@@ -1,0 +1,94 @@
+package main
+
+import (
+	"fmt"
+
+	"github.com/go-while/go-pugleaf/internal/models"
+)
+
+func main() {
+	fmt.Println("Testing Enhanced MIME Decoding with ISO-8859-15 Support")
+	fmt.Println("======================================================")
+
+	// Test cases for various charsets and encodings
+	testCases := []struct {
+		name        string
+		input       string
+		description string
+	}{
+		{
+			name:        "ISO-8859-15 Subject (original problem)",
+			input:       "=?ISO-8859-15?Q?NEXT_Klima-Schwindel_entlarvt:_Südseeinseln_wac?= =?ISO-8859-15?Q?hsen,_statt_zu_versinken?",
+			description: "The original subject that was failing to decode",
+		},
+		{
+			name:        "ISO-8859-15 Q-encoding",
+			input:       "=?iso-8859-15?Q?Pr=E9sentation?=",
+			description: "ISO-8859-15 Q-encoded text with accented character",
+		},
+		{
+			name:        "UTF-8 standard",
+			input:       "=?UTF-8?B?VGVzdCDwn5GN?=",
+			description: "UTF-8 with emoji (should work with both decoders)",
+		},
+		{
+			name:        "Windows-1252",
+			input:       "=?windows-1252?Q?Caf=E9?=",
+			description: "Windows-1252 encoding",
+		},
+		{
+			name:        "Plain ASCII text",
+			input:       "Simple ASCII text",
+			description: "Plain ASCII text (no encoding needed)",
+		},
+		{
+			name:        "Mixed encoded and plain",
+			input:       "Subject: =?ISO-8859-15?Q?R=E9ponse?= to your question",
+			description: "Mixed encoded and plain text",
+		},
+		{
+			name:        "Multiple ISO-8859-15 words",
+			input:       "=?ISO-8859-15?Q?Bonjour?= =?ISO-8859-15?Q?_le_monde?=",
+			description: "Multiple MIME encoded words in ISO-8859-15",
+		},
+	}
+
+	fmt.Printf("Running %d test cases using models.ConvertToUTF8()...\n\n", len(testCases))
+
+	for i, tc := range testCases {
+		fmt.Printf("Test %d: %s\n", i+1, tc.name)
+		fmt.Printf("  Input:       %s\n", tc.input)
+
+		result := models.ConvertToUTF8(tc.input)
+		fmt.Printf("  Result:      %s\n", result)
+
+		// Check if decoding actually happened (result different from input)
+		if result != tc.input {
+			fmt.Printf("  Status:      ✓ DECODED (changed from input)\n")
+		} else {
+			fmt.Printf("  Status:      ⚪ UNCHANGED (no decoding needed or failed)\n")
+		}
+
+		fmt.Printf("  Description: %s\n", tc.description)
+		fmt.Println()
+	}
+
+	fmt.Println("======================================")
+	fmt.Println("Testing specific ISO-8859-15 characters:")
+
+	// Test Euro symbol (€) which is specific to ISO-8859-15
+	// In ISO-8859-15, Euro symbol is at position 164 (0xA4)
+	euroTest := "=?ISO-8859-15?Q?Price:_=A4_100?=" // Price: € 100
+	euroResult := models.ConvertToUTF8(euroTest)
+	fmt.Printf("Euro symbol: %s -> %s\n", euroTest, euroResult)
+
+	// Test other ISO-8859-15 specific characters
+	// 0xA6 = Š, 0xA8 = š, 0xB4 = Ž, 0xB8 = ž, 0xBC = Œ, 0xBD = œ, 0xBE = Ÿ
+	specialTest := "=?ISO-8859-15?Q?Special:_=A6=A8=B4=B8=BC=BD=BE?="
+	specialResult := models.ConvertToUTF8(specialTest)
+	fmt.Printf("Special chars: %s -> %s\n", specialTest, specialResult)
+
+	fmt.Println("======================================")
+	fmt.Println("🎉 Enhanced MIME decoding test completed!")
+	fmt.Println("Check the results above to see if ISO-8859-15 is now properly decoded.")
+}

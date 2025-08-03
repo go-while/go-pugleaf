@@ -1,0 +1,65 @@
+package main
+
+import (
+	"fmt"
+	"mime"
+	"strings"
+
+	"github.com/go-while/go-pugleaf/internal/models"
+)
+
+func main() {
+	// Test the MIME decoding with the example from the user
+	testSubject := "=?ISO-8859-15?Q?NEXT_Klima-Schwindel_entlarvt:_Südseeinseln_wac?= =?ISO-8859-15?Q?hsen,_statt_zu_versinken?"
+
+	fmt.Println("=== Testing Go's Standard mime.WordDecoder ===")
+	decoder := mime.WordDecoder{}
+	decoded, err := decoder.DecodeHeader(testSubject)
+	if err != nil {
+		fmt.Printf("Error decoding: %v\n", err)
+	}
+	fmt.Printf("Original: %s\n", testSubject)
+	fmt.Printf("Decoded:  %s\n", decoded)
+	fmt.Printf("Same?:    %t\n", testSubject == decoded)
+
+	fmt.Println("\n=== Testing Our Enhanced ConvertToUTF8 Function ===")
+	enhancedDecoded := models.ConvertToUTF8(testSubject)
+	fmt.Printf("Original:           %s\n", testSubject)
+	fmt.Printf("Enhanced Decoded:   %s\n", enhancedDecoded)
+	fmt.Printf("Successfully Decoded?: %t\n", testSubject != enhancedDecoded)
+
+	// Test various charsets with our enhanced decoder
+	fmt.Println("\n=== Testing Various Charsets with Enhanced Decoder ===")
+	testCases := []struct {
+		name  string
+		input string
+	}{
+		{"UTF-8", "=?UTF-8?Q?Hello_World?="},
+		{"ISO-8859-1", "=?ISO-8859-1?Q?Hello_World?="},
+		{"ISO-8859-15", "=?ISO-8859-15?Q?Test?="},
+		{"Windows-1252", "=?windows-1252?Q?Caf=E9?="},
+		{"ISO-8859-15 with Euro", "=?ISO-8859-15?Q?Price:_=A4_100?="}, // € symbol
+		{"Plain text", "No encoding needed"},
+	}
+
+	for _, tc := range testCases {
+		result := models.ConvertToUTF8(tc.input)
+		status := "UNCHANGED"
+		if result != tc.input {
+			status = "DECODED ✓"
+		}
+		fmt.Printf("%-20s: %s -> %s [%s]\n", tc.name, tc.input, result, status)
+	}
+
+	// Try decoding each part separately with standard decoder
+	fmt.Println("\n=== Standard Decoder - Trying each part separately ===")
+	parts := strings.Fields(testSubject)
+	for i, part := range parts {
+		partDecoded, err := decoder.DecodeHeader(part)
+		if err != nil {
+			fmt.Printf("Part %d error: %v\n", i, err)
+		} else {
+			fmt.Printf("Part %d: %s -> %s\n", i, part, partDecoded)
+		}
+	}
+}
