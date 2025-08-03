@@ -1,0 +1,21 @@
+:Dove-Net newsgroups...
+DOVE-Net.Advertisements 
+DOVE-Net.Debate
+DOVE-Net.Entertainment
+DOVE-Net.Firearms
+DOVE-Net.General
+DOVE-Net.HAM_Radio
+DOVE-Net.Hardware_Software_Help
+DOVE-Net.Hobbies
+DOVE-Net.Internet
+DOVE-Net.Pro-Audio
+DOVE-Net.Programming
+DOVE-Net.Religion
+DOVE-Net.Sports
+DOVE-Net.Synchronet_Announcements
+DOVE-Net.Synchronet_Baja
+DOVE-Net.Synchronet_Discussion
+DOVE-Net.Synchronet_Javascript
+DOVE-Net.Synchronet_Programming
+DOVE-Net.Tech_Talk
+DOVE-Net.Unix
