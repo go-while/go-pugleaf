@@ -1,0 +1,121 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item active" aria-current="page">Newsgroups</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<!-- Navigation Menu -->
+<!--
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-collection me-2"></i>Newsgroup Browser
+                </h5>
+            </div>
+
+            <div class="card-body">
+                <div class="btn-group" role="group" aria-label="Navigation">
+                    <a href="/" class="btn btn-outline-secondary">
+                        <strong>[H]</strong> Return to Main Menu
+                    </a>
+                    <a href="/search" class="btn btn-outline-info">
+                        <strong>[S]</strong> Search Groups
+                    </a>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+-->
+
+{{template "pagination" .}}
+
+<!-- Groups List -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-list me-2"></i>Available Newsgroups
+                </h5>
+                {{if .Pagination}}
+                <span class="badge bg-light text-dark">{{.Pagination.TotalCount}} total</span>
+                {{end}}
+            </div>
+            <div class="table-responsive">
+                {{if .Groups}}
+                <table class="table table-hover mb-0">
+                    <thead class="table-light">
+                        <tr>
+                        <!--
+                            <th scope="col" style="width: 5%">
+                                <i class="bi bi-arrow-down-up"></i>
+                            </th>
+                        -->
+                            <th scope="col" style="width: 80%">Newsgroup</th>
+                            <th scope="col" style="width: 10%" class="text-center">Articles</th>
+                            <th scope="col" style="width: 10%" class="text-center">Last Article</th>
+                            <!--<th scope="col" style="width: 15%">Created</th>-->
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{range .Groups}}
+                        <tr>
+                            <!--
+                            <td class="text-center align-middle">
+                                <i class="bi bi-collection text-primary fs-4"></i>
+                            </td>
+                            -->
+                            <td class="align-middle">
+                                <div>
+                                    <a href="/groups/{{.Name}}/threads" class="text-decoration-none fw-bold">
+                                        {{.Name}}
+                                    </a>
+                                </div>
+                                {{if .Description}}
+                                <small class="text-muted">{{.Description}}</small>
+                                {{end}}
+                            </td>
+
+                            <td class="text-center align-middle">
+                                {{.MessageCount}}
+                            </td>
+
+
+                            <td class="text-center align-middle">
+                                <small><a href="/groups/{{.Name}}/articles/{{.LastArticle}}" class="text-decoration-none fw-bold">#{{.LastArticle}}</a></small>
+                            </td>
+
+                            <!--
+                            <td class="align-middle">
+                                <small class="text-muted">{{.CreatedAt.Format "2006-01-02"}}</small>
+                            </td>
+                            -->
+                        </tr>
+                        {{end}}
+                    </tbody>
+                </table>
+                {{else}}
+                <div class="alert alert-warning" role="alert">
+                    <h6 class="alert-heading">
+                        <i class="bi bi-exclamation-triangle me-2"></i>No Newsgroups Found
+                    </h6>
+                    <p class="mb-3">No registered newsgroups found in main database.</p>
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+
+{{template "pagination" .}}
+{{end}}

@@ -1,0 +1,559 @@
+{{define "admin_statistics"}}
+<!-- Statistics Tab -->
+<div class="tab-pane fade show active" id="stats" role="tabpanel" aria-labelledby="stats-tab">
+  <!-- Statistics -->
+  <div class="row mt-3">
+      <div class="col-md-6">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h6 class="card-title mb-0">📊 Statistics</h6>
+              </div>
+              <div class="card-body">
+                  <div class="row">
+                      <div class="col-3">
+                          <div class="text-center">
+                              <h4>{{len .Users}}</h4>
+                              <small class="text-muted">Total Users</small>
+                          </div>
+                      </div>
+                      <div class="col-2">
+                          <div class="text-center">
+                              <h4>{{len .Newsgroups}}</h4>
+                              <small class="text-muted">Newsgroups</small>
+                          </div>
+                      </div>
+                      <div class="col-2">
+                          <div class="text-center">
+                              <h4>{{len .Providers}}</h4>
+                              <small class="text-muted">Providers</small>
+                          </div>
+                      </div>
+                      <div class="col-2">
+                          <div class="text-center">
+                              <h4>{{len .APITokens}}</h4>
+                              <small class="text-muted">API Tokens</small>
+                              <br><small class="text-success">({{.EnabledTokensCount}} enabled)</small>
+                          </div>
+                      </div>
+                      <div class="col-3">
+                          <div class="text-center">
+                              <h4>{{if .AdminCount}}{{.AdminCount}}{{else}}0{{end}}</h4>
+                              <small class="text-muted">Admin Users</small>
+                          </div>
+                      </div>
+                  </div>
+                  {{if .NNTPUsers}}
+                  <hr>
+                  <div class="row">
+                      <div class="col-4">
+                          <div class="text-center">
+                              <h4>{{len .NNTPUsers}}</h4>
+                              <small class="text-muted">NNTP Users</small>
+                          </div>
+                      </div>
+                      <div class="col-4">
+                          <div class="text-center">
+                              <h4>{{.ActiveNNTPUsers}}</h4>
+                              <small class="text-muted">Active NNTP</small>
+                          </div>
+                      </div>
+                      <div class="col-4">
+                          <div class="text-center">
+                              <h4>{{.PostingNNTPUsers}}</h4>
+                              <small class="text-muted">Can Post</small>
+                          </div>
+                      </div>
+                  </div>
+                  {{end}}
+              </div>
+          </div>
+      </div>
+      <div class="col-md-6">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h6 class="card-title mb-0">ℹ️ System Info</h6>
+              </div>
+              <div class="card-body">
+                  <div class="row">
+                      <!-- TODO: Add actual system info -->
+                      <!--
+                          <p><strong>Server:</strong> <span class="text-success">Online</span></p>
+                          <p><strong>Database:</strong> <span class="text-success">Connected</span></p>
+                      -->
+                      <div class="col-12">
+                          <p><strong>Current User:</strong> {{if .CurrentUser}}{{.CurrentUser.Username}}{{else}}Unknown{{end}}</p>
+                          {{if .Uptime}}
+                          <p><strong>Uptime:</strong> {{.Uptime}}</p>
+                          {{end}}
+                          {{if .ActiveSessions}}
+                          <p><strong>Active Sessions:</strong> {{.ActiveSessions}}</p>
+                          {{end}}
+                      </div>
+                  </div>
+              </div>
+          </div>
+      </div>
+  </div>
+
+  <!-- Cache Statistics Row -->
+  {{if .CacheStats}}
+  <div class="row mt-3">
+      <!-- Newsgroup Cache -->
+      <div class="col-md-3">
+          {{if .NewsgroupCacheStats}}
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h6 class="card-title mb-0">📁 Newsgroup Cache</h6>
+              </div>
+              <div class="card-body">
+                  <div class="row">
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h4>{{.NewsgroupCacheStats.entries}}</h4>
+                              <small class="text-muted">Cached Pages</small>
+                          </div>
+                      </div>
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h4>{{.NewsgroupCacheStats.max_entries}}</h4>
+                              <small class="text-muted">Max Pages</small>
+                          </div>
+                      </div>
+                  </div>
+                  <hr>
+                  <div class="row text-center">
+                      <div class="col-4">
+                          <h5>{{printf "%.1f" .NewsgroupCacheStats.hit_rate}}%</h5>
+                          <small class="text-muted">Hit Rate</small>
+                      </div>
+                      <div class="col-4">
+                          <h5>{{.NewsgroupCacheStats.hits}}</h5>
+                          <small class="text-muted">Cache Hits</small>
+                      </div>
+                      <div class="col-4">
+                          <h5>{{.NewsgroupCacheStats.misses}}</h5>
+                          <small class="text-muted">Cache Misses</small>
+                      </div>
+                  </div>
+                  <hr>
+                  <div class="row mt-2">
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h5>{{.NewsgroupCacheStats.max_age}}</h5>
+                              <small class="text-muted">Max Age</small>
+                          </div>
+                      </div>
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h5>{{.NewsgroupCacheStats.utilization_percent}}%</h5>
+                              <small class="text-muted">Utilization</small>
+                          </div>
+                      </div>
+                  </div>
+                  <div class="row mt-2">
+                      <div class="col-12 text-center">
+                          <h5>{{.NewsgroupCacheStats.size_human}}</h5>
+                          <small class="text-muted">Memory Usage ({{.NewsgroupCacheStats.size_bytes}} bytes)</small>
+                      </div>
+                  </div>
+                  {{if .NewsgroupCacheStats.status}}
+                  <div class="row mt-3">
+                      <div class="col-12 text-center">
+                          <span class="badge bg-success me-2">Status: {{.NewsgroupCacheStats.status}}</span>
+                      </div>
+                  </div>
+                  {{end}}
+              </div>
+          </div>
+          {{else}}
+          <div class="card">
+              <div class="card-header bg-secondary text-white">
+                  <h6 class="card-title mb-0">📁 Newsgroup Cache</h6>
+              </div>
+              <div class="card-body text-center">
+                  <p class="text-muted">Cache not initialized</p>
+              </div>
+          </div>
+          {{end}}
+      </div>
+
+      <!-- Article Cache Statistics -->
+      <div class="col-md-3">
+          {{if .ArticleCacheStats}}
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h6 class="card-title mb-0">📄 Article Cache</h6>
+              </div>
+              <div class="card-body">
+                  <div class="row text-center">
+                      <div class="col-6">
+                          <div class="border-end">
+                              <h4>{{.ArticleCacheStats.size}}</h4>
+                              <small class="text-muted">Cached Articles</small>
+                          </div>
+                      </div>
+                      <div class="col-6">
+                          <div>
+                              <h4>{{.ArticleCacheStats.max_size}}</h4>
+                              <small class="text-muted">Max Articles</small>
+                          </div>
+                      </div>
+                  </div>
+                  <hr>
+                  <div class="row text-center">
+                      <div class="col-4">
+                          <h5>{{printf "%.0f" .ArticleCacheStats.hit_rate}}%</h5>
+                          <small class="text-muted">Hit Rate</small>
+                      </div>
+                      <div class="col-4">
+                          <h5>{{.ArticleCacheStats.hits}}</h5>
+                          <small class="text-muted">Cache Hits</small>
+                      </div>
+                      <div class="col-4">
+                          <h5>{{.ArticleCacheStats.misses}}</h5>
+                          <small class="text-muted">Cache Misses</small>
+                      </div>
+                  </div>
+                  <hr>
+                  <div class="row mt-2">
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h5>{{.ArticleCacheStats.max_age}}</h5>
+                              <small class="text-muted">Max Age</small>
+                          </div>
+                      </div>
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h5>{{printf "%.0f" .ArticleCacheStats.utilization_percent}}%</h5>
+                              <small class="text-muted">Utilization</small>
+                          </div>
+                      </div>
+                  </div>
+                  <div class="row mt-2">
+                      <div class="col-12 text-center">
+                          <h5>{{printf "%.2f" .ArticleCacheStats.memory_mb}} MB</h5>
+                          <small class="text-muted">Memory Usage ({{.ArticleCacheStats.total_size}} bytes)</small>
+                      </div>
+                  </div>
+                  {{if .ArticleCacheStats.status}}
+                  <div class="text-center mt-2">
+                      <span class="badge bg-success me-2">Status: {{.ArticleCacheStats.status}}</span>
+                  </div>
+                  {{end}}
+              </div>
+          </div>
+          {{else}}
+          <div class="card">
+              <div class="card-header bg-secondary text-white">
+                  <h6 class="card-title mb-0">📄 Article Cache</h6>
+              </div>
+              <div class="card-body text-center">
+                  <p class="text-muted">Cache not initialized</p>
+              </div>
+          </div>
+          {{end}}
+      </div>
+
+      <!-- Sanitized Cache -->
+      <div class="col-md-3">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h6 class="card-title mb-0">🗄️ Sanitized Content Cache</h6>
+              </div>
+              <div class="card-body">
+                  <div class="row">
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h4>{{.CacheStats.entries}}</h4>
+                              <small class="text-muted">Current Entries</small>
+                          </div>
+                      </div>
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h4>{{.CacheStats.max_entries}}</h4>
+                              <small class="text-muted">Max Entries</small>
+                          </div>
+                      </div>
+                  </div>
+                  <hr>
+                  <div class="row text-center">
+                      <div class="col-4">
+                          <h5>{{printf "%.1f" .CacheStats.hit_rate}}%</h5>
+                          <small class="text-muted">Hit Rate</small>
+                      </div>
+                      <div class="col-4">
+                          <h5>{{.CacheStats.hits}}</h5>
+                          <small class="text-muted">Cache Hits</small>
+                      </div>
+                      <div class="col-4">
+                          <h5>{{.CacheStats.misses}}</h5>
+                          <small class="text-muted">Cache Misses</small>
+                      </div>
+                  </div>
+                  <hr>
+                  <div class="row mt-2">
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h5>{{.CacheStats.max_age}}</h5>
+                              <small class="text-muted">Max Age</small>
+                          </div>
+                      </div>
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h5>{{.CacheStats.utilization_percent}}%</h5>
+                              <small class="text-muted">Utilization</small>
+                          </div>
+                      </div>
+                  </div>
+                  <div class="row mt-2">
+                      <div class="col-12 text-center">
+                          <h5>{{.CacheStats.size_human}}</h5>
+                          <small class="text-muted">Memory Usage ({{.CacheStats.size_bytes}} bytes)</small>
+                      </div>
+                  </div>
+                  {{if .CacheStats.status}}
+                  <div class="row mt-3">
+                      <div class="col-12 text-center">
+                          <span class="badge bg-success me-2">Status: {{.CacheStats.status}}</span>
+                      </div>
+                  </div>
+                  {{end}}
+              </div>
+          </div>
+      </div>
+
+
+
+
+
+      <!-- NNTP Auth Cache Statistics -->
+      <div class="col-md-3">
+          {{if .NNTPAuthCacheStats}}
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h6 class="card-title mb-0">🔐 NNTP Auth Cache</h6>
+              </div>
+              <div class="card-body">
+                  <div class="row">
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h4>{{.NNTPAuthCacheStats.entries}}</h4>
+                              <small class="text-muted">Cached Users</small>
+                          </div>
+                      </div>
+                      <div class="col-6">
+                          <div>
+                              <h4>Infinite</h4>
+                              <small class="text-muted">Auth Cache</small>
+                          </div>
+                      </div>
+                  </div>
+                  <hr>
+                  <div class="row text-center">
+                      <div class="col-4">
+                          <h5>{{printf "%.0f" .NNTPAuthCacheStats.hit_rate}}%</h5>
+                          <small class="text-muted">Hit Rate</small>
+                      </div>
+                      <div class="col-4">
+                          <h5>{{.NNTPAuthCacheStats.hits}}</h5>
+                          <small class="text-muted">Cache Hits</small>
+                      </div>
+                      <div class="col-4">
+                          <h5>{{.NNTPAuthCacheStats.misses}}</h5>
+                          <small class="text-muted">Cache Misses</small>
+                      </div>
+                  </div>
+                  <hr>
+                  <div class="row mt-2">
+                      <!-- DISABLED!
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h5>{{.NNTPAuthCacheStats.evictions}}</h5>
+                              <small class="text-muted">Evictions</small>
+                          </div>
+                      </div>
+                      -->
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h4>{{.NNTPAuthCacheStats.max_age}}</h4>
+                              <small class="text-muted">Max Age</small>
+                          </div>
+                      </div>
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h5>~%</h5>
+                              <small class="text-muted">Utilization</small>
+                          </div>
+                      </div>
+                  </div>
+                  <div class="row mt-2">
+                      <div class="col-12 text-center">
+                          <h5>~MB</h5>
+                          <small class="text-muted">Memory Usage ~</small>
+                      </div>
+                  </div>
+                  {{if .NNTPAuthCacheStats.status}}
+                  <div class="text-center mt-2">
+                      <span class="badge bg-success me-2">Status: {{.NNTPAuthCacheStats.status}}</span>
+                  </div>
+                  {{end}}
+              </div>
+          </div>
+          {{else}}
+          <div class="card">
+              <div class="card-header bg-secondary text-white">
+                  <h6 class="card-title mb-0">🔐 NNTP Auth Cache</h6>
+              </div>
+              <div class="card-body text-center">
+                  <p class="text-muted">Cache not initialized</p>
+              </div>
+          </div>
+          {{end}}
+      </div>
+  </div>
+
+  <!-- Message ID Cache Statistics Row -->
+  <div class="row mt-3">
+      <div class="col-md-6">
+          {{if .MessageIdCacheStats}}
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h6 class="card-title mb-0">🆔 Message ID Cache</h6>
+              </div>
+              <div class="card-body">
+                  <div class="row">
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h4>{{.MessageIdCacheStats.items}}</h4>
+                              <small class="text-muted">Cached Items</small>
+                          </div>
+                      </div>
+                      <div class="col-6">
+                          <div class="text-center">
+                              <h4>{{.MessageIdCacheStats.total_buckets}}</h4>
+                              <small class="text-muted">Total Buckets</small>
+                          </div>
+                      </div>
+                  </div>
+                  <hr>
+                  <div class="row text-center">
+                      <div class="col-4">
+                          <h5>{{printf "%.3f" .MessageIdCacheStats.load_factor}}</h5>
+                          <small class="text-muted">Load Factor</small>
+                      </div>
+                      <div class="col-4">
+                          <h5>{{.MessageIdCacheStats.max_chain_length}}</h5>
+                          <small class="text-muted">Max Chain</small>
+                      </div>
+                      <div class="col-4">
+                          <h5>{{printf "%.1f" .MessageIdCacheStats.utilization_percent}}%</h5>
+                          <small class="text-muted">Capacity Used</small>
+                      </div>
+                  </div>
+                  <hr>
+                  <div class="row mt-2">
+                      <div class="col-4">
+                          <div class="text-center">
+                              <h5>{{.MessageIdCacheStats.occupied_buckets}}</h5>
+                              <small class="text-muted">Occupied Buckets</small>
+                          </div>
+                      </div>
+                      <div class="col-4">
+                          <div class="text-center">
+                              <h5>{{printf "%.1f" .MessageIdCacheStats.bucket_occupancy_percent}}%</h5>
+                              <small class="text-muted">Bucket Fill</small>
+                          </div>
+                      </div>
+                      <div class="col-4">
+                          <div class="text-center">
+                              <h5>{{printf "%.2f" .MessageIdCacheStats.max_load_factor}}</h5>
+                              <small class="text-muted">Max Load Factor</small>
+                          </div>
+                      </div>
+                  </div>
+                  {{if .MessageIdCacheStats.status}}
+                  <div class="text-center mt-2">
+                      <span class="badge bg-success me-2">Status: {{.MessageIdCacheStats.status}}</span>
+                      <span class="badge bg-info">Max: {{.MessageIdCacheStats.max_buckets}} buckets</span>
+                  </div>
+                  {{end}}
+              </div>
+          </div>
+          {{else}}
+          <div class="card">
+              <div class="card-header bg-secondary text-white">
+                  <h6 class="card-title mb-0">🆔 Message ID Cache</h6>
+              </div>
+              <div class="card-body text-center">
+                  <p class="text-muted">Cache not initialized</p>
+              </div>
+          </div>
+          {{end}}
+      </div>
+  </div>
+
+  <div class="row mt-2">
+      <div class="col-12 text-center">
+          {{if or (or (or (or (eq .CacheStats.status "active") (eq .NewsgroupCacheStats.status "active")) (eq .ArticleCacheStats.status "active")) (eq .NNTPAuthCacheStats.status "active")) (eq .MessageIdCacheStats.status "active")}}
+          <form action="/admin/cache/clear" method="post" style="display: inline;">
+              <button type="submit" class="btn btn-warning">
+                  <i class="bi bi-trash"></i> Clear All Caches
+              </button>
+          </form>
+          {{end}}
+      </div>
+  </div>
+  {{end}}
+
+  <!-- Maintenance Utilities -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card maintenance-card">
+              <div class="card-header bg-dark text-white">
+                  <h6 class="card-title mb-0">🔧 Maintenance Utilities</h6>
+              </div>
+              <div class="card-body">
+                  <div class="row">
+                      <div class="col-md-6">
+                          <h6>Hierarchy Management</h6>
+                          <p class="text-muted small">Update hierarchy counts from existing newsgroups</p>
+                          <form action="/admin/hierarchies/update" method="post" style="display: inline;">
+                              <button type="submit" class="btn btn-outline-info btn-sm">
+                                  <i class="bi bi-arrow-clockwise me-1"></i>Update Hierarchies
+                              </button>
+                          </form>
+                      </div>
+                      <div class="col-md-6">
+                          <h6>Registration Control</h6>
+                          <p class="text-muted small">Enable or disable new user registration</p>
+                          {{if .RegistrationEnabled}}
+                          <form action="/admin/registration/disable" method="post" style="display: inline;">
+                              <button type="submit" class="btn btn-outline-warning btn-sm">
+                                  <i class="bi bi-person-slash me-1"></i>Disable Registration
+                              </button>
+                          </form>
+                          {{else}}
+                          <form action="/admin/registration/enable" method="post" style="display: inline;">
+                              <button type="submit" class="btn btn-outline-success btn-sm">
+                                  <i class="bi bi-person-plus me-1"></i>Enable Registration
+                              </button>
+                          </form>
+                          {{end}}
+                      </div>
+                    <!--
+                      <div class="col-md-6">
+                          <h6>Navigation</h6>
+                          <p class="text-muted small">View and manage Usenet hierarchies</p>
+                          <a href="/hierarchies" class="btn btn-outline-secondary btn-sm">
+                              <i class="bi bi-diagram-3 me-1"></i>View Hierarchies
+                          </a>
+                      </div>
+                    -->
+                  </div>
+              </div>
+          </div>
+      </div>
+  </div>
+</div>
+
+{{end}}

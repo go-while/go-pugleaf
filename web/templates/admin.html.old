@@ -1,0 +1,1445 @@
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item active" aria-current="page">Admin Panel</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-warning text-dark">
+                <h4 class="card-title mb-0">🛠️ Admin Panel</h4>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-3">
+                        <a href="/profile" class="btn btn-outline-success w-100 mb-2">👤 Back to Profile</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{{if .Success}}
+<div class="alert alert-success alert-dismissible fade show mt-3" role="alert">
+    <strong>Success!</strong> {{.Success}}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{{end}}
+
+{{if .Error}}
+<div class="alert alert-danger alert-dismissible fade show mt-3" role="alert">
+    <strong>Error!</strong> {{.Error}}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{{end}}
+
+<!-- Old Admin Panel Tabs -->
+<ul class="nav nav-tabs mt-3" id="adminTab" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" id="users-tab" data-bs-toggle="tab" data-bs-target="#users" type="button" role="tab">Users</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="newsgroups-tab" data-bs-toggle="tab" data-bs-target="#newsgroups" type="button" role="tab">Newsgroups</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="providers-tab" data-bs-toggle="tab" data-bs-target="#providers" type="button" role="tab">Providers</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="apitokens-tab" data-bs-toggle="tab" data-bs-target="#apitokens" type="button" role="tab">API Tokens</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="aimodels-tab" data-bs-toggle="tab" data-bs-target="#aimodels" type="button" role="tab">AI Models</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="nntpusers-tab" data-bs-toggle="tab" data-bs-target="#nntpusers" type="button" role="tab">NNTP Users</button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="stats-tab" data-bs-toggle="tab" data-bs-target="#stats" type="button" role="tab">Statistics</button>
+  </li>
+</ul>
+<div class="tab-content" id="adminTabContent">
+  <!-- Users Tab -->
+  <div class="tab-pane fade show active" id="users" role="tabpanel" aria-labelledby="users-tab">
+    <!-- Create New User -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="card-title mb-0">➕ Add User</h5>
+                </div>
+                <div class="card-body">
+                    <form autocomplete="off" method="POST" action="/admin/users">
+                        <input autocomplete="false" name="hidden" type="text" style="display:none;">
+                        <div class="row">
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <label for="username" class="form-label">Username</label>
+                                    <input autocomplete="off" type="text" class="form-control" id="username" name="username" required>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <label for="email" class="form-label">Email</label>
+                                    <input autocomplete="off" type="email" class="form-control" id="email" name="email" required>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <label for="displayName" class="form-label">Display Name</label>
+                                    <input autocomplete="off" type="text" class="form-control" id="displayName" name="displayName">
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <label for="password" class="form-label">Password</label>
+                                    <input autocomplete="new-password" type="password" class="form-control" id="password" name="password" required minlength="6">
+                                </div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Add User</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- User List -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-info text-white">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">👥 User Management</h5>
+                        <span class="badge bg-light text-dark">{{len .Users}} users</span>
+                    </div>
+                </div>
+                <div class="card-body">
+                    {{if .Users}}
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Username</th>
+                                    <th>Email</th>
+                                    <th>Display Name</th>
+                                    <th>Created</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .Users}}
+                                <tr>
+                                    <td>{{.ID}}</td>
+                                    <td><strong>{{.Username}}</strong></td>
+                                    <td>{{.Email}}</td>
+                                    <td>{{if .DisplayName}}{{.DisplayName}}{{else}}<em>None</em>{{end}}</td>
+                                    <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+                                    <td>
+                                        <div class="btn-group btn-group-sm">
+                                            <!-- Edit User Form -->
+                                            <button class="btn btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#edit-{{.ID}}">
+                                                Edit
+                                            </button>
+                                            <!-- Delete User Form (only if not current user) -->
+                                            {{if and $.CurrentUser (ne .ID $.CurrentUser.ID)}}
+                                            <form method="POST" action="/admin/users/delete" class="d-inline">
+                                                <input type="hidden" name="user_id" value="{{.ID}}">
+                                                <button type="submit" class="btn btn-outline-danger btn-sm"
+                                                        onclick="return confirm('Delete user {{.Username}}?')">
+                                                    Delete
+                                                </button>
+                                            </form>
+                                            {{end}}
+                                        </div>
+                                    </td>
+                                </tr>
+                                <!-- Collapsible Edit Form -->
+                                <tr class="collapse" id="edit-{{.ID}}">
+                                    <td colspan="6">
+                                        <div class="card">
+                                            <div class="card-header">
+                                                <h6>Edit User: {{.Username}}</h6>
+                                            </div>
+                                            <div class="card-body">
+                                                <form method="POST" action="/admin/users/update">
+                                                    <input type="hidden" name="user_id" value="{{.ID}}">
+                                                    <div class="row">
+                                                        <div class="col-md-6">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Username</label>
+                                                                <input autocomplete="off" type="text" class="form-control" value="{{.Username}}" readonly>
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-6">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Email</label>
+                                                                <input autocomplete="off" type="email" class="form-control" name="email" value="{{.Email}}" required>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="row">
+                                                        <div class="col-md-6">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Display Name</label>
+                                                                <input autocomplete="off" type="text" class="form-control" name="displayName" value="{{.DisplayName}}">
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="btn-group">
+                                                        <button type="submit" class="btn btn-success">Save Changes</button>
+                                                        <button type="button" class="btn btn-secondary" data-bs-toggle="collapse" data-bs-target="#edit-{{.ID}}">
+                                                            Cancel
+                                                        </button>
+                                                    </div>
+                                                </form>
+                                            </div>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                    {{else}}
+                    <div class="alert alert-info">
+                        <strong>No users found.</strong> Add the first user above.
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+  </div>
+  <!-- Newsgroups Tab -->
+  <div class="tab-pane fade" id="newsgroups" role="tabpanel" aria-labelledby="newsgroups-tab">
+    <!-- Create New Newsgroup -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-warning text-dark">
+                    <h5 class="card-title mb-0">📰 Create New Newsgroup</h5>
+                </div>
+                <div class="card-body">
+                    <form autocomplete="off" method="POST" action="/admin/newsgroups">
+                        <input autocomplete="false" name="hidden" type="text" style="display:none;">
+                        <div class="row">
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <label for="newsgroup_name" class="form-label">Newsgroup Name</label>
+                                    <input autocomplete="off" type="text" class="form-control" id="newsgroup_name" name="name" required
+                                           placeholder="e.g., comp.programming">
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label for="newsgroup_description" class="form-label">Description</label>
+                                    <input autocomplete="off" type="text" class="form-control" id="newsgroup_description" name="description"
+                                           placeholder="Brief description of the newsgroup">
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="newsgroup_expiry" class="form-label">Expiry Days</label>
+                                    <input autocomplete="off" type="number" class="form-control" id="newsgroup_expiry" name="expiry_days"
+                                           min="0" placeholder="0" value="0">
+                                    <small class="form-text text-muted">0 = never expire</small>
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="newsgroup_max_articles" class="form-label">Max Articles</label>
+                                    <input autocomplete="off" type="number" class="form-control" id="newsgroup_max_articles" name="max_articles"
+                                           min="0" placeholder="0" value="0">
+                                    <small class="form-text text-muted">0 = unlimited</small>
+                                </div>
+                            </div>
+                            <div class="col-md-1">
+                                <div class="mb-3">
+                                    <label class="form-label">Status</label>
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="newsgroup_active" name="active" checked>
+                                        <label class="form-check-label" for="newsgroup_active">
+                                            Active
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-1">
+                                <div class="mb-3">
+                                    <label class="form-label">&nbsp;</label>
+                                    <button type="submit" class="btn btn-warning d-block">Create</button>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Newsgroup List -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-secondary text-white">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">📰 Newsgroup Management</h5>
+                        <span class="badge bg-light text-dark">{{.NewsgroupCount}} newsgroups total</span>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <!-- Search Form -->
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <form method="GET" action="/admin" class="d-flex">
+                                <input type="hidden" name="ng_page" value="1">
+                                <input type="text" class="form-control me-2" name="search" placeholder="Search newsgroups..." value="{{.NewsgroupSearch}}">
+                                <button type="submit" class="btn btn-outline-primary">🔍 Search</button>
+                                {{if .NewsgroupSearch}}
+                                <a href="/admin" class="btn btn-outline-secondary ms-2">Clear</a>
+                                {{end}}
+                            </form>
+                        </div>
+                        <div class="col-md-6 text-end">
+                            {{if .NewsgroupSearch}}
+                            <small class="text-muted">Showing {{len .Newsgroups}} results for "{{.NewsgroupSearch}}"</small>
+                            {{else}}
+                            <small class="text-muted">Page {{.NewsgroupPage}} ({{len .Newsgroups}} of {{.NewsgroupCount}} newsgroups)</small>
+                            {{end}}
+                        </div>
+                    </div>
+
+                    {{if .Newsgroups}}
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Name</th>
+                                    <th>Description</th>
+                                    <th>Articles</th>
+                                    <th>Expiry Days</th>
+                                    <th>Max Articles</th>
+                                    <th>Status</th>
+                                    <th>Created</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .Newsgroups}}
+                                <tr>
+                                    <td>{{.ID}}</td>
+                                    <td><strong>{{.Name}}</strong></td>
+                                    <td>{{if .Description}}{{.Description}}{{else}}<em>No description</em>{{end}}</td>
+                                    <td>{{.MessageCount}}</td>
+                                    <td>
+                                        {{if eq .ExpiryDays 0}}
+                                            <span class="badge bg-success">Never</span>
+                                        {{else}}
+                                            <span class="badge bg-info">{{.ExpiryDays}} days</span>
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        {{if eq .MaxArticles 0}}
+                                            <span class="badge bg-success">Unlimited</span>
+                                        {{else}}
+                                            <span class="badge bg-warning">{{.MaxArticles}}</span>
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        {{if .Active}}
+                                            <span class="badge bg-success">Active</span>
+                                        {{else}}
+                                            <span class="badge bg-secondary">Inactive</span>
+                                        {{end}}
+                                    </td>
+                                    <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+                                    <td>
+                                        <div class="btn-group btn-group-sm">
+                                            <!-- Edit Newsgroup Form -->
+                                            <button class="btn btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#edit-ng-{{.ID}}">
+                                                Edit
+                                            </button>
+                                            <!-- Delete Newsgroup Form -->
+                                            <form method="POST" action="/admin/newsgroups/delete" class="d-inline">
+                                                <input type="hidden" name="name" value="{{.Name}}">
+                                                <button type="submit" class="btn btn-outline-danger btn-sm"
+                                                        onclick="return confirm('Delete newsgroup {{.Name}}? This will remove all articles!')">
+                                                    Delete
+                                                </button>
+                                            </form>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <!-- Collapsible Edit Form -->
+                                <tr class="collapse" id="edit-ng-{{.ID}}">
+                                    <td colspan="9">
+                                        <div class="card">
+                                            <div class="card-header">
+                                                <h6>Edit Newsgroup: {{.Name}}</h6>
+                                            </div>
+                                            <div class="card-body">
+                                                <form method="POST" action="/admin/newsgroups/update">
+                                                    <input type="hidden" name="name" value="{{.Name}}">
+                                                    <div class="row">
+                                                        <div class="col-md-3">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Name</label>
+                                                                <input autocomplete="off" type="text" class="form-control" value="{{.Name}}" readonly>
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Description</label>
+                                                                <input autocomplete="off" type="text" class="form-control" name="description" value="{{.Description}}">
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-2">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Expiry Days</label>
+                                                                <input autocomplete="off" type="number" class="form-control" name="expiry_days" value="{{.ExpiryDays}}" min="0">
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-2">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Max Articles</label>
+                                                                <input autocomplete="off" type="number" class="form-control" name="max_articles" value="{{.MaxArticles}}" min="0">
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-2">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Status</label>
+                                                                <div class="form-check">
+                                                                    <input class="form-check-input" type="checkbox" name="active" {{if .Active}}checked{{end}}>
+                                                                    <label autocomplete="off" class="form-check-label">Active</label>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="btn-group">
+                                                        <button type="submit" class="btn btn-success">Save Changes</button>
+                                                        <button type="button" class="btn btn-secondary" data-bs-toggle="collapse" data-bs-target="#edit-ng-{{.ID}}">
+                                                            Cancel
+                                                        </button>
+                                                    </div>
+                                                </form>
+                                            </div>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                    {{else}}
+                    <div class="alert alert-info">
+                        {{if .NewsgroupSearch}}
+                        <strong>No newsgroups found matching "{{.NewsgroupSearch}}".</strong> Try a different search term.
+                        {{else}}
+                        <strong>No newsgroups found.</strong> Create the first newsgroup above.
+                        {{end}}
+                    </div>
+                    {{end}}
+
+                    <!-- Pagination Controls -->
+                    {{if and (not .NewsgroupSearch) (gt .NewsgroupPagination.TotalCount .NewsgroupPagination.PageSize)}}
+                    <nav aria-label="Newsgroups pagination">
+                        <ul class="pagination justify-content-center">
+                            <!-- Previous Page -->
+                            {{if .NewsgroupPagination.HasPrev}}
+                            <li class="page-item">
+                                <a class="page-link" href="/admin?ng_page={{.NewsgroupPagination.PrevPage}}&ng_page_size={{.NewsgroupPagination.PageSize}}{{if .NewsgroupSearch}}&search={{.NewsgroupSearch}}{{end}}">Previous</a>
+                            </li>
+                            {{else}}
+                            <li class="page-item disabled">
+                                <span class="page-link">Previous</span>
+                            </li>
+                            {{end}}
+
+                            <!-- Current Page Info -->
+                            <li class="page-item active">
+                                <span class="page-link">{{.NewsgroupPagination.CurrentPage}} of {{.NewsgroupPagination.TotalPages}}</span>
+                            </li>
+
+                            <!-- Next Page -->
+                            {{if .NewsgroupPagination.HasNext}}
+                            <li class="page-item">
+                                <a class="page-link" href="/admin?ng_page={{.NewsgroupPagination.NextPage}}&ng_page_size={{.NewsgroupPagination.PageSize}}{{if .NewsgroupSearch}}&search={{.NewsgroupSearch}}{{end}}">Next</a>
+                            </li>
+                            {{else}}
+                            <li class="page-item disabled">
+                                <span class="page-link">Next</span>
+                            </li>
+                            {{end}}
+                        </ul>
+                    </nav>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+  </div>
+  <!-- Providers Tab -->
+  <div class="tab-pane fade" id="providers" role="tabpanel" aria-labelledby="providers-tab">
+    <!-- Provider Management -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-success text-white">
+                    <h5 class="card-title mb-0">🌐 Add News Server / Provider</h5>
+                </div>
+                <div class="card-body">
+                    <form autocomplete="off" method="POST" action="/admin/providers">
+                        <input autocomplete="false" name="hidden" type="text" style="display:none;">
+                        <div class="row">
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="provider_name" class="form-label">Name</label>
+                                    <input type="text" class="form-control" id="provider_name" name="name" required
+                                           placeholder="e.g., usenet.provider.com">
+                                </div>
+                            </div>
+                            <div class="col-md-1">
+                                <div class="mb-3">
+                                    <label for="provider_grp" class="form-label">Group</label>
+                                    <input type="text" class="form-control" id="provider_grp" name="grp"
+                                           placeholder="grp">
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="provider_host" class="form-label">Host</label>
+                                    <input type="text" class="form-control" id="provider_host" name="host" required
+                                           placeholder="news.provider.com">
+                                </div>
+                            </div>
+                            <div class="col-md-1">
+                                <div class="mb-3">
+                                    <label for="provider_port" class="form-label">Port</label>
+                                    <input type="number" class="form-control" id="provider_port" name="port"
+                                           min="1" max="65535" placeholder="119" value="119">
+                                </div>
+                            </div>
+                            <div class="col-md-1">
+                                <div class="mb-3">
+                                    <label class="form-label">SSL</label>
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="provider_ssl" name="ssl">
+                                        <label class="form-check-label" for="provider_ssl">
+                                            SSL
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="provider_username" class="form-label">Username</label>
+                                    <input autocomplete="off" type="text" class="form-control" id="provider_username" name="username"
+                                           placeholder="username">
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="provider_password" class="form-label">Password</label>
+                                    <input type="password" autocomplete="new-password" class="form-control" id="provider_password" name="password"
+                                           placeholder="password">
+                                </div>
+                            </div>
+                            <div class="col-md-1">
+                                <div class="mb-3">
+                                    <label class="form-label">&nbsp;</label>
+                                    <button type="submit" class="btn btn-success d-block">Create</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="provider_max_conns" class="form-label">Max Connections</label>
+                                    <input type="number" class="form-control" id="provider_max_conns" name="max_conns"
+                                           min="1" placeholder="1" value="1">
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="provider_priority" class="form-label">Priority</label>
+                                    <input type="number" class="form-control" id="provider_priority" name="priority"
+                                           min="1" placeholder="1" value="1">
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="provider_max_art_size" class="form-label">Max Article Size</label>
+                                    <input type="number" class="form-control" id="provider_max_art_size" name="max_art_size"
+                                           min="0" placeholder="0" value="0">
+                                    <small class="form-text text-muted">0 = unlimited</small>
+                                </div>
+                            </div>
+                            <div class="col-md-1">
+                                <div class="mb-3">
+                                    <label class="form-label">Enabled</label>
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="provider_enabled" name="enabled" checked>
+                                        <label class="form-check-label" for="provider_enabled">
+                                            Active
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Provider List -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-success text-white">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">🌐 Server Management for News Fetcher</h5>
+                        <span class="badge bg-light text-dark">{{len .Providers}} providers</span>
+                    </div>
+                </div>
+                <div class="card-body">
+                    {{if .Providers}}
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <!--<th>ID</th>-->
+                                    <th>#</th>
+                                    <th>Name</th>
+                                    <th>Host</th>
+                                    <th>Port</th>
+                                    <th>SSL</th>
+                                    <th>Max Conns</th>
+                                    <th>Max Art Size</th>
+                                    <th>Status</th>
+                                    <th>Created</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .Providers}}
+                                <tr>
+                                    <td>{{.Priority}}</td>
+                                    <!--<td>{{.ID}}</td>-->
+                                    <td><strong>{{.Name}}</strong></td>
+                                    <td>{{.Host}}</td>
+                                    <td>{{.Port}}</td>
+                                    <td>
+                                        {{if .SSL}}
+                                            <span class="badge bg-success">SSL</span>
+                                        {{else}}
+                                            <span class="badge bg-secondary">Plain</span>
+                                        {{end}}
+                                    </td>
+                                    <td>{{.MaxConns}}</td>
+                                    <td>
+                                        {{if eq .MaxArtSize 0}}
+                                            <span class="badge bg-success">Unlimited</span>
+                                        {{else}}
+                                            <span class="badge bg-info">{{.MaxArtSize}}</span>
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        {{if .Enabled}}
+                                            <span class="badge bg-success">Enabled</span>
+                                        {{else}}
+                                            <span class="badge bg-secondary">Disabled</span>
+                                        {{end}}
+                                    </td>
+                                    <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+                                    <td>
+                                        <div class="btn-group btn-group-sm">
+                                            <!-- Edit Provider Form -->
+                                            <button class="btn btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#edit-prov-{{.ID}}">
+                                                Edit
+                                            </button>
+                                            <!-- Delete Provider Form -->
+                                            <form method="POST" action="/admin/providers/delete" class="d-inline">
+                                                <input type="hidden" name="id" value="{{.ID}}">
+                                                <button type="submit" class="btn btn-outline-danger btn-sm"
+                                                        onclick="return confirm('Delete provider {{.Name}}?')">
+                                                    Delete
+                                                </button>
+                                            </form>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <!-- Collapsible Edit Form -->
+                                <tr class="collapse" id="edit-prov-{{.ID}}">
+                                    <td colspan="11">
+                                        <div class="card">
+                                            <div class="card-header">
+                                                <h6>Edit Provider: {{.Name}}</h6>
+                                            </div>
+                                            <div class="card-body">
+                                                <form method="POST" action="/admin/providers/update">
+                                                    <input type="hidden" name="id" value="{{.ID}}">
+                                                    <div class="row">
+                                                        <div class="col-md-3">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Name</label>
+                                                                <input autocomplete="off" type="text" class="form-control" value="{{.Name}}" readonly>
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-2">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Group</label>
+                                                                <input autocomplete="off" type="text" class="form-control" name="grp" value="{{.Grp}}">
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Host</label>
+                                                                <input autocomplete="off" type="text" class="form-control" name="host" value="{{.Host}}" required>
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-2">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Port</label>
+                                                                <input autocomplete="off" type="number" class="form-control" name="port" value="{{.Port}}" min="1" max="65535">
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-2">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">SSL</label>
+                                                                <div class="form-check">
+                                                                    <input class="form-check-input" type="checkbox" name="ssl" {{if .SSL}}checked{{end}}>
+                                                                    <label class="form-check-label">SSL</label>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="row">
+                                                        <div class="col-md-3">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Username</label>
+                                                                <input autocomplete="off" type="text" class="form-control" name="username" value="{{.Username}}">
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Password</label>
+                                                                <input autocomplete="new-password" type="password" class="form-control" name="password" value="{{.Password}}">
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-2">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Max Connections</label>
+                                                                <input autocomplete="off" type="number" class="form-control" name="max_conns" value="{{.MaxConns}}" min="1">
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-2">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Priority</label>
+                                                                <input autocomplete="off" type="number" class="form-control" name="priority" value="{{.Priority}}" min="1">
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-2">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Max Article Size</label>
+                                                                <input autocomplete="off" type="number" class="form-control" name="max_art_size" value="{{.MaxArtSize}}" min="0">
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="row">
+                                                        <div class="col-md-2">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Status</label>
+                                                                <div class="form-check">
+                                                                    <input class="form-check-input" type="checkbox" name="enabled" {{if .Enabled}}checked{{end}}>
+                                                                    <label class="form-check-label">Enabled</label>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="btn-group">
+                                                        <button type="submit" class="btn btn-success">Save Changes</button>
+                                                        <button type="button" class="btn btn-secondary" data-bs-toggle="collapse" data-bs-target="#edit-prov-{{.ID}}">
+                                                            Cancel
+                                                        </button>
+                                                    </div>
+                                                </form>
+                                            </div>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                    {{else}}
+                    <div class="alert alert-info">
+                        <strong>No providers found.</strong> Create the first provider above.
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+  </div>
+  <!-- API Tokens Tab -->
+  <div class="tab-pane fade" id="apitokens" role="tabpanel" aria-labelledby="apitokens-tab">
+    <!-- API Token Management -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-dark text-white">
+                    <h5 class="card-title mb-0">🔑 Create New API Token</h5>
+                </div>
+                <div class="card-body">
+                    <form autocomplete="off" method="POST" action="/admin/apitokens">
+                        <input autocomplete="false" name="hidden" type="text" style="display:none;">
+                        <div class="row">
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <label for="token_owner_name" class="form-label">Owner Name</label>
+                                    <input autocomplete="off" type="text" class="form-control" id="token_owner_name" name="owner_name" required
+                                           placeholder="e.g., API Client Name">
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="token_owner_id" class="form-label">Owner ID</label>
+                                    <input autocomplete="off" type="number" class="form-control" id="token_owner_id" name="owner_id"
+                                           min="0" placeholder="0">
+                                    <small class="form-text text-muted">Optional</small>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <label for="token_expires_at" class="form-label">Expires At</label>
+                                    <input autocomplete="off" type="date" class="form-control" id="token_expires_at" name="expires_at">
+                                    <small class="form-text text-muted">Leave empty for no expiration</small>
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label class="form-label">&nbsp;</label>
+                                    <button type="submit" class="btn btn-dark d-block">Create Token</button>
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label class="form-label">&nbsp;</label>
+                                    <form method="POST" action="/admin/apitokens/cleanup" class="d-inline">
+                                        <button type="submit" class="btn btn-outline-warning d-block"
+                                                onclick="return confirm('Cleanup expired tokens?')">
+                                            Cleanup Expired
+                                        </button>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- API Token List -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-dark text-white">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">🔑 API Token Management</h5>
+                        <span class="badge bg-light text-dark">{{len .APITokens}} tokens</span>
+                    </div>
+                </div>
+                <div class="card-body">
+                    {{if .APITokens}}
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Owner Name</th>
+                                    <th>Owner ID</th>
+                                    <th>Token Hash</th>
+                                    <th>Usage Count</th>
+                                    <th>Last Used</th>
+                                    <th>Expires</th>
+                                    <th>Status</th>
+                                    <th>Created</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .APITokens}}
+                                <tr>
+                                    <td>{{.ID}}</td>
+                                    <td><strong>{{.OwnerName}}</strong></td>
+                                    <td>{{if .OwnerID}}{{.OwnerID}}{{else}}<em>None</em>{{end}}</td>
+                                    <td><code>{{printf "%.16s" .APIToken}}...</code></td>
+                                    <td>{{.UsageCount}}</td>
+                                    <td>
+                                        {{if .LastUsedAt}}
+                                            {{.LastUsedAt.Format "2006-01-02 15:04"}}
+                                        {{else}}
+                                            <em>Never</em>
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        {{if .ExpiresAt}}
+                                            {{.ExpiresAt.Format "2006-01-02"}}
+                                        {{else}}
+                                            <span class="badge bg-success">Never</span>
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        {{if .IsEnabled}}
+                                            <span class="badge bg-success">Enabled</span>
+                                        {{else}}
+                                            <span class="badge bg-secondary">Disabled</span>
+                                        {{end}}
+                                    </td>
+                                    <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+                                    <td>
+                                        <div class="btn-group btn-group-sm">
+                                            <!-- Toggle Enable/Disable -->
+                                            <form method="POST" action="/admin/apitokens/toggle" class="d-inline">
+                                                <input type="hidden" name="id" value="{{.ID}}">
+                                                {{if .IsEnabled}}
+                                                    <input type="hidden" name="action" value="disable">
+                                                    <button type="submit" class="btn btn-outline-warning btn-sm">
+                                                        Disable
+                                                    </button>
+                                                {{else}}
+                                                    <input type="hidden" name="action" value="enable">
+                                                    <button type="submit" class="btn btn-outline-success btn-sm">
+                                                        Enable
+                                                    </button>
+                                                {{end}}
+                                            </form>
+                                            <!-- Delete Token -->
+                                            <form method="POST" action="/admin/apitokens/delete" class="d-inline">
+                                                <input type="hidden" name="id" value="{{.ID}}">
+                                                <button type="submit" class="btn btn-outline-danger btn-sm"
+                                                        onclick="return confirm('Delete API token {{.OwnerName}}? This cannot be undone!')">
+                                                    Delete
+                                                </button>
+                                            </form>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                    {{else}}
+                    <div class="alert alert-info">
+                        <strong>No API tokens found.</strong> Create the first API token above.
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+  </div>
+  <!-- AI Models Tab -->
+  <div class="tab-pane fade" id="aimodels" role="tabpanel" aria-labelledby="aimodels-tab">
+    <!-- Create New AI Model -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="card-title mb-0">🤖 Add AI Model</h5>
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="/admin/aimodels">
+                        <div class="row">
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <label for="post_key" class="form-label">Post Key</label>
+                                    <input type="text" class="form-control" id="post_key" name="post_key" required
+                                           placeholder="e.g. gemma3_12b" title="Must match proxy model name">
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <label for="display_name" class="form-label">Display Name</label>
+                                    <input type="text" class="form-control" id="display_name" name="display_name" required
+                                           placeholder="e.g. Gemma 3 12B">
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label for="description" class="form-label">Description</label>
+                                    <input type="text" class="form-control" id="description" name="description"
+                                           placeholder="Brief description of model capabilities">
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="sort_order" class="form-label">Sort Order</label>
+                                    <input type="number" class="form-control" id="sort_order" name="sort_order" value="0" min="0">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="is_active" name="is_active" checked>
+                                    <label class="form-check-label" for="is_active">
+                                        Active (available for users)
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="is_default" name="is_default">
+                                    <label class="form-check-label" for="is_default">
+                                        Default model for new chats
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary mt-2">Add AI Model</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI Model List -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-info text-white">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">🤖 AI Model Management</h5>
+                        <span class="badge bg-light text-dark">{{len .AIModels}} models</span>
+                    </div>
+                </div>
+                <div class="card-body">
+                    {{if .AIModels}}
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Post Key</th>
+                                    <th>Display Name</th>
+                                    <th>Description</th>
+                                    <th>Status</th>
+                                    <th>Default</th>
+                                    <th>Sort</th>
+                                    <th>Created</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .AIModels}}
+                                <tr>
+                                    <td>{{.ID}}</td>
+                                    <td><code>{{.PostKey}}</code></td>
+                                    <td><strong>{{.DisplayName}}</strong></td>
+                                    <td>{{if .Description}}{{.Description}}{{else}}<em>None</em>{{end}}</td>
+                                    <td>
+                                        {{if .IsActive}}
+                                            <span class="badge bg-success">Active</span>
+                                        {{else}}
+                                            <span class="badge bg-secondary">Inactive</span>
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        {{if .IsDefault}}
+                                            <span class="badge bg-primary">Default</span>
+                                        {{else}}
+                                            <span class="text-muted">-</span>
+                                        {{end}}
+                                    </td>
+                                    <td>{{.SortOrder}}</td>
+                                    <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+                                    <td>
+                                        <div class="btn-group btn-group-sm">
+                                            <!-- Edit AI Model Form -->
+                                            <button class="btn btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#edit-aimodel-{{.ID}}">
+                                                Edit
+                                            </button>
+                                            <!-- Delete AI Model Form -->
+                                            <form method="POST" action="/admin/aimodels/delete" class="d-inline">
+                                                <input type="hidden" name="model_id" value="{{.ID}}">
+                                                <button type="submit" class="btn btn-outline-danger btn-sm"
+                                                        onclick="return confirm('Delete AI model {{.DisplayName}}?')">
+                                                    Delete
+                                                </button>
+                                            </form>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <!-- Collapsible Edit Form -->
+                                <tr class="collapse" id="edit-aimodel-{{.ID}}">
+                                    <td colspan="9">
+                                        <div class="card">
+                                            <div class="card-header">
+                                                <h6>Edit AI Model: {{.DisplayName}}</h6>
+                                            </div>
+                                            <div class="card-body">
+                                                <form method="POST" action="/admin/aimodels/update">
+                                                    <input type="hidden" name="model_id" value="{{.ID}}">
+                                                    <div class="row">
+                                                        <div class="col-md-3">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Post Key</label>
+                                                                <input type="text" class="form-control" name="post_key" value="{{.PostKey}}" required>
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Display Name</label>
+                                                                <input type="text" class="form-control" name="display_name" value="{{.DisplayName}}" required>
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-4">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Description</label>
+                                                                <input type="text" class="form-control" name="description" value="{{.Description}}">
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-2">
+                                                            <div class="mb-3">
+                                                                <label class="form-label">Sort Order</label>
+                                                                <input type="number" class="form-control" name="sort_order" value="{{.SortOrder}}" min="0">
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="row">
+                                                        <div class="col-md-6">
+                                                            <div class="form-check">
+                                                                <input class="form-check-input" type="checkbox" name="is_active" {{if .IsActive}}checked{{end}}>
+                                                                <label class="form-check-label">
+                                                                    Active (available for users)
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-6">
+                                                            <div class="form-check">
+                                                                <input class="form-check-input" type="checkbox" name="is_default" {{if .IsDefault}}checked{{end}}>
+                                                                <label class="form-check-label">
+                                                                    Default model for new chats
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="btn-group mt-2">
+                                                        <button type="submit" class="btn btn-success">Save Changes</button>
+                                                        <button type="button" class="btn btn-secondary" data-bs-toggle="collapse" data-bs-target="#edit-aimodel-{{.ID}}">
+                                                            Cancel
+                                                        </button>
+                                                    </div>
+                                                </form>
+                                            </div>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                    {{else}}
+                    <div class="alert alert-info">
+                        <strong>No AI models found.</strong> Create the first AI model above.
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+  </div>
+  <!-- NNTP Users Tab -->
+  <div class="tab-pane fade" id="nntpusers" role="tabpanel" aria-labelledby="nntpusers-tab">
+    <!-- Create New NNTP User -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-info text-white">
+                    <h5 class="card-title mb-0">📡 Add NNTP User</h5>
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="/admin/nntpusers">
+                        <div class="row">
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <label for="nntp_username" class="form-label">Username</label>
+                                    <input type="text" class="form-control" id="nntp_username" name="username" required maxlength="16"
+                                           placeholder="NNTP username">
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="mb-3">
+                                    <label for="nntp_password" class="form-label">Password</label>
+                                    <input type="password" class="form-control" id="nntp_password" name="password" required maxlength="16"
+                                           placeholder="NNTP password">
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="nntp_maxconns" class="form-label">Max Connections</label>
+                                    <input type="number" class="form-control" id="nntp_maxconns" name="maxconns"
+                                           min="1" max="10" value="1">
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="nntp_posting" class="form-label">Posting</label>
+                                    <div class="form-check mt-2">
+                                        <input class="form-check-input" type="checkbox" id="nntp_posting" name="posting">
+                                        <label class="form-check-label" for="nntp_posting">
+                                            Allow posting
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="mb-3">
+                                    <label for="nntp_web_user_id" class="form-label">Map to Web User</label>
+                                    <select class="form-select" id="nntp_web_user_id" name="web_user_id">
+                                        <option value="">None</option>
+                                        {{range .Users}}
+                                        <option value="{{.ID}}">{{.Username}} ({{.Email}})</option>
+                                        {{end}}
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-12">
+                                <button type="submit" class="btn btn-primary">Create NNTP User</button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- NNTP Users List -->
+    <div class="row mt-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header bg-info text-white">
+                    <h6 class="card-title mb-0">📡 NNTP Users</h6>
+                </div>
+                <div class="card-body">
+                    {{if .NNTPUsers}}
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Username</th>
+                                    <th>Max Conns</th>
+                                    <th>Posting</th>
+                                    <th>Mapped User</th>
+                                    <th>Active</th>
+                                    <th>Last Login</th>
+                                    <th>Created</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .NNTPUsers}}
+                                <tr>
+                                    <td>{{.ID}}</td>
+                                    <td><strong>{{.Username}}</strong></td>
+                                    <td>{{.MaxConns}}</td>
+                                    <td>
+                                        {{if .Posting}}
+                                        <span class="badge bg-success">Yes</span>
+                                        {{else}}
+                                        <span class="badge bg-secondary">No</span>
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        {{if .WebUserID}}
+                                        <span class="badge bg-info">User ID: {{.WebUserID}}</span>
+                                        {{else}}
+                                        <span class="text-muted">None</span>
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        {{if .IsActive}}
+                                        <span class="badge bg-success">Active</span>
+                                        {{else}}
+                                        <span class="badge bg-danger">Inactive</span>
+                                        {{end}}
+                                    </td>
+                                    <td>
+                                        {{if .LastLogin}}
+                                        {{.LastLogin.Format "2006-01-02 15:04"}}
+                                        {{else}}
+                                        <span class="text-muted">Never</span>
+                                        {{end}}
+                                    </td>
+                                    <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+                                    <td>
+                                        <div class="btn-group btn-group-sm" role="group">
+                                            <button type="button" class="btn btn-outline-primary btn-sm"
+                                                    data-bs-toggle="modal" data-bs-target="#editNNTPUserModal{{.ID}}">
+                                                Edit
+                                            </button>
+                                            {{if .IsActive}}
+                                            <form method="POST" action="/admin/nntpusers/toggle" style="display: inline;">
+                                                <input type="hidden" name="id" value="{{.ID}}">
+                                                <button type="submit" class="btn btn-outline-warning btn-sm"
+                                                        onclick="return confirm('Deactivate NNTP user {{.Username}}?')">
+                                                    Deactivate
+                                                </button>
+                                            </form>
+                                            {{else}}
+                                            <form method="POST" action="/admin/nntpusers/enable" style="display: inline;">
+                                                <input type="hidden" name="id" value="{{.ID}}">
+                                                <button type="submit" class="btn btn-outline-success btn-sm"
+                                                        onclick="return confirm('Enable NNTP user {{.Username}}?')">
+                                                    Enable
+                                                </button>
+                                            </form>
+                                            {{end}}
+                                            <form method="POST" action="/admin/nntpusers/delete" style="display: inline;">
+                                                <input type="hidden" name="id" value="{{.ID}}">
+                                                <button type="submit" class="btn btn-outline-danger btn-sm"
+                                                        onclick="return confirm('Delete NNTP user {{.Username}}? This will also delete all associated sessions.')">
+                                                    Delete
+                                                </button>
+                                            </form>
+                                        </div>
+                                    </td>
+                                </tr>
+
+                                <!-- Edit NNTP User Modal -->
+                                <div class="modal fade" id="editNNTPUserModal{{.ID}}" tabindex="-1">
+                                    <div class="modal-dialog">
+                                        <div class="modal-content">
+                                            <div class="modal-header">
+                                                <h5 class="modal-title">Edit NNTP User: {{.Username}}</h5>
+                                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                                            </div>
+                                            <form method="POST" action="/admin/nntpusers/update">
+                                                <div class="modal-body">
+                                                    <input type="hidden" name="id" value="{{.ID}}">
+                                                    <div class="mb-3">
+                                                        <label for="edit_maxconns{{.ID}}" class="form-label">Max Connections</label>
+                                                        <input type="number" class="form-control" id="edit_maxconns{{.ID}}"
+                                                               name="maxconns" min="1" max="10" value="{{.MaxConns}}">
+                                                    </div>
+                                                    <div class="mb-3">
+                                                        <div class="form-check">
+                                                            <input class="form-check-input" type="checkbox"
+                                                                   id="edit_posting{{.ID}}" name="posting" {{if .Posting}}checked{{end}}>
+                                                            <label class="form-check-label" for="edit_posting{{.ID}}">
+                                                                Allow posting
+                                                            </label>
+                                                        </div>
+                                                    </div>
+                                                    <div class="mb-3">
+                                                        <label for="edit_password{{.ID}}" class="form-label">New Password (leave empty to keep current)</label>
+                                                        <input type="password" class="form-control" id="edit_password{{.ID}}"
+                                                               name="password" maxlength="16">
+                                                    </div>
+                                                </div>
+                                                <div class="modal-footer">
+                                                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                                    <button type="submit" class="btn btn-primary">Update NNTP User</button>
+                                                </div>
+                                            </form>
+                                        </div>
+                                    </div>
+                                </div>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                    {{else}}
+                    <p class="text-muted">No NNTP users found.</p>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+  </div>
+  <!-- Statistics Tab -->
+  <div class="tab-pane fade" id="stats" role="tabpanel" aria-labelledby="stats-tab">
+    <!-- Statistics -->
+    <div class="row mt-3">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header bg-success text-white">
+                    <h6 class="card-title mb-0">📊 Statistics</h6>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-3">
+                            <div class="text-center">
+                                <h4>{{len .Users}}</h4>
+                                <small class="text-muted">Total Users</small>
+                            </div>
+                        </div>
+                        <div class="col-2">
+                            <div class="text-center">
+                                <h4>{{len .Newsgroups}}</h4>
+                                <small class="text-muted">Newsgroups</small>
+                            </div>
+                        </div>
+                        <div class="col-2">
+                            <div class="text-center">
+                                <h4>{{len .Providers}}</h4>
+                                <small class="text-muted">Providers</small>
+                            </div>
+                        </div>
+                        <div class="col-2">
+                            <div class="text-center">
+                                <h4>{{len .APITokens}}</h4>
+                                <small class="text-muted">API Tokens</small>
+                                <br><small class="text-success">({{.EnabledTokensCount}} enabled)</small>
+                            </div>
+                        </div>
+                        <div class="col-3">
+                            <div class="text-center">
+                                <h4>{{if .AdminCount}}{{.AdminCount}}{{else}}0{{end}}</h4>
+                                <small class="text-muted">Admin Users</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header bg-secondary text-white">
+                    <h6 class="card-title mb-0">ℹ️ System Info</h6>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-12">
+                        <!-- TODO: Add actual system info -->
+                        <!--
+                            <p><strong>Server:</strong> <span class="text-success">Online</span></p>
+                            <p><strong>Database:</strong> <span class="text-success">Connected</span></p>
+                        -->
+                            <p><strong>Current User:</strong> {{if .CurrentUser}}{{.CurrentUser.Username}}{{else}}Unknown{{end}}</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+  </div>
+</div>
+
+<!-- ADD NEW TABBED LINKS HERE TO ADMIN OPTIONS -->
+
+<!-- END OF TABBED LINKS -->
+{{end}}
+

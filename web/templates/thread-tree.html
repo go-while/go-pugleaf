@@ -1,0 +1,233 @@
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item"><a href="/groups" class="text-decoration-none">Groups</a></li>
+        {{with .GroupName}}
+        <li class="breadcrumb-item"><a href="/groups/{{.}}" class="text-decoration-none">{{.}}</a></li>
+        <li class="breadcrumb-item"><a href="/groups/{{.}}/threads" class="text-decoration-none">Threads</a></li>
+        {{end}}
+        <li class="breadcrumb-item active" aria-current="page">Tree View</li>
+    </ol>
+</nav>
+{{end}}
+
+
+{{define "content"}}
+<!-- Navigation Menu -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-success text-white">
+                <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-diagram-3 me-2"></i>Thread Tree View{{with .GroupName}}: {{.}}{{end}}
+                    </h5>
+                    {{if .TreeStats}}
+                    <div class="d-flex gap-3">
+                        <span class="badge bg-light text-dark">
+                            {{.TreeStats.MessageCount}} messages
+                        </span>
+                        <span class="badge bg-light text-dark">
+                            Depth: {{.TreeStats.MaxDepth}}
+                        </span>
+                        {{if .CacheHit}}
+                        <span class="badge bg-warning text-dark">
+                            <i class="bi bi-lightning-fill"></i> Cached
+                        </span>
+                        {{end}}
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="btn-group" role="group" aria-label="Thread Navigation">
+                    {{with .GroupName}}
+                    <a href="/groups/{{.}}/threads" class="btn btn-outline-secondary">
+                        <strong>[T]</strong> Back to Threads
+                    </a>
+                    <a href="/groups/{{.}}/thread/{{$.ThreadRoot.ArticleNum}}" class="btn btn-outline-secondary">
+                        <strong>[F]</strong> Flat View
+                    </a>
+                    <a href="/groups/{{.}}" class="btn btn-outline-primary">
+                        <strong>[G]</strong> Group Articles
+                    </a>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Tree Controls -->
+<div class="row mb-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="tree-controls d-flex gap-3 align-items-center flex-wrap">
+                    <button id="expandAllBtn" class="btn btn-sm btn-outline-primary">
+                        <i class="bi bi-arrows-expand"></i> Expand All
+                    </button>
+                    <button id="collapseAllBtn" class="btn btn-sm btn-outline-primary">
+                        <i class="bi bi-arrows-collapse"></i> Collapse All
+                    </button>
+                    <button id="toggleCompactBtn" class="btn btn-sm btn-outline-secondary">
+                        <i class="bi bi-list"></i> Compact View
+                    </button>
+
+                    <div class="ms-auto small text-muted">
+                        {{if .BuildTime}}
+                        Build time: {{.BuildTime}}ms
+                        {{end}}
+                        {{if .TreeStats}}
+                        | {{.TreeStats.MessageCount}} messages | Max depth: {{.TreeStats.MaxDepth}}
+                        {{end}}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Thread Tree -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-diagram-3 me-2"></i>Thread Tree
+                </h6>
+            </div>
+            <div class="card-body p-0">
+                <div id="threadTree" class="thread-tree-container">
+                    {{if .TreeHTML}}
+                    {{.TreeHTML}}
+                    {{else}}
+                    <div class="alert alert-warning m-3">
+                        <i class="bi bi-exclamation-triangle me-2"></i>
+                        No thread tree data available. This may be a single message thread.
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Thread Root Information -->
+{{if .ThreadRoot}}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-chat-square-text me-2"></i>Root Message
+                </h6>
+            </div>
+            <div class="card-body">
+                <h5 class="mb-2">{{.ThreadRoot.PrintSanitized "subject" .GroupName}}</h5>
+                <div class="row">
+                    <div class="col-md-6">
+                        <p class="text-muted mb-1">
+                            <strong>From:</strong> {{.ThreadRoot.PrintSanitized "fromheader" .GroupName}}
+                        </p>
+                        <p class="text-muted mb-1">
+                            <strong>Date:</strong> {{.ThreadRoot.PrintSanitized "date_string" .GroupName}}
+                        </p>
+                    </div>
+                    <div class="col-md-6">
+                        <p class="text-muted mb-1">
+                            <strong>Article:</strong> {{.ThreadRoot.ArticleNum}}
+                        </p>
+                        <p class="text-muted mb-1">
+                            <strong>Message-ID:</strong> <code class="small">{{.ThreadRoot.MessageID}}</code>
+                        </p>
+                    </div>
+                </div>
+                <div class="mt-2">
+                    <a href="/groups/{{.GroupName}}/articles/{{.ThreadRoot.ArticleNum}}" class="btn btn-sm btn-outline-primary">
+                        <i class="bi bi-eye me-1"></i>View Article
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+<!-- Debug Information -->
+{{if .TreeStats}}
+<div class="row mt-4">
+    <div class="col-12">
+        <details class="card">
+            <summary class="card-header" style="cursor: pointer;">
+                <i class="bi bi-info-circle me-2"></i>Debug Information
+            </summary>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6 class="text-primary">Tree Statistics</h6>
+                        <ul class="list-unstyled">
+                            <li><strong>Root Article:</strong> {{.TreeStats.ThreadRoot}}</li>
+                            <li><strong>Message Count:</strong> {{.TreeStats.MessageCount}}</li>
+                            <li><strong>Max Depth:</strong> {{.TreeStats.MaxDepth}}</li>
+                            <li><strong>Cache Hit:</strong> {{if .CacheHit}}Yes{{else}}No{{end}}</li>
+                            {{if .BuildTime}}
+                            <li><strong>Build Time:</strong> {{.BuildTime}}</li>
+                            {{end}}
+                        </ul>
+                    </div>
+                    <div class="col-md-6">
+                        <h6 class="text-primary">Thread Root</h6>
+                        {{if .ThreadRoot}}
+                        <ul class="list-unstyled">
+                            <li><strong>Subject:</strong> {{.ThreadRoot.PrintSanitized "subject" .GroupName}}</li>
+                            <li><strong>From:</strong> {{.ThreadRoot.PrintSanitized "fromheader" .GroupName}}</li>
+                            <li><strong>Date:</strong> {{.ThreadRoot.PrintSanitized "date_string" .GroupName}}</li>
+                            <li><strong>Article:</strong> {{.ThreadRoot.ArticleNum}}</li>
+                        </ul>
+                        {{end}}
+                    </div>
+                </div>
+            </div>
+        </details>
+    </div>
+</div>
+{{end}}
+
+<script src="/static/js/thread-tree.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // The ThreadTree class auto-initializes via its DOMContentLoaded listener
+
+    // Wait a moment for the auto-initialization to complete
+    setTimeout(function() {
+        const treeContainer = document.querySelector('.thread-tree');
+
+        if (treeContainer && treeContainer.treeInstance) {
+            const tree = treeContainer.treeInstance;
+
+            // Bind control buttons to the tree instance methods
+            document.getElementById('expandAllBtn')?.addEventListener('click', function() {
+                tree.expandAll();
+            });
+
+            document.getElementById('collapseAllBtn')?.addEventListener('click', function() {
+                tree.collapseAll();
+            });
+
+            document.getElementById('toggleCompactBtn')?.addEventListener('click', function() {
+                // Toggle compact view by changing CSS class
+                const container = document.querySelector('.thread-tree-container');
+                if (container) {
+                    container.classList.toggle('compact-view');
+                }
+            });
+        } else {
+            // No thread tree found
+        }
+    }, 100);
+});
+</script>
+
+{{end}}

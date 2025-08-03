@@ -1,0 +1,152 @@
+{{define "admin_users"}}
+<!-- Users Tab -->
+<div class="tab-pane fade show active" id="users" role="tabpanel" aria-labelledby="users-tab">
+  <!-- Create New User -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h5 class="card-title mb-0">➕ Add User</h5>
+              </div>
+              <div class="card-body">
+                  <form autocomplete="off" method="POST" action="/admin/users?tab=users">
+                      <input autocomplete="false" name="hidden" type="text" style="display:none;">
+                      <div class="row">
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="username" class="form-label">Username</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="username" name="username" required>
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="email" class="form-label">Email</label>
+                                  <input autocomplete="off" type="email" class="form-control" id="email" name="email" required>
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="displayName" class="form-label">Display Name</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="displayName" name="displayName">
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="password" class="form-label">Password</label>
+                                  <input autocomplete="new-password" type="password" class="form-control" id="password" name="password" required minlength="6">
+                              </div>
+                          </div>
+                      </div>
+                      <button type="submit" class="btn btn-primary">Add User</button>
+                  </form>
+              </div>
+          </div>
+      </div>
+  </div>
+
+  <!-- User List -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <div class="d-flex justify-content-between align-items-center">
+                      <h5 class="card-title mb-0">👥 User Management</h5>
+                      <span class="badge bg-light text-dark">{{len .Users}} users</span>
+                  </div>
+              </div>
+              <div class="card-body">
+                  {{if .Users}}
+                  <div class="table-responsive">
+                      <table class="table table-striped">
+                          <thead>
+                              <tr>
+                                  <th>ID</th>
+                                  <th>Username</th>
+                                  <th>Email</th>
+                                  <th>Display Name</th>
+                                  <th>Created</th>
+                                  <th>Actions</th>
+                              </tr>
+                          </thead>
+                          <tbody>
+                              {{range .Users}}
+                              <tr>
+                                  <td>{{.ID}}</td>
+                                  <td><strong>{{.Username}}</strong></td>
+                                  <td>{{.Email}}</td>
+                                  <td>{{if .DisplayName}}{{.DisplayName}}{{else}}<em>None</em>{{end}}</td>
+                                  <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+                                  <td>
+                                    <div class="btn-group btn-group-sm">
+                                        <button type="button" class="btn btn-outline-primary btn-sm"
+                                                data-bs-toggle="collapse" data-bs-target="#edit-user-{{.ID}}">
+                                            Edit
+                                        </button>
+                                    <form method="POST" action="/admin/users/delete?tab=users" style="display: inline;">
+                                    <input type="hidden" name="user_id" value="{{.ID}}">
+                                        <button type="submit" class="btn btn-outline-danger btn-sm">
+                                        Delete
+                                    </button>
+                                    </form>
+                                    </div>
+                                  </td>
+                              </tr>
+                              <!-- Collapsible Edit Form -->
+                              <tr class="collapse" id="edit-user-{{.ID}}">
+                                  <td colspan="6">
+                                      <div class="card">
+                                          <div class="card-header bg-dark text-white">
+                                              <h6>Edit User: {{.Username}}</h6>
+                                          </div>
+                                          <div class="card-body">
+                                        <form method="POST" action="/admin/users/update?tab=users">
+                                            <input type="hidden" name="user_id" value="{{.ID}}">
+                                            <div class="row">
+                                                <div class="col-md-4">
+                                                    <div class="mb-3">
+                                                        <label class="form-label">Username</label>
+                                                        <input type="text" class="form-control" name="username" value="{{.Username}}" readonly>
+                                                    </div>
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <div class="mb-3">
+                                                        <label class="form-label">Email</label>
+                                                        <input type="email" class="form-control" name="email" value="{{.Email}}" required>
+                                                    </div>
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <div class="mb-3">
+                                                        <label class="form-label">Display Name</label>
+                                                        <input type="text" class="form-control" name="displayName" value="{{.DisplayName}}">
+                                                    </div>
+                                                </div>
+                                                </div>
+                                                <div class="row">
+                                                    <div class="col-md-6">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">New Password (leave blank to keep current)</label>
+                                                            <input type="password" class="form-control" name="password" minlength="6">
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <button type="submit" class="btn btn-primary">Update User</button>
+                                              </form>
+                                          </div>
+                                      </div>
+                                  </td>
+                              </tr>
+                              {{end}}
+                          </tbody>
+                      </table>
+                  </div>
+                  {{else}}
+                  <div class="alert alert-info">
+                      <strong>No users found.</strong> Create the first user above.
+                  </div>
+                  {{end}}
+              </div>
+          </div>
+      </div>
+  </div>
+</div>
+{{end}}

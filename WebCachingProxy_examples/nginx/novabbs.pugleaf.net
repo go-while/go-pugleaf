@@ -1,0 +1,64 @@
+upstream novabbs {
+    server 10.0.119.1:11980;
+}
+
+server {
+    listen 443 ssl;
+    server_name novabbs.pugleaf.net;
+    
+    ssl_certificate     /ssl/novabbs.pugleaf.net/fullchain.pem;
+    ssl_certificate_key /ssl/novabbs.pugleaf.net/privkey.pem;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    limit_rate_after 32K;
+    limit_rate       16k;
+    
+    location ^~ /static/ {
+        include /etc/nginx/filter.inc;
+        limit_rate_after 32K;
+        limit_rate       32k;
+        limit_req zone=mylimit burst=4 delay=2;
+        proxy_cache rs_cache;
+        proxy_cache_valid 200 1h;
+        proxy_cache_key "$host$request_uri";
+        proxy_pass http://novabbs;
+    }
+
+    # access only with cookie
+    location = ^/admin$ {
+        include /etc/nginx/filter.inc;
+        if ($cookie_session_id = "") {
+            return 403;
+        }
+        limit_rate_after 128K;
+        limit_rate       128k;
+        limit_req zone=mylimit burst=4 delay=4;
+        proxy_pass http://novabbs;
+    }
+    location = ^/(aichat|profile|logout)$ {
+        include /etc/nginx/filter.inc;      
+        if ($cookie_session_id = "") {
+            return 403;
+        }
+        limit_req zone=mylimit burst=2 delay=2;
+        proxy_pass http://novabbs;
+    }
+    
+    location = ^/(login|register) {
+        include /etc/nginx/filter.inc;      
+        limit_req zone=mylimit burst=1 delay=1;
+        proxy_pass http://novabbs;
+    }
+
+    location / {
+        include /etc/nginx/filter.inc;      
+        limit_req zone=mylimit burst=2 delay=2;
+        proxy_cache rs_cache;
+        proxy_cache_key "$scheme$proxy_host$request_uri$cookie_session_id";
+        proxy_pass http://novabbs;
+    }
+}

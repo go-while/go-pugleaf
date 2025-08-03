@@ -1,0 +1,178 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item"><a href="/sections" class="text-decoration-none">Sections</a></li>
+        <li class="breadcrumb-item active" aria-current="page">{{.Section.DisplayName}}</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<!-- Section Header -->
+ <!--
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-folder me-2"></i>{{.Section.DisplayName}}
+                </h5>
+            </div>
+            <div class="card-body">
+                <p class="card-text">{{.Section.Description}}</p>
+                <div class="row">
+                    <div class="col-md-6">
+                        <small class="text-muted">
+                            <strong>Section:</strong> {{.Section.Name}}
+                        </small>
+                    </div>
+                    <div class="col-md-6 text-md-end">
+                        <small class="text-muted">
+                            <strong>Total Groups:</strong> {{.TotalGroups}}
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+-->
+
+<!-- Section Navigation -->
+<!--
+{{if .AvailableSections}}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-secondary text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-list me-2"></i>Other Sections
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="btn-group flex-wrap" role="group">
+                    {{range .AvailableSections}}
+                    <a href="/{{.Name}}" class="btn btn-outline-secondary btn-sm">
+                        {{.DisplayName}}
+                    </a>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+-->
+
+<!-- Groups in Section -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-secondary text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-collection me-2"></i>{{.TotalGroups}} Groups in {{.Section.DisplayName}}
+
+                </h6>
+            </div>
+            <div class="card-body">
+                {{if .Groups}}
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Newsgroup</th>
+                                <th>Description</th>
+                                <!--<th class="text-end">Sort Order</th>-->
+                                <!--<th class="text-center">Actions</th>-->
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{range .Groups}}
+                            <tr {{if .IsCategoryHeader}}class="table-warning"{{end}}>
+                                <td>
+                                    <a href="/groups/{{.NewsgroupName}}/threads" class="text-decoration-none">
+                                        <i class="bi bi-newspaper me-2"></i>{{.NewsgroupName}}
+                                    </a>
+                                    <!--
+                                    {{if .IsCategoryHeader}}
+                                        <strong><i class="bi bi-folder-fill me-2"></i>{{.NewsgroupName}}</strong>
+                                    {{else}}
+                                        <a href="/{{$.Section.Name}}/{{.NewsgroupName}}/" class="text-decoration-none">
+                                            <i class="bi bi-newspaper me-2"></i>{{.NewsgroupName}}
+                                        </a>
+                                    {{end}}
+                                    -->
+                                </td>
+                                <td>
+                                    {{if .GroupDescription}}
+                                        {{.GroupDescription}}
+                                    {{else}}
+                                        <!--<span class="text-muted">No description available</span>-->
+                                    {{end}}
+                                </td>
+                                <!--
+                                <td class="text-end">
+                                    <small class="text-muted">{{.SortOrder}}</small>
+                                </td>
+                                <td class="text-center">
+                                    {{if not .IsCategoryHeader}}
+                                        <a href="/{{$.Section.Name}}/{{.NewsgroupName}}/" class="btn btn-outline-primary btn-sm">
+                                            <i class="bi bi-eye me-1"></i>View
+                                        </a>
+                                    {{end}}
+                                </td>
+                                -->
+                            </tr>
+                            {{end}}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Pagination -->
+                {{if .Pagination}}
+                    {{template "pagination" .}}
+                {{end}}
+
+                {{else}}
+                <div class="alert alert-info" role="alert">
+                    <i class="bi bi-info-circle me-2"></i>
+                    <strong>No groups found</strong> in this section.
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Quick Actions -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-light">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-lightning me-2"></i>Quick Actions
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2 d-md-flex">
+                    <a href="/groups" class="btn btn-primary">
+                        <i class="bi bi-collection me-2"></i>All Groups
+                    </a>
+                    <a href="/search" class="btn btn-secondary">
+                        <i class="bi bi-search me-2"></i>Search
+                    </a>
+                    <a href="/stats" class="btn btn-info">
+                        <i class="bi bi-bar-chart me-2"></i>Statistics
+                    </a>
+                    <a href="/" class="btn btn-outline-secondary">
+                        <i class="bi bi-house me-2"></i>Home
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

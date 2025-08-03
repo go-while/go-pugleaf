@@ -1,0 +1,273 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item active" aria-current="page">System Statistics</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+
+<!-- DISABLED OLD NAVIGATION; IS NOW IN HEADER IN BASE.HTML -->
+<!-- Navigation Menu -->
+<!--
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-info text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-bar-chart me-2"></i>System Statistics
+                </h5>
+            </div>
+
+            <div class="card-body">
+                <div class="btn-group" role="group" aria-label="Navigation">
+                    <a href="/" class="btn btn-outline-secondary">
+                        <strong>[H]</strong> Return to Home
+                    </a>
+                    <a href="/groups" class="btn btn-outline-primary">
+                        <strong>[G]</strong> Browse Groups
+                    </a>
+                    <a href="/search" class="btn btn-outline-warning">
+                        <strong>[S]</strong> Search
+                    </a>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+-->
+
+<!-- Title -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body text-center">
+                <h2 class="card-title">
+                    <i class="bi bi-graph-up me-2"></i>go-pugleaf System Status
+                </h2>
+                <p class="card-text lead">Real-time system information and statistics</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- System Overview Cards -->
+<div class="row mb-4">
+    <!-- Server Status -->
+    <div class="col-lg-4 mb-3">
+        <div class="card h-100">
+            <div class="card-header bg-success text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-server me-2"></i>WebServer
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="text-center">
+                    <div class="display-4 mb-3">
+                        <span class="badge bg-success">ONLINE</span>
+                    </div>
+                    <table class="table table-sm">
+                        <tbody>
+                            <tr>
+                                <td><strong>Version:</strong></td>
+                                <td>0.{{.AppVersion}}</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Database:</strong></td>
+                                <td>SQLite3</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Current Time:</strong></td>
+                                <td><small>{{.CurrentTime}}</small></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Newsgroup Statistics -->
+    <div class="col-lg-4 mb-3">
+        <div class="card h-100">
+            <div class="card-header bg-primary text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-collection me-2"></i>Newsgroup Statistics
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="text-center">
+                    <div class="display-4 mb-3 text-primary">{{.GroupCount}}</div>
+                    <h6>Total Groups</h6>
+                    <div class="mt-3">
+                        <div class="row text-center">
+                            <div class="col-6">
+                                <div class="border-end">
+                                    <h5 class="text-success">{{.GroupCount}}</h5>
+                                    <small class="text-muted">Active</small>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <h5 class="text-info">Ready</h5>
+                                <small class="text-muted">Import Status</small>
+                            </div>
+                        </div>
+                        <hr class="my-3">
+                        <div class="text-center">
+                            <div class="display-6 text-warning">{{.TotalArticles}}</div>
+                            <h6 class="text-muted">
+                                <i class="bi bi-file-text me-1"></i>Total Articles
+                            </h6>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- System Health -->
+    <div class="col-lg-4 mb-3">
+        <div class="card h-100">
+            <div class="card-header bg-warning text-dark">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-shield-check me-2"></i>System Health
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="list-group list-group-flush">
+                    <div class="list-group-item d-flex justify-content-between align-items-center">
+                        <span>NNTP Server</span>
+                        <span class="badge bg-success rounded-pill">✓</span>
+                    </div>
+                    <div class="list-group-item d-flex justify-content-between align-items-center">
+                        <span>Database</span>
+                        <span class="badge bg-success rounded-pill">✓</span>
+                    </div>
+                    <div class="list-group-item d-flex justify-content-between align-items-center">
+                        <span>Web Interface</span>
+                        <span class="badge bg-success rounded-pill">✓</span>
+                    </div>
+                    <div class="list-group-item d-flex justify-content-between align-items-center">
+                        <span>API Services</span>
+                        <span class="badge bg-success rounded-pill">✓</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Top Active Groups -->
+{{if .Groups}}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-secondary text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-trophy me-2"></i>Top 10 Most Active Groups
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Group Name</th>
+                                <th>Articles</th>
+                                <th>Last Article</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{range .Groups}}
+                            <tr>
+                                <td>
+                                    <strong><a href="/groups/{{.Name}}/threads">{{.Name}}</a></strong>
+                                    <br>
+                                    <small class="text-muted">{{.Description}}</small>
+                                </td>
+                                <td>
+                                    <span class="badge bg-primary">{{.MessageCount}}</span>
+                                </td>
+                                <td>
+                                    <code>#{{.LastArticle}}</code>
+                                </td>
+
+                            </tr>
+                            {{end}}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+<!-- System Features -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-dark text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-gear me-2"></i>System Features
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <ul class="list-unstyled">
+                            <li class="mb-2">
+                                <i class="bi bi-check-circle text-success me-2"></i>RFC-compliant NNTP client/server
+                            </li>
+                            <li class="mb-2">
+                                <i class="bi bi-check-circle text-success me-2"></i>Per-group database storage
+                            </li>
+                            <li class="mb-2">
+                                <i class="bi bi-check-circle text-success me-2"></i>Connection pooling & SSL/TLS
+                            </li>
+                            <li class="mb-2">
+                                <i class="bi bi-check-circle text-success me-2"></i>Web-based BBS interface
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="col-md-6">
+                        <ul class="list-unstyled">
+                            <li class="mb-2">
+                                <i class="bi bi-check-circle text-success me-2"></i>RESTful API endpoints
+                            </li>
+                            <li class="mb-2">
+                                <i class="bi bi-check-circle text-success me-2"></i>Threading support
+                            </li>
+                            <li class="mb-2">
+                                <i class="bi bi-check-circle text-success me-2"></i>Import pipeline
+                            </li>
+                            <li class="mb-2">
+                                <i class="bi bi-check-circle text-success me-2"></i>Modern Bootstrap UI
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- System Management -->
+<div class="row">
+    <div class="col-12">
+        <div class="alert alert-success" role="alert">
+            <h6 class="alert-heading">
+                <i class="bi bi-check-circle me-2"></i>System Management
+            </h6>
+            <p class="mb-1">All systems operational and ready for service.</p>
+            <hr>
+            <p class="mb-0">System is ready for article import and browsing operations.</p>
+        </div>
+    </div>
+</div>
+{{end}}

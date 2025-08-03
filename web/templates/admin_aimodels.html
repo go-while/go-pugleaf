@@ -1,0 +1,222 @@
+{{define "admin_aimodels"}}
+<!-- AI Models Tab -->
+<div class="tab-pane fade show active" id="aimodels" role="tabpanel" aria-labelledby="aimodels-tab">
+  <!-- Create New AI Model -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h5 class="card-title mb-0">🤖 Add AI Model</h5>
+              </div>
+              <div class="card-body">
+                  <form method="POST" action="/admin/aimodels?tab=aimodels">
+                      <div class="row">
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="post_key" class="form-label">Post Key</label>
+                                  <input type="text" class="form-control" id="post_key" name="post_key" required
+                                         placeholder="e.g., gemma3_12b">
+                                  <div class="form-text">User-friendly identifier for frontend forms</div>
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="ollama_model_name" class="form-label">Ollama Model Name</label>
+                                  <input readonly type="text" class="form-control" id="ollama_model_name" name="ollama_model_name" required
+                                         placeholder="e.g., gemma3:12b">
+                                  <div class="form-text">Real Ollama model name for API requests</div>
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="display_name" class="form-label">Display Name</label>
+                                  <input readonly type="text" class="form-control" id="display_name" name="display_name" required
+                                         placeholder="e.g., Gemma 3 12B">
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="description" class="form-label">Description</label>
+                                  <input readonly type="text" class="form-control" id="description" name="description"
+                                         placeholder="Brief description">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="sort_order" class="form-label">Sort Order</label>
+                                  <input type="number" class="form-control" id="sort_order" name="sort_order" value="0" min="0">
+                              </div>
+                          </div>
+                      </div>
+                      <div class="row">
+                          <div class="col-md-6">
+                              <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" id="is_active" name="is_active" checked>
+                                  <label class="form-check-label" for="is_active">
+                                      Active (available for use)
+                                  </label>
+                              </div>
+                          </div>
+                          <div class="col-md-6">
+                              <div class="form-check">
+                                  <input class="form-check-input" type="checkbox" id="is_default" name="is_default">
+                                  <label class="form-check-label" for="is_default">
+                                      Default model (selected by default)
+                                  </label>
+                              </div>
+                          </div>
+                      </div>
+                      <div class="d-flex gap-2 mt-2">
+                          <button type="submit" class="btn btn-primary">Add AI Model</button>
+                      </div>
+                  </form>
+
+                  <!-- Sync Models Form (separate from Add Model form) -->
+                  <div class="mt-2">
+                      <form method="POST" action="/admin/aimodels/sync?tab=aimodels" style="display: inline;">
+                          <button type="submit" class="btn btn-success">
+                              🔄 Sync new models from Ollama
+                          </button>
+                      </form>
+                  </div>
+              </div>
+          </div>
+      </div>
+  </div>
+
+  <!-- AI Model List -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <div class="d-flex justify-content-between align-items-center">
+                      <h5 class="card-title mb-0">🤖 AI Model Management</h5>
+                      <span class="badge bg-light text-dark">{{len .AIModels}} models</span>
+                  </div>
+              </div>
+              <div class="card-body">
+                  {{if .AIModels}}
+                  <div class="table-responsive">
+                      <table class="table table-striped">
+                          <thead>
+                              <tr>
+                                <th>ID</th>
+                                <th>Edit</th>
+                                <th>Model Info</th>
+                                <th>Delete</th>
+                              </tr>
+                          </thead>
+                          <tbody>
+                              {{range .AIModels}}
+                              <tr>
+                                <td>{{.ID}}</td>
+                                <td>
+                                    <button type="button" class="btn btn-outline-primary btn-sm"
+                                            data-bs-toggle="collapse" data-bs-target="#edit-aimodel-{{.ID}}">
+                                        Edit
+                                    </button>
+                                    <br>
+                                    {{if .IsActive}}
+                                    <span class="badge bg-success">Active</span>
+                                    {{else}}
+                                    <span class="badge bg-secondary">Inactive</span>
+                                    {{end}}
+                                    <div><small class="text-muted">Sort: {{.SortOrder}}</small></div>
+                                    {{if .IsDefault}}
+                                    <span class="badge bg-primary">Default</span>
+                                    {{else}}
+                                    <span class="text-muted">-</span>
+                                    {{end}}
+                                </td>
+                                <td>
+                                    <div><strong>{{.DisplayName}} | {{.CreatedAt.Format "2006-01-02 15:04"}}</strong></div>
+                                    <div><small class="text-muted">Key: <code>{{.PostKey}}</code></small></div>
+                                    <div><small class="text-muted">Model: <code>{{.OllamaModelName}}</code></small></div>
+                                    {{if .Description}}<div><small class="text-muted">{{.Description}}</small></div>{{end}}
+                                </td>
+                                <td>
+                                    <div class="btn-group btn-group-sm">
+                                    <form method="POST" action="/admin/aimodels/delete?tab=aimodels" style="display: inline;">
+                                    <input type="hidden" name="model_id" value="{{.ID}}">
+                                    <button type="submit" class="btn btn-outline-danger btn-sm">Delete</button>
+                                    </form>
+                                    </div>
+                                </td>
+                              </tr>
+                              <!-- Collapsible Edit Form -->
+                              <tr class="collapse" id="edit-aimodel-{{.ID}}">
+                                  <td colspan="5">
+                                      <div class="card">
+                                        <div class="card-header bg-dark text-white">
+                                            <h6>Edit AI Model: {{.DisplayName}}</h6>
+                                        </div>
+                                        <div class="card-body">
+                                            <form method="POST" action="/admin/aimodels/update?tab=aimodels">
+                                                <input type="hidden" name="model_id" value="{{.ID}}">
+                                                <div class="row">
+                                                    <div class="col-md-3">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Post Key</label>
+                                                            <input type="text" class="form-control" name="post_key" value="{{.PostKey}}" required>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Ollama Model Name</label>
+                                                            <input type="text" class="form-control" name="ollama_model_name" value="{{.OllamaModelName}}" required>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Display Name</label>
+                                                            <input type="text" class="form-control" name="display_name" value="{{.DisplayName}}" required>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Description</label>
+                                                            <input type="text" class="form-control" name="description" value="{{.Description}}">
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Sort Order</label>
+                                                            <input type="number" class="form-control" name="sort_order" value="{{.SortOrder}}" min="0">
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div class="row">
+                                                    <div class="col-md-6">
+                                                        <div class="form-check">
+                                                            <input class="form-check-input" type="checkbox" name="is_active" {{if .IsActive}}checked{{end}}>
+                                                            <label class="form-check-label">Active</label>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-6">
+                                                        <div class="form-check">
+                                                            <input class="form-check-input" type="checkbox" name="is_default" {{if .IsDefault}}checked{{end}}>
+                                                            <label class="form-check-label">Default</label>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <button type="submit" class="btn btn-primary">Update AI Model</button>
+                                            </form>
+                                          </div>
+                                      </div>
+                                  </td>
+                              </tr>
+                              {{end}}
+                          </tbody>
+                      </table>
+                  </div>
+                  {{else}}
+                  <div class="alert alert-info">
+                      <strong>No AI models found.</strong> Create the first AI model above.
+                  </div>
+                  {{end}}
+              </div>
+          </div>
+      </div>
+  </div>
+</div>
+{{end}}

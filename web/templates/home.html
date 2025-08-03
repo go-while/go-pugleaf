@@ -1,0 +1,871 @@
+{{template "base.html" .}}
+
+{{define "content"}}
+<div class="row">
+
+    <!-- Main Menu Card -->
+    <!--
+    <div class="col-md-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-list-ul me-2"></i>Main Menu
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2">
+                    <a href="/groups" class="btn btn-outline-primary btn-lg">
+                        <strong>[G]</strong> Newsgroups
+                    </a>
+                    <a href="/hierarchies" class="btn btn-outline-warning btn-lg">
+                        <strong>[R]</strong> Hierarchies
+                    </a>
+                    <a href="/sections" class="btn btn-outline-danger btn-lg">
+                        <strong>[B]</strong> Sections
+                    </a>
+                    <a href="/search" class="btn btn-outline-secondary btn-lg">
+                        <strong>[S]</strong> Search
+                    </a>
+                    <a href="/stats" class="btn btn-outline-info btn-lg">
+                        <strong>[T]</strong> Stats
+                    </a>
+                    <a href="/help" class="btn btn-outline-success btn-lg">
+                        <strong>[H]</strong> Help
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+    -->
+
+    <!-- Welcome Section -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-body text-center">
+                    <h2 class="card-title">Welcome to go-pugleaf NNTP to Web Gateway</h2>
+                    <p class="card-text lead">A modern, secure, high-performance Go-based NNTP newsgroup system</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-3 col-lg-4 col-md-12 mb-4">
+        <!-- Network Nodes -->
+        <div class="card h-100">
+            <div class="card-header bg-danger text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-diagram-3 me-2"></i>Network Nodes
+                </h6>
+            </div>
+            <div class="card-body p-2">
+                <!-- Table format for detailed node info -->
+                <div class="table-responsive">
+                    <table class="table table-sm table-borderless">
+                        <tbody>
+                        <tr>
+                            <td class="bg-dark text-center p-2">
+                                <div class="d-flex flex-column gap-1">
+                                    <a class="fw-bold badge bg-dark text-light" href="https://i2pn2.pugleaf.net/hierarchies">i2pn2.pugleaf.net</a>
+                                    <small class="bg-primary badge">All 42783 Newsgroups from i2pn2.org:</small>
+                                    <small class="bg-secondary badge">Retention: 198x-2025</small>
+                                    <small class="bg-success badge"><a href="https://i2pn2.pugleaf.net/stats">Status</a>: syncing...</small>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="bg-dark text-center p-2">
+                                <div class="d-flex flex-column gap-1">
+                                    <a class="fw-bold badge bg-dark text-light" href="https://rocksolid-us.pugleaf.net/hierarchies">🇺🇸 rocksolid-us.pugleaf.net</a>
+                                    <small class="bg-primary badge">648 Newsgroups from Webs:</small>
+                                    <div class="d-flex flex-wrap gap-1 justify-content-center">
+                                        <small class="bg-primary badge">+ RockSolidBBS.com</small>
+                                        <small class="bg-primary badge">+ NovaBBS.com</small>
+                                        <small class="bg-primary badge">+ NovaBBS.org</small>
+                                        <small class="bg-primary badge">+ NovaLink.us</small>
+                                        <small class="bg-primary badge">+ i2pn2.org</small>
+                                    </div>
+                                    <small class="bg-secondary badge">Retention: 198x-2025</small>
+                                    <small class="bg-success badge"><a href="https://rocksolid-us.pugleaf.net/stats">Status</a>: Live!</small>
+                                </div>
+                            </td>
+                        </tr>
+
+                        <tr>
+                            <td class="bg-dark text-center p-2">
+                                <div class="d-flex flex-column gap-1">
+                                    <a class="fw-bold badge bg-dark text-light" href="https://novabbs.pugleaf.net/hierarchies">🇺🇸 novabbs.pugleaf.net</a>
+                                    <small class="bg-secondary badge">Retention: 2024-2025</small>
+                                    <small class="bg-success badge"><a href="https://novabbs.pugleaf.net/stats">Status</a>: Live!</small>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="bg-dark text-center p-2">
+                                <div class="d-flex flex-column gap-1">
+                                    <a class="fw-bold badge bg-dark text-light" href="https://dorfdsl.pugleaf.net/hierarchies">🇩🇪 dorfdsl.pugleaf.net</a>
+                                    <small class="bg-primary badge">Testserver for dorfdsl</small>
+                                    <small class="bg-secondary badge">Retention: 198x-2025</small>
+                                    <small class="bg-success badge"><a href="https://dorfdsl.pugleaf.net/stats">Status</a>:  Live!</small>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="bg-dark text-center p-2">
+                                <div class="d-flex flex-column gap-1">
+                                    <a class="fw-bold badge bg-dark text-light" href="https://reader-nyc.newsdeef.eu:11982/hierarchies">🇩🇪 reader-nyc.newsdeef.eu:11982</a>
+                                    <small class="bg-primary badge">Testserver for dorfdsl</small>
+                                    <small class="bg-secondary badge">Retention: ~ 3-6 months</small>
+                                    <small class="bg-success badge"><a href="https://reader-nyc.newsdeef.eu:11982/stats">Status</a>: Live!</small>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="bg-dark text-center p-2">
+                                <div class="d-flex flex-column gap-1">
+                                    <a class="fw-bold badge bg-dark text-light" href="https://polski.pugleaf.net/hierarchy/pl">🇵🇱 polski.pugleaf.net</a>
+                                    <small class="bg-primary badge">Only for darius!</small>
+                                    <small class="bg-secondary badge">Retention: 1990-2025</small>
+                                    <small class="bg-success badge"><a href="https://polski.pugleaf.net/stats">Status</a>: Live!</small>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="bg-dark text-center p-2">
+                                <div class="d-flex flex-column gap-1">
+                                    <a class="fw-bold badge bg-dark text-light" href="https://gmane.pugleaf.net/hierarchy/gmane">📋 gmane.pugleaf.net</a>
+                                    <small class="bg-success badge"><a href="https://gmane.pugleaf.net/stats">Status</a>: Live!</small>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="bg-dark text-center p-2">
+                                <div class="d-flex flex-column gap-1">
+                                    <a class="fw-bold badge bg-dark text-light" href="https://gwene.pugleaf.net/hierarchy/gwene">📰 gwene.pugleaf.net</a>
+                                    <span class="bg-success badge"><a href="https://gwene.pugleaf.net/stats">Status</a>: syncing...</span>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-xl-9 col-lg-8 col-md-12 mb-4">
+        <div class="card h-100">
+            <div class="card-header bg-success text-light">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-newspaper me-2"></i>go-pugleaf Development Updates
+                </h5>
+            </div>
+            <div class="card-header bg-secondary text-light">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-info-circle me-2"></i>Each network node has its own dedicated news section - visit <a href="/news" class="text-warning">Site News</a> for node-specific updates
+                </h6>
+            </div>
+            <div class="card-body">
+                <!-- START NEWS ENTRY -->
+                <!--
+                <div class="news-entry mb-4 pb-3 border-bottom">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <h6 class="fw-bold mb-1 text-warning">--news--title--</h6>
+                        <small class="text-muted">July 01, 2025</small>
+                    </div>
+                    <p class="mb-0">
+                    <pre>
+                    </pre>
+                    </p>
+                </div>
+                -->
+                <!-- END NEWS ENTRY -->
+
+                <!-- START NEWS ENTRY -->
+                <div class="news-entry mb-4 pb-3 border-bottom">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <h6 class="fw-bold mb-1 text-warning">IRC Network online</h6>
+                        <small class="text-muted">July 30, 2025</small>
+                    </div>
+                    <p class="mb-0">
+                    <pre>
+- irc.pugleaf.net Message of the Day -
+
+                  🚀 Welcome to PUGLEAF.NET IRC Network! 🚀
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    📡 Server: irc.pugleaf.net
+                    🔒 SSL/TLS: 6697 (SSL)
+                    ⚠️ Plain: 6667 (no SSL)
+                    🚀 Home: https://pugleaf.net
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    🛡️  NETWORK INFORMATION 🛡️
+
+        • This is a retro-themed IRC network focused on discussion,
+          nostalgia and the classic internet experience!
+
+        • Inspired by RockSolid Light and classic BBS systems!
+
+    🌍 TOR: ij7fmstcudrwyty5p6iloodeenur4wksovlhbyrfubat7eixplmrxvqd.onion
+       Port: 6667 (no SSL)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    🏛️  MAIN CHANNELS 🏛️
+
+            #coding             - Code, development, and technical talk
+            #lounge             - General chat and hangout space
+            #retro              - Retro computing, vintage tech discussion
+            #rocksolid          - RIP Retro Guy memorial channel
+            #devnull            - Network support and assistance
+            #aichat             - Have fun with AI bots
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    📜 NETWORK RULES 📜
+
+            1. Be respectful and civil to all users
+            2. No spam, flooding, or excessive automated messages
+            3. No sharing of illegal content or malicious software
+            4. Follow standard IRC etiquette and common sense
+            5. Operators have final say in disputes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    🔧 NETWORK SERVICES 🔧
+
+            • NickServ: Register and protect your nickname
+            • ChanServ: Channel registration and management
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    💡 USEFUL COMMANDS 💡
+
+            /LIST              - List all channels
+            /WHOIS <nick>      - Get information about a user
+            /JOIN #channel     - Join a channel
+            /MSG NickServ HELP - Get help with nickname services
+            /MOTD              - Display this message again
+
+            /nickserv identify &lt;username&gt; &lt;password&gt;
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+              🎯 "Bringing back the golden age of online communities" 🎯
+
+                   Thanks for connecting! Happy chatting!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    </pre>
+                    </p>
+                </div>
+                <!-- END NEWS ENTRY -->
+
+                <!-- START NEWS ENTRY -->
+                <div class="news-entry mb-4 pb-3 border-bottom">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <h6 class="fw-bold mb-1 text-warning">
+                            <i class="bi bi-rocket-takeoff me-2"></i>🎉 go-pugleaf NNTP Gateway Goes Live!
+                        </h6>
+                        <small class="text-muted">July 15, 2025</small>
+                    </div>
+                    <p class="mb-0">
+                        <pre>
+
+Welcome to our new high-performance NNTP newsgroup system built with Go.
+
+**🚀 ANNOUNCEMENT: First go-pugleaf NNTP Node Online - Carrying Forward Retro Guy's Legacy**
+
+We are proud to announce that the first **go-pugleaf** NNTP node is now online and operational!
+
+**🌐 Access Information:**
+- **Web Interface:** <a href="https://pugleaf.net">pugleaf.net</a>
+- **NNTP Server:** Coming within the next few days or weeks
+- **Coverage:** Full rocksolid.* hierarchy + additional groups
+
+**📊 Current Status:**
+✅ **ONLINE** - Web interface fully functional
+🔄 **BACKFILLING** - Importing articles from legacy rslight installations
+📥 **FETCHING** - Automated article retrieval via cron jobs
+
+**🛠️ Development Roadmap:**
+- **Next Few Days:** NNTP server for reading access
+- **In Progress:** Incoming article peering setup
+- **TODO:** Posting access and full bidirectional peering
+
+**💝 Tribute to Retro Guy:**
+This project carries forward the legacy of **Retro Guy** @novabbs.com
+The visionary lead developer of rslight.
+Though he sadly cannot see this evolution of his work... RIP!
+We are committed to keeping the rocksolid.* community alive and thriving.
+
+The fresh, modern interface and robust Go-based architecture represent
+our dedication to honoring his contributions while building for the future.
+
+**🔧 Technical Highlights:**
+- Built with modern Go architecture for performance and reliability
+- High-speed parallel article fetching and processing
+- Efficient database design for large-scale article storage
+- Full NNTP protocol compliance
+
+**🤝 Community Notes:**
+We're in the exciting phase of bringing historical rocksolid.* content back online!
+The migration from legacy rslight installations is proceeding smoothly, ensuring no community history is lost.
+
+**🎯 Mission:**
+To provide a stable, modern, and efficient platform for the rocksolid.* community and beyond!
+
+Stay tuned for NNTP access announcements and peering updates!
+
+**The go-pugleaf Development Team**
+*Honoring the past, building the future*
+
+We are not responsible for this spam in news.admin.peering...
+---
+
+*Cross-posted to relevant groups.
+For technical updates,visit the web interface.
+                    </pre>
+                    </p>
+                </div>
+                <!-- END NEWS ENTRY -->
+
+                <!-- START NEWS ENTRY -->
+                <div class="news-entry mb-4 pb-3 border-bottom">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <h6 class="fw-bold mb-1 text-warning">
+                            <i class="bi bi-lightning-charge me-2"></i>⚡ Phase 6: NNTP Server almost Ready for Launch
+                        </h6>
+                        <small class="text-muted">July 07, 2025</small>
+                    </div>
+                    <p class="mb-0">
+                    <pre>
+### Core NNTP Server Architecture
+- [x] **Server Foundation**:
+- [x] Main NNTP server struct with configuration
+- [x] TCP listener with TLS/SSL support
+- [x] Client connection management
+- [x] Connection pooling and resource limits
+- [x] Graceful shutdown handling
+- [x] Multi-threaded request processing
+
+### NNTP Protocol Implementation (RFC 3977)
+- [x] **Essential Commands (Priority 1)**:
+- [x] `CAPABILITIES` - Server capability announcement
+- [x] `MODE READER` - Switch to reader mode
+- [x] `AUTHINFO USER/PASS` - User authentication
+- [x] `QUIT` - Clean connection termination
+- [x] `HELP` - Command help system
+
+- [x] **Group Management Commands**:
+- [x] `LIST` - List available newsgroups
+- [x] `LIST ACTIVE` - Active groups with counts
+- [x] `LIST NEWSGROUPS` - Groups with descriptions
+- [x] `GROUP` - Select newsgroup and get stats
+- [x] `LISTGROUP` - List article numbers in group
+
+- [x] **Article Retrieval Commands**:
+- [x] `STAT` - Check article existence
+- [x] `HEAD` - Retrieve article headers
+- [x] `BODY` - Retrieve article body
+- [x] `ARTICLE` - Retrieve complete article
+- [x] Support for both message-ID and article number addressing
+
+- [x] **Overview Commands**:
+- [x] `XOVER` - Article overview data (NOV format)
+- [x] `XHDR` - Specific header retrieval
+- [ ] `HDR` - RFC 3977 header command
+- [ ] `OVER` - RFC 3977 overview command
+
+- [ ] **Advanced Commands (Priority 2)**:
+- [x] `POST` - Article posting (optional)
+- [x] `IHAVE` - Article transfer (server-to-server)
+- [x] `CHECK/TAKETHIS` - Streaming commands
+- [ ] `DATE` - Server date/time
+- [ ] `NEWGROUPS` - New groups since date
+- [ ] `NEWNEWS` - New articles since date
+
+### Database Integration
+- [x] **Data Access Layer**:
+- [x] Integrate with existing `*database.Database`
+- [x] Reuse `models.Article`, `models.Newsgroup` structures
+- [x] Efficient article retrieval by message-ID and number
+- [x] Group statistics and article counting
+- [x] XOVER data generation from database
+- [x] Range-based overview queries for XOVER/XHDR
+- [x] Article caching for frequently accessed content
+
+### Authentication & Security
+- [x] **User Authentication**:
+- [x] Integrate with existing user system (`models.User`)
+- [x] AUTHINFO command with database user validation (framework)
+- [x] Session management for authenticated connections
+- [x] Permission-based group access control
+
+- [ ] **Security Features**:
+- [ ] Rate limiting per connection/IP
+- [ ] Command validation and sanitization
+- [ ] Logging of all NNTP operations
+- [ ] Connection timeout management
+- [ ] IP-based access control (optional)
+
+### Configuration & Management
+- [x] **Server Configuration**:
+- [x] NNTP server port and binding configuration
+- [x] TLS/SSL certificate management
+- [x] Maximum connections and resource limits
+- [ ] Command-specific feature toggles
+- [x] Integration with existing `config.ServerConfig`
+
+- [ ] **Administration Integration**:
+- [ ] NNTP server status in admin dashboard
+- [ ] Real-time connection monitoring
+- [ ] Command usage statistics
+- [ ] Server performance metrics
+- [ ] Configuration management via web interface
+
+### Testing & Validation
+- [ ] **Protocol Compliance**:
+- [ ] RFC 3977 compliance testing
+- [ ] Test with standard NNTP clients (tin, slrn, Thunderbird)
+- [ ] Multi-line response handling
+- [ ] Error code consistency
+- [ ] Character encoding support (UTF-8)
+
+---
+                    </pre>
+                    </p>
+                </div>
+                <!-- END NEWS ENTRY -->
+
+                <!-- START NEWS ENTRY -->
+                <div class="news-entry mb-4 pb-3 border-bottom">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <h6 class="fw-bold mb-1 text-warning">
+                            <i class="bi bi-gear-wide-connected me-2"></i>🛠️ Phase 5: Admin Dashboard & Tools
+                        </h6>
+                        <small class="text-muted">July 04, 2025</small>
+                    </div>
+                    <p class="mb-0">
+                    <pre>
+### Admin Interface
+- [x] Create admin dashboard
+- [x] API Tokens Management
+- [ ] Add server status monitoring
+- [x] Implement newsgroup management:
+- [x] Add new groups
+- [x] Delete groups
+- [x] Modify group settings
+- [x] sections Create/Set/Modify for newsgroups
+- [x] Bulk operations
+- [x] Create user management interface
+- [x] Add provider configuration
+- [x] Implement system settings
+- [ ] Create backup/restore tools
+- [ ] Implement backup automation
+
+### Monitoring & Logging
+- [ ] Create health check endpoints
+- [ ] Create log rotation
+- [ ] Add alerting system
+
+### Maintenance Tools
+- [x] Create article cleanup tools
+- [x] Add database optimization
+- [x] Create migration scripts
+
+---
+                    </pre>
+                    </p>
+                </div>
+                <!-- END NEWS ENTRY -->
+
+                <!-- START NEWS ENTRY -->
+                <div class="news-entry mb-4 pb-3 border-bottom">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <h6 class="fw-bold mb-1 text-warning">
+                            <i class="bi bi-shield-lock me-2"></i>🔐 Phase 4: Security & Authentication Complete
+                        </h6>
+                        <small class="text-muted">June 30, 2025</small>
+                    </div>
+                    <p class="mb-0">
+                    <pre>
+### User Management ✅ COMPLETE
+- [x] Implement user registration with validation
+- [x] Add password hashing (bcrypt)
+- [x] Create login/logout system
+- [x] Implement session management
+- [x] Add JWT token support
+- [x] Create user profile system
+- [x] Profile: password change functionality
+- [ ] Add password reset functionality via email
+- [ ] Add external SMTP sending support
+- [ ] Implement email verification for new accounts (+ option in admin panel do enable/disble)
+- [x] Implement user roles/permissions
+- [x] Add user registration form template
+- [x] Create login/logout page templates
+- [x] **Admin interface for user management (create/update/delete)**
+- [x] **API token management system with CRUD operations**
+- [x] **Session-based web authentication with secure cookies**
+
+### Search Functionality ⚡ IN PROGRESS
+- [x] **Basic search page template implemented**
+- [x] **Search API endpoints (newsgroup search working)**
+- [x] Create search API endpoints
+- [x] **Newsgroup name search functionality**
+- [ ] Implement full-text search for articles (FTS5 schema ready)
+- [x] Add search page template
+- [x] Add advanced search filters (author, date, group)
+- [x] Implement search result pagination
+- [ ] Add search result highlighting
+
+### Security Features ✅ PARTIALLY COMPLETE
+- [x] **API token authentication system with secure hashing**
+- [x] **Secure session handling with HttpOnly cookies**
+- [x] **Password validation and bcrypt hashing**
+- [x] **Input validation framework**
+- [x] **SQL injection prevention (parameterized queries)**
+- [x] **XSS protection via template HTML escaping**
+- [x] Implement SQL injection prevention (already in place with parameterized queries)
+- [ ] Add CSRF protection
+- [ ] Implement rate limiting middleware
+- [ ] Add comprehensive input validation framework
+- [ ] Add file upload security
+- [ ] Create audit logging
+
+### Theme & UI Enhancements ✅ COMPLETE
+- [x] **Bootstrap 5.3 dark mode integration**
+- [x] **Modern theme switcher with localStorage persistence**
+- [x] **Responsive design optimized for mobile**
+- [x] **Professional navigation with authentication links**
+- [x] **Theme selector positioned bottom-right to avoid overlap**
+- [x] **Page refresh functionality for complete theme application**
+
+---
+                    </pre>
+                    </p>
+                </div>
+                <!-- END NEWS ENTRY -->
+
+                <!-- START NEWS ENTRY -->
+                <div class="news-entry mb-4 pb-3 border-bottom">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <h6 class="fw-bold mb-1 text-warning">
+                            <i class="bi bi-browser-chrome me-2"></i>🔥 Phase 3: Web UI & Threading
+                        </h6>
+                        <small class="text-muted">June 27, 2025</small>
+                    </div>
+                    <p class="mb-0">
+                    <pre>
+### Gin Web Framework Setup
+- [x] Set up Gin web server (internal/web/)
+- [x] Create router configuration
+- [x] Add paginated API endpoints:
+- [x] GET /api/v1/groups (list newsgroups)
+- [x] GET /api/v1/groups/:group/overview (group overview)
+- [x] GET /api/v1/groups/:group/articles/:articleNum (single article)
+- [x] GET /api/v1/groups/:group/threads (thread data)
+- [x] Create cmd/web/main.go server entry point
+- [x] Add middleware:
+- [x] Logging middleware
+- [x] Static file serving
+- [x] CORS middleware
+- [x] Error handling middleware
+- [x] Create comprehensive error handling system
+- [x] Add request validation
+
+### 🔥 REVOLUTIONARY FORUM-STYLE THREADING SYSTEM
+- [x] **Clean thread list page**: Shows only thread titles with message counts
+- [x] **Full thread view route**: `/groups/:group/thread/:threadRoot`
+- [x] **Complete forum experience**: Click thread → see full discussion
+- [x] **Full article content inline**: All messages display complete article bodies
+- [x] **Flat threading hierarchy**: Forum-style (no confusing nested replies)
+- [x] **Smart threading engine**: Parses Message-ID/References for perfect grouping
+- [x] **Chronological message sorting**: Root first, then replies by date
+- [x] **Rich metadata display**: Author, date, lines, bytes for each message
+- [x] **Thread navigation**: Clean breadcrumbs and back-to-threads links
+
+### HTML Templates & UI
+- [x] Create base template layout with theme support
+- [x] Design newsgroup listing page with pagination
+- [x] Create article display template with proper formatting
+- [x] Implement pagination controls for Groups and Articles
+- [x] **Revolutionary thread.html template with full article content**
+- [x] **Updated threads.html for clean thread-only listing**
+- [x] Create stats page with system information
+- [x] Add help page with documentation
+- [x] Design error page with user-friendly messages
+- [x] Add comprehensive navigation
+- [x] **Forum-style thread discussions with inline content**
+
+### Static Assets & Frontend
+- [x] Create modern CSS framework (responsive design)
+- [x] Implement multiple theme system:
+- [x] Modern theme (gradient design with animations)
+- [x] Classic theme (retro terminal green-on-black)
+- [x] Amber theme (vintage amber terminal)
+- [x] Add JavaScript functionality:
+- [x] Theme switching with localStorage persistence
+- [x] Responsive navigation
+- [x] Pagination controls
+- [x] Article navigation
+- [x] Mobile-friendly responsive design
+- [x] RockSolid rocket logo integration
+
+### Performance & Scalability
+- [x] Implement efficient pagination for all large datasets
+- [x] Optimize database queries with proper indexing
+- [x] Memory-efficient template rendering
+- [x] Preloader system for newsgroup descriptions
+- [x] Reply count tracking and display
+- [x] Error handling for missing articles/groups
+- [x] **Full article loading optimization for thread views**
+- [x] **Efficient thread message grouping and sorting**
+
+---
+                    </pre>
+                    </p>
+                </div>
+                <!-- END NEWS ENTRY -->
+
+                <!-- START NEWS ENTRY -->
+                <div class="news-entry mb-4 pb-3 border-bottom">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <h6 class="fw-bold mb-1 text-warning">
+                            <i class="bi bi-database me-2"></i>🗄️ Phase 2: Database Architecture Complete
+                        </h6>
+                        <small class="text-muted">June 25, 2025</small>
+                    </div>
+                    <p class="mb-0">
+                    <pre>
+### Database Schema Design
+- [x] Design main database schema
+- [x] config table (system configuration)
+- [x] providers table (NNTP server configurations)
+- [x] newsgroups table (subscribed groups metadata)
+- [x] users table (user accounts)
+- [x] sessions table (user sessions)
+- [x] user_permissions table (access control)
+- [x] Design per-group database schemas
+- [x] articles table (full article storage)
+- [x] **threads table (revolutionary forum-style threading)**
+- [x] overview table (XOVER data for performance)
+- [x] Create database migration system
+- [x] Implement database connection pooling
+
+### SQLite3 Implementation
+- [x] Create database abstraction layer (internal/database/)
+- [x] Implement main database management
+- [x] Implement per-newsgroup database management
+- [x] Add article storage functions
+- [x] **Implement revolutionary threading logic using Message-ID/References**
+- [x] **Forum-style flat threading (one thread per original post)**
+- [x] Create overview data management (XOVER caching)
+- [x] Add database indexing for performance
+- [x] Implement efficient batching and scalability features
+- [x] **Thread counting and message grouping**
+- [ ] Implement database backup/restore
+
+### Data Models & Import System
+- [x] Create Go structs for all data models
+- [x] Implement JSON serialization
+- [x] Add validation tags
+- [x] Create model relationships
+- [x] Add database query methods
+- [x] Implement NNTP-to-database import pipeline:
+- [x] Group subscription and metadata import
+- [x] Article batch import using XOVER/XHDR
+- [x] Threading logic based on Message-ID/References
+- [x] Incremental sync for new articles
+- [x] Downloaded article tracking system
+- [x] Scalable batching for large groups
+- [x] Batched sync for new articles
+- [x] Downloaded article tracking system
+- [x] Scalable batching for large groups
+
+---
+                    </pre>
+                    </p>
+                </div>
+                <!-- END NEWS ENTRY -->
+
+                <!-- START NEWS ENTRY -->
+                <div class="news-entry mb-3">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <h6 class="fw-bold mb-1 text-warning">
+                            <i class="bi bi-lightbulb me-2"></i>🚀 Phase 1: Foundation & Vision Complete
+                        </h6>
+                        <small class="text-muted">June 20, 2025</small>
+                    </div>
+                    <p class="mb-0">
+
+                        <pre>
+### Project Structure
+- [x] Basic project structure created
+- [x] README.md written with clear vision
+- [x] LICENSE.md placeholder created
+- [x] Brainstorm document created
+- [x] Proper Go module structure setup
+- [x] Create internal package structure
+- [x] Set up cmd/ directory for executables
+- [x] Create GOALS.md with detailed project roadmap
+- [x] Create web/ directory for frontend assets
+- [x] Add configs/ directory for configuration files
+- [x] Create migrations/ directory for database schemas
+
+### Go Module & Dependencies
+- [x] Initialize go.mod with proper module name
+- [x] Configure VS Code for Go module mode (removed GOPATH)
+- [x] Add required dependencies:
+- [x] Gin web framework
+- [x] SQLite3 driver
+- [x] Password hashing (bcrypt)
+- [x] Set up go.sum for dependency management
+
+### Component Extraction & NNTP Implementation
+- [x] Extract Config.go → internal/config/config.go
+- [x] Extract ConnPool.go → internal/nntp/pool.go
+- [x] Extract NetConn.go → internal/nntp/client.go + commands.go
+- [x] Add newsgroup-specific NNTP commands
+- [x] Test basic NNTP connectivity
+- [x] Implement RFC-compliant NNTP client with all core commands:
+- [x] LIST (newsgroups)
+- [x] GROUP (select group)
+- [x] STAT (article status)
+- [x] ARTICLE (full article)
+- [x] HEAD (article headers)
+- [x] BODY (article body)
+- [x] XOVER (overview data with 1000-line batching)
+- [x] XHDR (header data with 1000-line batching)
+- [x] LISTGROUP (article numbers)
+- [x] Implement connection pooling with SSL/TLS support
+- [x] Add authentication handling (username/password)
+- [x] Create comprehensive error handling and dot-line reading
+- [x] Real-world testing with news.blueworldhosting.com:563
+- [x] Real-world testing with lux-feed1.newsdeef.eu:563
+- [x] Test with newsgroups (news.admin.peering: 3,294 articles)
+- [x] Validate XOVER/XHDR auto-limiting for database efficiency
+
+---
+
+                        </pre>
+                    </p>
+                </div>
+                <!-- END NEWS ENTRY -->
+
+            </div>
+        </div>
+    </div>
+    <div class="col-md-1 mb-4"></div>
+
+    <!-- System Status Card -->
+    <!--
+    <div class="col-md-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header bg-success text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-server me-2"></i>System Status
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-success mb-3" role="alert">
+                    <strong>Server Status:</strong> <span class="badge bg-success">ONLINE</span>
+                </div>
+
+                <table class="table table-sm">
+                    <tbody>
+                        <tr>
+                            <td><strong>Version:</strong></td>
+                            <td>{{.AppVersion}}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Web:</strong></td>
+                            <td>Port: {{.Port}}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>NNTP:</strong></td>
+                            <td>
+                            <li>TCP: {{.NNTPtcpPort}}</li>
+                            <li>TLS: {{.NNTPtlsPort}}</li>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><strong>Active Groups:</strong></td>
+                            <td><span class="badge bg-primary">{{.GroupCount}}</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </div>
+    -->
+</div>
+
+
+
+<!-- Features Section -->
+<!--
+<div class="row">
+    <div class="col-4">
+        <div class="card">
+            <div class="card-header bg-success text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-star me-2"></i>System Status
+                </h5>
+            </div>
+            <div class="card-body text-center">
+                <div class="alert alert-success mb-3" role="alert">
+                    <strong>Server Status:</strong> <span class="badge bg-success">ONLINE</span>
+                </div>
+
+                <table class="table table-sm">
+                    <tbody>
+                        <tr>
+                            <td><strong>Version:</strong></td>
+                            <td>{{.AppVersion}}</td>
+                        </tr>
+
+                        <tr>
+                            <td><strong>Web:</strong></td>
+                            <td>Port: {{.Port}}</td>
+                        </tr>
+
+                        <tr>
+                            <td><strong>NNTP:</strong></td>
+                            <td>
+                            <p>TCP: {{.NNTPtcpPort}}</p>
+                            <p>TLS: {{.NNTPtlsPort}}</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><strong>Active Groups:</strong></td>
+                            <td><span class="badge bg-primary">{{.GroupCount}}</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+-->
+
+<!-- Quick Help -->
+<!--
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="alert alert-light" role="alert">
+            <h6 class="alert-heading">
+                <i class="bi bi-info-circle me-2"></i>Quick Navigation
+            </h6>
+            <p class="mb-0">
+                Navigate using keyboard shortcuts or click menu items.
+                Type commands in uppercase (e.g., <kbd>G</kbd> for Groups, <kbd>H</kbd> for Help).
+            </p>
+        </div>
+    </div>
+</div>
+-->
+{{end}}

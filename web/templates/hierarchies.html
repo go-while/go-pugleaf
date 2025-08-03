@@ -1,0 +1,199 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item active" aria-current="page">Hierarchies</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+
+<!-- Navigation Menu -->
+<!--
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-diagram-3 me-2"></i>Usenet Hierarchies
+                </h5>
+            </div>
+        </div>
+    </div>
+</div>
+-->
+{{if gt .Pagination.TotalCount 25}}
+{{template "pagination" .}}
+{{end}}
+
+<!-- Hierarchies List -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-list me-2"></i>Available Hierarchies
+                </h5>
+                <div class="d-flex align-items-center gap-3">
+                    <div class="dropdown">
+                        <button class="btn btn-outline-light btn-sm dropdown-toggle" type="button" id="sortDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="bi bi-sort-down me-1"></i>Sort By
+                        </button>
+                        <ul class="dropdown-menu" aria-labelledby="sortDropdown">
+                            <li><a class="dropdown-item{{if eq .SortBy "newest"}} active{{end}}" href="?sort=activity">Last Activity</a></li>
+                            <li><a class="dropdown-item{{if eq .SortBy "name"}} active{{end}}" href="?sort=name">Name A-Z</a></li>
+                            <li><a class="dropdown-item{{if eq .SortBy "groups"}} active{{end}}" href="?sort=groups">Most Groups</a></li>
+                            <!--<li><a class="dropdown-item{{if eq .SortBy "oldest"}} active{{end}}" href="?sort=oldest">Oldest Created</a></li>-->
+                        </ul>
+                    </div>
+                    {{if .Pagination}}
+                    <span class="badge bg-light text-dark">{{.Pagination.TotalCount}} total</span>
+                    {{end}}
+                </div>
+            </div>
+            <div class="card-body">
+                {{if .Hierarchies}}
+                <div class="list-group list-group-flush">
+                    {{range .Hierarchies}}
+                    <div class="list-group-item">
+                        <div class="d-flex w-100 justify-content-between align-items-start">
+                            <div class="flex-grow-1">
+                                <h6 class="mb-1">
+                                    <a href="/hierarchy/{{.Name}}" class="text-decoration-none">
+                                        <strong>{{.Name}}</strong>
+                                    </a>
+                                </h6>
+                                <p class="mb-1 text-muted">{{.Description}}</p>
+                                <div class="d-flex gap-3">
+
+                                    <!-- DISABLED FROM VIEW; NOT REALLY NEEDED FOR USERS
+                                    {{if .LastUpdated}}
+                                    <small class="text-muted">
+                                        <i class="bi bi-clock me-1"></i>Updated: {{.LastUpdated.Format "2006-01-02 15:04"}}
+                                    </small>
+                                    {{end}}
+                                    <small class="text-muted">
+                                        <i class="bi bi-calendar me-1"></i>Created: {{.CreatedAt.Format "2006-01-02"}}
+                                    </small>
+                                    -->
+                                </div>
+                            </div>
+                            <div class="ms-3">
+                                <small class="text-muted">
+                                    <i class="bi bi-collection me-1"></i>Groups: <span
+                                        class="badge bg-secondary">{{.GroupCount}}</span>
+                                </small>
+                            </div>
+                            <!--
+                            <div class="ms-3">
+                                <a href="/hierarchy/{{.Name}}" class="btn btn-outline-primary btn-sm">
+                                    View Groups
+                                </a>
+                            </div>
+                            -->
+                        </div>
+                    </div>
+                    {{end}}
+                </div>
+                {{else}}
+                <div class="alert alert-warning" role="alert">
+                    <h6 class="alert-heading">
+                        <i class="bi bi-exclamation-triangle me-2"></i>No Hierarchies Found
+                    </h6>
+                    <p class="mb-3">No Usenet hierarchies found. They may need to be populated from existing newsgroups.</p>
+                    {{if .IsAdmin}}
+                    <a href="/admin" class="btn btn-outline-primary btn-sm">
+                        <i class="bi bi-gear me-1"></i>Go to Admin Panel
+                    </a>
+                    {{end}}
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+
+{{if gt .Pagination.TotalCount 25}}
+{{template "pagination" .}}
+{{end}}
+
+<!-- Help Section -->
+<!--
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-secondary text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-info-circle me-2"></i>About Usenet Hierarchies
+                </h6>
+            </div>
+            <div class="card-body">
+                <p class="mb-0">
+                    <h5>Usenet hierarchies organize newsgroups into logical categories.</h5><br>
+                    alternatives: <a href="/hierarchy/alt">alt.*</a>
+                    <br>
+                    <br>and the big8+:
+                    <br><a href="/hierarchy/comp">comp.*</a>, <a href="/hierarchy/linux">linux.*</a>,
+                    <br><a href="/hierarchy/misc">misc.*</a>, <a href="/hierarchy/news">news.*</a>,
+                    <br><a href="/hierarchy/rec">rec.*</a> (recreation),
+                    <br><a href="/hierarchy/sci">sci.*</a> (science), <a href="/hierarchy/soc">soc.*</a> (social),
+                    <br><a href="/hierarchy/talk">talk.*</a>, <a href="/hierarchy/humanities">humanities.*</a>
+
+                    <br><br>regional:
+                        <br><a href="/hierarchy/ar">ar</a> <a href="/hierarchy/at">at</a> <a href="/hierarchy/au">au</a> <a href="/hierarchy/aus">aus</a> <a href="/hierarchy/be">be</a>
+                        <br><a href="/hierarchy/bg">bg</a> <a href="/hierarchy/br">br</a> <a href="/hierarchy/ca">ca</a> <a href="/hierarchy/can">can</a> <a href="/hierarchy/ch">ch</a>
+                        <br><a href="/hierarchy/cl">cl</a> <a href="/hierarchy/cn">cn</a> <a href="/hierarchy/co">co</a> <a href="/hierarchy/cz">cz</a> <a href="/hierarchy/de">de</a>
+                        <br><a href="/hierarchy/dk">dk</a> <a href="/hierarchy/ee">ee</a> <a href="/hierarchy/eg">eg</a> <a href="/hierarchy/es">es</a> <a href="/hierarchy/fi">fi</a>
+                        <br><a href="/hierarchy/fj">fj</a> <a href="/hierarchy/fr">fr</a> <a href="/hierarchy/gr">gr</a> <a href="/hierarchy/hk">hk</a> <a href="/hierarchy/hr">hr</a>
+                        <br><a href="/hierarchy/id">id</a> <a href="/hierarchy/ie">ie</a> <a href="/hierarchy/il">il</a> <a href="/hierarchy/in">in</a> <a href="/hierarchy/is">is</a>
+                        <br><a href="/hierarchy/it">it</a> <a href="/hierarchy/jp">jp</a> <a href="/hierarchy/lt">lt</a> <a href="/hierarchy/lu">lu</a> <a href="/hierarchy/lv">lv</a>
+                        <br><a href="/hierarchy/mx">mx</a> <a href="/hierarchy/nl">nl</a> <a href="/hierarchy/no">no</a> <a href="/hierarchy/nz">nz</a> <a href="/hierarchy/ph">ph</a>
+                        <br><a href="/hierarchy/pk">pk</a> <a href="/hierarchy/pl">pl</a> <a href="/hierarchy/pt">pt</a> <a href="/hierarchy/ro">ro</a> <a href="/hierarchy/ru">ru</a>
+                        <br><a href="/hierarchy/se">se</a> <a href="/hierarchy/sg">sg</a> <a href="/hierarchy/si">si</a> <a href="/hierarchy/sk">sk</a> <a href="/hierarchy/th">th</a>
+                        <br><a href="/hierarchy/tn">tn</a> <a href="/hierarchy/tr">tr</a> <a href="/hierarchy/tw">tw</a> <a href="/hierarchy/ua">ua</a> <a href="/hierarchy/uk">uk</a>
+                        <br><a href="/hierarchy/yu">yu</a> <a href="/hierarchy/za">za</a>
+
+                        <br><br>network:
+                        <br><a href="/hierarchy/aol">aol</a> <a href="/hierarchy/bit">bit</a> <a href="/hierarchy/bitnet">bitnet</a> <a href="/hierarchy/compuserve">compuserve</a>
+                        <br><a href="/hierarchy/fido7">fido7</a> <a href="/hierarchy/fido">fido</a> <a href="/hierarchy/fidonet">fidonet</a> <a href="/hierarchy/inet">inet</a>
+                        <br><a href="/hierarchy/isp">isp</a> <a href="/hierarchy/lists">lists</a> <a href="/hierarchy/prodigy">prodigy</a> <a href="/hierarchy/uunet">uunet</a> <a href="/hierarchy/well">well</a>
+
+                    <br><br>educational:
+                        <br><a href="/hierarchy/caltech">caltech</a> <a href="/hierarchy/cmu">cmu</a> <a href="/hierarchy/columbia">columbia</a> <a href="/hierarchy/cornell">cornell</a>
+                        <br><a href="/hierarchy/dartmouth">dartmouth</a> <a href="/hierarchy/duke">duke</a> <a href="/hierarchy/harvard">harvard</a> <a href="/hierarchy/jhu">jhu</a>
+                        <br><a href="/hierarchy/mit">mit</a> <a href="/hierarchy/msu">msu</a> <a href="/hierarchy/ncsu">ncsu</a> <a href="/hierarchy/nyu">nyu</a>
+                        <br><a href="/hierarchy/osu">osu</a> <a href="/hierarchy/princeton">princeton</a> <a href="/hierarchy/psu">psu</a> <a href="/hierarchy/purdue">purdue</a>
+                        <br><a href="/hierarchy/rice">rice</a> <a href="/hierarchy/tamu">tamu</a> <a href="/hierarchy/ucb">ucb</a> <a href="/hierarchy/ucla">ucla</a>
+                        <br><a href="/hierarchy/ucsb">ucsb</a> <a href="/hierarchy/ucsd">ucsd</a> <a href="/hierarchy/uiuc">uiuc</a> <a href="/hierarchy/umich">umich</a>
+                        <br><a href="/hierarchy/umn">umn</a> <a href="/hierarchy/upenn">upenn</a> <a href="/hierarchy/usc">usc</a> <a href="/hierarchy/utexas">utexas</a>
+                        <br><a href="/hierarchy/uw">uw</a> <a href="/hierarchy/vt">vt</a> <a href="/hierarchy/yale">yale</a>
+
+                    <br><br>interests:
+                        <br><a href="/hierarchy/comics">comics</a> <a href="/hierarchy/games">games</a> <a href="/hierarchy/music">music</a> <a href="/hierarchy/politics">politics</a>
+                        <br><a href="/hierarchy/religion">religion</a> <a href="/hierarchy/space">space</a> <a href="/hierarchy/sport">sport</a> <a href="/hierarchy/stamps">stamps</a>
+                        <br><a href="/hierarchy/startrek">startrek</a> <a href="/hierarchy/tv">tv</a> <a href="/hierarchy/video">video</a>
+
+                    <br><br>programming/technical/computers:
+                        <br><a href="/hierarchy/comp.lang">comp.lang</a> <a href="/hierarchy/ada">ada</a> <a href="/hierarchy/c">c</a> <a href="/hierarchy/ml">ml</a>
+                        <br><a href="/hierarchy/perl">perl</a> <a href="/hierarchy/php">php</a> <a href="/hierarchy/prolog">prolog</a> <a href="/hierarchy/r">r</a>
+                        <br><a href="/hierarchy/ruby">ruby</a> <a href="/hierarchy/amiga">amiga</a> <a href="/hierarchy/apple">apple</a> <a href="/hierarchy/borland">borland</a>
+                        <br><a href="/hierarchy/debian">debian</a> <a href="/hierarchy/freebsd">freebsd</a> <a href="/hierarchy/gnu">gnu</a> <a href="/hierarchy/grc">grc</a>
+                        <br><a href="/hierarchy/ibm">ibm</a> <a href="/hierarchy/linux">linux</a> <a href="/hierarchy/mac">mac</a> <a href="/hierarchy/microsoft">microsoft</a>
+                        <br><a href="/hierarchy/netbsd">netbsd</a> <a href="/hierarchy/novell">novell</a> <a href="/hierarchy/openbsd">openbsd</a> <a href="/hierarchy/oracle">oracle</a>
+                        <br><a href="/hierarchy/redhat">redhat</a> <a href="/hierarchy/sco">sco</a> <a href="/hierarchy/sgi">sgi</a> <a href="/hierarchy/sun">sun</a> <a href="/hierarchy/windows">windows</a>
+
+                    <br><br>corporate: <a href="/hierarchy/adobe">adobe</a> <a href="/hierarchy/autodesk">autodesk</a> <a href="/hierarchy/bbc">bbc</a> <a href="/hierarchy/biz">biz</a>
+                        <br><a href="/hierarchy/clari">clari</a> <a href="/hierarchy/corel">corel</a> <a href="/hierarchy/courts">courts</a> <a href="/hierarchy/google">google</a>
+                        <br><a href="/hierarchy/intel">intel</a> <a href="/hierarchy/market">market</a> <a href="/hierarchy/mozilla">mozilla</a> <a href="/hierarchy/netscape">netscape</a>
+                        <br><a href="/hierarchy/sybase">sybase</a> <a href="/hierarchy/symantec">symantec</a> <a href="/hierarchy/vmware">vmware</a>
+                    <br>
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+-->
+{{end}}

@@ -1,0 +1,485 @@
+{{define "admin_newsgroups"}}
+<!-- Newsgroups Tab -->
+<div class="tab-pane fade show active" id="newsgroups" role="tabpanel" aria-labelledby="newsgroups-tab">
+
+  <!-- Search Newsgroups -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h6 class="card-title mb-0">🔍 Search Newsgroups</h6>
+              </div>
+              <div class="card-body">
+                  <form method="GET" action="/admin" class="row g-3">
+                      <input type="hidden" name="tab" value="newsgroups">
+                      <div class="col-md-8">
+                          <input type="text" class="form-control" name="search"
+                                 value="{{.NewsgroupSearch}}" placeholder="Search by name or prefix...">
+                      </div>
+                      <div class="col-md-4">
+                          <button type="submit" class="btn btn-outline-primary">Search</button>
+                          {{if .NewsgroupSearch}}
+                          <a href="/admin?tab=newsgroups" class="btn btn-outline-secondary">Clear</a>
+                          {{end}}
+                      </div>
+                  </form>
+              </div>
+          </div>
+      </div>
+  </div>
+
+  <!-- Newsgroup List -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <div class="d-flex justify-content-between align-items-center">
+                      <h5 class="card-title mb-0">📰 Newsgroup Management</h5>
+                      <span class="badge bg-light text-dark">
+                          {{if .NewsgroupSearch}}
+                          {{.NewsgroupPagination.TotalCount}} found
+                          {{else}}
+                          {{len .Newsgroups}} total
+                          {{end}}
+                      </span>
+                  </div>
+              </div>
+              <div class="card-body">
+                  {{if .Newsgroups}}
+
+                  <!-- Bulk Actions -->
+                  <div class="row mb-3">
+                      <div class="col-12">
+                          <div class="alert alert-light border">
+                              <form method="POST" id="bulkActionsForm">
+                                  {{if .NewsgroupSearch}}
+                                  <input type="hidden" name="search" value="{{.NewsgroupSearch}}">
+                                  {{end}}
+                                  <input type="hidden" name="ng_page" value="{{.NewsgroupPagination.CurrentPage}}">
+
+                                  <div class="d-flex align-items-center justify-content-between">
+                                      <div class="d-flex align-items-center">
+                                          <input type="checkbox" id="selectAll" class="form-check-input me-2" onchange="toggleAllCheckboxes()">
+                                          <label for="selectAll" class="form-check-label me-3">Select All</label>
+                                          <span id="selectedCount" class="badge bg-secondary">0 selected</span>
+                                      </div>
+                                      <div class="btn-group">
+                                          <button type="submit" name="action" value="enable" class="btn btn-outline-success btn-sm"
+                                                  onclick="return confirmBulkAction('enable')">
+                                              <i class="bi bi-check-circle me-1"></i>Enable Selected
+                                          </button>
+                                          <button type="submit" name="action" value="disable" class="btn btn-outline-warning btn-sm"
+                                                  onclick="return confirmBulkAction('disable')">
+                                              <i class="bi bi-x-circle me-1"></i>Disable Selected
+                                          </button>
+                                          <button type="submit" name="action" value="delete" class="btn btn-outline-danger btn-sm"
+                                                  onclick="return confirmBulkAction('delete')">
+                                              <i class="bi bi-trash me-1"></i>Delete Selected (Inactive Only)
+                                          </button>
+                                      </div>
+                                  </div>
+                              </form>
+                          </div>
+                      </div>
+                  </div>
+
+                  <div class="table-responsive">
+                      <table class="table table-striped">
+                          <thead>
+                              <tr>
+                                  <th width="30">
+                                      <input type="checkbox" id="headerCheckbox" class="form-check-input">
+                                  </th>
+                                  <th>Edit / Toggle</th>
+                                  <th>Newsgroup</th>
+                                  <th>Description</th>
+                                  <th>Section</th>
+                                  <th>Active</th>
+                                  <th>Articles</th>
+                                  <th>Last Article</th>
+                                  <th>Actions</th>
+                                  <th>Delete</th>
+                              </tr>
+                          </thead>
+                          <tbody>
+                              {{range .Newsgroups}}
+                              <tr>
+                                  <td>
+                                      <input type="checkbox" class="form-check-input newsgroup-checkbox"
+                                             name="newsgroups" value="{{.Name}}" data-active="{{.Active}}"
+                                             form="bulkActionsForm" onchange="updateSelectedCount()">
+                                  </td>
+                                  <td>
+                                    <button type="button" class="btn btn-outline-primary btn-sm edit-newsgroup-btn"
+                                            data-name="{{.Name}}"
+                                            data-description="{{.Description}}"
+                                            data-expiry-days="{{if .ExpiryDays}}{{.ExpiryDays}}{{else}}0{{end}}"
+                                            data-max-articles="{{if .MaxArticles}}{{.MaxArticles}}{{else}}0{{end}}"
+                                            data-active="{{.Active}}">
+                                        Edit
+                                    </button>
+                                    <!-- button to toggle enable disable -->
+                                    <form action="/admin/newsgroups/toggle" method="post" style="display: inline;">
+                                        <input type="hidden" name="name" value="{{.Name}}">
+                                        {{if $.NewsgroupSearch}}
+                                        <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                        {{end}}
+                                        <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
+                                        {{if .Active}}
+                                        <button type="submit" class="btn btn-outline-warning btn-sm">
+                                            <i class="bi bi-person-slash me-1"></i>Disable
+                                        </button>
+                                        {{else}}
+                                        <button type="submit" class="btn btn-outline-success btn-sm">
+                                            <i class="bi bi-person-check me-1"></i>Enable
+                                        </button>
+                                        {{end}}
+                                    </form>
+                                  </td>
+                                  <td><strong><a href="/groups/{{.Name}}" target="_blank" class="btn btn-outline-success btn-sm">{{.Name}}</a></strong></td>
+                                  <td>{{if .Description}}{{.Description}}{{else}}<em>No description</em>{{end}}</td>
+                                  <td>
+                                      {{/* Find current section assignment */}}
+                                      {{$currentSection := ""}}
+                                      {{$currentSectionID := 0}}
+                                      {{$currentNewsgroupName := .Name}}
+                                      {{range $.SectionGroups}}
+                                          {{if eq .NewsgroupName $currentNewsgroupName}}
+                                              {{$currentSection = .SectionID}}
+                                              {{$currentSectionID = .SectionID}}
+                                          {{end}}
+                                      {{end}}
+
+                                      <form method="POST" action="/admin/newsgroups/assign-section?tab=newsgroups" style="display: inline;">
+                                          <input type="hidden" name="newsgroup_name" value="{{.Name}}">
+                                          {{if $.NewsgroupSearch}}
+                                          <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                          {{end}}
+                                          <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
+                                          <select class="form-select form-select-sm" name="section_id" onchange="this.form.submit()">
+                                              <option value="0" {{if eq $currentSectionID 0}}selected{{end}}>No Section</option>
+                                              {{range $.Sections}}
+                                              <option value="{{.ID}}" {{if eq .ID $currentSectionID}}selected{{end}}>{{.DisplayName}}</option>
+                                              {{end}}
+                                          </select>
+                                      </form>
+                                  </td>
+                                  <td>
+                                      {{if .Active}}
+                                      <span class="badge bg-success">Active</span>
+                                      {{else}}
+                                      <span class="badge bg-secondary">Inactive</span>
+                                      {{end}}
+                                  </td>
+                                  <td>{{.MessageCount}}</td>
+                                  <td>{{if .LastArticle}}{{.LastArticle}}{{else}}-{{end}}</td>
+                                  <td>
+                                      <form method="POST" action="/admin/newsgroups/migrate-activity" style="display: inline;">
+                                          <input type="hidden" name="newsgroup_name" value="{{.Name}}">
+                                          {{if $.NewsgroupSearch}}
+                                          <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                          {{end}}
+                                          <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
+                                          <button type="submit" class="btn btn-outline-primary btn-sm"
+                                                  title="Recalculate last activity timestamp for this newsgroup">
+                                              <i class="bi bi-clock-history me-1"></i>Fix Activity
+                                          </button>
+                                      </form>
+                                  </td>
+                                  <td>
+                                      <div class="btn-group btn-group-sm">
+                                          <a href="/groups/{{.Name}}" class="btn btn-outline-info btn-sm">View</a>
+                                          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                                          {{if not .Active}}
+                                          <form method="POST" action="/admin/newsgroups/delete?tab=newsgroups" style="display: inline;">
+                                              <input type="hidden" name="name" value="{{.Name}}">
+                                              {{if $.NewsgroupSearch}}
+                                              <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                              {{end}}
+                                              <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
+                                              <button type="submit" class="btn btn-outline-danger btn-sm"
+                                                      onclick="return confirm('Are you sure you want to delete newsgroup {{.Name}}? This cannot be undone.')">
+                                                  Delete
+                                              </button>
+                                          </form>
+                                           {{else}}
+                                          <form style="display: inline;">
+                                              <button disabled type="submit" class="btn btn-outline-danger btn-sm">
+                                                  Delete
+                                              </button>
+                                          </form>
+                                          {{end}}
+                                      </div>
+                                  </td>
+                              </tr>
+                              {{end}}
+                          </tbody>
+                      </table>
+                  </div>
+
+                  {{else}}
+                  <div class="alert alert-info">
+                      {{if .NewsgroupSearch}}
+                      <strong>No newsgroups found</strong> matching "{{.NewsgroupSearch}}".
+                      {{else}}
+                      <strong>No newsgroups found.</strong> Create the first newsgroup above.
+                      {{end}}
+                  </div>
+                  {{end}}
+
+                  <!-- Pagination Controls -->
+                  {{if and (not .NewsgroupSearch) (gt .NewsgroupPagination.TotalCount .NewsgroupPagination.PageSize)}}
+                  <nav aria-label="Newsgroups pagination">
+                      <ul class="pagination justify-content-center">
+                          {{if .NewsgroupPagination.HasPrev}}
+                          <li class="page-item">
+                              <a class="page-link btn-outline-success" href="/admin?ng_page={{.NewsgroupPagination.PrevPage}}&tab=newsgroups">Previous</a>
+                          </li>
+                          {{end}}
+
+                          <li class="page-item active">
+                              <span class="page-link btn-outline-danger">{{.NewsgroupPagination.CurrentPage}}</span>
+                          </li>
+
+                          {{if .NewsgroupPagination.HasNext}}
+                          <li class="page-item">
+                              <a class="page-link btn-outline-success" href="/admin?ng_page={{.NewsgroupPagination.NextPage}}&tab=newsgroups">Next</a>
+                          </li>
+                          {{end}}
+                      </ul>
+                  </nav>
+
+                  <div class="text-center mt-2">
+                      <small class="text-muted">
+                          Page {{.NewsgroupPagination.CurrentPage}} of {{.NewsgroupPagination.TotalPages}}
+                          ({{.NewsgroupPagination.TotalCount}} total newsgroups)
+                      </small>
+                  </div>
+                  {{else if .NewsgroupSearch}}
+                  <!-- Search Result Pagination -->
+                  {{if gt .NewsgroupPagination.TotalCount .NewsgroupPagination.PageSize}}
+                  <nav aria-label="Search results pagination">
+                      <ul class="pagination justify-content-center">
+                          {{if .NewsgroupPagination.HasPrev}}
+                          <li class="page-item">
+                              <a class="page-link btn-outline-success" href="/admin?ng_page={{.NewsgroupPagination.PrevPage}}&search={{.NewsgroupSearch}}&tab=newsgroups">Previous</a>
+                          </li>
+                          {{end}}
+
+                          <li class="page-item active">
+                              <span class="page-link btn-outline-danger">{{.NewsgroupPagination.CurrentPage}}</span>
+                          </li>
+
+                          {{if .NewsgroupPagination.HasNext}}
+                          <li class="page-item">
+                              <a class="page-link btn-outline-success" href="/admin?ng_page={{.NewsgroupPagination.NextPage}}&search={{.NewsgroupSearch}}&tab=newsgroups">Next</a>
+                          </li>
+                          {{end}}
+                      </ul>
+                  </nav>
+
+                  <div class="text-center mt-2">
+                      <small class="text-muted">
+                          Search results: Page {{.NewsgroupPagination.CurrentPage}} of {{.NewsgroupPagination.TotalPages}}
+                          ({{.NewsgroupPagination.TotalCount}} total found)
+                      </small>
+                  </div>
+                  {{end}}
+                  {{end}}
+              </div>
+          </div>
+      </div>
+  </div>
+</div>
+
+<!-- Create New Newsgroup -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h5 class="card-title mb-0">📰 Add Newsgroup</h5>
+              </div>
+              <div class="card-body">
+                  <form autocomplete="off" method="POST" action="/admin/newsgroups?tab=newsgroups">
+                      <input autocomplete="false" name="hidden" type="text" style="display:none;">
+                      <div class="row">
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="newsgroup_name" class="form-label">Newsgroup Name</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="newsgroup_name" name="name" required
+                                         placeholder="e.g., comp.programming">
+                              </div>
+                          </div>
+                          <div class="col-md-4">
+                              <div class="mb-3">
+                                  <label for="newsgroup_description" class="form-label">Description</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="newsgroup_description" name="description"
+                                         placeholder="Brief description of the newsgroup">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="expiry_days" class="form-label">Expiry Days</label>
+                                  <input type="number" class="form-control" id="expiry_days" name="expiry_days"
+                                         placeholder="0" min="0" max="365">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="max_articles" class="form-label">Max Articles</label>
+                                  <input type="number" class="form-control" id="max_articles" name="max_articles"
+                                         placeholder="0" min="0" max="10000">
+                              </div>
+                          </div>
+                          <div class="col-md-1">
+                              <div class="mb-3">
+                                  <label for="newsgroup_active" class="form-label">Active</label>
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="newsgroup_active" name="active" checked>
+                                      <label class="form-check-label" for="newsgroup_active">
+                                          Enable
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                      </div>
+                      <button type="submit" class="btn btn-warning">Add Newsgroup</button>
+                  </form>
+              </div>
+          </div>
+      </div>
+  </div>
+
+<!-- Edit Newsgroup Modal -->
+<div class="modal fade" id="editNewsgroupModal" tabindex="-1" aria-labelledby="editNewsgroupModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="editNewsgroupModalLabel">Edit Newsgroup</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="POST" action="/admin/newsgroups/edit?tab=newsgroups">
+                <div class="modal-body">
+                    <input type="hidden" id="edit_newsgroup_original_name" name="original_name">
+                    <input type="hidden" id="edit_search_term" name="search" value="{{.NewsgroupSearch}}">
+                    <input type="hidden" id="edit_ng_page" name="ng_page" value="{{.NewsgroupPagination.CurrentPage}}">
+
+                    <div class="mb-3">
+                        <label for="edit_newsgroup_name" class="form-label">Newsgroup Name</label>
+                        <input type="text" class="form-control" id="edit_newsgroup_name" name="name" required readonly>
+                        <div class="form-text">Newsgroup names cannot be changed after creation.</div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="edit_newsgroup_description" class="form-label">Description</label>
+                        <input type="text" class="form-control" id="edit_newsgroup_description" name="description"
+                               placeholder="Brief description of the newsgroup">
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="edit_expiry_days" class="form-label">Expiry Days</label>
+                                <input type="number" class="form-control" id="edit_expiry_days" name="expiry_days"
+                                       placeholder="0" min="0" max="365">
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="edit_max_articles" class="form-label">Max Articles</label>
+                                <input type="number" class="form-control" id="edit_max_articles" name="max_articles"
+                                       placeholder="0" min="0" max="10000">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="edit_newsgroup_active" name="active">
+                            <label class="form-check-label" for="edit_newsgroup_active">
+                                Active
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+// Edit newsgroup modal handling
+document.addEventListener('DOMContentLoaded', function() {
+    const editButtons = document.querySelectorAll('.edit-newsgroup-btn');
+    const editModal = new bootstrap.Modal(document.getElementById('editNewsgroupModal'));
+
+    editButtons.forEach(button => {
+        button.addEventListener('click', function() {
+            const name = this.dataset.name;
+            const description = this.dataset.description || '';
+            const expiryDays = parseInt(this.dataset.expiryDays) || 0;
+            const maxArticles = parseInt(this.dataset.maxArticles) || 0;
+            const active = this.dataset.active === 'true';
+
+            // Populate the modal form
+            document.getElementById('edit_newsgroup_original_name').value = name;
+            document.getElementById('edit_newsgroup_name').value = name;
+            document.getElementById('edit_newsgroup_description').value = description;
+            document.getElementById('edit_expiry_days').value = expiryDays;
+            document.getElementById('edit_max_articles').value = maxArticles;
+            document.getElementById('edit_newsgroup_active').checked = active;
+
+            // Show the modal
+            editModal.show();
+        });
+    });
+});
+
+// Bulk actions handling - minimal JavaScript, server-side processing
+function toggleAllCheckboxes() {
+    const selectAll = document.getElementById('selectAll');
+    const checkboxes = document.querySelectorAll('.newsgroup-checkbox');
+    checkboxes.forEach(checkbox => {
+        checkbox.checked = selectAll.checked;
+    });
+    updateSelectedCount();
+}
+
+function updateSelectedCount() {
+    const checkboxes = document.querySelectorAll('.newsgroup-checkbox:checked');
+    const count = checkboxes.length;
+    document.getElementById('selectedCount').textContent = count + ' selected';
+}
+
+function confirmBulkAction(action) {
+    const checkboxes = document.querySelectorAll('.newsgroup-checkbox:checked');
+    if (checkboxes.length === 0) {
+        alert('Please select at least one newsgroup.');
+        return false;
+    }
+
+    // Set the form action based on the button clicked
+    const form = document.getElementById('bulkActionsForm');
+    form.action = '/admin/newsgroups/bulk-' + action + '?tab=newsgroups';
+
+    let message = '';
+    switch(action) {
+        case 'enable':
+            message = `Are you sure you want to enable ${checkboxes.length} newsgroups?`;
+            break;
+        case 'disable':
+            message = `Are you sure you want to disable ${checkboxes.length} newsgroups?`;
+            break;
+        case 'delete':
+            message = `Are you sure you want to delete ${checkboxes.length} newsgroups? This cannot be undone! Only inactive newsgroups will be deleted.`;
+            break;
+    }
+
+    return confirm(message);
+}
+</script>
+{{end}}

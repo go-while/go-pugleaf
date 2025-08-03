@@ -1,0 +1,194 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item"><a href="/groups" class="text-decoration-none">Groups</a></li>
+        <li class="breadcrumb-item"><a href="/groups/{{.GroupName}}" class="text-decoration-none">{{.GroupName}}</a></li>
+        <li class="breadcrumb-item active" aria-current="page">Article {{.ArticleNum}}</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<!-- Article Navigation Card -->
+<div class="row mb-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-secondary text-white">
+                <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-file-earmark-text me-2"></i>Article View: {{.GroupName}}
+                    </h5>
+                    <span class="badge bg-secondary">Article #{{.ArticleNum}}</span>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="btn-group" role="group" aria-label="Article Navigation">
+                    <a href="/groups/{{.GroupName}}" class="btn btn-outline-secondary btn-sm">
+                        <i class="bi bi-arrow-left me-1"></i>Back to {{.GroupName}}
+                    </a>
+                    <a href="/groups/{{.GroupName}}/articles/{{.PrevArticle}}" class="btn btn-outline-info btn-sm">
+                        <i class="bi bi-chevron-left me-1"></i>Previous
+                    </a>
+                    <a href="/groups/{{.GroupName}}/articles/{{.NextArticle}}" class="btn btn-outline-info btn-sm">
+                        Next<i class="bi bi-chevron-right ms-1"></i>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{{if .Article}}
+<!-- Article Card -->
+<div class="row">
+    <div class="col-12">
+        <div class="card mb-3">
+            <div class="card-header bg-secondary text-light">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div class="flex-grow-1 me-3">
+                        <h4 class="mb-0">{{.Article.PrintSanitized "subject" .GroupName}}</h4>
+                    </div>
+                    <span class="badge bg-secondary">#{{.Article.ArticleNum}}</span>
+                </div>
+            </div>
+            <div class="card-body">
+                <!-- Author and Date Info -->
+                <div class="row mb-3">
+                    <div class="col-md-8">
+                        <strong>From:</strong> {{.Article.PrintSanitized "fromheader" .GroupName}}<br>
+                        <strong>Date:</strong> {{.Article.PrintSanitized "date_string" .GroupName}}
+                    </div>
+                    <div class="col-md-4 text-md-end">
+                        {{if .Article.Lines}}<small class="text-muted">{{.Article.Lines}} lines</small><br>{{end}}
+                        {{if .Article.Bytes}}<small class="text-muted">{{.Article.Bytes}} bytes</small>{{end}}
+                    </div>
+                </div>
+
+                <!-- Article Content -->
+                {{if .Article.BodyText}}
+                <div class="bg-dark border rounded p-3 mb-3">
+                    <pre class="mb-0">{{.Article.PrintSanitized "bodytext" .GroupName}}</pre>
+                </div>
+                {{else}}
+                <div class="alert alert-warning" role="alert">
+                    <i class="bi bi-exclamation-triangle me-2"></i>Article content not available
+                </div>
+                {{end}}
+
+                <!-- Technical Details -->
+                <details class="border rounded mb-3">
+                    <summary class="bg-dark p-3 border-bottom" style="cursor: pointer; user-select: none;">
+                        <i class="bi bi-gear me-2"></i>Technical Details
+                    </summary>
+                    <div class="p-3">
+                        <div class="row">
+                            <div class="col-12">
+                                <div><strong>Message-ID:</strong> <code class="small">{{.Article.PrintSanitized "messageid" .GroupName}}</code></div>
+                                <div><strong>Path:</strong> <code class="small">{{.Article.PrintSanitized "path" .GroupName}}</code></div>
+                                {{if .Article.References}}
+                                <div><strong>References:</strong> <code class="small">{{.Article.PrintSanitized "references" .GroupName}}</code></div>
+                                <!-- DEBUG: Raw references field -->
+                                <!--
+                                <div style="background: yellow; color: black; font-family: monospace; white-space: pre-wrap; border: 1px solid red;">
+                                    RAW: "{{.Article.References}}"<br>
+                                    LENGTH: {{len .Article.References}}<br>
+                                    BYTES: {{printf "%q" .Article.References}}<br>
+                                    SANITIZED: "{{.Article.PrintSanitized "references" .GroupName}}"<br>
+                                    SANITIZED-LEN: {{len (.Article.PrintSanitized "references" .GroupName)}}
+                                </div>
+                                -->
+                                {{end}}
+                                <br>
+                                <details class="mt-3">
+                                    <summary class="btn btn-outline-info btn-sm" style="cursor: pointer;">
+                                        <i class="bi bi-code-square me-1"></i>Show Full Headers
+                                    </summary>
+                                    <div class="mt-3">
+                                        <div class="card">
+                                            <div class="card-header bg-dark text-white">
+                                                <small>Complete Article Headers</small>
+                                            </div>
+                                            <div class="card-body p-2">
+                                                {{if .Article.HeadersJSON}}
+                                                <pre class="small mb-0" style="white-space: pre-wrap; font-family: 'Courier New', monospace; font-size: 0.8rem;">{{.Article.PrintSanitized "headers_json" .GroupName}}</pre>
+                                                {{else}}
+                                                <div class="text-muted small">No full headers available</div>
+                                                {{end}}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </details>
+                            </div>
+                        </div>
+                    </div>
+                </details>
+
+                <!-- Reply Link -->
+                {{if .Article.References}}
+                <div class="mt-3">
+                    <a href="{{.Article.GetData "parent_URL" .GroupName}}" class="btn btn-outline-success btn-sm">
+                        <i class="bi bi-reply me-1"></i>Reply to Parent Message
+                    </a>
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+
+{{if .Thread}}
+<!-- Thread Context Card -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-success text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-chat-dots me-2"></i>Thread Context
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="list-group list-group-flush">
+                    {{range .Thread}}
+                    <div class="list-group-item{{if eq .ArticleNum $.ArticleNum}} active{{end}} d-flex justify-content-between align-items-start">
+                        <div class="flex-grow-1 me-3">
+                            <a href="/groups/{{$.GroupName}}/articles/{{.ArticleNum}}" class="text-decoration-none{{if eq .ArticleNum $.ArticleNum}} text-white{{end}}">
+                                <strong>[{{.ArticleNum}}]</strong> {{.PrintSanitized "subject" $.GroupName}}
+                            </a>
+                            {{if eq .ArticleNum $.ArticleNum}}
+                            <span class="badge bg-warning text-dark ms-2">Current</span>
+                            {{end}}
+                        </div>
+                        <div class="text-end small{{if eq .ArticleNum $.ArticleNum}} text-white-50{{else}} text-muted{{end}}">
+                            <div>{{.PrintSanitized "fromheader" $.GroupName}}</div>
+                            <div>{{.PrintSanitized "date_string" $.GroupName}}</div>
+                        </div>
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{else}}
+<div class="row">
+    <div class="col-12">
+        <div class="alert alert-warning" role="alert">
+            <h4 class="alert-heading"><i class="bi bi-exclamation-triangle me-2"></i>Article Not Found</h4>
+            <p>Article #{{.ArticleNum}} could not be found in group <strong>{{.GroupName}}</strong>.</p>
+            <hr>
+            <p class="mb-0">This may indicate the article has not been processed yet, the article number is incorrect, or the article has been deleted.</p>
+            <div class="mt-3">
+                <a href="/groups/{{.GroupName}}" class="btn btn-outline-warning">
+                    <i class="bi bi-arrow-left me-1"></i>Back to {{.GroupName}}
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+{{end}}

@@ -1,0 +1,180 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item"><a href="/sections" class="text-decoration-none">Sections</a></li>
+        <li class="breadcrumb-item"><a href="/{{.Section.Name}}" class="text-decoration-none">{{.Section.DisplayName}}</a></li>
+        <li class="breadcrumb-item active" aria-current="page">{{.GroupName}}</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<!-- Group Header -->
+<!--
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-newspaper me-2"></i>{{.GroupName}}
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <small class="text-muted">
+                            <strong>Section:</strong>
+                            <a href="/{{.Section.Name}}" class="text-decoration-none">{{.Section.DisplayName}}</a>
+                        </small>
+                    </div>
+                    <div class="col-md-6 text-md-end">
+                        <small class="text-muted">
+                            <strong>Total Articles:</strong> {{.Pagination.TotalCount}}
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+-->
+
+<!-- Quick Actions -->
+<!--
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-grid gap-2 d-md-flex">
+                    <a href="/groups/{{.GroupName}}/threads" class="btn btn-outline-primary">
+                        <i class="bi bi-diagram-3 me-2"></i>Thread View
+                    </a>
+                    <a href="/{{.Section.Name}}" class="btn btn-outline-secondary">
+                        <i class="bi bi-arrow-left me-2"></i>Back to {{.Section.DisplayName}}
+                    </a>
+                    <a href="/sections" class="btn btn-outline-info">
+                        <i class="bi bi-collection me-2"></i>All Sections
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+-->
+
+<!-- Articles List -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-secondary text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-file-text me-2"></i>{{.Pagination.TotalCount}} Articles in {{.GroupName}}
+                </h6>
+            </div>
+            <div class="card-body">
+                {{if .Articles}}
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th style="width: 80px;">#</th>
+                                <th>Subject</th>
+                                <th style="width: 200px;">From</th>
+                                <th style="width: 120px;">Date</th>
+                                <th style="width: 80px;" class="text-center">Replies</th>
+                                <th style="width: 80px;" class="text-center">Size</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{range .Articles}}
+                            <tr>
+                                <td>
+                                    <a href="/{{$.Section.Name}}/{{$.GroupName}}/articles/{{.ArticleNum}}"
+                                       class="text-decoration-none fw-bold">
+                                        {{.ArticleNum}}
+                                    </a>
+                                </td>
+                                <td>
+                                    <a href="/{{$.Section.Name}}/{{$.GroupName}}/articles/{{.ArticleNum}}"
+                                       class="text-decoration-none">
+                                        {{.Subject}}
+                                    </a>
+                                    {{if gt .ReplyCount 0}}
+                                        <span class="badge bg-secondary ms-2">{{.ReplyCount}} replies</span>
+                                    {{end}}
+                                </td>
+                                <td>
+                                    <small class="text-muted">{{.FromHeader}}</small>
+                                </td>
+                                <td>
+                                    <small class="text-muted">{{.DateString}}</small>
+                                </td>
+                                <td class="text-center">
+                                    {{if gt .ReplyCount 0}}
+                                        <span class="badge bg-primary">{{.ReplyCount}}</span>
+                                    {{else}}
+                                        <span class="text-muted">0</span>
+                                    {{end}}
+                                </td>
+                                <td class="text-center">
+                                    <small class="text-muted">{{.Bytes}} bytes</small>
+                                </td>
+                            </tr>
+                            {{end}}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Pagination -->
+                {{if .Pagination}}
+                    {{template "pagination" .}}
+                {{end}}
+
+                {{else}}
+                <div class="alert alert-info" role="alert">
+                    <i class="bi bi-info-circle me-2"></i>
+                    <strong>No articles found</strong> in this group.
+                    {{if not .GroupExists}}
+                        The group may not exist or has not been imported yet.
+                    {{else}}
+                        Try importing articles for this group first.
+                    {{end}}
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Additional Actions -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-light">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-lightning me-2"></i>Quick Actions
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2 d-md-flex">
+                    <a href="/search?group={{.GroupName}}" class="btn btn-outline-primary">
+                        <i class="bi bi-search me-2"></i>Search in Group
+                    </a>
+                    <a href="/groups/{{.GroupName}}" class="btn btn-outline-secondary">
+                        <i class="bi bi-link me-2"></i>Direct Group Link
+                    </a>
+                    <a href="/stats" class="btn btn-outline-info">
+                        <i class="bi bi-bar-chart me-2"></i>System Stats
+                    </a>
+                    <a href="/" class="btn btn-outline-secondary">
+                        <i class="bi bi-house me-2"></i>Home
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

@@ -1,0 +1,119 @@
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item active" aria-current="page">Admin Panel</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<!--
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-warning text-dark">
+                <h4 class="card-title mb-0">🔧 Administration Panel</h4>
+            </div>
+
+            <div class="card-body">
+                <p class="mb-0">Manage users, newsgroups, providers, API tokens, AI models, and NNTP users.</p>
+            </div>
+
+        </div>
+    </div>
+</div>
+-->
+{{if .Success}}
+<div class="alert alert-success alert-dismissible fade show mt-3" role="alert">
+    <strong>Success!</strong> {{.Success}}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{{end}}
+
+{{if .Error}}
+<div class="alert alert-danger alert-dismissible fade show mt-3" role="alert">
+    <strong>Error!</strong> {{.Error}}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+</div>
+{{end}}
+
+<!-- Admin Panel Tabs -->
+<ul class="nav nav-tabs mt-3" id="adminTab" role="tablist">
+  <li class="nav-item" role="presentation">
+    <a class="nav-link{{if eq .ActiveTab "sitenews"}} active{{end}}" id="sitenews-tab" href="?tab=sitenews" role="tab">Site News</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link{{if eq .ActiveTab "users"}} active{{end}}" id="users-tab" href="?tab=users" role="tab">Users</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link{{if eq .ActiveTab "newsgroups"}} active{{end}}" id="newsgroups-tab" href="?tab=newsgroups" role="tab">Newsgroups</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link{{if eq .ActiveTab "sections"}} active{{end}}" id="sections-tab" href="?tab=sections" role="tab">Sections</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link{{if eq .ActiveTab "providers"}} active{{end}}" id="providers-tab" href="?tab=providers" role="tab">Providers</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link{{if eq .ActiveTab "apitokens"}} active{{end}}" id="apitokens-tab" href="?tab=apitokens" role="tab">API Tokens</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link{{if eq .ActiveTab "aimodels"}} active{{end}}" id="aimodels-tab" href="?tab=aimodels" role="tab">AI Models</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link{{if eq .ActiveTab "nntpusers"}} active{{end}}" id="nntpusers-tab" href="?tab=nntpusers" role="tab">NNTP Users</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link{{if eq .ActiveTab "spam"}} active{{end}}" id="spam-tab" href="?tab=spam" role="tab">Spam</a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link{{if eq .ActiveTab "stats"}} active{{end}}" id="stats-tab" href="?tab=stats" role="tab">Statistics</a>
+  </li>
+</ul>
+
+<div class="tab-content" id="adminTabContent">
+  {{if eq .ActiveTab "users"}}
+    <div class="tab-pane fade show active" id="users" role="tabpanel" aria-labelledby="users-tab">
+      {{template "admin_users" .}}
+    </div>
+  {{else if eq .ActiveTab "newsgroups"}}
+    <div class="tab-pane fade show active" id="newsgroups" role="tabpanel" aria-labelledby="newsgroups-tab">
+      {{template "admin_newsgroups" .}}
+    </div>
+  {{else if eq .ActiveTab "sections"}}
+    <div class="tab-pane fade show active" id="sections" role="tabpanel" aria-labelledby="sections-tab">
+      {{template "admin_sections" .}}
+    </div>
+  {{else if eq .ActiveTab "providers"}}
+    <div class="tab-pane fade show active" id="providers" role="tabpanel" aria-labelledby="providers-tab">
+      {{template "admin_providers" .}}
+    </div>
+  {{else if eq .ActiveTab "apitokens"}}
+    <div class="tab-pane fade show active" id="apitokens" role="tabpanel" aria-labelledby="apitokens-tab">
+      {{template "admin_apitokens" .}}
+    </div>
+  {{else if eq .ActiveTab "aimodels"}}
+    <div class="tab-pane fade show active" id="aimodels" role="tabpanel" aria-labelledby="aimodels-tab">
+      {{template "admin_aimodels" .}}
+    </div>
+  {{else if eq .ActiveTab "nntpusers"}}
+    <div class="tab-pane fade show active" id="nntpusers" role="tabpanel" aria-labelledby="nntpusers-tab">
+      {{template "admin_nntpusers" .}}
+    </div>
+  {{else if eq .ActiveTab "sitenews"}}
+    <div class="tab-pane fade show active" id="sitenews" role="tabpanel" aria-labelledby="sitenews-tab">
+      {{template "admin_sitenews" .}}
+    </div>
+  {{else if eq .ActiveTab "stats"}}
+    <div class="tab-pane fade show active" id="stats" role="tabpanel" aria-labelledby="stats-tab">
+      {{template "admin_statistics" .}}
+    </div>
+  {{else if eq .ActiveTab "spam"}}
+    <div class="tab-pane fade show active" id="spam" role="tabpanel" aria-labelledby="spam-tab">
+      {{template "admin_spam" .}}
+    </div>
+  {{end}}
+</div>
+
+{{end}}

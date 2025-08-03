@@ -1,0 +1,1143 @@
+/* go-pugleaf Bootstrap Professional Theme */
+/* Built on Bootstrap 5.3.7 for professional, accessible design */
+/* Created: 2025-06-22 */
+
+@import url('/static/bootstrap-5.3.7-dist/css/bootstrap.min.css');
+@import url('/static/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.css');
+/*
+@font-face {
+font-family: 'High Def Regular';
+font-style: normal;
+font-weight: normal;
+src: local('High Def Regular'), url('/static/fonts/High Def.woff') format('woff');
+}
+*/
+@font-face {
+font-family: 'Monaco';
+font-style: normal;
+font-weight: normal;
+src: local('Monaco'), url('/static/fonts/Monaco.woff') format('woff');
+}
+@font-face {
+font-family: 'Chivo Mono Medium';
+font-style: normal;
+font-weight: normal;
+src: local('Chivo Mono Medium'), url('/static/fonts/ChivoMono[wght].woff') format('woff');
+}
+/*
+@font-face {
+font-family: 'DEC Terminal Modern Regular';
+font-style: normal;
+font-weight: normal;
+src: local('DEC Terminal Modern Regular'), url('/static/fonts/_decterm.woff') format('woff');
+}
+*/
+@font-face {
+font-family: 'Fixedsys-62';
+font-style: normal;
+font-weight: normal;
+src: local('Fixedsys-62'), url('/static/fonts/Fixedsys62.ttf') format('woff');
+}
+:root {
+    /* Custom color palette for newsgroup reading */
+    --pugleaf-primary: #0d6efd;
+    --pugleaf-secondary: #6c757d;
+    --pugleaf-success: #198754;
+    --pugleaf-info: #0dcaf0;
+    --pugleaf-warning: #ffc107;
+    --pugleaf-danger: #dc3545;
+    --pugleaf-light: #f8f9fa;
+    --pugleaf-dark: #212529;
+
+    /* Newsgroup-specific colors */
+    --article-bg: #afafaf;
+    --article-border: #959595;
+    --thread-highlight: rgba(13, 110, 253, 0.1);
+    --code-bg: #f8f9fa;
+    --meta-text: #6c757d;
+    --content-max-width: 100%;
+}
+
+/* Bootstrap 5 Dark Mode Support */
+[data-bs-theme="dark"] {
+    /* Dark mode color palette */
+    --pugleaf-primary: #00ff40b6;
+    --pugleaf-secondary: #adb5bd;
+    --pugleaf-success: #51cf66;
+    --pugleaf-info: #22b8cf;
+    --pugleaf-warning: #ffd640;
+    --pugleaf-danger: #ff6b6b;
+    --pugleaf-light: #343a40;
+    --pugleaf-dark: #f8f9fa;
+
+    /* Dark newsgroup-specific colors */
+    --article-bg: #212529;
+    --article-border: #495057;
+    --thread-highlight: rgba(77, 171, 247, 0.2);
+    --code-bg: #2d3339;
+    --meta-text: #adb5bd;
+}
+
+/* Base body styling */
+body {
+    /* 'Chivo Mono Medium',  */
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'SFMono-Regular', 'Courier New', 'Liberation Mono', Consolas, monospace;
+    background-color: var(--pugleaf-light);
+    color: var(--pugleaf-dark);
+    line-height: 1.6;
+    padding-top: 1rem;
+}
+/* Base body styling */
+.fixedsys62 {
+    font-family: 'Fixedsys-62', monospace;
+    background-color: var(--pugleaf-light);
+    color: var(--pugleaf-dark);
+    line-height: 1.6;
+    padding-top: 1rem;
+}
+
+/* Container improvements */
+.container-fluid {
+    max-width: var(--content-max-width);
+    margin: 0;
+    width: 100%;
+    padding-left: 1rem;
+    padding-right: 1rem;
+}
+
+/* Remove Bootstrap's default container constraints */
+.container,
+.container-sm,
+.container-md,
+.container-lg,
+.container-xl,
+.container-xxl {
+    max-width: 100% !important;
+}
+
+/* Optimize thread tree for full width */
+.thread-tree-container {
+    width: 100%;
+}
+
+.thread-tree {
+    width: 100%;
+    max-width: 100%;
+}
+
+/* Make cards use more of the available width */
+.card {
+    width: 100%;
+}
+
+/* Optimize table layouts for wide screens */
+.table {
+    width: 100%;
+    table-layout: auto;
+}
+
+/* Better use of space in button groups on wide screens */
+@media (min-width: 1200px) {
+    .btn-group {
+        justify-content: flex-start;
+        gap: 0.5rem;
+    }
+
+    .btn-group .btn {
+        min-width: auto;
+        white-space: nowrap;
+    }
+
+    /* Allow more content per line in thread trees */
+    .node-subject {
+        max-width: none;
+        white-space: normal;
+    }
+
+    .node-author {
+        min-width: 200px;
+    }
+
+    .node-date {
+        min-width: 150px;
+    }
+}
+
+/* Breadcrumb styling */
+.breadcrumb {
+    background-color: var(--bs-secondary-bg);
+    border-radius: 0.5rem;
+    padding: 0.75rem 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.breadcrumb a {
+    color: var(--pugleaf-primary);
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.breadcrumb a:hover {
+    text-decoration: underline;
+    color: var(--pugleaf-primary);
+}
+
+.breadcrumb .highlight {
+    color: var(--pugleaf-dark);
+    font-weight: 600;
+}
+
+/* Menu component */
+.menu {
+    border: none;
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    margin-bottom: 1.5rem;
+}
+
+.menu-title {
+    background-color: var(--bs-primary);
+    color: white;
+    font-weight: 600;
+    border-bottom: none;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0;
+    border-radius: 0.375rem 0.375rem 0 0;
+}
+
+.menu-item {
+    display: inline-block;
+    padding: 0.5rem 1rem;
+    color: var(--pugleaf-primary);
+    text-decoration: none;
+    border: none;
+    background: white;
+    border-bottom: 1px solid var(--bs-border-color);
+    transition: all 0.2s ease;
+}
+
+.menu-item:hover {
+    background-color: var(--bs-primary);
+    color: white;
+    text-decoration: none;
+}
+
+.menu-item:last-child {
+    border-bottom: none;
+}
+
+/* Content area */
+.content {
+    background: white;
+    border: 1px solid var(--bs-border-color);
+    border-radius: 0.375rem;
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    margin-bottom: 1.5rem;
+    padding: 2rem;
+}
+
+/* Article specific styling */
+.highlight {
+    color: var(--pugleaf-primary);
+    font-weight: 600;
+    font-size: 1.25rem;
+    margin-bottom: 1rem;
+}
+
+.article-meta {
+    color: var(--meta-text);
+    font-size: 0.875rem;
+    background-color: #bababa85;
+    padding: 0.3rem;
+    /*border-radius: 0.375rem;*/
+    margin-bottom: 1.5rem;
+    border-left: 4px solid var(--pugleaf-primary);
+}
+
+.article-meta p {
+    margin-bottom: 0.5rem;
+}
+
+.article-meta p:last-child {
+    margin-bottom: 0;
+}
+
+.article-meta strong {
+    color: var(--pugleaf-dark);
+    font-weight: 600;
+}
+
+/* Article body */
+.article-body {
+    background-color: var(--code-bg);
+    padding: 1.5rem;
+    margin: 1.5rem 0;
+    border: 1px solid var(--article-border);
+    border-radius: 0.375rem;
+}
+
+.article-body pre {
+    /*font-family: 'Courier New', Monaco, 'Liberation Mono', Consolas, monospace;*/
+    font-size: 0.875rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    margin: 0;
+    color: var(--pugleaf-dark);
+    background-color: transparent;
+}
+
+/* Thread context */
+.thread-context {
+    margin-top: 2rem;
+    padding-top: 2rem;
+    border-top: 2px solid var(--pugleaf-primary);
+}
+
+.article-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.article-item {
+    background: white;
+    border: 1px solid var(--article-border);
+    border-radius: 0.375rem;
+    margin-bottom: 0.5rem;
+    padding: 0.75rem;
+    transition: all 0.2s ease;
+}
+
+.article-item:hover {
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    transform: translateY(-1px);
+}
+
+.article-item.highlight {
+    background-color: var(--thread-highlight);
+    border-color: var(--pugleaf-primary);
+}
+
+.article-subject {
+    font-weight: 500;
+    margin-bottom: 0.25rem;
+}
+
+.article-subject a {
+    color: var(--pugleaf-primary);
+    text-decoration: none;
+}
+
+.article-subject a:hover {
+    text-decoration: underline;
+}
+
+.thread-context .article-meta {
+    color: var(--meta-text);
+    font-size: 0.8rem;
+    background: none;
+    padding: 0;
+    border: none;
+    margin: 0;
+}
+
+/* Links and buttons */
+a {
+    color: var(--pugleaf-primary);
+    text-decoration: none;
+}
+
+a:hover {
+    color: var(--pugleaf-primary);
+    text-decoration: underline;
+}
+
+/* Error states */
+.error {
+    background-color: #f8d7da;
+    color: #721c24;
+    padding: 1rem;
+    border-radius: 0.375rem;
+    border: 1px solid #f1aeb5;
+    margin: 1rem 0;
+}
+
+/* Blink animation for current article indicator */
+.blink {
+    background-color: var(--pugleaf-primary);
+    color: white;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    animation: blink-animation 1s steps(5, start) infinite;
+    margin-left: 0.5rem;
+}
+
+@keyframes blink-animation {
+    to {
+        opacity: 0.3;
+    }
+}
+
+/* Enhanced Bootstrap component styles */
+
+/* Card improvements */
+.card {
+    border: 1px solid rgba(0, 0, 0, 0.125);
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    transition: box-shadow 0.15s ease-in-out;
+}
+
+.card:hover {
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+}
+
+.card-header {
+    border-bottom: 1px solid rgba(0, 0, 0, 0.125);
+    font-weight: 600;
+}
+
+/* List group improvements */
+.list-group-item {
+    border-left: none;
+    border-right: none;
+    padding: 1rem;
+}
+
+.list-group-item:first-child {
+    border-top: none;
+}
+
+.list-group-item:last-child {
+    border-bottom: none;
+}
+
+.list-group-item:hover {
+    background-color: rgba(13, 110, 253, 0.04);
+}
+
+/* Button improvements */
+.btn {
+    border-radius: 0.375rem;
+    font-weight: 500;
+    transition: all 0.15s ease-in-out;
+}
+
+/* Remove button glow effects in dark mode */
+[data-bs-theme="dark"] .btn:focus,
+[data-bs-theme="dark"] .btn:focus-visible {
+    box-shadow: none !important;
+    outline: 1px solid rgba(255, 255, 255, 0.3) !important;
+    outline-offset: 2px;
+}
+
+[data-bs-theme="dark"] .btn:hover {
+    box-shadow: none !important;
+}
+
+.btn-group .btn {
+    margin-right: 0;
+}
+
+/* Badge improvements */
+.badge {
+    font-weight: 500;
+}
+
+/* Alert improvements */
+.alert {
+    border: none;
+    border-radius: 0.5rem;
+}
+
+.alert-heading {
+    font-weight: 600;
+}
+
+/* Breadcrumb improvements */
+.breadcrumb {
+    background-color: transparent;
+    padding: 0;
+    margin-bottom: 1.5rem;
+}
+
+.breadcrumb-item+.breadcrumb-item::before {
+    content: "›";
+    color: var(--pugleaf-secondary);
+}
+
+/* Table improvements */
+.table {
+    --bs-table-striped-bg: rgba(0, 0, 0, 0.02);
+}
+
+.table-hover tbody tr:hover {
+    background-color: rgba(13, 110, 253, 0.04);
+}
+
+/* Form improvements */
+.form-control,
+.form-select {
+    border-radius: 0.375rem;
+    border: 1px solid #ced4da;
+    transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+.form-control:focus,
+.form-select:focus {
+    border-color: #0606072f;
+    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+}
+
+/* Pagination improvements */
+.pagination .page-link {
+    border-radius: 0.375rem;
+    margin: 0 0.125rem;
+    color: var(--pugleaf-primary);
+    border: 0px solid #dee2e6;
+}
+
+.pagination .page-link:hover {
+    background-color: var(--thread-highlight);
+    border-color: var(--pugleaf-primary);
+}
+
+.pagination .page-item.active .page-link {
+    background-color: var(--pugleaf-primary);
+    border-color: var(--pugleaf-primary);
+}
+
+.article-meta {
+    color: var(--meta-text);
+    font-size: 0.875rem;
+}
+
+.thread-highlight {
+    background-color: var(--thread-highlight);
+    border-left: 3px solid var(--pugleaf-primary);
+    padding-left: 0.75rem;
+}
+
+/* ============================================================================
+   Article Header Styling - RocksolidBBS/NovaBBS Layout
+   ============================================================================ */
+
+/* Main article header container */
+.article-header {
+    border-bottom: 2px solid var(--article-border);
+    padding-bottom: 1rem;
+    margin-bottom: 1.5rem;
+    background-color: var(--article-bg);
+}
+
+/* Subject styling (left side) */
+.article-subject {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--pugleaf-primary);
+    word-wrap: break-word;
+    line-height: 1.3;
+    margin-bottom: 0.5rem;
+}
+
+/* Author and date styling (right side) */
+.article-author-date {
+    font-size: 0.9rem;
+    line-height: 1.4;
+    color: var(--meta-text);
+}
+
+.article-author-date strong {
+    color: var(--pugleaf-dark);
+    font-weight: 500;
+}
+
+[data-bs-theme="dark"] .article-author-date strong {
+    color: var(--pugleaf-light);
+}
+
+/* Article metadata section */
+.article-meta {
+    border-bottom: 1px solid var(--article-border);
+    padding-bottom: 1rem;
+    margin-bottom: 1.5rem;
+    background-color: var(--article-bg);
+}
+
+.article-meta small {
+    color: var(--meta-text);
+}
+
+/* Article content body */
+.article-content {
+    background-color: var(--code-bg);
+    border: 1px solid var(--article-border);
+    border-radius: 0.375rem;
+    padding: 1.5rem;
+    /*font-family: 'Courier New', Monaco, 'Liberation Mono', Consolas, monospace;*/
+    font-size: 0.9rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-x: auto;
+    color: var(--pugleaf-dark);
+    margin-bottom: 1.5rem;
+}
+
+[data-bs-theme="dark"] .article-content {
+    color: var(--pugleaf-light);
+    background-color: var(--code-bg);
+}
+
+/* Thread context styling */
+.article-subject-thread {
+    flex-grow: 1;
+    margin-right: 1rem;
+}
+
+.thread-context .list-group-item.active {
+    background-color: var(--pugleaf-primary);
+    border-color: var(--pugleaf-primary);
+}
+
+.thread-context .list-group-item:hover:not(.active) {
+    background-color: var(--thread-highlight);
+}
+
+/* Responsive design for smaller screens */
+@media (max-width: 768px) {
+    .article-header .row > div {
+        margin-bottom: 0.5rem;
+    }
+
+    .article-header .text-end {
+        text-align: start !important;
+    }
+
+    .article-subject {
+        font-size: 1.1rem;
+        margin-bottom: 0.75rem;
+    }
+
+    .article-author-date {
+        font-size: 0.85rem;
+    }
+
+    .article-content {
+        padding: 1rem;
+        font-size: 0.85rem;
+    }
+}
+
+/* Extra small screens */
+@media (max-width: 576px) {
+    .article-subject {
+        font-size: 1rem;
+    }
+
+    .article-content {
+        padding: 0.75rem;
+        font-size: 0.8rem;
+    }
+}
+
+/* Responsive improvements */
+@media (max-width: 768px) {
+    .btn-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+
+    .btn-group .btn {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    .container-fluid {
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+}
+
+/* Focus states for accessibility - only show outline for keyboard navigation */
+.menu-item:focus-visible,
+a:focus-visible {
+    outline: 2px solid var(--pugleaf-primary);
+    outline-offset: 2px;
+}
+
+/* Remove outline for mouse clicks while keeping it for keyboard navigation */
+.menu-item:focus:not(:focus-visible),
+a:focus:not(:focus-visible) {
+    outline: none;
+}
+
+/* Print styles */
+@media print {
+
+    .theme-selector,
+    .menu {
+        display: none;
+    }
+
+    .article-body {
+        border: 1px solid #ccc;
+        background: white;
+    }
+
+    a {
+        color: #000;
+        text-decoration: underline;
+    }
+
+    .card {
+        box-shadow: none;
+        border: 1px solid #dee2e6;
+    }
+
+    .btn,
+    .pagination {
+        display: none;
+    }
+}
+
+/* Dark mode body and base styles */
+[data-bs-theme="dark"] body {
+    background-color: var(--pugleaf-light) !important;
+    color: var(--pugleaf-dark) !important;
+}
+
+/* Content areas */
+[data-bs-theme="dark"] .content {
+    background: var(--article-bg) !important;
+    border-color: var(--article-border) !important;
+    color: var(--pugleaf-dark) !important;
+}
+
+/* Cards */
+[data-bs-theme="dark"] .card {
+    background-color: var(--article-bg) !important;
+    border-color: var(--article-border) !important;
+    color: var(--pugleaf-dark) !important;
+}
+
+[data-bs-theme="dark"] .card-header {
+    border-bottom-color: var(--article-border) !important;
+}
+
+[data-bs-theme="dark"] .card-body {
+    background-color: var(--article-bg) !important;
+    color: var(--pugleaf-dark) !important;
+}
+
+/* Article specific */
+[data-bs-theme="dark"] .article-meta {
+    background-color: var(--code-bg) !important;
+    color: var(--meta-text) !important;
+    border-left-color: var(--pugleaf-primary) !important;
+}
+
+[data-bs-theme="dark"] .article-body {
+    background-color: var(--code-bg) !important;
+    border-color: var(--article-border) !important;
+}
+
+[data-bs-theme="dark"] .article-body pre {
+    color: var(--pugleaf-dark) !important;
+}
+
+/* Breadcrumbs */
+[data-bs-theme="dark"] .breadcrumb {
+    background-color: var(--code-bg) !important;
+    color: var(--pugleaf-dark) !important;
+}
+
+/* Buttons */
+[data-bs-theme="dark"] .btn-outline-secondary {
+    color: #ffffff !important;
+    border-color: var(--pugleaf-secondary) !important;
+    background-color: #6c757d !important;
+}
+
+[data-bs-theme="dark"] .btn-outline-secondary:hover {
+    background-color: #5a6268 !important;
+    border-color: #545b62 !important;
+    color: #ffffff !important;
+}
+
+[data-bs-theme="dark"] .btn-outline-primary {
+    color: #ffffff !important;
+    border-color: var(--pugleaf-primary) !important;
+    background-color: var(--pugleaf-primary) !important;
+}
+
+[data-bs-theme="dark"] .btn-outline-primary:hover {
+    background-color: #0056b3 !important;
+    border-color: #004085 !important;
+    color: #ffffff !important;
+}
+
+[data-bs-theme="dark"] .btn-outline-info {
+    color: #ffffff !important;
+    border-color: var(--pugleaf-info) !important;
+    background-color: var(--pugleaf-info) !important;
+}
+
+[data-bs-theme="dark"] .btn-outline-info:hover {
+    background-color: #0aa2c0 !important;
+    border-color: #0a7c96 !important;
+    color: #ffffff !important;
+}
+
+[data-bs-theme="dark"] .btn-outline-warning {
+    color: #000000 !important;
+    border-color: var(--pugleaf-warning) !important;
+    background-color: var(--pugleaf-warning) !important;
+}
+
+[data-bs-theme="dark"] .btn-outline-warning:hover {
+    background-color: #e0a800 !important;
+    border-color: #c69500 !important;
+    color: #000000 !important;
+}
+
+[data-bs-theme="dark"] .btn-outline-danger {
+    color: #ffffff !important;
+    border-color: var(--pugleaf-danger) !important;
+    background-color: var(--pugleaf-danger) !important;
+}
+
+[data-bs-theme="dark"] .btn-outline-danger:hover {
+    background-color: #c82333 !important;
+    border-color: #bd2130 !important;
+    color: #ffffff !important;
+}
+
+/* Regular buttons */
+[data-bs-theme="dark"] .btn-primary {
+    color: #ffffff !important;
+    background-color: var(--pugleaf-primary) !important;
+    border-color: var(--pugleaf-primary) !important;
+}
+
+[data-bs-theme="dark"] .btn-secondary {
+    color: #ffffff !important;
+    background-color: #6c757d !important;
+    border-color: #6c757d !important;
+}
+
+[data-bs-theme="dark"] .btn-success {
+    color: #ffffff !important;
+    background-color: var(--pugleaf-success) !important;
+    border-color: var(--pugleaf-success) !important;
+}
+
+[data-bs-theme="dark"] .btn-info {
+    color: #ffffff !important;
+    background-color: var(--pugleaf-info) !important;
+    border-color: var(--pugleaf-info) !important;
+}
+
+[data-bs-theme="dark"] .btn-warning {
+    color: #000000 !important;
+    background-color: var(--pugleaf-warning) !important;
+    border-color: var(--pugleaf-warning) !important;
+}
+
+[data-bs-theme="dark"] .btn-danger {
+    color: #ffffff !important;
+    background-color: var(--pugleaf-danger) !important;
+    border-color: var(--pugleaf-danger) !important;
+}
+
+/* Thread context */
+[data-bs-theme="dark"] .article-item {
+    background: var(--article-bg) !important;
+    border-color: var(--article-border) !important;
+    color: var(--pugleaf-dark) !important;
+}
+
+[data-bs-theme="dark"] .article-item.highlight {
+    background-color: var(--thread-highlight) !important;
+    border-color: var(--pugleaf-primary) !important;
+}
+
+/* Menu */
+[data-bs-theme="dark"] .menu-item {
+    background: var(--article-bg) !important;
+    color: var(--pugleaf-primary) !important;
+    border-color: var(--article-border) !important;
+}
+
+[data-bs-theme="dark"] .menu-item:hover {
+    background-color: var(--pugleaf-primary) !important;
+    color: var(--article-bg) !important;
+}
+
+/* Text colors */
+[data-bs-theme="dark"] .text-muted {
+    color: var(--meta-text) !important;
+}
+
+/* Highlights and emphasis */
+[data-bs-theme="dark"] .highlight {
+    color: var(--pugleaf-primary) !important;
+}
+
+/* Links */
+[data-bs-theme="dark"] a {
+    color: var(--pugleaf-primary) !important;
+}
+
+[data-bs-theme="dark"] a:hover {
+    color: var(--pugleaf-info) !important;
+}
+
+/* Preserve emoji colors in dark mode - target specific elements */
+[data-bs-theme="dark"] h1.h2 span.me-2 {
+    /* Force the rocket emoji to use its natural color emoji rendering */
+    color: revert !important;
+    font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif !important;
+    font-feature-settings: "liga" off !important;
+    text-rendering: auto !important;
+    -webkit-font-feature-settings: "liga" off !important;
+    /* Override any inherited webkit text fill */
+    -webkit-text-fill-color: initial !important;
+}
+
+/* Also fix the header itself if it has the problematic style */
+[data-bs-theme="dark"] header h1 {
+    -webkit-text-fill-color: initial !important;
+}
+
+/* Also preserve emojis in select options */
+[data-bs-theme="dark"] select option {
+    font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif !important;
+}
+
+/* General emoji preservation in headers */
+[data-bs-theme="dark"] h1 span,
+[data-bs-theme="dark"] h2 span,
+[data-bs-theme="dark"] h3 span {
+    color: revert !important;
+    font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif !important;
+    -webkit-text-fill-color: initial !important;
+}
+
+/* ===== CLEAN FORUM-STYLE ARTICLE LAYOUT ===== */
+/* Remove all the excessive boxes and borders for a classic forum look */
+
+/* Article Navigation */
+.article-nav {
+    background: none;
+    border-color: #dee2e6;
+}
+
+.article-nav .nav-links .btn {
+    border: 1px solid #dee2e6;
+    background: #fff;
+    color: #495057;
+    text-decoration: none;
+}
+
+.article-nav .nav-links .btn:hover {
+    background: #e9ecef;
+    border-color: #adb5bd;
+}
+
+/* Article Post - Main Container */
+.article-post {
+    background: #fff;
+    border: 1px solid #dee2e6;
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+/* Subject Line */
+.article-subject-line h4 {
+    margin: 0;
+    color: #212529;
+    font-weight: 600;
+    line-height: 1.3;
+}
+
+/* Post Header */
+.post-header {
+    border-bottom: 1px solid #e9ecef !important;
+    margin-bottom: 1rem;
+    padding-bottom: 0.75rem;
+}
+
+.post-header .author-info {
+    font-size: 1rem;
+    color: #0d6efd;
+}
+
+.post-header .post-meta {
+    font-size: 0.875rem;
+    color: #6c757d;
+}
+
+/* Article Content */
+.forum-content {
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    padding: 1rem;
+    margin: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    /*font-family: 'Courier New', Monaco, 'Liberation Mono', Consolas, monospace;*/
+    font-size: 0.9rem;
+    line-height: 1.4;
+    color: #212529;
+}
+
+/* Technical Details */
+.technical-details {
+    margin-top: 1rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid #e9ecef;
+}
+
+.technical-details summary {
+    cursor: pointer;
+    user-select: none;
+    outline: none;
+}
+
+.technical-details summary:hover {
+    color: #0d6efd;
+}
+
+.technical-details div {
+    margin-bottom: 0.25rem;
+}
+
+/* Reply Link */
+.reply-link .btn {
+    border: 1px solid #6c757d;
+    background: #fff;
+    color: #495057;
+    font-size: 0.875rem;
+}
+
+.reply-link .btn:hover {
+    background: #e9ecef;
+    border-color: #495057;
+}
+
+/* Thread Context */
+.thread-context h5 {
+    color: #495057;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    border-bottom: 2px solid #0d6efd;
+    padding-bottom: 0.5rem;
+}
+
+.thread-list {
+    background: #fff;
+    border: 1px solid #dee2e6;
+    padding: 1rem;
+}
+
+.thread-item {
+    border-bottom: 1px solid #e9ecef;
+    padding-bottom: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+
+.thread-item:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+}
+
+.thread-item.current-article {
+    background: #e7f3ff;
+    padding: 0.75rem;
+    margin: 0 -1rem 0.75rem -1rem;
+    border-left: 4px solid #0d6efd;
+}
+
+.thread-subject a {
+    color: #0d6efd;
+    font-weight: 500;
+}
+
+.thread-subject a:hover {
+    color: #0056b3;
+}
+
+.thread-subject a.fw-bold {
+    color: #495057;
+}
+
+.thread-meta {
+    font-size: 0.8rem;
+    line-height: 1.2;
+}
+
+/* Dark Mode Support */
+[data-bs-theme="dark"] .article-post {
+    background: #212529;
+    border-color: #495057;
+    color: #f8f9fa;
+}
+
+[data-bs-theme="dark"] .forum-content {
+    background: #2d3339;
+    border-color: #495057;
+    color: #f8f9fa;
+}
+
+[data-bs-theme="dark"] .thread-list {
+    background: #212529;
+    border-color: #495057;
+}
+
+[data-bs-theme="dark"] .thread-item.current-article {
+    background: #1e3a5f;
+    border-left-color: #4dabf7;
+}
+
+[data-bs-theme="dark"] .post-header {
+    border-bottom-color: #495057 !important;
+}
+
+[data-bs-theme="dark"] .technical-details {
+    border-top-color: #495057;
+}
+
+[data-bs-theme="dark"] .thread-item {
+    border-bottom-color: #495057;
+}
+
+/* Remove all Bootstrap card styling overrides */
+.card,
+.card-body,
+.card-header,
+.list-group,
+.list-group-item {
+    border-radius: 0 !important;
+    box-shadow: none !important;
+}
+
+/* Override any remaining rounded corners */
+.btn,
+.badge,
+.alert {
+    border-radius: 3px !important;
+}
+
+.border-bottom {
+    border-bottom: 1px solid #dee2e6 !important;
+}
+
+/* Make sure content uses full width */
+.container-fluid {
+    max-width: 100%;
+    padding-left: 1rem;
+    padding-right: 1rem;
+}

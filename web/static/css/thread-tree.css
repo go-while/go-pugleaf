@@ -1,0 +1,653 @@
+/* Thread Tree View Styles */
+
+.thread-tree {
+    font-family: var(--bs-font-sans-serif);
+    font-size: 14px;
+    margin: 20px 0;
+    border: 1px solid var(--bs-border-color);
+    border-radius: var(--bs-border-radius-lg);
+    background-color: var(--bs-body-bg);
+    color: var(--bs-body-color);
+    padding: 20px;
+    box-shadow: var(--bs-box-shadow);
+}
+
+.thread-tree-container {
+    background-color: var(--bs-body-bg);
+    color: var(--bs-body-color);
+}
+
+.tree-stats {
+    background-color: var(--bs-secondary-bg);
+    padding: 8px 12px;
+    border-radius: var(--bs-border-radius);
+    margin-bottom: 15px;
+    font-size: 12px;
+    color: var(--bs-secondary-color);
+}
+
+.tree-stats span {
+    margin-right: 15px;
+}
+
+.tree-root, .tree-children {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.tree-children {
+    margin-left: 25px;
+    border-left: 2px solid var(--bs-border-color);
+    padding-left: 20px;
+    position: relative;
+}
+
+.tree-children::before {
+    content: '';
+    position: absolute;
+    left: -2px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(to bottom, var(--bs-primary) 0%, var(--bs-secondary) 100%);
+    opacity: 0.3;
+}
+
+.tree-node {
+    margin: 6px 0;
+    position: relative;
+    transition: all 0.2s ease;
+    color: var(--bs-body-color);
+    background-color: transparent;
+}
+
+.tree-node:hover {
+    transform: translateX(2px);
+}
+
+.tree-node.expandable > .node-content .node-toggle {
+    cursor: pointer;
+    font-weight: bold;
+    margin-right: 5px;
+    color: var(--bs-primary);
+    font-family: var(--bs-font-monospace);
+}
+
+.tree-node.expandable > .node-content .node-toggle:hover {
+    background-color: var(--bs-primary-bg-subtle);
+    border-radius: var(--bs-border-radius-sm);
+}
+
+.node-content {
+    display: flex;
+    align-items: center;
+    padding: 8px 12px;
+    border-radius: var(--bs-border-radius);
+    transition: all 0.3s ease;
+    background-color: var(--bs-body-bg);
+    border: 1px solid transparent;
+    cursor: pointer;
+}
+
+.node-content:hover {
+    background-color: var(--bs-secondary-bg);
+    border-color: var(--bs-primary);
+    box-shadow: 0 2px 8px var(--bs-primary-bg-subtle);
+}
+
+.tree-node-content {
+    background-color: var(--bs-body-bg);
+    border: 1px solid var(--bs-border-color);
+    color: var(--bs-body-color);
+    margin: 2px 0;
+    padding: 8px;
+    border-radius: var(--bs-border-radius);
+}
+
+.tree-node-content:hover {
+    background-color: var(--bs-secondary-bg);
+}
+
+.tree-node a {
+    color: var(--bs-link-color);
+    text-decoration: none;
+}
+
+.tree-node a:hover {
+    color: var(--bs-link-hover-color);
+    text-decoration: underline;
+}
+
+.node-toggle {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--bs-border-radius);
+    background-color: var(--bs-tertiary-bg);
+    border: 1px solid var(--bs-border-color);
+    font-family: var(--bs-font-monospace);
+    font-size: 12px;
+    color: var(--bs-body-color);
+    transition: all 0.2s ease;
+}
+
+.node-link {
+    text-decoration: none;
+    color: inherit;
+    display: flex;
+    align-items: center;
+    flex: 1;
+    gap: 12px;
+    cursor: pointer;
+}
+
+.node-link:hover {
+    text-decoration: underline;
+}
+
+.node-subject {
+    font-weight: 600;
+    color: var(--bs-body-color);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+}
+
+.node-author {
+    color: var(--bs-secondary-color);
+    font-size: 12px;
+    min-width: 120px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-weight: 500;
+}
+
+.node-date {
+    color: var(--bs-tertiary-color);
+    font-size: 11px;
+    font-family: var(--bs-font-monospace);
+    min-width: 100px;
+    text-align: right;
+    font-weight: 400;
+}
+
+/* Depth-based enhanced styling */
+.tree-node[data-depth="0"] {
+    border-left: 4px solid var(--bs-primary);
+    padding-left: 8px;
+}
+
+.tree-node[data-depth="0"] .node-subject {
+    font-weight: bold;
+    color: var(--bs-primary);
+    font-size: 15px;
+}
+
+.tree-node[data-depth="1"] .node-content {
+    background-color: var(--bs-primary-bg-subtle);
+}
+
+.tree-node[data-depth="2"] .node-content {
+    background-color: var(--bs-secondary-bg-subtle);
+}
+
+.tree-node[data-depth="3"] .node-content {
+    background-color: var(--bs-tertiary-bg-subtle);
+}
+
+/* Collapsed state */
+.tree-node.collapsed > .tree-children {
+    display: none;
+}
+
+.tree-node.collapsed > .tree-details > .tree-children {
+    display: none;
+}
+
+/* When JavaScript is enabled, override details behavior for collapsed nodes */
+.js-enabled .tree-node.collapsed > .tree-details[open] > .tree-children {
+    display: none !important;
+}
+
+/* Toggle symbols */
+.tree-node.expandable.collapsed > .node-content .node-toggle::before {
+    content: "[+]";
+}
+
+.tree-node.expandable.expanded > .node-content .node-toggle::before {
+    content: "[-]";
+}
+
+.tree-node.expandable > .node-content .node-toggle::before {
+    content: "[-]"; /* Default to expanded */
+}
+
+/* Non-expandable nodes should not show toggle symbols */
+.tree-node:not(.expandable) .node-toggle::before {
+    content: "";
+}
+
+/* Error states */
+.tree-error {
+    background-color: var(--bs-danger-bg-subtle);
+    border: 1px solid var(--bs-danger-border-subtle);
+    padding: 15px;
+    border-radius: var(--bs-border-radius);
+    color: var(--bs-danger-text-emphasis);
+    text-align: center;
+}
+
+/* Action buttons styling */
+.node-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-left: 8px;
+}
+
+.btn-view, .btn-preview {
+    background: none;
+    border: none;
+    padding: 4px 6px;
+    border-radius: var(--bs-border-radius);
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.2s ease;
+    text-decoration: none;
+    color: var(--bs-secondary-color);
+}
+
+.btn-view:hover, .btn-preview:hover {
+    background-color: var(--bs-primary);
+    color: var(--bs-white);
+    transform: scale(1.1);
+}
+
+/* Article preview styling */
+.article-preview {
+    margin: 12px 0 12px 25px;
+    padding: 20px;
+    background-color: var(--bs-secondary-bg);
+    border: 1px solid var(--bs-border-color);
+    border-radius: var(--bs-border-radius-lg);
+    font-size: 14px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    border-left: 4px solid var(--bs-primary);
+}
+
+.article-preview-header {
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--bs-border-color);
+    font-size: 20px;
+    line-height: 1.2;
+    color: var(--bs-body-color);
+}
+
+.article-preview-body {
+    margin: 8px 0;
+}
+
+.preview-text {
+    background-color: var(--bs-body-bg);
+    padding: 20px;
+    border-radius: var(--bs-border-radius);
+    border: 1px solid var(--bs-border-color);
+    font-size: 20px;
+    line-height: 1.2;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: var(--bs-body-color);
+    font-family: var(--bs-font-sans-serif);
+    max-width: 100%;
+    overflow: visible;
+}
+
+.article-preview-body pre {
+    background-color: var(--bs-tertiary-bg);
+    padding: 20px;
+    border-radius: var(--bs-border-radius);
+    border: 1px solid var(--bs-border-color);
+    font-size: 20px;
+    line-height: 1.2;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: var(--bs-body-color);
+    font-family: var(--bs-font-sans-serif);
+    max-width: 100%;
+    overflow: visible;
+}
+
+.article-preview-actions {
+    text-align: right;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--bs-border-color);
+}
+
+.preview-error {
+    color: var(--bs-danger-text-emphasis);
+    text-align: center;
+    font-style: italic;
+    padding: 8px;
+}
+
+.preview-content {
+    overflow: visible;
+    line-height: 1.6;
+}
+
+.preview-loading {
+    text-align: center;
+    color: var(--bs-secondary-color);
+    font-style: italic;
+}
+
+/* Responsive design */
+@media (max-width: 576px) {
+    /* Extra small devices (phones) */
+    .thread-tree-container.compact-view .tree-children {
+        margin-left: 8px;
+        padding-left: 6px;
+    }
+
+    .node-content {
+        padding: 2px 4px;
+    }
+
+    .node-subject {
+        font-size: 12px;
+    }
+
+    .node-date {
+        display: none; /* Hide dates on very small screens */
+    }
+}
+
+@media (max-width: 768px) {
+    /* Small devices (tablets) */
+    .tree-children {
+        margin-left: 10px;
+        padding-left: 10px;
+    }
+
+    .node-author {
+        display: none;
+    }
+
+    .node-date {
+        font-size: 10px;
+        min-width: 80px;
+    }
+
+    .tree-stats {
+        font-size: 11px;
+    }
+
+    .node-content {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+    }
+
+    .node-author, .node-date {
+        min-width: auto;
+        font-size: 11px;
+    }
+
+    .node-actions {
+        margin-left: 0;
+        margin-top: 4px;
+    }
+
+    .article-preview {
+        margin-left: 10px;
+        padding: 16px;
+        font-size: 13px;
+    }
+
+    .preview-text {
+        font-size: 13px;
+        padding: 16px;
+        line-height: 1.6;
+    }
+}
+
+@media (min-width: 1200px) {
+    /* Large devices (desktops) */
+    .node-author {
+        min-width: 200px;
+    }
+
+    .node-date {
+        min-width: 140px;
+    }
+}
+
+@media (min-width: 1400px) {
+    /* Extra large devices (large desktops, 4K) */
+    .thread-tree {
+        font-size: 15px;
+    }
+
+    .node-subject {
+        font-size: 16px;
+    }
+
+    .node-author {
+        min-width: 250px;
+        font-size: 13px;
+    }
+
+    .node-date {
+        min-width: 160px;
+        font-size: 12px;
+    }
+
+    .thread-tree-container.compact-view .tree-children {
+        margin-left: 15px;
+        padding-left: 10px;
+    }
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+    .thread-tree {
+        background: #212529 !important;
+        border-color: #495057 !important;
+        color: #f8f9fa !important;
+    }
+
+    .tree-stats {
+        background: #343a40 !important;
+        color: #adb5bd !important;
+    }
+
+    .tree-children {
+        border-left-color: #495057 !important;
+    }
+
+    .node-content {
+        color: #f8f9fa !important;
+    }
+
+    .node-content:hover {
+        background-color: #343a40 !important;
+    }
+
+    .node-subject {
+        color: #f8f9fa !important;
+    }
+
+    .node-author {
+        color: #adb5bd !important;
+    }
+
+    .node-date {
+        color: #6c757d !important;
+    }
+
+    .tree-node[data-depth="0"] .node-subject {
+        color: #fff !important;
+    }
+
+    .tree-node[data-depth="1"] .node-content {
+        background: rgba(77, 171, 247, 0.1) !important;
+    }
+
+    .tree-node[data-depth="2"] .node-content {
+        background: rgba(77, 171, 247, 0.05) !important;
+    }
+
+    .tree-node[data-depth="3"] .node-content {
+        background: rgba(77, 171, 247, 0.03) !important;
+    }
+
+    .node-toggle {
+        color: #adb5bd !important;
+    }
+
+    .tree-node.expandable > .node-content .node-toggle {
+        color: #4dabf7 !important;
+    }
+
+    .tree-node.expandable > .node-content .node-toggle:hover {
+        background: rgba(77, 171, 247, 0.2) !important;
+    }
+
+    .tree-error {
+        background: #491217 !important;
+        border-color: #721c24 !important;
+        color: #ea868f !important;
+    }
+
+    .tree-loading {
+        color: #adb5bd !important;
+    }
+
+    .article-preview {
+        background-color: #2d3748 !important;
+        border-color: #4a5568 !important;
+        border-left-color: #4dabf7 !important;
+    }
+
+    .preview-text {
+        background-color: #1a202c !important;
+        border-color: #4a5568 !important;
+        color: #e2e8f0 !important;
+    }
+}
+
+/* Details/Summary support for graceful degradation */
+.tree-details {
+    margin: 0;
+    padding: 0;
+    display: inline;
+}
+
+.tree-details > summary {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: inline;
+    cursor: pointer;
+}
+
+/* Hide default disclosure triangle */
+.tree-details > summary::-webkit-details-marker {
+    display: none;
+}
+
+/* When JavaScript is available, let it handle expand/collapse */
+.js-enabled .tree-details > summary {
+    pointer-events: auto; /* Allow the toggle button to be clicked */
+}
+
+/* For non-JS users, provide clear visual feedback */
+.tree-details:not([open]) + .node-link + .tree-children {
+    display: none;
+}
+
+.tree-details[open] + .node-link + .tree-children {
+    display: block;
+}
+
+/* Update toggle indicator for details/summary */
+.tree-details > summary .toggle-icon::before {
+    content: "▶";
+    font-size: 10px;
+    transition: transform 0.2s;
+}
+
+.tree-details[open] > summary .toggle-icon::before {
+    content: "▼";
+    transform: rotate(0deg);
+}
+
+/* When JavaScript is enabled, use the existing toggle styling */
+.js-enabled .tree-node.expandable .toggle-icon::before {
+    content: "▼";
+}
+
+.js-enabled .tree-node.expandable.collapsed .toggle-icon::before {
+    content: "▶";
+}
+
+/* Compact view */
+.thread-tree-container.compact-view .node-author {
+    display: none;
+}
+
+.thread-tree-container.compact-view .node-date {
+    font-size: 10px;
+    min-width: 80px;
+}
+
+.thread-tree-container.compact-view .node-content {
+    padding: 2px 4px;
+}
+
+.thread-tree-container.compact-view .tree-children {
+    margin-left: 15px;
+    padding-left: 10px;
+}
+
+.thread-tree-container.compact-view .node-subject {
+    font-size: 13px;
+}
+
+/* Loading states */
+.tree-loading {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--bs-secondary-color);
+    font-style: italic;
+}
+
+.tree-loading::before {
+    content: "⟳ ";
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* Enhanced accessibility */
+.tree-node:focus-within {
+    outline: 2px solid var(--bs-primary);
+    outline-offset: 2px;
+}
+
+.btn-view:focus, .btn-preview:focus {
+    outline: 2px solid var(--bs-primary);
+    outline-offset: 2px;
+}

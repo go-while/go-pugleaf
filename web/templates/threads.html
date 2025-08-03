@@ -1,0 +1,336 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item"><a href="/groups" class="text-decoration-none">Groups</a></li>
+        {{with .GroupName}}
+        <li class="breadcrumb-item"><a href="/groups/{{.}}" class="text-decoration-none">{{.}}</a></li>
+        {{end}}
+        <li class="breadcrumb-item active" aria-current="page">Threads</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<!-- Navigation Menu -->
+<!-- DISABLED OLD NAV -->
+<!--
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-chat me-2"></i>Thread Browser{{with .GroupName}}: {{.}}{{end}}
+                    </h5>
+                    {{if .TotalThreads}}
+                    <span class="badge bg-light text-dark">
+                        {{.TotalThreads}} threads • Page {{.CurrentPage}} of {{.TotalPages}}
+                    </span>
+                    {{end}}
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="btn-group" role="group" aria-label="Thread Navigation">
+                    {{with .GroupName}}
+                    <a href="/groups/{{.}}" class="btn btn-outline-secondary">
+                        <strong>[G]</strong> Back to Group
+                    </a>
+                    <a href="/groups/{{.}}" class="btn btn-outline-primary">
+                        <strong>[A]</strong> Articles
+                    </a>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+-->
+
+{{if .ForumThreads}}
+<!-- Pagination Top -->
+{{if gt .TotalPages 1}}
+<div class="row mb-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center flex-wrap">
+                    <small class="text-muted">
+                        Page {{.CurrentPage}} of {{.TotalPages}} • {{.TotalThreads}} total threads
+                    </small>
+
+                    <nav aria-label="Thread pagination">
+                        <ul class="pagination pagination-sm mb-0">
+                            {{if .HasPrevPage}}
+                            <li class="page-item">
+                                <a class="page-link" href="?page=1">First</a>
+                            </li>
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{.PrevPage}}">Previous</a>
+                            </li>
+                            {{else}}
+                            <li class="page-item disabled">
+                                <span class="page-link">First</span>
+                            </li>
+                            <li class="page-item disabled">
+                                <span class="page-link">Previous</span>
+                            </li>
+                            {{end}}
+
+                            <li class="page-item active">
+                                <span class="page-link bg-secondary text-light">{{.CurrentPage}}</span>
+                            </li>
+
+                            {{if .HasNextPage}}
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{.NextPage}}">Next</a>
+                            </li>
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{.TotalPages}}">Last</a>
+                            </li>
+                            {{else}}
+                            <li class="page-item disabled">
+                                <span class="page-link">Next</span>
+                            </li>
+                            <li class="page-item disabled">
+                                <span class="page-link">Last</span>
+                            </li>
+                            {{end}}
+                        </ul>
+                    </nav>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+<!-- Thread List -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-success text-white">
+                <!--<div class="d-flex justify-content-between align-items-center">-->
+                    <h6 class="card-title mb-0">
+                        <i class="bi bi-chat-dots me-2"></i>Discussion Threads{{with .GroupName}} in {{.}}{{end}}
+                    </h6>
+                    {{if .TotalThreads}}
+                    <span class="badge bg-light text-dark">
+                        {{.TotalThreads}} threads • Page {{.CurrentPage}} of {{.TotalPages}}
+                    </span>
+                    {{end}}
+                <!--</div>-->
+            </div>
+            <div class="table-responsive">
+                <table class="table table-hover mb-0">
+                    <thead class="table-light">
+                        <tr>
+                        <!--
+                            <th scope="col" style="width: 5%">
+                                <i class="bi bi-arrow-down-up"></i>
+                            </th>
+                        -->
+                            <th scope="col" style="width: 80%">Thread Subject</th>
+                            <!--<th scope="col" style="width: 15%" class="text-center">Messages</th>-->
+                            {{if $.User}}
+                            <th scope="col" style="width: 15%" class="text-end">Last Message</th>
+                            <th scope="col" style="width: 5%" class="text-center">Spam</th>
+                            {{else}}
+                            <th scope="col" style="width: 20%" class="text-end">Last Message</th>
+                            {{end}}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{range .ForumThreads}}
+                        <tr id="thread-{{.RootArticle.ArticleNum}}">
+                        <!--
+                            <td class="text-center align-middle">
+                                <i class="bi bi-chat-square-text text-primary fs-4"></i>
+                            </td>
+                        -->
+                            <td class="align-left">
+                                {{if gt .RootArticle.Spam 0}} 🚩 (SPAM) {{end}}
+                                <a href="/groups/{{$.GroupName}}/thread/{{.RootArticle.ArticleNum}}"
+                                    class="text-decoration-none fw-bold">
+                                    {{if .RootArticle.Subject}}{{.RootArticle.PrintSanitized "subject" $.GroupName}}{{else}}[No Subject]{{end}}
+                                </a>
+                                <br>
+                                <small class="text-muted">By:</small> {{.RootArticle.PrintSanitized "fromheader" $.GroupName}}
+                                <small class="text-muted">
+                                    on {{.RootArticle.PrintSanitized "date_string" $.GroupName}}
+                                </small>
+                            </td>
+                            <td class="text-end">
+                                {{if not .LastActivity.IsZero}}
+                                <small class="text-muted fw-semibold">
+                                    {{.PrintLastActivity}}
+                                </small><br>
+                                <small class="badge bg-secondary text-light rounded-pill">{{.MessageCount}} replies</small>
+                                {{else if .RootArticle.DateString}}
+                                <small class="text-muted fw-semibold">
+                                    {{.RootArticle.PrintSanitized "date_since" $.GroupName}}
+                                </small><br>
+                                <small class="badge bg-secondary text-light rounded-pill">{{.MessageCount}} replies</small>
+                                {{end}}
+                            </td>
+                            {{if $.User}}
+                            <td class="text-center">
+                                <div class="btn-group btn-group-sm" role="group">
+
+                                    <form method="POST" action="/groups/{{$.GroupName}}/articles/{{.RootArticle.ArticleNum}}/spam#thread-{{.RootArticle.ArticleNum}}" style="display: inline;">
+                                        <button type="submit" class="btn btn-outline-warning btn-sm" title="Flag thread as spam">
+                                            🚩 {{.RootArticle.Spam}}
+                                        </button>
+                                    </form>
+
+                                    {{if $.IsAdmin}}
+                                        {{if gt .RootArticle.Spam 0}}
+                                        <form method="POST" action="/groups/{{$.GroupName}}/articles/{{.RootArticle.ArticleNum}}/decrement-spam#spam-article-{{.RootArticle.ArticleNum}}" style="display: inline;">
+                                            <button type="submit" class="btn btn-outline-warning btn-sm" title="Decrement spam counter">
+                                                <i class="bi bi-dash-circle"></i>
+                                            </button>
+                                        </form>
+                                        <form method="POST" action="/groups/{{$.GroupName}}/articles/{{.RootArticle.ArticleNum}}/hide#thread-{{.RootArticle.ArticleNum}}" style="display: inline;">
+                                            <button type="submit" class="btn btn-outline-secondary btn-sm" title="Hide thread">
+                                                👁️ {{.RootArticle.Hide}}
+                                            </button>
+                                        </form>
+                                        {{end}}
+                                    {{end}}
+                                </div>
+                            </td>
+                            {{end}}
+                        </tr>
+                        {{end}}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Pagination Bottom -->
+{{if gt .TotalPages 1}}
+<div class="row mt-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center flex-wrap">
+                    <small class="text-muted">
+                        Page {{.CurrentPage}} of {{.TotalPages}} • {{.TotalThreads}} total threads
+                    </small>
+
+                    <nav aria-label="Thread pagination">
+                        <ul class="pagination pagination-sm mb-0">
+                            {{if .HasPrevPage}}
+                            <li class="page-item">
+                                <a class="page-link" href="?page=1">First</a>
+                            </li>
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{.PrevPage}}">Previous</a>
+                            </li>
+                            {{else}}
+                            <li class="page-item disabled">
+                                <span class="page-link">First</span>
+                            </li>
+                            <li class="page-item disabled">
+                                <span class="page-link">Previous</span>
+                            </li>
+                            {{end}}
+
+                            <li class="page-item bg-secondary text-light">
+                                <span class="page-link text-white">{{.CurrentPage}}</span>
+                            </li>
+
+                            {{if .HasNextPage}}
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{.NextPage}}">Next</a>
+                            </li>
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{.TotalPages}}">Last</a>
+                            </li>
+                            {{else}}
+                            <li class="page-item disabled">
+                                <span class="page-link">Next</span>
+                            </li>
+                            <li class="page-item disabled">
+                                <span class="page-link">Last</span>
+                            </li>
+                            {{end}}
+                        </ul>
+                    </nav>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{else}}
+<!-- No Threads Found -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="alert alert-warning" role="alert">
+                    <h6 class="alert-heading">
+                        <i class="bi bi-exclamation-triangle me-2"></i>No Threads Found
+                    </h6>
+                    <p class="mb-3">No threads found for this group.</p>
+
+                    <p class="mb-3">This may indicate:</p>
+                    <ul class="mb-3">
+                        <li>Threading has not been built yet</li>
+                        <li>No articles in this group</li>
+                        <li>Group not fully imported</li>
+                    </ul>
+
+                    <p class="mb-3">Try viewing the regular article list:</p>
+                    <div class="d-grid gap-2 d-md-flex">
+                        {{with .GroupName}}
+                        <a href="/groups/{{.}}" class="btn btn-outline-primary">
+                            <i class="bi bi-file-text me-2"></i>{{.}} Articles
+                        </a>
+                        {{else}}
+                        <a href="/groups" class="btn btn-outline-secondary">
+                            <i class="bi bi-arrow-left me-2"></i>Return to Groups
+                        </a>
+                        {{end}}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+<!-- Navigation Help -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="alert alert-light" role="alert">
+            <h6 class="alert-heading">
+                <i class="bi bi-info-circle me-2"></i>Thread Navigation
+            </h6>
+            <div class="row">
+                <div class="col-md-4">
+                    <p class="mb-0">
+                        <strong>Threads</strong> show conversation groups with message counts
+                    </p>
+                </div>
+                <div class="col-md-4">
+                    <p class="mb-0">
+                        <strong>Click thread titles</strong> to view the full discussion
+                    </p>
+                </div>
+                <div class="col-md-4">
+                    <p class="mb-0">
+                        <kbd>G</kbd> to switch to chronological article view
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

@@ -1,0 +1,116 @@
+{{define "admin_spam"}}
+<div class="card mt-3">
+    <div class="card-header bg-warning text-dark">
+        <h5 class="card-title mb-0">
+            <i class="bi bi-flag me-2"></i>Spam Management
+        </h5>
+    </div>
+    <div class="card-body">
+        {{if .SpamArticles}}
+        <!-- Simple pagination info -->
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+                <span class="text-muted">
+                    {{if .SpamPagination}}{{.SpamPagination.TotalCount}} spam articles{{else}}{{len .SpamArticles}} spam articles{{end}}
+                </span>
+            </div>
+        </div>
+
+        <div class="table-responsive">
+            <table class="table table-hover table-sm">
+                <thead class="table-dark">
+                    <tr>
+                        <th scope="col" style="width: 10%">Article #</th>
+                        <th scope="col" style="width: 40%">Subject</th>
+                        <th scope="col" style="width: 20%">From</th>
+                        <th scope="col" style="width: 10%">Date</th>
+                        <th scope="col" style="width: 5%">Spam</th>
+                        <th scope="col" style="width: 15%">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .SpamArticles}}
+                    <tr id="spam-article-{{.ArticleNum}}">
+                        <td class="align-middle">
+                            <span class="badge bg-primary">#{{.ArticleNum}}</span>
+                        </td>
+                        <td class="align-middle">
+                            <div class="text-truncate" style="max-width: 400px;" title="{{.PrintSanitized "subject" .GroupName}}">
+                                <strong>{{if .Subject}}{{.PrintSanitized "subject" .GroupName}}{{else}}[No Subject]{{end}}</strong>
+                            </div>
+                        </td>
+                        <td class="align-middle">
+                            <div class="text-truncate" style="max-width: 200px;" title="{{.PrintSanitized "fromheader" .GroupName}}">
+                                <small class="text-muted">{{.PrintSanitized "fromheader" .GroupName}}</small>
+                            </div>
+                        </td>
+                        <td class="align-middle">
+                            <small class="text-muted">{{.PrintSanitized "date_string" .GroupName}}</small>
+                        </td>
+                        <td class="align-middle text-center">
+                            <span class="badge bg-warning text-dark">{{.Spam}}</span>
+                        </td>
+                        <td class="align-middle text-center">
+                            <div class="btn-group" role="group">
+                                <form method="POST" action="/groups/{{.GroupName}}/articles/{{.ArticleNum}}/decrement-spam#spam-article-{{.ArticleNum}}" style="display: inline;">
+                                    <button type="submit" class="btn btn-outline-warning btn-sm" title="Decrement spam counter">
+                                        <i class="bi bi-dash-circle"></i>
+                                    </button>
+                                </form>
+                                {{if .Hide}}
+                                <form method="POST" action="/groups/{{.GroupName}}/articles/{{.ArticleNum}}/unhide#spam-article-{{.ArticleNum}}" style="display: inline;">
+                                    <button type="submit" class="btn btn-outline-success btn-sm" title="Unhide article">
+                                        <i class="bi bi-eye"></i>
+                                    </button>
+                                </form>
+                                {{else}}
+                                <form method="POST" action="/groups/{{.GroupName}}/articles/{{.ArticleNum}}/hide#spam-article-{{.ArticleNum}}" style="display: inline;">
+                                    <button type="submit" class="btn btn-outline-secondary btn-sm" title="Hide article">
+                                        <i class="bi bi-eye-slash"></i>
+                                    </button>
+                                </form>
+                                {{end}}
+                            </div>
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Use existing pagination template if available -->
+        {{if .SpamPagination}}
+        <div class="d-flex justify-content-center mt-3">
+            <nav aria-label="Spam pagination">
+                <ul class="pagination">
+                    {{if .SpamPagination.HasPrev}}
+                    <li class="page-item">
+                        <a class="page-link" href="?tab=spam&page={{.SpamPagination.PrevPage}}">Previous</a>
+                    </li>
+                    {{end}}
+
+                    <li class="page-item active">
+                        <span class="page-link">{{.SpamPagination.CurrentPage}}</span>
+                    </li>
+
+                    {{if .SpamPagination.HasNext}}
+                    <li class="page-item">
+                        <a class="page-link" href="?tab=spam&page={{.SpamPagination.NextPage}}">Next</a>
+                    </li>
+                    {{end}}
+                </ul>
+            </nav>
+        </div>
+        {{end}}
+
+        {{else}}
+        <div class="alert alert-info" role="alert">
+            <h6 class="alert-heading">
+                <i class="bi bi-info-circle me-2"></i>No Spam Articles Found
+            </h6>
+            <p class="mb-0">No articles have been flagged as spam yet.</p>
+        </div>
+        {{end}}
+    </div>
+</div>
+{{end}}

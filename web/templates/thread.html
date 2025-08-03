@@ -1,0 +1,277 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item"><a href="/groups" class="text-decoration-none">Groups</a></li>
+        {{with .GroupName}}
+        <li class="breadcrumb-item"><a href="/groups/{{.}}" class="text-decoration-none">{{.}}</a></li>
+        <li class="breadcrumb-item"><a href="/groups/{{.}}/threads" class="text-decoration-none">Threads</a></li>
+        {{end}}
+        <li class="breadcrumb-item active" aria-current="page">Thread {{.ThreadRoot.ArticleNum}}</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<!-- Navigation Menu -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-secondary text-white">
+                <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-chat-dots me-2"></i>Thread View{{with .GroupName}}: {{.}}{{end}}
+                    </h5>
+                    {{if .MessageCount}}
+                    <span class="badge bg-light text-dark">
+                        {{.MessageCount}} messages
+                    </span>
+                    {{end}}
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="btn-group" role="group" aria-label="Thread Navigation">
+                    <a href="/groups/{{with .GroupName}}{{.}}{{end}}/threads" class="btn btn-outline-secondary">
+                        <strong>[T]</strong> Back to Threads
+                    </a>
+                    <a href="/groups/{{with .GroupName}}{{.}}{{end}}/tree/{{.ThreadRoot.ArticleNum}}" class="btn btn-outline-secondary">
+                        <strong>[V]</strong> Tree View
+                    </a>
+                    <a href="/groups/{{with .GroupName}}{{.}}{{end}}" class="btn btn-outline-primary">
+                        <strong>[G]</strong> Group Articles
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Thread Info Card -->
+<div class="row mb-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                    <span class="badge bg-secondary">{{.MessageCount}} total messages</span>
+                    {{if gt .TotalPages 1}}<span class="badge bg-info">Page {{.CurrentPage}} of {{.TotalPages}}</span>{{end}}
+                    {{if .ThreadRoot.FromHeader}}<span class="badge bg-secondary">Started by {{.ThreadRoot.PrintSanitized "fromheader" .GroupName}}</span>{{end}}
+                    {{if .ThreadRoot.DateString}}<span class="badge bg-secondary">{{.ThreadRoot.PrintSanitized "date_string" .GroupName}}</span>{{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Pagination Top -->
+{{if gt .TotalPages 1}}
+<div class="row mb-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center flex-wrap">
+                    <small class="text-muted">
+                        Page {{.CurrentPage}} of {{.TotalPages}} • {{.MessageCount}} total messages
+                    </small>
+
+                    <nav aria-label="Thread message pagination">
+                        <ul class="pagination pagination-sm mb-0">
+                            {{if .HasPrevPage}}
+                            <li class="page-item">
+                                <a class="page-link" href="?page=1">First</a>
+                            </li>
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{.PrevPage}}">Previous</a>
+                            </li>
+                            {{else}}
+                            <li class="page-item disabled">
+                                <span class="page-link">First</span>
+                            </li>
+                            <li class="page-item disabled">
+                                <span class="page-link">Previous</span>
+                            </li>
+                            {{end}}
+
+                            <li class="page-item active">
+                                <span class="page-link bg-secondary text-light">{{.CurrentPage}}</span>
+                            </li>
+
+                            {{if .HasNextPage}}
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{.NextPage}}">Next</a>
+                            </li>
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{.TotalPages}}">Last</a>
+                            </li>
+                            {{else}}
+                            <li class="page-item disabled">
+                                <span class="page-link">Next</span>
+                            </li>
+                            <li class="page-item disabled">
+                                <span class="page-link">Last</span>
+                            </li>
+                            {{end}}
+                        </ul>
+                    </nav>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+    {{if .ThreadMessages}}
+    <div class="row">
+        <div class="col-12">
+            {{range $index, $message := .ThreadMessages}}
+            <div class="card mb-3{{if eq $message.ArticleNum $.ThreadRoot.ArticleNum}} border-primary{{end}}">
+                <div class="card-header{{if eq $message.ArticleNum $.ThreadRoot.ArticleNum}} bg-success text-white{{else}} bg-primary text-white{{end}}">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                        <!-- TODO FIXME: reply index does not count correctly with pagination, every page starts from reply 0 again
+                            {{if eq $message.ArticleNum $.ThreadRoot.ArticleNum}}
+                            <i class="bi bi-pin-fill me-2"></i><strong>Topic</strong>
+                            {{else}}
+                            <i class="bi bi-chat-dots me-2"></i><strong>Reply {{$index}}</strong>
+                            {{end}}
+                        -->
+                            {{if eq $message.ArticleNum $.ThreadRoot.ArticleNum}}
+                            <h5 class="bi-pin-fill mt-2 mb-0 text-light">
+                            {{else}}
+                            <h5 class="bi-chat-dots mt-2 mb-0 text-light">
+                            {{end}}
+                                {{if $message.Subject}}{{$message.PrintSanitized "subject" $.GroupName}}{{else}}<em>[No Subject]</em>{{end}}
+                                {{if gt $message.Spam 0}} <span class="badge bg-warning text-dark ms-2">🚩 SPAM</span>{{end}}
+                            </h5>
+                        </div>
+                        <a class="badge bg-secondary text-light" href="/groups/{{$.GroupName}}/articles/{{$message.ArticleNum}}"><span class="text-light">#{{$message.ArticleNum}}</span></a>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="row mb-3">
+                        <div class="col-md-8">
+                            {{if $message.FromHeader}}<strong>Author:</strong> {{$message.PrintSanitized "fromheader" $.GroupName}}<br>{{end}}
+                            {{if $message.DateString}}<strong>Date:</strong> {{$message.PrintSanitized "date_string" $.GroupName}}<br>{{end}}
+                        </div>
+                        <div class="col-md-4 text-md-end">
+                            {{if $message.Lines}}<small class="text-muted">{{$message.Lines}} lines</small><br>{{end}}
+                            {{if $message.Bytes}}<small class="text-muted">{{$message.Bytes}} bytes</small>{{end}}
+                        </div>
+                    </div>
+                    {{if $message.BodyText}}
+                    <div class="article-bg p-3 border rounded">
+                        <pre class="mb-0">{{$message.PrintSanitized "bodytext" $.GroupName}}</pre>
+                    </div>
+                    {{else}}
+                    <div class="alert alert-warning" role="alert">
+                        <i class="bi bi-exclamation-triangle me-2"></i>Article body not available
+                    </div>
+                    {{end}}
+                    <div class="mt-3">
+                    <!--
+                        <a href="/groups/{{$.GroupName}}/articles/{{$message.ArticleNum}}" class="btn btn-outline-primary btn-sm">
+                            <i class="bi bi-eye me-1"></i>View Full Article
+                        </a>
+                    -->
+                    </div>
+                </div>
+            </div>
+            {{end}}
+        </div>
+    </div>
+    {{else}}
+    <div class="row">
+        <div class="col-12">
+            <div class="alert alert-warning" role="alert">
+                <h4 class="alert-heading"><i class="bi bi-exclamation-triangle me-2"></i>No Messages Found</h4>
+                <p class="mb-0">No messages found in this thread.</p>
+                <hr>
+                <a href="/groups/{{.GroupName}}/threads" class="btn btn-outline-warning">
+                    <i class="bi bi-arrow-left me-1"></i>Back to Thread List
+                </a>
+            </div>
+        </div>
+    </div>
+    {{end}}
+
+<!-- Pagination Bottom -->
+{{if gt .TotalPages 1}}
+<div class="row mt-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center flex-wrap">
+                    <small class="text-muted">
+                        Page {{.CurrentPage}} of {{.TotalPages}} • {{.MessageCount}} total messages
+                    </small>
+
+                    <nav aria-label="Thread message pagination">
+                        <ul class="pagination pagination-sm mb-0">
+                            {{if .HasPrevPage}}
+                            <li class="page-item">
+                                <a class="page-link" href="?page=1">First</a>
+                            </li>
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{.PrevPage}}">Previous</a>
+                            </li>
+                            {{else}}
+                            <li class="page-item disabled">
+                                <span class="page-link">First</span>
+                            </li>
+                            <li class="page-item disabled">
+                                <span class="page-link">Previous</span>
+                            </li>
+                            {{end}}
+
+                            <li class="page-item active">
+                                <span class="page-link bg-secondary text-light">{{.CurrentPage}}</span>
+                            </li>
+
+                            {{if .HasNextPage}}
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{.NextPage}}">Next</a>
+                            </li>
+                            <li class="page-item">
+                                <a class="page-link" href="?page={{.TotalPages}}">Last</a>
+                            </li>
+                            {{else}}
+                            <li class="page-item disabled">
+                                <span class="page-link">Next</span>
+                            </li>
+                            <li class="page-item disabled">
+                                <span class="page-link">Last</span>
+                            </li>
+                            {{end}}
+                        </ul>
+                    </nav>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+<!-- Thread Navigation Help -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-secondary text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-info-circle me-2"></i>Thread Navigation
+                </h5>
+            </div>
+            <div class="card-body">
+                <p>This is a paginated view of messages in the thread with full content displayed inline.</p>
+                <p>Messages are displayed in chronological order, with the original post highlighted in green.</p>
+                <p>Use pagination controls to navigate through all messages in large threads.</p>
+                {{with .GroupName}}
+                <a href="/groups/{{.}}/threads" class="btn btn-outline-primary">
+                    <i class="bi bi-arrow-left me-1"></i>Back to All Threads
+                </a>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
