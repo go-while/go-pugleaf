@@ -1,0 +1,78 @@
+- irc.pugleaf.net Message of the Day -
+
+        ____  __  __________    _________    ______   _   ______________
+       / __ \/ / / / ____/ /   / ____/   |  / ____/  / | / / ____/_  __/
+      / /_/ / / / / / __/ /   / __/ / /| | / /_     /  |/ / __/   / /
+     / ____/ /_/ / /_/ / /___/ /___/ ___ |/ __/  _ / /|  / /___  / /
+    /_/    \____/\____/_____/_____/_/  |_/_/    (_)_/ |_/_____/ /_/
+
+                  🚀 Welcome to PUGLEAF.NET IRC Network! 🚀
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    📡 Server: irc.pugleaf.net
+                    🔒 SSL/TLS: 6697 (SSL)
+                    ⚠️ Plain: 6667 (no SSL)
+                    🚀 Home: https://pugleaf.net
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    🛡️  NETWORK INFORMATION 🛡️
+
+        • This is a retro-themed IRC network focused on discussion,
+          nostalgia and the classic internet experience!
+
+        • Inspired by RockSolid Light and classic BBS systems!
+
+    🌍 TOR: ij7fmstcudrwyty5p6iloodeenur4wksovlhbyrfubat7eixplmrxvqd.onion
+       Port: 6667 (no SSL)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    🏛️  MAIN CHANNELS 🏛️
+
+            #coding             - Code, development, and technical talk
+            #lounge             - General chat and hangout space
+            #retro              - Retro computing, vintage tech discussion
+            #rocksolid          - RIP Retro Guy memorial channel
+            #devnull            - Network support and assistance
+            #aichat             - Have fun with AI bots
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    📜 NETWORK RULES 📜
+
+            1. Be respectful and civil to all users
+            2. No spam, flooding, or excessive automated messages
+            3. No sharing of illegal content or malicious software
+            4. Follow standard IRC etiquette and common sense
+            5. Operators have final say in disputes
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    🔧 NETWORK SERVICES 🔧
+
+            • NickServ: Register and protect your nickname
+            • ChanServ: Channel registration and management
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    💡 USEFUL COMMANDS 💡
+
+            /LIST              - List all channels
+            /WHOIS <nick>      - Get information about a user
+            /JOIN #channel     - Join a channel
+            /MSG NickServ HELP - Get help with nickname services
+            /MOTD              - Display this message again
+
+            /nickserv identify <username> <password>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+              🎯 "Bringing back the golden age of online communities" 🎯
+
+                   Thanks for connecting! Happy chatting!
+
+                         Last updated: July 30, 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

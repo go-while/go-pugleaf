@@ -1,0 +1,142 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"sync"
+
+	"github.com/go-while/go-pugleaf/internal/history"
+)
+
+func main() {
+	// Clean up any previous test data
+	testDir := "./demo_history"
+	os.RemoveAll(testDir)
+
+	fmt.Println("🚀 Go-Pugleaf History System Demo")
+	fmt.Println("===================================")
+
+	// Create configuration with 16-DB sharding (recommended)
+	config := &history.HistoryConfig{
+		HistoryDir:     testDir,
+		CacheExpires:   300,
+		CachePurge:     60,
+		ShardMode:      history.SHARD_16_256, // 16 databases with 256 tables each
+		MaxConnections: 8,
+	}
+
+	fmt.Printf("Configuration:\n")
+	fmt.Printf("  • History Directory: %s\n", config.HistoryDir)
+	fmt.Printf("  • Sharding Mode: 16 databases with 256 tables each\n")
+	fmt.Printf("  • L1 Cache: Enabled\n")
+	fmt.Printf("  • Max Connections: %d per database\n\n", config.MaxConnections)
+
+	// Initialize history system
+	fmt.Println("📊 Initializing history system...")
+
+	// Create waitgroup for history coordination
+	var wg sync.WaitGroup
+
+	hist, err := history.NewHistory(config, &wg)
+	if err != nil {
+		log.Fatalf("Failed to create history: %v", err)
+	}
+	defer func() {
+		fmt.Println("⏳ Waiting for history workers to finish...")
+		wg.Wait()
+		fmt.Println("✅ History workers finished")
+		hist.Close()
+	}()
+
+	fmt.Println("✅ History system initialized successfully!")
+
+	// Test message-IDs
+	testMessages := []struct {
+		messageID string
+		token     string
+	}{
+		{"<article1@news.example.com>", "A:comp.lang.go:1001"},
+		{"<article2@news.example.com>", "A:comp.lang.go:1002"},
+		{"<article3@news.example.com>", "A:alt.test:2001"},
+		{"<duplicate@news.example.com>", "A:comp.test:3001"},
+	}
+
+	fmt.Println("📝 Adding message-IDs to history:")
+	for i, msg := range testMessages {
+		hash := history.ComputeMessageIDHash(msg.messageID)
+
+		response, err := hist.Add(msg.messageID, msg.token)
+		if err != nil {
+			log.Printf("Error adding message %d: %v", i+1, err)
+			continue
+		}
+
+		status := "ADDED"
+		if response == history.CaseDupes {
+			status = "DUPLICATE"
+		}
+
+		fmt.Printf("  %d. %s\n", i+1, status)
+		fmt.Printf("     Message-ID: %s\n", msg.messageID)
+		fmt.Printf("     Hash: %s\n", hash)
+		fmt.Printf("     Token: %s\n\n", msg.token)
+	}
+
+	// Test duplicate detection
+	fmt.Println("🔍 Testing duplicate detection:")
+	dupResponse, err := hist.Add(testMessages[0].messageID, testMessages[0].token)
+	if err != nil {
+		log.Printf("Error testing duplicate: %v", err)
+	} else {
+		if dupResponse == history.CaseDupes {
+			fmt.Println("✅ Duplicate detection working correctly!")
+		} else {
+			fmt.Println("❌ Duplicate detection failed!")
+		}
+	}
+
+	// Test lookups
+	fmt.Println("\n🔎 Testing message-ID lookups:")
+	for i, msg := range testMessages[:2] {
+		result, err := hist.Lookup(msg.messageID)
+		if err != nil {
+			log.Printf("Error looking up message %d: %v", i+1, err)
+			continue
+		}
+
+		switch result {
+		case history.CaseDupes:
+			fmt.Printf("  ✅ Found: %s (duplicate detected)\n", msg.messageID)
+		case history.CasePass:
+			fmt.Printf("  ❌ Not found: %s\n", msg.messageID)
+		default:
+			fmt.Printf("  ⚠️  Error for: %s (retry needed)\n", msg.messageID)
+		}
+	}
+
+	// Show statistics
+	fmt.Println("\n📈 System Statistics:")
+	stats := hist.GetStats()
+	fmt.Printf("  • Total Adds: %d\n", stats.TotalAdds)
+	fmt.Printf("  • Total Lookups: %d\n", stats.TotalLookups)
+	fmt.Printf("  • Cache Hits: %d\n", stats.CacheHits)
+	fmt.Printf("  • Cache Misses: %d\n", stats.CacheMisses)
+	fmt.Printf("  • Duplicates: %d\n", stats.Duplicates)
+	fmt.Printf("  • Errors: %d\n", stats.Errors)
+
+	// Test different sharding modes info
+	fmt.Println("\n🗄️  Available Sharding Modes:")
+	modes := []int{
+		history.SHARD_SINGLE_DB,
+		history.SHARD_16_256,
+	}
+
+	for _, mode := range modes {
+		numDBs, tablesPerDB, description := history.GetShardConfig(mode)
+		fmt.Printf("  Mode %d: %s (%d DBs × %d tables)\n", mode, description, numDBs, tablesPerDB)
+	}
+
+	fmt.Println("\n🎉 Demo completed successfully!")
+	fmt.Println("The 16-DB sharded SQLite backend is ready for production use!")
+}

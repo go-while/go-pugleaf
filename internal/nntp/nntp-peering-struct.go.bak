@@ -1,0 +1,138 @@
+package nntp
+
+// Legacy peering structures - DEPRECATED
+// This file contains legacy NNTP peering code that needs modernization
+// Use internal/nntp/peering.go for the new implementation
+
+// TODO: Remove this file once peering.go is fully integrated
+// TODO: Migrate any useful functions to the new peering system
+// TODO: Update all references to use the new PeeringManager
+
+import (
+	"fmt"
+	"log"
+	"net"
+	"strings"
+	"sync"
+)
+
+// DEPRECATED: Use PeeringManager from peering.go instead
+type LegacyPeeringManager struct {
+	mux      sync.RWMutex          //nolint:unused
+	peers    map[string]LegacyPeer //nolint:unused
+	hostname string                //nolint:unused
+	debug    bool                  //nolint:unused
+}
+
+// DEPRECATED: Use Peer from peering.go instead
+type LegacyPeer struct {
+	Enabled  bool   `json:"enabled"`
+	Hostname string `json:"hostname"`
+	Port     int    `json:"port"`
+	ReadOnly bool   `json:"read_only"`
+	MaxConns int    `json:"max_conns"`
+	UseSSL   bool   `json:"use_ssl"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// DEPRECATED: Legacy connection validation
+func (lpm *LegacyPeeringManager) CheckConnection(conn net.Conn) bool {
+	log.Printf("DEPRECATED: LegacyPeeringManager.CheckConnection - use PeeringManager instead")
+	return false
+}
+
+// Legacy helper functions that might be useful for migration
+
+// MatchCIDR checks if an IP address matches a CIDR block
+func MatchCIDR(remoteAddr string, matchCIDR string) (bool, error) {
+	ip := net.ParseIP(remoteAddr)
+	if ip == nil {
+		return false, fmt.Errorf("invalid IP address: %s", remoteAddr)
+	}
+
+	_, ipNet, err := net.ParseCIDR(matchCIDR)
+	if err != nil {
+		return false, fmt.Errorf("invalid CIDR block: %s", matchCIDR)
+	}
+
+	return ipNet.Contains(ip), nil
+}
+
+// MatchRDNS performs reverse DNS lookup with basic rate limiting
+func MatchRDNS(remoteAddr string, dnsQueryLimiter chan struct{}) (string, bool) {
+	if dnsQueryLimiter != nil {
+		dnsQueryLimiter <- struct{}{}
+		defer func() { <-dnsQueryLimiter }()
+	}
+
+	hosts, err := net.LookupAddr(remoteAddr)
+	if err != nil {
+		log.Printf("ERROR MatchRDNS LookupAddr err='%v'", err)
+		return "", false
+	}
+
+	for _, hostname := range hosts {
+		hostname = strings.TrimSuffix(hostname, ".")
+		if MatchHost(hostname, remoteAddr, dnsQueryLimiter) {
+			return hostname, true
+		}
+	}
+
+	return "", false
+}
+
+// MatchHost validates that a hostname resolves to the expected IP
+func MatchHost(hostname string, expectedAddr string, dnsQueryLimiter chan struct{}) bool {
+	if dnsQueryLimiter != nil {
+		dnsQueryLimiter <- struct{}{}
+		defer func() { <-dnsQueryLimiter }()
+	}
+
+	addrs, err := net.LookupHost(hostname)
+	if err != nil {
+		log.Printf("ERROR MatchHost LookupHost err='%v'", err)
+		return false
+	}
+
+	for _, addr := range addrs {
+		if addr == expectedAddr {
+			return true
+		}
+	}
+	return false
+}
+
+// RemoteAddr extracts the IP address from a connection
+func RemoteAddr(conn net.Conn) string {
+	remoteAddr, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+	if err != nil {
+		log.Printf("ERROR RemoteAddr net.SplitHostPort err='%v'", err)
+		return ""
+	}
+	return remoteAddr
+}
+
+// StrIsIPv4 checks if a string is a valid IPv4 address
+func StrIsIPv4(address string) bool {
+	testInput := net.ParseIP(address)
+	return testInput != nil && testInput.To4() != nil
+}
+
+// StrIsIPv6 checks if a string contains IPv6 format (simple check)
+func StrIsIPv6(address string) bool {
+	return strings.Contains(address, ":")
+}
+
+// Legacy DNS rate limiting helpers - consider using a proper rate limiter
+func lock_dnsquery(dnsQueryLimiter chan struct{}) {
+	if dnsQueryLimiter != nil {
+		dnsQueryLimiter <- struct{}{}
+	}
+}
+
+func return_dnsquery(dnsQueryLimiter chan struct{}) {
+	if dnsQueryLimiter != nil {
+		<-dnsQueryLimiter
+	}
+}

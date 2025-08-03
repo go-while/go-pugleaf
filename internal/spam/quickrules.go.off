@@ -1,0 +1,344 @@
+package spam
+
+import (
+	"log"
+	"strings"
+
+	"github.com/go-while/go-pugleaf/internal/models"
+)
+
+// PredefinedRules contains built-in spam detection rules based on your SpamAssassin config
+type PredefinedRules struct {
+	enabled bool
+}
+
+// NewPredefinedRules creates a new predefined rules checker
+func NewPredefinedRules() *PredefinedRules {
+	return &PredefinedRules{enabled: true}
+}
+
+// CheckQuickRules performs fast spam checks based on your SpamAssassin rules
+func (pr *PredefinedRules) CheckQuickRules(article *models.Article, headers map[string][]string, newsgroups []string) (isSpam bool, score float64, reason string) {
+	if !pr.enabled {
+		return false, 0, ""
+	}
+
+	var totalScore float64
+	var reasons []string
+
+	// Check ABAVIA bot detection (from local.cf)
+	if pr.checkAbaviaBot(article, headers) {
+		totalScore += 8.0
+		reasons = append(reasons, "ABAVIA_BOT")
+	}
+
+	// Check bad From headers (from 17_whitelist-blacklist.cf)
+	if pr.checkBadFrom(article) {
+		totalScore += 8.0
+		reasons = append(reasons, "BAD_FROM")
+	}
+
+	// Check Giganews with injection info (from 15_servers.cf)
+	if pr.checkGiganewsInjection(headers) {
+		totalScore += 25.0
+		reasons = append(reasons, "GIGANEWS_WITH_INJECTION_INFO")
+	}
+
+	// Check AMS/usenet-server.com with injection info
+	if pr.checkAMSInjection(headers) {
+		totalScore += 25.0
+		reasons = append(reasons, "AMS_WITH_INJECTION_INFO")
+	}
+
+	// Check solutions manual spam (from local.cf)
+	if pr.checkSolutionsManual(article) {
+		totalScore += 5.0 // 2.5 + 2.5 for subject + body
+		reasons = append(reasons, "SOLUTIONS_MANUAL")
+	}
+
+	// Check contact links spam
+	if pr.checkContactLinks(article) {
+		totalScore += 0.2
+		reasons = append(reasons, "CONTACT_LINK")
+	}
+
+	// Check random pattern spam
+	if pr.checkRandomPatterns(article) {
+		totalScore += 5.0
+		reasons = append(reasons, "RS_SHIT1")
+	}
+
+	// Check base64 encoding (often used by spammers)
+	if pr.checkBase64Content(headers) {
+		totalScore += 1.0
+		reasons = append(reasons, "BASE64_BODY")
+	}
+
+	// Check repeated HTTP links
+	if score := pr.checkRepeatedLinks(article); score > 0 {
+		totalScore += score
+		if score >= 2.0 {
+			reasons = append(reasons, "FORTY_REPEAT_HTTP_LINK")
+		} else {
+			reasons = append(reasons, "TEN_REPEAT_HTTP_LINK")
+		}
+	}
+
+	// Check UTF data patterns
+	if pr.checkUTFDataPattern(article) {
+		totalScore += 5.0
+		reasons = append(reasons, "META_UTF_DATA_01")
+	}
+
+	// Apply whitelist reductions
+	totalScore = pr.applyWhitelists(totalScore, article, newsgroups)
+
+	reason = strings.Join(reasons, ",")
+
+	// Log significant spam scores
+	if totalScore >= 5.0 {
+		log.Printf("[SPAM-QUICK] Message %s scored %.2f - Rules: %s",
+			article.MessageID, totalScore, reason)
+	}
+
+	return totalScore >= 6.0, totalScore, reason
+}
+
+// checkAbaviaBot detects ABAVIA bot spam patterns
+func (pr *PredefinedRules) checkAbaviaBot(article *models.Article, headers map[string][]string) bool {
+	// Check for ABAVIA server in path
+	pathHeaders := headers["path"]
+	serverAbavia := false
+	for _, path := range pathHeaders {
+		if strings.Contains(path, ".abavia.com!reseller!not-for-mail") {
+			serverAbavia = true
+			break
+		}
+	}
+
+	if !serverAbavia {
+		return false
+	}
+
+	// Check for bad Message-ID pattern: ends with 22-26 chars followed by >
+	// Pattern: ^.*@[a-zA-Z0-9\-]{22,26}>$
+	messageID := article.MessageID
+	if strings.HasSuffix(messageID, ">") {
+		atIndex := strings.LastIndex(messageID, "@")
+		if atIndex != -1 {
+			domain := messageID[atIndex+1 : len(messageID)-1] // Remove @ and >
+			if len(domain) >= 22 && len(domain) <= 26 {
+				// Check if domain is alphanumeric + hyphens
+				for _, r := range domain {
+					if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+						(r >= '0' && r <= '9') || r == '-') {
+						return false
+					}
+				}
+
+				// Check for 32-char domain in From header
+				if strings.Contains(article.FromHeader, "@") {
+					fromParts := strings.Split(article.FromHeader, "@")
+					if len(fromParts) > 1 {
+						fromDomain := strings.Split(fromParts[1], ".")[0]
+						if len(fromDomain) == 32 {
+							// Check if it's alphanumeric
+							for _, r := range fromDomain {
+								if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+									(r >= '0' && r <= '9')) {
+									return false
+								}
+							}
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// checkBadFrom checks for known bad From headers
+func (pr *PredefinedRules) checkBadFrom(article *models.Article) bool {
+	badFromPatterns := []string{
+		"vvgrant886",
+		"jainelectro",
+		"georgethecockroach@gmail.com",
+		"mayaaprianaya@gmail.com",
+	}
+
+	fromHeader := strings.ToLower(article.FromHeader)
+	for _, pattern := range badFromPatterns {
+		if strings.Contains(fromHeader, strings.ToLower(pattern)) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkGiganewsInjection checks for Giganews with injection info
+func (pr *PredefinedRules) checkGiganewsInjection(headers map[string][]string) bool {
+	// Check for Giganews in path
+	pathHeaders := headers["path"]
+	giganews := false
+	for _, path := range pathHeaders {
+		if strings.Contains(path, "!news.giganews.com.POSTED!not-for-mail") {
+			giganews = true
+			break
+		}
+	}
+
+	if !giganews {
+		return false
+	}
+
+	// Check for Injection-Info header
+	_, hasInjectionInfo := headers["injection-info"]
+	return hasInjectionInfo
+}
+
+// checkAMSInjection checks for AMS/usenet-server.com with injection info
+func (pr *PredefinedRules) checkAMSInjection(headers map[string][]string) bool {
+	// Check for AMS pattern in path: fx[0-9]{1,2}.ams[0-9]{1}.POSTED!not-for-mail
+	pathHeaders := headers["path"]
+	amsServer := false
+	for _, path := range pathHeaders {
+		if strings.Contains(path, ".ams") && strings.Contains(path, ".POSTED!not-for-mail") {
+			amsServer = true
+			break
+		}
+	}
+
+	if !amsServer {
+		return false
+	}
+
+	// Check for Injection-Info header
+	_, hasInjectionInfo := headers["injection-info"]
+	return hasInjectionInfo
+}
+
+// checkSolutionsManual checks for solutions manual spam
+func (pr *PredefinedRules) checkSolutionsManual(article *models.Article) bool {
+	// Check subject for "solutions manual" or "case solution"
+	subject := strings.ToLower(article.Subject)
+	subjectMatch := strings.Contains(subject, "solutions manual") ||
+		strings.Contains(subject, "solution manual") ||
+		strings.Contains(subject, "case solution")
+
+	// Check body for "solutions manual"
+	body := strings.ToLower(article.BodyText)
+	bodyMatch := strings.Contains(body, "solutions manual") ||
+		strings.Contains(body, "solution manual")
+
+	return subjectMatch || bodyMatch
+}
+
+// checkContactLinks checks for suspicious contact methods
+func (pr *PredefinedRules) checkContactLinks(article *models.Article) bool {
+	body := strings.ToLower(article.BodyText)
+	contactPatterns := []string{
+		"whatsapp",
+		"whats app",
+		"@protonmail",
+		"wickr id",
+		"telegram",
+		"jabber",
+		"ic2",
+		".onion",
+		".shop/",
+	}
+
+	for _, pattern := range contactPatterns {
+		if strings.Contains(body, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkRandomPatterns checks for random spam patterns
+func (pr *PredefinedRules) checkRandomPatterns(article *models.Article) bool {
+	// Pattern: ^[a-zA-Z0-9_]{6}  <a href="http://[a-z]{12}.com/">.*[url=http://[a-z]{12}.com/.*[link=http://[a-z]{12}.com/
+	body := article.BodyText
+
+	// Simple check for the pattern elements
+	return strings.Contains(body, `<a href="http://`) &&
+		strings.Contains(body, `[url=http://`) &&
+		strings.Contains(body, `[link=http://`) &&
+		strings.Contains(body, ".com/")
+}
+
+// checkBase64Content checks for base64 content encoding
+func (pr *PredefinedRules) checkBase64Content(headers map[string][]string) bool {
+	encodingHeaders := headers["content-transfer-encoding"]
+	for _, encoding := range encodingHeaders {
+		if strings.Contains(strings.ToLower(encoding), "base64") {
+			return true
+		}
+	}
+	return false
+}
+
+// checkRepeatedLinks checks for repeated HTTP links
+func (pr *PredefinedRules) checkRepeatedLinks(article *models.Article) float64 {
+	body := article.BodyText
+	httpCount := strings.Count(strings.ToLower(body), "http://") +
+		strings.Count(strings.ToLower(body), "https://")
+
+	if httpCount > 40 {
+		return 2.0
+	} else if httpCount > 10 {
+		return 0.8
+	}
+	return 0
+}
+
+// checkUTFDataPattern checks for specific UTF data patterns
+func (pr *PredefinedRules) checkUTFDataPattern(article *models.Article) bool {
+	// Check for pattern: +Ps++4j+KAjfCfjIg (appears >10 times)
+	body := article.BodyText
+	pattern := "+Ps++4j+KAjfCfjIg"
+	count := strings.Count(body, pattern)
+	return count > 10
+}
+
+// applyWhitelists applies whitelist rules to reduce spam scores
+func (pr *PredefinedRules) applyWhitelists(score float64, article *models.Article, newsgroups []string) float64 {
+	// NOCEM whitelist (NOCEM groups with @@NCM subject)
+	for _, ng := range newsgroups {
+		if strings.Contains(ng, "news.lists.filters") ||
+			strings.Contains(ng, "rocksolid.spam") ||
+			strings.Contains(ng, "i2pn.spam") {
+			if strings.HasPrefix(article.Subject, "@@NCM ") {
+				return -100.0 // Complete whitelist
+			}
+		}
+	}
+
+	// News feeds whitelist
+	for _, ng := range newsgroups {
+		if strings.HasPrefix(ng, "rocksolid.feeds.") {
+			if strings.Contains(article.FromHeader, "usenet@novabbs.org") {
+				return -100.0 // Complete whitelist
+			}
+		}
+	}
+
+	// Fidonet whitelist
+	for _, ng := range newsgroups {
+		if strings.HasPrefix(ng, "fido.") || strings.HasPrefix(ng, "fido7.") {
+			return -100.0 // Complete whitelist
+		}
+	}
+
+	return score
+}
+
+// QuickSpamCheck performs a fast spam check without running SpamAssassin
+func QuickSpamCheck(article *models.Article, headers map[string][]string, newsgroups []string) (isSpam bool, score float64, reason string) {
+	rules := NewPredefinedRules()
+	return rules.CheckQuickRules(article, headers, newsgroups)
+}

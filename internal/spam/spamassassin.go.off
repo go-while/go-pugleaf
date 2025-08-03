@@ -1,0 +1,322 @@
+package spam
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os/exec"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/go-while/go-pugleaf/internal/models"
+)
+
+// SpamAssassinConfig holds configuration for SpamAssassin integration
+type SpamAssassinConfig struct {
+	Enabled         bool    `yaml:"enabled"`
+	ConfigPath      string  `yaml:"config_path"`
+	RequiredScore   float64 `yaml:"required_score"`
+	TimeoutSeconds  int     `yaml:"timeout_seconds"`
+	MaxMessageSize  int     `yaml:"max_message_size"` // Skip very large messages
+	LogSpamDetails  bool    `yaml:"log_spam_details"`
+	RejectThreshold float64 `yaml:"reject_threshold"` // Auto-reject if score >= this
+}
+
+// SpamAssassinResult holds the result of spam checking
+type SpamAssassinResult struct {
+	IsSpam        bool
+	Score         float64
+	RequiredScore float64
+	Details       string
+	Tests         []string
+	ProcessTime   time.Duration
+}
+
+// SpamAssassinFilter implements spam filtering using SpamAssassin
+type SpamAssassinFilter struct {
+	config *SpamAssassinConfig
+}
+
+// NewSpamAssassinFilter creates a new SpamAssassin filter instance
+func NewSpamAssassinFilter(config *SpamAssassinConfig) *SpamAssassinFilter {
+	if config == nil {
+		config = &SpamAssassinConfig{
+			Enabled:         false,
+			ConfigPath:      "/home/fed/WORKSPACES/workspace.go-pugleaf/spamassassin",
+			RequiredScore:   6.0,
+			TimeoutSeconds:  30,
+			MaxMessageSize:  1024 * 1024, // 1MB
+			LogSpamDetails:  true,
+			RejectThreshold: 15.0, // Auto-reject very obvious spam
+		}
+	}
+	return &SpamAssassinFilter{config: config}
+}
+
+// CheckArticle checks if an article is spam using SpamAssassin
+func (sa *SpamAssassinFilter) CheckArticle(article *models.Article, headers map[string][]string, body []byte) (*SpamAssassinResult, error) {
+	if !sa.config.Enabled {
+		return &SpamAssassinResult{IsSpam: false, Score: 0}, nil
+	}
+
+	// Skip very large messages to avoid performance issues
+	messageSize := len(body) + len(article.HeadersJSON)
+	if messageSize > sa.config.MaxMessageSize {
+		log.Printf("[SPAM] Skipping large message %s (%d bytes)", article.MessageID, messageSize)
+		return &SpamAssassinResult{IsSpam: false, Score: 0}, nil
+	}
+
+	start := time.Now()
+
+	// Build RFC2822 message format for SpamAssassin
+	message := sa.buildRFC2822Message(article, headers, body)
+
+	// Run SpamAssassin check
+	result, err := sa.runSpamAssassin(message)
+	if err != nil {
+		return nil, fmt.Errorf("SpamAssassin check failed: %w", err)
+	}
+
+	result.ProcessTime = time.Since(start)
+
+	// Log spam detection
+	if result.IsSpam && sa.config.LogSpamDetails {
+		log.Printf("[SPAM] Message %s scored %.2f/%.2f (SPAM) - Tests: %s",
+			article.MessageID, result.Score, result.RequiredScore, strings.Join(result.Tests, ","))
+	}
+
+	return result, nil
+}
+
+// buildRFC2822Message constructs a proper RFC2822 message for SpamAssassin
+func (sa *SpamAssassinFilter) buildRFC2822Message(article *models.Article, headers map[string][]string, body []byte) string {
+	var message strings.Builder
+
+	// Add essential headers for Usenet spam detection
+	requiredHeaders := []string{
+		"Message-ID",
+		"From",
+		"Subject",
+		"Date",
+		"Newsgroups",
+		"Path",
+		"References",
+		"User-Agent",
+		"X-Newsreader",
+		"Organization",
+		"Content-Type",
+		"Content-Transfer-Encoding",
+		"Injection-Info",
+		"NNTP-Posting-Host",
+		"X-Trace",
+	}
+
+	// Write headers in proper order
+	for _, headerName := range requiredHeaders {
+		if values, exists := headers[strings.ToLower(headerName)]; exists && len(values) > 0 {
+			for _, value := range values {
+				message.WriteString(fmt.Sprintf("%s: %s\r\n", headerName, value))
+			}
+		}
+	}
+
+	// Add other headers not in required list
+	for headerName, values := range headers {
+		if !contains(requiredHeaders, headerName) {
+			for _, value := range values {
+				message.WriteString(fmt.Sprintf("%s: %s\r\n", properCase(headerName), value))
+			}
+		}
+	}
+
+	// Empty line between headers and body (RFC2822 requirement)
+	message.WriteString("\r\n")
+
+	// Add body
+	message.Write(body)
+
+	return message.String()
+}
+
+// runSpamAssassin executes SpamAssassin and parses the result
+func (sa *SpamAssassinFilter) runSpamAssassin(message string) (*SpamAssassinResult, error) {
+	// Build command with custom config path
+	cmd := exec.Command("spamassassin",
+		"--configpath="+sa.config.ConfigPath,
+		"--test-mode",
+		"--exit-code")
+
+	// Set timeout
+	if sa.config.TimeoutSeconds > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(),
+			time.Duration(sa.config.TimeoutSeconds)*time.Second)
+		defer cancel()
+		cmd = exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
+	}
+
+	// Pipe message to stdin
+	cmd.Stdin = strings.NewReader(message)
+
+	// Capture output
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// SpamAssassin returns non-zero exit code for spam, check if it's a real error
+		if exitError, ok := err.(*exec.ExitError); ok {
+			// Exit code 1 = spam detected, this is normal
+			if exitError.ExitCode() != 1 {
+				return nil, fmt.Errorf("spamassassin failed with exit code %d: %s",
+					exitError.ExitCode(), string(output))
+			}
+		} else {
+			return nil, fmt.Errorf("failed to run spamassassin: %w", err)
+		}
+	}
+
+	// Parse SpamAssassin output
+	return sa.parseSpamAssassinOutput(string(output))
+}
+
+// parseSpamAssassinOutput parses SpamAssassin test output
+func (sa *SpamAssassinFilter) parseSpamAssassinOutput(output string) (*SpamAssassinResult, error) {
+	result := &SpamAssassinResult{
+		RequiredScore: sa.config.RequiredScore,
+		Tests:         []string{},
+	}
+
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Look for spam status line: "X-Spam-Status: Yes, score=8.2 required=6.0"
+		if strings.HasPrefix(line, "X-Spam-Status:") {
+			if err := sa.parseSpamStatus(line, result); err != nil {
+				return nil, err
+			}
+		}
+
+		// Look for test results: "X-Spam-Report:"
+		if strings.HasPrefix(line, "*") && strings.Contains(line, " ") {
+			sa.parseSpamTest(line, result)
+		}
+	}
+
+	return result, nil
+}
+
+var scoreRegex = regexp.MustCompile(`score=([0-9.-]+)`)
+var requiredRegex = regexp.MustCompile(`required=([0-9.-]+)`)
+
+// parseSpamStatus parses the X-Spam-Status header
+func (sa *SpamAssassinFilter) parseSpamStatus(line string, result *SpamAssassinResult) error {
+	// Extract spam status
+	result.IsSpam = strings.Contains(line, "Yes,")
+
+	// Extract score using regex
+
+	if matches := scoreRegex.FindStringSubmatch(line); len(matches) > 1 {
+		score, err := strconv.ParseFloat(matches[1], 64)
+		if err != nil {
+			return fmt.Errorf("failed to parse spam score: %w", err)
+		}
+		result.Score = score
+	}
+
+	// Extract required score
+
+	if matches := requiredRegex.FindStringSubmatch(line); len(matches) > 1 {
+		required, err := strconv.ParseFloat(matches[1], 64)
+		if err != nil {
+			return fmt.Errorf("failed to parse required score: %w", err)
+		}
+		result.RequiredScore = required
+	}
+
+	return nil
+}
+
+// parseSpamTest parses individual spam test results
+func (sa *SpamAssassinFilter) parseSpamTest(line string, result *SpamAssassinResult) {
+	// Parse lines like: "* 2.5 SOLUTIONS_MANUAL_SUBJECT Solutions manual"
+	parts := strings.Fields(line)
+	if len(parts) >= 3 && parts[0] == "*" {
+		testName := parts[2]
+		result.Tests = append(result.Tests, testName)
+	}
+}
+
+// IsSpamByThreshold checks if message should be auto-rejected
+func (sa *SpamAssassinFilter) IsSpamByThreshold(result *SpamAssassinResult) bool {
+	return result.Score >= sa.config.RejectThreshold
+}
+
+// GetSpamScore returns the spam score for an article
+func (sa *SpamAssassinFilter) GetSpamScore(article *models.Article, headers map[string][]string, body []byte) float64 {
+	result, err := sa.CheckArticle(article, headers, body)
+	if err != nil {
+		log.Printf("[SPAM] Error checking article %s: %v", article.MessageID, err)
+		return 0
+	}
+	return result.Score
+}
+
+// Helper functions
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if strings.EqualFold(s, item) {
+			return true
+		}
+	}
+	return false
+}
+
+func properCase(header string) string {
+	parts := strings.Split(header, "-")
+	for i, part := range parts {
+		if len(part) > 0 {
+			parts[i] = strings.ToUpper(part[:1]) + strings.ToLower(part[1:])
+		}
+	}
+	return strings.Join(parts, "-")
+}
+
+// CheckNOCEMWhitelist checks if message is a NOCEM (spam cancellation) message
+func (sa *SpamAssassinFilter) CheckNOCEMWhitelist(article *models.Article, newsgroups []string) bool {
+	// Check for NOCEM groups (news.lists.filters, rocksolid.spam, i2pn.spam)
+	for _, ng := range newsgroups {
+		if strings.Contains(ng, "news.lists.filters") ||
+			strings.Contains(ng, "rocksolid.spam") ||
+			strings.Contains(ng, "i2pn.spam") {
+			// Check for NOCEM subject format: "@@NCM "
+			if strings.HasPrefix(article.Subject, "@@NCM ") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// CheckFidonetWhitelist checks if message is from Fidonet (trusted network)
+func (sa *SpamAssassinFilter) CheckFidonetWhitelist(newsgroups []string) bool {
+	for _, ng := range newsgroups {
+		if strings.HasPrefix(ng, "fido.") || strings.HasPrefix(ng, "fido7.") {
+			return true
+		}
+	}
+	return false
+}
+
+// CheckNewsFeedsWhitelist checks if message is a news feed message
+func (sa *SpamAssassinFilter) CheckNewsFeedsWhitelist(article *models.Article, newsgroups []string) bool {
+	// Check for rocksolid.feeds groups with specific From header
+	for _, ng := range newsgroups {
+		if strings.HasPrefix(ng, "rocksolid.feeds.") {
+			if strings.Contains(article.FromHeader, "usenet@novabbs.org") {
+				return true
+			}
+		}
+	}
+	return false
+}

@@ -1,0 +1,5 @@
+Benchmarking hash functions on 100000 random message-ids...
+MD5:    29.19257ms
+SHA1:   50.30126ms
+SHA256: 50.182033ms
+SHA512: 74.01107ms

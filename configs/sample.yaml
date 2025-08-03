@@ -1,0 +1,29 @@
+# go-pugleaf Sample Configuration
+
+# Database settings
+database:
+  path: "./data/newsgroups.db"
+
+# NNTP Server connection settings
+nntp:
+  server: "news.example.com"
+  port: 119
+  username: ""
+  password: ""
+  ssl: false
+  max_connections: 10
+  timeout: 30
+
+# Web server settings
+web:
+  port: 11980
+  static_path: "./web/static"
+  templates_path: "./web/templates"
+
+# Import settings
+import:
+  batch_size: 1000
+  max_articles: 10000
+  groups:
+    - "news.admin.peering"
+    - "alt.test"

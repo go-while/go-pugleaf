@@ -1,0 +1,157 @@
+package spam
+
+import (
+	"log"
+
+	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/go-pugleaf/internal/nntp"
+)
+
+// IntegrateSpamFilter shows how to integrate spam filtering into your article processing
+// This is an example of how to modify your existing processArticle function
+
+func ExampleIntegration() {
+	// Initialize spam filter (do this once at startup)
+	saConfig := &SpamAssassinConfig{
+		Enabled:         true,
+		ConfigPath:      "/home/fed/WORKSPACES/workspace.go-pugleaf/spamassassin",
+		RequiredScore:   6.0,
+		TimeoutSeconds:  30,
+		MaxMessageSize:  1024 * 1024,
+		LogSpamDetails:  true,
+		RejectThreshold: 15.0,
+	}
+
+	filterConfig := &FilterConfig{
+		EnableSpamAssassin: true,
+		EnableQuickRules:   true,
+		AutoReject:         true,
+		RejectThreshold:    15.0,
+		LogSpam:            true,
+		MarkSpam:           false,
+		QuarantineSpam:     false,
+	}
+
+	spamFilter := NewSpamFilter(saConfig, filterConfig)
+
+	// Example of how to use in your processArticle function:
+	// (This would go in your threading.go processArticle function)
+
+	log.Printf("Spam filter initialized and ready to use")
+	_ = spamFilter // Use in processArticle
+}
+
+// ModifiedProcessArticle shows how to modify your existing processArticle function
+func ModifiedProcessArticle(spamFilter *SpamFilter, art *nntp.Article, legacyNewsgroup string, bulkmode bool) error {
+	// ... your existing code for parsing headers and creating article ...
+
+	// Example article and newsgroups (replace with your actual variables)
+	var article *models.Article     // Your article struct
+	var newsgroups []string         // Your newsgroups list
+	var headers map[string][]string // Your parsed headers
+
+	// NEW: Add spam filtering before processing
+	if !bulkmode { // Skip spam filtering for bulk imports
+		// Step 1: Quick pre-filter check
+		shouldSkip, reason := spamFilter.PreFilterCheck(article, newsgroups)
+		if shouldSkip {
+			if reason == "WHITELISTED" {
+				log.Printf("[SPAM] Article %s whitelisted, processing normally", article.MessageID)
+			} else {
+				log.Printf("[SPAM] Article %s pre-filtered: %s", article.MessageID, reason)
+			}
+		} else {
+			// Step 2: Full spam check
+			filterResult, err := spamFilter.FilterArticle(article, headers, art.Body, newsgroups)
+			if err != nil {
+				log.Printf("[SPAM] Error filtering article %s: %v", article.MessageID, err)
+				// Continue processing on filter error
+			} else if filterResult.ShouldReject {
+				log.Printf("[SPAM] REJECTING article %s: score=%.2f, reason=%s",
+					article.MessageID, filterResult.Score, filterResult.Reason)
+				return nil // Skip this article (don't process further)
+			} else if filterResult.IsSpam {
+				log.Printf("[SPAM] Article %s flagged as spam (score=%.2f) but not rejected",
+					article.MessageID, filterResult.Score)
+				// Mark as spam but continue processing
+				spamFilter.MarkSpamArticle(article, filterResult)
+			}
+		}
+	}
+
+	// ... continue with your existing processing logic ...
+	return nil
+}
+
+// BatchSpamFilter shows how to efficiently filter multiple articles
+func BatchSpamFilter(spamFilter *SpamFilter, articles []*models.Article, headers []map[string][]string, bodies [][]byte, newsgroups [][]string) ([]*models.Article, []string) {
+	var validArticles []*models.Article
+	var rejectedReasons []string
+
+	for i, article := range articles {
+		// Quick header-only check first
+		if spamFilter.IsSpamByHeaders(article, headers[i], newsgroups[i]) {
+			rejectedReasons = append(rejectedReasons, "HEADER_SPAM")
+			continue
+		}
+
+		// Full spam check
+		filterResult, err := spamFilter.FilterArticle(article, headers[i], bodies[i], newsgroups[i])
+		if err != nil {
+			log.Printf("[SPAM] Batch filter error for %s: %v", article.MessageID, err)
+			validArticles = append(validArticles, article) // Include on error
+			rejectedReasons = append(rejectedReasons, "")
+		} else if filterResult.ShouldReject {
+			rejectedReasons = append(rejectedReasons, filterResult.Reason)
+		} else {
+			validArticles = append(validArticles, article)
+			rejectedReasons = append(rejectedReasons, "")
+
+			// Mark spam if detected but not rejected
+			if filterResult.IsSpam {
+				spamFilter.MarkSpamArticle(article, filterResult)
+			}
+		}
+	}
+
+	return validArticles, rejectedReasons
+}
+
+// Usage in your main application initialization:
+/*
+func main() {
+	// ... your existing initialization ...
+
+	// Initialize spam filter
+	spamFilter := initializeSpamFilter()
+
+	// Pass spam filter to your processor
+	processor := NewProcessor(db, spamFilter)
+
+	// ... rest of your application ...
+}
+
+func initializeSpamFilter() *SpamFilter {
+	saConfig := &SpamAssassinConfig{
+		Enabled:         true,
+		ConfigPath:      "/home/fed/WORKSPACES/workspace.go-pugleaf/spamassassin",
+		RequiredScore:   6.0,
+		TimeoutSeconds:  30,
+		MaxMessageSize:  1024 * 1024,
+		LogSpamDetails:  true,
+		RejectThreshold: 15.0,
+	}
+
+	filterConfig := &FilterConfig{
+		EnableSpamAssassin: true,
+		EnableQuickRules:   true,
+		AutoReject:         true,
+		RejectThreshold:    15.0,
+		LogSpam:            true,
+		MarkSpam:           false,
+		QuarantineSpam:     false,
+	}
+
+	return NewSpamFilter(saConfig, filterConfig)
+}
+*/
