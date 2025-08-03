@@ -1,0 +1,34 @@
+package main
+
+import (
+	"fmt"
+
+	"github.com/go-while/go-pugleaf/internal/models"
+)
+
+func main() {
+	// Test simple cases first
+	fmt.Println("Testing simple cases:")
+
+	simple1 := "=?ISO-8859-15?Q?Test?="
+	fmt.Printf("Simple 1: %s -> %s\n", simple1, models.ConvertToUTF8(simple1))
+
+	simple2 := "=?ISO-8859-15?Q?Hello_World?="
+	fmt.Printf("Simple 2: %s -> %s\n", simple2, models.ConvertToUTF8(simple2))
+
+	fmt.Println()
+
+	// Test the problematic first part
+	part1 := "=?ISO-8859-15?Q?NEXT_Klima-Schwindel_entlarvt:_Südseeinseln_wac?="
+	fmt.Printf("Part 1: %s\n", part1)
+	fmt.Printf("Decoded: %s\n", models.ConvertToUTF8(part1))
+	fmt.Println()
+
+	// Test the EXACT string provided by the user
+	originalString := "=?ISO-8859-15?Q?NEXT_Klima-Schwindel_entlarvt:_Südseeinseln_wac?= =?ISO-8859-15?Q?hsen,_statt_zu_versinken?"
+
+	fmt.Println("Testing the EXACT original string:")
+	fmt.Printf("Original: %s\n", originalString)
+	fmt.Printf("Decoded:  %s\n", models.ConvertToUTF8(originalString))
+	fmt.Printf("Was it decoded? %t\n", models.ConvertToUTF8(originalString) != originalString)
+}
