@@ -26,8 +26,9 @@ go-pugleaf provides a complete newsgroup platform with:
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/go-pugleaf.git
+git clone https://github.com/go-while/go-pugleaf.git
 cd go-pugleaf
+git checkout testing-001
 
 # Build all binaries
 ./build_ALL.sh
