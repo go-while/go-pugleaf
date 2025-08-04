@@ -22,3 +22,5 @@
 # sqlite3 data/cfg/pugleaf.sq3 "UPDATE newsgroups SET active = 0 WHERE name LIKE '%paedo%';"
 # sqlite3 data/cfg/pugleaf.sq3 "UPDATE newsgroups SET active = 0 WHERE name LIKE '%dateien%';"
 # sqlite3 data/cfg/pugleaf.sq3 "UPDATE newsgroups SET active = 0 WHERE name LIKE '%warez%';"
+
+# sqlite3 data/cfg/pugleaf.sq3 "UPDATE newsgroups SET max_articles = 1000, expiry_days = 7 WHERE name LIKE '%.test';"
