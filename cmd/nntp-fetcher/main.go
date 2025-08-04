@@ -280,12 +280,10 @@ func main() {
 					}
 					articleCount, err := db.GetArticlesCount(groupDBs)
 					groupDBs.Return(db) // Return immediately after checking
-					
 					if err != nil {
 						log.Printf("[FETCHER]: Failed to get article count for '%s': %v", *fetchNewsgroup, err)
 						continue
 					}
-					
 					if articleCount == 0 {
 						// Initial download: use expiry_days to avoid downloading old articles
 						startDate := time.Now().AddDate(0, 0, -nga.ExpiryDays)
