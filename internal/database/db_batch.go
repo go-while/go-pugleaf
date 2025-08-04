@@ -184,6 +184,10 @@ func (c *SQ3batch) CheckNoMoreWorkInMaps() bool {
 	if len(BatchDividerChan) > 0 {
 		return false
 	}
+	if c.proc == nil {
+		log.Printf("CheckNoMoreWorkInMaps c.proc not set")
+		return true
+	}
 	if !c.proc.CheckNoMoreWorkInHistory() {
 		log.Printf("[CRON-SHUTDOWN] History still has work")
 		return false
@@ -1034,6 +1038,10 @@ func (o *BatchOrchestrator) StartOrch() {
 	for {
 		time.Sleep(time.Second / 2)
 		if o.batch.db.IsDBshutdown() {
+			if o.batch.proc == nil {
+				log.Printf("[ORCHESTRATOR1] o.batch.proc not set. shutting down.")
+				return
+			}
 			log.Printf("[ORCHESTRATOR1] Database shutdown detected ShutDownCounter=%d", ShutDownCounter)
 			o.batch.processAllPendingBatches(&wgProcessAllBatches)
 			if !wantShutdown {
@@ -1077,6 +1085,10 @@ func (o *BatchOrchestrator) StartOrchestrator() {
 		hasWork := o.checkThresholds()
 		//log.Printf("[ORCHESTRATOR2] Current sleep interval: (%d ms) hasWork=%t", sleep, hasWork)
 		if o.batch.db.IsDBshutdown() {
+			if o.batch.proc == nil {
+				log.Printf("[ORCHESTRATOR2] o.batch.proc not set. shutting down.")
+				return
+			}
 			log.Printf("[ORCHESTRATOR2] Database shutdown detected ShutDownCounter=%d", ShutDownCounter)
 			sleep = 500
 			if !wantShutdown {
