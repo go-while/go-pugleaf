@@ -272,13 +272,37 @@ func main() {
 						log.Printf("[FETCHER]: DownloadArticlesFromDate failed: %v", err)
 					}
 				} else if nga.ExpiryDays > 0 {
-					// Auto-calculate start date based on expiry_days to avoid downloading old articles
-					startDate := time.Now().AddDate(0, 0, -nga.ExpiryDays)
-					log.Printf("[FETCHER]: Group has expiry_days=%d, starting download from calculated date: %s", nga.ExpiryDays, startDate.Format("2006-01-02"))
-					//time.Sleep(3 * time.Second) // debug sleep
-					err = proc.DownloadArticlesFromDate(*fetchNewsgroup, startDate, *ignoreInitialTinyGroups)
+					// Check if group already has articles to decide between initial vs incremental download
+					groupDBs, err := db.GetGroupDBs(*fetchNewsgroup)
 					if err != nil {
-						log.Printf("[FETCHER]: DownloadArticlesFromDate failed: %v", err)
+						log.Printf("[FETCHER]: Failed to get group DBs for '%s': %v", *fetchNewsgroup, err)
+						continue
+					}
+					articleCount, err := db.GetArticlesCount(groupDBs)
+					groupDBs.Return(db) // Return immediately after checking
+					
+					if err != nil {
+						log.Printf("[FETCHER]: Failed to get article count for '%s': %v", *fetchNewsgroup, err)
+						continue
+					}
+					
+					if articleCount == 0 {
+						// Initial download: use expiry_days to avoid downloading old articles
+						startDate := time.Now().AddDate(0, 0, -nga.ExpiryDays)
+						log.Printf("[FETCHER]: Initial download for group with expiry_days=%d, starting from calculated date: %s", nga.ExpiryDays, startDate.Format("2006-01-02"))
+						//time.Sleep(3 * time.Second) // debug sleep
+						err = proc.DownloadArticlesFromDate(*fetchNewsgroup, startDate, *ignoreInitialTinyGroups)
+						if err != nil {
+							log.Printf("[FETCHER]: DownloadArticlesFromDate failed: %v", err)
+						}
+					} else {
+						// Incremental download: continue from where we left off
+						log.Printf("[FETCHER]: Incremental download for newsgroup: '%s' (has %d existing articles)", *fetchNewsgroup, articleCount)
+						//time.Sleep(3 * time.Second) // debug sleep
+						err = proc.DownloadArticles(*fetchNewsgroup, *ignoreInitialTinyGroups)
+						if err != nil {
+							log.Printf("[FETCHER]: DownloadArticles failed: %v", err)
+						}
 					}
 				} else {
 					log.Printf("[FETCHER]: Downloading all articles for newsgroup: '%s' (no expiry limit)", *fetchNewsgroup)
