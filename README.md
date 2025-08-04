@@ -92,6 +92,20 @@ while true; do
   ./pugleaf-fetcher -nntphostname your.domain.com
   sleep 5m
 done
+
+# Fetch specific subscribed groups in a loop
+while true; do
+  ./pugleaf-fetcher -nntphostname your.domain.com \
+    -group news.admin.*
+  sleep 5m
+done
+
+# You can run multiple fetchers concurrently, each with another group.*
+# but provider conns are not tracked via database, only inside the running fetcher.
+# You need to make sure you don't exceed the max connections from your provider.
+# If you set providers max conn to 10 and run 4 fetchers you'll use up to 40 conns.
+# The fetcher scales connections automatically based on the number of articles to fetch.
+# Every fetcher will use all available connections if there are as many articles to fetch.
 ```
 
 ⚠️ **Important**: Stop the fetcher before adding new groups, or it will download all from scratch.
