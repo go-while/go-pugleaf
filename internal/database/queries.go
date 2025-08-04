@@ -797,7 +797,7 @@ func (db *Database) GetNewsgroupsPaginatedAdmin(page, pageSize int) ([]*models.N
 
 	// Get paginated results
 	rows, err := db.mainDB.Query(
-		`SELECT id, name, description, last_article, message_count, active, created_at
+		`SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, created_at
 		 FROM newsgroups
 		 ORDER BY name
 		 LIMIT ? OFFSET ?`,
@@ -810,7 +810,7 @@ func (db *Database) GetNewsgroupsPaginatedAdmin(page, pageSize int) ([]*models.N
 	var out []*models.Newsgroup
 	for rows.Next() {
 		var g models.Newsgroup
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.CreatedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, &g)
@@ -1115,7 +1115,7 @@ func (db *Database) SearchNewsgroups(searchTerm string) ([]*models.Newsgroup, er
 	searchPattern := "%" + searchTerm + "%"
 
 	rows, err := db.mainDB.Query(`
-		SELECT name, description, last_article, message_count, active, created_at, updated_at
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, created_at, updated_at
 		FROM newsgroups
 		WHERE name LIKE ? COLLATE NOCASE
 		OR description LIKE ? COLLATE NOCASE
@@ -1132,7 +1132,7 @@ func (db *Database) SearchNewsgroups(searchTerm string) ([]*models.Newsgroup, er
 		g := &models.Newsgroup{}
 		err := rows.Scan(
 			&g.Name, &g.Description, &g.LastArticle, &g.MessageCount,
-			&g.Active, &g.CreatedAt, &g.UpdatedAt,
+			&g.Active, &g.ExpiryDays, &g.MaxArticles, &g.CreatedAt, &g.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
