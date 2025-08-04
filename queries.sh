@@ -4,6 +4,7 @@
 # sqlite3 data/cfg/pugleaf.sq3 "UPDATE newsgroups SET active = 0 WHERE name LIKE '%banar%';"
 # sqlite3 data/cfg/pugleaf.sq3 "UPDATE newsgroups SET active = 0 WHERE name LIKE '%binaer%';"
 # sqlite3 data/cfg/pugleaf.sq3 "UPDATE newsgroups SET active = 0 WHERE name LIKE '%bini%';"
+# sqlite3 data/cfg/pugleaf.sq3 "UPDATE newsgroups SET active = 0 WHERE name LIKE '%biyar%';"
 # sqlite3 data/cfg/pugleaf.sq3 "UPDATE newsgroups SET active = 0 WHERE name LIKE '%boneless%';"
 # sqlite3 data/cfg/pugleaf.sq3 "UPDATE newsgroups SET active = 0 WHERE name LIKE '%nairies%';"
 # sqlite3 data/cfg/pugleaf.sq3 "UPDATE newsgroups SET active = 0 WHERE name LIKE '%naries%';"
