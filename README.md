@@ -25,15 +25,21 @@ go-pugleaf provides a complete newsgroup platform with:
 
 ```bash
 # Clone repository
+useradd -m -s /bin/bash pugleaf
+su pugleaf
+cd /home/pugleaf
 git clone https://github.com/go-while/go-pugleaf.git
 cd go-pugleaf
 git checkout testing-001
 
 # Build all binaries
-./build_ALL.sh
+./build_ALL.sh && cp build/* .
+
+# the "migrations" folder is needed for every executable that uses the database. It contains the database migrations.
 
 # Start web server
 ./webserver -nntphostname your.domain.com
+# needs the "web" folder with templates and static files.
 
 # Open browser to http://localhost:11980
 ```
