@@ -271,8 +271,17 @@ func main() {
 					if err != nil {
 						log.Printf("[FETCHER]: DownloadArticlesFromDate failed: %v", err)
 					}
+				} else if nga.ExpiryDays > 0 {
+					// Auto-calculate start date based on expiry_days to avoid downloading old articles
+					startDate := time.Now().AddDate(0, 0, -nga.ExpiryDays)
+					log.Printf("[FETCHER]: Group has expiry_days=%d, starting download from calculated date: %s", nga.ExpiryDays, startDate.Format("2006-01-02"))
+					//time.Sleep(3 * time.Second) // debug sleep
+					err = proc.DownloadArticlesFromDate(*fetchNewsgroup, startDate, *ignoreInitialTinyGroups)
+					if err != nil {
+						log.Printf("[FETCHER]: DownloadArticlesFromDate failed: %v", err)
+					}
 				} else {
-					log.Printf("[FETCHER]: Downloading all articles for newsgroup: '%s'", *fetchNewsgroup)
+					log.Printf("[FETCHER]: Downloading all articles for newsgroup: '%s' (no expiry limit)", *fetchNewsgroup)
 					//time.Sleep(3 * time.Second) // debug sleep
 					err = proc.DownloadArticles(*fetchNewsgroup, *ignoreInitialTinyGroups)
 				}
