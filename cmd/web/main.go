@@ -387,10 +387,9 @@ func main() {
 	log.Printf("[WEB]: NNTP authentication cache initialized (15 minute TTL)")
 
 	// Note: Database batch workers are started automatically by OpenDatabase()
-	if withfetch || withnntp {
-		db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
-		db.WG.Add(1) // Adds for history: one for writer worker
-	}
+	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
+	db.WG.Add(1) // Adds for history: one for writer worker
+
 	// Apply main database migrations
 	if err := db.Migrate(); err != nil {
 		log.Fatalf("[WEB]: Failed to apply database migrations: %v", err)
