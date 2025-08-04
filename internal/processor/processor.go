@@ -138,11 +138,11 @@ func (proc *Processor) CheckNoMoreWorkInHistory() bool {
 // AddProcessedArticleToHistory adds a successfully processed article to history with correct group and article number
 func (proc *Processor) AddProcessedArticleToHistory(msgIdItem *history.MessageIdItem, newsgroupPtr *string, articleNumber int64) {
 	if msgIdItem == nil || newsgroupPtr == nil {
-		log.Print("ERROR: addProcessedArticleToHistory called with nil MessageIdItem or newsgroupPtr")
+		//log.Print("ERROR: addProcessedArticleToHistory called with nil MessageIdItem or newsgroupPtr")
 		return
 	}
 	if *newsgroupPtr == "" || articleNumber <= 0 {
-		log.Printf("ERROR: addProcessedArticleToHistory called with invalid parameters: newsgroupPtr='%s', articleNumber=%d msgIdItem='%#v'", *newsgroupPtr, articleNumber, msgIdItem)
+		//log.Printf("ERROR: addProcessedArticleToHistory called with invalid parameters: newsgroupPtr='%s', articleNumber=%d msgIdItem='%#v'", *newsgroupPtr, articleNumber, msgIdItem)
 		return
 	}
 
@@ -150,7 +150,7 @@ func (proc *Processor) AddProcessedArticleToHistory(msgIdItem *history.MessageId
 	if msgIdItem.FileOffset > 0 || msgIdItem.ArtNum > 0 || msgIdItem.GroupName != nil {
 		msgIdItem.Response = history.CaseDupes
 		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
-		log.Printf("ERROR: addProcessedArticleToHistory called with existing FileOffset %d or ArtNum %d or GroupName '%v', ignoring new values for msgIdItem='%#v'", msgIdItem.FileOffset, msgIdItem.ArtNum, *msgIdItem.GroupName, msgIdItem)
+		//log.Printf("ERROR: addProcessedArticleToHistory called with existing FileOffset %d or ArtNum %d or GroupName '%v', ignoring new values for msgIdItem='%#v'", msgIdItem.FileOffset, msgIdItem.ArtNum, *msgIdItem.GroupName, msgIdItem)
 		msgIdItem.Mux.Unlock()
 		return
 	}
@@ -161,7 +161,7 @@ func (proc *Processor) AddProcessedArticleToHistory(msgIdItem *history.MessageId
 	} else {
 		msgIdItem.Response = history.CaseDupes
 		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
-		log.Printf("WARNING: addProcessedArticleToHistory called with existing GroupName '%s' or ArtNum %d, ignoring new values for msgIdItem='%#v'", *msgIdItem.GroupName, msgIdItem.ArtNum, msgIdItem)
+		//log.Printf("WARNING: addProcessedArticleToHistory called with existing GroupName '%s' or ArtNum %d, ignoring new values for msgIdItem='%#v'", *msgIdItem.GroupName, msgIdItem.ArtNum, msgIdItem)
 		msgIdItem.Mux.Unlock()
 		return
 	}

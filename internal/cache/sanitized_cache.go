@@ -175,7 +175,7 @@ func (sc *SanitizedCache) GetArticle(messageID string) (*SanitizedArticle, bool)
 	article.LastUsed = time.Now()
 	article.mux.Unlock()
 
-	log.Printf("SanitizedCache: GetArticle: found cached article for messageID '%s'", messageID)
+	//log.Printf("SanitizedCache: GetArticle: found cached article for messageID '%s'", messageID)
 	return article, true
 }
 
@@ -188,7 +188,7 @@ func (sc *SanitizedCache) SetField(messageID string, field string, value templat
 	// Get existing article or create new one
 	article, exists := sc.cache[key]
 	if !exists {
-		log.Printf("SanitizedCache: SetField '%s': creating new entry for messageID '%s'", field, messageID)
+		//log.Printf("SanitizedCache: SetField '%s': creating new entry for messageID '%s'", field, messageID)
 
 		article = &SanitizedArticle{
 			CreatedAt: now,
@@ -216,7 +216,7 @@ func (sc *SanitizedCache) SetField(messageID string, field string, value templat
 		article.Date = value
 	case "references":
 		oldSize = int64(len(article.References))
-		log.Printf("SanitizedCache: SetField 'references' for messageID='%s', key='%s', old_len=%d, new_len=%d", messageID, key, len(article.References), len(value))
+		//log.Printf("SanitizedCache: SetField 'references' for messageID='%s', key='%s', old_len=%d, new_len=%d", messageID, key, len(article.References), len(value))
 		article.References = value
 	case "messageid":
 		oldSize = int64(len(article.MessageID))

@@ -98,7 +98,8 @@ func (p *ProgressDB) GetLastArticle(backendName, newsgroupName string) (int64, e
 
 // UpdateProgress updates the fetching progress for a newsgroup on a backend
 func (p *ProgressDB) UpdateProgress(backendName, newsgroupName string, lastArticle int64) error {
-	_, err := p.db.Exec(`
+	for {
+		_, err := p.db.Exec(`
 		INSERT INTO progress (backend_name, newsgroup_name, last_article, last_fetched, updated_at)
 		VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(backend_name, newsgroup_name) DO UPDATE SET
@@ -107,10 +108,13 @@ func (p *ProgressDB) UpdateProgress(backendName, newsgroupName string, lastArtic
 			updated_at = excluded.updated_at
 	`, backendName, newsgroupName, lastArticle)
 
-	if err != nil {
-		return fmt.Errorf("failed to update progress: %w", err)
+		if err != nil {
+			log.Printf("Error in UpdateProgress err='%v' ... continue in 1s", err)
+			time.Sleep(time.Second)
+			continue
+		}
+		break
 	}
-
 	log.Printf("Updated progress: %s/%s -> article %d", backendName, newsgroupName, lastArticle)
 	return nil
 }

@@ -191,7 +191,7 @@ func (c *SQ3batch) CheckNoMoreWorkInMaps() bool {
 	c.GMux.RLock()         // Lock the mutex to ensure thread safety
 	defer c.GMux.RUnlock() // Ensure we unlock the mutex when done
 	// Check if all maps are empty and not processing
-	log.Printf("[CRON-SHUTDOWN] do CheckNoMoreWorkInMaps...")
+	//log.Printf("[CRON-SHUTDOWN] do CheckNoMoreWorkInMaps...")
 
 	// Iterate through all tasks to check channels
 	for newsgroup, tasks := range c.TasksMap {
@@ -207,7 +207,7 @@ func (c *SQ3batch) CheckNoMoreWorkInMaps() bool {
 		}
 	}
 
-	log.Printf("[CRON-SHUTDOWN] All clear! No more work!")
+	//log.Printf("[CRON-SHUTDOWN] All clear! No more work!")
 	return true
 }
 

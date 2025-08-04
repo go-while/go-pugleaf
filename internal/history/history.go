@@ -424,7 +424,7 @@ func (h *History) writerWorker() {
 			<-h.tickChan
 			// Handle shutdown
 			if h.ServerShutdown() && h.CheckNoMoreWorkInHistory() {
-				log.Printf("[HISTORY] writerWorker Server shutdown initiated, checking for pending work...")
+				//log.Printf("[HISTORY] writerWorker Server shutdown initiated, checking for pending work...")
 				time.Sleep(100 * time.Millisecond)
 				shutdownCounter--
 

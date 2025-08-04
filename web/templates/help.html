@@ -200,18 +200,20 @@
                                     </div>
                                 </div>
 
-                                <div class="mb-3">
-                                    <h6 class="text-success">Public Endpoint</h6>
-                                    <p class="small mb-2">The following endpoint is publicly accessible without authentication:</p>
-                                    <div class="list-group list-group-flush">
-                                        <div class="list-group-item">
-                                            <code class="text-success">GET /api/v1/stats</code>
-                                            <small class="text-muted d-block">System statistics and performance metrics</small>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div class="alert alert-info py-2">
+                <div class="mb-3">
+                    <h6 class="text-success">Public Endpoints (No Auth Required)</h6>
+                    <p class="small mb-2">The following endpoints are publicly accessible without authentication:</p>
+                    <div class="list-group list-group-flush">
+                        <div class="list-group-item">
+                            <code class="text-success">GET /api/v1/stats</code>
+                            <small class="text-muted d-block">System statistics and performance metrics</small>
+                        </div>
+                        <div class="list-group-item">
+                            <code class="text-success">GET /api/v1/groups/:group/articles/:articleNum/preview</code>
+                            <small class="text-muted d-block">Article preview/excerpt without full content</small>
+                        </div>
+                    </div>
+                </div>                                <div class="alert alert-info py-2">
                                     <small>
                                         <i class="bi bi-info-circle me-1"></i>
                                         <strong>Token Management:</strong> API tokens are managed through the admin interface. Contact your system administrator for access.
@@ -247,10 +249,10 @@
                                     </div>
                                     <div class="list-group-item">
                                         <code class="text-primary">GET /api/v1/groups/:group/threads</code>
-                                        <small class="text-muted d-block">Get threaded view of conversations in a group</small>
+                                        <small class="text-muted d-block">Get threaded conversation structure for a group</small>
                                     </div>
                                     <div class="list-group-item">
-                                        <code class="text-primary">GET /api/v1/groups/:group/articles/:num</code>
+                                        <code class="text-primary">GET /api/v1/groups/:group/articles/:articleNum</code>
                                         <small class="text-muted d-block">Get specific article by article number</small>
                                     </div>
                                     <div class="list-group-item">
@@ -283,123 +285,6 @@
 </div>
 
 <div class="row">
-    <!-- Web Interface Routes -->
-    <!--
-    <div class="col-lg-6 mb-4">
-        <div class="card h-100">
-            <div class="card-header bg-dark text-white">
-                <h6 class="card-title mb-0">
-                    <i class="bi bi-globe me-2"></i>Web Interface Routes
-                </h6>
-            </div>
-            <div class="card-body">
-                <div class="accordion" id="webRoutesAccordion">
-                    <!!-- Main Routes --?>
-                    <div class="accordion-item">
-                        <h2 class="accordion-header" id="mainRoutesHeading">
-                            <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#mainRoutes" aria-expanded="true" aria-controls="mainRoutes">
-                                <strong>Primary Navigation</strong>
-                            </button>
-                        </h2>
-                        <div id="mainRoutes" class="accordion-collapse collapse show" aria-labelledby="mainRoutesHeading" data-bs-parent="#webRoutesAccordion">
-                            <div class="accordion-body">
-                                <div class="list-group list-group-flush">
-                                    <div class="list-group-item">
-                                        <code class="text-primary">/</code>
-                                        <small class="text-muted d-block">Home page with system overview</small>
-                                    </div>
-                                    <div class="list-group-item">
-                                        <code class="text-primary">/groups</code>
-                                        <small class="text-muted d-block">Browse all available newsgroups</small>
-                                    </div>
-                                    <div class="list-group-item">
-                                        <code class="text-primary">/search</code>
-                                        <small class="text-muted d-block">Search articles and newsgroups</small>
-                                    </div>
-                                    <div class="list-group-item">
-                                        <code class="text-primary">/stats</code>
-                                        <small class="text-muted d-block">System statistics and performance</small>
-                                    </div>
-                                    <div class="list-group-item">
-                                        <code class="text-primary">/help</code>
-                                        <small class="text-muted d-block">This help documentation</small>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!!-- Group Access --?>
-                    <div class="accordion-item">
-                        <h2 class="accordion-header" id="groupRoutesHeading">
-                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#groupRoutes" aria-expanded="false" aria-controls="groupRoutes">
-                                <strong>Group & Article Access</strong>
-                            </button>
-                        </h2>
-                        <div id="groupRoutes" class="accordion-collapse collapse" aria-labelledby="groupRoutesHeading" data-bs-parent="#webRoutesAccordion">
-                            <div class="accordion-body">
-                                <div class="list-group list-group-flush">
-                                    <div class="list-group-item">
-                                        <code class="text-success">/groups/:group</code>
-                                        <small class="text-muted d-block">View articles in a specific newsgroup</small>
-                                    </div>
-                                    <div class="list-group-item">
-                                        <code class="text-success">/groups/:group/threads</code>
-                                        <small class="text-muted d-block">View threaded conversations in a group</small>
-                                    </div>
-                                    <div class="list-group-item">
-                                        <code class="text-success">/groups/:group/thread/:threadRoot</code>
-                                        <small class="text-muted d-block">View a single thread conversation</small>
-                                    </div>
-                                    <div class="list-group-item">
-                                        <code class="text-success">/groups/:group/articles/:num</code>
-                                        <small class="text-muted d-block">Read specific article by number</small>
-                                    </div>
-                                    <div class="list-group-item">
-                                        <code class="text-success">/groups/:group/message/:messageId</code>
-                                        <small class="text-muted d-block">Read specific article by message ID</small>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!!-- Section Routes --?>
-                    <div class="accordion-item">
-                        <h2 class="accordion-header" id="sectionRoutesHeading">
-                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#sectionRoutes" aria-expanded="false" aria-controls="sectionRoutes">
-                                <strong>Section-Based Navigation</strong>
-                            </button>
-                        </h2>
-                        <div id="sectionRoutes" class="accordion-collapse collapse" aria-labelledby="sectionRoutesHeading" data-bs-parent="#webRoutesAccordion">
-                            <div class="accordion-body">
-                                <div class="list-group list-group-flush">
-                                    <div class="list-group-item">
-                                        <code class="text-warning">/:section</code>
-                                        <small class="text-muted d-block">Browse groups within a section (e.g., /rocksolid)</small>
-                                    </div>
-                                    <div class="list-group-item">
-                                        <code class="text-warning">/:section/:group/</code>
-                                        <small class="text-muted d-block">View articles in section-specific group</small>
-                                    </div>
-                                    <div class="list-group-item">
-                                        <code class="text-warning">/:section/:group/articles/:num</code>
-                                        <small class="text-muted d-block">Read article via section navigation</small>
-                                    </div>
-                                    <div class="list-group-item">
-                                        <code class="text-warning">/:section/:group/message/:messageId</code>
-                                        <small class="text-muted d-block">Read article by message ID via section</small>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    -->
-
     <!-- API Examples -->
     <div class="col-lg-6 mb-4">
         <div class="card h-100">
@@ -417,17 +302,25 @@
                 </div>
 
                 <div class="mb-3">
-                    <h6 class="text-success">Public Endpoint (No Auth Required)</h6>
+                    <h6 class="text-success">Public Endpoints (No Auth Required)</h6>
                     <div class="bg-dark text-light p-2 rounded">
-                        <code>curl https://go-pugleaf.newsdeef.eu/api/v1/stats</code>
+                        <code>curl https://api.pugleaf.net/api/v1/stats</code>
                     </div>
                     <small class="text-muted">Returns system statistics - no authentication needed</small>
                 </div>
 
                 <div class="mb-3">
+                    <h6 class="text-success">Article Preview (No Auth Required)</h6>
+                    <div class="bg-dark text-light p-2 rounded">
+                        <code>curl https://api.pugleaf.net/api/v1/groups/alt.comp.freeware/articles/123/preview</code>
+                    </div>
+                    <small class="text-muted">Returns article preview/excerpt without authentication</small>
+                </div>
+
+                <div class="mb-3">
                     <h6 class="text-primary">Get All Newsgroups (Auth Required)</h6>
                     <div class="bg-dark text-light p-2 rounded">
-                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://go-pugleaf.newsdeef.eu/api/v1/groups</code>
+                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://api.pugleaf.net/api/v1/groups</code>
                     </div>
                     <small class="text-muted">Returns JSON array of all available newsgroups</small>
                 </div>
@@ -435,7 +328,7 @@
                 <div class="mb-3">
                     <h6 class="text-primary">Get Group Articles (Auth Required)</h6>
                     <div class="bg-dark text-light p-2 rounded">
-                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://go-pugleaf.newsdeef.eu/api/v1/groups/alt.comp.freeware/overview</code>
+                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://api.pugleaf.net/api/v1/groups/alt.comp.freeware/overview</code>
                     </div>
                     <small class="text-muted">Returns article overview for the specified group</small>
                 </div>
@@ -443,17 +336,25 @@
                 <div class="mb-3">
                     <h6 class="text-primary">Get Specific Article (Auth Required)</h6>
                     <div class="bg-dark text-light p-2 rounded">
-                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://go-pugleaf.newsdeef.eu/api/v1/groups/alt.comp.freeware/articles/123</code>
+                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://api.pugleaf.net/api/v1/groups/alt.comp.freeware/articles/123</code>
                     </div>
                     <small class="text-muted">Returns full article content including headers and body</small>
                 </div>
 
                 <div class="mb-3">
-                    <h6 class="text-primary">Get Thread View (Auth Required)</h6>
+                    <h6 class="text-primary">Get Article by Message ID (Auth Required)</h6>
                     <div class="bg-dark text-light p-2 rounded">
-                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://go-pugleaf.newsdeef.eu/api/v1/groups/alt.comp.freeware/threads</code>
+                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://api.pugleaf.net/api/v1/groups/alt.comp.freeware/message/&lt;msg-id@domain.com&gt;</code>
                     </div>
-                    <small class="text-muted">Returns threaded conversation structure</small>
+                    <small class="text-muted">Returns article by message ID instead of article number</small>
+                </div>
+
+                <div class="mb-3">
+                    <h6 class="text-primary">Get Thread Structure (Auth Required)</h6>
+                    <div class="bg-dark text-light p-2 rounded">
+                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://api.pugleaf.net/api/v1/groups/alt.comp.freeware/threads</code>
+                    </div>
+                    <small class="text-muted">Returns threaded conversation structure for the group</small>
                 </div>
 
                 <div class="alert alert-warning py-2 mt-3">
@@ -467,56 +368,11 @@
     </div>
 </div>
 
-<!-- System Information -->
-<div class="row">
-    <div class="col-12 mb-4">
-        <div class="card">
-            <div class="card-header bg-dark text-white">
-                <h6 class="card-title mb-0">
-                    <i class="bi bi-gear me-2"></i>System Information
-                </h6>
-            </div>
-            <div class="card-body">
-                <div class="row">
-                    <div class="col-md-3">
-                        <div class="text-center">
-                            <i class="bi bi-code-square display-6 text-primary"></i>
-                            <h6 class="mt-2">Built with Go</h6>
-                            <small class="text-muted">Gin web framework</small>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="text-center">
-                            <i class="bi bi-database display-6 text-success"></i>
-                            <h6 class="mt-2">SQLite3 Database</h6>
-                            <small class="text-muted">High performance backend</small>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="text-center">
-                            <i class="bi bi-shield-check display-6 text-warning"></i>
-                            <h6 class="mt-2">RFC Compliant</h6>
-                            <small class="text-muted">NNTP operations</small>
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <div class="text-center">
-                            <i class="bi bi-speedometer2 display-6 text-info"></i>
-                            <h6 class="mt-2">Scalable Design</h6>
-                            <small class="text-muted">High performance</small>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
 <!-- Quick Actions -->
 <div class="row">
     <div class="col-12">
         <div class="card">
-            <div class="card-header bg-light">
+            <div class="card-header bg-dark">
                 <h6 class="card-title mb-0">
                     <i class="bi bi-lightning me-2"></i>Quick Actions
                 </h6>

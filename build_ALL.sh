@@ -15,3 +15,4 @@ rm -v build/*
 ./build_fetcher.sh
 ./build_webserver.sh
 ./build_recover-db.sh
+./build_expire-news.sh
