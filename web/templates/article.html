@@ -67,6 +67,38 @@
                     </div>
                 </div>
 
+                {{if .User}}
+                <!-- Spam and Hide Controls -->
+                <div class="row mb-3">
+                    <div class="col-12">
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Article controls">
+                            <!-- Spam button (available to all users) -->
+                            <form method="POST" action="/groups/{{.GroupName}}/articles/{{.Article.ArticleNum}}/spam" style="display: inline;">
+                                <button type="submit" class="btn btn-outline-warning btn-sm" title="Flag article as spam">
+                                    🚩 {{.Article.Spam}}
+                                </button>
+                            </form>
+
+                            {{if .IsAdmin}}
+                                <!-- Admin-only controls -->
+                                {{if gt .Article.Spam 0}}
+                                <form method="POST" action="/groups/{{.GroupName}}/articles/{{.Article.ArticleNum}}/decrement-spam" style="display: inline;">
+                                    <button type="submit" class="btn btn-outline-warning btn-sm" title="Decrement spam counter">
+                                        <i class="bi bi-dash-circle"></i>
+                                    </button>
+                                </form>
+                                {{end}}
+                                <form method="POST" action="/groups/{{.GroupName}}/articles/{{.Article.ArticleNum}}/hide" style="display: inline;">
+                                    <button type="submit" class="btn btn-outline-secondary btn-sm" title="Hide article">
+                                        👁️ {{.Article.Hide}}
+                                    </button>
+                                </form>
+                            {{end}}
+                        </div>
+                    </div>
+                </div>
+                {{end}}
+
                 <!-- Article Content -->
                 {{if .Article.BodyText}}
                 <div class="bg-dark border rounded p-3 mb-3">
