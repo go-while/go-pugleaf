@@ -66,7 +66,7 @@ func (s *WebServer) searchPage(c *gin.Context) {
 
 			// Create pagination info
 			pagination := models.NewPaginationInfo(page, pageSize, totalCount)
-			
+
 			data.Results = groups
 			data.ResultCount = totalCount
 			data.HasResults = len(groups) > 0
@@ -105,7 +105,7 @@ func (s *WebServer) searchPage(c *gin.Context) {
 
 			// Create pagination info
 			pagination := models.NewPaginationInfo(page, pageSize, totalCount)
-			
+
 			data.Results = groups
 			data.ResultCount = totalCount
 			data.HasResults = len(groups) > 0

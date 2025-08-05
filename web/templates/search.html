@@ -273,7 +273,7 @@
                         <br><small>Try a different search term or search type.</small>
                     </div>
                 {{end}}
-                
+
                 <!-- Pagination Controls -->
                 {{if and .HasResults .Pagination}}
                 {{if gt .Pagination.TotalPages 1}}
@@ -294,11 +294,11 @@
                             <span class="page-link">Previous</span>
                         </li>
                         {{end}}
-                        
+
                         <li class="page-item active">
                             <span class="page-link">{{.Pagination.CurrentPage}}</span>
                         </li>
-                        
+
                         {{if .Pagination.HasNextPage}}
                         <li class="page-item">
                             <a class="page-link" href="?q={{.Query}}&searchType={{.SearchType}}&page={{.Pagination.NextPage}}">Next</a>
