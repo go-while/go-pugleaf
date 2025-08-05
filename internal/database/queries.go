@@ -111,8 +111,8 @@ func (db *Database) InsertNewsgroup(g *models.Newsgroup) error {
 	}
 
 	_, err := retryableExec(db.mainDB,
-		`INSERT INTO newsgroups (name, description, last_article, message_count, active, expiry_days, max_articles, high_water, low_water, status, hierarchy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		g.Name, g.Description, g.LastArticle, g.MessageCount, g.Active, g.ExpiryDays, g.MaxArticles, g.HighWater, g.LowWater, g.Status, g.Hierarchy,
+		`INSERT INTO newsgroups (name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		g.Name, g.Description, g.LastArticle, g.MessageCount, g.Active, g.ExpiryDays, g.MaxArticles, g.MaxArtSize, g.HighWater, g.LowWater, g.Status, g.Hierarchy,
 	)
 	return err
 }
@@ -130,7 +130,7 @@ func (db *Database) MainDBGetNewsgroupsCount() int64 {
 
 // MainDBGetAllNewsgroups returns all newsgroups
 func (db *Database) MainDBGetAllNewsgroups() ([]*models.Newsgroup, error) {
-	rows, err := retryableQuery(db.mainDB, `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, high_water, low_water, status, hierarchy, created_at FROM newsgroups order by name`)
+	rows, err := retryableQuery(db.mainDB, `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy, created_at FROM newsgroups order by name`)
 	if err != nil {
 		log.Printf("MainDBGetAllNewsgroups: Failed to query newsgroups: %v", err)
 		return nil, err
@@ -139,7 +139,7 @@ func (db *Database) MainDBGetAllNewsgroups() ([]*models.Newsgroup, error) {
 	var out []*models.Newsgroup
 	for rows.Next() {
 		var g models.Newsgroup
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.HighWater, &g.LowWater, &g.Status, &g.Hierarchy, &g.CreatedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.HighWater, &g.LowWater, &g.Status, &g.Hierarchy, &g.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &g)
@@ -149,7 +149,7 @@ func (db *Database) MainDBGetAllNewsgroups() ([]*models.Newsgroup, error) {
 
 // MainDBGetNewsgroup returns a newsgroups information from MainDB
 func (db *Database) MainDBGetNewsgroup(newsgroup string) (*models.Newsgroup, error) {
-	rows, err := retryableQuery(db.mainDB, `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, high_water, low_water, status, hierarchy, created_at FROM newsgroups WHERE name = ?`, newsgroup)
+	rows, err := retryableQuery(db.mainDB, `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy, created_at FROM newsgroups WHERE name = ?`, newsgroup)
 	if err != nil {
 		log.Printf("MainDBGetNewsgroup: Failed to query newsgroup '%s': %v", newsgroup, err)
 		return nil, err
@@ -158,7 +158,7 @@ func (db *Database) MainDBGetNewsgroup(newsgroup string) (*models.Newsgroup, err
 	var g models.Newsgroup
 	found := false
 	for rows.Next() {
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.HighWater, &g.LowWater, &g.Status, &g.Hierarchy, &g.CreatedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.HighWater, &g.LowWater, &g.Status, &g.Hierarchy, &g.CreatedAt); err != nil {
 			return nil, err
 		}
 		found = true
@@ -215,6 +215,15 @@ func (db *Database) UpdateNewsgroupMaxArticlesPrefix(name string, maxArticles in
 	_, err := retryableExec(db.mainDB,
 		`UPDATE newsgroups SET max_articles = ?, updated_at = CURRENT_TIMESTAMP WHERE name LIKE ?`,
 		maxArticles, name+"%",
+	)
+	return err
+}
+
+// UpdateNewsgroupMaxArtSize updates the max_art_size for a newsgroup
+func (db *Database) UpdateNewsgroupMaxArtSize(name string, maxArtSize int) error {
+	_, err := retryableExec(db.mainDB,
+		`UPDATE newsgroups SET max_art_size = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`,
+		maxArtSize, name,
 	)
 	return err
 }
@@ -797,7 +806,7 @@ func (db *Database) GetNewsgroupsPaginatedAdmin(page, pageSize int) ([]*models.N
 
 	// Get paginated results
 	rows, err := db.mainDB.Query(
-		`SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, created_at
+		`SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at
 		 FROM newsgroups
 		 ORDER BY name
 		 LIMIT ? OFFSET ?`,
@@ -810,7 +819,7 @@ func (db *Database) GetNewsgroupsPaginatedAdmin(page, pageSize int) ([]*models.N
 	var out []*models.Newsgroup
 	for rows.Next() {
 		var g models.Newsgroup
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.CreatedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, &g)
@@ -1115,7 +1124,7 @@ func (db *Database) SearchNewsgroups(searchTerm string) ([]*models.Newsgroup, er
 	searchPattern := "%" + searchTerm + "%"
 
 	rows, err := db.mainDB.Query(`
-		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, created_at, updated_at
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
 		FROM newsgroups
 		WHERE name LIKE ? COLLATE NOCASE
 		OR description LIKE ? COLLATE NOCASE
@@ -1132,7 +1141,7 @@ func (db *Database) SearchNewsgroups(searchTerm string) ([]*models.Newsgroup, er
 		g := &models.Newsgroup{}
 		err := rows.Scan(
 			&g.Name, &g.Description, &g.LastArticle, &g.MessageCount,
-			&g.Active, &g.ExpiryDays, &g.MaxArticles, &g.CreatedAt, &g.UpdatedAt,
+			&g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.CreatedAt, &g.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -1311,7 +1320,7 @@ func (db *Database) UpdateNewsgroupStatus(name string, status string) error {
 
 // GetNewsgroupsByPattern gets newsgroups matching a SQL LIKE pattern
 func (db *Database) GetNewsgroupsByPattern(pattern string) ([]*models.Newsgroup, error) {
-	rows, err := db.mainDB.Query(`SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, high_water, low_water, status, created_at FROM newsgroups WHERE name LIKE ? ORDER BY name`, pattern)
+	rows, err := db.mainDB.Query(`SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, created_at FROM newsgroups WHERE name LIKE ? ORDER BY name`, pattern)
 	if err != nil {
 		return nil, err
 	}
@@ -1320,7 +1329,7 @@ func (db *Database) GetNewsgroupsByPattern(pattern string) ([]*models.Newsgroup,
 	var out []*models.Newsgroup
 	for rows.Next() {
 		var g models.Newsgroup
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.HighWater, &g.LowWater, &g.Status, &g.CreatedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.HighWater, &g.LowWater, &g.Status, &g.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &g)
@@ -1536,7 +1545,7 @@ func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize in
 
 	// Get paginated newsgroups using optimized hierarchy column (indexed lookup, only active)
 	query := `SELECT id, name, description, active, message_count, last_article,
-			  expiry_days, max_articles, hierarchy, created_at, updated_at
+			  expiry_days, max_articles, max_art_size, hierarchy, created_at, updated_at
 			  FROM newsgroups
 			  WHERE hierarchy = ? AND active = 1
 			  ORDER BY ` + orderBy + `
@@ -1553,7 +1562,7 @@ func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize in
 		newsgroup := &models.Newsgroup{}
 		err := rows.Scan(&newsgroup.ID, &newsgroup.Name, &newsgroup.Description,
 			&newsgroup.Active, &newsgroup.MessageCount, &newsgroup.LastArticle,
-			&newsgroup.ExpiryDays, &newsgroup.MaxArticles, &newsgroup.Hierarchy, &newsgroup.CreatedAt, &newsgroup.UpdatedAt)
+			&newsgroup.ExpiryDays, &newsgroup.MaxArticles, &newsgroup.MaxArtSize, &newsgroup.Hierarchy, &newsgroup.CreatedAt, &newsgroup.UpdatedAt)
 		if err != nil {
 			log.Printf("GetNewsgroupsByHierarchy: Failed to scan newsgroup: %v", err)
 			continue

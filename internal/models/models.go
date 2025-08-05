@@ -47,6 +47,7 @@ type Newsgroup struct {
 	MessageCount int64  `json:"message_count" db:"message_count"`
 	ExpiryDays   int    `json:"expiry_days" db:"expiry_days"`
 	MaxArticles  int    `json:"max_articles" db:"max_articles"`
+	MaxArtSize   int    `json:"max_art_size" db:"max_art_size"`
 	Hierarchy    string `json:"hierarchy" db:"hierarchy"` // Extracted hierarchy for efficient queries
 	// NNTP-specific fields
 	HighWater int       `json:"high_water" db:"high_water"`

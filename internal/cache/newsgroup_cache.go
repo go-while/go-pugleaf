@@ -17,6 +17,7 @@ type Newsgroup struct {
 	MessageCount int64     `json:"message_count"`
 	ExpiryDays   int       `json:"expiry_days"`
 	MaxArticles  int       `json:"max_articles"`
+	MaxArtSize   int       `json:"max_art_size"`
 	HighWater    int       `json:"high_water"`
 	LowWater     int       `json:"low_water"`
 	Status       string    `json:"status"`

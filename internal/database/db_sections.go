@@ -370,7 +370,7 @@ func (db *Database) DeleteSectionGroup(id int) error {
 // GetNewsgroupByName retrieves a newsgroup by name (for getting description)
 func (db *Database) GetNewsgroupByName(name string) (*models.Newsgroup, error) {
 	query := `
-		SELECT id, name, active, description, last_article, message_count, expiry_days, max_articles,
+		SELECT id, name, active, description, last_article, message_count, expiry_days, max_articles, max_art_size,
 		       high_water, low_water, status, created_at, updated_at
 		FROM newsgroups
 		WHERE name = ?
@@ -386,6 +386,7 @@ func (db *Database) GetNewsgroupByName(name string) (*models.Newsgroup, error) {
 		&ng.MessageCount,
 		&ng.ExpiryDays,
 		&ng.MaxArticles,
+		&ng.MaxArtSize,
 		&ng.HighWater,
 		&ng.LowWater,
 		&ng.Status,

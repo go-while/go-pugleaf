@@ -45,6 +45,7 @@ func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
 	description := strings.TrimSpace(c.PostForm("description"))
 	expiryDaysStr := strings.TrimSpace(c.PostForm("expiry_days"))
 	maxArticlesStr := strings.TrimSpace(c.PostForm("max_articles"))
+	maxArtSizeStr := strings.TrimSpace(c.PostForm("max_art_size"))
 	activeStr := c.PostForm("active")
 
 	// Validate input
@@ -76,6 +77,17 @@ func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
 		}
 	}
 
+	// Parse max art size
+	maxArtSize := 0
+	if maxArtSizeStr != "" {
+		maxArtSize, err = strconv.Atoi(maxArtSizeStr)
+		if err != nil || maxArtSize < 0 {
+			session.SetError("Invalid max article size")
+			c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
+			return
+		}
+	}
+
 	// Parse active status
 	active := activeStr == "on" || activeStr == "true"
 
@@ -94,6 +106,7 @@ func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
 		Active:       active,
 		ExpiryDays:   expiryDays,
 		MaxArticles:  maxArticles,
+		MaxArtSize:   maxArtSize,
 		LastArticle:  0,
 		MessageCount: 0,
 		CreatedAt:    time.Now(),
@@ -132,6 +145,7 @@ func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
 	description := strings.TrimSpace(c.PostForm("description"))
 	expiryDaysStr := strings.TrimSpace(c.PostForm("expiry_days"))
 	maxArticlesStr := strings.TrimSpace(c.PostForm("max_articles"))
+	maxArtSizeStr := strings.TrimSpace(c.PostForm("max_art_size"))
 	activeStr := c.PostForm("active")
 
 	// Validate input
@@ -163,6 +177,17 @@ func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
 		}
 	}
 
+	// Parse max art size
+	maxArtSize := 0
+	if maxArtSizeStr != "" {
+		maxArtSize, err = strconv.Atoi(maxArtSizeStr)
+		if err != nil || maxArtSize < 0 {
+			session.SetError("Invalid max article size")
+			c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
+			return
+		}
+	}
+
 	// Parse active status
 	active := activeStr == "on" || activeStr == "true"
 
@@ -184,6 +209,13 @@ func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
 	err = s.DB.UpdateNewsgroupMaxArticles(name, maxArticles)
 	if err != nil {
 		session.SetError("Failed to update newsgroup max articles")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
+		return
+	}
+
+	err = s.DB.UpdateNewsgroupMaxArtSize(name, maxArtSize)
+	if err != nil {
+		session.SetError("Failed to update newsgroup max article size")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
 		return
 	}

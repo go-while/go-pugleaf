@@ -116,6 +116,7 @@
                                             data-description="{{.Description}}"
                                             data-expiry-days="{{if .ExpiryDays}}{{.ExpiryDays}}{{else}}0{{end}}"
                                             data-max-articles="{{if .MaxArticles}}{{.MaxArticles}}{{else}}0{{end}}"
+                                            data-max-art-size="{{if .MaxArtSize}}{{.MaxArtSize}}{{else}}0{{end}}"
                                             data-active="{{.Active}}">
                                         Edit
                                     </button>
@@ -174,7 +175,7 @@
                                   </td>
                                   <td>{{.MessageCount}}</td>
                                   <td>{{if .LastArticle}}{{.LastArticle}}{{else}}-{{end}}</td>
-                                  <td>{{.ExpiryDays}}d | {{.MaxArticles}}</td>
+                                  <td>{{.ExpiryDays}}d | {{.MaxArticles}}{{if .MaxArtSize}} | {{.MaxArtSize}}B{{end}}</td>
                                   <td>
                                       <form method="POST" action="/admin/newsgroups/migrate-activity" style="display: inline;">
                                           <input type="hidden" name="newsgroup_name" value="{{.Name}}">
@@ -333,6 +334,13 @@
                                          placeholder="0" min="0" max="10000">
                               </div>
                           </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="max_art_size" class="form-label">Max Art Size (bytes)</label>
+                                  <input type="number" class="form-control" id="max_art_size" name="max_art_size"
+                                         placeholder="0" min="0" max="20000000">
+                              </div>
+                          </div>
                           <div class="col-md-1">
                               <div class="mb-3">
                                   <label for="newsgroup_active" class="form-label">Active</label>
@@ -379,18 +387,25 @@
                     </div>
 
                     <div class="row">
-                        <div class="col-md-6">
+                        <div class="col-md-4">
                             <div class="mb-3">
                                 <label for="edit_expiry_days" class="form-label">Expiry Days</label>
                                 <input type="number" class="form-control" id="edit_expiry_days" name="expiry_days"
                                        placeholder="0" min="0" max="365">
                             </div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-md-4">
                             <div class="mb-3">
                                 <label for="edit_max_articles" class="form-label">Max Articles</label>
                                 <input type="number" class="form-control" id="edit_max_articles" name="max_articles"
                                        placeholder="0" min="0" max="10000">
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="edit_max_art_size" class="form-label">Max Art Size (bytes)</label>
+                                <input type="number" class="form-control" id="edit_max_art_size" name="max_art_size"
+                                       placeholder="0" min="0" max="20000000">
                             </div>
                         </div>
                     </div>
@@ -425,6 +440,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const description = this.dataset.description || '';
             const expiryDays = parseInt(this.dataset.expiryDays) || 0;
             const maxArticles = parseInt(this.dataset.maxArticles) || 0;
+            const maxArtSize = parseInt(this.dataset.maxArtSize) || 0;
             const active = this.dataset.active === 'true';
 
             // Populate the modal form
@@ -433,6 +449,7 @@ document.addEventListener('DOMContentLoaded', function() {
             document.getElementById('edit_newsgroup_description').value = description;
             document.getElementById('edit_expiry_days').value = expiryDays;
             document.getElementById('edit_max_articles').value = maxArticles;
+            document.getElementById('edit_max_art_size').value = maxArtSize;
             document.getElementById('edit_newsgroup_active').checked = active;
 
             // Show the modal
