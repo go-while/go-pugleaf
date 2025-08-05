@@ -1,1 +1,3 @@
-cp new/* .
+#!/bin/sh
+./getUpdate.sh
+cp -v new/* .

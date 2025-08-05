@@ -628,12 +628,12 @@ func monitorUpdateFile(shutdownChan chan<- bool) {
 		if _, err := os.Stat(updateFilePath); err == nil {
 			log.Printf("[WEB]: Update file '%s' detected, triggering graceful shutdown", updateFilePath)
 
-			// Remove the update file
-			if err := os.Remove(updateFilePath); err != nil {
-				log.Printf("[WEB]: Warning: Failed to remove update file '%s': %v", updateFilePath, err)
+			// Rename the update file
+			if err := os.Rename(updateFilePath, updateFilePath+".todo"); err != nil {
+				log.Printf("[WEB]: Warning: Failed to rename update file '%s': %v", updateFilePath, err)
 				continue
 			} else {
-				log.Printf("[WEB]: Update file '%s' removed successfully", updateFilePath)
+				log.Printf("[WEB]: Update file '%s' renamed successfully", updateFilePath)
 			}
 
 			// Signal shutdown

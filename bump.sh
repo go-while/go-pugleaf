@@ -1,1 +1,4 @@
-./appVersion.sh; ./build_ALL.sh; ./rsync.sh 
+#!/bin/sh
+./appVersion.sh 
+./Build_DEV.sh 
+./rsync.sh 

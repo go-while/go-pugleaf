@@ -10,12 +10,12 @@ rm -v build/*
 #./build_fix-references.sh
 #./build_fix-thread-activity.sh
 
-./build_rslight_importer.sh
-./build_analyze.sh
+#./build_rslight_importer.sh
+#./build_analyze.sh
 ./build_fetcher.sh
 ./build_webserver.sh
-./build_recover-db.sh
-./build_expire-news.sh
+#./build_recover-db.sh
+#./build_expire-news.sh
 
 
 ./createUpdate.sh
