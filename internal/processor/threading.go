@@ -75,7 +75,7 @@ func containsAtAndDot(messageID string) bool {
 }
 
 func (proc *Processor) setCaseDupes(msgIdItem *history.MessageIdItem, bulkmode bool) {
-	if !bulkmode && msgIdItem != nil {
+	if msgIdItem != nil {
 		msgIdItem.Mux.Lock()
 		msgIdItem.Response = history.CaseDupes
 		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
@@ -112,7 +112,7 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 			return history.CaseDupes, nil // Return duplicate to avoid race condition
 		case history.CasePass:
 			// Article is new, mark as being processed
-			msgIdItem.Response = history.CaseWrite
+			msgIdItem.Response = history.CaseLock
 			msgIdItem.Mux.Unlock()
 			// Continue with processing
 		default:
