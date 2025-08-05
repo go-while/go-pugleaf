@@ -156,6 +156,7 @@ type SearchPageData struct {
 	Results     interface{}
 	ResultCount int
 	HasResults  bool
+	Pagination  *models.PaginationInfo
 }
 
 // NewServer creates a new web server instance

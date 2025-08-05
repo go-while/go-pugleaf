@@ -84,7 +84,8 @@
                             </button>
                         </div>
                         <div id="searchHelp" class="form-text">
-                            Use quotes for exact phrases, * for wildcards, and boolean operators (AND, OR, NOT)
+                            Use quotes for exact phrases, * for wildcards, and boolean operators (AND, OR, NOT).
+                            <br><strong>Note:</strong> Very broad searches (like just "%" or "*") are limited to 50 results per page for performance.
                         </div>
                     </div>
 
@@ -178,7 +179,10 @@
                     <i class="bi bi-{{if .HasResults}}check-circle{{else}}exclamation-triangle{{end}} me-2"></i>
                     Search Results for "{{.Query}}"
                     {{if .HasResults}}
-                        <span class="badge bg-light text-dark ms-2">{{.ResultCount}} found</span>
+                        <span class="badge bg-light text-dark ms-2">{{.ResultCount}} total found</span>
+                        {{if .Pagination}}
+                            <span class="badge bg-light text-dark ms-1">Page {{.Pagination.CurrentPage}} of {{.Pagination.TotalPages}}</span>
+                        {{end}}
                     {{end}}
                 </h6>
             </div>
@@ -268,6 +272,56 @@
                         <strong>No results found</strong> for "{{.Query}}" in {{.SearchType}}.
                         <br><small>Try a different search term or search type.</small>
                     </div>
+                {{end}}
+                
+                <!-- Pagination Controls -->
+                {{if and .HasResults .Pagination}}
+                {{if gt .Pagination.TotalPages 1}}
+                <nav aria-label="Search results pagination" class="mt-4">
+                    <ul class="pagination justify-content-center">
+                        {{if .Pagination.HasPrevPage}}
+                        <li class="page-item">
+                            <a class="page-link" href="?q={{.Query}}&searchType={{.SearchType}}&page=1">First</a>
+                        </li>
+                        <li class="page-item">
+                            <a class="page-link" href="?q={{.Query}}&searchType={{.SearchType}}&page={{.Pagination.PrevPage}}">Previous</a>
+                        </li>
+                        {{else}}
+                        <li class="page-item disabled">
+                            <span class="page-link">First</span>
+                        </li>
+                        <li class="page-item disabled">
+                            <span class="page-link">Previous</span>
+                        </li>
+                        {{end}}
+                        
+                        <li class="page-item active">
+                            <span class="page-link">{{.Pagination.CurrentPage}}</span>
+                        </li>
+                        
+                        {{if .Pagination.HasNextPage}}
+                        <li class="page-item">
+                            <a class="page-link" href="?q={{.Query}}&searchType={{.SearchType}}&page={{.Pagination.NextPage}}">Next</a>
+                        </li>
+                        <li class="page-item">
+                            <a class="page-link" href="?q={{.Query}}&searchType={{.SearchType}}&page={{.Pagination.TotalPages}}">Last</a>
+                        </li>
+                        {{else}}
+                        <li class="page-item disabled">
+                            <span class="page-link">Next</span>
+                        </li>
+                        <li class="page-item disabled">
+                            <span class="page-link">Last</span>
+                        </li>
+                        {{end}}
+                    </ul>
+                    <div class="text-center">
+                        <small class="text-muted">
+                            Showing {{if .Pagination.HasResults}}{{.Pagination.StartResult}} - {{.Pagination.EndResult}} of{{end}} {{.ResultCount}} results
+                        </small>
+                    </div>
+                </nav>
+                {{end}}
                 {{end}}
             </div>
         </div>

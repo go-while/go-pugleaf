@@ -186,7 +186,7 @@ func (db *Database) UpdateNewsgroup(g *models.Newsgroup) error {
 // UpdateNewsgroupExpiry updates the expiry_days for a newsgroup
 func (db *Database) UpdateNewsgroupExpiry(name string, expiryDays int) error {
 	_, err := retryableExec(db.mainDB,
-		`UPDATE newsgroups SET expiry_days = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`,
+		`UPDATE newsgroups SET expiry_days = ? WHERE name = ?`,
 		expiryDays, name,
 	)
 	return err
@@ -195,7 +195,7 @@ func (db *Database) UpdateNewsgroupExpiry(name string, expiryDays int) error {
 // UpdateNewsgroupExpiryPrefix updates the expiry_days for a newsgroup
 func (db *Database) UpdateNewsgroupExpiryPrefix(name string, expiryDays int) error {
 	_, err := retryableExec(db.mainDB,
-		`UPDATE newsgroups SET expiry_days = ?, updated_at = CURRENT_TIMESTAMP WHERE name LIKE ? `,
+		`UPDATE newsgroups SET expiry_days = ? WHERE name LIKE ? `,
 		expiryDays, name+"%",
 	)
 	return err
@@ -204,7 +204,7 @@ func (db *Database) UpdateNewsgroupExpiryPrefix(name string, expiryDays int) err
 // UpdateNewsgroupMaxArticles updates the expiry_days for a newsgroup
 func (db *Database) UpdateNewsgroupMaxArticles(name string, maxArticles int) error {
 	_, err := retryableExec(db.mainDB,
-		`UPDATE newsgroups SET max_articles = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`,
+		`UPDATE newsgroups SET max_articles = ? WHERE name = ?`,
 		maxArticles, name,
 	)
 	return err
@@ -213,7 +213,7 @@ func (db *Database) UpdateNewsgroupMaxArticles(name string, maxArticles int) err
 // UpdateNewsgroupMaxArticles updates the expiry_days for a newsgroup
 func (db *Database) UpdateNewsgroupMaxArticlesPrefix(name string, maxArticles int) error {
 	_, err := retryableExec(db.mainDB,
-		`UPDATE newsgroups SET max_articles = ?, updated_at = CURRENT_TIMESTAMP WHERE name LIKE ?`,
+		`UPDATE newsgroups SET max_articles = ? WHERE name LIKE ?`,
 		maxArticles, name+"%",
 	)
 	return err
@@ -222,7 +222,7 @@ func (db *Database) UpdateNewsgroupMaxArticlesPrefix(name string, maxArticles in
 // UpdateNewsgroupMaxArtSize updates the max_art_size for a newsgroup
 func (db *Database) UpdateNewsgroupMaxArtSize(name string, maxArtSize int) error {
 	_, err := retryableExec(db.mainDB,
-		`UPDATE newsgroups SET max_art_size = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`,
+		`UPDATE newsgroups SET max_art_size = ? WHERE name = ?`,
 		maxArtSize, name,
 	)
 	return err
@@ -231,7 +231,7 @@ func (db *Database) UpdateNewsgroupMaxArtSize(name string, maxArtSize int) error
 // UpdateNewsgroupActive updates the active status for a newsgroup
 func (db *Database) UpdateNewsgroupActive(name string, active bool) error {
 	_, err := retryableExec(db.mainDB,
-		`UPDATE newsgroups SET active = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`,
+		`UPDATE newsgroups SET active = ? WHERE name = ?`,
 		active, name,
 	)
 	return err
@@ -261,7 +261,7 @@ func (db *Database) BulkUpdateNewsgroupActive(names []string, active bool) (int,
 	}
 
 	query := fmt.Sprintf(
-		`UPDATE newsgroups SET active = ?, updated_at = CURRENT_TIMESTAMP WHERE name IN (%s)`,
+		`UPDATE newsgroups SET active = ? WHERE name IN (%s)`,
 		strings.Join(placeholders, ","),
 	)
 
@@ -329,7 +329,7 @@ func (db *Database) BulkDeleteNewsgroups(names []string) (int, error) {
 // UpdateNewsgroupDescription updates the description for a newsgroup
 func (db *Database) UpdateNewsgroupDescription(name string, description string) error {
 	_, err := retryableExec(db.mainDB,
-		`UPDATE newsgroups SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`,
+		`UPDATE newsgroups SET description = ? WHERE name = ?`,
 		description, name,
 	)
 	return err
@@ -1117,8 +1117,8 @@ func (db *Database) GetTotalThreadsCount() (int64, error) {
 	return totalThreads, nil
 }
 
-// SearchNewsgroups searches for newsgroups by name pattern
-func (db *Database) SearchNewsgroups(searchTerm string) ([]*models.Newsgroup, error) {
+// SearchNewsgroups searches for newsgroups by name pattern with pagination
+func (db *Database) SearchNewsgroups(searchTerm string, limit, offset int) ([]*models.Newsgroup, error) {
 
 	// Use LIKE for pattern matching, case-insensitive
 	searchPattern := "%" + searchTerm + "%"
@@ -1129,7 +1129,8 @@ func (db *Database) SearchNewsgroups(searchTerm string) ([]*models.Newsgroup, er
 		WHERE name LIKE ? COLLATE NOCASE
 		OR description LIKE ? COLLATE NOCASE
 		ORDER BY message_count DESC, name ASC
-	`, searchPattern, searchPattern)
+		LIMIT ? OFFSET ?
+	`, searchPattern, searchPattern, limit, offset)
 
 	if err != nil {
 		return nil, err
@@ -1150,6 +1151,22 @@ func (db *Database) SearchNewsgroups(searchTerm string) ([]*models.Newsgroup, er
 	}
 
 	return groups, rows.Err()
+}
+
+// CountSearchNewsgroups counts total newsgroups matching search pattern
+func (db *Database) CountSearchNewsgroups(searchTerm string) (int, error) {
+	// Use LIKE for pattern matching, case-insensitive
+	searchPattern := "%" + searchTerm + "%"
+
+	var count int
+	err := db.mainDB.QueryRow(`
+		SELECT COUNT(*)
+		FROM newsgroups
+		WHERE name LIKE ? COLLATE NOCASE
+		OR description LIKE ? COLLATE NOCASE
+	`, searchPattern, searchPattern).Scan(&count)
+
+	return count, err
 }
 
 // GetAllUsers retrieves all users from the database
