@@ -279,7 +279,7 @@
                 {{if gt .Pagination.TotalPages 1}}
                 <nav aria-label="Search results pagination" class="mt-4">
                     <ul class="pagination justify-content-center">
-                        {{if .Pagination.HasPrevPage}}
+                        {{if .Pagination.HasPrev}}
                         <li class="page-item">
                             <a class="page-link" href="?q={{.Query}}&searchType={{.SearchType}}&page=1">First</a>
                         </li>
@@ -299,7 +299,7 @@
                             <span class="page-link">{{.Pagination.CurrentPage}}</span>
                         </li>
 
-                        {{if .Pagination.HasNextPage}}
+                        {{if .Pagination.HasNext}}
                         <li class="page-item">
                             <a class="page-link" href="?q={{.Query}}&searchType={{.SearchType}}&page={{.Pagination.NextPage}}">Next</a>
                         </li>
@@ -317,7 +317,7 @@
                     </ul>
                     <div class="text-center">
                         <small class="text-muted">
-                            Showing {{if .Pagination.HasResults}}{{.Pagination.StartResult}} - {{.Pagination.EndResult}} of{{end}} {{.ResultCount}} results
+                            Showing page {{.Pagination.CurrentPage}} of {{.Pagination.TotalPages}} ({{.ResultCount}} total results)
                         </small>
                     </div>
                 </nav>
