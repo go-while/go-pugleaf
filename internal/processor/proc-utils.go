@@ -9,6 +9,18 @@ import (
 	"time"
 )
 
+var (
+	separatorRegex       = regexp.MustCompile(`[,;:\s]+`)
+	parenRe              = regexp.MustCompile(`\s*\([^)]*\)$`)
+	threeDigitTimezoneRe = regexp.MustCompile(`\s([+-])(\d{3})\s*$`)
+	yearRegex            = regexp.MustCompile(`\b(19[7-9]\d|20[0-9]\d)\b`)
+	monthRegex           = regexp.MustCompile(`\b(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b`)
+	dayRegex             = regexp.MustCompile(`\b([1-9]|[12]\d|3[01])\b`)
+	timeRegex            = regexp.MustCompile(`\b(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?\b`)
+	twoDigitYearRegex    = regexp.MustCompile(`\b([0-9]\d)\b`)
+	numericRegex         = regexp.MustCompile(`\b(\d{1,4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,4})\b`)
+)
+
 var NNTPDateLayouts = []string{
 	// Just date
 	"2006/01/02",
@@ -436,7 +448,6 @@ func IsValidGroupName(name string) bool {
 
 func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []string {
 	// Use a single regex to split on any combination of separators
-	separatorRegex := regexp.MustCompile(`[,;:\s]+`)
 	rawGroups := separatorRegex.Split(groupsline, -1)
 
 	var validGroups []string
@@ -597,7 +608,6 @@ func ParseNNTPDate(dateStr string) time.Time {
 		return time.Time{}
 	}
 	// Remove trailing parenthesized timezone, e.g., " (NZDT)"
-	parenRe := regexp.MustCompile(`\s*\([^)]*\)$`)
 	dateStr = parenRe.ReplaceAllString(dateStr, "")
 	dateStr = strings.TrimSpace(dateStr)
 
@@ -606,7 +616,6 @@ func ParseNNTPDate(dateStr string) time.Time {
 	}
 
 	// Fix 3-digit timezone formats like +200 -> +0200
-	threeDigitTimezoneRe := regexp.MustCompile(`\s([+-])(\d{3})\s*$`)
 	if match := threeDigitTimezoneRe.FindStringSubmatch(dateStr); len(match) == 3 {
 		sign := match[1]
 		digits := match[2]
@@ -695,7 +704,6 @@ func bruteForceDateParse(dateStr string) time.Time {
 	var hour, min, sec int = 12, 0, 0 // Default to noon if no time found
 
 	// Pattern 1: Find 4-digit year (1970-2099)
-	yearRegex := regexp.MustCompile(`\b(19[7-9]\d|20[0-9]\d)\b`)
 	if yearMatch := yearRegex.FindString(dateStr); yearMatch != "" {
 		if y, err := strconv.Atoi(yearMatch); err == nil {
 			year = y
@@ -703,7 +711,6 @@ func bruteForceDateParse(dateStr string) time.Time {
 	}
 
 	// Pattern 2: Find month name (case insensitive)
-	monthRegex := regexp.MustCompile(`\b(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b`)
 	if monthMatch := monthRegex.FindString(strings.ToLower(dateStr)); monthMatch != "" {
 		if m, exists := monthMap[monthMatch]; exists {
 			month = int(m)
@@ -711,7 +718,6 @@ func bruteForceDateParse(dateStr string) time.Time {
 	}
 
 	// Pattern 3: Find day (1-31, but be flexible)
-	dayRegex := regexp.MustCompile(`\b([1-9]|[12]\d|3[01])\b`)
 	dayMatches := dayRegex.FindAllString(dateStr, -1)
 	for _, dayMatch := range dayMatches {
 		if d, err := strconv.Atoi(dayMatch); err == nil && d >= 1 && d <= 31 {
@@ -724,7 +730,6 @@ func bruteForceDateParse(dateStr string) time.Time {
 	}
 
 	// Pattern 4: Try to find time components HH:MM:SS or HH:MM
-	timeRegex := regexp.MustCompile(`\b(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?\b`)
 	if timeMatch := timeRegex.FindStringSubmatch(dateStr); len(timeMatch) >= 3 {
 		if h, err := strconv.Atoi(timeMatch[1]); err == nil && h >= 0 && h <= 23 {
 			hour = h
@@ -742,7 +747,6 @@ func bruteForceDateParse(dateStr string) time.Time {
 	// If we couldn't find a year, try to extract 2-digit year and guess the century
 	if year == 0 {
 		// Look for all 2-digit numbers and filter intelligently
-		twoDigitYearRegex := regexp.MustCompile(`\b([0-9]\d)\b`)
 		allMatches := twoDigitYearRegex.FindAllString(dateStr, -1)
 
 		// First pass: look for numbers >= 60 (clearly years from 1960s-1990s)
@@ -801,7 +805,6 @@ func bruteForceDateParse(dateStr string) time.Time {
 	// If we still don't have enough components, try alternative patterns
 	if year == 0 || month == 0 || day == 0 {
 		// Try numeric date patterns like DD/MM/YY or MM/DD/YY or YYYY/MM/DD
-		numericRegex := regexp.MustCompile(`\b(\d{1,4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,4})\b`)
 		if numMatch := numericRegex.FindStringSubmatch(dateStr); len(numMatch) == 4 {
 			part1, _ := strconv.Atoi(numMatch[1])
 			part2, _ := strconv.Atoi(numMatch[2])

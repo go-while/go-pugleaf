@@ -20,6 +20,15 @@ import (
 	"golang.org/x/text/transform"
 )
 
+var (
+	mimeWordRegex = regexp.MustCompile(`=\?([^?]+)\?([QqBb])\?([^?]*)\?=`)
+	spaceRegex    = regexp.MustCompile(`\s+`)
+	scriptRegex   = regexp.MustCompile(`(?i)<script[^>]*>.*?</script>`)
+	iframeRegex   = regexp.MustCompile(`(?i)<iframe[^>]*>.*?</iframe>`)
+	jsRegex       = regexp.MustCompile(`(?i)javascript:[^"'\s>]*`)
+	eventRegex    = regexp.MustCompile(`(?i)on\w+\s*=\s*["'][^"']*["']`)
+)
+
 // Security and sanitization methods
 
 // ConvertToUTF8 converts text from Latin-1 to UTF-8 if needed, decodes MIME encoded-words and HTML entities
@@ -67,7 +76,6 @@ func decodeQuotedPrintable(text string) string {
 // such as ISO-8859-15 and many other legacy charsets
 func decodeUnsupportedMIME(text string) string {
 	// MIME encoded-word pattern: =?charset?encoding?encoded-text?=
-	mimeWordRegex := regexp.MustCompile(`=\?([^?]+)\?([QqBb])\?([^?]*)\?=`)
 
 	result := mimeWordRegex.ReplaceAllStringFunc(text, func(match string) string {
 		parts := mimeWordRegex.FindStringSubmatch(match)
@@ -390,7 +398,6 @@ func cleanFromHeaderName(name string) string {
 	result := strings.TrimSpace(cleaned.String())
 
 	// Remove multiple consecutive spaces
-	spaceRegex := regexp.MustCompile(`\s+`)
 	result = spaceRegex.ReplaceAllString(result, " ")
 
 	// If result is empty after cleaning, return "Anon"
@@ -579,19 +586,15 @@ func sanitizeText(input string) string {
 	}
 
 	// Remove script tags and their content
-	scriptRegex := regexp.MustCompile(`(?i)<script[^>]*>.*?</script>`)
 	output := scriptRegex.ReplaceAllString(input, "")
 
 	// Remove iframe tags
-	iframeRegex := regexp.MustCompile(`(?i)<iframe[^>]*>.*?</iframe>`)
 	output = iframeRegex.ReplaceAllString(output, "")
 
 	// Remove javascript: links
-	jsRegex := regexp.MustCompile(`(?i)javascript:[^"'\s>]*`)
 	output = jsRegex.ReplaceAllString(output, "")
 
 	// Remove onload, onclick, onerror, etc. event handlers
-	eventRegex := regexp.MustCompile(`(?i)on\w+\s*=\s*["'][^"']*["']`)
 	output = eventRegex.ReplaceAllString(output, "")
 
 	return output
