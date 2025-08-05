@@ -74,11 +74,11 @@ func containsAtAndDot(messageID string) bool {
 	return strings.Contains(messageID, "@") && strings.Contains(messageID, ".")
 }
 
-// resetCaseWriteOnError resets the CaseWrite flag when processing fails
-func (proc *Processor) resetCaseWriteOnError(msgIdItem *history.MessageIdItem, bulkmode bool) {
+func (proc *Processor) setCaseDupes(msgIdItem *history.MessageIdItem, bulkmode bool) {
 	if !bulkmode && msgIdItem != nil {
 		msgIdItem.Mux.Lock()
-		msgIdItem.Response = history.CasePass // Reset to allow retry
+		msgIdItem.Response = history.CaseDupes
+		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
 		msgIdItem.Mux.Unlock()
 	}
 }
@@ -158,20 +158,20 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 		newsgroupsStr := getHeaderFirst(art.Headers, "newsgroups")
 		if newsgroupsStr == "" {
 			log.Printf("[SPAM:HDR] Article '%s' no newsgroups header", art.MessageID)
-			proc.resetCaseWriteOnError(msgIdItem, bulkmode)
+			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'newsgroups' header", art.MessageID)
 		}
 
 		newsgroups = proc.extractGroupsFromHeaders(art.MessageID, newsgroupsStr)
 		if len(newsgroups) > MaxCrossPosts {
 			log.Printf("[SPAM:EMP] Article '%s' newsgroups=%d", art.MessageID, len(newsgroups))
-			proc.resetCaseWriteOnError(msgIdItem, bulkmode)
+			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, fmt.Errorf("error processArticle: article '%s' crossposts=%d", art.MessageID, len(newsgroups))
 		}
 
 	} else {
 		log.Printf("ERROR processArticle: article '%s' has no 'newsgroups' header and no legacy newsgroup provided", art.MessageID)
-		proc.resetCaseWriteOnError(msgIdItem, bulkmode)
+		proc.setCaseDupes(msgIdItem, bulkmode)
 		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'newsgroups' header", art.MessageID)
 	}
 
@@ -188,10 +188,7 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 		futureThreshold := time.Now().Add(48 * time.Hour)
 		if dateSent.After(futureThreshold) {
 			log.Printf("[FUTURE] Article '%s' posted more than 48 hours in future (date: %v), skipping processing", art.MessageID, dateSent)
-			msgIdItem.Mux.Lock()
-			msgIdItem.Response = history.CaseDupes
-			msgIdItem.CachedEntryExpires = time.Now().Add(5 * time.Second)
-			msgIdItem.Mux.Unlock()
+			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, fmt.Errorf("article '%s' posted too far in future: %v", art.MessageID, dateSent)
 		}
 	}
@@ -242,7 +239,7 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 			newsgroupPtr := proc.DB.Batch.GetNewsgroupPointer(newsgroup)
 			if newsgroupPtr == nil {
 				log.Printf("error processArticle: GetNewsgroupPointer nil exception! msgId='%s' newsgroup '%s' skipping crosspost", art.MessageID, newsgroup)
-				proc.resetCaseWriteOnError(msgIdItem, bulkmode)
+				proc.setCaseDupes(msgIdItem, bulkmode)
 				continue // Skip this group if not found
 			}
 			// @AI !!! NO CACHE CHECK for bulk legacy import!!
@@ -293,7 +290,7 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 	} else {
 		log.Printf("No newsgroups found in article '%s', skipping processing", art.MessageID)
 		// Pipeline safety: Reset CaseWrite on error
-		proc.resetCaseWriteOnError(msgIdItem, bulkmode)
+		proc.setCaseDupes(msgIdItem, bulkmode)
 		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'newsgroups' header", art.MessageID)
 	}
 
