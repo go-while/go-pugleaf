@@ -28,12 +28,16 @@ type Pool struct {
 
 // NewPool creates a new connection pool
 func NewPool(cfg *BackendConfig) *Pool {
-	return &Pool{
+	pool := &Pool{
 		Backend:     cfg,
 		connections: make(chan *BackendConn, cfg.MaxConns),
 		maxConns:    cfg.MaxConns,
 		idleTimeout: DefaultConnExpire,
 	}
+	if pool.Backend.ConnectTimeout == 0 {
+		pool.Backend.ConnectTimeout = 30 * time.Second
+	}
+	return pool
 }
 
 func (p *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]OverviewLine, error) {
@@ -174,9 +178,9 @@ func (p *Pool) Get() (*BackendConn, error) {
 		p.totalCreated++
 		p.mux.Unlock()
 		return newPconn, nil
-	case <-time.After(p.Backend.ConnectTimeout + 1*time.Second):
+	case <-time.After(30 * time.Second):
 		// Timeout waiting for a connection
-		return nil, fmt.Errorf("timeout waiting for connection from pool")
+		return nil, fmt.Errorf("timeout waiting for connection from pool after 30s")
 	}
 }
 
@@ -372,7 +376,7 @@ done:
 // StartCleanupWorker starts a goroutine that periodically cleans up expired connections
 func (p *Pool) StartCleanupWorker(interval time.Duration) {
 	if interval <= 0 {
-		interval = 5 * time.Second // Default cleanup interval
+		interval = 8 * time.Second // Default cleanup interval
 	}
 
 	go func() {

@@ -684,16 +684,16 @@ func ConnectPools(db *database.Database) []*nntp.Pool {
 		}
 
 		backendConfig := &nntp.BackendConfig{
-			Host:           p.Host,
-			Port:           p.Port,
-			SSL:            p.SSL,
-			Username:       p.Username,
-			Password:       p.Password,
-			ConnectTimeout: 9 * time.Second,
-			ReadTimeout:    60 * time.Second,
-			WriteTimeout:   60 * time.Second,
-			MaxConns:       p.MaxConns,
-			Provider:       configProvider, // Set the Provider field
+			Host:     p.Host,
+			Port:     p.Port,
+			SSL:      p.SSL,
+			Username: p.Username,
+			Password: p.Password,
+			//ConnectTimeout: 9 * time.Second,
+			//ReadTimeout:    60 * time.Second,
+			//WriteTimeout:   60 * time.Second,
+			MaxConns: p.MaxConns,
+			Provider: configProvider, // Set the Provider field
 		}
 
 		pool := nntp.NewPool(backendConfig)

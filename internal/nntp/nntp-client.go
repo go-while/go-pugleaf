@@ -66,16 +66,16 @@ type BackendConn struct {
 
 // BackendConfig holds configuration for an NNTP client
 type BackendConfig struct {
-	Host           string           // hostname or IP address of the NNTP server
-	Port           int              // port number for the NNTP server
-	SSL            bool             // whether to use SSL/TLS
-	Username       string           // username for authentication
-	Password       string           // password for authentication
-	ConnectTimeout time.Duration    // timeout for establishing a connection
-	ReadTimeout    time.Duration    // timeout for reading from the connection
-	WriteTimeout   time.Duration    // timeout for writing to the connection
-	MaxConns       int              // maximum number of connections to this backend
-	Provider       *config.Provider // link to provider config
+	Host           string        // hostname or IP address of the NNTP server
+	Port           int           // port number for the NNTP server
+	SSL            bool          // whether to use SSL/TLS
+	Username       string        // username for authentication
+	Password       string        // password for authentication
+	ConnectTimeout time.Duration // timeout for establishing a connection
+	//ReadTimeout    time.Duration    // timeout for reading from the connection
+	//WriteTimeout   time.Duration    // timeout for writing to the connection
+	MaxConns int              // maximum number of connections to this backend
+	Provider *config.Provider // link to provider config
 }
 
 // Article represents an NNTP article
@@ -115,18 +115,8 @@ type HeaderLine struct {
 	Value      string
 }
 
-// NewConn creates a new NNTP connection with the provided backend configuration.
+// NewConn creates a new empty NNTP connection with the provided backend configuration.
 func NewConn(backend *BackendConfig) *BackendConn {
-	if backend.ConnectTimeout == 0 {
-		backend.ConnectTimeout = 30 * time.Second
-	}
-	if backend.ReadTimeout == 0 {
-		backend.ReadTimeout = 600 * time.Second // arbitrary long read timeout for NNTP
-	}
-	if backend.WriteTimeout == 0 {
-		backend.WriteTimeout = 600 * time.Second // arbitrary long write timeout for NNTP
-	}
-
 	return &BackendConn{
 		Backend: backend,
 		created: time.Now(),
@@ -277,7 +267,7 @@ func (c *BackendConn) CloseFromPoolOnly() error {
 	c.textConn = nil
 	c.conn = nil
 	c.writer = nil
-	log.Printf("Closed NNTP Connection to %s", c.Backend.Host)
+	//log.Printf("Closed NNTP Connection to %s", c.Backend.Host)
 	return nil
 }
 

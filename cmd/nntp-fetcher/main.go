@@ -199,16 +199,16 @@ func main() {
 		}
 
 		backendConfig := &nntp.BackendConfig{
-			Host:           p.Host,
-			Port:           p.Port,
-			SSL:            p.SSL,
-			Username:       p.Username,
-			Password:       p.Password,
-			ConnectTimeout: 30 * time.Second,
-			ReadTimeout:    60 * time.Second,
-			WriteTimeout:   30 * time.Second,
-			MaxConns:       p.MaxConns,
-			Provider:       configProvider, // Set the Provider field
+			Host:     p.Host,
+			Port:     p.Port,
+			SSL:      p.SSL,
+			Username: p.Username,
+			Password: p.Password,
+			//ConnectTimeout: 30 * time.Second,
+			//ReadTimeout:    60 * time.Second,
+			//WriteTimeout:   30 * time.Second,
+			MaxConns: p.MaxConns,
+			Provider: configProvider, // Set the Provider field
 		}
 		pool := nntp.NewPool(backendConfig)
 		pool.StartCleanupWorker(5 * time.Second)
@@ -463,16 +463,16 @@ func ConnectionTest(host *string, port *int, username *string, password *string,
 
 	// Create Test client configuration
 	backenConfig := &nntp.BackendConfig{
-		Host:           *host,
-		Port:           *port,
-		SSL:            *ssl,
-		Username:       *username,
-		Password:       *password,
-		MaxConns:       3, // Default max connections
-		ConnectTimeout: time.Duration(*timeout) * time.Second,
-		ReadTimeout:    60 * time.Second,
-		WriteTimeout:   30 * time.Second,
-		Provider:       testProvider, // Set the Provider field
+		Host:     *host,
+		Port:     *port,
+		SSL:      *ssl,
+		Username: *username,
+		Password: *password,
+		MaxConns: 3, // Default max connections
+		//ConnectTimeout: time.Duration(*timeout) * time.Second,
+		//ReadTimeout:    60 * time.Second,
+		//WriteTimeout:   30 * time.Second,
+		Provider: testProvider, // Set the Provider field
 	}
 
 	fmt.Printf("Testing NNTP connection to %s:%d (SSL: %v)\n", *host, *port, *ssl)

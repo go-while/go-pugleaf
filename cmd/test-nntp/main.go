@@ -3,7 +3,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/go-while/go-pugleaf/internal/nntp"
 )
@@ -12,14 +11,14 @@ func main() {
 
 	// Test configuration for news.blueworldhosting.com
 	config := nntp.BackendConfig{
-		Host:           "news.blueworldhosting.com",
-		Port:           563,
-		SSL:            true,
-		Username:       "", // Usually no auth required for reading
-		Password:       "",
-		ConnectTimeout: 30 * time.Second,
-		ReadTimeout:    60 * time.Second,
-		WriteTimeout:   30 * time.Second,
+		Host:     "news.blueworldhosting.com",
+		Port:     563,
+		SSL:      true,
+		Username: "", // Usually no auth required for reading
+		Password: "",
+		//ConnectTimeout: 30 * time.Second,
+		//ReadTimeout:    60 * time.Second,
+		//WriteTimeout:   30 * time.Second,
 	}
 
 	fmt.Printf("Testing NNTP connection to: %s:%d (SSL: %v)\n",

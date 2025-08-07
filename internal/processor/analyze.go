@@ -884,8 +884,8 @@ func AnalyzeModeStandalone(host *string, port *int, username *string, password *
 		Password:       *password,
 		MaxConns:       5,
 		ConnectTimeout: time.Duration(*timeout) * time.Second,
-		ReadTimeout:    60 * time.Second,
-		WriteTimeout:   30 * time.Second,
+		//ReadTimeout:    60 * time.Second,
+		//WriteTimeout:   30 * time.Second,
 	}
 
 	fmt.Printf("Analyzing newsgroup '%s' on %s:%d (SSL: %v)\n", *testGrp, *host, *port, *ssl)
