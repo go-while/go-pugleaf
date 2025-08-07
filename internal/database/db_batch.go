@@ -1078,6 +1078,7 @@ func (o *BatchOrchestrator) StartOrchestrator() {
 	sleep := 1500 // @AI: DO NOT CHANGE THIS!!!!
 	ShutDownCounter := InitialShutDownCounter
 	wantShutdown := false
+	newSleep := sleep
 	for {
 		// Sleep briefly to avoid busy waiting
 		time.Sleep(time.Duration(sleep) * time.Millisecond)
@@ -1106,14 +1107,14 @@ func (o *BatchOrchestrator) StartOrchestrator() {
 		}
 		if !wantShutdown {
 			if !hasWork {
-				// Exponential backoff with jitter - ensure minimum increment of 1ms
-				newSleep := int(float64(sleep) * 1.07) // +7%
+				// Exponential backoff with jitter - ensure minimum increment of 2ms
+				newSleep = int(float64(sleep) * 1.02) // +2%
 				if newSleep <= sleep {
-					newSleep = sleep + 50 // Force at least 50ms increment because if we hit 5ms and we have no more work 5ms * 1.05 results still in 5 and we will turn like crazy in cycles!
+					newSleep = sleep + 2 // Force at least 2ms increment: example if we hit 5ms and we have no more work 5ms * 1.05 results still in 5 and we will turn like crazy in cycles!
 				}
 				sleep = newSleep
-				if sleep > 3000 { // @AI: DO NOT CHANGE THIS!!!!
-					sleep = 3000 // @AI: DO NOT CHANGE THIS!!!!
+				if sleep > 1500 { // @AI: DO NOT CHANGE THIS!!!!
+					sleep = 1500 // @AI: DO NOT CHANGE THIS!!!!
 				} // @AI: DO NOT CHANGE THIS!!!!
 			} else {
 				// Fast recovery when work is found
