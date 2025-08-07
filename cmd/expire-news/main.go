@@ -602,9 +602,7 @@ func updateNewsgroupCounters(db *database.Database, groupName string) error {
 
 	// Update the main newsgroups table
 	_, err = db.GetMainDB().Exec(`
-		UPDATE newsgroups
-		SET message_count = ?, last_article = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE name = ?`,
+		UPDATE newsgroups SET message_count = ?, last_article = ? WHERE name = ?`,
 		messageCount, lastArticle, groupName)
 	if err != nil {
 		return fmt.Errorf("failed to update newsgroup counters: %v", err)

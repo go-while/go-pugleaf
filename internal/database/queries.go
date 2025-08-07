@@ -1320,7 +1320,7 @@ func (db *Database) GetHeaderFieldRange(groupDBs *GroupDBs, field string, startN
 // UpdateNewsgroupWatermarks updates the high and low water marks for a newsgroup
 func (db *Database) UpdateNewsgroupWatermarks(name string, highWater, lowWater int) error {
 	_, err := db.mainDB.Exec(
-		`UPDATE newsgroups SET high_water = ?, low_water = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`,
+		`UPDATE newsgroups SET high_water = ?, low_water = ? WHERE name = ?`,
 		highWater, lowWater, name,
 	)
 	return err
@@ -1329,7 +1329,7 @@ func (db *Database) UpdateNewsgroupWatermarks(name string, highWater, lowWater i
 // UpdateNewsgroupStatus updates the NNTP status for a newsgroup
 func (db *Database) UpdateNewsgroupStatus(name string, status string) error {
 	_, err := db.mainDB.Exec(
-		`UPDATE newsgroups SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`,
+		`UPDATE newsgroups SET status = ? WHERE name = ?`,
 		status, name,
 	)
 	return err
@@ -1787,7 +1787,7 @@ func (db *Database) ResetNewsgroupCounters(newsgroupName string) error {
 			last_article = 0,
 			high_water = 0,
 			low_water = 1,
-			updated_at = CURRENT_TIMESTAMP
+			updated_at = 0
 		WHERE name = ?`,
 		newsgroupName)
 
@@ -1937,8 +1937,7 @@ func (db *Database) DeleteSiteNews(id int) error {
 
 // ToggleSiteNewsVisibility toggles the visibility of a site news entry
 func (db *Database) ToggleSiteNewsVisibility(id int) error {
-	query := `UPDATE site_news SET is_visible = (1 - is_visible),
-			  updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	query := `UPDATE site_news SET is_visible = (1 - is_visible) WHERE id = ?`
 
 	_, err := retryableExec(db.mainDB, query, id)
 	if err != nil {
