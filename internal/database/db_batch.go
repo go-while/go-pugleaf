@@ -944,7 +944,9 @@ func (c *SQ3batch) batchUpdateThreadCache(groupDBs *GroupDBs, threadUpdates map[
 			if err != nil {
 				// Thread cache entry doesn't exist, initialize it with the first update
 				firstUpdate := updates[0]
-				_, err = retryableStmtExec(initStmt, threadRoot, firstUpdate.childDate, threadRoot, firstUpdate.childDate)
+				// Format dates as UTC strings to avoid timezone encoding issues
+				firstUpdateDateUTC := firstUpdate.childDate.UTC().Format("2006-01-02 15:04:05")
+				_, err = retryableStmtExec(initStmt, threadRoot, firstUpdateDateUTC, threadRoot, firstUpdateDateUTC)
 				if err != nil {
 					log.Printf("[BATCH-CACHE] Failed to initialize thread cache for root %d after retries: %v", threadRoot, err)
 					return fmt.Errorf("failed to initialize thread cache for root %d: %w", threadRoot, err)
@@ -975,7 +977,9 @@ func (c *SQ3batch) batchUpdateThreadCache(groupDBs *GroupDBs, threadUpdates map[
 			newCount := currentCount + len(updates)
 
 			// Execute the batch update for this thread with retryable logic
-			_, err = retryableStmtExec(updateStmt, newChildren, newCount, lastChildNum, lastActivity, threadRoot)
+			// Format lastActivity as UTC string to avoid timezone encoding issues
+			lastActivityUTC := lastActivity.UTC().Format("2006-01-02 15:04:05")
+			_, err = retryableStmtExec(updateStmt, newChildren, newCount, lastChildNum, lastActivityUTC, threadRoot)
 
 			if err != nil {
 				log.Printf("[BATCH-CACHE] Failed to update thread cache for root %d after retries: %v", threadRoot, err)

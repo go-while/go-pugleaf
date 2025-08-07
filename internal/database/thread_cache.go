@@ -37,11 +37,14 @@ func (db *Database) InitializeThreadCache(groupDBs *GroupDBs, threadRoot int64, 
 			last_activity = excluded.last_activity
 	`
 
+	// Format dates as UTC strings to avoid timezone encoding issues
+	rootDateUTC := rootArticle.DateSent.UTC().Format("2006-01-02 15:04:05")
+
 	_, err := retryableExec(groupDBs.DB, query,
 		threadRoot,
-		rootArticle.DateSent,
+		rootDateUTC,
 		threadRoot, // last_child_number starts as the root itself
-		rootArticle.DateSent,
+		rootDateUTC,
 	)
 
 	if err != nil {
@@ -106,11 +109,14 @@ func (db *Database) UpdateThreadCache(groupDBs *GroupDBs, threadRoot int64, chil
 		WHERE thread_root = ?
 	`
 
+	// Format childDate as UTC string to avoid timezone encoding issues
+	childDateUTC := childDate.UTC().Format("2006-01-02 15:04:05")
+
 	_, err = retryableExec(groupDBs.DB, updateQuery,
 		newChildren,
 		currentCount+1,
 		childArticleNum,
-		childDate,
+		childDateUTC,
 		threadRoot,
 	)
 

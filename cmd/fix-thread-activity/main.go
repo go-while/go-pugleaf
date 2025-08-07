@@ -144,10 +144,13 @@ func fixGroupThreadActivity(db *database.Database, groupName string) error {
 
 		// Update thread cache if we found a valid date
 		if found && !maxDate.Equal(thread.lastActivity) {
+			// Format as UTC string to avoid timezone encoding issues
+			utcTimeStr := maxDate.UTC().Format("2006-01-02 15:04:05")
+
 			_, err := groupDBs.DB.Exec(`
 				UPDATE thread_cache
 				SET last_activity = ?
-				WHERE thread_root = ?`, maxDate, thread.root)
+				WHERE thread_root = ?`, utcTimeStr, thread.root)
 
 			if err != nil {
 				log.Printf("Failed to update thread %d: %v", thread.root, err)
