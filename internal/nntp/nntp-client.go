@@ -131,7 +131,9 @@ func (c *BackendConn) Connect() error {
 	if c.connected {
 		return nil
 	}
-
+	if c.Backend.ConnectTimeout == 0 {
+		c.Backend.ConnectTimeout = config.DefaultConnectTimeout
+	}
 	// Build server address
 	serverAddr := net.JoinHostPort(c.Backend.Host, fmt.Sprintf("%d", c.Backend.Port))
 

@@ -34,9 +34,6 @@ func NewPool(cfg *BackendConfig) *Pool {
 		maxConns:    cfg.MaxConns,
 		idleTimeout: DefaultConnExpire,
 	}
-	if pool.Backend.ConnectTimeout == 0 {
-		pool.Backend.ConnectTimeout = 30 * time.Second
-	}
 	return pool
 }
 
