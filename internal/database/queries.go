@@ -1358,6 +1358,35 @@ func (db *Database) GetNewsgroupsByPattern(pattern string) ([]*models.Newsgroup,
 	return out, nil
 }
 
+// GetNewsgroupsByPrefix gets newsgroups with names starting with the given prefix
+func (db *Database) GetNewsgroupsByPrefix(prefix string) ([]*models.Newsgroup, error) {
+	return db.GetNewsgroupsByPattern(prefix + "%")
+}
+
+// GetNewsgroupsByExactPrefix gets newsgroups that match exactly the prefix (no dots after prefix)
+func (db *Database) GetNewsgroupsByExactPrefix(prefix string) ([]*models.Newsgroup, error) {
+	rows, err := db.mainDB.Query(`
+		SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, created_at, updated_at
+		FROM newsgroups
+		WHERE name = ? OR (name LIKE ? AND name NOT LIKE ?)
+		ORDER BY name
+	`, prefix, prefix+".%", prefix+".%.%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*models.Newsgroup
+	for rows.Next() {
+		var g models.Newsgroup
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.HighWater, &g.LowWater, &g.Status, &g.CreatedAt, &g.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, &g)
+	}
+	return out, nil
+}
+
 // HIERARCHY FUNCTIONS
 
 // ExtractHierarchyFromGroupName extracts the top-level hierarchy from a newsgroup name

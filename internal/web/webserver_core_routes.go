@@ -116,6 +116,36 @@ type HierarchyGroupsPageData struct {
 	SortBy        string
 }
 
+// HierarchyTreePageData represents data for hierarchical tree navigation
+type HierarchyTreePageData struct {
+	TemplateData
+	HierarchyName  string
+	CurrentPath    string
+	RelativePath   string // Path relative to hierarchy (e.g., "arts" for "alt.arts")
+	ParentPath     string
+	Breadcrumbs    []HierarchyBreadcrumb
+	SubHierarchies []HierarchyNode
+	Groups         []*models.Newsgroup
+	TotalSubItems  int
+	TotalGroups    int
+	ShowingGroups  bool
+}
+
+// HierarchyBreadcrumb represents a breadcrumb item in hierarchy navigation
+type HierarchyBreadcrumb struct {
+	Name   string
+	Path   string
+	IsLast bool
+}
+
+// HierarchyNode represents a node in the hierarchy tree
+type HierarchyNode struct {
+	Name       string
+	FullPath   string
+	GroupCount int
+	HasGroups  bool
+}
+
 // SectionPageData represents data for section page (shows groups in section)
 type SectionPageData struct {
 	TemplateData
@@ -350,8 +380,15 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/groups/", s.groupsPage)                                               // Handle trailing slash
 	s.Router.GET("/hierarchies", s.hierarchiesPage)                                      // Hierarchies listing
 	s.Router.GET("/hierarchies/", s.hierarchiesPage)                                     // Handle trailing slash
-	s.Router.GET("/hierarchy/:hierarchy", s.hierarchyGroupsPage)                         // Groups in hierarchy
-	s.Router.GET("/hierarchy/:hierarchy/", s.hierarchyGroupsPage)                        // Handle trailing slash
+	s.Router.GET("/hierarchy-groups/:hierarchy", s.hierarchyGroupsPage)                  // Flat groups listing (legacy)
+	s.Router.GET("/hierarchy/:hierarchy", s.hierarchyTreePage)                           // Hierarchical tree view
+	s.Router.GET("/hierarchy/:hierarchy/", s.hierarchyTreePage)                          // Handle trailing slash
+	s.Router.GET("/hierarchy/:hierarchy/:level1", s.hierarchyTreePage)                   // Level 1: hierarchy.level1
+	s.Router.GET("/hierarchy/:hierarchy/:level1/", s.hierarchyTreePage)                  // Level 1 with slash
+	s.Router.GET("/hierarchy/:hierarchy/:level1/:level2", s.hierarchyTreePage)           // Level 2: hierarchy.level1.level2
+	s.Router.GET("/hierarchy/:hierarchy/:level1/:level2/", s.hierarchyTreePage)          // Level 2 with slash
+	s.Router.GET("/hierarchy/:hierarchy/:level1/:level2/:level3", s.hierarchyTreePage)   // Level 3: hierarchy.level1.level2.level3
+	s.Router.GET("/hierarchy/:hierarchy/:level1/:level2/:level3/", s.hierarchyTreePage)  // Level 3 with slash
 	s.Router.GET("/groups/:group", s.groupPage)                                          // Legacy group access
 	s.Router.GET("/groups/:group/", s.groupPage)                                         // Legacy group access with slash
 	s.Router.POST("/groups/:group/articles/:articleNum/spam", s.incrementSpam)           // Spam button

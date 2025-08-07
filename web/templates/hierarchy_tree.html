@@ -1,0 +1,163 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item"><a href="/hierarchies" class="text-decoration-none">Hierarchies</a></li>
+        {{range .Breadcrumbs}}
+        {{if .IsLast}}
+        <li class="breadcrumb-item active" aria-current="page">{{.Name}}</li>
+        {{else}}
+        <li class="breadcrumb-item"><a href="{{.Path}}" class="text-decoration-none">{{.Name}}</a></li>
+        {{end}}
+        {{end}}
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+
+<!-- Navigation Header -->
+<div class="row mb-3">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h4 class="mb-0">
+                    <i class="bi bi-diagram-3 me-2"></i>{{.CurrentPath}}
+                </h4>
+                <small class="text-muted">
+                    {{if .ShowingGroups}}
+                        Showing {{.TotalGroups}} newsgroups{{if gt .TotalSubItems 0}} and {{.TotalSubItems}} sub-hierarchies{{end}}
+                    {{else}}
+                        {{.TotalSubItems}} sub-hierarchies
+                    {{end}}
+                </small>
+            </div>
+            <div>
+                {{if .ParentPath}}
+                <a href="{{.ParentPath}}" class="btn btn-outline-secondary btn-sm">
+                    <i class="bi bi-arrow-up me-1"></i>Up
+                </a>
+                {{end}}
+                <a href="/hierarchy-groups/{{.HierarchyName}}" class="btn btn-outline-info btn-sm">
+                    <i class="bi bi-list me-1"></i>Flat View
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Sub-Hierarchies -->
+{{if .SubHierarchies}}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-folder me-2"></i>Sub-Hierarchies ({{len .SubHierarchies}})
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    {{range .SubHierarchies}}
+                    <div class="col-lg-6 col-xl-4 mb-3">
+                        <div class="card border-secondary">
+                            <div class="card-body">
+                                <h6 class="card-title">
+                                    {{if eq $.RelativePath ""}}
+                                    <a href="/hierarchy/{{$.HierarchyName}}/{{.Name}}" class="text-decoration-none">
+                                    {{else}}
+                                    <a href="/hierarchy/{{$.HierarchyName}}/{{$.RelativePath}}/{{.Name}}" class="text-decoration-none">
+                                    {{end}}
+                                        <i class="bi bi-folder2 me-2 text-primary"></i>{{.Name}}
+                                    </a>
+                                </h6>
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <small class="text-muted">
+                                        <i class="bi bi-collection me-1"></i>{{.GroupCount}} groups
+                                    </small>
+                                    {{if .HasGroups}}
+                                    <span class="badge bg-success">Has groups</span>
+                                    {{end}}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+<!-- Direct Groups -->
+{{if .Groups}}
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-success text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-chat-dots me-2"></i>Newsgroups ({{len .Groups}})
+                </h6>
+            </div>
+            <div class="card-body">
+                {{if gt (len .Groups) 20}}
+                <div class="alert alert-info" role="alert">
+                    <i class="bi bi-info-circle me-2"></i>
+                    Showing first 20 groups. <a href="/hierarchy-groups/{{.HierarchyName}}" class="alert-link">View all {{len .Groups}} groups</a>
+                </div>
+                {{end}}
+
+                <div class="list-group list-group-flush">
+                    {{range $index, $group := .Groups}}
+                    {{if lt $index 20}}
+                    <div class="list-group-item">
+                        <div class="d-flex w-100 justify-content-between align-items-start">
+                            <div class="flex-grow-1">
+                                <h6 class="mb-1">
+                                    <a href="/groups/{{.Name}}/threads" class="text-decoration-none">
+                                        <strong>{{.Name}}</strong>
+                                    </a>
+                                </h6>
+                                <p class="mb-1 text-muted">{{.Description}}</p>
+                                <div class="d-flex gap-3">
+                                    <small class="text-muted">
+                                        <i class="bi bi-file-text me-1"></i>
+                                        <span class="badge bg-secondary">{{.MessageCount}} articles</span>
+                                    </small>
+                                    <small class="text-muted">
+                                        <i class="bi bi-clock me-1"></i>{{.PrintLastActivity}}
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {{end}}
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+<!-- Empty State -->
+{{if and (not .SubHierarchies) (not .Groups)}}
+<div class="row">
+    <div class="col-12">
+        <div class="alert alert-warning" role="alert">
+            <h6 class="alert-heading">
+                <i class="bi bi-exclamation-triangle me-2"></i>No Content Found
+            </h6>
+            <p class="mb-3">This hierarchy level is empty or the newsgroups haven't been loaded yet.</p>
+            <a href="{{.ParentPath}}" class="btn btn-outline-primary btn-sm">
+                <i class="bi bi-arrow-up me-1"></i>Go Back
+            </a>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{end}}
