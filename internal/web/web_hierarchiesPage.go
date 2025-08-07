@@ -4,6 +4,7 @@ package web
 import (
 	"html/template"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -12,7 +13,7 @@ import (
 )
 
 // This file handles the hierarchies listing page
-// Shows all available Usenet hierarchies with group counts and navigation
+// Shows all available hierarchies with group counts and navigation
 
 func (s *WebServer) hierarchiesPage(c *gin.Context) {
 	// Get pagination parameters
@@ -210,12 +211,41 @@ func (s *WebServer) hierarchyTreePage(c *gin.Context) {
 		parentPath = "/hierarchies"
 	}
 
+	// Get sort parameter
+	sortBy := c.Query("sort")
+	if sortBy == "" {
+		sortBy = "activity" // Default to last activity sorting
+	}
+
+	// Get pagination parameters
+	page := 1
+	pageSize := 50 // Page size for hierarchical navigation
+
+	if p := c.Query("page"); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+			page = parsed
+		}
+	}
+
 	// Get sub-hierarchies and groups for this level
-	subHierarchies, groups, err := s.getHierarchyLevel(currentPath)
+	subHierarchies, groups, totalSubHierarchies, totalGroups, err := s.getHierarchyLevel(currentPath, sortBy, page, pageSize)
 	if err != nil {
 		s.renderError(c, http.StatusInternalServerError, "Database error", err.Error())
 		return
 	}
+
+	// Calculate pagination based on sub-hierarchies (primary content)
+	// Groups are shown as a preview/summary alongside sub-hierarchies
+	var pagination *models.PaginationInfo
+
+	if totalSubHierarchies > pageSize {
+		// We have more sub-hierarchies than can fit on one page
+		pagination = models.NewPaginationInfo(page, pageSize, totalSubHierarchies)
+	}
+
+	// Calculate if we're at maximum depth (level 3)
+	currentDepth := len(pathParts)
+	atMaxDepth := currentDepth >= 3
 
 	data := HierarchyTreePageData{
 		TemplateData:   s.getBaseTemplateData(c, "Hierarchy: "+currentPath),
@@ -226,13 +256,16 @@ func (s *WebServer) hierarchyTreePage(c *gin.Context) {
 		Breadcrumbs:    breadcrumbs,
 		SubHierarchies: subHierarchies,
 		Groups:         groups,
-		TotalSubItems:  len(subHierarchies),
-		TotalGroups:    len(groups),
+		TotalSubItems:  totalSubHierarchies,
+		TotalGroups:    totalGroups,
 		ShowingGroups:  len(groups) > 0,
+		SortBy:         sortBy,
+		Pagination:     pagination,
+		AtMaxDepth:     atMaxDepth,
 	}
 
 	// Load template
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/hierarchy_tree.html"))
+	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/hierarchy_tree.html", "web/templates/pagination.html"))
 	c.Header("Content-Type", "text/html")
 	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
 	if err != nil {
@@ -241,51 +274,45 @@ func (s *WebServer) hierarchyTreePage(c *gin.Context) {
 	}
 }
 
-// getHierarchyLevel returns sub-hierarchies and groups for a given hierarchy level
-func (s *WebServer) getHierarchyLevel(currentPath string) ([]HierarchyNode, []*models.Newsgroup, error) {
-	// Get all newsgroups that start with the current path
-	allGroups, err := s.DB.GetNewsgroupsByPrefix(currentPath + ".")
+// getHierarchyLevel returns sub-hierarchies and groups for a given hierarchy level with pagination
+func (s *WebServer) getHierarchyLevel(currentPath string, sortBy string, page int, pageSize int) ([]HierarchyNode, []*models.Newsgroup, int, int, error) {
+	// Get sub-hierarchies with pagination
+	subHierarchyMap, totalSubHierarchies, err := s.DB.GetHierarchySubLevels(currentPath, page, pageSize)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, 0, err
 	}
 
-	// Organize groups into sub-hierarchies and direct groups
-	subHierarchyMap := make(map[string]*HierarchyNode)
-	var directGroups []*models.Newsgroup
-
-	for _, group := range allGroups {
-		// Remove the current path prefix
-		remainder := strings.TrimPrefix(group.Name, currentPath+".")
-
-		// If there's a dot in the remainder, it's a sub-hierarchy
-		if dotIndex := strings.Index(remainder, "."); dotIndex > 0 {
-			subHierarchyName := remainder[:dotIndex]
-			fullSubPath := currentPath + "." + subHierarchyName
-
-			if node, exists := subHierarchyMap[subHierarchyName]; exists {
-				node.GroupCount++
-			} else {
-				subHierarchyMap[subHierarchyName] = &HierarchyNode{
-					Name:       subHierarchyName,
-					FullPath:   fullSubPath,
-					GroupCount: 1,
-					HasGroups:  false,
-				}
-			}
-		} else {
-			// This is a direct group at this level
-			directGroups = append(directGroups, group)
-		}
-	}
-
-	// Convert map to slice for sub-hierarchies
+	// Convert to HierarchyNode slice
 	var subHierarchies []HierarchyNode
-	for _, node := range subHierarchyMap {
-		// Check if this sub-hierarchy has direct groups
-		directGroupsInSub, _ := s.DB.GetNewsgroupsByExactPrefix(node.FullPath)
-		node.HasGroups = len(directGroupsInSub) > 0
-		subHierarchies = append(subHierarchies, *node)
+	for name, count := range subHierarchyMap {
+		fullSubPath := currentPath + "." + name
+
+		// Check if this sub-hierarchy has direct groups (limit check to avoid loading all)
+		directGroupsInSub, _, _ := s.DB.GetDirectGroupsAtLevel(fullSubPath, "name", 1, 1)
+		hasGroups := len(directGroupsInSub) > 0
+
+		subHierarchies = append(subHierarchies, HierarchyNode{
+			Name:       name,
+			FullPath:   fullSubPath,
+			GroupCount: count,
+			HasGroups:  hasGroups,
+		})
 	}
 
-	return subHierarchies, directGroups, nil
+	// Sort sub-hierarchies alphabetically by name
+	sort.Slice(subHierarchies, func(i, j int) bool {
+		return subHierarchies[i].Name < subHierarchies[j].Name
+	})
+
+	// Get direct groups at this level - always get them for display
+	var directGroups []*models.Newsgroup
+	var totalGroups int
+
+	// Always get direct groups at this level, but limit to avoid overwhelming the page
+	directGroups, totalGroups, err = s.DB.GetDirectGroupsAtLevel(currentPath, sortBy, 1, 20) // Show first 20 groups
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+
+	return subHierarchies, directGroups, totalSubHierarchies, totalGroups, nil
 }

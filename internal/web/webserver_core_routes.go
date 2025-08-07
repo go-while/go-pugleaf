@@ -129,6 +129,9 @@ type HierarchyTreePageData struct {
 	TotalSubItems  int
 	TotalGroups    int
 	ShowingGroups  bool
+	SortBy         string
+	Pagination     *models.PaginationInfo
+	AtMaxDepth     bool // True if we're at the maximum supported hierarchy depth (level 3)
 }
 
 // HierarchyBreadcrumb represents a breadcrumb item in hierarchy navigation

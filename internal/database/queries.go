@@ -1368,7 +1368,7 @@ func (db *Database) GetNewsgroupsByExactPrefix(prefix string) ([]*models.Newsgro
 	rows, err := db.mainDB.Query(`
 		SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, created_at, updated_at
 		FROM newsgroups
-		WHERE name = ? OR (name LIKE ? AND name NOT LIKE ?)
+		WHERE active = 1 AND name = ? OR (name LIKE ? AND name NOT LIKE ?)
 		ORDER BY name
 	`, prefix, prefix+".%", prefix+".%.%")
 	if err != nil {
@@ -1385,6 +1385,98 @@ func (db *Database) GetNewsgroupsByExactPrefix(prefix string) ([]*models.Newsgro
 		out = append(out, &g)
 	}
 	return out, nil
+}
+
+// GetHierarchySubLevels gets immediate sub-hierarchy names and their group counts efficiently with pagination
+func (db *Database) GetHierarchySubLevels(prefix string, page int, pageSize int) (map[string]int, int, error) {
+	// First get total count of sub-hierarchies
+	var totalCount int
+	err := db.mainDB.QueryRow(`
+		SELECT COUNT(DISTINCT SUBSTR(name, ?, INSTR(SUBSTR(name, ?), '.') - 1))
+		FROM newsgroups
+		WHERE active = 1 AND name LIKE ? AND name != ? AND INSTR(SUBSTR(name, ?), '.') > 0
+	`, len(prefix)+2, len(prefix)+2, prefix+".%", prefix, len(prefix)+2).Scan(&totalCount)
+
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Get paginated sub-hierarchy names and their counts
+	offset := (page - 1) * pageSize
+	rows, err := db.mainDB.Query(`
+		SELECT
+			SUBSTR(name, ?, INSTR(SUBSTR(name, ?), '.') - 1) as sub_hierarchy,
+			COUNT(*) as group_count
+		FROM newsgroups
+		WHERE active = 1 AND name LIKE ? AND name != ? AND INSTR(SUBSTR(name, ?), '.') > 0
+		GROUP BY sub_hierarchy
+		ORDER BY sub_hierarchy
+		LIMIT ? OFFSET ?
+	`, len(prefix)+2, len(prefix)+2, prefix+".%", prefix, len(prefix)+2, pageSize, offset)
+
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]int)
+	for rows.Next() {
+		var subHierarchy string
+		var count int
+		if err := rows.Scan(&subHierarchy, &count); err != nil {
+			return nil, 0, err
+		}
+		result[subHierarchy] = count
+	}
+
+	return result, totalCount, nil
+}
+
+// GetDirectGroupsAtLevel gets newsgroups that are direct children of the given prefix with pagination
+func (db *Database) GetDirectGroupsAtLevel(prefix string, sortBy string, page int, pageSize int) ([]*models.Newsgroup, int, error) {
+	// First get total count
+	var totalCount int
+	err := db.mainDB.QueryRow(`
+		SELECT COUNT(*)
+		FROM newsgroups
+		WHERE active = 1 AND name LIKE ? AND name NOT LIKE ? AND active = 1
+	`, prefix+".%", prefix+".%.%").Scan(&totalCount)
+
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var orderBy string
+	if sortBy == "name" {
+		orderBy = "name ASC"
+	} else {
+		orderBy = "updated_at DESC"
+	}
+
+	offset := (page - 1) * pageSize
+	query := fmt.Sprintf(`
+		SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, created_at, updated_at
+		FROM newsgroups
+		WHERE active = 1 AND name LIKE ? AND name NOT LIKE ? AND active = 1
+		ORDER BY %s
+		LIMIT ? OFFSET ?
+	`, orderBy)
+
+	rows, err := db.mainDB.Query(query, prefix+".%", prefix+".%.%", pageSize, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var out []*models.Newsgroup
+	for rows.Next() {
+		var g models.Newsgroup
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.HighWater, &g.LowWater, &g.Status, &g.CreatedAt, &g.UpdatedAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, &g)
+	}
+	return out, totalCount, nil
 }
 
 // HIERARCHY FUNCTIONS
