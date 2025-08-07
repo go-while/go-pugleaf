@@ -1,4 +1,4 @@
 #!/bin/sh
-./appVersion.sh 
+#./appVersion.sh 
 ./Build_DEV.sh 
 ./rsync.sh 
