@@ -1665,9 +1665,24 @@ func (db *Database) UpdateHierarchyCounts() error {
 
 // GetNewsgroupsByHierarchy returns newsgroups belonging to a specific hierarchy with sorting
 func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize int, sortBy string) ([]*models.Newsgroup, int, error) {
-	// First get total count using optimized hierarchy column (only active groups)
+	// Check if this is a sub-hierarchy path (contains dots)
+	var countQuery string
+	var queryArgs []interface{}
+	
+	if strings.Contains(hierarchy, ".") {
+		// For sub-hierarchies like "gmane.comp", find groups that start with "gmane.comp."
+		pattern := hierarchy + ".%"
+		countQuery = "SELECT COUNT(*) FROM newsgroups WHERE name LIKE ? AND active = 1"
+		queryArgs = append(queryArgs, pattern)
+	} else {
+		// For top-level hierarchies like "gmane", use the hierarchy column
+		countQuery = "SELECT COUNT(*) FROM newsgroups WHERE hierarchy = ? AND active = 1"
+		queryArgs = append(queryArgs, hierarchy)
+	}
+	
+	// First get total count
 	var totalCount int
-	err := db.mainDB.QueryRow("SELECT COUNT(*) FROM newsgroups WHERE hierarchy = ? AND active = 1", hierarchy).Scan(&totalCount)
+	err := db.mainDB.QueryRow(countQuery, queryArgs...).Scan(&totalCount)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1685,15 +1700,33 @@ func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize in
 		orderBy = "name ASC"
 	}
 
-	// Get paginated newsgroups using optimized hierarchy column (indexed lookup, only active)
+	// Build the main query with the same WHERE condition
+	var whereClause string
+	var mainQueryArgs []interface{}
+	
+	if strings.Contains(hierarchy, ".") {
+		// For sub-hierarchies, use LIKE pattern
+		pattern := hierarchy + ".%"
+		whereClause = "WHERE name LIKE ? AND active = 1"
+		mainQueryArgs = append(mainQueryArgs, pattern)
+	} else {
+		// For top-level hierarchies, use hierarchy column  
+		whereClause = "WHERE hierarchy = ? AND active = 1"
+		mainQueryArgs = append(mainQueryArgs, hierarchy)
+	}
+
+	// Get paginated newsgroups
 	query := `SELECT id, name, description, active, message_count, last_article,
 			  expiry_days, max_articles, max_art_size, hierarchy, created_at, updated_at
 			  FROM newsgroups
-			  WHERE hierarchy = ? AND active = 1
+			  ` + whereClause + `
 			  ORDER BY ` + orderBy + `
 			  LIMIT ? OFFSET ?`
+	
+	// Add pagination parameters
+	mainQueryArgs = append(mainQueryArgs, pageSize, offset)
 
-	rows, err := db.mainDB.Query(query, hierarchy, pageSize, offset)
+	rows, err := db.mainDB.Query(query, mainQueryArgs...)
 	if err != nil {
 		return nil, 0, err
 	}

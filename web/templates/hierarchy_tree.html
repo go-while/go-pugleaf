@@ -42,7 +42,7 @@
                     <i class="bi bi-arrow-up me-1"></i>Up
                 </a>
                 {{end}}
-                <a href="/hierarchy-groups/{{.HierarchyName}}" class="btn btn-outline-info btn-sm">
+                <a href="/hierarchy-groups/{{.CurrentPath}}" class="btn btn-outline-info btn-sm">
                     <i class="bi bi-list me-1"></i>Flat View
                 </a>
                 {{if and .Groups (gt .TotalGroups 0)}}
@@ -61,7 +61,7 @@
                 </div>
                 {{end}}
                 {{if and .SubHierarchies (gt .TotalGroups 0)}}
-                <a href="/hierarchy-groups/{{.HierarchyName}}" class="btn btn-outline-success btn-sm ms-2">
+                <a href="/hierarchy-groups/{{.CurrentPath}}" class="btn btn-outline-success btn-sm ms-2">
                     <i class="bi bi-chat-dots me-1"></i>View {{.TotalGroups}} Groups
                 </a>
                 {{end}}
@@ -90,7 +90,7 @@
                                 <h6 class="card-title">
                                     {{if $.AtMaxDepth}}
                                     <!-- At max depth, link to flat view instead -->
-                                    <a href="/hierarchy-groups/{{$.HierarchyName}}" class="text-decoration-none">
+                                    <a href="/hierarchy-groups/{{$.CurrentPath}}" class="text-decoration-none">
                                         <i class="bi bi-folder2 me-2 text-warning"></i>{{.Name}}
                                         <small class="text-muted">(view in flat mode)</small>
                                     </a>
