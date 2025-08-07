@@ -1044,7 +1044,7 @@ func formatNumberWithCommas(n int64) string {
 }
 
 // DownloadArticlesWithDateFilter downloads articles starting from a specific date
-func DownloadArticlesWithDateFilter(proc *Processor, groupName, startDateStr, endDateStr string, useAnalyzeCache bool, ignoreInitialTinyGroups int64) error {
+func DownloadArticlesWithDateFilter(proc *Processor, groupName, startDateStr, endDateStr string, useAnalyzeCache bool, ignoreInitialTinyGroups int64, DLParChan chan struct{}) error {
 	var startDate, endDate time.Time
 	var err error
 
@@ -1134,12 +1134,12 @@ func DownloadArticlesWithDateFilter(proc *Processor, groupName, startDateStr, en
 		log.Printf("Analysis complete. Found %d articles in date range", analysis.CachedArticles)
 
 		// Now use the cache-based approach
-		return DownloadArticlesWithDateFilter(proc, groupName, startDateStr, endDateStr, true, ignoreInitialTinyGroups)
+		return DownloadArticlesWithDateFilter(proc, groupName, startDateStr, endDateStr, true, ignoreInitialTinyGroups, DLParChan)
 	}
 
 	// Fall back to normal download if no date filtering
 	log.Printf("No date filtering specified, using normal download")
-	return proc.DownloadArticles(groupName, ignoreInitialTinyGroups)
+	return proc.DownloadArticles(groupName, ignoreInitialTinyGroups, DLParChan)
 }
 
 // DownloadArticlesInRange downloads articles in a specific article number range

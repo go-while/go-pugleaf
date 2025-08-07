@@ -8,18 +8,39 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
+	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 )
 
 type BatchQueue struct {
-	Queue  chan *batchItem // Channel to hold batch items
-	Return chan *batchItem // Channel to return processed items
+	Mutex sync.RWMutex
+	Queue chan *batchItem // Channel to hold batch items to download
+}
+
+type batchItem struct {
+	MessageID  *string
+	ArticleNum *int64
+	GroupName  *string
+	Article    *models.Article
+	Error      error
+	ReturnChan chan *batchItem
 }
 
 var ErrUpToDate = fmt.Errorf("up2date")
 
+type selectResult struct {
+	groupInfo *nntp.GroupInfo
+	err       error
+}
+
 // DownloadArticles fetches full articles and stores them in the articles DB.
-func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroups int64) error {
+func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroups int64, DLParChan chan struct{}) error {
+	/*
+		DLParChan <- struct{}{} // aquire lock
+		defer func() {
+			<-DLParChan // free slot
+		}()
+	*/
 	// Note: We don't shut down the database here as it's shared with the main application
 	progressDB, err := database.NewProgressDB("data/progress.db")
 	if err != nil {
@@ -32,15 +53,10 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	}
 
 	// Add timeout for SelectGroup to prevent hanging
-	type selectResult struct {
-		groupInfo *nntp.GroupInfo
-		err       error
-	}
-
-	resultChan := make(chan selectResult, 1)
+	resultChan := make(chan *selectResult, 1)
 	go func() {
 		groupInfo, err := proc.Pool.SelectGroup(newsgroup)
-		resultChan <- selectResult{groupInfo: groupInfo, err: err}
+		resultChan <- &selectResult{groupInfo: groupInfo, err: err}
 	}()
 
 	// Wait for result with timeout
@@ -107,7 +123,7 @@ doWork:
 		if lastArticleDate != nil {
 			log.Printf("DownloadArticles: No progress for provider '%s' but group '%s' has existing articles, switching to date-based download from: %s",
 				providerName, newsgroup, lastArticleDate.Format("2006-01-02"))
-			return proc.DownloadArticlesFromDate(newsgroup, *lastArticleDate, 0) // Use 0 for ignore threshold since group already exists
+			return proc.DownloadArticlesFromDate(newsgroup, *lastArticleDate, 0, DLParChan) // Use 0 for ignore threshold since group already exists
 		}
 	} else if lastArticle == -1 {
 		// User-requested date rescan - reset to start from beginning
@@ -148,51 +164,55 @@ doWork:
 		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
 	}
 	log.Printf("DownloadArticles: XHDR fetched %d msgIds ng: '%s' (%d to %d)", len(messageIDs), newsgroup, start, end)
-	log.Printf("proc.Pool.Backend=%#v", proc.Pool.Backend)
-
-	batchQueue := make(chan *batchItem, len(messageIDs))
+	//log.Printf("proc.Pool.Backend=%#v", proc.Pool.Backend)
+	//batchQueue := make(chan *batchItem, len(messageIDs))
 	returnChan := make(chan *batchItem, len(messageIDs))
-	// launch goroutines to fetch articles in parallel
-	runthis := proc.Pool.Backend.MaxConns
-	if len(messageIDs) < runthis { // if we have less articles to fetch than max connections
-		runthis = len(messageIDs) // Limit goroutines to number of articles
-	}
-	if runthis < 1 {
-		return fmt.Errorf("no connections at backend provider??")
-	}
+	log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", len(messageIDs), newsgroup, proc.Pool.Backend.MaxConns)
 
-	mutex := &sync.Mutex{} // Mutex to protect shared state
-	downloaded := 0
-	quit := 0
-	log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", len(messageIDs), newsgroup, runthis)
-	for i := 1; i <= runthis; i++ {
-		// fire up async goroutines to fetch articles
-		go func(worker int, mutex *sync.Mutex) {
-			//log.Printf("DownloadArticles: Worker %d group '%s' start", worker, groupName)
-			defer func() {
-				//log.Printf("DownloadArticles: Worker %d group '%s' quit", worker, groupName)
-				mutex.Lock()
-				quit++
-				mutex.Unlock()
-			}()
-			for item := range batchQueue {
-				//log.Printf("DownloadArticles: Worker %d processing group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
-				art, err := proc.Pool.GetArticle(*item.MessageID)
-				if err != nil {
-					log.Printf("ERROR DownloadArticles: group '%s' proc.Pool.GetArticle %s: %v .. continue", newsgroup, *item.MessageID, err)
-					item.Error = err   // Set error on item
-					returnChan <- item // Send failed item back
-					continue
-				}
-				item.Article = art // set pointer
-				returnChan <- item // Send back the successfully downloaded article
-				mutex.Lock()
-				downloaded++
-				mutex.Unlock()
-				//log.Printf("DownloadArticles: Worker %d downloaded group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
-			} // end for item
-		}(i, mutex)
-	} // end for runthis
+	/*
+		// launch goroutines to fetch articles in parallel
+		runthis := proc.Pool.Backend.MaxConns
+		if len(messageIDs) < runthis { // if we have less articles to fetch than max connections
+			runthis = len(messageIDs) // Limit goroutines to number of articles
+		}
+		if runthis < 1 {
+			return fmt.Errorf("no connections at backend provider??")
+		}
+
+		mutex := &sync.Mutex{} // Mutex to protect shared state
+		downloaded := 0
+		quit := 0
+
+		log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", len(messageIDs), newsgroup, runthis)
+		for i := 1; i <= runthis; i++ {
+			// fire up async goroutines to fetch articles
+			go func(worker int, mutex *sync.Mutex) {
+				//log.Printf("DownloadArticles: Worker %d group '%s' start", worker, groupName)
+				defer func() {
+					//log.Printf("DownloadArticles: Worker %d group '%s' quit", worker, groupName)
+					mutex.Lock()
+					quit++
+					mutex.Unlock()
+				}()
+				for item := range batchQueue {
+					//log.Printf("DownloadArticles: Worker %d processing group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
+					art, err := proc.Pool.GetArticle(*item.MessageID)
+					if err != nil {
+						log.Printf("ERROR DownloadArticles: group '%s' proc.Pool.GetArticle %s: %v .. continue", newsgroup, *item.MessageID, err)
+						item.Error = err   // Set error on item
+						returnChan <- item // Send failed item back
+						continue
+					}
+					item.Article = art // set pointer
+					returnChan <- item // Send back the successfully downloaded article
+					mutex.Lock()
+					downloaded++
+					mutex.Unlock()
+					//log.Printf("DownloadArticles: Worker %d downloaded group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
+				} // end for item
+			}(i, mutex)
+		} // end for runthis
+	*/
 
 	// for every undownloaded overview entry, create a batch item
 	batchList := make([]*batchItem, 0, len(messageIDs)) // Slice to hold batch items
@@ -231,10 +251,11 @@ doWork:
 		}
 		*/
 		item := &batchItem{
-			MessageID: &msgIdItem.MessageId, // Use pointer to avoid copying
-			GroupName: proc.DB.Batch.GetNewsgroupPointer(newsgroup),
+			MessageID:  &msgIdItem.MessageId, // Use pointer to avoid copying
+			GroupName:  proc.DB.Batch.GetNewsgroupPointer(newsgroup),
+			ReturnChan: returnChan,
 		}
-		batchQueue <- item                  // send to batch queue
+		Batch.Queue <- item                 // send to batch queue
 		batchList = append(batchList, item) // also add to batchList for later processing
 		//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", num, msgID, groupName)
 	} // end for undl
@@ -251,13 +272,13 @@ forProcessing:
 	for {
 		select {
 		case <-ticker.C:
-			mutex.Lock()
+			//Batch.Mutex.Lock()
 			//log.Printf("DownloadArticles: backfilling group '%s' (gots: %d, errs: %d) batchQueue=%d deathcounter=%d downloaded=%d quit=%d", groupName, gots, errs, len(batchQueue), deathCounter, downloaded, quit)
-			mutex.Unlock()
+			//Batch.Mutex.Unlock()
 			// Periodically check if we are done or stuck
 			if gots+errs >= len(messageIDs) {
 				log.Printf("DownloadArticles: group '%s' All %d (gots: %d, errs: %d) articles processed, closing batch channel", newsgroup, gots+errs, gots, errs)
-				close(batchQueue)   // Close channel to stop goroutines
+				//close(batchQueue)   // Close channel to stop goroutines
 				break forProcessing // Exit processing loop if all items are processed
 			}
 			if gots > lastGots || errs > lastErrs {
@@ -274,7 +295,7 @@ forProcessing:
 			}
 			if deathCounter > 6 { // If we are stuck for too long
 				log.Printf("DownloadArticles: group '%s' Timeout... stopping import deathCounter=%d", newsgroup, deathCounter)
-				close(batchQueue) // Close channel to stop goroutines
+				close(Batch.Queue) // Close channel to stop goroutines
 				return fmt.Errorf("DownloadArticles: group '%s' Timeout... %d articles processed (%d got, %d errs)", newsgroup, gots+errs, gots, errs)
 			}
 
@@ -409,7 +430,7 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 // DownloadArticlesFromDate fetches articles starting from a specific date
 // Uses special progress tracking: sets progress to startArticle-1, or -1 if starting from article 1
 // This prevents DownloadArticles from using "no progress detected" logic for existing groups
-func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, ignoreInitialTinyGroups int64) error {
+func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, ignoreInitialTinyGroups int64, DLParChan chan struct{}) error {
 	log.Printf("DownloadArticlesFromDate: Starting download from date %s for group '%s'",
 		startDate.Format("2006-01-02"), groupName)
 
@@ -458,7 +479,7 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 	log.Printf("DownloadArticlesFromDate: Set progress to %d (date rescan), will start downloading from article %d", tempProgress, startArticle)
 
 	// Now use the high-performance DownloadArticles function
-	err = proc.DownloadArticles(groupName, ignoreInitialTinyGroups)
+	err = proc.DownloadArticles(groupName, ignoreInitialTinyGroups, DLParChan)
 
 	// If there was an error and we haven't made progress, restore the original progress
 	if err != nil && err != ErrUpToDate {

@@ -47,10 +47,9 @@ var (
 	// RunRSLIGHTImport is used to indicate if the importer should run the legacy RockSolid Light importer
 	RunRSLIGHTImport = false
 
-	// Batch
+	// Global Batch Queue
 	Batch = &BatchQueue{
-		Queue:  make(chan *batchItem, 1000), // Channel to hold batch items
-		Return: make(chan *batchItem, 1000), // Channel to return processed items
+		Queue: make(chan *batchItem, 1000), // Channel to hold batch items
 	}
 
 	// Do NOT change this here! these are needed for runtime !
@@ -121,14 +120,6 @@ func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen in
 	// DISABLED: Legacy threading processor - now handled by SQ3CronProcessThreading in db_batch.go
 	//go proc.CronProcessThreading()
 	return proc
-}
-
-type batchItem struct {
-	MessageID  *string
-	ArticleNum *int64
-	GroupName  *string
-	Article    *models.Article
-	Error      error
 }
 
 func (proc *Processor) CheckNoMoreWorkInHistory() bool {

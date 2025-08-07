@@ -519,7 +519,9 @@ func main() {
 	}
 
 	if withfetch && proc != nil {
-		go FetchRoutine(db, proc, finalUseShortHashLen, true, isleep) // Start the processor routine in a separate goroutine
+		DownloadMaxPar := 1
+		DLParChan := make(chan struct{}, DownloadMaxPar)
+		go FetchRoutine(db, proc, finalUseShortHashLen, true, isleep, DLParChan) // Start the processor routine in a separate goroutine
 	}
 
 	// Create and start web server in a goroutine for non-blocking startup
@@ -719,7 +721,7 @@ func NewFetchProcessor(db *database.Database) *processor.Processor {
 	return proc
 }
 
-func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHashLen int, boot bool, isleep int64) {
+func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHashLen int, boot bool, isleep int64, DLParChan chan struct{}) {
 	if isleep < 15 {
 		isleep = 15 // min 15 sec sleep!
 	}
@@ -777,7 +779,7 @@ func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHash
 			proc.Pool = pools[0] // Use the first pool
 		}
 		log.Printf("[WEB]: Sleep completed, starting new FetchRoutine goroutine")
-		go FetchRoutine(db, proc, useShortHashLen, false, isleep)
+		go FetchRoutine(db, proc, useShortHashLen, false, isleep, DLParChan)
 		log.Printf("[WEB]: New FetchRoutine goroutine launched")
 	}(isleep)
 
@@ -852,7 +854,7 @@ func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHash
 		}
 
 		// Check if the group is in sections DB
-		err := proc.DownloadArticles(group.Name, ignoreInitialTinyGroups)
+		err := proc.DownloadArticles(group.Name, ignoreInitialTinyGroups, DLParChan)
 		if err != nil {
 			if err.Error() == "up2date" {
 				log.Printf("[WEB]: [%d/%d] Group %s is up to date, skipping", i+1, len(groups), group.Name)
