@@ -27,6 +27,7 @@ type batchItem struct {
 }
 
 var ErrUpToDate = fmt.Errorf("up2date")
+var errIsDuplicateError = fmt.Errorf("isDup")
 
 type selectResult struct {
 	groupInfo *nntp.GroupInfo
@@ -231,7 +232,7 @@ doWork:
 	for _, msgID := range messageIDs {
 		if groupDBs.ExistsMsgIdInArticlesDB(msgID.Value) {
 			exists++
-			returnChan <- nil
+			returnChan <- &batchItem{Error: errIsDuplicateError}
 			continue
 		}
 		msgIdItem := history.MsgIdCache.GetORCreate(msgID.Value)
@@ -260,6 +261,7 @@ doWork:
 		//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", num, msgID, groupName)
 	} // end for undl
 
+	dups, lastDups := 0, 0
 	gots, lastGots := 0, 0
 	errs, lastErrs := 0, 0
 	aliveCheck := 10 * time.Second
@@ -276,38 +278,43 @@ forProcessing:
 			//log.Printf("DownloadArticles: backfilling group '%s' (gots: %d, errs: %d) batchQueue=%d deathcounter=%d downloaded=%d quit=%d", groupName, gots, errs, len(batchQueue), deathCounter, downloaded, quit)
 			//Batch.Mutex.Unlock()
 			// Periodically check if we are done or stuck
-			if gots+errs >= len(messageIDs) {
-				log.Printf("DownloadArticles: group '%s' All %d (gots: %d, errs: %d) articles processed, closing batch channel", newsgroup, gots+errs, gots, errs)
+			if gots+errs+dups >= len(messageIDs) {
+				log.Printf("DownloadArticles: group '%s' All %d (dups: %d, gots: %d, errs: %d) articles processed, closing batch channel", newsgroup, dups+gots+errs, dups, gots, errs)
 				//close(batchQueue)   // Close channel to stop goroutines
 				break forProcessing // Exit processing loop if all items are processed
 			}
-			if gots > lastGots || errs > lastErrs {
+			if dups > lastDups || gots > lastGots || errs > lastErrs {
 				nextCheck = time.Now().Add(aliveCheck) // Reset last check time
+				lastDups = dups
 				lastGots = gots
 				lastErrs = errs
 				deathCounter = 0 // Reset death counter on progress
 			}
 			if nextCheck.Before(time.Now()) {
 				// If we haven't made progress in N seconds, log a warning
-				log.Printf("DownloadArticles: group '%s' Stuck? %d articles processed (%d got, %d errs) in last 10 seconds (since Start=%v)", newsgroup, gots+errs, gots, errs, time.Since(startTime))
+				log.Printf("DownloadArticles: group '%s' Stuck? %d articles processed (%d dups, %d gots, %d errs) in last 10 seconds (since Start=%v)", newsgroup, dups+gots+errs, dups, gots, errs, time.Since(startTime))
 				nextCheck = time.Now().Add(aliveCheck) // Reset last check time
 				deathCounter++
 			}
 			if deathCounter > 6 { // If we are stuck for too long
 				log.Printf("DownloadArticles: group '%s' Timeout... stopping import deathCounter=%d", newsgroup, deathCounter)
 				close(Batch.Queue) // Close channel to stop goroutines
-				return fmt.Errorf("DownloadArticles: group '%s' Timeout... %d articles processed (%d got, %d errs)", newsgroup, gots+errs, gots, errs)
+				return fmt.Errorf("DownloadArticles: group '%s' Timeout... %d articles processed (%d dups, %d got, %d errs)", newsgroup, dups+gots+errs, dups, gots, errs)
 			}
 
 		case item := <-returnChan:
 			if item == nil || item.Error != nil {
 				if item != nil {
-					log.Printf("DownloadArticles: group '%s' Error fetching article %s: %v .. continue", newsgroup, *item.MessageID, item.Error)
+					if item.Error == errIsDuplicateError {
+						dups++
+					} else {
+						log.Printf("DownloadArticles: group '%s' Error fetching article %s: %v .. continue", newsgroup, *item.MessageID, item.Error)
+						errs++
+					}
 				}
-				errs++
 			} else {
 				gots++
-				//log.Printf("DownloadArticles: group '%s' fetched article (%s) gots=%d", groupName, *item.MessageID, gots)
+				//log.Printf("DownloadArticles: group '%s' fetched article (%s) %dups=%d gots=%d errs=%d", groupName, *item.MessageID, dups, gots, errs)
 			}
 		}
 	}
@@ -349,7 +356,7 @@ forProcessing:
 	if err != nil {
 		log.Printf("Failed to update progress for provider '%s' group '%s': %v", providerName, newsgroup, err)
 	}
-	log.Printf("DownloadArticles: progressDB group '%s' processed %d articles (gots: %d, errs: %d) in %v run=%d end=%d", newsgroup, gots+errs, gots, errs, time.Since(startTime), run, end)
+	log.Printf("DownloadArticles: progressDB group '%s' processed %d articles (dups: %d, gots: %d, errs: %d) in %v run=%d end=%d", newsgroup, gots+errs+dups, dups, gots, errs, time.Since(startTime), run, end)
 
 	run++
 	// do another one if we haven't run enough times
