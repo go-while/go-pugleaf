@@ -3,6 +3,7 @@ package models
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -257,31 +258,39 @@ func (n *Newsgroup) PrintLastActivity() string {
 		return "never"
 	}
 
-	diff := time.Since(n.UpdatedAt)
+	// Ensure we're working with UTC times for consistent calculation
+	now := time.Now().UTC()
+	updatedAtUTC := n.UpdatedAt.UTC()
+	diff := now.Sub(updatedAtUTC)
 	totalDays := int(diff.Hours() / 24)
+
+	// Debug: log the actual timestamp and calculated diff
+	log.Printf("DEBUG models.go PrintLastActivity: Group=%s, UpdatedAt=%v (UTC: %v), Now=%v, Diff=%v, Hours=%.1f",
+		n.Name, n.UpdatedAt, updatedAtUTC, now, diff, diff.Hours())
 
 	if diff < time.Minute {
 		return fmt.Sprintf("%d seconds ago", int(diff.Seconds()))
 	} else if diff < time.Hour {
 		return fmt.Sprintf("%d minutes ago", int(diff.Minutes()))
-	} else if diff < 24*time.Hour {
+	} else if diff < 48*time.Hour {
 		return fmt.Sprintf("%d hours ago", int(diff.Hours()))
-	} else if totalDays < 30 {
-		return fmt.Sprintf("%d days ago", totalDays)
 	} else if totalDays < 365 {
-		months := totalDays / 30
-		remainingDays := totalDays % 30
-		if remainingDays > 0 {
-			if months == 1 {
-				return fmt.Sprintf("1 Month %d Days ago", remainingDays)
+		/*
+			months := totalDays / 30
+			remainingDays := totalDays % 30
+			if remainingDays > 0 {
+				if months == 1 {
+					return fmt.Sprintf("1 Month %d Days ago", remainingDays)
+				}
+				return fmt.Sprintf("%d Months %d Days ago", months, remainingDays)
+			} else {
+				if months == 1 {
+					return "1 Month ago"
+				}
+				return fmt.Sprintf("%d Months ago", months)
 			}
-			return fmt.Sprintf("%d Months %d Days ago", months, remainingDays)
-		} else {
-			if months == 1 {
-				return "1 Month ago"
-			}
-			return fmt.Sprintf("%d Months ago", months)
-		}
+		*/
+		return fmt.Sprintf("%d days ago", totalDays)
 	} else {
 		years := totalDays / 365
 		remainingDays := totalDays % 365

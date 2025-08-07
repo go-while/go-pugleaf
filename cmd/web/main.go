@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -137,12 +138,49 @@ func migrateNewsgroupLastActivity(db *database.Database) error {
 
 		// Only update if we found a latest date
 		if latestDate.Valid {
-			_, err = db.GetMainDB().Exec("UPDATE newsgroups SET updated_at = ? WHERE id = ?", latestDate.String, id)
+			// Parse the date and format it consistently as UTC
+			dateStr := latestDate.String
+			var parsedDate time.Time
+			var err error
+
+			// Clean up malformed timestamps with extra dashes or spaces
+			dateStr = strings.ReplaceAll(dateStr, "- ", " ")
+			dateStr = strings.TrimSpace(dateStr)
+			parsedAs := 0
+			// Try multiple date formats to handle various edge cases
+			formats := []string{
+				time.RFC3339,
+				"2006-01-02 15:04:05",
+				"2006-01-02 15:04:05-07:00",
+				"2006-01-02 15:04:05+07:00",
+				"2006-01-02T15:04:05-07:00",
+				"2006-01-02T15:04:05+07:00",
+				"2006-01-02T15:04:05Z",
+			}
+
+			for _, format := range formats {
+				parsedDate, err = time.Parse(format, dateStr)
+				if err == nil {
+					break
+				}
+				parsedAs++
+			}
+
+			if err != nil {
+				log.Printf("[WEB]: Migration error parsing date '%s' for %s: %v", dateStr, name, err)
+				skippedCount++
+				continue
+			}
+
+			// Format as UTC without timezone info to match db_batch.go format
+			formattedDate := parsedDate.UTC().Format("2006-01-02 15:04:05")
+			_, err = db.GetMainDB().Exec("UPDATE newsgroups SET updated_at = ? WHERE id = ?", formattedDate, id)
 			if err != nil {
 				log.Printf("[WEB]: Migration error updating newsgroup %s: %v", name, err)
 				skippedCount++
 				continue
 			}
+			log.Printf("update newsgroup activity: %s formattedDate=%s parsedAs=%d", name, formattedDate, parsedAs)
 			updatedCount++
 		} else {
 			skippedCount++
@@ -376,15 +414,15 @@ func main() {
 
 	// Set up the date parser adapter to use processor's ParseNNTPDate
 	database.GlobalDateParser = processor.ParseNNTPDate
-	log.Printf("[WEB]: Date parser adapter initialized with processor.ParseNNTPDate")
+	//log.Printf("[WEB]: Date parser adapter initialized with processor.ParseNNTPDate")
 
 	// Initialize caches after database is loaded (using command-line flag values)
 	db.ArticleCache = database.NewArticleCache(maxArticleCache, time.Duration(maxArticleCacheExpiry)*time.Minute)
-	log.Printf("[WEB]: Article cache initialized (max %d articles, %v expiry)", maxArticleCache, time.Duration(maxArticleCacheExpiry)*time.Minute)
+	//log.Printf("[WEB]: Article cache initialized (max %d articles, %v expiry)", maxArticleCache, time.Duration(maxArticleCacheExpiry)*time.Minute)
 
 	// Initialize NNTP authentication cache (15 minute TTL)
 	db.NNTPAuthCache = database.NewNNTPAuthCache(15 * time.Minute)
-	log.Printf("[WEB]: NNTP authentication cache initialized (15 minute TTL)")
+	//log.Printf("[WEB]: NNTP authentication cache initialized (15 minute TTL)")
 
 	// Note: Database batch workers are started automatically by OpenDatabase()
 	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
@@ -394,15 +432,19 @@ func main() {
 	if err := db.Migrate(); err != nil {
 		log.Fatalf("[WEB]: Failed to apply database migrations: %v", err)
 	}
-	log.Printf("[WEB]: Database migrations applied successfully")
+	//log.Printf("[WEB]: Database migrations applied successfully")
 
 	// Run future posts hiding migration first if requested
 	if updateNewsgroupsHideFuture {
 		log.Printf("[WEB]: Starting future posts hiding migration...")
 		if err := hideFuturePosts(db); err != nil {
 			log.Printf("[WEB]: Warning: Future posts hiding migration failed: %v", err)
+			os.Exit(1)
 		} else {
 			log.Printf("[WEB]: Future posts hiding migration completed successfully")
+			if !updateNewsgroupActivity {
+				os.Exit(0)
+			}
 		}
 	}
 
@@ -411,8 +453,10 @@ func main() {
 		log.Printf("[WEB]: Starting newsgroup activity migration...")
 		if err := migrateNewsgroupLastActivity(db); err != nil {
 			log.Printf("[WEB]: Warning: Newsgroup activity migration failed: %v", err)
+			os.Exit(1)
 		} else {
 			log.Printf("[WEB]: Newsgroup activity migration completed successfully")
+			os.Exit(0)
 		}
 	}
 
@@ -440,11 +484,11 @@ func main() {
 
 	// Initialize sanitized content cache (N entries max, M minute expiry)
 	models.InitSanitizedCache(maxSanArtCache, time.Duration(maxSanArtCacheExpiry)*time.Minute)
-	log.Printf("[WEB]: Sanitized content cache initialized")
+	//log.Printf("[WEB]: Sanitized content cache initialized")
 
 	// Initialize newsgroup cache (N page results max, M minute expiry)
 	models.InitNewsgroupCache(maxNGpageCache, time.Duration(maxNGpageCacheExpiry)*time.Minute)
-	log.Printf("[WEB]: Newsgroup cache initialized")
+	//log.Printf("[WEB]: Newsgroup cache initialized")
 
 	// Handle newsgroup import/update operations
 	ctx := context.Background()
@@ -454,8 +498,13 @@ func main() {
 		log.Printf("[WEB]: Importing newsgroups from files...")
 		if err := preloader.LoadNewsgroupsFromFiles(ctx, db, importActiveFile, importDescFile, importCreateMissing); err != nil {
 			log.Printf("[WEB]: Warning: Failed to import newsgroups: %v", err)
+			os.Exit(1)
 		} else {
 			log.Printf("[WEB]: Newsgroups imported successfully")
+			if importActiveFile != "" {
+				// only quit when importing via active files, not when updateting descriptions
+				os.Exit(0)
+			}
 		}
 	}
 
@@ -463,8 +512,10 @@ func main() {
 		log.Printf("[WEB]: Repairing corrupted newsgroup watermarks...")
 		if err := preloader.RepairNewsgroupWatermarks(ctx, db); err != nil {
 			log.Printf("[WEB]: Warning: Failed to repair watermarks: %v", err)
+			os.Exit(1)
 		} else {
 			log.Printf("[WEB]: Watermarks repaired successfully")
+			os.Exit(0)
 		}
 	}
 

@@ -441,17 +441,21 @@ func (db *Database) GetThreads(groupDBs *GroupDBs) ([]*models.Thread, error) {
 func (db *Database) InsertOverview(groupDBs *GroupDBs, o *models.Overview) (int64, error) {
 	var res sql.Result
 	var err error
+
+	// Format DateSent as UTC string to avoid timezone encoding issues
+	dateSentStr := o.DateSent.UTC().Format("2006-01-02 15:04:05")
+
 	if o.ArticleNum == 0 {
 		// Auto-increment article_num - don't include it in INSERT
 		res, err = retryableExec(groupDBs.DB,
 			`INSERT INTO articles (subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			o.Subject, o.FromHeader, o.DateSent, o.DateString, o.MessageID, o.References, o.Bytes, o.Lines, o.ReplyCount, o.Downloaded,
+			o.Subject, o.FromHeader, dateSentStr, o.DateString, o.MessageID, o.References, o.Bytes, o.Lines, o.ReplyCount, o.Downloaded,
 		)
 	} else {
 		// Explicit article_num provided (e.g. from ImportOverview)
 		res, err = retryableExec(groupDBs.DB,
 			`INSERT INTO articles (article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			o.ArticleNum, o.Subject, o.FromHeader, o.DateSent, o.DateString, o.MessageID, o.References, o.Bytes, o.Lines, o.ReplyCount, o.Downloaded,
+			o.ArticleNum, o.Subject, o.FromHeader, dateSentStr, o.DateString, o.MessageID, o.References, o.Bytes, o.Lines, o.ReplyCount, o.Downloaded,
 		)
 	}
 	if err != nil {

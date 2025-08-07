@@ -469,7 +469,7 @@ retry:
 						ELSE last_article
 					END,
 					updated_at = excluded.updated_at`,
-				*task.Newsgroup, increment, maxArticleNum, time.Now())
+				*task.Newsgroup, increment, maxArticleNum, time.Now().UTC().Format("2006-01-02 15:04:05"))
 			return txErr
 		})
 
@@ -480,14 +480,7 @@ retry:
 	if err != nil {
 		log.Printf("[BATCH] processNewsgroupBatch Failed to update newsgroup stats for '%s': %v", *task.Newsgroup, err)
 	}
-
 	log.Printf("[BATCH] processNewsgroupBatch processed %d articles, newsgroup '%s' took %v", increment, *task.Newsgroup, time.Since(start))
-}
-
-// NEW: batchInsertUnifiedArticles - performs REAL batch insert with unified article+overview data in single SQL statement
-func (c *SQ3batch) batchInsertOverviews(newsgroup string, batches []*OverviewBatch) ([]int64, error) {
-	articleNumbers, _, err := c.batchInsertOverviewsWithDBs(newsgroup, batches)
-	return articleNumbers, err
 }
 
 // batchInsertOverviewsWithDBs - returns both article numbers and the GroupDBs connection for reuse
@@ -562,11 +555,14 @@ func (c *SQ3batch) processSingleOverviewBatch(groupDBs *GroupDBs, batches []*Ove
 
 	// Execute the prepared statement for each batch item
 	for _, batch := range batches {
+		// Format DateSent as UTC string to avoid timezone encoding issues
+		dateSentStr := batch.Article.DateSent.UTC().Format("2006-01-02 15:04:05")
+
 		_, err := stmt.Exec(
 			batch.Article.MessageID,   // message_id
 			batch.Article.Subject,     // subject
 			batch.Article.FromHeader,  // from_header
-			batch.Article.DateSent,    // date_sent
+			dateSentStr,               // date_sent (formatted as UTC string)
 			batch.Article.DateString,  // date_string
 			batch.Article.References,  // references
 			batch.Article.Bytes,       // bytes
