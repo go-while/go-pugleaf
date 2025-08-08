@@ -60,9 +60,13 @@
                     </ul>
                 </div>
                 {{end}}
-                {{if and .SubHierarchies (gt .TotalGroups 0)}}
+                {{if and .SubHierarchies (gt .TotalGroups 100)}}
                 <a href="/hierarchy-groups/{{.CurrentPath}}" class="btn btn-outline-success btn-sm ms-2">
-                    <i class="bi bi-chat-dots me-1"></i>View {{.TotalGroups}} Groups
+                    <i class="bi bi-chat-dots me-1"></i>View all {{.TotalGroups}} Groups in {{$.CurrentPath}}
+                </a>
+                {{else if and .SubHierarchies (gt .TotalGroups 0)}}
+                <a href="/hierarchy-groups/{{.CurrentPath}}" class="btn btn-outline-success btn-sm ms-2">
+                    <i class="bi bi-chat-dots me-1"></i>View listed {{.TotalGroups}} Groups in {{$.CurrentPath}}
                 </a>
                 {{end}}
             </div>
@@ -166,7 +170,20 @@
     </div>
 </div>
 {{end}}
-
+<div class="row">
+    <div class="col-12">
+        <div class="badge justify-content-center">
+            {{if and .SubHierarchies (gt .TotalGroups 100)}}
+            <a href="/hierarchy-groups/{{.CurrentPath}}" class="btn btn-outline-success btn-sm ms-2">
+                <i class="bi bi-chat-dots me-1"></i>View all {{.TotalGroups}} Groups in {{$.CurrentPath}}
+            </a>
+            {{else if and .SubHierarchies (gt .TotalGroups 0)}}
+            <a href="/hierarchy-groups/{{.CurrentPath}}" class="btn btn-outline-success btn-sm ms-2">
+                <i class="bi bi-chat-dots me-1"></i>View listed {{.TotalGroups}} Groups in {{$.CurrentPath}}
+            </a>
+            {{end}}
+        </div>
+</div>
 <!-- Pagination -->
 {{if .Pagination}}
 {{if gt .Pagination.TotalPages 1}}
