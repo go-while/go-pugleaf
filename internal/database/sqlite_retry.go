@@ -58,14 +58,12 @@ func retryableExec(db *sql.DB, query string, args ...interface{}) (sql.Result, e
 	return result, err
 }
 
-/*
 // retryableQueryRow executes a query that returns a single row with retry logic
 func retryableQueryRow(db *sql.DB, query string, args ...interface{}) *sql.Row {
 	// For QueryRow, we can't detect errors until Scan() is called
 	// Return the row directly - callers should handle retryable errors in their Scan() calls
 	return db.QueryRow(query, args...)
 }
-*/
 
 // retryableQueryRowScan executes a QueryRow and Scan with retry logic
 func retryableQueryRowScan(db *sql.DB, query string, args []interface{}, dest ...interface{}) error {
@@ -264,4 +262,41 @@ func retryableStmtQueryRowScan(stmt *sql.Stmt, args []interface{}, dest ...inter
 	}
 
 	return err
+}
+
+// Exported wrapper functions for use by other packages
+
+// RetryableExec executes a SQL statement with retry logic for lock conflicts
+func RetryableExec(db *sql.DB, query string, args ...interface{}) (sql.Result, error) {
+	return retryableExec(db, query, args...)
+}
+
+// RetryableQuery executes a SQL query with retry logic for lock conflicts
+func RetryableQuery(db *sql.DB, query string, args ...interface{}) (*sql.Rows, error) {
+	return retryableQuery(db, query, args...)
+}
+
+// RetryableQueryRow executes a SQL query and returns a single row with retry logic
+func RetryableQueryRow(db *sql.DB, query string, args ...interface{}) *sql.Row {
+	return retryableQueryRow(db, query, args...)
+}
+
+// RetryableQueryRowScan executes a SQL query and scans the result with retry logic
+func RetryableQueryRowScan(db *sql.DB, query string, args []interface{}, dest ...interface{}) error {
+	return retryableQueryRowScan(db, query, args, dest...)
+}
+
+// RetryableTransactionExec executes a transaction with retry logic for lock conflicts
+func RetryableTransactionExec(db *sql.DB, txFunc func(*sql.Tx) error) error {
+	return retryableTransactionExec(db, txFunc)
+}
+
+// RetryableStmtExec executes a prepared statement with retry logic for lock conflicts
+func RetryableStmtExec(stmt *sql.Stmt, args ...interface{}) (sql.Result, error) {
+	return retryableStmtExec(stmt, args...)
+}
+
+// RetryableStmtQueryRowScan executes a prepared statement QueryRow and scans with retry logic
+func RetryableStmtQueryRowScan(stmt *sql.Stmt, args []interface{}, dest ...interface{}) error {
+	return retryableStmtQueryRowScan(stmt, args, dest...)
 }

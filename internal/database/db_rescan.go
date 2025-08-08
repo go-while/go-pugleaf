@@ -6,6 +6,7 @@ import (
 )
 
 // RecoverDatabase attempts to recover the database by checking for missing articles and last_insert_ids mismatches
+const batchSize = 25000
 
 func (db *Database) Rescan(newsgroup string) error {
 	if newsgroup == "" {
@@ -44,10 +45,10 @@ func (db *Database) GetLatestArticleNumberFromOverview(newsgroup string) (int64,
 	defer groupDB.Return(db)
 
 	var latestArticle int64
-	err = groupDB.DB.QueryRow(`
+	err = retryableQueryRowScan(groupDB.DB, `
 		SELECT MAX(article_num)
 		FROM articles
-	`).Scan(&latestArticle)
+	`, []interface{}{}, &latestArticle)
 	if err != nil {
 		return 0, err
 	}
@@ -57,7 +58,7 @@ func (db *Database) GetLatestArticleNumberFromOverview(newsgroup string) (int64,
 
 func (db *Database) GetLatestArticleNumbers(newsgroup string) (map[string]int64, error) {
 	// Query the latest article numbers for the specified newsgroup
-	rows, err := db.GetMainDB().Query(`
+	rows, err := retryableQuery(db.GetMainDB(), `
 		SELECT name, last_article
 		FROM newsgroups
 		WHERE name = ?
@@ -130,7 +131,7 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 	defer groupDB.Return(db)
 
 	// 3. Get max article numbers from each table (handle NULL for empty tables)
-	err = groupDB.DB.QueryRow("SELECT COALESCE(MAX(article_num), 0) FROM articles").Scan(&report.ArticlesMaxNum)
+	err = retryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", []interface{}{}, &report.ArticlesMaxNum)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get max article_num from articles: %v", err))
 	}
@@ -138,13 +139,13 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 	// Since overview is now unified with articles, OverviewMaxNum equals ArticlesMaxNum
 	report.OverviewMaxNum = report.ArticlesMaxNum
 
-	err = groupDB.DB.QueryRow("SELECT COALESCE(MAX(root_article), 0) FROM threads").Scan(&report.ThreadsMaxNum)
+	err = retryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(root_article), 0) FROM threads", []interface{}{}, &report.ThreadsMaxNum)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get max root_article from threads: %v", err))
 	}
 
 	// 4. Get counts from each table
-	err = groupDB.DB.QueryRow("SELECT COUNT(*) FROM articles").Scan(&report.ArticleCount)
+	err = retryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", []interface{}{}, &report.ArticleCount)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get article count: %v", err))
 	}
@@ -152,7 +153,7 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 	// Since overview is now unified with articles, OverviewCount equals ArticleCount
 	report.OverviewCount = report.ArticleCount
 
-	err = groupDB.DB.QueryRow("SELECT COUNT(*) FROM threads").Scan(&report.ThreadCount)
+	err = retryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM threads", []interface{}{}, &report.ThreadCount)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get thread count: %v", err))
 	}
@@ -181,80 +182,167 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 	return report, nil
 }
 
-// findMissingArticles finds gaps in article numbering
+// findMissingArticles finds gaps in article numbering using batched processing
 func (db *Database) findMissingArticles(groupDB *GroupDBs, maxArticleNum int64) []int64 {
 	var missing []int64
 	if maxArticleNum <= 0 {
 		return missing
 	}
 
-	// Get all article numbers
-	rows, err := groupDB.DB.Query("SELECT article_num FROM articles ORDER BY article_num")
-	if err != nil {
-		return missing
-	}
-	defer rows.Close()
+	var offset int64 = 0
+	var totalProcessed int64 = 0
 
-	var articleNums []int64
-	for rows.Next() {
-		var num int64
-		if err := rows.Scan(&num); err != nil {
-			continue
+	log.Printf("Checking for missing articles in batches of %d (max article: %d)", batchSize, maxArticleNum)
+
+	for offset < maxArticleNum {
+		// Get batch of article numbers
+		rows, err := retryableQuery(groupDB.DB,
+			"SELECT article_num FROM articles WHERE article_num > ? ORDER BY article_num LIMIT ?",
+			offset, batchSize)
+		if err != nil {
+			log.Printf("Error fetching article batch starting at %d: %v", offset, err)
+			break
 		}
-		articleNums = append(articleNums, num)
-	}
 
-	// Find gaps
-	expectedNum := int64(1)
-	for _, actualNum := range articleNums {
-		for expectedNum < actualNum {
-			missing = append(missing, expectedNum)
-			expectedNum++
+		var batchArticles []int64
+		for rows.Next() {
+			var num int64
+			if err := rows.Scan(&num); err != nil {
+				continue
+			}
+			batchArticles = append(batchArticles, num)
 		}
-		expectedNum = actualNum + 1
+		rows.Close()
+
+		if len(batchArticles) == 0 {
+			break // No more articles
+		}
+
+		// Find gaps in this batch
+		expectedNum := offset + 1
+		for _, actualNum := range batchArticles {
+			for expectedNum < actualNum {
+				missing = append(missing, expectedNum)
+				expectedNum++
+			}
+			expectedNum = actualNum + 1
+		}
+
+		// Update offset to the last article number in this batch
+		offset = batchArticles[len(batchArticles)-1]
+		totalProcessed += int64(len(batchArticles))
+
+		// Progress reporting for large groups
+		if totalProcessed%100000 == 0 {
+			log.Printf("Processed %d articles, found %d missing so far", totalProcessed, len(missing))
+		}
 	}
 
+	log.Printf("Missing article check complete: processed %d articles, found %d missing", totalProcessed, len(missing))
 	return missing
 }
 
-// findOrphanedThreads finds thread entries pointing to non-existent articles
+// findOrphanedThreads finds thread entries pointing to non-existent articles using batched processing
 func (db *Database) findOrphanedThreads(groupDB *GroupDBs) []int64 {
 	var orphaned []int64
 
-	// Get all article numbers from articles table
+	log.Printf("Building article index in batches of %d", batchSize)
+
+	// Build a map of existing article numbers using batched processing
 	articleNums := make(map[int64]bool)
-	rows, err := groupDB.DB.Query("SELECT article_num FROM articles")
-	if err != nil {
-		return orphaned
-	}
-	defer rows.Close()
+	var offset int64 = 0
+	var totalArticles int64 = 0
 
-	for rows.Next() {
-		var num int64
-		if err := rows.Scan(&num); err != nil {
-			continue
+	for {
+		// Get batch of article numbers
+		rows, err := retryableQuery(groupDB.DB,
+			"SELECT article_num FROM articles WHERE article_num > ? ORDER BY article_num LIMIT ?",
+			offset, batchSize)
+		if err != nil {
+			log.Printf("Error fetching article batch for orphan check starting at %d: %v", offset, err)
+			return orphaned
 		}
-		articleNums[num] = true
-	}
 
-	// Get all root_article numbers from threads table
-	rows, err = groupDB.DB.Query("SELECT DISTINCT root_article FROM threads")
-	if err != nil {
-		return orphaned
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var rootArticle int64
-		if err := rows.Scan(&rootArticle); err != nil {
-			continue
+		var batchCount int
+		var lastArticle int64
+		for rows.Next() {
+			var num int64
+			if err := rows.Scan(&num); err != nil {
+				continue
+			}
+			articleNums[num] = true
+			lastArticle = num
+			batchCount++
 		}
-		// Check if this root_article exists in articles table
-		if !articleNums[rootArticle] {
-			orphaned = append(orphaned, rootArticle)
+		rows.Close()
+
+		if batchCount == 0 {
+			break // No more articles
+		}
+
+		totalArticles += int64(batchCount)
+		offset = lastArticle
+
+		// Progress reporting for large groups
+		if totalArticles%100000 == 0 {
+			log.Printf("Indexed %d articles for orphan detection", totalArticles)
+		}
+
+		if batchCount < batchSize {
+			break // Last batch
 		}
 	}
 
+	log.Printf("Article index complete: %d articles indexed", totalArticles)
+
+	// Now check thread roots in batches
+	offset = 0
+	var totalThreads int64 = 0
+
+	for {
+		// Get batch of distinct root_article numbers from threads table
+		rows, err := retryableQuery(groupDB.DB,
+			"SELECT DISTINCT root_article FROM threads WHERE root_article > ? ORDER BY root_article LIMIT ?",
+			offset, batchSize)
+		if err != nil {
+			log.Printf("Error fetching thread batch for orphan check starting at %d: %v", offset, err)
+			return orphaned
+		}
+
+		var batchCount int
+		var lastRoot int64
+		for rows.Next() {
+			var rootArticle int64
+			if err := rows.Scan(&rootArticle); err != nil {
+				continue
+			}
+			// Check if this root_article exists in articles table
+			if !articleNums[rootArticle] {
+				orphaned = append(orphaned, rootArticle)
+			}
+			lastRoot = rootArticle
+			batchCount++
+		}
+		rows.Close()
+
+		if batchCount == 0 {
+			break // No more threads
+		}
+
+		totalThreads += int64(batchCount)
+		offset = lastRoot
+
+		// Progress reporting for large groups
+		if totalThreads%50000 == 0 {
+			log.Printf("Checked %d thread roots, found %d orphaned so far", totalThreads, len(orphaned))
+		}
+
+		if batchCount < batchSize {
+			break // Last batch
+		}
+	}
+
+	log.Printf("Orphaned thread check complete: checked %d thread roots, found %d orphaned", totalThreads, len(orphaned))
 	return orphaned
 }
 

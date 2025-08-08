@@ -75,9 +75,8 @@ func (proc *Processor) DownloadArticlesViaOverview(groupName string) error {
 		msgID := ov.MessageID
 		num := ov.ArticleNum
 		/*
-			row := groupDBs.DB.QueryRow("SELECT 1 FROM articles WHERE message_id = ? LIMIT 1", msgID)
 			var exists int
-			if err := row.Scan(&exists); err == nil {
+			if err := database.RetryableQueryRowScan(groupDBs.DB, "SELECT 1 FROM articles WHERE message_id = ? LIMIT 1", []interface{}{msgID}, &exists); err == nil {
 				// Already exists, mark as downloaded if not alread
 				if ov.Downloaded == 0 {
 					//err = proc.DB.SetOverviewDownloaded(groupDBs, num, 1)

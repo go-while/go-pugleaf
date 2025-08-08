@@ -7,7 +7,7 @@ import (
 // GetConfigValue retrieves a configuration value from the config table
 func (db *Database) GetConfigValue(key string) (string, error) {
 	var value string
-	err := db.mainDB.QueryRow("SELECT value FROM config WHERE key = ?", key).Scan(&value)
+	err := retryableQueryRowScan(db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{key}, &value)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", nil // Return empty string for missing keys
@@ -19,7 +19,7 @@ func (db *Database) GetConfigValue(key string) (string, error) {
 
 // SetConfigValue sets or updates a configuration value in the config table
 func (db *Database) SetConfigValue(key, value string) error {
-	_, err := db.mainDB.Exec(`
+	_, err := retryableExec(db.mainDB, `
 		INSERT OR REPLACE INTO config (key, value)
 		VALUES (?, ?)
 	`, key, value)

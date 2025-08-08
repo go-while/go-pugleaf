@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/database"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -105,7 +106,7 @@ func (dm *DBManager) GetDB(dbName string) (*sql.DB, error) {
 	}
 
 	// Configure database for performance
-	if _, err := db.Exec(PRAGMA_SETTINGS); err != nil {
+	if _, err := database.RetryableExec(db, PRAGMA_SETTINGS); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to set PRAGMA settings: %w", err)
 	}
@@ -122,7 +123,7 @@ func (dm *DBManager) GetDB(dbName string) (*sql.DB, error) {
 			CREATE INDEX IF NOT EXISTS idx_%s_hash ON %s(messageid_hash);
 		`, tableName, tableName, tableName)
 
-		if _, err := db.Exec(createTableSQL); err != nil {
+		if _, err := database.RetryableExec(db, createTableSQL); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("failed to create table %s: %w", tableName, err)
 		}
@@ -169,7 +170,7 @@ func (dm *DBManager) ArticleExists(article *Article) (bool, error) {
 	storedHash := getStoredHash(article)
 	var exists bool
 	query := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM %s WHERE messageid_hash = ? LIMIT 1)", tableName)
-	err = db.QueryRow(query, storedHash).Scan(&exists)
+	err = database.RetryableQueryRowScan(db, query, []interface{}{storedHash}, &exists)
 	if err != nil {
 		return false, err
 	}

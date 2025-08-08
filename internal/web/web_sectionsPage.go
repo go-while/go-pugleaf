@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -206,11 +207,11 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 	if page > 1 && lastArticleNum == 0 {
 		skipCount := (page - 1) * LIMIT_sectionGroupPage
 		var cursorArticleNum int64
-		err = groupDBs.DB.QueryRow(`
+		err = database.RetryableQueryRowScan(groupDBs.DB, `
 			SELECT article_num FROM articles
 			WHERE hide = 0
 			ORDER BY article_num DESC
-			LIMIT 1 OFFSET ?`, skipCount-1).Scan(&cursorArticleNum)
+			LIMIT 1 OFFSET ?`, []interface{}{skipCount - 1}, &cursorArticleNum)
 		if err != nil {
 			lastArticleNum = 0
 		} else {

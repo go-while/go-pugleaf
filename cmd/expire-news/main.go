@@ -393,7 +393,7 @@ func getArticleBatch(groupDBs *database.GroupDBs, offset, limit int) ([]*models.
 		LIMIT ? OFFSET ?
 	`
 
-	rows, err := groupDBs.DB.Query(query, limit, offset)
+	rows, err := database.RetryableQuery(groupDBs.DB, query, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -506,7 +506,7 @@ func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles i
 
 	// First count total articles
 	var totalArticles int
-	err = groupDBs.DB.QueryRow("SELECT COUNT(*) FROM articles").Scan(&totalArticles)
+	err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COUNT(*) FROM articles", nil, &totalArticles)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to count articles: %v", err)
 	}
@@ -528,7 +528,7 @@ func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles i
 		LIMIT ?
 	`
 
-	rows, err := groupDBs.DB.Query(query, articlesToRemove)
+	rows, err := database.RetryableQuery(groupDBs.DB, query, articlesToRemove)
 	if err != nil {
 		return 0, totalArticles, fmt.Errorf("failed to query oldest articles: %v", err)
 	}
@@ -588,14 +588,14 @@ func updateNewsgroupCounters(db *database.Database, groupName string) error {
 
 	// Count current articles
 	var messageCount int64
-	err = groupDBs.DB.QueryRow("SELECT COUNT(*) FROM articles").Scan(&messageCount)
+	err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COUNT(*) FROM articles", nil, &messageCount)
 	if err != nil {
 		return fmt.Errorf("failed to count articles: %v", err)
 	}
 
 	// Get the highest article number
 	var lastArticle int64
-	err = groupDBs.DB.QueryRow("SELECT COALESCE(MAX(article_num), 0) FROM articles").Scan(&lastArticle)
+	err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", nil, &lastArticle)
 	if err != nil {
 		return fmt.Errorf("failed to get last article: %v", err)
 	}

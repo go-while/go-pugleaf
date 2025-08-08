@@ -127,7 +127,7 @@ func migrateNewsgroupLastActivity(db *database.Database) error {
 
 		// Query the latest article date from the group's articles table (excluding hidden articles)
 		var latestDate sql.NullString
-		err = groupDBs.DB.QueryRow("SELECT MAX(date_sent) FROM articles WHERE hide = 0").Scan(&latestDate)
+		err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT MAX(date_sent) FROM articles WHERE hide = 0", nil, &latestDate)
 		groupDBs.Return(db) // Always return the database connection
 
 		if err != nil {
@@ -228,7 +228,7 @@ func hideFuturePosts(db *database.Database) error {
 		}
 
 		// Update articles that are posted more than 48 hours in the future
-		result, err := groupDBs.DB.Exec("UPDATE articles SET hide = 1, spam = 1 WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
+		result, err := database.RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1, spam = 1 WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
 		groupDBs.Return(db) // Always return the database connection
 
 		if err != nil {

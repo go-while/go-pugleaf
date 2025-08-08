@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -29,9 +30,8 @@ func (proc *Processor) ImportOverview(groupName string) error {
 		return fmt.Errorf("DownloadArticles: Failed to select group '%s': %v", groupName, err)
 	}
 	// Efficiently find the highest article number already in articles table
-	row := groupDBs.DB.QueryRow("SELECT MAX(article_num) FROM articles")
 	var maxNum sql.NullInt64
-	if err := row.Scan(&maxNum); err != nil {
+	if err := database.RetryableQueryRowScan(groupDBs.DB, "SELECT MAX(article_num) FROM articles", nil, &maxNum); err != nil {
 		return err
 	}
 	start := groupInfo.First           // Start from the first article in the remote group
@@ -98,14 +98,14 @@ func (proc *Processor) ImportOverview(groupName string) error {
 		log.Printf("ImportOverview: Could not begin transaction for commit newsgroup '%s': %v", groupName, err)
 	}
 	// After overview inserts, force WAL to sync
-	_, err = groupDBs.DB.Exec("PRAGMA wal_checkpoint(FULL)")
+	_, err = database.RetryableExec(groupDBs.DB, "PRAGMA wal_checkpoint(FULL)")
 	if err != nil {
 		log.Printf("ImportOverview: WAL checkpoint failed newsgroup '%s': %v", groupName, err)
 	} else {
 		log.Printf("ImportOverview: WAL checkpoint completed newsgroup '%s'", groupName)
 	}
 	// After all overview inserts in ImportOverview
-	_, err = groupDBs.DB.Exec("PRAGMA synchronous = FULL")
+	_, err = database.RetryableExec(groupDBs.DB, "PRAGMA synchronous = FULL")
 	if err != nil {
 		log.Printf("Warning: Could not set synchronous mode: %v", err)
 	}

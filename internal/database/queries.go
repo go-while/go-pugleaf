@@ -117,12 +117,20 @@ func (db *Database) InsertNewsgroup(g *models.Newsgroup) error {
 	return err
 }
 
-func (db *Database) MainDBGetNewsgroupsCount() int64 {
-
+func (db *Database) MainDBGetAllNewsgroupsCount() int64 {
+	var count int64
+	err := retryableQueryRowScan(db.mainDB, `SELECT COUNT(*) FROM newsgroups`, nil, &count)
+	if err != nil {
+		log.Printf("MainDBGetNewsgroupsCount: Failed to get newsgroups count: %v", err)
+		return 0
+	}
+	return count
+}
+func (db *Database) MainDBGetNewsgroupsActiveCount() int64 {
 	var count int64
 	err := retryableQueryRowScan(db.mainDB, `SELECT COUNT(*) FROM newsgroups WHERE active = 1`, nil, &count)
 	if err != nil {
-		log.Printf("MainDBGetNewsgroupsCount: Failed to get newsgroups count: %v", err)
+		log.Printf("MainDBGetNewsgroupsActiveCount: Failed to get newsgroups count: %v", err)
 		return 0
 	}
 	return count

@@ -385,10 +385,10 @@ func createMissingOverview(groupDB *database.GroupDBs, articleNum int64) error {
 	}
 
 	// Get article data
-	err := groupDB.DB.QueryRow(`
+	err := database.RetryableQueryRowScan(groupDB.DB, `
 		SELECT message_id, subject, from_header, date_sent, date_string, references, bytes, lines, reply_count
 		FROM articles WHERE article_num = ?
-	`, articleNum).Scan(&article.MessageID, &article.Subject, &article.FromHeader,
+	`, []interface{}{articleNum}, &article.MessageID, &article.Subject, &article.FromHeader,
 		&article.DateSent, &article.DateString, &article.References,
 		&article.Bytes, &article.Lines, &article.ReplyCount)
 	if err != nil {
@@ -652,7 +652,7 @@ func checkAndFixDates(db *database.Database, newsgroups []*models.Newsgroup, rew
 // checkGroupDates checks and optionally fixes date mismatches in a single newsgroup
 func checkGroupDates(groupDB *database.GroupDBs, newsgroupName string, rewriteDates, verbose bool) (int, int, []DateProblem, error) {
 	// Query all articles with their date information - get date_sent as string to avoid timezone parsing issues
-	rows, err := groupDB.DB.Query(`
+	rows, err := database.RetryableQuery(groupDB.DB, `
 		SELECT article_num, message_id, date_string, date_sent
 		FROM articles
 		WHERE date_string IS NOT NULL AND date_string != ''

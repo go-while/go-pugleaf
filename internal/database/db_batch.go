@@ -594,7 +594,7 @@ func (c *SQ3batch) processSingleOverviewBatch(groupDBs *GroupDBs, batches []*Ove
 	selectSQL := `SELECT message_id, article_num FROM articles WHERE message_id IN (` +
 		getPlaceholders(batchSize) + `) ORDER BY article_num`
 
-	rows, err := groupDBs.DB.Query(selectSQL, args...)
+	rows, err := retryableQuery(groupDBs.DB, selectSQL, args...)
 	if err != nil {
 		log.Printf("[OVB-BATCH] group '%s': Failed to execute batch select: %v", groupDBs.Newsgroup, err)
 		return nil, fmt.Errorf("failed to execute batch select for group '%s': %w", groupDBs.Newsgroup, err)

@@ -81,10 +81,10 @@ func (p *ProgressDB) initSchema() error {
 // GetLastArticle returns the last fetched article number for a newsgroup on a backend
 func (p *ProgressDB) GetLastArticle(backendName, newsgroupName string) (int64, error) {
 	var lastArticle int64
-	err := p.db.QueryRow(`
+	err := retryableQueryRowScan(p.db, `
 		SELECT last_article FROM progress
 		WHERE backend_name = ? AND newsgroup_name = ?
-	`, backendName, newsgroupName).Scan(&lastArticle)
+	`, []interface{}{backendName, newsgroupName}, &lastArticle)
 
 	if err == sql.ErrNoRows {
 		return 0, nil // No previous progress, start from 0
@@ -98,8 +98,7 @@ func (p *ProgressDB) GetLastArticle(backendName, newsgroupName string) (int64, e
 
 // UpdateProgress updates the fetching progress for a newsgroup on a backend
 func (p *ProgressDB) UpdateProgress(backendName, newsgroupName string, lastArticle int64) error {
-	for {
-		_, err := p.db.Exec(`
+	_, err := retryableExec(p.db, `
 		INSERT INTO progress (backend_name, newsgroup_name, last_article, last_fetched, updated_at)
 		VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(backend_name, newsgroup_name) DO UPDATE SET
@@ -108,20 +107,17 @@ func (p *ProgressDB) UpdateProgress(backendName, newsgroupName string, lastArtic
 			updated_at = excluded.updated_at
 	`, backendName, newsgroupName, lastArticle)
 
-		if err != nil {
-			log.Printf("Error in UpdateProgress err='%v' ... continue in 1s", err)
-			time.Sleep(time.Second)
-			continue
-		}
-		break
+	if err != nil {
+		return fmt.Errorf("failed to update progress: %w", err)
 	}
+
 	log.Printf("Updated progress: %s/%s -> article %d", backendName, newsgroupName, lastArticle)
 	return nil
 }
 
 // GetAllProgress returns all progress entries
 func (p *ProgressDB) GetAllProgress() ([]*ProgressEntry, error) {
-	rows, err := p.db.Query(`
+	rows, err := retryableQuery(p.db, `
 		SELECT id, backend_name, newsgroup_name, last_article,
 			   COALESCE(last_fetched, '') as last_fetched,
 			   created_at, updated_at
@@ -158,7 +154,7 @@ func (p *ProgressDB) GetAllProgress() ([]*ProgressEntry, error) {
 
 // GetProgressForBackend returns progress entries for a specific backend
 func (p *ProgressDB) GetProgressForBackend(backendName string) ([]*ProgressEntry, error) {
-	rows, err := p.db.Query(`
+	rows, err := retryableQuery(p.db, `
 		SELECT id, backend_name, newsgroup_name, last_article,
 			   COALESCE(last_fetched, '') as last_fetched,
 			   created_at, updated_at

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/go-while/go-pugleaf/internal/database"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -184,7 +185,7 @@ func createDatabaseAndReadHierarchies() ([]string, error) {
 	}
 
 	// Query all hierarchy names
-	rows, err := db.Query("SELECT name FROM hierarchies ORDER BY name")
+	rows, err := database.RetryableQuery(db, "SELECT name FROM hierarchies ORDER BY name")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query hierarchies: %v", err)
 	}

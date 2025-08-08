@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -544,7 +545,7 @@ func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
 
 	// Query the latest article date from visible articles only
 	var latestDate sql.NullString
-	err = groupDBs.DB.QueryRow("SELECT MAX(date_sent) FROM articles WHERE hide = 0").Scan(&latestDate)
+	err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT MAX(date_sent) FROM articles WHERE hide = 0", nil, &latestDate)
 	groupDBs.Return(s.DB) // Always return the database connection
 
 	if err != nil {
@@ -555,7 +556,7 @@ func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
 
 	// Update newsgroup timestamp if we found a latest date
 	if latestDate.Valid {
-		_, err = s.DB.GetMainDB().Exec("UPDATE newsgroups SET updated_at = ? WHERE id = ?", latestDate.String, newsgroup.ID)
+		_, err = database.RetryableExec(s.DB.GetMainDB(), "UPDATE newsgroups SET updated_at = ? WHERE id = ?", latestDate.String, newsgroup.ID)
 		if err != nil {
 			session.SetError("Failed to update newsgroup activity timestamp: " + err.Error())
 			c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))

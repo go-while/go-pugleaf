@@ -286,7 +286,7 @@ func RepairNewsgroupWatermarks(ctx context.Context, db *database.Database) error
 		var maxArticle, minArticle, articleCount int64
 
 		// Get max article number
-		err = groupDBs.DB.QueryRow("SELECT COALESCE(MAX(article_num), 0) FROM articles").Scan(&maxArticle)
+		err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", nil, &maxArticle)
 		if err != nil {
 			log.Printf("PreLoader: Failed to get max article for %s: %v", newsgroup.Name, err)
 			groupDBs.Return(db)
@@ -295,7 +295,7 @@ func RepairNewsgroupWatermarks(ctx context.Context, db *database.Database) error
 		}
 
 		// Get min article number
-		err = groupDBs.DB.QueryRow("SELECT COALESCE(MIN(article_num), 1) FROM articles").Scan(&minArticle)
+		err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COALESCE(MIN(article_num), 1) FROM articles", nil, &minArticle)
 		if err != nil {
 			log.Printf("PreLoader: Failed to get min article for %s: %v", newsgroup.Name, err)
 			groupDBs.Return(db)
@@ -304,7 +304,7 @@ func RepairNewsgroupWatermarks(ctx context.Context, db *database.Database) error
 		}
 
 		// Get article count
-		err = groupDBs.DB.QueryRow("SELECT COUNT(*) FROM articles").Scan(&articleCount)
+		err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COUNT(*) FROM articles", nil, &articleCount)
 		if err != nil {
 			log.Printf("PreLoader: Failed to get article count for %s: %v", newsgroup.Name, err)
 			groupDBs.Return(db)

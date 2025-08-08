@@ -432,7 +432,7 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 
 	// Get total count first
 	var totalArticles int64
-	err = groupDBs.DB.QueryRow(`SELECT COUNT(*) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`).Scan(&totalArticles)
+	err = database.RetryableQueryRowScan(groupDBs.DB, `SELECT COUNT(*) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &totalArticles)
 	if err != nil {
 		return fmt.Errorf("failed to count articles: %w", err)
 	}
@@ -446,7 +446,7 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 
 	// Get the min and max article numbers for efficient range processing
 	var minArtNum, maxArtNum int64
-	err = groupDBs.DB.QueryRow(`SELECT MIN(article_num), MAX(article_num) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`).Scan(&minArtNum, &maxArtNum)
+	err = database.RetryableQueryRowScan(groupDBs.DB, `SELECT MIN(article_num), MAX(article_num) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &minArtNum, &maxArtNum)
 	if err != nil {
 		return fmt.Errorf("failed to get article number range: %w", err)
 	}
@@ -469,7 +469,7 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 				    AND article_num >= ? AND article_num <= ?
 		          ORDER BY article_num`
 
-		rows, err := groupDBs.DB.Query(query, currentArtNum, maxRangeArtNum)
+		rows, err := database.RetryableQuery(groupDBs.DB, query, currentArtNum, maxRangeArtNum)
 		if err != nil {
 			return fmt.Errorf("failed to query article range %d-%d: %w", currentArtNum, maxRangeArtNum, err)
 		}
@@ -758,14 +758,14 @@ func scanActualHistoryDatabase(useShortHashLen int) (*HistoryAnalysisStats, erro
 
 				// Count total entries in this table
 				var count int64
-				err = db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&count)
+				err = database.RetryableQueryRowScan(db, fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName), nil, &count)
 				if err != nil {
 					continue
 				}
 				stats.TotalEntries += count
 
 				// Analyze collisions in this table
-				rows, err := db.Query(fmt.Sprintf("SELECT h, o FROM %s", tableName))
+				rows, err := database.RetryableQuery(db, fmt.Sprintf("SELECT h, o FROM %s", tableName))
 				if err != nil {
 					continue
 				}

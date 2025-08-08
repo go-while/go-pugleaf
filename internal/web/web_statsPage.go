@@ -17,7 +17,7 @@ import (
 // This file will handle the statistics page functionality, showing server and NNTP statistics.
 func (s *WebServer) statsPage(c *gin.Context) {
 	// Get total count without loading all groups
-	totalCount := int(s.DB.MainDBGetNewsgroupsCount())
+	totalCount := int(s.DB.MainDBGetNewsgroupsActiveCount())
 
 	// Get top 10 most active groups ordered by message count
 	topGroups, _ := s.DB.GetTopGroupsByMessageCount(10)

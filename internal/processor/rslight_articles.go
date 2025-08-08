@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/go-while/go-pugleaf/internal/database"
 )
 
 func (leg *LegacyImporter) QuickOpenToGetNewsgroup(sqlitePath string) (string, error) {
@@ -18,7 +20,7 @@ func (leg *LegacyImporter) QuickOpenToGetNewsgroup(sqlitePath string) (string, e
 	defer legacyDB.Close()
 	//log.Printf("[RSLIGHT-IMPORT] Getting newsgroup from db='%s'", sqlitePath)
 
-	rows, err := legacyDB.Query(`
+	rows, err := database.RetryableQuery(legacyDB, `
 		SELECT newsgroup
 		FROM articles
 		ORDER BY id ASC LIMIT 1
@@ -62,7 +64,7 @@ func (leg *LegacyImporter) ImportSQLiteArticles(sqlitePath string) error {
 	//log.Printf("[RSLIGHT-IMPORT] Starting single query to read all articles from db='%s'", sqlitePath)
 	//queryStart := time.Now()
 
-	rows, err := legacyDB.Query(`
+	rows, err := database.RetryableQuery(legacyDB, `
 		SELECT newsgroup, msgid, article
 		FROM articles
 		ORDER BY id ASC

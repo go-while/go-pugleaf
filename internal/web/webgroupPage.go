@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -85,11 +86,11 @@ func (s *WebServer) groupPage(c *gin.Context) {
 
 		// Get the article_num at the skip position by querying with OFFSET once
 		var cursorArticleNum int64
-		err = groupDBs.DB.QueryRow(`
+		err = database.RetryableQueryRowScan(groupDBs.DB, `
 			SELECT article_num FROM articles
 			WHERE hide = 0
 			ORDER BY article_num DESC
-			LIMIT 1 OFFSET ?`, skipCount-1).Scan(&cursorArticleNum)
+			LIMIT 1 OFFSET ?`, []interface{}{skipCount - 1}, &cursorArticleNum)
 		if err != nil {
 			lastArticleNum = 0 // Fall back to first page
 		} else {

@@ -234,7 +234,7 @@ func fixReferencesInNewsgroup(groupDB *database.GroupDBs, dryRun, verbose bool, 
 		countQuery += fmt.Sprintf(" AND article_num <= (SELECT MIN(article_num) + %d - 1 FROM articles WHERE headers_json IS NOT NULL AND headers_json != '')", limit)
 	}
 
-	err := groupDB.DB.QueryRow(countQuery).Scan(&totalCount)
+	err := database.RetryableQueryRowScan(groupDB.DB, countQuery, nil, &totalCount)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get article count: %w", err)
 	}
@@ -284,7 +284,7 @@ func processBatch(groupDB *database.GroupDBs, dryRun, verbose bool, offset, batc
 		LIMIT ? OFFSET ?
 	`
 
-	rows, err := groupDB.DB.Query(query, batchSize, offset)
+	rows, err := database.RetryableQuery(groupDB.DB, query, batchSize, offset)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to query articles: %w", err)
 	}
@@ -363,7 +363,7 @@ func processBatch(groupDB *database.GroupDBs, dryRun, verbose bool, offset, batc
 func rebuildThreadsInNewsgroup(groupDB *database.GroupDBs, verbose bool, batchSize int) (int, error) {
 	// Get total article count
 	var totalCount int
-	err := groupDB.DB.QueryRow("SELECT COUNT(*) FROM articles").Scan(&totalCount)
+	err := database.RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", nil, &totalCount)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get article count: %w", err)
 	}
@@ -400,7 +400,7 @@ func rebuildThreadsInNewsgroup(groupDB *database.GroupDBs, verbose bool, batchSi
 		}
 
 		// Load batch of article mappings
-		rows, err := groupDB.DB.Query(`
+		rows, err := database.RetryableQuery(groupDB.DB, `
 			SELECT article_num, message_id
 			FROM articles
 			ORDER BY article_num
@@ -461,7 +461,7 @@ func rebuildThreadsInNewsgroup(groupDB *database.GroupDBs, verbose bool, batchSi
 
 func processThreadBatch(groupDB *database.GroupDBs, msgIDToArticleNum map[string]int64, offset, batchSize int, verbose bool) (int, error) {
 	// Get batch of articles with their references
-	rows, err := groupDB.DB.Query(`
+	rows, err := database.RetryableQuery(groupDB.DB, `
 		SELECT article_num, message_id, "references"
 		FROM articles
 		ORDER BY article_num

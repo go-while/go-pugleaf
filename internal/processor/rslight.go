@@ -280,7 +280,7 @@ func (leg *LegacyImporter) importSectionGroups(sectionID int, sectionName string
 
 // insertSection inserts a section record and returns its ID
 func (leg *LegacyImporter) insertSection(section *models.Section) (int, error) {
-	result, err := leg.proc.DB.GetMainDB().Exec(
+	result, err := database.RetryableExec(leg.proc.DB.GetMainDB(),
 		`INSERT OR IGNORE INTO sections (name, display_name, description, show_in_header, enable_local_spool, sort_order)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		section.Name, section.DisplayName, section.Description,
@@ -300,7 +300,7 @@ func (leg *LegacyImporter) insertSection(section *models.Section) (int, error) {
 
 // insertSectionGroup inserts a section group record
 func (leg *LegacyImporter) insertSectionGroup(sectionGroup *models.SectionGroup) error {
-	_, err := leg.proc.DB.GetMainDB().Exec(
+	_, err := database.RetryableExec(leg.proc.DB.GetMainDB(),
 		`INSERT OR IGNORE INTO section_groups (section_id, newsgroup_name, group_description, sort_order, is_category_header)
 		 VALUES (?, ?, ?, ?, ?)`,
 		sectionGroup.SectionID, sectionGroup.NewsgroupName, sectionGroup.GroupDescription,
@@ -505,7 +505,7 @@ func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads in
 
 // GetSectionsSummary returns a summary of imported sections
 func (leg *LegacyImporter) GetSectionsSummary() error {
-	rows, err := leg.proc.DB.GetMainDB().Query(`
+	rows, err := database.RetryableQuery(leg.proc.DB.GetMainDB(), `
 		SELECT s.name, s.display_name, s.show_in_header, COUNT(sg.id) as group_count
 		FROM sections s
 		LEFT JOIN section_groups sg ON s.id = sg.section_id
@@ -537,7 +537,7 @@ func (leg *LegacyImporter) GetSectionsSummary() error {
 	}
 
 	// Also show the total count of newsgroups created in the main database
-	newsgroupCount := leg.proc.DB.MainDBGetNewsgroupsCount()
+	newsgroupCount := leg.proc.DB.MainDBGetAllNewsgroupsCount()
 	fmt.Printf("\n=== Main Database Summary ===\n")
 	fmt.Printf("Total newsgroups in main database: %d\n", newsgroupCount)
 

@@ -56,12 +56,6 @@ func (db *Database) Migrate() error {
 	if err := db.migrateMainDB(); err != nil {
 		return fmt.Errorf("failed to migrate main database: %w", err)
 	}
-
-	// Apply active database migrations
-	if err := db.migrateActiveDB(); err != nil {
-		return fmt.Errorf("failed to migrate active database: %w", err)
-	}
-
 	return nil
 }
 
@@ -174,7 +168,7 @@ func ensureMigrationsTable(db *sql.DB, dbType string) error {
 func getAppliedMigrations(db *sql.DB, dbType string) (map[string]bool, error) {
 	applied := make(map[string]bool)
 
-	rows, err := db.Query(`SELECT filename FROM schema_migrations WHERE db_type = ? OR db_type = ''`, dbType)
+	rows, err := retryableQuery(db, `SELECT filename FROM schema_migrations WHERE db_type = ? OR db_type = ''`, dbType)
 	if err != nil {
 		log.Printf("Failed to query applied migrations for %s: %v", dbType, err)
 		return nil, fmt.Errorf("failed to query applied migrations for %s: %w", dbType, err)
@@ -221,51 +215,6 @@ func applyMigration(db *sql.DB, migration *MigrationFile, dbType string) error {
 	}
 
 	//log.Printf("Applied migration %s to %s database", migration.FileName, dbType)
-	return nil
-}
-
-// migrateActiveDB applies migrations to the active database
-func (db *Database) migrateActiveDB() error {
-	if db.activeDB == nil {
-		log.Printf("Active database not initialized")
-		return fmt.Errorf("active database not initialized")
-	}
-
-	activeDBConn := db.activeDB.GetDB()
-	if activeDBConn == nil {
-		log.Printf("Active database connection is nil")
-		return fmt.Errorf("active database connection is nil")
-	}
-
-	// Ensure migrations table exists
-	if err := ensureMigrationsTable(activeDBConn, "active"); err != nil {
-		log.Printf("Failed to ensure migrations table for active database: %v", err)
-		return err
-	}
-
-	// Get migration files
-	migrations, err := getMigrationFiles()
-	if err != nil {
-		log.Printf("Failed to get migration files: %v", err)
-		return err
-	}
-
-	// Get applied migrations
-	applied, err := getAppliedMigrations(activeDBConn, "active")
-	if err != nil {
-		log.Printf("Failed to get applied migrations for active database: %v", err)
-		return err
-	}
-
-	// Apply migrations for active database
-	for _, migration := range migrations {
-		if migration.Type == MigrationTypeActive && !applied[migration.FileName] {
-			if err := applyMigration(activeDBConn, migration, "active"); err != nil {
-				return err
-			}
-		}
-	}
-
 	return nil
 }
 

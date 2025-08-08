@@ -139,7 +139,7 @@ func (db *Database) IsUserLockedOut(username string) (bool, error) {
 
 	var attempts int
 	var updatedAt time.Time
-	err := db.mainDB.QueryRow(query, username).Scan(&attempts, &updatedAt)
+	err := retryableQueryRowScan(db.mainDB, query, []interface{}{username}, &attempts, &updatedAt)
 	if err != nil {
 		return false, err
 	}
@@ -153,7 +153,7 @@ func (db *Database) IsUserLockedOut(username string) (bool, error) {
 		} else {
 			// Lockout period expired, reset attempts
 			resetQuery := `UPDATE users SET login_attempts = 0, updated_at = CURRENT_TIMESTAMP WHERE username = ?`
-			db.mainDB.Exec(resetQuery, username)
+			retryableExec(db.mainDB, resetQuery, username)
 		}
 	}
 
@@ -168,7 +168,7 @@ func (db *Database) CleanupExpiredSessions() error {
 		updated_at = CURRENT_TIMESTAMP
 		WHERE session_expires_at < CURRENT_TIMESTAMP`
 
-	result, err := db.mainDB.Exec(query)
+	result, err := retryableExec(db.mainDB, query)
 	if err != nil {
 		return err
 	}

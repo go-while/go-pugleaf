@@ -21,9 +21,6 @@ type Database struct {
 	// Main database connection for system data
 	mainDB *sql.DB
 
-	// Active newsgroup registry database
-	activeDB *ActiveDB
-
 	// Per-group database connections (cached)
 	groupDBs   map[string]*GroupDBs // map with open database pointers
 	openDBsNum int                  // Total number of open group databases
@@ -116,11 +113,6 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 	// Initialize main database
 	if err := db.initMainDB(); err != nil {
 		return nil, fmt.Errorf("failed to initialize main database: %w", err)
-	}
-
-	// Initialize active database
-	if err := db.initActiveDB(); err != nil {
-		return nil, fmt.Errorf("failed to initialize active database: %w", err)
 	}
 
 	// Run migrations to ensure all tables exist
