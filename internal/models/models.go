@@ -3,7 +3,6 @@ package models
 
 import (
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -265,9 +264,10 @@ func (n *Newsgroup) PrintLastActivity() string {
 	totalDays := int(diff.Hours() / 24)
 
 	// Debug: log the actual timestamp and calculated diff
-	log.Printf("DEBUG models.go PrintLastActivity: Group=%s, UpdatedAt=%v (UTC: %v), Now=%v, Diff=%v, Hours=%.1f",
-		n.Name, n.UpdatedAt, updatedAtUTC, now, diff, diff.Hours())
-
+	/*
+		log.Printf("DEBUG models.go PrintLastActivity: Group=%s, UpdatedAt=%v (UTC: %v), Now=%v, Diff=%v, Hours=%.1f",
+			n.Name, n.UpdatedAt, updatedAtUTC, now, diff, diff.Hours())
+	*/
 	if diff < time.Minute {
 		return fmt.Sprintf("%d seconds ago", int(diff.Seconds()))
 	} else if diff < time.Hour {
