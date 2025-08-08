@@ -57,9 +57,9 @@ var (
 	// Pattern: lowercase alphanumeric start, components separated by dots, no trailing dots/hyphens
 	validGroupNameRegexStrict = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$`)
 	validGroupNameRegexchar   = regexp.MustCompile(`^[a-zA-Z0-9]{1,255}$`)
-	validGroupNameRegexLazy   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+-]*$`)
-	validGroupNameRegexSingle = regexp.MustCompile(`^[A-Za-z0-9-_+][A-Za-z0-9-_+]{1,64}$`)
-	validGroupNameRegexCaps   = regexp.MustCompile(`^[A-Za-z0-9-_+][A-Za-z0-9-_+]*(?:\.[A-Za-z0-9-_+][A-Za-z0-9-_+]*)+$`)
+	validGroupNameRegexLazy   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+&-]*$`)
+	validGroupNameRegexSingle = regexp.MustCompile(`^[A-Za-z0-9-_+&][A-Za-z0-9-_+&]{1,64}$`)
+	validGroupNameRegexCaps   = regexp.MustCompile(`^[A-Za-z0-9-_+&][A-Za-z0-9-_+&]*(?:\.[A-Za-z0-9-_+&][A-Za-z0-9-_+&]*)+$`)
 	errorUp2date              = fmt.Errorf("up2date")
 	//his                       = &history.HISTORY{DIR: "./history"}
 )
