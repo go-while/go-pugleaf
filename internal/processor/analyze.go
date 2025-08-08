@@ -1235,9 +1235,9 @@ func DownloadMessageIDs(proc *Processor, groupName string, messageIDs []nntp.Hea
 				log.Printf("Download worker %d finished", worker)
 			}()
 			for item := range batchQueue {
-				art, err := proc.Pool.GetArticle(*item.MessageID)
+				art, err := proc.Pool.GetArticle(item.MessageID)
 				if err != nil {
-					log.Printf("Failed to fetch article %s: %v", *item.MessageID, err)
+					log.Printf("Failed to fetch article %s: %v", item.MessageID, err)
 					item.Error = err
 					returnChan <- item
 					continue
@@ -1252,7 +1252,7 @@ func DownloadMessageIDs(proc *Processor, groupName string, messageIDs []nntp.Hea
 	var batchList []*batchItem
 	for _, msgID := range messageIDs {
 		item := &batchItem{
-			MessageID: &msgID.Value,
+			MessageID: msgID.Value,
 			GroupName: &groupName,
 		}
 		batchQueue <- item
@@ -1299,7 +1299,7 @@ forProcessing:
 
 		case item := <-returnChan:
 			if item.Error != nil {
-				log.Printf("Error fetching article %s: %v", *item.MessageID, item.Error)
+				log.Printf("Error fetching article %s: %v", item.MessageID, item.Error)
 				errs++
 			} else {
 				gots++
@@ -1315,7 +1315,7 @@ forProcessing:
 
 		// For now, just log that we got the article
 		// TODO: Process article through proper channels
-		log.Printf("Downloaded article %s (%d bytes)", *item.MessageID, item.Article.Bytes)
+		log.Printf("Downloaded article %s (%d bytes)", item.MessageID, item.Article.Bytes)
 
 		// Note: In a production system, you would process the article here
 		// bulkmode := true

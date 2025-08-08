@@ -18,8 +18,8 @@ type BatchQueue struct {
 }
 
 type batchItem struct {
-	MessageID  *string
-	ArticleNum *int64
+	MessageID  string
+	ArticleNum int64
 	GroupName  *string
 	Article    *models.Article
 	Error      error
@@ -170,51 +170,6 @@ doWork:
 	returnChan := make(chan *batchItem, len(messageIDs))
 	log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", len(messageIDs), newsgroup, proc.Pool.Backend.MaxConns)
 
-	/*
-		// launch goroutines to fetch articles in parallel
-		runthis := proc.Pool.Backend.MaxConns
-		if len(messageIDs) < runthis { // if we have less articles to fetch than max connections
-			runthis = len(messageIDs) // Limit goroutines to number of articles
-		}
-		if runthis < 1 {
-			return fmt.Errorf("no connections at backend provider??")
-		}
-
-		mutex := &sync.Mutex{} // Mutex to protect shared state
-		downloaded := 0
-		quit := 0
-
-		log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", len(messageIDs), newsgroup, runthis)
-		for i := 1; i <= runthis; i++ {
-			// fire up async goroutines to fetch articles
-			go func(worker int, mutex *sync.Mutex) {
-				//log.Printf("DownloadArticles: Worker %d group '%s' start", worker, groupName)
-				defer func() {
-					//log.Printf("DownloadArticles: Worker %d group '%s' quit", worker, groupName)
-					mutex.Lock()
-					quit++
-					mutex.Unlock()
-				}()
-				for item := range batchQueue {
-					//log.Printf("DownloadArticles: Worker %d processing group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
-					art, err := proc.Pool.GetArticle(*item.MessageID)
-					if err != nil {
-						log.Printf("ERROR DownloadArticles: group '%s' proc.Pool.GetArticle %s: %v .. continue", newsgroup, *item.MessageID, err)
-						item.Error = err   // Set error on item
-						returnChan <- item // Send failed item back
-						continue
-					}
-					item.Article = art // set pointer
-					returnChan <- item // Send back the successfully downloaded article
-					mutex.Lock()
-					downloaded++
-					mutex.Unlock()
-					//log.Printf("DownloadArticles: Worker %d downloaded group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
-				} // end for item
-			}(i, mutex)
-		} // end for runthis
-	*/
-
 	// for every undownloaded overview entry, create a batch item
 	batchList := make([]*batchItem, 0, len(messageIDs)) // Slice to hold batch items
 	//skipped := 0
@@ -252,7 +207,7 @@ doWork:
 		}
 		*/
 		item := &batchItem{
-			MessageID:  &msgIdItem.MessageId, // Use pointer to avoid copying
+			MessageID:  msgIdItem.MessageId, // Use pointer to avoid copying
 			GroupName:  proc.DB.Batch.GetNewsgroupPointer(newsgroup),
 			ReturnChan: returnChan,
 		}
@@ -308,7 +263,7 @@ forProcessing:
 					if item.Error == errIsDuplicateError {
 						dups++
 					} else {
-						log.Printf("DownloadArticles: group '%s' Error fetching article %s: %v .. continue", newsgroup, *item.MessageID, item.Error)
+						log.Printf("DownloadArticles: group '%s' Error fetching article %s: %v .. continue", newsgroup, item.MessageID, item.Error)
 						errs++
 					}
 				}
@@ -317,7 +272,7 @@ forProcessing:
 				//log.Printf("DownloadArticles: group '%s' fetched article (%s) %dups=%d gots=%d errs=%d", groupName, *item.MessageID, dups, gots, errs)
 			}
 		}
-	}
+	} // end for processing routine (counts only)
 
 	// now loop over the batchList and insert articles
 	for _, item := range batchList {
@@ -325,7 +280,7 @@ forProcessing:
 			continue // Skip nil items (not fetched)
 		}
 		if item.Article == nil {
-			log.Printf("DownloadArticles: group '%s' Article '%s' was not fetched successfully, continue", newsgroup, *item.MessageID)
+			log.Printf("DownloadArticles: group '%s' Article '%s' was not fetched successfully, continue", newsgroup, item.MessageID)
 			continue
 			//return fmt.Errorf("internal/importer:  group '%s' Article '%s' was not fetched successfully", newsgroup, *item.MessageID)
 		}
@@ -335,7 +290,7 @@ forProcessing:
 		bulkmode := true
 		response, err := proc.processArticle(item.Article, newsgroup, bulkmode)
 		if err != nil {
-			log.Printf("DownloadArticles:  group '%s' Failed to process article (%s): %v", newsgroup, *item.MessageID, err)
+			log.Printf("DownloadArticles:  group '%s' Failed to process article (%s): %v", newsgroup, item.MessageID, err)
 			continue // Skip this item on error
 		}
 		if response == history.CasePass {
@@ -343,9 +298,21 @@ forProcessing:
 		}
 
 		// Trigger GC periodically during large batch processing
-
 	} // end for batchList
 
+	for i, item := range batchList {
+		if item != nil {
+			item.ArticleNum = 0
+			item.MessageID = ""
+			item.GroupName = nil
+			item.ReturnChan = nil
+			item.Error = nil
+			item.Article = nil
+			item = nil
+			batchList[i] = nil
+		}
+	}
+	batchList = nil
 	//runtime.GC()
 
 	if proc.DB.IsDBshutdown() {
