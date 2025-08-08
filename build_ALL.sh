@@ -2,13 +2,13 @@
 echo "running: $0"
 rm -v build/*
 
-#./build_merge-active.sh
-#./build_merge-descriptions.sh
-#./build_TestMsgIdItemCache.sh
-#./build_history-rebuild.sh
-#./build_nntp-server.sh
-#./build_fix-references.sh
-#./build_fix-thread-activity.sh
+./build_merge-active.sh
+./build_merge-descriptions.sh
+./build_TestMsgIdItemCache.sh
+./build_history-rebuild.sh
+./build_nntp-server.sh
+./build_fix-references.sh
+./build_fix-thread-activity.sh
 
 ./build_rslight_importer.sh
 ./build_analyze.sh
@@ -17,5 +17,4 @@ rm -v build/*
 ./build_recover-db.sh
 ./build_expire-news.sh
 
-
-./createUpdate.sh
+test "$1" = "update" && ./createUpdate.sh
