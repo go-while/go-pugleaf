@@ -243,9 +243,9 @@ func main() {
 			}()
 			for item := range processor.Batch.Queue {
 				//log.Printf("DownloadArticles: Worker %d processing group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
-				art, err := proc.Pool.GetArticle(*item.MessageID)
+				art, err := proc.Pool.GetArticle(item.MessageID)
 				if err != nil {
-					log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle %s: %v .. continue", *item.MessageID, err)
+					log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle %s: %v .. continue", item.MessageID, err)
 					item.Error = err        // Set error on item
 					item.ReturnChan <- item // Send failed item back
 					continue
