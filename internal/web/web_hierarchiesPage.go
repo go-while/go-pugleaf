@@ -13,22 +13,20 @@ import (
 )
 
 // This file handles the hierarchies listing page
-// Shows all available hierarchies with group counts and navigation
 
+var LIMIT_GROUPS_IN_HIERARCHY_TREE = 128
+var LIMIT_hierarchyGroupsPage = 256
+var LIMIT_hierarchiesPage = 128
+var LIMIT_hierarchyTreePage = 512
+
+// Shows all available hierarchies with group counts and navigation
 func (s *WebServer) hierarchiesPage(c *gin.Context) {
 	// Get pagination parameters
 	page := 1
-	pageSize := 50 // Default page size for hierarchies
 
-	if p := c.Query("page"); p != "" {
-		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+	if p := c.Query("page"); p != "" && p != "1" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 1 {
 			page = parsed
-		}
-	}
-
-	if ps := c.Query("page_size"); ps != "" {
-		if parsed, err := strconv.Atoi(ps); err == nil && parsed > 0 && parsed <= 200 {
-			pageSize = parsed
 		}
 	}
 
@@ -38,7 +36,7 @@ func (s *WebServer) hierarchiesPage(c *gin.Context) {
 		sortBy = "activity" // Default to last activity sorting
 	}
 
-	hierarchies, totalCount, err := s.DB.GetHierarchiesPaginated(page, pageSize, sortBy)
+	hierarchies, totalCount, err := s.DB.GetHierarchiesPaginated(page, LIMIT_hierarchiesPage, sortBy)
 	if err != nil {
 		// Load error template individually
 		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/error.html"))
@@ -47,7 +45,7 @@ func (s *WebServer) hierarchiesPage(c *gin.Context) {
 		return
 	}
 
-	pagination := models.NewPaginationInfo(page, pageSize, totalCount)
+	pagination := models.NewPaginationInfo(page, LIMIT_hierarchiesPage, totalCount)
 
 	data := HierarchiesPageData{
 		TemplateData: s.getBaseTemplateData(c, "Hierarchies"),
@@ -76,17 +74,10 @@ func (s *WebServer) hierarchyGroupsPage(c *gin.Context) {
 
 	// Get pagination parameters
 	page := 1
-	pageSize := 50 // Default page size for groups
 
-	if p := c.Query("page"); p != "" {
-		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+	if p := c.Query("page"); p != "" && p != "1" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 1 {
 			page = parsed
-		}
-	}
-
-	if ps := c.Query("page_size"); ps != "" {
-		if parsed, err := strconv.Atoi(ps); err == nil && parsed > 0 && parsed <= 200 {
-			pageSize = parsed
 		}
 	}
 
@@ -96,7 +87,7 @@ func (s *WebServer) hierarchyGroupsPage(c *gin.Context) {
 		sortBy = "activity" // Default to last activity sorting
 	}
 
-	groups, totalCount, err := s.DB.GetNewsgroupsByHierarchy(hierarchyName, page, pageSize, sortBy)
+	groups, totalCount, err := s.DB.GetNewsgroupsByHierarchy(hierarchyName, page, LIMIT_hierarchyGroupsPage, sortBy)
 	if err != nil {
 		// Load error template individually
 		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/error.html"))
@@ -105,7 +96,7 @@ func (s *WebServer) hierarchyGroupsPage(c *gin.Context) {
 		return
 	}
 
-	pagination := models.NewPaginationInfo(page, pageSize, totalCount)
+	pagination := models.NewPaginationInfo(page, LIMIT_hierarchyGroupsPage, totalCount)
 
 	data := HierarchyGroupsPageData{
 		TemplateData:  s.getBaseTemplateData(c, "Hierarchy: "+hierarchyName),
@@ -219,7 +210,6 @@ func (s *WebServer) hierarchyTreePage(c *gin.Context) {
 
 	// Get pagination parameters
 	page := 1
-	pageSize := 50 // Page size for hierarchical navigation
 
 	if p := c.Query("page"); p != "" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
@@ -228,7 +218,7 @@ func (s *WebServer) hierarchyTreePage(c *gin.Context) {
 	}
 
 	// Get sub-hierarchies and groups for this level
-	subHierarchies, groups, totalSubHierarchies, totalGroups, err := s.getHierarchyLevel(currentPath, sortBy, page, pageSize)
+	subHierarchies, groups, totalSubHierarchies, totalGroups, err := s.getHierarchyLevel(currentPath, sortBy, page, LIMIT_hierarchyTreePage)
 	if err != nil {
 		s.renderError(c, http.StatusInternalServerError, "Database error", err.Error())
 		return
@@ -238,9 +228,9 @@ func (s *WebServer) hierarchyTreePage(c *gin.Context) {
 	// Groups are shown as a preview/summary alongside sub-hierarchies
 	var pagination *models.PaginationInfo
 
-	if totalSubHierarchies > pageSize {
+	if totalSubHierarchies > LIMIT_hierarchyTreePage {
 		// We have more sub-hierarchies than can fit on one page
-		pagination = models.NewPaginationInfo(page, pageSize, totalSubHierarchies)
+		pagination = models.NewPaginationInfo(page, LIMIT_hierarchyTreePage, totalSubHierarchies)
 	}
 
 	// Calculate if we're at maximum depth (level 3)
@@ -309,7 +299,7 @@ func (s *WebServer) getHierarchyLevel(currentPath string, sortBy string, page in
 	var totalGroups int
 
 	// Always get direct groups at this level, but limit to avoid overwhelming the page
-	directGroups, totalGroups, err = s.DB.GetDirectGroupsAtLevel(currentPath, sortBy, 1, 20) // Show first 20 groups
+	directGroups, totalGroups, err = s.DB.GetDirectGroupsAtLevel(currentPath, sortBy, 1, LIMIT_GROUPS_IN_HIERARCHY_TREE) // Show first N groups
 	if err != nil {
 		return nil, nil, 0, 0, err
 	}

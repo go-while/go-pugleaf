@@ -12,7 +12,9 @@ import (
 )
 
 // This file should contain the sections page related functions from server.go:
-//
+var LIMIT_sectionPage = 128
+var LIMIT_sectionGroupPage = 128
+
 // Functions to be moved from server.go:
 //   - func (s *WebServer) sectionsPage(c *gin.Context) (line ~893)
 //     Handles "/sections" route to display all available sections
@@ -84,17 +86,10 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 
 	// Get pagination parameters
 	page := 1
-	pageSize := 50
 
-	if p := c.Query("page"); p != "" {
-		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+	if p := c.Query("page"); p != "" && p != "1" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 1 {
 			page = parsed
-		}
-	}
-
-	if ps := c.Query("page_size"); ps != "" {
-		if parsed, err := strconv.Atoi(ps); err == nil && parsed > 0 && parsed <= 200 {
-			pageSize = parsed
 		}
 	}
 
@@ -107,8 +102,8 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 
 	// Calculate pagination
 	totalCount := len(allGroups)
-	start := (page - 1) * pageSize
-	end := start + pageSize
+	start := (page - 1) * LIMIT_sectionPage
+	end := start + LIMIT_sectionPage
 
 	if start > totalCount {
 		start = totalCount
@@ -118,7 +113,7 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 	}
 
 	groups := allGroups[start:end]
-	pagination := models.NewPaginationInfo(page, pageSize, totalCount)
+	pagination := models.NewPaginationInfo(page, LIMIT_sectionPage, totalCount)
 
 	// Get all sections for navigation
 	sections, err := s.DB.GetHeaderSections()
@@ -191,18 +186,11 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 	defer groupDBs.Return(s.DB)
 	// Get pagination parameters
 	page := 1
-	pageSize := 50 // Standardized page size for cache efficiency
 	var lastArticleNum int64
 
-	if p := c.Query("page"); p != "" {
-		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+	if p := c.Query("page"); p != "" && p != "1" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 1 {
 			page = parsed
-		}
-	}
-
-	if ps := c.Query("page_size"); ps != "" {
-		if parsed, err := strconv.Atoi(ps); err == nil && parsed > 0 && parsed <= 200 {
-			pageSize = parsed
 		}
 	}
 
@@ -216,7 +204,7 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 
 	// Handle page-based to cursor conversion for compatibility
 	if page > 1 && lastArticleNum == 0 {
-		skipCount := (page - 1) * pageSize
+		skipCount := (page - 1) * LIMIT_sectionGroupPage
 		var cursorArticleNum int64
 		err = groupDBs.DB.QueryRow(`
 			SELECT article_num FROM articles
@@ -231,7 +219,7 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 	}
 
 	// Get articles (overview data) for this group with pagination
-	articles, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, pageSize)
+	articles, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, LIMIT_sectionGroupPage)
 	if err != nil {
 		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
 		return
@@ -240,14 +228,14 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 	var pagination *models.PaginationInfo
 	if page > 0 {
 		// Page-based pagination
-		pagination = models.NewPaginationInfo(page, pageSize, totalCount)
+		pagination = models.NewPaginationInfo(page, LIMIT_sectionGroupPage, totalCount)
 	} else {
 		// Cursor-based pagination
 		pagination = &models.PaginationInfo{
 			CurrentPage: 1,
-			PageSize:    pageSize,
+			PageSize:    LIMIT_sectionGroupPage,
 			TotalCount:  totalCount,
-			TotalPages:  (totalCount + pageSize - 1) / pageSize,
+			TotalPages:  (totalCount + LIMIT_sectionGroupPage - 1) / LIMIT_sectionGroupPage,
 			HasNext:     hasMore,
 			HasPrev:     lastArticleNum > 0,
 		}

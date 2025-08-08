@@ -13,7 +13,8 @@ import (
 )
 
 // This file should contain the API endpoint functions from server.go:
-//
+var LIMIT_listGroups = 128
+
 // Functions to be moved from server.go:
 // - func (s *WebServer) listGroups(c *gin.Context) (line ~313)
 //   API endpoint for "/api/v1/groups" to return JSON list of groups
@@ -33,27 +34,21 @@ import (
 func (s *WebServer) listGroups(c *gin.Context) {
 	// Get pagination parameters
 	page := 1
-	pageSize := 50 // Default page size
+	//pageSize := 50 // Default page size
 
-	if p := c.Query("page"); p != "" {
+	if p := c.Query("page"); p != "" && p != "1" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
 			page = parsed
 		}
 	}
 
-	if ps := c.Query("page_size"); ps != "" {
-		if parsed, err := strconv.Atoi(ps); err == nil && parsed > 0 && parsed <= 1000 {
-			pageSize = parsed
-		}
-	}
-
-	groups, totalCount, err := s.DB.GetNewsgroupsPaginated(page, pageSize)
+	groups, totalCount, err := s.DB.GetNewsgroupsPaginated(page, LIMIT_listGroups)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	totalPages := (totalCount + pageSize - 1) / pageSize
+	totalPages := (totalCount + LIMIT_listGroups - 1) / LIMIT_listGroups
 	if totalPages == 0 {
 		totalPages = 1
 	}
@@ -61,7 +56,7 @@ func (s *WebServer) listGroups(c *gin.Context) {
 	response := models.PaginatedResponse{
 		Data:       groups,
 		Page:       page,
-		PageSize:   pageSize,
+		PageSize:   LIMIT_listGroups,
 		TotalCount: totalCount,
 		TotalPages: totalPages,
 		HasNext:    page < totalPages,
@@ -74,20 +69,19 @@ func (s *WebServer) listGroups(c *gin.Context) {
 func (s *WebServer) getGroupOverview(c *gin.Context) {
 	groupName := c.Param("group")
 
+	// Check if user can access this group (active status + admin bypass)
+	if !s.checkGroupAccessAPI(c, groupName) {
+		return // Error response already sent by checkGroupAccessAPI
+	}
+
 	// Get pagination parameters
 	page := 1
-	pageSize := 50 // Default page size for articles (standardized)
+	//pageSize := 50 // Default page size for articles (standardized)
 	var lastArticleNum int64
 
 	if p := c.Query("page"); p != "" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
 			page = parsed
-		}
-	}
-
-	if ps := c.Query("page_size"); ps != "" {
-		if parsed, err := strconv.Atoi(ps); err == nil && parsed > 0 && parsed <= 1000 {
-			pageSize = parsed
 		}
 	}
 
@@ -108,7 +102,7 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 
 	// Handle page-based to cursor conversion for compatibility
 	if page > 1 && lastArticleNum == 0 {
-		skipCount := (page - 1) * pageSize
+		skipCount := (page - 1) * LIMIT_listGroups
 		var cursorArticleNum int64
 		err = groupDBs.DB.QueryRow(`
 			SELECT article_num FROM articles
@@ -122,7 +116,7 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 		}
 	}
 
-	overviews, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, pageSize)
+	overviews, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, LIMIT_listGroups)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -133,7 +127,7 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 
 	if page > 0 {
 		// Page-based response
-		totalPages = (totalCount + pageSize - 1) / pageSize
+		totalPages = (totalCount + LIMIT_listGroups - 1) / LIMIT_listGroups
 		if totalPages == 0 {
 			totalPages = 1
 		}
@@ -141,7 +135,7 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 		hasPrev = page > 1
 	} else {
 		// Cursor-based response
-		totalPages = (totalCount + pageSize - 1) / pageSize
+		totalPages = (totalCount + LIMIT_listGroups - 1) / LIMIT_listGroups
 		hasNext = hasMore
 		hasPrev = lastArticleNum > 0
 		page = 1 // For response consistency
@@ -150,7 +144,7 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 	response := models.PaginatedResponse{
 		Data:       overviews,
 		Page:       page,
-		PageSize:   pageSize,
+		PageSize:   LIMIT_listGroups,
 		TotalCount: totalCount,
 		TotalPages: totalPages,
 		HasNext:    hasNext,
@@ -163,6 +157,11 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 func (s *WebServer) getArticle(c *gin.Context) {
 	groupName := c.Param("group")
 	articleNumStr := c.Param("articleNum")
+
+	// Check if user can access this group (active status + admin bypass)
+	if !s.checkGroupAccessAPI(c, groupName) {
+		return // Error response already sent by checkGroupAccessAPI
+	}
 
 	articleNum, err := strconv.ParseInt(articleNumStr, 10, 64)
 	if err != nil {
@@ -189,6 +188,11 @@ func (s *WebServer) getArticleByMessageId(c *gin.Context) {
 	groupName := c.Param("group")
 	messageId := c.Param("messageId")
 
+	// Check if user can access this group (active status + admin bypass)
+	if !s.checkGroupAccessAPI(c, groupName) {
+		return // Error response already sent by checkGroupAccessAPI
+	}
+
 	groupDBs, err := s.DB.GetGroupDBs(groupName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
@@ -206,6 +210,11 @@ func (s *WebServer) getArticleByMessageId(c *gin.Context) {
 
 func (s *WebServer) getGroupThreads(c *gin.Context) {
 	groupName := c.Param("group")
+
+	// Check if user can access this group (active status + admin bypass)
+	if !s.checkGroupAccessAPI(c, groupName) {
+		return // Error response already sent by checkGroupAccessAPI
+	}
 
 	groupDBs, err := s.DB.GetGroupDBs(groupName)
 	if err != nil {
@@ -297,6 +306,11 @@ func (s *WebServer) getStats(c *gin.Context) {
 func (s *WebServer) getArticlePreview(c *gin.Context) {
 	groupName := c.Param("group")
 	articleNumStr := c.Param("articleNum")
+
+	// Check if user can access this group (active status + admin bypass)
+	if !s.checkGroupAccessAPI(c, groupName) {
+		return // Error response already sent by checkGroupAccessAPI
+	}
 
 	articleNum, err := strconv.ParseInt(articleNumStr, 10, 64)
 	if err != nil {

@@ -24,6 +24,11 @@ func (s *WebServer) articlePage(c *gin.Context) {
 	groupName := c.Param("group")
 	articleNumStr := c.Param("articleNum")
 
+	// Check if user can access this group (active status + admin bypass)
+	if !s.checkGroupAccess(c, groupName) {
+		return // Error response already sent by checkGroupAccess
+	}
+
 	articleNum, err := strconv.ParseInt(articleNumStr, 10, 64)
 	if err != nil {
 		c.String(http.StatusBadRequest, "Invalid article number: %v", err)
@@ -95,6 +100,11 @@ func (s *WebServer) articlePage(c *gin.Context) {
 func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
 	groupName := c.Param("group")
 	messageId := c.Param("messageId")
+
+	// Check if user can access this group (active status + admin bypass)
+	if !s.checkGroupAccess(c, groupName) {
+		return // Error response already sent by checkGroupAccess
+	}
 
 	groupDBs, err := s.DB.GetGroupDBs(groupName)
 	if err != nil {

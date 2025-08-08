@@ -93,6 +93,11 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 	groupName := c.Param("group")
 	threadRootStr := c.Param("threadRoot")
 
+	// Check if user can access this group (active status + admin bypass)
+	if !s.checkGroupAccess(c, groupName) {
+		return // Error response already sent by checkGroupAccess
+	}
+
 	threadRoot, err := strconv.ParseInt(threadRootStr, 10, 64)
 	if err != nil {
 		s.renderError(c, http.StatusBadRequest, "Invalid Thread", "Invalid thread root parameter")

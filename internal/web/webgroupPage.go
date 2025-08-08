@@ -13,6 +13,8 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
+var LIMIT_groupPage = 128
+
 // This file should contain the individual group page related functions from server.go:
 //
 // Functions to be moved from server.go:
@@ -23,17 +25,20 @@ import (
 func (s *WebServer) groupPage(c *gin.Context) {
 	groupName := c.Param("group")
 
+	// Check if user can access this group (active status + admin bypass)
+	if !s.checkGroupAccess(c, groupName) {
+		return // Error response already sent by checkGroupAccess
+	}
+
 	// Get pagination parameters
 	page := 1
-	pageSize := 50 // Static page size for articles (cache efficiency)
 	var lastArticleNum int64
 
-	if p := c.Query("page"); p != "" {
-		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+	if p := c.Query("page"); p != "" && p != "1" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 1 {
 			page = parsed
 		}
 	}
-
 	// Check for cursor parameter (more efficient than page-based)
 	if cursor := c.Query("cursor"); cursor != "" {
 		if parsed, err := strconv.ParseInt(cursor, 10, 64); err == nil && parsed > 0 {
@@ -73,7 +78,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 		// For page-based requests beyond page 1, we need to calculate the cursor
 		// This is less efficient but maintains URL compatibility
 		// For optimal performance, clients should use cursor parameter
-		skipCount := (page - 1) * pageSize
+		skipCount := (page - 1) * LIMIT_groupPage
 		if skipCount > 1000 { // Warn for very large offsets
 			log.Printf("Warning: Large page offset (%d) requested for group %s, consider using cursor parameter", skipCount, groupName)
 		}
@@ -92,18 +97,18 @@ func (s *WebServer) groupPage(c *gin.Context) {
 		}
 	}
 
-	articles, totalCount, hasMore, err = s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, pageSize)
+	articles, totalCount, hasMore, err = s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, LIMIT_groupPage)
 	if err == nil {
 		if page > 0 {
 			// Page-based pagination info
-			pagination = models.NewPaginationInfo(page, pageSize, totalCount)
+			pagination = models.NewPaginationInfo(page, LIMIT_groupPage, totalCount)
 		} else {
 			// Cursor-based pagination - create a simple pagination info
 			pagination = &models.PaginationInfo{
 				CurrentPage: 1,
-				PageSize:    pageSize,
+				PageSize:    LIMIT_groupPage,
 				TotalCount:  totalCount,
-				TotalPages:  (totalCount + pageSize - 1) / pageSize,
+				TotalPages:  (totalCount + LIMIT_groupPage - 1) / LIMIT_groupPage,
 				HasNext:     hasMore,
 				HasPrev:     lastArticleNum > 0,
 			}

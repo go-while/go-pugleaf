@@ -15,6 +15,11 @@ const Threads_perPage int64 = 50 // Static page size for optimal caching
 func (s *WebServer) groupThreadsPage(c *gin.Context) {
 	groupName := c.Param("group")
 
+	// Check if user can access this group (active status + admin bypass)
+	if !s.checkGroupAccess(c, groupName) {
+		return // Error response already sent by checkGroupAccess
+	}
+
 	// Get pagination parameters
 	pageStr := c.DefaultQuery("page", "1")
 	page, err := strconv.ParseInt(pageStr, 10, 64)

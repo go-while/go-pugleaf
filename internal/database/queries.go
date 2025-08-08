@@ -1130,8 +1130,8 @@ func (db *Database) SearchNewsgroups(searchTerm string, limit, offset int) ([]*m
 	rows, err := db.mainDB.Query(`
 		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
 		FROM newsgroups
-		WHERE name LIKE ? COLLATE NOCASE
-		OR description LIKE ? COLLATE NOCASE
+		WHERE active = 1 AND (name LIKE ? COLLATE NOCASE
+		OR description LIKE ? COLLATE NOCASE)
 		ORDER BY message_count DESC, name ASC
 		LIMIT ? OFFSET ?
 	`, searchPattern, searchPattern, limit, offset)
@@ -1166,8 +1166,8 @@ func (db *Database) CountSearchNewsgroups(searchTerm string) (int, error) {
 	err := db.mainDB.QueryRow(`
 		SELECT COUNT(*)
 		FROM newsgroups
-		WHERE name LIKE ? COLLATE NOCASE
-		OR description LIKE ? COLLATE NOCASE
+		WHERE active = 1 AND (name LIKE ? COLLATE NOCASE
+		OR description LIKE ? COLLATE NOCASE)
 	`, searchPattern, searchPattern).Scan(&count)
 
 	return count, err
@@ -1668,7 +1668,7 @@ func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize in
 	// Check if this is a sub-hierarchy path (contains dots)
 	var countQuery string
 	var queryArgs []interface{}
-	
+
 	if strings.Contains(hierarchy, ".") {
 		// For sub-hierarchies like "gmane.comp", find groups that start with "gmane.comp."
 		pattern := hierarchy + ".%"
@@ -1679,7 +1679,7 @@ func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize in
 		countQuery = "SELECT COUNT(*) FROM newsgroups WHERE hierarchy = ? AND active = 1"
 		queryArgs = append(queryArgs, hierarchy)
 	}
-	
+
 	// First get total count
 	var totalCount int
 	err := db.mainDB.QueryRow(countQuery, queryArgs...).Scan(&totalCount)
@@ -1703,14 +1703,14 @@ func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize in
 	// Build the main query with the same WHERE condition
 	var whereClause string
 	var mainQueryArgs []interface{}
-	
+
 	if strings.Contains(hierarchy, ".") {
 		// For sub-hierarchies, use LIKE pattern
 		pattern := hierarchy + ".%"
 		whereClause = "WHERE name LIKE ? AND active = 1"
 		mainQueryArgs = append(mainQueryArgs, pattern)
 	} else {
-		// For top-level hierarchies, use hierarchy column  
+		// For top-level hierarchies, use hierarchy column
 		whereClause = "WHERE hierarchy = ? AND active = 1"
 		mainQueryArgs = append(mainQueryArgs, hierarchy)
 	}
@@ -1722,7 +1722,7 @@ func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize in
 			  ` + whereClause + `
 			  ORDER BY ` + orderBy + `
 			  LIMIT ? OFFSET ?`
-	
+
 	// Add pagination parameters
 	mainQueryArgs = append(mainQueryArgs, pageSize, offset)
 
