@@ -16,8 +16,8 @@ import (
 
 var LIMIT_GROUPS_IN_HIERARCHY_TREE = 128
 var LIMIT_hierarchyGroupsPage = 256
-var LIMIT_hierarchiesPage = 128
-var LIMIT_hierarchyTreePage = 512
+var LIMIT_hierarchyTreePage = 384
+var LIMIT_hierarchiesPage = 512
 
 // Shows all available hierarchies with group counts and navigation
 func (s *WebServer) hierarchiesPage(c *gin.Context) {
@@ -248,7 +248,7 @@ func (s *WebServer) hierarchyTreePage(c *gin.Context) {
 		Groups:         groups,
 		TotalSubItems:  totalSubHierarchies,
 		TotalGroups:    totalGroups,
-		ShowingGroups:  len(groups) > 0,
+		ShowingGroups:  totalGroups > 0,
 		SortBy:         sortBy,
 		Pagination:     pagination,
 		AtMaxDepth:     atMaxDepth,
@@ -278,8 +278,8 @@ func (s *WebServer) getHierarchyLevel(currentPath string, sortBy string, page in
 		fullSubPath := currentPath + "." + name
 
 		// Check if this sub-hierarchy has direct groups (limit check to avoid loading all)
-		directGroupsInSub, _, _ := s.DB.GetDirectGroupsAtLevel(fullSubPath, "name", 1, 1)
-		hasGroups := len(directGroupsInSub) > 0
+		_, totalCount, _ := s.DB.GetDirectGroupsAtLevel(fullSubPath, "name", 1, 1)
+		hasGroups := totalCount > 0
 
 		subHierarchies = append(subHierarchies, HierarchyNode{
 			Name:       name,
@@ -299,7 +299,8 @@ func (s *WebServer) getHierarchyLevel(currentPath string, sortBy string, page in
 	var totalGroups int
 
 	// Always get direct groups at this level, but limit to avoid overwhelming the page
-	directGroups, totalGroups, err = s.DB.GetDirectGroupsAtLevel(currentPath, sortBy, 1, LIMIT_GROUPS_IN_HIERARCHY_TREE) // Show first N groups
+	// Show first N groups or nothing if more groups than pagesize limit
+	directGroups, totalGroups, err = s.DB.GetDirectGroupsAtLevel(currentPath, sortBy, 1, LIMIT_GROUPS_IN_HIERARCHY_TREE)
 	if err != nil {
 		return nil, nil, 0, 0, err
 	}

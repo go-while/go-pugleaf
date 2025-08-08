@@ -1406,7 +1406,7 @@ func (db *Database) GetHierarchySubLevels(prefix string, page int, pageSize int)
 	`, len(prefix)+2, len(prefix)+2, prefix+".%", prefix, len(prefix)+2).Scan(&totalCount)
 
 	if err != nil {
-		return nil, 0, err
+		return nil, totalCount, err
 	}
 
 	// Get paginated sub-hierarchy names and their counts
@@ -1440,6 +1440,8 @@ func (db *Database) GetHierarchySubLevels(prefix string, page int, pageSize int)
 	return result, totalCount, nil
 }
 
+var empty []*models.Newsgroup
+
 // GetDirectGroupsAtLevel gets newsgroups that are direct children of the given prefix with pagination
 func (db *Database) GetDirectGroupsAtLevel(prefix string, sortBy string, page int, pageSize int) ([]*models.Newsgroup, int, error) {
 	// First get total count
@@ -1453,7 +1455,10 @@ func (db *Database) GetDirectGroupsAtLevel(prefix string, sortBy string, page in
 	if err != nil {
 		return nil, 0, err
 	}
-
+	if totalCount > pageSize {
+		// return nothing and just link to to the flatview
+		return empty, totalCount, nil
+	}
 	var orderBy string
 	if sortBy == "name" {
 		orderBy = "name ASC"
