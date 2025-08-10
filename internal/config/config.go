@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-var AppVersion = ".dev-test." // will be set at build time
+var AppVersion = "-unset-" // will be set at build time
 
 const (
 	// NNTP protocol constants

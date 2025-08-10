@@ -114,7 +114,9 @@ doWork:
 		}
 
 		lastArticleDate, checkDateErr := proc.DB.GetLastArticleDate(checkGroupDBs)
-		checkGroupDBs.Return(proc.DB) // Return the database connection immediately
+		if err := proc.DB.ForceCloseGroupDBs(checkGroupDBs); err != nil {
+			log.Printf("error in DownloadArticles ForceCloseGroupDBs err='%v'", err)
+		}
 
 		if checkDateErr != nil {
 			return fmt.Errorf("DownloadArticles: Failed to get last article date for '%s': %v", newsgroup, checkDateErr)
@@ -177,13 +179,16 @@ doWork:
 	if err != nil {
 		log.Printf("Failed to get group DBs for newsgroup '%s': %v", newsgroup, err)
 		if groupDBs != nil {
-			groupDBs.Return(proc.DB) // Return connection even on error
+			if err := proc.DB.ForceCloseGroupDBs(groupDBs); err != nil {
+				log.Printf("error in DownloadArticles ForceCloseGroupDBs err='%v'", err)
+			}
+			//groupDBs.Return(proc.DB) // Return connection even on error
 		}
 		log.Printf("DownloadArticles: Failed to get group DBs for newsgroup '%s': %v", newsgroup, err)
 		return fmt.Errorf("error in DownloadArticles: failed to get group DBs err='%v'", err)
 	}
 	exists := 0
-	defer groupDBs.Return(proc.DB)
+	defer proc.DB.ForceCloseGroupDBs(groupDBs)
 	for _, msgID := range messageIDs {
 		if groupDBs.ExistsMsgIdInArticlesDB(msgID.Value) {
 			exists++

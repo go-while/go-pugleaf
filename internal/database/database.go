@@ -11,7 +11,7 @@ import (
 	_ "github.com/mattn/go-sqlite3" // SQLite3 driver
 )
 
-const DBidleTimeOut = 1 * time.Hour // HARDCODED cleanupIdleGroups
+var DBidleTimeOut = 1 * time.Hour // HARDCODED cleanupIdleGroups
 
 // GetMainDB returns the main database connection for direct access
 // This should only be used by specialized tools like importers
@@ -132,7 +132,30 @@ func (db *Database) removePartialInitializedGroupDB(groupName string) {
 	db.MainMutex.Unlock()
 }
 
-// GetGroupDBs returns the three DBs for a specific newsgroup
+func (db *Database) ForceCloseGroupDBs(groupsDB *GroupDBs) error {
+	if db.dbconfig == nil {
+		log.Printf(("Database configuration is not set, cannot get group DBs for '%s'"), groupsDB.Newsgroup)
+		return fmt.Errorf("database configuration is not set")
+	}
+	db.MainMutex.Lock()
+	defer db.MainMutex.Unlock()
+	groupsDB.mux.Lock()
+	groupsDB.Workers--
+	if groupsDB.Workers > 0 {
+		groupsDB.mux.Unlock()
+		return fmt.Errorf("error ForceCloseGroupDBs ng:'%s' Worker=%d", groupsDB.Newsgroup, groupsDB.Workers)
+	}
+	if err := groupsDB.Close("ForceCloseGroupDBs"); err != nil {
+		groupsDB.mux.Unlock()
+		return fmt.Errorf("error ForceCloseGroupDBs groupsDB.Close ng:'%s' err='%v'", groupsDB.Newsgroup, err)
+	}
+	groupsDB.mux.Unlock()
+	db.openDBsNum--
+	delete(db.groupDBs, groupsDB.Newsgroup)
+	return nil
+}
+
+// GetGroupDBs returns groupDB for a specific newsgroup
 func (db *Database) GetGroupDBs(groupName string) (*GroupDBs, error) {
 
 	if db.dbconfig == nil {
