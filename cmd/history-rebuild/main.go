@@ -53,7 +53,7 @@ var appVersion = "-unset-"
 
 func main() {
 	config.AppVersion = appVersion
-	log.Printf("Starting go-pugleaf History Rebuild Tool (version %s)", appVersion)
+	log.Printf("Starting go-pugleaf History Rebuild Tool (version %s)", config.AppVersion)
 
 	// Set Go runtime memory limit to 4GB to prevent excessive heap growth
 	//debug.SetMemoryLimit(4 * 1024 * 1024 * 1024) // 4GB limit
