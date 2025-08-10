@@ -1,4 +1,10 @@
 #!/bin/sh
 #./appVersion.sh 
-./Build_DEV.sh 
+
+if [ "$1" = "ALL" ]; then
+    ./build_ALL.sh
+else
+    ./Build_DEV.sh 
+fi
+
 ./rsync.sh 
