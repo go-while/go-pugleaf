@@ -140,6 +140,10 @@ func (db *Database) ForceCloseGroupDBs(groupsDB *GroupDBs) error {
 	db.MainMutex.Lock()
 	defer db.MainMutex.Unlock()
 	groupsDB.mux.Lock()
+	if groupsDB.Workers < 1 {
+		groupsDB.mux.Unlock()
+		return fmt.Errorf("error in ForceCloseGroupDBs: workers <= 0")
+	}
 	groupsDB.Workers--
 	if groupsDB.Workers > 0 {
 		groupsDB.mux.Unlock()
