@@ -2,13 +2,19 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
+var appVersion = "-unset-"
+
 func main() {
+	config.AppVersion = appVersion
+	log.Printf("go-pugleaf Date Parser (version: %s)", config.AppVersion)
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: parsedates \"date string\"")
 		fmt.Println("Example: parsedates \"27 May 09 1:01:53 PM\"")

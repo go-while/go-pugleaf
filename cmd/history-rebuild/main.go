@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/processor"
@@ -48,7 +49,12 @@ type HistoryAnalysisStats struct {
 	CollisionDistribution map[int]int64 // collision count -> how many hashes have that many collisions
 }
 
+var appVersion = "-unset-"
+
 func main() {
+	config.AppVersion = appVersion
+	log.Printf("Starting go-pugleaf History Rebuild Tool (version %s)", config.AppVersion)
+
 	// Set Go runtime memory limit to 4GB to prevent excessive heap growth
 	//debug.SetMemoryLimit(4 * 1024 * 1024 * 1024) // 4GB limit
 

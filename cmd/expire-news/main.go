@@ -62,6 +62,7 @@ func showUsageExamples() {
 }
 
 func main() {
+	config.AppVersion = appVersion
 	log.Printf("Starting go-pugleaf News Expiration Tool (version %s)", appVersion)
 
 	// Command line flags
@@ -108,7 +109,6 @@ func main() {
 
 	// Load config
 	mainConfig := config.NewDefaultConfig()
-	appVersion = mainConfig.AppVersion
 	mainConfig.Server.Hostname = *hostnamePath
 
 	// Initialize database

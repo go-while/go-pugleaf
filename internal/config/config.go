@@ -154,7 +154,9 @@ var DefaultProviders = []Provider{
 
 // NewDefaultConfig returns a configuration with sensible defaults
 func NewDefaultConfig() *MainConfig {
-
+	if AppVersion == "-unset-" {
+		log.Fatalf("config.AppVersion is unset")
+	}
 	maincfg := &MainConfig{
 		AppVersion: AppVersion, // Set application version
 

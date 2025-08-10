@@ -17,9 +17,11 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-var appVersion = "-"
+var appVersion = "-unset-"
 
 func main() {
+	config.AppVersion = appVersion
+	log.Printf("go-pugleaf Web User Manager (version: %s)", config.AppVersion)
 	var (
 		createUser = flag.Bool("create", false, "Create a new user")
 		listUsers  = flag.Bool("list", false, "List all users")
@@ -45,9 +47,7 @@ func main() {
 	}
 
 	// Initialize configuration
-	mainConfig := config.NewDefaultConfig()
-	appVersion = mainConfig.AppVersion
-	log.Printf("go-pugleaf User Manager (version: %s)", appVersion)
+	//mainConfig := config.NewDefaultConfig()
 
 	// Initialize database
 	db, err := database.OpenDatabase(nil)

@@ -9,7 +9,11 @@ import (
 	"fmt"
 	"math/rand"
 	"time"
+
+	"github.com/go-while/go-pugleaf/internal/config"
 )
+
+var appVersion = "-unset-"
 
 // generateRandomMsgIDs generates n random message-ids in typical usenet format
 func generateRandomMsgIDs(n int) []string {
@@ -27,6 +31,7 @@ func generateRandomMsgIDs(n int) []string {
 }
 
 func main() {
+	config.AppVersion = appVersion
 	msgIDs := generateRandomMsgIDs(1000000)
 
 	fmt.Printf("Benchmarking hash functions on %d random message-ids...\n", len(msgIDs))
