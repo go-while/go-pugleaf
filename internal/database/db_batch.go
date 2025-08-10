@@ -532,7 +532,6 @@ func (c *SQ3batch) batchInsertOverviewsWithDBs(newsgroup string, batches []*Over
 
 		allArticleNumbers = append(allArticleNumbers, chunkNumbers...)
 	}
-
 	return allArticleNumbers, nil
 }
 

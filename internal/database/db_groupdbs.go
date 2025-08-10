@@ -97,7 +97,5 @@ func (dbs *GroupDBs) Close(who string) error {
 	} else {
 		return fmt.Errorf("group DB already closed")
 	}
-	dbs.Newsgroup = ""
-	dbs.DB = nil
 	return nil
 }
