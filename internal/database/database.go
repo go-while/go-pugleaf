@@ -48,10 +48,12 @@ func (db *Database) cleanupIdleGroups() {
 				log.Printf("cleanupIdleGroups Warning: GroupDBs for '%s' is nil, skipping", groupName)
 				continue
 			}
+			groupDBs.mux.RLock()
 			candidates = append(candidates, dbAge{
 				name: groupName,
 				age:  time.Since(groupDBs.Idle),
 			})
+			groupDBs.mux.RUnlock()
 		}
 
 		// Sort by age (oldest first)
