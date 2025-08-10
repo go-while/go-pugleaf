@@ -98,89 +98,116 @@ func (pa *ProcessorAdapter) CheckNoMoreWorkInHistory() bool {
 
 // updateNewsgroupLastActivity updates newsgroups' updated_at field based on their latest article
 func updateNewsgroupLastActivity(db *database.Database) error {
-	// First, get all newsgroups from the main database
-	rows, err := db.GetMainDB().Query("SELECT id, name FROM newsgroups WHERE message_count > 0")
-	if err != nil {
-		return fmt.Errorf("failed to query newsgroups: %w", err)
-	}
-	defer rows.Close()
-
+	const batchSize = 100 // Process 100 newsgroups at a time
+	offset := 0
 	updatedCount := 0
-	var id int
-	var name string
-	for rows.Next() {
-		if err := rows.Scan(&id, &name); err != nil {
-			return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity rows.Scan newsgroup: %v", err)
-		}
+	totalProcessed := 0
 
-		// Get the group database for this newsgroup
-		groupDBs, err := db.GetGroupDBs(name)
+	for {
+		// Get a batch of newsgroups
+		query := "SELECT id, name FROM newsgroups WHERE message_count > 0 LIMIT ? OFFSET ?"
+		rows, err := db.GetMainDB().Query(query, batchSize, offset)
 		if err != nil {
-			return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity GetGroupDB %s: %v", name, err)
-
+			return fmt.Errorf("failed to query newsgroups batch at offset %d: %w", offset, err)
 		}
 
-		_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET spam = 1 WHERE spam = 0 AND hide = 1", nil)
-		if err != nil {
-			return fmt.Errorf("failed to query newsgroups: %w", err)
-		}
+		batchCount := 0
+		var id int
+		var name string
 
-		// Query the latest article date from the group's articles table (excluding hidden articles)
-		var latestDate sql.NullString
-		err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT MAX(date_sent) FROM articles WHERE hide = 0", nil, &latestDate)
-		groupDBs.Return(db) // Always return the database connection
-		if err != nil {
-			return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity RetryableQueryRowScan %s: %v", name, err)
-		}
-
-		// Only update if we found a latest date
-		if latestDate.Valid {
-			// Parse the date and format it consistently as UTC
-			dateStr := latestDate.String
-			if dateStr == "" {
-				return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", name)
-			}
-			var parsedDate time.Time
-			var err error
-
-			// Clean up malformed timestamps with extra dashes or spaces
-			//dateStr = strings.ReplaceAll(dateStr, "- ", " ")
-			//dateStr = strings.TrimSpace(dateStr)
-			// Try multiple date formats to handle various edge cases
-			formats := []string{
-				"2006-01-02 15:04:05-07:00",
-				"2006-01-02 15:04:05+07:00",
-				"2006-01-02 15:04:05",
+		for rows.Next() {
+			batchCount++
+			if err := rows.Scan(&id, &name); err != nil {
+				rows.Close()
+				return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity rows.Scan newsgroup: %v", err)
 			}
 
-			for _, format := range formats {
-				parsedDate, err = time.Parse(format, dateStr)
-				if err == nil {
-					break
-				}
-			}
-
+			// Get the group database for this newsgroup
+			groupDBs, err := db.GetGroupDBs(name)
 			if err != nil {
-				return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity parsing date '%s' for %s: %v", dateStr, name, err)
-			}
-
-			// Format as UTC without timezone info to match db_batch.go format
-			formattedDate := parsedDate.UTC().Format("2006-01-02 15:04:05")
-			_, err = db.GetMainDB().Exec("UPDATE newsgroups SET updated_at = ? WHERE id = ?", formattedDate, id)
-			if err != nil {
-				log.Printf("[WEB]: error updateNewsgroupLastActivity updating newsgroup %s: %v", name, err)
+				log.Printf("[WEB]: updateNewsgroupLastActivity GetGroupDB %s: %v", name, err)
 				continue
 			}
-			log.Printf("[WEB]: updateNewsgroupLastActivity: '%s' dateStr=%s formattedDate=%s", name, dateStr, formattedDate)
-			updatedCount++
+
+			_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET spam = 1 WHERE spam = 0 AND hide = 1", nil)
+			if err != nil {
+				db.ForceCloseGroupDBs(groupDBs)
+				log.Printf("[WEB]: Failed to update spam flags for newsgroup %s: %v", name, err)
+				continue
+			}
+
+			// Query the latest article date from the group's articles table (excluding hidden articles)
+			var latestDate sql.NullString
+			err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT MAX(date_sent) FROM articles WHERE hide = 0", nil, &latestDate)
+			//groupDBs.Return(db) // Always return the database connection
+			db.ForceCloseGroupDBs(groupDBs)
+			if err != nil {
+				log.Printf("[WEB]: updateNewsgroupLastActivity RetryableQueryRowScan %s: %v", name, err)
+				continue
+			}
+
+			// Only update if we found a latest date
+			if latestDate.Valid {
+				// Parse the date and format it consistently as UTC
+				dateStr := latestDate.String
+				if dateStr == "" {
+					log.Printf("[WEB]: updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", name)
+					return fmt.Errorf("error updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", name)
+				}
+				var parsedDate time.Time
+				var err error
+
+				// Try multiple date formats to handle various edge cases
+				formats := []string{
+					"2006-01-02 15:04:05-07:00",
+					"2006-01-02 15:04:05+07:00",
+					"2006-01-02 15:04:05",
+				}
+
+				for _, format := range formats {
+					parsedDate, err = time.Parse(format, dateStr)
+					if err == nil {
+						break
+					}
+				}
+
+				if err != nil {
+					log.Printf("[WEB]: updateNewsgroupLastActivity parsing date '%s' for %s: %v", dateStr, name, err)
+					continue
+				}
+
+				// Format as UTC without timezone info to match db_batch.go format
+				formattedDate := parsedDate.UTC().Format("2006-01-02 15:04:05")
+				_, err = db.GetMainDB().Exec("UPDATE newsgroups SET updated_at = ? WHERE id = ?", formattedDate, id)
+				if err != nil {
+					log.Printf("[WEB]: error updateNewsgroupLastActivity updating newsgroup %s: %v", name, err)
+					continue
+				}
+				log.Printf("[WEB]: updateNewsgroupLastActivity: '%s' dateStr=%s formattedDate=%s", name, dateStr, formattedDate)
+				updatedCount++
+			}
+			totalProcessed++
 		}
+
+		rows.Close()
+
+		// Check for iteration errors
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("error updateNewsgroupLastActivity iterating newsgroups batch: %w", err)
+		}
+
+		log.Printf("[WEB]: Processed batch %d-%d (%d newsgroups), updated %d so far",
+			offset+1, offset+batchCount, batchCount, updatedCount)
+
+		// If we got fewer results than batch size, we're done
+		if batchCount < batchSize {
+			break
+		}
+
+		offset += batchSize
 	}
 
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error updateNewsgroupLastActivity iterating newsgroups: %w", err)
-	}
-
-	log.Printf("[WEB]: updateNewsgroupLastActivity updated %d newsgroups", updatedCount)
+	log.Printf("[WEB]: updateNewsgroupLastActivity completed: processed %d total newsgroups, updated %d", totalProcessed, updatedCount)
 	return nil
 }
 

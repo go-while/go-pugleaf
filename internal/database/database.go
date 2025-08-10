@@ -11,7 +11,7 @@ import (
 	_ "github.com/mattn/go-sqlite3" // SQLite3 driver
 )
 
-const DBidleTimeOut = 1 * time.Hour // HARDCODED cleanupIdleGroups
+var DBidleTimeOut = 1 * time.Hour // HARDCODED cleanupIdleGroups
 
 // GetMainDB returns the main database connection for direct access
 // This should only be used by specialized tools like importers
@@ -48,10 +48,12 @@ func (db *Database) cleanupIdleGroups() {
 				log.Printf("cleanupIdleGroups Warning: GroupDBs for '%s' is nil, skipping", groupName)
 				continue
 			}
+			groupDBs.mux.RLock()
 			candidates = append(candidates, dbAge{
 				name: groupName,
 				age:  time.Since(groupDBs.Idle),
 			})
+			groupDBs.mux.RUnlock()
 		}
 
 		// Sort by age (oldest first)
@@ -122,19 +124,6 @@ func (db *Database) cleanupIdleGroups() {
 		groupDBs.mux.Unlock()
 	}
 	db.MainMutex.Unlock()
-	/*
-		// Second pass: close databases WITHOUT holding the main mutex
-		for _, groupDBs := range groupsToClose {
-			groupDBs.mux.Lock()
-			if groupDBs.Workers > 0 {
-				groupDBs.mux.Unlock()
-				continue
-			}
-			log.Printf("Close idle DB ng: '%s'", groupDBs.Newsgroup)
-
-			groupDBs.mux.Unlock()
-		}
-	*/
 }
 
 func (db *Database) removePartialInitializedGroupDB(groupName string) {
@@ -143,7 +132,37 @@ func (db *Database) removePartialInitializedGroupDB(groupName string) {
 	db.MainMutex.Unlock()
 }
 
-// GetGroupDBs returns the three DBs for a specific newsgroup
+func (db *Database) ForceCloseGroupDBs(groupsDB *GroupDBs) error {
+	if db.dbconfig == nil {
+		log.Printf(("Database configuration is not set, cannot get group DBs for '%s'"), groupsDB.Newsgroup)
+		return fmt.Errorf("database configuration is not set")
+	}
+	db.MainMutex.Lock()
+	defer db.MainMutex.Unlock()
+	groupsDB.mux.Lock()
+	if groupsDB.Workers < 1 {
+		groupsDB.mux.Unlock()
+		return fmt.Errorf("error in ForceCloseGroupDBs: workers <= 0")
+	}
+	groupsDB.Workers--
+	if groupsDB.Workers > 0 {
+		groupsDB.mux.Unlock()
+		return fmt.Errorf("error ForceCloseGroupDBs ng:'%s' Worker=%d", groupsDB.Newsgroup, groupsDB.Workers)
+	}
+	if err := groupsDB.Close("ForceCloseGroupDBs"); err != nil {
+		groupsDB.mux.Unlock()
+		return fmt.Errorf("error ForceCloseGroupDBs groupsDB.Close ng:'%s' err='%v'", groupsDB.Newsgroup, err)
+	}
+	groupsDB.mux.Unlock()
+	db.openDBsNum--
+	delete(db.groupDBs, groupsDB.Newsgroup)
+	groupsDB.Newsgroup = ""
+	groupsDB.DB = nil
+	groupsDB = nil
+	return nil
+}
+
+// GetGroupDBs returns groupDB for a specific newsgroup
 func (db *Database) GetGroupDBs(groupName string) (*GroupDBs, error) {
 
 	if db.dbconfig == nil {

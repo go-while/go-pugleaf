@@ -45,6 +45,7 @@ func showUsageExamples() {
 }
 
 func main() {
+	database.DBidleTimeOut = 15 * time.Second
 	log.Printf("Starting go-pugleaf NNTP Fetcher (version %s)", appVersion)
 	// Command line flags for NNTP fetcher configuration
 	var (
@@ -73,8 +74,10 @@ func main() {
 		showUsageExamples()
 		os.Exit(0)
 	}
+	if appVersion != "-unset-" {
+		config.AppVersion = appVersion
+	}
 	mainConfig := config.NewDefaultConfig()
-	appVersion = mainConfig.AppVersion
 	mainConfig.Server.Hostname = *hostnamePath
 	if *testConn {
 		if err := ConnectionTest(host, port, username, password, ssl, timeout, *fetchNewsgroup, testMsg); err != nil {
