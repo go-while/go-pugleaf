@@ -124,19 +124,6 @@ func (db *Database) cleanupIdleGroups() {
 		groupDBs.mux.Unlock()
 	}
 	db.MainMutex.Unlock()
-	/*
-		// Second pass: close databases WITHOUT holding the main mutex
-		for _, groupDBs := range groupsToClose {
-			groupDBs.mux.Lock()
-			if groupDBs.Workers > 0 {
-				groupDBs.mux.Unlock()
-				continue
-			}
-			log.Printf("Close idle DB ng: '%s'", groupDBs.Newsgroup)
-
-			groupDBs.mux.Unlock()
-		}
-	*/
 }
 
 func (db *Database) removePartialInitializedGroupDB(groupName string) {
