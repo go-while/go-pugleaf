@@ -35,11 +35,9 @@ git checkout testing-001
 # Build all binaries
 ./build_ALL.sh && cp build/* .
 
-# the "migrations" folder is needed for every executable that uses the database. It contains the database migrations.
-
 # Start web server
 ./webserver -nntphostname your.domain.com
-# needs the "web" folder with templates and static files.
+# needs the "web" folder with templates
 
 # Open browser to http://localhost:11980
 ```

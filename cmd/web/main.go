@@ -247,6 +247,10 @@ func hideFuturePosts(db *database.Database) error {
 func main() {
 	config.AppVersion = appVersion
 
+	// Initialize embedded filesystems
+	database.SetEmbeddedMigrations(database.EmbeddedMigrationsFS)
+	log.Printf("[WEB]: Embedded filesystems initialized")
+
 	flag.Int64Var(&isleep, "isleep", 300, "Sleeps in fetch routines. if started with: -withfetch (default: 300 seconds = 5min)")
 	flag.IntVar(&maxSanArtCache, "maxsanartcache", 10000, "maximum number of cached sanitized articles (default: 10000)")
 	flag.IntVar(&maxSanArtCacheExpiry, "maxsanartcacheexpiry", 30, "expiry of cached sanitized articles in minutes (default: 30 minutes)")

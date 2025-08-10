@@ -20,32 +20,82 @@ func (db *Database) GetMainDB() *sql.DB {
 }
 
 func (db *Database) CronDB() {
+	baseSleep := 10 * time.Second
 	for {
 		// Adaptive sleep: longer intervals during heavy load to reduce mutex contention
-		baseSleep := 5 * time.Second
-
-		// If we have many open databases, sleep longer to reduce cleanup frequency
-		db.MainMutex.RLock()
-		openDBs := db.openDBsNum
-		db.MainMutex.RUnlock()
-
-		// Scale sleep time based on database load - more open DBs = less frequent cleanup
-		if openDBs > 100 {
-			baseSleep = 15 * time.Second // Reduce cleanup frequency during heavy import
-		} else if openDBs > 50 {
-			baseSleep = 10 * time.Second
-		}
-
 		time.Sleep(baseSleep)
 		db.cleanupIdleGroups()
 	}
 }
 
 func (db *Database) cleanupIdleGroups() {
-	var groupsToClose []*GroupDBs
+	db.MainMutex.RLock()
+	shouldClose := db.openDBsNum >= MaxOpenDatabases // TODO HARDCODED
+	if shouldClose {
+		// force close oldest groupDBs until 20% under limit of MaxOpenDatabases (* 0.8)
+		targetClose := MaxOpenDatabases / 5 // Close 20% of max to get under limit (256/5 = 51)
+		closedCount := 0
 
-	// First pass: quickly identify idle groups while holding mutex briefly
+		// Find oldest databases to close
+		type dbAge struct {
+			name string
+			age  time.Duration
+		}
+		var candidates []dbAge
+
+		for groupName, groupDBs := range db.groupDBs {
+			if groupDBs == nil {
+				log.Printf("cleanupIdleGroups Warning: GroupDBs for '%s' is nil, skipping", groupName)
+				continue
+			}
+			candidates = append(candidates, dbAge{
+				name: groupName,
+				age:  time.Since(groupDBs.Idle),
+			})
+		}
+
+		// Sort by age (oldest first)
+		for i := 0; i < len(candidates)-1; i++ {
+			for j := i + 1; j < len(candidates); j++ {
+				if candidates[i].age < candidates[j].age {
+					candidates[i], candidates[j] = candidates[j], candidates[i]
+				}
+			}
+		}
+
+		db.MainMutex.RUnlock()
+
+		// Close oldest databases
+		for _, candidate := range candidates {
+			if closedCount >= targetClose {
+				break
+			}
+
+			db.MainMutex.Lock()
+			groupDBs := db.groupDBs[candidate.name]
+			if groupDBs != nil {
+				groupDBs.mux.Lock()
+				if groupDBs.Workers == 0 {
+					if err := groupDBs.Close("force cleanup"); err != nil {
+						log.Printf("Failed to force close group database for '%s': %v", candidate.name, err)
+					} else {
+						delete(db.groupDBs, candidate.name)
+						db.openDBsNum--
+						closedCount++
+						log.Printf("Force closed idle DB ng: '%s' (age: %v)", candidate.name, candidate.age)
+					}
+				}
+				groupDBs.mux.Unlock()
+			}
+			db.MainMutex.Unlock()
+		}
+		log.Printf("Force closed %d databases due to exceeding limit (%d >= %d)", closedCount, db.openDBsNum+closedCount, MaxOpenDatabases)
+		return
+	}
+	db.MainMutex.RUnlock()
+
 	db.MainMutex.Lock()
+	// normal idle processing with idle time
 	for groupName, groupDBs := range db.groupDBs {
 		if groupDBs == nil {
 			log.Printf("cleanupIdleGroups Warning: GroupDBs for '%s' is nil, skipping", groupName)
@@ -57,25 +107,34 @@ func (db *Database) cleanupIdleGroups() {
 		if groupDBs.Workers < 0 {
 			log.Printf("Warning: Negative worker count for group '%s': %d", groupName, groupDBs.Workers)
 		}
-
 		isIdle := (groupDBs.Workers == 0 && time.Since(groupDBs.Idle) > DBidleTimeOut)
 		if isIdle {
 			// Mark for closure and remove from active map immediately
-			groupsToClose = append(groupsToClose, groupDBs)
+			if err := groupDBs.Close("cleanupIdleGroups"); err != nil {
+				log.Printf("Failed to close group database for '%s': %v", groupDBs.Newsgroup, err)
+				groupDBs.mux.Unlock()
+				continue
+			}
+			//groupsToClose = append(groupsToClose, groupDBs)
 			delete(db.groupDBs, groupName)
 			db.openDBsNum--
 		}
 		groupDBs.mux.Unlock()
 	}
-	db.MainMutex.Unlock() // Release main mutex immediately
+	db.MainMutex.Unlock()
+	/*
+		// Second pass: close databases WITHOUT holding the main mutex
+		for _, groupDBs := range groupsToClose {
+			groupDBs.mux.Lock()
+			if groupDBs.Workers > 0 {
+				groupDBs.mux.Unlock()
+				continue
+			}
+			log.Printf("Close idle DB ng: '%s'", groupDBs.Newsgroup)
 
-	// Second pass: close databases WITHOUT holding the main mutex
-	for _, groupDBs := range groupsToClose {
-		log.Printf("Close idle DB ng: '%s'", groupDBs.Newsgroup)
-		if err := groupDBs.Close(); err != nil {
-			log.Printf("Failed to close group database for '%s': %v", groupDBs.Newsgroup, err)
+			groupDBs.mux.Unlock()
 		}
-	}
+	*/
 }
 
 func (db *Database) removePartialInitializedGroupDB(groupName string) {

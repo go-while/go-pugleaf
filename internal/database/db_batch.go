@@ -380,24 +380,29 @@ drainChannel:
 	}
 
 	log.Printf("[BATCH] processNewsgroupBatch %d tasks: newsgroup '%s'", len(batches), *task.Newsgroup)
-
+	deferred := false
+	var groupDBs *GroupDBs
+	var err error
 retry:
-	/*
+	if groupDBs == nil {
 		// Get database connection for this newsgroup
-		groupDBs, err := c.db.GetGroupDBs(*task.Newsgroup)
+		groupDBs, err = c.db.GetGroupDBs(*task.Newsgroup)
 		if err != nil {
 			log.Printf("[BATCH] processNewsgroupBatch Failed to get database for group '%s': %v", *task.Newsgroup, err)
 			return
 		}
-	*/
+	}
+	if !deferred {
+		defer groupDBs.Return(c.db) // Ensure proper cleanup
+		deferred = true
+	}
 	// PHASE 1: Insert complete articles (overview + article data unified) and get article numbers
-	articleNumbers, groupDBs, err := c.batchInsertOverviewsWithDBs(*task.Newsgroup, batches)
+	articleNumbers, err := c.batchInsertOverviewsWithDBs(*task.Newsgroup, batches, groupDBs)
 	if err != nil {
 		log.Printf("[BATCH] processNewsgroupBatch Failed to process small batch for group '%s': %v", *task.Newsgroup, err)
 		time.Sleep(time.Second)
 		goto retry
 	}
-	defer groupDBs.Return(c.db) // Ensure proper cleanup
 	if len(articleNumbers) != len(batches) {
 		log.Printf("[BATCH] processNewsgroupBatch Warning: Expected %d article numbers, got %d", len(batches), len(articleNumbers))
 		return
@@ -410,7 +415,6 @@ retry:
 	for i, batch := range batches {
 		// Update the article with its number for subsequent processing
 		batch.Article.ArticleNum = articleNumbers[i]
-
 		// Track max article number for newsgroup stats
 		if articleNumbers[i] > maxArticleNum {
 			maxArticleNum = articleNumbers[i]
@@ -489,16 +493,9 @@ retry:
 }
 
 // batchInsertOverviewsWithDBs - returns both article numbers and the GroupDBs connection for reuse
-func (c *SQ3batch) batchInsertOverviewsWithDBs(newsgroup string, batches []*OverviewBatch) ([]int64, *GroupDBs, error) {
-	groupDBs, err := c.db.GetGroupDBs(newsgroup)
-	if err != nil {
-		log.Printf("[OVB-BATCH] Failed to get database for group '%s': %v", newsgroup, err)
-		return nil, nil, fmt.Errorf("failed to get database for group '%s': %w", newsgroup, err)
-	}
-	// Note: Do NOT defer groupDBs.Return(c.db) here - caller must handle it
-
+func (c *SQ3batch) batchInsertOverviewsWithDBs(newsgroup string, batches []*OverviewBatch, groupDBs *GroupDBs) ([]int64, error) {
 	if len(batches) == 0 {
-		return nil, groupDBs, fmt.Errorf("no batches to process for group '%s'", newsgroup)
+		return nil, fmt.Errorf("no batches to process for group '%s'", newsgroup)
 	}
 
 	if len(batches) <= maxBatchSize {
@@ -506,9 +503,9 @@ func (c *SQ3batch) batchInsertOverviewsWithDBs(newsgroup string, batches []*Over
 		articleNumbers, err := c.processSingleOverviewBatch(groupDBs, batches)
 		if err != nil {
 			log.Printf("[OVB-BATCH] Failed to process small batch for group '%s': %v", newsgroup, err)
-			return nil, groupDBs, fmt.Errorf("failed to process small batch for group '%s': %w", newsgroup, err)
+			return nil, fmt.Errorf("failed to process small batch for group '%s': %w", newsgroup, err)
 		}
-		return articleNumbers, groupDBs, nil
+		return articleNumbers, nil
 	}
 
 	// Large batch - split into chunks
@@ -523,7 +520,7 @@ func (c *SQ3batch) batchInsertOverviewsWithDBs(newsgroup string, batches []*Over
 		chunkNumbers, err := c.processSingleOverviewBatch(groupDBs, chunk)
 		if err != nil {
 			log.Printf("[OVB-BATCH] Failed to process chunk %d-%d for group '%s': %v", i, end, newsgroup, err)
-			return nil, groupDBs, fmt.Errorf("failed to process chunk %d-%d for group '%s': %w", i, end, newsgroup, err)
+			return nil, fmt.Errorf("failed to process chunk %d-%d for group '%s': %w", i, end, newsgroup, err)
 		}
 		if len(chunkNumbers) == 0 {
 			// If any chunk fails, mark remaining as failed
@@ -536,7 +533,7 @@ func (c *SQ3batch) batchInsertOverviewsWithDBs(newsgroup string, batches []*Over
 		allArticleNumbers = append(allArticleNumbers, chunkNumbers...)
 	}
 
-	return allArticleNumbers, groupDBs, nil
+	return allArticleNumbers, nil
 }
 
 // processSingleUnifiedArticleBatch handles a single batch that's within SQLite limits

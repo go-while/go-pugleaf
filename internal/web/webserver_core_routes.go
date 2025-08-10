@@ -258,12 +258,24 @@ func NewServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *n
 func (s *WebServer) setupRoutes() {
 	// Static files first (highest priority)
 	s.Router.Use(s.BotDetectionMiddleware())
-	s.Router.Static("/static", "./web/static")
+	
+	// Use embedded static files if available, otherwise fall back to filesystem
+	if UseEmbeddedStatic() {
+		s.Router.GET("/static/*filepath", EmbeddedStaticHandler("/static"))
+		log.Printf("[WEB]: Using embedded static files")
+	} else {
+		s.Router.Static("/static", "./web/static")
+		log.Printf("[WEB]: Using filesystem static files from ./web/static")
+	}
 
 	// Handle favicon to prevent it from being caught by section routes
-	s.Router.GET("/favicon.ico", func(c *gin.Context) {
-		c.File("web/favicon.ico")
-	})
+	if UseEmbeddedStatic() {
+		s.Router.GET("/favicon.ico", EmbeddedFileHandler("web/favicon.ico"))
+	} else {
+		s.Router.GET("/favicon.ico", func(c *gin.Context) {
+			c.File("web/favicon.ico")
+		})
+	}
 	s.Router.GET("/sitemap.xml", func(c *gin.Context) {
 		c.Status(http.StatusNotFound)
 	})

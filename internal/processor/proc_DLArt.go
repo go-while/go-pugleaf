@@ -327,7 +327,7 @@ forProcessing:
 
 	run++
 	// do another one if we haven't run enough times
-	if run < 4 {
+	if run < 250 {
 		goto doWork
 	}
 

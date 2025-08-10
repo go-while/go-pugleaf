@@ -48,6 +48,7 @@ type MigrationFile struct {
 	Type        MigrationType
 	Description string
 	FilePath    string
+	IsEmbedded  bool // True if migration is from embedded filesystem
 }
 
 // Migrate applies database migrations to all database types
@@ -102,8 +103,18 @@ func parseMigrationFileName(fileName string) (*MigrationFile, error) {
 	}, nil
 }
 
-// getMigrationFiles reads and parses all migration files from the migrations directory
+// getMigrationFiles reads and parses all migration files from embedded filesystem first, then fallback to file system
 func getMigrationFiles() ([]*MigrationFile, error) {
+	// Try to get embedded migrations first
+	embeddedMigrations, err := getEmbeddedMigrationFiles()
+	if err == nil && len(embeddedMigrations) > 0 {
+		log.Printf("Using %d embedded migration files", len(embeddedMigrations))
+		return embeddedMigrations, nil
+	}
+	
+	// Fall back to filesystem migrations
+	log.Printf("Embedded migrations not available, falling back to filesystem migrations")
+	
 	// Check the cache first
 	migrationCacheMux.RLock()
 	if migrationCacheInit {
@@ -194,15 +205,27 @@ func getAppliedMigrations(db *sql.DB, dbType string) (map[string]bool, error) {
 
 // applyMigration applies a single migration to a database
 func applyMigration(db *sql.DB, migration *MigrationFile, dbType string) error {
-	content, err := os.ReadFile(migration.FilePath)
-	if err != nil {
-		// Log error and return a wrapped error
-		log.Printf("Failed to read migration file %s: %v", migration.FilePath, err)
-		return fmt.Errorf("failed to read migration file %s: %w", migration.FilePath, err)
+	var content string
+	var err error
+	
+	// Read migration content from embedded filesystem or regular filesystem
+	if migration.IsEmbedded {
+		content, err = readEmbeddedMigrationContent(migration)
+		if err != nil {
+			log.Printf("Failed to read embedded migration file %s: %v", migration.FilePath, err)
+			return fmt.Errorf("failed to read embedded migration file %s: %w", migration.FilePath, err)
+		}
+	} else {
+		contentBytes, readErr := os.ReadFile(migration.FilePath)
+		if readErr != nil {
+			log.Printf("Failed to read migration file %s: %v", migration.FilePath, readErr)
+			return fmt.Errorf("failed to read migration file %s: %w", migration.FilePath, readErr)
+		}
+		content = string(contentBytes)
 	}
 
 	// Apply the migration
-	if _, err := db.Exec(string(content)); err != nil {
+	if _, err := db.Exec(content); err != nil {
 		log.Printf("Failed to execute migration %s for %s: %v", migration.FileName, dbType, err)
 		return fmt.Errorf("failed to execute migration %s for %s: %w", migration.FileName, dbType, err)
 	}
