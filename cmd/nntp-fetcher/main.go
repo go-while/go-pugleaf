@@ -19,8 +19,6 @@ import (
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
-var appVersion = "-unset-"
-
 // showUsageExamples displays usage examples for connection testing
 func showUsageExamples() {
 	fmt.Println("\n=== NNTP Fetcher - Connection Testing Examples ===")
@@ -46,7 +44,7 @@ func showUsageExamples() {
 
 func main() {
 	database.DBidleTimeOut = 15 * time.Second
-	log.Printf("Starting go-pugleaf NNTP Fetcher (version %s)", appVersion)
+	log.Printf("Starting go-pugleaf NNTP Fetcher (version %s)", config.AppVersion)
 	// Command line flags for NNTP fetcher configuration
 	var (
 		host                    = flag.String("host", "lux-feed1.newsdeef.eu", "NNTP hostname")
@@ -73,9 +71,6 @@ func main() {
 	if *showHelp {
 		showUsageExamples()
 		os.Exit(0)
-	}
-	if appVersion != "-unset-" {
-		config.AppVersion = appVersion
 	}
 	mainConfig := config.NewDefaultConfig()
 	mainConfig.Server.Hostname = *hostnamePath
