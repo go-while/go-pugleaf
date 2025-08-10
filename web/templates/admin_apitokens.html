@@ -1,0 +1,172 @@
+{{define "admin_apitokens"}}
+<!-- API Tokens Tab -->
+<div class="tab-pane fade show active" id="apitokens" role="tabpanel" aria-labelledby="apitokens-tab">
+  <!-- API Token Management -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h5 class="card-title mb-0">🔑 Create New API Token</h5>
+              </div>
+              <div class="card-body">
+                  <form autocomplete="off" method="POST" action="/admin/apitokens?tab=apitokens">
+                      <input autocomplete="false" name="hidden" type="text" style="display:none;">
+                      <div class="row">
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="token_owner_name" class="form-label">Owner Name</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="token_owner_name" name="owner_name" required
+                                         placeholder="Token owner name">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="token_owner_id" class="form-label">Owner ID</label>
+                                  <input type="number" class="form-control" id="token_owner_id" name="owner_id" min="0"
+                                         placeholder="Optional">
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="token_expires_at" class="form-label">Expires At</label>
+                                  <input type="datetime-local" class="form-control" id="token_expires_at" name="expires_at"
+                                         placeholder="Optional expiry date">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="token_enabled" class="form-label">Enabled</label>
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="token_enabled" name="enabled" checked>
+                                      <label class="form-check-label" for="token_enabled">
+                                          Enable
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label class="form-label">&nbsp;</label>
+                                  <div>
+                                      <button type="submit" class="btn btn-dark">Create Token</button>
+                                  </div>
+                              </div>
+                          </div>
+                      </div>
+                  </form>
+              </div>
+          </div>
+      </div>
+  </div>
+
+  <!-- API Token List -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <div class="d-flex justify-content-between align-items-center">
+                      <h5 class="card-title mb-0">🔑 API Token Management</h5>
+                      <span class="badge bg-light text-dark">{{len .APITokens}} tokens</span>
+                  </div>
+              </div>
+              <div class="card-body">
+                  {{if .APITokens}}
+                  <div class="table-responsive">
+                      <table class="table table-striped">
+                          <thead>
+                              <tr>
+                                  <th>Created</th>
+                                  <th>Owner</th>
+                                  <th>Token Hash</th>
+                                  <th>Expires</th>
+                                  <th>Status</th>
+                                  <th>Last Used</th>
+                                  <th>Usage Count</th>
+                                  <th>Actions</th>
+                              </tr>
+                          </thead>
+                          <tbody>
+                              {{range .APITokens}}
+                              <tr>
+                                  <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+                                  <td>
+                                      <strong>{{.OwnerName}}</strong>
+                                      {{if .OwnerID}}<br><small class="text-muted">ID: {{.OwnerID}}</small>{{end}}
+                                  </td>
+                                  <td><code>{{printf "%.12s" .TokenHash}}...</code></td>
+                                  <td>
+                                      {{if .ExpiresAt}}
+                                      {{.ExpiresAt.Format "2006-01-02 15:04"}}
+                                      {{else}}
+                                      <span class="text-muted">Never</span>
+                                      {{end}}
+                                  </td>
+                                  <td>
+                                      {{if .IsEnabled}}
+                                      <span class="badge bg-success">Enabled</span>
+                                      {{else}}
+                                      <span class="badge bg-danger">Disabled</span>
+                                      {{end}}
+                                  </td>
+                                  <td>
+                                      {{if .LastUsedAt}}
+                                      {{.LastUsedAt.Format "2006-01-02 15:04"}}
+                                      {{else}}
+                                      <span class="text-muted">Never</span>
+                                      {{end}}
+                                  </td>
+                                  <td>{{.UsageCount}}</td>
+                                  <td>
+                                      <div class="btn-group btn-group-sm">
+                                      {{if .IsEnabled}}
+                                        <form method="POST" action="/admin/apitokens/toggle?tab=apitokens" style="display: inline;">
+                                            <input type="hidden" name="id" value="{{.ID}}">
+                                            <input type="hidden" name="action" value="disable">
+                                            <button type="submit" class="btn btn-outline-warning btn-sm">Disable</button>
+                                        </form>
+                                        {{else}}
+                                        <form method="POST" action="/admin/apitokens/toggle?tab=apitokens" style="display: inline;">
+                                            <input type="hidden" name="id" value="{{.ID}}">
+                                            <input type="hidden" name="action" value="enable">
+                                            <button type="submit" class="btn btn-outline-success btn-sm">Enable</button>
+                                        </form>
+                                        {{end}}
+                                        {{if not .IsEnabled}}
+                                        <form method="POST" action="/admin/apitokens/delete?tab=apitokens" style="display: inline;">
+                                            <input type="hidden" name="id" value="{{.ID}}">
+                                            <button type="submit" class="btn btn-outline-danger btn-sm">
+                                                Delete
+                                            </button>
+                                        </form>
+                                        {{else}}
+                                        <form style="display: inline;">
+                                            <button disabled type="submit" class="btn btn-outline-danger btn-sm">
+                                                Delete
+                                            </button>
+                                        </form>
+                                        {{end}}
+                                      </div>
+                                  </td>
+                              </tr>
+                              {{end}}
+                          </tbody>
+                      </table>
+                  </div>
+                  <div class="mt-3">
+                      <form method="POST" action="/admin/apitokens/cleanup?tab=apitokens" style="display: inline;">
+                          <button type="submit" class="btn btn-outline-warning">
+                              🧹 Cleanup Expired Tokens
+                          </button>
+                      </form>
+                  </div>
+                  {{else}}
+                  <div class="alert alert-info">
+                      <strong>No API tokens found.</strong> Create the first API token above.
+                  </div>
+                  {{end}}
+              </div>
+          </div>
+      </div>
+  </div>
+</div>
+{{end}}

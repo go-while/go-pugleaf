@@ -1,0 +1,273 @@
+package spam
+
+import (
+	"log"
+	"strings"
+	"time"
+
+	"github.com/go-while/go-pugleaf/internal/models"
+)
+
+// SpamFilter provides unified spam filtering interface
+type SpamFilter struct {
+	spamAssassin *SpamAssassinFilter
+	quickRules   *PredefinedRules
+	config       *FilterConfig
+}
+
+// FilterConfig controls spam filtering behavior
+type FilterConfig struct {
+	EnableSpamAssassin bool    `yaml:"enable_spamassassin"`
+	EnableQuickRules   bool    `yaml:"enable_quick_rules"`
+	AutoReject         bool    `yaml:"auto_reject"`
+	RejectThreshold    float64 `yaml:"reject_threshold"`
+	LogSpam            bool    `yaml:"log_spam"`
+	MarkSpam           bool    `yaml:"mark_spam"`       // Add spam markers to articles
+	QuarantineSpam     bool    `yaml:"quarantine_spam"` // Store spam in separate location
+}
+
+// FilterResult contains the spam filtering results
+type FilterResult struct {
+	IsSpam         bool
+	Score          float64
+	Reason         string
+	ShouldReject   bool
+	ProcessingTime time.Duration
+	Method         string // "quick", "spamassassin", "both"
+}
+
+// NewSpamFilter creates a new spam filter with both quick rules and SpamAssassin
+func NewSpamFilter(saConfig *SpamAssassinConfig, filterConfig *FilterConfig) *SpamFilter {
+	if filterConfig == nil {
+		filterConfig = &FilterConfig{
+			EnableSpamAssassin: true,
+			EnableQuickRules:   true,
+			AutoReject:         true,
+			RejectThreshold:    15.0,
+			LogSpam:            true,
+			MarkSpam:           false,
+			QuarantineSpam:     false,
+		}
+	}
+
+	return &SpamFilter{
+		spamAssassin: NewSpamAssassinFilter(saConfig),
+		quickRules:   NewPredefinedRules(),
+		config:       filterConfig,
+	}
+}
+
+// FilterArticle performs comprehensive spam filtering on an article
+func (sf *SpamFilter) FilterArticle(article *models.Article, headers map[string][]string, body []byte, newsgroups []string) (*FilterResult, error) {
+	start := time.Now()
+	result := &FilterResult{}
+
+	// Step 1: Quick whitelist checks (always run first)
+	if sf.isWhitelisted(article, newsgroups) {
+		result.IsSpam = false
+		result.Score = -100.0
+		result.Reason = "WHITELISTED"
+		result.Method = "whitelist"
+		result.ProcessingTime = time.Since(start)
+		return result, nil
+	}
+
+	// Step 2: Quick rules check (fast)
+	if sf.config.EnableQuickRules {
+		quickSpam, quickScore, quickReason := sf.quickRules.CheckQuickRules(article, headers, newsgroups)
+
+		result.Score = quickScore
+		result.Reason = quickReason
+		result.Method = "quick"
+
+		// If quick rules definitively identify spam, we can stop here
+		if quickSpam && quickScore >= sf.config.RejectThreshold {
+			result.IsSpam = true
+			result.ShouldReject = sf.config.AutoReject
+			result.ProcessingTime = time.Since(start)
+
+			if sf.config.LogSpam {
+				log.Printf("[SPAM-QUICK] REJECTED: %s scored %.2f (quick rules: %s)",
+					article.MessageID, quickScore, quickReason)
+			}
+			return result, nil
+		}
+
+		// If quick rules give a moderate spam score, continue with SpamAssassin
+		if quickSpam {
+			result.IsSpam = true
+		}
+	}
+
+	// Step 3: SpamAssassin check (slower but more accurate)
+	if sf.config.EnableSpamAssassin {
+		saResult, err := sf.spamAssassin.CheckArticle(article, headers, body)
+		if err != nil {
+			log.Printf("[SPAM] SpamAssassin error for %s: %v", article.MessageID, err)
+			// Continue with quick rules result if SpamAssassin fails
+		} else {
+			// Combine scores (use higher score)
+			if saResult.Score > result.Score {
+				result.Score = saResult.Score
+				result.IsSpam = saResult.IsSpam
+				result.Method = "spamassassin"
+				if result.Reason != "" {
+					result.Reason += "," + strings.Join(saResult.Tests, ",")
+				} else {
+					result.Reason = strings.Join(saResult.Tests, ",")
+				}
+			} else if result.Method == "quick" {
+				result.Method = "both"
+			}
+		}
+	}
+
+	// Final decision
+	result.ShouldReject = sf.config.AutoReject && result.Score >= sf.config.RejectThreshold
+	result.ProcessingTime = time.Since(start)
+
+	// Log spam detection
+	if result.IsSpam && sf.config.LogSpam {
+		action := "DETECTED"
+		if result.ShouldReject {
+			action = "REJECTED"
+		}
+		log.Printf("[SPAM-%s] %s: %s scored %.2f via %s (%s)",
+			strings.ToUpper(result.Method), action, article.MessageID,
+			result.Score, result.Method, result.Reason)
+	}
+
+	return result, nil
+}
+
+// isWhitelisted checks various whitelist conditions
+func (sf *SpamFilter) isWhitelisted(article *models.Article, newsgroups []string) bool {
+	// NOCEM messages (spam cancellation notices)
+	for _, ng := range newsgroups {
+		if strings.Contains(ng, "news.lists.filters") ||
+			strings.Contains(ng, "rocksolid.spam") ||
+			strings.Contains(ng, "i2pn.spam") {
+			if strings.HasPrefix(article.Subject, "@@NCM ") {
+				return true
+			}
+		}
+	}
+
+	// Fidonet messages (trusted network)
+	for _, ng := range newsgroups {
+		if strings.HasPrefix(ng, "fido.") || strings.HasPrefix(ng, "fido7.") {
+			return true
+		}
+	}
+
+	// News feeds (trusted automated messages)
+	for _, ng := range newsgroups {
+		if strings.HasPrefix(ng, "rocksolid.feeds.") {
+			if strings.Contains(article.FromHeader, "usenet@novabbs.org") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// ShouldRejectArticle checks if an article should be rejected based on spam score
+func (sf *SpamFilter) ShouldRejectArticle(article *models.Article, headers map[string][]string, body []byte, newsgroups []string) (bool, string) {
+	result, err := sf.FilterArticle(article, headers, body, newsgroups)
+	if err != nil {
+		log.Printf("[SPAM] Error filtering article %s: %v", article.MessageID, err)
+		return false, ""
+	}
+
+	if result.ShouldReject {
+		return true, result.Reason
+	}
+
+	return false, ""
+}
+
+// MarkSpamArticle adds spam markers to an article
+func (sf *SpamFilter) MarkSpamArticle(article *models.Article, result *FilterResult) {
+	if !sf.config.MarkSpam || !result.IsSpam {
+		return
+	}
+
+	// Add spam marker to subject
+	if !strings.HasPrefix(article.Subject, "[SPAM]") {
+		article.Subject = "[SPAM] " + article.Subject
+	}
+
+	// Add spam headers to JSON
+	// Note: This would require parsing and re-encoding the HeadersJSON
+	// Implementation depends on your header storage format
+}
+
+// GetSpamStatistics returns spam filtering statistics
+type SpamStatistics struct {
+	TotalProcessed     int64
+	SpamDetected       int64
+	SpamRejected       int64
+	WhitelistedCount   int64
+	AverageScore       float64
+	AverageProcessTime time.Duration
+}
+
+// You could implement statistics tracking by adding fields to SpamFilter
+// and updating them in FilterArticle method
+
+// IsSpamByHeaders performs a lightweight spam check using only headers
+func (sf *SpamFilter) IsSpamByHeaders(article *models.Article, headers map[string][]string, newsgroups []string) bool {
+	// Quick check for obvious spam patterns in headers only
+
+	// Check bad From patterns
+	fromHeader := strings.ToLower(article.FromHeader)
+	badFromPatterns := []string{
+		"vvgrant886",
+		"jainelectro",
+		"georgethecockroach@gmail.com",
+		"mayaaprianaya@gmail.com",
+	}
+
+	for _, pattern := range badFromPatterns {
+		if strings.Contains(fromHeader, pattern) {
+			return true
+		}
+	}
+
+	// Check suspicious subjects
+	subject := strings.ToLower(article.Subject)
+	if strings.Contains(subject, "solutions manual") ||
+		strings.Contains(subject, "case solution") {
+		return true
+	}
+
+	// Check for injection info with suspicious servers
+	_, hasInjectionInfo := headers["injection-info"]
+	if hasInjectionInfo {
+		pathHeaders := headers["path"]
+		for _, path := range pathHeaders {
+			if strings.Contains(path, "news.giganews.com") ||
+				strings.Contains(path, ".ams") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// PreFilterCheck performs ultra-fast pre-filtering before full spam check
+func (sf *SpamFilter) PreFilterCheck(article *models.Article, newsgroups []string) (shouldSkip bool, reason string) {
+	// Skip whitelist check first
+	if sf.isWhitelisted(article, newsgroups) {
+		return true, "WHITELISTED"
+	}
+
+	// Quick blacklist patterns
+	if sf.quickRules.checkBadFrom(article) {
+		return false, "BAD_FROM" // Don't skip, needs rejection
+	}
+
+	return false, ""
+}

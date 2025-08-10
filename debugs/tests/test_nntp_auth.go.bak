@@ -1,0 +1,75 @@
+package main
+
+import (
+	"log"
+
+	"github.com/go-while/go-pugleaf/internal/config"
+	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/nntp"
+)
+
+func main() {
+	log.Println("Testing NNTP Authentication System")
+
+	// Initialize configuration
+	mainConfig := config.NewDefaultConfig()
+	log.Printf("Initialized config with version: %s", mainConfig.AppVersion)
+
+	// Initialize database
+	db, err := database.OpenDatabase(nil)
+	if err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer db.Shutdown()
+
+	// Create auth manager
+	authManager := nntp.NewAuthManager(db)
+
+	// Test valid authentication
+	log.Println("\n=== Testing Valid Authentication ===")
+	user, err := authManager.AuthenticateUser("testuser", "test123")
+	if err != nil {
+		log.Printf("❌ Authentication failed: %v", err)
+	} else {
+		log.Printf("✅ Authentication successful!")
+		log.Printf("   User ID: %d", user.ID)
+		log.Printf("   Username: %s", user.Username)
+		log.Printf("   Max Connections: %d", user.MaxConns)
+		log.Printf("   Posting Allowed: %t", user.Posting)
+		log.Printf("   Is Active: %t", user.IsActive)
+	}
+
+	// Test posting permissions
+	if user != nil {
+		log.Println("\n=== Testing Permissions ===")
+		canPost := authManager.CanPost(user)
+		log.Printf("✅ Can post: %t", canPost)
+
+		canConnect := authManager.CheckConnectionLimit(user)
+		log.Printf("✅ Can connect (within limit): %t", canConnect)
+
+		hasGroupAccess := authManager.CheckGroupAccess(user, "comp.programming")
+		log.Printf("✅ Has group access: %t", hasGroupAccess)
+
+		isAdmin := authManager.IsAdmin(user)
+		log.Printf("✅ Is admin: %t", isAdmin)
+	}
+
+	// Test invalid authentication
+	log.Println("\n=== Testing Invalid Authentication ===")
+	_, err = authManager.AuthenticateUser("testuser", "wrongpassword")
+	if err != nil {
+		log.Printf("✅ Invalid password correctly rejected: %v", err)
+	} else {
+		log.Printf("❌ Invalid password was accepted!")
+	}
+
+	_, err = authManager.AuthenticateUser("nonexistent", "test123")
+	if err != nil {
+		log.Printf("✅ Nonexistent user correctly rejected: %v", err)
+	} else {
+		log.Printf("❌ Nonexistent user was accepted!")
+	}
+
+	log.Println("\n=== NNTP Authentication Test Complete ===")
+}

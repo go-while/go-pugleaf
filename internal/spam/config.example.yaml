@@ -1,0 +1,36 @@
+# SpamAssassin Integration Configuration
+# Place this in your main config file
+
+spam_filter:
+  # Enable/disable spam filtering completely
+  enabled: true
+
+  # SpamAssassin configuration
+  spamassassin:
+    enabled: true
+    config_path: "/home/fed/WORKSPACES/workspace.go-pugleaf/spamassassin"
+    required_score: 6.0
+    timeout_seconds: 30
+    max_message_size: 1048576  # 1MB max message size
+    log_spam_details: true
+    reject_threshold: 15.0     # Auto-reject messages with score >= 15.0
+
+  # Quick rules configuration
+  quick_rules:
+    enabled: true
+
+  # Filtering behavior
+  filter:
+    enable_spamassassin: true
+    enable_quick_rules: true
+    auto_reject: true          # Automatically reject high-scoring spam
+    reject_threshold: 15.0     # Score threshold for auto-rejection
+    log_spam: true            # Log spam detection
+    mark_spam: false          # Add [SPAM] markers to subjects
+    quarantine_spam: false    # Store spam in separate location
+
+  # Performance settings
+  performance:
+    pre_filter_enabled: true   # Use fast pre-filtering
+    batch_processing: true     # Process spam checks in batches
+    max_concurrent_checks: 5   # Limit concurrent SpamAssassin processes

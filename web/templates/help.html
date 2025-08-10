@@ -1,0 +1,396 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item active" aria-current="page">Help & Commands</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<!-- Navigation Menu -->
+ <!--
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-info text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-question-circle me-2"></i>Help System
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="btn-group" role="group" aria-label="Navigation">
+                    <a href="/" class="btn btn-outline-secondary">
+                        <strong>[H]</strong> Return to Home
+                    </a>
+                    <a href="/groups" class="btn btn-outline-primary">
+                        <strong>[G]</strong> Browse Groups
+                    </a>
+                    <a href="/search" class="btn btn-outline-warning">
+                        <strong>[S]</strong> Search
+                    </a>
+                    <a href="/stats" class="btn btn-outline-success">
+                        <strong>[T]</strong> System Stats
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+-->
+
+<!-- Welcome -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body text-center">
+                <h2 class="card-title">
+                    <i class="bi bi-book me-2"></i>go-pugleaf BBS Help System
+                </h2>
+                <p class="card-text lead">Your guide to navigating the NNTP newsgroup interface</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Help Sections -->
+<div class="row">
+    <!-- Navigation Commands -->
+    <!--
+    <div class="col-lg-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header bg-primary text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-keyboard me-2"></i>Navigation Commands
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="list-group list-group-flush">
+                    <div class="list-group-item d-flex justify-content-between">
+                        <span><kbd>H</kbd> Return to Home/Main Menu</span>
+                    </div>
+                    <div class="list-group-item d-flex justify-content-between">
+                        <span><kbd>G</kbd> Browse Newsgroups</span>
+                    </div>
+                    <div class="list-group-item d-flex justify-content-between">
+                        <span><kbd>S</kbd> Search Articles and Groups</span>
+                    </div>
+                    <div class="list-group-item d-flex justify-content-between">
+                        <span><kbd>T</kbd> View System Statistics</span>
+                    </div>
+                    <div class="list-group-item d-flex justify-content-between">
+                        <span><kbd>A</kbd> Access API Documentation</span>
+                    </div>
+                    <div class="list-group-item d-flex justify-content-between">
+                        <span><kbd>P</kbd> Previous Article (in article view)</span>
+                    </div>
+                    <div class="list-group-item d-flex justify-content-between">
+                        <span><kbd>N</kbd> Next Article (in article view)</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    -->
+    <!-- Interface Features -->
+    <!--
+    <div class="col-lg-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header bg-success text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-display me-2"></i>Interface Features
+                </h6>
+            </div>
+            <div class="card-body">
+                <ul class="list-unstyled">
+                    <li class="mb-2">
+                        <i class="bi bi-palette text-primary me-2"></i>
+                        <strong>Multiple Themes:</strong> Professional Bootstrap, comfortable, retro terminal
+                    </li>
+                    <li class="mb-2">
+                        <i class="bi bi-keyboard text-success me-2"></i>
+                        <strong>Keyboard Navigation:</strong> Use bracketed commands [G], [H], etc.
+                    </li>
+                    <li class="mb-2">
+                        <i class="bi bi-mouse text-info me-2"></i>
+                        <strong>Mouse Support:</strong> Click on any menu item or link
+                    </li>
+                    <li class="mb-2">
+                        <i class="bi bi-signpost text-warning me-2"></i>
+                        <strong>Breadcrumbs:</strong> Track your location in the system
+                    </li>
+                    <li class="mb-2">
+                        <i class="bi bi-clock text-secondary me-2"></i>
+                        <strong>Status Line:</strong> Shows system time and status
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    -->
+</div>
+
+<div class="row">
+    <!-- Browsing Articles -->
+    <!--
+    <div class="col-lg-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header bg-warning text-dark">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-file-text me-2"></i>Browsing Articles
+                </h6>
+            </div>
+            <div class="card-body">
+                <ul class="list-unstyled">
+                    <li class="mb-2">
+                        <i class="bi bi-collection text-primary me-2"></i>
+                        Click on group names to view articles
+                    </li>
+                    <li class="mb-2">
+                        <i class="bi bi-hash text-success me-2"></i>
+                        Article numbers are clickable to read full content
+                    </li>
+                    <li class="mb-2">
+                        <i class="bi bi-diagram-3 text-info me-2"></i>
+                        Use thread view to see conversation trees
+                    </li>
+                    <li class="mb-2">
+                        <i class="bi bi-arrow-left-right text-warning me-2"></i>
+                        Navigation arrows for sequential reading
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    -->
+    <!-- API Access -->
+    <div class="col-lg-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header bg-secondary text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-code-slash me-2"></i>RESTful API Endpoints
+                </h6>
+            </div>
+            <div class="card-body">
+                <!-- API Authentication Info -->
+                <div class="alert alert-warning mb-3">
+                    <small>
+                        <i class="bi bi-shield-lock me-1"></i>
+                        <strong>Authentication Required:</strong> Most API endpoints require the <code>X-API</code> header with a valid token. Only <code>/api/v1/stats</code> is publicly accessible.
+                    </small>
+                </div>
+
+                <div class="accordion" id="apiAccordion">
+                    <!-- API Authentication -->
+                    <div class="accordion-item">
+                        <h2 class="accordion-header" id="authAPIHeading">
+                            <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#authAPI" aria-expanded="true" aria-controls="authAPI">
+                                <strong>API Authentication</strong>
+                            </button>
+                        </h2>
+                        <div id="authAPI" class="accordion-collapse collapse show" aria-labelledby="authAPIHeading" data-bs-parent="#apiAccordion">
+                            <div class="accordion-body">
+                                <div class="mb-3">
+                                    <h6 class="text-primary">Authentication Method</h6>
+                                    <p class="small mb-2">API endpoints require authentication via the <code>X-API</code> custom header:</p>
+                                    <div class="bg-dark text-light p-2 rounded mb-2">
+                                        <code>X-API: your-api-token-here</code>
+                                    </div>
+                                </div>
+
+                <div class="mb-3">
+                    <h6 class="text-success">Public Endpoints (No Auth Required)</h6>
+                    <p class="small mb-2">The following endpoints are publicly accessible without authentication:</p>
+                    <div class="list-group list-group-flush">
+                        <div class="list-group-item">
+                            <code class="text-success">GET /api/v1/stats</code>
+                            <small class="text-muted d-block">System statistics and performance metrics</small>
+                        </div>
+                        <div class="list-group-item">
+                            <code class="text-success">GET /api/v1/groups/:group/articles/:articleNum/preview</code>
+                            <small class="text-muted d-block">Article preview/excerpt without full content</small>
+                        </div>
+                    </div>
+                </div>                                <div class="alert alert-info py-2">
+                                    <small>
+                                        <i class="bi bi-info-circle me-1"></i>
+                                        <strong>Token Management:</strong> API tokens are managed through the admin interface. Contact your system administrator for access.
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Core API Endpoints -->
+                    <div class="accordion-item">
+                        <h2 class="accordion-header" id="coreAPIHeading">
+                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#coreAPI" aria-expanded="false" aria-controls="coreAPI">
+                                <strong>Protected API Endpoints</strong>
+                            </button>
+                        </h2>
+                        <div id="coreAPI" class="accordion-collapse collapse" aria-labelledby="coreAPIHeading" data-bs-parent="#apiAccordion">
+                            <div class="accordion-body">
+                                <div class="alert alert-warning py-2 mb-3">
+                                    <small>
+                                        <i class="bi bi-exclamation-triangle me-1"></i>
+                                        <strong>Authentication Required:</strong> These endpoints require the <code>X-API</code> header.
+                                    </small>
+                                </div>
+                                <div class="list-group list-group-flush">
+                                    <div class="list-group-item">
+                                        <code class="text-primary">GET /api/v1/groups</code>
+                                        <small class="text-muted d-block">List all available newsgroups with metadata</small>
+                                    </div>
+                                    <div class="list-group-item">
+                                        <code class="text-primary">GET /api/v1/groups/:group/overview</code>
+                                        <small class="text-muted d-block">Get article overview for a specific newsgroup</small>
+                                    </div>
+                                    <div class="list-group-item">
+                                        <code class="text-primary">GET /api/v1/groups/:group/threads</code>
+                                        <small class="text-muted d-block">Get threaded conversation structure for a group</small>
+                                    </div>
+                                    <div class="list-group-item">
+                                        <code class="text-primary">GET /api/v1/groups/:group/articles/:articleNum</code>
+                                        <small class="text-muted d-block">Get specific article by article number</small>
+                                    </div>
+                                    <div class="list-group-item">
+                                        <code class="text-primary">GET /api/v1/groups/:group/message/:messageId</code>
+                                        <small class="text-muted d-block">Get specific article by message ID</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-3">
+                    <div class="alert alert-info py-2">
+                        <small>
+                            <i class="bi bi-info-circle me-1"></i>
+                            <strong>Response Format:</strong> All API endpoints return JSON data with appropriate HTTP status codes.
+                        </small>
+                    </div>
+                    <div class="alert alert-warning py-2">
+                        <small>
+                            <i class="bi bi-exclamation-triangle me-1"></i>
+                            <strong>Rate Limiting:</strong> API calls may be rate-limited during high traffic periods.
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <!-- API Examples -->
+    <div class="col-lg-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header bg-info text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-code-square me-2"></i>API Usage Examples
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-info mb-3">
+                    <small>
+                        <i class="bi bi-info-circle me-1"></i>
+                        <strong>Note:</strong> Replace <code>your-api-token</code> with your actual API token. Only <code>/api/v1/stats</code> is public.
+                    </small>
+                </div>
+
+                <div class="mb-3">
+                    <h6 class="text-success">Public Endpoints (No Auth Required)</h6>
+                    <div class="bg-dark text-light p-2 rounded">
+                        <code>curl https://api.pugleaf.net/api/v1/stats</code>
+                    </div>
+                    <small class="text-muted">Returns system statistics - no authentication needed</small>
+                </div>
+
+                <div class="mb-3">
+                    <h6 class="text-success">Article Preview (No Auth Required)</h6>
+                    <div class="bg-dark text-light p-2 rounded">
+                        <code>curl https://api.pugleaf.net/api/v1/groups/alt.comp.freeware/articles/123/preview</code>
+                    </div>
+                    <small class="text-muted">Returns article preview/excerpt without authentication</small>
+                </div>
+
+                <div class="mb-3">
+                    <h6 class="text-primary">Get All Newsgroups (Auth Required)</h6>
+                    <div class="bg-dark text-light p-2 rounded">
+                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://api.pugleaf.net/api/v1/groups</code>
+                    </div>
+                    <small class="text-muted">Returns JSON array of all available newsgroups</small>
+                </div>
+
+                <div class="mb-3">
+                    <h6 class="text-primary">Get Group Articles (Auth Required)</h6>
+                    <div class="bg-dark text-light p-2 rounded">
+                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://api.pugleaf.net/api/v1/groups/alt.comp.freeware/overview</code>
+                    </div>
+                    <small class="text-muted">Returns article overview for the specified group</small>
+                </div>
+
+                <div class="mb-3">
+                    <h6 class="text-primary">Get Specific Article (Auth Required)</h6>
+                    <div class="bg-dark text-light p-2 rounded">
+                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://api.pugleaf.net/api/v1/groups/alt.comp.freeware/articles/123</code>
+                    </div>
+                    <small class="text-muted">Returns full article content including headers and body</small>
+                </div>
+
+                <div class="mb-3">
+                    <h6 class="text-primary">Get Article by Message ID (Auth Required)</h6>
+                    <div class="bg-dark text-light p-2 rounded">
+                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://api.pugleaf.net/api/v1/groups/alt.comp.freeware/message/&lt;msg-id@domain.com&gt;</code>
+                    </div>
+                    <small class="text-muted">Returns article by message ID instead of article number</small>
+                </div>
+
+                <div class="mb-3">
+                    <h6 class="text-primary">Get Thread Structure (Auth Required)</h6>
+                    <div class="bg-dark text-light p-2 rounded">
+                        <code>curl -H "X-API: your-api-token" \<br>&nbsp;&nbsp;&nbsp;&nbsp;https://api.pugleaf.net/api/v1/groups/alt.comp.freeware/threads</code>
+                    </div>
+                    <small class="text-muted">Returns threaded conversation structure for the group</small>
+                </div>
+
+                <div class="alert alert-warning py-2 mt-3">
+                    <small>
+                        <i class="bi bi-exclamation-triangle me-1"></i>
+                        <strong>Authentication Errors:</strong> Missing or invalid <code>X-API</code> header will return HTTP 401 Unauthorized.
+                    </small>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Quick Actions -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-dark">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-lightning me-2"></i>Quick Actions
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2 d-md-flex justify-content-md-center">
+                    <a href="/groups" class="btn btn-primary btn-lg">
+                        <i class="bi bi-collection me-2"></i>Start Browsing Groups
+                    </a>
+                    <a href="/search" class="btn btn-secondary btn-lg">
+                        <i class="bi bi-search me-2"></i>Search for Content
+                    </a>
+                    <a href="/stats" class="btn btn-info btn-lg">
+                        <i class="bi bi-bar-chart me-2"></i>View System Status
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

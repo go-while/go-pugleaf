@@ -1,0 +1,37 @@
+# Educational Institutions
+
+This directory contains newsgroup hierarchies for: Educational Institutions
+
+## Hierarchies in this category:
+
+- `caltech.active` - caltech (13 groups)
+- `cmu.active` - cmu (43 groups)
+- `columbia.active` - columbia (11 groups)
+- `cornell.active` - cornell (20 groups)
+- `dartmouth.active` - dartmouth (4 groups)
+- `duke.active` - duke (8 groups)
+- `harvard.active` - harvard (39 groups)
+- `jhu.active` - jhu (2 groups)
+- `mit.active` - mit (24 groups)
+- `msu.active` - msu (16 groups)
+- `ncsu.active` - ncsu (5 groups)
+- `nyu.active` - nyu (29 groups)
+- `osu.active` - osu (63 groups)
+- `princeton.active` - princeton (9 groups)
+- `psu.active` - psu (14 groups)
+- `purdue.active` - purdue (5 groups)
+- `rice.active` - rice (1 groups)
+- `tamu.active` - tamu (70 groups)
+- `ucb.active` - ucb (471 groups)
+- `ucla.active` - ucla (7 groups)
+- `ucsb.active` - ucsb (14 groups)
+- `ucsd.active` - ucsd (2 groups)
+- `uiuc.active` - uiuc (212 groups)
+- `umich.active` - umich (217 groups)
+- `umn.active` - umn (298 groups)
+- `upenn.active` - upenn (5 groups)
+- `usc.active` - usc (15 groups)
+- `utexas.active` - utexas (262 groups)
+- `uw.active` - uw (984 groups)
+- `vt.active` - vt (18 groups)
+- `yale.active` - yale (25 groups)

@@ -1,0 +1,156 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item active" aria-current="page">Sections</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<!-- Navigation Menu -->
+<!--
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-diagram-2 me-2"></i>Section Browser
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="btn-group" role="group" aria-label="Navigation">
+                    <a href="/" class="btn btn-outline-secondary">
+                        <strong>[H]</strong> Return to Main Menu
+                    </a>
+                    <a href="/groups" class="btn btn-outline-info">
+                        <strong>[G]</strong> All Groups
+                    </a>
+                    <a href="/search" class="btn btn-outline-success">
+                        <strong>[S]</strong> Search
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+-->
+
+<!-- Sections List -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-layers me-2"></i>Available Sections
+                </h5>
+                <span class="badge bg-light text-dark">{{len .Sections}} sections</span>
+            </div>
+            <div class="card-body">
+                {{if .Sections}}
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th style="width: 200px;">Section Name</th>
+                                <th>Display Name</th>
+                                <th>Description</th>
+                                <!--
+                                <th style="width: 100px;" class="text-center">In Header</th>
+                                <th style="width: 100px;" class="text-center">Sort Order</th>
+                                <th style="width: 120px;" class="text-center">Actions</th>
+                                -->
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{range .Sections}}
+                            <tr>
+                                <td>
+                                    <a href="/{{.Name}}" class="text-decoration-none fw-bold">
+                                        {{.Name}}
+                                    </a>
+                                </td>
+                                <td>
+                                    <strong>{{.DisplayName}}</strong>
+                                </td>
+                                <td>
+                                    <small class="text-muted">{{.Description}}</small>
+                                </td>
+                            <!--
+                                <td class="text-center">
+                                    {{if .ShowInHeader}}
+                                        <span class="badge bg-success">Yes</span>
+                                    {{else}}
+                                        <span class="badge bg-secondary">No</span>
+                                    {{end}}
+                                </td>
+                                <td class="text-center">
+                                    <span class="badge bg-primary">{{.SortOrder}}</span>
+                                </td>
+                                <td class="text-center">
+                                    <div class="btn-group btn-group-sm" role="group">
+                                        <a href="/{{.Name}}" class="btn btn-outline-primary" title="View Section">
+                                            <i class="bi bi-eye"></i>
+                                        </a>
+                                        <a href="/search?section={{.Name}}" class="btn btn-outline-info" title="Search in Section">
+                                            <i class="bi bi-search"></i>
+                                        </a>
+                                    </div>
+                                </td>
+                            -->
+                            </tr>
+                            {{end}}
+                        </tbody>
+                    </table>
+                </div>
+                {{else}}
+                <div class="alert alert-warning" role="alert">
+                    <i class="bi bi-exclamation-triangle me-2"></i>
+                    <strong>No sections found.</strong> The database may be empty or not properly configured.
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Quick Stats -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-info-circle me-2"></i>Section Information
+                </h6>
+            </div>
+            <div class="card-body">
+                <p class="mb-3">
+                    <strong>What are sections?</strong><br>
+                    <br>Sections organize related newsgroups together.
+                    <br>Each section can contain multiple newsgroups with similar topics or purposes.
+                </p>
+                <!--
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="d-grid">
+                            <a href="/groups" class="btn btn-outline-primary">
+                                <i class="bi bi-collection me-2"></i>View All Groups
+                            </a>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="d-grid">
+                            <a href="/stats" class="btn btn-outline-info">
+                                <i class="bi bi-bar-chart me-2"></i>System Statistics
+                            </a>
+                        </div>
+                    </div>
+                </div>
+                -->
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

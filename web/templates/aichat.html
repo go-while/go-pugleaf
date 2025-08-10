@@ -1,0 +1,533 @@
+{{template "base_chat.html" .}}
+{{define "content"}}
+<style>
+/* Override any global styles for full-screen chat */
+html, body {
+    margin: 0 !important;
+    padding: 0 !important;
+    height: 100% !important;
+    overflow: hidden !important;
+}
+
+/* Ensure chat container is always on top */
+.chat-container {
+    z-index: 9999 !important;
+    position: fixed !important;
+}
+
+/* AI Chat Full Screen Layout */
+.chat-container {
+    height: 100vh;
+    max-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    overflow: hidden; /* Prevent container from growing beyond viewport */
+    position: fixed; /* Fix to viewport to ensure it doesn't get pushed down */
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1000;
+}
+
+.chat-header {
+    flex-shrink: 0;
+    background-color: #212529;
+    color: white;
+    padding: 10px 15px;
+    border-bottom: 1px solid #444;
+}
+
+.chat-controls {
+    flex-shrink: 0;
+    padding: 10px 15px;
+    background-color: #f8f9fa;
+    border-bottom: 1px solid #dee2e6;
+}
+
+.chat-messages-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden; /* Ensure this doesn't expand beyond available space */
+}
+
+.chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 15px;
+    background: #f8f9fa;
+    font-family: 'Courier New', 'Monaco', monospace;
+    font-size: 0.9em;
+    min-height: 0; /* Allow shrinking */
+}
+
+.chat-input-area {
+    flex-shrink: 0;
+    padding: 10px 15px;
+    background-color: #ffffff;
+    border-top: 1px solid #dee2e6;
+    position: sticky; /* Make input area stick to bottom */
+    bottom: 0;
+    z-index: 10;
+}
+
+/* Dark theme adjustments for full screen */
+[data-bs-theme="dark"] .chat-controls {
+    background-color: #2b3035;
+    border-bottom-color: #444;
+}
+
+[data-bs-theme="dark"] .chat-messages {
+    background-color: #1a1a1a;
+}
+
+[data-bs-theme="dark"] .chat-input-area {
+    background-color: #2b3035;
+    border-top-color: #444;
+}
+
+/* AI Thinking Block Styling */
+.thinking-block {
+    display: block;
+    background-color: var(--bs-secondary-bg);
+    border-left: 4px solid var(--bs-secondary);
+    padding: 8px 12px;
+    margin: 8px 0;
+    font-family: 'Courier New', 'Monaco', monospace;
+    font-size: 0.85em;
+    color: var(--bs-secondary-color);
+    white-space: pre-wrap;
+    position: relative;
+    cursor: pointer;
+    transition: background-color 0.2s;
+    min-height: 30px;
+}
+
+.thinking-block:before {
+    content: "🤔 AI Thinking Process...";
+    display: block;
+    font-weight: bold;
+    color: var(--bs-body-color);
+    margin-bottom: 6px;
+    font-size: 0.8em;
+    font-family: sans-serif;
+}
+
+.thinking-block:hover {
+    background-color: var(--bs-tertiary-bg);
+}
+
+.thinking-block.collapsed {
+    max-height: 35px;
+    overflow: hidden;
+}
+
+.thinking-block.collapsed:after {
+    content: " [Click to expand]";
+    color: var(--bs-secondary-color);
+    font-style: italic;
+    font-size: 0.7em;
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+}
+
+.thinking-block:not(.collapsed):after {
+    content: " [Click to collapse]";
+    color: var(--bs-secondary-color);
+    font-style: italic;
+    font-size: 0.7em;
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+}
+</style>
+<div class="chat-container">
+  <!-- Chat Header -->
+  <div class="chat-header">
+    <h5 class="mb-0">🤖 AI Chat powered by local ollama instance @ RTX 3080 Ti (12 GB vRAM + 64 GB DDR4 ECC)</h5>
+  </div>
+
+  <!-- Chat Controls -->
+  <div class="chat-controls">
+    <div class="row align-items-center">
+      <div class="col-md-4">
+        <label for="model-select" class="form-label small mb-1">AI Model:</label>
+        <select id="model-select" class="form-select form-select-sm" onchange="switchModel()">
+          {{range .AvailableModels}}
+          <option value="{{.PostKey}}" {{if and $.DefaultModel (eq .PostKey $.DefaultModel.PostKey)}}selected{{end}}>
+            {{.DisplayName}} {{if index $.ChatCounts .PostKey}}({{index $.ChatCounts .PostKey}} msgs){{end}}
+          </option>
+          {{end}}
+        </select>
+      </div>
+      <div class="col-md-5">
+        <div class="small mb-1">
+          <strong>Active:</strong> <span id="active-model-name">{{if .DefaultModel}}{{.DefaultModel.DisplayName}}{{end}}</span>
+        </div>
+        <div class="text-muted small" id="active-model-description">{{if .DefaultModel.Description}}{{.DefaultModel.Description}}{{end}}</div>
+      </div>
+      <div class="col-md-3 text-end">
+        <button type="button" class="btn btn-outline-secondary btn-sm me-1" onclick="clearCurrentModel()">Clear Chat</button>
+        <button type="button" class="btn btn-outline-danger btn-sm" onclick="clearAllModels()">Clear All</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat Messages Container -->
+  <div class="chat-messages-container">
+    <div id="chat-messages" class="chat-messages">
+      <!-- Render existing chat history -->
+      {{range .ChatHistory}}
+      <div class="{{if eq .Role "user"}}text-end{{else}}text-start{{end}} mb-2">
+        <span class="fw-bold">{{if eq .Role "user"}}You{{else}}AI{{end}}:</span> {{.Content}}
+        <hr class="my-2 border-secondary opacity-25">
+      </div>
+      {{end}}
+    </div>
+  </div>
+
+  <!-- Chat Input Area -->
+  <div class="chat-input-area">
+    <form id="chat-form" onsubmit="return sendMessage();">
+      <div class="input-group">
+        <button class="btn btn-dark pull-left" type="submit">Send</button>
+        <input type="text" id="chat-input" class="form-control" placeholder="Type your message (max {{.MaxInputLength}} chars)..." autocomplete="off" required maxlength="{{.MaxInputLength}}">
+      </div>
+      <div class="text-muted small mt-1">
+        <span id="char-count">0</span>/{{.MaxInputLength}} characters
+      </div>
+      <div class="text-muted small mt-0">
+        Rules &amp; Privacy:<br>
+        - 'AI Chat' keeps your chat messages only in memory!<br>
+        - Don't store anything important in chats!<br>
+        - Chats are lost when go-pugleaf webserver restarts!
+        - Chats will expire or can reset without a warning!<br>
+      </div>
+    </form>
+  </div>
+</div>
+<script>
+console.log('JavaScript is running!');
+const chatMessages = document.getElementById('chat-messages');
+const chatForm = document.getElementById('chat-form');
+const chatInput = document.getElementById('chat-input');
+const charCount = document.getElementById('char-count');
+const modelSelect = document.getElementById('model-select');
+const activeModelName = document.getElementById('active-model-name');
+const activeModelDescription = document.getElementById('active-model-description');
+const sessionToken = "{{.SessionToken}}"; // Strong session token from backend
+
+// Available models data from backend
+const availableModels = {};
+{{range .AvailableModels}}
+availableModels["{{.PostKey}}"] = {
+  displayName: "{{.DisplayName}}",
+  description: "{{.Description}}"
+};
+{{end}}
+
+let currentModel = "{{if .DefaultModel}}{{.DefaultModel.PostKey}}{{end}}";
+
+// Load chat history for default model on page load
+function loadInitialChatHistory() {
+  if (!currentModel) return;
+
+  fetch(`/aichat/history/${currentModel}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sessionToken: sessionToken})
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.history && data.history.length > 0) {
+      console.log(`Loading ${data.history.length} messages for initial model: ${currentModel}`);
+      data.history.forEach(msg => {
+        console.log('Loading message:', msg);
+
+        if (msg && (msg.content || msg.Content)) {
+          const content = msg.content || msg.Content;
+          const role = msg.role || msg.Role || 'assistant';
+          appendMessage(role, content);
+        } else {
+          console.warn('Invalid message structure:', msg);
+        }
+      });
+    } else {
+      console.log('No chat history found for initial model:', currentModel);
+    }
+  })
+  .catch(err => {
+    console.error('Failed to load initial chat history:', err);
+  });
+}
+
+// Load initial chat history and scroll to bottom on page load
+loadInitialChatHistory();
+
+// Fix any escaped HTML in pre-rendered chat history from template
+function fixPreRenderedHTML() {
+  const chatContent = document.querySelectorAll('#chat-messages div');
+  chatContent.forEach(div => {
+    let innerHTML = div.innerHTML;
+    innerHTML = innerHTML.replace(/&lt;br&gt;/gi, '<br>');
+    //innerHTML = innerHTML.replace(/&lt;think&gt;/gi, '<div class="thinking-block collapsed">');
+    //innerHTML = innerHTML.replace(/&lt;\/think&gt;/gi, '</div>');
+
+    if (innerHTML !== div.innerHTML) {
+      div.innerHTML = innerHTML;
+      // Add click handlers to any thinking blocks
+      div.querySelectorAll('.thinking-block').forEach(block => {
+        block.addEventListener('click', function() {
+          this.classList.toggle('collapsed');
+        });
+      });
+    }
+  });
+}
+
+// Fix pre-rendered content and then scroll
+fixPreRenderedHTML();
+chatMessages.scrollTop = chatMessages.scrollHeight;
+
+// Update character count in real-time
+chatInput.addEventListener('input', function() {
+  const length = this.value.length;
+  charCount.textContent = length;
+
+  // Change color when approaching limit
+  if (length > 320) {
+    charCount.style.color = '#dc3545'; // red
+  } else if (length > 250) {
+    charCount.style.color = '#ffc107'; // yellow
+  } else {
+    charCount.style.color = '#6c757d'; // muted
+  }
+});
+
+// Initialize character count on page load
+charCount.textContent = chatInput.value.length;
+
+function appendMessage(role, content) {
+  const div = document.createElement('div');
+  div.className = role === 'user' ? 'text-end mb-2' : 'text-start mb-2';
+
+  // Process content to handle thinking blocks
+  let processedContent = content;
+  if (role === 'assistant') {
+    // Convert <think> tags to proper divs with class
+    processedContent = processedContent.replace(/<think>/gi, '<div class="thinking-block collapsed">');
+    processedContent = processedContent.replace(/<\/think>/gi, '</div>');
+  }
+
+  div.innerHTML = `<span class='fw-bold'>${role === 'user' ? 'You' : 'AI'}:</span> ${processedContent}<hr class="my-2 border-secondary opacity-25">`;
+  chatMessages.appendChild(div);
+
+  // Add click handlers to thinking blocks
+  if (role === 'assistant') {
+    const thinkingBlocks = div.querySelectorAll('.thinking-block');
+    thinkingBlocks.forEach(block => {
+      block.addEventListener('click', function() {
+        this.classList.toggle('collapsed');
+      });
+    });
+  }
+
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function clearChatMessages() {
+  chatMessages.innerHTML = '';
+}
+
+function updateActiveModelInfo(modelKey) {
+  const model = availableModels[modelKey];
+  if (model) {
+    activeModelName.textContent = model.displayName;
+    activeModelDescription.textContent = model.description || '';
+  }
+}
+
+function updateModelSelectCounts() {
+  // Update the dropdown options with current message counts
+  fetch(`/aichat/counts?sessionToken=${sessionToken}`)
+  .then(r => r.json())
+  .then(data => {
+    if (data.counts) {
+      // Update each option text to include current counts
+      const options = modelSelect.querySelectorAll('option');
+      options.forEach(option => {
+        const modelKey = option.value;
+        const model = availableModels[modelKey];
+        if (model && data.counts[modelKey] !== undefined) {
+          const count = data.counts[modelKey];
+          const countText = count > 0 ? ` (${count} msgs)` : '';
+          option.textContent = model.displayName + countText;
+        }
+      });
+    }
+  })
+  .catch(err => {
+    console.error('Failed to update message counts:', err);
+  });
+}
+
+function switchModel() {
+  const newModel = modelSelect.value;
+  if (newModel === currentModel) return;
+
+  currentModel = newModel;
+  updateActiveModelInfo(newModel);
+
+  // Load chat history for the selected model
+  fetch(`/aichat/history/${newModel}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({sessionToken: sessionToken})
+  })
+  .then(r => r.json())
+  .then(data => {
+    clearChatMessages();
+    if (data.history && data.history.length > 0) {
+      data.history.forEach(msg => {
+        // Debug log to see what we're getting
+        console.log('Loading message:', msg);
+
+        // Check if the message has the expected structure
+        if (msg && (msg.content || msg.Content)) {
+          const content = msg.content || msg.Content; // Handle both cases
+          const role = msg.role || msg.Role || 'assistant'; // Handle both cases
+          appendMessage(role, content);
+        } else {
+          console.warn('Invalid message structure:', msg);
+        }
+      });
+    }
+    // Update model select counts after switching models
+    updateModelSelectCounts();
+  })
+  .catch(err => {
+    console.error('Failed to load chat history:', err);
+    appendMessage('assistant', '[Error: Failed to load chat history]');
+  });
+}
+
+function sendMessage() {
+  const msg = chatInput.value.trim();
+  if (!msg) return false;
+
+  const maxLength = 1024;
+  if (msg.length > maxLength) {
+    alert(`Message too long! Maximum ${maxLength} characters allowed.`);
+    return false;
+  }
+
+  // Add user message to UI immediately
+  appendMessage('user', msg);
+  chatInput.value = '';
+  charCount.textContent = '0'; // Reset character count
+
+  // Update model select counts after user message
+  updateModelSelectCounts();
+
+  // Send message with selected model to backend
+  fetch('/aichat/send', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      message: msg,
+      sessionToken: sessionToken,
+      model: currentModel
+    })
+  })
+  .then(r => {
+    if (r.status === 429) {
+      appendMessage('assistant', '[Rate limited: Please wait 5 seconds before sending another message]');
+      return null;
+    }
+    return r.json();
+  })
+  .then(data => {
+    if (!data) return; // Rate limited, already handled
+    if (data.reply) {
+      appendMessage('assistant', data.reply);
+      // Update model select counts after successful message
+      updateModelSelectCounts();
+    } else if (data.error) {
+      appendMessage('assistant', `[Error: ${data.error}]`);
+    } else {
+      appendMessage('assistant', '[Error: No reply field in response]');
+    }
+  })
+  .catch(() => appendMessage('assistant', '[Error: No response from AI]'));
+  return false;
+}
+
+function clearCurrentModel() {
+  console.log('clearCurrentModel() called');
+  console.log('currentModel:', currentModel);
+
+  fetch('/aichat/clear/' + currentModel, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      sessionToken: '{{.SessionToken}}'
+    })
+  })
+  .then(response => response.json())
+  .then(data => {
+    console.log('Clear response:', data);
+    if (data.success) {
+      // Clear the chat messages from the UI
+      document.getElementById('chat-messages').innerHTML = '';
+      // Update model select counts after clearing
+      updateModelSelectCounts();
+      console.log('Chat cleared successfully');
+    } else {
+      console.error('Failed to clear chat:', data.error);
+    }
+  })
+  .catch(error => {
+    console.error('Error clearing chat:', error);
+  });
+}
+
+function clearAllModels() {
+  if (!confirm('Clear ALL chat histories for ALL models?')) {
+    return;
+  }
+
+  fetch('/aichat/clear/all', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      sessionToken: '{{.SessionToken}}'
+    })
+  })
+  .then(response => response.json())
+  .then(data => {
+    console.log('Clear all response:', data);
+    if (data.success) {
+      // Clear the chat messages from the UI
+      document.getElementById('chat-messages').innerHTML = '';
+      // Update model select counts after clearing all
+      updateModelSelectCounts();
+      console.log('All chats cleared successfully');
+    } else {
+      console.error('Failed to clear all chats:', data.error);
+    }
+  })
+  .catch(error => {
+    console.error('Error clearing all chats:', error);
+  });
+}
+</script>
+{{end}}

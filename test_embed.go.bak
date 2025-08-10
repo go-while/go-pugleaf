@@ -1,0 +1,28 @@
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/go-while/go-pugleaf/internal/web"
+)
+
+func main() {
+	fmt.Println("Testing embedded static files...")
+
+	if web.UseEmbeddedStatic() {
+		fmt.Println("✓ Embedded static files are available")
+
+		files, err := web.ListEmbeddedFiles()
+		if err != nil {
+			log.Fatalf("Error listing embedded files: %v", err)
+		}
+
+		fmt.Printf("Found %d embedded files:\n", len(files))
+		for _, file := range files {
+			fmt.Printf("  - %s\n", file)
+		}
+	} else {
+		fmt.Println("✗ No embedded static files found")
+	}
+}

@@ -1,0 +1,143 @@
+# golangci-lint configuration for go-pugleaf
+# Security-focused newsgroup server - comprehensive linting for safety
+
+run:
+  timeout: 5m
+  issues-exit-code: 1
+  tests: true
+  build-tags:
+    - ""
+
+output:
+  formats:
+    - format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+
+linters-settings:
+  # Security scanner - critical for replacing vulnerable PHP system
+  gosec:
+    severity: "low"
+    confidence: "low"
+    excludes:
+      - G204  # Subprocess launched with variable - we'll handle case by case
+    config:
+      G101: # Look for hardcoded credentials
+        pattern: "(?i)(?:password|pwd|secret|token|key)"
+        ignore_entropy: false
+      G104: # Audit errors not checked
+        fmt: true
+
+  # Error handling - critical for server stability
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+    exclude-functions:
+      - fmt.Print
+      - fmt.Println
+      - fmt.Printf
+
+  # Code complexity
+  gocyclo:
+    min-complexity: 15
+
+  # Function length
+  funlen:
+    lines: 80
+    statements: 50
+
+  # Line length
+  lll:
+    line-length: 120
+
+  # Naming conventions
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+      - name: package-comments
+        severity: warning
+      - name: var-naming
+        severity: warning
+
+  # Unused code detection
+  unused:
+    check-exported: false
+
+  # Performance issues
+  prealloc:
+    simple: true
+    range-loops: true
+    for-loops: false
+
+linters:
+  enable:
+    # Security-focused linters (CRITICAL for newsgroup server)
+    - gosec          # Security vulnerabilities
+    - errcheck       # Unchecked errors
+    - ineffassign    # Ineffectual assignments
+    - unconvert      # Unnecessary type conversions
+
+    # Code quality linters
+    - staticcheck    # Advanced static analysis
+    - unused         # Unused code (replaces deadcode, varcheck, structcheck)
+    - typecheck      # Type checking
+
+    # Performance linters
+    - prealloc       # Slice preallocation
+    - govet          # Go vet (includes fieldalignment)
+
+    # Style and maintainability
+    - gofmt          # Code formatting
+    - goimports      # Import formatting
+    - misspell       # Spelling mistakes
+    - unparam        # Unused function parameters
+    - goconst        # Repeated strings that could be constants
+    - gocyclo        # Cyclomatic complexity
+    - funlen         # Function length
+    - lll            # Line length
+    - revive         # Golint replacement
+
+    # Potential bugs
+    - bodyclose      # HTTP response body not closed
+    - rowserrcheck   # SQL rows.Err not checked
+    - sqlclosecheck  # SQL Close() not checked
+    - noctx          # HTTP requests without context
+
+  disable:
+    - exhaustive     # Switch exhaustiveness - handle case by case
+    - testpackage    # Separate test packages - not always needed
+
+issues:
+  exclude-dirs:
+    - vendor
+  exclude-files:
+    - ".*\\.pb\\.go$"
+  exclude-use-default: false
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - dupl
+        - gosec
+        - funlen
+
+    # Exclude lll issues for long lines with go:generate
+    - linters:
+        - lll
+      source: "^//go:generate "
+
+  # Maximum issues count per one linter. Set to 0 to disable
+  max-issues-per-linter: 0
+
+  # Maximum count of issues with the same text. Set to 0 to disable
+  max-same-issues: 0
+
+severity:
+  default-severity: error
+  rules:
+    - linters:
+        - revive
+      severity: warning

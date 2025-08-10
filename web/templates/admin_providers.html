@@ -1,0 +1,292 @@
+{{define "admin_providers"}}
+<!-- Providers Tab -->
+<div class="tab-pane fade show active" id="providers" role="tabpanel" aria-labelledby="providers-tab">
+  <!-- Provider Management -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h5 class="card-title mb-0">🌐 Add News Server / Provider</h5>
+              </div>
+              <div class="card-body">
+                  <form autocomplete="off" method="POST" action="/admin/providers?tab=providers">
+                      <input autocomplete="false" name="hidden" type="text" style="display:none;">
+                      <div class="row">
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_name" class="form-label">Name</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="provider_name" name="name" required
+                                         placeholder="Provider name">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_grp" class="form-label">Group</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="provider_grp" name="grp"
+                                         placeholder="Prov-Group">
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="provider_host" class="form-label">Host</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="provider_host" name="host" required
+                                         placeholder="news.example.com">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_port" class="form-label">Port</label>
+                                  <input autocomplete="off" type="number" class="form-control" id="provider_port" name="port" value="119" required>
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_ssl" class="form-label">SSL</label>
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="provider_ssl" name="ssl">
+                                      <label class="form-check-label" for="provider_ssl">
+                                          Use SSL
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_enabled" class="form-label">Enabled</label>
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="provider_enabled" name="enabled" checked>
+                                      <label class="form-check-label" for="provider_enabled">
+                                          Enable
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                      </div>
+                      <div class="row">
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="provider_username" class="form-label">Username</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="provider_username" name="username"
+                                         placeholder="Optional">
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="provider_password" class="form-label">Password</label>
+                                  <input autocomplete="new-password" type="password" class="form-control" id="provider_password" name="password"
+                                         placeholder="Optional">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_max_conns" class="form-label">Max Connections</label>
+                                  <input type="number" class="form-control" id="provider_max_conns" name="max_conns" value="5" min="1" max="1000">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_priority" class="form-label">Priority</label>
+                                  <input type="number" class="form-control" id="provider_priority" name="priority" value="50" min="1" max="100">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_max_art_size" class="form-label">Max Article Size (Bytes)</label>
+                                  <input type="number" class="form-control" id="provider_max_art_size" name="max_art_size" value="32768" min="1" max="16777216">
+                              </div>
+                          </div>
+                      </div>
+                      <button type="submit" class="btn btn-success">Add Provider</button>
+                  </form>
+              </div>
+          </div>
+      </div>
+  </div>
+
+  <!-- Provider List -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <div class="d-flex justify-content-between align-items-center">
+                      <h5 class="card-title mb-0">🌐 Backend Management for fetching News</h5>
+                      <p>Important: The Provider Name is directly related to progress of fetching news. If you change the name later, you'll reset progress too!</p>
+                      <span class="badge bg-light text-dark">{{len .Providers}} providers</span>
+                  </div>
+              </div>
+              <div class="card-body">
+                  {{if .Providers}}
+                  <div class="table-responsive">
+                      <table class="table table-striped">
+                          <thead>
+                              <tr>
+                                  <th>Edit</th>
+                                  <th>Name</th>
+                                  <th>Host:Port</th>
+                                  <th>SSL</th>
+                                  <th>Enabled</th>
+                                  <th>Priority</th>
+                                  <th>Max Conns</th>
+                                  <th>Max Art Size</th>
+                                  <th>Created</th>
+                                  <th>Delete</th>
+                              </tr>
+                          </thead>
+                          <tbody>
+                              {{range .Providers}}
+                              <tr>
+                                  <td>
+                                    <button type="button" class="btn btn-outline-primary btn-sm"
+                                        data-bs-toggle="collapse" data-bs-target="#edit-prov-{{.ID}}">
+                                            Edit
+                                    </button>
+                                  </td>
+                                  <td><strong>{{.Name}}</strong></td>
+                                  <td>{{.Host}}:{{.Port}}</td>
+                                  <td>
+                                      {{if .SSL}}
+                                      <span class="badge bg-success">Yes</span>
+                                      {{else}}
+                                      <span class="badge bg-secondary">No</span>
+                                      {{end}}
+                                  </td>
+                                  <td>
+                                      {{if .Enabled}}
+                                      <span class="badge bg-success">Enabled</span>
+                                      {{else}}
+                                      <span class="badge bg-danger">Disabled</span>
+                                      {{end}}
+                                  </td>
+                                  <td>{{.Priority}}</td>
+                                  <td>{{.MaxConns}}</td>
+                                  <td>{{.MaxArtSize}}</td>
+                                  <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+                                  <td>
+                                    {{if not .Enabled}}
+                                    <div class="btn-group btn-group-sm">
+                                    <form method="POST" action="/admin/providers/delete?tab=providers" style="display: inline;">
+                                        <input type="hidden" name="id" value="{{.ID}}">
+                                        <button type="submit" class="btn btn-outline-danger btn-sm">Delete</button>
+                                    </form>
+                                    </div>
+                                    {{else}}
+                                    <form style="display: inline;">
+                                        <button disabled type="submit" class="btn btn-outline-danger btn-sm">
+                                            Delete
+                                        </button>
+                                    </form>
+                                    {{end}}
+                                  </td>
+                              </tr>
+                              <!-- Collapsible Edit Form -->
+                              <tr class="collapse" id="edit-prov-{{.ID}}">
+                                  <td colspan="9">
+                                      <div class="card">
+                                          <div class="card-header bg-dark text-white">
+                                              <h6>Edit Provider: {{.Name}}</h6>
+                                          </div>
+                                          <div class="card-body">                              <form method="POST" action="/admin/providers/update?tab=providers">
+                                  <input type="hidden" name="id" value="{{.ID}}">
+                                  <div class="row">
+                                      <div class="col-md-2">
+                                          <div class="mb-3">
+                                              <label class="form-label">Name</label>
+                                              <input type="text" class="form-control" name="name" value="{{.Name}}" required>
+                                          </div>
+                                      </div>
+                                      <div class="col-md-2">
+                                          <div class="mb-3">
+                                              <label class="form-label">Group</label>
+                                                              <input type="text" class="form-control" name="grp" value="{{.Grp}}">
+                                                          </div>
+                                                      </div>
+                                                      <div class="col-md-3">
+                                                          <div class="mb-3">
+                                                              <label class="form-label">Host</label>
+                                                              <input type="text" class="form-control" name="host" value="{{.Host}}" required>
+                                                          </div>
+                                                      </div>
+                                                      <div class="col-md-2">
+                                                          <div class="mb-3">
+                                                              <label class="form-label">Port</label>
+                                                              <input type="number" class="form-control" name="port" value="{{.Port}}" required>
+                                                          </div>
+                                                      </div>
+                                                      <div class="col-md-2">
+                                                          <div class="form-check mt-4">
+                                                              <input class="form-check-input" type="checkbox" name="ssl" {{if .SSL}}checked{{end}}>
+                                                              <label class="form-check-label">Use SSL</label>
+                                                          </div>
+                                                      </div>
+                                                      <div class="col-md-2">
+                                                          <div class="form-check mt-4">
+                                                              <input class="form-check-input" type="checkbox" name="enabled" {{if .Enabled}}checked{{end}}>
+                                                              <label class="form-check-label">Enabled</label>
+                                                          </div>
+                                                      </div>
+                                                  </div>
+                                                  <div class="row">
+                                                      <div class="col-md-3">
+                                                          <div class="mb-3">
+                                                              <label class="form-label">Username</label>
+                                                              <input autocomplete="off"  type="text" class="form-control" name="username" value="{{.Username}}">
+                                                              <div class="form-check mt-2">
+                                                                  <input type="checkbox" class="form-check-input" name="clear_username" id="clear_username">
+                                                                  <label class="form-check-label" for="clear_username">
+                                                                      Clear username (for open servers)
+                                                                  </label>
+                                                              </div>
+                                                          </div>
+                                                      </div>
+                                                      <div class="col-md-3">
+                                                          <div class="mb-3">
+                                                              <label class="form-label">Password</label>
+                                                              <input autocomplete="new-password" type="password" class="form-control" name="password" placeholder="Leave blank to keep current">
+                                                              <div class="form-check mt-2">
+                                                                  <input type="checkbox" class="form-check-input" name="clear_password" id="clear_password">
+                                                                  <label class="form-check-label" for="clear_password">
+                                                                      Clear password (for open servers)
+                                                                  </label>
+                                                              </div>
+                                                          </div>
+                                                      </div>
+                                                      <div class="col-md-2">
+                                                          <div class="mb-3">
+                                                              <label class="form-label">Max Connections</label>
+                                                              <input type="number" class="form-control" name="max_conns" value="{{.MaxConns}}" min="1" max="1000">
+                                                          </div>
+                                                      </div>
+                                                      <div class="col-md-2">
+                                                          <div class="mb-3">
+                                                              <label class="form-label">Priority</label>
+                                                              <input type="number" class="form-control" name="priority" value="{{.Priority}}" min="1" max="100">
+                                                          </div>
+                                                      </div>
+                                                      <div class="col-md-2">
+                                                          <div class="mb-3">
+                                                              <label class="form-label">Max Article Size in Bytes</label>
+                                                              <input type="number" class="form-control" name="max_art_size" value="{{.MaxArtSize}}" min="4096" max="16777216">
+                                                          </div>
+                                                      </div>
+                                                  </div>
+                                                  <button type="submit" class="btn btn-primary">Update Provider</button>
+                                              </form>
+                                          </div>
+                                      </div>
+                                  </td>
+                              </tr>
+                              {{end}}
+                          </tbody>
+                      </table>
+                  </div>
+                  {{else}}
+                  <div class="alert alert-info">
+                      <strong>No providers found.</strong> Create the first provider above.
+                  </div>
+                  {{end}}
+              </div>
+          </div>
+      </div>
+  </div>
+</div>
+{{end}}

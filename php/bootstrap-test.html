@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bootstrap Test</title>
+
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <style>
+        .test-box {
+            background-color: #f8f9fa;
+            border: 2px solid #dee2e6;
+            padding: 20px;
+            margin: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="text-primary">Bootstrap CSS Test</h1>
+
+        <!-- Test Bootstrap classes -->
+        <div class="alert alert-success" role="alert">
+            ✅ If you can see this green alert box with proper styling, Bootstrap is working!
+        </div>
+
+        <div class="alert alert-danger" role="alert">
+            ❌ If this looks like plain text without colors, Bootstrap CSS is blocked.
+        </div>
+
+        <!-- Test Bootstrap components -->
+        <div class="card">
+            <div class="card-header">
+                Test Card Header
+            </div>
+            <div class="card-body">
+                <h5 class="card-title">Bootstrap Card</h5>
+                <p class="card-text">This card should have proper Bootstrap styling with borders and spacing.</p>
+                <a href="#" class="btn btn-primary">Primary Button</a>
+                <a href="#" class="btn btn-secondary">Secondary Button</a>
+            </div>
+        </div>
+
+        <!-- Test responsive grid -->
+        <div class="row mt-4">
+            <div class="col-md-6">
+                <div class="test-box">
+                    <h4>Column 1</h4>
+                    <p>This should be 50% width on medium screens and up.</p>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="test-box">
+                    <h4>Column 2</h4>
+                    <p>This should be 50% width on medium screens and up.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Debug info -->
+        <div class="mt-4">
+            <h3>Debug Information</h3>
+            <ul>
+                <li><strong>Bootstrap CDN URL:</strong> https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css</li>
+                <li><strong>Current URL:</strong> <span id="current-url"></span></li>
+                <li><strong>User Agent:</strong> <span id="user-agent"></span></li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.getElementById('current-url').textContent = window.location.href;
+        document.getElementById('user-agent').textContent = navigator.userAgent;
+    </script>
+</body>
+</html>

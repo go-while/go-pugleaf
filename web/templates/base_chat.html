@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="light">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.Title}} - go-pugleaf</title>
+
+    <!-- Bootstrap CSS -->
+    <link href="/static/bootstrap-5.3.7-dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+    <!-- Bootstrap Dark Mode CSS -->
+    <link href="/static/theme-bootstrap-dark.css" rel="stylesheet">
+
+    <!-- Theme CSS -->
+    <script>
+        // Load theme preference immediately to prevent flash
+        const savedTheme = localStorage.getItem('preferred-theme') || 'bootstrap';
+        const bsTheme = localStorage.getItem('theme') || 'light';
+
+        // Set Bootstrap theme immediately
+        document.documentElement.setAttribute('data-bs-theme', bsTheme);
+
+        // Load legacy theme CSS
+        document.write(`<link rel="stylesheet" href="/static/theme-${savedTheme}.css">`);
+    </script>
+
+    <link rel="stylesheet" href="/static/css/thread-tree.css">
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+</head>
+
+<body>
+    <!-- Main Content - Full Screen -->
+    <main class="h-100 w-100">
+        {{block "content" .}}{{end}}
+    </main>
+
+    <!-- Bootstrap JS -->
+    <script src="/static/bootstrap-5.3.7-dist/js/bootstrap.bundle.min.js"></script>
+
+    <!-- Theme Switcher Script -->
+    <script src="/static/theme-switcher.js"></script>
+</body>
+
+</html>

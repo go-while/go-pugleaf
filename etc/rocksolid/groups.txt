@@ -1,0 +1,23 @@
+rocksolid.feeds.news RSS Feeds from various news sites.
+rocksolid.feeds.tech RSS Feeds covering tech, computers, etc.
+rocksolid.nodes         Discuss specific Rocksolid nodes.
+rocksolid.nodes.help    Questions and Help for node administration.
+rocksolid.nodes.announce        Rocksolid node announcements.
+rocksolid.programming   Computer programming discussion.
+rocksolid.religion      Let there be Rocksolid Light.
+rocksolid.shared.encryption     Public keys, encrypted messages etc.
+rocksolid.shared.entertainment  Entertainment discussion and articles.
+rocksolid.shared.freenet        Discussion and questions about Freenet.
+rocksolid.shared.general        General discussion, questions or requests.
+rocksolid.shared.hacking        What do you want to hack today.
+rocksolid.shared.helpdesk       Tech questions and maybe even answers.
+rocksolid.shared.i2p    Discussion and questions about I2P.
+rocksolid.shared.linux  Questions, comments and discussion of Linux.
+rocksolid.shared.news   In the News.
+rocksolid.shared.offtopic       If it doesn't fit, this is the place.
+rocksolid.shared.rocksolid      Discuss the rocksolid network.
+rocksolid.shared.security       Tips, hints and articles about security.
+rocksolid.shared.test   The place to test.
+rocksolid.shared.tor    Discussion and questions about Tor.
+rocksolid.social        General non tech chat.
+

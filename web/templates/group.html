@@ -1,0 +1,223 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item"><a href="/groups" class="text-decoration-none">Groups</a></li>
+        <li class="breadcrumb-item active" aria-current="page">{{.GroupName}}</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<!-- Group Header and Navigation -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <!--
+            <div class="card-header bg-primary text-white">
+                <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-collection me-2"></i>Group: {{.GroupName}}
+                    </h5>
+                    {{if .Articles}}
+                    {{if .Pagination}}
+                    <span class="badge bg-light text-dark">
+                        {{.Pagination.TotalCount}} articles • Showing {{len .Articles}} on this page
+                    </span>
+                    {{else}}
+                    <span class="badge bg-light text-dark">
+                        {{len .Articles}} articles • Recent messages
+                    </span>
+                    {{end}}
+                    {{end}}
+                </div>
+            </div>
+            -->
+            <div class="card-body">
+                <div class="btn-group" role="group" aria-label="Group Navigation">
+                    <a href="/groups/{{.GroupName}}/threads" class="btn btn-outline-secondary">
+                        <strong>[ Threads ]</strong>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{{template "pagination" .}}
+
+<!-- Articles List -->
+<div class="row">
+    <div class="col-12">
+        {{if .Articles}}
+        <div class="card">
+            <div class="card-header bg-success text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-file-text me-2"></i>{{.GroupName}} - Article Overview
+                </h6>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-hover mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <!--
+                            <th scope="col" style="width: 5%">
+                                <i class="bi bi-arrow-down-up"></i>
+                            </th>
+                            <th scope="col" style="width: 10%" class="text-center">Article #</th>
+                            -->
+                            <th scope="col" style="width: 80%">Subject</th>
+                            <!--<th scope="col" style="width: 10%" class="text-center">Lines</th>-->
+                            <!--<th scope="col" style="width: 15%">Author</th>-->
+                            {{if $.User}}
+                            <th scope="col" style="width: 15%" class="text-end">Last Message</th>
+                            <th scope="col" style="width: 5%" class="text-center">Spam</th>
+                            {{else}}
+                            <th scope="col" style="width: 20%" class="text-end">Last Message</th>
+                            {{end}}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{range .Articles}}
+                        <tr id="article-{{.ArticleNum}}">
+                            <!--
+                            <td class="text-center align-middle">
+                                <i class="bi bi-file-text text-primary fs-4"></i>
+                            </td>
+                            <td class="text-center align-middle">
+                                <a href="/groups/{{$.GroupName}}/articles/{{.ArticleNum}}"
+                                    class="text-decoration-none">
+                                    <span class="badge bg-primary">#{{.ArticleNum}}</span>
+                                </a>
+                            </td>
+                            -->
+                            <td class="align-left">
+                                <div>{{if gt .Spam 0}} 🚩 (SPAM) {{end}}
+                                    <a href="/groups/{{$.GroupName}}/articles/{{.ArticleNum}}"
+                                        class="text-decoration-none fw-bold">
+                                        {{.PrintSanitized "subject" $.GroupName}}
+                                    </a>
+                                    <br>
+                                    <small class="text-muted">By:</small> {{.PrintSanitized "fromheader" $.GroupName}}
+                                    <small class="text-muted">
+                                        on {{.PrintSanitized "date_string" $.GroupName}}
+                                    </small>
+
+                                </div>
+                                <!--
+                                {{if gt .ReplyCount 0}}
+                                <small class="text-muted">
+                                    <i class="bi bi-chat me-1"></i>{{.ReplyCount}} replies
+                                </small>
+                                {{end}}
+                                -->
+                            </td>
+                            <!--
+                            <td class="text-center align-middle">
+                                <span class="badge bg-secondary rounded-pill">{{.Lines}}</span>
+                            </td>
+                            -->
+                            <td class="text-end">
+                                <small class="text-muted fw-semibold">
+                                    {{.PrintSanitized "date_since" $.GroupName}}
+                                </small><br>
+                                <small class="text-muted">
+                                    By: {{.PrintSanitized "fromheader" $.GroupName}}
+                                </small>
+                            </td>
+                            {{if $.User}}
+                            <td class="text-center">
+                                <div class="btn-group btn-group-sm" role="group">
+
+                                    <form method="POST" action="/groups/{{$.GroupName}}/articles/{{.ArticleNum}}/spam#article-{{.ArticleNum}}" style="display: inline;">
+                                        <button type="submit" class="btn btn-outline-warning btn-sm" title="Flag as spam">
+                                            🚩 {{.Spam}}
+                                        </button>
+                                    </form>
+
+                                    {{if $.IsAdmin}}
+                                        {{if gt .Spam 0}}
+                                        <form method="POST" action="/groups/{{$.GroupName}}/articles/{{.ArticleNum}}/decrement-spam#spam-article-{{.ArticleNum}}" style="display: inline;">
+                                            <button type="submit" class="btn btn-outline-warning btn-sm" title="Decrement spam counter">
+                                                <i class="bi bi-dash-circle"></i>
+                                            </button>
+                                        </form>
+                                        <form method="POST" action="/groups/{{$.GroupName}}/articles/{{.ArticleNum}}/hide#article-{{.ArticleNum}}" style="display: inline;">
+                                            <button type="submit" class="btn btn-outline-secondary btn-sm" title="Hide article">
+                                                👁️ {{.Hide}}
+                                            </button>
+                                        </form>
+                                        {{end}}
+                                    {{end}}
+                                </div>
+                            </td>
+                            {{end}}
+                        </tr>
+                        {{end}}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {{else}}
+        <div class="card">
+            <div class="card-body">
+                <div class="alert alert-warning" role="alert">
+                    <h6 class="alert-heading">
+                        <i class="bi bi-exclamation-triangle me-2"></i>No Articles Found
+                    </h6>
+                    <p class="mb-3">No articles found for this group.</p>
+
+                    <p class="mb-3">This may indicate:</p>
+                    <ul class="mb-3">
+                        <li>Group has not been imported yet</li>
+                        <li>No articles available</li>
+                        <li>Group name incorrect</li>
+                    </ul>
+
+                    <p class="mb-0">
+                        Try using the API endpoint:
+                        <a href="/api/v1/groups/{{.GroupName}}/overview" class="btn btn-outline-info btn-sm ms-2">
+                            {{.GroupName}} API Overview
+                        </a>
+                    </p>
+                </div>
+            </div>
+        </div>
+        {{end}}
+    </div>
+</div>
+
+{{template "pagination" .}}
+
+<!-- Help Section -->
+<!--
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="alert alert-light" role="alert">
+            <h6 class="alert-heading">
+                <i class="bi bi-info-circle me-2"></i>Group Navigation Help
+            </h6>
+            <div class="row">
+                <div class="col-md-4">
+                    <p class="mb-0">
+                        <kbd>Click article numbers</kbd> to read full messages
+                    </p>
+                </div>
+                <div class="col-md-4">
+                    <p class="mb-0">
+                        <kbd>T</kbd> to view threaded discussions
+                    </p>
+                </div>
+                <div class="col-md-4">
+                    <p class="mb-0">
+                        <kbd>G</kbd> to return to group list
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+-->
+{{end}}

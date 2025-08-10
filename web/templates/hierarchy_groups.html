@@ -1,0 +1,125 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item"><a href="/hierarchies" class="text-decoration-none">Hierarchies</a></li>
+        <li class="breadcrumb-item active" aria-current="page">{{.HierarchyName}}</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<!-- Navigation Menu -->
+<!--
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-diagram-3 me-2"></i>Hierarchy: {{.HierarchyName}}
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="btn-group" role="group" aria-label="Navigation">
+                    <a href="/hierarchies" class="btn btn-outline-secondary">
+                        <i class="bi bi-arrow-left me-1"></i>Back to Hierarchies
+                    </a>
+                    <a href="/groups" class="btn btn-outline-info">
+                        <i class="bi bi-collection me-1"></i>All Groups
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+-->
+{{if gt .Pagination.TotalCount 25}}
+{{template "pagination" .}}
+{{end}}
+<!-- Groups List -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-list me-2"></i>Groups in {{.HierarchyName}} Hierarchy
+                </h5>
+                <div class="d-flex align-items-center gap-3">
+                    <div class="dropdown">
+                        <button class="btn btn-outline-light btn-sm dropdown-toggle" type="button" id="sortDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="bi bi-sort-down me-1"></i>Sort By
+                        </button>
+                        <ul class="dropdown-menu" aria-labelledby="sortDropdown">
+                            <li><a class="dropdown-item{{if eq .SortBy "activity"}} active{{end}}" href="?sort=activity">Activity</a></li>
+                            <li><a class="dropdown-item{{if eq .SortBy "name"}} active{{end}}" href="?sort=name">Name A-Z</a></li>
+                        </ul>
+                    </div>
+                    {{if .Pagination}}
+                    <span class="badge bg-light text-dark">{{.Pagination.TotalCount}} total</span>
+                    {{end}}
+                </div>
+            </div>
+            <div class="card-body">
+                {{if .Groups}}
+                <div class="list-group list-group-flush">
+                    {{range .Groups}}
+                    <div class="list-group-item">
+                        <div class="d-flex w-100 justify-content-between align-items-start">
+                            <div class="flex-grow-1">
+                                <h6 class="mb-1">
+                                    <a href="/groups/{{.Name}}/threads" class="text-decoration-none">
+                                        <strong>{{.Name}}</strong>
+                                    </a>
+                                </h6>
+                                <p class="mb-1 text-muted">{{.Description}}</p>
+                                <div class="d-flex gap-3">
+                                    <small class="text-muted">
+                                        <!-- ARTICLES -->
+                                        <i class="bi bi-file-text me-1"></i><span class="badge bg-secondary">{{.MessageCount}} | Last: #{{.LastArticle}}</span>
+                                    </small>
+                                    <!-- LAST ART NUM -->
+                                    <!--
+                                    <small class="text-muted">
+                                        <i class="bi bi-hash me-1"></i>Last: #{{.LastArticle}}
+                                    </small>
+                                    -->
+                                    <!-- LAST ACTIVITY -->
+                                    <!--
+                                    <small class="text-muted">
+                                        <i class="bi bi-clock me-1"></i>Activity: {{.PrintLastActivity}}
+                                    </small>
+                                    -->
+                                    <!--
+                                    <small class="text-muted">
+                                        <i class="bi bi-calendar me-1"></i>Created: {{.CreatedAt.Format "2006-01-02"}}
+                                    </small>
+                                    -->
+                                </div>
+                            </div>
+                            <div class="ms-3">{{.PrintLastActivity}}</div>
+                        </div>
+                    </div>
+                    {{end}}
+                </div>
+                {{else}}
+                <div class="alert alert-warning" role="alert">
+                    <h6 class="alert-heading">
+                        <i class="bi bi-exclamation-triangle me-2"></i>No Groups Found
+                    </h6>
+                    <p class="mb-3">No newsgroups found in the <strong>{{.HierarchyName}}</strong> hierarchy.</p>
+                    <a href="/hierarchies" class="btn btn-outline-primary btn-sm">
+                        <i class="bi bi-arrow-left me-1"></i>Back to Hierarchies
+                    </a>
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+{{if gt .Pagination.TotalCount 25}}
+{{template "pagination" .}}
+{{end}}
+
+{{end}}

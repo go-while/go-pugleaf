@@ -1,0 +1,25 @@
+:Sport related groups
+alt.sport.horse-racing
+alt.sports.baseball.bos-redsox
+alt.sports.baseball.ny-mets
+alt.sports.baseball.sf-giants
+alt.sports.baseball.wash-nationals
+alt.sports.basketball.nba.gs-warriors
+alt.sports.basketball.nba.la-lakers
+alt.sports.football.pro.dallas-cowboys
+alt.sports.football.pro.miami-dolphins
+alt.sports.football.pro.ny-giants
+alt.sports.football.pro.sd-chargers
+alt.sports.soccer.manchester.united
+rec.autos.sport.cart
+rec.autos.sport.f1
+rec.autos.sport.indy
+rec.autos.sport.nascar
+rec.games.chess.misc
+rec.sport.cricket
+rec.sport.football.college
+rec.sport.hockey
+rec.sport.rowing
+rec.sport.rugby.league
+rec.sport.soccer
+rec.sport.tennis

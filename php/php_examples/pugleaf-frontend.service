@@ -1,0 +1,17 @@
+[Unit]
+Description=go-pugleaf PHP Frontend
+After=network.target nginx.service php8.2-fpm.service
+Wants=nginx.service php8.2-fpm.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecReload=/bin/systemctl reload nginx php8.2-fpm
+ExecStop=/bin/true
+
+# Health check
+ExecStartPost=/usr/local/bin/pugleaf-health-check
+
+[Install]
+WantedBy=multi-user.target

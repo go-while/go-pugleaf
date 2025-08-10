@@ -1,0 +1,71 @@
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item active" aria-current="page">Register</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<div class="row justify-content-center">
+    <div class="col-md-6 col-lg-5">
+        <div class="card">
+            <div class="card-header">
+                <h4 class="card-title mb-0">📝 Create Account</h4>
+            </div>
+            <div class="card-body">
+                {{if .Error}}
+                <div class="alert alert-danger" role="alert">
+                    <i class="bi bi-exclamation-triangle-fill"></i> {{.Error}}
+                </div>
+                {{end}}
+
+                <form method="POST" action="/register">
+                    <div class="mb-3">
+                        <label for="username" class="form-label">Username</label>
+                        <input type="text" class="form-control" id="username" name="username" required
+                               value="{{.Username}}" placeholder="Choose a username">
+                        <div class="form-text">3-20 characters, letters, numbers, and underscores only</div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="email" class="form-label">Email Address</label>
+                        <input type="email" class="form-control" id="email" name="email" required
+                               value="{{.Email}}" placeholder="Enter your email address">
+                        <div class="form-text">Valid email address required</div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="password1" class="form-label">Password</label>
+                        <input type="password" class="form-control" id="password1" name="password1" required
+                               placeholder="Enter your password">
+                        <div class="form-text">At least 8 characters recommended</div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="password2" class="form-label">Confirm Password</label>
+                        <input type="password" class="form-control" id="password2" name="password2" required
+                               placeholder="Confirm your password">
+                    </div>
+
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-success">
+                            🚀 Create Account
+                        </button>
+                    </div>
+                </form>
+
+                <hr>
+
+                <div class="text-center">
+                    <p class="mb-0">Already have an account?</p>
+                    <a href="/login" class="btn btn-outline-primary btn-sm">
+                        🔑 Sign In
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

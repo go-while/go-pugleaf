@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Thread Tree View Demo - go-pugleaf</title>
+    <link rel="stylesheet" href="/static/css/thread-tree.css">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+
+        .demo-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .demo-header {
+            border-bottom: 1px solid #eee;
+            padding-bottom: 15px;
+            margin-bottom: 20px;
+        }
+
+        .demo-header h1 {
+            margin: 0 0 10px 0;
+            color: #333;
+        }
+
+        .demo-header p {
+            margin: 0;
+            color: #666;
+        }
+
+        .tree-controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .tree-controls button {
+            padding: 5px 10px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .tree-controls button:hover {
+            background: #e9ecef;
+        }
+
+        .tree-controls select,
+        .tree-controls input {
+            padding: 4px 8px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            font-size: 13px;
+        }
+
+        .article-search {
+            width: 200px;
+        }
+
+        .tree-info {
+            color: #666;
+            font-size: 12px;
+            margin-left: auto;
+        }
+
+        .demo-stats {
+            background: #e8f4fd;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+
+        .demo-stats h3 {
+            margin: 0 0 10px 0;
+            color: #0366d6;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .stat-item {
+            background: white;
+            padding: 10px;
+            border-radius: 3px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #0366d6;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+        }
+
+        .highlighted {
+            background: #fff3cd !important;
+            border: 2px solid #ffc107 !important;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div class="demo-container">
+        <div class="demo-header">
+            <h1>🌳 Thread Tree View Demo</h1>
+            <p>Interactive hierarchical view of threaded discussions - go-pugleaf newsgroup reader</p>
+        </div>
+
+        <!-- Tree Controls -->
+        <div id="tree-controls-demo"></div>
+
+        <!-- Sample Thread Tree -->
+        <div class="thread-tree" data-thread-root="12345" data-group-name="comp.programming" data-controls="tree-controls-demo">
+            <div class="tree-stats">
+                <span class="node-count">15 nodes</span>
+                <span class="max-depth">max depth: 4</span>
+                <span class="leaf-count">8 leaves</span>
+            </div>
+            <ul class="tree-root">
+                <!-- Root article -->
+                <li class="tree-node expandable" data-article-num="12345" data-depth="0">
+                    <div class="node-content">
+                        <span class="node-toggle">[-]</span>
+                        <a href="/article/12345" class="node-link">
+                            <span class="node-subject">Best practices for error handling in Go?</span>
+                            <span class="node-author">by alice@example.com</span>
+                            <span class="node-date">2025-06-27 14:30</span>
+                        </a>
+                    </div>
+                    <ul class="tree-children">
+                        <!-- Direct replies -->
+                        <li class="tree-node expandable" data-article-num="12346" data-depth="1">
+                            <div class="node-content">
+                                <span class="node-toggle">[-]</span>
+                                <a href="/article/12346" class="node-link">
+                                    <span class="node-subject">Re: Best practices for error handling in Go?</span>
+                                    <span class="node-author">by bob@example.com</span>
+                                    <span class="node-date">2025-06-27 15:15</span>
+                                </a>
+                            </div>
+                            <ul class="tree-children">
+                                <!-- Nested replies -->
+                                <li class="tree-node expandable" data-article-num="12347" data-depth="2">
+                                    <div class="node-content">
+                                        <span class="node-toggle">[-]</span>
+                                        <a href="/article/12347" class="node-link">
+                                            <span class="node-subject">Re: Best practices for error handling in Go?</span>
+                                            <span class="node-author">by charlie@example.com</span>
+                                            <span class="node-date">2025-06-27 16:45</span>
+                                        </a>
+                                    </div>
+                                    <ul class="tree-children">
+                                        <li class="tree-node" data-article-num="12348" data-depth="3">
+                                            <div class="node-content">
+                                                <span class="node-toggle"></span>
+                                                <a href="/article/12348" class="node-link">
+                                                    <span class="node-subject">Re: Best practices for error handling in Go?</span>
+                                                    <span class="node-author">by dave@example.com</span>
+                                                    <span class="node-date">2025-06-27 17:20</span>
+                                                </a>
+                                            </div>
+                                        </li>
+                                        <li class="tree-node expandable" data-article-num="12349" data-depth="3">
+                                            <div class="node-content">
+                                                <span class="node-toggle">[-]</span>
+                                                <a href="/article/12349" class="node-link">
+                                                    <span class="node-subject">Re: Best practices for error handling in Go?</span>
+                                                    <span class="node-author">by eve@example.com</span>
+                                                    <span class="node-date">2025-06-27 18:00</span>
+                                                </a>
+                                            </div>
+                                            <ul class="tree-children">
+                                                <li class="tree-node" data-article-num="12350" data-depth="4">
+                                                    <div class="node-content">
+                                                        <span class="node-toggle"></span>
+                                                        <a href="/article/12350" class="node-link">
+                                                            <span class="node-subject">Re: Best practices for error handling in Go?</span>
+                                                            <span class="node-author">by frank@example.com</span>
+                                                            <span class="node-date">2025-06-27 19:30</span>
+                                                        </a>
+                                                    </div>
+                                                </li>
+                                            </ul>
+                                        </li>
+                                    </ul>
+                                </li>
+                                <li class="tree-node" data-article-num="12351" data-depth="2">
+                                    <div class="node-content">
+                                        <span class="node-toggle"></span>
+                                        <a href="/article/12351" class="node-link">
+                                            <span class="node-subject">Re: Best practices for error handling in Go?</span>
+                                            <span class="node-author">by grace@example.com</span>
+                                            <span class="node-date">2025-06-27 20:15</span>
+                                        </a>
+                                    </div>
+                                </li>
+                            </ul>
+                        </li>
+
+                        <li class="tree-node expandable" data-article-num="12352" data-depth="1">
+                            <div class="node-content">
+                                <span class="node-toggle">[-]</span>
+                                <a href="/article/12352" class="node-link">
+                                    <span class="node-subject">Re: Best practices for error handling in Go?</span>
+                                    <span class="node-author">by henry@example.com</span>
+                                    <span class="node-date">2025-06-27 21:00</span>
+                                </a>
+                            </div>
+                            <ul class="tree-children">
+                                <li class="tree-node" data-article-num="12353" data-depth="2">
+                                    <div class="node-content">
+                                        <span class="node-toggle"></span>
+                                        <a href="/article/12353" class="node-link">
+                                            <span class="node-subject">Re: Best practices for error handling in Go?</span>
+                                            <span class="node-author">by iris@example.com</span>
+                                            <span class="node-date">2025-06-27 21:45</span>
+                                        </a>
+                                    </div>
+                                </li>
+                                <li class="tree-node" data-article-num="12354" data-depth="2">
+                                    <div class="node-content">
+                                        <span class="node-toggle"></span>
+                                        <a href="/article/12354" class="node-link">
+                                            <span class="node-subject">Re: Best practices for error handling in Go?</span>
+                                            <span class="node-author">by jack@example.com</span>
+                                            <span class="node-date">2025-06-27 22:30</span>
+                                        </a>
+                                    </div>
+                                </li>
+                            </ul>
+                        </li>
+
+                        <li class="tree-node" data-article-num="12355" data-depth="1">
+                            <div class="node-content">
+                                <span class="node-toggle"></span>
+                                <a href="/article/12355" class="node-link">
+                                    <span class="node-subject">Re: Best practices for error handling in Go?</span>
+                                    <span class="node-author">by kate@example.com</span>
+                                    <span class="node-date">2025-06-27 23:15</span>
+                                </a>
+                            </div>
+                        </li>
+                    </ul>
+                </li>
+            </ul>
+        </div>
+
+        <!-- Demo Statistics -->
+        <div class="demo-stats">
+            <h3>📊 Tree Statistics</h3>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-value" id="total-nodes">15</div>
+                    <div class="stat-label">Total Nodes</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="max-depth">4</div>
+                    <div class="stat-label">Max Depth</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="expanded-nodes">12</div>
+                    <div class="stat-label">Expanded</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="collapsed-nodes">3</div>
+                    <div class="stat-label">Collapsed</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Usage Instructions -->
+        <div style="margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 5px;">
+            <h3>🎮 Usage Instructions</h3>
+            <ul>
+                <li><strong>Click [+]/[-]</strong> to expand/collapse nodes</li>
+                <li><strong>Arrow Keys:</strong> Navigate the tree with keyboard</li>
+                <li><strong>Search:</strong> Type in the search box to find articles</li>
+                <li><strong>Depth Control:</strong> Limit visible tree depth</li>
+                <li><strong>Expand/Collapse All:</strong> Use the ⊞/⊟ buttons</li>
+            </ul>
+        </div>
+    </div>
+
+    <script src="/static/js/thread-tree.js"></script>
+    <script>
+        // Demo-specific functionality
+        document.addEventListener('DOMContentLoaded', () => {
+            const tree = document.querySelector('.thread-tree').treeInstance;
+
+            // Update demo stats when tree changes
+            function updateDemoStats() {
+                const stats = tree.getStats();
+                document.getElementById('total-nodes').textContent = stats.totalNodes;
+                document.getElementById('max-depth').textContent = stats.maxDepth;
+                document.getElementById('expanded-nodes').textContent = stats.expandedNodes;
+                document.getElementById('collapsed-nodes').textContent = stats.collapsedNodes;
+            }
+
+            // Listen to tree events
+            tree.container.addEventListener('nodeExpanded', updateDemoStats);
+            tree.container.addEventListener('nodeCollapsed', updateDemoStats);
+
+            // Initial stats update
+            setTimeout(updateDemoStats, 100);
+
+            // Add some demo functionality
+            console.log('Thread Tree Demo loaded');
+            console.log('Tree instance:', tree);
+            console.log('Try: tree.highlightArticle(12349)');
+        });
+    </script>
+</body>
+</html>

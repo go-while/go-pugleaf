@@ -1,0 +1,68 @@
+upstream XXSUBDXX {
+    server XXUPSTREAMXX;
+}
+
+server {
+    listen 443 ssl;
+    server_name XXSUBDXX.YYFQDNYY;
+    
+    ssl_certificate     /home/certsync/XXSUBDXX.YYFQDNYY/fullchain.pem;
+    ssl_certificate_key /home/certsync/XXSUBDXX.YYFQDNYY/privkey.pem;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    limit_rate_after 32K;
+    limit_rate       16k;
+    
+    #if ($remote_addr !~* "^5\.2\.78\.") { return 501; }
+    if ($request ~* "(^\?dns=|\.(cgi|php)|^(\/cgi-bin))" ) { return 400; }
+    #if ($http_cookie ~* "cookiename=cookievalue") {return 403}
+
+    location ^~ /static/ {
+        limit_rate_after 32K;
+        limit_rate       32k;
+        limit_req zone=mylimit burst=4 delay=2;
+        proxy_cache rs_cache;
+        proxy_cache_valid 200 1h;
+        proxy_cache_key "$host$request_uri";
+        proxy_pass ZZTYPEZZ://XXSUBDXX;
+    }
+
+    # deny access to:
+    #location = ^/(admin|profile|login|logout|register)$ {
+    #   deny all; return 403;
+    #}
+
+    # access only with cookie
+    location = ^/admin$ {
+        if ($cookie_session_id = "") {
+            return 403;
+        }
+        limit_rate_after 128K;
+        limit_rate       128k;
+        limit_req zone=mylimit burst=4 delay=4;
+        proxy_pass ZZTYPEZZ://XXSUBDXX;
+    }
+    location = ^/(aichat|profile|logout)$ {
+        if ($cookie_session_id = "") {
+            return 403;
+        }
+        limit_req zone=mylimit burst=2 delay=2;
+        proxy_pass ZZTYPEZZ://XXSUBDXX;
+    }
+    
+    location = ^/(login|register) {
+        limit_req zone=mylimit burst=1 delay=1;
+        proxy_pass ZZTYPEZZ://XXSUBDXX;
+    }
+
+    location / {
+        limit_req zone=mylimit burst=2 delay=2;
+        proxy_cache rs_cache;
+        proxy_cache_key "$scheme$proxy_host$request_uri$cookie_session_id";
+        proxy_pass ZZTYPEZZ://XXSUBDXX;
+    }
+}

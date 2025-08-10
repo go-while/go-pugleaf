@@ -1,0 +1,85 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item"><a href="/sections" class="text-decoration-none">Sections</a></li>
+        <li class="breadcrumb-item"><a href="/{{.Section.Name}}" class="text-decoration-none">{{.Section.DisplayName}}</a></li>
+        <li class="breadcrumb-item"><a href="/{{.Section.Name}}/{{.GroupName}}" class="text-decoration-none">{{.GroupName}}</a></li>
+        <li class="breadcrumb-item active" aria-current="page">{{.ArticleNum}}</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<div class="menu">
+    <div class="menu-title">Article Reader - {{.Section.DisplayName}}</div>
+    <a href="/{{.Section.Name}}/{{.GroupName}}" class="menu-item">[G] Back to Group</a>
+    <a href="/{{.Section.Name}}/{{.GroupName}}/articles/{{.PrevArticle}}" class="menu-item">[P] Previous Article</a>
+    <a href="/{{.Section.Name}}/{{.GroupName}}/articles/{{.NextArticle}}" class="menu-item">[N] Next Article</a>
+</div>
+
+<div class="content">
+    {{if .Article}}
+    <div class="highlight">{{.Article.PrintSanitized "subject" .GroupName}}</div>
+    <div class="article-meta">
+        {{.Article.PrintSanitized "date_string" .GroupName}} | {{.Article.PrintSanitized "messageid" .GroupName}}
+        <p><strong>From:</strong> {{.Article.PrintSanitized "fromheader" .GroupName}}</p>
+        <p>
+            <strong>Lines:</strong> {{.Article.Lines}} |
+            <strong>Bytes:</strong> {{.Article.Bytes}} |
+            <strong>Article:</strong> #{{.Article.ArticleNum}}
+        </p>
+        {{if .Article.References}}
+        <p><strong>References:</strong> {{.Article.PrintSanitized "references" .GroupName}} <br>
+            <a href="{{.Article.GetData "parent_URL" .GroupName}}">← Reply to parent message</a>
+        </p>
+        {{end}}
+    </div>
+</div>
+
+<div class="article-body">
+    <pre>{{.Article.PrintSanitized "bodytext" .GroupName}}</pre>
+</div>
+
+{{if .Thread}}
+<div class="thread-context">
+    <div class="highlight">Thread Context:</div>
+    <ul class="article-list">
+        {{range .Thread}}
+        <li class="article-item {{if eq .ArticleNum $.ArticleNum}}highlight{{end}}">
+            <div class="article-subject">
+                <a href="/{{$.Section.Name}}/{{$.GroupName}}/articles/{{.ArticleNum}}">[{{.ArticleNum}}] {{.PrintSanitized "subject" $.GroupName}}</a>
+                {{if eq .ArticleNum $.ArticleNum}} <span class="blink">◄ Current</span>{{end}}
+            </div>
+            <div class="article-meta">
+                From: {{.PrintSanitized "fromheader" $.GroupName}} | Date: {{.PrintSanitized "date_string" $.GroupName}}
+            </div>
+        </li>
+        {{end}}
+    </ul>
+</div>
+{{end}}
+
+{{else}}
+<div class="error">
+    <p>Article #{{.ArticleNum}} not found in group {{.GroupName}}</p>
+    <br>
+    <p>This may indicate:</p>
+    <p>• Article has not been processed yet</p>
+    <p>• Article number is incorrect</p>
+    <p>• Article has been deleted</p>
+    <br>
+</div>
+{{end}}
+</div>
+
+<div class="menu">
+    <div class="menu-title">Article Navigation - {{.Section.DisplayName}}</div>
+    <p>Use [P] and [N] to navigate between articles</p>
+    <p>Use [G] to return to group overview</p>
+    <p>Use [D] to view this article in direct group mode</p>
+    <p>Thread context shows related messages</p>
+</div>
+{{end}}

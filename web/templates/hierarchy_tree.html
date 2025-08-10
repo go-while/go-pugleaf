@@ -1,0 +1,261 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item"><a href="/hierarchies" class="text-decoration-none">Hierarchies</a></li>
+        {{range .Breadcrumbs}}
+        {{if .IsLast}}
+        <li class="breadcrumb-item active" aria-current="page">{{.Name}}</li>
+        {{else}}
+        <li class="breadcrumb-item"><a href="{{.Path}}" class="text-decoration-none">{{.Name}}</a></li>
+        {{end}}
+        {{end}}
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+
+<!-- Navigation Header -->
+<div class="row mb-3">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h4 class="mb-0">
+                    <i class="bi bi-diagram-3 me-2"></i>{{.CurrentPath}}
+                </h4>
+                <small class="text-muted">
+                    {{if and .SubHierarchies .Groups}}
+                        {{.TotalSubItems}} sub-hierarchies and {{.TotalGroups}} newsgroups
+                    {{else if .SubHierarchies}}
+                        {{.TotalSubItems}} sub-hierarchies
+                    {{else if .Groups}}
+                        {{.TotalGroups}} newsgroups
+                    {{end}}
+                </small>
+            </div>
+            <div>
+                {{if .ParentPath}}
+                <a href="{{.ParentPath}}" class="btn btn-outline-secondary btn-sm">
+                    <i class="bi bi-arrow-up me-1"></i>Up
+                </a>
+                {{end}}
+                <a href="/hierarchy-groups/{{.CurrentPath}}" class="btn btn-outline-info btn-sm">
+                    <i class="bi bi-list me-1"></i>Flat View
+                </a>
+                {{if and .Groups (gt .TotalGroups 0)}}
+                <div class="btn-group ms-2" role="group">
+                    <button type="button" class="btn btn-outline-secondary btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+                        <i class="bi bi-sort-down me-1"></i>Sort: {{if eq .SortBy "name"}}Name{{else}}Activity{{end}}
+                    </button>
+                    <ul class="dropdown-menu">
+                        <li><a class="dropdown-item{{if eq .SortBy "activity"}} active{{end}}" href="?sort=activity">
+                            <i class="bi bi-clock me-2"></i>By Activity
+                        </a></li>
+                        <li><a class="dropdown-item{{if eq .SortBy "name"}} active{{end}}" href="?sort=name">
+                            <i class="bi bi-sort-alpha-down me-2"></i>By Name
+                        </a></li>
+                    </ul>
+                </div>
+                {{end}}
+                {{if and .SubHierarchies (gt .TotalGroups 100)}}
+                <a href="/hierarchy-groups/{{.CurrentPath}}" class="btn btn-outline-success btn-sm ms-2">
+                    <i class="bi bi-chat-dots me-1"></i>View all {{.TotalGroups}} Groups in {{$.CurrentPath}}
+                </a>
+                {{else if and .SubHierarchies (gt .TotalGroups 0)}}
+                <a href="/hierarchy-groups/{{.CurrentPath}}" class="btn btn-outline-success btn-sm ms-2">
+                    <i class="bi bi-chat-dots me-1"></i>View listed {{.TotalGroups}} Groups in {{$.CurrentPath}}
+                </a>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Sub-Hierarchies and Direct Groups -->
+{{if or .SubHierarchies .Groups}}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-secondary text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-folder me-2"></i>{{if and .SubHierarchies .Groups}}Sub-Hierarchies and Groups{{else if .SubHierarchies}}Sub-Hierarchies{{else}}Groups{{end}}
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    {{/* First show sub-hierarchies */}}
+                    {{range .SubHierarchies}}
+                    <div class="col-lg-4 col-xl-3 col-xxl-2 mb-3">
+                        <div class="card border-secondary">
+                            <div class="card-body">
+                                <h6 class="card-title">
+                                    {{if $.AtMaxDepth}}
+                                    <!-- At max depth, link to flat view instead -->
+                                    <a href="/hierarchy-groups/{{$.CurrentPath}}" class="text-decoration-none">
+                                        <i class="bi bi-folder2 me-2 text-warning"></i>{{.Name}}
+                                        <small class="text-muted">(view in flat mode)</small>
+                                    </a>
+                                    {{else}}
+                                    <!-- Normal hierarchical navigation -->
+                                    {{if eq $.RelativePath ""}}
+                                    <a href="/hierarchy/{{$.HierarchyName}}/{{.Name}}" class="text-decoration-none">
+                                    {{else}}
+                                    <a href="/hierarchy/{{$.HierarchyName}}/{{$.RelativePath}}/{{.Name}}" class="text-decoration-none">
+                                    {{end}}
+                                        <i class="bi bi-folder2 me-2 text-primary"></i>{{.Name}}
+                                    </a>
+                                    {{end}}
+                                </h6>
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <small class="text-muted">
+                                        <i class="bi bi-collection me-1"></i>{{.GroupCount}} groups
+                                    </small>
+                                    <!--
+                                    <span class="badge bg-primary">Hierarchy</span>
+                                    -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {{end}}
+
+                    {{/* Add visual break between sub-hierarchies and groups */}}
+                    {{if and .SubHierarchies .Groups}}
+                    <div class="col-12 mb-3">
+                        <hr class="text-muted">
+                    </div>
+                    {{end}}
+
+                    {{/* Then show direct groups */}}
+                    {{range .Groups}}
+                    <div class="col-lg-4 col-xl-3 col-xxl-2 mb-3">
+                        <div class="card border-success">
+                            <div class="card-body">
+                                <h6 class="card-title">
+                                    <a href="/groups/{{.Name}}/threads" class="text-decoration-none">
+                                        <i class="bi bi-chat-dots me-2 text-success"></i>{{.Name}}
+                                    </a>
+                                </h6>
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <small class="text-muted">
+                                        <i class="bi bi-file-text me-1"></i>{{.MessageCount}} articles
+                                    </small>
+                                    <span class="badge bg-success">Group</span>
+                                </div>
+                                <div class="mt-2">
+                                    <small class="text-muted">
+                                        <i class="bi bi-clock me-1"></i>{{.PrintLastActivity}}
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+<!-- Empty State -->
+{{if and (not .SubHierarchies) (not .Groups)}}
+<div class="row">
+    <div class="col-12">
+        <div class="alert alert-warning" role="alert">
+            <h6 class="alert-heading">
+                <i class="bi bi-exclamation-triangle me-2"></i>No Content Found
+            </h6>
+            <p class="mb-3">This hierarchy level is empty or the newsgroups haven't been loaded yet.</p>
+            <a href="{{.ParentPath}}" class="btn btn-outline-primary btn-sm">
+                <i class="bi bi-arrow-up me-1"></i>Go Back
+            </a>
+        </div>
+    </div>
+</div>
+{{end}}
+<div class="row">
+    <div class="col-12">
+        <div class="badge justify-content-center">
+            {{if and .SubHierarchies (gt .TotalGroups 100)}}
+            <a href="/hierarchy-groups/{{.CurrentPath}}" class="btn btn-outline-success btn-sm ms-2">
+                <i class="bi bi-chat-dots me-1"></i>View all {{.TotalGroups}} Groups in {{$.CurrentPath}}
+            </a>
+            {{else if and .SubHierarchies (gt .TotalGroups 0)}}
+            <a href="/hierarchy-groups/{{.CurrentPath}}" class="btn btn-outline-success btn-sm ms-2">
+                <i class="bi bi-chat-dots me-1"></i>View listed {{.TotalGroups}} Groups in {{$.CurrentPath}}
+            </a>
+            {{end}}
+        </div>
+</div>
+<!-- Pagination -->
+{{if .Pagination}}
+{{if gt .Pagination.TotalPages 1}}
+<div class="row">
+    <div class="col-12">
+        <nav aria-label="Hierarchy navigation">
+            <ul class="pagination justify-content-center">
+                {{if .Pagination.HasPrev}}
+                <li class="page-item">
+                    <a class="page-link" href="?page=1{{if ne .SortBy "activity"}}&sort={{.SortBy}}{{end}}" aria-label="First">
+                        <span aria-hidden="true">&laquo;</span> First
+                    </a>
+                </li>
+                <li class="page-item">
+                    <a class="page-link" href="?page={{.Pagination.PrevPage}}{{if ne .SortBy "activity"}}&sort={{.SortBy}}{{end}}" aria-label="Previous">
+                        <span aria-hidden="true">&lsaquo;</span> Previous
+                    </a>
+                </li>
+                {{else}}
+                <li class="page-item disabled">
+                    <span class="page-link">&laquo; First</span>
+                </li>
+                <li class="page-item disabled">
+                    <span class="page-link">&lsaquo; Previous</span>
+                </li>
+                {{end}}
+
+                <li class="page-item active">
+                    <span class="page-link">{{.Pagination.CurrentPage}}</span>
+                </li>
+
+                {{if .Pagination.HasNext}}
+                <li class="page-item">
+                    <a class="page-link" href="?page={{.Pagination.NextPage}}{{if ne .SortBy "activity"}}&sort={{.SortBy}}{{end}}" aria-label="Next">
+                        Next <span aria-hidden="true">&rsaquo;</span>
+                    </a>
+                </li>
+                <li class="page-item">
+                    <a class="page-link" href="?page={{.Pagination.TotalPages}}{{if ne .SortBy "activity"}}&sort={{.SortBy}}{{end}}" aria-label="Last">
+                        Last <span aria-hidden="true">&raquo;</span>
+                    </a>
+                </li>
+                {{else}}
+                <li class="page-item disabled">
+                    <span class="page-link">Next &rsaquo;</span>
+                </li>
+                <li class="page-item disabled">
+                    <span class="page-link">Last &raquo;</span>
+                </li>
+                {{end}}
+            </ul>
+        </nav>
+
+        <div class="text-center text-muted small">
+            {{if .SubHierarchies}}
+            Showing sub-hierarchies page {{.Pagination.CurrentPage}} of {{.Pagination.TotalPages}}
+            ({{.Pagination.TotalCount}} total sub-hierarchies)
+            {{else if .Groups}}
+            Showing groups page {{.Pagination.CurrentPage}} of {{.Pagination.TotalPages}}
+            ({{.Pagination.TotalCount}} total groups)
+            {{end}}
+        </div>
+    </div>
+</div>
+{{end}}
+{{end}}
+
+{{end}}

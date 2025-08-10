@@ -1,0 +1,48 @@
+{
+    "max_article_size": 131072,
+    "providers": [
+        {
+            "name": "newsdeef archive",
+            "host": "lux-feed1.newsdeef.eu",
+            "port": 563,
+            "ssl": true,
+            "username": "pugleaf",
+            "password": "rslight",
+            "max_connections": 5,
+            "enabled": true,
+            "priority": 1,
+            "max_article_size": 131072
+        },
+        {
+            "name": "Secondary Provider",
+            "host": "news.example.com",
+            "port": 563,
+            "ssl": true,
+            "username": "your_username",
+            "password": "your_password",
+            "max_connections": 3,
+            "enabled": false,
+            "priority": 2,
+            "max_article_size": 131072
+        }
+    ],
+    "server": {
+        "listen_port": 1563,
+        "ssl": true,
+        "cert_file": "ssl/fullchain.pem",
+        "key_file": "ssl/privkey.pem",
+        "max_article_size": 131072
+    },
+    "database": {
+        "main_db": "data/main.db",
+        "groups_dir": "data/groups",
+        "backup_dir": "data/backups"
+    },
+    "web": {
+        "listen_port": 11980,
+        "ssl": false,
+        "cert_file": "",
+        "key_file": "",
+        "static_dir": "web/static"
+    }
+}

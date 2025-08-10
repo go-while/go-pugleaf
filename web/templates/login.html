@@ -1,0 +1,62 @@
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item active" aria-current="page">Login</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<div class="row justify-content-center">
+    <div class="col-md-6 col-lg-4">
+        <div class="card">
+            <div class="card-header">
+                <h4 class="card-title mb-0">🔐 Login</h4>
+            </div>
+            <div class="card-body">
+                {{if .Error}}
+                <div class="alert alert-danger" role="alert">
+                    <i class="bi bi-exclamation-triangle-fill"></i> {{.Error}}
+                </div>
+                {{end}}
+
+                <form method="POST" action="/login">
+                    {{if .RedirectURL}}
+                    <input type="hidden" name="redirect" value="{{.RedirectURL}}">
+                    {{end}}
+
+                    <div class="mb-3">
+                        <label for="username" class="form-label">Username or Email</label>
+                        <input type="text" class="form-control" id="username" name="username" required
+                               placeholder="Enter your username or email">
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="password" class="form-label">Password</label>
+                        <input type="password" class="form-control" id="password" name="password" required
+                               placeholder="Enter your password">
+                    </div>
+
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary">
+                            🔑 Sign In
+                        </button>
+                    </div>
+                </form>
+
+                <hr>
+
+                {{if .RegistrationEnabled}}
+                <div class="text-center">
+                    <p class="mb-0">Don't have an account?</p>
+                    <a href="/register{{if .RedirectURL}}?redirect={{.RedirectURL}}{{end}}" class="btn btn-outline-secondary btn-sm">
+                        📝 Create Account
+                    </a>
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

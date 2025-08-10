@@ -1,0 +1,4 @@
+ALTER TABLE articles ADD COLUMN spam INTEGER DEFAULT 0 NOT NULL;
+ALTER TABLE articles ADD COLUMN hide INTEGER DEFAULT 0 NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_articles_spam ON articles(spam);
+CREATE INDEX IF NOT EXISTS idx_articles_hide ON articles(hide);

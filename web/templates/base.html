@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.Title}} - go-pugleaf | RockSolid RetroBBS NetNews Server</title>
+
+    <!-- Bootstrap CSS -->
+    <link href="/static/bootstrap-5.3.7-dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Bootstrap Icons -->
+    <!--<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">-->
+    <link rel="stylesheet" href="/static/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css">
+
+    <!-- Bootstrap theme CSS -->
+    <link href="/static/theme-bootstrap.css" rel="stylesheet">
+
+    <!-- Theme CSS -->
+    <script>
+        // Load theme preference immediately to prevent flash
+        const savedTheme = localStorage.getItem('preferred-theme') || 'bootstrap';
+        const bsTheme = localStorage.getItem('theme') || 'dark';
+
+        // Set Bootstrap theme immediately
+        document.documentElement.setAttribute('data-bs-theme', bsTheme);
+
+        // Load legacy theme CSS
+        document.write(`<link rel="stylesheet" href="/static/theme-${savedTheme}.css">`);
+    </script>
+
+    <link rel="stylesheet" href="/static/css/thread-tree.css">
+    <!-- Fonts -->
+     <!--
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    -->
+    <!-- Custom CSS to move header closer to top -->
+    <style>
+        body {
+            padding-top: 0;
+            margin-top: 0;
+        }
+        .container-fluid {
+            padding-top: 0.25rem !important;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Theme Selector -->
+    <!--
+    <div class="position-fixed bottom-0 end-0 p-3" style="z-index: 1050;">
+        <div class="btn-group dropup">
+            <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" id="bd-theme" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Toggle theme">
+                <i class="theme-icon-active bi bi-circle-half"></i>
+                <span class="visually-hidden" id="bd-theme-text">Toggle theme</span>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="bd-theme-text">
+                <li>
+                    <button type="button" class="dropdown-item d-flex align-items-center" data-bs-theme-value="light" aria-pressed="false">
+                        <i class="bi bi-sun-fill me-2 opacity-50"></i>
+                        Light
+                    </button>
+                </li>
+                <li>
+                    <button type="button" class="dropdown-item d-flex align-items-center" data-bs-theme-value="dark" aria-pressed="false">
+                        <i class="bi bi-moon-stars-fill me-2 opacity-50"></i>
+                        Dark
+                    </button>
+                </li>
+                <li>
+                    <button type="button" class="dropdown-item d-flex align-items-center" data-bs-theme-value="auto" aria-pressed="true">
+                        <i class="bi bi-circle-half me-2 opacity-50"></i>
+                        Auto
+                    </button>
+                </li>
+            </ul>
+        </div>
+        <select id="theme-select" class="form-select form-select-sm mt-2" onchange="changeTheme()" style="width: auto;">
+            <option value="bootstrap">🎨 Bootstrap</option>
+            <option value="rocksolid">🚀 RockSolid</option>
+        </select>
+    </div>
+    -->
+    <!-- Main Container -->
+    <div class="container-fluid px-4" style="padding-top: 0.25rem !important;">
+        <!-- Header -->
+        <header class="mb-3">
+            <div class="row align-items-center">
+                <div class="col fixedsys62">
+                    <h1 class="h2 mb-0">
+                        <span class="me-2">🚀</span>
+                        go-pugleaf
+                    </h1>
+                    <p class="text-muted mb-0">
+                        RetroBBS NetNews Server
+                    </p>
+                    <p class="text-muted mb-0 small">
+                        Inspired by RockSolid Light <i class="bi bi-heart-fill text-danger" title="Rest in Peace"></i> <i>RIP Retro Guy</i>
+                    </p>
+                </div>
+                <div class="col-auto" style="padding-top: 0.25rem !important;">
+                    <!-- Authentication Links -->
+                    <div class="btn-group">
+                        {{if .IsAdmin}}
+                        <a href="/admin" class="btn btn-danger btn-sm">🛠️ Admin</a>
+                        {{end}}
+                        <a href="/" class="btn btn-secondary btn-sm">🏠 Home</a>
+                        <a href="/news" class="btn btn-secondary btn-sm">📰 News</a>
+                        <!--
+                        <a href="/groups" class="btn btn-secondary btn-sm">📰 Usenet</a>
+                        -->
+                        <a href="/hierarchies" class="btn btn-secondary btn-sm">🗂️ Usenet</a>
+                        {{if .AvailableSections}}
+                        <a href="/sections" class="btn btn-secondary btn-sm">📚 Sections</a>
+                        {{end}}
+                        <a href="/search" class="btn btn-secondary btn-sm"><i class="bi bi-search"></i> Search</a>
+                        <!--<a href="/static/sites/chat.html" class="btn btn-outline-primary btn-sm"> 💬 Chat</a>-->
+                        {{if .User}}
+                        <!-- User is logged in -->
+                        {{if .AvailableAIModels}}
+                        <a href="/aichat" class="btn btn-secondary btn-sm">💬 AI Chat</a>
+                        {{end}}
+                        <a href="/profile" class="btn btn-info btn-sm">👤 {{.User.Username}}</a>
+                        <a href="/logout" class="btn btn-secondary btn-sm">🚪 Logout</a>
+                        {{else}}
+                        <!-- User is not logged in -->
+                        <a href="/login" class="btn btn-primary btn-sm">🔑 Login</a>
+                        {{if .RegistrationEnabled}}<a href="/register" class="btn btn-secondary btn-sm">📝 Register</a>{{end}}
+                        {{end}}
+                    </div>
+                </div>
+            </div>
+            <div class="row align-items-center">
+                <!-- Available Sections Navigation -->
+                {{if .AvailableSections}}
+                <div class="col-12">
+                    <div class="card">
+                        <div class="card-body">
+                            <div class="btn-group flex-wrap" role="group">
+                                {{range .AvailableSections}}
+                                <a href="/{{.Name}}" class="btn btn-outline-secondary btn-sm">
+                                    {{.DisplayName}}
+                                </a>
+                                {{end}}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {{end}}
+            </div>
+        </header>
+
+        <!-- Breadcrumb -->
+        {{block "breadcrumb" .}}{{end}}
+
+        <!-- Main Content -->
+        <main>
+            {{block "content" .}}{{end}}
+        </main>
+
+        <!-- Footer -->
+        <footer class="mt-5 pt-4 border-top" style="margin-bottom: 60px;">
+            <div class="row">
+                <div class="col-md-3">
+                    <small class="text-muted">
+                        System Time: {{.CurrentTime}}
+                    </small>
+                </div>
+
+                <div class="col-md-3">
+                </div>
+
+                <div class="col-md-6 text-md-end">
+                    <small>
+                        <a href="/help" class="text-decoration-none me-3">Help</a>
+                        <a href="/static/icons.html" class="text-decoration-none me-3">Icons</a>
+                        <a href="/stats" class="text-decoration-none me-3">Statistics</a>
+                        <span class="text-muted">Built with ❤️ by RockSolid fans</span>
+                    </small>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="/static/bootstrap-5.3.7-dist/js/bootstrap.bundle.min.js"></script>
+
+    <!-- Theme Switcher Script -->
+    <!--<script src="/static/theme-switcher.js"></script>-->
+
+    <!-- Legacy Theme Script -->
+    <!--
+    <script>
+        // Load saved theme preference for legacy selector
+        document.addEventListener('DOMContentLoaded', function () {
+            const savedTheme = localStorage.getItem('preferred-theme') || 'bootstrap';
+            const themeSelect = document.getElementById('theme-select');
+            if (themeSelect) {
+                themeSelect.value = savedTheme;
+            }
+        });
+    </script>
+    -->
+</body>
+</html>

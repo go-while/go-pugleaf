@@ -1,0 +1,402 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item active" aria-current="page">Search</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<!-- Navigation Menu -->
+<!-- DISABLED OLD NAVIGATION; IS NOW IN HEADER IN BASE.HTML -->
+<!--
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-warning text-dark">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-search me-2"></i>Search Interface
+                </h5>
+            </div>
+
+            <div class="card-body">
+                <div class="btn-group" role="group" aria-label="Navigation">
+                    <a href="/" class="btn btn-outline-secondary">
+                        <strong>[H]</strong> Return to Home
+                    </a>
+                    <a href="/groups" class="btn btn-outline-primary">
+                        <strong>[G]</strong> Browse Groups
+                    </a>
+                    <a href="/stats" class="btn btn-outline-info">
+                        <strong>[T]</strong> System Stats
+                    </a>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+-->
+
+<!-- Title -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body text-center">
+                <h2 class="card-title">
+                    <i class="bi bi-search me-2"></i>Search Newsgroups and Articles
+                </h2>
+                <p class="card-text lead">Find specific content across newsgroups</p>
+                <div class="text-muted">
+                Note:
+                <br><i class="bi bi-check-circle text-success me-2"> - Search for 'Group Names Only ' works.</i>
+                <br><i class="bi bi-x-circle text-danger me-2"> - Searching for content does NOT work!</i>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Search Form -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-funnel me-2"></i>Search Functions
+                </h6>
+            </div>
+            <div class="card-body">
+                <form method="GET" action="/search">
+                    <!-- Search Terms -->
+                    <div class="mb-4">
+                        <label for="searchTerms" class="form-label">
+                            <strong>Search Terms:</strong>
+                        </label>
+                        <div class="input-group input-group-lg">
+                            <input type="text" class="form-control" id="searchTerms" name="q"
+                                value="{{.Query}}" placeholder="Enter keywords, phrases, or patterns..." aria-describedby="searchHelp">
+                            <button class="btn btn-primary" type="submit">
+                                <i class="bi bi-search me-1"></i>Search
+                            </button>
+                        </div>
+                        <div id="searchHelp" class="form-text">
+                            Use quotes for exact phrases, * for wildcards, and boolean operators (AND, OR, NOT).
+                            <br><strong>Note:</strong> Very broad searches (like just "%" or "*") are limited to 50 results per page for performance.
+                        </div>
+                    </div>
+
+                    <!-- Search Type -->
+                    <div class="mb-4">
+                        <label class="form-label">
+                            <strong>Search In:</strong>
+                        </label>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <!-- CONTENT SEARCH NOT IMPLEMENTED YET -->
+                                <!--
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="searchType" id="searchAll"
+                                        value="all" {{if or (eq .SearchType "all") (eq .SearchType "")}}checked{{end}}>
+                                    <label class="form-check-label" for="searchAll">
+                                        <i class="bi bi-collection me-1"></i>All Groups and Articles
+                                    </label>
+                                </div>
+                                -->
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="searchType" id="searchGroups"
+                                        value="groups" {{if eq .SearchType "groups"}}checked{{end}}>
+                                    <label class="form-check-label" for="searchGroups">
+                                        <i class="bi bi-folder me-1"></i>Group Names Only
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <!-- CONTENT SEARCH NOT IMPLEMENTED YET -->
+                                <!--
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="searchType" id="searchSubjects"
+                                        value="subjects" {{if eq .SearchType "subjects"}}checked{{end}}>
+                                    <label class="form-check-label" for="searchSubjects">
+                                        <i class="bi bi-file-text me-1"></i>Article Subjects Only
+                                    </label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="searchType" id="searchAuthors"
+                                        value="authors" {{if eq .SearchType "authors"}}checked{{end}}>
+                                    <label class="form-check-label" for="searchAuthors">
+                                        <i class="bi bi-person me-1"></i>Authors Only
+                                    </label>
+                                </div>
+                                -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Advanced Options -->
+                    <!-- CONTENT SEARCH NOT IMPLEMENTED YET -->
+                    <!--
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="dateFrom" class="form-label">Date From:</label>
+                                <input type="date" class="form-control" id="dateFrom" name="date_from">
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="dateTo" class="form-label">Date To:</label>
+                                <input type="date" class="form-control" id="dateTo" name="date_to">
+                            </div>
+                        </div>
+                    </div>
+                    -->
+                    <!-- Submit Button -->
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-center">
+                        <button type="submit" class="btn btn-success btn-lg">
+                            <i class="bi bi-search me-2"></i><kbd>ENTER</kbd> Execute Search
+                        </button>
+                        <button type="reset" class="btn btn-outline-secondary btn-lg">
+                            <i class="bi bi-arrow-clockwise me-2"></i>Reset Form
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Search Results -->
+{{if .Query}}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header {{if .HasResults}}bg-success{{else}}bg-warning{{end}} text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-{{if .HasResults}}check-circle{{else}}exclamation-triangle{{end}} me-2"></i>
+                    Search Results for "{{.Query}}"
+                    {{if .HasResults}}
+                        <span class="badge bg-light text-dark ms-2">{{.ResultCount}} total found</span>
+                        {{if .Pagination}}
+                            <span class="badge bg-light text-dark ms-1">Page {{.Pagination.CurrentPage}} of {{.Pagination.TotalPages}}</span>
+                        {{end}}
+                    {{end}}
+                </h6>
+            </div>
+            <div class="card-body">
+                {{if .HasResults}}
+                    {{if eq .SearchType "groups"}}
+                        <!-- Group Results -->
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Group Name</th>
+                                        <th>Description</th>
+                                        <th class="text-center">Articles</th>
+                                        <th class="text-center">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {{range .Results}}
+                                    <tr>
+                                        <td>
+                                            <strong>{{.Name}}</strong>
+                                        </td>
+                                        <td>
+                                            <small class="text-muted">{{.Description}}</small>
+                                        </td>
+                                        <td class="text-center">
+                                            <span class="badge bg-primary">{{.MessageCount}}</span>
+                                        </td>
+                                        <td class="text-center">
+                                            <div class="btn-group btn-group-sm" role="group">
+                                                <a href="/groups/{{.Name}}" class="btn btn-outline-primary btn-sm">
+                                                    <i class="bi bi-eye me-1"></i>View
+                                                </a>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    {{end}}
+                                </tbody>
+                            </table>
+                        </div>
+                    {{else}}
+                        <!-- Other search results (articles, authors, etc.) -->
+                        <div class="alert alert-info">
+                            <i class="bi bi-info-circle me-2"></i>
+                            <strong>Search type "{{.SearchType}}" is not fully implemented yet.</strong>
+                            Currently showing group results for your query.
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Group Name</th>
+                                        <th>Description</th>
+                                        <th class="text-center">Articles</th>
+                                        <th class="text-center">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {{range .Results}}
+                                    <tr>
+                                        <td>
+                                            <strong>{{.Name}}</strong>
+                                        </td>
+                                        <td>
+                                            <small class="text-muted">{{.Description}}</small>
+                                        </td>
+                                        <td class="text-center">
+                                            <span class="badge bg-primary">{{.MessageCount}}</span>
+                                        </td>
+                                        <td class="text-center">
+                                            <div class="btn-group btn-group-sm" role="group">
+                                                <a href="/groups/{{.Name}}" class="btn btn-outline-primary btn-sm">
+                                                    <i class="bi bi-eye me-1"></i>View
+                                                </a>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    {{end}}
+                                </tbody>
+                            </table>
+                        </div>
+                    {{end}}
+                {{else}}
+                    <div class="alert alert-warning" role="alert">
+                        <i class="bi bi-search me-2"></i>
+                        <strong>No results found</strong> for "{{.Query}}" in {{.SearchType}}.
+                        <br><small>Try a different search term or search type.</small>
+                    </div>
+                {{end}}
+
+                <!-- Pagination Controls -->
+                {{if and .HasResults .Pagination}}
+                {{if gt .Pagination.TotalPages 1}}
+                <nav aria-label="Search results pagination" class="mt-4">
+                    <ul class="pagination justify-content-center">
+                        {{if .Pagination.HasPrev}}
+                        <li class="page-item">
+                            <a class="page-link" href="?q={{.Query}}&searchType={{.SearchType}}&page=1">First</a>
+                        </li>
+                        <li class="page-item">
+                            <a class="page-link" href="?q={{.Query}}&searchType={{.SearchType}}&page={{.Pagination.PrevPage}}">Previous</a>
+                        </li>
+                        {{else}}
+                        <li class="page-item disabled">
+                            <span class="page-link">First</span>
+                        </li>
+                        <li class="page-item disabled">
+                            <span class="page-link">Previous</span>
+                        </li>
+                        {{end}}
+
+                        <li class="page-item active">
+                            <span class="page-link">{{.Pagination.CurrentPage}}</span>
+                        </li>
+
+                        {{if .Pagination.HasNext}}
+                        <li class="page-item">
+                            <a class="page-link" href="?q={{.Query}}&searchType={{.SearchType}}&page={{.Pagination.NextPage}}">Next</a>
+                        </li>
+                        <li class="page-item">
+                            <a class="page-link" href="?q={{.Query}}&searchType={{.SearchType}}&page={{.Pagination.TotalPages}}">Last</a>
+                        </li>
+                        {{else}}
+                        <li class="page-item disabled">
+                            <span class="page-link">Next</span>
+                        </li>
+                        <li class="page-item disabled">
+                            <span class="page-link">Last</span>
+                        </li>
+                        {{end}}
+                    </ul>
+                    <div class="text-center">
+                        <small class="text-muted">
+                            Showing page {{.Pagination.CurrentPage}} of {{.Pagination.TotalPages}} ({{.ResultCount}} total results)
+                        </small>
+                    </div>
+                </nav>
+                {{end}}
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+<!-- Search Tips -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-info text-white">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-lightbulb me-2"></i>Search Tips
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6>Search Patterns:</h6>
+                        <ul class="list-unstyled">
+                            <li class="mb-2">
+                                <code>"specific topic"</code>
+                                <small class="text-muted d-block">Use quotes for exact phrases</small>
+                            </li>
+                            <li class="mb-2">
+                                <code>comp.lang.*</code>
+                                <small class="text-muted d-block">Use * for wildcards</small>
+                            </li>
+                            <li class="mb-2">
+                                <code>case insensitive</code>
+                                <small class="text-muted d-block">Search is case-insensitive</small>
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="col-md-6">
+                        <h6>Boolean Operators:</h6>
+                        <ul class="list-unstyled">
+                            <li class="mb-2">
+                                <code>term1 AND term2</code>
+                                <small class="text-muted d-block">Both terms must be present</small>
+                            </li>
+                            <li class="mb-2">
+                                <code>term1 OR term2</code>
+                                <small class="text-muted d-block">Either term can be present</small>
+                            </li>
+                            <li class="mb-2">
+                                <code>term1 NOT term2</code>
+                                <small class="text-muted d-block">First term present, second absent</small>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Quick Actions -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header bg-light">
+                <h6 class="card-title mb-0">
+                    <i class="bi bi-lightning me-2"></i>Quick Search Options
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2 d-md-flex justify-content-md-center">
+                    <a href="/groups" class="btn btn-outline-primary">
+                        <i class="bi bi-collection me-2"></i>Browse All Groups
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}

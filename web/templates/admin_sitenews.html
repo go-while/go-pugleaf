@@ -1,0 +1,191 @@
+{{define "admin_sitenews"}}
+<!-- Site News Tab -->
+<div class="tab-pane show active" id="sitenews" role="tabpanel" aria-labelledby="sitenews-tab">
+  <!-- Create New Site News -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h5 class="card-title mb-0">📰 Add Site News</h5>
+              </div>
+              <div class="card-body">
+                  <form method="POST" action="/admin/sitenews?tab=sitenews">
+                      <div class="row">
+                          <div class="col-md-6">
+                              <div class="mb-3">
+                                  <label for="subject" class="form-label">Subject</label>
+                                  <input type="text" class="form-control" id="subject" name="subject" required maxlength="255">
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="date_published" class="form-label">Date Published</label>
+                                  <input type="datetime-local" class="form-control" id="date_published" name="date_published" required>
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label class="form-label">Visibility</label>
+                                  <div class="form-check form-switch">
+                                      <input class="form-check-input" type="checkbox" id="is_visible" name="is_visible" checked>
+                                      <label class="form-check-label" for="is_visible">
+                                          Visible on home page
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                      </div>
+                      <div class="mb-3">
+                          <label for="content" class="form-label">Content</label>
+                          <textarea class="form-control" id="content" name="content" rows="8" required
+                                    placeholder="Enter news content (HTML and markdown supported)"></textarea>
+                      </div>
+                      <button type="submit" class="btn btn-primary">Add News Entry</button>
+                  </form>
+              </div>
+          </div>
+      </div>
+  </div>
+
+  <!-- Site News List -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <div class="d-flex justify-content-between align-items-center">
+                      <h5 class="card-title mb-0">📰 Site News Management</h5>
+                      <span class="badge bg-light text-dark">{{len .SiteNews}} entries</span>
+                  </div>
+              </div>
+              <div class="card-body">
+                  {{if .SiteNews}}
+                  <div class="table-responsive">
+                      <table class="table table-striped">
+                          <thead>
+                              <tr>
+                                  <th>ID</th>
+                                  <th>Subject</th>
+                                  <th>Date Published</th>
+                                  <th>Status</th>
+                                  <th>Actions</th>
+                              </tr>
+                          </thead>
+                          <tbody>
+                              {{range .SiteNews}}
+                              <tr{{if not .IsVisible}} class="table-secondary"{{end}}>
+                                  <td>{{.ID}}</td>
+                                  <td>
+                                      <strong>{{.Subject}}</strong>
+                                      <br><small class="text-muted">{{len .Content}} characters</small>
+                                  </td>
+                                  <td>{{.DatePublished.Format "2006-01-02 15:04"}}</td>
+                                  <td>
+                                      {{if .IsVisible}}
+                                          <span class="badge bg-success">Visible</span>
+                                      {{else}}
+                                          <span class="badge bg-secondary">Hidden</span>
+                                      {{end}}
+                                  </td>
+                                  <td>
+                                    <div class="btn-group btn-group-sm">
+                                        <button type="button" class="btn btn-outline-primary btn-sm"
+                                                data-bs-toggle="collapse" data-bs-target="#edit-news-{{.ID}}">
+                                            Edit
+                                        </button>
+                                        <form method="POST" action="/admin/sitenews/toggle?tab=sitenews" style="display: inline;">
+                                            <input type="hidden" name="news_id" value="{{.ID}}">
+                                            <button type="submit" class="btn btn-outline-{{if .IsVisible}}warning{{else}}success{{end}} btn-sm">
+                                                {{if .IsVisible}}Hide{{else}}Show{{end}}
+                                            </button>
+                                        </form>
+                                        <form method="POST" action="/admin/sitenews/delete?tab=sitenews" style="display: inline;"
+                                              onsubmit="return confirm('Are you sure you want to delete this news entry?')">
+                                            <input type="hidden" name="news_id" value="{{.ID}}">
+                                            <button type="submit" class="btn btn-outline-danger btn-sm">
+                                                Delete
+                                            </button>
+                                        </form>
+                                    </div>
+                                  </td>
+                              </tr>
+                              <!-- Collapsible Edit Form -->
+                              <tr class="collapse" id="edit-news-{{.ID}}">
+                                  <td colspan="5">
+                                      <div class="card">
+                                          <div class="card-header bg-dark text-white">
+                                              <h6>Edit News: {{.Subject}}</h6>
+                                          </div>
+                                          <div class="card-body">
+                                              <form method="POST" action="/admin/sitenews/update?tab=sitenews">
+                                                  <input type="hidden" name="news_id" value="{{.ID}}">
+                                                  <div class="row">
+                                                      <div class="col-md-6">
+                                                          <div class="mb-3">
+                                                              <label for="edit_subject_{{.ID}}" class="form-label">Subject</label>
+                                                              <input type="text" class="form-control" id="edit_subject_{{.ID}}"
+                                                                     name="subject" value="{{.Subject}}" required maxlength="255">
+                                                          </div>
+                                                      </div>
+                                                      <div class="col-md-3">
+                                                          <div class="mb-3">
+                                                              <label for="edit_date_published_{{.ID}}" class="form-label">Date Published</label>
+                                                              <input type="datetime-local" class="form-control" id="edit_date_published_{{.ID}}"
+                                                                     name="date_published" value="{{.DatePublished.Format "2006-01-02T15:04"}}" required>
+                                                          </div>
+                                                      </div>
+                                                      <div class="col-md-3">
+                                                          <div class="mb-3">
+                                                              <label class="form-label">Visibility</label>
+                                                              <div class="form-check form-switch">
+                                                                  <input class="form-check-input" type="checkbox" id="edit_is_visible_{{.ID}}"
+                                                                         name="is_visible"{{if .IsVisible}} checked{{end}}>
+                                                                  <label class="form-check-label" for="edit_is_visible_{{.ID}}">
+                                                                      Visible on home page
+                                                                  </label>
+                                                              </div>
+                                                          </div>
+                                                      </div>
+                                                  </div>
+                                                  <div class="mb-3">
+                                                      <label for="edit_content_{{.ID}}" class="form-label">Content</label>
+                                                      <textarea class="form-control" id="edit_content_{{.ID}}" name="content"
+                                                                rows="8" required>{{.Content}}</textarea>
+                                                  </div>
+                                                  <div class="d-flex gap-2">
+                                                      <button type="submit" class="btn btn-primary">Update News Entry</button>
+                                                      <button type="button" class="btn btn-secondary"
+                                                              data-bs-toggle="collapse" data-bs-target="#edit-news-{{.ID}}">
+                                                          Cancel
+                                                      </button>
+                                                  </div>
+                                              </form>
+                                          </div>
+                                      </div>
+                                  </td>
+                              </tr>
+                              {{end}}
+                          </tbody>
+                      </table>
+                  </div>
+                  {{else}}
+                  <div class="alert alert-info">
+                      <strong>No site news entries found.</strong><br>
+                      Create the first news entry using the form above.
+                  </div>
+                  {{end}}
+              </div>
+          </div>
+      </div>
+  </div>
+</div>
+
+<!-- Auto-set current datetime for new entries -->
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Set current datetime for new news entry
+    const now = new Date();
+    now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+    document.getElementById('date_published').value = now.toISOString().slice(0, 16);
+});
+</script>
+{{end}}
