@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -97,8 +96,8 @@ func (pa *ProcessorAdapter) CheckNoMoreWorkInHistory() bool {
 	return pa.processor.CheckNoMoreWorkInHistory()
 }
 
-// migrateNewsgroupLastActivity updates newsgroups' updated_at field based on their latest article
-func migrateNewsgroupLastActivity(db *database.Database) error {
+// updateNewsgroupLastActivity updates newsgroups' updated_at field based on their latest article
+func updateNewsgroupLastActivity(db *database.Database) error {
 	// First, get all newsgroups from the main database
 	rows, err := db.GetMainDB().Query("SELECT id, name FROM newsgroups WHERE message_count > 0")
 	if err != nil {
@@ -107,33 +106,31 @@ func migrateNewsgroupLastActivity(db *database.Database) error {
 	defer rows.Close()
 
 	updatedCount := 0
-	skippedCount := 0
-
+	var id int
+	var name string
 	for rows.Next() {
-		var id int
-		var name string
 		if err := rows.Scan(&id, &name); err != nil {
-			log.Printf("[WEB]: Migration error scanning newsgroup: %v", err)
-			continue
+			return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity rows.Scan newsgroup: %v", err)
 		}
 
 		// Get the group database for this newsgroup
 		groupDBs, err := db.GetGroupDBs(name)
 		if err != nil {
-			log.Printf("[WEB]: Migration error getting group DB for %s: %v", name, err)
-			skippedCount++
-			continue
+			return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity GetGroupDB %s: %v", name, err)
+
+		}
+
+		_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET spam = 1 WHERE spam = 0 AND hide = 1", nil)
+		if err != nil {
+			return fmt.Errorf("failed to query newsgroups: %w", err)
 		}
 
 		// Query the latest article date from the group's articles table (excluding hidden articles)
 		var latestDate sql.NullString
 		err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT MAX(date_sent) FROM articles WHERE hide = 0", nil, &latestDate)
 		groupDBs.Return(db) // Always return the database connection
-
 		if err != nil {
-			log.Printf("[WEB]: Migration error querying latest article for %s: %v", name, err)
-			skippedCount++
-			continue
+			return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity RetryableQueryRowScan %s: %v", name, err)
 		}
 
 		// Only update if we found a latest date
@@ -144,18 +141,12 @@ func migrateNewsgroupLastActivity(db *database.Database) error {
 			var err error
 
 			// Clean up malformed timestamps with extra dashes or spaces
-			dateStr = strings.ReplaceAll(dateStr, "- ", " ")
-			dateStr = strings.TrimSpace(dateStr)
-			parsedAs := 0
+			//dateStr = strings.ReplaceAll(dateStr, "- ", " ")
+			//dateStr = strings.TrimSpace(dateStr)
 			// Try multiple date formats to handle various edge cases
 			formats := []string{
-				time.RFC3339,
-				"2006-01-02 15:04:05",
 				"2006-01-02 15:04:05-07:00",
 				"2006-01-02 15:04:05+07:00",
-				"2006-01-02T15:04:05-07:00",
-				"2006-01-02T15:04:05+07:00",
-				"2006-01-02T15:04:05Z",
 			}
 
 			for _, format := range formats {
@@ -163,35 +154,29 @@ func migrateNewsgroupLastActivity(db *database.Database) error {
 				if err == nil {
 					break
 				}
-				parsedAs++
 			}
 
 			if err != nil {
-				log.Printf("[WEB]: Migration error parsing date '%s' for %s: %v", dateStr, name, err)
-				skippedCount++
-				continue
+				return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity parsing date '%s' for %s: %v", dateStr, name, err)
 			}
 
 			// Format as UTC without timezone info to match db_batch.go format
 			formattedDate := parsedDate.UTC().Format("2006-01-02 15:04:05")
 			_, err = db.GetMainDB().Exec("UPDATE newsgroups SET updated_at = ? WHERE id = ?", formattedDate, id)
 			if err != nil {
-				log.Printf("[WEB]: Migration error updating newsgroup %s: %v", name, err)
-				skippedCount++
+				log.Printf("[WEB]: error updateNewsgroupLastActivity updating newsgroup %s: %v", name, err)
 				continue
 			}
-			log.Printf("update newsgroup activity: %s formattedDate=%s parsedAs=%d", name, formattedDate, parsedAs)
+			log.Printf("[WEB]: updateNewsgroupLastActivity: '%s' dateStr=%s formattedDate=%s", name, dateStr, formattedDate)
 			updatedCount++
-		} else {
-			skippedCount++
 		}
 	}
 
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error iterating newsgroups: %w", err)
+		return fmt.Errorf("error updateNewsgroupLastActivity iterating newsgroups: %w", err)
 	}
 
-	log.Printf("[WEB]: Migration completed: updated %d newsgroups, skipped %d", updatedCount, skippedCount)
+	log.Printf("[WEB]: updateNewsgroupLastActivity updated %d newsgroups", updatedCount)
 	return nil
 }
 
@@ -451,7 +436,7 @@ func main() {
 	// Run newsgroup activity migration after hiding future posts if requested
 	if updateNewsgroupActivity {
 		log.Printf("[WEB]: Starting newsgroup activity migration...")
-		if err := migrateNewsgroupLastActivity(db); err != nil {
+		if err := updateNewsgroupLastActivity(db); err != nil {
 			log.Printf("[WEB]: Warning: Newsgroup activity migration failed: %v", err)
 			os.Exit(1)
 		} else {
@@ -655,6 +640,15 @@ func startHierarchyUpdater(db *database.Database) {
 	// Run immediately on startup
 	if err := db.UpdateHierarchiesLastUpdated(); err != nil {
 		log.Printf("[WEB]: Initial hierarchy update failed: %v", err)
+	} else {
+		// Update the hierarchy cache with new last_updated values
+		if db.HierarchyCache != nil {
+			if err := db.HierarchyCache.UpdateHierarchyLastUpdated(db); err != nil {
+				log.Printf("[WEB]: Initial hierarchy cache update failed: %v", err)
+			} else {
+				log.Printf("[WEB]: Initial hierarchy cache updated successfully")
+			}
+		}
 	}
 	log.Printf("[WEB]: Hierarchy updater started, will sync hierarchy last_updated every 30 minutes")
 
@@ -662,6 +656,15 @@ func startHierarchyUpdater(db *database.Database) {
 		time.Sleep(10 * time.Minute)
 		if err := db.UpdateHierarchiesLastUpdated(); err != nil {
 			log.Printf("[WEB]: Hierarchy update failed: %v", err)
+		} else {
+			// Update the hierarchy cache with new last_updated values
+			if db.HierarchyCache != nil {
+				if err := db.HierarchyCache.UpdateHierarchyLastUpdated(db); err != nil {
+					log.Printf("[WEB]: Hierarchy cache update failed: %v", err)
+				} else {
+					log.Printf("[WEB]: Hierarchy cache updated successfully")
+				}
+			}
 		}
 	}
 }

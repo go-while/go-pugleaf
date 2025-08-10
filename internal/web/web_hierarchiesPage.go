@@ -138,8 +138,14 @@ func (s *WebServer) adminUpdateHierarchies(c *gin.Context) {
 		return
 	}
 
+	// Refresh hierarchy cache after update
+	if s.DB.HierarchyCache != nil {
+		s.DB.HierarchyCache.InvalidateAll()
+		go s.DB.HierarchyCache.WarmCache(s.DB) // Warm cache in background
+	}
+
 	// Return success response as JSON
-	c.JSON(http.StatusOK, gin.H{"message": "Hierarchies updated successfully"})
+	c.JSON(http.StatusOK, gin.H{"message": "Hierarchies updated and cache refreshed successfully"})
 }
 
 // hierarchyTreePage displays a hierarchical tree view for browsing newsgroups

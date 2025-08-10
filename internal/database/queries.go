@@ -114,6 +114,12 @@ func (db *Database) InsertNewsgroup(g *models.Newsgroup) error {
 		`INSERT INTO newsgroups (name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		g.Name, g.Description, g.LastArticle, g.MessageCount, g.Active, g.ExpiryDays, g.MaxArticles, g.MaxArtSize, g.HighWater, g.LowWater, g.Status, g.Hierarchy,
 	)
+
+	// Invalidate hierarchy cache for the affected hierarchy
+	if err == nil && db.HierarchyCache != nil {
+		db.HierarchyCache.InvalidateHierarchy(g.Hierarchy)
+	}
+
 	return err
 }
 
@@ -188,6 +194,12 @@ func (db *Database) UpdateNewsgroup(g *models.Newsgroup) error {
 		`UPDATE newsgroups SET description = ?, last_article = ?, message_count = ?, active = ?, expiry_days = ?, max_articles = ?, high_water = ?, low_water = ?, status = ?, hierarchy = ? WHERE name = ?`,
 		g.Description, g.LastArticle, g.MessageCount, g.Active, g.ExpiryDays, g.MaxArticles, g.HighWater, g.LowWater, g.Status, g.Hierarchy, g.Name,
 	)
+
+	// Invalidate hierarchy cache for the affected hierarchy
+	if err == nil && db.HierarchyCache != nil {
+		db.HierarchyCache.InvalidateHierarchy(g.Hierarchy)
+	}
+
 	return err
 }
 
@@ -242,6 +254,12 @@ func (db *Database) UpdateNewsgroupActive(name string, active bool) error {
 		`UPDATE newsgroups SET active = ? WHERE name = ?`,
 		active, name,
 	)
+
+	// Update hierarchy cache with new active status instead of invalidating
+	if err == nil && db.HierarchyCache != nil {
+		db.HierarchyCache.UpdateNewsgroupActiveStatus(name, active)
+	}
+
 	return err
 }
 
@@ -285,6 +303,13 @@ func (db *Database) BulkUpdateNewsgroupActive(names []string, active bool) (int,
 
 	if err := tx.Commit(); err != nil {
 		return 0, err
+	}
+
+	// Update hierarchy cache with new active status for all affected newsgroups
+	if db.HierarchyCache != nil {
+		for _, name := range names {
+			db.HierarchyCache.UpdateNewsgroupActiveStatus(name, active)
+		}
 	}
 
 	return int(rowsAffected), nil
@@ -331,6 +356,14 @@ func (db *Database) BulkDeleteNewsgroups(names []string) (int, error) {
 		return 0, err
 	}
 
+	// Invalidate hierarchy cache for all affected newsgroups
+	if db.HierarchyCache != nil {
+		for _, name := range names {
+			hierarchy := ExtractHierarchyFromGroupName(name)
+			db.HierarchyCache.InvalidateHierarchy(hierarchy)
+		}
+	}
+
 	return int(rowsAffected), nil
 }
 
@@ -345,8 +378,23 @@ func (db *Database) UpdateNewsgroupDescription(name string, description string) 
 
 // DeleteNewsgroup deletes a newsgroup from the main database
 func (db *Database) DeleteNewsgroup(name string) error {
+	// Get hierarchy before deletion for cache invalidation
+	newsgroup, err := db.MainDBGetNewsgroup(name)
+	var hierarchy string
+	if err == nil {
+		hierarchy = newsgroup.Hierarchy
+	} else {
+		// Fallback: extract hierarchy from name
+		hierarchy = ExtractHierarchyFromGroupName(name)
+	}
 
-	_, err := retryableExec(db.mainDB, `DELETE FROM newsgroups WHERE name = ? AND active = 0`, name)
+	_, err = retryableExec(db.mainDB, `DELETE FROM newsgroups WHERE name = ? AND active = 0`, name)
+
+	// Invalidate hierarchy cache for the affected hierarchy
+	if err == nil && db.HierarchyCache != nil {
+		db.HierarchyCache.InvalidateHierarchy(hierarchy)
+	}
+
 	return err
 }
 
@@ -1397,6 +1445,15 @@ func (db *Database) GetNewsgroupsByExactPrefix(prefix string) ([]*models.Newsgro
 
 // GetHierarchySubLevels gets immediate sub-hierarchy names and their group counts efficiently with pagination
 func (db *Database) GetHierarchySubLevels(prefix string, page int, pageSize int) (map[string]int, int, error) {
+	// Use cache if available, otherwise fall back to direct query
+	if db.HierarchyCache != nil {
+		return db.HierarchyCache.GetHierarchySubLevels(db, prefix, page, pageSize)
+	}
+	return db.getHierarchySubLevelsDirect(prefix, page, pageSize)
+}
+
+// getHierarchySubLevelsDirect is the original uncached implementation
+func (db *Database) getHierarchySubLevelsDirect(prefix string, page int, pageSize int) (map[string]int, int, error) {
 	// First get total count of sub-hierarchies
 	var totalCount int
 	err := db.mainDB.QueryRow(`
@@ -1444,6 +1501,15 @@ var empty []*models.Newsgroup
 
 // GetDirectGroupsAtLevel gets newsgroups that are direct children of the given prefix with pagination
 func (db *Database) GetDirectGroupsAtLevel(prefix string, sortBy string, page int, pageSize int) ([]*models.Newsgroup, int, error) {
+	// Use cache if available, otherwise fall back to direct query
+	if db.HierarchyCache != nil {
+		return db.HierarchyCache.GetDirectGroupsAtLevel(db, prefix, sortBy, page, pageSize)
+	}
+	return db.getDirectGroupsAtLevelDirect(prefix, sortBy, page, pageSize)
+}
+
+// getDirectGroupsAtLevelDirect is the original uncached implementation
+func (db *Database) getDirectGroupsAtLevelDirect(prefix string, sortBy string, page int, pageSize int) ([]*models.Newsgroup, int, error) {
 	// First get total count
 	var totalCount int
 	err := db.mainDB.QueryRow(`
@@ -1533,6 +1599,15 @@ func (db *Database) GetAllHierarchies() ([]*models.Hierarchy, error) {
 
 // GetHierarchiesPaginated returns hierarchies with pagination and optional sorting
 func (db *Database) GetHierarchiesPaginated(page, pageSize int, sortBy string) ([]*models.Hierarchy, int, error) {
+	// Use cache if available, otherwise fall back to direct query
+	if db.HierarchyCache != nil {
+		return db.HierarchyCache.GetHierarchiesPaginated(db, page, pageSize, sortBy)
+	}
+	return db.getHierarchiesPaginatedDirect(page, pageSize, sortBy)
+}
+
+// getHierarchiesPaginatedDirect is the original uncached implementation
+func (db *Database) getHierarchiesPaginatedDirect(page, pageSize int, sortBy string) ([]*models.Hierarchy, int, error) {
 	// First get total count of hierarchies that have active newsgroups with messages
 	// Using optimized query with hierarchy column instead of LIKE pattern matching
 	var totalCount int

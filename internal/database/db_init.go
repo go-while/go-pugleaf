@@ -33,9 +33,10 @@ type Database struct {
 	// Caches
 	SectionsCache  *GroupSectionDBCache
 	MemThreadCache *MemCachedThreads
-	ArticleCache   *ArticleCache  // LRU cache for individual articles
-	NNTPAuthCache  *NNTPAuthCache // Authentication cache for NNTP users
-	Batch          *SQ3batch      // sqlite3 Batch operations
+	ArticleCache   *ArticleCache   // LRU cache for individual articles
+	NNTPAuthCache  *NNTPAuthCache  // Authentication cache for NNTP users
+	HierarchyCache *HierarchyCache // Fast hierarchy and group browsing cache
+	Batch          *SQ3batch       // sqlite3 Batch operations
 
 	WG       *sync.WaitGroup
 	StopChan chan struct{} // Channel to signal shutdown
@@ -144,8 +145,12 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 	log.Printf("pugLeaf DB init config: %+v", dbconfig)
 	db.SectionsCache = NewGroupSectionDBCache()
 	db.MemThreadCache = NewMemCachedThreads()
+	db.HierarchyCache = NewHierarchyCache() // Initialize hierarchy cache for fast browsing
 	GroupHashMap = NewGHmap()
 	db.Batch = NewSQ3batch(db) // Initialize SQ3batch for batch operations
+
+	// Start hierarchy cache warming in background
+	go db.HierarchyCache.WarmCache(db)
 
 	// Start other DB cron tasks
 	go db.CronDB()

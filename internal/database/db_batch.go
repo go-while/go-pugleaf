@@ -475,6 +475,11 @@ retry:
 
 		if err == nil {
 			//log.Printf("[BATCH] processNewsgroupBatch Updated newsgroup '%s' stats: +%d articles, max_article=%d", *task.Newsgroup, increment, maxArticleNum)
+
+			// Update hierarchy cache with new stats instead of invalidating
+			if c.db.HierarchyCache != nil {
+				c.db.HierarchyCache.UpdateNewsgroupStats(*task.Newsgroup, increment, maxArticleNum)
+			}
 		}
 	}
 	if err != nil {
