@@ -14,10 +14,13 @@ import (
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
-var appVersion = "RSL-unset" // set by build script
 var Prof *prof.Profiler
 
+var appVersion = "-unset-"
+
 func main() {
+	config.AppVersion = appVersion
+	log.Printf("Starting go-pugleaf RSLIGHT-IMPORT (version: %s)", config.AppVersion)
 	Prof = prof.NewProf()
 	go Prof.PprofWeb(":51111")
 	Prof.StartMemProfile(5*time.Minute, 30*time.Second)

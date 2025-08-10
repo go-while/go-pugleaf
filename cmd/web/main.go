@@ -25,8 +25,7 @@ import (
 )
 
 var (
-	appVersion = "-"
-	webmutex   sync.Mutex
+	webmutex sync.Mutex
 
 	// command-line flags
 	hostnamePath            string
@@ -275,12 +274,13 @@ func hideFuturePosts(db *database.Database) error {
 	return nil
 }
 
+var appVersion = "-unset-"
+
 func main() {
 	config.AppVersion = appVersion
 
 	// Initialize embedded filesystems
 	database.SetEmbeddedMigrations(database.EmbeddedMigrationsFS)
-	log.Printf("[WEB]: Embedded filesystems initialized")
 
 	flag.Int64Var(&isleep, "isleep", 300, "Sleeps in fetch routines. if started with: -withfetch (default: 300 seconds = 5min)")
 	flag.IntVar(&maxSanArtCache, "maxsanartcache", 10000, "maximum number of cached sanitized articles (default: 10000)")
@@ -320,7 +320,6 @@ func main() {
 	*/
 	flag.Parse()
 	mainConfig := config.NewDefaultConfig()
-	appVersion = mainConfig.AppVersion
 	log.Printf("Starting go-pugleaf: Web Server NNTP=%t Fetch=%t (version: %s)", withnntp, withfetch, appVersion)
 
 	// Debug: Log parsed flags

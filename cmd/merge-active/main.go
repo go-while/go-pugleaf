@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
@@ -44,7 +45,11 @@ type ActiveMap map[string]*ActiveEntry
 // OverviewMap holds overview entries by message ID
 type OverviewMap map[string]*OverviewEntry
 
+var appVersion = "-unset-"
+
 func main() {
+	config.AppVersion = appVersion
+
 	// Disable strict group validation to allow legitimate groups with + and _ characters
 	processor.UseStrictGroupValidation = false
 

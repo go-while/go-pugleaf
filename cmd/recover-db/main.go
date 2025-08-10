@@ -24,7 +24,11 @@ type GroupResult struct {
 	ErrorMessage           string
 }
 
+var appVersion = "-unset-"
+
 func main() {
+	config.AppVersion = appVersion
+	log.Printf("go-pugleaf Database Recovery Tool (version: %s)", config.AppVersion)
 	var (
 		dbPath       = flag.String("db", "data", "Data Path to main data directory (required)")
 		newsgroup    = flag.String("group", "$all", "Newsgroup name to check (required) (\\$all to check for all)")
@@ -188,7 +192,7 @@ func main() {
 			if err != nil {
 				result.Status = "ERROR"
 				result.ErrorMessage = "Failed to re-check after repair: " + err.Error()
-				results = append(results, result)
+				//results = append(results, result)
 				errorGroups++
 				if report != nil {
 					report.PrintReport()

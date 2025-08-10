@@ -42,7 +42,10 @@ func showUsageExamples() {
 	fmt.Println()
 }
 
+var appVersion = "-unset-"
+
 func main() {
+	config.AppVersion = appVersion
 	database.DBidleTimeOut = 15 * time.Second
 	log.Printf("Starting go-pugleaf NNTP Fetcher (version %s)", config.AppVersion)
 	// Command line flags for NNTP fetcher configuration

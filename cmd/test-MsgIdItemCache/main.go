@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"math/rand"
 	"runtime"
 	"sync"
@@ -10,10 +11,15 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/history"
 )
 
+var appVersion = "-unset-"
+
 func main() {
+	config.AppVersion = appVersion
+	log.Printf("Starting go-pugleaf MsgIdItemCache Test (version: %s)", config.AppVersion)
 	// Command line flags
 	numItems := flag.Int("items", 100000, "Number of message IDs to test")
 	numWorkers := flag.Int("workers", 1, "Number of concurrent workers")

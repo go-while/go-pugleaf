@@ -14,8 +14,6 @@ import (
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
-var appVersion = "-"
-
 var (
 	hostnamePath    string
 	nntptcpport     int
@@ -26,10 +24,13 @@ var (
 	maxConnections  int
 )
 
+var appVersion = "-unset-"
+
 func main() {
+	config.AppVersion = appVersion
+	log.Printf("Starting go-pugleaf dedicated NNTP Server (version: %s)", config.AppVersion)
 	// Example configuration
 	mainConfig := config.NewDefaultConfig()
-	appVersion = mainConfig.AppVersion
 	log.Printf("Starting go-pugleaf dedicated NNTP Server (version: %s)", appVersion)
 
 	flag.StringVar(&hostnamePath, "nntphostname", "", "Your hostname must be set!")

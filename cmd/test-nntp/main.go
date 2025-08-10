@@ -3,12 +3,17 @@ package main
 
 import (
 	"fmt"
+	"log"
 
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 )
 
-func main() {
+var appVersion = "-unset-"
 
+func main() {
+	config.AppVersion = appVersion
+	log.Printf("Starting go-pugleaf NNTP Provider Test (version: %s)", config.AppVersion)
 	// Test configuration for news.blueworldhosting.com
 	config := nntp.BackendConfig{
 		Host:     "news.blueworldhosting.com",
