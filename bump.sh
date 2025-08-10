@@ -7,4 +7,5 @@ else
     ./Build_DEV.sh 
 fi
 
+./createUpdate.sh
 ./rsync.sh 
