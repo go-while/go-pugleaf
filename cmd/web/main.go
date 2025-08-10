@@ -148,9 +148,9 @@ func updateNewsgroupLastActivity(db *database.Database) error {
 			//dateStr = strings.TrimSpace(dateStr)
 			// Try multiple date formats to handle various edge cases
 			formats := []string{
-				"2006-01-02 15:04:05",
 				"2006-01-02 15:04:05-07:00",
 				"2006-01-02 15:04:05+07:00",
+				"2006-01-02 15:04:05",
 			}
 
 			for _, format := range formats {
