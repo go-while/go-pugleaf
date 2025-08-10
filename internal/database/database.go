@@ -156,6 +156,9 @@ func (db *Database) ForceCloseGroupDBs(groupsDB *GroupDBs) error {
 	groupsDB.mux.Unlock()
 	db.openDBsNum--
 	delete(db.groupDBs, groupsDB.Newsgroup)
+	groupsDB.Newsgroup = ""
+	groupsDB.DB = nil
+	groupsDB = nil
 	return nil
 }
 
