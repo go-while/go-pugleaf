@@ -16,6 +16,8 @@ go-pugleaf provides a complete newsgroup platform with:
 
 ## 🚀 Quick Start
 
+Read [BUGS.md](https://github.com/go-while/go-pugleaf/blob/main/BUGS.md) first!
+
 ### Prerequisites
 - Go 1.24.3+ (for building from source)
 - Linux/Unix system (Windows support not tested)

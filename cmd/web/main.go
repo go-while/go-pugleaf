@@ -137,6 +137,9 @@ func updateNewsgroupLastActivity(db *database.Database) error {
 		if latestDate.Valid {
 			// Parse the date and format it consistently as UTC
 			dateStr := latestDate.String
+			if dateStr == "" {
+				return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", name)
+			}
 			var parsedDate time.Time
 			var err error
 
@@ -147,6 +150,7 @@ func updateNewsgroupLastActivity(db *database.Database) error {
 			formats := []string{
 				"2006-01-02 15:04:05-07:00",
 				"2006-01-02 15:04:05+07:00",
+				"2006-01-02 15:04:05",
 			}
 
 			for _, format := range formats {

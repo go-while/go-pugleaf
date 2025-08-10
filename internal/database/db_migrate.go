@@ -108,13 +108,13 @@ func getMigrationFiles() ([]*MigrationFile, error) {
 	// Try to get embedded migrations first
 	embeddedMigrations, err := getEmbeddedMigrationFiles()
 	if err == nil && len(embeddedMigrations) > 0 {
-		log.Printf("Using %d embedded migration files", len(embeddedMigrations))
+		//log.Printf("Using %d embedded migration files", len(embeddedMigrations))
 		return embeddedMigrations, nil
 	}
-	
+
 	// Fall back to filesystem migrations
 	log.Printf("Embedded migrations not available, falling back to filesystem migrations")
-	
+
 	// Check the cache first
 	migrationCacheMux.RLock()
 	if migrationCacheInit {
@@ -207,7 +207,7 @@ func getAppliedMigrations(db *sql.DB, dbType string) (map[string]bool, error) {
 func applyMigration(db *sql.DB, migration *MigrationFile, dbType string) error {
 	var content string
 	var err error
-	
+
 	// Read migration content from embedded filesystem or regular filesystem
 	if migration.IsEmbedded {
 		content, err = readEmbeddedMigrationContent(migration)
