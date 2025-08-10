@@ -21,7 +21,7 @@ var appVersion = "-unset-"
 
 func main() {
 	config.AppVersion = appVersion
-	log.Printf("go-pugleaf User Manager (version: %s)", config.AppVersion)
+	log.Printf("go-pugleaf Web User Manager (version: %s)", config.AppVersion)
 	var (
 		createUser = flag.Bool("create", false, "Create a new user")
 		listUsers  = flag.Bool("list", false, "List all users")

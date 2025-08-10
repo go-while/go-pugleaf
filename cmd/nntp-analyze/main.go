@@ -126,6 +126,7 @@ var appVersion = "-unset-"
 func main() {
 	config.AppVersion = appVersion
 	log.Printf("Starting go-pugleaf NNTP Analyzer (version %s)", config.AppVersion)
+
 	// Command line flags for NNTP server connection
 	var (
 		host       = flag.String("host", "lux-feed1.newsdeef.eu", "NNTP hostname")

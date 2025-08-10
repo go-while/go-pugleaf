@@ -33,7 +33,7 @@ func main() {
 	)
 	flag.Parse()
 
-	if (!*createUser && !*listUsers && !*deleteUser && !*updateUser) || *newsgroup == "" {
+	if !*createUser && !*listUsers && !*deleteUser && !*updateUser && *newsgroup == "" {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
@@ -87,7 +87,7 @@ func main() {
 			log.Fatalf("Failed to rescan newsgroup '%s': %v", *newsgroup, err)
 		}
 		log.Printf("✅ Rescan completed for newsgroup '%s'", *newsgroup)
-		os.Exit(1)
+		return
 	}
 
 	switch {
