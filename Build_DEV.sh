@@ -18,4 +18,3 @@ rm -v build/*
 #./build_expire-news.sh
 
 
-./createUpdate.sh
