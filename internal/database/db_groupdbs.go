@@ -99,6 +99,5 @@ func (dbs *GroupDBs) Close(who string) error {
 	}
 	dbs.Newsgroup = ""
 	dbs.DB = nil
-	dbs = nil
 	return nil
 }
