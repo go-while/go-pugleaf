@@ -122,6 +122,13 @@
                     </div>
                     {{end}}
 
+                    {{/* Add visual break between sub-hierarchies and groups */}}
+                    {{if and .SubHierarchies .Groups}}
+                    <div class="col-12 mb-3">
+                        <hr class="text-muted">
+                    </div>
+                    {{end}}
+
                     {{/* Then show direct groups */}}
                     {{range .Groups}}
                     <div class="col-lg-4 col-xl-3 col-xxl-2 mb-3">
