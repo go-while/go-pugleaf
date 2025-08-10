@@ -19,7 +19,6 @@
 
 # Go workspace file
 go.work
-*.db3
 *.db
 *.sq3
 *.prof
@@ -27,7 +26,6 @@ go.work
 /blobs
 /data*
 /new*
-/spool
 /demo_history
 internal/nntp/analysis_*
 update.tar.gz
