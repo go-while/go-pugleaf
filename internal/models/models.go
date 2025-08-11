@@ -113,30 +113,36 @@ type UserPermission struct {
 type Article struct {
 	GetDataFunc func(what string, group string) string `json:"-" db:"-"`
 	RWMutex     sync.RWMutex                           `json:"-" db:"-"`
-	ArticleNum  int64                                  `json:"article_num" db:"article_num"`
-	MessageID   string                                 `json:"message_id" db:"message_id"`
-	Subject     string                                 `json:"subject" db:"subject"`
-	FromHeader  string                                 `json:"from_header" db:"from_header"`
-	DateSent    time.Time                              `json:"date_sent" db:"date_sent"`
-	DateString  string                                 `json:"date_string" db:"date_string"`
-	References  string                                 `json:"references" db:"references"`
-	Bytes       int                                    `json:"bytes" db:"bytes"`
-	Lines       int                                    `json:"lines" db:"lines"`
-	ReplyCount  int                                    `json:"reply_count" db:"reply_count"`
-	HeadersJSON string                                 `json:"headers_json" db:"headers_json"`
-	BodyText    string                                 `json:"body_text" db:"body_text"`
-	Path        string                                 `json:"path" db:"path"` // headers network path
-	ImportedAt  time.Time                              `json:"imported_at" db:"imported_at"`
-	Spam        int                                    `json:"spam" db:"spam"` // Simple spam counter
-	Hide        int                                    `json:"hide" db:"hide"` // Simple hide counter
-	Sanitized   bool                                   `json:"-" db:"-"`
-	MsgIdItem   *history.MessageIdItem                 `json:"-" db:"-"` // Cached MessageIdItem for history lookups
+	//ArticleNum  int64                                  `json:"article_num" db:"article_num"`
+	MessageID   string                 `json:"message_id" db:"message_id"`
+	Subject     string                 `json:"subject" db:"subject"`
+	FromHeader  string                 `json:"from_header" db:"from_header"`
+	DateSent    time.Time              `json:"date_sent" db:"date_sent"`
+	DateString  string                 `json:"date_string" db:"date_string"`
+	References  string                 `json:"references" db:"references"`
+	Bytes       int                    `json:"bytes" db:"bytes"`
+	Lines       int                    `json:"lines" db:"lines"`
+	ReplyCount  int                    `json:"reply_count" db:"reply_count"`
+	HeadersJSON string                 `json:"headers_json" db:"headers_json"`
+	BodyText    string                 `json:"body_text" db:"body_text"`
+	Path        string                 `json:"path" db:"path"` // headers network path
+	ImportedAt  time.Time              `json:"imported_at" db:"imported_at"`
+	Spam        int                    `json:"spam" db:"spam"` // Simple spam counter
+	Hide        int                    `json:"hide" db:"hide"` // Simple hide counter
+	Sanitized   bool                   `json:"-" db:"-"`
+	MsgIdItem   *history.MessageIdItem `json:"-" db:"-"` // Cached MessageIdItem for history lookups
 
 	// Temporary fields for parsing - not stored in database
-	Headers    map[string][]string `json:"-" db:"-"` // Raw headers during parsing
-	Newsgroups []string            `json:"-" db:"-"` // Extracted newsgroups
-	NNTPhead   []string            // used for peering
-	NNTPbody   []string            // used for peering
+	Headers map[string][]string `json:"-" db:"-"` // Raw headers during parsing
+	//Newsgroups    []string            `json:"-" db:"-"` // Extracted newsgroups
+	ArticleNums   map[*string]int64 `json:"-" db:"-"` // key is newsgroup pointer, value is article number
+	NNTPhead      []string          `json:"-" db:"-"` // used for peering
+	NNTPbody      []string          `json:"-" db:"-"` // used for peering
+	IsThrRoot     bool              `json:"-" db:"-"` // used in db_batch
+	IsReply       bool              `json:"-" db:"-"` // used in db_batch
+	RefSlice      []string          `json:"-" db:"-"` // Parsed references for threading
+	NewsgroupsPtr []*string         `json:"-" db:"-"` // Parsed newsgroup for threading
+	ProcessQueue  chan *string      `json:"-" db:"-"` // newsgroup ptr for batching
 }
 
 func (a *Article) GetData(what string, group string) string {

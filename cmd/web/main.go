@@ -435,14 +435,6 @@ func main() {
 	database.GlobalDateParser = processor.ParseNNTPDate
 	//log.Printf("[WEB]: Date parser adapter initialized with processor.ParseNNTPDate")
 
-	// Initialize caches after database is loaded (using command-line flag values)
-	db.ArticleCache = database.NewArticleCache(maxArticleCache, time.Duration(maxArticleCacheExpiry)*time.Minute)
-	//log.Printf("[WEB]: Article cache initialized (max %d articles, %v expiry)", maxArticleCache, time.Duration(maxArticleCacheExpiry)*time.Minute)
-
-	// Initialize NNTP authentication cache (15 minute TTL)
-	db.NNTPAuthCache = database.NewNNTPAuthCache(15 * time.Minute)
-	//log.Printf("[WEB]: NNTP authentication cache initialized (15 minute TTL)")
-
 	// Note: Database batch workers are started automatically by OpenDatabase()
 	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
 	db.WG.Add(1) // Adds for history: one for writer worker

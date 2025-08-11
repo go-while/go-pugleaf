@@ -302,11 +302,8 @@ func (c *MsgIdItemCache) cleanupMessageIdItem(item *MessageIdItem) {
 
 	// Clear GroupThreading map and its contents
 	if item.GroupThreading != nil {
-		for k, v := range item.GroupThreading {
+		for k := range item.GroupThreading {
 			// Clear the ThreadingInfo contents (though it's a struct, not pointers)
-			if v != nil {
-				*v = ThreadingInfo{} // Zero out the struct
-			}
 			delete(item.GroupThreading, k)
 		}
 		item.GroupThreading = nil
@@ -645,29 +642,19 @@ func (c *MsgIdItemCache) CleanExpiredEntries() int {
 					}
 					countCaseDupes++
 				case CaseWrite:
-					// Items still being processed - DO NOT remove while processing
-
+					// Items ARE still being processed - DO NOT remove while processing
 					if now.After(item.CachedEntryExpires) {
-						//shouldDelete = false
 						countDeleteWrite++
 					}
-
 					countCaseWrite++
 				case CaseError:
 					// Error cases - remove when TTL expires to allow retry
 					if now.After(item.CachedEntryExpires) {
 						shouldDelete = true
-
 					}
 					countCaseError++
 				case CaseLock:
 					// Lock cases - DO NOT remove while locked
-					/*
-						if now.After(item.CachedEntryExpires) {
-							shouldDelete = false
-							//log.Printf("[CACHE-CLEANUP] Lock case for item %s - not removing yet, is timeout since %v", item.MessageId, item.CachedEntryExpires.Sub(now))
-						}
-					*/
 					countCaseLocked++
 				default:
 					// Unknown/uninitialized state - remove if expired

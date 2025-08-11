@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/go-pugleaf/internal/utils"
 )
 
 var MaxCrossPosts = 15 // HARDCODED Maximum number of crossposts to allow per article
@@ -58,6 +59,7 @@ func ComputeMessageIDHash(messageID string) string {
 	hash := md5.Sum([]byte(messageID))
 	return fmt.Sprintf("%x", hash)
 }
+
 func CheckMessageIdFormat(messageID string) bool {
 	// Check if the message ID is a valid format
 	if messageID == "" {
@@ -195,6 +197,7 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 
 	// Reuse the incoming article in-place - populate missing fields from headers
 	art.References = getHeaderFirst(art.Headers, "references")
+	art.RefSlice = utils.ParseReferences(art.References)
 	art.Subject = getHeaderFirst(art.Headers, "subject")
 	art.FromHeader = getHeaderFirst(art.Headers, "from")
 	art.Path = getHeaderFirst(art.Headers, "path")
@@ -206,7 +209,16 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 	art.HeadersJSON = multiLineHeaderToMergedString(art.NNTPhead)
 	art.ImportedAt = time.Now()
 	art.MsgIdItem = msgIdItem
+	art.ArticleNums = make(map[*string]int64)
+	art.ProcessQueue = make(chan *string, 16) // Initialize process queue
 
+	if len(art.RefSlice) == 0 {
+		art.IsThrRoot = true
+		art.IsReply = false
+	} else {
+		art.IsThrRoot = false
+		art.IsReply = true
+	}
 	// Apply fallbacks for missing essential fields
 	if art.Subject == "" {
 		log.Printf("[WARN:OLD] Article '%s' empty subject... headers='%#v'", art.MessageID, art.Headers)
@@ -229,8 +241,8 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 		art.NNTPhead = nil // not needed in bulmode: free memory
 		art.NNTPbody = nil // not needed in bulmode: free memory
 	}
-	art.Headers = nil    // Free headers map after extracting all needed values
-	art.Newsgroups = nil // Free newsgroups slice if it exists
+	art.Headers = nil // Free headers map after extracting all needed values
+	//art.Newsgroups = nil // Free newsgroups slice if it exists
 	if len(newsgroups) > 0 {
 		// Process groups directly inline - no goroutines/channels needed
 
@@ -243,6 +255,7 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 				proc.setCaseDupes(msgIdItem, bulkmode)
 				continue // Skip this group if not found
 			}
+			art.NewsgroupsPtr = append(art.NewsgroupsPtr, newsgroupPtr)
 			// @AI !!! NO CACHE CHECK for bulk legacy import!!
 			if !bulkmode { // @AI !!! NO CACHE CHECK for bulk legacy import!!
 				// @AI !!! NO CACHE CHECK for bulk legacy import!!
@@ -262,16 +275,20 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 				}
 				continue // Continue with other groups
 			}
-
-			// Skip database duplicate check for bulk legacy imports
-			if !bulkmode {
-				// check if article exists in articledb - this is the expensive operation
-				if groupDBs.ExistsMsgIdInArticlesDB(art.MessageID) {
-					groupDBs.Return(proc.DB) // Return connection before continuing
-					continue
-				}
+			if groupDBs.ExistsMsgIdInArticlesDB(art.MessageID) {
+				groupDBs.Return(proc.DB) // Return connection before continuing
+				continue
 			}
-
+			/*
+				// Skip database duplicate check for bulk legacy imports
+				if !bulkmode {
+					// check if article exists in articledb - this is the expensive operation
+					if groupDBs.ExistsMsgIdInArticlesDB(art.MessageID) {
+						groupDBs.Return(proc.DB) // Return connection before continuing
+						continue
+					}
+				}
+			*/
 			groupDBs.Return(proc.DB)
 
 			proc.DB.Batch.BatchCaptureOverviewForLater(newsgroupPtr, art)

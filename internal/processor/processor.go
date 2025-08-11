@@ -273,17 +273,17 @@ func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, err
 	}
 
 	// Make sure we have at least one newsgroup
-	if len(article.Newsgroups) == 0 {
+	if len(article.NewsgroupsPtr) == 0 {
 		return history.CaseError, fmt.Errorf("no newsgroups specified in article")
 	}
 
 	// Use the primary newsgroup for processing
 	// The article will be available in all cross-posted groups
 	log.Printf("Processing incoming article with Message-ID: %s for primary newsgroup %s (cross-posted to %d groups)",
-		article.MessageID, article.Newsgroups[0], len(article.Newsgroups))
+		article.MessageID, *article.NewsgroupsPtr[0], len(article.NewsgroupsPtr))
 
 	bulkmode := false
-	return proc.processArticle(article, article.Newsgroups[0], bulkmode)
+	return proc.processArticle(article, *article.NewsgroupsPtr[0], bulkmode)
 }
 
 // EnableBridges enables Fediverse and/or Matrix bridges with the given configuration

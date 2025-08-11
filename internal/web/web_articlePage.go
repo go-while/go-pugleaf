@@ -132,13 +132,13 @@ func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
 	subjectText := article.GetCleanSubject()
 
 	data := ArticlePageData{
-		TemplateData: s.getBaseTemplateData(c, subjectText+" - Article "+strconv.FormatInt(article.ArticleNum, 10)),
+		TemplateData: s.getBaseTemplateData(c, subjectText+" - Article "+strconv.FormatInt(article.ArticleNums[groupDBs.NewsgroupPtr], 10)),
 		GroupName:    groupName,
-		ArticleNum:   article.ArticleNum,
+		ArticleNum:   article.ArticleNums[groupDBs.NewsgroupPtr],
 		Article:      article,
 		Thread:       thread,
-		PrevArticle:  article.ArticleNum - 1,
-		NextArticle:  article.ArticleNum + 1,
+		PrevArticle:  article.ArticleNums[groupDBs.NewsgroupPtr] - 1,
+		NextArticle:  article.ArticleNums[groupDBs.NewsgroupPtr] + 1,
 	}
 
 	// Load template individually to avoid conflicts

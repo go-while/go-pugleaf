@@ -391,12 +391,11 @@ func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
 
 	// Get subject for title without HTML escaping (for proper browser title display)
 	subjectText := article.GetCleanSubject()
-
 	data := SectionArticlePageData{
 		TemplateData: s.getBaseTemplateData(c, section.DisplayName+" - "+groupName+" - "+subjectText),
 		Section:      section,
 		GroupName:    groupName,
-		ArticleNum:   article.ArticleNum,
+		ArticleNum:   article.ArticleNums[groupDBs.NewsgroupPtr],
 		Article:      article,
 		Thread:       []*models.Overview{}, // TODO: Implement threading
 		PrevArticle:  0,                    // TODO: Implement navigation

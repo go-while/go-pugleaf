@@ -243,7 +243,7 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 			c.sendResponse(430, "NotF8")
 			return nil, nil
 		}
-		articleNum = article.ArticleNum
+		articleNum = article.ArticleNums[groupDBs.NewsgroupPtr]
 
 	} else {
 		// Handle article number lookup

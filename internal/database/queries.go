@@ -443,7 +443,7 @@ func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
 	return &lastDate, nil
 }
 
-func (db *Database) GetArticles(groupDBs *GroupDBs) ([]*models.Article, error) {
+func (db *Database) GetAllArticles(groupDBs *GroupDBs) ([]*models.Article, error) {
 	log.Printf("GetArticles: group '%s' fetching articles", groupDBs.Newsgroup)
 
 	rows, err := retryableQuery(groupDBs.DB, `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles ORDER BY article_num ASC`)
@@ -454,9 +454,13 @@ func (db *Database) GetArticles(groupDBs *GroupDBs) ([]*models.Article, error) {
 	var out []*models.Article
 	for rows.Next() {
 		var a models.Article
-		if err := rows.Scan(&a.ArticleNum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
+		var artnum int64
+		if err := rows.Scan(&artnum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
 			return nil, err
 		}
+		a.ArticleNums = make(map[*string]int64)
+		a.ArticleNums[groupDBs.NewsgroupPtr] = artnum
+		a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDBs.NewsgroupPtr)
 		out = append(out, &a)
 	}
 	return out, nil
@@ -680,18 +684,20 @@ func (db *Database) GetArticleByNum(groupDBs *GroupDBs, articleNum int64) (*mode
 			return article, nil
 		}
 	}
-
 	row := groupDBs.DB.QueryRow(`SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles WHERE article_num = ?`, articleNum)
 	var a models.Article
-	if err := row.Scan(&a.ArticleNum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
+	var artnum int64
+	if err := row.Scan(&artnum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
 		return nil, err
 	}
+	a.ArticleNums = make(map[*string]int64)
+	a.ArticleNums[groupDBs.NewsgroupPtr] = artnum
+	a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDBs.NewsgroupPtr)
 
 	// Cache the result
 	if db.ArticleCache != nil {
 		db.ArticleCache.Put(groupDBs.Newsgroup, articleNum, &a)
 	}
-
 	return &a, nil
 }
 
@@ -701,15 +707,18 @@ func (db *Database) GetArticleByMessageID(groupDBs *GroupDBs, messageID string) 
 
 	row := groupDBs.DB.QueryRow(`SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles WHERE message_id = ?`, messageID)
 	var a models.Article
-	if err := row.Scan(&a.ArticleNum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
+	var artnum int64
+	if err := row.Scan(&artnum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
 		return nil, err
 	}
+	a.ArticleNums = make(map[*string]int64)
+	a.ArticleNums[groupDBs.NewsgroupPtr] = artnum
+	a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDBs.NewsgroupPtr)
 
-	// Cache the result using article number as key
+	// Cache the result
 	if db.ArticleCache != nil {
-		db.ArticleCache.Put(groupDBs.Newsgroup, a.ArticleNum, &a)
+		db.ArticleCache.Put(groupDBs.Newsgroup, a.ArticleNums[groupDBs.NewsgroupPtr], &a)
 	}
-
 	return &a, nil
 }
 

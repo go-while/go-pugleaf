@@ -15,6 +15,8 @@ import (
 
 var GroupHashMap *GHmap // Global variable for group hash map
 
+var ENABLE_ARTICLE_CACHE = true
+
 // Database represents the main database connection and per-group database pool
 type Database struct {
 	//proc *processor.Processor // Reference to the Processor for threading and other operations
@@ -158,7 +160,16 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 	// Start the smart orchestrator that monitors channel thresholds and timers
 	go db.Batch.orchestrator.StartOrch() // main wg waitGroup Add(+1)
 
+	db.NNTPAuthCache = NewNNTPAuthCache(15 * time.Minute)
+	//log.Printf("[WEB]: NNTP authentication cache initialized (15 minute TTL)")
+
 	// Start article cache cleanup routine
+	if ENABLE_ARTICLE_CACHE {
+		db.ArticleCache = NewArticleCache(db.dbconfig.ArticleCacheSize, db.dbconfig.ArticleCacheExpiry, db)
+		log.Printf("Article cache initialized with size %d and expiry %s", db.dbconfig.ArticleCacheSize, db.dbconfig.ArticleCacheExpiry)
+	} else {
+		log.Println("Article cache is disabled")
+	}
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute) // Cleanup every 5 minutes
 		defer ticker.Stop()
@@ -173,6 +184,7 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 			}
 		}
 	}()
+
 	log.Printf("Database initialized: %+v", db)
 	return db, nil
 }

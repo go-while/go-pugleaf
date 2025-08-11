@@ -12,6 +12,8 @@ import (
 	"github.com/go-while/go-pugleaf/internal/nntp"
 )
 
+var LOOPS_PER_GROUPS = 250
+
 type BatchQueue struct {
 	Mutex sync.RWMutex
 	Queue chan *batchItem // Channel to hold batch items to download
@@ -332,7 +334,7 @@ forProcessing:
 
 	run++
 	// do another one if we haven't run enough times
-	if run < 250 {
+	if run < LOOPS_PER_GROUPS {
 		goto doWork
 	}
 
