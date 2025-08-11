@@ -62,20 +62,21 @@ type Newsgroup struct {
 // Add 'Downloaded' field for tracking download status
 // Add Sanitized flag for consistent sanitization
 type Overview struct {
-	ArticleNum int64     `json:"article_num" db:"article_num"`
-	Subject    string    `json:"subject" db:"subject"`
-	FromHeader string    `json:"from_header" db:"from_header"`
-	DateSent   time.Time `json:"date_sent" db:"date_sent"`
-	DateString string    `json:"date_string" db:"date_string"`
-	MessageID  string    `json:"message_id" db:"message_id"`
-	References string    `json:"references" db:"references"`
-	Bytes      int       `json:"bytes" db:"bytes"`
-	Lines      int       `json:"lines" db:"lines"`
-	ReplyCount int       `json:"reply_count" db:"reply_count"`
-	Downloaded int       `json:"downloaded" db:"downloaded"` // 0 = not downloaded, 1 = downloaded
-	Spam       int       `json:"spam" db:"spam"`             // Spam flag counter
-	Hide       int       `json:"hide" db:"hide"`             // Hide flag counter
-	Sanitized  bool      `json:"-" db:"-"`
+	ArticleNum  int64             `json:"article_num" db:"article_num"`
+	Subject     string            `json:"subject" db:"subject"`
+	FromHeader  string            `json:"from_header" db:"from_header"`
+	DateSent    time.Time         `json:"date_sent" db:"date_sent"`
+	DateString  string            `json:"date_string" db:"date_string"`
+	MessageID   string            `json:"message_id" db:"message_id"`
+	References  string            `json:"references" db:"references"`
+	Bytes       int               `json:"bytes" db:"bytes"`
+	Lines       int               `json:"lines" db:"lines"`
+	ReplyCount  int               `json:"reply_count" db:"reply_count"`
+	Downloaded  int               `json:"downloaded" db:"downloaded"` // 0 = not downloaded, 1 = downloaded
+	Spam        int               `json:"spam" db:"spam"`             // Spam flag counter
+	Hide        int               `json:"hide" db:"hide"`             // Hide flag counter
+	Sanitized   bool              `json:"-" db:"-"`
+	ArticleNums map[*string]int64 `json:"-" db:"-"` // key is newsgroup pointer, value is article number
 }
 
 // User represents a web user account

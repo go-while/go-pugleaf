@@ -144,7 +144,7 @@
                     </thead>
                     <tbody>
                         {{range .ForumThreads}}
-                        <tr id="thread-{{.RootArticle.ArticleNum}}">
+                        <tr id="thread-{{index .RootArticle.ArticleNums $.GroupPtr}}">
                         <!--
                             <td class="text-center align-middle">
                                 <i class="bi bi-chat-square-text text-primary fs-4"></i>
@@ -152,7 +152,7 @@
                         -->
                             <td class="align-left">
                                 {{if gt .RootArticle.Spam 0}} 🚩 (SPAM) {{end}}
-                                <a href="/groups/{{$.GroupName}}/thread/{{.RootArticle.ArticleNum}}"
+                                <a href="/groups/{{$.GroupName}}/thread/{{index .RootArticle.ArticleNums $.GroupPtr}}"
                                     class="text-decoration-none fw-bold">
                                     {{if .RootArticle.Subject}}{{.RootArticle.PrintSanitized "subject" $.GroupName}}{{else}}[No Subject]{{end}}
                                 </a>
@@ -179,7 +179,7 @@
                             <td class="text-center">
                                 <div class="btn-group btn-group-sm" role="group">
 
-                                    <form method="POST" action="/groups/{{$.GroupName}}/articles/{{.RootArticle.ArticleNum}}/spam#thread-{{.RootArticle.ArticleNum}}" style="display: inline;">
+                                    <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index .RootArticle.ArticleNums $.GroupPtr}}/spam#thread-{{index .RootArticle.ArticleNums $.GroupPtr}}" style="display: inline;">
                                         <button type="submit" class="btn btn-outline-warning btn-sm" title="Flag thread as spam">
                                             🚩 {{.RootArticle.Spam}}
                                         </button>
@@ -187,12 +187,12 @@
 
                                     {{if $.IsAdmin}}
                                         {{if gt .RootArticle.Spam 0}}
-                                        <form method="POST" action="/groups/{{$.GroupName}}/articles/{{.RootArticle.ArticleNum}}/decrement-spam#spam-article-{{.RootArticle.ArticleNum}}" style="display: inline;">
+                                        <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index .RootArticle.ArticleNums $.GroupPtr}}/decrement-spam#spam-article-{{index .RootArticle.ArticleNums $.GroupPtr}}" style="display: inline;">
                                             <button type="submit" class="btn btn-outline-warning btn-sm" title="Decrement spam counter">
                                                 <i class="bi bi-dash-circle"></i>
                                             </button>
                                         </form>
-                                        <form method="POST" action="/groups/{{$.GroupName}}/articles/{{.RootArticle.ArticleNum}}/hide#thread-{{.RootArticle.ArticleNum}}" style="display: inline;">
+                                        <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index .RootArticle.ArticleNums $.GroupPtr}}/hide#thread-{{index .RootArticle.ArticleNums $.GroupPtr}}" style="display: inline;">
                                             <button type="submit" class="btn btn-outline-secondary btn-sm" title="Hide thread">
                                                 👁️ {{.RootArticle.Hide}}
                                             </button>
