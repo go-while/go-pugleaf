@@ -90,6 +90,7 @@ type BatchTasks struct {
 	BATCHmux        sync.RWMutex
 	BATCHchan       chan *OverviewBatch // Single channel for all batch items
 	BATCHprocessing bool                // Flag to indicate if batch processing is ongoing
+	Expires         time.Time
 }
 
 func NewSQ3batch(db *Database) *SQ3batch {
@@ -119,6 +120,24 @@ func (sq *SQ3batch) BatchCaptureOverviewForLater(newsgroupPtr *string, article *
 		Article:   article,
 		Newsgroup: newsgroupPtr,
 	}
+}
+
+func (sq *SQ3batch) ExpireCache() {
+	time.Sleep(15 * time.Second)
+	sq.GMux.Lock()
+	defer sq.GMux.Unlock()
+	for k, v := range sq.TasksMap {
+		if v.Expires.Before(time.Now()) {
+			log.Printf("[BATCH] Expiring cache for newsgroup '%s'", k)
+			// Close the channel to stop further processing
+			// Remove from TasksMap
+			delete(sq.TasksMap, k)
+		} else {
+			log.Printf("[BATCH] Keeping cache for newsgroup '%s', expires at %v", k, v.Expires)
+		}
+	}
+
+	go sq.ExpireCache()
 }
 
 // GetNewsgroupPointer returns a pointer to the newsgroup name in TasksMap
@@ -173,6 +192,7 @@ func (sq *SQ3batch) GetOrCreateTasksMapKey(newsgroup string) *BatchTasks {
 	batchTasks := &BatchTasks{
 		Newsgroup: &newsgroup,
 		BATCHchan: make(chan *OverviewBatch, InitialBatchChannelSize),
+		Expires:   time.Now().Add(120 * time.Second), // Set initial expiration time
 	}
 	sq.TasksMap[newsgroup] = batchTasks
 	sq.GMux.Unlock()
@@ -351,9 +371,11 @@ func (c *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup)
 // 3. Thread cache updates
 func (c *SQ3batch) processNewsgroupBatch(task *BatchTasks) {
 	startTime := time.Now()
+	task.Expires = time.Now().Add(120 * time.Second) // extend expiration time
 	defer func(task *BatchTasks, startTime time.Time) {
 		task.BATCHmux.Lock()
 		task.BATCHprocessing = false
+		task.Expires = time.Now().Add(120 * time.Second) // extend expiration time
 		task.BATCHmux.Unlock()
 		//totalDuration := time.Since(startTime)
 		//log.Printf("[BATCH] processNewsgroupBatch newsgroup '%s' took %v: now Return LimitChan", *task.Newsgroup, totalDuration)
@@ -396,13 +418,15 @@ retry:
 		defer groupDBs.Return(c.db) // Ensure proper cleanup
 		deferred = true
 	}
+
 	// PHASE 1: Insert complete articles (overview + article data unified) and get article numbers
-	articleNumbers, err := c.batchInsertOverviewsWithDBs(*task.Newsgroup, batches, groupDBs)
+	articleNumbers, err := c.batchInsertOverviews(*task.Newsgroup, batches, groupDBs)
 	if err != nil {
 		log.Printf("[BATCH] processNewsgroupBatch Failed to process small batch for group '%s': %v", *task.Newsgroup, err)
 		time.Sleep(time.Second)
 		goto retry
 	}
+
 	if len(articleNumbers) != len(batches) {
 		log.Printf("[BATCH] processNewsgroupBatch Warning: Expected %d article numbers, got %d", len(batches), len(articleNumbers))
 		return
@@ -438,18 +462,22 @@ retry:
 	for i, batch := range batches {
 		//log.Printf("[BATCH] processNewsgroupBatch Updating history/cache for article %d/%d in group '%s'", i+1, len(batches), *task.Newsgroup)
 		c.proc.AddProcessedArticleToHistory(batch.Article.MsgIdItem, task.Newsgroup, articleNumbers[i])
-		// Clear references to help with memory management
-		//batch.Article = nil
+		// The MsgIdItem is now in history system, clear the Article's reference to it
+		batch.Article.MessageID = ""
+		batch.Article.Subject = ""
+		batch.Article.FromHeader = ""
+		batch.Article.DateSent = time.Time{}
+		batch.Article.DateString = ""
+		batch.Article.References = ""
+		batch.Article.HeadersJSON = ""
+		batch.Article.BodyText = ""
+		batch.Article.Path = ""
+		batch.Article.MsgIdItem = nil
+		batch.Article = nil
+		batches[i] = nil
 	}
 	//historyDuration := time.Since(start)
 	//log.Printf("[BATCH] processNewsgroupBatch Completed history/cache updates for group '%s' in %v", *task.Newsgroup, historyDuration)
-
-	// Clear batches slice and trigger GC for large batches
-	/*
-		if len(batches) > 100 {
-			runtime.GC()
-		}
-	*/
 	batches = nil
 	// Update newsgroup statistics with retryable transaction to avoid race conditions
 	increment := len(articleNumbers)
@@ -492,15 +520,15 @@ retry:
 	log.Printf("[BATCH] processNewsgroupBatch processed %d articles, newsgroup '%s' took %v", increment, *task.Newsgroup, time.Since(start))
 }
 
-// batchInsertOverviewsWithDBs - returns both article numbers and the GroupDBs connection for reuse
-func (c *SQ3batch) batchInsertOverviewsWithDBs(newsgroup string, batches []*OverviewBatch, groupDBs *GroupDBs) ([]int64, error) {
+// batchInsertOverviews - returns both article numbers and the GroupDBs connection for reuse
+func (c *SQ3batch) batchInsertOverviews(newsgroup string, batches []*OverviewBatch, groupDBs *GroupDBs) ([]int64, error) {
 	if len(batches) == 0 {
 		return nil, fmt.Errorf("no batches to process for group '%s'", newsgroup)
 	}
 
 	if len(batches) <= maxBatchSize {
 		// Small batch - process directly
-		articleNumbers, err := c.processSingleOverviewBatch(groupDBs, batches)
+		articleNumbers, err := c.processOverviewBatch(groupDBs, batches)
 		if err != nil {
 			log.Printf("[OVB-BATCH] Failed to process small batch for group '%s': %v", newsgroup, err)
 			return nil, fmt.Errorf("failed to process small batch for group '%s': %w", newsgroup, err)
@@ -517,7 +545,7 @@ func (c *SQ3batch) batchInsertOverviewsWithDBs(newsgroup string, batches []*Over
 		}
 
 		chunk := batches[i:end]
-		chunkNumbers, err := c.processSingleOverviewBatch(groupDBs, chunk)
+		chunkNumbers, err := c.processOverviewBatch(groupDBs, chunk)
 		if err != nil {
 			log.Printf("[OVB-BATCH] Failed to process chunk %d-%d for group '%s': %v", i, end, newsgroup, err)
 			return nil, fmt.Errorf("failed to process chunk %d-%d for group '%s': %w", i, end, newsgroup, err)
@@ -536,7 +564,7 @@ func (c *SQ3batch) batchInsertOverviewsWithDBs(newsgroup string, batches []*Over
 }
 
 // processSingleUnifiedArticleBatch handles a single batch that's within SQLite limits
-func (c *SQ3batch) processSingleOverviewBatch(groupDBs *GroupDBs, batches []*OverviewBatch) ([]int64, error) {
+func (c *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*OverviewBatch) ([]int64, error) {
 	// Get timestamp once for the entire batch instead of per article
 	importedAt := time.Now()
 
@@ -625,7 +653,6 @@ func (c *SQ3batch) processSingleOverviewBatch(groupDBs *GroupDBs, batches []*Ove
 			foundCount++
 		} else {
 			articleNumbers[i] = 0 // Mark as failed
-
 			//log.Printf("[OVB-BATCH] group '%s': No article number found for messageID: %s",	groupDBs.Newsgroup, batch.Article.MessageID)
 		}
 	}
