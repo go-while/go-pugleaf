@@ -37,7 +37,7 @@ type selectResult struct {
 }
 
 // DownloadArticles fetches full articles and stores them in the articles DB.
-func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroups int64, DLParChan chan struct{}) error {
+func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroups int64, DLParChan chan struct{}, progressDB *database.ProgressDB) error {
 	/*
 		DLParChan <- struct{}{} // aquire lock
 		defer func() {
@@ -45,11 +45,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 		}()
 	*/
 	// Note: We don't shut down the database here as it's shared with the main application
-	progressDB, err := database.NewProgressDB("data/progress.db")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer progressDB.Close()
+	// progressDB is now passed as parameter to avoid opening/closing for each group
 
 	if proc.Pool == nil {
 		return fmt.Errorf("DownloadArticles: NNTP pool is nil for group '%s'", newsgroup)
@@ -93,7 +89,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	if providerName == "unknown" {
 		return fmt.Errorf("errror in DownloadArticles: Provider name is unknown, cannot proceed with group '%s'", newsgroup)
 	}
-	log.Printf("DownloadArticles: ng: '%s' @ (%s)", newsgroup, providerName)
+	//log.Printf("DownloadArticles: ng: '%s' @ (%s)", newsgroup, providerName)
 	run := 0
 doWork:
 	if proc.DB.IsDBshutdown() {
@@ -128,7 +124,7 @@ doWork:
 		if lastArticleDate != nil {
 			log.Printf("DownloadArticles: No progress for provider '%s' but group '%s' has existing articles, switching to date-based download from: %s",
 				providerName, newsgroup, lastArticleDate.Format("2006-01-02"))
-			return proc.DownloadArticlesFromDate(newsgroup, *lastArticleDate, 0, DLParChan) // Use 0 for ignore threshold since group already exists
+			return proc.DownloadArticlesFromDate(newsgroup, *lastArticleDate, 0, DLParChan, progressDB) // Use 0 for ignore threshold since group already exists
 		}
 	} else if lastArticle == -1 {
 		// User-requested date rescan - reset to start from beginning
@@ -141,7 +137,7 @@ doWork:
 		end = groupInfo.Last
 	}
 	if start > end {
-		log.Printf("DownloadArticles: No new data to import for newsgroup '%s' start=%d end=%d (remote: first=%d last=%d)", newsgroup, start, end, groupInfo.First, groupInfo.Last)
+		//log.Printf("DownloadArticles: No new data to import for newsgroup '%s' start=%d end=%d (remote: first=%d last=%d)", newsgroup, start, end, groupInfo.First, groupInfo.Last)
 		return ErrUpToDate
 	}
 	toFetch := end - start
@@ -149,11 +145,11 @@ doWork:
 		// Limit to N articles per batch fetch
 		end = start + nntp.MaxReadLinesXover - 1
 		toFetch = end - start
-		log.Printf("DownloadArticles: Limiting fetch for %s to %d articles (start=%d, end=%d)", newsgroup, toFetch, start, end)
+		//log.Printf("DownloadArticles: Limiting fetch for %s to %d articles (start=%d, end=%d)", newsgroup, toFetch, start, end)
 	}
 	if toFetch <= 0 {
-		log.Printf("DownloadArticles: No data to fetch for newsgroup '%s' (start=%d, end=%d)", newsgroup, start, end)
-		return nil
+		//log.Printf("DownloadArticles: No data to fetch for newsgroup '%s' (start=%d, end=%d)", newsgroup, start, end)
+		return ErrUpToDate
 	}
 
 	if proc.DB.IsDBshutdown() {
@@ -191,38 +187,45 @@ doWork:
 	}
 	exists := 0
 	defer proc.DB.ForceCloseGroupDBs(groupDBs)
+	lockChan := make(chan struct{}, 1) // Limit concurrent processing
 	for _, msgID := range messageIDs {
-		if groupDBs.ExistsMsgIdInArticlesDB(msgID.Value) {
-			exists++
-			returnChan <- &batchItem{Error: errIsDuplicateError}
-			continue
-		}
-		msgIdItem := history.MsgIdCache.GetORCreate(msgID.Value)
-		msgIdItem.Mux.Lock()
-		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
-		msgIdItem.Response = history.CaseLock
-		msgIdItem.Mux.Unlock()
-		/* TODO: check if article exists or not?!
-		 	since we don't process crossposts with bulkmode ...
-			checking here if an article already exists will actually  not file the article to this group
-			so checking should happen earlier on network level in ihave/check/takethis
-		if response, err := proc.History.Lookup(msgIdItem) response != history.CasePass {
-			skipped++
-			returnChan <- nil
-			log.Printf("DownloadArticles: group '%s' Skipping article %s as it is already in history", groupName, msgID.Value)
-			continue // Skip if already in history
-		}
-		*/
-		item := &batchItem{
-			MessageID:  msgIdItem.MessageId, // Use pointer to avoid copying
-			GroupName:  proc.DB.Batch.GetNewsgroupPointer(newsgroup),
-			ReturnChan: returnChan,
-		}
-		Batch.Queue <- item                 // send to batch queue
-		batchList = append(batchList, item) // also add to batchList for later processing
+		lockChan <- struct{}{}
+		go func(msgID *nntp.HeaderLine) {
+			defer func() {
+				<-lockChan // Release lock after processing
+			}()
+			if groupDBs.ExistsMsgIdInArticlesDB(msgID.Value) {
+				exists++
+				returnChan <- &batchItem{Error: errIsDuplicateError}
+				return
+			}
+			msgIdItem := history.MsgIdCache.GetORCreate(msgID.Value)
+			msgIdItem.Mux.Lock()
+			msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
+			msgIdItem.Response = history.CaseLock
+			msgIdItem.Mux.Unlock()
+			/* TODO: check if article exists or not?!
+			 	since we don't process crossposts with bulkmode ...
+				checking here if an article already exists will actually  not file the article to this group
+				so checking should happen earlier on network level in ihave/check/takethis
+			if response, err := proc.History.Lookup(msgIdItem) response != history.CasePass {
+				skipped++
+				returnChan <- nil
+				log.Printf("DownloadArticles: group '%s' Skipping article %s as it is already in history", groupName, msgID.Value)
+				continue // Skip if already in history
+			}
+			*/
+			item := &batchItem{
+				MessageID:  msgIdItem.MessageId, // Use pointer to avoid copying
+				GroupName:  proc.DB.Batch.GetNewsgroupPointer(newsgroup),
+				ReturnChan: returnChan,
+			}
+			Batch.Queue <- item                 // send to batch queue
+			batchList = append(batchList, item) // also add to batchList for later processing
+		}(&msgID)
 		//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", num, msgID, groupName)
 	} // end for undl
-
+	lockChan <- struct{}{} // wait
 	dups, lastDups := 0, 0
 	gots, lastGots := 0, 0
 	errs, lastErrs := 0, 0
@@ -411,7 +414,7 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 // DownloadArticlesFromDate fetches articles starting from a specific date
 // Uses special progress tracking: sets progress to startArticle-1, or -1 if starting from article 1
 // This prevents DownloadArticles from using "no progress detected" logic for existing groups
-func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, ignoreInitialTinyGroups int64, DLParChan chan struct{}) error {
+func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, ignoreInitialTinyGroups int64, DLParChan chan struct{}, progressDB *database.ProgressDB) error {
 	log.Printf("DownloadArticlesFromDate: Starting download from date %s for group '%s'",
 		startDate.Format("2006-01-02"), groupName)
 
@@ -423,11 +426,7 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 
 	// Open progress DB and temporarily override the last article position
 	// so DownloadArticles will start from our desired article number
-	progressDB, err := database.NewProgressDB("data/progress.db")
-	if err != nil {
-		return fmt.Errorf("failed to open progress DB: %w", err)
-	}
-	defer progressDB.Close()
+	// progressDB is now passed as parameter to avoid opening/closing for each group
 
 	// Get the provider name for progress tracking
 	providerName := "unknown"
@@ -460,7 +459,7 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 	log.Printf("DownloadArticlesFromDate: Set progress to %d (date rescan), will start downloading from article %d", tempProgress, startArticle)
 
 	// Now use the high-performance DownloadArticles function
-	err = proc.DownloadArticles(groupName, ignoreInitialTinyGroups, DLParChan)
+	err = proc.DownloadArticles(groupName, ignoreInitialTinyGroups, DLParChan, progressDB)
 
 	// If there was an error and we haven't made progress, restore the original progress
 	if err != nil && err != ErrUpToDate {

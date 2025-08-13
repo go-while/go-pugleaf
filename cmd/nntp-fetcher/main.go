@@ -49,6 +49,7 @@ func main() {
 	database.DBidleTimeOut = 15 * time.Second
 	log.Printf("Starting go-pugleaf NNTP Fetcher (version %s)", config.AppVersion)
 	// Command line flags for NNTP fetcher configuration
+	var newsgroups []*models.Newsgroup
 	var (
 		host                    = flag.String("host", "lux-feed1.newsdeef.eu", "NNTP hostname")
 		port                    = flag.Int("port", 563, "NNTP port")
@@ -57,7 +58,7 @@ func main() {
 		ssl                     = flag.Bool("ssl", true, "Use SSL/TLS connection")
 		timeout                 = flag.Int("timeout", 30, "Connection timeout in seconds")
 		testMsg                 = flag.String("message-id", "", "Test message ID to fetch (optional)")
-		maxBatch                = flag.Int64("max-batch", 5000, "Maximum number of articles to process in a batch (default: 500)")
+		maxBatch                = flag.Int("max-batch", 128, "Maximum number of articles to process in a batch (recommended: 100)")
 		ignoreInitialTinyGroups = flag.Int64("ignore-initial-tiny-groups", 0, "If > 0: initial fetch ignores tiny groups with fewer articles than this (default: 0)")
 		importOverview          = flag.Bool("xover-copy", false, "Do not use xover-copy unless you want to Copy xover data from remote server and then articles. instead of normal 'xhdr message-id' --> articles (default: false)")
 		fetchNewsgroup          = flag.String("group", "", "Newsgroup to fetch (default: empty = all groups once up to max-batch) or rocksolid.* with final wildcard to match prefix.*")
@@ -69,14 +70,11 @@ func main() {
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
 	)
 	flag.Parse()
-	var newsgroups []*models.Newsgroup
 	// Show help if requested
 	if *showHelp {
 		showUsageExamples()
 		os.Exit(0)
 	}
-	mainConfig := config.NewDefaultConfig()
-	mainConfig.Server.Hostname = *hostnamePath
 	if *testConn {
 		if err := ConnectionTest(host, port, username, password, ssl, timeout, *fetchNewsgroup, testMsg); err != nil {
 			log.Fatalf("Connection test failed: %v", err)
@@ -89,17 +87,29 @@ func main() {
 	if *hostnamePath == "" {
 		log.Fatalf("[NNTP]: Error: hostname must be set!")
 	}
-	mainConfig.Server.Hostname = *hostnamePath
 	processor.LocalHostnamePath = *hostnamePath
-	//processor.MaxBatch = *maxBatch        // Set global max batch size
-	nntp.MaxReadLinesXover = *maxBatch    // Set global max read lines for xover
 	processor.XoverCopy = *importOverview // Set global xover copy flag
+	//processor.MaxBatch = *maxBatch     // Set global max batch size
+	nntp.MaxReadLinesXover = int64(*maxBatch)   // Set global max read lines for xover
+	processor.MaxBatch = nntp.MaxReadLinesXover // Update processor MaxBatch to use the new NNTP limit
+	database.MaxBatchSize = *maxBatch           // Set global max read lines for xover
+
+	mainConfig := config.NewDefaultConfig()
+	mainConfig.Server.Hostname = *hostnamePath
 
 	// Initialize database (default config, data in ./data)
 	db, err := database.OpenDatabase(nil)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
+
+	// Initialize progress database once to avoid opening/closing for each group
+	progressDB, err := database.NewProgressDB("data/progress.db")
+	if err != nil {
+		log.Fatalf("Failed to initialize progress database: %v", err)
+	}
+	defer progressDB.Close()
+
 	// Set up cross-platform signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt) // Cross-platform (Ctrl+C on both Windows and Linux)
@@ -171,7 +181,7 @@ func main() {
 
 	pools := make([]*nntp.Pool, 0, len(providers))
 	for _, p := range providers {
-		if !p.Enabled || p.Host == "" || p.Port <= 0 {
+		if !p.Enabled || p.Host == "" || p.Port <= 0 || p.MaxConns <= 0 {
 			log.Printf("Ignore disabled Provider: %s", p.Name)
 			continue
 		}
@@ -180,7 +190,9 @@ func main() {
 		} else if strings.Contains(p.Host, "blueworld-hosting") && p.MaxConns > 3 {
 			p.MaxConns = 3
 		}
-
+		if p.MaxConns > *maxBatch {
+			p.MaxConns = *maxBatch // limit conns to maxBatch
+		}
 		log.Printf("Provider: %s (ID: %d, Host: %s, Port: %d, SSL: %v, MaxConns: %d)",
 			p.Name, p.ID, p.Host, p.Port, p.SSL, p.MaxConns)
 
@@ -200,15 +212,15 @@ func main() {
 		}
 
 		backendConfig := &nntp.BackendConfig{
-			Host:     p.Host,
-			Port:     p.Port,
-			SSL:      p.SSL,
-			Username: p.Username,
-			Password: p.Password,
+			Host:     p.Host,     // copy values to first level
+			Port:     p.Port,     // copy values to first level
+			SSL:      p.SSL,      // copy values to first level
+			Username: p.Username, // copy values to first level
+			Password: p.Password, // copy values to first level
+			MaxConns: p.MaxConns, // copy values to first level
 			//ConnectTimeout: 30 * time.Second,
 			//ReadTimeout:    60 * time.Second,
 			//WriteTimeout:   30 * time.Second,
-			MaxConns: p.MaxConns,
 			Provider: configProvider, // Set the Provider field
 		}
 		pool := nntp.NewPool(backendConfig)
@@ -271,11 +283,14 @@ func main() {
 				log.Printf("[FETCHER]: Database shutdown detected, stopping processing")
 				return
 			}
-			realMem, _ := getRealMemoryUsage()
+			realMem, err := getRealMemoryUsage()
 			// Emergency stop if RSS exceeds N GB
-			if realMem > 12*1024*1024*1024 {
+			if err == nil && realMem > 2*1024*1024*1024 {
 				log.Printf("[MEMORY-EMERGENCY] RSS HIGH! rebooting")
 				return
+			}
+			if err != nil {
+				log.Printf("[FETCHER]: Failed to get real memory usage: %v", err)
 			}
 			nga, err := db.GetActiveNewsgroupByName(ng.Name)
 			if err != nil || nga == nil || !nga.Active {
@@ -287,7 +302,7 @@ func main() {
 				continue
 			}
 			log.Printf("--- Fetching %d/%d: %s ---", i+1, len(newsgroups), ng.Name)
-			DownloadMaxPar := 1
+			DownloadMaxPar := 1 // unchangeable (code not working yet)
 			//ScanMaxPar := 1
 			//ScanParChan := make(chan struct{}, ScanMaxPar)
 			DLParChan := make(chan struct{}, DownloadMaxPar)
@@ -326,24 +341,18 @@ func main() {
 					}
 					log.Printf("[FETCHER]: Starting download from date: %s", startDate.Format("2006-01-02"))
 					//time.Sleep(3 * time.Second) // debug sleep
-					err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan)
+					err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan, progressDB)
 					if err != nil {
-						log.Printf("[FETCHER]: DownloadArticlesFromDate failed: %v", err)
+						log.Printf("[FETCHER]: DownloadArticlesFromDate5 failed: %v", err)
 						errChan <- err
 						continue
 					}
 				} else if nga.ExpiryDays > 0 {
 					// Check if group already has articles to decide between initial vs incremental download
-					groupDBs, err := db.GetGroupDBs(ng.Name)
+					// Use optimized main database check instead of opening group database
+					articleCount, err := db.GetArticleCountFromMainDB(ng.Name)
 					if err != nil {
-						log.Printf("[FETCHER]: Failed to get group DBs for '%s': %v", ng.Name, err)
-						errChan <- err
-						continue
-					}
-					articleCount, err := db.GetArticlesCount(groupDBs)
-					groupDBs.Return(db) // Return immediately after checking
-					if err != nil {
-						log.Printf("[FETCHER]: Failed to get article count for '%s': %v", ng.Name, err)
+						log.Printf("[FETCHER]: Failed to get article count from main DB for '%s': %v", ng.Name, err)
 						errChan <- err
 						continue
 					}
@@ -352,20 +361,20 @@ func main() {
 						startDate := time.Now().AddDate(0, 0, -nga.ExpiryDays)
 						log.Printf("[FETCHER]: Initial download for group with expiry_days=%d, starting from calculated date: %s", nga.ExpiryDays, startDate.Format("2006-01-02"))
 						//time.Sleep(3 * time.Second) // debug sleep
-						err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan)
+						err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan, progressDB)
 
 						if err != nil {
 							errChan <- err
-							log.Printf("[FETCHER]: DownloadArticlesFromDate failed: %v", err)
+							log.Printf("[FETCHER]: DownloadArticlesFromDate6 failed: %v", err)
 							continue
 						}
 					} else {
 						// Incremental download: continue from where we left off
 						log.Printf("[FETCHER]: Incremental download for newsgroup: '%s' (has %d existing articles)", ng.Name, articleCount)
 						//time.Sleep(3 * time.Second) // debug sleep
-						err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan)
+						err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan, progressDB)
 						if err != nil {
-							log.Printf("[FETCHER]: DownloadArticles failed: %v", err)
+							log.Printf("[FETCHER]: DownloadArticles7 failed: %v", err)
 							errChan <- err
 							continue
 						}
@@ -373,11 +382,18 @@ func main() {
 				} else {
 					log.Printf("[FETCHER]: Downloading all articles for newsgroup: '%s' (no expiry limit)", ng.Name)
 					//time.Sleep(3 * time.Second) // debug sleep
-					err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan)
+					err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan, progressDB)
+					if err != nil {
+						if err != processor.ErrUpToDate {
+							log.Printf("[FETCHER]: DownloadArticles8 failed: %v", err)
+						}
+						errChan <- err
+						continue
+					}
 				}
 				if err != nil {
 					if err != processor.ErrUpToDate {
-						log.Printf("DownloadArticles failed: %v", err)
+						log.Printf("DownloadArticles9 failed: %v", err)
 					}
 					continue
 				}

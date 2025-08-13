@@ -274,8 +274,8 @@ func (db *Database) applySQLitePragmas(conn *sql.DB) error {
 func (db *Database) applySQLitePragmasGroupDB(conn *sql.DB) error {
 	pragmas := []string{
 		"PRAGMA cache_size = 1000",
-		"PRAGMA synchronous = OFF",
-		"PRAGMA temp_store = MEMORY",
+		"PRAGMA synchronous = NORMAL",
+		//"PRAGMA temp_store = default",
 		"PRAGMA foreign_keys = ON",
 		"PRAGMA busy_timeout = 30000", // 30 seconds
 		//"PRAGMA mmap_size = 268435456", // 256MB memory-mapped I/O

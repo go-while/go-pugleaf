@@ -21,7 +21,7 @@ const MaxReadLinesArticle = 256 * 1024
 const MaxReadLinesHeaders = 1024
 
 // MaxReadLinesXover Maximum lines for XOVER command, which retrieves overview lines
-var MaxReadLinesXover int64 = 4000 // XOVER command typically retrieves overview lines MaxBatch REFERENCES this in processor!!!
+var MaxReadLinesXover int64 = 100 // XOVER command typically retrieves overview lines MaxBatch REFERENCES this in processor!!!
 
 // MaxReadLinesBody Maximum lines for BODY command, which retrieves the body of an article
 const MaxReadLinesBody = MaxReadLinesArticle - MaxReadLinesHeaders

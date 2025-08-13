@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/database"
+
 	"github.com/go-while/go-pugleaf/internal/nntp"
 )
 
@@ -1045,8 +1047,13 @@ func formatNumberWithCommas(n int64) string {
 
 // DownloadArticlesWithDateFilter downloads articles starting from a specific date
 func DownloadArticlesWithDateFilter(proc *Processor, groupName, startDateStr, endDateStr string, useAnalyzeCache bool, ignoreInitialTinyGroups int64, DLParChan chan struct{}) error {
+	// Create progressDB for this operation (temporary solution for backward compatibility)
+	progressDB, err := database.NewProgressDB("data/progress.db")
+	if err != nil {
+		return fmt.Errorf("failed to initialize progress database: %v", err)
+	}
+	defer progressDB.Close()
 	var startDate, endDate time.Time
-	var err error
 
 	// Parse start date if provided
 	if startDateStr != "" {
@@ -1139,7 +1146,7 @@ func DownloadArticlesWithDateFilter(proc *Processor, groupName, startDateStr, en
 
 	// Fall back to normal download if no date filtering
 	log.Printf("No date filtering specified, using normal download")
-	return proc.DownloadArticles(groupName, ignoreInitialTinyGroups, DLParChan)
+	return proc.DownloadArticles(groupName, ignoreInitialTinyGroups, DLParChan, progressDB)
 }
 
 // DownloadArticlesInRange downloads articles in a specific article number range

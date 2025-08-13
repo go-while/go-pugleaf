@@ -67,12 +67,11 @@ func (db *Database) cleanupIdleGroups() {
 		db.MainMutex.RUnlock()
 
 		// Close oldest databases
+		db.MainMutex.Lock()
 		for _, candidate := range candidates {
 			if closedCount >= targetClose {
 				break
 			}
-
-			db.MainMutex.Lock()
 			groupDBs := db.groupDBs[candidate.name]
 			if groupDBs != nil {
 				groupDBs.mux.Lock()
@@ -88,9 +87,9 @@ func (db *Database) cleanupIdleGroups() {
 				}
 				groupDBs.mux.Unlock()
 			}
-			db.MainMutex.Unlock()
 		}
 		log.Printf("Force closed %d databases due to exceeding limit (%d >= %d)", closedCount, db.openDBsNum+closedCount, MaxOpenDatabases)
+		db.MainMutex.Unlock()
 		return
 	}
 	db.MainMutex.RUnlock()

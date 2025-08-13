@@ -16,8 +16,8 @@ import (
 // SQLite safety limits: split large batches to avoid parameter/length limits
 // SQLite 3.34.1+ supports up to 32766 (vs 999 in older versions)
 var BatchInterval = 5 * time.Second // @AI: DO NOT CHANGE THIS!!!!
-var maxBatchSize = 4000             // @AI: DO NOT CHANGE THIS!!!!
-const maxTasks = 100
+var MaxBatchSize int = 4000         // @AI: DO NOT CHANGE THIS!!!!
+const maxTasks = 16
 
 var InitialShutDownCounter = 20 // (div by two = waiting time before shutdown!)
 
@@ -48,16 +48,16 @@ func getPlaceholders(count int) string {
 }
 
 // Pools to reduce allocation churn for hot-path buffers
-var argsPool = sync.Pool{ // *[]any with cap up to maxBatchSize
+var argsPool = sync.Pool{ // *[]any with cap up to MaxBatchSize
 	New: func() any {
-		buf := make([]any, 0, maxBatchSize)
+		buf := make([]any, 0, MaxBatchSize)
 		return &buf
 	},
 }
 
 var idToArticleNumPool = sync.Pool{ // *map[string]int64 pre-sized
 	New: func() any {
-		m := make(map[string]int64, maxBatchSize)
+		m := make(map[string]int64, MaxBatchSize)
 		return &m
 	},
 }
@@ -403,11 +403,11 @@ func (c *SQ3batch) processNewsgroupBatch(task *BatchTasks) {
 	}(task, startTime)
 
 	// Collect all batches for this newsgroup
-	batches := make([]*models.Article, 0, maxBatchSize)
+	batches := make([]*models.Article, 0, MaxBatchSize)
 
 	// Drain the channel
 drainChannel:
-	for len(batches) < maxBatchSize {
+	for len(batches) < MaxBatchSize {
 		select {
 		case batch := <-task.BATCHchan:
 			batches = append(batches, batch)
@@ -564,7 +564,7 @@ func (c *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Arti
 		return fmt.Errorf("no batches to process for group '%s'", newsgroup)
 	}
 
-	if len(batches) <= maxBatchSize {
+	if len(batches) <= MaxBatchSize {
 		// Small batch - process directly
 		if err := c.processOverviewBatch(groupDBs, batches); err != nil {
 			log.Printf("[OVB-BATCH] Failed to process small batch for group '%s': %v", newsgroup, err)
@@ -574,8 +574,8 @@ func (c *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Arti
 	}
 
 	// Large batch - split into chunks
-	for i := 0; i < len(batches); i += maxBatchSize {
-		end := i + maxBatchSize
+	for i := 0; i < len(batches); i += MaxBatchSize {
+		end := i + MaxBatchSize
 		if end > len(batches) {
 			end = len(batches)
 		}
@@ -644,7 +644,7 @@ func (c *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.Ar
 	bufPtr := argsPool.Get().(*[]any)
 	buf := *bufPtr
 	if cap(buf) < batchSize {
-		buf = make([]any, 0, maxBatchSize)
+		buf = make([]any, 0, MaxBatchSize)
 	}
 	args := buf[:batchSize]
 	for i, article := range batches {
@@ -1185,7 +1185,7 @@ func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 	tasksToProcess := make([]*BatchTasks, 0, maxTasks) // Pre-allocate with max capacity
 	for _, task := range o.batch.TasksMap {
 		task.BATCHmux.RLock()
-		if task.BATCHprocessing || len(task.BATCHchan) < maxBatchSize {
+		if task.BATCHprocessing || len(task.BATCHchan) < MaxBatchSize {
 			task.BATCHmux.RUnlock()
 			continue
 		}
@@ -1213,7 +1213,7 @@ func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 		}
 		totalQueued += batchCount
 
-		if batchCount >= maxBatchSize || totalQueued > maxBatchSize {
+		if batchCount >= MaxBatchSize || totalQueued > MaxBatchSize {
 			haswork = true
 			task.BATCHmux.Lock()
 			if task.BATCHprocessing {
@@ -1227,7 +1227,7 @@ func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 			if !LockLimitChan() {
 				/*
 					log.Printf("[ORCHESTRATOR] Threshold exceeded for group '%s': %d articles (threshold: %d) LimitChan acquisition failed, retry later",
-						*task.Newsgroup, batchCount, maxBatchSize)
+						*task.Newsgroup, batchCount, MaxBatchSize)
 				*/
 				//log.Printf("[BATCH-PROC] LimitChan acquisition failed for group '%s', resetting processing flag", *task.Newsgroup)
 				task.BATCHmux.Lock()
@@ -1236,14 +1236,14 @@ func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 				return true
 			} else {
 				log.Printf("[ORCHESTRATOR] Threshold exceeded for group '%s': %d articles (threshold: %d)",
-					*task.Newsgroup, batchCount, maxBatchSize)
+					*task.Newsgroup, batchCount, MaxBatchSize)
 				go o.batch.processNewsgroupBatch(task)
 			}
 		} else if batchCount > 0 {
 			// Log groups with pending work but below threshold
 			/*
 				log.Printf("[ORCHESTRATOR-PENDING] Group '%s' has %d articles (below threshold: %d)",
-					*task.Newsgroup, batchCount, maxBatchSize)
+					*task.Newsgroup, batchCount, MaxBatchSize)
 			*/
 		}
 	} // end for

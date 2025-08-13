@@ -72,7 +72,6 @@ func retryableQueryRowScan(db *sql.DB, query string, args []interface{}, dest ..
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		row := db.QueryRow(query, args...)
 		err = row.Scan(dest...)
-
 		if !isRetryableError(err) {
 			return err
 		}
@@ -108,6 +107,11 @@ func retryableQuery(db *sql.DB, query string, args ...interface{}) (*sql.Rows, e
 			return rows, err
 		}
 
+		// Close the rows if we got them but had a retryable error
+		if rows != nil {
+			rows.Close()
+		}
+
 		if attempt < maxRetries-1 {
 			// Exponential backoff with jitter
 			delay := time.Duration(attempt+1) * baseDelay
@@ -124,6 +128,11 @@ func retryableQuery(db *sql.DB, query string, args ...interface{}) (*sql.Rows, e
 		}
 	}
 
+	// If we exhausted all retries and still have an error, make sure to close any rows
+	if rows != nil && err != nil {
+		rows.Close()
+		rows = nil
+	}
 	return rows, err
 }
 
