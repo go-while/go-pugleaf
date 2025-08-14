@@ -71,7 +71,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 		return fmt.Errorf("DownloadArticles: Timeout selecting group '%s' after 13 seconds", newsgroup)
 	}
 	// check if group has at least N articles or ignore fetching
-	localDBnewsgroupInfo, err := proc.DB.GetActiveNewsgroupByName(newsgroup)
+	localDBnewsgroupInfo, err := proc.DB.GetNewsgroupByName(newsgroup)
 	if err != nil {
 		log.Printf("DownloadArticles: Failed to get local newsgroup info for '%s': %v", newsgroup, err)
 		return fmt.Errorf("DownloadArticles: Failed to get local newsgroup info for '%s': %v", newsgroup, err)

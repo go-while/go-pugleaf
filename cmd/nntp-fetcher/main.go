@@ -65,6 +65,7 @@ func main() {
 		hostnamePath            = flag.String("nntphostname", "", "Your hostname must be set!")
 		testConn                = flag.Bool("test-conn", false, "Test direct connection to NNTP server and exit (default: false)")
 		useShortHashLenPtr      = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
+		fetchActiveOnly         = flag.Bool("fetch-active-only", true, "Fetch only active newsgroups (default: true)")
 		// Download options with date filtering
 		downloadStartDate = flag.String("download-start-date", "", "Start downloading articles from this date (YYYY-MM-DD format)")
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
@@ -292,8 +293,9 @@ func main() {
 			if err != nil {
 				log.Printf("[FETCHER]: Failed to get real memory usage: %v", err)
 			}
-			nga, err := db.GetActiveNewsgroupByName(ng.Name)
-			if err != nil || nga == nil || !nga.Active {
+
+			nga, err := db.MainDBGetNewsgroup(ng.Name)
+			if err != nil || nga == nil || *fetchActiveOnly && !nga.Active {
 				//log.Printf("[FETCHER] ignore newsgroup '%s' err='%v' ng='%#v'", ng.Name, err, ng)
 				continue
 			}
