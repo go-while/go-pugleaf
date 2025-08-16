@@ -49,7 +49,8 @@ var (
 
 	// Global Batch Queue
 	Batch = &BatchQueue{
-		Queue: make(chan *batchItem, 1000), // Channel to hold batch items
+		Queue:  make(chan *batchItem, MaxBatch), // Channel to hold batch items
+		Return: make(chan *batchItem, MaxBatch), // Channel to hold batch items
 	}
 
 	// Do NOT change this here! these are needed for runtime !
@@ -60,8 +61,7 @@ var (
 	validGroupNameRegexLazy   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+&-]*$`)
 	validGroupNameRegexSingle = regexp.MustCompile(`^[A-Za-z0-9-_+&][A-Za-z0-9-_+&]{1,64}$`)
 	validGroupNameRegexCaps   = regexp.MustCompile(`^[A-Za-z0-9-_+&][A-Za-z0-9-_+&]*(?:\.[A-Za-z0-9-_+&][A-Za-z0-9-_+&]*)+$`)
-	errorUp2date              = fmt.Errorf("up2date")
-	//his                       = &history.HISTORY{DIR: "./history"}
+	//errorUp2date              = fmt.Errorf("up2date")
 )
 
 func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen int) *Processor {

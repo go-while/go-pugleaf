@@ -50,7 +50,7 @@ func (s *WebServer) searchPage(c *gin.Context) {
 		case "groups":
 			// Search in group names only with pagination
 			offset := (page - 1) * pageSize
-			groups, err := s.DB.SearchNewsgroups(query, pageSize, offset)
+			groups, err := s.DB.SearchNewsgroups(query, pageSize, offset, false)
 			if err != nil {
 				log.Printf("Error searching groups: %v", err)
 				s.renderError(c, http.StatusInternalServerError, "Search Error", err.Error())
@@ -89,7 +89,7 @@ func (s *WebServer) searchPage(c *gin.Context) {
 		default:
 			// TODO: Implement combined search (groups + articles)
 			offset := (page - 1) * pageSize
-			groups, err := s.DB.SearchNewsgroups(query, pageSize, offset)
+			groups, err := s.DB.SearchNewsgroups(query, pageSize, offset, false)
 			if err != nil {
 				log.Printf("Error searching: %v", err)
 				s.renderError(c, http.StatusInternalServerError, "Search Error", err.Error())

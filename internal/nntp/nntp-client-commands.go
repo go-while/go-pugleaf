@@ -61,7 +61,7 @@ func (c *BackendConn) StatArticle(messageID string) (bool, error) {
 }
 
 // GetArticle retrieves a complete article from the server
-func (c *BackendConn) GetArticle(messageID string) (*models.Article, error) {
+func (c *BackendConn) GetArticle(messageID *string) (*models.Article, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -71,7 +71,7 @@ func (c *BackendConn) GetArticle(messageID string) (*models.Article, error) {
 
 	c.lastUsed = time.Now()
 
-	id, err := c.textConn.Cmd("ARTICLE %s", messageID)
+	id, err := c.textConn.Cmd("ARTICLE %s", *messageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send ARTICLE command: %w", err)
 	}
@@ -87,9 +87,9 @@ func (c *BackendConn) GetArticle(messageID string) (*models.Article, error) {
 		c.textConn.EndResponse(id)
 		switch code {
 		case NoSuchArticle:
-			return nil, fmt.Errorf("article not found: %s", messageID)
+			return nil, fmt.Errorf("article not found: %s", *messageID)
 		case DMCA:
-			return nil, fmt.Errorf("article removed (DMCA): %s", messageID)
+			return nil, fmt.Errorf("article removed (DMCA): %s", *messageID)
 		default:
 			return nil, fmt.Errorf("unexpected ARTICLE response: %d %s", code, message)
 		}
@@ -104,7 +104,7 @@ func (c *BackendConn) GetArticle(messageID string) (*models.Article, error) {
 	}
 
 	// Parse article into headers and body
-	article, err := ParseLegacyArticleLines(messageID, lines)
+	article, err := ParseLegacyArticleLines(*messageID, lines)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse article: %w", err)
 	}

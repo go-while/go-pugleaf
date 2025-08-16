@@ -15,19 +15,18 @@ import (
 
 // SQLite safety limits: split large batches to avoid parameter/length limits
 // SQLite 3.34.1+ supports up to 32766 (vs 999 in older versions)
-var BatchInterval = 5 * time.Second // @AI: DO NOT CHANGE THIS!!!!
-var MaxBatchSize int = 4000         // @AI: DO NOT CHANGE THIS!!!!
-const maxTasks = 16
-
-var InitialShutDownCounter = 20 // (div by two = waiting time before shutdown!)
+var BatchInterval = 1 * time.Second
+var MaxBatchSize int = 100
 
 // don't process more than N groups in parallel: better have some cpu & mem when importing hard!
 var LimitBatchParallel = 16
 
-var InitialBatchChannelSize = 16384 // @AI: DO NOT CHANGE THIS!!!! per group cache channel size. should be less or equal to MaxBatch in processor aka MaxReadLinesXover in nntp-client-commands
+var InitialBatchChannelSize = MaxBatchSize * 4 // @AI: DO NOT CHANGE THIS!!!! per group cache channel size. should be less or equal to MaxBatch in processor aka MaxReadLinesXover in nntp-client-commands
 
 // Cache for placeholder strings to avoid rebuilding them repeatedly
 var placeholderCache sync.Map // map[int]string
+
+const InitialShutDownCounter = 10
 
 // getPlaceholders returns a comma-separated string of SQL placeholders (?) for the given count
 func getPlaceholders(count int) string {
@@ -1073,7 +1072,7 @@ type BatchOrchestrator struct {
 func NewBatchOrchestrator(batch *SQ3batch) *BatchOrchestrator {
 	return &BatchOrchestrator{
 		batch:         batch,
-		BatchInterval: BatchInterval, // Set to the global BatchInterval (15 seconds)
+		BatchInterval: BatchInterval, // Set to the global BatchInterval
 	}
 }
 
@@ -1182,7 +1181,7 @@ func (o *BatchOrchestrator) StartOrchestrator() {
 func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 
 	o.batch.GMux.RLock()
-	tasksToProcess := make([]*BatchTasks, 0, maxTasks) // Pre-allocate with max capacity
+	tasksToProcess := make([]*BatchTasks, 0, LimitBatchParallel) // Pre-allocate with max capacity
 	for _, task := range o.batch.TasksMap {
 		task.BATCHmux.RLock()
 		if task.BATCHprocessing || len(task.BATCHchan) < MaxBatchSize {
@@ -1191,7 +1190,7 @@ func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 		}
 		task.BATCHmux.RUnlock()
 		tasksToProcess = append(tasksToProcess, task)
-		if len(tasksToProcess) >= maxTasks {
+		if len(tasksToProcess) >= LimitBatchParallel {
 			break
 		}
 	}

@@ -55,7 +55,7 @@ func (proc *Processor) DownloadArticlesViaOverview(groupName string) error {
 				//log.Printf("DownloadArticlesViaOverview: Worker %d processing group '%s' article %d (%s)", worker, *item.GroupName, *item.ArticleNum, *item.MessageID)
 				art, err := proc.Pool.GetArticle(item.MessageID)
 				if err != nil {
-					log.Printf("DownloadArticlesViaOverview: group '%s' Failed to fetch article %s: %v", groupName, item.MessageID, err)
+					log.Printf("DownloadArticlesViaOverview: group '%s' Failed to fetch article %s: %v", groupName, *item.MessageID, err)
 					item.Error = err   // Set error on item
 					returnChan <- item // Send failed item back
 					return
@@ -92,7 +92,7 @@ func (proc *Processor) DownloadArticlesViaOverview(groupName string) error {
 			}
 		*/
 		item := &batchItem{
-			MessageID:  msgID,
+			MessageID:  &msgID,
 			ArticleNum: num,
 			GroupName:  &groupName,
 			// Article: nil, // will be set by the goroutine
@@ -142,7 +142,7 @@ forProcessing:
 
 		case item := <-returnChan:
 			if item.Error != nil {
-				log.Printf("DownloadArticlesViaOverview: group '%s' Error fetching article %s: %v", groupName, item.MessageID, item.Error)
+				log.Printf("DownloadArticlesViaOverview: group '%s' Error fetching article %s: %v", groupName, *item.MessageID, item.Error)
 				errs++
 			} else {
 				//log.Printf("DownloadArticlesViaOverview: group '%s' fetched article %d (%s)", groupName, *item.ArticleNum, *item.MessageID)
@@ -157,17 +157,17 @@ forProcessing:
 			continue // Skip nil items (not fetched)
 		}
 		if item.Article == nil {
-			log.Printf("DownloadArticlesViaOverview: group '%s' Article %d (%s) was not fetched successfully, breaking import", groupName, item.ArticleNum, item.MessageID)
-			return fmt.Errorf("internal/processor: DownloadArticlesViaOverview group '%s' article %d (%s) was not fetched successfully", groupName, item.ArticleNum, item.MessageID)
+			log.Printf("DownloadArticlesViaOverview: group '%s' Article %d (%s) was not fetched successfully, breaking import", groupName, item.ArticleNum, *item.MessageID)
+			return fmt.Errorf("internal/processor: DownloadArticlesViaOverview group '%s' article %d (%s) was not fetched successfully", groupName, item.ArticleNum, *item.MessageID)
 		}
 		bulkmode := true
 		response, err := proc.processArticle(item.Article, groupName, bulkmode)
 		if err != nil {
-			log.Printf("DownloadArticlesViaOverview:  group '%s' Failed to process article %d (%s): %v", groupName, item.ArticleNum, item.MessageID, err)
+			log.Printf("DownloadArticlesViaOverview:  group '%s' Failed to process article %d (%s): %v", groupName, item.ArticleNum, *item.MessageID, err)
 			continue // Skip this item on error
 		}
 		if response == history.CasePass {
-			log.Printf("DownloadArticlesViaOverview:  group '%s' imported article %d (%s)", groupName, item.ArticleNum, item.MessageID)
+			log.Printf("DownloadArticlesViaOverview:  group '%s' imported article %d (%s)", groupName, item.ArticleNum, *item.MessageID)
 		}
 
 	}

@@ -1281,14 +1281,29 @@ const query_SearchNewsgroups = `
 		OR description LIKE ? COLLATE NOCASE)
 		ORDER BY message_count DESC, name ASC
 		LIMIT ? OFFSET ?
+	` // SearchNewsgroups searches for newsgroups by name pattern with pagination
+
+const query_SearchNewsgroupsAdmin = `
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		FROM newsgroups
+		WHERE (name LIKE ? COLLATE NOCASE
+		OR description LIKE ? COLLATE NOCASE)
+		ORDER BY message_count DESC, name ASC
+		LIMIT ? OFFSET ?
 	`
 
-func (db *Database) SearchNewsgroups(searchTerm string, limit, offset int) ([]*models.Newsgroup, error) {
+func (db *Database) SearchNewsgroups(searchTerm string, limit, offset int, admin bool) ([]*models.Newsgroup, error) {
+	var query string
+	switch admin {
+	case true:
+		query = query_SearchNewsgroups
+	default:
+		query = query_SearchNewsgroupsAdmin
 
+	}
 	// Use LIKE for pattern matching, case-insensitive
 	searchPattern := "%" + searchTerm + "%"
-
-	rows, err := db.mainDB.Query(query_SearchNewsgroups, searchPattern, searchPattern, limit, offset)
+	rows, err := db.mainDB.Query(query, searchPattern, searchPattern, limit, offset)
 
 	if err != nil {
 		return nil, err

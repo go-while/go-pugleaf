@@ -59,6 +59,7 @@ func main() {
 		timeout                 = flag.Int("timeout", 30, "Connection timeout in seconds")
 		testMsg                 = flag.String("message-id", "", "Test message ID to fetch (optional)")
 		maxBatch                = flag.Int("max-batch", 128, "Maximum number of articles to process in a batch (recommended: 100)")
+		maxLoops                = flag.Int("max-loops", 250, "Loop a group this many times and fetch `-max-batch N` every loop")
 		ignoreInitialTinyGroups = flag.Int64("ignore-initial-tiny-groups", 0, "If > 0: initial fetch ignores tiny groups with fewer articles than this (default: 0)")
 		importOverview          = flag.Bool("xover-copy", false, "Do not use xover-copy unless you want to Copy xover data from remote server and then articles. instead of normal 'xhdr message-id' --> articles (default: false)")
 		fetchNewsgroup          = flag.String("group", "", "Newsgroup to fetch (default: empty = all groups once up to max-batch) or rocksolid.* with final wildcard to match prefix.*")
@@ -82,8 +83,11 @@ func main() {
 		}
 		os.Exit(0)
 	}
-	if *maxBatch < 1 || *maxBatch > 10000 {
-		log.Fatalf("Invalid max batch size: %d (must be between 1 and 10000)", *maxBatch)
+	if *maxBatch < 1 || *maxBatch > 4000 {
+		log.Printf("Invalid max batch size: %d (must be between 1 and 4000)", *maxBatch)
+	}
+	if *maxLoops < 1 || *maxLoops > 2500 {
+		log.Fatalf("Invalid max batch size: %d (must be between 1 and 2500)", *maxBatch)
 	}
 	if *hostnamePath == "" {
 		log.Fatalf("[NNTP]: Error: hostname must be set!")
@@ -91,9 +95,11 @@ func main() {
 	processor.LocalHostnamePath = *hostnamePath
 	processor.XoverCopy = *importOverview // Set global xover copy flag
 	//processor.MaxBatch = *maxBatch     // Set global max batch size
-	nntp.MaxReadLinesXover = int64(*maxBatch)   // Set global max read lines for xover
-	processor.MaxBatch = nntp.MaxReadLinesXover // Update processor MaxBatch to use the new NNTP limit
-	database.MaxBatchSize = *maxBatch           // Set global max read lines for xover
+	nntp.MaxReadLinesXover = int64(*maxBatch)                // Set global max read lines for xover
+	processor.MaxBatch = nntp.MaxReadLinesXover              // Update processor MaxBatch to use the new NNTP limit
+	processor.LOOPS_PER_GROUPS = *maxLoops                   // Set global loops per group
+	database.InitialBatchChannelSize = *maxBatch * *maxLoops // queued batch channel per group: maxBatch multiplied by maxLoops!!
+	database.MaxBatchSize = *maxBatch                        // Set global max read lines for xover
 
 	mainConfig := config.NewDefaultConfig()
 	mainConfig.Server.Hostname = *hostnamePath
@@ -259,13 +265,13 @@ func main() {
 				//log.Printf("DownloadArticles: Worker %d processing group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
 				art, err := proc.Pool.GetArticle(item.MessageID)
 				if err != nil {
-					log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle %s: %v .. continue", item.MessageID, err)
-					item.Error = err        // Set error on item
-					item.ReturnChan <- item // Send failed item back
+					log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle %s: %v .. continue", *item.MessageID, err)
+					item.Error = err               // Set error on item
+					processor.Batch.Return <- item // Send failed item back
 					continue
 				}
-				item.Article = art      // set pointer
-				item.ReturnChan <- item // Send back the successfully downloaded article
+				item.Article = art             // set pointer
+				processor.Batch.Return <- item // Send back the successfully downloaded article
 				processor.Batch.Mutex.Lock()
 				downloaded++
 				processor.Batch.Mutex.Unlock()

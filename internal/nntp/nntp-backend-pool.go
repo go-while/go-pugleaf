@@ -67,7 +67,7 @@ func (p *Pool) XHdr(group string, header string, start, end int64) ([]HeaderLine
 	return client.XHdr(group, header, start, end)
 }
 
-func (p *Pool) GetArticle(messageID string) (*models.Article, error) {
+func (p *Pool) GetArticle(messageID *string) (*models.Article, error) {
 	p.mux.RLock()
 	if p.closed {
 		p.mux.RUnlock()
@@ -85,7 +85,7 @@ func (p *Pool) GetArticle(messageID string) (*models.Article, error) {
 	result, err := client.GetArticle(messageID)
 	if err != nil {
 		p.CloseConn(client, true) // Close the connection on error
-		log.Printf("[NNTP-POOL] Failed to get article %s: %v", messageID, err)
+		log.Printf("[NNTP-POOL] Failed to get article %s: %v", *messageID, err)
 		return nil, fmt.Errorf("failed to get article: %w", err)
 	}
 	return result, nil
