@@ -429,6 +429,12 @@ func main() {
 				log.Printf("--- Fetching %d/%d: %s ---", todo, queued, ng.Name)
 				mux.Unlock()
 
+				nga, err := db.MainDBGetNewsgroup(ng.Name)
+				if err != nil {
+					log.Printf("Error in processor.Batch.TodoQ: MainDBGetNewsgroup err='%v'", err)
+					errChan <- err
+					return
+				}
 				// Import articles for the selected group
 				switch *importOverview {
 				case false:
