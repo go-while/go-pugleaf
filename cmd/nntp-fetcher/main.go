@@ -337,6 +337,7 @@ func main() {
 						//log.Printf("DownloadArticles: No data to fetch for newsgroup '%s' (start=%d, end=%d)", newsgroup, start, end)
 						return
 					}
+
 					groupInfo.First = start
 					groupInfo.Last = end
 					processor.Batch.TodoQ <- groupInfo
@@ -383,6 +384,11 @@ func main() {
 				//log.Printf("[FETCHER] Skipping newsgroup '%s' as it does not match prefix '%s'", ng.Name, wildcardNG)
 				continue
 			}
+			nga, err := db.MainDBGetNewsgroup(ng.Name)
+			if err != nil || nga == nil || *fetchActiveOnly && !nga.Active {
+				//log.Printf("[FETCHER] ignore newsgroup '%s' err='%v' ng='%#v'", ng.Name, err, ng)
+				return
+			}
 			processor.Batch.Check <- &ng.Name
 			mux.Lock()
 			queued++
@@ -418,15 +424,6 @@ func main() {
 						log.Printf("[FETCHER]: Failed to get real memory usage: %v", err)
 					}
 				*/
-				nga, err := db.MainDBGetNewsgroup(ng.Name)
-				if err != nil || nga == nil || *fetchActiveOnly && !nga.Active {
-					//log.Printf("[FETCHER] ignore newsgroup '%s' err='%v' ng='%#v'", ng.Name, err, ng)
-					return
-				}
-				if wildcardNG != "" && !strings.HasPrefix(ng.Name, wildcardNG) {
-					//log.Printf("[FETCHER] Skipping newsgroup '%s' as it does not match prefix '%s'", ng.Name, wildcardNG)
-					return
-				}
 				mux.Lock()
 				todo++
 				log.Printf("--- Fetching %d/%d: %s ---", todo, queued, ng.Name)
