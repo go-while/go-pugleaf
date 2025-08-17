@@ -348,7 +348,7 @@ func (c *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup)
 		if task.BATCHprocessing {
 			task.Mux.Unlock()
 			toProcess--
-			log.Printf("[BATCH-DEBUG] processAllPendingBatches: task '%s' already processing, skipping", *task.Newsgroup)
+			//log.Printf("[BATCH-DEBUG] processAllPendingBatches: task '%s' already processing, skipping", *task.Newsgroup)
 			continue
 		}
 		//log.Printf("[BATCH-DEBUG] processAllPendingBatches: setting task '%s' processing flag to true", *task.Newsgroup)
@@ -385,9 +385,9 @@ func (c *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup)
 	//log.Printf("[BATCH] processAllPendingBatches: launched %d goroutines, remaining tasks %d / %d, done %d", launched, len(tasksToProcess)-toProcess, len(tasksToProcess), len(doneProcessing))
 	wgProcessAllBatches.Wait() // Wait for all goroutines to finish
 	if toProcess == 0 {
-		log.Printf("[BATCH] processAllPendingBatches: all %d tasks processed, nothing left to do", len(tasksToProcess))
+		//log.Printf("[BATCH] processAllPendingBatches: all %d tasks processed, nothing left to do", len(tasksToProcess))
 	} else {
-		log.Printf("[BATCH-DEBUG] processAllPendingBatches: still have %d tasks left to process", toProcess)
+		log.Printf("[BATCH-DEBUG] processAllPendingBatches: %d tasks left to process", toProcess)
 	}
 }
 
