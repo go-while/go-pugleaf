@@ -424,10 +424,6 @@ func main() {
 						log.Printf("[FETCHER]: Failed to get real memory usage: %v", err)
 					}
 				*/
-				mux.Lock()
-				todo++
-				log.Printf("--- Fetching %d/%d: %s ---", todo, queued, ng.Name)
-				mux.Unlock()
 
 				nga, err := db.MainDBGetNewsgroup(ng.Name)
 				if err != nil {
@@ -435,6 +431,10 @@ func main() {
 					errChan <- err
 					return
 				}
+				mux.Lock()
+				todo++
+				log.Printf("--- Fetch '%s' (%d-%d) Q:[%d/%d]  --- ", ng.Name, ng.First, ng.Last, todo, queued)
+				mux.Unlock()
 				// Import articles for the selected group
 				switch *importOverview {
 				case false:
