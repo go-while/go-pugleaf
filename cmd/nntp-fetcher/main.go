@@ -257,6 +257,32 @@ func main() {
 	var mux sync.Mutex
 	downloaded := 0
 	// scan group worker
+	queued := 0
+	todo := 0
+	go func() {
+		for _, ng := range newsgroups {
+			if wildcardNG != "" && !strings.HasPrefix(ng.Name, wildcardNG) {
+				//log.Printf("[FETCHER] Skipping newsgroup '%s' as it does not match prefix '%s'", ng.Name, wildcardNG)
+				continue
+			}
+			nga, err := db.MainDBGetNewsgroup(ng.Name)
+			if err != nil || nga == nil || *fetchActiveOnly && !nga.Active {
+				//log.Printf("[FETCHER] ignore newsgroup '%s' err='%v' ng='%#v'", ng.Name, err, ng)
+				continue
+			}
+			if db.IsDBshutdown() {
+				log.Printf("[FETCHER]: Database shutdown detected, stopping processing")
+				return
+			}
+			processor.Batch.Check <- &ng.Name
+			//log.Printf("Checking ng: %s", ng.Name)
+			mux.Lock()
+			queued++
+			mux.Unlock()
+		}
+		close(processor.Batch.Check)
+		log.Printf("Queued %d newsgroups", queued)
+	}()
 	var wgCheck sync.WaitGroup
 	for i := 1; i <= proc.Pool.Backend.MaxConns; i++ {
 		wgCheck.Add(1)
@@ -366,32 +392,7 @@ func main() {
 			} // end for item
 		}(i)
 	} // end for runthis
-	queued := 0
-	todo := 0
-	go func() {
-		for _, ng := range newsgroups {
-			if wildcardNG != "" && !strings.HasPrefix(ng.Name, wildcardNG) {
-				//log.Printf("[FETCHER] Skipping newsgroup '%s' as it does not match prefix '%s'", ng.Name, wildcardNG)
-				continue
-			}
-			nga, err := db.MainDBGetNewsgroup(ng.Name)
-			if err != nil || nga == nil || *fetchActiveOnly && !nga.Active {
-				//log.Printf("[FETCHER] ignore newsgroup '%s' err='%v' ng='%#v'", ng.Name, err, ng)
-				continue
-			}
-			if db.IsDBshutdown() {
-				log.Printf("[FETCHER]: Database shutdown detected, stopping processing")
-				return
-			}
-			processor.Batch.Check <- &ng.Name
-			//log.Printf("Checking ng: %s", ng.Name)
-			mux.Lock()
-			queued++
-			mux.Unlock()
-		}
-		close(processor.Batch.Check)
-		log.Printf("Queued %d newsgroups", queued)
-	}()
+
 	go func() {
 		errChan := make(chan error, len(newsgroups))
 		defer db.WG.Done()
