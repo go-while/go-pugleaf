@@ -21,7 +21,7 @@ var MaxBatchSize int = 100
 // don't process more than N groups in parallel: better have some cpu & mem when importing hard!
 var LimitBatchParallel = 16
 
-var InitialBatchChannelSize = MaxBatchSize * 4 // @AI: DO NOT CHANGE THIS!!!! per group cache channel size. should be less or equal to MaxBatch in processor aka MaxReadLinesXover in nntp-client-commands
+var InitialBatchChannelSize = MaxBatchSize // @AI: DO NOT CHANGE THIS!!!! per group cache channel size. should be less or equal to MaxBatch in processor aka MaxReadLinesXover in nntp-client-commands
 
 // Cache for placeholder strings to avoid rebuilding them repeatedly
 var placeholderCache sync.Map // map[int]string

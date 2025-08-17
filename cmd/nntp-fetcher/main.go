@@ -97,11 +97,11 @@ func main() {
 	processor.LocalHostnamePath = *hostnamePath
 	processor.XoverCopy = *importOverview // Set global xover copy flag
 	//processor.MaxBatch = *maxBatch     // Set global max batch size
-	nntp.MaxReadLinesXover = int64(*maxBatch)    // Set global max read lines for xover
-	processor.MaxBatch = nntp.MaxReadLinesXover  // Update processor MaxBatch to use the new NNTP limit
-	processor.LOOPS_PER_GROUPS = *maxLoops       // Set global loops per group
-	database.InitialBatchChannelSize = *maxBatch // set per-group queue cap to maxBatch (decouple from loops)
-	database.MaxBatchSize = *maxBatch            // Set global max read lines for xover
+	nntp.MaxReadLinesXover = int64(*maxBatch)                // Set global max read lines for xover
+	processor.MaxBatch = nntp.MaxReadLinesXover              // Update processor MaxBatch to use the new NNTP limit
+	processor.LOOPS_PER_GROUPS = *maxLoops                   // Set global loops per group
+	database.InitialBatchChannelSize = *maxBatch * *maxLoops // set per-group queue cap to maxBatch (decouple from loops)
+	database.MaxBatchSize = *maxBatch                        // Set global max read lines for xover
 
 	mainConfig := config.NewDefaultConfig()
 	mainConfig.Server.Hostname = *hostnamePath
