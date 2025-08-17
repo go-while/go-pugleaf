@@ -54,68 +54,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	if proc.Pool == nil {
 		return fmt.Errorf("DownloadArticles: NNTP pool is nil for group '%s'", newsgroup)
 	}
-	/*
-			// Add timeout for SelectGroup to prevent hanging
-			resultChan := make(chan *nntp.GroupInfo, 1)
-			go func() {
-				groupInfo, err := proc.Pool.SelectGroup(newsgroup)
-				if err != nil {
-					log.Printf("error in select group: err='%vv'", err)
-					resultChan <- nil
-					close(resultChan)
-					return
-				}
-				resultChan <- groupInfo
-			}()
 
-			// Wait for result with timeout
-			var groupInfo *nntp.GroupInfo
-			select {
-			case groupInfo = <-resultChan:
-				if groupInfo == nil {
-					return fmt.Errorf("DownloadArticles: Failed to select group '%s'", newsgroup)
-				}
-				//log.Printf("DEBUG: Successfully selected group '%s', groupInfo: %+v", groupName, groupInfo)
-			case <-time.After(13 * time.Second):
-				return fmt.Errorf("DownloadArticles: Timeout selecting group '%s' after 13 seconds", newsgroup)
-			}
-
-
-			// check if group has at least N articles or ignore fetching
-			localDBnewsgroupInfo, err := proc.DB.GetNewsgroupByName(newsgroup)
-			if err != nil {
-				log.Printf("DownloadArticles: Failed to get local newsgroup info for '%s': %v", newsgroup, err)
-				return fmt.Errorf("DownloadArticles: Failed to get local newsgroup info for '%s': %v", newsgroup, err)
-			}
-			if localDBnewsgroupInfo.MessageCount == 0 && ignoreInitialTinyGroups > 0 && groupInfo.Count < ignoreInitialTinyGroups {
-				log.Printf("DownloadArticles: Initial Fetch, Skipping group '%s' with only %d articles (ignore threshold: %d)", newsgroup, groupInfo.Count, ignoreInitialTinyGroups)
-				return nil
-			}
-
-			// Get the provider name for progress tracking
-			providerName := "unknown"
-			if proc.Pool.Backend.Provider != nil {
-				providerName = proc.Pool.Backend.Provider.Name
-			}
-			if providerName == "unknown" {
-				return fmt.Errorf("errror in DownloadArticles: Provider name is unknown, cannot proceed with group '%s'", newsgroup)
-			}
-
-		groupDBs, err := proc.DB.GetGroupDBs(newsgroup)
-		if err != nil {
-			log.Printf("Failed to get group DBs for newsgroup '%s': %v", newsgroup, err)
-			if groupDBs != nil {
-				if err := proc.DB.ForceCloseGroupDBs(groupDBs); err != nil {
-					log.Printf("error in DownloadArticles ForceCloseGroupDBs err='%v'", err)
-				}
-				//groupDBs.Return(proc.DB) // Return connection even on error
-			}
-			log.Printf("DownloadArticles: Failed to get group DBs for newsgroup '%s': %v", newsgroup, err)
-			return fmt.Errorf("error in DownloadArticles: failed to get group DBs err='%v'", err)
-		}
-		defer proc.DB.ForceCloseGroupDBs(groupDBs)
-		run := 1
-	*/
 	//log.Printf("DownloadArticles: ng: '%s' @ (%s)", newsgroup, providerName)
 	/*
 		doWork:
@@ -190,9 +129,11 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	}
 	//remaining := groupInfo.Last - end
 	//log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d, remaining: %d)", newsgroup, start, end, groupInfo.Last, remaining)
+	runs := 0
+doWork:
 	messageIDs, err := proc.Pool.XHdr(newsgroup, "message-id", start, end)
 	if err != nil || len(messageIDs) == 0 {
-		log.Printf("Failed to fetch message IDs for group '%s': %v", newsgroup, err)
+		log.Printf("Failed to fetch message IDs for group '%s': %v Ids=%d", newsgroup, err, len(messageIDs))
 		return err
 	}
 	if proc.DB.IsDBshutdown() {
@@ -316,13 +257,20 @@ forProcessing:
 	}
 	log.Printf("DownloadArticles: progressDB group '%s' processed %d articles (dups: %d, gots: %d, errs: %d) in %v end=%d", newsgroup, gots+errs+dups, dups, gots, errs, time.Since(startTime), end)
 	// do another one if we haven't run enough times
+	runs++
+	runtime.GC()
+	if runs < LOOPS_PER_GROUPS {
+		start += MaxBatch
+		end += MaxBatch
+		goto doWork
+	}
 	/*
 		select {
 		case Batch.Check <- &newsgroup:
 		default:
 		}
 	*/
-	runtime.GC()
+
 	counters := GroupCounter.GetResetAll()
 	for ngc, count := range counters {
 		log.Printf("Downloaded ng:%s articles: %d", ngc, count)
