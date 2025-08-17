@@ -377,9 +377,14 @@ func main() {
 			nga, err := db.MainDBGetNewsgroup(ng.Name)
 			if err != nil || nga == nil || *fetchActiveOnly && !nga.Active {
 				//log.Printf("[FETCHER] ignore newsgroup '%s' err='%v' ng='%#v'", ng.Name, err, ng)
+				continue
+			}
+			if db.IsDBshutdown() {
+				log.Printf("[FETCHER]: Database shutdown detected, stopping processing")
 				return
 			}
 			processor.Batch.Check <- &ng.Name
+			log.Printf("Checking ng: %s", ng.Name)
 			mux.Lock()
 			queued++
 			mux.Unlock()
