@@ -142,17 +142,17 @@ func (sq *SQ3batch) ExpireCache() {
 	sq.GMux.Lock()
 	defer sq.GMux.Unlock()
 	for k, task := range sq.TasksMap {
-		task.Mux.RLock()
+		task.Mux.Lock()
 		if task.Expires.Before(time.Now()) && len(task.BATCHchan) == 0 {
 			log.Printf("[BATCH] Expiring cache for newsgroup '%s'", k)
 			// Close the channel to stop further processing
 			// Remove from TasksMap
 			delete(sq.TasksMap, k)
-			task.Mux.RUnlock()
+			task.Mux.Unlock()
 			continue
 		}
 		//log.Printf("[BATCH] Keeping cache for newsgroup '%s', expires at %v", k, task.Expires)
-		task.Mux.RUnlock()
+		task.Mux.Unlock()
 	}
 	go sq.ExpireCache()
 }
