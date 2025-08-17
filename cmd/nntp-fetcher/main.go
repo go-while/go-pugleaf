@@ -267,16 +267,16 @@ func main() {
 				if err != nil || groupInfo == nil {
 					if err == nntp.ErrNewsgroupNotFound {
 						log.Printf("[FETCHER]: Newsgroup not found: '%s'", *ng)
-						return
+						continue
 					}
 					log.Printf("[FETCHER]: Error in select ng='%s' groupInfo='%#v' err='%v'", *ng, err, groupInfo)
-					return
+					continue
 				}
 				//log.Printf("[FETCHER]: ng '%s', REMOTE groupInfo: %#v", *ng, groupInfo)
 				lastArticle, err := progressDB.GetLastArticle(proc.Pool.Backend.Provider.Name, *ng)
 				if err != nil {
 					log.Printf("DownloadArticles: Failed to get last article for group '%s' from provider '%s': %v", *ng, proc.Pool.Backend.Provider.Name, err)
-					return
+					continue
 				}
 
 				switch lastArticle {
@@ -285,7 +285,7 @@ func main() {
 					groupDBs, err := proc.DB.GetGroupDBs(*ng)
 					if err != nil {
 						log.Printf("DownloadArticles: Failed to get group DBs for newsgroup '%s': %v", *ng, err)
-						return
+						continue
 					}
 					lastArticleDate, checkDateErr := proc.DB.GetLastArticleDate(groupDBs)
 					// ensure close regardless of errors
@@ -294,7 +294,7 @@ func main() {
 					}
 					if checkDateErr != nil {
 						log.Printf("DownloadArticles: Failed to get last article date for '%s': %v", *ng, checkDateErr)
-						return
+						continue
 					}
 
 					// If group has existing articles, use date-based download instead
@@ -317,7 +317,7 @@ func main() {
 				}
 				if start > end {
 					//log.Printf("DownloadArticles: No new data to import for newsgroup '%s' start=%d end=%d (remote: first=%d last=%d)", newsgroup, start, end, groupInfo.First, groupInfo.Last)
-					return
+					continue
 				}
 				toFetch := end - start
 				if toFetch > nntp.MaxReadLinesXover {
@@ -328,7 +328,7 @@ func main() {
 				}
 				if toFetch <= 0 {
 					//log.Printf("DownloadArticles: No data to fetch for newsgroup '%s' (start=%d, end=%d)", newsgroup, start, end)
-					return
+					continue
 				}
 
 				groupInfo.First = start
@@ -384,7 +384,7 @@ func main() {
 				return
 			}
 			processor.Batch.Check <- &ng.Name
-			log.Printf("Checking ng: %s", ng.Name)
+			//log.Printf("Checking ng: %s", ng.Name)
 			mux.Lock()
 			queued++
 			mux.Unlock()
@@ -400,7 +400,7 @@ func main() {
 		}()
 		for ng := range processor.Batch.TodoQ {
 			if db.IsDBshutdown() {
-				log.Printf("[FETCHER]: Database shutdown detected, stopping processing")
+				log.Printf("[FETCHER]: TodoQ Database shutdown detected, stopping processing")
 				return
 			}
 			/*
