@@ -174,7 +174,8 @@ func (mem *MemCachedThreads) CleanCron() {
 		now := time.Now()
 		// Clean expired thread roots
 		for group, groupCache := range mem.Groups {
-			if groupCache.Expiry.After(now) {
+			// FIX: expire when Expiry is BEFORE now (not after)
+			if groupCache.Expiry.Before(now) {
 				log.Printf("[CACHE:THREADS] Clean thread roots ng: '%s'", group)
 				delete(mem.Groups, group)
 				cleaned++
@@ -206,38 +207,39 @@ func (mem *MemCachedThreads) GetMemCachedTreadsCount(group string) int64 {
 // First tries memory cache, falls back to database if cache miss
 func (db *Database) GetCachedThreads(groupDBs *GroupDBs, page int64, pageSize int64) ([]*models.ForumThread, int64, error) {
 	startTime := time.Now()
-	group := groupDBs.Newsgroup
-	log.Printf("[PERF:THREADS] Starting GetCachedThreads for group '%s', page %d, pageSize %d", group, page, pageSize)
+	log.Printf("[PERF:THREADS] Starting GetCachedThreads for group '%s', page %d, pageSize %d", groupDBs.Newsgroup, page, pageSize)
 
 	// Try memory cache first (fast path)
 	if db.MemThreadCache != nil {
 		cacheStartTime := time.Now()
-		if threads, count, hit := db.MemThreadCache.GetCachedThreadsFromMemory(db, groupDBs, group, page, pageSize); hit {
-			log.Printf("[PERF:THREADS] Memory cache HIT took %v for group '%s' (%d threads)", time.Since(cacheStartTime), group, len(threads))
+		if threads, count, hit := db.MemThreadCache.GetCachedThreadsFromMemory(db, groupDBs, groupDBs.Newsgroup, page, pageSize); hit {
+			log.Printf("[PERF:THREADS] Memory cache HIT took %v for group '%s' (%d threads)", time.Since(cacheStartTime), groupDBs.Newsgroup, len(threads))
 			log.Printf("[PERF:THREADS] Total GetCachedThreads took %v (cache hit)", time.Since(startTime))
 			return threads, count, nil
 		}
-		log.Printf("[PERF:THREADS] Memory cache MISS took %v for group '%s'", time.Since(cacheStartTime), group)
+		log.Printf("[PERF:THREADS] Memory cache MISS took %v for group '%s'", time.Since(cacheStartTime), groupDBs.Newsgroup)
 
 		// Cache miss - refresh from database
 		refreshStartTime := time.Now()
-		log.Printf("[MEM:MISS] Refreshing thread cache for group '%s'", group)
-		if err := db.MemThreadCache.RefreshThreadCache(db, groupDBs, group, page, pageSize); err != nil {
+		log.Printf("[MEM:MISS] Refreshing thread cache for group '%s'", groupDBs.Newsgroup)
+		if err := db.MemThreadCache.RefreshThreadCache(db, groupDBs, groupDBs.Newsgroup, page, pageSize); err != nil {
 			log.Printf("Failed to refresh thread cache: %v", err)
 			// Continue to database fallback
 		} else {
-			log.Printf("[PERF:THREADS] RefreshThreadCache took %v for group '%s'", time.Since(refreshStartTime), group)
+			log.Printf("[PERF:THREADS] RefreshThreadCache took %v for group '%s'", time.Since(refreshStartTime), groupDBs.Newsgroup)
 			// Try memory cache again after refresh
 			retryStartTime := time.Now()
-			if threads, count, hit := db.MemThreadCache.GetCachedThreadsFromMemory(db, groupDBs, group, page, pageSize); hit {
-				log.Printf("[PERF:THREADS] Memory cache retry took %v for group '%s' (%d threads)", time.Since(retryStartTime), group, len(threads))
+			if threads, count, hit := db.MemThreadCache.GetCachedThreadsFromMemory(db, groupDBs, groupDBs.Newsgroup, page, pageSize); hit {
+				log.Printf("[PERF:THREADS] Memory cache retry took %v for group '%s' (%d threads)", time.Since(retryStartTime), groupDBs.Newsgroup, len(threads))
 				log.Printf("[PERF:THREADS] Total GetCachedThreads took %v (after refresh)", time.Since(startTime))
 				return threads, count, nil
 			}
 		}
+	} else {
+		log.Printf("[WARN] MemThreadCache is nil")
 	}
 	log.Printf("[PERF:THREADS] Total GetCachedThreads FAILED took %v", time.Since(startTime))
-	return nil, 0, fmt.Errorf("no cached threads found for group '%s'", group)
+	return nil, 0, fmt.Errorf("no cached threads found for group '%s'", groupDBs.Newsgroup)
 }
 
 // GetCachedThreadReplies retrieves paginated replies for a specific thread
@@ -350,9 +352,14 @@ func (mem *MemCachedThreads) GetCachedThreadsFromMemory(db *Database, groupDBs *
 
 	// Check if we have cached data for this group
 	groupCache, exists := mem.Groups[group]
-	if !exists || len(groupCache.ThreadRoots) == 0 {
-		log.Printf("[PERF:MEMORY] Cache miss (no data) for group '%s' took %v", group, time.Since(startTime))
+	if !exists {
+		log.Printf("[PERF:MEMORY] Cache miss (no group) for group '%s' took %v", group, time.Since(startTime))
 		return nil, 0, false // Cache miss
+	}
+	if len(groupCache.ThreadRoots) == 0 {
+		// Treat empty cache for a valid initialized group as a hit with empty page
+		log.Printf("[MEM:HIT] Empty thread list for group '%s' (cold cache)", group)
+		return []*models.ForumThread{}, groupCache.CountThreads, true
 	}
 
 	// Check if the cache is fresh (within 5 minute)
