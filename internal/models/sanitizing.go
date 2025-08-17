@@ -203,9 +203,11 @@ func (a *Article) PrintSanitized(field string, groupName ...string) template.HTM
 		}
 	}
 
+	a.Mux.Lock()
+	defer a.Mux.Unlock()
+
 	if !a.Sanitized {
 		a.StripDangerousHTML()
-		a.Sanitized = true
 	}
 
 	var text string
@@ -622,16 +624,15 @@ func BatchSanitizeArticles(articles []*Article) {
 		if article == nil || article.MessageID == "" {
 			continue
 		}
-
 		// Skip if already fully cached
 		if cached, found := sanitizedCache.GetArticle(article.MessageID); found && cached != nil {
 			continue
 		}
+		article.Mux.Lock()
 
 		// Sanitize the article if not already done
 		if !article.Sanitized {
 			article.StripDangerousHTML()
-			article.Sanitized = true
 		}
 
 		// Prepare sanitized fields for this article
@@ -668,6 +669,8 @@ func BatchSanitizeArticles(articles []*Article) {
 		fields["path"] = template.HTML(html.EscapeString(utf8Path))
 
 		batch[article.MessageID] = fields
+
+		article.Mux.Unlock()
 	}
 
 	// Store all sanitized articles in one batch operation

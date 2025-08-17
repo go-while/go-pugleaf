@@ -346,19 +346,19 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 }
 
 // SelectGroup selects a newsgroup for operation
-func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, error) {
+func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if !c.connected {
-		return nil, fmt.Errorf("not connected")
+		return nil, 0, fmt.Errorf("not connected")
 	}
 
 	c.lastUsed = time.Now()
 
 	id, err := c.textConn.Cmd("GROUP %s", groupName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send GROUP '%s' command: %w", groupName, err)
+		return nil, 0, fmt.Errorf("failed to send GROUP '%s' command: %w", groupName, err)
 	}
 
 	c.textConn.StartResponse(id)
@@ -366,11 +366,11 @@ func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, error) {
 	c.textConn.EndResponse(id)
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to read GROUP '%s' response: %w", groupName, err)
+		return nil, code, fmt.Errorf("failed to read GROUP '%s' response: %w", groupName, err)
 	}
 
 	if code != 211 {
-		return nil, fmt.Errorf(
+		return nil, code, fmt.Errorf(
 			"group selection failed: expected code 211, got %d - response: %s group %s",
 			code, message, groupName,
 		)
@@ -381,7 +381,7 @@ func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, error) {
 	// message format is "count first last group"
 	parts := strings.Fields(message)
 	if len(parts) < 4 {
-		return nil, fmt.Errorf(
+		return nil, code, fmt.Errorf(
 			"malformed GROUP response (expected 'count first last group'): %s group %s",
 			message, groupName,
 		)
@@ -389,17 +389,18 @@ func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, error) {
 
 	count, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse count in GROUP '%s' response: %w", groupName, err)
+		return nil, code, fmt.Errorf("failed to parse count in GROUP '%s' response: %w", groupName, err)
 	}
 	first, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse first in GROUP '%s' response: %w", groupName, err)
+		return nil, code, fmt.Errorf("failed to parse first in GROUP '%s' response: %w", groupName, err)
 	}
 	last, err := strconv.ParseInt(parts[2], 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse last in GROUP '%s' response: %w", groupName, err)
+		return nil, code, fmt.Errorf("failed to parse last in GROUP '%s' response: %w", groupName, err)
 	}
-	log.Printf("Selected group '%s' with %d articles (range: %d-%d)", groupName, count, first, last)
+
+	//log.Printf("Selected group '%s' with %d articles (range: %d-%d)", groupName, count, first, last)
 
 	return &GroupInfo{
 		Name:      groupName,
@@ -407,7 +408,7 @@ func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, error) {
 		First:     first,
 		Last:      last,
 		PostingOK: true, // Assume posting is OK unless we know otherwise
-	}, nil
+	}, code, nil
 }
 
 // XOver retrieves overview data for a range of articles
@@ -421,9 +422,9 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 	if !c.connected {
 		return nil, fmt.Errorf("not connected")
 	}
-	groupInfo, err := c.SelectGroup(groupName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to select group '%s': %w", groupName, err)
+	groupInfo, code, err := c.SelectGroup(groupName)
+	if err != nil && code != 411 {
+		return nil, fmt.Errorf("failed to select group '%s': cdeo=%d err=%w", groupName, code, err)
 	}
 	_ = groupInfo // groupInfo is not used further, but we keep it for clarity
 	c.lastUsed = time.Now()
@@ -486,9 +487,9 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderL
 	if !c.connected {
 		return nil, fmt.Errorf("not connected")
 	}
-	groupInfo, err := c.SelectGroup(groupName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to select group '%s': %w", groupName, err)
+	groupInfo, code, err := c.SelectGroup(groupName)
+	if err != nil && code != 411 {
+		return nil, fmt.Errorf("failed to select group '%s': code=%d err=%w", groupName, code, err)
 	}
 	_ = groupInfo // groupInfo is not used further, but we keep it for clarity
 	c.lastUsed = time.Now()

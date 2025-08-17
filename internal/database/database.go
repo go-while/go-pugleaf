@@ -141,18 +141,20 @@ func (db *Database) Shutdown() error {
 	}
 
 	// STEP 2: Close per-group databases first (thousands of them)
-	db.MainMutex.RLock()
+	db.MainMutex.Lock()
 	log.Printf("[DATABASE] Closing %d group databases...", len(db.groupDBs))
 	groupCloseErrors := 0
 	for groupName, groupDBs := range db.groupDBs {
 		if groupDBs != nil && groupDBs.DB != nil {
+			groupDBs.mux.Lock()
 			if err := groupDBs.DB.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("failed to close group database %s: %w", groupName, err))
 				groupCloseErrors++
 			}
+			groupDBs.mux.Unlock()
 		}
 	}
-	db.MainMutex.RUnlock()
+	db.MainMutex.Unlock()
 	if groupCloseErrors > 0 {
 		log.Printf("[DATABASE] Failed to close %d group databases", groupCloseErrors)
 	}

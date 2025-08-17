@@ -26,6 +26,8 @@ type Pool struct {
 	totalClosed  int64
 }
 
+var ErrNewsgroupNotFound error
+
 // NewPool creates a new connection pool
 func NewPool(cfg *BackendConfig) *Pool {
 	pool := &Pool{
@@ -106,7 +108,11 @@ func (p *Pool) SelectGroup(group string) (*GroupInfo, error) {
 	}
 
 	defer p.Put(client)
-	return client.SelectGroup(group)
+	gi, code, err := client.SelectGroup(group)
+	if code == 411 {
+		err = ErrNewsgroupNotFound // silence error
+	}
+	return gi, err
 }
 
 // Get retrieves a connection from the pool or creates a new one

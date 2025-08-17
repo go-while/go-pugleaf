@@ -873,6 +873,7 @@ func NewFetchProcessor(db *database.Database) *processor.Processor {
 }
 
 func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHashLen int, boot bool, isleep int64, DLParChan chan struct{}, progressDB *database.ProgressDB) {
+	/* DISABLED
 	if isleep < 15 {
 		isleep = 15 // min 15 sec sleep!
 	}
@@ -1005,7 +1006,7 @@ func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHash
 		}
 
 		// Check if the group is in sections DB
-		err := proc.DownloadArticles(group.Name, ignoreInitialTinyGroups, DLParChan, progressDB)
+		err := proc.DownloadArticles(group.Name, ignoreInitialTinyGroups, DLParChan, progressDB, 0 ,0)
 		if err != nil {
 			if err.Error() == "up2date" {
 				log.Printf("[WEB]: [%d/%d] Group %s is up to date, skipping", i+1, len(groups), group.Name)
@@ -1029,4 +1030,5 @@ func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHash
 	log.Printf("[WEB]: Finished processing all %d groups", len(groups))
 	log.Printf("[WEB]: FINAL SUMMARY - Total groups: %d, Successfully processed: %d, Up-to-date: %d, Errors: %d",
 		len(groups), processedCount, upToDateCount, errorCount)
+	*/
 }

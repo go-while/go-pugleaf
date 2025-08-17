@@ -76,6 +76,7 @@ type BackendConfig struct {
 	//WriteTimeout   time.Duration    // timeout for writing to the connection
 	MaxConns int              // maximum number of connections to this backend
 	Provider *config.Provider // link to provider config
+	Mux      sync.Mutex
 }
 
 // Article represents an NNTP article
@@ -125,14 +126,15 @@ func NewConn(backend *BackendConfig) *BackendConn {
 
 // Connect establishes connection to the NNTP server
 func (c *BackendConn) Connect() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.connected {
-		return nil
-	}
+	c.Backend.Mux.Lock()
 	if c.Backend.ConnectTimeout == 0 {
 		c.Backend.ConnectTimeout = config.DefaultConnectTimeout
+	}
+	c.Backend.Mux.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.connected {
+		return nil
 	}
 	// Build server address
 	serverAddr := net.JoinHostPort(c.Backend.Host, fmt.Sprintf("%d", c.Backend.Port))

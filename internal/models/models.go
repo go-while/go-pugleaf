@@ -113,7 +113,7 @@ type UserPermission struct {
 // Article represents a newsgroup article (per-group DB)
 type Article struct {
 	GetDataFunc func(what string, group string) string `json:"-" db:"-"`
-	RWMutex     sync.RWMutex                           `json:"-" db:"-"`
+	Mux         sync.RWMutex                           `json:"-" db:"-"`
 	//ArticleNum  int64                                  `json:"article_num" db:"article_num"`
 	MessageID   string                 `json:"message_id" db:"message_id"`
 	Subject     string                 `json:"subject" db:"subject"`

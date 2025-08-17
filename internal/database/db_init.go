@@ -16,6 +16,8 @@ import (
 var GroupHashMap *GHmap // Global variable for group hash map
 
 var ENABLE_ARTICLE_CACHE = true
+var NNTP_AUTH_CACHE_TIME = 15 * time.Minute
+var FETCH_MODE = false // set true in fetcher/main.go
 
 // Database represents the main database connection and per-group database pool
 type Database struct {
@@ -144,23 +146,26 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 		}
 	}
 	db.StopChan = make(chan struct{}, 1) // Channel to signal shutdown (will get closed)
-	log.Printf("pugLeaf DB init config: %+v", dbconfig)
-	db.SectionsCache = NewGroupSectionDBCache()
-	db.MemThreadCache = NewMemCachedThreads()
-	db.HierarchyCache = NewHierarchyCache() // Initialize hierarchy cache for fast browsing
+	log.Printf("pugLeaf DB init config: %+v FETCH_MODE=%t", dbconfig, FETCH_MODE)
+	if !FETCH_MODE {
+		db.SectionsCache = NewGroupSectionDBCache()
+		db.MemThreadCache = NewMemCachedThreads()
+		db.HierarchyCache = NewHierarchyCache() // Initialize hierarchy cache for fast browsing
+		// Start hierarchy cache warming in background
+		go db.HierarchyCache.WarmCache(db)
+	}
 	GroupHashMap = NewGHmap()
 	db.Batch = NewSQ3batch(db) // Initialize SQ3batch for batch operations
-
-	// Start hierarchy cache warming in background
-	go db.HierarchyCache.WarmCache(db)
 
 	// Start other DB cron tasks
 	go db.CronDB()
 
 	// Start the smart orchestrator that monitors channel thresholds and timers
 	go db.Batch.orchestrator.StartOrch() // main wg waitGroup Add(+1)
+	// Periodically expire idle per-group batch state (keeps memory bounded during scans)
+	go db.Batch.ExpireCache()
 
-	db.NNTPAuthCache = NewNNTPAuthCache(15 * time.Minute)
+	db.NNTPAuthCache = NewNNTPAuthCache(NNTP_AUTH_CACHE_TIME)
 	//log.Printf("[WEB]: NNTP authentication cache initialized (15 minute TTL)")
 
 	// Start article cache cleanup routine

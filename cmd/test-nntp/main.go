@@ -65,9 +65,9 @@ func main() {
 		testGroup := groups[0].Name
 		fmt.Printf("\n2. Testing GROUP selection with '%s'...\n", testGroup)
 
-		groupInfo, err := client.SelectGroup(testGroup)
+		groupInfo, code, err := client.SelectGroup(testGroup)
 		if err != nil {
-			fmt.Printf("❌ GROUP command failed: %v\n", err)
+			fmt.Printf("❌ GROUP command failed: code=%d err=%v\n", code, err)
 		} else {
 			fmt.Printf("✅ GROUP selection successful!\n")
 			fmt.Printf("   Group: %s\n", groupInfo.Name)

@@ -111,7 +111,7 @@ type BatchTasks struct {
 	Newsgroup *string
 
 	// Single unified batch processing
-	BATCHmux        sync.RWMutex
+	Mux             sync.RWMutex
 	BATCHchan       chan *models.Article // Single channel for all batch items
 	BATCHprocessing bool                 // Flag to indicate if batch processing is ongoing
 	Expires         time.Time
@@ -128,11 +128,11 @@ func NewSQ3batch(db *Database) *SQ3batch {
 
 // #1 Entry Point for capturing articles / overview data for batched processing
 func (sq *SQ3batch) BatchCaptureOverviewForLater(newsgroupPtr *string, article *models.Article) {
-	article.RWMutex.Lock()
+	article.Mux.Lock()
 	if !slices.Contains(article.NewsgroupsPtr, newsgroupPtr) {
 		article.NewsgroupsPtr = append(article.NewsgroupsPtr, newsgroupPtr)
 	}
-	article.RWMutex.Unlock()
+	article.Mux.Unlock()
 	article.ProcessQueue <- newsgroupPtr // Add to process queue for later processing
 	BatchDividerChan <- article
 }
@@ -142,16 +142,15 @@ func (sq *SQ3batch) ExpireCache() {
 	sq.GMux.Lock()
 	defer sq.GMux.Unlock()
 	for k, v := range sq.TasksMap {
-		if v.Expires.Before(time.Now()) && len(v.BATCHchan) == 0 {
+		if v.Expires.Before(time.Now()) && v.BATCHchan != nil && len(v.BATCHchan) == 0 {
 			log.Printf("[BATCH] Expiring cache for newsgroup '%s'", k)
 			// Close the channel to stop further processing
 			// Remove from TasksMap
 			delete(sq.TasksMap, k)
-		} else {
-			log.Printf("[BATCH] Keeping cache for newsgroup '%s', expires at %v", k, v.Expires)
+			continue
 		}
+		//log.Printf("[BATCH] Keeping cache for newsgroup '%s', expires at %v", k, v.Expires)
 	}
-
 	go sq.ExpireCache()
 }
 
@@ -171,7 +170,8 @@ func (sq *SQ3batch) GetNewsgroupPointer(newsgroup string) *string {
 	}
 	batchTasks := &BatchTasks{
 		Newsgroup: &newsgroup,
-		BATCHchan: make(chan *models.Article, InitialBatchChannelSize),
+		// BATCHchan will be created lazily on first enqueue to reduce memory during scan-only paths
+		BATCHchan: nil,
 		Expires:   time.Now().Add(120 * time.Second), // Set initial expiration time
 	}
 	sq.TasksMap[newsgroup] = batchTasks
@@ -207,7 +207,8 @@ func (sq *SQ3batch) GetOrCreateTasksMapKey(newsgroup string) *BatchTasks {
 	}
 	batchTasks := &BatchTasks{
 		Newsgroup: &newsgroup,
-		BATCHchan: make(chan *models.Article, InitialBatchChannelSize),
+		// BATCHchan will be created lazily on first enqueue to reduce memory during scan-only paths
+		BATCHchan: nil,
 		Expires:   time.Now().Add(120 * time.Second), // Set initial expiration time
 	}
 	sq.TasksMap[newsgroup] = batchTasks
@@ -235,10 +236,10 @@ func (c *SQ3batch) CheckNoMoreWorkInMaps() bool {
 
 	// Iterate through all tasks to check channels
 	for newsgroup, tasks := range c.TasksMap {
-		tasks.BATCHmux.RLock()
+		tasks.Mux.RLock()
 		isEmpty := len(tasks.BATCHchan) == 0 && !tasks.BATCHprocessing
 		batchChan, batchProc := len(tasks.BATCHchan), tasks.BATCHprocessing
-		tasks.BATCHmux.RUnlock()
+		tasks.Mux.RUnlock()
 
 		if !isEmpty {
 			log.Printf("[CRON-SHUTDOWN] Work remaining in group '%s': BATCH(chan:%d,proc:%v)",
@@ -305,6 +306,12 @@ func (c *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup)
 	tasksToProcess := make([]*BatchTasks, 0, len(c.TasksMap)) // Pre-allocate with capacity
 	queuedItems := 0
 	for _, task := range c.TasksMap {
+		task.Mux.RLock()
+		if task.BATCHchan == nil {
+			task.Mux.RUnlock()
+			continue
+		}
+		task.Mux.RUnlock()
 		queued := len(task.BATCHchan)
 		if queued > 0 { // process only below threshold
 			tasksToProcess = append(tasksToProcess, task)
@@ -334,22 +341,22 @@ func (c *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup)
 		}
 		// Check if this newsgroup is already processing
 		//log.Printf("[BATCH-DEBUG] processAllPendingBatches: checking if task '%s' is already processing", *task.Newsgroup)
-		task.BATCHmux.Lock()
+		task.Mux.Lock()
 		if task.BATCHprocessing {
-			task.BATCHmux.Unlock()
+			task.Mux.Unlock()
 			toProcess--
 			log.Printf("[BATCH-DEBUG] processAllPendingBatches: task '%s' already processing, skipping", *task.Newsgroup)
 			continue
 		}
 		//log.Printf("[BATCH-DEBUG] processAllPendingBatches: setting task '%s' processing flag to true", *task.Newsgroup)
 		task.BATCHprocessing = true
-		task.BATCHmux.Unlock()
+		task.Mux.Unlock()
 
 		if !LockLimitChan() {
 			//log.Printf("[BATCH-DEBUG] processAllPendingBatches: LimitChan acquisition failed for task '%s', resetting processing flag", *task.Newsgroup)
-			task.BATCHmux.Lock()
+			task.Mux.Lock()
 			task.BATCHprocessing = false
-			task.BATCHmux.Unlock()
+			task.Mux.Unlock()
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -387,14 +394,14 @@ func (c *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup)
 // 3. Thread cache updates
 func (c *SQ3batch) processNewsgroupBatch(task *BatchTasks) {
 	startTime := time.Now()
-	task.BATCHmux.Lock()
+	task.Mux.Lock()
 	task.Expires = time.Now().Add(120 * time.Second) // extend expiration time
-	task.BATCHmux.Unlock()
+	task.Mux.Unlock()
 	defer func(task *BatchTasks, startTime time.Time) {
-		task.BATCHmux.Lock()
+		task.Mux.Lock()
 		task.BATCHprocessing = false
 		task.Expires = time.Now().Add(120 * time.Second) // extend expiration time
-		task.BATCHmux.Unlock()
+		task.Mux.Unlock()
 		//totalDuration := time.Since(startTime)
 		//log.Printf("[BATCH] processNewsgroupBatch newsgroup '%s' took %v: now Return LimitChan", *task.Newsgroup, totalDuration)
 		ReturnLimitChan()
@@ -451,11 +458,11 @@ retry:
 		if article == nil {
 			continue
 		}
-		article.RWMutex.RLock()
+		article.Mux.RLock()
 		if article.ArticleNums[task.Newsgroup] > maxArticleNum {
 			maxArticleNum = article.ArticleNums[task.Newsgroup]
 		}
-		article.RWMutex.RUnlock()
+		article.Mux.RUnlock()
 	}
 
 	// PHASE 2: Process threading for all articles (reusing the same DB connection)
@@ -476,11 +483,11 @@ retry:
 	for i, article := range batches {
 		//log.Printf("[BATCH] processNewsgroupBatch Updating history/cache for article %d/%d in group '%s'", i+1, len(batches), *task.Newsgroup)
 		// Read article number under read lock to avoid concurrent map access
-		article.RWMutex.RLock()
+		article.Mux.RLock()
 		artNum := article.ArticleNums[task.Newsgroup]
-		article.RWMutex.RUnlock()
+		article.Mux.RUnlock()
 		c.proc.AddProcessedArticleToHistory(article.MsgIdItem, task.Newsgroup, artNum)
-		article.RWMutex.Lock()
+		article.Mux.Lock()
 		if len(article.NewsgroupsPtr) > 0 {
 			index := -1
 			for j, ptr := range article.NewsgroupsPtr {
@@ -493,12 +500,12 @@ retry:
 				article.NewsgroupsPtr = slices.Delete(article.NewsgroupsPtr, index, index+1)
 			}
 			if len(article.NewsgroupsPtr) > 0 {
-				article.RWMutex.Unlock()
+				article.Mux.Unlock()
 				// Still referenced by other groups; skip clearing and continue
 				continue
 			}
 		}
-		article.RWMutex.Unlock()
+		article.Mux.Unlock()
 		// The MsgIdItem is now in history system, clear the Article's reference to it
 		article.MessageID = ""
 		article.Subject = ""
@@ -693,14 +700,14 @@ func (c *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.Ar
 	newsgroupPtr := c.GetNewsgroupPointer(groupDBs.Newsgroup)
 	// Assign article numbers directly to batch Articles in the same order as input
 	for _, article := range batches {
-		article.RWMutex.Lock()
+		article.Mux.Lock()
 		if articleNum, exists := idToArticleNum[article.MessageID]; exists {
 			article.ArticleNums[newsgroupPtr] = articleNum
 		} else {
 			log.Printf("[OVB-BATCH] group '%s': Article with message_id %s not found in batch select, marking as failed", groupDBs.Newsgroup, article.MessageID)
 			article.ArticleNums[newsgroupPtr] = 0 // Mark as failed/missing
 		}
-		article.RWMutex.Unlock()
+		article.Mux.Unlock()
 	}
 
 	return nil
@@ -718,10 +725,10 @@ func (c *SQ3batch) batchProcessThreading(groupName *string, batches []*models.Ar
 		if article == nil {
 			continue
 		}
-		article.RWMutex.RLock()
+		article.Mux.RLock()
 		if article.ArticleNums[newsgroupPtr] <= 0 {
 			log.Printf("[THR-BATCH] ERROR batchProcessThreading NewsgroupsPtr in %s, skipping msgId='%s'", *newsgroupPtr, article.MessageID)
-			article.RWMutex.RUnlock()
+			article.Mux.RUnlock()
 			continue
 		}
 		if article.IsThrRoot && !article.IsReply {
@@ -729,7 +736,7 @@ func (c *SQ3batch) batchProcessThreading(groupName *string, batches []*models.Ar
 		} else if article.IsReply && !article.IsThrRoot {
 			replies++
 		}
-		article.RWMutex.RUnlock()
+		article.Mux.RUnlock()
 	}
 
 	// Process thread roots first (they need to exist before replies can reference them)
@@ -769,14 +776,14 @@ func (c *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*mo
 		if article == nil {
 			continue
 		}
-		article.RWMutex.RLock()
+		article.Mux.RLock()
 		if article.ArticleNums[newsgroupPtr] <= 0 || !article.IsThrRoot {
-			article.RWMutex.RUnlock()
+			article.Mux.RUnlock()
 			continue
 		}
 		valuesClauses = append(valuesClauses, rootPlaceholder)
 		args = append(args, article.ArticleNums[newsgroupPtr], article.ArticleNums[newsgroupPtr]) // root_article, child_article
-		article.RWMutex.RUnlock()
+		article.Mux.RUnlock()
 	}
 
 	// Build the complete batch INSERT statement
@@ -794,9 +801,9 @@ func (c *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*mo
 		if article == nil {
 			continue
 		}
-		article.RWMutex.RLock()
+		article.Mux.RLock()
 		if article.ArticleNums[newsgroupPtr] <= 0 || !article.IsThrRoot {
-			article.RWMutex.RUnlock()
+			article.Mux.RUnlock()
 			continue
 		}
 		// Initialize thread cache
@@ -804,7 +811,7 @@ func (c *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*mo
 			log.Printf("[P-BATCH] group '%s': Failed to initialize thread cache for root %d: %v", groupDBs.Newsgroup, article.ArticleNums[newsgroupPtr], err)
 			// Don't fail the whole operation for cache errors
 		}
-		article.RWMutex.RUnlock()
+		article.Mux.RUnlock()
 	}
 
 	return nil
@@ -832,9 +839,9 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 			continue
 		}
 
-		article.RWMutex.RLock()
+		article.Mux.RLock()
 		if article.ArticleNums[newsgroupPtr] <= 0 || !article.IsReply {
-			article.RWMutex.RUnlock()
+			article.Mux.RUnlock()
 			continue
 		}
 		parentMessageID := article.RefSlice[len(article.RefSlice)-1] // Use the last reference as the parent
@@ -853,7 +860,7 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 			childDate  time.Time
 		}{article.ArticleNums[newsgroupPtr], threadRoot, parentMessageID, article.DateSent})
 
-		article.RWMutex.RUnlock()
+		article.Mux.RUnlock()
 	}
 
 	// Batch update reply counts for articles table (single call since overview is unified)
@@ -1183,12 +1190,12 @@ func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 	o.batch.GMux.RLock()
 	tasksToProcess := make([]*BatchTasks, 0, LimitBatchParallel) // Pre-allocate with max capacity
 	for _, task := range o.batch.TasksMap {
-		task.BATCHmux.RLock()
+		task.Mux.RLock()
 		if task.BATCHprocessing || len(task.BATCHchan) < MaxBatchSize {
-			task.BATCHmux.RUnlock()
+			task.Mux.RUnlock()
 			continue
 		}
-		task.BATCHmux.RUnlock()
+		task.Mux.RUnlock()
 		tasksToProcess = append(tasksToProcess, task)
 		if len(tasksToProcess) >= LimitBatchParallel {
 			break
@@ -1214,14 +1221,14 @@ func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 
 		if batchCount >= MaxBatchSize || totalQueued > MaxBatchSize {
 			haswork = true
-			task.BATCHmux.Lock()
+			task.Mux.Lock()
 			if task.BATCHprocessing {
 				//log.Printf("[ORCHESTRATOR] Group '%s' has %d articles but already processing", *task.Newsgroup, batchCount)
-				task.BATCHmux.Unlock()
+				task.Mux.Unlock()
 				continue
 			}
 			task.BATCHprocessing = true
-			task.BATCHmux.Unlock()
+			task.Mux.Unlock()
 
 			if !LockLimitChan() {
 				/*
@@ -1229,9 +1236,9 @@ func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 						*task.Newsgroup, batchCount, MaxBatchSize)
 				*/
 				//log.Printf("[BATCH-PROC] LimitChan acquisition failed for group '%s', resetting processing flag", *task.Newsgroup)
-				task.BATCHmux.Lock()
+				task.Mux.Lock()
 				task.BATCHprocessing = false
-				task.BATCHmux.Unlock()
+				task.Mux.Unlock()
 				return true
 			} else {
 				log.Printf("[ORCHESTRATOR] Threshold exceeded for group '%s': %d articles (threshold: %d)",
@@ -1258,10 +1265,10 @@ func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 	return haswork
 }
 
-var BatchDividerChan = make(chan *models.Article, 16384)
+var BatchDividerChan = make(chan *models.Article, 100)
 
 func (sq *SQ3batch) BatchDivider() {
-	var TaskChans = make(map[*string]chan *models.Article)
+	//var TaskChans = make(map[*string]chan *models.Article)
 	var task *models.Article
 	var tasks *BatchTasks
 	var newsgroupPtr *string
@@ -1275,28 +1282,22 @@ func (sq *SQ3batch) BatchDivider() {
 		select {
 		case newsgroupPtr = <-task.ProcessQueue:
 		default:
-			// Fallback: derive group from Article.NewsgroupsPtr to avoid dropping the task
-			task.RWMutex.RLock()
-			if len(task.NewsgroupsPtr) > 0 {
-				newsgroupPtr = task.NewsgroupsPtr[len(task.NewsgroupsPtr)-1]
-			}
-			task.RWMutex.RUnlock()
-			if newsgroupPtr == nil {
-				log.Printf("ERROR in BatchDivider: ProcessQueue empty and no NewsgroupsPtr for msgId='%s'", task.MessageID)
-				continue
-			}
+			log.Printf("Error in BatchDivider, received task (%#v) but no newsgroupPtr", task)
+			continue
 		}
 		//log.Printf("[BATCH-DIVIDER] Received task for group '%s'", *task.Newsgroup)
-		if TaskChans[newsgroupPtr] == nil {
-			tasks = sq.GetOrCreateTasksMapKey(*newsgroupPtr)
-			if tasks.BATCHchan == nil {
-				log.Printf("[BATCH-DIVIDER] ERROR: No channel found for group '%s'", *newsgroupPtr)
-				continue
-			}
-			tasks.BATCHchan <- task
-			TaskChans[newsgroupPtr] = tasks.BATCHchan
-		} else {
-			TaskChans[newsgroupPtr] <- task
+		//if TaskChans[newsgroupPtr] == nil {
+		tasks = sq.GetOrCreateTasksMapKey(*newsgroupPtr)
+		tasks.Mux.Lock()
+		// Lazily create the per-group channel on first enqueue
+		if tasks.BATCHchan == nil {
+			tasks.BATCHchan = make(chan *models.Article, InitialBatchChannelSize)
 		}
+		tasks.Mux.Unlock()
+		tasks.BATCHchan <- task
+		//TaskChans[newsgroupPtr] = tasks.BATCHchan
+		//} else {
+		//	TaskChans[newsgroupPtr] <- task
+		//}
 	}
 }
