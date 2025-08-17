@@ -362,11 +362,10 @@ func (mem *MemCachedThreads) GetCachedThreadsFromMemory(db *Database, groupDBs *
 		return []*models.ForumThread{}, groupCache.CountThreads, true
 	}
 
-	// Check if the cache is fresh (within 5 minute)
-	if time.Since(groupCache.ThreadRootsTS) > 5*time.Minute { // TODO hardcoded cache expiry
-		go mem.InvalidateThreadRoot(group, groupCache.ThreadRoots[0]) // Invalidate oldest root if cache expired
+	// Check if the cache is still valid using unified Expiry
+	if time.Now().After(groupCache.Expiry) {
 		log.Printf("[PERF:MEMORY] Cache miss (expired) for group '%s' took %v", group, time.Since(startTime))
-		return nil, 0, false // Cache expired
+		return nil, 0, false // Cache expired; caller should refresh
 	}
 
 	// Calculate pagination using REAL database total, not cached count
