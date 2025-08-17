@@ -137,7 +137,7 @@ func (db *Database) ForceCloseGroupDBs(groupsDB *GroupDBs) error {
 	groupsDB.Workers--
 	if groupsDB.Workers > 0 {
 		groupsDB.mux.Unlock()
-		return fmt.Errorf("error ForceCloseGroupDBs ng:'%s' Worker=%d", groupsDB.Newsgroup, groupsDB.Workers)
+		return nil
 	}
 	if err := groupsDB.Close("ForceCloseGroupDBs"); err != nil {
 		groupsDB.mux.Unlock()
