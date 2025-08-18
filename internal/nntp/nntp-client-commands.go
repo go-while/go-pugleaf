@@ -301,6 +301,9 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 
 	for {
 		if lineCount >= maxGroups {
+			c.textConn.Close() // Close connection on limit reached
+			c = nil
+			log.Printf("Connection reached maximum group limit: %d", maxGroups)
 			break
 		}
 
@@ -403,11 +406,11 @@ func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, int, error) {
 	//log.Printf("Selected group '%s' with %d articles (range: %d-%d)", groupName, count, first, last)
 
 	return &GroupInfo{
-		Name:      groupName,
-		Count:     count,
-		First:     first,
-		Last:      last,
-		PostingOK: true, // Assume posting is OK unless we know otherwise
+		Name:  groupName,
+		Count: count,
+		First: first,
+		Last:  last,
+		//PostingOK: true, // Assume posting is OK unless we know otherwise
 	}, code, nil
 }
 
@@ -595,13 +598,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 	}
 
 	// Read multiline response line by line and send to channel immediately
-	lineCount := int64(0)
-	maxReadLines := MaxReadLinesXover // Use XOVER limit for XHDR
-
 	for {
-		if lineCount >= maxReadLines {
-			break
-		}
 
 		line, err := c.textConn.ReadLine()
 		if err != nil {
@@ -618,7 +615,6 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 		// Parse the header line
 		header, parseErr := c.parseHeaderLine(line)
 		if parseErr != nil {
-			lineCount++
 			log.Printf("[ERROR] XHdrStreamed parse error ng: '%s' err='%v'", groupName, parseErr)
 			continue // Skip malformed lines
 		}
@@ -633,7 +629,6 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 			return fmt.Errorf("error in XHdrStreamed: ng: '%s' resultChan full or closed", groupName)
 		}
 
-		lineCount++
 	}
 
 	// Close channel
@@ -741,6 +736,8 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 	}
 	for {
 		if lineCount >= maxReadLines {
+			c.textConn.Close() // Close connection on too many lines
+			c = nil
 			return nil, fmt.Errorf("too many lines in response (limit: %d)", maxReadLines)
 		}
 

@@ -97,18 +97,20 @@ func (p *Pool) XHdrStreamed(group string, header string, start, end int64, resul
 	}
 
 	// Handle connection cleanup in a goroutine so the function can return immediately
-	go func() {
-
+	go func(client *BackendConn, group string, header string, start, end int64, resultChan chan<- *HeaderLine) {
 		// Use the streaming XHdr function on the client
 		if err := client.XHdrStreamed(group, header, start, end, resultChan); err != nil {
 			// If there's an error, close the connection instead of returning it
-			p.CloseConn(client, true)
+			err := p.CloseConn(client, true)
+			if err != nil {
+				log.Printf("[NNTP-POOL] Failed to close connection after XHdrStreamed error: %v", err)
+			}
 		} else {
 			p.Put(client)
 		}
-	}()
+	}(client, group, header, start, end, resultChan)
 
-	return nil
+	return err
 }
 
 func (p *Pool) GetArticle(messageID *string) (*models.Article, error) {
@@ -128,10 +130,8 @@ func (p *Pool) GetArticle(messageID *string) (*models.Article, error) {
 	result, err := client.GetArticle(messageID)
 	if err != nil {
 		if err != ErrArticleNotFound && err != ErrArticleRemoved {
-			go func(client *BackendConn, messageID *string) {
-				p.CloseConn(client, true) // Close the connection on error
-				log.Printf("[NNTP-POOL] Failed to get article %s: %v", *messageID, err)
-			}(client, messageID)
+			p.CloseConn(client, true) // Close the connection on error
+			log.Printf("[NNTP-POOL] Failed to get article %s: %v", *messageID, err)
 		}
 		return nil, fmt.Errorf("failed to get article: %w", err)
 	}
@@ -261,6 +261,7 @@ func (p *Pool) Put(client *BackendConn) error {
 		return nil
 	}
 	p.mux.Unlock()
+
 	client.UpdateLastUsed()
 	// Try to return connection to pool
 	select {
