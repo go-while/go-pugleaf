@@ -481,10 +481,12 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 // XHdr retrieves specific header field for a range of articles
 // Automatically limits to max 1000 articles to prevent SQLite overload
 func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderLine, error) {
-
+	c.mu.Lock()
 	if !c.connected {
+		c.mu.Unlock()
 		return nil, fmt.Errorf("not connected")
 	}
+	c.mu.Unlock()
 	groupInfo, code, err := c.SelectGroup(groupName)
 	if err != nil && code != 411 {
 		return nil, fmt.Errorf("failed to select group '%s': code=%d err=%w", groupName, code, err)
@@ -543,12 +545,12 @@ var ErrOutOfRange error = fmt.Errorf("end range exceeds group last article numbe
 // XHdrStreamed performs XHDR command and streams results line by line through a channel
 func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, resultChan chan<- *HeaderLine) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if !c.connected {
+		c.mu.Unlock()
 		close(resultChan)
 		return fmt.Errorf("not connected")
 	}
+	c.mu.Unlock()
 
 	groupInfo, code, err := c.SelectGroup(groupName)
 	if err != nil && code != 411 {
