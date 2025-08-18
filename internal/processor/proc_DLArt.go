@@ -139,6 +139,7 @@ forProcessing:
 		select {
 		case <-releaseChan:
 			log.Printf("DownloadArticles: releaseChan triggered ng: '%s'", newsgroup)
+			break forProcessing
 		case <-ticker.C:
 			// Periodically check if we are done or stuck
 			mux.Lock()
