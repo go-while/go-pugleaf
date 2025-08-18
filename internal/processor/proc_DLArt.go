@@ -96,6 +96,7 @@ doWork:
 		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
 	}
 	//log.Printf("DownloadArticles: XHDR fetched %d msgIds ng: '%s' (%d to %d)", len(messageIDs), newsgroup, start, end)
+	releaseChan := make(chan struct{}, 1)
 	go func() {
 		// launch to background and feed queue
 		//log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", toFetch, newsgroup, proc.Pool.Backend.MaxConns)
@@ -120,7 +121,10 @@ doWork:
 			queued++
 			//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", num, msgID, groupName)
 		} // end for undl
-		log.Printf("DownloadArticles: Finished feeding batch queue %d articles for group '%s' (existing: %d) total=%d", queued, newsgroup, exists, queued+exists)
+		log.Printf("DownloadArticles: XHdr closed, finished feeding batch queue %d articles for group '%s' (existing: %d) total=%d", queued, newsgroup, exists, queued+exists)
+		if queued == 0 {
+			releaseChan <- struct{}{}
+		}
 	}()
 	var dups, lastDups, gots, lastGots, errs, lastErrs int64
 	aliveCheck := 10 * time.Second
@@ -133,6 +137,8 @@ doWork:
 forProcessing:
 	for {
 		select {
+		case <-releaseChan:
+			log.Printf("DownloadArticles: releaseChan triggered ng: '%s'", newsgroup)
 		case <-ticker.C:
 			// Periodically check if we are done or stuck
 			mux.Lock()
