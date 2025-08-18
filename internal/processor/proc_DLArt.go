@@ -76,26 +76,28 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	//log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d, remaining: %d)", newsgroup, start, end, groupInfo.Last, remaining)
 	runs := 0
 	var mux sync.Mutex
+	var lastGoodEnd int64 = 1
 doWork:
 	toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
 	xhdrChan := make(chan *nntp.HeaderLine, MaxBatch)
+	errChan := make(chan error, 1)
 	go func(mux *sync.Mutex) {
 		log.Printf("XHdrStreamed ng: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
 		aerr := proc.Pool.XHdrStreamed(newsgroup, "message-id", start, end, xhdrChan)
 		if aerr != nil {
-			if aerr != nntp.ErrOutOfRange {
-				log.Printf("Failed to fetch message IDs for group '%s': %v toFetch=%d", newsgroup, aerr, toFetch)
-			}
+			log.Printf("Failed to fetch message IDs for group '%s': err='%v' toFetch=%d", newsgroup, aerr, toFetch)
 			mux.Lock()
 			runs = LOOPS_PER_GROUPS + 1
 			mux.Unlock()
+			errChan <- aerr
 			return
 		}
+		errChan <- nil
 	}(&mux)
 	if proc.DB.IsDBshutdown() {
 		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
 	}
-	//log.Printf("DownloadArticles: XHDR fetched %d msgIds ng: '%s' (%d to %d)", len(messageIDs), newsgroup, start, end)
+	//log.Printf("DownloadArticles: XHDR is fetching %d msgIds ng: '%s' (%d to %d)", len(messageIDs), newsgroup, start, end)
 	releaseChan := make(chan struct{}, 1)
 	go func() {
 		// launch to background and feed queue
@@ -211,7 +213,10 @@ forProcessing:
 	if proc.DB.IsDBshutdown() {
 		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
 	}
-
+	xerr := <-errChan
+	if xerr != nil {
+		end = lastGoodEnd
+	}
 	err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, newsgroup, end)
 	if err != nil {
 		log.Printf("Failed to update progress for provider '%s' group '%s': %v", proc.Pool.Backend.Provider.Name, newsgroup, err)
@@ -224,6 +229,7 @@ forProcessing:
 	runagain := runs < LOOPS_PER_GROUPS
 	mux.Unlock()
 	if runagain {
+		lastGoodEnd = end // Save last good end for next iteration
 		start += MaxBatch
 		end += MaxBatch
 		goto doWork

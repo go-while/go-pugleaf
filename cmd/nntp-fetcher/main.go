@@ -48,7 +48,7 @@ var appVersion = "-unset-"
 func main() {
 	config.AppVersion = appVersion
 	database.DBidleTimeOut = 15 * time.Second
-	database.FETCH_MODE = true
+	database.FETCH_MODE = true // prevents booting caches
 	log.Printf("Starting go-pugleaf NNTP Fetcher (version %s)", config.AppVersion)
 	// Command line flags for NNTP fetcher configuration
 	var newsgroups []*models.Newsgroup
@@ -85,14 +85,24 @@ func main() {
 		}
 		os.Exit(0)
 	}
-	if *maxBatch < 1 || *maxBatch > 4000 {
-		log.Printf("Invalid max batch size: %d (must be between 1 and 4000)", *maxBatch)
+	if *maxBatch < 1 {
+		*maxBatch = 1
 	}
-	if *maxLoops < 1 || *maxLoops > 2500 {
-		log.Fatalf("Invalid max batch size: %d (must be between 1 and 2500)", *maxBatch)
+	if *maxLoops < 1 {
+		*maxLoops = 1
+	}
+	if *maxBatch > 100 {
+		log.Printf("[WARN] max batch: %d (should be between 1 and 100) better have some RAM if you want more!", *maxBatch)
+	}
+	if *maxLoops > 100 {
+		log.Printf("[WARN] max loops: %d (should be between 1 and 100) better have some RAM if you want more!", *maxLoops)
 	}
 	if *hostnamePath == "" {
 		log.Fatalf("[NNTP]: Error: hostname must be set!")
+	}
+	// Validate command-line flag
+	if *useShortHashLenPtr < 2 || *useShortHashLenPtr > 7 {
+		log.Fatalf("Invalid UseShortHashLen: %d (must be between 2 and 7)", *useShortHashLenPtr)
 	}
 	database.InitialBatchChannelSize = *maxBatch * *maxLoops // set per-group queue cap to maxBatch (decouple from loops)
 	database.MaxBatchSize = *maxBatch
@@ -126,17 +136,12 @@ func main() {
 	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
 	db.WG.Add(1) // Adds for history: one for writer worker
 	db.WG.Add(1) // this fetch loop below
+
 	// Get UseShortHashLen from database (with safety check)
 	storedUseShortHashLen, isLocked, err := db.GetHistoryUseShortHashLen(*useShortHashLenPtr)
 	if err != nil {
 		log.Fatalf("Failed to get UseShortHashLen from database: %v", err)
 	}
-
-	// Validate command-line flag
-	if *useShortHashLenPtr < 2 || *useShortHashLenPtr > 7 {
-		log.Fatalf("Invalid UseShortHashLen: %d (must be between 2 and 7)", *useShortHashLenPtr)
-	}
-
 	var useShortHashLen int
 	if !isLocked {
 		// First run: store the provided value
@@ -154,7 +159,6 @@ func main() {
 		}
 		log.Printf("Using stored UseShortHashLen: %d", useShortHashLen)
 	}
-	//ctx := context.Background()
 
 	providers, err := db.GetProviders()
 	if err != nil || len(providers) == 0 {
@@ -163,6 +167,7 @@ func main() {
 		return
 	}
 	log.Printf("Loaded %d providers from database", len(providers))
+
 	// Get all newsgroups from database using admin function (includes empty groups)
 	suffixWildcard := strings.HasSuffix(*fetchNewsgroup, "*")
 	var wildcardNG string
@@ -252,7 +257,7 @@ func main() {
 		log.Fatalf("No provider backend available: '%#v'", proc.Pool.Backend.Provider)
 	}
 	log.Printf("[FETCHER]: Provider: %s @ MaxConns: %d", proc.Pool.Backend.Provider.Name, proc.Pool.Backend.MaxConns)
-	DownloadMaxPar := 1 // unchangeable (code not working yet)
+	DownloadMaxPar := 16 // unchangeable (code not working yet)
 	DLParChan := make(chan struct{}, DownloadMaxPar)
 	var mux sync.Mutex
 	downloaded := 0
@@ -341,7 +346,7 @@ func main() {
 					log.Printf("[FETCHER]: Date rescan mode for group '%s', starting from beginning", *ng)
 					// Set date-based download from epoch for complete rescan
 					mux.Lock()
-					startDates[*ng] = "1970-01-01"
+					startDates[*ng] = "1960-01-01"
 					mux.Unlock()
 					// Reset lastArticle to 0 and fall through to normal range processing
 					lastArticle = 0
@@ -382,11 +387,13 @@ func main() {
 				log.Printf("[FETCHER]: TodoQ '%s' toFetch=%d start=%d end=%d", *ng, toFetch, start, end)
 				//time.Sleep(time.Second * 2)
 			}
+			//log.Printf("[FETCHER]: Worker %d finished feeding TodoQ", worker)
 		}(i, &wgCheck, progressDB)
 	} // end for scan group worker
 	go func(wgCheck *sync.WaitGroup) {
 		wgCheck.Wait()
 		close(processor.Batch.TodoQ)
+		log.Printf("[FETCHER]: All newsgroups queued for processing, closing TodoQ")
 	}(&wgCheck)
 
 	// download worker
@@ -415,158 +422,145 @@ func main() {
 		}(i)
 	} // end for runthis
 
-	go func() {
-		errChan := make(chan error, len(newsgroups))
-		defer db.WG.Done()
-		defer func() {
-			fetchDoneChan <- nil
-		}()
-		for ng := range processor.Batch.TodoQ {
-			if db.IsDBshutdown() {
-				log.Printf("[FETCHER]: TodoQ Database shutdown detected, stopping processing")
-				return
-			}
-			/*
-				realMem, err := getRealMemoryUsage()
-				// Emergency stop if RSS exceeds N GB
-				if err == nil && realMem > 12*1024*1024*1024 {
-					log.Printf("[MEMORY-EMERGENCY] RSS HIGH! rebooting")
+	var waitHere sync.WaitGroup
+	waitHere.Add(DownloadMaxPar)
+	for i := 1; i <= DownloadMaxPar; i++ {
+		go func(waitHere *sync.WaitGroup) {
+			defer waitHere.Done()
+			errChan := make(chan error, len(newsgroups))
+			defer func() {
+				select {
+				case fetchDoneChan <- nil:
+				default:
+				}
+			}()
+			for ng := range processor.Batch.TodoQ {
+				if db.IsDBshutdown() {
+					log.Printf("[FETCHER]: TodoQ Database shutdown detected, stopping processing. still queued in TodoQ: %d", len(processor.Batch.TodoQ))
 					return
 				}
-				if err != nil {
-					log.Printf("[FETCHER]: Failed to get real memory usage: %v", err)
-				}
-			*/
-
-			nga, err := db.MainDBGetNewsgroup(ng.Name)
-			if err != nil {
-				log.Printf("Error in processor.Batch.TodoQ: MainDBGetNewsgroup err='%v'", err)
-				errChan <- err
-				continue
-			}
-			mux.Lock()
-			todo++
-			log.Printf("--- Fetch '%s' (%d-%d) [%d/%d|Q:%d]  --- ", ng.Name, ng.First, ng.Last, todo, queued, len(processor.Batch.TodoQ))
-			mux.Unlock()
-			// Import articles for the selected group
-			switch *importOverview {
-			case false:
 				/*
-					waitLock:
-						for {
-							if len(DLParChan) < DownloadMaxPar {
-								break waitLock
-							}
-							time.Sleep(time.Millisecond)
-						}
-						ScanParChan <- struct{}{} // aquire slot
-						DLParChan <- struct{}{}   // aquire slot
-						<-DLParChan               // free again
-						if db.IsDBshutdown() {
-							log.Printf("[FETCHER]: Database shutdown detected, stopping processing")
-							return
-						}
-						// fire up the memory killer
-						go func(DLParChan chan struct{}) {
-							defer func() {
-								<-ScanParChan // free slot when done
-							}()
+					realMem, err := getRealMemoryUsage()
+					// Emergency stop if RSS exceeds N GB
+					if err == nil && realMem > 12*1024*1024*1024 {
+						log.Printf("[MEMORY-EMERGENCY] RSS HIGH! rebooting")
+						return
+					}
+					if err != nil {
+						log.Printf("[FETCHER]: Failed to get real memory usage: %v", err)
+					}
 				*/
-				//log.Printf("[FETCHER]: Downloading articles for newsgroup: %s", ng.Name)
 
-				// Check if date-based downloading is requested
-				var useStartDate string
-				mux.Lock()
-				if startDates[ng.Name] != "" {
-					useStartDate = startDates[ng.Name]
-				} else if *downloadStartDate != "" {
-					useStartDate = *downloadStartDate
+				nga, err := db.MainDBGetNewsgroup(ng.Name)
+				if err != nil {
+					log.Printf("Error in processor.Batch.TodoQ: MainDBGetNewsgroup err='%v'", err)
+					errChan <- err
+					continue
 				}
+				mux.Lock()
+				todo++
+				log.Printf("--- Fetch '%s' (%d-%d) [%d/%d|Q:%d]  --- ", ng.Name, ng.First, ng.Last, todo, queued, len(processor.Batch.TodoQ))
 				mux.Unlock()
-				if useStartDate != "" {
-					startDate, err := time.Parse("2006-01-02", useStartDate)
-					if err != nil {
-						log.Fatalf("[FETCHER]: Invalid start date format '%s': %v (expected YYYY-MM-DD)", useStartDate, err)
+				// Import articles for the selected group
+				switch *importOverview {
+				case false:
+					//log.Printf("[FETCHER]: Downloading articles for newsgroup: %s", ng.Name)
+
+					// Check if date-based downloading is requested
+					var useStartDate string
+					mux.Lock()
+					if startDates[ng.Name] != "" {
+						useStartDate = startDates[ng.Name]
+					} else if *downloadStartDate != "" {
+						useStartDate = *downloadStartDate
 					}
-					log.Printf("[FETCHER]: Starting ng: '%s' from date: %s", ng.Name, startDate.Format("2006-01-02"))
-					//time.Sleep(3 * time.Second) // debug sleep
-					err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan, progressDB)
-					if err != nil {
-						log.Printf("[FETCHER]: DownloadArticlesFromDate5 failed: %v", err)
-						errChan <- err
-						continue
-					}
-				} else if nga.ExpiryDays > 0 {
-					// Check if group already has articles to decide between initial vs incremental download
-					// Use optimized main database check instead of opening group database
-					articleCount, err := db.GetArticleCountFromMainDB(ng.Name)
-					if err != nil {
-						log.Printf("[FETCHER]: Failed to get article count from main DB for '%s': %v", ng.Name, err)
-						errChan <- err
-						continue
-					}
-					if articleCount == 0 {
-						// Initial download: use expiry_days to avoid downloading old articles
-						startDate := time.Now().AddDate(0, 0, -nga.ExpiryDays)
-						log.Printf("[FETCHER]: Initial download for group with expiry_days=%d, starting from calculated date: %s", nga.ExpiryDays, startDate.Format("2006-01-02"))
+					mux.Unlock()
+					if useStartDate != "" {
+						startDate, err := time.Parse("2006-01-02", useStartDate)
+						if err != nil {
+							log.Fatalf("[FETCHER]: Invalid start date format '%s': %v (expected YYYY-MM-DD)", useStartDate, err)
+						}
+						log.Printf("[FETCHER]: Starting ng: '%s' from date: %s", ng.Name, startDate.Format("2006-01-02"))
 						//time.Sleep(3 * time.Second) // debug sleep
 						err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan, progressDB)
-
 						if err != nil {
+							log.Printf("[FETCHER]: DownloadArticlesFromDate5 failed: %v", err)
 							errChan <- err
-							log.Printf("[FETCHER]: DownloadArticlesFromDate6 failed: %v", err)
 							continue
 						}
+					} else if nga.ExpiryDays > 0 {
+						// Check if group already has articles to decide between initial vs incremental download
+						// Use optimized main database check instead of opening group database
+						articleCount, err := db.GetArticleCountFromMainDB(ng.Name)
+						if err != nil {
+							log.Printf("[FETCHER]: Failed to get article count from main DB for '%s': %v", ng.Name, err)
+							errChan <- err
+							continue
+						}
+						if articleCount == 0 {
+							// Initial download: use expiry_days to avoid downloading old articles
+							startDate := time.Now().AddDate(0, 0, -nga.ExpiryDays)
+							log.Printf("[FETCHER]: Initial download for group with expiry_days=%d, starting from calculated date: %s", nga.ExpiryDays, startDate.Format("2006-01-02"))
+							//time.Sleep(3 * time.Second) // debug sleep
+							err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan, progressDB)
+
+							if err != nil {
+								errChan <- err
+								log.Printf("[FETCHER]: DownloadArticlesFromDate6 failed: %v", err)
+								continue
+							}
+						} else {
+							// Incremental download: continue from where we left off
+							log.Printf("[FETCHER]: Incremental download for newsgroup: '%s' (has %d existing articles)", ng.Name, articleCount)
+							//time.Sleep(3 * time.Second) // debug sleep
+							err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan, progressDB, ng.First, ng.Last)
+							if err != nil {
+								log.Printf("[FETCHER]: DownloadArticles7 failed: %v", err)
+								errChan <- err
+								continue
+							}
+						}
 					} else {
-						// Incremental download: continue from where we left off
-						log.Printf("[FETCHER]: Incremental download for newsgroup: '%s' (has %d existing articles)", ng.Name, articleCount)
+						log.Printf("[FETCHER]: Downloading articles for newsgroup: '%s' (%d - %d) (no expiry limit)", ng.Name, ng.First, ng.Last)
 						//time.Sleep(3 * time.Second) // debug sleep
 						err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan, progressDB, ng.First, ng.Last)
 						if err != nil {
-							log.Printf("[FETCHER]: DownloadArticles7 failed: %v", err)
+							if err != processor.ErrUpToDate {
+								log.Printf("[FETCHER]: DownloadArticles8 failed: %v", err)
+							}
 							errChan <- err
 							continue
 						}
 					}
-				} else {
-					log.Printf("[FETCHER]: Downloading articles for newsgroup: '%s' (%d - %d) (no expiry limit)", ng.Name, ng.First, ng.Last)
-					//time.Sleep(3 * time.Second) // debug sleep
-					err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan, progressDB, ng.First, ng.Last)
 					if err != nil {
 						if err != processor.ErrUpToDate {
-							log.Printf("[FETCHER]: DownloadArticles8 failed: %v", err)
+							log.Printf("DownloadArticles9 failed: %v", err)
 						}
-						errChan <- err
 						continue
 					}
-				}
-				if err != nil {
-					if err != processor.ErrUpToDate {
-						log.Printf("DownloadArticles9 failed: %v", err)
-					}
-					continue
-				}
-				//}(DLParChan) // end go func
-				/*
-					case true:
-						log.Printf("[FETCHER]: Experimental! Start DownloadArticlesViaOverview for group '%s'", ng.Name)
-						err = proc.DownloadArticlesViaOverview(ng.Name)
-						if err != nil {
-							log.Printf("[FETCHER]: DownloadArticlesViaOverview failed: %v", err)
-							continue
-						}
-						fmt.Println("[FETCHER]: ✓ Article import complete.")
+					//}(DLParChan) // end go func
+					/*
+						case true:
+							log.Printf("[FETCHER]: Experimental! Start DownloadArticlesViaOverview for group '%s'", ng.Name)
+							err = proc.DownloadArticlesViaOverview(ng.Name)
+							if err != nil {
+								log.Printf("[FETCHER]: DownloadArticlesViaOverview failed: %v", err)
+								continue
+							}
+							fmt.Println("[FETCHER]: ✓ Article import complete.")
 
-						groupDBs, err := db.GetGroupDBs(ng.Name)
-						if err != nil {
-							log.Fatalf("[FETCHER]: Failed to get group DBs for '%s': %v", ng.Name, err)
-						}
-						defer groupDBs.Return(db)
-				*/
+							groupDBs, err := db.GetGroupDBs(ng.Name)
+							if err != nil {
+								log.Fatalf("[FETCHER]: Failed to get group DBs for '%s': %v", ng.Name, err)
+							}
+							defer groupDBs.Return(db)
+					*/
+				}
 			}
-		} // end for processor.Batch.TodoQ
-	}()
-
+		}(&waitHere)
+	}
+	waitHere.Wait()
+	db.WG.Done() // backwards compat... TODO remove this
 	// Wait for either shutdown signal or server error
 	select {
 	case <-sigChan:

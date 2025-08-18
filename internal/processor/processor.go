@@ -46,13 +46,14 @@ var (
 
 	// RunRSLIGHTImport is used to indicate if the importer should run the legacy RockSolid Light importer
 	RunRSLIGHTImport = false
+	DownloadMaxPar   = 16
 
 	// Global Batch Queue
 	Batch = &BatchQueue{
-		Check:  make(chan *string, 10),          // check newsgroups
-		TodoQ:  make(chan *nntp.GroupInfo, 10),  // todo newsgroups
-		Queue:  make(chan *batchItem, MaxBatch), // Channel to hold batch items
-		Return: make(chan *batchItem, MaxBatch), // Channel to hold batch items
+		Check:  make(chan *string, DownloadMaxPar),         // check newsgroups
+		TodoQ:  make(chan *nntp.GroupInfo, DownloadMaxPar), // todo newsgroups
+		Queue:  make(chan *batchItem, MaxBatch),            // Channel to hold batch items
+		Return: make(chan *batchItem, MaxBatch),            // Channel to hold batch items
 	}
 
 	// Do NOT change this here! these are needed for runtime !
