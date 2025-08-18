@@ -49,10 +49,10 @@ var (
 
 	// Global Batch Queue
 	Batch = &BatchQueue{
-		Check:  make(chan *string, 100),         // check newsgroups
-		TodoQ:  make(chan *nntp.GroupInfo, 100), // todo newsgroups
-		Queue:  make(chan *batchItem, 100),      // Channel to hold batch items
-		Return: make(chan *batchItem, 100),      // Channel to hold batch items
+		Check:  make(chan *string, 10),          // check newsgroups
+		TodoQ:  make(chan *nntp.GroupInfo, 10),  // todo newsgroups
+		Queue:  make(chan *batchItem, MaxBatch), // Channel to hold batch items
+		Return: make(chan *batchItem, MaxBatch), // Channel to hold batch items
 	}
 
 	// Do NOT change this here! these are needed for runtime !

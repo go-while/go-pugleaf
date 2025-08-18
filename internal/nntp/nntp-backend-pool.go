@@ -53,10 +53,17 @@ func (p *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]Overv
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
 
-	defer p.Put(client)
-
 	// Perform the XOVER command
-	return client.XOver(group, start, end, enforceLimit)
+	result, err := client.XOver(group, start, end, enforceLimit)
+	if err != nil {
+		// Close connection on error
+		p.CloseConn(client, true)
+		return nil, err
+	}
+
+	// Put back connection only if no error
+	p.Put(client)
+	return result, nil
 }
 
 func (p *Pool) XHdr(group string, header string, start, end int64) ([]HeaderLine, error) {
@@ -65,8 +72,43 @@ func (p *Pool) XHdr(group string, header string, start, end int64) ([]HeaderLine
 	if err != nil {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
-	defer p.Put(client)
-	return client.XHdr(group, header, start, end)
+
+	result, err := client.XHdr(group, header, start, end)
+	if err != nil {
+		// Close connection on error
+		p.CloseConn(client, true)
+		return nil, err
+	}
+
+	// Put back connection only if no error
+	p.Put(client)
+	return result, nil
+}
+
+// XHdrStreamed performs XHDR command and streams results through a channel
+// The channel will be closed when all results are sent or an error occurs
+// NOTE: This function takes ownership of the connection and will return it to the pool when done
+func (p *Pool) XHdrStreamed(group string, header string, start, end int64, resultChan chan<- *HeaderLine) error {
+	// Get a connection from the pool
+	client, err := p.Get()
+	if err != nil {
+		close(resultChan)
+		return fmt.Errorf("failed to get connection: %w", err)
+	}
+
+	// Handle connection cleanup in a goroutine so the function can return immediately
+	go func() {
+
+		// Use the streaming XHdr function on the client
+		if err := client.XHdrStreamed(group, header, start, end, resultChan); err != nil {
+			// If there's an error, close the connection instead of returning it
+			p.CloseConn(client, true)
+		} else {
+			p.Put(client)
+		}
+	}()
+
+	return nil
 }
 
 func (p *Pool) GetArticle(messageID *string) (*models.Article, error) {
@@ -83,13 +125,19 @@ func (p *Pool) GetArticle(messageID *string) (*models.Article, error) {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
 
-	defer p.Put(client)
 	result, err := client.GetArticle(messageID)
 	if err != nil {
-		p.CloseConn(client, true) // Close the connection on error
-		log.Printf("[NNTP-POOL] Failed to get article %s: %v", *messageID, err)
+		if err != ErrArticleNotFound && err != ErrArticleRemoved {
+			go func(client *BackendConn, messageID *string) {
+				p.CloseConn(client, true) // Close the connection on error
+				log.Printf("[NNTP-POOL] Failed to get article %s: %v", *messageID, err)
+			}(client, messageID)
+		}
 		return nil, fmt.Errorf("failed to get article: %w", err)
 	}
+
+	// Only put back if no error occurred
+	p.Put(client)
 	return result, nil
 }
 
@@ -107,8 +155,16 @@ func (p *Pool) SelectGroup(group string) (*GroupInfo, error) {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
 
-	defer p.Put(client)
 	gi, code, err := client.SelectGroup(group)
+	if err != nil && code != 411 {
+		// Close connection on unexpected errors (not "group not found")
+		p.CloseConn(client, true)
+		return nil, err
+	}
+
+	// Put back connection (even for code 411 - group not found)
+	p.Put(client)
+
 	if code == 411 {
 		err = ErrNewsgroupNotFound // silence error
 	}

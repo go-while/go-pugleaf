@@ -94,14 +94,14 @@ func main() {
 	if *hostnamePath == "" {
 		log.Fatalf("[NNTP]: Error: hostname must be set!")
 	}
-	processor.LocalHostnamePath = *hostnamePath
-	processor.XoverCopy = *importOverview // Set global xover copy flag
-	//processor.MaxBatch = *maxBatch     // Set global max batch size
-	nntp.MaxReadLinesXover = int64(*maxBatch)                // Set global max read lines for xover
-	processor.MaxBatch = nntp.MaxReadLinesXover              // Update processor MaxBatch to use the new NNTP limit
-	processor.LOOPS_PER_GROUPS = *maxLoops                   // Set global loops per group
 	database.InitialBatchChannelSize = *maxBatch * *maxLoops // set per-group queue cap to maxBatch (decouple from loops)
-	database.MaxBatchSize = *maxBatch                        // Set global max read lines for xover
+	database.MaxBatchSize = *maxBatch
+	nntp.MaxReadLinesXover = int64(*maxBatch) // Set global max read lines for xover
+	processor.LocalHostnamePath = *hostnamePath
+	processor.XoverCopy = *importOverview       // Set global xover copy flag
+	processor.MaxBatch = nntp.MaxReadLinesXover // Update processor MaxBatch to use the new NNTP limit
+	processor.LOOPS_PER_GROUPS = *maxLoops      // Set global loops per group
+	// Set global max read lines for xover
 
 	mainConfig := config.NewDefaultConfig()
 	mainConfig.Server.Hostname = *hostnamePath
@@ -284,85 +284,105 @@ func main() {
 		log.Printf("Queued %d newsgroups", queued)
 	}()
 	var wgCheck sync.WaitGroup
+	startDates := make(map[string]string)
 	for i := 1; i <= proc.Pool.Backend.MaxConns; i++ {
 		wgCheck.Add(1)
-		go func(worker int, wgCheck *sync.WaitGroup) {
+		go func(worker int, wgCheck *sync.WaitGroup, progressDB *database.ProgressDB) {
 			defer wgCheck.Done()
 			for ng := range processor.Batch.Check {
 				groupInfo, err := proc.Pool.SelectGroup(*ng)
 				if err != nil || groupInfo == nil {
 					if err == nntp.ErrNewsgroupNotFound {
-						log.Printf("[FETCHER]: Newsgroup not found: '%s'", *ng)
+						//log.Printf("[FETCHER]: Newsgroup not found: '%s'", *ng)
 						continue
 					}
 					log.Printf("[FETCHER]: Error in select ng='%s' groupInfo='%#v' err='%v'", *ng, err, groupInfo)
 					continue
 				}
-				//log.Printf("[FETCHER]: ng '%s', REMOTE groupInfo: %#v", *ng, groupInfo)
+				//log.Printf("[FETCHER]: ng '%s', REMOTE groupInfo: %#v", *ng, groupInfo),
+				mux.Lock()
 				lastArticle, err := progressDB.GetLastArticle(proc.Pool.Backend.Provider.Name, *ng)
-				if err != nil {
-					log.Printf("DownloadArticles: Failed to get last article for group '%s' from provider '%s': %v", *ng, proc.Pool.Backend.Provider.Name, err)
+				if err != nil || lastArticle < -1 {
+					log.Printf("[FETCHER]: Failed to get last article for group '%s' from provider '%s': %v", *ng, proc.Pool.Backend.Provider.Name, err)
+					mux.Unlock()
 					continue
 				}
+				mux.Unlock()
 
 				switch lastArticle {
 				case 0:
 					// Open group DB only when we need to check last-article date
 					groupDBs, err := proc.DB.GetGroupDBs(*ng)
 					if err != nil {
-						log.Printf("DownloadArticles: Failed to get group DBs for newsgroup '%s': %v", *ng, err)
+						log.Printf("[FETCHER]: Failed to get group DBs for newsgroup '%s': %v", *ng, err)
 						continue
 					}
 					lastArticleDate, checkDateErr := proc.DB.GetLastArticleDate(groupDBs)
 					// ensure close regardless of errors
 					if ferr := proc.DB.ForceCloseGroupDBs(groupDBs); ferr != nil {
-						log.Printf("ForceCloseGroupDBs error for '%s': %v", *ng, ferr)
+						log.Printf("[FETCHER]: ForceCloseGroupDBs error for '%s': %v", *ng, ferr)
 					}
 					if checkDateErr != nil {
-						log.Printf("DownloadArticles: Failed to get last article date for '%s': %v", *ng, checkDateErr)
+						log.Printf("[FETCHER]: Failed to get last article date for '%s': %v", *ng, checkDateErr)
 						continue
 					}
 
 					// If group has existing articles, use date-based download instead
 					if lastArticleDate != nil {
-						log.Printf("DownloadArticles: No progress for provider '%s' but group '%s' has existing articles, switching to date-based download from: %s",
+						log.Printf("[FETCHER]: No progress for provider '%s' but group '%s' has existing articles, switching to date-based download from: %s",
 							proc.Pool.Backend.Provider.Name, *ng, lastArticleDate.Format("2006-01-02"))
-						go proc.DownloadArticlesFromDate(*ng, *lastArticleDate, 0, DLParChan, progressDB) // Use 0 for ignore threshold since group already exists
+						mux.Lock()
+						startDates[*ng] = lastArticleDate.Format("2006-01-02")
+						mux.Unlock()
+						//go proc.DownloadArticlesFromDate(*ng, *lastArticleDate, 0, DLParChan, progressDB) // Use 0 for ignore threshold since group already exists
 					}
 
 				case -1: // User-requested date rescan - reset to start from beginning
+					log.Printf("[FETCHER]: Date rescan mode for group '%s', starting from beginning", *ng)
+					// Set date-based download from epoch for complete rescan
+					mux.Lock()
+					startDates[*ng] = "1970-01-01"
+					mux.Unlock()
+					// Reset lastArticle to 0 and fall through to normal range processing
 					lastArticle = 0
-					log.Printf("DownloadArticles: Date rescan mode for group '%s', starting from beginning", *ng)
 				default:
 					// pass
 				}
+				//log.Printf("DEBUG-RANGE: ng='%s' lastArticle=%d (after switch)", *ng, lastArticle)
 				start := lastArticle + 1                     // Start from the first article in the remote group
 				end := start + int64(processor.MaxBatch) - 1 // End at the last article in the remote group
-				if end > groupInfo.Last {
+				//log.Printf("DEBUG-RANGE: ng='%s' calculated start=%d end=%d groupInfo.Last=%d", *ng, start, end, groupInfo.Last)
+
+				// For date-based downloads, don't cap end to groupInfo.Last since they use date filtering
+				mux.Lock()
+				isDateBased := startDates[*ng] != ""
+				mux.Unlock()
+				if !isDateBased && end > groupInfo.Last {
 					end = groupInfo.Last
 				}
 				if start > end {
-					//log.Printf("DownloadArticles: No new data to import for newsgroup '%s' start=%d end=%d (remote: first=%d last=%d)", newsgroup, start, end, groupInfo.First, groupInfo.Last)
+					//log.Printf("[FETCHER]: OK ng: '%s' start=%d end=%d (remote: first=%d last=%d)", *ng, start, end, groupInfo.First, groupInfo.Last)
 					continue
 				}
-				toFetch := end - start
+				toFetch := end - start + 1
 				if toFetch > nntp.MaxReadLinesXover {
 					// Limit to N articles per batch fetch
 					end = start + nntp.MaxReadLinesXover - 1
-					toFetch = end - start
+					toFetch = end - start + 1
 					//log.Printf("DownloadArticles: Limiting fetch for %s to %d articles (start=%d, end=%d)", newsgroup, toFetch, start, end)
 				}
 				if toFetch <= 0 {
-					//log.Printf("DownloadArticles: No data to fetch for newsgroup '%s' (start=%d, end=%d)", newsgroup, start, end)
+					//log.Printf("[FETCHER]: OK ng: '%s' (start=%d, end=%d) toFetch=%d", *ng, start, end, toFetch)
 					continue
 				}
 
 				groupInfo.First = start
 				groupInfo.Last = end
 				processor.Batch.TodoQ <- groupInfo
-				log.Printf("[FETCHER]: TodoQ '%s' (%#v)", *ng, groupInfo)
+				log.Printf("[FETCHER]: TodoQ '%s' toFetch=%d start=%d end=%d", *ng, toFetch, start, end)
+				time.Sleep(time.Second * 2)
 			}
-		}(i, &wgCheck)
+		}(i, &wgCheck, progressDB)
 	} // end for scan group worker
 	go func(wgCheck *sync.WaitGroup) {
 		wgCheck.Wait()
@@ -378,12 +398,14 @@ func main() {
 				//log.Printf("DownloadArticles: Worker %d processing group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
 				art, err := proc.Pool.GetArticle(item.MessageID)
 				if err != nil {
-					log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle %s: %v .. continue", *item.MessageID, err)
-					item.Error = err               // Set error on item
+					log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle '%s' err='%v' .. continue", *item.MessageID, err)
+					item.Error = err // Set error on item
+					//log.Printf("DEBUG-SEND: Worker %d sending ERROR item to Return channel", worker)
 					processor.Batch.Return <- item // Send failed item back
 					continue
 				}
-				item.Article = art             // set pointer
+				item.Article = art // set pointer
+				//log.Printf("DEBUG-SEND: Worker %d sending SUCCESS item to Return channel", worker)
 				processor.Batch.Return <- item // Send back the successfully downloaded article
 				mux.Lock()
 				downloaded++
@@ -453,12 +475,20 @@ func main() {
 				//log.Printf("[FETCHER]: Downloading articles for newsgroup: %s", ng.Name)
 
 				// Check if date-based downloading is requested
-				if *downloadStartDate != "" {
-					startDate, err := time.Parse("2006-01-02", *downloadStartDate)
+				var useStartDate string
+				mux.Lock()
+				if startDates[ng.Name] != "" {
+					useStartDate = startDates[ng.Name]
+				} else if *downloadStartDate != "" {
+					useStartDate = *downloadStartDate
+				}
+				mux.Unlock()
+				if useStartDate != "" {
+					startDate, err := time.Parse("2006-01-02", useStartDate)
 					if err != nil {
-						log.Fatalf("[FETCHER]: Invalid start date format '%s': %v (expected YYYY-MM-DD)", *downloadStartDate, err)
+						log.Fatalf("[FETCHER]: Invalid start date format '%s': %v (expected YYYY-MM-DD)", useStartDate, err)
 					}
-					log.Printf("[FETCHER]: Starting download from date: %s", startDate.Format("2006-01-02"))
+					log.Printf("[FETCHER]: Starting ng: '%s' from date: %s", ng.Name, startDate.Format("2006-01-02"))
 					//time.Sleep(3 * time.Second) // debug sleep
 					err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan, progressDB)
 					if err != nil {
@@ -643,70 +673,76 @@ func ConnectionTest(host *string, port *int, username *string, password *string,
 	if err != nil {
 		log.Fatalf("Failed to get connection from pool: %v", err)
 	}
-	groups, err := poolClient.ListGroups()
-	if err != nil {
-		fmt.Printf("⚠ Failed to list groups: %v\n", err)
-	} else {
-		fmt.Printf("✓ Retrieved %d groups\n", len(groups))
+	var groups []nntp.GroupInfo
+	func() {
+		defer poolClient.Pool.Put(poolClient) // Ensure connection is always returned
+		var err error
+		groups, err = poolClient.ListGroups()
+		if err != nil {
+			fmt.Printf("⚠ Failed to list groups: %v\n", err)
+		} else {
+			fmt.Printf("✓ Retrieved %d groups\n", len(groups))
 
-		// Show first 10 groups
-		limit := 10
-		if len(groups) < limit {
-			limit = len(groups)
-		}
+			// Show first 10 groups
+			limit := 10
+			if len(groups) < limit {
+				limit = len(groups)
+			}
 
-		fmt.Println("First groups:")
-		for i := 0; i < limit; i++ {
-			group := groups[i]
-			fmt.Printf("  %s: %d articles (%d-%d) posting=%v\n",
-				group.Name, group.Count, group.First, group.Last, group.PostingOK)
+			fmt.Println("First groups:")
+			for i := 0; i < limit; i++ {
+				group := groups[i]
+				fmt.Printf("  %s: %d articles (%d-%d) posting=%v\n",
+					group.Name, group.Count, group.First, group.Last, group.PostingOK)
+			}
 		}
-	}
-	poolClient.Pool.Put(poolClient) // Return connection to pool
+	}()
 
 	// Test 4: Select a specific group (or try first available)
 	poolClient, err = pool.Get() // Get a connection from the pool
 	if err != nil {
 		log.Fatalf("Failed to get connection from pool: %v", err)
 	}
-	if fetchNewsgroup != "" {
-		fmt.Printf("\n=== Test 4: Select Group '%s' ===\n", fetchNewsgroup)
-		groupInfo, _, err := poolClient.SelectGroup(fetchNewsgroup)
-		if err != nil {
-			fmt.Printf("⚠ Failed to select group: %v\n", err)
-		} else {
-			fmt.Printf("✓ Group selected: %s\n", groupInfo.Name)
-			fmt.Printf("  Articles: %d (%d-%d)\n", groupInfo.Count, groupInfo.First, groupInfo.Last)
-			fmt.Printf("  Posting: %v\n", groupInfo.PostingOK)
-		}
-	} else if len(groups) > 0 {
-		// Try to select the first few groups, skipping problematic ones
-		fmt.Println("\n=== Test 4: Auto-select Available Group ===")
-		for i, group := range groups {
-			if i >= 5 { // Try max 5 groups
+	func() {
+		defer poolClient.Pool.Put(poolClient) // Ensure connection is always returned
+		if fetchNewsgroup != "" {
+			fmt.Printf("\n=== Test 4: Select Group '%s' ===\n", fetchNewsgroup)
+			groupInfo, _, err := poolClient.SelectGroup(fetchNewsgroup)
+			if err != nil {
+				fmt.Printf("⚠ Failed to select group: %v\n", err)
+			} else {
+				fmt.Printf("✓ Group selected: %s\n", groupInfo.Name)
+				fmt.Printf("  Articles: %d (%d-%d)\n", groupInfo.Count, groupInfo.First, groupInfo.Last)
+				fmt.Printf("  Posting: %v\n", groupInfo.PostingOK)
+			}
+		} else if len(groups) > 0 {
+			// Try to select the first few groups, skipping problematic ones
+			fmt.Println("\n=== Test 4: Auto-select Available Group ===")
+			for i, group := range groups {
+				if i >= 5 { // Try max 5 groups
+					break
+				}
+
+				// Skip known problematic groups
+				if group.Name == "control" || group.Name == "junk" {
+					fmt.Printf("Skipping problematic group: %s\n", group.Name)
+					continue
+				}
+
+				fmt.Printf("Trying to select group: %s\n", group.Name)
+				groupInfo, _, err := poolClient.SelectGroup(group.Name)
+				if err != nil {
+					fmt.Printf("⚠ Failed to select group %s: %v (trying next)\n", group.Name, err)
+					continue
+				}
+
+				fmt.Printf("✓ Successfully selected group: %s\n", groupInfo.Name)
+				fmt.Printf("  Articles: %d (%d-%d)\n", groupInfo.Count, groupInfo.First, groupInfo.Last)
+				fmt.Printf("  Posting: %v\n", groupInfo.PostingOK)
 				break
 			}
-
-			// Skip known problematic groups
-			if group.Name == "control" || group.Name == "junk" {
-				fmt.Printf("Skipping problematic group: %s\n", group.Name)
-				continue
-			}
-
-			fmt.Printf("Trying to select group: %s\n", group.Name)
-			groupInfo, _, err := poolClient.SelectGroup(group.Name)
-			if err != nil {
-				fmt.Printf("⚠ Failed to select group %s: %v (trying next)\n", group.Name, err)
-				continue
-			}
-
-			fmt.Printf("✓ Successfully selected group: %s\n", groupInfo.Name)
-			fmt.Printf("  Articles: %d (%d-%d)\n", groupInfo.Count, groupInfo.First, groupInfo.Last)
-			fmt.Printf("  Posting: %v\n", groupInfo.PostingOK)
-			break
 		}
-	}
-	poolClient.Pool.Put(poolClient) // Return connection to pool
+	}()
 
 	// Test 5: Test specific message ID
 	if *testMsg != "" {
@@ -714,37 +750,39 @@ func ConnectionTest(host *string, port *int, username *string, password *string,
 		if err != nil {
 			log.Fatalf("Test 5 Failed to get connection from pool: %v", err)
 		}
-		fmt.Printf("\n=== Test 5: Test Message ID '%s' ===\n", *testMsg)
+		func() {
+			defer poolClient.Pool.Put(poolClient) // Ensure connection is always returned
+			fmt.Printf("\n=== Test 5: Test Message ID '%s' ===\n", *testMsg)
 
-		// Test STAT command
-		exists, err := poolClient.StatArticle(*testMsg)
-		if err != nil {
-			fmt.Printf("⚠ STAT failed: %v\n", err)
-		} else {
-			fmt.Printf("✓ STAT result: exists=%v\n", exists)
-		}
-
-		if exists {
-			// Test HEAD command
-			article, err := poolClient.GetHead(*testMsg)
+			// Test STAT command
+			exists, err := poolClient.StatArticle(*testMsg)
 			if err != nil {
-				fmt.Printf("⚠ HEAD failed: %v\n", err)
+				fmt.Printf("⚠ STAT failed: %v\n", err)
 			} else {
-				fmt.Printf("✓ HEAD successful, %d headers\n", len(article.Headers))
+				fmt.Printf("✓ STAT result: exists=%v\n", exists)
+			}
 
-				// Show some key headers
-				if subject := article.Headers["subject"]; len(subject) > 0 {
-					fmt.Printf("  Subject: %s\n", subject[0])
-				}
-				if from := article.Headers["from"]; len(from) > 0 {
-					fmt.Printf("  From: %s\n", from[0])
-				}
-				if date := article.Headers["date"]; len(date) > 0 {
-					fmt.Printf("  Date: %s\n", date[0])
+			if exists {
+				// Test HEAD command
+				article, err := poolClient.GetHead(*testMsg)
+				if err != nil {
+					fmt.Printf("⚠ HEAD failed: %v\n", err)
+				} else {
+					fmt.Printf("✓ HEAD successful, %d headers\n", len(article.Headers))
+
+					// Show some key headers
+					if subject := article.Headers["subject"]; len(subject) > 0 {
+						fmt.Printf("  Subject: %s\n", subject[0])
+					}
+					if from := article.Headers["from"]; len(from) > 0 {
+						fmt.Printf("  From: %s\n", from[0])
+					}
+					if date := article.Headers["date"]; len(date) > 0 {
+						fmt.Printf("  Date: %s\n", date[0])
+					}
 				}
 			}
-		}
-		poolClient.Pool.Put(poolClient) // Return connection to pool
+		}()
 	}
 
 	// Test 6: XOVER (Overview data)
@@ -753,35 +791,37 @@ func ConnectionTest(host *string, port *int, username *string, password *string,
 		if err != nil {
 			log.Fatalf("Test 6 Failed to get connection from pool: %v", err)
 		}
-		fmt.Printf("\n=== Test 6: XOVER for group '%s' ===\n", fetchNewsgroup)
-		groupInfo, _, err := poolClient.SelectGroup(fetchNewsgroup)
-		if err != nil {
-			fmt.Printf("⚠ Failed to select group for XOVER: %v\n", err)
-		} else {
-			// Get overview data for first 10 articles
-			start := groupInfo.First
-			end := start + 9
-			if end > groupInfo.Last {
-				end = groupInfo.Last
-			}
-			enforceLimit := false
-			fmt.Printf("Getting XOVER data for articles %d-%d...\n", start, end)
-			overviews, err := poolClient.XOver(fetchNewsgroup, start, end, enforceLimit)
+		func() {
+			defer poolClient.Pool.Put(poolClient) // Ensure connection is always returned
+			fmt.Printf("\n=== Test 6: XOVER for group '%s' ===\n", fetchNewsgroup)
+			groupInfo, _, err := poolClient.SelectGroup(fetchNewsgroup)
 			if err != nil {
-				fmt.Printf("⚠ XOVER failed: %v\n", err)
+				fmt.Printf("⚠ Failed to select group for XOVER: %v\n", err)
 			} else {
-				fmt.Printf("✓ Retrieved %d overview records\n", len(overviews))
-				for i, ov := range overviews {
-					if i >= 3 { // Show only first 3
-						break
+				// Get overview data for first 10 articles
+				start := groupInfo.First
+				end := start + 9
+				if end > groupInfo.Last {
+					end = groupInfo.Last
+				}
+				enforceLimit := false
+				fmt.Printf("Getting XOVER data for articles %d-%d...\n", start, end)
+				overviews, err := poolClient.XOver(fetchNewsgroup, start, end, enforceLimit)
+				if err != nil {
+					fmt.Printf("⚠ XOVER failed: %v\n", err)
+				} else {
+					fmt.Printf("✓ Retrieved %d overview records\n", len(overviews))
+					for i, ov := range overviews {
+						if i >= 3 { // Show only first 3
+							break
+						}
+						fmt.Printf("  Article %d: %s (from: %s, %d bytes)\n",
+							ov.ArticleNum, ov.Subject[:min(50, len(ov.Subject))],
+							ov.From[:min(30, len(ov.From))], ov.Bytes)
 					}
-					fmt.Printf("  Article %d: %s (from: %s, %d bytes)\n",
-						ov.ArticleNum, ov.Subject[:min(50, len(ov.Subject))],
-						ov.From[:min(30, len(ov.From))], ov.Bytes)
 				}
 			}
-		}
-		poolClient.Pool.Put(poolClient) // Return connection to pool
+		}()
 	}
 
 	// Test 7: XHDR (Header field extraction)
@@ -790,34 +830,36 @@ func ConnectionTest(host *string, port *int, username *string, password *string,
 		if err != nil {
 			log.Fatalf("Test 7 Failed to get connection from pool: %v", err)
 		}
-		fmt.Printf("\n=== Test 7: XHDR for group '%s' ===\n", fetchNewsgroup)
-		groupInfo, _, err := poolClient.SelectGroup(fetchNewsgroup)
-		if err != nil {
-			fmt.Printf("⚠ Failed to select group for XHDR: %v\n", err)
-		} else {
-			// Get subject headers for first 5 articles
-			start := groupInfo.First
-			end := start + 4
-			if end > groupInfo.Last {
-				end = groupInfo.Last
-			}
-
-			fmt.Printf("Getting XHDR Subject for articles %d-%d...\n", start, end)
-			headers, err := poolClient.XHdr(fetchNewsgroup, "Subject", start, end)
+		func() {
+			defer poolClient.Pool.Put(poolClient) // Ensure connection is always returned
+			fmt.Printf("\n=== Test 7: XHDR for group '%s' ===\n", fetchNewsgroup)
+			groupInfo, _, err := poolClient.SelectGroup(fetchNewsgroup)
 			if err != nil {
-				fmt.Printf("⚠ XHDR failed: %v\n", err)
+				fmt.Printf("⚠ Failed to select group for XHDR: %v\n", err)
 			} else {
-				fmt.Printf("✓ Retrieved %d subject headers\n", len(headers))
-				for i, hdr := range headers {
-					if i >= 3 { // Show only first 3
-						break
+				// Get subject headers for first 5 articles
+				start := groupInfo.First
+				end := start + 4
+				if end > groupInfo.Last {
+					end = groupInfo.Last
+				}
+
+				fmt.Printf("Getting XHDR Subject for articles %d-%d...\n", start, end)
+				headers, err := poolClient.XHdr(fetchNewsgroup, "Subject", start, end)
+				if err != nil {
+					fmt.Printf("⚠ XHDR failed: %v\n", err)
+				} else {
+					fmt.Printf("✓ Retrieved %d subject headers\n", len(headers))
+					for i, hdr := range headers {
+						if i >= 3 { // Show only first 3
+							break
+						}
+						fmt.Printf("  Article %d: %s\n", hdr.ArticleNum,
+							hdr.Value[:min(60, len(hdr.Value))])
 					}
-					fmt.Printf("  Article %d: %s\n", hdr.ArticleNum,
-						hdr.Value[:min(60, len(hdr.Value))])
 				}
 			}
-		}
-		poolClient.Pool.Put(poolClient) // Return connection to pool
+		}()
 	}
 
 	// Test 8: LISTGROUP (Article numbers)
@@ -826,35 +868,37 @@ func ConnectionTest(host *string, port *int, username *string, password *string,
 		if err != nil {
 			log.Fatalf("Test 8 Failed to get connection from pool: %v", err)
 		}
-		fmt.Printf("\n=== Test 8: LISTGROUP for '%s' ===\n", fetchNewsgroup)
-		// Get first 20 article numbers
-		fmt.Printf("Getting article numbers (limited)...\n")
-		articleNums, err := poolClient.ListGroup(fetchNewsgroup, 0, 0) // Get all (limited by server)
-		if err != nil {
-			fmt.Printf("⚠ LISTGROUP failed: %v\n", err)
-		} else {
-			fmt.Printf("✓ Retrieved %d article numbers\n", len(articleNums))
-			if len(articleNums) > 0 {
-				fmt.Printf("  First articles: ")
-				for i, num := range articleNums {
-					if i >= 10 { // Show first 10
-						fmt.Printf("...")
-						break
+		func() {
+			defer poolClient.Pool.Put(poolClient) // Ensure connection is always returned
+			fmt.Printf("\n=== Test 8: LISTGROUP for '%s' ===\n", fetchNewsgroup)
+			// Get first 20 article numbers
+			fmt.Printf("Getting article numbers (limited)...\n")
+			articleNums, err := poolClient.ListGroup(fetchNewsgroup, 0, 0) // Get all (limited by server)
+			if err != nil {
+				fmt.Printf("⚠ LISTGROUP failed: %v\n", err)
+			} else {
+				fmt.Printf("✓ Retrieved %d article numbers\n", len(articleNums))
+				if len(articleNums) > 0 {
+					fmt.Printf("  First articles: ")
+					for i, num := range articleNums {
+						if i >= 10 { // Show first 10
+							fmt.Printf("...")
+							break
+						}
+						fmt.Printf("%d ", num)
 					}
-					fmt.Printf("%d ", num)
+					fmt.Printf("\n  Last articles: ")
+					start := len(articleNums) - 5
+					if start < 0 {
+						start = 0
+					}
+					for i := start; i < len(articleNums); i++ {
+						fmt.Printf("%d ", articleNums[i])
+					}
+					fmt.Println()
 				}
-				fmt.Printf("\n  Last articles: ")
-				start := len(articleNums) - 5
-				if start < 0 {
-					start = 0
-				}
-				for i := start; i < len(articleNums); i++ {
-					fmt.Printf("%d ", articleNums[i])
-				}
-				fmt.Println()
 			}
-		}
-		poolClient.Pool.Put(poolClient) // Return connection to pool
+		}()
 	}
 	return err
 } // end func ConnectionTest

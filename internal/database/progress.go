@@ -96,12 +96,16 @@ func (p *ProgressDB) GetLastArticle(backendName, newsgroupName string) (int64, e
 	err := retryableQueryRowScan(p.db, query_GetLastArticle, []interface{}{backendName, newsgroupName}, &lastArticle)
 
 	if err == sql.ErrNoRows {
+		//log.Printf("progressDB.GetLastArticle: provider '%s', newsgroup '%s' has no progress", backendName, newsgroupName)
 		return 0, nil // No previous progress, start from 0
 	}
 	if err != nil {
-		return 0, fmt.Errorf("failed to get last article: %w", err)
+		return -999, fmt.Errorf("failed to get last article: %w", err)
 	}
 
+	if lastArticle < 0 {
+		log.Printf("[INFO] progressDB.GetLastArticle: provider '%s', newsgroup '%s' last_article %d", backendName, newsgroupName, lastArticle)
+	}
 	return lastArticle, nil
 }
 

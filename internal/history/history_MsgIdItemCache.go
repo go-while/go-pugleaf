@@ -728,7 +728,7 @@ func (c *MsgIdItemCache) CleanExpiredEntries() int {
 		c.mux.RUnlock()
 	} else {
 		// Add debug information when nothing is cleaned up
-		log.Printf("[CACHE-CLEANUP] No expired cache entries found - checked %d buckets with CaseWrite=%d, CaseDupes=%d, CaseError=%d, CaseLock=%d items (took %s)", len(buckets), countCaseWrite, countCaseDupes, countCaseError, countCaseLocked, time.Since(start))
+		//log.Printf("[CACHE-CLEANUP] No expired cache entries found - checked %d buckets with CaseWrite=%d, CaseDupes=%d, CaseError=%d, CaseLock=%d items (took %s)", len(buckets), countCaseWrite, countCaseDupes, countCaseError, countCaseLocked, time.Since(start))
 	}
 	return cleaned
 }

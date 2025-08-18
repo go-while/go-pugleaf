@@ -61,6 +61,42 @@ var idToArticleNumPool = sync.Pool{ // *map[string]int64 pre-sized
 	},
 }
 
+// Additional pools for hot-path allocations
+var stringSlicePool = sync.Pool{ // *[]string for valuesClauses, caseWhenClauses, messageIDs
+	New: func() any {
+		s := make([]string, 0, MaxBatchSize)
+		return &s
+	},
+}
+
+var interfaceSlicePool = sync.Pool{ // *[]interface{} for args in threading operations
+	New: func() any {
+		s := make([]interface{}, 0, MaxBatchSize*3) // up to 3x for reply count updates
+		return &s
+	},
+}
+
+var parentMessageIDsPool = sync.Pool{ // *map[string]int for reply processing
+	New: func() any {
+		m := make(map[string]int, MaxBatchSize)
+		return &m
+	},
+}
+
+var threadUpdatesPool = sync.Pool{ // *map[int64][]threadCacheUpdateData for thread cache updates
+	New: func() any {
+		m := make(map[int64][]threadCacheUpdateData, MaxBatchSize/4) // assume fewer unique thread roots
+		return &m
+	},
+}
+
+var batchTasksSlicePool = sync.Pool{ // *[]*BatchTasks for orchestrator
+	New: func() any {
+		s := make([]*BatchTasks, 0, LimitBatchParallel)
+		return &s
+	},
+}
+
 // MsgIdTmpCacheItem represents a cached message ID item - matches processor definition
 type MsgIdTmpCacheItem struct {
 	MessageId    string
@@ -144,7 +180,7 @@ func (sq *SQ3batch) ExpireCache() {
 	for k, task := range sq.TasksMap {
 		task.Mux.Lock()
 		if task.Expires.Before(time.Now()) && len(task.BATCHchan) == 0 {
-			log.Printf("[BATCH] Expiring cache for newsgroup '%s'", k)
+			//log.Printf("[BATCH] Expiring cache for newsgroup '%s'", k)
 			// Close the channel to stop further processing
 			// Remove from TasksMap
 			delete(sq.TasksMap, k)
@@ -332,7 +368,7 @@ func (c *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup)
 	toProcess := len(tasksToProcess)
 	launched, launchedTotal := 0, 0
 
-	log.Printf("[BATCH] processAllPendingBatches! %d tasks toProcess, %d queued", toProcess, queuedItems)
+	log.Printf("[BATCH] processAllPendingBatches! %d newsgroups toProcess: total %d articles queued", toProcess, queuedItems)
 	//doWork:
 	//log.Printf("[BATCH-DEBUG] processAllPendingBatches: entering doWork loop, toProcess=%d", toProcess)
 	//startLoop := time.Now() // Reset start time for each iteration
@@ -429,7 +465,7 @@ drainChannel:
 		return
 	}
 
-	log.Printf("[BATCH] processNewsgroupBatch %d tasks: newsgroup '%s'", len(batches), *task.Newsgroup)
+	log.Printf("[BATCH] processNewsgroupBatch: ng: '%s' with %d articles", *task.Newsgroup, len(batches))
 	deferred := false
 	var groupDBs *GroupDBs
 	var err error
@@ -769,9 +805,31 @@ func (c *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*mo
 		return nil
 	}
 
-	// Pre-allocate slices to avoid repeated memory allocations
-	valuesClauses := make([]string, 0, num)
-	args := make([]interface{}, 0, num*2) // 2 args per root
+	// Get pooled slices to avoid repeated memory allocations
+	valuesPtr := stringSlicePool.Get().(*[]string)
+	valuesClauses := *valuesPtr
+	if cap(valuesClauses) < num {
+		valuesClauses = make([]string, 0, MaxBatchSize)
+	}
+	valuesClauses = valuesClauses[:0]
+
+	argsPtr := interfaceSlicePool.Get().(*[]interface{})
+	args := *argsPtr
+	if cap(args) < num*2 {
+		args = make([]interface{}, 0, MaxBatchSize*3)
+	}
+	args = args[:0]
+
+	defer func() {
+		// Reset and return to pool
+		valuesClauses = valuesClauses[:0]
+		*valuesPtr = valuesClauses
+		stringSlicePool.Put(valuesPtr)
+
+		args = args[:0]
+		*argsPtr = args
+		interfaceSlicePool.Put(argsPtr)
+	}()
 
 	// Reuse the same placeholder string
 	newsgroupPtr := c.GetNewsgroupPointer(groupDBs.Newsgroup)
@@ -826,14 +884,29 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 		return nil
 	}
 
-	// Pre-allocate collections to avoid repeated memory allocations
-	parentMessageIDs := make(map[string]int, num) // Pre-allocate with expected capacity
+	// Get pooled collections to avoid repeated memory allocations
+	parentMsgIDsPtr := parentMessageIDsPool.Get().(*map[string]int)
+	parentMessageIDs := *parentMsgIDsPtr
+	// Clear the map before use
+	for k := range parentMessageIDs {
+		delete(parentMessageIDs, k)
+	}
+
+	// Create replyData slice (keep as direct allocation since it contains complex struct)
 	replyData := make([]struct {
 		articleNum int64
 		threadRoot int64
 		parentID   string
 		childDate  time.Time
 	}, 0, num) // Pre-allocate slice with capacity
+
+	defer func() {
+		// Clear and return parentMessageIDs to pool
+		for k := range parentMessageIDs {
+			delete(parentMessageIDs, k)
+		}
+		parentMessageIDsPool.Put(parentMsgIDsPtr)
+	}()
 
 	newsgroupPtr := c.GetNewsgroupPointer(groupDBs.Newsgroup)
 	// Process each reply to gather data
@@ -873,8 +946,21 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 		}
 	}
 
-	// Collect all thread cache updates for TRUE batch processing
-	threadUpdates := make(map[int64][]threadCacheUpdateData) // [threadRoot] -> list of updates
+	// Get pooled map for thread cache updates
+	threadUpdatesPtr := threadUpdatesPool.Get().(*map[int64][]threadCacheUpdateData)
+	threadUpdates := *threadUpdatesPtr
+	// Clear the map before use
+	for k := range threadUpdates {
+		delete(threadUpdates, k)
+	}
+
+	defer func() {
+		// Clear and return threadUpdates to pool
+		for k := range threadUpdates {
+			delete(threadUpdates, k)
+		}
+		threadUpdatesPool.Put(threadUpdatesPtr)
+	}()
 
 	for _, data := range replyData {
 		if data.threadRoot > 0 {
@@ -901,11 +987,44 @@ func (c *SQ3batch) batchUpdateReplyCounts(groupDBs *GroupDBs, parentCounts map[s
 		return nil
 	}
 
-	// Pre-allocate slices to avoid repeated memory allocations
+	// Get pooled slices to avoid repeated memory allocations
 	parentCount := len(parentCounts)
-	caseWhenClauses := make([]string, 0, parentCount)
-	messageIDs := make([]string, 0, parentCount)
-	args := make([]interface{}, 0, parentCount*3) // messageID, count, messageID for WHERE clause
+
+	clausesPtr := stringSlicePool.Get().(*[]string)
+	caseWhenClauses := *clausesPtr
+	if cap(caseWhenClauses) < parentCount {
+		caseWhenClauses = make([]string, 0, MaxBatchSize)
+	}
+	caseWhenClauses = caseWhenClauses[:0]
+
+	msgIDsPtr := stringSlicePool.Get().(*[]string)
+	messageIDs := *msgIDsPtr
+	if cap(messageIDs) < parentCount {
+		messageIDs = make([]string, 0, MaxBatchSize)
+	}
+	messageIDs = messageIDs[:0]
+
+	argsPtr := interfaceSlicePool.Get().(*[]interface{})
+	args := *argsPtr
+	if cap(args) < parentCount*3 {
+		args = make([]interface{}, 0, MaxBatchSize*3)
+	}
+	args = args[:0]
+
+	defer func() {
+		// Reset and return all to pools
+		caseWhenClauses = caseWhenClauses[:0]
+		*clausesPtr = caseWhenClauses
+		stringSlicePool.Put(clausesPtr)
+
+		messageIDs = messageIDs[:0]
+		*msgIDsPtr = messageIDs
+		stringSlicePool.Put(msgIDsPtr)
+
+		args = args[:0]
+		*argsPtr = args
+		interfaceSlicePool.Put(argsPtr)
+	}()
 
 	for messageID, count := range parentCounts {
 		caseWhenClauses = append(caseWhenClauses, "WHEN message_id = ? THEN reply_count + ?")
@@ -1191,7 +1310,22 @@ func (o *BatchOrchestrator) StartOrchestrator() {
 func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 
 	o.batch.GMux.RLock()
-	tasksToProcess := make([]*BatchTasks, 0, LimitBatchParallel) // Pre-allocate with max capacity
+
+	// Get pooled slice for tasks to process
+	tasksPtr := batchTasksSlicePool.Get().(*[]*BatchTasks)
+	tasksToProcess := *tasksPtr
+	if cap(tasksToProcess) < LimitBatchParallel {
+		tasksToProcess = make([]*BatchTasks, 0, LimitBatchParallel)
+	}
+	tasksToProcess = tasksToProcess[:0]
+
+	defer func() {
+		// Reset and return to pool
+		tasksToProcess = tasksToProcess[:0]
+		*tasksPtr = tasksToProcess
+		batchTasksSlicePool.Put(tasksPtr)
+	}()
+
 	for _, task := range o.batch.TasksMap {
 		task.Mux.RLock()
 		if task.BATCHprocessing || len(task.BATCHchan) < MaxBatchSize {
