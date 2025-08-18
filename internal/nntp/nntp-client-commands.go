@@ -542,6 +542,8 @@ var ErrOutOfRange error = fmt.Errorf("end range exceeds group last article numbe
 
 // XHdrStreamed performs XHDR command and streams results line by line through a channel
 func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, resultChan chan<- *HeaderLine) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	if !c.connected {
 		close(resultChan)
@@ -569,7 +571,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 	if end > 0 {
 		id, err = c.textConn.Cmd("XHDR %s %d-%d", field, start, end)
 	} else {
-		id, err = c.textConn.Cmd("XHDR %s %d", field, start)
+		id, err = c.textConn.Cmd("XHDR %s %d-%d", field, start, start)
 	}
 	if err != nil {
 		close(resultChan)
@@ -577,17 +579,17 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 	}
 
 	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id) // Always clean up response state
+
 	code, message, err := c.textConn.ReadCodeLine(221)
 	if err != nil {
-		c.textConn.EndResponse(id)
 		close(resultChan)
 		return fmt.Errorf("failed to read XHDR response: %w", err)
 	}
 
 	if code != 221 {
-		c.textConn.EndResponse(id)
 		close(resultChan)
-		return fmt.Errorf("XHDR failed: %d %s", code, message)
+		return fmt.Errorf("XHDR failed: ng: '%s' %d %s", groupName, code, message)
 	}
 
 	// Read multiline response line by line and send to channel immediately
@@ -601,6 +603,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 
 		line, err := c.textConn.ReadLine()
 		if err != nil {
+			log.Printf("[ERROR] XHdrStreamed read error ng: '%s' err='%v'", groupName, err)
 			// EOF or error, finish streaming
 			break
 		}
@@ -614,6 +617,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 		header, parseErr := c.parseHeaderLine(line)
 		if parseErr != nil {
 			lineCount++
+			log.Printf("[ERROR] XHdrStreamed parse error ng: '%s' err='%v'", groupName, parseErr)
 			continue // Skip malformed lines
 		}
 
@@ -623,16 +627,14 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 			// Successfully sent
 		default:
 			// Channel is full or closed, abandon remaining results
-			c.textConn.EndResponse(id)
 			close(resultChan)
-			return fmt.Errorf("error in XHdrStreamed: resultChan full or closed")
+			return fmt.Errorf("error in XHdrStreamed: ng: '%s' resultChan full or closed", groupName)
 		}
 
 		lineCount++
 	}
 
-	// Clean up and close channel
-	c.textConn.EndResponse(id)
+	// Close channel
 	close(resultChan)
 	return nil
 }
