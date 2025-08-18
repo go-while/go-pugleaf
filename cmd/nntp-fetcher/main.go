@@ -296,7 +296,7 @@ func main() {
 						//log.Printf("[FETCHER]: Newsgroup not found: '%s'", *ng)
 						continue
 					}
-					log.Printf("[FETCHER]: Error in select ng='%s' groupInfo='%#v' err='%v'", *ng, err, groupInfo)
+					log.Printf("[FETCHER]: Error in select ng='%s' groupInfo='%#v' err='%v'", *ng, groupInfo, err)
 					continue
 				}
 				//log.Printf("[FETCHER]: ng '%s', REMOTE groupInfo: %#v", *ng, groupInfo),
@@ -380,7 +380,7 @@ func main() {
 				groupInfo.Last = end
 				processor.Batch.TodoQ <- groupInfo
 				log.Printf("[FETCHER]: TodoQ '%s' toFetch=%d start=%d end=%d", *ng, toFetch, start, end)
-				time.Sleep(time.Second * 2)
+				//time.Sleep(time.Second * 2)
 			}
 		}(i, &wgCheck, progressDB)
 	} // end for scan group worker
