@@ -127,7 +127,7 @@ func (p *Pool) GetArticle(messageID *string) (*models.Article, error) {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
 
-	result, err := client.GetArticle(messageID)
+	article, err := client.GetArticle(messageID)
 	if err != nil {
 		if err != ErrArticleNotFound && err != ErrArticleRemoved {
 			p.CloseConn(client, true) // Close the connection on error
@@ -138,7 +138,7 @@ func (p *Pool) GetArticle(messageID *string) (*models.Article, error) {
 
 	// Only put back if no error occurred
 	p.Put(client)
-	return result, nil
+	return article, nil
 }
 
 func (p *Pool) SelectGroup(group string) (*GroupInfo, error) {
