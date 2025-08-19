@@ -81,7 +81,7 @@ func (c *BackendConn) GetArticle(messageID *string) (*models.Article, error) {
 
 	code, message, err := c.textConn.ReadCodeLine(ArticleFollows)
 	if err != nil {
-		c.textConn.Close() // Close connection on error
+		c.Pool.CloseConn(c, true) // Close connection on error
 		return nil, fmt.Errorf("failed to read ARTICLE response: %w", err)
 	}
 
