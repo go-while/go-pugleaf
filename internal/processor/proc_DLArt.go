@@ -131,7 +131,7 @@ doWork:
 			notifyChan <- queued
 		}
 	}()
-	var dups, lastDups, gots, lastGots, errs, lastErrs int64
+	var dups, lastDups, gots, lastGots, notf, lastNotf, errs, lastErrs int64
 	aliveCheck := 5 * time.Second
 	ticker := time.NewTicker(100 * time.Millisecond)
 	startTime := time.Now()
@@ -153,22 +153,23 @@ forProcessing:
 			mux.Lock()
 			dead := runs >= LOOPS_PER_GROUPS
 			mux.Unlock()
-			currentTotal := gots + errs + dups
+			currentTotal := gots + errs + dups + notf
 			//log.Printf("DEBUG-TICKER: ng '%s' processed=%d toFetch=%d dead=%t (dups=%d gots=%d errs=%d)", newsgroup, currentTotal, toFetch, dead, dups, gots, errs)
 			if dead || (queued > 0 && currentTotal == queued) || (queued == -1 && currentTotal >= toFetch) {
-				log.Printf("OK-DA: ng: '%s' [ %d articles downloaded ] (dups: %d, gots: %d, errs: %d, queued: %d) dead=%t", newsgroup, currentTotal, dups, gots, errs, queued, dead)
+				log.Printf("OK-DA: ng: '%s' [ %d articles processed ] (dups: %d, gots: %d, notf: %d, errs: %d, queued: %d) dead=%t", newsgroup, currentTotal, dups, gots, notf, errs, queued, dead)
 				break forProcessing // Exit processing loop if all items are processed
 			}
-			if dups > lastDups || gots > lastGots || errs > lastErrs {
+			if dups > lastDups || gots > lastGots || notf > lastNotf || errs > lastErrs {
 				nextCheck = time.Now().Add(aliveCheck) // Reset last check time
 				lastDups = dups
 				lastGots = gots
+				lastNotf = notf
 				lastErrs = errs
 				deathCounter = 0 // Reset death counter on progress
 			}
 			if nextCheck.Before(time.Now()) {
 				// If we haven't made progress in N seconds, log a warning
-				log.Printf("DownloadArticles: group '%s' Stuck? %d articles processed (%d dups, %d gots, %d errs, queued: %d) (since Start=%v)", newsgroup, dups+gots+errs, dups, gots, errs, queued, time.Since(startTime))
+				log.Printf("DownloadArticles: group '%s' Stuck? %d articles processed (%d dups, %d gots, %d notf, %d errs, queued: %d) (since Start=%v)", newsgroup, dups+gots+errs, dups, gots, notf, errs, queued, time.Since(startTime))
 				nextCheck = time.Now().Add(aliveCheck) // Reset last check time
 				deathCounter++
 			}
@@ -181,10 +182,14 @@ forProcessing:
 			//log.Printf("DEBUG-RETURN: received item: Error=%v, Article=%v", item != nil && item.Error != nil, item != nil && item.Article != nil)
 			if item == nil || item.Error != nil || item.Article == nil {
 				if item != nil {
-					if item.Error == errIsDuplicateError {
+					switch item.Error {
+					case errIsDuplicateError:
 						dups++
-						//log.Printf("DEBUG-RETURN: counted duplicate, dups now %d", dups)
-					} else {
+					case nntp.ErrArticleNotFound:
+						notf++
+					case nntp.ErrArticleRemoved:
+						notf++
+					default:
 						log.Printf("DownloadArticles: group '%s' Error fetching article %s: %v .. continue", newsgroup, *item.MessageID, item.Error)
 						errs++
 					}
