@@ -18,7 +18,7 @@ var BatchInterval = 1 * time.Second
 var MaxBatchSize int = 100
 
 // don't process more than N groups in parallel: better have some cpu & mem when importing hard!
-var LimitBatchThreads = 16
+var MaxBatchThreads = 16
 
 var InitialBatchChannelSize = MaxBatchSize // @AI: DO NOT CHANGE THIS!!!! per group cache channel size. should be less or equal to MaxBatch in processor aka MaxReadLinesXover in nntp-client-commands
 
@@ -283,8 +283,8 @@ func (c *SQ3batch) CheckNoMoreWorkInMaps() bool {
 	return true
 }
 
-var QueryChan = make(chan struct{}, LimitBatchThreads)
-var LimitChan = make(chan struct{}, LimitBatchThreads)
+var QueryChan = make(chan struct{}, MaxBatchThreads)
+var LimitChan = make(chan struct{}, MaxBatchThreads)
 var LPending = make(chan struct{}, 1)
 
 func LockQueryChan() {

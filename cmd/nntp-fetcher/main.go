@@ -60,6 +60,7 @@ func main() {
 		ssl                     = flag.Bool("ssl", true, "Use SSL/TLS connection")
 		timeout                 = flag.Int("timeout", 30, "Connection timeout in seconds")
 		testMsg                 = flag.String("message-id", "", "Test message ID to fetch (optional)")
+		maxBatchThreads         = flag.Int("max-batch-threads", 16, "Limit how many newsgroup batches will be processed concurrently (default: 16)")
 		maxBatch                = flag.Int("max-batch", 128, "Maximum number of articles to process in a batch (recommended: 100)")
 		maxLoops                = flag.Int("max-loops", 1, "Loop a group this many times and fetch `-max-batch N` every loop")
 		ignoreInitialTinyGroups = flag.Int64("ignore-initial-tiny-groups", 0, "If > 0: initial fetch ignores tiny groups with fewer articles than this (default: 0)")
@@ -111,7 +112,7 @@ func main() {
 	}
 
 	database.InitialBatchChannelSize = *maxBatch * *maxLoops
-	database.LimitBatchThreads = *downloadMaxPar
+	database.MaxBatchThreads = *maxBatchThreads
 	database.MaxBatchSize = *maxBatch
 	nntp.MaxReadLinesXover = int64(*maxBatch)
 	processor.LocalHostnamePath = *hostnamePath
