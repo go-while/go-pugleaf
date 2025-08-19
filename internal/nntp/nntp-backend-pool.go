@@ -131,6 +131,7 @@ func (p *Pool) GetArticle(messageID *string) (*models.Article, error) {
 	if err != nil {
 		if err == ErrArticleNotFound || err == ErrArticleRemoved {
 			p.Put(client)
+			return nil, err
 		} else {
 			p.CloseConn(client, true) // Close the connection on error
 			log.Printf("[NNTP-POOL] Failed to get article %s: %v", *messageID, err)
