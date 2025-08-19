@@ -50,10 +50,10 @@ var (
 
 	// Global Batch Queue
 	Batch = &BatchQueue{
-		Check:  make(chan *string, DownloadMaxPar),         // check newsgroups
-		TodoQ:  make(chan *nntp.GroupInfo, DownloadMaxPar), // todo newsgroups
-		Queue:  make(chan *batchItem, MaxBatch),            // Channel to hold batch items
-		Return: make(chan *batchItem, MaxBatch),            // Channel to hold batch items
+		Check:       make(chan *string, DownloadMaxPar),         // check newsgroups
+		TodoQ:       make(chan *nntp.GroupInfo, DownloadMaxPar), // todo newsgroups
+		GetQ:        make(chan *BatchItem, DownloadMaxPar),      // todo newsgroups
+		GroupQueues: make(map[string]*GroupBatch),               // per-newsgroup queues
 	}
 
 	// Do NOT change this here! these are needed for runtime !
@@ -210,6 +210,20 @@ func (proc *Processor) GetHistoryStats() history.HistoryStats {
 // Close gracefully shuts down the processor and history system
 func (proc *Processor) Close() error {
 	log.Printf("Shutting down processor...")
+
+	// Stop all group workers first
+	if Batch != nil {
+		Batch.Mutex.Lock()
+		if Batch.GroupQueues != nil {
+			for newsgroup, groupBatch := range Batch.GroupQueues {
+				log.Printf("Stopping worker for newsgroup: %s", newsgroup)
+				groupBatch.stopWorker()
+			}
+			// Clear the map
+			Batch.GroupQueues = make(map[string]*GroupBatch)
+		}
+		Batch.Mutex.Unlock()
+	}
 
 	// Wait for all batch processing to complete before closing
 	proc.WaitForBatchCompletion()

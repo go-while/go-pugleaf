@@ -35,8 +35,8 @@ func (proc *Processor) DownloadArticlesViaOverview(groupName string) error {
 		return fmt.Errorf("DownloadArticlesVO: Failed to select group '%s': %v", groupName, err)
 	}
 	log.Printf("proc.Pool.Backend=%#v", proc.Pool.Backend)
-	batchQueue := make(chan *batchItem, len(undl))
-	returnChan := make(chan *batchItem, len(undl))
+	batchQueue := make(chan *BatchItem, len(undl))
+	returnChan := make(chan *BatchItem, len(undl))
 	// launch goroutines to fetch articles in parallel
 	runthis := int(float32(proc.Pool.Backend.MaxConns) * 0.75) // Use 75% of max connections for fetching articles
 	if runthis < 1 {
@@ -69,8 +69,8 @@ func (proc *Processor) DownloadArticlesViaOverview(groupName string) error {
 	} // end for runthis anonymous go routines
 
 	// for every undownloaded overview entry, create a batch item
-	//batchMap := make(map[int64]*batchItem, len(undl))
-	var batchList []*batchItem
+	//batchMap := make(map[int64]*BatchItem, len(undl))
+	var batchList []*BatchItem
 	for _, ov := range undl {
 		msgID := ov.MessageID
 		num := ov.ArticleNum
@@ -91,7 +91,7 @@ func (proc *Processor) DownloadArticlesViaOverview(groupName string) error {
 				continue
 			}
 		*/
-		item := &batchItem{
+		item := &BatchItem{
 			MessageID:  &msgID,
 			ArticleNum: num,
 			GroupName:  &groupName,

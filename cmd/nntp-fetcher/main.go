@@ -411,19 +411,19 @@ func main() {
 		// fire up async goroutines to fetch articles
 		go func(worker int) {
 			//log.Printf("DownloadArticles: Worker %d group '%s' start", worker, groupName)
-			for item := range processor.Batch.Queue {
+			for item := range processor.Batch.GetQ {
 				//log.Printf("DownloadArticles: Worker %d processing group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
 				art, err := proc.Pool.GetArticle(item.MessageID)
 				if err != nil {
 					log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle '%s' err='%v' .. continue", *item.MessageID, err)
 					item.Error = err // Set error on item
 					//log.Printf("DEBUG-SEND: Worker %d sending ERROR item to Return channel", worker)
-					processor.Batch.Return <- item // Send failed item back
+					item.Return <- item // Send failed item back
 					continue
 				}
 				item.Article = art // set pointer
 				//log.Printf("DEBUG-SEND: Worker %d sending SUCCESS item to Return channel", worker)
-				processor.Batch.Return <- item // Send back the successfully downloaded article
+				item.Return <- item // Send back the successfully downloaded article
 				mux.Lock()
 				downloaded++
 				mux.Unlock()
