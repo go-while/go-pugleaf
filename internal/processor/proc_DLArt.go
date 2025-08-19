@@ -13,7 +13,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/nntp"
 )
 
-var LOOPS_PER_GROUPS = 4
+var LOOPS_PER_GROUPS = 1
 
 type BatchQueue struct {
 	Mutex  sync.RWMutex
@@ -132,7 +132,7 @@ doWork:
 		}
 	}()
 	var dups, lastDups, gots, lastGots, errs, lastErrs int64
-	aliveCheck := 10 * time.Second
+	aliveCheck := 5 * time.Second
 	ticker := time.NewTicker(100 * time.Millisecond)
 	startTime := time.Now()
 	nextCheck := startTime.Add(aliveCheck)
@@ -168,11 +168,11 @@ forProcessing:
 			}
 			if nextCheck.Before(time.Now()) {
 				// If we haven't made progress in N seconds, log a warning
-				log.Printf("DownloadArticles: group '%s' Stuck? %d articles processed (%d dups, %d gots, %d errs) in last 10 seconds (since Start=%v)", newsgroup, dups+gots+errs, dups, gots, errs, time.Since(startTime))
+				log.Printf("DownloadArticles: group '%s' Stuck? %d articles processed (%d dups, %d gots, %d errs, queued: %d) (since Start=%v)", newsgroup, dups+gots+errs, dups, gots, errs, queued, time.Since(startTime))
 				nextCheck = time.Now().Add(aliveCheck) // Reset last check time
 				deathCounter++
 			}
-			if deathCounter > 6 { // If we are stuck for too long
+			if deathCounter > 3 { // If we are stuck for too long
 				log.Printf("DownloadArticles: group '%s' Timeout... stopping import deathCounter=%d", newsgroup, deathCounter)
 				return fmt.Errorf("DownloadArticles: group '%s' Timeout... %d articles processed (%d dups, %d got, %d errs)", newsgroup, dups+gots+errs, dups, gots, errs)
 			}
