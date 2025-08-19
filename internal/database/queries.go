@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -2042,47 +2043,72 @@ func (db *Database) DeleteUser(userID int64) error {
 func (db *Database) ResetAllNewsgroupData() error {
 	log.Printf("ResetAllNewsgroupData: Starting complete reset of all newsgroup data...")
 
-	// Get all newsgroups from main database
-	newsgroups, err := db.MainDBGetAllNewsgroups()
+	// Step 1: Reset all counters in main database with a single efficient UPDATE
+	log.Printf("ResetAllNewsgroupData: Resetting all newsgroup counters in main database...")
+	result, err := db.mainDB.Exec(`UPDATE newsgroups SET
+		message_count = 0,
+		last_article = 0,
+		high_water = 0,
+		low_water = 1,
+		updated_at = 0`)
 	if err != nil {
-		return fmt.Errorf("failed to get newsgroups: %w", err)
+		return fmt.Errorf("failed to reset all newsgroup counters: %w", err)
 	}
 
-	log.Printf("ResetAllNewsgroupData: Found %d newsgroups to reset", len(newsgroups))
+	rowsAffected, _ := result.RowsAffected()
+	log.Printf("ResetAllNewsgroupData: Reset counters for %d newsgroups in main database", rowsAffected)
+
+	// Step 2: Only process actual newsgroup databases that exist
+	// Check data directory for existing newsgroup databases
+	dataDir := db.dbconfig.DataDir
+	if dataDir == "" {
+		dataDir = "./data"
+	}
+
+	groupsDir := dataDir + "/groups"
+	entries, err := os.ReadDir(groupsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("ResetAllNewsgroupData: No groups directory found at %s, only main database counters reset", groupsDir)
+			return nil
+		}
+		return fmt.Errorf("failed to read groups directory %s: %w", groupsDir, err)
+	}
 
 	var resetCount int
 	var errorCount int
 
-	// Reset each newsgroup
-	for _, newsgroup := range newsgroups {
-		log.Printf("ResetAllNewsgroupData: Resetting newsgroup '%s'...", newsgroup.Name)
+	log.Printf("ResetAllNewsgroupData: Found %d newsgroup databases to reset", len(entries))
 
-		// Reset the group database tables
-		err := db.ResetNewsgroupData(newsgroup.Name)
-		if err != nil {
-			log.Printf("ResetAllNewsgroupData: Error resetting newsgroup '%s': %v", newsgroup.Name, err)
-			errorCount++
+	// Process only existing newsgroup databases
+	for _, entry := range entries {
+		if !entry.IsDir() {
 			continue
 		}
 
-		// Reset counters in main database
-		err = db.ResetNewsgroupCounters(newsgroup.Name)
+		newsgroupName := entry.Name()
+		log.Printf("ResetAllNewsgroupData: Resetting database for newsgroup '%s'...", newsgroupName)
+
+		// Reset the group database tables
+		err := db.ResetNewsgroupData(newsgroupName)
 		if err != nil {
-			log.Printf("ResetAllNewsgroupData: Error resetting counters for newsgroup '%s': %v", newsgroup.Name, err)
+			log.Printf("ResetAllNewsgroupData: Error resetting newsgroup '%s': %v", newsgroupName, err)
 			errorCount++
 			continue
 		}
 
 		resetCount++
-		log.Printf("ResetAllNewsgroupData: Successfully reset newsgroup '%s'", newsgroup.Name)
+		if resetCount%1000 == 0 {
+			log.Printf("ResetAllNewsgroupData: Progress - reset %d newsgroup databases", resetCount)
+		}
 	}
 
 	if errorCount > 0 {
-		log.Printf("ResetAllNewsgroupData: Completed with %d successful resets and %d errors", resetCount, errorCount)
-		return fmt.Errorf("reset completed with %d errors out of %d newsgroups", errorCount, len(newsgroups))
+		log.Printf("ResetAllNewsgroupData: Completed with %d successful database resets and %d errors", resetCount, errorCount)
+		return fmt.Errorf("reset completed with %d errors out of %d newsgroup databases", errorCount, len(entries))
 	}
 
-	log.Printf("ResetAllNewsgroupData: Successfully reset all %d newsgroups", resetCount)
+	log.Printf("ResetAllNewsgroupData: Successfully reset %d newsgroup databases and %d main database entries", resetCount, rowsAffected)
 	return nil
 }
 

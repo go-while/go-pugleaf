@@ -99,10 +99,11 @@ doWork:
 	}
 	//log.Printf("DownloadArticles: XHDR is fetching %d msgIds ng: '%s' (%d to %d)", len(messageIDs), newsgroup, start, end)
 	releaseChan := make(chan struct{}, 1)
+	notifyChan := make(chan int64, 1)
 	go func() {
 		// launch to background and feed queue
 		//log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", toFetch, newsgroup, proc.Pool.Backend.MaxConns)
-		exists, queued := 0, 0
+		var exists, queued int64
 		for msgID := range xhdrChan {
 			//log.Printf("DownloadArticles: Checking if article '%s' exists in group '%s'", msgID.Value, newsgroup)
 			if groupDBs.ExistsMsgIdInArticlesDB(msgID.Value) {
@@ -122,10 +123,12 @@ doWork:
 			Batch.Queue <- item // send to fetcher/main.go: for item := range processor.Batch.Queue
 			queued++
 			//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", num, msgID, groupName)
-		} // end for undl
+		} // end for xhdrChan
 		log.Printf("DownloadArticles: XHdr closed, finished feeding batch queue %d articles for group '%s' (existing: %d) total=%d", queued, newsgroup, exists, queued+exists)
 		if queued == 0 {
 			releaseChan <- struct{}{}
+		} else {
+			notifyChan <- queued
 		}
 	}()
 	var dups, lastDups, gots, lastGots, errs, lastErrs int64
@@ -135,10 +138,13 @@ doWork:
 	nextCheck := startTime.Add(aliveCheck)
 	deathCounter := 0 // Counter to track if we are stuck
 	bulkmode := true
+	var queued int64 = -1
 	// Start processing loop
 forProcessing:
 	for {
 		select {
+		case gotQueued := <-notifyChan:
+			queued = gotQueued
 		case <-releaseChan:
 			log.Printf("DownloadArticles: releaseChan triggered ng: '%s'", newsgroup)
 			break forProcessing
@@ -149,8 +155,8 @@ forProcessing:
 			mux.Unlock()
 			currentTotal := gots + errs + dups
 			//log.Printf("DEBUG-TICKER: ng '%s' processed=%d toFetch=%d dead=%t (dups=%d gots=%d errs=%d)", newsgroup, currentTotal, toFetch, dead, dups, gots, errs)
-			if dead || currentTotal >= toFetch {
-				log.Printf("OK-DA: ng: '%s' [ %d articles processed ] (dups: %d, gots: %d, errs: %d) dead=%t", newsgroup, currentTotal, dups, gots, errs, dead)
+			if dead || (queued > 0 && currentTotal == queued) || (queued == -1 && currentTotal >= toFetch) {
+				log.Printf("OK-DA: ng: '%s' [ %d articles downloaded ] (dups: %d, gots: %d, errs: %d, queued: %d) dead=%t", newsgroup, currentTotal, dups, gots, errs, queued, dead)
 				break forProcessing // Exit processing loop if all items are processed
 			}
 			if dups > lastDups || gots > lastGots || errs > lastErrs {

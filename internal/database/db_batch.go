@@ -14,12 +14,11 @@ import (
 )
 
 // SQLite safety limits: split large batches to avoid parameter/length limits
-// SQLite 3.34.1+ supports up to 32766 (vs 999 in older versions)
 var BatchInterval = 1 * time.Second
 var MaxBatchSize int = 100
 
 // don't process more than N groups in parallel: better have some cpu & mem when importing hard!
-var LimitBatchParallel = 16
+var LimitBatchThreads = 16
 
 var InitialBatchChannelSize = MaxBatchSize // @AI: DO NOT CHANGE THIS!!!! per group cache channel size. should be less or equal to MaxBatch in processor aka MaxReadLinesXover in nntp-client-commands
 
@@ -87,13 +86,6 @@ var threadUpdatesPool = sync.Pool{ // *map[int64][]threadCacheUpdateData for thr
 	New: func() any {
 		m := make(map[int64][]threadCacheUpdateData, MaxBatchSize/4) // assume fewer unique thread roots
 		return &m
-	},
-}
-
-var batchTasksSlicePool = sync.Pool{ // *[]*BatchTasks for orchestrator
-	New: func() any {
-		s := make([]*BatchTasks, 0, LimitBatchParallel)
-		return &s
 	},
 }
 
@@ -291,8 +283,8 @@ func (c *SQ3batch) CheckNoMoreWorkInMaps() bool {
 	return true
 }
 
-var QueryChan = make(chan struct{}, LimitBatchParallel)
-var LimitChan = make(chan struct{}, LimitBatchParallel)
+var QueryChan = make(chan struct{}, LimitBatchThreads)
+var LimitChan = make(chan struct{}, LimitBatchThreads)
 var LPending = make(chan struct{}, 1)
 
 func LockQueryChan() {
@@ -342,7 +334,8 @@ func (c *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup)
 	// Get a snapshot of tasks to avoid holding the lock too long
 	//log.Printf("[BATCH-DEBUG] processAllPendingBatches: acquiring GMux.RLock to get tasks snapshot")
 	c.GMux.RLock()
-	tasksToProcess := make([]*BatchTasks, 0, len(c.TasksMap)) // Pre-allocate with capacity
+	//tasksToProcess := make([]*BatchTasks, 0, len(c.TasksMap)) // Pre-allocate with capacity
+	tasksToProcess := make(chan *BatchTasks, len(c.TasksMap))
 	queuedItems := 0
 	for _, task := range c.TasksMap {
 		task.Mux.RLock()
@@ -353,14 +346,17 @@ func (c *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup)
 		task.Mux.RUnlock()
 		queued := len(task.BATCHchan)
 		if queued > 0 { // process only below threshold
-			tasksToProcess = append(tasksToProcess, task)
+			//tasksToProcess = append(tasksToProcess, task)
+			tasksToProcess <- task // Send the task to the channel
 		}
 		queuedItems += queued
 	}
 	c.GMux.RUnlock()
+	close(tasksToProcess)
 	if len(tasksToProcess) == 0 && queuedItems == 0 {
 		return
 	}
+
 	//log.Printf("[BATCH-DEBUG] processAllPendingBatches: released GMux.RLock, found %d tasks with work (%d total queued items)", len(tasksToProcess), queuedItems)
 
 	//start := time.Now()
@@ -372,7 +368,7 @@ func (c *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup)
 	//doWork:
 	//log.Printf("[BATCH-DEBUG] processAllPendingBatches: entering doWork loop, toProcess=%d", toProcess)
 	//startLoop := time.Now() // Reset start time for each iteration
-	for _, task := range tasksToProcess {
+	for task := range tasksToProcess {
 		if len(task.BATCHchan) == 0 {
 			toProcess--
 			//log.Printf("[BATCH-DEBUG] processAllPendingBatches: task '%s' has empty channel, marking as done", *task.Newsgroup)
@@ -1310,22 +1306,7 @@ func (o *BatchOrchestrator) StartOrchestrator() {
 func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 
 	o.batch.GMux.RLock()
-
-	// Get pooled slice for tasks to process
-	tasksPtr := batchTasksSlicePool.Get().(*[]*BatchTasks)
-	tasksToProcess := *tasksPtr
-	if cap(tasksToProcess) < LimitBatchParallel {
-		tasksToProcess = make([]*BatchTasks, 0, LimitBatchParallel)
-	}
-	tasksToProcess = tasksToProcess[:0]
-
-	defer func() {
-		// Reset and return to pool
-		tasksToProcess = tasksToProcess[:0]
-		*tasksPtr = tasksToProcess
-		batchTasksSlicePool.Put(tasksPtr)
-	}()
-
+	tasksToProcess := make(chan *BatchTasks, len(o.batch.TasksMap)) // Use buffered channel to avoid blocking
 	for _, task := range o.batch.TasksMap {
 		task.Mux.RLock()
 		if task.BATCHprocessing || len(task.BATCHchan) < MaxBatchSize {
@@ -1333,23 +1314,19 @@ func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 			continue
 		}
 		task.Mux.RUnlock()
-		tasksToProcess = append(tasksToProcess, task)
-		if len(tasksToProcess) >= LimitBatchParallel {
-			break
-		}
+		tasksToProcess <- task
 	}
 	o.batch.GMux.RUnlock()
-
+	close(tasksToProcess)
 	if len(tasksToProcess) == 0 {
 		return false // No tasks to process
 	}
-
 	//log.Printf("[ORCHESTRATOR] Checking %d groups for threshold breaches", len(tasksToProcess))
 
 	totalQueued := 0
 	willSleep := false
 	batchCount := 0
-	for _, task := range tasksToProcess {
+	for task := range tasksToProcess {
 		batchCount = len(task.BATCHchan)
 		if batchCount == 0 {
 			continue // skip empty channels
@@ -1378,7 +1355,7 @@ func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 				task.Mux.Unlock()
 				return true
 			} else {
-				log.Printf("[ORCHESTRATOR] Threshold exceeded for group '%s': %d articles (threshold: %d)",
+				log.Printf("[BATCH-BIG] Threshold exceeded for group '%s': %d articles (threshold: %d)",
 					*task.Newsgroup, batchCount, MaxBatchSize)
 				go o.batch.processNewsgroupBatch(task)
 			}
@@ -1432,9 +1409,5 @@ func (sq *SQ3batch) BatchDivider() {
 		}
 		tasks.Mux.Unlock()
 		tasks.BATCHchan <- task
-		//TaskChans[newsgroupPtr] = tasks.BATCHchan
-		//} else {
-		//	TaskChans[newsgroupPtr] <- task
-		//}
 	}
 }
