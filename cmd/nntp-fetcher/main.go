@@ -412,22 +412,20 @@ func main() {
 		go func(worker int) {
 			//log.Printf("DownloadArticles: Worker %d group '%s' start", worker, groupName)
 			for item := range processor.Batch.GetQ {
-				//log.Printf("DownloadArticles: Worker %d processing group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
+				//log.Printf("DownloadArticles: Worker %d GetArticle group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
 				art, err := proc.Pool.GetArticle(item.MessageID)
-				if err != nil {
+				if err != nil || art == nil {
 					log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle '%s' err='%v' .. continue", *item.MessageID, err)
-					item.Error = err // Set error on item
-					//log.Printf("DEBUG-SEND: Worker %d sending ERROR item to Return channel", worker)
-					item.Return <- item // Send failed item back
+					item.Error = err     // Set error on item
+					item.ReturnQ <- item // Send failed item back
 					continue
 				}
-				item.Article = art // set pointer
-				//log.Printf("DEBUG-SEND: Worker %d sending SUCCESS item to Return channel", worker)
-				item.Return <- item // Send back the successfully downloaded article
+				item.Article = art   // set pointer
+				item.ReturnQ <- item // Send back the successfully downloaded article
 				mux.Lock()
 				downloaded++
 				mux.Unlock()
-				//log.Printf("DownloadArticles: Worker %d downloaded group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
+				//log.Printf("DownloadArticles: Worker %d GetArticle OK group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
 			} // end for item
 		}(i)
 	} // end for runthis

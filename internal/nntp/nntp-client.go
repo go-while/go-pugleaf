@@ -17,27 +17,27 @@ import (
 
 const (
 	// NNTPWelcomeCodeMin is the minimum welcome code for NNTP servers.
-	NNTPWelcomeCodeMin = 200
+	NNTPWelcomeCodeMin int = 200
 	// NNTPWelcomeCodeMax is the maximum welcome code for NNTP servers.
-	NNTPWelcomeCodeMax = 201
+	NNTPWelcomeCodeMax int = 201
 	// NNTPMoreInfoCode indicates more information is required (e.g., password).
-	NNTPMoreInfoCode = 381
+	NNTPMoreInfoCode int = 381
 	// NNTPAuthSuccess indicates successful authentication.
-	NNTPAuthSuccess = 281
+	NNTPAuthSuccess int = 281
 
 	// ArticleFollows indicates that an article follows (multi-line).
-	ArticleFollows = 220
+	ArticleFollows int = 220
 	// HeadFollows indicates that the head of an article follows (multi-line).
-	HeadFollows = 221
+	HeadFollows int = 221
 	// BodyFollows indicates that the body of an article follows (multi-line).
-	BodyFollows = 222
+	BodyFollows int = 222
 	// ArticleExists indicates that the article exists (no body follows).
-	ArticleExists = 223
+	ArticleExists int = 223
 
 	// NoSuchArticle indicates that no such article exists.
-	NoSuchArticle = 430
+	NoSuchArticle int = 430
 	// DMCA indicates a DMCA takedown.
-	DMCA = 451
+	DMCA int = 451
 
 	// DefaultConnExpire is the default connection expiration duration.
 	DefaultConnExpire = 25 * time.Second

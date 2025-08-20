@@ -63,10 +63,16 @@ func ComputeMessageIDHash(messageID string) string {
 func CheckMessageIdFormat(messageID string) bool {
 	// Check if the message ID is a valid format
 	if messageID == "" {
+		log.Printf("[SPAM:HDR] Invalid message ID: empty string")
 		return false
 	}
 	// A simple check could be to see if it contains '@' and '.'
-	if len(messageID) < 5 || !containsAtAndDot(messageID) {
+	if len(messageID) < 5 || len(messageID) > 255 || !containsAtAndDot(messageID) {
+		log.Printf("[SPAM:HDR] Invalid message ID length or format: '%s'", messageID)
+		return false
+	}
+	if messageID[0] != '<' || messageID[len(messageID)-1] != '>' {
+		log.Printf("[SPAM:HDR] Invalid message ID format: '%s'", messageID)
 		return false
 	}
 	return true

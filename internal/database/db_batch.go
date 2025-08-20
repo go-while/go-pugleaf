@@ -14,7 +14,7 @@ import (
 )
 
 // SQLite safety limits: split large batches to avoid parameter/length limits
-var BatchInterval = 1 * time.Second
+var BatchInterval = 3 * time.Second
 var MaxBatchSize int = 100
 
 // don't process more than N groups in parallel: better have some cpu & mem when importing hard!

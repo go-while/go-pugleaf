@@ -48,11 +48,11 @@ var (
 	RunRSLIGHTImport = false
 	DownloadMaxPar   = 16
 
-	// Global Batch Queue
+	// Global Batch Queue (proc_DLArt.go)
 	Batch = &BatchQueue{
 		Check:       make(chan *string, DownloadMaxPar),         // check newsgroups
 		TodoQ:       make(chan *nntp.GroupInfo, DownloadMaxPar), // todo newsgroups
-		GetQ:        make(chan *BatchItem, DownloadMaxPar),      // todo newsgroups
+		GetQ:        make(chan *BatchItem),                      // get articles, blocking channel
 		GroupQueues: make(map[string]*GroupBatch),               // per-newsgroup queues
 	}
 

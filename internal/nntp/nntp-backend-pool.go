@@ -26,7 +26,9 @@ type Pool struct {
 	totalClosed  int64
 }
 
-var ErrNewsgroupNotFound error
+var ErrNewsgroupNotFound = fmt.Errorf("newsgroup not found")
+var ErrArticleNotFound = fmt.Errorf("article not found")
+var ErrArticleRemoved = fmt.Errorf("article removed (DMCA)")
 
 // NewPool creates a new connection pool
 func NewPool(cfg *BackendConfig) *Pool {
@@ -57,7 +59,7 @@ func (p *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]Overv
 	result, err := client.XOver(group, start, end, enforceLimit)
 	if err != nil {
 		// Close connection on error
-		p.CloseConn(client, true)
+		go p.CloseConn(client, true)
 		return nil, err
 	}
 
@@ -76,7 +78,7 @@ func (p *Pool) XHdr(group string, header string, start, end int64) ([]HeaderLine
 	result, err := client.XHdr(group, header, start, end)
 	if err != nil {
 		// Close connection on error
-		p.CloseConn(client, true)
+		go p.CloseConn(client, true)
 		return nil, err
 	}
 
@@ -128,15 +130,16 @@ func (p *Pool) GetArticle(messageID *string) (*models.Article, error) {
 	}
 
 	article, err := client.GetArticle(messageID)
-	if err != nil {
+	if err != nil || article == nil {
 		if err == ErrArticleNotFound || err == ErrArticleRemoved {
+			log.Printf("[NNTP-POOL] Article '%s' not found err='%v'", *messageID, err)
 			p.Put(client)
 			return nil, err
 		} else {
-			p.CloseConn(client, true) // Close the connection on error
+			go p.CloseConn(client, true) // Close the connection on error
 			log.Printf("[NNTP-POOL] Failed to get article %s: %v", *messageID, err)
 		}
-		return nil, fmt.Errorf("failed to get article: %w", err)
+		return nil, fmt.Errorf("nntp-pool: GetArticle failed to get article: %w", err)
 	}
 
 	// Only put back if no error occurred
@@ -161,7 +164,7 @@ func (p *Pool) SelectGroup(group string) (*GroupInfo, error) {
 	gi, code, err := client.SelectGroup(group)
 	if err != nil && code != 411 {
 		// Close connection on unexpected errors (not "group not found")
-		p.CloseConn(client, true)
+		go p.CloseConn(client, true)
 		return nil, err
 	}
 

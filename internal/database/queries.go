@@ -444,7 +444,7 @@ func (db *Database) GetArticleCountFromMainDB(groupName string) (int64, error) {
 
 // GetLastArticleDate returns the date_sent of the most recent article in the group
 // Returns nil if no articles found
-const query_GetLastArticleDate = `SELECT MAX(date_sent) FROM articles`
+const query_GetLastArticleDate = `SELECT MAX(date_sent) FROM articles WHERE hide = 0`
 
 func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
 	var lastDateStr sql.NullString

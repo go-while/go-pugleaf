@@ -24,16 +24,25 @@ type BatchQueue struct {
 }
 
 type GroupBatch struct {
-	GetQ     chan *BatchItem // global GetQ
-	Queue    chan *BatchItem // Per-group channel to hold batch items to download
-	Return   chan *BatchItem // Per-group channel to hold batch items to return
+	ReturnQ  chan *BatchItem // Per-group channel to hold batch items to return
 	shutdown chan struct{}   // Channel to signal worker shutdown
-	workerWG sync.WaitGroup  // WaitGroup to track worker completion
 }
+
+type BatchItem struct {
+	MessageID  *string
+	ArticleNum int64
+	GroupName  *string
+	Article    *models.Article
+	Error      error
+	ReturnQ    chan *BatchItem // Channel to return processed items
+}
+
+var ErrUpToDate = fmt.Errorf("up2date")
+var errIsDuplicateError = fmt.Errorf("isDup")
 
 // GetOrCreateGroupBatch returns the GroupBatch for a newsgroup, creating it if necessary
 // This now spawns a dedicated worker goroutine for efficient per-group processing
-func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string, pool *nntp.Pool, getQ chan *BatchItem) *GroupBatch {
+func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
 	bq.Mutex.Lock()
 	defer bq.Mutex.Unlock()
 
@@ -44,16 +53,14 @@ func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string, pool *nntp.Pool, g
 	groupBatch, exists := bq.GroupQueues[newsgroup]
 	if !exists {
 		groupBatch = &GroupBatch{
-			GetQ:     getQ,
-			Queue:    make(chan *BatchItem, MaxBatch),
-			Return:   make(chan *BatchItem, MaxBatch),
+			ReturnQ:  make(chan *BatchItem, MaxBatch),
 			shutdown: make(chan struct{}),
 		}
 		bq.GroupQueues[newsgroup] = groupBatch
 
 		// Start dedicated worker for this newsgroup
-		groupBatch.workerWG.Add(1)
-		go groupBatch.startWorker(newsgroup, pool)
+		//groupBatch.workerWG.Add(1)
+		//go groupBatch.startWorker(newsgroup)
 
 		log.Printf("Created new GroupBatch with dedicated worker for newsgroup: %s", newsgroup)
 	}
@@ -82,6 +89,7 @@ func (bq *BatchQueue) CloseGroupBatch(newsgroup string) {
 	}
 }
 
+/*
 // GetAllActiveGroupBatches returns a snapshot of all active group batches
 func (bq *BatchQueue) GetAllActiveGroupBatches() map[string]*GroupBatch {
 	bq.Mutex.RLock()
@@ -100,9 +108,10 @@ func (bq *BatchQueue) GetAllActiveGroupBatches() map[string]*GroupBatch {
 	}
 	return result
 }
-
+*/
+/*
 // startWorker starts a dedicated worker goroutine for this group batch
-func (gb *GroupBatch) startWorker(newsgroup string, pool *nntp.Pool) {
+func (gb *GroupBatch) startWorker(newsgroup string) {
 	defer gb.workerWG.Done()
 	log.Printf("Started dedicated worker for newsgroup: %s", newsgroup)
 
@@ -127,31 +136,12 @@ func (gb *GroupBatch) startWorker(newsgroup string, pool *nntp.Pool) {
 		}
 	}
 }
-
+*/
 // stopWorker signals the worker to stop and waits for it to finish
 func (gb *GroupBatch) stopWorker() {
 	close(gb.shutdown)
-	gb.workerWG.Wait()
+	//gb.workerWG.Wait()
 }
-
-type BatchItem struct {
-	MessageID  *string
-	ArticleNum int64
-	GroupName  *string
-	Article    *models.Article
-	Error      error
-	Return     chan *BatchItem // Channel to return processed items
-}
-
-var ErrUpToDate = fmt.Errorf("up2date")
-var errIsDuplicateError = fmt.Errorf("isDup")
-
-/*
-type selectResult struct {
-	groupInfo *nntp.GroupInfo
-	err       error
-}
-*/
 
 // DownloadArticles fetches full articles and stores them in the articles DB.
 func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroups int64, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64) error {
@@ -162,7 +152,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	}()
 
 	// Get or create the group-specific batch channels
-	groupBatch := Batch.GetOrCreateGroupBatch(newsgroup, proc.Pool, Batch.GetQ)
+	groupBatch := Batch.GetOrCreateGroupBatch(newsgroup)
 	// Note: Don't defer close here - let the main loop manage group batch lifecycle
 
 	// Note: We don't shut down the database here as it's shared with the main application
@@ -190,21 +180,16 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	}
 	//remaining := groupInfo.Last - end
 	//log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d, remaining: %d)", newsgroup, start, end, groupInfo.Last, remaining)
-	runs := 0
 	var mux sync.Mutex
 	var lastGoodEnd int64 = 1
-doWork:
 	toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
 	xhdrChan := make(chan *nntp.HeaderLine, MaxBatch)
 	errChan := make(chan error, 1)
+	log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
 	go func(mux *sync.Mutex) {
-		log.Printf("XHdrStreamed ng: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
 		aerr := proc.Pool.XHdrStreamed(newsgroup, "message-id", start, end, xhdrChan)
 		if aerr != nil {
 			log.Printf("Failed to fetch message IDs for group '%s': err='%v' toFetch=%d", newsgroup, aerr, toFetch)
-			mux.Lock()
-			runs = LOOPS_PER_GROUPS + 1
-			mux.Unlock()
 			errChan <- aerr
 			return
 		}
@@ -220,14 +205,19 @@ doWork:
 		// launch to background and feed queue
 		//log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", toFetch, newsgroup, proc.Pool.Backend.MaxConns)
 		var exists, queued int64
-		for msgID := range xhdrChan {
-			//log.Printf("DownloadArticles: Checking if article '%s' exists in group '%s'", msgID.Value, newsgroup)
-			if groupDBs.ExistsMsgIdInArticlesDB(msgID.Value) {
-				exists++
-				groupBatch.Return <- &BatchItem{Error: errIsDuplicateError}
+		for hdr := range xhdrChan {
+			if !CheckMessageIdFormat(hdr.Value) {
+				log.Printf("[FETCHER]: Invalid message ID format: '%s'", hdr.Value)
+				groupBatch.ReturnQ <- &BatchItem{Error: errIsDuplicateError}
 				continue
 			}
-			msgIdItem := history.MsgIdCache.GetORCreate(msgID.Value)
+			//log.Printf("DownloadArticles: Checking if article '%s' exists in group '%s'", msgID.Value, newsgroup)
+			if groupDBs.ExistsMsgIdInArticlesDB(hdr.Value) {
+				exists++
+				groupBatch.ReturnQ <- &BatchItem{Error: errIsDuplicateError}
+				continue
+			}
+			msgIdItem := history.MsgIdCache.GetORCreate(hdr.Value)
 			msgIdItem.Mux.Lock()
 			msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
 			msgIdItem.Response = history.CaseLock
@@ -236,9 +226,12 @@ doWork:
 				MessageID: &msgIdItem.MessageId, // Use pointer to avoid copying
 				GroupName: proc.DB.Batch.GetNewsgroupPointer(newsgroup),
 			}
-			groupBatch.Queue <- item // send to fetcher/main.go: for item := range processor.Batch.Queue
+			item.ReturnQ = groupBatch.ReturnQ
+			Batch.GetQ <- item // send to fetcher/main.go: for item := range processor.Batch.Queue
 			queued++
-			//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", num, msgID, groupName)
+			//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", hdr.ArticleNum, hdr.Value, *item.GroupName)
+			hdr.Value = ""
+			hdr.ArticleNum = 0
 		} // end for xhdrChan
 		log.Printf("DownloadArticles: XHdr closed, finished feeding batch queue %d articles for group '%s' (existing: %d) total=%d", queued, newsgroup, exists, queued+exists)
 		if queued == 0 {
@@ -254,25 +247,19 @@ doWork:
 	nextCheck := startTime.Add(aliveCheck)
 	deathCounter := 0 // Counter to track if we are stuck
 	bulkmode := true
-	var wantTotal int64 = -1
+	var gotQueued int64 = -1
 	// Start processing loop
 forProcessing:
 	for {
 		select {
-		case gotQueued := <-notifyChan:
-			wantTotal = gotQueued
+		case gotQueued = <-notifyChan:
 		case <-releaseChan:
 			//log.Printf("DownloadArticles: releaseChan triggered '%s'", newsgroup)
 			break forProcessing
 		case <-ticker.C:
 			// Periodically check if we are done or stuck
-			mux.Lock()
-			dead := runs >= LOOPS_PER_GROUPS
-			mux.Unlock()
-			currentTotal := dups + gots + errs + notf
-			//log.Printf("DEBUG-TICKER: ng '%s' processed=%d toFetch=%d dead=%t (dups=%d gots=%d errs=%d)", newsgroup, currentTotal, toFetch, dead, dups, gots, errs)
-			if dead || (wantTotal > 0 && currentTotal == wantTotal) {
-				log.Printf("OK-DA: '%s' [ %d articles processed ] (dups: %d, gots: %d, notf: %d, errs: %d, wantTotal: %d) dead=%t", newsgroup, currentTotal, dups, gots, notf, errs, wantTotal, dead)
+			if gotQueued > 0 && gots+errs+notf == gotQueued {
+				log.Printf("OK-DA: '%s' (dups: %d, gots: %d, notf: %d, errs: %d, gotQueued: %d)", newsgroup, dups, gots, notf, errs, gotQueued)
 				break forProcessing // Exit processing loop if all items are processed
 			}
 			if dups > lastDups || gots > lastGots || notf > lastNotf || errs > lastErrs {
@@ -285,7 +272,7 @@ forProcessing:
 			}
 			if nextCheck.Before(time.Now()) {
 				// If we haven't made progress in N seconds, log a warning
-				log.Printf("DownloadArticles: '%s' Stuck? %d articles processed (%d dups, %d gots, %d notf, %d errs, queued: %d) (since Start=%v)", newsgroup, dups+gots+notf+errs, dups, gots, notf, errs, wantTotal, time.Since(startTime))
+				log.Printf("DownloadArticles: '%s' Stuck? %d articles processed (%d dups, %d gots, %d notf, %d errs, gotQueued: %d) (since Start=%v)", newsgroup, dups+gots+notf+errs, dups, gots, notf, errs, gotQueued, time.Since(startTime))
 				nextCheck = time.Now().Add(aliveCheck) // Reset last check time
 				deathCounter++
 			}
@@ -294,7 +281,7 @@ forProcessing:
 				return fmt.Errorf("DownloadArticles: '%s' Timeout... %d articles processed (%d dups, %d got, %d errs)", newsgroup, dups+gots+notf+errs, dups, gots, errs)
 			}
 
-		case item := <-groupBatch.Return:
+		case item := <-groupBatch.ReturnQ:
 			//log.Printf("DEBUG-RETURN: received item: Error=%v, Article=%v", item != nil && item.Error != nil, item != nil && item.Article != nil)
 			if item == nil || item.Error != nil || item.Article == nil {
 				if item != nil {
@@ -312,29 +299,30 @@ forProcessing:
 					item.MessageID = nil
 					item.GroupName = nil
 					item.Error = nil
-					item.Return = nil
+					item.ReturnQ = nil
+				} else {
+					log.Printf("ERROR in DownloadArticles: received nil item (errs %d)", errs)
+					errs++
 				}
 			} else if item.Error == nil && item.Article != nil {
-				gots++
-				//log.Printf("DEBUG-RETURN: counted success, gots now %d", gots)
 				if proc.DB.IsDBshutdown() {
 					return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
 				}
+				//log.Printf("DownloadArticles --> proc.processArticle '%s' in group '%s'", *item.MessageID, newsgroup)
 				response, err := proc.processArticle(item.Article, newsgroup, bulkmode)
 				if err != nil {
-					log.Printf("DownloadArticles: '%s' Failed to process article (%s): %v", newsgroup, *item.MessageID, err)
+					errs++
+					log.Printf("DownloadArticles: '%s' Failed to process article (%s): response=%d err='%v'", newsgroup, *item.MessageID, response, err)
 					continue // Skip this item on error
 				}
 				item.Article = nil
 				item.MessageID = nil
 				item.GroupName = nil
-				item.Error = nil
-				item.Return = nil
-				if response == history.CasePass {
-					//log.Printf("DownloadArticles:  group '%s' imported article (%s)", groupName, *item.MessageID)
-				}
-				//returnChan <- item
-				//log.Printf("DownloadArticles: group '%s' fetched article (%s) %dups=%d gots=%d errs=%d", groupName, *item.MessageID, dups, gots, errs)
+				item.ReturnQ = nil
+				gots++
+			} else {
+				log.Printf("LOST CASE IN DownloadArticles item='%#v'", item)
+				errs++
 			}
 		}
 	} // end for processing routine (counts only)
@@ -352,22 +340,9 @@ forProcessing:
 	}
 	log.Printf("DownloadArticles: progressDB group '%s' processed %d articles (dups: %d, gots: %d, errs: %d) in %v end=%d", newsgroup, gots+errs+dups, dups, gots, errs, time.Since(startTime), end)
 	// do another one if we haven't run enough times
-	runs++
 	runtime.GC()
-	mux.Lock()
-	runagain := runs < LOOPS_PER_GROUPS
-	mux.Unlock()
-	if runagain {
-		lastGoodEnd = end // Save last good end for next iteration
-		start += MaxBatch
-		end += MaxBatch
-		goto doWork
-	}
-
-	counters := GroupCounter.GetResetAll()
-	for ngc, count := range counters {
-		log.Printf("Downloaded ng:%s articles: %d", ngc, count)
-	}
+	counter := GroupCounter.GetReset(newsgroup)
+	log.Printf("Downloaded ng:%s articles: %d", newsgroup, counter)
 	if proc.DB.IsDBshutdown() {
 		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
 	}

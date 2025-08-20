@@ -71,50 +71,58 @@ func (c *BackendConn) GetArticle(messageID *string) (*models.Article, error) {
 
 	c.lastUsed = time.Now()
 
+	// Set a per-operation timeout (10 seconds for article retrieval)
+	if err := c.conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return nil, fmt.Errorf("failed to set read deadline: %w", err)
+	}
+	defer func() {
+		// Clear the deadline when operation completes
+		if c.conn != nil {
+			c.conn.SetReadDeadline(time.Time{})
+		}
+	}()
+
 	id, err := c.textConn.Cmd("ARTICLE %s", *messageID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send ARTICLE command: %w", err)
+		return nil, fmt.Errorf("failed to send ARTICLE '%s' command: %w", *messageID, err)
 	}
 
 	c.textConn.StartResponse(id)
 	defer c.textConn.EndResponse(id) // Always clean up response state
 
 	code, message, err := c.textConn.ReadCodeLine(ArticleFollows)
-	if err != nil {
-		c.Pool.CloseConn(c, true) // Close connection on error
-		return nil, fmt.Errorf("failed to read ARTICLE response: %w", err)
+	if err != nil && code == 0 {
+		log.Printf("[ERROR] failed to read ARTICLE '%s' code=%d message='%s' err: %v", *messageID, code, message, err)
+		return nil, fmt.Errorf("failed to read ARTICLE '%s' code=%d message='%s' err: %v", *messageID, code, message, err)
 	}
 
 	if code != ArticleFollows {
 		switch code {
 		case NoSuchArticle:
-			log.Printf("[INFO] article not found: %s", *messageID)
+			log.Printf("[BECONN] GetArticle: not found: '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
 			return nil, ErrArticleNotFound
 		case DMCA:
-			log.Printf("[INFO] article removed (DMCA): %s", *messageID)
+			log.Printf("[BECONN] GetArticle: removed (DMCA): '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
 			return nil, ErrArticleRemoved
 		default:
-			return nil, fmt.Errorf("unexpected ARTICLE response: %d %s", code, message)
+			return nil, fmt.Errorf("unexpected ARTICLE '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
 		}
 	}
 
 	// Read the article content
 	lines, err := c.readMultilineResponse("article")
 	if err != nil {
-		return nil, fmt.Errorf("failed to read article content: %w", err)
+		return nil, fmt.Errorf("failed to read article '%s' content: %w", *messageID, err)
 	}
 
 	// Parse article into headers and body
 	article, err := ParseLegacyArticleLines(*messageID, lines)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse article: %w", err)
+		return nil, fmt.Errorf("failed to parse article '%s': %w", *messageID, err)
 	}
 
 	return article, nil
 }
-
-var ErrArticleNotFound = fmt.Errorf("article not found")
-var ErrArticleRemoved = fmt.Errorf("article removed (DMCA)")
 
 // GetHead retrieves only the headers of an article
 func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
@@ -586,6 +594,17 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 	c.textConn.StartResponse(id)
 	defer c.textConn.EndResponse(id) // Always clean up response state
 
+	// Set timeout for initial response
+	if err := c.conn.SetReadDeadline(time.Now().Add(9 * time.Second)); err != nil {
+		close(resultChan)
+		return fmt.Errorf("failed to set read deadline: %w", err)
+	}
+	defer func() {
+		// Clear the deadline when operation completes
+		if c.conn != nil {
+			c.conn.SetReadDeadline(time.Time{})
+		}
+	}()
 	code, message, err := c.textConn.ReadCodeLine(221)
 	if err != nil {
 		close(resultChan)
@@ -599,6 +618,11 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 
 	// Read multiline response line by line and send to channel immediately
 	for {
+		// Set a shorter timeout for each line read (3 seconds per line)
+		if err := c.conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			log.Printf("[ERROR] XHdrStreamed failed to set line deadline ng: '%s' err='%v'", groupName, err)
+			break
+		}
 
 		line, err := c.textConn.ReadLine()
 		if err != nil {
@@ -620,15 +644,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 		}
 
 		// Send through channel
-		select {
-		case resultChan <- &header:
-			// Successfully sent
-		default:
-			// Channel is full or closed, abandon remaining results
-			close(resultChan)
-			return fmt.Errorf("error in XHdrStreamed: ng: '%s' resultChan full or closed", groupName)
-		}
-
+		resultChan <- &header
 	}
 
 	// Close channel
