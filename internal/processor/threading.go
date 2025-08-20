@@ -67,12 +67,16 @@ func CheckMessageIdFormat(messageID string) bool {
 		return false
 	}
 	// A simple check could be to see if it contains '@' and '.'
-	if len(messageID) < 5 || len(messageID) > 255 || !containsAtAndDot(messageID) {
+	if len(messageID) < 5 || len(messageID) > 255 {
 		log.Printf("[SPAM:HDR] Invalid message ID length or format: '%s'", messageID)
 		return false
 	}
 	if messageID[0] != '<' || messageID[len(messageID)-1] != '>' {
 		log.Printf("[SPAM:HDR] Invalid message ID format: '%s'", messageID)
+		return false
+	}
+	if !strings.Contains(messageID, "@") {
+		log.Printf("[SPAM:HDR] Invalid message ID format: missing '@' in '%s'", messageID)
 		return false
 	}
 	return true

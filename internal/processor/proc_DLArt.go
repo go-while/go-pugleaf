@@ -206,11 +206,13 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 		//log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", toFetch, newsgroup, proc.Pool.Backend.MaxConns)
 		var exists, queued int64
 		for hdr := range xhdrChan {
-			if !CheckMessageIdFormat(hdr.Value) {
-				log.Printf("[FETCHER]: Invalid message ID format: '%s'", hdr.Value)
-				groupBatch.ReturnQ <- &BatchItem{Error: errIsDuplicateError}
-				continue
-			}
+			/*
+				if !CheckMessageIdFormat(hdr.Value) {
+					log.Printf("[FETCHER]: Invalid message ID format: '%s'", hdr.Value)
+					groupBatch.ReturnQ <- &BatchItem{Error: errIsDuplicateError}
+					continue
+				}
+			*/
 			//log.Printf("DownloadArticles: Checking if article '%s' exists in group '%s'", msgID.Value, newsgroup)
 			if groupDBs.ExistsMsgIdInArticlesDB(hdr.Value) {
 				exists++
@@ -237,7 +239,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 		if queued == 0 {
 			releaseChan <- struct{}{}
 		} else {
-			notifyChan <- queued + exists
+			notifyChan <- queued
 		}
 	}()
 	var dups, lastDups, gots, lastGots, notf, lastNotf, errs, lastErrs int64
