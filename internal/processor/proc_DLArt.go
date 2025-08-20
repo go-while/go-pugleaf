@@ -298,10 +298,6 @@ forProcessing:
 						log.Printf("DownloadArticles: '%s' Error fetching article %s: %v .. continue", newsgroup, *item.MessageID, item.Error)
 						errs++
 					}
-					item.MessageID = nil
-					item.GroupName = nil
-					item.Error = nil
-					item.ReturnQ = nil
 				} else {
 					log.Printf("ERROR in DownloadArticles: received nil item (errs %d)", errs)
 					errs++
@@ -313,18 +309,23 @@ forProcessing:
 				//log.Printf("DownloadArticles --> proc.processArticle '%s' in group '%s'", *item.MessageID, newsgroup)
 				response, err := proc.processArticle(item.Article, newsgroup, bulkmode)
 				if err != nil {
-					errs++
 					log.Printf("DownloadArticles: '%s' Failed to process article (%s): response=%d err='%v'", newsgroup, *item.MessageID, response, err)
-					continue // Skip this item on error
+					errs++
+				} else {
+					gots++
 				}
-				item.Article = nil
-				item.MessageID = nil
-				item.GroupName = nil
-				item.ReturnQ = nil
-				gots++
 			} else {
 				log.Printf("LOST CASE IN DownloadArticles item='%#v'", item)
 				errs++
+			}
+			item.Article = nil
+			item.MessageID = nil
+			item.GroupName = nil
+			item.Error = nil
+			item.ReturnQ = nil
+			if gotQueued > 0 && gots+errs+notf == gotQueued {
+				log.Printf("OK-DA: '%s' (dups: %d, gots: %d, notf: %d, errs: %d, gotQueued: %d)", newsgroup, dups, gots, notf, errs, gotQueued)
+				break forProcessing // Exit processing loop if all items are processed
 			}
 		}
 	} // end for processing routine (counts only)
