@@ -97,18 +97,14 @@ func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen in
 	}
 
 	proc := &Processor{
-		DB:   db,
-		Pool: nntpPool,
-		// Cache:         NewMsgTmpCache(), // REMOVED: Migrated to MsgIdCache
+		DB:            db,
+		Pool:          nntpPool,
 		ThreadCounter: NewCounter(),
 		LegacyCounter: NewCounter(),
-		//HisResChan:    make(chan int, 100), // HARDCODED: Channel for history responses
 		History:       hist,
 		MsgIdCache:    history.NewMsgIdItemCache(),
 		BridgeManager: nil, // Initialize as nil (disabled by default)
 	}
-
-	//his.BootHistory("./history", 5) // false = SQLite3
 
 	proc.DB.Batch.SetProcessor(proc) // Set the processor in the database instance for threading checks
 
@@ -120,8 +116,7 @@ func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen in
 		proc.MsgIdCache.StartCleanupRoutine()
 	}
 
-	// DISABLED: Legacy threading processor - now handled by SQ3CronProcessThreading in db_batch.go
-	//go proc.CronProcessThreading()
+	// DISABLED: threading processor - now handled by SQ3CronProcessThreading in db_batch.go
 	return proc
 }
 

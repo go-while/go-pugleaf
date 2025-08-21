@@ -96,12 +96,12 @@ func main() {
 	if *maxLoops != 1 {
 		*maxLoops = 1 // hardcoded to 1 TODO find fixme
 	}
-	if *maxBatch > 100 {
-		log.Printf("[WARN] max batch: %d (should be between 1 and 1000)", *maxBatch)
+	if *maxBatch > 1000 {
+		log.Printf("[WARN] max batch: %d (should be between 100 and 1000)", *maxBatch)
 	}
-	if *maxBatch > 4000 {
-		log.Printf("[WARN] max batch can not be higher than 4000 (sqlite parameter limit)")
-		*maxBatch = 4000
+	if *maxBatch > 100000 {
+		log.Printf("[WARN] max batch can not be higher than 100000")
+		*maxBatch = 100000
 	}
 	if *hostnamePath == "" {
 		log.Fatalf("[NNTP]: Error: hostname must be set!")
