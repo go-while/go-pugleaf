@@ -70,18 +70,18 @@ func (c *BackendConn) GetArticle(messageID *string) (*models.Article, error) {
 	}
 
 	c.lastUsed = time.Now()
-
-	// Set a per-operation timeout (10 seconds for article retrieval)
-	if err := c.conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		return nil, fmt.Errorf("failed to set read deadline: %w", err)
-	}
-	defer func() {
-		// Clear the deadline when operation completes
-		if c.conn != nil {
-			c.conn.SetReadDeadline(time.Time{})
+	/*
+		// Set a per-operation timeout (10 seconds for article retrieval)
+		if err := c.conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			return nil, fmt.Errorf("failed to set read deadline: %w", err)
 		}
-	}()
-
+		defer func() {
+			// Clear the deadline when operation completes
+			if c.conn != nil {
+				c.conn.SetReadDeadline(time.Time{})
+			}
+		}()
+	*/
 	id, err := c.textConn.Cmd("ARTICLE %s", *messageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send ARTICLE '%s' command: %w", *messageID, err)
@@ -595,16 +595,18 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 	defer c.textConn.EndResponse(id) // Always clean up response state
 
 	// Set timeout for initial response
-	if err := c.conn.SetReadDeadline(time.Now().Add(9 * time.Second)); err != nil {
-		close(resultChan)
-		return fmt.Errorf("failed to set read deadline: %w", err)
-	}
-	defer func() {
-		// Clear the deadline when operation completes
-		if c.conn != nil {
-			c.conn.SetReadDeadline(time.Time{})
+	/*
+		if err := c.conn.SetReadDeadline(time.Now().Add(9 * time.Second)); err != nil {
+			close(resultChan)
+			return fmt.Errorf("failed to set read deadline: %w", err)
 		}
-	}()
+		defer func() {
+			// Clear the deadline when operation completes
+			if c.conn != nil {
+				c.conn.SetReadDeadline(time.Time{})
+			}
+		}()
+	*/
 	code, message, err := c.textConn.ReadCodeLine(221)
 	if err != nil {
 		close(resultChan)
@@ -618,12 +620,13 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 
 	// Read multiline response line by line and send to channel immediately
 	for {
-		// Set a shorter timeout for each line read (3 seconds per line)
-		if err := c.conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
-			log.Printf("[ERROR] XHdrStreamed failed to set line deadline ng: '%s' err='%v'", groupName, err)
-			break
-		}
-
+		/*
+			// Set a shorter timeout for each line read (3 seconds per line)
+			if err := c.conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+				log.Printf("[ERROR] XHdrStreamed failed to set line deadline ng: '%s' err='%v'", groupName, err)
+				break
+			}
+		*/
 		line, err := c.textConn.ReadLine()
 		if err != nil {
 			log.Printf("[ERROR] XHdrStreamed read error ng: '%s' err='%v'", groupName, err)
