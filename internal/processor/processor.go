@@ -36,7 +36,7 @@ var (
 	// these list of ' var ' can be set after importing the lib before starting!!
 
 	// MaxBatch defines the maximum number of articles to fetch in a single batch
-	MaxBatch = nntp.MaxReadLinesXover // Use the XOVER limit as the maximum batch size for article imports
+	MaxBatchSize int64 = 100
 
 	// UseStrictGroupValidation for group names, false allows upper-case in group names
 	UseStrictGroupValidation = true
@@ -50,10 +50,10 @@ var (
 
 	// Global Batch Queue (proc_DLArt.go)
 	Batch = &BatchQueue{
-		Check:       make(chan *string, DownloadMaxPar),         // check newsgroups
-		TodoQ:       make(chan *nntp.GroupInfo, DownloadMaxPar), // todo newsgroups
-		GetQ:        make(chan *BatchItem),                      // get articles, blocking channel
-		GroupQueues: make(map[string]*GroupBatch),               // per-newsgroup queues
+		Check:       make(chan *string),           // check newsgroups
+		TodoQ:       make(chan *nntp.GroupInfo),   // todo newsgroups
+		GetQ:        make(chan *BatchItem),        // get articles, blocking channel
+		GroupQueues: make(map[string]*GroupBatch), // per-newsgroup queues
 	}
 
 	// Do NOT change this here! these are needed for runtime !

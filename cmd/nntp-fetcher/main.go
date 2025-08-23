@@ -117,8 +117,8 @@ func main() {
 	nntp.MaxReadLinesXover = int64(*maxBatch)
 	processor.LocalHostnamePath = *hostnamePath
 	processor.XoverCopy = *importOverview
-	processor.MaxBatch = nntp.MaxReadLinesXover
-	processor.LOOPS_PER_GROUPS = *maxLoops
+	processor.MaxBatchSize = int64(*maxBatch)
+	//processor.LOOPS_PER_GROUPS = *maxLoops
 
 	// Set global max read lines for xover
 
@@ -364,8 +364,8 @@ func main() {
 					// pass
 				}
 				//log.Printf("DEBUG-RANGE: ng='%s' lastArticle=%d (after switch)", *ng, lastArticle)
-				start := lastArticle + 1                     // Start from the first article in the remote group
-				end := start + int64(processor.MaxBatch) - 1 // End at the last article in the remote group
+				start := lastArticle + 1                         // Start from the first article in the remote group
+				end := start + int64(processor.MaxBatchSize) - 1 // End at the last article in the remote group
 				//log.Printf("DEBUG-RANGE: ng='%s' calculated start=%d end=%d groupInfo.Last=%d", *ng, start, end, groupInfo.Last)
 
 				// For date-based downloads, don't cap end to groupInfo.Last since they use date filtering

@@ -22,7 +22,7 @@ func (proc *Processor) DownloadArticlesViaOverview(groupName string) error {
 	}
 	defer groupDBs.Return(proc.DB)
 	// Only fetch undownloaded overviews, in batches
-	undl, err := proc.DB.GetUndownloadedOverviews(groupDBs, int(MaxBatch))
+	undl, err := proc.DB.GetUndownloadedOverviews(groupDBs, int(MaxBatchSize))
 	if err != nil {
 		return err
 	}

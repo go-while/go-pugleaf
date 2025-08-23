@@ -53,7 +53,7 @@ func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
 	groupBatch, exists := bq.GroupQueues[newsgroup]
 	if !exists {
 		groupBatch = &GroupBatch{
-			ReturnQ:  make(chan *BatchItem, MaxBatch),
+			ReturnQ:  make(chan *BatchItem, MaxBatchSize),
 			shutdown: make(chan struct{}),
 		}
 		bq.GroupQueues[newsgroup] = groupBatch
@@ -183,7 +183,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	var mux sync.Mutex
 	var lastGoodEnd int64 = 1
 	toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
-	xhdrChan := make(chan *nntp.HeaderLine, MaxBatch)
+	xhdrChan := make(chan *nntp.HeaderLine, MaxBatchSize)
 	errChan := make(chan error, 1)
 	log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
 	go func(mux *sync.Mutex) {
@@ -467,7 +467,7 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 
 	// Calculate download range: start from found article, end at current group last or startArticle + MaxBatch
 	downloadStart := startArticle
-	downloadEnd := startArticle + int64(MaxBatch) - 1
+	downloadEnd := startArticle + MaxBatchSize - 1
 	if downloadEnd > groupInfo.Last {
 		downloadEnd = groupInfo.Last
 	}

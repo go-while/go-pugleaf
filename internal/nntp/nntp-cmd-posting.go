@@ -264,11 +264,12 @@ func (c *ClientConnection) readArticleData() (*models.Article, error) {
 
 	// Convert to models.Article
 	article := &models.Article{
-		Headers:  headers,
-		BodyText: strings.Join(body, "\n"),
-		Lines:    len(body),
-		NNTPhead: head, // Preserve original header order for peering
-		NNTPbody: body, // Preserve original body lines for peering
+		Headers:     headers,
+		BodyText:    strings.Join(body, "\n"),
+		Lines:       len(body),
+		NNTPhead:    head, // Preserve original header order for peering
+		NNTPbody:    body, // Preserve original body lines for peering
+		ArticleNums: make(map[*string]int64),
 	}
 	for _, ng := range newsgroups {
 		newsgroupPtr := c.server.DB.Batch.GetNewsgroupPointer(ng)
