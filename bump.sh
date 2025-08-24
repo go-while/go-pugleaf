@@ -8,4 +8,6 @@ else
 fi
 
 ./createUpdate.sh
-./rsync.sh 
+./rsync.sh
+sha256sum update.tar.gz
+date
