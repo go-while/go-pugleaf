@@ -621,7 +621,7 @@ func BatchSanitizeArticles(articles []*Article) {
 	batch := make(map[string]map[string]template.HTML)
 
 	for _, article := range articles {
-		if article == nil || article.MessageID == "" {
+		if article == nil || (article.MessageID == "") {
 			continue
 		}
 		// Skip if already fully cached

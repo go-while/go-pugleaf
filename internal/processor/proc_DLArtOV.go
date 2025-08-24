@@ -53,7 +53,7 @@ func (proc *Processor) DownloadArticlesViaOverview(groupName string) error {
 			var processed int64
 			for item := range batchQueue {
 				//log.Printf("DownloadArticlesViaOverview: Worker %d processing group '%s' article %d (%s)", worker, *item.GroupName, *item.ArticleNum, *item.MessageID)
-				art, err := proc.Pool.GetArticle(item.MessageID)
+				art, err := proc.Pool.GetArticle(item.MessageID, true)
 				if err != nil {
 					log.Printf("DownloadArticlesViaOverview: group '%s' Failed to fetch article %s: %v", groupName, *item.MessageID, err)
 					item.Error = err   // Set error on item

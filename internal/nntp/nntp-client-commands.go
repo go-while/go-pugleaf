@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/go-pugleaf/internal/utils"
 )
 
 // Constants for maximum lines to read in various commands
@@ -61,7 +62,7 @@ func (c *BackendConn) StatArticle(messageID string) (bool, error) {
 }
 
 // GetArticle retrieves a complete article from the server
-func (c *BackendConn) GetArticle(messageID *string) (*models.Article, error) {
+func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -116,7 +117,7 @@ func (c *BackendConn) GetArticle(messageID *string) (*models.Article, error) {
 	}
 
 	// Parse article into headers and body
-	article, err := ParseLegacyArticleLines(*messageID, lines)
+	article, err := ParseLegacyArticleLines(*messageID, lines, bulkmode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse article '%s': %w", *messageID, err)
 	}
@@ -783,7 +784,7 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 }
 
 // ParseArticleLines parses article lines into headers and body
-func ParseLegacyArticleLines(messageID string, lines []string) (*models.Article, error) {
+func ParseLegacyArticleLines(messageID string, lines []string, bulkmode bool) (*models.Article, error) {
 	article := &models.Article{
 		MessageID: messageID,
 		Headers:   make(map[string][]string),
@@ -799,29 +800,42 @@ func ParseLegacyArticleLines(messageID string, lines []string) (*models.Article,
 	}
 
 	if bodyStart == -1 {
-		// No body separator found, treat all as headers
-		bodyStart = len(lines)
+		return nil, fmt.Errorf("malformed article: no header-body separator found in msgId='%s'", messageID)
 	}
 
 	// Parse headers
-	headerLines := lines[:bodyStart-1]
-	if err := ParseHeaders(article, headerLines); err != nil {
+	if err := ParseHeaders(article, lines[:bodyStart-1]); err != nil {
 		return nil, err
 	}
 
-	// Store original header lines for peering
-	article.NNTPhead = headerLines
-
-	// Parse body
+	// Parse article
 	if bodyStart < len(lines) {
-		bodyLines := lines[bodyStart:]
-		body := strings.Join(bodyLines, "\n")
-		article.BodyText = body
-		// Store original body lines for peering
-		article.NNTPbody = bodyLines
+		article.BodyText = strings.Join(lines[bodyStart:], "\n")
+		article.Bytes = len(article.BodyText)
+		article.Lines = len(lines) - bodyStart
+		if !bulkmode {
+			// original body lines for peering
+			article.NNTPhead = lines[:bodyStart-1]
+			article.NNTPbody = lines[bodyStart:]
+		}
 	}
-	article.Bytes = len(article.BodyText)
+	article.Subject = getHeaderFirst(article.Headers, "subject")
+	article.FromHeader = getHeaderFirst(article.Headers, "from")
+	article.Path = getHeaderFirst(article.Headers, "path")
+	article.References = getHeaderFirst(article.Headers, "references")
+	article.RefSlice = utils.ParseReferences(article.References) // capture all references for thread chain analysis
+	article.DateString = getHeaderFirst(article.Headers, "date")
 	return article, nil
+}
+
+func MultiLineHeaderToMergedString(vals []string) string {
+	if len(vals) == 0 {
+		return ""
+	}
+	if len(vals) == 1 {
+		return vals[0] // Fast path for single-line headers (most common case)
+	}
+	return strings.Join(vals, "\n") // Ultra fast for multi-line
 }
 
 // parseHeaders parses header lines into the article headers map
@@ -860,9 +874,17 @@ func ParseHeaders(article *models.Article, headerLines []string) error {
 			currentHeader = ""
 			continue
 		}
+		switch strings.ToLower(headerName) {
+		case "newsgroups", "date", "references", "subject", "from", "path":
+			//pass
+		default:
+			// not needed
+			currentHeader = ""
+			continue
+		}
 		article.Headers[currentHeader] = append(article.Headers[currentHeader], headerValue)
 	}
-
+	article.HeadersJSON = MultiLineHeaderToMergedString(headerLines)
 	return nil
 }
 

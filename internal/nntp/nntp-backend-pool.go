@@ -115,7 +115,7 @@ func (p *Pool) XHdrStreamed(group string, header string, start, end int64, resul
 	return err
 }
 
-func (p *Pool) GetArticle(messageID *string) (*models.Article, error) {
+func (p *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
 	p.mux.RLock()
 	if p.closed {
 		p.mux.RUnlock()
@@ -129,7 +129,7 @@ func (p *Pool) GetArticle(messageID *string) (*models.Article, error) {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
 
-	article, err := client.GetArticle(messageID)
+	article, err := client.GetArticle(messageID, bulkmode)
 	if err != nil || article == nil {
 		if err == ErrArticleNotFound || err == ErrArticleRemoved {
 			log.Printf("[NNTP-POOL] Article '%s' not found err='%v'", *messageID, err)

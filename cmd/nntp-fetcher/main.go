@@ -413,7 +413,7 @@ func main() {
 			//log.Printf("DownloadArticles: Worker %d group '%s' start", worker, groupName)
 			for item := range processor.Batch.GetQ {
 				//log.Printf("DownloadArticles: Worker %d GetArticle group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
-				art, err := proc.Pool.GetArticle(item.MessageID)
+				art, err := proc.Pool.GetArticle(item.MessageID, true)
 				if err != nil || art == nil {
 					log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle '%s' err='%v' .. continue", *item.MessageID, err)
 					item.Error = err     // Set error on item
@@ -631,16 +631,14 @@ func ConnectionTest(host *string, port *int, username *string, password *string,
 
 	// Create Test client configuration
 	backenConfig := &nntp.BackendConfig{
-		Host:     *host,
-		Port:     *port,
-		SSL:      *ssl,
-		Username: *username,
-		Password: *password,
-		MaxConns: 3, // Default max connections
-		//ConnectTimeout: time.Duration(*timeout) * time.Second,
-		//ReadTimeout:    60 * time.Second,
-		//WriteTimeout:   30 * time.Second,
-		Provider: testProvider, // Set the Provider field
+		Host:           *host,
+		Port:           *port,
+		SSL:            *ssl,
+		Username:       *username,
+		Password:       *password,
+		MaxConns:       3,            // Default max connections
+		Provider:       testProvider, // Set the Provider field
+		ConnectTimeout: time.Duration(*timeout) * time.Second,
 	}
 
 	fmt.Printf("Testing NNTP connection to %s:%d (SSL: %v)\n", *host, *port, *ssl)

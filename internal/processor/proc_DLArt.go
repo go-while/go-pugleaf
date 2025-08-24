@@ -89,54 +89,6 @@ func (bq *BatchQueue) CloseGroupBatch(newsgroup string) {
 	}
 }
 
-/*
-// GetAllActiveGroupBatches returns a snapshot of all active group batches
-func (bq *BatchQueue) GetAllActiveGroupBatches() map[string]*GroupBatch {
-	bq.Mutex.RLock()
-	defer bq.Mutex.RUnlock()
-
-	if bq.GroupQueues == nil {
-		return make(map[string]*GroupBatch)
-	}
-
-	// Return a copy to avoid concurrent access issues
-	result := make(map[string]*GroupBatch)
-	for name, batch := range bq.GroupQueues {
-		if len(batch.Queue) > 0 {
-			result[name] = batch
-		}
-	}
-	return result
-}
-*/
-/*
-// startWorker starts a dedicated worker goroutine for this group batch
-func (gb *GroupBatch) startWorker(newsgroup string) {
-	defer gb.workerWG.Done()
-	log.Printf("Started dedicated worker for newsgroup: %s", newsgroup)
-
-	for {
-		select {
-		case <-gb.shutdown:
-			log.Printf("Worker for newsgroup '%s' received shutdown signal", newsgroup)
-			return
-		case item, ok := <-gb.Queue:
-			if !ok {
-				// Channel is closed, exit gracefully
-				log.Printf("Worker for newsgroup '%s' exiting: queue channel closed", newsgroup)
-				return
-			}
-			if item == nil {
-				continue
-			}
-
-			// Process the article
-			item.Return = gb.Return
-			gb.GetQ <- item // Send to the global GetQ channel for processing
-		}
-	}
-}
-*/
 // stopWorker signals the worker to stop and waits for it to finish
 func (gb *GroupBatch) stopWorker() {
 	close(gb.shutdown)
@@ -183,7 +135,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	var mux sync.Mutex
 	var lastGoodEnd int64 = 1
 	toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
-	xhdrChan := make(chan *nntp.HeaderLine, MaxBatchSize)
+	xhdrChan := make(chan *nntp.HeaderLine)
 	errChan := make(chan error, 1)
 	log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
 	go func(mux *sync.Mutex) {

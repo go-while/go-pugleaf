@@ -990,6 +990,11 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 		}
 	*/
 	parentMessageIDs := make(map[*string]int, MaxBatchSize) // Pre-allocate map with expected size
+	defer func() {
+		for k := range parentMessageIDs {
+			delete(parentMessageIDs, k)
+		}
+	}()
 	// Create replyData slice (keep as direct allocation since it contains complex struct)
 	replyData := make([]struct {
 		articleNum int64
