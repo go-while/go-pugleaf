@@ -106,9 +106,16 @@ func (hc *HierarchyCache) GetHierarchiesPaginated(db *Database, page, pageSize i
 		return []*models.Hierarchy{}, 0, nil
 	}
 
-	// Copy hierarchies for processing
+	// Deep copy hierarchies for thread-safe processing
 	hierarchies := make([]*models.Hierarchy, len(hc.hierarchies))
-	copy(hierarchies, hc.hierarchies)
+	for i, h := range hc.hierarchies {
+		// Create a deep copy to avoid data races during sorting
+		hierarchies[i] = &models.Hierarchy{
+			Name:        h.Name,
+			GroupCount:  h.GroupCount,
+			LastUpdated: h.LastUpdated, // Safe read under RLock
+		}
+	}
 	hc.mu.RUnlock()
 
 	// Sort hierarchies based on sortBy parameter
