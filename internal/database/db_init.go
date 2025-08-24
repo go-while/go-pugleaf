@@ -15,6 +15,19 @@ import (
 
 var GroupHashMap *GHmap // Global variable for group hash map
 
+var ENABLE_ARTICLE_CACHE = true
+var NNTP_AUTH_CACHE_TIME = 15 * time.Minute
+var FETCH_MODE = false // set true in fetcher/main.go
+
+var SQLITE_cache_size = 2000 // 2000 pages or -2000 = 2 MB
+var SQLITE_busy_timeout = 30000
+var SQLITE_foreign_keys = "ON"
+var SQLITE_temp_store = "MEMORY"
+var SQLITE_sync_mode = "NORMAL" // FULL, OFF
+
+var SQLITE_BACKUP_ENABLED = false
+var SQLITE_BACKUP_INTERVAL = 24 * 7 * time.Hour // weekly backup
+
 // Database represents the main database connection and per-group database pool
 type Database struct {
 	//proc *processor.Processor // Reference to the Processor for threading and other operations
@@ -79,8 +92,8 @@ func DefaultDBConfig() (dbconfig *DBConfig) {
 		SyncMode:           "NORMAL",
 		CacheSize:          -16384, // -16384 == 1024 KB * 16384 = 16MB cache
 		TempStore:          "MEMORY",
-		BackupEnabled:      false,              // TODO pass flag to enable backups
-		BackupInterval:     24 * 7 * time.Hour, // weekly backup
+		BackupEnabled:      SQLITE_BACKUP_ENABLED,
+		BackupInterval:     SQLITE_BACKUP_INTERVAL,
 		BackupDir:          "./backups",
 		ArticleCacheSize:   1000,             // Default cache size
 		ArticleCacheExpiry: 15 * time.Minute, // Default cache expiry
@@ -142,23 +155,35 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 		}
 	}
 	db.StopChan = make(chan struct{}, 1) // Channel to signal shutdown (will get closed)
-	log.Printf("pugLeaf DB init config: %+v", dbconfig)
-	db.SectionsCache = NewGroupSectionDBCache()
-	db.MemThreadCache = NewMemCachedThreads()
-	db.HierarchyCache = NewHierarchyCache() // Initialize hierarchy cache for fast browsing
+	log.Printf("pugLeaf DB init config: %+v FETCH_MODE=%t", dbconfig, FETCH_MODE)
+	if !FETCH_MODE {
+		db.SectionsCache = NewGroupSectionDBCache()
+		db.MemThreadCache = NewMemCachedThreads()
+		db.HierarchyCache = NewHierarchyCache() // Initialize hierarchy cache for fast browsing
+		// Start hierarchy cache warming in background
+		go db.HierarchyCache.WarmCache(db)
+	}
 	GroupHashMap = NewGHmap()
 	db.Batch = NewSQ3batch(db) // Initialize SQ3batch for batch operations
-
-	// Start hierarchy cache warming in background
-	go db.HierarchyCache.WarmCache(db)
 
 	// Start other DB cron tasks
 	go db.CronDB()
 
 	// Start the smart orchestrator that monitors channel thresholds and timers
 	go db.Batch.orchestrator.StartOrch() // main wg waitGroup Add(+1)
+	// Periodically expire idle per-group batch state (keeps memory bounded during scans)
+	go db.Batch.ExpireCache()
+
+	db.NNTPAuthCache = NewNNTPAuthCache(NNTP_AUTH_CACHE_TIME)
+	//log.Printf("[WEB]: NNTP authentication cache initialized (15 minute TTL)")
 
 	// Start article cache cleanup routine
+	if ENABLE_ARTICLE_CACHE {
+		db.ArticleCache = NewArticleCache(db.dbconfig.ArticleCacheSize, db.dbconfig.ArticleCacheExpiry, db)
+		log.Printf("Article cache initialized with size %d and expiry %s", db.dbconfig.ArticleCacheSize, db.dbconfig.ArticleCacheExpiry)
+	} else {
+		log.Println("Article cache is disabled")
+	}
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute) // Cleanup every 5 minutes
 		defer ticker.Stop()
@@ -173,6 +198,7 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 			}
 		}
 	}()
+
 	log.Printf("Database initialized: %+v", db)
 	return db, nil
 }
@@ -258,26 +284,44 @@ func (db *Database) applySQLitePragmas(conn *sql.DB) error {
 	return nil
 }
 
+var PragmaMutex sync.RWMutex // Mutex to protect pragma execution
+var PragmasGroupDB []string
+
 // applySQLitePragmas applies performance and configuration pragmas to SQLite connection
 func (db *Database) applySQLitePragmasGroupDB(conn *sql.DB) error {
-	pragmas := []string{
-		"PRAGMA cache_size = 1000",
-		"PRAGMA synchronous = OFF",
-		"PRAGMA temp_store = MEMORY",
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA busy_timeout = 30000", // 30 seconds
-		//"PRAGMA mmap_size = 268435456", // 256MB memory-mapped I/O
-	}
+	PragmaMutex.RLock()
+	exists := len(PragmasGroupDB) > 0
+	PragmaMutex.RUnlock()
+	if !exists {
+		PragmaMutex.Lock()
+		exists = len(PragmasGroupDB) > 0
+		if !exists {
+			PragmasGroupDB = []string{
+				fmt.Sprintf("PRAGMA cache_size = %d", SQLITE_cache_size),
+				fmt.Sprintf("PRAGMA busy_timeout = %d", SQLITE_busy_timeout),
+				fmt.Sprintf("PRAGMA foreign_keys = %s", SQLITE_foreign_keys),
+				fmt.Sprintf("PRAGMA synchronous = %s", SQLITE_sync_mode),
+				fmt.Sprintf("PRAGMA temp_store = %s", SQLITE_temp_store),
+			}
 
-	if db.dbconfig.WALMode {
-		pragmas = append(pragmas, "PRAGMA journal_mode = WAL")
-		pragmas = append(pragmas, "PRAGMA wal_autocheckpoint = 1000")
-	}
-
-	for _, pragma := range pragmas {
-		if _, err := conn.Exec(pragma); err != nil {
-			return fmt.Errorf("failed to execute pragma '%s': %w", pragma, err)
+			if db.dbconfig.WALMode {
+				PragmasGroupDB = append(PragmasGroupDB, "PRAGMA journal_mode = WAL")
+				PragmasGroupDB = append(PragmasGroupDB, "PRAGMA wal_autocheckpoint = 2000")
+			}
+			exists = true
 		}
+		PragmaMutex.Unlock()
+	}
+
+	if exists {
+		for _, pragma := range PragmasGroupDB {
+			if _, err := conn.Exec(pragma); err != nil {
+				return fmt.Errorf("failed to execute pragma '%s': %w", pragma, err)
+			}
+		}
+		return nil
+	} else {
+		log.Printf("Error: Pragmas not found?! using defaults...")
 	}
 
 	return nil

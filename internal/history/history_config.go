@@ -63,7 +63,6 @@ type MessageIdItem struct {
 
 	// Group-specific threading information (replaces global threading fields)
 	GroupThreading map[*string]*ThreadingInfo // Per-group threading info for crossposted articles
-	//TmpExpires     time.Time                  // Expiration time for temporary cache functionality
 }
 
 // DatabaseWorkChecker interface allows History to check if database batch system has pending work

@@ -3,6 +3,7 @@ package processor
 import (
 	"fmt"
 	"log"
+	"runtime"
 	"sync"
 	"time"
 
@@ -12,169 +13,107 @@ import (
 	"github.com/go-while/go-pugleaf/internal/nntp"
 )
 
+var LOOPS_PER_GROUPS = 1
+
 type BatchQueue struct {
-	Mutex sync.RWMutex
-	Queue chan *batchItem // Channel to hold batch items to download
+	Mutex       sync.RWMutex
+	GetQ        chan *BatchItem        // Channel to get articles for processing
+	Check       chan *string           // Channel to check newsgroups
+	TodoQ       chan *nntp.GroupInfo   // Channel to do newsgroups
+	GroupQueues map[string]*GroupBatch // Per-newsgroup queues
 }
 
-type batchItem struct {
-	MessageID  string
+type GroupBatch struct {
+	ReturnQ  chan *BatchItem // Per-group channel to hold batch items to return
+	shutdown chan struct{}   // Channel to signal worker shutdown
+}
+
+type BatchItem struct {
+	MessageID  *string
 	ArticleNum int64
 	GroupName  *string
 	Article    *models.Article
 	Error      error
-	ReturnChan chan *batchItem
+	ReturnQ    chan *BatchItem // Channel to return processed items
 }
 
 var ErrUpToDate = fmt.Errorf("up2date")
 var errIsDuplicateError = fmt.Errorf("isDup")
 
-type selectResult struct {
-	groupInfo *nntp.GroupInfo
-	err       error
+// GetOrCreateGroupBatch returns the GroupBatch for a newsgroup, creating it if necessary
+// This now spawns a dedicated worker goroutine for efficient per-group processing
+func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
+	bq.Mutex.Lock()
+	defer bq.Mutex.Unlock()
+
+	if bq.GroupQueues == nil {
+		bq.GroupQueues = make(map[string]*GroupBatch)
+	}
+
+	groupBatch, exists := bq.GroupQueues[newsgroup]
+	if !exists {
+		groupBatch = &GroupBatch{
+			ReturnQ:  make(chan *BatchItem, MaxBatchSize),
+			shutdown: make(chan struct{}),
+		}
+		bq.GroupQueues[newsgroup] = groupBatch
+
+		// Start dedicated worker for this newsgroup
+		//groupBatch.workerWG.Add(1)
+		//go groupBatch.startWorker(newsgroup)
+
+		log.Printf("Created new GroupBatch with dedicated worker for newsgroup: %s", newsgroup)
+	}
+
+	return groupBatch
+}
+
+// CloseGroupBatch stops the worker and removes the group batch for a specific newsgroup
+// Note: Does not close channels as they may be managed by higher-level code
+func (bq *BatchQueue) CloseGroupBatch(newsgroup string) {
+	bq.Mutex.Lock()
+	defer bq.Mutex.Unlock()
+
+	if bq.GroupQueues == nil {
+		return
+	}
+
+	groupBatch, exists := bq.GroupQueues[newsgroup]
+	if exists {
+		// Signal the worker to stop and wait for it to finish
+		groupBatch.stopWorker()
+
+		// Remove from the map
+		delete(bq.GroupQueues, newsgroup)
+		log.Printf("Stopped worker and removed GroupBatch for newsgroup: %s", newsgroup)
+	}
+}
+
+// stopWorker signals the worker to stop and waits for it to finish
+func (gb *GroupBatch) stopWorker() {
+	close(gb.shutdown)
+	//gb.workerWG.Wait()
 }
 
 // DownloadArticles fetches full articles and stores them in the articles DB.
-func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroups int64, DLParChan chan struct{}) error {
-	/*
-		DLParChan <- struct{}{} // aquire lock
-		defer func() {
-			<-DLParChan // free slot
-		}()
-	*/
+func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroups int64, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64) error {
+	log.Printf("DEBUG-DownloadArticles: ng='%s' called with start=%d end=%d", newsgroup, start, end)
+	DLParChan <- struct{}{} // aquire lock
+	defer func() {
+		<-DLParChan // free slot
+	}()
+
+	// Get or create the group-specific batch channels
+	groupBatch := Batch.GetOrCreateGroupBatch(newsgroup)
+	// Note: Don't defer close here - let the main loop manage group batch lifecycle
+
 	// Note: We don't shut down the database here as it's shared with the main application
-	progressDB, err := database.NewProgressDB("data/progress.db")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer progressDB.Close()
+	// progressDB is now passed as parameter to avoid opening/closing for each group
 
 	if proc.Pool == nil {
 		return fmt.Errorf("DownloadArticles: NNTP pool is nil for group '%s'", newsgroup)
 	}
-
-	// Add timeout for SelectGroup to prevent hanging
-	resultChan := make(chan *selectResult, 1)
-	go func() {
-		groupInfo, err := proc.Pool.SelectGroup(newsgroup)
-		resultChan <- &selectResult{groupInfo: groupInfo, err: err}
-	}()
-
-	// Wait for result with timeout
-	var groupInfo *nntp.GroupInfo
-	select {
-	case result := <-resultChan:
-		if result.err != nil {
-			return fmt.Errorf("DownloadArticles: Failed to select group '%s': %v", newsgroup, result.err)
-		}
-		groupInfo = result.groupInfo
-		//log.Printf("DEBUG: Successfully selected group '%s', groupInfo: %+v", groupName, groupInfo)
-	case <-time.After(13 * time.Second):
-		return fmt.Errorf("DownloadArticles: Timeout selecting group '%s' after 13 seconds", newsgroup)
-	}
-	// check if group has at least N articles or ignore fetching
-	localDBnewsgroupInfo, err := proc.DB.GetActiveNewsgroupByName(newsgroup)
-	if err != nil {
-		log.Printf("DownloadArticles: Failed to get local newsgroup info for '%s': %v", newsgroup, err)
-		return fmt.Errorf("DownloadArticles: Failed to get local newsgroup info for '%s': %v", newsgroup, err)
-	}
-	if localDBnewsgroupInfo.MessageCount == 0 && ignoreInitialTinyGroups > 0 && groupInfo.Count < ignoreInitialTinyGroups {
-		log.Printf("DownloadArticles: Initial Fetch, Skipping group '%s' with only %d articles (ignore threshold: %d)", newsgroup, groupInfo.Count, ignoreInitialTinyGroups)
-		return nil
-	}
-
-	// Get the provider name for progress tracking
-	providerName := "unknown"
-	if proc.Pool.Backend.Provider != nil {
-		providerName = proc.Pool.Backend.Provider.Name
-	}
-	if providerName == "unknown" {
-		return fmt.Errorf("errror in DownloadArticles: Provider name is unknown, cannot proceed with group '%s'", newsgroup)
-	}
-	log.Printf("DownloadArticles: ng: '%s' @ (%s)", newsgroup, providerName)
-	run := 0
-doWork:
-	if proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
-	}
-
-	lastArticle, err := progressDB.GetLastArticle(providerName, newsgroup)
-	if err != nil {
-		log.Printf("DownloadArticles: Failed to get last article for group '%s' from provider '%s': %v", newsgroup, providerName, err)
-		return fmt.Errorf("DownloadArticles: Failed to get last article for group '%s' from provider '%s': %v", newsgroup, providerName, err)
-	}
-
-	// Handle special progress values:
-	// progress = 0: No previous progress (new provider/group)
-	// progress = -1: User-requested date rescan (skip auto-detection)
-	if lastArticle == 0 {
-		checkGroupDBs, checkGroupErr := proc.DB.GetGroupDBs(newsgroup)
-		if checkGroupErr != nil {
-			return fmt.Errorf("DownloadArticles: Failed to get group DBs for '%s': %v", newsgroup, checkGroupErr)
-		}
-
-		lastArticleDate, checkDateErr := proc.DB.GetLastArticleDate(checkGroupDBs)
-		if err := proc.DB.ForceCloseGroupDBs(checkGroupDBs); err != nil {
-			log.Printf("error in DownloadArticles ForceCloseGroupDBs err='%v'", err)
-		}
-
-		if checkDateErr != nil {
-			return fmt.Errorf("DownloadArticles: Failed to get last article date for '%s': %v", newsgroup, checkDateErr)
-		}
-
-		// If group has existing articles, use date-based download instead
-		if lastArticleDate != nil {
-			log.Printf("DownloadArticles: No progress for provider '%s' but group '%s' has existing articles, switching to date-based download from: %s",
-				providerName, newsgroup, lastArticleDate.Format("2006-01-02"))
-			return proc.DownloadArticlesFromDate(newsgroup, *lastArticleDate, 0, DLParChan) // Use 0 for ignore threshold since group already exists
-		}
-	} else if lastArticle == -1 {
-		// User-requested date rescan - reset to start from beginning
-		lastArticle = 0
-		log.Printf("DownloadArticles: Date rescan mode for group '%s', starting from beginning", newsgroup)
-	}
-	start := lastArticle + 1           // Start from the first article in the remote group
-	end := start + int64(MaxBatch) - 1 // End at the last article in the remote group
-	if end > groupInfo.Last {
-		end = groupInfo.Last
-	}
-	if start > end {
-		log.Printf("DownloadArticles: No new data to import for newsgroup '%s' start=%d end=%d (remote: first=%d last=%d)", newsgroup, start, end, groupInfo.First, groupInfo.Last)
-		return ErrUpToDate
-	}
-	toFetch := end - start
-	if toFetch > nntp.MaxReadLinesXover {
-		// Limit to N articles per batch fetch
-		end = start + nntp.MaxReadLinesXover - 1
-		toFetch = end - start
-		log.Printf("DownloadArticles: Limiting fetch for %s to %d articles (start=%d, end=%d)", newsgroup, toFetch, start, end)
-	}
-	if toFetch <= 0 {
-		log.Printf("DownloadArticles: No data to fetch for newsgroup '%s' (start=%d, end=%d)", newsgroup, start, end)
-		return nil
-	}
-
-	if proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
-	}
-	log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d)", newsgroup, start, end, groupInfo.Last)
-	messageIDs, err := proc.Pool.XHdr(newsgroup, "message-id", start, end)
-	if err != nil || len(messageIDs) == 0 {
-		log.Printf("Failed to fetch message IDs for group '%s': %v", newsgroup, err)
-		return err
-	}
-	if proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
-	}
-	log.Printf("DownloadArticles: XHDR fetched %d msgIds ng: '%s' (%d to %d)", len(messageIDs), newsgroup, start, end)
-	//log.Printf("proc.Pool.Backend=%#v", proc.Pool.Backend)
-	//batchQueue := make(chan *batchItem, len(messageIDs))
-	returnChan := make(chan *batchItem, len(messageIDs))
-	log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", len(messageIDs), newsgroup, proc.Pool.Backend.MaxConns)
-
-	// for every undownloaded overview entry, create a batch item
-	batchList := make([]*batchItem, 0, len(messageIDs)) // Slice to hold batch items
-	//skipped := 0
+	//log.Printf("DownloadArticles: ng: '%s' @ (%s)", newsgroup, providerName)
 	groupDBs, err := proc.DB.GetGroupDBs(newsgroup)
 	if err != nil {
 		log.Printf("Failed to get group DBs for newsgroup '%s': %v", newsgroup, err)
@@ -187,159 +126,178 @@ doWork:
 		log.Printf("DownloadArticles: Failed to get group DBs for newsgroup '%s': %v", newsgroup, err)
 		return fmt.Errorf("error in DownloadArticles: failed to get group DBs err='%v'", err)
 	}
-	exists := 0
 	defer proc.DB.ForceCloseGroupDBs(groupDBs)
-	for _, msgID := range messageIDs {
-		if groupDBs.ExistsMsgIdInArticlesDB(msgID.Value) {
-			exists++
-			returnChan <- &batchItem{Error: errIsDuplicateError}
-			continue
+	if proc.DB.IsDBshutdown() {
+		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
+	}
+	//remaining := groupInfo.Last - end
+	//log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d, remaining: %d)", newsgroup, start, end, groupInfo.Last, remaining)
+	var mux sync.Mutex
+	var lastGoodEnd int64 = 1
+	toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
+	xhdrChan := make(chan *nntp.HeaderLine)
+	errChan := make(chan error, 1)
+	log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
+	go func(mux *sync.Mutex) {
+		aerr := proc.Pool.XHdrStreamed(newsgroup, "message-id", start, end, xhdrChan)
+		if aerr != nil {
+			log.Printf("Failed to fetch message IDs for group '%s': err='%v' toFetch=%d", newsgroup, aerr, toFetch)
+			errChan <- aerr
+			return
 		}
-		msgIdItem := history.MsgIdCache.GetORCreate(msgID.Value)
-		msgIdItem.Mux.Lock()
-		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
-		msgIdItem.Response = history.CaseLock
-		msgIdItem.Mux.Unlock()
-		/* TODO: check if article exists or not?!
-		 	since we don't process crossposts with bulkmode ...
-			checking here if an article already exists will actually  not file the article to this group
-			so checking should happen earlier on network level in ihave/check/takethis
-		if response, err := proc.History.Lookup(msgIdItem) response != history.CasePass {
-			skipped++
-			returnChan <- nil
-			log.Printf("DownloadArticles: group '%s' Skipping article %s as it is already in history", groupName, msgID.Value)
-			continue // Skip if already in history
+		errChan <- nil
+	}(&mux)
+	if proc.DB.IsDBshutdown() {
+		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
+	}
+	//log.Printf("DownloadArticles: XHDR is fetching %d msgIds ng: '%s' (%d to %d)", len(messageIDs), newsgroup, start, end)
+	releaseChan := make(chan struct{}, 1)
+	notifyChan := make(chan int64, 1)
+	go func() {
+		// launch to background and feed queue
+		//log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", toFetch, newsgroup, proc.Pool.Backend.MaxConns)
+		var exists, queued int64
+		for hdr := range xhdrChan {
+			/*
+				if !CheckMessageIdFormat(hdr.Value) {
+					log.Printf("[FETCHER]: Invalid message ID format: '%s'", hdr.Value)
+					groupBatch.ReturnQ <- &BatchItem{Error: errIsDuplicateError}
+					continue
+				}
+			*/
+			//log.Printf("DownloadArticles: Checking if article '%s' exists in group '%s'", msgID.Value, newsgroup)
+			if groupDBs.ExistsMsgIdInArticlesDB(hdr.Value) {
+				exists++
+				groupBatch.ReturnQ <- &BatchItem{Error: errIsDuplicateError}
+				continue
+			}
+			msgIdItem := history.MsgIdCache.GetORCreate(hdr.Value)
+			msgIdItem.Mux.Lock()
+			msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
+			msgIdItem.Response = history.CaseLock
+			msgIdItem.Mux.Unlock()
+			item := &BatchItem{
+				MessageID: &msgIdItem.MessageId, // Use pointer to avoid copying
+				GroupName: proc.DB.Batch.GetNewsgroupPointer(newsgroup),
+			}
+			item.ReturnQ = groupBatch.ReturnQ
+			Batch.GetQ <- item // send to fetcher/main.go: for item := range processor.Batch.Queue
+			queued++
+			//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", hdr.ArticleNum, hdr.Value, *item.GroupName)
+			hdr.Value = ""
+			hdr.ArticleNum = 0
+		} // end for xhdrChan
+		log.Printf("DownloadArticles: XHdr closed, finished feeding batch queue %d articles for group '%s' (existing: %d) total=%d", queued, newsgroup, exists, queued+exists)
+		if queued == 0 {
+			releaseChan <- struct{}{}
+		} else {
+			notifyChan <- queued
 		}
-		*/
-		item := &batchItem{
-			MessageID:  msgIdItem.MessageId, // Use pointer to avoid copying
-			GroupName:  proc.DB.Batch.GetNewsgroupPointer(newsgroup),
-			ReturnChan: returnChan,
-		}
-		Batch.Queue <- item                 // send to batch queue
-		batchList = append(batchList, item) // also add to batchList for later processing
-		//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", num, msgID, groupName)
-	} // end for undl
-
-	dups, lastDups := 0, 0
-	gots, lastGots := 0, 0
-	errs, lastErrs := 0, 0
-	aliveCheck := 10 * time.Second
+	}()
+	var dups, lastDups, gots, lastGots, notf, lastNotf, errs, lastErrs int64
+	aliveCheck := 5 * time.Second
 	ticker := time.NewTicker(100 * time.Millisecond)
 	startTime := time.Now()
 	nextCheck := startTime.Add(aliveCheck)
 	deathCounter := 0 // Counter to track if we are stuck
+	bulkmode := true
+	var gotQueued int64 = -1
 	// Start processing loop
 forProcessing:
 	for {
 		select {
+		case gotQueued = <-notifyChan:
+		case <-releaseChan:
+			//log.Printf("DownloadArticles: releaseChan triggered '%s'", newsgroup)
+			break forProcessing
 		case <-ticker.C:
-			//Batch.Mutex.Lock()
-			//log.Printf("DownloadArticles: backfilling group '%s' (gots: %d, errs: %d) batchQueue=%d deathcounter=%d downloaded=%d quit=%d", groupName, gots, errs, len(batchQueue), deathCounter, downloaded, quit)
-			//Batch.Mutex.Unlock()
 			// Periodically check if we are done or stuck
-			if gots+errs+dups >= len(messageIDs) {
-				log.Printf("DownloadArticles: group '%s' All %d (dups: %d, gots: %d, errs: %d) articles processed, closing batch channel", newsgroup, dups+gots+errs, dups, gots, errs)
-				//close(batchQueue)   // Close channel to stop goroutines
+			if gotQueued > 0 && gots+errs+notf == gotQueued {
+				log.Printf("OK-DA: '%s' (dups: %d, gots: %d, notf: %d, errs: %d, gotQueued: %d)", newsgroup, dups, gots, notf, errs, gotQueued)
 				break forProcessing // Exit processing loop if all items are processed
 			}
-			if dups > lastDups || gots > lastGots || errs > lastErrs {
+			if dups > lastDups || gots > lastGots || notf > lastNotf || errs > lastErrs {
 				nextCheck = time.Now().Add(aliveCheck) // Reset last check time
 				lastDups = dups
 				lastGots = gots
+				lastNotf = notf
 				lastErrs = errs
 				deathCounter = 0 // Reset death counter on progress
 			}
 			if nextCheck.Before(time.Now()) {
 				// If we haven't made progress in N seconds, log a warning
-				log.Printf("DownloadArticles: group '%s' Stuck? %d articles processed (%d dups, %d gots, %d errs) in last 10 seconds (since Start=%v)", newsgroup, dups+gots+errs, dups, gots, errs, time.Since(startTime))
+				log.Printf("DownloadArticles: '%s' Stuck? %d articles processed (%d dups, %d gots, %d notf, %d errs, gotQueued: %d) (since Start=%v)", newsgroup, dups+gots+notf+errs, dups, gots, notf, errs, gotQueued, time.Since(startTime))
 				nextCheck = time.Now().Add(aliveCheck) // Reset last check time
 				deathCounter++
 			}
-			if deathCounter > 6 { // If we are stuck for too long
-				log.Printf("DownloadArticles: group '%s' Timeout... stopping import deathCounter=%d", newsgroup, deathCounter)
-				close(Batch.Queue) // Close channel to stop goroutines
-				return fmt.Errorf("DownloadArticles: group '%s' Timeout... %d articles processed (%d dups, %d got, %d errs)", newsgroup, dups+gots+errs, dups, gots, errs)
+			if deathCounter > 3 { // If we are stuck for too long
+				log.Printf("DownloadArticles: '%s' Timeout... stopping import deathCounter=%d", newsgroup, deathCounter)
+				return fmt.Errorf("DownloadArticles: '%s' Timeout... %d articles processed (%d dups, %d got, %d errs)", newsgroup, dups+gots+notf+errs, dups, gots, errs)
 			}
 
-		case item := <-returnChan:
-			if item == nil || item.Error != nil {
+		case item := <-groupBatch.ReturnQ:
+			//log.Printf("DEBUG-RETURN: received item: Error=%v, Article=%v", item != nil && item.Error != nil, item != nil && item.Article != nil)
+			if item == nil || item.Error != nil || item.Article == nil {
 				if item != nil {
-					if item.Error == errIsDuplicateError {
+					switch item.Error {
+					case errIsDuplicateError:
 						dups++
-					} else {
-						log.Printf("DownloadArticles: group '%s' Error fetching article %s: %v .. continue", newsgroup, item.MessageID, item.Error)
+					case nntp.ErrArticleNotFound:
+						notf++
+					case nntp.ErrArticleRemoved:
+						notf++
+					default:
+						log.Printf("DownloadArticles: '%s' Error fetching article %s: %v .. continue", newsgroup, *item.MessageID, item.Error)
 						errs++
 					}
+				} else {
+					log.Printf("ERROR in DownloadArticles: received nil item (errs %d)", errs)
+					errs++
+				}
+			} else if item.Error == nil && item.Article != nil {
+				if proc.DB.IsDBshutdown() {
+					return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
+				}
+				//log.Printf("DownloadArticles --> proc.processArticle '%s' in group '%s'", *item.MessageID, newsgroup)
+				response, err := proc.processArticle(item.Article, newsgroup, bulkmode)
+				if err != nil {
+					log.Printf("DownloadArticles: '%s' Failed to process article (%s): response=%d err='%v'", newsgroup, *item.MessageID, response, err)
+					errs++
+				} else {
+					gots++
 				}
 			} else {
-				gots++
-				//log.Printf("DownloadArticles: group '%s' fetched article (%s) %dups=%d gots=%d errs=%d", groupName, *item.MessageID, dups, gots, errs)
+				log.Printf("LOST CASE IN DownloadArticles item='%#v'", item)
+				errs++
+			}
+			item.Article = nil
+			item.MessageID = nil
+			item.GroupName = nil
+			item.Error = nil
+			item.ReturnQ = nil
+			if gotQueued > 0 && gots+errs+notf == gotQueued {
+				log.Printf("OK-DA: '%s' (dups: %d, gots: %d, notf: %d, errs: %d, gotQueued: %d)", newsgroup, dups, gots, notf, errs, gotQueued)
+				break forProcessing // Exit processing loop if all items are processed
 			}
 		}
 	} // end for processing routine (counts only)
 
-	// now loop over the batchList and insert articles
-	for _, item := range batchList {
-		if item == nil {
-			continue // Skip nil items (not fetched)
-		}
-		if item.Article == nil {
-			log.Printf("DownloadArticles: group '%s' Article '%s' was not fetched successfully, continue", newsgroup, item.MessageID)
-			continue
-			//return fmt.Errorf("internal/importer:  group '%s' Article '%s' was not fetched successfully", newsgroup, *item.MessageID)
-		}
-		if proc.DB.IsDBshutdown() {
-			return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
-		}
-		bulkmode := true
-		response, err := proc.processArticle(item.Article, newsgroup, bulkmode)
-		if err != nil {
-			log.Printf("DownloadArticles:  group '%s' Failed to process article (%s): %v", newsgroup, item.MessageID, err)
-			continue // Skip this item on error
-		}
-		if response == history.CasePass {
-			//log.Printf("DownloadArticles:  group '%s' imported article (%s)", groupName, *item.MessageID)
-		}
-
-		// Trigger GC periodically during large batch processing
-	} // end for batchList
-
-	for i, item := range batchList {
-		if item != nil {
-			item.ArticleNum = 0
-			item.MessageID = ""
-			item.GroupName = nil
-			item.ReturnChan = nil
-			item.Error = nil
-			item.Article = nil
-			item = nil
-			batchList[i] = nil
-		}
-	}
-	batchList = nil
-	//runtime.GC()
-
 	if proc.DB.IsDBshutdown() {
 		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
 	}
-
-	err = progressDB.UpdateProgress(providerName, newsgroup, end)
+	xerr := <-errChan
+	if xerr != nil {
+		end = lastGoodEnd
+	}
+	err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, newsgroup, end)
 	if err != nil {
-		log.Printf("Failed to update progress for provider '%s' group '%s': %v", providerName, newsgroup, err)
+		log.Printf("Failed to update progress for provider '%s' group '%s': %v", proc.Pool.Backend.Provider.Name, newsgroup, err)
 	}
-	log.Printf("DownloadArticles: progressDB group '%s' processed %d articles (dups: %d, gots: %d, errs: %d) in %v run=%d end=%d", newsgroup, gots+errs+dups, dups, gots, errs, time.Since(startTime), run, end)
-
-	run++
+	log.Printf("DownloadArticles: progressDB group '%s' processed %d articles (dups: %d, gots: %d, errs: %d) in %v end=%d", newsgroup, gots+errs+dups, dups, gots, errs, time.Since(startTime), end)
 	// do another one if we haven't run enough times
-	if run < 250 {
-		goto doWork
-	}
-
-	counters := GroupCounter.GetResetAll()
-	for ngc, count := range counters {
-		log.Printf("Downloaded ng:%s articles: %d", ngc, count)
-	}
+	runtime.GC()
+	counter := GroupCounter.GetReset(newsgroup)
+	log.Printf("Downloaded ng:%s articles: %d", newsgroup, counter)
 	if proc.DB.IsDBshutdown() {
 		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
 	}
@@ -367,8 +325,8 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 	if err == nil && len(firstOverviews) > 0 {
 		firstArticleDate := ParseNNTPDate(firstOverviews[0].Date)
 		if !firstArticleDate.IsZero() && targetDate.Before(firstArticleDate) {
-			log.Printf("Target date %s is before first article %d (date: %s), returning first article",
-				targetDate.Format("2006-01-02"), first, firstArticleDate.Format("2006-01-02"))
+			log.Printf("Target date %s is before first article %d (date: %s), returning first article. ng: %s",
+				targetDate.Format("2006-01-02"), first, firstArticleDate.Format("2006-01-02"), groupName)
 			return first, nil
 		}
 	}
@@ -393,7 +351,7 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 			continue
 		}
 
-		log.Printf("Article %d has date %s", mid, articleDate.Format("2006-01-02"))
+		log.Printf("Scanning: %s - Article %d has date %s", groupName, mid, articleDate.Format("2006-01-02"))
 
 		if articleDate.Before(targetDate) {
 			first = mid
@@ -402,14 +360,14 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 		}
 	}
 
-	log.Printf("Found start article: %d", last)
+	log.Printf("Found start article: %d, ng: %s", last, groupName)
 	return last, nil
 }
 
 // DownloadArticlesFromDate fetches articles starting from a specific date
 // Uses special progress tracking: sets progress to startArticle-1, or -1 if starting from article 1
 // This prevents DownloadArticles from using "no progress detected" logic for existing groups
-func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, ignoreInitialTinyGroups int64, DLParChan chan struct{}) error {
+func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, ignoreInitialTinyGroups int64, DLParChan chan struct{}, progressDB *database.ProgressDB) error {
 	log.Printf("DownloadArticlesFromDate: Starting download from date %s for group '%s'",
 		startDate.Format("2006-01-02"), groupName)
 
@@ -421,11 +379,7 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 
 	// Open progress DB and temporarily override the last article position
 	// so DownloadArticles will start from our desired article number
-	progressDB, err := database.NewProgressDB("data/progress.db")
-	if err != nil {
-		return fmt.Errorf("failed to open progress DB: %w", err)
-	}
-	defer progressDB.Close()
+	// progressDB is now passed as parameter to avoid opening/closing for each group
 
 	// Get the provider name for progress tracking
 	providerName := "unknown"
@@ -439,8 +393,8 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 	// Store the current progress to restore later if needed
 	currentProgress, err := progressDB.GetLastArticle(providerName, groupName)
 	if err != nil {
-		log.Printf("Warning: Could not get current progress for %s/%s: %v", providerName, groupName, err)
-		currentProgress = 0
+		return fmt.Errorf("error in DownloadArticlesFromDate: Could not get current progress for %s/%s: %v", providerName, groupName, err)
+
 	}
 
 	// Set progress to startArticle-1 with special marker for date rescan
@@ -457,8 +411,24 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 
 	log.Printf("DownloadArticlesFromDate: Set progress to %d (date rescan), will start downloading from article %d", tempProgress, startArticle)
 
-	// Now use the high-performance DownloadArticles function
-	err = proc.DownloadArticles(groupName, ignoreInitialTinyGroups, DLParChan)
+	// Get group info to calculate proper download range
+	groupInfo, err := proc.Pool.SelectGroup(groupName)
+	if err != nil {
+		return fmt.Errorf("failed to select group for date download: %w", err)
+	}
+
+	// Calculate download range: start from found article, end at current group last or startArticle + MaxBatch
+	downloadStart := startArticle
+	downloadEnd := startArticle + MaxBatchSize - 1
+	if downloadEnd > groupInfo.Last {
+		downloadEnd = groupInfo.Last
+	}
+
+	log.Printf("DownloadArticlesFromDate: Downloading range %d-%d for group '%s' (group last: %d)",
+		downloadStart, downloadEnd, groupName, groupInfo.Last)
+
+	// Now use the high-performance DownloadArticles function with proper article ranges
+	err = proc.DownloadArticles(groupName, ignoreInitialTinyGroups, DLParChan, progressDB, downloadStart, downloadEnd)
 
 	// If there was an error and we haven't made progress, restore the original progress
 	if err != nil && err != ErrUpToDate {

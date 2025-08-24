@@ -336,7 +336,7 @@ func (leg *LegacyImporter) importLegacyArticle(legacyArticle *LegacyArticle) err
 	}
 	// legacyArticle.Article includes headers, body and final DOT+CRLF pair
 	lines, size := parseArticleTextToSlice(legacyArticle.Article)
-	art, err := nntp.ParseLegacyArticleLines(legacyArticle.MsgID, lines) // split into headers and body
+	art, err := nntp.ParseLegacyArticleLines(legacyArticle.MsgID, lines, true) // split into headers and body
 	if err != nil {
 		return fmt.Errorf("failed to parse article '%s' (%d bytes) to lines %d size %d: %w", legacyArticle.MsgID, len(legacyArticle.Article), len(lines), size, err)
 	}

@@ -132,7 +132,7 @@ func fixGroupThreadActivity(db *database.Database, groupName string) error {
 			}
 
 			// Skip hidden articles and obvious future posts
-			if hide != 0 || dateSent.After(time.Now().Add(2*time.Hour)) {
+			if hide != 0 || dateSent.UTC().After(time.Now().UTC().Add(25*time.Hour)) {
 				continue
 			}
 
@@ -158,7 +158,7 @@ func fixGroupThreadActivity(db *database.Database, groupName string) error {
 			}
 
 			updatedCount++
-			if maxDate.After(time.Now()) {
+			if maxDate.UTC().After(time.Now().UTC()) {
 				log.Printf("Thread %d: updated %v -> %v (still future!)",
 					thread.root, thread.lastActivity.Format("2006-01-02 15:04:05"), maxDate.Format("2006-01-02 15:04:05"))
 			}

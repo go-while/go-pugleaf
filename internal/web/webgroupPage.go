@@ -55,6 +55,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 		data := GroupPageData{
 			TemplateData: s.getBaseTemplateData(c, groupName),
 			GroupName:    groupName,
+			GroupPtr:     nil, // No group pointer available in error case
 			Articles:     nil,
 			Pagination:   nil,
 		}
@@ -100,6 +101,14 @@ func (s *WebServer) groupPage(c *gin.Context) {
 
 	articles, totalCount, hasMore, err = s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, LIMIT_groupPage)
 	if err == nil {
+		// Initialize ArticleNums for all articles
+		for _, article := range articles {
+			if article.ArticleNums == nil {
+				article.ArticleNums = make(map[*string]int64)
+			}
+			article.ArticleNums[groupDBs.NewsgroupPtr] = article.ArticleNum
+		}
+
 		if page > 0 {
 			// Page-based pagination info
 			pagination = models.NewPaginationInfo(page, LIMIT_groupPage, totalCount)
@@ -118,6 +127,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 	data := GroupPageData{
 		TemplateData: s.getBaseTemplateData(c, groupName),
 		GroupName:    groupName,
+		GroupPtr:     groupDBs.NewsgroupPtr,
 		Articles:     articles,
 		Pagination:   pagination,
 	}

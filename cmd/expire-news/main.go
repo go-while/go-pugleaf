@@ -324,7 +324,7 @@ func expireArticlesInGroup(db *database.Database, groupName string, cutoffDate t
 	totalExpired := 0
 	totalScanned := 0
 	cutoffTimestamp := cutoffDate.Unix()
-
+	newsgroupPtr := db.Batch.GetNewsgroupPointer(groupName)
 	// Process articles in batches
 	offset := 0
 	for {
@@ -348,13 +348,13 @@ func expireArticlesInGroup(db *database.Database, groupName string, cutoffDate t
 			// Check if article is older than cutoff (using DateSent instead of PostedAt)
 			if article.DateSent.Unix() < cutoffTimestamp {
 				expiredInBatch++
-				articlesToDelete = append(articlesToDelete, article.ArticleNum)
+				articlesToDelete = append(articlesToDelete, article.ArticleNums[newsgroupPtr])
 
 				if len(articlesToDelete) > 100 { // Log every 100 deletions
 					if dryRun {
-						log.Printf("  Would delete articles up to ID %d...", article.ArticleNum)
+						log.Printf("  Would delete articles up to ID %d...", article.ArticleNums[newsgroupPtr])
 					} else {
-						log.Printf("  Deleting articles up to ID %d...", article.ArticleNum)
+						log.Printf("  Deleting articles up to ID %d...", article.ArticleNums[newsgroupPtr])
 					}
 				}
 			}
@@ -402,7 +402,9 @@ func getArticleBatch(groupDBs *database.GroupDBs, offset, limit int) ([]*models.
 	var articles []*models.Article
 	for rows.Next() {
 		article := &models.Article{}
-		err := rows.Scan(&article.ArticleNum, &article.DateSent)
+		article.ArticleNums = make(map[*string]int64)
+		article.ArticleNums[groupDBs.NewsgroupPtr] = -1 // Initialize with group name
+		err := rows.Scan(article.ArticleNums[groupDBs.NewsgroupPtr], &article.DateSent)
 		if err != nil {
 			return nil, err
 		}

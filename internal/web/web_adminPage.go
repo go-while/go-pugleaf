@@ -57,7 +57,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	if searchTerm != "" {
 		// Use search function if search term provided
 		// For admin page, get all results without pagination for now
-		newsgroups, err = s.DB.SearchNewsgroups(searchTerm, 1000, 0) // High limit for admin
+		newsgroups, err = s.DB.SearchNewsgroups(searchTerm, 1000, 0, true) // High limit for admin
 		if err != nil {
 			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to search newsgroups")
 			return

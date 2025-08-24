@@ -7,5 +7,5 @@ while IFS="" read SERVER; do
  echo "rsync to $SERVER"
  #rsync -advz --delete-before build/ copynew.sh run_web*.sh "$SERVER":~/new/ &
  #sleep 0.3
- rsync -advz --progress --delete-before web preload .update getUpdate.sh "$SERVER":~/ &
+ rsync -advz --progress web preload .update getUpdate.sh "$SERVER":~/ 1>/dev/null &
 done< <(echo "$SERVERS")

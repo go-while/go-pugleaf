@@ -48,6 +48,12 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 	var rootOverviews []*models.Overview
 	for _, ft := range forumThreads {
 		if ft.RootArticle != nil {
+			// Initialize ArticleNums map if nil
+			if ft.RootArticle.ArticleNums == nil {
+				ft.RootArticle.ArticleNums = make(map[*string]int64)
+			}
+			// Store the article number for this newsgroup
+			ft.RootArticle.ArticleNums[groupDBs.NewsgroupPtr] = ft.RootArticle.ArticleNum
 			rootOverviews = append(rootOverviews, ft.RootArticle)
 		}
 	}
@@ -83,6 +89,7 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 		"AvailableSections":   baseData.AvailableSections,
 		"AvailableAIModels":   baseData.AvailableAIModels,
 		"GroupName":           groupName,
+		"GroupPtr":            groupDBs.NewsgroupPtr,
 		"ForumThreads":        forumThreads,
 		"TotalThreads":        totalThreads,
 		"TotalMessages":       totalMessages,

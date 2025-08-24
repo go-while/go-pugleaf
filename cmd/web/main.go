@@ -57,6 +57,7 @@ var (
 	// Migration flags
 	updateNewsgroupActivity    bool
 	updateNewsgroupsHideFuture bool
+	writeActiveFile            string
 
 	// Bridge flags (disabled by default)
 	enableFediverse   bool
@@ -95,118 +96,107 @@ func (pa *ProcessorAdapter) CheckNoMoreWorkInHistory() bool {
 	return pa.processor.CheckNoMoreWorkInHistory()
 }
 
+var testFormats = []string{
+	"2006-01-02 15:04:05-07:00",
+	"2006-01-02 15:04:05+07:00",
+	"2006-01-02 15:04:05",
+}
+
 // updateNewsgroupLastActivity updates newsgroups' updated_at field based on their latest article
 func updateNewsgroupLastActivity(db *database.Database) error {
-	const batchSize = 100 // Process 100 newsgroups at a time
-	offset := 0
 	updatedCount := 0
 	totalProcessed := 0
-
-	for {
-		// Get a batch of newsgroups
-		query := "SELECT id, name FROM newsgroups WHERE message_count > 0 LIMIT ? OFFSET ?"
-		rows, err := db.GetMainDB().Query(query, batchSize, offset)
-		if err != nil {
-			return fmt.Errorf("failed to query newsgroups batch at offset %d: %w", offset, err)
+	var id int
+	var name string
+	var formattedDate string
+	var parsedDate time.Time
+	var latestDate sql.NullString
+	// Get newsgroups
+	rows, err := db.GetMainDB().Query("SELECT id, name FROM newsgroups WHERE message_count > 0")
+	if err != nil {
+		return fmt.Errorf("failed to query newsgroups: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := rows.Scan(&id, &name); err != nil {
+			return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity rows.Scan newsgroup: %v", err)
 		}
-
-		batchCount := 0
-		var id int
-		var name string
-
-		for rows.Next() {
-			batchCount++
-			if err := rows.Scan(&id, &name); err != nil {
-				rows.Close()
-				return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity rows.Scan newsgroup: %v", err)
-			}
-
-			// Get the group database for this newsgroup
-			groupDBs, err := db.GetGroupDBs(name)
-			if err != nil {
-				log.Printf("[WEB]: updateNewsgroupLastActivity GetGroupDB %s: %v", name, err)
-				continue
-			}
-
-			_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET spam = 1 WHERE spam = 0 AND hide = 1", nil)
-			if err != nil {
-				db.ForceCloseGroupDBs(groupDBs)
-				log.Printf("[WEB]: Failed to update spam flags for newsgroup %s: %v", name, err)
-				continue
-			}
-
-			// Query the latest article date from the group's articles table (excluding hidden articles)
-			var latestDate sql.NullString
-			err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT MAX(date_sent) FROM articles WHERE hide = 0", nil, &latestDate)
-			//groupDBs.Return(db) // Always return the database connection
-			db.ForceCloseGroupDBs(groupDBs)
-			if err != nil {
-				log.Printf("[WEB]: updateNewsgroupLastActivity RetryableQueryRowScan %s: %v", name, err)
-				continue
-			}
-
-			// Only update if we found a latest date
-			if latestDate.Valid {
-				// Parse the date and format it consistently as UTC
-				dateStr := latestDate.String
-				if dateStr == "" {
-					log.Printf("[WEB]: updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", name)
-					return fmt.Errorf("error updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", name)
-				}
-				var parsedDate time.Time
-				var err error
-
-				// Try multiple date formats to handle various edge cases
-				formats := []string{
-					"2006-01-02 15:04:05-07:00",
-					"2006-01-02 15:04:05+07:00",
-					"2006-01-02 15:04:05",
-				}
-
-				for _, format := range formats {
-					parsedDate, err = time.Parse(format, dateStr)
-					if err == nil {
-						break
-					}
-				}
-
-				if err != nil {
-					log.Printf("[WEB]: updateNewsgroupLastActivity parsing date '%s' for %s: %v", dateStr, name, err)
-					continue
-				}
-
-				// Format as UTC without timezone info to match db_batch.go format
-				formattedDate := parsedDate.UTC().Format("2006-01-02 15:04:05")
-				_, err = db.GetMainDB().Exec("UPDATE newsgroups SET updated_at = ? WHERE id = ?", formattedDate, id)
-				if err != nil {
-					log.Printf("[WEB]: error updateNewsgroupLastActivity updating newsgroup %s: %v", name, err)
-					continue
-				}
-				log.Printf("[WEB]: updateNewsgroupLastActivity: '%s' dateStr=%s formattedDate=%s", name, dateStr, formattedDate)
-				updatedCount++
-			}
-			totalProcessed++
+		if err := updateNewsGroupActivityValue(db, &id, &name, &latestDate, &parsedDate, &formattedDate); err == nil {
+			updatedCount++
 		}
-
-		rows.Close()
-
-		// Check for iteration errors
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("error updateNewsgroupLastActivity iterating newsgroups batch: %w", err)
-		}
-
-		log.Printf("[WEB]: Processed batch %d-%d (%d newsgroups), updated %d so far",
-			offset+1, offset+batchCount, batchCount, updatedCount)
-
-		// If we got fewer results than batch size, we're done
-		if batchCount < batchSize {
-			break
-		}
-
-		offset += batchSize
+		totalProcessed++
+		log.Printf("[WEB]: Processed %d newsgroups, updated %d so far", totalProcessed, updatedCount)
+	}
+	// Check for iteration errors
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error updateNewsgroupLastActivity iterating newsgroups: %w", err)
 	}
 
 	log.Printf("[WEB]: updateNewsgroupLastActivity completed: processed %d total newsgroups, updated %d", totalProcessed, updatedCount)
+	return nil
+}
+
+const ActivityQuery = "UPDATE newsgroups SET updated_at = ? WHERE id = ? AND updated_at != ?"
+
+func updateNewsGroupActivityValue(db *database.Database, id *int, name *string, latestDate *sql.NullString, parsedDate *time.Time, formattedDate *string) error {
+	// Get the group database for this newsgroup
+	groupDBs, err := db.GetGroupDBs(*name)
+	if err != nil {
+		log.Printf("[WEB]: updateNewsgroupLastActivity GetGroupDB %s: %v", *name, err)
+		return err
+	}
+
+	/*
+		_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET spam = 1 WHERE spam = 0 AND hide = 1", nil)
+		if err != nil {
+			db.ForceCloseGroupDBs(groupDBs)
+			log.Printf("[WEB]: Failed to update spam flags for newsgroup %s: %v", name, err)
+			continue
+		}
+	*/
+
+	// Query the latest article date from the group's articles table (excluding hidden articles)
+	rows, err := database.RetryableQuery(groupDBs.DB, "SELECT MAX(date_sent) FROM articles WHERE hide = 0 LIMIT 1", nil, latestDate)
+	//groupDBs.Return(db) // Always return the database connection
+	if err != nil {
+		log.Printf("[WEB]: updateNewsgroupLastActivity RetryableQueryRowScan %s: %v", *name, err)
+		return err
+	}
+	defer rows.Close()
+	defer db.ForceCloseGroupDBs(groupDBs)
+	for rows.Next() {
+		// Only update if we found a latest date
+		if latestDate.Valid {
+			// Parse the date and format it consistently as UTC
+			if latestDate.String == "" {
+				log.Printf("[WEB]: updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", *name)
+				return fmt.Errorf("error updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", *name)
+			}
+			// Try multiple date formats to handle various edge cases
+			for _, format := range testFormats {
+				*parsedDate, err = time.Parse(format, latestDate.String)
+				if err == nil {
+					break
+				}
+			}
+			if err != nil {
+				log.Printf("[WEB]: updateNewsgroupLastActivity parsing date '%s' for %s: %v", latestDate.String, *name, err)
+				return err
+			}
+
+			// Format as UTC without timezone info to match db_batch.go format
+			*formattedDate = parsedDate.UTC().Format("2006-01-02 15:04:05")
+			result, err := db.GetMainDB().Exec(ActivityQuery, *formattedDate, *id, *formattedDate)
+			if err != nil {
+				log.Printf("[WEB]: error updateNewsgroupLastActivity updating newsgroup %s: %v", *name, err)
+				return err
+			}
+			if _, err := result.RowsAffected(); err != nil {
+				log.Printf("[WEB]: updateNewsgroupLastActivity: '%s' dateStr=%s formattedDate=%s", *name, latestDate.String, *formattedDate)
+			}
+
+		}
+	}
 	return nil
 }
 
@@ -274,6 +264,67 @@ func hideFuturePosts(db *database.Database) error {
 	return nil
 }
 
+// writeActiveFileFromDB writes an NNTP active file from the main database newsgroups table
+func writeActiveFileFromDB(db *database.Database, filePath string) error {
+	// Query newsgroups from main database with all fields needed for active file
+	rows, err := db.GetMainDB().Query(`
+		SELECT name, high_water, low_water, status
+		FROM newsgroups
+		WHERE active = 1
+		ORDER BY name
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to query newsgroups: %w", err)
+	}
+	defer rows.Close()
+
+	// Create the output file
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create active file '%s': %w", filePath, err)
+	}
+	defer file.Close()
+
+	totalGroups := 0
+	log.Printf("[WEB]: Writing active file to: %s", filePath)
+
+	// Write each newsgroup in NNTP active file format: groupname highwater lowwater status
+	for rows.Next() {
+		var name string
+		var highWater, lowWater int64
+		var status string
+
+		if err := rows.Scan(&name, &highWater, &lowWater, &status); err != nil {
+			log.Printf("[WEB]: Warning: Failed to scan newsgroup row: %v", err)
+			continue
+		}
+
+		// Validate status field (should be single character)
+		if len(status) != 1 {
+			log.Printf("[WEB]: Warning: Invalid status '%s' for group '%s', using 'y'", status, name)
+			status = "y"
+		}
+
+		// Write in NNTP active file format: groupname highwater lowwater status
+		line := fmt.Sprintf("%s %d %d %s\n", name, highWater, lowWater, status)
+		if _, err := file.WriteString(line); err != nil {
+			return fmt.Errorf("failed to write line for group '%s': %w", name, err)
+		}
+
+		totalGroups++
+		if totalGroups%1000 == 0 {
+			log.Printf("[WEB]: Written %d groups to active file...", totalGroups)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating newsgroups: %w", err)
+	}
+
+	log.Printf("[WEB]: Successfully wrote %d newsgroups to active file: %s", totalGroups, filePath)
+	return nil
+}
+
 var appVersion = "-unset-"
 
 func main() {
@@ -309,6 +360,7 @@ func main() {
 	flag.BoolVar(&repairWatermarks, "repair-watermarks", false, "Repair corrupted newsgroup watermarks caused by preloader (default: false)")
 	flag.BoolVar(&updateNewsgroupActivity, "update-newsgroup-activity", false, "Updates newsgroup updated_at timestamps to reflect actual article activity (default: false)")
 	flag.BoolVar(&updateNewsgroupsHideFuture, "update-newsgroups-hide-futureposts", false, "Hide articles posted more than 48 hours in the future (default: false)")
+	flag.StringVar(&writeActiveFile, "write-active-file", "", "Write NNTP active file from main database newsgroups table to specified path")
 	/*
 		flag.BoolVar(&enableFediverse, "enable-fediverse", false, "Enable Fediverse bridge (default: false)")
 		flag.StringVar(&fediverseDomain, "fediverse-domain", "", "Fediverse domain (e.g. example.com)")
@@ -431,17 +483,16 @@ func main() {
 		log.Fatalf("[WEB]: Failed to initialize database: %v", err)
 	}
 
+	// Initialize progress database once to avoid opening/closing for each group
+	progressDB, err := database.NewProgressDB("data/progress.db")
+	if err != nil {
+		log.Fatalf("[WEB]: Failed to initialize progress database: %v", err)
+	}
+	defer progressDB.Close()
+
 	// Set up the date parser adapter to use processor's ParseNNTPDate
 	database.GlobalDateParser = processor.ParseNNTPDate
 	//log.Printf("[WEB]: Date parser adapter initialized with processor.ParseNNTPDate")
-
-	// Initialize caches after database is loaded (using command-line flag values)
-	db.ArticleCache = database.NewArticleCache(maxArticleCache, time.Duration(maxArticleCacheExpiry)*time.Minute)
-	//log.Printf("[WEB]: Article cache initialized (max %d articles, %v expiry)", maxArticleCache, time.Duration(maxArticleCacheExpiry)*time.Minute)
-
-	// Initialize NNTP authentication cache (15 minute TTL)
-	db.NNTPAuthCache = database.NewNNTPAuthCache(15 * time.Minute)
-	//log.Printf("[WEB]: NNTP authentication cache initialized (15 minute TTL)")
 
 	// Note: Database batch workers are started automatically by OpenDatabase()
 	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
@@ -475,6 +526,18 @@ func main() {
 			os.Exit(1)
 		} else {
 			log.Printf("[WEB]: Newsgroup activity migration completed successfully")
+			os.Exit(0)
+		}
+	}
+
+	// Write active file if requested
+	if writeActiveFile != "" {
+		log.Printf("[WEB]: Writing active file from main database to: %s", writeActiveFile)
+		if err := writeActiveFileFromDB(db, writeActiveFile); err != nil {
+			log.Printf("[WEB]: Error: Failed to write active file: %v", err)
+			os.Exit(1)
+		} else {
+			log.Printf("[WEB]: Active file written successfully")
 			os.Exit(0)
 		}
 	}
@@ -591,7 +654,7 @@ func main() {
 	if withfetch && proc != nil {
 		DownloadMaxPar := 1
 		DLParChan := make(chan struct{}, DownloadMaxPar)
-		go FetchRoutine(db, proc, finalUseShortHashLen, true, isleep, DLParChan) // Start the processor routine in a separate goroutine
+		go FetchRoutine(db, proc, finalUseShortHashLen, true, isleep, DLParChan, progressDB) // Start the processor routine in a separate goroutine
 	}
 
 	// Create and start web server in a goroutine for non-blocking startup
@@ -809,7 +872,8 @@ func NewFetchProcessor(db *database.Database) *processor.Processor {
 	return proc
 }
 
-func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHashLen int, boot bool, isleep int64, DLParChan chan struct{}) {
+func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHashLen int, boot bool, isleep int64, DLParChan chan struct{}, progressDB *database.ProgressDB) {
+	/* DISABLED
 	if isleep < 15 {
 		isleep = 15 // min 15 sec sleep!
 	}
@@ -835,7 +899,7 @@ func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHash
 	}
 	log.Printf("[WEB]: Begin article fetching process")
 
-	defer func(isleep int64) {
+	defer func(isleep int64, progressDB *database.ProgressDB) {
 		duration := time.Since(startTime)
 		log.Printf("[WEB]: FetchRoutine COMPLETED after %v", duration)
 		if isleep > 30 {
@@ -867,9 +931,9 @@ func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHash
 			proc.Pool = pools[0] // Use the first pool
 		}
 		log.Printf("[WEB]: Sleep completed, starting new FetchRoutine goroutine")
-		go FetchRoutine(db, proc, useShortHashLen, false, isleep, DLParChan)
+		go FetchRoutine(db, proc, useShortHashLen, false, isleep, DLParChan, progressDB)
 		log.Printf("[WEB]: New FetchRoutine goroutine launched")
-	}(isleep)
+	}(isleep, progressDB)
 
 	log.Printf("[WEB]: Fetching newsgroups from database...")
 	groups, err := db.MainDBGetAllNewsgroups()
@@ -942,7 +1006,7 @@ func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHash
 		}
 
 		// Check if the group is in sections DB
-		err := proc.DownloadArticles(group.Name, ignoreInitialTinyGroups, DLParChan)
+		err := proc.DownloadArticles(group.Name, ignoreInitialTinyGroups, DLParChan, progressDB, 0 ,0)
 		if err != nil {
 			if err.Error() == "up2date" {
 				log.Printf("[WEB]: [%d/%d] Group %s is up to date, skipping", i+1, len(groups), group.Name)
@@ -966,4 +1030,5 @@ func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHash
 	log.Printf("[WEB]: Finished processing all %d groups", len(groups))
 	log.Printf("[WEB]: FINAL SUMMARY - Total groups: %d, Successfully processed: %d, Up-to-date: %d, Errors: %d",
 		len(groups), processedCount, upToDateCount, errorCount)
+	*/
 }
