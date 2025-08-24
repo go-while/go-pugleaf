@@ -35,6 +35,9 @@ func showUsageExamples() {
 	fmt.Println("  ./nntp-fetcher -group alt.test -xover-copy (use xover-copy to do identical copy from remote server!)")
 	fmt.Println("  ./nntp-fetcher -group alt.test -download-start-date 2024-12-31")
 	fmt.Println()
+	fmt.Println("Newsgroup List Update:")
+	fmt.Println("  ./nntp-fetcher -update-list (fetch remote newsgroup list and add new groups to database)")
+	fmt.Println()
 	fmt.Println("Server Configuration:")
 	fmt.Println("  ./nntp-fetcher -test-conn -host news.server.com -port 563")
 	fmt.Println("  ./nntp-fetcher -test-conn -username user -password pass")
@@ -71,6 +74,7 @@ func main() {
 		useShortHashLenPtr      = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
 		fetchActiveOnly         = flag.Bool("fetch-active-only", true, "Fetch only active newsgroups (default: true)")
 		downloadMaxPar          = flag.Int("download-max-par", 1, "run this many groups in parallel, can eat your memory! (default: 1)")
+		updateList              = flag.String("update-newsgroups-from-remote", "", "Fetch remote newsgroup list from first enabled provider and add new groups to database (default: empty, nothing. use \"group.*\" or \"\\$all\")")
 		// Download options with date filtering
 		downloadStartDate = flag.String("download-start-date", "", "Start downloading articles from this date (YYYY-MM-DD format)")
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
@@ -84,6 +88,12 @@ func main() {
 	if *testConn {
 		if err := ConnectionTest(host, port, username, password, ssl, timeout, *fetchNewsgroup, testMsg); err != nil {
 			log.Fatalf("Connection test failed: %v", err)
+		}
+		os.Exit(0)
+	}
+	if *updateList != "" {
+		if err := UpdateNewsgroupList(host, port, username, password, ssl, timeout, updateList); err != nil {
+			log.Fatalf("Newsgroup list update failed: %v", err)
 		}
 		os.Exit(0)
 	}
@@ -939,4 +949,139 @@ func getRealMemoryUsage() (uint64, error) {
 	}
 	// Fallback to runtime stats if VmRSS not found
 	return 0, nil
+}
+
+// UpdateNewsgroupList fetches the remote newsgroup list from the first enabled provider
+// and adds all groups to the database that we don't already have
+func UpdateNewsgroupList(host *string, port *int, username *string, password *string, ssl *bool, timeout *int, updateList *string) error {
+	log.Printf("Starting newsgroup list update from remote server...")
+
+	// Initialize database
+	db, err := database.OpenDatabase(nil)
+	if err != nil {
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+
+	// Get providers from database
+	providers, err := db.GetProviders()
+	if err != nil || len(providers) == 0 {
+		return fmt.Errorf("failed to get providers (%d): %v", len(providers), err)
+	}
+
+	// Find first enabled provider
+	var firstProvider *models.Provider
+	for _, p := range providers {
+		if p.Enabled && p.Host != "" && p.Port > 0 {
+			firstProvider = p
+			break
+		}
+	}
+
+	if firstProvider == nil {
+		return fmt.Errorf("no enabled providers found in database")
+	}
+
+	log.Printf("Using provider: %s (Host: %s, Port: %d, SSL: %v)",
+		firstProvider.Name, firstProvider.Host, firstProvider.Port, firstProvider.SSL)
+
+	// Create NNTP backend config using the first enabled provider
+	backendConfig := &nntp.BackendConfig{
+		Host:     firstProvider.Host,
+		Port:     firstProvider.Port,
+		SSL:      firstProvider.SSL,
+		Username: firstProvider.Username,
+		Password: firstProvider.Password,
+		MaxConns: 1, // Only need one connection for list retrieval
+	}
+
+	// Create NNTP pool
+	pool := nntp.NewPool(backendConfig)
+	defer pool.ClosePool()
+
+	// Get a connection from the pool
+	conn, err := pool.Get()
+	if err != nil {
+		return fmt.Errorf("failed to get NNTP connection: %w", err)
+	}
+	defer pool.Put(conn)
+
+	log.Printf("Connected to %s:%d, fetching newsgroup list...", firstProvider.Host, firstProvider.Port)
+
+	// Fetch the complete newsgroup list
+	remoteGroups, err := conn.ListGroups()
+	if err != nil {
+		return fmt.Errorf("failed to fetch newsgroup list: %w", err)
+	}
+
+	log.Printf("Fetched %d newsgroups from remote server", len(remoteGroups))
+
+	// Parse the update pattern to determine filtering
+	updatePattern := *updateList
+	var groupPrefix string
+	addAllGroups := false
+
+	if updatePattern == "$all" {
+		addAllGroups = true
+		log.Printf("Adding all newsgroups from remote server")
+	} else if strings.HasSuffix(updatePattern, "*") {
+		groupPrefix = strings.TrimSuffix(updatePattern, "*")
+		log.Printf("Adding newsgroups with prefix: '%s'", groupPrefix)
+	} else if updatePattern != "" {
+		groupPrefix = updatePattern
+		log.Printf("Adding newsgroups matching: '%s'", groupPrefix)
+	} else {
+		return fmt.Errorf("invalid update pattern: '%s' (use 'group.*' or '$all')", updatePattern)
+	}
+
+	// Get existing newsgroups from local database
+	localGroups, err := db.MainDBGetAllNewsgroups()
+	if err != nil {
+		return fmt.Errorf("failed to get local newsgroups: %w", err)
+	}
+
+	// Create a map of existing newsgroup names for fast lookup
+	existingGroups := make(map[string]bool, len(localGroups))
+	for _, group := range localGroups {
+		existingGroups[group.Name] = true
+	}
+
+	log.Printf("Found %d existing newsgroups in local database", len(localGroups))
+
+	// Add new newsgroups that don't exist locally and match the pattern
+	newGroupCount := 0
+	skippedCount := 0
+	for _, remoteGroup := range remoteGroups {
+		// Apply prefix filtering
+		if !addAllGroups {
+			if groupPrefix != "" && !strings.HasPrefix(remoteGroup.Name, groupPrefix) {
+				skippedCount++
+				continue
+			}
+		}
+
+		if !existingGroups[remoteGroup.Name] {
+			// Create a new newsgroup model
+			newGroup := &models.Newsgroup{
+				Name:      remoteGroup.Name,
+				Active:    true,             // Default to active
+				Status:    "y",              // Default posting status
+				CreatedAt: time.Now().UTC(), // Default created at
+			}
+
+			// Insert the new newsgroup
+			err := db.InsertNewsgroup(newGroup)
+			if err != nil {
+				log.Printf("Failed to insert newsgroup '%s': %v", remoteGroup.Name, err)
+				continue
+			}
+
+			log.Printf("Added new newsgroup: %s", remoteGroup.Name)
+			newGroupCount++
+		}
+	}
+
+	log.Printf("Newsgroup list update completed: %d new groups added, %d skipped (prefix filter), out of %d remote groups",
+		newGroupCount, skippedCount, len(remoteGroups))
+
+	return nil
 }
