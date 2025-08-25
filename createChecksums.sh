@@ -28,6 +28,11 @@ rm -f "$CHECKSUMS_FILE"
 echo "Creating $CHECKSUMS_FILE with SHA256 hashes..."
 sha256sum "$BUILD_DIR"/* > "$CHECKSUMS_FILE"
 
+# Also create a version with relative paths for inclusion in the release archive
+cd "$BUILD_DIR"
+sha256sum * > "../${CHECKSUMS_FILE}.archive"
+cd ..
+
 # Display the checksums file
 echo ""
 echo "Checksums generated successfully:"
@@ -36,4 +41,5 @@ cat "$CHECKSUMS_FILE"
 
 echo ""
 echo "Checksums file created: $CHECKSUMS_FILE"
+echo "Archive checksums file created: ${CHECKSUMS_FILE}.archive (for inclusion in release)"
 echo "Number of executables: $(wc -l < $CHECKSUMS_FILE)"

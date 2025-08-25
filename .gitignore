@@ -30,6 +30,7 @@ go.work
 internal/nntp/analysis_*
 update.tar.gz
 checksums.sha256
+checksums.sha256.archive
 active_files/local-mode.active.filtered
 active_files/local-mode.active.filtered.sorted
 active_files/local-mode.active.new

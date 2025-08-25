@@ -182,23 +182,39 @@ go build -o build/usermgr ./cmd/usermgr
 
 ### Building and Release
 
-**Generate checksums for binaries:**
+**Build all binaries:**
+```bash
+# Build all binaries (automatically generates checksums)
+./build_ALL.sh
+```
+
+**Generate checksums manually:**
 ```bash
 # Generate SHA256 checksums for all executables in build/
 ./createChecksums.sh
+```
 
+**Build and create release package:**
+```bash
 # Build all binaries and create release package with checksums
 ./build_ALL.sh update
 ```
 
 This creates:
-- `checksums.sha256` - SHA256 hashes for all individual executables
-- `update.tar.gz` - Compressed archive of all binaries
+- `checksums.sha256` - SHA256 hashes for all individual executables (with build/ paths)
+- `checksums.sha256.archive` - SHA256 hashes with relative paths for archive inclusion
+- `update.tar.gz` - Compressed archive of all binaries including checksums.sha256
 - `.update` - SHA256 hash of the tar.gz file
 
 **Verify checksums:**
 ```bash
-sha256sum -c checksums.sha256  # Verify all executable checksums
+# Verify all executable checksums (from repository root)
+sha256sum -c checksums.sha256
+
+# Verify checksums after extracting release archive
+tar -xzf update.tar.gz
+cd extracted-directory/
+sha256sum -c checksums.sha256  # Verify all executables in release
 ```
 
 ## 📚 Binary Documentation
