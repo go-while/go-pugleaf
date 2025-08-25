@@ -92,6 +92,8 @@ git checkout testing-001
 
 
 # Initial fetch from a specific date
+# This will fetch N articles (max-batch) per group and quit
+# When first run is done: remove the flag '-download-start-date ...' and run again and again.
 ./pugleaf-fetcher -nntphostname your.domain.com \
   -download-start-date 2024-12-31 \
   -group news.admin.*
@@ -138,21 +140,22 @@ The `usermgr` tool provides complete command-line user management:
 ```bash
 # Build the usermgr tool
 go build -o build/usermgr ./cmd/usermgr
+mv build/usermgr .
 
 # Create a new user
-./build/usermgr -create -username john -email john@example.com -display "John Doe"
+./usermgr -create -username john -email john@example.com -display "John Doe"
 
 # Create a new admin user
-./build/usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
+./usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
 
 # List all users (shows admin status)
-./build/usermgr -list
+./usermgr -list
 
 # Delete a user
-./build/usermgr -delete -username john
+./usermgr -delete -username john
 
 # Update a user's password
-./build/usermgr -update -username john
+./usermgr -update -username john
 ```
 
 The usermgr tool is particularly useful for:
@@ -209,7 +212,7 @@ go-pugleaf includes 19 command-line applications for various newsgroup managemen
 - `-update-newsgroup-activity` - Update newsgroup activity timestamps
 - `-update-newsgroups-hide-futureposts` - Hide articles posted > 48h in future
 
-**Bridge Features:**
+**Bridge Features: (NOT WORKING!)**
 - `-enable-fediverse` - Enable Fediverse bridge
 - `-fediverse-domain string` - Fediverse domain (e.g. example.com)
 - `-fediverse-baseurl string` - Fediverse base URL (e.g. https://example.com)
