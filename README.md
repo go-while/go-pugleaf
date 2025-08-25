@@ -25,6 +25,12 @@ Read [BUGS.md](https://github.com/go-while/go-pugleaf/blob/main/BUGS.md) first!
 
 ### Installation
 
+**Option 1: Download pre-built binaries**
+
+Download the latest release for your platform from the [releases page](https://github.com/go-while/go-pugleaf/releases).
+
+**Option 2: Build from source**
+
 ```bash
 # Clone repository
 useradd -m -s /bin/bash pugleaf
@@ -46,7 +52,14 @@ git checkout testing-001
 
 ### Initial Setup
 
-1. **Register admin account** - First registered user becomes administrator
+1. **Create admin account** - Choose one of two methods:
+   - **Web registration**: First registered user becomes administrator
+   - **Command line**: Use the usermgr tool to create admin users directly
+   ```bash
+   go build -o build/usermgr ./cmd/usermgr
+   mv build/usermgr .
+   ./usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
+   ```
 2. **Secure your instance** - Login → Statistics → Disable registrations
 3. **Add newsgroups** - Admin → Add groups you want to follow
 - or bulk import newsgroups
@@ -79,6 +92,8 @@ git checkout testing-001
 
 
 # Initial fetch from a specific date
+# This will fetch N articles (max-batch) per group and quit
+# When first run is done: remove the flag '-download-start-date ...' and run again and again.
 ./pugleaf-fetcher -nntphostname your.domain.com \
   -download-start-date 2024-12-31 \
   -group news.admin.*
@@ -109,6 +124,44 @@ done
 ```
 
 ⚠️ **Important**: Stop the fetcher before adding new groups, or it will download all from scratch.
+
+## 👥 User Management
+
+go-pugleaf provides both web-based and command-line user management tools.
+
+### Web Interface
+- User registration and login via the web interface
+- Admin panel for user management (accessible to administrators)
+- First registered user automatically becomes administrator
+
+### Command Line Tool (usermgr)
+The `usermgr` tool provides complete command-line user management:
+
+```bash
+# Build the usermgr tool
+go build -o build/usermgr ./cmd/usermgr
+mv build/usermgr .
+
+# Create a new user
+./usermgr -create -username john -email john@example.com -display "John Doe"
+
+# Create a new admin user
+./usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
+
+# List all users (shows admin status)
+./usermgr -list
+
+# Delete a user
+./usermgr -delete -username john
+
+# Update a user's password
+./usermgr -update -username john
+```
+
+The usermgr tool is particularly useful for:
+- Creating the initial administrator account before first web access
+- Batch user management and automation
+- Managing users when web interface is unavailable
 
 📖 **For complete documentation of all 19 available binaries and their flags, see [Binary Documentation](#-binary-documentation) below.**
 
@@ -159,7 +212,7 @@ go-pugleaf includes 19 command-line applications for various newsgroup managemen
 - `-update-newsgroup-activity` - Update newsgroup activity timestamps
 - `-update-newsgroups-hide-futureposts` - Hide articles posted > 48h in future
 
-**Bridge Features:**
+**Bridge Features: (NOT WORKING!)**
 - `-enable-fediverse` - Enable Fediverse bridge
 - `-fediverse-domain string` - Fediverse domain (e.g. example.com)
 - `-fediverse-baseurl string` - Fediverse base URL (e.g. https://example.com)

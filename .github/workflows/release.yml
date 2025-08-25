@@ -1,0 +1,200 @@
+---
+name: Build and Release
+
+"on":
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [linux, darwin, windows]
+        arch: [amd64, arm64]
+        exclude:
+          # Windows on ARM64 is not commonly used for this type of application
+          - os: windows
+            arch: arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Extract version from tag or input
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/v}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "$VERSION" > appVersion.txt
+          echo "Version set to: $VERSION"
+
+      - name: Create build directory
+        run: mkdir -p build
+
+      - name: Set build environment
+        run: |
+          echo "GOOS=${{ matrix.os }}" >> $GITHUB_ENV
+          echo "GOARCH=${{ matrix.arch }}" >> $GITHUB_ENV
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            echo "BINARY_EXT=.exe" >> $GITHUB_ENV
+          else
+            echo "BINARY_EXT=" >> $GITHUB_ENV
+          fi
+
+      - name: Build all binaries
+        run: |
+          VERSION=$(cat appVersion.txt)
+
+          # List of all applications to build
+          apps=(
+            "web:webserver"
+            "nntp-fetcher:pugleaf-fetcher"
+            "nntp-server:pugleaf-nntp-server"
+            "expire-news:expire-news"
+            "merge-active:merge-active"
+            "merge-descriptions:merge-descriptions"
+            "test-MsgIdItemCache:test-MsgIdItemCache"
+            "history-rebuild:history-rebuild"
+            "fix-references:fix-references"
+            "fix-thread-activity:fix-thread-activity"
+            "rslight-importer:rslight-importer"
+            "nntp-analyze:nntp-analyze"
+            "recover-db:recover-db"
+          )
+
+          for app in "${apps[@]}"; do
+            IFS=':' read -r cmd_dir binary_name <<< "$app"
+            echo "Building $cmd_dir -> $binary_name"
+
+            if [ "$cmd_dir" = "nntp-fetcher" ]; then
+              # Special build for fetcher with green tea GC
+              GOEXPERIMENT=greenteagc go build \
+                -o "build/${binary_name}${BINARY_EXT}" \
+                -ldflags "-X main.appVersion=$VERSION" \
+                "./cmd/$cmd_dir"
+            else
+              # Standard build (removing -race for cross-compilation)
+              go build -o "build/${binary_name}${BINARY_EXT}" \
+                -ldflags "-X main.appVersion=$VERSION" \
+                "./cmd/$cmd_dir"
+            fi
+
+            if [ $? -ne 0 ]; then
+              echo "Failed to build $cmd_dir"
+              exit 1
+            fi
+          done
+
+      - name: Create release archive
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          OS="${{ matrix.os }}"
+          ARCH="${{ matrix.arch }}"
+          ARCHIVE_NAME="go-pugleaf-v${VERSION}-${OS}-${ARCH}"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            zip -r "${ARCHIVE_NAME}.zip" build/ README.md LICENSE
+            echo "ARCHIVE_FILE=${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
+          else
+            tar -czf "${ARCHIVE_NAME}.tar.gz" build/ README.md LICENSE
+            echo "ARCHIVE_FILE=${ARCHIVE_NAME}.tar.gz" >> $GITHUB_ENV
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-pugleaf-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ env.ARCHIVE_FILE }}
+
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag or input
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/v}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', steps.version.outputs.version) || github.ref_name }}
+          name: Release v${{ steps.version.outputs.version }}
+          body: |
+            ## Go-Pugleaf v${{ steps.version.outputs.version }}
+
+            Automated release build of go-pugleaf NNTP server and web gateway.
+
+            ### Included Binaries:
+            - `webserver` - Main web interface
+            - `pugleaf-fetcher` - Article fetcher from NNTP providers
+            - `pugleaf-nntp-server` - NNTP server implementation
+            - `expire-news` - Article expiration tool
+            - `merge-active` - Active file merger
+            - `merge-descriptions` - Description file merger
+            - `test-MsgIdItemCache` - Cache testing tool
+            - `history-rebuild` - History rebuild utility
+            - `fix-references` - Reference fixing tool
+            - `fix-thread-activity` - Thread activity fixer
+            - `rslight-importer` - RSLight data importer
+            - `nntp-analyze` - NNTP analysis tool
+            - `recover-db` - Database recovery tool
+
+            ### Platform Support:
+            - Linux (amd64, arm64)
+            - macOS (amd64, arm64)
+            - Windows (amd64)
+
+            Extract the archive for your platform and run the binaries.
+            See README.md for usage instructions.
+          files: artifacts/*/*
+          draft: false
+          prerelease: false
