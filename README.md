@@ -52,7 +52,13 @@ git checkout testing-001
 
 ### Initial Setup
 
-1. **Register admin account** - First registered user becomes administrator
+1. **Create admin account** - Choose one of two methods:
+   - **Web registration**: First registered user becomes administrator
+   - **Command line**: Use the usermgr tool to create admin users directly
+   ```bash
+   go build -o build/usermgr ./cmd/usermgr
+   ./build/usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
+   ```
 2. **Secure your instance** - Login → Statistics → Disable registrations
 3. **Add newsgroups** - Admin → Add groups you want to follow
 - or bulk import newsgroups
@@ -115,6 +121,43 @@ done
 ```
 
 ⚠️ **Important**: Stop the fetcher before adding new groups, or it will download all from scratch.
+
+## 👥 User Management
+
+go-pugleaf provides both web-based and command-line user management tools.
+
+### Web Interface
+- User registration and login via the web interface
+- Admin panel for user management (accessible to administrators)
+- First registered user automatically becomes administrator
+
+### Command Line Tool (usermgr)
+The `usermgr` tool provides complete command-line user management:
+
+```bash
+# Build the usermgr tool
+go build -o build/usermgr ./cmd/usermgr
+
+# Create a new user
+./build/usermgr -create -username john -email john@example.com -display "John Doe"
+
+# Create a new admin user
+./build/usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
+
+# List all users (shows admin status)
+./build/usermgr -list
+
+# Delete a user
+./build/usermgr -delete -username john
+
+# Update a user's password
+./build/usermgr -update -username john
+```
+
+The usermgr tool is particularly useful for:
+- Creating the initial administrator account before first web access
+- Batch user management and automation
+- Managing users when web interface is unavailable
 
 
 ## 🤝 Contributing
