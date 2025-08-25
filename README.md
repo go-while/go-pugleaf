@@ -25,6 +25,12 @@ Read [BUGS.md](https://github.com/go-while/go-pugleaf/blob/main/BUGS.md) first!
 
 ### Installation
 
+**Option 1: Download pre-built binaries**
+
+Download the latest release for your platform from the [releases page](https://github.com/go-while/go-pugleaf/releases).
+
+**Option 2: Build from source**
+
 ```bash
 # Clone repository
 useradd -m -s /bin/bash pugleaf
