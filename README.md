@@ -119,8 +119,8 @@ go-pugleaf includes 19 command-line applications for various newsgroup managemen
 ### Core Applications
 
 #### `webserver` (cmd/web)
-**Main web interface and NNTP server**
-./build/webserver -nntphostname your.domain.com
+**Main web interface**
+./webserver -nntphostname your.domain.com
 ```
 
 **Required Flags:**
@@ -188,11 +188,11 @@ go-pugleaf includes 19 command-line applications for various newsgroup managemen
 - `-password string` - NNTP password (default: "only")
 - `-ssl` - Use SSL/TLS connection (default: true)
 - `-timeout int` - Connection timeout in seconds (default: 30)
+- `-message-id string` - Test specific message ID
 
 **Fetching Options:**
 - `-group string` - Newsgroup to fetch (empty = all groups or wildcard like rocksolid.*)
 - `-download-start-date string` - Start downloading from date (YYYY-MM-DD format)
-- `-message-id string` - Test specific message ID
 - `-fetch-active-only` - Fetch only active newsgroups (default: true)
 
 **Performance Configuration:**
