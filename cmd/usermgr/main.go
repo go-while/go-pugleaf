@@ -202,11 +202,9 @@ func listAllUsers(db *database.Database) error {
 
 	for _, user := range users {
 		isAdmin := isAdminUser(db, user)
-		adminMark := ""
+		adminMark := "no"
 		if isAdmin {
 			adminMark = "yes"
-		} else {
-			adminMark = "no"
 		}
 		fmt.Printf("%-4d %-6s %-20s %-30s %-20s %s\n",
 			user.ID,
