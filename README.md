@@ -120,8 +120,7 @@ go-pugleaf includes 19 command-line applications for various newsgroup managemen
 
 #### `webserver` (cmd/web)
 **Main web interface and NNTP server**
-```bash
-./webserver -nntphostname your.domain.com
+./build/webserver -nntphostname your.domain.com
 ```
 
 **Required Flags:**
