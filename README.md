@@ -40,7 +40,7 @@ git clone https://github.com/go-while/go-pugleaf.git
 cd go-pugleaf
 git checkout testing-001
 
-# Build all binaries
+# Build all binaries (outputs to ./build)
 ./build_ALL.sh && cp build/* .
 
 # Start web server
@@ -165,9 +165,26 @@ The usermgr tool is particularly useful for:
 
 📖 **For complete documentation of all 19 available binaries and their flags, see [Binary Documentation](#-binary-documentation) below.**
 
+### Building individual tools
+
+Each command in `cmd/*` has a matching build script in the repo root that produces a binary in `./build`:
+
+- Core: `build_webserver.sh`, `build_nntp-server.sh`
+- NNTP: `build_fetcher.sh`, `build_analyze.sh`, `build_test-nntp.sh`
+- Users: `build_usermgr.sh`, `build_nntpmgr.sh`
+- Import: `build_rslight_importer.sh`, `build_import_flat-files.sh`, `build_merge-active.sh`, `build_merge-descriptions.sh`
+- Database: `build_expire-news.sh`, `build_recover-db.sh`, `build_fix-references.sh`, `build_fix-thread-activity.sh`, `build_history-rebuild.sh`
+
+Or build a single tool manually, e.g.:
+```bash
+go build -o build/usermgr ./cmd/usermgr
+```
+
 ## 📚 Binary Documentation
 
-go-pugleaf includes 19 command-line applications for various newsgroup management tasks. Below is comprehensive documentation for all available binaries and their flags.
+go-pugleaf includes command-line applications for various newsgroup management tasks.
+
+- Below is comprehensive documentation for all available binaries and their flags.
 
 ### Core Applications
 
@@ -511,7 +528,7 @@ go-pugleaf includes 19 command-line applications for various newsgroup managemen
 
 Several other binaries are available but don't have extracted flags (likely no command-line options):
 - `benchmark_hash` - Hash function benchmarking
-- `extract_hierarchies` - Extract newsgroup hierarchies  
+- `extract_hierarchies` - Extract newsgroup hierarchies
 - `history-demo` - History system demonstration
 - `parsedates` - Date parsing utilities
 - `test-nntp` - NNTP protocol testing
