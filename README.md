@@ -57,7 +57,8 @@ git checkout testing-001
    - **Command line**: Use the usermgr tool to create admin users directly
    ```bash
    go build -o build/usermgr ./cmd/usermgr
-   ./build/usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
+   mv build/usermgr .
+   ./usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
    ```
 2. **Secure your instance** - Login → Statistics → Disable registrations
 3. **Add newsgroups** - Admin → Add groups you want to follow
