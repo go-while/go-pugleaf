@@ -1,20 +1,28 @@
 # GitHub Actions Release Workflow
 
-This repository includes an automated release workflow that builds binaries for multiple platforms when version tags are pushed.
+This repository includes an automated release workflow that builds binaries for multiple platforms when version tags are pushed or manually triggered.
 
 ## How to Create a Release
 
+### Automatic Release (Recommended)
 1. **Tag a release version:**
    ```bash
    git tag v1.0.0
    git push origin v1.0.0
    ```
 
-2. **The workflow will automatically:**
-   - Build binaries for Linux (amd64, arm64), macOS (amd64, arm64), and Windows (amd64)
-   - Create platform-specific archives (`.tar.gz` for Unix, `.zip` for Windows)
-   - Create a GitHub release with all binaries attached
-   - Use the tag version for binary version injection
+### Manual Release
+1. **Go to the Actions tab** in the GitHub repository
+2. **Select "Build and Release" workflow**
+3. **Click "Run workflow"**
+4. **Enter the version** (e.g., `1.0.0`) when prompted
+5. **Click "Run workflow"**
+
+Both methods will automatically:
+- Build binaries for Linux (amd64, arm64), macOS (amd64, arm64), and Windows (amd64)
+- Create platform-specific archives (`.tar.gz` for Unix, `.zip` for Windows)
+- Create a GitHub release with all binaries attached
+- Use the specified version for binary version injection
 
 ## Built Applications
 
@@ -54,6 +62,7 @@ Examples:
 The workflow is defined in `.github/workflows/release.yml` and:
 
 - Triggers on tags matching `v*` pattern
+- Supports manual dispatch with version input
 - Uses Go 1.25.x for builds
 - Removes `-race` flag for cross-compilation compatibility
 - Uses `GOEXPERIMENT=greenteagc` for the fetcher binary
