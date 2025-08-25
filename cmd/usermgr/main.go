@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
@@ -160,14 +161,26 @@ func createNewUser(db *database.Database, username, email, displayName string, i
 		return fmt.Errorf("failed to insert user: %v", err)
 	}
 
-	fmt.Printf("✅ User '%s' created successfully\n", username)
+	// Fetch the created user to get its ID
+	createdUser, err := db.GetUserByUsername(username)
+	if err != nil {
+		return fmt.Errorf("failed to load created user: %v", err)
+	}
 
 	// Add admin permission if requested
 	if isAdmin {
-		// Note: This would require implementing user permissions
-		// For now, just log that admin permissions were requested
-		fmt.Printf("⚠️  Admin permissions requested but not yet implemented\n")
+		up := &models.UserPermission{
+			UserID:     createdUser.ID,
+			Permission: "admin",
+			GrantedAt:  time.Now(),
+		}
+		if err := db.InsertUserPermission(up); err != nil {
+			return fmt.Errorf("user created but failed to grant admin permission: %v", err)
+		}
+		fmt.Printf("✅ Granted admin permission to '%s'\n", username)
 	}
+
+	fmt.Printf("✅ User '%s' created successfully\n", username)
 
 	return nil
 }
@@ -184,12 +197,18 @@ func listAllUsers(db *database.Database) error {
 	}
 
 	fmt.Printf("Found %d users:\n\n", len(users))
-	fmt.Printf("%-4s %-20s %-30s %-20s %s\n", "ID", "Username", "Email", "Display Name", "Created")
-	fmt.Printf("%-4s %-20s %-30s %-20s %s\n", "----", "--------", "-----", "------------", "-------")
+	fmt.Printf("%-4s %-6s %-20s %-30s %-20s %s\n", "ID", "Admin", "Username", "Email", "Display Name", "Created")
+	fmt.Printf("%-4s %-6s %-20s %-30s %-20s %s\n", "----", "-----", "--------", "-----", "------------", "-------")
 
 	for _, user := range users {
-		fmt.Printf("%-4d %-20s %-30s %-20s %s\n",
+		isAdmin := isAdminUser(db, user)
+		adminMark := "no"
+		if isAdmin {
+			adminMark = "yes"
+		}
+		fmt.Printf("%-4d %-6s %-20s %-30s %-20s %s\n",
 			user.ID,
+			adminMark,
 			truncate(user.Username, 20),
 			truncate(user.Email, 30),
 			truncate(user.DisplayName, 20),
@@ -218,11 +237,11 @@ func deleteExistingUser(db *database.Database, username string) error {
 		return nil
 	}
 
-	// Note: This would require implementing user deletion
-	// For now, just show what would be deleted
-	fmt.Printf("⚠️  User deletion not yet implemented\n")
-	fmt.Printf("Would delete: %s (ID: %d, Email: %s)\n", user.Username, user.ID, user.Email)
-
+	// Perform deletion
+	if err := db.DeleteUser(int64(user.ID)); err != nil {
+		return fmt.Errorf("failed to delete user: %v", err)
+	}
+	fmt.Printf("✅ User '%s' (ID: %d) deleted\n", user.Username, user.ID)
 	return nil
 }
 
@@ -278,4 +297,25 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// isAdminUser checks if a user is admin (ID 1 or has 'admin' permission)
+func isAdminUser(db *database.Database, user *models.User) bool {
+	if user == nil {
+		return false
+	}
+	if user.ID == 1 {
+		return true
+	}
+	perms, err := db.GetUserPermissions(user.ID)
+	if err != nil {
+		log.Printf("Failed to get permissions for user ID %d: %v", user.ID, err)
+		return false
+	}
+	for _, p := range perms {
+		if strings.EqualFold(p.Permission, "admin") {
+			return true
+		}
+	}
+	return false
 }
