@@ -29,6 +29,7 @@ go.work
 /demo_history
 internal/nntp/analysis_*
 update.tar.gz
+checksums.sha256
 active_files/local-mode.active.filtered
 active_files/local-mode.active.filtered.sorted
 active_files/local-mode.active.new

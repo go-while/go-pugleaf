@@ -180,6 +180,27 @@ Or build a single tool manually, e.g.:
 go build -o build/usermgr ./cmd/usermgr
 ```
 
+### Building and Release
+
+**Generate checksums for binaries:**
+```bash
+# Generate SHA256 checksums for all executables in build/
+./createChecksums.sh
+
+# Build all binaries and create release package with checksums
+./build_ALL.sh update
+```
+
+This creates:
+- `checksums.sha256` - SHA256 hashes for all individual executables
+- `update.tar.gz` - Compressed archive of all binaries
+- `.update` - SHA256 hash of the tar.gz file
+
+**Verify checksums:**
+```bash
+sha256sum -c checksums.sha256  # Verify all executable checksums
+```
+
 ## 📚 Binary Documentation
 
 go-pugleaf includes command-line applications for various newsgroup management tasks.
