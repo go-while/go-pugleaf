@@ -20,6 +20,7 @@ type ArticleCacheEntry struct {
 
 // ArticleCache provides LRU caching for articles
 type ArticleCache struct {
+	DB        *Database
 	maxSize   int
 	ttl       time.Duration
 	cache     map[string]*list.Element // key -> list element
@@ -32,8 +33,9 @@ type ArticleCache struct {
 }
 
 // NewArticleCache creates a new article cache
-func NewArticleCache(maxSize int, ttl time.Duration) *ArticleCache {
+func NewArticleCache(maxSize int, ttl time.Duration, db *Database) *ArticleCache {
 	return &ArticleCache{
+		DB:      db,
 		maxSize: maxSize,
 		ttl:     ttl,
 		cache:   make(map[string]*list.Element),
@@ -56,14 +58,7 @@ func (ac *ArticleCache) Get(groupName string, articleNum int64) (*models.Article
 	if elem, exists := ac.cache[key]; exists {
 		entry := elem.Value.(*ArticleCacheEntry)
 
-		// Check TTL (DISABLED! SINCE ARTICLES DONT CHANGE: IF IT IS STILL CACHED WE TAKE IT!)
-		/*
-			if ac.ttl > 0 && time.Since(entry.CachedAt) > ac.ttl {
-				ac.removeElement(elem)
-				ac.misses++
-				return nil, false
-			}
-		*/
+		// Check TTL (REMOVED! SINCE ARTICLES DONT CHANGE: IF IT IS STILL CACHED WE TAKE IT!)
 
 		// Move to front (most recently used)
 		ac.lruList.MoveToFront(elem)
@@ -131,7 +126,8 @@ func (ac *ArticleCache) evictIfNeeded() {
 // removeElement removes an element from cache
 func (ac *ArticleCache) removeElement(elem *list.Element) {
 	entry := elem.Value.(*ArticleCacheEntry)
-	key := ac.makeKey(entry.GroupName, entry.Article.ArticleNum)
+	newsgroupPtr := ac.DB.Batch.GetNewsgroupPointer(entry.GroupName)
+	key := ac.makeKey(entry.GroupName, entry.Article.ArticleNums[newsgroupPtr])
 
 	// Estimate memory freed
 	ac.totalSize -= int64(entry.Article.Bytes)

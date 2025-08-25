@@ -58,13 +58,24 @@ func ComputeMessageIDHash(messageID string) string {
 	hash := md5.Sum([]byte(messageID))
 	return fmt.Sprintf("%x", hash)
 }
+
 func CheckMessageIdFormat(messageID string) bool {
 	// Check if the message ID is a valid format
 	if messageID == "" {
+		log.Printf("[SPAM:HDR] Invalid message ID: empty string")
 		return false
 	}
 	// A simple check could be to see if it contains '@' and '.'
-	if len(messageID) < 5 || !containsAtAndDot(messageID) {
+	if len(messageID) < 5 || len(messageID) > 255 {
+		log.Printf("[SPAM:HDR] Invalid message ID length or format: '%s'", messageID)
+		return false
+	}
+	if messageID[0] != '<' || messageID[len(messageID)-1] != '>' {
+		log.Printf("[SPAM:HDR] Invalid message ID format: '%s'", messageID)
+		return false
+	}
+	if !strings.Contains(messageID, "@") {
+		log.Printf("[SPAM:HDR] Invalid message ID format: missing '@' in '%s'", messageID)
 		return false
 	}
 	return true
@@ -84,12 +95,12 @@ func (proc *Processor) setCaseDupes(msgIdItem *history.MessageIdItem, bulkmode b
 }
 
 // processArticle processes a fetched article and generates overview data
-func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup string, bulkmode bool) (int, error) {
+func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup string, bulkmode bool) (int, error) {
 	// external caller supplies ONLY art *models.Article!
-	if art == nil || art.MessageID == "" {
+	if article == nil || article.MessageID == "" {
 		return history.CaseError, fmt.Errorf("processArticle: article is nil")
 	}
-	msgIdItem := history.MsgIdCache.GetORCreate(art.MessageID)
+	msgIdItem := history.MsgIdCache.GetORCreate(article.MessageID)
 	if msgIdItem == nil {
 		return history.CaseError, fmt.Errorf("error in processArticle: msgIdItem is nil")
 	}
@@ -141,96 +152,95 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 
 	var newsgroups []string
 
-	//if art != nil && groupDBs == nil && article == nil {
-	// Parse article headers
-	//log.Printf("processArticle: parseHeaders article '%s' [ groupDBs=%v article=%v ]", art.MessageID, groupDBs != nil, article != nil)
-	lines := countLines([]byte(art.BodyText))
-
 	if bulkmode {
 		msgIdItem.Mux.Lock()
 		msgIdItem.Response = history.CaseLock
 		msgIdItem.Mux.Unlock()
 		// dont process crossposts if we downloaded articles in bulkmode
-		newsgroups = append(newsgroups, legacyNewsgroup) // Use legacy newsgroup if no newsgroups found
+		// Use legacy newsgroup in bulkmode. add article only to single newsgroup db.
+		newsgroups = append(newsgroups, legacyNewsgroup)
 
 	} else if !RunRSLIGHTImport && !bulkmode {
 
-		newsgroupsStr := getHeaderFirst(art.Headers, "newsgroups")
+		newsgroupsStr := getHeaderFirst(article.Headers, "newsgroups")
 		if newsgroupsStr == "" {
-			log.Printf("[SPAM:HDR] Article '%s' no newsgroups header", art.MessageID)
+			log.Printf("[SPAM:HDR] Article '%s' no newsgroups header", article.MessageID)
 			proc.setCaseDupes(msgIdItem, bulkmode)
-			return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'newsgroups' header", art.MessageID)
+			return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'newsgroups' header", article.MessageID)
 		}
 
-		newsgroups = proc.extractGroupsFromHeaders(art.MessageID, newsgroupsStr)
+		newsgroups = proc.extractGroupsFromHeaders(article.MessageID, newsgroupsStr)
 		if len(newsgroups) > MaxCrossPosts {
-			log.Printf("[SPAM:EMP] Article '%s' newsgroups=%d", art.MessageID, len(newsgroups))
+			log.Printf("[SPAM:EMP] Article '%s' newsgroups=%d", article.MessageID, len(newsgroups))
 			proc.setCaseDupes(msgIdItem, bulkmode)
-			return history.CaseError, fmt.Errorf("error processArticle: article '%s' crossposts=%d", art.MessageID, len(newsgroups))
+			return history.CaseError, fmt.Errorf("error processArticle: article '%s' crossposts=%d", article.MessageID, len(newsgroups))
 		}
 
 	} else {
-		log.Printf("ERROR processArticle: article '%s' has no 'newsgroups' header and no legacy newsgroup provided", art.MessageID)
+		log.Printf("ERROR processArticle: article '%s' has no 'newsgroups' header and no legacy newsgroup provided", article.MessageID)
 		proc.setCaseDupes(msgIdItem, bulkmode)
-		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'newsgroups' header", art.MessageID)
+		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'newsgroups' header", article.MessageID)
 	}
 
-	// Transform the incoming article in-place instead of creating a duplicate
-	dateSent := ParseNNTPDate(getHeaderFirst(art.Headers, "date"))
-	dateString := getHeaderFirst(art.Headers, "date")
-	if dateSent.IsZero() {
-		log.Printf("[WARN:OLD] Article '%s' no valid date... headerDate='%v' dateString='%s'", art.MessageID, dateSent, dateString)
+	article.DateSent = ParseNNTPDate(article.DateString)
+	if article.DateSent.IsZero() {
+		log.Printf("[ERROR-HDR] Article '%s' no valid date... headerDate='%v' dateString='%s'", article.MessageID, article.DateSent, article.DateString)
+		proc.setCaseDupes(msgIdItem, bulkmode)
 		//dateString = time.Now().Format(time.RFC1123Z) // Use current time as fallback
+		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no valid 'date' header", article.MessageID)
+	}
+	// Check for future posts (more than 25 hours in the future) and skip processing
+	if article.DateSent.After(time.Now().Add(25 * time.Hour)) {
+		log.Printf("[SPAM-HDR:FUTURE] Article '%s' posted too far in future (date: %v), skipping", article.MessageID, article.DateSent)
+		proc.setCaseDupes(msgIdItem, bulkmode)
+		return history.CaseError, fmt.Errorf("article '%s' posted too far in future: %v", article.MessageID, article.DateSent)
 	}
 
-	// Check for future posts (more than 48 hours in the future) and skip processing
-	if !dateSent.IsZero() {
-		futureThreshold := time.Now().Add(48 * time.Hour)
-		if dateSent.After(futureThreshold) {
-			log.Printf("[FUTURE] Article '%s' posted more than 48 hours in future (date: %v), skipping processing", art.MessageID, dateSent)
-			proc.setCaseDupes(msgIdItem, bulkmode)
-			return history.CaseError, fmt.Errorf("article '%s' posted too far in future: %v", art.MessageID, dateSent)
-		}
-	}
+	// part of parsing data moved to nntp-client-commands.go:L~800 (func ParseLegacyArticleLines)
+	article.ReplyCount = 0 // Will be updated by threading
+	article.ImportedAt = time.Now()
+	article.MsgIdItem = msgIdItem
+	article.ArticleNums = make(map[*string]int64)
+	article.ProcessQueue = make(chan *string, 16) // Initialize process queue
 
-	// Reuse the incoming article in-place - populate missing fields from headers
-	art.References = getHeaderFirst(art.Headers, "references")
-	art.Subject = getHeaderFirst(art.Headers, "subject")
-	art.FromHeader = getHeaderFirst(art.Headers, "from")
-	art.Path = getHeaderFirst(art.Headers, "path")
-	art.DateSent = dateSent
-	art.DateString = dateString
-	art.Bytes = len(art.BodyText)
-	art.Lines = lines
-	art.ReplyCount = 0 // Will be updated by threading
-	art.HeadersJSON = multiLineHeaderToMergedString(art.NNTPhead)
-	art.ImportedAt = time.Now()
-	art.MsgIdItem = msgIdItem
-
-	// Apply fallbacks for missing essential fields
-	if art.Subject == "" {
-		log.Printf("[WARN:OLD] Article '%s' empty subject... headers='%#v'", art.MessageID, art.Headers)
-		art.Subject = "No Subject" // Fallback to a default value
-	}
-	if art.FromHeader == "" {
-		log.Printf("[WARN:OLD] Article '%s' empty from header... headers='%#v'", art.MessageID, art.Headers)
-		art.FromHeader = "Unknown <anon@nohost.local>" // Fallback to a default value
-	}
-	if art.Path == "" {
-		//log.Printf("[WARN:OLD] Article '%s' empty path... ?! headers='%#v'", art.MessageID, art.Headers)
-		// Fallback to message ID if no path is provided
-		art.Path = LocalHostnamePath + "!" + DefaultArticleItemPath
+	if len(article.RefSlice) == 0 {
+		article.IsThrRoot = true
+		article.IsReply = false
 	} else {
-		art.Path = LocalHostnamePath + "!" + art.Path // Ensure path is prefixed with hostname
+		article.IsThrRoot = false
+		article.IsReply = true
+	}
+	// Apply fallbacks for missing essential fields
+	if article.Subject == "" {
+		log.Printf("[HDR-SPAM] Article '%s' empty subject... headers='%#v'", article.MessageID, article.Headers)
+		//article.Subject = "No Subject" // Fallback to a default value
+		proc.setCaseDupes(msgIdItem, bulkmode)
+		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'subject' header", article.MessageID)
+	}
+	if article.FromHeader == "" {
+		log.Printf("[HDR-SPAM] Article '%s' empty from header... headers='%#v'", article.MessageID, article.Headers)
+		proc.setCaseDupes(msgIdItem, bulkmode)
+		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'from' header", article.MessageID)
+	}
+	if article.Path == "" {
+		//log.Printf("[WARN:OLD] Article '%s' empty path... ?! headers='%#v'", article.MessageID, article.Headers)
+		article.Path = LocalHostnamePath + "!" + DefaultArticleItemPath
+	} else {
+		article.Path = LocalHostnamePath + "!" + article.Path // Ensure path is prefixed with hostname
 	}
 
 	// Free memory from transient fields after extracting what we need
 	if bulkmode {
-		art.NNTPhead = nil // not needed in bulmode: free memory
-		art.NNTPbody = nil // not needed in bulmode: free memory
+		article.NNTPhead = nil // not needed in bulkmode: free memory
+		article.NNTPbody = nil // not needed in bulkmode: free memory
 	}
-	art.Headers = nil    // Free headers map after extracting all needed values
-	art.Newsgroups = nil // Free newsgroups slice if it exists
+	if article.Headers != nil {
+		for k := range article.Headers {
+			article.Headers[k] = nil // Free each header slice
+		}
+		article.Headers = nil // Free headers map after extracting all needed values
+	}
+	//article.Newsgroups = nil // Free newsgroups slice if it exists
 	if len(newsgroups) > 0 {
 		// Process groups directly inline - no goroutines/channels needed
 
@@ -239,16 +249,17 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 			// Get the newsgroup pointer once from batch system for memory efficiency
 			newsgroupPtr := proc.DB.Batch.GetNewsgroupPointer(newsgroup)
 			if newsgroupPtr == nil {
-				log.Printf("error processArticle: GetNewsgroupPointer nil exception! msgId='%s' newsgroup '%s' skipping crosspost", art.MessageID, newsgroup)
+				log.Printf("error processArticle: GetNewsgroupPointer nil exception! msgId='%s' newsgroup '%s' skipping crosspost", article.MessageID, newsgroup)
 				proc.setCaseDupes(msgIdItem, bulkmode)
 				continue // Skip this group if not found
 			}
+			article.NewsgroupsPtr = append(article.NewsgroupsPtr, newsgroupPtr)
 			// @AI !!! NO CACHE CHECK for bulk legacy import!!
 			if !bulkmode { // @AI !!! NO CACHE CHECK for bulk legacy import!!
 				// @AI !!! NO CACHE CHECK for bulk legacy import!!
 				// Cache check still provides some throttling while avoiding the expensive DB query
-				if proc.MsgIdCache.HasMessageIDInGroup(art.MessageID, newsgroupPtr) { // CHECK GLOBAL PROCESSOR CACHE with POINTER
-					log.Printf("processArticle: article '%s' already exists in cache for newsgroup '%s', skipping crosspost", art.MessageID, *newsgroupPtr)
+				if proc.MsgIdCache.HasMessageIDInGroup(article.MessageID, newsgroupPtr) { // CHECK GLOBAL PROCESSOR CACHE with POINTER
+					log.Printf("processArticle: article '%s' already exists in cache for newsgroup '%s', skipping crosspost", article.MessageID, *newsgroupPtr)
 					continue
 				}
 			}
@@ -262,22 +273,26 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 				}
 				continue // Continue with other groups
 			}
-
-			// Skip database duplicate check for bulk legacy imports
-			if !bulkmode {
-				// check if article exists in articledb - this is the expensive operation
-				if groupDBs.ExistsMsgIdInArticlesDB(art.MessageID) {
-					groupDBs.Return(proc.DB) // Return connection before continuing
-					continue
-				}
+			if groupDBs.ExistsMsgIdInArticlesDB(article.MessageID) {
+				groupDBs.Return(proc.DB) // Return connection before continuing
+				continue
 			}
-
+			/*
+				// Skip database duplicate check for bulk legacy imports
+				if !bulkmode {
+					// check if article exists in articledb - this is the expensive operation
+					if groupDBs.ExistsMsgIdInArticlesDB(article.MessageID) {
+						groupDBs.Return(proc.DB) // Return connection before continuing
+						continue
+					}
+				}
+			*/
 			groupDBs.Return(proc.DB)
 
-			proc.DB.Batch.BatchCaptureOverviewForLater(newsgroupPtr, art)
+			proc.DB.Batch.BatchCaptureOverviewForLater(newsgroupPtr, article)
 
 			// Return connection immediately after processing
-			//log.Printf("BatchCaptureOverviewForLater: msgid='%s' ng: '%s'", art.MessageID, group)
+			//log.Printf("BatchCaptureOverviewForLater: msgid='%s' ng: '%s'", article.MessageID, group)
 			GroupCounter.Increment(newsgroup) // Increment the group counter
 			/*
 				// Bridge article to Fediverse/Matrix if enabled
@@ -286,13 +301,13 @@ func (proc *Processor) processArticle(art *models.Article, legacyNewsgroup strin
 				}
 			*/
 		}
-		//log.Printf("All posts completed: (%d) for article %s", len(newsgroups), art.MessageID)
+		//log.Printf("All posts completed: (%d) for article %s", len(newsgroups), article.MessageID)
 
 	} else {
-		log.Printf("No newsgroups found in article '%s', skipping processing", art.MessageID)
+		log.Printf("No newsgroups found in article '%s', skipping processing", article.MessageID)
 		// Pipeline safety: Reset CaseWrite on error
 		proc.setCaseDupes(msgIdItem, bulkmode)
-		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'newsgroups' header", art.MessageID)
+		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'newsgroups' header", article.MessageID)
 	}
 
 	// Memory optimization: trigger GC periodically during bulk imports

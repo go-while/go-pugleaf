@@ -81,21 +81,21 @@
                     </thead>
                     <tbody>
                         {{range .Articles}}
-                        <tr id="article-{{.ArticleNum}}">
+                        <tr id="article-{{index .ArticleNums $.GroupPtr}}">
                             <!--
                             <td class="text-center align-middle">
                                 <i class="bi bi-file-text text-primary fs-4"></i>
                             </td>
                             <td class="text-center align-middle">
-                                <a href="/groups/{{$.GroupName}}/articles/{{.ArticleNum}}"
+                                <a href="/groups/{{$.GroupName}}/articles/{{index .ArticleNums $.GroupPtr}}"
                                     class="text-decoration-none">
-                                    <span class="badge bg-primary">#{{.ArticleNum}}</span>
+                                    <span class="badge bg-primary">#{{index .ArticleNums $.GroupPtr}}</span>
                                 </a>
                             </td>
                             -->
                             <td class="align-left">
                                 <div>{{if gt .Spam 0}} 🚩 (SPAM) {{end}}
-                                    <a href="/groups/{{$.GroupName}}/articles/{{.ArticleNum}}"
+                                    <a href="/groups/{{$.GroupName}}/articles/{{index .ArticleNums $.GroupPtr}}"
                                         class="text-decoration-none fw-bold">
                                         {{.PrintSanitized "subject" $.GroupName}}
                                     </a>
@@ -131,7 +131,7 @@
                             <td class="text-center">
                                 <div class="btn-group btn-group-sm" role="group">
 
-                                    <form method="POST" action="/groups/{{$.GroupName}}/articles/{{.ArticleNum}}/spam#article-{{.ArticleNum}}" style="display: inline;">
+                                    <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index .ArticleNums $.GroupPtr}}/spam#article-{{index .ArticleNums $.GroupPtr}}" style="display: inline;">
                                         <button type="submit" class="btn btn-outline-warning btn-sm" title="Flag as spam">
                                             🚩 {{.Spam}}
                                         </button>
@@ -139,12 +139,12 @@
 
                                     {{if $.IsAdmin}}
                                         {{if gt .Spam 0}}
-                                        <form method="POST" action="/groups/{{$.GroupName}}/articles/{{.ArticleNum}}/decrement-spam#spam-article-{{.ArticleNum}}" style="display: inline;">
+                                        <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index .ArticleNums $.GroupPtr}}/decrement-spam#spam-article-{{index .ArticleNums $.GroupPtr}}" style="display: inline;">
                                             <button type="submit" class="btn btn-outline-warning btn-sm" title="Decrement spam counter">
                                                 <i class="bi bi-dash-circle"></i>
                                             </button>
                                         </form>
-                                        <form method="POST" action="/groups/{{$.GroupName}}/articles/{{.ArticleNum}}/hide#article-{{.ArticleNum}}" style="display: inline;">
+                                        <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index .ArticleNums $.GroupPtr}}/hide#article-{{index .ArticleNums $.GroupPtr}}" style="display: inline;">
                                             <button type="submit" class="btn btn-outline-secondary btn-sm" title="Hide article">
                                                 👁️ {{.Hide}}
                                             </button>

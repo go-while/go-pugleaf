@@ -42,8 +42,8 @@ type OverviewEntry struct {
 // ActiveMap holds all newsgroup entries by name
 type ActiveMap map[string]*ActiveEntry
 
-// OverviewMap holds overview entries by message ID
-type OverviewMap map[string]*OverviewEntry
+// OverviewMap holds overview entries by message ID, allowing multiple entries per message ID
+type OverviewMap map[string][]*OverviewEntry
 
 var appVersion = "-unset-"
 
@@ -337,7 +337,12 @@ func filterAndWriteCleanFile(inputFile string) error {
 
 	// Calculate statistics
 	printGroupStatistics(validGroups)
-
+	// Write the filtered groups file
+	if len(moreThan1000) > 0 {
+		if err := writeFilteredGroupsFile(filteredPath+".moreThan1000", moreThan1000); err != nil {
+			return fmt.Errorf("failed to write moreThan1000 groups file: %w", err)
+		}
+	}
 	// Calculate statistics for filtered groups
 	if len(invalidGroups) > 0 {
 		fmt.Printf("\n=== FILTERED GROUPS STATISTICS ===\n")
@@ -410,6 +415,8 @@ func writeFilteredGroupsFile(outputPath string, invalidGroups ActiveMap) error {
 	return nil
 }
 
+var moreThan1000 = make(ActiveMap)
+
 // printGroupStatistics prints statistics about message counts in newsgroups
 func printGroupStatistics(activeMap ActiveMap) {
 	if len(activeMap) == 0 {
@@ -451,6 +458,7 @@ func printGroupStatistics(activeMap ActiveMap) {
 			messagesLessThan1000 += messageCount
 		} else {
 			messagesLarger += messageCount
+			moreThan1000[entry.GroupName] = entry
 		}
 	}
 
@@ -607,7 +615,7 @@ func processOverviewFiles() error {
 
 		// Add entries to overview map
 		for _, entry := range entries {
-			overviewMap[entry.MessageID] = entry
+			overviewMap[entry.MessageID] = append(overviewMap[entry.MessageID], entry)
 		}
 
 		processedGroups++
@@ -711,12 +719,20 @@ func analyzeDuplicates(overviewMap OverviewMap) {
 	// Count message IDs that appear in multiple groups
 	messageIDGroups := make(map[string][]string)
 
-	for messageID, entry := range overviewMap {
-		messageIDGroups[messageID] = append(messageIDGroups[messageID], entry.GroupName)
+	for messageID, entries := range overviewMap {
+		for _, entry := range entries {
+			messageIDGroups[messageID] = append(messageIDGroups[messageID], entry.GroupName)
+		}
 	}
 
 	duplicateCount := 0
 	crossPostCount := 0
+	totalEntries := 0
+
+	// Count total entries
+	for _, entries := range overviewMap {
+		totalEntries += len(entries)
+	}
 
 	for messageID, groups := range messageIDGroups {
 		if len(groups) > 1 {
@@ -735,6 +751,7 @@ func analyzeDuplicates(overviewMap OverviewMap) {
 		}
 	}
 
+	fmt.Printf("Total overview entries loaded: %d\n", totalEntries)
 	fmt.Printf("Total unique message IDs: %d\n", len(messageIDGroups))
 	fmt.Printf("Duplicate message IDs: %d\n", duplicateCount)
 	fmt.Printf("Cross-posted messages: %d\n", crossPostCount)

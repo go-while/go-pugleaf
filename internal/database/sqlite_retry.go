@@ -58,6 +58,37 @@ func retryableExec(db *sql.DB, query string, args ...interface{}) (sql.Result, e
 	return result, err
 }
 
+// retryableExecPtr executes a SQL statement with retry logic for lock conflicts
+func retryableExecPtr(db *sql.DB, query *strings.Builder, args ...interface{}) (sql.Result, error) {
+	var result sql.Result
+	var err error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		result, err = db.Exec(query.String(), args...)
+
+		if !isRetryableError(err) {
+			return result, err
+		}
+
+		if attempt < maxRetries-1 {
+			// Exponential backoff with jitter
+			delay := time.Duration(attempt+1) * baseDelay
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+
+			// Add random jitter (up to 50% of delay)
+			jitter := time.Duration(rand.Int63n(int64(delay) / 2))
+			time.Sleep(delay + jitter)
+
+			log.Printf("[WARN] SQLite retry attempt %d/%d for query (first 50 chars): %s... Error: %v",
+				attempt+1, maxRetries, truncateString(query.String(), 50), err)
+		}
+	}
+
+	return result, err
+}
+
 // retryableQueryRow executes a query that returns a single row with retry logic
 func retryableQueryRow(db *sql.DB, query string, args ...interface{}) *sql.Row {
 	// For QueryRow, we can't detect errors until Scan() is called
@@ -72,7 +103,6 @@ func retryableQueryRowScan(db *sql.DB, query string, args []interface{}, dest ..
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		row := db.QueryRow(query, args...)
 		err = row.Scan(dest...)
-
 		if !isRetryableError(err) {
 			return err
 		}
@@ -108,6 +138,11 @@ func retryableQuery(db *sql.DB, query string, args ...interface{}) (*sql.Rows, e
 			return rows, err
 		}
 
+		// Close the rows if we got them but had a retryable error
+		if rows != nil {
+			rows.Close()
+		}
+
 		if attempt < maxRetries-1 {
 			// Exponential backoff with jitter
 			delay := time.Duration(attempt+1) * baseDelay
@@ -124,6 +159,11 @@ func retryableQuery(db *sql.DB, query string, args ...interface{}) (*sql.Rows, e
 		}
 	}
 
+	// If we exhausted all retries and still have an error, make sure to close any rows
+	if rows != nil && err != nil {
+		rows.Close()
+		rows = nil
+	}
 	return rows, err
 }
 

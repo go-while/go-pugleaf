@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/go-pugleaf/internal/utils"
 )
 
 // Constants for maximum lines to read in various commands
@@ -21,7 +22,7 @@ const MaxReadLinesArticle = 256 * 1024
 const MaxReadLinesHeaders = 1024
 
 // MaxReadLinesXover Maximum lines for XOVER command, which retrieves overview lines
-var MaxReadLinesXover int64 = 4000 // XOVER command typically retrieves overview lines MaxBatch REFERENCES this in processor!!!
+var MaxReadLinesXover int64 = 100 // XOVER command typically retrieves overview lines MaxBatch REFERENCES this in processor!!!
 
 // MaxReadLinesBody Maximum lines for BODY command, which retrieves the body of an article
 const MaxReadLinesBody = MaxReadLinesArticle - MaxReadLinesHeaders
@@ -43,9 +44,9 @@ func (c *BackendConn) StatArticle(messageID string) (bool, error) {
 	}
 
 	c.textConn.StartResponse(id)
-	code, _, err := c.textConn.ReadCodeLine(223)
-	c.textConn.EndResponse(id)
+	defer c.textConn.EndResponse(id) // Always clean up response state
 
+	code, _, err := c.textConn.ReadCodeLine(223)
 	if err != nil {
 		return false, fmt.Errorf("failed to read STAT response: %w", err)
 	}
@@ -61,7 +62,7 @@ func (c *BackendConn) StatArticle(messageID string) (bool, error) {
 }
 
 // GetArticle retrieves a complete article from the server
-func (c *BackendConn) GetArticle(messageID string) (*models.Article, error) {
+func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -70,43 +71,55 @@ func (c *BackendConn) GetArticle(messageID string) (*models.Article, error) {
 	}
 
 	c.lastUsed = time.Now()
-
-	id, err := c.textConn.Cmd("ARTICLE %s", messageID)
+	/*
+		// Set a per-operation timeout (10 seconds for article retrieval)
+		if err := c.conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			return nil, fmt.Errorf("failed to set read deadline: %w", err)
+		}
+		defer func() {
+			// Clear the deadline when operation completes
+			if c.conn != nil {
+				c.conn.SetReadDeadline(time.Time{})
+			}
+		}()
+	*/
+	id, err := c.textConn.Cmd("ARTICLE %s", *messageID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send ARTICLE command: %w", err)
+		return nil, fmt.Errorf("failed to send ARTICLE '%s' command: %w", *messageID, err)
 	}
 
 	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id) // Always clean up response state
+
 	code, message, err := c.textConn.ReadCodeLine(ArticleFollows)
-	if err != nil {
-		c.textConn.EndResponse(id)
-		return nil, fmt.Errorf("failed to read ARTICLE response: %w", err)
+	if err != nil && code == 0 {
+		log.Printf("[ERROR] failed to read ARTICLE '%s' code=%d message='%s' err: %v", *messageID, code, message, err)
+		return nil, fmt.Errorf("failed to read ARTICLE '%s' code=%d message='%s' err: %v", *messageID, code, message, err)
 	}
 
 	if code != ArticleFollows {
-		c.textConn.EndResponse(id)
 		switch code {
 		case NoSuchArticle:
-			return nil, fmt.Errorf("article not found: %s", messageID)
+			log.Printf("[BECONN] GetArticle: not found: '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
+			return nil, ErrArticleNotFound
 		case DMCA:
-			return nil, fmt.Errorf("article removed (DMCA): %s", messageID)
+			log.Printf("[BECONN] GetArticle: removed (DMCA): '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
+			return nil, ErrArticleRemoved
 		default:
-			return nil, fmt.Errorf("unexpected ARTICLE response: %d %s", code, message)
+			return nil, fmt.Errorf("unexpected ARTICLE '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
 		}
 	}
 
 	// Read the article content
 	lines, err := c.readMultilineResponse("article")
-	c.textConn.EndResponse(id)
-
 	if err != nil {
-		return nil, fmt.Errorf("failed to read article content: %w", err)
+		return nil, fmt.Errorf("failed to read article '%s' content: %w", *messageID, err)
 	}
 
 	// Parse article into headers and body
-	article, err := ParseLegacyArticleLines(messageID, lines)
+	article, err := ParseLegacyArticleLines(*messageID, lines, bulkmode)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse article: %w", err)
+		return nil, fmt.Errorf("failed to parse article '%s': %w", *messageID, err)
 	}
 
 	return article, nil
@@ -129,19 +142,21 @@ func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
 	}
 
 	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id) // Always clean up response state
+
 	code, message, err := c.textConn.ReadCodeLine(HeadFollows)
 	if err != nil {
-		c.textConn.EndResponse(id)
 		return nil, fmt.Errorf("failed to read HEAD response: %w", err)
 	}
 
 	if code != HeadFollows {
-		c.textConn.EndResponse(id)
 		switch code {
 		case NoSuchArticle:
-			return nil, fmt.Errorf("article not found: %s", messageID)
+			log.Printf("[INFO] head not found: %s", messageID)
+			return nil, ErrArticleNotFound
 		case DMCA:
-			return nil, fmt.Errorf("article removed (DMCA): %s", messageID)
+			log.Printf("[INFO] head removed (DMCA): %s", messageID)
+			return nil, ErrArticleRemoved
 		default:
 			return nil, fmt.Errorf("unexpected HEAD response: %d %s", code, message)
 		}
@@ -149,8 +164,6 @@ func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
 
 	// Read the headers
 	lines, err := c.readMultilineResponse("headers")
-	c.textConn.EndResponse(id)
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to read headers: %w", err)
 	}
@@ -185,19 +198,21 @@ func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
 	}
 
 	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id) // Always clean up response state
+
 	code, message, err := c.textConn.ReadCodeLine(BodyFollows)
 	if err != nil {
-		c.textConn.EndResponse(id)
 		return nil, fmt.Errorf("failed to read BODY response: %w", err)
 	}
 
 	if code != BodyFollows {
-		c.textConn.EndResponse(id)
 		switch code {
 		case NoSuchArticle:
-			return nil, fmt.Errorf("article not found: %s", messageID)
+			log.Printf("[INFO] body not found: %s", messageID)
+			return nil, ErrArticleNotFound
 		case DMCA:
-			return nil, fmt.Errorf("article removed (DMCA): %s", messageID)
+			log.Printf("[INFO] body removed (DMCA): %s", messageID)
+			return nil, ErrArticleRemoved
 		default:
 			return nil, fmt.Errorf("unexpected BODY response: %d %s", code, message)
 		}
@@ -205,8 +220,6 @@ func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
 
 	// Read the body
 	lines, err := c.readMultilineResponse("body")
-	c.textConn.EndResponse(id)
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to read body: %w", err)
 	}
@@ -233,21 +246,19 @@ func (c *BackendConn) ListGroups() ([]GroupInfo, error) {
 	}
 
 	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id) // Always clean up response state
+
 	code, message, err := c.textConn.ReadCodeLine(215)
 	if err != nil {
-		c.textConn.EndResponse(id)
 		return nil, fmt.Errorf("failed to read LIST response: %w", err)
 	}
 
 	if code != 215 {
-		c.textConn.EndResponse(id)
 		return nil, fmt.Errorf("unexpected LIST response: %d %s", code, message)
 	}
 
 	// Read the group list
 	lines, err := c.readMultilineResponse("list")
-	c.textConn.EndResponse(id)
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to read group list: %w", err)
 	}
@@ -282,14 +293,14 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 	}
 
 	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id) // Always clean up response state
+
 	code, message, err := c.textConn.ReadCodeLine(215)
 	if err != nil {
-		c.textConn.EndResponse(id)
 		return nil, fmt.Errorf("failed to read LIST response: %w", err)
 	}
 
 	if code != 215 {
-		c.textConn.EndResponse(id)
 		return nil, fmt.Errorf("unexpected LIST response: %d %s", code, message)
 	}
 
@@ -299,12 +310,14 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 
 	for {
 		if lineCount >= maxGroups {
+			c.textConn.Close() // Close connection on limit reached
+			c = nil
+			log.Printf("Connection reached maximum group limit: %d", maxGroups)
 			break
 		}
 
 		line, err := c.textConn.ReadLine()
 		if err != nil {
-			c.textConn.EndResponse(id)
 			return nil, fmt.Errorf("failed to read group list: %w", err)
 		}
 
@@ -335,42 +348,41 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 			if err != nil {
 				break
 			}
-			if line == "." {
+			if line == DOT {
 				break
 			}
 		}
 	}
 
-	c.textConn.EndResponse(id)
 	return groups, nil
 }
 
 // SelectGroup selects a newsgroup for operation
-func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, error) {
+func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if !c.connected {
-		return nil, fmt.Errorf("not connected")
+		return nil, 0, fmt.Errorf("not connected")
 	}
 
 	c.lastUsed = time.Now()
 
 	id, err := c.textConn.Cmd("GROUP %s", groupName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send GROUP '%s' command: %w", groupName, err)
+		return nil, 0, fmt.Errorf("failed to send GROUP '%s' command: %w", groupName, err)
 	}
 
 	c.textConn.StartResponse(id)
-	code, message, err := c.textConn.ReadCodeLine(211)
-	c.textConn.EndResponse(id)
+	defer c.textConn.EndResponse(id) // Always clean up response state
 
+	code, message, err := c.textConn.ReadCodeLine(211)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read GROUP '%s' response: %w", groupName, err)
+		return nil, code, fmt.Errorf("failed to read GROUP '%s' response: %w", groupName, err)
 	}
 
 	if code != 211 {
-		return nil, fmt.Errorf(
+		return nil, code, fmt.Errorf(
 			"group selection failed: expected code 211, got %d - response: %s group %s",
 			code, message, groupName,
 		)
@@ -381,7 +393,7 @@ func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, error) {
 	// message format is "count first last group"
 	parts := strings.Fields(message)
 	if len(parts) < 4 {
-		return nil, fmt.Errorf(
+		return nil, code, fmt.Errorf(
 			"malformed GROUP response (expected 'count first last group'): %s group %s",
 			message, groupName,
 		)
@@ -389,25 +401,26 @@ func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, error) {
 
 	count, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse count in GROUP '%s' response: %w", groupName, err)
+		return nil, code, fmt.Errorf("failed to parse count in GROUP '%s' response: %w", groupName, err)
 	}
 	first, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse first in GROUP '%s' response: %w", groupName, err)
+		return nil, code, fmt.Errorf("failed to parse first in GROUP '%s' response: %w", groupName, err)
 	}
 	last, err := strconv.ParseInt(parts[2], 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse last in GROUP '%s' response: %w", groupName, err)
+		return nil, code, fmt.Errorf("failed to parse last in GROUP '%s' response: %w", groupName, err)
 	}
-	log.Printf("Selected group '%s' with %d articles (range: %d-%d)", groupName, count, first, last)
+
+	//log.Printf("Selected group '%s' with %d articles (range: %d-%d)", groupName, count, first, last)
 
 	return &GroupInfo{
-		Name:      groupName,
-		Count:     count,
-		First:     first,
-		Last:      last,
-		PostingOK: true, // Assume posting is OK unless we know otherwise
-	}, nil
+		Name:  groupName,
+		Count: count,
+		First: first,
+		Last:  last,
+		//PostingOK: true, // Assume posting is OK unless we know otherwise
+	}, code, nil
 }
 
 // XOver retrieves overview data for a range of articles
@@ -421,9 +434,9 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 	if !c.connected {
 		return nil, fmt.Errorf("not connected")
 	}
-	groupInfo, err := c.SelectGroup(groupName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to select group '%s': %w", groupName, err)
+	groupInfo, code, err := c.SelectGroup(groupName)
+	if err != nil && code != 411 {
+		return nil, fmt.Errorf("failed to select group '%s': cdeo=%d err=%w", groupName, code, err)
 	}
 	_ = groupInfo // groupInfo is not used further, but we keep it for clarity
 	c.lastUsed = time.Now()
@@ -444,21 +457,19 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 	}
 
 	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id) // Always clean up response state
+
 	code, message, err := c.textConn.ReadCodeLine(224)
 	if err != nil {
-		c.textConn.EndResponse(id)
 		return nil, fmt.Errorf("failed to read XOVER response: %w", err)
 	}
 
 	if code != 224 {
-		c.textConn.EndResponse(id)
 		return nil, fmt.Errorf("XOVER failed: %d %s", code, message)
 	}
 
 	// Use your existing readMultilineResponse function!
 	lines, err := c.readMultilineResponse("xover")
-	c.textConn.EndResponse(id)
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to read XOVER data: %w", err)
 	}
@@ -482,13 +493,15 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 // XHdr retrieves specific header field for a range of articles
 // Automatically limits to max 1000 articles to prevent SQLite overload
 func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderLine, error) {
-
+	c.mu.Lock()
 	if !c.connected {
+		c.mu.Unlock()
 		return nil, fmt.Errorf("not connected")
 	}
-	groupInfo, err := c.SelectGroup(groupName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to select group '%s': %w", groupName, err)
+	c.mu.Unlock()
+	groupInfo, code, err := c.SelectGroup(groupName)
+	if err != nil && code != 411 {
+		return nil, fmt.Errorf("failed to select group '%s': code=%d err=%w", groupName, code, err)
 	}
 	_ = groupInfo // groupInfo is not used further, but we keep it for clarity
 	c.lastUsed = time.Now()
@@ -509,21 +522,19 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderL
 	}
 
 	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id) // Always clean up response state
+
 	code, message, err := c.textConn.ReadCodeLine(221)
 	if err != nil {
-		c.textConn.EndResponse(id)
 		return nil, fmt.Errorf("failed to read XHDR response: %w", err)
 	}
 
 	if code != 221 {
-		c.textConn.EndResponse(id)
 		return nil, fmt.Errorf("XHDR failed: %d %s", code, message)
 	}
 
 	// Use your existing readMultilineResponse function!
 	lines, err := c.readMultilineResponse("xhdr")
-	c.textConn.EndResponse(id)
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to read XHDR data: %w", err)
 	}
@@ -539,6 +550,110 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderL
 	}
 
 	return headers, nil
+}
+
+var ErrOutOfRange error = fmt.Errorf("end range exceeds group last article number")
+
+// XHdrStreamed performs XHDR command and streams results line by line through a channel
+func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, resultChan chan<- *HeaderLine) error {
+	c.mu.Lock()
+	if !c.connected {
+		c.mu.Unlock()
+		close(resultChan)
+		return fmt.Errorf("not connected")
+	}
+	c.mu.Unlock()
+
+	groupInfo, code, err := c.SelectGroup(groupName)
+	if err != nil && code != 411 {
+		close(resultChan)
+		return fmt.Errorf("failed to select group '%s': code=%d err=%w", groupName, code, err)
+	}
+	if end > groupInfo.Last {
+		close(resultChan)
+		return ErrOutOfRange
+	}
+	c.lastUsed = time.Now()
+
+	// Limit to 1000 articles maximum to prevent SQLite overload
+	if end > 0 && (end-start+1) > MaxReadLinesXover {
+		end = start + MaxReadLinesXover - 1
+	}
+	log.Printf("XHdrStreamed group '%s' field '%s' start=%d end=%d", groupName, field, start, end)
+
+	var id uint
+	if end > 0 {
+		id, err = c.textConn.Cmd("XHDR %s %d-%d", field, start, end)
+	} else {
+		id, err = c.textConn.Cmd("XHDR %s %d-%d", field, start, start)
+	}
+	if err != nil {
+		close(resultChan)
+		return fmt.Errorf("failed to send XHDR command: %w", err)
+	}
+
+	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id) // Always clean up response state
+
+	// Set timeout for initial response
+	/*
+		if err := c.conn.SetReadDeadline(time.Now().Add(9 * time.Second)); err != nil {
+			close(resultChan)
+			return fmt.Errorf("failed to set read deadline: %w", err)
+		}
+		defer func() {
+			// Clear the deadline when operation completes
+			if c.conn != nil {
+				c.conn.SetReadDeadline(time.Time{})
+			}
+		}()
+	*/
+	code, message, err := c.textConn.ReadCodeLine(221)
+	if err != nil {
+		close(resultChan)
+		return fmt.Errorf("failed to read XHDR response: %w", err)
+	}
+
+	if code != 221 {
+		close(resultChan)
+		return fmt.Errorf("XHDR failed: ng: '%s' %d %s", groupName, code, message)
+	}
+
+	// Read multiline response line by line and send to channel immediately
+	for {
+		/*
+			// Set a shorter timeout for each line read (3 seconds per line)
+			if err := c.conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+				log.Printf("[ERROR] XHdrStreamed failed to set line deadline ng: '%s' err='%v'", groupName, err)
+				break
+			}
+		*/
+		line, err := c.textConn.ReadLine()
+		if err != nil {
+			log.Printf("[ERROR] XHdrStreamed read error ng: '%s' err='%v'", groupName, err)
+			// EOF or error, finish streaming
+			break
+		}
+
+		// Check for end marker
+		if line == DOT {
+			break
+		}
+
+		// Parse the header line
+		header, parseErr := c.parseHeaderLine(line)
+		if parseErr != nil {
+			log.Printf("[ERROR] XHdrStreamed parse error ng: '%s' err='%v'", groupName, parseErr)
+			continue // Skip malformed lines
+		}
+
+		// Send through channel
+		resultChan <- &header
+	}
+
+	// Close channel
+	close(resultChan)
+	return nil
 }
 
 // ListGroup retrieves article numbers for a specific group
@@ -564,21 +679,19 @@ func (c *BackendConn) ListGroup(groupName string, start, end int64) ([]int64, er
 	}
 
 	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id) // Always clean up response state
+
 	code, message, err := c.textConn.ReadCodeLine(211)
 	if err != nil {
-		c.textConn.EndResponse(id)
 		return nil, fmt.Errorf("failed to read LISTGROUP response: %w", err)
 	}
 
 	if code != 211 {
-		c.textConn.EndResponse(id)
 		return nil, fmt.Errorf("LISTGROUP failed: %d %s", code, message)
 	}
 
 	// Use your existing readMultilineResponse function!
 	lines, err := c.readMultilineResponse("listgroup")
-	c.textConn.EndResponse(id)
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to read article numbers: %w", err)
 	}
@@ -643,6 +756,8 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 	}
 	for {
 		if lineCount >= maxReadLines {
+			c.textConn.Close() // Close connection on too many lines
+			c = nil
 			return nil, fmt.Errorf("too many lines in response (limit: %d)", maxReadLines)
 		}
 
@@ -669,7 +784,7 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 }
 
 // ParseArticleLines parses article lines into headers and body
-func ParseLegacyArticleLines(messageID string, lines []string) (*models.Article, error) {
+func ParseLegacyArticleLines(messageID string, lines []string, bulkmode bool) (*models.Article, error) {
 	article := &models.Article{
 		MessageID: messageID,
 		Headers:   make(map[string][]string),
@@ -685,29 +800,42 @@ func ParseLegacyArticleLines(messageID string, lines []string) (*models.Article,
 	}
 
 	if bodyStart == -1 {
-		// No body separator found, treat all as headers
-		bodyStart = len(lines)
+		return nil, fmt.Errorf("malformed article: no header-body separator found in msgId='%s'", messageID)
 	}
 
 	// Parse headers
-	headerLines := lines[:bodyStart-1]
-	if err := ParseHeaders(article, headerLines); err != nil {
+	if err := ParseHeaders(article, lines[:bodyStart-1]); err != nil {
 		return nil, err
 	}
 
-	// Store original header lines for peering
-	article.NNTPhead = headerLines
-
-	// Parse body
+	// Parse article
 	if bodyStart < len(lines) {
-		bodyLines := lines[bodyStart:]
-		body := strings.Join(bodyLines, "\n")
-		article.BodyText = body
-		// Store original body lines for peering
-		article.NNTPbody = bodyLines
+		article.BodyText = strings.Join(lines[bodyStart:], "\n")
+		article.Bytes = len(article.BodyText)
+		article.Lines = len(lines) - bodyStart
+		if !bulkmode {
+			// original body lines for peering
+			article.NNTPhead = lines[:bodyStart-1]
+			article.NNTPbody = lines[bodyStart:]
+		}
 	}
-	article.Bytes = len(article.BodyText)
+	article.Subject = getHeaderFirst(article.Headers, "subject")
+	article.FromHeader = getHeaderFirst(article.Headers, "from")
+	article.Path = getHeaderFirst(article.Headers, "path")
+	article.References = getHeaderFirst(article.Headers, "references")
+	article.RefSlice = utils.ParseReferences(article.References) // capture all references for thread chain analysis
+	article.DateString = getHeaderFirst(article.Headers, "date")
 	return article, nil
+}
+
+func MultiLineHeaderToMergedString(vals []string) string {
+	if len(vals) == 0 {
+		return ""
+	}
+	if len(vals) == 1 {
+		return vals[0] // Fast path for single-line headers (most common case)
+	}
+	return strings.Join(vals, "\n") // Ultra fast for multi-line
 }
 
 // parseHeaders parses header lines into the article headers map
@@ -746,9 +874,17 @@ func ParseHeaders(article *models.Article, headerLines []string) error {
 			currentHeader = ""
 			continue
 		}
+		switch strings.ToLower(headerName) {
+		case "newsgroups", "date", "references", "subject", "from", "path":
+			//pass
+		default:
+			// not needed
+			currentHeader = ""
+			continue
+		}
 		article.Headers[currentHeader] = append(article.Headers[currentHeader], headerValue)
 	}
-
+	article.HeadersJSON = MultiLineHeaderToMergedString(headerLines)
 	return nil
 }
 

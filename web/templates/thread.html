@@ -9,7 +9,7 @@
         <li class="breadcrumb-item"><a href="/groups/{{.}}" class="text-decoration-none">{{.}}</a></li>
         <li class="breadcrumb-item"><a href="/groups/{{.}}/threads" class="text-decoration-none">Threads</a></li>
         {{end}}
-        <li class="breadcrumb-item active" aria-current="page">Thread {{.ThreadRoot.ArticleNum}}</li>
+        <li class="breadcrumb-item active" aria-current="page">Thread {{index .ThreadRoot.ArticleNums .GroupPtr}}</li>
     </ol>
 </nav>
 {{end}}
@@ -36,7 +36,7 @@
                     <a href="/groups/{{with .GroupName}}{{.}}{{end}}/threads" class="btn btn-outline-secondary">
                         <strong>[T]</strong> Back to Threads
                     </a>
-                    <a href="/groups/{{with .GroupName}}{{.}}{{end}}/tree/{{.ThreadRoot.ArticleNum}}" class="btn btn-outline-secondary">
+                    <a href="/groups/{{with .GroupName}}{{.}}{{end}}/tree/{{index .ThreadRoot.ArticleNums .GroupPtr}}" class="btn btn-outline-secondary">
                         <strong>[V]</strong> Tree View
                     </a>
                     <a href="/groups/{{with .GroupName}}{{.}}{{end}}" class="btn btn-outline-primary">
@@ -125,18 +125,18 @@
     <div class="row">
         <div class="col-12">
             {{range $index, $message := .ThreadMessages}}
-            <div class="card mb-3{{if eq $message.ArticleNum $.ThreadRoot.ArticleNum}} border-primary{{end}}">
-                <div class="card-header{{if eq $message.ArticleNum $.ThreadRoot.ArticleNum}} bg-success text-white{{else}} bg-primary text-white{{end}}">
+            <div class="card mb-3{{if eq (index $message.ArticleNums $.GroupPtr) (index $.ThreadRoot.ArticleNums $.GroupPtr)}} border-primary{{end}}">
+                <div class="card-header{{if eq (index $message.ArticleNums $.GroupPtr) (index $.ThreadRoot.ArticleNums $.GroupPtr)}} bg-success text-white{{else}} bg-primary text-white{{end}}">
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
                         <!-- TODO FIXME: reply index does not count correctly with pagination, every page starts from reply 0 again
-                            {{if eq $message.ArticleNum $.ThreadRoot.ArticleNum}}
+                            {{if eq (index $message.ArticleNums $.GroupPtr) (index $.ThreadRoot.ArticleNums $.GroupPtr)}}
                             <i class="bi bi-pin-fill me-2"></i><strong>Topic</strong>
                             {{else}}
                             <i class="bi bi-chat-dots me-2"></i><strong>Reply {{$index}}</strong>
                             {{end}}
                         -->
-                            {{if eq $message.ArticleNum $.ThreadRoot.ArticleNum}}
+                            {{if eq (index $message.ArticleNums $.GroupPtr) (index $.ThreadRoot.ArticleNums $.GroupPtr)}}
                             <h5 class="bi-pin-fill mt-2 mb-0 text-light">
                             {{else}}
                             <h5 class="bi-chat-dots mt-2 mb-0 text-light">
@@ -145,7 +145,7 @@
                                 {{if gt $message.Spam 0}} <span class="badge bg-warning text-dark ms-2">🚩 SPAM</span>{{end}}
                             </h5>
                         </div>
-                        <a class="badge bg-secondary text-light" href="/groups/{{$.GroupName}}/articles/{{$message.ArticleNum}}"><span class="text-light">#{{$message.ArticleNum}}</span></a>
+                        <a class="badge bg-secondary text-light" href="/groups/{{$.GroupName}}/articles/{{index $message.ArticleNums $.GroupPtr}}"><span class="text-light">#{{index $message.ArticleNums $.GroupPtr}}</span></a>
                     </div>
                 </div>
                 <div class="card-body">
@@ -166,7 +166,7 @@
                         <div class="col-12">
                             <div class="btn-group btn-group-sm" role="group" aria-label="Article controls">
                                 <!-- Spam button (available to all users) -->
-                                <form method="POST" action="/groups/{{$.GroupName}}/articles/{{$message.ArticleNum}}/spam" style="display: inline;">
+                                <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index $message.ArticleNums $.GroupPtr}}/spam" style="display: inline;">
                                     <button type="submit" class="btn btn-outline-warning btn-sm" title="Flag article as spam">
                                         🚩 {{$message.Spam}}
                                     </button>
@@ -175,13 +175,13 @@
                                 {{if $.IsAdmin}}
                                     <!-- Admin-only controls -->
                                     {{if gt $message.Spam 0}}
-                                    <form method="POST" action="/groups/{{$.GroupName}}/articles/{{$message.ArticleNum}}/decrement-spam" style="display: inline;">
+                                    <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index $message.ArticleNums $.GroupPtr}}/decrement-spam" style="display: inline;">
                                         <button type="submit" class="btn btn-outline-warning btn-sm" title="Decrement spam counter">
                                             <i class="bi bi-dash-circle"></i>
                                         </button>
                                     </form>
                                     {{end}}
-                                    <form method="POST" action="/groups/{{$.GroupName}}/articles/{{$message.ArticleNum}}/hide" style="display: inline;">
+                                    <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index $message.ArticleNums $.GroupPtr}}/hide" style="display: inline;">
                                         <button type="submit" class="btn btn-outline-secondary btn-sm" title="Hide article">
                                             👁️ {{$message.Hide}}
                                         </button>
@@ -202,7 +202,7 @@
                     {{end}}
                     <div class="mt-3">
                     <!--
-                        <a href="/groups/{{$.GroupName}}/articles/{{$message.ArticleNum}}" class="btn btn-outline-primary btn-sm">
+                        <a href="/groups/{{$.GroupName}}/articles/{{index $message.ArticleNums $.GroupPtr}}" class="btn btn-outline-primary btn-sm">
                             <i class="bi bi-eye me-1"></i>View Full Article
                         </a>
                     -->

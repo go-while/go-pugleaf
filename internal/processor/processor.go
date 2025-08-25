@@ -36,7 +36,7 @@ var (
 	// these list of ' var ' can be set after importing the lib before starting!!
 
 	// MaxBatch defines the maximum number of articles to fetch in a single batch
-	MaxBatch = nntp.MaxReadLinesXover // Use the XOVER limit as the maximum batch size for article imports
+	MaxBatchSize int64 = 100
 
 	// UseStrictGroupValidation for group names, false allows upper-case in group names
 	UseStrictGroupValidation = true
@@ -46,10 +46,14 @@ var (
 
 	// RunRSLIGHTImport is used to indicate if the importer should run the legacy RockSolid Light importer
 	RunRSLIGHTImport = false
+	DownloadMaxPar   = 16
 
-	// Global Batch Queue
+	// Global Batch Queue (proc_DLArt.go)
 	Batch = &BatchQueue{
-		Queue: make(chan *batchItem, 1000), // Channel to hold batch items
+		Check:       make(chan *string),           // check newsgroups
+		TodoQ:       make(chan *nntp.GroupInfo),   // todo newsgroups
+		GetQ:        make(chan *BatchItem),        // get articles, blocking channel
+		GroupQueues: make(map[string]*GroupBatch), // per-newsgroup queues
 	}
 
 	// Do NOT change this here! these are needed for runtime !
@@ -60,8 +64,7 @@ var (
 	validGroupNameRegexLazy   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+&-]*$`)
 	validGroupNameRegexSingle = regexp.MustCompile(`^[A-Za-z0-9-_+&][A-Za-z0-9-_+&]{1,64}$`)
 	validGroupNameRegexCaps   = regexp.MustCompile(`^[A-Za-z0-9-_+&][A-Za-z0-9-_+&]*(?:\.[A-Za-z0-9-_+&][A-Za-z0-9-_+&]*)+$`)
-	errorUp2date              = fmt.Errorf("up2date")
-	//his                       = &history.HISTORY{DIR: "./history"}
+	//errorUp2date              = fmt.Errorf("up2date")
 )
 
 func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen int) *Processor {
@@ -94,18 +97,14 @@ func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen in
 	}
 
 	proc := &Processor{
-		DB:   db,
-		Pool: nntpPool,
-		// Cache:         NewMsgTmpCache(), // REMOVED: Migrated to MsgIdCache
+		DB:            db,
+		Pool:          nntpPool,
 		ThreadCounter: NewCounter(),
 		LegacyCounter: NewCounter(),
-		//HisResChan:    make(chan int, 100), // HARDCODED: Channel for history responses
 		History:       hist,
 		MsgIdCache:    history.NewMsgIdItemCache(),
 		BridgeManager: nil, // Initialize as nil (disabled by default)
 	}
-
-	//his.BootHistory("./history", 5) // false = SQLite3
 
 	proc.DB.Batch.SetProcessor(proc) // Set the processor in the database instance for threading checks
 
@@ -117,8 +116,7 @@ func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen in
 		proc.MsgIdCache.StartCleanupRoutine()
 	}
 
-	// DISABLED: Legacy threading processor - now handled by SQ3CronProcessThreading in db_batch.go
-	//go proc.CronProcessThreading()
+	// DISABLED: threading processor - now handled by SQ3CronProcessThreading in db_batch.go
 	return proc
 }
 
@@ -208,6 +206,20 @@ func (proc *Processor) GetHistoryStats() history.HistoryStats {
 func (proc *Processor) Close() error {
 	log.Printf("Shutting down processor...")
 
+	// Stop all group workers first
+	if Batch != nil {
+		Batch.Mutex.Lock()
+		if Batch.GroupQueues != nil {
+			for newsgroup, groupBatch := range Batch.GroupQueues {
+				log.Printf("Stopping worker for newsgroup: %s", newsgroup)
+				groupBatch.stopWorker()
+			}
+			// Clear the map
+			Batch.GroupQueues = make(map[string]*GroupBatch)
+		}
+		Batch.Mutex.Unlock()
+	}
+
 	// Wait for all batch processing to complete before closing
 	proc.WaitForBatchCompletion()
 
@@ -273,17 +285,17 @@ func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, err
 	}
 
 	// Make sure we have at least one newsgroup
-	if len(article.Newsgroups) == 0 {
+	if len(article.NewsgroupsPtr) == 0 {
 		return history.CaseError, fmt.Errorf("no newsgroups specified in article")
 	}
 
 	// Use the primary newsgroup for processing
 	// The article will be available in all cross-posted groups
 	log.Printf("Processing incoming article with Message-ID: %s for primary newsgroup %s (cross-posted to %d groups)",
-		article.MessageID, article.Newsgroups[0], len(article.Newsgroups))
+		article.MessageID, *article.NewsgroupsPtr[0], len(article.NewsgroupsPtr))
 
 	bulkmode := false
-	return proc.processArticle(article, article.Newsgroups[0], bulkmode)
+	return proc.processArticle(article, *article.NewsgroupsPtr[0], bulkmode)
 }
 
 // EnableBridges enables Fediverse and/or Matrix bridges with the given configuration

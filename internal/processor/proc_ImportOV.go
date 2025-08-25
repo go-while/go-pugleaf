@@ -34,14 +34,14 @@ func (proc *Processor) ImportOverview(groupName string) error {
 	if err := database.RetryableQueryRowScan(groupDBs.DB, "SELECT MAX(article_num) FROM articles", nil, &maxNum); err != nil {
 		return err
 	}
-	start := groupInfo.First           // Start from the first article in the remote group
-	end := start + int64(MaxBatch) - 1 // End at the last article in the remote group
+	start := groupInfo.First        // Start from the first article in the remote group
+	end := start + MaxBatchSize - 1 // End at the last article in the remote group
 	if end > groupInfo.Last {
 		end = groupInfo.Last
 	}
 	if maxNum.Valid && maxNum.Int64 >= start {
 		start = maxNum.Int64 + 1
-		end = start + int64(MaxBatch) - 1
+		end = start + MaxBatchSize - 1
 		if end > groupInfo.Last {
 			end = groupInfo.Last
 		}

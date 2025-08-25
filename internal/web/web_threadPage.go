@@ -64,6 +64,19 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 		return
 	}
 
+	// Load the full ThreadRoot article to get ArticleNums populated
+	threadRootArticle, err := s.DB.GetArticleByNum(groupDBs, threadRoot)
+	if err != nil {
+		c.String(http.StatusNotFound, "Thread root article %d not found: %v", threadRoot, err)
+		return
+	}
+
+	// Initialize ArticleNums map if nil and set the article number for this group
+	if threadRootArticle.ArticleNums == nil {
+		threadRootArticle.ArticleNums = make(map[*string]int64)
+	}
+	threadRootArticle.ArticleNums[groupDBs.NewsgroupPtr] = threadRoot
+
 	// Use cached thread replies with pagination
 	threadReplies, totalReplies, err := s.DB.GetCachedThreadReplies(groupDBs, threadRoot, page, ThreadMessages_perPage)
 	if err != nil {
@@ -109,6 +122,13 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 			// but for now let's skip missing articles
 			continue
 		}
+
+		// Initialize ArticleNums map if nil and set the article number for this group
+		if article.ArticleNums == nil {
+			article.ArticleNums = make(map[*string]int64)
+		}
+		article.ArticleNums[groupDBs.NewsgroupPtr] = overview.ArticleNum
+
 		threadMessages = append(threadMessages, article)
 	}
 
@@ -116,7 +136,7 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 	models.BatchSanitizeArticles(threadMessages)
 
 	// Get base template data with authentication context
-	baseData := s.getBaseTemplateData(c, rootOverview.GetCleanSubject()+" - Thread")
+	baseData := s.getBaseTemplateData(c, threadRootArticle.GetCleanSubject()+" - Thread")
 
 	data := gin.H{
 		"Title":               baseData.Title,
@@ -133,7 +153,8 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 		"AvailableSections":   baseData.AvailableSections,
 		"AvailableAIModels":   baseData.AvailableAIModels,
 		"GroupName":           groupName,
-		"ThreadRoot":          rootOverview,
+		"GroupPtr":            groupDBs.NewsgroupPtr,
+		"ThreadRoot":          threadRootArticle,
 		"ThreadMessages":      threadMessages,
 		"MessageCount":        totalMessages,
 		"CurrentPage":         page,

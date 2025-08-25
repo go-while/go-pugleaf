@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"path/filepath"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite3 driver
@@ -68,12 +67,11 @@ func (db *Database) cleanupIdleGroups() {
 		db.MainMutex.RUnlock()
 
 		// Close oldest databases
+		db.MainMutex.Lock()
 		for _, candidate := range candidates {
 			if closedCount >= targetClose {
 				break
 			}
-
-			db.MainMutex.Lock()
 			groupDBs := db.groupDBs[candidate.name]
 			if groupDBs != nil {
 				groupDBs.mux.Lock()
@@ -89,9 +87,9 @@ func (db *Database) cleanupIdleGroups() {
 				}
 				groupDBs.mux.Unlock()
 			}
-			db.MainMutex.Unlock()
 		}
 		log.Printf("Force closed %d databases due to exceeding limit (%d >= %d)", closedCount, db.openDBsNum+closedCount, MaxOpenDatabases)
+		db.MainMutex.Unlock()
 		return
 	}
 	db.MainMutex.RUnlock()
@@ -132,130 +130,6 @@ func (db *Database) removePartialInitializedGroupDB(groupName string) {
 	db.MainMutex.Unlock()
 }
 
-func (db *Database) ForceCloseGroupDBs(groupsDB *GroupDBs) error {
-	if db.dbconfig == nil {
-		log.Printf(("Database configuration is not set, cannot get group DBs for '%s'"), groupsDB.Newsgroup)
-		return fmt.Errorf("database configuration is not set")
-	}
-	db.MainMutex.Lock()
-	defer db.MainMutex.Unlock()
-	groupsDB.mux.Lock()
-	if groupsDB.Workers < 1 {
-		groupsDB.mux.Unlock()
-		return fmt.Errorf("error in ForceCloseGroupDBs: workers <= 0")
-	}
-	groupsDB.Workers--
-	if groupsDB.Workers > 0 {
-		groupsDB.mux.Unlock()
-		return fmt.Errorf("error ForceCloseGroupDBs ng:'%s' Worker=%d", groupsDB.Newsgroup, groupsDB.Workers)
-	}
-	if err := groupsDB.Close("ForceCloseGroupDBs"); err != nil {
-		groupsDB.mux.Unlock()
-		return fmt.Errorf("error ForceCloseGroupDBs groupsDB.Close ng:'%s' err='%v'", groupsDB.Newsgroup, err)
-	}
-	groupsDB.mux.Unlock()
-	db.openDBsNum--
-	delete(db.groupDBs, groupsDB.Newsgroup)
-	return nil
-}
-
-// GetGroupDBs returns groupDB for a specific newsgroup
-func (db *Database) GetGroupDBs(groupName string) (*GroupDBs, error) {
-
-	if db.dbconfig == nil {
-		log.Printf(("Database configuration is not set, cannot get group DBs for '%s'"), groupName)
-		return nil, fmt.Errorf("database configuration is not set")
-	}
-
-	db.MainMutex.Lock()
-	groupDBs := db.groupDBs[groupName]
-	if groupDBs != nil {
-		db.MainMutex.Unlock()
-
-		for {
-			groupDBs.mux.RLock()
-			if groupDBs.state == stateDONE {
-				groupDBs.mux.RUnlock()
-				groupDBs.IncrementWorkers()
-				return groupDBs, nil
-			}
-			groupDBs.mux.RUnlock()
-			time.Sleep(10 * time.Millisecond)
-		}
-	} else {
-		groupDBs = &GroupDBs{
-			Newsgroup: groupName,
-			DB:        nil,
-			Idle:      time.Now(),
-		}
-		db.groupDBs[groupName] = groupDBs
-		db.MainMutex.Unlock()
-
-		groupsHash := GroupHashMap.GroupToHash(groupName)
-
-		//log.Printf("Open DB for newsgroup '%s' hash='%s' db.openDBsNum=%d db.groupDBs=%d", groupName, groupsHash, db.openDBsNum, len(db.groupDBs))
-
-		// Create single database filename
-		baseGroupDBdir := filepath.Join(db.dbconfig.DataDir, "/db/"+groupsHash)
-		if err := createDirIfNotExists(baseGroupDBdir); err != nil {
-			db.removePartialInitializedGroupDB(groupName)
-			return nil, fmt.Errorf("failed to create group database directory: %w", err)
-		}
-		groupDBfile := filepath.Join(baseGroupDBdir + "/" + sanitizeGroupName(groupName) + ".db")
-
-		// Check if database file already exists
-		dbExists := fileExists(groupDBfile)
-
-		// Open single database
-		groupDB, err := sql.Open("sqlite3", groupDBfile)
-		if err != nil {
-			db.removePartialInitializedGroupDB(groupName)
-			return nil, err
-		}
-
-		// Apply pragmas (optimized for existing vs new DBs)
-		var pragmaErr error
-		if dbExists {
-			// Use optimized pragmas for existing DBs (no page_size)
-			pragmaErr = db.applySQLitePragmasGroupDB(groupDB)
-		}
-		if pragmaErr != nil {
-			if cerr := groupDB.Close(); cerr != nil {
-				log.Printf("Failed to close groupDB during pragma error: %v", cerr)
-			}
-			db.removePartialInitializedGroupDB(groupName)
-			return nil, pragmaErr
-		}
-
-		groupDBs.mux.Lock()
-		groupDBs.Idle = time.Now()
-		groupDBs.DB = groupDB
-		groupDBs.mux.Unlock()
-
-		// Apply schemas using the new migration system instead of direct file application
-		// Apply all migrations to ensure schema is up to date
-		if err := db.migrateGroupDB(groupDBs); err != nil {
-			if cerr := groupDB.Close(); cerr != nil {
-				log.Printf("Failed to close groupDB during migration error: %v", cerr)
-			}
-			db.removePartialInitializedGroupDB(groupName)
-			return nil, fmt.Errorf("failed to migrate group database %s: %w", groupName, err)
-		}
-
-		groupDBs.IncrementWorkers()
-
-		db.MainMutex.Lock()
-		db.openDBsNum++
-		db.MainMutex.Unlock()
-
-		groupDBs.mux.Lock()
-		groupDBs.state = stateDONE
-		groupDBs.mux.Unlock()
-
-		return groupDBs, nil
-	}
-}
-
 // Close closes all database connections
 func (db *Database) Shutdown() error {
 	var errs []error
@@ -267,18 +141,20 @@ func (db *Database) Shutdown() error {
 	}
 
 	// STEP 2: Close per-group databases first (thousands of them)
+	db.MainMutex.Lock()
 	log.Printf("[DATABASE] Closing %d group databases...", len(db.groupDBs))
 	groupCloseErrors := 0
-	db.MainMutex.RLock()
 	for groupName, groupDBs := range db.groupDBs {
 		if groupDBs != nil && groupDBs.DB != nil {
+			groupDBs.mux.Lock()
 			if err := groupDBs.DB.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("failed to close group database %s: %w", groupName, err))
 				groupCloseErrors++
 			}
+			groupDBs.mux.Unlock()
 		}
 	}
-	db.MainMutex.RUnlock()
+	db.MainMutex.Unlock()
 	if groupCloseErrors > 0 {
 		log.Printf("[DATABASE] Failed to close %d group databases", groupCloseErrors)
 	}

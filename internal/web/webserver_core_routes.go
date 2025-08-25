@@ -53,6 +53,7 @@ type TemplateData struct {
 type GroupPageData struct {
 	TemplateData
 	GroupName  string
+	GroupPtr   *string
 	Articles   []*models.Overview
 	Pagination *models.PaginationInfo
 }
@@ -61,6 +62,7 @@ type GroupPageData struct {
 type ArticlePageData struct {
 	TemplateData
 	GroupName   string
+	GroupPtr    *string
 	ArticleNum  int64
 	Article     *models.Article
 	Thread      []*models.Overview
@@ -258,7 +260,7 @@ func NewServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *n
 func (s *WebServer) setupRoutes() {
 	// Static files first (highest priority)
 	s.Router.Use(s.BotDetectionMiddleware())
-	
+
 	// Use embedded static files if available, otherwise fall back to filesystem
 	if UseEmbeddedStatic() {
 		s.Router.GET("/static/*filepath", EmbeddedStaticHandler("/static"))

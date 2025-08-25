@@ -6,7 +6,7 @@
         <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
         <li class="breadcrumb-item"><a href="/groups" class="text-decoration-none">Groups</a></li>
         <li class="breadcrumb-item"><a href="/groups/{{.GroupName}}" class="text-decoration-none">{{.GroupName}}</a></li>
-        <li class="breadcrumb-item active" aria-current="page">Article {{.ArticleNum}}</li>
+        <li class="breadcrumb-item active" aria-current="page">Article {{index .Article.ArticleNums .GroupPtr}}</li>
     </ol>
 </nav>
 {{end}}
@@ -21,7 +21,7 @@
                     <h5 class="card-title mb-0">
                         <i class="bi bi-file-earmark-text me-2"></i>Article View: {{.GroupName}}
                     </h5>
-                    <span class="badge bg-secondary">Article #{{.ArticleNum}}</span>
+                    <span class="badge bg-secondary">Article #{{index .Article.ArticleNums .GroupPtr}}</span>
                 </div>
             </div>
             <div class="card-body">
@@ -51,7 +51,7 @@
                     <div class="flex-grow-1 me-3">
                         <h4 class="mb-0">{{.Article.PrintSanitized "subject" .GroupName}}</h4>
                     </div>
-                    <span class="badge bg-secondary">#{{.Article.ArticleNum}}</span>
+                    <span class="badge bg-secondary">#{{index .Article.ArticleNums .GroupPtr}}</span>
                 </div>
             </div>
             <div class="card-body">
@@ -73,7 +73,7 @@
                     <div class="col-12">
                         <div class="btn-group btn-group-sm" role="group" aria-label="Article controls">
                             <!-- Spam button (available to all users) -->
-                            <form method="POST" action="/groups/{{.GroupName}}/articles/{{.Article.ArticleNum}}/spam" style="display: inline;">
+                            <form method="POST" action="/groups/{{.GroupName}}/articles/{{index .Article.ArticleNums .GroupPtr}}/spam" style="display: inline;">
                                 <button type="submit" class="btn btn-outline-warning btn-sm" title="Flag article as spam">
                                     🚩 {{.Article.Spam}}
                                 </button>
@@ -82,13 +82,13 @@
                             {{if .IsAdmin}}
                                 <!-- Admin-only controls -->
                                 {{if gt .Article.Spam 0}}
-                                <form method="POST" action="/groups/{{.GroupName}}/articles/{{.Article.ArticleNum}}/decrement-spam" style="display: inline;">
+                                <form method="POST" action="/groups/{{.GroupName}}/articles/{{index .Article.ArticleNums .GroupPtr}}/decrement-spam" style="display: inline;">
                                     <button type="submit" class="btn btn-outline-warning btn-sm" title="Decrement spam counter">
                                         <i class="bi bi-dash-circle"></i>
                                     </button>
                                 </form>
                                 {{end}}
-                                <form method="POST" action="/groups/{{.GroupName}}/articles/{{.Article.ArticleNum}}/hide" style="display: inline;">
+                                <form method="POST" action="/groups/{{.GroupName}}/articles/{{index .Article.ArticleNums .GroupPtr}}/hide" style="display: inline;">
                                     <button type="submit" class="btn btn-outline-secondary btn-sm" title="Hide article">
                                         👁️ {{.Article.Hide}}
                                     </button>
@@ -184,16 +184,16 @@
             <div class="card-body">
                 <div class="list-group list-group-flush">
                     {{range .Thread}}
-                    <div class="list-group-item{{if eq .ArticleNum $.ArticleNum}} active{{end}} d-flex justify-content-between align-items-start">
+                    <div class="list-group-item{{if eq (index .ArticleNums $.GroupPtr) (index $.Article.ArticleNums $.GroupPtr)}} active{{end}} d-flex justify-content-between align-items-start">
                         <div class="flex-grow-1 me-3">
-                            <a href="/groups/{{$.GroupName}}/articles/{{.ArticleNum}}" class="text-decoration-none{{if eq .ArticleNum $.ArticleNum}} text-white{{end}}">
-                                <strong>[{{.ArticleNum}}]</strong> {{.PrintSanitized "subject" $.GroupName}}
+                            <a href="/groups/{{$.GroupName}}/articles/{{index .ArticleNums $.GroupPtr}}" class="text-decoration-none{{if eq (index .ArticleNums $.GroupPtr) (index $.Article.ArticleNums $.GroupPtr)}} text-white{{end}}">
+                                <strong>[{{index .ArticleNums $.GroupPtr}}]</strong> {{.PrintSanitized "subject" $.GroupName}}
                             </a>
-                            {{if eq .ArticleNum $.ArticleNum}}
+                            {{if eq (index .ArticleNums $.GroupPtr) (index $.Article.ArticleNums $.GroupPtr)}}
                             <span class="badge bg-warning text-dark ms-2">Current</span>
                             {{end}}
                         </div>
-                        <div class="text-end small{{if eq .ArticleNum $.ArticleNum}} text-white-50{{else}} text-muted{{end}}">
+                        <div class="text-end small{{if eq (index .ArticleNums $.GroupPtr) (index $.Article.ArticleNums $.GroupPtr)}} text-white-50{{else}} text-muted{{end}}">
                             <div>{{.PrintSanitized "fromheader" $.GroupName}}</div>
                             <div>{{.PrintSanitized "date_string" $.GroupName}}</div>
                         </div>
@@ -211,7 +211,7 @@
     <div class="col-12">
         <div class="alert alert-warning" role="alert">
             <h4 class="alert-heading"><i class="bi bi-exclamation-triangle me-2"></i>Article Not Found</h4>
-            <p>Article #{{.ArticleNum}} could not be found in group <strong>{{.GroupName}}</strong>.</p>
+            <p>Article #{{index .Article.ArticleNums .GroupPtr}} could not be found in group <strong>{{.GroupName}}</strong>.</p>
             <hr>
             <p class="mb-0">This may indicate the article has not been processed yet, the article number is incorrect, or the article has been deleted.</p>
             <div class="mt-3">

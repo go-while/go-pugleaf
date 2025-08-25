@@ -243,7 +243,7 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 			c.sendResponse(430, "NotF8")
 			return nil, nil
 		}
-		articleNum = article.ArticleNum
+		articleNum = article.ArticleNums[groupDBs.NewsgroupPtr]
 
 	} else {
 		// Handle article number lookup
@@ -271,7 +271,10 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 			c.sendResponse(423, "No such article number")
 			return nil, nil
 		}
-
+		if article.MessageID == "" {
+			log.Printf("Error in getArticleData: Article with no message-id: %#v", article)
+			return nil, fmt.Errorf("error in getArticleData: article with no message-id")
+		}
 		// Create or get msgIdItem
 		messageID := article.MessageID
 		if overview != nil {

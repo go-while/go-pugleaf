@@ -36,11 +36,15 @@ func (s *WebServer) articlePage(c *gin.Context) {
 	}
 
 	groupDBs, err := s.DB.GetGroupDBs(groupName)
-	if err != nil {
+	if groupDBs == nil || err != nil {
 		c.String(http.StatusNotFound, "Group not found: %v", err)
 		return
 	}
 	defer groupDBs.Return(s.DB)
+	if groupDBs.NewsgroupPtr == nil {
+		c.String(http.StatusInternalServerError, "Group pointer is nil for group %s", groupName)
+		return
+	}
 	// Get the article
 	article, err := s.DB.GetArticleByNum(groupDBs, articleNum)
 	if err != nil {
@@ -64,15 +68,12 @@ func (s *WebServer) articlePage(c *gin.Context) {
 		c.String(http.StatusNotFound, "Article #%d not found in group %s. Available articles may have different numbers.", articleNum, groupName)
 		return
 	}
+	// Batch sanitize the article for better performance
+	models.BatchSanitizeArticles([]*models.Article{article})
 
 	// Get thread context - for now, don't show all articles (too many)
 	// TODO: Implement proper threading based on References/In-Reply-To headers
 	thread := []*models.Overview{}
-
-	// Batch sanitize the article for better performance
-	if article != nil {
-		models.BatchSanitizeArticles([]*models.Article{article})
-	}
 
 	// Get subject for title without HTML escaping (for proper browser title display)
 	subjectText := article.GetCleanSubject()
@@ -80,6 +81,7 @@ func (s *WebServer) articlePage(c *gin.Context) {
 	data := ArticlePageData{
 		TemplateData: s.getBaseTemplateData(c, subjectText+" - Article "+articleNumStr),
 		GroupName:    groupName,
+		GroupPtr:     groupDBs.NewsgroupPtr,
 		ArticleNum:   articleNum,
 		Article:      article,
 		Thread:       thread,
@@ -132,13 +134,14 @@ func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
 	subjectText := article.GetCleanSubject()
 
 	data := ArticlePageData{
-		TemplateData: s.getBaseTemplateData(c, subjectText+" - Article "+strconv.FormatInt(article.ArticleNum, 10)),
+		TemplateData: s.getBaseTemplateData(c, subjectText+" - Article "+strconv.FormatInt(article.ArticleNums[groupDBs.NewsgroupPtr], 10)),
 		GroupName:    groupName,
-		ArticleNum:   article.ArticleNum,
+		GroupPtr:     groupDBs.NewsgroupPtr,
+		ArticleNum:   article.ArticleNums[groupDBs.NewsgroupPtr],
 		Article:      article,
 		Thread:       thread,
-		PrevArticle:  article.ArticleNum - 1,
-		NextArticle:  article.ArticleNum + 1,
+		PrevArticle:  article.ArticleNums[groupDBs.NewsgroupPtr] - 1,
+		NextArticle:  article.ArticleNums[groupDBs.NewsgroupPtr] + 1,
 	}
 
 	// Load template individually to avoid conflicts
