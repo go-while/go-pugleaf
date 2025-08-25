@@ -311,6 +311,7 @@ func isAdminUser(db *database.Database, user *models.User) bool {
 	}
 	perms, err := db.GetUserPermissions(user.ID)
 	if err != nil {
+		log.Printf("Failed to get permissions for user ID %d: %v", user.ID, err)
 		return false
 	}
 	for _, p := range perms {
