@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/bin/sh -e
 
 # Generate SHA256 checksums for all executables in build directory
 
