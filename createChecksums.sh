@@ -15,7 +15,7 @@ if [ ! -d "$BUILD_DIR" ]; then
 fi
 
 # Check if there are any files in build directory
-if [ ! "$(ls -A $BUILD_DIR)" ]; then
+if [ ! "$(ls -A "$BUILD_DIR")" ]; then
     echo "Error: Build directory '$BUILD_DIR' is empty"
     echo "Please run ./build_ALL.sh first to build all executables"
     exit 1
