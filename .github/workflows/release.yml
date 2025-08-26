@@ -117,12 +117,33 @@ jobs:
             fi
           done
 
+      - name: Generate SHA256 checksums
+        run: |
+          OS="${{ matrix.os }}"
+          ARCH="${{ matrix.arch }}"
+          CHECKSUMS_FILE="checksums-${OS}-${ARCH}.sha256"
+          
+          echo "Generating SHA256 checksums for ${OS}-${ARCH} binaries..."
+          cd build
+          sha256sum * > "../${CHECKSUMS_FILE}"
+          cd ..
+          
+          echo "CHECKSUMS_FILE=${CHECKSUMS_FILE}" >> $GITHUB_ENV
+          echo ""
+          echo "Generated checksums for ${OS}-${ARCH}:"
+          echo "================================="
+          cat "${CHECKSUMS_FILE}"
+
       - name: Create release archive
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           OS="${{ matrix.os }}"
           ARCH="${{ matrix.arch }}"
           ARCHIVE_NAME="go-pugleaf-v${VERSION}-${OS}-${ARCH}"
+          
+          # Include checksums in the archive
+          cp "${{ env.CHECKSUMS_FILE }}" build/checksums.sha256
+          
           if [ "${{ matrix.os }}" = "windows" ]; then
             zip -r "${ARCHIVE_NAME}.zip" build/ README.md LICENSE
             echo "ARCHIVE_FILE=${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
@@ -135,7 +156,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: go-pugleaf-${{ matrix.os }}-${{ matrix.arch }}
-          path: ${{ env.ARCHIVE_FILE }}
+          path: |
+            ${{ env.ARCHIVE_FILE }}
+            ${{ env.CHECKSUMS_FILE }}
 
   release:
     name: Create release
@@ -162,6 +185,38 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Create comprehensive checksums file
+        run: |
+          echo "Creating comprehensive SHA256 checksums file..."
+          echo "# Go-Pugleaf v${{ steps.version.outputs.version }} - SHA256 Checksums" > SHA256SUMS.txt
+          echo "# Generated on $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> SHA256SUMS.txt
+          echo "" >> SHA256SUMS.txt
+          
+          # Process each platform's checksums
+          for artifact_dir in artifacts/go-pugleaf-*; do
+            if [ -d "$artifact_dir" ]; then
+              platform=$(basename "$artifact_dir" | sed 's/go-pugleaf-//')
+              echo "## Platform: $platform" >> SHA256SUMS.txt
+              
+              # Find and process checksums file for this platform
+              checksums_file=$(find "$artifact_dir" -name "checksums-*.sha256" | head -1)
+              if [ -f "$checksums_file" ]; then
+                echo "Processing checksums for $platform..."
+                while IFS= read -r line; do
+                  # Extract hash and filename
+                  hash=$(echo "$line" | cut -d' ' -f1)
+                  filename=$(echo "$line" | cut -d' ' -f2-)
+                  echo "$hash  $filename ($platform)" >> SHA256SUMS.txt
+                done < "$checksums_file"
+              fi
+              echo "" >> SHA256SUMS.txt
+            fi
+          done
+          
+          echo "Comprehensive checksums file created:"
+          echo "====================================="
+          cat SHA256SUMS.txt
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -193,8 +248,27 @@ jobs:
             - macOS (amd64, arm64)
             - Windows (amd64)
 
+            ### Binary Verification:
+            All binaries include SHA256 checksums for integrity verification:
+            - **SHA256SUMS.txt** - Comprehensive checksums for all platforms
+            - **checksums-{os}-{arch}.sha256** - Individual platform checksums
+            - Each archive also contains a `checksums.sha256` file for verification after extraction
+
+            **Verification Examples:**
+            ```bash
+            # Verify individual platform binaries
+            sha256sum -c checksums-linux-amd64.sha256
+            
+            # Verify after archive extraction
+            tar -xzf go-pugleaf-v${{ steps.version.outputs.version }}-linux-amd64.tar.gz
+            cd build/
+            sha256sum -c checksums.sha256
+            ```
+
             Extract the archive for your platform and run the binaries.
             See README.md for usage instructions.
-          files: artifacts/*/*
+          files: |
+            artifacts/*/*
+            SHA256SUMS.txt
           draft: false
           prerelease: false
