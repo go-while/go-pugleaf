@@ -128,7 +128,7 @@ func (s *WebServer) logout(c *gin.Context) {
 	// Get current session to invalidate it
 	session := s.getWebSession(c)
 	if session != nil {
-		s.DB.InvalidateUserSession(int(session.UserID))
+		s.DB.InvalidateUserSession(session.UserID)
 	}
 
 	// Clear session cookie
