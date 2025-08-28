@@ -250,16 +250,16 @@ func validatePassword(password string) error {
 
 // Helper function to set session cookie
 func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
-	// Use same HTTPS detection logic as security middleware
-	// Check both app SSL config AND reverse proxy headers
-	secure := s.Config.SSL || c.GetHeader("X-Forwarded-Proto") == "https"
+	// Detect HTTPS from the current request perspective only
+	// Prefer actual TLS on the request or trusted reverse proxy header
+	isHTTPS := c.Request != nil && (c.Request.TLS != nil || strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https"))
 
 	cookie := &http.Cookie{
 		Name:     "session_id",
 		Value:    sessionID,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   secure,
+		Secure:   isHTTPS,
 		SameSite: http.SameSiteLaxMode, // Works well with reverse proxies
 		MaxAge:   int(7 * 24 * 3600),   // 7 days
 	}
@@ -269,16 +269,15 @@ func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
 
 // Helper function to clear session cookie
 func (s *WebServer) clearSessionCookie(c *gin.Context) {
-	// Use same HTTPS detection logic as security middleware
-	// Check both app SSL config AND reverse proxy headers
-	secure := s.Config.SSL || c.GetHeader("X-Forwarded-Proto") == "https"
+	// Detect HTTPS from the current request perspective only
+	isHTTPS := c.Request != nil && (c.Request.TLS != nil || strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https"))
 
 	cookie := &http.Cookie{
 		Name:     "session_id",
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   secure,
+		Secure:   isHTTPS,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1, // Delete cookie
 	}
