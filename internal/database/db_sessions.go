@@ -34,8 +34,8 @@ func (db *Database) CreateUserSession(userID int64, remoteIP string) (string, er
 		return "", err
 	}
 
-	// Calculate expiration time (3 hours from now)
-	expiresAt := time.Now().Add(SessionTimeout)
+	// Calculate expiration time (3 hours from now) in UTC for consistent DB comparison
+	expiresAt := time.Now().UTC().Add(SessionTimeout)
 
 	// Update user with new session (this invalidates any existing session)
 	query := `UPDATE users SET
@@ -75,8 +75,8 @@ func (db *Database) ValidateUserSession(sessionID string) (*models.User, error) 
 		return nil, fmt.Errorf("invalid or expired session")
 	}
 
-	// Extend session expiration (sliding timeout) - write operation
-	newExpiresAt := time.Now().Add(SessionTimeout)
+	// Extend session expiration (sliding timeout) in UTC - write operation
+	newExpiresAt := time.Now().UTC().Add(SessionTimeout)
 	updateQuery := `UPDATE users SET session_expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
 	_, err = retryableExec(db.mainDB, updateQuery, newExpiresAt, user.ID)
 	if err != nil {
