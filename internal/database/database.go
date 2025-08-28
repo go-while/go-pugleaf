@@ -587,7 +587,7 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 }
 
 // HasUserFlaggedSpam checks if a user has already flagged a specific article as spam
-func (db *Database) HasUserFlaggedSpam(userID int, groupName string, articleNum int64) (bool, error) {
+func (db *Database) HasUserFlaggedSpam(userID int64, groupName string, articleNum int64) (bool, error) {
 	// Get newsgroup ID
 	newsgroupID, err := db.GetNewsgroupID(groupName)
 	if err != nil {
@@ -608,7 +608,7 @@ func (db *Database) HasUserFlaggedSpam(userID int, groupName string, articleNum 
 }
 
 // RecordUserSpamFlag records that a user has flagged an article as spam
-func (db *Database) RecordUserSpamFlag(userID int, groupName string, articleNum int64) error {
+func (db *Database) RecordUserSpamFlag(userID int64, groupName string, articleNum int64) error {
 	// Get newsgroup ID
 	newsgroupID, err := db.GetNewsgroupID(groupName)
 	if err != nil {

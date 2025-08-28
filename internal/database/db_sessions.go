@@ -27,7 +27,7 @@ func GenerateSecureSessionID() (string, error) {
 }
 
 // CreateUserSession creates a new session for the user and invalidates any existing session
-func (db *Database) CreateUserSession(userID int, remoteIP string) (string, error) {
+func (db *Database) CreateUserSession(userID int64, remoteIP string) (string, error) {
 	// Generate new session ID
 	sessionID, err := GenerateSecureSessionID()
 	if err != nil {
@@ -90,7 +90,7 @@ func (db *Database) ValidateUserSession(sessionID string) (*models.User, error) 
 }
 
 // InvalidateUserSession clears the user's session
-func (db *Database) InvalidateUserSession(userID int) error {
+func (db *Database) InvalidateUserSession(userID int64) error {
 	query := `UPDATE users SET
 		session_id = '',
 		session_expires_at = NULL,
@@ -123,7 +123,7 @@ func (db *Database) IncrementLoginAttempts(username string) error {
 }
 
 // ResetLoginAttempts clears the failed login counter
-func (db *Database) ResetLoginAttempts(userID int) error {
+func (db *Database) ResetLoginAttempts(userID int64) error {
 	query := `UPDATE users SET
 		login_attempts = 0,
 		updated_at = CURRENT_TIMESTAMP

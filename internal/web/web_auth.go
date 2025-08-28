@@ -117,7 +117,7 @@ func (s *WebServer) WebAdminRequired() gin.HandlerFunc {
 		}
 
 		// Check if user has admin permission
-		permissions, err := s.DB.GetUserPermissions(int(session.UserID))
+		permissions, err := s.DB.GetUserPermissions(session.UserID)
 		if err != nil {
 			s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
 			c.Abort()
@@ -157,7 +157,7 @@ func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
 	}
 
 	authUser := &AuthUser{
-		ID:          int64(user.ID),
+		ID:          user.ID,
 		Username:    user.Username,
 		Email:       user.Email,
 		DisplayName: user.DisplayName,
@@ -166,7 +166,7 @@ func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
 
 	return &SessionData{
 		SessionID: sessionID,
-		UserID:    int64(user.ID),
+		UserID:    user.ID,
 		User:      authUser,
 		ExpiresAt: *user.SessionExpiresAt,
 	}
@@ -187,7 +187,7 @@ func (s *WebServer) createWebSession(c *gin.Context, userID int64) error {
 	// Store session in database
 	session := &models.Session{
 		ID:        sessionID,
-		UserID:    int(userID),
+		UserID:    userID,
 		CreatedAt: time.Now(),
 		ExpiresAt: expiresAt,
 	}
