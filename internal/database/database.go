@@ -31,8 +31,6 @@ func (db *Database) cleanupIdleGroups() {
 	db.MainMutex.RLock()
 	shouldClose := db.openDBsNum >= MaxOpenDatabases // TODO HARDCODED
 	if shouldClose {
-		// force close oldest groupDBs until 20% under limit of MaxOpenDatabases (* 0.8)
-		targetClose := MaxOpenDatabases / 5 // Close 20% of max to get under limit (256/5 = 51)
 		closedCount := 0
 
 		// Find oldest databases to close
@@ -69,7 +67,7 @@ func (db *Database) cleanupIdleGroups() {
 		// Close oldest databases
 		db.MainMutex.Lock()
 		for _, candidate := range candidates {
-			if closedCount >= targetClose {
+			if db.openDBsNum <= MaxOpenDatabases/2 {
 				break
 			}
 			groupDBs := db.groupDBs[candidate.name]
