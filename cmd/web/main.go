@@ -52,7 +52,8 @@ var (
 	maxArticleCache       int
 	maxArticleCacheExpiry int
 	useShortHashLen       int
-	moveInactiveGroups    string
+	rsyncInactiveGroups   string
+	rsyncRemoveSource     bool
 	//ignoreInitialTinyGroups int64 // code path disabled
 
 	// Migration flags
@@ -333,7 +334,7 @@ func writeActiveFileFromDB(db *database.Database, filePath string, activeOnly bo
 	return nil
 }
 
-func moveInactiveGroupsToDir(db *database.Database, newdatadir string) error {
+func rsyncInactiveGroupsToDir(db *database.Database, newdatadir string) error {
 
 	// check if newdatadir exists
 	if _, err := os.Stat(newdatadir); os.IsNotExist(err) {
@@ -376,7 +377,7 @@ func moveInactiveGroupsToDir(db *database.Database, newdatadir string) error {
 			}
 		}
 		start := time.Now()
-		if err := database.RsyncDIR(baseGroupDBdir, basedirNew); err != nil {
+		if err := database.RsyncDIR(baseGroupDBdir, basedirNew, rsyncRemoveSource); err != nil {
 			log.Printf("[RSYNC]: Warning: Failed to rsync group database file baseGroupDBdir='%s' to basedirNew='%s' (baseGroupDBdirNew=%s): %v", baseGroupDBdir, basedirNew, baseGroupDBdirNew, err)
 			return err
 		}
@@ -427,7 +428,8 @@ func main() {
 	flag.BoolVar(&updateNewsgroupsHideFuture, "update-newsgroups-hide-futureposts", false, "Hide articles posted more than 48 hours in the future (default: false)")
 	flag.StringVar(&writeActiveFile, "write-active-file", "", "Write NNTP active file from main database newsgroups table to specified path")
 	flag.BoolVar(&writeActiveOnly, "write-active-only", true, "use with -write-active-file (false writes only non active groups!)")
-	flag.StringVar(&moveInactiveGroups, "move-inactive-groups", "", "path to new data dir, moves all inactive groups to new folder.")
+	flag.StringVar(&rsyncInactiveGroups, "rsync-inactive-groups", "", "path to new data dir, uses rsync to copy all inactive group databases to new data folder.")
+	flag.BoolVar(&rsyncRemoveSource, "rsync-remove-source", false, "use with -rsync-inactive-groups. if set, removes source files after moving inactive groups (default: false)")
 	/*
 		flag.BoolVar(&enableFediverse, "enable-fediverse", false, "Enable Fediverse bridge (default: false)")
 		flag.StringVar(&fediverseDomain, "fediverse-domain", "", "Fediverse domain (e.g. example.com)")
@@ -609,14 +611,14 @@ func main() {
 		}
 	}
 
-	// moveInactiveGroups
-	if moveInactiveGroups != "" {
-		log.Printf("[WEB]: Moving inactive groups to: %s", moveInactiveGroups)
-		if err := moveInactiveGroupsToDir(db, moveInactiveGroups); err != nil {
-			log.Printf("[WEB]: Error: Failed to move inactive groups: %v", err)
+	// rsyncInactiveGroups
+	if rsyncInactiveGroups != "" {
+		log.Printf("[RSYNC]: inactive groups to: %s", rsyncInactiveGroups)
+		if err := rsyncInactiveGroupsToDir(db, rsyncInactiveGroups); err != nil {
+			log.Printf("[RSYNC]: Error: Failed to rsync inactive groups: %v", err)
 			os.Exit(1)
 		} else {
-			log.Printf("[WEB]: Inactive groups moved successfully")
+			log.Printf("[RSYNC]: Inactive groups synced successfully")
 			os.Exit(0)
 		}
 	}

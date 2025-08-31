@@ -31,9 +31,12 @@ func MoveFile(oldpath, newpath string) error {
 	return os.Rename(oldpath, newpath)
 }
 
-func RsyncDIR(oldpath, newpath string) error {
+func RsyncDIR(oldpath, newpath string, removesource bool) error {
 	// Stream rsync output so progress is visible in logs/STDOUT
 	args := []string{"-va", "--progress", oldpath, newpath}
+	if removesource {
+		args = append(args, "--remove-source-files")
+	}
 	log.Printf("[RSYNC] running: rsync %v", args)
 
 	cmd := exec.Command("rsync", args...)
