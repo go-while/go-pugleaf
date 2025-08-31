@@ -28,38 +28,41 @@ var (
 	webmutex sync.Mutex
 
 	// command-line flags
-	hostnamePath            string
-	isleep                  int64
-	webport                 int
-	webssl                  bool
-	withnntp                bool
-	withfetch               bool
-	webcertFile             string
-	webkeyFile              string
-	nntptcpport             int
-	nntptlsport             int
-	nntpcertFile            string
-	nntpkeyFile             string
-	forceReloadDesc         bool
-	importActiveFile        string
-	importDescFile          string
-	importCreateMissing     bool
-	repairWatermarks        bool
-	maxSanArtCache          int
-	maxSanArtCacheExpiry    int
-	maxNGpageCache          int
-	maxNGpageCacheExpiry    int
-	maxArticleCache         int
-	maxArticleCacheExpiry   int
-	useShortHashLen         int
-	ignoreInitialTinyGroups int64
+	hostnamePath          string
+	isleep                int64
+	webport               int
+	webssl                bool
+	withnntp              bool
+	withfetch             bool
+	webcertFile           string
+	webkeyFile            string
+	nntptcpport           int
+	nntptlsport           int
+	nntpcertFile          string
+	nntpkeyFile           string
+	forceReloadDesc       bool
+	importActiveFile      string
+	importDescFile        string
+	importCreateMissing   bool
+	repairWatermarks      bool
+	maxSanArtCache        int
+	maxSanArtCacheExpiry  int
+	maxNGpageCache        int
+	maxNGpageCacheExpiry  int
+	maxArticleCache       int
+	maxArticleCacheExpiry int
+	useShortHashLen       int
+	moveInactiveGroups    string
+	//ignoreInitialTinyGroups int64 // code path disabled
 
 	// Migration flags
 	updateNewsgroupActivity    bool
 	updateNewsgroupsHideFuture bool
 	writeActiveFile            string
+	writeActiveOnly            bool
 
 	// Bridge flags (disabled by default)
+	/* code path disabled (not tested)
 	enableFediverse   bool
 	fediverseDomain   string
 	fediverseBaseURL  string
@@ -67,6 +70,7 @@ var (
 	matrixHomeserver  string
 	matrixAccessToken string
 	matrixUserID      string
+	*/
 )
 
 // ProcessorAdapter adapts the processor.Processor to implement nntp.ArticleProcessor interface
@@ -265,14 +269,18 @@ func hideFuturePosts(db *database.Database) error {
 }
 
 // writeActiveFileFromDB writes an NNTP active file from the main database newsgroups table
-func writeActiveFileFromDB(db *database.Database, filePath string) error {
+func writeActiveFileFromDB(db *database.Database, filePath string, activeOnly bool) error {
 	// Query newsgroups from main database with all fields needed for active file
+	active := 0
+	if activeOnly {
+		active = 1
+	}
 	rows, err := db.GetMainDB().Query(`
 		SELECT name, high_water, low_water, status
 		FROM newsgroups
-		WHERE active = 1
+		WHERE active = ?
 		ORDER BY name
-	`)
+	`, active)
 	if err != nil {
 		return fmt.Errorf("failed to query newsgroups: %w", err)
 	}
@@ -286,7 +294,7 @@ func writeActiveFileFromDB(db *database.Database, filePath string) error {
 	defer file.Close()
 
 	totalGroups := 0
-	log.Printf("[WEB]: Writing active file to: %s", filePath)
+	log.Printf("[WEB]: Writing active file to: %s (writeActiveOnly=%t)", filePath, activeOnly)
 
 	// Write each newsgroup in NNTP active file format: groupname highwater lowwater status
 	for rows.Next() {
@@ -325,6 +333,63 @@ func writeActiveFileFromDB(db *database.Database, filePath string) error {
 	return nil
 }
 
+func moveInactiveGroupsToDir(db *database.Database, newdatadir string) error {
+
+	// check if newdatadir exists
+	if _, err := os.Stat(newdatadir); os.IsNotExist(err) {
+		if err := os.MkdirAll(newdatadir, 0755); err != nil {
+			log.Printf("[WEB]: Warning: Failed to create new data directory '%s': %v", newdatadir, err)
+			return err
+		}
+	}
+
+	rows, err := db.GetMainDB().Query(`
+		SELECT name
+		FROM newsgroups
+		WHERE active = 0
+		ORDER BY name
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to query newsgroups: %w", err)
+	}
+	defer rows.Close()
+	basedirNew := filepath.Join(newdatadir, "/db/")
+	for rows.Next() {
+		var newsgroup string
+		if err := rows.Scan(&newsgroup); err != nil {
+			log.Printf("[WEB]: Warning: Failed to scan newsgroup row: %v", err)
+			return err
+		}
+		groupsHash := database.MD5Hash(newsgroup)
+		baseGroupDBdir := filepath.Join("data", "/db/"+groupsHash)
+		baseGroupDBdirNew := filepath.Join(basedirNew, groupsHash)
+		sanitizedName := database.SanitizeGroupName(newsgroup)
+		groupDBfileOld := filepath.Join(baseGroupDBdir + "/" + sanitizedName + ".db")
+		if !database.FileExists(groupDBfileOld) {
+			log.Printf("[RSYNC]: Group database file does not exist: %s", groupDBfileOld)
+			continue
+		}
+		if _, err := os.Stat(baseGroupDBdirNew); os.IsNotExist(err) {
+			if err := os.MkdirAll(baseGroupDBdirNew, 0755); err != nil {
+				log.Printf("[WEB]: Warning: Failed to create new data directory '%s': %v", newdatadir, err)
+				return err
+			}
+		}
+		start := time.Now()
+		if err := database.RsyncDIR(baseGroupDBdir, basedirNew); err != nil {
+			log.Printf("[RSYNC]: Warning: Failed to rsync group database file baseGroupDBdir='%s' to basedirNew='%s' (baseGroupDBdirNew=%s): %v", baseGroupDBdir, basedirNew, baseGroupDBdirNew, err)
+			return err
+		}
+		groupDBfileNew := filepath.Join(baseGroupDBdirNew + "/" + sanitizedName + ".db")
+		if !database.FileExists(groupDBfileNew) {
+			log.Printf("[RSYNC]: ERROR: new group database file not found: %s", groupDBfileNew)
+			return fmt.Errorf("error new group database file not found: %s", groupDBfileNew)
+		}
+		log.Printf("[RSYNC]: OK %s (%v) '%s' to '%s'", newsgroup, time.Since(start), baseGroupDBdir, baseGroupDBdirNew)
+	}
+	return nil
+}
+
 var appVersion = "-unset-"
 
 func main() {
@@ -333,7 +398,6 @@ func main() {
 	// Initialize embedded filesystems
 	database.SetEmbeddedMigrations(database.EmbeddedMigrationsFS)
 
-	flag.Int64Var(&isleep, "isleep", 300, "Sleeps in fetch routines. if started with: -withfetch (default: 300 seconds = 5min)")
 	flag.IntVar(&maxSanArtCache, "maxsanartcache", 10000, "maximum number of cached sanitized articles (default: 10000)")
 	flag.IntVar(&maxSanArtCacheExpiry, "maxsanartcacheexpiry", 30, "expiry of cached sanitized articles in minutes (default: 30 minutes)")
 	flag.IntVar(&maxNGpageCache, "maxngpagecache", 4096, "maximum number of cached newsgroup pages (25 groups per page) (default: 4K pages) [~12-16 KB/entry * 4096 = ~64 MB (+overhead) with 100k active groups!]")
@@ -342,10 +406,11 @@ func main() {
 	flag.IntVar(&maxArticleCacheExpiry, "maxarticlecacheexpiry", 60, "expiry of cached articles in minutes (default: 60 minutes)")
 	flag.IntVar(&useShortHashLen, "useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
 	flag.IntVar(&webport, "webport", 0, "Web server port (default: 11980 (no ssl) or 19443 (webssl))")
-	flag.Int64Var(&ignoreInitialTinyGroups, "ignore-initial-tiny-groups", 0, "If > 0: initial fetch ignores tiny groups with fewer articles than this (default: 0)")
 	flag.BoolVar(&webssl, "webssl", false, "Enable SSL")
 	//flag.BoolVar(&withnntp, "withnntp", false, "Start NNTP server with default ports 1119/1563")
 	//flag.BoolVar(&withfetch, "withfetch", false, "Enable internal Cronjob to fetch new articles")
+	//flag.Int64Var(&isleep, "isleep", 300, "Sleeps in fetch routines. if started with: -withfetch (default: 300 seconds = 5min)")
+	//flag.Int64Var(&ignoreInitialTinyGroups, "ignore-initial-tiny-groups", 0, "If > 0: initial fetch ignores tiny groups with fewer articles than this (default: 0)")
 	flag.StringVar(&hostnamePath, "nntphostname", "", "your hostname must be set")
 	flag.StringVar(&webcertFile, "websslcert", "", "SSL certificate file (/path/to/fullchain.pem)")
 	flag.StringVar(&webkeyFile, "websslkey", "", "SSL key file (/path/to/privkey.pem)")
@@ -361,6 +426,8 @@ func main() {
 	flag.BoolVar(&updateNewsgroupActivity, "update-newsgroup-activity", false, "Updates newsgroup updated_at timestamps to reflect actual article activity (default: false)")
 	flag.BoolVar(&updateNewsgroupsHideFuture, "update-newsgroups-hide-futureposts", false, "Hide articles posted more than 48 hours in the future (default: false)")
 	flag.StringVar(&writeActiveFile, "write-active-file", "", "Write NNTP active file from main database newsgroups table to specified path")
+	flag.BoolVar(&writeActiveOnly, "write-active-only", true, "use with -write-active-file (false writes only non active groups!)")
+	flag.StringVar(&moveInactiveGroups, "move-inactive-groups", "", "path to new data dir, moves all inactive groups to new folder.")
 	/*
 		flag.BoolVar(&enableFediverse, "enable-fediverse", false, "Enable Fediverse bridge (default: false)")
 		flag.StringVar(&fediverseDomain, "fediverse-domain", "", "Fediverse domain (e.g. example.com)")
@@ -533,11 +600,23 @@ func main() {
 	// Write active file if requested
 	if writeActiveFile != "" {
 		log.Printf("[WEB]: Writing active file from main database to: %s", writeActiveFile)
-		if err := writeActiveFileFromDB(db, writeActiveFile); err != nil {
+		if err := writeActiveFileFromDB(db, writeActiveFile, writeActiveOnly); err != nil {
 			log.Printf("[WEB]: Error: Failed to write active file: %v", err)
 			os.Exit(1)
 		} else {
 			log.Printf("[WEB]: Active file written successfully")
+			os.Exit(0)
+		}
+	}
+
+	// moveInactiveGroups
+	if moveInactiveGroups != "" {
+		log.Printf("[WEB]: Moving inactive groups to: %s", moveInactiveGroups)
+		if err := moveInactiveGroupsToDir(db, moveInactiveGroups); err != nil {
+			log.Printf("[WEB]: Error: Failed to move inactive groups: %v", err)
+			os.Exit(1)
+		} else {
+			log.Printf("[WEB]: Inactive groups moved successfully")
 			os.Exit(0)
 		}
 	}
