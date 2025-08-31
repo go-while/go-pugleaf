@@ -82,6 +82,8 @@ func (db *Database) cleanupIdleGroups() {
 						closedCount++
 						log.Printf("Force closed idle DB ng: '%s' (age: %v)", candidate.name, candidate.age)
 					}
+				} else {
+					//log.Printf("Skipping force close for busy group DB '%s' (workers: %d)", candidate.name, groupDBs.Workers)
 				}
 				groupDBs.mux.Unlock()
 			}
