@@ -239,7 +239,7 @@ func hideFuturePosts(db *database.Database) error {
 
 		// Update articles that are posted more than 48 hours in the future
 		result, err := database.RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1, spam = 1 WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
-		groupDBs.Return(db) // Always return the database connection
+		db.ForceCloseGroupDBs(groupDBs)
 
 		if err != nil {
 			log.Printf("[WEB]: Future posts migration error updating articles for %s: %v", name, err)
