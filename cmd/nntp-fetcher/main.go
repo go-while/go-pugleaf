@@ -325,15 +325,19 @@ func main() {
 					continue
 				}
 				//log.Printf("[FETCHER]: ng '%s', REMOTE groupInfo: %#v", *ng, groupInfo),
-				mux.Lock()
-				lastArticle, err := progressDB.GetLastArticle(proc.Pool.Backend.Provider.Name, *ng)
-				if err != nil || lastArticle < -1 {
-					log.Printf("[FETCHER]: Failed to get last article for group '%s' from provider '%s': %v", *ng, proc.Pool.Backend.Provider.Name, err)
+				var lastArticle int64
+				if *downloadStartDate != "" {
+					lastArticle = -1
+				} else {
+					mux.Lock()
+					lastArticle, err = progressDB.GetLastArticle(proc.Pool.Backend.Provider.Name, *ng)
+					if err != nil || lastArticle < -1 {
+						log.Printf("[FETCHER]: Failed to get last article for group '%s' from provider '%s': %v", *ng, proc.Pool.Backend.Provider.Name, err)
+						mux.Unlock()
+						continue
+					}
 					mux.Unlock()
-					continue
 				}
-				mux.Unlock()
-
 				switch lastArticle {
 				case 0:
 					// Open group DB only when we need to check last-article date
@@ -366,7 +370,9 @@ func main() {
 					log.Printf("[FETCHER]: Date rescan mode for group '%s', starting from beginning", *ng)
 					// Set date-based download from epoch for complete rescan
 					mux.Lock()
-					startDates[*ng] = "1960-01-01"
+					if *downloadStartDate != "" {
+						startDates[*ng] = *downloadStartDate
+					}
 					mux.Unlock()
 					// Reset lastArticle to 0 and fall through to normal range processing
 					lastArticle = 0
@@ -374,8 +380,8 @@ func main() {
 					// pass
 				}
 				//log.Printf("DEBUG-RANGE: ng='%s' lastArticle=%d (after switch)", *ng, lastArticle)
-				start := lastArticle + 1                         // Start from the first article in the remote group
-				end := start + int64(processor.MaxBatchSize) - 1 // End at the last article in the remote group
+				start := lastArticle + 1                  // Start from the first article in the remote group
+				end := start + processor.MaxBatchSize - 1 // End at the last article in the remote group
 				//log.Printf("DEBUG-RANGE: ng='%s' calculated start=%d end=%d groupInfo.Last=%d", *ng, start, end, groupInfo.Last)
 
 				// For date-based downloads, don't cap end to groupInfo.Last since they use date filtering
