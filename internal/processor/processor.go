@@ -160,13 +160,6 @@ func (proc *Processor) AddProcessedArticleToHistory(msgIdItem *history.MessageId
 	proc.History.Add(msgIdItem)
 }
 
-/*
-// AddMsgIdToTmpCache - public wrapper for the interface
-//func (proc *Processor) AddMsgIdToTmpCache(group string, msgIdItem *history.MessageIdItem, articleNumber int64) {
-//	go proc.Cache.AddMsgIdToTmpCache(group, *msgIdItem.MessageId, articleNumber)
-//}
-*/
-
 // FindThreadRootInCache - public wrapper for the interface
 func (proc *Processor) FindThreadRootInCache(newsgroupPtr *string, refs []string) *database.MsgIdTmpCacheItem {
 	item := proc.MsgIdCache.FindThreadRootInCache(newsgroupPtr, refs)
@@ -205,20 +198,6 @@ func (proc *Processor) GetHistoryStats() history.HistoryStats {
 // Close gracefully shuts down the processor and history system
 func (proc *Processor) Close() error {
 	log.Printf("Shutting down processor...")
-
-	// Stop all group workers first
-	if Batch != nil {
-		Batch.Mutex.Lock()
-		if Batch.GroupQueues != nil {
-			for newsgroup, groupBatch := range Batch.GroupQueues {
-				log.Printf("Stopping worker for newsgroup: %s", newsgroup)
-				groupBatch.stopWorker()
-			}
-			// Clear the map
-			Batch.GroupQueues = make(map[string]*GroupBatch)
-		}
-		Batch.Mutex.Unlock()
-	}
 
 	// Wait for all batch processing to complete before closing
 	proc.WaitForBatchCompletion()

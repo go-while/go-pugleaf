@@ -297,7 +297,7 @@ func main() {
 				continue
 			}
 			if db.IsDBshutdown() {
-				log.Printf("[FETCHER]: Database shutdown detected, stopping processing")
+				//log.Printf("[FETCHER]: Database shutdown detected, stopping processing")
 				return
 			}
 			processor.Batch.Check <- &ng.Name
@@ -367,8 +367,8 @@ func main() {
 						//go proc.DownloadArticlesFromDate(*ng, *lastArticleDate, 0, DLParChan, progressDB) // Use 0 for ignore threshold since group already exists
 					}
 
-				case -1: // User-requested date rescan - reset to start from beginning
-					log.Printf("[FETCHER]: Date rescan mode for group '%s', starting from beginning", *ng)
+				case -1: // User-requested date rescan
+					//log.Printf("[FETCHER]: Date rescan '%s'", *ng)
 					// Set date-based download from epoch for complete rescan
 					mux.Lock()
 					if *downloadStartDate != "" {
@@ -462,15 +462,15 @@ func main() {
 			for {
 				select {
 				case <-shutdownChan:
-					log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
+					//log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
 					return
 				case ng := <-processor.Batch.TodoQ:
 					if ng == nil {
-						log.Printf("[FETCHER]: TodoQ closed, worker stopping")
+						//log.Printf("[FETCHER]: TodoQ closed, worker stopping")
 						return
 					}
 					if db.IsDBshutdown() {
-						log.Printf("[FETCHER]: TodoQ Database shutdown detected, stopping processing. still queued in TodoQ: %d", len(processor.Batch.TodoQ))
+						//log.Printf("[FETCHER]: TodoQ Database shutdown detected, stopping processing. still queued in TodoQ: %d", len(processor.Batch.TodoQ))
 						return
 					}
 					/*
@@ -493,7 +493,7 @@ func main() {
 					}
 					mux.Lock()
 					todo++
-					log.Printf("--- Fetch '%s' (%d-%d) [%d/%d|Q:%d]  --- ", ng.Name, ng.First, ng.Last, todo, queued, len(processor.Batch.TodoQ))
+					//log.Printf("[FETCHER]: start *importOverview=%t '%s' (%d-%d) [%d/%d|Q:%d]  --- ", *importOverview, ng.Name, ng.First, ng.Last, todo, queued, len(processor.Batch.TodoQ))
 					mux.Unlock()
 					// Import articles for the selected group
 					switch *importOverview {
