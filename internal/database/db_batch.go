@@ -1011,7 +1011,7 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 
 	// Batch update reply counts for articles table (single call since overview is unified)
 	if len(parentMessageIDs) > 0 {
-		if err := c.batchUpdateReplyCounts(groupDBs, parentMessageIDs, "articles"); err != nil {
+		if err := c.batchUpdateReplyCounts(groupDBs, parentMessageIDs); err != nil {
 			log.Printf("[P-BATCH] group '%s': Failed to batch update article reply counts: %v", groupDBs.Newsgroup, err)
 		}
 	}
@@ -1038,11 +1038,11 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 	return nil
 }
 
-var query_batchUpdateReplyCounts1 string = "WHEN message_id = ? THEN reply_count + ?"
-var query_batchUpdateReplyCounts2 string = "UPDATE %s SET reply_count = CASE %s END WHERE message_id IN (%s)"
+var query_batchUpdateReplyCounts1 string = "WHEN message_id = ? THEN reply_count + ? "
+var query_batchUpdateReplyCounts2 string = "UPDATE articles SET reply_count = CASE %s END WHERE message_id IN (%s)"
 
 // batchUpdateReplyCounts performs batch update of reply counts using CASE WHEN
-func (c *SQ3batch) batchUpdateReplyCounts(groupDBs *GroupDBs, parentCounts map[*string]int, tableName string) error {
+func (c *SQ3batch) batchUpdateReplyCounts(groupDBs *GroupDBs, parentCounts map[*string]int) error {
 	if len(parentCounts) == 0 {
 		return nil
 	}
@@ -1068,24 +1068,15 @@ func (c *SQ3batch) batchUpdateReplyCounts(groupDBs *GroupDBs, parentCounts map[*
 		args = append(args, messageID) // WHERE IN args
 	}
 
-	// Use strings.Repeat for efficient SQL building - zero string copies
-	caseClause := strings.Repeat("WHEN message_id = ? THEN reply_count + ? ", len(messageIDs))
-
 	// Build the complete batch UPDATE statement with a single sprintf
-	sql := fmt.Sprintf("UPDATE %s SET reply_count = CASE %s END WHERE message_id IN (%s)",
-		tableName,
-		caseClause,
-		getPlaceholders(len(messageIDs)))
-
+	// Use strings.Repeat for efficient SQL building - zero string copies
 	// Execute the batch UPDATE
-	log.Printf("[P-BATCH] group '%s': Executing batch reply count update for %d articles in table '%s' (queryLen=%d)", groupDBs.Newsgroup, len(messageIDs), tableName, len(sql))
-	switch tableName {
-	case "articles":
-		_, err := retryableExec(groupDBs.DB, sql, args...)
-		return err
+	//log.Printf("[P-BATCH] group '%s': update batch reply count for %d articles (queryLen=%d)", groupDBs.Newsgroup, len(messageIDs), len(sql))
+	_, err := retryableExec(groupDBs.DB, fmt.Sprintf(query_batchUpdateReplyCounts2, strings.Repeat(query_batchUpdateReplyCounts1, len(messageIDs)), getPlaceholders(len(messageIDs))), args...)
+	if err != nil {
+		log.Printf("[P-BATCH] group '%s': Failed to execute batch reply count update: %v", groupDBs.Newsgroup, err)
 	}
-
-	return fmt.Errorf("unknown table name: %s", tableName)
+	return err
 }
 
 // findThreadRootForBatch is a simplified version for batch processing
