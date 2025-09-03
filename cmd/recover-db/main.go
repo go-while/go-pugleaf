@@ -593,10 +593,10 @@ func getStatusEmoji(status string) string {
 
 // DateProblem captures information about a problematic date
 type DateProblem struct {
-	Newsgroup   string
+	Newsgroup   *string
 	ArticleNum  int64
-	MessageID   string
-	DateString  string
+	MessageID   *string
+	DateString  *string
 	StoredDate  time.Time
 	ParsedDate  time.Time
 	Difference  time.Duration
@@ -716,10 +716,10 @@ func checkGroupDates(groupDB *database.GroupDBs, newsgroupName string, rewriteDa
 		reparsedDate := processor.ParseNNTPDate(dateString)
 		if reparsedDate.IsZero() {
 			problem := DateProblem{
-				Newsgroup:   newsgroupName,
+				Newsgroup:   &newsgroupName,
 				ArticleNum:  articleNum,
-				MessageID:   messageID,
-				DateString:  dateString,
+				MessageID:   &messageID,
+				DateString:  &dateString,
 				StoredDate:  dateSent,
 				ParseFailed: true,
 			}
@@ -752,10 +752,10 @@ func checkGroupDates(groupDB *database.GroupDBs, newsgroupName string, rewriteDa
 		if diff > time.Second {
 			fixed++
 			problem := DateProblem{
-				Newsgroup:  newsgroupName,
+				Newsgroup:  &newsgroupName,
 				ArticleNum: articleNum,
-				MessageID:  messageID,
-				DateString: dateString,
+				MessageID:  &messageID,
+				DateString: &dateString,
 				StoredDate: dateSent,
 				ParsedDate: reparsedDate,
 				Difference: diff,
@@ -770,7 +770,7 @@ func checkGroupDates(groupDB *database.GroupDBs, newsgroupName string, rewriteDa
 			if rewriteDates {
 				// Format as UTC string to avoid timezone encoding issues
 				reparsedDateStr := reparsedDate.UTC().Format("2006-01-02 15:04:05")
-				_, err := tx.Exec("UPDATE articles SET date_sent = ? WHERE article_num = ?", reparsedDateStr, articleNum)
+				_, err := tx.Exec("UPDATE articles SET date_sent = ?, hide = 0, spam = 0 WHERE article_num = ?", reparsedDateStr, articleNum)
 				if err != nil {
 					if verbose {
 						fmt.Printf("   ❌ Failed to update article %d: %v\n", articleNum, err)
@@ -833,7 +833,7 @@ func printDateProblemsSummary(problems []DateProblem, rewriteDates bool) {
 		// Group by unique date strings to avoid repetition
 		uniqueFailures := make(map[string][]DateProblem)
 		for _, failure := range parseFailures {
-			uniqueFailures[failure.DateString] = append(uniqueFailures[failure.DateString], failure)
+			uniqueFailures[*failure.DateString] = append(uniqueFailures[*failure.DateString], failure)
 		}
 
 		count := 0
@@ -842,11 +842,11 @@ func printDateProblemsSummary(problems []DateProblem, rewriteDates bool) {
 			fmt.Printf("   %d. \"%s\" (found %d times)\n", count, dateStr, len(failures))
 			if len(failures) <= 5 {
 				for _, failure := range failures {
-					fmt.Printf("      → %s article %d (%s)\n", failure.Newsgroup, failure.ArticleNum, failure.MessageID)
+					fmt.Printf("      → %s article %d (%s)\n", *failure.Newsgroup, failure.ArticleNum, *failure.MessageID)
 				}
 			} else {
 				for i := 0; i < 3; i++ {
-					fmt.Printf("      → %s article %d (%s)\n", failures[i].Newsgroup, failures[i].ArticleNum, failures[i].MessageID)
+					fmt.Printf("      → %s article %d (%s)\n", *failures[i].Newsgroup, failures[i].ArticleNum, *failures[i].MessageID)
 				}
 				fmt.Printf("      → ... and %d more occurrences\n", len(failures)-3)
 			}
@@ -876,8 +876,8 @@ func printDateProblemsSummary(problems []DateProblem, rewriteDates bool) {
 		}
 
 		for i, problem := range sortedMismatches {
-			fmt.Printf("   %d. %s article %d (%s)\n", i+1, problem.Newsgroup, problem.ArticleNum, problem.MessageID)
-			fmt.Printf("      Date string: \"%s\"\n", problem.DateString)
+			fmt.Printf("   %d. %s article %d (%s)\n", i+1, *problem.Newsgroup, problem.ArticleNum, *problem.MessageID)
+			fmt.Printf("      Date string: \"%s\"\n", *problem.DateString)
 			fmt.Printf("      Stored as:   %s\n", problem.StoredDate.Format(time.RFC3339))
 			fmt.Printf("      Should be:   %s\n", problem.ParsedDate.Format(time.RFC3339))
 			fmt.Printf("      Difference:  %v\n", problem.Difference)
@@ -888,7 +888,7 @@ func printDateProblemsSummary(problems []DateProblem, rewriteDates bool) {
 	// Group problems by newsgroup for statistics
 	groupStats := make(map[string]int)
 	for _, problem := range problems {
-		groupStats[problem.Newsgroup]++
+		groupStats[*problem.Newsgroup]++
 	}
 
 	if len(groupStats) > 1 {

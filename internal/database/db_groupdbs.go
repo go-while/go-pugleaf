@@ -17,7 +17,7 @@ const stateCREATED = 1
 type GroupDBs struct {
 	state        int64 // 0 = not initialized, 1 = initialized
 	mux          sync.RWMutex
-	Newsgroup    string    // Name of the newsgroup
+	Newsgroup    string    // Name of the newsgroup TODO: remove and use ptr below
 	NewsgroupPtr *string   // pointer to the newsgroup
 	Idle         time.Time // Last time this group was used
 	Workers      int64     // how many are working with this DB
@@ -67,10 +67,10 @@ func (db *Database) GetGroupDBs(groupName string) (*GroupDBs, error) {
 			db.removePartialInitializedGroupDB(groupName)
 			return nil, fmt.Errorf("failed to create group database directory: %w", err)
 		}
-		groupDBfile := filepath.Join(baseGroupDBdir + "/" + sanitizeGroupName(groupName) + ".db")
+		groupDBfile := filepath.Join(baseGroupDBdir + "/" + SanitizeGroupName(groupName) + ".db")
 
 		// Check if database file already exists
-		dbExists := fileExists(groupDBfile)
+		dbExists := FileExists(groupDBfile)
 
 		// Open single database
 		groupDB, err := sql.Open("sqlite3", groupDBfile)

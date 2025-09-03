@@ -129,7 +129,7 @@ func main() {
 
 	// Command line flags for NNTP server connection
 	var (
-		host       = flag.String("host", "lux-feed1.newsdeef.eu", "NNTP hostname")
+		host       = flag.String("host", "81-171-22-215.pugleaf.net", "NNTP hostname")
 		port       = flag.Int("port", 563, "NNTP port")
 		username   = flag.String("username", "read", "NNTP username")
 		password   = flag.String("password", "only", "NNTP password")

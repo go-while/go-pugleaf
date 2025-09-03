@@ -14,9 +14,9 @@ var (
 	UpperLimitMsgIdCacheSize = 1024 * 1024
 	// This is the maximum size for the cache, used to prevent overflow
 
-	DefaultMsgIdCacheSize = 512 * 1024 // N buckets
-	MaxLoadFactor         = 0.75       // Resize when load factor exceeds this
-	ResizeMultiplier      = 2          // Double the size when resizing
+	DefaultMsgIdCacheSize = 4 * 1024 // N buckets
+	MaxLoadFactor         = 0.75     // Resize when load factor exceeds this
+	ResizeMultiplier      = 2        // Double the size when resizing
 
 	// TTL Configuration Constants
 	TmpCacheTTL       = 15 * time.Second // TTL for temporary processing (CaseWrite items) // @AI!!! DO NOT CHANGE THIS!!!!
@@ -586,17 +586,19 @@ func (c *MsgIdItemCache) AddMsgIdToCache(newsgroupPtr *string, messageID string,
 // This replaces the functionality from MsgTmpCache.CronClean
 // Efficiently unlinks expired items during chain traversal to avoid double-walking
 func (c *MsgIdItemCache) CleanExpiredEntries() int {
+
 	c.mux.RLock()
 	// Get a snapshot of hash buckets to iterate over
-	buckets := make([]int, 0, len(c.Pages))
-	for hash := range c.Pages {
-		buckets = append(buckets, hash)
+	buckets := make(chan int, len(c.Pages))
+	for i := range c.Pages {
+		buckets <- i
 	}
+	close(buckets)
 	c.mux.RUnlock()
 
 	start := time.Now()
 	cleaned := 0
-	now := time.Now()
+	now := start
 	countCaseLocked := 0
 	countCaseWrite := 0
 	countCaseError := 0
@@ -604,11 +606,10 @@ func (c *MsgIdItemCache) CleanExpiredEntries() int {
 	countDeleteDupes := 0
 	countDeleteWrite := 0
 	// Process each hash bucket
-	for _, hash := range buckets {
+	for i := range buckets {
 		c.mux.RLock()
-		firstPage, exists := c.Pages[hash]
+		firstPage, exists := c.Pages[i]
 		c.mux.RUnlock()
-
 		if !exists {
 			continue // Bucket was deleted by another goroutine
 		}
@@ -618,7 +619,6 @@ func (c *MsgIdItemCache) CleanExpiredEntries() int {
 		var prevPage *MsgIdItemCachePage = nil
 
 		for page != nil {
-
 			page.mux.RLock()
 			nextPage := page.Next // Store next before potential unlinking
 			item := page.MsgIdItem
@@ -679,11 +679,11 @@ func (c *MsgIdItemCache) CleanExpiredEntries() int {
 					// First page in chain
 					c.mux.Lock()
 					if page.Next != nil {
-						c.Pages[hash] = page.Next
+						c.Pages[i] = page.Next
 						page.Next.Prev = nil
 					} else {
 						// Last item in bucket - delete the bucket
-						delete(c.Pages, hash)
+						delete(c.Pages, i)
 					}
 					c.mux.Unlock()
 				}
@@ -736,11 +736,8 @@ func (c *MsgIdItemCache) CleanExpiredEntries() int {
 // StartCleanupRoutine starts a background goroutine to clean expired entries
 func (c *MsgIdItemCache) StartCleanupRoutine() {
 	go func() {
-		currentInterval := 3 * time.Second
-		ticker := time.NewTicker(currentInterval)
-		defer ticker.Stop()
-
-		for range ticker.C {
+		for {
+			time.Sleep(TmpCacheTTL)
 			start := time.Now()
 			cleaned := c.CleanExpiredEntries()
 			// Adjust cleanup frequency based on cache size

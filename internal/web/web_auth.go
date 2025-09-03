@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -117,7 +118,7 @@ func (s *WebServer) WebAdminRequired() gin.HandlerFunc {
 		}
 
 		// Check if user has admin permission
-		permissions, err := s.DB.GetUserPermissions(int(session.UserID))
+		permissions, err := s.DB.GetUserPermissions(session.UserID)
 		if err != nil {
 			s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
 			c.Abort()
@@ -156,8 +157,11 @@ func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
 		return nil
 	}
 
+	// Refresh cookie to keep client-side max age in sync with sliding server timeout
+	s.setSessionCookie(c, sessionID)
+
 	authUser := &AuthUser{
-		ID:          int64(user.ID),
+		ID:          user.ID,
 		Username:    user.Username,
 		Email:       user.Email,
 		DisplayName: user.DisplayName,
@@ -166,7 +170,7 @@ func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
 
 	return &SessionData{
 		SessionID: sessionID,
-		UserID:    int64(user.ID),
+		UserID:    user.ID,
 		User:      authUser,
 		ExpiresAt: *user.SessionExpiresAt,
 	}
@@ -181,13 +185,13 @@ func (s *WebServer) createWebSession(c *gin.Context, userID int64) error {
 	}
 	sessionID := hex.EncodeToString(bytes)
 
-	// Set expiration to 7 days
-	expiresAt := time.Now().Add(7 * 24 * time.Hour)
+	// Set expiration to server session timeout for consistency
+	expiresAt := time.Now().Add(database.SessionTimeout)
 
 	// Store session in database
 	session := &models.Session{
 		ID:        sessionID,
-		UserID:    int(userID),
+		UserID:    userID,
 		CreatedAt: time.Now(),
 		ExpiresAt: expiresAt,
 	}
@@ -250,18 +254,37 @@ func validatePassword(password string) error {
 
 // Helper function to set session cookie
 func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
-	// Use same HTTPS detection logic as security middleware
-	// Check both app SSL config AND reverse proxy headers
-	secure := s.Config.SSL || c.GetHeader("X-Forwarded-Proto") == "https"
+	// Detect HTTPS from the current request perspective only
+	// Prefer actual TLS on the request or trusted reverse proxy header
+	// Gin guarantees c.Request is non-nil for handlers
+	if v, exists := c.Get("is_https"); exists {
+		if b, ok := v.(bool); ok {
+			// Use scheme determined by ReverseProxyMiddleware
+			isHTTPS := b
+			cookie := &http.Cookie{
+				Name:     "session_id",
+				Value:    sessionID,
+				Path:     "/",
+				HttpOnly: true,
+				Secure:   isHTTPS,
+				SameSite: http.SameSiteLaxMode, // Works well with reverse proxies
+				MaxAge:   int(database.SessionTimeout.Seconds()), // align with server-side sliding timeout
+			}
+			http.SetCookie(c.Writer, cookie)
+			return
+		}
+	}
+	// Fallback if middleware wasn't applied
+	isHTTPS := c.Request.TLS != nil
 
 	cookie := &http.Cookie{
 		Name:     "session_id",
 		Value:    sessionID,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   secure,
+		Secure:   isHTTPS,
 		SameSite: http.SameSiteLaxMode, // Works well with reverse proxies
-		MaxAge:   int(7 * 24 * 3600),   // 7 days
+		MaxAge:   int(database.SessionTimeout.Seconds()), // align with server-side sliding timeout
 	}
 
 	http.SetCookie(c.Writer, cookie)
@@ -269,16 +292,21 @@ func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
 
 // Helper function to clear session cookie
 func (s *WebServer) clearSessionCookie(c *gin.Context) {
-	// Use same HTTPS detection logic as security middleware
-	// Check both app SSL config AND reverse proxy headers
-	secure := s.Config.SSL || c.GetHeader("X-Forwarded-Proto") == "https"
+	// Detect HTTPS from the current request perspective only
+	// Gin guarantees c.Request is non-nil for handlers
+	isHTTPS := c.Request.TLS != nil
+	if v, exists := c.Get("is_https"); exists {
+		if b, ok := v.(bool); ok {
+			isHTTPS = b
+		}
+	}
 
 	cookie := &http.Cookie{
 		Name:     "session_id",
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   secure,
+		Secure:   isHTTPS,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1, // Delete cookie
 	}

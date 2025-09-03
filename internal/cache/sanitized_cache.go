@@ -76,10 +76,9 @@ func NewSanitizedCache(maxEntries int, maxAge time.Duration) *SanitizedCache {
 
 // GetField retrieves a specific sanitized field from a cached article
 func (sc *SanitizedCache) GetField(messageID string, field string) (template.HTML, bool) {
-	key := sc.hashMessageID(messageID)
 
 	sc.mutex.RLock()
-	article, exists := sc.cache[key]
+	article, exists := sc.cache[messageID]
 	sc.mutex.RUnlock()
 
 	if !exists {
@@ -161,9 +160,8 @@ func (sc *SanitizedCache) GetField(messageID string, field string) (template.HTM
 
 // GetArticle retrieves a complete cached sanitized article
 func (sc *SanitizedCache) GetArticle(messageID string) (*SanitizedArticle, bool) {
-	key := sc.hashMessageID(messageID)
 	sc.mutex.RLock()
-	article, exists := sc.cache[key]
+	article, exists := sc.cache[messageID]
 	sc.mutex.RUnlock()
 
 	if !exists {
@@ -181,12 +179,11 @@ func (sc *SanitizedCache) GetArticle(messageID string) (*SanitizedArticle, bool)
 
 // SetField stores a single sanitized field, creating or updating the article entry
 func (sc *SanitizedCache) SetField(messageID string, field string, value template.HTML) {
-	key := sc.hashMessageID(messageID)
 	now := time.Now()
 
 	sc.mutex.Lock()
 	// Get existing article or create new one
-	article, exists := sc.cache[key]
+	article, exists := sc.cache[messageID]
 	if !exists {
 		//log.Printf("SanitizedCache: SetField '%s': creating new entry for messageID '%s'", field, messageID)
 
@@ -194,7 +191,7 @@ func (sc *SanitizedCache) SetField(messageID string, field string, value templat
 			CreatedAt: now,
 			LastUsed:  now,
 		}
-		sc.cache[key] = article
+		sc.cache[messageID] = article
 	}
 	sc.mutex.Unlock()
 
@@ -247,18 +244,17 @@ func (sc *SanitizedCache) SetField(messageID string, field string, value templat
 
 // SetArticle stores a complete sanitized article in one operation
 func (sc *SanitizedCache) SetArticle(messageID string, sanitizedFields map[string]template.HTML) {
-	key := sc.hashMessageID(messageID)
 	now := time.Now()
 
 	sc.mutex.Lock()
 	// Get existing article or create new one
-	article, exists := sc.cache[key]
+	article, exists := sc.cache[messageID]
 	if !exists {
 		article = &SanitizedArticle{
 			CreatedAt: now,
 			LastUsed:  now,
 		}
-		sc.cache[key] = article
+		sc.cache[messageID] = article
 	}
 	sc.mutex.Unlock()
 
@@ -314,16 +310,15 @@ func (sc *SanitizedCache) BatchSetArticles(articles map[string]map[string]templa
 	// Process all articles in one lock cycle
 	sc.mutex.Lock()
 	for messageID, fields := range articles {
-		key := sc.hashMessageID(messageID)
 
 		// Get existing article or create new one
-		article, exists := sc.cache[key]
+		article, exists := sc.cache[messageID]
 		if !exists {
 			article = &SanitizedArticle{
 				CreatedAt: now,
 				LastUsed:  now,
 			}
-			sc.cache[key] = article
+			sc.cache[messageID] = article
 		}
 
 		// Set fields for this article
@@ -409,7 +404,7 @@ func (sc *SanitizedCache) Stop() {
 }
 
 // hashMessageID creates a consistent hash from a message ID
-func (sc *SanitizedCache) hashMessageID(messageID string) string {
+func (sc *SanitizedCache) xxxhashMessageID(messageID string) string {
 	// For now, just use the message ID directly
 	// Could hash it if needed for consistent key length
 	/*
@@ -466,9 +461,8 @@ func (sc *SanitizedCache) cleanupLoop() {
 func (sc *SanitizedCache) cleanup() {
 
 	sc.mutex.RLock()
-	if sc.maxAge <= 0 || len(sc.cache) < sc.maxEntries {
+	if sc.maxAge <= 0 {
 		sc.mutex.RUnlock()
-
 		return // no cleanup needed
 	}
 	sc.mutex.RUnlock()

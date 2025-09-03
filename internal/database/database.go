@@ -31,8 +31,6 @@ func (db *Database) cleanupIdleGroups() {
 	db.MainMutex.RLock()
 	shouldClose := db.openDBsNum >= MaxOpenDatabases // TODO HARDCODED
 	if shouldClose {
-		// force close oldest groupDBs until 20% under limit of MaxOpenDatabases (* 0.8)
-		targetClose := MaxOpenDatabases / 5 // Close 20% of max to get under limit (256/5 = 51)
 		closedCount := 0
 
 		// Find oldest databases to close
@@ -69,7 +67,7 @@ func (db *Database) cleanupIdleGroups() {
 		// Close oldest databases
 		db.MainMutex.Lock()
 		for _, candidate := range candidates {
-			if closedCount >= targetClose {
+			if db.openDBsNum <= MaxOpenDatabases/2 {
 				break
 			}
 			groupDBs := db.groupDBs[candidate.name]
@@ -84,6 +82,8 @@ func (db *Database) cleanupIdleGroups() {
 						closedCount++
 						log.Printf("Force closed idle DB ng: '%s' (age: %v)", candidate.name, candidate.age)
 					}
+				} else {
+					//log.Printf("Skipping force close for busy group DB '%s' (workers: %d)", candidate.name, groupDBs.Workers)
 				}
 				groupDBs.mux.Unlock()
 			}
@@ -587,7 +587,7 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 }
 
 // HasUserFlaggedSpam checks if a user has already flagged a specific article as spam
-func (db *Database) HasUserFlaggedSpam(userID int, groupName string, articleNum int64) (bool, error) {
+func (db *Database) HasUserFlaggedSpam(userID int64, groupName string, articleNum int64) (bool, error) {
 	// Get newsgroup ID
 	newsgroupID, err := db.GetNewsgroupID(groupName)
 	if err != nil {
@@ -608,7 +608,7 @@ func (db *Database) HasUserFlaggedSpam(userID int, groupName string, articleNum 
 }
 
 // RecordUserSpamFlag records that a user has flagged an article as spam
-func (db *Database) RecordUserSpamFlag(userID int, groupName string, articleNum int64) error {
+func (db *Database) RecordUserSpamFlag(userID int64, groupName string, articleNum int64) error {
 	// Get newsgroup ID
 	newsgroupID, err := db.GetNewsgroupID(groupName)
 	if err != nil {

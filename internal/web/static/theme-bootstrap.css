@@ -1132,12 +1132,70 @@ a:focus:not(:focus-visible) {
 }
 
 .border-bottom {
-    border-bottom: 1px solid #dee2e6 !important;
+    /* Use Bootstrap variable so borders adapt to light/dark themes */
+    border-bottom: 1px solid var(--bs-border-color) !important;
 }
 
 /* Make sure content uses full width */
 .container-fluid {
     max-width: 100%;
+    padding-left: 1rem;
+    padding-right: 1rem;
+}
+
+/* --- Admin nav-tabs refinements --- */
+.nav-tabs {
+    border-bottom: 1px solid var(--bs-border-color) !important;
+}
+.nav-tabs .nav-link {
+    color: var(--bs-nav-link-color, var(--bs-body-color));
+    border: 1px solid transparent;
+    margin-bottom: -1px;
+}
+.nav-tabs .nav-link:hover,
+.nav-tabs .nav-link:focus {
+    border-color: var(--bs-border-color) var(--bs-border-color) transparent;
+}
+.nav-tabs .nav-link.active,
+.nav-tabs .nav-item.show .nav-link {
+    color: var(--bs-emphasis-color, var(--bs-body-color));
+    background-color: var(--bs-body-bg);
+    border-color: var(--bs-border-color) var(--bs-border-color) transparent;
+}
+[data-bs-theme="dark"] .nav-tabs .nav-link.active,
+[data-bs-theme="dark"] .nav-tabs .nav-item.show .nav-link {
+    background-color: var(--bs-body-bg);
+}
+
+/* Admin panel: eliminate inner double borders and stretch content */
+.admin-panel .card,
+.admin-panel .card-header,
+.admin-panel .card-body,
+.admin-panel .list-group,
+.admin-panel .list-group-item,
+.admin-panel table,
+.admin-panel .table,
+.admin-panel .table > :not(caption) > * > * {
+    border-color: var(--bs-border-color) !important;
+}
+.admin-panel .card,
+.admin-panel .list-group,
+.admin-panel .table {
+    border-left: none !important;
+    border-right: none !important;
+}
+.admin-panel .card-header {
+    border-left: none !important;
+    border-right: none !important;
+}
+.admin-panel .table thead th,
+.admin-panel .table tbody td {
+    border-left: none !important;
+    border-right: none !important;
+}
+.admin-panel {
+    margin-left: -1rem;
+    margin-right: -1rem;
     padding-left: 1rem;
     padding-right: 1rem;
 }

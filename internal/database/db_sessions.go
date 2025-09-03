@@ -11,10 +11,13 @@ import (
 
 // Session security constants
 const (
-	SessionIDLength  = 64               // 64 character session ID
-	SessionTimeout   = 3 * time.Hour    // 3 hour sliding timeout
-	MaxLoginAttempts = 5                // Max failed login attempts
+	SessionIDLength = 64
+)
+
+var (
+	SessionTimeout   = 1 * time.Hour    // 1 hour sliding timeout
 	LoginLockoutTime = 15 * time.Minute // Lockout time after max attempts
+	MaxLoginAttempts = 5                // Max failed login attempts
 )
 
 // GenerateSecureSessionID creates a cryptographically secure session ID
@@ -27,15 +30,15 @@ func GenerateSecureSessionID() (string, error) {
 }
 
 // CreateUserSession creates a new session for the user and invalidates any existing session
-func (db *Database) CreateUserSession(userID int, remoteIP string) (string, error) {
+func (db *Database) CreateUserSession(userID int64, remoteIP string) (string, error) {
 	// Generate new session ID
 	sessionID, err := GenerateSecureSessionID()
 	if err != nil {
 		return "", err
 	}
 
-	// Calculate expiration time (3 hours from now)
-	expiresAt := time.Now().Add(SessionTimeout)
+	// Calculate expiration time in UTC for consistent DB comparison
+	expiresAt := time.Now().UTC().Add(SessionTimeout)
 
 	// Update user with new session (this invalidates any existing session)
 	query := `UPDATE users SET
@@ -75,8 +78,8 @@ func (db *Database) ValidateUserSession(sessionID string) (*models.User, error) 
 		return nil, fmt.Errorf("invalid or expired session")
 	}
 
-	// Extend session expiration (sliding timeout) - write operation
-	newExpiresAt := time.Now().Add(SessionTimeout)
+	// Extend session expiration (sliding timeout) in UTC - write operation
+	newExpiresAt := time.Now().UTC().Add(SessionTimeout)
 	updateQuery := `UPDATE users SET session_expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
 	_, err = retryableExec(db.mainDB, updateQuery, newExpiresAt, user.ID)
 	if err != nil {
@@ -90,7 +93,7 @@ func (db *Database) ValidateUserSession(sessionID string) (*models.User, error) 
 }
 
 // InvalidateUserSession clears the user's session
-func (db *Database) InvalidateUserSession(userID int) error {
+func (db *Database) InvalidateUserSession(userID int64) error {
 	query := `UPDATE users SET
 		session_id = '',
 		session_expires_at = NULL,
@@ -123,7 +126,7 @@ func (db *Database) IncrementLoginAttempts(username string) error {
 }
 
 // ResetLoginAttempts clears the failed login counter
-func (db *Database) ResetLoginAttempts(userID int) error {
+func (db *Database) ResetLoginAttempts(userID int64) error {
 	query := `UPDATE users SET
 		login_attempts = 0,
 		updated_at = CURRENT_TIMESTAMP

@@ -81,7 +81,7 @@ type Overview struct {
 
 // User represents a web user account
 type User struct {
-	ID               int        `json:"id" db:"id"`
+	ID               int64      `json:"id" db:"id"`
 	Username         string     `json:"username" db:"username"`
 	Email            string     `json:"email" db:"email"`
 	PasswordHash     string     `json:"password_hash" db:"password_hash"`
@@ -97,15 +97,15 @@ type User struct {
 // Session represents a user session
 type Session struct {
 	ID        string    `json:"id" db:"id"`
-	UserID    int       `json:"user_id" db:"user_id"`
+	UserID    int64     `json:"user_id" db:"user_id"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	ExpiresAt time.Time `json:"expires_at" db:"expires_at"`
 }
 
 // UserPermission represents a permission granted to a user
 type UserPermission struct {
-	ID         int       `json:"id" db:"id"`
-	UserID     int       `json:"user_id" db:"user_id"`
+	ID         int64     `json:"id" db:"id"`
+	UserID     int64     `json:"user_id" db:"user_id"`
 	Permission string    `json:"permission" db:"permission"`
 	GrantedAt  time.Time `json:"granted_at" db:"granted_at"`
 }

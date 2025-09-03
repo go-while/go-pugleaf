@@ -708,7 +708,7 @@ func (db *Database) InsertUserPermission(up *models.UserPermission) error {
 
 const query_GetUserPermissions = `SELECT id, user_id, permission, granted_at FROM user_permissions WHERE user_id = ?`
 
-func (db *Database) GetUserPermissions(userID int) ([]*models.UserPermission, error) {
+func (db *Database) GetUserPermissions(userID int64) ([]*models.UserPermission, error) {
 	rows, err := db.mainDB.Query(query_GetUserPermissions, userID)
 	if err != nil {
 		return nil, err
@@ -1297,9 +1297,9 @@ func (db *Database) SearchNewsgroups(searchTerm string, limit, offset int, admin
 	var query string
 	switch admin {
 	case true:
-		query = query_SearchNewsgroups
-	default:
 		query = query_SearchNewsgroupsAdmin
+	default:
+		query = query_SearchNewsgroups
 
 	}
 	// Use LIKE for pattern matching, case-insensitive

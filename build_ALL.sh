@@ -17,4 +17,8 @@ rm -v build/*
 ./build_recover-db.sh
 ./build_expire-news.sh
 
+# Always generate checksums after building
+echo "Generating checksums for built executables..."
+./createChecksums.sh
+
 test "$1" = "update" && ./createUpdate.sh

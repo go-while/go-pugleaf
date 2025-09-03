@@ -56,7 +56,7 @@ func main() {
 	// Command line flags for NNTP fetcher configuration
 	var newsgroups []*models.Newsgroup
 	var (
-		host                    = flag.String("host", "lux-feed1.newsdeef.eu", "NNTP hostname")
+		host                    = flag.String("host", "81-171-22-215.pugleaf.net", "NNTP hostname")
 		port                    = flag.Int("port", 563, "NNTP port")
 		username                = flag.String("username", "read", "NNTP username")
 		password                = flag.String("password", "only", "NNTP password")
@@ -97,8 +97,9 @@ func main() {
 		}
 		os.Exit(0)
 	}
-	if *downloadMaxPar != 1 {
-		*downloadMaxPar = 1 // hardcoded to 1 TODO find fixme
+
+	if *downloadMaxPar < 1 {
+		*downloadMaxPar = 1
 	}
 	if *maxBatch < 1 {
 		*maxBatch = 1
@@ -296,7 +297,7 @@ func main() {
 				continue
 			}
 			if db.IsDBshutdown() {
-				log.Printf("[FETCHER]: Database shutdown detected, stopping processing")
+				//log.Printf("[FETCHER]: Database shutdown detected, stopping processing")
 				return
 			}
 			processor.Batch.Check <- &ng.Name
@@ -325,15 +326,19 @@ func main() {
 					continue
 				}
 				//log.Printf("[FETCHER]: ng '%s', REMOTE groupInfo: %#v", *ng, groupInfo),
-				mux.Lock()
-				lastArticle, err := progressDB.GetLastArticle(proc.Pool.Backend.Provider.Name, *ng)
-				if err != nil || lastArticle < -1 {
-					log.Printf("[FETCHER]: Failed to get last article for group '%s' from provider '%s': %v", *ng, proc.Pool.Backend.Provider.Name, err)
+				var lastArticle int64
+				if *downloadStartDate != "" {
+					lastArticle = -1
+				} else {
+					mux.Lock()
+					lastArticle, err = progressDB.GetLastArticle(proc.Pool.Backend.Provider.Name, *ng)
+					if err != nil || lastArticle < -1 {
+						log.Printf("[FETCHER]: Failed to get last article for group '%s' from provider '%s': %v", *ng, proc.Pool.Backend.Provider.Name, err)
+						mux.Unlock()
+						continue
+					}
 					mux.Unlock()
-					continue
 				}
-				mux.Unlock()
-
 				switch lastArticle {
 				case 0:
 					// Open group DB only when we need to check last-article date
@@ -362,11 +367,13 @@ func main() {
 						//go proc.DownloadArticlesFromDate(*ng, *lastArticleDate, 0, DLParChan, progressDB) // Use 0 for ignore threshold since group already exists
 					}
 
-				case -1: // User-requested date rescan - reset to start from beginning
-					log.Printf("[FETCHER]: Date rescan mode for group '%s', starting from beginning", *ng)
+				case -1: // User-requested date rescan
+					//log.Printf("[FETCHER]: Date rescan '%s'", *ng)
 					// Set date-based download from epoch for complete rescan
 					mux.Lock()
-					startDates[*ng] = "1960-01-01"
+					if *downloadStartDate != "" {
+						startDates[*ng] = *downloadStartDate
+					}
 					mux.Unlock()
 					// Reset lastArticle to 0 and fall through to normal range processing
 					lastArticle = 0
@@ -374,8 +381,8 @@ func main() {
 					// pass
 				}
 				//log.Printf("DEBUG-RANGE: ng='%s' lastArticle=%d (after switch)", *ng, lastArticle)
-				start := lastArticle + 1                         // Start from the first article in the remote group
-				end := start + int64(processor.MaxBatchSize) - 1 // End at the last article in the remote group
+				start := lastArticle + 1                  // Start from the first article in the remote group
+				end := start + processor.MaxBatchSize - 1 // End at the last article in the remote group
 				//log.Printf("DEBUG-RANGE: ng='%s' calculated start=%d end=%d groupInfo.Last=%d", *ng, start, end, groupInfo.Last)
 
 				// For date-based downloads, don't cap end to groupInfo.Last since they use date filtering
@@ -455,15 +462,15 @@ func main() {
 			for {
 				select {
 				case <-shutdownChan:
-					log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
+					//log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
 					return
 				case ng := <-processor.Batch.TodoQ:
 					if ng == nil {
-						log.Printf("[FETCHER]: TodoQ closed, worker stopping")
+						//log.Printf("[FETCHER]: TodoQ closed, worker stopping")
 						return
 					}
 					if db.IsDBshutdown() {
-						log.Printf("[FETCHER]: TodoQ Database shutdown detected, stopping processing. still queued in TodoQ: %d", len(processor.Batch.TodoQ))
+						//log.Printf("[FETCHER]: TodoQ Database shutdown detected, stopping processing. still queued in TodoQ: %d", len(processor.Batch.TodoQ))
 						return
 					}
 					/*
@@ -486,7 +493,7 @@ func main() {
 					}
 					mux.Lock()
 					todo++
-					log.Printf("--- Fetch '%s' (%d-%d) [%d/%d|Q:%d]  --- ", ng.Name, ng.First, ng.Last, todo, queued, len(processor.Batch.TodoQ))
+					//log.Printf("[FETCHER]: start *importOverview=%t '%s' (%d-%d) [%d/%d|Q:%d]  --- ", *importOverview, ng.Name, ng.First, ng.Last, todo, queued, len(processor.Batch.TodoQ))
 					mux.Unlock()
 					// Import articles for the selected group
 					switch *importOverview {

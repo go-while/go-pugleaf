@@ -28,7 +28,7 @@ func (*Counter) GetReset(group string) int64 {
 		log.Printf("Resetting counter for group '%s', previous count was %d", group, count)
 		return count
 	}
-	log.Printf("No counter found for group '%s', nothing to reset", group)
+	//log.Printf("No counter found for group '%s', nothing to reset", group)
 	return 0
 }
 
