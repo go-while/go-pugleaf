@@ -135,7 +135,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	var mux sync.Mutex
 	var lastGoodEnd int64 = 1
 	toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
-	xhdrChan := make(chan *nntp.HeaderLine)
+	xhdrChan := make(chan *nntp.HeaderLine, MaxBatchSize)
 	errChan := make(chan error, 1)
 	log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
 	go func(mux *sync.Mutex) {
