@@ -11,10 +11,13 @@ import (
 
 // Session security constants
 const (
-	SessionIDLength  = 64               // 64 character session ID
-	SessionTimeout   = 3 * time.Hour    // 3 hour sliding timeout
-	MaxLoginAttempts = 5                // Max failed login attempts
+	SessionIDLength = 64
+)
+
+var (
+	SessionTimeout   = 1 * time.Hour    // 1 hour sliding timeout
 	LoginLockoutTime = 15 * time.Minute // Lockout time after max attempts
+	MaxLoginAttempts = 5                // Max failed login attempts
 )
 
 // GenerateSecureSessionID creates a cryptographically secure session ID
@@ -34,7 +37,7 @@ func (db *Database) CreateUserSession(userID int64, remoteIP string) (string, er
 		return "", err
 	}
 
-	// Calculate expiration time (3 hours from now) in UTC for consistent DB comparison
+	// Calculate expiration time in UTC for consistent DB comparison
 	expiresAt := time.Now().UTC().Add(SessionTimeout)
 
 	// Update user with new session (this invalidates any existing session)

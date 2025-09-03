@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -491,33 +492,79 @@ func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
 // ReverseProxyMiddleware handles X-Forwarded headers when running behind a reverse proxy
 func (s *WebServer) ReverseProxyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Handle X-Forwarded-Proto to detect if the original request was HTTPS
-		if proto := c.GetHeader("X-Forwarded-Proto"); proto == "https" {
+		// Capture the immediate peer before any overrides
+		remoteHost, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+		if err != nil {
+			remoteHost = c.Request.RemoteAddr // Fallback if no port
+		}
+
+		// Determine if the request came from a trusted proxy (private/loopback)
+		trustedProxy := isPrivateOrLoopbackIP(remoteHost)
+
+		// Determine HTTPS: direct TLS or forwarded by trusted proxy
+		isHTTPS := c.Request.TLS != nil
+		if !isHTTPS && trustedProxy && strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") {
+			isHTTPS = true
 			c.Request.URL.Scheme = "https"
 		}
+		// Expose scheme result to handlers
+		c.Set("is_https", isHTTPS)
 
-		// Handle X-Forwarded-For to get the real client IP
-		if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
-			// Take the first IP from the list (original client)
-			ips := strings.Split(xff, ",")
-			if len(ips) > 0 {
-				clientIP := strings.TrimSpace(ips[0])
-				c.Request.RemoteAddr = clientIP + ":0"
+		if trustedProxy {
+			// Handle X-Forwarded-For to get the real client IP
+			if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
+				// Take the first IP from the list (original client)
+				ips := strings.Split(xff, ",")
+				if len(ips) > 0 {
+					clientIP := strings.TrimSpace(ips[0])
+					c.Request.RemoteAddr = clientIP + ":0"
+				}
 			}
-		}
 
-		// Handle X-Real-IP as an alternative
-		if realIP := c.GetHeader("X-Real-IP"); realIP != "" {
-			c.Request.RemoteAddr = realIP + ":0"
-		}
+			// Handle X-Real-IP as an alternative
+			if realIP := c.GetHeader("X-Real-IP"); realIP != "" {
+				c.Request.RemoteAddr = realIP + ":0"
+			}
 
-		// Handle X-Forwarded-Host to get the original host
-		if host := c.GetHeader("X-Forwarded-Host"); host != "" {
-			c.Request.Host = host
+			// Handle X-Forwarded-Host to get the original host
+			if host := c.GetHeader("X-Forwarded-Host"); host != "" {
+				c.Request.Host = host
+			}
 		}
 
 		c.Next()
 	}
+}
+
+// isPrivateOrLoopbackIP returns true if the given host string is loopback or RFC1918/private
+func isPrivateOrLoopbackIP(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	// RFC1918 IPv4 ranges
+	if ip4 := ip.To4(); ip4 != nil {
+		// 10.0.0.0/8
+		if ip4[0] == 10 {
+			return true
+		}
+		// 172.16.0.0/12
+		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+			return true
+		}
+		// 192.168.0.0/16
+		if ip4[0] == 192 && ip4[1] == 168 {
+			return true
+		}
+	}
+	// IPv6 unique local addresses (fc00::/7)
+	if ip.To16() != nil && (ip[0]&0xfe) == 0xfc {
+		return true
+	}
+	return false
 }
 
 func (s *WebServer) ApacheLogFormat() gin.HandlerFunc {

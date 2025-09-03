@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -156,6 +157,9 @@ func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
 		return nil
 	}
 
+	// Refresh cookie to keep client-side max age in sync with sliding server timeout
+	s.setSessionCookie(c, sessionID)
+
 	authUser := &AuthUser{
 		ID:          user.ID,
 		Username:    user.Username,
@@ -181,8 +185,8 @@ func (s *WebServer) createWebSession(c *gin.Context, userID int64) error {
 	}
 	sessionID := hex.EncodeToString(bytes)
 
-	// Set expiration to 7 days
-	expiresAt := time.Now().Add(7 * 24 * time.Hour)
+	// Set expiration to server session timeout for consistency
+	expiresAt := time.Now().Add(database.SessionTimeout)
 
 	// Store session in database
 	session := &models.Session{
@@ -252,7 +256,26 @@ func validatePassword(password string) error {
 func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
 	// Detect HTTPS from the current request perspective only
 	// Prefer actual TLS on the request or trusted reverse proxy header
-	isHTTPS := c.Request != nil && (c.Request.TLS != nil || strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https"))
+	// Gin guarantees c.Request is non-nil for handlers
+	if v, exists := c.Get("is_https"); exists {
+		if b, ok := v.(bool); ok {
+			// Use scheme determined by ReverseProxyMiddleware
+			isHTTPS := b
+			cookie := &http.Cookie{
+				Name:     "session_id",
+				Value:    sessionID,
+				Path:     "/",
+				HttpOnly: true,
+				Secure:   isHTTPS,
+				SameSite: http.SameSiteLaxMode, // Works well with reverse proxies
+				MaxAge:   int(database.SessionTimeout.Seconds()), // align with server-side sliding timeout
+			}
+			http.SetCookie(c.Writer, cookie)
+			return
+		}
+	}
+	// Fallback if middleware wasn't applied
+	isHTTPS := c.Request.TLS != nil
 
 	cookie := &http.Cookie{
 		Name:     "session_id",
@@ -261,7 +284,7 @@ func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
 		HttpOnly: true,
 		Secure:   isHTTPS,
 		SameSite: http.SameSiteLaxMode, // Works well with reverse proxies
-		MaxAge:   int(7 * 24 * 3600),   // 7 days
+		MaxAge:   int(database.SessionTimeout.Seconds()), // align with server-side sliding timeout
 	}
 
 	http.SetCookie(c.Writer, cookie)
@@ -270,7 +293,13 @@ func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
 // Helper function to clear session cookie
 func (s *WebServer) clearSessionCookie(c *gin.Context) {
 	// Detect HTTPS from the current request perspective only
-	isHTTPS := c.Request != nil && (c.Request.TLS != nil || strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https"))
+	// Gin guarantees c.Request is non-nil for handlers
+	isHTTPS := c.Request.TLS != nil
+	if v, exists := c.Get("is_https"); exists {
+		if b, ok := v.(bool); ok {
+			isHTTPS = b
+		}
+	}
 
 	cookie := &http.Cookie{
 		Name:     "session_id",
