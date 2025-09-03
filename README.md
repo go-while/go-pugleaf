@@ -56,7 +56,7 @@ git checkout testing-001
   - **Web registration**: First registered user becomes administrator
   - **Command line**: Use the usermgr tool to create admin users directly
 ```bash
-go build -o build/usermgr ./cmd/usermgr
+./build_usermgr.sh
 mv build/usermgr .
 ./usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
 ```
@@ -64,8 +64,8 @@ mv build/usermgr .
 3. **Add newsgroups** - Admin → Add groups you want to follow
   - Or bulk import newsgroups:
 ```bash
-./webserver -import-active preload/active.txt
-./webserver -update-desc preload/newsgroups.descriptions
+./webserver -import-active preload/active.txt -nntphostname your.domain.com
+./webserver -update-desc preload/newsgroups.descriptions -nntphostname your.domain.com
 ./rslight-importer -data data -etc etc -spool spool -nntphostname your.domain.com
 ```
   - rslight section import: see etc/menu.conf and creating sections aka folders in etc/ containing a groups.txt (e.g., etc/section/groups.txt)
@@ -76,6 +76,8 @@ mv build/usermgr .
  - Please limit to max 50 connections at 81-171-22-215.pugleaf.net
  - this is a free service and we want to keep it running for everyone.
  - blueworldhosting and eternal-september have hardcoded limit of 3 conns!
+ - There is NO NEED to download all usenet from archives again!
+ - Unfiltered databases will be shared via torrent soon!
 
 6. **Fetch articles** - Use `pugleaf-fetcher` to download articles from subscribed groups
 7. **Runtime Mode** - Set connections to max 10 when your back filling is finished.
