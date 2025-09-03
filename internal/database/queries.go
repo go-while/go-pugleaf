@@ -1297,9 +1297,9 @@ func (db *Database) SearchNewsgroups(searchTerm string, limit, offset int, admin
 	var query string
 	switch admin {
 	case true:
-		query = query_SearchNewsgroups
-	default:
 		query = query_SearchNewsgroupsAdmin
+	default:
+		query = query_SearchNewsgroups
 
 	}
 	// Use LIKE for pattern matching, case-insensitive
