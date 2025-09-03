@@ -2,6 +2,7 @@ package database
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/md5"
 	"fmt"
 	"log"
@@ -59,10 +60,8 @@ func RsyncDIR(oldpath, newpath string, removesource bool) error {
 
 	// Split function that treats both \n and \r as record delimiters
 	scanCRorLF := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		for i, b := range data {
-			if b == '\n' || b == '\r' {
-				return i + 1, data[:i], nil
-			}
+		if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
+			return i + 1, data[:i], nil
 		}
 		if atEOF && len(data) > 0 {
 			return len(data), data, nil
