@@ -211,7 +211,7 @@ func hideFuturePosts(db *database.Database) error {
 	cutoffTime := time.Now().Add(48 * time.Hour)
 
 	// First, get all newsgroups from the main database
-	rows, err := db.GetMainDB().Query("SELECT id, name FROM newsgroups WHERE message_count > 0")
+	rows, err := db.GetMainDB().Query("SELECT id, name FROM newsgroups WHERE message_count > 0 AND active = 1")
 	if err != nil {
 		return fmt.Errorf("failed to query newsgroups: %w", err)
 	}
