@@ -97,8 +97,9 @@ func main() {
 		}
 		os.Exit(0)
 	}
-	if *downloadMaxPar != 1 {
-		*downloadMaxPar = 1 // hardcoded to 1 TODO find fixme
+
+	if *downloadMaxPar < 1 {
+		*downloadMaxPar = 1
 	}
 	if *maxBatch < 1 {
 		*maxBatch = 1
