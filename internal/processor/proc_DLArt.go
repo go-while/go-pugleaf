@@ -103,7 +103,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
 	xhdrChan := make(chan *nntp.HeaderLine, MaxBatchSize)
 	errChan := make(chan error, 1)
-	log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
+	//log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
 	go func(mux *sync.Mutex) {
 		aerr := proc.Pool.XHdrStreamed(newsgroup, "message-id", start, end, xhdrChan)
 		if aerr != nil {

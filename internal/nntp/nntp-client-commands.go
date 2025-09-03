@@ -579,7 +579,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 	if end > 0 && (end-start+1) > MaxReadLinesXover {
 		end = start + MaxReadLinesXover - 1
 	}
-	log.Printf("XHdrStreamed group '%s' field '%s' start=%d end=%d", groupName, field, start, end)
+	//log.Printf("XHdrStreamed group '%s' field '%s' start=%d end=%d", groupName, field, start, end)
 
 	var id uint
 	if end > 0 {
