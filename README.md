@@ -53,29 +53,27 @@ git checkout testing-001
 ### Initial Setup
 
 1. **Create admin account** - Choose one of two methods:
-   - **Web registration**: First registered user becomes administrator
-   - **Command line**: Use the usermgr tool to create admin users directly
-   ```bash
-   go build -o build/usermgr ./cmd/usermgr
-   mv build/usermgr .
-   ./usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
-   ```
+  - **Web registration**: First registered user becomes administrator
+  - **Command line**: Use the usermgr tool to create admin users directly
+```bash
+go build -o build/usermgr ./cmd/usermgr
+mv build/usermgr .
+./usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
+```
 2. **Secure your instance** - Login → Statistics → Disable registrations
 3. **Add newsgroups** - Admin → Add groups you want to follow
-- or bulk import newsgroups
+  - Or bulk import newsgroups:
 ```bash
 ./webserver -import-active preload/active.txt
 ./webserver -update-desc preload/newsgroups.descriptions
-- rslight section import:
-- see etc/menu.conf and creating sections aka folders in etc/ containing a groups.txt
-- like etc/section/groups.txt
 ./rslight-importer -data data -etc etc -spool spool -nntphostname your.domain.com
-- spool folder can be empty if you don't want to import rocksolid backups.
 ```
+  - rslight section import: see etc/menu.conf and creating sections aka folders in etc/ containing a groups.txt (e.g., etc/section/groups.txt)
+  - spool folder can be empty if you don't want to import rocksolid backups.
 4. **Configure provider** - Admin → Providers (defaults works)
 
 5. **Limit Connections**
- - Please limit to max 500 connections at lux-feed1.newsdeef.eu
+ - Please limit to max 50 connections at 81-171-22-215.pugleaf.net
  - this is a free service and we want to keep it running for everyone.
  - blueworldhosting and eternal-september have hardcoded limit of 3 conns!
 
@@ -163,7 +161,7 @@ The usermgr tool is particularly useful for:
 - Batch user management and automation
 - Managing users when web interface is unavailable
 
-📖 **For complete documentation of all 19 available binaries and their flags, see [Binary Documentation](#-binary-documentation) below.**
+📖 **For complete documentation of all 19 available binaries and their flags, see [Binary Documentation](#binary-documentation) below.**
 
 ### Building individual tools
 
@@ -227,6 +225,7 @@ go-pugleaf includes command-line applications for various newsgroup management t
 
 #### `webserver` (cmd/web)
 **Main web interface**
+```bash
 ./webserver -nntphostname your.domain.com
 ```
 
@@ -289,7 +288,7 @@ go-pugleaf includes command-line applications for various newsgroup management t
 - `-nntphostname string` - Your hostname must be set!
 
 **Connection Configuration:**
-- `-host string` - NNTP hostname (default: "lux-feed1.newsdeef.eu")
+- `-host string` - NNTP hostname (default: "81-171-22-215.pugleaf.net")
 - `-port int` - NNTP port (default: 563)
 - `-username string` - NNTP username (default: "read")
 - `-password string` - NNTP password (default: "only")
@@ -340,7 +339,7 @@ go-pugleaf includes command-line applications for various newsgroup management t
 ```
 
 **Connection Configuration:**
-- `-host string` - NNTP hostname (default: "lux-feed1.newsdeef.eu")
+- `-host string` - NNTP hostname (default: "81-171-22-215.pugleaf.net")
 - `-port int` - NNTP port (default: 563)
 - `-username string` - NNTP username (default: "read")
 - `-password string` - NNTP password (default: "only")
@@ -610,3 +609,4 @@ GPL v2 - see [LICENSE](LICENSE)
 This project is inspired by the work of Thomas "Retro Guy" Miller and the original RockSolid Light project.
 
 -- the pugleaf.net development team -
+```
