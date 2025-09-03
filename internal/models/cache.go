@@ -7,11 +7,19 @@ import (
 	"github.com/go-while/go-pugleaf/internal/cache"
 )
 
+// Global toggle to enable/disable the sanitized cache at compile-time.
+// Set to true to completely bypass Get/Set operations for sanitized cache.
+const DisableSanitizedCache = true
+
 // Global sanitized cache instance
 var sanitizedCache *cache.SanitizedCache
 
 // InitSanitizedCache initializes the global sanitized cache
 func InitSanitizedCache(maxEntries int, maxAge time.Duration) {
+	if DisableSanitizedCache {
+		sanitizedCache = nil
+		return
+	}
 	sanitizedCache = cache.NewSanitizedCache(maxEntries, maxAge)
 }
 
@@ -28,7 +36,7 @@ type CacheKey struct {
 
 // GetCachedSanitized retrieves a cached sanitized field value by message ID
 func GetCachedSanitized(messageID string, field string) (template.HTML, bool) {
-	if sanitizedCache == nil || messageID == "" {
+	if DisableSanitizedCache || sanitizedCache == nil || messageID == "" {
 		return "", false
 	}
 	return sanitizedCache.GetField(messageID, field)
@@ -36,6 +44,9 @@ func GetCachedSanitized(messageID string, field string) (template.HTML, bool) {
 
 // SetCachedSanitized stores a sanitized field value in cache by message ID
 func SetCachedSanitized(messageID string, field string, value template.HTML) {
+	if DisableSanitizedCache {
+		return
+	}
 	if sanitizedCache != nil && messageID != "" {
 		sanitizedCache.SetField(messageID, field, value)
 	}
@@ -43,6 +54,9 @@ func SetCachedSanitized(messageID string, field string, value template.HTML) {
 
 // BatchSetCachedSanitized stores multiple complete sanitized articles in cache
 func BatchSetCachedSanitized(articles map[string]map[string]template.HTML) {
+	if DisableSanitizedCache {
+		return
+	}
 	if sanitizedCache != nil && len(articles) > 0 {
 		sanitizedCache.BatchSetArticles(articles)
 	}
@@ -50,7 +64,7 @@ func BatchSetCachedSanitized(articles map[string]map[string]template.HTML) {
 
 // GetCachedSanitizedArticle retrieves a complete cached sanitized article
 func GetCachedSanitizedArticle(messageID string) (*cache.SanitizedArticle, bool) {
-	if sanitizedCache == nil || messageID == "" {
+	if DisableSanitizedCache || sanitizedCache == nil || messageID == "" {
 		return nil, false
 	}
 	return sanitizedCache.GetArticle(messageID)
