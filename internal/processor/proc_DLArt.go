@@ -256,9 +256,11 @@ forProcessing:
 	if xerr != nil {
 		end = lastGoodEnd
 	}
-	err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, newsgroup, end)
-	if err != nil {
-		log.Printf("Failed to update progress for provider '%s' group '%s': %v", proc.Pool.Backend.Provider.Name, newsgroup, err)
+	if gotQueued > 0 {
+		err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, newsgroup, end)
+		if err != nil {
+			log.Printf("Failed to update progress for provider '%s' group '%s': %v", proc.Pool.Backend.Provider.Name, newsgroup, err)
+		}
 	}
 	log.Printf("DownloadArticles: '%s' processed %d articles (dups: %d, gots: %d, errs: %d, added: %d) in %v end=%d", newsgroup, gots+errs+dups, dups, gots, errs, GroupCounter.GetReset(newsgroup), time.Since(startTime), end)
 	// do another one if we haven't run enough times
