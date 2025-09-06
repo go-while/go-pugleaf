@@ -257,12 +257,15 @@ forProcessing:
 		end = lastGoodEnd
 	}
 	if gotQueued > 0 {
+		// only update progress if we actually got something
 		err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, newsgroup, end)
 		if err != nil {
 			log.Printf("Failed to update progress for provider '%s' group '%s': %v", proc.Pool.Backend.Provider.Name, newsgroup, err)
 		}
 	}
-	log.Printf("DownloadArticles: '%s' processed %d articles [gotQueued=%d] (dups: %d, gots: %d, errs: %d, adds: %d) in %v end=%d", newsgroup, gots+errs+dups, gotQueued, dups, gots, errs, GroupCounter.GetReset(newsgroup), time.Since(startTime), end)
+	// threading.go:296: GroupCounter.Increment(newsgroup) // Increment the group counter
+	groupCnt := GroupCounter.GetReset(newsgroup)
+	log.Printf("DownloadArticles: '%s' processed %d articles [gotQueued=%d] (dups: %d, gots: %d, errs: %d, adds: %d) in %v end=%d", newsgroup, gots+errs+dups, gotQueued, dups, gots, errs, groupCnt, time.Since(startTime), end)
 	// do another one if we haven't run enough times
 	runtime.GC()
 
