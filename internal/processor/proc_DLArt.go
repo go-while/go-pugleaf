@@ -262,7 +262,7 @@ forProcessing:
 			log.Printf("Failed to update progress for provider '%s' group '%s': %v", proc.Pool.Backend.Provider.Name, newsgroup, err)
 		}
 	}
-	log.Printf("DownloadArticles: '%s' processed %d articles (dups: %d, gots: %d, errs: %d, added: %d) in %v end=%d", newsgroup, gots+errs+dups, dups, gots, errs, GroupCounter.GetReset(newsgroup), time.Since(startTime), end)
+	log.Printf("DownloadArticles: '%s' processed %d articles [gotQueued=%d] (dups: %d, gots: %d, errs: %d, adds: %d) in %v end=%d", newsgroup, gots+errs+dups, gotQueued, dups, gots, errs, GroupCounter.GetReset(newsgroup), time.Since(startTime), end)
 	// do another one if we haven't run enough times
 	runtime.GC()
 
