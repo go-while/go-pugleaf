@@ -99,7 +99,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	//remaining := groupInfo.Last - end
 	//log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d, remaining: %d)", newsgroup, start, end, groupInfo.Last, remaining)
 	var mux sync.Mutex
-	var lastGoodEnd int64 = 1
+	var lastGoodEnd int64 = start
 	toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
 	xhdrChan := make(chan *nntp.HeaderLine, MaxBatchSize)
 	errChan := make(chan error, 1)
