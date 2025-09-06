@@ -550,7 +550,6 @@ drainChannel:
 	}
 
 	log.Printf("[BATCH] processNewsgroupBatch: ng: '%s' with %d articles (more queued: %d)", *task.Newsgroup, len(batches), len(task.BATCHchan))
-	deferred := false
 	var groupDBs *GroupDBs
 	var err error
 retry:
@@ -562,18 +561,19 @@ retry:
 			return
 		}
 	}
-	if !deferred {
-		defer groupDBs.Return(sq.db) // Ensure proper cleanup
-		deferred = true
-	}
 
 	// PHASE 1: Insert complete articles (overview + article data unified) and set article numbers directly on batches
 	if err := sq.batchInsertOverviews(*task.Newsgroup, batches, groupDBs); err != nil {
 		log.Printf("[BATCH] processNewsgroupBatch Failed to process batch for group '%s': %v", *task.Newsgroup, err)
 		time.Sleep(time.Second)
+		if groupDBs != nil {
+			groupDBs.Return(sq.db)
+			groupDBs = nil
+		}
 		goto retry
 	}
 
+	groupDBs.Return(sq.db)
 	// Update all articles with their assigned numbers for subsequent processing
 	// and compute max article number for newsgroup stats
 	var maxArticleNum int64 = 0
@@ -740,13 +740,12 @@ func (c *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.Ar
 	// Execute the prepared statement for each batch item
 	for _, article := range batches {
 		// Format DateSent as UTC string to avoid timezone encoding issues
-		dateSentStr := article.DateSent.UTC().Format("2006-01-02 15:04:05")
 
 		_, err := stmt.Exec(
-			article.MessageID,   // message_id
-			article.Subject,     // subject
-			article.FromHeader,  // from_header
-			dateSentStr,         // date_sent (formatted as UTC string)
+			article.MessageID,  // message_id
+			article.Subject,    // subject
+			article.FromHeader, // from_header
+			article.DateSent.UTC().Format("2006-01-02 15:04:05"), // date_sent (formatted as UTC string)
 			article.DateString,  // date_string
 			article.References,  // references
 			article.Bytes,       // bytes
