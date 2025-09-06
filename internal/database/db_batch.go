@@ -1426,7 +1426,9 @@ var BatchDividerChan = make(chan *models.Article, 1)
 // This runs as a single goroutine to avoid locking issues
 
 func (sq *SQ3batch) BatchDivider() {
-	var tmpQueued, realQueue = 0, 0
+	var tmpQueued, realQueue int
+	var maxQueue int = MaxQueued / 100 * 80
+	var target int = MaxQueued / 100 * 20
 	for {
 		var newsgroupPtr *string
 		task := <-BatchDividerChan
@@ -1449,9 +1451,9 @@ func (sq *SQ3batch) BatchDivider() {
 			tasks.BATCHchan = make(chan *models.Article, InitialBatchChannelSize)
 		}
 		tasks.Mux.Unlock()
-		if realQueue >= MaxQueued {
+		if realQueue >= maxQueue {
 			log.Printf("[BATCH-DIVIDER] MaxQueued reached (%d), waiting to enqueue more (current Queue=%d, tmpQueued=%d)", MaxQueued, realQueue, tmpQueued)
-			target := MaxQueued / 100 * 20
+
 			for {
 				time.Sleep(100 * time.Millisecond)
 				sq.GMux.RLock()
