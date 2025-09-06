@@ -555,29 +555,72 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderL
 var ErrOutOfRange error = fmt.Errorf("end range exceeds group last article number")
 
 // XHdrStreamed performs XHDR command and streams results line by line through a channel
+// Fetches max 1000 hdrs and starts a new fetch if the channel is less than 10% capacity
 func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, resultChan chan<- *HeaderLine) error {
+	channelCap := cap(resultChan)
+	lowWaterMark := channelCap / 10 // 10% threshold
+	if lowWaterMark < 1 {
+		lowWaterMark = 1
+	}
+
+	currentStart := start
+	var isleep int64 = 10
+	for currentStart <= end {
+		// Wait if channel is not empty
+		for len(resultChan) > lowWaterMark {
+			time.Sleep(time.Duration(isleep) * time.Millisecond)
+		}
+
+		// Calculate batch end (max 1000 articles)
+		batchEnd := currentStart + 999 // 1000 articles max
+		if batchEnd > end {
+			batchEnd = end
+		}
+
+		// Fetch this batch
+		startStream := time.Now()
+		err := c.XHdrStreamedBatch(groupName, field, currentStart, batchEnd, resultChan)
+		if err != nil {
+			close(resultChan) // Close on error
+			return fmt.Errorf("XHdrStreamedBatch failed for range %d-%d: %w", currentStart, batchEnd, err)
+		}
+		isleep = time.Since(startStream).Milliseconds() / 2
+		if isleep < 10 {
+			isleep = 10
+		}
+
+		// Move to next batch
+		currentStart = batchEnd + 1
+
+	}
+
+	// Close channel when all batches are complete
+	close(resultChan)
+	return nil
+}
+
+// XHdrStreamed performs XHDR command and streams results line by line through a channel
+func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, resultChan chan<- *HeaderLine) error {
 	c.mu.Lock()
 	if !c.connected {
 		c.mu.Unlock()
-		close(resultChan)
 		return fmt.Errorf("not connected")
 	}
 	c.mu.Unlock()
 
 	groupInfo, code, err := c.SelectGroup(groupName)
 	if err != nil && code != 411 {
-		close(resultChan)
 		return fmt.Errorf("failed to select group '%s': code=%d err=%w", groupName, code, err)
 	}
 	if end > groupInfo.Last {
-		close(resultChan)
 		return ErrOutOfRange
 	}
 	c.lastUsed = time.Now()
 
 	// Limit to 1000 articles maximum to prevent SQLite overload
-	if end > 0 && (end-start+1) > MaxReadLinesXover {
-		end = start + MaxReadLinesXover - 1
+	const maxFetchLimit = 1000
+	if end > 0 && (end-start+1) > maxFetchLimit {
+		end = start + maxFetchLimit - 1
 	}
 	//log.Printf("XHdrStreamed group '%s' field '%s' start=%d end=%d", groupName, field, start, end)
 
@@ -588,7 +631,6 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 		id, err = c.textConn.Cmd("XHDR %s %d-%d", field, start, start)
 	}
 	if err != nil {
-		close(resultChan)
 		return fmt.Errorf("failed to send XHDR command: %w", err)
 	}
 
@@ -610,12 +652,10 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 	*/
 	code, message, err := c.textConn.ReadCodeLine(221)
 	if err != nil {
-		close(resultChan)
 		return fmt.Errorf("failed to read XHDR response: %w", err)
 	}
 
 	if code != 221 {
-		close(resultChan)
 		return fmt.Errorf("XHDR failed: ng: '%s' %d %s", groupName, code, message)
 	}
 
@@ -651,8 +691,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 		resultChan <- &header
 	}
 
-	// Close channel
-	close(resultChan)
+	// Don't close channel here - let the main function handle it
 	return nil
 }
 

@@ -102,8 +102,8 @@ func main() {
 	if *downloadMaxPar < 1 {
 		*downloadMaxPar = 1
 	}
-	if *maxBatch < 1 {
-		*maxBatch = 1
+	if *maxBatch < 10 {
+		*maxBatch = 10
 	}
 	if *maxLoops != 1 {
 		*maxLoops = 1 // hardcoded to 1 TODO code path removed
