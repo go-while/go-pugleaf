@@ -1086,83 +1086,6 @@ type TakeThisResponse struct {
 	Message   string
 }
 
-// TakeThisArticle sends an article via TAKETHIS command
-func (c *BackendConn) TakeThisArticle(messageID string, headers []string, body string) (*TakeThisResponse, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.connected {
-		return nil, fmt.Errorf("not connected")
-	}
-
-	c.lastUsed = time.Now()
-
-	// Send TAKETHIS command
-	takeThisCommand := fmt.Sprintf("TAKETHIS %s", messageID)
-	id, err := c.textConn.Cmd("%s", takeThisCommand)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send TAKETHIS command: %w", err)
-	}
-
-	// Send article content using DotWriter
-	dw := c.textConn.DotWriter()
-
-	// Send headers
-	for _, headerLine := range headers {
-		if _, err := dw.Write([]byte(headerLine + "\r\n")); err != nil {
-			dw.Close()
-			return nil, fmt.Errorf("failed to write header: %w", err)
-		}
-	}
-
-	// Send empty line between headers and body
-	if _, err := dw.Write([]byte("\r\n")); err != nil {
-		dw.Close()
-		return nil, fmt.Errorf("failed to write header/body separator: %w", err)
-	}
-
-	// Send body
-	if _, err := dw.Write([]byte(body)); err != nil {
-		dw.Close()
-		return nil, fmt.Errorf("failed to write body: %w", err)
-	}
-
-	// Close dot writer to send terminator
-	if err := dw.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close article data: %w", err)
-	}
-
-	// Read TAKETHIS response
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id)
-
-	code, line, err := c.textConn.ReadCodeLine(-1) // -1 means any code is acceptable
-	if err != nil {
-		return nil, fmt.Errorf("failed to read TAKETHIS response: %w", err)
-	}
-
-	// Parse response
-	// Format: code <message-id> [message]
-	// 239 <message-id> - article transferred successfully
-	// 439 <message-id> - article transfer failed
-	parts := strings.Fields(line)
-	if len(parts) < 2 {
-		return nil, fmt.Errorf("malformed TAKETHIS response: %s", line)
-	}
-
-	response := &TakeThisResponse{
-		MessageID: parts[1],
-		Code:      code,
-		Success:   code == 239, // 239 means transfer successful
-	}
-
-	if len(parts) > 2 {
-		response.Message = strings.Join(parts[2:], " ")
-	}
-
-	return response, nil
-}
-
 // SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response
 // Returns command ID for later response reading - used for streaming mode
 func (c *BackendConn) SendTakeThisArticleStreaming(messageID string, headers []string, body string) (uint, error) {
@@ -1176,38 +1099,52 @@ func (c *BackendConn) SendTakeThisArticleStreaming(messageID string, headers []s
 	c.lastUsed = time.Now()
 
 	// Send TAKETHIS command
-	takeThisCommand := fmt.Sprintf("TAKETHIS %s", messageID)
-	id, err := c.textConn.Cmd("%s", takeThisCommand)
+	id, err := c.textConn.Cmd("TAKETHIS %s", messageID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
 	}
 
-	// Send article content using DotWriter
-	dw := c.textConn.DotWriter()
+	// Get the underlying connection and create bufio writer
 
 	// Send headers
 	for _, headerLine := range headers {
-		if _, err := dw.Write([]byte(headerLine + "\r\n")); err != nil {
-			dw.Close()
+		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write header: %w", err)
 		}
 	}
 
 	// Send empty line between headers and body
-	if _, err := dw.Write([]byte("\r\n")); err != nil {
-		dw.Close()
+	if _, err := c.writer.WriteString(CRLF); err != nil {
 		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
 	}
 
-	// Send body
-	if _, err := dw.Write([]byte(body)); err != nil {
-		dw.Close()
-		return 0, fmt.Errorf("failed to write body: %w", err)
+	// Send body with proper dot-stuffing
+	// Split body preserving line endings
+	bodyLines := strings.Split(body, "\n")
+	for i, line := range bodyLines {
+		// Skip empty last element from trailing \n
+		if i == len(bodyLines)-1 && line == "" {
+			break
+		}
+
+		// Dot-stuff lines that start with a dot (RFC 977)
+		if strings.HasPrefix(line, ".") {
+			line = "." + line
+		}
+
+		if _, err := c.writer.WriteString(line + CRLF); err != nil {
+			return 0, fmt.Errorf("failed to write body line: %w", err)
+		}
 	}
 
-	// Close dot writer to send terminator
-	if err := dw.Close(); err != nil {
-		return 0, fmt.Errorf("failed to close article data: %w", err)
+	// Send termination line (single dot)
+	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
+		return 0, fmt.Errorf("failed to send article terminator: %w", err)
+	}
+
+	// Flush the writer to ensure all data is sent
+	if err := c.writer.Flush(); err != nil {
+		return 0, fmt.Errorf("failed to flush article data: %w", err)
 	}
 
 	// Return command ID without reading response (streaming mode)
