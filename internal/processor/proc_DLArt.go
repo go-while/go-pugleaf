@@ -211,7 +211,9 @@ forProcessing:
 					case nntp.ErrArticleRemoved:
 						notf++
 					default:
-						log.Printf("DownloadArticles: '%s' Error fetching article %s: %v .. continue", newsgroup, *item.MessageID, item.Error)
+						if item.MessageID != nil {
+							log.Printf("DownloadArticles: '%s' Error fetching article %s: %v .. continue", newsgroup, *item.MessageID, item.Error)
+						}
 						errs++
 					}
 				} else {
