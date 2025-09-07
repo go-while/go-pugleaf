@@ -1035,23 +1035,25 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 		}
 	}
 
-	threadUpdates := make(map[int64][]threadCacheUpdateData, preAllocThreadRoots)
-	log.Printf("[P-BATCH] group '%s': Pre-allocated thread updates map with capacity %d", groupDBs.Newsgroup, preAllocThreadRoots)
-	for _, data := range replyData {
-		if data.threadRoot > 0 {
-			threadUpdates[data.threadRoot] = append(threadUpdates[data.threadRoot], threadCacheUpdateData{
-				childArticleNum: data.articleNum,
-				childDate:       data.childDate,
-			})
+	if preAllocThreadRoots > 0 {
+		threadUpdates := make(map[int64][]threadCacheUpdateData, preAllocThreadRoots)
+		//log.Printf("[P-BATCH] group '%s': Pre-allocated thread updates map with capacity %d", groupDBs.Newsgroup, preAllocThreadRoots)
+		for _, data := range replyData {
+			if data.threadRoot > 0 {
+				threadUpdates[data.threadRoot] = append(threadUpdates[data.threadRoot], threadCacheUpdateData{
+					childArticleNum: data.articleNum,
+					childDate:       data.childDate,
+				})
+			}
 		}
-	}
 
-	// Execute ALL thread cache updates in a single transaction
-	if len(threadUpdates) > 0 {
-		if err := c.batchUpdateThreadCache(groupDBs, threadUpdates); err != nil {
-			log.Printf("[P-BATCH] group '%s': Failed to batch update thread cache: %v", groupDBs.Newsgroup, err)
+		// Execute ALL thread cache updates in a single transaction
+		if len(threadUpdates) > 0 {
+			if err := c.batchUpdateThreadCache(groupDBs, threadUpdates); err != nil {
+				log.Printf("[P-BATCH] group '%s': Failed to batch update thread cache: %v", groupDBs.Newsgroup, err)
+			}
+			log.Printf("[P-BATCH] group '%s': Updated thread cache for %d thread roots", groupDBs.Newsgroup, len(threadUpdates))
 		}
-		log.Printf("[P-BATCH] group '%s': Updated thread cache for %d thread roots", groupDBs.Newsgroup, len(threadUpdates))
 	}
 
 	return nil
