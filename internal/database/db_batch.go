@@ -570,7 +570,6 @@ retry1:
 		goto retry1
 	}
 
-	groupDBs.Return(sq.db)
 	// Update all articles with their assigned numbers for subsequent processing
 	// and compute max article number for newsgroup stats
 	var maxArticleNum int64 = 0
