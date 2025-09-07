@@ -588,10 +588,10 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 
 	// Phase 1: Send all TAKETHIS commands without waiting for responses
 	log.Printf("Phase 1: Sending %d TAKETHIS commands...", len(articles))
-	
+
 	commandIDs := make([]uint, 0, len(articles))
 	validArticles := make([]*models.Article, 0, len(articles))
-	
+
 	for _, article := range articles {
 		// Reconstruct headers for transmission
 		articleHeaders, err := reconstructHeaders(article)
@@ -606,7 +606,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			log.Printf("Failed to send TAKETHIS for %s: %v", article.MessageID, err)
 			continue
 		}
-		
+
 		commandIDs = append(commandIDs, cmdID)
 		validArticles = append(validArticles, article)
 	}
@@ -617,7 +617,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	transferred := 0
 	for i, cmdID := range commandIDs {
 		article := validArticles[i]
-		
+
 		takeThisResponse, err := conn.ReadTakeThisResponseStreaming(cmdID)
 		if err != nil {
 			log.Printf("Failed to read TAKETHIS response for %s: %v", article.MessageID, err)
