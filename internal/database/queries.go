@@ -467,16 +467,20 @@ func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
 	return &lastDate, nil
 }
 
-const query_GetAllArticles = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles ORDER BY article_num ASC`
+const query_GetArticlesBatch = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles ORDER BY article_num ASC LIMIT ? OFFSET ?`
 
-func (db *Database) GetAllArticles(groupDBs *GroupDBs) ([]*models.Article, error) {
-	log.Printf("GetArticles: group '%s' fetching articles", groupDBs.Newsgroup)
+// GetArticlesBatch retrieves articles from a group database in batches for memory efficiency
+func (db *Database) GetArticlesBatch(groupDBs *GroupDBs, limit, offset int) ([]*models.Article, error) {
+	if limit <= 0 {
+		limit = 100 // Default batch size
+	}
 
-	rows, err := retryableQuery(groupDBs.DB, query_GetAllArticles)
+	rows, err := retryableQuery(groupDBs.DB, query_GetArticlesBatch, limit, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+
 	var out []*models.Article
 	for rows.Next() {
 		var a models.Article

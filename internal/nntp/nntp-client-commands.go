@@ -1001,3 +1001,164 @@ func (c *BackendConn) parseHeaderLine(line string) (HeaderLine, error) {
 		Value:      parts[1],
 	}, nil
 }
+
+// CheckResponse represents a response to CHECK command
+type CheckResponse struct {
+	MessageID string
+	Wanted    bool
+	Code      int
+	Message   string
+}
+
+// CheckMultiple sends a CHECK command for multiple message IDs and returns responses
+func (c *BackendConn) CheckMultiple(messageIDs []string) ([]CheckResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	if len(messageIDs) == 0 {
+		return nil, fmt.Errorf("no message IDs provided")
+	}
+
+	c.lastUsed = time.Now()
+
+	// Send individual CHECK commands for each message ID (pipelining)
+	commandIds := make([]uint, len(messageIDs))
+	for i, msgID := range messageIDs {
+		id, err := c.textConn.Cmd("CHECK %s", msgID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to send CHECK command for %s: %w", msgID, err)
+		}
+		commandIds[i] = id
+	}
+
+	// Read responses for each CHECK command
+	responses := make([]CheckResponse, 0, len(messageIDs))
+
+	for i, msgID := range messageIDs {
+		id := commandIds[i]
+		c.textConn.StartResponse(id)
+
+		// Read response for this CHECK command
+		code, line, err := c.textConn.ReadCodeLine(238)
+		c.textConn.EndResponse(id)
+
+		if code == 0 && err != nil {
+			log.Printf("Failed to read CHECK response for %s: %v", msgID, err)
+			continue
+		}
+
+		// Parse response line
+		// Format: code <message-id> [message]
+		// 238 <message-id> - article wanted
+		// 431 <message-id> - article not wanted
+		// 438 <message-id> - article not wanted (already have it)
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			log.Printf("Malformed CHECK response: %s", line)
+			continue
+		}
+
+		response := CheckResponse{
+			MessageID: parts[1],
+			Code:      code,
+			Wanted:    code == 238, // 238 means article wanted
+		}
+
+		if len(parts) > 2 {
+			response.Message = strings.Join(parts[2:], " ")
+		}
+
+		responses = append(responses, response)
+	}
+
+	return responses, nil
+}
+
+// TakeThisResponse represents a response to TAKETHIS command
+type TakeThisResponse struct {
+	MessageID string
+	Success   bool
+	Code      int
+	Message   string
+}
+
+// TakeThisArticle sends an article via TAKETHIS command
+func (c *BackendConn) TakeThisArticle(messageID string, headers []string, body string) (*TakeThisResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	c.lastUsed = time.Now()
+
+	// Send TAKETHIS command
+	takeThisCommand := fmt.Sprintf("TAKETHIS %s", messageID)
+	id, err := c.textConn.Cmd("%s", takeThisCommand)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send TAKETHIS command: %w", err)
+	}
+
+	// Send article content using DotWriter
+	dw := c.textConn.DotWriter()
+
+	// Send headers
+	for _, headerLine := range headers {
+		if _, err := dw.Write([]byte(headerLine + "\r\n")); err != nil {
+			dw.Close()
+			return nil, fmt.Errorf("failed to write header: %w", err)
+		}
+	}
+
+	// Send empty line between headers and body
+	if _, err := dw.Write([]byte("\r\n")); err != nil {
+		dw.Close()
+		return nil, fmt.Errorf("failed to write header/body separator: %w", err)
+	}
+
+	// Send body
+	if _, err := dw.Write([]byte(body)); err != nil {
+		dw.Close()
+		return nil, fmt.Errorf("failed to write body: %w", err)
+	}
+
+	// Close dot writer to send terminator
+	if err := dw.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close article data: %w", err)
+	}
+
+	// Read TAKETHIS response
+	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id)
+
+	code, line, err := c.textConn.ReadCodeLine(-1) // -1 means any code is acceptable
+	if err != nil {
+		return nil, fmt.Errorf("failed to read TAKETHIS response: %w", err)
+	}
+
+	// Parse response
+	// Format: code <message-id> [message]
+	// 239 <message-id> - article transferred successfully
+	// 439 <message-id> - article transfer failed
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("malformed TAKETHIS response: %s", line)
+	}
+
+	response := &TakeThisResponse{
+		MessageID: parts[1],
+		Code:      code,
+		Success:   code == 239, // 239 means transfer successful
+	}
+
+	if len(parts) > 2 {
+		response.Message = strings.Join(parts[2:], " ")
+	}
+
+	return response, nil
+}
