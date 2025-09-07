@@ -27,13 +27,8 @@ func showUsageExamples() {
 	fmt.Println("\n=== NNTP Transfer Tool - Usage Examples ===")
 	fmt.Println("The NNTP transfer tool sends articles via CHECK/TAKETHIS commands.")
 	fmt.Println()
-	fmt.Println("Basic Usage:")
-	fmt.Println("  ./nntp-transfer -nntphostname your.domain.com -group alt.test")
-	fmt.Println("  ./nntp-transfer -nntphostname your.domain.com -group alt.*")
-	fmt.Println("  ./nntp-transfer -nntphostname your.domain.com -group news.admin.*")
-	fmt.Println()
 	fmt.Println("Connection Configuration:")
-	fmt.Println("  ./nntp-transfer -host news.server.com -port 563 -group alt.test")
+	fmt.Println("  ./nntp-transfer -host news.server.com -port 563 -group news.admin.*")
 	fmt.Println("  ./nntp-transfer -username user -password pass -group alt.test")
 	fmt.Println("  ./nntp-transfer -ssl=false -port 119 -group alt.test")
 	fmt.Println()
@@ -52,8 +47,8 @@ func main() {
 	// Command line flags for NNTP transfer configuration
 	var (
 		// Required flags
-		hostnamePath  = flag.String("nntphostname", "", "Your hostname must be set!")
-		transferGroup = flag.String("group", "", "Newsgroup to transfer (supports wildcards like alt.* or news.*)")
+		hostnamePath  = flag.String("nntphostname", "news.pugleaf.net", "Your hostname must be set!")
+		transferGroup = flag.String("group", "", "Newsgroup to transfer (supports wildcards like alt.* or news.admin.*)")
 
 		// Connection configuration
 		host     = flag.String("host", "news.server.com", "Target NNTP hostname")
