@@ -7,5 +7,5 @@ test -e update.tar.gz && rm -v update.tar.gz
 mv .update.todo .update.todo.downloading
 wget XXXURLXXX -O tmp/update.tar.gz && cd tmp && \
  sha256sum update.tar.gz && du -b update.tar.gz && \
- sha256sum -c ../$FILE && tar xfvz update.tar.gz && mv * ../new/
+ sha256sum -c ../.update.todo.downloading && tar xfvz update.tar.gz && mv * ../new/
 rm -v ../.update.todo.downloading
