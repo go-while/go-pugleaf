@@ -260,7 +260,13 @@ func main() {
 	}
 
 	fetchDoneChan := make(chan error, 1)
-	shutdownChan := make(chan struct{})                           // For graceful shutdown signaling
+	shutdownChan := make(chan struct{}) // For graceful shutdown signaling
+	go func() {
+		<-sigChan
+		log.Printf("[FETCHER]: Received shutdown signal, initiating graceful shutdown...")
+		// Signal all worker goroutines to stop
+		close(shutdownChan)
+	}()
 	proc := processor.NewProcessor(db, pools[0], useShortHashLen) // Use first pool for import
 	if proc == nil {
 		log.Fatalf("[FETCHER]: Failed to create processor: %v", err)
@@ -591,10 +597,8 @@ func main() {
 	db.WG.Done() // backwards compat... TODO remove this
 	// Wait for either shutdown signal or server error
 	select {
-	case <-sigChan:
+	case <-shutdownChan:
 		log.Printf("[FETCHER]: Received shutdown signal, initiating graceful shutdown...")
-		// Signal all worker goroutines to stop
-		close(shutdownChan)
 	case err := <-fetchDoneChan:
 		log.Printf("[FETCHER]: DONE! err='%v'", err)
 	}

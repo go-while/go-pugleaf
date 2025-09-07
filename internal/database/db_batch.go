@@ -887,14 +887,14 @@ func (c *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*mo
 	// Use a transaction with prepared statement for cleaner, more efficient execution
 	tx, err := groupDBs.DB.Begin()
 	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+		return fmt.Errorf("failed to begin transaction in batchProcessThreadRoots: %w", err)
 	}
 	defer tx.Rollback()
 
 	// Prepare the INSERT statement once
 	stmt, err := tx.Prepare(query_batchProcessThreadRoots)
 	if err != nil {
-		return fmt.Errorf("failed to prepare statement: %w", err)
+		return fmt.Errorf("failed to prepare statement in batchProcessThreadRoots: %w", err)
 	}
 	defer stmt.Close()
 
@@ -923,7 +923,7 @@ func (c *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*mo
 		_, err := stmt.Exec(articleNum, nil, articleNum) // root_article, parent_article, child_article
 		if err != nil {
 			article.Mux.RUnlock()
-			return fmt.Errorf("failed to execute thread insert for article %d: %w", articleNum, err)
+			return fmt.Errorf("failed to execute thread insert in batchProcessThreadRoots for article %d: %w", articleNum, err)
 		}
 
 		// Collect data for post-processing OUTSIDE the transaction

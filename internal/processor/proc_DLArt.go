@@ -61,7 +61,7 @@ func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
 	return groupBatch
 }
 
-var BatchItemDuplicateError = &BatchItem{Error: errIsDuplicateError}
+//var BatchItemDuplicateError = &BatchItem{Error: errIsDuplicateError}
 
 // DownloadArticles fetches full articles and stores them in the articles DB.
 func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroups int64, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64, shutdownChan <-chan struct{}) error {
@@ -130,7 +130,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 			//log.Printf("DownloadArticles: Checking if article '%s' exists in group '%s'", msgID.Value, newsgroup)
 			if groupDBs.ExistsMsgIdInArticlesDB(hdr.Value) {
 				exists++
-				groupBatch.ReturnQ <- BatchItemDuplicateError
+				groupBatch.ReturnQ <- &BatchItem{Error: errIsDuplicateError}
 				continue
 			}
 			msgIdItem := history.MsgIdCache.GetORCreate(hdr.Value)
@@ -213,6 +213,8 @@ forProcessing:
 					default:
 						if item.MessageID != nil {
 							log.Printf("DownloadArticles: '%s' Error fetching article %s: %v .. continue", newsgroup, *item.MessageID, item.Error)
+						} else {
+							log.Printf("DownloadArticles: '%s' Error fetching item: %#v .. continue", newsgroup, item)
 						}
 						errs++
 					}
