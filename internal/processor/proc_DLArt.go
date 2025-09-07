@@ -150,8 +150,9 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 			Batch.GetQ <- item // send to fetcher/main.go: for item := range processor.Batch.Queue
 			queued++
 			//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", hdr.ArticleNum, hdr.Value, *item.GroupName)
-			hdr.Value = ""
-			hdr.ArticleNum = 0
+			//hdr.Value = ""
+			//hdr.ArticleNum = 0
+			*hdr = nntp.HeaderLine{}
 		} // end for xhdrChan
 		//log.Printf("DownloadArticles: XHdr closed, finished feeding batch queue %d articles for group '%s' (existing: %d) total=%d", queued, newsgroup, exists, queued+exists)
 		if queued == 0 {

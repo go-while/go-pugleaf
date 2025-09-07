@@ -68,7 +68,7 @@ func (p *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]Overv
 	return result, nil
 }
 
-func (p *Pool) XHdr(group string, header string, start, end int64) ([]HeaderLine, error) {
+func (p *Pool) XHdr(group string, header string, start, end int64) ([]*HeaderLine, error) {
 	// Get a connection from the pool
 	client, err := p.Get()
 	if err != nil {

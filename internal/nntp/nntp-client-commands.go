@@ -492,7 +492,7 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 
 // XHdr retrieves specific header field for a range of articles
 // Automatically limits to max 1000 articles to prevent SQLite overload
-func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderLine, error) {
+func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]*HeaderLine, error) {
 	c.mu.Lock()
 	if !c.connected {
 		c.mu.Unlock()
@@ -540,7 +540,7 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderL
 	}
 
 	// Parse header lines
-	var headers = make([]HeaderLine, 0, len(lines))
+	var headers = make([]*HeaderLine, 0, len(lines))
 	for _, line := range lines {
 		header, err := c.parseHeaderLine(line)
 		if err != nil {
@@ -556,8 +556,8 @@ var ErrOutOfRange error = fmt.Errorf("end range exceeds group last article numbe
 
 // XHdrStreamed performs XHDR command and streams results line by line through a channel
 // Fetches max 1000 hdrs and starts a new fetch if the channel is less than 10% capacity
-func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, resultChan chan<- *HeaderLine) error {
-	channelCap := cap(resultChan)
+func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine) error {
+	channelCap := cap(xhdrChan)
 	lowWaterMark := channelCap / 10 // 10% threshold
 	if lowWaterMark < 1 {
 		lowWaterMark = 1
@@ -567,7 +567,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 	var isleep int64 = 10
 	for currentStart <= end {
 		// Wait if channel is not empty
-		for len(resultChan) > lowWaterMark {
+		for len(xhdrChan) > lowWaterMark {
 			time.Sleep(time.Duration(isleep) * time.Millisecond)
 		}
 
@@ -579,9 +579,9 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 
 		// Fetch this batch
 		startStream := time.Now()
-		err := c.XHdrStreamedBatch(groupName, field, currentStart, batchEnd, resultChan)
+		err := c.XHdrStreamedBatch(groupName, field, currentStart, batchEnd, xhdrChan)
 		if err != nil {
-			close(resultChan) // Close on error
+			close(xhdrChan) // Close on error
 			return fmt.Errorf("XHdrStreamedBatch failed for range %d-%d: %w", currentStart, batchEnd, err)
 		}
 		isleep = time.Since(startStream).Milliseconds() / 2
@@ -595,12 +595,12 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 	}
 
 	// Close channel when all batches are complete
-	close(resultChan)
+	close(xhdrChan)
 	return nil
 }
 
 // XHdrStreamed performs XHDR command and streams results line by line through a channel
-func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, resultChan chan<- *HeaderLine) error {
+func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine) error {
 	c.mu.Lock()
 	if !c.connected {
 		c.mu.Unlock()
@@ -688,7 +688,7 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 		}
 
 		// Send through channel
-		resultChan <- &header
+		xhdrChan <- header
 	}
 
 	// Don't close channel here - let the main function handle it
@@ -988,15 +988,19 @@ func (c *BackendConn) parseOverviewLine(line string) (OverviewLine, error) {
 
 // parseHeaderLine parses a single XHDR response line
 // Format: articlenum<space>header-value
-func (c *BackendConn) parseHeaderLine(line string) (HeaderLine, error) {
+func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
 	parts := strings.SplitN(line, " ", 2)
 	if len(parts) < 2 {
-		return HeaderLine{}, fmt.Errorf("malformed XHDR line: %s", line)
+		return nil, fmt.Errorf("malformed XHDR line: %s", line)
 	}
 
-	articleNum, _ := strconv.ParseInt(parts[0], 10, 64)
+	articleNum, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		log.Printf("Invalid article number in XHDR line: %s", line)
+		return nil, fmt.Errorf("invalid article number in XHDR line: %s", line)
+	}
 
-	return HeaderLine{
+	return &HeaderLine{
 		ArticleNum: articleNum,
 		Value:      parts[1],
 	}, nil
