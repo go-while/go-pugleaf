@@ -540,12 +540,12 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int, erro
 		}
 
 		// Find wanted articles
-		wantedIds := make([]string, 0)
+		wantedIds := make([]*string, 0)
 		for _, response := range checkResponses {
 			if response.Wanted {
 				wantedIds = append(wantedIds, response.MessageID)
 			} else {
-				log.Printf("Article %s not wanted by server: %d %s", response.MessageID, response.Code, response.Message)
+				log.Printf("Article %s not wanted by server: %d", *response.MessageID, response.Code)
 			}
 		}
 
@@ -558,9 +558,9 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int, erro
 
 		// Send TAKETHIS for wanted articles
 		for _, msgId := range wantedIds {
-			count, err := sendArticleViaTakeThis(conn, articleMap[msgId])
+			count, err := sendArticleViaTakeThis(conn, articleMap[*msgId])
 			if err != nil {
-				log.Printf("Failed to send TAKETHIS for %s: %v", msgId, err)
+				log.Printf("Failed to send TAKETHIS for %s: %v", *msgId, err)
 				continue
 			}
 			transferred += count
