@@ -256,7 +256,7 @@ forProcessing:
 	if xerr != nil {
 		end = lastGoodEnd
 	}
-	if gotQueued > 0 {
+	if gotQueued > 0 || dups > 0 {
 		// only update progress if we actually got something
 		err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, newsgroup, end)
 		if err != nil {

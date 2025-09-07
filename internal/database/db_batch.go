@@ -550,27 +550,24 @@ drainChannel:
 	}
 
 	log.Printf("[BATCH] processNewsgroupBatch: ng: '%s' with %d articles (more queued: %d)", *task.Newsgroup, len(batches), len(task.BATCHchan))
-	var groupDBs *GroupDBs
-	var err error
-retry:
-	if groupDBs == nil {
-		// Get database connection for this newsgroup
-		groupDBs, err = sq.db.GetGroupDBs(*task.Newsgroup)
-		if err != nil {
-			log.Printf("[BATCH] processNewsgroupBatch Failed to get database for group '%s': %v", *task.Newsgroup, err)
-			return
-		}
+
+retry1:
+	// Get database connection for this newsgroup
+	groupDBs, err := sq.db.GetGroupDBs(*task.Newsgroup)
+	if err != nil {
+		log.Printf("[BATCH] processNewsgroupBatch Failed to get database for group '%s': %v", *task.Newsgroup, err)
+		return
 	}
 
 	// PHASE 1: Insert complete articles (overview + article data unified) and set article numbers directly on batches
 	if err := sq.batchInsertOverviews(*task.Newsgroup, batches, groupDBs); err != nil {
-		log.Printf("[BATCH] processNewsgroupBatch Failed to process batch for group '%s': %v", *task.Newsgroup, err)
 		time.Sleep(time.Second)
 		if groupDBs != nil {
 			groupDBs.Return(sq.db)
+			log.Printf("[BATCH] processNewsgroupBatch Failed1 to process batch for group '%s': %v groupDBs='%#v'", *task.Newsgroup, err, groupDBs)
 			groupDBs = nil
 		}
-		goto retry
+		goto retry1
 	}
 
 	groupDBs.Return(sq.db)
@@ -591,12 +588,25 @@ retry:
 	// PHASE 2: Process threading for all articles (reusing the same DB connection)
 	//log.Printf("[BATCH] processNewsgroupBatch Starting threading phase for %d articles in group '%s'", len(batches), *task.Newsgroup)
 	//start := time.Now()
-	err = sq.batchProcessThreading(task.Newsgroup, batches, groupDBs)
-	//threadingDuration := time.Since(start)
-	if err != nil {
-		log.Printf("[BATCH] processNewsgroupBatch Failed to process threading for group '%s': %v", *task.Newsgroup, err)
-		return
+retry2:
+	if groupDBs == nil {
+		groupDBs, err = sq.db.GetGroupDBs(*task.Newsgroup)
+		if err != nil {
+			log.Printf("[BATCH] processNewsgroupBatch Failed2 to get database for group '%s': %v", *task.Newsgroup, err)
+			return
+		}
 	}
+	if err := sq.batchProcessThreading(task.Newsgroup, batches, groupDBs); err != nil {
+		time.Sleep(time.Second)
+		if groupDBs != nil {
+			groupDBs.Return(sq.db)
+			log.Printf("[BATCH] processNewsgroupBatch Failed2 to process threading for group '%s': %v groupDBs='%#v'", *task.Newsgroup, err, groupDBs)
+			groupDBs = nil
+		}
+		goto retry2
+	}
+	defer groupDBs.Return(sq.db)
+	//threadingDuration := time.Since(start)
 	//log.Printf("[BATCH] processNewsgroupBatch Completed threading phase for group '%s' in %v", *task.Newsgroup, threadingDuration)
 
 	// PHASE 3: Handle history and processor cache updates
