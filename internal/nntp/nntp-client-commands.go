@@ -556,7 +556,7 @@ var ErrOutOfRange error = fmt.Errorf("end range exceeds group last article numbe
 
 // XHdrStreamed performs XHDR command and streams results line by line through a channel
 // Fetches max 1000 hdrs and starts a new fetch if the channel is less than 10% capacity
-func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine) error {
+func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
 	channelCap := cap(xhdrChan)
 	lowWaterMark := channelCap / 10 // 10% threshold
 	if lowWaterMark < 1 {
@@ -566,9 +566,22 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 	currentStart := start
 	var isleep int64 = 10
 	for currentStart <= end {
+		// Check for shutdown signal
+		select {
+		case <-shutdownChan:
+			close(xhdrChan)
+			return fmt.Errorf("got shutdown in XHdrStreamed")
+		default:
+		}
+
 		// Wait if channel is not empty
 		for len(xhdrChan) > lowWaterMark {
-			time.Sleep(time.Duration(isleep) * time.Millisecond)
+			select {
+			case <-shutdownChan:
+				close(xhdrChan)
+				return fmt.Errorf("got shutdown in XHdrStreamed")
+			case <-time.After(time.Duration(isleep) * time.Millisecond):
+			}
 		}
 
 		// Calculate batch end (max 1000 articles)
@@ -579,7 +592,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 
 		// Fetch this batch
 		startStream := time.Now()
-		err := c.XHdrStreamedBatch(groupName, field, currentStart, batchEnd, xhdrChan)
+		err := c.XHdrStreamedBatch(groupName, field, currentStart, batchEnd, xhdrChan, shutdownChan)
 		if err != nil {
 			close(xhdrChan) // Close on error
 			return fmt.Errorf("XHdrStreamedBatch failed for range %d-%d: %w", currentStart, batchEnd, err)
@@ -599,8 +612,8 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 	return nil
 }
 
-// XHdrStreamed performs XHDR command and streams results line by line through a channel
-func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine) error {
+// XHdrStreamedBatch performs XHDR command and streams results line by line through a channel
+func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
 	c.mu.Lock()
 	if !c.connected {
 		c.mu.Unlock()
@@ -637,19 +650,13 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 	c.textConn.StartResponse(id)
 	defer c.textConn.EndResponse(id) // Always clean up response state
 
-	// Set timeout for initial response
-	/*
-		if err := c.conn.SetReadDeadline(time.Now().Add(9 * time.Second)); err != nil {
-			close(resultChan)
-			return fmt.Errorf("failed to set read deadline: %w", err)
-		}
-		defer func() {
-			// Clear the deadline when operation completes
-			if c.conn != nil {
-				c.conn.SetReadDeadline(time.Time{})
-			}
-		}()
-	*/
+	// Check for shutdown before reading initial response
+	select {
+	case <-shutdownChan:
+		return fmt.Errorf("got shutdown in XHdrStreamedBatch interrupted before reading response")
+	default:
+	}
+
 	code, message, err := c.textConn.ReadCodeLine(221)
 	if err != nil {
 		return fmt.Errorf("failed to read XHDR response: %w", err)
@@ -661,13 +668,13 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 
 	// Read multiline response line by line and send to channel immediately
 	for {
-		/*
-			// Set a shorter timeout for each line read (3 seconds per line)
-			if err := c.conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
-				log.Printf("[ERROR] XHdrStreamed failed to set line deadline ng: '%s' err='%v'", groupName, err)
-				break
-			}
-		*/
+		// Check for shutdown signal between reads
+		select {
+		case <-shutdownChan:
+			return fmt.Errorf("got shutdown in XHdrStreamedBatch interrupted during line reading")
+		default:
+		}
+
 		line, err := c.textConn.ReadLine()
 		if err != nil {
 			log.Printf("[ERROR] XHdrStreamed read error ng: '%s' err='%v'", groupName, err)
@@ -687,7 +694,13 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 			continue // Skip malformed lines
 		}
 
-		// Send through channel
+		// Send through channel (with shutdown check)
+		select {
+		case <-shutdownChan:
+			return fmt.Errorf("got shutdown in XHdrStreamedBatch interrupted during channel send")
+		default:
+		}
+
 		xhdrChan <- header
 	}
 

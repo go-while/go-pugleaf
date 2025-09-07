@@ -510,7 +510,7 @@ func main() {
 							}
 							log.Printf("[FETCHER]: Starting ng: '%s' from date: %s", ng.Name, startDate.Format("2006-01-02"))
 							//time.Sleep(3 * time.Second) // debug sleep
-							err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan, progressDB)
+							err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan, progressDB, shutdownChan)
 							if err != nil {
 								log.Printf("[FETCHER]: DownloadArticlesFromDate5 failed: %v", err)
 								errChan <- err
@@ -530,7 +530,7 @@ func main() {
 								startDate := time.Now().AddDate(0, 0, -nga.ExpiryDays)
 								log.Printf("[FETCHER]: Initial download for group with expiry_days=%d, starting from calculated date: %s", nga.ExpiryDays, startDate.Format("2006-01-02"))
 								//time.Sleep(3 * time.Second) // debug sleep
-								err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan, progressDB)
+								err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan, progressDB, shutdownChan)
 
 								if err != nil {
 									errChan <- err
@@ -541,7 +541,7 @@ func main() {
 								// Incremental download: continue from where we left off
 								log.Printf("[FETCHER]: Incremental download for newsgroup: '%s' (has %d existing articles)", ng.Name, articleCount)
 								//time.Sleep(3 * time.Second) // debug sleep
-								err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan, progressDB, ng.First, ng.Last)
+								err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan, progressDB, ng.First, ng.Last, shutdownChan)
 								if err != nil {
 									log.Printf("[FETCHER]: DownloadArticles7 failed: %v", err)
 									errChan <- err
@@ -551,7 +551,7 @@ func main() {
 						} else {
 							log.Printf("[FETCHER]: Downloading articles for newsgroup: '%s' (%d - %d) (no expiry limit)", ng.Name, ng.First, ng.Last)
 							//time.Sleep(3 * time.Second) // debug sleep
-							err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan, progressDB, ng.First, ng.Last)
+							err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan, progressDB, ng.First, ng.Last, shutdownChan)
 							if err != nil {
 								if err != processor.ErrUpToDate {
 									log.Printf("[FETCHER]: DownloadArticles8 failed: %v", err)

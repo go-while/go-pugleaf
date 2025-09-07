@@ -64,7 +64,7 @@ func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
 var BatchItemDuplicateError = &BatchItem{Error: errIsDuplicateError}
 
 // DownloadArticles fetches full articles and stores them in the articles DB.
-func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroups int64, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64) error {
+func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroups int64, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64, shutdownChan <-chan struct{}) error {
 	//log.Printf("DEBUG-DownloadArticles: ng='%s' called with start=%d end=%d", newsgroup, start, end)
 	DLParChan <- struct{}{} // aquire lock
 	defer func() {
@@ -100,24 +100,18 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	}
 	//remaining := groupInfo.Last - end
 	//log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d, remaining: %d)", newsgroup, start, end, groupInfo.Last, remaining)
-	var mux sync.Mutex
 	var lastGoodEnd int64 = start
-	toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
+	//toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
 	xhdrChan := make(chan *nntp.HeaderLine, 1000)
 	errChan := make(chan error, 1)
 	//log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
-	go func(mux *sync.Mutex) {
-		aerr := proc.Pool.XHdrStreamed(newsgroup, "message-id", start, end, xhdrChan)
-		if aerr != nil {
-			log.Printf("Failed to fetch message IDs for group '%s': err='%v' toFetch=%d", newsgroup, aerr, toFetch)
-			errChan <- aerr
-			return
-		}
-		errChan <- nil
-	}(&mux)
 	if proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
+		return fmt.Errorf("got shutdown in DownloadArticles: Database shutdown while in group '%s'", newsgroup)
 	}
+	go func() {
+		errChan <- proc.Pool.XHdrStreamed(newsgroup, "message-id", start, end, xhdrChan, shutdownChan)
+	}()
+
 	//log.Printf("DownloadArticles: XHDR is fetching %d msgIds ng: '%s' (%d to %d)", len(messageIDs), newsgroup, start, end)
 	releaseChan := make(chan struct{}, 1)
 	notifyChan := make(chan int64, 1)
@@ -341,7 +335,7 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 // DownloadArticlesFromDate fetches articles starting from a specific date
 // Uses special progress tracking: sets progress to startArticle-1, or -1 if starting from article 1
 // This prevents DownloadArticles from using "no progress detected" logic for existing groups
-func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, ignoreInitialTinyGroups int64, DLParChan chan struct{}, progressDB *database.ProgressDB) error {
+func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, ignoreInitialTinyGroups int64, DLParChan chan struct{}, progressDB *database.ProgressDB, shutdownChan <-chan struct{}) error {
 	//log.Printf("DownloadArticlesFromDate: Starting download from date %s for group '%s'", startDate.Format("2006-01-02"), groupName)
 
 	// Find the starting article number based on date
@@ -400,7 +394,7 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 	//log.Printf("DownloadArticlesFromDate: Downloading range %d-%d for group '%s' (group last: %d)",	downloadStart, downloadEnd, groupName, groupInfo.Last)
 
 	// Now use the high-performance DownloadArticles function with proper article ranges
-	err = proc.DownloadArticles(groupName, ignoreInitialTinyGroups, DLParChan, progressDB, downloadStart, downloadEnd)
+	err = proc.DownloadArticles(groupName, ignoreInitialTinyGroups, DLParChan, progressDB, downloadStart, downloadEnd, shutdownChan)
 
 	// If there was an error and we haven't made progress, restore the original progress
 	if err != nil && err != ErrUpToDate {

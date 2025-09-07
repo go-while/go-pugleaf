@@ -90,18 +90,18 @@ func (p *Pool) XHdr(group string, header string, start, end int64) ([]*HeaderLin
 // XHdrStreamed performs XHDR command and streams results through a channel
 // The channel will be closed when all results are sent or an error occurs
 // NOTE: This function takes ownership of the connection and will return it to the pool when done
-func (p *Pool) XHdrStreamed(group string, header string, start, end int64, resultChan chan<- *HeaderLine) error {
+func (p *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
 	// Get a connection from the pool
 	client, err := p.Get()
 	if err != nil {
-		close(resultChan)
+		close(xhdrChan)
 		return fmt.Errorf("failed to get connection: %w", err)
 	}
 
 	// Handle connection cleanup in a goroutine so the function can return immediately
-	go func(client *BackendConn, group string, header string, start, end int64, resultChan chan<- *HeaderLine) {
+	go func(client *BackendConn, group string, header string, start, end int64, resultChan chan<- *HeaderLine, shutdownChan <-chan struct{}) {
 		// Use the streaming XHdr function on the client
-		if err := client.XHdrStreamed(group, header, start, end, resultChan); err != nil {
+		if err := client.XHdrStreamed(group, header, start, end, resultChan, shutdownChan); err != nil {
 			// If there's an error, close the connection instead of returning it
 			err := p.CloseConn(client, true)
 			if err != nil {
@@ -110,7 +110,7 @@ func (p *Pool) XHdrStreamed(group string, header string, start, end int64, resul
 		} else {
 			p.Put(client)
 		}
-	}(client, group, header, start, end, resultChan)
+	}(client, group, header, start, end, xhdrChan, shutdownChan)
 
 	return err
 }
