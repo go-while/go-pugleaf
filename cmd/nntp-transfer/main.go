@@ -630,7 +630,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			takeThisSuccessCount++
 			transferred++
 		} else {
-			log.Printf("Failed to transfer article %s: %d %s", takeThisResponse.MessageID, takeThisResponse.Code, takeThisResponse.Message)
+			log.Printf("Failed to transfer article %s: %d", takeThisResponse.MessageID, takeThisResponse.Code)
 		}
 	}
 
@@ -660,7 +660,7 @@ func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article) (in
 		//log.Printf("Successfully transferred article: %s", article.MessageID)
 		return 1, nil
 	} else {
-		log.Printf("Failed to transfer article %s: %d %s", article.MessageID, takeThisResponse.Code, takeThisResponse.Message)
+		log.Printf("Failed to transfer article %s: %d", article.MessageID, takeThisResponse.Code)
 		return 0, nil
 	}
 }
