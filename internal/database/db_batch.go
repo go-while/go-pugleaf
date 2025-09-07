@@ -1150,10 +1150,10 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDBs *GroupDBs, threadUpdates map
 			err := retryableStmtQueryRowScan(selectStmt, []interface{}{threadRoot}, &currentChildren, &currentCount)
 			if err != nil {
 				// Thread cache entry doesn't exist, initialize it with the first update
-				firstUpdate := updates[0]
+				//firstUpdate := updates[0]
 				// Format dates as UTC strings to avoid timezone encoding issues
-				firstUpdateDateUTC := firstUpdate.childDate.UTC().Format("2006-01-02 15:04:05")
-				_, err = retryableStmtExec(initStmt, threadRoot, firstUpdateDateUTC, firstUpdate.childArticleNum, firstUpdateDateUTC)
+				firstUpdateDateUTC := updates[0].childDate.UTC().Format("2006-01-02 15:04:05")
+				_, err = retryableStmtExec(initStmt, threadRoot, firstUpdateDateUTC, updates[0].childArticleNum, firstUpdateDateUTC)
 				if err != nil {
 					log.Printf("[BATCH-CACHE] Failed to initialize thread cache for root %d after retries: %v", threadRoot, err)
 					return fmt.Errorf("failed to initialize thread cache for root %d: %w", threadRoot, err)
