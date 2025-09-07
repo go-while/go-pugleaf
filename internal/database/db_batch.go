@@ -942,7 +942,7 @@ func (c *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*mo
 
 	// Commit the transaction BEFORE doing thread cache operations
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		return fmt.Errorf("failed to commit transaction in batchProcessThreadRoots: %w", err)
 	}
 
 	// Do post-processing AFTER transaction is committed to avoid SQLite lock conflicts
@@ -963,15 +963,6 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 	if len(replyBatches) == 0 {
 		return nil
 	}
-	/*
-		// Get pooled collections to avoid repeated memory allocations
-		parentMsgIDsPtr := parentMessageIDsPool.Get().(*map[string]int)
-		parentMessageIDs := *parentMsgIDsPtr
-		// Clear the map before use
-		for k := range parentMessageIDs {
-			delete(parentMessageIDs, k)
-		}
-	*/
 	parentMessageIDs := make(map[*string]int, MaxBatchSize) // Pre-allocate map with expected size
 	defer func() {
 		for k := range parentMessageIDs {
@@ -984,16 +975,6 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 		threadRoot int64
 		childDate  time.Time
 	}, 0, len(replyBatches)) // Pre-allocate slice with capacity
-
-	/*
-		defer func() {
-			// Clear and return parentMessageIDs to pool
-			for k := range parentMessageIDs {
-				delete(parentMessageIDs, k)
-			}
-			parentMessageIDsPool.Put(parentMsgIDsPtr)
-		}()
-	*/
 
 	newsgroupPtr := c.GetNewsgroupPointer(groupDBs.Newsgroup)
 	// Process each reply to gather data
