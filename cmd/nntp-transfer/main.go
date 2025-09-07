@@ -569,16 +569,72 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int, erro
 		// TAKETHIS mode: send articles directly and track success rate
 		log.Printf("Using TAKETHIS mode for %d articles (success rate: %.1f%%)", len(articles), successRate)
 
-		for _, article := range articles {
-			count, err := sendArticleViaTakeThis(conn, article)
-			if err != nil {
-				log.Printf("Failed to send TAKETHIS for %s: %v", article.MessageID, err)
-				continue
-			}
-			transferred += count
+		transferred, err := sendArticlesBatchViaTakeThis(conn, articles)
+		if err != nil {
+			return 0, fmt.Errorf("failed to send TAKETHIS batch: %v", err)
+		}
+		return transferred, nil
+	}
+
+	return transferred, nil
+}
+
+// sendArticlesBatchViaTakeThis sends multiple articles via TAKETHIS in streaming mode
+// Sends all TAKETHIS commands first, then reads all responses (true streaming)
+func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Article) (int, error) {
+	if len(articles) == 0 {
+		return 0, nil
+	}
+
+	// Phase 1: Send all TAKETHIS commands without waiting for responses
+	log.Printf("Phase 1: Sending %d TAKETHIS commands...", len(articles))
+	
+	commandIDs := make([]uint, 0, len(articles))
+	validArticles := make([]*models.Article, 0, len(articles))
+	
+	for _, article := range articles {
+		// Reconstruct headers for transmission
+		articleHeaders, err := reconstructHeaders(article)
+		if err != nil {
+			log.Printf("Failed to reconstruct headers for %s: %v", article.MessageID, err)
+			continue
+		}
+
+		// Send TAKETHIS command with article content (non-blocking)
+		cmdID, err := conn.SendTakeThisArticleStreaming(article.MessageID, articleHeaders, article.BodyText)
+		if err != nil {
+			log.Printf("Failed to send TAKETHIS for %s: %v", article.MessageID, err)
+			continue
+		}
+		
+		commandIDs = append(commandIDs, cmdID)
+		validArticles = append(validArticles, article)
+	}
+
+	log.Printf("Sent %d TAKETHIS commands, reading responses...", len(commandIDs))
+
+	// Phase 2: Read all responses in order
+	transferred := 0
+	for i, cmdID := range commandIDs {
+		article := validArticles[i]
+		
+		takeThisResponse, err := conn.ReadTakeThisResponseStreaming(cmdID)
+		if err != nil {
+			log.Printf("Failed to read TAKETHIS response for %s: %v", article.MessageID, err)
+			continue
+		}
+
+		// Update success rate tracking
+		takeThisTotalCount++
+		if takeThisResponse.Success {
+			takeThisSuccessCount++
+			transferred++
+		} else {
+			log.Printf("Failed to transfer article %s: %d %s", takeThisResponse.MessageID, takeThisResponse.Code, takeThisResponse.Message)
 		}
 	}
 
+	log.Printf("Batch transfer complete: %d/%d articles transferred successfully", transferred, len(articles))
 	return transferred, nil
 }
 

@@ -1162,3 +1162,91 @@ func (c *BackendConn) TakeThisArticle(messageID string, headers []string, body s
 
 	return response, nil
 }
+
+// SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response
+// Returns command ID for later response reading - used for streaming mode
+func (c *BackendConn) SendTakeThisArticleStreaming(messageID string, headers []string, body string) (uint, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected {
+		return 0, fmt.Errorf("not connected")
+	}
+
+	c.lastUsed = time.Now()
+
+	// Send TAKETHIS command
+	takeThisCommand := fmt.Sprintf("TAKETHIS %s", messageID)
+	id, err := c.textConn.Cmd("%s", takeThisCommand)
+	if err != nil {
+		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
+	}
+
+	// Send article content using DotWriter
+	dw := c.textConn.DotWriter()
+
+	// Send headers
+	for _, headerLine := range headers {
+		if _, err := dw.Write([]byte(headerLine + "\r\n")); err != nil {
+			dw.Close()
+			return 0, fmt.Errorf("failed to write header: %w", err)
+		}
+	}
+
+	// Send empty line between headers and body
+	if _, err := dw.Write([]byte("\r\n")); err != nil {
+		dw.Close()
+		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
+	}
+
+	// Send body
+	if _, err := dw.Write([]byte(body)); err != nil {
+		dw.Close()
+		return 0, fmt.Errorf("failed to write body: %w", err)
+	}
+
+	// Close dot writer to send terminator
+	if err := dw.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close article data: %w", err)
+	}
+
+	// Return command ID without reading response (streaming mode)
+	return id, nil
+}
+
+// ReadTakeThisResponseStreaming reads a TAKETHIS response using the command ID
+// Used in streaming mode after all articles have been sent
+func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (*TakeThisResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Read TAKETHIS response
+	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id)
+
+	code, line, err := c.textConn.ReadCodeLine(-1) // -1 means any code is acceptable
+	if err != nil {
+		return nil, fmt.Errorf("failed to read TAKETHIS response: %w", err)
+	}
+
+	// Parse response
+	// Format: code <message-id> [message]
+	// 239 <message-id> - article transferred successfully
+	// 439 <message-id> - article transfer failed
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("malformed TAKETHIS response: %s", line)
+	}
+
+	response := &TakeThisResponse{
+		MessageID: parts[1],
+		Code:      code,
+		Success:   code == 239, // 239 means transfer successful
+	}
+
+	if len(parts) > 2 {
+		response.Message = strings.Join(parts[2:], " ")
+	}
+
+	return response, nil
+}
