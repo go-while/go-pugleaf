@@ -1011,7 +1011,7 @@ type CheckResponse struct {
 }
 
 // CheckMultiple sends a CHECK command for multiple message IDs and returns responses
-func (c *BackendConn) CheckMultiple(messageIDs []string) ([]CheckResponse, error) {
+func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -1028,7 +1028,7 @@ func (c *BackendConn) CheckMultiple(messageIDs []string) ([]CheckResponse, error
 	// Send individual CHECK commands for each message ID (pipelining)
 	commandIds := make([]uint, len(messageIDs))
 	for i, msgID := range messageIDs {
-		id, err := c.textConn.Cmd("CHECK %s", msgID)
+		id, err := c.textConn.Cmd("CHECK %s", *msgID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to send CHECK command for %s: %w", msgID, err)
 		}
@@ -1056,20 +1056,21 @@ func (c *BackendConn) CheckMultiple(messageIDs []string) ([]CheckResponse, error
 		// 238 <message-id> - article wanted
 		// 431 <message-id> - article not wanted
 		// 438 <message-id> - article not wanted (already have it)
+		// ReadCodeLine returns: code=238, message="<message-id> article wanted"
 		parts := strings.Fields(line)
-		if len(parts) < 2 {
+		if len(parts) < 1 {
 			log.Printf("Malformed CHECK response: %s", line)
 			continue
 		}
 
 		response := CheckResponse{
-			MessageID: parts[1],
+			MessageID: parts[0], // First part is the message ID
 			Code:      code,
 			Wanted:    code == 238, // 238 means article wanted
 		}
 
-		if len(parts) > 2 {
-			response.Message = strings.Join(parts[2:], " ")
+		if len(parts) > 1 {
+			response.Message = strings.Join(parts[1:], " ")
 		}
 
 		responses = append(responses, response)
@@ -1078,12 +1079,83 @@ func (c *BackendConn) CheckMultiple(messageIDs []string) ([]CheckResponse, error
 	return responses, nil
 }
 
-// TakeThisResponse represents a response to TAKETHIS command
-type TakeThisResponse struct {
-	MessageID string
-	Success   bool
-	Code      int
-	Message   string
+// TakeThisArticle sends an article via TAKETHIS command
+func (c *BackendConn) TakeThisArticle(messageID string, headers []string, body string) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected {
+		return 0, fmt.Errorf("not connected")
+	}
+
+	c.lastUsed = time.Now()
+
+	// Send TAKETHIS command
+	takeThisCommand := fmt.Sprintf("TAKETHIS %s", messageID)
+	id, err := c.textConn.Cmd("%s", takeThisCommand)
+	if err != nil {
+		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
+	}
+
+	// Send headers
+	for _, headerLine := range headers {
+		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
+			return 0, fmt.Errorf("failed to write header: %w", err)
+		}
+	}
+
+	// Send empty line between headers and body
+	if _, err := c.writer.WriteString(CRLF); err != nil {
+		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
+	}
+
+	// Send body with proper dot-stuffing
+	// Split body preserving line endings
+	bodyLines := strings.Split(body, "\n")
+	for i, line := range bodyLines {
+		// Skip empty last element from trailing \n
+		if i == len(bodyLines)-1 && line == "" {
+			break
+		}
+
+		// Remove trailing \r if present (will add CRLF)
+		line = strings.TrimSuffix(line, "\r")
+
+		// Dot-stuff lines that start with a dot (RFC 977)
+		if strings.HasPrefix(line, ".") {
+			line = "." + line
+		}
+
+		if _, err := c.writer.WriteString(line + CRLF); err != nil {
+			return 0, fmt.Errorf("failed to write body line: %w", err)
+		}
+	}
+
+	// Send termination line (single dot)
+	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
+		return 0, fmt.Errorf("failed to send article terminator: %w", err)
+	}
+
+	// Flush the writer to ensure all data is sent
+	if err := c.writer.Flush(); err != nil {
+		return 0, fmt.Errorf("failed to flush article data: %w", err)
+	}
+
+	// Read TAKETHIS response
+	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id)
+
+	code, _, err := c.textConn.ReadCodeLine(239) // -1 means any code is acceptable
+	if code == 0 && err != nil {
+		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
+	}
+
+	// Parse response
+	// Format: code <message-id> [message]
+	// 239 <message-id> - article transferred successfully
+	// 439 <message-id> - article transfer failed
+
+	return code, nil
 }
 
 // SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response
@@ -1153,7 +1225,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(messageID string, headers []s
 
 // ReadTakeThisResponseStreaming reads a TAKETHIS response using the command ID
 // Used in streaming mode after all articles have been sent
-func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (*TakeThisResponse, error) {
+func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -1161,29 +1233,14 @@ func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (*TakeThisResponse,
 	c.textConn.StartResponse(id)
 	defer c.textConn.EndResponse(id)
 
-	code, line, err := c.textConn.ReadCodeLine(-1) // -1 means any code is acceptable
-	if err != nil {
-		return nil, fmt.Errorf("failed to read TAKETHIS response: %w", err)
+	code, _, err := c.textConn.ReadCodeLine(239)
+	if code == 0 && err != nil {
+		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
 	}
 
 	// Parse response
 	// Format: code <message-id> [message]
 	// 239 <message-id> - article transferred successfully
 	// 439 <message-id> - article transfer failed
-	parts := strings.Fields(line)
-	if len(parts) < 2 {
-		return nil, fmt.Errorf("malformed TAKETHIS response: %s", line)
-	}
-
-	response := &TakeThisResponse{
-		MessageID: parts[1],
-		Code:      code,
-		Success:   code == 239, // 239 means transfer successful
-	}
-
-	if len(parts) > 2 {
-		response.Message = strings.Join(parts[2:], " ")
-	}
-
-	return response, nil
+	return code, nil
 }

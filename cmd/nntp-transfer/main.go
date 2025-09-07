@@ -19,7 +19,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
-var IgnoreHeaders = []string{"Message-ID", "Subject", "From", "Date", "References", "Path"}
+var IgnoreHeaders = []string{"Message-ID", "Subject", "From", "Date", "References", "Path", "Xref", "X-Ref"}
 var IgnoreHeadersMap = make(map[string]bool)
 
 // showUsageExamples displays usage examples for NNTP transfer
@@ -528,9 +528,9 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int, erro
 		// CHECK mode: verify articles are wanted before sending
 		log.Printf("Using CHECK mode for %d articles (success rate: %.1f%%)", len(articles), successRate)
 
-		messageIds := make([]string, len(articles))
+		messageIds := make([]*string, len(articles))
 		for i, article := range articles {
-			messageIds[i] = article.MessageID
+			messageIds[i] = &article.MessageID
 		}
 
 		// Send CHECK commands for all message IDs
@@ -618,7 +618,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	for i, cmdID := range commandIDs {
 		article := validArticles[i]
 
-		takeThisResponse, err := conn.ReadTakeThisResponseStreaming(cmdID)
+		takeThisResponseCode, err := conn.ReadTakeThisResponseStreaming(cmdID)
 		if err != nil {
 			log.Printf("Failed to read TAKETHIS response for %s: %v", article.MessageID, err)
 			continue
@@ -626,11 +626,11 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 
 		// Update success rate tracking
 		takeThisTotalCount++
-		if takeThisResponse.Success {
+		if takeThisResponseCode == 239 {
 			takeThisSuccessCount++
 			transferred++
 		} else {
-			log.Printf("Failed to transfer article %s: %d", takeThisResponse.MessageID, takeThisResponse.Code)
+			log.Printf("Failed to transfer article %s: %d", article.MessageID, takeThisResponseCode)
 		}
 	}
 
@@ -648,19 +648,19 @@ func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article) (in
 	}
 
 	// Send TAKETHIS command with article content
-	takeThisResponse, err := conn.TakeThisArticle(article.MessageID, articleHeaders, article.BodyText)
+	takeThisResponseCode, err := conn.TakeThisArticle(article.MessageID, articleHeaders, article.BodyText)
 	if err != nil {
 		return 0, fmt.Errorf("failed to send TAKETHIS: %v", err)
 	}
 
 	// Update success rate tracking
 	takeThisTotalCount++
-	if takeThisResponse.Success {
+	if takeThisResponseCode == 239 {
 		takeThisSuccessCount++
 		//log.Printf("Successfully transferred article: %s", article.MessageID)
 		return 1, nil
 	} else {
-		log.Printf("Failed to transfer article %s: %d", article.MessageID, takeThisResponse.Code)
+		log.Printf("Failed to transfer article %s: %d", article.MessageID, takeThisResponseCode)
 		return 0, nil
 	}
 }
