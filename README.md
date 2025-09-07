@@ -283,7 +283,7 @@ go-pugleaf includes command-line applications for various newsgroup management t
 
 **Disabled Options (commented out in code):**
 - `# -withnntp` - Start NNTP server with default ports 1119/1563
-- `# -withfetch` - Enable internal Cronjob to fetch new articles  
+- `# -withfetch` - Enable internal Cronjob to fetch new articles
 - `# -isleep int` - Sleeps in fetch routines (default: 300 seconds = 5min)
 - `# -ignore-initial-tiny-groups int` - Ignore tiny groups with fewer articles (default: 0)
 
@@ -295,15 +295,6 @@ go-pugleaf includes command-line applications for various newsgroup management t
 
 **Required Flags:**
 - `-nntphostname string` - Your hostname must be set!
-
-**Connection Configuration:**
-- `-host string` - NNTP hostname (default: "81-171-22-215.pugleaf.net")
-- `-port int` - NNTP port (default: 563)
-- `-username string` - NNTP username (default: "read")
-- `-password string` - NNTP password (default: "only")
-- `-ssl` - Use SSL/TLS connection (default: true)
-- `-timeout int` - Connection timeout in seconds (default: 30)
-- `-message-id string` - Test specific message ID
 
 **Fetching Options:**
 - `-group string` - Newsgroup to fetch (empty = all groups or wildcard like rocksolid.*)
