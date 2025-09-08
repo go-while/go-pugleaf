@@ -286,7 +286,16 @@ func main() {
 	queued := 0
 	todo := 0
 	go func() {
+		defer close(processor.Batch.Check)
 		for _, ng := range newsgroups {
+			if proc.WantShutdown(shutdownChan) {
+				log.Printf("[FETCHER]: Feed Batch.Check shutdown")
+				return
+			}
+			if db.IsDBshutdown() {
+				//log.Printf("[FETCHER]: Feed Batch.Check shutdown")
+				return
+			}
 			if wildcardNG != "" && !strings.HasPrefix(ng.Name, wildcardNG) {
 				//log.Printf("[FETCHER] Skipping newsgroup '%s' as it does not match prefix '%s'", ng.Name, wildcardNG)
 				continue
@@ -296,17 +305,13 @@ func main() {
 				//log.Printf("[FETCHER] ignore newsgroup '%s' err='%v' ng='%#v'", ng.Name, err, ng)
 				continue
 			}
-			if db.IsDBshutdown() {
-				//log.Printf("[FETCHER]: Database shutdown detected, stopping processing")
-				return
-			}
+
 			processor.Batch.Check <- &ng.Name
 			//log.Printf("Checking ng: %s", ng.Name)
 			mux.Lock()
 			queued++
 			mux.Unlock()
 		}
-		close(processor.Batch.Check)
 		log.Printf("Queued %d newsgroups", queued)
 	}()
 	var wgCheck sync.WaitGroup
@@ -316,6 +321,14 @@ func main() {
 		go func(worker int, wgCheck *sync.WaitGroup, progressDB *database.ProgressDB) {
 			defer wgCheck.Done()
 			for ng := range processor.Batch.Check {
+				if proc.WantShutdown(shutdownChan) {
+					log.Printf("[FETCHER]: Batch.Check shutdown")
+					return
+				}
+				if db.IsDBshutdown() {
+					log.Printf("[FETCHER]: Batch.Check DB shutdown")
+					return
+				}
 				groupInfo, err := proc.Pool.SelectGroup(*ng)
 				if err != nil || groupInfo == nil {
 					if err == nntp.ErrNewsgroupNotFound {
@@ -430,7 +443,11 @@ func main() {
 			//log.Printf("DownloadArticles: Worker %d group '%s' start", worker, groupName)
 			for item := range processor.Batch.GetQ {
 				if proc.WantShutdown(shutdownChan) {
-					log.Printf("DownloadArticles: Worker %d received shutdown signal, stopping", worker)
+					log.Printf("[FETCHER]: Batch.GetQ shutdown")
+					return
+				}
+				if db.IsDBshutdown() {
+					log.Printf("[FETCHER]: Batch.GetQ DB shutdown")
 					return
 				}
 				//log.Printf("DownloadArticles: Worker %d GetArticle group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
@@ -475,6 +492,11 @@ func main() {
 						//log.Printf("[FETCHER]: TodoQ closed, worker stopping")
 						return
 					}
+					if proc.WantShutdown(shutdownChan) {
+						log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
+						return
+					}
+					// Check if database is shutting down
 					if db.IsDBshutdown() {
 						//log.Printf("[FETCHER]: TodoQ Database shutdown detected, stopping processing. still queued in TodoQ: %d", len(processor.Batch.TodoQ))
 						return
