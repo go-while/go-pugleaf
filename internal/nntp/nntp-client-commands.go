@@ -310,8 +310,8 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 
 	for {
 		if lineCount >= maxGroups {
-			c.textConn.Close() // Close connection on limit reached
-			c = nil
+			c.conn.Close() // Close connection on limit reached
+			c.conn = nil
 			log.Printf("Connection reached maximum group limit: %d", maxGroups)
 			break
 		}
@@ -680,6 +680,8 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 	for {
 		// Check for shutdown signal between reads
 		if c.WantShutdown(shutdownChan) {
+			c.conn.Close() // Close connection on shutdown
+			c.conn = nil
 			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
 			return fmt.Errorf("shutdown requested")
 		}
@@ -704,6 +706,8 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 		}
 
 		if c.WantShutdown(shutdownChan) {
+			c.conn.Close() // Close connection on shutdown
+			c.conn = nil
 			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
 			return fmt.Errorf("shutdown requested")
 		}
@@ -815,8 +819,8 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 	}
 	for {
 		if lineCount >= maxReadLines {
-			c.textConn.Close() // Close connection on too many lines
-			c = nil
+			c.conn.Close() // Close connection on limit reached
+			c.conn = nil
 			return nil, fmt.Errorf("too many lines in response (limit: %d)", maxReadLines)
 		}
 
