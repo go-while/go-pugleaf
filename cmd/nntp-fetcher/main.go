@@ -429,6 +429,10 @@ func main() {
 		go func(worker int) {
 			//log.Printf("DownloadArticles: Worker %d group '%s' start", worker, groupName)
 			for item := range processor.Batch.GetQ {
+				if proc.WantShutdown(shutdownChan) {
+					log.Printf("DownloadArticles: Worker %d received shutdown signal, stopping", worker)
+					return
+				}
 				//log.Printf("DownloadArticles: Worker %d GetArticle group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
 				art, err := proc.Pool.GetArticle(item.MessageID, true)
 				if err != nil || art == nil {
@@ -461,8 +465,10 @@ func main() {
 			}()
 			for {
 				select {
-				case <-shutdownChan:
-					//log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
+				case _, ok := <-shutdownChan:
+					if !ok {
+						log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
+					}
 					return
 				case ng := <-processor.Batch.TodoQ:
 					if ng == nil {
@@ -594,11 +600,13 @@ func main() {
 			}
 		}(&waitHere)
 	}
-	db.WG.Done() // backwards compat... TODO remove this
+	db.WG.Done()
 	// Wait for either shutdown signal or server error
 	select {
-	case <-shutdownChan:
-		log.Printf("[FETCHER]: Received shutdown signal, initiating graceful shutdown...")
+	case _, ok := <-shutdownChan:
+		if !ok {
+			log.Printf("[FETCHER]: Shutdown channel closed, initiating graceful shutdown...")
+		}
 	case err := <-fetchDoneChan:
 		log.Printf("[FETCHER]: DONE! err='%v'", err)
 	}

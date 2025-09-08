@@ -554,6 +554,18 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]*Header
 
 var ErrOutOfRange error = fmt.Errorf("end range exceeds group last article number")
 
+func (c *BackendConn) WantShutdown(shutdownChan <-chan struct{}) bool {
+	select {
+	case _, ok := <-shutdownChan:
+		if !ok {
+			// channel is closed
+			return true
+		}
+	default:
+	}
+	return false
+}
+
 // XHdrStreamed performs XHDR command and streams results line by line through a channel
 // Fetches max 1000 hdrs and starts a new fetch if the channel is less than 10% capacity
 func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
@@ -567,20 +579,19 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 	var isleep int64 = 10
 	for currentStart <= end {
 		// Check for shutdown signal
-		select {
-		case <-shutdownChan:
+		if c.WantShutdown(shutdownChan) {
 			close(xhdrChan)
-			return fmt.Errorf("got shutdown in XHdrStreamed")
-		default:
+			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
+			return fmt.Errorf("shutdown requested")
 		}
 
 		// Wait if channel is not empty
 		for len(xhdrChan) > lowWaterMark {
-			select {
-			case <-shutdownChan:
+			time.Sleep(time.Duration(isleep) * time.Millisecond)
+			if c.WantShutdown(shutdownChan) {
 				close(xhdrChan)
-				return fmt.Errorf("got shutdown in XHdrStreamed")
-			case <-time.After(time.Duration(isleep) * time.Millisecond):
+				log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
+				return fmt.Errorf("shutdown requested")
 			}
 		}
 
@@ -651,10 +662,9 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 	defer c.textConn.EndResponse(id) // Always clean up response state
 
 	// Check for shutdown before reading initial response
-	select {
-	case <-shutdownChan:
-		return fmt.Errorf("got shutdown in XHdrStreamedBatch interrupted before reading response")
-	default:
+	if c.WantShutdown(shutdownChan) {
+		log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
+		return fmt.Errorf("shutdown requested")
 	}
 
 	code, message, err := c.textConn.ReadCodeLine(221)
@@ -669,10 +679,9 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 	// Read multiline response line by line and send to channel immediately
 	for {
 		// Check for shutdown signal between reads
-		select {
-		case <-shutdownChan:
-			return fmt.Errorf("got shutdown in XHdrStreamedBatch interrupted during line reading")
-		default:
+		if c.WantShutdown(shutdownChan) {
+			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
+			return fmt.Errorf("shutdown requested")
 		}
 
 		line, err := c.textConn.ReadLine()
@@ -694,11 +703,9 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 			continue // Skip malformed lines
 		}
 
-		// Send through channel (with shutdown check)
-		select {
-		case <-shutdownChan:
-			return fmt.Errorf("got shutdown in XHdrStreamedBatch interrupted during channel send")
-		default:
+		if c.WantShutdown(shutdownChan) {
+			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
+			return fmt.Errorf("shutdown requested")
 		}
 
 		xhdrChan <- header
