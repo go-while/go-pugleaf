@@ -289,7 +289,7 @@ func main() {
 		defer close(processor.Batch.Check)
 		for _, ng := range newsgroups {
 			if proc.WantShutdown(shutdownChan) {
-				log.Printf("[FETCHER]: Feed Batch.Check shutdown")
+				//log.Printf("[FETCHER]: Feed Batch.Check shutdown")
 				return
 			}
 			if db.IsDBshutdown() {
@@ -322,11 +322,11 @@ func main() {
 			defer wgCheck.Done()
 			for ng := range processor.Batch.Check {
 				if proc.WantShutdown(shutdownChan) {
-					log.Printf("[FETCHER]: Batch.Check shutdown")
+					//log.Printf("[FETCHER]: Batch.Check shutdown")
 					return
 				}
 				if db.IsDBshutdown() {
-					log.Printf("[FETCHER]: Batch.Check DB shutdown")
+					//log.Printf("[FETCHER]: Batch.Check DB shutdown")
 					return
 				}
 				groupInfo, err := proc.Pool.SelectGroup(*ng)
@@ -443,11 +443,11 @@ func main() {
 			//log.Printf("DownloadArticles: Worker %d group '%s' start", worker, groupName)
 			for item := range processor.Batch.GetQ {
 				if proc.WantShutdown(shutdownChan) {
-					log.Printf("[FETCHER]: Batch.GetQ shutdown")
+					//log.Printf("[FETCHER]: Batch.GetQ shutdown")
 					return
 				}
 				if db.IsDBshutdown() {
-					log.Printf("[FETCHER]: Batch.GetQ DB shutdown")
+					//log.Printf("[FETCHER]: Batch.GetQ DB shutdown")
 					return
 				}
 				//log.Printf("DownloadArticles: Worker %d GetArticle group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
@@ -493,7 +493,7 @@ func main() {
 						return
 					}
 					if proc.WantShutdown(shutdownChan) {
-						log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
+						//log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
 						return
 					}
 					// Check if database is shutting down
@@ -627,7 +627,7 @@ func main() {
 	select {
 	case _, ok := <-shutdownChan:
 		if !ok {
-			log.Printf("[FETCHER]: Shutdown channel closed, initiating graceful shutdown...")
+			//log.Printf("[FETCHER]: Shutdown channel closed, initiating graceful shutdown...")
 		}
 	case err := <-fetchDoneChan:
 		log.Printf("[FETCHER]: DONE! err='%v'", err)
