@@ -34,6 +34,7 @@ type Provider struct {
 	Password   string    `json:"password" db:"password"`
 	MaxConns   int       `json:"max_conns" db:"max_conns"`       // Maximum concurrent connections
 	MaxArtSize int       `json:"max_art_size" db:"max_art_size"` // Maximum article size in bytes
+	Posting    bool      `json:"posting" db:"posting"`           // Whether posting is enabled for this provider
 	CreatedAt  time.Time `json:"created_at" db:"created_at"`
 }
 

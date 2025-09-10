@@ -90,7 +90,7 @@ func (db *Database) SetProvider(provider *models.Provider) error {
 }
 
 // GetProviders returns all providers
-const query_GetProviders = `SELECT id, enabled, priority, name, host, port, ssl, username, password, max_conns, max_art_size, created_at FROM providers order by priority ASC`
+const query_GetProviders = `SELECT id, enabled, priority, name, host, port, ssl, username, password, max_conns, max_art_size, posting, created_at FROM providers order by priority ASC`
 
 func (db *Database) GetProviders() ([]*models.Provider, error) {
 	rows, err := retryableQuery(db.mainDB, query_GetProviders)
@@ -101,7 +101,7 @@ func (db *Database) GetProviders() ([]*models.Provider, error) {
 	var out []*models.Provider
 	for rows.Next() {
 		var p models.Provider
-		if err := rows.Scan(&p.ID, &p.Enabled, &p.Priority, &p.Name, &p.Host, &p.Port, &p.SSL, &p.Username, &p.Password, &p.MaxConns, &p.MaxArtSize, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Enabled, &p.Priority, &p.Name, &p.Host, &p.Port, &p.SSL, &p.Username, &p.Password, &p.MaxConns, &p.MaxArtSize, &p.Posting, &p.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &p)

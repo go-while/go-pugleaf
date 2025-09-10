@@ -231,6 +231,7 @@ func main() {
 			Enabled:    p.Enabled,
 			Priority:   p.Priority,
 			MaxArtSize: p.MaxArtSize,
+			Posting:    p.Posting,
 		}
 
 		backendConfig := &nntp.BackendConfig{

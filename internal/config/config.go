@@ -62,6 +62,7 @@ type Provider struct {
 	Enabled    bool   `json:"enabled"`
 	Priority   int    `json:"priority"`         // Lower numbers = higher priority
 	MaxArtSize int    `json:"max_article_size"` // Maximum article size in bytes
+	Posting    bool   `json:"posting"`          // Whether posting is enabled for this provider
 }
 
 // ServerConfig holds Web and NNTP server configuration
