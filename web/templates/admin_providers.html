@@ -61,6 +61,17 @@
                                   </div>
                               </div>
                           </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_posting" class="form-label">Posting</label>
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="provider_posting" name="posting_enabled">
+                                      <label class="form-check-label" for="provider_posting">
+                                          Allow Posting
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
                       </div>
                       <div class="row">
                           <div class="col-md-3">
@@ -125,6 +136,7 @@
                                   <th>Host:Port</th>
                                   <th>SSL</th>
                                   <th>Enabled</th>
+                                  <th>Posting</th>
                                   <th>Priority</th>
                                   <th>Max Conns</th>
                                   <th>Max Art Size</th>
@@ -157,6 +169,13 @@
                                       <span class="badge bg-danger">Disabled</span>
                                       {{end}}
                                   </td>
+                                  <td>
+                                      {{if .Posting}}
+                                      <span class="badge bg-success">Yes</span>
+                                      {{else}}
+                                      <span class="badge bg-secondary">No</span>
+                                      {{end}}
+                                  </td>
                                   <td>{{.Priority}}</td>
                                   <td>{{.MaxConns}}</td>
                                   <td>{{.MaxArtSize}}</td>
@@ -180,7 +199,7 @@
                               </tr>
                               <!-- Collapsible Edit Form -->
                               <tr class="collapse" id="edit-prov-{{.ID}}">
-                                  <td colspan="9">
+                                  <td colspan="11">
                                       <div class="card">
                                           <div class="card-header bg-dark text-white">
                                               <h6>Edit Provider: {{.Name}}</h6>
@@ -222,6 +241,12 @@
                                                           <div class="form-check mt-4">
                                                               <input class="form-check-input" type="checkbox" name="enabled" {{if .Enabled}}checked{{end}}>
                                                               <label class="form-check-label">Enabled</label>
+                                                          </div>
+                                                      </div>
+                                                      <div class="col-md-2">
+                                                          <div class="form-check mt-4">
+                                                              <input class="form-check-input" type="checkbox" name="posting_enabled" {{if .Posting}}checked{{end}}>
+                                                              <label class="form-check-label">Allow Posting</label>
                                                           </div>
                                                       </div>
                                                   </div>

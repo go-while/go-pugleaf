@@ -39,6 +39,7 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 	priorityStr := strings.TrimSpace(c.PostForm("priority"))
 	maxArtSizeStr := strings.TrimSpace(c.PostForm("max_art_size"))
 	enabledStr := c.PostForm("enabled")
+	postingEnabledStr := c.PostForm("posting_enabled")
 
 	// Validate required fields
 	if name == "" || host == "" {
@@ -97,6 +98,9 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 	// Parse enabled status
 	enabled := enabledStr == "on" || enabledStr == "true"
 
+	// Parse posting enabled status
+	postingEnabled := postingEnabledStr == "on" || postingEnabledStr == "true"
+
 	// Check if provider already exists
 	res, err := s.DB.GetProviderByName(name)
 	if err != nil {
@@ -119,6 +123,7 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 		Priority:   priority,
 		MaxArtSize: maxArtSize,
 		Enabled:    enabled,
+		Posting:    postingEnabled,
 		CreatedAt:  time.Now(),
 	}
 
@@ -164,6 +169,7 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 	priorityStr := strings.TrimSpace(c.PostForm("priority"))
 	maxArtSizeStr := strings.TrimSpace(c.PostForm("max_art_size"))
 	enabledStr := c.PostForm("enabled")
+	postingEnabledStr := c.PostForm("posting_enabled")
 
 	// Validate required fields
 	if idStr == "" || name == "" || host == "" {
@@ -230,6 +236,9 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 	// Parse enabled status
 	enabled := enabledStr == "on" || enabledStr == "true"
 
+	// Parse posting enabled status
+	postingEnabled := postingEnabledStr == "on" || postingEnabledStr == "true"
+
 	// Handle username and password clearing/preservation
 	clearUsername := clearUsernameStr == "on" || clearUsernameStr == "true"
 	clearPassword := clearPasswordStr == "on" || clearPasswordStr == "true"
@@ -272,6 +281,7 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 		Priority:   priority,
 		MaxArtSize: maxArtSize,
 		Enabled:    enabled,
+		Posting:    postingEnabled,
 	}
 
 	err = s.DB.SetProvider(provider)

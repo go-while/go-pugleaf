@@ -48,15 +48,15 @@ func parseDateString(dateStr string) time.Time {
 // --- Main DB Queries ---
 
 // AddProvider adds a new provider to the main database
-const query_AddProvider = `INSERT INTO providers (name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size)
-	          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const query_AddProvider = `INSERT INTO providers (name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting)
+	          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (db *Database) AddProvider(provider *models.Provider) error {
 	_, err := retryableExec(db.mainDB, query_AddProvider,
 		provider.Name, provider.Grp, provider.Host, provider.Port,
 		provider.SSL, provider.Username, provider.Password,
 		provider.MaxConns, provider.Enabled, provider.Priority,
-		provider.MaxArtSize)
+		provider.MaxArtSize, provider.Posting)
 	if err != nil {
 		return fmt.Errorf("failed to add provider %s: %w", provider.Name, err)
 	}
@@ -74,7 +74,7 @@ func (db *Database) DeleteProvider(id int) error {
 
 const query_SetProvider = `UPDATE providers SET
 		grp = ?, host = ?, port = ?, ssl = ?, username = ?, password = ?,
-		max_conns = ?, enabled = ?, priority = ?, max_art_size = ?
+		max_conns = ?, enabled = ?, priority = ?, max_art_size = ?, posting = ?
 		WHERE id = ?`
 
 func (db *Database) SetProvider(provider *models.Provider) error {
@@ -82,7 +82,7 @@ func (db *Database) SetProvider(provider *models.Provider) error {
 		provider.Grp, provider.Host, provider.Port,
 		provider.SSL, provider.Username, provider.Password,
 		provider.MaxConns, provider.Enabled, provider.Priority,
-		provider.MaxArtSize, provider.ID)
+		provider.MaxArtSize, provider.Posting, provider.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update provider %d: %w", provider.ID, err)
 	}
@@ -1157,7 +1157,7 @@ func (db *Database) GetSectionGroupsByName(newsgroupName string) ([]*models.Sect
 	return out, nil
 }
 
-const query_GetProviderByName = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size
+const query_GetProviderByName = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting
 	          FROM providers WHERE name = ? ORDER by id ASC LIMIT 1`
 
 func (db *Database) GetProviderByName(name string) (*models.Provider, error) {
@@ -1165,7 +1165,7 @@ func (db *Database) GetProviderByName(name string) (*models.Provider, error) {
 	var provider models.Provider
 	err := row.Scan(&provider.ID, &provider.Name, &provider.Grp, &provider.Host, &provider.Port,
 		&provider.SSL, &provider.Username, &provider.Password, &provider.MaxConns, &provider.Enabled, &provider.Priority,
-		&provider.MaxArtSize)
+		&provider.MaxArtSize, &provider.Posting)
 	if err == sql.ErrNoRows {
 		return nil, nil // Provider not found
 	} else if err != nil {
@@ -1175,7 +1175,7 @@ func (db *Database) GetProviderByName(name string) (*models.Provider, error) {
 	return &provider, nil
 }
 
-const query_GetProviderByID = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size
+const query_GetProviderByID = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting
 	          FROM providers WHERE id = ? LIMIT 1`
 
 func (db *Database) GetProviderByID(id int) (*models.Provider, error) {
@@ -1183,7 +1183,7 @@ func (db *Database) GetProviderByID(id int) (*models.Provider, error) {
 	var provider models.Provider
 	err := row.Scan(&provider.ID, &provider.Name, &provider.Grp, &provider.Host, &provider.Port,
 		&provider.SSL, &provider.Username, &provider.Password, &provider.MaxConns, &provider.Enabled, &provider.Priority,
-		&provider.MaxArtSize)
+		&provider.MaxArtSize, &provider.Posting)
 	if err == sql.ErrNoRows {
 		return nil, nil // Provider not found
 	} else if err != nil {
