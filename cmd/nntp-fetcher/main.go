@@ -372,7 +372,6 @@ func main() {
 						mux.Lock()
 						startDates[*ng] = lastArticleDate.Format("2006-01-02")
 						mux.Unlock()
-						//go proc.DownloadArticlesFromDate(*ng, *lastArticleDate, 0, DLParChan, progressDB) // Use 0 for ignore threshold since group already exists
 					}
 
 				case -1: // User-requested date rescan
@@ -540,6 +539,14 @@ func main() {
 						//time.Sleep(3 * time.Second) // debug sleep
 						err = proc.DownloadArticlesFromDate(ng.Name, startDate, DLParChan, progressDB, shutdownChan)
 						if err != nil {
+							if err == processor.ErrIsEmptyGroup {
+								err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, ng.Name, 0)
+								if err != nil {
+									continue
+								}
+								errChan <- nil
+								continue
+							}
 							log.Printf("[FETCHER]: DownloadArticlesFromDate5 failed: %v", err)
 							errChan <- err
 							continue
@@ -560,6 +567,14 @@ func main() {
 							//time.Sleep(3 * time.Second) // debug sleep
 							err = proc.DownloadArticlesFromDate(ng.Name, startDate, DLParChan, progressDB, shutdownChan)
 							if err != nil {
+								if err == processor.ErrIsEmptyGroup {
+									err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, ng.Name, 0)
+									if err != nil {
+										continue
+									}
+									errChan <- nil
+									continue
+								}
 								errChan <- err
 								log.Printf("[FETCHER]: DownloadArticlesFromDate6 failed: %v", err)
 								continue
