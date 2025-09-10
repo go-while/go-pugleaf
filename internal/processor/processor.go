@@ -36,13 +36,10 @@ var (
 	// these list of ' var ' can be set after importing the lib before starting!!
 
 	// MaxBatch defines the maximum number of articles to fetch in a single batch
-	MaxBatchSize int64 = 100
+	MaxBatchSize int64 = 128
 
 	// UseStrictGroupValidation for group names, false allows upper-case in group names
 	UseStrictGroupValidation = true
-
-	// must be set to true before booting and running DownloadArticlesViaOverview or ImportOverview!
-	XoverCopy = false
 
 	// RunRSLIGHTImport is used to indicate if the importer should run the legacy RockSolid Light importer
 	RunRSLIGHTImport = false

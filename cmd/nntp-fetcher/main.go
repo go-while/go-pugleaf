@@ -56,18 +56,16 @@ func main() {
 	// Command line flags for NNTP fetcher configuration
 	var newsgroups []*models.Newsgroup
 	var (
-		maxBatchThreads         = flag.Int("max-batch-threads", 16, "Limit how many newsgroup batches will be processed concurrently (default: 16) more can eat your memory and disk IO!")
-		maxBatch                = flag.Int("max-batch", 128, "Maximum number of articles to process in a batch (recommended: 100)")
-		maxLoops                = flag.Int("max-loops", 1, "Loop a group this many times and fetch `-max-batch N` every loop")
-		maxQueued               = flag.Int("max-queue", 16384, "Limit db_batch to have max N articles queued over all newsgroups")
-		ignoreInitialTinyGroups = flag.Int64("ignore-initial-tiny-groups", 0, "If > 0: initial fetch ignores tiny groups with fewer articles than this (default: 0)")
-		importOverview          = flag.Bool("xover-copy", false, "Do not use xover-copy unless you want to Copy xover data from remote server and then articles. instead of normal 'xhdr message-id' --> articles (default: false)")
-		fetchNewsgroup          = flag.String("group", "", "Newsgroup to fetch (default: empty = all groups once up to max-batch) or rocksolid.* with final wildcard to match prefix.*")
-		hostnamePath            = flag.String("nntphostname", "", "Your hostname must be set!")
-		useShortHashLenPtr      = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
-		fetchActiveOnly         = flag.Bool("fetch-active-only", true, "Fetch only active newsgroups (default: true)")
-		downloadMaxPar          = flag.Int("download-max-par", 1, "run this many groups in parallel, can eat your memory! (default: 1)")
-		updateList              = flag.String("update-newsgroups-from-remote", "", "Fetch remote newsgroup list from first enabled provider and add new groups to database (default: empty, nothing. use \"group.*\" or \"\\$all\")")
+		maxBatchThreads    = flag.Int("max-batch-threads", 4, "Limit how many newsgroup batches will be processed concurrently (default: 16) more can eat your memory and disk IO!")
+		maxBatch           = flag.Int("max-batch", 128, "Maximum number of articles to process in a batch (recommended: 100)")
+		maxQueued          = flag.Int("max-queue", 16384, "Limit db_batch to have max N articles queued over all newsgroups")
+		fetchNewsgroup     = flag.String("group", "", "Newsgroup to fetch (default: empty = all groups once up to max-batch) or rocksolid.* with final wildcard to match prefix.*")
+		hostnamePath       = flag.String("nntphostname", "", "Your hostname must be set!")
+		useShortHashLenPtr = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
+		fetchActiveOnly    = flag.Bool("fetch-active-only", true, "Fetch only active newsgroups (default: true)")
+		downloadMaxPar     = flag.Int("download-max-par", 1, "run this many groups in parallel, can eat your memory! (default: 1)")
+		updateList         = flag.String("fetch-newsgroups-from-remote", "", "Fetch remote newsgroup list from first enabled provider (default: empty, nothing. use \"group.*\" or \"\\$all\")")
+		updateListForce    = flag.Bool("fetch-newsgroups-force", false, "use with -fetch-newsgroups-from-remote .. to really add them to database")
 		// Download options with date filtering
 		downloadStartDate = flag.String("download-start-date", "", "Start downloading articles from this date (YYYY-MM-DD format)")
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
@@ -79,7 +77,7 @@ func main() {
 		os.Exit(0)
 	}
 	if *updateList != "" {
-		if err := UpdateNewsgroupList(updateList); err != nil {
+		if err := UpdateNewsgroupList(updateList, *updateListForce); err != nil {
 			log.Fatalf("Newsgroup list update failed: %v", err)
 		}
 		os.Exit(0)
@@ -90,9 +88,6 @@ func main() {
 	}
 	if *maxBatch < 10 {
 		*maxBatch = 10
-	}
-	if *maxLoops != 1 {
-		*maxLoops = 1 // hardcoded to 1 TODO code path removed
 	}
 	if *maxBatchThreads < 1 {
 		*maxBatchThreads = 1
@@ -115,13 +110,12 @@ func main() {
 		log.Fatalf("Invalid UseShortHashLen: %d (must be between 2 and 7)", *useShortHashLenPtr)
 	}
 
-	database.InitialBatchChannelSize = *maxBatch * *maxLoops
+	database.InitialBatchChannelSize = *maxBatch
 	database.MaxBatchThreads = *maxBatchThreads
 	database.MaxBatchSize = *maxBatch
 	database.MaxQueued = *maxQueued
 	nntp.MaxReadLinesXover = int64(*maxBatch)
 	processor.LocalHostnamePath = *hostnamePath
-	processor.XoverCopy = *importOverview
 	processor.MaxBatchSize = int64(*maxBatch)
 	//processor.LOOPS_PER_GROUPS = *maxLoops
 
@@ -524,99 +518,79 @@ func main() {
 					//log.Printf("[FETCHER]: start *importOverview=%t '%s' (%d-%d) [%d/%d|Q:%d]  --- ", *importOverview, ng.Name, ng.First, ng.Last, todo, queued, len(processor.Batch.TodoQ))
 					mux.Unlock()
 					// Import articles for the selected group
-					switch *importOverview {
-					case false:
-						//log.Printf("[FETCHER]: Downloading articles for newsgroup: %s", ng.Name)
 
-						// Check if date-based downloading is requested
-						var useStartDate string
-						mux.Lock()
-						if startDates[ng.Name] != "" {
-							useStartDate = startDates[ng.Name]
-						} else if *downloadStartDate != "" {
-							useStartDate = *downloadStartDate
-						}
-						mux.Unlock()
-						if useStartDate != "" {
-							startDate, err := time.Parse("2006-01-02", useStartDate)
-							if err != nil {
-								log.Fatalf("[FETCHER]: Invalid start date format '%s': %v (expected YYYY-MM-DD)", useStartDate, err)
-							}
-							log.Printf("[FETCHER]: Starting ng: '%s' from date: %s", ng.Name, startDate.Format("2006-01-02"))
-							//time.Sleep(3 * time.Second) // debug sleep
-							err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan, progressDB, shutdownChan)
-							if err != nil {
-								log.Printf("[FETCHER]: DownloadArticlesFromDate5 failed: %v", err)
-								errChan <- err
-								continue
-							}
-						} else if nga.ExpiryDays > 0 {
-							// Check if group already has articles to decide between initial vs incremental download
-							// Use optimized main database check instead of opening group database
-							articleCount, err := db.GetArticleCountFromMainDB(ng.Name)
-							if err != nil {
-								log.Printf("[FETCHER]: Failed to get article count from main DB for '%s': %v", ng.Name, err)
-								errChan <- err
-								continue
-							}
-							if articleCount == 0 {
-								// Initial download: use expiry_days to avoid downloading old articles
-								startDate := time.Now().AddDate(0, 0, -nga.ExpiryDays)
-								log.Printf("[FETCHER]: Initial download for group with expiry_days=%d, starting from calculated date: %s", nga.ExpiryDays, startDate.Format("2006-01-02"))
-								//time.Sleep(3 * time.Second) // debug sleep
-								err = proc.DownloadArticlesFromDate(ng.Name, startDate, *ignoreInitialTinyGroups, DLParChan, progressDB, shutdownChan)
+					//log.Printf("[FETCHER]: Downloading articles for newsgroup: %s", ng.Name)
 
-								if err != nil {
-									errChan <- err
-									log.Printf("[FETCHER]: DownloadArticlesFromDate6 failed: %v", err)
-									continue
-								}
-							} else {
-								// Incremental download: continue from where we left off
-								log.Printf("[FETCHER]: Incremental download for newsgroup: '%s' (has %d existing articles)", ng.Name, articleCount)
-								//time.Sleep(3 * time.Second) // debug sleep
-								err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan, progressDB, ng.First, ng.Last, shutdownChan)
-								if err != nil {
-									log.Printf("[FETCHER]: DownloadArticles7 failed: %v", err)
-									errChan <- err
-									continue
-								}
-							}
-						} else {
-							log.Printf("[FETCHER]: Downloading articles for newsgroup: '%s' (%d - %d) (no expiry limit)", ng.Name, ng.First, ng.Last)
-							//time.Sleep(3 * time.Second) // debug sleep
-							err = proc.DownloadArticles(ng.Name, *ignoreInitialTinyGroups, DLParChan, progressDB, ng.First, ng.Last, shutdownChan)
-							if err != nil {
-								if err != processor.ErrUpToDate {
-									log.Printf("[FETCHER]: DownloadArticles8 failed: %v", err)
-								}
-								errChan <- err
-								continue
-							}
-						}
+					// Check if date-based downloading is requested
+					var useStartDate string
+					mux.Lock()
+					if startDates[ng.Name] != "" {
+						useStartDate = startDates[ng.Name]
+					} else if *downloadStartDate != "" {
+						useStartDate = *downloadStartDate
+					}
+					mux.Unlock()
+					if useStartDate != "" {
+						startDate, err := time.Parse("2006-01-02", useStartDate)
 						if err != nil {
-							if err != processor.ErrUpToDate {
-								log.Printf("DownloadArticles9 failed: %v", err)
-							}
+							log.Fatalf("[FETCHER]: Invalid start date format '%s': %v (expected YYYY-MM-DD)", useStartDate, err)
+						}
+						log.Printf("[FETCHER]: Starting ng: '%s' from date: %s", ng.Name, startDate.Format("2006-01-02"))
+						//time.Sleep(3 * time.Second) // debug sleep
+						err = proc.DownloadArticlesFromDate(ng.Name, startDate, DLParChan, progressDB, shutdownChan)
+						if err != nil {
+							log.Printf("[FETCHER]: DownloadArticlesFromDate5 failed: %v", err)
+							errChan <- err
 							continue
 						}
-						//}(DLParChan) // end go func
-						/*
-							case true:
-								log.Printf("[FETCHER]: Experimental! Start DownloadArticlesViaOverview for group '%s'", ng.Name)
-								err = proc.DownloadArticlesViaOverview(ng.Name)
-								if err != nil {
-									log.Printf("[FETCHER]: DownloadArticlesViaOverview failed: %v", err)
-									continue
-								}
-								fmt.Println("[FETCHER]: ✓ Article import complete.")
-
-								groupDBs, err := db.GetGroupDBs(ng.Name)
-								if err != nil {
-									log.Fatalf("[FETCHER]: Failed to get group DBs for '%s': %v", ng.Name, err)
-								}
-								defer groupDBs.Return(db)
-						*/
+					} else if nga.ExpiryDays > 0 {
+						// Check if group already has articles to decide between initial vs incremental download
+						// Use optimized main database check instead of opening group database
+						articleCount, err := db.GetArticleCountFromMainDB(ng.Name)
+						if err != nil {
+							log.Printf("[FETCHER]: Failed to get article count from main DB for '%s': %v", ng.Name, err)
+							errChan <- err
+							continue
+						}
+						if articleCount == 0 {
+							// Initial download: use expiry_days to avoid downloading old articles
+							startDate := time.Now().AddDate(0, 0, -nga.ExpiryDays)
+							log.Printf("[FETCHER]: Initial download for group with expiry_days=%d, starting from calculated date: %s", nga.ExpiryDays, startDate.Format("2006-01-02"))
+							//time.Sleep(3 * time.Second) // debug sleep
+							err = proc.DownloadArticlesFromDate(ng.Name, startDate, DLParChan, progressDB, shutdownChan)
+							if err != nil {
+								errChan <- err
+								log.Printf("[FETCHER]: DownloadArticlesFromDate6 failed: %v", err)
+								continue
+							}
+						} else {
+							// Incremental download: continue from where we left off
+							log.Printf("[FETCHER]: Incremental download for newsgroup: '%s' (has %d existing articles)", ng.Name, articleCount)
+							//time.Sleep(3 * time.Second) // debug sleep
+							err = proc.DownloadArticles(ng.Name, DLParChan, progressDB, ng.First, ng.Last, shutdownChan)
+							if err != nil {
+								log.Printf("[FETCHER]: DownloadArticles7 failed: %v", err)
+								errChan <- err
+								continue
+							}
+						}
+					} else {
+						log.Printf("[FETCHER]: Downloading articles for newsgroup: '%s' (%d - %d) (no expiry limit)", ng.Name, ng.First, ng.Last)
+						//time.Sleep(3 * time.Second) // debug sleep
+						err = proc.DownloadArticles(ng.Name, DLParChan, progressDB, ng.First, ng.Last, shutdownChan)
+						if err != nil {
+							if err != processor.ErrUpToDate {
+								log.Printf("[FETCHER]: DownloadArticles8 failed: %v", err)
+							}
+							errChan <- err
+							continue
+						}
+					}
+					if err != nil {
+						if err != processor.ErrUpToDate {
+							log.Printf("DownloadArticles9 failed: %v", err)
+						}
+						continue
 					}
 				}
 			}
@@ -688,7 +662,7 @@ func getRealMemoryUsage() (uint64, error) {
 
 // UpdateNewsgroupList fetches the remote newsgroup list from the first enabled provider
 // and adds all groups to the database that we don't already have
-func UpdateNewsgroupList(updateList *string) error {
+func UpdateNewsgroupList(updateList *string, updateListForce bool) error {
 	log.Printf("Starting newsgroup list update from remote server...")
 
 	// Initialize database
@@ -757,13 +731,13 @@ func UpdateNewsgroupList(updateList *string) error {
 
 	if updatePattern == "$all" {
 		addAllGroups = true
-		log.Printf("Adding all newsgroups from remote server")
+		log.Printf("Listing all newsgroups from remote server")
 	} else if strings.HasSuffix(updatePattern, "*") {
 		groupPrefix = strings.TrimSuffix(updatePattern, "*")
-		log.Printf("Adding newsgroups with prefix: '%s'", groupPrefix)
+		log.Printf("Listing newsgroups with prefix: '%s'", groupPrefix)
 	} else if updatePattern != "" {
 		groupPrefix = updatePattern
-		log.Printf("Adding newsgroups matching: '%s'", groupPrefix)
+		log.Printf("Listing newsgroups matching: '%s'", groupPrefix)
 	} else {
 		return fmt.Errorf("invalid update pattern: '%s' (use 'group.*' or '$all')", updatePattern)
 	}
@@ -780,11 +754,12 @@ func UpdateNewsgroupList(updateList *string) error {
 		existingGroups[group.Name] = true
 	}
 
-	log.Printf("Found %d existing newsgroups in local database", len(localGroups))
+	log.Printf("Found %d newsgroups in local database", len(localGroups))
 
 	// Add new newsgroups that don't exist locally and match the pattern
 	newGroupCount := 0
 	skippedCount := 0
+	var messages int64
 	for _, remoteGroup := range remoteGroups {
 		// Apply prefix filtering
 		if !addAllGroups {
@@ -803,20 +778,25 @@ func UpdateNewsgroupList(updateList *string) error {
 				CreatedAt: time.Now().UTC(), // Default created at
 			}
 
-			// Insert the new newsgroup
-			err := db.InsertNewsgroup(newGroup)
-			if err != nil {
-				log.Printf("Failed to insert newsgroup '%s': %v", remoteGroup.Name, err)
-				continue
-			}
+			if updateListForce {
+				// Insert the new newsgroup
+				err := db.InsertNewsgroup(newGroup)
+				if err != nil {
+					log.Printf("Failed to insert newsgroup '%s': %v", remoteGroup.Name, err)
+					continue
+				}
 
-			log.Printf("Added new newsgroup: %s", remoteGroup.Name)
+				log.Printf("Added new newsgroup: %s", remoteGroup.Name)
+			} else {
+				log.Printf("New newsgroup: %s (not added) lo=%d hi=%d messages=%d", remoteGroup.Name, remoteGroup.First, remoteGroup.Last, remoteGroup.Count)
+			}
 			newGroupCount++
+			messages += remoteGroup.Count
 		}
 	}
 
-	log.Printf("Newsgroup list update completed: %d new groups added, %d skipped (prefix filter), out of %d remote groups",
-		newGroupCount, skippedCount, len(remoteGroups))
+	log.Printf("Newsgroup list update completed: %d new groups added, %d skipped (prefix filter), out of %d remote groups with total: %d messages",
+		newGroupCount, skippedCount, len(remoteGroups), messages)
 
 	return nil
 }
