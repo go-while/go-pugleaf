@@ -43,7 +43,6 @@ var (
 
 	// RunRSLIGHTImport is used to indicate if the importer should run the legacy RockSolid Light importer
 	RunRSLIGHTImport = false
-	DownloadMaxPar   = 16
 
 	// Global Batch Queue (proc_DLArt.go)
 	Batch = &BatchQueue{
