@@ -422,8 +422,8 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/search/", s.searchPage)
 	s.Router.GET("/stats", s.statsPage)
 	s.Router.GET("/stats/", s.statsPage)
-	s.Router.GET("/help", s.helpPage)
-	s.Router.GET("/help/", s.helpPage)
+	s.Router.GET("/SiteHelp", s.helpPage)
+	s.Router.GET("/SiteHelp/", s.helpPage)
 	s.Router.GET("/SiteNews", s.newsPage)      // Site news page
 	s.Router.GET("/SiteNews/", s.newsPage)     // Handle trailing slash
 	s.Router.GET("/sections", s.sectionsPage)  // List all sections
@@ -648,8 +648,8 @@ func (s *WebServer) sectionValidationMiddleware() gin.HandlerFunc {
 			"hierarchy":   true,
 			"search":      true,
 			"stats":       true,
-			"help":        true,
-			"news":        true,
+			"SiteHelp":    true,
+			"SiteNews":    true,
 			"sections":    true,
 			"demo":        true,
 			"ping":        true,
