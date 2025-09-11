@@ -835,7 +835,7 @@ func (c *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*model
 	if len(batches) == 0 {
 		return nil
 	}
-	//log.Printf("[THR-BATCH] group '%s': %d articles to process", *groupName, len(batches))
+	//log.Printf("[THR-BATCH] group '%s': %d articles to process", *taskNewsgroup, len(batches))
 	roots, replies := 0, 0
 	for _, article := range batches {
 		if article == nil {
