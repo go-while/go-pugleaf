@@ -91,11 +91,13 @@ type Article struct {
 
 // GroupInfo represents newsgroup information
 type GroupInfo struct {
-	Name      string
-	Count     int64
-	First     int64
-	Last      int64
-	PostingOK bool
+	Name       string
+	Count      int64
+	First      int64
+	Last       int64
+	FetchStart int64
+	FetchEnd   int64
+	PostingOK  bool
 }
 
 // OverviewLine represents a line from XOVER command

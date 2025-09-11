@@ -289,16 +289,20 @@ forProcessing:
 
 // FindStartArticleByDate finds the first article number on or after the given date
 // using a simple binary search approach with XOVER data
-func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.Time) (int64, error) {
-	// Get group info
-	groupInfo, err := proc.Pool.SelectGroup(groupName)
-	if err != nil {
-		return 0, fmt.Errorf("failed to select group: %w", err)
-	}
+func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.Time, groupInfo *nntp.GroupInfo) (int64, error) {
+	/*
+		// Get group info
+		groupInfo, err := proc.Pool.SelectGroup(groupName)
+		if err != nil {
+			return 0, fmt.Errorf("failed to select group: %w", err)
+		}
+	*/
 	if groupInfo.Last == 0 {
 		log.Printf("No articles in group %s", groupName)
 		return 0, ErrIsEmptyGroup
 	}
+	// decrease targetDate by 2 days
+	targetDate = targetDate.AddDate(0, 0, -2)
 
 	log.Printf("Finding start article for date %s in group %s (range %d-%d)",
 		targetDate.Format("2006-01-02"), groupName, groupInfo.First, groupInfo.Last)
@@ -312,10 +316,13 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 			log.Printf("Target date %s is before first article %d (date: %s), returning first article. ng: %s",
 				targetDate.Format("2006-01-02"), groupInfo.First, firstArticleDate.Format("2006-01-02"), groupName)
 			return groupInfo.First, nil
+		} else {
+			log.Printf("Target date %s is after first article %d (date: %s), checking last article. ng: %s",
+				targetDate.Format("2006-01-02"), groupInfo.First, firstArticleDate.Format("2006-01-02"), groupName)
 		}
 	}
 
-	// Check if target date is after the last article - optimization to skip binary search
+	// Check if target date is after the last article
 	lastOverviews, err := proc.Pool.XOver(groupName, groupInfo.Last, groupInfo.Last, enforceLimit)
 	if err == nil && len(lastOverviews) > 0 {
 		lastArticleDate := ParseNNTPDate(lastOverviews[0].Date)
@@ -323,18 +330,23 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 			log.Printf("Target date %s is after last article %d (date: %s), returning last article. ng: %s",
 				targetDate.Format("2006-01-02"), groupInfo.Last, lastArticleDate.Format("2006-01-02"), groupName)
 			return groupInfo.Last, nil
+		} else {
+			log.Printf("Target date %s is before last article %d (date: %s), starting search. ng: %s",
+				targetDate.Format("2006-01-02"), groupInfo.Last, lastArticleDate.Format("2006-01-02"), groupName)
 		}
 	}
+	groupInfo.FetchStart = groupInfo.First
+	groupInfo.FetchEnd = groupInfo.Last
 
 	// Binary search using 50% approach
-	for groupInfo.Last-groupInfo.First > 1 {
-		mid := groupInfo.First + (groupInfo.Last-groupInfo.First)/2
+	for groupInfo.FetchEnd-groupInfo.FetchStart > 1 {
+		mid := groupInfo.FetchStart + (groupInfo.FetchEnd-groupInfo.FetchStart)/2
 
 		// Get XOVER for this article
 		overviews, err := proc.Pool.XOver(groupName, mid, mid, enforceLimit)
 		if err != nil || len(overviews) == 0 {
 			// Article doesn't exist, try moving up
-			groupInfo.First = mid
+			groupInfo.FetchStart = mid
 			continue
 		}
 		if proc.DB.IsDBshutdown() {
@@ -342,20 +354,20 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 		}
 		articleDate := ParseNNTPDate(overviews[0].Date)
 		if articleDate.IsZero() {
-			groupInfo.First = mid
+			groupInfo.FetchStart = mid
 			continue
 		}
 
 		log.Printf("Scanning: %s - Article %d has date %s", groupName, mid, articleDate.Format("2006-01-02"))
 
 		if articleDate.Before(targetDate) {
-			groupInfo.First = mid
+			groupInfo.FetchStart = mid
 		} else {
-			groupInfo.Last = mid
+			groupInfo.FetchEnd = mid
 		}
 	}
-	log.Printf("Found start article: %d, ng: %s", groupInfo.Last, groupName)
-	return groupInfo.Last, nil
+	log.Printf("Found start article: %d, ng: %s", groupInfo.FetchEnd, groupName)
+	return groupInfo.FetchEnd, nil
 }
 
 var ErrIsEmptyGroup = fmt.Errorf("isEmptyGroup")
@@ -363,11 +375,11 @@ var ErrIsEmptyGroup = fmt.Errorf("isEmptyGroup")
 // DownloadArticlesFromDate fetches articles starting from a specific date
 // Uses special progress tracking: sets progress to startArticle-1, or -1 if starting from article 1
 // This prevents DownloadArticles from using "no progress detected" logic for existing groups
-func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, DLParChan chan struct{}, progressDB *database.ProgressDB, shutdownChan <-chan struct{}) error {
+func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, DLParChan chan struct{}, progressDB *database.ProgressDB, groupInfo *nntp.GroupInfo, shutdownChan <-chan struct{}) error {
 	//log.Printf("DownloadArticlesFromDate: Starting download from date %s for group '%s'", startDate.Format("2006-01-02"), groupName)
 
 	// Find the starting article number based on date
-	startArticle, err := proc.FindStartArticleByDate(groupName, startDate)
+	startArticle, err := proc.FindStartArticleByDate(groupName, startDate, groupInfo)
 	if err != nil {
 		if err == ErrIsEmptyGroup {
 			return err
@@ -409,10 +421,12 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 	//log.Printf("DownloadArticlesFromDate: Set progress to %d (date rescan), will start downloading from article %d", tempProgress, startArticle)
 
 	// Get group info to calculate proper download range
-	groupInfo, err := proc.Pool.SelectGroup(groupName)
-	if err != nil {
-		return fmt.Errorf("failed to select group for date download: %w", err)
-	}
+	/*
+		groupInfo, err := proc.Pool.SelectGroup(groupName)
+		if err != nil {
+			return fmt.Errorf("failed to select group for date download: %w", err)
+		}
+	*/
 
 	// Calculate download range: start from found article, end at current group last or startArticle + MaxBatch
 	downloadStart := startArticle

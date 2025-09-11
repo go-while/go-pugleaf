@@ -419,8 +419,8 @@ func main() {
 					continue
 				}
 
-				groupInfo.First = start
-				groupInfo.Last = end
+				groupInfo.FetchStart = start
+				groupInfo.FetchEnd = end
 				processor.Batch.TodoQ <- groupInfo
 				log.Printf("[FETCHER]: TodoQ '%s' toFetch=%d start=%d end=%d", *ng, toFetch, start, end)
 				//time.Sleep(time.Second * 2)
@@ -485,8 +485,8 @@ func main() {
 						log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
 					}
 					return
-				case ng := <-processor.Batch.TodoQ:
-					if ng == nil {
+				case groupInfo := <-processor.Batch.TodoQ:
+					if groupInfo == nil {
 						//log.Printf("[FETCHER]: TodoQ closed, worker stopping")
 						return
 					}
@@ -511,7 +511,7 @@ func main() {
 						}
 					*/
 
-					nga, err := db.MainDBGetNewsgroup(ng.Name)
+					nga, err := db.MainDBGetNewsgroup(groupInfo.Name)
 					if err != nil {
 						log.Printf("Error in processor.Batch.TodoQ: MainDBGetNewsgroup err='%v'", err)
 						errChan <- err
@@ -528,8 +528,8 @@ func main() {
 					// Check if date-based downloading is requested
 					var useStartDate string
 					mux.Lock()
-					if startDates[ng.Name] != "" {
-						useStartDate = startDates[ng.Name]
+					if startDates[groupInfo.Name] != "" {
+						useStartDate = startDates[groupInfo.Name]
 					} else if *downloadStartDate != "" {
 						useStartDate = *downloadStartDate
 					}
@@ -539,12 +539,12 @@ func main() {
 						if err != nil {
 							log.Fatalf("[FETCHER]: Invalid start date format '%s': %v (expected YYYY-MM-DD)", useStartDate, err)
 						}
-						log.Printf("[FETCHER]: Starting ng: '%s' from date: %s", ng.Name, startDate.Format("2006-01-02"))
+						log.Printf("[FETCHER]: Starting ng: '%s' from date: %s", groupInfo.Name, startDate.Format("2006-01-02"))
 						//time.Sleep(3 * time.Second) // debug sleep
-						err = proc.DownloadArticlesFromDate(ng.Name, startDate, DLParChan, progressDB, shutdownChan)
+						err = proc.DownloadArticlesFromDate(groupInfo.Name, startDate, DLParChan, progressDB, groupInfo, shutdownChan)
 						if err != nil {
 							if err == processor.ErrIsEmptyGroup {
-								err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, ng.Name, 0)
+								err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0)
 								if err != nil {
 									continue
 								}
@@ -558,9 +558,9 @@ func main() {
 					} else if nga.ExpiryDays > 0 {
 						// Check if group already has articles to decide between initial vs incremental download
 						// Use optimized main database check instead of opening group database
-						articleCount, err := db.GetArticleCountFromMainDB(ng.Name)
+						articleCount, err := db.GetArticleCountFromMainDB(groupInfo.Name)
 						if err != nil {
-							log.Printf("[FETCHER]: Failed to get article count from main DB for '%s': %v", ng.Name, err)
+							log.Printf("[FETCHER]: Failed to get article count from main DB for '%s': %v", groupInfo.Name, err)
 							errChan <- err
 							continue
 						}
@@ -569,10 +569,10 @@ func main() {
 							startDate := time.Now().AddDate(0, 0, -nga.ExpiryDays)
 							log.Printf("[FETCHER]: Initial download for group with expiry_days=%d, starting from calculated date: %s", nga.ExpiryDays, startDate.Format("2006-01-02"))
 							//time.Sleep(3 * time.Second) // debug sleep
-							err = proc.DownloadArticlesFromDate(ng.Name, startDate, DLParChan, progressDB, shutdownChan)
+							err = proc.DownloadArticlesFromDate(groupInfo.Name, startDate, DLParChan, progressDB, groupInfo, shutdownChan)
 							if err != nil {
 								if err == processor.ErrIsEmptyGroup {
-									err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, ng.Name, 0)
+									err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0)
 									if err != nil {
 										continue
 									}
@@ -585,9 +585,9 @@ func main() {
 							}
 						} else {
 							// Incremental download: continue from where we left off
-							log.Printf("[FETCHER]: Incremental download for newsgroup: '%s' (has %d existing articles)", ng.Name, articleCount)
+							log.Printf("[FETCHER]: Incremental download for newsgroup: '%s' (has %d existing articles)", groupInfo.Name, articleCount)
 							//time.Sleep(3 * time.Second) // debug sleep
-							err = proc.DownloadArticles(ng.Name, DLParChan, progressDB, ng.First, ng.Last, shutdownChan)
+							err = proc.DownloadArticles(groupInfo.Name, DLParChan, progressDB, groupInfo.FetchStart, groupInfo.FetchEnd, shutdownChan)
 							if err != nil {
 								log.Printf("[FETCHER]: DownloadArticles7 failed: %v", err)
 								errChan <- err
@@ -595,9 +595,9 @@ func main() {
 							}
 						}
 					} else {
-						log.Printf("[FETCHER]: Downloading articles for newsgroup: '%s' (%d - %d) (no expiry limit)", ng.Name, ng.First, ng.Last)
+						log.Printf("[FETCHER]: Downloading articles for newsgroup: '%s' (%d - %d) (no expiry limit)", groupInfo.Name, groupInfo.FetchStart, groupInfo.FetchEnd)
 						//time.Sleep(3 * time.Second) // debug sleep
-						err = proc.DownloadArticles(ng.Name, DLParChan, progressDB, ng.First, ng.Last, shutdownChan)
+						err = proc.DownloadArticles(groupInfo.Name, DLParChan, progressDB, groupInfo.FetchStart, groupInfo.FetchEnd, shutdownChan)
 						if err != nil {
 							if err != processor.ErrUpToDate {
 								log.Printf("[FETCHER]: DownloadArticles8 failed: %v", err)
