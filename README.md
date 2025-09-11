@@ -69,7 +69,7 @@ mv build/usermgr .
   - Or bulk import newsgroups:
 ```bash
 ./webserver -import-active preload/active.txt -nntphostname your.domain.com
-./webserver -update-desc preload/newsgroups.descriptions -nntphostname your.domain.com
+./webserver -update-descr preload/newsgroups.descriptions -nntphostname your.domain.com
 ./rslight-importer -data data -etc etc -spool spool -nntphostname your.domain.com
 ```
   - rslight section import: see etc/menu.conf and creating sections aka folders in etc/ containing a groups.txt (e.g., etc/section/groups.txt)
