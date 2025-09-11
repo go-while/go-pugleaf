@@ -749,13 +749,13 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 		}
 
 		// Step 4: Update thread_cache for replies (build cache updates from replies)
-		threadCacheUpdates := make(map[int64][]time.Time)
+		threadCacheUpdates := make(map[int64][]int64) // Changed to map[rootID][]childArticleNums
 		for _, reply := range threadReplies {
-			threadCacheUpdates[reply.rootNum] = append(threadCacheUpdates[reply.rootNum], reply.dateSent)
+			threadCacheUpdates[reply.rootNum] = append(threadCacheUpdates[reply.rootNum], reply.articleNum)
 		}
 
 		if len(threadCacheUpdates) > 0 {
-			if err := db.updateThreadCacheFromMap(groupDB, threadCacheUpdates, verbose); err != nil {
+			if err := db.updateThreadCacheWithChildren(groupDB, threadCacheUpdates, verbose); err != nil {
 				if verbose {
 					log.Printf("processThreadBatch: Failed to update thread cache: %v", err)
 				}
@@ -800,8 +800,8 @@ func (db *Database) initializeThreadCacheSimple(groupDB *GroupDBs, threadRoot in
 	return nil
 }
 
-// updateThreadCacheFromMap updates the thread_cache table for reply articles using a map of root->dates
-func (db *Database) updateThreadCacheFromMap(groupDB *GroupDBs, rootUpdates map[int64][]time.Time, verbose bool) error {
+// updateThreadCacheWithChildren updates the thread_cache table with child article lists
+func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDBs, rootUpdates map[int64][]int64, verbose bool) error {
 	if len(rootUpdates) == 0 {
 		return nil
 	}
@@ -813,65 +813,71 @@ func (db *Database) updateThreadCacheFromMap(groupDB *GroupDBs, rootUpdates map[
 	defer tx.Rollback()
 
 	// Update each thread root's cache
-	for rootArticle, childDates := range rootUpdates {
-		// Find the latest child date (but exclude obvious future posts > 25 hours from now)
-		now := time.Now().UTC()
-		futureLimit := now.Add(25 * time.Hour)
-
-		var latestValidDate time.Time
-		validDates := 0
-
-		for _, date := range childDates {
-			// Skip obvious future posts
-			if date.UTC().After(futureLimit) {
-				if verbose {
-					log.Printf("updateThreadCacheFromMap: Skipping future date %v for root %d",
-						date.Format("2006-01-02 15:04:05"), rootArticle)
-				}
-				continue
+	for rootArticle, childArticleNums := range rootUpdates {
+		// Build comma-separated child articles list
+		childArticlesStr := ""
+		if len(childArticleNums) > 0 {
+			childStrs := make([]string, len(childArticleNums))
+			for i, num := range childArticleNums {
+				childStrs[i] = fmt.Sprintf("%d", num)
 			}
-
-			if validDates == 0 || date.After(latestValidDate) {
-				latestValidDate = date
-			}
-			validDates++
+			childArticlesStr = strings.Join(childStrs, ",")
 		}
 
-		// Get the root article's date to compare
-		var rootDate time.Time
-		err := tx.QueryRow("SELECT root_date FROM thread_cache WHERE thread_root = ?", rootArticle).Scan(&rootDate)
+		// Get current thread cache data 
+		var currentCount int
+		var currentChildren string
+		err := tx.QueryRow("SELECT message_count, child_articles FROM thread_cache WHERE thread_root = ?", rootArticle).Scan(&currentCount, &currentChildren)
 		if err != nil {
-			// If thread cache doesn't exist yet, skip
 			if verbose {
-				log.Printf("updateThreadCacheFromMap: No thread cache entry for root %d, skipping", rootArticle)
+				log.Printf("updateThreadCacheWithChildren: No thread cache entry for root %d, skipping", rootArticle)
 			}
 			continue
 		}
 
-		// Use the latest valid date, but ensure it's not earlier than root date
-		finalActivityDate := rootDate
-		if validDates > 0 && latestValidDate.After(rootDate) {
-			finalActivityDate = latestValidDate
+		// Merge with existing children (in case we're processing in batches)
+		var allChildren []string
+		if currentChildren != "" {
+			allChildren = append(allChildren, strings.Split(currentChildren, ",")...)
+		}
+		if childArticlesStr != "" {
+			allChildren = append(allChildren, strings.Split(childArticlesStr, ",")...)
 		}
 
-		// Update thread_cache with correct activity date and incremented message count
+		// Remove duplicates and build final child list
+		childMap := make(map[string]bool)
+		for _, child := range allChildren {
+			if child != "" {
+				childMap[child] = true
+			}
+		}
+
+		var finalChildren []string
+		for child := range childMap {
+			finalChildren = append(finalChildren, child)
+		}
+
+		finalChildrenStr := strings.Join(finalChildren, ",")
+		newMessageCount := 1 + len(finalChildren) // 1 for root + replies
+
+		// Update thread_cache with child articles list and correct message count
 		_, err = tx.Exec(`
 			UPDATE thread_cache
-			SET message_count = message_count + ?,
-				last_activity = ?
+			SET child_articles = ?,
+				message_count = ?
 			WHERE thread_root = ?
-		`, validDates, finalActivityDate.UTC().Format("2006-01-02 15:04:05"), rootArticle)
+		`, finalChildrenStr, newMessageCount, rootArticle)
 
 		if err != nil {
 			if verbose {
-				log.Printf("updateThreadCacheFromMap: Failed to update cache for root %d: %v", rootArticle, err)
+				log.Printf("updateThreadCacheWithChildren: Failed to update cache for root %d: %v", rootArticle, err)
 			}
 			continue
 		}
 
 		if verbose {
-			log.Printf("updateThreadCacheFromMap: Updated root %d with %d replies, latest activity: %v",
-				rootArticle, validDates, finalActivityDate.Format("2006-01-02 15:04:05"))
+			log.Printf("updateThreadCacheWithChildren: Updated root %d with %d replies: %s",
+				rootArticle, len(finalChildren), finalChildrenStr)
 		}
 	}
 
