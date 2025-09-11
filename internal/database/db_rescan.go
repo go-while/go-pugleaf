@@ -596,9 +596,12 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 		articleNum int64
 		dateSent   time.Time
 	}
-	var threadCacheUpdates []struct {
-		rootArticle int64
-		childDate   time.Time
+	var threadReplies []struct {
+		articleNum   int64
+		parentNum    int64
+		rootNum      int64
+		dateSent     time.Time
+		depth        int
 	}
 
 	// Process each article to determine if it's a root or reply
@@ -624,24 +627,40 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 				dateSent   time.Time
 			}{articleNum, dateSent})
 		} else {
-			// This is a reply - find its thread root and update thread_cache
-			var rootArticleNum int64
+			// This is a reply - find its immediate parent and thread root
+			var parentArticleNum, rootArticleNum int64
+			depth := 0
 
-			// Find the thread root by looking up the references chain
+			// Find immediate parent (last reference that exists)
 			for i := len(refs) - 1; i >= 0; i-- {
 				if parentNum, exists := msgIDToArticleNum[refs[i]]; exists {
-					// Check if this parent is a thread root (exists in threads table)
-					// We'll do this check later when we have all the roots processed
-					rootArticleNum = parentNum
+					parentArticleNum = parentNum
+					depth = i + 1  // Depth based on position in references
 					break
 				}
 			}
 
-			if rootArticleNum > 0 {
-				threadCacheUpdates = append(threadCacheUpdates, struct {
-					rootArticle int64
-					childDate   time.Time
-				}{rootArticleNum, dateSent})
+			// Find thread root (first reference that exists)
+			for i := 0; i < len(refs); i++ {
+				if rootNum, exists := msgIDToArticleNum[refs[i]]; exists {
+					rootArticleNum = rootNum
+					break
+				}
+			}
+
+			// If no root found in references, the immediate parent becomes the root
+			if rootArticleNum == 0 {
+				rootArticleNum = parentArticleNum
+			}
+
+			if parentArticleNum > 0 {
+				threadReplies = append(threadReplies, struct {
+					articleNum   int64
+					parentNum    int64
+					rootNum      int64
+					dateSent     time.Time
+					depth        int
+				}{articleNum, parentArticleNum, rootArticleNum, dateSent, depth})
 			}
 		}
 	}
@@ -694,31 +713,49 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 		}
 	}
 
-	// Step 3: Update thread_cache for replies (filter to only valid roots)
-	if len(threadCacheUpdates) > 0 {
-		validUpdates := make([]struct {
-			rootArticle int64
-			childDate   time.Time
-		}, 0, len(threadCacheUpdates))
-
-		// Filter to only include replies that reference actual thread roots
+	// Step 3: Insert REPLIES into threads table
+	if len(threadReplies) > 0 {
 		tx, err := groupDB.DB.Begin()
 		if err != nil {
-			return threadsBuilt, fmt.Errorf("failed to begin cache check transaction: %w", err)
+			return threadsBuilt, fmt.Errorf("failed to begin replies transaction: %w", err)
 		}
 		defer tx.Rollback()
 
-		for _, update := range threadCacheUpdates {
-			var exists int
-			err := tx.QueryRow("SELECT 1 FROM threads WHERE root_article = ? LIMIT 1", update.rootArticle).Scan(&exists)
-			if err == nil {
-				validUpdates = append(validUpdates, update)
-			}
+		replyStmt, err := tx.Prepare("INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, ?, 0)")
+		if err != nil {
+			return threadsBuilt, fmt.Errorf("failed to prepare reply insert statement: %w", err)
 		}
-		tx.Rollback()
+		defer replyStmt.Close()
 
-		if len(validUpdates) > 0 {
-			if err := db.updateThreadCacheForReplies(groupDB, validUpdates, verbose); err != nil {
+		repliesBuilt := 0
+		for _, reply := range threadReplies {
+			// For replies: root_article = thread root, parent_article = immediate parent, child_article = this article
+			_, err = replyStmt.Exec(reply.rootNum, reply.parentNum, reply.articleNum, reply.depth)
+			if err != nil {
+				if verbose {
+					log.Printf("processThreadBatch: Failed to insert reply for article %d: %v", reply.articleNum, err)
+				}
+				continue
+			}
+			repliesBuilt++
+		}
+
+		if err := tx.Commit(); err != nil {
+			return threadsBuilt, fmt.Errorf("failed to commit replies transaction: %w", err)
+		}
+
+		if verbose && repliesBuilt > 0 {
+			log.Printf("processThreadBatch: Inserted %d replies into threads table", repliesBuilt)
+		}
+
+		// Step 4: Update thread_cache for replies (build cache updates from replies)
+		threadCacheUpdates := make(map[int64][]time.Time)
+		for _, reply := range threadReplies {
+			threadCacheUpdates[reply.rootNum] = append(threadCacheUpdates[reply.rootNum], reply.dateSent)
+		}
+
+		if len(threadCacheUpdates) > 0 {
+			if err := db.updateThreadCacheFromMap(groupDB, threadCacheUpdates, verbose); err != nil {
 				if verbose {
 					log.Printf("processThreadBatch: Failed to update thread cache: %v", err)
 				}
@@ -732,6 +769,17 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 
 // initializeThreadCacheSimple initializes thread cache for a root article
 func (db *Database) initializeThreadCacheSimple(groupDB *GroupDBs, threadRoot int64, rootDate time.Time) error {
+	// Validate root date - skip obvious future posts
+	now := time.Now().UTC()
+	futureLimit := now.Add(25 * time.Hour)
+
+	if rootDate.UTC().After(futureLimit) {
+		log.Printf("initializeThreadCacheSimple: Skipping thread root %d with future date %v",
+			threadRoot, rootDate.Format("2006-01-02 15:04:05"))
+		// Use current time as fallback for obvious future posts
+		rootDate = now
+	}
+
 	query := `
 		INSERT OR REPLACE INTO thread_cache (
 			thread_root, root_date, message_count, child_articles, last_child_number, last_activity
@@ -752,19 +800,10 @@ func (db *Database) initializeThreadCacheSimple(groupDB *GroupDBs, threadRoot in
 	return nil
 }
 
-// updateThreadCacheForReplies updates the thread_cache table for reply articles
-func (db *Database) updateThreadCacheForReplies(groupDB *GroupDBs, updates []struct {
-	rootArticle int64
-	childDate   time.Time
-}, verbose bool) error {
-	if len(updates) == 0 {
+// updateThreadCacheFromMap updates the thread_cache table for reply articles using a map of root->dates
+func (db *Database) updateThreadCacheFromMap(groupDB *GroupDBs, rootUpdates map[int64][]time.Time, verbose bool) error {
+	if len(rootUpdates) == 0 {
 		return nil
-	}
-
-	// Group updates by root article for efficient batch processing
-	rootUpdates := make(map[int64][]time.Time)
-	for _, update := range updates {
-		rootUpdates[update.rootArticle] = append(rootUpdates[update.rootArticle], update.childDate)
 	}
 
 	tx, err := groupDB.DB.Begin()
@@ -775,29 +814,64 @@ func (db *Database) updateThreadCacheForReplies(groupDB *GroupDBs, updates []str
 
 	// Update each thread root's cache
 	for rootArticle, childDates := range rootUpdates {
-		// Find the latest child date
-		latestDate := childDates[0]
-		for _, date := range childDates[1:] {
-			if date.After(latestDate) {
-				latestDate = date
+		// Find the latest child date (but exclude obvious future posts > 25 hours from now)
+		now := time.Now().UTC()
+		futureLimit := now.Add(25 * time.Hour)
+
+		var latestValidDate time.Time
+		validDates := 0
+
+		for _, date := range childDates {
+			// Skip obvious future posts
+			if date.UTC().After(futureLimit) {
+				if verbose {
+					log.Printf("updateThreadCacheFromMap: Skipping future date %v for root %d",
+						date.Format("2006-01-02 15:04:05"), rootArticle)
+				}
+				continue
 			}
+
+			if validDates == 0 || date.After(latestValidDate) {
+				latestValidDate = date
+			}
+			validDates++
 		}
 
-		// Update or insert thread_cache entry
-		_, err := tx.Exec(`
-			INSERT OR REPLACE INTO thread_cache
-			(thread_root, message_count, last_activity)
-			SELECT
-				?,
-				COALESCE((SELECT message_count FROM thread_cache WHERE thread_root = ?), 0) + ?,
-				?
-		`, rootArticle, rootArticle, len(childDates), latestDate)
+		// Get the root article's date to compare
+		var rootDate time.Time
+		err := tx.QueryRow("SELECT root_date FROM thread_cache WHERE thread_root = ?", rootArticle).Scan(&rootDate)
+		if err != nil {
+			// If thread cache doesn't exist yet, skip
+			if verbose {
+				log.Printf("updateThreadCacheFromMap: No thread cache entry for root %d, skipping", rootArticle)
+			}
+			continue
+		}
+
+		// Use the latest valid date, but ensure it's not earlier than root date
+		finalActivityDate := rootDate
+		if validDates > 0 && latestValidDate.After(rootDate) {
+			finalActivityDate = latestValidDate
+		}
+
+		// Update thread_cache with correct activity date and incremented message count
+		_, err = tx.Exec(`
+			UPDATE thread_cache
+			SET message_count = message_count + ?,
+				last_activity = ?
+			WHERE thread_root = ?
+		`, validDates, finalActivityDate.UTC().Format("2006-01-02 15:04:05"), rootArticle)
 
 		if err != nil {
 			if verbose {
-				log.Printf("updateThreadCacheForReplies: Failed to update cache for root %d: %v", rootArticle, err)
+				log.Printf("updateThreadCacheFromMap: Failed to update cache for root %d: %v", rootArticle, err)
 			}
 			continue
+		}
+
+		if verbose {
+			log.Printf("updateThreadCacheFromMap: Updated root %d with %d replies, latest activity: %v",
+				rootArticle, validDates, finalActivityDate.Format("2006-01-02 15:04:05"))
 		}
 	}
 
@@ -826,14 +900,15 @@ func (db *Database) parseReferences(refs string) []string {
 
 // ThreadRebuildReport represents the results of a thread rebuild operation
 type ThreadRebuildReport struct {
-	Newsgroup      string
-	TotalArticles  int64
-	ThreadsDeleted int64
-	ThreadsRebuilt int64
-	Errors         []string
-	StartTime      time.Time
-	EndTime        time.Time
-	Duration       time.Duration
+	Newsgroup        string
+	TotalArticles    int64
+	ThreadsDeleted   int64
+	ThreadsRebuilt   int64
+	FutureDatesFixed int64 // New: count of future dates corrected
+	Errors           []string
+	StartTime        time.Time
+	EndTime          time.Time
+	Duration         time.Duration
 }
 
 // PrintReport prints a human-readable thread rebuild report
@@ -851,10 +926,16 @@ func (report *ThreadRebuildReport) PrintReport() {
 	fmt.Printf("Articles processed:   %d\n", report.TotalArticles)
 	fmt.Printf("Threads deleted:      %d\n", report.ThreadsDeleted)
 	fmt.Printf("Threads rebuilt:      %d\n", report.ThreadsRebuilt)
+	if report.FutureDatesFixed > 0 {
+		fmt.Printf("Future dates fixed:   %d\n", report.FutureDatesFixed)
+	}
 	fmt.Printf("Duration:             %v\n", report.Duration)
 
 	if len(report.Errors) == 0 {
 		fmt.Printf("\n✅ Thread rebuild completed successfully.\n")
+		if report.FutureDatesFixed > 0 {
+			fmt.Printf("💡 Fixed %d future date issues during rebuild.\n", report.FutureDatesFixed)
+		}
 	} else {
 		fmt.Printf("\n❌ Thread rebuild completed with errors.\n")
 	}
