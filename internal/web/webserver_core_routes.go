@@ -482,8 +482,7 @@ func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
 		for _, pattern := range badBots {
 			if strings.Contains(strings.ToLower(userAgent), pattern) {
 				// Log bot request
-				log.Printf("Bot blocked: %s from %s", userAgent, c.ClientIP())
-				// You could block, throttle, or just log
+				log.Printf("Bot blocked: '%s' IP: %s", userAgent, c.ClientIP())
 				c.String(403, "403")
 				c.Abort()
 				return
