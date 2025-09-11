@@ -38,7 +38,11 @@ su pugleaf
 cd /home/pugleaf
 git clone https://github.com/go-while/go-pugleaf.git
 cd go-pugleaf
-git checkout testing-001
+
+# Warning: Nightly patches may be unstable or contain bugs
+# Only switch to the testing branch if you understand the risks or a dev told you to test a Patch!
+# git checkout testing-001
+ git checkout main
 
 # Build all binaries (outputs to ./build)
 ./build_ALL.sh && cp build/* .
