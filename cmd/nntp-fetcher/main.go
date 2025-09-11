@@ -204,12 +204,12 @@ func main() {
 	pools := make([]*nntp.Pool, 0, len(providers))
 	for _, p := range providers {
 		if !p.Enabled || p.Host == "" || p.Port <= 0 || p.MaxConns <= 0 {
-			log.Printf("Ignore disabled Provider: %s", p.Name)
+			//log.Printf("Ignore disabled Provider: %s", p.Name)
 			continue
 		}
 		if strings.Contains(p.Host, "eternal-september") && p.MaxConns > 3 {
 			p.MaxConns = 3
-		} else if strings.Contains(p.Host, "blueworld-hosting") && p.MaxConns > 3 {
+		} else if strings.Contains(p.Host, "blueworldhosting") && p.MaxConns > 3 {
 			p.MaxConns = 3
 		}
 		if p.MaxConns > *maxBatch {
@@ -331,6 +331,10 @@ func main() {
 						continue
 					}
 					log.Printf("[FETCHER]: Error in select ng='%s' groupInfo='%#v' err='%v'", *ng, groupInfo, err)
+					continue
+				}
+				if groupInfo.Last == 0 || groupInfo.Last < groupInfo.First {
+					log.Printf("[FETCHER]: Empty group '%s'", *ng)
 					continue
 				}
 				//log.Printf("[FETCHER]: ng '%s', REMOTE groupInfo: %#v", *ng, groupInfo),
