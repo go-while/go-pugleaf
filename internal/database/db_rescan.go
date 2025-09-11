@@ -597,11 +597,11 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 		dateSent   time.Time
 	}
 	var threadReplies []struct {
-		articleNum   int64
-		parentNum    int64
-		rootNum      int64
-		dateSent     time.Time
-		depth        int
+		articleNum int64
+		parentNum  int64
+		rootNum    int64
+		dateSent   time.Time
+		depth      int
 	}
 
 	// Process each article to determine if it's a root or reply
@@ -635,7 +635,7 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 			for i := len(refs) - 1; i >= 0; i-- {
 				if parentNum, exists := msgIDToArticleNum[refs[i]]; exists {
 					parentArticleNum = parentNum
-					depth = i + 1  // Depth based on position in references
+					depth = i + 1 // Depth based on position in references
 					break
 				}
 			}
@@ -655,11 +655,11 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 
 			if parentArticleNum > 0 {
 				threadReplies = append(threadReplies, struct {
-					articleNum   int64
-					parentNum    int64
-					rootNum      int64
-					dateSent     time.Time
-					depth        int
+					articleNum int64
+					parentNum  int64
+					rootNum    int64
+					dateSent   time.Time
+					depth      int
 				}{articleNum, parentArticleNum, rootArticleNum, dateSent, depth})
 			}
 		}
@@ -824,7 +824,7 @@ func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDBs, rootUpdates
 			childArticlesStr = strings.Join(childStrs, ",")
 		}
 
-		// Get current thread cache data 
+		// Get current thread cache data
 		var currentCount int
 		var currentChildren string
 		err := tx.QueryRow("SELECT message_count, child_articles FROM thread_cache WHERE thread_root = ?", rootArticle).Scan(&currentCount, &currentChildren)
