@@ -394,7 +394,7 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/registration/disable", s.adminDisableRegistration)
 	// Legacy/admin routes (high priority - must come before dynamic routes)
 	s.Router.GET("/", s.homePage)
-	s.Router.GET("/groups", s.groupsPage)                                                // Legacy fallback
+	s.Router.GET("/groups", s.groupsPage)                                                // groups listing
 	s.Router.GET("/groups/", s.groupsPage)                                               // Handle trailing slash
 	s.Router.GET("/hierarchies", s.hierarchiesPage)                                      // Hierarchies listing
 	s.Router.GET("/hierarchies/", s.hierarchiesPage)                                     // Handle trailing slash
@@ -424,10 +424,12 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/stats/", s.statsPage)
 	s.Router.GET("/SiteHelp", s.helpPage)
 	s.Router.GET("/SiteHelp/", s.helpPage)
-	s.Router.GET("/SiteNews", s.newsPage)      // Site news page
-	s.Router.GET("/SiteNews/", s.newsPage)     // Handle trailing slash
-	s.Router.GET("/sections", s.sectionsPage)  // List all sections
-	s.Router.GET("/sections/", s.sectionsPage) // Handle trailing slash
+	s.Router.GET("/SiteNews", s.newsPage)
+	s.Router.GET("/SiteNews/", s.newsPage)
+	s.Router.GET("/SiteIRC", s.ircPage)
+	s.Router.GET("/SiteIRC/", s.ircPage)
+	s.Router.GET("/sections", s.sectionsPage)
+	s.Router.GET("/sections/", s.sectionsPage)
 
 	// Demo and testing routes
 	s.Router.GET("/demo/thread-tree", s.threadTreeDemoPage)
@@ -483,6 +485,8 @@ func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
 				log.Printf("Bot blocked: %s from %s", userAgent, c.ClientIP())
 				// You could block, throttle, or just log
 				c.String(403, "403")
+				c.Abort()
+				return
 			}
 		}
 		c.Next()
@@ -634,26 +638,27 @@ func (s *WebServer) sectionValidationMiddleware() gin.HandlerFunc {
 
 		// Skip validation for known non-section paths
 		knownPaths := map[string]bool{
-			"favicon.ico": true,
-			"robots.txt":  true,
-			"static":      true,
-			"admin":       true,
-			"api":         true,
-			"login":       true,
-			"logout":      true,
-			"register":    true,
-			"profile":     true,
-			"groups":      true,
-			"hierarchies": true,
-			"hierarchy":   true,
-			"search":      true,
-			"stats":       true,
-			"SiteHelp":    true,
-			"SiteNews":    true,
-			"sections":    true,
-			"demo":        true,
-			"ping":        true,
-			"aichat":      true,
+			"favicon.ico":      true,
+			"robots.txt":       true,
+			"static":           true,
+			"admin":            true,
+			"api":              true,
+			"login":            true,
+			"logout":           true,
+			"register":         true,
+			"profile":          true,
+			"groups":           true,
+			"hierarchies":      true,
+			"hierarchy":        true,
+			"search":           true,
+			"stats":            true,
+			"SiteHelp":         true,
+			"SiteNews":         true,
+			"sections":         true,
+			"demo":             true,
+			"ping":             true,
+			"aichat":           true,
+			"hierarchy-groups": true,
 		}
 
 		if knownPaths[potentialSection] {

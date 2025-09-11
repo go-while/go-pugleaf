@@ -13,11 +13,16 @@ type NewsPageData struct {
 	TemplateData
 }
 
-// newsPage handles the "/news" route to display site news
+// newsPage handles the "/SiteNews" route to display site news
 func (s *WebServer) newsPage(c *gin.Context) {
 	data := NewsPageData{
 		TemplateData: s.getBaseTemplateData(c, "Site News"),
 	}
+
+	// Add cache-control headers to prevent browser caching of user-specific content
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
 
 	// Load template individually to avoid conflicts
 	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/news.html"))
