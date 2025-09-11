@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"html/template"
 	"log"
-	"net/http"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -424,8 +424,8 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/stats/", s.statsPage)
 	s.Router.GET("/help", s.helpPage)
 	s.Router.GET("/help/", s.helpPage)
-	s.Router.GET("/news", s.newsPage)          // Site news page
-	s.Router.GET("/news/", s.newsPage)         // Handle trailing slash
+	s.Router.GET("/SiteNews", s.newsPage)      // Site news page
+	s.Router.GET("/SiteNews/", s.newsPage)     // Handle trailing slash
 	s.Router.GET("/sections", s.sectionsPage)  // List all sections
 	s.Router.GET("/sections/", s.sectionsPage) // Handle trailing slash
 
