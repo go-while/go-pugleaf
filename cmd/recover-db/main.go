@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
@@ -31,12 +33,13 @@ func main() {
 	log.Printf("go-pugleaf Database Recovery Tool (version: %s)", config.AppVersion)
 	var (
 		dbPath         = flag.String("db", "data", "Data Path to main data directory (required)")
-		newsgroup      = flag.String("group", "$all", "Newsgroup name to check (required) (\\$all to check for all)")
+		newsgroup      = flag.String("group", "$all", "Newsgroup name to check (required) (\\$all to check for all or news.* to check for all in that hierarchy)")
 		verbose        = flag.Bool("v", true, "Verbose output")
 		repair         = flag.Bool("repair", false, "Attempt to repair detected inconsistencies")
 		parseDates     = flag.Bool("parsedates", false, "Check and log date parsing differences between date_string and date_sent")
 		rewriteDates   = flag.Bool("rewritedates", false, "Rewrite incorrect dates (requires -parsedates)")
 		rebuildThreads = flag.Bool("rebuild-threads", false, "Rebuild all thread relationships from scratch (destructive)")
+		maxPar         = flag.Int("max-par", 1, "use with -rebuild-threads to process N newsgroups")
 	)
 	flag.Parse()
 
@@ -80,11 +83,36 @@ func main() {
 		log.Fatalf("Failed to apply database migrations: %v", err)
 	}
 	var newsgroups []*models.Newsgroup
-	if *newsgroup != "$all" && *newsgroup != "" {
-		newsgroups = append(newsgroups, &models.Newsgroup{
-			Name: *newsgroup,
-		})
+	isWildcard := strings.HasSuffix(*newsgroup, "*")
+	if *newsgroup != "$all" && *newsgroup != "" && !isWildcard {
+		// if is comma separated check for multiple newsgroups
+		if strings.Contains(*newsgroup, ",") {
+			for _, grpName := range strings.Split(*newsgroup, ",") {
+				if grpName == "" {
+					continue
+				}
+				newsgroups = append(newsgroups, &models.Newsgroup{
+					Name: strings.TrimSpace(grpName),
+				})
+			}
 
+		} else {
+			newsgroups = append(newsgroups, &models.Newsgroup{
+				Name: *newsgroup,
+			})
+		}
+	} else if isWildcard {
+		// strip * from newsgroup and add only newsgroups matching the strings prefix
+		prefix := strings.TrimSuffix(*newsgroup, "*")
+		allGroups, err := db.MainDBGetAllNewsgroups()
+		if err != nil {
+			log.Fatalf("failed to get newsgroups from database: %v", err)
+		}
+		for _, grp := range allGroups {
+			if strings.HasPrefix(grp.Name, prefix) {
+				newsgroups = append(newsgroups, grp)
+			}
+		}
 	} else {
 		newsgroups, err = db.MainDBGetAllNewsgroups()
 		if err != nil {
@@ -100,26 +128,42 @@ func main() {
 	fmt.Printf("📅 Parse Dates:   %v\n", *parseDates)
 	fmt.Printf("🔄 Rewrite Dates: %v\n", *rewriteDates)
 	fmt.Printf("\n")
-
+	parChan := make(chan struct{}, *maxPar)
+	var parMux sync.Mutex
+	var wg sync.WaitGroup
 	// If only thread rebuilding is requested, run that and exit
 	if *rebuildThreads {
+		start := time.Now()
 		fmt.Printf("🧵 Starting thread rebuild process...\n")
 		fmt.Printf("=====================================\n")
 		var totalArticles, totalThreadsRebuilt int64
 		for i, newsgroup := range newsgroups {
-			fmt.Printf("🧵 [%d/%d] Rebuilding threads for newsgroup: %s\n", i+1, len(newsgroups), newsgroup.Name)
-			report, err := db.RebuildThreadsFromScratch(newsgroup.Name, *verbose)
-			if err != nil {
-				fmt.Printf("❌ Failed to rebuild threads for '%s': %v\n", newsgroup.Name, err)
-				continue
-			}
-			report.PrintReport()
-			totalArticles += report.TotalArticles
-			totalThreadsRebuilt += report.ThreadsRebuilt
+			parChan <- struct{}{} // get lock
+			wg.Add(1)
+			go func(newsgroup *models.Newsgroup, wg *sync.WaitGroup) {
+				defer func(wg *sync.WaitGroup) {
+					<-parChan // release lock
+					wg.Done()
+				}(wg)
+				fmt.Printf("🧵 [%d/%d] Rebuilding threads for newsgroup: %s\n", i+1, len(newsgroups), newsgroup.Name)
+				report, err := db.RebuildThreadsFromScratch(newsgroup.Name, *verbose)
+				if err != nil {
+					fmt.Printf("❌ Failed to rebuild threads for '%s': %v\n", newsgroup.Name, err)
+					return
+				}
+				report.PrintReport()
+				parMux.Lock()
+				totalArticles += report.TotalArticles
+				totalThreadsRebuilt += report.ThreadsRebuilt
+				parMux.Unlock()
+			}(newsgroup, &wg)
 		}
-		fmt.Printf("\n🧵 Thread rebuild completed:\n")
+		wg.Wait()
+		parMux.Lock()
+		fmt.Printf("\n🧵 Thread rebuild completed (%d newsgroups) took: %d ms\n", len(newsgroups), time.Since(start).Milliseconds())
 		fmt.Printf("   Total articles processed: %d\n", totalArticles)
 		fmt.Printf("   Total threads rebuilt: %d\n", totalThreadsRebuilt)
+		parMux.Unlock()
 		os.Exit(0)
 	}
 
