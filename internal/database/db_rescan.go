@@ -577,39 +577,37 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool) (*
 }
 
 // processThreadBatch processes a batch of articles to build thread relationships
-func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[string]int64, offset, RescanBatchSize int64, verbose bool) (int, error) {
-	// Get batch of articles with their references
+// Based on the actual threading system: only ROOT articles go in threads table, replies only update thread_cache
+func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[string]int64, offset, batchSize int64, verbose bool) (int, error) {
+	// Get batch of articles with their references and dates
 	rows, err := retryableQuery(groupDB.DB, `
-		SELECT article_num, message_id, "references"
+		SELECT article_num, message_id, "references", date_sent
 		FROM articles
 		ORDER BY article_num
 		LIMIT ? OFFSET ?
-	`, RescanBatchSize, offset)
+	`, batchSize, offset)
 	if err != nil {
 		return 0, fmt.Errorf("failed to query articles: %w", err)
 	}
 	defer rows.Close()
 
-	// Start transaction for this batch
-	tx, err := groupDB.DB.Begin()
-	if err != nil {
-		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	// Separate roots and replies for processing
+	var threadRoots []struct {
+		articleNum int64
+		dateSent   time.Time
 	}
-	defer tx.Rollback()
-
-	threadStmt, err := tx.Prepare("INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, ?, ?)")
-	if err != nil {
-		return 0, fmt.Errorf("failed to prepare thread insert statement: %w", err)
+	var threadCacheUpdates []struct {
+		rootArticle int64
+		childDate   time.Time
 	}
-	defer threadStmt.Close()
 
-	var threadsBuilt int
-
+	// Process each article to determine if it's a root or reply
 	for rows.Next() {
 		var articleNum int64
 		var messageID, references string
+		var dateSent time.Time
 
-		err := rows.Scan(&articleNum, &messageID, &references)
+		err := rows.Scan(&articleNum, &messageID, &references, &dateSent)
 		if err != nil {
 			if verbose {
 				log.Printf("processThreadBatch: Error scanning article: %v", err)
@@ -620,66 +618,190 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 		refs := db.parseReferences(references)
 
 		if len(refs) == 0 {
-			// This is a thread root
-			_, err = threadStmt.Exec(articleNum, nil, articleNum, 0, 0)
-			if err != nil {
-				if verbose {
-					log.Printf("processThreadBatch: Failed to insert thread root for article %d: %v", articleNum, err)
-				}
-				continue
-			}
-			threadsBuilt++
+			// This is a thread root - will be inserted into threads table
+			threadRoots = append(threadRoots, struct {
+				articleNum int64
+				dateSent   time.Time
+			}{articleNum, dateSent})
 		} else {
-			// This is a reply - find the best parent
-			var parentArticleNum int64
+			// This is a reply - find its thread root and update thread_cache
 			var rootArticleNum int64
-			depth := 1
 
-			// Find the most recent parent in the references chain
+			// Find the thread root by looking up the references chain
 			for i := len(refs) - 1; i >= 0; i-- {
 				if parentNum, exists := msgIDToArticleNum[refs[i]]; exists {
-					parentArticleNum = parentNum
-
-					// Find the root of this thread by looking up the parent's thread entry
-					err := tx.QueryRow("SELECT root_article, depth FROM threads WHERE child_article = ?", parentNum).Scan(&rootArticleNum, &depth)
-					if err == nil {
-						depth++ // This article is one level deeper than its parent
-						break
-					}
-					// If parent not found in threads yet, treat parent as root
+					// Check if this parent is a thread root (exists in threads table)
+					// We'll do this check later when we have all the roots processed
 					rootArticleNum = parentNum
-					depth = 1
 					break
 				}
 			}
 
-			// If no parent found in our database, treat this as a root
-			if parentArticleNum == 0 {
-				rootArticleNum = articleNum
-				depth = 0
+			if rootArticleNum > 0 {
+				threadCacheUpdates = append(threadCacheUpdates, struct {
+					rootArticle int64
+					childDate   time.Time
+				}{rootArticleNum, dateSent})
 			}
+		}
+	}
 
-			_, err = threadStmt.Exec(rootArticleNum, parentArticleNum, articleNum, depth, 0)
+	if err = rows.Err(); err != nil {
+		return 0, fmt.Errorf("error iterating articles: %w", err)
+	}
+
+	threadsBuilt := 0
+
+	// Step 1: Insert thread ROOTS into threads table
+	if len(threadRoots) > 0 {
+		tx, err := groupDB.DB.Begin()
+		if err != nil {
+			return 0, fmt.Errorf("failed to begin threads transaction: %w", err)
+		}
+		defer tx.Rollback()
+
+		threadStmt, err := tx.Prepare("INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, 0, 0)")
+		if err != nil {
+			return 0, fmt.Errorf("failed to prepare thread insert statement: %w", err)
+		}
+		defer threadStmt.Close()
+
+		for _, root := range threadRoots {
+			// For thread roots: root_article = child_article, parent_article = NULL
+			_, err = threadStmt.Exec(root.articleNum, nil, root.articleNum)
 			if err != nil {
 				if verbose {
-					log.Printf("processThreadBatch: Failed to insert thread entry for article %d: %v", articleNum, err)
+					log.Printf("processThreadBatch: Failed to insert thread root for article %d: %v", root.articleNum, err)
 				}
 				continue
 			}
 			threadsBuilt++
 		}
+
+		if err := tx.Commit(); err != nil {
+			return threadsBuilt, fmt.Errorf("failed to commit threads transaction: %w", err)
+		}
+
+		// Step 2: Initialize thread_cache for roots
+		for _, root := range threadRoots {
+			err := db.initializeThreadCacheSimple(groupDB, root.articleNum, root.dateSent)
+			if err != nil {
+				if verbose {
+					log.Printf("processThreadBatch: Failed to initialize thread cache for root %d: %v", root.articleNum, err)
+				}
+				// Don't fail the whole operation for cache errors
+			}
+		}
 	}
 
-	if err = rows.Err(); err != nil {
-		return threadsBuilt, fmt.Errorf("error iterating articles: %w", err)
-	}
+	// Step 3: Update thread_cache for replies (filter to only valid roots)
+	if len(threadCacheUpdates) > 0 {
+		validUpdates := make([]struct {
+			rootArticle int64
+			childDate   time.Time
+		}, 0, len(threadCacheUpdates))
 
-	// Commit this batch
-	if err := tx.Commit(); err != nil {
-		return threadsBuilt, fmt.Errorf("failed to commit thread batch: %w", err)
+		// Filter to only include replies that reference actual thread roots
+		tx, err := groupDB.DB.Begin()
+		if err != nil {
+			return threadsBuilt, fmt.Errorf("failed to begin cache check transaction: %w", err)
+		}
+		defer tx.Rollback()
+
+		for _, update := range threadCacheUpdates {
+			var exists int
+			err := tx.QueryRow("SELECT 1 FROM threads WHERE root_article = ? LIMIT 1", update.rootArticle).Scan(&exists)
+			if err == nil {
+				validUpdates = append(validUpdates, update)
+			}
+		}
+		tx.Rollback()
+
+		if len(validUpdates) > 0 {
+			if err := db.updateThreadCacheForReplies(groupDB, validUpdates, verbose); err != nil {
+				if verbose {
+					log.Printf("processThreadBatch: Failed to update thread cache: %v", err)
+				}
+				// Don't fail the whole operation for cache errors
+			}
+		}
 	}
 
 	return threadsBuilt, nil
+}
+
+// initializeThreadCacheSimple initializes thread cache for a root article
+func (db *Database) initializeThreadCacheSimple(groupDB *GroupDBs, threadRoot int64, rootDate time.Time) error {
+	query := `
+		INSERT OR REPLACE INTO thread_cache (
+			thread_root, root_date, message_count, child_articles, last_child_number, last_activity
+		) VALUES (?, ?, 1, '', ?, ?)
+	`
+
+	_, err := retryableExec(groupDB.DB, query,
+		threadRoot,
+		rootDate.UTC().Format("2006-01-02 15:04:05"),
+		threadRoot, // last_child_number starts as the root itself
+		rootDate.UTC().Format("2006-01-02 15:04:05"),
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to initialize thread cache for root %d: %w", threadRoot, err)
+	}
+
+	return nil
+}
+
+// updateThreadCacheForReplies updates the thread_cache table for reply articles
+func (db *Database) updateThreadCacheForReplies(groupDB *GroupDBs, updates []struct {
+	rootArticle int64
+	childDate   time.Time
+}, verbose bool) error {
+	if len(updates) == 0 {
+		return nil
+	}
+
+	// Group updates by root article for efficient batch processing
+	rootUpdates := make(map[int64][]time.Time)
+	for _, update := range updates {
+		rootUpdates[update.rootArticle] = append(rootUpdates[update.rootArticle], update.childDate)
+	}
+
+	tx, err := groupDB.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin thread cache transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Update each thread root's cache
+	for rootArticle, childDates := range rootUpdates {
+		// Find the latest child date
+		latestDate := childDates[0]
+		for _, date := range childDates[1:] {
+			if date.After(latestDate) {
+				latestDate = date
+			}
+		}
+
+		// Update or insert thread_cache entry
+		_, err := tx.Exec(`
+			INSERT OR REPLACE INTO thread_cache
+			(thread_root, message_count, last_activity)
+			SELECT
+				?,
+				COALESCE((SELECT message_count FROM thread_cache WHERE thread_root = ?), 0) + ?,
+				?
+		`, rootArticle, rootArticle, len(childDates), latestDate)
+
+		if err != nil {
+			if verbose {
+				log.Printf("updateThreadCacheForReplies: Failed to update cache for root %d: %v", rootArticle, err)
+			}
+			continue
+		}
+	}
+
+	return tx.Commit()
 }
 
 // parseReferences parses the references header into individual message IDs
