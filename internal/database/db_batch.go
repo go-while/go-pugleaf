@@ -843,7 +843,8 @@ func (c *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*model
 		}
 		article.Mux.RLock()
 		if article.ArticleNums[taskNewsgroup] <= 0 {
-			log.Printf("[THR-BATCH] ERROR batchProcessThreading NewsgroupsPtr in %s, skipping msgId='%s'", *taskNewsgroup, article.MessageID)
+			// when reaching here, we got a duplicate in remote servers overview and we already processed the article earlier...
+			log.Printf("[THR-BATCH] INFO: Did not insert into '%s' skipping msgId='%s'", *taskNewsgroup, article.MessageID)
 			article.Mux.RUnlock()
 			continue
 		}
