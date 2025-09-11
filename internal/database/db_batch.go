@@ -838,14 +838,14 @@ func (c *SQ3batch) batchProcessThreading(groupName *string, batches []*models.Ar
 	}
 	//log.Printf("[THR-BATCH] group '%s': %d articles to process", *groupName, len(batches))
 	roots, replies := 0, 0
-	newsgroupPtr := c.GetNewsgroupPointer(groupDBs.Newsgroup)
+	//newsgroupPtr := c.GetNewsgroupPointer(groupDBs.Newsgroup)
 	for _, article := range batches {
 		if article == nil {
 			continue
 		}
 		article.Mux.RLock()
-		if article.ArticleNums[newsgroupPtr] <= 0 {
-			log.Printf("[THR-BATCH] ERROR batchProcessThreading NewsgroupsPtr in %s, skipping msgId='%s'", *newsgroupPtr, article.MessageID)
+		if article.ArticleNums[groupName] <= 0 {
+			log.Printf("[THR-BATCH] ERROR batchProcessThreading NewsgroupsPtr in %s, skipping msgId='%s'", *groupName, article.MessageID)
 			article.Mux.RUnlock()
 			continue
 		}
