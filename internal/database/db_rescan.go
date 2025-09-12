@@ -10,34 +10,6 @@ import (
 // RecoverDatabase attempts to recover the database by checking for missing articles and last_insert_ids mismatches
 var RescanBatchSize int64 = 25000
 
-func (db *Database) Rescan(newsgroup string) error {
-	if newsgroup == "" {
-		return nil // Nothing to rescan
-	}
-	// first look into the maindb newsgroups table and get the latest numbers
-	latest, err := db.GetLatestArticleNumbers(newsgroup)
-	if err != nil {
-		return err
-	}
-	// open groupDBs
-	groupDB, err := db.GetGroupDBs(newsgroup)
-	if err != nil {
-		return err
-	}
-	defer groupDB.Return(db)
-	// Get the latest article number from the groupDB
-	latestArticle, err := db.GetLatestArticleNumberFromOverview(newsgroup)
-	if err != nil {
-		return err
-	}
-	// Compare with the latest from the mainDB
-	if latestArticle > latest[newsgroup] {
-		log.Printf("Found new articles in group '%s': %d (latest: %d)", newsgroup, latestArticle, latest[newsgroup])
-		// TODO: Handle new articles (e.g., fetch and insert into mainDB)
-	}
-	return nil
-}
-
 func (db *Database) GetLatestArticleNumberFromOverview(newsgroup string) (int64, error) {
 	// Since overview table is unified with articles, query articles table instead
 	groupDB, err := db.GetGroupDBs(newsgroup)

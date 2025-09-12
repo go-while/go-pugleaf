@@ -30,11 +30,10 @@ func main() {
 		password   = flag.String("password", "random", "Password for NNTP user (10-20 chars, will be bcrypt hashed)")
 		maxConns   = flag.Int("maxconns", 1, "Maximum concurrent connections")
 		posting    = flag.Bool("posting", false, "Allow posting (default: read-only)")
-		newsgroup  = flag.String("rescan-db", "", "[TOOL] Rescan database for newsgroup (default: alt.test)")
 	)
 	flag.Parse()
 
-	if !*createUser && !*listUsers && !*deleteUser && !*updateUser && *newsgroup == "" {
+	if !*createUser && !*listUsers && !*deleteUser && !*updateUser {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
@@ -44,7 +43,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  %s -list\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -update -username reader1 -maxconns 5 -posting\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -delete -username reader1\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -rescan-db alt.test\n", os.Args[0])
 		os.Exit(1)
 	}
 
@@ -79,16 +77,6 @@ func main() {
 	// Apply migrations
 	if err := db.Migrate(); err != nil {
 		log.Fatalf("Failed to apply database migrations: %v", err)
-	}
-
-	if *newsgroup != "" {
-		// Rescan database for the specified newsgroup
-		log.Printf("Rescanning database for newsgroup '%s'...", *newsgroup)
-		if err := db.Rescan(*newsgroup); err != nil {
-			log.Fatalf("Failed to rescan newsgroup '%s': %v", *newsgroup, err)
-		}
-		log.Printf("✅ Rescan completed for newsgroup '%s'", *newsgroup)
-		return
 	}
 
 	switch {
