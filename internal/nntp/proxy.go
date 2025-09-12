@@ -77,15 +77,17 @@ func (pd *ProxyDialer) dialDirect(network, address string) (net.Conn, error) {
 }
 
 // dialSOCKS4 establishes a connection through a SOCKS4 proxy
+// Note: golang.org/x/net/proxy doesn't have native SOCKS4 support, so we use SOCKS5 without auth
 func (pd *ProxyDialer) dialSOCKS4(network, address string) (net.Conn, error) {
 	proxyAddr := net.JoinHostPort(pd.config.ProxyHost, fmt.Sprintf("%d", pd.config.ProxyPort))
 
-	// SOCKS4 doesn't support authentication, so we ignore username/password
+	// SOCKS4 doesn't support authentication, so we use SOCKS5 without auth
+	// Most SOCKS4 proxies also support SOCKS5 without authentication (said AI)
 	dialer, err := proxy.SOCKS5("tcp", proxyAddr, nil, &net.Dialer{
 		Timeout: pd.config.ConnectTimeout,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create SOCKS4 proxy dialer: %w", err)
+		return nil, fmt.Errorf("failed to create SOCKS4/5 proxy dialer: %w", err)
 	}
 
 	return dialer.Dial(network, address)
