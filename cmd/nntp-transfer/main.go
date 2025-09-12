@@ -766,6 +766,7 @@ func reconstructHeaders(article *models.Article) ([]string, error) {
 				log.Printf("Invalid header: '%s' line=%d in msgId='%s'", headerLine, i, article.MessageID)
 				ignoreLine = true
 				ignoredLines++
+				continue
 			}
 			if IgnoreHeadersMap[header] {
 				ignoreLine = true
