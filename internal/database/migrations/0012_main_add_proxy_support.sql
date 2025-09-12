@@ -6,7 +6,7 @@ PRAGMA foreign_keys = ON;
 
 -- Add proxy configuration fields to providers table
 ALTER TABLE providers ADD COLUMN proxy_enabled BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE providers ADD COLUMN proxy_type TEXT NOT NULL DEFAULT 'direct';
+ALTER TABLE providers ADD COLUMN proxy_type TEXT NOT NULL DEFAULT '';
 ALTER TABLE providers ADD COLUMN proxy_host TEXT DEFAULT '';
 ALTER TABLE providers ADD COLUMN proxy_port INTEGER DEFAULT 0;
 ALTER TABLE providers ADD COLUMN proxy_username TEXT DEFAULT '';
