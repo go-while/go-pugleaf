@@ -1020,8 +1020,8 @@ func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
 
 	articleNum, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
-		log.Printf("Invalid article number in XHDR line: %s", line)
-		return nil, fmt.Errorf("invalid article number in XHDR line: %s", line)
+		log.Printf("Invalid article number in XHDR line: %q", parts[0])
+		return nil, fmt.Errorf("invalid article number in XHDR line: %q", parts[0])
 	}
 
 	return &HeaderLine{
