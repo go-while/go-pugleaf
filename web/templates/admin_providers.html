@@ -107,6 +107,80 @@
                               </div>
                           </div>
                       </div>
+
+                      <!-- Proxy Configuration Section -->
+                      <div class="row mt-3">
+                          <div class="col-12">
+                              <h6 class="text-muted">🔒 Proxy Configuration (Optional)</h6>
+                              <small class="text-muted">Configure SOCKS proxy settings. For Tor: use SOCKS5 with localhost:9050</small>
+                          </div>
+                      </div>
+
+                      <div class="row">
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_proxy_enabled" class="form-label">Enable Proxy</label>
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="provider_proxy_enabled" name="proxy_enabled">
+                                      <label class="form-check-label" for="provider_proxy_enabled">
+                                          Use Proxy
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_proxy_type" class="form-label">Proxy Type</label>
+                                  <select class="form-control" id="provider_proxy_type" name="proxy_type">
+                                      <option value="socks5">SOCKS5 (including Tor)</option>
+                                      <option value="socks4">SOCKS4</option>
+                                  </select>
+                              </div>
+                          </div>
+                      </div>
+
+                      <div class="row">
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="provider_proxy_host" class="form-label">Proxy Host</label>
+                                  <input type="text" class="form-control" id="provider_proxy_host" name="proxy_host"
+                                         placeholder="127.0.0.1 (for Tor) or proxy.example.com">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_proxy_port" class="form-label">Proxy Port</label>
+                                  <input type="number" class="form-control" id="provider_proxy_port" name="proxy_port"
+                                         placeholder="9050 (Tor default)" min="1" max="65535">
+                              </div>
+                          </div>
+                      </div>
+
+                      <div class="row">
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="provider_proxy_username" class="form-label">Proxy Username</label>
+                                  <input type="text" class="form-control" id="provider_proxy_username" name="proxy_username"
+                                         placeholder="Optional for authenticated proxies">
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="provider_proxy_password" class="form-label">Proxy Password</label>
+                                  <input type="password" class="form-control" id="provider_proxy_password" name="proxy_password"
+                                         placeholder="Optional for authenticated proxies">
+                              </div>
+                          </div>
+                          <div class="col-md-9">
+                              <div class="mb-3">
+                                  <small class="text-muted">
+                                      <strong>Tor Configuration:</strong> For Tor/Onion access, use SOCKS5 with host 127.0.0.1 and port 9050 (default Tor proxy).<br>
+                                      <strong>.onion addresses:</strong> You can use .onion addresses directly in the Host field above when proxy is enabled.<br>
+                                  </small>
+                              </div>
+                          </div>
+                      </div>
+
                       <button type="submit" class="btn btn-success">Add Provider</button>
                   </form>
               </div>
@@ -315,6 +389,80 @@
                                                         </div>
                                                     </div>
                                                 </div>
+
+                                                <!-- Proxy Configuration Section -->
+                                                <div class="row mt-3">
+                                                    <div class="col-12">
+                                                        <h6 class="text-muted">🔒 Proxy Configuration</h6>
+                                                    </div>
+                                                </div>
+                                                <div class="row">
+                                                    <div class="col-md-2">
+                                                        <div class="form-check">
+                                                            <input class="form-check-input" type="checkbox" name="proxy_enabled" {{if .ProxyEnabled}}checked{{end}}>
+                                                            <label class="form-check-label">Enable Proxy</label>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Proxy Type</label>
+                                                            <select class="form-control" name="proxy_type">
+                                                                <option value="socks5" {{if or (eq .ProxyType "socks5") (eq .ProxyType "tor") (eq .ProxyType "direct")}}selected{{end}}>SOCKS5 (including Tor)</option>
+                                                                <option value="socks4" {{if eq .ProxyType "socks4"}}selected{{end}}>SOCKS4</option>
+                                                            </select>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div class="row">
+                                                    <div class="col-md-3">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Proxy Host</label>
+                                                            <input type="text" class="form-control" name="proxy_host" value="{{.ProxyHost}}"
+                                                                   placeholder="127.0.0.1 for Tor">
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Proxy Port</label>
+                                                            <input type="number" class="form-control" name="proxy_port" value="{{.ProxyPort}}"
+                                                                   placeholder="9050 for Tor" min="1" max="65535">
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div class="row">
+                                                    <div class="col-md-3">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Proxy Username</label>
+                                                            <input type="text" class="form-control" name="proxy_username" value="{{.ProxyUsername}}"
+                                                                   placeholder="Optional">
+                                                            <div class="form-check mt-2">
+                                                                <input type="checkbox" class="form-check-input" name="clear_proxy_username">
+                                                                <label class="form-check-label">Clear proxy username</label>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Proxy Password</label>
+                                                            <input type="password" class="form-control" name="proxy_password"
+                                                                   placeholder="Leave blank to keep current">
+                                                            <div class="form-check mt-2">
+                                                                <input type="checkbox" class="form-check-input" name="clear_proxy_password">
+                                                                <label class="form-check-label">Clear proxy password</label>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-9">
+                                                        <div class="mb-3">
+                                                            <small class="text-muted">
+                                                                <strong>Tor:</strong> Use SOCKS5, host 127.0.0.1, port 9050. Supports .onion addresses in Host field.<br>
+                                                            </small>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
                                                 <button type="submit" class="btn btn-primary">Update Provider</button>
                                             </form>
                                         </div>

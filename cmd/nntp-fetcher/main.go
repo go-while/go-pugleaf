@@ -232,6 +232,13 @@ func main() {
 			Priority:   p.Priority,
 			MaxArtSize: p.MaxArtSize,
 			Posting:    p.Posting,
+			// Copy proxy configuration from database provider
+			ProxyEnabled:  p.ProxyEnabled,
+			ProxyType:     p.ProxyType,
+			ProxyHost:     p.ProxyHost,
+			ProxyPort:     p.ProxyPort,
+			ProxyUsername: p.ProxyUsername,
+			ProxyPassword: p.ProxyPassword,
 		}
 
 		backendConfig := &nntp.BackendConfig{
@@ -245,6 +252,13 @@ func main() {
 			//ReadTimeout:    60 * time.Second,
 			//WriteTimeout:   30 * time.Second,
 			Provider: configProvider, // Set the Provider field
+			// Copy proxy configuration from database provider
+			ProxyEnabled:  p.ProxyEnabled,
+			ProxyType:     p.ProxyType,
+			ProxyHost:     p.ProxyHost,
+			ProxyPort:     p.ProxyPort,
+			ProxyUsername: p.ProxyUsername,
+			ProxyPassword: p.ProxyPassword,
 		}
 		pool := nntp.NewPool(backendConfig)
 		pool.StartCleanupWorker(5 * time.Second)

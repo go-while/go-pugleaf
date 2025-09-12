@@ -48,15 +48,17 @@ func parseDateString(dateStr string) time.Time {
 // --- Main DB Queries ---
 
 // AddProvider adds a new provider to the main database
-const query_AddProvider = `INSERT INTO providers (name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting)
-	          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const query_AddProvider = `INSERT INTO providers (name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting, proxy_enabled, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password)
+	          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (db *Database) AddProvider(provider *models.Provider) error {
 	_, err := retryableExec(db.mainDB, query_AddProvider,
 		provider.Name, provider.Grp, provider.Host, provider.Port,
 		provider.SSL, provider.Username, provider.Password,
 		provider.MaxConns, provider.Enabled, provider.Priority,
-		provider.MaxArtSize, provider.Posting)
+		provider.MaxArtSize, provider.Posting, provider.ProxyEnabled,
+		provider.ProxyType, provider.ProxyHost, provider.ProxyPort,
+		provider.ProxyUsername, provider.ProxyPassword)
 	if err != nil {
 		return fmt.Errorf("failed to add provider %s: %w", provider.Name, err)
 	}
@@ -74,7 +76,8 @@ func (db *Database) DeleteProvider(id int) error {
 
 const query_SetProvider = `UPDATE providers SET
 		grp = ?, host = ?, port = ?, ssl = ?, username = ?, password = ?,
-		max_conns = ?, enabled = ?, priority = ?, max_art_size = ?, posting = ?
+		max_conns = ?, enabled = ?, priority = ?, max_art_size = ?, posting = ?,
+		proxy_enabled = ?, proxy_type = ?, proxy_host = ?, proxy_port = ?, proxy_username = ?, proxy_password = ?
 		WHERE id = ?`
 
 func (db *Database) SetProvider(provider *models.Provider) error {
@@ -82,7 +85,9 @@ func (db *Database) SetProvider(provider *models.Provider) error {
 		provider.Grp, provider.Host, provider.Port,
 		provider.SSL, provider.Username, provider.Password,
 		provider.MaxConns, provider.Enabled, provider.Priority,
-		provider.MaxArtSize, provider.Posting, provider.ID)
+		provider.MaxArtSize, provider.Posting, provider.ProxyEnabled,
+		provider.ProxyType, provider.ProxyHost, provider.ProxyPort,
+		provider.ProxyUsername, provider.ProxyPassword, provider.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update provider %d: %w", provider.ID, err)
 	}
@@ -90,7 +95,7 @@ func (db *Database) SetProvider(provider *models.Provider) error {
 }
 
 // GetProviders returns all providers
-const query_GetProviders = `SELECT id, enabled, priority, name, host, port, ssl, username, password, max_conns, max_art_size, posting, created_at FROM providers order by priority ASC`
+const query_GetProviders = `SELECT id, enabled, priority, name, host, port, ssl, username, password, max_conns, max_art_size, posting, created_at, proxy_enabled, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password FROM providers order by priority ASC`
 
 func (db *Database) GetProviders() ([]*models.Provider, error) {
 	rows, err := retryableQuery(db.mainDB, query_GetProviders)
@@ -101,7 +106,7 @@ func (db *Database) GetProviders() ([]*models.Provider, error) {
 	var out []*models.Provider
 	for rows.Next() {
 		var p models.Provider
-		if err := rows.Scan(&p.ID, &p.Enabled, &p.Priority, &p.Name, &p.Host, &p.Port, &p.SSL, &p.Username, &p.Password, &p.MaxConns, &p.MaxArtSize, &p.Posting, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Enabled, &p.Priority, &p.Name, &p.Host, &p.Port, &p.SSL, &p.Username, &p.Password, &p.MaxConns, &p.MaxArtSize, &p.Posting, &p.CreatedAt, &p.ProxyEnabled, &p.ProxyType, &p.ProxyHost, &p.ProxyPort, &p.ProxyUsername, &p.ProxyPassword); err != nil {
 			return nil, err
 		}
 		out = append(out, &p)
@@ -1157,7 +1162,7 @@ func (db *Database) GetSectionGroupsByName(newsgroupName string) ([]*models.Sect
 	return out, nil
 }
 
-const query_GetProviderByName = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting
+const query_GetProviderByName = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting, proxy_enabled, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password
 	          FROM providers WHERE name = ? ORDER by id ASC LIMIT 1`
 
 func (db *Database) GetProviderByName(name string) (*models.Provider, error) {
@@ -1165,7 +1170,7 @@ func (db *Database) GetProviderByName(name string) (*models.Provider, error) {
 	var provider models.Provider
 	err := row.Scan(&provider.ID, &provider.Name, &provider.Grp, &provider.Host, &provider.Port,
 		&provider.SSL, &provider.Username, &provider.Password, &provider.MaxConns, &provider.Enabled, &provider.Priority,
-		&provider.MaxArtSize, &provider.Posting)
+		&provider.MaxArtSize, &provider.Posting, &provider.ProxyEnabled, &provider.ProxyType, &provider.ProxyHost, &provider.ProxyPort, &provider.ProxyUsername, &provider.ProxyPassword)
 	if err == sql.ErrNoRows {
 		return nil, nil // Provider not found
 	} else if err != nil {
@@ -1175,7 +1180,7 @@ func (db *Database) GetProviderByName(name string) (*models.Provider, error) {
 	return &provider, nil
 }
 
-const query_GetProviderByID = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting
+const query_GetProviderByID = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting, proxy_enabled, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password
 	          FROM providers WHERE id = ? LIMIT 1`
 
 func (db *Database) GetProviderByID(id int) (*models.Provider, error) {
@@ -1183,7 +1188,7 @@ func (db *Database) GetProviderByID(id int) (*models.Provider, error) {
 	var provider models.Provider
 	err := row.Scan(&provider.ID, &provider.Name, &provider.Grp, &provider.Host, &provider.Port,
 		&provider.SSL, &provider.Username, &provider.Password, &provider.MaxConns, &provider.Enabled, &provider.Priority,
-		&provider.MaxArtSize, &provider.Posting)
+		&provider.MaxArtSize, &provider.Posting, &provider.ProxyEnabled, &provider.ProxyType, &provider.ProxyHost, &provider.ProxyPort, &provider.ProxyUsername, &provider.ProxyPassword)
 	if err == sql.ErrNoRows {
 		return nil, nil // Provider not found
 	} else if err != nil {

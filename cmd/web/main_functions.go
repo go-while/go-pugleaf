@@ -538,6 +538,13 @@ func ConnectPools(db *database.Database) []*nntp.Pool {
 			Enabled:    p.Enabled,
 			Priority:   p.Priority,
 			MaxArtSize: p.MaxArtSize,
+			// Copy proxy configuration from database provider
+			ProxyEnabled:  p.ProxyEnabled,
+			ProxyType:     p.ProxyType,
+			ProxyHost:     p.ProxyHost,
+			ProxyPort:     p.ProxyPort,
+			ProxyUsername: p.ProxyUsername,
+			ProxyPassword: p.ProxyPassword,
 		}
 
 		backendConfig := &nntp.BackendConfig{
@@ -551,6 +558,13 @@ func ConnectPools(db *database.Database) []*nntp.Pool {
 			//WriteTimeout:   60 * time.Second,
 			MaxConns: p.MaxConns,
 			Provider: configProvider, // Set the Provider field
+			// Copy proxy configuration from database provider
+			ProxyEnabled:  p.ProxyEnabled,
+			ProxyType:     p.ProxyType,
+			ProxyHost:     p.ProxyHost,
+			ProxyPort:     p.ProxyPort,
+			ProxyUsername: p.ProxyUsername,
+			ProxyPassword: p.ProxyPassword,
 		}
 
 		pool := nntp.NewPool(backendConfig)
