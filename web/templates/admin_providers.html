@@ -122,6 +122,7 @@
                                                         </div>
                                                     </div>
                                                 </div>
+                                                <hr class="my-3">
                                                 <div class="row">
                                                     <div class="col-md-2">
                                                         <div class="mb-3">
@@ -129,7 +130,7 @@
                                                             <input type="text" class="form-control" name="name" value="{{.Name}}" required>
                                                         </div>
                                                     </div>
-                                                <!--
+                                                <!-- disabled for now. no support for grouping provider accounts into one...
                                                     <div class="col-md-2">
                                                         <div class="mb-3">
                                                         <label class="form-label">Group</label>
@@ -156,6 +157,7 @@
                                                         </div>
                                                     </div>
                                                 </div>
+                                                <hr class="my-3">
                                                 <div class="row">
                                                     <div class="col-md-3">
                                                         <div class="mb-3">
@@ -182,6 +184,7 @@
                                                         </div>
                                                     </div>
                                                 </div>
+                                                <hr class="my-3">
                                                 <div class="row">
                                                     <div class="col-md-2">
                                                         <div class="mb-3">
@@ -202,6 +205,7 @@
                                                         </div>
                                                     </div>
                                                 </div>
+                                                <hr class="my-3">
 
                                                 <!-- Proxy Configuration Section -->
                                                 <div class="row mt-3">
@@ -309,11 +313,35 @@
                       <div class="row">
                           <div class="col-md-2">
                               <div class="mb-3">
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="provider_enabled" name="enabled">
+                                      <label class="form-check-label" for="provider_enabled">
+                                          Enabled
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="provider_posting" name="posting_enabled">
+                                      <label class="form-check-label" for="provider_posting">
+                                          Posting
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                      </div>
+                      <hr class="my-3">
+                      <div class="row">
+                          <div class="col-md-2">
+                              <div class="mb-3">
                                   <label for="provider_name" class="form-label">Name</label>
                                   <input autocomplete="off" type="text" class="form-control" id="provider_name" name="name" required
                                          placeholder="Provider name">
                               </div>
                           </div>
+                          <!-- disabled for now. no support for grouping provider accounts into one...
                           <div class="col-md-2">
                               <div class="mb-3">
                                   <label for="provider_grp" class="form-label">Group</label>
@@ -321,6 +349,7 @@
                                          placeholder="Prov-Group">
                               </div>
                           </div>
+                          -->
                           <div class="col-md-3">
                               <div class="mb-3">
                                   <label for="provider_host" class="form-label">Host</label>
@@ -345,29 +374,8 @@
                                   </div>
                               </div>
                           </div>
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_enabled" class="form-label">Enabled</label>
-                                  <div class="form-check mt-2">
-                                      <input class="form-check-input" type="checkbox" id="provider_enabled" name="enabled" checked>
-                                      <label class="form-check-label" for="provider_enabled">
-                                          Enable
-                                      </label>
-                                  </div>
-                              </div>
-                          </div>
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_posting" class="form-label">Posting</label>
-                                  <div class="form-check mt-2">
-                                      <input class="form-check-input" type="checkbox" id="provider_posting" name="posting_enabled">
-                                      <label class="form-check-label" for="provider_posting">
-                                          Allow Posting
-                                      </label>
-                                  </div>
-                              </div>
-                          </div>
                       </div>
+                      <hr class="my-3">
                       <div class="row">
                           <div class="col-md-3">
                               <div class="mb-3">
@@ -383,6 +391,9 @@
                                          placeholder="Optional">
                               </div>
                           </div>
+                      </div>
+                      <hr class="my-3">
+                      <div class="row">
                           <div class="col-md-2">
                               <div class="mb-3">
                                   <label for="provider_max_conns" class="form-label">Max Connections</label>
@@ -402,6 +413,8 @@
                               </div>
                           </div>
                       </div>
+
+                      <hr class="my-3">
 
                       <!-- Proxy Configuration Section -->
                       <div class="row mt-3">
