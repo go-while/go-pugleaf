@@ -19,6 +19,7 @@ var appVersion = "-unset-"
 
 func main() {
 	config.AppVersion = appVersion
+	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("go-pugleaf NNTP User Manager (version: %s)", config.AppVersion)
 	var (
 		createUser = flag.Bool("create", false, "Create a new NNTP user")

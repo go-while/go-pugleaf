@@ -41,7 +41,11 @@ func showUsageExamples() {
 	fmt.Println()
 }
 
+var appVersion = "-unset-"
+
 func main() {
+	config.AppVersion = appVersion
+	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("Starting go-pugleaf NNTP Transfer Tool (version %s)", config.AppVersion)
 
 	// Command line flags for NNTP transfer configuration

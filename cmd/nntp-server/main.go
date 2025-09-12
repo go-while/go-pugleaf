@@ -29,9 +29,6 @@ var appVersion = "-unset-"
 func main() {
 	config.AppVersion = appVersion
 	log.Printf("Starting go-pugleaf dedicated NNTP Server (version: %s)", config.AppVersion)
-	// Example configuration
-	mainConfig := config.NewDefaultConfig()
-	log.Printf("Starting go-pugleaf dedicated NNTP Server (version: %s)", appVersion)
 
 	flag.StringVar(&hostnamePath, "nntphostname", "", "Your hostname must be set!")
 	flag.IntVar(&nntptcpport, "nntptcpport", 0, "NNTP TCP port")
@@ -42,6 +39,7 @@ func main() {
 	flag.IntVar(&maxConnections, "maxconnections", 500, "allow max of N authenticated connections (default: 500)")
 	flag.Parse()
 
+	mainConfig := config.NewDefaultConfig()
 	mainConfig.Server.NNTP.Enabled = true
 	// Override config with command-line flags if provided
 	if nntptcpport > 0 {

@@ -30,7 +30,7 @@ var appVersion = "-unset-"
 
 func main() {
 	config.AppVersion = appVersion
-	database.FETCH_MODE = true // prevents booting caches
+	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("go-pugleaf Database Recovery Tool (version: %s)", config.AppVersion)
 	var (
 		dbPath         = flag.String("db", "data", "Data Path to main data directory (required)")

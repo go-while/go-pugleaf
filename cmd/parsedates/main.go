@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
@@ -14,6 +15,7 @@ var appVersion = "-unset-"
 
 func main() {
 	config.AppVersion = appVersion
+	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("go-pugleaf Date Parser (version: %s)", config.AppVersion)
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: parsedates \"date string\"")

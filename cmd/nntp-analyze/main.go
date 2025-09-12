@@ -125,6 +125,7 @@ var appVersion = "-unset-"
 
 func main() {
 	config.AppVersion = appVersion
+	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("Starting go-pugleaf NNTP Analyzer (version %s)", config.AppVersion)
 
 	// Command line flags for NNTP server connection

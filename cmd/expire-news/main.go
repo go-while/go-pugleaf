@@ -63,8 +63,8 @@ func showUsageExamples() {
 
 func main() {
 	config.AppVersion = appVersion
+	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("Starting go-pugleaf News Expiration Tool (version %s)", appVersion)
-
 	// Command line flags
 	var (
 		targetGroup   = flag.String("group", "", "Newsgroup to expire ('$all', specific group, or wildcard like news.*)")

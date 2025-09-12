@@ -51,7 +51,7 @@ var appVersion = "-unset-"
 func main() {
 	config.AppVersion = appVersion
 	database.DBidleTimeOut = 15 * time.Second
-	database.FETCH_MODE = true // prevents booting caches
+	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("Starting go-pugleaf NNTP Fetcher (version %s)", config.AppVersion)
 	// Command line flags for NNTP fetcher configuration
 	var newsgroups []*models.Newsgroup

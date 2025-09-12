@@ -17,7 +17,7 @@ var GroupHashMap *GHmap // Global variable for group hash map
 
 var ENABLE_ARTICLE_CACHE = true
 var NNTP_AUTH_CACHE_TIME = 15 * time.Minute
-var FETCH_MODE = false // set true in fetcher/main.go
+var NO_CACHE_BOOT = false // set true in fetcher/main.go
 
 var SQLITE_cache_size = 2000 // 2000 pages or -2000 = 2 MB
 var SQLITE_busy_timeout = 30000
@@ -155,8 +155,8 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 		}
 	}
 	db.StopChan = make(chan struct{}, 1) // Channel to signal shutdown (will get closed)
-	log.Printf("pugLeaf DB init config: %+v FETCH_MODE=%t", dbconfig, FETCH_MODE)
-	if !FETCH_MODE {
+	log.Printf("pugLeaf DB init config: %+v NO_CACHE_BOOT=%t", dbconfig, NO_CACHE_BOOT)
+	if !NO_CACHE_BOOT {
 		db.SectionsCache = NewGroupSectionDBCache()
 		db.MemThreadCache = NewMemCachedThreads()
 		db.HierarchyCache = NewHierarchyCache() // Initialize hierarchy cache for fast browsing
