@@ -781,9 +781,6 @@ func reconstructHeaders(article *models.Article) ([]string, error) {
 		}
 		headers = append(headers, headerLine)
 	}
-	if ignoredLines > 0 {
-		log.Printf("Ignored %d lines while reconstructing headers for msgId='%s'", ignoredLines, article.MessageID)
-	}
-	log.Printf("Reconstructed %d headers, ignored %d lines for msgId='%s'", len(headers), ignoredLines, article.MessageID)
+	log.Printf("Reconstructed %d header lines, ignored %d: msgId='%s'", len(headers), ignoredLines, article.MessageID)
 	return headers, nil
 }
