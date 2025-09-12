@@ -1,193 +1,6 @@
 {{define "admin_providers"}}
 <!-- Providers Tab -->
 <div class="tab-pane fade show active" id="providers" role="tabpanel" aria-labelledby="providers-tab">
-  <!-- Provider Management -->
-  <div class="row mt-3">
-      <div class="col-12">
-          <div class="card">
-              <div class="card-header bg-dark text-white">
-                  <h5 class="card-title mb-0">🌐 Add News Server / Provider</h5>
-              </div>
-              <div class="card-body">
-                  <form autocomplete="off" method="POST" action="/admin/providers?tab=providers">
-                      <input autocomplete="false" name="hidden" type="text" style="display:none;">
-                      <div class="row">
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_name" class="form-label">Name</label>
-                                  <input autocomplete="off" type="text" class="form-control" id="provider_name" name="name" required
-                                         placeholder="Provider name">
-                              </div>
-                          </div>
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_grp" class="form-label">Group</label>
-                                  <input autocomplete="off" type="text" class="form-control" id="provider_grp" name="grp"
-                                         placeholder="Prov-Group">
-                              </div>
-                          </div>
-                          <div class="col-md-3">
-                              <div class="mb-3">
-                                  <label for="provider_host" class="form-label">Host</label>
-                                  <input autocomplete="off" type="text" class="form-control" id="provider_host" name="host" required
-                                         placeholder="news.example.com">
-                              </div>
-                          </div>
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_port" class="form-label">Port</label>
-                                  <input autocomplete="off" type="number" class="form-control" id="provider_port" name="port" value="119" required>
-                              </div>
-                          </div>
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_ssl" class="form-label">SSL</label>
-                                  <div class="form-check mt-2">
-                                      <input class="form-check-input" type="checkbox" id="provider_ssl" name="ssl">
-                                      <label class="form-check-label" for="provider_ssl">
-                                          Use SSL
-                                      </label>
-                                  </div>
-                              </div>
-                          </div>
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_enabled" class="form-label">Enabled</label>
-                                  <div class="form-check mt-2">
-                                      <input class="form-check-input" type="checkbox" id="provider_enabled" name="enabled" checked>
-                                      <label class="form-check-label" for="provider_enabled">
-                                          Enable
-                                      </label>
-                                  </div>
-                              </div>
-                          </div>
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_posting" class="form-label">Posting</label>
-                                  <div class="form-check mt-2">
-                                      <input class="form-check-input" type="checkbox" id="provider_posting" name="posting_enabled">
-                                      <label class="form-check-label" for="provider_posting">
-                                          Allow Posting
-                                      </label>
-                                  </div>
-                              </div>
-                          </div>
-                      </div>
-                      <div class="row">
-                          <div class="col-md-3">
-                              <div class="mb-3">
-                                  <label for="provider_username" class="form-label">Username</label>
-                                  <input autocomplete="off" type="text" class="form-control" id="provider_username" name="username"
-                                         placeholder="Optional">
-                              </div>
-                          </div>
-                          <div class="col-md-3">
-                              <div class="mb-3">
-                                  <label for="provider_password" class="form-label">Password</label>
-                                  <input autocomplete="new-password" type="password" class="form-control" id="provider_password" name="password"
-                                         placeholder="Optional">
-                              </div>
-                          </div>
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_max_conns" class="form-label">Max Connections</label>
-                                  <input type="number" class="form-control" id="provider_max_conns" name="max_conns" value="5" min="1" max="1000">
-                              </div>
-                          </div>
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_priority" class="form-label">Priority</label>
-                                  <input type="number" class="form-control" id="provider_priority" name="priority" value="50" min="1" max="100">
-                              </div>
-                          </div>
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_max_art_size" class="form-label">Max Article Size (Bytes)</label>
-                                  <input type="number" class="form-control" id="provider_max_art_size" name="max_art_size" value="32768" min="1" max="16777216">
-                              </div>
-                          </div>
-                      </div>
-
-                      <!-- Proxy Configuration Section -->
-                      <div class="row mt-3">
-                          <div class="col-12">
-                              <h6 class="text-muted">🔒 Proxy Configuration (Optional)</h6>
-                              <small class="text-muted">Configure SOCKS proxy settings. For Tor: use SOCKS5 with localhost:9050</small>
-                          </div>
-                      </div>
-
-                      <div class="row">
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_proxy_enabled" class="form-label">Enable Proxy</label>
-                                  <div class="form-check mt-2">
-                                      <input class="form-check-input" type="checkbox" id="provider_proxy_enabled" name="proxy_enabled">
-                                      <label class="form-check-label" for="provider_proxy_enabled">
-                                          Use Proxy
-                                      </label>
-                                  </div>
-                              </div>
-                          </div>
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_proxy_type" class="form-label">Proxy Type</label>
-                                  <select class="form-control" id="provider_proxy_type" name="proxy_type">
-                                      <option value="socks5">SOCKS5 (including Tor)</option>
-                                      <option value="socks4">SOCKS4</option>
-                                  </select>
-                              </div>
-                          </div>
-                      </div>
-
-                      <div class="row">
-                          <div class="col-md-3">
-                              <div class="mb-3">
-                                  <label for="provider_proxy_host" class="form-label">Proxy Host</label>
-                                  <input type="text" class="form-control" id="provider_proxy_host" name="proxy_host"
-                                         placeholder="127.0.0.1 (for Tor) or proxy.example.com">
-                              </div>
-                          </div>
-                          <div class="col-md-2">
-                              <div class="mb-3">
-                                  <label for="provider_proxy_port" class="form-label">Proxy Port</label>
-                                  <input type="number" class="form-control" id="provider_proxy_port" name="proxy_port"
-                                         placeholder="9050 (Tor default)" min="1" max="65535">
-                              </div>
-                          </div>
-                      </div>
-
-                      <div class="row">
-                          <div class="col-md-3">
-                              <div class="mb-3">
-                                  <label for="provider_proxy_username" class="form-label">Proxy Username</label>
-                                  <input type="text" class="form-control" id="provider_proxy_username" name="proxy_username"
-                                         placeholder="Optional for authenticated proxies">
-                              </div>
-                          </div>
-                          <div class="col-md-3">
-                              <div class="mb-3">
-                                  <label for="provider_proxy_password" class="form-label">Proxy Password</label>
-                                  <input type="password" class="form-control" id="provider_proxy_password" name="proxy_password"
-                                         placeholder="Optional for authenticated proxies">
-                              </div>
-                          </div>
-                          <div class="col-md-9">
-                              <div class="mb-3">
-                                  <small class="text-muted">
-                                      <strong>Tor Configuration:</strong> For Tor/Onion access, use SOCKS5 with host 127.0.0.1 and port 9050 (default Tor proxy).<br>
-                                      <strong>.onion addresses:</strong> You can use .onion addresses directly in the Host field above when proxy is enabled.<br>
-                                  </small>
-                              </div>
-                          </div>
-                      </div>
-
-                      <button type="submit" class="btn btn-success">Add Provider</button>
-                  </form>
-              </div>
-          </div>
-      </div>
-  </div>
-
   <!-- Provider List -->
   <div class="row mt-3">
       <div class="col-12">
@@ -481,6 +294,193 @@
               </div>
           </div>
       </div>
-  </div>
+  </div><!-- end Provider List -->
+
+  <!-- Add Provider -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h5 class="card-title mb-0">🌐 Add News Server / Provider</h5>
+              </div>
+              <div class="card-body">
+                  <form autocomplete="off" method="POST" action="/admin/providers?tab=providers">
+                      <input autocomplete="false" name="hidden" type="text" style="display:none;">
+                      <div class="row">
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_name" class="form-label">Name</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="provider_name" name="name" required
+                                         placeholder="Provider name">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_grp" class="form-label">Group</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="provider_grp" name="grp"
+                                         placeholder="Prov-Group">
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="provider_host" class="form-label">Host</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="provider_host" name="host" required
+                                         placeholder="news.example.com">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_port" class="form-label">Port</label>
+                                  <input autocomplete="off" type="number" class="form-control" id="provider_port" name="port" value="119" required>
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_ssl" class="form-label">SSL</label>
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="provider_ssl" name="ssl">
+                                      <label class="form-check-label" for="provider_ssl">
+                                          Use SSL
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_enabled" class="form-label">Enabled</label>
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="provider_enabled" name="enabled" checked>
+                                      <label class="form-check-label" for="provider_enabled">
+                                          Enable
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_posting" class="form-label">Posting</label>
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="provider_posting" name="posting_enabled">
+                                      <label class="form-check-label" for="provider_posting">
+                                          Allow Posting
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                      </div>
+                      <div class="row">
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="provider_username" class="form-label">Username</label>
+                                  <input autocomplete="off" type="text" class="form-control" id="provider_username" name="username"
+                                         placeholder="Optional">
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="provider_password" class="form-label">Password</label>
+                                  <input autocomplete="new-password" type="password" class="form-control" id="provider_password" name="password"
+                                         placeholder="Optional">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_max_conns" class="form-label">Max Connections</label>
+                                  <input type="number" class="form-control" id="provider_max_conns" name="max_conns" value="5" min="1" max="1000">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_priority" class="form-label">Priority</label>
+                                  <input type="number" class="form-control" id="provider_priority" name="priority" value="50" min="1" max="100">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_max_art_size" class="form-label">Max Article Size (Bytes)</label>
+                                  <input type="number" class="form-control" id="provider_max_art_size" name="max_art_size" value="32768" min="1" max="16777216">
+                              </div>
+                          </div>
+                      </div>
+
+                      <!-- Proxy Configuration Section -->
+                      <div class="row mt-3">
+                          <div class="col-12">
+                              <h6 class="text-muted">🔒 Proxy Configuration (Optional)</h6>
+                              <small class="text-muted">Configure SOCKS proxy settings. For Tor: use SOCKS5 with localhost:9050</small>
+                          </div>
+                      </div>
+
+                      <div class="row">
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_proxy_enabled" class="form-label">Enable Proxy</label>
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="provider_proxy_enabled" name="proxy_enabled">
+                                      <label class="form-check-label" for="provider_proxy_enabled">
+                                          Use Proxy
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_proxy_type" class="form-label">Proxy Type</label>
+                                  <select class="form-control" id="provider_proxy_type" name="proxy_type">
+                                      <option value="socks5">SOCKS5 (including Tor)</option>
+                                      <option value="socks4">SOCKS4</option>
+                                  </select>
+                              </div>
+                          </div>
+                      </div>
+
+                      <div class="row">
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="provider_proxy_host" class="form-label">Proxy Host</label>
+                                  <input type="text" class="form-control" id="provider_proxy_host" name="proxy_host"
+                                         placeholder="127.0.0.1 (for Tor) or proxy.example.com">
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="provider_proxy_port" class="form-label">Proxy Port</label>
+                                  <input type="number" class="form-control" id="provider_proxy_port" name="proxy_port"
+                                         placeholder="9050 (Tor default)" min="1" max="65535">
+                              </div>
+                          </div>
+                      </div>
+
+                      <div class="row">
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="provider_proxy_username" class="form-label">Proxy Username</label>
+                                  <input type="text" class="form-control" id="provider_proxy_username" name="proxy_username"
+                                         placeholder="Optional for authenticated proxies">
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="provider_proxy_password" class="form-label">Proxy Password</label>
+                                  <input type="password" class="form-control" id="provider_proxy_password" name="proxy_password"
+                                         placeholder="Optional for authenticated proxies">
+                              </div>
+                          </div>
+                          <div class="col-md-9">
+                              <div class="mb-3">
+                                  <small class="text-muted">
+                                      <strong>Tor Configuration:</strong> For Tor/Onion access, use SOCKS5 with host 127.0.0.1 and port 9050 (default Tor proxy).<br>
+                                      <strong>.onion addresses:</strong> You can use .onion addresses directly in the Host field above when proxy is enabled.<br>
+                                  </small>
+                              </div>
+                          </div>
+                      </div>
+
+                      <button type="submit" class="btn btn-success">Add Provider</button>
+                  </form>
+              </div>
+          </div>
+      </div>
+  </div><!-- end Add Provider -->
 </div>
 {{end}}
