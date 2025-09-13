@@ -253,7 +253,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	article := &models.Article{
 		MessageID:   generateMessageID(), // We'll need to implement this
 		Subject:     subject,
-		FromHeader:  fmt.Sprintf("%s <%s>", user.DisplayName, user.Email),
+		FromHeader:  fmt.Sprintf("%s <%s>", user.DisplayName, user.DisplayName+"@"+processor.LocalNNTPHostname),
 		DateString:  time.Now().Format(time.RFC1123Z),
 		DateSent:    time.Now(),
 		BodyText:    body,
