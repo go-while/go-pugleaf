@@ -12,7 +12,7 @@ import (
 
 // Hierarchy represents a Usenet hierarchy (e.g., comp, alt, rec)
 type Hierarchy struct {
-	ID          int       `json:"id" db:"id"`
+	ID          int64     `json:"id" db:"id"`
 	Name        string    `json:"name" db:"name"`
 	Description string    `json:"description" db:"description"`
 	GroupCount  int       `json:"group_count" db:"group_count"`
@@ -22,7 +22,7 @@ type Hierarchy struct {
 
 // Provider represents an NNTP provider configuration
 type Provider struct {
-	ID         int    `json:"id" db:"id"`
+	ID         int64  `json:"id" db:"id"`
 	Enabled    bool   `json:"enabled" db:"enabled"`   // Whether this provider is enabled
 	Priority   int    `json:"priority" db:"priority"` // Priority for load balancing
 	Grp        string `json:"grp" db:"grp"`
@@ -47,7 +47,7 @@ type Provider struct {
 
 // Newsgroup represents a subscribed newsgroup
 type Newsgroup struct {
-	ID           int    `json:"id" db:"id"`
+	ID           int64  `json:"id" db:"id"`
 	Name         string `json:"name" db:"name"`
 	Active       bool   `json:"active" db:"active"`
 	Description  string `json:"description" db:"description"`

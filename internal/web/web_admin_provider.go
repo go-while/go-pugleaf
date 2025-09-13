@@ -240,7 +240,7 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 	}
 
 	// Parse ID
-	id, err := strconv.Atoi(idStr)
+	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		session.SetError("Invalid provider ID")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")

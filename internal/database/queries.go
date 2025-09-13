@@ -1183,7 +1183,7 @@ func (db *Database) GetProviderByName(name string) (*models.Provider, error) {
 const query_GetProviderByID = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting, proxy_enabled, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password
 	          FROM providers WHERE id = ? LIMIT 1`
 
-func (db *Database) GetProviderByID(id int) (*models.Provider, error) {
+func (db *Database) GetProviderByID(id int64) (*models.Provider, error) {
 	row := db.mainDB.QueryRow(query_GetProviderByID, id)
 	var provider models.Provider
 	err := row.Scan(&provider.ID, &provider.Name, &provider.Grp, &provider.Host, &provider.Port,
