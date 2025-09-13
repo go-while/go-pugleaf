@@ -79,16 +79,30 @@ func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 
 	log.Printf("Found %d pending posts to process", len(entries))
 
+	var failedEntryIDs []int64
+
 	// Process each entry
 	for _, entry := range entries {
 		select {
 		case <-pm.stopCh:
 			log.Printf("PosterManager: Stopping due to shutdown signal")
+			// Reset processing state for any remaining entries
+			if len(failedEntryIDs) > 0 {
+				pm.db.ResetPostQueueProcessing(failedEntryIDs)
+			}
 			return 0, nil
 		default:
 			if err := pm.processEntry(entry); err != nil {
 				log.Printf("Failed to process entry %d (message: %s): %v", entry.ID, entry.MessageID, err)
+				failedEntryIDs = append(failedEntryIDs, entry.ID)
 			}
+		}
+	}
+
+	// Reset processing state for failed entries
+	if len(failedEntryIDs) > 0 {
+		if err := pm.db.ResetPostQueueProcessing(failedEntryIDs); err != nil {
+			log.Printf("Failed to reset processing state for failed entries: %v", err)
 		}
 	}
 
