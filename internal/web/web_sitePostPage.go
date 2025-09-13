@@ -262,7 +262,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		IsReply:     isReply,
 		Lines:       strings.Count(body, "\n") + 1,
 		Bytes:       len(body),
-		Path:        fmt.Sprintf("pugleaf.local!%s", user.Username), // Local path
+		Path:        fmt.Sprintf("%s!.POSTED!not-for-mail", processor.LocalNNTPHostname),
 		ArticleNums: make(map[*string]int64),
 		RefSlice:    []string{},
 	}
