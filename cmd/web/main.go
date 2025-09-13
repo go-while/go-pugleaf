@@ -437,6 +437,13 @@ func main() {
 		go FetchRoutine(db, proc, finalUseShortHashLen, true, isleep, DLParChan, progressDB) // Start the processor routine in a separate goroutine
 	}
 
+	var postQueueWorker *processor.PostQueueWorker
+	if proc != nil {
+		postQueueWorker = proc.NewPostQueueWorker()
+		postQueueWorker.Start()
+		log.Printf("[WEB]: PostQueueWorker started for web posting")
+	}
+
 	// Create and start web server in a goroutine for non-blocking startup
 	server := web.NewServer(db, webConfig, nntpServer)
 
@@ -480,6 +487,14 @@ func main() {
 			log.Printf("[WEB]: NNTP server stopped successfully")
 		}
 	}
+
+	// Stop PostQueueWorker if running
+	if postQueueWorker != nil {
+		log.Printf("[WEB]: Stopping PostQueueWorker...")
+		postQueueWorker.Stop()
+		log.Printf("[WEB]: PostQueueWorker stopped")
+	}
+
 	// Signal background tasks to stop
 	close(db.StopChan)
 
