@@ -322,10 +322,6 @@
           </div>
       </div>
 
-
-
-
-
       <!-- NNTP Auth Cache Statistics -->
       <div class="col-md-3">
           {{if .NNTPAuthCacheStats}}
@@ -540,20 +536,54 @@
                           </form>
                           {{end}}
                       </div>
-                    <!--
-                      <div class="col-md-6">
-                          <h6>Navigation</h6>
-                          <p class="text-muted small">View and manage Usenet hierarchies</p>
-                          <a href="/hierarchies" class="btn btn-outline-secondary btn-sm">
-                              <i class="bi bi-diagram-3 me-1"></i>View Hierarchies
-                          </a>
+                  </div>
+                  <div class="row mt-3">
+                      <div class="col-md-12">
+                          <h6>NNTP Hostname Configuration</h6>
+                          <p class="text-muted small">Set the NNTP hostname for the server</p>
+                          <p class="text-muted small">Restart Webserver and pugleaf-fetcher when updating the hostname!</p>
+                          <form action="/admin/hostname/set" method="post" class="row g-2">
+                              <div class="col-md-8">
+                                  <input type="text" class="form-control form-control-sm" name="hostname"
+                                         placeholder="Enter NNTP hostname (e.g., news.example.com)"
+                                         value="{{.CurrentHostname}}">
+                              </div>
+                              <div class="col-md-4">
+                                  <button type="submit" class="btn btn-outline-primary btn-sm">
+                                      <i class="bi bi-gear me-1"></i>Set Hostname
+                                  </button>
+                              </div>
+                          </form>
+                          {{if .CurrentHostname}}
+                          <small class="text-muted">Current hostname: <strong>{{.CurrentHostname}}</strong></small>
+                          {{else}}
+                          <small class="text-muted">No hostname configured</small>
+                          {{end}}
                       </div>
-                    -->
+                  </div>
+                  <div class="row mt-3">
+                      <div class="col-md-12">
+                          <h6>Web Post Article Size Limit</h6>
+                          <p class="text-muted small">Set the maximum size limit for articles posted via web interface (in bytes)</p>
+                          <form action="/admin/webpostsize/set" method="post" class="row g-2">
+                              <div class="col-md-8">
+                                  <input type="number" class="form-control form-control-sm" name="size"
+                                         placeholder="Enter max article size in bytes (e.g., 32768)"
+                                         value="{{.WebPostMaxArticleSize}}" min="1024" max="16777216">
+                              </div>
+                              <div class="col-md-4">
+                                  <button type="submit" class="btn btn-outline-primary btn-sm">
+                                      <i class="bi bi-gear me-1"></i>Set Max Size
+                                  </button>
+                              </div>
+                          </form>
+                          <small class="text-muted">Current limit: <strong>{{.WebPostMaxArticleSize}} bytes</strong> ({{if eq .WebPostMaxArticleSize "32768"}}32KB{{else if eq .WebPostMaxArticleSize "65536"}}64KB{{else}}{{.WebPostMaxArticleSize}} bytes{{end}})</small>
+                      </div>
                   </div>
               </div>
           </div>
       </div>
-  </div>
+  </div><!-- Maintenance Utilities -->
 </div>
 
 {{end}}

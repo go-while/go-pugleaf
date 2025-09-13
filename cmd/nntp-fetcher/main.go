@@ -60,7 +60,7 @@ func main() {
 		maxBatch           = flag.Int("max-batch", 128, "Maximum number of articles to process in a batch (recommended: 100)")
 		maxQueued          = flag.Int("max-queue", 16384, "Limit db_batch to have max N articles queued over all newsgroups")
 		fetchNewsgroup     = flag.String("group", "", "Newsgroup to fetch (default: empty = all groups once up to max-batch) or rocksolid.* with final wildcard to match prefix.*")
-		hostnamePath       = flag.String("nntphostname", "", "Your hostname must be set!")
+		nntphostname       = flag.String("nntphostname", "", "Your hostname must be set!")
 		useShortHashLenPtr = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
 		fetchActiveOnly    = flag.Bool("fetch-active-only", true, "Fetch only active newsgroups (default: true)")
 		downloadMaxPar     = flag.Int("download-max-par", 1, "run this many groups in parallel, can eat your memory! (default: 1)")
@@ -102,9 +102,6 @@ func main() {
 	if *maxBatch > 1000 {
 		log.Printf("[WARN] max batch: %d (should be between 100 and 1000)", *maxBatch)
 	}
-	if *hostnamePath == "" {
-		log.Fatalf("[NNTP]: Error: hostname must be set!")
-	}
 	// Validate command-line flag
 	if *useShortHashLenPtr < 2 || *useShortHashLenPtr > 7 {
 		log.Fatalf("Invalid UseShortHashLen: %d (must be between 2 and 7)", *useShortHashLenPtr)
@@ -115,14 +112,13 @@ func main() {
 	database.MaxBatchSize = *maxBatch
 	database.MaxQueued = *maxQueued
 	nntp.MaxReadLinesXover = int64(*maxBatch)
-	processor.LocalHostnamePath = *hostnamePath
 	processor.MaxBatchSize = int64(*maxBatch)
 	//processor.LOOPS_PER_GROUPS = *maxLoops
 
 	// Set global max read lines for xover
 
 	mainConfig := config.NewDefaultConfig()
-	mainConfig.Server.Hostname = *hostnamePath
+	mainConfig.Server.Hostname = *nntphostname
 
 	// Initialize database (default config, data in ./data)
 	db, err := database.OpenDatabase(nil)
@@ -166,6 +162,11 @@ func main() {
 			log.Printf("WARNING: Command-line UseShortHashLen (%d) differs from stored value (%d). Using stored value to prevent data corruption.", *useShortHashLenPtr, useShortHashLen)
 		}
 		log.Printf("Using stored UseShortHashLen: %d", useShortHashLen)
+	}
+
+	// Set hostname in processor with database fallback support
+	if err := processor.SetHostname(*nntphostname, db); err != nil {
+		log.Fatalf("Failed to set NNTP hostname: %v", err)
 	}
 
 	providers, err := db.GetProviders()

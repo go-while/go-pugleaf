@@ -392,6 +392,8 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/hierarchies/update", s.adminUpdateHierarchies)
 	s.Router.POST("/admin/registration/enable", s.adminEnableRegistration)
 	s.Router.POST("/admin/registration/disable", s.adminDisableRegistration)
+	s.Router.POST("/admin/hostname/set", s.adminSetHostname)
+	s.Router.POST("/admin/webpostsize/set", s.adminSetWebPostSize)
 	// Legacy/admin routes (high priority - must come before dynamic routes)
 	s.Router.GET("/", s.homePage)
 	s.Router.GET("/groups", s.groupsPage)                                                // groups listing
@@ -428,6 +430,8 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/SiteNews/", s.newsPage)
 	s.Router.GET("/SiteIRC", s.ircPage)
 	s.Router.GET("/SiteIRC/", s.ircPage)
+	s.Router.POST("/SitePost", s.sitePostPage)         // Handle POST for form display
+	s.Router.POST("/SitePostSubmit", s.sitePostSubmit) // Handle form submission
 	s.Router.GET("/sections", s.sectionsPage)
 	s.Router.GET("/sections/", s.sectionsPage)
 

@@ -11,18 +11,6 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-var MaxCrossPosts = 15 // HARDCODED Maximum number of crossposts to allow per article
-
-var LocalHostnamePath = "" // Hostname must be set before processing articles
-/*
-var (
-
-	processedArticleCount int64
-	lastGCTime            time.Time
-	gcMutex               sync.Mutex
-
-)
-*/
 const DefaultArticleItemPath = "no-path!not-for-mail"
 
 // Removed all object pools - they were causing race conditions and data corruption
@@ -224,9 +212,9 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 	}
 	if article.Path == "" {
 		//log.Printf("[WARN:OLD] Article '%s' empty path... ?! headers='%#v'", article.MessageID, article.Headers)
-		article.Path = LocalHostnamePath + "!" + DefaultArticleItemPath
+		article.Path = LocalNNTPHostname + "!" + DefaultArticleItemPath
 	} else {
-		article.Path = LocalHostnamePath + "!" + article.Path // Ensure path is prefixed with hostname
+		article.Path = LocalNNTPHostname + "!" + article.Path // Ensure path is prefixed with hostname
 	}
 
 	// Free memory from transient fields after extracting what we need

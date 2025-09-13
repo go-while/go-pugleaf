@@ -151,9 +151,13 @@ func main() {
 		return
 	}
 
+	// Set hostname in processor with database fallback support
+	if err := processor.SetHostname(*nntpHostname, db); err != nil {
+		log.Fatalf("Failed to set NNTP hostname: %v", err)
+	}
+
 	// Initialize processor with proper cache management
 	fmt.Println("🔧 Initializing processor for cache management...")
-	processor.LocalHostnamePath = *nntpHostname
 	proc := processor.NewProcessor(db, nil, lockedHashLen) // nil pool since we're not fetching
 	// Set up the date parser adapter to use processor's ParseNNTPDate
 	database.GlobalDateParser = processor.ParseNNTPDate

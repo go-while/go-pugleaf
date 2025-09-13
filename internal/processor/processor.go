@@ -34,6 +34,9 @@ type Processor struct {
 
 var (
 	// these list of ' var ' can be set after importing the lib before starting!!
+	MaxCrossPosts int = 15 // HARDCODED Maximum number of crossposts to allow per article
+
+	LocalNNTPHostname string = "" // Hostname must be set before processing articles
 
 	// MaxBatch defines the maximum number of articles to fetch in a single batch
 	MaxBatchSize int64 = 128
@@ -64,12 +67,15 @@ var (
 )
 
 func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen int) *Processor {
-	if LocalHostnamePath == "" {
-		log.Fatalf("FATAL: LocalHostnamePath is not set, please configure the hostname before starting the processor")
+	if LocalNNTPHostname == "" {
+		// Try to get hostname from database if not set
+		if err := SetHostname("", db); err != nil {
+			log.Fatalf("FATAL: LocalNNTPHostname is not set and could not retrieve from database: %v", err)
+		}
 	}
 
 	// Perform comprehensive hostname validation (similar to INN2)
-	if err := validateHostname(LocalHostnamePath); err != nil {
+	if err := validateHostname(LocalNNTPHostname); err != nil {
 		log.Fatalf("FATAL: Hostname validation failed: %v", err)
 	}
 	// Ensure main database exists and is properly set up before any import operations
@@ -296,19 +302,51 @@ func (proc *Processor) DisableBridges() {
 
 // SetHostname sets and validates the hostname for NNTP operations
 // This must be called before creating a new processor
-func SetHostname(hostname string) error {
-	if err := validateHostname(hostname); err != nil {
-		return fmt.Errorf("hostname validation failed: %v", err)
+// If hostname is empty, it will attempt to retrieve it from the database
+// If hostname is provided, it will be saved to the database and used
+func SetHostname(hostname string, db *database.Database) error {
+	if db == nil {
+		return fmt.Errorf("database is required for hostname operations")
 	}
 
-	LocalHostnamePath = hostname
-	log.Printf("Hostname set and validated: %s", hostname)
+	// If hostname is provided, validate and save it to database
+	if hostname != "" {
+		if err := validateHostname(hostname); err != nil {
+			return fmt.Errorf("hostname validation failed: %v", err)
+		}
+
+		// Save hostname to database
+		if err := db.SetConfigValue("local_nntp_hostname", hostname); err != nil {
+			return fmt.Errorf("failed to save hostname to database: %v", err)
+		}
+
+		LocalNNTPHostname = hostname
+		log.Printf("Hostname set, validated, and saved to database: %s", hostname)
+		return nil
+	}
+
+	// If no hostname provided, try to get from database
+	dbHostname, err := db.GetConfigValue("local_nntp_hostname")
+	if err != nil {
+		return fmt.Errorf("failed to retrieve hostname from database: %v", err)
+	}
+
+	if dbHostname == "" {
+		return fmt.Errorf("hostname is empty and no hostname configured in database")
+	}
+
+	if err := validateHostname(dbHostname); err != nil {
+		return fmt.Errorf("database hostname validation failed: %v", err)
+	}
+
+	LocalNNTPHostname = dbHostname
+	log.Printf("Using hostname from database: %s", dbHostname)
 	return nil
 }
 
 // GetHostname returns the currently configured hostname
 func GetHostname() string {
-	return LocalHostnamePath
+	return LocalNNTPHostname
 }
 
 // validateHostname performs comprehensive hostname validation similar to INN2

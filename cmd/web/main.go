@@ -25,7 +25,7 @@ var (
 	webmutex sync.Mutex
 
 	// command-line flags
-	hostnamePath          string
+	nntphostname          string
 	isleep                int64
 	webport               int
 	webssl                bool
@@ -96,7 +96,7 @@ func main() {
 	//flag.BoolVar(&withfetch, "withfetch", false, "Enable internal Cronjob to fetch new articles")
 	//flag.Int64Var(&isleep, "isleep", 300, "Sleeps in fetch routines. if started with: -withfetch (default: 300 seconds = 5min)")
 	//flag.Int64Var(&ignoreInitialTinyGroups, "ignore-initial-tiny-groups", 0, "If > 0: initial fetch ignores tiny groups with fewer articles than this (default: 0)")
-	flag.StringVar(&hostnamePath, "nntphostname", "", "your hostname must be set")
+	flag.StringVar(&nntphostname, "nntphostname", "", "your hostname must be set")
 	flag.StringVar(&webcertFile, "websslcert", "", "SSL certificate file (/path/to/fullchain.pem)")
 	flag.StringVar(&webkeyFile, "websslkey", "", "SSL key file (/path/to/privkey.pem)")
 	flag.IntVar(&nntptcpport, "nntptcpport", 0, "NNTP TCP port")
@@ -186,11 +186,7 @@ func main() {
 		log.Printf("[WEB]: No NNTP TLS port flag provided")
 	}
 
-	if hostnamePath == "" && (withfetch || withnntp) {
-		log.Fatalf("[WEB]: Error: hostname must be set when starting with -withfetch or -withnntp")
-	}
-	mainConfig.Server.Hostname = hostnamePath
-	processor.LocalHostnamePath = hostnamePath
+	mainConfig.Server.Hostname = nntphostname
 	log.Printf("[WEB]: Using NNTP configuration %#v", mainConfig.Server.NNTP)
 
 	// Validate port
@@ -259,6 +255,11 @@ func main() {
 	}
 	//log.Printf("[WEB]: Database migrations applied successfully")
 
+	// Set hostname in processor with database fallback support
+	log.Printf("nntphostname=%s", nntphostname)
+	if err := processor.SetHostname(nntphostname, db); err != nil {
+		log.Fatalf("[WEB]: Failed to set NNTP hostname: %v", err)
+	}
 	// Run future posts hiding migration first if requested
 	if updateNewsgroupsHideFuture {
 		log.Printf("[WEB]: Starting future posts hiding migration...")

@@ -36,10 +36,22 @@
             </div>
             -->
             <div class="card-body">
-                <div class="btn-group" role="group" aria-label="Group Navigation">
-                    <a href="/groups/{{.GroupName}}/threads" class="btn btn-outline-secondary">
-                        <strong>[ Threads ]</strong>
-                    </a>
+                <div class="d-flex justify-content-between align-items-center">
+                    <div class="btn-group" role="group" aria-label="Group Navigation">
+                        <a href="/groups/{{.GroupName}}/threads" class="btn btn-outline-secondary">
+                            <strong>[ Threads ]</strong>
+                        </a>
+                    </div>
+                    {{if .User}}
+                    <div class="btn-group" role="group" aria-label="Post Actions">
+                        <form method="POST" action="/SitePost" style="display: inline;">
+                            <input type="hidden" name="newsgroup" value="{{.GroupName}}">
+                            <button type="submit" class="btn btn-success">
+                                <i class="bi bi-plus-circle me-2"></i>New Thread
+                            </button>
+                        </form>
+                    </div>
+                    {{end}}
                 </div>
             </div>
         </div>

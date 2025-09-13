@@ -1,0 +1,164 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item active" aria-current="page">New Thread</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<div class="row justify-content-center">
+    <div class="col-lg-8 col-md-10">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-plus-circle me-2"></i>Post New Thread
+                </h5>
+            </div>
+            <div class="card-body">
+                {{if .Error}}
+                <div class="alert alert-danger" role="alert">
+                    <i class="bi bi-exclamation-triangle me-2"></i>{{.Error}}
+                </div>
+                {{end}}
+
+                {{if .Success}}
+                <div class="alert alert-success" role="alert">
+                    <i class="bi bi-check-circle me-2"></i>{{.Success}}
+                    <hr>
+                    <p class="mb-0">
+                        <a href="/groups" class="btn btn-outline-primary">Browse Groups</a>
+                        <a href="/SitePost" class="btn btn-outline-secondary">Post Another</a>
+                    </p>
+                </div>
+                {{else}}
+
+                <form method="POST" action="/SitePostSubmit">
+                    <div class="mb-3">
+                        <label for="newsgroups" class="form-label">
+                            <strong>Newsgroups</strong>
+                            <small class="text-muted">(space or comma separated)</small>
+                        </label>
+                        <input type="text"
+                               class="form-control"
+                               id="newsgroups"
+                               name="newsgroups"
+                               value="{{.PrefilledNewsgroup}}"
+                               placeholder="e.g. comp.lang.go alt.test"
+                               required>
+                        <div class="form-text">
+                            Enter one or more newsgroup names separated by spaces or commas.
+                            <br>Examples: <code>comp.lang.go</code>, <code>alt.test misc.test</code>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="subject" class="form-label"><strong>Subject</strong></label>
+                        <input type="text"
+                               class="form-control"
+                               id="subject"
+                               name="subject"
+                               placeholder="Enter subject line"
+                               required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="body" class="form-label"><strong>Message</strong></label>
+                        <textarea class="form-control"
+                                  id="body"
+                                  name="body"
+                                  rows="12"
+                                  placeholder="Enter your message here..."
+                                  required></textarea>
+                        <div class="form-text">
+                            Plain text only. No HTML formatting.
+                            <span class="float-end">
+                                <span id="charCount">0</span> / <span id="maxChars">{{.WebPostMaxArticleSize}}</span> characters
+                                <span id="charStatus" class="ms-1"></span>
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                        <a href="/" class="btn btn-secondary me-md-2">Cancel</a>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="bi bi-send me-2"></i>Post Message
+                        </button>
+                    </div>
+                </form>
+
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
+
+{{if not .Success}}
+<div class="row justify-content-center mt-4">
+    <div class="col-lg-8 col-md-10">
+        <div class="alert alert-info" role="alert">
+            <h6 class="alert-heading">
+                <i class="bi bi-info-circle me-2"></i>Posting Guidelines
+            </h6>
+            <ul class="mb-0">
+                <li>Be respectful and follow newsgroup etiquette</li>
+                <li>Choose appropriate newsgroups for your message</li>
+                <li>Use descriptive subject lines</li>
+                <li>Plain text only - no HTML formatting</li>
+                <li>Your message will be queued and processed shortly</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const bodyTextarea = document.getElementById('body');
+    const charCount = document.getElementById('charCount');
+    const maxChars = document.getElementById('maxChars');
+    const charStatus = document.getElementById('charStatus');
+    const maxCharLimit = parseInt(maxChars.textContent);
+
+    function updateCharCount() {
+        const currentLength = bodyTextarea.value.length;
+        charCount.textContent = currentLength;
+
+        // Update status and styling based on character count
+        if (currentLength === 0) {
+            charStatus.textContent = '';
+            charStatus.className = 'ms-1';
+            bodyTextarea.classList.remove('border-warning', 'border-danger');
+        } else if (currentLength > maxCharLimit) {
+            charStatus.textContent = '⚠️ Too long!';
+            charStatus.className = 'ms-1 text-danger';
+            bodyTextarea.classList.remove('border-warning');
+            bodyTextarea.classList.add('border-danger');
+        } else if (currentLength > maxCharLimit * 0.9) {
+            charStatus.textContent = '⚠️ Nearly full';
+            charStatus.className = 'ms-1 text-warning';
+            bodyTextarea.classList.remove('border-danger');
+            bodyTextarea.classList.add('border-warning');
+        } else {
+            charStatus.textContent = '✓';
+            charStatus.className = 'ms-1 text-success';
+            bodyTextarea.classList.remove('border-warning', 'border-danger');
+        }
+    }
+
+    // Update character count on input
+    bodyTextarea.addEventListener('input', updateCharCount);
+    bodyTextarea.addEventListener('paste', function() {
+        // Slight delay to allow paste content to be processed
+        setTimeout(updateCharCount, 10);
+    });
+
+    // Initial count
+    updateCharCount();
+});
+</script>
+{{end}}
+
+{{end}}

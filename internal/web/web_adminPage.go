@@ -338,37 +338,53 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		registrationEnabled = true // Default to enabled on error
 	}
 
+	// Get current NNTP hostname from database
+	currentHostname, err := s.DB.GetConfigValue("local_nntp_hostname")
+	if err != nil {
+		log.Printf("Failed to get NNTP hostname: %v", err)
+		currentHostname = "" // Default to empty on error
+	}
+
+	// Get current WebPostMaxArticleSize from database
+	webPostMaxSize, err := s.DB.GetConfigValue("WebPostMaxArticleSize")
+	if err != nil {
+		log.Printf("Failed to get WebPostMaxArticleSize: %v", err)
+		webPostMaxSize = "32768" // Default to 32KB on error
+	}
+
 	data := AdminPageData{
-		TemplateData:        s.getBaseTemplateData(c, "Admin Interface"),
-		Users:               users,
-		Newsgroups:          newsgroups,
-		NewsgroupPagination: newsgroupPagination,
-		NewsgroupSearch:     searchTerm,
-		Providers:           providers,
-		APITokens:           apiTokens,
-		AIModels:            aiModels,
-		NNTPUsers:           nntpUsers,
-		SiteNews:            siteNews,
-		Sections:            sections,
-		SectionGroups:       sectionGroups,
-		SpamArticles:        spamArticles,
-		SpamPagination:      spamPagination,
-		CurrentUser:         currentUser,
-		AdminCount:          s.countAdminUsers(users),
-		EnabledTokensCount:  s.countEnabledAPITokens(apiTokens),
-		ActiveSessions:      s.countActiveSessions(),
-		ActiveNNTPUsers:     s.countActiveNNTPUsers(nntpUsers),
-		PostingNNTPUsers:    s.countPostingNNTPUsers(nntpUsers),
-		Uptime:              s.getUptime(),
-		CacheStats:          cacheStats,
-		NewsgroupCacheStats: newsgroupCacheStats,
-		ArticleCacheStats:   articleCacheStats,
-		NNTPAuthCacheStats:  nntpAuthCacheStats,
-		MessageIdCacheStats: messageIdCacheStats,
-		RegistrationEnabled: registrationEnabled,
-		Success:             session.GetSuccess(),
-		Error:               session.GetError(),
-		ActiveTab:           activeTab, // <-- add this field to AdminPageData struct
+		TemplateData:          s.getBaseTemplateData(c, "Admin Interface"),
+		Users:                 users,
+		Newsgroups:            newsgroups,
+		NewsgroupPagination:   newsgroupPagination,
+		NewsgroupSearch:       searchTerm,
+		Providers:             providers,
+		APITokens:             apiTokens,
+		AIModels:              aiModels,
+		NNTPUsers:             nntpUsers,
+		SiteNews:              siteNews,
+		Sections:              sections,
+		SectionGroups:         sectionGroups,
+		SpamArticles:          spamArticles,
+		SpamPagination:        spamPagination,
+		CurrentUser:           currentUser,
+		AdminCount:            s.countAdminUsers(users),
+		EnabledTokensCount:    s.countEnabledAPITokens(apiTokens),
+		ActiveSessions:        s.countActiveSessions(),
+		ActiveNNTPUsers:       s.countActiveNNTPUsers(nntpUsers),
+		PostingNNTPUsers:      s.countPostingNNTPUsers(nntpUsers),
+		Uptime:                s.getUptime(),
+		CacheStats:            cacheStats,
+		NewsgroupCacheStats:   newsgroupCacheStats,
+		ArticleCacheStats:     articleCacheStats,
+		NNTPAuthCacheStats:    nntpAuthCacheStats,
+		MessageIdCacheStats:   messageIdCacheStats,
+		RegistrationEnabled:   registrationEnabled,
+		CurrentHostname:       currentHostname,
+		WebPostMaxArticleSize: webPostMaxSize,
+		Success:               session.GetSuccess(),
+		Error:                 session.GetError(),
+		ActiveTab:             activeTab, // <-- add this field to AdminPageData struct
 	}
 
 	// Load modular admin templates

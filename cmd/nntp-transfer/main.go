@@ -51,7 +51,7 @@ func main() {
 	// Command line flags for NNTP transfer configuration
 	var (
 		// Required flags
-		hostnamePath  = flag.String("nntphostname", "news.pugleaf.net", "Your hostname must be set!")
+		nntphostname  = flag.String("nntphostname", "news.pugleaf.net", "Your hostname must be set!")
 		transferGroup = flag.String("group", "", "Newsgroup to transfer (supports wildcards like alt.* or news.admin.*)")
 
 		// Connection configuration
@@ -83,7 +83,7 @@ func main() {
 	}
 
 	// Validate required flags
-	if *hostnamePath == "" {
+	if *nntphostname == "" {
 		log.Fatalf("Error: -nntphostname must be set!")
 	}
 
@@ -120,7 +120,7 @@ func main() {
 
 	// Initialize configuration
 	mainConfig := config.NewDefaultConfig()
-	mainConfig.Server.Hostname = *hostnamePath
+	mainConfig.Server.Hostname = *nntphostname
 
 	// Initialize database (default config, data in ./data)
 	db, err := database.OpenDatabase(nil)
@@ -201,8 +201,12 @@ func main() {
 
 	log.Printf("Found %d newsgroups to transfer", len(newsgroups))
 
+	// Set hostname in processor with database fallback support
+	if err := processor.SetHostname(*nntphostname, db); err != nil {
+		log.Fatalf("Failed to set NNTP hostname: %v", err)
+	}
+
 	// Initialize processor for article handling
-	processor.LocalHostnamePath = *hostnamePath
 	proc := processor.NewProcessor(db, pool, finalUseShortHashLen)
 	if proc == nil {
 		log.Fatalf("Failed to create processor")
