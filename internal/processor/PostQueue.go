@@ -50,7 +50,7 @@ func (w *PostQueueWorker) processLoop() {
 			}
 
 			log.Printf("PostQueueWorker: Processing article %s", article.MessageID)
-			err := w.processArticle(article)
+			err := w.pre_processArticle(article)
 			if err != nil {
 				log.Printf("PostQueueWorker: Error processing article %s: %v", article.MessageID, err)
 				// TODO: Implement retry logic or dead letter queue
@@ -70,7 +70,7 @@ func (w *PostQueueWorker) processLoop() {
 }
 
 // processArticle processes a single article from the queue
-func (w *PostQueueWorker) processArticle(article *models.Article) error {
+func (w *PostQueueWorker) pre_processArticle(article *models.Article) error {
 	// Get newsgroups from the article's headers
 	newsgroupsHeader, exists := article.Headers["newsgroups"]
 	if !exists || len(newsgroupsHeader) == 0 {
