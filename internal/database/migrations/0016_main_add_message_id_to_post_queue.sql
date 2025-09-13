@@ -11,7 +11,6 @@ CREATE TABLE IF NOT EXISTS post_queue (
     message_id TEXT,
     created DATETIME DEFAULT CURRENT_TIMESTAMP,
     posted_to_remote INTEGER NOT NULL DEFAULT 0 CHECK (posted_to_remote IN (0, 1)),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (newsgroup_id) REFERENCES newsgroups(id) ON DELETE CASCADE
 );
 
