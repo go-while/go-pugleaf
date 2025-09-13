@@ -44,7 +44,7 @@ func isRFC822Compliant(dateStr string) bool {
 }
 
 // ReconstructHeaders reconstructs the header lines from an article for transmission
-func ReconstructHeaders(article *models.Article) ([]string, error) {
+func ReconstructHeaders(article *models.Article, withPath bool) ([]string, error) {
 	var headers []string
 
 	// Add basic headers that we know about
@@ -88,10 +88,12 @@ func ReconstructHeaders(article *models.Article) ([]string, error) {
 	if article.References != "" {
 		headers = append(headers, "References: "+article.References)
 	}
-	if article.Path != "" {
-		headers = append(headers, "Path: "+article.Path)
-	} else {
-		headers = append(headers, "Path: unknown.pugleaf.net!not-for-mail")
+	if withPath {
+		if article.Path != "" {
+			headers = append(headers, "Path: "+article.Path)
+		} else {
+			headers = append(headers, "Path: unknown.pugleaf.net!not-for-mail")
+		}
 	}
 	moreHeaders := strings.Split(article.HeadersJSON, "\n")
 	ignoreLine := false

@@ -1301,7 +1301,7 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 		return 0, fmt.Errorf("not connected")
 	}
 	// Prepare article for posting
-	headers, err := common.ReconstructHeaders(article)
+	headers, err := common.ReconstructHeaders(article, false)
 	if err != nil {
 		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
 	}
