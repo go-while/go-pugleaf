@@ -53,7 +53,6 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	replyToMessageID := c.PostForm("message_id")
 	isReply := replyToArticleNum != "" && replyToMessageID != ""
 
-	//var replySubject string
 	var err error
 	article := &models.Article{}
 	if isReply {
