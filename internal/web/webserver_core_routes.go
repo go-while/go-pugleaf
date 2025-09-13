@@ -430,7 +430,8 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/SiteNews/", s.newsPage)
 	s.Router.GET("/SiteIRC", s.ircPage)
 	s.Router.GET("/SiteIRC/", s.ircPage)
-	s.Router.POST("/SitePost", s.sitePostPage)         // Handle POST for form display
+	s.Router.GET("/SitePost", s.sitePostPage)
+	s.Router.POST("/SitePost", s.sitePostPage)
 	s.Router.POST("/SitePostSubmit", s.sitePostSubmit) // Handle form submission
 	s.Router.GET("/sections", s.sectionsPage)
 	s.Router.GET("/sections/", s.sectionsPage)
