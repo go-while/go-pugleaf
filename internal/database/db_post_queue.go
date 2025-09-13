@@ -79,9 +79,9 @@ func (d *Database) GetPendingPostQueueEntries(limit int) ([]PostQueueEntry, erro
 			args[i] = id
 		}
 
-		updateQuery := fmt.Sprintf(`UPDATE post_queue SET in_processing = 1 WHERE id IN (%s)`, 
+		updateQuery := fmt.Sprintf(`UPDATE post_queue SET in_processing = 1 WHERE id IN (%s)`,
 			strings.Join(placeholders, ","))
-		
+
 		_, err = tx.Exec(updateQuery, args...)
 		if err != nil {
 			return nil, err
@@ -129,9 +129,9 @@ func (d *Database) ResetPostQueueProcessing(ids []int64) error {
 		args[i] = id
 	}
 
-	query := fmt.Sprintf(`UPDATE post_queue SET in_processing = 0 WHERE id IN (%s)`, 
+	query := fmt.Sprintf(`UPDATE post_queue SET in_processing = 0 WHERE id IN (%s)`,
 		strings.Join(placeholders, ","))
-	
+
 	_, err := d.mainDB.Exec(query, args...)
 	if err != nil {
 		log.Printf("Database: Failed to reset in_processing for post_queue entries: %v", err)
@@ -145,7 +145,7 @@ func (d *Database) ResetPostQueueProcessing(ids []int64) error {
 // ResetAllPostQueueProcessing resets all in_processing flags - useful for cleanup on startup
 func (d *Database) ResetAllPostQueueProcessing() error {
 	query := `UPDATE post_queue SET in_processing = 0 WHERE in_processing = 1`
-	
+
 	result, err := d.mainDB.Exec(query)
 	if err != nil {
 		log.Printf("Database: Failed to reset all in_processing flags: %v", err)
