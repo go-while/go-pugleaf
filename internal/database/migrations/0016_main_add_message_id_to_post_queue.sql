@@ -8,7 +8,7 @@ DROP TABLE IF EXISTS post_queue;
 CREATE TABLE IF NOT EXISTS post_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     newsgroup_id INTEGER NOT NULL,
-    COLUMN message_id TEXT,
+    message_id TEXT,
     created DATETIME DEFAULT CURRENT_TIMESTAMP,
     posted_to_remote INTEGER NOT NULL DEFAULT 0 CHECK (posted_to_remote IN (0, 1)),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
