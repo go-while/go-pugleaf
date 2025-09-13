@@ -17,6 +17,7 @@ rm -v build/*
 ./build_recover-db.sh
 ./build_expire-news.sh
 ./build_nntp-transfer.sh
+./build_post-queue.sh
 
 # Always generate checksums after building
 echo "Generating checksums for built executables..."
