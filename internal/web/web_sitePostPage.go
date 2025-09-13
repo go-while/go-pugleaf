@@ -53,23 +53,23 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	replyToMessageID := c.PostForm("message_id")
 	isReply := replyToArticleNum != "" && replyToMessageID != ""
 
-	var replySubject string
-	var replyBody string
+	//var replySubject string
+	var err error
+	article := &models.Article{}
 	if isReply {
 		// Get the original article to extract subject and body for reply
 		if articleNum, err := strconv.ParseInt(replyToArticleNum, 10, 64); err == nil {
 			// Get group database connection
 			if groupDBs, err := s.DB.GetGroupDBs(prefilledNewsgroup); err == nil {
 				defer groupDBs.Return(s.DB)
-				if article, err := s.DB.GetArticleByNum(groupDBs, articleNum); err == nil {
+				if article, err = s.DB.GetArticleByNum(groupDBs, articleNum); err == nil {
 					// Handle subject with "Re: " prefix
 					subject := article.Subject
 					if !strings.HasPrefix(strings.ToLower(subject), "re:") {
-						replySubject = "Re: " + subject
+						article.Subject = "Re: " + subject
 					} else {
-						replySubject = subject
+						article.Subject = subject
 					}
-
 					// Quote the original message body
 					if article.BodyText != "" {
 						lines := strings.Split(article.BodyText, "\n")
@@ -88,7 +88,7 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 						// Add empty lines for user's response
 						quotedLines = append(quotedLines, "", "")
 
-						replyBody = strings.Join(quotedLines, "\n")
+						article.BodyText = strings.Join(quotedLines, "\n")
 					}
 				} else {
 					log.Printf("Warning: Failed to get article for reply: %v", err)
@@ -111,19 +111,26 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	if isReply {
 		pageTitle = "Reply to"
 	}
-
+	var sanizizedBodyStr string
+	if isReply && len(article.BodyText) > 0 {
+		sanizizedBodyStr = string(article.PrintSanitized("body", "$prepost"))
+	}
+	var sanizizedSubjectStr string
+	if isReply && len(article.Subject) > 0 {
+		sanizizedSubjectStr = string(article.PrintSanitized("subject", "$prepost"))
+	}
 	data := PostPageData{
 		TemplateData:          s.getBaseTemplateData(c, pageTitle),
 		PrefilledNewsgroup:    prefilledNewsgroup,
-		PrefilledSubject:      replySubject,
-		PrefilledBody:         replyBody,
+		PrefilledSubject:      sanizizedSubjectStr,
+		PrefilledBody:         sanizizedBodyStr,
 		Error:                 "", // No errors when just displaying the form
 		Success:               "", // No success message when just displaying the form
 		WebPostMaxArticleSize: maxArticleSizeStr,
 		IsReply:               isReply,
 		ReplyToArticleNum:     replyToArticleNum,
 		ReplyToMessageID:      replyToMessageID,
-		ReplySubject:          replySubject,
+		ReplySubject:          sanizizedSubjectStr,
 	}
 
 	// Load and render the posting form template
