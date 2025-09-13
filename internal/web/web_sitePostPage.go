@@ -204,22 +204,25 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	}
 
 	// Validate that all newsgroups exist and are active
-	var validNewsgroups []string
-	for _, newsgroup := range newsgroups {
-		ng, err := s.DB.GetNewsgroupByName(newsgroup)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("Newsgroup '%s' does not exist", newsgroup))
-			continue
+	if len(newsgroups) > processor.MaxCrossPosts {
+		errors = append(errors, fmt.Sprintf("You can post to a maximum of %d newsgroups at once", processor.MaxCrossPosts))
+	} else if len(errors) == 0 {
+		var validNewsgroups []string
+		for _, newsgroup := range newsgroups {
+			ng, err := s.DB.GetNewsgroupByName(newsgroup)
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("Newsgroup '%s' does not exist", newsgroup))
+				continue
+			}
+			if !ng.Active {
+				errors = append(errors, fmt.Sprintf("Newsgroup '%s' is not active for posting", newsgroup))
+				continue
+			}
+			validNewsgroups = append(validNewsgroups, newsgroup)
 		}
-		if !ng.Active {
-			errors = append(errors, fmt.Sprintf("Newsgroup '%s' is not active for posting", newsgroup))
-			continue
-		}
-		validNewsgroups = append(validNewsgroups, newsgroup)
+		// Use only valid newsgroups for further processing
+		newsgroups = validNewsgroups
 	}
-
-	// Use only valid newsgroups for further processing
-	newsgroups = validNewsgroups
 
 	// Check if we have any valid newsgroups after validation
 	if len(newsgroups) == 0 && len(errors) == 0 {
