@@ -229,7 +229,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	// Check if there are validation errors
 	if len(errors) > 0 {
 		data := PostPageData{
-			TemplateData:          s.getBaseTemplateData(c, "New Thread"),
+			TemplateData:          s.getBaseTemplateData(c, "Posting failed"),
 			PrefilledNewsgroup:    newsgroupsStr,
 			PrefilledSubject:      subject,
 			PrefilledBody:         body,
@@ -251,7 +251,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 
 	// Create article similar to threading.go
 	article := &models.Article{
-		MessageID:   generateMessageID(), // We'll need to implement this
+		MessageID:   generateMessageID(),
 		Subject:     subject,
 		FromHeader:  fmt.Sprintf("%s <%s>", user.DisplayName, user.DisplayName+"@"+processor.LocalNNTPHostname),
 		DateString:  time.Now().Format(time.RFC1123Z),
