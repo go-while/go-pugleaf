@@ -84,7 +84,7 @@
                         <textarea class="form-control"
                                   id="body"
                                   name="body"
-                                  rows="12"
+                                  rows="40"
                                   placeholder="Enter your message here..."
                                   required>{{.PrefilledBody}}</textarea>
                         <div class="form-text">
@@ -118,16 +118,18 @@
                 <i class="bi bi-info-circle me-2"></i>Posting Guidelines
             </h6>
             <ul class="mb-0">
+                <li>Choose appropriate newsgroups for your message and use a descriptive subject line</li>
                 <li>Be respectful and follow newsgroup etiquette</li>
-                <li>Choose appropriate newsgroups for your message</li>
-                <li>Use descriptive subject lines</li>
-                <li>Plain text only - no HTML formatting</li>
+                <li>We are friends of free speech, but advertisements, bullying, harassment, and racism are strictly prohibited</li>
+                <li><li>
                 <li>Your message will be queued and processed shortly</li>
             </ul>
         </div>
     </div>
 </div>
+{{end}}
 
+{{if not .Success}}
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     const bodyTextarea = document.getElementById('body');
