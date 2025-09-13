@@ -404,16 +404,7 @@ func main() {
 		log.Printf("[WEB]: Found %d newsgroups in database", len(groups))
 	}
 
-	// Only create processor if integrated fetcher or nntp-server is enabled
-	var proc *processor.Processor
-	if withfetch || withnntp {
-		proc = NewFetchProcessor(db) // Create a new processor instance
-		if proc == nil {
-			log.Printf("[WEB]: ERROR: No enabled providers found! Cannot proceed with article fetching")
-		} else {
-			log.Printf("[WEB]: Using first enabled provider for fetching articles")
-		}
-	}
+	proc := NewFetchProcessor(db)
 
 	var nntpServer *nntp.NNTPServer
 	if (nntptcpport > 0 || nntptlsport > 0) && withnntp {
