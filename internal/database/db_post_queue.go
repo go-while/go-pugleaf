@@ -32,15 +32,15 @@ func (d *Database) InsertPostQueueEntry(newsgroupID int64, messageID string) err
 }
 
 // GetPendingPostQueueEntries retrieves entries that haven't been posted to remote servers
-func (d *Database) GetPendingPostQueueEntries() ([]PostQueueEntry, error) {
+func (d *Database) GetPendingPostQueueEntries(limit int) ([]PostQueueEntry, error) {
 	query := `
 		SELECT id, newsgroup_id, message_id, created, posted_to_remote
 		FROM post_queue
 		WHERE posted_to_remote = 0
-		ORDER BY created ASC
+		ORDER BY created ASC LIMIT ?
 	`
 
-	rows, err := d.mainDB.Query(query)
+	rows, err := d.mainDB.Query(query, limit)
 	if err != nil {
 		return nil, err
 	}

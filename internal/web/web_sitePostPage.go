@@ -317,24 +317,6 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	case models.PostQueueChannel <- article:
 		log.Printf("Article queued successfully for user %s, message-id: %s", user.Username, article.MessageID)
 
-		// Record in post_queue table for tracking
-		for _, newsgroup := range newsgroups {
-			// Get newsgroup ID
-			newsgroupModel, err := s.DB.GetNewsgroupByName(newsgroup)
-			if err != nil {
-				log.Printf("Warning: Failed to get newsgroup %s for post queue recording: %v", newsgroup, err)
-				continue
-			}
-
-			// Insert into post_queue table
-			err = s.DB.InsertPostQueueEntry(user.ID, int64(newsgroupModel.ID), article.MessageID)
-			if err != nil {
-				log.Printf("Warning: Failed to insert post_queue entry for user %d, newsgroup %s, message_id %s: %v",
-					user.ID, newsgroup, article.MessageID, err)
-				// Continue even if database recording fails - the article is already queued
-			}
-		}
-
 	default:
 		log.Printf("Warning: Post queue channel is full, article is lost.")
 		data := PostPageData{

@@ -21,10 +21,3 @@ CREATE INDEX IF NOT EXISTS idx_post_queue_posted_to_remote ON post_queue(posted_
 CREATE INDEX IF NOT EXISTS idx_post_queue_created ON post_queue(created);
 CREATE INDEX IF NOT EXISTS idx_post_queue_message_id ON post_queue(message_id);
 CREATE INDEX IF NOT EXISTS idx_post_queue_newsgroup_posted ON post_queue(newsgroup_id, posted_to_remote);
-
-
--- Create index for message_id lookups
-
--- Remove the UNIQUE constraint on (newsgroup_id, artnum) since artnum may be NULL initially
--- We'll create a new constraint after we have both message_id and artnum available
--- For now, allow NULL artnum values for articles that are queued but not yet processed

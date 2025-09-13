@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -56,14 +55,6 @@ func (w *PostQueueWorker) processLoop() {
 				// TODO: Implement retry logic or dead letter queue
 			} else {
 				log.Printf("PostQueueWorker: Successfully processed article %s", article.MessageID)
-			}
-
-		case <-time.After(30 * time.Second):
-			// Periodic heartbeat to ensure the worker is alive
-			// Note: len() on channels is safe and atomic
-			queueLen := len(models.PostQueueChannel)
-			if queueLen > 0 {
-				log.Printf("PostQueueWorker: Worker alive, queue length: %d", queueLen)
 			}
 		}
 	}

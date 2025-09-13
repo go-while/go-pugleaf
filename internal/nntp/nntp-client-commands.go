@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/utils"
 )
@@ -1288,5 +1289,94 @@ func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (int, error) {
 	// Format: code <message-id> [message]
 	// 239 <message-id> - article transferred successfully
 	// 439 <message-id> - article transfer failed
+	return code, nil
+}
+
+// PostArticle posts an article using the POST command
+func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected {
+		return 0, fmt.Errorf("not connected")
+	}
+	// Prepare article for posting
+	headers, err := common.ReconstructHeaders(article)
+	if err != nil {
+		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
+	}
+	c.lastUsed = time.Now()
+
+	// Send POST command
+	id, err := c.textConn.Cmd("POST")
+	if err != nil {
+		return 0, fmt.Errorf("failed to send POST command: %w", err)
+	}
+
+	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id)
+
+	// Read response to POST command
+	code, line, err := c.textConn.ReadCodeLine(340)
+	if err != nil {
+		return code, fmt.Errorf("POST command failed: %s", line)
+	}
+	if code != 340 {
+		return code, fmt.Errorf("POST command rejected (code %d): %s", code, line)
+	}
+
+	// Send headers using writer (not DotWriter)
+	for _, headerLine := range headers {
+		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
+			return 0, fmt.Errorf("failed to write header: %w", err)
+		}
+	}
+
+	// Send empty line between headers and body
+	if _, err := c.writer.WriteString(CRLF); err != nil {
+		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
+	}
+
+	// Send body with proper dot-stuffing (like TakeThisArticle)
+	// Split body preserving line endings
+	bodyLines := strings.Split(article.BodyText, "\n")
+	for i, line := range bodyLines {
+		// Skip empty last element from trailing \n
+		if i == len(bodyLines)-1 && line == "" {
+			break
+		}
+
+		// Remove trailing \r if present (will add CRLF)
+		line = strings.TrimSuffix(line, "\r")
+
+		// Dot-stuff lines that start with a dot (RFC 977)
+		if strings.HasPrefix(line, ".") {
+			line = "." + line
+		}
+
+		if _, err := c.writer.WriteString(line + CRLF); err != nil {
+			return 0, fmt.Errorf("failed to write body line: %w", err)
+		}
+	}
+
+	// Send termination line (single dot)
+	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
+		return 0, fmt.Errorf("failed to send article terminator: %w", err)
+	}
+
+	// Flush the writer to ensure all data is sent
+	if err := c.writer.Flush(); err != nil {
+		return 0, fmt.Errorf("failed to flush article data: %w", err)
+	}
+
+	// Read final response
+	code, _, err = c.textConn.ReadCodeLine(240)
+	if err != nil {
+		return code, fmt.Errorf("failed to read POST response: %w", err)
+	}
+
+	// Parse response codes
+	// 240 - article posted successfully
+	// 441 - posting failed
 	return code, nil
 }
