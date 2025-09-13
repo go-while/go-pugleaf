@@ -81,19 +81,18 @@ func ReconstructHeaders(article *models.Article) ([]string, error) {
 			return nil, fmt.Errorf("article missing Date header (both DateString and DateSent are empty)")
 		}
 	}
-
-	if article.References == "" {
-		return nil, fmt.Errorf("article missing References header")
-	}
-	if article.Path == "" {
-		return nil, fmt.Errorf("article missing Path header")
-	}
 	headers = append(headers, "Message-ID: "+article.MessageID)
 	headers = append(headers, "Subject: "+article.Subject)
 	headers = append(headers, "From: "+article.FromHeader)
 	headers = append(headers, "Date: "+dateHeader)
-	headers = append(headers, "References: "+article.References)
-	headers = append(headers, "Path: "+article.Path)
+	if article.References != "" {
+		headers = append(headers, "References: "+article.References)
+	}
+	if article.Path != "" {
+		headers = append(headers, "Path: "+article.Path)
+	} else {
+		headers = append(headers, "Path: unknown.pugleaf.net!not-for-mail")
+	}
 	moreHeaders := strings.Split(article.HeadersJSON, "\n")
 	ignoreLine := false
 	isSpacedLine := false
