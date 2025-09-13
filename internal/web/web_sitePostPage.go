@@ -32,10 +32,6 @@ type PostPageData struct {
 	ReplySubject          string
 }
 
-// PostQueueChannel is the channel for articles posted from web interface
-// TODO: This will be processed later by a background worker
-var PostQueueChannel = make(chan *models.Article, 100)
-
 // sitePostPage handles the "/SitePost" route to display the posting form
 func (s *WebServer) sitePostPage(c *gin.Context) {
 	// Check if user is authenticated
@@ -262,14 +258,12 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		Subject:     subject,
 		FromHeader:  fmt.Sprintf("%s <%s>", user.DisplayName, user.DisplayName+"@"+processor.LocalNNTPHostname),
 		DateString:  time.Now().Format(time.RFC1123Z),
-		DateSent:    time.Now(),
 		BodyText:    body,
-		ImportedAt:  time.Now(),
 		IsThrRoot:   !isReply, // Only new threads are thread roots
 		IsReply:     isReply,
 		Lines:       strings.Count(body, "\n") + 1,
 		Bytes:       len(body),
-		Path:        fmt.Sprintf("%s!.POSTED!not-for-mail", processor.LocalNNTPHostname),
+		Path:        ".POSTED!not-for-mail",
 		ArticleNums: make(map[*string]int64),
 		RefSlice:    []string{},
 	}
@@ -318,9 +312,9 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	log.Printf("Web posting: User %s posting to newsgroups: %v, subject: %s", user.Username, newsgroups, subject)
 
 	// Put article into the queue channel
-	// TODO: This channel will be processed later by a background worker
+	// This channel will be processed by the PostQueueWorker in the processor package
 	select {
-	case PostQueueChannel <- article:
+	case models.PostQueueChannel <- article:
 		log.Printf("Article queued successfully for user %s, message-id: %s", user.Username, article.MessageID)
 
 		// Record in post_queue table for tracking
@@ -332,11 +326,13 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 				continue
 			}
 
-			// TODO: Insert into post_queue table
-			// This would require implementing the post_queue database operations
-			// For now, we'll just log it
-			log.Printf("TODO: Record in post_queue table - user_id: %d, newsgroup_id: %d, message_id: %s",
-				user.ID, newsgroupModel.ID, article.MessageID)
+			// Insert into post_queue table
+			err = s.DB.InsertPostQueueEntry(user.ID, int64(newsgroupModel.ID), article.MessageID)
+			if err != nil {
+				log.Printf("Warning: Failed to insert post_queue entry for user %d, newsgroup %s, message_id %s: %v",
+					user.ID, newsgroup, article.MessageID, err)
+				// Continue even if database recording fails - the article is already queued
+			}
 		}
 
 	default:

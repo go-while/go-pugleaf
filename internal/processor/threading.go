@@ -156,7 +156,6 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 
 	// part of parsing data moved to nntp-client-commands.go:L~800 (func ParseLegacyArticleLines)
 	article.ReplyCount = 0 // Will be updated by threading
-	article.ImportedAt = time.Now()
 	article.MsgIdItem = msgIdItem
 	article.ArticleNums = make(map[*string]int64)
 	article.ProcessQueue = make(chan *string, 16) // Initialize process queue
@@ -182,7 +181,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 	}
 	if article.Path == "" {
 		//log.Printf("[WARN:OLD] Article '%s' empty path... ?! headers='%#v'", article.MessageID, article.Headers)
-		article.Path = LocalNNTPHostname + "!" + "!not-for-mail"
+		article.Path = LocalNNTPHostname + "!not-for-mail"
 	} else {
 		article.Path = LocalNNTPHostname + "!" + article.Path // Ensure path is prefixed with hostname
 	}
