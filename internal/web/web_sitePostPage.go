@@ -64,11 +64,8 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 				defer groupDBs.Return(s.DB)
 				if article, err = s.DB.GetArticleByNum(groupDBs, articleNum); err == nil {
 					// Handle subject with "Re: " prefix
-					subject := article.Subject
-					if !strings.HasPrefix(strings.ToLower(subject), "re:") {
-						article.Subject = "Re: " + subject
-					} else {
-						article.Subject = subject
+					if !strings.HasPrefix(strings.ToLower(article.Subject), "re:") {
+						article.Subject = "Re: " + article.Subject
 					}
 					// Quote the original message body
 					if article.BodyText != "" {
