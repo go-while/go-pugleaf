@@ -4,7 +4,11 @@
 <nav aria-label="breadcrumb">
     <ol class="breadcrumb">
         <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        {{if .IsReply}}
+        <li class="breadcrumb-item active" aria-current="page">Reply to</li>
+        {{else}}
         <li class="breadcrumb-item active" aria-current="page">New Thread</li>
+        {{end}}
     </ol>
 </nav>
 {{end}}
@@ -15,7 +19,11 @@
         <div class="card">
             <div class="card-header bg-primary text-white">
                 <h5 class="card-title mb-0">
+                    {{if .IsReply}}
+                    <i class="bi bi-reply me-2"></i>Reply to
+                    {{else}}
                     <i class="bi bi-plus-circle me-2"></i>Post New Thread
+                    {{end}}
                 </h5>
             </div>
             <div class="card-body">
@@ -37,6 +45,11 @@
                 {{else}}
 
                 <form method="POST" action="/SitePostSubmit">
+                    {{if .IsReply}}
+                    <input type="hidden" name="reply_to" value="{{.ReplyTo}}">
+                    <input type="hidden" name="message_id" value="{{.MessageID}}">
+                    {{end}}
+
                     <div class="mb-3">
                         <label for="newsgroups" class="form-label">
                             <strong>Newsgroups</strong>
@@ -61,6 +74,7 @@
                                class="form-control"
                                id="subject"
                                name="subject"
+                               value="{{.PrefilledSubject}}"
                                placeholder="Enter subject line"
                                required>
                     </div>
@@ -72,7 +86,7 @@
                                   name="body"
                                   rows="12"
                                   placeholder="Enter your message here..."
-                                  required></textarea>
+                                  required>{{.PrefilledBody}}</textarea>
                         <div class="form-text">
                             Plain text only. No HTML formatting.
                             <span class="float-end">

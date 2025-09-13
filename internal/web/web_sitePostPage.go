@@ -19,9 +19,17 @@ import (
 type PostPageData struct {
 	TemplateData
 	PrefilledNewsgroup    string
+	PrefilledSubject      string
+	PrefilledBody         string
 	Error                 string
 	Success               string
 	WebPostMaxArticleSize string
+	IsReply               bool
+	ReplyTo               string
+	MessageID             string
+	ReplyToArticleNum     string
+	ReplyToMessageID      string
+	ReplySubject          string
 }
 
 // PostQueueChannel is the channel for articles posted from web interface
@@ -40,6 +48,57 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	// Get prefilled newsgroup from POST form data (from "New Thread" button)
 	prefilledNewsgroup := c.PostForm("newsgroup")
 
+	// Check if this is a reply
+	replyToArticleNum := c.PostForm("reply_to")
+	replyToMessageID := c.PostForm("message_id")
+	isReply := replyToArticleNum != "" && replyToMessageID != ""
+
+	var replySubject string
+	var replyBody string
+	if isReply {
+		// Get the original article to extract subject and body for reply
+		if articleNum, err := strconv.ParseInt(replyToArticleNum, 10, 64); err == nil {
+			// Get group database connection
+			if groupDBs, err := s.DB.GetGroupDBs(prefilledNewsgroup); err == nil {
+				defer groupDBs.Return(s.DB)
+				if article, err := s.DB.GetArticleByNum(groupDBs, articleNum); err == nil {
+					// Handle subject with "Re: " prefix
+					subject := article.Subject
+					if !strings.HasPrefix(strings.ToLower(subject), "re:") {
+						replySubject = "Re: " + subject
+					} else {
+						replySubject = subject
+					}
+
+					// Quote the original message body
+					if article.BodyText != "" {
+						lines := strings.Split(article.BodyText, "\n")
+						var quotedLines []string
+
+						// Add header line
+						quotedLines = append(quotedLines, fmt.Sprintf("On %s, %s wrote:",
+							article.DateString, article.FromHeader))
+						quotedLines = append(quotedLines, "")
+
+						// Quote each line with "> "
+						for _, line := range lines {
+							quotedLines = append(quotedLines, "> "+line)
+						}
+
+						// Add empty lines for user's response
+						quotedLines = append(quotedLines, "", "")
+
+						replyBody = strings.Join(quotedLines, "\n")
+					}
+				} else {
+					log.Printf("Warning: Failed to get article for reply: %v", err)
+				}
+			} else {
+				log.Printf("Warning: Failed to get group database for reply: %v", err)
+			}
+		}
+	}
+
 	// Get max article size from database config
 	maxArticleSizeStr, err := s.DB.GetConfigValue("WebPostMaxArticleSize")
 	if err != nil {
@@ -48,12 +107,23 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	}
 
 	// Create template data with no errors (this is just displaying the form)
+	pageTitle := "New Thread"
+	if isReply {
+		pageTitle = "Reply to"
+	}
+
 	data := PostPageData{
-		TemplateData:          s.getBaseTemplateData(c, "New Thread"),
+		TemplateData:          s.getBaseTemplateData(c, pageTitle),
 		PrefilledNewsgroup:    prefilledNewsgroup,
+		PrefilledSubject:      replySubject,
+		PrefilledBody:         replyBody,
 		Error:                 "", // No errors when just displaying the form
 		Success:               "", // No success message when just displaying the form
 		WebPostMaxArticleSize: maxArticleSizeStr,
+		IsReply:               isReply,
+		ReplyToArticleNum:     replyToArticleNum,
+		ReplyToMessageID:      replyToMessageID,
+		ReplySubject:          replySubject,
 	}
 
 	// Load and render the posting form template
@@ -80,6 +150,11 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	subject := strings.TrimSpace(c.PostForm("subject"))
 	body := strings.TrimSpace(c.PostForm("body"))
 	newsgroupsStr := strings.TrimSpace(c.PostForm("newsgroups"))
+
+	// Check if this is a reply
+	replyTo := strings.TrimSpace(c.PostForm("reply_to"))
+	messageID := strings.TrimSpace(c.PostForm("message_id"))
+	isReply := replyTo != "" && messageID != ""
 
 	// Get max article size from database config
 	maxArticleSizeStr, err := s.DB.GetConfigValue("WebPostMaxArticleSize")
@@ -156,8 +231,13 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		data := PostPageData{
 			TemplateData:          s.getBaseTemplateData(c, "New Thread"),
 			PrefilledNewsgroup:    newsgroupsStr,
+			PrefilledSubject:      subject,
+			PrefilledBody:         body,
 			Error:                 strings.Join(errors, "; "),
 			WebPostMaxArticleSize: strconv.Itoa(maxArticleSize),
+			IsReply:               isReply,
+			ReplyToArticleNum:     replyTo,
+			ReplyToMessageID:      messageID,
 		}
 
 		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
@@ -178,17 +258,50 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		DateSent:    time.Now(),
 		BodyText:    body,
 		ImportedAt:  time.Now(),
-		IsThrRoot:   true, // New posts from web are always thread roots
-		IsReply:     false,
+		IsThrRoot:   !isReply, // Only new threads are thread roots
+		IsReply:     isReply,
 		Lines:       strings.Count(body, "\n") + 1,
 		Bytes:       len(body),
 		Path:        fmt.Sprintf("pugleaf.local!%s", user.Username), // Local path
 		ArticleNums: make(map[*string]int64),
-		RefSlice:    []string{}, // No references for new threads
+		RefSlice:    []string{},
 	}
 
-	// Set newsgroups
-	article.Headers = make(map[string][]string)
+	// If this is a reply, set up References header
+	if isReply {
+		// Try to find the original article to get its References
+		var originalRefs []string
+		for _, newsgroup := range newsgroups {
+			groupDB, err := s.DB.GetGroupDBs(newsgroup)
+			if err != nil {
+				log.Printf("Warning: Failed to get group DB for %s: %v", newsgroup, err)
+				continue
+			}
+			defer groupDB.DB.Close()
+
+			originalArticle, err := s.DB.GetArticleByMessageID(groupDB, messageID)
+			if err != nil {
+				log.Printf("Warning: Failed to find original article %s in %s: %v", messageID, newsgroup, err)
+				continue
+			}
+
+			// Get existing References from original article
+			if refs, exists := originalArticle.Headers["references"]; exists && len(refs) > 0 {
+				originalRefs = strings.Fields(refs[0])
+			}
+			break
+		}
+
+		// Build new References header: original References + original Message-ID
+		newRefs := append(originalRefs, messageID)
+		article.RefSlice = newRefs
+		article.Headers = make(map[string][]string)
+		article.Headers["references"] = []string{strings.Join(newRefs, " ")}
+	} else {
+		article.Headers = make(map[string][]string)
+	}
+
+	// Set standard headers
 	article.Headers["newsgroups"] = []string{strings.Join(newsgroups, ",")}
 	article.Headers["subject"] = []string{subject}
 	article.Headers["from"] = []string{article.FromHeader}
@@ -220,12 +333,17 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		}
 
 	default:
-		log.Printf("Warning: Post queue channel is full, article may be lost")
+		log.Printf("Warning: Post queue channel is full, article is lost.")
 		data := PostPageData{
 			TemplateData:          s.getBaseTemplateData(c, "New Thread"),
 			PrefilledNewsgroup:    newsgroupsStr,
+			PrefilledSubject:      subject,
+			PrefilledBody:         body,
 			Error:                 "Server is busy, please try again later",
 			WebPostMaxArticleSize: strconv.Itoa(maxArticleSize),
+			IsReply:               isReply,
+			ReplyToArticleNum:     replyTo,
+			ReplyToMessageID:      messageID,
 		}
 
 		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
@@ -238,9 +356,16 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	}
 
 	// Show success page
+	successMsg := "Your message has been queued for posting. It will be processed shortly."
+	pageTitle := "New Thread"
+	if isReply {
+		successMsg = "Your reply has been queued for posting. It will be processed shortly."
+		pageTitle = "Reply to Thread"
+	}
+
 	data := PostPageData{
-		TemplateData:          s.getBaseTemplateData(c, "New Thread"),
-		Success:               "Your message has been queued for posting. It will be processed shortly.",
+		TemplateData:          s.getBaseTemplateData(c, pageTitle),
+		Success:               successMsg,
 		WebPostMaxArticleSize: strconv.Itoa(maxArticleSize),
 	}
 

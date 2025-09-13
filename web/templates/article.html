@@ -72,6 +72,14 @@
                 <div class="row mb-3">
                     <div class="col-12">
                         <div class="btn-group btn-group-sm" role="group" aria-label="Article controls">
+                            <form method="POST" action="/SitePost" style="display: inline; margin-left: 10px;">
+                                <input type="hidden" name="newsgroup" value="{{$.GroupName}}">
+                                <input type="hidden" name="reply_to" value="{{index .Article.ArticleNums $.GroupPtr}}">
+                                <input type="hidden" name="message_id" value="{{.Article.MessageID}}">
+                                <button type="submit" class="btn btn-outline-primary btn-sm" title="Reply to thread">
+                                    <i class="bi bi-reply me-1"></i>Reply
+                                </button>
+                            </form>
                             <!-- Spam button (available to all users) -->
                             <form method="POST" action="/groups/{{.GroupName}}/articles/{{index .Article.ArticleNums .GroupPtr}}/spam" style="display: inline;">
                                 <button type="submit" class="btn btn-outline-warning btn-sm" title="Flag article as spam">

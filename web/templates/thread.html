@@ -129,13 +129,6 @@
                 <div class="card-header{{if eq (index $message.ArticleNums $.GroupPtr) (index $.ThreadRoot.ArticleNums $.GroupPtr)}} bg-success text-white{{else}} bg-primary text-white{{end}}">
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
-                        <!-- TODO FIXME: reply index does not count correctly with pagination, every page starts from reply 0 again
-                            {{if eq (index $message.ArticleNums $.GroupPtr) (index $.ThreadRoot.ArticleNums $.GroupPtr)}}
-                            <i class="bi bi-pin-fill me-2"></i><strong>Topic</strong>
-                            {{else}}
-                            <i class="bi bi-chat-dots me-2"></i><strong>Reply {{$index}}</strong>
-                            {{end}}
-                        -->
                             {{if eq (index $message.ArticleNums $.GroupPtr) (index $.ThreadRoot.ArticleNums $.GroupPtr)}}
                             <h5 class="bi-pin-fill mt-2 mb-0 text-light">
                             {{else}}
@@ -165,6 +158,14 @@
                     <div class="row mb-3">
                         <div class="col-12">
                             <div class="btn-group btn-group-sm" role="group" aria-label="Article controls">
+                                <form method="POST" action="/SitePost" style="display: inline; margin-left: 10px;">
+                                    <input type="hidden" name="newsgroup" value="{{$.GroupName}}">
+                                    <input type="hidden" name="reply_to" value="{{index $message.ArticleNums $.GroupPtr}}">
+                                    <input type="hidden" name="message_id" value="{{$message.MessageID}}">
+                                    <button type="submit" class="btn btn-outline-primary btn-sm" title="Reply to">
+                                        <i class="bi bi-reply me-1"></i>Reply
+                                    </button>
+                                </form>
                                 <!-- Spam button (available to all users) -->
                                 <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index $message.ArticleNums $.GroupPtr}}/spam" style="display: inline;">
                                     <button type="submit" class="btn btn-outline-warning btn-sm" title="Flag article as spam">
