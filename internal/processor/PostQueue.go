@@ -97,6 +97,9 @@ func (w *PostQueueWorker) pre_processArticle(article *models.Article) error {
 			// Continue with other newsgroups even if one fails
 		}
 	}
+	if errs == len(newsgroups) {
+		return fmt.Errorf("failed to process article %s for all newsgroups", article.MessageID)
+	}
 	// Record in post_queue table for tracking
 	// Get newsgroup ID
 	newsgroupModel, err := w.processor.DB.GetNewsgroupByName(newsgroups[0])
