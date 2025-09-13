@@ -157,7 +157,7 @@
                     <!-- Spam and Hide Controls -->
                     <div class="row mb-3">
                         <div class="col-12">
-                            <div class="btn-group btn-group-sm" role="group" aria-label="Article controls">
+                            <div class="btn-group btn-group-sm d-flex" role="group" aria-label="Article controls">
                                 <form method="POST" action="/SitePost" style="display: inline; margin-left: 10px;">
                                     <input type="hidden" name="newsgroup" value="{{$.GroupName}}">
                                     <input type="hidden" name="reply_to" value="{{index $message.ArticleNums $.GroupPtr}}">
@@ -167,7 +167,7 @@
                                     </button>
                                 </form>
                                 <!-- Spam button (available to all users) -->
-                                <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index $message.ArticleNums $.GroupPtr}}/spam" style="display: inline;">
+                                <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index $message.ArticleNums $.GroupPtr}}/spam" style="display: inline;" class="ms-auto">
                                     <button type="submit" class="btn btn-outline-warning btn-sm" title="Flag article as spam">
                                         🚩 {{$message.Spam}}
                                     </button>
@@ -181,12 +181,12 @@
                                             <i class="bi bi-dash-circle"></i>
                                         </button>
                                     </form>
-                                    {{end}}
                                     <form method="POST" action="/groups/{{$.GroupName}}/articles/{{index $message.ArticleNums $.GroupPtr}}/hide" style="display: inline;">
                                         <button type="submit" class="btn btn-outline-secondary btn-sm" title="Hide article">
                                             👁️ {{$message.Hide}}
                                         </button>
                                     </form>
+                                    {{end}}
                                 {{end}}
                             </div>
                         </div>
