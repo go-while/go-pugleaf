@@ -64,12 +64,15 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 					}
 					// Quote the original message body
 					if article.BodyText != "" {
-						lines := strings.Split(article.BodyText, "\n")
+						// Clean the body text first to remove HTML entities
+						cleanBodyText := models.ConvertToUTF8(article.BodyText)
+						lines := strings.Split(cleanBodyText, "\n")
 						var quotedLines []string
 
-						// Add header line
+						// Add header line with properly decoded FromHeader for NNTP posting
+						cleanFromHeader := models.ConvertToUTF8(article.FromHeader)
 						quotedLines = append(quotedLines, fmt.Sprintf("On %s, %s wrote:",
-							article.DateString, article.FromHeader))
+							article.DateString, cleanFromHeader))
 						quotedLines = append(quotedLines, "")
 
 						// Quote each line with "> "
@@ -103,26 +106,29 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	if isReply {
 		pageTitle = "Reply to"
 	}
-	var sanizizedBodyStr string
+	var prefilledBodyStr string
 	if isReply && len(article.BodyText) > 0 {
-		sanizizedBodyStr = string(article.PrintSanitized("body", "$prepost"))
+		// Use raw text for textarea - Go's html/template will automatically escape it
+		// This gives us clean text in the form while still being XSS-safe
+		prefilledBodyStr = article.BodyText
 	}
-	var sanizizedSubjectStr string
+	var prefilledSubjectStr string
 	if isReply && len(article.Subject) > 0 {
-		sanizizedSubjectStr = string(article.PrintSanitized("subject", "$prepost"))
+		// Use raw text for input field - Go's html/template will automatically escape it
+		prefilledSubjectStr = article.Subject
 	}
 	data := PostPageData{
 		TemplateData:          s.getBaseTemplateData(c, pageTitle),
 		PrefilledNewsgroup:    prefilledNewsgroup,
-		PrefilledSubject:      sanizizedSubjectStr,
-		PrefilledBody:         sanizizedBodyStr,
+		PrefilledSubject:      prefilledSubjectStr,
+		PrefilledBody:         prefilledBodyStr,
 		Error:                 "", // No errors when just displaying the form
 		Success:               "", // No success message when just displaying the form
 		WebPostMaxArticleSize: maxArticleSizeStr,
 		IsReply:               isReply,
 		ReplyToArticleNum:     replyToArticleNum,
 		ReplyToMessageID:      replyToMessageID,
-		ReplySubject:          sanizizedSubjectStr,
+		ReplySubject:          prefilledSubjectStr,
 	}
 
 	// Load and render the posting form template
@@ -273,7 +279,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	// If this is a reply, set up References header
 	if isReply {
 		// Try to find the original article to get its References
-		var originalRefs []string
+		var originalRefs string
 		for _, newsgroup := range newsgroups {
 			groupDB, err := s.DB.GetGroupDBs(newsgroup)
 			if err != nil {
@@ -287,30 +293,15 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 				log.Printf("Warning: Failed to find original article %s in %s: %v", messageID, newsgroup, err)
 				continue
 			}
-
-			// Get existing References from original article
-			if refs, exists := originalArticle.Headers["references"]; exists && len(refs) > 0 {
-				originalRefs = strings.Fields(refs[0])
+			if originalArticle.References != "" {
+				originalRefs = originalArticle.References
 			}
 			break
 		}
 
 		// Build new References header: original References + original Message-ID
-		newRefs := append(originalRefs, messageID)
-		article.RefSlice = newRefs
-		article.Headers = make(map[string][]string)
-		article.Headers["references"] = []string{strings.Join(newRefs, " ")}
-	} else {
-		article.Headers = make(map[string][]string)
+		article.References = originalRefs + " " + messageID
 	}
-
-	// Set standard headers
-	article.Headers["newsgroups"] = []string{strings.Join(newsgroups, ",")}
-	article.Headers["subject"] = []string{subject}
-	article.Headers["from"] = []string{article.FromHeader}
-	article.Headers["date"] = []string{article.DateString}
-	article.Headers["message-id"] = []string{article.MessageID}
-
 	log.Printf("Web posting: User %s posting to newsgroups: %v, subject: %s", user.Username, newsgroups, subject)
 
 	// Put article into the queue channel
@@ -367,10 +358,10 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 
 // generateMessageID creates a unique message ID for web-posted articles
 func generateMessageID() string {
-	random, err := generateRandomHex(12)
+	random, err := generateRandomHex(8)
 	if err != nil {
 		log.Printf("Error in generateMessageID: generating random hex: %v", err)
 		return fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), processor.LocalNNTPHostname)
 	}
-	return fmt.Sprintf("<%s@%s>", random, processor.LocalNNTPHostname)
+	return fmt.Sprintf("<%d$%s@%s>", time.Now().UnixNano(), random, processor.LocalNNTPHostname)
 }

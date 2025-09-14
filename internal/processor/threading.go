@@ -154,7 +154,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		return history.CaseError, fmt.Errorf("article '%s' posted too far in future: %v", article.MessageID, article.DateSent)
 	}
 
-	// part of parsing data moved to nntp-client-commands.go:L~800 (func ParseLegacyArticleLines)
+	// part of parsing data moved to nntp-client-commands.go:L~850 (func ParseLegacyArticleLines)
 	article.ReplyCount = 0 // Will be updated by threading
 	article.MsgIdItem = msgIdItem
 	article.ArticleNums = make(map[*string]int64)
