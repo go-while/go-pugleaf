@@ -592,7 +592,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 
 	for _, article := range articles {
 		// Reconstruct headers for transmission
-		articleHeaders, err := common.ReconstructHeaders(article)
+		articleHeaders, err := common.ReconstructHeaders(article, true)
 		if err != nil {
 			log.Printf("Failed to reconstruct headers for %s: %v", article.MessageID, err)
 			continue
@@ -640,7 +640,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article) (int, error) {
 
 	// Reconstruct headers for transmission
-	articleHeaders, err := common.ReconstructHeaders(article)
+	articleHeaders, err := common.ReconstructHeaders(article, true)
 	if err != nil {
 		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
 	}
