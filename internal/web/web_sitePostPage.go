@@ -276,6 +276,10 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		RefSlice:    []string{},
 	}
 	article.Headers["newsgroups"] = []string{strings.Join(newsgroups, ",")}
+	article.Headers["subject"] = []string{subject}
+	article.Headers["from"] = []string{article.FromHeader}
+	article.Headers["date"] = []string{article.DateString}
+	article.Headers["message-id"] = []string{article.MessageID}
 	// If this is a reply, set up References header
 	if isReply {
 		// Try to find the original article to get its References
