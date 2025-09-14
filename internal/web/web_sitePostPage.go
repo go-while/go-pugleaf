@@ -154,7 +154,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	subject := strings.TrimSpace(c.PostForm("subject"))
 	body := strings.TrimSpace(c.PostForm("body"))
 	newsgroupsStr := strings.TrimSpace(c.PostForm("newsgroups"))
-	log.Printf("User %s is posting to newsgroups: %v, subject: %s", session.User.Username, newsgroupsStr, subject)
+	//log.Printf("User %s is posting to newsgroups: %v, subject: %s", session.User.Username, newsgroupsStr, subject)
 
 	// Check if this is a reply
 	replyTo := strings.TrimSpace(c.PostForm("reply_to"))
@@ -207,28 +207,27 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	if len(newsgroups) == 0 {
 		errors = append(errors, "No valid newsgroups specified")
 	}
+	if len(newsgroups) > processor.MaxCrossPosts {
+		errors = append(errors, fmt.Sprintf("You can post to a maximum of %d newsgroups at once", processor.MaxCrossPosts))
+	}
 
 	if len(errors) == 0 {
 		// Validate that all newsgroups exist and are active
-		if len(newsgroups) > processor.MaxCrossPosts {
-			errors = append(errors, fmt.Sprintf("You can post to a maximum of %d newsgroups at once", processor.MaxCrossPosts))
-		} else {
-			var validNewsgroups []string
-			for _, newsgroup := range newsgroups {
-				ng, err := s.DB.GetNewsgroupByName(newsgroup)
-				if err != nil {
-					errors = append(errors, fmt.Sprintf("Newsgroup '%s' does not exist", newsgroup))
-					continue
-				}
-				if !ng.Active {
-					errors = append(errors, fmt.Sprintf("Newsgroup '%s' is not active for posting", newsgroup))
-					continue
-				}
-				validNewsgroups = append(validNewsgroups, newsgroup)
+		var validNewsgroups []string
+		for _, newsgroup := range newsgroups {
+			ng, err := s.DB.GetNewsgroupByName(newsgroup)
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("Newsgroup '%s' does not exist", newsgroup))
+				continue
 			}
-			// Use only valid newsgroups for further processing
-			newsgroups = validNewsgroups
+			if !ng.Active {
+				errors = append(errors, fmt.Sprintf("Newsgroup '%s' is not active for posting", newsgroup))
+				continue
+			}
+			validNewsgroups = append(validNewsgroups, newsgroup)
 		}
+		// Use only valid newsgroups for further processing
+		newsgroups = validNewsgroups
 		// Check if we have any valid newsgroups after validation
 		if len(newsgroups) == 0 && len(errors) == 0 {
 			errors = append(errors, "No valid active newsgroups found")
@@ -283,17 +282,18 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	article.Headers["message-id"] = []string{article.MessageID}
 	// If this is a reply, set up References header
 	if isReply {
+		log.Printf("Setting up References header for reply to message ID: %s", messageID)
 		// Try to find the original article to get its References
 		var originalRefs string
 		for _, newsgroup := range newsgroups {
-			groupDB, err := s.DB.GetGroupDBs(newsgroup)
+			groupDBs, err := s.DB.GetGroupDBs(newsgroup)
 			if err != nil {
 				log.Printf("Warning: Failed to get group DB for %s: %v", newsgroup, err)
 				continue
 			}
-			defer groupDB.DB.Close()
+			defer groupDBs.Return(s.DB)
 
-			originalArticle, err := s.DB.GetArticleByMessageID(groupDB, messageID)
+			originalArticle, err := s.DB.GetArticleByMessageID(groupDBs, messageID)
 			if err != nil {
 				log.Printf("Warning: Failed to find original article %s in %s: %v", messageID, newsgroup, err)
 				continue
@@ -305,18 +305,17 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		}
 
 		// Build new References header: original References + original Message-ID
-		article.References = originalRefs + " " + messageID
+		article.References = strings.TrimSpace(originalRefs + " " + messageID)
 		article.RefSlice = utils.ParseReferences(article.References)
 		article.Headers["references"] = []string{article.References}
-
 	}
-	log.Printf("Web posting: User %s posting to newsgroups: %v, subject: %s", session.User.Username, newsgroups, subject)
+	//log.Printf("Web posting: User '%s': article='%#v'", session.User.Username, article)
 
 	// Put article into the queue channel
 	// This channel will be processed by the PostQueueWorker in the processor package
 	select {
 	case models.PostQueueChannel <- article:
-		log.Printf("Article queued successfully for user %s, message-id: %s", session.User.Username, article.MessageID)
+		log.Printf("Article queued successfully for user '%s', message-id: '%s'", session.User.Username, article.MessageID)
 
 	default:
 		log.Printf("Warning: Post queue channel is full, article is lost.")
@@ -346,7 +345,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	pageTitle := "New Thread"
 	if isReply {
 		successMsg = "Your reply has been queued for posting. It will be processed shortly."
-		pageTitle = "Reply to Thread"
+		pageTitle = "Reply to"
 	}
 
 	data := PostPageData{

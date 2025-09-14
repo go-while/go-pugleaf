@@ -46,8 +46,8 @@
 
                 <form method="POST" action="/SitePostSubmit">
                     {{if .IsReply}}
-                    <input type="hidden" name="reply_to" value="{{.ReplyTo}}">
-                    <input type="hidden" name="message_id" value="{{.MessageID}}">
+                    <input type="hidden" name="reply_to" value="{{.ReplyToArticleNum}}">
+                    <input type="hidden" name="message_id" value="{{.ReplyToMessageID}}">
                     {{end}}
 
                     <div class="mb-3">

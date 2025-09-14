@@ -83,6 +83,8 @@ type ThreadingProcessor interface {
 	// Add method for finding thread roots - matches proc_MsgIDtmpCache.go signature (updated to use pointer)
 	FindThreadRootInCache(groupName *string, refs []string) *MsgIdTmpCacheItem
 	CheckNoMoreWorkInHistory() bool
+	// Add method for force closing group databases
+	ForceCloseGroupDBs(groupsDB *GroupDBs) error
 }
 
 // SetProcessor sets the threading processor callback interface
@@ -561,12 +563,12 @@ retry1:
 
 	// PHASE 1: Insert complete articles (overview + article data unified) and set article numbers directly on batches
 	if err := sq.batchInsertOverviews(*task.Newsgroup, batches, groupDBs, task.Newsgroup); err != nil {
-		time.Sleep(time.Second)
 		if groupDBs != nil {
-			groupDBs.Return(sq.db)
+			sq.proc.ForceCloseGroupDBs(groupDBs)
 			log.Printf("[BATCH] processNewsgroupBatch Failed1 to process batch for group '%s': %v groupDBs='%#v'", *task.Newsgroup, err, groupDBs)
 			groupDBs = nil
 		}
+		time.Sleep(time.Second)
 		goto retry1
 	}
 

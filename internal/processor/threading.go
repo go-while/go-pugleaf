@@ -181,7 +181,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 	}
 	if article.Path == "" {
 		//log.Printf("[WARN:OLD] Article '%s' empty path... ?! headers='%#v'", article.MessageID, article.Headers)
-		article.Path = LocalNNTPHostname + "!not-for-mail"
+		article.Path = LocalNNTPHostname + "!unknown!not-for-mail"
 	} else {
 		article.Path = LocalNNTPHostname + "!" + article.Path // Ensure path is prefixed with hostname
 	}
