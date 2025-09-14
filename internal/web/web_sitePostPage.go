@@ -251,11 +251,13 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		}
 		return
 	}
-
+	var headers []string
+	headers = append(headers, "Newsgroups: "+strings.Join(newsgroups, ","))
 	// Create article similar to threading.go
 	article := &models.Article{
 		MessageID:   generateMessageID(),
 		Subject:     subject,
+		HeadersJSON: strings.Join(headers, "\n"),
 		FromHeader:  fmt.Sprintf("%s <%s>", user.DisplayName, user.DisplayName+"@"+processor.LocalNNTPHostname),
 		DateString:  time.Now().Format(time.RFC1123Z),
 		BodyText:    body,
