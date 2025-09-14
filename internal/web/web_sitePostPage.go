@@ -150,12 +150,11 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/login")
 		return
 	}
-	user := session.User
-
 	// Get form data
 	subject := strings.TrimSpace(c.PostForm("subject"))
 	body := strings.TrimSpace(c.PostForm("body"))
 	newsgroupsStr := strings.TrimSpace(c.PostForm("newsgroups"))
+	log.Printf("User %s is posting to newsgroups: %v, subject: %s", session.User.Username, newsgroupsStr, subject)
 
 	// Check if this is a reply
 	replyTo := strings.TrimSpace(c.PostForm("reply_to"))
@@ -265,7 +264,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		MessageID:   generateMessageID(),
 		Subject:     subject,
 		HeadersJSON: strings.Join(headers, "\n"),
-		FromHeader:  fmt.Sprintf("%s <%s>", user.DisplayName, user.DisplayName+"@"+processor.LocalNNTPHostname),
+		FromHeader:  fmt.Sprintf("%s <%s>", session.User.DisplayName, session.User.DisplayName+"@"+processor.LocalNNTPHostname),
 		DateString:  time.Now().Format(time.RFC1123Z),
 		BodyText:    body,
 		IsThrRoot:   !isReply, // Only new threads are thread roots
@@ -275,6 +274,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		Path:        ".POSTED!not-for-mail",
 		ArticleNums: make(map[*string]int64),
 		RefSlice:    []string{},
+		Headers:     make(map[string][]string, 6),
 	}
 	article.Headers["newsgroups"] = []string{strings.Join(newsgroups, ",")}
 	article.Headers["subject"] = []string{subject}
@@ -310,13 +310,13 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		article.Headers["references"] = []string{article.References}
 
 	}
-	log.Printf("Web posting: User %s posting to newsgroups: %v, subject: %s", user.Username, newsgroups, subject)
+	log.Printf("Web posting: User %s posting to newsgroups: %v, subject: %s", session.User.Username, newsgroups, subject)
 
 	// Put article into the queue channel
 	// This channel will be processed by the PostQueueWorker in the processor package
 	select {
 	case models.PostQueueChannel <- article:
-		log.Printf("Article queued successfully for user %s, message-id: %s", user.Username, article.MessageID)
+		log.Printf("Article queued successfully for user %s, message-id: %s", session.User.Username, article.MessageID)
 
 	default:
 		log.Printf("Warning: Post queue channel is full, article is lost.")
