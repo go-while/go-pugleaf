@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/processor"
+	"github.com/go-while/go-pugleaf/internal/utils"
 )
 
 // PostPageData represents data for posting page
@@ -305,6 +306,9 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 
 		// Build new References header: original References + original Message-ID
 		article.References = originalRefs + " " + messageID
+		article.RefSlice = utils.ParseReferences(article.References)
+		article.Headers["references"] = []string{article.References}
+
 	}
 	log.Printf("Web posting: User %s posting to newsgroups: %v, subject: %s", user.Username, newsgroups, subject)
 
