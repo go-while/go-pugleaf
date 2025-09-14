@@ -58,22 +58,22 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 			// Get group database connection
 			if groupDBs, err := s.DB.GetGroupDBs(prefilledNewsgroup); err == nil {
 				defer groupDBs.Return(s.DB)
-				if article, err = s.DB.GetArticleByNum(groupDBs, articleNum); err == nil {
+				if reply_article, err := s.DB.GetArticleByNum(groupDBs, articleNum); err == nil {
 					// Handle subject with "Re: " prefix
-					if !strings.HasPrefix(strings.ToLower(article.Subject), "re:") {
-						article.Subject = "Re: " + article.Subject
+					if !strings.HasPrefix(strings.ToLower(reply_article.Subject), "re:") {
+						article.Subject = "Re: " + models.ConvertToUTF8(reply_article.Subject)
 					}
 					// Quote the original message body
-					if article.BodyText != "" {
+					if reply_article.BodyText != "" {
 						// Clean the body text first to remove HTML entities
-						cleanBodyText := models.ConvertToUTF8(article.BodyText)
+						cleanBodyText := models.ConvertToUTF8(reply_article.BodyText)
 						lines := strings.Split(cleanBodyText, "\n")
 						var quotedLines []string
 
 						// Add header line with properly decoded FromHeader for NNTP posting
-						cleanFromHeader := models.ConvertToUTF8(article.FromHeader)
+						cleanFromHeader := models.ConvertToUTF8(reply_article.FromHeader)
 						quotedLines = append(quotedLines, fmt.Sprintf("On %s, %s wrote:",
-							article.DateString, cleanFromHeader))
+							reply_article.DateString, cleanFromHeader))
 						quotedLines = append(quotedLines, "")
 
 						// Quote each line with "> "
