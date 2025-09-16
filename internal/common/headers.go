@@ -132,12 +132,16 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			ignoreLine = false
 		}
 		if !isSpacedLine {
-			// check if first char is lowercase
-			if unicode.IsLower(rune(headerLine[0])) {
-				log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
+			if len(headerLine) < 4 { // "X: A"
+				log.Printf("Short header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
 				ignoreLine = true
 				ignoredLines++
 				continue
+			}
+			// check if first char is lowercase
+			if unicode.IsLower(rune(headerLine[0])) {
+				headerLine = strings.ToUpper(string(headerLine[0])) + headerLine[1:]
+				log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (rewrote)", headerLine, i, article.MessageID)
 			}
 			header := strings.SplitN(headerLine, ":", 2)[0]
 			if len(header) == 0 {
@@ -159,7 +163,6 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				}
 				headersMap[strings.ToLower(header)] = true
 			}
-
 		}
 		headers = append(headers, headerLine)
 	}
