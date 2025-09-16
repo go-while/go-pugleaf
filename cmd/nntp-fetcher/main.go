@@ -57,8 +57,8 @@ func main() {
 	var newsgroups []*models.Newsgroup
 	var (
 		maxBatchThreads    = flag.Int("max-batch-threads", 4, "Limit how many newsgroup batches will be processed concurrently (default: 16) more can eat your memory and disk IO!")
-		maxBatch           = flag.Int("max-batch", 128, "Maximum number of articles to process in a batch (recommended: 100)")
-		maxQueued          = flag.Int("max-queue", 16384, "Limit db_batch to have max N articles queued over all newsgroups")
+		maxBatch           = flag.Int("max-batch", 1000, "Maximum number of articles to process in a batch (recommended: 100-10000)")
+		maxQueued          = flag.Int("max-queue", 1280, "Limit db_batch to have max N articles queued over all newsgroups")
 		fetchNewsgroup     = flag.String("group", "", "Newsgroup to fetch (default: empty = all groups once up to max-batch) or rocksolid.* with final wildcard to match prefix.*")
 		nntphostname       = flag.String("nntphostname", "", "Your hostname must be set!")
 		useShortHashLenPtr = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
