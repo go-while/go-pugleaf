@@ -13,14 +13,14 @@ import (
 
 // IgnoreHeadersMap is a map version of IgnoreHeaders for fast lookup
 var IgnoreHeadersMap = map[string]bool{
-	"Message-ID": true,
-	"Subject":    true,
-	"From":       true,
-	"Date":       true,
-	"References": true,
-	"Path":       true,
-	"Xref":       true,
-	"X-Ref":      true,
+	"message-id": true,
+	"subject":    true,
+	"from":       true,
+	"date":       true,
+	"references": true,
+	"path":       true,
+	"xref":       true,
+	"x-Ref":      true,
 }
 
 // isRFC822Compliant checks if a date string is RFC 822/1123 compliant for Usenet
@@ -146,16 +146,16 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				ignoredLines++
 				continue
 			}
-			if IgnoreHeadersMap[header] {
+			if IgnoreHeadersMap[strings.ToLower(header)] {
 				ignoreLine = true
 				continue
 			}
-			if headersMap[header] {
+			if headersMap[strings.ToLower(header)] {
 				log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
 				ignoreLine = true
 				continue
 			}
-			headersMap[header] = true
+			headersMap[strings.ToLower(header)] = true
 		}
 		headers = append(headers, headerLine)
 	}
