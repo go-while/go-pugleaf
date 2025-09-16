@@ -71,7 +71,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			// DateString is not RFC compliant, use DateSent instead
 			if !article.DateSent.IsZero() {
 				dateHeader = article.DateSent.UTC().Format(time.RFC1123Z)
-				log.Printf("Using dateHeader '%s' instead of DateString '%s' for article %s", dateHeader, article.DateString, article.MessageID)
+				//log.Printf("Using dateHeader '%s' instead of DateString '%s' for article %s", dateHeader, article.DateString, article.MessageID)
 			} else {
 				return nil, fmt.Errorf("article has non-compliant DateString and zero DateSent msgId='%s'", article.MessageID)
 			}
