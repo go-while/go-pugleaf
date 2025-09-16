@@ -908,7 +908,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article) (int, error) {
 
 	// Send TAKETHIS command with article content
-	takeThisResponseCode, err := conn.TakeThisArticle(article)
+	takeThisResponseCode, err := conn.TakeThisArticle(article, &processor.LocalNNTPHostname)
 	if err != nil {
 		return 0, fmt.Errorf("failed to send TAKETHIS: %v", err)
 	}
