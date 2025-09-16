@@ -63,7 +63,6 @@ func main() {
 	// Command line flags for NNTP transfer configuration
 	var (
 		// Required flags
-		nntphostname  = flag.String("nntphostname", "", "Your hostname must be set!")
 		transferGroup = flag.String("group", "", "Newsgroup to transfer (supports wildcards like alt.* or news.admin.*)")
 
 		// Connection configuration
@@ -103,11 +102,6 @@ func main() {
 	if *showHelp {
 		showUsageExamples()
 		os.Exit(0)
-	}
-
-	// Validate required flags
-	if *nntphostname == "" {
-		log.Fatalf("Error: -nntphostname must be set!")
 	}
 
 	if *transferGroup == "" {
@@ -187,11 +181,6 @@ func main() {
 		log.Printf("Connection test successful!")
 		os.Exit(0)
 	}
-	// No need to initialize IgnoreHeadersMap, it's already initialized in common package
-
-	// Initialize configuration
-	mainConfig := config.NewDefaultConfig()
-	mainConfig.Server.Hostname = *nntphostname
 
 	// Initialize database (default config, data in ./data)
 	db, err := database.OpenDatabase(nil)
@@ -281,11 +270,6 @@ func main() {
 	}
 
 	log.Printf("Found %d newsgroups to transfer", len(newsgroups))
-
-	// Set hostname in processor with database fallback support
-	if err := processor.SetHostname(*nntphostname, db); err != nil {
-		log.Fatalf("Failed to set NNTP hostname: %v", err)
-	}
 
 	// Initialize processor for article handling
 	proc := processor.NewProcessor(db, pool, finalUseShortHashLen)
