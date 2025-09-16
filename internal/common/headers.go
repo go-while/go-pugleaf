@@ -88,11 +88,18 @@ func ReconstructHeaders(article *models.Article, withPath bool) ([]string, error
 	if article.References != "" {
 		headers = append(headers, "References: "+article.References)
 	}
-	if withPath {
+	switch withPath {
+	case true:
 		if article.Path != "" {
 			headers = append(headers, "Path: "+article.Path)
 		} else {
 			headers = append(headers, "Path: unknown.pugleaf.net!not-for-mail")
+		}
+	case false:
+		if article.Path != "" {
+			headers = append(headers, "X-Path: "+article.Path)
+		} else {
+			headers = append(headers, "X-Path: unknown.pugleaf.net!not-for-mail")
 		}
 	}
 	moreHeaders := strings.Split(article.HeadersJSON, "\n")
