@@ -20,20 +20,20 @@ var IgnoreHeadersMap = map[string]bool{
 	"references": true,
 	"path":       true,
 	"xref":       true,
-	"x-Ref":      true,
 }
 
-// isRFC822Compliant checks if a date string is RFC 822/1123 compliant for Usenet
-func isRFC822Compliant(dateStr string) bool {
+var formats = []string{
+	time.RFC1123Z,                     // "Mon, 02 Jan 2006 15:04:05 -0700"
+	time.RFC1123,                      // "Mon, 02 Jan 2006 15:04:05 MST"
+	time.RFC822,                       // "02 Jan 06 15:04 MST"
+	time.RFC822Z,                      // "02 Jan 06 15:04 -0700"
+	"Mon, _2 Jan 2006 15:04:05 MST",   // Single digit day
+	"Mon, _2 Jan 2006 15:04:05 -0700", // Single digit day with timezone
+}
+
+// isRFCdate checks if a date string is RFC compliant for Usenet
+func isRFCdate(dateStr string) bool {
 	// Try to parse with common RFC formats used in Usenet
-	formats := []string{
-		time.RFC1123,                     // "Mon, 02 Jan 2006 15:04:05 MST"
-		time.RFC1123Z,                    // "Mon, 02 Jan 2006 15:04:05 -0700"
-		time.RFC822,                      // "02 Jan 06 15:04 MST"
-		time.RFC822Z,                     // "02 Jan 06 15:04 -0700"
-		"Mon, 2 Jan 2006 15:04:05 MST",   // Single digit day
-		"Mon, 2 Jan 2006 15:04:05 -0700", // Single digit day with timezone
-	}
 
 	for _, format := range formats {
 		if _, err := time.Parse(format, dateStr); err == nil {
@@ -65,15 +65,15 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 	var dateHeader string
 	if article.DateString != "" {
 		// Check if DateString is RFC-compliant by trying to parse it
-		if isRFC822Compliant(article.DateString) {
+		if isRFCdate(article.DateString) {
 			dateHeader = article.DateString
 		} else {
 			// DateString is not RFC compliant, use DateSent instead
 			if !article.DateSent.IsZero() {
-				dateHeader = article.DateSent.UTC().Format(time.RFC1123)
-				log.Printf("Using DateSent instead of non-compliant DateString for article %s", article.MessageID)
+				dateHeader = article.DateSent.UTC().Format(time.RFC1123Z)
+				log.Printf("Using dateHeader '%s' instead of DateString '%s' for article %s", dateHeader, article.DateString, article.MessageID)
 			} else {
-				return nil, fmt.Errorf("article has non-compliant DateString and zero DateSent")
+				return nil, fmt.Errorf("article has non-compliant DateString and zero DateSent msgId='%s'", article.MessageID)
 			}
 		}
 	} else {
@@ -81,7 +81,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 		if !article.DateSent.IsZero() {
 			dateHeader = article.DateSent.UTC().Format(time.RFC1123)
 		} else {
-			return nil, fmt.Errorf("article missing Date header (both DateString and DateSent are empty)")
+			return nil, fmt.Errorf("article missing Date header (both DateString and DateSent are empty) msgId='%s'", article.MessageID)
 		}
 	}
 	headers = append(headers, "Message-ID: "+article.MessageID)
@@ -150,12 +150,16 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				ignoreLine = true
 				continue
 			}
-			if headersMap[strings.ToLower(header)] {
-				log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
-				ignoreLine = true
-				continue
+
+			if !strings.HasPrefix(header, "X-") {
+				if headersMap[strings.ToLower(header)] {
+					log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
+					ignoreLine = true
+					continue
+				}
+				headersMap[strings.ToLower(header)] = true
 			}
-			headersMap[strings.ToLower(header)] = true
+
 		}
 		headers = append(headers, headerLine)
 	}
