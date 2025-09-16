@@ -325,10 +325,12 @@ func (p *Pool) ClosePool() error {
 		p.totalClosed++
 		p.mux.Unlock()
 	}
+	p.mux.Lock()
 	if p.activeConns > 0 {
 		log.Printf("[NNTP-POOL] WARNING: Pool closed with positive count %d active connections remaining ?!?!", p.activeConns)
 	}
 	p.activeConns = 0
+	p.mux.Unlock()
 	return nil
 }
 
