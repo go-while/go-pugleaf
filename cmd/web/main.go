@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
@@ -22,7 +21,6 @@ import (
 )
 
 var (
-	webmutex sync.Mutex
 
 	// command-line flags
 	nntphostname          string
@@ -167,44 +165,11 @@ func main() {
 	}
 	log.Printf("[WEB]: Using WEB configuration: %#v", webConfig)
 
-	// Override config with command-line flags if provided
-	if withnntp && nntptcpport > 0 {
-		mainConfig.Server.NNTP.Port = nntptcpport
-		log.Printf("[WEB]: Overriding NNTP TCP port with command-line flag: %d", mainConfig.Server.NNTP.Port)
-	} else {
-		log.Printf("[WEB]: No NNTP TCP port flag provided")
-		mainConfig.Server.NNTP.Port = 0
-	}
-	if withnntp && nntptlsport > 0 {
-		mainConfig.Server.NNTP.TLSPort = nntptlsport
-		mainConfig.Server.NNTP.TLSCert = nntpcertFile
-		mainConfig.Server.NNTP.TLSKey = nntpkeyFile
-	} else {
-		mainConfig.Server.NNTP.TLSPort = 0
-		mainConfig.Server.NNTP.TLSCert = ""
-		mainConfig.Server.NNTP.TLSKey = ""
-		log.Printf("[WEB]: No NNTP TLS port flag provided")
-	}
-
-	mainConfig.Server.Hostname = nntphostname
-	log.Printf("[WEB]: Using NNTP configuration %#v", mainConfig.Server.NNTP)
-
 	// Validate port
 	if webConfig.ListenPort < 1024 || webConfig.ListenPort > 65535 {
 		log.Fatalf("[WEB]: Invalid port number: %d (must be between 1024 and 65535)", webConfig.ListenPort)
 	}
-	// Validate port
-	if mainConfig.Server.NNTP.Port > 0 {
-		if mainConfig.Server.NNTP.Port < 1024 || mainConfig.Server.NNTP.Port > 65535 {
-			log.Fatalf("[WEB]: Invalid NNTP tcp port number: %d (must be between 1024 and 65535)", mainConfig.Server.NNTP.Port)
-		}
-	}
-	// Validate port
-	if mainConfig.Server.NNTP.TLSPort > 0 {
-		if mainConfig.Server.NNTP.TLSPort < 1024 || mainConfig.Server.NNTP.TLSPort > 65535 {
-			log.Fatalf("[WEB]: Invalid NNTP tls port number: %d (must be between 1024 and 65535)", mainConfig.Server.NNTP.TLSPort)
-		}
-	}
+
 	/*
 		// Check for environment variable override
 		if portEnv := os.Getenv("PUGLEAF_WEB_PORT"); portEnv != "" {
@@ -248,6 +213,7 @@ func main() {
 	// Note: Database batch workers are started automatically by OpenDatabase()
 	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
 	db.WG.Add(1) // Adds for history: one for writer worker
+	db.WG.Add(1) // Adds for processor
 
 	// Apply main database migrations
 	if err := db.Migrate(); err != nil {
@@ -405,13 +371,47 @@ func main() {
 	}
 
 	proc := NewFetchProcessor(db)
-
+	if proc == nil {
+		log.Fatalf("[WEB]: Error booting processor")
+	}
 	var nntpServer *nntp.NNTPServer
 	if (nntptcpport > 0 || nntptlsport > 0) && withnntp {
-		if proc == nil {
-			log.Fatalf("[WEB]: Cannot start NNTP server without a processor (no enabled providers found)")
+		// set config from command-line flags
+		if nntptcpport > 0 {
+			mainConfig.Server.NNTP.Port = nntptcpport
+			log.Printf("[WEB]: Local NNTP Server TCP: %d", nntptcpport)
+		} else {
+			log.Printf("[WEB]: No NNTP TCP port flag provided")
+			mainConfig.Server.NNTP.Port = 0
+		}
+		if nntptlsport > 0 {
+			log.Printf("[WEB]: Local NNTP Server TLS: %d", nntptlsport)
+			mainConfig.Server.NNTP.TLSPort = nntptlsport
+			mainConfig.Server.NNTP.TLSCert = nntpcertFile
+			mainConfig.Server.NNTP.TLSKey = nntpkeyFile
+		} else {
+			log.Printf("[WEB]: No NNTP TLS port flag provided")
+			mainConfig.Server.NNTP.TLSPort = 0
+			mainConfig.Server.NNTP.TLSCert = ""
+			mainConfig.Server.NNTP.TLSKey = ""
+		}
+		mainConfig.Server.Hostname = nntphostname
+		// Validate port
+		if mainConfig.Server.NNTP.Port > 0 {
+			if mainConfig.Server.NNTP.Port < 1024 || mainConfig.Server.NNTP.Port > 65535 {
+				log.Fatalf("[WEB]: Invalid NNTP tcp port number: %d (must be between 1024 and 65535)", mainConfig.Server.NNTP.Port)
+			}
+		}
+		// Validate port
+		if mainConfig.Server.NNTP.TLSPort > 0 {
+			if mainConfig.Server.NNTP.TLSPort < 1024 || mainConfig.Server.NNTP.TLSPort > 65535 {
+				log.Fatalf("[WEB]: Invalid NNTP tls port number: %d (must be between 1024 and 65535)", mainConfig.Server.NNTP.TLSPort)
+			}
 		}
 		processorAdapter := NewProcessorAdapter(proc)
+		if processorAdapter == nil {
+			log.Fatalf("[WEB]: Failed to create processor adapter for NNTP server")
+		}
 		log.Printf("[WEB]: Starting NNTP server with TCP port %d, TLS port %d", mainConfig.Server.NNTP.Port, mainConfig.Server.NNTP.TLSPort)
 		nntpServer, err = nntp.NewNNTPServer(db, &mainConfig.Server, db.WG, processorAdapter)
 		if err != nil {
