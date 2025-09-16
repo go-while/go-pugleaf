@@ -592,6 +592,8 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 	maxThreadsChan := make(chan struct{}, maxThreads)
 	var wg sync.WaitGroup
 	// Process each newsgroup
+	log.Printf("Starting transfer for %d newsgroups", len(newsgroups))
+	time.Sleep(3 * time.Second)
 	for _, newsgroup := range newsgroups {
 		if proc.WantShutdown(shutdownChan) {
 			log.Printf("Shutdown requested, stopping transfer. Total transferred: %d articles", totalTransferred)
@@ -674,9 +676,9 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	} else {
 		log.Printf("Found %d articles in newsgroup %s - processing in batches", totalArticles, newsgroup.Name)
 	}
-
+	time.Sleep(3 * time.Second)
 	var transferred, ioffset int64
-
+	remainingArticles := totalArticles
 	// Process articles in database batches (much larger than network batches)
 	for offset := ioffset; offset < totalArticles; offset += dbBatchSize {
 		if proc.WantShutdown(shutdownChan) {
@@ -712,7 +714,6 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			if end > len(articles) {
 				end = len(articles)
 			}
-			var done int64
 		forever:
 			for {
 				if proc.WantShutdown(shutdownChan) {
@@ -734,29 +735,28 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 					if isleep > time.Minute {
 						isleep = time.Minute
 					}
-					goto forever
+					continue forever
 				}
 				isleep = time.Second
 				pool.Put(conn)
-				done += batchTransferred
+				transferred += batchTransferred
+				log.Printf("Newsgroup %s: batch %d-%d processed (offset %d/%d) transferred %d", newsgroup.Name, i+1, end, offset, totalArticles, batchTransferred)
 				break forever
 			}
-			transferred += done
-
-			// todo verbose flag
-			log.Printf("Newsgroup %s: Network batch %d-%d processed, %d transferred in this batch", newsgroup.Name, i+1, end, done)
 		}
 
 		// Clear articles slice to free memory
 		for i := range articles {
 			articles[i] = nil
 		}
+		remainingArticles -= int64(len(articles))
 		articles = nil
 
 		// todo verbose flag
-		log.Printf("Newsgroup %s: done (offset %d), total transferred: %d", newsgroup.Name, offset, transferred)
+		log.Printf("Newsgroup %s: done (offset %d/%d), total transferred: %d, remainingArticles %d", newsgroup.Name, offset, totalArticles, transferred, remainingArticles)
 	}
 
+	log.Printf("Completed newsgroup %s: total transferred: %d articles / total articles: %d", newsgroup.Name, transferred, totalArticles)
 	return transferred, nil
 }
 
