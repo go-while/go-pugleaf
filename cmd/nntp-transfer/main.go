@@ -633,6 +633,12 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 	return nil
 }
 
+type takeThisMode struct {
+	takeThisSuccessCount int
+	takeThisTotalCount   int
+	useCheckMode         bool // Start with TAKETHIS mode (false)
+}
+
 // transferNewsgroup transfers articles from a single newsgroup
 func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}) (int64, error) {
 
@@ -697,11 +703,9 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			log.Printf("No more articles in newsgroup %s (offset %d)", newsgroup.Name, offset)
 			break
 		}
-
-		// todo verbose flag
-
 		log.Printf("Newsgroup %s: Loaded %d articles from database (offset %d)", newsgroup.Name, len(articles), offset)
 		isleep := time.Second
+		ttMode := &takeThisMode{}
 
 		// Process articles in network batches
 		for i := 0; i < len(articles); i += batchCheck {
@@ -709,7 +713,11 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 				log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
 				return transferred, nil
 			}
-
+			if !ttMode.useCheckMode && ttMode.takeThisSuccessCount > 0 && ttMode.takeThisSuccessCount == ttMode.takeThisTotalCount {
+				ttMode.takeThisSuccessCount = 0
+				ttMode.takeThisTotalCount = 0
+			}
+			// Determine end index for the batch
 			end := i + batchCheck
 			if end > len(articles) {
 				end = len(articles)
@@ -725,7 +733,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 				if err != nil {
 					return transferred, fmt.Errorf("failed to get connection from pool: %v", err)
 				}
-				batchTransferred, berr := processBatch(conn, articles[i:end])
+				batchTransferred, berr := processBatch(conn, newsgroup.Name, ttMode, articles[i:end])
 				if berr != nil {
 					conn = nil
 					pool.Put(conn)
@@ -760,16 +768,9 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	return transferred, nil
 }
 
-// Global variables to track TAKETHIS success rate for streaming protocol
-var (
-	takeThisSuccessCount int
-	takeThisTotalCount   int
-	useCheckMode         bool // Start with TAKETHIS mode (false)
-)
-
 // processBatch processes a batch of articles using NNTP streaming protocol (RFC 4644)
 // Uses TAKETHIS primarily, falls back to CHECK when success rate < 95%
-func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int64, error) {
+func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThisMode, articles []*models.Article) (int64, error) {
 
 	if len(articles) == 0 {
 		return 0, nil
@@ -777,17 +778,17 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int64, er
 
 	// Calculate success rate to determine whether to use CHECK or TAKETHIS
 	var successRate float64 = 100.0 // Start optimistic
-	if takeThisTotalCount > 0 {
-		successRate = float64(takeThisSuccessCount) / float64(takeThisTotalCount) * 100.0
+	if ttMode.takeThisTotalCount > 0 {
+		successRate = float64(ttMode.takeThisSuccessCount) / float64(ttMode.takeThisTotalCount) * 100.0
 	}
 
 	// Switch to CHECK mode if TAKETHIS success rate drops below 95%
-	if successRate < 95.0 && takeThisTotalCount >= 10 { // Need at least 10 attempts for meaningful stats
-		useCheckMode = true
-		log.Printf("TAKETHIS success rate %.1f%% < 95%%, switching to CHECK mode", successRate)
-	} else if successRate >= 98.0 && takeThisTotalCount >= 20 { // Switch back when rate improves
-		useCheckMode = false
-		log.Printf("TAKETHIS success rate %.1f%% >= 98%%, switching back to TAKETHIS mode", successRate)
+	if successRate < 95.0 && ttMode.takeThisTotalCount >= 10 { // Need at least 10 attempts for meaningful stats
+		ttMode.useCheckMode = true
+		//log.Printf("newsgroup %s: TAKETHIS success rate %.1f%% < 95%%, switching to CHECK mode", newsgroupName, successRate)
+	} else if successRate >= 95.0 && ttMode.takeThisTotalCount >= 20 { // Switch back when rate improves
+		ttMode.useCheckMode = false
+		//log.Printf("newsgroup %s: TAKETHIS success rate %.1f%% >= 95%%, switching back to TAKETHIS mode", newsgroupName, successRate)
 	}
 
 	articleMap := make(map[string]*models.Article)
@@ -797,7 +798,7 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int64, er
 
 	var transferred int64
 
-	if useCheckMode {
+	if ttMode.useCheckMode {
 		// CHECK mode: verify articles are wanted before sending
 		log.Printf("Using CHECK mode for %d articles (success rate: %.1f%%)", len(articles), successRate)
 
@@ -826,12 +827,17 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int64, er
 			log.Printf("No articles wanted by server in this batch")
 			return transferred, nil
 		}
-
-		log.Printf("Server wants %d out of %d articles in batch", len(wantedIds), len(messageIds))
+		if ttMode.useCheckMode && len(wantedIds) == len(messageIds) {
+			// use TAKETHIS mode if all articles are wanted
+			ttMode.useCheckMode = false
+			ttMode.takeThisSuccessCount = len(wantedIds)
+			ttMode.takeThisTotalCount = len(wantedIds)
+		}
+		log.Printf("Newsgroup: '%s' Server wants %d out of %d articles in batch", newsgroupName, len(wantedIds), len(messageIds))
 
 		// Send TAKETHIS for wanted articles
 		for _, msgId := range wantedIds {
-			count, err := sendArticleViaTakeThis(conn, articleMap[*msgId])
+			count, err := sendArticleViaTakeThis(conn, articleMap[*msgId], ttMode)
 			if err != nil {
 				log.Printf("Failed to send TAKETHIS for %s: %v", *msgId, err)
 				continue
@@ -842,7 +848,7 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int64, er
 		// TAKETHIS mode: send articles directly and track success rate
 		log.Printf("Using TAKETHIS mode for %d articles (success rate: %.1f%%)", len(articles), successRate)
 
-		transferred, err := sendArticlesBatchViaTakeThis(conn, articles)
+		transferred, err := sendArticlesBatchViaTakeThis(conn, articles, ttMode)
 		if err != nil {
 			return int64(transferred), fmt.Errorf("failed to send TAKETHIS batch: %v", err)
 		}
@@ -854,7 +860,7 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int64, er
 
 // sendArticlesBatchViaTakeThis sends multiple articles via TAKETHIS in streaming mode
 // Sends all TAKETHIS commands first, then reads all responses (true streaming)
-func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Article) (int, error) {
+func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Article, ttMode *takeThisMode) (int, error) {
 	if len(articles) == 0 {
 		return 0, nil
 	}
@@ -891,9 +897,9 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		}
 
 		// Update success rate tracking
-		takeThisTotalCount++
+		ttMode.takeThisTotalCount++
 		if takeThisResponseCode == 239 {
-			takeThisSuccessCount++
+			ttMode.takeThisSuccessCount++
 			transferred++
 		} else {
 			log.Printf("Failed to transfer article %s: %d", article.MessageID, takeThisResponseCode)
@@ -905,7 +911,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 }
 
 // sendArticleViaTakeThis sends a single article via TAKETHIS and tracks success rate
-func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article) (int, error) {
+func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article, ttMode *takeThisMode) (int, error) {
 
 	// Send TAKETHIS command with article content
 	takeThisResponseCode, err := conn.TakeThisArticle(article, &processor.LocalNNTPHostname)
@@ -914,9 +920,9 @@ func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article) (in
 	}
 
 	// Update success rate tracking
-	takeThisTotalCount++
+	ttMode.takeThisTotalCount++
 	if takeThisResponseCode == 239 {
-		takeThisSuccessCount++
+		ttMode.takeThisSuccessCount++
 		//log.Printf("Successfully transferred article: %s", article.MessageID)
 		return 1, nil
 	} else {
