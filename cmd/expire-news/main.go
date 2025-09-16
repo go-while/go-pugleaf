@@ -74,7 +74,6 @@ func main() {
 		batchSize     = flag.Int("batch-size", 1000, "Number of articles to process per batch")
 		respectExpiry = flag.Bool("respect-expiry", false, "Use per-group expiry_days settings from database")
 		prune         = flag.Bool("prune", false, "Remove oldest articles to respect max_articles limit per group")
-		hostnamePath  = flag.String("nntphostname", "", "Your hostname (required)")
 		showHelp      = flag.Bool("help", false, "Show usage examples and exit")
 	)
 	flag.Parse()
@@ -90,10 +89,6 @@ func main() {
 		log.Fatal("Error: -group flag is required. Use -help for examples.")
 	}
 
-	if *hostnamePath == "" {
-		log.Fatal("Error: -nntphostname flag is required")
-	}
-
 	if !*respectExpiry && *expireDays <= 0 && !*prune {
 		log.Fatal("Error: -days must be > 0, or use -respect-expiry, or use -prune to use database settings")
 	}
@@ -106,10 +101,6 @@ func main() {
 	if !*dryRun && !*force {
 		log.Fatal("Error: Must specify -force to actually delete articles, or use -dry-run to preview")
 	}
-
-	// Load config
-	mainConfig := config.NewDefaultConfig()
-	mainConfig.Server.Hostname = *hostnamePath
 
 	// Initialize database
 	db, err := database.OpenDatabase(nil)
