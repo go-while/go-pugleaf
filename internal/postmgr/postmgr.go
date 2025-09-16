@@ -113,23 +113,10 @@ func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 func (pm *PosterManager) processEntry(entry database.PostQueueEntry) error {
 	log.Printf("Processing post queue entry %d (message: %s)", entry.ID, entry.MessageID)
 
-	// Get the newsgroup name by ID - we need to create this method or modify the query
-	// For now, let's get all newsgroups and find the one with matching ID
-	allNewsgroups, err := pm.db.MainDBGetAllNewsgroups()
+	// Get the newsgroup by ID
+	newsgroup, err := pm.db.MainDBGetNewsgroupByID(entry.NewsgroupID)
 	if err != nil {
-		return fmt.Errorf("failed to get newsgroups: %v", err)
-	}
-
-	var newsgroup *models.Newsgroup
-	for _, ng := range allNewsgroups {
-		if ng.ID == entry.NewsgroupID {
-			newsgroup = ng
-			break
-		}
-	}
-
-	if newsgroup == nil {
-		return fmt.Errorf("newsgroup with ID %d not found", entry.NewsgroupID)
+		return fmt.Errorf("failed to get newsgroup with ID %d: %v", entry.NewsgroupID, err)
 	}
 
 	if !newsgroup.Active {

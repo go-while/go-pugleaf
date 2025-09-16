@@ -201,6 +201,30 @@ func (db *Database) MainDBGetNewsgroup(newsgroup string) (*models.Newsgroup, err
 	return &g, nil
 }
 
+// MainDBGetNewsgroupByID returns a newsgroup information from MainDB by ID
+const query_MainDBGetNewsgroupByID = `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy, created_at FROM newsgroups WHERE id = ?`
+
+func (db *Database) MainDBGetNewsgroupByID(id int64) (*models.Newsgroup, error) {
+	rows, err := retryableQuery(db.mainDB, query_MainDBGetNewsgroupByID, id)
+	if err != nil {
+		log.Printf("MainDBGetNewsgroupByID: Failed to query newsgroup with ID %d: %v", id, err)
+		return nil, err
+	}
+	defer rows.Close()
+	var g models.Newsgroup
+	found := false
+	for rows.Next() {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.HighWater, &g.LowWater, &g.Status, &g.Hierarchy, &g.CreatedAt); err != nil {
+			return nil, err
+		}
+		found = true
+	}
+	if !found {
+		return nil, sql.ErrNoRows
+	}
+	return &g, nil
+}
+
 // UpdateNewsgroup updates an existing newsgroup
 const query_UpdateNewsgroup = `UPDATE newsgroups SET description = ?, last_article = ?, message_count = ?, active = ?, expiry_days = ?, max_articles = ?, high_water = ?, low_water = ?, status = ?, hierarchy = ? WHERE name = ?`
 
