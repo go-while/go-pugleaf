@@ -113,12 +113,6 @@ func main() {
 	database.MaxQueued = *maxQueued
 	nntp.MaxReadLinesXover = int64(*maxBatch)
 	processor.MaxBatchSize = int64(*maxBatch)
-	//processor.LOOPS_PER_GROUPS = *maxLoops
-
-	// Set global max read lines for xover
-
-	mainConfig := config.NewDefaultConfig()
-	mainConfig.Server.Hostname = *nntphostname
 
 	// Initialize database (default config, data in ./data)
 	db, err := database.OpenDatabase(nil)
