@@ -682,10 +682,12 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	} else {
 		log.Printf("Found %d articles in newsgroup %s - processing in batches", totalArticles, newsgroup.Name)
 	}
-	time.Sleep(3 * time.Second)
+	//time.Sleep(3 * time.Second) // debug sleep
 	var transferred, ioffset int64
 	remainingArticles := totalArticles
 	// Process articles in database batches (much larger than network batches)
+	ttMode := &takeThisMode{}
+
 	for offset := ioffset; offset < totalArticles; offset += dbBatchSize {
 		if proc.WantShutdown(shutdownChan) {
 			log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
@@ -705,8 +707,10 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		}
 		log.Printf("Newsgroup %s: Loaded %d articles from database (offset %d)", newsgroup.Name, len(articles), offset)
 		isleep := time.Second
-		ttMode := &takeThisMode{}
-
+		if !ttMode.useCheckMode && ttMode.takeThisSuccessCount > 0 && ttMode.takeThisSuccessCount == ttMode.takeThisTotalCount {
+			ttMode.takeThisSuccessCount = 0
+			ttMode.takeThisTotalCount = 0
+		}
 		// Process articles in network batches
 		for i := 0; i < len(articles); i += batchCheck {
 			if proc.WantShutdown(shutdownChan) {
@@ -768,6 +772,9 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	return transferred, nil
 }
 
+var lowerLevel float64 = 90.0
+var upperLevel float64 = 95.0
+
 // processBatch processes a batch of articles using NNTP streaming protocol (RFC 4644)
 // Uses TAKETHIS primarily, falls back to CHECK when success rate < 95%
 func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThisMode, articles []*models.Article) (int64, error) {
@@ -782,13 +789,13 @@ func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThis
 		successRate = float64(ttMode.takeThisSuccessCount) / float64(ttMode.takeThisTotalCount) * 100.0
 	}
 
-	// Switch to CHECK mode if TAKETHIS success rate drops below 95%
-	if successRate < 95.0 && ttMode.takeThisTotalCount >= 10 { // Need at least 10 attempts for meaningful stats
+	// Switch to CHECK mode if TAKETHIS success rate drops below lowerLevel
+	if successRate < lowerLevel && ttMode.takeThisTotalCount >= 10 { // Need at least 10 attempts for meaningful stats
 		ttMode.useCheckMode = true
-		//log.Printf("newsgroup %s: TAKETHIS success rate %.1f%% < 95%%, switching to CHECK mode", newsgroupName, successRate)
-	} else if successRate >= 95.0 && ttMode.takeThisTotalCount >= 20 { // Switch back when rate improves
+		//log.Printf("newsgroup %s: TAKETHIS success rate %.1f%% < %d%%, switching to CHECK mode", newsgroupName, successRate, lowerLevel)
+	} else if successRate >= upperLevel && ttMode.takeThisTotalCount >= 20 { // Switch back when rate improves
 		ttMode.useCheckMode = false
-		//log.Printf("newsgroup %s: TAKETHIS success rate %.1f%% >= 95%%, switching back to TAKETHIS mode", newsgroupName, successRate)
+		//log.Printf("newsgroup %s: TAKETHIS success rate %.1f%% >= %d%%, switching back to TAKETHIS mode", newsgroupName, successRate, upperLevel)
 	}
 
 	articleMap := make(map[string]*models.Article)
@@ -830,8 +837,8 @@ func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThis
 		if ttMode.useCheckMode && len(wantedIds) == len(messageIds) {
 			// use TAKETHIS mode if all articles are wanted
 			ttMode.useCheckMode = false
-			ttMode.takeThisSuccessCount = len(wantedIds)
-			ttMode.takeThisTotalCount = len(wantedIds)
+			ttMode.takeThisSuccessCount = 0
+			ttMode.takeThisTotalCount = 0
 		}
 		log.Printf("Newsgroup: '%s' Server wants %d out of %d articles in batch", newsgroupName, len(wantedIds), len(messageIds))
 
