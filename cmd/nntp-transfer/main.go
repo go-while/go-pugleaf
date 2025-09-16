@@ -40,12 +40,16 @@ func showUsageExamples() {
 	fmt.Println("  ./nntp-transfer -host news.server.local -max-threads 4 -group alt.*")
 	fmt.Println()
 	fmt.Println("Date Filtering:")
-	fmt.Println("  ./nntp-transfer -host news.server.local -start-date 2024-01-01 -group alt.test")
-	fmt.Println("  ./nntp-transfer -host news.server.local -end-date 2024-12-31 -group alt.test")
-	fmt.Println("  ./nntp-transfer -host news.server.local -start-date 2024-01-01T00:00:00 -end-date 2024-01-31T23:59:59 -group alt.test")
+	fmt.Println("  ./nntp-transfer -host news.server.local -date-beg 2024-01-01 -group alt.test")
+	fmt.Println("  ./nntp-transfer -host news.server.local -date-end 2024-12-31 -group alt.test")
+	fmt.Println("  ./nntp-transfer -host news.server.local -date-beg 2024-01-01T00:00:00 -date-end 2024-01-31T23:59:59 -group alt.test")
 	fmt.Println()
 	fmt.Println("Dry Run Mode:")
 	fmt.Println("  ./nntp-transfer -host news.server.local -dry-run -group alt.test")
+	fmt.Println()
+
+	fmt.Println("Show ALL command line flags:")
+	fmt.Println("  ./nntp-transfer -h")
 	fmt.Println()
 }
 
