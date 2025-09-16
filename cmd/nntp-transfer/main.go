@@ -707,17 +707,13 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		}
 		log.Printf("Newsgroup %s: Loaded %d articles from database (offset %d)", newsgroup.Name, len(articles), offset)
 		isleep := time.Second
-		if !ttMode.useCheckMode && ttMode.takeThisSuccessCount > 0 && ttMode.takeThisSuccessCount == ttMode.takeThisTotalCount {
-			ttMode.takeThisSuccessCount = 0
-			ttMode.takeThisTotalCount = 0
-		}
 		// Process articles in network batches
 		for i := 0; i < len(articles); i += batchCheck {
 			if proc.WantShutdown(shutdownChan) {
 				log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
 				return transferred, nil
 			}
-			if !ttMode.useCheckMode && ttMode.takeThisSuccessCount > 0 && ttMode.takeThisSuccessCount == ttMode.takeThisTotalCount {
+			if !ttMode.useCheckMode && ttMode.takeThisTotalCount >= 100 {
 				ttMode.takeThisSuccessCount = 0
 				ttMode.takeThisTotalCount = 0
 			}
