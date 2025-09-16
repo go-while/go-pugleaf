@@ -274,8 +274,7 @@ func (p *Pool) Put(client *BackendConn) error {
 	case p.connections <- client:
 		return nil
 	default:
-		log.Printf("[NNTP-POOL ERROR: Pool is full ?! should be fatal! closing connection for %s:%d", p.Backend.Host, p.Backend.Port)
-		// Pool is full, close the connection
+		log.Printf("[NNTP-POOL] ERROR: Pool is full or closed. Closing conn for %s:%d", p.Backend.Host, p.Backend.Port)
 		client.CloseFromPoolOnly()
 		p.mux.Lock()
 		p.totalClosed++
