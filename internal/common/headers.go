@@ -71,7 +71,9 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			// DateString is not RFC compliant, use DateSent instead
 			if !article.DateSent.IsZero() {
 				dateHeader = article.DateSent.UTC().Format(time.RFC1123Z)
-				//log.Printf("Using dateHeader '%s' instead of DateString '%s' for article %s", dateHeader, article.DateString, article.MessageID)
+				if VerboseHeaders {
+					log.Printf("Using dateHeader '%s' instead of DateString '%s' for article %s", dateHeader, article.DateString, article.MessageID)
+				}
 			} else {
 				return nil, fmt.Errorf("article has non-compliant DateString and zero DateSent msgId='%s'", article.MessageID)
 			}
@@ -141,7 +143,9 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			// check if first char is lowercase
 			if unicode.IsLower(rune(headerLine[0])) {
 				headerLine = strings.ToUpper(string(headerLine[0])) + headerLine[1:]
-				//log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (rewrote)", headerLine, i, article.MessageID)
+				if VerboseHeaders {
+					log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (rewrote)", headerLine, i, article.MessageID)
+				}
 			}
 			header := strings.SplitN(headerLine, ":", 2)[0]
 			if len(header) == 0 {
@@ -166,8 +170,10 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 		}
 		headers = append(headers, headerLine)
 	}
-	if ignoredLines > 0 {
+	if VerboseHeaders && ignoredLines > 0 {
 		log.Printf("Reconstructed %d header lines, ignored %d: msgId='%s'", len(headers), ignoredLines, article.MessageID)
 	}
 	return headers, nil
 }
+
+var VerboseHeaders = false
