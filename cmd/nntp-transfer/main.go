@@ -867,7 +867,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 
 	for _, article := range articles {
 		// Send TAKETHIS command with article content (non-blocking)
-		cmdID, err := conn.SendTakeThisArticleStreaming(article)
+		cmdID, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname)
 		if err != nil {
 			log.Printf("Failed to send TAKETHIS for %s: %v", article.MessageID, err)
 			continue

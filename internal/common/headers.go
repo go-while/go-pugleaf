@@ -43,8 +43,11 @@ func isRFC822Compliant(dateStr string) bool {
 	return false
 }
 
+const pathHeader_inv1 string = "Path: pugleaf.invalid!.TX!not-for-mail"
+const pathHeader_inv2 string = "X-Path: pugleaf.invalid!.TX!not-for-mail"
+
 // ReconstructHeaders reconstructs the header lines from an article for transmission
-func ReconstructHeaders(article *models.Article, withPath bool) ([]string, error) {
+func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *string) ([]string, error) {
 	var headers []string
 
 	// Add basic headers that we know about
@@ -91,15 +94,23 @@ func ReconstructHeaders(article *models.Article, withPath bool) ([]string, error
 	switch withPath {
 	case true:
 		if article.Path != "" {
-			headers = append(headers, "Path: "+article.Path)
+			if nntphostname != nil && *nntphostname != "" {
+				headers = append(headers, "Path: "+*nntphostname+"!.TX!"+article.Path)
+			} else {
+				headers = append(headers, "Path: "+article.Path)
+			}
 		} else {
-			headers = append(headers, "Path: unknown.pugleaf.net!not-for-mail")
+			headers = append(headers, pathHeader_inv1)
 		}
 	case false:
 		if article.Path != "" {
-			headers = append(headers, "X-Path: "+article.Path)
+			if nntphostname != nil && *nntphostname != "" {
+				headers = append(headers, "X-Path: "+*nntphostname+"!.TX!"+article.Path)
+			} else {
+				headers = append(headers, "X-Path: "+article.Path)
+			}
 		} else {
-			headers = append(headers, "X-Path: unknown.pugleaf.net!not-for-mail")
+			headers = append(headers, pathHeader_inv2)
 		}
 	}
 	moreHeaders := strings.Split(article.HeadersJSON, "\n")
@@ -110,7 +121,7 @@ func ReconstructHeaders(article *models.Article, withPath bool) ([]string, error
 
 	for i, headerLine := range moreHeaders {
 		if len(headerLine) == 0 {
-			log.Printf("Empty headerline=%d in msgId='%s'", i, article.MessageID)
+			log.Printf("Empty headerline=%d in msgId='%s' (continue)", i, article.MessageID)
 			continue
 		}
 		isSpacedLine = strings.HasPrefix(headerLine, " ") || strings.HasPrefix(headerLine, "\t")
@@ -123,14 +134,14 @@ func ReconstructHeaders(article *models.Article, withPath bool) ([]string, error
 		if !isSpacedLine {
 			// check if first char is lowercase
 			if unicode.IsLower(rune(headerLine[0])) {
-				log.Printf("Lowercase header: '%s' line=%d in msgId='%s'", headerLine, i, article.MessageID)
+				log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
 				ignoreLine = true
 				ignoredLines++
 				continue
 			}
 			header := strings.SplitN(headerLine, ":", 2)[0]
 			if len(header) == 0 {
-				log.Printf("Invalid header: '%s' line=%d in msgId='%s'", headerLine, i, article.MessageID)
+				log.Printf("Invalid header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
 				ignoreLine = true
 				ignoredLines++
 				continue
@@ -140,7 +151,7 @@ func ReconstructHeaders(article *models.Article, withPath bool) ([]string, error
 				continue
 			}
 			if headersMap[header] {
-				log.Printf("Duplicate header: '%s' line=%d in msgId='%s'", headerLine, i, article.MessageID)
+				log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
 				ignoreLine = true
 				continue
 			}
@@ -148,6 +159,8 @@ func ReconstructHeaders(article *models.Article, withPath bool) ([]string, error
 		}
 		headers = append(headers, headerLine)
 	}
-	log.Printf("Reconstructed %d header lines, ignored %d: msgId='%s'", len(headers), ignoredLines, article.MessageID)
+	if ignoredLines > 0 {
+		log.Printf("Reconstructed %d header lines, ignored %d: msgId='%s'", len(headers), ignoredLines, article.MessageID)
+	}
 	return headers, nil
 }

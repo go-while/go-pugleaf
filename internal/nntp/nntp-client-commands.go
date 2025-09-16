@@ -1127,7 +1127,7 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, erro
 }
 
 // TakeThisArticle sends an article via TAKETHIS command
-func (c *BackendConn) TakeThisArticle(article *models.Article) (int, error) {
+func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *string) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -1136,7 +1136,7 @@ func (c *BackendConn) TakeThisArticle(article *models.Article) (int, error) {
 	}
 
 	// Prepare article for transfer
-	headers, err := common.ReconstructHeaders(article, true)
+	headers, err := common.ReconstructHeaders(article, true, nntphostname)
 	if err != nil {
 		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
 	}
@@ -1212,7 +1212,7 @@ func (c *BackendConn) TakeThisArticle(article *models.Article) (int, error) {
 
 // SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response
 // Returns command ID for later response reading - used for streaming mode
-func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article) (uint, error) {
+func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string) (uint, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -1221,7 +1221,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article) (uin
 	}
 
 	// Prepare article for transfer
-	headers, err := common.ReconstructHeaders(article, true)
+	headers, err := common.ReconstructHeaders(article, true, nntphostname)
 	if err != nil {
 		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
 	}
@@ -1313,7 +1313,7 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 		return 0, fmt.Errorf("not connected")
 	}
 	// Prepare article for posting
-	headers, err := common.ReconstructHeaders(article, false)
+	headers, err := common.ReconstructHeaders(article, false, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
 	}

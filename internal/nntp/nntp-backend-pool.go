@@ -14,7 +14,7 @@ import (
 // Pool manages a pool of NNTP client connections
 type Pool struct {
 	mux         sync.RWMutex
-	Backend     *BackendConfig
+	Backend     *BackendConfig // links to internal/nntp/nntp-client.go:68
 	connections chan *BackendConn
 	maxConns    int
 	activeConns int
