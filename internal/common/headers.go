@@ -141,7 +141,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			// check if first char is lowercase
 			if unicode.IsLower(rune(headerLine[0])) {
 				headerLine = strings.ToUpper(string(headerLine[0])) + headerLine[1:]
-				log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (rewrote)", headerLine, i, article.MessageID)
+				//log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (rewrote)", headerLine, i, article.MessageID)
 			}
 			header := strings.SplitN(headerLine, ":", 2)[0]
 			if len(header) == 0 {
