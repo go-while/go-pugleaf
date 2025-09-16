@@ -832,6 +832,11 @@ func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThis
 
 		if len(wantedIds) == 0 {
 			log.Printf("No articles wanted by server in this batch")
+			if !ttMode.useCheckMode {
+				ttMode.useCheckMode = true
+				ttMode.takeThisSuccessCount = 0
+				ttMode.takeThisTotalCount = len(messageIds)
+			}
 			return transferred, nil
 		}
 		if ttMode.useCheckMode && len(wantedIds) == len(messageIds) {
@@ -858,6 +863,13 @@ func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThis
 		transferred, err := sendArticlesBatchViaTakeThis(conn, articles, ttMode)
 		if err != nil {
 			return int64(transferred), fmt.Errorf("failed to send TAKETHIS batch: %v", err)
+		}
+		if transferred == 0 {
+			if !ttMode.useCheckMode {
+				ttMode.useCheckMode = true
+				ttMode.takeThisSuccessCount = 0
+				ttMode.takeThisTotalCount = len(articles)
+			}
 		}
 		return int64(transferred), nil
 	}
