@@ -1127,7 +1127,7 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, erro
 }
 
 // TakeThisArticle sends an article via TAKETHIS command
-func (c *BackendConn) TakeThisArticle(messageID string, headers []string, body string) (int, error) {
+func (c *BackendConn) TakeThisArticle(article *models.Article) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -1135,11 +1135,16 @@ func (c *BackendConn) TakeThisArticle(messageID string, headers []string, body s
 		return 0, fmt.Errorf("not connected")
 	}
 
+	// Prepare article for transfer
+	headers, err := common.ReconstructHeaders(article, true)
+	if err != nil {
+		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
+	}
+
 	c.lastUsed = time.Now()
 
 	// Send TAKETHIS command
-	takeThisCommand := fmt.Sprintf("TAKETHIS %s", messageID)
-	id, err := c.textConn.Cmd("%s", takeThisCommand)
+	id, err := c.textConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
 	}
@@ -1158,7 +1163,7 @@ func (c *BackendConn) TakeThisArticle(messageID string, headers []string, body s
 
 	// Send body with proper dot-stuffing
 	// Split body preserving line endings
-	bodyLines := strings.Split(body, "\n")
+	bodyLines := strings.Split(article.BodyText, "\n")
 	for i, line := range bodyLines {
 		// Skip empty last element from trailing \n
 		if i == len(bodyLines)-1 && line == "" {
@@ -1207,7 +1212,7 @@ func (c *BackendConn) TakeThisArticle(messageID string, headers []string, body s
 
 // SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response
 // Returns command ID for later response reading - used for streaming mode
-func (c *BackendConn) SendTakeThisArticleStreaming(messageID string, headers []string, body string) (uint, error) {
+func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article) (uint, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -1215,15 +1220,19 @@ func (c *BackendConn) SendTakeThisArticleStreaming(messageID string, headers []s
 		return 0, fmt.Errorf("not connected")
 	}
 
+	// Prepare article for transfer
+	headers, err := common.ReconstructHeaders(article, true)
+	if err != nil {
+		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
+	}
+
 	c.lastUsed = time.Now()
 
 	// Send TAKETHIS command
-	id, err := c.textConn.Cmd("TAKETHIS %s", messageID)
+	id, err := c.textConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
 	}
-
-	// Get the underlying connection and create bufio writer
 
 	// Send headers
 	for _, headerLine := range headers {
@@ -1239,12 +1248,15 @@ func (c *BackendConn) SendTakeThisArticleStreaming(messageID string, headers []s
 
 	// Send body with proper dot-stuffing
 	// Split body preserving line endings
-	bodyLines := strings.Split(body, "\n")
+	bodyLines := strings.Split(article.BodyText, "\n")
 	for i, line := range bodyLines {
 		// Skip empty last element from trailing \n
 		if i == len(bodyLines)-1 && line == "" {
 			break
 		}
+
+		// Remove trailing \r if present (will add CRLF)
+		line = strings.TrimSuffix(line, "\r")
 
 		// Dot-stuff lines that start with a dot (RFC 977)
 		if strings.HasPrefix(line, ".") {

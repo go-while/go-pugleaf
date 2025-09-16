@@ -7,11 +7,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -19,22 +19,33 @@ import (
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
+var dbBatchSize int64 = 1000 // Load 1000 articles from DB at a time
+
 // showUsageExamples displays usage examples for NNTP transfer
 func showUsageExamples() {
 	fmt.Println("\n=== NNTP Transfer Tool - Usage Examples ===")
 	fmt.Println("The NNTP transfer tool sends articles via CHECK/TAKETHIS commands.")
 	fmt.Println()
 	fmt.Println("Connection Configuration:")
-	fmt.Println("  ./nntp-transfer -host news.server.com -port 563 -group news.admin.*")
-	fmt.Println("  ./nntp-transfer -username user -password pass -group alt.test")
-	fmt.Println("  ./nntp-transfer -ssl=false -port 119 -group alt.test")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group news.admin.*")
+	fmt.Println("  ./nntp-transfer -host news.server.local -username user -password pass -group alt.test")
+	fmt.Println("  ./nntp-transfer -host news.server.local -port 119 -ssl=false -group alt.test")
+	fmt.Println()
+	fmt.Println("Proxy Configuration:")
+	fmt.Println("  ./nntp-transfer -host news.server.local -socks5 127.0.0.1:9050 -group alt.test")
+	fmt.Println("  ./nntp-transfer -host news.server.local -socks4 proxy.example.com:1080 -group alt.test")
+	fmt.Println("  ./nntp-transfer -host news.server.local -socks5 proxy.example.com:1080 -proxy-username user -proxy-password pass -group alt.test")
 	fmt.Println()
 	fmt.Println("Performance Tuning:")
-	fmt.Println("  ./nntp-transfer -batch-size 25 -max-threads 4 -group alt.test")
-	fmt.Println("  ./nntp-transfer -check-timeout 30 -group alt.test")
+	fmt.Println("  ./nntp-transfer -host news.server.local -max-threads 4 -group alt.*")
+	fmt.Println()
+	fmt.Println("Date Filtering:")
+	fmt.Println("  ./nntp-transfer -host news.server.local -start-date 2024-01-01 -group alt.test")
+	fmt.Println("  ./nntp-transfer -host news.server.local -end-date 2024-12-31 -group alt.test")
+	fmt.Println("  ./nntp-transfer -host news.server.local -start-date 2024-01-01T00:00:00 -end-date 2024-01-31T23:59:59 -group alt.test")
 	fmt.Println()
 	fmt.Println("Dry Run Mode:")
-	fmt.Println("  ./nntp-transfer -dry-run -group alt.test")
+	fmt.Println("  ./nntp-transfer -host news.server.local -dry-run -group alt.test")
 	fmt.Println()
 }
 
@@ -48,25 +59,36 @@ func main() {
 	// Command line flags for NNTP transfer configuration
 	var (
 		// Required flags
-		nntphostname  = flag.String("nntphostname", "news.pugleaf.net", "Your hostname must be set!")
+		nntphostname  = flag.String("nntphostname", "", "Your hostname must be set!")
 		transferGroup = flag.String("group", "", "Newsgroup to transfer (supports wildcards like alt.* or news.admin.*)")
 
 		// Connection configuration
-		host     = flag.String("host", "news.server.com", "Target NNTP hostname")
-		port     = flag.Int("port", 563, "Target NNTP port")
+		host     = flag.String("host", "", "Target NNTP hostname")
+		port     = flag.Int("port", 563, "Target NNTP port (common: 119 -ssl=false OR 563 -ssl=true)")
 		username = flag.String("username", "", "Target NNTP username")
 		password = flag.String("password", "", "Target NNTP password")
 		ssl      = flag.Bool("ssl", true, "Use SSL/TLS connection")
 		timeout  = flag.Int("timeout", 30, "Connection timeout in seconds")
 
+		// Proxy configuration
+		proxySocks4   = flag.String("socks4", "", "SOCKS4 proxy address (host:port)")
+		proxySocks5   = flag.String("socks5", "", "SOCKS5 proxy address (host:port)")
+		proxyUsername = flag.String("proxy-username", "", "Proxy authentication username")
+		proxyPassword = flag.String("proxy-password", "", "Proxy authentication password")
+
 		// Transfer configuration
-		batchSize  = flag.Int("batch-size", 25, "Number of message-IDs to send in a single CHECK command")
-		maxThreads = flag.Int("max-threads", 4, "Maximum number of concurrent transfer threads")
+		batchCheck = flag.Int("batch-check", 25, "Number of message-IDs to send in a single CHECK command")
+		batchDB    = flag.Int64("batch-db", 1000, "Fetch N articles from DB in a batch")
+		maxThreads = flag.Int("max-threads", 1, "Transfer N newsgroups in concurrent threads. Each thread uses 1 connection.")
 
 		// Operation options
 		dryRun   = flag.Bool("dry-run", false, "Show what would be transferred without actually sending")
 		testConn = flag.Bool("test-conn", false, "Test connection and exit")
 		showHelp = flag.Bool("help", false, "Show usage examples and exit")
+
+		// Date filtering options
+		startDate = flag.String("date-beg", "", "Start date for article transfer (format: 2006-01-02 [YYYY-MM-DD] or 2006-01-02T15:04:05)")
+		endDate   = flag.String("date-end", "", "End date for article transfer (format: 2006-01-02 [YYYY-MM-DD] or 2006-01-02T15:04:05)")
 
 		// History configuration
 		useShortHashLen = flag.Int("useshorthashlen", 7, "Short hash length for history storage (2-7, default: 7)")
@@ -89,13 +111,19 @@ func main() {
 	}
 
 	// Validate batch size
-	if *batchSize < 1 || *batchSize > 100 {
-		log.Fatalf("Error: batch-size must be between 1 and 100 (got %d)", *batchSize)
+	if *batchCheck < 1 || *batchCheck > 100 {
+		log.Fatalf("Error: batch-check must be between 1 and 100 (got %d)", *batchCheck)
 	}
 
+	// Validate batch size
+	if *batchDB < 100 {
+		*batchDB = 100
+	}
+	dbBatchSize = *batchDB
+
 	// Validate thread count
-	if *maxThreads < 1 || *maxThreads > 32 {
-		log.Fatalf("Error: max-threads must be between 1 and 32 (got %d)", *maxThreads)
+	if *maxThreads < 1 || *maxThreads > 500 {
+		log.Fatalf("Error: max-threads must be between 1 and 500 (got %d)", *maxThreads)
 	}
 
 	// Validate UseShortHashLen
@@ -103,9 +131,53 @@ func main() {
 		log.Fatalf("Invalid UseShortHashLen: %d (must be between 2 and 7)", *useShortHashLen)
 	}
 
+	// Parse and validate date filters
+	var startTime, endTime *time.Time
+	if *startDate != "" {
+		parsed, err := parseDateTime(*startDate)
+		if err != nil {
+			log.Fatalf("Invalid start-date format: %v. Use format: 2006-01-02 or 2006-01-02T15:04:05", err)
+		}
+		startTime = &parsed
+		log.Printf("Filtering articles from: %s", startTime.Format("2006-01-02 15:04:05"))
+	}
+	if *endDate != "" {
+		parsed, err := parseDateTime(*endDate)
+		if err != nil {
+			log.Fatalf("Invalid end-date format: %v. Use format: 2006-01-02 or 2006-01-02T15:04:05", err)
+		}
+		endTime = &parsed
+		log.Printf("Filtering articles to: %s", endTime.Format("2006-01-02 15:04:05"))
+	}
+	if startTime != nil && endTime != nil && startTime.After(*endTime) {
+		log.Fatalf("Start date (%s) cannot be after end date (%s)", startTime.Format("2006-01-02"), endTime.Format("2006-01-02"))
+	}
+
+	// Parse and validate proxy configuration
+	var proxyConfig *ProxyConfig
+	if *proxySocks4 != "" && *proxySocks5 != "" {
+		log.Fatalf("Cannot specify both SOCKS4 and SOCKS5 proxy")
+	}
+	if *proxySocks4 != "" {
+		config, err := parseProxyConfig(*proxySocks4, "socks4", *proxyUsername, *proxyPassword)
+		if err != nil {
+			log.Fatalf("Invalid SOCKS4 proxy configuration: %v", err)
+		}
+		proxyConfig = config
+		log.Printf("Using SOCKS4 proxy: %s:%d", proxyConfig.Host, proxyConfig.Port)
+	}
+	if *proxySocks5 != "" {
+		config, err := parseProxyConfig(*proxySocks5, "socks5", *proxyUsername, *proxyPassword)
+		if err != nil {
+			log.Fatalf("Invalid SOCKS5 proxy configuration: %v", err)
+		}
+		proxyConfig = config
+		log.Printf("Using SOCKS5 proxy: %s:%d", proxyConfig.Host, proxyConfig.Port)
+	}
+
 	// Test connection if requested
 	if *testConn {
-		if err := testConnection(host, port, username, password, ssl, timeout); err != nil {
+		if err := testConnection(host, port, username, password, ssl, timeout, proxyConfig); err != nil {
 			log.Fatalf("Connection test failed: %v", err)
 		}
 		log.Printf("Connection test successful!")
@@ -154,7 +226,7 @@ func main() {
 
 	// Create target server connection pool
 	targetProvider := &config.Provider{
-		Name:       "transfer-target",
+		Name:       "transfer:" + *host,
 		Host:       *host,
 		Port:       *port,
 		SSL:        *ssl,
@@ -175,6 +247,16 @@ func main() {
 		MaxConns:       *maxThreads,
 		Provider:       targetProvider,
 		ConnectTimeout: time.Duration(*timeout) * time.Second,
+	}
+
+	// Apply proxy configuration if specified
+	if proxyConfig != nil {
+		backendConfig.ProxyEnabled = proxyConfig.Enabled
+		backendConfig.ProxyType = proxyConfig.Type
+		backendConfig.ProxyHost = proxyConfig.Host
+		backendConfig.ProxyPort = proxyConfig.Port
+		backendConfig.ProxyUsername = proxyConfig.Username
+		backendConfig.ProxyPassword = proxyConfig.Password
 	}
 
 	pool := nntp.NewPool(backendConfig)
@@ -213,7 +295,7 @@ func main() {
 
 	// Start transfer process
 	go func() {
-		transferDoneChan <- runTransfer(db, pool, newsgroups, *batchSize, *dryRun, shutdownChan)
+		transferDoneChan <- runTransfer(db, proc, pool, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, shutdownChan)
 	}()
 
 	// Wait for either shutdown signal or transfer completion
@@ -253,8 +335,169 @@ func main() {
 	log.Printf("Graceful shutdown completed. Exiting.")
 }
 
+// parseDateTime parses a date string in multiple supported formats
+func parseDateTime(dateStr string) (time.Time, error) {
+	// Try different date formats
+	formats := []string{
+		"2006-01-02",           // YYYY-MM-DD
+		"2006-01-02T15:04:05",  // YYYY-MM-DDTHH:MM:SS
+		"2006-01-02 15:04:05",  // YYYY-MM-DD HH:MM:SS
+		"2006-01-02T15:04:05Z", // YYYY-MM-DDTHH:MM:SSZ
+	}
+
+	for _, format := range formats {
+		if parsed, err := time.Parse(format, dateStr); err == nil {
+			return parsed, nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("unsupported date format: %s", dateStr)
+}
+
+// ProxyConfig holds proxy configuration parsed from command line flags
+type ProxyConfig struct {
+	Enabled  bool
+	Type     string // "socks4" or "socks5"
+	Host     string
+	Port     int
+	Username string
+	Password string
+}
+
+// parseProxyConfig parses proxy address (host:port) and creates proxy configuration
+func parseProxyConfig(address, proxyType, username, password string) (*ProxyConfig, error) {
+	if address == "" {
+		return nil, fmt.Errorf("proxy address cannot be empty")
+	}
+
+	// Parse host:port
+	parts := strings.Split(address, ":")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("proxy address must be in format host:port, got: %s", address)
+	}
+
+	host := parts[0]
+	if host == "" {
+		return nil, fmt.Errorf("proxy host cannot be empty")
+	}
+
+	port, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy port: %s", parts[1])
+	}
+	if port <= 0 || port > 65535 {
+		return nil, fmt.Errorf("proxy port must be between 1 and 65535, got: %d", port)
+	}
+
+	return &ProxyConfig{
+		Enabled:  true,
+		Type:     proxyType,
+		Host:     host,
+		Port:     port,
+		Username: username,
+		Password: password,
+	}, nil
+}
+
+const query_getArticlesBatchWithDateFilter_selectPart = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles`
+const query_getArticlesBatchWithDateFilter_nodatefilter = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles ORDER BY date_sent ASC LIMIT ? OFFSET ?`
+const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ? OFFSET ?"
+
+// getArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
+func getArticlesBatchWithDateFilter(groupDBs *database.GroupDBs, offset int64, startTime, endTime *time.Time) ([]*models.Article, error) {
+
+	var query string
+	var args []interface{}
+
+	if startTime != nil || endTime != nil {
+		// Build query with date filtering
+
+		var whereConditions []string
+
+		if startTime != nil {
+			whereConditions = append(whereConditions, "date_sent >= ?")
+			args = append(args, startTime.UTC().Format("2006-01-02 15:04:05"))
+		}
+
+		if endTime != nil {
+			whereConditions = append(whereConditions, "date_sent <= ?")
+			args = append(args, endTime.UTC().Format("2006-01-02 15:04:05"))
+		}
+
+		whereClause := ""
+		if len(whereConditions) > 0 {
+			whereClause = " WHERE " + strings.Join(whereConditions, " AND ")
+		}
+
+		query = query_getArticlesBatchWithDateFilter_selectPart + whereClause + query_getArticlesBatchWithDateFilter_orderby
+		args = append(args, dbBatchSize, offset)
+	} else {
+		// No date filtering, use original query but with date_sent ordering
+		query = query_getArticlesBatchWithDateFilter_nodatefilter
+		args = []interface{}{dbBatchSize, offset}
+	}
+
+	rows, err := groupDBs.DB.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*models.Article
+	for rows.Next() {
+		var a models.Article
+		var artnum int64
+		if err := rows.Scan(&artnum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
+			return nil, err
+		}
+		a.ArticleNums = make(map[*string]int64)
+		out = append(out, &a)
+	}
+
+	return out, nil
+}
+
+// getArticleCountWithDateFilter gets the total count of articles with optional date filtering
+func getArticleCountWithDateFilter(groupDBs *database.GroupDBs, startTime, endTime *time.Time) (int64, error) {
+	var query string
+	var args []interface{}
+
+	if startTime != nil || endTime != nil {
+		// Build count query with date filtering
+		var whereConditions []string
+
+		if startTime != nil {
+			whereConditions = append(whereConditions, "date_sent >= ?")
+			args = append(args, startTime.UTC().Format("2006-01-02 15:04:05"))
+		}
+
+		if endTime != nil {
+			whereConditions = append(whereConditions, "date_sent <= ?")
+			args = append(args, endTime.UTC().Format("2006-01-02 15:04:05"))
+		}
+
+		whereClause := ""
+		if len(whereConditions) > 0 {
+			whereClause = " WHERE " + strings.Join(whereConditions, " AND ")
+		}
+
+		query = "SELECT COUNT(*) FROM articles" + whereClause
+	} else {
+		// No date filtering
+		query = "SELECT COUNT(*) FROM articles"
+	}
+
+	var count int64
+	err := groupDBs.DB.QueryRow(query, args...).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+
+	return count, nil
+}
+
 // testConnection tests the connection to the target NNTP server
-func testConnection(host *string, port *int, username *string, password *string, ssl *bool, timeout *int) error {
+func testConnection(host *string, port *int, username *string, password *string, ssl *bool, timeout *int, proxyConfig *ProxyConfig) error {
 	testProvider := &config.Provider{
 		Name:     "test",
 		Host:     *host,
@@ -278,11 +521,27 @@ func testConnection(host *string, port *int, username *string, password *string,
 		ConnectTimeout: time.Duration(*timeout) * time.Second,
 	}
 
+	// Apply proxy configuration if specified
+	if proxyConfig != nil {
+		backendConfig.ProxyEnabled = proxyConfig.Enabled
+		backendConfig.ProxyType = proxyConfig.Type
+		backendConfig.ProxyHost = proxyConfig.Host
+		backendConfig.ProxyPort = proxyConfig.Port
+		backendConfig.ProxyUsername = proxyConfig.Username
+		backendConfig.ProxyPassword = proxyConfig.Password
+	}
+
 	fmt.Printf("Testing connection to %s:%d (SSL: %v)\n", *host, *port, *ssl)
 	if *username != "" {
 		fmt.Printf("Authentication: %s\n", *username)
 	} else {
 		fmt.Println("Authentication: None")
+	}
+	if proxyConfig != nil {
+		fmt.Printf("Proxy: %s %s:%d\n", strings.ToUpper(proxyConfig.Type), proxyConfig.Host, proxyConfig.Port)
+		if proxyConfig.Username != "" {
+			fmt.Printf("Proxy Authentication: %s\n", proxyConfig.Username)
+		}
 	}
 
 	// Test connection
@@ -338,55 +597,59 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern string) ([]*mod
 }
 
 // runTransfer performs the actual article transfer process
-func runTransfer(db *database.Database, pool *nntp.Pool, newsgroups []*models.Newsgroup, batchSize int, dryRun bool, shutdownChan <-chan struct{}) error {
-	transferSemaphore := make(chan struct{}, pool.Backend.MaxConns)
+func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}) error {
 
-	totalTransferred := 0
-	totalChecked := 0
+	var totalTransferred int64
 	var transferMutex sync.Mutex
-
+	maxThreadsChan := make(chan struct{}, maxThreads)
+	var wg sync.WaitGroup
+	// Process each newsgroup
 	for _, newsgroup := range newsgroups {
-		select {
-		case <-shutdownChan:
-			log.Printf("Shutdown requested, stopping transfer")
+		if proc.WantShutdown(shutdownChan) {
+			log.Printf("Shutdown requested, stopping transfer. Total transferred: %d articles", totalTransferred)
 			return nil
-		default:
 		}
+		maxThreadsChan <- struct{}{} // acquire a thread slot
+		wg.Add(1)
+		go func(ng *models.Newsgroup, wg *sync.WaitGroup) {
+			defer func(wg *sync.WaitGroup) {
+				wg.Done()
+				<-maxThreadsChan // release the thread slot
+			}(wg)
+			if proc.WantShutdown(shutdownChan) {
+				return
+			}
+			start := time.Now()
+			log.Printf("Starting transfer for newsgroup: %s", newsgroup.Name)
+			transferred, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, shutdownChan)
 
-		log.Printf("Starting transfer for newsgroup: %s", newsgroup.Name)
+			transferMutex.Lock()
+			totalTransferred += transferred
+			transferMutex.Unlock()
 
-		// Acquire semaphore
-		transferSemaphore <- struct{}{}
-		defer func() { <-transferSemaphore }()
-
-		transferred, checked, err := transferNewsgroup(db, pool, newsgroup, batchSize, dryRun, shutdownChan)
-
-		transferMutex.Lock()
-		totalTransferred += transferred
-		totalChecked += checked
-		transferMutex.Unlock()
-
-		if err != nil {
-			log.Printf("Error transferring newsgroup %s: %v", newsgroup.Name, err)
-		} else {
-			log.Printf("Completed transfer for newsgroup %s: %d articles transferred, %d articles checked",
-				newsgroup.Name, transferred, checked)
-		}
+			if err != nil {
+				log.Printf("Error transferring newsgroup %s: %v", newsgroup.Name, err)
+			} else {
+				log.Printf("Completed transfer for newsgroup %s: transferred %d articles. took %v",
+					newsgroup.Name, transferred, time.Since(start))
+			}
+		}(newsgroup, &wg)
 	}
 
 	// Wait for all transfers to complete
+	wg.Wait()
 
-	log.Printf("Transfer summary: %d total articles transferred, %d total articles checked", totalTransferred, totalChecked)
+	log.Printf("Transfer summary: %d articles transferred", totalTransferred)
 	return nil
 }
 
 // transferNewsgroup transfers articles from a single newsgroup
-func transferNewsgroup(db *database.Database, pool *nntp.Pool, newsgroup *models.Newsgroup, batchSize int, dryRun bool, shutdownChan <-chan struct{}) (int, int, error) {
+func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}) (int64, error) {
 
 	// Get group database
 	groupDBs, err := db.GetGroupDBs(newsgroup.Name)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
+		return 0, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
 	}
 	defer func() {
 		if ferr := db.ForceCloseGroupDBs(groupDBs); ferr != nil {
@@ -394,46 +657,47 @@ func transferNewsgroup(db *database.Database, pool *nntp.Pool, newsgroup *models
 		}
 	}()
 
-	// Get total article count first
-	totalArticles, err := db.GetArticleCountFromMainDB(newsgroup.Name)
+	// Get total article count first with date filtering
+	totalArticles, err := getArticleCountWithDateFilter(groupDBs, startTime, endTime)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get article count for newsgroup '%s': %v", newsgroup.Name, err)
+		return 0, fmt.Errorf("failed to get article count for newsgroup '%s': %v", newsgroup.Name, err)
 	}
 
 	if totalArticles == 0 {
-		log.Printf("No articles found in newsgroup: %s", newsgroup.Name)
-		return 0, 0, nil
+		if startTime != nil || endTime != nil {
+			log.Printf("No articles found in newsgroup: %s (within specified date range)", newsgroup.Name)
+		} else {
+			log.Printf("No articles found in newsgroup: %s", newsgroup.Name)
+		}
+		return 0, nil
 	}
-
-	log.Printf("Found %d articles in newsgroup %s - processing in batches", totalArticles, newsgroup.Name)
 
 	if dryRun {
-		log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s", totalArticles, newsgroup.Name)
-		return 0, int(totalArticles), nil
+		if startTime != nil || endTime != nil {
+			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s (within specified date range)", totalArticles, newsgroup.Name)
+		} else {
+			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s", totalArticles, newsgroup.Name)
+		}
+		return 0, nil
 	}
 
-	// Get connection from pool
-	conn, err := pool.Get()
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get connection from pool: %v", err)
+	if startTime != nil || endTime != nil {
+		log.Printf("Found %d articles in newsgroup %s (within specified date range) - processing in batches", totalArticles, newsgroup.Name)
+	} else {
+		log.Printf("Found %d articles in newsgroup %s - processing in batches", totalArticles, newsgroup.Name)
 	}
-	defer pool.Put(conn)
 
-	transferred := 0
-	checked := 0
+	var transferred, ioffset int64
 
 	// Process articles in database batches (much larger than network batches)
-	const dbBatchSize = 1000 // Load 1000 articles from DB at a time
-	for offset := 0; offset < int(totalArticles); offset += dbBatchSize {
-		select {
-		case <-shutdownChan:
-			log.Printf("Shutdown requested, stopping transfer for newsgroup: %s", newsgroup.Name)
-			return transferred, checked, nil
-		default:
+	for offset := ioffset; offset < totalArticles; offset += dbBatchSize {
+		if proc.WantShutdown(shutdownChan) {
+			log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
+			return transferred, nil
 		}
 
-		// Load batch from database
-		articles, err := db.GetArticlesBatch(groupDBs, dbBatchSize, offset)
+		// Load batch from database with date filtering
+		articles, err := getArticlesBatchWithDateFilter(groupDBs, offset, startTime, endTime)
 		if err != nil {
 			log.Printf("Error loading article batch (offset %d) for newsgroup %s: %v", offset, newsgroup.Name, err)
 			continue
@@ -444,33 +708,55 @@ func transferNewsgroup(db *database.Database, pool *nntp.Pool, newsgroup *models
 			break
 		}
 
-		log.Printf("Newsgroup %s: Loaded %d articles from database (offset %d-%d)", newsgroup.Name, len(articles), offset, offset+len(articles)-1)
+		// todo verbose flag
+
+		log.Printf("Newsgroup %s: Loaded %d articles from database (offset %d)", newsgroup.Name, len(articles), offset)
+		isleep := time.Second
 
 		// Process articles in network batches
-		for i := 0; i < len(articles); i += batchSize {
-			select {
-			case <-shutdownChan:
-				log.Printf("Shutdown requested, stopping transfer for newsgroup: %s", newsgroup.Name)
-				return transferred, checked, nil
-			default:
+		for i := 0; i < len(articles); i += batchCheck {
+			if proc.WantShutdown(shutdownChan) {
+				log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
+				return transferred, nil
 			}
 
-			end := i + batchSize
+			end := i + batchCheck
 			if end > len(articles) {
 				end = len(articles)
 			}
-
-			batch := articles[i:end]
-			batchTransferred, err := processBatch(conn, batch)
-			if err != nil {
-				log.Printf("Error processing network batch for newsgroup %s: %v", newsgroup.Name, err)
-				continue
+			var done int64
+		forever:
+			for {
+				if proc.WantShutdown(shutdownChan) {
+					log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
+					return transferred, nil
+				}
+				// Get connection from pool
+				conn, err := pool.Get()
+				if err != nil {
+					return transferred, fmt.Errorf("failed to get connection from pool: %v", err)
+				}
+				batchTransferred, berr := processBatch(conn, articles[i:end])
+				if berr != nil {
+					conn = nil
+					pool.Put(conn)
+					log.Printf("Error processing network batch for newsgroup %s: %v ... retry in %v", newsgroup.Name, err, isleep)
+					time.Sleep(isleep)
+					isleep = time.Duration(int64(isleep) * 2)
+					if isleep > time.Minute {
+						isleep = time.Minute
+					}
+					goto forever
+				}
+				isleep = time.Second
+				pool.Put(conn)
+				done += batchTransferred
+				break forever
 			}
+			transferred += done
 
-			transferred += batchTransferred
-			checked += len(batch)
-
-			log.Printf("Newsgroup %s: Network batch %d-%d processed, %d transferred in this batch", newsgroup.Name, i+1, end, batchTransferred)
+			// todo verbose flag
+			log.Printf("Newsgroup %s: Network batch %d-%d processed, %d transferred in this batch", newsgroup.Name, i+1, end, done)
 		}
 
 		// Clear articles slice to free memory
@@ -479,10 +765,11 @@ func transferNewsgroup(db *database.Database, pool *nntp.Pool, newsgroup *models
 		}
 		articles = nil
 
-		log.Printf("Newsgroup %s: Database batch complete (offset %d), total transferred so far: %d/%d", newsgroup.Name, offset, transferred, checked)
+		// todo verbose flag
+		log.Printf("Newsgroup %s: done (offset %d), total transferred: %d", newsgroup.Name, offset, transferred)
 	}
 
-	return transferred, checked, nil
+	return transferred, nil
 }
 
 // Global variables to track TAKETHIS success rate for streaming protocol
@@ -494,7 +781,7 @@ var (
 
 // processBatch processes a batch of articles using NNTP streaming protocol (RFC 4644)
 // Uses TAKETHIS primarily, falls back to CHECK when success rate < 95%
-func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int, error) {
+func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int64, error) {
 
 	if len(articles) == 0 {
 		return 0, nil
@@ -520,7 +807,7 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int, erro
 		articleMap[article.MessageID] = article
 	}
 
-	transferred := 0
+	var transferred int64
 
 	if useCheckMode {
 		// CHECK mode: verify articles are wanted before sending
@@ -534,7 +821,7 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int, erro
 		// Send CHECK commands for all message IDs
 		checkResponses, err := conn.CheckMultiple(messageIds)
 		if err != nil {
-			return 0, fmt.Errorf("failed to send CHECK command: %v", err)
+			return transferred, fmt.Errorf("failed to send CHECK command: %v", err)
 		}
 
 		// Find wanted articles
@@ -549,7 +836,7 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int, erro
 
 		if len(wantedIds) == 0 {
 			log.Printf("No articles wanted by server in this batch")
-			return 0, nil
+			return transferred, nil
 		}
 
 		log.Printf("Server wants %d out of %d articles in batch", len(wantedIds), len(messageIds))
@@ -561,7 +848,7 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int, erro
 				log.Printf("Failed to send TAKETHIS for %s: %v", *msgId, err)
 				continue
 			}
-			transferred += count
+			transferred += int64(count)
 		}
 	} else {
 		// TAKETHIS mode: send articles directly and track success rate
@@ -569,9 +856,9 @@ func processBatch(conn *nntp.BackendConn, articles []*models.Article) (int, erro
 
 		transferred, err := sendArticlesBatchViaTakeThis(conn, articles)
 		if err != nil {
-			return 0, fmt.Errorf("failed to send TAKETHIS batch: %v", err)
+			return int64(transferred), fmt.Errorf("failed to send TAKETHIS batch: %v", err)
 		}
-		return transferred, nil
+		return int64(transferred), nil
 	}
 
 	return transferred, nil
@@ -591,15 +878,8 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	validArticles := make([]*models.Article, 0, len(articles))
 
 	for _, article := range articles {
-		// Reconstruct headers for transmission
-		articleHeaders, err := common.ReconstructHeaders(article, true)
-		if err != nil {
-			log.Printf("Failed to reconstruct headers for %s: %v", article.MessageID, err)
-			continue
-		}
-
 		// Send TAKETHIS command with article content (non-blocking)
-		cmdID, err := conn.SendTakeThisArticleStreaming(article.MessageID, articleHeaders, article.BodyText)
+		cmdID, err := conn.SendTakeThisArticleStreaming(article)
 		if err != nil {
 			log.Printf("Failed to send TAKETHIS for %s: %v", article.MessageID, err)
 			continue
@@ -639,14 +919,8 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 // sendArticleViaTakeThis sends a single article via TAKETHIS and tracks success rate
 func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article) (int, error) {
 
-	// Reconstruct headers for transmission
-	articleHeaders, err := common.ReconstructHeaders(article, true)
-	if err != nil {
-		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
-	}
-
 	// Send TAKETHIS command with article content
-	takeThisResponseCode, err := conn.TakeThisArticle(article.MessageID, articleHeaders, article.BodyText)
+	takeThisResponseCode, err := conn.TakeThisArticle(article)
 	if err != nil {
 		return 0, fmt.Errorf("failed to send TAKETHIS: %v", err)
 	}
