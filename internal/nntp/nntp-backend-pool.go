@@ -258,7 +258,6 @@ func (p *Pool) Put(client *BackendConn) error {
 			client.CloseFromPoolOnly()
 		} else {
 			log.Printf("[NNTP-POOL] ERROR: Attempted to put nil client back into pool")
-			p.mux.Unlock()
 		}
 		p.mux.Lock()
 		p.totalClosed++
