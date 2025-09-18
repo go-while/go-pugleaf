@@ -38,3 +38,5 @@ active_files/local-mode.active.new
 active_files/local-mode.active.new.sorted
 active_files/local-mode.active
 /old_overview
+cmd/tcp2tor/tcp2tor
+cmd/tcp2tor/tcp2tor.sha256
