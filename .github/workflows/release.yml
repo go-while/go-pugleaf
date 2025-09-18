@@ -237,6 +237,9 @@ jobs:
             - `rslight-importer` - RSLight data importer
             - `nntp-analyze` - NNTP analysis tool
             - `recover-db` - Database recovery tool
+            - `nntp-transfer` - Tool to transfer newsgroups
+            - `post-queue` - Tool to send out queued posts
+            - `tcp2tor` - TCP to Tor proxy
 
             ### Platform Support:
             - Linux (amd64, arm64)
