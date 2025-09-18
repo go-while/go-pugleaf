@@ -84,6 +84,9 @@ jobs:
             "rslight-importer:rslight-importer"
             "nntp-analyze:nntp-analyze"
             "recover-db:recover-db"
+            "nntp-transfer:nntp-transfer"
+            "post-queue:post-queue"
+            "tcp2tor:tcp2tor"
           )
 
           for app in "${apps[@]}"; do
@@ -114,12 +117,12 @@ jobs:
           OS="${{ matrix.os }}"
           ARCH="${{ matrix.arch }}"
           CHECKSUMS_FILE="checksums-${OS}-${ARCH}.sha256"
-          
+
           echo "Generating SHA256 checksums for ${OS}-${ARCH} binaries..."
           cd build
           sha256sum * > "../${CHECKSUMS_FILE}"
           cd ..
-          
+
           echo "CHECKSUMS_FILE=${CHECKSUMS_FILE}" >> $GITHUB_ENV
           echo ""
           echo "Generated checksums for ${OS}-${ARCH}:"
@@ -132,10 +135,10 @@ jobs:
           OS="${{ matrix.os }}"
           ARCH="${{ matrix.arch }}"
           ARCHIVE_NAME="go-pugleaf-v${VERSION}-${OS}-${ARCH}"
-          
+
           # Include checksums in the archive
           cp "${{ env.CHECKSUMS_FILE }}" build/checksums.sha256
-          
+
           if [ "${{ matrix.os }}" = "windows" ]; then
             zip -r "${ARCHIVE_NAME}.zip" build/ README.md LICENSE
             echo "ARCHIVE_FILE=${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
@@ -184,13 +187,13 @@ jobs:
           echo "# Go-Pugleaf v${{ steps.version.outputs.version }} - SHA256 Checksums" > SHA256SUMS.txt
           echo "# Generated on $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
-          
+
           # Process each platform's checksums
           for artifact_dir in artifacts/go-pugleaf-*; do
             if [ -d "$artifact_dir" ]; then
               platform=$(basename "$artifact_dir" | sed 's/go-pugleaf-//')
               echo "## Platform: $platform" >> SHA256SUMS.txt
-              
+
               # Find and process checksums file for this platform
               checksums_file=$(find "$artifact_dir" -name "checksums-*.sha256" | head -1)
               if [ -f "$checksums_file" ]; then
@@ -205,7 +208,7 @@ jobs:
               echo "" >> SHA256SUMS.txt
             fi
           done
-          
+
           echo "Comprehensive checksums file created:"
           echo "====================================="
           cat SHA256SUMS.txt
@@ -250,7 +253,7 @@ jobs:
             ```bash
             # Verify individual platform binaries
             sha256sum -c checksums-linux-amd64.sha256
-            
+
             # Verify after archive extraction
             tar -xzf go-pugleaf-v${{ steps.version.outputs.version }}-linux-amd64.tar.gz
             cd build/
