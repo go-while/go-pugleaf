@@ -18,6 +18,7 @@ rm -v build/*
 ./build_expire-news.sh
 ./build_nntp-transfer.sh
 ./build_post-queue.sh
+./build_tcp2tor.sh
 
 # Always generate checksums after building
 echo "Generating checksums for built executables..."
