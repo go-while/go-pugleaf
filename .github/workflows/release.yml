@@ -68,18 +68,21 @@ jobs:
       - name: Build all binaries
         run: |
           VERSION=$(cat appVersion.txt)
-
+          #
+          # disabled binaries:
+          #"merge-active:merge-active"
+          #"merge-descriptions:merge-descriptions"
+          #"test-MsgIdItemCache:test-MsgIdItemCache"
+          #"history-rebuild:history-rebuild"
+          #"fix-references:fix-references"
+          #
+          #
           # List of all applications to build
           apps=(
             "web:webserver"
             "nntp-fetcher:pugleaf-fetcher"
             "nntp-server:pugleaf-nntp-server"
             "expire-news:expire-news"
-            "merge-active:merge-active"
-            "merge-descriptions:merge-descriptions"
-            "test-MsgIdItemCache:test-MsgIdItemCache"
-            "history-rebuild:history-rebuild"
-            "fix-references:fix-references"
             "fix-thread-activity:fix-thread-activity"
             "rslight-importer:rslight-importer"
             "nntp-analyze:nntp-analyze"
@@ -228,11 +231,6 @@ jobs:
             - `pugleaf-fetcher` - Article fetcher from NNTP providers
             - `pugleaf-nntp-server` - NNTP server implementation
             - `expire-news` - Article expiration tool
-            - `merge-active` - Active file merger
-            - `merge-descriptions` - Description file merger
-            - `test-MsgIdItemCache` - Cache testing tool
-            - `history-rebuild` - History rebuild utility
-            - `fix-references` - Reference fixing tool
             - `fix-thread-activity` - Thread activity fixer
             - `rslight-importer` - RSLight data importer
             - `nntp-analyze` - NNTP analysis tool
@@ -240,6 +238,13 @@ jobs:
             - `nntp-transfer` - Tool to transfer newsgroups
             - `post-queue` - Tool to send out queued posts
             - `tcp2tor` - TCP to Tor proxy
+
+            ## NOT included:
+            - `fix-references` - Reference fixing tool
+            - `history-rebuild` - History rebuild utility
+            - `merge-active` - Active file merger
+            - `merge-descriptions` - Description file merger
+            - `test-MsgIdItemCache` - Cache testing tool
 
             ### Platform Support:
             - Linux (amd64, arm64)
