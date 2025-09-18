@@ -13,7 +13,7 @@ type NewsPageData struct {
 	TemplateData
 }
 
-// newsPage handles the "/news" route to display site news
+// newsPage handles the "/SiteNews" route to display site news
 func (s *WebServer) newsPage(c *gin.Context) {
 	data := NewsPageData{
 		TemplateData: s.getBaseTemplateData(c, "Site News"),

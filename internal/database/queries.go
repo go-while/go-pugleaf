@@ -48,15 +48,17 @@ func parseDateString(dateStr string) time.Time {
 // --- Main DB Queries ---
 
 // AddProvider adds a new provider to the main database
-const query_AddProvider = `INSERT INTO providers (name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size)
-	          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const query_AddProvider = `INSERT INTO providers (name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting, proxy_enabled, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password)
+	          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (db *Database) AddProvider(provider *models.Provider) error {
 	_, err := retryableExec(db.mainDB, query_AddProvider,
 		provider.Name, provider.Grp, provider.Host, provider.Port,
 		provider.SSL, provider.Username, provider.Password,
 		provider.MaxConns, provider.Enabled, provider.Priority,
-		provider.MaxArtSize)
+		provider.MaxArtSize, provider.Posting, provider.ProxyEnabled,
+		provider.ProxyType, provider.ProxyHost, provider.ProxyPort,
+		provider.ProxyUsername, provider.ProxyPassword)
 	if err != nil {
 		return fmt.Errorf("failed to add provider %s: %w", provider.Name, err)
 	}
@@ -74,7 +76,8 @@ func (db *Database) DeleteProvider(id int) error {
 
 const query_SetProvider = `UPDATE providers SET
 		grp = ?, host = ?, port = ?, ssl = ?, username = ?, password = ?,
-		max_conns = ?, enabled = ?, priority = ?, max_art_size = ?
+		max_conns = ?, enabled = ?, priority = ?, max_art_size = ?, posting = ?,
+		proxy_enabled = ?, proxy_type = ?, proxy_host = ?, proxy_port = ?, proxy_username = ?, proxy_password = ?
 		WHERE id = ?`
 
 func (db *Database) SetProvider(provider *models.Provider) error {
@@ -82,7 +85,9 @@ func (db *Database) SetProvider(provider *models.Provider) error {
 		provider.Grp, provider.Host, provider.Port,
 		provider.SSL, provider.Username, provider.Password,
 		provider.MaxConns, provider.Enabled, provider.Priority,
-		provider.MaxArtSize, provider.ID)
+		provider.MaxArtSize, provider.Posting, provider.ProxyEnabled,
+		provider.ProxyType, provider.ProxyHost, provider.ProxyPort,
+		provider.ProxyUsername, provider.ProxyPassword, provider.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update provider %d: %w", provider.ID, err)
 	}
@@ -90,7 +95,7 @@ func (db *Database) SetProvider(provider *models.Provider) error {
 }
 
 // GetProviders returns all providers
-const query_GetProviders = `SELECT id, enabled, priority, name, host, port, ssl, username, password, max_conns, max_art_size, created_at FROM providers order by priority ASC`
+const query_GetProviders = `SELECT id, enabled, priority, name, host, port, ssl, username, password, max_conns, max_art_size, posting, created_at, proxy_enabled, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password FROM providers order by priority ASC`
 
 func (db *Database) GetProviders() ([]*models.Provider, error) {
 	rows, err := retryableQuery(db.mainDB, query_GetProviders)
@@ -101,7 +106,7 @@ func (db *Database) GetProviders() ([]*models.Provider, error) {
 	var out []*models.Provider
 	for rows.Next() {
 		var p models.Provider
-		if err := rows.Scan(&p.ID, &p.Enabled, &p.Priority, &p.Name, &p.Host, &p.Port, &p.SSL, &p.Username, &p.Password, &p.MaxConns, &p.MaxArtSize, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Enabled, &p.Priority, &p.Name, &p.Host, &p.Port, &p.SSL, &p.Username, &p.Password, &p.MaxConns, &p.MaxArtSize, &p.Posting, &p.CreatedAt, &p.ProxyEnabled, &p.ProxyType, &p.ProxyHost, &p.ProxyPort, &p.ProxyUsername, &p.ProxyPassword); err != nil {
 			return nil, err
 		}
 		out = append(out, &p)
@@ -179,6 +184,30 @@ func (db *Database) MainDBGetNewsgroup(newsgroup string) (*models.Newsgroup, err
 	rows, err := retryableQuery(db.mainDB, query_MainDBGetNewsgroup, newsgroup)
 	if err != nil {
 		log.Printf("MainDBGetNewsgroup: Failed to query newsgroup '%s': %v", newsgroup, err)
+		return nil, err
+	}
+	defer rows.Close()
+	var g models.Newsgroup
+	found := false
+	for rows.Next() {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.HighWater, &g.LowWater, &g.Status, &g.Hierarchy, &g.CreatedAt); err != nil {
+			return nil, err
+		}
+		found = true
+	}
+	if !found {
+		return nil, sql.ErrNoRows
+	}
+	return &g, nil
+}
+
+// MainDBGetNewsgroupByID returns a newsgroup information from MainDB by ID
+const query_MainDBGetNewsgroupByID = `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy, created_at FROM newsgroups WHERE id = ?`
+
+func (db *Database) MainDBGetNewsgroupByID(id int64) (*models.Newsgroup, error) {
+	rows, err := retryableQuery(db.mainDB, query_MainDBGetNewsgroupByID, id)
+	if err != nil {
+		log.Printf("MainDBGetNewsgroupByID: Failed to query newsgroup with ID %d: %v", id, err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -467,16 +496,20 @@ func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
 	return &lastDate, nil
 }
 
-const query_GetAllArticles = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles ORDER BY article_num ASC`
+const query_GetArticlesBatch = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles ORDER BY article_num ASC LIMIT ? OFFSET ?`
 
-func (db *Database) GetAllArticles(groupDBs *GroupDBs) ([]*models.Article, error) {
-	log.Printf("GetArticles: group '%s' fetching articles", groupDBs.Newsgroup)
+// GetArticlesBatch retrieves articles from a group database in batches for memory efficiency
+func (db *Database) GetArticlesBatch(groupDBs *GroupDBs, limit, offset int) ([]*models.Article, error) {
+	if limit <= 0 {
+		limit = 100 // Default batch size
+	}
 
-	rows, err := retryableQuery(groupDBs.DB, query_GetAllArticles)
+	rows, err := retryableQuery(groupDBs.DB, query_GetArticlesBatch, limit, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+
 	var out []*models.Article
 	for rows.Next() {
 		var a models.Article
@@ -1153,7 +1186,7 @@ func (db *Database) GetSectionGroupsByName(newsgroupName string) ([]*models.Sect
 	return out, nil
 }
 
-const query_GetProviderByName = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size
+const query_GetProviderByName = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting, proxy_enabled, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password
 	          FROM providers WHERE name = ? ORDER by id ASC LIMIT 1`
 
 func (db *Database) GetProviderByName(name string) (*models.Provider, error) {
@@ -1161,7 +1194,7 @@ func (db *Database) GetProviderByName(name string) (*models.Provider, error) {
 	var provider models.Provider
 	err := row.Scan(&provider.ID, &provider.Name, &provider.Grp, &provider.Host, &provider.Port,
 		&provider.SSL, &provider.Username, &provider.Password, &provider.MaxConns, &provider.Enabled, &provider.Priority,
-		&provider.MaxArtSize)
+		&provider.MaxArtSize, &provider.Posting, &provider.ProxyEnabled, &provider.ProxyType, &provider.ProxyHost, &provider.ProxyPort, &provider.ProxyUsername, &provider.ProxyPassword)
 	if err == sql.ErrNoRows {
 		return nil, nil // Provider not found
 	} else if err != nil {
@@ -1171,15 +1204,15 @@ func (db *Database) GetProviderByName(name string) (*models.Provider, error) {
 	return &provider, nil
 }
 
-const query_GetProviderByID = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size
+const query_GetProviderByID = `SELECT id, name, grp, host, port, ssl, username, password, max_conns, enabled, priority, max_art_size, posting, proxy_enabled, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password
 	          FROM providers WHERE id = ? LIMIT 1`
 
-func (db *Database) GetProviderByID(id int) (*models.Provider, error) {
+func (db *Database) GetProviderByID(id int64) (*models.Provider, error) {
 	row := db.mainDB.QueryRow(query_GetProviderByID, id)
 	var provider models.Provider
 	err := row.Scan(&provider.ID, &provider.Name, &provider.Grp, &provider.Host, &provider.Port,
 		&provider.SSL, &provider.Username, &provider.Password, &provider.MaxConns, &provider.Enabled, &provider.Priority,
-		&provider.MaxArtSize)
+		&provider.MaxArtSize, &provider.Posting, &provider.ProxyEnabled, &provider.ProxyType, &provider.ProxyHost, &provider.ProxyPort, &provider.ProxyUsername, &provider.ProxyPassword)
 	if err == sql.ErrNoRows {
 		return nil, nil // Provider not found
 	} else if err != nil {

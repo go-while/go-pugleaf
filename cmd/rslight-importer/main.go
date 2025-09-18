@@ -31,7 +31,7 @@ func main() {
 		sqliteDir       = flag.String("spool", "", "Path to legacy RockSolid spool directory containing SQLite files *.db3")
 		threads         = flag.Int("threads", 1, "parallel import threads (default: 1)")
 		useShortHashLen = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
-		hostnamePath    = flag.String("nntphostname", "", "your hostname must be set")
+		nntphostname    = flag.String("nntphostname", "", "your hostname must be set")
 	)
 
 	flag.Parse()
@@ -52,11 +52,7 @@ func main() {
 	}
 	mainConfig := config.NewDefaultConfig()
 	mainConfig.AppVersion = appVersion
-	if *hostnamePath == "" {
-		log.Fatalf("[RSLIGHT-IMPORT]: Error: hostname must be set!")
-	}
-	mainConfig.Server.Hostname = *hostnamePath
-	processor.LocalHostnamePath = *hostnamePath
+	mainConfig.Server.Hostname = *nntphostname
 	log.Printf("Starting go-pugleaf RSLIGHT-IMPORT (version: %s)", appVersion)
 
 	// Create database configuration
@@ -72,6 +68,11 @@ func main() {
 	// Run migrations to ensure sections tables exist
 	if err := db.Migrate(); err != nil {
 		log.Fatalf("Failed to run database migrations: %v", err)
+	}
+
+	// Set hostname in processor with database fallback support
+	if err := processor.SetHostname(*nntphostname, db); err != nil {
+		log.Fatalf("Failed to set NNTP hostname: %v", err)
 	}
 
 	// Handle UseShortHashLen configuration with locking

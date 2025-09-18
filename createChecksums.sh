@@ -33,13 +33,6 @@ cd "$BUILD_DIR"
 sha256sum * > "../${CHECKSUMS_FILE}.archive"
 cd ..
 
-# Display the checksums file
-echo ""
-echo "Checksums generated successfully:"
-echo "================================="
-cat "$CHECKSUMS_FILE"
-
-echo ""
 echo "Checksums file created: $CHECKSUMS_FILE"
 echo "Archive checksums file created: ${CHECKSUMS_FILE}.archive (for inclusion in release)"
 echo "Number of executables: $(wc -l < $CHECKSUMS_FILE)"

@@ -11,48 +11,6 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-var MaxCrossPosts = 15 // HARDCODED Maximum number of crossposts to allow per article
-
-var LocalHostnamePath = "" // Hostname must be set before processing articles
-/*
-var (
-
-	processedArticleCount int64
-	lastGCTime            time.Time
-	gcMutex               sync.Mutex
-
-)
-*/
-const DefaultArticleItemPath = "no-path!not-for-mail"
-
-// Removed all object pools - they were causing race conditions and data corruption
-
-// Removed all pool functions - they were causing race conditions and data corruption
-// Objects are now allocated normally and Go's GC handles cleanup
-
-// triggerGCIfNeeded forces garbage collection periodically during bulk imports to manage memory
-func triggerGCIfNeeded(bulkmode bool) {
-	/*
-		if !bulkmode {
-			return // Only do this for bulk imports
-		}
-
-		gcMutex.Lock()
-		defer gcMutex.Unlock()
-
-		processedArticleCount++
-		now := time.Now()
-
-		// Force GC every 1000 articles or every 10 seconds, whichever comes first (made more aggressive for memory management)
-
-		if processedArticleCount%1000 == 0 || now.Sub(lastGCTime) > 10*time.Second {
-			//runtime.GC()
-			lastGCTime = now
-			//log.Printf("[MEMORY] Forced GC after %d articles", processedArticleCount)
-		}
-	*/
-}
-
 // ComputeMessageIDHash computes MD5 hash of a message-ID
 func ComputeMessageIDHash(messageID string) string {
 	hash := md5.Sum([]byte(messageID))
@@ -196,9 +154,8 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		return history.CaseError, fmt.Errorf("article '%s' posted too far in future: %v", article.MessageID, article.DateSent)
 	}
 
-	// part of parsing data moved to nntp-client-commands.go:L~800 (func ParseLegacyArticleLines)
+	// part of parsing data moved to nntp-client-commands.go:L~850 (func ParseLegacyArticleLines)
 	article.ReplyCount = 0 // Will be updated by threading
-	article.ImportedAt = time.Now()
 	article.MsgIdItem = msgIdItem
 	article.ArticleNums = make(map[*string]int64)
 	article.ProcessQueue = make(chan *string, 16) // Initialize process queue
@@ -224,9 +181,9 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 	}
 	if article.Path == "" {
 		//log.Printf("[WARN:OLD] Article '%s' empty path... ?! headers='%#v'", article.MessageID, article.Headers)
-		article.Path = LocalHostnamePath + "!" + DefaultArticleItemPath
+		article.Path = LocalNNTPHostname + "!unknown!not-for-mail"
 	} else {
-		article.Path = LocalHostnamePath + "!" + article.Path // Ensure path is prefixed with hostname
+		article.Path = LocalNNTPHostname + "!" + article.Path // Ensure path is prefixed with hostname
 	}
 
 	// Free memory from transient fields after extracting what we need
@@ -309,9 +266,6 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		proc.setCaseDupes(msgIdItem, bulkmode)
 		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'newsgroups' header", article.MessageID)
 	}
-
-	// Memory optimization: trigger GC periodically during bulk imports
-	triggerGCIfNeeded(bulkmode)
 
 	return history.CasePass, nil
 } // end func processArticle

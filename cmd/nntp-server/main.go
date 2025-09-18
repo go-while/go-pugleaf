@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	hostnamePath    string
+	nntphostname    string
 	nntptcpport     int
 	nntptlsport     int
 	nntpcertFile    string
@@ -29,11 +29,8 @@ var appVersion = "-unset-"
 func main() {
 	config.AppVersion = appVersion
 	log.Printf("Starting go-pugleaf dedicated NNTP Server (version: %s)", config.AppVersion)
-	// Example configuration
-	mainConfig := config.NewDefaultConfig()
-	log.Printf("Starting go-pugleaf dedicated NNTP Server (version: %s)", appVersion)
 
-	flag.StringVar(&hostnamePath, "nntphostname", "", "Your hostname must be set!")
+	flag.StringVar(&nntphostname, "nntphostname", "", "Your hostname must be set!")
 	flag.IntVar(&nntptcpport, "nntptcpport", 0, "NNTP TCP port")
 	flag.IntVar(&nntptlsport, "nntptlsport", 0, "NNTP TLS port")
 	flag.StringVar(&nntpcertFile, "nntpcertfile", "", "NNTP TLS certificate file (/path/to/fullchain.pem)")
@@ -42,6 +39,7 @@ func main() {
 	flag.IntVar(&maxConnections, "maxconnections", 500, "allow max of N authenticated connections (default: 500)")
 	flag.Parse()
 
+	mainConfig := config.NewDefaultConfig()
 	mainConfig.Server.NNTP.Enabled = true
 	// Override config with command-line flags if provided
 	if nntptcpport > 0 {
@@ -62,17 +60,14 @@ func main() {
 		log.Printf("[NNTP]: No NNTP TLS port flag provided")
 	}
 
-	if hostnamePath == "" {
-		log.Fatalf("[NNTP]: Error: hostname must be set!")
-	}
+	// Note: hostname can be empty here since SetHostname will check database for fallback
 	if maxConnections <= 0 {
 		log.Fatalf("[NNTP]: Error: max connections must be greater than 0")
 	}
 	if maxConnections > 500 { // Default is 500, but allow higher if specified
 		log.Printf("[NNTP]: WARNING! Setting max connections to %d: You may hit filedescriptor limits! rise ulimit -n to maxConnections * 2 !", maxConnections)
 	}
-	mainConfig.Server.Hostname = hostnamePath
-	processor.LocalHostnamePath = hostnamePath
+	mainConfig.Server.Hostname = nntphostname
 	mainConfig.Server.NNTP.MaxConns = maxConnections
 	log.Printf("[NNTP]: Using NNTP configuration %#v", mainConfig.Server.NNTP)
 
@@ -91,6 +86,11 @@ func main() {
 	// Apply migrations
 	if err := db.Migrate(); err != nil {
 		log.Fatalf("Failed to apply database migrations: %v", err)
+	}
+
+	// Set hostname in processor with database fallback support
+	if err := processor.SetHostname(nntphostname, db); err != nil {
+		log.Fatalf("[NNTP]: Failed to set NNTP hostname: %v", err)
 	}
 
 	// Validate command-line flag

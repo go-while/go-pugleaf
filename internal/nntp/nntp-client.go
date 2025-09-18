@@ -76,7 +76,14 @@ type BackendConfig struct {
 	//WriteTimeout   time.Duration    // timeout for writing to the connection
 	MaxConns int              // maximum number of connections to this backend
 	Provider *config.Provider // link to provider config
-	Mux      sync.Mutex
+	// Proxy configuration fields
+	ProxyEnabled  bool   // whether to use proxy for connections
+	ProxyType     string // proxy type: socks4, socks5
+	ProxyHost     string // proxy server hostname/IP
+	ProxyPort     int    // proxy server port
+	ProxyUsername string // proxy authentication username
+	ProxyPassword string // proxy authentication password
+	Mux           sync.Mutex
 }
 
 // Article represents an NNTP article
@@ -91,11 +98,13 @@ type Article struct {
 
 // GroupInfo represents newsgroup information
 type GroupInfo struct {
-	Name      string
-	Count     int64
-	First     int64
-	Last      int64
-	PostingOK bool
+	Name       string
+	Count      int64
+	First      int64
+	Last       int64
+	FetchStart int64
+	FetchEnd   int64
+	PostingOK  bool
 }
 
 // OverviewLine represents a line from XOVER command
@@ -136,8 +145,18 @@ func (c *BackendConn) Connect() error {
 	if c.connected {
 		return nil
 	}
+
+	// Check if this is a .onion address and automatically enable Tor if not already configured
+	if IsOnionAddress(c.Backend.Host) && !c.Backend.ProxyEnabled {
+		log.Printf("[NNTP-PROXY] Detected .onion address %s but TOR proxy is not configured!", c.Backend.Host)
+		return fmt.Errorf("error in Connect: TOR proxy is not configured: %s", c.Backend.Provider.Name)
+	}
+
 	// Build server address
 	serverAddr := net.JoinHostPort(c.Backend.Host, fmt.Sprintf("%d", c.Backend.Port))
+
+	// Create proxy dialer
+	proxyDialer := NewProxyDialer(c.Backend)
 
 	// Set connection timeout
 	var conn net.Conn
@@ -148,15 +167,27 @@ func (c *BackendConn) Connect() error {
 			ServerName: c.Backend.Host,
 			MinVersion: tls.VersionTLS12,
 		}
-		conn, err = tls.DialWithDialer(&net.Dialer{
-			Timeout: c.Backend.ConnectTimeout,
-		}, "tcp", serverAddr, tlsConfig)
+
+		// Use proxy-aware TLS dialer
+		conn, err = proxyDialer.DialTLS("tcp", serverAddr, tlsConfig)
 	} else {
-		conn, err = net.DialTimeout("tcp", serverAddr, c.Backend.ConnectTimeout)
+		// Use proxy-aware dialer
+		conn, err = proxyDialer.Dial("tcp", serverAddr)
 	}
 
 	if err != nil {
+		// Log proxy information if proxy was attempted
+		if c.Backend.ProxyEnabled {
+			log.Printf("[NNTP-PROXY] Failed to connect to %s via %s proxy %s:%d: %v",
+				serverAddr, c.Backend.ProxyType, c.Backend.ProxyHost, c.Backend.ProxyPort, err)
+		}
 		return fmt.Errorf("failed to connect to %s: %w", serverAddr, err)
+	}
+
+	// Log successful proxy connection
+	if c.Backend.ProxyEnabled {
+		log.Printf("[NNTP-PROXY] Successfully connected to %s via %s proxy %s:%d",
+			serverAddr, c.Backend.ProxyType, c.Backend.ProxyHost, c.Backend.ProxyPort)
 	}
 
 	c.conn = conn

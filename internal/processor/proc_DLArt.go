@@ -61,8 +61,10 @@ func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
 	return groupBatch
 }
 
+//var BatchItemDuplicateError = &BatchItem{Error: errIsDuplicateError}
+
 // DownloadArticles fetches full articles and stores them in the articles DB.
-func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroups int64, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64) error {
+func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64, shutdownChan <-chan struct{}) error {
 	//log.Printf("DEBUG-DownloadArticles: ng='%s' called with start=%d end=%d", newsgroup, start, end)
 	DLParChan <- struct{}{} // aquire lock
 	defer func() {
@@ -98,24 +100,18 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	}
 	//remaining := groupInfo.Last - end
 	//log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d, remaining: %d)", newsgroup, start, end, groupInfo.Last, remaining)
-	var mux sync.Mutex
-	var lastGoodEnd int64 = 1
-	toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
-	xhdrChan := make(chan *nntp.HeaderLine, MaxBatchSize)
+	var lastGoodEnd int64 = start
+	//toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
+	xhdrChan := make(chan *nntp.HeaderLine, 1000)
 	errChan := make(chan error, 1)
 	//log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
-	go func(mux *sync.Mutex) {
-		aerr := proc.Pool.XHdrStreamed(newsgroup, "message-id", start, end, xhdrChan)
-		if aerr != nil {
-			log.Printf("Failed to fetch message IDs for group '%s': err='%v' toFetch=%d", newsgroup, aerr, toFetch)
-			errChan <- aerr
-			return
-		}
-		errChan <- nil
-	}(&mux)
 	if proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
+		return fmt.Errorf("got shutdown in DownloadArticles: Database shutdown while in group '%s'", newsgroup)
 	}
+	go func() {
+		errChan <- proc.Pool.XHdrStreamed(newsgroup, "message-id", start, end, xhdrChan, shutdownChan)
+	}()
+
 	//log.Printf("DownloadArticles: XHDR is fetching %d msgIds ng: '%s' (%d to %d)", len(messageIDs), newsgroup, start, end)
 	releaseChan := make(chan struct{}, 1)
 	notifyChan := make(chan int64, 1)
@@ -124,6 +120,10 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 		//log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", toFetch, newsgroup, proc.Pool.Backend.MaxConns)
 		var exists, queued int64
 		for hdr := range xhdrChan {
+			if proc.WantShutdown(shutdownChan) {
+				log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
+				return
+			}
 			/*
 				if !CheckMessageIdFormat(hdr.Value) {
 					log.Printf("[FETCHER]: Invalid message ID format: '%s'", hdr.Value)
@@ -150,8 +150,9 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 			Batch.GetQ <- item // send to fetcher/main.go: for item := range processor.Batch.Queue
 			queued++
 			//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", hdr.ArticleNum, hdr.Value, *item.GroupName)
-			hdr.Value = ""
-			hdr.ArticleNum = 0
+			//hdr.Value = ""
+			//hdr.ArticleNum = 0
+			*hdr = nntp.HeaderLine{}
 		} // end for xhdrChan
 		//log.Printf("DownloadArticles: XHdr closed, finished feeding batch queue %d articles for group '%s' (existing: %d) total=%d", queued, newsgroup, exists, queued+exists)
 		if queued == 0 {
@@ -169,6 +170,10 @@ func (proc *Processor) DownloadArticles(newsgroup string, ignoreInitialTinyGroup
 	deathCounter := 0 // Counter to track if we are stuck
 	bulkmode := true
 	var gotQueued int64 = -1
+	if proc.WantShutdown(shutdownChan) {
+		log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
+		return fmt.Errorf("shutdown requested")
+	}
 	// Start processing loop
 forProcessing:
 	for {
@@ -214,7 +219,11 @@ forProcessing:
 					case nntp.ErrArticleRemoved:
 						notf++
 					default:
-						log.Printf("DownloadArticles: '%s' Error fetching article %s: %v .. continue", newsgroup, *item.MessageID, item.Error)
+						if item.MessageID != nil {
+							log.Printf("DownloadArticles: '%s' Error fetching article %s: %v .. continue", newsgroup, *item.MessageID, item.Error)
+						} else {
+							log.Printf("DownloadArticles: '%s' Error fetching item: %#v .. continue", newsgroup, item)
+						}
 						errs++
 					}
 				} else {
@@ -248,7 +257,10 @@ forProcessing:
 			}
 		}
 	} // end for processing routine (counts only)
-
+	if proc.WantShutdown(shutdownChan) {
+		log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
+		return fmt.Errorf("shutdown requested")
+	}
 	if proc.DB.IsDBshutdown() {
 		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
 	}
@@ -256,11 +268,16 @@ forProcessing:
 	if xerr != nil {
 		end = lastGoodEnd
 	}
-	err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, newsgroup, end)
-	if err != nil {
-		log.Printf("Failed to update progress for provider '%s' group '%s': %v", proc.Pool.Backend.Provider.Name, newsgroup, err)
+	if gotQueued > 0 || dups > 0 {
+		// only update progress if we actually got something
+		err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, newsgroup, end)
+		if err != nil {
+			log.Printf("Failed to update progress for provider '%s' group '%s': %v", proc.Pool.Backend.Provider.Name, newsgroup, err)
+		}
 	}
-	log.Printf("DownloadArticles: '%s' processed %d articles (dups: %d, gots: %d, errs: %d, added: %d) in %v end=%d", newsgroup, gots+errs+dups, dups, gots, errs, GroupCounter.GetReset(newsgroup), time.Since(startTime), end)
+	// threading.go:296: GroupCounter.Increment(newsgroup) // Increment the group counter
+	groupCnt := GroupCounter.GetReset(newsgroup)
+	log.Printf("DownloadArticles: '%s' processed %d articles [gotQueued=%d] (dups: %d, gots: %d, errs: %d, adds: %d) in %v end=%d", newsgroup, gots+errs+dups, gotQueued, dups, gots, errs, groupCnt, time.Since(startTime), end)
 	// do another one if we haven't run enough times
 	runtime.GC()
 
@@ -272,40 +289,64 @@ forProcessing:
 
 // FindStartArticleByDate finds the first article number on or after the given date
 // using a simple binary search approach with XOVER data
-func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.Time) (int64, error) {
-	// Get group info
-	groupInfo, err := proc.Pool.SelectGroup(groupName)
-	if err != nil {
-		return 0, fmt.Errorf("failed to select group: %w", err)
+func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.Time, groupInfo *nntp.GroupInfo) (int64, error) {
+	/*
+		// Get group info
+		groupInfo, err := proc.Pool.SelectGroup(groupName)
+		if err != nil {
+			return 0, fmt.Errorf("failed to select group: %w", err)
+		}
+	*/
+	if groupInfo.Last == 0 {
+		log.Printf("No articles in group %s", groupName)
+		return 0, ErrIsEmptyGroup
 	}
-
-	first := groupInfo.First
-	last := groupInfo.Last
+	// decrease targetDate by 2 days
+	targetDate = targetDate.AddDate(0, 0, -2)
 
 	log.Printf("Finding start article for date %s in group %s (range %d-%d)",
-		targetDate.Format("2006-01-02"), groupName, first, last)
+		targetDate.Format("2006-01-02"), groupName, groupInfo.First, groupInfo.Last)
 
 	// Check if target date is before the first article
 	enforceLimit := true
-	firstOverviews, err := proc.Pool.XOver(groupName, first, first, enforceLimit)
+	firstOverviews, err := proc.Pool.XOver(groupName, groupInfo.First, groupInfo.First, enforceLimit)
 	if err == nil && len(firstOverviews) > 0 {
 		firstArticleDate := ParseNNTPDate(firstOverviews[0].Date)
 		if !firstArticleDate.IsZero() && targetDate.Before(firstArticleDate) {
 			log.Printf("Target date %s is before first article %d (date: %s), returning first article. ng: %s",
-				targetDate.Format("2006-01-02"), first, firstArticleDate.Format("2006-01-02"), groupName)
-			return first, nil
+				targetDate.Format("2006-01-02"), groupInfo.First, firstArticleDate.Format("2006-01-02"), groupName)
+			return groupInfo.First, nil
+		} else {
+			log.Printf("Target date %s is after first article %d (date: %s), checking last article. ng: %s",
+				targetDate.Format("2006-01-02"), groupInfo.First, firstArticleDate.Format("2006-01-02"), groupName)
 		}
 	}
 
+	// Check if target date is after the last article
+	lastOverviews, err := proc.Pool.XOver(groupName, groupInfo.Last, groupInfo.Last, enforceLimit)
+	if err == nil && len(lastOverviews) > 0 {
+		lastArticleDate := ParseNNTPDate(lastOverviews[0].Date)
+		if !lastArticleDate.IsZero() && targetDate.After(lastArticleDate) {
+			log.Printf("Target date %s is after last article %d (date: %s), returning last article. ng: %s",
+				targetDate.Format("2006-01-02"), groupInfo.Last, lastArticleDate.Format("2006-01-02"), groupName)
+			return groupInfo.Last, nil
+		} else {
+			log.Printf("Target date %s is before last article %d (date: %s), starting search. ng: %s",
+				targetDate.Format("2006-01-02"), groupInfo.Last, lastArticleDate.Format("2006-01-02"), groupName)
+		}
+	}
+	groupInfo.FetchStart = groupInfo.First
+	groupInfo.FetchEnd = groupInfo.Last
+
 	// Binary search using 50% approach
-	for last-first > 1 {
-		mid := first + (last-first)/2
+	for groupInfo.FetchEnd-groupInfo.FetchStart > 1 {
+		mid := groupInfo.FetchStart + (groupInfo.FetchEnd-groupInfo.FetchStart)/2
 
 		// Get XOVER for this article
 		overviews, err := proc.Pool.XOver(groupName, mid, mid, enforceLimit)
 		if err != nil || len(overviews) == 0 {
 			// Article doesn't exist, try moving up
-			first = mid
+			groupInfo.FetchStart = mid
 			continue
 		}
 		if proc.DB.IsDBshutdown() {
@@ -313,35 +354,38 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 		}
 		articleDate := ParseNNTPDate(overviews[0].Date)
 		if articleDate.IsZero() {
-			first = mid
+			groupInfo.FetchStart = mid
 			continue
 		}
 
 		log.Printf("Scanning: %s - Article %d has date %s", groupName, mid, articleDate.Format("2006-01-02"))
 
 		if articleDate.Before(targetDate) {
-			first = mid
+			groupInfo.FetchStart = mid
 		} else {
-			last = mid
+			groupInfo.FetchEnd = mid
 		}
 	}
-
-	log.Printf("Found start article: %d, ng: %s", last, groupName)
-	return last, nil
+	log.Printf("Found start article: %d, ng: %s", groupInfo.FetchEnd, groupName)
+	return groupInfo.FetchEnd, nil
 }
+
+var ErrIsEmptyGroup = fmt.Errorf("isEmptyGroup")
 
 // DownloadArticlesFromDate fetches articles starting from a specific date
 // Uses special progress tracking: sets progress to startArticle-1, or -1 if starting from article 1
 // This prevents DownloadArticles from using "no progress detected" logic for existing groups
-func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, ignoreInitialTinyGroups int64, DLParChan chan struct{}, progressDB *database.ProgressDB) error {
+func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, DLParChan chan struct{}, progressDB *database.ProgressDB, groupInfo *nntp.GroupInfo, shutdownChan <-chan struct{}) error {
 	//log.Printf("DownloadArticlesFromDate: Starting download from date %s for group '%s'", startDate.Format("2006-01-02"), groupName)
 
 	// Find the starting article number based on date
-	startArticle, err := proc.FindStartArticleByDate(groupName, startDate)
+	startArticle, err := proc.FindStartArticleByDate(groupName, startDate, groupInfo)
 	if err != nil {
+		if err == ErrIsEmptyGroup {
+			return err
+		}
 		return fmt.Errorf("failed to find start article for date %s: %w", startDate.Format("2006-01-02"), err)
 	}
-
 	// Open progress DB and temporarily override the last article position
 	// so DownloadArticles will start from our desired article number
 	// progressDB is now passed as parameter to avoid opening/closing for each group
@@ -377,10 +421,12 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 	//log.Printf("DownloadArticlesFromDate: Set progress to %d (date rescan), will start downloading from article %d", tempProgress, startArticle)
 
 	// Get group info to calculate proper download range
-	groupInfo, err := proc.Pool.SelectGroup(groupName)
-	if err != nil {
-		return fmt.Errorf("failed to select group for date download: %w", err)
-	}
+	/*
+		groupInfo, err := proc.Pool.SelectGroup(groupName)
+		if err != nil {
+			return fmt.Errorf("failed to select group for date download: %w", err)
+		}
+	*/
 
 	// Calculate download range: start from found article, end at current group last or startArticle + MaxBatch
 	downloadStart := startArticle
@@ -388,12 +434,19 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 	if downloadEnd > groupInfo.Last {
 		downloadEnd = groupInfo.Last
 	}
-
+	if proc.WantShutdown(shutdownChan) {
+		log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
+		return fmt.Errorf("shutdown requested")
+	}
 	//log.Printf("DownloadArticlesFromDate: Downloading range %d-%d for group '%s' (group last: %d)",	downloadStart, downloadEnd, groupName, groupInfo.Last)
 
 	// Now use the high-performance DownloadArticles function with proper article ranges
-	err = proc.DownloadArticles(groupName, ignoreInitialTinyGroups, DLParChan, progressDB, downloadStart, downloadEnd)
+	err = proc.DownloadArticles(groupName, DLParChan, progressDB, downloadStart, downloadEnd, shutdownChan)
 
+	if proc.WantShutdown(shutdownChan) {
+		log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
+		return fmt.Errorf("shutdown requested")
+	}
 	// If there was an error and we haven't made progress, restore the original progress
 	if err != nil && err != ErrUpToDate {
 		// Check if we made any progress
@@ -414,4 +467,16 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 
 	//log.Printf("DownloadArticlesFromDate: Successfully completed download from date %s for group '%s'",	startDate.Format("2006-01-02"), groupName)
 	return err // Return the result from DownloadArticles (including ErrUpToDate)
+}
+
+func (proc *Processor) WantShutdown(shutdownChan <-chan struct{}) bool {
+	select {
+	case _, ok := <-shutdownChan:
+		if !ok {
+			// channel is closed
+			return true
+		}
+	default:
+	}
+	return false
 }

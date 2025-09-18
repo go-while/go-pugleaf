@@ -8,6 +8,7 @@ require (
 	github.com/go-while/go-cpu-mem-profiler v0.0.0-20240612221627-856954a5fc83
 	github.com/mattn/go-sqlite3 v1.14.32
 	golang.org/x/crypto v0.41.0
+	golang.org/x/net v0.43.0
 	golang.org/x/term v0.34.0
 	golang.org/x/text v0.28.0
 )
@@ -35,7 +36,6 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.0 // indirect
 	golang.org/x/arch v0.20.0 // indirect
-	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

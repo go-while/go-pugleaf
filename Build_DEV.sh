@@ -14,6 +14,7 @@ rm -v build/*
 #./build_analyze.sh
 ./build_fetcher.sh
 ./build_webserver.sh
+./build_nntp-transfer.sh
 #./build_recover-db.sh
 #./build_expire-news.sh
 

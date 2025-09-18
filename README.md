@@ -38,7 +38,11 @@ su pugleaf
 cd /home/pugleaf
 git clone https://github.com/go-while/go-pugleaf.git
 cd go-pugleaf
-git checkout testing-001
+
+# Warning: Nightly patches may be unstable or contain bugs
+# Only switch to the testing branch if you understand the risks or a dev told you to test a Patch!
+# git checkout testing-001
+ git checkout main
 
 # Build all binaries (outputs to ./build)
 ./build_ALL.sh && cp build/* .
@@ -65,7 +69,7 @@ mv build/usermgr .
   - Or bulk import newsgroups:
 ```bash
 ./webserver -import-active preload/active.txt -nntphostname your.domain.com
-./webserver -update-desc preload/newsgroups.descriptions -nntphostname your.domain.com
+./webserver -update-descr preload/newsgroups.descriptions -nntphostname your.domain.com
 ./rslight-importer -data data -etc etc -spool spool -nntphostname your.domain.com
 ```
   - rslight section import: see etc/menu.conf and creating sections aka folders in etc/ containing a groups.txt (e.g., etc/section/groups.txt)
@@ -243,11 +247,8 @@ go-pugleaf includes command-line applications for various newsgroup management t
 
 **Server Configuration:**
 - `-webport int` - Web server port (default: 11980 (no ssl) or 19443 (webssl))
-- `-withnntp` - Start NNTP server with default ports 1119/1563
 - `-nntptcpport int` - NNTP TCP port
 - `-nntptlsport int` - NNTP TLS port
-- `-withfetch` - Enable internal Cronjob to fetch new articles
-- `-isleep int` - Sleeps in fetch routines (default: 300 seconds = 5min)
 
 **Cache Configuration:**
 - `-maxsanartcache int` - Maximum number of cached sanitized articles (default: 10000)
@@ -262,10 +263,15 @@ go-pugleaf includes command-line applications for various newsgroup management t
 - `-import-desc string` - Import newsgroups from descriptions file
 - `-import-create` - Create missing newsgroups when importing
 - `-write-active-file string` - Write NNTP active file to specified path
+- `-write-active-only` - Use with -write-active-file (false writes only non active groups!) (default: true)
 - `-update-descr` - Update newsgroup descriptions from file
 - `-repair-watermarks` - Repair corrupted newsgroup watermarks
 - `-update-newsgroup-activity` - Update newsgroup activity timestamps
 - `-update-newsgroups-hide-futureposts` - Hide articles posted > 48h in future
+- `-compare-active string` - Compare active file with database and show missing groups (format: groupname highwater lowwater status)
+- `-compare-active-min-articles int64` - Use with -compare-active: only show groups with more than N articles (calculated as high-low)
+- `-rsync-inactive-groups string` - Path to new data dir, uses rsync to copy all inactive group databases to new data folder
+- `-rsync-remove-source` - Use with -rsync-inactive-groups. If set, removes source files after moving inactive groups (default: false)
 
 **Bridge Features: (NOT WORKING!)**
 - `-enable-fediverse` - Enable Fediverse bridge
@@ -277,8 +283,13 @@ go-pugleaf includes command-line applications for various newsgroup management t
 - `-matrix-userid string` - Matrix user ID
 
 **Advanced Options:**
-- `-useshorthashlen int` - Short hash length for history storage (2-7, default: 7)
-- `-ignore-initial-tiny-groups int` - Ignore tiny groups with fewer articles (default: 0)
+- `-useshorthashlen int` - Short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!
+
+**Disabled Options (commented out in code):**
+- `# -withnntp` - Start NNTP server with default ports 1119/1563
+- `# -withfetch` - Enable internal Cronjob to fetch new articles
+- `# -isleep int` - Sleeps in fetch routines (default: 300 seconds = 5min)
+- `# -ignore-initial-tiny-groups int` - Ignore tiny groups with fewer articles (default: 0)
 
 #### `pugleaf-fetcher` (cmd/nntp-fetcher)
 **Article fetcher from NNTP providers**
@@ -289,15 +300,6 @@ go-pugleaf includes command-line applications for various newsgroup management t
 **Required Flags:**
 - `-nntphostname string` - Your hostname must be set!
 
-**Connection Configuration:**
-- `-host string` - NNTP hostname (default: "81-171-22-215.pugleaf.net")
-- `-port int` - NNTP port (default: 563)
-- `-username string` - NNTP username (default: "read")
-- `-password string` - NNTP password (default: "only")
-- `-ssl` - Use SSL/TLS connection (default: true)
-- `-timeout int` - Connection timeout in seconds (default: 30)
-- `-message-id string` - Test specific message ID
-
 **Fetching Options:**
 - `-group string` - Newsgroup to fetch (empty = all groups or wildcard like rocksolid.*)
 - `-download-start-date string` - Start downloading from date (YYYY-MM-DD format)
@@ -307,10 +309,13 @@ go-pugleaf includes command-line applications for various newsgroup management t
 - `-max-batch int` - Maximum articles per batch (default: 128, recommended: 100)
 - `-max-batch-threads int` - Concurrent newsgroup batches (default: 16)
 - `-max-loops int` - Loop a group this many times (default: 1)
+- `-max-queue int` - Limit db_batch to have max N articles queued over all newsgroups (default: 16384)
 - `-download-max-par int` - Groups in parallel (default: 1, can consume memory!)
 - `-useshorthashlen int` - Short hash length for history (2-7, default: 7)
 
 **Advanced Options:**
+- `-ignore-initial-tiny-groups int64` - Ignore tiny groups with fewer articles during initial fetch (default: 0)
+- `-update-newsgroups-from-remote string` - Fetch remote newsgroup list and add new groups (empty = disabled, use "group.*" or "$all")
 - `-xover-copy` - Copy xover data from remote server (default: false)
 - `-test-conn` - Test connection and exit (default: false)
 - `-help` - Show usage examples and exit

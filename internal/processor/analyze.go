@@ -496,7 +496,7 @@ func (proc *Processor) cacheFileExists(cacheFile string) bool {
 }
 
 // GetCachedMessageIDs returns cached message IDs for download optimization
-func (proc *Processor) GetCachedMessageIDs(groupName string, startArticle, endArticle int64) ([]nntp.HeaderLine, error) {
+func (proc *Processor) GetCachedMessageIDs(groupName string, startArticle, endArticle int64) ([]*nntp.HeaderLine, error) {
 	providerName := "unknown"
 	if proc.Pool.Backend != nil {
 		providerName = proc.Pool.Backend.Provider.Name
@@ -518,7 +518,7 @@ func (proc *Processor) GetCachedMessageIDs(groupName string, startArticle, endAr
 	}
 	defer file.Close()
 
-	var results []nntp.HeaderLine
+	var results []*nntp.HeaderLine
 	scanner := bufio.NewScanner(file)
 
 	for scanner.Scan() {
@@ -550,7 +550,7 @@ func (proc *Processor) GetCachedMessageIDs(groupName string, startArticle, endAr
 			continue
 		}
 
-		results = append(results, nntp.HeaderLine{
+		results = append(results, &nntp.HeaderLine{
 			ArticleNum: articleNum,
 			Value:      messageID,
 		})

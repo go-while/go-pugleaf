@@ -60,7 +60,16 @@
                     <small class="text-muted">
                         Page {{.CurrentPage}} of {{.TotalPages}} • {{.TotalThreads}} total threads
                     </small>
-
+                    {{if .User}}
+                    <div class="btn-group" role="group" aria-label="Post Actions">
+                        <form method="POST" action="/SitePost" style="display: inline;">
+                            <input type="hidden" name="newsgroup" value="{{.GroupName}}">
+                            <button type="submit" class="btn btn-success">
+                                <i class="bi bi-plus-circle me-2"></i>New Thread
+                            </button>
+                        </form>
+                    </div>
+                    {{end}}
                     <nav aria-label="Thread pagination">
                         <ul class="pagination pagination-sm mb-0">
                             {{if .HasPrevPage}}

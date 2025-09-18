@@ -12,7 +12,7 @@ import (
 
 // Hierarchy represents a Usenet hierarchy (e.g., comp, alt, rec)
 type Hierarchy struct {
-	ID          int       `json:"id" db:"id"`
+	ID          int64     `json:"id" db:"id"`
 	Name        string    `json:"name" db:"name"`
 	Description string    `json:"description" db:"description"`
 	GroupCount  int       `json:"group_count" db:"group_count"`
@@ -22,24 +22,32 @@ type Hierarchy struct {
 
 // Provider represents an NNTP provider configuration
 type Provider struct {
-	ID         int       `json:"id" db:"id"`
-	Enabled    bool      `json:"enabled" db:"enabled"`   // Whether this provider is enabled
-	Priority   int       `json:"priority" db:"priority"` // Priority for load balancing
-	Grp        string    `json:"grp" db:"grp"`
-	Name       string    `json:"name" db:"name"`
-	Host       string    `json:"host" db:"host"`
-	Port       int       `json:"port" db:"port"`
-	SSL        bool      `json:"ssl" db:"ssl"`
-	Username   string    `json:"username" db:"username"`
-	Password   string    `json:"password" db:"password"`
-	MaxConns   int       `json:"max_conns" db:"max_conns"`       // Maximum concurrent connections
-	MaxArtSize int       `json:"max_art_size" db:"max_art_size"` // Maximum article size in bytes
-	CreatedAt  time.Time `json:"created_at" db:"created_at"`
+	ID         int64  `json:"id" db:"id"`
+	Enabled    bool   `json:"enabled" db:"enabled"`   // Whether this provider is enabled
+	Priority   int    `json:"priority" db:"priority"` // Priority for load balancing
+	Grp        string `json:"grp" db:"grp"`
+	Name       string `json:"name" db:"name"`
+	Host       string `json:"host" db:"host"`
+	Port       int    `json:"port" db:"port"`
+	SSL        bool   `json:"ssl" db:"ssl"`
+	Username   string `json:"username" db:"username"`
+	Password   string `json:"password" db:"password"`
+	MaxConns   int    `json:"max_conns" db:"max_conns"`       // Maximum concurrent connections
+	MaxArtSize int    `json:"max_art_size" db:"max_art_size"` // Maximum article size in bytes
+	Posting    bool   `json:"posting" db:"posting"`           // Whether posting is enabled for this provider
+	// Proxy configuration fields
+	ProxyEnabled  bool      `json:"proxy_enabled" db:"proxy_enabled"`   // Whether to use proxy for this provider
+	ProxyType     string    `json:"proxy_type" db:"proxy_type"`         // Proxy type: socks4, socks5
+	ProxyHost     string    `json:"proxy_host" db:"proxy_host"`         // Proxy server hostname/IP
+	ProxyPort     int       `json:"proxy_port" db:"proxy_port"`         // Proxy server port
+	ProxyUsername string    `json:"proxy_username" db:"proxy_username"` // Proxy authentication username
+	ProxyPassword string    `json:"proxy_password" db:"proxy_password"` // Proxy authentication password
+	CreatedAt     time.Time `json:"created_at" db:"created_at"`
 }
 
 // Newsgroup represents a subscribed newsgroup
 type Newsgroup struct {
-	ID           int    `json:"id" db:"id"`
+	ID           int64  `json:"id" db:"id"`
 	Name         string `json:"name" db:"name"`
 	Active       bool   `json:"active" db:"active"`
 	Description  string `json:"description" db:"description"`

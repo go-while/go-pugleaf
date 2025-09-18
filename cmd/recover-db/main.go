@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
@@ -28,14 +30,17 @@ var appVersion = "-unset-"
 
 func main() {
 	config.AppVersion = appVersion
+	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("go-pugleaf Database Recovery Tool (version: %s)", config.AppVersion)
 	var (
-		dbPath       = flag.String("db", "data", "Data Path to main data directory (required)")
-		newsgroup    = flag.String("group", "$all", "Newsgroup name to check (required) (\\$all to check for all)")
-		verbose      = flag.Bool("v", true, "Verbose output")
-		repair       = flag.Bool("repair", false, "Attempt to repair detected inconsistencies")
-		parseDates   = flag.Bool("parsedates", false, "Check and log date parsing differences between date_string and date_sent")
-		rewriteDates = flag.Bool("rewritedates", false, "Rewrite incorrect dates (requires -parsedates)")
+		dbPath         = flag.String("db", "data", "Data Path to main data directory (required)")
+		newsgroup      = flag.String("group", "$all", "Newsgroup name to check (required) (\\$all to check for all or news.* to check for all in that hierarchy)")
+		verbose        = flag.Bool("v", true, "Verbose output")
+		repair         = flag.Bool("repair", false, "Attempt to repair detected inconsistencies")
+		parseDates     = flag.Bool("parsedates", false, "Check and log date parsing differences between date_string and date_sent")
+		rewriteDates   = flag.Bool("rewritedates", false, "Rewrite incorrect dates (requires -parsedates)")
+		rebuildThreads = flag.Bool("rebuild-threads", false, "Rebuild all thread relationships from scratch (destructive)")
+		maxPar         = flag.Int("max-par", 1, "use with -rebuild-threads to process N newsgroups")
 	)
 	flag.Parse()
 
@@ -79,11 +84,36 @@ func main() {
 		log.Fatalf("Failed to apply database migrations: %v", err)
 	}
 	var newsgroups []*models.Newsgroup
-	if *newsgroup != "$all" && *newsgroup != "" {
-		newsgroups = append(newsgroups, &models.Newsgroup{
-			Name: *newsgroup,
-		})
+	isWildcard := strings.HasSuffix(*newsgroup, "*")
+	if *newsgroup != "$all" && *newsgroup != "" && !isWildcard {
+		// if is comma separated check for multiple newsgroups
+		if strings.Contains(*newsgroup, ",") {
+			for _, grpName := range strings.Split(*newsgroup, ",") {
+				if grpName == "" {
+					continue
+				}
+				newsgroups = append(newsgroups, &models.Newsgroup{
+					Name: strings.TrimSpace(grpName),
+				})
+			}
 
+		} else {
+			newsgroups = append(newsgroups, &models.Newsgroup{
+				Name: *newsgroup,
+			})
+		}
+	} else if isWildcard {
+		// strip * from newsgroup and add only newsgroups matching the strings prefix
+		prefix := strings.TrimSuffix(*newsgroup, "*")
+		allGroups, err := db.MainDBGetAllNewsgroups()
+		if err != nil {
+			log.Fatalf("failed to get newsgroups from database: %v", err)
+		}
+		for _, grp := range allGroups {
+			if strings.HasPrefix(grp.Name, prefix) {
+				newsgroups = append(newsgroups, grp)
+			}
+		}
 	} else {
 		newsgroups, err = db.MainDBGetAllNewsgroups()
 		if err != nil {
@@ -95,9 +125,48 @@ func main() {
 	fmt.Printf("📂 Data Path: %s\n", *dbPath)
 	fmt.Printf("📊 Newsgroups:    %d\n", len(newsgroups))
 	fmt.Printf("🔧 Repair Mode:   %v\n", *repair)
+	fmt.Printf("🧵 Rebuild Threads: %v\n", *rebuildThreads)
 	fmt.Printf("📅 Parse Dates:   %v\n", *parseDates)
 	fmt.Printf("🔄 Rewrite Dates: %v\n", *rewriteDates)
 	fmt.Printf("\n")
+	parChan := make(chan struct{}, *maxPar)
+	var parMux sync.Mutex
+	var wg sync.WaitGroup
+	// If only thread rebuilding is requested, run that and exit
+	if *rebuildThreads {
+		start := time.Now()
+		fmt.Printf("🧵 Starting thread rebuild process...\n")
+		fmt.Printf("=====================================\n")
+		var totalArticles, totalThreadsRebuilt int64
+		for i, newsgroup := range newsgroups {
+			parChan <- struct{}{} // get lock
+			wg.Add(1)
+			go func(newsgroup *models.Newsgroup, wg *sync.WaitGroup) {
+				defer func(wg *sync.WaitGroup) {
+					<-parChan // release lock
+					wg.Done()
+				}(wg)
+				fmt.Printf("🧵 [%d/%d] Rebuilding threads for newsgroup: %s\n", i+1, len(newsgroups), newsgroup.Name)
+				report, err := db.RebuildThreadsFromScratch(newsgroup.Name, *verbose)
+				if err != nil {
+					fmt.Printf("❌ Failed to rebuild threads for '%s': %v\n", newsgroup.Name, err)
+					return
+				}
+				report.PrintReport()
+				parMux.Lock()
+				totalArticles += report.TotalArticles
+				totalThreadsRebuilt += report.ThreadsRebuilt
+				parMux.Unlock()
+			}(newsgroup, &wg)
+		}
+		wg.Wait()
+		parMux.Lock()
+		fmt.Printf("\n🧵 Thread rebuild completed (%d newsgroups) took: %d ms\n", len(newsgroups), time.Since(start).Milliseconds())
+		fmt.Printf("   Total articles processed: %d\n", totalArticles)
+		fmt.Printf("   Total threads rebuilt: %d\n", totalThreadsRebuilt)
+		parMux.Unlock()
+		os.Exit(0)
+	}
 
 	// If only date parsing is requested, run that and exit
 	if *parseDates {
@@ -186,6 +255,18 @@ func main() {
 				continue // Continue to next newsgroup instead of exiting
 			}
 			fmt.Printf("🔍 Repair completed. Re-running consistency check...\n\n")
+
+			// Optionally rebuild threads after repair if there were thread-related issues
+			if len(report.OrphanedThreads) > 0 {
+				fmt.Printf("🧵 Rebuilding thread relationships after repair...\n")
+				threadReport, err := db.RebuildThreadsFromScratch(newsgroup.Name, *verbose)
+				if err != nil {
+					fmt.Printf("❌ Failed to rebuild threads: %v\n", err)
+				} else {
+					fmt.Printf("✅ Thread rebuild completed: %d threads rebuilt from %d articles\n",
+						threadReport.ThreadsRebuilt, threadReport.TotalArticles)
+				}
+			}
 
 			// Re-run consistency check after repair
 			report, err = db.CheckDatabaseConsistency(newsgroup.Name)
@@ -604,8 +685,8 @@ type DateProblem struct {
 }
 
 // checkAndFixDates analyzes date_string vs date_sent mismatches and optionally fixes them
-func checkAndFixDates(db *database.Database, newsgroups []*models.Newsgroup, rewriteDates, verbose bool) (int, int, error) {
-	var totalFixed, totalChecked int
+func checkAndFixDates(db *database.Database, newsgroups []*models.Newsgroup, rewriteDates, verbose bool) (int64, int64, error) {
+	var totalFixed, totalChecked int64
 	var allProblems []DateProblem
 
 	for i, newsgroup := range newsgroups {
@@ -654,7 +735,7 @@ func checkAndFixDates(db *database.Database, newsgroups []*models.Newsgroup, rew
 }
 
 // checkGroupDates checks and optionally fixes date mismatches in a single newsgroup
-func checkGroupDates(groupDB *database.GroupDBs, newsgroupName string, rewriteDates, verbose bool) (int, int, []DateProblem, error) {
+func checkGroupDates(groupDB *database.GroupDBs, newsgroupName string, rewriteDates, verbose bool) (int64, int64, []DateProblem, error) {
 	// Query all articles with their date information - get date_sent as string to avoid timezone parsing issues
 	rows, err := database.RetryableQuery(groupDB.DB, `
 		SELECT article_num, message_id, date_string, date_sent
@@ -667,7 +748,7 @@ func checkGroupDates(groupDB *database.GroupDBs, newsgroupName string, rewriteDa
 	}
 	defer rows.Close()
 
-	var fixed, checked int
+	var fixed, checked int64
 	var problems []DateProblem
 	var tx *sql.Tx
 
@@ -694,7 +775,7 @@ func checkGroupDates(groupDB *database.GroupDBs, newsgroupName string, rewriteDa
 		checked++
 
 		// print progress every N
-		if checked%25000 == 0 {
+		if checked%database.RescanBatchSize == 0 {
 			fmt.Printf("   📊 Checked %d articles so far...\n", checked)
 		}
 

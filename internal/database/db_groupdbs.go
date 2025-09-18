@@ -159,49 +159,14 @@ func (dbs *GroupDBs) IncrementWorkers() {
 }
 
 func (dbs *GroupDBs) Return(db *Database) {
-	dbs.mux.Lock()
-	dbs.Idle = time.Now() // Update idle time to now
-	dbs.Workers--
-	dbs.mux.Unlock()
-	/*
-		if dbs.Workers < 0 {
-			log.Printf("Warning: Worker count went negative for group '%s'", dbs.Newsgroup)
-			return
-		}
-		//log.Printf("DEBUG: Return for group '%s': %d", dbs.Newsgroup, dbs.Workers)
-
-		// Check if we need to close, but don't do it while holding dbs.mux
-		workerCount := dbs.Workers
-		ng := dbs.Newsgroup
+	if dbs != nil && db != nil {
+		dbs.mux.Lock()
+		dbs.Idle = time.Now() // Update idle time to now
+		dbs.Workers--
 		dbs.mux.Unlock()
-
-		// Check openDBsNum with proper synchronization
-		db.MainMutex.RLock()
-		shouldClose := workerCount == 0 && db.openDBsNum >= MaxOpenDatabases // TODO HARDCODED
-		db.MainMutex.RUnlock()
-
-		// If we need to close, acquire locks in the same order as GetGroupDBs to prevent deadlock
-		if shouldClose {
-			db.MainMutex.Lock()
-			dbs.mux.Lock()
-			// Double-check condition after re-acquiring locks
-			if dbs.Workers == 0 && db.openDBsNum >= MaxOpenDatabases { // TODO hardcoded limit
-				log.Printf("Closing group databases for '%s' due to no more open workers and high open DBs count (%d)", ng, db.openDBsNum)
-				err := dbs.Close() // Close DBs if no workers are left
-				if err != nil {
-					log.Printf("Failed to close group databases for '%s': %v", ng, err)
-				} else {
-					db.groupDBs[ng] = nil // Remove from groupDBs map
-					delete(db.groupDBs, ng)
-					dbs.DB = nil
-					db.openDBsNum--
-				}
-			}
-			dbs.mux.Unlock()
-			db.MainMutex.Unlock()
-		}
-	*/
-	//dbs = nil
+	} else {
+		log.Printf("Warning: Attempted to return a nil db=%#v dbs=%#v", db, dbs)
+	}
 }
 
 func (db *GroupDBs) ExistsMsgIdInArticlesDB(messageID string) bool {

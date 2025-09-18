@@ -28,6 +28,7 @@ go.work
 /new*
 /demo_history
 internal/nntp/analysis_*
+getUpdate.sh
 update.tar.gz
 checksums.sha256
 checksums.sha256.archive
@@ -37,3 +38,5 @@ active_files/local-mode.active.new
 active_files/local-mode.active.new.sorted
 active_files/local-mode.active
 /old_overview
+cmd/tcp2tor/tcp2tor
+cmd/tcp2tor/tcp2tor.sha256

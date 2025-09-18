@@ -62,6 +62,14 @@ type Provider struct {
 	Enabled    bool   `json:"enabled"`
 	Priority   int    `json:"priority"`         // Lower numbers = higher priority
 	MaxArtSize int    `json:"max_article_size"` // Maximum article size in bytes
+	Posting    bool   `json:"posting"`          // Whether posting is enabled for this provider
+	// Proxy configuration fields
+	ProxyEnabled  bool   `json:"proxy_enabled"`  // Whether to use proxy for this provider
+	ProxyType     string `json:"proxy_type"`     // Proxy type: socks4, socks5
+	ProxyHost     string `json:"proxy_host"`     // Proxy server hostname/IP
+	ProxyPort     int    `json:"proxy_port"`     // Proxy server port
+	ProxyUsername string `json:"proxy_username"` // Proxy authentication username
+	ProxyPassword string `json:"proxy_password"` // Proxy authentication password
 }
 
 // ServerConfig holds Web and NNTP server configuration

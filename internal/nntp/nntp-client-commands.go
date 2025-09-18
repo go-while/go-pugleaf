@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/utils"
 )
@@ -310,8 +311,8 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 
 	for {
 		if lineCount >= maxGroups {
-			c.textConn.Close() // Close connection on limit reached
-			c = nil
+			c.conn.Close() // Close connection on limit reached
+			c.conn = nil
 			log.Printf("Connection reached maximum group limit: %d", maxGroups)
 			break
 		}
@@ -492,7 +493,7 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 
 // XHdr retrieves specific header field for a range of articles
 // Automatically limits to max 1000 articles to prevent SQLite overload
-func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderLine, error) {
+func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]*HeaderLine, error) {
 	c.mu.Lock()
 	if !c.connected {
 		c.mu.Unlock()
@@ -540,7 +541,7 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderL
 	}
 
 	// Parse header lines
-	var headers = make([]HeaderLine, 0, len(lines))
+	var headers = make([]*HeaderLine, 0, len(lines))
 	for _, line := range lines {
 		header, err := c.parseHeaderLine(line)
 		if err != nil {
@@ -554,30 +555,97 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderL
 
 var ErrOutOfRange error = fmt.Errorf("end range exceeds group last article number")
 
+func (c *BackendConn) WantShutdown(shutdownChan <-chan struct{}) bool {
+	select {
+	case _, ok := <-shutdownChan:
+		if !ok {
+			// channel is closed
+			return true
+		}
+	default:
+	}
+	return false
+}
+
 // XHdrStreamed performs XHDR command and streams results line by line through a channel
-func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, resultChan chan<- *HeaderLine) error {
+// Fetches max 1000 hdrs and starts a new fetch if the channel is less than 10% capacity
+func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
+	channelCap := cap(xhdrChan)
+	lowWaterMark := channelCap / 10 // 10% threshold
+	if lowWaterMark < 1 {
+		lowWaterMark = 1
+	}
+
+	currentStart := start
+	var isleep int64 = 10
+	for currentStart <= end {
+		// Check for shutdown signal
+		if c.WantShutdown(shutdownChan) {
+			close(xhdrChan)
+			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
+			return fmt.Errorf("shutdown requested")
+		}
+
+		// Wait if channel is not empty
+		for len(xhdrChan) > lowWaterMark {
+			time.Sleep(time.Duration(isleep) * time.Millisecond)
+			if c.WantShutdown(shutdownChan) {
+				close(xhdrChan)
+				log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
+				return fmt.Errorf("shutdown requested")
+			}
+		}
+
+		// Calculate batch end (max 1000 articles)
+		batchEnd := currentStart + 999 // 1000 articles max
+		if batchEnd > end {
+			batchEnd = end
+		}
+
+		// Fetch this batch
+		startStream := time.Now()
+		err := c.XHdrStreamedBatch(groupName, field, currentStart, batchEnd, xhdrChan, shutdownChan)
+		if err != nil {
+			close(xhdrChan) // Close on error
+			return fmt.Errorf("XHdrStreamedBatch failed for range %d-%d: %w", currentStart, batchEnd, err)
+		}
+		isleep = time.Since(startStream).Milliseconds() / 2
+		if isleep < 10 {
+			isleep = 10
+		}
+
+		// Move to next batch
+		currentStart = batchEnd + 1
+
+	}
+
+	// Close channel when all batches are complete
+	close(xhdrChan)
+	return nil
+}
+
+// XHdrStreamedBatch performs XHDR command and streams results line by line through a channel
+func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
 	c.mu.Lock()
 	if !c.connected {
 		c.mu.Unlock()
-		close(resultChan)
 		return fmt.Errorf("not connected")
 	}
 	c.mu.Unlock()
 
 	groupInfo, code, err := c.SelectGroup(groupName)
 	if err != nil && code != 411 {
-		close(resultChan)
 		return fmt.Errorf("failed to select group '%s': code=%d err=%w", groupName, code, err)
 	}
 	if end > groupInfo.Last {
-		close(resultChan)
 		return ErrOutOfRange
 	}
 	c.lastUsed = time.Now()
 
 	// Limit to 1000 articles maximum to prevent SQLite overload
-	if end > 0 && (end-start+1) > MaxReadLinesXover {
-		end = start + MaxReadLinesXover - 1
+	const maxFetchLimit = 1000
+	if end > 0 && (end-start+1) > maxFetchLimit {
+		end = start + maxFetchLimit - 1
 	}
 	//log.Printf("XHdrStreamed group '%s' field '%s' start=%d end=%d", groupName, field, start, end)
 
@@ -588,46 +656,37 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 		id, err = c.textConn.Cmd("XHDR %s %d-%d", field, start, start)
 	}
 	if err != nil {
-		close(resultChan)
 		return fmt.Errorf("failed to send XHDR command: %w", err)
 	}
 
 	c.textConn.StartResponse(id)
 	defer c.textConn.EndResponse(id) // Always clean up response state
 
-	// Set timeout for initial response
-	/*
-		if err := c.conn.SetReadDeadline(time.Now().Add(9 * time.Second)); err != nil {
-			close(resultChan)
-			return fmt.Errorf("failed to set read deadline: %w", err)
-		}
-		defer func() {
-			// Clear the deadline when operation completes
-			if c.conn != nil {
-				c.conn.SetReadDeadline(time.Time{})
-			}
-		}()
-	*/
+	// Check for shutdown before reading initial response
+	if c.WantShutdown(shutdownChan) {
+		log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
+		return fmt.Errorf("shutdown requested")
+	}
+
 	code, message, err := c.textConn.ReadCodeLine(221)
 	if err != nil {
-		close(resultChan)
 		return fmt.Errorf("failed to read XHDR response: %w", err)
 	}
 
 	if code != 221 {
-		close(resultChan)
 		return fmt.Errorf("XHDR failed: ng: '%s' %d %s", groupName, code, message)
 	}
 
 	// Read multiline response line by line and send to channel immediately
 	for {
-		/*
-			// Set a shorter timeout for each line read (3 seconds per line)
-			if err := c.conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
-				log.Printf("[ERROR] XHdrStreamed failed to set line deadline ng: '%s' err='%v'", groupName, err)
-				break
-			}
-		*/
+		// Check for shutdown signal between reads
+		if c.WantShutdown(shutdownChan) {
+			c.conn.Close() // Close connection on shutdown
+			c.conn = nil
+			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
+			return fmt.Errorf("shutdown requested")
+		}
+
 		line, err := c.textConn.ReadLine()
 		if err != nil {
 			log.Printf("[ERROR] XHdrStreamed read error ng: '%s' err='%v'", groupName, err)
@@ -647,12 +706,17 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, re
 			continue // Skip malformed lines
 		}
 
-		// Send through channel
-		resultChan <- &header
+		if c.WantShutdown(shutdownChan) {
+			c.conn.Close() // Close connection on shutdown
+			c.conn = nil
+			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
+			return fmt.Errorf("shutdown requested")
+		}
+
+		xhdrChan <- header
 	}
 
-	// Close channel
-	close(resultChan)
+	// Don't close channel here - let the main function handle it
 	return nil
 }
 
@@ -756,8 +820,8 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 	}
 	for {
 		if lineCount >= maxReadLines {
-			c.textConn.Close() // Close connection on too many lines
-			c = nil
+			c.conn.Close() // Close connection on limit reached
+			c.conn = nil
 			return nil, fmt.Errorf("too many lines in response (limit: %d)", maxReadLines)
 		}
 
@@ -949,16 +1013,382 @@ func (c *BackendConn) parseOverviewLine(line string) (OverviewLine, error) {
 
 // parseHeaderLine parses a single XHDR response line
 // Format: articlenum<space>header-value
-func (c *BackendConn) parseHeaderLine(line string) (HeaderLine, error) {
+func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
 	parts := strings.SplitN(line, " ", 2)
 	if len(parts) < 2 {
-		return HeaderLine{}, fmt.Errorf("malformed XHDR line: %s", line)
+		return nil, fmt.Errorf("malformed XHDR line: %s", line)
 	}
 
-	articleNum, _ := strconv.ParseInt(parts[0], 10, 64)
+	articleNum, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		log.Printf("Invalid article number in XHDR line: %q", parts[0])
+		return nil, fmt.Errorf("invalid article number in XHDR line: %q", parts[0])
+	}
 
-	return HeaderLine{
+	return &HeaderLine{
 		ArticleNum: articleNum,
 		Value:      parts[1],
 	}, nil
+}
+
+// CheckResponse represents a response to CHECK command
+type CheckResponse struct {
+	MessageID *string
+	Wanted    bool
+	Code      int
+}
+
+// CheckMultiple sends a CHECK command for multiple message IDs and returns responses
+func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	if len(messageIDs) == 0 {
+		return nil, fmt.Errorf("no message IDs provided")
+	}
+
+	c.lastUsed = time.Now()
+
+	// Send individual CHECK commands for each message ID (pipelining)
+	commandIds := make([]uint, len(messageIDs))
+	for i, msgID := range messageIDs {
+		id, err := c.textConn.Cmd("CHECK %s", *msgID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
+		}
+		commandIds[i] = id
+	}
+
+	// Read responses for each CHECK command
+	responses := make([]CheckResponse, 0, len(messageIDs))
+	var outoforder []CheckResponse
+	for i, msgID := range messageIDs {
+		id := commandIds[i]
+		c.textConn.StartResponse(id)
+
+		// Read response for this CHECK command
+		code, line, err := c.textConn.ReadCodeLine(238)
+		c.textConn.EndResponse(id)
+
+		if code == 0 && err != nil {
+			log.Printf("Failed to read CHECK response for %s: %v", *msgID, err)
+			continue
+		}
+
+		// Parse response line
+		// Format: code <message-id> [message]
+		// 238 <message-id> - article wanted
+		// 431 <message-id> - article not wanted
+		// 438 <message-id> - article not wanted (already have it)
+		// ReadCodeLine returns: code=238, message="<message-id> article wanted"
+		parts := strings.Fields(line)
+		if len(parts) < 1 {
+			log.Printf("Malformed CHECK response: %s", line)
+			continue
+		}
+		if parts[0] != *msgID {
+			log.Printf("Mismatched CHECK response: expected %s, got %s", *msgID, parts[0])
+			outoforder = append(outoforder, CheckResponse{
+				MessageID: &parts[0],
+				Code:      code,
+				Wanted:    code == 238, // 238 means article wanted
+			})
+			continue
+		}
+
+		response := CheckResponse{
+			MessageID: msgID, // First part is the message ID
+			Code:      code,
+			Wanted:    code == 238, // 238 means article wanted
+		}
+
+		responses = append(responses, response)
+	}
+
+	for _, resp := range outoforder {
+		for _, msgID := range messageIDs {
+			if *resp.MessageID == *msgID {
+				responses = append(responses, CheckResponse{
+					MessageID: msgID, // First part is the message ID
+					Code:      resp.Code,
+					Wanted:    resp.Wanted,
+				})
+			}
+		}
+	}
+
+	// Return all responses
+
+	return responses, nil
+}
+
+// TakeThisArticle sends an article via TAKETHIS command
+func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *string) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected {
+		return 0, fmt.Errorf("not connected")
+	}
+
+	// Prepare article for transfer
+	headers, err := common.ReconstructHeaders(article, true, nntphostname)
+	if err != nil {
+		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
+	}
+
+	c.lastUsed = time.Now()
+
+	// Send TAKETHIS command
+	id, err := c.textConn.Cmd("TAKETHIS %s", article.MessageID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
+	}
+
+	// Send headers
+	for _, headerLine := range headers {
+		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
+			return 0, fmt.Errorf("failed to write header: %w", err)
+		}
+	}
+
+	// Send empty line between headers and body
+	if _, err := c.writer.WriteString(CRLF); err != nil {
+		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
+	}
+
+	// Send body with proper dot-stuffing
+	// Split body preserving line endings
+	bodyLines := strings.Split(article.BodyText, "\n")
+	for i, line := range bodyLines {
+		// Skip empty last element from trailing \n
+		if i == len(bodyLines)-1 && line == "" {
+			break
+		}
+
+		// Remove trailing \r if present (will add CRLF)
+		line = strings.TrimSuffix(line, "\r")
+
+		// Dot-stuff lines that start with a dot (RFC 977)
+		if strings.HasPrefix(line, ".") {
+			line = "." + line
+		}
+
+		if _, err := c.writer.WriteString(line + CRLF); err != nil {
+			return 0, fmt.Errorf("failed to write body line: %w", err)
+		}
+	}
+
+	// Send termination line (single dot)
+	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
+		return 0, fmt.Errorf("failed to send article terminator: %w", err)
+	}
+
+	// Flush the writer to ensure all data is sent
+	if err := c.writer.Flush(); err != nil {
+		return 0, fmt.Errorf("failed to flush article data: %w", err)
+	}
+
+	// Read TAKETHIS response
+	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id)
+
+	code, _, err := c.textConn.ReadCodeLine(239) // -1 means any code is acceptable
+	if code == 0 && err != nil {
+		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
+	}
+
+	// Parse response
+	// Format: code <message-id> [message]
+	// 239 <message-id> - article transferred successfully
+	// 439 <message-id> - article transfer failed
+
+	return code, nil
+}
+
+// SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response
+// Returns command ID for later response reading - used for streaming mode
+func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string) (uint, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected {
+		return 0, fmt.Errorf("not connected")
+	}
+
+	// Prepare article for transfer
+	headers, err := common.ReconstructHeaders(article, true, nntphostname)
+	if err != nil {
+		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
+	}
+
+	c.lastUsed = time.Now()
+
+	// Send TAKETHIS command
+	id, err := c.textConn.Cmd("TAKETHIS %s", article.MessageID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
+	}
+
+	// Send headers
+	for _, headerLine := range headers {
+		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
+			return 0, fmt.Errorf("failed to write header: %w", err)
+		}
+	}
+
+	// Send empty line between headers and body
+	if _, err := c.writer.WriteString(CRLF); err != nil {
+		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
+	}
+
+	// Send body with proper dot-stuffing
+	// Split body preserving line endings
+	bodyLines := strings.Split(article.BodyText, "\n")
+	for i, line := range bodyLines {
+		// Skip empty last element from trailing \n
+		if i == len(bodyLines)-1 && line == "" {
+			break
+		}
+
+		// Remove trailing \r if present (will add CRLF)
+		line = strings.TrimSuffix(line, "\r")
+
+		// Dot-stuff lines that start with a dot (RFC 977)
+		if strings.HasPrefix(line, ".") {
+			line = "." + line
+		}
+
+		if _, err := c.writer.WriteString(line + CRLF); err != nil {
+			return 0, fmt.Errorf("failed to write body line: %w", err)
+		}
+	}
+
+	// Send termination line (single dot)
+	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
+		return 0, fmt.Errorf("failed to send article terminator: %w", err)
+	}
+
+	// Flush the writer to ensure all data is sent
+	if err := c.writer.Flush(); err != nil {
+		return 0, fmt.Errorf("failed to flush article data: %w", err)
+	}
+
+	// Return command ID without reading response (streaming mode)
+	return id, nil
+}
+
+// ReadTakeThisResponseStreaming reads a TAKETHIS response using the command ID
+// Used in streaming mode after all articles have been sent
+func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Read TAKETHIS response
+	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id)
+
+	code, _, err := c.textConn.ReadCodeLine(239)
+	if code == 0 && err != nil {
+		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
+	}
+
+	// Parse response
+	// Format: code <message-id> [message]
+	// 239 <message-id> - article transferred successfully
+	// 439 <message-id> - article transfer failed
+	return code, nil
+}
+
+// PostArticle posts an article using the POST command
+func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connected {
+		return 0, fmt.Errorf("not connected")
+	}
+	// Prepare article for posting
+	headers, err := common.ReconstructHeaders(article, false, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
+	}
+	c.lastUsed = time.Now()
+
+	// Send POST command
+	id, err := c.textConn.Cmd("POST")
+	if err != nil {
+		return 0, fmt.Errorf("failed to send POST command: %w", err)
+	}
+
+	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id)
+
+	// Read response to POST command
+	code, line, err := c.textConn.ReadCodeLine(340)
+	if err != nil {
+		return code, fmt.Errorf("POST command failed: %s", line)
+	}
+	if code != 340 {
+		return code, fmt.Errorf("POST command rejected (code %d): %s", code, line)
+	}
+
+	// Send headers using writer (not DotWriter)
+	for _, headerLine := range headers {
+		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
+			return 0, fmt.Errorf("failed to write header: %w", err)
+		}
+	}
+
+	// Send empty line between headers and body
+	if _, err := c.writer.WriteString(CRLF); err != nil {
+		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
+	}
+
+	// Send body with proper dot-stuffing (like TakeThisArticle)
+	// Split body preserving line endings
+	bodyLines := strings.Split(article.BodyText, "\n")
+	for i, line := range bodyLines {
+		// Skip empty last element from trailing \n
+		if i == len(bodyLines)-1 && line == "" {
+			break
+		}
+
+		// Remove trailing \r if present (will add CRLF)
+		line = strings.TrimSuffix(line, "\r")
+
+		// Dot-stuff lines that start with a dot (RFC 977)
+		if strings.HasPrefix(line, ".") {
+			line = "." + line
+		}
+
+		if _, err := c.writer.WriteString(line + CRLF); err != nil {
+			return 0, fmt.Errorf("failed to write body line: %w", err)
+		}
+	}
+
+	// Send termination line (single dot)
+	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
+		return 0, fmt.Errorf("failed to send article terminator: %w", err)
+	}
+
+	// Flush the writer to ensure all data is sent
+	if err := c.writer.Flush(); err != nil {
+		return 0, fmt.Errorf("failed to flush article data: %w", err)
+	}
+
+	// Read final response
+	code, _, err = c.textConn.ReadCodeLine(240)
+	if err != nil {
+		return code, fmt.Errorf("failed to read POST response: %w", err)
+	}
+
+	// Parse response codes
+	// 240 - article posted successfully
+	// 441 - posting failed
+	return code, nil
 }
