@@ -13,8 +13,8 @@ else
 fi
 
 # Build for current platform
-go build -ldflags "-X main.appVersion=$VERSION" -o tcp2tor .
-
+go build -trimpath -ldflags "-w -s -X main.appVersion=$VERSION" -o tcp2tor . || exit 1
+sha256sum tcp2tor > tcp2tor.sha256
 echo "✓ Built tcp2tor (version $VERSION)"
 echo ""
 echo "Usage examples:"
