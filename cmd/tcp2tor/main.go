@@ -1,8 +1,11 @@
-// tcp2tor - General TCP proxy tool for go-pugleaf
-// This tool creates a local TCP listener that forwards raw TCP connections through a SOCKS5 proxy
+// tcp2tor - General TCP proxy tool
+//
+//	This tool creates a local TCP listener
+//	that forwards raw TCP connections through a SOCKS5 proxy
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -12,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,15 +31,42 @@ type ProxyConfig struct {
 	SocksAuth *proxy.Auth // Optional authentication
 }
 
+// ProxyTarget holds configuration for a single proxy target
+type ProxyTarget struct {
+	ListenHost string
+	ListenPort int
+	TargetHost string
+	TargetPort string
+}
+
+// ConfigEntry represents one line from the configuration file
+type ConfigEntry struct {
+	Target ProxyTarget
+	Config *ProxyConfig
+}
+
 // showUsageExamples displays usage examples for tcp2tor
 func showUsageExamples() {
 	fmt.Println("\n=== tcp2tor - General TCP Proxy Tool ===")
 	fmt.Println("Creates a local TCP listener that forwards raw TCP connections through SOCKS5 proxy.")
 	fmt.Println("Note: Works with any TCP service and any SOCKS5 proxy - not limited to NNTP or Tor.")
 	fmt.Println()
-	fmt.Println("Basic Usage:")
+	fmt.Println("Single Target Mode:")
 	fmt.Println("  ./tcp2tor -listen-port 1119 -listen-host 127.2.3.4 -target test.onion:119")
 	fmt.Println("  ./tcp2tor -listen-port 1563 -listen-host 127.2.3.4 -target test.onion:563")
+	fmt.Println()
+	fmt.Println("Configuration File Mode (multiple targets):")
+	fmt.Println("  ./tcp2tor -config example.cfg")
+	fmt.Println()
+	fmt.Println("Add Entry to Configuration File:")
+	fmt.Println("  ./tcp2tor -add myconfig.cfg -listen-host 127.2.3.4 -listen-port 1119 -target test.onion:119")
+	fmt.Println("  ./tcp2tor -add myconfig.cfg -listen-host 127.2.3.5 -listen-port 1120 -target news.onion:119")
+	fmt.Println()
+	fmt.Println("Configuration file format (one per line):")
+	fmt.Println("  listen_host:listen_port:target_host:target_port")
+	fmt.Println("  127.2.3.4:1119:news1.onion:119")
+	fmt.Println("  127.2.3.5:1120:news2.onion:119")
+	fmt.Println("  127.2.3.6:1563:secure.onion:563")
 	fmt.Println()
 	fmt.Println("Custom SOCKS5 Proxy:")
 	fmt.Println("  ./tcp2tor -listen-port 1119 -listen-host 127.2.3.4 -target test.onion:119 -socks5-host 127.0.0.1 -socks5-port 9050")
@@ -44,11 +75,7 @@ func showUsageExamples() {
 	fmt.Println("SOCKS5 Authentication:")
 	fmt.Println("  ./tcp2tor -listen-port 1119 -listen-host 127.2.3.4 -target test.onion:119 -socks5-user myuser -socks5-pass mypass")
 	fmt.Println()
-	fmt.Println("Multiple Targets (use multiple instances):")
-	fmt.Println("  ./tcp2tor -listen-port 1119 -listen-host 127.2.3.4 -target news1.onion:119 &")
-	fmt.Println("  ./tcp2tor -listen-port 1120 -listen-host 127.2.3.5 -target news2.onion:119 &")
-	fmt.Println()
-	fmt.Println("Then configure your NNTP client to connect to localhost:1119")
+	fmt.Println("Then configure your clients to connect to the respective local ports")
 	fmt.Println()
 }
 
@@ -57,9 +84,11 @@ func main() {
 
 	// Command line flags
 	var (
-		listenPort = flag.Int("listen-port", 1119, "Local port to listen on for incoming connections")
-		listenHost = flag.String("listen-host", "", "Local host/IP to bind to like 127.2.3.4")
-		targetAddr = flag.String("target", "", "Target onion address and port (e.g., example.onion:119)")
+		listenPort  = flag.Int("listen-port", 0, "Local port to listen on for incoming connections")
+		listenHost  = flag.String("listen-host", "127.2.3.4", "Local host/IP to bind to like 127.2.3.4")
+		targetAddr  = flag.String("target", "", "Target onion address and port (e.g., example.onion:119)")
+		configFile  = flag.String("config", "", "Configuration file with multiple targets (format: listen_host:listen_port:target_host:target_port)")
+		addToConfig = flag.String("add", "", "Add current listen-host:listen-port:target configuration to specified config file and exit")
 
 		// SOCKS5 proxy configuration
 		socksHost  = flag.String("socks5-host", "127.0.0.1", "SOCKS5 proxy host")
@@ -81,42 +110,60 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Handle add mode - add entry to config file and exit
+	if *addToConfig != "" {
+		addEntryToConfigFile(*addToConfig, *listenHost, *listenPort, *targetAddr)
+		os.Exit(0)
+	}
+
+	// Determine mode: config file or single target
+	if *configFile != "" {
+		// Config file mode - run multiple proxies
+		runConfigFileMode(*configFile, *socksProxy, *socksHost, *socksPort, *socksUser, *socksPass, *timeout, *verbose)
+	} else {
+		// Single target mode - run one proxy
+		runSingleTargetMode(*targetAddr, *listenHost, *listenPort, *socksProxy, *socksHost, *socksPort, *socksUser, *socksPass, *timeout, *verbose)
+	}
+}
+
+// runSingleTargetMode runs a single proxy instance
+func runSingleTargetMode(targetAddr, listenHost string, listenPort int, socksProxy, socksHost string, socksPort int, socksUser, socksPass string, timeout int, verbose bool) {
 	// Validate required flags
-	if *targetAddr == "" {
+	if targetAddr == "" {
 		log.Fatalf("Error: -target must be specified (e.g., example.onion:119)")
 	}
 
 	// Parse target address
-	targetHost, targetPort, err := parseTargetAddress(*targetAddr)
+	targetHost, targetPort, err := parseTargetAddress(targetAddr)
 	if err != nil {
-		log.Fatalf("Error: Invalid target address '%s': %v", *targetAddr, err)
+		log.Fatalf("Error: Invalid target address '%s': %v", targetAddr, err)
 	}
 
 	// Validate listen port
-	if *listenPort < 1 || *listenPort > 65535 {
-		log.Fatalf("Error: listen-port must be between 1 and 65535 (got %d)", *listenPort)
+	if listenPort < 1 || listenPort > 65535 {
+		log.Fatalf("Error: listen-port must be between 1 and 65535 (got %d)", listenPort)
 	}
 
 	// Parse SOCKS5 proxy configuration
-	proxyConfig, err := parseProxyConfig(*socksProxy, *socksHost, *socksPort, *socksUser, *socksPass)
+	proxyConfig, err := parseProxyConfig(socksProxy, socksHost, socksPort, socksUser, socksPass)
 	if err != nil {
 		log.Fatalf("Error: Invalid SOCKS5 proxy configuration: %v", err)
 	}
 
 	// Create listen address
-	listenAddr := fmt.Sprintf("%s:%d", *listenHost, *listenPort)
+	listenAddr := fmt.Sprintf("%s:%d", listenHost, listenPort)
 
-	log.Printf("Configuration:")
+	log.Printf("Single Target Configuration:")
 	log.Printf("  Listen: %s", listenAddr)
 	log.Printf("  Target: %s:%s", targetHost, targetPort)
 	log.Printf("  SOCKS5 Proxy: %s:%d", proxyConfig.SocksHost, proxyConfig.SocksPort)
 	if proxyConfig.SocksAuth != nil {
 		log.Printf("  SOCKS5 Auth: %s", proxyConfig.SocksAuth.User)
 	}
-	log.Printf("  Timeout: %d seconds", *timeout)
+	log.Printf("  Timeout: %d seconds", timeout)
 
 	// Test SOCKS5 proxy connection
-	if err := testSOCKS5Connection(proxyConfig, targetHost, targetPort, *timeout, *verbose); err != nil {
+	if err := testSOCKS5Connection(proxyConfig, targetHost, targetPort, timeout, verbose); err != nil {
 		log.Fatalf("Error: Failed to connect through SOCKS5 proxy: %v", err)
 	}
 	log.Printf("✓ SOCKS5 proxy connection test successful")
@@ -127,8 +174,8 @@ func main() {
 		TargetHost:  targetHost,
 		TargetPort:  targetPort,
 		ProxyConfig: proxyConfig,
-		Timeout:     time.Duration(*timeout) * time.Second,
-		Verbose:     *verbose,
+		Timeout:     time.Duration(timeout) * time.Second,
+		Verbose:     verbose,
 	}
 
 	// Set up signal handling for graceful shutdown
@@ -153,6 +200,89 @@ func main() {
 	}
 
 	log.Printf("tcp2tor proxy shutdown complete")
+}
+
+// runConfigFileMode runs multiple proxy instances from configuration file
+func runConfigFileMode(configFile, socksProxy, socksHost string, socksPort int, socksUser, socksPass string, timeout int, verbose bool) {
+	// Read and parse configuration file
+	configs, err := parseConfigFile(configFile, socksProxy, socksHost, socksPort, socksUser, socksPass)
+	if err != nil {
+		log.Fatalf("Error: Failed to parse config file '%s': %v", configFile, err)
+	}
+
+	if len(configs) == 0 {
+		log.Fatalf("Error: No valid configuration entries found in '%s'", configFile)
+	}
+
+	log.Printf("Connecting %d target(s)", len(configs))
+	for i, config := range configs {
+		log.Printf("  [%d] Listen: %s:%d -> Target: %s:%s", i+1,
+			config.Target.ListenHost, config.Target.ListenPort,
+			config.Target.TargetHost, config.Target.TargetPort)
+	}
+
+	// Test SOCKS5 proxy connections for all targets
+	proxyConfig := configs[0].Config // Use the first config for testing (they should all be the same)
+	log.Printf("Testing SOCKS5 proxy: %s:%d", proxyConfig.SocksHost, proxyConfig.SocksPort)
+
+	for i, config := range configs {
+		if err := testSOCKS5Connection(config.Config, config.Target.TargetHost, config.Target.TargetPort, timeout, verbose); err != nil {
+			log.Fatalf("Error: Failed to connect to target %d (%s:%s) through SOCKS5 proxy: %v",
+				i+1, config.Target.TargetHost, config.Target.TargetPort, err)
+		}
+		if verbose {
+			log.Printf("✓ Target %d SOCKS5 connection test successful", i+1)
+		}
+	}
+	log.Printf("✓ All SOCKS5 proxy connection tests successful")
+
+	// Start all proxy servers
+	var servers []*ProxyServer
+	var wg sync.WaitGroup
+	serverErrors := make(chan error, len(configs))
+
+	for i, config := range configs {
+		listenAddr := fmt.Sprintf("%s:%d", config.Target.ListenHost, config.Target.ListenPort)
+
+		server := &ProxyServer{
+			ListenAddr:  listenAddr,
+			TargetHost:  config.Target.TargetHost,
+			TargetPort:  config.Target.TargetPort,
+			ProxyConfig: config.Config,
+			Timeout:     time.Duration(timeout) * time.Second,
+			Verbose:     verbose,
+		}
+		servers = append(servers, server)
+
+		wg.Add(1)
+		go func(srv *ProxyServer, idx int) {
+			defer wg.Done()
+			if err := srv.Start(); err != nil {
+				serverErrors <- fmt.Errorf("server %d error: %v", idx+1, err)
+			}
+		}(server, i)
+
+		log.Printf("Started proxy server %d: %s", i+1, listenAddr)
+	}
+
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Wait for shutdown signal or server error
+	select {
+	case sig := <-sigChan:
+		log.Printf("Received signal %v, shutting down all proxies gracefully...", sig)
+		for i, server := range servers {
+			log.Printf("Stopping proxy server %d...", i+1)
+			server.Stop()
+		}
+		wg.Wait()
+	case err := <-serverErrors:
+		log.Fatalf("Server error: %v", err)
+	}
+
+	log.Printf("All tcp2tor proxies shutdown complete")
 }
 
 // parseTargetAddress parses target address in format "host:port"
@@ -217,6 +347,156 @@ func parseProxyConfig(socksProxy, socksHost string, socksPort int, socksUser, so
 	}
 
 	return config, nil
+}
+
+// parseConfigFile reads and parses a configuration file with multiple targets
+func parseConfigFile(filename, socksProxy, socksHost string, socksPort int, socksUser, socksPass string) ([]*ConfigEntry, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open config file: %v", err)
+	}
+	defer file.Close()
+
+	var configs []*ConfigEntry
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Parse line format: listen_host:listen_port:target_host:target_port
+		parts := strings.Split(line, ":")
+		if len(parts) != 4 {
+			return nil, fmt.Errorf("line %d: invalid format, expected 'listen_host:listen_port:target_host:target_port', got '%s'", lineNum, line)
+		}
+
+		listenHost := strings.TrimSpace(parts[0])
+		listenPortStr := strings.TrimSpace(parts[1])
+		targetHost := strings.TrimSpace(parts[2])
+		targetPortStr := strings.TrimSpace(parts[3])
+
+		// Validate and parse listen port
+		listenPort, err := strconv.Atoi(listenPortStr)
+		if err != nil || listenPort < 1 || listenPort > 65535 {
+			return nil, fmt.Errorf("line %d: invalid listen port '%s', must be number between 1-65535", lineNum, listenPortStr)
+		}
+
+		// Validate target host
+		if targetHost == "" {
+			return nil, fmt.Errorf("line %d: target host cannot be empty", lineNum)
+		}
+
+		// Validate and parse target port
+		if strings.Contains(targetPortStr, "#") {
+			targetPortStr = strings.Split(targetPortStr, "#")[0]
+		}
+		targetPortStr = strings.TrimSpace(targetPortStr)
+		targetPortNum, err := strconv.Atoi(targetPortStr)
+		if err != nil || targetPortNum < 1 || targetPortNum > 65535 {
+			return nil, fmt.Errorf("line %d: invalid target port '%s', must be number between 1-65535", lineNum, targetPortStr)
+		}
+
+		// Create proxy configuration (same for all entries)
+		proxyConfig, err := parseProxyConfig(socksProxy, socksHost, socksPort, socksUser, socksPass)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: invalid SOCKS5 proxy configuration: %v", lineNum, err)
+		}
+
+		// Create config entry
+		config := &ConfigEntry{
+			Target: ProxyTarget{
+				ListenHost: listenHost,
+				ListenPort: listenPort,
+				TargetHost: targetHost,
+				TargetPort: targetPortStr,
+			},
+			Config: proxyConfig,
+		}
+
+		configs = append(configs, config)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading config file: %v", err)
+	}
+
+	return configs, nil
+}
+
+// addEntryToConfigFile adds a new configuration entry to the specified config file
+func addEntryToConfigFile(configFile, listenHost string, listenPort int, targetAddr string) {
+	// Validate required parameters
+	if targetAddr == "" {
+		log.Fatalf("Error: -target must be specified when using -add")
+	}
+	if listenHost == "" {
+		log.Fatalf("Error: -listen-host must be specified when using -add")
+	}
+	if listenPort < 1 || listenPort > 65535 {
+		log.Fatalf("Error: -listen-port must be between 1 and 65535 when using -add (got %d)", listenPort)
+	}
+
+	// Parse and validate target address
+	targetHost, targetPort, err := parseTargetAddress(targetAddr)
+	if err != nil {
+		log.Fatalf("Error: Invalid target address '%s': %v", targetAddr, err)
+	}
+
+	// Create the configuration line
+	configLine := fmt.Sprintf("%s:%d:%s:%s", listenHost, listenPort, targetHost, targetPort)
+
+	// Check if config file exists and read existing content
+	var existingLines []string
+	if _, err := os.Stat(configFile); err == nil {
+		// File exists, read it
+		file, err := os.Open(configFile)
+		if err != nil {
+			log.Fatalf("Error: Failed to open existing config file '%s': %v", configFile, err)
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			existingLines = append(existingLines, line)
+
+			// Check for duplicates
+			if line == configLine {
+				log.Printf("Warning: Entry '%s' already exists in config file", configLine)
+				return
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			log.Fatalf("Error: Failed to read existing config file '%s': %v", configFile, err)
+		}
+	}
+
+	// Open file for appending (create if it doesn't exist)
+	file, err := os.OpenFile(configFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatalf("Error: Failed to open config file '%s' for writing: %v", configFile, err)
+	}
+	defer file.Close()
+
+	// Add header comment if this is a new file
+	if len(existingLines) == 0 {
+		fmt.Fprintf(file, "# tcp2tor configuration file\n")
+		fmt.Fprintf(file, "# Format: listen_host:listen_port:target_host:target_port\n")
+		fmt.Fprintf(file, "#\n")
+	}
+
+	// Write the new configuration line
+	fmt.Fprintf(file, "%s\n", configLine)
+
+	log.Printf("✓ Added configuration entry to '%s': %s", configFile, configLine)
+	log.Printf("You can now run: ./tcp2tor -config %s", configFile)
 }
 
 // testSOCKS5Connection tests the SOCKS5 proxy connection
