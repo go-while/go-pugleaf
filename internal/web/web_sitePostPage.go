@@ -321,7 +321,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	}
 	displayName := strings.TrimSpace(session.User.DisplayName)
 	if displayName != "" && !strings.Contains(displayName, "<") && !strings.Contains(displayName, ">") {
-		displayName = fmt.Sprintf("%s <%s@%s>", session.User.DisplayName, session.User.DisplayName, processor.LocalNNTPHostname)
+		displayName = fmt.Sprintf("%s <noreply@%s>", session.User.DisplayName, processor.LocalNNTPHostname)
 	}
 	if displayName == "" {
 		// Fallback if display name is empty
