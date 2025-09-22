@@ -71,12 +71,10 @@ func (s *WebServer) adminPage(c *gin.Context) {
 
 	// Create a map of user IDs to their NNTP users
 	userNNTPMap := make(map[int64]*models.NNTPUser)
-	if users != nil {
-		for _, user := range users {
-			nntpUser, err := s.DB.GetNNTPUserByWebUserID(user.ID)
-			if err == nil && nntpUser != nil {
-				userNNTPMap[user.ID] = nntpUser
-			}
+	for _, user := range users {
+		nntpUser, err := s.DB.GetNNTPUserByWebUserID(user.ID)
+		if err == nil && nntpUser != nil {
+			userNNTPMap[user.ID] = nntpUser
 		}
 	}
 
@@ -171,14 +169,6 @@ func (s *WebServer) adminPage(c *gin.Context) {
 			return
 		}
 	}
-	/*
-		nntpUsers, err := s.DB.GetAllNNTPUsers()
-		if err != nil {
-			log.Printf("Failed to load NNTP users: %v", err)
-			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to load NNTP users")
-			return
-		}
-	*/
 
 	// Get all sections with their group counts (efficient single query)
 	sections, err := s.DB.GetAllSectionsWithCounts()
@@ -422,44 +412,44 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	}
 
 	data := AdminPageData{
-		TemplateData:          s.getBaseTemplateData(c, "Admin Interface"),
-		Users:                 users,
-		UserSearch:            userSearch,
-		Nonce:                 nonce,
-		UserNNTPMap:           userNNTPMap,
-		Newsgroups:            newsgroups,
-		NewsgroupPagination:   newsgroupPagination,
-		NewsgroupSearch:       searchTerm,
-		Providers:             providers,
-		APITokens:             apiTokens,
-		AIModels:              aiModels,
-		NNTPUsers:             nntpUsers,
-		NNTPUserSearch:        nntpUserSearch,
-		SiteNews:              siteNews,
-		Sections:              sections,
-		SectionGroups:         sectionGroups,
-		SpamArticles:          spamArticles,
-		SpamPagination:        spamPagination,
-		CurrentUser:           currentUser,
-		AdminCount:            s.countAdminUsers(users),
-		EnabledTokensCount:    s.countEnabledAPITokens(apiTokens),
-		ActiveSessions:        s.countActiveSessions(),
-		ActiveNNTPUsers:       s.countActiveNNTPUsers(nntpUsers),
-		PostingNNTPUsers:      s.countPostingNNTPUsers(nntpUsers),
-		Uptime:                s.getUptime(),
-		CacheStats:            cacheStats,
-		NewsgroupCacheStats:   newsgroupCacheStats,
-		ArticleCacheStats:     articleCacheStats,
-		NNTPAuthCacheStats:    nntpAuthCacheStats,
-		MessageIdCacheStats:   messageIdCacheStats,
-		RegistrationEnabled:   registrationEnabled,
-		CurrentHostname:       currentHostname,
-		WebPostMaxArticleSize: webPostMaxSize,
-		AbuseMail:             abuseMail,
+		TemplateData:               s.getBaseTemplateData(c, "Admin Interface"),
+		Users:                      users,
+		UserSearch:                 userSearch,
+		Nonce:                      nonce,
+		UserNNTPMap:                userNNTPMap,
+		Newsgroups:                 newsgroups,
+		NewsgroupPagination:        newsgroupPagination,
+		NewsgroupSearch:            searchTerm,
+		Providers:                  providers,
+		APITokens:                  apiTokens,
+		AIModels:                   aiModels,
+		NNTPUsers:                  nntpUsers,
+		NNTPUserSearch:             nntpUserSearch,
+		SiteNews:                   siteNews,
+		Sections:                   sections,
+		SectionGroups:              sectionGroups,
+		SpamArticles:               spamArticles,
+		SpamPagination:             spamPagination,
+		CurrentUser:                currentUser,
+		AdminCount:                 s.countAdminUsers(users),
+		EnabledTokensCount:         s.countEnabledAPITokens(apiTokens),
+		ActiveSessions:             s.countActiveSessions(),
+		ActiveNNTPUsers:            s.countActiveNNTPUsers(nntpUsers),
+		PostingNNTPUsers:           s.countPostingNNTPUsers(nntpUsers),
+		Uptime:                     s.getUptime(),
+		CacheStats:                 cacheStats,
+		NewsgroupCacheStats:        newsgroupCacheStats,
+		ArticleCacheStats:          articleCacheStats,
+		NNTPAuthCacheStats:         nntpAuthCacheStats,
+		MessageIdCacheStats:        messageIdCacheStats,
+		RegistrationEnabled:        registrationEnabled,
+		CurrentHostname:            currentHostname,
+		WebPostMaxArticleSize:      webPostMaxSize,
+		AbuseMail:                  abuseMail,
 		WebLocalNNTPServerAddrInfo: webLocalNNTPServerAddrInfo,
-		Success:               session.GetSuccess(),
-		Error:                 session.GetError(),
-		ActiveTab:             activeTab,
+		Success:                    session.GetSuccess(),
+		Error:                      session.GetError(),
+		ActiveTab:                  activeTab,
 	}
 
 	// Load modular admin templates
