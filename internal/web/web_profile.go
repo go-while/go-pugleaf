@@ -98,6 +98,7 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 
 	// Get form data
 	email := strings.TrimSpace(c.PostForm("email"))
+	displayName := strings.TrimSpace(c.PostForm("display_name"))
 	currentPassword := c.PostForm("current_password")
 	newPassword := c.PostForm("new_password")
 	confirmPassword := c.PostForm("confirm_password")
@@ -145,6 +146,13 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 		return
 	}
 
+	// Validate current password
+	if !checkPassword(currentPassword, user.PasswordHash) {
+		session.SetError("Current password is incorrect")
+		c.Redirect(http.StatusSeeOther, "/profile")
+		return
+	}
+
 	// Check if email is already taken by another user
 	if email != user.Email {
 		existingUser, err := s.DB.GetUserByEmail(email)
@@ -157,12 +165,6 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 
 	// If password change is requested
 	if currentPassword != "" || newPassword != "" || confirmPassword != "" {
-		// Validate current password
-		if !checkPassword(currentPassword, user.PasswordHash) {
-			session.SetError("Current password is incorrect")
-			c.Redirect(http.StatusSeeOther, "/profile")
-			return
-		}
 
 		// Validate new password
 		if newPassword != confirmPassword {
@@ -187,7 +189,7 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 		}
 
 		// Update password
-		err = s.DB.UpdateUserPassword(int64(user.ID), hashedPassword)
+		err = s.DB.UpdateUserPassword(user.ID, hashedPassword)
 		if err != nil {
 			session.SetError("Failed to update password")
 			c.Redirect(http.StatusSeeOther, "/profile")
@@ -196,9 +198,17 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 	}
 
 	// Update email
-	err = s.DB.UpdateUserEmail(int64(user.ID), email)
+	err = s.DB.UpdateUserEmail(user.ID, email)
 	if err != nil {
 		session.SetError("Failed to update email")
+		c.Redirect(http.StatusSeeOther, "/profile")
+		return
+	}
+
+	// Update display name
+	err = s.DB.UpdateUserDisplayName(user.ID, displayName)
+	if err != nil {
+		session.SetError("Failed to update display name")
 		c.Redirect(http.StatusSeeOther, "/profile")
 		return
 	}

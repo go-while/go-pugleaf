@@ -706,6 +706,17 @@ func (db *Database) UpdateUserPassword(userID int64, passwordHash string) error 
 	return err
 }
 
+// UpdateUserDisplayName updates a user's display name
+const query_UpdateUserDisplayName = `UPDATE users SET display_name = ? WHERE id = ?`
+
+func (db *Database) UpdateUserDisplayName(userID int64, displayName string) error {
+	if len(displayName) > 64 {
+		return fmt.Errorf("display name is too long")
+	}
+	_, err := db.mainDB.Exec(query_UpdateUserDisplayName, displayName, userID)
+	return err
+}
+
 // UpdateUserStatus updates user status fields (verified, disabled, no_posting)
 const query_UpdateUserStatus = `UPDATE users SET verified = ?, disabled = ?, no_posting = ? WHERE id = ?`
 
