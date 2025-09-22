@@ -31,7 +31,7 @@ func (s *WebServer) adminSetWebLocalNNTPServerAddrInfo(c *gin.Context) {
 
 	// Get the WebLocalNNTPServerAddrInfo from form
 	webLocalNNTPServerAddrInfo := strings.TrimSpace(c.PostForm("web_local_nntp_server_addr_info"))
-	
+
 	// WebLocalNNTPServerAddrInfo can be empty, so we don't validate for emptiness
 
 	// Set the configuration value
