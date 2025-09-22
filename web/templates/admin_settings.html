@@ -103,6 +103,29 @@
                           {{end}}
                       </div>
                   </div>
+                  <div class="row mt-3">
+                      <div class="col-md-12">
+                          <h6>Web Local NNTP Server Address Info</h6>
+                          <p class="text-muted small">Set the local NNTP server address information displayed to users</p>
+                          <form action="/admin/weblocalnntpserver/set" method="post" class="row g-2">
+                              <div class="col-md-8">
+                                  <input type="text" class="form-control form-control-sm" name="web_local_nntp_server_addr_info"
+                                         placeholder="Enter NNTP server address info (e.g., news.example.com:119)"
+                                         value="{{.WebLocalNNTPServerAddrInfo}}">
+                              </div>
+                              <div class="col-md-4">
+                                  <button type="submit" class="btn btn-outline-primary btn-sm">
+                                      <i class="bi bi-server me-1"></i>Set Server Info
+                                  </button>
+                              </div>
+                          </form>
+                          {{if .WebLocalNNTPServerAddrInfo}}
+                          <small class="text-muted">Current server info: <strong>{{.WebLocalNNTPServerAddrInfo}}</strong></small>
+                          {{else}}
+                          <small class="text-muted">No server address info configured</small>
+                          {{end}}
+                      </div>
+                  </div>
               </div>
           </div>
       </div>

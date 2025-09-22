@@ -395,6 +395,7 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/hostname/set", s.adminSetHostname)
 	s.Router.POST("/admin/webpostsize/set", s.adminSetWebPostSize)
 	s.Router.POST("/admin/abusemail/set", s.adminSetAbuseMail)
+	s.Router.POST("/admin/weblocalnntpserver/set", s.adminSetWebLocalNNTPServerAddrInfo)
 	// Legacy/admin routes (high priority - must come before dynamic routes)
 	s.Router.GET("/", s.homePage)
 	s.Router.GET("/groups", s.groupsPage)                                                // groups listing

@@ -144,7 +144,7 @@
                         {{end}}
                     </dd>
 
-                    <dt class="col-sm-4">Posting:</dt>
+                    <dt class="col-sm-4">Web Post:</dt>
                     <dd class="col-sm-8">
                         {{if .User.NoPosting}}
                             <span class="badge bg-secondary">Read-Only</span>
@@ -162,7 +162,7 @@
                     </dd>
 
                     <dt class="col-sm-4">Joined:</dt>
-                    <dd class="col-sm-8">{{.User.CreatedAt}}</dd>
+                    <dd class="col-sm-8">{{.Joined}}</dd>
                 </dl>
 
                 <hr>
@@ -186,6 +186,70 @@
                         🛠️ Admin Panel
                     </a>
                 </div>
+            </div>
+        </div>
+        {{end}}
+
+        {{if .NNTPUser}}
+        <div class="card mt-3">
+            <div class="card-header">
+                <h5 class="card-title mb-0">📰 NNTP Account</h5>
+                <p>
+                    <li>Local NNTP Server Address:</li>
+                    {{.LocalNNTPServerAddr}}
+                </p>
+            </div>
+            <div class="card-body">
+                <dl class="row">
+                    <dt class="col-sm-4">Username:</dt>
+                    <dd class="col-sm-8"><code>{{.NNTPUser.Username}}</code></dd>
+
+                    <dt class="col-sm-4">Status:</dt>
+                    <dd class="col-sm-8">
+                        {{if .NNTPUser.IsActive}}
+                            <span class="badge bg-success">Active</span>
+                        {{else}}
+                            <span class="badge bg-danger">Inactive</span>
+                        {{end}}
+                    </dd>
+
+                    <dt class="col-sm-4">Posting:</dt>
+                    <dd class="col-sm-8">
+                        {{if .NNTPUser.Posting}}
+                            <span class="badge bg-success">Allowed</span>
+                        {{else}}
+                            <span class="badge bg-secondary">Read-Only</span>
+                        {{end}}
+                    </dd>
+
+                    <dt class="col-sm-4">Max Connections:</dt>
+                    <dd class="col-sm-8">{{.NNTPUser.MaxConns}}</dd>
+
+                    {{if .NNTPUser.LastLogin}}
+                    <dt class="col-sm-4">Last Login:</dt>
+                    <dd class="col-sm-8">{{.NNTPUser.LastLogin.Format "2006-01-02 15:04"}}</dd>
+                    {{end}}
+                </dl>
+
+                <hr>
+
+                <form method="POST" action="/profile" onsubmit="return confirm('Are you sure you want to reset your NNTP password? This will generate a new random 12-character password.');">
+                    <input type="hidden" name="reset_nntp_password" value="true">
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-outline-warning">
+                            🔄 Reset NNTP Password
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        {{else}}
+        <div class="card mt-3">
+            <div class="card-header">
+                <h5 class="card-title mb-0">📰 NNTP Account</h5>
+            </div>
+            <div class="card-body">
+                <p class="text-muted">No NNTP account found. Contact an administrator to create an NNTP account for newsreader access.</p>
             </div>
         </div>
         {{end}}

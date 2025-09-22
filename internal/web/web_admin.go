@@ -55,6 +55,7 @@ type AdminPageData struct {
 	CurrentHostname       string                 // Added for NNTP hostname configuration
 	WebPostMaxArticleSize string                 // Added for web post size configuration
 	AbuseMail             string                 // Added for abuse email configuration
+	WebLocalNNTPServerAddrInfo string           // Added for NNTP server address info configuration
 	Success               string
 	Error                 string
 	ActiveTab             string // Added for tab state

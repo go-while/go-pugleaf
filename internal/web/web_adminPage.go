@@ -414,6 +414,13 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		abuseMail = "" // Default to empty on error
 	}
 
+	// Get current WebLocalNNTPServerAddrInfo from database
+	webLocalNNTPServerAddrInfo, err := s.DB.GetConfigValue("WebLocalNNTPServerAddrInfo")
+	if err != nil {
+		log.Printf("Failed to get WebLocalNNTPServerAddrInfo: %v", err)
+		webLocalNNTPServerAddrInfo = "" // Default to empty on error
+	}
+
 	data := AdminPageData{
 		TemplateData:          s.getBaseTemplateData(c, "Admin Interface"),
 		Users:                 users,
@@ -449,6 +456,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		CurrentHostname:       currentHostname,
 		WebPostMaxArticleSize: webPostMaxSize,
 		AbuseMail:             abuseMail,
+		WebLocalNNTPServerAddrInfo: webLocalNNTPServerAddrInfo,
 		Success:               session.GetSuccess(),
 		Error:                 session.GetError(),
 		ActiveTab:             activeTab,
