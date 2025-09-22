@@ -17,35 +17,47 @@ import (
 
 // Global flash message map and mutex
 var (
-	flashMessages   = make(map[string]FlashMessage)
+	flashMessages   = make(map[string]map[string]string)
 	flashMessagesMu sync.RWMutex
 )
 
 // SetFlashError sets a temporary error message for a session
 func SetFlashError(sessionID, msg string) {
 	flashMessagesMu.Lock()
-	flashMessages[sessionID] = FlashMessage{Type: "error", Message: msg}
+	if flashMessages[sessionID] == nil {
+		flashMessages[sessionID] = make(map[string]string)
+	}
+	flashMessages[sessionID]["error"] = msg
 	flashMessagesMu.Unlock()
 }
 
 // SetFlashSuccess sets a temporary success message for a session
 func SetFlashSuccess(sessionID, msg string) {
 	flashMessagesMu.Lock()
-	flashMessages[sessionID] = FlashMessage{Type: "success", Message: msg}
+	if flashMessages[sessionID] == nil {
+		flashMessages[sessionID] = make(map[string]string)
+	}
+	flashMessages[sessionID]["success"] = msg
 	flashMessagesMu.Unlock()
 }
 
 // GetAndClearFlash retrieves and clears flash messages for a session
-func GetAndClearFlash(sessionID string) (success, errorMsg string) {
+func GetAndClearFlash(sessionID string, mtype string) (success, errorMsg string) {
 	flashMessagesMu.Lock()
-	fm := flashMessages[sessionID]
-	switch fm.Type {
+	switch mtype {
 	case "success":
-		success = fm.Message
+		success = flashMessages[sessionID]["success"]
+		delete(flashMessages[sessionID], "success")
 	case "error":
-		errorMsg = fm.Message
+		errorMsg = flashMessages[sessionID]["error"]
+		delete(flashMessages[sessionID], "error")
 	}
-	delete(flashMessages, sessionID)
+	if len(flashMessages[sessionID]) == 0 {
+		delete(flashMessages, sessionID)
+	}
+	if len(flashMessages) == 0 {
+		flashMessages = make(map[string]map[string]string)
+	}
 	flashMessagesMu.Unlock()
 	return
 }
@@ -81,13 +93,13 @@ func (s *SessionData) SetSuccess(msg string) {
 
 // GetSuccess retrieves and clears the temporary success message
 func (s *SessionData) GetSuccess() string {
-	succ, _ := GetAndClearFlash(s.SessionID)
+	succ, _ := GetAndClearFlash(s.SessionID, "success")
 	return succ
 }
 
 // GetError retrieves and clears the temporary error message
 func (s *SessionData) GetError() string {
-	_, err := GetAndClearFlash(s.SessionID)
+	_, err := GetAndClearFlash(s.SessionID, "error")
 	return err
 }
 
