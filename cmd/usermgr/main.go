@@ -155,6 +155,11 @@ func createNewUser(db *database.Database, username, email, displayName string, i
 		Email:        email,
 		DisplayName:  displayName,
 		PasswordHash: string(hashedPassword),
+		Verified:     1, // CLI created users are verified by default
+		Disabled:     0, // Default not disabled
+		NoPosting:    0, // Default can post
+		PostCount:    0, // Default no posts
+		LastPostUnix: 0, // Default no last post
 	}
 
 	err = db.InsertUser(user)

@@ -2,8 +2,10 @@ package web
 
 import (
 	"html/template"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -59,6 +61,8 @@ func (s *WebServer) loginSubmit(c *gin.Context) {
 	password := c.PostForm("password")
 	redirectURL := c.PostForm("redirect")
 
+	time.Sleep(2 * time.Second) // stupid brute-force protection
+
 	if redirectURL == "" {
 		redirectURL = "/"
 	}
@@ -76,7 +80,8 @@ func (s *WebServer) loginSubmit(c *gin.Context) {
 		return
 	}
 	if lockedOut {
-		s.renderLoginError(c, "Account temporarily locked due to too many failed attempts. Try again in 15 minutes.", redirectURL)
+		s.renderLoginError(c, "Invalid username/email or password", redirectURL)
+		log.Printf("Login locked out for username/email: '%x'", username)
 		return
 	}
 
@@ -89,7 +94,8 @@ func (s *WebServer) loginSubmit(c *gin.Context) {
 		user, err = s.DB.GetUserByEmail(username)
 		if err != nil {
 			s.DB.IncrementLoginAttempts(username)
-			s.renderLoginError(c, "Invalid email or password", redirectURL)
+			s.renderLoginError(c, "Invalid username/email or password", redirectURL)
+			log.Printf("Login failed for email: '%x' err='%v'", username, err)
 			return
 		}
 	} else {
@@ -97,7 +103,8 @@ func (s *WebServer) loginSubmit(c *gin.Context) {
 		user, err = s.DB.GetUserByUsername(username)
 		if err != nil {
 			s.DB.IncrementLoginAttempts(username)
-			s.renderLoginError(c, "Invalid username or password", redirectURL)
+			s.renderLoginError(c, "Invalid username/email or password", redirectURL)
+			log.Printf("Login failed for username: '%x' err='%v'", username, err)
 			return
 		}
 	}
@@ -105,7 +112,8 @@ func (s *WebServer) loginSubmit(c *gin.Context) {
 	// Check password
 	if !checkPassword(password, user.PasswordHash) {
 		s.DB.IncrementLoginAttempts(username)
-		s.renderLoginError(c, "Invalid username or password", redirectURL)
+		s.renderLoginError(c, "Invalid username/email or password", redirectURL)
+		log.Printf("Login failed for username: '%x' err='%v'", username, err)
 		return
 	}
 
@@ -113,6 +121,7 @@ func (s *WebServer) loginSubmit(c *gin.Context) {
 	sessionID, err := s.DB.CreateUserSession(user.ID, c.ClientIP())
 	if err != nil {
 		s.renderLoginError(c, "Failed to create session", redirectURL)
+		log.Printf("Failed to create session for user: '%s' err='%v'", username, err)
 		return
 	}
 

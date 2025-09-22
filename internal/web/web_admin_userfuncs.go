@@ -50,6 +50,20 @@ func (s *WebServer) adminCreateUser(c *gin.Context) {
 	displayName := strings.TrimSpace(c.PostForm("displayName"))
 	password := c.PostForm("password")
 
+	// Get checkbox values (checkboxes not present = 0, present = 1)
+	verified := 0
+	if c.PostForm("verified") == "on" {
+		verified = 1
+	}
+	disabled := 0
+	if c.PostForm("disabled") == "on" {
+		disabled = 1
+	}
+	noPosting := 0
+	if c.PostForm("no_posting") == "on" {
+		noPosting = 1
+	}
+
 	// Validate input
 	if username == "" || email == "" || password == "" {
 		session.SetError("All fields are required")
@@ -57,8 +71,8 @@ func (s *WebServer) adminCreateUser(c *gin.Context) {
 		return
 	}
 
-	if len(password) < 6 {
-		session.SetError("Password must be at least 6 characters")
+	if len(password) < 12 {
+		session.SetError("Password must be at least 12 characters")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=users")
 		return
 	}
@@ -93,6 +107,10 @@ func (s *WebServer) adminCreateUser(c *gin.Context) {
 		Email:        email,
 		DisplayName:  displayName,
 		PasswordHash: hashedPassword,
+		Verified:     verified,
+		Disabled:     disabled,
+		NoPosting:    noPosting,
+		PostCount:    0,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -152,6 +170,20 @@ func (s *WebServer) adminUpdateUser(c *gin.Context) {
 	// Get form data
 	email := strings.TrimSpace(c.PostForm("email"))
 
+	// Get checkbox values (checkboxes not present = 0, present = 1)
+	verified := 0
+	if c.PostForm("verified") == "1" {
+		verified = 1
+	}
+	disabled := 0
+	if c.PostForm("disabled") == "1" {
+		disabled = 1
+	}
+	noPosting := 0
+	if c.PostForm("no_posting") == "1" {
+		noPosting = 1
+	}
+
 	// Validate input
 	if email == "" {
 		session.SetError("Email is required")
@@ -162,7 +194,15 @@ func (s *WebServer) adminUpdateUser(c *gin.Context) {
 	// Update email
 	err = s.DB.UpdateUserEmail(userID, email)
 	if err != nil {
-		session.SetError("Failed to update user")
+		session.SetError("Failed to update user email")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=users")
+		return
+	}
+
+	// Update user status fields
+	err = s.DB.UpdateUserStatus(userID, verified, disabled, noPosting)
+	if err != nil {
+		session.SetError("Failed to update user status")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=users")
 		return
 	}

@@ -1,0 +1,112 @@
+{{define "admin_settings"}}
+<!-- Settings Tab -->
+<div class="tab-pane fade show active" id="settings" role="tabpanel" aria-labelledby="settings-tab">
+  <!-- Maintenance Utilities -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card maintenance-card">
+              <div class="card-header bg-dark text-white">
+                  <h6 class="card-title mb-0">🔧 Maintenance Utilities</h6>
+              </div>
+              <div class="card-body">
+                  <div class="row">
+                      <div class="col-md-6">
+                          <h6>Hierarchy Management</h6>
+                          <p class="text-muted small">Update hierarchy counts from existing newsgroups</p>
+                          <form action="/admin/hierarchies/update" method="post" style="display: inline;">
+                              <button type="submit" class="btn btn-outline-info btn-sm">
+                                  <i class="bi bi-arrow-clockwise me-1"></i>Update Hierarchies
+                              </button>
+                          </form>
+                      </div>
+                      <div class="col-md-6">
+                          <h6>Registration Control</h6>
+                          <p class="text-muted small">Enable or disable new user registration</p>
+                          {{if .RegistrationEnabled}}
+                          <form action="/admin/registration/disable" method="post" style="display: inline;">
+                              <button type="submit" class="btn btn-outline-warning btn-sm">
+                                  <i class="bi bi-person-slash me-1"></i>Disable Registration
+                              </button>
+                          </form>
+                          {{else}}
+                          <form action="/admin/registration/enable" method="post" style="display: inline;">
+                              <button type="submit" class="btn btn-outline-success btn-sm">
+                                  <i class="bi bi-person-plus me-1"></i>Enable Registration
+                              </button>
+                          </form>
+                          {{end}}
+                      </div>
+                  </div>
+                  <div class="row mt-3">
+                      <div class="col-md-12">
+                          <h6>NNTP Hostname Configuration</h6>
+                          <p class="text-muted small">Set the NNTP hostname for the server</p>
+                          <p class="text-muted small">Restart Webserver and pugleaf-fetcher when updating the hostname!</p>
+                          <form action="/admin/hostname/set" method="post" class="row g-2">
+                              <div class="col-md-8">
+                                  <input type="text" class="form-control form-control-sm" name="hostname"
+                                         placeholder="Enter NNTP hostname (e.g., news.example.com)"
+                                         value="{{.CurrentHostname}}">
+                              </div>
+                              <div class="col-md-4">
+                                  <button type="submit" class="btn btn-outline-primary btn-sm">
+                                      <i class="bi bi-gear me-1"></i>Set Hostname
+                                  </button>
+                              </div>
+                          </form>
+                          {{if .CurrentHostname}}
+                          <small class="text-muted">Current hostname: <strong>{{.CurrentHostname}}</strong></small>
+                          {{else}}
+                          <small class="text-muted">No hostname configured</small>
+                          {{end}}
+                      </div>
+                  </div>
+                  <div class="row mt-3">
+                      <div class="col-md-12">
+                          <h6>Web Post Article Size Limit</h6>
+                          <p class="text-muted small">Set the maximum size limit for articles posted via web interface (in bytes)</p>
+                          <form action="/admin/webpostsize/set" method="post" class="row g-2">
+                              <div class="col-md-8">
+                                  <input type="number" class="form-control form-control-sm" name="size"
+                                         placeholder="Enter max article size in bytes (e.g., 32768)"
+                                         value="{{.WebPostMaxArticleSize}}" min="1024" max="16777216">
+                              </div>
+                              <div class="col-md-4">
+                                  <button type="submit" class="btn btn-outline-primary btn-sm">
+                                      <i class="bi bi-gear me-1"></i>Set Max Size
+                                  </button>
+                              </div>
+                          </form>
+                          <small class="text-muted">Current limit: <strong>{{.WebPostMaxArticleSize}} bytes</strong> ({{if eq .WebPostMaxArticleSize "32768"}}32KB{{else if eq .WebPostMaxArticleSize "65536"}}64KB{{else}}{{.WebPostMaxArticleSize}} bytes{{end}})</small>
+                      </div>
+                  </div>
+                  <div class="row mt-3">
+                      <div class="col-md-12">
+                          <h6>Abuse Contact Email</h6>
+                          <p class="text-muted small">Set the abuse contact email for complaints and reports</p>
+                          <form action="/admin/abusemail/set" method="post" class="row g-2">
+                              <div class="col-md-8">
+                                  <input type="email" class="form-control form-control-sm" name="abuse_mail"
+                                         placeholder="Enter abuse contact email (e.g., abuse@example.com)"
+                                         value="{{.AbuseMail}}" required>
+                              </div>
+                              <div class="col-md-4">
+                                  <button type="submit" class="btn btn-outline-primary btn-sm">
+                                      <i class="bi bi-envelope me-1"></i>Set Abuse Email
+                                  </button>
+                              </div>
+                          </form>
+                          {{if .AbuseMail}}
+                          <small class="text-muted">Current abuse email: <strong>{{.AbuseMail}}</strong></small>
+                          {{else}}
+                          <small class="text-muted">No abuse email configured</small>
+                          {{end}}
+                      </div>
+                  </div>
+              </div>
+          </div>
+      </div>
+  </div>
+</div>
+
+{{end}}

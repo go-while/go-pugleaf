@@ -130,6 +130,37 @@
                     <dt class="col-sm-4">Email:</dt>
                     <dd class="col-sm-8">{{.User.Email}}</dd>
 
+                    <dt class="col-sm-4">Status:</dt>
+                    <dd class="col-sm-8">
+                        {{if .User.Verified}}
+                            <span class="badge bg-success">Verified</span>
+                        {{else}}
+                            <span class="badge bg-warning">Unverified</span>
+                        {{end}}
+                        {{if .User.Disabled}}
+                            <span class="badge bg-danger">Disabled</span>
+                        {{else}}
+                            <span class="badge bg-success">Active</span>
+                        {{end}}
+                    </dd>
+
+                    <dt class="col-sm-4">Posting:</dt>
+                    <dd class="col-sm-8">
+                        {{if .User.NoPosting}}
+                            <span class="badge bg-secondary">Read-Only</span>
+                        {{else}}
+                            <span class="badge bg-success">Allowed</span>
+                        {{end}}
+                    </dd>
+
+                    <dt class="col-sm-4">Post Count:</dt>
+                    <dd class="col-sm-8">
+                        <strong>{{.User.PostCount}}</strong> articles
+                        {{if .User.LastPostUnix}}
+                            <br><small class="text-muted">Last post: {{.User.LastPostUnix}}</small>
+                        {{end}}
+                    </dd>
+
                     <dt class="col-sm-4">Joined:</dt>
                     <dd class="col-sm-8">{{.User.CreatedAt}}</dd>
                 </dl>

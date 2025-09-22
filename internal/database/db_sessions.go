@@ -15,9 +15,9 @@ const (
 )
 
 var (
-	SessionTimeout   = 1 * time.Hour    // 1 hour sliding timeout
-	LoginLockoutTime = 15 * time.Minute // Lockout time after max attempts
-	MaxLoginAttempts = 5                // Max failed login attempts
+	SessionTimeout   = 1 * time.Hour   // 1 hour sliding timeout
+	LoginLockoutTime = 1 * time.Minute // Lockout time after max attempts
+	MaxLoginAttempts = 5               // Max failed login attempts
 )
 
 // GenerateSecureSessionID creates a cryptographically secure session ID

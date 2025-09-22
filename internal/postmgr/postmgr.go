@@ -172,26 +172,39 @@ func (pm *PosterManager) getArticleByMessageID(messageID, newsgroup string) (*mo
 
 // postToProvider posts an article to a specific provider
 func (pm *PosterManager) postToProvider(article *models.Article, pool *nntp.Pool) error {
-	// Get connection from pool using the correct method name
-	conn, err := pool.Get()
-	if err != nil {
-		return fmt.Errorf("failed to get connection: %v", err)
-	}
-	defer pool.Put(conn)
 
-	// Use POST for posting articles (standard NNTP posting)
-	responseCode, err := conn.PostArticle(article)
-	if err != nil {
-		return fmt.Errorf("failed to post article: %v", err)
+	peering := false // TODO: pool.Backend.Provider.Peering
+
+	if pool.Backend.Provider.Posting {
+		conn, err := pool.Get(nntp.MODE_READER_MV)
+		if err != nil {
+			return fmt.Errorf("failed to get connection: %v", err)
+		}
+		defer pool.Put(conn)
+		// Use POST for posting articles (standard NNTP posting)
+		responseCode, err := conn.PostArticle(article)
+		if err != nil {
+			return fmt.Errorf("failed to post article: %v", err)
+		}
+
+		// Check response code
+		switch responseCode {
+		case 240: // Article posted successfully
+			return nil
+		case 441: // Posting failed
+			return fmt.Errorf("article posting failed (code 441)")
+		default:
+			return fmt.Errorf("unexpected response code: %d", responseCode)
+		}
 	}
 
-	// Check response code
-	switch responseCode {
-	case 240: // Article posted successfully
-		return nil
-	case 441: // Posting failed
-		return fmt.Errorf("article posting failed (code 441)")
-	default:
-		return fmt.Errorf("unexpected response code: %d", responseCode)
+	if peering { // TODO: pool.Backend.Provider.Peering
+		conn, err := pool.Get(nntp.MODE_STREAM_MV)
+		if err != nil {
+			return fmt.Errorf("failed to get connection: %v", err)
+		}
+		defer pool.Put(conn)
 	}
+
+	return fmt.Errorf("selected provider %s does not support posting or peering", pool.Backend.Provider.Name)
 }

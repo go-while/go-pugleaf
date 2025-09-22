@@ -36,27 +36,27 @@ func (s *WebServer) adminSetWebPostSize(c *gin.Context) {
 	// Validate the size
 	if sizeStr == "" {
 		session.SetError("Size cannot be empty")
-		c.Redirect(http.StatusSeeOther, "/admin")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 		return
 	}
 
 	size, err := strconv.Atoi(sizeStr)
 	if err != nil {
 		session.SetError("Invalid size format: must be a number")
-		c.Redirect(http.StatusSeeOther, "/admin")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 		return
 	}
 
 	// Validate size range (minimum 1KB, maximum 1MB)
 	if size < 1024 {
 		session.SetError("Size must be at least 1024 bytes (1KB)")
-		c.Redirect(http.StatusSeeOther, "/admin")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 		return
 	}
 
-	if size > 1048576 {
-		session.SetError("Size must not exceed 1048576 bytes (1MB)")
-		c.Redirect(http.StatusSeeOther, "/admin")
+	if size > 16*1024*1024 {
+		session.SetError("Size must not exceed 16777216 bytes (16MB)")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 		return
 	}
 
@@ -64,13 +64,13 @@ func (s *WebServer) adminSetWebPostSize(c *gin.Context) {
 	err = s.DB.SetConfigValue("WebPostMaxArticleSize", sizeStr)
 	if err != nil {
 		session.SetError("Failed to save configuration: " + err.Error())
-		c.Redirect(http.StatusSeeOther, "/admin")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 		return
 	}
 
 	// Set success message
 	session.SetSuccess("Web post article size limit set to: " + sizeStr + " bytes")
 
-	// Redirect back to admin page
-	c.Redirect(http.StatusSeeOther, "/admin")
+	// Redirect back to admin settings tab
+	c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 }

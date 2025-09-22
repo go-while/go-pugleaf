@@ -2,14 +2,14 @@ package web
 
 import (
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
-// adminSetHostname sets the NNTP hostname configuration
-func (s *WebServer) adminSetHostname(c *gin.Context) {
+// adminSetAbuseMail sets the AbuseMail configuration
+func (s *WebServer) adminSetAbuseMail(c *gin.Context) {
 	// Check authentication and admin permissions
 	session := s.getWebSession(c)
 	if session == nil {
@@ -30,24 +30,30 @@ func (s *WebServer) adminSetHostname(c *gin.Context) {
 		return
 	}
 
-	// Get the hostname from form
-	hostname := strings.TrimSpace(c.PostForm("hostname"))
-	if hostname == "" {
-		session.SetError("NNTP hostname can not be empty!")
+	// Get the abuse email from form
+	abuseMail := strings.TrimSpace(c.PostForm("abuse_mail"))
+	if abuseMail == "" {
+		session.SetError("Abuse email cannot be empty")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 		return
 	}
-	// Use SetHostname function to validate and save the hostname
-	// This will handle validation and database persistence
-	err = processor.SetHostname(hostname, s.DB)
+
+	// Validate email format
+	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+	if !emailRegex.MatchString(abuseMail) {
+		session.SetError("Invalid email format for abuse email")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
+		return
+	}
+
+	// Save to database
+	err = s.DB.SetConfigValue("AbuseMail", abuseMail)
 	if err != nil {
-		session.SetError("Failed to set hostname: " + err.Error())
+		session.SetError("Failed to set abuse email: " + err.Error())
 		c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 		return
 	}
 
-	session.SetSuccess("NNTP hostname set to: " + hostname)
-
-	// Redirect back to admin settings tab
+	session.SetSuccess("Abuse email set to: " + abuseMail)
 	c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 }

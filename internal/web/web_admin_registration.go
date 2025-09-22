@@ -35,8 +35,8 @@ func (s *WebServer) adminEnableRegistration(c *gin.Context) {
 		return
 	}
 
-	// Redirect back to admin page with success
-	c.Redirect(http.StatusSeeOther, "/admin?msg=Registration+enabled")
+	// Redirect back to admin settings tab with success
+	c.Redirect(http.StatusSeeOther, "/admin?tab=settings&msg=Registration+enabled")
 }
 
 // adminDisableRegistration disables user registration
@@ -68,6 +68,6 @@ func (s *WebServer) adminDisableRegistration(c *gin.Context) {
 		return
 	}
 
-	// Redirect back to admin page with success
-	c.Redirect(http.StatusSeeOther, "/admin?msg=Registration+disabled")
+	// Redirect back to admin settings tab with success
+	c.Redirect(http.StatusSeeOther, "/admin?tab=settings&msg=Registration+disabled")
 }

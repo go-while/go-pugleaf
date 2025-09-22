@@ -729,13 +729,21 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 					return transferred, nil
 				}
 				// Get connection from pool
-				conn, err := pool.Get()
+				conn, err := pool.Get(nntp.MODE_STREAM_MV)
 				if err != nil {
 					return transferred, fmt.Errorf("failed to get connection from pool: %v", err)
 				}
+
+				if conn.ModeReader {
+					log.Printf("got connection in reader mode, closing and getting a new one")
+					conn.ForceClose = true
+					pool.Put(conn)
+					continue forever
+				}
+
 				batchTransferred, berr := processBatch(conn, newsgroup.Name, ttMode, articles[i:end])
 				if berr != nil {
-					conn = nil
+					conn.ForceClose = true
 					pool.Put(conn)
 					log.Printf("Error processing network batch for newsgroup %s: %v ... retry in %v", newsgroup.Name, err, isleep)
 					time.Sleep(isleep)

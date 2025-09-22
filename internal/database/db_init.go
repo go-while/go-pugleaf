@@ -49,6 +49,7 @@ type Database struct {
 	ArticleCache   *ArticleCache   // LRU cache for individual articles
 	NNTPAuthCache  *NNTPAuthCache  // Authentication cache for NNTP users
 	HierarchyCache *HierarchyCache // Fast hierarchy and group browsing cache
+	ConfigCache    *ConfigCache    // Configuration values cache with 5-minute refresh
 	Batch          *SQ3batch       // sqlite3 Batch operations
 
 	WG       *sync.WaitGroup
@@ -134,13 +135,6 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 		return nil, fmt.Errorf("failed to run database migrations: %w", err)
 	}
 
-	// Check previous shutdown state and initialize system status
-	if wasClean, err := db.CheckPreviousShutdown(); err != nil {
-		log.Printf("Warning: Failed to check previous shutdown state: %v", err)
-	} else if !wasClean {
-		log.Printf("WARNING: Previous shutdown was not clean - database may need recovery")
-	}
-
 	// Initialize system status for this startup
 	hostname, _ := os.Hostname()
 	if err := db.InitializeSystemStatus("go-pugleaf", os.Getpid(), hostname); err != nil {
@@ -177,6 +171,31 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 	db.NNTPAuthCache = NewNNTPAuthCache(NNTP_AUTH_CACHE_TIME)
 	//log.Printf("[WEB]: NNTP authentication cache initialized (15 minute TTL)")
 
+	// Initialize configuration cache
+	db.ConfigCache = NewConfigCache(db)
+	log.Printf("Configuration cache initialized")
+	usersalt, err := db.GetConfigValue("UserSalt")
+	if err != nil {
+		log.Fatalf("Failed to get UserSalt config: %v", err)
+	}
+	if usersalt == "" {
+		// generate a usersalt, used for injection-info in header for posting
+		usersalt = generateRandomString(42)
+		if err := db.SetConfigValue("UserSalt", usersalt); err != nil {
+			log.Fatalf("Failed to set UserSalt config: %v", err)
+		}
+		log.Printf("Generated new UserSalt for hashing usernames")
+	}
+	abuseMail, err := db.GetConfigValue("AbuseMail")
+	if err != nil {
+		log.Fatalf("Failed to get AbuseMail config: %v", err)
+	}
+	if abuseMail == "" {
+		err := db.SetConfigValue("AbuseMail", "abuse@invalid.invalid")
+		if err != nil {
+			log.Fatalf("Failed to set AbuseMail config: %v", err)
+		}
+	}
 	// Start article cache cleanup routine
 	if ENABLE_ARTICLE_CACHE {
 		db.ArticleCache = NewArticleCache(db.dbconfig.ArticleCacheSize, db.dbconfig.ArticleCacheExpiry, db)

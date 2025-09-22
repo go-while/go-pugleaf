@@ -23,6 +23,8 @@ type SpamArticleInfo struct {
 type AdminPageData struct {
 	TemplateData
 	Users                 []*models.User
+	UserSearch            string // Added for user search functionality
+	Nonce                 string // Added for nonce input in hash search
 	Newsgroups            []*models.Newsgroup
 	NewsgroupPagination   *models.PaginationInfo
 	NewsgroupSearch       string
@@ -50,6 +52,7 @@ type AdminPageData struct {
 	RegistrationEnabled   bool                   // Added for registration control
 	CurrentHostname       string                 // Added for NNTP hostname configuration
 	WebPostMaxArticleSize string                 // Added for web post size configuration
+	AbuseMail             string                 // Added for abuse email configuration
 	Success               string
 	Error                 string
 	ActiveTab             string // Added for tab state

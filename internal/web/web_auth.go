@@ -243,11 +243,11 @@ func validateUsername(username string) error {
 
 // validatePassword validates password requirements
 func validatePassword(password string) error {
-	if len(password) < 6 {
-		return fmt.Errorf("password must be at least 6 characters long")
+	if len(password) < 12 {
+		return fmt.Errorf("password must be at least 12 characters long")
 	}
-	if len(password) > 128 {
-		return fmt.Errorf("password must be less than 128 characters")
+	if len(password) > 255 {
+		return fmt.Errorf("maximum password length is 255 characters")
 	}
 	return nil
 }
@@ -267,7 +267,7 @@ func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
 				Path:     "/",
 				HttpOnly: true,
 				Secure:   isHTTPS,
-				SameSite: http.SameSiteLaxMode, // Works well with reverse proxies
+				SameSite: http.SameSiteLaxMode,                   // Works well with reverse proxies
 				MaxAge:   int(database.SessionTimeout.Seconds()), // align with server-side sliding timeout
 			}
 			http.SetCookie(c.Writer, cookie)
@@ -283,7 +283,7 @@ func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   isHTTPS,
-		SameSite: http.SameSiteLaxMode, // Works well with reverse proxies
+		SameSite: http.SameSiteLaxMode,                   // Works well with reverse proxies
 		MaxAge:   int(database.SessionTimeout.Seconds()), // align with server-side sliding timeout
 	}
 

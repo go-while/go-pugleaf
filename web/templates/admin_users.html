@@ -37,6 +37,44 @@
                               </div>
                           </div>
                       </div>
+                      <div class="row">
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <div class="form-check">
+                                      <input class="form-check-input" type="checkbox" id="verified" name="verified" value="1">
+                                      <label class="form-check-label" for="verified">
+                                          Verified User
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <div class="form-check">
+                                      <input class="form-check-input" type="checkbox" id="disabled" name="disabled" value="1">
+                                      <label class="form-check-label" for="disabled">
+                                          Disabled (Cannot Login)
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <div class="form-check">
+                                      <input class="form-check-input" type="checkbox" id="no_posting" name="no_posting" value="1">
+                                      <label class="form-check-label" for="no_posting">
+                                          Read-Only (No Posting)
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="post_count" class="form-label">Initial Post Count</label>
+                                  <input type="number" class="form-control" id="post_count" name="post_count" value="0" min="0">
+                              </div>
+                          </div>
+                      </div>
                       <button type="submit" class="btn btn-primary">Add User</button>
                   </form>
               </div>
@@ -51,10 +89,36 @@
               <div class="card-header bg-dark text-white">
                   <div class="d-flex justify-content-between align-items-center">
                       <h5 class="card-title mb-0">👥 User Management</h5>
-                      <span class="badge bg-light text-dark">{{len .Users}} users</span>
+                      <span class="badge bg-light text-dark">{{if .Users}}{{len .Users}} users found{{else}}Search users{{end}}</span>
                   </div>
               </div>
               <div class="card-body">
+                  <!-- User Search Form -->
+                  <div class="row mb-3">
+                      <div class="col-md-8">
+                          <form method="GET" action="/admin" class="d-flex">
+                              <input type="hidden" name="tab" value="users">
+                              <input type="text" class="form-control me-2" name="user_search"
+                                     placeholder="Search users by username, email, or display name..."
+                                     value="{{.UserSearch}}" minlength="2">
+                              <input type="text" class="form-control me-2" name="nonce"
+                                     placeholder="Nonce (for hash search)"
+                                     value="{{.Nonce}}" title="Optional: Enter nonce to search by computed hash">
+                              <button type="submit" class="btn btn-outline-primary">Search</button>
+                          </form>
+                      </div>
+                      <div class="col-md-4 text-end">
+                          {{if .UserSearch}}
+                          <a href="/admin?tab=users" class="btn btn-outline-secondary">Clear Search</a>
+                          {{else}}
+                          <small class="text-muted">
+                              Regular search: Enter username/email<br>
+                              Hash search: Enter computed hash + nonce
+                          </small>
+                          {{end}}
+                      </div>
+                  </div>
+
                   {{if .Users}}
                   <div class="table-responsive">
                       <table class="table table-striped">
@@ -64,6 +128,8 @@
                                   <th>Username</th>
                                   <th>Email</th>
                                   <th>Display Name</th>
+                                  <th>Status</th>
+                                  <th>Posts</th>
                                   <th>Created</th>
                                   <th>Actions</th>
                               </tr>
@@ -75,6 +141,19 @@
                                   <td><strong>{{.Username}}</strong></td>
                                   <td>{{.Email}}</td>
                                   <td>{{if .DisplayName}}{{.DisplayName}}{{else}}<em>None</em>{{end}}</td>
+                                  <td>
+                                      <div class="d-flex flex-wrap gap-1">
+                                          {{if .Verified}}<span class="badge bg-success">Verified</span>{{else}}<span class="badge bg-warning">Unverified</span>{{end}}
+                                          {{if .Disabled}}<span class="badge bg-danger">Disabled</span>{{else}}<span class="badge bg-success">Active</span>{{end}}
+                                          {{if .NoPosting}}<span class="badge bg-secondary">Read-Only</span>{{else}}<span class="badge bg-info">Can Post</span>{{end}}
+                                      </div>
+                                  </td>
+                                  <td>
+                                      <div class="text-center">
+                                          <strong>{{.PostCount}}</strong>
+                                          {{if .LastPostUnix}}<br><small class="text-muted">Last: {{.LastPostUnix}}</small>{{end}}
+                                      </div>
+                                  </td>
                                   <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
                                   <td>
                                     <div class="btn-group btn-group-sm">
@@ -93,7 +172,7 @@
                               </tr>
                               <!-- Collapsible Edit Form -->
                               <tr class="collapse" id="edit-user-{{.ID}}">
-                                  <td colspan="6">
+                                  <td colspan="8">
                                       <div class="card">
                                           <div class="card-header bg-dark text-white">
                                               <h6>Edit User: {{.Username}}</h6>
@@ -128,6 +207,44 @@
                                                             <input type="password" class="form-control" name="password" minlength="6">
                                                         </div>
                                                     </div>
+                                                    <div class="col-md-6">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Post Count</label>
+                                                            <input readonly type="number" class="form-control" name="post_count" value="{{.PostCount}}" min="0">
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div class="row">
+                                                    <div class="col-md-4">
+                                                        <div class="mb-3">
+                                                            <div class="form-check">
+                                                                <input class="form-check-input" type="checkbox" name="verified" value="1" {{if .Verified}}checked{{end}}>
+                                                                <label class="form-check-label">
+                                                                    Verified User
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-4">
+                                                        <div class="mb-3">
+                                                            <div class="form-check">
+                                                                <input class="form-check-input" type="checkbox" name="disabled" value="1" {{if .Disabled}}checked{{end}}>
+                                                                <label class="form-check-label">
+                                                                    Disabled (Cannot Login)
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-4">
+                                                        <div class="mb-3">
+                                                            <div class="form-check">
+                                                                <input class="form-check-input" type="checkbox" name="no_posting" value="1" {{if .NoPosting}}checked{{end}}>
+                                                                <label class="form-check-label">
+                                                                    Read-Only (No Posting)
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    </div>
                                                 </div>
                                                 <button type="submit" class="btn btn-primary">Update User</button>
                                               </form>
@@ -140,9 +257,15 @@
                       </table>
                   </div>
                   {{else}}
+                  {{if .UserSearch}}
                   <div class="alert alert-info">
-                      <strong>No users found.</strong> Create the first user above.
+                      <strong>No users found matching "{{.UserSearch}}".</strong> Try a different search term.
                   </div>
+                  {{else}}
+                  <div class="alert alert-info">
+                      <strong>Use the search above to find users.</strong> Enter a username, email, or display name to search.
+                  </div>
+                  {{end}}
                   {{end}}
               </div>
           </div>

@@ -2,6 +2,7 @@
 package database
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"log"
@@ -647,43 +648,43 @@ func (db *Database) GetUndownloadedOverviews(groupDBs *GroupDBs, fetchMax int) (
 }
 
 // --- User Queries ---
-const query_InsertUser = `INSERT INTO users (username, email, password_hash, display_name) VALUES (?, ?, ?, ?)`
+const query_InsertUser = `INSERT INTO users (username, email, password_hash, display_name, verified, disabled, no_posting, post_count, lastpost_unix) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (db *Database) InsertUser(u *models.User) error {
 	_, err := db.mainDB.Exec(query_InsertUser,
-		u.Username, u.Email, u.PasswordHash, u.DisplayName,
+		u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Verified, u.Disabled, u.NoPosting, u.PostCount, u.LastPostUnix,
 	)
 	return err
 }
 
-const query_GetUserByUsername = `SELECT id, username, email, password_hash, display_name, created_at FROM users WHERE username = ?`
+const query_GetUserByUsername = `SELECT id, username, email, password_hash, display_name, verified, disabled, no_posting, post_count, lastpost_unix, created_at FROM users WHERE username = ?`
 
 func (db *Database) GetUserByUsername(username string) (*models.User, error) {
 	row := db.mainDB.QueryRow(query_GetUserByUsername, username)
 	var u models.User
-	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Verified, &u.Disabled, &u.NoPosting, &u.PostCount, &u.LastPostUnix, &u.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &u, nil
 }
 
-const query_GetUserByEmail = `SELECT id, username, email, password_hash, display_name, created_at FROM users WHERE email = ?`
+const query_GetUserByEmail = `SELECT id, username, email, password_hash, display_name, verified, disabled, no_posting, post_count, lastpost_unix, created_at FROM users WHERE email = ?`
 
 func (db *Database) GetUserByEmail(email string) (*models.User, error) {
 	row := db.mainDB.QueryRow(query_GetUserByEmail, email)
 	var u models.User
-	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Verified, &u.Disabled, &u.NoPosting, &u.PostCount, &u.LastPostUnix, &u.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &u, nil
 }
 
-const query_GetUserByID = `SELECT id, username, email, password_hash, display_name, created_at FROM users WHERE id = ?`
+const query_GetUserByID = `SELECT id, username, email, password_hash, display_name, verified, disabled, no_posting, post_count, lastpost_unix, created_at FROM users WHERE id = ?`
 
 func (db *Database) GetUserByID(id int64) (*models.User, error) {
 	row := db.mainDB.QueryRow(query_GetUserByID, id)
 	var u models.User
-	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Verified, &u.Disabled, &u.NoPosting, &u.PostCount, &u.LastPostUnix, &u.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &u, nil
@@ -702,6 +703,22 @@ const query_UpdateUserPassword = `UPDATE users SET password_hash = ? WHERE id = 
 
 func (db *Database) UpdateUserPassword(userID int64, passwordHash string) error {
 	_, err := db.mainDB.Exec(query_UpdateUserPassword, passwordHash, userID)
+	return err
+}
+
+// UpdateUserStatus updates user status fields (verified, disabled, no_posting)
+const query_UpdateUserStatus = `UPDATE users SET verified = ?, disabled = ?, no_posting = ? WHERE id = ?`
+
+func (db *Database) UpdateUserStatus(userID int64, verified, disabled, noPosting int) error {
+	_, err := db.mainDB.Exec(query_UpdateUserStatus, verified, disabled, noPosting, userID)
+	return err
+}
+
+// UpdateUserPostCount updates a user's post count and last post timestamp
+const query_UpdateUserPostCount = `UPDATE users SET post_count = post_count+1, lastpost_unix = ? WHERE id = ?`
+
+func (db *Database) UpdateUserPostCount(userID int64, lastPostUnix int64) error {
+	_, err := db.mainDB.Exec(query_UpdateUserPostCount, lastPostUnix, userID)
 	return err
 }
 
@@ -1379,7 +1396,7 @@ func (db *Database) CountSearchNewsgroups(searchTerm string) (int, error) {
 }
 
 // GetAllUsers retrieves all users from the database
-const query_GetAllUsers = `SELECT id, username, email, display_name, password_hash, created_at FROM users ORDER BY username`
+const query_GetAllUsers = `SELECT id, username, email, display_name, password_hash, verified, disabled, no_posting, post_count, lastpost_unix, created_at FROM users ORDER BY username`
 
 func (db *Database) GetAllUsers() ([]*models.User, error) {
 	rows, err := db.mainDB.Query(query_GetAllUsers)
@@ -1391,7 +1408,33 @@ func (db *Database) GetAllUsers() ([]*models.User, error) {
 	var users []*models.User
 	for rows.Next() {
 		var user models.User
-		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.PasswordHash, &user.CreatedAt); err != nil {
+		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.PasswordHash, &user.Verified, &user.Disabled, &user.NoPosting, &user.PostCount, &user.LastPostUnix, &user.CreatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, &user)
+	}
+	return users, nil
+}
+
+// SearchUsers searches for users by username, email, or display name with a limit
+func (db *Database) SearchUsers(searchTerm string, limit int) ([]*models.User, error) {
+	query := `SELECT id, username, email, display_name, password_hash, verified, disabled, no_posting, post_count, lastpost_unix, created_at
+              FROM users
+              WHERE username LIKE ? OR email LIKE ? OR display_name LIKE ?
+              ORDER BY username
+              LIMIT ?`
+
+	searchPattern := "%" + searchTerm + "%"
+	rows, err := db.mainDB.Query(query, searchPattern, searchPattern, searchPattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []*models.User
+	for rows.Next() {
+		var user models.User
+		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.PasswordHash, &user.Verified, &user.Disabled, &user.NoPosting, &user.PostCount, &user.LastPostUnix, &user.CreatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, &user)
@@ -2459,4 +2502,82 @@ func (db *Database) GetSpamArticles(offset, limit int) ([]*models.Overview, []st
 	}
 
 	return spamArticles, groupNames, totalCount, nil
+}
+
+// ComputeHashedUsername returns a hashed username for Injection-info / X-Trace header
+func (db *Database) ComputeHashedUsername(username string, nonce string) (string, error) {
+	usersalt, err := db.GetConfigValue("UserSalt")
+	if err != nil || usersalt == "" {
+		log.Printf("Failed to get UserSalt config: %v", err)
+		return "", err
+	}
+	hashedUser := fmt.Sprintf("%x", sha256.Sum256([]byte(usersalt+username+nonce)))
+	return hashedUser, nil
+}
+
+// SearchUserByComputedHash searches for a user by comparing computed hashes with a nonce
+// Loops through all users in batches of 1000 to find the one matching the target hash
+func (db *Database) SearchUserByComputedHash(targetHash string, nonce string) (*models.User, error) {
+	if targetHash == "" || nonce == "" {
+		return nil, fmt.Errorf("target hash and nonce are required")
+	}
+
+	// Get UserSalt for hash computation
+	usersalt, err := db.GetConfigValue("UserSalt")
+	if err != nil || usersalt == "" {
+		log.Printf("Failed to get UserSalt config: %v", err)
+		return nil, fmt.Errorf("failed to get UserSalt config: %v", err)
+	}
+
+	offset := 0
+	batchSize := 1000
+
+	for {
+		// Query users in batches
+		query := `SELECT id, username, email, display_name, password_hash, verified, disabled, no_posting, post_count, lastpost_unix, created_at
+		          FROM users
+				  WHERE post_count > 0
+		          ORDER BY id
+		          LIMIT ? OFFSET ?`
+
+		rows, err := db.mainDB.Query(query, batchSize, offset)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query users batch: %v", err)
+		}
+
+		var users []*models.User
+		for rows.Next() {
+			var user models.User
+			if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.PasswordHash, &user.Verified, &user.Disabled, &user.NoPosting, &user.PostCount, &user.LastPostUnix, &user.CreatedAt); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("failed to scan user: %v", err)
+			}
+			users = append(users, &user)
+		}
+		rows.Close()
+
+		// If no users in this batch, we've reached the end
+		if len(users) == 0 {
+			break
+		}
+
+		// Check each user's computed hash against the target
+		for _, user := range users {
+			computedHash := fmt.Sprintf("%x", sha256.Sum256([]byte(usersalt+user.Username+nonce)))
+			if computedHash == targetHash {
+				return user, nil
+			}
+		}
+
+		// Move to next batch
+		offset += batchSize
+
+		// If we got fewer users than batch size, we've reached the end
+		if len(users) < batchSize {
+			break
+		}
+	}
+
+	// No matching user found
+	return nil, nil
 }

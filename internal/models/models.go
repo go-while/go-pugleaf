@@ -98,6 +98,11 @@ type User struct {
 	LastLoginIP      string     `json:"last_login_ip" db:"last_login_ip"`           // IP of last login (for logging only)
 	SessionExpiresAt *time.Time `json:"session_expires_at" db:"session_expires_at"` // Session expiration (sliding)
 	LoginAttempts    int        `json:"login_attempts" db:"login_attempts"`         // Failed login attempts counter
+	Verified         int        `json:"verified" db:"verified"`                     // User verification status (0|1)
+	Disabled         int        `json:"disabled" db:"disabled"`                     // User disabled status (0|1)
+	NoPosting        int        `json:"no_posting" db:"no_posting"`                 // Posting restriction (0|1)
+	PostCount        int        `json:"post_count" db:"post_count"`                 // User's post count
+	LastPostUnix     int64      `json:"lastpost_unix" db:"lastpost_unix"`           // Last post timestamp (Unix)
 	CreatedAt        time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at" db:"updated_at"`
 }

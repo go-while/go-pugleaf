@@ -60,8 +60,15 @@ type BackendConn struct {
 	// Connection state
 	connected     bool
 	authenticated bool
+	ModeReader    bool
+	ModeStream    bool
+	ForceClose    bool
 	created       time.Time
 	lastUsed      time.Time
+	// INN allows switching to mode reader when mode stream is active
+	// but INN does not allow switching to mode stream when mode reader is active
+	// when using check/takethis and we got a mode reader connection from pool
+	// we must set ForceClose to true and Put the connection back in pool and get a new one...
 }
 
 // BackendConfig holds configuration for an NNTP client
@@ -299,8 +306,8 @@ func (c *BackendConn) CloseFromPoolOnly() error {
 
 	c.connected = false
 	c.authenticated = false
-	c.textConn = nil
-	c.conn = nil
+	c.textConn = nil // CloseFromPoolOnly
+	c.conn = nil     // CloseFromPoolOnly
 	c.writer = nil
 	//log.Printf("Closed NNTP Connection to %s", c.Backend.Host)
 	return nil

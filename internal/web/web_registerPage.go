@@ -148,6 +148,11 @@ func (s *WebServer) createUser(username, email, passwordHash, displayName string
 		Email:        email,
 		PasswordHash: passwordHash,
 		DisplayName:  displayName,
+		Verified:     0, // Default not verified
+		Disabled:     0, // Default not disabled
+		NoPosting:    0, // Default can post
+		PostCount:    0, // Default no posts
+		LastPostUnix: 0, // Default no last post
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}

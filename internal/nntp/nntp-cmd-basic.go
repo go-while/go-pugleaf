@@ -60,7 +60,7 @@ func (c *ClientConnection) Close() {
 	// Close the connection
 	if c.conn != nil {
 		c.conn.Close()
-		c.conn = nil
+		c.conn = nil // Close() *ClientConnection
 	}
 	// Remove from server connections
 	/*

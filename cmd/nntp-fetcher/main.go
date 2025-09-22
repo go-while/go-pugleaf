@@ -737,7 +737,7 @@ func UpdateNewsgroupList(updateList *string, updateListForce bool) error {
 	defer pool.ClosePool()
 
 	// Get a connection from the pool
-	conn, err := pool.Get()
+	conn, err := pool.Get(nntp.MODE_READER_MV)
 	if err != nil {
 		return fmt.Errorf("failed to get NNTP connection: %w", err)
 	}

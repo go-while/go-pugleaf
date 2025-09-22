@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/history"
@@ -33,11 +34,39 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		return
 	}
 
-	// Get all users
-	users, err := s.DB.GetAllUsers()
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to load users")
-		return
+	var users []*models.User
+	userSearch := c.Query("user_search")
+	nonce := c.Query("nonce")
+
+	// Only search users if search term is provided and has at least 2 characters
+	if userSearch != "" && len(strings.TrimSpace(userSearch)) >= 2 {
+		var err error
+
+		// If nonce is provided, treat userSearch as a computed hash and search by hash
+		if nonce != "" && len(strings.TrimSpace(nonce)) > 0 {
+			targetHash := strings.TrimSpace(userSearch)
+			nonceValue := strings.TrimSpace(nonce)
+
+			// Search for user by computed hash
+			user, err := s.DB.SearchUserByComputedHash(targetHash, nonceValue)
+			if err != nil {
+				log.Printf("Failed to search user by computed hash: %v", err)
+				s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to search user by computed hash")
+				return
+			}
+
+			if user != nil {
+				users = []*models.User{user}
+			}
+		} else {
+			// Regular search by username, email, or display name
+			users, err = s.DB.SearchUsers(strings.TrimSpace(userSearch), 100) // Limit to 100 results for performance
+			if err != nil {
+				log.Printf("Failed to search users: %v", err)
+				s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to search users")
+				return
+			}
+		}
 	}
 
 	// Get newsgroups with pagination and search
@@ -118,12 +147,15 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	}
 
 	// Get all NNTP users
-	nntpUsers, err := s.DB.GetAllNNTPUsers()
-	if err != nil {
-		log.Printf("Failed to load NNTP users: %v", err)
-		s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to load NNTP users")
-		return
-	}
+	var nntpUsers []*models.NNTPUser
+	/*
+		nntpUsers, err := s.DB.GetAllNNTPUsers()
+		if err != nil {
+			log.Printf("Failed to load NNTP users: %v", err)
+			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to load NNTP users")
+			return
+		}
+	*/
 
 	// Get all sections with their group counts (efficient single query)
 	sections, err := s.DB.GetAllSectionsWithCounts()
@@ -144,7 +176,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	// Read tab parameter to control active tab in template
 	activeTab := c.Query("tab")
 	if activeTab == "" {
-		activeTab = "users" // or any other default tab you want
+		activeTab = "settings" // or any other default tab you want
 	}
 
 	// Create pagination info for newsgroups
@@ -352,9 +384,18 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		webPostMaxSize = "32768" // Default to 32KB on error
 	}
 
+	// Get current AbuseMail from database
+	abuseMail, err := s.DB.GetConfigValue("AbuseMail")
+	if err != nil {
+		log.Printf("Failed to get AbuseMail: %v", err)
+		abuseMail = "" // Default to empty on error
+	}
+
 	data := AdminPageData{
 		TemplateData:          s.getBaseTemplateData(c, "Admin Interface"),
 		Users:                 users,
+		UserSearch:            userSearch,
+		Nonce:                 nonce,
 		Newsgroups:            newsgroups,
 		NewsgroupPagination:   newsgroupPagination,
 		NewsgroupSearch:       searchTerm,
@@ -382,9 +423,10 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		RegistrationEnabled:   registrationEnabled,
 		CurrentHostname:       currentHostname,
 		WebPostMaxArticleSize: webPostMaxSize,
+		AbuseMail:             abuseMail,
 		Success:               session.GetSuccess(),
 		Error:                 session.GetError(),
-		ActiveTab:             activeTab, // <-- add this field to AdminPageData struct
+		ActiveTab:             activeTab,
 	}
 
 	// Load modular admin templates
@@ -401,6 +443,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		"web/templates/admin_sections.html",
 		"web/templates/admin_statistics.html",
 		"web/templates/admin_spam.html",
+		"web/templates/admin_settings.html",
 	))
 	c.Header("Content-Type", "text/html")
 	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)

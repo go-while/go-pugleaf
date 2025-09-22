@@ -16,6 +16,8 @@ import (
 	"github.com/go-while/go-pugleaf/internal/utils"
 )
 
+var WebPostingBackOff = 42 * time.Second
+
 // PostPageData represents data for posting page
 type PostPageData struct {
 	TemplateData
@@ -41,7 +43,22 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/login?redirect=/SitePost")
 		return
 	}
-
+	user, err := s.DB.GetUserByID(session.User.ID)
+	if err != nil {
+		log.Printf("Failed to get user by ID: %v", err)
+		c.Redirect(http.StatusFound, "/login")
+		return
+	}
+	if user.NoPosting > 0 || user.Disabled > 0 {
+		session.SetError("Your account is not permitted to post")
+		c.Redirect(http.StatusFound, "/profile")
+		return
+	}
+	if user.LastPostUnix > time.Now().Add(-WebPostingBackOff).Unix() {
+		session.SetError(fmt.Sprintf("You can only post once every %d seconds", int(WebPostingBackOff.Seconds())))
+		c.Redirect(http.StatusFound, "/profile")
+		return
+	}
 	// Get prefilled newsgroup from POST form data (from "New Thread" button)
 	prefilledNewsgroup := c.PostForm("newsgroup")
 
@@ -50,7 +67,6 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	replyToMessageID := c.PostForm("message_id")
 	isReply := replyToArticleNum != "" && replyToMessageID != ""
 
-	var err error
 	article := &models.Article{}
 	if isReply {
 		// Get the original article to extract subject and body for reply
@@ -62,6 +78,8 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 					// Handle subject with "Re: " prefix
 					if !strings.HasPrefix(strings.ToLower(reply_article.Subject), "re:") {
 						article.Subject = "Re: " + models.ConvertToUTF8(reply_article.Subject)
+					} else {
+						article.Subject = models.ConvertToUTF8(reply_article.Subject)
 					}
 					// Quote the original message body
 					if reply_article.BodyText != "" {
@@ -105,7 +123,7 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	// Create template data with no errors (this is just displaying the form)
 	pageTitle := "New Thread"
 	if isReply {
-		pageTitle = "Reply to"
+		pageTitle = fmt.Sprintf("Reply to: [%s] %s)", replyToArticleNum, replyToMessageID)
 	}
 	var prefilledBodyStr string
 	if isReply && len(article.BodyText) > 0 {
@@ -150,6 +168,12 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		c.Redirect(http.StatusFound, "/login")
 		return
 	}
+	user, err := s.DB.GetUserByID(session.User.ID)
+	if err != nil {
+		log.Printf("Failed to get user by ID: %v", err)
+		c.Redirect(http.StatusFound, "/login")
+		return
+	}
 	// Get form data
 	subject := strings.TrimSpace(c.PostForm("subject"))
 	body := strings.TrimSpace(c.PostForm("body"))
@@ -160,46 +184,73 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	replyTo := strings.TrimSpace(c.PostForm("reply_to"))
 	messageID := strings.TrimSpace(c.PostForm("message_id"))
 	isReply := replyTo != "" && messageID != ""
+	var errors []string
+
+	abuseMail, err := s.DB.GetConfigValue("AbuseMail")
+	if err != nil {
+		log.Printf("Warning: Failed to get AbuseMail config: %v", err)
+	}
+	if abuseMail == "" || abuseMail == "abuse@invalid.invalid" {
+		errors = append(errors, "System Abuse email is not configured. Please contact the administrator.")
+	}
 
 	// Get max article size from database config
 	maxArticleSizeStr, err := s.DB.GetConfigValue("WebPostMaxArticleSize")
 	if err != nil {
-		log.Printf("Warning: Failed to get WebPostMaxArticleSize config, using default: %v", err)
-		maxArticleSizeStr = "32768" // fallback to default
+		log.Printf("Warning: Failed to get WebPostMaxArticleSize config: %v", err)
 	}
 
-	maxArticleSize := 32768 // default fallback
+	maxArticleSize := -1
 	if parsed, err := strconv.Atoi(maxArticleSizeStr); err == nil && parsed > 0 {
-		maxArticleSize = parsed
+		if parsed >= 1000 && parsed <= 16*1024*1024 {
+			maxArticleSize = parsed
+		}
 	}
 
-	// Validate required fields
-	var errors []string
-	if subject == "" {
-		errors = append(errors, "Subject is required")
+	if maxArticleSize <= 0 {
+		errors = append(errors, "Server configuration error: invalid max WebPostMaxArticleSize")
+		log.Printf("Warning: WebPostMaxArticleSize config value %d is out of valid range (1000-16777216)")
 	}
-	if len(subject) > 72 {
-		errors = append(errors, "Subject must be less than 72 characters")
-	}
-	if body == "" {
-		errors = append(errors, "Message body is required")
-	}
-	if len(body) > maxArticleSize {
-		errors = append(errors, fmt.Sprintf("Message body must be less than %d bytes", maxArticleSize))
-	}
-	if newsgroupsStr == "" {
-		errors = append(errors, "At least one newsgroup is required")
+
+	if len(errors) == 0 {
+		// Validate required fields
+		if subject == "" {
+			errors = append(errors, "Subject is required")
+		}
+		if len(subject) > 72 {
+			errors = append(errors, "Subject must be less than 72 characters")
+		}
+		if body == "" {
+			errors = append(errors, "Message body is required")
+		}
+		if len(body) > maxArticleSize {
+			errors = append(errors, fmt.Sprintf("Message body must be less than %d bytes", maxArticleSize))
+		}
+		if newsgroupsStr == "" {
+			errors = append(errors, "At least one newsgroup is required")
+		}
+		if user.NoPosting > 0 || user.Disabled > 0 {
+			errors = append(errors, "Your account is not permitted to post")
+		}
+		if user.LastPostUnix > time.Now().Add(-WebPostingBackOff).Unix() {
+			errors = append(errors, fmt.Sprintf("You can only post once every %d seconds", int(WebPostingBackOff.Seconds())))
+		}
 	}
 
 	// Parse newsgroups (space or comma separated)
 	var newsgroups []string
-	if newsgroupsStr != "" {
+	if len(errors) == 0 && newsgroupsStr != "" {
 		// Replace commas with spaces and split
 		newsgroupsStr = strings.ReplaceAll(newsgroupsStr, ",", " ")
 		parts := strings.FieldsSeq(newsgroupsStr)
 		for part := range parts {
 			if part != "" {
-				newsgroups = append(newsgroups, part)
+				if processor.IsValidGroupName(part) {
+					newsgroups = append(newsgroups, part)
+				} else {
+					errors = append(errors, "Invalid newsgroup name: "+part)
+					break
+				}
 			}
 		}
 	}
@@ -233,6 +284,18 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 			errors = append(errors, "No valid active newsgroups found")
 		}
 	}
+	now := time.Now().Unix()
+	nonce := strconv.FormatInt(now, 10)
+	hashedUser, err := s.DB.ComputeHashedUsername(session.User.Username, nonce)
+	if err != nil {
+		errors = append(errors, "Failed to compute hashed username")
+	}
+	if len(errors) == 0 {
+		if err := s.DB.UpdateUserPostCount(session.User.ID, now); err != nil {
+			log.Printf("Failed to update user post count: %v", err)
+			errors = append(errors, "Failed to update post count")
+		}
+	}
 
 	// Check if there are validation errors
 	if len(errors) > 0 {
@@ -256,8 +319,14 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		}
 		return
 	}
+
 	var headers []string
 	headers = append(headers, "Newsgroups: "+strings.Join(newsgroups, ","))
+	// Injection-Info / X-Trace header for tracking
+	headers = append(headers, "X-pugleaf-Trace: "+processor.LocalNNTPHostname+";")
+	headers = append(headers, "\tnonce=\""+nonce+"\"; mail-complaints-to=\""+abuseMail+"\";")
+	headers = append(headers, "\tposting-account=\""+hashedUser+"\";")
+
 	// Create article similar to threading.go
 	article := &models.Article{
 		MessageID:   generateMessageID(),
@@ -276,10 +345,10 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		Headers:     make(map[string][]string, 6),
 	}
 	article.Headers["newsgroups"] = []string{strings.Join(newsgroups, ",")}
-	article.Headers["subject"] = []string{subject}
-	article.Headers["from"] = []string{article.FromHeader}
-	article.Headers["date"] = []string{article.DateString}
-	article.Headers["message-id"] = []string{article.MessageID}
+	//article.Headers["subject"] = []string{subject}
+	//article.Headers["from"] = []string{article.FromHeader}
+	//article.Headers["date"] = []string{article.DateString}
+	//article.Headers["message-id"] = []string{article.MessageID}
 	// If this is a reply, set up References header
 	if isReply {
 		log.Printf("Setting up References header for reply to message ID: %s", messageID)
@@ -320,7 +389,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	default:
 		log.Printf("Warning: Post queue channel is full, article is lost.")
 		data := PostPageData{
-			TemplateData:          s.getBaseTemplateData(c, "New Thread"),
+			TemplateData:          s.getBaseTemplateData(c, "Posting failed"),
 			PrefilledNewsgroup:    newsgroupsStr,
 			PrefilledSubject:      subject,
 			PrefilledBody:         body,

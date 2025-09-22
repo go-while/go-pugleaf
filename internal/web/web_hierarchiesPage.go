@@ -134,7 +134,8 @@ func (s *WebServer) adminUpdateHierarchies(c *gin.Context) {
 	// Update hierarchy counts
 	err = s.DB.UpdateHierarchyCounts()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update hierarchies: " + err.Error()})
+		session.SetError("Failed to update hierarchies: " + err.Error())
+		c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 		return
 	}
 
@@ -144,8 +145,9 @@ func (s *WebServer) adminUpdateHierarchies(c *gin.Context) {
 		go s.DB.HierarchyCache.WarmCache(s.DB) // Warm cache in background
 	}
 
-	// Return success response as JSON
-	c.JSON(http.StatusOK, gin.H{"message": "Hierarchies updated and cache refreshed successfully"})
+	// Set success message and redirect to settings tab
+	session.SetSuccess("Hierarchies updated and cache refreshed successfully")
+	c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 }
 
 // hierarchyTreePage displays a hierarchical tree view for browsing newsgroups

@@ -36,8 +36,8 @@ func (s *WebServer) profilePage(c *gin.Context) {
 	data := ProfilePageData{
 		TemplateData: s.getBaseTemplateData(c, "Profile"),
 		User:         user,
-		Error:        c.Query("error"),
-		Success:      c.Query("success"),
+		Error:        session.GetError(),
+		Success:      session.GetSuccess(),
 	}
 
 	// Load template
@@ -62,7 +62,7 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 	user, err := s.DB.GetUserByID(int64(session.UserID))
 	if err != nil {
 		session.SetError("Failed to load user")
-		c.Redirect(http.StatusSeeOther, "/profile")
+		c.Redirect(http.StatusSeeOther, "/logout")
 		return
 	}
 
@@ -105,8 +105,9 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 			return
 		}
 
-		if len(newPassword) < 6 {
-			session.SetError("Password must be at least 6 characters")
+		// Validate password
+		if err := validatePassword(newPassword); err != nil {
+			session.SetError(err.Error())
 			c.Redirect(http.StatusSeeOther, "/profile")
 			return
 		}

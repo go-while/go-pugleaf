@@ -312,7 +312,7 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 	for {
 		if lineCount >= maxGroups {
 			c.conn.Close() // Close connection on limit reached
-			c.conn = nil
+			c.ForceClose = true
 			log.Printf("Connection reached maximum group limit: %d", maxGroups)
 			break
 		}
@@ -682,7 +682,7 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 		// Check for shutdown signal between reads
 		if c.WantShutdown(shutdownChan) {
 			c.conn.Close() // Close connection on shutdown
-			c.conn = nil
+			c.ForceClose = true
 			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
 			return fmt.Errorf("shutdown requested")
 		}
@@ -707,8 +707,8 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 		}
 
 		if c.WantShutdown(shutdownChan) {
-			c.conn.Close() // Close connection on shutdown
-			c.conn = nil
+			c.conn.Close() // Close connection on limit reached
+			c.ForceClose = true
 			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
 			return fmt.Errorf("shutdown requested")
 		}
@@ -821,7 +821,7 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 	for {
 		if lineCount >= maxReadLines {
 			c.conn.Close() // Close connection on limit reached
-			c.conn = nil
+			c.ForceClose = true
 			return nil, fmt.Errorf("too many lines in response (limit: %d)", maxReadLines)
 		}
 
@@ -1047,6 +1047,10 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, erro
 		return nil, fmt.Errorf("not connected")
 	}
 
+	if c.ModeReader {
+		return nil, fmt.Errorf("cannot check article in reader mode")
+	}
+
 	if len(messageIDs) == 0 {
 		return nil, fmt.Errorf("no message IDs provided")
 	}
@@ -1134,6 +1138,9 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 	if !c.connected {
 		return 0, fmt.Errorf("not connected")
 	}
+	if c.ModeReader {
+		return 0, fmt.Errorf("cannot send article in reader mode")
+	}
 
 	// Prepare article for transfer
 	headers, err := common.ReconstructHeaders(article, true, nntphostname)
@@ -1152,12 +1159,14 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 	// Send headers
 	for _, headerLine := range headers {
 		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
+			c.writer.Flush()
 			return 0, fmt.Errorf("failed to write header: %w", err)
 		}
 	}
 
 	// Send empty line between headers and body
 	if _, err := c.writer.WriteString(CRLF); err != nil {
+		c.writer.Flush()
 		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
 	}
 
@@ -1179,12 +1188,14 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 		}
 
 		if _, err := c.writer.WriteString(line + CRLF); err != nil {
+			c.writer.Flush()
 			return 0, fmt.Errorf("failed to write body line: %w", err)
 		}
 	}
 
 	// Send termination line (single dot)
 	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
+		c.writer.Flush()
 		return 0, fmt.Errorf("failed to send article terminator: %w", err)
 	}
 
@@ -1219,6 +1230,9 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	if !c.connected {
 		return 0, fmt.Errorf("not connected")
 	}
+	if c.ModeReader {
+		return 0, fmt.Errorf("cannot send article in reader mode")
+	}
 
 	// Prepare article for transfer
 	headers, err := common.ReconstructHeaders(article, true, nntphostname)
@@ -1237,12 +1251,14 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	// Send headers
 	for _, headerLine := range headers {
 		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
+			c.writer.Flush()
 			return 0, fmt.Errorf("failed to write header: %w", err)
 		}
 	}
 
 	// Send empty line between headers and body
 	if _, err := c.writer.WriteString(CRLF); err != nil {
+		c.writer.Flush()
 		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
 	}
 
@@ -1264,12 +1280,14 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 		}
 
 		if _, err := c.writer.WriteString(line + CRLF); err != nil {
+			c.writer.Flush()
 			return 0, fmt.Errorf("failed to write body line: %w", err)
 		}
 	}
 
 	// Send termination line (single dot)
 	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
+		c.writer.Flush()
 		return 0, fmt.Errorf("failed to send article terminator: %w", err)
 	}
 
@@ -1326,13 +1344,40 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 	}
 
 	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id)
-
 	// Read response to POST command
 	code, line, err := c.textConn.ReadCodeLine(340)
-	if err != nil {
+	if err != nil && code == 0 {
+		c.textConn.EndResponse(id)
 		return code, fmt.Errorf("POST command failed: %s", line)
 	}
+
+	switch code {
+	case 340:
+		defer c.textConn.EndResponse(id)
+
+	case 401:
+		if strings.ToLower(line) == "mode reader" {
+			if err := c.SwitchMode(MODE_READER_MV); err != nil {
+				return code, fmt.Errorf("POST failed and switching to reader mode failed: %w", err)
+			}
+
+			// Send POST command again
+			id, err := c.textConn.Cmd("POST")
+			if err != nil {
+				return 0, fmt.Errorf("failed to send POST command: %w", err)
+			}
+			c.textConn.StartResponse(id)
+			// Read response to POST command
+			code, line, err = c.textConn.ReadCodeLine(340)
+			if err != nil {
+				c.textConn.EndResponse(id)
+				return code, fmt.Errorf("POST command failed: %s", line)
+			}
+			defer c.textConn.EndResponse(id)
+			c.ModeReader = true
+		}
+	}
+
 	if code != 340 {
 		return code, fmt.Errorf("POST command rejected (code %d): %s", code, line)
 	}
@@ -1340,12 +1385,14 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 	// Send headers using writer (not DotWriter)
 	for _, headerLine := range headers {
 		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
+			c.writer.Flush()
 			return 0, fmt.Errorf("failed to write header: %w", err)
 		}
 	}
 
 	// Send empty line between headers and body
 	if _, err := c.writer.WriteString(CRLF); err != nil {
+		c.writer.Flush()
 		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
 	}
 
@@ -1367,12 +1414,14 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 		}
 
 		if _, err := c.writer.WriteString(line + CRLF); err != nil {
+			c.writer.Flush()
 			return 0, fmt.Errorf("failed to write body line: %w", err)
 		}
 	}
 
 	// Send termination line (single dot)
 	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
+		c.writer.Flush()
 		return 0, fmt.Errorf("failed to send article terminator: %w", err)
 	}
 
@@ -1391,4 +1440,84 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 	// 240 - article posted successfully
 	// 441 - posting failed
 	return code, nil
+}
+
+// SwitchMode switches the NNTP connection to a specific mode
+// Supported modes: "reader", "stream"
+func (c *BackendConn) SwitchMode(mode int) error {
+	switch mode {
+	case MODE_READER_MV:
+		return c.SwitchToModeReader()
+	case MODE_STREAM_MV:
+		return c.SwitchToModeStream()
+	default:
+		return fmt.Errorf("unsupported mode: %d (supported: reader, stream)", mode)
+	}
+}
+
+// SwitchToModeReader switches the connection to MODE READER
+func (c *BackendConn) SwitchToModeReader() error {
+
+	if c.ModeReader {
+		// Already in reader mode
+		return nil
+	}
+
+	c.lastUsed = time.Now()
+
+	// Send MODE READER command
+	id, err := c.textConn.Cmd("MODE READER")
+	if err != nil {
+		return fmt.Errorf("failed to send MODE READER command: %w", err)
+	}
+
+	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id)
+
+	code, line, err := c.textConn.ReadCodeLine(200)
+	if err != nil {
+		return fmt.Errorf("failed to read MODE READER response: %w", err)
+	}
+
+	if code != 200 {
+		return fmt.Errorf("MODE READER failed (code %d): %s", code, line)
+	}
+
+	c.ModeReader = true
+	return nil
+}
+
+// SwitchToModeStream switches the connection to MODE STREAM
+func (c *BackendConn) SwitchToModeStream() error {
+
+	if c.ModeStream {
+		// Already in stream mode
+		return nil
+	}
+	if c.ModeReader {
+		return fmt.Errorf("cannot switch from MODE READER to MODE STREAM on same connection")
+	}
+
+	c.lastUsed = time.Now()
+
+	// Send MODE STREAM command
+	id, err := c.textConn.Cmd("MODE STREAM")
+	if err != nil {
+		return fmt.Errorf("failed to send MODE STREAM command: %w", err)
+	}
+
+	c.textConn.StartResponse(id)
+	defer c.textConn.EndResponse(id)
+
+	code, line, err := c.textConn.ReadCodeLine(203)
+	if err != nil {
+		return fmt.Errorf("failed to read MODE STREAM response: %w", err)
+	}
+
+	if code != 203 {
+		return fmt.Errorf("MODE STREAM failed (code %d): %s", code, line)
+	}
+
+	c.ModeStream = true
+	return nil
 }
