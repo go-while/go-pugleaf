@@ -164,7 +164,7 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 	}
 
 	// If password change is requested
-	if currentPassword != "" || newPassword != "" || confirmPassword != "" {
+	if currentPassword != "" && newPassword != "" && confirmPassword != "" {
 
 		// Validate new password
 		if newPassword != confirmPassword {
