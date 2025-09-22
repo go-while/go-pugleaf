@@ -319,8 +319,18 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		}
 		return
 	}
-
+	displayName := strings.TrimSpace(session.User.DisplayName)
+	if displayName != "" && !strings.Contains(displayName, "<") && !strings.Contains(displayName, ">") {
+		displayName = fmt.Sprintf("%s <%s@%s>", session.User.DisplayName, session.User.DisplayName, processor.LocalNNTPHostname)
+	}
+	if displayName == "" {
+		// Fallback if display name is empty
+		displayName = fmt.Sprintf("Lorem Ipsum <oops@%s>", processor.LocalNNTPHostname)
+	}
 	var headers []string
+	headers = append(headers, "MIME-Version: 1.0")
+	headers = append(headers, "Content-Type: text/plain; charset=\"UTF-8\"")
+	headers = append(headers, "Content-Transfer-Encoding: 8bit")
 	headers = append(headers, "Newsgroups: "+strings.Join(newsgroups, ","))
 	// Injection-Info / X-Trace header for tracking
 	headers = append(headers, "X-pugleaf-Trace: "+processor.LocalNNTPHostname+";")
@@ -332,7 +342,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		MessageID:   generateMessageID(),
 		Subject:     subject,
 		HeadersJSON: strings.Join(headers, "\n"),
-		FromHeader:  fmt.Sprintf("%s <%s>", session.User.DisplayName, session.User.DisplayName+"@"+processor.LocalNNTPHostname),
+		FromHeader:  displayName,
 		DateString:  time.Now().Format(time.RFC1123Z),
 		BodyText:    body,
 		IsThrRoot:   !isReply, // Only new threads are thread roots
@@ -345,10 +355,6 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		Headers:     make(map[string][]string, 6),
 	}
 	article.Headers["newsgroups"] = []string{strings.Join(newsgroups, ",")}
-	//article.Headers["subject"] = []string{subject}
-	//article.Headers["from"] = []string{article.FromHeader}
-	//article.Headers["date"] = []string{article.DateString}
-	//article.Headers["message-id"] = []string{article.MessageID}
 	// If this is a reply, set up References header
 	if isReply {
 		log.Printf("Setting up References header for reply to message ID: %s", messageID)
