@@ -9,7 +9,7 @@
 
 {{define "content"}}
 <div class="row">
-    <div class="col-md-8">
+    <div class="col-md-6">
         <div class="card">
             <div class="card-header">
                 <h4 class="card-title mb-0">👤 User Profile</h4>
@@ -28,6 +28,7 @@
                 {{end}}
 
                 <form method="POST" action="/profile">
+                <!--
                     <div class="row">
                         <div class="col-md-6">
                             <div class="mb-3">
@@ -37,53 +38,55 @@
                                 <div class="form-text">Username cannot be changed</div>
                             </div>
                         </div>
-                        <div class="col-md-6">
+                    </div>
+                -->
+                    <div class="row">
                             <div class="mb-3">
                                 <label for="email" class="form-label">Email Address</label>
                                 <input type="email" class="form-control" id="email" name="email" required
                                     value="{{.User.Email}}">
                             </div>
-                        </div>
                     </div>
 
-                    <div class="mb-3">
-                        <label for="display_name" class="form-label">Display Name</label>
-                        <input type="text" class="form-control" id="display_name" name="display_name"
-                            value="{{.User.DisplayName}}" placeholder="Your display name (optional)">
-                        <div class="form-text">How your name appears in posts</div>
+                    <div class="row">
+                            <div class="mb-3">
+                                <label for="display_name" class="form-label">Display Name</label>
+                                <input type="text" class="form-control" id="display_name" name="display_name"
+                                    value="{{.User.DisplayName}}" placeholder="Your display name (optional)">
+                                <div class="form-text">How your name appears in posts</div>
+                            </div>
                     </div>
 
                     <hr>
 
                     <h5>Change Password</h5>
                     <div class="row">
-                        <div class="col-md-4">
                             <div class="mb-3">
                                 <label for="current_password" class="form-label">Current Password</label>
                                 <input autocomplete="new-password" type="password" class="form-control"
                                     id="current_password" name="current_password" placeholder="Enter current password">
                             </div>
-                        </div>
-                        <div class="col-md-4">
+                    </div>
+                    <div class="row">
                             <div class="mb-3">
                                 <label for="new_password" class="form-label">New Password</label>
                                 <input autocomplete="new-password" type="password" class="form-control"
                                     id="new_password" name="new_password" placeholder="Enter new password">
                             </div>
-                        </div>
-                        <div class="col-md-4">
+                    </div>
+                    <div class="row">
                             <div class="mb-3">
                                 <label for="confirm_password" class="form-label">Confirm New Password</label>
                                 <input autocomplete="new-password" type="password" class="form-control"
                                     id="confirm_password" name="confirm_password" placeholder="Confirm new password">
                             </div>
-                        </div>
                     </div>
-
-                    <div class="d-grid d-md-flex justify-content-md-end">
-                        <button type="submit" class="btn btn-primary">
-                            💾 Update Profile
-                        </button>
+                    <div class="row">
+                            <div class="mb-3">
+                                <button type="submit" class="btn btn-primary">
+                                    💾 Update Profile
+                                </button>
+                            </div>
                     </div>
                 </form>
             </div>
@@ -114,22 +117,40 @@
         </div>
     </div>
     -->
-    <div class="col-md-4">
+    <div class="col-md-6">
+
+    <!--
+        {{if .IsAdmin}}
+        <div class="card mt-3">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Administration</h5>
+            </div>
+            <div class="card-body">
+                <div class="d-grid">
+                    <a href="/admin" class="btn btn-warning">
+                        🛠️ Admin Panel
+                    </a>
+                </div>
+            </div>
+        </div>
+        {{end}}
+    -->
         <div class="card">
             <div class="card-header">
                 <h5 class="card-title mb-0">Account Information</h5>
             </div>
             <div class="card-body">
                 <dl class="row">
+                    <!--
                     <dt class="col-sm-4">User ID:</dt>
                     <dd class="col-sm-8">{{.User.ID}}</dd>
-
+                    -->
                     <dt class="col-sm-4">Username:</dt>
                     <dd class="col-sm-8">{{.User.Username}}</dd>
-
+                    <!--
                     <dt class="col-sm-4">Email:</dt>
                     <dd class="col-sm-8">{{.User.Email}}</dd>
-
+                    -->
                     <dt class="col-sm-4">Status:</dt>
                     <dd class="col-sm-8">
                         {{if .User.Verified}}
@@ -164,7 +185,7 @@
                     <dt class="col-sm-4">Joined:</dt>
                     <dd class="col-sm-8">{{.Joined}}</dd>
                 </dl>
-
+                <!--
                 <hr>
 
                 <div class="d-grid">
@@ -172,23 +193,9 @@
                         🚪 Logout
                     </a>
                 </div>
+                -->
             </div>
         </div>
-
-        {{if .IsAdmin}}
-        <div class="card mt-3">
-            <div class="card-header">
-                <h5 class="card-title mb-0">Administration</h5>
-            </div>
-            <div class="card-body">
-                <div class="d-grid">
-                    <a href="/admin" class="btn btn-warning">
-                        🛠️ Admin Panel
-                    </a>
-                </div>
-            </div>
-        </div>
-        {{end}}
 
         {{if .NNTPUser}}
         <div class="card mt-3">
