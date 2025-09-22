@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -209,6 +210,43 @@ func (s *WebServer) adminUpdateUser(c *gin.Context) {
 
 	// Update display name (we need to add this method)
 	// For now, just update email
+
+	// Handle NNTP user updates if NNTP ID is provided
+	nntpIDStr := strings.TrimSpace(c.PostForm("nntp_id"))
+	if nntpIDStr != "" {
+		nntpID, err := strconv.Atoi(nntpIDStr)
+		if err == nil {
+			// Update NNTP user permissions
+			nntpMaxConnsStr := strings.TrimSpace(c.PostForm("nntp_maxconns"))
+			nntpPosting := c.PostForm("nntp_posting") == "on"
+			nntpPassword := strings.TrimSpace(c.PostForm("nntp_password"))
+
+			// Update NNTP permissions
+			if nntpMaxConnsStr != "" {
+				if parsed, err := strconv.Atoi(nntpMaxConnsStr); err == nil && parsed >= 1 && parsed <= 10 {
+					err = s.DB.UpdateNNTPUserPermissions(nntpID, parsed, nntpPosting)
+					if err != nil {
+						log.Printf("Error updating NNTP user permissions: %v", err)
+						session.SetError("Failed to update NNTP user permissions")
+						c.Redirect(http.StatusSeeOther, "/admin?tab=users")
+						return
+					}
+				}
+			}
+
+			// Update NNTP password if provided
+			if nntpPassword != "" {
+				err = s.DB.UpdateNNTPUserPassword(nntpID, nntpPassword)
+				if err != nil {
+					log.Printf("Error updating NNTP user password: %v", err)
+					session.SetError("Failed to update NNTP user password")
+					c.Redirect(http.StatusSeeOther, "/admin?tab=users")
+					return
+				}
+			}
+		}
+	}
+
 	session.SetSuccess("User updated successfully")
 	c.Redirect(http.StatusSeeOther, "/admin?tab=users")
 }

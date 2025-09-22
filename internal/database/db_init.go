@@ -358,17 +358,21 @@ func (db *Database) LoadDefaultProviders() error {
 		// If provider doesn't exist, add it
 		if existing == nil {
 			provider := &models.Provider{
-				Name:       p.Name,
-				Enabled:    p.Enabled,
-				Priority:   p.Priority,
-				Grp:        p.Grp,
-				Host:       p.Host,
-				Port:       p.Port,
-				SSL:        p.SSL,
-				Username:   p.Username,
-				Password:   p.Password,
-				MaxConns:   p.MaxConns,
-				MaxArtSize: p.MaxArtSize,
+				Name:         p.Name,
+				Enabled:      p.Enabled,
+				Priority:     p.Priority,
+				Grp:          p.Grp,
+				Host:         p.Host,
+				Port:         p.Port,
+				SSL:          p.SSL,
+				Username:     p.Username,
+				Password:     p.Password,
+				MaxConns:     p.MaxConns,
+				MaxArtSize:   p.MaxArtSize,
+				ProxyEnabled: p.ProxyEnabled,
+				ProxyType:    p.ProxyType,
+				ProxyHost:    p.ProxyHost,
+				ProxyPort:    p.ProxyPort,
 			}
 
 			err = db.AddProvider(provider)

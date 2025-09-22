@@ -69,6 +69,17 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		}
 	}
 
+	// Create a map of user IDs to their NNTP users
+	userNNTPMap := make(map[int64]*models.NNTPUser)
+	if users != nil {
+		for _, user := range users {
+			nntpUser, err := s.DB.GetNNTPUserByWebUserID(user.ID)
+			if err == nil && nntpUser != nil {
+				userNNTPMap[user.ID] = nntpUser
+			}
+		}
+	}
+
 	// Get newsgroups with pagination and search
 	page := 1
 	pageSize := 50 // Static page size for newsgroups (cache efficiency)
@@ -148,6 +159,18 @@ func (s *WebServer) adminPage(c *gin.Context) {
 
 	// Get all NNTP users
 	var nntpUsers []*models.NNTPUser
+	nntpUserSearch := c.Query("nntp_user_search")
+
+	// Only search NNTP users if search term is provided and has at least 2 characters
+	if nntpUserSearch != "" && len(strings.TrimSpace(nntpUserSearch)) >= 2 {
+		var err error
+		nntpUsers, err = s.DB.SearchNNTPUsers(strings.TrimSpace(nntpUserSearch), 100) // Limit to 100 results for performance
+		if err != nil {
+			log.Printf("Failed to search NNTP users: %v", err)
+			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to search NNTP users")
+			return
+		}
+	}
 	/*
 		nntpUsers, err := s.DB.GetAllNNTPUsers()
 		if err != nil {
@@ -396,6 +419,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		Users:                 users,
 		UserSearch:            userSearch,
 		Nonce:                 nonce,
+		UserNNTPMap:           userNNTPMap,
 		Newsgroups:            newsgroups,
 		NewsgroupPagination:   newsgroupPagination,
 		NewsgroupSearch:       searchTerm,
@@ -403,6 +427,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		APITokens:             apiTokens,
 		AIModels:              aiModels,
 		NNTPUsers:             nntpUsers,
+		NNTPUserSearch:        nntpUserSearch,
 		SiteNews:              siteNews,
 		Sections:              sections,
 		SectionGroups:         sectionGroups,

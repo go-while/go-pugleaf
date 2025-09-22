@@ -53,6 +53,46 @@ func (db *Database) GetNNTPUserByID(id int) (*models.NNTPUser, error) {
 	return &u, nil
 }
 
+// GetNNTPUserByWebUserID retrieves an NNTP user by web user ID
+func (db *Database) GetNNTPUserByWebUserID(webUserID int64) (*models.NNTPUser, error) {
+	query := `SELECT id, username, password, maxconns, posting, web_user_id, created_at, updated_at, last_login, is_active
+	          FROM nntp_users WHERE web_user_id = ? AND is_active = 1`
+
+	var u models.NNTPUser
+	err := retryableQueryRowScan(db.mainDB, query, []interface{}{webUserID}, &u.ID, &u.Username, &u.Password, &u.MaxConns, &u.Posting, &u.WebUserID,
+		&u.CreatedAt, &u.UpdatedAt, &u.LastLogin, &u.IsActive)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// SearchNNTPUsers searches for NNTP users by username with a limit
+func (db *Database) SearchNNTPUsers(searchTerm string, limit int) ([]*models.NNTPUser, error) {
+	query := `SELECT id, username, password, maxconns, posting, web_user_id, created_at, updated_at, last_login, is_active
+	          FROM nntp_users
+	          WHERE username LIKE ?
+	          ORDER BY username
+	          LIMIT ?`
+
+	searchPattern := "%" + searchTerm + "%"
+	rows, err := retryableQuery(db.mainDB, query, searchPattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var nntpUsers []*models.NNTPUser
+	for rows.Next() {
+		var u models.NNTPUser
+		if err := rows.Scan(&u.ID, &u.Username, &u.Password, &u.MaxConns, &u.Posting, &u.WebUserID, &u.CreatedAt, &u.UpdatedAt, &u.LastLogin, &u.IsActive); err != nil {
+			return nil, err
+		}
+		nntpUsers = append(nntpUsers, &u)
+	}
+	return nntpUsers, nil
+}
+
 // GetAllNNTPUsers retrieves all NNTP users
 func (db *Database) GetAllNNTPUsers() ([]*models.NNTPUser, error) {
 	query := `SELECT id, username, password, maxconns, posting, web_user_id, created_at, updated_at, last_login, is_active

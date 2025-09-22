@@ -23,8 +23,9 @@ type SpamArticleInfo struct {
 type AdminPageData struct {
 	TemplateData
 	Users                 []*models.User
-	UserSearch            string // Added for user search functionality
-	Nonce                 string // Added for nonce input in hash search
+	UserSearch            string                     // Added for user search functionality
+	Nonce                 string                     // Added for nonce input in hash search
+	UserNNTPMap           map[int64]*models.NNTPUser // Added for NNTP user mapping
 	Newsgroups            []*models.Newsgroup
 	NewsgroupPagination   *models.PaginationInfo
 	NewsgroupSearch       string
@@ -32,6 +33,7 @@ type AdminPageData struct {
 	APITokens             []*database.APIToken
 	AIModels              []*models.AIModel
 	NNTPUsers             []*models.NNTPUser
+	NNTPUserSearch        string // Added for NNTP user search functionality
 	SiteNews              []*models.SiteNews     // Added for site news management
 	Sections              []*models.Section      // Added for section management
 	SectionGroups         []*models.SectionGroup // Added for section-newsgroup assignments

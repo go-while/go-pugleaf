@@ -97,7 +97,7 @@
                                   <th>Active</th>
                                   <th>Count</th>
                                   <th>Last</th>
-                                  <th>Expiry | Max</th>
+                                  <th>Exp | MA | MS</th>
                                   <th>Actions</th>
                                   <th>Delete</th>
                               </tr>
@@ -175,7 +175,7 @@
                                   </td>
                                   <td>{{.MessageCount}}</td>
                                   <td>{{if .LastArticle}}{{.LastArticle}}{{else}}-{{end}}</td>
-                                  <td>{{.ExpiryDays}}d | {{.MaxArticles}}{{if .MaxArtSize}} | {{.MaxArtSize}}B{{end}}</td>
+                                  <td>{{.ExpiryDays}}d | {{.MaxArticles}} | {{.MaxArtSize}}B</td>
                                   <td>
                                       <form method="POST" action="/admin/newsgroups/migrate-activity" style="display: inline;">
                                           <input type="hidden" name="newsgroup_name" value="{{.Name}}">

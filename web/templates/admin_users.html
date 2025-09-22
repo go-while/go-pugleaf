@@ -1,6 +1,280 @@
 {{define "admin_users"}}
 <!-- Users Tab -->
 <div class="tab-pane fade show active" id="users" role="tabpanel" aria-labelledby="users-tab">
+
+  <!-- User List -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <div class="d-flex justify-content-between align-items-center">
+                      <h5 class="card-title mb-0">👥 User Management</h5>
+                      <span class="badge bg-light text-dark">{{if .Users}}{{len .Users}} users found{{else}}Search users{{end}}</span>
+                  </div>
+              </div>
+              <div class="card-body">
+                  <!-- User Search Form -->
+                  <div class="row mb-3">
+                      <div class="col-md-8">
+                          <form method="GET" action="/admin" class="d-flex">
+                              <input type="hidden" name="tab" value="users">
+                              <input type="text" class="form-control me-2" name="user_search"
+                                     placeholder="Search users by username, email, or display name..."
+                                     value="{{.UserSearch}}" minlength="2">
+                              <input type="text" class="form-control me-2" name="nonce"
+                                     placeholder="Nonce (for hash search)"
+                                     value="{{.Nonce}}" title="Optional: Enter nonce to search by computed hash">
+                              <button type="submit" class="btn btn-outline-primary">Search</button>
+                          </form>
+                      </div>
+                      <div class="col-md-4 text-end">
+                          {{if .UserSearch}}
+                          <a href="/admin?tab=users" class="btn btn-outline-secondary">Clear Search</a>
+                          {{else}}
+                          <small class="text-muted">
+                              Regular search: Enter username/email<br>
+                              Hash search: Enter computed hash + nonce
+                          </small>
+                          {{end}}
+                      </div>
+                  </div>
+
+                  {{if .Users}}
+                  <div class="table-responsive">
+                      <table class="table table-striped">
+                          <thead>
+                              <tr>
+                                  <th>ID</th>
+                                  <th>Username</th>
+                                  <th>Email</th>
+                                  <th>Display Name</th>
+                                  <th>Status</th>
+                                  <th>NNTP</th>
+                                  <th>Posts</th>
+                                  <th>Created</th>
+                                  <th>Actions</th>
+                              </tr>
+                          </thead>
+                          <tbody>
+                              {{range .Users}}
+                              <tr>
+                                  <td>{{.ID}}</td>
+                                  <td><strong>{{.Username}}</strong></td>
+                                  <td>{{.Email}}</td>
+                                  <td>{{if .DisplayName}}{{.DisplayName}}{{else}}<em>None</em>{{end}}</td>
+                                  <td>
+                                      <div class="d-flex flex-wrap gap-1">
+                                          {{if .Verified}}<span class="badge bg-success">Verified</span>{{else}}<span class="badge bg-warning">Unverified</span>{{end}}
+                                          {{if .Disabled}}<span class="badge bg-danger">Disabled</span>{{else}}<span class="badge bg-success">Active</span>{{end}}
+                                          {{if .NoPosting}}<span class="badge bg-secondary">Read-Only</span>{{else}}<span class="badge bg-info">Can Post</span>{{end}}
+                                      </div>
+                                  </td>
+                                  <td>
+                                      {{$nntpUser := index $.UserNNTPMap .ID}}
+                                      {{if $nntpUser}}
+                                      <div class="text-center">
+                                          {{if $nntpUser.IsActive}}
+                                          <span class="badge bg-success">📡 Active</span>
+                                          {{else}}
+                                          <span class="badge bg-warning">📡 Inactive</span>
+                                          {{end}}
+                                          <br><small class="text-muted">{{$nntpUser.Username}}</small>
+                                      </div>
+                                      {{else}}
+                                      <span class="text-muted text-center">No NNTP</span>
+                                      {{end}}
+                                  </td>
+                                  <td>
+                                      <div class="text-center">
+                                          <strong>{{.PostCount}}</strong>
+                                          {{if .LastPostUnix}}<br><small class="text-muted">Last: {{.LastPostUnix}}</small>{{end}}
+                                      </div>
+                                  </td>
+                                  <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+                                  <td>
+                                    <div class="btn-group btn-group-sm">
+                                        <button type="button" class="btn btn-outline-primary btn-sm"
+                                                data-bs-toggle="collapse" data-bs-target="#edit-user-{{.ID}}">
+                                            Edit
+                                        </button>
+                                    <form method="POST" action="/admin/users/delete?tab=users" style="display: inline;">
+                                    <input type="hidden" name="user_id" value="{{.ID}}">
+                                        <button type="submit" class="btn btn-outline-danger btn-sm">
+                                        Delete
+                                    </button>
+                                    </form>
+                                    </div>
+                                  </td>
+                              </tr>
+                              <!-- Collapsible Edit Form -->
+                              <tr class="collapse" id="edit-user-{{.ID}}">
+                                  <td colspan="9">
+                                      <div class="card">
+                                          <div class="card-header bg-dark text-white">
+                                              <h6>Edit User: {{.Username}}</h6>
+                                          </div>
+                                          <div class="card-body">
+                                        <form method="POST" action="/admin/users/update?tab=users">
+                                            <input type="hidden" name="user_id" value="{{.ID}}">
+                                            <div class="row">
+                                                <div class="col-md-4">
+                                                    <div class="mb-3">
+                                                        <label class="form-label">Username</label>
+                                                        <input type="text" class="form-control" name="username" value="{{.Username}}" readonly>
+                                                    </div>
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <div class="mb-3">
+                                                        <label class="form-label">Email</label>
+                                                        <input type="email" class="form-control" name="email" value="{{.Email}}" required>
+                                                    </div>
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <div class="mb-3">
+                                                        <label class="form-label">Display Name</label>
+                                                        <input type="text" class="form-control" name="displayName" value="{{.DisplayName}}">
+                                                    </div>
+                                                </div>
+                                                </div>
+                                                <div class="row">
+                                                    <div class="col-md-6">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">New Password (leave blank to keep current)</label>
+                                                            <input type="password" class="form-control" name="password" minlength="6">
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-6">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Post Count</label>
+                                                            <input readonly type="number" class="form-control" name="post_count" value="{{.PostCount}}" min="0">
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div class="row">
+                                                    <div class="col-md-4">
+                                                        <div class="mb-3">
+                                                            <div class="form-check">
+                                                                <input class="form-check-input" type="checkbox" name="verified" value="1" {{if .Verified}}checked{{end}}>
+                                                                <label class="form-check-label">
+                                                                    Verified User
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-4">
+                                                        <div class="mb-3">
+                                                            <div class="form-check">
+                                                                <input class="form-check-input" type="checkbox" name="disabled" value="1" {{if .Disabled}}checked{{end}}>
+                                                                <label class="form-check-label">
+                                                                    Disabled (Cannot Login)
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-4">
+                                                        <div class="mb-3">
+                                                            <div class="form-check">
+                                                                <input class="form-check-input" type="checkbox" name="no_posting" value="1" {{if .NoPosting}}checked{{end}}>
+                                                                <label class="form-check-label">
+                                                                    Read-Only (No Posting)
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <!-- NNTP User Configuration -->
+                                                {{$nntpUser := index $.UserNNTPMap .ID}}
+                                                {{if $nntpUser}}
+                                                <div class="row mt-3">
+                                                    <div class="col-12">
+                                                        <h6 class="border-bottom pb-2">📡 NNTP User Configuration</h6>
+                                                    </div>
+                                                </div>
+                                                <div class="row">
+                                                    <div class="col-md-6">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">NNTP Username</label>
+                                                            <input type="text" class="form-control" value="{{$nntpUser.Username}}" readonly>
+                                                            <input type="hidden" name="nntp_id" value="{{$nntpUser.ID}}">
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-6">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">New NNTP Password (leave blank to keep current)</label>
+                                                            <input type="password" class="form-control" name="nntp_password" maxlength="16">
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div class="row">
+                                                    <div class="col-md-4">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">Max NNTP Connections</label>
+                                                            <input type="number" class="form-control" name="nntp_maxconns" value="{{$nntpUser.MaxConns}}" min="1" max="10">
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-4">
+                                                        <div class="mb-3">
+                                                            <div class="form-check mt-4">
+                                                                <input class="form-check-input" type="checkbox" name="nntp_posting" {{if $nntpUser.Posting}}checked{{end}}>
+                                                                <label class="form-check-label">
+                                                                    Allow NNTP Posting
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-4">
+                                                        <div class="mb-3">
+                                                            <label class="form-label">NNTP Status</label>
+                                                            <div class="mt-2">
+                                                                {{if $nntpUser.IsActive}}
+                                                                <span class="badge bg-success">Active</span>
+                                                                {{else}}
+                                                                <span class="badge bg-danger">Inactive</span>
+                                                                {{end}}
+                                                                {{if $nntpUser.LastLogin}}
+                                                                <br><small class="text-muted">Last: {{$nntpUser.LastLogin.Format "2006-01-02 15:04"}}</small>
+                                                                {{end}}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                {{else}}
+                                                <div class="row mt-3">
+                                                    <div class="col-12">
+                                                        <div class="alert alert-info">
+                                                            <strong>No NNTP User:</strong> This web user does not have an associated NNTP account.
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                {{end}}
+
+                                                <button type="submit" class="btn btn-primary">Update User</button>
+                                              </form>
+                                          </div>
+                                      </div>
+                                  </td>
+                              </tr>
+                              {{end}}
+                          </tbody>
+                      </table>
+                  </div>
+                  {{else}}
+                  {{if .UserSearch}}
+                  <div class="alert alert-info">
+                      <strong>No users found matching "{{.UserSearch}}".</strong> Try a different search term.
+                  </div>
+                  {{else}}
+                  <div class="alert alert-info">
+                      <strong>Use the search above to find users.</strong> Enter a username, email, or display name to search.
+                  </div>
+                  {{end}}
+                  {{end}}
+              </div>
+          </div>
+      </div>
+  </div>
+
   <!-- Create New User -->
   <div class="row mt-3">
       <div class="col-12">
@@ -82,194 +356,5 @@
       </div>
   </div>
 
-  <!-- User List -->
-  <div class="row mt-3">
-      <div class="col-12">
-          <div class="card">
-              <div class="card-header bg-dark text-white">
-                  <div class="d-flex justify-content-between align-items-center">
-                      <h5 class="card-title mb-0">👥 User Management</h5>
-                      <span class="badge bg-light text-dark">{{if .Users}}{{len .Users}} users found{{else}}Search users{{end}}</span>
-                  </div>
-              </div>
-              <div class="card-body">
-                  <!-- User Search Form -->
-                  <div class="row mb-3">
-                      <div class="col-md-8">
-                          <form method="GET" action="/admin" class="d-flex">
-                              <input type="hidden" name="tab" value="users">
-                              <input type="text" class="form-control me-2" name="user_search"
-                                     placeholder="Search users by username, email, or display name..."
-                                     value="{{.UserSearch}}" minlength="2">
-                              <input type="text" class="form-control me-2" name="nonce"
-                                     placeholder="Nonce (for hash search)"
-                                     value="{{.Nonce}}" title="Optional: Enter nonce to search by computed hash">
-                              <button type="submit" class="btn btn-outline-primary">Search</button>
-                          </form>
-                      </div>
-                      <div class="col-md-4 text-end">
-                          {{if .UserSearch}}
-                          <a href="/admin?tab=users" class="btn btn-outline-secondary">Clear Search</a>
-                          {{else}}
-                          <small class="text-muted">
-                              Regular search: Enter username/email<br>
-                              Hash search: Enter computed hash + nonce
-                          </small>
-                          {{end}}
-                      </div>
-                  </div>
-
-                  {{if .Users}}
-                  <div class="table-responsive">
-                      <table class="table table-striped">
-                          <thead>
-                              <tr>
-                                  <th>ID</th>
-                                  <th>Username</th>
-                                  <th>Email</th>
-                                  <th>Display Name</th>
-                                  <th>Status</th>
-                                  <th>Posts</th>
-                                  <th>Created</th>
-                                  <th>Actions</th>
-                              </tr>
-                          </thead>
-                          <tbody>
-                              {{range .Users}}
-                              <tr>
-                                  <td>{{.ID}}</td>
-                                  <td><strong>{{.Username}}</strong></td>
-                                  <td>{{.Email}}</td>
-                                  <td>{{if .DisplayName}}{{.DisplayName}}{{else}}<em>None</em>{{end}}</td>
-                                  <td>
-                                      <div class="d-flex flex-wrap gap-1">
-                                          {{if .Verified}}<span class="badge bg-success">Verified</span>{{else}}<span class="badge bg-warning">Unverified</span>{{end}}
-                                          {{if .Disabled}}<span class="badge bg-danger">Disabled</span>{{else}}<span class="badge bg-success">Active</span>{{end}}
-                                          {{if .NoPosting}}<span class="badge bg-secondary">Read-Only</span>{{else}}<span class="badge bg-info">Can Post</span>{{end}}
-                                      </div>
-                                  </td>
-                                  <td>
-                                      <div class="text-center">
-                                          <strong>{{.PostCount}}</strong>
-                                          {{if .LastPostUnix}}<br><small class="text-muted">Last: {{.LastPostUnix}}</small>{{end}}
-                                      </div>
-                                  </td>
-                                  <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
-                                  <td>
-                                    <div class="btn-group btn-group-sm">
-                                        <button type="button" class="btn btn-outline-primary btn-sm"
-                                                data-bs-toggle="collapse" data-bs-target="#edit-user-{{.ID}}">
-                                            Edit
-                                        </button>
-                                    <form method="POST" action="/admin/users/delete?tab=users" style="display: inline;">
-                                    <input type="hidden" name="user_id" value="{{.ID}}">
-                                        <button type="submit" class="btn btn-outline-danger btn-sm">
-                                        Delete
-                                    </button>
-                                    </form>
-                                    </div>
-                                  </td>
-                              </tr>
-                              <!-- Collapsible Edit Form -->
-                              <tr class="collapse" id="edit-user-{{.ID}}">
-                                  <td colspan="8">
-                                      <div class="card">
-                                          <div class="card-header bg-dark text-white">
-                                              <h6>Edit User: {{.Username}}</h6>
-                                          </div>
-                                          <div class="card-body">
-                                        <form method="POST" action="/admin/users/update?tab=users">
-                                            <input type="hidden" name="user_id" value="{{.ID}}">
-                                            <div class="row">
-                                                <div class="col-md-4">
-                                                    <div class="mb-3">
-                                                        <label class="form-label">Username</label>
-                                                        <input type="text" class="form-control" name="username" value="{{.Username}}" readonly>
-                                                    </div>
-                                                </div>
-                                                <div class="col-md-4">
-                                                    <div class="mb-3">
-                                                        <label class="form-label">Email</label>
-                                                        <input type="email" class="form-control" name="email" value="{{.Email}}" required>
-                                                    </div>
-                                                </div>
-                                                <div class="col-md-4">
-                                                    <div class="mb-3">
-                                                        <label class="form-label">Display Name</label>
-                                                        <input type="text" class="form-control" name="displayName" value="{{.DisplayName}}">
-                                                    </div>
-                                                </div>
-                                                </div>
-                                                <div class="row">
-                                                    <div class="col-md-6">
-                                                        <div class="mb-3">
-                                                            <label class="form-label">New Password (leave blank to keep current)</label>
-                                                            <input type="password" class="form-control" name="password" minlength="6">
-                                                        </div>
-                                                    </div>
-                                                    <div class="col-md-6">
-                                                        <div class="mb-3">
-                                                            <label class="form-label">Post Count</label>
-                                                            <input readonly type="number" class="form-control" name="post_count" value="{{.PostCount}}" min="0">
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                                <div class="row">
-                                                    <div class="col-md-4">
-                                                        <div class="mb-3">
-                                                            <div class="form-check">
-                                                                <input class="form-check-input" type="checkbox" name="verified" value="1" {{if .Verified}}checked{{end}}>
-                                                                <label class="form-check-label">
-                                                                    Verified User
-                                                                </label>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <div class="col-md-4">
-                                                        <div class="mb-3">
-                                                            <div class="form-check">
-                                                                <input class="form-check-input" type="checkbox" name="disabled" value="1" {{if .Disabled}}checked{{end}}>
-                                                                <label class="form-check-label">
-                                                                    Disabled (Cannot Login)
-                                                                </label>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <div class="col-md-4">
-                                                        <div class="mb-3">
-                                                            <div class="form-check">
-                                                                <input class="form-check-input" type="checkbox" name="no_posting" value="1" {{if .NoPosting}}checked{{end}}>
-                                                                <label class="form-check-label">
-                                                                    Read-Only (No Posting)
-                                                                </label>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                                <button type="submit" class="btn btn-primary">Update User</button>
-                                              </form>
-                                          </div>
-                                      </div>
-                                  </td>
-                              </tr>
-                              {{end}}
-                          </tbody>
-                      </table>
-                  </div>
-                  {{else}}
-                  {{if .UserSearch}}
-                  <div class="alert alert-info">
-                      <strong>No users found matching "{{.UserSearch}}".</strong> Try a different search term.
-                  </div>
-                  {{else}}
-                  <div class="alert alert-info">
-                      <strong>Use the search above to find users.</strong> Enter a username, email, or display name to search.
-                  </div>
-                  {{end}}
-                  {{end}}
-              </div>
-          </div>
-      </div>
-  </div>
 </div>
 {{end}}
