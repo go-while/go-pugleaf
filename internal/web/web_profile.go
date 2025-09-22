@@ -60,19 +60,14 @@ func (s *WebServer) profilePage(c *gin.Context) {
 		s.renderError(c, http.StatusInternalServerError, "Config Error", "Failed to load NNTP server address")
 		return
 	}
-
-	successMsg := session.GetSuccess()
-	errorMsg := session.GetError()
-	log.Printf("Profile page for user %d - Success: '%s', Error: '%s'", session.UserID, successMsg, errorMsg)
-
 	data := ProfilePageData{
 		TemplateData:        s.getBaseTemplateData(c, "Profile"),
 		User:                user,
 		Joined:              joined,
 		NNTPUser:            nntpUser,
 		LocalNNTPServerAddr: localNNTPaddr,
-		Error:               errorMsg,
-		Success:             successMsg,
+		Error:               session.GetError(),
+		Success:             session.GetSuccess(),
 	}
 
 	// Load template
@@ -137,9 +132,8 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 		// Invalidate auth cache for this user
 		s.DB.InvalidateNNTPUserAuth(nntpUser.Username)
 
-		successMsg := fmt.Sprintf("NNTP password reset successfully. New password: %s", newNNTPPassword)
-		session.SetSuccess(successMsg)
-		log.Printf("User %d reset NNTP password. Success message set: %s", user.ID, successMsg)
+		session.SetSuccess(fmt.Sprintf("NNTP password reset successfully. New password: %s", newNNTPPassword))
+		log.Printf("User %d reseted NNTP password", user.ID)
 		c.Redirect(http.StatusSeeOther, "/profile")
 		return
 	}
