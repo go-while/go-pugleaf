@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite3 driver
@@ -134,13 +135,7 @@ func (db *Database) removePartialInitializedGroupDB(groupName string) {
 func (db *Database) Shutdown() error {
 	var errs []error
 
-	// STEP 1: Mark shutdown as in progress
-	if err := db.SetShutdownState(ShutdownStateInProgress); err != nil {
-		log.Printf("[DATABASE] Warning: Failed to set shutdown state: %v", err)
-		// Continue with shutdown even if we can't update the state
-	}
-
-	// STEP 2: Close per-group databases first (thousands of them)
+	// Close per-group databases first (thousands of them)
 	db.MainMutex.Lock()
 	log.Printf("[DATABASE] Closing %d group databases...", len(db.groupDBs))
 	groupCloseErrors := 0
@@ -165,13 +160,7 @@ func (db *Database) Shutdown() error {
 	db.MainMutex.Unlock()
 	log.Printf("[DATABASE] Group databases closed")
 
-	// STEP 4: Mark shutdown as clean BEFORE closing main database
-	if err := db.SetShutdownState(ShutdownStateClean); err != nil {
-		log.Printf("[DATABASE] Warning: Failed to mark shutdown as clean: %v", err)
-		// Continue anyway
-	}
-
-	// STEP 5: Close main database last
+	// Close main database last
 	if db.mainDB != nil {
 		if err := db.mainDB.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to close main database: %w", err))
@@ -209,8 +198,8 @@ type Stats struct {
 	}
 }
 
-// GetStats returns database connection statistics
-func (db *Database) GetStats() *Stats {
+// GetDatabaseStats returns database connection statistics
+func (db *Database) GetDatabaseStats() *Stats {
 	stats := &Stats{
 		GroupDBs: make(map[string]struct {
 			OpenConnections int
@@ -320,129 +309,30 @@ func (db *Database) SetHistoryUseShortHashLen(value int) error {
 	return nil
 }
 
-// Shutdown state constants
-const (
-	ShutdownStateRunning    = "running"
-	ShutdownStateInProgress = "shutting_down"
-	ShutdownStateClean      = "clean_shutdown"
-	ShutdownStateCrashed    = "crashed"
-)
-
-// SetShutdownState updates the shutdown state in the database
-func (db *Database) SetShutdownState(state string) error {
-	if db.mainDB == nil {
-		return fmt.Errorf("main database not initialized")
-	}
-
-	var query string
-	var args []interface{}
-
-	switch state {
-	case ShutdownStateInProgress:
-		query = `UPDATE system_status SET shutdown_state = ?, shutdown_started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = 1`
-		args = []interface{}{state}
-	case ShutdownStateClean:
-		query = `UPDATE system_status SET shutdown_state = ?, shutdown_completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = 1`
-		args = []interface{}{state}
-	default:
-		query = `UPDATE system_status SET shutdown_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`
-		args = []interface{}{state}
-	}
-
-	_, err := retryableExec(db.mainDB, query, args...)
-	if err != nil {
-		return fmt.Errorf("failed to update shutdown state to %s: %w", state, err)
-	}
-
-	log.Printf("[DATABASE] Shutdown state updated to: %s", state)
-	return nil
-}
-
-// GetShutdownState retrieves the current shutdown state from the database
-func (db *Database) GetShutdownState() (string, error) {
-	if db.mainDB == nil {
-		return ShutdownStateCrashed, fmt.Errorf("main database not initialized")
-	}
-
-	var state string
-	err := retryableQueryRowScan(db.mainDB, "SELECT shutdown_state FROM system_status WHERE id = 1", []interface{}{}, &state)
-	if err != nil {
-		return ShutdownStateCrashed, fmt.Errorf("failed to get shutdown state: %w", err)
-	}
-
-	return state, nil
-}
-
 // InitializeSystemStatus sets up the system status on startup
-func (db *Database) InitializeSystemStatus(appVersion string, pid int, hostname string) error {
+func (db *Database) InitializeSystemStatus(appVersion string) error {
 	if db.mainDB == nil {
 		return fmt.Errorf("main database not initialized")
 	}
 
 	// Update the system status with current app info and set to running state
 	query := `UPDATE system_status SET
-		shutdown_state = ?,
 		app_version = ?,
 		pid = ?,
 		hostname = ?,
-		shutdown_started_at = NULL,
-		shutdown_completed_at = NULL,
 		last_heartbeat = CURRENT_TIMESTAMP,
-		updated_at = CURRENT_TIMESTAMP
+		shutdown_state = ''
 		WHERE id = 1`
+	hostname, _ := os.Hostname()
+	pid := os.Getpid()
 
-	_, err := retryableExec(db.mainDB, query, ShutdownStateRunning, appVersion, pid, hostname)
+	_, err := retryableExec(db.mainDB, query, appVersion, pid, hostname)
 	if err != nil {
 		return fmt.Errorf("failed to initialize system status: %w", err)
 	}
 
-	log.Printf("[DATABASE] System status initialized: version=%s, pid=%d, hostname=%s", appVersion, pid, hostname)
+	log.Printf("[DATABASE] System status initialized: version=%s, pid=%d", appVersion, pid)
 	return nil
-}
-
-// CheckPreviousShutdown checks if the previous shutdown was clean
-func (db *Database) CheckPreviousShutdown() (bool, error) {
-	state, err := db.GetShutdownState()
-	if err != nil {
-		return false, err
-	}
-
-	wasClean := (state == ShutdownStateClean)
-	if !wasClean {
-		log.Printf("[DATABASE] WARNING: Previous shutdown was not clean. State was: %s", state)
-	} else {
-		log.Printf("[DATABASE] Previous shutdown was clean")
-	}
-
-	return wasClean, nil
-}
-
-// IsShuttingDown returns true if the database is in the process of shutting down
-func (db *Database) IsShuttingDown() bool {
-	state, err := db.GetShutdownState()
-	if err != nil {
-		// If we can't read the state, assume we're shutting down to be safe
-		return true
-	}
-	return state == ShutdownStateInProgress || state == ShutdownStateClean
-}
-
-// UpdateHeartbeat updates the last heartbeat timestamp
-func (db *Database) UpdateHeartbeat() {
-	ticker := time.NewTicker(60 * time.Second)
-	for range ticker.C {
-
-		if db.mainDB == nil {
-			log.Printf("ERROR UpdateHeartbeat: main database not initialized")
-			return
-		}
-
-		_, err := retryableExec(db.mainDB, "UPDATE system_status SET last_heartbeat = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = 1")
-		if err != nil {
-			log.Printf("ERROR UpdateHeartbeat: failed to update heartbeat: %v", err)
-			continue
-		}
-	}
 }
 
 // GetNewsgroupID returns the ID of a newsgroup by name

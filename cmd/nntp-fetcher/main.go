@@ -256,7 +256,6 @@ func main() {
 			ProxyPassword: p.ProxyPassword,
 		}
 		pool := nntp.NewPool(backendConfig)
-		pool.StartCleanupWorker(5 * time.Second)
 		pools = append(pools, pool)
 		log.Printf("Created connection pool for provider '%s' with max %d connections", p.Name, p.MaxConns)
 		defer pool.ClosePool()

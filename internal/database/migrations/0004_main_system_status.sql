@@ -1,5 +1,5 @@
 -- go-pugleaf: Create system status table for tracking application state
-
+-- deprecated -- fully removed in migration 0022_main_remove_system_status.sql !
 CREATE TABLE IF NOT EXISTS system_status (
     id INTEGER PRIMARY KEY CHECK (id = 1), -- Singleton table, only one row allowed
     shutdown_state TEXT NOT NULL DEFAULT 'running', -- 'running', 'shutting_down', 'clean_shutdown', 'crashed'

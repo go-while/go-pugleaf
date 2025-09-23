@@ -31,6 +31,8 @@ type WebServer struct {
 	StartTime     time.Time       // Track server start time for uptime calculations
 	SectionsCache map[string]bool // In-memory cache of valid section names for route filtering
 	robotsTxtPath string          // Path to robots.txt file if it exists
+	CronManager   *CronJobManager // Background cron job manager
+	CronEdit      bool
 }
 
 // TemplateData represents common template data
@@ -195,8 +197,10 @@ type SearchPageData struct {
 	Pagination  *models.PaginationInfo
 }
 
-// NewServer creates a new web server instance
-func NewServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *nntp.NNTPServer) *WebServer {
+var DefaultReverseProxy = []string{"127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+
+// NewWebServer creates a new web server instance
+func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *nntp.NNTPServer, cronEdit bool, noCronjobs bool) *WebServer {
 	// Set Gin to release mode for production
 	gin.SetMode(gin.ReleaseMode)
 
@@ -204,7 +208,12 @@ func NewServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *n
 
 	// Configure Gin to trust reverse proxy headers
 	// Set trusted proxies for common reverse proxy setups (nginx, etc.)
-	router.SetTrustedProxies([]string{"127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"})
+	ReverseProxyAddr, err := db.GetConfigValue("ReverseProxyAddr")
+	if err != nil {
+		log.Printf("Error getting ReverseProxyAddr: %v", err)
+	}
+	addrs := strings.Replace(ReverseProxyAddr, ",", " ", -1)
+	router.SetTrustedProxies(strings.Fields(addrs))
 
 	// Configure security headers based on SSL setup
 	secureConfig := secure.Config{
@@ -228,6 +237,12 @@ func NewServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *n
 	// Don't use ParseGlob - it causes template name conflicts
 	// Instead, we'll load templates individually in each handler
 	// router.SetHTMLTemplate(templates)
+	var cronmgr *CronJobManager
+	if !noCronjobs {
+		cronmgr = NewCronJobManager(db)
+	} else {
+		cronEdit = false
+	}
 
 	server := &WebServer{
 		DB:            db,
@@ -236,6 +251,8 @@ func NewServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *n
 		NNTP:          nntpconfig,
 		templates:     nil, // We'll handle templates individually
 		SectionsCache: make(map[string]bool),
+		CronManager:   cronmgr,
+		CronEdit:      cronEdit,
 	}
 
 	// Check if robots.txt file exists
@@ -249,6 +266,9 @@ func NewServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *n
 
 	// Initialize sections cache
 	server.loadSectionsCache()
+
+	// Start the cron job manager
+	server.CronManager.StartCronManager()
 
 	// Add reverse proxy middleware for handling X-Forwarded headers
 	router.Use(server.ReverseProxyMiddleware())
@@ -396,6 +416,13 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/webpostsize/set", s.adminSetWebPostSize)
 	s.Router.POST("/admin/abusemail/set", s.adminSetAbuseMail)
 	s.Router.POST("/admin/weblocalnntpserver/set", s.adminSetWebLocalNNTPServerAddrInfo)
+	s.Router.POST("/admin/reverseproxy/set", s.adminSetReverseProxyAddr)
+	s.Router.POST("/admin/crons/create", s.adminCreateCronJob)
+	s.Router.POST("/admin/crons/update", s.adminUpdateCronJob)
+	s.Router.POST("/admin/crons/toggle", s.adminToggleCronJob)
+	s.Router.POST("/admin/crons/delete", s.adminDeleteCronJob)
+	s.Router.POST("/admin/crons/stop", s.adminStopCronJob)
+	s.Router.GET("/admin/cronjobs/viewlog/:id", s.adminViewCronJobLog)
 	// Legacy/admin routes (high priority - must come before dynamic routes)
 	s.Router.GET("/", s.homePage)
 	s.Router.GET("/groups", s.groupsPage)                                                // groups listing

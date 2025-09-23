@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/preloader"
@@ -49,6 +50,8 @@ var (
 	useShortHashLen       int
 	rsyncInactiveGroups   string
 	rsyncRemoveSource     bool
+	editCronjobs          bool
+	noCronjobs            bool
 	//ignoreInitialTinyGroups int64 // code path disabled
 
 	// Migration flags
@@ -112,6 +115,8 @@ func main() {
 	flag.BoolVar(&writeActiveOnly, "write-active-only", true, "use with -write-active-file (false writes only non active groups!)")
 	flag.StringVar(&rsyncInactiveGroups, "rsync-inactive-groups", "", "path to new data dir, uses rsync to copy all inactive group databases to new data folder.")
 	flag.BoolVar(&rsyncRemoveSource, "rsync-remove-source", false, "use with -rsync-inactive-groups. if set, removes source files after moving inactive groups (default: false)")
+	flag.BoolVar(&editCronjobs, "edit-cronjobs", false, "Safety Warning / Shell Execution: Adding/Editing Crons is disabled by default. Use this flag only temporarily!")
+	flag.BoolVar(&noCronjobs, "no-cronjobs", false, "use this flag to not run cron jobs")
 	flag.StringVar(&compareActiveFile, "compare-active", "", "Compare active file with database and show missing groups (format: groupname highwater lowwater status)")
 	flag.Int64Var(&compareActiveMinArticles, "compare-active-min-articles", 0, "use with -compare-active: only show groups with more than N articles (calculated as high-low)")
 	/*
@@ -212,8 +217,9 @@ func main() {
 
 	// Note: Database batch workers are started automatically by OpenDatabase()
 	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
-	db.WG.Add(1) // Adds for history: one for writer worker
-	db.WG.Add(1) // Adds for processor
+	if history.ENABLE_HISTORY {
+		db.WG.Add(1) // Adds for history: one for writer worker
+	}
 
 	// Apply main database migrations
 	if err := db.Migrate(); err != nil {
@@ -422,31 +428,23 @@ func main() {
 		}
 	}
 
-	if withfetch && proc != nil {
-		DownloadMaxPar := 1
-		DLParChan := make(chan struct{}, DownloadMaxPar)
-		go FetchRoutine(db, proc, finalUseShortHashLen, true, isleep, DLParChan, progressDB) // Start the processor routine in a separate goroutine
-	}
-
-	var postQueueWorker *processor.PostQueueWorker
-	if proc != nil {
-		postQueueWorker = proc.NewPostQueueWorker()
-		postQueueWorker.Start()
-		log.Printf("[WEB]: PostQueueWorker started for web posting")
-	}
+	postQueueWorker := proc.NewPostQueueWorker()
+	postQueueWorker.Start()
+	log.Printf("[WEB]: PostQueueWorker started for web posting")
 
 	// Create and start web server in a goroutine for non-blocking startup
-	server := web.NewServer(db, webConfig, nntpServer)
-
+	server := web.NewWebServer(db, webConfig, nntpServer, editCronjobs, noCronjobs)
+	if !noCronjobs && server.CronManager != nil {
+		db.WG.Add(2) // Adds for cronjobs
+	}
 	// Set up cross-platform signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt) // Cross-platform (Ctrl+C on both Windows and Linux)
 
-	log.Printf("[WEB]: Starting web server...")
-
 	// Start web server in goroutine to make it non-blocking
 	webServerErrChan := make(chan error, 1)
 	go func() {
+		log.Printf("[WEB]: Starting web server...")
 		if err := server.Start(); err != nil && err != http.ErrServerClosed {
 			webServerErrChan <- err
 		}
@@ -457,7 +455,6 @@ func main() {
 	// Start update file monitor in a separate goroutine
 	updateFileChan := make(chan bool, 1)
 	go monitorUpdateFile(updateFileChan)
-	go db.UpdateHeartbeat()      // Start heartbeat updater in the background
 	go startHierarchyUpdater(db) // Start hierarchy last_updated synchronizer in the background
 	// Wait for either shutdown signal, server error, or update file
 	select {
@@ -486,27 +483,29 @@ func main() {
 		log.Printf("[WEB]: PostQueueWorker stopped")
 	}
 
+	// Stop CronJobs if running
+	if server.CronManager != nil {
+		server.CronManager.StopCronManager()
+	}
+
 	// Signal background tasks to stop
 	close(db.StopChan)
 
 	// Close the proc/processor (flushes history, stops processing)
 	if proc != nil {
 		if err := proc.Close(); err != nil {
-			log.Printf("[RSLIGHT-IMPORT] Warning: Failed to close proc: %v", err)
+			log.Printf("[WEB] Warning: Failed to close proc: %v", err)
 		} else {
-			log.Printf("[RSLIGHT-IMPORT] proc/processor closed successfully")
+			log.Printf("[WEB] proc closed successfully")
 		}
 	}
 
-	if withfetch || withnntp {
-		log.Printf("[WEB]: Signaling background tasks to stop...")
-		// Notify orchestrator to send shutdown signals to workers
-		//go db.Batch.Shutdown()
-		// Wait for all database operations to complete
-		log.Printf("[WEB]: Waiting for background tasks to finish...")
-		db.WG.Wait()
-		log.Printf("[WEB]: All background tasks completed, shutting down database...")
-	}
+	// Notify orchestrator to send shutdown signals to workers
+	//go db.Batch.Shutdown()
+	// Wait for all database operations to complete
+	log.Printf("[WEB]: Waiting for background tasks to finish...")
+	db.WG.Wait()
+	log.Printf("[WEB]: All background tasks completed, shutting down database...")
 
 	if err := db.Shutdown(); err != nil {
 		log.Fatalf("[WEB]: Failed to shutdown database: %v", err)

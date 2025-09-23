@@ -34,6 +34,7 @@ type AdminPageData struct {
 	AIModels                   []*models.AIModel
 	NNTPUsers                  []*models.NNTPUser
 	NNTPUserSearch             string                 // Added for NNTP user search functionality
+	CronJobs                   []*models.CronJob      // Added for cron job management
 	SiteNews                   []*models.SiteNews     // Added for site news management
 	Sections                   []*models.Section      // Added for section management
 	SectionGroups              []*models.SectionGroup // Added for section-newsgroup assignments
@@ -56,6 +57,7 @@ type AdminPageData struct {
 	WebPostMaxArticleSize      string                 // Added for web post size configuration
 	AbuseMail                  string                 // Added for abuse email configuration
 	WebLocalNNTPServerAddrInfo string                 // Added for NNTP server address info configuration
+	ReverseProxyAddr           string                 // Added for reverse proxy address configuration
 	Success                    string
 	Error                      string
 	ActiveTab                  string // Added for tab state

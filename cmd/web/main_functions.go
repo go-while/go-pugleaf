@@ -568,7 +568,6 @@ func ConnectPools(db *database.Database) []*nntp.Pool {
 		}
 
 		pool := nntp.NewPool(backendConfig)
-		pool.StartCleanupWorker(5 * time.Second)
 		pools = append(pools, pool)
 		log.Printf("[WEB]: Using only first enabled provider '%s' (TODO: support multiple providers)", p.Name)
 		break // For now, we only use the first enabled provider!!! TODO

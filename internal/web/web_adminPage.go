@@ -155,6 +155,14 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		return
 	}
 
+	// Get all cron jobs
+	cronJobs, err := s.DB.GetAllCronJobs()
+	if err != nil {
+		log.Printf("Failed to load cron jobs: %v", err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to load cron jobs")
+		return
+	}
+
 	// Get all NNTP users
 	var nntpUsers []*models.NNTPUser
 	nntpUserSearch := c.Query("nntp_user_search")
@@ -411,6 +419,13 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		webLocalNNTPServerAddrInfo = "" // Default to empty on error
 	}
 
+	// Get current ReverseProxyAddr from database
+	reverseProxyAddr, err := s.DB.GetConfigValue("ReverseProxyAddr")
+	if err != nil {
+		log.Printf("Failed to get ReverseProxyAddr: %v", err)
+		reverseProxyAddr = "" // Default to empty on error
+	}
+
 	data := AdminPageData{
 		TemplateData:               s.getBaseTemplateData(c, "Admin Interface"),
 		Users:                      users,
@@ -426,6 +441,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		NNTPUsers:                  nntpUsers,
 		NNTPUserSearch:             nntpUserSearch,
 		SiteNews:                   siteNews,
+		CronJobs:                   cronJobs,
 		Sections:                   sections,
 		SectionGroups:              sectionGroups,
 		SpamArticles:               spamArticles,
@@ -447,6 +463,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		WebPostMaxArticleSize:      webPostMaxSize,
 		AbuseMail:                  abuseMail,
 		WebLocalNNTPServerAddrInfo: webLocalNNTPServerAddrInfo,
+		ReverseProxyAddr:           reverseProxyAddr,
 		Success:                    session.GetSuccess(),
 		Error:                      session.GetError(),
 		ActiveTab:                  activeTab,
@@ -467,6 +484,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		"web/templates/admin_statistics.html",
 		"web/templates/admin_spam.html",
 		"web/templates/admin_settings.html",
+		"web/templates/admin_crons.html",
 	))
 	c.Header("Content-Type", "text/html")
 	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)

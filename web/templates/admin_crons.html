@@ -1,0 +1,321 @@
+{{define "admin_crons"}}
+<!-- Cron Jobs Tab -->
+<div class="tab-pane fade show active" id="crons" role="tabpanel" aria-labelledby="crons-tab">
+
+  <!-- Cron Jobs List -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <div class="d-flex justify-content-between align-items-center">
+                      <h5 class="card-title mb-0">⏰ Cron Job Management</h5>
+                      <span><strong>Safety Warning / Shell Execution</strong><br>
+                        Editing Crons is disabled by default.<br>
+                        Run webserver temporarily with -edit-cronjobs flag!</span>
+                  </div>
+              </div>
+              <div class="card-body">
+                  {{if .CronJobs}}
+                  <div class="table-responsive">
+                      <table class="table table-striped">
+                          <thead>
+                              <tr>
+                                  <th>ID</th>
+                                  <th>Name</th>
+                                  <th>Command</th>
+                                  <th>Schedule</th>
+                                  <th>Start Time</th>
+                                  <th>Status</th>
+                                  <th>Last Run</th>
+                                  <th>Run Count</th>
+                                  <th>Delete</th>
+                              </tr>
+                          </thead>
+                          <tbody>
+                              {{range .CronJobs}}
+                              <tr>
+                                  <td>
+                                    <!-- View Log -->
+                                    <form method="GET" action="/admin/cronjobs/viewlog/{{.ID}}" style="display: inline;">
+                                        <button type="submit" class="btn btn-outline-warning btn-sm" title="Job Log">
+                                            <i class="bi bi-question-circle"></i>
+                                        </button>
+                                    </form>
+                                    <!-- Edit -->
+                                    <button type="button" class="btn btn-outline-info btn-sm edit-cron-btn" title="Edit"
+                                            data-id="{{.ID}}"
+                                            data-name="{{.Name}}"
+                                            data-command="{{.Command}}"
+                                            data-interval="{{.IntervalMinutes}}"
+                                            data-start-time="{{.StartHourMinute}}"
+                                            data-enabled="{{.Enabled}}">
+                                        <i class="bi bi-pencil"></i>
+                                    </button>
+                                  </td>
+                                  <td><strong>{{.Name}}</strong></td>
+                                  <td><code>{{.Command}}</code></td>
+                                  <td>
+                                      {{if eq .IntervalMinutes 1440}}
+                                          <span class="badge bg-outline-info">Daily</span>
+                                      {{else}}
+                                          <span class="badge bg-outline-info">Every {{.IntervalMinutes}}m</span>
+                                      {{end}}
+                                  </td>
+                                  <td>
+                                      {{if .StartHourMinute}}
+                                          <span class="badge bg-secondary">{{.StartHourMinute}}</span>
+                                      {{else}}
+                                          <span class="text-muted">Any time</span>
+                                      {{end}}
+                                  </td>
+                                  <td>
+                                    <!-- Toggle Enable/Disable -->
+                                      <form method="POST" action="/admin/crons/toggle" style="display: inline;">
+                                        <input type="hidden" name="cron_id" value="{{.ID}}">
+                                        {{if .Enabled}}
+                                        <button type="submit" class="btn btn-outline-warning btn-sm" title="Disable">
+                                            <i class="bi bi-pause-circle"></i>
+                                        </button>
+                                        {{else}}
+                                        <button type="submit" class="btn btn-outline-success btn-sm" title="Enable">
+                                            <i class="bi bi-play-circle"></i>
+                                        </button>
+                                        {{end}}
+                                      </form>
+
+                                    <!-- Stop Job (only show if running) -->
+                                    <form method="POST" action="/admin/crons/stop" style="display: inline;">
+                                        <input type="hidden" name="cron_id" value="{{.ID}}">
+                                        <button type="submit" class="btn btn-outline-danger btn-sm" title="Stop Running Job">
+                                            <i class="bi bi-stop-circle"></i>
+                                        </button>
+                                    </form>
+
+                                      {{if .Enabled}}
+                                          <span class="badge bg-success">Enabled</span>
+                                      {{else}}
+                                          <span class="badge bg-secondary">Disabled</span>
+                                      {{end}}
+                                  </td>
+                                  <td>
+                                      {{if .LastRun}}
+                                          {{.LastRun.Format "2006-01-02 15:04:05"}}
+                                      {{else}}
+                                          <span class="text-muted">Never</span>
+                                      {{end}}
+                                  </td>
+                                  <td>{{.RunCount}}</td>
+                                  <td>
+                                      <div class="btn-group btn-group-sm">
+                                          <!-- Delete -->
+                                          {{if .Enabled}}
+                                              <button disabled type="submit" class="btn btn-outline-danger btn-sm" title="Delete">
+                                                  <i class="bi bi-trash"></i>
+                                              </button>
+                                          {{else}}
+                                          <form method="POST" action="/admin/crons/delete" style="display: inline;">
+                                              <input type="hidden" name="cron_id" value="{{.ID}}">
+                                              <button type="submit" class="btn btn-outline-danger btn-sm" title="Delete">
+                                                  <i class="bi bi-trash"></i>
+                                              </button>
+                                          </form>
+                                          {{end}}
+                                      </div>
+                                  </td>
+                              </tr>
+                              {{end}}
+                          </tbody>
+                      </table>
+                  </div>
+                  {{else}}
+                  <div class="alert alert-info">
+                      <strong>No cron jobs found.</strong> Create the first cron job below.
+                  </div>
+                  {{end}}
+              </div>
+          </div>
+      </div>
+  </div>
+
+  <!-- Create New Cron Job -->
+  <div class="row mt-3">
+      <div class="col-12">
+          <div class="card">
+              <div class="card-header bg-dark text-white">
+                  <h5 class="card-title mb-0">➕ Add New Cron Job</h5>
+              </div>
+              <div class="card-body">
+                  <form method="POST" action="/admin/crons/create">
+                      <div class="row">
+                          <div class="col-md-3">
+                              <div class="mb-3">
+                                  <label for="cron_name" class="form-label">Job Name</label>
+                                  <input type="text" class="form-control" id="cron_name" name="name" required
+                                         placeholder="e.g., Database Cleanup">
+                              </div>
+                          </div>
+                          <div class="col-md-4">
+                              <div class="mb-3">
+                                  <label for="cron_command" class="form-label">Command</label>
+                                  <input type="text" class="form-control" id="cron_command" name="command" required
+                                         placeholder="e.g., /path/to/script.sh">
+                                  <div class="form-text">Use full path to executable</div>
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="cron_schedule" class="form-label">Schedule</label>
+                                  <select class="form-select" id="cron_schedule" name="interval_minutes" required>
+                                      <option value="">Select schedule...</option>
+                                      <option value="1">Every 1 minute</option>
+                                      <option value="2">Every 2 minutes</option>
+                                      <option value="3">Every 3 minutes</option>
+                                      <option value="4">Every 4 minutes</option>
+                                      <option value="5">Every 5 minutes</option>
+                                      <option value="10">Every 10 minutes</option>
+                                      <option value="15">Every 15 minutes</option>
+                                      <option value="30">Every 30 minutes</option>
+                                      <option value="60">Every 1 hour</option>
+                                      <option value="120">Every 2 hours</option>
+                                      <option value="180">Every 3 hours</option>
+                                      <option value="240">Every 4 hours</option>
+                                      <option value="300">Every 5 hours</option>
+                                      <option value="360">Every 6 hours</option>
+                                      <option value="420">Every 7 hours</option>
+                                      <option value="480">Every 8 hours</option>
+                                      <option value="720">Every 12 hours</option>
+                                      <option value="1440">Every 24 hours</option>
+                                  </select>
+                              </div>
+                          </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <label for="start_hour_minute" class="form-label">Start Time</label>
+                                  <input type="time" class="form-control" id="start_hour_minute" name="start_hour_minute"
+                                         placeholder="02:59">
+                                  <div class="form-text">Optional daily start time (HH:MM)</div>
+                              </div>
+                          </div>
+                          <div class="col-md-1">
+                              <div class="mb-3">
+                                  <label for="cron_enabled" class="form-label">Status</label>
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="cron_enabled" name="enabled" checked>
+                                      <label class="form-check-label" for="cron_enabled">
+                                          Enabled
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
+                      </div>
+                      <button type="submit" class="btn btn-success">Create Cron Job</button>
+                  </form>
+              </div>
+          </div>
+      </div>
+  </div>
+
+
+</div>
+
+<!-- Edit Cron Job Modal -->
+<div class="modal fade" id="editCronModal" tabindex="-1" aria-labelledby="editCronModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="editCronModalLabel">Edit Cron Job</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="POST" action="/admin/crons/update">
+                <div class="modal-body">
+                    <input type="hidden" id="edit_cron_id" name="cron_id">
+
+                    <div class="mb-3">
+                        <label for="edit_cron_name" class="form-label">Job Name</label>
+                        <input type="text" class="form-control" id="edit_cron_name" name="name" required>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="edit_cron_command" class="form-label">Command</label>
+                        <input type="text" class="form-control" id="edit_cron_command" name="command" required>
+                        <div class="form-text">Use full path to executable</div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="edit_cron_schedule" class="form-label">Schedule</label>
+                        <select class="form-select" id="edit_cron_schedule" name="interval_minutes" required>
+                            <option value="1">Every 1 minute</option>
+                            <option value="2">Every 2 minutes</option>
+                            <option value="3">Every 3 minutes</option>
+                            <option value="4">Every 4 minutes</option>
+                            <option value="5">Every 5 minutes</option>
+                            <option value="10">Every 10 minutes</option>
+                            <option value="15">Every 15 minutes</option>
+                            <option value="30">Every 30 minutes</option>
+                            <option value="60">Every 1 hour</option>
+                            <option value="120">Every 2 hours</option>
+                            <option value="180">Every 3 hours</option>
+                            <option value="240">Every 4 hours</option>
+                            <option value="300">Every 5 hours</option>
+                            <option value="360">Every 6 hours</option>
+                            <option value="420">Every 7 hours</option>
+                            <option value="480">Every 8 hours</option>
+                            <option value="720">Every 12 hours</option>
+                            <option value="1440">Every 24 hours</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="edit_start_hour_minute" class="form-label">Start Time</label>
+                        <input type="time" class="form-control" id="edit_start_hour_minute" name="start_hour_minute">
+                        <div class="form-text">Optional daily start time (HH:MM)</div>
+                    </div>
+
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="edit_cron_enabled" name="enabled">
+                            <label class="form-check-label" for="edit_cron_enabled">
+                                Enabled
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+// Edit cron modal handling
+document.addEventListener('DOMContentLoaded', function() {
+    const editButtons = document.querySelectorAll('.edit-cron-btn');
+    const editModal = new bootstrap.Modal(document.getElementById('editCronModal'));
+
+    editButtons.forEach(button => {
+        button.addEventListener('click', function() {
+            const id = this.dataset.id;
+            const name = this.dataset.name;
+            const command = this.dataset.command;
+            const interval = this.dataset.interval;
+            const startTime = this.dataset.startTime;
+            const enabled = this.dataset.enabled === 'true';
+
+            // Populate the modal form
+            document.getElementById('edit_cron_id').value = id;
+            document.getElementById('edit_cron_name').value = name;
+            document.getElementById('edit_cron_command').value = command;
+            document.getElementById('edit_cron_schedule').value = interval;
+            document.getElementById('edit_start_hour_minute').value = startTime || '';
+            document.getElementById('edit_cron_enabled').checked = enabled;
+
+            // Show the modal
+            editModal.show();
+        });
+    });
+});
+</script>
+{{end}}

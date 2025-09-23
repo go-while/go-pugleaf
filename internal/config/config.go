@@ -102,7 +102,8 @@ type WebConfig struct {
 	CertFile   string `json:"cert_file,omitempty"`
 	KeyFile    string `json:"key_file,omitempty"`
 	StaticDir  string `json:"static_dir"`
-	Debug      bool   `json:"debug"` // Enable debug logging for sessions/auth
+	Debug      bool   `json:"debug"`     // Enable debug logging for sessions/auth
+	CronEdit   bool   `json:"cron_edit"` // Allow editing cron jobs via web interface
 }
 
 var DefaultProviders = []Provider{
@@ -524,14 +525,14 @@ func NewDefaultConfig() *MainConfig {
 				Port:       1119,
 				TLSPort:    1563,
 				MaxConns:   NNTPServerMaxConns,
-				TLSCert:    "ssl/cert.pem",
+				TLSCert:    "ssl/fullchain.pem",
 				TLSKey:     "ssl/privkey.pem",
 				MaxArtSize: DefaultMaxArticleSize, // 128 KB
 			},
 		},
 		Database: DatabaseConfig{
-			MainDB:    "data/pugleaf.sq3",
-			GroupsDir: "data/groups",
+			MainDB:    "data/cfg/pugleaf.sq3",
+			GroupsDir: "data/db",
 			BackupDir: "backups",
 		},
 		Providers: DefaultProviders,

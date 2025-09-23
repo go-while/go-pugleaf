@@ -126,6 +126,29 @@
                           {{end}}
                       </div>
                   </div>
+                  <div class="row mt-3">
+                      <div class="col-md-12">
+                          <h6>Reverse Proxy Address</h6>
+                          <p class="text-muted small">Set the reverse proxy address for proper client IP detection and forwarding</p>
+                          <form action="/admin/reverseproxy/set" method="post" class="row g-2">
+                              <div class="col-md-8">
+                                  <input type="text" class="form-control form-control-sm" name="reverse_proxy_addr"
+                                         placeholder="Enter reverse proxy address (::1, 127.0.0.1, 192.168.1.100/32, 192.168.0.0/16, 172.16.0.0/12, 10.0.0.0/8, FD00::/8)"
+                                         value="{{.ReverseProxyAddr}}">
+                              </div>
+                              <div class="col-md-4">
+                                  <button type="submit" class="btn btn-outline-primary btn-sm">
+                                      <i class="bi bi-arrow-left-right me-1"></i>Set Proxy Address
+                                  </button>
+                              </div>
+                          </form>
+                          {{if .ReverseProxyAddr}}
+                          <small class="text-muted">Current proxy address: <strong>{{.ReverseProxyAddr}}</strong></small>
+                          {{else}}
+                          <small class="text-muted">No reverse proxy address configured</small>
+                          {{end}}
+                      </div>
+                  </div>
               </div>
           </div>
       </div>

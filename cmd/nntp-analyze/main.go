@@ -306,7 +306,6 @@ func analyzeAllGroups(group *string, host *string, port *int, username *string, 
 	// Create shared connection pool - this will be reused for all groups
 	pool := nntp.NewPool(backendConfig)
 	defer pool.ClosePool() // Only close when ALL analysis is done
-	pool.StartCleanupWorker(15 * time.Second)
 
 	// Create processor instance that will be reused for all groups
 	proc := &processor.Processor{
@@ -462,7 +461,6 @@ func analyzeGroupsFromFile(filePath string, host *string, port *int, username *s
 	// Create shared connection pool - this will be reused for all groups
 	pool := nntp.NewPool(backendConfig)
 	defer pool.ClosePool() // Only close when ALL analysis is done
-	pool.StartCleanupWorker(15 * time.Second)
 
 	// Create processor instance that will be reused for all groups
 	proc := &processor.Processor{

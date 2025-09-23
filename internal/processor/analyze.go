@@ -893,7 +893,6 @@ func AnalyzeModeStandalone(host *string, port *int, username *string, password *
 	// Create connection pool
 	pool := nntp.NewPool(backendConfig)
 	defer pool.ClosePool()
-	pool.StartCleanupWorker(30 * time.Second)
 
 	// Create processor (minimal setup for analysis only)
 	proc := &Processor{

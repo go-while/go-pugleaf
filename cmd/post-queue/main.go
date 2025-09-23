@@ -189,7 +189,6 @@ func createPostingPools(providers []*models.Provider) ([]*nntp.Pool, error) {
 		}
 
 		pool := nntp.NewPool(backendConfig)
-		pool.StartCleanupWorker(5 * time.Second)
 		pools = append(pools, pool)
 		log.Printf("Created posting pool for provider '%s' with max %d connections", p.Name, p.MaxConns)
 	}

@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -135,12 +134,6 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 		return nil, fmt.Errorf("failed to run database migrations: %w", err)
 	}
 
-	// Initialize system status for this startup
-	hostname, _ := os.Hostname()
-	if err := db.InitializeSystemStatus("go-pugleaf", os.Getpid(), hostname); err != nil {
-		log.Printf("Warning: Failed to initialize system status: %v", err)
-	}
-
 	if new {
 		// Load default providers on first boot
 		if err := db.LoadDefaultProviders(); err != nil {
@@ -148,6 +141,7 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 			return nil, fmt.Errorf("failed to sync config providers: %w", err)
 		}
 	}
+
 	db.StopChan = make(chan struct{}, 1) // Channel to signal shutdown (will get closed)
 	log.Printf("pugLeaf DB init config: %+v NO_CACHE_BOOT=%t", dbconfig, NO_CACHE_BOOT)
 	if !NO_CACHE_BOOT {
@@ -217,7 +211,13 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 			}
 		}
 	}()
-
+	go func() {
+		time.Sleep(1 * time.Minute)
+		for {
+			log.Printf("\n *** Database Statistics:\n ::: %+v", db.GetDatabaseStats())
+			time.Sleep(5 * time.Minute)
+		}
+	}()
 	log.Printf("Database initialized: %+v", db)
 	return db, nil
 }

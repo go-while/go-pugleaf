@@ -73,6 +73,9 @@
   <li class="nav-item" role="presentation">
     <a class="nav-link{{if eq .ActiveTab "stats"}} active{{end}}" id="stats-tab" href="?tab=stats" role="tab" alt="statistics-tab">📊 Stats</a>
   </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link{{if eq .ActiveTab "crons"}} active{{end}}" id="crons-tab" href="?tab=crons" role="tab" alt="crons-tab">🕒 Crons</a>
+  </li>
 </ul>
 <!-- new admin tabs must be defined in web_adminPage.go:390 -->
 <!-- Content area with matching borders and rounded bottom to blend with tabs -->
@@ -120,6 +123,10 @@
   {{else if eq .ActiveTab "spam"}}
     <div class="tab-pane fade show active" id="spam" role="tabpanel" aria-labelledby="spam-tab">
       {{template "admin_spam" .}}
+    </div>
+  {{else if eq .ActiveTab "crons"}}
+    <div class="tab-pane fade show active" id="crons" role="tabpanel" aria-labelledby="crons-tab">
+      {{template "admin_crons" .}}
     </div>
   {{end}}
 </div>

@@ -38,19 +38,20 @@ func NewPool(cfg *BackendConfig) *Pool {
 		maxConns:    cfg.MaxConns,
 		idleTimeout: DefaultConnExpire,
 	}
+	go pool.startCleanupWorker()
 	return pool
 }
 
-func (p *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]OverviewLine, error) {
-	p.mux.RLock()
-	if p.closed {
-		p.mux.RUnlock()
+func (pool *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]OverviewLine, error) {
+	pool.mux.RLock()
+	if pool.closed {
+		pool.mux.RUnlock()
 		return nil, fmt.Errorf("connection pool is closed")
 	}
-	p.mux.RUnlock()
+	pool.mux.RUnlock()
 
 	// Get a connection from the pool
-	client, err := p.Get(MODE_READER_MV)
+	client, err := pool.Get(MODE_READER_MV)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
@@ -59,18 +60,18 @@ func (p *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]Overv
 	result, err := client.XOver(group, start, end, enforceLimit)
 	if err != nil {
 		// Close connection on error
-		go p.CloseConn(client, true)
+		go pool.CloseConn(client, true)
 		return nil, err
 	}
 
 	// Put back connection only if no error
-	p.Put(client)
+	pool.Put(client)
 	return result, nil
 }
 
-func (p *Pool) XHdr(group string, header string, start, end int64) ([]*HeaderLine, error) {
+func (pool *Pool) XHdr(group string, header string, start, end int64) ([]*HeaderLine, error) {
 	// Get a connection from the pool
-	client, err := p.Get(MODE_READER_MV)
+	client, err := pool.Get(MODE_READER_MV)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
@@ -78,21 +79,21 @@ func (p *Pool) XHdr(group string, header string, start, end int64) ([]*HeaderLin
 	result, err := client.XHdr(group, header, start, end)
 	if err != nil {
 		// Close connection on error
-		go p.CloseConn(client, true)
+		go pool.CloseConn(client, true)
 		return nil, err
 	}
 
 	// Put back connection only if no error
-	p.Put(client)
+	pool.Put(client)
 	return result, nil
 }
 
 // XHdrStreamed performs XHDR command and streams results through a channel
 // The channel will be closed when all results are sent or an error occurs
 // NOTE: This function takes ownership of the connection and will return it to the pool when done
-func (p *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
+func (pool *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
 	// Get a connection from the pool
-	client, err := p.Get(MODE_READER_MV)
+	client, err := pool.Get(MODE_READER_MV)
 	if err != nil {
 		close(xhdrChan)
 		return fmt.Errorf("failed to get connection: %w", err)
@@ -103,28 +104,28 @@ func (p *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrC
 		// Use the streaming XHdr function on the client
 		if err := client.XHdrStreamed(group, header, start, end, resultChan, shutdownChan); err != nil {
 			// If there's an error, close the connection instead of returning it
-			err := p.CloseConn(client, true)
+			err := pool.CloseConn(client, true)
 			if err != nil {
 				log.Printf("[NNTP-POOL] Failed to close connection after XHdrStreamed error: %v", err)
 			}
 		} else {
-			p.Put(client)
+			pool.Put(client)
 		}
 	}(client, group, header, start, end, xhdrChan, shutdownChan)
 
 	return err
 }
 
-func (p *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
-	p.mux.RLock()
-	if p.closed {
-		p.mux.RUnlock()
+func (pool *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
+	pool.mux.RLock()
+	if pool.closed {
+		pool.mux.RUnlock()
 		return nil, fmt.Errorf("connection pool is closed")
 	}
-	p.mux.RUnlock()
+	pool.mux.RUnlock()
 
 	// Get a connection from the pool
-	client, err := p.Get(MODE_READER_MV)
+	client, err := pool.Get(MODE_READER_MV)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
@@ -133,30 +134,30 @@ func (p *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article, er
 	if err != nil || article == nil {
 		if err == ErrArticleNotFound || err == ErrArticleRemoved {
 			log.Printf("[NNTP-POOL] Article '%s' not found err='%v'", *messageID, err)
-			p.Put(client)
+			pool.Put(client)
 			return nil, err
 		} else {
-			go p.CloseConn(client, true) // Close the connection on error
+			go pool.CloseConn(client, true) // Close the connection on error
 			log.Printf("[NNTP-POOL] Failed to get article %s: %v", *messageID, err)
 		}
 		return nil, fmt.Errorf("nntp-pool: GetArticle failed to get article: %w", err)
 	}
 
 	// Only put back if no error occurred
-	p.Put(client)
+	pool.Put(client)
 	return article, nil
 }
 
-func (p *Pool) SelectGroup(group string) (*GroupInfo, error) {
-	p.mux.RLock()
-	if p.closed {
-		p.mux.RUnlock()
+func (pool *Pool) SelectGroup(group string) (*GroupInfo, error) {
+	pool.mux.RLock()
+	if pool.closed {
+		pool.mux.RUnlock()
 		return nil, fmt.Errorf("connection pool is closed")
 	}
-	p.mux.RUnlock()
+	pool.mux.RUnlock()
 
 	// Get a connection from the pool
-	client, err := p.Get(MODE_READER_MV)
+	client, err := pool.Get(MODE_READER_MV)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
@@ -164,12 +165,12 @@ func (p *Pool) SelectGroup(group string) (*GroupInfo, error) {
 	gi, code, err := client.SelectGroup(group)
 	if err != nil && code != 411 {
 		// Close connection on unexpected errors (not "group not found")
-		go p.CloseConn(client, true)
+		go pool.CloseConn(client, true)
 		return nil, err
 	}
 
 	// Put back connection (even for code 411 - group not found)
-	p.Put(client)
+	pool.Put(client)
 
 	if code == 411 {
 		err = ErrNewsgroupNotFound // silence error
@@ -181,23 +182,23 @@ const MODE_READER_MV int = 1
 const MODE_STREAM_MV int = 2
 
 // Get retrieves a connection from the pool or creates a new one
-func (p *Pool) Get(mode int) (*BackendConn, error) {
-	p.mux.Lock()
-	if p.closed {
-		p.mux.Unlock()
+func (pool *Pool) Get(mode int) (*BackendConn, error) {
+	pool.mux.Lock()
+	if pool.closed {
+		pool.mux.Unlock()
 		return nil, fmt.Errorf("connection pool is closed")
 	}
-	p.mux.Unlock()
+	pool.mux.Unlock()
 
 	// Try to get an existing idle connection without waiting
 	select {
-	case pconn := <-p.connections:
+	case pconn := <-pool.connections:
 		pconn.mu.Lock()
 		if pconn.ModeStream && mode == MODE_READER_MV {
 			if err := pconn.SwitchMode(MODE_READER_MV); err != nil {
 				pconn.mu.Unlock()
-				p.CloseConn(pconn, true)
-				log.Printf("[NNTP-POOL] Failed to switch mode: provider='%s': %v", p.Backend.Provider.Name, err)
+				pool.CloseConn(pconn, true)
+				log.Printf("[NNTP-POOL] Failed to switch mode: provider='%s': %v", pool.Backend.Provider.Name, err)
 				time.Sleep(time.Second)
 				goto newConn
 			} else {
@@ -208,18 +209,18 @@ func (p *Pool) Get(mode int) (*BackendConn, error) {
 			// we must close this connection and create a new one
 			log.Printf("[NNTP-POOL] want streaming but got connection in reader mode, closing and getting a new one")
 			pconn.mu.Unlock()
-			p.CloseConn(pconn, true)
+			pool.CloseConn(pconn, true)
 			break // exit select to create a new connection
 		} else {
 			pconn.mu.Unlock()
 		}
 		// Check if connection is still valid
-		if p.isConnectionValid(pconn) {
+		if pool.isConnectionValid(pconn) {
 			pconn.UpdateLastUsed()
 			return pconn, nil
 		}
 		// Connection expired, close it and create a new one
-		p.CloseConn(pconn, true)
+		pool.CloseConn(pconn, true)
 
 	default:
 		// No idle connections available
@@ -227,46 +228,46 @@ func (p *Pool) Get(mode int) (*BackendConn, error) {
 
 newConn:
 	// Create new connection if under limit
-	p.mux.Lock()
-	if p.activeConns < p.maxConns {
-		p.activeConns++
-		p.mux.Unlock()
-		pconn, err := p.createConnection()
+	pool.mux.Lock()
+	if pool.activeConns < pool.maxConns {
+		pool.activeConns++
+		pool.mux.Unlock()
+		pconn, err := pool.createConnection()
 		if err != nil {
-			p.mux.Lock()
-			p.activeConns--
-			p.mux.Unlock()
+			pool.mux.Lock()
+			pool.activeConns--
+			pool.mux.Unlock()
 			return nil, err
 		}
 		err = pconn.SwitchMode(mode)
 		if err != nil {
-			p.mux.Lock()
-			p.activeConns--
-			p.mux.Unlock()
+			pool.mux.Lock()
+			pool.activeConns--
+			pool.mux.Unlock()
 			if pconn.conn != nil {
 				pconn.conn.Close()
 			}
-			log.Printf("[NNTP-POOL] Failed to switch mode: provider='%s': %v", p.Backend.Provider.Name, err)
+			log.Printf("[NNTP-POOL] Failed to switch mode: provider='%s': %v", pool.Backend.Provider.Name, err)
 			return nil, err
 		}
 		pconn.UpdateLastUsed() // Mark as used since we're handing it out
-		p.mux.Lock()
-		p.totalCreated++
-		p.mux.Unlock()
+		pool.mux.Lock()
+		pool.totalCreated++
+		pool.mux.Unlock()
 		return pconn, nil
 	}
-	p.mux.Unlock()
+	pool.mux.Unlock()
 
 	// Wait for a connection to become available
 	select {
-	case pconn := <-p.connections:
+	case pconn := <-pool.connections:
 		pconn.mu.Lock()
 		if pconn.ModeStream && mode == MODE_READER_MV {
 			if err := pconn.SwitchMode(MODE_READER_MV); err != nil {
 				pconn.mu.Unlock()
-				p.CloseConn(pconn, true)
+				pool.CloseConn(pconn, true)
 				time.Sleep(time.Second)
-				log.Printf("[NNTP-POOL] Failed to switch mode: provider='%s': %v", p.Backend.Provider.Name, err)
+				log.Printf("[NNTP-POOL] Failed to switch mode: provider='%s': %v", pool.Backend.Provider.Name, err)
 				goto newConn
 			} else {
 				pconn.mu.Unlock()
@@ -276,17 +277,17 @@ newConn:
 			// we must close this connection and create a new one
 			log.Printf("[NNTP-POOL] want streaming but got connection in reader mode, closing and getting a new one")
 			pconn.mu.Unlock()
-			p.CloseConn(pconn, true)
+			pool.CloseConn(pconn, true)
 			goto newConn
 		} else {
 			pconn.mu.Unlock()
 		}
-		if p.isConnectionValid(pconn) {
+		if pool.isConnectionValid(pconn) {
 			pconn.UpdateLastUsed()
 			return pconn, nil
 		}
 		// Connection expired, close and create new one
-		p.CloseConn(pconn, true)
+		pool.CloseConn(pconn, true)
 		goto newConn
 	case <-time.After(30 * time.Second):
 		// Timeout waiting for a connection
@@ -295,7 +296,7 @@ newConn:
 }
 
 // Put returns a connection to the pool
-func (p *Pool) Put(client *BackendConn) error {
+func (pool *Pool) Put(client *BackendConn) error {
 	var forceClose bool
 	if client != nil {
 		client.mu.RLock()
@@ -305,40 +306,40 @@ func (p *Pool) Put(client *BackendConn) error {
 		client.mu.RUnlock()
 	}
 
-	p.mux.Lock()
-	if p.closed || forceClose {
-		p.mux.Unlock()
+	pool.mux.Lock()
+	if pool.closed || forceClose {
+		pool.mux.Unlock()
 		if client != nil {
 			client.CloseFromPoolOnly()
 		} else {
 			log.Printf("[NNTP-POOL] ERROR: Attempted to put nil client back into pool")
 		}
-		p.mux.Lock()
-		p.totalClosed++
-		p.activeConns--
-		p.mux.Unlock()
+		pool.mux.Lock()
+		pool.totalClosed++
+		pool.activeConns--
+		pool.mux.Unlock()
 		return nil
 	}
-	p.mux.Unlock()
+	pool.mux.Unlock()
 
 	client.UpdateLastUsed()
 	// Try to return connection to pool
 	select {
-	case p.connections <- client:
+	case pool.connections <- client:
 		return nil
 	default:
-		log.Printf("[NNTP-POOL] ERROR: Pool is full or closed. Closing conn for %s:%d", p.Backend.Host, p.Backend.Port)
+		log.Printf("[NNTP-POOL] ERROR: Pool is full or closed. Closing conn for %s:%d", pool.Backend.Host, pool.Backend.Port)
 		client.CloseFromPoolOnly()
-		p.mux.Lock()
-		p.totalClosed++
-		p.activeConns--
-		p.mux.Unlock()
+		pool.mux.Lock()
+		pool.totalClosed++
+		pool.activeConns--
+		pool.mux.Unlock()
 		return nil
 	}
 }
 
 // Closes a specific connection
-func (p *Pool) CloseConn(client *BackendConn, lock bool) error {
+func (pool *Pool) CloseConn(client *BackendConn, lock bool) error {
 
 	if client == nil {
 		return nil
@@ -350,54 +351,54 @@ func (p *Pool) CloseConn(client *BackendConn, lock bool) error {
 	}
 	// Remove from active connections
 	if lock {
-		p.mux.Lock()
-		p.totalClosed++
-		p.activeConns--
-		p.mux.Unlock()
+		pool.mux.Lock()
+		pool.totalClosed++
+		pool.activeConns--
+		pool.mux.Unlock()
 	}
 	return nil
 }
 
 // Close closes all connections in the pool
-func (p *Pool) ClosePool() error {
-	p.mux.Lock()
+func (pool *Pool) ClosePool() error {
+	pool.mux.Lock()
 
-	if p.closed {
-		p.mux.Unlock()
+	if pool.closed {
+		pool.mux.Unlock()
 		log.Printf("[NNTP-POOL] Pool is already closed")
 		return nil
 	}
-	p.closed = true
-	p.mux.Unlock()
+	pool.closed = true
+	pool.mux.Unlock()
 	// Close all connections in the pool
-	close(p.connections)
-	for client := range p.connections { // drain channel
+	close(pool.connections)
+	for client := range pool.connections { // drain channel
 		client.CloseFromPoolOnly()
-		p.mux.Lock()
-		p.totalClosed++
-		p.mux.Unlock()
+		pool.mux.Lock()
+		pool.totalClosed++
+		pool.mux.Unlock()
 	}
-	p.mux.Lock()
-	if p.activeConns > 0 {
-		log.Printf("[NNTP-POOL] WARNING: Pool closed with positive count %d active connections remaining ?!?!", p.activeConns)
+	pool.mux.Lock()
+	if pool.activeConns > 0 {
+		log.Printf("[NNTP-POOL] WARNING: Pool closed with positive count %d active connections remaining ?!?!", pool.activeConns)
 	}
-	p.activeConns = 0
-	p.mux.Unlock()
+	pool.activeConns = 0
+	pool.mux.Unlock()
 	return nil
 }
 
 // Stats returns pool statistics
-func (p *Pool) Stats() PoolStats {
-	p.mux.RLock()
-	defer p.mux.RUnlock()
+func (pool *Pool) Stats() PoolStats {
+	pool.mux.RLock()
+	defer pool.mux.RUnlock()
 
 	return PoolStats{
-		MaxConnections:    p.maxConns,
-		ActiveConnections: p.activeConns,
-		IdleConnections:   len(p.connections),
-		TotalCreated:      p.totalCreated,
-		TotalClosed:       p.totalClosed,
-		Closed:            p.closed,
+		MaxConnections:    pool.maxConns,
+		ActiveConnections: pool.activeConns,
+		IdleConnections:   len(pool.connections),
+		TotalCreated:      pool.totalCreated,
+		TotalClosed:       pool.totalClosed,
+		Closed:            pool.closed,
 	}
 }
 
@@ -412,21 +413,21 @@ type PoolStats struct {
 }
 
 // createConnection creates a new NNTP client connection
-func (p *Pool) createConnection() (*BackendConn, error) {
-	//log.Printf("[NNTP-POOL] Creating new connection to %s:%d", p.Backend.Host, p.Backend.Port)
-	client := NewConn(p.Backend)
-	client.Pool = p // Set the pool reference BEFORE calling Connect()
+func (pool *Pool) createConnection() (*BackendConn, error) {
+	//log.Printf("[NNTP-POOL] Creating new connection to %s:%d", pool.Backend.Host, pool.Backend.Port)
+	client := NewConn(pool.Backend)
+	client.Pool = pool // Set the pool reference BEFORE calling Connect()
 
 	if err := client.Connect(); err != nil {
-		log.Printf("[NNTP-POOL] Failed to create connection to %s:%d: %v", p.Backend.Host, p.Backend.Port, err)
+		log.Printf("[NNTP-POOL] Failed to create connection to %s:%d: %v", pool.Backend.Host, pool.Backend.Port, err)
 		return nil, fmt.Errorf("failed to create connection: %w", err)
 	}
-	//log.Printf("[NNTP-POOL] Successfully created connection to %s:%d", p.Backend.Host, p.Backend.Port)
+	//log.Printf("[NNTP-POOL] Successfully created connection to %s:%d", pool.Backend.Host, pool.Backend.Port)
 	return client, nil
 }
 
 // isConnectionValid checks if a connection is still valid and not expired
-func (p *Pool) isConnectionValid(client *BackendConn) bool {
+func (pool *Pool) isConnectionValid(client *BackendConn) bool {
 	if client == nil || !client.connected {
 		return false
 	}
@@ -437,7 +438,7 @@ func (p *Pool) isConnectionValid(client *BackendConn) bool {
 	client.mu.RUnlock()
 
 	// Check if connection has been idle too long
-	if time.Since(lastUsed) > p.idleTimeout {
+	if time.Since(lastUsed) > pool.idleTimeout {
 		return false
 	}
 
@@ -445,29 +446,29 @@ func (p *Pool) isConnectionValid(client *BackendConn) bool {
 }
 
 // Cleanup periodically cleans up expired connections
-func (p *Pool) Cleanup() {
-	p.mux.Lock()
+func (pool *Pool) Cleanup() {
+	pool.mux.Lock()
 
-	if p.closed {
-		p.mux.Unlock()
+	if pool.closed {
+		pool.mux.Unlock()
 		return
 	}
-	p.mux.Unlock()
+	pool.mux.Unlock()
 	// Check connections in the pool for expiration
 	var validConnections []*BackendConn
 
 	// Drain the channel and check each connection
 	for {
 		select {
-		case client := <-p.connections:
-			if p.isConnectionValid(client) {
+		case client := <-pool.connections:
+			if pool.isConnectionValid(client) {
 				validConnections = append(validConnections, client)
 			} else {
 				client.CloseFromPoolOnly()
-				p.mux.Lock()
-				p.totalClosed++
-				p.activeConns--
-				p.mux.Unlock()
+				pool.mux.Lock()
+				pool.totalClosed++
+				pool.activeConns--
+				pool.mux.Unlock()
 			}
 		default:
 			// Channel is empty
@@ -479,41 +480,33 @@ done:
 	// Put valid connections back
 	for _, client := range validConnections {
 		select {
-		case p.connections <- client:
+		case pool.connections <- client:
 			// Successfully returned to pool
 		default:
-			log.Printf("[NNTP-POOL] ERROR: Pool is full while returning connection for %s:%d", p.Backend.Host, p.Backend.Port)
+			log.Printf("[NNTP-POOL] CLEANUP ERROR: Pool is full while returning connection for %s:%d", pool.Backend.Host, pool.Backend.Port)
 			// Pool is full, close the connection
 			client.CloseFromPoolOnly()
-			p.mux.Lock()
-			p.totalClosed++
-			p.activeConns--
-			p.mux.Unlock()
+			pool.mux.Lock()
+			pool.totalClosed++
+			pool.activeConns--
+			pool.mux.Unlock()
 		}
 	}
 }
 
-// StartCleanupWorker starts a goroutine that periodically cleans up expired connections
-func (p *Pool) StartCleanupWorker(interval time.Duration) {
-	if interval <= 0 {
-		interval = 8 * time.Second // Default cleanup interval
-	}
+// startCleanupWorker starts a goroutine that periodically cleans up expired connections
+func (pool *Pool) startCleanupWorker() {
+	for {
+		time.Sleep(5 * time.Second)
+		pool.Cleanup()
 
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		// Check if pool is closed
+		pool.mux.RLock()
+		closed := pool.closed
+		pool.mux.RUnlock()
 
-		for range ticker.C {
-			p.Cleanup()
-
-			// Check if pool is closed
-			p.mux.RLock()
-			closed := p.closed
-			p.mux.RUnlock()
-
-			if closed {
-				return
-			}
+		if closed {
+			return
 		}
-	}()
+	}
 }

@@ -253,7 +253,6 @@ func main() {
 	}
 
 	pool := nntp.NewPool(backendConfig)
-	pool.StartCleanupWorker(5 * time.Second)
 	defer pool.ClosePool()
 
 	log.Printf("Created connection pool for target server '%s:%d' with max %d connections", *host, *port, *maxThreads)

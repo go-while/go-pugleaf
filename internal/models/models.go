@@ -505,3 +505,17 @@ type SpamTracking struct {
 	NewsgroupID int   `json:"newsgroup_id" db:"newsgroup_id"`
 	ArticleNum  int64 `json:"article_num" db:"article_num"`
 }
+
+// CronJob represents a scheduled job configuration
+type CronJob struct {
+	ID              int64      `json:"id" db:"id"`
+	Name            string     `json:"name" db:"name"`
+	Command         string     `json:"command" db:"command"`
+	IntervalMinutes int        `json:"interval_minutes" db:"interval_minutes"`
+	StartHourMinute string     `json:"start_hour_minute" db:"start_hour_minute"`
+	Enabled         bool       `json:"enabled" db:"enabled"`
+	LastRun         *time.Time `json:"last_run" db:"last_run"`
+	RunCount        int        `json:"run_count" db:"run_count"`
+	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at" db:"updated_at"`
+}
