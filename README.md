@@ -2,14 +2,14 @@
 
 **A modern NNTP server and web gateway for Usenet/NetNews built in Go**
 
-[![Go Version](https://img.shields.io/badge/Go-1.24+-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-blue.svg)](https://golang.org)
 [![Development Status](https://img.shields.io/badge/Status-Testing-green.svg)](#development-status)
 [![License](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
 
 
 go-pugleaf provides a complete newsgroup platform with:
-- Full NNTP server implementation (RFC 3977 compliant)
-- Modern web interface for browsing (and posting *TODO*)
+- Full NNTP server implementation (RFC 3977 compliant) *TODO*
+- Modern web interface for browsing and posting
 - Efficient article fetching and threading
 - SQLite-based storage with per-group databases
 - Spam flagging and moderation tools
@@ -19,7 +19,7 @@ go-pugleaf provides a complete newsgroup platform with:
 Read [BUGS.md](https://github.com/go-while/go-pugleaf/blob/main/BUGS.md) first!
 
 ### Prerequisites
-- Go 1.24.3+ (for building from source)
+- Go 1.25.1+ (for building from source)
 - Linux/Unix system (Windows support not tested)
 - At least 1-256GB RAM, 1-10000GB+ disk space
 
@@ -60,19 +60,23 @@ cd go-pugleaf
   - **Web registration**: First registered user becomes administrator
   - **Command line**: Use the usermgr tool to create admin users directly
 ```bash
-./build_usermgr.sh
-mv build/usermgr .
 ./usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
+./webserver -nntphostname your.domain.com
+# the flag: -nntphostname is only required for the very first time
 ```
-2. **Secure your instance** - Login → Statistics → Disable registrations
+2. **Secure your instance** - Login → Admin → CFG → Disable registrations
 3. **Add newsgroups** - Admin → Add groups you want to follow
   - Or bulk import newsgroups:
 ```bash
-./webserver -import-active preload/active.txt -nntphostname your.domain.com
-./webserver -update-descr preload/newsgroups.descriptions -nntphostname your.domain.com
-./rslight-importer -data data -etc etc -spool spool -nntphostname your.domain.com
+./webserver -import-active preload/active.txt
+./webserver -update-descr preload/newsgroups.descriptions
+./rslight-importer -data data/ -etc etc/ -spool spool/
 ```
-  - rslight section import: see etc/menu.conf and creating sections aka folders in etc/ containing a groups.txt (e.g., etc/section/groups.txt)
+  - rslight section import:
+  - see etc/menu.conf
+  - create sections aka folders in etc/
+  - and a groups.txt per folder in etc/$section/
+  - (e.g., etc/rocksolid/groups.txt)
   - spool folder can be empty if you don't want to import rocksolid backups.
 4. **Configure provider** - Admin → Providers (defaults works)
 
@@ -84,7 +88,7 @@ mv build/usermgr .
  - Unfiltered databases will be shared via torrent soon!
 
 6. **Fetch articles** - Use `pugleaf-fetcher` to download articles from subscribed groups
-7. **Runtime Mode** - Set connections to max 10 when your back filling is finished.
+7. **Runtime Mode** - Set connections to 3 when your back filling is finished.
 
 ### Fetching Articles
 
@@ -98,24 +102,23 @@ mv build/usermgr .
 # Initial fetch from a specific date
 # This will fetch N articles (max-batch) per group and quit
 # When first run is done: remove the flag '-download-start-date ...' and run again and again.
-./pugleaf-fetcher -nntphostname your.domain.com \
+./pugleaf-fetcher \
   -download-start-date 2024-12-31 \
   -group news.admin.*
 
 # Continuous fetching (run after initial fetch)
-./pugleaf-fetcher -nntphostname your.domain.com \
+./pugleaf-fetcher \
   -group news.admin.*
 
 # Fetch all subscribed groups in a loop
 while true; do
-  ./pugleaf-fetcher -nntphostname your.domain.com
+  ./pugleaf-fetcher
   sleep 5m
 done
 
 # Fetch specific subscribed groups in a loop
 while true; do
-  ./pugleaf-fetcher -nntphostname your.domain.com \
-    -group news.admin.*
+  ./pugleaf-fetcher -group "news.admin.*"
   sleep 5m
 done
 
@@ -147,19 +150,19 @@ go build -o build/usermgr ./cmd/usermgr
 mv build/usermgr .
 
 # Create a new user
-./usermgr -create -username john -email john@example.com -display "John Doe"
+build/usermgr -create -username john -email john@example.com -display "John Doe"
 
 # Create a new admin user
-./usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
+build/usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
 
 # List all users (shows admin status)
-./usermgr -list
+build/usermgr -list
 
 # Delete a user
-./usermgr -delete -username john
+build/usermgr -delete -username john
 
 # Update a user's password
-./usermgr -update -username john
+build/usermgr -update -username john
 ```
 
 The usermgr tool is particularly useful for:
@@ -192,33 +195,10 @@ go build -o build/usermgr ./cmd/usermgr
 ./build_ALL.sh
 ```
 
-**Generate checksums manually:**
-```bash
-# Generate SHA256 checksums for all executables in build/
-./createChecksums.sh
-```
-
-**Build and create release package:**
-```bash
-# Build all binaries and create release package with checksums
-./build_ALL.sh update
-```
-
-This creates:
-- `checksums.sha256` - SHA256 hashes for all individual executables (with build/ paths)
-- `checksums.sha256.archive` - SHA256 hashes with relative paths for archive inclusion
-- `update.tar.gz` - Compressed archive of all binaries including checksums.sha256
-- `.update` - SHA256 hash of the tar.gz file
-
 **Verify checksums:**
 ```bash
 # Verify all executable checksums (from repository root)
 sha256sum -c checksums.sha256
-
-# Verify checksums after extracting release archive
-tar -xzf update.tar.gz
-cd extracted-directory/
-sha256sum -c checksums.sha256  # Verify all executables in release
 ```
 
 ## 📚 Binary Documentation
@@ -581,18 +561,6 @@ Several other binaries are available but don't have extracted flags (likely no c
 **Hostname Configuration:**
 Most network-related tools require `-nntphostname your.domain.com` to identify your server.
 
-**Database Paths:**
-Database tools typically use `-db data` to specify the data directory.
-
-**Batch Processing:**
-Many tools support `-batch-size` for processing large datasets efficiently.
-
-**Dry Run Mode:**
-Tools that modify data support `-dry-run` to preview changes without applying them.
-
-**Verbose Output:**
-Most tools support `-v` or `-verbose` for detailed logging.
-
 **History Configuration:**
 Tools that work with article history use `-useshorthashlen` (2-7, default: 7) - this cannot be changed once set!
 
@@ -600,6 +568,7 @@ Tools that work with article history use `-useshorthashlen` (2-7, default: 7) - 
 
 This project is in active development.
 We welcome contributions!
+
 Areas of focus:
 - RFC compliance improvements
 - Web UI enhancements
@@ -615,5 +584,5 @@ GPL v2 - see [LICENSE](LICENSE)
 
 This project is inspired by the work of Thomas "Retro Guy" Miller and the original RockSolid Light project.
 
--- the pugleaf.net development team -
-```
+-- the pugleaf.net development team --
+
