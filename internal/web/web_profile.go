@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -55,7 +56,7 @@ func (s *WebServer) profilePage(c *gin.Context) {
 	} else {
 		joined = fmt.Sprintf("%d days ago", timereg)
 	}
-	localNNTPaddr, err := s.DB.GetConfigValue("WebLocalNNTPServerAddrInfo")
+	localNNTPaddr, err := s.DB.GetConfigValue(config.CFG_KEY_WEBLOCALNNTP)
 	if err != nil {
 		s.renderError(c, http.StatusInternalServerError, "Config Error", "Failed to load NNTP server address")
 		return

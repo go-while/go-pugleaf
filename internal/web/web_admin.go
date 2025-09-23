@@ -58,6 +58,12 @@ type AdminPageData struct {
 	AbuseMail                  string                 // Added for abuse email configuration
 	WebLocalNNTPServerAddrInfo string                 // Added for NNTP server address info configuration
 	ReverseProxyAddr           string                 // Added for reverse proxy address configuration
+	FormFieldHostname          string                 // NNTP hostname form field name
+	FormFieldWebPostSize       string                 // Web post size form field name
+	FormFieldAbuseMail         string                 // Abuse email form field name
+	FormFieldWebLocalNNTP      string                 // Web local NNTP server form field name
+	FormFieldReverseProxy      string                 // Reverse proxy form field name
+	FormFieldRegistration      string                 // Registration toggle form field name
 	Success                    string
 	Error                      string
 	ActiveTab                  string // Added for tab state

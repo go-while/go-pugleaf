@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/processor"
 	"github.com/go-while/go-pugleaf/internal/utils"
@@ -114,7 +115,7 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	}
 
 	// Get max article size from database config
-	maxArticleSizeStr, err := s.DB.GetConfigValue("WebPostMaxArticleSize")
+	maxArticleSizeStr, err := s.DB.GetConfigValue(config.CFG_KEY_WEBPOSTSIZE)
 	if err != nil {
 		log.Printf("Warning: Failed to get WebPostMaxArticleSize config in sitePostPage, using default: %v", err)
 		maxArticleSizeStr = "32768" // fallback to default
@@ -186,7 +187,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	isReply := replyTo != "" && messageID != ""
 	var errors []string
 
-	abuseMail, err := s.DB.GetConfigValue("AbuseMail")
+	abuseMail, err := s.DB.GetConfigValue(config.CFG_KEY_ABUSEMAIL)
 	if err != nil {
 		log.Printf("Warning: Failed to get AbuseMail config: %v", err)
 	}
@@ -195,7 +196,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	}
 
 	// Get max article size from database config
-	maxArticleSizeStr, err := s.DB.GetConfigValue("WebPostMaxArticleSize")
+	maxArticleSizeStr, err := s.DB.GetConfigValue(config.CFG_KEY_WEBPOSTSIZE)
 	if err != nil {
 		log.Printf("Warning: Failed to get WebPostMaxArticleSize config: %v", err)
 	}
@@ -209,7 +210,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 
 	if maxArticleSize <= 0 {
 		errors = append(errors, "Server configuration error: invalid max WebPostMaxArticleSize")
-		log.Printf("Warning: WebPostMaxArticleSize config value %d is out of valid range (1000-16777216)")
+		log.Printf("Warning: WebPostMaxArticleSize config value is out of valid range (1000-16777216)")
 	}
 
 	if len(errors) == 0 {

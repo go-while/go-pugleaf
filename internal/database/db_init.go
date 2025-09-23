@@ -168,24 +168,24 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 	// Initialize configuration cache
 	db.ConfigCache = NewConfigCache(db)
 	log.Printf("Configuration cache initialized")
-	usersalt, err := db.GetConfigValue("UserSalt")
+	usersalt, err := db.GetConfigValue(config.CFG_KEY_USERSALT)
 	if err != nil {
 		log.Fatalf("Failed to get UserSalt config: %v", err)
 	}
 	if usersalt == "" {
 		// generate a usersalt, used for injection-info in header for posting
 		usersalt = generateRandomString(42)
-		if err := db.SetConfigValue("UserSalt", usersalt); err != nil {
+		if err := db.SetConfigValue(config.CFG_KEY_USERSALT, usersalt); err != nil {
 			log.Fatalf("Failed to set UserSalt config: %v", err)
 		}
 		log.Printf("Generated new UserSalt for hashing usernames")
 	}
-	abuseMail, err := db.GetConfigValue("AbuseMail")
+	abuseMail, err := db.GetConfigValue(config.CFG_KEY_ABUSEMAIL)
 	if err != nil {
 		log.Fatalf("Failed to get AbuseMail config: %v", err)
 	}
 	if abuseMail == "" {
-		err := db.SetConfigValue("AbuseMail", "abuse@invalid.invalid")
+		err := db.SetConfigValue(config.CFG_KEY_ABUSEMAIL, "abuse@invalid.invalid")
 		if err != nil {
 			log.Fatalf("Failed to set AbuseMail config: %v", err)
 		}

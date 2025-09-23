@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -399,28 +400,28 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	}
 
 	// Get current WebPostMaxArticleSize from database
-	webPostMaxSize, err := s.DB.GetConfigValue("WebPostMaxArticleSize")
+	webPostMaxSize, err := s.DB.GetConfigValue(config.CFG_KEY_WEBPOSTSIZE)
 	if err != nil {
 		log.Printf("Failed to get WebPostMaxArticleSize: %v", err)
 		webPostMaxSize = "32768" // Default to 32KB on error
 	}
 
 	// Get current AbuseMail from database
-	abuseMail, err := s.DB.GetConfigValue("AbuseMail")
+	abuseMail, err := s.DB.GetConfigValue(config.CFG_KEY_ABUSEMAIL)
 	if err != nil {
 		log.Printf("Failed to get AbuseMail: %v", err)
 		abuseMail = "" // Default to empty on error
 	}
 
 	// Get current WebLocalNNTPServerAddrInfo from database
-	webLocalNNTPServerAddrInfo, err := s.DB.GetConfigValue("WebLocalNNTPServerAddrInfo")
+	webLocalNNTPServerAddrInfo, err := s.DB.GetConfigValue(config.CFG_KEY_WEBLOCALNNTP)
 	if err != nil {
 		log.Printf("Failed to get WebLocalNNTPServerAddrInfo: %v", err)
 		webLocalNNTPServerAddrInfo = "" // Default to empty on error
 	}
 
 	// Get current ReverseProxyAddr from database
-	reverseProxyAddr, err := s.DB.GetConfigValue("ReverseProxyAddr")
+	reverseProxyAddr, err := s.DB.GetConfigValue(config.CFG_KEY_REVERSEPROXY)
 	if err != nil {
 		log.Printf("Failed to get ReverseProxyAddr: %v", err)
 		reverseProxyAddr = "" // Default to empty on error
@@ -464,9 +465,16 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		AbuseMail:                  abuseMail,
 		WebLocalNNTPServerAddrInfo: webLocalNNTPServerAddrInfo,
 		ReverseProxyAddr:           reverseProxyAddr,
-		Success:                    session.GetSuccess(),
-		Error:                      session.GetError(),
-		ActiveTab:                  activeTab,
+		// Form field constants for admin settings
+		FormFieldHostname:     config.FORM_FIELD_HOSTNAME,
+		FormFieldWebPostSize:  config.FORM_FIELD_WEBPOSTSIZE,
+		FormFieldAbuseMail:    config.FORM_FIELD_ABUSEMAIL,
+		FormFieldWebLocalNNTP: config.FORM_FIELD_WEBLOCALNNTP,
+		FormFieldReverseProxy: config.FORM_FIELD_REVERSEPROXY,
+		FormFieldRegistration: config.FORM_FIELD_REGISTRATION,
+		Success:               session.GetSuccess(),
+		Error:                 session.GetError(),
+		ActiveTab:             activeTab,
 	}
 
 	// Load modular admin templates

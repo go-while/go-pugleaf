@@ -27,6 +27,23 @@ const (
 	NNTPServerMaxConns = 500 // Maximum concurrent NNTP connections
 )
 
+// Config database keys
+const CFG_KEY_HOSTNAME string = "local_nntp_hostname"
+const CFG_KEY_WEBPOSTSIZE string = "WebPostMaxArticleSize"
+const CFG_KEY_ABUSEMAIL string = "AbuseMail"
+const CFG_KEY_WEBLOCALNNTP string = "WebLocalNNTPServerAddrInfo"
+const CFG_KEY_REVERSEPROXY string = "ReverseProxyAddr"
+const CFG_KEY_REGISTRATION string = "registration_enabled"
+const CFG_KEY_USERSALT string = "UserSalt"
+
+// Admin settings form field names
+const FORM_FIELD_HOSTNAME string = "local_nntp_hostname"
+const FORM_FIELD_WEBPOSTSIZE string = "web_post_size"
+const FORM_FIELD_ABUSEMAIL string = "abuse_mail"
+const FORM_FIELD_WEBLOCALNNTP string = "web_local_nntp_server_addr_info"
+const FORM_FIELD_REVERSEPROXY string = "reverse_proxy_addr"
+const FORM_FIELD_REGISTRATION string = "registration_toggle"
+
 // Config holds the main configuration for go-pugleaf
 type MainConfig struct {
 	MaxArtSize int `json:"max_article_size"`

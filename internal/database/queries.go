@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -2517,7 +2518,7 @@ func (db *Database) GetSpamArticles(offset, limit int) ([]*models.Overview, []st
 
 // ComputeHashedUsername returns a hashed username for Injection-info / X-Trace header
 func (db *Database) ComputeHashedUsername(username string, nonce string) (string, error) {
-	usersalt, err := db.GetConfigValue("UserSalt")
+	usersalt, err := db.GetConfigValue(config.CFG_KEY_USERSALT)
 	if err != nil || usersalt == "" {
 		log.Printf("Failed to get UserSalt config: %v", err)
 		return "", err
@@ -2534,7 +2535,7 @@ func (db *Database) SearchUserByComputedHash(targetHash string, nonce string) (*
 	}
 
 	// Get UserSalt for hash computation
-	usersalt, err := db.GetConfigValue("UserSalt")
+	usersalt, err := db.GetConfigValue(config.CFG_KEY_USERSALT)
 	if err != nil || usersalt == "" {
 		log.Printf("Failed to get UserSalt config: %v", err)
 		return nil, fmt.Errorf("failed to get UserSalt config: %v", err)

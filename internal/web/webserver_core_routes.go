@@ -208,7 +208,7 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 
 	// Configure Gin to trust reverse proxy headers
 	// Set trusted proxies for common reverse proxy setups (nginx, etc.)
-	ReverseProxyAddr, err := db.GetConfigValue("ReverseProxyAddr")
+	ReverseProxyAddr, err := db.GetConfigValue(config.CFG_KEY_REVERSEPROXY)
 	if err != nil {
 		log.Printf("Error getting ReverseProxyAddr: %v", err)
 	}
@@ -410,13 +410,7 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/sections/unassign", s.UnassignNewsgroupHandler)
 	s.Router.POST("/admin/cache/clear", s.adminClearCache)
 	s.Router.POST("/admin/hierarchies/update", s.adminUpdateHierarchies)
-	s.Router.POST("/admin/registration/enable", s.adminEnableRegistration)
-	s.Router.POST("/admin/registration/disable", s.adminDisableRegistration)
-	s.Router.POST("/admin/hostname/set", s.adminSetHostname)
-	s.Router.POST("/admin/webpostsize/set", s.adminSetWebPostSize)
-	s.Router.POST("/admin/abusemail/set", s.adminSetAbuseMail)
-	s.Router.POST("/admin/weblocalnntpserver/set", s.adminSetWebLocalNNTPServerAddrInfo)
-	s.Router.POST("/admin/reverseproxy/set", s.adminSetReverseProxyAddr)
+	s.Router.POST("/admin/settings", s.adminUpdateSettings)
 	s.Router.POST("/admin/crons/create", s.adminCreateCronJob)
 	s.Router.POST("/admin/crons/update", s.adminUpdateCronJob)
 	s.Router.POST("/admin/crons/toggle", s.adminToggleCronJob)
