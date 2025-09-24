@@ -138,8 +138,8 @@ func (pm *PosterManager) processEntry(entry database.PostQueueEntry) error {
 				entry.MessageID, pool.Backend.Provider.Name, err)
 		} else {
 			successCount++
-			log.Printf("Successfully posted article %s to provider %s",
-				entry.MessageID, pool.Backend.Provider.Name)
+			log.Printf("Successfully posted article %s to provider %s", entry.MessageID, pool.Backend.Provider.Name)
+			break
 		}
 	}
 
