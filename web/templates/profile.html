@@ -50,10 +50,18 @@
 
                     <div class="row">
                             <div class="mb-3">
-                                <label for="display_name" class="form-label">Display Name</label>
+                                <label for="display_name" class="form-label">From Name</label>
                                 <input type="text" class="form-control" id="display_name" name="display_name"
                                     value="{{.User.DisplayName}}" placeholder="Your display name (optional)">
-                                <div class="form-text">How your name appears in posts</div>
+                                <div class="form-text small text-light">
+                                    <strong>Display Name Format Options:</strong><br>
+                                    • If you enter only a name (e.g., 'John Doe'):<br>
+                                    &nbsp; the header will be: 'John Doe &lt;noreply@$this.site&gt;'<br>
+                                    • Set custom format: 'My Name &lt;my-name@mail.local&gt;'<br>
+                                    <span class="text-warning"><u>⚠️ Important:</u><br>
+                                        The system adds tracking headers to all posted articles.</span><br>
+                                    <em class="text-info">Spam messages are prohibited. Peace be upon you.</em>
+                                </div>
                             </div>
                     </div>
 
@@ -156,7 +164,7 @@
                         {{if .User.Verified}}
                             <span class="badge bg-success">Verified</span>
                         {{else}}
-                            <span class="badge bg-warning">Unverified</span>
+                            <span class="badge bg-secondary">Unverified</span>
                         {{end}}
                         {{if .User.Disabled}}
                             <span class="badge bg-danger">Disabled</span>
