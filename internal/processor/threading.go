@@ -153,7 +153,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		proc.setCaseDupes(msgIdItem, bulkmode)
 		return history.CaseError, fmt.Errorf("article '%s' posted too far in future: %v", article.MessageID, article.DateSent)
 	}
-
+	article.Mux.Lock()
 	// part of parsing data moved to nntp-client-commands.go:L~850 (func ParseLegacyArticleLines)
 	article.ReplyCount = 0 // Will be updated by threading
 	article.MsgIdItem = msgIdItem
@@ -167,6 +167,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		article.IsThrRoot = false
 		article.IsReply = true
 	}
+	article.Mux.Unlock()
 	// Apply fallbacks for missing essential fields
 	if article.Subject == "" {
 		log.Printf("[HDR-SPAM] Article '%s' empty subject... headers='%#v'", article.MessageID, article.Headers)

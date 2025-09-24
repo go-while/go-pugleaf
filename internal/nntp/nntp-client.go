@@ -227,11 +227,13 @@ func (c *BackendConn) Connect() error {
 	if c.Backend.Username != "" {
 		//log.Printf("[NNTP-AUTH] Attempting authentication for user '%s' on %s:%d", c.Backend.Username, c.Backend.Host, c.Backend.Port)
 		if err := c.authenticate(); err != nil {
-			log.Printf("[NNTP-AUTH] Authentication FAILED for user '%s' on %s:%d: %v", c.Backend.Username, c.Backend.Host, c.Backend.Port, err)
-			if err := c.Pool.CloseConn(c, true); err != nil {
-				log.Printf("[NNTP-AUTH] Failed to close connection after auth failure: %v", err)
-			}
-			return fmt.Errorf("authentication failed: %w", err)
+			log.Printf("[NNTP-AUTH] Authentication FAILED for user '%s' on %s:%d err: %v", c.Backend.Username, c.Backend.Host, c.Backend.Port, err)
+			go func() {
+				if err := c.Pool.CloseConn(c, true); err != nil {
+					log.Printf("[NNTP-AUTH] Failed to close connection after auth failure: %v", err)
+				}
+			}()
+			return fmt.Errorf("remote authentication FAILED for user '%s' on %s:%d err: %w", c.Backend.Username, c.Backend.Host, c.Backend.Port, err)
 		}
 		//log.Printf("[NNTP-AUTH] Authentication SUCCESS for user '%s' on %s:%d", c.Backend.Username, c.Backend.Host, c.Backend.Port)
 	} else {

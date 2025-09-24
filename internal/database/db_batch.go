@@ -1426,9 +1426,12 @@ func (sq *SQ3batch) BatchDivider() {
 			log.Printf("[BATCH-DIVIDER] Received nil task?!")
 			continue
 		}
+		task.Mux.Lock()
 		select {
 		case newsgroupPtr = <-task.ProcessQueue:
+			task.Mux.Unlock()
 		default:
+			task.Mux.Unlock()
 			log.Printf("Error in BatchDivider, received task (%#v) but no newsgroupPtr", task)
 			continue
 		}
