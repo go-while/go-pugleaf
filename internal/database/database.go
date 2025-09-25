@@ -222,19 +222,23 @@ func (db *Database) GetDatabaseStats() *Stats {
 	db.MainMutex.RLock()
 	defer db.MainMutex.RUnlock()
 	for groupName, groupDBs := range db.groupDBs {
-		if groupDBs != nil && groupDBs.DB != nil {
-			dbStats := groupDBs.DB.Stats()
-			stats.GroupDBs[groupName] = struct {
-				OpenConnections int
-				IdleConnections int
-				WaitCount       int64
-				WaitDuration    time.Duration
-			}{
-				OpenConnections: dbStats.OpenConnections,
-				IdleConnections: dbStats.Idle,
-				WaitCount:       dbStats.WaitCount,
-				WaitDuration:    dbStats.WaitDuration,
+		if groupDBs != nil {
+			groupDBs.mux.RLock()
+			if groupDBs.DB != nil {
+				dbStats := groupDBs.DB.Stats()
+				stats.GroupDBs[groupName] = struct {
+					OpenConnections int
+					IdleConnections int
+					WaitCount       int64
+					WaitDuration    time.Duration
+				}{
+					OpenConnections: dbStats.OpenConnections,
+					IdleConnections: dbStats.Idle,
+					WaitCount:       dbStats.WaitCount,
+					WaitDuration:    dbStats.WaitDuration,
+				}
 			}
+			groupDBs.mux.RUnlock()
 		}
 	}
 
