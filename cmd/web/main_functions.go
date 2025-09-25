@@ -33,6 +33,7 @@ func updateNewsgroupLastActivity(db *database.Database, updateNGAConcurrent int)
 	totalProcessed := 0
 	var mux sync.Mutex
 	parChan := make(chan struct{}, updateNGAConcurrent)
+	var wg sync.WaitGroup
 	var id int
 	var name string
 	// Get newsgroups
@@ -45,9 +46,10 @@ func updateNewsgroupLastActivity(db *database.Database, updateNGAConcurrent int)
 		if err := rows.Scan(&id, &name); err != nil {
 			return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity rows.Scan newsgroup: %v", err)
 		}
+		wg.Add(1)
 		parChan <- struct{}{} // acquire a slot
-		go func(id int, name string, mux *sync.Mutex) {
-			defer func() {
+		go func(id int, name string, mux *sync.Mutex, wg *sync.WaitGroup) {
+			defer func(wg *sync.WaitGroup) {
 				<-parChan // release slot
 				mux.Lock()
 				totalProcessed++
@@ -55,7 +57,8 @@ func updateNewsgroupLastActivity(db *database.Database, updateNGAConcurrent int)
 					log.Printf("[WEB]: Processed %d newsgroups, updated %d so far", totalProcessed, updatedCount)
 				}
 				mux.Unlock()
-			}()
+				wg.Done()
+			}(wg)
 			groupDBs, err := db.GetGroupDBs(name)
 			if err != nil {
 				log.Printf("[WEB]: ERROR updateNewsgroupLastActivity GetGroupDB %s: %v", name, err)
@@ -68,14 +71,16 @@ func updateNewsgroupLastActivity(db *database.Database, updateNGAConcurrent int)
 			} else {
 				log.Printf("[WEB]: ERROR updateNewsGroupActivityValue %s: %v", name, err)
 			}
-		}(id, name, &mux)
+		}(id, name, &mux, &wg)
 	}
 	// Check for iteration errors
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("error updateNewsgroupLastActivity iterating newsgroups: %w", err)
 	}
-
+	wg.Wait()
+	mux.Lock()
 	log.Printf("[WEB]: updateNewsgroupLastActivity completed: processed %d total newsgroups, updated %d", totalProcessed, updatedCount)
+	mux.Unlock()
 	return nil
 }
 
