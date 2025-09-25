@@ -21,7 +21,7 @@ func (s *WebServer) decrementSpam(c *gin.Context) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
+	currentUser, err := s.DB.GetUserByID(session.UserID)
 	if err != nil || !s.isAdmin(currentUser) {
 		session.SetError("Access denied")
 		c.Redirect(http.StatusSeeOther, "/profile")
