@@ -227,10 +227,10 @@ func main() {
 	//log.Printf("[WEB]: Database migrations applied successfully")
 
 	// Set hostname in processor with database fallback support
-	log.Printf("nntphostname=%s", nntphostname)
 	if err := processor.SetHostname(nntphostname, db); err != nil {
 		log.Fatalf("[WEB]: Failed to set NNTP hostname: %v", err)
 	}
+
 	// Run future posts hiding migration first if requested
 	if updateNewsgroupsHideFuture {
 		log.Printf("[WEB]: Starting future posts hiding migration...")
