@@ -49,6 +49,8 @@ func updateNewsgroupLastActivity(db *database.Database) error {
 		}
 		if err := updateNewsGroupActivityValue(db, id, groupDBs); err == nil {
 			updatedCount++
+		} else {
+			log.Printf("[WEB]: ERROR updateNewsGroupActivityValue %s: %v", name, err)
 		}
 		totalProcessed++
 		if totalProcessed%1000 == 0 {
