@@ -24,17 +24,16 @@ var testFormats = []string{
 	"2006-01-02 15:04:05",
 }
 
+const query_updateNewsgroupLastActivity = "SELECT id, name FROM newsgroups WHERE message_count > 0"
+
 // updateNewsgroupLastActivity updates newsgroups' updated_at field based on their latest article
 func updateNewsgroupLastActivity(db *database.Database) error {
 	updatedCount := 0
 	totalProcessed := 0
 	var id int
 	var name string
-	var formattedDate string
-	var parsedDate time.Time
-	var latestDate sql.NullString
 	// Get newsgroups
-	rows, err := db.GetMainDB().Query("SELECT id, name FROM newsgroups WHERE message_count > 0")
+	rows, err := db.GetMainDB().Query(query_updateNewsgroupLastActivity)
 	if err != nil {
 		return fmt.Errorf("failed to query newsgroups: %w", err)
 	}
@@ -43,11 +42,18 @@ func updateNewsgroupLastActivity(db *database.Database) error {
 		if err := rows.Scan(&id, &name); err != nil {
 			return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity rows.Scan newsgroup: %v", err)
 		}
-		if err := updateNewsGroupActivityValue(db, &id, &name, &latestDate, &parsedDate, &formattedDate); err == nil {
+		groupDBs, err := db.GetGroupDBs(name)
+		if err != nil {
+			log.Printf("[WEB]: updateNewsgroupLastActivity GetGroupDB %s: %v", name, err)
+			continue
+		}
+		if err := updateNewsGroupActivityValue(db, id, groupDBs); err == nil {
 			updatedCount++
 		}
 		totalProcessed++
-		log.Printf("[WEB]: Processed %d newsgroups, updated %d so far", totalProcessed, updatedCount)
+		if totalProcessed%1000 == 0 {
+			log.Printf("[WEB]: Processed %d newsgroups, updated %d so far", totalProcessed, updatedCount)
+		}
 	}
 	// Check for iteration errors
 	if err := rows.Err(); err != nil {
@@ -58,15 +64,15 @@ func updateNewsgroupLastActivity(db *database.Database) error {
 	return nil
 }
 
-const ActivityQuery = "UPDATE newsgroups SET updated_at = ? WHERE id = ? AND updated_at != ?"
+const query_updateNewsGroupActivityValue1 = "SELECT MAX(date_sent) FROM articles WHERE hide = 0 LIMIT 1"
+const query_updateNewsGroupActivityValue2 = "UPDATE newsgroups SET updated_at = ? WHERE id = ? AND updated_at != ?"
 
-func updateNewsGroupActivityValue(db *database.Database, id *int, name *string, latestDate *sql.NullString, parsedDate *time.Time, formattedDate *string) error {
-	// Get the group database for this newsgroup
-	groupDBs, err := db.GetGroupDBs(*name)
-	if err != nil {
-		log.Printf("[WEB]: updateNewsgroupLastActivity GetGroupDB %s: %v", *name, err)
-		return err
-	}
+func updateNewsGroupActivityValue(db *database.Database, id int, groupDBs *database.GroupDBs) error {
+	defer db.ForceCloseGroupDBs(groupDBs)
+
+	var formattedDate string
+	var parsedDate time.Time
+	var latestDate sql.NullString
 
 	/*
 		_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET spam = 1 WHERE spam = 0 AND hide = 1", nil)
@@ -78,49 +84,52 @@ func updateNewsGroupActivityValue(db *database.Database, id *int, name *string, 
 	*/
 
 	// Query the latest article date from the group's articles table (excluding hidden articles)
-	rows, err := database.RetryableQuery(groupDBs.DB, "SELECT MAX(date_sent) FROM articles WHERE hide = 0 LIMIT 1", nil, latestDate)
+	rows, err := database.RetryableQuery(groupDBs.DB, query_updateNewsGroupActivityValue1, nil, latestDate)
 	//groupDBs.Return(db) // Always return the database connection
 	if err != nil {
-		log.Printf("[WEB]: updateNewsgroupLastActivity RetryableQueryRowScan %s: %v", *name, err)
+		log.Printf("[WEB]: updateNewsgroupLastActivity RetryableQueryRowScan %s: %v", groupDBs.Newsgroup, err)
 		return err
 	}
 	defer rows.Close()
-	defer db.ForceCloseGroupDBs(groupDBs)
 	for rows.Next() {
+		rows.Scan(&latestDate)
 		// Only update if we found a latest date
-		if latestDate.Valid {
-			// Parse the date and format it consistently as UTC
-			if latestDate.String == "" {
-				log.Printf("[WEB]: updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", *name)
-				return fmt.Errorf("error updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", *name)
-			}
-			// Try multiple date formats to handle various edge cases
-			for _, format := range testFormats {
-				*parsedDate, err = time.Parse(format, latestDate.String)
-				if err == nil {
-					break
-				}
-			}
-			if err != nil {
-				log.Printf("[WEB]: updateNewsgroupLastActivity parsing date '%s' for %s: %v", latestDate.String, *name, err)
-				return err
-			}
+		if !latestDate.Valid {
+			return fmt.Errorf("error updateNewsgroupLastActivity no valid latestDate in ng: '%s'", groupDBs.Newsgroup)
+		}
 
-			// Format as UTC without timezone info to match db_batch.go format
-			*formattedDate = parsedDate.UTC().Format("2006-01-02 15:04:05")
-			result, err := db.GetMainDB().Exec(ActivityQuery, *formattedDate, *id, *formattedDate)
-			if err != nil {
-				log.Printf("[WEB]: error updateNewsgroupLastActivity updating newsgroup %s: %v", *name, err)
-				return err
+		// Parse the date and format it consistently as UTC
+		if latestDate.String == "" {
+			log.Printf("[WEB]: updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", groupDBs.Newsgroup)
+			return fmt.Errorf("error updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", groupDBs.Newsgroup)
+		}
+		// Try multiple date formats to handle various edge cases
+		for _, format := range testFormats {
+			parsedDate, err = time.Parse(format, latestDate.String)
+			if err == nil {
+				break
 			}
-			if _, err := result.RowsAffected(); err != nil {
-				log.Printf("[WEB]: updateNewsgroupLastActivity: '%s' dateStr=%s formattedDate=%s", *name, latestDate.String, *formattedDate)
-			}
+		}
+		if err != nil {
+			log.Printf("[WEB]: updateNewsgroupLastActivity parsing date '%s' for %s: %v", latestDate.String, groupDBs.Newsgroup, err)
+			return err
+		}
 
+		// Format as UTC without timezone info to match db_batch.go format
+		formattedDate = parsedDate.UTC().Format("2006-01-02 15:04:05")
+		result, err := db.GetMainDB().Exec(query_updateNewsGroupActivityValue2, formattedDate, id, formattedDate)
+		if err != nil {
+			log.Printf("[WEB]: error updateNewsgroupLastActivity updating newsgroup %s: %v", groupDBs.Newsgroup, err)
+			return err
+		}
+		if _, err := result.RowsAffected(); err != nil {
+			log.Printf("[WEB]: updateNewsgroupLastActivity: '%s' dateStr=%s formattedDate=%s", groupDBs.Newsgroup, latestDate.String, formattedDate)
 		}
 	}
 	return nil
 }
+
+const query_hideFuturePosts = "SELECT id, name FROM newsgroups WHERE message_count > 0 AND active = 1"
 
 // hideFuturePosts updates articles' hide field to 1 if they are posted more than 48 hours in the future
 func hideFuturePosts(db *database.Database) error {
@@ -128,7 +137,7 @@ func hideFuturePosts(db *database.Database) error {
 	cutoffTime := time.Now().Add(48 * time.Hour)
 
 	// First, get all newsgroups from the main database
-	rows, err := db.GetMainDB().Query("SELECT id, name FROM newsgroups WHERE message_count > 0 AND active = 1")
+	rows, err := db.GetMainDB().Query(query_hideFuturePosts)
 	if err != nil {
 		return fmt.Errorf("failed to query newsgroups: %w", err)
 	}
