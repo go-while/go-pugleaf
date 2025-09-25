@@ -390,7 +390,7 @@ func (cm *CronJobManager) executeJob(job *CronJob, execWG *sync.WaitGroup) {
 	cm.TotalRunning++
 	cm.mutex.Unlock()
 
-	job.addLogLine(fmt.Sprintf("[%s] Starting job execution: %s", startTime.Format("2006-01-02 15:04:05"), job.Command))
+	//job.addLogLine(fmt.Sprintf("[%s] Starting job execution: %s", startTime.Format("2006-01-02 15:04:05"), job.Command))
 
 	// Execute command without timeout
 	cmd := getShellCommand(job.Command)
@@ -419,7 +419,7 @@ func (cm *CronJobManager) executeJob(job *CronJob, execWG *sync.WaitGroup) {
 	job.mutex.Lock()
 	job.PID = cmd.Process.Pid
 	job.mutex.Unlock()
-	job.addLogLine(fmt.Sprintf("[%s] Process started with PID: %d", time.Now().Format("2006-01-02 15:04:05"), cmd.Process.Pid))
+	job.addLogLine(fmt.Sprintf("[%s] PID: %d, Command: '%s'", time.Now().Format("2006-01-02 15:04:05"), cmd.Process.Pid, job.Command))
 	defer func() {
 		// Clear the PID when done
 		job.mutex.Lock()
