@@ -55,7 +55,7 @@ var (
 	//ignoreInitialTinyGroups int64 // code path disabled
 
 	// Migration flags
-	updateNewsgroupActivity    bool
+	updateNGAConcurrent        int
 	updateNewsgroupsHideFuture bool
 	writeActiveFile            string
 	writeActiveOnly            bool
@@ -109,7 +109,7 @@ func main() {
 	flag.StringVar(&importDescFile, "import-desc", "", "Import newsgroups from descriptions file (format: groupname\\tdescription)")
 	flag.BoolVar(&importCreateMissing, "import-create", false, "Create missing newsgroups when importing from descriptions file (default: false)")
 	flag.BoolVar(&repairWatermarks, "repair-watermarks", false, "Repair corrupted newsgroup watermarks caused by preloader (default: false)")
-	flag.BoolVar(&updateNewsgroupActivity, "update-newsgroup-activity", false, "Updates newsgroup updated_at timestamps to reflect actual article activity (default: false)")
+	flag.IntVar(&updateNGAConcurrent, "update-newsgroups-activity", 0, "Updates newsgroup updated_at timestamps to reflect actual article activity. N = process this many newsgroups concurrently")
 	flag.BoolVar(&updateNewsgroupsHideFuture, "update-newsgroups-hide-futureposts", false, "Hide articles posted more than 48 hours in the future (default: false)")
 	flag.StringVar(&writeActiveFile, "write-active-file", "", "Write NNTP active file from main database newsgroups table to specified path")
 	flag.BoolVar(&writeActiveOnly, "write-active-only", true, "use with -write-active-file (false writes only non active groups!)")
@@ -239,16 +239,16 @@ func main() {
 			os.Exit(1)
 		} else {
 			log.Printf("[WEB]: Future posts hiding migration completed successfully")
-			if !updateNewsgroupActivity {
+			if updateNGAConcurrent == 0 {
 				os.Exit(0)
 			}
 		}
 	}
 
 	// Run newsgroup activity migration after hiding future posts if requested
-	if updateNewsgroupActivity {
-		log.Printf("[WEB]: Starting newsgroup activity migration...")
-		if err := updateNewsgroupLastActivity(db); err != nil {
+	if updateNGAConcurrent > 0 {
+		log.Printf("[WEB]: Starting updateNewsgroupLastActivity")
+		if err := updateNewsgroupLastActivity(db, updateNGAConcurrent); err != nil {
 			log.Printf("[WEB]: Warning: Newsgroup activity migration failed: %v", err)
 			os.Exit(1)
 		} else {

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
@@ -27,9 +28,11 @@ var testFormats = []string{
 const query_updateNewsgroupLastActivity = "SELECT id, name FROM newsgroups WHERE message_count > 0"
 
 // updateNewsgroupLastActivity updates newsgroups' updated_at field based on their latest article
-func updateNewsgroupLastActivity(db *database.Database) error {
+func updateNewsgroupLastActivity(db *database.Database, updateNGAConcurrent int) error {
 	updatedCount := 0
 	totalProcessed := 0
+	var mux sync.Mutex
+	parChan := make(chan struct{}, updateNGAConcurrent)
 	var id int
 	var name string
 	// Get newsgroups
@@ -42,20 +45,30 @@ func updateNewsgroupLastActivity(db *database.Database) error {
 		if err := rows.Scan(&id, &name); err != nil {
 			return fmt.Errorf("error [WEB]: updateNewsgroupLastActivity rows.Scan newsgroup: %v", err)
 		}
-		groupDBs, err := db.GetGroupDBs(name)
-		if err != nil {
-			log.Printf("[WEB]: ERROR updateNewsgroupLastActivity GetGroupDB %s: %v", name, err)
-			continue
-		}
-		if err := updateNewsGroupActivityValue(db, id, groupDBs); err == nil {
-			updatedCount++
-		} else {
-			log.Printf("[WEB]: ERROR updateNewsGroupActivityValue %s: %v", name, err)
-		}
-		totalProcessed++
-		if totalProcessed%1000 == 0 {
-			log.Printf("[WEB]: Processed %d newsgroups, updated %d so far", totalProcessed, updatedCount)
-		}
+		parChan <- struct{}{} // acquire a slot
+		go func(id int, name string, mux *sync.Mutex) {
+			defer func() {
+				<-parChan // release slot
+				mux.Lock()
+				totalProcessed++
+				if totalProcessed%1000 == 0 {
+					log.Printf("[WEB]: Processed %d newsgroups, updated %d so far", totalProcessed, updatedCount)
+				}
+				mux.Unlock()
+			}()
+			groupDBs, err := db.GetGroupDBs(name)
+			if err != nil {
+				log.Printf("[WEB]: ERROR updateNewsgroupLastActivity GetGroupDB %s: %v", name, err)
+				return
+			}
+			if err := updateNewsGroupActivityValue(db, id, groupDBs); err == nil {
+				mux.Lock()
+				updatedCount++
+				mux.Unlock()
+			} else {
+				log.Printf("[WEB]: ERROR updateNewsGroupActivityValue %s: %v", name, err)
+			}
+		}(id, name, &mux)
 	}
 	// Check for iteration errors
 	if err := rows.Err(); err != nil {
