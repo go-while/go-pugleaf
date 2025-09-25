@@ -47,23 +47,27 @@ type AdminPageData struct {
 	ActiveNNTPUsers            int
 	PostingNNTPUsers           int
 	Uptime                     string
-	CacheStats                 map[string]interface{} // Added for cache monitoring
-	NewsgroupCacheStats        map[string]interface{} // Added for newsgroup cache monitoring
-	ArticleCacheStats          map[string]interface{} // Added for article cache monitoring
-	NNTPAuthCacheStats         map[string]interface{} // Added for NNTP auth cache monitoring
-	MessageIdCacheStats        map[string]interface{} // Added for message ID cache monitoring
-	RegistrationEnabled        bool                   // Added for registration control
-	CurrentHostname            string                 // Added for NNTP hostname configuration
-	WebPostMaxArticleSize      string                 // Added for web post size configuration
-	AbuseMail                  string                 // Added for abuse email configuration
-	WebLocalNNTPServerAddrInfo string                 // Added for NNTP server address info configuration
-	ReverseProxyAddr           string                 // Added for reverse proxy address configuration
-	FormFieldHostname          string                 // NNTP hostname form field name
-	FormFieldWebPostSize       string                 // Web post size form field name
-	FormFieldAbuseMail         string                 // Abuse email form field name
-	FormFieldWebLocalNNTP      string                 // Web local NNTP server form field name
-	FormFieldReverseProxy      string                 // Reverse proxy form field name
-	FormFieldRegistration      string                 // Registration toggle form field name
+	CacheStats                 map[string]interface{}                // Added for cache monitoring
+	NewsgroupCacheStats        map[string]interface{}                // Added for newsgroup cache monitoring
+	ArticleCacheStats          map[string]interface{}                // Added for article cache monitoring
+	NNTPAuthCacheStats         map[string]interface{}                // Added for NNTP auth cache monitoring
+	MessageIdCacheStats        map[string]interface{}                // Added for message ID cache monitoring
+	RegistrationEnabled        bool                                  // Added for registration control
+	CurrentHostname            string                                // Added for NNTP hostname configuration
+	WebPostMaxArticleSize      string                                // Added for web post size configuration
+	AbuseMail                  string                                // Added for abuse email configuration
+	WebLocalNNTPServerAddrInfo string                                // Added for NNTP server address info configuration
+	ReverseProxyAddr           string                                // Added for reverse proxy address configuration
+	FormFieldHostname          string                                // NNTP hostname form field name
+	FormFieldWebPostSize       string                                // Web post size form field name
+	FormFieldAbuseMail         string                                // Abuse email form field name
+	FormFieldWebLocalNNTP      string                                // Web local NNTP server form field name
+	FormFieldReverseProxy      string                                // Reverse proxy form field name
+	FormFieldRegistration      string                                // Registration toggle form field name
+	PostQueue                  []*database.PostQueueEntryWithDetails // Added for post queue management
+	QueueStats                 map[string]int                        // Added for post queue statistics
+	StatusFilter               string                                // Added for post queue status filtering
+	QueueSearch                string                                // Added for post queue search functionality
 	Success                    string
 	Error                      string
 	ActiveTab                  string // Added for tab state

@@ -14,7 +14,7 @@ import (
 
 // PosterManager manages the posting of articles to multiple providers
 type PosterManager struct {
-	db     *database.Database
+	DB     *database.Database
 	pools  []*nntp.Pool
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -23,7 +23,7 @@ type PosterManager struct {
 // NewPosterManager creates a new poster manager
 func NewPosterManager(db *database.Database, pools []*nntp.Pool) *PosterManager {
 	return &PosterManager{
-		db:     db,
+		DB:     db,
 		pools:  pools,
 		stopCh: make(chan struct{}),
 	}
@@ -67,13 +67,13 @@ func (pm *PosterManager) Stop() {
 // ProcessPendingPosts processes all pending posts in the queue
 func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 	// Get pending posts from database
-	entries, err := pm.db.GetPendingPostQueueEntries(limit)
+	entries, err := pm.DB.GetPendingPostQueueEntries(limit)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get pending posts: %v", err)
 	}
 
 	if len(entries) == 0 {
-		log.Printf("No pending posts found")
+		//log.Printf("No pending posts found")
 		return 0, nil
 	}
 
@@ -88,7 +88,7 @@ func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 			log.Printf("PosterManager: Stopping due to shutdown signal")
 			// Reset processing state for any remaining entries
 			if len(failedEntryIDs) > 0 {
-				pm.db.ResetPostQueueProcessing(failedEntryIDs)
+				pm.DB.ResetPostQueueProcessing(failedEntryIDs)
 			}
 			return 0, nil
 		default:
@@ -101,7 +101,7 @@ func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 
 	// Reset processing state for failed entries
 	if len(failedEntryIDs) > 0 {
-		if err := pm.db.ResetPostQueueProcessing(failedEntryIDs); err != nil {
+		if err := pm.DB.ResetPostQueueProcessing(failedEntryIDs); err != nil {
 			log.Printf("Failed to reset processing state for failed entries: %v", err)
 		}
 	}
@@ -111,31 +111,30 @@ func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 
 // processEntry processes a single post queue entry
 func (pm *PosterManager) processEntry(entry database.PostQueueEntry) error {
-	log.Printf("Processing post queue entry %d (message: %s)", entry.ID, entry.MessageID)
+	log.Printf("Processing: #%d '%s'", entry.ID, entry.MessageID)
 
 	// Get the newsgroup by ID
-	newsgroup, err := pm.db.MainDBGetNewsgroupByID(entry.NewsgroupID)
+	newsgroup, err := pm.DB.MainDBGetNewsgroupByID(entry.NewsgroupID)
 	if err != nil {
 		return fmt.Errorf("failed to get newsgroup with ID %d: %v", entry.NewsgroupID, err)
 	}
 
 	if !newsgroup.Active {
 		log.Printf("Newsgroup %s is not active, skipping", newsgroup.Name)
-		return pm.db.MarkPostQueueAsPostedToRemote(entry.ID)
+		return pm.DB.MarkPostQueueAsPostedToRemote(entry.ID)
 	}
 
 	// Get the article from the local database
 	article, err := pm.getArticleByMessageID(entry.MessageID, newsgroup.Name)
 	if err != nil {
-		return fmt.Errorf("failed to get article %s: %v", entry.MessageID, err)
+		return fmt.Errorf("failed to get article '%s': %v", entry.MessageID, err)
 	}
 
 	// Post to all available providers
 	successCount := 0
 	for _, pool := range pm.pools {
 		if err := pm.postToProvider(article, pool); err != nil {
-			log.Printf("Failed to post article %s to provider %s: %v",
-				entry.MessageID, pool.Backend.Provider.Name, err)
+			log.Printf("Failed to post article %s to provider %s: %v", entry.MessageID, pool.Backend.Provider.Name, err)
 		} else {
 			successCount++
 			log.Printf("Successfully posted article %s to provider %s", entry.MessageID, pool.Backend.Provider.Name)
@@ -144,9 +143,8 @@ func (pm *PosterManager) processEntry(entry database.PostQueueEntry) error {
 	}
 
 	if successCount > 0 {
-		log.Printf("Successfully posted article %s to %d/%d providers",
-			entry.MessageID, successCount, len(pm.pools))
-		return pm.db.MarkPostQueueAsPostedToRemote(entry.ID)
+		//log.Printf("Successfully posted article '%s'", entry.MessageID)
+		return pm.DB.MarkPostQueueAsPostedToRemote(entry.ID)
 	}
 
 	return fmt.Errorf("failed to post article %s to any provider", entry.MessageID)
@@ -155,14 +153,14 @@ func (pm *PosterManager) processEntry(entry database.PostQueueEntry) error {
 // getArticleByMessageID retrieves an article from the local database
 func (pm *PosterManager) getArticleByMessageID(messageID, newsgroup string) (*models.Article, error) {
 	// Get group database connection
-	groupDBs, err := pm.db.GetGroupDBs(newsgroup)
+	groupDBs, err := pm.DB.GetGroupDBs(newsgroup)
 	if err != nil {
 		return nil, err
 	}
-	defer groupDBs.Return(pm.db)
+	defer groupDBs.Return(pm.DB)
 
 	// Get article by message ID using the database method (not groupDBs method)
-	article, err := pm.db.GetArticleByMessageID(groupDBs, messageID)
+	article, err := pm.DB.GetArticleByMessageID(groupDBs, messageID)
 	if err != nil {
 		return nil, err
 	}

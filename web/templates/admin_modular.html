@@ -76,6 +76,9 @@
   <li class="nav-item" role="presentation">
     <a class="nav-link{{if eq .ActiveTab "crons"}} active{{end}}" id="crons-tab" href="?tab=crons" role="tab" alt="crons-tab">🕒 Crons</a>
   </li>
+  <li class="nav-item" role="presentation">
+    <a class="nav-link{{if eq .ActiveTab "postqueue"}} active{{end}}" id="postqueue-tab" href="?tab=postqueue" role="tab" alt="postqueue-tab">📮 PostQueue</a>
+  </li>
 </ul>
 <!-- new admin tabs must be defined in web_adminPage.go:390 -->
 <!-- Content area with matching borders and rounded bottom to blend with tabs -->
@@ -127,6 +130,10 @@
   {{else if eq .ActiveTab "crons"}}
     <div class="tab-pane fade show active" id="crons" role="tabpanel" aria-labelledby="crons-tab">
       {{template "admin_crons" .}}
+    </div>
+  {{else if eq .ActiveTab "postqueue"}}
+    <div class="tab-pane fade show active" id="postqueue" role="tabpanel" aria-labelledby="postqueue-tab">
+      {{template "admin_postqueue" .}}
     </div>
   {{end}}
 </div>

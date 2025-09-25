@@ -461,7 +461,7 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 	rowsAffected, _ := result.RowsAffected()
 	log.Printf("DEBUG: Decremented spam count for %d rows in articles table for article %d", rowsAffected, articleNum)
 
-	// If spam count reaches 0, remove from main database spam table
+	// If spam count reaches 0, remove from main database spam table and clear all user flags
 	if currentSpam == 1 {
 		result2, err := retryableExec(db.mainDB, "DELETE FROM spam WHERE newsgroup_id = ? AND article_num = ?", newsgroupID, articleNum)
 		if err != nil {
@@ -471,6 +471,16 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 
 		rowsAffected2, _ := result2.RowsAffected()
 		log.Printf("DEBUG: Removed %d rows from spam table", rowsAffected2)
+
+		// Also remove all user spam flags for this article
+		result3, err := retryableExec(db.mainDB, "DELETE FROM user_spam_flags WHERE newsgroup_id = ? AND article_num = ?", newsgroupID, articleNum)
+		if err != nil {
+			log.Printf("DEBUG: Failed to clear user spam flags: %v", err)
+			return fmt.Errorf("failed to clear user spam flags: %w", err)
+		}
+
+		rowsAffected3, _ := result3.RowsAffected()
+		log.Printf("DEBUG: Cleared %d user spam flags for article %d", rowsAffected3, articleNum)
 	}
 
 	return nil

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -385,6 +386,30 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		spamPagination = models.NewPaginationInfo(spamPage, spamPageSize, spamCount)
 	}
 
+	// Handle post queue data if on postqueue tab
+	var postQueue []*database.PostQueueEntryWithDetails
+	var queueStats map[string]int
+	statusFilter := c.Query("status_filter")
+	queueSearch := c.Query("search")
+
+	if activeTab == "postqueue" {
+		// Get post queue entries with filtering
+		var err error
+		postQueue, err = s.DB.GetAllPostQueueEntries(100, 0, statusFilter, queueSearch)
+		if err != nil {
+			log.Printf("Failed to load post queue entries: %v", err)
+			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to load post queue entries")
+			return
+		}
+
+		// Get queue statistics
+		queueStats, err = s.DB.GetPostQueueStats()
+		if err != nil {
+			log.Printf("Failed to load post queue stats: %v", err)
+			// Don't fail the request, just log the error
+		}
+	}
+
 	// Get registration status
 	registrationEnabled, err := s.DB.IsRegistrationEnabled()
 	if err != nil {
@@ -472,6 +497,10 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		FormFieldWebLocalNNTP: config.FORM_FIELD_WEBLOCALNNTP,
 		FormFieldReverseProxy: config.FORM_FIELD_REVERSEPROXY,
 		FormFieldRegistration: config.FORM_FIELD_REGISTRATION,
+		PostQueue:             postQueue,
+		QueueStats:            queueStats,
+		StatusFilter:          statusFilter,
+		QueueSearch:           queueSearch,
 		Success:               session.GetSuccess(),
 		Error:                 session.GetError(),
 		ActiveTab:             activeTab,
@@ -493,6 +522,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		"web/templates/admin_spam.html",
 		"web/templates/admin_settings.html",
 		"web/templates/admin_crons.html",
+		"web/templates/admin_postqueue.html",
 	))
 	c.Header("Content-Type", "text/html")
 	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)

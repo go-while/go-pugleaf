@@ -21,8 +21,8 @@ type PostQueueEntry struct {
 // This is called when an article is first queued from the web interface
 func (d *Database) InsertPostQueueEntry(newsgroupID int64, messageID string) error {
 	query := `
-		INSERT INTO post_queue (newsgroup_id, message_id, created, posted_to_remote)
-		VALUES (?, ?, CURRENT_TIMESTAMP, 0)
+		INSERT INTO post_queue (newsgroup_id, message_id, posted_to_remote, in_processing)
+		VALUES (?, ?, 0, 0)
 	`
 	_, err := d.mainDB.Exec(query, newsgroupID, messageID)
 	if err != nil {
@@ -111,7 +111,7 @@ func (d *Database) MarkPostQueueAsPostedToRemote(id int64) error {
 		return err
 	}
 
-	log.Printf("Database: Marked post_queue entry %d as posted to remote", id)
+	//log.Printf("Database: Marked post_queue entry %d as posted to remote", id)
 	return nil
 }
 
@@ -162,4 +162,207 @@ func (d *Database) ResetAllPostQueueProcessing() error {
 		log.Printf("Database: Reset in_processing flag for %d stale post_queue entries", rowsAffected)
 	}
 	return nil
+}
+
+// PostQueueEntryWithDetails extends PostQueueEntry with additional information for admin display
+type PostQueueEntryWithDetails struct {
+	PostQueueEntry
+	Newsgroup string `db:"newsgroup"`
+	Status    string // Computed status based on flags
+}
+
+// GetAllPostQueueEntries retrieves all post queue entries for admin display with pagination and filtering
+func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searchTerm string) ([]*PostQueueEntryWithDetails, error) {
+	baseQuery := `
+		SELECT pq.id, pq.newsgroup_id, pq.message_id, pq.created, pq.posted_to_remote, pq.in_processing,
+		       ng.name as newsgroup
+		FROM post_queue pq
+		LEFT JOIN newsgroups ng ON ng.id = pq.newsgroup_id
+	`
+
+	var conditions []string
+	var args []interface{}
+
+	// Apply status filter
+	if statusFilter != "" {
+		switch statusFilter {
+		case "pending":
+			conditions = append(conditions, "pq.posted_to_remote = 0 AND pq.in_processing = 0")
+		case "processing":
+			conditions = append(conditions, "pq.in_processing = 1")
+		case "completed":
+			conditions = append(conditions, "pq.posted_to_remote = 1")
+		}
+	}
+
+	// Apply search filter
+	if searchTerm != "" {
+		searchCondition := "(ng.name LIKE ? OR pq.message_id LIKE ?)"
+		searchParam := "%" + searchTerm + "%"
+		conditions = append(conditions, searchCondition)
+		args = append(args, searchParam, searchParam)
+	}
+
+	// Build WHERE clause
+	query := baseQuery
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	// Add ordering and pagination
+	query += " ORDER BY pq.created DESC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+		if offset > 0 {
+			query += " OFFSET ?"
+			args = append(args, offset)
+		}
+	}
+
+	rows, err := d.mainDB.Query(query, args...)
+	if err != nil {
+		log.Printf("Database: Failed to get post queue entries: %v", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []*PostQueueEntryWithDetails
+	for rows.Next() {
+		entry := &PostQueueEntryWithDetails{}
+		var newsgroup *string
+
+		err := rows.Scan(&entry.ID, &entry.NewsgroupID, &entry.MessageID, &entry.Created,
+			&entry.PostedToRemote, &entry.InProcessing,
+			&newsgroup)
+		if err != nil {
+			log.Printf("Database: Failed to scan post queue entry: %v", err)
+			continue
+		}
+
+		// Set optional fields
+		if newsgroup != nil {
+			entry.Newsgroup = *newsgroup
+		}
+
+		// Compute status
+		if entry.PostedToRemote {
+			entry.Status = "completed"
+		} else if entry.InProcessing {
+			entry.Status = "processing"
+		} else {
+			entry.Status = "pending"
+		}
+
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
+}
+
+// GetPostQueueStats returns statistics about the post queue for admin display
+func (d *Database) GetPostQueueStats() (map[string]int, error) {
+	stats := make(map[string]int)
+
+	// Get total count
+	var total int
+	err := d.mainDB.QueryRow("SELECT COUNT(*) FROM post_queue").Scan(&total)
+	if err != nil {
+		return nil, err
+	}
+	stats["total"] = total
+
+	// Get pending count
+	var pending int
+	err = d.mainDB.QueryRow("SELECT COUNT(*) FROM post_queue WHERE posted_to_remote = 0 AND in_processing = 0").Scan(&pending)
+	if err != nil {
+		return nil, err
+	}
+	stats["pending"] = pending
+
+	// Get processing count
+	var processing int
+	err = d.mainDB.QueryRow("SELECT COUNT(*) FROM post_queue WHERE in_processing = 1").Scan(&processing)
+	if err != nil {
+		return nil, err
+	}
+	stats["processing"] = processing
+
+	// Get completed count
+	var completed int
+	err = d.mainDB.QueryRow("SELECT COUNT(*) FROM post_queue WHERE posted_to_remote = 1").Scan(&completed)
+	if err != nil {
+		return nil, err
+	}
+	stats["completed"] = completed
+
+	return stats, nil
+}
+
+// DeletePostQueueEntry deletes a post queue entry by ID
+func (d *Database) DeletePostQueueEntry(id int64) error {
+	query := `DELETE FROM post_queue WHERE posted_to_remote = 1 AND id = ?`
+
+	_, err := d.mainDB.Exec(query, id)
+	if err != nil {
+		log.Printf("Database: Failed to delete post queue entry %d: %v", id, err)
+		return err
+	}
+
+	log.Printf("Database: Deleted post queue entry %d", id)
+	return nil
+}
+
+// RetryPostQueueEntry resets a failed/completed entry to be processed again
+func (d *Database) RetryPostQueueEntry(id int64) error {
+	query := `UPDATE post_queue SET posted_to_remote = 0, in_processing = 0 WHERE id = ?`
+
+	_, err := d.mainDB.Exec(query, id)
+	if err != nil {
+		log.Printf("Database: Failed to retry post queue entry %d: %v", id, err)
+		return err
+	}
+
+	log.Printf("Database: Reset post queue entry %d for retry", id)
+	return nil
+}
+
+// CleanupPostedEntries deletes successfully posted entries from the post_queue table
+// If cleanupOlder > 0, only deletes posted entries older than N days
+// If cleanupOlder = 0, deletes all posted entries
+func (d *Database) CleanupPostedEntries(cleanupPosted bool, cleanupOlder int) (int64, error) {
+	if !cleanupPosted && cleanupOlder == 0 {
+		return 0, nil
+	}
+
+	var query string
+	var args []interface{}
+
+	if cleanupOlder > 0 {
+		// Delete posted entries older than N days
+		query = `DELETE FROM post_queue WHERE posted_to_remote = 1 AND created < datetime('now', '-' || ? || ' days')`
+		args = append(args, cleanupOlder)
+	} else {
+		// Delete all posted entries
+		query = `DELETE FROM post_queue WHERE posted_to_remote = 1`
+	}
+
+	result, err := d.mainDB.Exec(query, args...)
+	if err != nil {
+		log.Printf("Database: Failed to cleanup posted entries: %v", err)
+		return 0, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("Database: Failed to get rows affected for cleanup: %v", err)
+		return 0, err
+	}
+
+	if cleanupOlder > 0 {
+		log.Printf("Database: Cleaned up %d posted entries older than %d days from post_queue", rowsAffected, cleanupOlder)
+	} else {
+		log.Printf("Database: Cleaned up %d posted entries from post_queue", rowsAffected)
+	}
+	return rowsAffected, nil
 }
