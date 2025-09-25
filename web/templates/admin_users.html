@@ -64,9 +64,9 @@
                                   <td>{{if .DisplayName}}{{.DisplayName}}{{else}}<em>None</em>{{end}}</td>
                                   <td>
                                       <div class="d-flex flex-wrap gap-1">
-                                          {{if .Verified}}<span class="badge bg-success">Verified</span>{{else}}<span class="badge bg-warning">Unverified</span>{{end}}
                                           {{if .Disabled}}<span class="badge bg-danger">Disabled</span>{{else}}<span class="badge bg-success">Active</span>{{end}}
-                                          {{if .NoPosting}}<span class="badge bg-secondary">Read-Only</span>{{else}}<span class="badge bg-info">Can Post</span>{{end}}
+                                          {{if .Verified}}<span class="badge bg-success">V</span>{{else}}<span class="badge bg-secondary">U</span>{{end}}
+                                          {{if .NoPosting}}<span class="badge bg-secondary">Read-Only</span>{{else}}<span class="badge bg-info">Post</span>{{end}}
                                       </div>
                                   </td>
                                   <td>
