@@ -143,7 +143,7 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 	}
 
 	db.StopChan = make(chan struct{}, 1) // Channel to signal shutdown (will get closed)
-	log.Printf("pugLeaf DB init config: %+v NO_CACHE_BOOT=%t", dbconfig, NO_CACHE_BOOT)
+	//log.Printf("pugLeaf DB init config: %+v NO_CACHE_BOOT=%t", dbconfig, NO_CACHE_BOOT)
 	if !NO_CACHE_BOOT {
 		db.SectionsCache = NewGroupSectionDBCache()
 		db.MemThreadCache = NewMemCachedThreads()
@@ -167,7 +167,7 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 
 	// Initialize configuration cache
 	db.ConfigCache = NewConfigCache(db)
-	log.Printf("Configuration cache initialized")
+	//log.Printf("Configuration cache initialized")
 	usersalt, err := db.GetConfigValue(config.CFG_KEY_USERSALT)
 	if err != nil {
 		log.Fatalf("Failed to get UserSalt config: %v", err)
@@ -193,7 +193,7 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 	// Start article cache cleanup routine
 	if ENABLE_ARTICLE_CACHE {
 		db.ArticleCache = NewArticleCache(db.dbconfig.ArticleCacheSize, db.dbconfig.ArticleCacheExpiry, db)
-		log.Printf("Article cache initialized with size %d and expiry %s", db.dbconfig.ArticleCacheSize, db.dbconfig.ArticleCacheExpiry)
+		//log.Printf("Article cache initialized with size %d and expiry %s", db.dbconfig.ArticleCacheSize, db.dbconfig.ArticleCacheExpiry)
 	} else {
 		log.Println("Article cache is disabled")
 	}
@@ -218,7 +218,7 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 			time.Sleep(5 * time.Minute)
 		}
 	}()
-	log.Printf("Database initialized: %+v", db)
+	//log.Printf("Database initialized: %+v", db)
 	return db, nil
 }
 
@@ -240,7 +240,7 @@ func (db *Database) IsDBshutdown() bool {
 // initMainDB initializes the main database connection
 func (db *Database) initMainDB() error {
 	dbPath := filepath.Join(db.dbconfig.DataDir, "/cfg/pugleaf.sq3")
-	log.Printf("Initializing main database at: %s", dbPath)
+	//log.Printf("Initializing main database at: %s", dbPath)
 
 	// Create data directory if it doesn't exist
 	if err := createDirIfNotExists(db.dbconfig.DataDir + "/cfg/"); err != nil {

@@ -1272,7 +1272,7 @@ func (o *BatchOrchestrator) StartOrch() {
 
 // StartOrchestrator runs the main orchestrator loop that monitors channels and sends notifications
 func (o *BatchOrchestrator) StartOrchestrator() {
-	log.Printf("[ORCHESTRATOR] StartOrchestrator")
+	//log.Printf("[ORCHESTRATOR] StartOrchestrator")
 	defer o.batch.db.WG.Done()
 
 	// Start timer goroutine for fallback processing

@@ -98,7 +98,7 @@ func (cc *ConfigCache) RefreshCache() error {
 	cc.lastLoad = time.Now()
 	cc.mutex.Unlock()
 
-	log.Printf("Config cache refreshed with %d entries", len(newCache))
+	//log.Printf("Config cache refreshed with %d entries", len(newCache))
 	return nil
 }
 
