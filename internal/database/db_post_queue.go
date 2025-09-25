@@ -332,6 +332,7 @@ func (d *Database) RetryPostQueueEntry(id int64) error {
 // If cleanupOlder = 0, deletes all posted entries
 func (d *Database) CleanupPostedEntries(cleanupPosted bool, cleanupOlder int) (int64, error) {
 	if !cleanupPosted && cleanupOlder == 0 {
+		log.Printf("ERROR: CleanupPostedEntries called with no action (cleanupPosted=false and cleanupOlder=0)")
 		return 0, nil
 	}
 
