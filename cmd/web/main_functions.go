@@ -64,7 +64,7 @@ func updateNewsgroupLastActivity(db *database.Database) error {
 	return nil
 }
 
-const query_updateNewsGroupActivityValue1 = "SELECT MAX(date_sent) FROM articles WHERE hide = 0 LIMIT 1"
+const query_updateNewsGroupActivityValue1 = "SELECT MAX(date_sent) FROM articles WHERE hide = 0"
 const query_updateNewsGroupActivityValue2 = "UPDATE newsgroups SET updated_at = ? WHERE id = ? AND updated_at != ?"
 
 func updateNewsGroupActivityValue(db *database.Database, id int, groupDBs *database.GroupDBs) error {
