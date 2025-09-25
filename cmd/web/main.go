@@ -191,7 +191,6 @@ func main() {
 	if webConfig.SSL {
 		protocol = "https"
 	}
-	log.Printf("[WEB]: Starting go-pugleaf web server on %s://localhost:%d", protocol, webConfig.ListenPort)
 
 	// Initialize database with custom cache configuration
 	dbConfig := database.DefaultDBConfig() // Start with defaults
@@ -444,7 +443,7 @@ func main() {
 	// Start web server in goroutine to make it non-blocking
 	webServerErrChan := make(chan error, 1)
 	go func() {
-		log.Printf("[WEB]: Starting web server...")
+		log.Printf("[WEB]: Starting go-pugleaf web server on %s://localhost:%d", protocol, webConfig.ListenPort)
 		if err := server.Start(); err != nil && err != http.ErrServerClosed {
 			webServerErrChan <- err
 		}

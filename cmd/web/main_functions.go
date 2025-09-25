@@ -44,7 +44,7 @@ func updateNewsgroupLastActivity(db *database.Database) error {
 		}
 		groupDBs, err := db.GetGroupDBs(name)
 		if err != nil {
-			log.Printf("[WEB]: updateNewsgroupLastActivity GetGroupDB %s: %v", name, err)
+			log.Printf("[WEB]: ERROR updateNewsgroupLastActivity GetGroupDB %s: %v", name, err)
 			continue
 		}
 		if err := updateNewsGroupActivityValue(db, id, groupDBs); err == nil {
