@@ -177,17 +177,30 @@
                                   <td>{{if .LastArticle}}{{.LastArticle}}{{else}}-{{end}}</td>
                                   <td>{{.ExpiryDays}}d | {{.MaxArticles}} | {{.MaxArtSize}}B</td>
                                   <td>
-                                      <form method="POST" action="/admin/newsgroups/migrate-activity" style="display: inline;">
-                                          <input type="hidden" name="newsgroup_name" value="{{.Name}}">
-                                          {{if $.NewsgroupSearch}}
-                                          <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
-                                          {{end}}
-                                          <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
-                                          <button type="submit" class="btn btn-outline-primary btn-sm"
-                                                  title="Recalculate last activity timestamp for this newsgroup">
-                                              <i class="bi bi-clock-history me-1"></i>Fix Activity
-                                          </button>
-                                      </form>
+                                      <div class="btn-group btn-group-sm">
+                                          <form method="POST" action="/admin/newsgroups/migrate-activity" style="display: inline;">
+                                              <input type="hidden" name="newsgroup_name" value="{{.Name}}">
+                                              {{if $.NewsgroupSearch}}
+                                              <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                              {{end}}
+                                              <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
+                                              <button type="submit" class="btn btn-outline-primary btn-sm"
+                                                      title="Fix Activity recalculates last activity timestamp for this newsgroup">
+                                                  <i class="bi bi-clock me-1"></i>FA
+                                              </button>
+                                          </form>
+                                          <form method="POST" action="/admin/newsgroups/hide-future-posts" style="display: inline;">
+                                              <input type="hidden" name="newsgroup_name" value="{{.Name}}">
+                                              {{if $.NewsgroupSearch}}
+                                              <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                              {{end}}
+                                              <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
+                                              <button type="submit" class="btn btn-outline-warning btn-sm"
+                                                      title="Hide Future Posts finds and marks future-dated articles (>48h) as spam. Articles will appear in spam management.">
+                                                  <i class="bi bi-clock-history me-1"></i>HF
+                                              </button>
+                                          </form>
+                                      </div>
                                   </td>
                                   <td>
                                       <div class="btn-group btn-group-sm">

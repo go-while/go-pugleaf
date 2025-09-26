@@ -507,3 +507,99 @@ func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
 
 	c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
 }
+
+// adminHideFuturePosts handles hiding future-dated posts for a specific newsgroup using the spam system
+func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
+	if !s.requireAdminAuth(c) {
+		return
+	}
+
+	session := s.getWebSession(c)
+
+	// Get newsgroup name from form
+	name := strings.TrimSpace(c.PostForm("newsgroup_name"))
+	if name == "" {
+		session.SetError("Newsgroup name is required")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
+		return
+	}
+
+	// Check if newsgroup exists
+	_, err := s.DB.MainDBGetNewsgroup(name)
+	if err != nil {
+		session.SetError("Newsgroup not found: " + name)
+		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+		return
+	}
+
+	// Calculate the cutoff time (current time + 48 hours)
+	cutoffTime := time.Now().Add(48 * time.Hour)
+
+	// Get the group database for this newsgroup
+	groupDBs, err := s.DB.GetGroupDBs(name)
+	if err != nil {
+		session.SetError("Failed to access newsgroup database: " + err.Error())
+		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+		return
+	}
+
+	// Find articles that are posted more than 48 hours in the future and not already hidden
+	articleRows, err := groupDBs.DB.Query("SELECT article_num FROM articles WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
+	if err != nil {
+		groupDBs.Return(s.DB)
+		session.SetError("Failed to query future articles: " + err.Error())
+		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+		return
+	}
+
+	var futureArticles []int64
+	for articleRows.Next() {
+		var articleNum int64
+		if err := articleRows.Scan(&articleNum); err != nil {
+			continue // Skip problematic articles
+		}
+		futureArticles = append(futureArticles, articleNum)
+	}
+	articleRows.Close()
+	groupDBs.Return(s.DB)
+
+	if len(futureArticles) == 0 {
+		session.SetSuccess("No future-dated articles found in newsgroup: " + name)
+		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+		return
+	}
+
+	// Process each future article using the proper spam increment system
+	processedCount := 0
+	for _, articleNum := range futureArticles {
+		// Use the proper spam increment function which:
+		// 1. Increments spam counter (spam = spam + 1)  
+		// 2. Adds entry to main spam table for admin tracking
+		// 3. Handles proper error logging
+		if err := s.DB.IncrementArticleSpam(name, articleNum); err != nil {
+			continue // Skip articles that fail spam increment
+		}
+
+		// Also set the hide flag for these future-dated articles
+		groupDBs, err := s.DB.GetGroupDBs(name)
+		if err != nil {
+			continue // Skip if can't get DB connection
+		}
+		_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ?", articleNum)
+		groupDBs.Return(s.DB)
+		
+		if err != nil {
+			continue // Skip articles that fail hide update
+		}
+
+		processedCount++
+	}
+
+	if processedCount > 0 {
+		session.SetSuccess(fmt.Sprintf("Successfully processed %d future-dated articles in newsgroup %s. Articles marked as spam and hidden, now visible in spam management.", processedCount, name))
+	} else {
+		session.SetError("Failed to process any future-dated articles in newsgroup: " + name)
+	}
+
+	c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+}

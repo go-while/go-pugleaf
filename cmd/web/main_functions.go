@@ -151,7 +151,7 @@ func updateNewsGroupActivityValue(db *database.Database, id int, groupDBs *datab
 
 const query_hideFuturePosts = "SELECT id, name FROM newsgroups WHERE message_count > 0 AND active = 1"
 
-// hideFuturePosts updates articles' hide field to 1 if they are posted more than 48 hours in the future
+// hideFuturePosts finds articles posted more than 48 hours in the future and properly marks them as spam
 func hideFuturePosts(db *database.Database) error {
 	// Calculate the cutoff time (current time + 48 hours)
 	cutoffTime := time.Now().Add(48 * time.Hour)
@@ -183,26 +183,59 @@ func hideFuturePosts(db *database.Database) error {
 			continue
 		}
 
-		// Update articles that are posted more than 48 hours in the future
-		result, err := database.RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1, spam = 1 WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
+		// Find articles that are posted more than 48 hours in the future and not already hidden
+		articleRows, err := groupDBs.DB.Query("SELECT article_num FROM articles WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
+		if err != nil {
+			log.Printf("[WEB]: Future posts migration error querying articles for %s: %v", name, err)
+			db.ForceCloseGroupDBs(groupDBs)
+			skippedGroups++
+			continue
+		}
+
+		var futureArticles []int64
+		for articleRows.Next() {
+			var articleNum int64
+			if err := articleRows.Scan(&articleNum); err != nil {
+				log.Printf("[WEB]: Future posts migration error scanning article for %s: %v", name, err)
+				continue
+			}
+			futureArticles = append(futureArticles, articleNum)
+		}
+		articleRows.Close()
 		db.ForceCloseGroupDBs(groupDBs)
 
-		if err != nil {
-			log.Printf("[WEB]: Future posts migration error updating articles for %s: %v", name, err)
-			skippedGroups++
-			continue
+		// Process each future article using the proper spam increment system
+		groupArticleCount := 0
+		for _, articleNum := range futureArticles {
+			// Use the proper spam increment function which:
+			// 1. Increments spam counter (spam = spam + 1)  
+			// 2. Adds entry to main spam table for admin tracking
+			// 3. Handles proper error logging
+			if err := db.IncrementArticleSpam(name, articleNum); err != nil {
+				log.Printf("[WEB]: Future posts migration error incrementing spam for %s article %d: %v", name, articleNum, err)
+				continue
+			}
+
+			// Also set the hide flag for these future-dated articles
+			groupDBs, err := db.GetGroupDBs(name)
+			if err != nil {
+				log.Printf("[WEB]: Future posts migration error getting group DB for hide update %s: %v", name, err)
+				continue
+			}
+			_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ?", articleNum)
+			db.ForceCloseGroupDBs(groupDBs)
+			
+			if err != nil {
+				log.Printf("[WEB]: Future posts migration error setting hide flag for %s article %d: %v", name, articleNum, err)
+				continue
+			}
+
+			groupArticleCount++
 		}
 
-		rowsAffected, err := result.RowsAffected()
-		if err != nil {
-			log.Printf("[WEB]: Future posts migration error getting rows affected for %s: %v", name, err)
-			skippedGroups++
-			continue
-		}
-
-		if rowsAffected > 0 {
-			log.Printf("[WEB]: Hidden %d future posts in newsgroup %s", rowsAffected, name)
-			updatedArticles += int(rowsAffected)
+		if groupArticleCount > 0 {
+			log.Printf("[WEB]: Processed %d future posts in newsgroup %s (marked as spam and hidden)", groupArticleCount, name)
+			updatedArticles += groupArticleCount
 		}
 		processedGroups++
 	}
@@ -211,7 +244,8 @@ func hideFuturePosts(db *database.Database) error {
 		return fmt.Errorf("error iterating newsgroups: %w", err)
 	}
 
-	log.Printf("[WEB]: Future posts migration completed: processed %d groups, hidden %d articles, skipped %d groups", processedGroups, updatedArticles, skippedGroups)
+	log.Printf("[WEB]: Future posts migration completed: processed %d groups, marked %d articles as spam, skipped %d groups", processedGroups, updatedArticles, skippedGroups)
+	log.Printf("[WEB]: Future posts are now properly tracked in spam system and will appear in admin spam management")
 	return nil
 }
 

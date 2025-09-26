@@ -385,6 +385,7 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/newsgroups/assign-section", s.adminAssignNewsgroupSection)
 	s.Router.POST("/admin/newsgroups/toggle", s.adminToggleNewsgroup)
 	s.Router.POST("/admin/newsgroups/migrate-activity", s.adminMigrateNewsgroupActivity)
+	s.Router.POST("/admin/newsgroups/hide-future-posts", s.adminHideFuturePosts)
 	s.Router.POST("/admin/newsgroups/bulk-enable", s.adminBulkEnableNewsgroups)
 	s.Router.POST("/admin/newsgroups/bulk-disable", s.adminBulkDisableNewsgroups)
 	s.Router.POST("/admin/newsgroups/bulk-delete", s.adminBulkDeleteNewsgroups)
