@@ -34,7 +34,7 @@
                           {{if or .StatusFilter .QueueSearch}}
                           <a href="/admin?tab=postqueue" class="btn btn-outline-secondary">Clear Filters</a>
                           {{else}}
-                          <form method="POST" action="/admin/postqueue/refresh" class="d-inline">
+                          <form method="POST" action="/admin?tab=postqueue" class="d-inline">
                               <button type="submit" class="btn btn-outline-info btn-sm">
                                   <i class="bi bi-arrow-clockwise me-1"></i>Refresh
                               </button>
