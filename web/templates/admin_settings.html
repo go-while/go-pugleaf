@@ -1,202 +1,216 @@
 {{define "admin_settings"}}
 <!-- Settings Tab -->
 <div class="tab-pane fade show active" id="settings" role="tabpanel" aria-labelledby="settings-tab">
-  <!-- Maintenance Utilities -->
-  <div class="row mt-3">
-      <div class="col-md-6 mb-3">
-          <div class="card">
-              <div class="card-header bg-dark text-white">
-                  <h6 class="card-title mb-0">🔧 Maintenance Utilities</h6>
-              </div>
-              <div class="card-body">
-                  <div class="mb-3">
-                      <h6>Hierarchy Management</h6>
-                      <form action="/admin/hierarchies/update" method="post" style="display: inline;">
-                          <button type="submit" class="btn btn-outline-secondary btn-sm">
-                              <i class="bi bi-arrow-clockwise me-1"></i>Rebuild
-                          </button>
-                          <small>Rebuild the hierarchy cache table from existing newsgroups</small>
-                      </form>
-                      <form action="/admin/hierarchies/restore-descriptions" method="post" style="display: inline;" class="ms-2">
-                          <button type="submit" class="btn btn-outline-primary btn-sm">
-                              <i class="bi bi-journal-arrow-down me-1"></i>Restore
-                          </button>
-                          <small>Restore lost hierarchy descriptions</small>
-                      </form>
-                  </div>
-                  <div class="mb-0">
-                    <h6>User Registration:
-                        {{if .RegistrationEnabled}}
-                        <span alt="registration enabled">✅</span>
-                        {{else}}
-                        <span alt="registration disabled">❌</span>
-                        {{end}}
-                    </h6>
-                      <form action="/admin/settings" method="post" style="display: inline;">
-                          <input type="hidden" name="setting" value="{{.FormFieldRegistration}}">
-                          <input type="hidden" name="{{.FormFieldRegistration}}" value="toggle">
-                          <button type="submit" class="btn btn-outline-secondary btn-sm">
-                              {{if .RegistrationEnabled}}
-                              <i class="bi bi-person-slash me-1"></i>Disable Registration
-                              {{else}}
-                              <i class="bi bi-person-plus me-1"></i>Enable Registration
-                              {{end}}
-                          </button>
-                      </form>
-                  </div>
-              </div>
-          </div>
-      </div>
-      <div class="col-md-6 mb-3">
-          <div class="card">
-              <div class="card-header bg-dark text-white">
-                  <h6 class="card-title mb-0">🌐 NNTP Hostname</h6>
-              </div>
-              <div class="card-body">
-                  <p class="text-muted small">Set the NNTP hostname for the server</p>
-                  <p class="text-muted small"><strong>Note:</strong> Restart Webserver and pugleaf-fetcher when updating the hostname!</p>
-                  <hr>
-                  {{if .CurrentHostname}}
-                  <small class="text-muted">Current: <strong>{{.CurrentHostname}}</strong></small>
-                  {{else}}
-                  <small class="text-muted">No hostname configured</small>
-                  {{end}}
-                  <form action="/admin/settings" method="post" class="row g-2">
-                      <input type="hidden" name="setting" value="{{.FormFieldHostname}}">
-                      <div class="col-md-8">
-                          <input type="text" class="form-control form-control-sm" name="{{.FormFieldHostname}}"
-                                 placeholder="Enter NNTP hostname (e.g., news.example.com)"
-                                 value="{{.CurrentHostname}}">
-                      </div>
-                      <div class="col-md-4">
-                          <button type="submit" class="btn btn-outline-secondary btn-sm">
-                              <i class="bi bi-gear me-1"></i>Set Hostname
-                          </button>
-                      </div>
-                  </form>
-              </div>
-          </div>
-      </div>
-  </div>
+    <div class="mt-3">
+        <h4 class="mb-3">System Settings</h4>
 
-  <div class="row">
-      <div class="col-md-6 mb-3">
-          <div class="card">
-              <div class="card-header bg-dark text-white">
-                  <h6 class="card-title mb-0">📏 Article Size Limit</h6>
-              </div>
-              <div class="card-body">
-                  <p class="text-muted small">Set the maximum size limit for articles posted via web interface (in bytes)</p>
-                  <hr>
-                  <small class="text-muted">Current: <strong>{{.WebPostMaxArticleSize}} bytes</strong> ({{if eq .WebPostMaxArticleSize "32768"}}32KB{{else if eq .WebPostMaxArticleSize "65536"}}64KB{{else}}{{.WebPostMaxArticleSize}} bytes{{end}})</small>
-                  <form action="/admin/settings" method="post" class="row g-2">
-                      <input type="hidden" name="setting" value="{{.FormFieldWebPostSize}}">
-                      <div class="col-md-8">
-                          <input type="number" class="form-control form-control-sm" name="{{.FormFieldWebPostSize}}"
-                                 placeholder="Enter max article size in bytes (e.g., 32768)"
-                                 value="{{.WebPostMaxArticleSize}}" min="1024" max="16777216">
-                      </div>
-                      <div class="col-md-4">
-                          <button type="submit" class="btn btn-outline-secondary btn-sm">
-                              <i class="bi bi-gear me-1"></i>Set Max Size
-                          </button>
-                      </div>
-                  </form>
-              </div>
-          </div>
-      </div>
-      <div class="col-md-6 mb-3">
-          <div class="card">
-              <div class="card-header bg-dark text-white">
-                  <h6 class="card-title mb-0">📧 Abuse Contact</h6>
-              </div>
-              <div class="card-body">
-                  <p class="text-muted small">Set the abuse contact email for complaints and reports</p>
-                  <hr>
-                  {{if .AbuseMail}}
-                  <small class="text-muted">Current: <strong>{{.AbuseMail}}</strong></small>
-                  {{else}}
-                  <small class="text-muted">No abuse email configured</small>
-                  {{end}}
-                  <form action="/admin/settings" method="post" class="row g-2">
-                      <input type="hidden" name="setting" value="{{.FormFieldAbuseMail}}">
-                      <div class="col-md-8">
-                          <input type="email" class="form-control form-control-sm" name="{{.FormFieldAbuseMail}}"
-                                 placeholder="Enter abuse contact email (e.g., abuse@example.com)"
-                                 value="{{.AbuseMail}}" required>
-                      </div>
-                      <div class="col-md-4">
-                          <button type="submit" class="btn btn-outline-secondary btn-sm">
-                              <i class="bi bi-envelope me-1"></i>Set Email
-                          </button>
-                      </div>
-                  </form>
-              </div>
-          </div>
-      </div>
-  </div>
+        <!-- Settings Table -->
+        <div class="table-responsive">
+            <table class="table table-striped table-hover">
+                <thead class="table-dark">
+                    <tr>
+                        <th style="width: 60%;">Option</th>
+                        <th style="width: 30%;">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- User Registration Setting -->
+                    <tr>
+                        <td>
+                            <strong>🚪 User Registration
+                            {{if .RegistrationEnabled}}
+                            <span class="badge bg-success">✅ Enabled</span>
+                            {{else}}
+                            <span class="badge bg-danger">❌ Disabled</span>
+                            {{end}}
+                            <br>
+                            </strong>
+                            <span class="text-muted">Enable or disable new user registration on the platform</span>
+                        </td>
+                        <td>
+                            <form action="/admin/settings" method="post" class="d-inline">
+                                <input type="hidden" name="setting" value="{{.FormFieldRegistration}}">
+                                <input type="hidden" name="{{.FormFieldRegistration}}" value="toggle">
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                    {{if .RegistrationEnabled}}
+                                    <i class="bi bi-person-slash me-1"></i>Disable
+                                    {{else}}
+                                    <i class="bi bi-person-plus me-1"></i>Enable
+                                    {{end}}
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
 
-  <div class="row">
-      <div class="col-md-6 mb-3">
-          <div class="card">
-              <div class="card-header bg-dark text-white">
-                  <h6 class="card-title mb-0">🖥️ NNTP Server Info</h6>
-              </div>
-              <div class="card-body">
-                  <p class="text-muted small">Set the local NNTP server address information displayed to users</p>
-                  <hr>
-                  {{if .WebLocalNNTPServerAddrInfo}}
-                  <small class="text-muted">Current: <strong>{{.WebLocalNNTPServerAddrInfo}}</strong></small>
-                  {{else}}
-                  <small class="text-muted">No server address info configured</small>
-                  {{end}}
-                  <form action="/admin/settings" method="post" class="row g-2">
-                      <input type="hidden" name="setting" value="{{.FormFieldWebLocalNNTP}}">
-                      <div class="col-md-8">
-                          <input type="text" class="form-control form-control-sm" name="{{.FormFieldWebLocalNNTP}}"
-                                 placeholder="Enter NNTP server address info (e.g., news.example.com:119)"
-                                 value="{{.WebLocalNNTPServerAddrInfo}}">
-                      </div>
-                      <div class="col-md-4">
-                          <button type="submit" class="btn btn-outline-secondary btn-sm">
-                              <i class="bi bi-server me-1"></i>Set Server Info
-                          </button>
-                      </div>
-                  </form>
-              </div>
-          </div>
-      </div>
-      <div class="col-md-6 mb-3">
-          <div class="card">
-              <div class="card-header bg-dark text-white">
-                  <h6 class="card-title mb-0">🔄 Reverse Proxy</h6>
-              </div>
-              <div class="card-body">
-                  <p class="text-muted small">Set the reverse proxy address for proper client IP detection and forwarding</p>
-                  <hr>
-                  {{if .ReverseProxyAddr}}
-                  <small class="badge text-muted">Current: <strong>{{.ReverseProxyAddr}}</strong></small>
-                  {{else}}
-                  <small class="badge text-muted">No reverse proxy address configured</small>
-                  {{end}}
-                  <form action="/admin/settings" method="post" class="row g-2">
-                      <input type="hidden" name="setting" value="{{.FormFieldReverseProxy}}">
-                      <div class="col-md-8">
-                          <input type="text" class="form-control form-control-sm" name="{{.FormFieldReverseProxy}}"
-                                 placeholder="Enter reverse proxy address (::1, 127.0.0.1, 127.2.3.4, 100.64.0.0/16, 192.168.0.0/16, 172.16.0.0/12, 10.0.0.0/8, FD00::/8, ... )"
-                                 value="{{.ReverseProxyAddr}}">
-                      </div>
-                      <div class="col-md-4">
-                          <button type="submit" class="btn btn-outline-secondary btn-sm">
-                              <i class="bi bi-arrow-left-right me-1"></i>Set Proxy
-                          </button>
-                      </div>
-                  </form>
+                    <!-- NNTP Hostname Setting -->
+                    <tr>
+                        <td>
+                            <strong>🌐 NNTP Hostname:</strong>
+                            {{if .CurrentHostname}}
+                            <code>{{.CurrentHostname}}</code>
+                            {{else}}
+                            <span class="text-muted">Not configured</span>
+                            {{end}}
+                            <br>
+                            <span class="text-muted">Set the NNTP hostname for the server</span>
+                            <br><small class="text-warning"><strong>Note:</strong> Restart Webserver and pugleaf-fetcher when updating!</small>
+                        </td>
+                        <td>
+                            <form action="/admin/settings" method="post" class="d-flex gap-1">
+                                <input type="hidden" name="setting" value="{{.FormFieldHostname}}">
+                                <input type="text" class="form-control form-control-sm" name="{{.FormFieldHostname}}"
+                                        placeholder="news.example.com"
+                                        value="{{.CurrentHostname}}" style="min-width: 150px;">
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-gear"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
 
-              </div>
-          </div>
-      </div>
-  </div>
+                    <!-- NNTP Server Info Setting -->
+                    <tr>
+                        <td>
+                            <strong>🖥️ NNTP Server Info:</strong>
+                            {{if .WebLocalNNTPServerAddrInfo}}
+                            <code>{{.WebLocalNNTPServerAddrInfo}}</code>
+                            {{else}}
+                            <span class="text-muted">Not configured</span>
+                            {{end}}
+                            <br>
+                            <span class="text-muted">Set the local NNTP server address information displayed to users</span>
+                        </td>
+                        <td>
+                            <form action="/admin/settings" method="post" class="d-flex gap-1">
+                                <input type="hidden" name="setting" value="{{.FormFieldWebLocalNNTP}}">
+                                <input type="text" class="form-control form-control-sm" name="{{.FormFieldWebLocalNNTP}}"
+                                        placeholder="news.example.com:119"
+                                        value="{{.WebLocalNNTPServerAddrInfo}}" style="min-width: 150px;">
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-server"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+
+                    <!-- Abuse Contact Setting -->
+                    <tr>
+                        <td>
+                            <strong>📧 Abuse Contact:</strong>
+                            {{if .AbuseMail}}
+                            <code>{{.AbuseMail}}</code>
+                            {{else}}
+                            <span class="text-muted">Not configured</span>
+                            {{end}}
+                            <br>
+                            <span class="text-muted">Set the abuse contact email for complaints and reports</span>
+                        </td>
+                        <td>
+                            <form action="/admin/settings" method="post" class="d-flex gap-1">
+                                <input type="hidden" name="setting" value="{{.FormFieldAbuseMail}}">
+                                <input type="email" class="form-control form-control-sm" name="{{.FormFieldAbuseMail}}"
+                                        placeholder="abuse@example.com"
+                                        value="{{.AbuseMail}}" required style="min-width: 150px;">
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-envelope"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+
+                    <!-- Article Size Limit Setting -->
+                    <tr>
+                        <td>
+                            <strong>📏 Article Size Limit:</strong>
+                            <code>{{.WebPostMaxArticleSize}} bytes
+                            <small class="text-muted">
+                                ({{if eq .WebPostMaxArticleSize "32768"}}32KB{{else if eq .WebPostMaxArticleSize "65536"}}64KB{{else}}{{.WebPostMaxArticleSize}} bytes{{end}})
+                            </small>
+                            </code>
+                            <br>
+                            <span class="text-muted">Set the maximum size limit for articles posted via web interface</span>
+                        </td>
+                        <td>
+                            <form action="/admin/settings" method="post" class="d-flex gap-1">
+                                <input type="hidden" name="setting" value="{{.FormFieldWebPostSize}}">
+                                <input type="number" class="form-control form-control-sm" name="{{.FormFieldWebPostSize}}"
+                                        placeholder="32768"
+                                        value="{{.WebPostMaxArticleSize}}" min="1024" max="16777216" style="min-width: 100px;">
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-gear"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+
+                    <!-- Reverse Proxy Setting -->
+                    <tr>
+                        <td>
+                            <strong>🔄 Reverse Proxy</strong>
+                            {{if .ReverseProxyAddr}}
+                            <code>{{.ReverseProxyAddr}}</code>
+                            {{else}}
+                            <span class="text-muted">Not configured</span>
+                            {{end}}
+                            <br>
+                            <span class="text-muted">Set the reverse proxy address for proper client IP detection and forwarding</span>
+                            <br>
+                        </td>
+                        <td>
+                            <form action="/admin/settings" method="post" class="d-flex gap-1">
+                                <input type="hidden" name="setting" value="{{.FormFieldReverseProxy}}">
+                                <input type="text" class="form-control form-control-sm" name="{{.FormFieldReverseProxy}}"
+                                        placeholder="127.0.0.1, ::1"
+                                        value="{{.ReverseProxyAddr}}" style="min-width: 150px;">
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-arrow-left-right"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Maintenance Utilities Section -->
+        <div class="mt-4">
+            <h5 class="mb-3">🔧 Maintenance Utilities</h5>
+            <div class="table-responsive">
+                <table class="table table-striped">
+                    <thead class="table-secondary">
+                        <tr>
+                            <th style="width: 30%;">Utility</th>
+                            <th style="width: 20%;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>
+                                <strong>Hierarchy Management</strong>
+                                <br>
+                                <span class="text-muted">Rebuild hierarchy cache and restore descriptions</span>
+                            </td>
+                            <td>
+                                <div class="d-flex gap-2">
+                                    <form action="/admin/hierarchies/update" method="post" class="d-inline">
+                                        <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                            <i class="bi bi-arrow-clockwise me-1"></i>Rebuild Cache
+                                        </button>
+                                    </form>
+                                    <form action="/admin/hierarchies/restore-descriptions" method="post" class="d-inline">
+                                        <button type="submit" class="btn btn-outline-primary btn-sm">
+                                            <i class="bi bi-journal-arrow-down me-1"></i>Restore Descriptions
+                                        </button>
+                                    </form>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
 </div>
 
 {{end}}
