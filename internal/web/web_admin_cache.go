@@ -41,8 +41,7 @@ func (s *WebServer) adminClearCache(c *gin.Context) {
 	}
 
 	if cachesCleared > 0 {
-		message := "Cleared: " + joinStrings(cacheMessages, ", ")
-		session.SetSuccess(message)
+		session.SetSuccess("Cleared: " + joinStrings(cacheMessages, ", "))
 	} else {
 		session.SetError("No caches are initialized")
 	}
