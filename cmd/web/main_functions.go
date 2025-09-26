@@ -208,7 +208,7 @@ func hideFuturePosts(db *database.Database) error {
 		groupArticleCount := 0
 		for _, articleNum := range futureArticles {
 			// Use the proper spam increment function which:
-			// 1. Increments spam counter (spam = spam + 1)  
+			// 1. Increments spam counter (spam = spam + 1)
 			// 2. Adds entry to main spam table for admin tracking
 			// 3. Handles proper error logging
 			if err := db.IncrementArticleSpam(name, articleNum); err != nil {
@@ -224,7 +224,7 @@ func hideFuturePosts(db *database.Database) error {
 			}
 			_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ?", articleNum)
 			db.ForceCloseGroupDBs(groupDBs)
-			
+
 			if err != nil {
 				log.Printf("[WEB]: Future posts migration error setting hide flag for %s article %d: %v", name, articleNum, err)
 				continue

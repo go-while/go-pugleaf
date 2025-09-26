@@ -573,7 +573,7 @@ func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
 	processedCount := 0
 	for _, articleNum := range futureArticles {
 		// Use the proper spam increment function which:
-		// 1. Increments spam counter (spam = spam + 1)  
+		// 1. Increments spam counter (spam = spam + 1)
 		// 2. Adds entry to main spam table for admin tracking
 		// 3. Handles proper error logging
 		if err := s.DB.IncrementArticleSpam(name, articleNum); err != nil {
@@ -587,7 +587,7 @@ func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
 		}
 		_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ?", articleNum)
 		groupDBs.Return(s.DB)
-		
+
 		if err != nil {
 			continue // Skip articles that fail hide update
 		}
