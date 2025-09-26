@@ -315,3 +315,31 @@ func (s *WebServer) getHierarchyLevel(currentPath string, sortBy string, page in
 
 	return subHierarchies, directGroups, totalSubHierarchies, totalGroups, nil
 }
+
+// adminRestoreHierarchyDescriptions handles restoring all hierarchy descriptions from migration
+func (s *WebServer) adminRestoreHierarchyDescriptions(c *gin.Context) {
+	// Check authentication and admin permissions
+	if !s.requireAdminAuth(c) {
+		return
+	}
+
+	session := s.getWebSession(c)
+
+	// Restore hierarchy descriptions
+	err := s.DB.RestoreHierarchyDescriptions()
+	if err != nil {
+		session.SetError("Failed to restore hierarchy descriptions: " + err.Error())
+		c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
+		return
+	}
+
+	// Refresh hierarchy cache after restore
+	if s.DB.HierarchyCache != nil {
+		s.DB.HierarchyCache.InvalidateAll()
+		go s.DB.HierarchyCache.WarmCache(s.DB) // Warm cache in background
+	}
+
+	// Set success message and redirect to settings tab
+	session.SetSuccess("Hierarchy descriptions restored successfully from migration defaults")
+	c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
+}

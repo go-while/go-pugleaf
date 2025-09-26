@@ -13,8 +13,15 @@
                       <h6>Hierarchy Management</h6>
                       <form action="/admin/hierarchies/update" method="post" style="display: inline;">
                           <button type="submit" class="btn btn-outline-secondary btn-sm">
-                              <i class="bi bi-arrow-clockwise me-1"></i>Update Hierarchies
+                              <i class="bi bi-arrow-clockwise me-1"></i>Rebuild
                           </button>
+                          <small>Rebuild the hierarchy cache table from existing newsgroups</small>
+                      </form>
+                      <form action="/admin/hierarchies/restore-descriptions" method="post" style="display: inline;" class="ms-2">
+                          <button type="submit" class="btn btn-outline-primary btn-sm">
+                              <i class="bi bi-journal-arrow-down me-1"></i>Restore
+                          </button>
+                          <small>Restore lost hierarchy descriptions</small>
                       </form>
                   </div>
                   <div class="mb-0">

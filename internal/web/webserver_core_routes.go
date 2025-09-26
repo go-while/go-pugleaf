@@ -410,6 +410,7 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/sections/unassign", s.UnassignNewsgroupHandler)
 	s.Router.POST("/admin/cache/clear", s.adminClearCache)
 	s.Router.POST("/admin/hierarchies/update", s.adminUpdateHierarchies)
+	s.Router.POST("/admin/hierarchies/restore-descriptions", s.adminRestoreHierarchyDescriptions)
 	s.Router.POST("/admin/settings", s.adminUpdateSettings)
 	s.Router.POST("/admin/crons/create", s.adminCreateCronJob)
 	s.Router.POST("/admin/crons/update", s.adminUpdateCronJob)

@@ -34,13 +34,13 @@ func (s *WebServer) profilePage(c *gin.Context) {
 	}
 
 	// Get user details
-	user, err := s.DB.GetUserByID(int64(session.UserID))
+	user, err := s.DB.GetUserByID(session.UserID)
 	if err != nil {
 		s.renderError(c, http.StatusInternalServerError, "User Error", "Failed to load user profile")
 		return
 	}
 	// Get NNTP user details if available
-	nntpUser, err := s.DB.GetNNTPUserByWebUserID(int64(session.UserID))
+	nntpUser, err := s.DB.GetNNTPUserByWebUserID(session.UserID)
 	if err != nil {
 		// NNTP user doesn't exist - this is okay, not all users have NNTP accounts
 		nntpUser = nil
