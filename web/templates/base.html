@@ -106,15 +106,14 @@
                         {{if .IsAdmin}}
                         <a href="/admin" class="btn btn-danger btn-sm">🛠️ Admin</a>
                         {{end}}
+                        <!--<a href="/SiteChat" class="btn btn-outline-primary btn-sm"> 💬 Chat</a>-->
                         <a href="/" class="btn btn-secondary btn-sm">🏠 Home</a>
                         <a href="/SiteNews" class="btn btn-secondary btn-sm">📰 News</a>
-                        <a href="/groups" class="btn btn-secondary btn-sm">📰 Usenet</a>
-                        <a href="/hierarchies" class="btn btn-secondary btn-sm">🗂️ Hierarchies</a>
+                        <a href="/hierarchies" class="btn btn-secondary btn-sm">🗂️ Usenet</a>
                         {{if .AvailableSections}}
                         <a href="/sections" class="btn btn-secondary btn-sm">📚 Sections</a>
                         {{end}}
                         <a href="/search" class="btn btn-secondary btn-sm"><i class="bi bi-search"></i> Search</a>
-                        <!--<a href="/static/sites/chat.html" class="btn btn-outline-primary btn-sm"> 💬 Chat</a>-->
                         {{if .User}}
                         <!-- User is logged in -->
                         {{if .AvailableAIModels}}
