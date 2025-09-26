@@ -49,11 +49,12 @@ func (s *WebServer) profilePage(c *gin.Context) {
 	// days since User.CreatedAt
 	timereg := int(time.Since(user.CreatedAt).Hours() / 24)
 	joined := ""
-	if timereg == 0 {
+	switch timereg {
+	case 0:
 		joined = "today"
-	} else if timereg == 1 {
+	case 1:
 		joined = "1 day ago"
-	} else {
+	default:
 		joined = fmt.Sprintf("%d days ago", timereg)
 	}
 	localNNTPaddr, err := s.DB.GetConfigValue(config.CFG_KEY_WEBLOCALNNTP)
