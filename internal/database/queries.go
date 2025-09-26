@@ -1939,9 +1939,10 @@ const query_UpdateHierarchyCounts1 = `UPDATE newsgroups
 		END
 		WHERE hierarchy IS NULL`
 const query_UpdateHierarchyCounts2 = `
-		INSERT OR REPLACE INTO hierarchies (name, group_count, last_updated, created_at)
+		INSERT OR REPLACE INTO hierarchies (name, description, group_count, last_updated, created_at)
 		SELECT
 			hierarchy,
+			COALESCE((SELECT description FROM hierarchies WHERE name = newsgroups.hierarchy), '') as description,
 			COUNT(*) as group_count,
 			CURRENT_TIMESTAMP as last_updated,
 			COALESCE((SELECT created_at FROM hierarchies WHERE name = newsgroups.hierarchy), CURRENT_TIMESTAMP) as created_at
