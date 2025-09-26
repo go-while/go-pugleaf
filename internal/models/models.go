@@ -288,7 +288,7 @@ func (n *Newsgroup) PrintLastActivity() string {
 	*/
 	if diff < time.Minute {
 		return fmt.Sprintf("%d seconds ago", int(diff.Seconds()))
-	} else if diff < time.Hour {
+	} else if diff < time.Hour*2 {
 		return fmt.Sprintf("%d minutes ago", int(diff.Minutes()))
 	} else if diff < 48*time.Hour {
 		return fmt.Sprintf("%d hours ago", int(diff.Hours()))
@@ -308,6 +308,50 @@ func (n *Newsgroup) PrintLastActivity() string {
 				return fmt.Sprintf("%d Months ago", months)
 			}
 		*/
+		return fmt.Sprintf("%d days ago", totalDays)
+	} else {
+		years := totalDays / 365
+		remainingDays := totalDays % 365
+		months := remainingDays / 30
+		if months > 0 {
+			if years == 1 && months == 1 {
+				return "1 Year 1 Month ago"
+			} else if years == 1 {
+				return fmt.Sprintf("1 Year %d Months ago", months)
+			} else if months == 1 {
+				return fmt.Sprintf("%d Years 1 Month ago", years)
+			} else {
+				return fmt.Sprintf("%d Years %d Months ago", years, months)
+			}
+		} else {
+			if years == 1 {
+				return "1 Year ago"
+			}
+			return fmt.Sprintf("%d Years ago", years)
+		}
+	}
+}
+
+// PrintLastActivity returns a human-readable time difference from now for hierarchies
+func (h *Hierarchy) PrintLastActivity() string {
+	// This function returns a human-readable time difference from now
+	if h.LastUpdated.IsZero() {
+		return "never"
+	}
+
+	// Ensure we're working with UTC times for consistent calculation
+	now := time.Now().UTC()
+	updatedAtUTC := h.LastUpdated.UTC()
+	diff := now.Sub(updatedAtUTC)
+	totalDays := int(diff.Hours() / 24)
+
+	if diff < time.Minute {
+		return fmt.Sprintf("%d seconds ago", int(diff.Seconds()))
+	} else if diff < time.Hour*2 {
+		return fmt.Sprintf("%d minutes ago", int(diff.Minutes()))
+	} else if diff < 48*time.Hour {
+		return fmt.Sprintf("%d hours ago", int(diff.Hours()))
+	} else if totalDays < 365 {
 		return fmt.Sprintf("%d days ago", totalDays)
 	} else {
 		years := totalDays / 365

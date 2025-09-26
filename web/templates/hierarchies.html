@@ -83,11 +83,14 @@
                                     -->
                                 </div>
                             </div>
-                            <div class="ms-3">
-                                <small class="text-muted">
+                            <div class="d-flex flex-column align-items-end text-end">
+                                <small class="text-muted mb-1">
                                     <i class="bi bi-collection me-1"></i>Groups: <span
                                         class="badge bg-secondary">{{.GroupCount}}</span>
                                 </small>
+                                <div class="text-muted">
+                                    {{.PrintLastActivity}}
+                                </div>
                             </div>
                             <!--
                             <div class="ms-3">
