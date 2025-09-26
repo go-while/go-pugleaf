@@ -1825,7 +1825,7 @@ func (db *Database) GetAllHierarchies() ([]*models.Hierarchy, error) {
 func (db *Database) GetHierarchiesPaginated(page, pageSize int, sortBy string) ([]*models.Hierarchy, int, error) {
 	// Use cache if available, otherwise fall back to direct query
 	if db.HierarchyCache != nil {
-		log.Printf("GetHierarchiesPaginated: Using cached hierarchies | page %d, pageSize %d, sortBy %s", page, pageSize, sortBy)
+		//log.Printf("GetHierarchiesPaginated: Using cached hierarchies | page %d, pageSize %d, sortBy %s", page, pageSize, sortBy)
 		return db.HierarchyCache.GetHierarchiesPaginated(db, page, pageSize, sortBy)
 	}
 	return db.getHierarchiesPaginatedDirect(page, pageSize, sortBy)
