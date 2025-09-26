@@ -1825,6 +1825,7 @@ func (db *Database) GetAllHierarchies() ([]*models.Hierarchy, error) {
 func (db *Database) GetHierarchiesPaginated(page, pageSize int, sortBy string) ([]*models.Hierarchy, int, error) {
 	// Use cache if available, otherwise fall back to direct query
 	if db.HierarchyCache != nil {
+		log.Printf("GetHierarchiesPaginated: Using cached hierarchies | page %d, pageSize %d, sortBy %s", page, pageSize, sortBy)
 		return db.HierarchyCache.GetHierarchiesPaginated(db, page, pageSize, sortBy)
 	}
 	return db.getHierarchiesPaginatedDirect(page, pageSize, sortBy)
@@ -1886,6 +1887,9 @@ func (db *Database) getHierarchiesPaginatedDirect(page, pageSize int, sortBy str
 		}
 		if description.Valid {
 			hierarchy.Description = description.String
+			//log.Printf("DEBUG | GetHierarchiesPaginated: Loaded hierarchy '%s' with description: '%s'", hierarchy.Name, hierarchy.Description)
+		} else {
+			//log.Printf("DEBUG | GetHierarchiesPaginated: Hierarchy '%s' has no description (NULL or empty)", hierarchy.Name)
 		}
 		hierarchies = append(hierarchies, hierarchy)
 	}
@@ -1984,7 +1988,7 @@ func (db *Database) UpdateHierarchyCounts() error {
 
 // RestoreHierarchyDescriptions restores all default hierarchy descriptions from the migration
 func (db *Database) RestoreHierarchyDescriptions() error {
-	log.Printf("RestoreHierarchyDescriptions: Starting hierarchy description restoration...")
+	//log.Printf("Starting RestoreHierarchyDescriptions")
 
 	// Map of hierarchy names to descriptions from 0003_main_create_hierarchies.sql
 	hierarchyDescriptions := map[string]string{
@@ -1999,87 +2003,73 @@ func (db *Database) RestoreHierarchyDescriptions() error {
 		"talk":       "General discussion and debate",
 
 		// Alternative hierarchies
-		"alt":            "Alternative discussions and topics",
-		"alt.anonymous":  "Anonymous posting groups",
-		"alt.binaries":   "Binary file sharing",
-		"alt.conspiracy": "Conspiracy theories",
-		"alt.culture":    "Cultural discussions",
-		"alt.fan":        "Fan groups for various topics",
-		"alt.folklore":   "Folklore and urban legends",
-		"alt.humor":      "Humor and jokes",
-		"alt.music":      "Music discussions",
-		"alt.politics":   "Political discussions",
-		"alt.privacy":    "Privacy-related discussions",
-		"alt.religion":   "Religious discussions",
-		"alt.security":   "Security discussions",
-		"alt.sex":        "Adult discussions",
-		"alt.society":    "Society and social issues",
+		"alt": "Alternative discussions and topics",
 
 		// Regional/Language hierarchies (alphabetical by code)
-		"ar":            "Arabic language newsgroups",
-		"at":            "Austrian newsgroups",
-		"au":            "Australian newsgroups",
-		"aus":           "Australian regional groups",
-		"be":            "Belgian newsgroups",
-		"bg":            "Bulgarian newsgroups",
-		"br":            "Brazilian Portuguese newsgroups",
-		"ca":            "California regional groups",
-		"can":           "Canadian regional groups",
-		"ch":            "Swiss newsgroups",
-		"cl":            "Chilean newsgroups",
-		"cn":            "Chinese language newsgroups",
-		"co.newsgroups": "Colombian newsgroups",
-		"cr":            "Costa Rican newsgroups",
-		"cz":            "Czech language newsgroups",
-		"de":            "German language newsgroups",
-		"dk":            "Danish language newsgroups",
-		"ee":            "Estonian newsgroups",
-		"eg":            "Egyptian newsgroups",
-		"es":            "Spanish language newsgroups",
-		"fi":            "Finnish language newsgroups",
-		"fj":            "Japanese newsgroups (From Japan)",
-		"fr":            "French language newsgroups",
-		"gr":            "Greek language newsgroups",
-		"hk":            "Hong Kong newsgroups",
-		"hr":            "Croatian newsgroups",
-		"hu":            "Hungarian newsgroups",
-		"id":            "Indonesian newsgroups",
-		"ie":            "Irish newsgroups",
-		"in":            "Indian newsgroups",
-		"is":            "Icelandic newsgroups",
-		"it":            "Italian language newsgroups",
-		"jp":            "Japanese language newsgroups",
-		"kr":            "Korean language newsgroups",
-		"lt":            "Lithuanian newsgroups",
-		"lu":            "Luxembourg newsgroups",
-		"lv":            "Latvian newsgroups",
-		"mx":            "Mexican newsgroups",
-		"my":            "Malaysian newsgroups",
-		"nl":            "Dutch/Netherlands newsgroups",
-		"no":            "Norwegian language newsgroups",
-		"nz":            "New Zealand newsgroups",
-		"pe":            "Peruvian newsgroups",
-		"ph":            "Philippine newsgroups",
-		"pk":            "Pakistani newsgroups",
-		"pl":            "Polish language newsgroups",
-		"pt":            "Portuguese language newsgroups",
-		"ro":            "Romanian newsgroups",
-		"ru":            "Russian language newsgroups",
-		"se":            "Swedish language newsgroups",
-		"sg":            "Singapore newsgroups",
-		"si":            "Slovenian newsgroups",
-		"sk":            "Slovak language newsgroups",
-		"th":            "Thai newsgroups",
-		"tn":            "Tunisian newsgroups",
-		"tr":            "Turkish language newsgroups",
-		"tw":            "Taiwanese newsgroups",
-		"ua":            "Ukrainian newsgroups",
-		"uk":            "United Kingdom regional groups",
-		"uy":            "Uruguayan newsgroups",
-		"ve":            "Venezuelan newsgroups",
-		"vn":            "Vietnamese newsgroups",
-		"yu":            "Former Yugoslav newsgroups",
-		"za":            "South African newsgroups",
+		"ar":  "Arabic language newsgroups",
+		"at":  "Austrian newsgroups",
+		"au":  "Australian newsgroups",
+		"aus": "Australian regional groups",
+		"be":  "Belgian newsgroups",
+		"bg":  "Bulgarian newsgroups",
+		"br":  "Brazilian Portuguese newsgroups",
+		"ca":  "California regional groups",
+		"can": "Canadian regional groups",
+		"ch":  "Swiss newsgroups",
+		"cl":  "Chilean newsgroups",
+		"cn":  "Chinese language newsgroups",
+		"co":  "Colombian newsgroups",
+		"cr":  "Costa Rican newsgroups",
+		"cz":  "Czech language newsgroups",
+		"de":  "German language newsgroups",
+		"dk":  "Danish language newsgroups",
+		"ee":  "Estonian newsgroups",
+		"eg":  "Egyptian newsgroups",
+		"es":  "Spanish language newsgroups",
+		"fi":  "Finnish language newsgroups",
+		"fj":  "Japanese newsgroups (From Japan)",
+		"fr":  "French language newsgroups",
+		"gr":  "Greek language newsgroups",
+		"hk":  "Hong Kong newsgroups",
+		"hr":  "Croatian newsgroups",
+		"hu":  "Hungarian newsgroups",
+		"id":  "Indonesian newsgroups",
+		"ie":  "Irish newsgroups",
+		"in":  "Indian newsgroups",
+		"is":  "Icelandic newsgroups",
+		"it":  "Italian language newsgroups",
+		"jp":  "Japanese language newsgroups",
+		"kr":  "Korean language newsgroups",
+		"lt":  "Lithuanian newsgroups",
+		"lu":  "Luxembourg newsgroups",
+		"lv":  "Latvian newsgroups",
+		"mx":  "Mexican newsgroups",
+		"my":  "Malaysian newsgroups",
+		"nl":  "Dutch/Netherlands newsgroups",
+		"no":  "Norwegian language newsgroups",
+		"nz":  "New Zealand newsgroups",
+		"pe":  "Peruvian newsgroups",
+		"ph":  "Philippine newsgroups",
+		"pk":  "Pakistani newsgroups",
+		"pl":  "Polish language newsgroups",
+		"pt":  "Portuguese language newsgroups",
+		"ro":  "Romanian newsgroups",
+		"ru":  "Russian language newsgroups",
+		"se":  "Swedish language newsgroups",
+		"sg":  "Singapore newsgroups",
+		"si":  "Slovenian newsgroups",
+		"sk":  "Slovak language newsgroups",
+		"th":  "Thai newsgroups",
+		"tn":  "Tunisian newsgroups",
+		"tr":  "Turkish language newsgroups",
+		"tw":  "Taiwanese newsgroups",
+		"ua":  "Ukrainian newsgroups",
+		"uk":  "United Kingdom regional groups",
+		"uy":  "Uruguayan newsgroups",
+		"ve":  "Venezuelan newsgroups",
+		"vn":  "Vietnamese newsgroups",
+		"yu":  "Former Yugoslav newsgroups",
+		"za":  "South African newsgroups",
 
 		// Regional US hierarchies (alphabetical)
 		"austin":   "Austin, Texas area",
@@ -2087,7 +2077,6 @@ func (db *Database) RestoreHierarchyDescriptions() error {
 		"ba":       "San Francisco Bay Area",
 		"boston":   "Boston area",
 		"chi":      "Chicago area",
-		"co.us":    "Colorado regional groups",
 		"ct":       "Connecticut regional groups",
 		"dc":       "Washington DC area",
 		"fl":       "Florida regional groups",
@@ -2467,7 +2456,7 @@ func (db *Database) RestoreHierarchyDescriptions() error {
 		}
 	}
 
-	log.Printf("RestoreHierarchyDescriptions: Successfully restored descriptions for %d hierarchies", updated)
+	log.Printf("Restored descriptions for %d hierarchies (map: %d)", updated, len(hierarchyDescriptions))
 	return nil
 }
 

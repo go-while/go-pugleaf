@@ -111,9 +111,12 @@ func (hc *HierarchyCache) GetHierarchiesPaginated(db *Database, page, pageSize i
 	for i, h := range hc.hierarchies {
 		// Create a deep copy to avoid data races during sorting
 		hierarchies[i] = &models.Hierarchy{
+			ID:          h.ID,
 			Name:        h.Name,
+			Description: h.Description, // Fix: Include description field
 			GroupCount:  h.GroupCount,
 			LastUpdated: h.LastUpdated, // Safe read under RLock
+			CreatedAt:   h.CreatedAt,   // Fix: Include created_at field
 		}
 	}
 	hc.mu.RUnlock()
