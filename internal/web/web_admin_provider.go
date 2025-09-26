@@ -48,11 +48,11 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
 		return
 	}
-
+ 	var err error
 	// Parse port
 	port := 119 // Default NNTP port
 	if portStr != "" {
-		var err error
+
 		port, err = strconv.Atoi(portStr)
 		if err != nil || port <= 0 || port > 65535 {
 			session.SetError("Invalid port number")
