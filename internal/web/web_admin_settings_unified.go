@@ -24,23 +24,11 @@ type SettingConfig struct {
 
 // adminUpdateSettings handles all admin settings updates in a unified way
 func (s *WebServer) adminUpdateSettings(c *gin.Context) {
-	// Check authentication and admin permissions
+	if !s.requireAdminAuth(c) {
+		return
+	}
+
 	session := s.getWebSession(c)
-	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
-		return
-	}
-
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
-		return
-	}
-
-	if !s.isAdmin(currentUser) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
-		return
-	}
 
 	// Get the setting type from form
 	settingType := strings.TrimSpace(c.PostForm("setting"))

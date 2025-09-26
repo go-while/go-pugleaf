@@ -47,19 +47,11 @@ func (s *WebServer) countPostingNNTPUsers(nntpUsers []*models.NNTPUser) int {
 
 // adminCreateNNTPUser handles NNTP user creation
 func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Generate random credentials
 	username, err := generateRandomHex(16)
@@ -138,19 +130,11 @@ func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
 
 // adminUpdateNNTPUser handles NNTP user updates
 func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get NNTP user ID
 	idStr := strings.TrimSpace(c.PostForm("id"))
@@ -226,19 +210,11 @@ func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
 
 // adminDeleteNNTPUser handles NNTP user deletion
 func (s *WebServer) adminDeleteNNTPUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get NNTP user ID
 	idStr := strings.TrimSpace(c.PostForm("id"))
@@ -270,19 +246,11 @@ func (s *WebServer) adminDeleteNNTPUser(c *gin.Context) {
 
 // adminToggleNNTPUser handles activating/deactivating NNTP users
 func (s *WebServer) adminToggleNNTPUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get NNTP user ID
 	idStr := strings.TrimSpace(c.PostForm("id"))
@@ -332,19 +300,11 @@ func (s *WebServer) adminToggleNNTPUser(c *gin.Context) {
 
 // adminEnableNNTPUser handles activating NNTP users
 func (s *WebServer) adminEnableNNTPUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get NNTP user ID
 	idStr := strings.TrimSpace(c.PostForm("id"))

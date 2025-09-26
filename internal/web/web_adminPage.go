@@ -16,23 +16,17 @@ import (
 
 // adminPage displays the admin interface
 func (s *WebServer) adminPage(c *gin.Context) {
-	// Check authentication and admin permissions
+	if !s.requireAdminAuth(c) {
+		return
+	}
+
 	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login?redirect=/admin")
-		return
-	}
-
+	
+	// Get current user for template
 	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
+	if err != nil {
+		session.SetError("Failed to load user")
 		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
-
-	// Check if user is admin
-	if !s.isAdmin(currentUser) {
-		s.renderError(c, http.StatusForbidden, "Access Denied", "You don't have permission to access the admin interface")
 		return
 	}
 

@@ -27,19 +27,11 @@ func buildNewsgroupAdminRedirectURL(c *gin.Context) string {
 
 // adminCreateNewsgroup handles newsgroup creation
 func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get form data
 	name := strings.TrimSpace(c.PostForm("name"))
@@ -57,6 +49,7 @@ func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
 	}
 
 	// Parse expiry days
+	var err error
 	expiryDays := 0
 	if expiryDaysStr != "" {
 		expiryDays, err = strconv.Atoi(expiryDaysStr)
@@ -127,21 +120,14 @@ func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
 
 // adminUpdateNewsgroup handles newsgroup updates
 func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get form data
+	var err error
 	name := strings.TrimSpace(c.PostForm("name"))
 	description := strings.TrimSpace(c.PostForm("description"))
 	expiryDaysStr := strings.TrimSpace(c.PostForm("expiry_days"))
@@ -234,19 +220,11 @@ func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
 
 // adminDeleteNewsgroup handles newsgroup deletion
 func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get newsgroup name
 	name := strings.TrimSpace(c.PostForm("name"))
@@ -257,7 +235,7 @@ func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
 	}
 
 	// Delete newsgroup
-	err = s.DB.DeleteNewsgroup(name)
+	err := s.DB.DeleteNewsgroup(name)
 	if err != nil {
 		session.SetError("Failed to delete newsgroup")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
@@ -270,19 +248,11 @@ func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
 
 // adminAssignNewsgroupSection handles section assignment for newsgroups
 func (s *WebServer) adminAssignNewsgroupSection(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
-		return
-	}
+	session := s.getWebSession(c)
 
 	newsgroupName := strings.TrimSpace(c.PostForm("newsgroup_name"))
 	sectionIDStr := strings.TrimSpace(c.PostForm("section_id"))
@@ -361,19 +331,11 @@ func (s *WebServer) adminAssignNewsgroupSection(c *gin.Context) {
 
 // adminToggleNewsgroup handles toggling the active status of a newsgroup
 func (s *WebServer) adminToggleNewsgroup(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get newsgroup name from form
 	name := strings.TrimSpace(c.PostForm("name"))
@@ -423,19 +385,11 @@ func (s *WebServer) adminBulkDisableNewsgroups(c *gin.Context) {
 
 // adminBulkDeleteNewsgroups handles bulk deletion of inactive newsgroups
 func (s *WebServer) adminBulkDeleteNewsgroups(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get newsgroup names from form array
 	newsgroups := c.PostFormArray("newsgroups")
@@ -464,19 +418,11 @@ func (s *WebServer) adminBulkDeleteNewsgroups(c *gin.Context) {
 
 // handleBulkNewsgroupAction is a helper function for bulk enable/disable operations
 func (s *WebServer) handleBulkNewsgroupAction(c *gin.Context, activeStatus bool, actionName string) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get newsgroup names from form array
 	newsgroups := c.PostFormArray("newsgroups")
@@ -505,19 +451,11 @@ func (s *WebServer) handleBulkNewsgroupAction(c *gin.Context, activeStatus bool,
 
 // adminMigrateNewsgroupActivity handles migrating activity timestamp for a specific newsgroup
 func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get newsgroup name from form
 	name := strings.TrimSpace(c.PostForm("newsgroup_name"))

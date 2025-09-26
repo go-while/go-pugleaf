@@ -31,21 +31,14 @@ func (s *WebServer) countActiveSessions() int {
 
 // adminCreateUser handles user creation
 func (s *WebServer) adminCreateUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get form data
+	var err error
 	username := strings.TrimSpace(c.PostForm("username"))
 	email := strings.TrimSpace(c.PostForm("email"))
 	displayName := strings.TrimSpace(c.PostForm("displayName"))
@@ -145,19 +138,11 @@ func (s *WebServer) adminCreateUser(c *gin.Context) {
 
 // adminUpdateUser handles user updates
 func (s *WebServer) adminUpdateUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get user ID
 	userIDStr := c.PostForm("user_id")
@@ -253,16 +238,14 @@ func (s *WebServer) adminUpdateUser(c *gin.Context) {
 
 // adminDeleteUser handles user deletion
 func (s *WebServer) adminDeleteUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
+	session := s.getWebSession(c)
 	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
+	if err != nil {
+		session.SetError("Failed to load user")
 		c.Redirect(http.StatusSeeOther, "/profile")
 		return
 	}

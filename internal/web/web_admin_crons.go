@@ -11,23 +11,10 @@ import (
 
 // adminCreateCronJob creates a new cron job
 func (s *WebServer) adminCreateCronJob(c *gin.Context) {
-	// Check authentication and admin permissions
+	if !s.requireAdminAuth(c) {
+		return
+	}
 	session := s.getWebSession(c)
-	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
-		return
-	}
-
-	currentUser, err := s.DB.GetUserByID(session.UserID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
-		return
-	}
-
-	if !s.isAdmin(currentUser) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
-		return
-	}
 
 	// Get form data
 	name := strings.TrimSpace(c.PostForm("name"))
@@ -78,26 +65,15 @@ func (s *WebServer) adminCreateCronJob(c *gin.Context) {
 
 // adminUpdateCronJob updates an existing cron job
 func (s *WebServer) adminUpdateCronJob(c *gin.Context) {
-	// Check authentication and admin permissions
+	if !s.requireAdminAuth(c) {
+		return
+	}
+
 	session := s.getWebSession(c)
-	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
-		return
-	}
-
-	currentUser, err := s.DB.GetUserByID(session.UserID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
-		return
-	}
-
-	if !s.isAdmin(currentUser) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
-		return
-	}
 
 	if !s.CronEdit {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Editing Crons is disabled"})
+		session.SetError("Editing Crons is disabled")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=crons")
 		return
 	}
 
@@ -165,23 +141,11 @@ func (s *WebServer) adminUpdateCronJob(c *gin.Context) {
 
 // adminToggleCronJob toggles a cron job's enabled status
 func (s *WebServer) adminToggleCronJob(c *gin.Context) {
-	// Check authentication and admin permissions
+	if !s.requireAdminAuth(c) {
+		return
+	}
+
 	session := s.getWebSession(c)
-	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
-		return
-	}
-
-	currentUser, err := s.DB.GetUserByID(session.UserID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
-		return
-	}
-
-	if !s.isAdmin(currentUser) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
-		return
-	}
 
 	// Get cron job ID
 	cronIDStr := c.PostForm("cron_id")
@@ -205,26 +169,15 @@ func (s *WebServer) adminToggleCronJob(c *gin.Context) {
 
 // adminDeleteCronJob deletes a cron job
 func (s *WebServer) adminDeleteCronJob(c *gin.Context) {
-	// Check authentication and admin permissions
+	if !s.requireAdminAuth(c) {
+		return
+	}
+
 	session := s.getWebSession(c)
-	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
-		return
-	}
-
-	currentUser, err := s.DB.GetUserByID(session.UserID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
-		return
-	}
-
-	if !s.isAdmin(currentUser) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
-		return
-	}
 
 	if !s.CronEdit {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Editing Crons is disabled"})
+		session.SetError("Editing Crons is disabled")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=crons")
 		return
 	}
 
@@ -298,23 +251,11 @@ func (s *WebServer) adminViewCronJobLog(c *gin.Context) {
 
 // adminStopCronJob stops a running cron job
 func (s *WebServer) adminStopCronJob(c *gin.Context) {
-	// Check authentication and admin permissions
+	if !s.requireAdminAuth(c) {
+		return
+	}
+
 	session := s.getWebSession(c)
-	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
-		return
-	}
-
-	currentUser, err := s.DB.GetUserByID(session.UserID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
-		return
-	}
-
-	if !s.isAdmin(currentUser) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
-		return
-	}
 
 	// Get cron job ID
 	cronIDStr := c.PostForm("cron_id")

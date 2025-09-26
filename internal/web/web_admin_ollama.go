@@ -31,18 +31,11 @@ type ProxyModel struct {
 
 // adminCreateAIModel handles AI model creation
 func (s *WebServer) adminCreateAIModel(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get form data
 	postKey := strings.TrimSpace(c.PostForm("post_key"))
@@ -63,6 +56,7 @@ func (s *WebServer) adminCreateAIModel(c *gin.Context) {
 	// Parse sort order
 	sortOrder := 0
 	if sortOrderStr != "" {
+		var err error
 		sortOrder, err = strconv.Atoi(sortOrderStr)
 		if err != nil || sortOrder < 0 {
 			session.SetError("Invalid sort order")
@@ -98,19 +92,11 @@ func (s *WebServer) adminCreateAIModel(c *gin.Context) {
 
 // adminUpdateAIModel handles AI model updates
 func (s *WebServer) adminUpdateAIModel(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get model ID
 	modelIDStr := c.PostForm("model_id")
@@ -173,19 +159,11 @@ func (s *WebServer) adminUpdateAIModel(c *gin.Context) {
 
 // adminDeleteAIModel handles AI model deletion
 func (s *WebServer) adminDeleteAIModel(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get model ID
 	modelIDStr := c.PostForm("model_id")
@@ -217,19 +195,11 @@ func (s *WebServer) adminDeleteAIModel(c *gin.Context) {
 // adminSyncOllamaModels handles the sync new models request
 func (s *WebServer) adminSyncOllamaModels(c *gin.Context) {
 	log.Printf("DEBUG: adminSyncOllamaModels handler called")
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Fetch models from ollama-proxy
 	resp, err := http.Get(ProxyURL)

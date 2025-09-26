@@ -130,6 +130,52 @@ func (s *WebServer) isAdminUser(user *models.User) bool {
 	return false
 }
 
+// requireAdminAuth checks authentication and admin permissions for admin handlers
+// Returns true if authorized, false if not (and handles the redirect)
+func (s *WebServer) requireAdminAuth(c *gin.Context) bool {
+	// Check authentication
+	session := s.getWebSession(c)
+	if session == nil {
+		c.Redirect(http.StatusSeeOther, "/login")
+		return false
+	}
+
+	// Check admin permissions
+	currentUser, err := s.DB.GetUserByID(session.UserID)
+	if err != nil || !s.isAdmin(currentUser) {
+		session.SetError("Access denied")
+		c.Redirect(http.StatusSeeOther, "/profile")
+		return false
+	}
+
+	return true
+}
+
+// requireAdminAuthJSON checks authentication and admin permissions for JSON API handlers
+// Returns true if authorized, false if not (and handles the JSON error response)
+func (s *WebServer) requireAdminAuthJSON(c *gin.Context) bool {
+	// Check authentication
+	session := s.getWebSession(c)
+	if session == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
+		return false
+	}
+
+	// Check admin permissions
+	currentUser, err := s.DB.GetUserByID(session.UserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
+		return false
+	}
+
+	if !s.isAdmin(currentUser) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
+		return false
+	}
+
+	return true
+}
+
 // renderError renders an error page
 func (s *WebServer) renderError(c *gin.Context, statusCode int, message string, errstring string) {
 	errorData := struct {

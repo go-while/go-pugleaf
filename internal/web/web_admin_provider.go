@@ -14,19 +14,11 @@ import (
 
 // adminCreateProvider handles provider creation
 func (s *WebServer) adminCreateProvider(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get form data
 	name := strings.TrimSpace(c.PostForm("name"))
@@ -60,6 +52,7 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 	// Parse port
 	port := 119 // Default NNTP port
 	if portStr != "" {
+		var err error
 		port, err = strconv.Atoi(portStr)
 		if err != nil || port <= 0 || port > 65535 {
 			session.SetError("Invalid port number")
@@ -191,19 +184,11 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 
 // adminUpdateProvider handles provider updates
 func (s *WebServer) adminUpdateProvider(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get form data
 	idStr := strings.TrimSpace(c.PostForm("id"))
@@ -440,19 +425,11 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 
 // adminDeleteProvider handles provider deletion
 func (s *WebServer) adminDeleteProvider(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get provider ID
 	idStr := strings.TrimSpace(c.PostForm("id"))
