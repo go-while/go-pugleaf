@@ -186,7 +186,18 @@
                                               <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                               <button type="submit" class="btn btn-outline-primary btn-sm"
                                                       title="Fix Activity recalculates last activity timestamp for this newsgroup">
-                                                  <i class="bi bi-clock me-1"></i>FA
+                                                  <i class="bi bi-clock me-1"></i>FNA
+                                              </button>
+                                          </form>
+                                          <form method="POST" action="/admin/newsgroups/fix-thread-activity" style="display: inline;">
+                                              <input type="hidden" name="newsgroup_name" value="{{.Name}}">
+                                              {{if $.NewsgroupSearch}}
+                                              <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                              {{end}}
+                                              <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
+                                              <button type="submit" class="btn btn-outline-info btn-sm"
+                                                      title="Fix Thread Activity recalculates thread last_activity timestamps that may be incorrectly set to future dates.">
+                                                  <i class="bi bi-arrow-clockwise me-1"></i>FTA
                                               </button>
                                           </form>
                                           <form method="POST" action="/admin/newsgroups/hide-future-posts" style="display: inline;">
@@ -197,7 +208,7 @@
                                               <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                               <button type="submit" class="btn btn-outline-warning btn-sm"
                                                       title="Hide Future Posts finds and marks future-dated articles (>48h) as spam. Articles will appear in spam management.">
-                                                  <i class="bi bi-clock-history me-1"></i>HF
+                                                  <i class="bi bi-clock-history me-1"></i>HFP
                                               </button>
                                           </form>
                                       </div>

@@ -3,6 +3,7 @@ package web
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -506,6 +507,172 @@ func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
 	}
 
 	c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+}
+
+// adminFixThreadActivity handles fixing thread activity timestamps for a specific newsgroup
+func (s *WebServer) adminFixThreadActivity(c *gin.Context) {
+	if !s.requireAdminAuth(c) {
+		return
+	}
+
+	session := s.getWebSession(c)
+
+	// Get newsgroup name from form
+	name := strings.TrimSpace(c.PostForm("newsgroup_name"))
+	if name == "" {
+		session.SetError("Newsgroup name is required")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
+		return
+	}
+
+	// Check if newsgroup exists
+	_, err := s.DB.MainDBGetNewsgroup(name)
+	if err != nil {
+		session.SetError("Newsgroup not found: " + name)
+		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+		return
+	}
+
+	// Call the fix thread activity function (same logic as cmd/fix-thread-activity)
+	if err := s.fixGroupThreadActivity(name); err != nil {
+		session.SetError("Failed to fix thread activity for " + name + ": " + err.Error())
+		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+		return
+	}
+
+	session.SetSuccess("Successfully fixed thread activity timestamps for newsgroup: " + name)
+	c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+}
+
+const query_fixGroupThreadActivity1 = "SELECT thread_root, child_articles, last_activity FROM thread_cache"
+const query_fixGroupThreadActivity2 = "SELECT date_sent FROM articles WHERE article_num = ? AND hide = 0"
+const query_fixGroupThreadActivity3 = "UPDATE thread_cache SET last_activity = ? WHERE thread_root = ?"
+
+// fixGroupThreadActivity implements the same logic as cmd/fix-thread-activity for a single group
+func (s *WebServer) fixGroupThreadActivity(groupName string) error {
+	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	if err != nil {
+		return fmt.Errorf("failed to get group DB: %w", err)
+	}
+	defer groupDBs.Return(s.DB)
+
+	rows, err := database.RetryableQuery(groupDBs.DB, query_fixGroupThreadActivity1)
+	if err != nil {
+		return fmt.Errorf("failed to query thread cache: %w", err)
+	}
+	defer rows.Close()
+
+	type threadInfo struct {
+		root          int64
+		childArticles string
+		lastActivity  time.Time
+	}
+	updatedCount := 0
+	for rows.Next() {
+		var thread threadInfo
+		var lastActivityStr sql.NullString
+		if err := rows.Scan(&thread.root, &thread.childArticles, &lastActivityStr); err != nil {
+			return fmt.Errorf("failed to scan thread in '%s': %w", groupName, err)
+		}
+		if lastActivityStr.Valid {
+			// Try SQLite format first, then RFC3339 format (same as recover-db/main.go)
+			if parsed, err := time.Parse("2006-01-02 15:04:05", lastActivityStr.String); err == nil {
+				thread.lastActivity = parsed
+			} else if parsed, err := time.Parse(time.RFC3339, lastActivityStr.String); err == nil {
+				thread.lastActivity = parsed
+			}
+		} else {
+			log.Printf("Thread %d in '%s': last_activity is NULL", thread.root, groupName)
+		}
+		// Build list of all articles in this thread
+		articleNums := []int64{thread.root}
+		if thread.childArticles != "" {
+			parts := strings.Split(thread.childArticles, ",")
+			for _, part := range parts {
+				part = strings.TrimSpace(part)
+				if part != "" {
+					if num, err := strconv.ParseInt(part, 10, 64); err == nil {
+						articleNums = append(articleNums, num)
+					}
+				}
+			}
+		}
+
+		// Find the actual maximum date_sent among all articles in this thread
+		maxDate := time.Time{}
+		found := false
+
+		for _, articleNum := range articleNums {
+			// Debug logging for specific article in de.admin.mail
+			if groupName == "de.admin.mail" && articleNum == 1598 {
+				log.Printf("DEBUG: Processing article %d in newsgroup %s, thread %d", articleNum, groupName, thread.root)
+			}
+
+			var dateSent time.Time
+			var dateStr sql.NullString
+			err := database.RetryableQueryRowScan(groupDBs.DB, query_fixGroupThreadActivity2, []interface{}{articleNum}, &dateStr)
+
+			if err != nil || !dateStr.Valid {
+				log.Printf("Skipping article %d in thread %d: no valid date_sent\n", articleNum, thread.root)
+				continue
+			}
+
+			if groupName == "de.admin.mail" && articleNum == 1598 {
+				log.Printf("DEBUG: Article %d in %s - Raw date_sent string: '%s'", articleNum, groupName, dateStr.String)
+			}
+
+			// Try SQLite format first, then RFC3339 format (same as recover-db/main.go)
+			var parseErr error
+			dateSent, parseErr = time.Parse("2006-01-02 15:04:05", dateStr.String)
+			if parseErr != nil {
+				// Try RFC3339 format as fallback
+				dateSent, parseErr = time.Parse(time.RFC3339, dateStr.String)
+				if parseErr != nil {
+					if groupName == "de.admin.mail" && articleNum == 1598 {
+						log.Printf("DEBUG: Article %d in %s - Failed to parse date_sent '%s' with both SQLite and RFC3339 formats: %v", articleNum, groupName, dateStr.String, parseErr)
+					}
+					continue
+				} else {
+					if groupName == "de.admin.mail" && articleNum == 1598 {
+						log.Printf("DEBUG: Article %d in %s - Parsed date_sent with RFC3339 format: %v", articleNum, groupName, dateSent)
+					}
+				}
+			} else {
+				if groupName == "de.admin.mail" && articleNum == 1598 {
+					log.Printf("DEBUG: Article %d in %s - Parsed date_sent with SQLite format: %v", articleNum, groupName, dateSent)
+				}
+			}
+
+			if !found || dateSent.After(maxDate) {
+				maxDate = dateSent
+				found = true
+				if groupName == "de.admin.mail" && articleNum == 1598 {
+					log.Printf("DEBUG: Article %d in %s - Set as new maxDate: %v", articleNum, groupName, maxDate)
+				}
+			}
+		}
+
+		// Update thread cache if we found a valid date
+		if found && !maxDate.Equal(thread.lastActivity) {
+			// Format as UTC string to avoid timezone encoding issues
+			utcTimeStr := maxDate.UTC().Format("2006-01-02 15:04:05")
+
+			_, err := database.RetryableExec(groupDBs.DB, query_fixGroupThreadActivity3, utcTimeStr, thread.root)
+
+			if err != nil {
+				log.Print("Failed to update thread activity for thread ", thread.root, ": ", err)
+				continue // Skip threads that fail to update
+			}
+			log.Printf("Updated thread %d last_activity to %s\n", thread.root, utcTimeStr)
+			updatedCount++
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating threads: %w", err)
+	}
+
+	return nil
 }
 
 // adminHideFuturePosts handles hiding future-dated posts for a specific newsgroup using the spam system

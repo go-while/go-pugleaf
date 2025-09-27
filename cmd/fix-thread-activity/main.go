@@ -84,9 +84,16 @@ func fixGroupThreadActivity(db *database.Database, groupName string) error {
 			return fmt.Errorf("failed to scan thread: %w", err)
 		}
 		if lastActivityStr.Valid {
+			// Try SQLite format first, then RFC3339 format (same as web version)
 			if parsed, err := time.Parse("2006-01-02 15:04:05", lastActivityStr.String); err == nil {
 				t.lastActivity = parsed
+			} else if parsed, err := time.Parse(time.RFC3339, lastActivityStr.String); err == nil {
+				t.lastActivity = parsed
+			} else {
+				log.Printf("Thread %d: unrecognized last_activity format '%s'", t.root, lastActivityStr.String)
 			}
+		} else {
+			log.Printf("Thread %d: last_activity is NULL", t.root)
 		}
 		threads = append(threads, t)
 	}
