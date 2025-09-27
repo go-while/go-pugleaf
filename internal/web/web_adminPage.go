@@ -21,7 +21,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	}
 
 	session := s.getWebSession(c)
-	
+
 	// Get current user for template
 	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
 	if err != nil {
@@ -502,9 +502,9 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		SpamArticles:               spamArticles,
 		SpamPagination:             spamPagination,
 		CurrentUser:                currentUser,
-		TotalUsersCount:            int(totalUsersCount),
+		TotalUsersCount:            totalUsersCount,
 		AdminCount:                 s.countAdminUsers(users),
-		TotalAdminCount:            int(totalAdminCount),
+		TotalAdminCount:            totalAdminCount,
 		EnabledTokensCount:         s.countEnabledAPITokens(apiTokens),
 		ActiveSessions:             s.countActiveSessions(),
 		ActiveNNTPUsers:            s.countActiveNNTPUsers(nntpUsers),

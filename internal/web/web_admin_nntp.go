@@ -24,25 +24,23 @@ func generateRandomHex(length int) (string, error) {
 }
 
 // countActiveNNTPUsers counts the number of active NNTP users
-func (s *WebServer) countActiveNNTPUsers(nntpUsers []*models.NNTPUser) int {
-	count := 0
+func (s *WebServer) countActiveNNTPUsers(nntpUsers []*models.NNTPUser) (count int64) {
 	for _, user := range nntpUsers {
 		if user.IsActive {
 			count++
 		}
 	}
-	return count
+	return
 }
 
 // countPostingNNTPUsers counts the number of NNTP users who can post
-func (s *WebServer) countPostingNNTPUsers(nntpUsers []*models.NNTPUser) int {
-	count := 0
+func (s *WebServer) countPostingNNTPUsers(nntpUsers []*models.NNTPUser) (count int64) {
 	for _, user := range nntpUsers {
 		if user.IsActive && user.Posting {
 			count++
 		}
 	}
-	return count
+	return
 }
 
 // adminCreateNNTPUser handles NNTP user creation

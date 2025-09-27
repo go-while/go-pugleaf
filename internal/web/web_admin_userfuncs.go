@@ -13,18 +13,17 @@ import (
 )
 
 // countAdminUsers counts how many users have admin permissions
-func (s *WebServer) countAdminUsers(users []*models.User) int {
-	count := 0
+func (s *WebServer) countAdminUsers(users []*models.User) (count int64) {
 	for _, user := range users {
 		if s.isAdmin(user) {
 			count++
 		}
 	}
-	return count
+	return
 }
 
 // countActiveSessions returns the number of active sessions (placeholder)
-func (s *WebServer) countActiveSessions() int {
+func (s *WebServer) countActiveSessions() int64 {
 	// TODO: Implement actual session counting
 	return 0
 }

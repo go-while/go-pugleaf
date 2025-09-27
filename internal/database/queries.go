@@ -160,8 +160,8 @@ func (db *Database) GetUsersCount() int64 {
 }
 
 // GetAdminUsersCount gets the total number of admin users
-const query_GetAdminUsersCount = `SELECT COUNT(DISTINCT u.id) FROM users u 
-LEFT JOIN user_permissions up ON u.id = up.user_id 
+const query_GetAdminUsersCount = `SELECT COUNT(DISTINCT u.id) FROM users u
+LEFT JOIN user_permissions up ON u.id = up.user_id
 WHERE u.disabled = 0 AND (u.id = 1 OR up.permission = 'admin')`
 
 func (db *Database) GetAdminUsersCount() int64 {

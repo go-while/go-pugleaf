@@ -9,15 +9,15 @@ import (
 
 // APIToken represents an API token record
 type APIToken struct {
-	ID         int        `db:"id"`
+	ID         int64      `db:"id"`
 	APIToken   string     `db:"apitoken"`
 	OwnerName  string     `db:"ownername"`
-	OwnerID    int        `db:"ownerid"`
+	OwnerID    int64      `db:"ownerid"`
 	CreatedAt  time.Time  `db:"created_at"`
 	LastUsedAt *time.Time `db:"last_used_at"`
 	ExpiresAt  *time.Time `db:"expires_at"`
 	IsEnabled  bool       `db:"is_enabled"`
-	UsageCount int        `db:"usage_count"`
+	UsageCount int64      `db:"usage_count"`
 }
 
 // GenerateAPIToken creates a new cryptographically secure API token
@@ -35,8 +35,11 @@ func HashToken(token string) string {
 	return hex.EncodeToString(hash[:])
 }
 
+const query_CreateAPIToken = `INSERT INTO api_tokens (apitoken, ownername, ownerid, expires_at, is_enabled)
+	          VALUES (?, ?, ?, ?, 1)`
+
 // CreateAPIToken generates and stores a new API token
-func (db *Database) CreateAPIToken(ownerName string, ownerID int, expiresAt *time.Time) (*APIToken, string, error) {
+func (db *Database) CreateAPIToken(ownerName string, ownerID int64, expiresAt *time.Time) (*APIToken, string, error) {
 	// Generate plain token
 	plainToken, err := GenerateAPIToken()
 	if err != nil {
@@ -49,10 +52,7 @@ func (db *Database) CreateAPIToken(ownerName string, ownerID int, expiresAt *tim
 	db.MainMutex.Lock()
 	defer db.MainMutex.Unlock()
 
-	query := `INSERT INTO api_tokens (apitoken, ownername, ownerid, expires_at, is_enabled)
-	          VALUES (?, ?, ?, ?, 1)`
-
-	result, err := retryableExec(db.mainDB, query, hashedToken, ownerName, ownerID, expiresAt)
+	result, err := retryableExec(db.mainDB, query_CreateAPIToken, hashedToken, ownerName, ownerID, expiresAt)
 	if err != nil {
 		return nil, "", err
 	}
@@ -63,7 +63,7 @@ func (db *Database) CreateAPIToken(ownerName string, ownerID int, expiresAt *tim
 	}
 
 	token := &APIToken{
-		ID:         int(id),
+		ID:         id,
 		APIToken:   hashedToken,
 		OwnerName:  ownerName,
 		OwnerID:    ownerID,
@@ -106,7 +106,7 @@ func (db *Database) ValidateAPIToken(plainToken string) (*APIToken, error) {
 }
 
 // UpdateTokenUsage updates the last_used_at timestamp and increments usage_count
-func (db *Database) UpdateTokenUsage(tokenID int) error {
+func (db *Database) UpdateTokenUsage(tokenID int64) error {
 	db.MainMutex.Lock()
 	defer db.MainMutex.Unlock()
 

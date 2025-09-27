@@ -41,13 +41,13 @@ type AdminPageData struct {
 	SpamArticles               []*SpamArticleInfo     // Added for spam management
 	SpamPagination             *models.PaginationInfo // Added for spam pagination
 	CurrentUser                *models.User
-	TotalUsersCount            int                        // Total count of all users (for statistics)
-	AdminCount                 int
-	TotalAdminCount            int                        // Total count of all admin users (for statistics)
-	EnabledTokensCount         int
-	ActiveSessions             int
-	ActiveNNTPUsers            int
-	PostingNNTPUsers           int
+	TotalUsersCount            int64 // Total count of all users (for statistics)
+	AdminCount                 int64
+	TotalAdminCount            int64 // Total count of all admin users (for statistics)
+	EnabledTokensCount         int64
+	ActiveSessions             int64
+	ActiveNNTPUsers            int64
+	PostingNNTPUsers           int64
 	Uptime                     string
 	CacheStats                 map[string]interface{}                // Added for cache monitoring
 	NewsgroupCacheStats        map[string]interface{}                // Added for newsgroup cache monitoring

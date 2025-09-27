@@ -11,14 +11,13 @@ import (
 )
 
 // countEnabledAPITokens counts how many API tokens are enabled
-func (s *WebServer) countEnabledAPITokens(tokens []*database.APIToken) int {
-	count := 0
+func (s *WebServer) countEnabledAPITokens(tokens []*database.APIToken) (count int64) {
 	for _, token := range tokens {
 		if token.IsEnabled {
 			count++
 		}
 	}
-	return count
+	return
 }
 
 // adminCreateAPIToken handles API token creation from admin form
@@ -42,10 +41,10 @@ func (s *WebServer) adminCreateAPIToken(c *gin.Context) {
 	}
 
 	// Parse owner ID (optional)
-	ownerID := 0
+	var ownerID int64
 	if ownerIDStr != "" {
 		var err error
-		ownerID, err = strconv.Atoi(ownerIDStr)
+		ownerID, err = strconv.ParseInt(ownerIDStr, 10, 64)
 		if err != nil {
 			session.SetError("Invalid owner ID")
 			c.Redirect(http.StatusSeeOther, "/admin?tab=apitokens")
