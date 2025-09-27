@@ -506,6 +506,26 @@ func (s *WebServer) Start() error {
 // Custom bot detection middleware
 func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Check IP blocking first
+		config.BadIPsMutex.RLock()
+		if config.BlockBadIPs {
+			ip := net.ParseIP(c.ClientIP())
+			if ip != nil {
+				for _, ipNet := range config.Default_BlockedIPs {
+					if ipNet.Contains(ip) {
+						config.BadIPsMutex.RUnlock()
+						// Log blocked IP
+						log.Printf("IP blocked: %s (matches %s)", c.ClientIP(), ipNet.String())
+						c.String(403, "403")
+						c.Abort()
+						return
+					}
+				}
+			}
+		}
+		config.BadIPsMutex.RUnlock()
+
+		// Check bot detection
 		config.BadBotsMutex.RLock()
 		defer config.BadBotsMutex.RUnlock()
 		// Check if bot blocking is enabled (use global variable)
@@ -519,7 +539,7 @@ func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
 		for _, pattern := range config.Default_BadBots {
 			if strings.Contains(strings.ToLower(c.GetHeader("User-Agent")), pattern) {
 				// Log bot request
-				log.Printf("Bot blocked: '%s' IP: %s", c.GetHeader("User-Agent"), c.ClientIP())
+				log.Printf("Bot blocked: '%s' IP: '%s'", c.GetHeader("User-Agent"), c.ClientIP())
 				c.String(403, "403")
 				c.Abort()
 				return

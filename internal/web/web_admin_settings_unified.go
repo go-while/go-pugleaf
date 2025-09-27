@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -109,13 +110,34 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 		config.FORM_FIELD_BADBOTS: {
 			FormField: config.FORM_FIELD_BADBOTS,
 			ConfigKey: config.CFG_KEY_BADBOTS,
-			Validator: nil, // No validation needed for comma-separated list
-			Processor: nil, // Uses config key directly
+			Validator: nil, // Basic string validation
+			Processor: s.processBadBotsUpdate, // Apply changes immediately
 			SuccessMsg: func(value string) string {
 				if value == "" {
-					return "Bad bots list cleared (using defaults)"
+					return "Bad bots list cleared and applied (using defaults)"
 				}
-				return "Ok. Reboot webserver now! Bad bots list updated: " + value
+				return "Bad bots list updated and applied immediately: " + value
+			},
+			EmptyAllowed: true,
+		},
+		config.FORM_FIELD_BLOCKBADIPS: {
+			FormField:    config.FORM_FIELD_BLOCKBADIPS,
+			ConfigKey:    config.CFG_KEY_BLOCKBADIPS,
+			Validator:    nil, // No validation needed
+			Processor:    s.processBlockBadIPsToggle,
+			SuccessMsg:   func(value string) string { return value }, // Custom message handled in processor
+			EmptyAllowed: true,                                       // Toggle doesn't need a value
+		},
+		config.FORM_FIELD_BADIPS: {
+			FormField: config.FORM_FIELD_BADIPS,
+			ConfigKey: config.CFG_KEY_BADIPS,
+			Validator: s.validateCIDRList, // Validate CIDR ranges
+			Processor: nil,                // Uses config key directly
+			SuccessMsg: func(value string) string {
+				if value == "" {
+					return "Bad IPs list cleared (using defaults)"
+				}
+				return "Bad IPs list updated: " + value
 			},
 			EmptyAllowed: true,
 		},
@@ -304,5 +326,108 @@ func (s *WebServer) processBlockBadBotsToggle(server *WebServer, value string) e
 		return fmt.Errorf("failed to toggle bot blocking: %v", err)
 	}
 
+	return nil
+}
+
+// processBlockBadIPsToggle handles the IP blocking toggle
+func (s *WebServer) processBlockBadIPsToggle(server *WebServer, value string) error {
+	// Get current IP blocking status
+	currentStatus, err := server.DB.GetConfigValue(config.CFG_KEY_BLOCKBADIPS)
+	if err != nil {
+		return fmt.Errorf("failed to get current BlockBadIPs config: %v", err)
+	}
+
+	// Toggle the status
+	var newStatus string
+	if currentStatus == "true" {
+		newStatus = "false"
+		config.BadIPsMutex.Lock()
+		config.BlockBadIPs = false
+		config.BadIPsMutex.Unlock()
+	} else {
+		newStatus = "true"
+		config.BadIPsMutex.Lock()
+		config.BlockBadIPs = true
+		config.BadIPsMutex.Unlock()
+	}
+
+	// Update the configuration
+	err = server.DB.SetConfigValue(config.CFG_KEY_BLOCKBADIPS, newStatus)
+	if err != nil {
+		return fmt.Errorf("failed to toggle IP blocking: %v", err)
+	}
+
+	return nil
+}
+
+// validateCIDRList validates a comma-separated list of CIDR ranges
+func (s *WebServer) validateCIDRList(value string) error {
+	if value == "" {
+		return nil // Empty is allowed
+	}
+
+	// Parse comma-separated list
+	for _, cidr := range strings.Split(value, ",") {
+		trimmed := strings.TrimSpace(cidr)
+		if trimmed == "" {
+			continue // Skip empty entries
+		}
+
+		// Validate CIDR format
+		_, _, err := net.ParseCIDR(trimmed)
+		if err != nil {
+			// Try parsing as single IP address
+			ip := net.ParseIP(trimmed)
+			if ip == nil {
+				return fmt.Errorf("invalid IP address or CIDR range: %s", trimmed)
+			}
+		}
+	}
+
+	return nil
+}
+
+// processBadBotsUpdate updates bad bots configuration and applies it immediately
+func (s *WebServer) processBadBotsUpdate(server *WebServer, value string) error {
+	// Get current BlockBadBots setting
+	blockBadBotsStr, err := server.DB.GetConfigValue(config.CFG_KEY_BLOCKBADBOTS)
+	if err != nil {
+		return fmt.Errorf("failed to get BlockBadBots config: %v", err)
+	}
+	blockEnabled := (blockBadBotsStr == "true")
+	
+	// Update database first
+	err = server.DB.SetConfigValue(config.CFG_KEY_BADBOTS, value)
+	if err != nil {
+		return fmt.Errorf("failed to update BadBots config: %v", err)
+	}
+	
+	// Apply changes immediately to global variables
+	config.UpdateBadBots(value, blockEnabled)
+	
+	return nil
+}
+
+// processBadIPsUpdate updates bad IPs configuration and applies it immediately
+func (s *WebServer) processBadIPsUpdate(server *WebServer, value string) error {
+	// Get current BlockBadIPs setting
+	blockBadIPsStr, err := server.DB.GetConfigValue(config.CFG_KEY_BLOCKBADIPS)
+	if err != nil {
+		return fmt.Errorf("failed to get BlockBadIPs config: %v", err)
+	}
+	blockEnabled := (blockBadIPsStr == "true")
+	
+	// Update database first
+	err = server.DB.SetConfigValue(config.CFG_KEY_BADIPS, value)
+	if err != nil {
+		return fmt.Errorf("failed to update BadIPs config: %v", err)
+	}
+	
+	// Apply changes immediately to global variables
+	err = config.UpdateBadIPs(value, blockEnabled)
+	if err != nil {
+		return fmt.Errorf("failed to apply IP config changes: %v", err)
+	}
+	
 	return nil
 }

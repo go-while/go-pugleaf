@@ -60,6 +60,8 @@ type AdminPageData struct {
 	ReverseProxyAddr           string                                // Added for reverse proxy address configuration
 	BadBots                    string                                // Added for bad bots list configuration
 	BlockBadBots               bool                                  // Added for bot blocking control
+	BadIPs                     string                                // Added for bad IPs list configuration
+	BlockBadIPs                bool                                  // Added for IP blocking control
 	FormFieldHostname          string                                // NNTP hostname form field name
 	FormFieldWebPostSize       string                                // Web post size form field name
 	FormFieldAbuseMail         string                                // Abuse email form field name
@@ -68,6 +70,8 @@ type AdminPageData struct {
 	FormFieldRegistration      string                                // Registration toggle form field name
 	FormFieldBadBots           string                                // Bad bots list form field name
 	FormFieldBlockBadBots      string                                // Block bad bots toggle form field name
+	FormFieldBadIPs            string                                // Bad IPs list form field name
+	FormFieldBlockBadIPs       string                                // Block bad IPs toggle form field name
 	PostQueue                  []*database.PostQueueEntryWithDetails // Added for post queue management
 	QueueStats                 map[string]int                        // Added for post queue statistics
 	StatusFilter               string                                // Added for post queue status filtering

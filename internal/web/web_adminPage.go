@@ -461,6 +461,21 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	}
 	blockBadBots := blockBadBotsStr == "true"
 
+	// Get current BadIPs from database
+	badIPs, err := s.DB.GetConfigValue(config.CFG_KEY_BADIPS)
+	if err != nil {
+		log.Printf("Failed to get BadIPs: %v", err)
+		badIPs = "" // Default to empty on error
+	}
+
+	// Get current BlockBadIPs from database
+	blockBadIPsStr, err := s.DB.GetConfigValue(config.CFG_KEY_BLOCKBADIPS)
+	if err != nil {
+		log.Printf("Failed to get BlockBadIPs: %v", err)
+		blockBadIPsStr = "false" // Default to false on error
+	}
+	blockBadIPs := blockBadIPsStr == "true"
+
 	data := AdminPageData{
 		TemplateData:               s.getBaseTemplateData(c, "Admin Interface"),
 		Users:                      users,
@@ -501,6 +516,8 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		ReverseProxyAddr:           reverseProxyAddr,
 		BadBots:                    badBots,
 		BlockBadBots:               blockBadBots,
+		BadIPs:                     badIPs,
+		BlockBadIPs:                blockBadIPs,
 		// Form field constants for admin settings
 		FormFieldHostname:     config.FORM_FIELD_HOSTNAME,
 		FormFieldWebPostSize:  config.FORM_FIELD_WEBPOSTSIZE,
@@ -510,6 +527,8 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		FormFieldRegistration: config.FORM_FIELD_REGISTRATION,
 		FormFieldBadBots:      config.FORM_FIELD_BADBOTS,
 		FormFieldBlockBadBots: config.FORM_FIELD_BLOCKBADBOTS,
+		FormFieldBadIPs:       config.FORM_FIELD_BADIPS,
+		FormFieldBlockBadIPs:  config.FORM_FIELD_BLOCKBADIPS,
 		PostQueue:             postQueue,
 		QueueStats:            queueStats,
 		StatusFilter:          statusFilter,

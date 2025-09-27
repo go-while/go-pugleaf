@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -181,6 +182,9 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 		}
 		log.Printf("Generated new UserSalt for hashing usernames")
 	}
+
+	// Load IP blocking configuration
+	db.loadIPBlockingConfiguration()
 	// Load bot configuration from database
 	db.loadBotConfiguration()
 
@@ -433,4 +437,52 @@ func (db *Database) loadBotConfiguration() {
 
 	log.Printf("BlockBadBots=%t, BadBots patterns=%d", config.BlockBadBots, len(config.Default_BadBots))
 
+}
+
+// loadIPBlockingConfiguration loads IP blocking settings from database and populates global config variables
+func (db *Database) loadIPBlockingConfiguration() {
+	// Load BlockBadIPs setting
+	config.BadIPsMutex.Lock()
+	defer config.BadIPsMutex.Unlock()
+
+	blockBadIPsStr, err := db.GetConfigValue(config.CFG_KEY_BLOCKBADIPS)
+	if err != nil {
+		log.Printf("Failed to get BlockBadIPs config, using default (false): %v", err)
+		config.BlockBadIPs = false
+	} else {
+		config.BlockBadIPs = (blockBadIPsStr == "true")
+		if !config.BlockBadIPs {
+			log.Printf("BlockBadIPs is disabled")
+			return
+		}
+	}
+
+	// Load BadIPs list (CIDR ranges)
+	badIPsStr, err := db.GetConfigValue(config.CFG_KEY_BADIPS)
+	if err != nil {
+		log.Printf("Failed to get BadIPs config err='%v'", err)
+		return
+	}
+	if badIPsStr == "" {
+		log.Printf("BadIPs config empty")
+		config.BlockBadIPs = false
+		return
+	} else {
+		// Parse comma-separated list and convert to IPNet
+		config.Default_BlockedIPs = []*net.IPNet{}
+		for _, cidr := range strings.Split(badIPsStr, ",") {
+			trimmed := strings.TrimSpace(cidr)
+			if trimmed != "" {
+				_, ipNet, err := net.ParseCIDR(trimmed)
+				if err != nil {
+					log.Printf("Invalid CIDR range '%s': %v", trimmed, err)
+					continue
+				}
+				config.Default_BlockedIPs = append(config.Default_BlockedIPs, ipNet)
+				log.Printf("Added BadIP range: '%s'", trimmed)
+			}
+		}
+	}
+
+	log.Printf("BlockBadIPs=%t, BadIPs ranges=%d", config.BlockBadIPs, len(config.Default_BlockedIPs))
 }

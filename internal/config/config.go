@@ -4,6 +4,8 @@ package config
 
 import (
 	"log"
+	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,6 +34,11 @@ var Default_BadBots []string
 var BlockBadBots bool
 var BadBotsMutex sync.RWMutex
 
+// Global IP blocking configuration variables (populated from database on startup)
+var Default_BlockedIPs []*net.IPNet
+var BlockBadIPs bool
+var BadIPsMutex sync.RWMutex
+
 // Config database keys
 const CFG_KEY_HOSTNAME string = "local_nntp_hostname"
 const CFG_KEY_WEBPOSTSIZE string = "WebPostMaxArticleSize"
@@ -42,6 +49,8 @@ const CFG_KEY_REGISTRATION string = "registration_enabled"
 const CFG_KEY_USERSALT string = "UserSalt"
 const CFG_KEY_BADBOTS string = "BadBots"
 const CFG_KEY_BLOCKBADBOTS string = "BlockBadBots"
+const CFG_KEY_BADIPS string = "BadIPs"
+const CFG_KEY_BLOCKBADIPS string = "BlockBadIPs"
 
 // Admin settings form field names
 const FORM_FIELD_HOSTNAME string = "local_nntp_hostname"
@@ -52,6 +61,8 @@ const FORM_FIELD_REVERSEPROXY string = "reverse_proxy_addr"
 const FORM_FIELD_REGISTRATION string = "registration_toggle"
 const FORM_FIELD_BADBOTS string = "bad_bots"
 const FORM_FIELD_BLOCKBADBOTS string = "block_bad_bots"
+const FORM_FIELD_BADIPS string = "bad_ips"
+const FORM_FIELD_BLOCKBADIPS string = "block_bad_ips"
 
 // Config holds the main configuration for go-pugleaf
 type MainConfig struct {
@@ -568,4 +579,87 @@ func NewDefaultConfig() *MainConfig {
 	log.Printf("MainConfig initialized with %d providers", len(maincfg.Providers))
 	maincfg.mux.Unlock()
 	return maincfg
+}
+
+// UpdateBadBots safely updates the global bad bots configuration
+func UpdateBadBots(badBotsStr string, blockEnabled bool) {
+	BadBotsMutex.Lock()
+	defer BadBotsMutex.Unlock()
+
+	BlockBadBots = blockEnabled
+
+	if badBotsStr != "" {
+		// Parse comma-separated list and trim whitespace
+		Default_BadBots = []string{}
+		for _, pattern := range strings.Split(badBotsStr, ",") {
+			trimmed := strings.TrimSpace(pattern)
+			if trimmed != "" {
+				Default_BadBots = append(Default_BadBots, trimmed)
+			}
+		}
+		log.Printf("Updated BadBots list (%d patterns)", len(Default_BadBots))
+	}
+
+	log.Printf("Bot configuration updated: BlockBadBots=%t, patterns=%d", BlockBadBots, len(Default_BadBots))
+}
+
+// UpdateBadIPs safely updates the global bad IPs configuration
+func UpdateBadIPs(badIPsStr string, blockEnabled bool) error {
+	BadIPsMutex.Lock()
+	defer BadIPsMutex.Unlock()
+
+	BlockBadIPs = blockEnabled
+
+	if badIPsStr == "" {
+		// Use default IP ranges if config is empty
+		defaultRanges := []string{
+			"47.74.0.0/15",     // alibaba
+			"47.76.0.0/14",     // alibaba
+			"47.80.0.0/13",     // alibaba
+			"185.191.171.0/24", // semrush
+		}
+
+		Default_BlockedIPs = make([]*net.IPNet, 0, len(defaultRanges))
+		for _, cidr := range defaultRanges {
+			_, ipNet, err := net.ParseCIDR(cidr)
+			if err != nil {
+				log.Printf("Warning: failed to parse default CIDR %s: %v", cidr, err)
+				continue
+			}
+			Default_BlockedIPs = append(Default_BlockedIPs, ipNet)
+		}
+		log.Printf("Using default BlockedIPs list (%d ranges)", len(Default_BlockedIPs))
+	} else {
+		// Parse comma-separated list and trim whitespace
+		Default_BlockedIPs = []*net.IPNet{}
+		for _, cidr := range strings.Split(badIPsStr, ",") {
+			trimmed := strings.TrimSpace(cidr)
+			if trimmed == "" {
+				continue
+			}
+
+			// Handle single IP addresses by adding /32 or /128 suffix
+			if !strings.Contains(trimmed, "/") {
+				ip := net.ParseIP(trimmed)
+				if ip != nil {
+					if ip.To4() != nil {
+						trimmed += "/32" // IPv4
+					} else {
+						trimmed += "/128" // IPv6
+					}
+				}
+			}
+
+			_, ipNet, err := net.ParseCIDR(trimmed)
+			if err != nil {
+				log.Printf("Warning: failed to parse CIDR %s: %v", trimmed, err)
+				continue
+			}
+			Default_BlockedIPs = append(Default_BlockedIPs, ipNet)
+		}
+		log.Printf("Updated BlockedIPs list (%d ranges)", len(Default_BlockedIPs))
+	}
+
+	log.Printf("IP blocking configuration updated: BlockBadIPs=%t, ranges=%d", BlockBadIPs, len(Default_BlockedIPs))
+	return nil
 }
