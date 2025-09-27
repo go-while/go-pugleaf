@@ -476,6 +476,11 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	}
 	blockBadIPs := blockBadIPsStr == "true"
 
+	// Get total users count for statistics
+	totalUsersCount := s.DB.GetUsersCount()
+	// Get total admin users count for statistics
+	totalAdminCount := s.DB.GetAdminUsersCount()
+
 	data := AdminPageData{
 		TemplateData:               s.getBaseTemplateData(c, "Admin Interface"),
 		Users:                      users,
@@ -497,7 +502,9 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		SpamArticles:               spamArticles,
 		SpamPagination:             spamPagination,
 		CurrentUser:                currentUser,
+		TotalUsersCount:            int(totalUsersCount),
 		AdminCount:                 s.countAdminUsers(users),
+		TotalAdminCount:            int(totalAdminCount),
 		EnabledTokensCount:         s.countEnabledAPITokens(apiTokens),
 		ActiveSessions:             s.countActiveSessions(),
 		ActiveNNTPUsers:            s.countActiveNNTPUsers(nntpUsers),

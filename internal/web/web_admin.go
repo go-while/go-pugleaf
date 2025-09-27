@@ -41,7 +41,9 @@ type AdminPageData struct {
 	SpamArticles               []*SpamArticleInfo     // Added for spam management
 	SpamPagination             *models.PaginationInfo // Added for spam pagination
 	CurrentUser                *models.User
+	TotalUsersCount            int                        // Total count of all users (for statistics)
 	AdminCount                 int
+	TotalAdminCount            int                        // Total count of all admin users (for statistics)
 	EnabledTokensCount         int
 	ActiveSessions             int
 	ActiveNNTPUsers            int

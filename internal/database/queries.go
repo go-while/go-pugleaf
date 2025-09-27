@@ -146,6 +146,34 @@ func (db *Database) MainDBGetAllNewsgroupsCount() int64 {
 	return count
 }
 
+// GetUsersCount gets the total number of users
+const query_GetUsersCount = `SELECT COUNT(*) FROM users`
+
+func (db *Database) GetUsersCount() int64 {
+	var count int64
+	err := retryableQueryRowScan(db.mainDB, query_GetUsersCount, nil, &count)
+	if err != nil {
+		log.Printf("GetUsersCount: Failed to get users count: %v", err)
+		return 0
+	}
+	return count
+}
+
+// GetAdminUsersCount gets the total number of admin users
+const query_GetAdminUsersCount = `SELECT COUNT(DISTINCT u.id) FROM users u 
+LEFT JOIN user_permissions up ON u.id = up.user_id 
+WHERE u.disabled = 0 AND (u.id = 1 OR up.permission = 'admin')`
+
+func (db *Database) GetAdminUsersCount() int64 {
+	var count int64
+	err := retryableQueryRowScan(db.mainDB, query_GetAdminUsersCount, nil, &count)
+	if err != nil {
+		log.Printf("GetAdminUsersCount: Failed to get admin users count: %v", err)
+		return 0
+	}
+	return count
+}
+
 const query_MainDBGetNewsgroupsActiveCount = `SELECT COUNT(*) FROM newsgroups WHERE active = 1`
 
 func (db *Database) MainDBGetNewsgroupsActiveCount() int64 {
