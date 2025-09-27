@@ -115,7 +115,7 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 				if value == "" {
 					return "Bad bots list cleared (using defaults)"
 				}
-				return "Note: Changes take effect after webserver restart! Bad bots list updated: " + value
+				return "Ok. Reboot webserver now! Bad bots list updated: " + value
 			},
 			EmptyAllowed: true,
 		},
