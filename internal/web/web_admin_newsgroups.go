@@ -576,9 +576,9 @@ func (s *WebServer) fixGroupThreadActivity(groupName string) error {
 		}
 		if lastActivityStr.Valid {
 			// Try SQLite format first, then RFC3339 format (same as recover-db/main.go)
-			if parsed, err := time.Parse("2006-01-02 15:04:05", lastActivityStr.String); err == nil {
+			if parsed, err := time.Parse(time.RFC3339, lastActivityStr.String); err == nil {
 				thread.lastActivity = parsed
-			} else if parsed, err := time.Parse(time.RFC3339, lastActivityStr.String); err == nil {
+			} else if parsed, err := time.Parse("2006-01-02 15:04:05", lastActivityStr.String); err == nil {
 				thread.lastActivity = parsed
 			}
 		} else {
@@ -604,9 +604,9 @@ func (s *WebServer) fixGroupThreadActivity(groupName string) error {
 
 		for _, articleNum := range articleNums {
 			// Debug logging for specific article in de.admin.mail
-			if groupName == "de.admin.mail" && articleNum == 1598 {
-				log.Printf("DEBUG: Processing article %d in newsgroup %s, thread %d", articleNum, groupName, thread.root)
-			}
+			//if groupName == "de.admin.mail" && articleNum == 1598 {
+			//	log.Printf("DEBUG: Processing article %d in newsgroup %s, thread %d", articleNum, groupName, thread.root)
+			//}
 
 			var dateSent time.Time
 			var dateStr sql.NullString
@@ -617,9 +617,9 @@ func (s *WebServer) fixGroupThreadActivity(groupName string) error {
 				continue
 			}
 
-			if groupName == "de.admin.mail" && articleNum == 1598 {
-				log.Printf("DEBUG: Article %d in %s - Raw date_sent string: '%s'", articleNum, groupName, dateStr.String)
-			}
+			//if groupName == "de.admin.mail" && articleNum == 1598 {
+			//	log.Printf("DEBUG: Article %d in %s - Raw date_sent string: '%s'", articleNum, groupName, dateStr.String)
+			//}
 
 			// Try SQLite format first, then RFC3339 format (same as recover-db/main.go)
 			var parseErr error
@@ -628,27 +628,27 @@ func (s *WebServer) fixGroupThreadActivity(groupName string) error {
 				// Try RFC3339 format as fallback
 				dateSent, parseErr = time.Parse(time.RFC3339, dateStr.String)
 				if parseErr != nil {
-					if groupName == "de.admin.mail" && articleNum == 1598 {
-						log.Printf("DEBUG: Article %d in %s - Failed to parse date_sent '%s' with both SQLite and RFC3339 formats: %v", articleNum, groupName, dateStr.String, parseErr)
-					}
+					//if groupName == "de.admin.mail" && articleNum == 1598 {
+					//	log.Printf("DEBUG: Article %d in %s - Failed to parse date_sent '%s' with both SQLite and RFC3339 formats: %v", articleNum, groupName, dateStr.String, parseErr)
+					//}
 					continue
 				} else {
-					if groupName == "de.admin.mail" && articleNum == 1598 {
-						log.Printf("DEBUG: Article %d in %s - Parsed date_sent with RFC3339 format: %v", articleNum, groupName, dateSent)
-					}
+					//if groupName == "de.admin.mail" && articleNum == 1598 {
+					//	log.Printf("DEBUG: Article %d in %s - Parsed date_sent with RFC3339 format: %v", articleNum, groupName, dateSent)
+					//}
 				}
 			} else {
-				if groupName == "de.admin.mail" && articleNum == 1598 {
-					log.Printf("DEBUG: Article %d in %s - Parsed date_sent with SQLite format: %v", articleNum, groupName, dateSent)
-				}
+				//if groupName == "de.admin.mail" && articleNum == 1598 {
+				//	log.Printf("DEBUG: Article %d in %s - Parsed date_sent with SQLite format: %v", articleNum, groupName, dateSent)
+				//}
 			}
 
 			if !found || dateSent.After(maxDate) {
 				maxDate = dateSent
 				found = true
-				if groupName == "de.admin.mail" && articleNum == 1598 {
-					log.Printf("DEBUG: Article %d in %s - Set as new maxDate: %v", articleNum, groupName, maxDate)
-				}
+				//if groupName == "de.admin.mail" && articleNum == 1598 {
+				//	log.Printf("DEBUG: Article %d in %s - Set as new maxDate: %v", articleNum, groupName, maxDate)
+				//}
 			}
 		}
 
