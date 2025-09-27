@@ -90,14 +90,12 @@
                                   <th width="30">
                                       <input type="checkbox" id="headerCheckbox" class="form-check-input">
                                   </th>
-                                  <th>Edit / Toggle</th>
+                                  <th>ON</th>
+                                  <th>Edit</th>
                                   <th>Newsgroup</th>
-                                  <th>Description</th>
+                                  <th>Count<br>Last</th>
                                   <th>Section</th>
-                                  <th>Active</th>
-                                  <th>Count</th>
-                                  <th>Last</th>
-                                  <th>Exp | MA | MS</th>
+                                  <th>Expiry</th>
                                   <th>Actions</th>
                                   <th>Delete</th>
                               </tr>
@@ -111,6 +109,26 @@
                                              form="bulkActionsForm" onchange="updateSelectedCount()">
                                   </td>
                                   <td>
+                                    <!-- button to toggle enable disable -->
+                                    <form action="/admin/newsgroups/toggle" method="post" style="display: inline;">
+                                        <input type="hidden" name="name" value="{{.Name}}">
+                                        {{if $.NewsgroupSearch}}
+                                        <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                        {{end}}
+                                        <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
+                                        {{if .Active}}
+                                        <button type="submit" class="btn btn-outline-success btn-sm">
+                                            ✅
+                                        </button>
+                                        {{else}}
+                                        <button type="submit" class="btn btn-outline-success btn-sm">
+                                            ❌
+                                        </button>
+                                        {{end}}
+
+                                    </form>
+                                  </td>
+                                  <td>
                                     <button type="button" class="btn btn-outline-primary btn-sm edit-newsgroup-btn"
                                             data-name="{{.Name}}"
                                             data-description="{{.Description}}"
@@ -120,26 +138,19 @@
                                             data-active="{{.Active}}">
                                         Edit
                                     </button>
-                                    <!-- button to toggle enable disable -->
-                                    <form action="/admin/newsgroups/toggle" method="post" style="display: inline;">
-                                        <input type="hidden" name="name" value="{{.Name}}">
-                                        {{if $.NewsgroupSearch}}
-                                        <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
-                                        {{end}}
-                                        <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
-                                        {{if .Active}}
-                                        <button type="submit" class="btn btn-outline-warning btn-sm">
-                                            <i class="bi bi-person-slash me-1"></i>Disable
-                                        </button>
-                                        {{else}}
-                                        <button type="submit" class="btn btn-outline-success btn-sm">
-                                            <i class="bi bi-person-check me-1"></i>Enable
-                                        </button>
-                                        {{end}}
-                                    </form>
+                                    <br>
+
                                   </td>
-                                  <td><strong><a href="/groups/{{.Name}}" target="_blank" class="btn btn-outline-success btn-sm">{{.Name}}</a></strong></td>
-                                  <td>{{if .Description}}{{.Description}}{{else}}<em>No description</em>{{end}}</td>
+                                  <td>
+                                    <strong><a href="/groups/{{.Name}}" target="_blank" class="btn btn-outline-success btn-sm">{{.Name}}</a></strong>
+                                    <br>
+                                    <small>{{if .Description}}{{.Description}}{{else}}<em>No description</em>{{end}}</small>
+                                  </td>
+                                  <td>
+                                    <small>C:{{.MessageCount}}</small>
+                                    <br>
+                                    <small>L#{{if .LastArticle}}{{.LastArticle}}{{else}}-{{end}}</small>
+                                  </td>
                                   <td>
                                       {{/* Find current section assignment */}}
                                       {{$currentSection := ""}}
@@ -167,15 +178,19 @@
                                       </form>
                                   </td>
                                   <td>
-                                      {{if .Active}}
-                                      <span class="badge bg-success">Active</span>
-                                      {{else}}
-                                      <span class="badge bg-secondary">Inactive</span>
-                                      {{end}}
+                                      <button type="button" class="btn btn-outline-secondary btn-sm"
+                                              title="Expiry Days: Articles older than {{.ExpiryDays}} days will be automatically expired">
+                                          {{.ExpiryDays}}d
+                                      </button>
+                                      <button type="button" class="btn btn-outline-secondary btn-sm"
+                                              title="Max Articles: Maximum number of articles allowed in this newsgroup ({{.MaxArticles}})">
+                                          {{.MaxArticles}}
+                                      </button>
+                                      <button type="button" class="btn btn-outline-secondary btn-sm"
+                                              title="Max Article Size: Maximum size per article in bytes ({{.MaxArtSize}}B)">
+                                          {{.MaxArtSize}}B
+                                      </button>
                                   </td>
-                                  <td>{{.MessageCount}}</td>
-                                  <td>{{if .LastArticle}}{{.LastArticle}}{{else}}-{{end}}</td>
-                                  <td>{{.ExpiryDays}}d | {{.MaxArticles}} | {{.MaxArtSize}}B</td>
                                   <td>
                                       <div class="btn-group btn-group-sm">
                                           <form method="POST" action="/admin/newsgroups/migrate-activity" style="display: inline;">
@@ -215,8 +230,6 @@
                                   </td>
                                   <td>
                                       <div class="btn-group btn-group-sm">
-                                          <a href="/groups/{{.Name}}" class="btn btn-outline-info btn-sm">View</a>
-                                          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
                                           {{if not .Active}}
                                           <form method="POST" action="/admin/newsgroups/delete?tab=newsgroups" style="display: inline;">
                                               <input type="hidden" name="name" value="{{.Name}}">
