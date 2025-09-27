@@ -403,7 +403,7 @@ type SectionGroup struct {
 	SortOrder        int       `json:"sort_order" db:"sort_order"`
 	IsCategoryHeader bool      `json:"is_category_header" db:"is_category_header"`
 	CreatedAt        time.Time `json:"created_at" db:"created_at"`
-	
+
 	// Activity fields (populated when joining with newsgroups table)
 	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`
 	MessageCount int       `json:"message_count" db:"message_count"`

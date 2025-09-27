@@ -1197,8 +1197,8 @@ func (db *Database) GetSectionGroups(sectionID int) ([]*models.SectionGroup, err
 
 // GetSectionGroupsWithActivity returns all groups for a specific section with activity data
 const query_GetSectionGroupsWithActivity = `
-	SELECT 
-		sg.id, sg.section_id, sg.newsgroup_name, sg.group_description, 
+	SELECT
+		sg.id, sg.section_id, sg.newsgroup_name, sg.group_description,
 		sg.sort_order, sg.is_category_header, sg.created_at,
 		COALESCE(n.updated_at, datetime('1970-01-01 00:00:00')) as updated_at,
 		COALESCE(n.message_count, 0) as message_count,
@@ -1219,25 +1219,25 @@ func (db *Database) GetSectionGroupsWithActivity(sectionID int, sortBy string) (
 	default: // "sort_order" or any other value defaults to original sorting
 		orderBy = "sg.sort_order, sg.newsgroup_name"
 	}
-	
+
 	query := fmt.Sprintf(query_GetSectionGroupsWithActivity, orderBy)
 	rows, err := db.mainDB.Query(query, sectionID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var out []*models.SectionGroup
 	for rows.Next() {
 		var sg models.SectionGroup
 		var updatedAtStr sql.NullString
-		
-		if err := rows.Scan(&sg.ID, &sg.SectionID, &sg.NewsgroupName, &sg.GroupDescription, 
+
+		if err := rows.Scan(&sg.ID, &sg.SectionID, &sg.NewsgroupName, &sg.GroupDescription,
 			&sg.SortOrder, &sg.IsCategoryHeader, &sg.CreatedAt,
 			&updatedAtStr, &sg.MessageCount, &sg.LastArticle); err != nil {
 			return nil, err
 		}
-		
+
 		// Handle updated_at field parsing
 		if updatedAtStr.Valid {
 			// Try RFC3339 format first (with Z timezone)
@@ -1254,7 +1254,7 @@ func (db *Database) GetSectionGroupsWithActivity(sectionID int, sortBy string) (
 			// If NULL, use zero time (will show as "never")
 			sg.UpdatedAt = time.Time{}
 		}
-		
+
 		out = append(out, &sg)
 	}
 	return out, nil
