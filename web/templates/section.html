@@ -71,11 +71,22 @@
 <div class="row">
     <div class="col-12">
         <div class="card">
-            <div class="card-header bg-secondary text-white">
+            <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
                 <h6 class="card-title mb-0">
-                    <i class="bi bi-collection me-2"></i>{{.TotalGroups}} Groups in {{.Section.DisplayName}}
-
+                    <i class="bi bi-collection me-2"></i>{{.TotalGroups}} Newsgroups in {{.Section.DisplayName}}
                 </h6>
+                <div class="d-flex align-items-center gap-3">
+                    <div class="dropdown">
+                        <button class="btn btn-outline-light btn-sm dropdown-toggle" type="button" id="sortDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="bi bi-sort-down me-1"></i>Sort By
+                        </button>
+                        <ul class="dropdown-menu" aria-labelledby="sortDropdown">
+                            <li><a class="dropdown-item{{if eq .SortBy "activity"}} active{{end}}" href="?sort=activity">Last Activity</a></li>
+                            <li><a class="dropdown-item{{if eq .SortBy "name"}} active{{end}}" href="?sort=name">Name A-Z</a></li>
+                            <li><a class="dropdown-item{{if eq .SortBy "sort_order"}} active{{end}}" href="?sort=sort_order">Default Order</a></li>
+                        </ul>
+                    </div>
+                </div>
             </div>
             <div class="card-body">
                 {{if .Groups}}
@@ -85,6 +96,7 @@
                             <tr>
                                 <th>Newsgroup</th>
                                 <th>Description</th>
+                                <th class="text-end">Activity</th>
                                 <!--<th class="text-end">Sort Order</th>-->
                                 <!--<th class="text-center">Actions</th>-->
                             </tr>
@@ -111,6 +123,18 @@
                                         {{.GroupDescription}}
                                     {{else}}
                                         <!--<span class="text-muted">No description available</span>-->
+                                    {{end}}
+                                </td>
+                                <td class="text-end">
+                                    {{if not .IsCategoryHeader}}
+                                        <div class="d-flex flex-column align-items-end">
+                                            <small class="text-muted mb-1">
+                                                <i class="bi bi-file-text me-1"></i><span class="badge bg-secondary">{{.MessageCount}} articles</span>
+                                            </small>
+                                            <div class="text-muted small">
+                                                {{.PrintLastActivity}}
+                                            </div>
+                                        </div>
                                     {{end}}
                                 </td>
                                 <!--

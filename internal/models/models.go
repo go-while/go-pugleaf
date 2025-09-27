@@ -268,24 +268,19 @@ func (f *ForumThread) PrintLastActivity() string {
 	}
 }
 
-// PrintLastActivity returns a human-readable time difference from now for newsgroups
-func (n *Newsgroup) PrintLastActivity() string {
-	// This function returns a human-readable time difference from now
-	if n.UpdatedAt.IsZero() {
+// printLastActivityFromTime returns a human-readable time difference from now
+// This helper function consolidates the common logic used by all PrintLastActivity methods
+func printLastActivityFromTime(timestamp time.Time) string {
+	if timestamp.IsZero() {
 		return "never"
 	}
 
 	// Ensure we're working with UTC times for consistent calculation
 	now := time.Now().UTC()
-	updatedAtUTC := n.UpdatedAt.UTC()
-	diff := now.Sub(updatedAtUTC)
+	timestampUTC := timestamp.UTC()
+	diff := now.Sub(timestampUTC)
 	totalDays := int(diff.Hours() / 24)
 
-	// Debug: log the actual timestamp and calculated diff
-	/*
-		log.Printf("DEBUG models.go PrintLastActivity: Group=%s, UpdatedAt=%v (UTC: %v), Now=%v, Diff=%v, Hours=%.1f",
-			n.Name, n.UpdatedAt, updatedAtUTC, now, diff, diff.Hours())
-	*/
 	if diff < time.Minute {
 		return fmt.Sprintf("%d seconds ago", int(diff.Seconds()))
 	} else if diff < time.Hour*2 {
@@ -293,21 +288,6 @@ func (n *Newsgroup) PrintLastActivity() string {
 	} else if diff < 48*time.Hour {
 		return fmt.Sprintf("%d hours ago", int(diff.Hours()))
 	} else if totalDays < 365 {
-		/*
-			months := totalDays / 30
-			remainingDays := totalDays % 30
-			if remainingDays > 0 {
-				if months == 1 {
-					return fmt.Sprintf("1 Month %d Days ago", remainingDays)
-				}
-				return fmt.Sprintf("%d Months %d Days ago", months, remainingDays)
-			} else {
-				if months == 1 {
-					return "1 Month ago"
-				}
-				return fmt.Sprintf("%d Months ago", months)
-			}
-		*/
 		return fmt.Sprintf("%d days ago", totalDays)
 	} else {
 		years := totalDays / 365
@@ -332,48 +312,19 @@ func (n *Newsgroup) PrintLastActivity() string {
 	}
 }
 
+// PrintLastActivity returns a human-readable time difference from now for newsgroups
+func (n *Newsgroup) PrintLastActivity() string {
+	return printLastActivityFromTime(n.UpdatedAt)
+}
+
 // PrintLastActivity returns a human-readable time difference from now for hierarchies
 func (h *Hierarchy) PrintLastActivity() string {
-	// This function returns a human-readable time difference from now
-	if h.LastUpdated.IsZero() {
-		return "never"
-	}
+	return printLastActivityFromTime(h.LastUpdated)
+}
 
-	// Ensure we're working with UTC times for consistent calculation
-	now := time.Now().UTC()
-	updatedAtUTC := h.LastUpdated.UTC()
-	diff := now.Sub(updatedAtUTC)
-	totalDays := int(diff.Hours() / 24)
-
-	if diff < time.Minute {
-		return fmt.Sprintf("%d seconds ago", int(diff.Seconds()))
-	} else if diff < time.Hour*2 {
-		return fmt.Sprintf("%d minutes ago", int(diff.Minutes()))
-	} else if diff < 48*time.Hour {
-		return fmt.Sprintf("%d hours ago", int(diff.Hours()))
-	} else if totalDays < 365 {
-		return fmt.Sprintf("%d days ago", totalDays)
-	} else {
-		years := totalDays / 365
-		remainingDays := totalDays % 365
-		months := remainingDays / 30
-		if months > 0 {
-			if years == 1 && months == 1 {
-				return "1 Year 1 Month ago"
-			} else if years == 1 {
-				return fmt.Sprintf("1 Year %d Months ago", months)
-			} else if months == 1 {
-				return fmt.Sprintf("%d Years 1 Month ago", years)
-			} else {
-				return fmt.Sprintf("%d Years %d Months ago", years, months)
-			}
-		} else {
-			if years == 1 {
-				return "1 Year ago"
-			}
-			return fmt.Sprintf("%d Years ago", years)
-		}
-	}
+// PrintLastActivity returns a human-readable time difference from now for section groups
+func (sg *SectionGroup) PrintLastActivity() string {
+	return printLastActivityFromTime(sg.UpdatedAt)
 }
 
 // PaginatedResponse represents a paginated API response
@@ -452,6 +403,11 @@ type SectionGroup struct {
 	SortOrder        int       `json:"sort_order" db:"sort_order"`
 	IsCategoryHeader bool      `json:"is_category_header" db:"is_category_header"`
 	CreatedAt        time.Time `json:"created_at" db:"created_at"`
+	
+	// Activity fields (populated when joining with newsgroups table)
+	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`
+	MessageCount int       `json:"message_count" db:"message_count"`
+	LastArticle  int       `json:"last_article" db:"last_article"`
 }
 
 // ActiveNewsgroup represents a newsgroup in the active.db

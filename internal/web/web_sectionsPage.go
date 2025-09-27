@@ -87,15 +87,20 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 
 	// Get pagination parameters
 	page := 1
-
 	if p := c.Query("page"); p != "" && p != "1" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 1 {
 			page = parsed
 		}
 	}
 
-	// Get groups for this section (paginated)
-	allGroups, err := s.DB.GetSectionGroups(section.ID)
+	// Get sort parameter
+	sortBy := c.DefaultQuery("sort", "sort_order")
+	if sortBy != "activity" && sortBy != "name" {
+		sortBy = "sort_order"
+	}
+
+	// Get groups for this section with activity data (includes sorting)
+	allGroups, err := s.DB.GetSectionGroupsWithActivity(section.ID, sortBy)
 	if err != nil {
 		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
 		return
@@ -129,6 +134,7 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 		Pagination:        pagination,
 		TotalGroups:       totalCount,
 		AvailableSections: sections,
+		SortBy:            sortBy,
 	}
 
 	// Load template individually to include pagination support

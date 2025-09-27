@@ -162,6 +162,7 @@ type SectionPageData struct {
 	Pagination        *models.PaginationInfo
 	TotalGroups       int
 	AvailableSections []*models.Section
+	SortBy            string
 }
 
 // SectionGroupPageData represents data for group page within a section
