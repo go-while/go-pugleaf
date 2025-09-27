@@ -27,6 +27,11 @@ const (
 	NNTPServerMaxConns = 500 // Maximum concurrent NNTP connections
 )
 
+// Global bot configuration variables (populated from database on startup)
+var Default_BadBots []string
+var BlockBadBots bool
+var BadBotsMutex sync.RWMutex
+
 // Config database keys
 const CFG_KEY_HOSTNAME string = "local_nntp_hostname"
 const CFG_KEY_WEBPOSTSIZE string = "WebPostMaxArticleSize"
@@ -35,6 +40,8 @@ const CFG_KEY_WEBLOCALNNTP string = "WebLocalNNTPServerAddrInfo"
 const CFG_KEY_REVERSEPROXY string = "ReverseProxyAddr"
 const CFG_KEY_REGISTRATION string = "registration_enabled"
 const CFG_KEY_USERSALT string = "UserSalt"
+const CFG_KEY_BADBOTS string = "BadBots"
+const CFG_KEY_BLOCKBADBOTS string = "BlockBadBots"
 
 // Admin settings form field names
 const FORM_FIELD_HOSTNAME string = "local_nntp_hostname"
@@ -43,6 +50,8 @@ const FORM_FIELD_ABUSEMAIL string = "abuse_mail"
 const FORM_FIELD_WEBLOCALNNTP string = "web_local_nntp_server_addr_info"
 const FORM_FIELD_REVERSEPROXY string = "reverse_proxy_addr"
 const FORM_FIELD_REGISTRATION string = "registration_toggle"
+const FORM_FIELD_BADBOTS string = "bad_bots"
+const FORM_FIELD_BLOCKBADBOTS string = "block_bad_bots"
 
 // Config holds the main configuration for go-pugleaf
 type MainConfig struct {

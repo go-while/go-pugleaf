@@ -98,6 +98,27 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 			SuccessMsg:   func(value string) string { return value }, // Custom message handled in processor
 			EmptyAllowed: true,                                       // Toggle doesn't need a value
 		},
+		config.FORM_FIELD_BLOCKBADBOTS: {
+			FormField:    config.FORM_FIELD_BLOCKBADBOTS,
+			ConfigKey:    config.CFG_KEY_BLOCKBADBOTS,
+			Validator:    nil, // No validation needed
+			Processor:    s.processBlockBadBotsToggle,
+			SuccessMsg:   func(value string) string { return value }, // Custom message handled in processor
+			EmptyAllowed: true,                                       // Toggle doesn't need a value
+		},
+		config.FORM_FIELD_BADBOTS: {
+			FormField: config.FORM_FIELD_BADBOTS,
+			ConfigKey: config.CFG_KEY_BADBOTS,
+			Validator: nil, // No validation needed for comma-separated list
+			Processor: nil, // Uses config key directly
+			SuccessMsg: func(value string) string {
+				if value == "" {
+					return "Bad bots list cleared (using defaults)"
+				}
+				return "Note: Changes take effect after webserver restart! Bad bots list updated: " + value
+			},
+			EmptyAllowed: true,
+		},
 	}
 
 	// Get setting configuration
@@ -135,13 +156,15 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 	}
 
 	// Process the setting
-	if settingType == config.FORM_FIELD_HOSTNAME || settingType == config.FORM_FIELD_REGISTRATION {
+	if settingType == config.FORM_FIELD_HOSTNAME || settingType == config.FORM_FIELD_REGISTRATION || settingType == config.FORM_FIELD_BLOCKBADBOTS {
 		if err := cfg.Processor(s, value); err != nil {
 			switch settingType {
 			case config.FORM_FIELD_HOSTNAME:
 				session.SetError("Failed to set hostname: " + err.Error())
 			case config.FORM_FIELD_REGISTRATION:
 				session.SetError("Failed to toggle registration: " + err.Error())
+			case config.FORM_FIELD_BLOCKBADBOTS:
+				session.SetError("Failed to toggle bot blocking: " + err.Error())
 			}
 			c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 			return
@@ -174,6 +197,14 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 			session.SetSuccess("Registration enabled")
 		} else {
 			session.SetSuccess("Registration disabled")
+		}
+	} else if settingType == config.FORM_FIELD_BLOCKBADBOTS {
+		// Get the new status to show the correct message
+		currentStatus, _ := s.DB.GetConfigValue(config.CFG_KEY_BLOCKBADBOTS)
+		if currentStatus == "true" {
+			session.SetSuccess("Bot blocking enabled.")
+		} else {
+			session.SetSuccess("Bot blocking disabled.")
 		}
 	} else {
 		session.SetSuccess(cfg.SuccessMsg(value))
@@ -240,6 +271,37 @@ func (s *WebServer) processRegistrationToggle(server *WebServer, value string) e
 	err = server.DB.SetConfigValue(config.CFG_KEY_REGISTRATION, newStatus)
 	if err != nil {
 		return fmt.Errorf("failed to toggle registration: %v", err)
+	}
+
+	return nil
+}
+
+func (s *WebServer) processBlockBadBotsToggle(server *WebServer, value string) error {
+	// Get current bot blocking status
+	currentStatus, err := server.DB.GetConfigValue(config.CFG_KEY_BLOCKBADBOTS)
+	if err != nil {
+		return fmt.Errorf("failed to get current BlockBadBots config: %v", err)
+
+	}
+
+	// Toggle the status
+	var newStatus string
+	if currentStatus == "true" {
+		newStatus = "false"
+		config.BadBotsMutex.Lock()
+		config.BlockBadBots = false
+		config.BadBotsMutex.Unlock()
+	} else {
+		newStatus = "true"
+		config.BadBotsMutex.Lock()
+		config.BlockBadBots = true
+		config.BadBotsMutex.Unlock()
+	}
+
+	// Update the configuration
+	err = server.DB.SetConfigValue(config.CFG_KEY_BLOCKBADBOTS, newStatus)
+	if err != nil {
+		return fmt.Errorf("failed to toggle bot blocking: %v", err)
 	}
 
 	return nil

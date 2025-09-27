@@ -506,16 +506,20 @@ func (s *WebServer) Start() error {
 // Custom bot detection middleware
 func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		userAgent := c.GetHeader("User-Agent")
+		config.BadBotsMutex.RLock()
+		defer config.BadBotsMutex.RUnlock()
+		// Check if bot blocking is enabled (use global variable)
+		if !config.BlockBadBots {
+			// Bot blocking is disabled, allow all requests
+			c.Next()
+			return
+		}
 
-		// Simple bot patterns
-		badBots := []string{"acunetix", "agent", "ahref", "amazon", "census", "chatgpt", "claude", "crawler",
-			"curl", "deepseek", "go-http", "httrack", "meta", "mj12", "paloalto", "python", "semrush", "wget"}
-		//goodBots := []string{}
-		for _, pattern := range badBots {
-			if strings.Contains(strings.ToLower(userAgent), pattern) {
+		// Check user agent against bad bot patterns (use global variable)
+		for _, pattern := range config.Default_BadBots {
+			if strings.Contains(strings.ToLower(c.GetHeader("User-Agent")), pattern) {
 				// Log bot request
-				log.Printf("Bot blocked: '%s' IP: %s", userAgent, c.ClientIP())
+				log.Printf("Bot blocked: '%s' IP: %s", c.GetHeader("User-Agent"), c.ClientIP())
 				c.String(403, "403")
 				c.Abort()
 				return

@@ -446,6 +446,21 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		reverseProxyAddr = "" // Default to empty on error
 	}
 
+	// Get current BadBots from database
+	badBots, err := s.DB.GetConfigValue(config.CFG_KEY_BADBOTS)
+	if err != nil {
+		log.Printf("Failed to get BadBots: %v", err)
+		badBots = "" // Default to empty on error
+	}
+
+	// Get current BlockBadBots from database
+	blockBadBotsStr, err := s.DB.GetConfigValue(config.CFG_KEY_BLOCKBADBOTS)
+	if err != nil {
+		log.Printf("Failed to get BlockBadBots: %v", err)
+		blockBadBotsStr = "false" // Default to false on error
+	}
+	blockBadBots := blockBadBotsStr == "true"
+
 	data := AdminPageData{
 		TemplateData:               s.getBaseTemplateData(c, "Admin Interface"),
 		Users:                      users,
@@ -484,6 +499,8 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		AbuseMail:                  abuseMail,
 		WebLocalNNTPServerAddrInfo: webLocalNNTPServerAddrInfo,
 		ReverseProxyAddr:           reverseProxyAddr,
+		BadBots:                    badBots,
+		BlockBadBots:               blockBadBots,
 		// Form field constants for admin settings
 		FormFieldHostname:     config.FORM_FIELD_HOSTNAME,
 		FormFieldWebPostSize:  config.FORM_FIELD_WEBPOSTSIZE,
@@ -491,6 +508,8 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		FormFieldWebLocalNNTP: config.FORM_FIELD_WEBLOCALNNTP,
 		FormFieldReverseProxy: config.FORM_FIELD_REVERSEPROXY,
 		FormFieldRegistration: config.FORM_FIELD_REGISTRATION,
+		FormFieldBadBots:      config.FORM_FIELD_BADBOTS,
+		FormFieldBlockBadBots: config.FORM_FIELD_BLOCKBADBOTS,
 		PostQueue:             postQueue,
 		QueueStats:            queueStats,
 		StatusFilter:          statusFilter,

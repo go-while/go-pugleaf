@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -180,6 +181,9 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 		}
 		log.Printf("Generated new UserSalt for hashing usernames")
 	}
+	// Load bot configuration from database
+	db.loadBotConfiguration()
+
 	abuseMail, err := db.GetConfigValue(config.CFG_KEY_ABUSEMAIL)
 	if err != nil {
 		log.Fatalf("Failed to get AbuseMail config: %v", err)
@@ -385,4 +389,48 @@ func (db *Database) LoadDefaultProviders() error {
 	}
 
 	return nil
+}
+
+// loadBotConfiguration loads bot settings from database and populates global config variables
+func (db *Database) loadBotConfiguration() {
+	// Load BlockBadBots setting
+	config.BadBotsMutex.Lock()
+	defer config.BadBotsMutex.Unlock()
+
+	blockBadBotsStr, err := db.GetConfigValue(config.CFG_KEY_BLOCKBADBOTS)
+	if err != nil {
+		log.Printf("Failed to get BlockBadBots config, using default (false): %v", err)
+		config.BlockBadBots = false
+	} else {
+		config.BlockBadBots = (blockBadBotsStr == "true")
+		if !config.BlockBadBots {
+			log.Printf("BlockBadBots is disabled")
+			return
+		}
+	}
+
+	// Load BadBots list
+	badBotsStr, err := db.GetConfigValue(config.CFG_KEY_BADBOTS)
+	if err != nil {
+		log.Printf("Failed to get BadBots config err='%v'", err)
+		return
+	}
+	if badBotsStr == "" {
+		log.Printf("BadBots config empty")
+		config.BlockBadBots = false
+		return
+	} else {
+		// Parse comma-separated list and trim whitespace
+		config.Default_BadBots = []string{}
+		for _, pattern := range strings.Split(badBotsStr, ",") {
+			trimmed := strings.TrimSpace(pattern)
+			if trimmed != "" {
+				config.Default_BadBots = append(config.Default_BadBots, trimmed)
+				log.Printf("Added BadBot pattern: '%s'", trimmed)
+			}
+		}
+	}
+
+	log.Printf("BlockBadBots=%t, BadBots patterns=%d", config.BlockBadBots, len(config.Default_BadBots))
+
 }

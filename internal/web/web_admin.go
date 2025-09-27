@@ -58,12 +58,16 @@ type AdminPageData struct {
 	AbuseMail                  string                                // Added for abuse email configuration
 	WebLocalNNTPServerAddrInfo string                                // Added for NNTP server address info configuration
 	ReverseProxyAddr           string                                // Added for reverse proxy address configuration
+	BadBots                    string                                // Added for bad bots list configuration
+	BlockBadBots               bool                                  // Added for bot blocking control
 	FormFieldHostname          string                                // NNTP hostname form field name
 	FormFieldWebPostSize       string                                // Web post size form field name
 	FormFieldAbuseMail         string                                // Abuse email form field name
 	FormFieldWebLocalNNTP      string                                // Web local NNTP server form field name
 	FormFieldReverseProxy      string                                // Reverse proxy form field name
 	FormFieldRegistration      string                                // Registration toggle form field name
+	FormFieldBadBots           string                                // Bad bots list form field name
+	FormFieldBlockBadBots      string                                // Block bad bots toggle form field name
 	PostQueue                  []*database.PostQueueEntryWithDetails // Added for post queue management
 	QueueStats                 map[string]int                        // Added for post queue statistics
 	StatusFilter               string                                // Added for post queue status filtering
