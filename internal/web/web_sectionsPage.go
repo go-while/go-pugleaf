@@ -93,10 +93,10 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 		}
 	}
 
-	// Get sort parameter
-	sortBy := c.DefaultQuery("sort", "sort_order")
+	// Get sort parameter - default to activity since sort_order is meaningless (all newsgroups have sort_order=0)
+	sortBy := c.DefaultQuery("sort", "activity")
 	if sortBy != "activity" && sortBy != "name" {
-		sortBy = "sort_order"
+		sortBy = "activity"
 	}
 
 	// Get groups for this section with activity data (includes sorting)

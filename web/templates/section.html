@@ -83,7 +83,16 @@
                         <ul class="dropdown-menu" aria-labelledby="sortDropdown">
                             <li><a class="dropdown-item{{if eq .SortBy "activity"}} active{{end}}" href="?sort=activity">Last Activity</a></li>
                             <li><a class="dropdown-item{{if eq .SortBy "name"}} active{{end}}" href="?sort=name">Name A-Z</a></li>
-                            <li><a class="dropdown-item{{if eq .SortBy "sort_order"}} active{{end}}" href="?sort=sort_order">Default Order</a></li>
+
+                            <!--
+                                NOTE: "Default Order" option commented out because currently all newsgroups
+                                in sections have sort_order=0 (hardcoded in AssignNewsgroupHandler).
+                                There's no admin interface to set custom sort orders for newsgroups within sections.
+                                Both "Default Order" and "Name A-Z" would produce identical alphabetical results.
+                                Keep this for potential future implementation of manual newsgroup ordering within sections.
+                            -->
+                            <!--<li><a class="dropdown-item{{if eq .SortBy "sort_order"}} active{{end}}" href="?sort=sort_order">Default Order</a></li>-->
+
                         </ul>
                     </div>
                 </div>
