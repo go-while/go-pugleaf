@@ -780,7 +780,6 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 	var wg sync.WaitGroup
 	// Process each newsgroup
 	log.Printf("Starting transfer for %d newsgroups", len(newsgroups))
-	time.Sleep(3 * time.Second)
 	for _, newsgroup := range newsgroups {
 		if proc.WantShutdown(shutdownChan) {
 			transferMutex.Lock()
@@ -799,7 +798,9 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 				return
 			}
 			start := time.Now()
-			log.Printf("Starting transfer for newsgroup: %s", newsgroup.Name)
+			if VERBOSE {
+				log.Printf("Starting transfer for newsgroup: %s", newsgroup.Name)
+			}
 			transferred, checked, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, shutdownChan)
 
 			transferMutex.Lock()
@@ -855,10 +856,12 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	}
 
 	if totalArticles == 0 {
-		if startTime != nil || endTime != nil {
-			log.Printf("No articles found in newsgroup: %s (within specified date range)", newsgroup.Name)
-		} else {
-			log.Printf("No articles found in newsgroup: %s", newsgroup.Name)
+		if VERBOSE {
+			if startTime != nil || endTime != nil {
+				log.Printf("No articles found in newsgroup: %s (within specified date range)", newsgroup.Name)
+			} else {
+				log.Printf("No articles found in newsgroup: %s", newsgroup.Name)
+			}
 		}
 		return 0, 0, nil
 	}
