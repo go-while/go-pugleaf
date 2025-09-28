@@ -678,12 +678,12 @@ func loadPatternsFromFile(filePath string) ([]string, error) {
 }
 
 // shouldIncludeNewsgroup determines if a newsgroup should be included based on include/exclude patterns
-func shouldIncludeNewsgroup(newsgroupName string, includePatterns, excludePatterns []string) bool {
+func shouldIncludeNewsgroup(newsgroup string, includePatterns, excludePatterns []string) bool {
 	// If include patterns are specified, newsgroup must match at least one
 	if len(includePatterns) > 0 {
 		included := false
 		for _, pattern := range includePatterns {
-			if matchesPattern(newsgroupName, pattern) {
+			if matchesPattern(newsgroup, pattern) {
 				included = true
 				break
 			}
@@ -696,7 +696,7 @@ func shouldIncludeNewsgroup(newsgroupName string, includePatterns, excludePatter
 	// If exclude patterns are specified, newsgroup must not match any
 	if len(excludePatterns) > 0 {
 		for _, pattern := range excludePatterns {
-			if matchesPattern(newsgroupName, pattern) {
+			if matchesPattern(newsgroup, pattern) {
 				return false
 			}
 		}
@@ -706,29 +706,29 @@ func shouldIncludeNewsgroup(newsgroupName string, includePatterns, excludePatter
 }
 
 // matchesPattern checks if a newsgroup name matches a pattern (supports wildcard *)
-func matchesPattern(newsgroupName, pattern string) bool {
+func matchesPattern(newsgroup, pattern string) bool {
 	if pattern == "*" {
 		return true
 	}
 
 	if strings.HasSuffix(pattern, "*") {
 		prefix := strings.TrimSuffix(pattern, "*")
-		return strings.HasPrefix(newsgroupName, prefix)
+		return strings.HasPrefix(newsgroup, prefix)
 	}
 
 	if strings.HasPrefix(pattern, "*") {
 		suffix := strings.TrimPrefix(pattern, "*")
-		return strings.HasSuffix(newsgroupName, suffix)
+		return strings.HasSuffix(newsgroup, suffix)
 	}
 
 	// Exact match
-	return newsgroupName == pattern
+	return newsgroup == pattern
 }
 
 // matchesAnyPattern checks if a newsgroup name matches any of the given patterns
-func matchesAnyPattern(newsgroupName string, patterns []string) bool {
+func matchesAnyPattern(newsgroup string, patterns []string) bool {
 	for _, pattern := range patterns {
-		if matchesPattern(newsgroupName, pattern) {
+		if matchesPattern(newsgroup, pattern) {
 			return true
 		}
 	}
@@ -949,7 +949,7 @@ var upperLevel float64 = 95.0
 
 // processBatch processes a batch of articles using NNTP streaming protocol (RFC 4644)
 // Uses TAKETHIS primarily, falls back to CHECK when success rate < 95%
-func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThisMode, articles []*models.Article) (uint64, error) {
+func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode, articles []*models.Article) (uint64, error) {
 
 	if len(articles) == 0 {
 		return 0, nil
@@ -964,10 +964,10 @@ func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThis
 	// Switch to CHECK mode if TAKETHIS success rate drops below lowerLevel
 	if successRate < lowerLevel && ttMode.takeThisTotalCount >= 10 { // Need at least 10 attempts for meaningful stats
 		ttMode.useCheckMode = true
-		//log.Printf("newsgroup %s: TAKETHIS success rate %.1f%% < %d%%, switching to CHECK mode", newsgroupName, successRate, lowerLevel)
+		//log.Printf("newsgroup %s: TAKETHIS success rate %.1f%% < %d%%, switching to CHECK mode", newsgroup, successRate, lowerLevel)
 	} else if successRate >= upperLevel && ttMode.takeThisTotalCount >= 20 { // Switch back when rate improves
 		ttMode.useCheckMode = false
-		//log.Printf("newsgroup %s: TAKETHIS success rate %.1f%% >= %d%%, switching back to TAKETHIS mode", newsgroupName, successRate, upperLevel)
+		//log.Printf("newsgroup %s: TAKETHIS success rate %.1f%% >= %d%%, switching back to TAKETHIS mode", newsgroup, successRate, upperLevel)
 	}
 
 	articleMap := make(map[string]*models.Article)
@@ -979,7 +979,7 @@ func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThis
 
 	if ttMode.useCheckMode {
 		// CHECK mode: verify articles are wanted before sending
-		log.Printf("Newsgroup: '%s' | CHECK: %d articles (success rate: %.1f%%)", newsgroupName, len(articles), successRate)
+		log.Printf("Newsgroup: '%s' | CHECK: %d articles (success rate: %.1f%%)", newsgroup, len(articles), successRate)
 
 		messageIds := make([]*string, len(articles))
 		for i, article := range articles {
@@ -990,7 +990,9 @@ func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThis
 		checkResponses, err := conn.CheckMultiple(messageIds)
 		if err != nil {
 			ttMode.connErrors++
-			return transferred, fmt.Errorf("failed to send CHECK command: %v", err)
+			conn.ForceClose = true
+			conn.Pool.Put(conn)
+			return transferred, fmt.Errorf("Newsgroup: '%s' | failed to send CHECK command: %v", newsgroup, err)
 		}
 
 		// Find wanted articles
@@ -1019,22 +1021,25 @@ func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThis
 			ttMode.takeThisSuccessCount = 0
 			ttMode.takeThisTotalCount = 0
 		}
-		log.Printf("Newsgroup: '%s' | Server wants: %d/%d articles in batch", newsgroupName, len(wantedIds), len(messageIds))
+		log.Printf("Newsgroup: '%s' | Server wants: %d/%d articles in batch", newsgroup, len(wantedIds), len(messageIds))
 
 		// Send TAKETHIS for wanted articles
 		for _, msgId := range wantedIds {
-			count, err := sendArticleViaTakeThis(conn, articleMap[*msgId], ttMode, newsgroupName)
+			count, err := sendArticleViaTakeThis(conn, articleMap[*msgId], ttMode, newsgroup)
+			if conn.ForceClose {
+				return transferred, fmt.Errorf("Newsgroup: '%s' | connection marked for close, aborting batch. err='%v'", newsgroup, err)
+			}
 			if err != nil {
-				//log.Printf("Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroupName, *msgId, err)
+				log.Printf("Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroup, *msgId, err)
 				continue
 			}
 			transferred += count
 		}
 	} else {
 		// TAKETHIS mode: send articles directly and track success rate
-		log.Printf("Newsgroup: '%s' | TAKETHIS: %d articles (success rate: %.1f%%)", newsgroupName, len(articles), successRate)
+		log.Printf("Newsgroup: '%s' | TAKETHIS: %d articles (success rate: %.1f%%)", newsgroup, len(articles), successRate)
 
-		transferred, err := sendArticlesBatchViaTakeThis(conn, articles, ttMode, newsgroupName)
+		transferred, err := sendArticlesBatchViaTakeThis(conn, articles, ttMode, newsgroup)
 		if err != nil {
 			return transferred, fmt.Errorf("failed to send TAKETHIS batch: %v", err)
 		}
@@ -1069,6 +1074,8 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		cmdID, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname)
 		if err != nil {
 			ttMode.connErrors++
+			conn.ForceClose = true
+			conn.Pool.Put(conn)
 			log.Printf("ERROR Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroup, article.MessageID, err)
 			return 0, fmt.Errorf("failed to send TAKETHIS for %s: %v", article.MessageID, err)
 		}
@@ -1087,6 +1094,8 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		takeThisResponseCode, err := conn.ReadTakeThisResponseStreaming(cmdID)
 		if err != nil {
 			ttMode.connErrors++
+			conn.ForceClose = true
+			conn.Pool.Put(conn)
 			log.Printf("ERROR Newsgroup: '%s' | Failed to read TAKETHIS response for %s: %v", newsgroup, article.MessageID, err)
 			return transferred, fmt.Errorf("failed to read TAKETHIS response for %s: %v", article.MessageID, err)
 		}
@@ -1106,6 +1115,8 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		default:
 			ttMode.TX_Errors++
 			log.Printf("Newsgroup: '%s' | Failed to transfer article '%s': response=%d (i=%d/%d)", newsgroup, article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
+			conn.ForceClose = true
+			conn.Pool.Put(conn)
 			return transferred, fmt.Errorf("failed to transfer article '%s': response=%d", article.MessageID, takeThisResponseCode)
 		}
 	}
@@ -1121,6 +1132,8 @@ func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article, ttM
 	takeThisResponseCode, err := conn.TakeThisArticle(article, &processor.LocalNNTPHostname)
 	if err != nil {
 		ttMode.connErrors++
+		conn.ForceClose = true
+		conn.Pool.Put(conn)
 		return 0, fmt.Errorf("failed to send TAKETHIS: %v", err)
 	}
 
@@ -1140,7 +1153,9 @@ func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article, ttM
 		return 0, nil
 	default:
 		ttMode.TX_Errors++
-		log.Printf("ERROR Newsgroup: '%s' | Failed to transfer article '%s': response=%d", newsgroup, article.MessageID, takeThisResponseCode)
+		log.Printf("Newsgroup: '%s' | Failed to transfer article '%s': response=%d", newsgroup, article.MessageID, takeThisResponseCode)
+		conn.ForceClose = true
+		conn.Pool.Put(conn)
 		return 0, fmt.Errorf("failed to transfer article '%s': response=%d", article.MessageID, takeThisResponseCode)
 	}
 }

@@ -1069,7 +1069,7 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, erro
 
 	// Read responses for each CHECK command
 	responses := make([]CheckResponse, 0, len(messageIDs))
-	var outoforder []CheckResponse
+	//var outoforder []CheckResponse
 	for i, msgID := range messageIDs {
 		id := commandIds[i]
 		c.textConn.StartResponse(id)
@@ -1077,10 +1077,9 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, erro
 		// Read response for this CHECK command
 		code, line, err := c.textConn.ReadCodeLine(238)
 		c.textConn.EndResponse(id)
-
 		if code == 0 && err != nil {
 			log.Printf("Failed to read CHECK response for %s: %v", *msgID, err)
-			continue
+			return nil, fmt.Errorf("failed to read CHECK response for %s: %w", *msgID, err)
 		}
 
 		// Parse response line
@@ -1092,16 +1091,18 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, erro
 		parts := strings.Fields(line)
 		if len(parts) < 1 {
 			log.Printf("Malformed CHECK response: %s", line)
-			continue
+			return nil, fmt.Errorf("malformed CHECK response: %s", line)
 		}
 		if parts[0] != *msgID {
 			log.Printf("Mismatched CHECK response: expected %s, got %s", *msgID, parts[0])
-			outoforder = append(outoforder, CheckResponse{
-				MessageID: &parts[0],
-				Code:      code,
-				Wanted:    code == 238, // 238 means article wanted
-			})
-			continue
+			/*
+				outoforder = append(outoforder, CheckResponse{
+					MessageID: &parts[0],
+					Code:      code,
+					Wanted:    code == 238, // 238 means article wanted
+				})
+			*/
+			return nil, fmt.Errorf("out of order CHECK response: expected %s, got %s", *msgID, parts[0])
 		}
 
 		response := CheckResponse{
@@ -1113,18 +1114,19 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, erro
 		responses = append(responses, response)
 	}
 
-	for _, resp := range outoforder {
-		for _, msgID := range messageIDs {
-			if *resp.MessageID == *msgID {
-				responses = append(responses, CheckResponse{
-					MessageID: msgID, // First part is the message ID
-					Code:      resp.Code,
-					Wanted:    resp.Wanted,
-				})
+	/*
+		for _, resp := range outoforder {
+			for _, msgID := range messageIDs {
+				if *resp.MessageID == *msgID {
+					responses = append(responses, CheckResponse{
+						MessageID: msgID, // First part is the message ID
+						Code:      resp.Code,
+						Wanted:    resp.Wanted,
+					})
+				}
 			}
 		}
-	}
-
+	*/
 	// Return all responses
 
 	return responses, nil
