@@ -73,7 +73,7 @@ func showUsageExamples() {
 var appVersion = "-unset-"
 
 func main() {
-	common.VerboseHeaders = true
+	common.VerboseHeaders = false
 	config.AppVersion = appVersion
 	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("Starting go-pugleaf NNTP Transfer Tool (version %s)", config.AppVersion)
@@ -783,7 +783,9 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 	time.Sleep(3 * time.Second)
 	for _, newsgroup := range newsgroups {
 		if proc.WantShutdown(shutdownChan) {
+			transferMutex.Lock()
 			log.Printf("Shutdown requested, stopping transfer. Total transferred: %d articles", totalTransferred)
+			transferMutex.Unlock()
 			return nil
 		}
 		maxThreadsChan <- struct{}{} // acquire a thread slot
