@@ -936,6 +936,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	for _, msgId := range rejected[newsgroup.Name] {
 		log.Printf("Newsgroup '%s': rejected '%s'", newsgroup.Name, msgId)
 	}
+	delete(rejected, newsgroup.Name) // free memory
 	resultsMutex.Unlock()
 	return transferred, nil
 }
