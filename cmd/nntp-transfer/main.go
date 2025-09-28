@@ -21,6 +21,7 @@ import (
 )
 
 var dbBatchSize int64 = 1000 // Load 1000 articles from DB at a time
+var VERBOSE bool
 
 // showUsageExamples displays usage examples for NNTP transfer
 func showUsageExamples() {
@@ -915,24 +916,27 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 				isleep = time.Second
 				pool.Put(conn)
 				transferred += batchTransferred
-				log.Printf("Newsgroup: '%s' | Batch (offset %d/%d) %d-%d TX:%d check=%t rate=%.1f%%", newsgroup.Name, offset, totalArticles, i+1, end, batchTransferred, ttMode.useCheckMode, successRate)
+				if VERBOSE {
+					log.Printf("Newsgroup: '%s' | Batch (offset %d/%d) %d-%d TX:%d check=%t rate=%.1f%%", newsgroup.Name, offset, totalArticles, i+1, end, batchTransferred, ttMode.useCheckMode, successRate)
+				}
 				break forever
 			}
 		}
 
 		// Clear articles slice to free memory
 		for i := range articles {
-			articles[i] = nil
+			articles[i] = nil // free memory
 		}
 		remainingArticles -= int64(len(articles))
-		// todo verbose flag
 		var batchSuccessRate float64
 		if transferred > 0 {
 			batchSuccessRate = float64(transferred) / float64(len(articles)) * 100.0
 		}
-		log.Printf("Newsgroup: '%s' | done batch (offset %d/%d), total: %d, remaining: %d, unwanted: %d, rejected: %d (check=%t) rate=%.1f%%", newsgroup.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.useCheckMode, batchSuccessRate)
-		articles = nil
-	}
+		if VERBOSE {
+			log.Printf("Newsgroup: '%s' | done batch (offset %d/%d), total: %d, remaining: %d, unwanted: %d, rejected: %d (check=%t) rate=%.1f%%", newsgroup.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.useCheckMode, batchSuccessRate)
+		}
+		articles = nil // free memory
+	} // end for offset range totalArticles
 	result := fmt.Sprintf("END Newsgroup: '%s' | total transferred: %d articles / total articles: %d (unwanted: %d | rejected: %d) TX_Errors: %d, connErrors: %d", newsgroup.Name, transferred, totalArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.TX_Errors, ttMode.connErrors)
 	log.Print(result)
 	resultsMutex.Lock()
