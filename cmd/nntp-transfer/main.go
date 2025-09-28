@@ -930,7 +930,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		// todo verbose flag
 		log.Printf("Newsgroup '%s': done (offset %d/%d), total transferred: %d, remainingArticles %d, unwanted %d, rejected %d", newsgroup.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected)
 	}
-	result := fmt.Sprintf("Newsgroup '%s': total transferred: %d articles / total articles: %d (unwanted=%d | rejected=%d) txErrors=%d", newsgroup.Name, transferred, totalArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.connErrors)
+	result := fmt.Sprintf("Newsgroup '%s': total transferred: %d articles / total articles: %d (unwanted=%d | rejected=%d) TX_Errors=%d connErrors=%d", newsgroup.Name, transferred, totalArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.TX_Errors, ttMode.connErrors)
 	log.Print(result)
 	resultsMutex.Lock()
 	results = append(results, result)
