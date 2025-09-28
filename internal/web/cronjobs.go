@@ -141,7 +141,7 @@ func (cm *CronJobManager) StopCronManager() {
 				job.mutex.Lock()
 				if job.PID > 0 {
 					// Wait for the job to finish
-					log.Printf("[CRON] Waiting for cron job %d cmd='%s' (pid: %d) to finish...", job.ID, job.Command, job.PID)
+					log.Printf("[CRON] wait! job id=%d cmd='%s' (pid: %d)", job.ID, job.Command, job.PID)
 				}
 				job.mutex.Unlock()
 			}
