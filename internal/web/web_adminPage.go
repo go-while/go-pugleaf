@@ -78,6 +78,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	page := 1
 	pageSize := 50 // Static page size for newsgroups (cache efficiency)
 	searchTerm := c.Query("search")
+	searchDescription := c.Query("search_description") == "on"
 
 	if p := c.Query("ng_page"); p != "" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
@@ -89,14 +90,18 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	var newsgroupCount int
 
 	if searchTerm != "" {
-		// Use search function if search term provided
-		// For admin page, get all results without pagination for now
-		newsgroups, err = s.DB.SearchNewsgroups(searchTerm, 1000, 0, true) // High limit for admin
+		// Use search function with description option if search term provided
+		newsgroups, err = s.DB.SearchNewsgroupsWithOptions(searchTerm, 1000, 0, true, searchDescription) // High limit for admin
 		if err != nil {
 			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to search newsgroups")
 			return
 		}
-		newsgroupCount = len(newsgroups)
+		// Get accurate count using the same search options
+		newsgroupCount, err = s.DB.CountSearchNewsgroupsWithOptions(searchTerm, searchDescription, true)
+		if err != nil {
+			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to count search results")
+			return
+		}
 
 		// Apply manual pagination to search results
 		start := (page - 1) * pageSize
@@ -490,6 +495,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		Newsgroups:                 newsgroups,
 		NewsgroupPagination:        newsgroupPagination,
 		NewsgroupSearch:            searchTerm,
+		SearchDescription:          searchDescription,
 		Providers:                  providers,
 		APITokens:                  apiTokens,
 		AIModels:                   aiModels,

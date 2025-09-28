@@ -29,6 +29,7 @@ type AdminPageData struct {
 	Newsgroups                 []*models.Newsgroup
 	NewsgroupPagination        *models.PaginationInfo
 	NewsgroupSearch            string
+	SearchDescription          bool // Added for description search option
 	Providers                  []*models.Provider
 	APITokens                  []*database.APIToken
 	AIModels                   []*models.AIModel

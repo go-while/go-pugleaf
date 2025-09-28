@@ -1439,6 +1439,40 @@ const query_SearchNewsgroups = `
 		LIMIT ? OFFSET ?
 	` // SearchNewsgroups searches for newsgroups by name pattern with pagination
 
+// Search queries with description
+const query_SearchNewsgroupsWithDesc = `
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		FROM newsgroups
+		WHERE active = 1 AND (name LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE)
+		ORDER BY message_count DESC, name ASC
+		LIMIT ? OFFSET ?
+	`
+
+const query_SearchNewsgroupsAdminWithDesc = `
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		FROM newsgroups
+		WHERE (name LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE)
+		ORDER BY message_count DESC, name ASC
+		LIMIT ? OFFSET ?
+	`
+
+// Search queries name-only
+const query_SearchNewsgroupsNameOnly = `
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		FROM newsgroups
+		WHERE active = 1 AND name LIKE ? COLLATE NOCASE
+		ORDER BY message_count DESC, name ASC
+		LIMIT ? OFFSET ?
+	`
+
+const query_SearchNewsgroupsAdminNameOnly = `
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		FROM newsgroups
+		WHERE name LIKE ? COLLATE NOCASE
+		ORDER BY message_count DESC, name ASC
+		LIMIT ? OFFSET ?
+	`
+
 const query_SearchNewsgroupsAdmin = `
 		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
 		FROM newsgroups
@@ -1449,17 +1483,38 @@ const query_SearchNewsgroupsAdmin = `
 	`
 
 func (db *Database) SearchNewsgroups(searchTerm string, limit, offset int, admin bool) ([]*models.Newsgroup, error) {
-	var query string
-	switch admin {
-	case true:
-		query = query_SearchNewsgroupsAdmin
-	default:
-		query = query_SearchNewsgroups
+	return db.SearchNewsgroupsWithOptions(searchTerm, limit, offset, admin, false)
+}
 
+// SearchNewsgroupsWithOptions searches for newsgroups with configurable options
+func (db *Database) SearchNewsgroupsWithOptions(searchTerm string, limit, offset int, admin bool, searchDescription bool) ([]*models.Newsgroup, error) {
+	var query string
+	var args []interface{}
+
+	// Use prefix matching (term%) instead of substring (%term%)
+	searchPattern := searchTerm + "%"
+
+	if searchDescription {
+		// Search both name and description
+		switch admin {
+		case true:
+			query = query_SearchNewsgroupsAdminWithDesc
+		default:
+			query = query_SearchNewsgroupsWithDesc
+		}
+		args = []interface{}{searchPattern, searchPattern, limit, offset}
+	} else {
+		// Search only name
+		switch admin {
+		case true:
+			query = query_SearchNewsgroupsAdminNameOnly
+		default:
+			query = query_SearchNewsgroupsNameOnly
+		}
+		args = []interface{}{searchPattern, limit, offset}
 	}
-	// Use LIKE for pattern matching, case-insensitive
-	searchPattern := "%" + searchTerm + "%"
-	rows, err := db.mainDB.Query(query, searchPattern, searchPattern, limit, offset)
+
+	rows, err := db.mainDB.Query(query, args...)
 
 	if err != nil {
 		return nil, err
@@ -1490,12 +1545,64 @@ const query_CountSearchNewsgroups = `
 		OR description LIKE ? COLLATE NOCASE)
 	`
 
+// Count queries with description
+const query_CountSearchNewsgroupsWithDesc = `
+		SELECT COUNT(*)
+		FROM newsgroups
+		WHERE active = 1 AND (name LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE)
+	`
+
+const query_CountSearchNewsgroupsAdminWithDesc = `
+		SELECT COUNT(*)
+		FROM newsgroups
+		WHERE (name LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE)
+	`
+
+// Count queries name-only
+const query_CountSearchNewsgroupsNameOnly = `
+		SELECT COUNT(*)
+		FROM newsgroups
+		WHERE active = 1 AND name LIKE ? COLLATE NOCASE
+	`
+
+const query_CountSearchNewsgroupsAdminNameOnly = `
+		SELECT COUNT(*)
+		FROM newsgroups
+		WHERE name LIKE ? COLLATE NOCASE
+	`
+
 func (db *Database) CountSearchNewsgroups(searchTerm string) (int, error) {
-	// Use LIKE for pattern matching, case-insensitive
-	searchPattern := "%" + searchTerm + "%"
+	return db.CountSearchNewsgroupsWithOptions(searchTerm, false, false)
+}
+
+// CountSearchNewsgroupsWithOptions counts newsgroups with configurable options
+func (db *Database) CountSearchNewsgroupsWithOptions(searchTerm string, searchDescription bool, admin bool) (int, error) {
+	// Use prefix matching (term%) instead of substring (%term%)
+	searchPattern := searchTerm + "%"
+
+	var query string
+	var args []interface{}
+
+	if searchDescription {
+		// Count both name and description matches
+		if admin {
+			query = query_CountSearchNewsgroupsAdminWithDesc
+		} else {
+			query = query_CountSearchNewsgroupsWithDesc
+		}
+		args = []interface{}{searchPattern, searchPattern}
+	} else {
+		// Count only name matches
+		if admin {
+			query = query_CountSearchNewsgroupsAdminNameOnly
+		} else {
+			query = query_CountSearchNewsgroupsNameOnly
+		}
+		args = []interface{}{searchPattern}
+	}
 
 	var count int
-	err := db.mainDB.QueryRow(query_CountSearchNewsgroups, searchPattern, searchPattern).Scan(&count)
+	err := db.mainDB.QueryRow(query, args...).Scan(&count)
 
 	return count, err
 }
