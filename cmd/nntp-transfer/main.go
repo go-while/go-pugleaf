@@ -1025,7 +1025,7 @@ func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThis
 		for _, msgId := range wantedIds {
 			count, err := sendArticleViaTakeThis(conn, articleMap[*msgId], ttMode, newsgroupName)
 			if err != nil {
-				log.Printf("ERROR Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroupName, *msgId, err)
+				//log.Printf("Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroupName, *msgId, err)
 				continue
 			}
 			transferred += count
@@ -1105,7 +1105,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			resultsMutex.Unlock()
 		default:
 			ttMode.TX_Errors++
-			log.Printf("ERROR Newsgroup: '%s' | Failed to transfer article '%s': response=%d (i=%d/%d)", newsgroup, article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
+			log.Printf("Newsgroup: '%s' | Failed to transfer article '%s': response=%d (i=%d/%d)", newsgroup, article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
 			return transferred, fmt.Errorf("failed to transfer article '%s': response=%d", article.MessageID, takeThisResponseCode)
 		}
 	}
@@ -1137,10 +1137,10 @@ func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article, ttM
 		resultsMutex.Lock()
 		rejected[newsgroup] = append(rejected[newsgroup], article.MessageID)
 		resultsMutex.Unlock()
-		return 0, fmt.Errorf("failed to transfer article '%s': response=%d", article.MessageID, takeThisResponseCode)
+		return 0, nil
 	default:
 		ttMode.TX_Errors++
 		log.Printf("ERROR Newsgroup: '%s' | Failed to transfer article '%s': response=%d", newsgroup, article.MessageID, takeThisResponseCode)
-		return 0, nil
+		return 0, fmt.Errorf("failed to transfer article '%s': response=%d", article.MessageID, takeThisResponseCode)
 	}
 }
