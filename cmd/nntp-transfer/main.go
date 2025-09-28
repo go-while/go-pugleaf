@@ -603,10 +603,10 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 			return nil, fmt.Errorf("force-include-only flag requires include file to be specified")
 		}
 		log.Printf("Force-include-only mode: filtering newsgroups using group pattern '%s' and include patterns", groupPattern)
-		
+
 		// First filter by group pattern, then by include patterns
 		var groupFiltered []*models.Newsgroup
-		
+
 		// Handle $all pattern
 		if groupPattern == "$all" {
 			groupFiltered = allNewsgroups
@@ -630,7 +630,7 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 				}
 			}
 		}
-		
+
 		// Now apply include patterns to group-filtered newsgroups
 		for _, ng := range groupFiltered {
 			if matchesAnyPattern(ng.Name, includePatterns) {
