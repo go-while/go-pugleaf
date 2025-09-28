@@ -957,7 +957,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 	}
 
 	// Calculate success rate to determine whether to use CHECK or TAKETHIS
-	var successRate float64 = 100.0 // Start optimistic
+	var successRate float64 = 0.0
 	if ttMode.takeThisTotalCount > 0 {
 		successRate = float64(ttMode.takeThisSuccessCount) / float64(ttMode.takeThisTotalCount) * 100.0
 	}
