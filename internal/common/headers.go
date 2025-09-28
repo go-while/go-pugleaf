@@ -126,9 +126,9 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 					parsedTime := parseDateReceivedHeader(dateReceivedStr)
 					if !parsedTime.IsZero() && parsedTime.Year() >= 1979 {
 						dateHeader = parsedTime.UTC().Format(time.RFC1123Z)
-						if VerboseHeaders {
-							log.Printf("Using Date-Received '%s' (parsed as '%s') instead of invalid DateString '%s' and invalid DateSent (year %d) for article %s", dateReceivedStr, dateHeader, article.DateString, article.DateSent.Year(), article.MessageID)
-						}
+						//if VerboseHeaders {
+						log.Printf("Using Date-Received '%s' (parsed as '%s') instead of invalid DateString '%s' and invalid DateSent (year %d) for article %s", dateReceivedStr, dateHeader, article.DateString, article.DateSent.Year(), article.MessageID)
+						//}
 					} else {
 						log.Printf("ERROR common.ReconstructHeaders: Non-compliant DateString '%s', invalid DateSent (year %d), and invalid Date-Received '%s' for article %s", article.DateString, article.DateSent.Year(), dateReceivedStr, article.MessageID)
 						return nil, fmt.Errorf("article has non-compliant DateString, invalid DateSent (year %d), and invalid Date-Received msgId='%s'", article.DateSent.Year(), article.MessageID)
