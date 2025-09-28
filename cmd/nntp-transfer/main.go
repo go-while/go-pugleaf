@@ -958,7 +958,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 				transferred += batchTransferred
 				checked += batchChecked
 
-				if VERBOSE {
+				if VERBOSE || transferred%1000 == 0 || checked%1000 == 0 {
 					log.Printf("Newsgroup: '%s' | Batch (offset %d/%d) %d-%d TX:%d check=%t ttRate=%.1f%% checked=%d", newsgroup.Name, offset, totalArticles, i+1, end, batchTransferred, ttMode.useCheckMode, TTsuccessRate, batchChecked)
 				}
 				break forever
