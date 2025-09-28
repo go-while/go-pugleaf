@@ -844,8 +844,9 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	var transferred uint64
 	remainingArticles := totalArticles
 	// Process articles in database batches (much larger than network batches)
-	ttMode := &takeThisMode{}
-
+	ttMode := &takeThisMode{
+		useCheckMode: true, // start with CHECK mode
+	}
 	for offset := ioffset; offset < totalArticles; offset += dbBatchSize {
 		if proc.WantShutdown(shutdownChan) {
 			log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
