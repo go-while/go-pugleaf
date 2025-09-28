@@ -48,6 +48,48 @@ func isRFCdate(dateStr string) bool {
 const pathHeader_inv1 string = "Path: pugleaf.invalid!.TX!not-for-mail"
 const pathHeader_inv2 string = "X-Path: pugleaf.invalid!.TX!not-for-mail"
 
+// extractDateReceivedHeader extracts the Date-Received header value from HeadersJSON
+func extractDateReceivedHeader(headersJSON string) string {
+	headerLines := strings.Split(headersJSON, "\n")
+	for _, line := range headerLines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(line), "Date-Received:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return ""
+}
+
+// parseDateReceivedHeader parses Date-Received header using common NNTP date formats
+func parseDateReceivedHeader(dateStr string) time.Time {
+	if dateStr == "" {
+		return time.Time{}
+	}
+	// Date-Received: Sat, 26-Sep-87 10:35:30 EDT
+	// Common Date-Received formats seen in NNTP
+	dateFormats := []string{
+		"Mon, _2-Jan-06 15:04:05 MST",   // e.g., "Sat, 26-Sep-87 10:35:30 EDT"
+		"Mon, 02-Jan-06 15:04:05 MST",   // e.g., "Sat, 26-Sep-87 10:35:30 EDT" with leading zero
+		"Mon, _2-Jan-2006 15:04:05 MST", // 4-digit year version
+		"Mon, 02-Jan-2006 15:04:05 MST", // 4-digit year with leading zero
+		time.RFC1123Z,                   // Standard RFC format
+		time.RFC1123,                    // Standard RFC format
+		time.RFC822Z,                    // RFC822 with timezone
+		time.RFC822,                     // RFC822
+	}
+
+	for _, format := range dateFormats {
+		if t, err := time.Parse(format, dateStr); err == nil {
+			return t
+		}
+	}
+
+	return time.Time{}
+}
+
 // ReconstructHeaders reconstructs the header lines from an article for transmission
 func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *string) ([]string, error) {
 	var headers []string
@@ -70,23 +112,52 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 		if isRFCdate(article.DateString) {
 			dateHeader = article.DateString
 		} else {
-			// DateString is not RFC compliant, use DateSent instead
-			if !article.DateSent.IsZero() {
+			// DateString is not RFC compliant, try DateSent first
+			if !article.DateSent.IsZero() && article.DateSent.Year() >= 1979 {
 				dateHeader = article.DateSent.UTC().Format(time.RFC1123Z)
 				if VerboseHeaders {
-					log.Printf("Using dateHeader '%s' instead of DateString '%s' for article %s", dateHeader, article.DateString, article.MessageID)
+					log.Printf("Using DateSent '%s' instead of DateString '%s' for article %s", dateHeader, article.DateString, article.MessageID)
 				}
 			} else {
-				log.Printf("ERROR common.ReconstructHeaders: Non-compliant DateString '%s' and zero DateSent for article %s", article.DateString, article.MessageID)
-				return nil, fmt.Errorf("article has non-compliant DateString and zero DateSent msgId='%s'", article.MessageID)
+				// DateSent is zero or invalid (e.g., 1969 epoch), try Date-Received header as fallback
+				dateReceivedStr := extractDateReceivedHeader(article.HeadersJSON)
+				if dateReceivedStr != "" {
+					parsedTime := parseDateReceivedHeader(dateReceivedStr)
+					if !parsedTime.IsZero() && parsedTime.Year() >= 1979 {
+						dateHeader = parsedTime.UTC().Format(time.RFC1123Z)
+						if VerboseHeaders {
+							log.Printf("Using Date-Received '%s' (parsed as '%s') instead of invalid DateString '%s' and invalid DateSent (year %d) for article %s", dateReceivedStr, dateHeader, article.DateString, article.DateSent.Year(), article.MessageID)
+						}
+					} else {
+						log.Printf("ERROR common.ReconstructHeaders: Non-compliant DateString '%s', invalid DateSent (year %d), and invalid Date-Received '%s' for article %s", article.DateString, article.DateSent.Year(), dateReceivedStr, article.MessageID)
+						return nil, fmt.Errorf("article has non-compliant DateString, invalid DateSent (year %d), and invalid Date-Received msgId='%s'", article.DateSent.Year(), article.MessageID)
+					}
+				} else {
+					log.Printf("ERROR common.ReconstructHeaders: Non-compliant DateString '%s', invalid DateSent (year %d), and no Date-Received header for article %s", article.DateString, article.DateSent.Year(), article.MessageID)
+					return nil, fmt.Errorf("article has non-compliant DateString, invalid DateSent (year %d), and no Date-Received header msgId='%s'", article.DateSent.Year(), article.MessageID)
+				}
 			}
 		}
 	} else {
 		// No DateString, try DateSent
-		if !article.DateSent.IsZero() {
+		if !article.DateSent.IsZero() && article.DateSent.Year() >= 1979 {
 			dateHeader = article.DateSent.UTC().Format(time.RFC1123)
 		} else {
-			return nil, fmt.Errorf("article missing Date header (both DateString and DateSent are empty) msgId='%s'", article.MessageID)
+			// DateSent is also zero or invalid, try Date-Received header as fallback
+			dateReceivedStr := extractDateReceivedHeader(article.HeadersJSON)
+			if dateReceivedStr != "" {
+				parsedTime := parseDateReceivedHeader(dateReceivedStr)
+				if !parsedTime.IsZero() && parsedTime.Year() >= 1979 {
+					dateHeader = parsedTime.UTC().Format(time.RFC1123Z)
+					if VerboseHeaders {
+						log.Printf("Using Date-Received '%s' (parsed as '%s') when DateString is empty and DateSent is invalid (year %d) for article %s", dateReceivedStr, dateHeader, article.DateSent.Year(), article.MessageID)
+					}
+				} else {
+					return nil, fmt.Errorf("article missing Date header (DateString empty, DateSent invalid year %d, and invalid Date-Received '%s') msgId='%s'", article.DateSent.Year(), dateReceivedStr, article.MessageID)
+				}
+			} else {
+				return nil, fmt.Errorf("article missing Date header (DateString empty, DateSent invalid year %d, and no Date-Received header) msgId='%s'", article.DateSent.Year(), article.MessageID)
+			}
 		}
 	}
 	headers = append(headers, "Message-ID: "+article.MessageID)
