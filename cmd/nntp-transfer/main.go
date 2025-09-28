@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -60,8 +61,8 @@ func showUsageExamples() {
 	fmt.Println("  ./nntp-transfer -host news.server.local -group '$all' -file-exclude exclude.txt")
 	fmt.Println()
 	fmt.Println("Force Include Only Mode:")
-	fmt.Println("  ./nntp-transfer -host news.server.local -file-include include.txt -force-include-only")
-	fmt.Println("  # Ignores -group pattern, transfers only newsgroups matching include file patterns")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.* -file-include include.txt -force-include-only")
+	fmt.Println("  # Applies -group pattern first, then only transfers newsgroups that also match include file patterns")
 	fmt.Println()
 
 	fmt.Println("Show ALL command line flags:")
@@ -72,6 +73,7 @@ func showUsageExamples() {
 var appVersion = "-unset-"
 
 func main() {
+	common.VerboseHeaders = true
 	config.AppVersion = appVersion
 	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("Starting go-pugleaf NNTP Transfer Tool (version %s)", config.AppVersion)
@@ -600,8 +602,37 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 		if len(includePatterns) == 0 {
 			return nil, fmt.Errorf("force-include-only flag requires include file to be specified")
 		}
-		log.Printf("Force-include-only mode: filtering newsgroups using only include patterns")
-		for _, ng := range allNewsgroups {
+		log.Printf("Force-include-only mode: filtering newsgroups using group pattern '%s' and include patterns", groupPattern)
+		
+		// First filter by group pattern, then by include patterns
+		var groupFiltered []*models.Newsgroup
+		
+		// Handle $all pattern
+		if groupPattern == "$all" {
+			groupFiltered = allNewsgroups
+		} else {
+			// Handle wildcard patterns
+			suffixWildcard := strings.HasSuffix(groupPattern, "*")
+			if suffixWildcard {
+				wildcardPrefix := strings.TrimSuffix(groupPattern, "*")
+				for _, ng := range allNewsgroups {
+					if strings.HasPrefix(ng.Name, wildcardPrefix) {
+						groupFiltered = append(groupFiltered, ng)
+					}
+				}
+			} else {
+				// Exact match
+				for _, ng := range allNewsgroups {
+					if ng.Name == groupPattern {
+						groupFiltered = append(groupFiltered, ng)
+						break
+					}
+				}
+			}
+		}
+		
+		// Now apply include patterns to group-filtered newsgroups
+		for _, ng := range groupFiltered {
 			if matchesAnyPattern(ng.Name, includePatterns) {
 				newsgroups = append(newsgroups, ng)
 			}
@@ -772,9 +803,7 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 			if err != nil {
 				log.Printf("Error transferring newsgroup %s: %v", newsgroup.Name, err)
 			} else {
-				if VERBOSE {
-					log.Printf("DONE runTransfer Newsgroup '%s' | transferred %d articles. checked %d. took %v", newsgroup.Name, transferred, checked, time.Since(start))
-				}
+				log.Printf("DONE runTransfer Newsgroup '%s' | transferred %d articles. checked %d. took %v", newsgroup.Name, transferred, checked, time.Since(start))
 			}
 		}(newsgroup, &wg)
 	}
@@ -866,7 +895,9 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			//log.Printf("No more articles in newsgroup %s (offset %d)", newsgroup.Name, offset)
 			break
 		}
-		log.Printf("Newsgroup: '%s' | Loaded %d articles from database (offset %d)", newsgroup.Name, len(articles), offset)
+		if VERBOSE {
+			log.Printf("Newsgroup: '%s' | Loaded %d articles from database (offset %d)", newsgroup.Name, len(articles), offset)
+		}
 		isleep := time.Second
 		// Process articles in network batches
 		for i := 0; i < len(articles); i += batchCheck {
@@ -896,7 +927,9 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 				}
 
 				if conn.ModeReader {
-					log.Printf("got connection in reader mode, closing and getting a new one")
+					if VERBOSE {
+						log.Printf("got connection in reader mode, closing and getting a new one")
+					}
 					conn.ForceClose = true
 					pool.Put(conn)
 					continue forever
@@ -991,11 +1024,42 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 
 		messageIds := make([]*string, len(articles))
 		for i, article := range articles {
+			// Defensive copy and validation of message ID to prevent buffer corruption
+
+			if strings.Contains(article.MessageID, "?") {
+				log.Printf("ERROR: Invalid message ID contains '?' character: '%s' - skipping article", article.MessageID)
+				messageIds[i] = nil
+				os.Exit(1)
+				continue
+			}
+			if len(article.MessageID) > 128 { // Reasonable message ID length limit
+				log.Printf("WARN: Message ID too long (%d chars): '%s'", len(article.MessageID), article.MessageID)
+				//msgID = msgID[:1000]
+			}
 			messageIds[i] = &article.MessageID
 		}
 
+		// Remove nil entries (from skipped articles) and update articleMap to use valid articles only
+		validMessageIds := make([]*string, 0, len(messageIds))
+		validArticles := make([]*models.Article, 0, len(articles))
+		validArticleMap := make(map[string]*models.Article)
+		for i, msgID := range messageIds {
+			if msgID != nil {
+				validMessageIds = append(validMessageIds, msgID)
+				validArticles = append(validArticles, articles[i])
+				validArticleMap[*msgID] = articles[i]
+			}
+		}
+
+		if len(validMessageIds) == 0 {
+			log.Printf("WARN: No valid message IDs found in batch, skipping")
+			return transferred, checked, successRate, nil
+		}
+
+		log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d valid articles (filtered from %d)", newsgroup, len(validMessageIds), len(articles))
+
 		// Send CHECK commands for all message IDs
-		checkResponses, err := conn.CheckMultiple(messageIds)
+		checkResponses, err := conn.CheckMultiple(validMessageIds)
 		if err != nil {
 			ttMode.connErrors++
 			conn.ForceClose = true
@@ -1020,21 +1084,28 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 			if !ttMode.useCheckMode {
 				ttMode.useCheckMode = true
 				ttMode.takeThisSuccessCount = 0
-				ttMode.takeThisTotalCount = uint64(len(messageIds))
+				ttMode.takeThisTotalCount = uint64(len(validMessageIds))
 			}
 			return transferred, checked, successRate, nil
 		}
-		if ttMode.useCheckMode && len(wantedIds) == len(messageIds) {
+		if ttMode.useCheckMode && len(wantedIds) == len(validMessageIds) {
 			// use TAKETHIS mode if all articles are wanted
 			ttMode.useCheckMode = false
 			ttMode.takeThisSuccessCount = 0
 			ttMode.takeThisTotalCount = 0
 		}
-		log.Printf("Newsgroup: '%s' | Server wants: %d/%d articles in batch", newsgroup, len(wantedIds), len(messageIds))
+		if VERBOSE {
+			log.Printf("Newsgroup: '%s' | Server wants: %d/%d articles in batch", newsgroup, len(wantedIds), len(validMessageIds))
+		}
 
 		// Send TAKETHIS for wanted articles
 		for _, msgId := range wantedIds {
-			count, err := sendArticleViaTakeThis(conn, articleMap[*msgId], ttMode, newsgroup)
+			article, exists := validArticleMap[*msgId]
+			if !exists {
+				log.Printf("WARN: Article not found in validArticleMap for msgId: %s", *msgId)
+				continue
+			}
+			count, err := sendArticleViaTakeThis(conn, article, ttMode, newsgroup)
 			if conn.ForceClose {
 				return transferred, checked, successRate, fmt.Errorf("Newsgroup: '%s' | connection marked for close, aborting batch. err='%v'", newsgroup, err)
 			}
@@ -1048,7 +1119,30 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 		// TAKETHIS mode: send articles directly and track success rate
 		//log.Printf("Newsgroup: '%s' | TAKETHIS: %d articles (success rate: %.1f%%)", newsgroup, len(articles), successRate)
 
-		transferred, err := sendArticlesBatchViaTakeThis(conn, articles, ttMode, newsgroup)
+		// Validate articles before sending in TAKETHIS mode
+		validTakeThisArticles := make([]*models.Article, 0, len(articles))
+		for _, article := range articles {
+			if strings.Contains(article.MessageID, "?") {
+				log.Printf("ERROR: Invalid message ID contains '?' character in TAKETHIS mode: '%s' - skipping", article.MessageID)
+				os.Exit(1)
+				continue
+			}
+			if len(article.MessageID) > 128 {
+				log.Printf("WARN: Message ID too long in TAKETHIS mode (%d chars): '%.100s...'", len(article.MessageID), article.MessageID)
+			}
+			validTakeThisArticles = append(validTakeThisArticles, article)
+		}
+
+		if len(validTakeThisArticles) == 0 {
+			log.Printf("WARN: No valid articles for TAKETHIS mode, skipping batch")
+			return transferred, checked, successRate, nil
+		}
+
+		if len(validTakeThisArticles) != len(articles) {
+			log.Printf("Newsgroup: '%s' | Filtered articles for TAKETHIS: %d valid from %d total", newsgroup, len(validTakeThisArticles), len(articles))
+		}
+
+		transferred, err := sendArticlesBatchViaTakeThis(conn, validTakeThisArticles, ttMode, newsgroup)
 		if err != nil {
 			return transferred, checked, successRate, fmt.Errorf("failed to send TAKETHIS batch: %v", err)
 		}
@@ -1056,7 +1150,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 			if !ttMode.useCheckMode {
 				ttMode.useCheckMode = true
 				ttMode.takeThisSuccessCount = 0
-				ttMode.takeThisTotalCount = uint64(len(articles))
+				ttMode.takeThisTotalCount = uint64(len(validTakeThisArticles))
 			}
 		}
 		return transferred, checked, successRate, nil
@@ -1129,8 +1223,9 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			return transferred, fmt.Errorf("failed to transfer article '%s': response=%d", article.MessageID, takeThisResponseCode)
 		}
 	}
-
-	log.Printf("Newsgroup: '%s' | Batch transferred: %d/%d articles", newsgroup, transferred, len(articles))
+	if VERBOSE {
+		log.Printf("Newsgroup: '%s' | Batch transferred: %d/%d articles", newsgroup, transferred, len(articles))
+	}
 	return transferred, nil
 }
 

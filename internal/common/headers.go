@@ -11,6 +11,8 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
+var VerboseHeaders bool = false
+
 // IgnoreHeadersMap is a map version of IgnoreHeaders for fast lookup
 var IgnoreHeadersMap = map[string]bool{
 	"message-id": true,
@@ -75,6 +77,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 					log.Printf("Using dateHeader '%s' instead of DateString '%s' for article %s", dateHeader, article.DateString, article.MessageID)
 				}
 			} else {
+				log.Printf("ERROR common.ReconstructHeaders: Non-compliant DateString '%s' and zero DateSent for article %s", article.DateString, article.MessageID)
 				return nil, fmt.Errorf("article has non-compliant DateString and zero DateSent msgId='%s'", article.MessageID)
 			}
 		}
@@ -175,5 +178,3 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 	}
 	return headers, nil
 }
-
-var VerboseHeaders = false
