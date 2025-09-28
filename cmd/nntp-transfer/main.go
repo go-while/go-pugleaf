@@ -900,7 +900,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 					continue forever
 				}
 
-				batchTransferred, berr := processBatch(conn, newsgroup.Name, ttMode, articles[i:end])
+				batchTransferred, successRate, berr := processBatch(conn, newsgroup.Name, ttMode, articles[i:end])
 				if berr != nil {
 					conn.ForceClose = true
 					pool.Put(conn)
@@ -915,7 +915,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 				isleep = time.Second
 				pool.Put(conn)
 				transferred += batchTransferred
-				log.Printf("Newsgroup: '%s' | batch %d-%d processed (offset %d/%d) transferred %d", newsgroup.Name, i+1, end, offset, totalArticles, batchTransferred)
+				log.Printf("Newsgroup: '%s' | Batch (offset %d/%d) %d-%d TX:%d check=%t rate=%.1f%%", newsgroup.Name, offset, totalArticles, i+1, end, batchTransferred, ttMode.useCheckMode, successRate)
 				break forever
 			}
 		}
@@ -950,10 +950,10 @@ var upperLevel float64 = 95.0
 
 // processBatch processes a batch of articles using NNTP streaming protocol (RFC 4644)
 // Uses TAKETHIS primarily, falls back to CHECK when success rate < 95%
-func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode, articles []*models.Article) (uint64, error) {
+func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode, articles []*models.Article) (uint64, float64, error) {
 
 	if len(articles) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	// Calculate success rate to determine whether to use CHECK or TAKETHIS
@@ -980,7 +980,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 
 	if ttMode.useCheckMode {
 		// CHECK mode: verify articles are wanted before sending
-		log.Printf("Newsgroup: '%s' | CHECK: %d articles (success rate: %.1f%%)", newsgroup, len(articles), successRate)
+		//log.Printf("Newsgroup: '%s' | CHECK: %d articles (success rate: %.1f%%)", newsgroup, len(articles), successRate)
 
 		messageIds := make([]*string, len(articles))
 		for i, article := range articles {
@@ -993,7 +993,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 			ttMode.connErrors++
 			conn.ForceClose = true
 			conn.Pool.Put(conn)
-			return transferred, fmt.Errorf("Newsgroup: '%s' | failed to send CHECK command: %v", newsgroup, err)
+			return transferred, successRate, fmt.Errorf("Newsgroup: '%s' | failed to send CHECK command: %v", newsgroup, err)
 		}
 
 		// Find wanted articles
@@ -1014,7 +1014,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 				ttMode.takeThisSuccessCount = 0
 				ttMode.takeThisTotalCount = uint64(len(messageIds))
 			}
-			return transferred, nil
+			return transferred, successRate, nil
 		}
 		if ttMode.useCheckMode && len(wantedIds) == len(messageIds) {
 			// use TAKETHIS mode if all articles are wanted
@@ -1028,7 +1028,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 		for _, msgId := range wantedIds {
 			count, err := sendArticleViaTakeThis(conn, articleMap[*msgId], ttMode, newsgroup)
 			if conn.ForceClose {
-				return transferred, fmt.Errorf("Newsgroup: '%s' | connection marked for close, aborting batch. err='%v'", newsgroup, err)
+				return transferred, successRate, fmt.Errorf("Newsgroup: '%s' | connection marked for close, aborting batch. err='%v'", newsgroup, err)
 			}
 			if err != nil {
 				log.Printf("Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroup, *msgId, err)
@@ -1038,11 +1038,11 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 		}
 	} else {
 		// TAKETHIS mode: send articles directly and track success rate
-		log.Printf("Newsgroup: '%s' | TAKETHIS: %d articles (success rate: %.1f%%)", newsgroup, len(articles), successRate)
+		//log.Printf("Newsgroup: '%s' | TAKETHIS: %d articles (success rate: %.1f%%)", newsgroup, len(articles), successRate)
 
 		transferred, err := sendArticlesBatchViaTakeThis(conn, articles, ttMode, newsgroup)
 		if err != nil {
-			return transferred, fmt.Errorf("failed to send TAKETHIS batch: %v", err)
+			return transferred, successRate, fmt.Errorf("failed to send TAKETHIS batch: %v", err)
 		}
 		if transferred == 0 {
 			if !ttMode.useCheckMode {
@@ -1051,10 +1051,10 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 				ttMode.takeThisTotalCount = uint64(len(articles))
 			}
 		}
-		return transferred, nil
+		return transferred, successRate, nil
 	}
 
-	return transferred, nil
+	return transferred, successRate, nil
 }
 
 // sendArticlesBatchViaTakeThis sends multiple articles via TAKETHIS in streaming mode
