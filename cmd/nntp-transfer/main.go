@@ -763,7 +763,7 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 			}
 			start := time.Now()
 			log.Printf("Starting transfer for newsgroup: %s", newsgroup.Name)
-			transferred, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, shutdownChan)
+			transferred, checked, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, shutdownChan)
 
 			transferMutex.Lock()
 			totalTransferred += transferred
@@ -772,7 +772,9 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 			if err != nil {
 				log.Printf("Error transferring newsgroup %s: %v", newsgroup.Name, err)
 			} else {
-				log.Printf("Completed transfer for newsgroup %s: transferred %d articles. took %v", newsgroup.Name, transferred, time.Since(start))
+				if VERBOSE {
+					log.Printf("DONE runTransfer Newsgroup '%s' | transferred %d articles. checked %d. took %v", newsgroup.Name, transferred, checked, time.Since(start))
+				}
 			}
 		}(newsgroup, &wg)
 	}
@@ -798,12 +800,12 @@ type takeThisMode struct {
 }
 
 // transferNewsgroup transfers articles from a single newsgroup
-func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}) (uint64, error) {
+func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}) (transferred uint64, checked uint64, err error) {
 
 	// Get group database
 	groupDBs, err := db.GetGroupDBs(newsgroup.Name)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
+		return 0, 0, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
 	}
 	defer func() {
 		if ferr := db.ForceCloseGroupDBs(groupDBs); ferr != nil {
@@ -814,7 +816,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	// Get total article count first with date filtering
 	totalArticles, err := getArticleCountWithDateFilter(groupDBs, startTime, endTime)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get article count for newsgroup '%s': %v", newsgroup.Name, err)
+		return 0, 0, fmt.Errorf("failed to get article count for newsgroup '%s': %v", newsgroup.Name, err)
 	}
 
 	if totalArticles == 0 {
@@ -823,7 +825,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		} else {
 			log.Printf("No articles found in newsgroup: %s", newsgroup.Name)
 		}
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	if dryRun {
@@ -832,7 +834,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		} else {
 			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s", totalArticles, newsgroup.Name)
 		}
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	if startTime != nil || endTime != nil {
@@ -842,7 +844,6 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	}
 	//time.Sleep(3 * time.Second) // debug sleep
 	var ioffset int64
-	var transferred uint64
 	remainingArticles := totalArticles
 	// Process articles in database batches (much larger than network batches)
 	ttMode := &takeThisMode{
@@ -851,7 +852,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	for offset := ioffset; offset < totalArticles; offset += dbBatchSize {
 		if proc.WantShutdown(shutdownChan) {
 			log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
-			return transferred, nil
+			return transferred, checked, nil
 		}
 
 		// Load batch from database with date filtering
@@ -871,7 +872,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		for i := 0; i < len(articles); i += batchCheck {
 			if proc.WantShutdown(shutdownChan) {
 				log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
-				return transferred, nil
+				return transferred, checked, nil
 			}
 			if !ttMode.useCheckMode && ttMode.takeThisTotalCount >= 100 {
 				ttMode.takeThisSuccessCount = 0
@@ -886,12 +887,12 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			for {
 				if proc.WantShutdown(shutdownChan) {
 					log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
-					return transferred, nil
+					return transferred, checked, nil
 				}
 				// Get connection from pool
 				conn, err := pool.Get(nntp.MODE_STREAM_MV)
 				if err != nil {
-					return transferred, fmt.Errorf("failed to get connection from pool: %v", err)
+					return transferred, checked, fmt.Errorf("failed to get connection from pool: %v", err)
 				}
 
 				if conn.ModeReader {
@@ -901,7 +902,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 					continue forever
 				}
 
-				batchTransferred, successRate, berr := processBatch(conn, newsgroup.Name, ttMode, articles[i:end])
+				batchTransferred, batchChecked, TTsuccessRate, berr := processBatch(conn, newsgroup.Name, ttMode, articles[i:end])
 				if berr != nil {
 					conn.ForceClose = true
 					pool.Put(conn)
@@ -916,8 +917,10 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 				isleep = time.Second
 				pool.Put(conn)
 				transferred += batchTransferred
+				checked += batchChecked
+
 				if VERBOSE {
-					log.Printf("Newsgroup: '%s' | Batch (offset %d/%d) %d-%d TX:%d check=%t rate=%.1f%%", newsgroup.Name, offset, totalArticles, i+1, end, batchTransferred, ttMode.useCheckMode, successRate)
+					log.Printf("Newsgroup: '%s' | Batch (offset %d/%d) %d-%d TX:%d check=%t ttRate=%.1f%% checked=%d", newsgroup.Name, offset, totalArticles, i+1, end, batchTransferred, ttMode.useCheckMode, TTsuccessRate, batchChecked)
 				}
 				break forever
 			}
@@ -933,11 +936,11 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			batchSuccessRate = float64(transferred) / float64(len(articles)) * 100.0
 		}
 		if VERBOSE {
-			log.Printf("Newsgroup: '%s' | done batch (offset %d/%d), total: %d, remaining: %d, unwanted: %d, rejected: %d (check=%t) rate=%.1f%%", newsgroup.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.useCheckMode, batchSuccessRate)
+			log.Printf("Newsgroup: '%s' | Done (offset %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t) ttRate=%.1f%%", newsgroup.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.useCheckMode, batchSuccessRate)
 		}
 		articles = nil // free memory
 	} // end for offset range totalArticles
-	result := fmt.Sprintf("END Newsgroup: '%s' | total transferred: %d articles / total articles: %d (unwanted: %d | rejected: %d) TX_Errors: %d, connErrors: %d", newsgroup.Name, transferred, totalArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.TX_Errors, ttMode.connErrors)
+	result := fmt.Sprintf("END Newsgroup: '%s' | total transferred: %d articles / total articles: %d (unwanted: %d | rejected: %d | checked: %d) TX_Errors: %d, connErrors: %d,", newsgroup.Name, transferred, totalArticles, ttMode.Unwanted, ttMode.Rejected, checked, ttMode.TX_Errors, ttMode.connErrors)
 	log.Print(result)
 	resultsMutex.Lock()
 	results = append(results, result)
@@ -946,7 +949,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	}
 	delete(rejected, newsgroup.Name) // free memory
 	resultsMutex.Unlock()
-	return transferred, nil
+	return transferred, checked, nil
 } // end func transferNewsgroup
 
 var results []string
@@ -957,14 +960,13 @@ var upperLevel float64 = 95.0
 
 // processBatch processes a batch of articles using NNTP streaming protocol (RFC 4644)
 // Uses TAKETHIS primarily, falls back to CHECK when success rate < 95%
-func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode, articles []*models.Article) (uint64, float64, error) {
+func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode, articles []*models.Article) (transferred uint64, checked uint64, successRate float64, err error) {
 
 	if len(articles) == 0 {
-		return 0, 0, nil
+		return 0, 0, 0, nil
 	}
 
 	// Calculate success rate to determine whether to use CHECK or TAKETHIS
-	var successRate float64 = 0.0
 	if ttMode.takeThisTotalCount > 0 {
 		successRate = float64(ttMode.takeThisSuccessCount) / float64(ttMode.takeThisTotalCount) * 100.0
 	}
@@ -983,8 +985,6 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 		articleMap[article.MessageID] = article
 	}
 
-	var transferred uint64
-
 	if ttMode.useCheckMode {
 		// CHECK mode: verify articles are wanted before sending
 		//log.Printf("Newsgroup: '%s' | CHECK: %d articles (success rate: %.1f%%)", newsgroup, len(articles), successRate)
@@ -1000,12 +1000,13 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 			ttMode.connErrors++
 			conn.ForceClose = true
 			conn.Pool.Put(conn)
-			return transferred, successRate, fmt.Errorf("Newsgroup: '%s' | failed to send CHECK command: %v", newsgroup, err)
+			return transferred, checked, successRate, fmt.Errorf("Newsgroup: '%s' | failed to send CHECK command: %v", newsgroup, err)
 		}
 
 		// Find wanted articles
 		wantedIds := make([]*string, 0)
 		for _, response := range checkResponses {
+			checked++
 			if response.Wanted {
 				wantedIds = append(wantedIds, response.MessageID)
 			} else {
@@ -1021,7 +1022,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 				ttMode.takeThisSuccessCount = 0
 				ttMode.takeThisTotalCount = uint64(len(messageIds))
 			}
-			return transferred, successRate, nil
+			return transferred, checked, successRate, nil
 		}
 		if ttMode.useCheckMode && len(wantedIds) == len(messageIds) {
 			// use TAKETHIS mode if all articles are wanted
@@ -1035,7 +1036,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 		for _, msgId := range wantedIds {
 			count, err := sendArticleViaTakeThis(conn, articleMap[*msgId], ttMode, newsgroup)
 			if conn.ForceClose {
-				return transferred, successRate, fmt.Errorf("Newsgroup: '%s' | connection marked for close, aborting batch. err='%v'", newsgroup, err)
+				return transferred, checked, successRate, fmt.Errorf("Newsgroup: '%s' | connection marked for close, aborting batch. err='%v'", newsgroup, err)
 			}
 			if err != nil {
 				log.Printf("Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroup, *msgId, err)
@@ -1049,7 +1050,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 
 		transferred, err := sendArticlesBatchViaTakeThis(conn, articles, ttMode, newsgroup)
 		if err != nil {
-			return transferred, successRate, fmt.Errorf("failed to send TAKETHIS batch: %v", err)
+			return transferred, checked, successRate, fmt.Errorf("failed to send TAKETHIS batch: %v", err)
 		}
 		if transferred == 0 {
 			if !ttMode.useCheckMode {
@@ -1058,10 +1059,10 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 				ttMode.takeThisTotalCount = uint64(len(articles))
 			}
 		}
-		return transferred, successRate, nil
+		return transferred, checked, successRate, nil
 	}
 
-	return transferred, successRate, nil
+	return transferred, checked, successRate, nil
 }
 
 // sendArticlesBatchViaTakeThis sends multiple articles via TAKETHIS in streaming mode
