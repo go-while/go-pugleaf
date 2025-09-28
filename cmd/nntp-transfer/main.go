@@ -860,7 +860,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		}
 
 		if len(articles) == 0 {
-			log.Printf("No more articles in newsgroup %s (offset %d)", newsgroup.Name, offset)
+			//log.Printf("No more articles in newsgroup %s (offset %d)", newsgroup.Name, offset)
 			break
 		}
 		log.Printf("Newsgroup: '%s' | Loaded %d articles from database (offset %d)", newsgroup.Name, len(articles), offset)
@@ -933,6 +933,9 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	log.Print(result)
 	resultsMutex.Lock()
 	results = append(results, result)
+	for _, msgId := range rejected[newsgroup.Name] {
+		log.Printf("Newsgroup '%s': rejected '%s'", newsgroup.Name, msgId)
+	}
 	resultsMutex.Unlock()
 	return transferred, nil
 }
