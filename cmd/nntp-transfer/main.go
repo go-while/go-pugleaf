@@ -1099,7 +1099,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			transferred++
 		case 439:
 			ttMode.Rejected++
-			log.Printf("ERROR Newsgroup: '%s' | Rejected article '%s': response=%d (i=%d/%d)", newsgroup, article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
+			log.Printf("Newsgroup: '%s' | Rejected article '%s': response=%d (i=%d/%d)", newsgroup, article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
 			resultsMutex.Lock()
 			rejected[newsgroup] = append(rejected[newsgroup], article.MessageID)
 			resultsMutex.Unlock()
