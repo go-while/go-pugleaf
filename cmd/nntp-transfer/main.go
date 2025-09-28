@@ -925,12 +925,15 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			articles[i] = nil
 		}
 		remainingArticles -= int64(len(articles))
-		articles = nil
-
 		// todo verbose flag
-		log.Printf("Newsgroup: '%s' | done (offset %d/%d), total transferred: %d, remainingArticles %d, unwanted %d, rejected %d", newsgroup.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected)
+		var batchSuccessRate float64
+		if transferred > 0 {
+			batchSuccessRate = float64(transferred) / float64(len(articles)) * 100.0
+		}
+		log.Printf("Newsgroup: '%s' | done batch (offset %d/%d), total: %d, remaining: %d, unwanted: %d, rejected: %d (check=%t) rate=%.1f%%", newsgroup.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.useCheckMode, batchSuccessRate)
+		articles = nil
 	}
-	result := fmt.Sprintf("Newsgroup: '%s' | total transferred: %d articles / total articles: %d (unwanted=%d | rejected=%d) TX_Errors=%d connErrors=%d", newsgroup.Name, transferred, totalArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.TX_Errors, ttMode.connErrors)
+	result := fmt.Sprintf("END Newsgroup: '%s' | total transferred: %d articles / total articles: %d (unwanted: %d | rejected: %d) TX_Errors: %d, connErrors: %d", newsgroup.Name, transferred, totalArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.TX_Errors, ttMode.connErrors)
 	log.Print(result)
 	resultsMutex.Lock()
 	results = append(results, result)
@@ -940,7 +943,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	delete(rejected, newsgroup.Name) // free memory
 	resultsMutex.Unlock()
 	return transferred, nil
-}
+} // end func transferNewsgroup
 
 var results []string
 var rejected = make(map[string][]string)
