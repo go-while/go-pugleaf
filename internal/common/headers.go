@@ -54,7 +54,7 @@ func extractDateReceivedHeader(headersJSON string) string {
 	headerLines := strings.Split(headersJSON, "\n")
 	for _, line := range headerLines {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(strings.ToLower(line), "Date-Received:") {
+		if strings.HasPrefix(strings.ToLower(line), "date-received:") {
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
 				return strings.TrimSpace(parts[1])
@@ -135,6 +135,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 					}
 				} else {
 					log.Printf("ERROR common.ReconstructHeaders: Non-compliant DateString '%s', invalid DateSent (year %d), and no Date-Received header for article %s", article.DateString, article.DateSent.Year(), article.MessageID)
+					log.Printf("DEBUG article %s HeadersJSON: %s", article.MessageID, article.HeadersJSON)
 					return nil, fmt.Errorf("article has non-compliant DateString, invalid DateSent (year %d), and no Date-Received header msgId='%s'", article.DateSent.Year(), article.MessageID)
 				}
 			}

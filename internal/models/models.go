@@ -127,6 +127,7 @@ type UserPermission struct {
 type Article struct {
 	GetDataFunc func(what string, group string) string `json:"-" db:"-"`
 	Mux         sync.RWMutex                           `json:"-" db:"-"`
+	DBArtNum    int64                                  `json:"dbarticle_num" db:"article_num"`
 	MessageID   string                                 `json:"message_id" db:"message_id"`
 	Subject     string                                 `json:"subject" db:"subject"`
 	FromHeader  string                                 `json:"from_header" db:"from_header"`

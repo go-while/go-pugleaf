@@ -306,12 +306,41 @@ func main() {
 	// Set up shutdown handling
 	shutdownChan := make(chan struct{})
 	transferDoneChan := make(chan error, 1)
-
+	// special debug mode to find articles with bad date header... before usenet existed...
+	debugCapture := *startDate == "1969-01-01" && *endDate == "1979-01-01"
+	if debugCapture {
+		log.Printf("Debug capture mode enabled - capturing articles without sending")
+		*dryRun = true
+		time.Sleep(5 * time.Second)
+	}
 	// Start transfer process
-	go func() {
-		transferDoneChan <- runTransfer(db, proc, pool, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, shutdownChan)
-	}()
-
+	var wgP sync.WaitGroup
+	wgP.Add(2)
+	go func(wgP *sync.WaitGroup) {
+		defer wgP.Done()
+		resultChan := make(chan error, 1)
+		resultChan <- runTransfer(db, proc, pool, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, shutdownChan, debugCapture, wgP)
+		result := <-resultChan
+		if !debugCapture {
+			transferDoneChan <- result
+			return
+		}
+		debugMutex.Lock()
+		defer debugMutex.Unlock()
+		// process debugCapture
+		for groupName, articles := range debugArticles {
+			log.Printf("Debug capture - Newsgroup: %s, Articles: %d", groupName, len(articles))
+			for _, article := range articles {
+				fmt.Printf("\n %s: #%d : '%s' | orgDate='%s' parsed='%s'", groupName, article.DBArtNum, article.MessageID, article.DateSent, article.DateString)
+				fmt.Printf("\n Header dump:\n%s", article.HeadersJSON)
+				fmt.Printf("\n### HEADER EOF body=%d ###", len(article.BodyText))
+				fmt.Printf("\n%s", article.BodyText)
+				fmt.Printf("\n### BODY EOF '%s' ###\n", article.MessageID)
+			}
+		}
+		transferDoneChan <- result
+	}(&wgP)
+	wgP.Wait()
 	// Wait for either shutdown signal or transfer completion
 	select {
 	case <-sigChan:
@@ -460,11 +489,9 @@ func getArticlesBatchWithDateFilter(groupDBs *database.GroupDBs, offset int64, s
 	var out []*models.Article
 	for rows.Next() {
 		var a models.Article
-		var artnum int64
-		if err := rows.Scan(&artnum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
+		if err := rows.Scan(&a.DBArtNum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
 			return nil, err
 		}
-		a.ArticleNums = make(map[*string]int64)
 		out = append(out, &a)
 	}
 
@@ -772,8 +799,8 @@ func matchesAnyPattern(newsgroup string, patterns []string) bool {
 }
 
 // runTransfer performs the actual article transfer process
-func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}) error {
-
+func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}, debugCapture bool, wgP *sync.WaitGroup) error {
+	defer wgP.Done()
 	var totalTransferred uint64
 	var transferMutex sync.Mutex
 	maxThreadsChan := make(chan struct{}, maxThreads)
@@ -801,7 +828,7 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 			if VERBOSE {
 				log.Printf("Starting transfer for newsgroup: %s", newsgroup.Name)
 			}
-			transferred, checked, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, shutdownChan)
+			transferred, checked, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, shutdownChan, debugCapture)
 
 			transferMutex.Lock()
 			totalTransferred += transferred
@@ -810,7 +837,9 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 			if err != nil {
 				log.Printf("Error transferring newsgroup %s: %v", newsgroup.Name, err)
 			} else {
-				log.Printf("DONE runTransfer Newsgroup '%s' | transferred %d articles. checked %d. took %v", newsgroup.Name, transferred, checked, time.Since(start))
+				if startTime == nil && endTime == nil {
+					log.Printf("DONE runTransfer Newsgroup '%s' | transferred %d articles. checked %d. took %v", newsgroup.Name, transferred, checked, time.Since(start))
+				}
 			}
 		}(newsgroup, &wg)
 	}
@@ -835,8 +864,11 @@ type takeThisMode struct {
 	useCheckMode         bool // Start with TAKETHIS mode (false)
 }
 
+var debugArticles = make(map[string][]*models.Article)
+var debugMutex sync.Mutex
+
 // transferNewsgroup transfers articles from a single newsgroup
-func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}) (transferred uint64, checked uint64, err error) {
+func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}, debugCapture bool) (transferred uint64, checked uint64, err error) {
 
 	// Get group database
 	groupDBs, err := db.GetGroupDBs(newsgroup.Name)
@@ -872,13 +904,17 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		} else {
 			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s", totalArticles, newsgroup.Name)
 		}
-		return 0, 0, nil
+		if !debugCapture {
+			return 0, 0, nil
+		}
 	}
 
-	if startTime != nil || endTime != nil {
-		log.Printf("Found %d articles in newsgroup %s (within specified date range) - processing in batches", totalArticles, newsgroup.Name)
-	} else {
-		log.Printf("Found %d articles in newsgroup %s - processing in batches", totalArticles, newsgroup.Name)
+	if !dryRun && !debugCapture {
+		if startTime != nil || endTime != nil {
+			log.Printf("Found %d articles in newsgroup %s (within specified date range) - processing in batches", totalArticles, newsgroup.Name)
+		} else {
+			log.Printf("Found %d articles in newsgroup %s - processing in batches", totalArticles, newsgroup.Name)
+		}
 	}
 	//time.Sleep(3 * time.Second) // debug sleep
 	var ioffset int64
@@ -903,6 +939,12 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		if len(articles) == 0 {
 			//log.Printf("No more articles in newsgroup %s (offset %d)", newsgroup.Name, offset)
 			break
+		}
+		if dryRun && debugCapture {
+			debugMutex.Lock()
+			debugArticles[newsgroup.Name] = append(debugArticles[newsgroup.Name], articles...)
+			debugMutex.Unlock()
+			return 0, 0, nil
 		}
 		if VERBOSE {
 			log.Printf("Newsgroup: '%s' | Loaded %d articles from database (offset %d)", newsgroup.Name, len(articles), offset)
