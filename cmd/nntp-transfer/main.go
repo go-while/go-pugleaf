@@ -1026,8 +1026,8 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 		for i, article := range articles {
 			// Defensive copy and validation of message ID to prevent buffer corruption
 
-			if strings.Contains(article.MessageID, "?") {
-				log.Printf("ERROR: Invalid message ID contains '?' character: '%s' - skipping article", article.MessageID)
+			if strings.Contains(article.MessageID, ">?<") {
+				log.Printf("ERROR: Invalid message ID contains '>?<' character: '%s' - skipping article", article.MessageID)
 				messageIds[i] = nil
 				os.Exit(1)
 				continue
@@ -1055,8 +1055,9 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 			log.Printf("WARN: No valid message IDs found in batch, skipping")
 			return transferred, checked, successRate, nil
 		}
-
-		log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d valid articles (filtered from %d)", newsgroup, len(validMessageIds), len(articles))
+		if VERBOSE {
+			log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d valid articles (filtered from %d)", newsgroup, len(validMessageIds), len(articles))
+		}
 
 		// Send CHECK commands for all message IDs
 		checkResponses, err := conn.CheckMultiple(validMessageIds)
@@ -1122,8 +1123,8 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 		// Validate articles before sending in TAKETHIS mode
 		validTakeThisArticles := make([]*models.Article, 0, len(articles))
 		for _, article := range articles {
-			if strings.Contains(article.MessageID, "?") {
-				log.Printf("ERROR: Invalid message ID contains '?' character in TAKETHIS mode: '%s' - skipping", article.MessageID)
+			if strings.Contains(article.MessageID, ">?<") {
+				log.Printf("ERROR: Invalid message ID contains '>?<' character in TAKETHIS mode: '%s' - skipping", article.MessageID)
 				os.Exit(1)
 				continue
 			}
