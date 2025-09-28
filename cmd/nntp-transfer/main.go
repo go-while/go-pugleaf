@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"log"
@@ -47,6 +48,20 @@ func showUsageExamples() {
 	fmt.Println("Dry Run Mode:")
 	fmt.Println("  ./nntp-transfer -host news.server.local -dry-run -group alt.test")
 	fmt.Println()
+	fmt.Println("File-based Filtering:")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.* -file-include include.txt")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.* -file-exclude exclude.txt")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.* -file-include include.txt -file-exclude exclude.txt")
+	fmt.Println("  # File format: one pattern per line, supports wildcards (*), # for comments")
+	fmt.Println()
+	fmt.Println("Transfer All Newsgroups:")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group '$all'")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group '$all' -file-exclude exclude.txt")
+	fmt.Println()
+	fmt.Println("Force Include Only Mode:")
+	fmt.Println("  ./nntp-transfer -host news.server.local -file-include include.txt -force-include-only")
+	fmt.Println("  # Ignores -group pattern, transfers only newsgroups matching include file patterns")
+	fmt.Println()
 
 	fmt.Println("Show ALL command line flags:")
 	fmt.Println("  ./nntp-transfer -h")
@@ -63,14 +78,14 @@ func main() {
 	// Command line flags for NNTP transfer configuration
 	var (
 		// Required flags
-		transferGroup = flag.String("group", "", "Newsgroup to transfer (supports wildcards like alt.* or news.admin.*)")
+		transferGroup = flag.String("group", "", "Newsgroup to transfer (supports wildcards like alt.* or news.admin.*, or use $all for all newsgroups)")
 
 		// Connection configuration
 		host     = flag.String("host", "", "Target NNTP hostname")
-		port     = flag.Int("port", 563, "Target NNTP port (common: 119 -ssl=false OR 563 -ssl=true)")
+		port     = flag.Int("port", 433, "Target NNTP port (common: 119 -ssl=false OR 563 -ssl=true)")
 		username = flag.String("username", "", "Target NNTP username")
 		password = flag.String("password", "", "Target NNTP password")
-		ssl      = flag.Bool("ssl", true, "Use SSL/TLS connection")
+		ssl      = flag.Bool("ssl", false, "Use SSL/TLS connection")
 		timeout  = flag.Int("timeout", 30, "Connection timeout in seconds")
 
 		// Proxy configuration
@@ -95,6 +110,11 @@ func main() {
 
 		// History configuration
 		useShortHashLen = flag.Int("useshorthashlen", 7, "Short hash length for history storage (2-7, default: 7)")
+
+		// Newsgroup filtering options
+		fileInclude      = flag.String("file-include", "", "File containing newsgroup patterns to include (one per line)")
+		fileExclude      = flag.String("file-exclude", "", "File containing newsgroup patterns to exclude (one per line)")
+		forceIncludeOnly = flag.Bool("force-include-only", false, "When set, only transfer newsgroups that match patterns in include file (ignores -group pattern)")
 	)
 	flag.Parse()
 
@@ -258,7 +278,7 @@ func main() {
 	log.Printf("Created connection pool for target server '%s:%d' with max %d connections", *host, *port, *maxThreads)
 
 	// Get newsgroups to transfer
-	newsgroups, err := getNewsgroupsToTransfer(db, *transferGroup)
+	newsgroups, err := getNewsgroupsToTransfer(db, *transferGroup, *fileInclude, *fileExclude, *forceIncludeOnly)
 	if err != nil {
 		log.Fatalf("Failed to get newsgroups: %v", err)
 	}
@@ -544,9 +564,60 @@ func testConnection(host *string, port *int, username *string, password *string,
 	return nil
 }
 
-// getNewsgroupsToTransfer returns newsgroups matching the specified pattern
-func getNewsgroupsToTransfer(db *database.Database, groupPattern string) ([]*models.Newsgroup, error) {
+// getNewsgroupsToTransfer returns newsgroups matching the specified pattern and file filters
+func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, fileExclude string, forceIncludeOnly bool) ([]*models.Newsgroup, error) {
 	var newsgroups []*models.Newsgroup
+
+	// Load include/exclude patterns from files if specified
+	var includePatterns, excludePatterns []string
+	var err error
+
+	if fileInclude != "" {
+		includePatterns, err = loadPatternsFromFile(fileInclude)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load include patterns from %s: %v", fileInclude, err)
+		}
+		log.Printf("Loaded %d include patterns from %s", len(includePatterns), fileInclude)
+	}
+
+	if fileExclude != "" {
+		excludePatterns, err = loadPatternsFromFile(fileExclude)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load exclude patterns from %s: %v", fileExclude, err)
+		}
+		log.Printf("Loaded %d exclude patterns from %s", len(excludePatterns), fileExclude)
+	}
+
+	// Get all newsgroups from database
+	allNewsgroups, err := db.MainDBGetAllNewsgroups()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get newsgroups from database: %v", err)
+	}
+
+	// Handle force-include-only mode
+	if forceIncludeOnly {
+		if len(includePatterns) == 0 {
+			return nil, fmt.Errorf("force-include-only flag requires include file to be specified")
+		}
+		log.Printf("Force-include-only mode: filtering newsgroups using only include patterns")
+		for _, ng := range allNewsgroups {
+			if matchesAnyPattern(ng.Name, includePatterns) {
+				newsgroups = append(newsgroups, ng)
+			}
+		}
+		return newsgroups, nil
+	}
+
+	// Handle $all pattern (transfer all newsgroups, but still apply file filters)
+	if groupPattern == "$all" {
+		log.Printf("Using $all pattern: transferring all newsgroups with file filters applied")
+		for _, ng := range allNewsgroups {
+			if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns) {
+				newsgroups = append(newsgroups, ng)
+			}
+		}
+		return newsgroups, nil
+	}
 
 	// Handle wildcard patterns
 	suffixWildcard := strings.HasSuffix(groupPattern, "*")
@@ -557,30 +628,111 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern string) ([]*mod
 		log.Printf("Using wildcard newsgroup prefix: '%s'", wildcardPrefix)
 	}
 
-	// Get all newsgroups from database
-	allNewsgroups, err := db.MainDBGetAllNewsgroups()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get newsgroups from database: %v", err)
-	}
-
 	// Filter newsgroups based on pattern
 	if suffixWildcard {
 		for _, ng := range allNewsgroups {
 			if strings.HasPrefix(ng.Name, wildcardPrefix) {
-				newsgroups = append(newsgroups, ng)
+				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns) {
+					newsgroups = append(newsgroups, ng)
+				}
 			}
 		}
 	} else {
 		// Exact match
 		for _, ng := range allNewsgroups {
 			if ng.Name == groupPattern {
-				newsgroups = append(newsgroups, ng)
+				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns) {
+					newsgroups = append(newsgroups, ng)
+				}
 				break
 			}
 		}
 	}
 
 	return newsgroups, nil
+}
+
+// loadPatternsFromFile loads newsgroup patterns from a file (one per line)
+func loadPatternsFromFile(filePath string) ([]string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var patterns []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		// Skip empty lines and comments
+		if line != "" && !strings.HasPrefix(line, "#") {
+			patterns = append(patterns, line)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return patterns, nil
+}
+
+// shouldIncludeNewsgroup determines if a newsgroup should be included based on include/exclude patterns
+func shouldIncludeNewsgroup(newsgroupName string, includePatterns, excludePatterns []string) bool {
+	// If include patterns are specified, newsgroup must match at least one
+	if len(includePatterns) > 0 {
+		included := false
+		for _, pattern := range includePatterns {
+			if matchesPattern(newsgroupName, pattern) {
+				included = true
+				break
+			}
+		}
+		if !included {
+			return false
+		}
+	}
+
+	// If exclude patterns are specified, newsgroup must not match any
+	if len(excludePatterns) > 0 {
+		for _, pattern := range excludePatterns {
+			if matchesPattern(newsgroupName, pattern) {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+// matchesPattern checks if a newsgroup name matches a pattern (supports wildcard *)
+func matchesPattern(newsgroupName, pattern string) bool {
+	if pattern == "*" {
+		return true
+	}
+
+	if strings.HasSuffix(pattern, "*") {
+		prefix := strings.TrimSuffix(pattern, "*")
+		return strings.HasPrefix(newsgroupName, prefix)
+	}
+
+	if strings.HasPrefix(pattern, "*") {
+		suffix := strings.TrimPrefix(pattern, "*")
+		return strings.HasSuffix(newsgroupName, suffix)
+	}
+
+	// Exact match
+	return newsgroupName == pattern
+}
+
+// matchesAnyPattern checks if a newsgroup name matches any of the given patterns
+func matchesAnyPattern(newsgroupName string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if matchesPattern(newsgroupName, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // runTransfer performs the actual article transfer process
@@ -627,14 +779,19 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 
 	// Wait for all transfers to complete
 	wg.Wait()
-
-	log.Printf("Transfer summary: %d articles transferred", totalTransferred)
+	log.Printf("All transfers completed.")
+	for _, result := range results {
+		log.Print(result)
+	}
+	log.Printf("Transfer summary: Total %d articles transferred", totalTransferred)
 	return nil
 }
 
 type takeThisMode struct {
-	takeThisSuccessCount int
-	takeThisTotalCount   int
+	Unwanted             uint64
+	Rejected             uint64
+	takeThisSuccessCount uint64
+	takeThisTotalCount   uint64
 	useCheckMode         bool // Start with TAKETHIS mode (false)
 }
 
@@ -768,13 +925,18 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		articles = nil
 
 		// todo verbose flag
-		log.Printf("Newsgroup %s: done (offset %d/%d), total transferred: %d, remainingArticles %d", newsgroup.Name, offset, totalArticles, transferred, remainingArticles)
+		log.Printf("Newsgroup '%s': done (offset %d/%d), total transferred: %d, remainingArticles %d, unwanted %d, rejected %d", newsgroup.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected)
 	}
-
-	log.Printf("Completed newsgroup %s: total transferred: %d articles / total articles: %d", newsgroup.Name, transferred, totalArticles)
+	result := fmt.Sprintf("Newsgroup '%s': total transferred: %d articles / total articles: %d (unwanted=%d | rejected=%d)", newsgroup.Name, transferred, totalArticles, ttMode.Unwanted, ttMode.Rejected)
+	log.Print(result)
+	resultsMutex.Lock()
+	results = append(results, result)
+	resultsMutex.Unlock()
 	return transferred, nil
 }
 
+var results []string
+var resultsMutex sync.Mutex
 var lowerLevel float64 = 90.0
 var upperLevel float64 = 95.0
 
@@ -829,7 +991,8 @@ func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThis
 			if response.Wanted {
 				wantedIds = append(wantedIds, response.MessageID)
 			} else {
-				log.Printf("Article %s not wanted by server: %d", *response.MessageID, response.Code)
+				//log.Printf("Unwanted Article '%s': response=%d", *response.MessageID, response.Code)
+				ttMode.Unwanted++
 			}
 		}
 
@@ -838,7 +1001,7 @@ func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThis
 			if !ttMode.useCheckMode {
 				ttMode.useCheckMode = true
 				ttMode.takeThisSuccessCount = 0
-				ttMode.takeThisTotalCount = len(messageIds)
+				ttMode.takeThisTotalCount = uint64(len(messageIds))
 			}
 			return transferred, nil
 		}
@@ -871,7 +1034,7 @@ func processBatch(conn *nntp.BackendConn, newsgroupName string, ttMode *takeThis
 			if !ttMode.useCheckMode {
 				ttMode.useCheckMode = true
 				ttMode.takeThisSuccessCount = 0
-				ttMode.takeThisTotalCount = len(articles)
+				ttMode.takeThisTotalCount = uint64(len(articles))
 			}
 		}
 		return int64(transferred), nil
@@ -905,7 +1068,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		validArticles = append(validArticles, article)
 	}
 
-	log.Printf("Sent %d TAKETHIS commands, reading responses...", len(commandIDs))
+	//log.Printf("Sent %d TAKETHIS commands, reading responses...", len(commandIDs))
 
 	// Phase 2: Read all responses in order
 	transferred := 0
@@ -924,11 +1087,16 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			ttMode.takeThisSuccessCount++
 			transferred++
 		} else {
-			log.Printf("Failed to transfer article %s: %d", article.MessageID, takeThisResponseCode)
+			if takeThisResponseCode == 439 {
+				ttMode.Rejected++
+				//log.Printf("Rejected article '%s': response=%d (i=%d/%d)", article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
+			} else {
+				log.Printf("Failed to transfer article '%s': response=%d (i=%d/%d)", article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
+			}
 		}
 	}
 
-	log.Printf("Batch transfer complete: %d/%d articles transferred successfully", transferred, len(articles))
+	log.Printf("Batch transfer complete: %d/%d articles transferred", transferred, len(articles))
 	return transferred, nil
 }
 
@@ -948,7 +1116,12 @@ func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article, ttM
 		//log.Printf("Successfully transferred article: %s", article.MessageID)
 		return 1, nil
 	} else {
-		log.Printf("Failed to transfer article %s: %d", article.MessageID, takeThisResponseCode)
+		if takeThisResponseCode == 439 {
+			ttMode.Rejected++
+			log.Printf("Rejected article '%s': response=%d", article.MessageID, takeThisResponseCode)
+		} else {
+			log.Printf("Failed to transfer article '%s': response=%d", article.MessageID, takeThisResponseCode)
+		}
 		return 0, nil
 	}
 }
