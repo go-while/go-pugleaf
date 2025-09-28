@@ -122,13 +122,13 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 			// but for now let's skip missing articles
 			continue
 		}
-
+		article.Mux.Lock()
 		// Initialize ArticleNums map if nil and set the article number for this group
 		if article.ArticleNums == nil {
 			article.ArticleNums = make(map[*string]int64)
 		}
 		article.ArticleNums[groupDBs.NewsgroupPtr] = overview.ArticleNum
-
+		article.Mux.Unlock()
 		threadMessages = append(threadMessages, article)
 	}
 
