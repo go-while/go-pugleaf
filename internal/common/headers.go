@@ -12,6 +12,7 @@ import (
 )
 
 var VerboseHeaders bool = false
+var IgnoreGoogleHeaders bool = false
 
 // IgnoreHeadersMap is a map version of IgnoreHeaders for fast lookup
 var IgnoreHeadersMap = map[string]bool{
@@ -229,6 +230,10 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				continue
 			}
 			if IgnoreHeadersMap[strings.ToLower(header)] {
+				ignoreLine = true
+				continue
+			}
+			if IgnoreGoogleHeaders && strings.HasPrefix(strings.ToLower(header), "x-google") {
 				ignoreLine = true
 				continue
 			}

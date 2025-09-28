@@ -111,6 +111,9 @@ func main() {
 		startDate = flag.String("date-beg", "", "Start date for article transfer (format: 2006-01-02 [YYYY-MM-DD] or 2006-01-02T15:04:05)")
 		endDate   = flag.String("date-end", "", "End date for article transfer (format: 2006-01-02 [YYYY-MM-DD] or 2006-01-02T15:04:05)")
 
+		// header filtering
+		ignoreGoogleHeaders = flag.Bool("ignore-google-headers", true, "Ignores specific header: 'X-Google-*'")
+
 		// History configuration
 		useShortHashLen = flag.Int("useshorthashlen", 7, "Short hash length for history storage (2-7, default: 7)")
 
@@ -120,6 +123,7 @@ func main() {
 		forceIncludeOnly = flag.Bool("force-include-only", false, "When set, only transfer newsgroups that match patterns in include file (ignores -group pattern)")
 	)
 	flag.Parse()
+	common.IgnoreGoogleHeaders = *ignoreGoogleHeaders
 
 	// Show help if requested
 	if *showHelp {
