@@ -652,6 +652,7 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 	// Load include/exclude patterns from files if specified
 	var includePatterns, excludePatterns []string
 	var includeLookup, excludeLookup map[string]bool
+	var hasIncludeWildcards, hasExcludeWildcards bool
 	var err error
 
 	if fileInclude != "" {
@@ -661,14 +662,16 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 		}
 		log.Printf("Loaded %d include patterns from %s", len(includePatterns), fileInclude)
 
-		// Create fast lookup map for exact matches (non-wildcard patterns)
+		// Create fast lookup map for exact matches and detect wildcards
 		includeLookup = make(map[string]bool)
 		for _, pattern := range includePatterns {
-			if !strings.Contains(pattern, "*") {
+			if strings.Contains(pattern, "*") {
+				hasIncludeWildcards = true
+			} else {
 				includeLookup[pattern] = true
 			}
 		}
-		log.Printf("Created fast lookup for %d exact include patterns", len(includeLookup))
+		log.Printf("Created fast lookup for %d exact include patterns, wildcards: %v", len(includeLookup), hasIncludeWildcards)
 	}
 
 	if fileExclude != "" {
@@ -678,14 +681,16 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 		}
 		log.Printf("Loaded %d exclude patterns from %s", len(excludePatterns), fileExclude)
 
-		// Create fast lookup map for exact matches (non-wildcard patterns)
+		// Create fast lookup map for exact matches and detect wildcards
 		excludeLookup = make(map[string]bool)
 		for _, pattern := range excludePatterns {
-			if !strings.Contains(pattern, "*") {
+			if strings.Contains(pattern, "*") {
+				hasExcludeWildcards = true
+			} else {
 				excludeLookup[pattern] = true
 			}
 		}
-		log.Printf("Created fast lookup for %d exact exclude patterns", len(excludeLookup))
+		log.Printf("Created fast lookup for %d exact exclude patterns, wildcards: %v", len(excludeLookup), hasExcludeWildcards)
 	}
 
 	// Get all newsgroups from database
@@ -732,17 +737,20 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 		}
 
 		// Now apply include patterns to group-filtered newsgroups
+		start = time.Now()
 		for _, ng := range groupFiltered {
 			// Fast exact match check first
 			if includeLookup[ng.Name] {
 				newsgroups = append(newsgroups, ng)
-			} else {
-				// Check wildcard patterns only if no exact match
+			} else if hasIncludeWildcards {
+				// Only check wildcard patterns if wildcards exist
 				if matchesAnyWildcardPattern(ng.Name, includePatterns) {
 					newsgroups = append(newsgroups, ng)
 				}
 			}
+			// If no wildcards exist and no exact match, skip this newsgroup
 		}
+		log.Printf("Applied include pattern filtering in %v", time.Since(start))
 		return newsgroups, nil
 	}
 
@@ -751,7 +759,7 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 		log.Printf("Using $all pattern: transferring all newsgroups with file filters applied")
 		start := time.Now()
 		for _, ng := range allNewsgroups {
-			if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup) {
+			if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup, hasIncludeWildcards, hasExcludeWildcards) {
 				newsgroups = append(newsgroups, ng)
 			}
 		}
@@ -773,7 +781,7 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 	if suffixWildcard {
 		for _, ng := range allNewsgroups {
 			if strings.HasPrefix(ng.Name, wildcardPrefix) {
-				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup) {
+				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup, hasIncludeWildcards, hasExcludeWildcards) {
 					newsgroups = append(newsgroups, ng)
 				}
 			}
@@ -782,7 +790,7 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 		// Exact match
 		for _, ng := range allNewsgroups {
 			if ng.Name == groupPattern {
-				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup) {
+				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup, hasIncludeWildcards, hasExcludeWildcards) {
 					newsgroups = append(newsgroups, ng)
 				}
 				break
@@ -820,14 +828,14 @@ func loadPatternsFromFile(filePath string) ([]string, error) {
 }
 
 // shouldIncludeNewsgroup determines if a newsgroup should be included based on include/exclude patterns
-func shouldIncludeNewsgroup(newsgroup string, includePatterns, excludePatterns []string, includeLookup, excludeLookup map[string]bool) bool {
+func shouldIncludeNewsgroup(newsgroup string, includePatterns, excludePatterns []string, includeLookup, excludeLookup map[string]bool, hasIncludeWildcards, hasExcludeWildcards bool) bool {
 	// If include patterns are specified, newsgroup must match at least one
 	if len(includePatterns) > 0 {
 		// First check exact matches (fast O(1) lookup)
 		if includeLookup[newsgroup] {
 			// Still need to check excludes
-		} else {
-			// Check wildcard patterns (slower but only when no exact match)
+		} else if hasIncludeWildcards {
+			// Only check wildcard patterns if wildcards exist
 			included := false
 			for _, pattern := range includePatterns {
 				if strings.Contains(pattern, "*") && matchesPattern(newsgroup, pattern) {
@@ -838,6 +846,9 @@ func shouldIncludeNewsgroup(newsgroup string, includePatterns, excludePatterns [
 			if !included {
 				return false
 			}
+		} else {
+			// No wildcards and no exact match = not included
+			return false
 		}
 	}
 
@@ -847,10 +858,12 @@ func shouldIncludeNewsgroup(newsgroup string, includePatterns, excludePatterns [
 		if excludeLookup[newsgroup] {
 			return false
 		}
-		// Check wildcard patterns
-		for _, pattern := range excludePatterns {
-			if strings.Contains(pattern, "*") && matchesPattern(newsgroup, pattern) {
-				return false
+		// Only check wildcard patterns if wildcards exist
+		if hasExcludeWildcards {
+			for _, pattern := range excludePatterns {
+				if strings.Contains(pattern, "*") && matchesPattern(newsgroup, pattern) {
+					return false
+				}
 			}
 		}
 	}
