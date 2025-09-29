@@ -358,6 +358,10 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 		}
 		headers = append(headers, fmt.Sprintf("X-pugleaf-debug: %d invalid newsgroups removed", badGroups))
 		log.Printf("Reconstructed Newsgroups header with %d valid, removed %d. msgId='%s'", len(validNewsgroups), badGroups, article.MessageID)
+		for i := range validNewsgroups {
+			validNewsgroups[i] = nil // free memory
+		}
+		validNewsgroups = nil // free memory
 	}
 	return headers, nil
 }
