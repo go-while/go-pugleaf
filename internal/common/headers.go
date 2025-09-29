@@ -332,7 +332,10 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 	if VerboseHeaders && ignoredLines > 0 {
 		log.Printf("Reconstructed %d header lines, ignored %d: msgId='%s'", len(headers), ignoredLines, article.MessageID)
 	}
-	if badGroups > 0 && len(validNewsgroups) > 0 {
+	if len(validNewsgroups) == 0 {
+		return nil, fmt.Errorf("ERROR: article has no valid newsgroups, all %d invalid msgId='%s'", badGroups, article.MessageID)
+	}
+	if badGroups > 0 {
 		// append newsgroups headers with line folding
 		var currentLine string = "Newsgroups: "
 		for i, group := range validNewsgroups {
