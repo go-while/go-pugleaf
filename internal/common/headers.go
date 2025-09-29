@@ -294,10 +294,11 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				// check if next headerline is a continued line
 				for {
 					if i+1 < len(moreHeaders) {
-						if strings.HasPrefix(moreHeaders[i+1], " ") {
-							headerLine += moreHeaders[i+1]
-							i++
+						if !strings.HasPrefix(moreHeaders[i+1], " ") && !strings.HasPrefix(moreHeaders[i+1], "\t") {
+							break
 						}
+						headerLine += moreHeaders[i+1]
+						i++
 					} else {
 						break
 					}
@@ -306,6 +307,10 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				newsgroups := SeparatorRegex.Split(headerLine, -1)
 				for _, group := range newsgroups {
 					trimmedNG := strings.TrimSpace(group)
+					if trimmedNG == "" {
+						badGroups++
+						continue
+					}
 					if IsValidGroupName(trimmedNG) {
 						validNewsgroups = append(validNewsgroups, &trimmedNG)
 					} else {
