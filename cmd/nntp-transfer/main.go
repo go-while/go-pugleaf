@@ -1046,6 +1046,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	ttMode := &takeThisMode{
 		useCheckMode: true, // start with CHECK mode
 	}
+	start := time.Now()
 	for offset := ioffset; offset < totalArticles; offset += dbBatchSize {
 		if proc.WantShutdown(shutdownChan) {
 			log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
@@ -1147,8 +1148,8 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		}
 		articles = nil // free memory
 	} // end for offset range totalArticles
-	result := fmt.Sprintf("END Newsgroup: '%s' | total transferred: %d articles / total articles: %d (unwanted: %d | rejected: %d | checked: %d) TX_Errors: %d, connErrors: %d,", newsgroup.Name, transferred, totalArticles, ttMode.Unwanted, ttMode.Rejected, checked, ttMode.TX_Errors, ttMode.connErrors)
-	log.Print(result)
+	result := fmt.Sprintf("END Newsgroup: '%s' | total transferred: %d articles / total articles: %d (unwanted: %d | rejected: %d | checked: %d) TX_Errors: %d, connErrors: %d, took %v", newsgroup.Name, transferred, totalArticles, ttMode.Unwanted, ttMode.Rejected, checked, ttMode.TX_Errors, ttMode.connErrors, time.Since(start))
+	//log.Print(result)
 	resultsMutex.Lock()
 	results = append(results, result)
 	if VERBOSE {
