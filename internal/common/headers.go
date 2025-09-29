@@ -15,7 +15,7 @@ import (
 var VerboseHeaders bool = false
 var IgnoreGoogleHeaders bool = false
 var UseStrictGroupValidation bool = false
-
+var ErrNoNewsgroups = fmt.Errorf("ErrNoNewsgroups")
 var (
 	// Do NOT change this here! these are needed for runtime !
 	// validGroupNameRegex validates newsgroup names according to RFC standards
@@ -339,7 +339,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 		log.Printf("Reconstructed %d header lines, ignored %d: msgId='%s'", len(headers), ignoredLines, article.MessageID)
 	}
 	if len(validNewsgroups) == 0 {
-		return nil, fmt.Errorf("ERROR: article has no valid newsgroups, all %d invalid msgId='%s'", badGroups, article.MessageID)
+		return nil, ErrNoNewsgroups
 	}
 	if badGroups > 0 {
 		// append newsgroups headers with line folding

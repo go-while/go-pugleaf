@@ -1239,7 +1239,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	// Prepare article for transfer
 	headers, err := common.ReconstructHeaders(article, true, nntphostname)
 	if err != nil {
-		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
+		return 0, err
 	}
 
 	c.lastUsed = time.Now()

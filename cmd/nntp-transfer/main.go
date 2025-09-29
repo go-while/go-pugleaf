@@ -1114,7 +1114,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 				if berr != nil {
 					conn.ForceClose = true
 					pool.Put(conn)
-					log.Printf("Error processing network batch for newsgroup %s: %v ... retry in %v", newsgroup.Name, err, isleep)
+					log.Printf("Error processing network batch for newsgroup %s: %v ... retry in %v", newsgroup.Name, berr, isleep)
 					time.Sleep(isleep)
 					isleep = time.Duration(int64(isleep) * 2)
 					if isleep > time.Minute {
@@ -1358,6 +1358,10 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		// Send TAKETHIS command with article content (non-blocking)
 		cmdID, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname)
 		if err != nil {
+			if err == common.ErrNoNewsgroups {
+				log.Printf("Newsgroup: '%s' | skipped article '%s': no newsgroups header", newsgroup, article.MessageID)
+				continue
+			}
 			ttMode.connErrors++
 			conn.ForceClose = true
 			conn.Pool.Put(conn)
