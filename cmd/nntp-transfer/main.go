@@ -651,6 +651,7 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 
 	// Load include/exclude patterns from files if specified
 	var includePatterns, excludePatterns []string
+	var includeLookup, excludeLookup map[string]bool
 	var err error
 
 	if fileInclude != "" {
@@ -659,6 +660,15 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 			return nil, fmt.Errorf("failed to load include patterns from %s: %v", fileInclude, err)
 		}
 		log.Printf("Loaded %d include patterns from %s", len(includePatterns), fileInclude)
+
+		// Create fast lookup map for exact matches (non-wildcard patterns)
+		includeLookup = make(map[string]bool)
+		for _, pattern := range includePatterns {
+			if !strings.Contains(pattern, "*") {
+				includeLookup[pattern] = true
+			}
+		}
+		log.Printf("Created fast lookup for %d exact include patterns", len(includeLookup))
 	}
 
 	if fileExclude != "" {
@@ -667,20 +677,32 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 			return nil, fmt.Errorf("failed to load exclude patterns from %s: %v", fileExclude, err)
 		}
 		log.Printf("Loaded %d exclude patterns from %s", len(excludePatterns), fileExclude)
+
+		// Create fast lookup map for exact matches (non-wildcard patterns)
+		excludeLookup = make(map[string]bool)
+		for _, pattern := range excludePatterns {
+			if !strings.Contains(pattern, "*") {
+				excludeLookup[pattern] = true
+			}
+		}
+		log.Printf("Created fast lookup for %d exact exclude patterns", len(excludeLookup))
 	}
 
 	// Get all newsgroups from database
+	log.Printf("Loading newsgroups from database...")
+	start := time.Now()
 	allNewsgroups, err := db.MainDBGetAllNewsgroups()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get newsgroups from database: %v", err)
 	}
+	log.Printf("Loaded %d newsgroups from database in %v", len(allNewsgroups), time.Since(start))
 
 	// Handle force-include-only mode
 	if forceIncludeOnly {
 		if len(includePatterns) == 0 {
 			return nil, fmt.Errorf("force-include-only flag requires include file to be specified")
 		}
-		log.Printf("Force-include-only mode: filtering newsgroups using group pattern '%s' and include patterns", groupPattern)
+		log.Printf("Force-include-only mode: filtering newsgroups using group pattern '%s' and %d include patterns", groupPattern, len(includePatterns))
 
 		// First filter by group pattern, then by include patterns
 		var groupFiltered []*models.Newsgroup
@@ -711,8 +733,14 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 
 		// Now apply include patterns to group-filtered newsgroups
 		for _, ng := range groupFiltered {
-			if matchesAnyPattern(ng.Name, includePatterns) {
+			// Fast exact match check first
+			if includeLookup[ng.Name] {
 				newsgroups = append(newsgroups, ng)
+			} else {
+				// Check wildcard patterns only if no exact match
+				if matchesAnyWildcardPattern(ng.Name, includePatterns) {
+					newsgroups = append(newsgroups, ng)
+				}
 			}
 		}
 		return newsgroups, nil
@@ -721,11 +749,13 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 	// Handle $all pattern (transfer all newsgroups, but still apply file filters)
 	if groupPattern == "$all" {
 		log.Printf("Using $all pattern: transferring all newsgroups with file filters applied")
+		start := time.Now()
 		for _, ng := range allNewsgroups {
-			if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns) {
+			if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup) {
 				newsgroups = append(newsgroups, ng)
 			}
 		}
+		log.Printf("Filtered %d newsgroups from %d total in %v", len(newsgroups), len(allNewsgroups), time.Since(start))
 		return newsgroups, nil
 	}
 
@@ -739,10 +769,11 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 	}
 
 	// Filter newsgroups based on pattern
+	start = time.Now()
 	if suffixWildcard {
 		for _, ng := range allNewsgroups {
 			if strings.HasPrefix(ng.Name, wildcardPrefix) {
-				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns) {
+				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup) {
 					newsgroups = append(newsgroups, ng)
 				}
 			}
@@ -751,13 +782,14 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 		// Exact match
 		for _, ng := range allNewsgroups {
 			if ng.Name == groupPattern {
-				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns) {
+				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup) {
 					newsgroups = append(newsgroups, ng)
 				}
 				break
 			}
 		}
 	}
+	log.Printf("Pattern filtering completed in %v, found %d matching newsgroups", time.Since(start), len(newsgroups))
 
 	return newsgroups, nil
 }
@@ -788,25 +820,36 @@ func loadPatternsFromFile(filePath string) ([]string, error) {
 }
 
 // shouldIncludeNewsgroup determines if a newsgroup should be included based on include/exclude patterns
-func shouldIncludeNewsgroup(newsgroup string, includePatterns, excludePatterns []string) bool {
+func shouldIncludeNewsgroup(newsgroup string, includePatterns, excludePatterns []string, includeLookup, excludeLookup map[string]bool) bool {
 	// If include patterns are specified, newsgroup must match at least one
 	if len(includePatterns) > 0 {
-		included := false
-		for _, pattern := range includePatterns {
-			if matchesPattern(newsgroup, pattern) {
-				included = true
-				break
+		// First check exact matches (fast O(1) lookup)
+		if includeLookup[newsgroup] {
+			// Still need to check excludes
+		} else {
+			// Check wildcard patterns (slower but only when no exact match)
+			included := false
+			for _, pattern := range includePatterns {
+				if strings.Contains(pattern, "*") && matchesPattern(newsgroup, pattern) {
+					included = true
+					break
+				}
 			}
-		}
-		if !included {
-			return false
+			if !included {
+				return false
+			}
 		}
 	}
 
 	// If exclude patterns are specified, newsgroup must not match any
 	if len(excludePatterns) > 0 {
+		// First check exact matches (fast O(1) lookup)
+		if excludeLookup[newsgroup] {
+			return false
+		}
+		// Check wildcard patterns
 		for _, pattern := range excludePatterns {
-			if matchesPattern(newsgroup, pattern) {
+			if strings.Contains(pattern, "*") && matchesPattern(newsgroup, pattern) {
 				return false
 			}
 		}
@@ -839,6 +882,16 @@ func matchesPattern(newsgroup, pattern string) bool {
 func matchesAnyPattern(newsgroup string, patterns []string) bool {
 	for _, pattern := range patterns {
 		if matchesPattern(newsgroup, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesAnyWildcardPattern checks if a newsgroup name matches any wildcard patterns (skips exact matches)
+func matchesAnyWildcardPattern(newsgroup string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if strings.Contains(pattern, "*") && matchesPattern(newsgroup, pattern) {
 			return true
 		}
 	}
@@ -1085,20 +1138,21 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	log.Print(result)
 	resultsMutex.Lock()
 	results = append(results, result)
-	for _, msgId := range rejected[newsgroup.Name] {
-		if VERBOSE {
+	if VERBOSE {
+		for _, msgId := range rejectedArticles[newsgroup.Name] {
 			// prints all at the end again
 			log.Printf("END Newsgroup: '%s' | REJECTED '%s'", newsgroup.Name, msgId)
+
 		}
+		delete(rejectedArticles, newsgroup.Name) // free memory
 	}
-	delete(rejected, newsgroup.Name) // free memory
 	resultsMutex.Unlock()
 	return transferred, checked, nil
 } // end func transferNewsgroup
 
 var results []string
-var rejected = make(map[string][]string)
-var resultsMutex sync.Mutex
+var rejectedArticles = make(map[string][]string)
+var resultsMutex sync.RWMutex
 var lowerLevel float64 = 90.0
 var upperLevel float64 = 95.0
 
@@ -1275,7 +1329,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 
 // sendArticlesBatchViaTakeThis sends multiple articles via TAKETHIS in streaming mode
 // Sends all TAKETHIS commands first, then reads all responses (true streaming)
-func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Article, ttMode *takeThisMode, newsgroup string) (uint64, error) {
+func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Article, ttMode *takeThisMode, newsgroup string) (transferred uint64, err error) {
 	if len(articles) == 0 {
 		return 0, nil
 	}
@@ -1304,7 +1358,6 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	//log.Printf("Sent %d TAKETHIS commands, reading responses...", len(commandIDs))
 
 	// Phase 2: Read all responses in order
-	var transferred uint64
 	for i, cmdID := range commandIDs {
 		article := validArticles[i]
 
@@ -1325,10 +1378,12 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			transferred++
 		case 439:
 			ttMode.Rejected++
-			log.Printf("Newsgroup: '%s' | Rejected article '%s': response=%d (i=%d/%d)", newsgroup, article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
-			resultsMutex.Lock()
-			rejected[newsgroup] = append(rejected[newsgroup], article.MessageID)
-			resultsMutex.Unlock()
+			if VERBOSE {
+				log.Printf("Newsgroup: '%s' | Rejected article '%s': response=%d (i=%d/%d)", newsgroup, article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
+				resultsMutex.Lock()
+				rejectedArticles[newsgroup] = append(rejectedArticles[newsgroup], article.MessageID)
+				resultsMutex.Unlock()
+			}
 		default:
 			ttMode.TX_Errors++
 			log.Printf("Newsgroup: '%s' | Failed to transfer article '%s': response=%d (i=%d/%d)", newsgroup, article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
@@ -1364,10 +1419,12 @@ func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article, ttM
 		return 1, nil
 	case 439:
 		ttMode.Rejected++
-		log.Printf("Newsgroup: '%s' | Rejected article '%s': response=%d (i=1/1)", newsgroup, article.MessageID, takeThisResponseCode)
-		resultsMutex.Lock()
-		rejected[newsgroup] = append(rejected[newsgroup], article.MessageID)
-		resultsMutex.Unlock()
+		if VERBOSE {
+			log.Printf("Newsgroup: '%s' | Rejected article '%s': response=%d (i=1/1)", newsgroup, article.MessageID, takeThisResponseCode)
+			resultsMutex.Lock()
+			rejectedArticles[newsgroup] = append(rejectedArticles[newsgroup], article.MessageID)
+			resultsMutex.Unlock()
+		}
 		return 0, nil
 	default:
 		ttMode.TX_Errors++
