@@ -316,7 +316,6 @@ func main() {
 	if *debugCapture {
 		log.Printf("Debug capture mode enabled - capturing articles without sending")
 		*dryRun = true
-		time.Sleep(5 * time.Second)
 	}
 	// Start transfer process
 	var wgP sync.WaitGroup
@@ -882,6 +881,7 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 			totalTransferred += transferred
 			if err == ErrNotInDateRange {
 				nothingInDateRange++
+				err = nil // not a real error
 			}
 			transferMutex.Unlock()
 
@@ -942,14 +942,16 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	}
 
 	if totalArticles == 0 {
-		if VERBOSE {
-			if startTime != nil || endTime != nil {
+
+		if startTime != nil || endTime != nil {
+			if VERBOSE {
 				log.Printf("No articles found in newsgroup: %s (within specified date range)", newsgroup.Name)
-				return 0, 0, ErrNotInDateRange
-			} else {
-				log.Printf("No articles found in newsgroup: %s", newsgroup.Name)
 			}
+			return 0, 0, ErrNotInDateRange
+		} else {
+			log.Printf("No articles found in newsgroup: %s", newsgroup.Name)
 		}
+
 		return 0, 0, nil
 	}
 
