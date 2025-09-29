@@ -1086,7 +1086,10 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	resultsMutex.Lock()
 	results = append(results, result)
 	for _, msgId := range rejected[newsgroup.Name] {
-		log.Printf("Newsgroup: '%s' | REJECTED '%s'", newsgroup.Name, msgId)
+		if VERBOSE {
+			// prints all at the end again
+			log.Printf("END Newsgroup: '%s' | REJECTED '%s'", newsgroup.Name, msgId)
+		}
 	}
 	delete(rejected, newsgroup.Name) // free memory
 	resultsMutex.Unlock()
