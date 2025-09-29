@@ -165,6 +165,8 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 					parsedTime := parseDateReceivedHeader(dateReceivedStr)
 					if !parsedTime.IsZero() && parsedTime.Year() >= 1979 {
 						dateHeader = parsedTime.UTC().Format(time.RFC1123Z)
+						article.DateSent = parsedTime // Update article DateSent with corrected time
+						article.DateString = dateHeader // Update DateString with corrected value
 						//if VerboseHeaders {
 						log.Printf("Using Date-Received '%s' (parsed as '%s') instead of invalid DateString '%s' and invalid DateSent (year %d) for article %s", dateReceivedStr, dateHeader, article.DateString, article.DateSent.Year(), article.MessageID)
 						//}
@@ -190,6 +192,8 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				parsedTime := parseDateReceivedHeader(dateReceivedStr)
 				if !parsedTime.IsZero() && parsedTime.Year() >= 1979 {
 					dateHeader = parsedTime.UTC().Format(time.RFC1123Z)
+					article.DateSent = parsedTime // Update article DateSent with corrected time
+					article.DateString = dateHeader // Update DateString with corrected value
 					if VerboseHeaders {
 						log.Printf("Using Date-Received '%s' (parsed as '%s') when DateString is empty and DateSent is invalid (year %d) for article %s", dateReceivedStr, dateHeader, article.DateSent.Year(), article.MessageID)
 					}

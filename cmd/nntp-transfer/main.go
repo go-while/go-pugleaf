@@ -113,6 +113,8 @@ func main() {
 
 		// header filtering
 		ignoreGoogleHeaders = flag.Bool("ignore-google-headers", true, "Ignores specific header: 'X-Google-*'")
+		RewriteDates        = flag.Bool("rewrite-dates", false, "Rewrite invalid date headers (e.g. utzoo articles) needs '-dry-run -date-beg 1969-01-01 -date-end 1979-01-01' to see results")
+		debugCapture        = flag.Bool("debug-capture", false, "Capture debug information. use with -dry-run -date-beg 1979-01-01 -date-end 1983-01-01 to see results")
 
 		// History configuration
 		useShortHashLen = flag.Int("useshorthashlen", 7, "Short hash length for history storage (2-7, default: 7)")
@@ -311,8 +313,7 @@ func main() {
 	shutdownChan := make(chan struct{})
 	transferDoneChan := make(chan error, 1)
 	// special debug mode to find articles with bad date header... before usenet existed...
-	debugCapture := *startDate == "1969-01-01" && *endDate == "1979-01-01"
-	if debugCapture {
+	if *debugCapture {
 		log.Printf("Debug capture mode enabled - capturing articles without sending")
 		*dryRun = true
 		time.Sleep(5 * time.Second)
@@ -323,26 +324,58 @@ func main() {
 	go func(wgP *sync.WaitGroup) {
 		defer wgP.Done()
 		resultChan := make(chan error, 1)
-		resultChan <- runTransfer(db, proc, pool, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, shutdownChan, debugCapture, wgP)
+		resultChan <- runTransfer(db, proc, pool, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, shutdownChan, *debugCapture, wgP)
 		result := <-resultChan
-		if !debugCapture {
+		if !*debugCapture {
 			transferDoneChan <- result
 			return
 		}
 		debugMutex.Lock()
 		defer debugMutex.Unlock()
-		// process debugCapture
+		// process debugCapture (used to debug and rewrite utzoo articles with invalid date headers)
 
 		for groupName, articles := range debugArticles {
 			fmt.Printf("Debug capture - Newsgroup: %s, Articles: %d\n", groupName, len(articles))
+
+			// Get group database for updates if needed
+			groupDBs, err := db.GetGroupDBs(groupName)
+			if err != nil {
+				fmt.Printf("! Error getting group database for %s: %v\n", groupName, err)
+				continue
+			}
+
 			for _, article := range articles {
 				fmt.Printf("# %s: #%d : '%s' | orgDate='%s' parsed='%#v'\n", groupName, article.DBArtNum, article.MessageID, article.DateString, article.DateSent)
+
+				// Track original values to detect changes
+				originalDateSent := article.DateSent
+				originalDateString := article.DateString
+
 				headers, err := common.ReconstructHeaders(article, true, &nntphostname)
 				fmt.Printf("### ORG HEADER: '%s'\n%s\n", article.MessageID, article.HeadersJSON)
 				if err != nil {
-					fmt.Printf("! Error reconstructing headers for article %s: %v\n", article.MessageID, err)
+					fmt.Printf("! Error reconstructing headers for article '%s': %v\n", article.MessageID, err)
 					continue
 				}
+
+				if *RewriteDates {
+					// Check if DateSent or DateString were updated and update database
+					if !article.DateSent.Equal(originalDateSent) || article.DateString != originalDateString {
+						fmt.Printf("! Date corrected for %s:\n    DateSent '%s' -> '%s'\n    DateString: '%s' -> '%s'\n",
+							article.MessageID,
+							originalDateSent.UTC().Format(time.RFC1123Z),
+							article.DateSent.UTC().Format(time.RFC1123Z),
+							originalDateString,
+							article.DateString)
+
+						if err := db.UpdateArticleDateSent(groupDBs, article.MessageID, article.DateSent, article.DateString); err != nil {
+							fmt.Printf("! Error updating database for article '%s': %v\n", article.MessageID, err)
+						} else {
+							fmt.Printf("! Database updated for article '%s'\n", article.MessageID)
+						}
+					}
+				}
+
 				fmt.Printf("### NEW HEADER: '%s' REWRITE\n", article.MessageID)
 				for _, line := range headers {
 					fmt.Printf("%s\n", line)
@@ -351,6 +384,7 @@ func main() {
 				//fmt.Printf("%s\n", article.BodyText)
 				//fmt.Printf("### BODY EOF '%s' ###\n\n", article.MessageID)
 			}
+			groupDBs.Return(db)
 		}
 		transferDoneChan <- result
 	}(&wgP)
@@ -815,7 +849,7 @@ func matchesAnyPattern(newsgroup string, patterns []string) bool {
 // runTransfer performs the actual article transfer process
 func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}, debugCapture bool, wgP *sync.WaitGroup) error {
 	defer wgP.Done()
-	var totalTransferred uint64
+	var totalTransferred, nothingInDateRange uint64
 	var transferMutex sync.Mutex
 	maxThreadsChan := make(chan struct{}, maxThreads)
 	var wg sync.WaitGroup
@@ -846,6 +880,9 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 
 			transferMutex.Lock()
 			totalTransferred += transferred
+			if err == ErrNotInDateRange {
+				nothingInDateRange++
+			}
 			transferMutex.Unlock()
 
 			if err != nil {
@@ -860,7 +897,9 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 
 	// Wait for all transfers to complete
 	wg.Wait()
-	log.Printf("All transfers completed.")
+	if nothingInDateRange > 0 {
+		log.Printf("Note: %d newsgroups had no articles in the specified date range", nothingInDateRange)
+	}
 	for _, result := range results {
 		log.Print(result)
 	}
@@ -880,6 +919,7 @@ type takeThisMode struct {
 
 var debugArticles = make(map[string][]*models.Article)
 var debugMutex sync.Mutex
+var ErrNotInDateRange = fmt.Errorf("article not in specified date range")
 
 // transferNewsgroup transfers articles from a single newsgroup
 func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}, debugCapture bool) (transferred uint64, checked uint64, err error) {
@@ -905,6 +945,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		if VERBOSE {
 			if startTime != nil || endTime != nil {
 				log.Printf("No articles found in newsgroup: %s (within specified date range)", newsgroup.Name)
+				return 0, 0, ErrNotInDateRange
 			} else {
 				log.Printf("No articles found in newsgroup: %s", newsgroup.Name)
 			}

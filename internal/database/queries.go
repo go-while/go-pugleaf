@@ -899,6 +899,14 @@ func (db *Database) GetReplyCount(groupDBs *GroupDBs, messageID string) (int, er
 	return count, nil
 }
 
+// UpdateArticleDateSent updates the date_sent field for an article
+const query_UpdateArticleDateSent = `UPDATE articles SET date_sent = ?, date_string = ? WHERE message_id = ?`
+
+func (db *Database) UpdateArticleDateSent(groupDBs *GroupDBs, messageID string, dateSent time.Time, dateString string) error {
+	_, err := retryableExec(groupDBs.DB, query_UpdateArticleDateSent, dateSent.UTC().Format("2006-01-02 15:04:05"), dateString, messageID)
+	return err
+}
+
 // UpdateOverviewReplyCount updates the reply count for an article in the articles table
 const query_UpdateOverviewReplyCount = `UPDATE articles SET reply_count = ? WHERE message_id = ?`
 
