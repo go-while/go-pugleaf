@@ -69,21 +69,45 @@ func parseDateReceivedHeader(dateStr string) time.Time {
 	if dateStr == "" {
 		return time.Time{}
 	}
-	// Date-Received: Sat, 26-Sep-87 10:35:30 EDT
+
+	// Convert common timezone abbreviations to numeric offsets
+	// This handles the issue where Go's time.Parse() doesn't recognize abbreviations like EDT
+	timezoneMap := map[string]string{
+		"EDT": "-0400", // Eastern Daylight Time (UTC-4)
+		"EST": "-0500", // Eastern Standard Time (UTC-5)
+		"CDT": "-0500", // Central Daylight Time (UTC-5)
+		"CST": "-0600", // Central Standard Time (UTC-6)
+		"MDT": "-0600", // Mountain Daylight Time (UTC-6)
+		"MST": "-0700", // Mountain Standard Time (UTC-7)
+		"PDT": "-0700", // Pacific Daylight Time (UTC-7)
+		"PST": "-0800", // Pacific Standard Time (UTC-8)
+	}
+
+	// Replace timezone abbreviations with numeric offsets
+	normalizedDateStr := dateStr
+	for abbr, offset := range timezoneMap {
+		normalizedDateStr = strings.Replace(normalizedDateStr, " "+abbr, " "+offset, 1)
+	}
+
+	// Date-Received: Sat, 26-Sep-87 10:35:30 EDT -> Sat, 26-Sep-87 10:35:30 -0400
 	// Common Date-Received formats seen in NNTP
 	dateFormats := []string{
-		"Mon, _2-Jan-06 15:04:05 MST",   // e.g., "Sat, 26-Sep-87 10:35:30 EDT"
-		"Mon, 02-Jan-06 15:04:05 MST",   // e.g., "Sat, 26-Sep-87 10:35:30 EDT" with leading zero
-		"Mon, _2-Jan-2006 15:04:05 MST", // 4-digit year version
-		"Mon, 02-Jan-2006 15:04:05 MST", // 4-digit year with leading zero
-		time.RFC1123Z,                   // Standard RFC format
-		time.RFC1123,                    // Standard RFC format
-		time.RFC822Z,                    // RFC822 with timezone
-		time.RFC822,                     // RFC822
+		"Mon, _2-Jan-06 15:04:05 -0700",   // e.g., "Sat, 26-Sep-87 10:35:30 -0400" (numeric offset)
+		"Mon, 02-Jan-06 15:04:05 -0700",   // with leading zero
+		"Mon, _2-Jan-2006 15:04:05 -0700", // 4-digit year version
+		"Mon, 02-Jan-2006 15:04:05 -0700", // 4-digit year with leading zero
+		"Mon, _2-Jan-06 15:04:05 MST",     // fallback for unrecognized abbreviations
+		"Mon, 02-Jan-06 15:04:05 MST",     // fallback with leading zero
+		"Mon, _2-Jan-2006 15:04:05 MST",   // fallback 4-digit year
+		"Mon, 02-Jan-2006 15:04:05 MST",   // fallback 4-digit year with leading zero
+		time.RFC1123Z,                     // Standard RFC format
+		time.RFC1123,                      // Standard RFC format
+		time.RFC822Z,                      // RFC822 with timezone
+		time.RFC822,                       // RFC822
 	}
 
 	for _, format := range dateFormats {
-		if t, err := time.Parse(format, dateStr); err == nil {
+		if t, err := time.Parse(format, normalizedDateStr); err == nil {
 			return t
 		}
 	}
