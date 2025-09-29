@@ -291,7 +291,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			}
 			if header == "Newsgroups" {
 				// Check if Newsgroups header contains at least one valid newsgroup name
-				// check if next headerline is a continued line
+				// check if next headerlines are continued lines
 				for {
 					if i+1 < len(moreHeaders) {
 						if !strings.HasPrefix(moreHeaders[i+1], " ") && !strings.HasPrefix(moreHeaders[i+1], "\t") {
@@ -307,15 +307,11 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				newsgroups := SeparatorRegex.Split(headerLine, -1)
 				for _, group := range newsgroups {
 					trimmedNG := strings.TrimSpace(group)
-					if trimmedNG == "" {
+					if trimmedNG == "" || !IsValidGroupName(trimmedNG) {
 						badGroups++
 						continue
 					}
-					if IsValidGroupName(trimmedNG) {
-						validNewsgroups = append(validNewsgroups, &trimmedNG)
-					} else {
-						badGroups++
-					}
+					validNewsgroups = append(validNewsgroups, &trimmedNG)
 				}
 
 				if len(validNewsgroups) == 0 {
