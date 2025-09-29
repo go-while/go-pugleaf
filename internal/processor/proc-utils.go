@@ -7,10 +7,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-while/go-pugleaf/internal/common"
 )
 
 var (
-	separatorRegex       = regexp.MustCompile(`[,;:\s]+`)
+	//separatorRegex       = regexp.MustCompile(`[,;:\s]+`)
 	parenRe              = regexp.MustCompile(`\s*\([^)]*\)$`)
 	threeDigitTimezoneRe = regexp.MustCompile(`\s([+-])(\d{3})\s*$`)
 	yearRegex            = regexp.MustCompile(`\b(19[7-9]\d|20[0-9]\d)\b`)
@@ -406,49 +408,12 @@ var NNTPDateLayouts = []string{
 // IsValidGroupName validates a newsgroup name according to RFC standards
 // Returns true if the group name is valid (lowercase, alphanumeric components separated by dots)
 func IsValidGroupName(name string) bool {
-	if validGroupNameRegexchar.MatchString(name) {
-		return true
-	}
-
-	if !UseStrictGroupValidation {
-
-		if validGroupNameRegexLazy.MatchString(name) {
-			return true
-		}
-		if validGroupNameRegexSingle.MatchString(name) {
-			return true
-		}
-		// Allow both lowercase and mixed case group names
-		if validGroupNameRegexCaps.MatchString(name) {
-			return true
-		}
-		return false
-	}
-	if len(name) < 1 {
-		log.Printf("IsValidGroupName: Group name '%s' is too short (%d characters)", name, len(name))
-		return false
-	}
-	if len(name) > 255 {
-		log.Printf("IsValidGroupName: Group name '%s' is too long (%d characters)", name, len(name))
-		return false
-	}
-	name = strings.ToLower(name)
-	// Special case for programming language groups ending with ++
-	if strings.HasSuffix(name, "++") || strings.HasSuffix(name, "+") {
-		// Allow C++, C+, etc. in programming contexts
-		if validGroupNameRegexLazy.MatchString(strings.ReplaceAll(name, "+", "")) {
-			return true
-		}
-	}
-	if validGroupNameRegexStrict.MatchString(name) {
-		return true
-	}
-	return false
+	return common.IsValidGroupName(name)
 }
 
 func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []string {
 	// Use a single regex to split on any combination of separators
-	rawGroups := separatorRegex.Split(groupsline, -1)
+	rawGroups := common.SeparatorRegex.Split(groupsline, -1)
 
 	var validGroups []string
 	seen := make(map[string]bool) // For deduplication

@@ -41,9 +41,6 @@ var (
 	// MaxBatch defines the maximum number of articles to fetch in a single batch
 	MaxBatchSize int64 = 128
 
-	// UseStrictGroupValidation for group names, false allows upper-case in group names
-	UseStrictGroupValidation = true
-
 	// RunRSLIGHTImport is used to indicate if the importer should run the legacy RockSolid Light importer
 	RunRSLIGHTImport = false
 
@@ -54,16 +51,6 @@ var (
 		GetQ:        make(chan *BatchItem),        // get articles, blocking channel
 		GroupQueues: make(map[string]*GroupBatch), // per-newsgroup queues
 	}
-
-	// Do NOT change this here! these are needed for runtime !
-	// validGroupNameRegex validates newsgroup names according to RFC standards
-	// Pattern: lowercase alphanumeric start, components separated by dots, no trailing dots/hyphens
-	validGroupNameRegexStrict = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$`)
-	validGroupNameRegexchar   = regexp.MustCompile(`^[a-zA-Z0-9]{1,255}$`)
-	validGroupNameRegexLazy   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+&-]*$`)
-	validGroupNameRegexSingle = regexp.MustCompile(`^[A-Za-z0-9-_+&][A-Za-z0-9-_+&]{1,64}$`)
-	validGroupNameRegexCaps   = regexp.MustCompile(`^[A-Za-z0-9-_+&][A-Za-z0-9-_+&]*(?:\.[A-Za-z0-9-_+&][A-Za-z0-9-_+&]*)+$`)
-	//errorUp2date              = fmt.Errorf("up2date")
 )
 
 func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen int) *Processor {

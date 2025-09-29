@@ -4,6 +4,7 @@ package common
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -13,6 +14,20 @@ import (
 
 var VerboseHeaders bool = false
 var IgnoreGoogleHeaders bool = false
+var UseStrictGroupValidation bool = false
+
+var (
+	// Do NOT change this here! these are needed for runtime !
+	// validGroupNameRegex validates newsgroup names according to RFC standards
+	// Pattern: lowercase alphanumeric start, components separated by dots, no trailing dots/hyphens
+
+	SeparatorRegex            = regexp.MustCompile(`[,;:\s]+`)
+	validGroupNameRegexStrict = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$`)
+	validGroupNameRegexchar   = regexp.MustCompile(`^[a-zA-Z0-9]{1,255}$`)
+	validGroupNameRegexLazy   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+&-]*$`)
+	validGroupNameRegexSingle = regexp.MustCompile(`^[A-Za-z0-9-_+&][A-Za-z0-9-_+&]{1,64}$`)
+	validGroupNameRegexCaps   = regexp.MustCompile(`^[A-Za-z0-9-_+&][A-Za-z0-9-_+&]*(?:\.[A-Za-z0-9-_+&][A-Za-z0-9-_+&]*)+$`)
+)
 
 // IgnoreHeadersMap is a map version of IgnoreHeaders for fast lookup
 var IgnoreHeadersMap = map[string]bool{
@@ -220,6 +235,8 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 	isSpacedLine := false
 	ignoredLines := 0
 	headersMap := make(map[string]bool)
+	badGroups := 0
+	var validNewsgroups []*string
 
 	for i, headerLine := range moreHeaders {
 		if len(headerLine) == 0 {
@@ -233,6 +250,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 		} else {
 			ignoreLine = false
 		}
+
 		if !isSpacedLine {
 			if len(headerLine) < 4 { // "X: A"
 				log.Printf("Short header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
@@ -271,11 +289,112 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				}
 				headersMap[strings.ToLower(header)] = true
 			}
+			if header == "Newsgroups" {
+				// Check if Newsgroups header contains at least one valid newsgroup name
+				// check if next headerline is a continued line
+				for {
+					if i+1 < len(moreHeaders) {
+						if strings.HasPrefix(moreHeaders[i+1], " ") {
+							headerLine += moreHeaders[i+1]
+							i++
+						}
+					} else {
+						break
+					}
+				}
+
+				newsgroups := SeparatorRegex.Split(headerLine, -1)
+				for _, group := range newsgroups {
+					trimmedNG := strings.TrimSpace(group)
+					if IsValidGroupName(trimmedNG) {
+						validNewsgroups = append(validNewsgroups, &trimmedNG)
+					} else {
+						badGroups++
+					}
+				}
+
+				if len(validNewsgroups) == 0 {
+					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
+					ignoreLine = true
+					ignoredLines++
+					continue
+				}
+				if badGroups > 0 {
+					log.Printf("Newsgroups header: '%s' line=%d in msgId='%s' has %d invalid newsgroup names (valid=%d)", headerLine, i, article.MessageID, badGroups, len(validNewsgroups))
+					ignoreLine = true
+					ignoredLines++
+					continue
+				}
+			}
 		}
 		headers = append(headers, headerLine)
 	}
 	if VerboseHeaders && ignoredLines > 0 {
 		log.Printf("Reconstructed %d header lines, ignored %d: msgId='%s'", len(headers), ignoredLines, article.MessageID)
 	}
+	if badGroups > 0 && len(validNewsgroups) > 0 {
+		// append newsgroups headers with line folding
+		var currentLine string = "Newsgroups: "
+		for i, group := range validNewsgroups {
+			if i > 0 {
+				if len(currentLine)+1+len(*group) > 78 {
+					// line would exceed 78 chars, start a new line
+					headers = append(headers, currentLine)
+					currentLine = " ," + *group // continuation line starts with space and comma
+				} else {
+					currentLine += "," + *group
+				}
+			} else {
+				currentLine += *group
+			}
+		}
+		// append any remaining line (only if it has content beyond just whitespace)
+		if strings.TrimSpace(currentLine) != "" {
+			headers = append(headers, currentLine)
+		}
+		headers = append(headers, fmt.Sprintf("X-pugleaf-debug: %d invalid newsgroups removed", badGroups))
+		log.Printf("Reconstructed Newsgroups header with %d valid, removed %d. msgId='%s'", len(validNewsgroups), badGroups, article.MessageID)
+	}
 	return headers, nil
+}
+
+func IsValidGroupName(name string) bool {
+	if validGroupNameRegexchar.MatchString(name) {
+		return true
+	}
+
+	if !UseStrictGroupValidation {
+
+		if validGroupNameRegexLazy.MatchString(name) {
+			return true
+		}
+		if validGroupNameRegexSingle.MatchString(name) {
+			return true
+		}
+		// Allow both lowercase and mixed case group names
+		if validGroupNameRegexCaps.MatchString(name) {
+			return true
+		}
+		return false
+	}
+	if len(name) < 1 {
+		log.Printf("IsValidGroupName: Group name '%s' is too short (%d characters)", name, len(name))
+		return false
+	}
+	if len(name) > 255 {
+		log.Printf("IsValidGroupName: Group name '%s' is too long (%d characters)", name, len(name))
+		return false
+	}
+	name = strings.ToLower(name)
+	// Special case for programming language groups ending with ++
+	if strings.HasSuffix(name, "++") || strings.HasSuffix(name, "+") {
+		// Allow C++, C+, etc. in programming contexts
+		if validGroupNameRegexLazy.MatchString(strings.ReplaceAll(name, "+", "")) {
+			return true
+		}
+	}
+	if validGroupNameRegexStrict.MatchString(name) {
+		return true
+	}
+	return false
 }
