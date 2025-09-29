@@ -1209,7 +1209,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 		if VERBOSE {
 			log.Printf("Newsgroup: '%s' | Server wants: %d/%d articles in batch", newsgroup, len(wantedIds), len(validMessageIds))
 		}
-
+		var validTakeThisArticles []*models.Article
 		// Send TAKETHIS for wanted articles
 		for _, msgId := range wantedIds {
 			article, exists := validArticleMap[*msgId]
@@ -1217,16 +1217,18 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 				log.Printf("WARN: Article not found in validArticleMap for msgId: %s", *msgId)
 				continue
 			}
-			count, err := sendArticleViaTakeThis(conn, article, ttMode, newsgroup)
-			if conn.ForceClose {
-				return transferred, checked, successRate, fmt.Errorf("Newsgroup: '%s' | connection marked for close, aborting batch. err='%v'", newsgroup, err)
-			}
-			if err != nil {
-				log.Printf("Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroup, *msgId, err)
-				continue
-			}
-			transferred += count
+			validTakeThisArticles = append(validTakeThisArticles, article)
 		}
+		count, err := sendArticlesBatchViaTakeThis(conn, validTakeThisArticles, ttMode, newsgroup)
+		if conn.ForceClose {
+			return transferred, checked, successRate, fmt.Errorf("Newsgroup: '%s' | connection marked for close, aborting batch. err='%v'", newsgroup, err)
+		}
+		if err != nil {
+			log.Printf("Newsgroup: '%s' | Failed to send CHECKED TAKETHIS: %v", newsgroup, err)
+			return transferred, checked, successRate, fmt.Errorf("failed to send CHECKED TAKETHIS batch: %v", err)
+		}
+		transferred += count
+
 	} else {
 		// TAKETHIS mode: send articles directly and track success rate
 		//log.Printf("Newsgroup: '%s' | TAKETHIS: %d articles (success rate: %.1f%%)", newsgroup, len(articles), successRate)
@@ -1362,7 +1364,7 @@ func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article, ttM
 		return 1, nil
 	case 439:
 		ttMode.Rejected++
-		log.Printf("Newsgroup: '%s' | Rejected article '%s': response=%d", newsgroup, article.MessageID, takeThisResponseCode)
+		log.Printf("Newsgroup: '%s' | Rejected article '%s': response=%d (i=1/1)", newsgroup, article.MessageID, takeThisResponseCode)
 		resultsMutex.Lock()
 		rejected[newsgroup] = append(rejected[newsgroup], article.MessageID)
 		resultsMutex.Unlock()
