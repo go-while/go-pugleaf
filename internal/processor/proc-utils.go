@@ -615,6 +615,24 @@ func ParseNNTPDate(dateStr string) time.Time {
 		dateStr = strings.ReplaceAll(dateStr, "Sum, ", "Sun, ")
 	}
 
+	// Convert common timezone abbreviations to numeric offsets
+	// This handles the issue where Go's time.Parse() doesn't recognize abbreviations like EDT
+	timezoneMap := map[string]string{
+		"EDT": "-0400", // Eastern Daylight Time (UTC-4)
+		"EST": "-0500", // Eastern Standard Time (UTC-5)
+		"CDT": "-0500", // Central Daylight Time (UTC-5)
+		"CST": "-0600", // Central Standard Time (UTC-6)
+		"MDT": "-0600", // Mountain Daylight Time (UTC-6)
+		"MST": "-0700", // Mountain Standard Time (UTC-7)
+		"PDT": "-0700", // Pacific Daylight Time (UTC-7)
+		"PST": "-0800", // Pacific Standard Time (UTC-8)
+	}
+
+	// Replace timezone abbreviations with numeric offsets
+	for abbr, offset := range timezoneMap {
+		dateStr = strings.Replace(dateStr, " "+abbr, " "+offset, 1)
+	}
+
 	// Fix 3-digit timezone formats like +200 -> +0200
 	if match := threeDigitTimezoneRe.FindStringSubmatch(dateStr); len(match) == 3 {
 		sign := match[1]
