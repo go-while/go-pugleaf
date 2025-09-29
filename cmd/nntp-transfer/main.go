@@ -1112,6 +1112,10 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 
 				batchTransferred, batchChecked, TTsuccessRate, berr := processBatch(conn, newsgroup.Name, ttMode, articles[i:end])
 				if berr != nil {
+					if proc.WantShutdown(shutdownChan) {
+						log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
+						return transferred, checked, nil
+					}
 					conn.ForceClose = true
 					pool.Put(conn)
 					log.Printf("Error processing network batch for newsgroup %s: %v ... retry in %v", newsgroup.Name, berr, isleep)

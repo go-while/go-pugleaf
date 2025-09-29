@@ -20,7 +20,6 @@ var (
 	// Do NOT change this here! these are needed for runtime !
 	// validGroupNameRegex validates newsgroup names according to RFC standards
 	// Pattern: lowercase alphanumeric start, components separated by dots, no trailing dots/hyphens
-
 	SeparatorRegex            = regexp.MustCompile(`[,;:\s]+`)
 	validGroupNameRegexStrict = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$`)
 	validGroupNameRegexchar   = regexp.MustCompile(`^[a-zA-Z0-9]{1,255}$`)
@@ -269,6 +268,25 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 					log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (rewrote)", headerLine, i, article.MessageID)
 				}
 			}
+			
+			// Check for proper header format: "name: value" (colon followed by space)
+			colonIndex := strings.Index(headerLine, ":")
+			if colonIndex == -1 {
+				log.Printf("Invalid header (no colon): '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
+				ignoreLine = true
+				ignoredLines++
+				continue
+			}
+			
+			// Check if header follows RFC format "name: value" (colon-space)
+			if colonIndex+1 >= len(headerLine) || headerLine[colonIndex+1] != ' ' {
+				// Malformed header - missing space after colon, skip it
+				log.Printf("Skipping malformed header (no colon-space): '%s' line=%d in msgId='%s'", headerLine, i, article.MessageID)
+				ignoreLine = true
+				ignoredLines++
+				continue
+			}
+			
 			header := strings.SplitN(headerLine, ":", 2)[0]
 			if len(header) == 0 {
 				log.Printf("Invalid header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
