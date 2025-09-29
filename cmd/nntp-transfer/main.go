@@ -338,11 +338,11 @@ func main() {
 			for _, article := range articles {
 				fmt.Printf("# %s: #%d : '%s' | orgDate='%s' parsed='%#v'\n", groupName, article.DBArtNum, article.MessageID, article.DateString, article.DateSent)
 				headers, err := common.ReconstructHeaders(article, true, &nntphostname)
+				fmt.Printf("### ORG HEADER: '%s'\n%s\n", article.MessageID, article.HeadersJSON)
 				if err != nil {
-					fmt.Printf("\n ! Error reconstructing headers for article %s: %v", article.MessageID, err)
+					fmt.Printf("! Error reconstructing headers for article %s: %v\n", article.MessageID, err)
 					continue
 				}
-				fmt.Printf("### ORG HEADER: '%s'\n%s\n", article.MessageID, article.HeadersJSON)
 				fmt.Printf("### NEW HEADER: '%s' REWRITE\n", article.MessageID)
 				for _, line := range headers {
 					fmt.Printf("%s\n", line)
