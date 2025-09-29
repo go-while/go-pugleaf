@@ -278,6 +278,11 @@ func main() {
 		backendConfig.ProxyUsername = proxyConfig.Username
 		backendConfig.ProxyPassword = proxyConfig.Password
 	}
+	nntphostname, err := db.GetConfigValue("local_nntp_hostname")
+	if err != nil || nntphostname == "" {
+		log.Printf("Failed to get local_nntp_hostname from database: %v", err)
+		os.Exit(1)
+	}
 
 	pool := nntp.NewPool(backendConfig)
 	defer pool.ClosePool()
@@ -302,7 +307,6 @@ func main() {
 	if proc == nil {
 		log.Fatalf("Failed to create processor")
 	}
-
 	// Set up shutdown handling
 	shutdownChan := make(chan struct{})
 	transferDoneChan := make(chan error, 1)
@@ -328,14 +332,24 @@ func main() {
 		debugMutex.Lock()
 		defer debugMutex.Unlock()
 		// process debugCapture
+
 		for groupName, articles := range debugArticles {
-			log.Printf("Debug capture - Newsgroup: %s, Articles: %d", groupName, len(articles))
+			fmt.Printf("Debug capture - Newsgroup: %s, Articles: %d\n", groupName, len(articles))
 			for _, article := range articles {
-				fmt.Printf("\n %s: #%d : '%s' | orgDate='%s' parsed='%s'", groupName, article.DBArtNum, article.MessageID, article.DateSent, article.DateString)
-				fmt.Printf("\n Header dump:\n%s", article.HeadersJSON)
-				fmt.Printf("\n### HEADER EOF body=%d ###", len(article.BodyText))
-				fmt.Printf("\n%s", article.BodyText)
-				fmt.Printf("\n### BODY EOF '%s' ###\n", article.MessageID)
+				fmt.Printf("# %s: #%d : '%s' | orgDate='%s' parsed='%s'\n", groupName, article.DBArtNum, article.MessageID, article.DateSent, article.DateString)
+				headers, err := common.ReconstructHeaders(article, true, &nntphostname)
+				if err != nil {
+					fmt.Printf("\n ! Error reconstructing headers for article %s: %v", article.MessageID, err)
+					continue
+				}
+				fmt.Printf("### ORG HEADER: '%s'\n%s\n", article.MessageID, article.HeadersJSON)
+				fmt.Printf("### NEW HEADER: '%s' REWRITE\n", article.MessageID)
+				for _, line := range headers {
+					fmt.Printf("%s\n", line)
+				}
+				fmt.Printf("### EOF HEADER '%s' bodyBytes=%d ###\n\n", article.MessageID, len(article.BodyText))
+				//fmt.Printf("%s\n", article.BodyText)
+				//fmt.Printf("### BODY EOF '%s' ###\n\n", article.MessageID)
 			}
 		}
 		transferDoneChan <- result
