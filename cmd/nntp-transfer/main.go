@@ -336,7 +336,7 @@ func main() {
 		for groupName, articles := range debugArticles {
 			fmt.Printf("Debug capture - Newsgroup: %s, Articles: %d\n", groupName, len(articles))
 			for _, article := range articles {
-				fmt.Printf("# %s: #%d : '%s' | orgDate='%s' parsed='%s'\n", groupName, article.DBArtNum, article.MessageID, article.DateSent, article.DateString)
+				fmt.Printf("# %s: #%d : '%s' | orgDate='%s' parsed='%#v'\n", groupName, article.DBArtNum, article.MessageID, article.DateString, article.DateSent)
 				headers, err := common.ReconstructHeaders(article, true, &nntphostname)
 				if err != nil {
 					fmt.Printf("\n ! Error reconstructing headers for article %s: %v", article.MessageID, err)
