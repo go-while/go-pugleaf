@@ -1089,21 +1089,25 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			if end > len(articles) {
 				end = len(articles)
 			}
+			// forever: will process this batch until successful or shutdown
 		forever:
 			for {
 				if proc.WantShutdown(shutdownChan) {
 					log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
 					return transferred, checked, nil
 				}
+				if isleep > time.Minute {
+					isleep = time.Minute
+				}
+				if isleep > time.Second {
+					time.Sleep(isleep)
+					log.Printf("Newsgroup: '%s' | Sleeping %v before retrying batch %d-%d (transferred %d so far)", newsgroup.Name, isleep, i+1, end, transferred)
+				}
 				// Get connection from pool
 				conn, err := pool.Get(nntp.MODE_STREAM_MV)
 				if err != nil {
-					time.Sleep(isleep)
-					isleep = time.Duration(int64(isleep) * 2)
-					if isleep > time.Minute {
-						isleep = time.Minute
-					}
-					log.Printf("newsgroup: %s: Failed to get connection from pool: %v", newsgroup.Name, err)
+					isleep = isleep * 2
+					log.Printf("Newsgroup: '%s' | Failed to get connection from pool: %v", newsgroup.Name, err)
 					continue forever
 				}
 
@@ -1118,27 +1122,17 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 
 				batchTransferred, batchChecked, TTsuccessRate, berr := processBatch(conn, newsgroup.Name, ttMode, articles[i:end])
 				if berr != nil {
-					if proc.WantShutdown(shutdownChan) {
-						log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
-						return transferred, checked, nil
-					}
 					conn.ForceClose = true
 					pool.Put(conn)
-					log.Printf("Error processing network batch for newsgroup %s: %v ... retry in %v", newsgroup.Name, berr, isleep)
-					time.Sleep(isleep)
-					isleep = time.Duration(int64(isleep) * 2)
-					if isleep > time.Minute {
-						isleep = time.Minute
-					}
+					log.Printf("Newsgroup: '%s' | Error processing network batch: %v ... retry", newsgroup.Name, berr)
+					isleep = isleep * 2
 					continue forever
 				}
-				isleep = time.Second
 				pool.Put(conn)
 				transferred += batchTransferred
 				checked += batchChecked
-
 				if VERBOSE || (transferred >= 1000 && transferred%1000 == 0) || (checked >= 1000 && checked%1000 == 0) {
-					log.Printf("Newsgroup: '%s' | Batch (offset %d/%d) %d-%d TX:%d check=%t ttRate=%.1f%% checked=%d", newsgroup.Name, offset, totalArticles, i+1, end, batchTransferred, ttMode.useCheckMode, TTsuccessRate, batchChecked)
+					log.Printf("Newsgroup: '%s' | BatchDone (offset %d/%d) %d-%d TX:%d check=%t ttRate=%.1f%% checked=%d", newsgroup.Name, offset, totalArticles, i+1, end, batchTransferred, ttMode.useCheckMode, TTsuccessRate, batchChecked)
 				}
 				break forever
 			}

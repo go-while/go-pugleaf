@@ -263,10 +263,10 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			}
 			// check if first char is lowercase
 			if unicode.IsLower(rune(headerLine[0])) {
-				headerLine = strings.ToUpper(string(headerLine[0])) + headerLine[1:]
 				if VerboseHeaders {
-					log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (rewrote)", headerLine, i, article.MessageID)
+					log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (rewrite)", headerLine, i, article.MessageID)
 				}
+				headerLine = strings.ToUpper(string(headerLine[0])) + headerLine[1:]
 			}
 
 			// Check for proper header format: "name: value" (colon followed by space)
@@ -281,7 +281,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			// Check if header follows RFC format "name: value" (colon-space)
 			if colonIndex+1 >= len(headerLine) || headerLine[colonIndex+1] != ' ' {
 				// Malformed header - missing space after colon, skip it
-				log.Printf("Skipping malformed header (no colon-space): '%s' line=%d in msgId='%s'", headerLine, i, article.MessageID)
+				log.Printf("Malformed header (no colon-space): '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
 				ignoreLine = true
 				ignoredLines++
 				continue
@@ -290,7 +290,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			header := strings.SplitN(headerLine, ":", 2)[0]
 			// extracted header key. do some checks
 			if header == "" || strings.Contains(header, " ") {
-				log.Printf("Invalid header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
+				log.Printf("Invalid header (empty or contains space): '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
 				ignoreLine = true
 				ignoredLines++
 				continue
@@ -299,14 +299,15 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				ignoreLine = true
 				continue
 			}
-			if IgnoreGoogleHeaders && strings.HasPrefix(strings.ToLower(header), "x-google") {
+			if IgnoreGoogleHeaders && strings.HasPrefix(strings.ToLower(header), "x-goo") {
 				ignoreLine = true
+				ignoredLines++
 				continue
 			}
 
 			if !strings.HasPrefix(header, "X-") {
 				if headersMap[strings.ToLower(header)] {
-					log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (rewrite to X-RW-)", headerLine, i, article.MessageID)
+					log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (rewrite)", headerLine, i, article.MessageID)
 					headerLine = "X-RW-" + headerLine
 					//ignoreLine = true
 					//continue
