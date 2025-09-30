@@ -268,7 +268,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 					log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (rewrote)", headerLine, i, article.MessageID)
 				}
 			}
-			
+
 			// Check for proper header format: "name: value" (colon followed by space)
 			colonIndex := strings.Index(headerLine, ":")
 			if colonIndex == -1 {
@@ -277,7 +277,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				ignoredLines++
 				continue
 			}
-			
+
 			// Check if header follows RFC format "name: value" (colon-space)
 			if colonIndex+1 >= len(headerLine) || headerLine[colonIndex+1] != ' ' {
 				// Malformed header - missing space after colon, skip it
@@ -286,9 +286,10 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				ignoredLines++
 				continue
 			}
-			
+
 			header := strings.SplitN(headerLine, ":", 2)[0]
-			if len(header) == 0 {
+			// extracted header key. do some checks
+			if header == "" || strings.Contains(header, " ") {
 				log.Printf("Invalid header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
 				ignoreLine = true
 				ignoredLines++
@@ -327,9 +328,23 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 					}
 				}
 
-				newsgroups := SeparatorRegex.Split(headerLine, -1)
+				// Extract only the newsgroups value (after "Newsgroups: ")
+				parts := strings.SplitN(headerLine, ":", 2)
+				if len(parts) != 2 {
+					log.Printf("Invalid Newsgroups header format: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
+					ignoreLine = true
+					ignoredLines++
+					continue
+				}
+				newsgroupsValue := strings.TrimSpace(parts[1])
+
+				newsgroups := SeparatorRegex.Split(newsgroupsValue, -1)
 				for _, group := range newsgroups {
 					trimmedNG := strings.TrimSpace(group)
+					// Clean up trailing semicolons and other unwanted characters
+					trimmedNG = strings.TrimRight(trimmedNG, ";:,")
+					trimmedNG = strings.TrimSpace(trimmedNG) // Trim again after removing punctuation
+
 					if trimmedNG == "" || !IsValidGroupName(trimmedNG) {
 						badGroups++
 						continue

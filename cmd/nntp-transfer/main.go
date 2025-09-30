@@ -1098,7 +1098,13 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 				// Get connection from pool
 				conn, err := pool.Get(nntp.MODE_STREAM_MV)
 				if err != nil {
-					return transferred, checked, fmt.Errorf("failed to get connection from pool: %v", err)
+					time.Sleep(isleep)
+					isleep = time.Duration(int64(isleep) * 2)
+					if isleep > time.Minute {
+						isleep = time.Minute
+					}
+					log.Printf("newsgroup: %s: Failed to get connection from pool: %v", newsgroup.Name, err)
+					continue forever
 				}
 
 				if conn.ModeReader {
