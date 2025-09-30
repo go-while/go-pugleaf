@@ -1072,9 +1072,8 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, erro
 	//var outoforder []CheckResponse
 	for i, msgID := range messageIDs {
 		id := commandIds[i]
-		c.textConn.StartResponse(id)
-
 		// Read response for this CHECK command
+		c.textConn.StartResponse(id)
 		code, line, err := c.textConn.ReadCodeLine(238)
 		c.textConn.EndResponse(id)
 		if code == 0 && err != nil {
@@ -1348,14 +1347,14 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 	c.textConn.StartResponse(id)
 	// Read response to POST command
 	code, line, err := c.textConn.ReadCodeLine(340)
+	c.textConn.EndResponse(id)
 	if err != nil && code == 0 {
-		c.textConn.EndResponse(id)
 		return code, fmt.Errorf("POST command failed: %s", line)
 	}
 
 	switch code {
 	case 340:
-		defer c.textConn.EndResponse(id)
+		// pass, posted
 
 	case 401:
 		if strings.ToLower(line) == "mode reader" {
@@ -1369,13 +1368,12 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 				return 0, fmt.Errorf("failed to send POST command: %w", err)
 			}
 			c.textConn.StartResponse(id)
+			defer c.textConn.EndResponse(id)
 			// Read response to POST command
 			code, line, err = c.textConn.ReadCodeLine(340)
 			if err != nil {
-				c.textConn.EndResponse(id)
 				return code, fmt.Errorf("POST command failed: %s", line)
 			}
-			defer c.textConn.EndResponse(id)
 			c.ModeReader = true
 		}
 	}
