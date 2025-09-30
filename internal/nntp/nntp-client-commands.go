@@ -1032,13 +1032,6 @@ func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
 	}, nil
 }
 
-// CheckResponse represents a response to CHECK command
-type CheckResponse struct {
-	MessageID *string
-	Wanted    bool
-	Code      int
-}
-
 // CheckMultiple sends a CHECK command for multiple message IDs and returns responses
 func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) (chan *string, error) {
 	c.mu.Lock()
