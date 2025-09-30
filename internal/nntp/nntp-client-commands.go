@@ -1060,16 +1060,21 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 			}
 			commandIdsChan <- id
 		}
+		close(commandIdsChan)
 	}()
 
 	// Read responses for each CHECK command
 	responses := make(chan *string, len(messageIDs))
 	defer close(responses)
-	var id uint
 	for _, msgID := range messageIDs {
+		var id uint
 		select {
-		case id = <-commandIdsChan:
+		case rid, ok := <-commandIdsChan:
+			if !ok {
+				break
+			}
 			// Command ID is ready
+			id = rid
 		case err := <-errchan:
 			return nil, err
 		}
