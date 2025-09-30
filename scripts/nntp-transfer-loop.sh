@@ -5,8 +5,8 @@
 #
 
 # Default values
-START_YEAR=${1:-1992}
-END_YEAR=${2:-1996}
+START_YEAR=${1:-1996}
+END_YEAR=${2:-1997}
 
 echo "# nntp-transfer: month-by-month processing"
 echo "# Start year: $START_YEAR"
@@ -54,7 +54,7 @@ for year in $(seq $START_YEAR $((END_YEAR - 1))); do
         test -e ".stop" && exit 123
         # Generate the command
         echo -n "$(date) --- Processing $start_date to $end_date:"
-        ./nntp-transfer -max-threads=16 -batch-check=100 -date-beg $start_date -date-end $end_date -host usenet.blueworldhosting.com -port 433 -ssl=false -group "\$all" -file-include newsgroups.txt -force-include-only > /var/www/html/rocksolid/transfer-live.txt 2>&1
+        ./nntp-transfer -max-threads=1 -batch-check=1000 -batch-db=10000 -date-beg $start_date -date-end $end_date -host usenet.blueworldhosting.com -port 433 -ssl=false -group "\$all" -file-include newsgroups.txt -force-include-only > /var/www/html/rocksolid/transfer-live.txt 2>&1
         mv /var/www/html/rocksolid/transfer-live.txt /var/www/html/rocksolid/transfer-${year}-${month_padded}.txt
         echo " done @ http://199.115.116.171/rocksolid/transfer-${year}-${month_padded}.txt"
 
