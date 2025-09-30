@@ -1040,10 +1040,9 @@ type CheckResponse struct {
 }
 
 // CheckMultiple sends a CHECK command for multiple message IDs and returns responses
-func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) (chan *CheckResponse, error) {
+func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) (chan *string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	if !c.connected {
 		return nil, fmt.Errorf("not connected")
 	}
@@ -1073,8 +1072,8 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 	}(&mux)
 
 	// Read responses for each CHECK command
-	responses := make(chan *CheckResponse, len(messageIDs))
-	//var outoforder []CheckResponse
+	responses := make(chan *string, len(messageIDs))
+	defer close(responses)
 	var id uint
 	for _, msgID := range messageIDs {
 		select {
@@ -1105,36 +1104,18 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 		}
 		if parts[0] != *msgID {
 			log.Printf("Mismatched CHECK response: expected %s, got %s", *msgID, parts[0])
-			/*
-				outoforder = append(outoforder, CheckResponse{
-					MessageID: &parts[0],
-					Code:      code,
-					Wanted:    code == 238, // 238 means article wanted
-				})
-			*/
 			return nil, fmt.Errorf("out of order CHECK response: expected %s, got %s", *msgID, parts[0])
 		}
-
-		responses <- &CheckResponse{
-			MessageID: msgID,       // First part is the message ID
-			Wanted:    code == 238, // 238 means article wanted
+		if code == 238 {
+			//log.Printf("Wanted Article '%s': response=%d", *msgID, code)
+			responses <- msgID // wanted
+		} else {
+			//log.Printf("Unwanted Article '%s': response=%d", *msgID, code)
+			ttMode.Unwanted++
+			responses <- nil // counts as checked but unwanted
 		}
 	}
-	/*
-		for _, resp := range outoforder {
-			for _, msgID := range messageIDs {
-				if *resp.MessageID == *msgID {
-					responses = append(responses, CheckResponse{
-						MessageID: msgID, // First part is the message ID
-						Code:      resp.Code,
-						Wanted:    resp.Wanted,
-					})
-				}
-			}
-		}
-	*/
 	// Return all responses
-
 	return responses, nil
 }
 
