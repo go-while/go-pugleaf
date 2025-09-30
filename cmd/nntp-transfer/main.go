@@ -1570,9 +1570,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		default:
 			ttMode.TX_Errors++
 			log.Printf("ERROR Newsgroup: '%s' | Failed to transfer article '%s': response=%d (i=%d/%d)", newsgroup, article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
-			conn.ForceClose = true
-			conn.Pool.Put(conn)
-			return transferred, redis_cached, fmt.Errorf("failed to transfer article '%s': response=%d", article.MessageID, takeThisResponseCode)
+			continue
 		}
 		if redisCli != nil {
 			done = append(done, &article.MessageID)
