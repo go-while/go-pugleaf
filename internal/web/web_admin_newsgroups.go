@@ -20,6 +20,9 @@ func buildNewsgroupAdminRedirectURL(c *gin.Context) string {
 	if search := c.PostForm("search"); search != "" {
 		redirectURL += "&search=" + search
 	}
+	if searchDesc := c.PostForm("search_description"); searchDesc == "on" {
+		redirectURL += "&search_description=on"
+	}
 	if page := c.PostForm("ng_page"); page != "" {
 		redirectURL += "&ng_page=" + page
 	}

@@ -59,13 +59,14 @@
                   <div class="row mb-3">
                       <div class="col-12">
                           <div class="alert alert-light border">
-                              <form method="POST" id="bulkActionsForm">
+                                  <form method="POST" id="bulkActionsForm">
                                   {{if .NewsgroupSearch}}
                                   <input type="hidden" name="search" value="{{.NewsgroupSearch}}">
                                   {{end}}
-                                  <input type="hidden" name="ng_page" value="{{.NewsgroupPagination.CurrentPage}}">
-
-                                  <div class="d-flex align-items-center justify-content-between">
+                                  {{if .SearchDescription}}
+                                  <input type="hidden" name="search_description" value="on">
+                                  {{end}}
+                                  <input type="hidden" name="ng_page" value="{{.NewsgroupPagination.CurrentPage}}">                                  <div class="d-flex align-items-center justify-content-between">
                                       <div class="d-flex align-items-center">
                                           <input type="checkbox" id="selectAll" class="form-check-input me-2" onchange="toggleAllCheckboxes()">
                                           <label for="selectAll" class="form-check-label me-3">Select All</label>
@@ -123,6 +124,9 @@
                                         {{if $.NewsgroupSearch}}
                                         <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
                                         {{end}}
+                                        {{if $.SearchDescription}}
+                                        <input type="hidden" name="search_description" value="on">
+                                        {{end}}
                                         <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                         {{if .Active}}
                                         <button type="submit" class="btn btn-outline-success btn-sm">
@@ -176,6 +180,9 @@
                                           {{if $.NewsgroupSearch}}
                                           <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
                                           {{end}}
+                                          {{if $.SearchDescription}}
+                                          <input type="hidden" name="search_description" value="on">
+                                          {{end}}
                                           <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                           <select class="form-select form-select-sm" name="section_id" onchange="this.form.submit()">
                                               <option value="0" {{if eq $currentSectionID 0}}selected{{end}}>No Section</option>
@@ -206,6 +213,9 @@
                                               {{if $.NewsgroupSearch}}
                                               <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
                                               {{end}}
+                                              {{if $.SearchDescription}}
+                                              <input type="hidden" name="search_description" value="on">
+                                              {{end}}
                                               <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                               <button type="submit" class="btn btn-outline-primary btn-sm"
                                                       title="Fix Activity recalculates last activity timestamp for this newsgroup">
@@ -217,6 +227,9 @@
                                               {{if $.NewsgroupSearch}}
                                               <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
                                               {{end}}
+                                              {{if $.SearchDescription}}
+                                              <input type="hidden" name="search_description" value="on">
+                                              {{end}}
                                               <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                               <button type="submit" class="btn btn-outline-info btn-sm"
                                                       title="Fix Thread Activity recalculates thread last_activity timestamps that may be incorrectly set to future dates.">
@@ -227,6 +240,9 @@
                                               <input type="hidden" name="newsgroup_name" value="{{.Name}}">
                                               {{if $.NewsgroupSearch}}
                                               <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                              {{end}}
+                                              {{if $.SearchDescription}}
+                                              <input type="hidden" name="search_description" value="on">
                                               {{end}}
                                               <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                               <button type="submit" class="btn btn-outline-warning btn-sm"
@@ -243,6 +259,9 @@
                                               <input type="hidden" name="name" value="{{.Name}}">
                                               {{if $.NewsgroupSearch}}
                                               <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                              {{end}}
+                                              {{if $.SearchDescription}}
+                                              <input type="hidden" name="search_description" value="on">
                                               {{end}}
                                               <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                               <button type="submit" class="btn btn-outline-danger btn-sm"
@@ -417,6 +436,7 @@
                 <div class="modal-body">
                     <input type="hidden" id="edit_newsgroup_original_name" name="original_name">
                     <input type="hidden" id="edit_search_term" name="search" value="{{.NewsgroupSearch}}">
+                    <input type="hidden" id="edit_search_description" name="search_description" value="{{if .SearchDescription}}on{{end}}">
                     <input type="hidden" id="edit_ng_page" name="ng_page" value="{{.NewsgroupPagination.CurrentPage}}">
 
                     <div class="mb-3">
