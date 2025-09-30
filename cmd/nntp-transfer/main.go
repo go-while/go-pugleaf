@@ -109,7 +109,7 @@ func main() {
 		proxyPassword = flag.String("proxy-password", "", "Proxy authentication password")
 
 		// Transfer configuration
-		batchCheck      = flag.Int("batch-check", 25, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
+		batchCheck      = flag.Int("batch-check", 100, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
 		batchDB         = flag.Int64("batch-db", 1000, "Fetch N articles from DB in a batch")
 		maxThreads      = flag.Int("max-threads", 1, "Transfer N newsgroups in concurrent threads. Each thread uses 1 connection.")
 		redisCache      = flag.Bool("redis-cache", true, "Use Redis caching for message IDs")
@@ -155,8 +155,8 @@ func main() {
 	}
 
 	// Validate batch size
-	if *batchCheck < 1 || *batchCheck > 100 {
-		log.Fatalf("Error: batch-check must be between 1 and 100 (got %d)", *batchCheck)
+	if *batchCheck < 1 || *batchCheck > 1000 {
+		log.Fatalf("Error: batch-check must be between 1 and 1000 (got %d)", *batchCheck)
 	}
 
 	// Validate batch size
