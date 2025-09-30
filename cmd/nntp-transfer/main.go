@@ -1100,14 +1100,14 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 					isleep = time.Minute
 				}
 				if isleep > time.Second {
-					time.Sleep(isleep)
 					log.Printf("Newsgroup: '%s' | Sleeping %v before retrying batch %d-%d (transferred %d so far)", newsgroup.Name, isleep, i+1, end, transferred)
+					time.Sleep(isleep)
 				}
 				// Get connection from pool
 				conn, err := pool.Get(nntp.MODE_STREAM_MV)
 				if err != nil {
-					isleep = isleep * 2
 					log.Printf("Newsgroup: '%s' | Failed to get connection from pool: %v", newsgroup.Name, err)
+					isleep = isleep * 2
 					continue forever
 				}
 
@@ -1122,9 +1122,9 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 
 				batchTransferred, batchChecked, TTsuccessRate, berr := processBatch(conn, newsgroup.Name, ttMode, articles[i:end])
 				if berr != nil {
+					log.Printf("Newsgroup: '%s' | Error processing network batch: %v ... retry", newsgroup.Name, berr)
 					conn.ForceClose = true
 					pool.Put(conn)
-					log.Printf("Newsgroup: '%s' | Error processing network batch: %v ... retry", newsgroup.Name, berr)
 					isleep = isleep * 2
 					continue forever
 				}
