@@ -67,6 +67,11 @@ func showUsageExamples() {
 	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.* -file-include include.txt -force-include-only")
 	fmt.Println("  # Applies -group pattern first, then only transfers newsgroups that also match include file patterns")
 	fmt.Println()
+	fmt.Println("Redis Cache Management:")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.test -redis-cache=true -redis-ttl 86400")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.test -redis-clear-cache")
+	fmt.Println("  # Use -redis-clear-cache to start fresh (clears all cached message IDs)")
+	fmt.Println()
 
 	fmt.Println("Show ALL command line flags:")
 	fmt.Println("  ./nntp-transfer -h")
@@ -104,14 +109,15 @@ func main() {
 		proxyPassword = flag.String("proxy-password", "", "Proxy authentication password")
 
 		// Transfer configuration
-		batchCheck = flag.Int("batch-check", 25, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
-		batchDB    = flag.Int64("batch-db", 1000, "Fetch N articles from DB in a batch")
-		maxThreads = flag.Int("max-threads", 1, "Transfer N newsgroups in concurrent threads. Each thread uses 1 connection.")
-		redisCache = flag.Bool("redis-cache", true, "Use Redis caching for message IDs")
-		redisAddr  = flag.String("redis-addr", "localhost:6379", "Redis server address")
-		redisPass  = flag.String("redis-pass", "", "Redis server password")
-		redisTTL   = flag.Uint("redis-ttl", 3600, "Redis cache TTL in seconds (default: 3600 = 1 hour)")
-		redisDB    = flag.Int("redis-db", 0, "Redis database number")
+		batchCheck      = flag.Int("batch-check", 25, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
+		batchDB         = flag.Int64("batch-db", 1000, "Fetch N articles from DB in a batch")
+		maxThreads      = flag.Int("max-threads", 1, "Transfer N newsgroups in concurrent threads. Each thread uses 1 connection.")
+		redisCache      = flag.Bool("redis-cache", true, "Use Redis caching for message IDs")
+		redisAddr       = flag.String("redis-addr", "localhost:6379", "Redis server address")
+		redisPass       = flag.String("redis-pass", "", "Redis server password")
+		redisTTL        = flag.Uint("redis-ttl", 3600, "Redis cache TTL in seconds (default: 3600 = 1 hour)")
+		redisDB         = flag.Int("redis-db", 0, "Redis database number")
+		redisClearCache = flag.Bool("redis-flushdb", false, " Warning! THIS DELETES ALL CACHED DATA on startup by executing FlushDB which flushes ALL keys in the selected Redis DB!")
 
 		// Operation options
 		dryRun   = flag.Bool("dry-run", false, "Show what would be transferred without actually sending")
@@ -241,6 +247,25 @@ func main() {
 			log.Printf("Failed to create Redis client")
 		} else {
 			defer redisCli.Close()
+
+			// Test Redis connection
+			if err := redisCli.Ping(redisCtx).Err(); err != nil {
+				log.Printf("WARNING: Redis connection test failed: %v", err)
+				log.Printf("Continuing without Redis cache...")
+				redisCli = nil
+			} else {
+				log.Printf("Redis connection established: %s (DB: %d)", *redisAddr, *redisDB)
+
+				// Clear Redis cache if requested
+				if *redisClearCache {
+					log.Printf("Clearing Redis cache (DB: %d)...", *redisDB)
+					if err := redisCli.FlushDB(redisCtx).Err(); err != nil {
+						log.Printf("ERROR: Failed to clear Redis cache: %v", err)
+					} else {
+						log.Printf("Redis cache cleared successfully")
+					}
+				}
+			}
 		}
 	}
 
