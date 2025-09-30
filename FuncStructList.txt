@@ -7,11 +7,10 @@
 ./cmd/import-flat-files/main.go:193:type FileScanner struct {
 ./cmd/import-flat-files/main.go:57:type Article struct {
 ./cmd/import-flat-files/main.go:69:type DBManager struct {
-./cmd/merge-active/main.go:20:type ActiveEntry struct {
-./cmd/merge-active/main.go:30:type OverviewEntry struct {
+./cmd/merge-active/main.go:21:type ActiveEntry struct {
+./cmd/merge-active/main.go:31:type OverviewEntry struct {
 ./cmd/nntp-server/processor_adapter.go:10:type ProcessorAdapter struct {
-./cmd/nntp-transfer/main.go:346:type ProxyConfig struct {
-./cmd/nntp-transfer/main.go:636:type takeThisMode struct {
+./cmd/nntp-transfer/main.go:503:type ProxyConfig struct {
 ./cmd/recover-db/main.go:20:type GroupResult struct {
 ./cmd/recover-db/main.go:676:type DateProblem struct {
 ./cmd/tcp2tor/main.go:28:type ProxyConfig struct {
@@ -25,16 +24,16 @@
 ./internal/cache/newsgroup_cache.go:38:type NewsgroupCache struct {
 ./internal/cache/sanitized_cache.go:12:type SanitizedArticle struct {
 ./internal/cache/sanitized_cache.go:30:type SanitizedCache struct {
-./internal/config/config.go:31:type MainConfig struct {
-./internal/config/config.go:53:type Provider struct {
-./internal/config/config.go:76:type ServerConfig struct {
-./internal/config/config.go:92:type DatabaseConfig struct {
-./internal/config/config.go:99:type WebConfig struct {
+./internal/config/config.go:113:type ServerConfig struct {
+./internal/config/config.go:129:type DatabaseConfig struct {
+./internal/config/config.go:136:type WebConfig struct {
+./internal/config/config.go:68:type MainConfig struct {
+./internal/config/config.go:90:type Provider struct {
 ./internal/database/article_cache.go:13:type ArticleCacheEntry struct {
 ./internal/database/article_cache.go:22:type ArticleCache struct {
 ./internal/database/config_cache.go:10:type ConfigCache struct {
-./internal/database/database.go:197:type Stats struct {
-./internal/database/database.go:37:		type dbAge struct {
+./internal/database/database.go:186:type Stats struct {
+./internal/database/database.go:38:		type dbAge struct {
 ./internal/database/db_apitokens.go:11:type APIToken struct {
 ./internal/database/db_batch.go:114:type BatchTasks struct {
 ./internal/database/db_batch.go:1215:type threadCacheUpdateData struct {
@@ -44,17 +43,18 @@
 ./internal/database/db_batch.go:73:type ThreadCacheBatch struct {
 ./internal/database/db_batch.go:99:type SQ3batch struct {
 ./internal/database/db_groupdbs.go:17:type GroupDBs struct {
-./internal/database/db_init.go:32:type Database struct {
-./internal/database/db_init.go:60:type DBConfig struct {
+./internal/database/db_init.go:33:type Database struct {
+./internal/database/db_init.go:61:type DBConfig struct {
 ./internal/database/db_migrate.go:45:type MigrationFile struct {
 ./internal/database/db_post_queue.go:11:type PostQueueEntry struct {
+./internal/database/db_post_queue.go:168:type PostQueueEntryWithDetails struct {
 ./internal/database/db_rescan.go:59:type ConsistencyReport struct {
 ./internal/database/db_rescan.go:889:type ThreadRebuildReport struct {
 ./internal/database/groups_hashmap.go:31:type HashedEntry struct {
 ./internal/database/groups_hashmap.go:36:type GroupEntry struct {
 ./internal/database/groups_hashmap.go:41:type GHmap struct {
-./internal/database/hierarchy_cache.go:167:	type subLevel struct {
 ./internal/database/hierarchy_cache.go:16:type HierarchyCache struct {
+./internal/database/hierarchy_cache.go:170:	type subLevel struct {
 ./internal/database/nntp_auth_cache.go:11:type AuthCacheEntry struct {
 ./internal/database/nntp_auth_cache.go:19:type NNTPAuthCache struct {
 ./internal/database/progress.go:16:type ProgressDB struct {
@@ -111,33 +111,33 @@
 ./internal/models/models.go:119:type UserPermission struct {
 ./internal/models/models.go:127:type Article struct {
 ./internal/models/models.go:14:type Hierarchy struct {
-./internal/models/models.go:200:type Thread struct {
-./internal/models/models.go:210:type ForumThread struct {
+./internal/models/models.go:201:type Thread struct {
+./internal/models/models.go:211:type ForumThread struct {
 ./internal/models/models.go:24:type Provider struct {
-./internal/models/models.go:336:type PaginatedResponse struct {
-./internal/models/models.go:347:type PaginationInfo struct {
-./internal/models/models.go:390:type Section struct {
-./internal/models/models.go:403:type SectionGroup struct {
-./internal/models/models.go:414:type ActiveNewsgroup struct {
-./internal/models/models.go:434:type APIToken struct {
-./internal/models/models.go:447:type AIModel struct {
-./internal/models/models.go:461:type NNTPUser struct {
-./internal/models/models.go:475:type NNTPSession struct {
-./internal/models/models.go:486:type Setting struct {
-./internal/models/models.go:492:type SiteNews struct {
+./internal/models/models.go:332:type PaginatedResponse struct {
+./internal/models/models.go:343:type PaginationInfo struct {
+./internal/models/models.go:386:type Section struct {
+./internal/models/models.go:399:type SectionGroup struct {
+./internal/models/models.go:415:type ActiveNewsgroup struct {
+./internal/models/models.go:435:type APIToken struct {
+./internal/models/models.go:448:type AIModel struct {
+./internal/models/models.go:462:type NNTPUser struct {
+./internal/models/models.go:476:type NNTPSession struct {
+./internal/models/models.go:487:type Setting struct {
+./internal/models/models.go:493:type SiteNews struct {
 ./internal/models/models.go:49:type Newsgroup struct {
-./internal/models/models.go:503:type SpamTracking struct {
-./internal/models/models.go:510:type CronJob struct {
+./internal/models/models.go:504:type SpamTracking struct {
+./internal/models/models.go:511:type CronJob struct {
 ./internal/models/models.go:72:type Overview struct {
 ./internal/models/models.go:91:type User struct {
 ./internal/nntp/nntp-article-common.go:26:type ArticleRetrievalResult struct {
+./internal/nntp/nntp-article-common.go:35:type TakeThisMode struct {
 ./internal/nntp/nntp-auth-manager.go:12:type AuthManager struct {
 ./internal/nntp/nntp-backend-pool.go:15:type Pool struct {
-./internal/nntp/nntp-backend-pool.go:405:type PoolStats struct {
+./internal/nntp/nntp-backend-pool.go:406:type PoolStats struct {
 ./internal/nntp/nntp-cache-local.go:11:type Local430 struct {
 ./internal/nntp/nntp-cache-local.go:57:type CacheMessageIDNumtoGroup struct {
 ./internal/nntp/nntp-cache-local.go:62:type ItemCMIDNG struct {
-./internal/nntp/nntp-client-commands.go:1035:type CheckResponse struct {
 ./internal/nntp/nntp-client.go:107:type GroupInfo struct {
 ./internal/nntp/nntp-client.go:118:type OverviewLine struct {
 ./internal/nntp/nntp-client.go:130:type HeaderLine struct {
@@ -179,8 +179,10 @@
 ./internal/web/web_admin.go:11:type FlashMessage struct {
 ./internal/web/web_admin.go:17:type SpamArticleInfo struct {
 ./internal/web/web_admin.go:23:type AdminPageData struct {
+./internal/web/web_admin_newsgroups.go:565:	type threadInfo struct {
 ./internal/web/web_admin_ollama.go:18:type ProxyModelResponse struct {
 ./internal/web/web_admin_ollama.go:22:type ProxyModel struct {
+./internal/web/web_admin_settings_unified.go:17:type SettingConfig struct {
 ./internal/web/web_aichatPage.go:64:type ChatMessage struct {
 ./internal/web/web_aichatPage.go:70:type AIChatPageData struct {
 ./internal/web/web_auth.go:66:type AuthUser struct {
@@ -188,25 +190,25 @@
 ./internal/web/web_ircPage.go:12:type IRCPageData struct {
 ./internal/web/web_login.go:15:type LoginPageData struct {
 ./internal/web/web_newsPage.go:12:type NewsPageData struct {
-./internal/web/web_profile.go:16:type ProfilePageData struct {
+./internal/web/web_profile.go:17:type ProfilePageData struct {
 ./internal/web/web_registerPage.go:15:type RegisterPageData struct {
-./internal/web/webserver_core_routes.go:107:type HierarchiesPageData struct {
-./internal/web/webserver_core_routes.go:115:type HierarchyGroupsPageData struct {
-./internal/web/webserver_core_routes.go:124:type HierarchyTreePageData struct {
-./internal/web/webserver_core_routes.go:142:type HierarchyBreadcrumb struct {
-./internal/web/webserver_core_routes.go:149:type HierarchyNode struct {
-./internal/web/webserver_core_routes.go:157:type SectionPageData struct {
-./internal/web/webserver_core_routes.go:167:type SectionGroupPageData struct {
-./internal/web/webserver_core_routes.go:177:type SectionArticlePageData struct {
-./internal/web/webserver_core_routes.go:189:type SearchPageData struct {
+./internal/web/webserver_core_routes.go:108:type HierarchiesPageData struct {
+./internal/web/webserver_core_routes.go:116:type HierarchyGroupsPageData struct {
+./internal/web/webserver_core_routes.go:125:type HierarchyTreePageData struct {
+./internal/web/webserver_core_routes.go:143:type HierarchyBreadcrumb struct {
+./internal/web/webserver_core_routes.go:150:type HierarchyNode struct {
+./internal/web/webserver_core_routes.go:158:type SectionPageData struct {
+./internal/web/webserver_core_routes.go:169:type SectionGroupPageData struct {
+./internal/web/webserver_core_routes.go:179:type SectionArticlePageData struct {
+./internal/web/webserver_core_routes.go:191:type SearchPageData struct {
 ./internal/web/webserver_core_routes.go:25:type WebServer struct {
-./internal/web/webserver_core_routes.go:38:type TemplateData struct {
-./internal/web/webserver_core_routes.go:55:type GroupPageData struct {
-./internal/web/webserver_core_routes.go:64:type ArticlePageData struct {
-./internal/web/webserver_core_routes.go:76:type StatsPageData struct {
-./internal/web/webserver_core_routes.go:83:type GroupsPageData struct {
-./internal/web/webserver_core_routes.go:91:type GroupThreadsPageData struct {
-./internal/web/web_sitePostPage.go:22:type PostPageData struct {
+./internal/web/webserver_core_routes.go:39:type TemplateData struct {
+./internal/web/webserver_core_routes.go:56:type GroupPageData struct {
+./internal/web/webserver_core_routes.go:65:type ArticlePageData struct {
+./internal/web/webserver_core_routes.go:77:type StatsPageData struct {
+./internal/web/webserver_core_routes.go:84:type GroupsPageData struct {
+./internal/web/webserver_core_routes.go:92:type GroupThreadsPageData struct {
+./internal/web/web_sitePostPage.go:23:type PostPageData struct {
 ### Function Signatures
 ./cmd/history-rebuild/main.go:297:func (s *RebuildStats) PrintProgress() {
 ./cmd/history-rebuild/main.go:328:func (s *RebuildStats) PrintFinal() {
@@ -269,27 +271,23 @@
 ./internal/database/config_cache.go:142:func (cc *ConfigCache) GetCacheStats() map[string]interface{} {
 ./internal/database/config_cache.go:29:func (cc *ConfigCache) GetConfigValue(key string) (string, error) {
 ./internal/database/config_cache.go:73:func (cc *ConfigCache) RefreshCache() error {
-./internal/database/database.go:127:func (db *Database) removePartialInitializedGroupDB(groupName string) {
-./internal/database/database.go:134:func (db *Database) Shutdown() error {
-./internal/database/database.go:17:func (db *Database) GetMainDB() *sql.DB {
-./internal/database/database.go:192:func (db *Database) GetDataDir() string {
-./internal/database/database.go:213:func (db *Database) GetStats() *Stats {
-./internal/database/database.go:21:func (db *Database) CronDB() {
-./internal/database/database.go:257:func (db *Database) GetHistoryUseShortHashLen(defaultValue int) (int, bool, error) {
-./internal/database/database.go:289:func (db *Database) SetHistoryUseShortHashLen(value int) error {
-./internal/database/database.go:30:func (db *Database) cleanupIdleGroups() {
-./internal/database/database.go:332:func (db *Database) SetShutdownState(state string) error {
-./internal/database/database.go:362:func (db *Database) GetShutdownState() (string, error) {
-./internal/database/database.go:377:func (db *Database) InitializeSystemStatus(appVersion string, pid int, hostname string) error {
-./internal/database/database.go:401:func (db *Database) CheckPreviousShutdown() (bool, error) {
-./internal/database/database.go:418:func (db *Database) IsShuttingDown() bool {
-./internal/database/database.go:428:func (db *Database) GetNewsgroupID(groupName string) (int, error) {
-./internal/database/database.go:438:func (db *Database) IncrementArticleSpam(groupName string, articleNum int64) error {
-./internal/database/database.go:480:func (db *Database) IncrementArticleHide(groupName string, articleNum int64) error {
-./internal/database/database.go:496:func (db *Database) UnHideArticle(groupName string, articleNum int64) error {
-./internal/database/database.go:512:func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) error {
-./internal/database/database.go:569:func (db *Database) HasUserFlaggedSpam(userID int64, groupName string, articleNum int64) (bool, error) {
-./internal/database/database.go:590:func (db *Database) RecordUserSpamFlag(userID int64, groupName string, articleNum int64) error {
+./internal/database/database.go:128:func (db *Database) removePartialInitializedGroupDB(groupName string) {
+./internal/database/database.go:135:func (db *Database) Shutdown() error {
+./internal/database/database.go:181:func (db *Database) GetDataDir() string {
+./internal/database/database.go:18:func (db *Database) GetMainDB() *sql.DB {
+./internal/database/database.go:202:func (db *Database) GetDatabaseStats() *Stats {
+./internal/database/database.go:22:func (db *Database) CronDB() {
+./internal/database/database.go:250:func (db *Database) GetHistoryUseShortHashLen(defaultValue int) (int, bool, error) {
+./internal/database/database.go:282:func (db *Database) SetHistoryUseShortHashLen(value int) error {
+./internal/database/database.go:317:func (db *Database) InitializeSystemStatus(appVersion string) error {
+./internal/database/database.go:31:func (db *Database) cleanupIdleGroups() {
+./internal/database/database.go:343:func (db *Database) GetNewsgroupID(groupName string) (int, error) {
+./internal/database/database.go:353:func (db *Database) IncrementArticleSpam(groupName string, articleNum int64) error {
+./internal/database/database.go:395:func (db *Database) IncrementArticleHide(groupName string, articleNum int64) error {
+./internal/database/database.go:411:func (db *Database) UnHideArticle(groupName string, articleNum int64) error {
+./internal/database/database.go:427:func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) error {
+./internal/database/database.go:494:func (db *Database) HasUserFlaggedSpam(userID int64, groupName string, articleNum int64) (bool, error) {
+./internal/database/database.go:515:func (db *Database) RecordUserSpamFlag(userID int64, groupName string, articleNum int64) error {
 ./internal/database/db_aimodels.go:118:func (db *Database) CreateAIModel(postKey, ollamaModelName, displayName, description string, isActive, isDefault bool, sortOrder int) (*models.AIModel, error) {
 ./internal/database/db_aimodels.go:12:func (db *Database) GetActiveAIModels() ([]*models.AIModel, error) {
 ./internal/database/db_aimodels.go:152:func (db *Database) UpdateAIModel(id int, ollamaModelName, displayName, description string, isActive, isDefault bool, sortOrder int) error {
@@ -299,13 +297,13 @@
 ./internal/database/db_aimodels.go:45:func (db *Database) GetDefaultAIModel() (*models.AIModel, error) {
 ./internal/database/db_aimodels.go:72:func (db *Database) GetFirstActiveAIModel() (*models.AIModel, error) {
 ./internal/database/db_aimodels.go:96:func (db *Database) GetAIModelByPostKey(postKey string) (*models.AIModel, error) {
-./internal/database/db_apitokens.go:109:func (db *Database) UpdateTokenUsage(tokenID int) error {
+./internal/database/db_apitokens.go:109:func (db *Database) UpdateTokenUsage(tokenID int64) error {
 ./internal/database/db_apitokens.go:122:func (db *Database) ListAPITokens() ([]*APIToken, error) {
 ./internal/database/db_apitokens.go:154:func (db *Database) DisableAPIToken(tokenID int) error {
 ./internal/database/db_apitokens.go:164:func (db *Database) EnableAPIToken(tokenID int) error {
 ./internal/database/db_apitokens.go:174:func (db *Database) DeleteAPIToken(tokenID int) error {
 ./internal/database/db_apitokens.go:184:func (db *Database) CleanupExpiredTokens() (int, error) {
-./internal/database/db_apitokens.go:39:func (db *Database) CreateAPIToken(ownerName string, ownerID int, expiresAt *time.Time) (*APIToken, string, error) {
+./internal/database/db_apitokens.go:42:func (db *Database) CreateAPIToken(ownerName string, ownerID int64, expiresAt *time.Time) (*APIToken, string, error) {
 ./internal/database/db_apitokens.go:80:func (db *Database) ValidateAPIToken(plainToken string) (*APIToken, error) {
 ./internal/database/db_batch.go:1046:func (c *SQ3batch) batchUpdateReplyCounts(groupDBs *GroupDBs, parentCounts map[*string]int) error {
 ./internal/database/db_batch.go:1084:func (c *SQ3batch) findThreadRoot(groupDBs *GroupDBs, refs []string) (int64, error) {
@@ -358,11 +356,13 @@
 ./internal/database/db_groupdbs.go:172:func (db *GroupDBs) ExistsMsgIdInArticlesDB(messageID string) bool {
 ./internal/database/db_groupdbs.go:181:func (dbs *GroupDBs) Close(who string) error {
 ./internal/database/db_groupdbs.go:28:func (db *Database) GetGroupDBs(groupName string) (*GroupDBs, error) {
-./internal/database/db_init.go:225:func (db *Database) IsDBshutdown() bool {
-./internal/database/db_init.go:241:func (db *Database) initMainDB() error {
-./internal/database/db_init.go:282:func (db *Database) applySQLitePragmas(conn *sql.DB) error {
-./internal/database/db_init.go:310:func (db *Database) applySQLitePragmasGroupDB(conn *sql.DB) error {
-./internal/database/db_init.go:350:func (db *Database) LoadDefaultProviders() error {
+./internal/database/db_init.go:233:func (db *Database) IsDBshutdown() bool {
+./internal/database/db_init.go:249:func (db *Database) initMainDB() error {
+./internal/database/db_init.go:290:func (db *Database) applySQLitePragmas(conn *sql.DB) error {
+./internal/database/db_init.go:318:func (db *Database) applySQLitePragmasGroupDB(conn *sql.DB) error {
+./internal/database/db_init.go:358:func (db *Database) LoadDefaultProviders() error {
+./internal/database/db_init.go:399:func (db *Database) loadBotConfiguration() {
+./internal/database/db_init.go:443:func (db *Database) loadIPBlockingConfiguration() {
 ./internal/database/db_migrate.go:245:func (db *Database) migrateMainDB() error {
 ./internal/database/db_migrate.go:281:func (db *Database) MigrateGroup(groupName string) error {
 ./internal/database/db_migrate.go:293:func (db *Database) migrateGroupDB(groupDBs *GroupDBs) error {
@@ -392,7 +392,12 @@
 ./internal/database/db_post_queue.go:105:func (d *Database) MarkPostQueueAsPostedToRemote(id int64) error {
 ./internal/database/db_post_queue.go:119:func (d *Database) ResetPostQueueProcessing(ids []int64) error {
 ./internal/database/db_post_queue.go:146:func (d *Database) ResetAllPostQueueProcessing() error {
+./internal/database/db_post_queue.go:175:func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searchTerm string) ([]*PostQueueEntryWithDetails, error) {
 ./internal/database/db_post_queue.go:22:func (d *Database) InsertPostQueueEntry(newsgroupID int64, messageID string) error {
+./internal/database/db_post_queue.go:264:func (d *Database) GetPostQueueStats() (map[string]int, error) {
+./internal/database/db_post_queue.go:303:func (d *Database) DeletePostQueueEntry(id int64) error {
+./internal/database/db_post_queue.go:317:func (d *Database) RetryPostQueueEntry(id int64) error {
+./internal/database/db_post_queue.go:333:func (d *Database) CleanupPostedEntries(cleanupPosted bool, cleanupOlder int) (int64, error) {
 ./internal/database/db_post_queue.go:38:func (d *Database) GetPendingPostQueueEntries(limit int) ([]PostQueueEntry, error) {
 ./internal/database/db_rescan.go:13:func (db *Database) GetLatestArticleNumberFromOverview(newsgroup string) (int64, error) {
 ./internal/database/db_rescan.go:160:func (db *Database) findMissingArticles(groupDB *GroupDBs, maxArticleNum int64) []int64 {
@@ -436,22 +441,22 @@
 ./internal/database/groups_hashmap.go:75:func (h *GHmap) Hneg() {
 ./internal/database/groups_hashmap.go:82:func (h *GHmap) GHmapCron() {
 ./internal/database/hierarchy_cache.go:101:func (hc *HierarchyCache) GetHierarchiesPaginated(db *Database, page, pageSize int, sortBy string) ([]*models.Hierarchy, int, error) {
-./internal/database/hierarchy_cache.go:154:func (hc *HierarchyCache) GetHierarchySubLevels(db *Database, prefix string, page, pageSize int) (map[string]int, int, error) {
-./internal/database/hierarchy_cache.go:203:func (hc *HierarchyCache) GetDirectGroupsAtLevel(db *Database, prefix, sortBy string, page, pageSize int) ([]*models.Newsgroup, int, error) {
-./internal/database/hierarchy_cache.go:233:func (hc *HierarchyCache) UpdateNewsgroupActiveStatus(newsgroupName string, active bool) {
-./internal/database/hierarchy_cache.go:258:func (hc *HierarchyCache) UpdateNewsgroupStats(newsgroupName string, messageCountIncrement int, newLastArticle int64) {
-./internal/database/hierarchy_cache.go:306:func (hc *HierarchyCache) InvalidateHierarchy(hierarchyName string) {
-./internal/database/hierarchy_cache.go:349:func (hc *HierarchyCache) InvalidateAll() {
-./internal/database/hierarchy_cache.go:371:func (hc *HierarchyCache) ForceInvalidateHierarchy(hierarchyName string) {
-./internal/database/hierarchy_cache.go:405:func (hc *HierarchyCache) GetInvalidationStatus() (time.Time, time.Duration, time.Duration) {
-./internal/database/hierarchy_cache.go:419:func (hc *HierarchyCache) WaitForWarmup(timeout time.Duration) error {
-./internal/database/hierarchy_cache.go:438:func (hc *HierarchyCache) loadAllHierarchies(db *Database) error {
-./internal/database/hierarchy_cache.go:459:func (hc *HierarchyCache) buildHierarchyTreeBulk(db *Database) error {
+./internal/database/hierarchy_cache.go:157:func (hc *HierarchyCache) GetHierarchySubLevels(db *Database, prefix string, page, pageSize int) (map[string]int, int, error) {
+./internal/database/hierarchy_cache.go:206:func (hc *HierarchyCache) GetDirectGroupsAtLevel(db *Database, prefix, sortBy string, page, pageSize int) ([]*models.Newsgroup, int, error) {
+./internal/database/hierarchy_cache.go:236:func (hc *HierarchyCache) UpdateNewsgroupActiveStatus(newsgroupName string, active bool) {
+./internal/database/hierarchy_cache.go:261:func (hc *HierarchyCache) UpdateNewsgroupStats(newsgroupName string, messageCountIncrement int, newLastArticle int64) {
+./internal/database/hierarchy_cache.go:309:func (hc *HierarchyCache) InvalidateHierarchy(hierarchyName string) {
+./internal/database/hierarchy_cache.go:352:func (hc *HierarchyCache) InvalidateAll() {
+./internal/database/hierarchy_cache.go:374:func (hc *HierarchyCache) ForceInvalidateHierarchy(hierarchyName string) {
+./internal/database/hierarchy_cache.go:408:func (hc *HierarchyCache) GetInvalidationStatus() (time.Time, time.Duration, time.Duration) {
+./internal/database/hierarchy_cache.go:422:func (hc *HierarchyCache) WaitForWarmup(timeout time.Duration) error {
+./internal/database/hierarchy_cache.go:441:func (hc *HierarchyCache) loadAllHierarchies(db *Database) error {
+./internal/database/hierarchy_cache.go:462:func (hc *HierarchyCache) buildHierarchyTreeBulk(db *Database) error {
 ./internal/database/hierarchy_cache.go:54:func (hc *HierarchyCache) WarmCache(db *Database) {
-./internal/database/hierarchy_cache.go:589:func (hc *HierarchyCache) buildSubLevelCounts(groupName, hierarchy string, subLevelCounts map[string]map[string]int) {
-./internal/database/hierarchy_cache.go:615:func (hc *HierarchyCache) isDirectChild(groupName, hierarchy string) bool {
-./internal/database/hierarchy_cache.go:624:func (hc *HierarchyCache) addGroupToAllPossibleLevels(group *models.Newsgroup, hierarchyGroups map[string][]*models.Newsgroup, directGroupCounts map[string]int) {
-./internal/database/hierarchy_cache.go:648:func (hc *HierarchyCache) UpdateHierarchyLastUpdated(db *Database) error {
+./internal/database/hierarchy_cache.go:592:func (hc *HierarchyCache) buildSubLevelCounts(groupName, hierarchy string, subLevelCounts map[string]map[string]int) {
+./internal/database/hierarchy_cache.go:618:func (hc *HierarchyCache) isDirectChild(groupName, hierarchy string) bool {
+./internal/database/hierarchy_cache.go:627:func (hc *HierarchyCache) addGroupToAllPossibleLevels(group *models.Newsgroup, hierarchyGroups map[string][]*models.Newsgroup, directGroupCounts map[string]int) {
+./internal/database/hierarchy_cache.go:651:func (hc *HierarchyCache) UpdateHierarchyLastUpdated(db *Database) error {
 ./internal/database/nntp_auth_cache.go:101:func (c *NNTPAuthCache) Clear() {
 ./internal/database/nntp_auth_cache.go:113:func (c *NNTPAuthCache) Stats() map[string]interface{} {
 ./internal/database/nntp_auth_cache.go:154:func (c *NNTPAuthCache) cleanupExpired() {
@@ -465,114 +470,121 @@
 ./internal/database/progress.go:211:func (p *ProgressDB) Close() error {
 ./internal/database/progress.go:76:func (p *ProgressDB) initSchema() (err error) {
 ./internal/database/progress.go:94:func (p *ProgressDB) GetLastArticle(backendName, newsgroupName string) (int64, error) {
-./internal/database/queries.go:1000:func (db *Database) GetNewsgroupsPaginatedAdmin(page, pageSize int) ([]*models.Newsgroup, int, error) {
-./internal/database/queries.go:101:func (db *Database) GetProviders() ([]*models.Provider, error) {
-./internal/database/queries.go:1045:func (db *Database) GetOverviewsPaginated(groupDBs *GroupDBs, lastArticleNum int64, pageSize int) ([]*models.Overview, int, bool, error) {
-./internal/database/queries.go:1104:func (db *Database) InsertSection(s *models.Section) error {
-./internal/database/queries.go:1115:func (db *Database) GetSections() ([]*models.Section, error) {
-./internal/database/queries.go:1135:func (db *Database) GetSectionByName(name string) (*models.Section, error) {
-./internal/database/queries.go:1147:func (db *Database) GetHeaderSections() ([]*models.Section, error) {
-./internal/database/queries.go:1169:func (db *Database) InsertSectionGroup(sg *models.SectionGroup) error {
-./internal/database/queries.go:1180:func (db *Database) GetSectionGroups(sectionID int) ([]*models.SectionGroup, error) {
-./internal/database/queries.go:1200:func (db *Database) GetSectionGroupsByName(newsgroupName string) ([]*models.SectionGroup, error) {
-./internal/database/queries.go:121:func (db *Database) InsertNewsgroup(g *models.Newsgroup) error {
-./internal/database/queries.go:1220:func (db *Database) GetProviderByName(name string) (*models.Provider, error) {
-./internal/database/queries.go:1238:func (db *Database) GetProviderByID(id int64) (*models.Provider, error) {
-./internal/database/queries.go:1255:func (db *Database) IsNewsGroupInSections(name string) bool {
-./internal/database/queries.go:1281:func (db *Database) GetTopGroupsByMessageCount(limit int) ([]*models.Newsgroup, error) {
-./internal/database/queries.go:1309:func (db *Database) GetTotalThreadsCount() (int64, error) {
-./internal/database/queries.go:1357:func (db *Database) SearchNewsgroups(searchTerm string, limit, offset int, admin bool) ([]*models.Newsgroup, error) {
-./internal/database/queries.go:138:func (db *Database) MainDBGetAllNewsgroupsCount() int64 {
-./internal/database/queries.go:1399:func (db *Database) CountSearchNewsgroups(searchTerm string) (int, error) {
-./internal/database/queries.go:1412:func (db *Database) GetAllUsers() ([]*models.User, error) {
-./internal/database/queries.go:1431:func (db *Database) SearchUsers(searchTerm string, limit int) ([]*models.User, error) {
-./internal/database/queries.go:1462:func (db *Database) GetOverviewsRange(groupDBs *GroupDBs, startNum, endNum int64) ([]*models.Overview, error) {
-./internal/database/queries.go:1499:func (db *Database) GetOverviewByMessageID(groupDBs *GroupDBs, messageID string) (*models.Overview, error) {
-./internal/database/queries.go:150:func (db *Database) MainDBGetNewsgroupsActiveCount() int64 {
-./internal/database/queries.go:1524:func (db *Database) GetHeaderFieldRange(groupDBs *GroupDBs, field string, startNum, endNum int64) (map[int64]string, error) {
-./internal/database/queries.go:1595:func (db *Database) UpdateNewsgroupWatermarks(name string, highWater, lowWater int) error {
-./internal/database/queries.go:1603:func (db *Database) UpdateNewsgroupStatus(name string, status string) error {
-./internal/database/queries.go:1614:func (db *Database) GetNewsgroupsByPattern(pattern string) ([]*models.Newsgroup, error) {
-./internal/database/queries.go:1633:func (db *Database) GetNewsgroupsByPrefix(prefix string) ([]*models.Newsgroup, error) {
-./internal/database/queries.go:163:func (db *Database) MainDBGetAllNewsgroups() ([]*models.Newsgroup, error) {
-./internal/database/queries.go:1645:func (db *Database) GetNewsgroupsByExactPrefix(prefix string) ([]*models.Newsgroup, error) {
-./internal/database/queries.go:1664:func (db *Database) GetHierarchySubLevels(prefix string, page int, pageSize int) (map[string]int, int, error) {
-./internal/database/queries.go:1689:func (db *Database) getHierarchySubLevelsDirect(prefix string, page int, pageSize int) (map[string]int, int, error) {
-./internal/database/queries.go:1729:func (db *Database) GetDirectGroupsAtLevel(prefix string, sortBy string, page int, pageSize int) ([]*models.Newsgroup, int, error) {
-./internal/database/queries.go:1738:func (db *Database) getDirectGroupsAtLevelDirect(prefix string, sortBy string, page int, pageSize int) ([]*models.Newsgroup, int, error) {
-./internal/database/queries.go:1797:func (db *Database) GetAllHierarchies() ([]*models.Hierarchy, error) {
-./internal/database/queries.go:1824:func (db *Database) GetHierarchiesPaginated(page, pageSize int, sortBy string) ([]*models.Hierarchy, int, error) {
-./internal/database/queries.go:1838:func (db *Database) getHierarchiesPaginatedDirect(page, pageSize int, sortBy string) ([]*models.Hierarchy, int, error) {
-./internal/database/queries.go:184:func (db *Database) MainDBGetNewsgroup(newsgroup string) (*models.Newsgroup, error) {
-./internal/database/queries.go:1913:func (db *Database) UpdateHierarchiesLastUpdated() error {
-./internal/database/queries.go:1954:func (db *Database) UpdateHierarchyCounts() error {
-./internal/database/queries.go:1987:func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize int, sortBy string) ([]*models.Newsgroup, int, error) {
-./internal/database/queries.go:2072:func (db *Database) DeleteUser(userID int64) error {
-./internal/database/queries.go:208:func (db *Database) MainDBGetNewsgroupByID(id int64) (*models.Newsgroup, error) {
-./internal/database/queries.go:2130:func (db *Database) ResetAllNewsgroupData() error {
-./internal/database/queries.go:2203:func (db *Database) ResetNewsgroupData(newsgroupName string) error {
-./internal/database/queries.go:2291:func (db *Database) ResetNewsgroupCounters(newsgroupName string) error {
-./internal/database/queries.go:2311:func (db *Database) GetAllSiteNews() ([]*models.SiteNews, error) {
-./internal/database/queries.go:232:func (db *Database) UpdateNewsgroup(g *models.Newsgroup) error {
-./internal/database/queries.go:2340:func (db *Database) GetVisibleSiteNews() ([]*models.SiteNews, error) {
-./internal/database/queries.go:2369:func (db *Database) GetSiteNewsByID(id int) (*models.SiteNews, error) {
-./internal/database/queries.go:2391:func (db *Database) CreateSiteNews(news *models.SiteNews) error {
-./internal/database/queries.go:2416:func (db *Database) UpdateSiteNews(news *models.SiteNews) error {
-./internal/database/queries.go:2434:func (db *Database) DeleteSiteNews(id int) error {
-./internal/database/queries.go:2445:func (db *Database) ToggleSiteNewsVisibility(id int) error {
-./internal/database/queries.go:2463:func (db *Database) GetSpamArticles(offset, limit int) ([]*models.Overview, []string, int, error) {
-./internal/database/queries.go:2519:func (db *Database) ComputeHashedUsername(username string, nonce string) (string, error) {
-./internal/database/queries.go:2531:func (db *Database) SearchUserByComputedHash(targetHash string, nonce string) (*models.User, error) {
-./internal/database/queries.go:253:func (db *Database) UpdateNewsgroupExpiry(name string, expiryDays int) error {
-./internal/database/queries.go:261:func (db *Database) UpdateNewsgroupExpiryPrefix(name string, expiryDays int) error {
-./internal/database/queries.go:269:func (db *Database) UpdateNewsgroupMaxArticles(name string, maxArticles int) error {
-./internal/database/queries.go:277:func (db *Database) UpdateNewsgroupMaxArticlesPrefix(name string, maxArticles int) error {
-./internal/database/queries.go:285:func (db *Database) UpdateNewsgroupMaxArtSize(name string, maxArtSize int) error {
-./internal/database/queries.go:293:func (db *Database) UpdateNewsgroupActive(name string, active bool) error {
-./internal/database/queries.go:305:func (db *Database) BulkUpdateNewsgroupActive(names []string, active bool) (int, error) {
-./internal/database/queries.go:357:func (db *Database) BulkDeleteNewsgroups(names []string) (int, error) {
-./internal/database/queries.go:411:func (db *Database) UpdateNewsgroupDescription(name string, description string) error {
-./internal/database/queries.go:419:func (db *Database) DeleteNewsgroup(name string) error {
-./internal/database/queries.go:442:func (db *Database) GetThreadsCount(groupDBs *GroupDBs) (int64, error) {
-./internal/database/queries.go:454:func (db *Database) GetArticlesCount(groupDBs *GroupDBs) (int64, error) {
-./internal/database/queries.go:467:func (db *Database) GetArticleCountFromMainDB(groupName string) (int64, error) {
-./internal/database/queries.go:479:func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
-./internal/database/queries.go:503:func (db *Database) GetArticlesBatch(groupDBs *GroupDBs, limit, offset int) ([]*models.Article, error) {
-./internal/database/queries.go:532:func (db *Database) InsertThread(groupDBs *GroupDBs, t *models.Thread, a *models.Article) error {
-./internal/database/queries.go:542:func (db *Database) GetThreads(groupDBs *GroupDBs) ([]*models.Thread, error) {
-./internal/database/queries.go:55:func (db *Database) AddProvider(provider *models.Provider) error {
-./internal/database/queries.go:567:func (db *Database) InsertOverview(groupDBs *GroupDBs, o *models.Overview) (int64, error) {
-./internal/database/queries.go:594:func (db *Database) GetOverviews(groupDBs *GroupDBs) ([]*models.Overview, error) {
-./internal/database/queries.go:615:func (db *Database) SetOverviewDownloaded(groupDBs *GroupDBs, articleNum int64, downloaded int) error {
-./internal/database/queries.go:633:func (db *Database) GetUndownloadedOverviews(groupDBs *GroupDBs, fetchMax int) ([]*models.Overview, error) {
-./internal/database/queries.go:653:func (db *Database) InsertUser(u *models.User) error {
-./internal/database/queries.go:662:func (db *Database) GetUserByUsername(username string) (*models.User, error) {
-./internal/database/queries.go:673:func (db *Database) GetUserByEmail(email string) (*models.User, error) {
-./internal/database/queries.go:684:func (db *Database) GetUserByID(id int64) (*models.User, error) {
-./internal/database/queries.go:696:func (db *Database) UpdateUserEmail(userID int64, email string) error {
-./internal/database/queries.go:704:func (db *Database) UpdateUserPassword(userID int64, passwordHash string) error {
-./internal/database/queries.go:70:func (db *Database) DeleteProvider(id int) error {
-./internal/database/queries.go:712:func (db *Database) UpdateUserDisplayName(userID int64, displayName string) error {
-./internal/database/queries.go:723:func (db *Database) UpdateUserStatus(userID int64, verified, disabled, noPosting int) error {
-./internal/database/queries.go:731:func (db *Database) UpdateUserPostCount(userID int64, lastPostUnix int64) error {
-./internal/database/queries.go:739:func (db *Database) InsertSession(s *models.Session) error {
-./internal/database/queries.go:746:func (db *Database) GetSession(id string) (*models.Session, error) {
-./internal/database/queries.go:757:func (db *Database) DeleteSession(id string) error {
-./internal/database/queries.go:765:func (db *Database) InsertUserPermission(up *models.UserPermission) error {
-./internal/database/queries.go:772:func (db *Database) GetUserPermissions(userID int64) ([]*models.UserPermission, error) {
-./internal/database/queries.go:792:func (db *Database) GetArticleByNum(groupDBs *GroupDBs, articleNum int64) (*models.Article, error) {
-./internal/database/queries.go:819:func (db *Database) GetArticleByMessageID(groupDBs *GroupDBs, messageID string) (*models.Article, error) {
-./internal/database/queries.go:842:func (db *Database) UpdateReplyCount(groupDBs *GroupDBs, messageID string, replyCount int) error {
-./internal/database/queries.go:84:func (db *Database) SetProvider(provider *models.Provider) error {
-./internal/database/queries.go:850:func (db *Database) IncrementReplyCount(groupDBs *GroupDBs, messageID string) error {
-./internal/database/queries.go:861:func (db *Database) GetReplyCount(groupDBs *GroupDBs, messageID string) (int, error) {
-./internal/database/queries.go:876:func (db *Database) UpdateOverviewReplyCount(groupDBs *GroupDBs, messageID string, replyCount int) error {
-./internal/database/queries.go:887:func (db *Database) IncrementOverviewReplyCount(groupDBs *GroupDBs, messageID string) error {
-./internal/database/queries.go:899:func (db *Database) GetActiveNewsgroupByName(name string) (*models.Newsgroup, error) {
-./internal/database/queries.go:913:func (db *Database) UpsertNewsgroupDescription(name, description string) error {
-./internal/database/queries.go:921:func (db *Database) GetActiveNewsgroups() ([]*models.Newsgroup, error) {
-./internal/database/queries.go:941:func (db *Database) GetActiveNewsgroupsWithMessages() ([]*models.Newsgroup, error) {
-./internal/database/queries.go:965:func (db *Database) GetNewsgroupsPaginated(page, pageSize int) ([]*models.Newsgroup, int, error) {
+./internal/database/queries.go:1002:func (db *Database) GetNewsgroupsPaginated(page, pageSize int) ([]*models.Newsgroup, int, error) {
+./internal/database/queries.go:102:func (db *Database) GetProviders() ([]*models.Provider, error) {
+./internal/database/queries.go:1037:func (db *Database) GetNewsgroupsPaginatedAdmin(page, pageSize int) ([]*models.Newsgroup, int, error) {
+./internal/database/queries.go:1082:func (db *Database) GetOverviewsPaginated(groupDBs *GroupDBs, lastArticleNum int64, pageSize int) ([]*models.Overview, int, bool, error) {
+./internal/database/queries.go:1141:func (db *Database) InsertSection(s *models.Section) error {
+./internal/database/queries.go:1152:func (db *Database) GetSections() ([]*models.Section, error) {
+./internal/database/queries.go:1172:func (db *Database) GetSectionByName(name string) (*models.Section, error) {
+./internal/database/queries.go:1184:func (db *Database) GetHeaderSections() ([]*models.Section, error) {
+./internal/database/queries.go:1206:func (db *Database) InsertSectionGroup(sg *models.SectionGroup) error {
+./internal/database/queries.go:1217:func (db *Database) GetSectionGroups(sectionID int) ([]*models.SectionGroup, error) {
+./internal/database/queries.go:122:func (db *Database) InsertNewsgroup(g *models.Newsgroup) error {
+./internal/database/queries.go:1247:func (db *Database) GetSectionGroupsWithActivity(sectionID int, sortBy string) ([]*models.SectionGroup, error) {
+./internal/database/queries.go:1302:func (db *Database) GetSectionGroupsByName(newsgroupName string) ([]*models.SectionGroup, error) {
+./internal/database/queries.go:1322:func (db *Database) GetProviderByName(name string) (*models.Provider, error) {
+./internal/database/queries.go:1340:func (db *Database) GetProviderByID(id int64) (*models.Provider, error) {
+./internal/database/queries.go:1357:func (db *Database) IsNewsGroupInSections(name string) bool {
+./internal/database/queries.go:1383:func (db *Database) GetTopGroupsByMessageCount(limit int) ([]*models.Newsgroup, error) {
+./internal/database/queries.go:139:func (db *Database) MainDBGetAllNewsgroupsCount() int64 {
+./internal/database/queries.go:1411:func (db *Database) GetTotalThreadsCount() (int64, error) {
+./internal/database/queries.go:1493:func (db *Database) SearchNewsgroups(searchTerm string, limit, offset int, admin bool) ([]*models.Newsgroup, error) {
+./internal/database/queries.go:1498:func (db *Database) SearchNewsgroupsWithOptions(searchTerm string, limit, offset int, admin bool, searchDescription bool) ([]*models.Newsgroup, error) {
+./internal/database/queries.go:152:func (db *Database) GetUsersCount() int64 {
+./internal/database/queries.go:1582:func (db *Database) CountSearchNewsgroups(searchTerm string) (int, error) {
+./internal/database/queries.go:1587:func (db *Database) CountSearchNewsgroupsWithOptions(searchTerm string, searchDescription bool, admin bool) (int, error) {
+./internal/database/queries.go:1621:func (db *Database) GetAllUsers() ([]*models.User, error) {
+./internal/database/queries.go:1640:func (db *Database) SearchUsers(searchTerm string, limit int) ([]*models.User, error) {
+./internal/database/queries.go:1671:func (db *Database) GetOverviewsRange(groupDBs *GroupDBs, startNum, endNum int64) ([]*models.Overview, error) {
+./internal/database/queries.go:167:func (db *Database) GetAdminUsersCount() int64 {
+./internal/database/queries.go:1708:func (db *Database) GetOverviewByMessageID(groupDBs *GroupDBs, messageID string) (*models.Overview, error) {
+./internal/database/queries.go:1733:func (db *Database) GetHeaderFieldRange(groupDBs *GroupDBs, field string, startNum, endNum int64) (map[int64]string, error) {
+./internal/database/queries.go:179:func (db *Database) MainDBGetNewsgroupsActiveCount() int64 {
+./internal/database/queries.go:1804:func (db *Database) UpdateNewsgroupWatermarks(name string, highWater, lowWater int) error {
+./internal/database/queries.go:1812:func (db *Database) UpdateNewsgroupStatus(name string, status string) error {
+./internal/database/queries.go:1823:func (db *Database) GetNewsgroupsByPattern(pattern string) ([]*models.Newsgroup, error) {
+./internal/database/queries.go:1842:func (db *Database) GetNewsgroupsByPrefix(prefix string) ([]*models.Newsgroup, error) {
+./internal/database/queries.go:1854:func (db *Database) GetNewsgroupsByExactPrefix(prefix string) ([]*models.Newsgroup, error) {
+./internal/database/queries.go:1873:func (db *Database) GetHierarchySubLevels(prefix string, page int, pageSize int) (map[string]int, int, error) {
+./internal/database/queries.go:1898:func (db *Database) getHierarchySubLevelsDirect(prefix string, page int, pageSize int) (map[string]int, int, error) {
+./internal/database/queries.go:192:func (db *Database) MainDBGetAllNewsgroups() ([]*models.Newsgroup, error) {
+./internal/database/queries.go:1938:func (db *Database) GetDirectGroupsAtLevel(prefix string, sortBy string, page int, pageSize int) ([]*models.Newsgroup, int, error) {
+./internal/database/queries.go:1947:func (db *Database) getDirectGroupsAtLevelDirect(prefix string, sortBy string, page int, pageSize int) ([]*models.Newsgroup, int, error) {
+./internal/database/queries.go:2006:func (db *Database) GetAllHierarchies() ([]*models.Hierarchy, error) {
+./internal/database/queries.go:2033:func (db *Database) GetHierarchiesPaginated(page, pageSize int, sortBy string) ([]*models.Hierarchy, int, error) {
+./internal/database/queries.go:2048:func (db *Database) getHierarchiesPaginatedDirect(page, pageSize int, sortBy string) ([]*models.Hierarchy, int, error) {
+./internal/database/queries.go:2126:func (db *Database) UpdateHierarchiesLastUpdated() error {
+./internal/database/queries.go:213:func (db *Database) MainDBGetNewsgroup(newsgroup string) (*models.Newsgroup, error) {
+./internal/database/queries.go:2168:func (db *Database) UpdateHierarchyCounts() error {
+./internal/database/queries.go:2198:func (db *Database) RestoreHierarchyDescriptions() error {
+./internal/database/queries.go:237:func (db *Database) MainDBGetNewsgroupByID(id int64) (*models.Newsgroup, error) {
+./internal/database/queries.go:261:func (db *Database) UpdateNewsgroup(g *models.Newsgroup) error {
+./internal/database/queries.go:2675:func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize int, sortBy string) ([]*models.Newsgroup, int, error) {
+./internal/database/queries.go:2760:func (db *Database) DeleteUser(userID int64) error {
+./internal/database/queries.go:2818:func (db *Database) ResetAllNewsgroupData() error {
+./internal/database/queries.go:282:func (db *Database) UpdateNewsgroupExpiry(name string, expiryDays int) error {
+./internal/database/queries.go:2891:func (db *Database) ResetNewsgroupData(newsgroupName string) error {
+./internal/database/queries.go:290:func (db *Database) UpdateNewsgroupExpiryPrefix(name string, expiryDays int) error {
+./internal/database/queries.go:2979:func (db *Database) ResetNewsgroupCounters(newsgroupName string) error {
+./internal/database/queries.go:298:func (db *Database) UpdateNewsgroupMaxArticles(name string, maxArticles int) error {
+./internal/database/queries.go:2999:func (db *Database) GetAllSiteNews() ([]*models.SiteNews, error) {
+./internal/database/queries.go:3028:func (db *Database) GetVisibleSiteNews() ([]*models.SiteNews, error) {
+./internal/database/queries.go:3057:func (db *Database) GetSiteNewsByID(id int) (*models.SiteNews, error) {
+./internal/database/queries.go:306:func (db *Database) UpdateNewsgroupMaxArticlesPrefix(name string, maxArticles int) error {
+./internal/database/queries.go:3079:func (db *Database) CreateSiteNews(news *models.SiteNews) error {
+./internal/database/queries.go:3104:func (db *Database) UpdateSiteNews(news *models.SiteNews) error {
+./internal/database/queries.go:3122:func (db *Database) DeleteSiteNews(id int) error {
+./internal/database/queries.go:3133:func (db *Database) ToggleSiteNewsVisibility(id int) error {
+./internal/database/queries.go:314:func (db *Database) UpdateNewsgroupMaxArtSize(name string, maxArtSize int) error {
+./internal/database/queries.go:3151:func (db *Database) GetSpamArticles(offset, limit int) ([]*models.Overview, []string, int, error) {
+./internal/database/queries.go:3207:func (db *Database) ComputeHashedUsername(username string, nonce string) (string, error) {
+./internal/database/queries.go:3219:func (db *Database) SearchUserByComputedHash(targetHash string, nonce string) (*models.User, error) {
+./internal/database/queries.go:322:func (db *Database) UpdateNewsgroupActive(name string, active bool) error {
+./internal/database/queries.go:334:func (db *Database) BulkUpdateNewsgroupActive(names []string, active bool) (int, error) {
+./internal/database/queries.go:386:func (db *Database) BulkDeleteNewsgroups(names []string) (int, error) {
+./internal/database/queries.go:440:func (db *Database) UpdateNewsgroupDescription(name string, description string) error {
+./internal/database/queries.go:448:func (db *Database) DeleteNewsgroup(name string) error {
+./internal/database/queries.go:471:func (db *Database) GetThreadsCount(groupDBs *GroupDBs) (int64, error) {
+./internal/database/queries.go:483:func (db *Database) GetArticlesCount(groupDBs *GroupDBs) (int64, error) {
+./internal/database/queries.go:496:func (db *Database) GetArticleCountFromMainDB(groupName string) (int64, error) {
+./internal/database/queries.go:508:func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
+./internal/database/queries.go:532:func (db *Database) GetArticlesBatch(groupDBs *GroupDBs, limit, offset int) ([]*models.Article, error) {
+./internal/database/queries.go:561:func (db *Database) InsertThread(groupDBs *GroupDBs, t *models.Thread, a *models.Article) error {
+./internal/database/queries.go:56:func (db *Database) AddProvider(provider *models.Provider) error {
+./internal/database/queries.go:571:func (db *Database) GetThreads(groupDBs *GroupDBs) ([]*models.Thread, error) {
+./internal/database/queries.go:596:func (db *Database) InsertOverview(groupDBs *GroupDBs, o *models.Overview) (int64, error) {
+./internal/database/queries.go:623:func (db *Database) GetOverviews(groupDBs *GroupDBs) ([]*models.Overview, error) {
+./internal/database/queries.go:644:func (db *Database) SetOverviewDownloaded(groupDBs *GroupDBs, articleNum int64, downloaded int) error {
+./internal/database/queries.go:662:func (db *Database) GetUndownloadedOverviews(groupDBs *GroupDBs, fetchMax int) ([]*models.Overview, error) {
+./internal/database/queries.go:682:func (db *Database) InsertUser(u *models.User) error {
+./internal/database/queries.go:691:func (db *Database) GetUserByUsername(username string) (*models.User, error) {
+./internal/database/queries.go:702:func (db *Database) GetUserByEmail(email string) (*models.User, error) {
+./internal/database/queries.go:713:func (db *Database) GetUserByID(id int64) (*models.User, error) {
+./internal/database/queries.go:71:func (db *Database) DeleteProvider(id int) error {
+./internal/database/queries.go:725:func (db *Database) UpdateUserEmail(userID int64, email string) error {
+./internal/database/queries.go:733:func (db *Database) UpdateUserPassword(userID int64, passwordHash string) error {
+./internal/database/queries.go:741:func (db *Database) UpdateUserDisplayName(userID int64, displayName string) error {
+./internal/database/queries.go:752:func (db *Database) UpdateUserStatus(userID int64, verified, disabled, noPosting int) error {
+./internal/database/queries.go:760:func (db *Database) UpdateUserPostCount(userID int64, lastPostUnix int64) error {
+./internal/database/queries.go:768:func (db *Database) InsertSession(s *models.Session) error {
+./internal/database/queries.go:775:func (db *Database) GetSession(id string) (*models.Session, error) {
+./internal/database/queries.go:786:func (db *Database) DeleteSession(id string) error {
+./internal/database/queries.go:794:func (db *Database) InsertUserPermission(up *models.UserPermission) error {
+./internal/database/queries.go:801:func (db *Database) GetUserPermissions(userID int64) ([]*models.UserPermission, error) {
+./internal/database/queries.go:821:func (db *Database) GetArticleByNum(groupDBs *GroupDBs, articleNum int64) (*models.Article, error) {
+./internal/database/queries.go:848:func (db *Database) GetArticleByMessageID(groupDBs *GroupDBs, messageID string) (*models.Article, error) {
+./internal/database/queries.go:85:func (db *Database) SetProvider(provider *models.Provider) error {
+./internal/database/queries.go:871:func (db *Database) UpdateReplyCount(groupDBs *GroupDBs, messageID string, replyCount int) error {
+./internal/database/queries.go:879:func (db *Database) IncrementReplyCount(groupDBs *GroupDBs, messageID string) error {
+./internal/database/queries.go:890:func (db *Database) GetReplyCount(groupDBs *GroupDBs, messageID string) (int, error) {
+./internal/database/queries.go:905:func (db *Database) UpdateArticleDateSent(groupDBs *GroupDBs, messageID string, dateSent time.Time, dateString string) error {
+./internal/database/queries.go:913:func (db *Database) UpdateOverviewReplyCount(groupDBs *GroupDBs, messageID string, replyCount int) error {
+./internal/database/queries.go:924:func (db *Database) IncrementOverviewReplyCount(groupDBs *GroupDBs, messageID string) error {
+./internal/database/queries.go:936:func (db *Database) GetActiveNewsgroupByName(name string) (*models.Newsgroup, error) {
+./internal/database/queries.go:950:func (db *Database) UpsertNewsgroupDescription(name, description string) error {
+./internal/database/queries.go:958:func (db *Database) GetActiveNewsgroups() ([]*models.Newsgroup, error) {
+./internal/database/queries.go:978:func (db *Database) GetActiveNewsgroupsWithMessages() ([]*models.Newsgroup, error) {
 ./internal/database/sections_cache.go:26:func (g *GroupSectionDBCache) IsInSections(group string) bool {
 ./internal/database/sections_cache.go:41:func (g *GroupSectionDBCache) CronClean() {
 ./internal/database/sections_cache.go:73:func (g *GroupSectionDBCache) AddGroupToSectionsCache(group string) {
@@ -693,40 +705,42 @@
 ./internal/matrix/client.go:143:func (mc *MatrixClient) SendArticle(roomID string, article *models.Article) error {
 ./internal/matrix/client.go:57:func (mc *MatrixClient) CreateRoom(newsgroup *models.Newsgroup) (string, error) {
 ./internal/matrix/client.go:92:func (mc *MatrixClient) SendMessage(roomID string, message *MatrixMessage) error {
-./internal/models/models.go:160:func (a *Article) GetData(what string, group string) string {
-./internal/models/models.go:217:func (f *ForumThread) PrintLastActivity() string {
-./internal/models/models.go:272:func (n *Newsgroup) PrintLastActivity() string {
-./internal/models/models.go:379:func (o *Overview) ReferenceCount() int {
+./internal/models/models.go:161:func (a *Article) GetData(what string, group string) string {
+./internal/models/models.go:218:func (f *ForumThread) PrintLastActivity() string {
+./internal/models/models.go:317:func (n *Newsgroup) PrintLastActivity() string {
+./internal/models/models.go:322:func (h *Hierarchy) PrintLastActivity() string {
+./internal/models/models.go:327:func (sg *SectionGroup) PrintLastActivity() string {
+./internal/models/models.go:375:func (o *Overview) ReferenceCount() int {
 ./internal/models/sanitizing.go:193:func (a *Article) PrintSanitized(field string, groupName ...string) template.HTML {
 ./internal/models/sanitizing.go:464:func (a *Article) StripDangerousHTML() {
 ./internal/models/sanitizing.go:481:func (o *Overview) PrintSanitized(field string, groupName ...string) template.HTML {
 ./internal/models/sanitizing.go:547:func (a *Article) GetCleanSubject() string {
 ./internal/models/sanitizing.go:567:func (o *Overview) GetCleanSubject() string {
-./internal/nntp/nntp-article-common.go:309:func (c *ClientConnection) sendArticleContent(result *ArticleRetrievalResult) error {
-./internal/nntp/nntp-article-common.go:344:func (c *ClientConnection) sendHeadContent(result *ArticleRetrievalResult) error {
-./internal/nntp/nntp-article-common.go:35:func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType ArticleRetrievalType) error {
-./internal/nntp/nntp-article-common.go:365:func (c *ClientConnection) sendBodyContent(result *ArticleRetrievalResult) error {
-./internal/nntp/nntp-article-common.go:386:func (c *ClientConnection) sendStatContent(result *ArticleRetrievalResult) error {
-./internal/nntp/nntp-article-common.go:78:func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResult, error) {
+./internal/nntp/nntp-article-common.go:320:func (c *ClientConnection) sendArticleContent(result *ArticleRetrievalResult) error {
+./internal/nntp/nntp-article-common.go:355:func (c *ClientConnection) sendHeadContent(result *ArticleRetrievalResult) error {
+./internal/nntp/nntp-article-common.go:376:func (c *ClientConnection) sendBodyContent(result *ArticleRetrievalResult) error {
+./internal/nntp/nntp-article-common.go:397:func (c *ClientConnection) sendStatContent(result *ArticleRetrievalResult) error {
+./internal/nntp/nntp-article-common.go:46:func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType ArticleRetrievalType) error {
+./internal/nntp/nntp-article-common.go:89:func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResult, error) {
 ./internal/nntp/nntp-auth-manager.go:24:func (am *AuthManager) AuthenticateUser(username, password string) (*models.NNTPUser, error) {
 ./internal/nntp/nntp-auth-manager.go:47:func (am *AuthManager) CheckGroupAccess(user *models.NNTPUser, groupName string) bool {
 ./internal/nntp/nntp-auth-manager.go:58:func (am *AuthManager) CanPost(user *models.NNTPUser) bool {
 ./internal/nntp/nntp-auth-manager.go:66:func (am *AuthManager) IsAdmin(user *models.NNTPUser) bool {
 ./internal/nntp/nntp-auth-manager.go:77:func (am *AuthManager) CheckConnectionLimit(user *models.NNTPUser) bool {
-./internal/nntp/nntp-backend-pool.go:118:func (p *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
-./internal/nntp/nntp-backend-pool.go:150:func (p *Pool) SelectGroup(group string) (*GroupInfo, error) {
-./internal/nntp/nntp-backend-pool.go:184:func (p *Pool) Get(mode int) (*BackendConn, error) {
-./internal/nntp/nntp-backend-pool.go:298:func (p *Pool) Put(client *BackendConn) error {
-./internal/nntp/nntp-backend-pool.go:341:func (p *Pool) CloseConn(client *BackendConn, lock bool) error {
-./internal/nntp/nntp-backend-pool.go:362:func (p *Pool) ClosePool() error {
-./internal/nntp/nntp-backend-pool.go:390:func (p *Pool) Stats() PoolStats {
-./internal/nntp/nntp-backend-pool.go:415:func (p *Pool) createConnection() (*BackendConn, error) {
-./internal/nntp/nntp-backend-pool.go:429:func (p *Pool) isConnectionValid(client *BackendConn) bool {
-./internal/nntp/nntp-backend-pool.go:448:func (p *Pool) Cleanup() {
-./internal/nntp/nntp-backend-pool.go:44:func (p *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]OverviewLine, error) {
-./internal/nntp/nntp-backend-pool.go:497:func (p *Pool) StartCleanupWorker(interval time.Duration) {
-./internal/nntp/nntp-backend-pool.go:71:func (p *Pool) XHdr(group string, header string, start, end int64) ([]*HeaderLine, error) {
-./internal/nntp/nntp-backend-pool.go:93:func (p *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
+./internal/nntp/nntp-backend-pool.go:119:func (pool *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
+./internal/nntp/nntp-backend-pool.go:151:func (pool *Pool) SelectGroup(group string) (*GroupInfo, error) {
+./internal/nntp/nntp-backend-pool.go:185:func (pool *Pool) Get(mode int) (*BackendConn, error) {
+./internal/nntp/nntp-backend-pool.go:299:func (pool *Pool) Put(client *BackendConn) error {
+./internal/nntp/nntp-backend-pool.go:342:func (pool *Pool) CloseConn(client *BackendConn, lock bool) error {
+./internal/nntp/nntp-backend-pool.go:363:func (pool *Pool) ClosePool() error {
+./internal/nntp/nntp-backend-pool.go:391:func (pool *Pool) Stats() PoolStats {
+./internal/nntp/nntp-backend-pool.go:416:func (pool *Pool) createConnection() (*BackendConn, error) {
+./internal/nntp/nntp-backend-pool.go:430:func (pool *Pool) isConnectionValid(client *BackendConn) bool {
+./internal/nntp/nntp-backend-pool.go:449:func (pool *Pool) Cleanup() {
+./internal/nntp/nntp-backend-pool.go:45:func (pool *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]OverviewLine, error) {
+./internal/nntp/nntp-backend-pool.go:498:func (pool *Pool) startCleanupWorker() {
+./internal/nntp/nntp-backend-pool.go:72:func (pool *Pool) XHdr(group string, header string, start, end int64) ([]*HeaderLine, error) {
+./internal/nntp/nntp-backend-pool.go:94:func (pool *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
 ./internal/nntp/nntp-cache-local.go:102:func (c *CacheMessageIDNumtoGroup) Del(messageID, group string) {
 ./internal/nntp/nntp-cache-local.go:115:func (c *CacheMessageIDNumtoGroup) Clear(messageID string) {
 ./internal/nntp/nntp-cache-local.go:122:func (c *CacheMessageIDNumtoGroup) CleanupCron() {
@@ -738,15 +752,15 @@
 ./internal/nntp/nntp-cache-local.go:75:func (c *CacheMessageIDNumtoGroup) Get(messageID, group string) (int64, bool) {
 ./internal/nntp/nntp-cache-local.go:88:func (c *CacheMessageIDNumtoGroup) Set(messageID, group string, articleNum int64) {
 ./internal/nntp/nntp-client-commands.go:1016:func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
-./internal/nntp/nntp-client-commands.go:1042:func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, error) {
-./internal/nntp/nntp-client-commands.go:1134:func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *string) (int, error) {
-./internal/nntp/nntp-client-commands.go:1226:func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string) (uint, error) {
-./internal/nntp/nntp-client-commands.go:1305:func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (int, error) {
+./internal/nntp/nntp-client-commands.go:1035:func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) (chan *string, error) {
+./internal/nntp/nntp-client-commands.go:1119:func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *string) (int, error) {
+./internal/nntp/nntp-client-commands.go:1211:func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string) (uint, error) {
+./internal/nntp/nntp-client-commands.go:1290:func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (int, error) {
 ./internal/nntp/nntp-client-commands.go:130:func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
-./internal/nntp/nntp-client-commands.go:1326:func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
-./internal/nntp/nntp-client-commands.go:1447:func (c *BackendConn) SwitchMode(mode int) error {
-./internal/nntp/nntp-client-commands.go:1459:func (c *BackendConn) SwitchToModeReader() error {
-./internal/nntp/nntp-client-commands.go:1491:func (c *BackendConn) SwitchToModeStream() error {
+./internal/nntp/nntp-client-commands.go:1311:func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
+./internal/nntp/nntp-client-commands.go:1431:func (c *BackendConn) SwitchMode(mode int) error {
+./internal/nntp/nntp-client-commands.go:1443:func (c *BackendConn) SwitchToModeReader() error {
+./internal/nntp/nntp-client-commands.go:1475:func (c *BackendConn) SwitchToModeStream() error {
 ./internal/nntp/nntp-client-commands.go:186:func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
 ./internal/nntp/nntp-client-commands.go:234:func (c *BackendConn) ListGroups() ([]GroupInfo, error) {
 ./internal/nntp/nntp-client-commands.go:281:func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
@@ -763,11 +777,11 @@
 ./internal/nntp/nntp-client-commands.go:956:func (c *BackendConn) parseGroupLine(line string) (GroupInfo, error) {
 ./internal/nntp/nntp-client-commands.go:989:func (c *BackendConn) parseOverviewLine(line string) (OverviewLine, error) {
 ./internal/nntp/nntp-client.go:144:func (c *BackendConn) Connect() error {
-./internal/nntp/nntp-client.go:245:func (c *BackendConn) authenticate() error {
-./internal/nntp/nntp-client.go:287:func (c *BackendConn) CloseFromPoolOnly() error {
-./internal/nntp/nntp-client.go:317:func (c *BackendConn) xSetReadDeadline(t time.Time) error {
-./internal/nntp/nntp-client.go:327:func (c *BackendConn) xSetWriteDeadline(t time.Time) error {
-./internal/nntp/nntp-client.go:336:func (c *BackendConn) UpdateLastUsed() {
+./internal/nntp/nntp-client.go:247:func (c *BackendConn) authenticate() error {
+./internal/nntp/nntp-client.go:289:func (c *BackendConn) CloseFromPoolOnly() error {
+./internal/nntp/nntp-client.go:319:func (c *BackendConn) xSetReadDeadline(t time.Time) error {
+./internal/nntp/nntp-client.go:329:func (c *BackendConn) xSetWriteDeadline(t time.Time) error {
+./internal/nntp/nntp-client.go:338:func (c *BackendConn) UpdateLastUsed() {
 ./internal/nntp/nntp-cmd-article.go:4:func (c *ClientConnection) handleArticle(args []string) error {
 ./internal/nntp/nntp-cmd-auth.go:9:func (c *ClientConnection) handleAuthInfo(args []string) error {
 ./internal/nntp/nntp-cmd-basic.go:15:func (c *ClientConnection) handleMode(args []string) error {
@@ -842,8 +856,8 @@
 ./internal/nntp/proxy.go:81:func (pd *ProxyDialer) dialSOCKS4(network, address string) (net.Conn, error) {
 ./internal/nntp/proxy.go:97:func (pd *ProxyDialer) dialSOCKS5(network, address string) (net.Conn, error) {
 ./internal/postmgr/postmgr.go:113:func (pm *PosterManager) processEntry(entry database.PostQueueEntry) error {
-./internal/postmgr/postmgr.go:156:func (pm *PosterManager) getArticleByMessageID(messageID, newsgroup string) (*models.Article, error) {
-./internal/postmgr/postmgr.go:174:func (pm *PosterManager) postToProvider(article *models.Article, pool *nntp.Pool) error {
+./internal/postmgr/postmgr.go:154:func (pm *PosterManager) getArticleByMessageID(messageID, newsgroup string) (*models.Article, error) {
+./internal/postmgr/postmgr.go:172:func (pm *PosterManager) postToProvider(article *models.Article, pool *nntp.Pool) error {
 ./internal/postmgr/postmgr.go:33:func (pm *PosterManager) Run(limit int, shutdownChan <-chan struct{}, wg *sync.WaitGroup) {
 ./internal/postmgr/postmgr.go:62:func (pm *PosterManager) Stop() {
 ./internal/postmgr/postmgr.go:68:func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
@@ -887,17 +901,17 @@
 ./internal/processor/proc_DLArt.go:472:func (proc *Processor) WantShutdown(shutdownChan <-chan struct{}) bool {
 ./internal/processor/proc_DLArt.go:67:func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64, shutdownChan <-chan struct{}) error {
 ./internal/processor/proc_DLXHDR.go:6:func (proc *Processor) GetXHDR(groupName string, header string, start, end int64) ([]*nntp.HeaderLine, error) {
-./internal/processor/processor.go:125:func (proc *Processor) CheckNoMoreWorkInHistory() bool {
-./internal/processor/processor.go:130:func (proc *Processor) AddProcessedArticleToHistory(msgIdItem *history.MessageIdItem, newsgroupPtr *string, articleNumber int64) {
-./internal/processor/processor.go:166:func (proc *Processor) FindThreadRootInCache(newsgroupPtr *string, refs []string) *database.MsgIdTmpCacheItem {
-./internal/processor/processor.go:193:func (proc *Processor) GetHistoryStats() history.HistoryStats {
-./internal/processor/processor.go:201:func (proc *Processor) Close() error {
-./internal/processor/processor.go:217:func (proc *Processor) WaitForBatchCompletion() {
-./internal/processor/processor.go:252:func (proc *Processor) Lookup(msgIdItem *history.MessageIdItem) (int, error) {
-./internal/processor/processor.go:258:func (proc *Processor) AddArticleToHistory(article *nntp.Article, newsgroup string) {
-./internal/processor/processor.go:263:func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, error) {
-./internal/processor/processor.go:283:func (proc *Processor) EnableBridges(config *BridgeConfig) {
-./internal/processor/processor.go:295:func (proc *Processor) DisableBridges() {
+./internal/processor/processor.go:112:func (proc *Processor) CheckNoMoreWorkInHistory() bool {
+./internal/processor/processor.go:117:func (proc *Processor) AddProcessedArticleToHistory(msgIdItem *history.MessageIdItem, newsgroupPtr *string, articleNumber int64) {
+./internal/processor/processor.go:153:func (proc *Processor) FindThreadRootInCache(newsgroupPtr *string, refs []string) *database.MsgIdTmpCacheItem {
+./internal/processor/processor.go:180:func (proc *Processor) GetHistoryStats() history.HistoryStats {
+./internal/processor/processor.go:188:func (proc *Processor) Close() error {
+./internal/processor/processor.go:204:func (proc *Processor) WaitForBatchCompletion() {
+./internal/processor/processor.go:239:func (proc *Processor) Lookup(msgIdItem *history.MessageIdItem) (int, error) {
+./internal/processor/processor.go:245:func (proc *Processor) AddArticleToHistory(article *nntp.Article, newsgroup string) {
+./internal/processor/processor.go:250:func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, error) {
+./internal/processor/processor.go:270:func (proc *Processor) EnableBridges(config *BridgeConfig) {
+./internal/processor/processor.go:282:func (proc *Processor) DisableBridges() {
 ./internal/processor/proc_ImportOV.go:14:func (proc *Processor) ImportOverview(groupName string) error {
 ./internal/processor/proc_MsgIDtmpCache.go:105://func (c *MsgTmpCache) Clear() {
 ./internal/processor/proc_MsgIDtmpCache.go:112://func (c *MsgTmpCache) UpdateThreadRootToTmpCache(group string, messageID string, rootArticle int64, isThreadRoot bool) bool {
@@ -906,7 +920,7 @@
 ./internal/processor/proc_MsgIDtmpCache.go:28://func (c *MsgTmpCache) CronClean() {
 ./internal/processor/proc_MsgIDtmpCache.go:67://func (c *MsgTmpCache) AddMsgIdToTmpCache(group string, messageID string, articleNum int64) bool {
 ./internal/processor/proc_MsgIDtmpCache.go:87://func (c *MsgTmpCache) MsgIdExists(group string, messageID string) *MsgIdTmpCacheItem {
-./internal/processor/proc-utils.go:449:func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []string {
+./internal/processor/proc-utils.go:414:func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []string {
 ./internal/processor/rslight_articles.go:14:func (leg *LegacyImporter) QuickOpenToGetNewsgroup(sqlitePath string) (string, error) {
 ./internal/processor/rslight_articles.go:47:func (leg *LegacyImporter) ImportSQLiteArticles(sqlitePath string) error {
 ./internal/processor/rslight.go:143:func (leg *LegacyImporter) parseMenuConf() ([]MenuConfEntry, error) {
@@ -921,77 +935,89 @@
 ./internal/processor/rslight.go:94:func (leg *LegacyImporter) ImportSections() error {
 ./internal/processor/threading.go:46:func (proc *Processor) setCaseDupes(msgIdItem *history.MessageIdItem, bulkmode bool) {
 ./internal/processor/threading.go:56:func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup string, bulkmode bool) (int, error) {
-./internal/web/cronjobs.go:116:func (cm *CronJobManager) StopCronManager() {
-./internal/web/cronjobs.go:208:func (cm *CronJobManager) GetJobOutput(jobID int64) []string {
-./internal/web/cronjobs.go:228:func (cm *CronJobManager) StopJob(jobId int64) error {
-./internal/web/cronjobs.go:275:func (cm *CronJobManager) startJob(cronJob *models.CronJob) error {
-./internal/web/cronjobs.go:303:func (cm *CronJobManager) runJobScheduler(job *CronJob) {
-./internal/web/cronjobs.go:368:func (cm *CronJobManager) executeJob(job *CronJob, execWG *sync.WaitGroup) {
-./internal/web/cronjobs.go:463:func (job *CronJob) addLogLine(line string) {
-./internal/web/cronjobs.go:478:func (job *CronJob) setRunningStatus(running bool) {
-./internal/web/cronjobs.go:491:func (cm *CronJobManager) GetJobStatus(jobID int64) (*CronJob, bool) {
-./internal/web/cronjobs.go:499:func (cm *CronJobManager) GetJobPID(jobID int64) int {
-./internal/web/cronjobs.go:512:func (cm *CronJobManager) GetAllJobStatuses() map[int64]*CronJob {
-./internal/web/cronjobs.go:64:func (cm *CronJobManager) StartCronManager() {
-./internal/web/web_admin_abusemail.go:12:func (s *WebServer) adminSetAbuseMail(c *gin.Context) {
-./internal/web/web_admin_apitokens.go:140:func (s *WebServer) adminDeleteAPIToken(c *gin.Context) {
-./internal/web/web_admin_apitokens.go:14:func (s *WebServer) countEnabledAPITokens(tokens []*database.APIToken) int {
-./internal/web/web_admin_apitokens.go:183:func (s *WebServer) adminCleanupExpiredTokens(c *gin.Context) {
-./internal/web/web_admin_apitokens.go:25:func (s *WebServer) adminCreateAPIToken(c *gin.Context) {
-./internal/web/web_admin_apitokens.go:89:func (s *WebServer) adminToggleAPIToken(c *gin.Context) {
+./internal/web/cronjobs.go:120:func (cm *CronJobManager) StopCronManager() {
+./internal/web/cronjobs.go:212:func (cm *CronJobManager) GetJobOutput(jobID int64) []string {
+./internal/web/cronjobs.go:232:func (cm *CronJobManager) StopJob(jobId int64) error {
+./internal/web/cronjobs.go:279:func (cm *CronJobManager) startJob(cronJob *models.CronJob) error {
+./internal/web/cronjobs.go:307:func (cm *CronJobManager) runJobScheduler(job *CronJob) {
+./internal/web/cronjobs.go:372:func (cm *CronJobManager) executeJob(job *CronJob, execWG *sync.WaitGroup) {
+./internal/web/cronjobs.go:467:func (job *CronJob) addLogLine(line string) {
+./internal/web/cronjobs.go:482:func (job *CronJob) setRunningStatus(running bool) {
+./internal/web/cronjobs.go:495:func (cm *CronJobManager) GetJobStatus(jobID int64) (*CronJob, bool) {
+./internal/web/cronjobs.go:503:func (cm *CronJobManager) GetJobPID(jobID int64) int {
+./internal/web/cronjobs.go:516:func (cm *CronJobManager) GetAllJobStatuses() map[int64]*CronJob {
+./internal/web/cronjobs.go:68:func (cm *CronJobManager) StartCronManager() {
+./internal/web/web_admin_apitokens.go:124:func (s *WebServer) adminDeleteAPIToken(c *gin.Context) {
+./internal/web/web_admin_apitokens.go:14:func (s *WebServer) countEnabledAPITokens(tokens []*database.APIToken) (count int64) {
+./internal/web/web_admin_apitokens.go:159:func (s *WebServer) adminCleanupExpiredTokens(c *gin.Context) {
+./internal/web/web_admin_apitokens.go:24:func (s *WebServer) adminCreateAPIToken(c *gin.Context) {
+./internal/web/web_admin_apitokens.go:81:func (s *WebServer) adminToggleAPIToken(c *gin.Context) {
 ./internal/web/web_admin_cache.go:11:func (s *WebServer) adminClearCache(c *gin.Context) {
 ./internal/web/web_admin_crons.go:13:func (s *WebServer) adminCreateCronJob(c *gin.Context) {
-./internal/web/web_admin_crons.go:162:func (s *WebServer) adminToggleCronJob(c *gin.Context) {
-./internal/web/web_admin_crons.go:202:func (s *WebServer) adminDeleteCronJob(c *gin.Context) {
-./internal/web/web_admin_crons.go:242:func (s *WebServer) adminViewCronJobLog(c *gin.Context) {
-./internal/web/web_admin_crons.go:80:func (s *WebServer) adminUpdateCronJob(c *gin.Context) {
-./internal/web/web_admin.go:66:func (s *WebServer) getUptime() string {
-./internal/web/web_admin_hostname.go:12:func (s *WebServer) adminSetHostname(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:129:func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:236:func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:272:func (s *WebServer) adminAssignNewsgroupSection(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:29:func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:363:func (s *WebServer) adminToggleNewsgroup(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:415:func (s *WebServer) adminBulkEnableNewsgroups(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:420:func (s *WebServer) adminBulkDisableNewsgroups(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:425:func (s *WebServer) adminBulkDeleteNewsgroups(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:466:func (s *WebServer) handleBulkNewsgroupAction(c *gin.Context, activeStatus bool, actionName string) {
-./internal/web/web_admin_newsgroups.go:507:func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
-./internal/web/web_admin_nntp.go:140:func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
-./internal/web/web_admin_nntp.go:228:func (s *WebServer) adminDeleteNNTPUser(c *gin.Context) {
-./internal/web/web_admin_nntp.go:272:func (s *WebServer) adminToggleNNTPUser(c *gin.Context) {
-./internal/web/web_admin_nntp.go:27:func (s *WebServer) countActiveNNTPUsers(nntpUsers []*models.NNTPUser) int {
-./internal/web/web_admin_nntp.go:334:func (s *WebServer) adminEnableNNTPUser(c *gin.Context) {
-./internal/web/web_admin_nntp.go:38:func (s *WebServer) countPostingNNTPUsers(nntpUsers []*models.NNTPUser) int {
-./internal/web/web_admin_nntp.go:49:func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
-./internal/web/web_admin_ollama.go:100:func (s *WebServer) adminUpdateAIModel(c *gin.Context) {
-./internal/web/web_admin_ollama.go:175:func (s *WebServer) adminDeleteAIModel(c *gin.Context) {
-./internal/web/web_admin_ollama.go:218:func (s *WebServer) adminSyncOllamaModels(c *gin.Context) {
+./internal/web/web_admin_crons.go:143:func (s *WebServer) adminToggleCronJob(c *gin.Context) {
+./internal/web/web_admin_crons.go:171:func (s *WebServer) adminDeleteCronJob(c *gin.Context) {
+./internal/web/web_admin_crons.go:205:func (s *WebServer) adminViewCronJobLog(c *gin.Context) {
+./internal/web/web_admin_crons.go:253:func (s *WebServer) adminStopCronJob(c *gin.Context) {
+./internal/web/web_admin_crons.go:67:func (s *WebServer) adminUpdateCronJob(c *gin.Context) {
+./internal/web/web_admin.go:88:func (s *WebServer) getUptime() string {
+./internal/web/web_admin_newsgroups.go:123:func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:223:func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:251:func (s *WebServer) adminAssignNewsgroupSection(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:30:func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:334:func (s *WebServer) adminToggleNewsgroup(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:378:func (s *WebServer) adminBulkEnableNewsgroups(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:383:func (s *WebServer) adminBulkDisableNewsgroups(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:388:func (s *WebServer) adminBulkDeleteNewsgroups(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:421:func (s *WebServer) handleBulkNewsgroupAction(c *gin.Context, activeStatus bool, actionName string) {
+./internal/web/web_admin_newsgroups.go:454:func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:513:func (s *WebServer) adminFixThreadActivity(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:552:func (s *WebServer) fixGroupThreadActivity(groupName string) error {
+./internal/web/web_admin_newsgroups.go:679:func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
+./internal/web/web_admin_nntp.go:130:func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
+./internal/web/web_admin_nntp.go:210:func (s *WebServer) adminDeleteNNTPUser(c *gin.Context) {
+./internal/web/web_admin_nntp.go:246:func (s *WebServer) adminToggleNNTPUser(c *gin.Context) {
+./internal/web/web_admin_nntp.go:27:func (s *WebServer) countActiveNNTPUsers(nntpUsers []*models.NNTPUser) (count int64) {
+./internal/web/web_admin_nntp.go:300:func (s *WebServer) adminEnableNNTPUser(c *gin.Context) {
+./internal/web/web_admin_nntp.go:37:func (s *WebServer) countPostingNNTPUsers(nntpUsers []*models.NNTPUser) (count int64) {
+./internal/web/web_admin_nntp.go:47:func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
+./internal/web/web_admin_ollama.go:161:func (s *WebServer) adminDeleteAIModel(c *gin.Context) {
+./internal/web/web_admin_ollama.go:196:func (s *WebServer) adminSyncOllamaModels(c *gin.Context) {
 ./internal/web/web_admin_ollama.go:33:func (s *WebServer) adminCreateAIModel(c *gin.Context) {
-./internal/web/web_adminPage.go:16:func (s *WebServer) adminPage(c *gin.Context) {
+./internal/web/web_admin_ollama.go:94:func (s *WebServer) adminUpdateAIModel(c *gin.Context) {
+./internal/web/web_adminPage.go:18:func (s *WebServer) adminPage(c *gin.Context) {
+./internal/web/web_admin_postqueue.go:12:func (s *WebServer) adminDeletePostQueueEntry(c *gin.Context) {
 ./internal/web/web_admin_provider.go:16:func (s *WebServer) adminCreateProvider(c *gin.Context) {
-./internal/web/web_admin_provider.go:193:func (s *WebServer) adminUpdateProvider(c *gin.Context) {
-./internal/web/web_admin_provider.go:442:func (s *WebServer) adminDeleteProvider(c *gin.Context) {
-./internal/web/web_admin_registration.go:10:func (s *WebServer) adminEnableRegistration(c *gin.Context) {
-./internal/web/web_admin_registration.go:43:func (s *WebServer) adminDisableRegistration(c *gin.Context) {
-./internal/web/web_admin_sections.go:101:func (s *WebServer) UpdateSectionHandler(c *gin.Context) {
+./internal/web/web_admin_provider.go:186:func (s *WebServer) adminUpdateProvider(c *gin.Context) {
+./internal/web/web_admin_provider.go:427:func (s *WebServer) adminDeleteProvider(c *gin.Context) {
 ./internal/web/web_admin_sections.go:16:func (s *WebServer) SectionsHandler(c *gin.Context) {
-./internal/web/web_admin_sections.go:189:func (s *WebServer) DeleteSectionHandler(c *gin.Context) {
+./internal/web/web_admin_sections.go:173:func (s *WebServer) DeleteSectionHandler(c *gin.Context) {
+./internal/web/web_admin_sections.go:216:func (s *WebServer) AssignNewsgroupHandler(c *gin.Context) {
 ./internal/web/web_admin_sections.go:22:func (s *WebServer) CreateSectionHandler(c *gin.Context) {
-./internal/web/web_admin_sections.go:240:func (s *WebServer) AssignNewsgroupHandler(c *gin.Context) {
-./internal/web/web_admin_sections.go:381:func (s *WebServer) UnassignNewsgroupHandler(c *gin.Context) {
-./internal/web/web_admin_sitenews.go:152:func (s *WebServer) adminDeleteSiteNews(c *gin.Context) {
+./internal/web/web_admin_sections.go:349:func (s *WebServer) UnassignNewsgroupHandler(c *gin.Context) {
+./internal/web/web_admin_sections.go:93:func (s *WebServer) UpdateSectionHandler(c *gin.Context) {
+./internal/web/web_admin_settings_unified.go:238:func (s *WebServer) validateHostname(hostname string) error {
+./internal/web/web_admin_settings_unified.go:246:func (s *WebServer) validateWebPostSize(sizeStr string) error {
+./internal/web/web_admin_settings_unified.go:263:func (s *WebServer) validateEmail(email string) error {
+./internal/web/web_admin_settings_unified.go:272:func (s *WebServer) processHostname(server *WebServer, hostname string) error {
+./internal/web/web_admin_settings_unified.go:276:func (s *WebServer) processRegistrationToggle(server *WebServer, value string) error {
+./internal/web/web_admin_settings_unified.go:27:func (s *WebServer) adminUpdateSettings(c *gin.Context) {
+./internal/web/web_admin_settings_unified.go:301:func (s *WebServer) processBlockBadBotsToggle(server *WebServer, value string) error {
+./internal/web/web_admin_settings_unified.go:333:func (s *WebServer) processBlockBadIPsToggle(server *WebServer, value string) error {
+./internal/web/web_admin_settings_unified.go:364:func (s *WebServer) validateCIDRList(value string) error {
+./internal/web/web_admin_settings_unified.go:391:func (s *WebServer) processBadBotsUpdate(server *WebServer, value string) error {
+./internal/web/web_admin_settings_unified.go:412:func (s *WebServer) processBadIPsUpdate(server *WebServer, value string) error {
+./internal/web/web_admin_sitenews.go:136:func (s *WebServer) adminDeleteSiteNews(c *gin.Context) {
+./internal/web/web_admin_sitenews.go:166:func (s *WebServer) adminToggleSiteNewsVisibility(c *gin.Context) {
 ./internal/web/web_admin_sitenews.go:16:func (s *WebServer) adminCreateSiteNews(c *gin.Context) {
-./internal/web/web_admin_sitenews.go:190:func (s *WebServer) adminToggleSiteNewsVisibility(c *gin.Context) {
-./internal/web/web_admin_sitenews.go:76:func (s *WebServer) adminUpdateSiteNews(c *gin.Context) {
-./internal/web/web_admin_userfuncs.go:147:func (s *WebServer) adminUpdateUser(c *gin.Context) {
-./internal/web/web_admin_userfuncs.go:16:func (s *WebServer) countAdminUsers(users []*models.User) int {
-./internal/web/web_admin_userfuncs.go:255:func (s *WebServer) adminDeleteUser(c *gin.Context) {
-./internal/web/web_admin_userfuncs.go:27:func (s *WebServer) countActiveSessions() int {
-./internal/web/web_admin_userfuncs.go:299:func (s *WebServer) isAdmin(user *models.User) bool {
-./internal/web/web_admin_userfuncs.go:33:func (s *WebServer) adminCreateUser(c *gin.Context) {
-./internal/web/web_admin_weblocalnntpserver.go:11:func (s *WebServer) adminSetWebLocalNNTPServerAddrInfo(c *gin.Context) {
-./internal/web/web_admin_webpostsize.go:12:func (s *WebServer) adminSetWebPostSize(c *gin.Context) {
+./internal/web/web_admin_sitenews.go:68:func (s *WebServer) adminUpdateSiteNews(c *gin.Context) {
+./internal/web/web_admin_spam.go:16:func (s *WebServer) decrementSpam(c *gin.Context) {
+./internal/web/web_admin_spam.go:83:func (s *WebServer) unhideArticle(c *gin.Context) {
+./internal/web/web_admin_userfuncs.go:139:func (s *WebServer) adminUpdateUser(c *gin.Context) {
+./internal/web/web_admin_userfuncs.go:16:func (s *WebServer) countAdminUsers(users []*models.User) (count int64) {
+./internal/web/web_admin_userfuncs.go:239:func (s *WebServer) adminDeleteUser(c *gin.Context) {
+./internal/web/web_admin_userfuncs.go:26:func (s *WebServer) countActiveSessions() int64 {
+./internal/web/web_admin_userfuncs.go:281:func (s *WebServer) isAdmin(user *models.User) bool {
+./internal/web/web_admin_userfuncs.go:32:func (s *WebServer) adminCreateUser(c *gin.Context) {
 ./internal/web/web_aichatPage.go:153:func (s *WebServer) aichatSend(c *gin.Context) {
 ./internal/web/web_aichatPage.go:294:func (s *WebServer) aichatModels(c *gin.Context) {
 ./internal/web/web_aichatPage.go:325:func (s *WebServer) aichatLoadHistory(c *gin.Context) {
@@ -1033,8 +1059,6 @@
 ./internal/web/web_auth.go:85:func (s *SessionData) SetError(msg string) {
 ./internal/web/web_auth.go:90:func (s *SessionData) SetSuccess(msg string) {
 ./internal/web/web_auth.go:95:func (s *SessionData) GetSuccess() string {
-./internal/web/webgroupPage_admin.go:16:func (s *WebServer) decrementSpam(c *gin.Context) {
-./internal/web/webgroupPage_admin.go:91:func (s *WebServer) unhideArticle(c *gin.Context) {
 ./internal/web/webgroupPage.go:145:func (s *WebServer) incrementSpam(c *gin.Context) {
 ./internal/web/webgroupPage.go:22://   - func (s *WebServer) groupPage(c *gin.Context) (line ~598)
 ./internal/web/webgroupPage.go:238:func (s *WebServer) incrementHide(c *gin.Context) {
@@ -1050,6 +1074,7 @@
 ./internal/web/web_hierarchiesPage.go:154:func (s *WebServer) hierarchyTreePage(c *gin.Context) {
 ./internal/web/web_hierarchiesPage.go:23:func (s *WebServer) hierarchiesPage(c *gin.Context) {
 ./internal/web/web_hierarchiesPage.go:276:func (s *WebServer) getHierarchyLevel(currentPath string, sortBy string, page int, pageSize int) ([]HierarchyNode, []*models.Newsgroup, int, int, error) {
+./internal/web/web_hierarchiesPage.go:320:func (s *WebServer) adminRestoreHierarchyDescriptions(c *gin.Context) {
 ./internal/web/web_hierarchiesPage.go:68:func (s *WebServer) hierarchyGroupsPage(c *gin.Context) {
 ./internal/web/web_homePage.go:14:// - func (s *WebServer) homePage(c *gin.Context) (line ~538)
 ./internal/web/web_homePage.go:19:func (s *WebServer) homePage(c *gin.Context) {
@@ -1059,36 +1084,36 @@
 ./internal/web/web_login.go:22:func (s *WebServer) loginPage(c *gin.Context) {
 ./internal/web/web_login.go:59:func (s *WebServer) loginSubmit(c *gin.Context) {
 ./internal/web/web_newsPage.go:17:func (s *WebServer) newsPage(c *gin.Context) {
-./internal/web/web_profile.go:27:func (s *WebServer) profilePage(c *gin.Context) {
-./internal/web/web_profile.go:83:func (s *WebServer) profileUpdate(c *gin.Context) {
+./internal/web/web_profile.go:28:func (s *WebServer) profilePage(c *gin.Context) {
+./internal/web/web_profile.go:85:func (s *WebServer) profileUpdate(c *gin.Context) {
 ./internal/web/web_registerPage.go:145:func (s *WebServer) createUser(username, email, passwordHash, displayName string) (*models.User, error) {
 ./internal/web/web_registerPage.go:182:func (s *WebServer) renderRegisterError(c *gin.Context, errorMsg, username, email string) {
 ./internal/web/web_registerPage.go:23:func (s *WebServer) registerPage(c *gin.Context) {
 ./internal/web/web_registerPage.go:54:func (s *WebServer) registerSubmit(c *gin.Context) {
 ./internal/web/web_searchPage.go:18://   - func (s *WebServer) searchPage(c *gin.Context) (line ~784)
 ./internal/web/web_searchPage.go:23:func (s *WebServer) searchPage(c *gin.Context) {
-./internal/web/web_sectionsPage.go:145:func (s *WebServer) sectionGroupPage(c *gin.Context) {
+./internal/web/web_sectionsPage.go:151:func (s *WebServer) sectionGroupPage(c *gin.Context) {
 ./internal/web/web_sectionsPage.go:20://   - func (s *WebServer) sectionsPage(c *gin.Context) (line ~893)
 ./internal/web/web_sectionsPage.go:22://   - func (s *WebServer) sectionPage(c *gin.Context) (line ~932)
 ./internal/web/web_sectionsPage.go:24://   - func (s *WebServer) sectionGroupPage(c *gin.Context) (line ~1027)
-./internal/web/web_sectionsPage.go:265:func (s *WebServer) sectionArticlePage(c *gin.Context) {
 ./internal/web/web_sectionsPage.go:26://   - func (s *WebServer) sectionArticlePage(c *gin.Context) (line ~1123)
+./internal/web/web_sectionsPage.go:271:func (s *WebServer) sectionArticlePage(c *gin.Context) {
 ./internal/web/web_sectionsPage.go:28://   - func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) (line ~1204)
-./internal/web/web_sectionsPage.go:341:func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
+./internal/web/web_sectionsPage.go:347:func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
 ./internal/web/web_sectionsPage.go:36:func (s *WebServer) sectionsPage(c *gin.Context) {
 ./internal/web/web_sectionsPage.go:65:func (s *WebServer) sectionPage(c *gin.Context) {
-./internal/web/webserver_core_routes.go:266:func (s *WebServer) setupRoutes() {
-./internal/web/webserver_core_routes.go:477:func (s *WebServer) Start() error {
-./internal/web/webserver_core_routes.go:493:func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
-./internal/web/webserver_core_routes.go:515:func (s *WebServer) ReverseProxyMiddleware() gin.HandlerFunc {
-./internal/web/webserver_core_routes.go:592:func (s *WebServer) ApacheLogFormat() gin.HandlerFunc {
-./internal/web/webserver_core_routes.go:609:func (s *WebServer) loadSectionsCache() {
-./internal/web/webserver_core_routes.go:626:func (s *WebServer) refreshSectionsCache() {
-./internal/web/webserver_core_routes.go:631:func (s *WebServer) isValidSection(sectionName string) bool {
-./internal/web/webserver_core_routes.go:639:func (s *WebServer) sectionValidationMiddleware() gin.HandlerFunc {
+./internal/web/webserver_core_routes.go:282:func (s *WebServer) setupRoutes() {
+./internal/web/webserver_core_routes.go:491:func (s *WebServer) Start() error {
+./internal/web/webserver_core_routes.go:507:func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
+./internal/web/webserver_core_routes.go:553:func (s *WebServer) ReverseProxyMiddleware() gin.HandlerFunc {
+./internal/web/webserver_core_routes.go:630:func (s *WebServer) ApacheLogFormat() gin.HandlerFunc {
+./internal/web/webserver_core_routes.go:647:func (s *WebServer) loadSectionsCache() {
+./internal/web/webserver_core_routes.go:664:func (s *WebServer) refreshSectionsCache() {
+./internal/web/webserver_core_routes.go:669:func (s *WebServer) isValidSection(sectionName string) bool {
+./internal/web/webserver_core_routes.go:677:func (s *WebServer) sectionValidationMiddleware() gin.HandlerFunc {
 ./internal/web/web_session_cleanup.go:9:func (s *WebServer) StartSessionCleanup() {
-./internal/web/web_sitePostPage.go:164:func (s *WebServer) sitePostSubmit(c *gin.Context) {
-./internal/web/web_sitePostPage.go:39:func (s *WebServer) sitePostPage(c *gin.Context) {
+./internal/web/web_sitePostPage.go:165:func (s *WebServer) sitePostSubmit(c *gin.Context) {
+./internal/web/web_sitePostPage.go:40:func (s *WebServer) sitePostPage(c *gin.Context) {
 ./internal/web/web_statsPage.go:14://   - func (s *WebServer) statsPage(c *gin.Context) (line ~857)
 ./internal/web/web_statsPage.go:18:func (s *WebServer) statsPage(c *gin.Context) {
 ./internal/web/web_threadPage.go:17://   - func (s *WebServer) singleThreadPage(c *gin.Context) (line ~1394)
@@ -1102,10 +1127,12 @@
 ./internal/web/web_threadTreePage.go:28:func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 ./internal/web/web_threadTreePage.go:92:func (s *WebServer) threadTreePage(c *gin.Context) {
 ./internal/web/web_utils.go:117:func (s *WebServer) isAdminUser(user *models.User) bool {
-./internal/web/web_utils.go:134:func (s *WebServer) renderError(c *gin.Context, statusCode int, message string, errstring string) {
-./internal/web/web_utils.go:158:func (s *WebServer) renderTemplate(c *gin.Context, templateName string, data interface{}) {
-./internal/web/web_utils.go:170:func (s *WebServer) GetGroupCount() int {
+./internal/web/web_utils.go:135:func (s *WebServer) requireAdminAuth(c *gin.Context) bool {
+./internal/web/web_utils.go:156:func (s *WebServer) requireAdminAuthJSON(c *gin.Context) bool {
+./internal/web/web_utils.go:180:func (s *WebServer) renderError(c *gin.Context, statusCode int, message string, errstring string) {
 ./internal/web/web_utils.go:19:// - func (s *WebServer) GetPort() int (line ~235)
+./internal/web/web_utils.go:204:func (s *WebServer) renderTemplate(c *gin.Context, templateName string, data interface{}) {
+./internal/web/web_utils.go:216:func (s *WebServer) GetGroupCount() int {
 ./internal/web/web_utils.go:21:// - func (s *WebServer) NNTPGetTCPPort() int (line ~239)
 ./internal/web/web_utils.go:23:// - func (s *WebServer) NNTPGetTLSPort() int (line ~247)
 ./internal/web/web_utils.go:25:// - func (s *WebServer) getBaseTemplateData(c *gin.Context, title string) TemplateData (line ~255)
