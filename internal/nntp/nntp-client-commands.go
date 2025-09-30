@@ -1050,34 +1050,20 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 	c.lastUsed = time.Now()
 
 	// Send individual CHECK commands for each message ID (pipelining)
-	commandIdsChan := make(chan uint, len(messageIDs))
-	errchan := make(chan error, 1)
-	go func() {
-		for _, msgID := range messageIDs {
-			id, err := c.textConn.Cmd("CHECK %s", *msgID)
-			if err != nil {
-				errchan <- fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
-			}
-			commandIdsChan <- id
+	commandIds := make([]uint, len(messageIDs))
+	for i, msgID := range messageIDs {
+		id, err := c.textConn.Cmd("CHECK %s", *msgID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
 		}
-		close(commandIdsChan)
-	}()
+		commandIds[i] = id
+	}
 
 	// Read responses for each CHECK command
 	responses := make(chan *string, len(messageIDs))
 	defer close(responses)
-	for _, msgID := range messageIDs {
-		var id uint
-		select {
-		case rid, ok := <-commandIdsChan:
-			if !ok {
-				break
-			}
-			// Command ID is ready
-			id = rid
-		case err := <-errchan:
-			return nil, err
-		}
+	for i, msgID := range messageIDs {
+		id := commandIds[i]
 		// Read response for this CHECK command
 		c.textConn.StartResponse(id)
 		code, line, err := c.textConn.ReadCodeLine(238)
