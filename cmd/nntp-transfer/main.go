@@ -1265,23 +1265,64 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 			return transferred, checked, successRate, redis_cache_hits, nil
 		}
 
-		// Remove nil entries (from skipped articles) and update articleMap to use valid articles only
+		// Remove nil entries and batch check Redis cache using pipeline
 		validMessageIds := make([]*string, 0, len(messageIds))
 		validArticles := make([]*models.Article, 0, len(articles))
 		validArticleMap := make(map[string]*models.Article)
+
+		// Collect non-nil message IDs for batch Redis check
+		nonNilIndices := make([]int, 0, len(messageIds))
+		nonNilMsgIds := make([]*string, 0, len(messageIds))
 		for i, msgID := range messageIds {
 			if msgID != nil {
-				// check if message ID is cached in redis
-				if redisCli != nil {
-					if cached, err := redisCli.Exists(redisCtx, *msgID).Result(); err == nil && cached > 0 {
+				nonNilIndices = append(nonNilIndices, i)
+				nonNilMsgIds = append(nonNilMsgIds, msgID)
+			}
+		}
+
+		// Batch check Redis cache using pipeline (1 round trip for all keys)
+		if redisCli != nil && len(nonNilMsgIds) > 0 {
+			pipe := redisCli.Pipeline()
+			cmds := make([]*redis.IntCmd, len(nonNilMsgIds))
+
+			// Queue all EXISTS commands
+			for i, msgID := range nonNilMsgIds {
+				cmds[i] = pipe.Exists(redisCtx, *msgID)
+			}
+
+			// Execute all in one network round trip
+			_, err := pipe.Exec(redisCtx)
+			if err != nil && VERBOSE {
+				log.Printf("Newsgroup: '%s' | Redis pipeline error: %v", newsgroup, err)
+			}
+
+			// Process results
+			for i, cmd := range cmds {
+				idx := nonNilIndices[i]
+				msgID := nonNilMsgIds[i]
+
+				exists, cmdErr := cmd.Result()
+				if cmdErr == nil && exists > 0 {
+					// Cached in Redis - skip this article
+					if VERBOSE {
 						log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis (skip [CHECK])", newsgroup, *msgID)
-						redis_cache_hits++
-						continue // skip this article
 					}
+					redis_cache_hits++
+					continue
 				}
+
+				// Not cached - add to valid list
 				validMessageIds = append(validMessageIds, msgID)
-				validArticles = append(validArticles, articles[i])
-				validArticleMap[*msgID] = articles[i]
+				validArticles = append(validArticles, articles[idx])
+				validArticleMap[*msgID] = articles[idx]
+			}
+		} else {
+			// No Redis - add all non-nil message IDs
+			for i, msgID := range nonNilMsgIds {
+				idx := nonNilIndices[i]
+				validMessageIds = append(validMessageIds, msgID)
+				validArticles = append(validArticles, articles[idx])
+				validArticleMap[*msgID] = articles[idx]
 			}
 		}
 
@@ -1417,10 +1458,28 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	commandIDs := make([]uint, 0, len(articles))
 	validArticles := make([]*models.Article, 0, len(articles))
 
-	for i, article := range articles {
-		if redisCli != nil {
-			// check if message ID is cached in redis
-			if cached, err := redisCli.Exists(redisCtx, article.MessageID).Result(); err == nil && cached > 0 {
+	// Batch check Redis cache using pipeline before sending TAKETHIS
+	if redisCli != nil && len(articles) > 0 {
+		pipe := redisCli.Pipeline()
+		cmds := make([]*redis.IntCmd, len(articles))
+
+		// Queue all EXISTS commands
+		for i, article := range articles {
+			cmds[i] = pipe.Exists(redisCtx, article.MessageID)
+		}
+
+		// Execute all in one network round trip
+		_, err := pipe.Exec(redisCtx)
+		if err != nil && VERBOSE {
+			log.Printf("Newsgroup: '%s' | Redis pipeline error in TAKETHIS: %v", newsgroup, err)
+		}
+
+		// Process results and filter cached articles
+		for i, cmd := range cmds {
+			article := articles[i]
+			exists, cmdErr := cmd.Result()
+			if cmdErr == nil && exists > 0 {
+				// Cached in Redis - skip this article
 				if VERBOSE {
 					log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis (skip [TAKETHIS])", newsgroup, article.MessageID)
 				}
@@ -1428,6 +1487,14 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 				redis_cached++
 				continue
 			}
+			// Not cached - will be sent
+		}
+	}
+
+	// Now send TAKETHIS for non-cached articles
+	for _, article := range articles {
+		if article == nil {
+			continue // Skip cached articles
 		}
 		// Send TAKETHIS command with article content (non-blocking)
 		cmdID, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname)
