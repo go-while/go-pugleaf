@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
@@ -51,7 +52,7 @@ func main() {
 	config.AppVersion = appVersion
 
 	// Disable strict group validation to allow legitimate groups with + and _ characters
-	processor.UseStrictGroupValidation = false
+	common.UseStrictGroupValidation = false
 
 	// Command line flags
 	var filterMalformed bool
