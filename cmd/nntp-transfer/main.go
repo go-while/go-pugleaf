@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -19,10 +20,13 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/processor"
+
+	"github.com/redis/go-redis/v9"
 )
 
 var dbBatchSize int64 = 1000 // Load 1000 articles from DB at a time
 var VERBOSE bool
+var REDIS_CACHE bool = true
 
 // showUsageExamples displays usage examples for NNTP transfer
 func showUsageExamples() {
@@ -72,6 +76,9 @@ func showUsageExamples() {
 
 var appVersion = "-unset-"
 
+var redisCtx = context.Background()
+var REDIS_TTL time.Duration = 3600 * time.Second // default 1h
+
 func main() {
 	common.VerboseHeaders = false
 	config.AppVersion = appVersion
@@ -98,9 +105,14 @@ func main() {
 		proxyPassword = flag.String("proxy-password", "", "Proxy authentication password")
 
 		// Transfer configuration
-		batchCheck = flag.Int("batch-check", 25, "Number of message-IDs to send in a single CHECK command")
+		batchCheck = flag.Int("batch-check", 25, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
 		batchDB    = flag.Int64("batch-db", 1000, "Fetch N articles from DB in a batch")
 		maxThreads = flag.Int("max-threads", 1, "Transfer N newsgroups in concurrent threads. Each thread uses 1 connection.")
+		redisCache = flag.Bool("redis-cache", true, "Use Redis caching for message IDs")
+		redisAddr  = flag.String("redis-addr", "localhost:6379", "Redis server address")
+		redisPass  = flag.String("redis-pass", "", "Redis server password")
+		redisTTL   = flag.Uint("redis-ttl", 3600, "Redis cache TTL in seconds (default: 3600 = 1 hour)")
+		redisDB    = flag.Int("redis-db", 0, "Redis database number")
 
 		// Operation options
 		dryRun   = flag.Bool("dry-run", false, "Show what would be transferred without actually sending")
@@ -126,7 +138,20 @@ func main() {
 	)
 	flag.Parse()
 	common.IgnoreGoogleHeaders = *ignoreGoogleHeaders
-
+	REDIS_CACHE = *redisCache
+	REDIS_TTL = time.Duration(*redisTTL) * time.Second
+	var redisCli *redis.Client
+	if REDIS_CACHE {
+		redisCli = redis.NewClient(&redis.Options{
+			Addr:     *redisAddr,
+			Password: *redisPass,
+			DB:       *redisDB,
+		})
+		if redisCli == nil {
+			log.Printf("Failed to create Redis client")
+			REDIS_CACHE = false
+		}
+	}
 	// Show help if requested
 	if *showHelp {
 		showUsageExamples()
@@ -320,19 +345,22 @@ func main() {
 	// Start transfer process
 	var wgP sync.WaitGroup
 	wgP.Add(2)
-	go func(wgP *sync.WaitGroup) {
+	go func(wgP *sync.WaitGroup, redisCli *redis.Client) {
 		defer wgP.Done()
 		resultChan := make(chan error, 1)
-		resultChan <- runTransfer(db, proc, pool, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, shutdownChan, *debugCapture, wgP)
+		resultChan <- runTransfer(db, proc, pool, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, shutdownChan, *debugCapture, wgP, redisCli)
 		result := <-resultChan
 		if !*debugCapture {
 			transferDoneChan <- result
 			return
 		}
+
+		// when transfer is done: process debugCapture flag
+		// used to debug and rewrite utzoo articles with invalid date headers
+		// rewrite means, database update of DateSent and DateString fields! could be destructive!
+		// you did create a backup before, right?
 		debugMutex.Lock()
 		defer debugMutex.Unlock()
-		// process debugCapture (used to debug and rewrite utzoo articles with invalid date headers)
-
 		for groupName, articles := range debugArticles {
 			fmt.Printf("Debug capture - Newsgroup: %s, Articles: %d\n", groupName, len(articles))
 
@@ -386,7 +414,7 @@ func main() {
 			groupDBs.Return(db)
 		}
 		transferDoneChan <- result
-	}(&wgP)
+	}(&wgP, redisCli)
 	wgP.Wait()
 	// Wait for either shutdown signal or transfer completion
 	select {
@@ -912,9 +940,9 @@ func matchesAnyWildcardPattern(newsgroup string, patterns []string) bool {
 }
 
 // runTransfer performs the actual article transfer process
-func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}, debugCapture bool, wgP *sync.WaitGroup) error {
+func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}, debugCapture bool, wgP *sync.WaitGroup, redisCli *redis.Client) error {
 	defer wgP.Done()
-	var totalTransferred, nothingInDateRange uint64
+	var totalTransferred, nothingInDateRange, totalRedisCacheHits uint64
 	var transferMutex sync.Mutex
 	maxThreadsChan := make(chan struct{}, maxThreads)
 	var wg sync.WaitGroup
@@ -929,7 +957,7 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 		}
 		maxThreadsChan <- struct{}{} // acquire a thread slot
 		wg.Add(1)
-		go func(ng *models.Newsgroup, wg *sync.WaitGroup) {
+		go func(ng *models.Newsgroup, wg *sync.WaitGroup, redisCli *redis.Client) {
 			defer func(wg *sync.WaitGroup) {
 				wg.Done()
 				<-maxThreadsChan // release the thread slot
@@ -941,10 +969,11 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 			if VERBOSE {
 				log.Printf("Starting transfer for newsgroup: %s", newsgroup.Name)
 			}
-			transferred, checked, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, shutdownChan, debugCapture)
+			transferred, checked, rc, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, shutdownChan, debugCapture, redisCli)
 
 			transferMutex.Lock()
 			totalTransferred += transferred
+			totalRedisCacheHits += rc
 			if err == ErrNotInDateRange {
 				nothingInDateRange++
 				err = nil // not a real error
@@ -958,7 +987,7 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 					log.Printf("DONE runTransfer Newsgroup '%s' | transferred %d articles. checked %d. took %v", newsgroup.Name, transferred, checked, time.Since(start))
 				}
 			}
-		}(newsgroup, &wg)
+		}(newsgroup, &wg, redisCli)
 	}
 
 	// Wait for all transfers to complete
@@ -969,7 +998,7 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 	for _, result := range results {
 		log.Print(result)
 	}
-	log.Printf("Transfer summary: Total %d articles transferred", totalTransferred)
+	log.Printf("Summary: Total %d articles transferred. redis_cache_hits: %d", totalTransferred, totalRedisCacheHits)
 	return nil
 }
 
@@ -988,12 +1017,12 @@ var debugMutex sync.Mutex
 var ErrNotInDateRange = fmt.Errorf("article not in specified date range")
 
 // transferNewsgroup transfers articles from a single newsgroup
-func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}, debugCapture bool) (transferred uint64, checked uint64, err error) {
+func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}, debugCapture bool, redisCli *redis.Client) (transferred uint64, checked uint64, redis_cache_hits uint64, err error) {
 
 	// Get group database
 	groupDBs, err := db.GetGroupDBs(newsgroup.Name)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
+		return 0, 0, 0, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
 	}
 	defer func() {
 		if ferr := db.ForceCloseGroupDBs(groupDBs); ferr != nil {
@@ -1004,7 +1033,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	// Get total article count first with date filtering
 	totalArticles, err := getArticleCountWithDateFilter(groupDBs, startTime, endTime)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get article count for newsgroup '%s': %v", newsgroup.Name, err)
+		return 0, 0, 0, fmt.Errorf("failed to get article count for newsgroup '%s': %v", newsgroup.Name, err)
 	}
 
 	if totalArticles == 0 {
@@ -1013,12 +1042,12 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			if VERBOSE {
 				log.Printf("No articles found in newsgroup: %s (within specified date range)", newsgroup.Name)
 			}
-			return 0, 0, ErrNotInDateRange
+			return 0, 0, 0, ErrNotInDateRange
 		} else {
 			log.Printf("No articles found in newsgroup: %s", newsgroup.Name)
 		}
 
-		return 0, 0, nil
+		return 0, 0, 0, nil
 	}
 
 	if dryRun {
@@ -1028,7 +1057,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s", totalArticles, newsgroup.Name)
 		}
 		if !debugCapture {
-			return 0, 0, nil
+			return 0, 0, 0, nil
 		}
 	}
 
@@ -1050,7 +1079,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	for offset := ioffset; offset < totalArticles; offset += dbBatchSize {
 		if proc.WantShutdown(shutdownChan) {
 			log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
-			return transferred, checked, nil
+			return transferred, checked, redis_cache_hits, nil
 		}
 
 		// Load batch from database with date filtering
@@ -1068,8 +1097,28 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			debugMutex.Lock()
 			debugArticles[newsgroup.Name] = append(debugArticles[newsgroup.Name], articles...)
 			debugMutex.Unlock()
-			return 0, 0, nil
+			return 0, 0, 0, nil
 		}
+		/* disabled here
+		redis_cached := 0
+		if redisCli != nil {
+			for i, article := range articles {
+				// check if message ID is cached in redis
+				if cached, err := redisCli.Exists(redisCtx, article.MessageID).Result(); err == nil && cached > 0 {
+					log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis", newsgroup.Name, article.MessageID)
+					articles[i] = nil // free memory
+					redis_cached++
+				}
+			}
+		}
+		if redis_cached == len(articles) {
+			if VERBOSE {
+				log.Printf("Newsgroup: '%s' | All %d articles in batch are cached in Redis, skipping batch (offset %d)", newsgroup.Name, len(articles), offset)
+			}
+			remainingArticles -= int64(len(articles))
+			continue
+		}
+		*/
 		if VERBOSE {
 			log.Printf("Newsgroup: '%s' | Loaded %d articles from database (offset %d)", newsgroup.Name, len(articles), offset)
 		}
@@ -1078,7 +1127,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		for i := 0; i < len(articles); i += batchCheck {
 			if proc.WantShutdown(shutdownChan) {
 				log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
-				return transferred, checked, nil
+				return transferred, checked, redis_cache_hits, nil
 			}
 			if !ttMode.useCheckMode && ttMode.takeThisTotalCount >= 100 {
 				ttMode.takeThisSuccessCount = 0
@@ -1094,7 +1143,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			for {
 				if proc.WantShutdown(shutdownChan) {
 					log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
-					return transferred, checked, nil
+					return transferred, checked, redis_cache_hits, nil
 				}
 				if isleep > time.Minute {
 					isleep = time.Minute
@@ -1120,7 +1169,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 					continue forever
 				}
 
-				batchTransferred, batchChecked, TTsuccessRate, berr := processBatch(conn, newsgroup.Name, ttMode, articles[i:end])
+				batchTransferred, batchChecked, TTsuccessRate, rc, berr := processBatch(conn, newsgroup.Name, ttMode, articles[i:end], redisCli)
 				if berr != nil {
 					log.Printf("Newsgroup: '%s' | Error processing network batch: %v ... retry", newsgroup.Name, berr)
 					conn.ForceClose = true
@@ -1130,9 +1179,10 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 				}
 				pool.Put(conn)
 				transferred += batchTransferred
+				redis_cache_hits += rc
 				checked += batchChecked
 				if VERBOSE || (transferred >= 1000 && transferred%1000 == 0) || (checked >= 1000 && checked%1000 == 0) {
-					log.Printf("Newsgroup: '%s' | BatchDone (offset %d/%d) %d-%d TX:%d check=%t ttRate=%.1f%% checked=%d", newsgroup.Name, offset, totalArticles, i+1, end, batchTransferred, ttMode.useCheckMode, TTsuccessRate, batchChecked)
+					log.Printf("Newsgroup: '%s' | BatchDone (offset %d/%d) %d-%d TX:%d check=%t ttRate=%.1f%% checked=%d redis_cache_hits=%d/%d", newsgroup.Name, offset, totalArticles, i+1, end, batchTransferred, ttMode.useCheckMode, TTsuccessRate, batchChecked, rc, redis_cache_hits)
 				}
 				break forever
 			}
@@ -1165,7 +1215,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		delete(rejectedArticles, newsgroup.Name) // free memory
 	}
 	resultsMutex.Unlock()
-	return transferred, checked, nil
+	return transferred, checked, redis_cache_hits, nil
 } // end func transferNewsgroup
 
 var results []string
@@ -1176,10 +1226,10 @@ var upperLevel float64 = 95.0
 
 // processBatch processes a batch of articles using NNTP streaming protocol (RFC 4644)
 // Uses TAKETHIS primarily, falls back to CHECK when success rate < 95%
-func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode, articles []*models.Article) (transferred uint64, checked uint64, successRate float64, err error) {
+func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode, articles []*models.Article, redisCli *redis.Client) (transferred uint64, checked uint64, successRate float64, redis_cache_hits uint64, err error) {
 
 	if len(articles) == 0 {
-		return 0, 0, 0, nil
+		return 0, 0, 0, 0, nil
 	}
 
 	// Calculate success rate to determine whether to use CHECK or TAKETHIS
@@ -1207,8 +1257,9 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 
 		messageIds := make([]*string, len(articles))
 		for i, article := range articles {
-			// Defensive copy and validation of message ID to prevent buffer corruption
-
+			if article == nil {
+				continue
+			}
 			if strings.Contains(article.MessageID, ">?<") {
 				log.Printf("ERROR: Invalid message ID contains '>?<' character: '%s' - skipping article", article.MessageID)
 				messageIds[i] = nil
@@ -1216,10 +1267,13 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 				continue
 			}
 			if len(article.MessageID) > 128 { // Reasonable message ID length limit
-				log.Printf("WARN: Message ID too long (%d chars): '%s'", len(article.MessageID), article.MessageID)
-				//msgID = msgID[:1000]
+				log.Printf("WARN: long message ID: '%s' (%d chars)", article.MessageID, len(article.MessageID))
 			}
 			messageIds[i] = &article.MessageID
+		}
+		if len(messageIds) == 0 {
+			log.Printf("No message IDs in batch, skipping")
+			return transferred, checked, successRate, redis_cache_hits, nil
 		}
 
 		// Remove nil entries (from skipped articles) and update articleMap to use valid articles only
@@ -1236,7 +1290,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 
 		if len(validMessageIds) == 0 {
 			log.Printf("WARN: No valid message IDs found in batch, skipping")
-			return transferred, checked, successRate, nil
+			return transferred, checked, successRate, redis_cache_hits, nil
 		}
 		if VERBOSE {
 			log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d valid articles (filtered from %d)", newsgroup, len(validMessageIds), len(articles))
@@ -1248,7 +1302,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 			ttMode.connErrors++
 			conn.ForceClose = true
 			conn.Pool.Put(conn)
-			return transferred, checked, successRate, fmt.Errorf("Newsgroup: '%s' | failed to send CHECK command: %v", newsgroup, err)
+			return transferred, checked, successRate, redis_cache_hits, fmt.Errorf("Newsgroup: '%s' | failed to send CHECK command: %v", newsgroup, err)
 		}
 
 		// Find wanted articles
@@ -1270,7 +1324,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 				ttMode.takeThisSuccessCount = 0
 				ttMode.takeThisTotalCount = uint64(len(validMessageIds))
 			}
-			return transferred, checked, successRate, nil
+			return transferred, checked, successRate, redis_cache_hits, nil
 		}
 		if ttMode.useCheckMode && len(wantedIds) == len(validMessageIds) {
 			// use TAKETHIS mode if all articles are wanted
@@ -1291,15 +1345,16 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 			}
 			validTakeThisArticles = append(validTakeThisArticles, article)
 		}
-		count, err := sendArticlesBatchViaTakeThis(conn, validTakeThisArticles, ttMode, newsgroup)
+		txcount, rc, err := sendArticlesBatchViaTakeThis(conn, validTakeThisArticles, ttMode, newsgroup, redisCli)
 		if conn.ForceClose {
-			return transferred, checked, successRate, fmt.Errorf("Newsgroup: '%s' | connection marked for close, aborting batch. err='%v'", newsgroup, err)
+			return transferred, checked, successRate, redis_cache_hits, fmt.Errorf("Newsgroup: '%s' | connection marked for close, aborting batch. err='%v'", newsgroup, err)
 		}
 		if err != nil {
 			log.Printf("Newsgroup: '%s' | Failed to send CHECKED TAKETHIS: %v", newsgroup, err)
-			return transferred, checked, successRate, fmt.Errorf("failed to send CHECKED TAKETHIS batch: %v", err)
+			return transferred, checked, successRate, redis_cache_hits, fmt.Errorf("failed to send CHECKED TAKETHIS batch: %v", err)
 		}
-		transferred += count
+		transferred += txcount
+		redis_cache_hits += rc
 
 	} else {
 		// TAKETHIS mode: send articles directly and track success rate
@@ -1308,48 +1363,53 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *takeThisMode
 		// Validate articles before sending in TAKETHIS mode
 		validTakeThisArticles := make([]*models.Article, 0, len(articles))
 		for _, article := range articles {
+			if article == nil {
+				continue
+			}
 			if strings.Contains(article.MessageID, ">?<") {
 				log.Printf("ERROR: Invalid message ID contains '>?<' character in TAKETHIS mode: '%s' - skipping", article.MessageID)
 				os.Exit(1)
 				continue
 			}
 			if len(article.MessageID) > 128 {
-				log.Printf("WARN: Message ID too long in TAKETHIS mode (%d chars): '%.100s...'", len(article.MessageID), article.MessageID)
+				log.Printf("WARN: Message ID very long in TAKETHIS mode (%d chars): '%.100s...'", len(article.MessageID), article.MessageID)
 			}
 			validTakeThisArticles = append(validTakeThisArticles, article)
 		}
 
 		if len(validTakeThisArticles) == 0 {
 			log.Printf("WARN: No valid articles for TAKETHIS mode, skipping batch")
-			return transferred, checked, successRate, nil
+			return transferred, checked, successRate, redis_cache_hits, nil
 		}
 
 		if len(validTakeThisArticles) != len(articles) {
 			log.Printf("Newsgroup: '%s' | Filtered articles for TAKETHIS: %d valid from %d total", newsgroup, len(validTakeThisArticles), len(articles))
 		}
 
-		transferred, err := sendArticlesBatchViaTakeThis(conn, validTakeThisArticles, ttMode, newsgroup)
+		txcount, rc, err := sendArticlesBatchViaTakeThis(conn, validTakeThisArticles, ttMode, newsgroup, redisCli)
 		if err != nil {
-			return transferred, checked, successRate, fmt.Errorf("failed to send TAKETHIS batch: %v", err)
+			return transferred, checked, successRate, redis_cache_hits, fmt.Errorf("failed to send TAKETHIS batch: %v", err)
 		}
-		if transferred == 0 {
+		if txcount == 0 {
 			if !ttMode.useCheckMode {
 				ttMode.useCheckMode = true
 				ttMode.takeThisSuccessCount = 0
 				ttMode.takeThisTotalCount = uint64(len(validTakeThisArticles))
 			}
 		}
-		return transferred, checked, successRate, nil
+		transferred += txcount
+		redis_cache_hits += rc
+		return transferred, checked, successRate, redis_cache_hits, nil
 	}
 
-	return transferred, checked, successRate, nil
+	return transferred, checked, successRate, redis_cache_hits, nil
 }
 
 // sendArticlesBatchViaTakeThis sends multiple articles via TAKETHIS in streaming mode
 // Sends all TAKETHIS commands first, then reads all responses (true streaming)
-func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Article, ttMode *takeThisMode, newsgroup string) (transferred uint64, err error) {
+func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Article, ttMode *takeThisMode, newsgroup string, redisCli *redis.Client) (transferred uint64, redis_cached uint64, err error) {
 	if len(articles) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	// Phase 1: Send all TAKETHIS commands without waiting for responses
@@ -1358,7 +1418,17 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	commandIDs := make([]uint, 0, len(articles))
 	validArticles := make([]*models.Article, 0, len(articles))
 
-	for _, article := range articles {
+	for i, article := range articles {
+
+		if REDIS_CACHE && redisCli != nil {
+			// check if message ID is cached in redis
+			if cached, err := redisCli.Exists(redisCtx, article.MessageID).Result(); err == nil && cached > 0 {
+				//log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis", newsgroup, article.MessageID)
+				articles[i] = nil // free memory
+				redis_cached++
+				continue
+			}
+		}
 		// Send TAKETHIS command with article content (non-blocking)
 		cmdID, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname)
 		if err != nil {
@@ -1370,7 +1440,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			conn.ForceClose = true
 			conn.Pool.Put(conn)
 			log.Printf("ERROR Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroup, article.MessageID, err)
-			return 0, fmt.Errorf("failed to send TAKETHIS for %s: %v", article.MessageID, err)
+			return 0, redis_cached, fmt.Errorf("failed to send TAKETHIS for %s: %v", article.MessageID, err)
 		}
 
 		commandIDs = append(commandIDs, cmdID)
@@ -1389,7 +1459,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			conn.ForceClose = true
 			conn.Pool.Put(conn)
 			log.Printf("ERROR Newsgroup: '%s' | Failed to read TAKETHIS response for %s: %v", newsgroup, article.MessageID, err)
-			return transferred, fmt.Errorf("failed to read TAKETHIS response for %s: %v", article.MessageID, err)
+			return transferred, redis_cached, fmt.Errorf("failed to read TAKETHIS response for %s: %v", article.MessageID, err)
 		}
 
 		// Update success rate tracking
@@ -1411,13 +1481,13 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			log.Printf("Newsgroup: '%s' | Failed to transfer article '%s': response=%d (i=%d/%d)", newsgroup, article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
 			conn.ForceClose = true
 			conn.Pool.Put(conn)
-			return transferred, fmt.Errorf("failed to transfer article '%s': response=%d", article.MessageID, takeThisResponseCode)
+			return transferred, redis_cached, fmt.Errorf("failed to transfer article '%s': response=%d", article.MessageID, takeThisResponseCode)
 		}
 	}
 	if VERBOSE {
-		log.Printf("Newsgroup: '%s' | Batch transferred: %d/%d articles", newsgroup, transferred, len(articles))
+		log.Printf("Newsgroup: '%s' | Batch transferred: %d/%d articles. redis_cached=%d", newsgroup, transferred, len(articles), redis_cached)
 	}
-	return transferred, nil
+	return transferred, redis_cached, nil
 }
 
 // sendArticleViaTakeThis sends a single article via TAKETHIS and tracks success rate
