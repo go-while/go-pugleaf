@@ -7,7 +7,6 @@ import (
 	"log"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -1053,8 +1052,7 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 	// Send individual CHECK commands for each message ID (pipelining)
 	commandIdsChan := make(chan uint, len(messageIDs))
 	errchan := make(chan error, 1)
-	var mux sync.Mutex
-	go func(mux *sync.Mutex) {
+	go func() {
 		for _, msgID := range messageIDs {
 			id, err := c.textConn.Cmd("CHECK %s", *msgID)
 			if err != nil {
@@ -1062,7 +1060,7 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 			}
 			commandIdsChan <- id
 		}
-	}(&mux)
+	}()
 
 	// Read responses for each CHECK command
 	responses := make(chan *string, len(messageIDs))
