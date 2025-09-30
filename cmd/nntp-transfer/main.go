@@ -1224,7 +1224,6 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		for _, msgId := range rejectedArticles[newsgroup.Name] {
 			// prints all at the end again
 			log.Printf("END Newsgroup: '%s' | REJECTED '%s'", newsgroup.Name, msgId)
-
 		}
 		delete(rejectedArticles, newsgroup.Name) // free memory
 	}
@@ -1540,7 +1539,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	}
 
 	//log.Printf("Sent %d TAKETHIS commands, reading responses...", len(commandIDs))
-
+	var done []*string
 	// Phase 2: Read all responses in order
 	for i, cmdID := range commandIDs {
 		article := validArticles[i]
@@ -1564,9 +1563,9 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			ttMode.Rejected++
 			if VERBOSE {
 				log.Printf("Newsgroup: '%s' | Rejected article '%s': response=%d (i=%d/%d)", newsgroup, article.MessageID, takeThisResponseCode, i+1, len(commandIDs))
-				resultsMutex.Lock()
-				rejectedArticles[newsgroup] = append(rejectedArticles[newsgroup], article.MessageID)
-				resultsMutex.Unlock()
+				//resultsMutex.Lock()
+				//rejectedArticles[newsgroup] = append(rejectedArticles[newsgroup], article.MessageID)
+				//resultsMutex.Unlock()
 			}
 		default:
 			ttMode.TX_Errors++
@@ -1576,10 +1575,25 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			return transferred, redis_cached, fmt.Errorf("failed to transfer article '%s': response=%d", article.MessageID, takeThisResponseCode)
 		}
 		if redisCli != nil {
-			// cache transferred or rejected message IDs in redis
-			if err := redisCli.Set(redisCtx, article.MessageID, "1", REDIS_TTL).Err(); err != nil {
-				log.Printf("Newsgroup: '%s' | Failed to cache article '%s' in Redis: %v", newsgroup, article.MessageID, err)
-			}
+			done = append(done, &article.MessageID)
+		}
+	} // end for commandIDs
+
+	if redisCli != nil && len(done) > 0 {
+		// Cache transferred or rejected message IDs in Redis using pipeline (1 round trip)
+		pipe := redisCli.Pipeline()
+
+		// Queue all SET commands
+		for _, msgID := range done {
+			pipe.Set(redisCtx, *msgID, "1", REDIS_TTL)
+		}
+
+		// Execute all SET commands in one network round trip
+		_, err := pipe.Exec(redisCtx)
+		if err != nil {
+			log.Printf("Newsgroup: '%s' | Failed to cache %d message IDs in Redis: %v", newsgroup, len(done), err)
+		} else if VERBOSE {
+			log.Printf("Newsgroup: '%s' | Cached %d message IDs in Redis", newsgroup, len(done))
 		}
 	}
 	if VERBOSE {
@@ -1587,40 +1601,3 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	}
 	return transferred, redis_cached, nil
 } // end func sendArticlesBatchViaTakeThis
-
-// sendArticleViaTakeThis sends a single article via TAKETHIS and tracks success rate
-func sendArticleViaTakeThis(conn *nntp.BackendConn, article *models.Article, ttMode *takeThisMode, newsgroup string) (uint64, error) {
-
-	// Send TAKETHIS command with article content
-	takeThisResponseCode, err := conn.TakeThisArticle(article, &processor.LocalNNTPHostname)
-	if err != nil {
-		ttMode.connErrors++
-		conn.ForceClose = true
-		conn.Pool.Put(conn)
-		return 0, fmt.Errorf("failed to send TAKETHIS: %v", err)
-	}
-
-	// Update success rate tracking
-	ttMode.takeThisTotalCount++
-	switch takeThisResponseCode {
-	case 239:
-		ttMode.takeThisSuccessCount++
-		//log.Printf("Successfully transferred article: %s", article.MessageID)
-		return 1, nil
-	case 439:
-		ttMode.Rejected++
-		if VERBOSE {
-			log.Printf("Newsgroup: '%s' | Rejected article '%s': response=%d (i=1/1)", newsgroup, article.MessageID, takeThisResponseCode)
-			resultsMutex.Lock()
-			rejectedArticles[newsgroup] = append(rejectedArticles[newsgroup], article.MessageID)
-			resultsMutex.Unlock()
-		}
-		return 0, nil
-	default:
-		ttMode.TX_Errors++
-		log.Printf("Newsgroup: '%s' | Failed to transfer article '%s': response=%d", newsgroup, article.MessageID, takeThisResponseCode)
-		conn.ForceClose = true
-		conn.Pool.Put(conn)
-		return 0, fmt.Errorf("failed to transfer article '%s': response=%d", article.MessageID, takeThisResponseCode)
-	}
-}
