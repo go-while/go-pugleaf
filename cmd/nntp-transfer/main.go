@@ -86,7 +86,7 @@ var REDIS_TTL time.Duration = 3600 * time.Second // default 1h
 func main() {
 	common.VerboseHeaders = false
 	config.AppVersion = appVersion
-	database.NO_CACHE_BOOT = true // prevents booting caches
+	database.NO_CACHE_BOOT = true // prevents booting caches and several other not needed functions
 	log.Printf("Starting go-pugleaf NNTP Transfer Tool (version %s)", config.AppVersion)
 
 	// Command line flags for NNTP transfer configuration

@@ -397,6 +397,9 @@ func (db *Database) LoadDefaultProviders() error {
 
 // loadBotConfiguration loads bot settings from database and populates global config variables
 func (db *Database) loadBotConfiguration() {
+	if NO_CACHE_BOOT {
+		return
+	}
 	// Load BlockBadBots setting
 	config.BadBotsMutex.Lock()
 	defer config.BadBotsMutex.Unlock()
@@ -441,6 +444,9 @@ func (db *Database) loadBotConfiguration() {
 
 // loadIPBlockingConfiguration loads IP blocking settings from database and populates global config variables
 func (db *Database) loadIPBlockingConfiguration() {
+	if NO_CACHE_BOOT {
+		return
+	}
 	// Load BlockBadIPs setting
 	config.BadIPsMutex.Lock()
 	defer config.BadIPsMutex.Unlock()
