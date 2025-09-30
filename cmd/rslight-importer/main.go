@@ -9,6 +9,7 @@ import (
 	"time"
 
 	prof "github.com/go-while/go-cpu-mem-profiler"
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/processor"
@@ -98,8 +99,8 @@ func main() {
 	}
 
 	// Create legacy RockSolid Light proc
-	processor.UseStrictGroupValidation = false // Disable strict validation for legacy imports (allows uppercase groups and other legacy quirks)
-	processor.RunRSLIGHTImport = true          // Enable RSLIGHT import mode
+	common.UseStrictGroupValidation = false // Disable strict validation for legacy imports (allows uppercase groups and other legacy quirks)
+	processor.RunRSLIGHTImport = true       // Enable RSLIGHT import mode
 	proc := processor.NewLegacyImporter(db, *legacyPath, *sqliteDir, lockedHashLen)
 	// Set up the date parser adapter to use processor's ParseNNTPDate
 	database.GlobalDateParser = processor.ParseNNTPDate
