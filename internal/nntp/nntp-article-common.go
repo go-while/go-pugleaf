@@ -44,7 +44,7 @@ type TakeThisMode struct {
 
 // retrieveArticleCommon handles the common logic for ARTICLE, HEAD, BODY, and STAT commands
 func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType ArticleRetrievalType) error {
-	time.Sleep(time.Second / 5) // ratelimit
+	time.Sleep(time.Second / 5) // TODO hardcoded ratelimit
 
 	// Get article data using common logic
 	result, err := c.getArticleData(args)
