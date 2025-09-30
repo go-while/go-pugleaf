@@ -31,6 +31,17 @@ type ArticleRetrievalResult struct {
 	GroupDBs   *database.GroupDBs
 }
 
+// used in nntp-transfer/main.go
+type TakeThisMode struct {
+	Unwanted             uint64
+	Rejected             uint64
+	TX_Errors            uint64
+	ConnErrors           uint64
+	TakeThisSuccessCount uint64
+	TakeThisTotalCount   uint64
+	CheckMode            bool // Start with TAKETHIS mode (false)
+}
+
 // retrieveArticleCommon handles the common logic for ARTICLE, HEAD, BODY, and STAT commands
 func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType ArticleRetrievalType) error {
 	time.Sleep(time.Second / 5) // ratelimit

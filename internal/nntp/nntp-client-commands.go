@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -1039,7 +1040,7 @@ type CheckResponse struct {
 }
 
 // CheckMultiple sends a CHECK command for multiple message IDs and returns responses
-func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, error) {
+func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) (chan *CheckResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -1058,20 +1059,30 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, erro
 	c.lastUsed = time.Now()
 
 	// Send individual CHECK commands for each message ID (pipelining)
-	commandIds := make([]uint, len(messageIDs))
-	for i, msgID := range messageIDs {
-		id, err := c.textConn.Cmd("CHECK %s", *msgID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
+	commandIdsChan := make(chan uint, len(messageIDs))
+	errchan := make(chan error, 1)
+	var mux sync.Mutex
+	go func(mux *sync.Mutex) {
+		for _, msgID := range messageIDs {
+			id, err := c.textConn.Cmd("CHECK %s", *msgID)
+			if err != nil {
+				errchan <- fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
+			}
+			commandIdsChan <- id
 		}
-		commandIds[i] = id
-	}
+	}(&mux)
 
 	// Read responses for each CHECK command
-	responses := make([]CheckResponse, 0, len(messageIDs))
+	responses := make(chan *CheckResponse, len(messageIDs))
 	//var outoforder []CheckResponse
-	for i, msgID := range messageIDs {
-		id := commandIds[i]
+	var id uint
+	for _, msgID := range messageIDs {
+		select {
+		case id = <-commandIdsChan:
+			// Command ID is ready
+		case err := <-errchan:
+			return nil, err
+		}
 		// Read response for this CHECK command
 		c.textConn.StartResponse(id)
 		code, line, err := c.textConn.ReadCodeLine(238)
@@ -1104,15 +1115,11 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, erro
 			return nil, fmt.Errorf("out of order CHECK response: expected %s, got %s", *msgID, parts[0])
 		}
 
-		response := CheckResponse{
-			MessageID: msgID, // First part is the message ID
-			Code:      code,
+		responses <- &CheckResponse{
+			MessageID: msgID,       // First part is the message ID
 			Wanted:    code == 238, // 238 means article wanted
 		}
-
-		responses = append(responses, response)
 	}
-
 	/*
 		for _, resp := range outoforder {
 			for _, msgID := range messageIDs {
