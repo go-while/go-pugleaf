@@ -338,17 +338,29 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 					continue
 				}
 				newsgroupsValue := strings.TrimSpace(parts[1])
-
+				newsgroupsValue = strings.ReplaceAll(newsgroupsValue, ":", " ")
+				newsgroupsValue = strings.ReplaceAll(newsgroupsValue, ";", " ")
+				newsgroupsValue = strings.TrimSpace(newsgroupsValue)
+				if newsgroupsValue == "" {
+					log.Printf("Empty Newsgroups header value: '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
+					return nil, ErrNoNewsgroups
+				}
 				newsgroups := SeparatorRegex.Split(newsgroupsValue, -1)
-				for _, group := range newsgroups {
+			checkGroups:
+				for x, group := range newsgroups {
+					if UseStrictGroupValidation && group != strings.ToLower(group) {
+						log.Printf("Newsgroup name not lowercase: '%s' in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
+						badGroups++
+						continue checkGroups
+					}
 					trimmedNG := strings.TrimSpace(group)
 					// Clean up trailing semicolons and other unwanted characters
 					trimmedNG = strings.TrimRight(trimmedNG, ";:,")
 					trimmedNG = strings.TrimSpace(trimmedNG) // Trim again after removing punctuation
-
-					if trimmedNG == "" || !IsValidGroupName(trimmedNG) {
+					if trimmedNG == "" || strings.Contains(group, " ") || !IsValidGroupName(trimmedNG) {
+						log.Printf("Invalid newsgroup name: '%s' in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
 						badGroups++
-						continue
+						continue checkGroups
 					}
 					validNewsgroups = append(validNewsgroups, &trimmedNG)
 				}
