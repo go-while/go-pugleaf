@@ -178,13 +178,13 @@ func (pm *PosterManager) postToProvider(article *models.Article, pool *nntp.Pool
 		if err != nil {
 			return fmt.Errorf("failed to get connection: %v", err)
 		}
-		defer pool.Put(conn)
 		// Use POST for posting articles (standard NNTP posting)
 		responseCode, err := conn.PostArticle(article)
 		if err != nil {
+			conn.ForceCloseConn()
 			return fmt.Errorf("failed to post article: %v", err)
 		}
-
+		defer pool.Put(conn)
 		// Check response code
 		switch responseCode {
 		case 240: // Article posted successfully
