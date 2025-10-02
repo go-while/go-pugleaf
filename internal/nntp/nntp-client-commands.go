@@ -1142,18 +1142,6 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
 	}
 
-	go func() {
-		c.mux.Lock()
-		// Flush the writer to ensure all data is sent
-		if err := c.writer.Flush(); err != nil {
-			log.Printf("defer failed to flush TakeThisArticle: %v", err)
-			c.connected = false
-			c.forceClose = true
-			go c.Pool.Put(c)
-		}
-		c.mux.Unlock()
-	}()
-
 	// Send headers
 	for _, headerLine := range headers {
 		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
@@ -1240,20 +1228,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	if err != nil {
 		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
 	}
-	/*
-		go func() {
-			c.mux.Lock()
-			// Flush the writer to ensure all data is sent
-			if err := c.writer.Flush(); err != nil {
-				log.Printf("defer failed to flush SendTakeThisArticleStreaming: %v", err)
-				c.connected = false
-				c.forceClose = true
-				go c.Pool.Put(c)
-			}
-			c.lastUsed = time.Now()
-			c.mux.Unlock()
-		}()
-	*/
+
 	// Send headers
 	for _, headerLine := range headers {
 		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
@@ -1360,7 +1335,7 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 	case 401:
 		if strings.ToLower(line) == "mode reader" {
 			if err := c.SwitchMode(MODE_READER_MV); err != nil {
-				return code, fmt.Errorf("POST failed and switching to reader mode failed: %w", err)
+				return code, fmt.Errorf("POST '%s' failed. switching to reader mode failed: %w", article.MessageID, err)
 			}
 
 			// Send POST command again
@@ -1382,20 +1357,7 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 	if code != 340 {
 		return code, fmt.Errorf("POST command rejected (code %d): %s", code, line)
 	}
-	/*
-		go func() {
-			c.mux.Lock()
-			// Flush the writer to ensure all data is sent
-			if err := c.writer.Flush(); err != nil {
-				log.Printf("defer failed to flush PostArticle: %v", err)
-				c.connected = false
-				c.forceClose = true
-				go c.Pool.Put(c)
-			}
-			c.lastUsed = time.Now()
-			c.mux.Unlock()
-		}()
-	*/
+
 	// Send headers using writer (not DotWriter)
 	for _, headerLine := range headers {
 		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
