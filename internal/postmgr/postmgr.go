@@ -184,14 +184,16 @@ func (pm *PosterManager) postToProvider(article *models.Article, pool *nntp.Pool
 			conn.ForceCloseConn()
 			return fmt.Errorf("failed to post article: %v", err)
 		}
-		defer pool.Put(conn)
 		// Check response code
 		switch responseCode {
 		case 240: // Article posted successfully
+			pool.Put(conn)
 			return nil
 		case 441: // Posting failed
+			pool.Put(conn)
 			return fmt.Errorf("article posting failed (code 441)")
 		default:
+			conn.ForceCloseConn()
 			return fmt.Errorf("unexpected response code: %d", responseCode)
 		}
 	}
