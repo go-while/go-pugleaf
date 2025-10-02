@@ -16,6 +16,22 @@ import (
 // This file should contain the API endpoint functions from server.go:
 var LIMIT_listGroups = 128
 
+// requireAPIEnabled is a middleware that checks if API is enabled
+func (s *WebServer) requireAPIEnabled() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiEnabledStr, err := s.DB.GetConfigValue(config.CFG_KEY_API_ENABLED)
+		if err != nil || apiEnabledStr != "true" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":   "API services are currently disabled",
+				"message": "The API is not available at this time. Please contact the administrator.",
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 // Functions to be moved from server.go:
 // - func (s *WebServer) listGroups(c *gin.Context) (line ~313)
 //   API endpoint for "/api/v1/groups" to return JSON list of groups

@@ -51,6 +51,7 @@ const CFG_KEY_BADBOTS string = "BadBots"
 const CFG_KEY_BLOCKBADBOTS string = "BlockBadBots"
 const CFG_KEY_BADIPS string = "BadIPs"
 const CFG_KEY_BLOCKBADIPS string = "BlockBadIPs"
+const CFG_KEY_API_ENABLED string = "APIEnabled"
 
 // Admin settings form field names
 const FORM_FIELD_HOSTNAME string = "local_nntp_hostname"
@@ -63,6 +64,7 @@ const FORM_FIELD_BADBOTS string = "bad_bots"
 const FORM_FIELD_BLOCKBADBOTS string = "block_bad_bots"
 const FORM_FIELD_BADIPS string = "bad_ips"
 const FORM_FIELD_BLOCKBADIPS string = "block_bad_ips"
+const FORM_FIELD_API_ENABLED string = "api_toogle"
 
 // Config holds the main configuration for go-pugleaf
 type MainConfig struct {

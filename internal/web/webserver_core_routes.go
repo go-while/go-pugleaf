@@ -78,6 +78,7 @@ type StatsPageData struct {
 	TemplateData
 	Groups        []*models.Newsgroup
 	TotalArticles int64
+	APIEnabled    bool
 }
 
 // GroupsPageData represents data for groups page
@@ -332,14 +333,15 @@ func (s *WebServer) setupRoutes() {
 
 	// API routes (high priority - before dynamic section routes)
 	// stats are public
-	s.Router.GET("/api/v1/stats", s.getStats)  // API endpoint for stats
-	s.Router.GET("/api/v1/stats/", s.getStats) // API endpoint for stats
+	s.Router.GET("/api/v1/stats", s.requireAPIEnabled(), s.getStats)  // API endpoint for stats
+	s.Router.GET("/api/v1/stats/", s.requireAPIEnabled(), s.getStats) // API endpoint for stats
 
 	// Public article preview endpoint (no auth required)
-	s.Router.GET("/api/v1/groups/:group/articles/:articleNum/preview", s.getArticlePreview)
+	s.Router.GET("/api/v1/groups/:group/articles/:articleNum/preview", s.requireAPIEnabled(), s.getArticlePreview)
 
 	api := s.Router.Group("/api/v1")
-	api.Use(s.APIAuthRequired())
+	api.Use(s.requireAPIEnabled()) // Check if API is enabled
+	api.Use(s.APIAuthRequired())   // Then check authentication
 	{
 		//api.GET("/stats/", s.getStats) // not public, needs auth
 		api.GET("/groups", s.listGroups)

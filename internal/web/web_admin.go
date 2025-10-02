@@ -56,6 +56,7 @@ type AdminPageData struct {
 	NNTPAuthCacheStats         map[string]interface{}                // Added for NNTP auth cache monitoring
 	MessageIdCacheStats        map[string]interface{}                // Added for message ID cache monitoring
 	RegistrationEnabled        bool                                  // Added for registration control
+	APIEnabled                 bool                                  // Added for api_enabled control
 	CurrentHostname            string                                // Added for NNTP hostname configuration
 	WebPostMaxArticleSize      string                                // Added for web post size configuration
 	AbuseMail                  string                                // Added for abuse email configuration
@@ -74,7 +75,8 @@ type AdminPageData struct {
 	FormFieldBadBots           string                                // Bad bots list form field name
 	FormFieldBlockBadBots      string                                // Block bad bots toggle form field name
 	FormFieldBadIPs            string                                // Bad IPs list form field name
-	FormFieldBlockBadIPs       string                                // Block bad IPs toggle form field name
+	FormFieldBlockBadIPs       string                                // Block Bad IPs toggle form field name
+	FormFieldAPIEnabled        string                                // API Enabled toggle form field name
 	PostQueue                  []*database.PostQueueEntryWithDetails // Added for post queue management
 	QueueStats                 map[string]int                        // Added for post queue statistics
 	StatusFilter               string                                // Added for post queue status filtering
@@ -82,6 +84,7 @@ type AdminPageData struct {
 	Success                    string
 	Error                      string
 	ActiveTab                  string // Added for tab state
+
 }
 
 // getUptime returns server uptime (placeholder)

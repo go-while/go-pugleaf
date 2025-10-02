@@ -250,6 +250,34 @@
                         </td>
                     </tr>
 
+                    <!-- API Enabled Setting -->
+                    <tr>
+                        <td>
+                            <strong>🔌 API Services
+                            {{if .APIEnabled}}
+                            <span class="badge bg-success">✅ Enabled</span>
+                            {{else}}
+                            <span class="badge bg-danger">❌ Disabled</span>
+                            {{end}}
+                            <br>
+                            </strong>
+                            <span class="text-muted">Enable or disable API services for external integrations</span>
+                        </td>
+                        <td>
+                            <form action="/admin/settings" method="post" class="d-inline">
+                                <input type="hidden" name="setting" value="{{.FormFieldAPIEnabled}}">
+                                <input type="hidden" name="{{.FormFieldAPIEnabled}}" value="toggle">
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                    {{if .APIEnabled}}
+                                    <i class="bi bi-plug me-1"></i>Disable
+                                    {{else}}
+                                    <i class="bi bi-plug-fill me-1"></i>Enable
+                                    {{end}}
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+
                     <!-- Bad IPs List Setting -->
                     <tr>
                         <td>

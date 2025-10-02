@@ -481,6 +481,14 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	}
 	blockBadIPs := blockBadIPsStr == "true"
 
+	// Get current API Enabled from database
+	apiEnabledStr, err := s.DB.GetConfigValue(config.CFG_KEY_API_ENABLED)
+	if err != nil {
+		log.Printf("Failed to get APIEnabled: %v", err)
+		apiEnabledStr = "false" // Default to false on error
+	}
+	apiEnabled := apiEnabledStr == "true"
+
 	// Get total users count for statistics
 	totalUsersCount := s.DB.GetUsersCount()
 	// Get total admin users count for statistics
@@ -531,6 +539,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		BlockBadBots:               blockBadBots,
 		BadIPs:                     badIPs,
 		BlockBadIPs:                blockBadIPs,
+		APIEnabled:                 apiEnabled,
 		// Form field constants for admin settings
 		FormFieldHostname:     config.FORM_FIELD_HOSTNAME,
 		FormFieldWebPostSize:  config.FORM_FIELD_WEBPOSTSIZE,
@@ -542,6 +551,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		FormFieldBlockBadBots: config.FORM_FIELD_BLOCKBADBOTS,
 		FormFieldBadIPs:       config.FORM_FIELD_BADIPS,
 		FormFieldBlockBadIPs:  config.FORM_FIELD_BLOCKBADIPS,
+		FormFieldAPIEnabled:   config.FORM_FIELD_API_ENABLED,
 		PostQueue:             postQueue,
 		QueueStats:            queueStats,
 		StatusFilter:          statusFilter,

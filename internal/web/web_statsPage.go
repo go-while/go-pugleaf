@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/config"
 )
 
 // This file should contain the statistics page related functions from server.go:
@@ -33,10 +34,15 @@ func (s *WebServer) statsPage(c *gin.Context) {
 		}
 	}
 
+	// Get API enabled status
+	apiEnabledStr, _ := s.DB.GetConfigValue(config.CFG_KEY_API_ENABLED)
+	apiEnabled := apiEnabledStr == "true"
+
 	data := StatsPageData{
 		TemplateData:  s.getBaseTemplateData(c, "System Statistics"),
 		Groups:        topGroups, // Only top 10 most active groups
 		TotalArticles: totalArticles,
+		APIEnabled:    apiEnabled,
 	}
 	data.GroupCount = totalCount
 

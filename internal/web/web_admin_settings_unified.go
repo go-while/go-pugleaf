@@ -141,6 +141,14 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 			},
 			EmptyAllowed: true,
 		},
+		config.FORM_FIELD_API_ENABLED: {
+			FormField:    config.FORM_FIELD_API_ENABLED,
+			ConfigKey:    config.CFG_KEY_API_ENABLED,
+			Validator:    nil, // No validation needed
+			Processor:    s.processAPIEnabledToggle,
+			SuccessMsg:   func(value string) string { return value }, // Custom message handled in processor
+			EmptyAllowed: true,                                       // Toggle doesn't need a value
+		},
 	}
 
 	// Get setting configuration
@@ -178,7 +186,7 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 	}
 
 	// Process the setting
-	if settingType == config.FORM_FIELD_HOSTNAME || settingType == config.FORM_FIELD_REGISTRATION || settingType == config.FORM_FIELD_BLOCKBADBOTS {
+	if settingType == config.FORM_FIELD_HOSTNAME || settingType == config.FORM_FIELD_REGISTRATION || settingType == config.FORM_FIELD_BLOCKBADBOTS || settingType == config.FORM_FIELD_API_ENABLED {
 		if err := cfg.Processor(s, value); err != nil {
 			switch settingType {
 			case config.FORM_FIELD_HOSTNAME:
@@ -187,6 +195,8 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 				session.SetError("Failed to toggle registration: " + err.Error())
 			case config.FORM_FIELD_BLOCKBADBOTS:
 				session.SetError("Failed to toggle bot blocking: " + err.Error())
+			case config.FORM_FIELD_API_ENABLED:
+				session.SetError("Failed to toggle API: " + err.Error())
 			}
 			c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 			return
@@ -227,6 +237,14 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 			session.SetSuccess("Bot blocking enabled.")
 		} else {
 			session.SetSuccess("Bot blocking disabled.")
+		}
+	} else if settingType == config.FORM_FIELD_API_ENABLED {
+		// Get the new status to show the correct message
+		currentStatus, _ := s.DB.GetConfigValue(config.CFG_KEY_API_ENABLED)
+		if currentStatus == "true" {
+			session.SetSuccess("API enabled.")
+		} else {
+			session.SetSuccess("API disabled.")
 		}
 	} else {
 		session.SetSuccess(cfg.SuccessMsg(value))
@@ -355,6 +373,31 @@ func (s *WebServer) processBlockBadIPsToggle(server *WebServer, value string) er
 	err = server.DB.SetConfigValue(config.CFG_KEY_BLOCKBADIPS, newStatus)
 	if err != nil {
 		return fmt.Errorf("failed to toggle IP blocking: %v", err)
+	}
+
+	return nil
+}
+
+// processAPIEnabledToggle handles the API enabled toggle
+func (s *WebServer) processAPIEnabledToggle(server *WebServer, value string) error {
+	// Get current API enabled status
+	currentStatus, err := server.DB.GetConfigValue(config.CFG_KEY_API_ENABLED)
+	if err != nil {
+		return fmt.Errorf("failed to get current APIEnabled config: %v", err)
+	}
+
+	// Toggle the status
+	var newStatus string
+	if currentStatus == "true" {
+		newStatus = "false"
+	} else {
+		newStatus = "true"
+	}
+
+	// Update the configuration
+	err = server.DB.SetConfigValue(config.CFG_KEY_API_ENABLED, newStatus)
+	if err != nil {
+		return fmt.Errorf("failed to toggle API: %v", err)
 	}
 
 	return nil
