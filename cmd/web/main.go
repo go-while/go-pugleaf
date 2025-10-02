@@ -52,6 +52,9 @@ var (
 	rsyncRemoveSource     bool
 	editCronjobs          bool
 	noCronjobs            bool
+	findOrphanDBs         bool
+	verbose               bool
+	dataDir               string
 	//ignoreInitialTinyGroups int64 // code path disabled
 
 	// Migration flags
@@ -117,8 +120,12 @@ func main() {
 	flag.BoolVar(&rsyncRemoveSource, "rsync-remove-source", false, "use with -rsync-inactive-groups. if set, removes source files after moving inactive groups (default: false)")
 	flag.BoolVar(&editCronjobs, "edit-cronjobs", false, "Safety Warning / Shell Execution: Adding/Editing Crons is disabled by default. Use this flag only temporarily!")
 	flag.BoolVar(&noCronjobs, "no-cronjobs", false, "use this flag to not run cron jobs")
+	flag.BoolVar(&findOrphanDBs, "find-orphan-dbs", false, "Find orphaned database folders in data/db that don't correspond to any newsgroup in main database")
 	flag.StringVar(&compareActiveFile, "compare-active", "", "Compare active file with database and show missing groups (format: groupname highwater lowwater status)")
 	flag.Int64Var(&compareActiveMinArticles, "compare-active-min-articles", 0, "use with -compare-active: only show groups with more than N articles (calculated as high-low)")
+	flag.BoolVar(&verbose, "verbose", false, "print more (debug) output")
+	flag.StringVar(&dataDir, "data", "data", "path to database and config directory")
+
 	/*
 		flag.BoolVar(&enableFediverse, "enable-fediverse", false, "Enable Fediverse bridge (default: false)")
 		flag.StringVar(&fediverseDomain, "fediverse-domain", "", "Fediverse domain (e.g. example.com)")
@@ -198,7 +205,7 @@ func main() {
 	dbConfig.ArticleCacheSize = maxArticleCache
 	dbConfig.ArticleCacheExpiry = time.Duration(maxArticleCacheExpiry) * time.Minute
 
-	db, err := database.OpenDatabase(nil) // Pass nil to trigger first-boot logic
+	db, err := database.OpenDatabase(dbConfig) // Pass custom dbConfig with cache settings
 	if err != nil {
 		log.Fatalf("[WEB]: Failed to initialize database: %v", err)
 	}
@@ -219,12 +226,6 @@ func main() {
 	if history.ENABLE_HISTORY {
 		db.WG.Add(1) // Adds for history: one for writer worker
 	}
-
-	// Apply main database migrations
-	if err := db.Migrate(); err != nil {
-		log.Fatalf("[WEB]: Failed to apply database migrations: %v", err)
-	}
-	//log.Printf("[WEB]: Database migrations applied successfully")
 
 	// Set hostname in processor with database fallback support
 	if err := processor.SetHostname(nntphostname, db); err != nil {
@@ -289,6 +290,18 @@ func main() {
 			os.Exit(1)
 		} else {
 			log.Printf("[WEB]: Active file comparison completed successfully")
+			os.Exit(0)
+		}
+	}
+
+	// findOrphanDBs
+	if findOrphanDBs {
+		log.Printf("[WEB]: Finding orphaned database folders...")
+		if err := findOrphanedDatabases(db, dataDir, verbose); err != nil {
+			log.Printf("[WEB]: Error: Failed to find orphaned databases: %v", err)
+			os.Exit(1)
+		} else {
+			log.Printf("[WEB]: Orphaned database scan completed successfully")
 			os.Exit(0)
 		}
 	}

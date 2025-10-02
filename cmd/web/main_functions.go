@@ -814,3 +814,123 @@ func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHash
 		len(groups), processedCount, upToDateCount, errorCount)
 	*/
 }
+
+// findOrphanedDatabases scans data/db folder for MD5 hashed directories and checks if they correspond to newsgroups in main database
+func findOrphanedDatabases(db *database.Database, dataDir string, verbose bool) error {
+	if dataDir == "" {
+		dataDir = "data"
+	}
+	dbPath := filepath.Join(dataDir, "db")
+
+	// Check if db directory exists
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return fmt.Errorf("database directory does not exist: %s", dbPath)
+	}
+
+	log.Printf("[ORPHAN-DB]: Scanning database folders in: %s", dbPath)
+
+	// Read all directories in data/db
+	entries, err := os.ReadDir(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to read database directory: %w", err)
+	}
+
+	// Get all newsgroups from main database and create a map of their MD5 hashes
+	rows, err := db.GetMainDB().Query("SELECT name FROM newsgroups")
+	if err != nil {
+		return fmt.Errorf("failed to query newsgroups: %w", err)
+	}
+	defer rows.Close()
+
+	validHashes := make(map[string]string) // hash -> newsgroup name
+	totalNewsgroups := 0
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return fmt.Errorf("failed to scan newsgroup name: %w", err)
+		}
+		hash := database.MD5Hash(name)
+		validHashes[hash] = name
+		totalNewsgroups++
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating newsgroups: %w", err)
+	}
+
+	log.Printf("[ORPHAN-DB]: Loaded %d newsgroups from main database", totalNewsgroups)
+
+	// Check each directory in data/db
+	orphanedCount := 0
+	totalDirs := 0
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		dirName := entry.Name()
+		totalDirs++
+
+		// Check if this hash corresponds to a known newsgroup
+		if newsgroupName, exists := validHashes[dirName]; exists {
+			// Valid directory - corresponds to a newsgroup
+			if verbose {
+				log.Printf("[VALID] '%s' -> '%s'", dirName, newsgroupName)
+			}
+			continue
+		} else {
+			// Orphaned database directory - no matching newsgroup found
+			orphanedCount++
+			dirPath := filepath.Join(dbPath, dirName)
+
+			// Get directory size
+			var size int64
+			err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				if !info.IsDir() {
+					size += info.Size()
+				}
+				return nil
+			})
+
+			sizeStr := "unknown"
+			if err == nil {
+				sizeStr = formatBytes(size)
+			}
+
+			log.Printf("[ORPHAN] '%s' (size: %s)", dirName, sizeStr)
+		}
+	}
+
+	log.Printf("[ORPHAN-DB]: ========================================")
+	log.Printf("[ORPHAN-DB]: SCAN COMPLETE")
+	log.Printf("[ORPHAN-DB]: Total database directories: %d", totalDirs)
+	log.Printf("[ORPHAN-DB]: Valid directories: %d", totalDirs-orphanedCount)
+	log.Printf("[ORPHAN-DB]: Orphaned directories: %d", orphanedCount)
+	log.Printf("[ORPHAN-DB]: ========================================")
+
+	if orphanedCount > 0 {
+		log.Printf("[ORPHAN-DB]: WARNING: Found %d orphaned database directories that don't match any newsgroup", orphanedCount)
+		log.Printf("[ORPHAN-DB]: These directories can be safely deleted if they are not needed")
+	}
+
+	return nil
+}
+
+// formatBytes converts bytes to human-readable format
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
