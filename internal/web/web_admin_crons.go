@@ -1,6 +1,7 @@
 package web
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -234,6 +235,7 @@ func (s *WebServer) adminViewCronJobLog(c *gin.Context) {
 		c.String(http.StatusNotFound, "Cron job not found")
 		return
 	}
+	log.Printf("Viewing log for cron job ID %d: %s", cronJob.ID, cronJob.Name)
 
 	// Get the log output from the cron manager
 	logOutput := s.CronManager.GetJobOutput(id)
@@ -247,6 +249,7 @@ func (s *WebServer) adminViewCronJobLog(c *gin.Context) {
 		cronJob.RunCount,
 		len(logOutput),
 		strings.Join(logOutput, "\n"))
+	log.Printf("Displayed log for cron job ID %d", cronJob.ID)
 }
 
 // adminStopCronJob stops a running cron job

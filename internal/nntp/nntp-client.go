@@ -46,6 +46,10 @@ const (
 	MaxReadLines = 500000
 )
 
+// DefaultBufferTX is the default buffer size for bufio.Writer
+// when sending articles via POST/TAKETHIS/IHAVE commands.
+var DefaultBufferTX int = 64 * 1024
+
 // BackendConn represents an NNTP connection to a server.
 // It manages the connection state, authentication, and provides methods
 // for interacting with the NNTP server.
@@ -54,7 +58,7 @@ type BackendConn struct {
 	textConn *textproto.Conn
 	writer   *bufio.Writer
 	Backend  *BackendConfig
-	mu       sync.RWMutex
+	mux      sync.RWMutex
 	Pool     *Pool // link to parent pool
 
 	// Connection state
@@ -62,7 +66,7 @@ type BackendConn struct {
 	authenticated bool
 	ModeReader    bool
 	ModeStream    bool
-	ForceClose    bool
+	forceClose    bool
 	created       time.Time
 	lastUsed      time.Time
 	// INN allows switching to mode reader when mode stream is active
@@ -147,8 +151,8 @@ func (c *BackendConn) Connect() error {
 		c.Backend.ConnectTimeout = config.DefaultConnectTimeout
 	}
 	c.Backend.Mux.Unlock()
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mux.Lock()
+	defer c.mux.Unlock()
 	if c.connected {
 		return nil
 	}
@@ -199,22 +203,18 @@ func (c *BackendConn) Connect() error {
 
 	c.conn = conn
 	c.textConn = textproto.NewConn(conn)
-	c.writer = bufio.NewWriter(conn)
+	c.writer = bufio.NewWriterSize(conn, DefaultBufferTX) // bufio writer with defined buffer size
 
 	// Read welcome message
 	code, message, err := c.textConn.ReadCodeLine(NNTPWelcomeCodeMin)
 	if err != nil {
-		if err := c.Pool.CloseConn(c, true); err != nil {
-			log.Printf("Failed to close connection: %v", err)
-		}
+		c.ForceCloseConn()
 		return fmt.Errorf("failed to read welcome: %w", err)
 	}
 
 	if code < NNTPWelcomeCodeMin || code > NNTPWelcomeCodeMax {
 		log.Printf("[NNTP-CONN] Invalid welcome code %d from %s:%d: %s", code, c.Backend.Host, c.Backend.Port, message)
-		if err := c.Pool.CloseConn(c, true); err != nil {
-			log.Printf("[NNTP-CONN] Failed to close connection after invalid welcome: %v", err)
-		}
+		c.ForceCloseConn()
 		return fmt.Errorf("unexpected welcome code %d: %s", code, message)
 	}
 
@@ -228,11 +228,7 @@ func (c *BackendConn) Connect() error {
 		//log.Printf("[NNTP-AUTH] Attempting authentication for user '%s' on %s:%d", c.Backend.Username, c.Backend.Host, c.Backend.Port)
 		if err := c.authenticate(); err != nil {
 			log.Printf("[NNTP-AUTH] Authentication FAILED for user '%s' on %s:%d err: %v", c.Backend.Username, c.Backend.Host, c.Backend.Port, err)
-			go func() {
-				if err := c.Pool.CloseConn(c, true); err != nil {
-					log.Printf("[NNTP-AUTH] Failed to close connection after auth failure: %v", err)
-				}
-			}()
+			c.ForceCloseConn()
 			return fmt.Errorf("remote authentication FAILED for user '%s' on %s:%d err: %w", c.Backend.Username, c.Backend.Host, c.Backend.Port, err)
 		}
 		//log.Printf("[NNTP-AUTH] Authentication SUCCESS for user '%s' on %s:%d", c.Backend.Username, c.Backend.Host, c.Backend.Port)
@@ -287,8 +283,8 @@ func (c *BackendConn) authenticate() error {
 
 // CloseFromPoolOnly closes a raw NNTP connection
 func (c *BackendConn) CloseFromPoolOnly() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mux.Lock()
+	defer c.mux.Unlock()
 
 	if !c.connected {
 		return nil
@@ -336,9 +332,9 @@ func (c *BackendConn) xSetWriteDeadline(t time.Time) error {
 
 // UpdateLastUsed updates the last used timestamp
 func (c *BackendConn) UpdateLastUsed() {
-	c.mu.Lock()
+	c.mux.Lock()
 	c.lastUsed = time.Now()
-	c.mu.Unlock()
+	c.mux.Unlock()
 	//c.SetReadDeadline(time.Now().Add(c.Backend.ReadTimeout))
 	//c.SetWriteDeadline(time.Now().Add(c.Backend.WriteTimeout))
 }

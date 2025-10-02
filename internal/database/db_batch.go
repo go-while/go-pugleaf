@@ -25,7 +25,7 @@ var InitialBatchChannelSize = MaxBatchSize // @AI: DO NOT CHANGE THIS!!!! per gr
 // Cache for placeholder strings to avoid rebuilding them repeatedly
 var placeholderCache sync.Map // map[int]string
 
-const InitialShutDownCounter = 10
+const DefaultShutDownCounter = 5
 
 // getPlaceholders returns a comma-separated string of SQL placeholders (?) for the given count
 func getPlaceholders(count int) string {
@@ -1236,22 +1236,25 @@ func NewBatchOrchestrator(batch *SQ3batch) *BatchOrchestrator {
 func (o *BatchOrchestrator) StartOrch() {
 	go o.StartOrchestrator()
 	go o.batch.BatchDivider()
-	defer o.batch.db.WG.Done()
+	defer o.batch.db.WG.Done() // (defer MainWG)
+	defer log.Printf("[ORCHESTRATOR1] Exiting timer goroutine (defer MainWG)")
 	lastFlush := time.Now() // Fixed: initialize to current time, not future time
 	var wgProcessAllBatches sync.WaitGroup
-	ShutDownCounter := InitialShutDownCounter
+	ShutDownCounter := DefaultShutDownCounter
 	wantShutdown := false
 	for {
 		time.Sleep(time.Second / 2)
 		if o.batch.db.IsDBshutdown() {
-			log.Printf("[ORCHESTRATOR1] Database shutdown detected ShutDownCounter=%d", ShutDownCounter)
+			if ShutDownCounter == DefaultShutDownCounter {
+				log.Printf("[ORCHESTRATOR1] Database shutdown detected ShutDownCounter=%d", ShutDownCounter)
+			}
 			o.batch.processAllPendingBatches(&wgProcessAllBatches, MaxBatchSize)
 			if !wantShutdown {
 				wantShutdown = true
 			}
 
 			if !o.batch.CheckNoMoreWorkInMaps() {
-				ShutDownCounter = InitialShutDownCounter
+				ShutDownCounter = DefaultShutDownCounter
 				continue
 			} else {
 				ShutDownCounter--
@@ -1273,12 +1276,12 @@ func (o *BatchOrchestrator) StartOrch() {
 // StartOrchestrator runs the main orchestrator loop that monitors channels and sends notifications
 func (o *BatchOrchestrator) StartOrchestrator() {
 	//log.Printf("[ORCHESTRATOR] StartOrchestrator")
-	defer o.batch.db.WG.Done()
-
+	defer o.batch.db.WG.Done() // (defer MainWG)
+	defer log.Printf("[ORCHESTRATOR2] Exiting orchestrator goroutine (defer MainWG)")
 	// Start timer goroutine for fallback processing
 	// Main monitoring loop
 	sleep := 1000 * 1000 // @AI: DO NOT CHANGE THIS!!!!
-	ShutDownCounter := InitialShutDownCounter
+	ShutDownCounter := DefaultShutDownCounter
 	wantShutdown := false
 	newSleep := sleep
 	for {
@@ -1292,13 +1295,15 @@ func (o *BatchOrchestrator) StartOrchestrator() {
 				log.Printf("[ORCHESTRATOR2] o.batch.proc not set. shutting down.")
 				return
 			}
-			log.Printf("[ORCHESTRATOR2] Database shutdown detected ShutDownCounter=%d", ShutDownCounter)
+			if ShutDownCounter == DefaultShutDownCounter {
+				log.Printf("[ORCHESTRATOR2] Database shutdown detected ShutDownCounter=%d", ShutDownCounter)
+			}
 			sleep = 500 * 1000
 			if !wantShutdown {
 				wantShutdown = true
 			}
 			if !o.batch.CheckNoMoreWorkInMaps() {
-				ShutDownCounter = InitialShutDownCounter
+				ShutDownCounter = DefaultShutDownCounter
 				continue
 			} else {
 				ShutDownCounter--

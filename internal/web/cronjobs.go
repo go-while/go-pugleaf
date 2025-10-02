@@ -28,6 +28,7 @@ type CronJobManager struct {
 // CronJob represents a currently running or completed cron job
 type CronJob struct {
 	ID          int64
+	Name        string
 	Command     string
 	IntervalMin int
 	IsActive    bool
@@ -39,7 +40,7 @@ type CronJob struct {
 	stopChan    chan struct{}
 }
 
-var maxLogLines int = 1000
+var maxLogLines int = 25000
 
 // getShellCommand returns the appropriate shell command for the current OS
 func getShellCommand(command string) *exec.Cmd {
@@ -121,33 +122,47 @@ func (cm *CronJobManager) StopCronManager() {
 	go func(cm *CronJobManager) {
 		log.Printf("[CRON] Stopping cron job manager...")
 		close(cm.stopChannel)
-		defer func() { cm.db.WG.Done() }()
+		defer cm.db.WG.Done() // (defer MainWG)
+		defer log.Printf("[CRON] Cron job manager stopped (defer MainWG)")
 
+		// Collect job IDs while holding lock
 		cm.mutex.Lock()
-		// Stop all running jobs
-		for _, job := range cm.jobs {
-			go cm.StopJob(job.ID)
+		jobIDs := make([]int64, 0, len(cm.jobs))
+		for id := range cm.jobs {
+			jobIDs = append(jobIDs, id)
 		}
 		cm.mutex.Unlock()
 
+		// Stop all jobs without holding manager lock to avoid deadlock
+		for _, jobID := range jobIDs {
+			go cm.StopJob(jobID)
+		}
+
 		for {
 			time.Sleep(time.Second)
-			cm.mutex.Lock()
-			if cm.TotalRunning == 0 {
-				cm.mutex.Unlock()
+
+			// Check if all jobs finished
+			cm.mutex.RLock()
+			running := cm.TotalRunning
+			cm.mutex.RUnlock()
+
+			if running == 0 {
 				break
 			}
+
+			// Log status of running jobs without holding manager lock
+			cm.mutex.RLock()
 			for _, job := range cm.jobs {
-				job.mutex.Lock()
+				job.mutex.RLock()
 				if job.PID > 0 {
-					// Wait for the job to finish
 					log.Printf("[CRON] wait! job id=%d cmd='%s' (pid: %d)", job.ID, job.Command, job.PID)
 				}
-				job.mutex.Unlock()
+				job.mutex.RUnlock()
 			}
-			log.Printf("[CRON] Waiting for all jobs to finish... (still running: %d)", cm.TotalRunning)
-			cm.mutex.Unlock()
+			cm.mutex.RUnlock()
+			log.Printf("[CRON] Waiting for all jobs to finish... (still running: %d)", running)
 		}
+
 		log.Printf("[CRON] Cron job manager stopped")
 	}(cm)
 }
@@ -211,15 +226,14 @@ func calculateNextRun(job *models.CronJob, now time.Time) (time.Time, error) {
 // GetJobOutput returns the last output lines for a specific cron job
 func (cm *CronJobManager) GetJobOutput(jobID int64) []string {
 	cm.mutex.RLock()
-	defer cm.mutex.RUnlock()
+	job, exists := cm.jobs[jobID]
+	cm.mutex.RUnlock()
 
-	if job, exists := cm.jobs[jobID]; exists {
+	if exists {
 		job.mutex.RLock()
-		defer job.mutex.RUnlock()
-
-		// Return a copy of the output slice
 		result := make([]string, len(job.Output))
 		copy(result, job.Output)
+		job.mutex.RUnlock()
 		return result
 	}
 
@@ -306,35 +320,51 @@ func (cm *CronJobManager) startJob(cronJob *models.CronJob) error {
 // runJobScheduler handles the scheduling and execution of a specific job
 func (cm *CronJobManager) runJobScheduler(job *CronJob) {
 	if isClosedChannel(cm.stopChannel) {
+		log.Printf("[CRON] runJobScheduler: is closed, abort job %d/%s", job.ID, job.Name)
 		return
 	}
-	// Get the cron job info to check for start time
+
+	// Get the cron job info to check to update values for job
 	cronJob, err := cm.db.GetCronJobByID(job.ID)
 	if err != nil {
 		log.Printf("[CRON] Failed to get cron job %d: %v", job.ID, err)
 		return
 	}
 	if !cronJob.Enabled {
-		log.Printf("[CRON] runJobScheduler: Job %d is no longer enabled.", job.ID)
+		log.Printf("[CRON] runJobScheduler: Job %d/%s is no longer enabled.", job.ID, job.Name)
 		return
 	}
 
+	// Collect changes while holding lock
+	var logMessages []string
 	job.mutex.Lock()
+	if job.Name != cronJob.Name {
+		log.Printf("[CRON] Job %d/%s name has changed from '%s' to '%s'", job.ID, job.Name, job.Name, cronJob.Name)
+		logMessages = append(logMessages, fmt.Sprintf("[%s] Name changed from '%s' to '%s'", time.Now().Format("2006-01-02 15:04:05"), job.Name, cronJob.Name))
+		job.Name = cronJob.Name
+	}
 	if job.Command != cronJob.Command {
-		log.Printf("[CRON] Job %d command has changed, updating to: %s", job.ID, cronJob.Command)
+		log.Printf("[CRON] Job %d/%s command has changed from '%s' to '%s'", job.ID, job.Name, job.Command, cronJob.Command)
+		logMessages = append(logMessages, fmt.Sprintf("[%s] Command changed from '%s' to '%s'", time.Now().Format("2006-01-02 15:04:05"), job.Command, cronJob.Command))
 		job.Command = cronJob.Command
 	}
 	if job.IntervalMin != cronJob.IntervalMinutes {
-		log.Printf("[CRON] Job %d interval has changed, updating to: %d minutes", job.ID, cronJob.IntervalMinutes)
+		log.Printf("[CRON] Job %d/%s interval has changed from %d minutes to %d minutes", job.ID, job.Name, job.IntervalMin, cronJob.IntervalMinutes)
+		logMessages = append(logMessages, fmt.Sprintf("[%s] Interval changed from %d minutes to %d minutes", time.Now().Format("2006-01-02 15:04:05"), job.IntervalMin, cronJob.IntervalMinutes))
 		job.IntervalMin = cronJob.IntervalMinutes
 	}
 	job.mutex.Unlock()
+
+	// Add log messages after releasing lock to avoid holding lock during addLogLine
+	for _, msg := range logMessages {
+		job.addLogLine(msg)
+	}
 
 	// Calculate next run time considering start_hour_minute
 	now := time.Now()
 	nextRun, err := calculateNextRun(cronJob, now)
 	if err != nil {
-		log.Printf("[CRON] Failed to calculate next run for job %d: %v", job.ID, err)
+		log.Printf("[CRON] Failed to calculate next run for job %d/%s: %v", job.ID, job.Name, err)
 		return
 	}
 
@@ -344,7 +374,8 @@ func (cm *CronJobManager) runJobScheduler(job *CronJob) {
 		// Wait
 		select {
 		case <-job.stopChan:
-			log.Printf("[CRON] Job %d signal stopChan", job.ID)
+			log.Printf("[CRON] Job %d/%s signal stopChan", job.ID, job.Name)
+			job.addLogLine(fmt.Sprintf("[%s] Job %d/%s got stop signal... quit now.", time.Now().Format("2006-01-02 15:04:05"), job.ID, job.Name))
 			return
 		case <-time.After(waitDuration):
 			// Continue
@@ -354,13 +385,13 @@ func (cm *CronJobManager) runJobScheduler(job *CronJob) {
 	// Check if job is already running before executing
 	job.mutex.Lock()
 	if job.IsRunning {
-		job.addLogLine(fmt.Sprintf("[%s] runJobScheduler: job %d is already running", time.Now().Format("2006-01-02 15:04:05"), job.ID))
 		job.mutex.Unlock()
+		job.addLogLine(fmt.Sprintf("[%s] runJobScheduler: job %d/%s is already running", time.Now().Format("2006-01-02 15:04:05"), job.ID, job.Name))
 		time.Sleep(1 * time.Minute)
 	} else {
+		job.IsRunning = true
 		var execWG sync.WaitGroup
 		execWG.Add(1)
-		job.setRunningStatus(true)
 		go cm.executeJob(job, &execWG)
 		job.mutex.Unlock()
 		execWG.Wait()
@@ -371,7 +402,9 @@ func (cm *CronJobManager) runJobScheduler(job *CronJob) {
 // executeJob executes a single job
 func (cm *CronJobManager) executeJob(job *CronJob, execWG *sync.WaitGroup) {
 	defer func() {
-		job.setRunningStatus(false)
+		job.mutex.Lock()
+		job.IsRunning = false
+		job.mutex.Unlock()
 		cm.mutex.Lock()
 		cm.TotalRunning--
 		cm.mutex.Unlock()
@@ -478,24 +511,11 @@ func (job *CronJob) addLogLine(line string) {
 	}
 }
 
-// setRunningStatus sets the running status
-func (job *CronJob) setRunningStatus(running bool) {
-	switch running {
-	case true:
-		job.IsRunning = true
-	case false:
-		// Release lock
-		job.mutex.Lock()
-		job.IsRunning = false
-		job.mutex.Unlock()
-	}
-}
-
 // GetJobStatus returns the current status of a job
 func (cm *CronJobManager) GetJobStatus(jobID int64) (*CronJob, bool) {
 	cm.mutex.RLock()
-	defer cm.mutex.RUnlock()
 	job, exists := cm.jobs[jobID]
+	cm.mutex.RUnlock()
 	return job, exists
 }
 
@@ -506,8 +526,9 @@ func (cm *CronJobManager) GetJobPID(jobID int64) int {
 
 	if job, exists := cm.jobs[jobID]; exists {
 		job.mutex.RLock()
-		defer job.mutex.RUnlock()
-		return job.PID
+		pid := job.PID
+		job.mutex.RUnlock()
+		return pid
 	}
 	return 0
 }

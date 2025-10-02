@@ -206,8 +206,8 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 	}
 	headers = append(headers, "Message-ID: "+article.MessageID)
 	headers = append(headers, "Subject: "+article.Subject)
-	headers = append(headers, "From: "+article.FromHeader)
 	headers = append(headers, "Date: "+dateHeader)
+	headers = append(headers, "From: "+article.FromHeader)
 	if article.References != "" {
 		headers = append(headers, "References: "+article.References)
 	}
@@ -342,22 +342,25 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				newsgroupsValue = strings.ReplaceAll(newsgroupsValue, ";", " ")
 				newsgroupsValue = strings.TrimSpace(newsgroupsValue)
 				if newsgroupsValue == "" {
-					log.Printf("Empty Newsgroups header value: '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
+					log.Printf("Invalid Empty Newsgroups header value: '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
 					return nil, ErrNoNewsgroups
 				}
 				newsgroups := SeparatorRegex.Split(newsgroupsValue, -1)
 			checkGroups:
 				for x, group := range newsgroups {
-					if UseStrictGroupValidation && group != strings.ToLower(group) {
-						log.Printf("Newsgroup name not lowercase: '%s' in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
-						badGroups++
-						continue checkGroups
-					}
+					/*
+						if UseStrictGroupValidation && group != strings.ToLower(group) {
+							log.Printf("Invalid newsgroup name not lowercase: '%s' in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
+							badGroups++
+							continue checkGroups
+						}
+					*/
 					trimmedNG := strings.TrimSpace(group)
 					// Clean up trailing semicolons and other unwanted characters
-					trimmedNG = strings.TrimRight(trimmedNG, ";:,")
+					trimmedNG = strings.TrimRight(trimmedNG, ";:,<>")
 					trimmedNG = strings.TrimSpace(trimmedNG) // Trim again after removing punctuation
-					if trimmedNG == "" || strings.Contains(group, " ") || !IsValidGroupName(trimmedNG) {
+					trimmedNG = strings.ToLower(trimmedNG)   // parse to lowercase
+					if trimmedNG == "" || strings.Contains(trimmedNG, " ") || !IsValidGroupName(trimmedNG) {
 						log.Printf("Invalid newsgroup name: '%s' in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
 						badGroups++
 						continue checkGroups
@@ -366,13 +369,11 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				}
 
 				if len(validNewsgroups) == 0 {
-					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
-					ignoreLine = true
-					ignoredLines++
-					continue
+					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' (return err)", headerLine, i, article.MessageID)
+					return nil, ErrNoNewsgroups
 				}
 				if badGroups > 0 {
-					log.Printf("Newsgroups header: '%s' line=%d in msgId='%s' has %d invalid newsgroup names (valid=%d)", headerLine, i, article.MessageID, badGroups, len(validNewsgroups))
+					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' has %d invalid newsgroup names (valid=%d)", headerLine, i, article.MessageID, badGroups, len(validNewsgroups))
 					ignoreLine = true
 					ignoredLines++
 					continue
@@ -456,4 +457,56 @@ func IsValidGroupName(name string) bool {
 		return true
 	}
 	return false
+}
+
+func multiLineHeaderToMergedString(vals []string) string {
+	if len(vals) == 0 {
+		return ""
+	}
+	if len(vals) == 1 {
+		return vals[0] // Fast path for single-line headers (most common case)
+	}
+	return strings.Join(vals, "\n") // Ultra fast for multi-line
+}
+
+// getHeaderFirst returns the first value for a header, or "" if not present
+func GetHeaderFirst(headers map[string][]string, key string) string {
+	if vals, ok := headers[key]; ok && len(vals) > 0 {
+		// For headers that can be folded across multiple lines (like References),
+		// we need to join with spaces instead of newlines to properly unfold them
+		if key == "references" || key == "References" || key == "in-reply-to" || key == "In-Reply-To" {
+			return multiLineHeaderToStringSpaced(vals)
+		}
+		return multiLineHeaderToMergedString(vals)
+	}
+	return ""
+}
+
+// multiLineHeaderToStringSpaced joins multi-line headers with spaces (for RFC-compliant header unfolding)
+func multiLineHeaderToStringSpaced(vals []string) string {
+	if len(vals) == 0 {
+		return ""
+	}
+	if len(vals) == 1 {
+		return vals[0] // Fast path for single-line headers
+	}
+	var sb strings.Builder
+	for i, line := range vals {
+		// Trim each line and add spaces between them
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue // Skip empty lines
+		}
+		if i > 0 {
+			sb.WriteString(" ")
+		}
+		sb.WriteString(line)
+	}
+	return sb.String()
+}
+
+func multiLineStringToSlice(input string) []string {
+	// Replace newlines with spaces, trim leading/trailing spaces
+	result := strings.Split(input, "\n")
+	return result
 }

@@ -237,7 +237,7 @@ func (db *Database) IsDBshutdown() bool {
 	select {
 	case _, ok := <-db.StopChan:
 		if !ok {
-			log.Println("[DATABASE] preparing shutdown: StopChan is already closed")
+			//log.Println("[DATABASE] preparing shutdown: StopChan is already closed")
 		}
 		return true // If StopChan is closed, database is shutdown
 	default:

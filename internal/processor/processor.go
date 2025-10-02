@@ -205,10 +205,10 @@ func (proc *Processor) WaitForBatchCompletion() {
 	if proc.DB == nil || proc.DB.Batch == nil {
 		return
 	}
+	log.Printf("[PROCESSOR] WaitForBatchCompletion")
+	defer log.Printf("[PROCESSOR] Quit WaitForBatchCompletion")
 
-	log.Printf("[PROCESSOR] Waiting for all batch processing to complete...")
-
-	maxWaitTime := 60 * time.Second // Maximum wait time
+	//maxWaitTime := 60 * time.Second // Maximum wait time
 	checkInterval := 1 * time.Second
 	startTime := time.Now()
 
@@ -217,18 +217,17 @@ func (proc *Processor) WaitForBatchCompletion() {
 			log.Printf("[PROCESSOR] All batch processing completed")
 			return
 		}
-
 		elapsed := time.Since(startTime)
+		/* disabled: we want to wait indefinitely
 		if elapsed > maxWaitTime {
 			log.Printf("[PROCESSOR] Warning: Timeout waiting for batch completion after %v", elapsed)
 			return
 		}
-
-		// Show progress every 5 seconds
-		if int(elapsed.Seconds())%5 == 0 {
+		*/
+		// Show progress every N seconds
+		if int(elapsed.Seconds())%10 == 0 {
 			log.Printf("[PROCESSOR] Still waiting for batch processing... (elapsed: %v)", elapsed)
 		}
-
 		time.Sleep(checkInterval)
 	}
 }

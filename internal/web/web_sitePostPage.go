@@ -218,8 +218,8 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		if subject == "" {
 			errors = append(errors, "Subject is required")
 		}
-		if len(subject) > 72 {
-			errors = append(errors, "Subject must be less than 72 characters")
+		if len(subject) > 255 {
+			errors = append(errors, "Subject limited to 255 characters")
 		}
 		if body == "" {
 			errors = append(errors, "Message body is required")
@@ -322,13 +322,15 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	}
 	displayName := strings.TrimSpace(session.User.DisplayName)
 	if displayName != "" && !strings.Contains(displayName, "<") && !strings.Contains(displayName, ">") {
-		displayName = fmt.Sprintf("%s <noreply@%s>", session.User.DisplayName, processor.LocalNNTPHostname)
+		displayName = fmt.Sprintf("%s <noreply@pugleaf.invalid>", session.User.DisplayName)
 	}
 	if displayName == "" {
 		// Fallback if display name is empty
 		displayName = fmt.Sprintf("Lorem Ipsum <oops@%s>", processor.LocalNNTPHostname)
 	}
 	var headers []string
+	linesCount := strings.Count(body, "\n") + 1
+	bytesCount := len(body)
 	headers = append(headers, "MIME-Version: 1.0")
 	headers = append(headers, "Content-Type: text/plain; charset=\"UTF-8\"")
 	headers = append(headers, "Content-Transfer-Encoding: 8bit")
@@ -337,6 +339,9 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	headers = append(headers, "X-pugleaf-Trace: "+processor.LocalNNTPHostname+";")
 	headers = append(headers, "\tnonce=\""+nonce+"\"; mail-complaints-to=\""+abuseMail+"\";")
 	headers = append(headers, "\tposting-account=\""+hashedUser+"\";")
+	headers = append(headers, "From: "+displayName)
+	headers = append(headers, "Lines: "+strconv.Itoa(linesCount))
+	headers = append(headers, "Bytes: "+strconv.Itoa(bytesCount))
 
 	// Create article similar to threading.go
 	article := &models.Article{
@@ -348,8 +353,8 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		BodyText:    body,
 		IsThrRoot:   !isReply, // Only new threads are thread roots
 		IsReply:     isReply,
-		Lines:       strings.Count(body, "\n") + 1,
-		Bytes:       len(body),
+		Lines:       linesCount,
+		Bytes:       bytesCount,
 		Path:        ".POSTED!not-for-mail",
 		ArticleNums: make(map[*string]int64),
 		RefSlice:    []string{},
@@ -384,6 +389,8 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		article.References = strings.TrimSpace(originalRefs + " " + messageID)
 		article.RefSlice = utils.ParseReferences(article.References)
 		article.Headers["references"] = []string{article.References}
+		article.Headers["lines"] = []string{strconv.Itoa(article.Lines)}
+		article.Headers["bytes"] = []string{strconv.Itoa(article.Bytes)}
 	}
 	//log.Printf("Web posting: User '%s': article='%#v'", session.User.Username, article)
 

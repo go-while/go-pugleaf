@@ -455,22 +455,6 @@ func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []stri
 	return validGroups
 }
 
-func multiLineHeaderToMergedString(vals []string) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	if len(vals) == 1 {
-		return vals[0] // Fast path for single-line headers (most common case)
-	}
-	return strings.Join(vals, "\n") // Ultra fast for multi-line
-}
-
-func multiLineStringToSlice(input string) []string {
-	// Replace newlines with spaces, trim leading/trailing spaces
-	result := strings.Split(input, "\n")
-	return result
-}
-
 /* UNUSED KEEP FOR REFERENCE
 func jsonStringValToMultiLineHeader(val string) []string {
 	// Split the JSON string by newline characters
@@ -515,57 +499,6 @@ func multiLineHeaderToStringHTML(vals []string) string {
 	return result
 }
 */
-
-/* UNUSED KEEP FOR REFERENCE
-func multiLineHeaderToStringSpaced(vals []string) string {
-	var sb strings.Builder
-	for i, line := range vals {
-		if i > 0 {
-			sb.WriteString(" ")
-		}
-		sb.WriteString(line)
-	}
-	result := sb.String()
-	result = strings.TrimSuffix(result, " ")
-	return result
-}
-*/
-
-// getHeaderFirst returns the first value for a header, or "" if not present
-func getHeaderFirst(headers map[string][]string, key string) string {
-	if vals, ok := headers[key]; ok && len(vals) > 0 {
-		// For headers that can be folded across multiple lines (like References),
-		// we need to join with spaces instead of newlines to properly unfold them
-		if key == "references" || key == "References" || key == "in-reply-to" || key == "In-Reply-To" {
-			return multiLineHeaderToStringSpaced(vals)
-		}
-		return multiLineHeaderToMergedString(vals)
-	}
-	return ""
-}
-
-// multiLineHeaderToStringSpaced joins multi-line headers with spaces (for RFC-compliant header unfolding)
-func multiLineHeaderToStringSpaced(vals []string) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	if len(vals) == 1 {
-		return vals[0] // Fast path for single-line headers
-	}
-	var sb strings.Builder
-	for i, line := range vals {
-		// Trim each line and add spaces between them
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue // Skip empty lines
-		}
-		if i > 0 {
-			sb.WriteString(" ")
-		}
-		sb.WriteString(line)
-	}
-	return sb.String()
-}
 
 // parseNNTPDate parses an NNTP date string to time.Time, handling common NNTP quirks.
 func ParseNNTPDate(dateStr string) time.Time {

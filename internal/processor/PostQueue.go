@@ -80,7 +80,25 @@ func (w *PostQueueWorker) pre_processArticle(article *models.Article) error {
 	errs := 0
 	// Process the article for each newsgroup
 	for _, newsgroup := range newsgroups {
-		err := w.processArticleForNewsgroup(article, newsgroup)
+		// copy article
+		copiedArticle := &models.Article{
+			MessageID:   article.MessageID,
+			Subject:     article.Subject,
+			FromHeader:  article.FromHeader,
+			DateSent:    article.DateSent,
+			DateString:  article.DateString,
+			References:  article.References,
+			Bytes:       article.Bytes,
+			Lines:       article.Lines,
+			HeadersJSON: article.HeadersJSON,
+			BodyText:    article.BodyText,
+			Path:        article.Path,
+			Headers:     article.Headers,
+			IsThrRoot:   article.IsThrRoot,
+			IsReply:     article.IsReply,
+			RefSlice:    article.RefSlice,
+		}
+		err := w.processArticleForNewsgroup(copiedArticle, newsgroup)
 		if err != nil {
 			errs++
 			log.Printf("PostQueueWorker: Error processing article %s for newsgroup %s: %v",

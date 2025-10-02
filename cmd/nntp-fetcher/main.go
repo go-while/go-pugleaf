@@ -342,7 +342,7 @@ func main() {
 					continue
 				}
 				if groupInfo.Last == 0 || groupInfo.Last < groupInfo.First {
-					log.Printf("[FETCHER]: Empty group '%s'", *ng)
+					//log.Printf("[FETCHER]: Empty group '%s'", *ng)
 					continue
 				}
 				//log.Printf("[FETCHER]: ng '%s', REMOTE groupInfo: %#v", *ng, groupInfo),

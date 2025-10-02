@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -278,33 +279,25 @@ func (c *ClientConnection) readArticleData() (*models.Article, error) {
 	}
 	article.Bytes = rxb
 	// Extract individual header fields if they exist
-	if msgID := getHeaderFirst(headers, "message-id"); msgID != "" {
+	if msgID := common.GetHeaderFirst(headers, "message-id"); msgID != "" {
 		article.MessageID = msgID
 	}
-	if subject := getHeaderFirst(headers, "subject"); subject != "" {
+	if subject := common.GetHeaderFirst(headers, "subject"); subject != "" {
 		article.Subject = subject
 	}
-	if from := getHeaderFirst(headers, "from"); from != "" {
+	if from := common.GetHeaderFirst(headers, "from"); from != "" {
 		article.FromHeader = from
 	}
-	if references := getHeaderFirst(headers, "references"); references != "" {
+	if references := common.GetHeaderFirst(headers, "references"); references != "" {
 		article.References = references
 	}
-	if path := getHeaderFirst(headers, "path"); path != "" {
+	if path := common.GetHeaderFirst(headers, "path"); path != "" {
 		article.Path = path
 	}
-	if dateStr := getHeaderFirst(headers, "date"); dateStr != "" {
+	if dateStr := common.GetHeaderFirst(headers, "date"); dateStr != "" {
 		article.DateString = dateStr
 		// TODO: Parse DateSent from dateStr if needed
 	}
 
 	return article, nil
-}
-
-// getHeaderFirst helper function to get first header value
-func getHeaderFirst(headers map[string][]string, key string) string {
-	if vals, exists := headers[key]; exists && len(vals) > 0 {
-		return vals[0]
-	}
-	return ""
 }

@@ -32,7 +32,7 @@ const (
 
 	// History Write Batching configuration
 	DefaultBatchSize    = 10000 // Number of entries to batch before flushing (reduced from 10000 to fix memory bloat)
-	DefaultBatchTimeout = 5000  // Milliseconds to wait before forced flush
+	DefaultBatchTimeout = 1000  // Milliseconds to wait before forced flush. maps to h.config.BatchTimeout
 
 	// Sharding configuration constants
 	SHARD_16_256 = 2 // 16 DBs with 256 tables each (recommended)
@@ -41,6 +41,7 @@ const (
 // NewHistory creates a new history manager
 // The mainWG parameter should be the main application's waitgroup that will coordinate shutdown
 func NewHistory(config *HistoryConfig, mainWG *sync.WaitGroup) (*History, error) {
+
 	if config == nil {
 		config = DefaultConfig()
 	}
@@ -374,15 +375,14 @@ func (h *History) writerWorker() {
 	if h.mainWG == nil {
 		log.Fatalf("Main waitgroup is nil, cannot signal completion")
 	}
-	log.Printf("History writer worker started (batching enabled: size=%d, timeout=%dms)",
-		h.config.BatchSize, h.config.BatchTimeout)
+	log.Printf("History writer worker started (batching enabled: BatchSize=%d, timeout: %d ms)", h.config.BatchSize, h.config.BatchTimeout)
 
 	//counter := 100
 	//shutdown := false
 	// Initialize batch timeout timer
 
 	go func(h *History) {
-		ticker := time.NewTicker(50 * time.Millisecond)
+		ticker := time.NewTicker(250 * time.Millisecond)
 		var chansize int
 		var chanlimit bool
 		lastChanlimit := time.Now()
@@ -414,8 +414,8 @@ func (h *History) writerWorker() {
 	}(h)
 
 	go func(h *History) {
-		defer log.Printf("History writer worker stopped")
-		defer h.mainWG.Done()
+		defer log.Printf("History writer worker stopped (defer MainWG)")
+		defer h.mainWG.Done() // (defer MainWG)
 
 		shutdownCounter := 100
 		chanSize := 0
@@ -424,6 +424,9 @@ func (h *History) writerWorker() {
 			<-h.tickChan
 			// Handle shutdown
 			if h.ServerShutdown() && h.CheckNoMoreWorkInHistory() {
+				if !ENABLE_HISTORY {
+					return
+				}
 				//log.Printf("[HISTORY] writerWorker Server shutdown initiated, checking for pending work...")
 				time.Sleep(100 * time.Millisecond)
 				shutdownCounter--

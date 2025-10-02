@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -34,22 +35,6 @@ func multiLineHeaderToStringSpaced(vals []string) string {
 		sb.WriteString(line)
 	}
 	return sb.String()
-}
-
-// getHeaderFirst returns the first value for a header, or "" if not present
-func getHeaderFirst(headers map[string][]string, key string) string {
-	if vals, ok := headers[key]; ok && len(vals) > 0 {
-		// For headers that can be folded across multiple lines (like References),
-		// we need to join with spaces instead of newlines to properly unfold them
-		if key == "references" || key == "References" || key == "in-reply-to" || key == "In-Reply-To" {
-			return multiLineHeaderToStringSpaced(vals)
-		}
-		// For other headers, just return first value
-		if len(vals) > 0 {
-			return vals[0]
-		}
-	}
-	return ""
 }
 
 // parseRawHeaders parses raw header string (with \n line breaks) into a map
@@ -319,7 +304,7 @@ func processBatch(groupDB *database.GroupDBs, dryRun, verbose bool, offset, batc
 		headers := parseRawHeaders(headersJSON)
 
 		// Extract the correct references using our fixed function
-		correctReferences := getHeaderFirst(headers, "references")
+		correctReferences := common.GetHeaderFirst(headers, "references")
 		if messageID == "<106kmd6$vnsl$1@dont-email.me>" {
 			log.Printf("DEBUG storedReferences:  '%s'", storedReferences)
 			log.Printf("DEBUG correctReferences: '%s'", correctReferences)

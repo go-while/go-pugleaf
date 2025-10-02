@@ -33,13 +33,15 @@ type ArticleRetrievalResult struct {
 
 // used in nntp-transfer/main.go
 type TakeThisMode struct {
-	Unwanted             uint64
-	Rejected             uint64
-	TX_Errors            uint64
-	ConnErrors           uint64
-	TakeThisSuccessCount uint64
-	TakeThisTotalCount   uint64
-	CheckMode            bool // Start with TAKETHIS mode (false)
+	Wanted           uint64
+	Unwanted         uint64
+	Rejected         uint64
+	TX_Errors        uint64
+	ConnErrors       uint64
+	TmpSuccessCount  uint64
+	TmpTakeThisCount uint64
+
+	CheckMode bool // Start with TAKETHIS mode (false)
 }
 
 // retrieveArticleCommon handles the common logic for ARTICLE, HEAD, BODY, and STAT commands
