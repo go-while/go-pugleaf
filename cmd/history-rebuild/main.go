@@ -70,6 +70,7 @@ func main() {
 		showCollisions   = flag.Bool("show-collisions", false, "Show detailed collision information (use with -analyze-only)")
 		readOffset       = flag.Int64("read-offset", -1, "Read and display history.dat entry at specific offset (for debugging hash mismatches)")
 		pprofAddr        = flag.String("pprof", "", "Enable pprof HTTP server on specified address (e.g., ':6060')")
+		dataDir          = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
 
@@ -108,7 +109,10 @@ func main() {
 
 	// Initialize database
 	fmt.Println("📊 Initializing database connection...")
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}

@@ -75,6 +75,7 @@ func main() {
 		respectExpiry = flag.Bool("respect-expiry", false, "Use per-group expiry_days settings from database")
 		prune         = flag.Bool("prune", false, "Remove oldest articles to respect max_articles limit per group")
 		showHelp      = flag.Bool("help", false, "Show usage examples and exit")
+		dataDir       = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
 
@@ -103,7 +104,10 @@ func main() {
 	}
 
 	// Initialize database
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}

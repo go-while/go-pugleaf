@@ -43,7 +43,7 @@ func main() {
 		fmt.Println("          -etc <path>             Path to legacy RockSolid Light configs (default: /etc/rslight)")
 		fmt.Println("          -spool <path>           Path to legacy RockSolid spool directory (default: /var/spool/rslight)")
 		fmt.Println("          -threads <n>            Number of parallel import threads (default: 1)")
-		fmt.Println("          -use-short-hash-len <n> short hash length for history storage (2-7, default: 3)")
+		fmt.Println("          -use-short-hash-len <n> short hash length for history storage (2-7, default: 7)")
 		fmt.Println("          -nntphostname <host>    your NNTP hostname (required)")
 		fmt.Println("          -YESresetallgroupsYES   ⚠️  DANGER: Permanently deletes ALL articles, threads,")
 		fmt.Println("                                  overview, and cache data from ALL newsgroups!")
@@ -64,11 +64,6 @@ func main() {
 	db, err := database.OpenDatabase(dbconfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
-	}
-
-	// Run migrations to ensure sections tables exist
-	if err := db.Migrate(); err != nil {
-		log.Fatalf("Failed to run database migrations: %v", err)
 	}
 
 	// Set hostname in processor with database fallback support

@@ -72,7 +72,7 @@ func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen in
 
 	// Initialize history system with 16-DB sharding
 	historyConfig := &history.HistoryConfig{
-		HistoryDir:      "data/history",
+		HistoryDir:      "./data/history",
 		CacheExpires:    60,                   // HARDCODED
 		CachePurge:      15,                   // HARDCODED
 		ShardMode:       history.SHARD_16_256, // CAN NOT BE CHANGED ! ! 16 databases with 256 tables each

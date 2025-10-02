@@ -14,29 +14,6 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-// multiLineHeaderToStringSpaced joins multi-line headers with spaces (for RFC-compliant header unfolding)
-func multiLineHeaderToStringSpaced(vals []string) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	if len(vals) == 1 {
-		return vals[0] // Fast path for single-line headers
-	}
-	var sb strings.Builder
-	for i, line := range vals {
-		// Trim each line and add spaces between them
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue // Skip empty lines
-		}
-		if i > 0 {
-			sb.WriteString(" ")
-		}
-		sb.WriteString(line)
-	}
-	return sb.String()
-}
-
 // parseRawHeaders parses raw header string (with \n line breaks) into a map
 func parseRawHeaders(rawHeaders string) map[string][]string {
 	headers := make(map[string][]string)
@@ -84,17 +61,17 @@ func parseRawHeaders(rawHeaders string) map[string][]string {
 
 func main() {
 	var (
-		dbPath         = flag.String("db", "data", "Data Path to main data directory (required)")
 		newsgroup      = flag.String("group", "$all", "Newsgroup name to fix (required) (\\$all to fix all)")
-		verbose        = flag.Bool("v", false, "Verbose output")
-		dryRun         = flag.Bool("dry-run", false, "Show what would be fixed without making changes")
+		verbose        = flag.Bool("v", true, "Verbose output")
+		dryRun         = flag.Bool("dry-run", true, "Show what would be fixed without making changes")
 		limit          = flag.Int("limit", 0, "Limit number of articles to process (0 = no limit)")
 		rebuildThreads = flag.Bool("rebuild-threads", false, "Rebuild thread relationships after fixing references (default: false)")
 		batchSize      = flag.Int("batch-size", 10000, "Number of articles to process in each batch (for large datasets)")
+		dataDir        = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
 
-	if *dbPath == "" || *newsgroup == "" {
+	if *dataDir == "" || *newsgroup == "" {
 		fmt.Fprintf(os.Stderr, "Usage: %s -db <database-path> -group <newsgroup-name> [options]\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
@@ -104,8 +81,8 @@ func main() {
 	}
 
 	// Validate database path
-	if _, err := os.Stat(*dbPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: Database path '%s' does not exist\n", *dbPath)
+	if _, err := os.Stat(*dataDir); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: Database path '%s' does not exist\n", *dataDir)
 		os.Exit(1)
 	}
 
@@ -114,16 +91,14 @@ func main() {
 	log.Printf("go-pugleaf References Header Fix Tool (version: %s)", mainConfig.AppVersion)
 
 	// Initialize database connection
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer db.Shutdown()
-
-	// Apply migrations
-	if err := db.Migrate(); err != nil {
-		log.Fatalf("Failed to apply database migrations: %v", err)
-	}
 
 	var newsgroups []*models.Newsgroup
 	if *newsgroup != "$all" && *newsgroup != "" {
@@ -139,7 +114,7 @@ func main() {
 
 	fmt.Printf("🔧 Starting References Header Fix Tool for go-pugleaf\n")
 	fmt.Printf("====================================================\n")
-	fmt.Printf("📂 Data Path: %s\n", *dbPath)
+	fmt.Printf("📂 Data Path: %s\n", *dataDir)
 	fmt.Printf("📊 Newsgroups: %d\n", len(newsgroups))
 	fmt.Printf("🔍 Dry Run: %v\n", *dryRun)
 	fmt.Printf("📝 Verbose: %v\n", *verbose)

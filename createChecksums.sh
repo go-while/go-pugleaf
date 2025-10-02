@@ -5,7 +5,7 @@
 BUILD_DIR="build"
 CHECKSUMS_FILE="checksums.sha256"
 
-echo "Generating SHA256 checksums for executables in $BUILD_DIR/"
+#echo "Generating SHA256 checksums for executables in $BUILD_DIR/"
 
 # Check if build directory exists
 if [ ! -d "$BUILD_DIR" ]; then
@@ -25,7 +25,7 @@ fi
 rm -f "$CHECKSUMS_FILE"
 
 # Generate checksums for all files in build directory
-echo "Creating $CHECKSUMS_FILE with SHA256 hashes..."
+#echo "Creating $CHECKSUMS_FILE with SHA256 hashes..."
 sha256sum "$BUILD_DIR"/* > "$CHECKSUMS_FILE"
 
 # Also create a version with relative paths for inclusion in the release archive
@@ -33,6 +33,6 @@ cd "$BUILD_DIR"
 sha256sum * > "../${CHECKSUMS_FILE}.archive"
 cd ..
 
-echo "Checksums file created: $CHECKSUMS_FILE"
-echo "Archive checksums file created: ${CHECKSUMS_FILE}.archive (for inclusion in release)"
-echo "Number of executables: $(wc -l < $CHECKSUMS_FILE)"
+#echo "Checksums file created: $CHECKSUMS_FILE"
+#echo "Archive checksums file created: ${CHECKSUMS_FILE}.archive (for inclusion in release)"
+echo "Hashed: Number of executables: $(wc -l < $CHECKSUMS_FILE)"

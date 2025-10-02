@@ -547,7 +547,7 @@ func NewDefaultConfig() *MainConfig {
 			WEB: &WebConfig{
 				ListenPort: 11980,
 				SSL:        false,
-				StaticDir:  "web/static",
+				StaticDir:  "./web/static",
 			},
 			NNTP: struct {
 				Enabled    bool   `json:"enabled"`
@@ -568,9 +568,9 @@ func NewDefaultConfig() *MainConfig {
 			},
 		},
 		Database: DatabaseConfig{
-			MainDB:    "data/cfg/pugleaf.sq3",
-			GroupsDir: "data/db",
-			BackupDir: "backups",
+			MainDB:    "./data/cfg/pugleaf.sq3",
+			GroupsDir: "./data/db",
+			BackupDir: "./backups",
 		},
 		Providers: DefaultProviders,
 	}

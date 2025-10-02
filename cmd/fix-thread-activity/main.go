@@ -12,11 +12,18 @@ import (
 )
 
 func main() {
-	var groupName string
+	var (
+		groupName string
+		dataDir   string
+	)
 	flag.StringVar(&groupName, "group", "", "Newsgroup name to fix (empty = fix all groups)")
+	flag.StringVar(&dataDir, "data", "./data", "Directory to store database files")
 	flag.Parse()
 
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}

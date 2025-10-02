@@ -66,6 +66,7 @@ func main() {
 		downloadMaxPar     = flag.Int("download-max-par", 1, "run this many groups in parallel, can eat your memory! (default: 1)")
 		updateList         = flag.String("fetch-newsgroups-from-remote", "", "Fetch remote newsgroup list from first enabled provider (default: empty, nothing. use \"group.*\" or \"\\$all\")")
 		updateListForce    = flag.Bool("fetch-newsgroups-force", false, "use with -fetch-newsgroups-from-remote .. to really add them to database")
+		dataDir            = flag.String("data", "./data", "Directory to store database files")
 		// Download options with date filtering
 		downloadStartDate = flag.String("download-start-date", "", "Start downloading articles from this date (YYYY-MM-DD format)")
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
@@ -115,7 +116,10 @@ func main() {
 	processor.MaxBatchSize = int64(*maxBatch)
 
 	// Initialize database (default config, data in ./data)
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}

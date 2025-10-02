@@ -124,7 +124,7 @@ func main() {
 	flag.StringVar(&compareActiveFile, "compare-active", "", "Compare active file with database and show missing groups (format: groupname highwater lowwater status)")
 	flag.Int64Var(&compareActiveMinArticles, "compare-active-min-articles", 0, "use with -compare-active: only show groups with more than N articles (calculated as high-low)")
 	flag.BoolVar(&verbose, "verbose", false, "print more (debug) output")
-	flag.StringVar(&dataDir, "data", "data", "path to database and config directory")
+	flag.StringVar(&dataDir, "data", "./data", "path to database and config directory")
 
 	/*
 		flag.BoolVar(&enableFediverse, "enable-fediverse", false, "Enable Fediverse bridge (default: false)")

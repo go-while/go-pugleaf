@@ -30,6 +30,7 @@ func main() {
 		password   = flag.String("password", "random", "Password for NNTP user (10-20 chars, will be bcrypt hashed)")
 		maxConns   = flag.Int("maxconns", 1, "Maximum concurrent connections")
 		posting    = flag.Bool("posting", false, "Allow posting (default: read-only)")
+		dataDir    = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
 
@@ -68,16 +69,14 @@ func main() {
 	//mainConfig := config.NewDefaultConfig()
 
 	// Initialize database
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer db.Shutdown()
-
-	// Apply migrations
-	if err := db.Migrate(); err != nil {
-		log.Fatalf("Failed to apply database migrations: %v", err)
-	}
 
 	switch {
 	case *createUser:

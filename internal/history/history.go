@@ -23,7 +23,7 @@ const (
 	//MaxLookupWorkers = 64
 
 	// History file constants
-	DefaultHistoryDir = "data/history" // TODO set via config
+	DefaultHistoryDir = "./data/history" // TODO set via config
 	HistoryFileName   = "history.dat"
 
 	// Cache configuration

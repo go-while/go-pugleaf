@@ -22,6 +22,7 @@ var (
 	nntpkeyFile     string
 	useShortHashLen int
 	maxConnections  int
+	dataDir         string
 )
 
 var appVersion = "-unset-"
@@ -37,6 +38,7 @@ func main() {
 	flag.StringVar(&nntpkeyFile, "nntpkeyfile", "", "NNTP TLS key file (/path/to/privkey.pem)")
 	flag.IntVar(&useShortHashLen, "useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
 	flag.IntVar(&maxConnections, "maxconnections", 500, "allow max of N authenticated connections (default: 500)")
+	flag.StringVar(&dataDir, "data", "./data", "Directory to store database files")
 	flag.Parse()
 
 	mainConfig := config.NewDefaultConfig()
@@ -72,7 +74,10 @@ func main() {
 	log.Printf("[NNTP]: Using NNTP configuration %#v", mainConfig.Server.NNTP)
 
 	// Initialize database (this would normally come from your main application)
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -82,11 +87,6 @@ func main() {
 	wg := &sync.WaitGroup{}
 	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
 	db.WG.Add(1) // Adds for history: one for writer worker
-
-	// Apply migrations
-	if err := db.Migrate(); err != nil {
-		log.Fatalf("Failed to apply database migrations: %v", err)
-	}
 
 	// Set hostname in processor with database fallback support
 	if err := processor.SetHostname(nntphostname, db); err != nil {

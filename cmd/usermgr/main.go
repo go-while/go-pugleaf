@@ -33,6 +33,7 @@ func main() {
 		email      = flag.String("email", "", "Email for user creation")
 		display    = flag.String("display", "", "Display name for user creation")
 		admin      = flag.Bool("admin", false, "Grant admin permissions to user")
+		dataDir    = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
 
@@ -52,16 +53,14 @@ func main() {
 	//mainConfig := config.NewDefaultConfig()
 
 	// Initialize database
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer db.Shutdown()
-
-	// Apply migrations
-	if err := db.Migrate(); err != nil {
-		log.Fatalf("Failed to apply database migrations: %v", err)
-	}
 
 	switch {
 	case *createUser:

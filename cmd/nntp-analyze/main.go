@@ -149,6 +149,7 @@ func main() {
 		clearCache         = flag.Bool("clear-cache", false, "Clear cached data for the group")
 		cacheStats         = flag.Bool("cache-stats", false, "Show cache statistics for the group")
 		showHelp           = flag.Bool("help", false, "Show usage examples and exit")
+		dataDir            = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
 
@@ -184,7 +185,7 @@ func main() {
 	if *group == "$all" || strings.HasSuffix(*group, "*") {
 		if err := analyzeAllGroups(group, host, port, username, password, ssl, timeout,
 			forceRefresh, maxAnalyzeArticles, startDate, endDate,
-			exportFormat, validateCache, clearCache, cacheStats); err != nil {
+			exportFormat, validateCache, clearCache, cacheStats, dataDir); err != nil {
 			log.Fatalf("Analysis of all groups failed: %v", err)
 		}
 		return
@@ -257,7 +258,7 @@ func readGroupsFromFile(filePath string, host *string, port *int, username *stri
 // analyzeAllGroups performs analysis on all newsgroups found in the database using a shared connection pool
 func analyzeAllGroups(group *string, host *string, port *int, username *string, password *string, ssl *bool, timeout *int,
 	forceRefresh *bool, maxAnalyzeArticles *int64, startDate *string, endDate *string,
-	exportFormat *string, validateCache *bool, clearCache *bool, cacheStats *bool) error {
+	exportFormat *string, validateCache *bool, clearCache *bool, cacheStats *bool, dataDir *string) error {
 
 	fmt.Printf("=== Analyzing Newsgroups: %s ===", *group)
 	suffixWildcard := strings.HasSuffix(*group, "*")
@@ -269,7 +270,10 @@ func analyzeAllGroups(group *string, host *string, port *int, username *string, 
 		time.Sleep(3 * time.Second) // debug sleep
 	}
 	// Initialize database to get list of newsgroups
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}

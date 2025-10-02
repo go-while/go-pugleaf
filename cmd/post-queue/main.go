@@ -32,6 +32,7 @@ func main() {
 		limit         = flag.Int("max-batch", 100, "Post max N articles in a batch")
 		cleanupPosted = flag.Bool("cleanup-posted-entries", false, "Delete all successfully posted entries from post_queue table and exit")
 		cleanupOlder  = flag.Int("cleanup-older", 0, "Delete all post_queue entries older than N days and exit (0 = disabled)")
+		dataDir       = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
 
@@ -41,7 +42,10 @@ func main() {
 	}
 
 	// Initialize database
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}

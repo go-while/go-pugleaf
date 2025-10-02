@@ -41,6 +41,7 @@ func main() {
 		rewriteDates   = flag.Bool("rewritedates", false, "Rewrite incorrect dates (requires -parsedates)")
 		rebuildThreads = flag.Bool("rebuild-threads", false, "Rebuild all thread relationships from scratch (destructive)")
 		maxPar         = flag.Int("max-par", 1, "use with -rebuild-threads to process N newsgroups")
+		dataDir        = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
 
@@ -73,16 +74,14 @@ func main() {
 	log.Printf("go-pugleaf Database Recovery Tool (version: %s)", mainConfig.AppVersion)
 
 	// Initialize database connection
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer db.Shutdown()
-
-	// Apply migrations
-	if err := db.Migrate(); err != nil {
-		log.Fatalf("Failed to apply database migrations: %v", err)
-	}
 	var newsgroups []*models.Newsgroup
 	isWildcard := strings.HasSuffix(*newsgroup, "*")
 	if *newsgroup != "$all" && *newsgroup != "" && !isWildcard {

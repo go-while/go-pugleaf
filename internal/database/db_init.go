@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -105,18 +107,38 @@ func DefaultDBConfig() (dbconfig *DBConfig) {
 var GlobalDBMutex sync.Mutex // Mutex to protect database operations
 var INIT bool
 
-// New creates a new Database instance
+// checkRootUser verifies we're NOT running as root or system user on Unix-like systems
+func checkRootUser() error {
+	// Only check on Unix-like systems (Linux, macOS, BSD, etc.)
+	if runtime.GOOS == "windows" {
+		return nil // Skip check on Windows
+	}
+
+	// Check if running as root or system user
+	if os.Geteuid() < 1000 {
+		return fmt.Errorf("FATAL: Running as root or system user (UID < 1000) is not allowed for security reasons. Please run as a regular user")
+	}
+
+	return nil
+}
+
+// New creates a new main Database instance
 func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
-	new := false
 	GlobalDBMutex.Lock()
 	defer GlobalDBMutex.Unlock()
+
+	// Check if running as root
+	if err := checkRootUser(); err != nil {
+		log.Fatal(err)
+		return nil, err
+	}
+
 	if INIT {
-		return nil, fmt.Errorf("database already initialized")
+		return nil, fmt.Errorf("main database already initialized")
 	}
 	INIT = true
 	if dbconfig == nil {
 		dbconfig = DefaultDBConfig()
-		new = true
 	}
 
 	db := &Database{
@@ -136,12 +158,10 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 		return nil, fmt.Errorf("failed to run database migrations: %w", err)
 	}
 
-	if new {
-		// Load default providers on first boot
-		if err := db.LoadDefaultProviders(); err != nil {
-			log.Printf("Failed to add default providers to database: %v", err)
-			return nil, fmt.Errorf("failed to sync config providers: %w", err)
-		}
+	// Load default providers on first boot
+	if err := db.LoadDefaultProviders(); err != nil {
+		log.Printf("Failed to add default providers to database: %v", err)
+		return nil, fmt.Errorf("failed to sync config providers: %w", err)
 	}
 
 	db.StopChan = make(chan struct{}, 1) // Channel to signal shutdown (will get closed)
