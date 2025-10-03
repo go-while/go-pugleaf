@@ -1036,7 +1036,7 @@ func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
 }
 
 // CheckMultiple sends a CHECK command for multiple message IDs and returns responses
-func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) (chan *string, error) {
+func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) ([]*string, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 	if !c.connected {
@@ -1064,8 +1064,7 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 	}
 
 	// Read responses for each CHECK command
-	responses := make(chan *string, len(messageIDs))
-	defer close(responses)
+	wantedIds := make([]*string, 0, len(messageIDs))
 	for i, msgID := range messageIDs {
 		id := commandIds[i]
 		// Read response for this CHECK command
@@ -1095,7 +1094,7 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 		switch code {
 		case 238:
 			//log.Printf("Wanted Article '%s': response=%d", *msgID, code)
-			responses <- msgID
+			wantedIds = append(wantedIds, msgID)
 			ttMode.Wanted++
 		case 438:
 			//log.Printf("Unwanted Article '%s': response=%d", *msgID, code)
@@ -1109,7 +1108,7 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 		}
 	}
 	// Return all responses
-	return responses, nil
+	return wantedIds, nil
 }
 
 // TakeThisArticle sends an article via TAKETHIS command

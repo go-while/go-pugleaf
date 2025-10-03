@@ -1325,21 +1325,13 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *nntp.TakeThi
 		}
 
 		// Send CHECK commands for all message IDs
-		wantedIdsChan, err := conn.CheckMultiple(checkMessageIds, ttMode)
-		if err != nil || wantedIdsChan == nil {
+		wantedIds, err := conn.CheckMultiple(checkMessageIds, ttMode)
+		if err != nil {
 			ttMode.ConnErrors++
 			conn.ForceCloseConn()
 			return transferred, checked, successRate, redis_cache_hits, fmt.Errorf("Newsgroup: '%s' | failed to send CHECK command: %v", newsgroup, err)
 		}
 		checked += uint64(len(checkMessageIds))
-		// Consume channel into slice, filtering out unwanted articles (nil)
-		wantedIds := make([]*string, 0, len(wantedIdsChan))
-
-		for msgId := range wantedIdsChan {
-			if msgId != nil {
-				wantedIds = append(wantedIds, msgId)
-			}
-		}
 
 		if len(wantedIds) == 0 {
 			//log.Printf("No articles wanted by server in this batch")
@@ -1363,7 +1355,7 @@ func processBatch(conn *nntp.BackendConn, newsgroup string, ttMode *nntp.TakeThi
 		}
 
 		log.Printf("Newsgroup: '%s' | CHECK wants: %d/%d message IDs. sending=%d", newsgroup, len(wantedIds), len(checkMessageIds), len(wantedArticles))
-		log.Printf("Newsgroup: '%s' | Calling sendArticlesBatchViaTakeThis with %d articles...", newsgroup, len(wantedArticles))
+		//log.Printf("Newsgroup: '%s' | Calling sendArticlesBatchViaTakeThis with %d articles...", newsgroup, len(wantedArticles))
 		txcount, rc, err := sendArticlesBatchViaTakeThis(conn, wantedArticles, ttMode, newsgroup, redisCli)
 		log.Printf("Newsgroup: '%s' | sendArticlesBatchViaTakeThis returned: transferred=%d redis_cached=%d err=%v", newsgroup, txcount, rc, err)
 		transferred += txcount
