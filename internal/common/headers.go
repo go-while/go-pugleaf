@@ -16,6 +16,7 @@ var VerboseHeaders bool = false
 var IgnoreGoogleHeaders bool = false
 var UseStrictGroupValidation bool = false
 var ErrNoNewsgroups = fmt.Errorf("ErrNoNewsgroups")
+var unwantedChars = ";:,<>#*`§()[]{}?!%$§/\\@\"'"
 var (
 	// Do NOT change this here! these are needed for runtime !
 	// validGroupNameRegex validates newsgroup names according to RFC standards
@@ -241,15 +242,16 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 	badGroups := 0
 	var validNewsgroups []string
 
+checkHeader:
 	for i, headerLine := range moreHeaders {
 		if len(headerLine) == 0 {
 			log.Printf("Empty headerline=%d in msgId='%s' (continue)", i, article.MessageID)
-			continue
+			continue checkHeader
 		}
 		isSpacedLine = strings.HasPrefix(headerLine, " ") || strings.HasPrefix(headerLine, "\t")
 		if isSpacedLine && ignoreLine {
 			ignoredLines++
-			continue
+			continue checkHeader
 		} else {
 			ignoreLine = false
 		}
@@ -259,7 +261,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				log.Printf("Short header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
 				ignoreLine = true
 				ignoredLines++
-				continue
+				continue checkHeader
 			}
 			// check if first char is lowercase
 			if unicode.IsLower(rune(headerLine[0])) {
@@ -275,7 +277,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				log.Printf("Invalid header (no colon): '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
 				ignoreLine = true
 				ignoredLines++
-				continue
+				continue checkHeader
 			}
 
 			// Check if header follows RFC format "name: value" (colon-space)
@@ -284,7 +286,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				log.Printf("Malformed header (no colon-space): '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
 				ignoreLine = true
 				ignoredLines++
-				continue
+				continue checkHeader
 			}
 
 			header := strings.SplitN(headerLine, ":", 2)[0]
@@ -293,14 +295,17 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				log.Printf("Invalid header (empty or contains space): '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
 				ignoreLine = true
 				ignoredLines++
-				continue
+				continue checkHeader
+			}
+			if IgnoreHeadersMap[strings.ToLower(header)] {
+				ignoreLine = true
+				continue checkHeader
 			}
 			if IgnoreGoogleHeaders && strings.HasPrefix(strings.ToLower(header), "x-goo") {
 				ignoreLine = true
 				ignoredLines++
-				continue
+				continue checkHeader
 			}
-
 			if !strings.HasPrefix(header, "X-") {
 				if headersMap[strings.ToLower(header)] {
 					log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (rewrite)", headerLine, i, article.MessageID)
@@ -311,19 +316,20 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			if header == "Newsgroups" {
 				// Check if Newsgroups header contains at least one valid newsgroup name
 				// check if next headerlines are continued lines
+			getLines:
 				for {
 					if i+1 < len(moreHeaders) {
 						if !strings.HasPrefix(moreHeaders[i+1], " ") && !strings.HasPrefix(moreHeaders[i+1], "\t") {
-							break
+							break getLines
 						}
 						headerLine += moreHeaders[i+1]
 						i++
 					} else {
-						break
+						break getLines
 					}
 					if len(headerLine) > 1024 {
 						log.Printf("Newsgroups header too long, exceeds total 1024 chars: '%s' line=%d in msgId='%s' (break)", headerLine, i, article.MessageID)
-						break
+						break getLines
 					}
 				}
 
@@ -333,7 +339,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 					log.Printf("Invalid Newsgroups header format: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
 					ignoreLine = true
 					ignoredLines++
-					continue
+					continue checkHeader
 				}
 				newsgroupsValue := strings.TrimSpace(parts[1])
 				newsgroupsValue = strings.ReplaceAll(newsgroupsValue, ":", " ")
@@ -353,38 +359,43 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 							continue checkGroups
 						}
 					*/
-					trimmedNG := strings.TrimSpace(group)
-					if trimmedNG != strings.ToLower(trimmedNG) {
-						badGroups++ // increment badGroups so the newsgroups header will be reconstructed if the below checks pass
+					var trimmedNG string
+					if trimmedNG != strings.ToLower(group) {
+						trimmedNG = strings.ToLower(group) // parse to lowercase
+						badGroups++
 					}
-					// Clean up trailing semicolons and other unwanted characters
-					trimmedNG = strings.ReplaceAll(trimmedNG, ";:,<>#*`'()[]{}?!%$§/\\@\"", "")
-					trimmedNG = strings.TrimSpace(trimmedNG) // Trim again after removing punctuation
-					trimmedNG = strings.ToLower(trimmedNG)   // parse to lowercase
+					trimmedNG = strings.TrimSpace(trimmedNG)
+					// Clean up unwanted characters (remove each character individually)
+					for _, char := range unwantedChars {
+						trimmedNG = strings.ReplaceAll(trimmedNG, string(char), "")
+					}
+					trimmedNG = strings.TrimSpace(trimmedNG)
+					trimmedNG = strings.TrimLeft(trimmedNG, ".")
+					trimmedNG = strings.TrimRight(trimmedNG, ".")
 					if trimmedNG == "" || strings.Contains(trimmedNG, " ") || !IsValidGroupName(trimmedNG) {
-						log.Printf("Invalid newsgroup name: '%s' in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
+						if trimmedNG == "" {
+							log.Printf("Invalid newsgroup name: '%s' empty after cleanup in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
+						} else {
+							log.Printf("Invalid newsgroup name: '%s' in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
+						}
 						badGroups++
 						continue checkGroups
 					}
 					validNewsgroups = append(validNewsgroups, trimmedNG)
-				}
+				} // end for checkGroups
 
 				if len(validNewsgroups) == 0 {
 					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' (return err)", headerLine, i, article.MessageID)
 					return nil, ErrNoNewsgroups
 				}
-				/*
-					if badGroups > 0 {
-						log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' has %d invalid newsgroup names (valid=%d)", headerLine, i, article.MessageID, badGroups, len(validNewsgroups))
-						ignoreLine = true
-						ignoredLines++
-						continue
-					}
-				*/
-			}
-			if IgnoreHeadersMap[strings.ToLower(header)] {
-				ignoreLine = true
-				continue
+
+				if badGroups > 0 {
+					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' has %d invalid newsgroup names (valid=%d)", headerLine, i, article.MessageID, badGroups, len(validNewsgroups))
+					ignoreLine = true
+					ignoredLines++
+					continue checkHeader
+				}
+
 			}
 		}
 		headers = append(headers, headerLine)

@@ -156,8 +156,8 @@ func main() {
 	}
 
 	// Validate batch size
-	if *batchCheck < 1 || *batchCheck > 1000 {
-		log.Fatalf("Error: batch-check must be between 1 and 1000 (got %d)", *batchCheck)
+	if *batchCheck < 1 || *batchCheck > 10000 {
+		log.Fatalf("Error: batch-check must be between 1 and 10000 (got %d)", *batchCheck)
 	}
 
 	// Validate batch size
