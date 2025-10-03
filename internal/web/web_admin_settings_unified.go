@@ -186,7 +186,7 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 	}
 
 	// Process the setting
-	if settingType == config.FORM_FIELD_HOSTNAME || settingType == config.FORM_FIELD_REGISTRATION || settingType == config.FORM_FIELD_BLOCKBADBOTS || settingType == config.FORM_FIELD_API_ENABLED {
+	if settingType == config.FORM_FIELD_HOSTNAME || settingType == config.FORM_FIELD_REGISTRATION || settingType == config.FORM_FIELD_BLOCKBADBOTS || settingType == config.FORM_FIELD_BLOCKBADIPS || settingType == config.FORM_FIELD_API_ENABLED {
 		if err := cfg.Processor(s, value); err != nil {
 			switch settingType {
 			case config.FORM_FIELD_HOSTNAME:
@@ -195,6 +195,8 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 				session.SetError("Failed to toggle registration: " + err.Error())
 			case config.FORM_FIELD_BLOCKBADBOTS:
 				session.SetError("Failed to toggle bot blocking: " + err.Error())
+			case config.FORM_FIELD_BLOCKBADIPS:
+				session.SetError("Failed to toggle IP blocking: " + err.Error())
 			case config.FORM_FIELD_API_ENABLED:
 				session.SetError("Failed to toggle API: " + err.Error())
 			}
@@ -237,6 +239,14 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 			session.SetSuccess("Bot blocking enabled.")
 		} else {
 			session.SetSuccess("Bot blocking disabled.")
+		}
+	} else if settingType == config.FORM_FIELD_BLOCKBADIPS {
+		// Get the new status to show the correct message
+		currentStatus, _ := s.DB.GetConfigValue(config.CFG_KEY_BLOCKBADIPS)
+		if currentStatus == "true" {
+			session.SetSuccess("IP blocking enabled.")
+		} else {
+			session.SetSuccess("IP blocking disabled.")
 		}
 	} else if settingType == config.FORM_FIELD_API_ENABLED {
 		// Get the new status to show the correct message

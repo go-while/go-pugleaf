@@ -4,11 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -420,46 +418,23 @@ func (db *Database) loadBotConfiguration() {
 	if NO_CACHE_BOOT {
 		return
 	}
-	// Load BlockBadBots setting
-	config.BadBotsMutex.Lock()
-	defer config.BadBotsMutex.Unlock()
-
+	// Load BlockBadBots setting and BadBots list
 	blockBadBotsStr, err := db.GetConfigValue(config.CFG_KEY_BLOCKBADBOTS)
 	if err != nil {
 		log.Printf("Failed to get BlockBadBots config, using default (false): %v", err)
-		config.BlockBadBots = false
-	} else {
-		config.BlockBadBots = (blockBadBotsStr == "true")
-		if !config.BlockBadBots {
-			log.Printf("BlockBadBots is disabled")
-			return
-		}
+		blockBadBotsStr = "false"
 	}
 
 	// Load BadBots list
 	badBotsStr, err := db.GetConfigValue(config.CFG_KEY_BADBOTS)
 	if err != nil {
 		log.Printf("Failed to get BadBots config err='%v'", err)
-		return
-	}
-	if badBotsStr == "" {
-		log.Printf("BadBots config empty")
-		config.BlockBadBots = false
-		return
-	} else {
-		// Parse comma-separated list and trim whitespace
-		config.Default_BadBots = []string{}
-		for _, pattern := range strings.Split(badBotsStr, ",") {
-			trimmed := strings.TrimSpace(pattern)
-			if trimmed != "" {
-				config.Default_BadBots = append(config.Default_BadBots, trimmed)
-				log.Printf("Added BadBot pattern: '%s'", trimmed)
-			}
-		}
+		badBotsStr = ""
 	}
 
-	log.Printf("BlockBadBots=%t, BadBots patterns=%d", config.BlockBadBots, len(config.Default_BadBots))
-
+	// Use UpdateBadBots to safely update configuration (handles mutex internally)
+	blockEnabled := blockBadBotsStr == "true"
+	config.UpdateBadBots(badBotsStr, blockEnabled)
 }
 
 // loadIPBlockingConfiguration loads IP blocking settings from database and populates global config variables
@@ -467,48 +442,23 @@ func (db *Database) loadIPBlockingConfiguration() {
 	if NO_CACHE_BOOT {
 		return
 	}
-	// Load BlockBadIPs setting
-	config.BadIPsMutex.Lock()
-	defer config.BadIPsMutex.Unlock()
-
+	// Load BlockBadIPs setting and BadIPs list
 	blockBadIPsStr, err := db.GetConfigValue(config.CFG_KEY_BLOCKBADIPS)
 	if err != nil {
 		log.Printf("Failed to get BlockBadIPs config, using default (false): %v", err)
-		config.BlockBadIPs = false
-	} else {
-		config.BlockBadIPs = (blockBadIPsStr == "true")
-		if !config.BlockBadIPs {
-			log.Printf("BlockBadIPs is disabled")
-			return
-		}
+		blockBadIPsStr = "false"
 	}
 
 	// Load BadIPs list (CIDR ranges)
 	badIPsStr, err := db.GetConfigValue(config.CFG_KEY_BADIPS)
 	if err != nil {
 		log.Printf("Failed to get BadIPs config err='%v'", err)
-		return
-	}
-	if badIPsStr == "" {
-		log.Printf("BadIPs config empty")
-		config.BlockBadIPs = false
-		return
-	} else {
-		// Parse comma-separated list and convert to IPNet
-		config.Default_BlockedIPs = []*net.IPNet{}
-		for _, cidr := range strings.Split(badIPsStr, ",") {
-			trimmed := strings.TrimSpace(cidr)
-			if trimmed != "" {
-				_, ipNet, err := net.ParseCIDR(trimmed)
-				if err != nil {
-					log.Printf("Invalid CIDR range '%s': %v", trimmed, err)
-					continue
-				}
-				config.Default_BlockedIPs = append(config.Default_BlockedIPs, ipNet)
-				log.Printf("Added BadIP range: '%s'", trimmed)
-			}
-		}
+		badIPsStr = ""
 	}
 
-	log.Printf("BlockBadIPs=%t, BadIPs ranges=%d", config.BlockBadIPs, len(config.Default_BlockedIPs))
+	// Use UpdateBadIPs to safely update configuration (handles mutex internally)
+	blockEnabled := blockBadIPsStr == "true"
+	if err := config.UpdateBadIPs(badIPsStr, blockEnabled); err != nil {
+		log.Printf("Failed to update BadIPs configuration: %v", err)
+	}
 }

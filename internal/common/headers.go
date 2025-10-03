@@ -31,10 +31,10 @@ var (
 // IgnoreHeadersMap is a map version of IgnoreHeaders for fast lookup
 var IgnoreHeadersMap = map[string]bool{
 	"message-id": true,
+	"references": true,
 	"subject":    true,
 	"from":       true,
 	"date":       true,
-	"references": true,
 	"path":       true,
 	"xref":       true,
 }
@@ -239,7 +239,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 	ignoredLines := 0
 	headersMap := make(map[string]bool)
 	badGroups := 0
-	var validNewsgroups []*string
+	var validNewsgroups []string
 
 	for i, headerLine := range moreHeaders {
 		if len(headerLine) == 0 {
@@ -295,10 +295,6 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				ignoredLines++
 				continue
 			}
-			if IgnoreHeadersMap[strings.ToLower(header)] {
-				ignoreLine = true
-				continue
-			}
 			if IgnoreGoogleHeaders && strings.HasPrefix(strings.ToLower(header), "x-goo") {
 				ignoreLine = true
 				ignoredLines++
@@ -309,8 +305,6 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				if headersMap[strings.ToLower(header)] {
 					log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (rewrite)", headerLine, i, article.MessageID)
 					headerLine = "X-RW-" + headerLine
-					//ignoreLine = true
-					//continue
 				}
 				headersMap[strings.ToLower(header)] = true
 			}
@@ -325,6 +319,10 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 						headerLine += moreHeaders[i+1]
 						i++
 					} else {
+						break
+					}
+					if len(headerLine) > 1024 {
+						log.Printf("Newsgroups header too long, exceeds total 1024 chars: '%s' line=%d in msgId='%s' (break)", headerLine, i, article.MessageID)
 						break
 					}
 				}
@@ -356,8 +354,11 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 						}
 					*/
 					trimmedNG := strings.TrimSpace(group)
+					if trimmedNG != strings.ToLower(trimmedNG) {
+						badGroups++ // increment badGroups so the newsgroups header will be reconstructed if the below checks pass
+					}
 					// Clean up trailing semicolons and other unwanted characters
-					trimmedNG = strings.TrimRight(trimmedNG, ";:,<>")
+					trimmedNG = strings.ReplaceAll(trimmedNG, ";:,<>#*`'()[]{}?!%$§/\\@\"", "")
 					trimmedNG = strings.TrimSpace(trimmedNG) // Trim again after removing punctuation
 					trimmedNG = strings.ToLower(trimmedNG)   // parse to lowercase
 					if trimmedNG == "" || strings.Contains(trimmedNG, " ") || !IsValidGroupName(trimmedNG) {
@@ -365,19 +366,25 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 						badGroups++
 						continue checkGroups
 					}
-					validNewsgroups = append(validNewsgroups, &trimmedNG)
+					validNewsgroups = append(validNewsgroups, trimmedNG)
 				}
 
 				if len(validNewsgroups) == 0 {
 					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' (return err)", headerLine, i, article.MessageID)
 					return nil, ErrNoNewsgroups
 				}
-				if badGroups > 0 {
-					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' has %d invalid newsgroup names (valid=%d)", headerLine, i, article.MessageID, badGroups, len(validNewsgroups))
-					ignoreLine = true
-					ignoredLines++
-					continue
-				}
+				/*
+					if badGroups > 0 {
+						log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' has %d invalid newsgroup names (valid=%d)", headerLine, i, article.MessageID, badGroups, len(validNewsgroups))
+						ignoreLine = true
+						ignoredLines++
+						continue
+					}
+				*/
+			}
+			if IgnoreHeadersMap[strings.ToLower(header)] {
+				ignoreLine = true
+				continue
 			}
 		}
 		headers = append(headers, headerLine)
@@ -393,15 +400,15 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 		var currentLine string = "Newsgroups: "
 		for i, group := range validNewsgroups {
 			if i > 0 {
-				if len(currentLine)+1+len(*group) > 78 {
-					// line would exceed 78 chars, start a new line
+				if len(currentLine)+1+len(group) > 500 {
+					// line would exceed 500 chars, start a new line
 					headers = append(headers, currentLine)
-					currentLine = " ," + *group // continuation line starts with space and comma
+					currentLine = " ," + group // continuation line starts with space and comma
 				} else {
-					currentLine += "," + *group
+					currentLine += "," + group
 				}
 			} else {
-				currentLine += *group
+				currentLine += group
 			}
 		}
 		// append any remaining line (only if it has content beyond just whitespace)
@@ -411,9 +418,10 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 		headers = append(headers, fmt.Sprintf("X-pugleaf-debug: %d invalid newsgroups removed", badGroups))
 		log.Printf("Reconstructed Newsgroups header with %d valid, removed %d. msgId='%s'", len(validNewsgroups), badGroups, article.MessageID)
 		for i := range validNewsgroups {
-			validNewsgroups[i] = nil // free memory
+			validNewsgroups[i] = "" // free memory
 		}
-		validNewsgroups = nil // free memory
+		validNewsgroups = validNewsgroups[:0] // free memory
+		validNewsgroups = nil
 	}
 	return headers, nil
 }
