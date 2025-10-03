@@ -250,6 +250,31 @@
                         </td>
                     </tr>
 
+                    <!-- Bad IPs List Setting -->
+                    <tr>
+                        <td>
+                            <strong>🚫 Bad IPs List:</strong>
+                            {{if .BadIPs}}
+                            <code>{{.BadIPs}}</code>
+                            {{else}}
+                            <span class="text-muted">Using defaults</span>
+                            {{end}}
+                            <br>
+                            <span class="text-muted">Comma-separated list of IP addresses and CIDR ranges to block</span>
+                        </td>
+                        <td>
+                            <form action="/admin/settings" method="post" class="d-flex gap-1">
+                                <input type="hidden" name="setting" value="{{.FormFieldBadIPs}}">
+                                <input type="text" class="form-control form-control-sm" name="{{.FormFieldBadIPs}}"
+                                        placeholder="192.168.1.0/24, 10.0.0.1, 172.16.0.0/16"
+                                        value="{{.BadIPs}}" style="min-width: 200px;">
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-list"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+
                     <!-- API Enabled Setting -->
                     <tr>
                         <td>
@@ -278,30 +303,6 @@
                         </td>
                     </tr>
 
-                    <!-- Bad IPs List Setting -->
-                    <tr>
-                        <td>
-                            <strong>🚫 Bad IPs List:</strong>
-                            {{if .BadIPs}}
-                            <code>{{.BadIPs}}</code>
-                            {{else}}
-                            <span class="text-muted">Using defaults</span>
-                            {{end}}
-                            <br>
-                            <span class="text-muted">Comma-separated list of IP addresses and CIDR ranges to block</span>
-                        </td>
-                        <td>
-                            <form action="/admin/settings" method="post" class="d-flex gap-1">
-                                <input type="hidden" name="setting" value="{{.FormFieldBadIPs}}">
-                                <input type="text" class="form-control form-control-sm" name="{{.FormFieldBadIPs}}"
-                                        placeholder="192.168.1.0/24, 10.0.0.1, 172.16.0.0/16"
-                                        value="{{.BadIPs}}" style="min-width: 200px;">
-                                <button type="submit" class="btn btn-outline-secondary btn-sm">
-                                    <i class="bi bi-list"></i>
-                                </button>
-                            </form>
-                        </td>
-                    </tr>
                 </tbody>
             </table>
         </div>
