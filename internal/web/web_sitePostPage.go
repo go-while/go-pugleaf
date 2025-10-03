@@ -269,11 +269,19 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		for _, newsgroup := range newsgroups {
 			ng, err := s.DB.GetNewsgroupByName(newsgroup)
 			if err != nil {
-				errors = append(errors, fmt.Sprintf("Newsgroup '%s' does not exist", newsgroup))
+				errors = append(errors, fmt.Sprintf("Newsgroup '%s' does not exist.", newsgroup))
 				continue
 			}
 			if !ng.Active {
-				errors = append(errors, fmt.Sprintf("Newsgroup '%s' is not active for posting", newsgroup))
+				errors = append(errors, fmt.Sprintf("Newsgroup '%s' is not active.", newsgroup))
+				continue
+			}
+			if ng.Status == "m" || ng.Status == "mod" || ng.Status == "moderated" {
+				errors = append(errors, fmt.Sprintf("Newsgroup '%s' is moderated.", newsgroup))
+				continue
+			}
+			if ng.Status == "n" || ng.Status == "x" {
+				errors = append(errors, fmt.Sprintf("Newsgroup '%s' does not allow posting.", newsgroup))
 				continue
 			}
 			validNewsgroups = append(validNewsgroups, newsgroup)

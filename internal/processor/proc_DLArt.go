@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -120,7 +121,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 		//log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", toFetch, newsgroup, proc.Pool.Backend.MaxConns)
 		var exists, queued int64
 		for hdr := range xhdrChan {
-			if proc.WantShutdown(shutdownChan) {
+			if common.WantShutdown() {
 				log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
 				return
 			}
@@ -147,7 +148,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 				GroupName: proc.DB.Batch.GetNewsgroupPointer(newsgroup),
 			}
 			item.ReturnQ = groupBatch.ReturnQ
-			Batch.GetQ <- item // send to fetcher/main.go: for item := range processor.Batch.Queue
+			Batch.GetQ <- item // send to fetcher/main.go:461: for item := range processor.Batch.GetQ
 			queued++
 			//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", hdr.ArticleNum, hdr.Value, *item.GroupName)
 			//hdr.Value = ""
@@ -170,7 +171,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 	deathCounter := 0 // Counter to track if we are stuck
 	bulkmode := true
 	var gotQueued int64 = -1
-	if proc.WantShutdown(shutdownChan) {
+	if common.WantShutdown() {
 		log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
 		return fmt.Errorf("shutdown requested")
 	}
@@ -257,7 +258,7 @@ forProcessing:
 			}
 		}
 	} // end for processing routine (counts only)
-	if proc.WantShutdown(shutdownChan) {
+	if common.WantShutdown() {
 		log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
 		return fmt.Errorf("shutdown requested")
 	}
@@ -434,7 +435,7 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 	if downloadEnd > groupInfo.Last {
 		downloadEnd = groupInfo.Last
 	}
-	if proc.WantShutdown(shutdownChan) {
+	if common.WantShutdown() {
 		log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
 		return fmt.Errorf("shutdown requested")
 	}
@@ -443,7 +444,7 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 	// Now use the high-performance DownloadArticles function with proper article ranges
 	err = proc.DownloadArticles(groupName, DLParChan, progressDB, downloadStart, downloadEnd, shutdownChan)
 
-	if proc.WantShutdown(shutdownChan) {
+	if common.WantShutdown() {
 		log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
 		return fmt.Errorf("shutdown requested")
 	}
@@ -467,16 +468,4 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 
 	//log.Printf("DownloadArticlesFromDate: Successfully completed download from date %s for group '%s'",	startDate.Format("2006-01-02"), groupName)
 	return err // Return the result from DownloadArticles (including ErrUpToDate)
-}
-
-func (proc *Processor) WantShutdown(shutdownChan <-chan struct{}) bool {
-	select {
-	case _, ok := <-shutdownChan:
-		if !ok {
-			// channel is closed
-			return true
-		}
-	default:
-	}
-	return false
 }

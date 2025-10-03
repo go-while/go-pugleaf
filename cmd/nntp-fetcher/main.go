@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -267,13 +269,13 @@ func main() {
 	}
 
 	fetchDoneChan := make(chan error, 1)
-	shutdownChan := make(chan struct{}) // For graceful shutdown signaling
 	go func() {
 		<-sigChan
 		log.Printf("[FETCHER]: Received shutdown signal, initiating graceful shutdown...")
 		// Signal all worker goroutines to stop
-		close(shutdownChan)
+		common.ForceShutdown()
 	}()
+
 	proc := processor.NewProcessor(db, pools[0], useShortHashLen) // Use first pool for import
 	if proc == nil {
 		log.Fatalf("[FETCHER]: Failed to create processor: %v", err)
@@ -295,7 +297,7 @@ func main() {
 	go func() {
 		defer close(processor.Batch.Check)
 		for _, ng := range newsgroups {
-			if proc.WantShutdown(shutdownChan) {
+			if common.WantShutdown() {
 				//log.Printf("[FETCHER]: Feed Batch.Check shutdown")
 				return
 			}
@@ -328,7 +330,7 @@ func main() {
 		go func(worker int, wgCheck *sync.WaitGroup, progressDB *database.ProgressDB) {
 			defer wgCheck.Done()
 			for ng := range processor.Batch.Check {
-				if proc.WantShutdown(shutdownChan) {
+				if common.WantShutdown() {
 					//log.Printf("[FETCHER]: Batch.Check shutdown")
 					return
 				}
@@ -338,12 +340,17 @@ func main() {
 				}
 				groupInfo, err := proc.Pool.SelectGroup(*ng)
 				if err != nil || groupInfo == nil {
-					if err == nntp.ErrNewsgroupNotFound {
+					switch err {
+					case nntp.ErrNewsgroupNotFound:
 						//log.Printf("[FETCHER]: Newsgroup not found: '%s'", *ng)
 						continue
+					case io.EOF:
+						log.Printf("pool.SelectGroup failed. connection EOF. skipping ng: '%s'", *ng)
+						continue
+					default:
+						log.Printf("[FETCHER]: Error in select ng='%s' groupInfo='%#v' err='%v'", *ng, groupInfo, err)
+						return
 					}
-					log.Printf("[FETCHER]: Error in select ng='%s' groupInfo='%#v' err='%v'", *ng, groupInfo, err)
-					continue
 				}
 				if groupInfo.Last == 0 || groupInfo.Last < groupInfo.First {
 					//log.Printf("[FETCHER]: Empty group '%s'", *ng)
@@ -451,8 +458,8 @@ func main() {
 		// fire up async goroutines to fetch articles
 		go func(worker int) {
 			//log.Printf("DownloadArticles: Worker %d group '%s' start", worker, groupName)
-			for item := range processor.Batch.GetQ {
-				if proc.WantShutdown(shutdownChan) {
+			for item := range processor.Batch.GetQ { // gets fed from internal/processor/proc_DLArt.go:150: Batch.GetQ <- item
+				if common.WantShutdown() {
 					//log.Printf("[FETCHER]: Batch.GetQ shutdown")
 					return
 				}
@@ -463,10 +470,21 @@ func main() {
 				//log.Printf("DownloadArticles: Worker %d GetArticle group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
 				art, err := proc.Pool.GetArticle(item.MessageID, true)
 				if err != nil || art == nil {
-					log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle '%s' err='%v' .. continue", *item.MessageID, err)
 					item.Error = err     // Set error on item
 					item.ReturnQ <- item // Send failed item back
-					continue
+					switch err {
+					case nntp.ErrArticleNotFound, nntp.ErrArticleRemoved:
+						// article not found, not a big deal
+						continue
+					case io.EOF:
+						log.Printf("ERROR DownloadArticles: pool.GetArticle failed. connection EOF ... quitting! ng: '%s'", *item.GroupName)
+						common.ForceShutdown()
+						return
+					default:
+						log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle '%s' err='%v' ... quitting! ng: '%s'", *item.MessageID, err, *item.GroupName)
+						common.ForceShutdown()
+						return
+					}
 				}
 				item.Article = art   // set pointer
 				item.ReturnQ <- item // Send back the successfully downloaded article
@@ -491,10 +509,14 @@ func main() {
 				}
 			}()
 			for {
+				if common.WantShutdown() {
+					//log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
+					return
+				}
 				select {
-				case _, ok := <-shutdownChan:
+				case _, ok := <-common.ShutdownChan:
 					if !ok {
-						log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
+						//log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
 					}
 					return
 				case groupInfo := <-processor.Batch.TodoQ:
@@ -502,7 +524,7 @@ func main() {
 						//log.Printf("[FETCHER]: TodoQ closed, worker stopping")
 						return
 					}
-					if proc.WantShutdown(shutdownChan) {
+					if common.WantShutdown() {
 						//log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
 						return
 					}
@@ -553,7 +575,7 @@ func main() {
 						}
 						log.Printf("[FETCHER]: Starting ng: '%s' from date: %s", groupInfo.Name, startDate.Format("2006-01-02"))
 						//time.Sleep(3 * time.Second) // debug sleep
-						err = proc.DownloadArticlesFromDate(groupInfo.Name, startDate, DLParChan, progressDB, groupInfo, shutdownChan)
+						err = proc.DownloadArticlesFromDate(groupInfo.Name, startDate, DLParChan, progressDB, groupInfo, common.ShutdownChan)
 						if err != nil {
 							if err == processor.ErrIsEmptyGroup {
 								err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0)
@@ -581,7 +603,7 @@ func main() {
 							startDate := time.Now().AddDate(0, 0, -nga.ExpiryDays)
 							log.Printf("[FETCHER]: Initial download for group with expiry_days=%d, starting from calculated date: %s", nga.ExpiryDays, startDate.Format("2006-01-02"))
 							//time.Sleep(3 * time.Second) // debug sleep
-							err = proc.DownloadArticlesFromDate(groupInfo.Name, startDate, DLParChan, progressDB, groupInfo, shutdownChan)
+							err = proc.DownloadArticlesFromDate(groupInfo.Name, startDate, DLParChan, progressDB, groupInfo, common.ShutdownChan)
 							if err != nil {
 								if err == processor.ErrIsEmptyGroup {
 									err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0)
@@ -599,7 +621,7 @@ func main() {
 							// Incremental download: continue from where we left off
 							log.Printf("[FETCHER]: Incremental download for newsgroup: '%s' (has %d existing articles)", groupInfo.Name, articleCount)
 							//time.Sleep(3 * time.Second) // debug sleep
-							err = proc.DownloadArticles(groupInfo.Name, DLParChan, progressDB, groupInfo.FetchStart, groupInfo.FetchEnd, shutdownChan)
+							err = proc.DownloadArticles(groupInfo.Name, DLParChan, progressDB, groupInfo.FetchStart, groupInfo.FetchEnd, common.ShutdownChan)
 							if err != nil {
 								log.Printf("[FETCHER]: DownloadArticles7 failed: %v", err)
 								errChan <- err
@@ -609,7 +631,7 @@ func main() {
 					} else {
 						log.Printf("[FETCHER]: Downloading articles for newsgroup: '%s' (%d - %d) (no expiry limit)", groupInfo.Name, groupInfo.FetchStart, groupInfo.FetchEnd)
 						//time.Sleep(3 * time.Second) // debug sleep
-						err = proc.DownloadArticles(groupInfo.Name, DLParChan, progressDB, groupInfo.FetchStart, groupInfo.FetchEnd, shutdownChan)
+						err = proc.DownloadArticles(groupInfo.Name, DLParChan, progressDB, groupInfo.FetchStart, groupInfo.FetchEnd, common.ShutdownChan)
 						if err != nil {
 							if err != processor.ErrUpToDate {
 								log.Printf("[FETCHER]: DownloadArticles8 failed: %v", err)
@@ -631,7 +653,7 @@ func main() {
 	db.WG.Done()
 	// Wait for either shutdown signal or server error
 	select {
-	case _, ok := <-shutdownChan:
+	case _, ok := <-common.ShutdownChan:
 		if !ok {
 			//log.Printf("[FETCHER]: Shutdown channel closed, initiating graceful shutdown...")
 		}

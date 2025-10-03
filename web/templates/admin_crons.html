@@ -18,113 +18,128 @@
                   {{if .CronJobs}}
                   <div class="table-responsive">
                       <table class="table table-striped">
-                          <thead>
-                              <tr>
-                                  <th>ID</th>
-                                  <th>Name</th>
-                                  <th>Command</th>
-                                  <th>Schedule</th>
-                                  <th>Start Time</th>
-                                  <th>Status</th>
-                                  <th>Last Run</th>
-                                  <th>Run Count</th>
-                                  <th>Delete</th>
-                              </tr>
-                          </thead>
-                          <tbody>
-                              {{range .CronJobs}}
-                              <tr>
-                                  <td>
-                                    <!-- View Log -->
-                                    <form method="GET" action="/admin/cronjobs/viewlog/{{.ID}}" style="display: inline;">
-                                        <button type="submit" class="btn btn-outline-warning btn-sm" title="Job Log">
-                                            <i class="bi bi-question-circle"></i>
-                                        </button>
-                                    </form>
-                                    <!-- Edit -->
-                                    <button type="button" class="btn btn-outline-info btn-sm edit-cron-btn" title="Edit"
-                                            data-id="{{.ID}}"
-                                            data-name="{{.Name}}"
-                                            data-command="{{.Command}}"
-                                            data-interval="{{.IntervalMinutes}}"
-                                            data-start-time="{{.StartHourMinute}}"
-                                            data-enabled="{{.Enabled}}">
-                                        <i class="bi bi-pencil"></i>
+                        <thead>
+                            <tr>
+                            <th></th>
+                            <th>Log</th>
+                            <th>Edit</th>
+                            <th>Status</th>
+                            <th>Last</th>
+                            <th>Tick</th>
+                            <th>Name</th>
+                            <th>Command</th>
+                            <th>Start</th>
+                            <th>Count</th>
+                            <th><i class="bi bi-trash"></i></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                          {{range .CronJobs}}
+                          <tr>
+                            <td>
+                                {{if .Enabled}}
+                                    <span class="badge bg-success" title="CRON is ON">✅</span>
+                                {{else}}
+                                    <span class="badge bg-secondary" title="CRON is OFF">❌</span>
+                                {{end}}
+                            </td>
+                            <td>
+                                <!-- View Log -->
+                                <form method="GET" action="/admin/cronjobs/viewlog/{{.ID}}" style="display: inline;">
+                                    <input type="hidden" name="limit" value="1000">
+                                    <button type="submit" class="btn btn-outline-warning btn-sm" title="Log">
+                                        <i class="bi bi-question-circle"></i>
                                     </button>
-                                  </td>
-                                  <td><strong>{{.Name}}</strong></td>
-                                  <td><code>{{.Command}}</code></td>
-                                  <td>
-                                      {{if eq .IntervalMinutes 1440}}
-                                          <span class="badge bg-outline-info">Daily</span>
-                                      {{else}}
-                                          <span class="badge bg-outline-info">Every {{.IntervalMinutes}}m</span>
-                                      {{end}}
-                                  </td>
-                                  <td>
-                                      {{if .StartHourMinute}}
-                                          <span class="badge bg-secondary">{{.StartHourMinute}}</span>
-                                      {{else}}
-                                          <span class="text-muted">Any time</span>
-                                      {{end}}
-                                  </td>
-                                  <td>
-                                    <!-- Toggle Enable/Disable -->
-                                      <form method="POST" action="/admin/crons/toggle" style="display: inline;">
-                                        <input type="hidden" name="cron_id" value="{{.ID}}">
-                                        {{if .Enabled}}
-                                        <button type="submit" class="btn btn-outline-warning btn-sm" title="Disable">
-                                            <i class="bi bi-pause-circle"></i>
-                                        </button>
-                                        {{else}}
-                                        <button type="submit" class="btn btn-outline-success btn-sm" title="Enable">
-                                            <i class="bi bi-play-circle"></i>
-                                        </button>
-                                        {{end}}
-                                      </form>
+                                </form>
+                            </td>
+                            <td>
+                                <!-- Edit -->
+                                <button type="button" class="btn btn-outline-info btn-sm edit-cron-btn" title="Edit"
+                                        data-id="{{.ID}}"
+                                        data-name="{{.Name}}"
+                                        data-command="{{.Command}}"
+                                        data-interval="{{.IntervalMinutes}}"
+                                        data-start-time="{{.StartHourMinute}}"
+                                        data-enabled="{{.Enabled}}">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                            </td>
+                            <td>
+                                <!-- Toggle Enable/Disable -->
+                                <form method="POST" action="/admin/crons/toggle" style="display: inline;">
+                                <input type="hidden" name="cron_id" value="{{.ID}}">
+                                {{if .Enabled}}
+                                <button type="submit" class="btn btn-outline-warning btn-sm" title="Disable">
+                                    <i class="bi bi-pause-circle"></i>
+                                </button>
+                                {{else}}
+                                <button type="submit" class="btn btn-outline-success btn-sm" title="Enable">
+                                    <i class="bi bi-play-circle"></i>
+                                </button>
+                                {{end}}
+                                </form>
 
-                                    <!-- Stop Job (only show if running) -->
-                                    <form method="POST" action="/admin/crons/stop" style="display: inline;">
+                                <!-- Stop Job (only show if running) -->
+                                <form method="POST" action="/admin/crons/stop" style="display: inline;">
+                                    <input type="hidden" name="cron_id" value="{{.ID}}">
+                                    <button type="submit" class="btn btn-outline-danger btn-sm" title="Stop Running Job">
+                                        <i class="bi bi-stop-circle"></i>
+                                    </button>
+                                </form>
+                            </td>
+                            <td>
+                                {{if .LastRun}}
+                                    {{$duration := since .LastRun}}
+                                    {{if lt $duration 60}}
+                                        <span class="badge bg-success">{{$duration}}s ago</span>
+                                    {{else if lt $duration 3600}}
+                                        <span class="badge bg-success">{{div $duration 60}}m ago</span>
+                                    {{else if lt $duration 172800}}
+                                        <span class="badge bg-success">{{div $duration 3600}}h ago</span>
+                                    {{else}}
+                                        <span class="badge bg-secondary">{{div $duration 86400}}d ago</span>
+                                    {{end}}
+                                {{else}}
+                                    <span class="text-muted">Never</span>
+                                {{end}}
+                            </td>
+                            <td>
+                                {{if eq .IntervalMinutes 1440}}
+                                    <span class="badge bg-outline-info">Daily</span>
+                                {{else}}
+                                    <span class="badge bg-outline-info">Every {{.IntervalMinutes}}m</span>
+                                {{end}}
+                            </td>
+                            <td><strong>{{.Name}}</strong></td>
+                            <td><code>{{.Command}}</code></td>
+                            <td>
+                                {{if .StartHourMinute}}
+                                    <span class="badge bg-secondary">{{.StartHourMinute}}</span>
+                                {{else}}
+                                    <span class="text-muted">Any time</span>
+                                {{end}}
+                            </td>
+                            <td>{{.RunCount}}</td>
+                            <td>
+                                <div class="btn-group btn-group-sm">
+                                    <!-- Delete -->
+                                    {{if .Enabled}}
+                                        <button disabled type="submit" class="btn btn-outline-danger btn-sm" title="Delete">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    {{else}}
+                                    <form method="POST" action="/admin/crons/delete" style="display: inline;">
                                         <input type="hidden" name="cron_id" value="{{.ID}}">
-                                        <button type="submit" class="btn btn-outline-danger btn-sm" title="Stop Running Job">
-                                            <i class="bi bi-stop-circle"></i>
+                                        <button type="submit" class="btn btn-outline-danger btn-sm" title="Delete">
+                                            <i class="bi bi-trash"></i>
                                         </button>
                                     </form>
-
-                                      {{if .Enabled}}
-                                          <span class="badge bg-success">Enabled</span>
-                                      {{else}}
-                                          <span class="badge bg-secondary">Disabled</span>
-                                      {{end}}
-                                  </td>
-                                  <td>
-                                      {{if .LastRun}}
-                                          {{.LastRun.Format "2006-01-02 15:04:05"}}
-                                      {{else}}
-                                          <span class="text-muted">Never</span>
-                                      {{end}}
-                                  </td>
-                                  <td>{{.RunCount}}</td>
-                                  <td>
-                                      <div class="btn-group btn-group-sm">
-                                          <!-- Delete -->
-                                          {{if .Enabled}}
-                                              <button disabled type="submit" class="btn btn-outline-danger btn-sm" title="Delete">
-                                                  <i class="bi bi-trash"></i>
-                                              </button>
-                                          {{else}}
-                                          <form method="POST" action="/admin/crons/delete" style="display: inline;">
-                                              <input type="hidden" name="cron_id" value="{{.ID}}">
-                                              <button type="submit" class="btn btn-outline-danger btn-sm" title="Delete">
-                                                  <i class="bi bi-trash"></i>
-                                              </button>
-                                          </form>
-                                          {{end}}
-                                      </div>
-                                  </td>
-                              </tr>
-                              {{end}}
-                          </tbody>
+                                    {{end}}
+                                </div>
+                            </td>
+                          </tr>
+                          {{end}}
+                        </tbody>
                       </table>
                   </div>
                   {{else}}

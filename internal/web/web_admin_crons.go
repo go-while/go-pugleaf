@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -240,15 +241,57 @@ func (s *WebServer) adminViewCronJobLog(c *gin.Context) {
 	// Get the log output from the cron manager
 	logOutput := s.CronManager.GetJobOutput(id)
 
+	// Parse limit parameter (default to 1000)
+	limit := 1000
+	filter := ""
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
+
+	if filterStr := c.Query("filter"); filterStr != "" {
+		filter = filterStr
+	}
+	// Limit the output to the last N lines
+	displayOutput := logOutput
+	totalLines := len(logOutput)
+
+	if filter != "" {
+		var filteredOutput []string
+		filteredOutput = append(filteredOutput, "Filtered log output (filter: '"+filter+"'):")
+		for _, line := range logOutput {
+			if strings.Contains(line, filter) {
+				filteredOutput = append(filteredOutput, line)
+			}
+		}
+		filteredOutput = append(filteredOutput, fmt.Sprintf("--- End of filtered output lines: %d ---", len(filteredOutput)-1))
+		displayOutput = filteredOutput
+	}
+	if totalLines > limit {
+		displayOutput = logOutput[totalLines-limit:]
+	}
+
 	// Return plain text log for now
 	c.Header("Content-Type", "text/plain; charset=utf-8")
-	c.String(http.StatusOK, "Cron Job: %s\nCommand: %s\nLast Run: %v\nRun Count: %d\n\n--- Log Output (Last %d lines) ---\n%s",
-		cronJob.Name,
-		cronJob.Command,
-		cronJob.LastRun,
-		cronJob.RunCount,
-		len(logOutput),
-		strings.Join(logOutput, "\n"))
+	if totalLines > limit {
+		c.String(http.StatusOK, "Cron Job: %s\nCommand: %s\nLast Run: %v\nRun Count: %d\n\n--- Log Output (Showing last %d of %d lines) ---\n%s",
+			cronJob.Name,
+			cronJob.Command,
+			cronJob.LastRun,
+			cronJob.RunCount,
+			limit,
+			totalLines,
+			strings.Join(displayOutput, "\n"))
+	} else {
+		c.String(http.StatusOK, "Cron Job: %s\nCommand: %s\nLast Run: %v\nRun Count: %d\n\n--- Log Output (All %d lines) ---\n%s",
+			cronJob.Name,
+			cronJob.Command,
+			cronJob.LastRun,
+			cronJob.RunCount,
+			totalLines,
+			strings.Join(displayOutput, "\n"))
+	}
 	log.Printf("Displayed log for cron job ID %d", cronJob.ID)
 }
 

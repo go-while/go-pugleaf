@@ -365,7 +365,6 @@ func main() {
 		log.Fatalf("Failed to create processor")
 	}
 	// Set up shutdown handling
-	shutdownChan := make(chan struct{})
 	transferDoneChan := make(chan error, 1)
 	// special debug mode to find articles with bad date header... before usenet existed...
 	if *debugCapture {
@@ -378,7 +377,7 @@ func main() {
 	go func(wgP *sync.WaitGroup, redisCli *redis.Client) {
 		defer wgP.Done()
 		resultChan := make(chan error, 1)
-		resultChan <- runTransfer(db, proc, pool, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, shutdownChan, *debugCapture, wgP, redisCli)
+		resultChan <- runTransfer(db, proc, pool, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, *debugCapture, wgP, redisCli)
 		result := <-resultChan
 		if !*debugCapture {
 			transferDoneChan <- result
@@ -450,7 +449,7 @@ func main() {
 	select {
 	case <-sigChan:
 		log.Printf("Received shutdown signal, initiating graceful shutdown...")
-		close(shutdownChan)
+		common.ForceShutdown()
 	case err := <-transferDoneChan:
 		if err != nil {
 			log.Printf("Transfer completed with error: %v", err)
@@ -971,7 +970,7 @@ func matchesAnyWildcardPattern(newsgroup string, patterns []string) bool {
 }
 
 // runTransfer performs the actual article transfer process
-func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}, debugCapture bool, wgP *sync.WaitGroup, redisCli *redis.Client) error {
+func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, wgP *sync.WaitGroup, redisCli *redis.Client) error {
 	defer wgP.Done()
 	var totalTransferred, nothingInDateRange, totalRedisCacheHits uint64
 	var totalUnwanted, totalRejected, totalTXErrors, totalConnErrors uint64
@@ -981,7 +980,7 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 	// Process each newsgroup
 	log.Printf("Starting transfer for %d newsgroups", len(newsgroups))
 	for _, newsgroup := range newsgroups {
-		if proc.WantShutdown(shutdownChan) {
+		if common.WantShutdown() {
 			transferMutex.Lock()
 			log.Printf("Shutdown requested, stopping transfer. Total transferred: %d articles", totalTransferred)
 			transferMutex.Unlock()
@@ -994,14 +993,14 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 				wg.Done()
 				<-maxThreadsChan // release the thread slot
 			}(wg)
-			if proc.WantShutdown(shutdownChan) {
+			if common.WantShutdown() {
 				return
 			}
 			start := time.Now()
 			if VERBOSE {
 				log.Printf("Starting transfer for newsgroup: %s", newsgroup.Name)
 			}
-			transferred, checked, rc, unwanted, rejected, txErrors, connErrors, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, shutdownChan, debugCapture, redisCli)
+			transferred, checked, rc, unwanted, rejected, txErrors, connErrors, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, debugCapture, redisCli)
 
 			transferMutex.Lock()
 			totalTransferred += transferred
@@ -1044,7 +1043,7 @@ var debugMutex sync.Mutex
 var ErrNotInDateRange = fmt.Errorf("article not in specified date range")
 
 // transferNewsgroup transfers articles from a single newsgroup
-func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, shutdownChan <-chan struct{}, debugCapture bool, redisCli *redis.Client) (uint64, uint64, uint64, uint64, uint64, uint64, uint64, error) {
+func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, redisCli *redis.Client) (uint64, uint64, uint64, uint64, uint64, uint64, uint64, error) {
 
 	// Get group database
 	groupDBs, err := db.GetGroupDBs(newsgroup.Name)
@@ -1105,7 +1104,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	var transferred, checked, redis_cache_hits uint64
 	start := time.Now()
 	for offset := ioffset; offset < totalArticles; offset += dbBatchSize {
-		if proc.WantShutdown(shutdownChan) {
+		if common.WantShutdown() {
 			log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
 			return transferred, checked, redis_cache_hits, ttMode.Unwanted, ttMode.Rejected, ttMode.TX_Errors, ttMode.ConnErrors, nil
 		}
@@ -1133,7 +1132,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 		isleep := time.Second
 		// Process articles in network batches
 		for i := 0; i < len(articles); i += batchCheck {
-			if proc.WantShutdown(shutdownChan) {
+			if common.WantShutdown() {
 				log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
 				return transferred, checked, redis_cache_hits, ttMode.Unwanted, ttMode.Rejected, ttMode.TX_Errors, ttMode.ConnErrors, nil
 			}
@@ -1149,7 +1148,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			// forever: will process this batch until successful or shutdown
 		forever:
 			for {
-				if proc.WantShutdown(shutdownChan) {
+				if common.WantShutdown() {
 					log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
 					return transferred, checked, redis_cache_hits, ttMode.Unwanted, ttMode.Rejected, ttMode.TX_Errors, ttMode.ConnErrors, nil
 				}

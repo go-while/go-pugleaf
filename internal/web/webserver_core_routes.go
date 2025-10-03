@@ -337,7 +337,8 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/api/v1/stats/", s.requireAPIEnabled(), s.getStats) // API endpoint for stats
 
 	// Public article preview endpoint (no auth required)
-	s.Router.GET("/api/v1/groups/:group/articles/:articleNum/preview", s.requireAPIEnabled(), s.getArticlePreview)
+	//s.Router.GET("/api/v1/groups/:group/articles/:articleNum/preview", s.requireAPIEnabled(), s.getArticlePreview)
+	s.Router.GET("/api/v1/groups/:group/articles/:articleNum/preview", s.getArticlePreview)
 
 	api := s.Router.Group("/api/v1")
 	api.Use(s.requireAPIEnabled()) // Check if API is enabled

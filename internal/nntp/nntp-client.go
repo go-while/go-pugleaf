@@ -189,16 +189,14 @@ func (c *BackendConn) Connect() error {
 	if err != nil {
 		// Log proxy information if proxy was attempted
 		if c.Backend.ProxyEnabled {
-			log.Printf("[NNTP-PROXY] Failed to connect to %s via %s proxy %s:%d: %v",
-				serverAddr, c.Backend.ProxyType, c.Backend.ProxyHost, c.Backend.ProxyPort, err)
+			log.Printf("[NNTP-PROXY] Failed to connect to %s via %s proxy %s:%d: %v", serverAddr, c.Backend.ProxyType, c.Backend.ProxyHost, c.Backend.ProxyPort, err)
 		}
 		return fmt.Errorf("failed to connect to %s: %w", serverAddr, err)
 	}
 
 	// Log successful proxy connection
 	if c.Backend.ProxyEnabled {
-		log.Printf("[NNTP-PROXY] Successfully connected to %s via %s proxy %s:%d",
-			serverAddr, c.Backend.ProxyType, c.Backend.ProxyHost, c.Backend.ProxyPort)
+		log.Printf("[NNTP-PROXY] Successfully connected to %s via %s proxy %s:%d", serverAddr, c.Backend.ProxyType, c.Backend.ProxyHost, c.Backend.ProxyPort)
 	}
 
 	c.conn = conn
@@ -208,13 +206,12 @@ func (c *BackendConn) Connect() error {
 	// Read welcome message
 	code, message, err := c.textConn.ReadCodeLine(NNTPWelcomeCodeMin)
 	if err != nil {
-		c.ForceCloseConn()
-		return fmt.Errorf("failed to read welcome: %w", err)
+		log.Printf("[NNTP-CONN] Error reading welcome from %s:%d: %v", c.Backend.Host, c.Backend.Port, err)
+		return err
 	}
 
 	if code < NNTPWelcomeCodeMin || code > NNTPWelcomeCodeMax {
 		log.Printf("[NNTP-CONN] Invalid welcome code %d from %s:%d: %s", code, c.Backend.Host, c.Backend.Port, message)
-		c.ForceCloseConn()
 		return fmt.Errorf("unexpected welcome code %d: %s", code, message)
 	}
 
@@ -228,8 +225,8 @@ func (c *BackendConn) Connect() error {
 		//log.Printf("[NNTP-AUTH] Attempting authentication for user '%s' on %s:%d", c.Backend.Username, c.Backend.Host, c.Backend.Port)
 		if err := c.authenticate(); err != nil {
 			log.Printf("[NNTP-AUTH] Authentication FAILED for user '%s' on %s:%d err: %v", c.Backend.Username, c.Backend.Host, c.Backend.Port, err)
-			c.ForceCloseConn()
-			return fmt.Errorf("remote authentication FAILED for user '%s' on %s:%d err: %w", c.Backend.Username, c.Backend.Host, c.Backend.Port, err)
+			time.Sleep(time.Second * 5)
+			return err
 		}
 		//log.Printf("[NNTP-AUTH] Authentication SUCCESS for user '%s' on %s:%d", c.Backend.Username, c.Backend.Host, c.Backend.Port)
 	} else {

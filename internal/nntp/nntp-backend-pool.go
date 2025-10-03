@@ -158,12 +158,12 @@ func (pool *Pool) SelectGroup(group string) (*GroupInfo, error) {
 	// Get a connection from the pool
 	client, err := pool.Get(MODE_READER_MV)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get connection: %w", err)
+		return nil, err
 	}
 
 	gi, code, err := client.SelectGroup(group)
 	if err != nil && code != 411 {
-		// Close connection on unexpected errors (not "group not found")
+		// Close connection on unexpected any other error than "group not found"
 		client.ForceCloseConn()
 		return nil, err
 	}
@@ -241,6 +241,9 @@ newConn:
 		pool.mux.Unlock()
 		pconn, err := pool.createConnection()
 		if err != nil {
+			if pconn.conn != nil {
+				pconn.conn.Close()
+			}
 			pool.mux.Lock()
 			pool.activeConns--
 			pool.failedConns++

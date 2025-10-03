@@ -380,7 +380,7 @@ func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, int, error) {
 
 	id, err := c.textConn.Cmd("GROUP %s", groupName)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to send GROUP '%s' command: %w", groupName, err)
+		return nil, 0, err
 	}
 
 	c.textConn.StartResponse(id)
@@ -388,14 +388,10 @@ func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, int, error) {
 
 	code, message, err := c.textConn.ReadCodeLine(211)
 	if err != nil {
-		return nil, code, fmt.Errorf("failed to read GROUP '%s' response: %w", groupName, err)
-	}
-
-	if code != 211 {
-		return nil, code, fmt.Errorf(
-			"group selection failed: expected code 211, got %d - response: %s group %s",
-			code, message, groupName,
-		)
+		if code != 411 {
+			log.Printf("[ERROR] failed to read GROUP '%s' code=%d message='%s' err: %v", groupName, code, message, err)
+		}
+		return nil, code, err
 	}
 
 	// Parse group information from response

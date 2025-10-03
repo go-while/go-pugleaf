@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
@@ -562,7 +563,17 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	}
 
 	// Load modular admin templates
-	tmpl := template.Must(template.ParseFiles(
+	tmpl := template.Must(template.New("").Funcs(template.FuncMap{
+		"since": func(t time.Time) int64 {
+			return int64(time.Since(t).Seconds())
+		},
+		"div": func(a, b int64) int64 {
+			if b == 0 {
+				return 0
+			}
+			return a / b
+		},
+	}).ParseFiles(
 		"web/templates/base.html",
 		"web/templates/admin_modular.html",
 		"web/templates/admin_users.html",
