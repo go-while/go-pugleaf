@@ -110,7 +110,7 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 		config.FORM_FIELD_BADBOTS: {
 			FormField: config.FORM_FIELD_BADBOTS,
 			ConfigKey: config.CFG_KEY_BADBOTS,
-			Validator: nil, // Basic string validation
+			Validator: nil,                    // Basic string validation
 			Processor: s.processBadBotsUpdate, // Apply changes immediately
 			SuccessMsg: func(value string) string {
 				if value == "" {
@@ -321,28 +321,28 @@ func (s *WebServer) processBlockBadBotsToggle(server *WebServer, value string) e
 	currentStatus, err := server.DB.GetConfigValue(config.CFG_KEY_BLOCKBADBOTS)
 	if err != nil {
 		return fmt.Errorf("failed to get current BlockBadBots config: %v", err)
-
 	}
 
 	// Toggle the status
 	var newStatus string
+	blockEnabled := false
 	if currentStatus == "true" {
 		newStatus = "false"
-		config.BadBotsMutex.Lock()
-		config.BlockBadBots = false
-		config.BadBotsMutex.Unlock()
+		blockEnabled = false
 	} else {
 		newStatus = "true"
-		config.BadBotsMutex.Lock()
-		config.BlockBadBots = true
-		config.BadBotsMutex.Unlock()
+		blockEnabled = true
 	}
 
-	// Update the configuration
+	// Update the configuration in database
 	err = server.DB.SetConfigValue(config.CFG_KEY_BLOCKBADBOTS, newStatus)
 	if err != nil {
 		return fmt.Errorf("failed to toggle bot blocking: %v", err)
 	}
+
+	// Get current bad bots list and apply changes using UpdateBadBots
+	badBotsStr, _ := server.DB.GetConfigValue(config.CFG_KEY_BADBOTS)
+	config.UpdateBadBots(badBotsStr, blockEnabled)
 
 	return nil
 }
@@ -357,23 +357,24 @@ func (s *WebServer) processBlockBadIPsToggle(server *WebServer, value string) er
 
 	// Toggle the status
 	var newStatus string
+	blockEnabled := false
 	if currentStatus == "true" {
 		newStatus = "false"
-		config.BadIPsMutex.Lock()
-		config.BlockBadIPs = false
-		config.BadIPsMutex.Unlock()
+		blockEnabled = false
 	} else {
 		newStatus = "true"
-		config.BadIPsMutex.Lock()
-		config.BlockBadIPs = true
-		config.BadIPsMutex.Unlock()
+		blockEnabled = true
 	}
 
-	// Update the configuration
+	// Update the configuration in database
 	err = server.DB.SetConfigValue(config.CFG_KEY_BLOCKBADIPS, newStatus)
 	if err != nil {
 		return fmt.Errorf("failed to toggle IP blocking: %v", err)
 	}
+
+	// Get current bad IPs list and apply changes using UpdateBadIPs
+	badIPsStr, _ := server.DB.GetConfigValue(config.CFG_KEY_BADIPS)
+	config.UpdateBadIPs(badIPsStr, blockEnabled)
 
 	return nil
 }
@@ -438,16 +439,16 @@ func (s *WebServer) processBadBotsUpdate(server *WebServer, value string) error 
 		return fmt.Errorf("failed to get BlockBadBots config: %v", err)
 	}
 	blockEnabled := (blockBadBotsStr == "true")
-	
+
 	// Update database first
 	err = server.DB.SetConfigValue(config.CFG_KEY_BADBOTS, value)
 	if err != nil {
 		return fmt.Errorf("failed to update BadBots config: %v", err)
 	}
-	
+
 	// Apply changes immediately to global variables
 	config.UpdateBadBots(value, blockEnabled)
-	
+
 	return nil
 }
 
@@ -459,18 +460,18 @@ func (s *WebServer) processBadIPsUpdate(server *WebServer, value string) error {
 		return fmt.Errorf("failed to get BlockBadIPs config: %v", err)
 	}
 	blockEnabled := (blockBadIPsStr == "true")
-	
+
 	// Update database first
 	err = server.DB.SetConfigValue(config.CFG_KEY_BADIPS, value)
 	if err != nil {
 		return fmt.Errorf("failed to update BadIPs config: %v", err)
 	}
-	
+
 	// Apply changes immediately to global variables
 	err = config.UpdateBadIPs(value, blockEnabled)
 	if err != nil {
 		return fmt.Errorf("failed to apply IP config changes: %v", err)
 	}
-	
+
 	return nil
 }
