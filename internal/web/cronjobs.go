@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -70,7 +71,7 @@ func (cm *CronJobManager) StartCronManager() {
 	//log.Printf("[CRON] Starting cron job manager...")
 	go func(cm *CronJobManager) {
 		for {
-			if isClosedChannel(cm.stopChannel) {
+			if common.IsClosedChannel(cm.stopChannel) {
 				return
 			}
 			// Load all active cron jobs from database
@@ -106,15 +107,6 @@ func (cm *CronJobManager) StartCronManager() {
 			time.Sleep(time.Minute)
 		}
 	}(cm)
-}
-
-func isClosedChannel(ch <-chan struct{}) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-		return false
-	}
 }
 
 // Stop gracefully shuts down the cron job manager
@@ -319,7 +311,7 @@ func (cm *CronJobManager) startJob(cronJob *models.CronJob) error {
 
 // runJobScheduler handles the scheduling and execution of a specific job
 func (cm *CronJobManager) runJobScheduler(job *CronJob) {
-	if isClosedChannel(cm.stopChannel) {
+	if common.IsClosedChannel(cm.stopChannel) {
 		log.Printf("[CRON] runJobScheduler: is closed, abort job %d/%s", job.ID, job.Name)
 		return
 	}
@@ -410,7 +402,7 @@ func (cm *CronJobManager) executeJob(job *CronJob, execWG *sync.WaitGroup) {
 		cm.mutex.Unlock()
 		execWG.Done()
 	}()
-	if isClosedChannel(cm.stopChannel) {
+	if common.IsClosedChannel(cm.stopChannel) {
 		log.Printf("[CRON] executeJob: Cron manager is stopping, aborting job %d", job.ID)
 		return
 	}
