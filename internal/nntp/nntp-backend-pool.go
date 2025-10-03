@@ -241,7 +241,7 @@ newConn:
 		pool.mux.Unlock()
 		pconn, err := pool.createConnection()
 		if err != nil {
-			if pconn.conn != nil {
+			if pconn != nil && pconn.conn != nil {
 				pconn.conn.Close()
 			}
 			pool.mux.Lock()
