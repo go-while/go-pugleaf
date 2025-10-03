@@ -5,8 +5,8 @@
 #
 
 # Default values
-START_YEAR=${1:-1999}
-END_YEAR=${2:-2002}
+START_YEAR=${1:-1980}
+END_YEAR=${2:-2026}
 
 echo "# nntp-transfer: month-by-month processing"
 echo "# Start year: $START_YEAR"
