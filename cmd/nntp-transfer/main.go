@@ -390,24 +390,24 @@ func main() {
 		// you did create a backup before, right?
 		debugMutex.Lock()
 		defer debugMutex.Unlock()
-		for groupName, articles := range debugArticles {
-			fmt.Printf("Debug capture - Newsgroup: %s, Articles: %d\n", groupName, len(articles))
+		for newsgroup, articles := range debugArticles {
+			fmt.Printf("Debug capture - Newsgroup: %s, Articles: %d\n", newsgroup, len(articles))
 
 			// Get group database for updates if needed
-			groupDBs, err := db.GetGroupDBs(groupName)
+			groupDBs, err := db.GetGroupDBs(newsgroup)
 			if err != nil {
-				fmt.Printf("! Error getting group database for %s: %v\n", groupName, err)
+				fmt.Printf("! Error getting group database for %s: %v\n", newsgroup, err)
 				continue
 			}
 
 			for _, article := range articles {
-				fmt.Printf("# %s: #%d : '%s' | orgDate='%s' parsed='%#v'\n", groupName, article.DBArtNum, article.MessageID, article.DateString, article.DateSent)
+				fmt.Printf("# %s: #%d : '%s' | orgDate='%s' parsed='%#v'\n", newsgroup, article.DBArtNum, article.MessageID, article.DateString, article.DateSent)
 
 				// Track original values to detect changes
 				originalDateSent := article.DateSent
 				originalDateString := article.DateString
 
-				headers, err := common.ReconstructHeaders(article, true, &nntphostname)
+				headers, err := common.ReconstructHeaders(article, true, &nntphostname, newsgroup)
 				fmt.Printf("### ORG HEADER: '%s'\n%s\n", article.MessageID, article.HeadersJSON)
 				if err != nil {
 					fmt.Printf("! Error reconstructing headers for article '%s': %v\n", article.MessageID, err)
@@ -1484,7 +1484,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			continue // Skip cached articles
 		}
 		// Send TAKETHIS command with article content (non-blocking)
-		cmdID, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname)
+		cmdID, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname, newsgroup)
 		if err != nil {
 			if err == common.ErrNoNewsgroups {
 				log.Printf("Newsgroup: '%s' | skipped article '%s': no newsgroups header", newsgroup, article.MessageID)
