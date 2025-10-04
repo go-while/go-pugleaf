@@ -332,7 +332,7 @@ func (pool *Pool) Put(conn *BackendConn) error {
 		pool.mux.Unlock()
 		return nil
 	}
-	conn.writer.Reset(conn.conn)
+	conn.Writer.Reset(conn.conn)
 	pool.mux.RUnlock()
 
 	conn.UpdateLastUsed() // set lastused before returning to pool

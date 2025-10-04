@@ -55,8 +55,8 @@ var DefaultBufferTX int = 64 * 1024
 // for interacting with the NNTP server.
 type BackendConn struct {
 	conn     net.Conn
-	textConn *textproto.Conn
-	writer   *bufio.Writer
+	TextConn *textproto.Conn
+	Writer   *bufio.Writer
 	Backend  *BackendConfig
 	mux      sync.RWMutex
 	Pool     *Pool // link to parent pool
@@ -200,11 +200,11 @@ func (c *BackendConn) Connect() error {
 	}
 
 	c.conn = conn
-	c.textConn = textproto.NewConn(conn)
-	c.writer = bufio.NewWriterSize(conn, DefaultBufferTX) // bufio writer with defined buffer size
+	c.TextConn = textproto.NewConn(conn)
+	c.Writer = bufio.NewWriterSize(conn, DefaultBufferTX) // bufio writer with defined buffer size
 
 	// Read welcome message
-	code, message, err := c.textConn.ReadCodeLine(NNTPWelcomeCodeMin)
+	code, message, err := c.TextConn.ReadCodeLine(NNTPWelcomeCodeMin)
 	if err != nil {
 		log.Printf("[NNTP-CONN] Error reading welcome from %s:%d: %v", c.Backend.Host, c.Backend.Port, err)
 		return err
@@ -239,14 +239,14 @@ func (c *BackendConn) Connect() error {
 // authenticate performs NNTP authentication
 func (c *BackendConn) authenticate() error {
 	// Send AUTHINFO USER
-	id, err := c.textConn.Cmd("AUTHINFO USER %s", c.Backend.Username)
+	id, err := c.TextConn.Cmd("AUTHINFO USER %s", c.Backend.Username)
 	if err != nil {
 		return err
 	}
 
-	c.textConn.StartResponse(id)
-	code, message, err := c.textConn.ReadCodeLine(NNTPMoreInfoCode)
-	c.textConn.EndResponse(id)
+	c.TextConn.StartResponse(id)
+	code, message, err := c.TextConn.ReadCodeLine(NNTPMoreInfoCode)
+	c.TextConn.EndResponse(id)
 
 	if err != nil {
 		return err
@@ -257,14 +257,14 @@ func (c *BackendConn) authenticate() error {
 	}
 
 	// Send AUTHINFO PASS
-	id, err = c.textConn.Cmd("AUTHINFO PASS %s", c.Backend.Password)
+	id, err = c.TextConn.Cmd("AUTHINFO PASS %s", c.Backend.Password)
 	if err != nil {
 		return err
 	}
 
-	c.textConn.StartResponse(id)
-	code, message, err = c.textConn.ReadCodeLine(NNTPAuthSuccess)
-	c.textConn.EndResponse(id)
+	c.TextConn.StartResponse(id)
+	code, message, err = c.TextConn.ReadCodeLine(NNTPAuthSuccess)
+	c.TextConn.EndResponse(id)
 
 	if err != nil {
 		return err
@@ -287,8 +287,8 @@ func (c *BackendConn) CloseFromPoolOnly() error {
 		return nil
 	}
 
-	if c.textConn != nil {
-		if err := c.textConn.Close(); err != nil {
+	if c.TextConn != nil {
+		if err := c.TextConn.Close(); err != nil {
 			//log.Printf("Error closing text connection: %v", err)
 		}
 	}
@@ -301,9 +301,9 @@ func (c *BackendConn) CloseFromPoolOnly() error {
 
 	c.connected = false
 	c.authenticated = false
-	c.textConn = nil // CloseFromPoolOnly
+	c.TextConn = nil // CloseFromPoolOnly
 	c.conn = nil     // CloseFromPoolOnly
-	c.writer = nil
+	c.Writer = nil
 	//log.Printf("Closed NNTP Connection to %s", c.Backend.Host)
 	return nil
 }

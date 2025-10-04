@@ -48,15 +48,15 @@ func (c *BackendConn) StatArticle(messageID string) (bool, error) {
 
 	c.lastUsed = time.Now()
 
-	id, err := c.textConn.Cmd("STAT %s", messageID)
+	id, err := c.TextConn.Cmd("STAT %s", messageID)
 	if err != nil {
 		return false, fmt.Errorf("failed to send STAT command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, _, err := c.textConn.ReadCodeLine(223)
+	code, _, err := c.TextConn.ReadCodeLine(223)
 	if err != nil {
 		return false, fmt.Errorf("failed to read STAT response: %w", err)
 	}
@@ -93,15 +93,15 @@ func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Arti
 			}
 		}()
 	*/
-	id, err := c.textConn.Cmd("ARTICLE %s", *messageID)
+	id, err := c.TextConn.Cmd("ARTICLE %s", *messageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send ARTICLE '%s' command: %w", *messageID, err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(ArticleFollows)
+	code, message, err := c.TextConn.ReadCodeLine(ArticleFollows)
 	if err != nil && code == 0 {
 		log.Printf("[ERROR] failed to read ARTICLE '%s' code=%d message='%s' err: %v", *messageID, code, message, err)
 		return nil, fmt.Errorf("failed to read ARTICLE '%s' code=%d message='%s' err: %v", *messageID, code, message, err)
@@ -146,15 +146,15 @@ func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
 
 	c.lastUsed = time.Now()
 
-	id, err := c.textConn.Cmd("HEAD %s", messageID)
+	id, err := c.TextConn.Cmd("HEAD %s", messageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send HEAD command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(HeadFollows)
+	code, message, err := c.TextConn.ReadCodeLine(HeadFollows)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read HEAD response: %w", err)
 	}
@@ -202,15 +202,15 @@ func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
 
 	c.lastUsed = time.Now()
 
-	id, err := c.textConn.Cmd("BODY %s", messageID)
+	id, err := c.TextConn.Cmd("BODY %s", messageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send BODY command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(BodyFollows)
+	code, message, err := c.TextConn.ReadCodeLine(BodyFollows)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read BODY response: %w", err)
 	}
@@ -250,15 +250,15 @@ func (c *BackendConn) ListGroups() ([]GroupInfo, error) {
 
 	c.lastUsed = time.Now()
 
-	id, err := c.textConn.Cmd("LIST")
+	id, err := c.TextConn.Cmd("LIST")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send LIST command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(215)
+	code, message, err := c.TextConn.ReadCodeLine(215)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read LIST response: %w", err)
 	}
@@ -297,15 +297,15 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 
 	c.lastUsed = time.Now()
 
-	id, err := c.textConn.Cmd("LIST")
+	id, err := c.TextConn.Cmd("LIST")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send LIST command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(215)
+	code, message, err := c.TextConn.ReadCodeLine(215)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read LIST response: %w", err)
 	}
@@ -326,7 +326,7 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 			break
 		}
 
-		line, err := c.textConn.ReadLine()
+		line, err := c.TextConn.ReadLine()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read group list: %w", err)
 		}
@@ -354,7 +354,7 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 	// Read remaining lines until end marker if we hit the limit
 	if lineCount >= maxGroups {
 		for {
-			line, err := c.textConn.ReadLine()
+			line, err := c.TextConn.ReadLine()
 			if err != nil {
 				break
 			}
@@ -378,15 +378,15 @@ func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, int, error) {
 
 	c.lastUsed = time.Now()
 
-	id, err := c.textConn.Cmd("GROUP %s", groupName)
+	id, err := c.TextConn.Cmd("GROUP %s", groupName)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(211)
+	code, message, err := c.TextConn.ReadCodeLine(211)
 	if err != nil {
 		if code != 411 {
 			log.Printf("[ERROR] failed to read GROUP '%s' code=%d message='%s' err: %v", groupName, code, message, err)
@@ -454,18 +454,18 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 
 	var id uint
 	if end > 0 {
-		id, err = c.textConn.Cmd("XOVER %d-%d", start, end)
+		id, err = c.TextConn.Cmd("XOVER %d-%d", start, end)
 	} else {
-		id, err = c.textConn.Cmd("XOVER %d", start)
+		id, err = c.TextConn.Cmd("XOVER %d", start)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to send XOVER command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(224)
+	code, message, err := c.TextConn.ReadCodeLine(224)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read XOVER response: %w", err)
 	}
@@ -519,18 +519,18 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]*Header
 	log.Printf("XHdr group '%s' field '%s' start=%d end=%d", groupName, field, start, end)
 	var id uint
 	if end > 0 {
-		id, err = c.textConn.Cmd("XHDR %s %d-%d", field, start, end)
+		id, err = c.TextConn.Cmd("XHDR %s %d-%d", field, start, end)
 	} else {
-		id, err = c.textConn.Cmd("XHDR %s %d", field, start)
+		id, err = c.TextConn.Cmd("XHDR %s %d", field, start)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to send XHDR command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(221)
+	code, message, err := c.TextConn.ReadCodeLine(221)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read XHDR response: %w", err)
 	}
@@ -656,16 +656,16 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 
 	var id uint
 	if end > 0 {
-		id, err = c.textConn.Cmd("XHDR %s %d-%d", field, start, end)
+		id, err = c.TextConn.Cmd("XHDR %s %d-%d", field, start, end)
 	} else {
-		id, err = c.textConn.Cmd("XHDR %s %d-%d", field, start, start)
+		id, err = c.TextConn.Cmd("XHDR %s %d-%d", field, start, start)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to send XHDR command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
 	// Check for shutdown before reading initial response
 	if c.WantShutdown(shutdownChan) {
@@ -673,7 +673,7 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 		return fmt.Errorf("shutdown requested")
 	}
 
-	code, message, err := c.textConn.ReadCodeLine(221)
+	code, message, err := c.TextConn.ReadCodeLine(221)
 	if err != nil {
 		return fmt.Errorf("failed to read XHDR response: %w", err)
 	}
@@ -691,7 +691,7 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 			return fmt.Errorf("shutdown requested")
 		}
 
-		line, err := c.textConn.ReadLine()
+		line, err := c.TextConn.ReadLine()
 		if err != nil {
 			log.Printf("[ERROR] XHdrStreamed read error ng: '%s' err='%v'", groupName, err)
 			// EOF or error, finish streaming
@@ -738,18 +738,18 @@ func (c *BackendConn) ListGroup(groupName string, start, end int64) ([]int64, er
 	var id uint
 	var err error
 	if start > 0 && end > 0 {
-		id, err = c.textConn.Cmd("LISTGROUP %s %d-%d", groupName, start, end)
+		id, err = c.TextConn.Cmd("LISTGROUP %s %d-%d", groupName, start, end)
 	} else {
-		id, err = c.textConn.Cmd("LISTGROUP %s", groupName)
+		id, err = c.TextConn.Cmd("LISTGROUP %s", groupName)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to send LISTGROUP command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(211)
+	code, message, err := c.TextConn.ReadCodeLine(211)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read LISTGROUP response: %w", err)
 	}
@@ -829,7 +829,7 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 			return nil, fmt.Errorf("too many lines in response (limit: %d)", maxReadLines)
 		}
 
-		line, err := c.textConn.ReadLine()
+		line, err := c.TextConn.ReadLine()
 		if err != nil {
 			return nil, err
 		}
@@ -1035,6 +1035,40 @@ func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
 	}, nil
 }
 
+// SendCheckMultiple sends CHECK commands for multiple message IDs without returning responses!
+func (c *BackendConn) SendCheckMultiple(messageIDs []*string) error {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+	if !c.connected {
+		return fmt.Errorf("not connected")
+	}
+
+	if c.ModeReader {
+		return fmt.Errorf("cannot check article in reader mode")
+	}
+
+	if len(messageIDs) == 0 {
+		return fmt.Errorf("no message IDs provided")
+	}
+
+	c.lastUsed = time.Now()
+	for _, msgID := range messageIDs {
+		if msgID == nil || *msgID == "" {
+			log.Printf("Skipping empty message ID in CHECK command")
+			continue
+		}
+		_, err := c.Writer.WriteString("CHECK " + *msgID + CRLF)
+		if err != nil {
+			return fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
+		}
+	}
+	if err := c.Writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush CHECK commands: %w", err)
+	}
+	// Responses must be read later using CheckMultiple
+	return nil
+}
+
 // CheckMultiple sends a CHECK command for multiple message IDs and returns responses
 func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) ([]*string, error) {
 	c.mux.Lock()
@@ -1056,7 +1090,7 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 	// Send individual CHECK commands for each message ID (pipelining)
 	commandIds := make([]uint, len(messageIDs))
 	for i, msgID := range messageIDs {
-		id, err := c.textConn.Cmd("CHECK %s", *msgID)
+		id, err := c.TextConn.Cmd("CHECK %s", *msgID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
 		}
@@ -1068,9 +1102,9 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 	for i, msgID := range messageIDs {
 		id := commandIds[i]
 		// Read response for this CHECK command
-		c.textConn.StartResponse(id)
-		code, line, err := c.textConn.ReadCodeLine(238)
-		c.textConn.EndResponse(id)
+		c.TextConn.StartResponse(id)
+		code, line, err := c.TextConn.ReadCodeLine(238)
+		c.TextConn.EndResponse(id)
 		if code == 0 && err != nil {
 			log.Printf("Failed to read CHECK response for %s: %v", *msgID, err)
 			return nil, fmt.Errorf("failed to read CHECK response for %s: %w", *msgID, err)
@@ -1132,20 +1166,20 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 	c.lastUsed = time.Now()
 
 	// Send TAKETHIS command
-	id, err := c.textConn.Cmd("TAKETHIS %s", article.MessageID)
+	id, err := c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
 	}
 
 	// Send headers
 	for _, headerLine := range headers {
-		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
+		if _, err := c.Writer.WriteString(headerLine + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write header: %w", err)
 		}
 	}
 
 	// Send empty line between headers and body
-	if _, err := c.writer.WriteString(CRLF); err != nil {
+	if _, err := c.Writer.WriteString(CRLF); err != nil {
 		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
 	}
 
@@ -1166,26 +1200,26 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 			line = "." + line
 		}
 
-		if _, err := c.writer.WriteString(line + CRLF); err != nil {
+		if _, err := c.Writer.WriteString(line + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write body line: %w", err)
 		}
 	}
 
 	// Send termination line (single dot)
-	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
+	if _, err := c.Writer.WriteString(DOT + CRLF); err != nil {
 		return 0, fmt.Errorf("failed to send article terminator: %w", err)
 	}
 
 	// Flush the writer to ensure all data is sent
-	if err := c.writer.Flush(); err != nil {
+	if err := c.Writer.Flush(); err != nil {
 		return 0, fmt.Errorf("failed to flush article data: %w", err)
 	}
 
 	// Read TAKETHIS response
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id)
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id)
 
-	code, _, err := c.textConn.ReadCodeLine(239) // -1 means any code is acceptable
+	code, _, err := c.TextConn.ReadCodeLine(239) // -1 means any code is acceptable
 	if code == 0 && err != nil {
 		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
 	}
@@ -1219,20 +1253,20 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	}
 
 	// Send TAKETHIS command
-	id, err := c.textConn.Cmd("TAKETHIS %s", article.MessageID)
+	id, err := c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
 	}
 
 	// Send headers
 	for _, headerLine := range headers {
-		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
+		if _, err := c.Writer.WriteString(headerLine + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write header SendTakeThisArticleStreaming: %w", err)
 		}
 	}
 
 	// Send empty line between headers and body
-	if _, err := c.writer.WriteString(CRLF); err != nil {
+	if _, err := c.Writer.WriteString(CRLF); err != nil {
 		return 0, fmt.Errorf("failed to write header/body separator SendTakeThisArticleStreaming: %w", err)
 	}
 
@@ -1253,18 +1287,18 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 			line = "." + line
 		}
 
-		if _, err := c.writer.WriteString(line + CRLF); err != nil {
+		if _, err := c.Writer.WriteString(line + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write body line SendTakeThisArticleStreaming: %w", err)
 		}
 	}
 
 	// Send termination line (single dot)
-	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
+	if _, err := c.Writer.WriteString(DOT + CRLF); err != nil {
 		return 0, fmt.Errorf("failed to send article terminator SendTakeThisArticleStreaming: %w", err)
 	}
 
 	// Flush the writer to ensure all data is sent
-	if err := c.writer.Flush(); err != nil {
+	if err := c.Writer.Flush(); err != nil {
 		return 0, fmt.Errorf("failed to flush article data SendTakeThisArticleStreaming: %w", err)
 	}
 
@@ -1279,10 +1313,10 @@ func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (int, error) {
 	defer c.mux.Unlock()
 
 	// Read TAKETHIS response
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id)
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id)
 
-	code, _, err := c.textConn.ReadCodeLine(239)
+	code, _, err := c.TextConn.ReadCodeLine(239)
 	if code == 0 && err != nil {
 		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
 	}
@@ -1310,15 +1344,15 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 	c.lastUsed = time.Now()
 
 	// Send POST command
-	id, err := c.textConn.Cmd("POST")
+	id, err := c.TextConn.Cmd("POST")
 	if err != nil {
 		return 0, fmt.Errorf("failed to send POST command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
+	c.TextConn.StartResponse(id)
 	// Read response to POST command
-	code, line, err := c.textConn.ReadCodeLine(340)
-	c.textConn.EndResponse(id)
+	code, line, err := c.TextConn.ReadCodeLine(340)
+	c.TextConn.EndResponse(id)
 	if err != nil && code == 0 {
 		return code, fmt.Errorf("POST command failed: %s", line)
 	}
@@ -1334,14 +1368,14 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 			}
 
 			// Send POST command again
-			id, err := c.textConn.Cmd("POST")
+			id, err := c.TextConn.Cmd("POST")
 			if err != nil {
 				return 0, fmt.Errorf("failed to send POST command: %w", err)
 			}
-			c.textConn.StartResponse(id)
-			defer c.textConn.EndResponse(id)
+			c.TextConn.StartResponse(id)
+			defer c.TextConn.EndResponse(id)
 			// Read response to POST command
-			code, line, err = c.textConn.ReadCodeLine(340)
+			code, line, err = c.TextConn.ReadCodeLine(340)
 			if err != nil {
 				return code, fmt.Errorf("POST command failed: %s", line)
 			}
@@ -1355,13 +1389,13 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 
 	// Send headers using writer (not DotWriter)
 	for _, headerLine := range headers {
-		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
+		if _, err := c.Writer.WriteString(headerLine + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write header: %w", err)
 		}
 	}
 
 	// Send empty line between headers and body
-	if _, err := c.writer.WriteString(CRLF); err != nil {
+	if _, err := c.Writer.WriteString(CRLF); err != nil {
 		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
 	}
 
@@ -1382,23 +1416,23 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 			line = "." + line
 		}
 
-		if _, err := c.writer.WriteString(line + CRLF); err != nil {
+		if _, err := c.Writer.WriteString(line + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write body line: %w", err)
 		}
 	}
 
 	// Send termination line (single dot)
-	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
+	if _, err := c.Writer.WriteString(DOT + CRLF); err != nil {
 		return 0, fmt.Errorf("failed to send article terminator: %w", err)
 	}
 
 	// Flush the writer to ensure all data is sent
-	if err := c.writer.Flush(); err != nil {
+	if err := c.Writer.Flush(); err != nil {
 		return 0, fmt.Errorf("failed to flush article data: %w", err)
 	}
 
 	// Read final response
-	code, _, err = c.textConn.ReadCodeLine(240)
+	code, _, err = c.TextConn.ReadCodeLine(240)
 	if err != nil {
 		return code, fmt.Errorf("failed to read POST response: %w", err)
 	}
@@ -1433,15 +1467,15 @@ func (c *BackendConn) SwitchToModeReader() error {
 	c.lastUsed = time.Now()
 
 	// Send MODE READER command
-	id, err := c.textConn.Cmd("MODE READER")
+	id, err := c.TextConn.Cmd("MODE READER")
 	if err != nil {
 		return fmt.Errorf("failed to send MODE READER command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id)
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id)
 
-	code, line, err := c.textConn.ReadCodeLine(200)
+	code, line, err := c.TextConn.ReadCodeLine(200)
 	if err != nil {
 		return fmt.Errorf("failed to read MODE READER response: %w", err)
 	}
@@ -1468,15 +1502,15 @@ func (c *BackendConn) SwitchToModeStream() error {
 	c.lastUsed = time.Now()
 
 	// Send MODE STREAM command
-	id, err := c.textConn.Cmd("MODE STREAM")
+	id, err := c.TextConn.Cmd("MODE STREAM")
 	if err != nil {
 		return fmt.Errorf("failed to send MODE STREAM command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id)
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id)
 
-	code, line, err := c.textConn.ReadCodeLine(203)
+	code, line, err := c.TextConn.ReadCodeLine(203)
 	if err != nil {
 		return fmt.Errorf("failed to read MODE STREAM response: %w", err)
 	}
