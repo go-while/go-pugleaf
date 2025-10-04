@@ -362,7 +362,6 @@ checkHeader:
 					trimmedNG := strings.TrimSpace(group)
 					if trimmedNG != strings.ToLower(group) {
 						trimmedNG = strings.ToLower(group) // parse to lowercase
-						badGroups++
 					}
 					// Clean up unwanted characters (remove each character individually)
 					for _, char := range unwantedChars {
@@ -370,7 +369,11 @@ checkHeader:
 					}
 					trimmedNG = strings.TrimSpace(trimmedNG)
 					trimmedNG = strings.TrimLeft(trimmedNG, ".")
+					trimmedNG = strings.TrimLeft(trimmedNG, ",")
+					trimmedNG = strings.TrimLeft(trimmedNG, ";")
 					trimmedNG = strings.TrimRight(trimmedNG, ".")
+					trimmedNG = strings.TrimRight(trimmedNG, ",")
+					trimmedNG = strings.TrimRight(trimmedNG, ";")
 					if trimmedNG == "" || strings.Contains(trimmedNG, " ") || !IsValidGroupName(trimmedNG) {
 						if trimmedNG == "" {
 							log.Printf("Invalid newsgroup name: '%s' empty after cleanup in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
@@ -379,6 +382,9 @@ checkHeader:
 						}
 						badGroups++
 						continue checkGroups
+					}
+					if trimmedNG != group {
+						badGroups++ // but passed after trimming
 					}
 					validNewsgroups = append(validNewsgroups, trimmedNG)
 				} // end for checkGroups
