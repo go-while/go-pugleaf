@@ -16,12 +16,13 @@ var VerboseHeaders bool = false
 var IgnoreGoogleHeaders bool = false
 var UseStrictGroupValidation bool = false
 var ErrNoNewsgroups = fmt.Errorf("ErrNoNewsgroups")
-var unwantedChars = ";:,<>#*`§()[]{}?!%$§/\\@\"'"
+var unwantedChars = "\t\x00;:,<>#*§()[]{}?!%$§/\\@\"'`"
 var (
 	// Do NOT change this here! these are needed for runtime !
 	// validGroupNameRegex validates newsgroup names according to RFC standards
 	// Pattern: lowercase alphanumeric start, components separated by dots, no trailing dots/hyphens
 	SeparatorRegex            = regexp.MustCompile(`[,;:\s]+`)
+	MultipleDots              = regexp.MustCompile(`\.{2,}`)
 	validGroupNameRegexStrict = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$`)
 	validGroupNameRegexchar   = regexp.MustCompile(`^[a-zA-Z0-9]{1,255}$`)
 	validGroupNameRegexLazy   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+&-]*$`)
@@ -131,7 +132,7 @@ func parseDateReceivedHeader(dateStr string) time.Time {
 }
 
 // ReconstructHeaders reconstructs the header lines from an article for transmission
-func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *string) ([]string, error) {
+func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *string, newsgroup string) ([]string, error) {
 	var headers []string
 
 	// Add basic headers that we know about
@@ -367,6 +368,7 @@ checkHeader:
 					for _, char := range unwantedChars {
 						trimmedNG = strings.ReplaceAll(trimmedNG, string(char), "")
 					}
+					trimmedNG = MultipleDots.ReplaceAllString(trimmedNG, ".")
 					trimmedNG = strings.TrimSpace(trimmedNG)
 					trimmedNG = strings.TrimLeft(trimmedNG, ".")
 					trimmedNG = strings.TrimLeft(trimmedNG, ",")
@@ -374,6 +376,7 @@ checkHeader:
 					trimmedNG = strings.TrimRight(trimmedNG, ".")
 					trimmedNG = strings.TrimRight(trimmedNG, ",")
 					trimmedNG = strings.TrimRight(trimmedNG, ";")
+					trimmedNG = strings.TrimSpace(trimmedNG)
 					if trimmedNG == "" || strings.Contains(trimmedNG, " ") || !IsValidGroupName(trimmedNG) {
 						if trimmedNG == "" {
 							log.Printf("Invalid newsgroup name: '%s' empty after cleanup in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
@@ -391,7 +394,6 @@ checkHeader:
 
 				if len(validNewsgroups) == 0 {
 					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' (return err)", headerLine, i, article.MessageID)
-					return nil, ErrNoNewsgroups
 				}
 
 				if badGroups > 0 {
@@ -400,18 +402,31 @@ checkHeader:
 					ignoredLines++
 					continue checkHeader
 				}
+			} // end if header Newsgroups
+		} // end if !isSpacedLine
 
-			}
-		}
 		headers = append(headers, headerLine)
-	}
+	} // end for moreHeaders
 	if VerboseHeaders && ignoredLines > 0 {
 		log.Printf("Reconstructed %d header lines, ignored %d: msgId='%s'", len(headers), ignoredLines, article.MessageID)
 	}
+	fallbackNewsgroup := false
 	if len(validNewsgroups) == 0 {
-		return nil, ErrNoNewsgroups
+		if newsgroup == "" {
+			log.Printf("No valid newsgroups found in article msgId='%s'", article.MessageID)
+			return nil, ErrNoNewsgroups
+		}
+		// No Newsgroups header found, but we have a newsgroup parameter
+		validNewsgroups = append(validNewsgroups, newsgroup)
+		if badGroups == 0 {
+			headers = append(headers, "X-pugleaf-debug: added missing newsgroups header")
+		}
+		fallbackNewsgroup = true
 	}
-	if badGroups > 0 {
+	if badGroups > 0 || fallbackNewsgroup {
+		if !fallbackNewsgroup {
+			headers = append(headers, fmt.Sprintf("X-pugleaf-debug: badGroups=%d valid=%d", badGroups, len(validNewsgroups)))
+		}
 		// append newsgroups headers with line folding
 		var currentLine string = "Newsgroups: "
 		for i, group := range validNewsgroups {
@@ -431,7 +446,7 @@ checkHeader:
 		if strings.TrimSpace(currentLine) != "" {
 			headers = append(headers, currentLine)
 		}
-		headers = append(headers, fmt.Sprintf("X-pugleaf-debug: %d invalid newsgroups removed", badGroups))
+
 		log.Printf("Reconstructed Newsgroups header with %d valid, removed %d. msgId='%s'", len(validNewsgroups), badGroups, article.MessageID)
 		for i := range validNewsgroups {
 			validNewsgroups[i] = "" // free memory
