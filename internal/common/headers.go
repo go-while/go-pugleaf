@@ -359,12 +359,12 @@ checkHeader:
 							continue checkGroups
 						}
 					*/
-					var trimmedNG string
+					trimmedNG := strings.TrimSpace(group)
 					if trimmedNG != strings.ToLower(group) {
 						trimmedNG = strings.ToLower(group) // parse to lowercase
 						badGroups++
 					}
-					trimmedNG = strings.TrimSpace(trimmedNG)
+
 					// Clean up unwanted characters (remove each character individually)
 					for _, char := range unwantedChars {
 						trimmedNG = strings.ReplaceAll(trimmedNG, string(char), "")

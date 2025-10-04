@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -27,6 +28,166 @@ var MaxReadLinesXover int64 = 100 // XOVER command typically retrieves overview 
 
 // MaxReadLinesBody Maximum lines for BODY command, which retrieves the body of an article
 const MaxReadLinesBody = MaxReadLinesArticle - MaxReadLinesHeaders
+
+var NNTPTransferThreads int = 0
+var TakeThisQueue = make(chan *CHTTJob, NNTPTransferThreads)
+var CheckQueue = make(chan *CHTTJob, NNTPTransferThreads)
+
+// used in nntp-transfer/main.go
+type TakeThisMode struct {
+	mux       sync.Mutex
+	Newsgroup *string
+	//Wanted           uint64
+	//Unwanted         uint64
+	//Rejected         uint64
+	//TX_Errors        uint64
+	//ConnErrors       uint64
+	TmpSuccessCount uint64
+	TmpTTotalsCount uint64
+	CheckMode       bool // Start with TAKETHIS mode (false)
+}
+
+type TTResponse struct {
+	Job *CHTTJob
+	Err error
+}
+
+type CheckResponse struct { // deprecated
+	CmdId   uint
+	Article *models.Article
+}
+
+// batched CHECK/TAKETHIS Job
+type CHTTJob struct {
+	Newsgroup    *string
+	Mux          sync.Mutex
+	TTMode       *TakeThisMode
+	ResponseChan chan *TTResponse
+	Articles     []*models.Article
+	ArticleMap   map[*string]*models.Article
+	MessageIDs   []*string
+	WantedIDs    []*string
+	checked      uint64
+	wanted       uint64
+	unwanted     uint64
+	rejected     uint64
+	retry        uint64
+	transferred  uint64
+	redisCached  uint64
+	TxErrors     uint64
+	ConnErrors   uint64
+}
+
+const IncrFLAG_CHECKED = 1
+const IncrFLAG_WANTED = 2
+const IncrFLAG_UNWANTED = 4
+const IncrFLAG_REJECTED = 8
+const IncrFLAG_RETRY = 16
+const IncrFLAG_TRANSFERRED = 32
+const IncrFLAG_REDIS_CACHED = 64
+const IncrFLAG_TX_ERRORS = 128
+const IncrFLAG_CONN_ERRORS = 256
+
+func (job *CHTTJob) Increment(counter int) {
+	job.Mux.Lock()
+	defer job.Mux.Unlock()
+	switch counter {
+	case IncrFLAG_CHECKED:
+		job.checked++
+	case IncrFLAG_WANTED:
+		job.wanted++
+	case IncrFLAG_UNWANTED:
+		job.unwanted++
+	case IncrFLAG_REJECTED:
+		job.rejected++
+	case IncrFLAG_RETRY:
+		job.retry++
+	case IncrFLAG_TRANSFERRED:
+		job.transferred++
+	case IncrFLAG_REDIS_CACHED:
+		job.redisCached++
+	case IncrFLAG_TX_ERRORS:
+		job.txErrors++
+	case IncrFLAG_CONN_ERRORS:
+		job.connErrors++
+	}
+}
+
+func (job *CHTTJob) AppendWantedMessageID(msgID *string) {
+	job.Mux.Lock()
+	job.WantedIDs = append(job.WantedIDs, msgID)
+	job.Mux.Unlock()
+	job.Increment(IncrFLAG_WANTED)
+}
+
+func (job *CHTTJob) GetUpdateCounters(transferred, unwanted, rejected, checked, txErrors, connErrors *uint64) {
+	job.Mux.Lock()
+	*transferred += job.transferred
+	*unwanted += job.unwanted
+	*rejected += job.rejected
+	*checked += job.checked
+	*txErrors += job.txErrors
+	*connErrors += job.connErrors
+	job.Mux.Unlock()
+}
+
+func (ttMode *TakeThisMode) GetMode() bool {
+	ttMode.mux.Lock()
+	defer ttMode.mux.Unlock()
+	if ttMode.CheckMode {
+		return true
+	}
+	return false
+}
+
+func (ttMode *TakeThisMode) SetForceCHECK() {
+	ttMode.mux.Lock()
+	ttMode.CheckMode = true
+	ttMode.mux.Unlock()
+}
+
+func (ttMode *TakeThisMode) IncrementSuccess() {
+	ttMode.mux.Lock()
+	ttMode.TmpSuccessCount++
+	ttMode.mux.Unlock()
+}
+
+func (ttMode *TakeThisMode) IncrementTmp() {
+	ttMode.mux.Lock()
+	ttMode.TmpTTotalsCount++
+	ttMode.mux.Unlock()
+}
+
+func (ttMode *TakeThisMode) SetNoCHECK() {
+	ttMode.mux.Lock()
+	ttMode.CheckMode = false
+	ttMode.mux.Unlock()
+}
+
+func (ttMode *TakeThisMode) FlipMode(lowerLevel float64, upperLevel float64) bool {
+	ttMode.mux.Lock()
+	defer ttMode.mux.Unlock()
+	if ttMode.TmpSuccessCount < 10 || ttMode.TmpTTotalsCount < 100 {
+		return true // Force CHECK mode for this batch
+	}
+	successRate := float64(ttMode.TmpSuccessCount) / float64(ttMode.TmpTTotalsCount) * 100.0
+	ttMode.TmpSuccessCount = 0
+	ttMode.TmpTTotalsCount = 0
+	switch ttMode.CheckMode {
+	case false: // Currently in TAKETHIS mode
+		if successRate < lowerLevel {
+			ttMode.CheckMode = true
+			log.Printf("Newsgroup: '%s' | TAKETHIS success rate %.1f%% < %f%%, switching to CHECK mode", *ttMode.Newsgroup, successRate, lowerLevel)
+		}
+	case true: // Currently in CHECK mode
+		if successRate > upperLevel {
+			ttMode.CheckMode = false
+			log.Printf("Newsgroup: '%s' | TAKETHIS success rate %.1f%% >= %f%%, switching to TAKETHIS mode", *ttMode.Newsgroup, successRate, upperLevel)
+		}
+	}
+	retval := ttMode.CheckMode
+	return retval
+}
 
 func (c *BackendConn) ForceCloseConn() {
 	c.mux.Lock()
@@ -1069,6 +1230,7 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string) error {
 	return nil
 }
 
+/*
 // CheckMultiple sends a CHECK command for multiple message IDs and returns responses
 func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) ([]*string, error) {
 	c.mux.Lock()
@@ -1144,8 +1306,9 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 	// Return all responses
 	return wantedIds, nil
 }
+*/
 
-// TakeThisArticle sends an article via TAKETHIS command
+// TakeThisArticle sends a single article via TAKETHIS command and returns the response code
 func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *string) (int, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
@@ -1219,7 +1382,7 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 	c.TextConn.StartResponse(id)
 	defer c.TextConn.EndResponse(id)
 
-	code, _, err := c.TextConn.ReadCodeLine(239) // -1 means any code is acceptable
+	code, _, err := c.TextConn.ReadCodeLine(239)
 	if code == 0 && err != nil {
 		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
 	}

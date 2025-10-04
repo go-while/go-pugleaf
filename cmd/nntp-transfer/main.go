@@ -83,7 +83,7 @@ var appVersion = "-unset-"
 var redisCtx = context.Background()
 var REDIS_TTL time.Duration = 3600 * time.Second // default 1h
 
-var MaxThreads int
+// var MaxThreads int
 var BatchCheck int
 
 func main() {
@@ -174,7 +174,7 @@ func main() {
 	if *maxThreads < 1 || *maxThreads > 500 {
 		log.Fatalf("Error: max-threads must be between 1 and 500 (got %d)", *maxThreads)
 	}
-	MaxThreads = *maxThreads
+	nntp.NNTPTransferThreads = *maxThreads
 
 	// Validate UseShortHashLen
 	if *useShortHashLen < 2 || *useShortHashLen > 7 {
@@ -382,7 +382,7 @@ func main() {
 	go func(wgP *sync.WaitGroup, redisCli *redis.Client) {
 		defer wgP.Done()
 		resultChan := make(chan error, 1)
-		resultChan <- runTransfer(db, proc, pool, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, *debugCapture, wgP, redisCli)
+		resultChan <- runTransfer(db, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, *debugCapture, wgP, redisCli)
 		result := <-resultChan
 		if !*debugCapture {
 			transferDoneChan <- result
@@ -974,21 +974,19 @@ func matchesAnyWildcardPattern(newsgroup string, patterns []string) bool {
 	return false
 }
 
+var totalTransferred, totalUnwanted, totalRejected, totalRedisCacheHits, totalTXErrors, totalConnErrors, nothingInDateRange uint64
+var transferMutex sync.Mutex
+
 // runTransfer performs the actual article transfer process
-func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, wgP *sync.WaitGroup, redisCli *redis.Client) error {
+func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, wgP *sync.WaitGroup, redisCli *redis.Client) error {
 	defer wgP.Done()
-	var totalTransferred, nothingInDateRange, totalRedisCacheHits uint64
-	var totalUnwanted, totalRejected, totalTXErrors, totalConnErrors uint64
-	var transferMutex sync.Mutex
 	maxThreadsChan := make(chan struct{}, maxThreads)
 	var wg sync.WaitGroup
+	log.Printf("Todo: %d newsgroups", len(newsgroups))
 	// Process each newsgroup
-	log.Printf("Starting transfer for %d newsgroups", len(newsgroups))
 	for _, newsgroup := range newsgroups {
 		if common.WantShutdown() {
-			transferMutex.Lock()
-			log.Printf("Shutdown requested, stopping transfer. Total transferred: %d articles", totalTransferred)
-			transferMutex.Unlock()
+			log.Printf("Aborted before next: %s", newsgroup.Name)
 			return nil
 		}
 		maxThreadsChan <- struct{}{} // acquire a thread slot
@@ -999,39 +997,41 @@ func runTransfer(db *database.Database, proc *processor.Processor, pool *nntp.Po
 				<-maxThreadsChan // release the thread slot
 			}(wg)
 			if common.WantShutdown() {
+				log.Printf("Aborted before next: %s", newsgroup.Name)
 				return
 			}
-			start := time.Now()
 			if VERBOSE {
-				log.Printf("Starting transfer for newsgroup: %s", newsgroup.Name)
+				log.Printf("Newsgroup: '%s' | Start", newsgroup.Name)
 			}
-			transferred, checked, rc, unwanted, rejected, txErrors, connErrors, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, debugCapture, redisCli)
+			/*
+				transferred, checked, rc, unwanted, rejected, txErrors, connErrors, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, debugCapture, redisCli)
 
-			transferMutex.Lock()
-			totalTransferred += transferred
-			totalRedisCacheHits += rc
-			totalUnwanted += unwanted
-			totalRejected += rejected
-			totalTXErrors += txErrors
-			totalConnErrors += connErrors
+				transferMutex.Lock()
+				totalTransferred += transferred
+				totalRedisCacheHits += rc
+				totalUnwanted += unwanted
+				totalRejected += rejected
+				totalTXErrors += txErrors
+				totalConnErrors += connErrors
+				transferMutex.Unlock()
+			*/
+			err := transferNewsgroup(db, newsgroup, batchCheck, dryRun, startTime, endTime, debugCapture, redisCli)
 			if err == ErrNotInDateRange {
+				transferMutex.Lock()
 				nothingInDateRange++
+				transferMutex.Unlock()
 				err = nil // not a real error
 			}
-			transferMutex.Unlock()
-
 			if err != nil {
 				log.Printf("Error transferring newsgroup %s: %v", newsgroup.Name, err)
-			} else {
-				if startTime == nil && endTime == nil {
-					log.Printf("DONE runTransfer Newsgroup '%s' | transferred %d articles. checked %d. took %v", newsgroup.Name, transferred, checked, time.Since(start))
-				}
 			}
 		}(newsgroup, &wg, redisCli)
 	}
 
 	// Wait for all transfers to complete
 	wg.Wait()
+	transferMutex.Lock()
+	defer transferMutex.Unlock()
 	if nothingInDateRange > 0 {
 		log.Printf("Note: %d newsgroups had no articles in the specified date range", nothingInDateRange)
 	}
@@ -1048,12 +1048,12 @@ var debugMutex sync.Mutex
 var ErrNotInDateRange = fmt.Errorf("article not in specified date range")
 
 // transferNewsgroup transfers articles from a single newsgroup
-func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *nntp.Pool, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, redisCli *redis.Client) (uint64, uint64, uint64, uint64, uint64, uint64, uint64, error) {
+func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, redisCli *redis.Client) error {
 
 	// Get group database
 	groupDBs, err := db.GetGroupDBs(newsgroup.Name)
 	if err != nil {
-		return 0, 0, 0, 0, 0, 0, 0, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
+		return fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
 	}
 	defer func() {
 		if ferr := db.ForceCloseGroupDBs(groupDBs); ferr != nil {
@@ -1064,7 +1064,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	// Get total article count first with date filtering
 	totalArticles, err := getArticleCountWithDateFilter(groupDBs, startTime, endTime)
 	if err != nil {
-		return 0, 0, 0, 0, 0, 0, 0, fmt.Errorf("failed to get article count for newsgroup '%s': %v", newsgroup.Name, err)
+		return fmt.Errorf("failed to get article count for newsgroup '%s': %v", newsgroup.Name, err)
 	}
 
 	if totalArticles == 0 {
@@ -1073,12 +1073,12 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			if VERBOSE {
 				log.Printf("No articles found in newsgroup: %s (within specified date range)", newsgroup.Name)
 			}
-			return 0, 0, 0, 0, 0, 0, 0, ErrNotInDateRange
+			return ErrNotInDateRange
 		} else {
 			log.Printf("No articles found in newsgroup: %s", newsgroup.Name)
 		}
 
-		return 0, 0, 0, 0, 0, 0, 0, nil
+		return nil
 	}
 
 	if dryRun {
@@ -1088,7 +1088,7 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s", totalArticles, newsgroup.Name)
 		}
 		if !debugCapture {
-			return 0, 0, 0, 0, 0, 0, 0, nil
+			return nil
 		}
 	}
 
@@ -1102,23 +1102,94 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 	//time.Sleep(3 * time.Second) // debug sleep
 	var ioffset int64
 	remainingArticles := totalArticles
-	// Process articles in database batches (much larger than network batches)
 	ttMode := &nntp.TakeThisMode{
-		CheckMode: true, // start with CHECK mode
+		Newsgroup: &newsgroup.Name,
+		CheckMode: true,
 	}
-	var transferred, checked, redis_cache_hits uint64
+	ttResponses := make(chan chan *nntp.TTResponse, totalArticles/int64(batchCheck)+2)
+	defer close(ttResponses)
 	start := time.Now()
+	go func() {
+		var amux sync.Mutex
+		var transferred, unwanted, rejected, checked, txErrors, connErrors uint64
+		for responseChan := range ttResponses {
+			if responseChan != nil {
+				go func(rc chan *nntp.TTResponse) {
+					for resp := range rc {
+						if resp == nil {
+							log.Printf("Newsgroup: '%s' | Warning: nil TT response channel received!?", newsgroup.Name)
+							return
+						}
+						if resp.Err != nil {
+							log.Printf("Newsgroup: '%s' | Error in TT response: err='%v' job='%#v'", newsgroup.Name, resp.Err, resp.Job)
+							return
+						}
+						if resp.Job == nil {
+							log.Printf("Newsgroup: '%s' | Warning: nil Job in TT response without error!?", newsgroup.Name)
+							return
+						}
+						// get numbers
+						amux.Lock()
+						resp.Job.GetUpdateCounters(&transferred, &unwanted, &rejected, &checked, &txErrors, &connErrors)
+						amux.Unlock()
+
+						// free memory
+						resp.Job.Mux.Lock()
+						defer resp.Job.Mux.Unlock()
+
+						for msgid := range resp.Job.ArticleMap {
+							delete(resp.Job.ArticleMap, msgid)
+						}
+						resp.Job.ArticleMap = nil
+
+						for i, _ := range resp.Job.Articles {
+							resp.Job.Articles[i] = nil
+						}
+						resp.Job.Articles = nil
+
+						for i, _ := range resp.Job.MessageIDs {
+							resp.Job.MessageIDs[i] = nil
+						}
+						resp.Job.MessageIDs = nil
+
+						for i, _ := range resp.Job.WantedIDs {
+							resp.Job.WantedIDs[i] = nil
+						}
+						resp.Job.WantedIDs = nil
+
+					}
+				}(responseChan)
+			}
+		}
+		amux.Lock()
+		result := fmt.Sprintf("END Newsgroup: '%s' | transferred: %d/%d (unwanted: %d | rejected: %d | checked: %d) TX_Errors: %d, connErrors: %d, took %v",
+			newsgroup.Name, transferred, totalArticles, unwanted, rejected, checked, txErrors, connErrors, time.Since(start))
+		amux.Unlock()
+		//log.Print(result)
+		resultsMutex.Lock()
+		results = append(results, result)
+		if VERBOSE {
+			for _, msgId := range rejectedArticles[newsgroup.Name] {
+				// prints all at the end again
+				log.Printf("END Newsgroup: '%s' | REJECTED '%s'", newsgroup.Name, msgId)
+			}
+			delete(rejectedArticles, newsgroup.Name) // free memory
+		}
+		resultsMutex.Unlock()
+	}()
+
+	// Get articles in database batches (much larger than network batches)
 	for offset := ioffset; offset < totalArticles; offset += dbBatchSize {
 		if common.WantShutdown() {
-			log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
-			return transferred, checked, redis_cache_hits, ttMode.Unwanted, ttMode.Rejected, ttMode.TX_Errors, ttMode.ConnErrors, nil
+			log.Printf("WantShutdown in newsgroup: '%s' offset: %d", newsgroup.Name, offset)
+			return nil
 		}
 
 		// Load batch from database with date filtering
 		articles, err := getArticlesBatchWithDateFilter(groupDBs, offset, startTime, endTime)
 		if err != nil {
 			log.Printf("Error loading article batch (offset %d) for newsgroup %s: %v", offset, newsgroup.Name, err)
-			continue
+			return fmt.Errorf("failed to load article batch (offset %d) for newsgroup '%s': %v", offset, newsgroup.Name, err)
 		}
 
 		if len(articles) == 0 {
@@ -1129,106 +1200,39 @@ func transferNewsgroup(db *database.Database, proc *processor.Processor, pool *n
 			debugMutex.Lock()
 			debugArticles[newsgroup.Name] = append(debugArticles[newsgroup.Name], articles...)
 			debugMutex.Unlock()
-			return 0, 0, 0, 0, 0, 0, 0, nil
+			return nil
 		}
 		if VERBOSE {
 			log.Printf("Newsgroup: '%s' | Loaded %d articles from database (offset %d)", newsgroup.Name, len(articles), offset)
 		}
-		isleep := time.Second
 		// Process articles in network batches
 		for i := 0; i < len(articles); i += batchCheck {
 			if common.WantShutdown() {
-				log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
-				return transferred, checked, redis_cache_hits, ttMode.Unwanted, ttMode.Rejected, ttMode.TX_Errors, ttMode.ConnErrors, nil
-			}
-			if !ttMode.CheckMode && ttMode.TmpSuccessCount >= 100 {
-				ttMode.TmpSuccessCount = 0
-				ttMode.TmpTakeThisCount = 0
+				log.Printf("WantShutdown in newsgroup: '%s' (offset %d)", newsgroup.Name, offset)
+				return nil
 			}
 			// Determine end index for the batch
 			end := i + batchCheck
 			if end > len(articles) {
 				end = len(articles)
 			}
-			// forever: will process this batch until successful or shutdown
-		forever:
-			for {
-				if common.WantShutdown() {
-					log.Printf("WantShutdown in newsgroup: %s: Transferred %d articles", newsgroup.Name, transferred)
-					return transferred, checked, redis_cache_hits, ttMode.Unwanted, ttMode.Rejected, ttMode.TX_Errors, ttMode.ConnErrors, nil
-				}
-				if isleep > time.Minute {
-					isleep = time.Minute
-				}
-				if isleep > time.Second {
-					log.Printf("Newsgroup: '%s' | Sleeping %v before retrying batch %d-%d (transferred %d so far)", newsgroup.Name, isleep, i+1, end, transferred)
-					time.Sleep(isleep)
-				}
-				/*
-					// Get connection from pool
-					conn, err := pool.Get(nntp.MODE_STREAM_MV)
-					if err != nil {
-						log.Printf("Newsgroup: '%s' | Failed to get connection from pool: %v", newsgroup.Name, err)
-						isleep = isleep * 2
-						continue forever
-					}
-
-					if conn.ModeReader {
-						if VERBOSE {
-							log.Printf("got connection in reader mode, closing and getting a new one")
-						}
-						conn.ForceCloseConn()
-						continue forever
-					}
-				*/
-				batchTransferred, batchChecked, TTsuccessRate, rc, berr := processBatch(&newsgroup.Name, ttMode, articles[i:end], redisCli)
-				transferred += batchTransferred
-				redis_cache_hits += rc
-				checked += batchChecked
-				if berr != nil {
-					log.Printf("Newsgroup: '%s' | Error processing network batch: %v ... retry", newsgroup.Name, berr)
-					//conn.ForceCloseConn()
-					isleep = isleep * 2
-					ttMode.CheckMode = true
-					ttMode.TmpSuccessCount = 0
-					ttMode.TmpTakeThisCount = 0
-					continue forever
-				}
-				if VERBOSE || (transferred >= 1000 && transferred%1000 == 0) || (checked >= 1000 && checked%1000 == 0) {
-					log.Printf("Newsgroup: '%s' | BatchDone (offset %d/%d) %d-%d TX:%d check=%t ttRate=%.1f%% checked=%d redis_cache_hits=%d/%d", newsgroup.Name, offset, totalArticles, i+1, end, batchTransferred, ttMode.CheckMode, TTsuccessRate, batchChecked, rc, redis_cache_hits)
-				}
-				//pool.Put(conn)
-				break forever
+			responseChan, err := processBatch(ttMode, articles[i:end], redisCli)
+			if err != nil {
+				log.Printf("Newsgroup: '%s' | Error processing batch %d-%d: %v", newsgroup.Name, i+1, end, err)
+				return fmt.Errorf("error processing batch %d-%d for newsgroup '%s': %v", i+1, end, newsgroup.Name, err)
+			}
+			if responseChan != nil {
+				// pass the response channel to the collector channel: ttResponses
+				ttResponses <- responseChan
 			}
 		}
-
-		// Clear articles slice to free memory
-		for i := range articles {
-			articles[i] = nil // free memory
-		}
 		remainingArticles -= int64(len(articles))
-		var batchSuccessRate float64
-		if transferred > 0 {
-			batchSuccessRate = float64(transferred) / float64(len(articles)) * 100.0
-		}
 		if VERBOSE {
-			log.Printf("Newsgroup: '%s' | Done (offset %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t) ttRate=%.1f%%", newsgroup.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.CheckMode, batchSuccessRate)
+			log.Printf("Newsgroup: '%s' | Pushed to queue (offset %d/%d) remaining: %d (Check=%t)", newsgroup.Name, offset, totalArticles, remainingArticles, ttMode.GetMode())
+			//log.Printf("Newsgroup: '%s' | Pushed (offset %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t)", newsgroup.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.GetMode())
 		}
-		articles = nil // free memory
 	} // end for offset range totalArticles
-	result := fmt.Sprintf("END Newsgroup: '%s' | total transferred: %d articles / total articles: %d (unwanted: %d | rejected: %d | checked: %d) TX_Errors: %d, connErrors: %d, took %v", newsgroup.Name, transferred, totalArticles, ttMode.Unwanted, ttMode.Rejected, checked, ttMode.TX_Errors, ttMode.ConnErrors, time.Since(start))
-	//log.Print(result)
-	resultsMutex.Lock()
-	results = append(results, result)
-	if VERBOSE {
-		for _, msgId := range rejectedArticles[newsgroup.Name] {
-			// prints all at the end again
-			log.Printf("END Newsgroup: '%s' | REJECTED '%s'", newsgroup.Name, msgId)
-		}
-		delete(rejectedArticles, newsgroup.Name) // free memory
-	}
-	resultsMutex.Unlock()
-	return transferred, checked, redis_cache_hits, ttMode.Unwanted, ttMode.Rejected, ttMode.TX_Errors, ttMode.ConnErrors, nil
+	return nil
 } // end func transferNewsgroup
 
 var results []string
@@ -1239,56 +1243,59 @@ var upperLevel float64 = 95.0
 
 // processBatch processes a batch of articles using NNTP streaming protocol (RFC 4644)
 // Uses TAKETHIS primarily, falls back to CHECK when success rate < 95%
-func processBatch(newsgroup *string, ttMode *nntp.TakeThisMode, articles []*models.Article, redisCli *redis.Client) (transferred uint64, checked uint64, successRate float64, redis_cache_hits uint64, err error) {
+func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCli *redis.Client) (chan *nntp.TTResponse, error) {
 
 	if len(articles) == 0 {
-		return 0, 0, 0, 0, nil
+		log.Printf("processBatch: no articles in this batch for newsgroup '%s'", *ttMode.Newsgroup)
+		return nil, nil
+	}
+	doCheck := ttMode.FlipMode(lowerLevel, upperLevel)
+	var batchedJob *nntp.CHTTJob
+
+	select {
+	case job := <-jobRequeue:
+		batchedJob = job
+		batchedJob.TTMode = ttMode
+		articles = batchedJob.Articles
+		batchedJob.Articles = nil
+	default:
+		batchedJob = &nntp.CHTTJob{
+			Newsgroup:    ttMode.Newsgroup,
+			MessageIDs:   make([]*string, 0, len(articles)),
+			Articles:     make([]*models.Article, 0, len(articles)),
+			ArticleMap:   make(map[*string]*models.Article, len(articles)),
+			ResponseChan: make(chan *nntp.TTResponse, 1),
+			TTMode:       ttMode,
+		}
 	}
 
-	// Calculate success rate to determine whether to use CHECK or TAKETHIS
-	if ttMode.TmpSuccessCount > 0 {
-		successRate = float64(ttMode.TmpSuccessCount) / float64(ttMode.TmpTakeThisCount) * 100.0
-	}
-
-	// Switch to CHECK mode if TAKETHIS success rate drops below lowerLevel
-	if !ttMode.CheckMode && successRate < lowerLevel && ttMode.TmpTakeThisCount >= 10 { // Need at least 10 attempts for meaningful stats
-		ttMode.CheckMode = true
-		log.Printf("Newsgroup: '%s' | TAKETHIS success rate %.1f%% < %f%%, switching to CHECK mode", newsgroup, successRate, lowerLevel)
-	} else if ttMode.CheckMode && successRate >= upperLevel && ttMode.TmpTakeThisCount >= 20 { // Switch back when rate improves
-		ttMode.CheckMode = false
-		log.Printf("Newsgroup: '%s' | TAKETHIS success rate %.1f%% >= %f%%, switching to TAKETHIS mode", newsgroup, successRate, upperLevel)
-	}
-
-	job := &CHTTJob{
-		Newsgroup:    newsgroup,
-		MessageIDs:   make([]*string, 0, len(articles)),
-		ArticleMap:   make(map[*string]*models.Article, len(articles)),
-		ResponseChan: make(chan *TTResponse, 1),
-		TTMode:       ttMode,
-	}
-	switch ttMode.CheckMode {
+	switch doCheck {
 	case true: // ttMode.CheckMode
 		// CHECK mode: verify articles are wanted before sending
 		//log.Printf("Newsgroup: '%s' | CHECK: %d articles (success rate: %.1f%%)", newsgroup, len(articles), successRate)
 		// Batch check Redis cache using pipeline (1 round trip for all keys)
+		var redis_cache_hits int
 		if redisCli != nil && len(articles) > 0 {
 			pipe := redisCli.Pipeline()
 			cmds := make([]*redis.IntCmd, len(articles))
 
 			// Queue all EXISTS commands
 			for i, article := range articles {
+				if article == nil {
+					continue
+				}
 				cmds[i] = pipe.Exists(redisCtx, article.MessageID)
 			}
 
 			// Execute all in one network round trip
 			_, err := pipe.Exec(redisCtx)
 			if err != nil && VERBOSE {
-				log.Printf("Newsgroup: '%s' | Redis pipeline error: %v", newsgroup, err)
+				log.Printf("Newsgroup: '%s' | Redis pipeline error: %v", *ttMode.Newsgroup, err)
 			}
 
 			// Process results
 			for i, cmd := range cmds {
-				if articles[i] == nil {
+				if cmd == nil || articles[i] == nil {
 					continue
 				}
 				article := articles[i]
@@ -1296,16 +1303,18 @@ func processBatch(newsgroup *string, ttMode *nntp.TakeThisMode, articles []*mode
 				if cmdErr == nil && exists > 0 {
 					// Cached in Redis - skip this article
 					if VERBOSE {
-						log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis (skip [CHECK])", newsgroup, article.MessageID)
+						log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis (skip [CHECK])", *ttMode.Newsgroup, article.MessageID)
 					}
+					batchedJob.Increment(nntp.IncrFLAG_REDIS_CACHED)
 					redis_cache_hits++
-					articles[i] = nil // mark as nil to skip later
+					articles[i] = nil
 					continue
 				}
 
 				// Not cached - add to valid list
-				job.MessageIDs = append(job.MessageIDs, &article.MessageID)
-				job.ArticleMap[&article.MessageID] = article
+				batchedJob.MessageIDs = append(batchedJob.MessageIDs, &article.MessageID)
+				batchedJob.ArticleMap[&article.MessageID] = article
+				batchedJob.Articles = append(batchedJob.Articles, article)
 			}
 		} else {
 			// No Redis - add all non-nil message IDs
@@ -1313,19 +1322,21 @@ func processBatch(newsgroup *string, ttMode *nntp.TakeThisMode, articles []*mode
 				if article == nil {
 					continue
 				}
-				job.MessageIDs = append(job.MessageIDs, &article.MessageID)
-				job.ArticleMap[&article.MessageID] = article
+				batchedJob.MessageIDs = append(batchedJob.MessageIDs, &article.MessageID)
+				batchedJob.ArticleMap[&article.MessageID] = article
+				batchedJob.Articles = append(batchedJob.Articles, article)
 			}
 		}
 
-		if len(job.MessageIDs) == 0 {
-			log.Printf("Newsgroup: '%s' | No message IDs to check in batch. (redis_cache_hits: %d)", newsgroup, redis_cache_hits)
-			return transferred, checked, successRate, redis_cache_hits, nil
+		if len(batchedJob.MessageIDs) == 0 {
+			log.Printf("Newsgroup: '%s' | No message IDs to check in batch. (redis_cache_hits: %d)", *ttMode.Newsgroup, redis_cache_hits)
+			return nil, nil
 		}
 		if VERBOSE {
-			log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d valid articles (filtered from %d)", newsgroup, len(job.MessageIDs), len(articles))
+			log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d/%d articles", *ttMode.Newsgroup, len(batchedJob.MessageIDs), len(articles))
 		}
-		CheckQueue <- job
+		nntp.CheckQueue <- batchedJob
+		return batchedJob.ResponseChan, nil
 		//log.Printf("Newsgroup: '%s' | CHECK wanted %d articles", newsgroup, len(wantedIds))
 		// Send CHECK commands for all message IDs
 		/* disabled
@@ -1382,14 +1393,15 @@ func processBatch(newsgroup *string, ttMode *nntp.TakeThisMode, articles []*mode
 			if article == nil {
 				continue
 			}
-			job.Articles = append(job.Articles, article)
+			batchedJob.Articles = append(batchedJob.Articles, article)
 		}
 
-		if len(job.Articles) == 0 {
+		if len(batchedJob.Articles) == 0 {
 			log.Printf("WARN: No valid articles for TAKETHIS mode, skipping batch")
-			return transferred, checked, successRate, redis_cache_hits, nil
+			return nil, nil
 		}
-		TakeThisQueue <- job // TODO DEAD END
+		nntp.TakeThisQueue <- batchedJob // TODO DEAD END
+		return batchedJob.ResponseChan, nil
 		/*
 			response := <-ttJob.ResponseChan
 			transferred += response.txcount
@@ -1422,44 +1434,12 @@ func processBatch(newsgroup *string, ttMode *nntp.TakeThisMode, articles []*mode
 	} // end case !ttMode.CheckMode
 	// end switch ttMode.CheckMode
 
-	return transferred, checked, successRate, redis_cache_hits, nil
+	return nil, nil
 } // end func processBatch
-
-var TakeThisQueue = make(chan *CHTTJob, MaxThreads)
-var CheckQueue = make(chan *CHTTJob, MaxThreads)
-
-// CHECK/TAKETHIS Job
-type CHTTJob struct {
-	Mux          sync.Mutex
-	Newsgroup    *string
-	MessageIDs   []*string
-	WantedIDs    []*string
-	Wanted       uint64
-	Unwanted     uint64
-	Rejected     uint64
-	Retry        uint64
-	Transferred  uint64
-	RedisCached  uint64
-	TX_Errors    uint64
-	ResponseChan chan *TTResponse
-	Articles     []*models.Article
-	ArticleMap   map[*string]*models.Article
-	TTMode       *nntp.TakeThisMode
-}
-
-type TTResponse struct {
-	Job *CHTTJob
-	err error
-}
-
-type CheckResponse struct { // deprecated
-	CmdId   uint
-	Article *models.Article
-}
 
 // sendArticlesBatchViaTakeThis sends multiple articles via TAKETHIS in streaming mode
 // Sends all TAKETHIS commands first, then reads all responses (true streaming)
-func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Article, job *CHTTJob, newsgroup string, redisCli *redis.Client) (transferred uint64, redis_cached uint64, err error) {
+func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Article, job *nntp.CHTTJob, newsgroup string, redisCli *redis.Client) (transferred uint64, redis_cached uint64, err error) {
 	if len(articles) == 0 {
 		return 0, 0, nil
 	}
@@ -1510,7 +1490,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	}
 
 	// Now send TAKETHIS for non-cached articles
-	artChan := make(chan *CheckResponse, len(articles))
+	artChan := make(chan *nntp.CheckResponse, len(articles))
 	// ← Also close artChan
 
 	for _, article := range articles {
@@ -1529,7 +1509,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			return 0, redis_cached, fmt.Errorf("failed to send TAKETHIS for %s: %v", article.MessageID, err)
 		}
 
-		artChan <- &CheckResponse{
+		artChan <- &nntp.CheckResponse{
 			Article: article,
 			CmdId:   cmdID,
 		}
@@ -1541,10 +1521,10 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	// Phase 2: Read all responses in order
 	for cr := range artChan {
 
-		job.TTMode.TmpTakeThisCount++
+		job.TTMode.IncrementTmp()
 		takeThisResponseCode, err := conn.ReadTakeThisResponseStreaming(cr.CmdId)
 		if err != nil || takeThisResponseCode == 0 {
-			job.TTMode.ConnErrors++
+			job.Increment(nntp.IncrFLAG_CONN_ERRORS)
 			conn.ForceCloseConn()
 			log.Printf("ERROR Newsgroup: '%s' | Failed to read TAKETHIS response for %s: %v", newsgroup, cr.Article.MessageID, err)
 			return transferred, redis_cached, fmt.Errorf("failed to read TAKETHIS response for %s: %v", cr.Article.MessageID, err)
@@ -1553,12 +1533,12 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		// Update success rate tracking
 		switch takeThisResponseCode {
 		case 239:
-			job.TTMode.TmpSuccessCount++
-			job.Transferred++
+			job.TTMode.IncrementSuccess()
+			job.Increment(nntp.IncrFLAG_TRANSFERRED)
 		case 439:
-			job.Rejected++
-			rejected++
+			job.Increment(nntp.IncrFLAG_REJECTED)
 			if VERBOSE {
+				rejected++
 				log.Printf("Newsgroup: '%s' | Rejected article '%s': response=%d (i=%d/%d)", newsgroup, cr.Article.MessageID, takeThisResponseCode, countDone, len(articles))
 				//resultsMutex.Lock()
 				//rejectedArticles[newsgroup] = append(rejectedArticles[newsgroup], article.MessageID)
@@ -1566,13 +1546,13 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			}
 		case 400, 480, 500, 501, 502, 503, 504:
 			log.Printf("ERROR Newsgroup: '%s' | Failed to transfer article '%s': response=%d (i=%d/%d)", newsgroup, cr.Article.MessageID, takeThisResponseCode, countDone, len(articles))
-			job.TX_Errors++
+			job.Increment(nntp.IncrFLAG_TX_ERRORS)
 			conn.ForceCloseConn()
 			return transferred, redis_cached, fmt.Errorf("failed to transfer article '%s': response=%d", cr.Article.MessageID, takeThisResponseCode)
 
 		default:
 			log.Printf("ERROR Newsgroup: '%s' | Failed to transfer article '%s': unknown response=%d (i=%d/%d)", newsgroup, cr.Article.MessageID, takeThisResponseCode, countDone, len(articles))
-			job.TX_Errors++
+			job.Increment(nntp.IncrFLAG_TX_ERRORS)
 			continue
 		}
 		if redisCli != nil {
@@ -1613,11 +1593,12 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	return transferred, redis_cached, nil
 } // end func sendArticlesBatchViaTakeThis
 
+var jobRequeue = make(chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
+
 func BootConnWorkers(pool *nntp.Pool) {
 	openConns := 0
 	defaultSleep := time.Second
 	isleep := defaultSleep
-	CHECKrunning := 0
 	var mux sync.Mutex
 forever:
 	for {
@@ -1626,22 +1607,24 @@ forever:
 			log.Printf("BootConnWorkers: WantShutdown, exiting")
 			break forever
 		}
-		if openConns == MaxThreads {
+		if openConns == nntp.NNTPTransferThreads {
 			continue forever
 		}
-		sharedConns := make([]*nntp.BackendConn, 0, MaxThreads)
-		bootN := MaxThreads - openConns - 1
+		var sharedConns []*nntp.BackendConn
+		bootN := nntp.NNTPTransferThreads - openConns - 1
 		// get connections from pool
-		for i := bootN; i < MaxThreads; i++ {
+		for i := bootN; i < nntp.NNTPTransferThreads; i++ {
 			// Get a connection from pool
 			conn, err := pool.Get(nntp.MODE_STREAM_MV)
 			if err != nil {
+				log.Printf("BootConnWorkers failed to get connection from pool: %v ... retry in: %v", err, isleep)
+				if isleep > defaultSleep {
+					time.Sleep(isleep)
+				}
 				isleep = isleep * 2
 				if isleep > time.Minute {
 					isleep = time.Minute
 				}
-				log.Printf("BootConnWorkers failed to get connection from pool: %v ... retry in: %v", err, isleep)
-				time.Sleep(isleep)
 				continue forever
 			}
 			if conn.ModeReader {
@@ -1651,41 +1634,84 @@ forever:
 				conn.ForceCloseConn()
 				continue forever
 			}
-
+			// got a connection
 			sharedConns = append(sharedConns, conn)
 			openConns++
 		}
-		isleep = defaultSleep // reset to default
-		CHECKreturnChans := make([]chan struct{}, 0, len(sharedConns))
-		for i, conn := range sharedConns {
-			CHECKreturnChans[i] = make(chan struct{}, 1)
-			go CheckWorker(conn, CHECKreturnChans[i])
+		if len(sharedConns) == 0 {
+			log.Printf("BootConnWorkers: no connections obtained, retry in: %v", isleep)
+			continue forever
 		}
-		mux.Lock()
-		CHECKrunning += len(sharedConns)
-		mux.Unlock()
-		// Monitor CHECK workers
+		isleep = defaultSleep // reset to default
+		returnSignals := make([]*ReturnSignal, 0, len(sharedConns))
+		errChan := make(chan struct{}, 1)
+		for i, conn := range sharedConns {
+			returnSignal := &ReturnSignal{
+				errChan:       errChan,
+				Chan:          make(chan *ReturnSignal, 1),
+				tmpMessageIDs: make([]*string, 0, BatchCheck),
+				jobsQueued:    make(map[*nntp.CHTTJob]uint64, BatchCheck),
+				jobsReadOK:    make(map[*nntp.CHTTJob]uint64, BatchCheck),
+				jobMap:        make(map[*string]*nntp.CHTTJob, BatchCheck),
+				jobs:          make([]*nntp.CHTTJob, 0, BatchCheck),
+			}
+			returnSignals[i] = returnSignal
+			go CHTTWorker(i, conn, returnSignal)
+		}
+		// Monitor recently launched CHTT workers
 		go func() {
-			checkBOOTED := len(sharedConns)
+			monitoring := len(sharedConns)
 			for {
 				time.Sleep(100 * time.Millisecond)
-				for i, retChan := range CHECKreturnChans {
-					if retChan == nil {
+				for i, wait := range returnSignals {
+					if wait == nil {
 						continue
 					}
 					select {
-					case <-CHECKreturnChans[i]:
-						//log.Printf("CheckWorker %d exited, restarting...", i)
+					case rs := <-wait.Chan:
+						log.Printf("CHTTWorker (%d) exited", i)
+						monitoring--
+
 						mux.Lock()
-						CHECKrunning--
+						openConns--
 						mux.Unlock()
-						checkBOOTED--
-						CHECKreturnChans[i] = nil
+
+						returnSignals[i] = nil
+
+						rs.Mux.Lock()
+						if len(rs.jobs) > 0 {
+							log.Printf("CHTTWorker (%d) try requeue %d jobs", i, len(rs.jobs))
+							for _, job := range rs.jobs {
+								if job != nil {
+									job.Mux.Lock()
+									rqj := &nntp.CHTTJob{
+										Newsgroup:    job.Newsgroup,
+										Articles:     job.Articles,
+										TxErrors:     job.TxErrors,
+										ConnErrors:   job.ConnErrors,
+										ResponseChan: make(chan *nntp.TTResponse, 1),
+									}
+									jobRequeue <- rqj // TODO DEAD END
+									// free memory
+									job.Newsgroup = nil
+									job.TTMode = nil
+									job.ResponseChan = nil
+									job.Articles = nil
+									job.ArticleMap = nil
+									job.MessageIDs = nil
+									job.WantedIDs = nil
+									job.Mux.Unlock()
+								}
+							}
+							log.Printf("CHTTWorker (%d) did requeue %d jobs", i, len(rs.jobs))
+						}
+						rs.Mux.Unlock()
+						// TODO: check remaining work and restart connection
 					default:
 						// Worker still running
 					}
 				}
-				if checkBOOTED == 0 {
+				if monitoring == 0 {
 					return
 				}
 			}
@@ -1695,62 +1721,73 @@ forever:
 
 var DefaultCheckTicker = 5 * time.Second
 
-func CheckWorker(conn *nntp.BackendConn, returnSignal chan struct{}) {
-	var mux sync.Mutex
+var JobsToRetry []*nntp.CHTTJob
+var JobsToRetryMux sync.Mutex
 
-	tmpMessageIDs := make([]*string, 0, BatchCheck)
+type ReturnSignal struct {
+	Mux           sync.Mutex
+	Chan          chan *ReturnSignal
+	errChan       chan struct{}
+	tmpMessageIDs []*string
+	jobsQueued    map[*nntp.CHTTJob]uint64
+	jobsReadOK    map[*nntp.CHTTJob]uint64
+	jobMap        map[*string]*nntp.CHTTJob
+	jobs          []*nntp.CHTTJob
+}
+
+func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 	readResponsesChan := make(chan *string, BatchCheck)
-	jobMap := make(map[*string]*CHTTJob, BatchCheck) // maps messageIds to Jobs
-
-	lastRun := time.Now()
+	errChan := make(chan struct{}, 3)
 	tickChan := make(chan struct{}, 1)
-	errChan := make(chan struct{}, 1)
 
-	defer func(conn *nntp.BackendConn) {
+	defer func(conn *nntp.BackendConn, rs *ReturnSignal) {
 		conn.ForceCloseConn()
-		returnSignal <- struct{}{}
-		close(errChan)
-	}(conn)
+		rs.Chan <- rs
+		errChan <- struct{}{}
+	}(conn, rs)
+	lastRun := time.Now()
 
 	// launch go routine which sends CHECK commands if threshold exceeds BatchCheck
-	go func(mux *sync.Mutex) {
+	go func() {
 		// tick every n seconds to check if any CHECKs to do
 		ticker := time.NewTicker(DefaultCheckTicker)
 		defer ticker.Stop()
-	forever:
+		defer func() {
+			errChan <- struct{}{}
+		}()
+	loop:
 		for {
 			select {
 			case <-errChan:
+				errChan <- struct{}{}
+				log.Printf("CheckWorker (%d): Send CHECK got errChan signal... exiting", id)
 				return
+
 			case <-tickChan:
 				if common.WantShutdown() {
-					log.Printf("CheckWorker: Tick WantShutdown, exiting")
+					log.Printf("CheckWorker (%d): Tick WantShutdown, exiting", id)
 					return
 				}
-				if common.IsClosedChannel(errChan) {
-					log.Printf("CheckWorker: Tick errChan closed, exiting")
-					return
-				}
-				// process CHECK commands
-				mux.Lock()
-				hasWork := len(tmpMessageIDs) > 0
-				mux.Unlock()
+				// check if we have work and process CHECK commands
+				rs.Mux.Lock()
+				hasWork := len(rs.tmpMessageIDs) > 0
+				rs.Mux.Unlock()
 				if !hasWork {
-					log.Printf("CheckWorker: Ticked but no work? continue...")
-					continue forever
+					log.Printf("CheckWorker (%d): Ticked but no work? continue...", id)
+					continue loop
 				}
 
 				// copy accumulated message IDs and clear slice
-				mux.Lock()
-				checkIds := make([]*string, len(tmpMessageIDs))
-				copy(checkIds, tmpMessageIDs)
-				tmpMessageIDs = tmpMessageIDs[:0] //clear
-				mux.Unlock()
+				rs.Mux.Lock()
+				checkIds := make([]*string, len(rs.tmpMessageIDs))
+				copy(checkIds, rs.tmpMessageIDs)
+				rs.tmpMessageIDs = rs.tmpMessageIDs[:0] //clear
+				rs.Mux.Unlock()
 
-				log.Printf("CheckWorker: Ticker sending CHECK: %d message IDs", len(checkIds))
+				log.Printf("CheckWorker (%d): SendCheckMultiple %d message IDs", id, len(checkIds))
 				err := conn.SendCheckMultiple(checkIds)
 				if err != nil {
-					log.Printf("CheckWorker: SendCheckMultiple error: %v", err)
+					log.Printf("CheckWorker (%d): SendCheckMultiple error: %v", id, err)
 					return
 				}
 				for _, msgID := range checkIds {
@@ -1761,18 +1798,18 @@ func CheckWorker(conn *nntp.BackendConn, returnSignal chan struct{}) {
 					}
 				}
 
-				mux.Lock()
+				rs.Mux.Lock()
 				lastRun = time.Now()
-				mux.Unlock()
+				rs.Mux.Unlock()
 
 			case <-ticker.C:
 				if common.WantShutdown() {
-					log.Printf("CheckWorker: Ticker WantShutdown, exiting")
+					log.Printf("CheckWorker (%d): Ticker WantShutdown, exiting", id)
 					return
 				}
-				mux.Lock()
-				hasWork := len(tmpMessageIDs) > 0 && time.Since(lastRun) >= DefaultCheckTicker
-				mux.Unlock()
+				rs.Mux.Lock()
+				hasWork := len(rs.tmpMessageIDs) > 0 && time.Since(lastRun) >= DefaultCheckTicker
+				rs.Mux.Unlock()
 				if hasWork {
 					select {
 					case tickChan <- struct{}{}:
@@ -1782,29 +1819,41 @@ func CheckWorker(conn *nntp.BackendConn, returnSignal chan struct{}) {
 				}
 			} // end select
 		} // end forever
-	}(&mux)
+	}()
 
 	// launch a go routine to read CHECK responses from the supplied connection with textproto readline
-	go func(mux *sync.Mutex) {
-	forever:
+	go func() {
+		var responseCount int64
+		var tookTime int64
+		defer func() {
+			errChan <- struct{}{}
+		}()
+	loop:
 		for {
 			select {
 			case <-errChan:
-				log.Printf("CheckWorker: Read CHECK errChan closed, exiting")
+				errChan <- struct{}{}
+				log.Printf("CheckWorker (%d): Read CHECK responses got errChan signal... exiting", id)
 				return
+
 			case msgID := <-readResponsesChan:
 				if common.WantShutdown() {
-					log.Printf("CheckWorker: Read CHECK WantShutdown, exiting")
+					log.Printf("CheckWorker (%d): Read CHECK WantShutdown, exiting", id)
 					return
 				}
-				if common.IsClosedChannel(errChan) {
-					log.Printf("CheckWorker: Read CHECK errChan closed, exiting")
-					return
-				}
+				start := time.Now()
 				code, line, err := conn.TextConn.ReadCodeLine(238)
 				if code == 0 && err != nil {
 					log.Printf("Failed to read CHECK response: %v", err)
 					return
+				}
+				tookTime += time.Since(start).Milliseconds()
+				responseCount++
+				if responseCount >= 1000 {
+					avg := float64(tookTime) / float64(responseCount)
+					log.Printf("CheckWorker (%d): Read %d CHECK responses, avg latency: %.1f ms", id, responseCount, avg)
+					responseCount = 0
+					tookTime = 0
 				}
 				// Parse response line
 				// Format: code <message-id> [message]
@@ -1821,75 +1870,95 @@ func CheckWorker(conn *nntp.BackendConn, returnSignal chan struct{}) {
 					log.Printf("Mismatched CHECK response: expected %s, got %s", *msgID, parts[0])
 					return
 				}
-				mux.Lock()
-				checkjob, exists := jobMap[msgID]
-				mux.Unlock()
+				rs.Mux.Lock()
+				job, exists := rs.jobMap[msgID]
+				rs.Mux.Unlock()
 				if !exists {
 					log.Printf("ERROR in CheckWorker: ReadCheckResponse msgId did not exist in jobMap: %s", *msgID)
-					continue forever
+					continue loop
 				}
+				rs.Mux.Lock()
+				delete(rs.jobMap, msgID)
+				rs.jobsReadOK[job]++
+				rs.Mux.Unlock()
 				switch code {
 				case 238:
 					//log.Printf("Wanted Article '%s': response=%d", *msgID, code)
-
-					mux.Lock()
-					delete(jobMap, msgID)
-					mux.Unlock()
-
-					checkjob.Mux.Lock()
-					checkjob.WantedIDs = append(checkjob.WantedIDs, msgID)
-					checkjob.Wanted++
-					checkjob.Mux.Unlock()
+					job.AppendWantedMessageID(msgID)
 
 				case 438:
 					//log.Printf("Unwanted Article '%s': response=%d", *msgID, code)
-					checkjob.Mux.Lock()
-					checkjob.Unwanted++
-					checkjob.Mux.Unlock()
+					job.Increment(nntp.IncrFLAG_UNWANTED)
 
 				case 431:
-					checkjob.Mux.Lock()
-					checkjob.Retry++
-					checkjob.Mux.Unlock()
+					job.Increment(nntp.IncrFLAG_RETRY)
 
 				default:
 					log.Printf("Unknown CHECK response: line='%s' code=%d expected msgID %s", line, code, *msgID)
-					return
 				}
+				// check if all jobs are done
+				rs.Mux.Lock()
+				queuedCount, qexists := rs.jobsQueued[job]
+				readCount, rexists := rs.jobsReadOK[job]
+				rs.Mux.Unlock()
+				if !qexists || !rexists {
+					log.Printf("ERROR in CheckWorker: queuedCount or readCount did not exist for a job?!")
+					continue loop
+				}
+				if queuedCount == readCount {
+					rs.Mux.Lock()
+					log.Printf("CheckWorker (%d): All CHECK responses received for job %v", id, job)
+					delete(rs.jobsQueued, job)
+					delete(rs.jobsReadOK, job)
+					rs.Mux.Unlock()
+				}
+				// TODO HERE: pass the job to takethis
+				// using this connection where we did the CHECK!
+				// ***
 			} // end select
 		} // end forever
-	}(&mux)
+	}()
 
-forever:
-	for checkjob := range CheckQueue {
-		if common.WantShutdown() {
-			log.Printf("CheckWorker: WantShutdown, exiting")
+	for {
+		select {
+		case <-errChan:
+			errChan <- struct{}{}
 			return
-		}
-		if checkjob == nil || len(checkjob.MessageIDs) == 0 {
-			if VERBOSE {
-				log.Printf("CheckWorker: empty job, skipping")
+		case job := <-nntp.CheckQueue:
+			if common.WantShutdown() {
+				log.Printf("CheckWorker: WantShutdown, exiting")
+				return
 			}
-			checkjob.ResponseChan <- []*string{}
-			continue forever
-		}
-		for _, msgId := range checkjob.MessageIDs {
-			if msgId != nil {
-				mux.Lock()
-				tmpMessageIDs = append(tmpMessageIDs, msgId)
-				jobMap[msgId] = checkjob
-				mux.Unlock()
+			if job == nil || len(job.MessageIDs) == 0 {
+				if VERBOSE {
+					log.Printf("CheckWorker: empty job, skipping")
+				}
+				if job != nil && job.ResponseChan != nil {
+					job.ResponseChan <- nil
+				}
+				continue
 			}
-		}
-		if len(tmpMessageIDs) >= BatchCheck {
-			// Signal to process CHECK commands
-			if VERBOSE {
-				log.Printf("CheckWorker: processing batch of %d message IDs", len(tmpMessageIDs))
+			for _, msgId := range job.MessageIDs {
+				if msgId != nil {
+					rs.Mux.Lock()
+					rs.tmpMessageIDs = append(rs.tmpMessageIDs, msgId)
+					rs.jobMap[msgId] = job
+					rs.jobsQueued[job]++
+					rs.jobs = append(rs.jobs, job)
+					rs.Mux.Unlock()
+				}
 			}
-			select {
-			case tickChan <- struct{}{}:
-			default:
+			rs.Mux.Lock()
+			hasWork := len(rs.tmpMessageIDs) >= BatchCheck
+			rs.Mux.Unlock()
+			if hasWork {
+				// send signal to process CHECK commands
+				select {
+				case tickChan <- struct{}{}:
+				default:
+					// tickChan full, tickChan will tick
+				}
 			}
-		}
-	} // end for forever
+		} // end select
+	} // end for
 } // end func CheckWorker
