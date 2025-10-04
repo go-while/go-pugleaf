@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1137,15 +1138,15 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 						resp.Job.Mux.Lock()
 						defer resp.Job.Mux.Unlock()
 
-						for msgid := range resp.Job.ArticleMap {
-							delete(resp.Job.ArticleMap, msgid)
-						}
-						resp.Job.ArticleMap = nil
-
 						for i, _ := range resp.Job.Articles {
 							resp.Job.Articles[i] = nil
 						}
 						resp.Job.Articles = nil
+
+						for msgid := range resp.Job.ArticleMap {
+							delete(resp.Job.ArticleMap, msgid)
+						}
+						resp.Job.ArticleMap = nil
 
 						for i, _ := range resp.Job.MessageIDs {
 							resp.Job.MessageIDs[i] = nil
@@ -1162,7 +1163,7 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 			}
 		}
 		amux.Lock()
-		result := fmt.Sprintf("END Newsgroup: '%s' | transferred: %d/%d (unwanted: %d | rejected: %d | checked: %d) TX_Errors: %d, connErrors: %d, took %v",
+		result := fmt.Sprintf("END Newsgroup: '%s' | transferred: %d/%d (unwanted: %d | rejected: %d | checked: %d | TX_Errors: %d | connErrors: %d | took %v",
 			newsgroup.Name, transferred, totalArticles, unwanted, rejected, checked, txErrors, connErrors, time.Since(start))
 		amux.Unlock()
 		//log.Print(result)
@@ -1183,6 +1184,37 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 		if common.WantShutdown() {
 			log.Printf("WantShutdown in newsgroup: '%s' offset: %d", newsgroup.Name, offset)
 			return nil
+		}
+		// Load articles from requeue first
+		var queuedJobs []*nntp.CHTTJob
+		jobRequeueMutex.Lock()
+		if jobs, exists := jobRequeue[ttMode.Newsgroup]; exists {
+			queuedJobs = jobs
+			// clear requeue
+			delete(jobRequeue, ttMode.Newsgroup)
+		}
+		jobRequeueMutex.Unlock()
+
+		if len(queuedJobs) > 0 {
+			log.Printf("Newsgroup: '%s' | Processing %d requeued jobs first", newsgroup.Name, len(queuedJobs))
+			for i, job := range queuedJobs {
+				log.Printf("Newsgroup: '%s' | Processing requeued job %d/%d with %d articles", newsgroup.Name, i+1, len(queuedJobs), len(job.Articles))
+				responseChan, err := processBatch(ttMode, job.Articles, redisCli)
+				if err != nil {
+					log.Printf("Newsgroup: '%s' | Error processing requeued batch: %v", newsgroup.Name, err)
+					jobRequeueMutex.Lock()
+					// insert remaining jobs back to slot 0
+					jobRequeue[ttMode.Newsgroup] = slices.Insert(jobRequeue[ttMode.Newsgroup], 0, queuedJobs[i:]...)
+					jobRequeueMutex.Unlock()
+					return fmt.Errorf("error processing requeued batch for newsgroup '%s': %v", newsgroup.Name, err)
+				}
+				if responseChan != nil {
+					// pass the response channel to the collector channel: ttResponses
+					ttResponses <- responseChan
+				}
+			}
+			offset -= dbBatchSize
+			continue
 		}
 
 		// Load batch from database with date filtering
@@ -1252,21 +1284,13 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 	doCheck := ttMode.FlipMode(lowerLevel, upperLevel)
 	var batchedJob *nntp.CHTTJob
 
-	select {
-	case job := <-jobRequeue:
-		batchedJob = job
-		batchedJob.TTMode = ttMode
-		articles = batchedJob.Articles
-		batchedJob.Articles = nil
-	default:
-		batchedJob = &nntp.CHTTJob{
-			Newsgroup:    ttMode.Newsgroup,
-			MessageIDs:   make([]*string, 0, len(articles)),
-			Articles:     make([]*models.Article, 0, len(articles)),
-			ArticleMap:   make(map[*string]*models.Article, len(articles)),
-			ResponseChan: make(chan *nntp.TTResponse, 1),
-			TTMode:       ttMode,
-		}
+	batchedJob = &nntp.CHTTJob{
+		Newsgroup:    ttMode.Newsgroup,
+		MessageIDs:   make([]*string, 0, len(articles)),
+		Articles:     make([]*models.Article, 0, len(articles)),
+		ArticleMap:   make(map[*string]*models.Article, len(articles)),
+		ResponseChan: make(chan *nntp.TTResponse, 1),
+		TTMode:       ttMode,
 	}
 
 	switch doCheck {
@@ -1593,7 +1617,8 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	return transferred, redis_cached, nil
 } // end func sendArticlesBatchViaTakeThis
 
-var jobRequeue = make(chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
+var jobRequeueMutex sync.RWMutex
+var jobRequeue = make(map[*string][]*nntp.CHTTJob)
 
 func BootConnWorkers(pool *nntp.Pool) {
 	openConns := 0
@@ -1685,14 +1710,13 @@ forever:
 								if job != nil {
 									job.Mux.Lock()
 									rqj := &nntp.CHTTJob{
-										Newsgroup:    job.Newsgroup,
-										Articles:     job.Articles,
-										TxErrors:     job.TxErrors,
-										ConnErrors:   job.ConnErrors,
-										ResponseChan: make(chan *nntp.TTResponse, 1),
+										Newsgroup: job.Newsgroup,
+										Articles:  job.Articles,
 									}
-									jobRequeue <- rqj // TODO DEAD END
-									// free memory
+									jobRequeueMutex.Lock()
+									jobRequeue[rqj.Newsgroup] = append(jobRequeue[rqj.Newsgroup], rqj) // TODO DEAD END
+									jobRequeueMutex.Unlock()
+									// unlink pointers
 									job.Newsgroup = nil
 									job.TTMode = nil
 									job.ResponseChan = nil

@@ -107,9 +107,9 @@ func (job *CHTTJob) Increment(counter int) {
 	case IncrFLAG_REDIS_CACHED:
 		job.redisCached++
 	case IncrFLAG_TX_ERRORS:
-		job.txErrors++
+		job.TxErrors++
 	case IncrFLAG_CONN_ERRORS:
-		job.connErrors++
+		job.ConnErrors++
 	}
 }
 
@@ -126,8 +126,8 @@ func (job *CHTTJob) GetUpdateCounters(transferred, unwanted, rejected, checked, 
 	*unwanted += job.unwanted
 	*rejected += job.rejected
 	*checked += job.checked
-	*txErrors += job.txErrors
-	*connErrors += job.connErrors
+	*txErrors += job.TxErrors
+	*connErrors += job.ConnErrors
 	job.Mux.Unlock()
 }
 
