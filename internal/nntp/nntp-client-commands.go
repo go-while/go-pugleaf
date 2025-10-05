@@ -29,7 +29,7 @@ var MaxReadLinesXover int64 = 100 // XOVER command typically retrieves overview 
 // MaxReadLinesBody Maximum lines for BODY command, which retrieves the body of an article
 const MaxReadLinesBody = MaxReadLinesArticle - MaxReadLinesHeaders
 
-var NNTPTransferThreads int = 0
+var NNTPTransferThreads int = 1
 var TakeThisQueue = make(chan *CHTTJob, NNTPTransferThreads)
 var CheckQueue = make(chan *CHTTJob, NNTPTransferThreads)
 
@@ -191,11 +191,11 @@ func (ttMode *TakeThisMode) FlipMode(lowerLevel float64, upperLevel float64) boo
 
 func (c *BackendConn) ForceCloseConn() {
 	c.mux.Lock()
-	defer c.mux.Unlock()
 	if !c.forceClose {
 		c.forceClose = true
-		go c.Pool.Put(c)
 	}
+	c.mux.Unlock()
+	c.Pool.Put(c)
 }
 
 // StatArticle checks if an article exists on the server

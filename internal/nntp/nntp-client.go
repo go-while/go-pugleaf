@@ -301,8 +301,8 @@ func (c *BackendConn) CloseFromPoolOnly() error {
 
 	c.connected = false
 	c.authenticated = false
-	c.TextConn = nil // CloseFromPoolOnly
-	c.conn = nil     // CloseFromPoolOnly
+	//c.TextConn = nil // CloseFromPoolOnly
+	//c.conn = nil     // CloseFromPoolOnly
 	c.Writer = nil
 	//log.Printf("Closed NNTP Connection to %s", c.Backend.Host)
 	return nil

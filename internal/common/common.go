@@ -35,3 +35,13 @@ func IsClosedChannel(ch chan struct{}) bool {
 		return false
 	}
 }
+
+func ChanLock(lockChan chan struct{}) {
+	// try aquire lock
+	lockChan <- struct{}{}
+}
+
+func ChanRelease(lockChan chan struct{}) {
+	// release lock
+	<-lockChan
+}
