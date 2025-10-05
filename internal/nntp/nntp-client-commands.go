@@ -1320,7 +1320,7 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 }
 */
 
-// TakeThisArticle sends a single article via TAKETHIS command and returns the response code
+// TakeThisArticle sends an article via TAKETHIS command
 func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *string, newsgroup string) (int, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
