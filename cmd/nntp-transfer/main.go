@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -1085,6 +1086,7 @@ func processRequeuedJobs(newsgroup string, ttMode *nntp.TakeThisMode, ttResponse
 		}
 
 		log.Printf("Newsgroup: '%s' | Processing requeued job %d/%d with %d articles", newsgroup, i+1, len(queuedJobs), len(job.Articles))
+		// pass articles to CHECK or TAKETHIS queue (async!)
 		responseChan, err := processBatch(ttMode, job.Articles, redisCli)
 		if err != nil {
 			log.Printf("Newsgroup: '%s' | Error processing requeued batch: %v", newsgroup, err)
@@ -1177,60 +1179,76 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 		defer collectorWG.Done()
 		var amux sync.Mutex
 		var transferred, unwanted, rejected, checked, txErrors, connErrors uint64
+		var num uint64
 		for responseChan := range ttResponses {
-			if responseChan != nil {
-				responseWG.Add(1)
-				go func(rc chan *nntp.TTResponse) {
-					defer responseWG.Done()
-					for resp := range rc {
-						if resp == nil {
-							log.Printf("Newsgroup: '%s' | Warning: nil TT response channel received!?", newsgroup.Name)
-							return
-						}
-						if resp.Err != nil {
-							log.Printf("Newsgroup: '%s' | Error in TT response: err='%v' job='%#v'", newsgroup.Name, resp.Err, resp.Job)
-							return
-						}
-						if resp.Job == nil {
-							log.Printf("Newsgroup: '%s' | Warning: nil Job in TT response without error!?", newsgroup.Name)
-							return
-						}
-						// get numbers
-						amux.Lock()
-						resp.Job.GetUpdateCounters(&transferred, &unwanted, &rejected, &checked, &txErrors, &connErrors)
-						amux.Unlock()
+			if responseChan == nil {
+				log.Printf("Newsgroup: '%s' | Warning: nil TT response channel received in collector!?", newsgroup.Name)
+				continue
+			}
+			num++
+			log.Printf("Newsgroup: '%s' | Starting response channel processor num %d", newsgroup.Name, num)
+			responseWG.Add(1)
+			go func(rc chan *nntp.TTResponse, num uint64) {
+				defer responseWG.Done()
+				defer log.Printf("Newsgroup: '%s' | Ending response channel processor num %d", newsgroup.Name, num)
+				for resp := range rc {
+					if resp == nil {
+						log.Printf("Newsgroup: '%s' | Warning: nil TT response channel received!?", newsgroup.Name)
+						return
+					}
+					if resp.Err != nil {
+						log.Printf("Newsgroup: '%s' | Error in TT response: err='%v' job='%#v'", newsgroup.Name, resp.Err, resp.Job)
+						return
+					}
+					if resp.Job == nil {
+						log.Printf("Newsgroup: '%s' | Warning: nil Job in TT response without error!?", newsgroup.Name)
+						return
+					}
+					// get numbers
+					amux.Lock()
+					resp.Job.GetUpdateCounters(&transferred, &unwanted, &rejected, &checked, &txErrors, &connErrors)
+					amux.Unlock()
 
-						// free memory
-						resp.Job.Mux.Lock()
-						defer resp.Job.Mux.Unlock()
+					// free memory - CRITICAL: Lock and unlock in same scope, not with defer!
+					resp.Job.Mux.Lock()
 
-						for i := range resp.Job.Articles {
+					// Clean up Articles and their internal fields
+					for i := range resp.Job.Articles {
+						if resp.Job.Articles[i] != nil {
+							// Clean article internal fields to free memory
+							resp.Job.Articles[i].RefSlice = nil
+							resp.Job.Articles[i].NNTPhead = nil
+							resp.Job.Articles[i].NNTPbody = nil
+							resp.Job.Articles[i].Headers = nil
+							resp.Job.Articles[i].ArticleNums = nil
+							resp.Job.Articles[i].NewsgroupsPtr = nil
+							resp.Job.Articles[i].ProcessQueue = nil
+							resp.Job.Articles[i].MsgIdItem = nil
 							resp.Job.Articles[i] = nil
 						}
-						resp.Job.Articles = nil
-
-						for msgid := range resp.Job.ArticleMap {
-							delete(resp.Job.ArticleMap, msgid)
-						}
-						resp.Job.ArticleMap = nil
-
-						for i := range resp.Job.MessageIDs {
-							resp.Job.MessageIDs[i] = nil
-						}
-						resp.Job.MessageIDs = nil
-
-						for i := range resp.Job.WantedIDs {
-							resp.Job.WantedIDs[i] = nil
-						}
-						resp.Job.WantedIDs = nil
-
 					}
-				}(responseChan)
-			}
+					resp.Job.Articles = nil
+
+					// Clean up ArticleMap - nil the keys (pointers) before deleting
+					for msgid := range resp.Job.ArticleMap {
+						resp.Job.ArticleMap[msgid] = nil
+						delete(resp.Job.ArticleMap, msgid)
+					}
+					resp.Job.ArticleMap = nil
+
+					// NOTE: Do NOT clean up MessageIDs or WantedIDs here!
+					// The CHECK worker may still be using them (race condition).
+					// They will be cleaned up in BootConnWorkers when the job is requeued or discarded.
+
+					resp.Job.Mux.Unlock()
+
+				}
+			}(responseChan, num)
 		}
+		log.Printf("Newsgroup: '%s' | Collector: ttResponses closed, waiting for %d response processors to finish...", newsgroup.Name, num)
 		// Wait for all response channel processors to finish
 		responseWG.Wait()
-
+		log.Printf("Newsgroup: '%s' | Collector: all response processors closed", newsgroup.Name)
 		amux.Lock()
 		result := fmt.Sprintf("END Newsgroup: '%s' | transferred: %d/%d (unwanted: %d | rejected: %d | checked: %d | TX_Errors: %d | connErrors: %d | took %v",
 			newsgroup.Name, transferred, totalArticles, unwanted, rejected, checked, txErrors, connErrors, time.Since(start))
@@ -1290,15 +1308,14 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 			if end > len(articles) {
 				end = len(articles)
 			}
+			// pass articles to CHECK or TAKETHIS queue (async!)
 			responseChan, err := processBatch(ttMode, articles[i:end], redisCli)
 			if err != nil {
 				log.Printf("Newsgroup: '%s' | Error processing batch %d-%d: %v", newsgroup.Name, i+1, end, err)
 				return fmt.Errorf("error processing batch %d-%d for newsgroup '%s': %v", i+1, end, newsgroup.Name, err)
 			}
-			if responseChan != nil {
-				// pass the response channel to the collector channel: ttResponses
-				ttResponses <- responseChan
-			}
+			// pass the response channel to the collector channel: ttResponses
+			ttResponses <- responseChan
 		}
 		remainingArticles -= int64(len(articles))
 		if VERBOSE {
@@ -1306,6 +1323,8 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 			//log.Printf("Newsgroup: '%s' | Pushed (offset %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t)", newsgroup.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.GetMode())
 		}
 	} // end for offset range totalArticles
+
+	log.Printf("Newsgroup: '%s' | Main article loop completed, checking for requeued jobs...", newsgroup.Name)
 
 	// Process any remaining requeued jobs after main loop completes
 	// This handles failures that occurred in the last batch
@@ -1328,8 +1347,12 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 		// Loop again to check if any of those jobs failed and were requeued
 	}
 
+	log.Printf("Newsgroup: '%s' | Final requeue processing completed, closing ttResponses channel...", newsgroup.Name)
+
 	// Close the ttResponses channel to signal collector goroutine to finish
 	close(ttResponses)
+
+	log.Printf("Newsgroup: '%s' | ttResponses channel closed, waiting for collector to finish...", newsgroup.Name)
 
 	// Wait for collector goroutine to finish processing all responses
 	collectorWG.Wait()
@@ -1354,9 +1377,9 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 		return nil, nil
 	}
 	doCheck := ttMode.FlipMode(lowerLevel, upperLevel)
-	var batchedJob *nntp.CHTTJob
 
-	batchedJob = &nntp.CHTTJob{
+	batchedJob := &nntp.CHTTJob{
+		JobID:        atomic.AddUint64(&nntp.JobIDCounter, 1),
 		Newsgroup:    ttMode.Newsgroup,
 		MessageIDs:   make([]*string, 0, len(articles)),
 		Articles:     make([]*models.Article, 0, len(articles)),
@@ -1431,7 +1454,9 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 		if VERBOSE {
 			log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d/%d articles", *ttMode.Newsgroup, len(batchedJob.MessageIDs), len(articles))
 		}
+		log.Printf("Newsgroup: '%s' | Sending job #%d to CheckQueue (global) with %d message IDs", *ttMode.Newsgroup, batchedJob.JobID, len(batchedJob.MessageIDs))
 		nntp.CheckQueue <- batchedJob
+		log.Printf("Newsgroup: '%s' | Job #%d sent to CheckQueue successfully", *ttMode.Newsgroup, batchedJob.JobID)
 		return batchedJob.ResponseChan, nil
 
 	// end case ttMode.CheckMode
@@ -1451,10 +1476,12 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 		}
 
 		if len(batchedJob.Articles) == 0 {
-			log.Printf("WARN: No valid articles for TAKETHIS mode, skipping batch")
+			log.Printf("Newsgroup: '%s' | WARN: No valid articles for TAKETHIS mode, skipping batch", *ttMode.Newsgroup)
 			return nil, nil
 		}
+		log.Printf("Newsgroup: '%s' | Sending job #%d to TakeThisQueue with %d articles", *ttMode.Newsgroup, batchedJob.JobID, len(batchedJob.WantedIDs))
 		nntp.TakeThisQueue <- batchedJob
+		log.Printf("Newsgroup: '%s' | Job #%d sent to TakeThisQueue successfully", *ttMode.Newsgroup, batchedJob.JobID)
 		return batchedJob.ResponseChan, nil
 
 	} // end case !ttMode.CheckMode
@@ -1719,6 +1746,7 @@ forever:
 									// copy articles pointer
 									job.Mux.Lock()
 									rqj := &nntp.CHTTJob{
+										JobID:     job.JobID,
 										Newsgroup: job.Newsgroup,
 										Articles:  job.Articles,
 									}
@@ -1745,6 +1773,43 @@ forever:
 							}
 							log.Printf("CHTTWorker (%d) did requeue %d jobs", i, len(rs.jobs))
 						}
+
+						// Clean up ReturnSignal maps and unlink pointers
+						// Clean up jobMap - nil all pointers before deleting
+						for msgID := range rs.jobMap {
+							rs.jobMap[msgID] = nil
+							delete(rs.jobMap, msgID)
+						}
+						rs.jobMap = nil
+
+						// Clean up jobsQueued
+						for job := range rs.jobsQueued {
+							delete(rs.jobsQueued, job)
+						}
+						rs.jobsQueued = nil
+
+						// Clean up jobsReadOK
+						for job := range rs.jobsReadOK {
+							delete(rs.jobsReadOK, job)
+						}
+						rs.jobsReadOK = nil
+
+						// Clean up jobs slice - nil all pointers
+						for idx := range rs.jobs {
+							rs.jobs[idx] = nil
+						}
+						rs.jobs = nil
+
+						// Clean up tmpMessageIDs (if still present)
+						for idx := range rs.tmpMessageIDs {
+							rs.tmpMessageIDs[idx] = nil
+						}
+						rs.tmpMessageIDs = nil
+
+						rs.redisCli = nil
+						rs.Chan = nil
+						rs.errChan = nil
+
 						rs.Mux.Unlock()
 						// TODO: check remaining work and restart connection
 					default:
@@ -1817,23 +1882,25 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 					log.Printf("CheckWorker (%d): Tick WantShutdown, exiting", id)
 					return
 				}
-				// check if we have work and process CHECK commands
+				// Get the next job to process
 				rs.Mux.Lock()
-				hasWork := len(rs.tmpMessageIDs) > 0
-				rs.Mux.Unlock()
-				if !hasWork {
-					log.Printf("CheckWorker (%d): Ticked but no work? continue...", id)
+				if len(rs.jobs) == 0 {
+					rs.Mux.Unlock()
+					log.Printf("CheckWorker (%d): Ticked but no jobs in queue, continue...", id)
 					continue loop
 				}
-
-				// copy accumulated message IDs and clear slice
-				rs.Mux.Lock()
-				checkIds := make([]*string, len(rs.tmpMessageIDs))
-				copy(checkIds, rs.tmpMessageIDs)
-				rs.tmpMessageIDs = rs.tmpMessageIDs[:0] //clear
+				currentJob := rs.jobs[0]
+				rs.jobs = rs.jobs[1:] // Remove first job from queue
 				rs.Mux.Unlock()
 
-				log.Printf("CheckWorker (%d): Checking %d message IDs in batches of %d", id, len(checkIds), BatchCheck)
+				// Use message IDs directly from the job
+				checkIds := currentJob.MessageIDs
+				newsgroup := "unknown"
+				if currentJob != nil && currentJob.Newsgroup != nil {
+					newsgroup = *currentJob.Newsgroup
+				}
+
+				log.Printf("Newsgroup: '%s' | CheckWorker (%d): waits to check %d message IDs in batches of %d (job #%d)", newsgroup, id, len(checkIds), BatchCheck, currentJob.JobID)
 
 				// Process checkIds in batches of BatchCheck
 				for batchStart := 0; batchStart < len(checkIds); batchStart += BatchCheck {
@@ -1845,12 +1912,12 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 
 					// Lock for this batch only
 					common.ChanLock(flipflopChan)
-					log.Printf("CheckWorker (%d): Sending CHECK for batch %d-%d (%d messages)", id, batchStart, batchEnd, len(batch))
+					log.Printf("Newsgroup: '%s' | CheckWorker (%d): Sending CHECK for batch %d-%d (%d messages)", newsgroup, id, batchStart, batchEnd, len(batch))
 
 					err := conn.SendCheckMultiple(batch)
 					if err != nil {
 						common.ChanRelease(flipflopChan)
-						log.Printf("CheckWorker (%d): SendCheckMultiple error for batch %d-%d: %v", id, batchStart, batchEnd, err)
+						log.Printf("Newsgroup: '%s' | CheckWorker (%d): SendCheckMultiple error for batch %d-%d: %v", newsgroup, id, batchStart, batchEnd, err)
 						return
 					}
 
@@ -1887,7 +1954,18 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 
 				rs.Mux.Lock()
 				lastRun = time.Now()
+				// Check if there are more jobs to process
+				hasMoreJobs := len(rs.jobs) > 0
 				rs.Mux.Unlock()
+
+				// If there are more jobs waiting, immediately trigger next job processing
+				if hasMoreJobs {
+					select {
+					case tickChan <- struct{}{}:
+					default:
+						// Channel full, will be processed on next tick
+					}
+				}
 
 			case <-ticker.C:
 				if common.WantShutdown() {
@@ -1895,7 +1973,7 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 					return
 				}
 				rs.Mux.Lock()
-				hasWork := len(rs.tmpMessageIDs) > 0 && time.Since(lastRun) >= DefaultCheckTicker
+				hasWork := len(rs.jobs) > 0 && time.Since(lastRun) >= DefaultCheckTicker
 				rs.Mux.Unlock()
 				if hasWork {
 					select {
@@ -1910,7 +1988,7 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 
 	// launch a go routine to read CHECK responses from the supplied connection with textproto readline
 	go func() {
-		var responseCount int64
+		var responseCount int
 		var tookTime int64
 		defer func() {
 			errChan <- struct{}{}
@@ -1943,9 +2021,11 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 				}
 				tookTime += time.Since(start).Milliseconds()
 				responseCount++
-				if responseCount >= 1000 {
+				if responseCount >= BatchCheck {
 					avg := float64(tookTime) / float64(responseCount)
-					log.Printf("CheckWorker (%d): Read %d CHECK responses, avg latency: %.1f ms", id, responseCount, avg)
+					if avg > 1 {
+						log.Printf("CheckWorker (%d): Read %d CHECK responses, avg latency: %.1f ms", id, responseCount, avg)
+					}
 					responseCount = 0
 					tookTime = 0
 				}
@@ -1975,6 +2055,7 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 					continue loop
 				}
 				rs.Mux.Lock()
+				rs.jobMap[rr.MsgID] = nil // Nil the pointer before deleting
 				delete(rs.jobMap, rr.MsgID)
 				rs.jobsReadOK[job]++
 				rs.Mux.Unlock()
@@ -1991,7 +2072,7 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 					job.Increment(nntp.IncrFLAG_RETRY)
 
 				default:
-					log.Printf("Unknown CHECK response: line='%s' code=%d expected msgID %s", line, code, *rr.MsgID)
+					log.Printf("Newsgroup: '%s' | Unknown CHECK response: line='%s' code=%d expected msgID %s", *job.Newsgroup, line, code, *rr.MsgID)
 				}
 				// check if all jobs are done
 				rs.Mux.Lock()
@@ -1999,7 +2080,7 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 				readCount, rexists := rs.jobsReadOK[job]
 				rs.Mux.Unlock()
 				if !qexists || !rexists {
-					log.Printf("ERROR in CheckWorker: queuedCount or readCount did not exist for a job?!")
+					log.Printf("Newsgroup: '%s' | ERROR in CheckWorker: queuedCount or readCount did not exist for a job?!", *job.Newsgroup)
 					rr.retChan <- struct{}{}
 					continue loop
 				}
@@ -2011,9 +2092,11 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 					if len(job.WantedIDs) > 0 {
 						// Pass job to TAKETHIS worker via channel
 						takeThisChan <- job // local takethis chan sharing the same connection
-						log.Printf("Newsgroup '%s' | CheckWorker (%d): Sent job to TAKETHIS worker (wanted: %d/%d)", *job.Newsgroup, id, len(job.WantedIDs), queuedCount)
+						log.Printf("Newsgroup: '%s' | CheckWorker (%d): Sent job #%d to TAKETHIS worker (wanted: %d/%d)", *job.Newsgroup, id, job.JobID, len(job.WantedIDs), queuedCount)
 					} else {
-						log.Printf("Newsgroup '%s' | CheckWorker (%d): got %d CHECK responses but server wants none", *job.Newsgroup, id, queuedCount)
+						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d got %d CHECK responses but server wants none", *job.Newsgroup, id, job.JobID, queuedCount)
+						// Send response and close channel for jobs with no wanted articles
+						job.Response(&nntp.TTResponse{Job: job, Err: nil})
 					}
 				}
 				rr.retChan <- struct{}{}
@@ -2037,12 +2120,12 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 			case job1 := <-nntp.TakeThisQueue:
 				job = job1
 				if job != nil {
-					log.Printf("CheckWorker (%d): Received TAKETHIS job from global queue (wanted: %d)", id, len(job.WantedIDs))
+					log.Printf("Newsgroup '%s' | CheckWorker (%d): Received TAKETHIS job #%d from global queue (wanted: %d)", *job.Newsgroup, id, job.JobID, len(job.WantedIDs))
 				}
 			case job2 := <-takeThisChan:
 				job = job2
 				if job != nil {
-					log.Printf("CheckWorker (%d): Received TAKETHIS job from local CHECK channel (wanted: %d)", id, len(job.WantedIDs))
+					log.Printf("Newsgroup '%s' | CheckWorker (%d): Received TAKETHIS job #%d from local CHECK channel (wanted: %d)", *job.Newsgroup, id, job.JobID, len(job.WantedIDs))
 				}
 			}
 
@@ -2063,40 +2146,30 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 			}
 
 			if len(wantedArticles) == 0 {
-				log.Printf("CheckWorker (%d): No valid wanted articles found in ArticleMap", id)
-				if job.ResponseChan != nil {
-					job.ResponseChan <- &nntp.TTResponse{Job: nil, Err: fmt.Errorf("got job without valid wanted articles")}
-					close(job.ResponseChan)
-				}
+				log.Printf("Newsgroup '%s' | CheckWorker (%d): No valid wanted articles found in ArticleMap for job #%d", *job.Newsgroup, id, job.JobID)
+				job.Response(&nntp.TTResponse{Job: nil, Err: fmt.Errorf("got job without valid wanted articles")})
 				continue
 			}
 
 			common.ChanLock(flipflopChan)
-			log.Printf("CheckWorker (%d): Sending TAKETHIS for %d wanted articles", id, len(wantedArticles))
+			log.Printf("Newsgroup '%s' | CheckWorker (%d): Sending TAKETHIS for job #%d with %d wanted articles", *job.Newsgroup, id, job.JobID, len(wantedArticles))
 			// Send TAKETHIS commands using existing function
 			transferred, rejected, redis_cached, err := sendArticlesBatchViaTakeThis(conn, wantedArticles, job, *job.Newsgroup, rs.redisCli)
 			common.ChanRelease(flipflopChan)
 
 			if err != nil {
-				log.Printf("CheckWorker (%d): Error in TAKETHIS: %v", id, err)
-				if job.ResponseChan != nil {
-					job.ResponseChan <- &nntp.TTResponse{Job: job, Err: err}
-					close(job.ResponseChan)
-				}
+				log.Printf("Newsgroup '%s' | CheckWorker (%d): Error in TAKETHIS job #%d: %v", *job.Newsgroup, id, job.JobID, err)
+				job.Response(&nntp.TTResponse{Job: job, Err: err})
 				continue
 			}
 
-			log.Printf("CheckWorker (%d): TAKETHIS completed: transferred=%d, rejected=%d, redis_cached=%d", id, transferred, rejected, redis_cached)
+			log.Printf("Newsgroup '%s' | CheckWorker (%d): TAKETHIS job #%d completed: transferred=%d, rejected=%d, redis_cached=%d", *job.Newsgroup, id, job.JobID, transferred, rejected, redis_cached)
 
 			// Send response back
-			if job.ResponseChan != nil {
-				log.Printf("CheckWorker (%d): Sending TTresponse back to responseChan len=%d", id, len(job.ResponseChan))
-				job.ResponseChan <- &nntp.TTResponse{Job: job, Err: nil}
-				log.Printf("CheckWorker (%d): Sent TTresponse back to job channel, closing response channel", id)
-				close(job.ResponseChan)
-			} else {
-				log.Printf("ERROR CheckWorker (%d): job.ResponseChan is nil, cannot send response back", id)
-			}
+			log.Printf("Newsgroup '%s' | CheckWorker (%d): Sending TTresponse for job #%d to responseChan len=%d", *job.Newsgroup, id, job.JobID, len(job.ResponseChan))
+			job.Response(&nntp.TTResponse{Job: job, Err: nil})
+			log.Printf("Newsgroup '%s' | CheckWorker (%d): Sent TTresponse for job #%d to responseChan", *job.Newsgroup, id, job.JobID)
+
 		}
 	}()
 
@@ -2112,38 +2185,31 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 			}
 			if job == nil || len(job.MessageIDs) == 0 {
 				log.Printf("CheckWorker: empty job, skipping")
-				if job != nil && job.ResponseChan != nil {
-					job.ResponseChan <- nil
-					close(job.ResponseChan)
+				if job != nil {
+					job.Response(&nntp.TTResponse{Job: nil, Err: fmt.Errorf("got job without valid wanted articles")})
 				}
 				continue
 			}
-			// Track this job and its message IDs
-			// accumulate message IDs to rs.tmpMessageIDs
-			// when threshold BatchCheck is reached, send CHECK commands
-			//log.Printf("CheckWorker (%d): Received job with %d message IDs", id, len(job.MessageIDs))
+			log.Printf("CheckWorker (%d): Received job #%d from CheckQueue for newsgroup '%s' with %d message IDs", id, job.JobID, *job.Newsgroup, len(job.MessageIDs))
+
+			// Build jobMap for tracking which message IDs belong to this job
+			// and count queued messages
+			rs.Mux.Lock()
 			for _, msgId := range job.MessageIDs {
 				if msgId != nil {
-					rs.Mux.Lock()
-					rs.tmpMessageIDs = append(rs.tmpMessageIDs, msgId)
 					rs.jobMap[msgId] = job
-					rs.jobsQueued[job]++
-					rs.Mux.Unlock()
+					rs.jobsQueued[job]++ // counts message ids to read check later
 				}
 			}
-			rs.Mux.Lock()
-			hasWork := len(rs.tmpMessageIDs) >= 0
-			if hasWork {
-				rs.jobs = append(rs.jobs, job)
-			}
+			// Add job to processing queue
+			rs.jobs = append(rs.jobs, job)
 			rs.Mux.Unlock()
-			if hasWork {
-				// send signal to process CHECK commands
-				select {
-				case tickChan <- struct{}{}:
-				default:
-					// tickChan full, tickChan will tick
-				}
+
+			// Signal ticker to process this job
+			select {
+			case tickChan <- struct{}{}:
+			default:
+				// tickChan full, will be processed on next tick
 			}
 		} // end select
 	} // end for

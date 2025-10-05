@@ -32,6 +32,7 @@ const MaxReadLinesBody = MaxReadLinesArticle - MaxReadLinesHeaders
 var NNTPTransferThreads int = 1
 var TakeThisQueue = make(chan *CHTTJob, NNTPTransferThreads)
 var CheckQueue = make(chan *CHTTJob, NNTPTransferThreads)
+var JobIDCounter uint64 // Atomic counter for unique job IDs
 
 // used in nntp-transfer/main.go
 type TakeThisMode struct {
@@ -59,6 +60,7 @@ type CheckResponse struct { // deprecated
 
 // batched CHECK/TAKETHIS Job
 type CHTTJob struct {
+	JobID        uint64 // Unique job ID for tracing
 	Newsgroup    *string
 	Mux          sync.Mutex
 	TTMode       *TakeThisMode
@@ -76,6 +78,15 @@ type CHTTJob struct {
 	redisCached  uint64
 	TxErrors     uint64
 	ConnErrors   uint64
+}
+
+func (job *CHTTJob) Response(response *TTResponse) {
+	if job.ResponseChan == nil {
+		log.Printf("ERROR CHTTJob.Response(): ResponseChan is nil for job ID %d response='%v'", job.JobID, response)
+		return
+	}
+	job.ResponseChan <- response
+	close(job.ResponseChan)
 }
 
 const IncrFLAG_CHECKED = 1
