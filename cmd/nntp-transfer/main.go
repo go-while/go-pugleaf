@@ -1454,9 +1454,23 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 		if VERBOSE {
 			log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d/%d articles", *ttMode.Newsgroup, len(batchedJob.MessageIDs), len(articles))
 		}
-		log.Printf("Newsgroup: '%s' | Sending job #%d to CheckQueue (global) with %d message IDs", *ttMode.Newsgroup, batchedJob.JobID, len(batchedJob.MessageIDs))
-		nntp.CheckQueue <- batchedJob
-		log.Printf("Newsgroup: '%s' | Job #%d sent to CheckQueue successfully", *ttMode.Newsgroup, batchedJob.JobID)
+		
+		// Assign job to worker (consistent assignment + load balancing)
+		if len(CheckQueues) == 0 {
+			return nil, fmt.Errorf("no workers available")
+		}
+		
+		workerID := assignWorkerToNewsgroup(*ttMode.Newsgroup)
+		checkQueue := CheckQueues[workerID]
+		
+		// Track queue length for load balancing
+		WorkerQueueLengthMux.Lock()
+		WorkerQueueLength[workerID]++
+		WorkerQueueLengthMux.Unlock()
+		
+		log.Printf("Newsgroup: '%s' | Sending job #%d to Worker %d queue with %d message IDs", *ttMode.Newsgroup, batchedJob.JobID, workerID, len(batchedJob.MessageIDs))
+		checkQueue <- batchedJob
+		log.Printf("Newsgroup: '%s' | Job #%d sent to Worker %d successfully", *ttMode.Newsgroup, batchedJob.JobID, workerID)
 		return batchedJob.ResponseChan, nil
 
 	// end case ttMode.CheckMode
@@ -1650,11 +1664,103 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 var jobRequeueMutex sync.RWMutex
 var jobRequeue = make(map[*string][]*nntp.CHTTJob)
 
+// CheckQueues holds per-worker CheckQueue channels for consistent newsgroup routing
+var CheckQueues []chan *nntp.CHTTJob
+
+// NewsgroupWorkerMap tracks which worker is assigned to each newsgroup
+var NewsgroupWorkerMap = make(map[string]int)
+var NewsgroupWorkerMapMux sync.RWMutex
+
+// WorkerQueueLength tracks how many jobs are queued per worker (for load balancing)
+var WorkerQueueLength []int
+var WorkerQueueLengthMux sync.Mutex
+
+// assignWorkerToNewsgroup finds the best worker for a newsgroup
+// If newsgroup already assigned, returns same worker (sequential processing)
+// If new newsgroup, assigns to least busy worker (load balancing)
+func assignWorkerToNewsgroup(newsgroup string) int {
+	// Check if already assigned
+	NewsgroupWorkerMapMux.RLock()
+	if workerID, exists := NewsgroupWorkerMap[newsgroup]; exists {
+		NewsgroupWorkerMapMux.RUnlock()
+		return workerID
+	}
+	NewsgroupWorkerMapMux.RUnlock()
+	
+	// Find least busy worker
+	WorkerQueueLengthMux.Lock()
+	if len(WorkerQueueLength) == 0 {
+		WorkerQueueLengthMux.Unlock()
+		return 0
+	}
+	
+	minLoad := WorkerQueueLength[0]
+	workerID := 0
+	for i := 1; i < len(WorkerQueueLength); i++ {
+		if WorkerQueueLength[i] < minLoad {
+			minLoad = WorkerQueueLength[i]
+			workerID = i
+		}
+	}
+	WorkerQueueLengthMux.Unlock()
+	
+	// Assign newsgroup to this worker
+	NewsgroupWorkerMapMux.Lock()
+	NewsgroupWorkerMap[newsgroup] = workerID
+	NewsgroupWorkerMapMux.Unlock()
+	
+	return workerID
+}
+
+// hashStringToInt computes a simple hash of a string to an integer (UNUSED - kept for reference)
+func hashStringToInt(s string) int {
+	h := 0
+	for i := 0; i < len(s); i++ {
+		h = 31*h + int(s[i])
+	}
+	if h < 0 {
+		h = -h
+	}
+	return h
+}
+
+// Find first empty slot
+func findEmptySlot(openConns *int, workerSlots []bool, mux *sync.Mutex) int {
+	mux.Lock()
+	defer mux.Unlock()
+	*openConns++
+	for i := 0; i < len(workerSlots); i++ {
+		if !workerSlots[i] {
+			workerSlots[i] = true
+			return i
+		}
+	}
+	return -1
+}
+
+func UnsetWorker(openConns *int, slotID int, workerSlots []bool, mux *sync.Mutex) {
+	mux.Lock()
+	defer mux.Unlock()
+	*openConns--
+	if slotID >= 0 && slotID < len(workerSlots) {
+		workerSlots[slotID] = false
+	}
+}
+
 func BootConnWorkers(pool *nntp.Pool, redisCli *redis.Client) {
 	openConns := 0
+	workerSlots := make([]bool, nntp.NNTPTransferThreads)
 	defaultSleep := time.Second
 	isleep := defaultSleep
 	var mux sync.Mutex
+	// Create per-worker queues
+	CheckQueues = make([]chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
+	WorkerQueueLength = make([]int, nntp.NNTPTransferThreads)
+	for i := range CheckQueues {
+		CheckQueues[i] = make(chan *nntp.CHTTJob, 1) // do not queue more than one (1) job at a time!
+		WorkerQueueLength[i] = 0
+	}
+	allEstablished := false
 forever:
 	for {
 		time.Sleep(defaultSleep)
@@ -1663,16 +1769,23 @@ forever:
 			break forever
 		}
 		mux.Lock()
-		if openConns == nntp.NNTPTransferThreads {
-			mux.Unlock()
+		allEstablished = openConns == nntp.NNTPTransferThreads
+		mux.Unlock()
+		if allEstablished {
 			continue forever
 		}
-		mux.Unlock()
-
-		var sharedConns []*nntp.BackendConn
-		bootN := nntp.NNTPTransferThreads - openConns - 1
+		//var sharedConns []*nntp.BackendConn
+		bootN := nntp.NNTPTransferThreads - openConns
+		if bootN <= 0 {
+			log.Printf("BootConnWorkers: all %d/%d connections established", openConns, nntp.NNTPTransferThreads)
+			continue forever
+		}
 		// get connections from pool
-		for i := bootN; i < nntp.NNTPTransferThreads; i++ {
+		log.Printf("BootConnWorkers: need %d connections (have %d), getting from pool...", bootN, openConns)
+		returnSignals := make([]*ReturnSignal, bootN)
+		errChan := make(chan struct{}, 1)
+		newConns := 0
+		for i := range bootN {
 			// Get a connection from pool
 			conn, err := pool.Get(nntp.MODE_STREAM_MV)
 			if err != nil {
@@ -1694,33 +1807,43 @@ forever:
 				continue forever
 			}
 			// got a connection
-			sharedConns = append(sharedConns, conn)
-			openConns++
-		}
-		if len(sharedConns) == 0 {
-			log.Printf("BootConnWorkers: no connections obtained, retry in: %v", isleep)
-			continue forever
-		}
-		isleep = defaultSleep // reset to default
-		returnSignals := make([]*ReturnSignal, len(sharedConns))
-		errChan := make(chan struct{}, 1)
-		for i, conn := range sharedConns {
+			slotID := findEmptySlot(&openConns, workerSlots, &mux)
+			if slotID < 0 {
+				log.Printf("BootConnWorkers: no empty worker slot found, closing connection")
+				conn.ForceCloseConn()
+				continue forever
+			}
 			returnSignal := &ReturnSignal{
+				slotID:        slotID,
 				errChan:       errChan,
 				redisCli:      redisCli,
-				Chan:          make(chan *ReturnSignal, 1),
+				ExitChan:      make(chan *ReturnSignal, 1),
 				tmpMessageIDs: make([]*string, 0, BatchCheck),
 				jobsQueued:    make(map[*nntp.CHTTJob]uint64, BatchCheck),
 				jobsReadOK:    make(map[*nntp.CHTTJob]uint64, BatchCheck),
 				jobMap:        make(map[*string]*nntp.CHTTJob, BatchCheck),
 				jobs:          make([]*nntp.CHTTJob, 0, BatchCheck),
 			}
+
 			returnSignals[i] = returnSignal
-			go CHTTWorker(i, conn, returnSignal)
+			// assign checkQueue by openConns counter
+			// so restarted workers get same channels to read from
+			go CHTTWorker(slotID, conn, returnSignal, CheckQueues[slotID])
+			newConns++
 		}
+		if newConns == 0 {
+			log.Printf("BootConnWorkers: no connections obtained, retry in: %v", isleep)
+			isleep = isleep * 2
+			if isleep > time.Minute {
+				isleep = time.Minute
+			}
+			continue forever
+		}
+		isleep = defaultSleep // reset to default
+		log.Printf("BootConnWorkers: launched %d CHTT workers", newConns)
 		// Monitor recently launched CHTT workers
 		go func() {
-			monitoring := len(sharedConns)
+			monitoring := newConns
 			for {
 				time.Sleep(100 * time.Millisecond)
 				for i, wait := range returnSignals {
@@ -1728,14 +1851,11 @@ forever:
 						continue
 					}
 					select {
-					case rs := <-wait.Chan:
+					case rs := <-wait.ExitChan:
 						log.Printf("CHTTWorker (%d) exited", i)
 						monitoring--
 
-						mux.Lock()
-						openConns--
-						mux.Unlock()
-
+						UnsetWorker(&openConns, rs.slotID, workerSlots, &mux)
 						returnSignals[i] = nil
 
 						rs.Mux.Lock()
@@ -1776,6 +1896,7 @@ forever:
 
 						// Clean up ReturnSignal maps and unlink pointers
 						// Clean up jobMap - nil all pointers before deleting
+						log.Printf("CHTTWorker (%d) cleaning up jobMap with %d entries", i, len(rs.jobMap))
 						for msgID := range rs.jobMap {
 							rs.jobMap[msgID] = nil
 							delete(rs.jobMap, msgID)
@@ -1783,31 +1904,35 @@ forever:
 						rs.jobMap = nil
 
 						// Clean up jobsQueued
+						log.Printf("CHTTWorker (%d) cleaning up jobsQueued with %d entries", i, len(rs.jobsQueued))
 						for job := range rs.jobsQueued {
 							delete(rs.jobsQueued, job)
 						}
 						rs.jobsQueued = nil
 
 						// Clean up jobsReadOK
+						log.Printf("CHTTWorker (%d) cleaning up jobsReadOK with %d entries", i, len(rs.jobsReadOK))
 						for job := range rs.jobsReadOK {
 							delete(rs.jobsReadOK, job)
 						}
 						rs.jobsReadOK = nil
 
 						// Clean up jobs slice - nil all pointers
+						log.Printf("CHTTWorker (%d) cleaning up jobs slice with %d entries", i, len(rs.jobs))
 						for idx := range rs.jobs {
 							rs.jobs[idx] = nil
 						}
 						rs.jobs = nil
 
 						// Clean up tmpMessageIDs (if still present)
+						log.Printf("CHTTWorker (%d) cleaning up tmpMessageIDs with %d entries", i, len(rs.tmpMessageIDs))
 						for idx := range rs.tmpMessageIDs {
 							rs.tmpMessageIDs[idx] = nil
 						}
 						rs.tmpMessageIDs = nil
 
 						rs.redisCli = nil
-						rs.Chan = nil
+						rs.ExitChan = nil
 						rs.errChan = nil
 
 						rs.Mux.Unlock()
@@ -1831,7 +1956,8 @@ var JobsToRetryMux sync.Mutex
 
 type ReturnSignal struct {
 	Mux           sync.Mutex
-	Chan          chan *ReturnSignal
+	slotID        int
+	ExitChan      chan *ReturnSignal
 	errChan       chan struct{}
 	redisCli      *redis.Client
 	tmpMessageIDs []*string
@@ -1846,7 +1972,7 @@ type readRequest struct {
 	retChan chan struct{}
 }
 
-func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
+func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue chan *nntp.CHTTJob) {
 	readResponsesChan := make(chan *readRequest, BatchCheck)
 	takeThisChan := make(chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
 	errChan := make(chan struct{}, 4)
@@ -1856,10 +1982,10 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 
 	defer func(conn *nntp.BackendConn, rs *ReturnSignal) {
 		conn.ForceCloseConn()
-		rs.Chan <- rs
+		rs.ExitChan <- rs
 		errChan <- struct{}{}
 	}(conn, rs)
-	lastRun := time.Now()
+	//lastRun := time.Now()
 
 	// launch go routine which sends CHECK commands if threshold exceeds BatchCheck
 	go func() {
@@ -1953,10 +2079,17 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 				}
 
 				rs.Mux.Lock()
-				lastRun = time.Now()
+				//lastRun = time.Now()
 				// Check if there are more jobs to process
 				hasMoreJobs := len(rs.jobs) > 0
 				rs.Mux.Unlock()
+				
+				// Decrement queue length for this worker (job processing complete)
+				WorkerQueueLengthMux.Lock()
+				if id < len(WorkerQueueLength) && WorkerQueueLength[id] > 0 {
+					WorkerQueueLength[id]--
+				}
+				WorkerQueueLengthMux.Unlock()
 
 				// If there are more jobs waiting, immediately trigger next job processing
 				if hasMoreJobs {
@@ -1973,7 +2106,7 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 					return
 				}
 				rs.Mux.Lock()
-				hasWork := len(rs.jobs) > 0 && time.Since(lastRun) >= DefaultCheckTicker
+				hasWork := len(rs.jobs) > 0
 				rs.Mux.Unlock()
 				if hasWork {
 					select {
@@ -2178,7 +2311,7 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal) {
 		case <-errChan:
 			errChan <- struct{}{}
 			return
-		case job := <-nntp.CheckQueue:
+		case job := <-checkQueue:
 			if common.WantShutdown() {
 				log.Printf("CheckWorker: WantShutdown, exiting")
 				return

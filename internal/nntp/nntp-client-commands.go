@@ -32,6 +32,7 @@ const MaxReadLinesBody = MaxReadLinesArticle - MaxReadLinesHeaders
 var NNTPTransferThreads int = 1
 var TakeThisQueue = make(chan *CHTTJob, NNTPTransferThreads)
 var CheckQueue = make(chan *CHTTJob, NNTPTransferThreads)
+
 var JobIDCounter uint64 // Atomic counter for unique job IDs
 
 // used in nntp-transfer/main.go
