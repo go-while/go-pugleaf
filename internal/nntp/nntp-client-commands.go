@@ -1321,7 +1321,7 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 */
 
 // TakeThisArticle sends a single article via TAKETHIS command and returns the response code
-func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *string) (int, error) {
+func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *string, newsgroup string) (int, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
@@ -1333,7 +1333,7 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 	}
 
 	// Prepare article for transfer
-	headers, err := common.ReconstructHeaders(article, true, nntphostname)
+	headers, err := common.ReconstructHeaders(article, true, nntphostname, newsgroup)
 	if err != nil {
 		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
 	}
@@ -1409,7 +1409,7 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 
 // SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response
 // Returns command ID for later response reading - used for streaming mode
-func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string) (uint, error) {
+func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string) (uint, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
@@ -1422,7 +1422,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	}
 
 	// Prepare article for transfer
-	headers, err := common.ReconstructHeaders(article, true, nntphostname)
+	headers, err := common.ReconstructHeaders(article, true, nntphostname, newsgroup)
 	if err != nil {
 		return 0, err
 	}
@@ -1512,7 +1512,7 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 		return 0, fmt.Errorf("not connected")
 	}
 	// Prepare article for posting
-	headers, err := common.ReconstructHeaders(article, false, nil)
+	headers, err := common.ReconstructHeaders(article, false, nil, "")
 	if err != nil {
 		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
 	}
