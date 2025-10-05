@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1186,11 +1187,11 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 				continue
 			}
 			num++
-			log.Printf("Newsgroup: '%s' | Starting response channel processor num %d", newsgroup.Name, num)
+			log.Printf("Newsgroup: '%s' | Starting response channel processor num %d (goroutines: %d)", newsgroup.Name, num, runtime.NumGoroutine())
 			responseWG.Add(1)
 			go func(rc chan *nntp.TTResponse, num uint64) {
 				defer responseWG.Done()
-				defer log.Printf("Newsgroup: '%s' | Ending response channel processor num %d", newsgroup.Name, num)
+				defer log.Printf("Newsgroup: '%s' | Ending response channel processor num %d (goroutines: %d)", newsgroup.Name, num, runtime.NumGoroutine())
 				for resp := range rc {
 					if resp == nil {
 						log.Printf("Newsgroup: '%s' | Warning: nil TT response channel received!?", newsgroup.Name)
@@ -1454,20 +1455,20 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 		if VERBOSE {
 			log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d/%d articles", *ttMode.Newsgroup, len(batchedJob.MessageIDs), len(articles))
 		}
-		
+
 		// Assign job to worker (consistent assignment + load balancing)
 		if len(CheckQueues) == 0 {
 			return nil, fmt.Errorf("no workers available")
 		}
-		
+
 		workerID := assignWorkerToNewsgroup(*ttMode.Newsgroup)
 		checkQueue := CheckQueues[workerID]
-		
+
 		// Track queue length for load balancing
 		WorkerQueueLengthMux.Lock()
 		WorkerQueueLength[workerID]++
 		WorkerQueueLengthMux.Unlock()
-		
+
 		log.Printf("Newsgroup: '%s' | Sending job #%d to Worker %d queue with %d message IDs", *ttMode.Newsgroup, batchedJob.JobID, workerID, len(batchedJob.MessageIDs))
 		checkQueue <- batchedJob
 		log.Printf("Newsgroup: '%s' | Job #%d sent to Worker %d successfully", *ttMode.Newsgroup, batchedJob.JobID, workerID)
@@ -1686,14 +1687,14 @@ func assignWorkerToNewsgroup(newsgroup string) int {
 		return workerID
 	}
 	NewsgroupWorkerMapMux.RUnlock()
-	
+
 	// Find least busy worker
 	WorkerQueueLengthMux.Lock()
 	if len(WorkerQueueLength) == 0 {
 		WorkerQueueLengthMux.Unlock()
 		return 0
 	}
-	
+
 	minLoad := WorkerQueueLength[0]
 	workerID := 0
 	for i := 1; i < len(WorkerQueueLength); i++ {
@@ -1703,25 +1704,13 @@ func assignWorkerToNewsgroup(newsgroup string) int {
 		}
 	}
 	WorkerQueueLengthMux.Unlock()
-	
+
 	// Assign newsgroup to this worker
 	NewsgroupWorkerMapMux.Lock()
 	NewsgroupWorkerMap[newsgroup] = workerID
 	NewsgroupWorkerMapMux.Unlock()
-	
-	return workerID
-}
 
-// hashStringToInt computes a simple hash of a string to an integer (UNUSED - kept for reference)
-func hashStringToInt(s string) int {
-	h := 0
-	for i := 0; i < len(s); i++ {
-		h = 31*h + int(s[i])
-	}
-	if h < 0 {
-		h = -h
-	}
-	return h
+	return workerID
 }
 
 // Find first empty slot
@@ -1757,7 +1746,7 @@ func BootConnWorkers(pool *nntp.Pool, redisCli *redis.Client) {
 	CheckQueues = make([]chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
 	WorkerQueueLength = make([]int, nntp.NNTPTransferThreads)
 	for i := range CheckQueues {
-		CheckQueues[i] = make(chan *nntp.CHTTJob, 1) // do not queue more than one (1) job at a time!
+		CheckQueues[i] = make(chan *nntp.CHTTJob) // no cap! only accepts if there is a reader!
 		WorkerQueueLength[i] = 0
 	}
 	allEstablished := false
@@ -1972,12 +1961,23 @@ type readRequest struct {
 	retChan chan struct{}
 }
 
+func replyChan(request chan struct{}, reply chan struct{}) {
+	select {
+	case <-request:
+		// got a reply request
+		reply <- struct{}{} // send back
+	default:
+	}
+}
+
 func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue chan *nntp.CHTTJob) {
 	readResponsesChan := make(chan *readRequest, BatchCheck)
 	takeThisChan := make(chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
 	errChan := make(chan struct{}, 4)
 	tickChan := make(chan struct{}, 1)
 	flipflopChan := make(chan struct{}, 1)
+	requestReplyJobDone := make(chan struct{}, 1)
+	replyJobDone := make(chan struct{}, 1)
 	rrRetChan := make(chan struct{}, BatchCheck)
 
 	defer func(conn *nntp.BackendConn, rs *ReturnSignal) {
@@ -2077,13 +2077,13 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue cha
 					// Release lock after batch is complete, allowing TAKETHIS to run
 					common.ChanRelease(flipflopChan)
 				}
-
+				replyChan(requestReplyJobDone, replyJobDone) // see if anybody is waiting and reply
 				rs.Mux.Lock()
 				//lastRun = time.Now()
 				// Check if there are more jobs to process
 				hasMoreJobs := len(rs.jobs) > 0
 				rs.Mux.Unlock()
-				
+
 				// Decrement queue length for this worker (job processing complete)
 				WorkerQueueLengthMux.Lock()
 				if id < len(WorkerQueueLength) && WorkerQueueLength[id] > 0 {
@@ -2253,12 +2253,12 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue cha
 			case job1 := <-nntp.TakeThisQueue:
 				job = job1
 				if job != nil {
-					log.Printf("Newsgroup '%s' | CheckWorker (%d): Received TAKETHIS job #%d from global queue (wanted: %d)", *job.Newsgroup, id, job.JobID, len(job.WantedIDs))
+					log.Printf("Newsgroup: '%s' | CheckWorker (%d): Received TAKETHIS job #%d from global queue (wanted: %d)", *job.Newsgroup, id, job.JobID, len(job.WantedIDs))
 				}
 			case job2 := <-takeThisChan:
 				job = job2
 				if job != nil {
-					log.Printf("Newsgroup '%s' | CheckWorker (%d): Received TAKETHIS job #%d from local CHECK channel (wanted: %d)", *job.Newsgroup, id, job.JobID, len(job.WantedIDs))
+					log.Printf("Newsgroup: '%s' | CheckWorker (%d): Received TAKETHIS job #%d from local CHECK channel (wanted: %d)", *job.Newsgroup, id, job.JobID, len(job.WantedIDs))
 				}
 			}
 
@@ -2279,29 +2279,29 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue cha
 			}
 
 			if len(wantedArticles) == 0 {
-				log.Printf("Newsgroup '%s' | CheckWorker (%d): No valid wanted articles found in ArticleMap for job #%d", *job.Newsgroup, id, job.JobID)
+				log.Printf("Newsgroup: '%s' | CheckWorker (%d): No valid wanted articles found in ArticleMap for job #%d", *job.Newsgroup, id, job.JobID)
 				job.Response(&nntp.TTResponse{Job: nil, Err: fmt.Errorf("got job without valid wanted articles")})
 				continue
 			}
 
 			common.ChanLock(flipflopChan)
-			log.Printf("Newsgroup '%s' | CheckWorker (%d): Sending TAKETHIS for job #%d with %d wanted articles", *job.Newsgroup, id, job.JobID, len(wantedArticles))
+			log.Printf("Newsgroup: '%s' | CheckWorker (%d): Sending TAKETHIS for job #%d with %d wanted articles", *job.Newsgroup, id, job.JobID, len(wantedArticles))
 			// Send TAKETHIS commands using existing function
 			transferred, rejected, redis_cached, err := sendArticlesBatchViaTakeThis(conn, wantedArticles, job, *job.Newsgroup, rs.redisCli)
 			common.ChanRelease(flipflopChan)
 
 			if err != nil {
-				log.Printf("Newsgroup '%s' | CheckWorker (%d): Error in TAKETHIS job #%d: %v", *job.Newsgroup, id, job.JobID, err)
+				log.Printf("Newsgroup: '%s' | CheckWorker (%d): Error in TAKETHIS job #%d: %v", *job.Newsgroup, id, job.JobID, err)
 				job.Response(&nntp.TTResponse{Job: job, Err: err})
 				continue
 			}
 
-			log.Printf("Newsgroup '%s' | CheckWorker (%d): TAKETHIS job #%d completed: transferred=%d, rejected=%d, redis_cached=%d", *job.Newsgroup, id, job.JobID, transferred, rejected, redis_cached)
+			log.Printf("Newsgroup: '%s' | CheckWorker (%d): TAKETHIS job #%d completed: transferred=%d, rejected=%d, redis_cached=%d", *job.Newsgroup, id, job.JobID, transferred, rejected, redis_cached)
 
 			// Send response back
-			log.Printf("Newsgroup '%s' | CheckWorker (%d): Sending TTresponse for job #%d to responseChan len=%d", *job.Newsgroup, id, job.JobID, len(job.ResponseChan))
+			log.Printf("Newsgroup: '%s' | CheckWorker (%d): Sending TTresponse for job #%d to responseChan len=%d", *job.Newsgroup, id, job.JobID, len(job.ResponseChan))
 			job.Response(&nntp.TTResponse{Job: job, Err: nil})
-			log.Printf("Newsgroup '%s' | CheckWorker (%d): Sent TTresponse for job #%d to responseChan", *job.Newsgroup, id, job.JobID)
+			log.Printf("Newsgroup: '%s' | CheckWorker (%d): Sent TTresponse for job #%d to responseChan", *job.Newsgroup, id, job.JobID)
 
 		}
 	}()
@@ -2323,17 +2323,30 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue cha
 				}
 				continue
 			}
-			log.Printf("CheckWorker (%d): Received job #%d from CheckQueue for newsgroup '%s' with %d message IDs", id, job.JobID, *job.Newsgroup, len(job.MessageIDs))
 
 			// Build jobMap for tracking which message IDs belong to this job
 			// and count queued messages
 			rs.Mux.Lock()
+			queueFull := len(rs.jobs) > 0
+			if queueFull {
+				log.Printf("Newsgroup: '%s' | CheckWorker (%d): got job #%d with %d message IDs. queued=%d ... waiting...", *job.Newsgroup, id, job.JobID, len(job.MessageIDs), len(rs.jobs))
+				requestReplyJobDone <- struct{}{}
+			}
+			rs.Mux.Unlock()
+			if queueFull {
+				start := time.Now()
+				<-replyJobDone
+				log.Printf("Newsgroup: '%s' | CheckWorker (%d): waited %v for previous jobs to clear before queuing job #%d", *job.Newsgroup, id, time.Since(start), job.JobID)
+			}
+			rs.Mux.Lock()
+			job.Mux.Lock()
 			for _, msgId := range job.MessageIDs {
 				if msgId != nil {
 					rs.jobMap[msgId] = job
 					rs.jobsQueued[job]++ // counts message ids to read check later
 				}
 			}
+			job.Mux.Unlock()
 			// Add job to processing queue
 			rs.jobs = append(rs.jobs, job)
 			rs.Mux.Unlock()
