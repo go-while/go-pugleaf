@@ -1566,7 +1566,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			continue // Skip cached articles
 		}
 		// Send TAKETHIS command with article content (non-blocking)
-		cmdID, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname)
+		cmdID, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname, newsgroup)
 		if err != nil {
 			if err == common.ErrNoNewsgroups {
 				log.Printf("Newsgroup: '%s' | skipped article '%s': no newsgroups header", newsgroup, article.MessageID)
