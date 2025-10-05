@@ -350,6 +350,100 @@ checkHeader:
 					return nil, ErrNoNewsgroups
 				}
 				newsgroups := SeparatorRegex.Split(newsgroupsValue, -1)
+		if !isSpacedLine {
+			if len(headerLine) < 4 { // "X: A"
+				log.Printf("Short header: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
+				ignoreLine = true
+				ignoredLines++
+				continue checkHeader
+			}
+			// check if first char is lowercase
+			if unicode.IsLower(rune(headerLine[0])) {
+				if VerboseHeaders {
+					log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (rewrite)", headerLine, i, article.MessageID)
+				}
+				headerLine = strings.ToUpper(string(headerLine[0])) + headerLine[1:]
+			}
+
+			// Check for proper header format: "name: value" (colon followed by space)
+			colonIndex := strings.Index(headerLine, ":")
+			if colonIndex == -1 {
+				log.Printf("Invalid header (no colon): '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
+				ignoreLine = true
+				ignoredLines++
+				continue checkHeader
+			}
+
+			// Check if header follows RFC format "name: value" (colon-space)
+			if colonIndex+1 >= len(headerLine) || headerLine[colonIndex+1] != ' ' {
+				// Malformed header - missing space after colon, skip it
+				log.Printf("Malformed header (no colon-space): '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
+				ignoreLine = true
+				ignoredLines++
+				continue checkHeader
+			}
+
+			header := strings.SplitN(headerLine, ":", 2)[0]
+			// extracted header key. do some checks
+			if header == "" || strings.Contains(header, " ") {
+				log.Printf("Invalid header (empty or contains space): '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
+				ignoreLine = true
+				ignoredLines++
+				continue checkHeader
+			}
+			if IgnoreHeadersMap[strings.ToLower(header)] {
+				ignoreLine = true
+				continue checkHeader
+			}
+			if IgnoreGoogleHeaders && strings.HasPrefix(strings.ToLower(header), "x-goo") {
+				ignoreLine = true
+				ignoredLines++
+				continue checkHeader
+			}
+			if !strings.HasPrefix(header, "X-") {
+				if headersMap[strings.ToLower(header)] {
+					log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (rewrite)", headerLine, i, article.MessageID)
+					headerLine = "X-RW-" + headerLine
+				}
+				headersMap[strings.ToLower(header)] = true
+			}
+			if header == "Newsgroups" {
+				// Check if Newsgroups header contains at least one valid newsgroup name
+				// check if next headerlines are continued lines
+			getLines:
+				for {
+					if i+1 < len(moreHeaders) {
+						if !strings.HasPrefix(moreHeaders[i+1], " ") && !strings.HasPrefix(moreHeaders[i+1], "\t") {
+							break getLines
+						}
+						headerLine += moreHeaders[i+1]
+						i++
+					} else {
+						break getLines
+					}
+					if len(headerLine) > 1024 {
+						log.Printf("Newsgroups header too long, exceeds total 1024 chars: '%s' line=%d in msgId='%s' (break)", headerLine, i, article.MessageID)
+						break getLines
+					}
+				}
+
+				// Extract only the newsgroups value (after "Newsgroups: ")
+				parts := strings.SplitN(headerLine, ":", 2)
+				if len(parts) != 2 {
+					log.Printf("Invalid Newsgroups header format: '%s' line=%d in msgId='%s' (continue)", headerLine, i, article.MessageID)
+					ignoreLine = true
+					ignoredLines++
+					continue checkHeader
+				}
+				newsgroupsValue := strings.TrimSpace(parts[1])
+				newsgroupsValue = strings.ReplaceAll(newsgroupsValue, ":", " ")
+				newsgroupsValue = strings.ReplaceAll(newsgroupsValue, ";", " ")
+				newsgroupsValue = strings.TrimSpace(newsgroupsValue)
+				if newsgroupsValue == "" {
+					log.Printf("Invalid Empty Newsgroups header value: '%s' line=%d in msgId='%s' (skip)", headerLine, i, article.MessageID)
+					return nil, ErrNoNewsgroups
+				}
+				newsgroups := SeparatorRegex.Split(newsgroupsValue, -1)
 			checkGroups:
 				for x, group := range newsgroups {
 					/*
@@ -362,16 +456,20 @@ checkHeader:
 					trimmedNG := strings.TrimSpace(group)
 					if trimmedNG != strings.ToLower(group) {
 						trimmedNG = strings.ToLower(group) // parse to lowercase
-						badGroups++
 					}
-
 					// Clean up unwanted characters (remove each character individually)
 					for _, char := range unwantedChars {
 						trimmedNG = strings.ReplaceAll(trimmedNG, string(char), "")
 					}
+					trimmedNG = MultipleDots.ReplaceAllString(trimmedNG, ".")
 					trimmedNG = strings.TrimSpace(trimmedNG)
 					trimmedNG = strings.TrimLeft(trimmedNG, ".")
+					trimmedNG = strings.TrimLeft(trimmedNG, ",")
+					trimmedNG = strings.TrimLeft(trimmedNG, ";")
 					trimmedNG = strings.TrimRight(trimmedNG, ".")
+					trimmedNG = strings.TrimRight(trimmedNG, ",")
+					trimmedNG = strings.TrimRight(trimmedNG, ";")
+					trimmedNG = strings.TrimSpace(trimmedNG)
 					if trimmedNG == "" || strings.Contains(trimmedNG, " ") || !IsValidGroupName(trimmedNG) {
 						if trimmedNG == "" {
 							log.Printf("Invalid newsgroup name: '%s' empty after cleanup in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
@@ -381,12 +479,14 @@ checkHeader:
 						badGroups++
 						continue checkGroups
 					}
+					if trimmedNG != group {
+						badGroups++ // but passed after trimming
+					}
 					validNewsgroups = append(validNewsgroups, trimmedNG)
 				} // end for checkGroups
 
 				if len(validNewsgroups) == 0 {
 					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' (return err)", headerLine, i, article.MessageID)
-					return nil, ErrNoNewsgroups
 				}
 
 				if badGroups > 0 {
@@ -395,9 +495,8 @@ checkHeader:
 					ignoredLines++
 					continue checkHeader
 				}
-
-			}
-		}
+			} // end if header Newsgroups
+		} // end if !isSpacedLine
 		headers = append(headers, headerLine)
 	}
 	if VerboseHeaders && ignoredLines > 0 {
