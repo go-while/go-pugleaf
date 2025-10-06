@@ -457,7 +457,6 @@ func main() {
 		}
 		transferDoneChan <- result
 	}(&wgP, redisCli)
-	wgP.Wait()
 	// Wait for either shutdown signal or transfer completion
 	select {
 	case <-sigChan:
@@ -470,7 +469,7 @@ func main() {
 			log.Printf("Transfer completed successfully")
 		}
 	}
-
+	wgP.Wait()
 	pool.ClosePool()
 
 	// Close processor
@@ -565,8 +564,17 @@ const query_getArticlesBatchWithDateFilter_nodatefilter = `SELECT article_num, m
 const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ? OFFSET ?"
 
 // getArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
-func getArticlesBatchWithDateFilter(groupDBs *database.GroupDBs, offset int64, startTime, endTime *time.Time) ([]*models.Article, error) {
-
+func getArticlesBatchWithDateFilter(db *database.Database, newsgroup *models.Newsgroup, offset int64, startTime, endTime *time.Time) ([]*models.Article, error) {
+	// Get group database
+	groupDBs, err := db.GetGroupDBs(newsgroup.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
+	}
+	defer func() {
+		if ferr := db.ForceCloseGroupDBs(groupDBs); ferr != nil {
+			log.Printf("ForceCloseGroupDBs error for '%s': %v", newsgroup.Name, ferr)
+		}
+	}()
 	var query string
 	var args []interface{}
 
@@ -1111,20 +1119,18 @@ func processRequeuedJobs(newsgroup string, ttMode *nntp.TakeThisMode, ttResponse
 func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, redisCli *redis.Client) error {
 
 	// Get group database
-	groupDBs, err := db.GetGroupDBs(newsgroup.Name)
+	groupDBsA, err := db.GetGroupDBs(newsgroup.Name)
 	if err != nil {
 		return fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
 	}
-	defer func() {
-		if ferr := db.ForceCloseGroupDBs(groupDBs); ferr != nil {
-			log.Printf("ForceCloseGroupDBs error for '%s': %v", newsgroup.Name, ferr)
-		}
-	}()
 
 	// Get total article count first with date filtering
-	totalArticles, err := getArticleCountWithDateFilter(groupDBs, startTime, endTime)
+	totalArticles, err := getArticleCountWithDateFilter(groupDBsA, startTime, endTime)
 	if err != nil {
 		return fmt.Errorf("failed to get article count for newsgroup '%s': %v", newsgroup.Name, err)
+	}
+	if ferr := db.ForceCloseGroupDBs(groupDBsA); ferr != nil {
+		log.Printf("ForceCloseGroupDBs error for '%s': %v", newsgroup.Name, ferr)
 	}
 
 	if totalArticles == 0 {
@@ -1279,7 +1285,7 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 		}
 		start := time.Now()
 		// Load batch from database with date filtering
-		articles, err := getArticlesBatchWithDateFilter(groupDBs, offset, startTime, endTime)
+		articles, err := getArticlesBatchWithDateFilter(db, newsgroup, offset, startTime, endTime)
 		if err != nil {
 			log.Printf("Error loading article batch (offset %d) for newsgroup %s: %v", offset, newsgroup.Name, err)
 			return fmt.Errorf("failed to load article batch (offset %d) for newsgroup '%s': %v", offset, newsgroup.Name, err)
@@ -1296,7 +1302,11 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 			return nil
 		}
 		//if VERBOSE {
-		log.Printf("Newsgroup: '%s' | Loaded %d articles from database (offset %d) took %v", newsgroup.Name, len(articles), offset, time.Since(start))
+		var size int
+		for _, a := range articles {
+			size += a.Bytes
+		}
+		log.Printf("Newsgroup: '%s' | Loaded %d articles from database (offset %d) (Bytes=%d) took %v", newsgroup.Name, len(articles), offset, size, time.Since(start))
 		//}
 		// Process articles in network batches
 		for i := 0; i < len(articles); i += batchCheck {
