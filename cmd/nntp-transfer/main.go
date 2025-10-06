@@ -1198,58 +1198,59 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 			go func(rc chan *nntp.TTResponse, num uint64) {
 				defer responseWG.Done()
 				defer log.Printf("Newsgroup: '%s' | Ending response channel processor num %d (goroutines: %d)", newsgroup.Name, num, runtime.NumGoroutine())
-				for resp := range rc {
-					if resp == nil {
-						log.Printf("Newsgroup: '%s' | Warning: nil TT response channel received!?", newsgroup.Name)
-						return
-					}
-					if resp.Err != nil {
-						log.Printf("Newsgroup: '%s' | Error in TT response: err='%v' job='%#v'", newsgroup.Name, resp.Err, resp.Job)
-						return
-					}
-					if resp.Job == nil {
-						log.Printf("Newsgroup: '%s' | Warning: nil Job in TT response without error!?", newsgroup.Name)
-						return
-					}
-					// get numbers
-					amux.Lock()
-					resp.Job.GetUpdateCounters(&transferred, &unwanted, &rejected, &checked, &txErrors, &connErrors)
-					amux.Unlock()
-
-					// free memory - CRITICAL: Lock and unlock in same scope, not with defer!
-					resp.Job.Mux.Lock()
-
-					// Clean up Articles and their internal fields
-					for i := range resp.Job.Articles {
-						if resp.Job.Articles[i] != nil {
-							// Clean article internal fields to free memory
-							resp.Job.Articles[i].RefSlice = nil
-							resp.Job.Articles[i].NNTPhead = nil
-							resp.Job.Articles[i].NNTPbody = nil
-							resp.Job.Articles[i].Headers = nil
-							resp.Job.Articles[i].ArticleNums = nil
-							resp.Job.Articles[i].NewsgroupsPtr = nil
-							resp.Job.Articles[i].ProcessQueue = nil
-							resp.Job.Articles[i].MsgIdItem = nil
-							resp.Job.Articles[i] = nil
-						}
-					}
-					resp.Job.Articles = nil
-
-					// Clean up ArticleMap - nil the keys (pointers) before deleting
-					for msgid := range resp.Job.ArticleMap {
-						resp.Job.ArticleMap[msgid] = nil
-						delete(resp.Job.ArticleMap, msgid)
-					}
-					resp.Job.ArticleMap = nil
-
-					// NOTE: Do NOT clean up MessageIDs or WantedIDs here!
-					// The CHECK worker may still be using them (race condition).
-					// They will be cleaned up in BootConnWorkers when the job is requeued or discarded.
-
-					resp.Job.Mux.Unlock()
-
+				
+				// Read exactly ONE response from this channel (channel is buffered with cap 1)
+				resp := <-rc
+				
+				if resp == nil {
+					log.Printf("Newsgroup: '%s' | Warning: nil TT response received!?", newsgroup.Name)
+					return
 				}
+				if resp.Err != nil {
+					log.Printf("Newsgroup: '%s' | Error in TT response: err='%v' job='%#v'", newsgroup.Name, resp.Err, resp.Job)
+					return
+				}
+				if resp.Job == nil {
+					log.Printf("Newsgroup: '%s' | Warning: nil Job in TT response without error!?", newsgroup.Name)
+					return
+				}
+				// get numbers
+				amux.Lock()
+				resp.Job.GetUpdateCounters(&transferred, &unwanted, &rejected, &checked, &txErrors, &connErrors)
+				amux.Unlock()
+
+				// free memory - CRITICAL: Lock and unlock in same scope, not with defer!
+				resp.Job.Mux.Lock()
+
+				// Clean up Articles and their internal fields
+				for i := range resp.Job.Articles {
+					if resp.Job.Articles[i] != nil {
+						// Clean article internal fields to free memory
+						resp.Job.Articles[i].RefSlice = nil
+						resp.Job.Articles[i].NNTPhead = nil
+						resp.Job.Articles[i].NNTPbody = nil
+						resp.Job.Articles[i].Headers = nil
+						resp.Job.Articles[i].ArticleNums = nil
+						resp.Job.Articles[i].NewsgroupsPtr = nil
+						resp.Job.Articles[i].ProcessQueue = nil
+						resp.Job.Articles[i].MsgIdItem = nil
+						resp.Job.Articles[i] = nil
+					}
+				}
+				resp.Job.Articles = nil
+
+				// Clean up ArticleMap - nil the keys (pointers) before deleting
+				for msgid := range resp.Job.ArticleMap {
+					resp.Job.ArticleMap[msgid] = nil
+					delete(resp.Job.ArticleMap, msgid)
+				}
+				resp.Job.ArticleMap = nil
+
+				// NOTE: Do NOT clean up MessageIDs or WantedIDs here!
+				// The CHECK worker may still be using them (race condition).
+				// They will be cleaned up in BootConnWorkers when the job is requeued or discarded.
+
+				resp.Job.Mux.Unlock()
 			}(responseChan, num)
 		}
 		log.Printf("Newsgroup: '%s' | Collector: ttResponses closed, waiting for %d response processors to finish...", newsgroup.Name, num)
