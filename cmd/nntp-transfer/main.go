@@ -1198,10 +1198,10 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 			go func(rc chan *nntp.TTResponse, num uint64) {
 				defer responseWG.Done()
 				defer log.Printf("Newsgroup: '%s' | Ending response channel processor num %d (goroutines: %d)", newsgroup.Name, num, runtime.NumGoroutine())
-				
+
 				// Read exactly ONE response from this channel (channel is buffered with cap 1)
 				resp := <-rc
-				
+
 				if resp == nil {
 					log.Printf("Newsgroup: '%s' | Warning: nil TT response received!?", newsgroup.Name)
 					return
@@ -1814,15 +1814,14 @@ forever:
 				continue forever
 			}
 			returnSignal := &ReturnSignal{
-				slotID:        slotID,
-				errChan:       errChan,
-				redisCli:      redisCli,
-				ExitChan:      make(chan *ReturnSignal, 1),
-				tmpMessageIDs: make([]*string, 0, BatchCheck),
-				jobsQueued:    make(map[*nntp.CHTTJob]uint64, BatchCheck),
-				jobsReadOK:    make(map[*nntp.CHTTJob]uint64, BatchCheck),
-				jobMap:        make(map[*string]*nntp.CHTTJob, BatchCheck),
-				jobs:          make([]*nntp.CHTTJob, 0, BatchCheck),
+				slotID:     slotID,
+				errChan:    errChan,
+				redisCli:   redisCli,
+				ExitChan:   make(chan *ReturnSignal, 1),
+				jobsQueued: make(map[*nntp.CHTTJob]uint64, BatchCheck),
+				jobsReadOK: make(map[*nntp.CHTTJob]uint64, BatchCheck),
+				jobMap:     make(map[*string]*nntp.CHTTJob, BatchCheck),
+				jobs:       make([]*nntp.CHTTJob, 0, BatchCheck),
 			}
 
 			returnSignals[i] = returnSignal
@@ -1865,6 +1864,11 @@ forever:
 								if job != nil {
 									// copy articles pointer
 									job.Mux.Lock()
+									if len(job.Articles) == 0 {
+										log.Printf("ERROR in CHTTWorker (%d) job %d has no articles, skipping requeue", i, job.JobID)
+										job.Mux.Unlock()
+										continue
+									}
 									rqj := &nntp.CHTTJob{
 										JobID:     job.JobID,
 										Newsgroup: job.Newsgroup,
@@ -1923,14 +1927,6 @@ forever:
 							rs.jobs[idx] = nil
 						}
 						rs.jobs = nil
-
-						// Clean up tmpMessageIDs (if still present)
-						log.Printf("CHTTWorker (%d) cleaning up tmpMessageIDs with %d entries", i, len(rs.tmpMessageIDs))
-						for idx := range rs.tmpMessageIDs {
-							rs.tmpMessageIDs[idx] = nil
-						}
-						rs.tmpMessageIDs = nil
-
 						rs.redisCli = nil
 						rs.ExitChan = nil
 						rs.errChan = nil
@@ -1955,16 +1951,15 @@ var JobsToRetry []*nntp.CHTTJob
 var JobsToRetryMux sync.Mutex
 
 type ReturnSignal struct {
-	Mux           sync.Mutex
-	slotID        int
-	ExitChan      chan *ReturnSignal
-	errChan       chan struct{}
-	redisCli      *redis.Client
-	tmpMessageIDs []*string
-	jobsQueued    map[*nntp.CHTTJob]uint64
-	jobsReadOK    map[*nntp.CHTTJob]uint64
-	jobMap        map[*string]*nntp.CHTTJob
-	jobs          []*nntp.CHTTJob
+	Mux        sync.Mutex
+	slotID     int
+	ExitChan   chan *ReturnSignal
+	errChan    chan struct{}
+	redisCli   *redis.Client
+	jobsQueued map[*nntp.CHTTJob]uint64
+	jobsReadOK map[*nntp.CHTTJob]uint64
+	jobMap     map[*string]*nntp.CHTTJob
+	jobs       []*nntp.CHTTJob
 }
 
 type readRequest struct {
@@ -2053,8 +2048,12 @@ func CHTTWorker(id int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue cha
 
 					err := conn.SendCheckMultiple(batch)
 					if err != nil {
+						rs.Mux.Lock()
+						rs.jobs = append([]*nntp.CHTTJob{currentJob}, rs.jobs...) // requeue at front
+						rs.Mux.Unlock()
 						common.ChanRelease(flipflopChan)
 						log.Printf("Newsgroup: '%s' | CheckWorker (%d): SendCheckMultiple error for batch %d-%d: %v", newsgroup, id, batchStart, batchEnd, err)
+						time.Sleep(time.Second)
 						return
 					}
 
