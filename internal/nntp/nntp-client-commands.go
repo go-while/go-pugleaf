@@ -64,16 +64,20 @@ type CheckResponse struct { // deprecated
 
 type ReadRequest struct {
 	CmdID uint
+	Job   *CHTTJob
 	N     int
 	Reqs  int
 	MsgID *string
 }
 
-func ReturnReadRequest(channel chan struct{}) {
+func (rr *ReadRequest) ReturnReadRequest(channel chan struct{}) {
 	select {
 	case channel <- struct{}{}:
 	default:
 	}
+	rr.Job = nil
+	rr.MsgID = nil
+	rr = nil
 }
 
 // batched CHECK/TAKETHIS Job
@@ -112,13 +116,13 @@ func (job *CHTTJob) Response(ForceCleanUp bool, Err error) {
 
 const IncrFLAG_CHECKED = 1
 const IncrFLAG_WANTED = 2
-const IncrFLAG_UNWANTED = 4
-const IncrFLAG_REJECTED = 8
-const IncrFLAG_RETRY = 16
-const IncrFLAG_TRANSFERRED = 32
-const IncrFLAG_REDIS_CACHED = 64
-const IncrFLAG_TX_ERRORS = 128
-const IncrFLAG_CONN_ERRORS = 256
+const IncrFLAG_UNWANTED = 3
+const IncrFLAG_REJECTED = 4
+const IncrFLAG_RETRY = 5
+const IncrFLAG_TRANSFERRED = 6
+const IncrFLAG_REDIS_CACHED = 7
+const IncrFLAG_TX_ERRORS = 8
+const IncrFLAG_CONN_ERRORS = 9
 
 func (job *CHTTJob) Increment(counter int) {
 	job.Mux.Lock()
@@ -1229,7 +1233,7 @@ func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
 }
 
 // SendCheckMultiple sends CHECK commands for multiple message IDs without returning responses!
-func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan chan *ReadRequest, retChan chan struct{}) error {
+func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan chan *ReadRequest, retChan chan struct{}, job *CHTTJob) error {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 	if !c.connected {
@@ -1255,7 +1259,7 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan 
 		if err != nil {
 			return fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
 		}
-		readResponsesChan <- &ReadRequest{CmdID: id, Reqs: len(messageIDs), MsgID: msgID, N: n + 1}
+		readResponsesChan <- &ReadRequest{CmdID: id, Job: job, Reqs: len(messageIDs), MsgID: msgID, N: n + 1}
 	}
 	return nil
 }
@@ -1444,7 +1448,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	if err != nil {
 		return 0, err
 	}
-	writer := bufio.NewWriter(c.conn)
+	writer := bufio.NewWriterSize(c.conn, article.Bytes+2048) // Slightly larger buffer than article size for headers
 	// Send TAKETHIS command
 	id, err := c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {

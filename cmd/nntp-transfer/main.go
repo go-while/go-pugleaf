@@ -1278,10 +1278,6 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 				}
 				resp.Job.ArticleMap = nil
 
-				// NOTE: Do NOT clean up MessageIDs or WantedIDs here!
-				// The CHECK worker may still be using them (race condition).
-				// They will be cleaned up in BootConnWorkers when the job is requeued or discarded.
-
 				resp.Job.Mux.Unlock()
 			}(responseChan, num)
 		}
@@ -1290,7 +1286,7 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 		responseWG.Wait()
 		log.Printf("Newsgroup: '%s' | Collector: all response processors closed", newsgroup.Name)
 		amux.Lock()
-		result := fmt.Sprintf("END Newsgroup: '%s' | transferred: %d/%d (unwanted: %d | rejected: %d | checked: %d | TX_Errors: %d | connErrors: %d | took %v",
+		result := fmt.Sprintf("END Newsgroup: '%s' | transferred: %d/%d  | unwanted: %d | rejected: %d | checked: %d | TX_Errors: %d | connErrors: %d | took %v",
 			newsgroup.Name, transferred, totalArticles, unwanted, rejected, checked, txErrors, connErrors, time.Since(start))
 		amux.Unlock()
 		//log.Print(result)
@@ -1750,7 +1746,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 
 		job.TTMode.IncrementTmp()
 		takeThisResponseCode, err := conn.ReadTakeThisResponseStreaming(cr.CmdId)
-		if err != nil || takeThisResponseCode == 0 {
+		if err != nil {
 			job.Increment(nntp.IncrFLAG_CONN_ERRORS)
 			conn.ForceCloseConn()
 			log.Printf("ERROR Newsgroup: '%s' | Failed to read TAKETHIS response for %s: %v", newsgroup, cr.Article.MessageID, err)
@@ -2192,7 +2188,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 							time.Sleep(time.Second)
 							return
 						}
-						err := conn.SendCheckMultiple(currentJob.MessageIDs[batchStart:batchEnd], readResponsesChan, rrRetChan)
+						err := conn.SendCheckMultiple(currentJob.MessageIDs[batchStart:batchEnd], readResponsesChan, rrRetChan, currentJob)
 						if err != nil {
 							log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d SendCheckMultiple error for batch (offset %d: %d-%d): %v", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, err)
 							time.Sleep(time.Second)
@@ -2340,17 +2336,16 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 
 				if rr == nil || rr.MsgID == nil {
 					log.Printf("CheckWorker (%d): Read CHECK got nil readRequest, skipping", workerID)
-					nntp.ReturnReadRequest(rrRetChan)
 					continue loop
 				}
 				if common.WantShutdown() {
 					log.Printf("CheckWorker (%d): Read CHECK WantShutdown, exiting", workerID)
-					nntp.ReturnReadRequest(rrRetChan)
+					rr.ReturnReadRequest(rrRetChan)
 					return
 				}
 				if !conn.IsConnected() {
 					log.Printf("CheckWorker (%d): Read CHECK connection lost, exiting", workerID)
-					nntp.ReturnReadRequest(rrRetChan)
+					rr.ReturnReadRequest(rrRetChan)
 					return
 				}
 				log.Printf("CheckWorker (%d): Reading CHECK response for msgID: %s (cmdId:%d MID=%d/%d)", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs)
@@ -2367,7 +2362,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				conn.TextConn.EndResponse(rr.CmdID)
 				if code == 0 && err != nil {
 					log.Printf("Failed to read CHECK response: %v", err)
-					nntp.ReturnReadRequest(rrRetChan)
+					rr.ReturnReadRequest(rrRetChan)
 					return
 				}
 				log.Printf("CheckWorker (%d): Got CHECK response line: '%s' for msgID: %s (cmdId:%d MID=%d/%d) took: %v ms", workerID, line, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, time.Since(start).Milliseconds())
@@ -2380,6 +2375,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				*/
 				tookTime += time.Since(start).Milliseconds()
 				responseCount++
+				rr.Job.Increment(nntp.IncrFLAG_CHECKED)
 				if rr.N == 1 {
 					log.Printf("CheckWorker (%d): time to first response for msgID: %s (cmdId:%d MID=%d/%d) took: %v ms", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, time.Since(start).Milliseconds())
 				}
@@ -2400,12 +2396,12 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				parts := strings.Fields(line)
 				if len(parts) < 1 {
 					log.Printf("ERROR in CheckWorker: Malformed CHECK response: %s", line)
-					nntp.ReturnReadRequest(rrRetChan)
+					rr.ReturnReadRequest(rrRetChan)
 					return
 				}
 				if parts[0] != *rr.MsgID {
 					log.Printf("ERROR in CheckWorker: Mismatched CHECK response: expected %s, got %s", *rr.MsgID, parts[0])
-					nntp.ReturnReadRequest(rrRetChan)
+					rr.ReturnReadRequest(rrRetChan)
 					return
 				}
 				log.Printf("CheckWorker (%d): DEBUG1 Processing CHECK response for msgID: %s (cmdId:%d MID=%d/%d) code=%d", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, code)
@@ -2414,7 +2410,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				rs.Mux.Unlock()
 				if !exists {
 					log.Printf("ERROR in CheckWorker: ReadCheckResponse msgId did not exist in jobMap: %s", *rr.MsgID)
-					nntp.ReturnReadRequest(rrRetChan)
+					rr.ReturnReadRequest(rrRetChan)
 					continue loop
 				}
 				log.Printf("CheckWorker (%d): DEBUG2 Processing CHECK response for msgID: %s (cmdId:%d MID=%d/%d) code=%d", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, code)
@@ -2447,11 +2443,11 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				rs.Mux.Unlock()
 				if !qexists || !rexists {
 					log.Printf("Newsgroup: '%s' | ERROR in CheckWorker: queuedCount or readCount did not exist for a job?!", *job.Newsgroup)
-					nntp.ReturnReadRequest(rrRetChan)
+					rr.ReturnReadRequest(rrRetChan)
 					continue loop
 				}
-				nntp.ReturnReadRequest(rrRetChan)
 				log.Printf("CheckWorker (%d): DEBUG4 Processing CHECK response for msgID: %s (cmdId:%d MID=%d/%d) code=%d", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, code)
+				rr.ReturnReadRequest(rrRetChan)
 				if queuedCount == readCount {
 					rs.Mux.Lock()
 					delete(rs.jobsQueued, job)
