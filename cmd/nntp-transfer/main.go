@@ -2258,10 +2258,10 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 							delete(rs.jobsQueued, currentJob)
 							delete(rs.jobsReadOK, currentJob)
 							rs.Mux.Unlock()
-
+							*/
 							// Send failure response
 							currentJob.Response(false, fmt.Errorf("CHECK response timeout"))
-							*/
+
 							// Release lock
 							common.ChanRelease(flipflopChan)
 							return
@@ -2737,7 +2737,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		function autoRefresh() {
 			setTimeout(function() {
 				location.reload();
-			}, 15000);
+			}, 3000);
 		}
 	</script>
 </head>
@@ -2757,7 +2757,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			<br>
 		{{end}}
 		<button class="refresh-btn" onclick="location.reload()">🔄 Refresh Now</button>
-		<span style="margin-left: 10px; color: #666; font-size: 12px;">(Auto-refresh every 15 seconds)</span>
+		<span style="margin-left: 10px; color: #666; font-size: 12px;">(Auto-refresh every 3 seconds)</span>
 	</div>
 
 	{{if .Progress}}
@@ -2854,7 +2854,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 
 		progressList = append(progressList, ProgressInfo{
 			Name:          name,
-			OffsetStart:   progress.OffsetStart,
+			OffsetStart:   progress.OffsetStart + progress.BatchStart,
 			BatchStart:    progress.BatchStart,
 			BatchEnd:      progress.BatchEnd,
 			TotalArticles: progress.TotalArticles,
