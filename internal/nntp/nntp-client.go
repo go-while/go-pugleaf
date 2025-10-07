@@ -3,7 +3,6 @@ package nntp
 // nntp provides NNTP client functionality for go-pugleaf.
 
 import (
-	"bufio"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -56,10 +55,10 @@ var DefaultBufferTX int = 64 * 1024
 type BackendConn struct {
 	conn     net.Conn
 	TextConn *textproto.Conn
-	Writer   *bufio.Writer
-	Backend  *BackendConfig
-	mux      sync.RWMutex
-	Pool     *Pool // link to parent pool
+	//Writer   *bufio.Writer
+	Backend *BackendConfig
+	mux     sync.RWMutex
+	Pool    *Pool // link to parent pool
 
 	// Connection state
 	connected     bool
@@ -201,7 +200,7 @@ func (c *BackendConn) Connect() error {
 
 	c.conn = conn
 	c.TextConn = textproto.NewConn(conn)
-	c.Writer = bufio.NewWriterSize(conn, DefaultBufferTX) // bufio writer with defined buffer size
+	//c.Writer = bufio.NewWriterSize(conn, DefaultBufferTX) // bufio writer with defined buffer size
 
 	// Read welcome message
 	code, message, err := c.TextConn.ReadCodeLine(NNTPWelcomeCodeMin)
@@ -303,13 +302,25 @@ func (c *BackendConn) CloseFromPoolOnly() error {
 	c.authenticated = false
 	//c.TextConn = nil // CloseFromPoolOnly
 	//c.conn = nil     // CloseFromPoolOnly
-	c.Writer = nil
+	//c.Writer = nil
 	//log.Printf("Closed NNTP Connection to %s", c.Backend.Host)
 	return nil
 }
 
+func (c *BackendConn) IsConnected() bool {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+	if !c.connected {
+		return false
+	}
+	if c.conn == nil {
+		return false
+	}
+	return true
+}
+
 // SetReadDeadline sets the read deadline for the connection
-func (c *BackendConn) xSetReadDeadline(t time.Time) error {
+func (c *BackendConn) SetReadDeadline(t time.Time) error {
 
 	if c.conn == nil {
 		return fmt.Errorf("connection not established")

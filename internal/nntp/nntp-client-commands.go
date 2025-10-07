@@ -3,6 +3,7 @@ package nntp
 // Package nntp provides NNTP command implementations for go-pugleaf.
 
 import (
+	"bufio"
 	"fmt"
 	"log"
 	"strconv"
@@ -30,8 +31,9 @@ var MaxReadLinesXover int64 = 100 // XOVER command typically retrieves overview 
 const MaxReadLinesBody = MaxReadLinesArticle - MaxReadLinesHeaders
 
 var NNTPTransferThreads int = 1
-var TakeThisQueue = make(chan *CHTTJob, NNTPTransferThreads)
-var CheckQueue = make(chan *CHTTJob, NNTPTransferThreads)
+
+// var TakeThisQueue = make(chan *CHTTJob, NNTPTransferThreads)
+//var CheckQueue = make(chan *CHTTJob, NNTPTransferThreads)
 
 var JobIDCounter uint64 // Atomic counter for unique job IDs
 
@@ -50,13 +52,28 @@ type TakeThisMode struct {
 }
 
 type TTResponse struct {
-	Job *CHTTJob
-	Err error
+	Job          *CHTTJob
+	ForceCleanUp bool
+	Err          error
 }
 
 type CheckResponse struct { // deprecated
 	CmdId   uint
 	Article *models.Article
+}
+
+type ReadRequest struct {
+	CmdID uint
+	N     int
+	Reqs  int
+	MsgID *string
+}
+
+func ReturnReadRequest(channel chan struct{}) {
+	select {
+	case channel <- struct{}{}:
+	default:
+	}
 }
 
 // batched CHECK/TAKETHIS Job
@@ -79,14 +96,17 @@ type CHTTJob struct {
 	redisCached  uint64
 	TxErrors     uint64
 	ConnErrors   uint64
+	OffsetStart  int64
+	BatchStart   int64
+	BatchEnd     int64
 }
 
-func (job *CHTTJob) Response(response *TTResponse) {
+func (job *CHTTJob) Response(ForceCleanUp bool, Err error) {
 	if job.ResponseChan == nil {
-		log.Printf("ERROR CHTTJob.Response(): ResponseChan is nil for job ID %d response='%v'", job.JobID, response)
+		log.Printf("ERROR CHTTJob.Response(): ResponseChan is nil for job #%d", job.JobID)
 		return
 	}
-	job.ResponseChan <- response
+	job.ResponseChan <- &TTResponse{Job: job, ForceCleanUp: ForceCleanUp, Err: Err}
 	close(job.ResponseChan)
 }
 
@@ -143,7 +163,7 @@ func (job *CHTTJob) GetUpdateCounters(transferred, unwanted, rejected, checked, 
 	job.Mux.Unlock()
 }
 
-func (ttMode *TakeThisMode) GetMode() bool {
+func (ttMode *TakeThisMode) UseCHECK() bool {
 	ttMode.mux.Lock()
 	defer ttMode.mux.Unlock()
 	if ttMode.CheckMode {
@@ -1209,7 +1229,7 @@ func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
 }
 
 // SendCheckMultiple sends CHECK commands for multiple message IDs without returning responses!
-func (c *BackendConn) SendCheckMultiple(messageIDs []*string) error {
+func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan chan *ReadRequest, retChan chan struct{}) error {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 	if !c.connected {
@@ -1223,22 +1243,20 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string) error {
 	if len(messageIDs) == 0 {
 		return fmt.Errorf("no message IDs provided")
 	}
-
+	//writer := bufio.NewWriter(c.conn)
 	c.lastUsed = time.Now()
-	for _, msgID := range messageIDs {
+
+	for n, msgID := range messageIDs {
 		if msgID == nil || *msgID == "" {
 			log.Printf("Skipping empty message ID in CHECK command")
 			continue
 		}
-		_, err := c.Writer.WriteString("CHECK " + *msgID + CRLF)
+		id, err := c.TextConn.Cmd("CHECK %s", *msgID)
 		if err != nil {
 			return fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
 		}
+		readResponsesChan <- &ReadRequest{CmdID: id, Reqs: len(messageIDs), MsgID: msgID, N: n + 1}
 	}
-	if err := c.Writer.Flush(); err != nil {
-		return fmt.Errorf("failed to flush CHECK commands: %w", err)
-	}
-	// Responses must be read later using CheckMultiple
 	return nil
 }
 
@@ -1339,7 +1357,7 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 	}
 
 	c.lastUsed = time.Now()
-
+	writer := bufio.NewWriter(c.conn)
 	// Send TAKETHIS command
 	id, err := c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
@@ -1348,13 +1366,13 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 
 	// Send headers
 	for _, headerLine := range headers {
-		if _, err := c.Writer.WriteString(headerLine + CRLF); err != nil {
+		if _, err := writer.WriteString(headerLine + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write header: %w", err)
 		}
 	}
 
 	// Send empty line between headers and body
-	if _, err := c.Writer.WriteString(CRLF); err != nil {
+	if _, err := writer.WriteString(CRLF); err != nil {
 		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
 	}
 
@@ -1375,18 +1393,18 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 			line = "." + line
 		}
 
-		if _, err := c.Writer.WriteString(line + CRLF); err != nil {
+		if _, err := writer.WriteString(line + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write body line: %w", err)
 		}
 	}
 
 	// Send termination line (single dot)
-	if _, err := c.Writer.WriteString(DOT + CRLF); err != nil {
+	if _, err := writer.WriteString(DOT + CRLF); err != nil {
 		return 0, fmt.Errorf("failed to send article terminator: %w", err)
 	}
 
 	// Flush the writer to ensure all data is sent
-	if err := c.Writer.Flush(); err != nil {
+	if err := writer.Flush(); err != nil {
 		return 0, fmt.Errorf("failed to flush article data: %w", err)
 	}
 
@@ -1426,7 +1444,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	if err != nil {
 		return 0, err
 	}
-
+	writer := bufio.NewWriter(c.conn)
 	// Send TAKETHIS command
 	id, err := c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
@@ -1435,13 +1453,13 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 
 	// Send headers
 	for _, headerLine := range headers {
-		if _, err := c.Writer.WriteString(headerLine + CRLF); err != nil {
+		if _, err := writer.WriteString(headerLine + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write header SendTakeThisArticleStreaming: %w", err)
 		}
 	}
 
 	// Send empty line between headers and body
-	if _, err := c.Writer.WriteString(CRLF); err != nil {
+	if _, err := writer.WriteString(CRLF); err != nil {
 		return 0, fmt.Errorf("failed to write header/body separator SendTakeThisArticleStreaming: %w", err)
 	}
 
@@ -1462,18 +1480,18 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 			line = "." + line
 		}
 
-		if _, err := c.Writer.WriteString(line + CRLF); err != nil {
+		if _, err := writer.WriteString(line + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write body line SendTakeThisArticleStreaming: %w", err)
 		}
 	}
 
 	// Send termination line (single dot)
-	if _, err := c.Writer.WriteString(DOT + CRLF); err != nil {
+	if _, err := writer.WriteString(DOT + CRLF); err != nil {
 		return 0, fmt.Errorf("failed to send article terminator SendTakeThisArticleStreaming: %w", err)
 	}
 
 	// Flush the writer to ensure all data is sent
-	if err := c.Writer.Flush(); err != nil {
+	if err := writer.Flush(); err != nil {
 		return 0, fmt.Errorf("failed to flush article data SendTakeThisArticleStreaming: %w", err)
 	}
 
@@ -1531,7 +1549,7 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 	if err != nil && code == 0 {
 		return code, fmt.Errorf("POST command failed: %s", line)
 	}
-
+	writer := bufio.NewWriter(c.conn)
 	switch code {
 	case 340:
 		// pass, posted
@@ -1564,13 +1582,13 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 
 	// Send headers using writer (not DotWriter)
 	for _, headerLine := range headers {
-		if _, err := c.Writer.WriteString(headerLine + CRLF); err != nil {
+		if _, err := writer.WriteString(headerLine + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write header: %w", err)
 		}
 	}
 
 	// Send empty line between headers and body
-	if _, err := c.Writer.WriteString(CRLF); err != nil {
+	if _, err := writer.WriteString(CRLF); err != nil {
 		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
 	}
 
@@ -1591,18 +1609,18 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 			line = "." + line
 		}
 
-		if _, err := c.Writer.WriteString(line + CRLF); err != nil {
+		if _, err := writer.WriteString(line + CRLF); err != nil {
 			return 0, fmt.Errorf("failed to write body line: %w", err)
 		}
 	}
 
 	// Send termination line (single dot)
-	if _, err := c.Writer.WriteString(DOT + CRLF); err != nil {
+	if _, err := writer.WriteString(DOT + CRLF); err != nil {
 		return 0, fmt.Errorf("failed to send article terminator: %w", err)
 	}
 
 	// Flush the writer to ensure all data is sent
-	if err := c.Writer.Flush(); err != nil {
+	if err := writer.Flush(); err != nil {
 		return 0, fmt.Errorf("failed to flush article data: %w", err)
 	}
 
