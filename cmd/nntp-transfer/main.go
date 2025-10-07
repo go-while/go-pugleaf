@@ -2557,7 +2557,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 			// Build jobMap for tracking which message IDs belong to this job
 			// and count queued messages
 			rs.Mux.Lock()
-			queueFull := len(rs.jobs) > 0
+			queueFull := len(rs.jobs) > 1
 			rs.Mux.Unlock()
 			if queueFull {
 				log.Printf("Newsgroup: '%s' | CHTTworker (%d): got job #%d with %d message IDs. queued=%d ... waiting...", *job.Newsgroup, workerID, job.JobID, len(job.MessageIDs), len(rs.jobs))
@@ -2573,7 +2573,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 						// pass
 					case <-time.After(time.Millisecond * 16):
 						rs.Mux.Lock()
-						queueFull = len(rs.jobs) > 0
+						queueFull = len(rs.jobs) > 1
 						rs.Mux.Unlock()
 						if !queueFull {
 							break waitForReply
