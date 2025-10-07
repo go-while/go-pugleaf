@@ -2122,7 +2122,7 @@ func replyChan(request chan struct{}, reply chan struct{}) {
 func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue chan *nntp.CHTTJob) {
 	readResponsesChan := make(chan *nntp.ReadRequest, BatchCheck)
 	rrRetChan := make(chan struct{}, BatchCheck)
-	takeThisChan := make(chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
+	takeThisChan := make(chan *nntp.CHTTJob) // unbuffered
 	errChan := make(chan struct{}, 4)
 	tickChan := make(chan struct{}, 1)
 	flipflopChan := make(chan struct{}, 1)
