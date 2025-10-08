@@ -2169,23 +2169,25 @@ func (rs *ReturnSignal) UnlockTT() {
 	rs.Mux.Lock()
 	rs.RunTT = false
 	rs.Mux.Unlock()
+	log.Printf("UnlockTT: released RunTT lock")
 }
 
 func (rs *ReturnSignal) GetLockTT() {
 	for {
 		rs.Mux.Lock()
-		if !rs.RunTT && !rs.CHECK {
-			rs.RunTT = true
-			rs.Mux.Unlock()
-			return
-		}
 		if rs.RunTT {
 			rs.Mux.Unlock()
 			return
 		}
+		if !rs.RunTT && !rs.CHECK {
+			rs.RunTT = true
+			rs.Mux.Unlock()
+			log.Printf("GetLockTT: acquired RunTT lock")
+			return
+		}
 		rs.Mux.Unlock()
 		log.Printf("GetLockTT: waiting for RunTT to be true...")
-		time.Sleep(time.Millisecond * 5000)
+		time.Sleep(nntp.ReturnDelay)
 	}
 }
 
@@ -2196,37 +2198,50 @@ func (rs *ReturnSignal) UnlockCHECKforTTwithWait() {
 			rs.CHECK = false
 			rs.RunTT = true
 			rs.Mux.Unlock()
+			log.Printf("UnlockCHECKforTTwithWait: switched CHECK to RunTT")
 			return
 		}
 		rs.Mux.Unlock()
 		log.Printf("UnlockCHECKforTTwithWait: waiting for RunTT to be false...")
-		time.Sleep(time.Millisecond * 5000)
+		time.Sleep(nntp.ReturnDelay)
 	}
 }
+
 func (rs *ReturnSignal) UnlockCHECKforTT() {
 	rs.Mux.Lock()
+	defer rs.Mux.Unlock()
+	if !rs.CHECK || rs.RunTT {
+		log.Printf("UnlockCHECKforTT: cannot switch to RunTT, CHECK=%t RunTT=%t", rs.CHECK, rs.RunTT)
+		return
+	}
 	rs.CHECK = false
 	rs.RunTT = true
-	rs.Mux.Unlock()
 }
 
 func (rs *ReturnSignal) BlockCHECK() {
 	rs.Mux.Lock()
 	rs.CHECK = false
+	log.Printf("BlockCHECK: set CHECK to false (runTT=%t)", rs.RunTT)
 	rs.Mux.Unlock()
 }
 
 func (rs *ReturnSignal) LockCHECK() {
+	start := time.Now()
+	printLast := start
 	for {
 		rs.Mux.Lock()
 		if !rs.RunTT {
 			rs.CHECK = true
+			log.Printf("LockCHECK: acquired CHECK lock (runTT=%t) waited %v", rs.RunTT, time.Since(start))
 			rs.Mux.Unlock()
 			return
 		}
-		log.Printf("LockCHECK: waiting for RunTT to be false... rs.CHECK=%t rs.RunTT=%t", rs.CHECK, rs.RunTT)
+		if time.Since(printLast) > time.Second {
+			log.Printf("LockCHECK: waiting for RunTT to be false... rs.CHECK=%t rs.RunTT=%t", rs.CHECK, rs.RunTT)
+			printLast = time.Now()
+		}
 		rs.Mux.Unlock()
-		time.Sleep(time.Millisecond * 5000)
+		time.Sleep(nntp.ReturnDelay)
 	}
 }
 
@@ -2245,7 +2260,7 @@ func replyChan(request chan struct{}, reply chan struct{}) {
 }
 
 func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue chan *nntp.CHTTJob) {
-	readResponsesChan := make(chan *nntp.ReadRequest, BatchCheck)
+	readResponsesChan := make(chan *nntp.ReadRequest, BatchCheck*2)
 	//rrRetChan := make(chan struct{}, BatchCheck)
 	takeThisChan := make(chan *nntp.CHTTJob, 2) // buffer 2
 	errChan := make(chan struct{}, 4)
@@ -2331,7 +2346,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 						}
 						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquire LOCK CHECK for batch (offset %d: %d-%d) (%d messages)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, len(currentJob.MessageIDs[batchStart:batchEnd]))
 						rs.LockCHECK()
-						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquired CHECK lock for batch (offset %d: %d-%d)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
+						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquired CHECK lock for batch (offset %d: %d-%d) -> SendCheckMultiple", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
 						err := conn.SendCheckMultiple(currentJob.MessageIDs[batchStart:batchEnd], readResponsesChan, currentJob)
 						if err != nil {
 							log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d SendCheckMultiple error for batch (offset %d: %d-%d): %v", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, err)
@@ -2452,7 +2467,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				return
 
 			case rr := <-readResponsesChan:
-				log.Printf("CheckWorker (%d): Read CHECK got readRequest for rr: '%v'", workerID, rr)
+				//log.Printf("CheckWorker (%d): Read CHECK got readRequest for rr: '%v'", workerID, rr)
 				if rr == nil || rr.MsgID == nil {
 					log.Printf("CheckWorker (%d): Read CHECK got nil readRequest, skipping", workerID)
 					continue loop
@@ -2463,14 +2478,14 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rr.ClearReadRequest()
 					return
 				}
-				log.Printf("CheckWorker (%d): Read CHECK response (do conn check) for msgID: %s (cmdId:%d MID=%d/%d)", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs)
+				//log.Printf("CheckWorker (%d): Read CHECK response (do conn check) for msgID: %s (cmdId:%d MID=%d/%d)", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs)
 				if !conn.IsConnected() {
 					log.Printf("CheckWorker (%d): Read CHECK connection lost, exiting", workerID)
 					//rr.ReturnReadRequest(rrRetChan)
 					rr.ClearReadRequest()
 					return
 				}
-				log.Printf("CheckWorker (%d): Reading CHECK response for msgID: %s (cmdId:%d MID=%d/%d)", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs)
+				//log.Printf("CheckWorker (%d): Reading CHECK response for msgID: %s (cmdId:%d MID=%d/%d)", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs)
 				start := time.Now()
 				/* disabled
 				if err := conn.SetReadDeadline(time.Now().Add(1 * time.Minute)); err != nil {
@@ -2489,7 +2504,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rr.ClearReadRequest()
 					return
 				}
-				log.Printf("CheckWorker (%d): Got CHECK response line: '%s' for msgID: %s (cmdId:%d MID=%d/%d) took: %v ms", workerID, line, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, time.Since(start).Milliseconds())
+				//log.Printf("CheckWorker (%d): Got CHECK response line: '%s' for msgID: %s (cmdId:%d MID=%d/%d) took: %v ms", workerID, line, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, time.Since(start).Milliseconds())
 				/* disabled
 				if err := conn.SetReadDeadline(time.Time{}); err != nil {
 					log.Printf("Failed to set unset read deadline: %v", err)
@@ -2498,11 +2513,13 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					return
 				}
 				*/
-				tookTime += time.Since(start).Milliseconds()
+				took := time.Since(start).Milliseconds()
+				tookTime += took
 				responseCount++
 				rr.Job.Increment(nntp.IncrFLAG_CHECKED)
 				if rr.N == 1 {
 					log.Printf("CheckWorker (%d): time to first response for msgID: %s (cmdId:%d MID=%d/%d) took: %v ms", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, time.Since(start).Milliseconds())
+					tookTime = 0
 				} else if responseCount >= 10 {
 					avg := float64(tookTime) / float64(responseCount)
 					if avg > 1 {
@@ -2533,7 +2550,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				rs.Mux.Lock()
 				job, exists := rs.jobMap[rr.MsgID]
 				rs.Mux.Unlock()
-				log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG1 Processing CHECK response for msgID: %s (cmdId:%d MID=%d/%d) code=%d", *job.Newsgroup, workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, code)
+				//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG1 Processing CHECK response for msgID: %s (cmdId:%d MID=%d/%d) code=%d", *job.Newsgroup, workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, code)
 				if !exists {
 					log.Printf("Newsgroup: '%s' | ERROR in CheckWorker: ReadCheckResponse msgId did not exist in jobMap: %s", *job.Newsgroup, *rr.MsgID)
 					//rr.ReturnReadRequest(rrRetChan)
@@ -2548,15 +2565,15 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				rs.Mux.Unlock()
 				switch code {
 				case 238:
-					log.Printf("Newsgroup: '%s' | Got Response: Wanted Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
+					//log.Printf("Newsgroup: '%s' | Got Response: Wanted Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
 					job.AppendWantedMessageID(rr.MsgID)
 
 				case 438:
-					log.Printf("Newsgroup: '%s' | Got Response: Unwanted Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
+					//log.Printf("Newsgroup: '%s' | Got Response: Unwanted Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
 					job.Increment(nntp.IncrFLAG_UNWANTED)
 
 				case 431:
-					log.Printf("Newsgroup: '%s' | Got Response: Retry Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
+					//log.Printf("Newsgroup: '%s' | Got Response: Retry Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
 					job.Increment(nntp.IncrFLAG_RETRY)
 
 				default:
@@ -2584,7 +2601,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rs.Mux.Unlock()
 					if len(job.WantedIDs) > 0 {
 						// Pass job to TAKETHIS worker via channel
-						log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5 job #%d got all %d CHECK responses, passing to TAKETHIS worker (wanted: %d articles)", *job.Newsgroup, workerID, job.JobID, queuedCount, len(job.WantedIDs))
+						log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5 job #%d got all %d CHECK responses, passing to TAKETHIS worker (wanted: %d articles) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, queuedCount, len(job.WantedIDs), len(takeThisChan))
 						if len(readResponsesChan) == 0 {
 							rs.UnlockCHECKforTT() // Unlock CHECK, lock for TAKETHIS
 						} else {
@@ -2601,7 +2618,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 							}()
 						}
 						takeThisChan <- job // local takethis chan sharing the same connection
-						log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5c Sent job #%d to TAKETHIS worker (wanted: %d/%d)", *job.Newsgroup, workerID, job.JobID, len(job.WantedIDs), queuedCount)
+						log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5c Sent job #%d to TAKETHIS worker (wanted: %d/%d) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, len(job.WantedIDs), queuedCount, len(takeThisChan))
 
 					} else {
 						log.Printf("Newsgroup: '%s' | CheckWorker (%d):  DEBUG6 job #%d got %d CHECK responses but server wants none", *job.Newsgroup, workerID, job.JobID, queuedCount)
@@ -2609,7 +2626,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 						job.Response(true, nil)
 					}
 				} else {
-					log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG6 job #%d CHECK responses so far: %d/%d readResponsesChan=%d", *job.Newsgroup, workerID, job.JobID, readCount, queuedCount, len(readResponsesChan))
+					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG6 job #%d CHECK responses so far: %d/%d readResponsesChan=%d", *job.Newsgroup, workerID, job.JobID, readCount, queuedCount, len(readResponsesChan))
 				}
 				continue loop
 			} // end select
@@ -2621,16 +2638,17 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 		defer func() {
 			errChan <- struct{}{}
 		}()
-
+		var job *nntp.CHTTJob
 		for {
 			if common.WantShutdown() {
 				log.Printf("TTworker (%d): WantShutdown, exiting", workerID)
 				return
 			}
-			var job *nntp.CHTTJob
+
 			select {
 			case ajob := <-takeThisChan:
 				job = ajob
+
 			case <-errChan:
 				log.Printf("TTworker (%d): got errChan signal, exiting", workerID)
 				errChan <- struct{}{}
@@ -2640,7 +2658,11 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				log.Printf("TTworker (%d): Received nil job, channels may be closing", workerID)
 				continue
 			}
-
+			if len(job.WantedIDs) == 0 {
+				log.Printf("Newsgroup: '%s' | TTworker (%d): job #%d has no wanted articles, skipping TAKETHIS", *job.Newsgroup, workerID, job.JobID)
+				job.Response(true, nil)
+				continue
+			}
 			// Build list of wanted articles
 			wantedArticles := make([]*models.Article, 0, len(job.WantedIDs))
 			for _, wantedID := range job.WantedIDs {

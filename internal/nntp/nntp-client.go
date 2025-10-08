@@ -308,7 +308,7 @@ func (c *BackendConn) CloseFromPoolOnly() error {
 
 func (c *BackendConn) IsConnected() bool {
 	c.mux.Lock()
-	log.Printf("IsConnected check: connected=%v conn=%v", c.connected, c.conn)
+	//log.Printf("IsConnected check: connected=%v conn=%v", c.connected, c.conn)
 	defer c.mux.Unlock()
 	if !c.connected {
 		return false

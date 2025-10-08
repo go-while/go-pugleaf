@@ -62,27 +62,35 @@ type OffsetQueue struct {
 	queued int
 }
 
+var ReturnDelay = time.Millisecond * 16
+
 func (o *OffsetQueue) Wait(n int) {
 	start := time.Now()
+	lastPrint := start
 	for {
 		o.mux.RLock()
 		if o.queued < n {
 			o.mux.RUnlock()
+
 			o.mux.Lock()
+			log.Printf("OffsetQueue: waited (%d ms) for %d batches to finish, currently queued: %d", time.Since(start).Milliseconds(), n, o.queued)
 			o.isleep = o.isleep / 2
 			if o.isleep < time.Millisecond {
-				o.isleep = time.Millisecond
+				o.isleep = 0
 			}
 			o.mux.Unlock()
-			log.Printf("OffsetQueue: waited (%d ms) for %d batches to finish, currently queued: %d", time.Since(start).Milliseconds(), n, o.queued)
+
 			return
 		}
-		log.Printf("OffsetQueue: waiting for %d batches to finish, currently queued: %d", n, o.queued)
+		if time.Since(lastPrint) > time.Second {
+			log.Printf("OffsetQueue: waiting for batches to finish, currently queued: %d", o.queued)
+			lastPrint = time.Now()
+		}
 		o.mux.RUnlock()
 		o.mux.Lock()
 		o.isleep += time.Millisecond
-		if o.isleep > time.Millisecond*5000 {
-			o.isleep = time.Millisecond * 5000
+		if o.isleep > ReturnDelay {
+			o.isleep = ReturnDelay
 		}
 		time.Sleep(o.isleep)
 		o.mux.Unlock()
@@ -1322,13 +1330,13 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan 
 
 	//writer := bufio.NewWriter(c.conn)
 	//defer writer.Flush()
-	log.Printf("SendCheckMultiple commands for %d message IDs", len(messageIDs))
+	//log.Printf("Newsgroup: '%s' | SendCheckMultiple commands for %d message IDs", *job.Newsgroup, len(messageIDs))
 	for n, msgID := range messageIDs {
 		if msgID == nil || *msgID == "" {
-			log.Printf("Skipping empty message ID in CHECK command")
+			log.Printf("Newsgroup: '%s' | Skipping empty message ID in CHECK command", *job.Newsgroup)
 			continue
 		}
-		log.Printf("Newsgroup: '%s' | Preparing c.mux.Lock() 'CHECK %s' (%d/%d)", *job.Newsgroup, *msgID, n+1, len(messageIDs))
+		//log.Printf("Newsgroup: '%s' | Preparing c.mux.Lock() 'CHECK %s' (%d/%d)", *job.Newsgroup, *msgID, n+1, len(messageIDs))
 		c.mux.Lock()
 		id, err := c.TextConn.Cmd("CHECK %s", *msgID)
 		//_, err := fmt.Fprintf(c.conn, "CHECK %s%s", *msgID, CRLF)
@@ -1336,9 +1344,12 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan 
 		if err != nil {
 			return fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
 		}
-		log.Printf("Newsgroup: '%s' | Sent CHECK command for %s (CmdID=%d) notify readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
+		//log.Printf("Newsgroup: '%s' | Sent CHECK command for %s (CmdID=%d) notify readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
+		if len(readResponsesChan) == cap(readResponsesChan) {
+			log.Printf("Newsgroup: '%s' | WARNING: readResponsesChan is full (%d/%d)", *job.Newsgroup, len(readResponsesChan), cap(readResponsesChan))
+		}
 		readResponsesChan <- &ReadRequest{CmdID: id, Job: job, Reqs: len(messageIDs), MsgID: msgID, N: n + 1}
-		log.Printf("Newsgroup: '%s' | Notify reader done for %s (CmdID=%d) readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
+		//log.Printf("Newsgroup: '%s' | Notify reader done for %s (CmdID=%d) readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
 		id++
 	}
 	return nil
@@ -1593,17 +1604,17 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 // ReadTakeThisResponseStreaming reads a TAKETHIS response using the command ID
 // Used in streaming mode after all articles have been sent
 func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (int, error) {
-	log.Printf("*BackendConn.ReadTakeThisResponseStreaming: wait command ID %d Response", id)
+	log.Printf("TAKETHIS wait Response command ID %d ", id)
 	// Read TAKETHIS response
 	c.TextConn.StartResponse(id)
 	defer c.TextConn.EndResponse(id)
-	c.mux.Lock()
-	defer c.mux.Unlock()
+	//c.mux.Lock()
+	//defer c.mux.Unlock()
 	code, _, err := c.TextConn.ReadCodeLine(239)
 	if code == 0 && err != nil {
 		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
 	}
-	log.Printf("got *BackendConn.ReadTakeThisResponseStreaming: command ID %d: code=%d", id, code)
+	log.Printf("TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: command ID %d: code=%d", id, code)
 
 	// Parse response
 	// Format: code <message-id> [message]
