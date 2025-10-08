@@ -55,10 +55,9 @@ var DefaultBufferTX int = 64 * 1024
 type BackendConn struct {
 	conn     net.Conn
 	TextConn *textproto.Conn
-	//Writer   *bufio.Writer
-	Backend *BackendConfig
-	mux     sync.RWMutex
-	Pool    *Pool // link to parent pool
+	Backend  *BackendConfig
+	mux      sync.RWMutex
+	Pool     *Pool // link to parent pool
 
 	// Connection state
 	connected     bool
@@ -309,6 +308,7 @@ func (c *BackendConn) CloseFromPoolOnly() error {
 
 func (c *BackendConn) IsConnected() bool {
 	c.mux.Lock()
+	log.Printf("IsConnected check: connected=%v conn=%v", c.connected, c.conn)
 	defer c.mux.Unlock()
 	if !c.connected {
 		return false
@@ -320,7 +320,7 @@ func (c *BackendConn) IsConnected() bool {
 }
 
 // SetReadDeadline sets the read deadline for the connection
-func (c *BackendConn) SetReadDeadline(t time.Time) error {
+func (c *BackendConn) xSetReadDeadline(t time.Time) error {
 
 	if c.conn == nil {
 		return fmt.Errorf("connection not established")

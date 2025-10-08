@@ -51,6 +51,57 @@ type TakeThisMode struct {
 	CheckMode       bool // Start with TAKETHIS mode (false)
 }
 
+type TTSetup struct {
+	ResponseChan chan *TTResponse
+	OffsetQ      *OffsetQueue
+}
+
+type OffsetQueue struct {
+	mux    sync.RWMutex
+	isleep time.Duration
+	queued int
+}
+
+func (o *OffsetQueue) Wait(n int) {
+	start := time.Now()
+	for {
+		o.mux.RLock()
+		if o.queued < n {
+			o.mux.RUnlock()
+			o.mux.Lock()
+			o.isleep = o.isleep / 2
+			if o.isleep < time.Millisecond {
+				o.isleep = time.Millisecond
+			}
+			o.mux.Unlock()
+			log.Printf("OffsetQueue: waited (%d ms) for %d batches to finish, currently queued: %d", time.Since(start).Milliseconds(), n, o.queued)
+			return
+		}
+		log.Printf("OffsetQueue: waiting for %d batches to finish, currently queued: %d", n, o.queued)
+		o.mux.RUnlock()
+		o.mux.Lock()
+		o.isleep += time.Millisecond
+		if o.isleep > time.Millisecond*5000 {
+			o.isleep = time.Millisecond * 5000
+		}
+		time.Sleep(o.isleep)
+		o.mux.Unlock()
+	}
+}
+
+func (o *OffsetQueue) Done() {
+	o.mux.Lock()
+	defer o.mux.Unlock()
+	o.queued--
+	log.Printf("OffsetQueue: a batch is done, still queued: %d", o.queued)
+}
+func (o *OffsetQueue) Add(n int) {
+	o.mux.Lock()
+	defer o.mux.Unlock()
+	o.queued += n
+	log.Printf("OffsetQueue: added %d batches, now queued: %d", n, o.queued)
+}
+
 type TTResponse struct {
 	Job          *CHTTJob
 	ForceCleanUp bool
@@ -70,14 +121,18 @@ type ReadRequest struct {
 	MsgID *string
 }
 
+func (rr *ReadRequest) ClearReadRequest() {
+	rr.Job = nil
+	rr.MsgID = nil
+	rr = nil
+}
+
 func (rr *ReadRequest) ReturnReadRequest(channel chan struct{}) {
 	select {
 	case channel <- struct{}{}:
 	default:
 	}
-	rr.Job = nil
-	rr.MsgID = nil
-	rr = nil
+	rr.ClearReadRequest()
 }
 
 // batched CHECK/TAKETHIS Job
@@ -104,6 +159,7 @@ type CHTTJob struct {
 	OffsetStart  int64
 	BatchStart   int64
 	BatchEnd     int64
+	OffsetQ      *OffsetQueue
 }
 
 func (job *CHTTJob) Response(ForceCleanUp bool, Err error) {
@@ -1245,33 +1301,45 @@ func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
 }
 
 // SendCheckMultiple sends CHECK commands for multiple message IDs without returning responses!
-func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan chan *ReadRequest, retChan chan struct{}, job *CHTTJob) error {
+func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan chan *ReadRequest, job *CHTTJob) error {
 	c.mux.Lock()
-	defer c.mux.Unlock()
+
 	if !c.connected {
+		c.mux.Unlock()
 		return fmt.Errorf("not connected")
 	}
 
 	if c.ModeReader {
+		c.mux.Unlock()
 		return fmt.Errorf("cannot check article in reader mode")
 	}
+	c.lastUsed = time.Now()
+	c.mux.Unlock()
 
 	if len(messageIDs) == 0 {
 		return fmt.Errorf("no message IDs provided")
 	}
-	//writer := bufio.NewWriter(c.conn)
-	c.lastUsed = time.Now()
 
+	//writer := bufio.NewWriter(c.conn)
+	//defer writer.Flush()
+	log.Printf("SendCheckMultiple commands for %d message IDs", len(messageIDs))
 	for n, msgID := range messageIDs {
 		if msgID == nil || *msgID == "" {
 			log.Printf("Skipping empty message ID in CHECK command")
 			continue
 		}
+		log.Printf("Newsgroup: '%s' | Preparing c.mux.Lock() 'CHECK %s' (%d/%d)", *job.Newsgroup, *msgID, n+1, len(messageIDs))
+		c.mux.Lock()
 		id, err := c.TextConn.Cmd("CHECK %s", *msgID)
+		//_, err := fmt.Fprintf(c.conn, "CHECK %s%s", *msgID, CRLF)
+		c.mux.Unlock()
 		if err != nil {
 			return fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
 		}
+		log.Printf("Newsgroup: '%s' | Sent CHECK command for %s (CmdID=%d) notify readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
 		readResponsesChan <- &ReadRequest{CmdID: id, Job: job, Reqs: len(messageIDs), MsgID: msgID, N: n + 1}
+		log.Printf("Newsgroup: '%s' | Notify reader done for %s (CmdID=%d) readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
+		id++
 	}
 	return nil
 }
@@ -1441,6 +1509,13 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 	return code, nil
 }
 
+func (c *BackendConn) GetBufSize(size int) int {
+	if size+2048 <= 16*1024 {
+		return size + 2048
+	}
+	return 16 * 1024 // hardcoded default 32KB max buffer size
+}
+
 // SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response
 // Returns command ID for later response reading - used for streaming mode
 func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string) (uint, error) {
@@ -1460,7 +1535,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	if err != nil {
 		return 0, err
 	}
-	writer := bufio.NewWriterSize(c.conn, article.Bytes+2048) // Slightly larger buffer than article size for headers
+	writer := bufio.NewWriterSize(c.conn, c.GetBufSize(article.Bytes)) // Slightly larger buffer than article size for headers
 	// Send TAKETHIS command
 	id, err := c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
@@ -1518,17 +1593,17 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 // ReadTakeThisResponseStreaming reads a TAKETHIS response using the command ID
 // Used in streaming mode after all articles have been sent
 func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (int, error) {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
+	log.Printf("*BackendConn.ReadTakeThisResponseStreaming: wait command ID %d Response", id)
 	// Read TAKETHIS response
 	c.TextConn.StartResponse(id)
 	defer c.TextConn.EndResponse(id)
-
+	c.mux.Lock()
+	defer c.mux.Unlock()
 	code, _, err := c.TextConn.ReadCodeLine(239)
 	if code == 0 && err != nil {
 		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
 	}
+	log.Printf("got *BackendConn.ReadTakeThisResponseStreaming: command ID %d: code=%d", id, code)
 
 	// Parse response
 	// Format: code <message-id> [message]
