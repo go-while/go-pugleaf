@@ -1174,7 +1174,17 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 	}
 
 	log.Printf("Newsgroup: '%s' | transferNewsgroup: Got group DBs, querying article count...", newsgroup.Name)
-
+	// Initialize newsgroup progress tracking
+	resultsMutex.Lock()
+	if _, exists := NewsgroupProgressMap[newsgroup.Name]; !exists {
+		NewsgroupProgressMap[newsgroup.Name] = &NewsgroupProgress{
+			Started:       time.Now(),
+			LastUpdated:   time.Now(),
+			Finished:      false,
+			TotalArticles: 0,
+		}
+	}
+	resultsMutex.Unlock()
 	// Get total article count first with date filtering
 	totalArticles, err := getArticleCountWithDateFilter(groupDBsA, startTime, endTime)
 	if err != nil {
@@ -1190,7 +1200,12 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 	log.Printf("Newsgroup: '%s' | transferNewsgroup: Closed group DBs, checking if articles exist...", newsgroup.Name)
 
 	if totalArticles == 0 {
-
+		resultsMutex.Lock()
+		NewsgroupProgressMap[newsgroup.Name].Finished = true
+		NewsgroupProgressMap[newsgroup.Name].LastUpdated = time.Now()
+		results = append(results, fmt.Sprintf("END Newsgroup: '%s' | No articles to process", newsgroup.Name))
+		resultsMutex.Unlock()
+		// No articles to process
 		if startTime != nil || endTime != nil {
 			if VERBOSE {
 				log.Printf("No articles found in newsgroup: %s (within specified date range)", newsgroup.Name)
@@ -1205,14 +1220,9 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 
 	// Initialize newsgroup progress tracking
 	resultsMutex.Lock()
-	if _, exists := NewsgroupProgressMap[newsgroup.Name]; !exists {
-		NewsgroupProgressMap[newsgroup.Name] = &NewsgroupProgress{
-			Started:       time.Now(),
-			LastUpdated:   time.Now(),
-			Finished:      false,
-			TotalArticles: totalArticles,
-		}
-	}
+	progress := NewsgroupProgressMap[newsgroup.Name]
+	progress.TotalArticles = totalArticles
+	progress.LastUpdated = time.Now()
 	resultsMutex.Unlock()
 
 	if dryRun {
