@@ -87,6 +87,7 @@ type CHTTJob struct {
 	Mux          sync.Mutex
 	TTMode       *TakeThisMode
 	ResponseChan chan *TTResponse
+	responseSent bool // Track if response already sent (prevents double send)
 	Articles     []*models.Article
 	ArticleMap   map[*string]*models.Article
 	MessageIDs   []*string
@@ -110,6 +111,17 @@ func (job *CHTTJob) Response(ForceCleanUp bool, Err error) {
 		log.Printf("ERROR CHTTJob.Response(): ResponseChan is nil for job #%d", job.JobID)
 		return
 	}
+
+	// Check if response already sent (prevents double send on connection loss)
+	job.Mux.Lock()
+	if job.responseSent {
+		log.Printf("WARNING CHTTJob.Response(): Response already sent for job #%d, skipping", job.JobID)
+		job.Mux.Unlock()
+		return
+	}
+	job.responseSent = true
+	job.Mux.Unlock()
+
 	job.ResponseChan <- &TTResponse{Job: job, ForceCleanUp: ForceCleanUp, Err: Err}
 	close(job.ResponseChan)
 }

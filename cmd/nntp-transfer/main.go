@@ -9,9 +9,11 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	_ "net/http/pprof" // Memory profiling
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strconv"
@@ -77,6 +79,16 @@ func showUsageExamples() {
 	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.test -redis-cache=true -redis-ttl 86400")
 	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.test -redis-clear-cache")
 	fmt.Println("  # Use -redis-clear-cache to start fresh (clears all cached message IDs)")
+	fmt.Println()
+	fmt.Println("Memory Profiling & Monitoring:")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.* -mem-stats")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.* -pprof-port 6060")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.* -gc-percent 50")
+	fmt.Println("  # -mem-stats: Log memory stats every 30 seconds")
+	fmt.Println("  # -pprof-port: Enable pprof at http://localhost:6060/debug/pprof/")
+	fmt.Println("  # -gc-percent: Lower values = more GC, less memory (default 100)")
+	fmt.Println("  # Get heap profile: curl http://localhost:6060/debug/pprof/heap > heap.prof")
+	fmt.Println("  # Analyze: go tool pprof heap.prof")
 	fmt.Println()
 
 	fmt.Println("Show ALL command line flags:")
@@ -150,11 +162,20 @@ func main() {
 		fileExclude      = flag.String("file-exclude", "", "File containing newsgroup patterns to exclude (one per line)")
 		forceIncludeOnly = flag.Bool("force-include-only", false, "When set, only transfer newsgroups that match patterns in include file (ignores -group pattern)")
 
-		// Web server options
-		webPort = flag.Int("web-port", 0, "Enable web server on this port to view results (e.g. 8080, default: disabled)")
+		// Web server and profiling options
+		webPort   = flag.Int("web-port", 0, "Enable web server on this port to view results (e.g. 8080, default: disabled)")
+		pprofPort = flag.Int("pprof-port", 0, "Enable pprof profiling server on this port (e.g., 6060). Access at http://localhost:PORT/debug/pprof/")
+		memStats  = flag.Bool("mem-stats", false, "Log memory statistics every 30 seconds")
+		gcPercent = flag.Int("gc-percent", 100, "Set GOGC percentage (default 100). Lower values = more frequent GC, less memory")
 	)
 	flag.Parse()
 	common.IgnoreGoogleHeaders = *ignoreGoogleHeaders
+
+	// Configure garbage collector
+	if *gcPercent != 100 {
+		old := debug.SetGCPercent(*gcPercent)
+		log.Printf("Set GOGC from %d to %d (lower = more GC, less memory)", old, *gcPercent)
+	}
 
 	// Show help if requested
 	if *showHelp {
@@ -469,6 +490,25 @@ func main() {
 		go startWebServer(*webPort)
 	}
 
+	// Start pprof server if port is specified
+	if *pprofPort > 0 {
+		go func() {
+			addr := fmt.Sprintf("localhost:%d", *pprofPort)
+			log.Printf("Starting pprof server on http://%s/debug/pprof/", addr)
+			log.Printf("  Heap profile: http://%s/debug/pprof/heap", addr)
+			log.Printf("  Goroutines:   http://%s/debug/pprof/goroutine", addr)
+			log.Printf("  Allocs:       http://%s/debug/pprof/allocs", addr)
+			if err := http.ListenAndServe(addr, nil); err != nil {
+				log.Printf("pprof server error: %v", err)
+			}
+		}()
+	}
+
+	// Start memory stats monitoring if enabled
+	if *memStats {
+		go monitorMemoryStats()
+	}
+
 	// Wait for either shutdown signal or transfer completion
 	select {
 	case <-sigChan:
@@ -666,8 +706,15 @@ func getArticleCountWithDateFilter(groupDBs *database.GroupDBs, startTime, endTi
 		query = "SELECT COUNT(*) FROM articles"
 	}
 
+	start := time.Now()
 	var count int64
 	err := groupDBs.DB.QueryRow(query, args...).Scan(&count)
+	elapsed := time.Since(start)
+
+	if elapsed > 5*time.Second {
+		log.Printf("WARNING: Slow COUNT query for group '%s' took %v (count=%d)", groupDBs.Newsgroup, elapsed, count)
+	}
+
 	if err != nil {
 		return 0, err
 	}
@@ -1031,28 +1078,6 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 			if VERBOSE {
 				log.Printf("Newsgroup: '%s' | Start", newsgroup.Name)
 			}
-
-			// Initialize newsgroup progress tracking
-			resultsMutex.Lock()
-			NewsgroupProgressMap[newsgroup.Name] = &NewsgroupProgress{
-				Started:     time.Now(),
-				LastUpdated: time.Now(),
-				Finished:    false,
-			}
-			resultsMutex.Unlock()
-
-			/*
-				transferred, checked, rc, unwanted, rejected, txErrors, connErrors, err := transferNewsgroup(db, proc, pool, newsgroup, batchCheck, dryRun, startTime, endTime, debugCapture, redisCli)
-
-				transferMutex.Lock()
-				totalTransferred += transferred
-				totalRedisCacheHits += rc
-				totalUnwanted += unwanted
-				totalRejected += rejected
-				totalTXErrors += txErrors
-				totalConnErrors += connErrors
-				transferMutex.Unlock()
-			*/
 			err := transferNewsgroup(db, newsgroup, batchCheck, dryRun, startTime, endTime, debugCapture, redisCli)
 			if err == ErrNotInDateRange {
 				transferMutex.Lock()
@@ -1140,20 +1165,29 @@ func processRequeuedJobs(newsgroup string, ttMode *nntp.TakeThisMode, ttResponse
 // transferNewsgroup transfers articles from a single newsgroup
 func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, redisCli *redis.Client) error {
 
+	log.Printf("Newsgroup: '%s' | transferNewsgroup: Starting (getting group DBs)...", newsgroup.Name)
+
 	// Get group database
 	groupDBsA, err := db.GetGroupDBs(newsgroup.Name)
 	if err != nil {
 		return fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
 	}
 
+	log.Printf("Newsgroup: '%s' | transferNewsgroup: Got group DBs, querying article count...", newsgroup.Name)
+
 	// Get total article count first with date filtering
 	totalArticles, err := getArticleCountWithDateFilter(groupDBsA, startTime, endTime)
 	if err != nil {
 		return fmt.Errorf("failed to get article count for newsgroup '%s': %v", newsgroup.Name, err)
 	}
+
+	log.Printf("Newsgroup: '%s' | transferNewsgroup: Got article count (%d), closing group DBs...", newsgroup.Name, totalArticles)
+
 	if ferr := db.ForceCloseGroupDBs(groupDBsA); ferr != nil {
 		log.Printf("ForceCloseGroupDBs error for '%s': %v", newsgroup.Name, ferr)
 	}
+
+	log.Printf("Newsgroup: '%s' | transferNewsgroup: Closed group DBs, checking if articles exist...", newsgroup.Name)
 
 	if totalArticles == 0 {
 
@@ -1169,12 +1203,15 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 		return nil
 	}
 
-	// Update progress with total articles count
+	// Initialize newsgroup progress tracking
 	resultsMutex.Lock()
-	if progress, exists := NewsgroupProgressMap[newsgroup.Name]; exists {
-		progress.Mux.Lock()
-		progress.TotalArticles = totalArticles
-		progress.Mux.Unlock()
+	if _, exists := NewsgroupProgressMap[newsgroup.Name]; !exists {
+		NewsgroupProgressMap[newsgroup.Name] = &NewsgroupProgress{
+			Started:       time.Now(),
+			LastUpdated:   time.Now(),
+			Finished:      false,
+			TotalArticles: totalArticles,
+		}
 	}
 	resultsMutex.Unlock()
 
@@ -2202,40 +2239,20 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 						deadline := time.After(time.Minute)
 						timedOut := false
 						replies := 0
-						/*
-							// Send all message IDs to read channel
-							for i, msgID := range currentJob.MessageIDs[batchStart:batchEnd] {
-								if msgID != nil {
-									// pass message ID pointer to channel
-									// to read the responses from connection
-									select {
-									case <-deadline:
-										log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d timeout for batch (offset %d: %d-%d) replies=%d readResponsesChan=%d n=%d/%d", *currentJob.Newsgroup, id, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, replies, len(readResponsesChan), i+1, len(currentJob.MessageIDs[batchStart:batchEnd]))
-										timedOut = true
-									case readResponsesChan <- &readRequest{id: i, reqs: len(currentJob.MessageIDs[batchStart:batchEnd]), MsgID: msgID, retChan: rrRetChan}:
-										// sent readRequest to readResponsesChan, wait for reply
-									}
-									if timedOut {
-										break
-									}
+
+						for i, msgID := range currentJob.MessageIDs[batchStart:batchEnd] {
+							if msgID != nil {
+								log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d waiting for rrRetChan (offset %d: %d-%d) replies=%d readResponsesChan=%d n=%d/%d", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, replies, len(readResponsesChan), i+1, len(currentJob.MessageIDs[batchStart:batchEnd]))
+								select {
+								case <-deadline:
+									log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d timeout waiting for rrRetChan for batch (offset %d: %d-%d) replies=%d readResponsesChan=%d n=%d/%d", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, replies, len(readResponsesChan), i+1, len(currentJob.MessageIDs[batchStart:batchEnd]))
+									timedOut = true
+								case <-rrRetChan:
+									// got reply
+									replies++
 								}
-							}
-						*/
-						if !timedOut {
-							for i, msgID := range currentJob.MessageIDs[batchStart:batchEnd] {
-								if msgID != nil {
-									log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d waiting for rrRetChan (offset %d: %d-%d) replies=%d readResponsesChan=%d n=%d/%d", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, replies, len(readResponsesChan), i+1, len(currentJob.MessageIDs[batchStart:batchEnd]))
-									select {
-									case <-deadline:
-										log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d timeout waiting for rrRetChan for batch (offset %d: %d-%d) replies=%d readResponsesChan=%d n=%d/%d", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, replies, len(readResponsesChan), i+1, len(currentJob.MessageIDs[batchStart:batchEnd]))
-										timedOut = true
-									case <-rrRetChan:
-										// got reply
-										replies++
-									}
-									if timedOut {
-										break
-									}
+								if timedOut {
+									break
 								}
 							}
 						}
@@ -2378,8 +2395,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				rr.Job.Increment(nntp.IncrFLAG_CHECKED)
 				if rr.N == 1 {
 					log.Printf("CheckWorker (%d): time to first response for msgID: %s (cmdId:%d MID=%d/%d) took: %v ms", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, time.Since(start).Milliseconds())
-				}
-				if responseCount >= BatchCheck {
+				} else if responseCount >= BatchCheck/2 {
 					avg := float64(tookTime) / float64(responseCount)
 					if avg > 1 {
 						log.Printf("CheckWorker (%d): Read %d CHECK responses, avg latency: %.1f ms", workerID, responseCount, avg)
@@ -2523,7 +2539,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				// requeue at front
 				rs.jobs = append([]*nntp.CHTTJob{job}, rs.jobs...)
 				rs.Mux.Unlock()
-				continue
+				return
 			}
 
 			log.Printf("Newsgroup: '%s' | TTworker (%d): TAKETHIS job #%d completed: transferred=%d, rejected=%d, redis_cached=%d", *job.Newsgroup, workerID, job.JobID, transferred, rejected, redis_cached)
@@ -2605,6 +2621,49 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 		} // end select
 	} // end for
 } // end func CheckWorker
+
+// monitorMemoryStats logs memory statistics periodically
+func monitorMemoryStats() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	var m runtime.MemStats
+	startTime := time.Now()
+
+	for {
+		<-ticker.C
+		runtime.ReadMemStats(&m)
+
+		// Convert bytes to MB for readability
+		allocMB := float64(m.Alloc) / 1024 / 1024
+		totalAllocMB := float64(m.TotalAlloc) / 1024 / 1024
+		sysMB := float64(m.Sys) / 1024 / 1024
+		heapAllocMB := float64(m.HeapAlloc) / 1024 / 1024
+		heapSysMB := float64(m.HeapSys) / 1024 / 1024
+		heapIdleMB := float64(m.HeapIdle) / 1024 / 1024
+		heapInuseMB := float64(m.HeapInuse) / 1024 / 1024
+
+		log.Printf("=== MEMORY STATS (uptime: %v) ===", time.Since(startTime).Round(time.Second))
+		log.Printf("  Alloc       = %.2f MB (currently allocated)", allocMB)
+		log.Printf("  TotalAlloc  = %.2f MB (cumulative allocated)", totalAllocMB)
+		log.Printf("  Sys         = %.2f MB (obtained from system)", sysMB)
+		log.Printf("  HeapAlloc   = %.2f MB (heap allocated)", heapAllocMB)
+		log.Printf("  HeapSys     = %.2f MB (heap from system)", heapSysMB)
+		log.Printf("  HeapIdle    = %.2f MB (heap idle)", heapIdleMB)
+		log.Printf("  HeapInuse   = %.2f MB (heap in use)", heapInuseMB)
+		log.Printf("  NumGC       = %d (garbage collections)", m.NumGC)
+		log.Printf("  Goroutines  = %d", runtime.NumGoroutine())
+		log.Printf("  GCCPUFract  = %.4f%% (GC CPU fraction)", m.GCCPUFraction*100)
+
+		// Warning if memory usage is high
+		if allocMB > 1000 {
+			log.Printf("  ⚠️  WARNING: High memory usage (%.2f MB)! Consider lowering -batch-check or -batch-db", allocMB)
+		}
+		if runtime.NumGoroutine() > 1000 {
+			log.Printf("  ⚠️  WARNING: High goroutine count (%d)! Possible goroutine leak", runtime.NumGoroutine())
+		}
+	}
+}
 
 // startWebServer starts a simple HTTP server to display transfer results
 func startWebServer(port int) {
