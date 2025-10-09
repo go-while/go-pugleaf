@@ -103,6 +103,7 @@ func (o *OffsetQueue) Done() {
 	o.queued--
 	log.Printf("OffsetQueue: a batch is done, still queued: %d", o.queued)
 }
+
 func (o *OffsetQueue) Add(n int) {
 	o.mux.Lock()
 	defer o.mux.Unlock()
@@ -1604,7 +1605,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 // ReadTakeThisResponseStreaming reads a TAKETHIS response using the command ID
 // Used in streaming mode after all articles have been sent
 func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (int, error) {
-	log.Printf("TAKETHIS wait Response command ID %d ", id)
+	log.Printf("TAKETHIS wait Response command ID %d", id)
 	// Read TAKETHIS response
 	c.TextConn.StartResponse(id)
 	defer c.TextConn.EndResponse(id)

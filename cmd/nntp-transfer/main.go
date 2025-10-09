@@ -2456,7 +2456,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 	// launch a go routine to read CHECK responses from the supplied connection with textproto readline
 	go func() {
 		var responseCount int
-		var tookTime int64
+		var tookTime time.Duration
 		defer func() {
 			errChan <- struct{}{}
 		}()
@@ -2516,17 +2516,17 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					return
 				}
 				*/
-				took := time.Since(start).Milliseconds()
+				took := time.Since(start)
 				tookTime += took
 				responseCount++
 				rr.Job.Increment(nntp.IncrFLAG_CHECKED)
 				if rr.N == 1 {
 					log.Printf("CheckWorker (%d): time to first response for msgID: %s (cmdId:%d MID=%d/%d) took: %v ms", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, time.Since(start).Milliseconds())
 					tookTime = 0
-				} else if responseCount >= 10 {
-					avg := float64(tookTime) / float64(responseCount)
+				} else if responseCount >= 100 {
+					avg := time.Duration(float64(tookTime) / float64(responseCount))
 					if avg > 1 {
-						log.Printf("CheckWorker (%d): Read %d CHECK responses, avg latency: %.1f ms", workerID, responseCount, avg)
+						log.Printf("CheckWorker (%d): Read %d CHECK responses, avg latency: %v, last: %v (cmdId:%d MID=%d/%d)", workerID, responseCount, avg, took, rr.CmdID, rr.N, rr.Reqs)
 					}
 					responseCount = 0
 					tookTime = 0
@@ -2605,6 +2605,8 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					if len(job.WantedIDs) > 0 {
 						// Pass job to TAKETHIS worker via channel
 						log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5 job #%d got all %d CHECK responses, passing to TAKETHIS worker (wanted: %d articles) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, queuedCount, len(job.WantedIDs), len(TakeThisQueues[workerID]))
+						rs.UnlockCHECKforTT()
+						/* disabled
 						if len(readResponsesChan) == 0 {
 							rs.UnlockCHECKforTT() // Unlock CHECK, lock for TAKETHIS
 						} else {
@@ -2619,7 +2621,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 									}
 								}
 							}()
-						}
+						}*/
 						TakeThisQueues[workerID] <- job // local takethis chan sharing the same connection
 						log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5c Sent job #%d to TAKETHIS worker (wanted: %d/%d) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, len(job.WantedIDs), queuedCount, len(TakeThisQueues[workerID]))
 
@@ -2627,6 +2629,11 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 						log.Printf("Newsgroup: '%s' | CheckWorker (%d):  DEBUG6 job #%d got %d CHECK responses but server wants none", *job.Newsgroup, workerID, job.JobID, queuedCount)
 						// Send response and close channel for jobs with no wanted articles
 						job.Response(true, nil)
+						if len(TakeThisQueues[workerID]) > 0 {
+							rs.UnlockCHECKforTT()
+						} else {
+							rs.UnlockTT()
+						}
 					}
 				} else {
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG6 job #%d CHECK responses so far: %d/%d readResponsesChan=%d", *job.Newsgroup, workerID, job.JobID, readCount, queuedCount, len(readResponsesChan))
