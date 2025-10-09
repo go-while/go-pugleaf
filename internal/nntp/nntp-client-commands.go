@@ -62,7 +62,7 @@ type OffsetQueue struct {
 	queued int
 }
 
-var ReturnDelay = time.Millisecond * 8
+var ReturnDelay = time.Millisecond * 256
 
 func (o *OffsetQueue) Wait(n int) {
 	start := time.Now()
@@ -1337,20 +1337,16 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan 
 			log.Printf("Newsgroup: '%s' | Skipping empty message ID in CHECK command", *job.Newsgroup)
 			continue
 		}
-		//log.Printf("Newsgroup: '%s' | Preparing c.mux.Lock() 'CHECK %s' (%d/%d)", *job.Newsgroup, *msgID, n+1, len(messageIDs))
+		log.Printf("Newsgroup: '%s' | CHECK '%s' acquire c.mux.Lock() (%d/%d)", *job.Newsgroup, *msgID, n+1, len(messageIDs))
 		c.mux.Lock()
 		id, err := c.TextConn.Cmd("CHECK %s", *msgID)
-		//_, err := fmt.Fprintf(c.conn, "CHECK %s%s", *msgID, CRLF)
 		c.mux.Unlock()
 		if err != nil {
-			return fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
+			return fmt.Errorf("failed to send CHECK '%s': %w", *msgID, err)
 		}
-		//log.Printf("Newsgroup: '%s' | Sent CHECK command for %s (CmdID=%d) notify readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
-		//if len(readResponsesChan) == cap(readResponsesChan) {
-		//	log.Printf("Newsgroup: '%s' | WARNING: readResponsesChan is full (%d/%d)", *job.Newsgroup, len(readResponsesChan), cap(readResponsesChan))
-		//}
+		log.Printf("Newsgroup: '%s' | CHECK sent '%s' (CmdID=%d) pass notify to readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
 		readResponsesChan <- &ReadRequest{CmdID: id, Job: job, Reqs: len(messageIDs), MsgID: msgID, N: n + 1}
-		//log.Printf("Newsgroup: '%s' | Notify reader done for %s (CmdID=%d) readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
+		log.Printf("Newsgroup: '%s' | CHECK notified response reader '%s' (CmdID=%d) readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
 		id++
 	}
 	return nil
@@ -1434,8 +1430,9 @@ func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) 
 }
 */
 
+/* unused
 // TakeThisArticle sends an article via TAKETHIS command
-func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *string, newsgroup string) (int, error) {
+func (c *BackendConn) xxTakeThisArticle(article *models.Article, nntphostname *string, newsgroup string) (int, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
@@ -1454,6 +1451,7 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 
 	c.lastUsed = time.Now()
 	writer := bufio.NewWriter(c.conn)
+	defer writer.Flush()
 	// Send TAKETHIS command
 	id, err := c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
@@ -1520,6 +1518,7 @@ func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *str
 
 	return code, nil
 }
+*/
 
 func (c *BackendConn) GetBufSize(size int) int {
 	if size+2048 <= 16*1024 {
@@ -1532,15 +1531,19 @@ func (c *BackendConn) GetBufSize(size int) int {
 // Returns command ID for later response reading - used for streaming mode
 func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string) (uint, error) {
 	c.mux.Lock()
-	defer c.mux.Unlock()
+	//defer c.mux.Unlock()
 
 	if !c.connected {
+		c.mux.Unlock()
 		return 0, fmt.Errorf("not connected")
 	}
 
 	if c.ModeReader {
+		c.mux.Unlock()
 		return 0, fmt.Errorf("cannot send article in reader mode")
 	}
+	c.lastUsed = time.Now()
+	c.mux.Unlock()
 
 	// Prepare article for transfer
 	headers, err := common.ReconstructHeaders(article, true, nntphostname, newsgroup)
@@ -1549,10 +1552,14 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	}
 	writer := bufio.NewWriterSize(c.conn, c.GetBufSize(article.Bytes)) // Slightly larger buffer than article size for headers
 	defer writer.Flush()
+
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
 	// Send TAKETHIS command
 	id, err := c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
-		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
+		return 0, fmt.Errorf("failed SendTakeThisArticleStreaming command: %w", err)
 	}
 
 	// Send headers
@@ -1600,19 +1607,23 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 
 // ReadTakeThisResponseStreaming reads a TAKETHIS response using the command ID
 // Used in streaming mode after all articles have been sent
-func (c *BackendConn) ReadTakeThisResponseStreaming(cr *CheckResponse) (int, error) {
-	log.Printf("TAKETHIS wait Response CmdID=%d message-id '%s'", cr.CmdId, cr.Article.MessageID)
+func (c *BackendConn) ReadTakeThisResponseStreaming(newsgroup string, cr *CheckResponse) (int, error) {
+	//log.Printf("Newsgroup: '%s' | TAKETHIS acquire c.mux.Lock(): CmdID=%d message-id '%s'", newsgroup, cr.CmdId, cr.Article.MessageID)
+	//c.mux.Lock()
+	//defer c.mux.Unlock()
+	//log.Printf("Newsgroup: '%s' | TAKETHIS acquired Lock(): wait Response CmdID=%d message-id '%s'", newsgroup, cr.CmdId, cr.Article.MessageID)
+	log.Printf("Newsgroup: '%s' | TAKETHIS wait for response CmdID=%d message-id '%s'", newsgroup, cr.CmdId, cr.Article.MessageID)
 	// Read TAKETHIS response
 	c.TextConn.StartResponse(cr.CmdId)
 	defer c.TextConn.EndResponse(cr.CmdId)
-	log.Printf("TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: passed StartResponse CmdID=%d message-id '%s'", cr.CmdId, cr.Article.MessageID)
+	log.Printf("Newsgroup: '%s' | TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: passed StartResponse CmdID=%d message-id '%s'", newsgroup, cr.CmdId, cr.Article.MessageID)
 	//c.mux.Lock()
 	//defer c.mux.Unlock()
 	code, _, err := c.TextConn.ReadCodeLine(239)
 	if code == 0 && err != nil {
 		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
 	}
-	log.Printf("TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: passed ReadCodeLine CmdID=%d: code=%d message-id '%s'", cr.CmdId, code, cr.Article.MessageID)
+	log.Printf("Newsgroup: '%s' | TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: passed ReadCodeLine CmdID=%d: code=%d message-id '%s'", newsgroup, cr.CmdId, code, cr.Article.MessageID)
 
 	// Parse response
 	// Format: code <message-id> [message]
@@ -1650,6 +1661,7 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 		return code, fmt.Errorf("POST command failed: %s", line)
 	}
 	writer := bufio.NewWriter(c.conn)
+	defer writer.Flush()
 	switch code {
 	case 340:
 		// pass, posted
