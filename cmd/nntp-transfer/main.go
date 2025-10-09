@@ -2405,7 +2405,8 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				} else {
 					log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d skipping CHECK for %d message IDs (TAKETHIS mode)", *currentJob.Newsgroup, workerID, currentJob.JobID, len(currentJob.MessageIDs))
 					currentJob.WantedIDs = currentJob.MessageIDs
-					rs.UnlockCHECKforTTwithWait()
+					//rs.UnlockCHECKforTTwithWait()
+					rs.BlockCHECK()
 					TakeThisQueues[workerID] <- currentJob // local takethis chan sharing the same connection
 					log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d sent to local TakeThisChan", *currentJob.Newsgroup, workerID, currentJob.JobID)
 				}
