@@ -1877,6 +1877,7 @@ var jobRequeue = make(map[*string][]*nntp.CHTTJob)
 
 // CheckQueues holds per-worker CheckQueue channels for consistent newsgroup routing
 var CheckQueues []chan *nntp.CHTTJob
+var TakeThisQueues []chan *nntp.CHTTJob
 
 // NewsgroupWorkerMap tracks which worker is assigned to each newsgroup
 var NewsgroupWorkerMap = make(map[string]int)
@@ -1891,12 +1892,11 @@ var WorkerQueueLengthMux sync.Mutex
 // If new newsgroup, assigns to least busy worker (load balancing)
 func assignWorkerToNewsgroup(newsgroup string) int {
 	// Check if already assigned
-	NewsgroupWorkerMapMux.RLock()
+	NewsgroupWorkerMapMux.Lock()
+	defer NewsgroupWorkerMapMux.Unlock()
 	if workerID, exists := NewsgroupWorkerMap[newsgroup]; exists {
-		NewsgroupWorkerMapMux.RUnlock()
 		return workerID
 	}
-	NewsgroupWorkerMapMux.RUnlock()
 
 	// Find least busy worker
 	WorkerQueueLengthMux.Lock()
@@ -1916,9 +1916,7 @@ func assignWorkerToNewsgroup(newsgroup string) int {
 	WorkerQueueLengthMux.Unlock()
 
 	// Assign newsgroup to this worker
-	NewsgroupWorkerMapMux.Lock()
 	NewsgroupWorkerMap[newsgroup] = workerID
-	NewsgroupWorkerMapMux.Unlock()
 
 	return workerID
 }
@@ -1954,9 +1952,11 @@ func BootConnWorkers(pool *nntp.Pool, redisCli *redis.Client) {
 	var mux sync.Mutex
 	// Create per-worker queues
 	CheckQueues = make([]chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
+	TakeThisQueues = make([]chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
 	WorkerQueueLength = make([]int, nntp.NNTPTransferThreads)
 	for i := range CheckQueues {
-		CheckQueues[i] = make(chan *nntp.CHTTJob) // no cap! only accepts if there is a reader!
+		CheckQueues[i] = make(chan *nntp.CHTTJob)       // no cap! only accepts if there is a reader!
+		TakeThisQueues[i] = make(chan *nntp.CHTTJob, 2) // allows max 2 queued TT jobs
 		WorkerQueueLength[i] = 0
 	}
 	allEstablished := false
@@ -2223,6 +2223,7 @@ func (rs *ReturnSignal) UnlockCHECKforTT() {
 func (rs *ReturnSignal) BlockCHECK() {
 	rs.Mux.Lock()
 	rs.CHECK = false
+	rs.RunTT = true
 	log.Printf("BlockCHECK: set CHECK to false (RunTT=%t)", rs.RunTT)
 	rs.Mux.Unlock()
 }
@@ -2264,7 +2265,7 @@ func replyChan(request chan struct{}, reply chan struct{}) {
 func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue chan *nntp.CHTTJob) {
 	readResponsesChan := make(chan *nntp.ReadRequest, BatchCheck*2)
 	//rrRetChan := make(chan struct{}, BatchCheck)
-	takeThisChan := make(chan *nntp.CHTTJob, 2) // buffer 2
+	//takeThisChan := make(chan *nntp.CHTTJob, 2) // buffer 2
 	errChan := make(chan struct{}, 4)
 	tickChan := make(chan struct{}, 1)
 	//flipflopChan := make(chan struct{}, 1)
@@ -2299,15 +2300,6 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					log.Printf("CheckWorker (%d): Tick WantShutdown, exiting", workerID)
 					return
 				}
-			waiting:
-				for {
-					if len(takeThisChan) > 1 {
-						log.Printf("CheckWorker (%d): waiting takeThisChan full (%d)", workerID, len(takeThisChan))
-						time.Sleep(time.Millisecond * 16)
-						continue waiting
-					}
-					break
-				}
 
 				// Get the next job to process
 				rs.Mux.Lock()
@@ -2320,9 +2312,18 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				currentJob := rs.jobs[0]
 				rs.jobs = rs.jobs[1:] // Remove first job from queue
 				rs.Mux.Unlock()
-
 				if currentJob == nil {
 					continue loop
+				}
+				workerID := assignWorkerToNewsgroup(*currentJob.Newsgroup)
+			waiting:
+				for {
+					if len(TakeThisQueues[workerID]) > 1 {
+						log.Printf("CheckWorker (%d): waiting shared takeThisChan full (%d)", workerID, len(TakeThisQueues[workerID]))
+						time.Sleep(time.Millisecond * 16)
+						continue waiting
+					}
+					break
 				}
 				currentJob.OffsetQ.Done()
 				if currentJob.TTMode.UseCHECK() {
@@ -2404,7 +2405,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d skipping CHECK for %d message IDs (TAKETHIS mode)", *currentJob.Newsgroup, workerID, currentJob.JobID, len(currentJob.MessageIDs))
 					currentJob.WantedIDs = currentJob.MessageIDs
 					rs.UnlockCHECKforTTwithWait()
-					takeThisChan <- currentJob // local takethis chan sharing the same connection
+					TakeThisQueues[workerID] <- currentJob // local takethis chan sharing the same connection
 					log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d sent to local TakeThisChan", *currentJob.Newsgroup, workerID, currentJob.JobID)
 				}
 				//lastRun = time.Now()
@@ -2603,7 +2604,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rs.Mux.Unlock()
 					if len(job.WantedIDs) > 0 {
 						// Pass job to TAKETHIS worker via channel
-						log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5 job #%d got all %d CHECK responses, passing to TAKETHIS worker (wanted: %d articles) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, queuedCount, len(job.WantedIDs), len(takeThisChan))
+						log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5 job #%d got all %d CHECK responses, passing to TAKETHIS worker (wanted: %d articles) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, queuedCount, len(job.WantedIDs), len(TakeThisQueues[workerID]))
 						if len(readResponsesChan) == 0 {
 							rs.UnlockCHECKforTT() // Unlock CHECK, lock for TAKETHIS
 						} else {
@@ -2619,8 +2620,8 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 								}
 							}()
 						}
-						takeThisChan <- job // local takethis chan sharing the same connection
-						log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5c Sent job #%d to TAKETHIS worker (wanted: %d/%d) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, len(job.WantedIDs), queuedCount, len(takeThisChan))
+						TakeThisQueues[workerID] <- job // local takethis chan sharing the same connection
+						log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5c Sent job #%d to TAKETHIS worker (wanted: %d/%d) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, len(job.WantedIDs), queuedCount, len(TakeThisQueues[workerID]))
 
 					} else {
 						log.Printf("Newsgroup: '%s' | CheckWorker (%d):  DEBUG6 job #%d got %d CHECK responses but server wants none", *job.Newsgroup, workerID, job.JobID, queuedCount)
@@ -2648,7 +2649,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 			}
 
 			select {
-			case ajob := <-takeThisChan:
+			case ajob := <-TakeThisQueues[workerID]:
 				job = ajob
 
 			case <-errChan:
@@ -2730,7 +2731,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 			// Build jobMap for tracking which message IDs belong to this job
 			// and count queued messages
 			rs.Mux.Lock()
-			queueFull := len(rs.jobs) > 1 || len(takeThisChan) > 1
+			queueFull := len(rs.jobs) > 1 || len(TakeThisQueues[workerID]) > 1
 			if queueFull {
 				log.Printf("Newsgroup: '%s' | CHTTworker (%d): got job #%d with %d message IDs. queued=%d ... waiting...", *job.Newsgroup, workerID, job.JobID, len(job.MessageIDs), len(rs.jobs))
 				select {
@@ -2751,14 +2752,14 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 						// pass
 					case <-time.After(time.Millisecond * 16):
 						rs.Mux.Lock()
-						queueFull = len(rs.jobs) > 1 || len(takeThisChan) > 1
+						queueFull = len(rs.jobs) > 1 || len(TakeThisQueues[workerID]) > 1
 						rs.Mux.Unlock()
 						if !queueFull {
 							break waitForReply
 						}
 						// log every 5s
 						if time.Since(wait) > time.Second {
-							log.Printf("Newsgroup: '%s' | CHTTworker (%d): pre append job #%d waiting since %v rs.jobs=%d takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, time.Since(start), len(rs.jobs), len(takeThisChan))
+							log.Printf("Newsgroup: '%s' | CHTTworker (%d): pre append job #%d waiting since %v rs.jobs=%d takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, time.Since(start), len(rs.jobs), len(TakeThisQueues[workerID]))
 							wait = time.Now()
 						}
 					}
