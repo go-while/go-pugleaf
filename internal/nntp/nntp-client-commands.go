@@ -1345,9 +1345,9 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan 
 			return fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
 		}
 		//log.Printf("Newsgroup: '%s' | Sent CHECK command for %s (CmdID=%d) notify readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
-		if len(readResponsesChan) == cap(readResponsesChan) {
-			log.Printf("Newsgroup: '%s' | WARNING: readResponsesChan is full (%d/%d)", *job.Newsgroup, len(readResponsesChan), cap(readResponsesChan))
-		}
+		//if len(readResponsesChan) == cap(readResponsesChan) {
+		//	log.Printf("Newsgroup: '%s' | WARNING: readResponsesChan is full (%d/%d)", *job.Newsgroup, len(readResponsesChan), cap(readResponsesChan))
+		//}
 		readResponsesChan <- &ReadRequest{CmdID: id, Job: job, Reqs: len(messageIDs), MsgID: msgID, N: n + 1}
 		//log.Printf("Newsgroup: '%s' | Notify reader done for %s (CmdID=%d) readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
 		id++

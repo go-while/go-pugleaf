@@ -2176,6 +2176,7 @@ func (rs *ReturnSignal) GetLockTT() {
 	for {
 		rs.Mux.Lock()
 		if rs.RunTT {
+			log.Printf("GetLockTT: RunTT already true")
 			rs.Mux.Unlock()
 			return
 		}
@@ -2214,6 +2215,7 @@ func (rs *ReturnSignal) UnlockCHECKforTT() {
 		log.Printf("UnlockCHECKforTT: cannot switch to RunTT, CHECK=%t RunTT=%t", rs.CHECK, rs.RunTT)
 		return
 	}
+	log.Printf("UnlockCHECKforTT: switched CHECK to RunTT")
 	rs.CHECK = false
 	rs.RunTT = true
 }
@@ -2221,7 +2223,7 @@ func (rs *ReturnSignal) UnlockCHECKforTT() {
 func (rs *ReturnSignal) BlockCHECK() {
 	rs.Mux.Lock()
 	rs.CHECK = false
-	log.Printf("BlockCHECK: set CHECK to false (runTT=%t)", rs.RunTT)
+	log.Printf("BlockCHECK: set CHECK to false (RunTT=%t)", rs.RunTT)
 	rs.Mux.Unlock()
 }
 
@@ -2232,12 +2234,12 @@ func (rs *ReturnSignal) LockCHECK() {
 		rs.Mux.Lock()
 		if !rs.RunTT {
 			rs.CHECK = true
-			log.Printf("LockCHECK: acquired CHECK lock (runTT=%t) waited %v", rs.RunTT, time.Since(start))
+			log.Printf("LockCHECK: acquired CHECK lock (RunTT=%t) waited %v", rs.RunTT, time.Since(start))
 			rs.Mux.Unlock()
 			return
 		}
 		if time.Since(printLast) > time.Second {
-			log.Printf("LockCHECK: waiting for RunTT to be false... rs.CHECK=%t rs.RunTT=%t", rs.CHECK, rs.RunTT)
+			log.Printf("LockCHECK: waiting for RunTT to be false... CHECK=%t RunTT=%t", rs.CHECK, rs.RunTT)
 			printLast = time.Now()
 		}
 		rs.Mux.Unlock()
@@ -2260,7 +2262,7 @@ func replyChan(request chan struct{}, reply chan struct{}) {
 }
 
 func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue chan *nntp.CHTTJob) {
-	readResponsesChan := make(chan *nntp.ReadRequest, BatchCheck*2)
+	readResponsesChan := make(chan *nntp.ReadRequest, BatchCheck)
 	//rrRetChan := make(chan struct{}, BatchCheck)
 	takeThisChan := make(chan *nntp.CHTTJob, 2) // buffer 2
 	errChan := make(chan struct{}, 4)
