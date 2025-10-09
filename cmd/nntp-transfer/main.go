@@ -1774,17 +1774,18 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			continue // Skip cached articles
 		}
 		// Send TAKETHIS command with article content (non-blocking)
+		log.Printf("Newsgroup: '%s' | Pre-Send TAKETHIS '%s'", newsgroup, article.MessageID)
 		cmdID, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname, newsgroup)
 		if err != nil {
 			if err == common.ErrNoNewsgroups {
-				log.Printf("Newsgroup: '%s' | skipped article '%s': no newsgroups header", newsgroup, article.MessageID)
+				log.Printf("Newsgroup: '%s' | skipped TAKETHIS '%s': no newsgroups header", newsgroup, article.MessageID)
 				continue
 			}
 			conn.ForceCloseConn()
 			log.Printf("ERROR Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroup, article.MessageID, err)
 			return 0, 0, redis_cached, fmt.Errorf("failed to send TAKETHIS for %s: %v", article.MessageID, err)
 		}
-
+		log.Printf("Newsgroup: '%s' | Sent TAKETHIS '%s' CmdID=%d", newsgroup, article.MessageID, cmdID)
 		artChan <- &nntp.CheckResponse{
 			Article: article,
 			CmdId:   cmdID,
@@ -1795,18 +1796,18 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	var done []*string
 	var countDone int
 	// Phase 2: Read all responses in order
-	log.Printf("Newsgroup: '%s' | Phase 2: Reading TAKETHIS responses for %d sent articles...", newsgroup, len(artChan))
+	log.Printf("Newsgroup: '%s' | Reading TAKETHIS responses for %d sent articles...", newsgroup, len(artChan))
 	for cr := range artChan {
-		log.Printf("Newsgroup: '%s' | Reading TAKETHIS response for article '%s' (CmdID=%d) (i=%d/%d)", newsgroup, cr.Article.MessageID, cr.CmdId, countDone+1, len(articles))
+		log.Printf("Newsgroup: '%s' | Pre-Read TAKETHIS response for article '%s' CmdID=%d (i=%d/%d)", newsgroup, cr.Article.MessageID, cr.CmdId, countDone+1, len(articles))
 		job.TTMode.IncrementTmp()
-		takeThisResponseCode, err := conn.ReadTakeThisResponseStreaming(cr.CmdId)
+		takeThisResponseCode, err := conn.ReadTakeThisResponseStreaming(cr)
 		if err != nil {
 			job.Increment(nntp.IncrFLAG_CONN_ERRORS)
 			conn.ForceCloseConn()
 			log.Printf("ERROR Newsgroup: '%s' | Failed to read TAKETHIS response for %s: %v", newsgroup, cr.Article.MessageID, err)
 			return transferred, rejected, redis_cached, fmt.Errorf("failed to read TAKETHIS response for %s: %v", cr.Article.MessageID, err)
 		}
-		log.Printf("Newsgroup: '%s' | TAKETHIS response '%s': %d", newsgroup, cr.Article.MessageID, takeThisResponseCode)
+		log.Printf("Newsgroup: '%s' | GOT TAKETHIS response '%s': %d CmdID=%d (i=%d/%d)", newsgroup, cr.Article.MessageID, takeThisResponseCode, cr.CmdId, countDone+1, len(articles))
 		countDone++
 		// Update success rate tracking
 		switch takeThisResponseCode {

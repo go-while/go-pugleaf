@@ -62,7 +62,7 @@ type OffsetQueue struct {
 	queued int
 }
 
-var ReturnDelay = time.Millisecond * 16
+var ReturnDelay = time.Millisecond * 8
 
 func (o *OffsetQueue) Wait(n int) {
 	start := time.Now()
@@ -1548,6 +1548,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 		return 0, err
 	}
 	writer := bufio.NewWriterSize(c.conn, c.GetBufSize(article.Bytes)) // Slightly larger buffer than article size for headers
+	defer writer.Flush()
 	// Send TAKETHIS command
 	id, err := c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
@@ -1593,29 +1594,25 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 		return 0, fmt.Errorf("failed to send article terminator SendTakeThisArticleStreaming: %w", err)
 	}
 
-	// Flush the writer to ensure all data is sent
-	if err := writer.Flush(); err != nil {
-		return 0, fmt.Errorf("failed to flush article data SendTakeThisArticleStreaming: %w", err)
-	}
-
 	// Return command ID without reading response (streaming mode)
 	return id, nil
 }
 
 // ReadTakeThisResponseStreaming reads a TAKETHIS response using the command ID
 // Used in streaming mode after all articles have been sent
-func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (int, error) {
-	log.Printf("TAKETHIS wait Response command ID %d", id)
+func (c *BackendConn) ReadTakeThisResponseStreaming(cr *CheckResponse) (int, error) {
+	log.Printf("TAKETHIS wait Response CmdID=%d message-id '%s'", cr.CmdId, cr.Article.MessageID)
 	// Read TAKETHIS response
-	c.TextConn.StartResponse(id)
-	defer c.TextConn.EndResponse(id)
+	c.TextConn.StartResponse(cr.CmdId)
+	defer c.TextConn.EndResponse(cr.CmdId)
+	log.Printf("TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: passed StartResponse CmdID=%d message-id '%s'", cr.CmdId, cr.Article.MessageID)
 	//c.mux.Lock()
 	//defer c.mux.Unlock()
 	code, _, err := c.TextConn.ReadCodeLine(239)
 	if code == 0 && err != nil {
 		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
 	}
-	log.Printf("TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: command ID %d: code=%d", id, code)
+	log.Printf("TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: passed ReadCodeLine CmdID=%d: code=%d message-id '%s'", cr.CmdId, code, cr.Article.MessageID)
 
 	// Parse response
 	// Format: code <message-id> [message]
