@@ -616,15 +616,15 @@ const query_getArticlesBatchWithDateFilter_nodatefilter = `SELECT article_num, m
 const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ? OFFSET ?"
 
 // getArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
-func getArticlesBatchWithDateFilter(db *database.Database, newsgroup *models.Newsgroup, offset int64, startTime, endTime *time.Time) ([]*models.Article, error) {
+func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup, offset int64, startTime, endTime *time.Time) ([]*models.Article, error) {
 	// Get group database
-	groupDBs, err := db.GetGroupDBs(newsgroup.Name)
+	groupDBs, err := db.GetGroupDBs(ng.Name)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
+		return nil, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", ng.Name, err)
 	}
 	defer func() {
 		if ferr := db.ForceCloseGroupDBs(groupDBs); ferr != nil {
-			log.Printf("ForceCloseGroupDBs error for '%s': %v", newsgroup.Name, ferr)
+			log.Printf("ForceCloseGroupDBs error for '%s': %v", ng.Name, ferr)
 		}
 	}()
 	var query string
@@ -1059,9 +1059,9 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 	var wg sync.WaitGroup
 	log.Printf("Todo: %d newsgroups", len(newsgroups))
 	// Process each newsgroup
-	for _, newsgroup := range newsgroups {
+	for _, ng := range newsgroups {
 		if common.WantShutdown() {
-			log.Printf("Aborted before next: %s", newsgroup.Name)
+			log.Printf("Aborted before next: %s", ng.Name)
 			return nil
 		}
 		maxThreadsChan <- struct{}{} // acquire a thread slot
@@ -1072,13 +1072,13 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 				<-maxThreadsChan // release the thread slot
 			}(wg)
 			if common.WantShutdown() {
-				log.Printf("Aborted before next: %s", newsgroup.Name)
+				log.Printf("Aborted before next: %s", ng.Name)
 				return
 			}
 			if VERBOSE {
-				log.Printf("Newsgroup: '%s' | Start", newsgroup.Name)
+				log.Printf("Newsgroup: '%s' | Start", ng.Name)
 			}
-			err := transferNewsgroup(db, newsgroup, batchCheck, dryRun, startTime, endTime, debugCapture, redisCli)
+			err := transferNewsgroup(db, ng, batchCheck, dryRun, startTime, endTime, debugCapture, redisCli)
 			if err == ErrNotInDateRange {
 				transferMutex.Lock()
 				nothingInDateRange++
@@ -1086,9 +1086,9 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 				err = nil // not a real error
 			}
 			if err != nil {
-				log.Printf("Error transferring newsgroup %s: %v", newsgroup.Name, err)
+				log.Printf("Error transferring newsgroup %s: %v", ng.Name, err)
 			}
-		}(newsgroup, &wg, redisCli)
+		}(ng, &wg, redisCli)
 	}
 
 	// Wait for all transfers to complete
@@ -1143,7 +1143,7 @@ func processRequeuedJobs(newsgroup string, ttMode *nntp.TakeThisMode, ttResponse
 
 		log.Printf("Newsgroup: '%s' | Processing requeued job %d/%d with %d articles", newsgroup, i+1, len(queuedJobs), len(job.Articles))
 		// pass articles to CHECK or TAKETHIS queue (async!)
-		responseChan, err := processBatch(ttMode, job.Articles, redisCli, job.BatchStart, job.BatchEnd, -1, job.OffsetQ)
+		responseChan, err := processBatch(ttMode, job.Articles, redisCli, job.BatchStart, job.BatchEnd, -1, job.OffsetQ, job.NGTProgress)
 		if err != nil {
 			log.Printf("Newsgroup: '%s' | Error processing requeued batch: %v", newsgroup, err)
 			jobRequeueMutex.Lock()
@@ -1165,23 +1165,25 @@ func processRequeuedJobs(newsgroup string, ttMode *nntp.TakeThisMode, ttResponse
 }
 
 // transferNewsgroup transfers articles from a single newsgroup
-func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, redisCli *redis.Client) error {
+func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, redisCli *redis.Client) error {
 
-	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Starting (getting group DBs)...", newsgroup.Name)
+	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Starting (getting group DBs)...", ng.Name)
 
 	// Get group database
-	groupDBsA, err := db.GetGroupDBs(newsgroup.Name)
+	groupDBsA, err := db.GetGroupDBs(ng.Name)
 	if err != nil {
-		return fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", newsgroup.Name, err)
+		return fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", ng.Name, err)
 	}
 
-	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Got group DBs, querying article count...", newsgroup.Name)
+	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Got group DBs, querying article count...", ng.Name)
 	// Initialize newsgroup progress tracking
 	resultsMutex.Lock()
-	if _, exists := NewsgroupProgressMap[newsgroup.Name]; !exists {
-		NewsgroupProgressMap[newsgroup.Name] = &NewsgroupProgress{
+	if _, exists := nntp.NewsgroupTransferProgressMap[ng.Name]; !exists {
+		nntp.NewsgroupTransferProgressMap[ng.Name] = &nntp.NewsgroupTransferProgress{
+			Newsgroup:     &ng.Name,
 			Started:       time.Now(),
 			LastUpdated:   time.Now(),
+			LastCronTX:    time.Now(),
 			Finished:      false,
 			TotalArticles: 0,
 		}
@@ -1190,31 +1192,31 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 	// Get total article count first with date filtering
 	totalArticles, err := getArticleCountWithDateFilter(groupDBsA, startTime, endTime)
 	if err != nil {
-		return fmt.Errorf("failed to get article count for newsgroup '%s': %v", newsgroup.Name, err)
+		return fmt.Errorf("failed to get article count for newsgroup '%s': %v", ng.Name, err)
 	}
 
-	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Got article count (%d), closing group DBs...", newsgroup.Name, totalArticles)
+	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Got article count (%d), closing group DBs...", ng.Name, totalArticles)
 
 	if ferr := db.ForceCloseGroupDBs(groupDBsA); ferr != nil {
-		log.Printf("ForceCloseGroupDBs error for '%s': %v", newsgroup.Name, ferr)
+		log.Printf("ForceCloseGroupDBs error for '%s': %v", ng.Name, ferr)
 	}
 
-	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Closed group DBs, checking if articles exist...", newsgroup.Name)
+	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Closed group DBs, checking if articles exist...", ng.Name)
 
 	if totalArticles == 0 {
 		resultsMutex.Lock()
-		NewsgroupProgressMap[newsgroup.Name].Finished = true
-		NewsgroupProgressMap[newsgroup.Name].LastUpdated = time.Now()
-		results = append(results, fmt.Sprintf("END Newsgroup: '%s' | No articles to process", newsgroup.Name))
+		nntp.NewsgroupTransferProgressMap[ng.Name].Finished = true
+		nntp.NewsgroupTransferProgressMap[ng.Name].LastUpdated = time.Now()
+		results = append(results, fmt.Sprintf("END Newsgroup: '%s' | No articles to process", ng.Name))
 		resultsMutex.Unlock()
 		// No articles to process
 		if startTime != nil || endTime != nil {
 			if VERBOSE {
-				log.Printf("No articles found in newsgroup: %s (within specified date range)", newsgroup.Name)
+				log.Printf("No articles found in newsgroup: %s (within specified date range)", ng.Name)
 			}
 			return ErrNotInDateRange
 		} else {
-			log.Printf("No articles found in newsgroup: %s", newsgroup.Name)
+			log.Printf("No articles found in newsgroup: %s", ng.Name)
 		}
 
 		return nil
@@ -1222,15 +1224,16 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 
 	// Initialize newsgroup progress tracking
 	resultsMutex.Lock()
-	NewsgroupProgressMap[newsgroup.Name].TotalArticles = totalArticles
-	NewsgroupProgressMap[newsgroup.Name].LastUpdated = time.Now()
+	nntp.NewsgroupTransferProgressMap[ng.Name].TotalArticles = totalArticles
+	nntp.NewsgroupTransferProgressMap[ng.Name].LastUpdated = time.Now()
+	ngtprogress := nntp.NewsgroupTransferProgressMap[ng.Name]
 	resultsMutex.Unlock()
 
 	if dryRun {
 		if startTime != nil || endTime != nil {
-			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s (within specified date range)", totalArticles, newsgroup.Name)
+			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s (within specified date range)", totalArticles, ng.Name)
 		} else {
-			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s", totalArticles, newsgroup.Name)
+			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s", totalArticles, ng.Name)
 		}
 		if !debugCapture {
 			return nil
@@ -1239,16 +1242,16 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 
 	if !dryRun && !debugCapture {
 		if startTime != nil || endTime != nil {
-			log.Printf("Found %d articles in newsgroup %s (within specified date range) - processing in batches", totalArticles, newsgroup.Name)
+			log.Printf("Found %d articles in newsgroup %s (within specified date range) - processing in batches", totalArticles, ng.Name)
 		} else {
-			log.Printf("Found %d articles in newsgroup %s - processing in batches", totalArticles, newsgroup.Name)
+			log.Printf("Found %d articles in newsgroup %s - processing in batches", totalArticles, ng.Name)
 		}
 	}
 	//time.Sleep(3 * time.Second) // debug sleep
 	var ioffset int64
 	remainingArticles := totalArticles
 	ttMode := &nntp.TakeThisMode{
-		Newsgroup: &newsgroup.Name,
+		Newsgroup: &ng.Name,
 		CheckMode: true,
 	}
 	ttResponses := make(chan *nntp.TTSetup, totalArticles/int64(batchCheck)+2)
@@ -1268,28 +1271,28 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 		var num uint64
 		for setup := range ttResponses {
 			if setup == nil || setup.ResponseChan == nil {
-				log.Printf("Newsgroup: '%s' | Warning: nil TT response channel received in collector!?", newsgroup.Name)
+				log.Printf("Newsgroup: '%s' | Warning: nil TT response channel received in collector!?", ng.Name)
 				continue
 			}
 			num++
-			log.Printf("Newsgroup: '%s' | Starting response channel processor num %d (goroutines: %d)", newsgroup.Name, num, runtime.NumGoroutine())
+			log.Printf("Newsgroup: '%s' | Starting response channel processor num %d (goroutines: %d)", ng.Name, num, runtime.NumGoroutine())
 			responseWG.Add(1)
 			go func(rc chan *nntp.TTResponse, num uint64) {
 				defer responseWG.Done()
-				defer log.Printf("Newsgroup: '%s' | Quit response channel processor num %d (goroutines: %d)", newsgroup.Name, num, runtime.NumGoroutine())
+				defer log.Printf("Newsgroup: '%s' | Quit response channel processor num %d (goroutines: %d)", ng.Name, num, runtime.NumGoroutine())
 
 				// Read exactly ONE response from this channel (channel is buffered with cap 1)
 				resp := <-rc // job.Response(ForceCleanUp, err) arrives here
 
 				if resp == nil {
-					log.Printf("Newsgroup: '%s' | Warning: nil TT response received!?", newsgroup.Name)
+					log.Printf("Newsgroup: '%s' | Warning: nil TT response received!?", ng.Name)
 					return
 				}
 				if resp.Err != nil {
-					log.Printf("Newsgroup: '%s' | Error in TT response job #%d err='%v' job='%v' ForceCleanUp=%t", newsgroup.Name, resp.Job.JobID, resp.Err, resp.Job, resp.ForceCleanUp)
+					log.Printf("Newsgroup: '%s' | Error in TT response job #%d err='%v' job='%v' ForceCleanUp=%t", ng.Name, resp.Job.JobID, resp.Err, resp.Job, resp.ForceCleanUp)
 				}
 				if resp.Job == nil {
-					log.Printf("Newsgroup: '%s' | Warning: nil Job in TT response job without error!? ForceCleanUp=%t", newsgroup.Name, resp.ForceCleanUp)
+					log.Printf("Newsgroup: '%s' | Warning: nil Job in TT response job without error!? ForceCleanUp=%t", ng.Name, resp.ForceCleanUp)
 					return
 				}
 				// get numbers
@@ -1301,7 +1304,7 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 				}
 				// free memory - CRITICAL: Lock and unlock in same scope, not with defer!
 				resp.Job.Mux.Lock()
-				//log.Printf("Newsgroup: '%s' | Cleaning up TT job #%d with %d articles (ForceCleanUp)", newsgroup.Name, resp.Job.JobID, len(resp.Job.Articles))
+				//log.Printf("Newsgroup: '%s' | Cleaning up TT job #%d with %d articles (ForceCleanUp)", ng.Name, resp.Job.JobID, len(resp.Job.Articles))
 				// Clean up Articles and their internal fields
 				for i := range resp.Job.Articles {
 					if resp.Job.Articles[i] != nil {
@@ -1329,30 +1332,33 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 				resp.Job = nil
 			}(setup.ResponseChan, num)
 		}
-		log.Printf("Newsgroup: '%s' | Collector: ttResponses closed, waiting for %d response processors to finish...", newsgroup.Name, num)
+		log.Printf("Newsgroup: '%s' | Collector: ttResponses closed, waiting for %d response processors to finish...", ng.Name, num)
 		// Wait for all response channel processors to finish
 		responseWG.Wait()
-		log.Printf("Newsgroup: '%s' | Collector: all response processors closed", newsgroup.Name)
+		log.Printf("Newsgroup: '%s' | Collector: all response processors closed", ng.Name)
 		amux.Lock()
 		result := fmt.Sprintf("END Newsgroup: '%s' | transferred: %d/%d  | unwanted: %d | rejected: %d | checked: %d | TX_Errors: %d | connErrors: %d | took %v",
-			newsgroup.Name, transferred, totalArticles, unwanted, rejected, checked, txErrors, connErrors, time.Since(start))
+			ng.Name, transferred, totalArticles, unwanted, rejected, checked, txErrors, connErrors, time.Since(start))
 		amux.Unlock()
 		//log.Print(result)
 		resultsMutex.Lock()
 		results = append(results, result)
 		// Mark newsgroup as finished
-		if progress, exists := NewsgroupProgressMap[newsgroup.Name]; exists {
+		if progress, exists := nntp.NewsgroupTransferProgressMap[ng.Name]; exists {
 			progress.Mux.Lock()
 			progress.Finished = true
 			progress.LastUpdated = time.Now()
+			progress.TXBytes += progress.TXBytesTMP
+			progress.TXBytesTMP = 0
+			progress.LastCronTX = progress.LastUpdated
 			progress.Mux.Unlock()
 		}
 		if VERBOSE {
-			for _, msgId := range rejectedArticles[newsgroup.Name] {
+			for _, msgId := range rejectedArticles[ng.Name] {
 				// prints all at the end again
-				log.Printf("END Newsgroup: '%s' | REJECTED '%s'", newsgroup.Name, msgId)
+				log.Printf("END Newsgroup: '%s' | REJECTED '%s'", ng.Name, msgId)
 			}
-			delete(rejectedArticles, newsgroup.Name) // free memory
+			delete(rejectedArticles, ng.Name) // free memory
 		}
 		resultsMutex.Unlock()
 	}()
@@ -1360,28 +1366,28 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 	// Get articles in database batches (much larger than network batches)
 	for offset := ioffset; offset < totalArticles; offset += dbBatchSize {
 		if common.WantShutdown() {
-			log.Printf("WantShutdown in newsgroup: '%s' offset: %d", newsgroup.Name, offset)
+			log.Printf("WantShutdown in newsgroup: '%s' offset: %d", ng.Name, offset)
 			return nil
 		}
 		// Process any requeued jobs first (from previous failed batches)
-		if _, err := processRequeuedJobs(newsgroup.Name, ttMode, ttResponses, redisCli); err != nil {
+		if _, err := processRequeuedJobs(ng.Name, ttMode, ttResponses, redisCli); err != nil {
 			return err
 		}
 		start := time.Now()
 		// Load batch from database with date filtering
-		articles, err := getArticlesBatchWithDateFilter(db, newsgroup, offset, startTime, endTime)
+		articles, err := getArticlesBatchWithDateFilter(db, ng, offset, startTime, endTime)
 		if err != nil {
-			log.Printf("Error loading article batch (offset %d) for newsgroup %s: %v", offset, newsgroup.Name, err)
-			return fmt.Errorf("failed to load article batch (offset %d) for newsgroup '%s': %v", offset, newsgroup.Name, err)
+			log.Printf("Error loading article batch (offset %d) for newsgroup %s: %v", offset, ng.Name, err)
+			return fmt.Errorf("failed to load article batch (offset %d) for newsgroup '%s': %v", offset, ng.Name, err)
 		}
 
 		if len(articles) == 0 {
-			//log.Printf("No more articles in newsgroup %s (offset %d)", newsgroup.Name, offset)
+			//log.Printf("No more articles in newsgroup %s (offset %d)", ng.Name, offset)
 			break
 		}
 		if dryRun && debugCapture {
 			debugMutex.Lock()
-			debugArticles[newsgroup.Name] = append(debugArticles[newsgroup.Name], articles...)
+			debugArticles[ng.Name] = append(debugArticles[ng.Name], articles...)
 			debugMutex.Unlock()
 			return nil
 		}
@@ -1390,13 +1396,13 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 		for _, a := range articles {
 			size += a.Bytes
 		}
-		log.Printf("Newsgroup: '%s' | Loaded %d articles from database (offset %d) (Bytes=%d) took %v", newsgroup.Name, len(articles), offset, size, time.Since(start))
+		log.Printf("Newsgroup: '%s' | Loaded %d articles from database (offset %d) (Bytes=%d) took %v", ng.Name, len(articles), offset, size, time.Since(start))
 		//}
 		// Process articles in network batches
 		for i := 0; i < len(articles); i += batchCheck {
 			OffsetQueue.Add(1)
 			if common.WantShutdown() {
-				log.Printf("WantShutdown in newsgroup: '%s' (offset %d)", newsgroup.Name, offset)
+				log.Printf("WantShutdown in newsgroup: '%s' (offset %d)", ng.Name, offset)
 				return nil
 			}
 			// Determine end index for the batch
@@ -1405,10 +1411,10 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 				end = len(articles)
 			}
 			// pass articles to CHECK or TAKETHIS queue (async!)
-			responseChan, err := processBatch(ttMode, articles[i:end], redisCli, int64(i), int64(end), offset, OffsetQueue)
+			responseChan, err := processBatch(ttMode, articles[i:end], redisCli, int64(i), int64(end), offset, OffsetQueue, ngtprogress)
 			if err != nil {
-				log.Printf("Newsgroup: '%s' | Error processing batch %d-%d: %v", newsgroup.Name, i+1, end, err)
-				return fmt.Errorf("error processing batch %d-%d for newsgroup '%s': %v", i+1, end, newsgroup.Name, err)
+				log.Printf("Newsgroup: '%s' | Error processing batch %d-%d: %v", ng.Name, i+1, end, err)
+				return fmt.Errorf("error processing batch %d-%d for newsgroup '%s': %v", i+1, end, ng.Name, err)
 			}
 			// pass the response channel to the collector channel: ttResponses
 			ttResponses <- &nntp.TTSetup{
@@ -1418,24 +1424,24 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 		}
 		remainingArticles -= int64(len(articles))
 		if VERBOSE {
-			log.Printf("Newsgroup: '%s' | Pushed to queue (offset %d/%d) remaining: %d (Check=%t)", newsgroup.Name, offset, totalArticles, remainingArticles, ttMode.UseCHECK())
-			//log.Printf("Newsgroup: '%s' | Pushed (offset %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t)", newsgroup.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.GetMode())
+			log.Printf("Newsgroup: '%s' | Pushed to queue (offset %d/%d) remaining: %d (Check=%t)", ng.Name, offset, totalArticles, remainingArticles, ttMode.UseCHECK())
+			//log.Printf("Newsgroup: '%s' | Pushed (offset %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t)", ng.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.GetMode())
 		}
 
 	} // end for offset range totalArticles
 
-	//log.Printf("Newsgroup: '%s' | Main article loop completed, checking for requeued jobs...", newsgroup.Name)
+	//log.Printf("Newsgroup: '%s' | Main article loop completed, checking for requeued jobs...", ng.Name)
 
 	// Process any remaining requeued jobs after main loop completes
 	// This handles failures that occurred in the last batch
 	for {
 		if common.WantShutdown() {
-			log.Printf("WantShutdown during final requeue processing for '%s'", newsgroup.Name)
+			log.Printf("WantShutdown during final requeue processing for '%s'", ng.Name)
 			break
 		}
-		processed, err := processRequeuedJobs(newsgroup.Name, ttMode, ttResponses, redisCli)
+		processed, err := processRequeuedJobs(ng.Name, ttMode, ttResponses, redisCli)
 		if err != nil {
-			log.Printf("Newsgroup: '%s' | Error in final requeue processing: %v", newsgroup.Name, err)
+			log.Printf("Newsgroup: '%s' | Error in final requeue processing: %v", ng.Name, err)
 			// Don't return error, just log it - we've already processed most articles
 			break
 		}
@@ -1443,47 +1449,34 @@ func transferNewsgroup(db *database.Database, newsgroup *models.Newsgroup, batch
 			// No more requeued jobs to process
 			break
 		}
-		//log.Printf("Newsgroup: '%s' | Processed %d requeued jobs in final pass", newsgroup.Name, processed)
+		//log.Printf("Newsgroup: '%s' | Processed %d requeued jobs in final pass", ng.Name, processed)
 		// Loop again to check if any of those jobs failed and were requeued
 	}
 
-	//log.Printf("Newsgroup: '%s' | Final requeue processing completed, closing ttResponses channel...", newsgroup.Name)
+	//log.Printf("Newsgroup: '%s' | Final requeue processing completed, closing ttResponses channel...", ng.Name)
 
 	// Close the ttResponses channel to signal collector goroutine to finish
 	close(ttResponses)
 
-	//log.Printf("Newsgroup: '%s' | ttResponses channel closed, waiting for collector to finish...", newsgroup.Name)
+	//log.Printf("Newsgroup: '%s' | ttResponses channel closed, waiting for collector to finish...", ng.Name)
 
 	// Wait for collector goroutine to finish processing all responses
 	collectorWG.Wait()
 
-	//log.Printf("Newsgroup: '%s' | All jobs completed and responses collected", newsgroup.Name)
+	//log.Printf("Newsgroup: '%s' | All jobs completed and responses collected", ng.Name)
 
 	return nil
 } // end func transferNewsgroup
 
-// NewsgroupProgress tracks the progress of a newsgroup transfer
-type NewsgroupProgress struct {
-	Mux           sync.RWMutex
-	Started       time.Time
-	LastUpdated   time.Time
-	OffsetStart   int64
-	BatchStart    int64
-	BatchEnd      int64
-	TotalArticles int64
-	Finished      bool
-}
-
 var results []string
 var rejectedArticles = make(map[string][]string)
 var resultsMutex sync.RWMutex
-var NewsgroupProgressMap = make(map[string]*NewsgroupProgress)
 var lowerLevel float64 = 90.0
 var upperLevel float64 = 95.0
 
 // processBatch processes a batch of articles using NNTP streaming protocol (RFC 4644)
 // Uses TAKETHIS primarily, falls back to CHECK when success rate < 95%
-func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCli *redis.Client, batchStart int64, batchEnd int64, dbOffset int64, offsetQ *nntp.OffsetQueue) (chan *nntp.TTResponse, error) {
+func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCli *redis.Client, batchStart int64, batchEnd int64, dbOffset int64, offsetQ *nntp.OffsetQueue, ngtprogress *nntp.NewsgroupTransferProgress) (chan *nntp.TTResponse, error) {
 
 	if len(articles) == 0 {
 		log.Printf("processBatch: no articles in this batch for newsgroup '%s'", *ttMode.Newsgroup)
@@ -1492,7 +1485,7 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 
 	// Update newsgroup progress with current offset
 	resultsMutex.RLock()
-	if progress, exists := NewsgroupProgressMap[*ttMode.Newsgroup]; exists {
+	if progress, exists := nntp.NewsgroupTransferProgressMap[*ttMode.Newsgroup]; exists {
 		progress.Mux.Lock()
 		progress.OffsetStart = dbOffset
 		progress.BatchStart = batchStart
@@ -1516,6 +1509,7 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 		BatchStart:   batchStart,
 		BatchEnd:     batchEnd,
 		OffsetQ:      offsetQ,
+		NGTProgress:  ngtprogress,
 	}
 	var redis_cache_hits int
 	if redisCli != nil && len(articles) > 0 {
@@ -1775,7 +1769,8 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		}
 		// Send TAKETHIS command with article content (non-blocking)
 		log.Printf("Newsgroup: '%s' | Pre-Send TAKETHIS '%s'", newsgroup, article.MessageID)
-		cmdID, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname, newsgroup)
+		cmdID, txBytes, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname, newsgroup)
+		job.NGTProgress.AddTXBytes(txBytes)
 		if err != nil {
 			if err == common.ErrNoNewsgroups {
 				log.Printf("Newsgroup: '%s' | skipped TAKETHIS '%s': no newsgroups header", newsgroup, article.MessageID)
@@ -2070,10 +2065,11 @@ forever:
 										continue
 									}
 									rqj := &nntp.CHTTJob{
-										JobID:     job.JobID,
-										Newsgroup: job.Newsgroup,
-										Articles:  job.Articles,
-										OffsetQ:   job.OffsetQ,
+										JobID:       job.JobID,
+										Newsgroup:   job.Newsgroup,
+										Articles:    job.Articles,
+										OffsetQ:     job.OffsetQ,
+										NGTProgress: job.NGTProgress,
 									}
 									job.Mux.Unlock()
 
@@ -2094,6 +2090,7 @@ forever:
 									job.MessageIDs = nil
 									job.WantedIDs = nil
 									job.OffsetQ = nil
+									job.NGTProgress = nil
 									job.Mux.Unlock()
 								}
 							}
@@ -2490,7 +2487,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rr.ClearReadRequest()
 					return
 				}
-				//log.Printf("CheckWorker (%d): Reading CHECK response for msgID: %s (cmdId:%d MID=%d/%d)", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs)
+				log.Printf("CheckWorker (%d): Pre-Read CHECK response for msgID: %s (cmdId:%d MID=%d/%d)", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs)
 				start := time.Now()
 				/* disabled
 				if err := conn.SetReadDeadline(time.Now().Add(1 * time.Minute)); err != nil {
@@ -2501,6 +2498,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				}
 				*/
 				conn.TextConn.StartResponse(rr.CmdID)
+				log.Printf("CheckWorker (%d): Reading CHECK response for msgID: %s (cmdId:%d MID=%d/%d)", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs)
 				code, line, err := conn.TextConn.ReadCodeLine(238)
 				conn.TextConn.EndResponse(rr.CmdID)
 				if code == 0 && err != nil {
@@ -2509,7 +2507,6 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rr.ClearReadRequest()
 					return
 				}
-				//log.Printf("CheckWorker (%d): Got CHECK response line: '%s' for msgID: %s (cmdId:%d MID=%d/%d) took: %v ms", workerID, line, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, time.Since(start).Milliseconds())
 				/* disabled
 				if err := conn.SetReadDeadline(time.Time{}); err != nil {
 					log.Printf("Failed to set unset read deadline: %v", err)
@@ -2552,6 +2549,8 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rr.ClearReadRequest()
 					return
 				}
+				log.Printf("CheckWorker (%d): Got CHECK response: '%s' (cmdId:%d MID=%d/%d) took: %v ms", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, time.Since(start).Milliseconds())
+
 				rs.Mux.Lock()
 				job, exists := rs.jobMap[rr.MsgID]
 				rs.Mux.Unlock()
@@ -3002,6 +3001,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			<tr>
 				<th>Newsgroup</th>
 				<th>Progress</th>
+				<th>Speed</th>
 				<th>Started</th>
 				<th>Duration</th>
 			</tr>
@@ -3022,8 +3022,10 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 						<em>Initializing...</em>
 					{{end}}
 				</td>
+				<td style="font-size: 12px;">{{.SpeedKB}} KByte/s</td>
 				<td style="font-size: 12px;">{{.Started}}</td>
 				<td style="font-size: 12px;">{{.Duration}}</td>
+
 			</tr>
 			{{end}}
 		</tbody>
@@ -3070,14 +3072,16 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		Started       string
 		LastUpdated   string
 		Finished      bool
+		SpeedKB       int64
 		Duration      string
 	}
 
-	started := len(NewsgroupProgressMap)
+	started := len(nntp.NewsgroupTransferProgressMap)
 	finished := 0
 	var progressList []ProgressInfo
 
-	for name, progress := range NewsgroupProgressMap {
+	for name, progress := range nntp.NewsgroupTransferProgressMap {
+		progress.CalcSpeed()
 		progress.Mux.RLock()
 		if progress.Finished {
 			finished++
@@ -3095,6 +3099,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			TotalArticles: progress.TotalArticles,
 			Started:       progress.Started.Format("15:04:05"),
 			LastUpdated:   progress.LastUpdated.Format("15:04:05"),
+			SpeedKB:       progress.LastSpeedKB,
 			Finished:      false,
 			Duration:      duration,
 		})

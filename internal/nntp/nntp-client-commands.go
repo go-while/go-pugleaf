@@ -169,6 +169,7 @@ type CHTTJob struct {
 	BatchStart   int64
 	BatchEnd     int64
 	OffsetQ      *OffsetQueue
+	NGTProgress  *NewsgroupTransferProgress
 }
 
 func (job *CHTTJob) Response(ForceCleanUp bool, Err error) {
@@ -189,6 +190,52 @@ func (job *CHTTJob) Response(ForceCleanUp bool, Err error) {
 
 	job.ResponseChan <- &TTResponse{Job: job, ForceCleanUp: ForceCleanUp, Err: Err}
 	close(job.ResponseChan)
+}
+
+// NewsgroupTransferProgressMap is protected by resultsMutex in nntp-transfer/main.go
+var NewsgroupTransferProgressMap = make(map[string]*NewsgroupTransferProgress)
+
+// NewsgroupProgress tracks the progress of a newsgroup transfer
+type NewsgroupTransferProgress struct {
+	Mux           sync.RWMutex
+	Newsgroup     *string
+	Started       time.Time
+	LastUpdated   time.Time
+	OffsetStart   int64
+	BatchStart    int64
+	BatchEnd      int64
+	TotalArticles int64
+	Finished      bool
+	TXBytes       int64
+	TXBytesTMP    int64
+	LastCronTX    time.Time
+	LastSpeedKB   int64
+}
+
+func (ngp *NewsgroupTransferProgress) CalcSpeed() (speed int64) {
+	ngp.Mux.Lock()
+	if time.Since(ngp.LastCronTX) >= time.Second*5 {
+		since := time.Since(ngp.LastCronTX)
+		ngp.LastSpeedKB = int64(float64(ngp.TXBytesTMP) / since.Seconds() / 1024)
+		speed = ngp.LastSpeedKB
+		log.Printf("Newsgroup: '%s' | Transfer speed: %d KB/s (%d bytes in %v)", *ngp.Newsgroup, ngp.LastSpeedKB, ngp.TXBytesTMP, since)
+		ngp.TXBytesTMP = 0
+		ngp.LastCronTX = time.Now()
+	} else {
+		speed = ngp.LastSpeedKB
+	}
+	ngp.Mux.Unlock()
+	return speed
+}
+
+func (ngp *NewsgroupTransferProgress) AddTXBytes(n int) {
+	if n > 0 {
+		ngp.Mux.Lock()
+		ngp.TXBytes += int64(n)
+		ngp.TXBytesTMP += int64(n)
+		ngp.Mux.Unlock()
+	}
+	ngp.CalcSpeed()
 }
 
 const IncrFLAG_CHECKED = 1
@@ -1345,7 +1392,7 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan 
 			return fmt.Errorf("failed to send CHECK '%s': %w", *msgID, err)
 		}
 		log.Printf("Newsgroup: '%s' | CHECK sent '%s' (CmdID=%d) pass notify to readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
-		readResponsesChan <- &ReadRequest{CmdID: id, Job: job, Reqs: len(messageIDs), MsgID: msgID, N: n + 1}
+		readResponsesChan <- &ReadRequest{CmdID: id, Job: job, MsgID: msgID, N: n + 1, Reqs: len(messageIDs)}
 		log.Printf("Newsgroup: '%s' | CHECK notified response reader '%s' (CmdID=%d) readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
 		id++
 	}
@@ -1529,18 +1576,18 @@ func (c *BackendConn) GetBufSize(size int) int {
 
 // SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response
 // Returns command ID for later response reading - used for streaming mode
-func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string) (uint, error) {
+func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string) (cmdID uint, txBytes int, err error) {
 	c.mux.Lock()
 	//defer c.mux.Unlock()
 
 	if !c.connected {
 		c.mux.Unlock()
-		return 0, fmt.Errorf("not connected")
+		return 0, 0, fmt.Errorf("not connected")
 	}
 
 	if c.ModeReader {
 		c.mux.Unlock()
-		return 0, fmt.Errorf("cannot send article in reader mode")
+		return 0, 0, fmt.Errorf("cannot send article in reader mode")
 	}
 	c.lastUsed = time.Now()
 	c.mux.Unlock()
@@ -1548,7 +1595,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	// Prepare article for transfer
 	headers, err := common.ReconstructHeaders(article, true, nntphostname, newsgroup)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	writer := bufio.NewWriterSize(c.conn, c.GetBufSize(article.Bytes)) // Slightly larger buffer than article size for headers
 	defer writer.Flush()
@@ -1557,21 +1604,25 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	defer c.mux.Unlock()
 
 	// Send TAKETHIS command
-	id, err := c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
+	cmdID, err = c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
-		return 0, fmt.Errorf("failed SendTakeThisArticleStreaming command: %w", err)
+		return 0, 0, fmt.Errorf("failed SendTakeThisArticleStreaming command: %w", err)
 	}
 
 	// Send headers
 	for _, headerLine := range headers {
-		if _, err := writer.WriteString(headerLine + CRLF); err != nil {
-			return 0, fmt.Errorf("failed to write header SendTakeThisArticleStreaming: %w", err)
+		if tx, err := writer.WriteString(headerLine + CRLF); err != nil {
+			return 0, txBytes, fmt.Errorf("failed to write header SendTakeThisArticleStreaming: %w", err)
+		} else {
+			txBytes += tx
 		}
 	}
 
 	// Send empty line between headers and body
-	if _, err := writer.WriteString(CRLF); err != nil {
-		return 0, fmt.Errorf("failed to write header/body separator SendTakeThisArticleStreaming: %w", err)
+	if tx, err := writer.WriteString(CRLF); err != nil {
+		return 0, txBytes, fmt.Errorf("failed to write header/body separator SendTakeThisArticleStreaming: %w", err)
+	} else {
+		txBytes += tx
 	}
 
 	// Send body with proper dot-stuffing
@@ -1591,18 +1642,22 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 			line = "." + line
 		}
 
-		if _, err := writer.WriteString(line + CRLF); err != nil {
-			return 0, fmt.Errorf("failed to write body line SendTakeThisArticleStreaming: %w", err)
+		if tx, err := writer.WriteString(line + CRLF); err != nil {
+			return 0, txBytes, fmt.Errorf("failed to write body line SendTakeThisArticleStreaming: %w", err)
+		} else {
+			txBytes += tx
 		}
 	}
 
 	// Send termination line (single dot)
-	if _, err := writer.WriteString(DOT + CRLF); err != nil {
-		return 0, fmt.Errorf("failed to send article terminator SendTakeThisArticleStreaming: %w", err)
+	if tx, err := writer.WriteString(DOT + CRLF); err != nil {
+		return 0, txBytes, fmt.Errorf("failed to send article terminator SendTakeThisArticleStreaming: %w", err)
+	} else {
+		txBytes += tx
 	}
 
 	// Return command ID without reading response (streaming mode)
-	return id, nil
+	return cmdID, txBytes, nil
 }
 
 // ReadTakeThisResponseStreaming reads a TAKETHIS response using the command ID
@@ -1619,9 +1674,20 @@ func (c *BackendConn) ReadTakeThisResponseStreaming(newsgroup string, cr *CheckR
 	log.Printf("Newsgroup: '%s' | TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: passed StartResponse CmdID=%d message-id '%s'", newsgroup, cr.CmdId, cr.Article.MessageID)
 	//c.mux.Lock()
 	//defer c.mux.Unlock()
-	code, _, err := c.TextConn.ReadCodeLine(239)
+	code, line, err := c.TextConn.ReadCodeLine(239)
 	if code == 0 && err != nil {
 		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
+	}
+	parts := strings.Fields(line)
+	if len(parts) < 1 {
+		log.Printf("ERROR in ReadTakeThisResponseStreaming: Malformed response code=%d line: '%s' CmdID=%d message-id '%s')", code, line, cr.CmdId, cr.Article.MessageID)
+		//rr.ReturnReadRequest(rrRetChan)
+		return 0, fmt.Errorf("malformed TAKETHIS response: %s", line)
+	}
+
+	if parts[0] != cr.Article.MessageID {
+		log.Printf("ERROR in ReadTakeThisResponseStreaming: Mismatched response code=%d line: '%s' (expected msgID '%s') CmdID=%d", code, line, cr.Article.MessageID, cr.CmdId)
+		return 0, fmt.Errorf("out of order TAKETHIS response: expected %s, got %s", cr.Article.MessageID, parts[0])
 	}
 	log.Printf("Newsgroup: '%s' | TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: passed ReadCodeLine CmdID=%d: code=%d message-id '%s'", newsgroup, cr.CmdId, code, cr.Article.MessageID)
 
