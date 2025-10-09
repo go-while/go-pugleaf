@@ -62,7 +62,7 @@ type OffsetQueue struct {
 	queued int
 }
 
-var ReturnDelay = time.Millisecond * 256
+var ReturnDelay = time.Millisecond * 16
 
 func (o *OffsetQueue) Wait(n int) {
 	start := time.Now()
@@ -79,7 +79,6 @@ func (o *OffsetQueue) Wait(n int) {
 				o.isleep = 0
 			}
 			o.mux.Unlock()
-
 			return
 		}
 		if time.Since(lastPrint) > time.Second {
@@ -205,34 +204,61 @@ type NewsgroupTransferProgress struct {
 	BatchStart    int64
 	BatchEnd      int64
 	TotalArticles int64
+	ArticlesTT    int64
+	ArticlesCH    int64
 	Finished      bool
 	TXBytes       int64
 	TXBytesTMP    int64
 	LastCronTX    time.Time
 	LastSpeedKB   int64
+	LastArtPerfC  int64 // check articles per second
+	LastArtPerfT  int64 // takethis articles per second
 }
 
-func (ngp *NewsgroupTransferProgress) CalcSpeed() (speed int64) {
+func (ngp *NewsgroupTransferProgress) CalcSpeed() {
 	ngp.Mux.Lock()
+	defer ngp.Mux.Unlock()
 	if time.Since(ngp.LastCronTX) >= time.Second*5 {
-		since := time.Since(ngp.LastCronTX)
-		ngp.LastSpeedKB = int64(float64(ngp.TXBytesTMP) / since.Seconds() / 1024)
-		speed = ngp.LastSpeedKB
-		log.Printf("Newsgroup: '%s' | Transfer speed: %d KB/s (%d bytes in %v)", *ngp.Newsgroup, ngp.LastSpeedKB, ngp.TXBytesTMP, since)
+		since := int64(time.Since(ngp.LastCronTX).Seconds())
+		if ngp.TXBytesTMP > 0 {
+			ngp.LastSpeedKB = ngp.TXBytesTMP / since / 1024
+		}
+		if ngp.ArticlesCH > 0 {
+			ngp.LastArtPerfC = ngp.ArticlesCH / since
+		}
+		if ngp.ArticlesTT > 0 {
+			ngp.LastArtPerfT = ngp.ArticlesTT / since
+		}
+		log.Printf("Newsgroup: '%s' | Transfer Perf: %d KB/s (%d bytes in %v) did: CH=(%d|%d/s) TT=(%d|%d/s)", *ngp.Newsgroup, ngp.LastSpeedKB, ngp.TXBytesTMP, since, ngp.ArticlesCH, ngp.LastArtPerfC, ngp.ArticlesTT, ngp.LastArtPerfT)
+
+		ngp.ArticlesCH = 0
+		ngp.ArticlesTT = 0
 		ngp.TXBytesTMP = 0
 		ngp.LastCronTX = time.Now()
-	} else {
-		speed = ngp.LastSpeedKB
+
 	}
-	ngp.Mux.Unlock()
-	return speed
 }
 
-func (ngp *NewsgroupTransferProgress) AddTXBytes(n int) {
-	if n > 0 {
+func (ngp *NewsgroupTransferProgress) AddNGTP(articlesCH int64, articlesTT int64, txbytes int64) {
+	if articlesCH > 0 {
 		ngp.Mux.Lock()
-		ngp.TXBytes += int64(n)
-		ngp.TXBytesTMP += int64(n)
+		ngp.ArticlesCH += articlesCH
+		ngp.Mux.Unlock()
+	}
+	if articlesTT > 0 {
+		ngp.Mux.Lock()
+		ngp.ArticlesTT += articlesTT
+		ngp.Mux.Unlock()
+	}
+	if txbytes > 0 {
+		ngp.Mux.Lock()
+		ngp.TXBytes += txbytes
+		ngp.TXBytesTMP += txbytes
+		ngp.Mux.Unlock()
+	}
+	if articlesCH > 0 || articlesTT > 0 || txbytes > 0 {
+		ngp.Mux.Lock()
+		ngp.LastUpdated = time.Now()
 		ngp.Mux.Unlock()
 	}
 	ngp.CalcSpeed()
@@ -1399,179 +1425,11 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan 
 	return nil
 }
 
-/*
-// CheckMultiple sends a CHECK command for multiple message IDs and returns responses
-func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) ([]*string, error) {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-	if !c.connected {
-		return nil, fmt.Errorf("not connected")
-	}
-
-	if c.ModeReader {
-		return nil, fmt.Errorf("cannot check article in reader mode")
-	}
-
-	if len(messageIDs) == 0 {
-		return nil, fmt.Errorf("no message IDs provided")
-	}
-
-	c.lastUsed = time.Now()
-
-	// Send individual CHECK commands for each message ID (pipelining)
-	commandIds := make([]uint, len(messageIDs))
-	for i, msgID := range messageIDs {
-		id, err := c.TextConn.Cmd("CHECK %s", *msgID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
-		}
-		commandIds[i] = id
-	}
-
-	// Read responses for each CHECK command
-	wantedIds := make([]*string, 0, len(messageIDs))
-	for i, msgID := range messageIDs {
-		id := commandIds[i]
-		// Read response for this CHECK command
-		c.TextConn.StartResponse(id)
-		code, line, err := c.TextConn.ReadCodeLine(238)
-		c.TextConn.EndResponse(id)
-		if code == 0 && err != nil {
-			log.Printf("Failed to read CHECK response for %s: %v", *msgID, err)
-			return nil, fmt.Errorf("failed to read CHECK response for %s: %w", *msgID, err)
-		}
-
-		// Parse response line
-		// Format: code <message-id> [message]
-		// 238 <message-id> - article wanted
-		// 431 <message-id> - article not wanted
-		// 438 <message-id> - article not wanted (already have it)
-		// ReadCodeLine returns: code=238, message="<message-id> article wanted"
-		parts := strings.Fields(line)
-		if len(parts) < 1 {
-			log.Printf("Malformed CHECK response: %s", line)
-			return nil, fmt.Errorf("malformed CHECK response: %s", line)
-		}
-		if parts[0] != *msgID {
-			log.Printf("Mismatched CHECK response: expected %s, got %s", *msgID, parts[0])
-			return nil, fmt.Errorf("out of order CHECK response: expected %s, got %s", *msgID, parts[0])
-		}
-		switch code {
-		case 238:
-			//log.Printf("Wanted Article '%s': response=%d", *msgID, code)
-			wantedIds = append(wantedIds, msgID)
-			ttMode.Wanted++
-		case 438:
-			//log.Printf("Unwanted Article '%s': response=%d", *msgID, code)
-			ttMode.Unwanted++
-		case 431:
-			continue
-		default:
-			log.Printf("Unknown CHECK response: line='%s' code=%d expected msgID %s", line, code, *msgID)
-			return nil, fmt.Errorf("unknown check response line='%s' code=%d", line, code)
-
-		}
-	}
-	// Return all responses
-	return wantedIds, nil
-}
-*/
-
-/* unused
-// TakeThisArticle sends an article via TAKETHIS command
-func (c *BackendConn) xxTakeThisArticle(article *models.Article, nntphostname *string, newsgroup string) (int, error) {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	if !c.connected {
-		return 0, fmt.Errorf("not connected")
-	}
-	if c.ModeReader {
-		return 0, fmt.Errorf("cannot send article in reader mode")
-	}
-
-	// Prepare article for transfer
-	headers, err := common.ReconstructHeaders(article, true, nntphostname, newsgroup)
-	if err != nil {
-		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
-	}
-
-	c.lastUsed = time.Now()
-	writer := bufio.NewWriter(c.conn)
-	defer writer.Flush()
-	// Send TAKETHIS command
-	id, err := c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
-	if err != nil {
-		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
-	}
-
-	// Send headers
-	for _, headerLine := range headers {
-		if _, err := writer.WriteString(headerLine + CRLF); err != nil {
-			return 0, fmt.Errorf("failed to write header: %w", err)
-		}
-	}
-
-	// Send empty line between headers and body
-	if _, err := writer.WriteString(CRLF); err != nil {
-		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
-	}
-
-	// Send body with proper dot-stuffing
-	// Split body preserving line endings
-	bodyLines := strings.Split(article.BodyText, "\n")
-	for i, line := range bodyLines {
-		// Skip empty last element from trailing \n
-		if i == len(bodyLines)-1 && line == "" {
-			break
-		}
-
-		// Remove trailing \r if present (will add CRLF)
-		line = strings.TrimSuffix(line, "\r")
-
-		// Dot-stuff lines that start with a dot (RFC 977)
-		if strings.HasPrefix(line, ".") {
-			line = "." + line
-		}
-
-		if _, err := writer.WriteString(line + CRLF); err != nil {
-			return 0, fmt.Errorf("failed to write body line: %w", err)
-		}
-	}
-
-	// Send termination line (single dot)
-	if _, err := writer.WriteString(DOT + CRLF); err != nil {
-		return 0, fmt.Errorf("failed to send article terminator: %w", err)
-	}
-
-	// Flush the writer to ensure all data is sent
-	if err := writer.Flush(); err != nil {
-		return 0, fmt.Errorf("failed to flush article data: %w", err)
-	}
-
-	// Read TAKETHIS response
-	c.TextConn.StartResponse(id)
-	defer c.TextConn.EndResponse(id)
-
-	code, _, err := c.TextConn.ReadCodeLine(239)
-	if code == 0 && err != nil {
-		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
-	}
-
-	// Parse response
-	// Format: code <message-id> [message]
-	// 239 <message-id> - article transferred successfully
-	// 439 <message-id> - article transfer failed
-
-	return code, nil
-}
-*/
-
 func (c *BackendConn) GetBufSize(size int) int {
-	if size+2048 <= 16*1024 {
+	if size+2048 <= 16384 {
 		return size + 2048
 	}
-	return 16 * 1024 // hardcoded default 32KB max buffer size
+	return 16384 // hardcoded default max buffer size
 }
 
 // SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response

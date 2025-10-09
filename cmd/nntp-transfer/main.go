@@ -1770,7 +1770,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		// Send TAKETHIS command with article content (non-blocking)
 		log.Printf("Newsgroup: '%s' | Pre-Send TAKETHIS '%s'", newsgroup, article.MessageID)
 		cmdID, txBytes, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname, newsgroup)
-		job.NGTProgress.AddTXBytes(txBytes)
+		job.NGTProgress.AddNGTP(0, 1, int64(txBytes))
 		if err != nil {
 			if err == common.ErrNoNewsgroups {
 				log.Printf("Newsgroup: '%s' | skipped TAKETHIS '%s': no newsgroups header", newsgroup, article.MessageID)
@@ -2554,6 +2554,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				rs.Mux.Lock()
 				job, exists := rs.jobMap[rr.MsgID]
 				rs.Mux.Unlock()
+				job.NGTProgress.AddNGTP(1, 0, 0)
 				//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG1 Processing CHECK response for msgID: %s (cmdId:%d MID=%d/%d) code=%d", *job.Newsgroup, workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, code)
 				if !exists {
 					log.Printf("Newsgroup: '%s' | ERROR in CheckWorker: ReadCheckResponse msgId '%s' did not exist in jobMap.", *job.Newsgroup, *rr.MsgID)
@@ -3002,6 +3003,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 				<th>Newsgroup</th>
 				<th>Progress</th>
 				<th>Speed</th>
+				<th>CH/s</th>
+				<th>TT/s</th>
+				<th>Active</th>
 				<th>Started</th>
 				<th>Duration</th>
 			</tr>
@@ -3023,6 +3027,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 					{{end}}
 				</td>
 				<td style="font-size: 12px;">{{.SpeedKB}} KByte/s</td>
+				<td style="font-size: 12px;">{{.LastArtPerfC}}/s</td>
+				<td style="font-size: 12px;">{{.LastArtPerfT}}/s</td>
+				<td style="font-size: 12px;">{{.TimeSince}} ago</td>
 				<td style="font-size: 12px;">{{.Started}}</td>
 				<td style="font-size: 12px;">{{.Duration}}</td>
 
@@ -3074,6 +3081,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		Finished      bool
 		SpeedKB       int64
 		Duration      string
+		TimeSince     string
+		LastArtPerfC  int64
+		LastArtPerfT  int64
 	}
 
 	started := len(nntp.NewsgroupTransferProgressMap)
@@ -3099,7 +3109,10 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			TotalArticles: progress.TotalArticles,
 			Started:       progress.Started.Format("15:04:05"),
 			LastUpdated:   progress.LastUpdated.Format("15:04:05"),
+			TimeSince:     time.Since(progress.LastUpdated).Round(time.Second).String(),
 			SpeedKB:       progress.LastSpeedKB,
+			LastArtPerfC:  progress.LastArtPerfC,
+			LastArtPerfT:  progress.LastArtPerfT,
 			Finished:      false,
 			Duration:      duration,
 		})
