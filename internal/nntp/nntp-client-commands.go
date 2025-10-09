@@ -1405,6 +1405,7 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan 
 	//writer := bufio.NewWriter(c.conn)
 	//defer writer.Flush()
 	//log.Printf("Newsgroup: '%s' | SendCheckMultiple commands for %d message IDs", *job.Newsgroup, len(messageIDs))
+
 	for n, msgID := range messageIDs {
 		if msgID == nil || *msgID == "" {
 			log.Printf("Newsgroup: '%s' | Skipping empty message ID in CHECK command", *job.Newsgroup)
@@ -1432,23 +1433,30 @@ func (c *BackendConn) GetBufSize(size int) int {
 	return 16384 // hardcoded default max buffer size
 }
 
+func (c *BackendConn) Lock() {
+	c.mux.Lock()
+}
+func (c *BackendConn) Unlock() {
+	c.mux.Unlock()
+}
+
 // SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response
 // Returns command ID for later response reading - used for streaming mode
 func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string) (cmdID uint, txBytes int, err error) {
-	c.mux.Lock()
+	//c.mux.Lock()
 	//defer c.mux.Unlock()
 
 	if !c.connected {
-		c.mux.Unlock()
+		//c.mux.Unlock()
 		return 0, 0, fmt.Errorf("not connected")
 	}
 
 	if c.ModeReader {
-		c.mux.Unlock()
+		//c.mux.Unlock()
 		return 0, 0, fmt.Errorf("cannot send article in reader mode")
 	}
 	c.lastUsed = time.Now()
-	c.mux.Unlock()
+	//c.mux.Unlock()
 
 	// Prepare article for transfer
 	headers, err := common.ReconstructHeaders(article, true, nntphostname, newsgroup)
@@ -1458,8 +1466,8 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	writer := bufio.NewWriterSize(c.conn, c.GetBufSize(article.Bytes)) // Slightly larger buffer than article size for headers
 	defer writer.Flush()
 
-	c.mux.Lock()
-	defer c.mux.Unlock()
+	//c.mux.Lock()
+	//defer c.mux.Unlock()
 
 	// Send TAKETHIS command
 	cmdID, err = c.TextConn.Cmd("TAKETHIS %s", article.MessageID)

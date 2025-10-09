@@ -1762,7 +1762,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	// Now send TAKETHIS for non-cached articles
 	artChan := make(chan *nntp.CheckResponse, len(articles))
 	// ← Also close artChan
-
+	conn.Lock()
 	for _, article := range articles {
 		if article == nil {
 			continue // Skip cached articles
@@ -1770,12 +1770,13 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		// Send TAKETHIS command with article content (non-blocking)
 		log.Printf("Newsgroup: '%s' | Pre-Send TAKETHIS '%s'", newsgroup, article.MessageID)
 		cmdID, txBytes, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname, newsgroup)
-		job.NGTProgress.AddNGTP(0, 1, int64(txBytes))
+		job.NGTProgress.AddNGTP(0, 0, int64(txBytes))
 		if err != nil {
 			if err == common.ErrNoNewsgroups {
 				log.Printf("Newsgroup: '%s' | skipped TAKETHIS '%s': no newsgroups header", newsgroup, article.MessageID)
 				continue
 			}
+			conn.Unlock()
 			conn.ForceCloseConn()
 			log.Printf("ERROR Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroup, article.MessageID, err)
 			return 0, 0, redis_cached, fmt.Errorf("failed to send TAKETHIS for %s: %v", article.MessageID, err)
@@ -1786,6 +1787,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			CmdId:   cmdID,
 		}
 	}
+	conn.Unlock()
 	close(artChan)
 	//log.Printf("Sent %d TAKETHIS commands, reading responses...", len(commandIDs))
 	var done []*string
@@ -1804,6 +1806,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		}
 		log.Printf("Newsgroup: '%s' | GOT TAKETHIS response '%s': %d CmdID=%d (i=%d/%d)", newsgroup, cr.Article.MessageID, takeThisResponseCode, cr.CmdId, countDone+1, len(articles))
 		countDone++
+		job.NGTProgress.AddNGTP(0, 1, 0)
 		// Update success rate tracking
 		switch takeThisResponseCode {
 		case 239:
