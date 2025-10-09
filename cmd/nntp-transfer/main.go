@@ -1800,7 +1800,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	for cr := range artChan {
 		log.Printf("Newsgroup: '%s' | Pre-Read TAKETHIS response for article '%s' CmdID=%d (i=%d/%d)", newsgroup, cr.Article.MessageID, cr.CmdId, countDone+1, len(articles))
 		job.TTMode.IncrementTmp()
-		takeThisResponseCode, err := conn.ReadTakeThisResponseStreaming(cr)
+		takeThisResponseCode, err := conn.ReadTakeThisResponseStreaming(newsgroup, cr)
 		if err != nil {
 			job.Increment(nntp.IncrFLAG_CONN_ERRORS)
 			conn.ForceCloseConn()
@@ -2541,13 +2541,13 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				// ReadCodeLine returns: code=238, message="<message-id> article wanted"
 				parts := strings.Fields(line)
 				if len(parts) < 1 {
-					log.Printf("ERROR in CheckWorker: Malformed CHECK response: %s", line)
+					log.Printf("ERROR in CheckWorker: Malformed CHECK response code=%d line: '%s' (cmdId:%d MID=%d/%d)", code, line, rr.CmdID, rr.N, rr.Reqs)
 					//rr.ReturnReadRequest(rrRetChan)
 					rr.ClearReadRequest()
 					return
 				}
 				if parts[0] != *rr.MsgID {
-					log.Printf("ERROR in CheckWorker: Mismatched CHECK response: expected %s, got %s", *rr.MsgID, parts[0])
+					log.Printf("ERROR in CheckWorker: Mismatched CHECK response: expected '%s', got '%s' code=%d (cmdId:%d MID=%d/%d)", *rr.MsgID, parts[0], code, rr.CmdID, rr.N, rr.Reqs)
 					//rr.ReturnReadRequest(rrRetChan)
 					rr.ClearReadRequest()
 					return
@@ -2557,7 +2557,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				rs.Mux.Unlock()
 				//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG1 Processing CHECK response for msgID: %s (cmdId:%d MID=%d/%d) code=%d", *job.Newsgroup, workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, code)
 				if !exists {
-					log.Printf("Newsgroup: '%s' | ERROR in CheckWorker: ReadCheckResponse msgId did not exist in jobMap: %s", *job.Newsgroup, *rr.MsgID)
+					log.Printf("Newsgroup: '%s' | ERROR in CheckWorker: ReadCheckResponse msgId '%s' did not exist in jobMap.", *job.Newsgroup, *rr.MsgID)
 					//rr.ReturnReadRequest(rrRetChan)
 					rr.ClearReadRequest()
 					continue loop
