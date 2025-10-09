@@ -2262,7 +2262,7 @@ func replyChan(request chan struct{}, reply chan struct{}) {
 }
 
 func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue chan *nntp.CHTTJob) {
-	readResponsesChan := make(chan *nntp.ReadRequest, BatchCheck)
+	readResponsesChan := make(chan *nntp.ReadRequest, BatchCheck*2)
 	//rrRetChan := make(chan struct{}, BatchCheck)
 	takeThisChan := make(chan *nntp.CHTTJob, 2) // buffer 2
 	errChan := make(chan struct{}, 4)
