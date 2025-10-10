@@ -934,3 +934,74 @@ func formatBytes(bytes int64) string {
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
+
+// updateNewsgroupsExpiryFromFile reads a file with newsgroup:days format and updates expiry_days
+func updateNewsgroupsExpiryFromFile(db *database.Database, filename string) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+	updated := 0
+	errors := 0
+
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Parse line: newsgroup:days
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			log.Printf("[EXPIRY] Line %d: invalid format (expected 'newsgroup:days'): %s", lineNum, line)
+			errors++
+			continue
+		}
+
+		newsgroup := strings.TrimSpace(parts[0])
+		daysStr := strings.TrimSpace(parts[1])
+
+		// Strip optional 'd' suffix (e.g., "30d" -> "30")
+		daysStr = strings.TrimSuffix(daysStr, "d")
+		daysStr = strings.TrimSuffix(daysStr, "D")
+
+		// Parse days as integer
+		days, err := strconv.Atoi(daysStr)
+		if err != nil {
+			log.Printf("[EXPIRY] Line %d: invalid days value '%s' for newsgroup '%s': %v", lineNum, daysStr, newsgroup, err)
+			errors++
+			continue
+		}
+
+		// Update database
+		if err := db.UpdateNewsgroupExpiry(newsgroup, days); err != nil {
+			log.Printf("[EXPIRY] Line %d: failed to update newsgroup '%s': %v", lineNum, newsgroup, err)
+			errors++
+			continue
+		}
+
+		updated++
+		if verbose {
+			log.Printf("[EXPIRY] Updated '%s' to %d days", newsgroup, days)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading file: %w", err)
+	}
+
+	log.Printf("[EXPIRY] Processed %d lines: %d updated, %d errors", lineNum, updated, errors)
+
+	if errors > 0 {
+		return fmt.Errorf("completed with %d errors", errors)
+	}
+
+	return nil
+}

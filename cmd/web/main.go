@@ -67,6 +67,9 @@ var (
 	compareActiveFile        string
 	compareActiveMinArticles int64
 
+	// Expiry update flag
+	updateNewsgroupsExpiryFile string
+
 	// Bridge flags (disabled by default)
 	/* code path disabled (not tested)
 	enableFediverse   bool
@@ -123,6 +126,7 @@ func main() {
 	flag.BoolVar(&findOrphanDBs, "find-orphan-dbs", false, "Find orphaned database folders in data/db that don't correspond to any newsgroup in main database")
 	flag.StringVar(&compareActiveFile, "compare-active", "", "Compare active file with database and show missing groups (format: groupname highwater lowwater status)")
 	flag.Int64Var(&compareActiveMinArticles, "compare-active-min-articles", 0, "use with -compare-active: only show groups with more than N articles (calculated as high-low)")
+	flag.StringVar(&updateNewsgroupsExpiryFile, "update-newsgroups-expiry-from-file", "", "Update newsgroup expiry_days from file (format: newsgroup:days, one per line)")
 	flag.BoolVar(&verbose, "verbose", false, "print more (debug) output")
 	flag.StringVar(&dataDir, "data", "./data", "path to database and config directory")
 
@@ -302,6 +306,18 @@ func main() {
 			os.Exit(1)
 		} else {
 			log.Printf("[WEB]: Orphaned database scan completed successfully")
+			os.Exit(0)
+		}
+	}
+
+	// updateNewsgroupsExpiryFile
+	if updateNewsgroupsExpiryFile != "" {
+		log.Printf("[WEB]: Updating newsgroup expiry from file: %s", updateNewsgroupsExpiryFile)
+		if err := updateNewsgroupsExpiryFromFile(db, updateNewsgroupsExpiryFile); err != nil {
+			log.Printf("[WEB]: Error: Failed to update newsgroup expiry: %v", err)
+			os.Exit(1)
+		} else {
+			log.Printf("[WEB]: Newsgroup expiry update completed successfully")
 			os.Exit(0)
 		}
 	}
