@@ -229,7 +229,7 @@ func (ngp *NewsgroupTransferProgress) CalcSpeed() {
 		if ngp.ArticlesTT > 0 {
 			ngp.LastArtPerfT = ngp.ArticlesTT / since
 		}
-		log.Printf("Newsgroup: '%s' | Transfer Perf: %d KB/s (%d bytes in %v) did: CH=(%d|%d/s) TT=(%d|%d/s)", *ngp.Newsgroup, ngp.LastSpeedKB, ngp.TXBytesTMP, since, ngp.ArticlesCH, ngp.LastArtPerfC, ngp.ArticlesTT, ngp.LastArtPerfT)
+		//log.Printf("Newsgroup: '%s' | Transfer Perf: %d KB/s (%d bytes in %v) did: CH=(%d|%d/s) TT=(%d|%d/s)", *ngp.Newsgroup, ngp.LastSpeedKB, ngp.TXBytesTMP, since, ngp.ArticlesCH, ngp.LastArtPerfC, ngp.ArticlesTT, ngp.LastArtPerfT)
 
 		ngp.ArticlesCH = 0
 		ngp.ArticlesTT = 0
@@ -1536,11 +1536,11 @@ func (c *BackendConn) ReadTakeThisResponseStreaming(newsgroup string, cr *CheckR
 	log.Printf("Newsgroup: '%s' | TAKETHIS wait for response CmdID=%d message-id '%s'", newsgroup, cr.CmdId, cr.Article.MessageID)
 	// Read TAKETHIS response
 	c.TextConn.StartResponse(cr.CmdId)
-	defer c.TextConn.EndResponse(cr.CmdId)
-	log.Printf("Newsgroup: '%s' | TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: passed StartResponse CmdID=%d message-id '%s'", newsgroup, cr.CmdId, cr.Article.MessageID)
+	//log.Printf("Newsgroup: '%s' | TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: passed StartResponse CmdID=%d message-id '%s'", newsgroup, cr.CmdId, cr.Article.MessageID)
 	//c.mux.Lock()
 	//defer c.mux.Unlock()
 	code, line, err := c.TextConn.ReadCodeLine(239)
+	c.TextConn.EndResponse(cr.CmdId)
 	if code == 0 && err != nil {
 		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
 	}
