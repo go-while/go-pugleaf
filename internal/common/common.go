@@ -29,11 +29,14 @@ func WantShutdown() bool {
 
 func IsClosedChannel(ch chan struct{}) bool {
 	select {
-	case <-ch:
-		return true
+	case _, ok := <-ch:
+		if !ok {
+			// channel is closed
+			return true
+		}
 	default:
-		return false
 	}
+	return false
 }
 
 func ChanLock(lockChan chan struct{}) {

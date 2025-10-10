@@ -14,6 +14,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/utils"
+	"github.com/redis/go-redis/v9"
 )
 
 // Constants for maximum lines to read in various commands
@@ -37,15 +38,214 @@ var NNTPTransferThreads int = 1
 
 var JobIDCounter uint64 // Atomic counter for unique job IDs
 
+// ResponseType indicates which handler should process a response
+type ResponseType int
+
+const (
+	TYPE_CHECK ResponseType = iota
+	TYPE_TAKETHIS
+)
+
+// ResponseData holds a pre-read response from the connection
+type ResponseData struct {
+	CmdID uint
+	Code  int
+	Line  string
+	Err   error
+}
+
+type CmdIDinfo struct {
+	CmdID    uint
+	RespType ResponseType
+}
+
+// ResponseDemuxer reads all responses from a connection in ONE goroutine
+// and dispatches them to the appropriate handler channel (CHECK or TAKETHIS)
+// This eliminates race conditions in concurrent ReadCodeLine calls
+type ResponseDemuxer struct {
+	conn              *BackendConn
+	cmdIDQ            []*CmdIDinfo
+	signalChan        chan struct{}
+	cmdIDQMux         sync.RWMutex
+	LastID            uint
+	checkResponseChan chan *ResponseData
+	ttResponseChan    chan *ResponseData
+	errChan           chan struct{}
+	started           bool
+	startedMux        sync.Mutex
+}
+
+// NewResponseDemuxer creates a new response demultiplexer
+func NewResponseDemuxer(conn *BackendConn, errChan chan struct{}, BatchCheck int) *ResponseDemuxer {
+	return &ResponseDemuxer{
+		conn:              conn,
+		signalChan:        make(chan struct{}, 1),
+		checkResponseChan: make(chan *ResponseData, 128000), // Buffer for CHECK responses
+		ttResponseChan:    make(chan *ResponseData, 128000), // Buffer for TAKETHIS responses
+		errChan:           errChan,
+		started:           false,
+	}
+}
+
+// RegisterCommand registers a command ID with its type (CHECK or TAKETHIS)
+func (d *ResponseDemuxer) RegisterCommand(cmdID uint, cmdType ResponseType) {
+	d.cmdIDQMux.Lock()
+	d.cmdIDQ = append(d.cmdIDQ, &CmdIDinfo{CmdID: cmdID, RespType: cmdType})
+	d.cmdIDQMux.Unlock()
+	select {
+	case d.signalChan <- struct{}{}:
+	default:
+	}
+}
+
+// PopCommand removes a command ID from the queue
+func (d *ResponseDemuxer) PopCommand() *CmdIDinfo {
+	d.cmdIDQMux.Lock()
+	defer d.cmdIDQMux.Unlock()
+
+	if len(d.cmdIDQ) == 0 {
+		return nil
+	}
+
+	cmdIDInfo := d.cmdIDQ[0]
+	d.cmdIDQ = d.cmdIDQ[1:]
+	return cmdIDInfo
+}
+
+// GetCheckResponseChan returns the channel for CHECK responses
+func (d *ResponseDemuxer) GetCheckResponseChan() chan *ResponseData {
+	return d.checkResponseChan
+}
+
+// GetTakeThisResponseChan returns the channel for TAKETHIS responses
+func (d *ResponseDemuxer) GetTakeThisResponseChan() chan *ResponseData {
+	return d.ttResponseChan
+}
+
+// Start launches the central response reader goroutine (call once)
+func (d *ResponseDemuxer) Start() {
+	d.startedMux.Lock()
+	defer d.startedMux.Unlock()
+
+	if d.started {
+		return // Already started
+	}
+	d.started = true
+
+	go d.readAndDispatch()
+}
+
+// readAndDispatch is the SINGLE goroutine that reads ALL responses from the shared connection
+func (d *ResponseDemuxer) readAndDispatch() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("ResponseDemuxer: panic in readAndDispatch: %v", r)
+		}
+		select {
+		case d.errChan <- struct{}{}:
+		default:
+		}
+	}()
+	outoforderBacklog := make(map[uint]*CmdIDinfo, 1024)
+	for {
+		select {
+		case <-d.errChan:
+			log.Printf("ResponseDemuxer: got errChan signal, exiting")
+			return
+		default:
+		}
+
+		if !d.conn.IsConnected() {
+			log.Printf("ResponseDemuxer: connection lost, exiting")
+			return
+		}
+
+		var cmdInfo *CmdIDinfo
+		if len(outoforderBacklog) > 0 {
+			if cmdInfoBacklog, exists := outoforderBacklog[d.LastID+1]; exists {
+				log.Printf("ResponseDemuxer: processing out-of-order backlog cmdID=%d d.LastID=%d", cmdInfoBacklog.CmdID, d.LastID)
+				cmdInfo = cmdInfoBacklog
+				outoforderBacklog[d.LastID+1] = nil
+				delete(outoforderBacklog, d.LastID+1)
+			}
+		} else {
+			cmdInfo = d.PopCommand()
+		}
+		if cmdInfo == nil {
+			if len(outoforderBacklog) > 0 {
+				log.Printf("ResponseDemuxer: got no cmdInfo but have outoforderBacklog: %d", len(outoforderBacklog))
+				if _, exists := outoforderBacklog[d.LastID+1]; exists {
+					continue
+				}
+			}
+			log.Printf("ResponseDemuxer: nothing to process, waiting on signalChan")
+			<-d.signalChan
+			continue
+		}
+		if d.LastID+1 != cmdInfo.CmdID {
+			log.Printf("ResponseDemuxer: WARNING - out of order cmdID received, expected %d got %d", d.LastID+1, cmdInfo.CmdID)
+			outoforderBacklog[cmdInfo.CmdID] = cmdInfo
+			continue
+		} else {
+			d.LastID = cmdInfo.CmdID
+		}
+
+		log.Printf("ResponseDemuxer: waiting for response cmdID=%d respType=%d", cmdInfo.CmdID, cmdInfo.RespType)
+		start := time.Now()
+		d.conn.TextConn.StartResponse(cmdInfo.CmdID)
+		code, line, err := d.conn.TextConn.ReadCodeLine(0) // Read any code
+		d.conn.TextConn.EndResponse(cmdInfo.CmdID)
+		log.Printf("ResponseDemuxer: received response cmdID=%d: code=%d line='%s' err='%v' respType=%d (waited %v)", cmdInfo.CmdID, code, line, err, cmdInfo.RespType, time.Since(start))
+		if err != nil && code == 0 {
+			d.errChan <- struct{}{}
+			log.Printf("ResponseDemuxer: error reading response for cmdID=%d: %v", cmdInfo.CmdID, err)
+			return
+		}
+		respData := &ResponseData{
+			CmdID: cmdInfo.CmdID,
+			Code:  code,
+			Line:  line,
+			Err:   err,
+		}
+		// Dispatch based on registered type
+
+		switch cmdInfo.RespType {
+		case TYPE_CHECK:
+			select {
+			case d.checkResponseChan <- respData:
+				// Dispatched successfully
+				log.Printf("ResponseDemuxer: dispatched CHECK response cmdID=%d d.checkResponseChan=%d", cmdInfo.CmdID, len(d.checkResponseChan))
+			case <-d.errChan:
+				log.Printf("ResponseDemuxer: got errChan while dispatching CHECK response, exiting")
+				d.errChan <- struct{}{}
+				return
+			}
+
+		case TYPE_TAKETHIS:
+			select {
+			case d.ttResponseChan <- respData:
+				// Dispatched successfully
+				log.Printf("ResponseDemuxer: dispatched TAKETHIS response cmdID=%d d.ttResponseChan=%d", cmdInfo.CmdID, len(d.ttResponseChan))
+			case <-d.errChan:
+				d.errChan <- struct{}{}
+				log.Printf("ResponseDemuxer: got errChan while dispatching TAKETHIS response, exiting")
+				return
+			}
+
+		default:
+			log.Printf("ResponseDemuxer: WARNING - unknown command type for cmdID=%d, signaling ERROR", cmdInfo.CmdID)
+			select {
+			case d.errChan <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
 // used in nntp-transfer/main.go
 type TakeThisMode struct {
-	mux       sync.Mutex
-	Newsgroup *string
-	//Wanted           uint64
-	//Unwanted         uint64
-	//Rejected         uint64
-	//TX_Errors        uint64
-	//ConnErrors       uint64
+	mux             sync.Mutex
+	Newsgroup       *string
 	TmpSuccessCount uint64
 	TmpTTotalsCount uint64
 	CheckMode       bool // Start with TAKETHIS mode (false)
@@ -143,6 +343,14 @@ func (rr *ReadRequest) ReturnReadRequest(channel chan struct{}) {
 	rr.ClearReadRequest()
 }
 
+// TakeThisTracker tracks metadata for pending TAKETHIS responses
+type TakeThisTracker struct {
+	CmdID    uint
+	Job      *CHTTJob
+	Article  *models.Article
+	RedisCli *redis.Client // Will be *redis.Client in practice
+}
+
 // batched CHECK/TAKETHIS Job
 type CHTTJob struct {
 	JobID        uint64 // Unique job ID for tracing
@@ -217,8 +425,7 @@ type NewsgroupTransferProgress struct {
 
 func (ngp *NewsgroupTransferProgress) CalcSpeed() {
 	ngp.Mux.Lock()
-	defer ngp.Mux.Unlock()
-	if time.Since(ngp.LastCronTX) >= time.Second*5 {
+	if time.Since(ngp.LastCronTX) >= time.Second*3 {
 		since := int64(time.Since(ngp.LastCronTX).Seconds())
 		if ngp.TXBytesTMP > 0 {
 			ngp.LastSpeedKB = ngp.TXBytesTMP / since / 1024
@@ -235,8 +442,8 @@ func (ngp *NewsgroupTransferProgress) CalcSpeed() {
 		ngp.ArticlesTT = 0
 		ngp.TXBytesTMP = 0
 		ngp.LastCronTX = time.Now()
-
 	}
+	ngp.Mux.Unlock()
 }
 
 func (ngp *NewsgroupTransferProgress) AddNGTP(articlesCH int64, articlesTT int64, txbytes int64) {
@@ -375,21 +582,12 @@ func (ttMode *TakeThisMode) FlipMode(lowerLevel float64, upperLevel float64) boo
 	return retval
 }
 
-func (c *BackendConn) ForceCloseConn() {
-	c.mux.Lock()
-	if !c.forceClose {
-		c.forceClose = true
-	}
-	c.mux.Unlock()
-	c.Pool.Put(c)
-}
-
 // StatArticle checks if an article exists on the server
 func (c *BackendConn) StatArticle(messageID string) (bool, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return false, fmt.Errorf("not connected")
 	}
 
@@ -423,7 +621,7 @@ func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Arti
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
@@ -487,7 +685,7 @@ func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
@@ -543,7 +741,7 @@ func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
@@ -591,7 +789,7 @@ func (c *BackendConn) ListGroups() ([]GroupInfo, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
@@ -638,7 +836,7 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
@@ -719,7 +917,7 @@ func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, int, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, 0, fmt.Errorf("not connected")
 	}
 
@@ -784,7 +982,7 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 		return nil, fmt.Errorf("error XOver: group name is required")
 	}
 	//log.Printf("XOver group '%s' start=%d end=%d", groupName, start, end)
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 	groupInfo, code, err := c.SelectGroup(groupName)
@@ -847,7 +1045,7 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 // Automatically limits to max 1000 articles to prevent SQLite overload
 func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]*HeaderLine, error) {
 	c.mux.Lock()
-	if !c.connected {
+	if !c.IsConnected() {
 		c.mux.Unlock()
 		return nil, fmt.Errorf("not connected")
 	}
@@ -979,7 +1177,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 // XHdrStreamedBatch performs XHDR command and streams results line by line through a channel
 func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
 	c.mux.Lock()
-	if !c.connected {
+	if !c.IsConnected() {
 		c.mux.Unlock()
 		return fmt.Errorf("not connected")
 	}
@@ -1076,7 +1274,7 @@ func (c *BackendConn) ListGroup(groupName string, start, end int64) ([]int64, er
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
@@ -1383,10 +1581,11 @@ func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
 }
 
 // SendCheckMultiple sends CHECK commands for multiple message IDs without returning responses!
-func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan chan *ReadRequest, job *CHTTJob) error {
+// Registers each command ID with the demuxer for proper response routing
+func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponsesChan chan *ReadRequest, job *CHTTJob, demuxer *ResponseDemuxer) error {
 	c.mux.Lock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		c.mux.Unlock()
 		return fmt.Errorf("not connected")
 	}
@@ -1411,26 +1610,29 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan 
 			log.Printf("Newsgroup: '%s' | Skipping empty message ID in CHECK command", *job.Newsgroup)
 			continue
 		}
-		log.Printf("Newsgroup: '%s' | CHECK '%s' acquire c.mux.Lock() (%d/%d)", *job.Newsgroup, *msgID, n+1, len(messageIDs))
+		//log.Printf("Newsgroup: '%s' | CHECK '%s' acquire c.mux.Lock() (%d/%d)", *job.Newsgroup, *msgID, n+1, len(messageIDs))
 		c.mux.Lock()
-		id, err := c.TextConn.Cmd("CHECK %s", *msgID)
+		cmdID, err := c.TextConn.Cmd("CHECK %s", *msgID)
 		c.mux.Unlock()
 		if err != nil {
 			return fmt.Errorf("failed to send CHECK '%s': %w", *msgID, err)
 		}
-		log.Printf("Newsgroup: '%s' | CHECK sent '%s' (CmdID=%d) pass notify to readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
-		readResponsesChan <- &ReadRequest{CmdID: id, Job: job, MsgID: msgID, N: n + 1, Reqs: len(messageIDs)}
-		log.Printf("Newsgroup: '%s' | CHECK notified response reader '%s' (CmdID=%d) readResponsesChan=%d", *job.Newsgroup, *msgID, id, len(readResponsesChan))
-		id++
+
+		// Register command ID with demuxer as TYPE_CHECK
+		demuxer.RegisterCommand(cmdID, TYPE_CHECK)
+
+		//log.Printf("Newsgroup: '%s' | CHECK sent '%s' (CmdID=%d) pass notify to readResponsesChan=%d", *job.Newsgroup, *msgID, cmdID, len(readCHECKResponsesChan))
+		readCHECKResponsesChan <- &ReadRequest{CmdID: cmdID, Job: job, MsgID: msgID, N: n + 1, Reqs: len(messageIDs)}
+		log.Printf("Newsgroup: '%s' | CHECK notified response reader '%s' (CmdID=%d) readCHECKResponsesChan=%d", *job.Newsgroup, *msgID, cmdID, len(readCHECKResponsesChan))
 	}
 	return nil
 }
 
 func (c *BackendConn) GetBufSize(size int) int {
-	if size+2048 <= 16384 {
+	if size+2048 <= 1024*1024 {
 		return size + 2048
 	}
-	return 16384 // hardcoded default max buffer size
+	return 1024 * 1024 // hardcoded default max buffer size
 }
 
 func (c *BackendConn) Lock() {
@@ -1440,13 +1642,16 @@ func (c *BackendConn) Unlock() {
 	c.mux.Unlock()
 }
 
-// SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response
+// SendTakeThisArticleStreaming IS UNSAFE! MUST BE LOCKED AND UNLOCKED OUTSIDE FOR THE WHOLE BATCH!!!
+// sends TAKETHIS command and article content without waiting for response
 // Returns command ID for later response reading - used for streaming mode
-func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string) (cmdID uint, txBytes int, err error) {
+// Registers the command ID with the demuxer for proper response routing
+func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string, demuxer *ResponseDemuxer, readTAKETHISResponsesChan chan *ReadRequest, job *CHTTJob) (cmdID uint, txBytes int, err error) {
+	start := time.Now()
 	//c.mux.Lock()
 	//defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		//c.mux.Unlock()
 		return 0, 0, fmt.Errorf("not connected")
 	}
@@ -1463,12 +1668,13 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	if err != nil {
 		return 0, 0, err
 	}
-	writer := bufio.NewWriterSize(c.conn, c.GetBufSize(article.Bytes)) // Slightly larger buffer than article size for headers
-	defer writer.Flush()
+	//writer := bufio.NewWriterSize(c.conn, c.GetBufSize(article.Bytes)) // Slightly larger buffer than article size for headers
+	writer := bufio.NewWriter(c.conn) // Slightly larger buffer than article size for headers
 
 	//c.mux.Lock()
 	//defer c.mux.Unlock()
 
+	startSend := time.Now()
 	// Send TAKETHIS command
 	cmdID, err = c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
@@ -1521,7 +1727,21 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	} else {
 		txBytes += tx
 	}
+	log.Printf("Newsgroup: '%s' | TAKETHIS sent CmdID=%d '%s' txBytes: %d in %v (sending took: %v) readTAKETHISResponsesChanLen=%d/%d", newsgroup, cmdID, article.MessageID, txBytes, time.Since(start), time.Since(startSend), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
 
+	startFlush := time.Now()
+	if err := writer.Flush(); err != nil {
+		return 0, txBytes, fmt.Errorf("failed to flush article data SendTakeThisArticleStreaming: %w", err)
+	}
+
+	chanStart := time.Now()
+	// Register command ID with demuxer as TYPE_TAKETHIS (CRITICAL: must match CHECK pattern)
+	demuxer.RegisterCommand(cmdID, TYPE_TAKETHIS)
+
+	log.Printf("Newsgroup: '%s' | TAKETHIS flushed CmdID=%d '%s' (flushing took: %v) total time: %v readTAKETHISResponsesChan=%d/%d", newsgroup, cmdID, article.MessageID, time.Since(startFlush), time.Since(start), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
+	// Queue ReadRequest IMMEDIATELY after command (like SendCheckMultiple does at line 1608)
+	readTAKETHISResponsesChan <- &ReadRequest{CmdID: cmdID, Job: job, MsgID: &article.MessageID, N: 1, Reqs: 1}
+	log.Printf("Newsgroup: '%s' | TAKETHIS notified response reader CmdID=%d '%s' waited %v readTAKETHISResponsesChan=%d/%d", newsgroup, cmdID, article.MessageID, time.Since(chanStart), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
 	// Return command ID without reading response (streaming mode)
 	return cmdID, txBytes, nil
 }
@@ -1569,7 +1789,7 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return 0, fmt.Errorf("not connected")
 	}
 	// Prepare article for posting

@@ -248,6 +248,7 @@ newConn:
 			pool.activeConns--
 			pool.failedConns++
 			pool.mux.Unlock()
+			log.Printf("[NNTP-POOL] Failed to create new connection: provider='%s': %v", pool.Backend.Provider.Name, err)
 			return nil, err
 		}
 		err = pconn.SwitchMode(wantMode)
@@ -312,7 +313,7 @@ func (pool *Pool) Put(conn *BackendConn) error {
 	// Check if connection should be closed
 	if conn != nil {
 		conn.mux.Lock()
-		if conn.forceClose || !conn.connected {
+		if conn.forceClose || !conn.IsConnected() {
 			forceClose = true
 		}
 		conn.mux.Unlock()
@@ -433,7 +434,7 @@ func (pool *Pool) createConnection() (*BackendConn, error) {
 		log.Printf("[NNTP-POOL] Failed to create connection to %s:%d: %v", pool.Backend.Host, pool.Backend.Port, err)
 		return nil, fmt.Errorf("failed to create connection: %w", err)
 	}
-	//log.Printf("[NNTP-POOL] Successfully created connection to %s:%d", pool.Backend.Host, pool.Backend.Port)
+	log.Printf("[NNTP-POOL] Successfully created connection to %s:%d", pool.Backend.Host, pool.Backend.Port)
 	return client, nil
 }
 
@@ -447,7 +448,7 @@ func (pool *Pool) isConnectionValid(client *BackendConn) bool {
 	client.mux.Lock()
 	defer client.mux.Unlock()
 
-	if client.forceClose || !client.connected {
+	if client.forceClose || !client.IsConnected() {
 		return false
 	}
 
