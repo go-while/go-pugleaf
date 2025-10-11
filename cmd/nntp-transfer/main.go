@@ -100,7 +100,7 @@ var appVersion = "-unset-"
 
 var redisCtx = context.Background()
 var REDIS_TTL time.Duration = 3600 * time.Second // default 1h
-
+var MaxQueuedJobs int = 8
 var BatchCheck int
 
 func main() {
@@ -612,11 +612,13 @@ func parseProxyConfig(address, proxyType, username, password string) (*ProxyConf
 }
 
 const query_getArticlesBatchWithDateFilter_selectPart = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles`
-const query_getArticlesBatchWithDateFilter_nodatefilter = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles ORDER BY date_sent ASC LIMIT ? OFFSET ?`
-const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ? OFFSET ?"
+const query_getArticlesBatchWithDateFilter_nodatefilter = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles ORDER BY date_sent ASC, article_num ASC LIMIT ?`
+const query_getArticlesBatchWithDateFilter_nodatefilter_keyset = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles WHERE (date_sent > ? OR (date_sent = ? AND article_num > ?)) ORDER BY date_sent ASC, article_num ASC LIMIT ?`
+const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ?"
+const query_getArticlesBatchWithDateFilter_orderby_keyset = " AND (date_sent > ? OR (date_sent = ? AND article_num > ?)) ORDER BY date_sent ASC LIMIT ?"
 
 // getArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
-func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup, offset int64, startTime, endTime *time.Time) ([]*models.Article, error) {
+func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup, lastDateSent *time.Time, lastArticleNum int64, startTime, endTime *time.Time) ([]*models.Article, error) {
 	// Get group database
 	groupDBs, err := db.GetGroupDBs(ng.Name)
 	if err != nil {
@@ -629,6 +631,9 @@ func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup,
 	}()
 	var query string
 	var args []interface{}
+
+	// Use keyset pagination (much faster than OFFSET)
+	useKeyset := lastDateSent != nil
 
 	if startTime != nil || endTime != nil {
 		// Build query with date filtering
@@ -650,12 +655,28 @@ func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup,
 			whereClause = " WHERE " + strings.Join(whereConditions, " AND ")
 		}
 
-		query = query_getArticlesBatchWithDateFilter_selectPart + whereClause + query_getArticlesBatchWithDateFilter_orderby
-		args = append(args, dbBatchSize, offset)
+		if useKeyset {
+			// Keyset pagination with date filter
+			query = query_getArticlesBatchWithDateFilter_selectPart + whereClause + query_getArticlesBatchWithDateFilter_orderby_keyset
+			lastDateStr := lastDateSent.UTC().Format("2006-01-02 15:04:05")
+			args = append(args, lastDateStr, lastDateStr, lastArticleNum, dbBatchSize)
+		} else {
+			// First batch with date filter
+			query = query_getArticlesBatchWithDateFilter_selectPart + whereClause + query_getArticlesBatchWithDateFilter_orderby
+			args = append(args, dbBatchSize)
+		}
 	} else {
-		// No date filtering, use original query but with date_sent ordering
-		query = query_getArticlesBatchWithDateFilter_nodatefilter
-		args = []interface{}{dbBatchSize, offset}
+		// No date filtering
+		if useKeyset {
+			// Keyset pagination without date filter
+			query = query_getArticlesBatchWithDateFilter_nodatefilter_keyset
+			lastDateStr := lastDateSent.UTC().Format("2006-01-02 15:04:05")
+			args = []interface{}{lastDateStr, lastDateStr, lastArticleNum, dbBatchSize}
+		} else {
+			// First batch without date filter
+			query = query_getArticlesBatchWithDateFilter_nodatefilter
+			args = []interface{}{dbBatchSize}
+		}
 	}
 
 	rows, err := groupDBs.DB.Query(query, args...)
@@ -1248,7 +1269,6 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		}
 	}
 	//time.Sleep(3 * time.Second) // debug sleep
-	var ioffset int64
 	remainingArticles := totalArticles
 	ttMode := &nntp.TakeThisMode{
 		Newsgroup: &ng.Name,
@@ -1264,7 +1284,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	// WaitGroup to track individual response channel processors
 	var responseWG sync.WaitGroup
 
-	go func() {
+	go func(responseWG *sync.WaitGroup) {
 		defer collectorWG.Done()
 		var amux sync.Mutex
 		var transferred, unwanted, rejected, checked, txErrors, connErrors uint64
@@ -1275,11 +1295,11 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 				continue
 			}
 			num++
-			log.Printf("Newsgroup: '%s' | Starting response channel processor num %d (goroutines: %d)", ng.Name, num, runtime.NumGoroutine())
+			//log.Printf("Newsgroup: '%s' | Starting response channel processor num %d (goroutines: %d)", ng.Name, num, runtime.NumGoroutine())
 			responseWG.Add(1)
-			go func(rc chan *nntp.TTResponse, num uint64) {
+			go func(rc chan *nntp.TTResponse, num uint64, responseWG *sync.WaitGroup) {
 				defer responseWG.Done()
-				defer log.Printf("Newsgroup: '%s' | Quit response channel processor num %d (goroutines: %d)", ng.Name, num, runtime.NumGoroutine())
+				//defer log.Printf("Newsgroup: '%s' | Quit response channel processor num %d (goroutines: %d)", ng.Name, num, runtime.NumGoroutine())
 
 				// Read exactly ONE response from this channel (channel is buffered with cap 1)
 				resp := <-rc // job.Response(ForceCleanUp, err) arrives here
@@ -1304,7 +1324,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 				}
 				// free memory - CRITICAL: Lock and unlock in same scope, not with defer!
 				resp.Job.Mux.Lock()
-				//log.Printf("Newsgroup: '%s' | Cleaning up TT job #%d with %d articles (ForceCleanUp)", ng.Name, resp.Job.JobID, len(resp.Job.Articles))
+				log.Printf("Newsgroup: '%s' | Cleaning up TT job #%d with %d articles (ForceCleanUp)", ng.Name, resp.Job.JobID, len(resp.Job.Articles))
 				// Clean up Articles and their internal fields
 				for i := range resp.Job.Articles {
 					if resp.Job.Articles[i] != nil {
@@ -1330,7 +1350,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 				resp.Job.ArticleMap = nil
 				resp.Job.Mux.Unlock()
 				resp.Job = nil
-			}(setup.ResponseChan, num)
+			}(setup.ResponseChan, num, responseWG)
 		}
 		log.Printf("Newsgroup: '%s' | Collector: ttResponses closed, waiting for %d response processors to finish...", ng.Name, num)
 		// Wait for all response channel processors to finish
@@ -1361,12 +1381,18 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			delete(rejectedArticles, ng.Name) // free memory
 		}
 		resultsMutex.Unlock()
-	}()
+	}(&responseWG)
 	OffsetQueue := &nntp.OffsetQueue{}
+
+	// Use keyset pagination instead of OFFSET for much better performance
+	var lastDateSent *time.Time
+	var lastArticleNum int64
+	articlesProcessed := int64(0)
+
 	// Get articles in database batches (much larger than network batches)
-	for offset := ioffset; offset < totalArticles; offset += dbBatchSize {
+	for articlesProcessed < totalArticles {
 		if common.WantShutdown() {
-			log.Printf("WantShutdown in newsgroup: '%s' offset: %d", ng.Name, offset)
+			log.Printf("WantShutdown in newsgroup: '%s' (processed %d articles)", ng.Name, articlesProcessed)
 			return nil
 		}
 		// Process any requeued jobs first (from previous failed batches)
@@ -1374,17 +1400,24 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			return err
 		}
 		start := time.Now()
-		// Load batch from database with date filtering
-		articles, err := getArticlesBatchWithDateFilter(db, ng, offset, startTime, endTime)
+		// Load batch from database using keyset pagination (no OFFSET!)
+		articles, err := getArticlesBatchWithDateFilter(db, ng, lastDateSent, lastArticleNum, startTime, endTime)
 		if err != nil {
-			log.Printf("Error loading article batch (offset %d) for newsgroup %s: %v", offset, ng.Name, err)
-			return fmt.Errorf("failed to load article batch (offset %d) for newsgroup '%s': %v", offset, ng.Name, err)
+			log.Printf("Error loading article batch (processed %d) for newsgroup %s: %v", articlesProcessed, ng.Name, err)
+			return fmt.Errorf("failed to load article batch (processed %d) for newsgroup '%s': %v", articlesProcessed, ng.Name, err)
 		}
 
 		if len(articles) == 0 {
-			//log.Printf("No more articles in newsgroup %s (offset %d)", ng.Name, offset)
+			//log.Printf("No more articles in newsgroup %s (processed %d)", ng.Name, articlesProcessed)
 			break
 		}
+
+		// Update keyset for next iteration (last article in current batch)
+		lastArticle := articles[len(articles)-1]
+		lastDateSent = &lastArticle.DateSent
+		lastArticleNum = lastArticle.DBArtNum
+		articlesProcessed += int64(len(articles))
+
 		if dryRun && debugCapture {
 			debugMutex.Lock()
 			debugArticles[ng.Name] = append(debugArticles[ng.Name], articles...)
@@ -1396,13 +1429,13 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		for _, a := range articles {
 			size += a.Bytes
 		}
-		log.Printf("Newsgroup: '%s' | Loaded %d articles from database (offset %d) (Bytes=%d) took %v", ng.Name, len(articles), offset, size, time.Since(start))
+		log.Printf("Newsgroup: '%s' | Loaded %d articles from database (processed %d/%d) (Bytes=%d) took %v", ng.Name, len(articles), articlesProcessed, totalArticles, size, time.Since(start))
 		//}
 		// Process articles in network batches
 		for i := 0; i < len(articles); i += batchCheck {
 			OffsetQueue.Add(1)
 			if common.WantShutdown() {
-				log.Printf("WantShutdown in newsgroup: '%s' (offset %d)", ng.Name, offset)
+				log.Printf("WantShutdown in newsgroup: '%s' (processed %d)", ng.Name, articlesProcessed)
 				return nil
 			}
 			// Determine end index for the batch
@@ -1411,24 +1444,26 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 				end = len(articles)
 			}
 			// pass articles to CHECK or TAKETHIS queue (async!)
-			responseChan, err := processBatch(ttMode, articles[i:end], redisCli, int64(i), int64(end), offset, OffsetQueue, ngtprogress)
+			responseChan, err := processBatch(ttMode, articles[i:end], redisCli, int64(i), int64(end), articlesProcessed-int64(len(articles))+int64(i), OffsetQueue, ngtprogress)
 			if err != nil {
 				log.Printf("Newsgroup: '%s' | Error processing batch %d-%d: %v", ng.Name, i+1, end, err)
 				return fmt.Errorf("error processing batch %d-%d for newsgroup '%s': %v", i+1, end, ng.Name, err)
 			}
-			// pass the response channel to the collector channel: ttResponses
-			ttResponses <- &nntp.TTSetup{
-				ResponseChan: responseChan,
+			if responseChan != nil {
+				// pass the response channel to the collector channel: ttResponses
+				ttResponses <- &nntp.TTSetup{
+					ResponseChan: responseChan,
+				}
 			}
-			OffsetQueue.Wait(2) // wait for offset batches to finish, less than 2 in flight
+			OffsetQueue.Wait(MaxQueuedJobs) // wait for offset batches to finish, less than 2 in flight
 		}
 		remainingArticles -= int64(len(articles))
 		if VERBOSE {
-			log.Printf("Newsgroup: '%s' | Pushed to queue (offset %d/%d) remaining: %d (Check=%t)", ng.Name, offset, totalArticles, remainingArticles, ttMode.UseCHECK())
-			//log.Printf("Newsgroup: '%s' | Pushed (offset %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t)", ng.Name, offset, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.GetMode())
+			log.Printf("Newsgroup: '%s' | Pushed to queue (processed %d/%d) remaining: %d (Check=%t)", ng.Name, articlesProcessed, totalArticles, remainingArticles, ttMode.UseCHECK())
+			//log.Printf("Newsgroup: '%s' | Pushed (processed %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t)", ng.Name, articlesProcessed, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.GetMode())
 		}
 
-	} // end for offset range totalArticles
+	} // end for keyset pagination loop
 
 	//log.Printf("Newsgroup: '%s' | Main article loop completed, checking for requeued jobs...", ng.Name)
 
@@ -1587,7 +1622,7 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queue job #%d with %d message IDs. CheckQ=%d", *ttMode.Newsgroup, workerID, batchedJob.JobID, len(batchedJob.MessageIDs), len(CheckQueues[workerID]))
 	CheckQueues[workerID] <- batchedJob // checkQueue <- batchedJob
-	log.Printf("Newsgroup: '%s' | CheckWorker (%d) queued Job #%d", *ttMode.Newsgroup, workerID, batchedJob.JobID)
+	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queued Job #%d", *ttMode.Newsgroup, workerID, batchedJob.JobID)
 	return batchedJob.ResponseChan, nil
 } // end func processBatch
 
@@ -1659,7 +1694,10 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		log.Printf("Newsgroup: '%s' | ++Pre-Send TAKETHIS '%s'", newsgroup, article.MessageID)
 		cmdID, txBytes, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname, newsgroup, demuxer, readTAKETHISResponsesChan, job)
 		astart2 := time.Now()
-		job.NGTProgress.AddNGTP(0, 0, int64(txBytes))
+		job.Mux.Lock()
+		job.TTxBytes += uint64(txBytes)
+		job.TmpTxBytes += uint64(txBytes)
+		job.Mux.Unlock()
 		ttxBytes += uint64(txBytes)
 		if err != nil {
 			if err == common.ErrNoNewsgroups {
@@ -1978,7 +2016,7 @@ func (rs *ReturnSignal) BlockTT() {
 	rs.Mux.Lock()
 	rs.RunTT = false
 	rs.Mux.Unlock()
-	log.Printf("BlockTT: released RunTT lock")
+	//log.Printf("BlockTT: released RunTT lock")
 }
 
 func (rs *ReturnSignal) GetLockTT() {
@@ -2044,7 +2082,7 @@ func (rs *ReturnSignal) LockCHECK() {
 		rs.Mux.Lock()
 		if !rs.RunTT {
 			rs.CHECK = true
-			log.Printf("LockCHECK: acquired CHECK lock (RunTT=%t) waited %v", rs.RunTT, time.Since(start))
+			//log.Printf("LockCHECK: acquired CHECK lock (RunTT=%t) waited %v", rs.RunTT, time.Since(start))
 			rs.Mux.Unlock()
 			return
 		}
@@ -2132,9 +2170,9 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				workerID := assignWorkerToNewsgroup(*currentJob.Newsgroup)
 			waiting:
 				for {
-					if len(TakeThisQueues[workerID]) > 1 {
+					if len(TakeThisQueues[workerID]) >= MaxQueuedJobs {
 						rs.BlockCHECK()
-						log.Printf("CheckWorker (%d): waiting shared takeThisChan full (%d)", workerID, len(TakeThisQueues[workerID]))
+						log.Printf("CheckWorker (%d): waiting... shared takeThisChan full (%d)", workerID, len(TakeThisQueues[workerID]))
 						time.Sleep(time.Second / 4)
 						continue waiting
 					}
@@ -2162,9 +2200,9 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 							time.Sleep(time.Second)
 							return
 						}
-						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquire LOCK CHECK for batch (offset %d: %d-%d) (%d messages)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, len(currentJob.MessageIDs[batchStart:batchEnd]))
+						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquire LOCK CHECK for batch (offset %d: %d-%d) (%d messages)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, len(currentJob.MessageIDs[batchStart:batchEnd]))
 						rs.LockCHECK()
-						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquired CHECK lock for batch (offset %d: %d-%d) -> SendCheckMultiple", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
+						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquired CHECK lock for batch (offset %d: %d-%d) -> SendCheckMultiple", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
 						err := conn.SendCheckMultiple(currentJob.MessageIDs[batchStart:batchEnd], readCHECKResponsesChan, currentJob, demuxer)
 						if err != nil {
 							log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d SendCheckMultiple error for batch (offset %d: %d-%d): %v", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, err)
@@ -2176,15 +2214,15 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 							//common.ChanRelease(flipflopChan)
 							return
 						}
-						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d Sent CHECK for batch (offset %d: %d-%d), responses will be read asynchronously...", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
+						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d Sent CHECK for batch (offset %d: %d-%d), responses will be read asynchronously...", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
 					}
 				} else {
-					log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d skipping CHECK for %d message IDs (TAKETHIS mode)", *currentJob.Newsgroup, workerID, currentJob.JobID, len(currentJob.MessageIDs))
+					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d skipping CHECK for %d message IDs (TAKETHIS mode)", *currentJob.Newsgroup, workerID, currentJob.JobID, len(currentJob.MessageIDs))
 					currentJob.WantedIDs = currentJob.MessageIDs
 					//rs.UnlockCHECKforTTwithWait()
 					rs.BlockCHECK()
 					TakeThisQueues[workerID] <- currentJob // local takethis chan sharing the same connection
-					log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d sent to local TakeThisChan", *currentJob.Newsgroup, workerID, currentJob.JobID)
+					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d sent to local TakeThisChan", *currentJob.Newsgroup, workerID, currentJob.JobID)
 				}
 				//lastRun = time.Now()
 				// Check if there are more jobs to process
@@ -2209,7 +2247,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 						// Channel full, will be processed on next tick
 					}
 				}
-				log.Printf("CheckWorker (%d): job #%d CHECKs sent, loop to next job", workerID, currentJob.JobID)
+				//log.Printf("CheckWorker (%d): job #%d CHECKs sent, loop to next job", workerID, currentJob.JobID)
 
 			case <-ticker.C:
 				if common.WantShutdown() {
@@ -2266,7 +2304,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rr.ClearReadRequest()
 					return
 				}
-				log.Printf("CheckWorker (%d): Pre-Read CHECK response for msgID: %s (cmdID=%d MID=%d/%d)", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs)
+				//log.Printf("CheckWorker (%d): Pre-Read CHECK response for msgID: %s (cmdID=%d MID=%d/%d)", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs)
 				start := time.Now()
 
 				// NEW: Get pre-read response from demuxer (eliminates race condition)
@@ -2309,12 +2347,12 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				tookTime += took
 				responseCount++
 				rr.Job.Increment(nntp.IncrFLAG_CHECKED)
-				if rr.N == 1 {
-					log.Printf("CheckWorker (%d): time to first response for msgID: %s (cmdID=%d MID=%d/%d) took: %v ms", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, time.Since(start).Milliseconds())
+				if rr.N == 1 && took.Milliseconds() > 100 {
+					log.Printf("CheckWorker (%d): time to first response for msgID: %s (cmdID=%d MID=%d/%d) took: %v ms", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, took.Milliseconds())
 					tookTime = 0
-				} else if responseCount >= 100 {
+				} else if responseCount >= 10000 {
 					avg := time.Duration(float64(tookTime) / float64(responseCount))
-					if avg > 1 {
+					if avg.Milliseconds() > 0 {
 						log.Printf("CheckWorker (%d): Read %d CHECK responses, avg latency: %v, last: %v (cmdID=%d MID=%d/%d)", workerID, responseCount, avg, took, rr.CmdID, rr.N, rr.Reqs)
 					}
 					responseCount = 0
@@ -2339,7 +2377,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rr.ClearReadRequest()
 					return
 				}
-				log.Printf("CheckWorker (%d): Got CHECK response: '%s' (cmdID=%d MID=%d/%d) took: %v ms", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, time.Since(start).Milliseconds())
+				//log.Printf("CheckWorker (%d): Got CHECK response: '%s' (cmdID=%d MID=%d/%d) took: %v ms", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, time.Since(start).Milliseconds())
 
 				rs.Mux.Lock()
 				job, exists := rs.jobMap[rr.MsgID]
@@ -2396,13 +2434,13 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rs.Mux.Unlock()
 					if len(job.WantedIDs) > 0 {
 						// Pass job to TAKETHIS worker via channel
-						log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5 job #%d got all %d CHECK responses, passing to TAKETHIS worker (wanted: %d articles) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, queuedCount, len(job.WantedIDs), len(TakeThisQueues[workerID]))
+						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5 job #%d got all %d CHECK responses, passing to TAKETHIS worker (wanted: %d articles) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, queuedCount, len(job.WantedIDs), len(TakeThisQueues[workerID]))
 						rs.UnlockCHECKforTT()
 						TakeThisQueues[workerID] <- job // local takethis chan sharing the same connection
-						log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5c Sent job #%d to TAKETHIS worker (wanted: %d/%d) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, len(job.WantedIDs), queuedCount, len(TakeThisQueues[workerID]))
+						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5c Sent job #%d to TAKETHIS worker (wanted: %d/%d) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, len(job.WantedIDs), queuedCount, len(TakeThisQueues[workerID]))
 
 					} else {
-						log.Printf("Newsgroup: '%s' | CheckWorker (%d):  DEBUG6 job #%d got %d CHECK responses but server wants none", *job.Newsgroup, workerID, job.JobID, queuedCount)
+						//log.Printf("Newsgroup: '%s' | CheckWorker (%d):  DEBUG6 job #%d got %d CHECK responses but server wants none", *job.Newsgroup, workerID, job.JobID, queuedCount)
 						// Send response and close channel for jobs with no wanted articles
 						job.Response(true, nil)
 						if len(TakeThisQueues[workerID]) > 0 {
@@ -2450,7 +2488,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					return
 				}
 
-				log.Printf("TTResponseWorker (%d): Pre-Read TAKETHIS response for msgID: %s (cmdID=%d)", workerID, *rr.MsgID, rr.CmdID)
+				//log.Printf("TTResponseWorker (%d): Pre-Read TAKETHIS response for msgID: %s (cmdID=%d)", workerID, *rr.MsgID, rr.CmdID)
 
 				// Get pre-read response from demuxer (same pattern as CHECK)
 				var respData *nntp.ResponseData
@@ -2480,7 +2518,11 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				}
 
 				rr.Job.TTMode.IncrementTmp()
-				rr.Job.NGTProgress.AddNGTP(0, 1, 0)
+				rr.Job.Mux.Lock()
+				txbytes := rr.Job.TmpTxBytes
+				rr.Job.TmpTxBytes = 0
+				rr.Job.Mux.Unlock()
+				rr.Job.NGTProgress.AddNGTP(0, 1, txbytes)
 
 				// Handle response codes
 				switch respData.Code {
@@ -2574,10 +2616,10 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				continue
 			}
 
-			log.Printf("Newsgroup: '%s' | TTworker (%d): Prepare locking to send TAKETHIS for job #%d with %d wanted articles", *job.Newsgroup, workerID, job.JobID, len(wantedArticles))
+			//log.Printf("Newsgroup: '%s' | TTworker (%d): Prepare locking to send TAKETHIS for job #%d with %d wanted articles", *job.Newsgroup, workerID, job.JobID, len(wantedArticles))
 			rs.GetLockTT()
 			//common.ChanLock(flipflopChan)
-			log.Printf("Newsgroup: '%s' | TTworker (%d): Sending TAKETHIS for job #%d with %d wanted articles", *job.Newsgroup, workerID, job.JobID, len(wantedArticles))
+			//log.Printf("Newsgroup: '%s' | TTworker (%d): Sending TAKETHIS for job #%d with %d wanted articles", *job.Newsgroup, workerID, job.JobID, len(wantedArticles))
 			// Send TAKETHIS commands using existing function
 			redis_cached, err := sendArticlesBatchViaTakeThis(conn, wantedArticles, job, *job.Newsgroup, rs.redisCli, demuxer, readTAKETHISResponsesChan)
 			//common.ChanRelease(flipflopChan)
@@ -2591,12 +2633,14 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				rs.Mux.Unlock()
 				return
 			}
-			log.Printf("Newsgroup: '%s' | TTworker (%d): TAKETHIS job #%d sent, redis_cached=%d", *job.Newsgroup, workerID, job.JobID, redis_cached)
+			if VERBOSE && redis_cached > 0 {
+				log.Printf("Newsgroup: '%s' | TTworker (%d): TAKETHIS job #%d sent, redis_cached=%d", *job.Newsgroup, workerID, job.JobID, redis_cached)
+			}
 
 			// Send response back
-			log.Printf("Newsgroup: '%s' | TTworker (%d): Sending TTresponse for job #%d to responseChan len=%d", *job.Newsgroup, workerID, job.JobID, len(job.ResponseChan))
+			//log.Printf("Newsgroup: '%s' | TTworker (%d): Sending TTresponse for job #%d to responseChan len=%d", *job.Newsgroup, workerID, job.JobID, len(job.ResponseChan))
 			job.Response(true, nil)
-			log.Printf("Newsgroup: '%s' | TTworker (%d): Sent TTresponse for job #%d to responseChan", *job.Newsgroup, workerID, job.JobID)
+			//log.Printf("Newsgroup: '%s' | TTworker (%d): Sent TTresponse for job #%d to responseChan", *job.Newsgroup, workerID, job.JobID)
 		}
 	}()
 
@@ -2621,7 +2665,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 			// Build jobMap for tracking which message IDs belong to this job
 			// and count queued messages
 			rs.Mux.Lock()
-			queueFull := len(rs.jobs) > 1 || len(TakeThisQueues[workerID]) > 1
+			queueFull := len(rs.jobs) >= MaxQueuedJobs || len(TakeThisQueues[workerID]) >= MaxQueuedJobs
 			if queueFull {
 				log.Printf("Newsgroup: '%s' | CHTTworker (%d): got job #%d with %d message IDs. queued=%d ... waiting...", *job.Newsgroup, workerID, job.JobID, len(job.MessageIDs), len(rs.jobs))
 				select {
@@ -2642,7 +2686,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 						// pass
 					case <-time.After(time.Millisecond * 16):
 						rs.Mux.Lock()
-						queueFull = len(rs.jobs) > 1 || len(TakeThisQueues[workerID]) > 1
+						queueFull = len(rs.jobs) >= MaxQueuedJobs || len(TakeThisQueues[workerID]) >= MaxQueuedJobs
 						rs.Mux.Unlock()
 						if !queueFull {
 							break waitForReply
@@ -2670,7 +2714,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 			// Signal ticker to process this job
 			select {
 			case tickChan <- struct{}{}:
-				log.Printf("Newsgroup: '%s' | CHTTworker (%d): signal ticker start job #%d with %d message IDs. queued=%d", *job.Newsgroup, workerID, job.JobID, len(job.MessageIDs), len(rs.jobs))
+				//log.Printf("Newsgroup: '%s' | CHTTworker (%d): signal ticker start job #%d with %d message IDs. queued=%d", *job.Newsgroup, workerID, job.JobID, len(job.MessageIDs), len(rs.jobs))
 			default:
 				// tickChan full, will be processed on next tick
 			}
@@ -2960,11 +3004,11 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		Started       string
 		LastUpdated   string
 		Finished      bool
-		SpeedKB       int64
+		SpeedKB       uint64
 		Duration      string
 		TimeSince     string
-		LastArtPerfC  int64
-		LastArtPerfT  int64
+		LastArtPerfC  uint64
+		LastArtPerfT  uint64
 	}
 
 	started := len(nntp.NewsgroupTransferProgressMap)

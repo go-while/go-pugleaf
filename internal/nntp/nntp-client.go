@@ -368,3 +368,17 @@ func (c *BackendConn) UpdateLastUsed() {
 	//c.SetReadDeadline(time.Now().Add(c.Backend.ReadTimeout))
 	//c.SetWriteDeadline(time.Now().Add(c.Backend.WriteTimeout))
 }
+
+func (c *BackendConn) GetBufSize(size int) int {
+	if size+4096 <= 1024*1024 {
+		return size + 4096
+	}
+	return 1024 * 1024 // hardcoded default max buffer size
+}
+
+func (c *BackendConn) Lock() {
+	c.mux.Lock()
+}
+func (c *BackendConn) Unlock() {
+	c.mux.Unlock()
+}

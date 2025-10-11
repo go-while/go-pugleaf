@@ -178,7 +178,7 @@ func (d *ResponseDemuxer) readAndDispatch() {
 					continue
 				}
 			}
-			log.Printf("ResponseDemuxer: nothing to process, waiting on signalChan")
+			//log.Printf("ResponseDemuxer: nothing to process, waiting on signalChan")
 			<-d.signalChan
 			continue
 		}
@@ -190,12 +190,14 @@ func (d *ResponseDemuxer) readAndDispatch() {
 			d.LastID = cmdInfo.CmdID
 		}
 
-		log.Printf("ResponseDemuxer: waiting for response cmdID=%d respType=%d", cmdInfo.CmdID, cmdInfo.RespType)
+		//log.Printf("ResponseDemuxer: waiting for response cmdID=%d respType=%d", cmdInfo.CmdID, cmdInfo.RespType)
 		start := time.Now()
 		d.conn.TextConn.StartResponse(cmdInfo.CmdID)
 		code, line, err := d.conn.TextConn.ReadCodeLine(0) // Read any code
 		d.conn.TextConn.EndResponse(cmdInfo.CmdID)
-		log.Printf("ResponseDemuxer: received response cmdID=%d: code=%d line='%s' err='%v' respType=%d (waited %v)", cmdInfo.CmdID, code, line, err, cmdInfo.RespType, time.Since(start))
+		if time.Since(start) > time.Second {
+			log.Printf("LongWait ResponseDemuxer: received response cmdID=%d: code=%d line='%s' err='%v' respType=%d (waited %v)", cmdInfo.CmdID, code, line, err, cmdInfo.RespType, time.Since(start))
+		}
 		if err != nil && code == 0 {
 			d.errChan <- struct{}{}
 			log.Printf("ResponseDemuxer: error reading response for cmdID=%d: %v", cmdInfo.CmdID, err)
@@ -214,7 +216,7 @@ func (d *ResponseDemuxer) readAndDispatch() {
 			select {
 			case d.checkResponseChan <- respData:
 				// Dispatched successfully
-				log.Printf("ResponseDemuxer: dispatched CHECK response cmdID=%d d.checkResponseChan=%d", cmdInfo.CmdID, len(d.checkResponseChan))
+				//log.Printf("ResponseDemuxer: dispatched CHECK response cmdID=%d d.checkResponseChan=%d", cmdInfo.CmdID, len(d.checkResponseChan))
 			case <-d.errChan:
 				log.Printf("ResponseDemuxer: got errChan while dispatching CHECK response, exiting")
 				d.errChan <- struct{}{}
@@ -225,7 +227,7 @@ func (d *ResponseDemuxer) readAndDispatch() {
 			select {
 			case d.ttResponseChan <- respData:
 				// Dispatched successfully
-				log.Printf("ResponseDemuxer: dispatched TAKETHIS response cmdID=%d d.ttResponseChan=%d", cmdInfo.CmdID, len(d.ttResponseChan))
+				//log.Printf("ResponseDemuxer: dispatched TAKETHIS response cmdID=%d d.ttResponseChan=%d", cmdInfo.CmdID, len(d.ttResponseChan))
 			case <-d.errChan:
 				d.errChan <- struct{}{}
 				log.Printf("ResponseDemuxer: got errChan while dispatching TAKETHIS response, exiting")
@@ -273,7 +275,9 @@ func (o *OffsetQueue) Wait(n int) {
 			o.mux.RUnlock()
 
 			o.mux.Lock()
-			log.Printf("OffsetQueue: waited (%d ms) for %d batches to finish, currently queued: %d", time.Since(start).Milliseconds(), n, o.queued)
+			if time.Since(start).Milliseconds() > 1000 {
+				log.Printf("OffsetQueue: waited (%d ms) for %d batches to finish, currently queued: %d", time.Since(start).Milliseconds(), n, o.queued)
+			}
 			o.isleep = o.isleep / 2
 			if o.isleep < time.Millisecond {
 				o.isleep = 0
@@ -371,6 +375,8 @@ type CHTTJob struct {
 	transferred  uint64
 	redisCached  uint64
 	TxErrors     uint64
+	TmpTxBytes   uint64
+	TTxBytes     uint64
 	ConnErrors   uint64
 	OffsetStart  int64
 	BatchStart   int64
@@ -412,29 +418,35 @@ type NewsgroupTransferProgress struct {
 	BatchStart    int64
 	BatchEnd      int64
 	TotalArticles int64
-	ArticlesTT    int64
-	ArticlesCH    int64
+	ArticlesTT    uint64
+	ArticlesCH    uint64
 	Finished      bool
-	TXBytes       int64
-	TXBytesTMP    int64
+	TXBytes       uint64
+	TXBytesTMP    uint64
 	LastCronTX    time.Time
-	LastSpeedKB   int64
-	LastArtPerfC  int64 // check articles per second
-	LastArtPerfT  int64 // takethis articles per second
+	LastSpeedKB   uint64
+	LastArtPerfC  uint64 // check articles per second
+	LastArtPerfT  uint64 // takethis articles per second
 }
 
 func (ngp *NewsgroupTransferProgress) CalcSpeed() {
 	ngp.Mux.Lock()
 	if time.Since(ngp.LastCronTX) >= time.Second*3 {
-		since := int64(time.Since(ngp.LastCronTX).Seconds())
+		since := uint64(time.Since(ngp.LastCronTX).Seconds())
 		if ngp.TXBytesTMP > 0 {
 			ngp.LastSpeedKB = ngp.TXBytesTMP / since / 1024
+		} else {
+			ngp.LastSpeedKB = 0
 		}
 		if ngp.ArticlesCH > 0 {
 			ngp.LastArtPerfC = ngp.ArticlesCH / since
+		} else {
+			ngp.LastArtPerfC = 0
 		}
 		if ngp.ArticlesTT > 0 {
 			ngp.LastArtPerfT = ngp.ArticlesTT / since
+		} else {
+			ngp.LastArtPerfT = 0
 		}
 		//log.Printf("Newsgroup: '%s' | Transfer Perf: %d KB/s (%d bytes in %v) did: CH=(%d|%d/s) TT=(%d|%d/s)", *ngp.Newsgroup, ngp.LastSpeedKB, ngp.TXBytesTMP, since, ngp.ArticlesCH, ngp.LastArtPerfC, ngp.ArticlesTT, ngp.LastArtPerfT)
 
@@ -446,7 +458,7 @@ func (ngp *NewsgroupTransferProgress) CalcSpeed() {
 	ngp.Mux.Unlock()
 }
 
-func (ngp *NewsgroupTransferProgress) AddNGTP(articlesCH int64, articlesTT int64, txbytes int64) {
+func (ngp *NewsgroupTransferProgress) AddNGTP(articlesCH uint64, articlesTT uint64, txbytes uint64) {
 	if articlesCH > 0 {
 		ngp.Mux.Lock()
 		ngp.ArticlesCH += articlesCH
@@ -1623,23 +1635,9 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponses
 
 		//log.Printf("Newsgroup: '%s' | CHECK sent '%s' (CmdID=%d) pass notify to readResponsesChan=%d", *job.Newsgroup, *msgID, cmdID, len(readCHECKResponsesChan))
 		readCHECKResponsesChan <- &ReadRequest{CmdID: cmdID, Job: job, MsgID: msgID, N: n + 1, Reqs: len(messageIDs)}
-		log.Printf("Newsgroup: '%s' | CHECK notified response reader '%s' (CmdID=%d) readCHECKResponsesChan=%d", *job.Newsgroup, *msgID, cmdID, len(readCHECKResponsesChan))
+		//log.Printf("Newsgroup: '%s' | CHECK notified response reader '%s' (CmdID=%d) readCHECKResponsesChan=%d", *job.Newsgroup, *msgID, cmdID, len(readCHECKResponsesChan))
 	}
 	return nil
-}
-
-func (c *BackendConn) GetBufSize(size int) int {
-	if size+2048 <= 1024*1024 {
-		return size + 2048
-	}
-	return 1024 * 1024 // hardcoded default max buffer size
-}
-
-func (c *BackendConn) Lock() {
-	c.mux.Lock()
-}
-func (c *BackendConn) Unlock() {
-	c.mux.Unlock()
 }
 
 // SendTakeThisArticleStreaming IS UNSAFE! MUST BE LOCKED AND UNLOCKED OUTSIDE FOR THE WHOLE BATCH!!!
@@ -1647,7 +1645,7 @@ func (c *BackendConn) Unlock() {
 // Returns command ID for later response reading - used for streaming mode
 // Registers the command ID with the demuxer for proper response routing
 func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string, demuxer *ResponseDemuxer, readTAKETHISResponsesChan chan *ReadRequest, job *CHTTJob) (cmdID uint, txBytes int, err error) {
-	start := time.Now()
+	//start := time.Now()
 	//c.mux.Lock()
 	//defer c.mux.Unlock()
 
@@ -1674,7 +1672,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	//c.mux.Lock()
 	//defer c.mux.Unlock()
 
-	startSend := time.Now()
+	//startSend := time.Now()
 	// Send TAKETHIS command
 	cmdID, err = c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
@@ -1727,61 +1725,23 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	} else {
 		txBytes += tx
 	}
-	log.Printf("Newsgroup: '%s' | TAKETHIS sent CmdID=%d '%s' txBytes: %d in %v (sending took: %v) readTAKETHISResponsesChanLen=%d/%d", newsgroup, cmdID, article.MessageID, txBytes, time.Since(start), time.Since(startSend), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
+	//log.Printf("Newsgroup: '%s' | TAKETHIS sent CmdID=%d '%s' txBytes: %d in %v (sending took: %v) readTAKETHISResponsesChanLen=%d/%d", newsgroup, cmdID, article.MessageID, txBytes, time.Since(start), time.Since(startSend), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
 
-	startFlush := time.Now()
+	//startFlush := time.Now()
 	if err := writer.Flush(); err != nil {
 		return 0, txBytes, fmt.Errorf("failed to flush article data SendTakeThisArticleStreaming: %w", err)
 	}
 
-	chanStart := time.Now()
+	//chanStart := time.Now()
 	// Register command ID with demuxer as TYPE_TAKETHIS (CRITICAL: must match CHECK pattern)
 	demuxer.RegisterCommand(cmdID, TYPE_TAKETHIS)
 
-	log.Printf("Newsgroup: '%s' | TAKETHIS flushed CmdID=%d '%s' (flushing took: %v) total time: %v readTAKETHISResponsesChan=%d/%d", newsgroup, cmdID, article.MessageID, time.Since(startFlush), time.Since(start), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
+	//log.Printf("Newsgroup: '%s' | TAKETHIS flushed CmdID=%d '%s' (flushing took: %v) total time: %v readTAKETHISResponsesChan=%d/%d", newsgroup, cmdID, article.MessageID, time.Since(startFlush), time.Since(start), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
 	// Queue ReadRequest IMMEDIATELY after command (like SendCheckMultiple does at line 1608)
 	readTAKETHISResponsesChan <- &ReadRequest{CmdID: cmdID, Job: job, MsgID: &article.MessageID, N: 1, Reqs: 1}
-	log.Printf("Newsgroup: '%s' | TAKETHIS notified response reader CmdID=%d '%s' waited %v readTAKETHISResponsesChan=%d/%d", newsgroup, cmdID, article.MessageID, time.Since(chanStart), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
+	//log.Printf("Newsgroup: '%s' | TAKETHIS notified response reader CmdID=%d '%s' waited %v readTAKETHISResponsesChan=%d/%d", newsgroup, cmdID, article.MessageID, time.Since(chanStart), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
 	// Return command ID without reading response (streaming mode)
 	return cmdID, txBytes, nil
-}
-
-// ReadTakeThisResponseStreaming reads a TAKETHIS response using the command ID
-// Used in streaming mode after all articles have been sent
-func (c *BackendConn) ReadTakeThisResponseStreaming(newsgroup string, cr *CheckResponse) (int, error) {
-	//log.Printf("Newsgroup: '%s' | TAKETHIS acquire c.mux.Lock(): CmdID=%d message-id '%s'", newsgroup, cr.CmdId, cr.Article.MessageID)
-	//c.mux.Lock()
-	//defer c.mux.Unlock()
-	//log.Printf("Newsgroup: '%s' | TAKETHIS acquired Lock(): wait Response CmdID=%d message-id '%s'", newsgroup, cr.CmdId, cr.Article.MessageID)
-	log.Printf("Newsgroup: '%s' | TAKETHIS wait for response CmdID=%d message-id '%s'", newsgroup, cr.CmdId, cr.Article.MessageID)
-	// Read TAKETHIS response
-	c.TextConn.StartResponse(cr.CmdId)
-	//log.Printf("Newsgroup: '%s' | TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: passed StartResponse CmdID=%d message-id '%s'", newsgroup, cr.CmdId, cr.Article.MessageID)
-	//c.mux.Lock()
-	//defer c.mux.Unlock()
-	code, line, err := c.TextConn.ReadCodeLine(239)
-	c.TextConn.EndResponse(cr.CmdId)
-	if code == 0 && err != nil {
-		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
-	}
-	parts := strings.Fields(line)
-	if len(parts) < 1 {
-		log.Printf("ERROR in ReadTakeThisResponseStreaming: Malformed response code=%d line: '%s' CmdID=%d message-id '%s')", code, line, cr.CmdId, cr.Article.MessageID)
-		//rr.ReturnReadRequest(rrRetChan)
-		return 0, fmt.Errorf("malformed TAKETHIS response: %s", line)
-	}
-
-	if parts[0] != cr.Article.MessageID {
-		log.Printf("ERROR in ReadTakeThisResponseStreaming: Mismatched response code=%d line: '%s' (expected msgID '%s') CmdID=%d", code, line, cr.Article.MessageID, cr.CmdId)
-		return 0, fmt.Errorf("out of order TAKETHIS response: expected %s, got %s", cr.Article.MessageID, parts[0])
-	}
-	log.Printf("Newsgroup: '%s' | TAKETHIS got *BackendConn.ReadTakeThisResponseStreaming: passed ReadCodeLine CmdID=%d: code=%d message-id '%s'", newsgroup, cr.CmdId, code, cr.Article.MessageID)
-
-	// Parse response
-	// Format: code <message-id> [message]
-	// 239 <message-id> - article transferred successfully
-	// 439 <message-id> - article transfer failed
-	return code, nil
 }
 
 // PostArticle posts an article using the POST command
