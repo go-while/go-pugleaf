@@ -218,7 +218,7 @@
                                               {{end}}
                                               <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                               <button type="submit" class="btn btn-outline-primary btn-sm"
-                                                      title="Fix Activity recalculates last activity timestamp for this newsgroup">
+                                                      title="Fix Activity recalculates last activity timestamp for this newsgroup. Run it on all newsgroups with the webserver flag '-update-newsgroups-activity N' ( N is the number of newsgroups to process concurrently! )">
                                                   <i class="bi bi-clock me-1"></i>FNA
                                               </button>
                                           </form>
@@ -246,7 +246,7 @@
                                               {{end}}
                                               <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                               <button type="submit" class="btn btn-outline-warning btn-sm"
-                                                      title="Hide Future Posts finds and marks future-dated articles (>48h) as spam. Articles will appear in spam management.">
+                                                      title="Hide Future Posts finds and marks future-dated articles (>48h) as spam. Articles will appear in spam management. Run it on all newsgroups with the webserver flag '-update-newsgroups-hide-futureposts'">
                                                   <i class="bi bi-clock-history me-1"></i>HFP
                                               </button>
                                           </form>

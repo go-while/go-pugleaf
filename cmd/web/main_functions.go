@@ -1005,3 +1005,90 @@ func updateNewsgroupsExpiryFromFile(db *database.Database, filename string) erro
 
 	return nil
 }
+
+// disableNewsgroupsNotInActiveFile disables newsgroups NOT listed in the active file
+func disableNewsgroupsNotInActiveFile(db *database.Database, activeFilePath string) error {
+	log.Printf("[WEB]: Disabling newsgroups not listed in active file: %s", activeFilePath)
+
+	// Open and read the active file
+	file, err := os.Open(activeFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to open active file '%s': %w", activeFilePath, err)
+	}
+	defer file.Close()
+
+	// Parse active file to get list of groups to KEEP active
+	activeGroups := make(map[string]bool)
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Parse active file format: groupname high low status
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			log.Printf("[WEB]: Warning: Skipping malformed line %d in active file: %s", lineNum, line)
+			continue
+		}
+
+		groupName := fields[0]
+		if groupName != "" {
+			activeGroups[groupName] = true
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading active file: %w", err)
+	}
+
+	log.Printf("[WEB]: Found %d active groups in file", len(activeGroups))
+
+	// Get all newsgroups from database
+	dbGroups, err := db.MainDBGetAllNewsgroups()
+	if err != nil {
+		return fmt.Errorf("failed to get newsgroups from database: %w", err)
+	}
+
+	log.Printf("[WEB]: Found %d total newsgroups in database", len(dbGroups))
+
+	// Disable groups NOT in active file
+	disabledCount := 0
+	alreadyInactiveCount := 0
+	keptActiveCount := 0
+
+	for _, group := range dbGroups {
+		if _, exists := activeGroups[group.Name]; !exists {
+			// Group not in active file - disable it
+			if group.Active {
+				if err := db.UpdateNewsgroupActive(group.Name, false); err != nil {
+					log.Printf("[WEB]: Warning: Failed to disable newsgroup '%s': %v", group.Name, err)
+					continue
+				}
+				disabledCount++
+				if disabledCount%1000 == 0 {
+					log.Printf("[WEB]: Disabled %d newsgroups so far...", disabledCount)
+				}
+			} else {
+				alreadyInactiveCount++
+			}
+		} else {
+			// Group IS in active file - keep it active
+			keptActiveCount++
+		}
+	}
+
+	log.Printf("[WEB]: Disable operation completed:")
+	log.Printf("[WEB]:   - Groups kept active (in active file): %d", keptActiveCount)
+	log.Printf("[WEB]:   - Groups newly disabled (not in active file): %d", disabledCount)
+	log.Printf("[WEB]:   - Groups already inactive (not in active file): %d", alreadyInactiveCount)
+	log.Printf("[WEB]:   - Total groups processed: %d", len(dbGroups))
+
+	return nil
+}
