@@ -102,8 +102,10 @@ var redisCtx = context.Background()
 var REDIS_TTL time.Duration = 3600 * time.Second // default 1h
 var MaxQueuedJobs int = 8
 var BatchCheck int
+var START_WITH_CHECK_MODE bool
 
 func main() {
+	bootTime := time.Now()
 	common.VerboseHeaders = false
 	config.AppVersion = appVersion
 	database.NO_CACHE_BOOT = true // prevents booting caches and several other not needed functions
@@ -129,7 +131,7 @@ func main() {
 		proxyPassword = flag.String("proxy-password", "", "Proxy authentication password")
 
 		// Transfer configuration
-		batchCheck      = flag.Int("batch-check", 1000, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
+		batchCheck      = flag.Int("batch-check", 100, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
 		batchDB         = flag.Int64("batch-db", 1000, "Fetch N articles from DB in a batch")
 		maxThreads      = flag.Int("max-threads", 1, "Transfer N newsgroups in concurrent threads. Each thread uses 1 connection.")
 		redisCache      = flag.Bool("redis-cache", true, "Use Redis caching for message IDs")
@@ -156,6 +158,7 @@ func main() {
 
 		// History configuration
 		useShortHashLen = flag.Int("useshorthashlen", 7, "Short hash length for history storage (2-7, default: 7)")
+		startWithCheck  = flag.Bool("start-with-check", false, "Enable 'start with check' mode")
 
 		// Newsgroup filtering options
 		fileInclude      = flag.String("file-include", "", "File containing newsgroup patterns to include (one per line)")
@@ -170,6 +173,7 @@ func main() {
 	)
 	flag.Parse()
 	common.IgnoreGoogleHeaders = *ignoreGoogleHeaders
+	START_WITH_CHECK_MODE = *startWithCheck
 
 	// Configure garbage collector
 	if *gcPercent != 100 {
@@ -544,8 +548,8 @@ func main() {
 	} else {
 		log.Printf("Database shutdown successfully")
 	}
-
-	log.Printf("Graceful shutdown completed. Exiting.")
+	time.Sleep(time.Second * 3) // wait for all goroutines to finish
+	log.Printf("nntp-transfer exit. Runtime: %v", time.Since(bootTime))
 }
 
 // parseDateTime parses a date string in multiple supported formats
@@ -622,7 +626,6 @@ func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup,
 	if err != nil {
 		return nil, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", ng.Name, err)
 	}
-	defer groupDBs.Return(db)
 
 	var query string
 	var args []interface{}
@@ -656,6 +659,7 @@ func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup,
 
 	rows, err := groupDBs.DB.Query(query, args...)
 	if err != nil {
+		db.ForceCloseGroupDBs(groupDBs)
 		return nil, err
 	}
 	defer rows.Close()
@@ -669,6 +673,11 @@ func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup,
 		out = append(out, &a)
 	}
 
+	if int64(len(out)) < dbBatchSize {
+		db.ForceCloseGroupDBs(groupDBs)
+	} else {
+		groupDBs.Return(db)
+	}
 	return out, nil
 }
 
@@ -1203,12 +1212,15 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		}
 		return fmt.Errorf("failed to get article count for newsgroup '%s': %v", ng.Name, err)
 	}
-	groupDBsA.Return(db)
+
 	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Got article count (%d), closing group DBs...", ng.Name, totalArticles)
 
 	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Closed group DBs, checking if articles exist...", ng.Name)
 
 	if totalArticles == 0 {
+		if ferr := db.ForceCloseGroupDBs(groupDBsA); ferr != nil {
+			log.Printf("ForceCloseGroupDBs error for '%s': %v", ng.Name, ferr)
+		}
 		resultsMutex.Lock()
 		nntp.NewsgroupTransferProgressMap[ng.Name].Finished = true
 		nntp.NewsgroupTransferProgressMap[ng.Name].LastUpdated = time.Now()
@@ -1225,9 +1237,9 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		} else {
 			log.Printf("No articles found in newsgroup: %s", ng.Name)
 		}
-
 		return nil
 	}
+	groupDBsA.Return(db)
 
 	// Initialize newsgroup progress tracking
 	resultsMutex.Lock()
@@ -1258,7 +1270,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	remainingArticles := totalArticles
 	ttMode := &nntp.TakeThisMode{
 		Newsgroup: &ng.Name,
-		CheckMode: true,
+		CheckMode: START_WITH_CHECK_MODE,
 	}
 	ttResponses := make(chan *nntp.TTSetup, totalArticles/int64(batchCheck)+2)
 	start := time.Now()
@@ -1311,6 +1323,15 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 				// free memory - CRITICAL: Lock and unlock in same scope, not with defer!
 				resp.Job.Mux.Lock()
 				log.Printf("Newsgroup: '%s' | Cleaning up TT job #%d with %d articles (ForceCleanUp)", ng.Name, resp.Job.JobID, len(resp.Job.Articles))
+				/*
+					// Decrement queue length for this worker (job processing complete)
+					workerID := assignWorkerToNewsgroup(*ttMode.Newsgroup)
+					WorkerQueueLengthMux.Lock()
+					if workerID < len(WorkerQueueLength) && WorkerQueueLength[workerID] > 0 {
+						WorkerQueueLength[workerID]--
+					}
+					WorkerQueueLengthMux.Unlock()
+				*/
 				// Clean up Articles and their internal fields
 				for i := range resp.Job.Articles {
 					if resp.Job.Articles[i] != nil {
@@ -1338,10 +1359,14 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 				resp.Job = nil
 			}(setup.ResponseChan, num, responseWG)
 		}
-		log.Printf("Newsgroup: '%s' | Collector: ttResponses closed, waiting for %d response processors to finish...", ng.Name, num)
+		if VERBOSE {
+			log.Printf("Newsgroup: '%s' | Collector: ttResponses closed, waiting for %d response processors to finish...", ng.Name, num)
+		}
 		// Wait for all response channel processors to finish
 		responseWG.Wait()
-		log.Printf("Newsgroup: '%s' | Collector: all response processors closed", ng.Name)
+		if VERBOSE {
+			log.Printf("Newsgroup: '%s' | Collector: all response processors closed", ng.Name)
+		}
 		amux.Lock()
 		result := fmt.Sprintf("END Newsgroup: '%s' | transferred: %d/%d  | unwanted: %d | rejected: %d | checked: %d | TX_Errors: %d | connErrors: %d | took %v",
 			ng.Name, transferred, totalArticles, unwanted, rejected, checked, txErrors, connErrors, time.Since(start))
@@ -1440,7 +1465,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 					ResponseChan: responseChan,
 				}
 			}
-			OffsetQueue.Wait(MaxQueuedJobs) // wait for offset batches to finish, less than 2 in flight
+			OffsetQueue.Wait(MaxQueuedJobs) // wait for offset batches to finish, less than N in flight
 		}
 		remainingArticles -= int64(len(articles))
 		if VERBOSE {
@@ -1606,10 +1631,6 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 	QueuesMutex.RLock()
 	WorkersCheckChannel := CheckQueues[workerID]
 	QueuesMutex.RUnlock()
-	// Track queue length for load balancing
-	WorkerQueueLengthMux.Lock()
-	WorkerQueueLength[workerID]++
-	WorkerQueueLengthMux.Unlock()
 
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queue job #%d with %d message IDs. CheckQ=%d", *ttMode.Newsgroup, workerID, batchedJob.JobID, len(batchedJob.MessageIDs), len(CheckQueues[workerID]))
 
@@ -1709,7 +1730,9 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		}
 	}
 	conn.Unlock()
-	log.Printf("Newsgroup: '%s' | DONE TAKETHIS BATCH sent: %d commands. ttxBytes: %d in %v", newsgroup, sentCount, ttxBytes, time.Since(start))
+	if VERBOSE {
+		log.Printf("Newsgroup: '%s' | DONE TAKETHIS BATCH sent: %d commands. ttxBytes: %d in %v", newsgroup, sentCount, ttxBytes, time.Since(start))
+	}
 	return redis_cached, nil
 } // end func sendArticlesBatchViaTakeThis
 
@@ -1744,7 +1767,7 @@ func assignWorkerToNewsgroup(newsgroup string) int {
 	WorkerQueueLengthMux.Lock()
 	if len(WorkerQueueLength) == 0 {
 		WorkerQueueLengthMux.Unlock()
-		return 0
+		log.Fatalf("assignWorkerToNewsgroup: no workers available?")
 	}
 
 	minLoad := WorkerQueueLength[0]
@@ -1753,6 +1776,8 @@ func assignWorkerToNewsgroup(newsgroup string) int {
 		if WorkerQueueLength[i] < minLoad {
 			minLoad = WorkerQueueLength[i]
 			workerID = i
+			WorkerQueueLength[i]++
+			break
 		}
 	}
 	WorkerQueueLengthMux.Unlock()
@@ -1828,7 +1853,7 @@ forever:
 		returnSignals := make([]*ReturnSignal, bootN)
 		errChan := make(chan struct{}, 1)
 		newConns := 0
-		for i := range bootN {
+		for workerID := range bootN {
 			// Get a connection from pool
 			conn, err := pool.Get(nntp.MODE_STREAM_MV)
 			if err != nil {
@@ -1867,7 +1892,7 @@ forever:
 				jobs:       make([]*nntp.CHTTJob, 0, BatchCheck),
 			}
 
-			returnSignals[i] = returnSignal
+			returnSignals[workerID] = returnSignal
 			// assign checkQueue by openConns counter
 			// so restarted workers get same channels to read from
 			go CHTTWorker(slotID, conn, returnSignal, CheckQueues[slotID])
@@ -1888,27 +1913,30 @@ forever:
 			monitoring := newConns
 			for {
 				time.Sleep(100 * time.Millisecond)
-				for i, wait := range returnSignals {
+				for workerID, wait := range returnSignals {
 					if wait == nil {
 						continue
 					}
 					select {
 					case rs := <-wait.ExitChan:
-						log.Printf("CHTTWorker (%d) exited", i)
+						WorkerQueueLengthMux.Lock()
+						log.Printf("CHTTWorker (%d) exited. processed jobs: %d", workerID, WorkerQueueLength[workerID])
+						WorkerQueueLengthMux.Unlock()
+
 						monitoring--
 
 						UnsetWorker(&openConns, rs.slotID, workerSlots, &mux)
-						returnSignals[i] = nil
+						returnSignals[workerID] = nil
 
 						rs.Mux.Lock()
 						if len(rs.jobs) > 0 {
-							log.Printf("CHTTWorker (%d) try requeue %d jobs", i, len(rs.jobs))
+							log.Printf("CHTTWorker (%d) try requeue %d jobs", workerID, len(rs.jobs))
 							for _, job := range rs.jobs {
 								if job != nil {
 									// copy articles pointer
 									job.Mux.Lock()
 									if len(job.Articles) == 0 {
-										log.Printf("ERROR in CHTTWorker (%d) job %d has no articles, skipping requeue", i, job.JobID)
+										log.Printf("ERROR in CHTTWorker (%d) job %d has no articles, skipping requeue", workerID, job.JobID)
 										job.Mux.Unlock()
 										continue
 									}
@@ -1924,7 +1952,7 @@ forever:
 									jobRequeueMutex.Lock()
 									jobRequeue[rqj.Newsgroup] = append(jobRequeue[rqj.Newsgroup], rqj)
 									jobRequeueMutex.Unlock()
-									log.Printf("CHTTWorker (%d) did requeue job %d with %d articles for newsgroup '%s'", i, rqj.JobID, len(rqj.Articles), *rqj.Newsgroup)
+									log.Printf("CHTTWorker (%d) did requeue job %d with %d articles for newsgroup '%s'", workerID, rqj.JobID, len(rqj.Articles), *rqj.Newsgroup)
 									// unlink pointers
 									job.Mux.Lock()
 									if job.TTMode != nil {
@@ -1942,7 +1970,7 @@ forever:
 									job.Mux.Unlock()
 								}
 							}
-							log.Printf("CHTTWorker (%d) did requeue %d jobs", i, len(rs.jobs))
+							log.Printf("CHTTWorker (%d) did requeue %d jobs", workerID, len(rs.jobs))
 						}
 
 						// Clean up ReturnSignal maps and unlink pointers
@@ -2020,6 +2048,8 @@ func (rs *ReturnSignal) BlockTT() {
 }
 
 func (rs *ReturnSignal) GetLockTT() {
+	start := time.Now()
+	printLast := start
 	for {
 		rs.Mux.Lock()
 		if rs.RunTT {
@@ -2034,12 +2064,17 @@ func (rs *ReturnSignal) GetLockTT() {
 			return
 		}
 		rs.Mux.Unlock()
-		log.Printf("GetLockTT: waiting for RunTT to be true...")
+		if time.Since(printLast) > time.Second*30 {
+			log.Printf("GetLockTT: waiting since %v for RunTT to become true...", time.Since(start))
+			printLast = time.Now()
+		}
 		time.Sleep(nntp.ReturnDelay)
 	}
 }
 
 func (rs *ReturnSignal) UnlockCHECKforTTwithWait() {
+	start := time.Now()
+	printLast := start
 	for {
 		rs.Mux.Lock()
 		if !rs.RunTT {
@@ -2050,8 +2085,11 @@ func (rs *ReturnSignal) UnlockCHECKforTTwithWait() {
 			return
 		}
 		rs.Mux.Unlock()
-		log.Printf("UnlockCHECKforTTwithWait: waiting for RunTT to be false...")
-		time.Sleep(nntp.ReturnDelay)
+		if time.Since(printLast) > time.Second*30 {
+			log.Printf("UnlockCHECKforTTwithWait: waiting since %v for RunTT to become false...", time.Since(start))
+			time.Sleep(nntp.ReturnDelay)
+			printLast = time.Now()
+		}
 	}
 }
 
@@ -2059,10 +2097,10 @@ func (rs *ReturnSignal) UnlockCHECKforTT() {
 	rs.Mux.Lock()
 	defer rs.Mux.Unlock()
 	if !rs.CHECK || rs.RunTT {
-		log.Printf("UnlockCHECKforTT: cannot switch to RunTT, CHECK=%t RunTT=%t", rs.CHECK, rs.RunTT)
+		//log.Printf("UnlockCHECKforTT: already set... CHECK=%t RunTT=%t", rs.CHECK, rs.RunTT)
 		return
 	}
-	log.Printf("UnlockCHECKforTT: switched CHECK to RunTT")
+	//log.Printf("UnlockCHECKforTT: switched CHECK to RunTT")
 	rs.CHECK = false
 	rs.RunTT = true
 }
@@ -2086,8 +2124,8 @@ func (rs *ReturnSignal) LockCHECK() {
 			rs.Mux.Unlock()
 			return
 		}
-		if time.Since(printLast) > time.Second {
-			log.Printf("LockCHECK: waiting for RunTT to be false... CHECK=%t RunTT=%t", rs.CHECK, rs.RunTT)
+		if time.Since(printLast) > time.Second*30 {
+			log.Printf("LockCHECK: waiting since %v for RunTT to become false... CHECK=%t RunTT=%t", time.Since(start), rs.CHECK, rs.RunTT)
 			printLast = time.Now()
 		}
 		rs.Mux.Unlock()
@@ -2160,7 +2198,9 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					log.Printf("CheckWorker (%d): Ticked but no jobs in queue, continue...", workerID)
 					continue loop
 				}
-				log.Printf("CheckWorker (%d): Ticked and found %d jobs in queue", workerID, len(rs.jobs))
+				if len(rs.jobs) >= MaxQueuedJobs {
+					log.Printf("CheckWorker (%d): Ticked and found %d jobs in queue (max: %d)", workerID, len(rs.jobs), MaxQueuedJobs)
+				}
 				currentJob := rs.jobs[0]
 				rs.jobs = rs.jobs[1:] // Remove first job from queue
 				rs.Mux.Unlock()
@@ -2235,12 +2275,6 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				rs.Mux.Unlock()
 				replyChan(requestReplyJobDone, replyJobDone) // see if anybody is waiting and reply
 				//log.Printf("CheckWorker (%d): job #%d CHECK done, hasMoreJobs=%v", workerID, currentJob.JobID, hasMoreJobs)
-				// Decrement queue length for this worker (job processing complete)
-				WorkerQueueLengthMux.Lock()
-				if workerID < len(WorkerQueueLength) && WorkerQueueLength[workerID] > 0 {
-					WorkerQueueLength[workerID]--
-				}
-				WorkerQueueLengthMux.Unlock()
 
 				// If there are more jobs waiting, immediately trigger next job processing
 				if hasMoreJobs {
