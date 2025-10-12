@@ -1,7 +1,7 @@
 ### Struct Signatures
 ./active_files/hierarchies/organize_by_theme.go:15:type ThemeCategory struct {
 ./cmd/extract_hierarchies/extract_hierarchies.go:138:	type hierarchyStat struct {
-./cmd/fix-thread-activity/main.go:73:	type threadInfo struct {
+./cmd/fix-thread-activity/main.go:80:	type threadInfo struct {
 ./cmd/history-rebuild/main.go:26:type RebuildStats struct {
 ./cmd/history-rebuild/main.go:36:type HistoryAnalysisStats struct {
 ./cmd/import-flat-files/main.go:193:type FileScanner struct {
@@ -10,9 +10,11 @@
 ./cmd/merge-active/main.go:21:type ActiveEntry struct {
 ./cmd/merge-active/main.go:31:type OverviewEntry struct {
 ./cmd/nntp-server/processor_adapter.go:10:type ProcessorAdapter struct {
-./cmd/nntp-transfer/main.go:503:type ProxyConfig struct {
+./cmd/nntp-transfer/main.go:2152:type ReturnSignal struct {
+./cmd/nntp-transfer/main.go:3066:	type ProgressInfo struct {
+./cmd/nntp-transfer/main.go:570:type ProxyConfig struct {
 ./cmd/recover-db/main.go:20:type GroupResult struct {
-./cmd/recover-db/main.go:676:type DateProblem struct {
+./cmd/recover-db/main.go:675:type DateProblem struct {
 ./cmd/tcp2tor/main.go:28:type ProxyConfig struct {
 ./cmd/tcp2tor/main.go:35:type ProxyTarget struct {
 ./cmd/tcp2tor/main.go:43:type ConfigEntry struct {
@@ -24,11 +26,11 @@
 ./internal/cache/newsgroup_cache.go:38:type NewsgroupCache struct {
 ./internal/cache/sanitized_cache.go:12:type SanitizedArticle struct {
 ./internal/cache/sanitized_cache.go:30:type SanitizedCache struct {
-./internal/config/config.go:113:type ServerConfig struct {
-./internal/config/config.go:129:type DatabaseConfig struct {
-./internal/config/config.go:136:type WebConfig struct {
-./internal/config/config.go:68:type MainConfig struct {
-./internal/config/config.go:90:type Provider struct {
+./internal/config/config.go:115:type ServerConfig struct {
+./internal/config/config.go:131:type DatabaseConfig struct {
+./internal/config/config.go:138:type WebConfig struct {
+./internal/config/config.go:70:type MainConfig struct {
+./internal/config/config.go:92:type Provider struct {
 ./internal/database/article_cache.go:13:type ArticleCacheEntry struct {
 ./internal/database/article_cache.go:22:type ArticleCache struct {
 ./internal/database/config_cache.go:10:type ConfigCache struct {
@@ -131,20 +133,27 @@
 ./internal/models/models.go:72:type Overview struct {
 ./internal/models/models.go:91:type User struct {
 ./internal/nntp/nntp-article-common.go:26:type ArticleRetrievalResult struct {
-./internal/nntp/nntp-article-common.go:35:type TakeThisMode struct {
 ./internal/nntp/nntp-auth-manager.go:12:type AuthManager struct {
 ./internal/nntp/nntp-backend-pool.go:15:type Pool struct {
-./internal/nntp/nntp-backend-pool.go:406:type PoolStats struct {
+./internal/nntp/nntp-backend-pool.go:417:type PoolStats struct {
 ./internal/nntp/nntp-cache-local.go:11:type Local430 struct {
 ./internal/nntp/nntp-cache-local.go:57:type CacheMessageIDNumtoGroup struct {
 ./internal/nntp/nntp-cache-local.go:62:type ItemCMIDNG struct {
-./internal/nntp/nntp-client.go:107:type GroupInfo struct {
-./internal/nntp/nntp-client.go:118:type OverviewLine struct {
-./internal/nntp/nntp-client.go:130:type HeaderLine struct {
-./internal/nntp/nntp-client.go:52:type BackendConn struct {
-./internal/nntp/nntp-client.go:75:type BackendConfig struct {
-./internal/nntp/nntp-client.go:98:type Article struct {
-./internal/nntp/nntp-cmd-posting.go:163:type ArticleData struct {
+./internal/nntp/nntp-client-commands.go:114:type TTResponse struct {
+./internal/nntp/nntp-client-commands.go:120:type CheckResponse struct { // deprecated
+./internal/nntp/nntp-client-commands.go:125:type ReadRequest struct {
+./internal/nntp/nntp-client-commands.go:148:type CHTTJob struct {
+./internal/nntp/nntp-client-commands.go:199:type NewsgroupTransferProgress struct {
+./internal/nntp/nntp-client-commands.go:41:type TakeThisMode struct {
+./internal/nntp/nntp-client-commands.go:54:type TTSetup struct {
+./internal/nntp/nntp-client-commands.go:59:type OffsetQueue struct {
+./internal/nntp/nntp-client.go:100:type Article struct {
+./internal/nntp/nntp-client.go:109:type GroupInfo struct {
+./internal/nntp/nntp-client.go:120:type OverviewLine struct {
+./internal/nntp/nntp-client.go:132:type HeaderLine struct {
+./internal/nntp/nntp-client.go:55:type BackendConn struct {
+./internal/nntp/nntp-client.go:77:type BackendConfig struct {
+./internal/nntp/nntp-cmd-posting.go:164:type ArticleData struct {
 ./internal/nntp/nntp-peering.go:153:type PeeringStats struct {
 ./internal/nntp/nntp-peering.go:47:type PeeringManager struct {
 ./internal/nntp/nntp-peering.go:70:type PeeringConfig struct {
@@ -163,9 +172,9 @@
 ./internal/processor/bridges.go:24:type BridgeManager struct {
 ./internal/processor/counter.go:12:type Counter struct {
 ./internal/processor/PostQueue.go:12:type PostQueueWorker struct {
-./internal/processor/proc_DLArt.go:18:type BatchQueue struct {
-./internal/processor/proc_DLArt.go:26:type GroupBatch struct {
-./internal/processor/proc_DLArt.go:30:type BatchItem struct {
+./internal/processor/proc_DLArt.go:19:type BatchQueue struct {
+./internal/processor/proc_DLArt.go:27:type GroupBatch struct {
+./internal/processor/proc_DLArt.go:31:type BatchItem struct {
 ./internal/processor/processor.go:23:type Processor struct {
 ./internal/processor/proc_MsgIDtmpCache.go:14://type MsgTmpCache struct {
 ./internal/processor/proc_MsgIDtmpCache.go:57:type MsgIdTmpCacheItem struct {
@@ -174,12 +183,12 @@
 ./internal/processor/rslight.go:45:type GroupsEntry struct {
 ./internal/processor/rslight.go:52:type LegacyArticle struct {
 ./internal/processor/rslight.go:65:type LegacyThread struct {
-./internal/web/cronjobs.go:20:type CronJobManager struct {
-./internal/web/cronjobs.go:29:type CronJob struct {
+./internal/web/cronjobs.go:21:type CronJobManager struct {
+./internal/web/cronjobs.go:30:type CronJob struct {
 ./internal/web/web_admin.go:11:type FlashMessage struct {
 ./internal/web/web_admin.go:17:type SpamArticleInfo struct {
 ./internal/web/web_admin.go:23:type AdminPageData struct {
-./internal/web/web_admin_newsgroups.go:565:	type threadInfo struct {
+./internal/web/web_admin_newsgroups.go:568:	type threadInfo struct {
 ./internal/web/web_admin_ollama.go:18:type ProxyModelResponse struct {
 ./internal/web/web_admin_ollama.go:22:type ProxyModel struct {
 ./internal/web/web_admin_settings_unified.go:17:type SettingConfig struct {
@@ -192,26 +201,26 @@
 ./internal/web/web_newsPage.go:12:type NewsPageData struct {
 ./internal/web/web_profile.go:17:type ProfilePageData struct {
 ./internal/web/web_registerPage.go:15:type RegisterPageData struct {
-./internal/web/webserver_core_routes.go:108:type HierarchiesPageData struct {
-./internal/web/webserver_core_routes.go:116:type HierarchyGroupsPageData struct {
-./internal/web/webserver_core_routes.go:125:type HierarchyTreePageData struct {
-./internal/web/webserver_core_routes.go:143:type HierarchyBreadcrumb struct {
-./internal/web/webserver_core_routes.go:150:type HierarchyNode struct {
-./internal/web/webserver_core_routes.go:158:type SectionPageData struct {
-./internal/web/webserver_core_routes.go:169:type SectionGroupPageData struct {
-./internal/web/webserver_core_routes.go:179:type SectionArticlePageData struct {
-./internal/web/webserver_core_routes.go:191:type SearchPageData struct {
+./internal/web/webserver_core_routes.go:109:type HierarchiesPageData struct {
+./internal/web/webserver_core_routes.go:117:type HierarchyGroupsPageData struct {
+./internal/web/webserver_core_routes.go:126:type HierarchyTreePageData struct {
+./internal/web/webserver_core_routes.go:144:type HierarchyBreadcrumb struct {
+./internal/web/webserver_core_routes.go:151:type HierarchyNode struct {
+./internal/web/webserver_core_routes.go:159:type SectionPageData struct {
+./internal/web/webserver_core_routes.go:170:type SectionGroupPageData struct {
+./internal/web/webserver_core_routes.go:180:type SectionArticlePageData struct {
+./internal/web/webserver_core_routes.go:192:type SearchPageData struct {
 ./internal/web/webserver_core_routes.go:25:type WebServer struct {
 ./internal/web/webserver_core_routes.go:39:type TemplateData struct {
 ./internal/web/webserver_core_routes.go:56:type GroupPageData struct {
 ./internal/web/webserver_core_routes.go:65:type ArticlePageData struct {
 ./internal/web/webserver_core_routes.go:77:type StatsPageData struct {
-./internal/web/webserver_core_routes.go:84:type GroupsPageData struct {
-./internal/web/webserver_core_routes.go:92:type GroupThreadsPageData struct {
+./internal/web/webserver_core_routes.go:85:type GroupsPageData struct {
+./internal/web/webserver_core_routes.go:93:type GroupThreadsPageData struct {
 ./internal/web/web_sitePostPage.go:23:type PostPageData struct {
 ### Function Signatures
-./cmd/history-rebuild/main.go:297:func (s *RebuildStats) PrintProgress() {
-./cmd/history-rebuild/main.go:328:func (s *RebuildStats) PrintFinal() {
+./cmd/history-rebuild/main.go:301:func (s *RebuildStats) PrintProgress() {
+./cmd/history-rebuild/main.go:332:func (s *RebuildStats) PrintFinal() {
 ./cmd/import-flat-files/main.go:162:func (dm *DBManager) ArticleExists(article *Article) (bool, error) {
 ./cmd/import-flat-files/main.go:181:func (dm *DBManager) Close() {
 ./cmd/import-flat-files/main.go:206:func (fs *FileScanner) ScanFiles() <-chan *Article {
@@ -220,6 +229,12 @@
 ./cmd/nntp-server/processor_adapter.go:20:func (pa *ProcessorAdapter) ProcessIncomingArticle(article *models.Article) (int, error) {
 ./cmd/nntp-server/processor_adapter.go:27:func (pa *ProcessorAdapter) Lookup(msgIdItem *history.MessageIdItem) (int, error) {
 ./cmd/nntp-server/processor_adapter.go:32:func (pa *ProcessorAdapter) CheckNoMoreWorkInHistory() bool {
+./cmd/nntp-transfer/main.go:2166:func (rs *ReturnSignal) UnlockTT() {
+./cmd/nntp-transfer/main.go:2173:func (rs *ReturnSignal) GetLockTT() {
+./cmd/nntp-transfer/main.go:2193:func (rs *ReturnSignal) UnlockCHECKforTTwithWait() {
+./cmd/nntp-transfer/main.go:2209:func (rs *ReturnSignal) UnlockCHECKforTT() {
+./cmd/nntp-transfer/main.go:2221:func (rs *ReturnSignal) BlockCHECK() {
+./cmd/nntp-transfer/main.go:2229:func (rs *ReturnSignal) LockCHECK() {
 ./cmd/tcp2tor/main.go:558:func (s *ProxyServer) Start() error {
 ./cmd/tcp2tor/main.go:601:func (s *ProxyServer) Stop() {
 ./cmd/tcp2tor/main.go:611:func (s *ProxyServer) handleConnection(clientConn net.Conn) {
@@ -309,10 +324,10 @@
 ./internal/database/db_batch.go:1084:func (c *SQ3batch) findThreadRoot(groupDBs *GroupDBs, refs []string) (int64, error) {
 ./internal/database/db_batch.go:1111:func (sq *SQ3batch) batchUpdateThreadCache(groupDBs *GroupDBs, threadUpdates map[int64][]threadCacheUpdateData) error {
 ./internal/database/db_batch.go:1236:func (o *BatchOrchestrator) StartOrch() {
-./internal/database/db_batch.go:1274:func (o *BatchOrchestrator) StartOrchestrator() {
-./internal/database/db_batch.go:1333:func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
+./internal/database/db_batch.go:1277:func (o *BatchOrchestrator) StartOrchestrator() {
+./internal/database/db_batch.go:1338:func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 ./internal/database/db_batch.go:139:func (sq *SQ3batch) BatchCaptureOverviewForLater(newsgroupPtr *string, article *models.Article) {
-./internal/database/db_batch.go:1418:func (sq *SQ3batch) BatchDivider() {
+./internal/database/db_batch.go:1423:func (sq *SQ3batch) BatchDivider() {
 ./internal/database/db_batch.go:149:func (sq *SQ3batch) ExpireCache() {
 ./internal/database/db_batch.go:170:func (sq *SQ3batch) GetNewsgroupPointer(newsgroup string) *string {
 ./internal/database/db_batch.go:196:func (sq *SQ3batch) GetChan(newsgroup *string) chan *models.Article {
@@ -356,13 +371,13 @@
 ./internal/database/db_groupdbs.go:172:func (db *GroupDBs) ExistsMsgIdInArticlesDB(messageID string) bool {
 ./internal/database/db_groupdbs.go:181:func (dbs *GroupDBs) Close(who string) error {
 ./internal/database/db_groupdbs.go:28:func (db *Database) GetGroupDBs(groupName string) (*GroupDBs, error) {
-./internal/database/db_init.go:233:func (db *Database) IsDBshutdown() bool {
-./internal/database/db_init.go:249:func (db *Database) initMainDB() error {
-./internal/database/db_init.go:290:func (db *Database) applySQLitePragmas(conn *sql.DB) error {
-./internal/database/db_init.go:318:func (db *Database) applySQLitePragmasGroupDB(conn *sql.DB) error {
-./internal/database/db_init.go:358:func (db *Database) LoadDefaultProviders() error {
-./internal/database/db_init.go:399:func (db *Database) loadBotConfiguration() {
-./internal/database/db_init.go:443:func (db *Database) loadIPBlockingConfiguration() {
+./internal/database/db_init.go:251:func (db *Database) IsDBshutdown() bool {
+./internal/database/db_init.go:267:func (db *Database) initMainDB() error {
+./internal/database/db_init.go:308:func (db *Database) applySQLitePragmas(conn *sql.DB) error {
+./internal/database/db_init.go:336:func (db *Database) applySQLitePragmasGroupDB(conn *sql.DB) error {
+./internal/database/db_init.go:376:func (db *Database) LoadDefaultProviders() error {
+./internal/database/db_init.go:417:func (db *Database) loadBotConfiguration() {
+./internal/database/db_init.go:441:func (db *Database) loadIPBlockingConfiguration() {
 ./internal/database/db_migrate.go:245:func (db *Database) migrateMainDB() error {
 ./internal/database/db_migrate.go:281:func (db *Database) MigrateGroup(groupName string) error {
 ./internal/database/db_migrate.go:293:func (db *Database) migrateGroupDB(groupDBs *GroupDBs) error {
@@ -631,28 +646,28 @@
 ./internal/history/history_config.go:293:func (h *History) xxxGetHashPrefix(hash string) string {
 ./internal/history/history_config.go:302:func (h *History) initDatabase() error {
 ./internal/history/history_config.go:324:func (h *History) openHistoryFile() error {
-./internal/history/history.go:1004:func (h *History) xxLookupStorageToken(msgIdItem *MessageIdItem) int {
-./internal/history/history.go:1059:func (h *History) CheckNoMoreWorkInHistory() bool {
-./internal/history/history.go:1079:func (h *History) SetDatabaseWorkChecker(checker DatabaseWorkChecker) {
-./internal/history/history.go:160:func (h *History) bootLookupWorkers() {
-./internal/history/history.go:168:func (h *History) LookupWorker(wid int) {
-./internal/history/history.go:214:func (h *History) Lookup(msgIdItem *MessageIdItem) (int, error) {
-./internal/history/history.go:235:func (h *History) lookupInDatabase(msgIdItem *MessageIdItem) (bool, error) {
-./internal/history/history.go:334:func (h *History) GetStats() HistoryStats {
-./internal/history/history.go:348:func (h *History) updateStats(fn func(*HistoryStats)) {
-./internal/history/history.go:355:func (h *History) Close() error {
-./internal/history/history.go:372:func (h *History) writerWorker() {
-./internal/history/history.go:466:func (h *History) ServerShutdown() bool {
-./internal/history/history.go:479:func (h *History) readHistoryEntryAtOffset(offset int64, msgIdItem *MessageIdItem) (int, error) {
-./internal/history/history.go:567:func (h *History) routeHash(msgId string) (int, string, string, error) {
-./internal/history/history.go:604:func (h *History) flushPendingBatch() {
-./internal/history/history.go:623:func (h *History) processBatch() {
-./internal/history/history.go:666:func (h *History) writeBatchToFile() error {
-./internal/history/history.go:765:func (h *History) writeBatchToDatabase() error {
-./internal/history/history.go:834:func (h *History) writeBatchToHashDB(dbIndex int, entries []*MessageIdItem) error {
-./internal/history/history.go:861:func (h *History) executeDBTransaction(dbIndex int, entries []*MessageIdItem) error {
-./internal/history/history.go:92:func (h *History) Add(msgIdItem *MessageIdItem) {
-./internal/history/history.go:938:func (h *History) processTableInTransaction(tx *sql.Tx, tableName string, hashGroups map[string][]*MessageIdItem) error {
+./internal/history/history.go:1007:func (h *History) xxLookupStorageToken(msgIdItem *MessageIdItem) int {
+./internal/history/history.go:1062:func (h *History) CheckNoMoreWorkInHistory() bool {
+./internal/history/history.go:1082:func (h *History) SetDatabaseWorkChecker(checker DatabaseWorkChecker) {
+./internal/history/history.go:161:func (h *History) bootLookupWorkers() {
+./internal/history/history.go:169:func (h *History) LookupWorker(wid int) {
+./internal/history/history.go:215:func (h *History) Lookup(msgIdItem *MessageIdItem) (int, error) {
+./internal/history/history.go:236:func (h *History) lookupInDatabase(msgIdItem *MessageIdItem) (bool, error) {
+./internal/history/history.go:335:func (h *History) GetStats() HistoryStats {
+./internal/history/history.go:349:func (h *History) updateStats(fn func(*HistoryStats)) {
+./internal/history/history.go:356:func (h *History) Close() error {
+./internal/history/history.go:373:func (h *History) writerWorker() {
+./internal/history/history.go:469:func (h *History) ServerShutdown() bool {
+./internal/history/history.go:482:func (h *History) readHistoryEntryAtOffset(offset int64, msgIdItem *MessageIdItem) (int, error) {
+./internal/history/history.go:570:func (h *History) routeHash(msgId string) (int, string, string, error) {
+./internal/history/history.go:607:func (h *History) flushPendingBatch() {
+./internal/history/history.go:626:func (h *History) processBatch() {
+./internal/history/history.go:669:func (h *History) writeBatchToFile() error {
+./internal/history/history.go:768:func (h *History) writeBatchToDatabase() error {
+./internal/history/history.go:837:func (h *History) writeBatchToHashDB(dbIndex int, entries []*MessageIdItem) error {
+./internal/history/history.go:864:func (h *History) executeDBTransaction(dbIndex int, entries []*MessageIdItem) error {
+./internal/history/history.go:93:func (h *History) Add(msgIdItem *MessageIdItem) {
+./internal/history/history.go:941:func (h *History) processTableInTransaction(tx *sql.Tx, tableName string, hashGroups map[string][]*MessageIdItem) error {
 ./internal/history/history_L1-cache.go:113:func (c *L1Cache) Close() {
 ./internal/history/history_L1-cache.go:205:func (l1 *L1CACHE) BootL1Cache() {
 ./internal/history/history_L1-cache.go:248:func (l1 *L1CACHE) LockL1Cache(hash string, value int) int {
@@ -716,31 +731,31 @@
 ./internal/models/sanitizing.go:481:func (o *Overview) PrintSanitized(field string, groupName ...string) template.HTML {
 ./internal/models/sanitizing.go:547:func (a *Article) GetCleanSubject() string {
 ./internal/models/sanitizing.go:567:func (o *Overview) GetCleanSubject() string {
-./internal/nntp/nntp-article-common.go:320:func (c *ClientConnection) sendArticleContent(result *ArticleRetrievalResult) error {
-./internal/nntp/nntp-article-common.go:355:func (c *ClientConnection) sendHeadContent(result *ArticleRetrievalResult) error {
-./internal/nntp/nntp-article-common.go:376:func (c *ClientConnection) sendBodyContent(result *ArticleRetrievalResult) error {
-./internal/nntp/nntp-article-common.go:397:func (c *ClientConnection) sendStatContent(result *ArticleRetrievalResult) error {
-./internal/nntp/nntp-article-common.go:46:func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType ArticleRetrievalType) error {
-./internal/nntp/nntp-article-common.go:89:func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResult, error) {
+./internal/nntp/nntp-article-common.go:309:func (c *ClientConnection) sendArticleContent(result *ArticleRetrievalResult) error {
+./internal/nntp/nntp-article-common.go:344:func (c *ClientConnection) sendHeadContent(result *ArticleRetrievalResult) error {
+./internal/nntp/nntp-article-common.go:35:func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType ArticleRetrievalType) error {
+./internal/nntp/nntp-article-common.go:365:func (c *ClientConnection) sendBodyContent(result *ArticleRetrievalResult) error {
+./internal/nntp/nntp-article-common.go:386:func (c *ClientConnection) sendStatContent(result *ArticleRetrievalResult) error {
+./internal/nntp/nntp-article-common.go:78:func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResult, error) {
 ./internal/nntp/nntp-auth-manager.go:24:func (am *AuthManager) AuthenticateUser(username, password string) (*models.NNTPUser, error) {
 ./internal/nntp/nntp-auth-manager.go:47:func (am *AuthManager) CheckGroupAccess(user *models.NNTPUser, groupName string) bool {
 ./internal/nntp/nntp-auth-manager.go:58:func (am *AuthManager) CanPost(user *models.NNTPUser) bool {
 ./internal/nntp/nntp-auth-manager.go:66:func (am *AuthManager) IsAdmin(user *models.NNTPUser) bool {
 ./internal/nntp/nntp-auth-manager.go:77:func (am *AuthManager) CheckConnectionLimit(user *models.NNTPUser) bool {
-./internal/nntp/nntp-backend-pool.go:119:func (pool *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
-./internal/nntp/nntp-backend-pool.go:151:func (pool *Pool) SelectGroup(group string) (*GroupInfo, error) {
-./internal/nntp/nntp-backend-pool.go:185:func (pool *Pool) Get(mode int) (*BackendConn, error) {
-./internal/nntp/nntp-backend-pool.go:299:func (pool *Pool) Put(client *BackendConn) error {
-./internal/nntp/nntp-backend-pool.go:342:func (pool *Pool) CloseConn(client *BackendConn, lock bool) error {
-./internal/nntp/nntp-backend-pool.go:363:func (pool *Pool) ClosePool() error {
-./internal/nntp/nntp-backend-pool.go:391:func (pool *Pool) Stats() PoolStats {
-./internal/nntp/nntp-backend-pool.go:416:func (pool *Pool) createConnection() (*BackendConn, error) {
-./internal/nntp/nntp-backend-pool.go:430:func (pool *Pool) isConnectionValid(client *BackendConn) bool {
-./internal/nntp/nntp-backend-pool.go:449:func (pool *Pool) Cleanup() {
-./internal/nntp/nntp-backend-pool.go:45:func (pool *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]OverviewLine, error) {
-./internal/nntp/nntp-backend-pool.go:498:func (pool *Pool) startCleanupWorker() {
-./internal/nntp/nntp-backend-pool.go:72:func (pool *Pool) XHdr(group string, header string, start, end int64) ([]*HeaderLine, error) {
-./internal/nntp/nntp-backend-pool.go:94:func (pool *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
+./internal/nntp/nntp-backend-pool.go:118:func (pool *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
+./internal/nntp/nntp-backend-pool.go:150:func (pool *Pool) SelectGroup(group string) (*GroupInfo, error) {
+./internal/nntp/nntp-backend-pool.go:184:func (pool *Pool) Get(wantMode int) (*BackendConn, error) {
+./internal/nntp/nntp-backend-pool.go:310:func (pool *Pool) Put(conn *BackendConn) error {
+./internal/nntp/nntp-backend-pool.go:351:func (pool *Pool) closeConn(client *BackendConn, lock bool) error {
+./internal/nntp/nntp-backend-pool.go:372:func (pool *Pool) ClosePool() error {
+./internal/nntp/nntp-backend-pool.go:402:func (pool *Pool) Stats() PoolStats {
+./internal/nntp/nntp-backend-pool.go:427:func (pool *Pool) createConnection() (*BackendConn, error) {
+./internal/nntp/nntp-backend-pool.go:441:func (pool *Pool) isConnectionValid(client *BackendConn) bool {
+./internal/nntp/nntp-backend-pool.go:463:func (pool *Pool) Cleanup() {
+./internal/nntp/nntp-backend-pool.go:47:func (pool *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]OverviewLine, error) {
+./internal/nntp/nntp-backend-pool.go:504:func (pool *Pool) startCleanupWorker() {
+./internal/nntp/nntp-backend-pool.go:74:func (pool *Pool) XHdr(group string, header string, start, end int64) ([]*HeaderLine, error) {
+./internal/nntp/nntp-backend-pool.go:96:func (pool *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
 ./internal/nntp/nntp-cache-local.go:102:func (c *CacheMessageIDNumtoGroup) Del(messageID, group string) {
 ./internal/nntp/nntp-cache-local.go:115:func (c *CacheMessageIDNumtoGroup) Clear(messageID string) {
 ./internal/nntp/nntp-cache-local.go:122:func (c *CacheMessageIDNumtoGroup) CleanupCron() {
@@ -751,37 +766,58 @@
 ./internal/nntp/nntp-cache-local.go:43:func (lc *Local430) Cleanup() {
 ./internal/nntp/nntp-cache-local.go:75:func (c *CacheMessageIDNumtoGroup) Get(messageID, group string) (int64, bool) {
 ./internal/nntp/nntp-cache-local.go:88:func (c *CacheMessageIDNumtoGroup) Set(messageID, group string, articleNum int64) {
-./internal/nntp/nntp-client-commands.go:1016:func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
-./internal/nntp/nntp-client-commands.go:1035:func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) (chan *string, error) {
-./internal/nntp/nntp-client-commands.go:1119:func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *string) (int, error) {
-./internal/nntp/nntp-client-commands.go:1211:func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string) (uint, error) {
-./internal/nntp/nntp-client-commands.go:1290:func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (int, error) {
-./internal/nntp/nntp-client-commands.go:130:func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
-./internal/nntp/nntp-client-commands.go:1311:func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
-./internal/nntp/nntp-client-commands.go:1431:func (c *BackendConn) SwitchMode(mode int) error {
-./internal/nntp/nntp-client-commands.go:1443:func (c *BackendConn) SwitchToModeReader() error {
-./internal/nntp/nntp-client-commands.go:1475:func (c *BackendConn) SwitchToModeStream() error {
-./internal/nntp/nntp-client-commands.go:186:func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
-./internal/nntp/nntp-client-commands.go:234:func (c *BackendConn) ListGroups() ([]GroupInfo, error) {
-./internal/nntp/nntp-client-commands.go:281:func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
-./internal/nntp/nntp-client-commands.go:32:func (c *BackendConn) StatArticle(messageID string) (bool, error) {
-./internal/nntp/nntp-client-commands.go:362:func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, int, error) {
-./internal/nntp/nntp-client-commands.go:430:func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit bool) ([]OverviewLine, error) {
-./internal/nntp/nntp-client-commands.go:496:func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]*HeaderLine, error) {
-./internal/nntp/nntp-client-commands.go:558:func (c *BackendConn) WantShutdown(shutdownChan <-chan struct{}) bool {
-./internal/nntp/nntp-client-commands.go:572:func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
-./internal/nntp/nntp-client-commands.go:628:func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
-./internal/nntp/nntp-client-commands.go:66:func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
-./internal/nntp/nntp-client-commands.go:724:func (c *BackendConn) ListGroup(groupName string, start, end int64) ([]int64, error) {
-./internal/nntp/nntp-client-commands.go:781:func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
-./internal/nntp/nntp-client-commands.go:956:func (c *BackendConn) parseGroupLine(line string) (GroupInfo, error) {
-./internal/nntp/nntp-client-commands.go:989:func (c *BackendConn) parseOverviewLine(line string) (OverviewLine, error) {
-./internal/nntp/nntp-client.go:144:func (c *BackendConn) Connect() error {
-./internal/nntp/nntp-client.go:247:func (c *BackendConn) authenticate() error {
-./internal/nntp/nntp-client.go:289:func (c *BackendConn) CloseFromPoolOnly() error {
-./internal/nntp/nntp-client.go:319:func (c *BackendConn) xSetReadDeadline(t time.Time) error {
-./internal/nntp/nntp-client.go:329:func (c *BackendConn) xSetWriteDeadline(t time.Time) error {
-./internal/nntp/nntp-client.go:338:func (c *BackendConn) UpdateLastUsed() {
+./internal/nntp/nntp-client-commands.go:100:func (o *OffsetQueue) Done() {
+./internal/nntp/nntp-client-commands.go:1049:func (c *BackendConn) ListGroup(groupName string, start, end int64) ([]int64, error) {
+./internal/nntp/nntp-client-commands.go:107:func (o *OffsetQueue) Add(n int) {
+./internal/nntp/nntp-client-commands.go:1106:func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
+./internal/nntp/nntp-client-commands.go:1281:func (c *BackendConn) parseGroupLine(line string) (GroupInfo, error) {
+./internal/nntp/nntp-client-commands.go:1314:func (c *BackendConn) parseOverviewLine(line string) (OverviewLine, error) {
+./internal/nntp/nntp-client-commands.go:133:func (rr *ReadRequest) ClearReadRequest() {
+./internal/nntp/nntp-client-commands.go:1341:func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
+./internal/nntp/nntp-client-commands.go:1360:func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readResponsesChan chan *ReadRequest, job *CHTTJob) error {
+./internal/nntp/nntp-client-commands.go:139:func (rr *ReadRequest) ReturnReadRequest(channel chan struct{}) {
+./internal/nntp/nntp-client-commands.go:1404:func (c *BackendConn) CheckMultiple(messageIDs []*string, ttMode *TakeThisMode) ([]*string, error) {
+./internal/nntp/nntp-client-commands.go:1482:func (c *BackendConn) xxTakeThisArticle(article *models.Article, nntphostname *string, newsgroup string) (int, error) {
+./internal/nntp/nntp-client-commands.go:1570:func (c *BackendConn) GetBufSize(size int) int {
+./internal/nntp/nntp-client-commands.go:1579:func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string) (cmdID uint, txBytes int, err error) {
+./internal/nntp/nntp-client-commands.go:1665:func (c *BackendConn) ReadTakeThisResponseStreaming(newsgroup string, cr *CheckResponse) (int, error) {
+./internal/nntp/nntp-client-commands.go:1702:func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
+./internal/nntp/nntp-client-commands.go:175:func (job *CHTTJob) Response(ForceCleanUp bool, Err error) {
+./internal/nntp/nntp-client-commands.go:1819:func (c *BackendConn) SwitchMode(mode int) error {
+./internal/nntp/nntp-client-commands.go:1831:func (c *BackendConn) SwitchToModeReader() error {
+./internal/nntp/nntp-client-commands.go:1863:func (c *BackendConn) SwitchToModeStream() error {
+./internal/nntp/nntp-client-commands.go:215:func (ngp *NewsgroupTransferProgress) CalcSpeed() (speed int64) {
+./internal/nntp/nntp-client-commands.go:231:func (ngp *NewsgroupTransferProgress) AddTXBytes(n int) {
+./internal/nntp/nntp-client-commands.go:251:func (job *CHTTJob) Increment(counter int) {
+./internal/nntp/nntp-client-commands.go:276:func (job *CHTTJob) AppendWantedMessageID(msgID *string) {
+./internal/nntp/nntp-client-commands.go:283:func (job *CHTTJob) GetUpdateCounters(transferred, unwanted, rejected, checked, txErrors, connErrors *uint64) {
+./internal/nntp/nntp-client-commands.go:294:func (ttMode *TakeThisMode) UseCHECK() bool {
+./internal/nntp/nntp-client-commands.go:303:func (ttMode *TakeThisMode) SetForceCHECK() {
+./internal/nntp/nntp-client-commands.go:309:func (ttMode *TakeThisMode) IncrementSuccess() {
+./internal/nntp/nntp-client-commands.go:315:func (ttMode *TakeThisMode) IncrementTmp() {
+./internal/nntp/nntp-client-commands.go:321:func (ttMode *TakeThisMode) SetNoCHECK() {
+./internal/nntp/nntp-client-commands.go:327:func (ttMode *TakeThisMode) FlipMode(lowerLevel float64, upperLevel float64) bool {
+./internal/nntp/nntp-client-commands.go:352:func (c *BackendConn) ForceCloseConn() {
+./internal/nntp/nntp-client-commands.go:362:func (c *BackendConn) StatArticle(messageID string) (bool, error) {
+./internal/nntp/nntp-client-commands.go:396:func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
+./internal/nntp/nntp-client-commands.go:460:func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
+./internal/nntp/nntp-client-commands.go:516:func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
+./internal/nntp/nntp-client-commands.go:564:func (c *BackendConn) ListGroups() ([]GroupInfo, error) {
+./internal/nntp/nntp-client-commands.go:611:func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
+./internal/nntp/nntp-client-commands.go:67:func (o *OffsetQueue) Wait(n int) {
+./internal/nntp/nntp-client-commands.go:692:func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, int, error) {
+./internal/nntp/nntp-client-commands.go:756:func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit bool) ([]OverviewLine, error) {
+./internal/nntp/nntp-client-commands.go:822:func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]*HeaderLine, error) {
+./internal/nntp/nntp-client-commands.go:884:func (c *BackendConn) WantShutdown(shutdownChan <-chan struct{}) bool {
+./internal/nntp/nntp-client-commands.go:898:func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
+./internal/nntp/nntp-client-commands.go:954:func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
+./internal/nntp/nntp-client.go:146:func (c *BackendConn) Connect() error {
+./internal/nntp/nntp-client.go:238:func (c *BackendConn) authenticate() error {
+./internal/nntp/nntp-client.go:280:func (c *BackendConn) CloseFromPoolOnly() error {
+./internal/nntp/nntp-client.go:309:func (c *BackendConn) IsConnected() bool {
+./internal/nntp/nntp-client.go:323:func (c *BackendConn) xSetReadDeadline(t time.Time) error {
+./internal/nntp/nntp-client.go:333:func (c *BackendConn) xSetWriteDeadline(t time.Time) error {
+./internal/nntp/nntp-client.go:342:func (c *BackendConn) UpdateLastUsed() {
 ./internal/nntp/nntp-cmd-article.go:4:func (c *ClientConnection) handleArticle(args []string) error {
 ./internal/nntp/nntp-cmd-auth.go:9:func (c *ClientConnection) handleAuthInfo(args []string) error {
 ./internal/nntp/nntp-cmd-basic.go:15:func (c *ClientConnection) handleMode(args []string) error {
@@ -801,10 +837,10 @@
 ./internal/nntp/nntp-cmd-list.go:26:func (c *ClientConnection) handleListActive() error {
 ./internal/nntp/nntp-cmd-list.go:46:func (c *ClientConnection) handleListNewsgroups() error {
 ./internal/nntp/nntp-cmd-list.go:9:func (c *ClientConnection) handleList(args []string) error {
-./internal/nntp/nntp-cmd-posting.go:108:func (c *ClientConnection) handleTakeThis(args []string) error {
-./internal/nntp/nntp-cmd-posting.go:13:func (c *ClientConnection) handlePost() error {
-./internal/nntp/nntp-cmd-posting.go:173:func (c *ClientConnection) readArticleData() (*models.Article, error) {
-./internal/nntp/nntp-cmd-posting.go:49:func (c *ClientConnection) handleIHave(args []string) error {
+./internal/nntp/nntp-cmd-posting.go:109:func (c *ClientConnection) handleTakeThis(args []string) error {
+./internal/nntp/nntp-cmd-posting.go:14:func (c *ClientConnection) handlePost() error {
+./internal/nntp/nntp-cmd-posting.go:174:func (c *ClientConnection) readArticleData() (*models.Article, error) {
+./internal/nntp/nntp-cmd-posting.go:50:func (c *ClientConnection) handleIHave(args []string) error {
 ./internal/nntp/nntp-cmd-stat.go:4:func (c *ClientConnection) handleStat(args []string) error {
 ./internal/nntp/nntp-cmd-xhdr.go:10:func (c *ClientConnection) handleXHdr(args []string) error {
 ./internal/nntp/nntp-cmd-xover.go:9:func (c *ClientConnection) handleXOver(args []string) error {
@@ -889,17 +925,16 @@
 ./internal/processor/interface.go:14:func (proc *Processor) IsNewsGroupInSectionsDB(name *string) bool {
 ./internal/processor/interface.go:20:func (proc *Processor) ForceCloseGroupDBs(groupsDB *database.GroupDBs) error {
 ./internal/processor/interface.go:9:func (proc *Processor) MsgIdExists(group *string, messageID string) bool {
-./internal/processor/PostQueue.go:112:func (w *PostQueueWorker) processArticleForNewsgroup(article *models.Article, newsgroup string) error {
+./internal/processor/PostQueue.go:130:func (w *PostQueueWorker) processArticleForNewsgroup(article *models.Article, newsgroup string) error {
 ./internal/processor/PostQueue.go:18:func (processor *Processor) NewPostQueueWorker() *PostQueueWorker {
 ./internal/processor/PostQueue.go:26:func (w *PostQueueWorker) Start() {
 ./internal/processor/PostQueue.go:32:func (w *PostQueueWorker) Stop() {
 ./internal/processor/PostQueue.go:38:func (w *PostQueueWorker) processLoop() {
 ./internal/processor/PostQueue.go:64:func (w *PostQueueWorker) pre_processArticle(article *models.Article) error {
-./internal/processor/proc_DLArt.go:292:func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.Time, groupInfo *nntp.GroupInfo) (int64, error) {
-./internal/processor/proc_DLArt.go:378:func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, DLParChan chan struct{}, progressDB *database.ProgressDB, groupInfo *nntp.GroupInfo, shutdownChan <-chan struct{}) error {
-./internal/processor/proc_DLArt.go:44:func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
-./internal/processor/proc_DLArt.go:472:func (proc *Processor) WantShutdown(shutdownChan <-chan struct{}) bool {
-./internal/processor/proc_DLArt.go:67:func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64, shutdownChan <-chan struct{}) error {
+./internal/processor/proc_DLArt.go:293:func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.Time, groupInfo *nntp.GroupInfo) (int64, error) {
+./internal/processor/proc_DLArt.go:379:func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time.Time, DLParChan chan struct{}, progressDB *database.ProgressDB, groupInfo *nntp.GroupInfo, shutdownChan <-chan struct{}) error {
+./internal/processor/proc_DLArt.go:45:func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
+./internal/processor/proc_DLArt.go:68:func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64, shutdownChan <-chan struct{}) error {
 ./internal/processor/proc_DLXHDR.go:6:func (proc *Processor) GetXHDR(groupName string, header string, start, end int64) ([]*nntp.HeaderLine, error) {
 ./internal/processor/processor.go:112:func (proc *Processor) CheckNoMoreWorkInHistory() bool {
 ./internal/processor/processor.go:117:func (proc *Processor) AddProcessedArticleToHistory(msgIdItem *history.MessageIdItem, newsgroupPtr *string, articleNumber int64) {
@@ -907,11 +942,11 @@
 ./internal/processor/processor.go:180:func (proc *Processor) GetHistoryStats() history.HistoryStats {
 ./internal/processor/processor.go:188:func (proc *Processor) Close() error {
 ./internal/processor/processor.go:204:func (proc *Processor) WaitForBatchCompletion() {
-./internal/processor/processor.go:239:func (proc *Processor) Lookup(msgIdItem *history.MessageIdItem) (int, error) {
-./internal/processor/processor.go:245:func (proc *Processor) AddArticleToHistory(article *nntp.Article, newsgroup string) {
-./internal/processor/processor.go:250:func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, error) {
-./internal/processor/processor.go:270:func (proc *Processor) EnableBridges(config *BridgeConfig) {
-./internal/processor/processor.go:282:func (proc *Processor) DisableBridges() {
+./internal/processor/processor.go:238:func (proc *Processor) Lookup(msgIdItem *history.MessageIdItem) (int, error) {
+./internal/processor/processor.go:244:func (proc *Processor) AddArticleToHistory(article *nntp.Article, newsgroup string) {
+./internal/processor/processor.go:249:func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, error) {
+./internal/processor/processor.go:269:func (proc *Processor) EnableBridges(config *BridgeConfig) {
+./internal/processor/processor.go:281:func (proc *Processor) DisableBridges() {
 ./internal/processor/proc_ImportOV.go:14:func (proc *Processor) ImportOverview(groupName string) error {
 ./internal/processor/proc_MsgIDtmpCache.go:105://func (c *MsgTmpCache) Clear() {
 ./internal/processor/proc_MsgIDtmpCache.go:112://func (c *MsgTmpCache) UpdateThreadRootToTmpCache(group string, messageID string, rootArticle int64, isThreadRoot bool) bool {
@@ -933,46 +968,45 @@
 ./internal/processor/rslight.go:582:func (leg *LegacyImporter) insertNewsgroupIfNotExists(name, description string) error {
 ./internal/processor/rslight.go:86:func (leg *LegacyImporter) Close() error {
 ./internal/processor/rslight.go:94:func (leg *LegacyImporter) ImportSections() error {
-./internal/processor/threading.go:46:func (proc *Processor) setCaseDupes(msgIdItem *history.MessageIdItem, bulkmode bool) {
-./internal/processor/threading.go:56:func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup string, bulkmode bool) (int, error) {
-./internal/web/cronjobs.go:120:func (cm *CronJobManager) StopCronManager() {
-./internal/web/cronjobs.go:212:func (cm *CronJobManager) GetJobOutput(jobID int64) []string {
-./internal/web/cronjobs.go:232:func (cm *CronJobManager) StopJob(jobId int64) error {
-./internal/web/cronjobs.go:279:func (cm *CronJobManager) startJob(cronJob *models.CronJob) error {
-./internal/web/cronjobs.go:307:func (cm *CronJobManager) runJobScheduler(job *CronJob) {
-./internal/web/cronjobs.go:372:func (cm *CronJobManager) executeJob(job *CronJob, execWG *sync.WaitGroup) {
-./internal/web/cronjobs.go:467:func (job *CronJob) addLogLine(line string) {
-./internal/web/cronjobs.go:482:func (job *CronJob) setRunningStatus(running bool) {
-./internal/web/cronjobs.go:495:func (cm *CronJobManager) GetJobStatus(jobID int64) (*CronJob, bool) {
-./internal/web/cronjobs.go:503:func (cm *CronJobManager) GetJobPID(jobID int64) int {
-./internal/web/cronjobs.go:516:func (cm *CronJobManager) GetAllJobStatuses() map[int64]*CronJob {
-./internal/web/cronjobs.go:68:func (cm *CronJobManager) StartCronManager() {
+./internal/processor/threading.go:47:func (proc *Processor) setCaseDupes(msgIdItem *history.MessageIdItem, bulkmode bool) {
+./internal/processor/threading.go:57:func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup string, bulkmode bool) (int, error) {
+./internal/web/cronjobs.go:113:func (cm *CronJobManager) StopCronManager() {
+./internal/web/cronjobs.go:219:func (cm *CronJobManager) GetJobOutput(jobID int64) []string {
+./internal/web/cronjobs.go:238:func (cm *CronJobManager) StopJob(jobId int64) error {
+./internal/web/cronjobs.go:285:func (cm *CronJobManager) startJob(cronJob *models.CronJob) error {
+./internal/web/cronjobs.go:313:func (cm *CronJobManager) runJobScheduler(job *CronJob) {
+./internal/web/cronjobs.go:395:func (cm *CronJobManager) executeJob(job *CronJob, execWG *sync.WaitGroup) {
+./internal/web/cronjobs.go:492:func (job *CronJob) addLogLine(line string) {
+./internal/web/cronjobs.go:507:func (cm *CronJobManager) GetJobStatus(jobID int64) (*CronJob, bool) {
+./internal/web/cronjobs.go:515:func (cm *CronJobManager) GetJobPID(jobID int64) int {
+./internal/web/cronjobs.go:529:func (cm *CronJobManager) GetAllJobStatuses() map[int64]*CronJob {
+./internal/web/cronjobs.go:70:func (cm *CronJobManager) StartCronManager() {
 ./internal/web/web_admin_apitokens.go:124:func (s *WebServer) adminDeleteAPIToken(c *gin.Context) {
 ./internal/web/web_admin_apitokens.go:14:func (s *WebServer) countEnabledAPITokens(tokens []*database.APIToken) (count int64) {
 ./internal/web/web_admin_apitokens.go:159:func (s *WebServer) adminCleanupExpiredTokens(c *gin.Context) {
 ./internal/web/web_admin_apitokens.go:24:func (s *WebServer) adminCreateAPIToken(c *gin.Context) {
 ./internal/web/web_admin_apitokens.go:81:func (s *WebServer) adminToggleAPIToken(c *gin.Context) {
 ./internal/web/web_admin_cache.go:11:func (s *WebServer) adminClearCache(c *gin.Context) {
-./internal/web/web_admin_crons.go:13:func (s *WebServer) adminCreateCronJob(c *gin.Context) {
-./internal/web/web_admin_crons.go:143:func (s *WebServer) adminToggleCronJob(c *gin.Context) {
-./internal/web/web_admin_crons.go:171:func (s *WebServer) adminDeleteCronJob(c *gin.Context) {
-./internal/web/web_admin_crons.go:205:func (s *WebServer) adminViewCronJobLog(c *gin.Context) {
-./internal/web/web_admin_crons.go:253:func (s *WebServer) adminStopCronJob(c *gin.Context) {
-./internal/web/web_admin_crons.go:67:func (s *WebServer) adminUpdateCronJob(c *gin.Context) {
-./internal/web/web_admin.go:88:func (s *WebServer) getUptime() string {
-./internal/web/web_admin_newsgroups.go:123:func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:223:func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:251:func (s *WebServer) adminAssignNewsgroupSection(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:30:func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:334:func (s *WebServer) adminToggleNewsgroup(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:378:func (s *WebServer) adminBulkEnableNewsgroups(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:383:func (s *WebServer) adminBulkDisableNewsgroups(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:388:func (s *WebServer) adminBulkDeleteNewsgroups(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:421:func (s *WebServer) handleBulkNewsgroupAction(c *gin.Context, activeStatus bool, actionName string) {
-./internal/web/web_admin_newsgroups.go:454:func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:513:func (s *WebServer) adminFixThreadActivity(c *gin.Context) {
-./internal/web/web_admin_newsgroups.go:552:func (s *WebServer) fixGroupThreadActivity(groupName string) error {
-./internal/web/web_admin_newsgroups.go:679:func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
+./internal/web/web_admin_crons.go:145:func (s *WebServer) adminToggleCronJob(c *gin.Context) {
+./internal/web/web_admin_crons.go:15:func (s *WebServer) adminCreateCronJob(c *gin.Context) {
+./internal/web/web_admin_crons.go:173:func (s *WebServer) adminDeleteCronJob(c *gin.Context) {
+./internal/web/web_admin_crons.go:207:func (s *WebServer) adminViewCronJobLog(c *gin.Context) {
+./internal/web/web_admin_crons.go:299:func (s *WebServer) adminStopCronJob(c *gin.Context) {
+./internal/web/web_admin_crons.go:69:func (s *WebServer) adminUpdateCronJob(c *gin.Context) {
+./internal/web/web_admin.go:91:func (s *WebServer) getUptime() string {
+./internal/web/web_admin_newsgroups.go:126:func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:226:func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:254:func (s *WebServer) adminAssignNewsgroupSection(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:337:func (s *WebServer) adminToggleNewsgroup(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:33:func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:381:func (s *WebServer) adminBulkEnableNewsgroups(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:386:func (s *WebServer) adminBulkDisableNewsgroups(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:391:func (s *WebServer) adminBulkDeleteNewsgroups(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:424:func (s *WebServer) handleBulkNewsgroupAction(c *gin.Context, activeStatus bool, actionName string) {
+./internal/web/web_admin_newsgroups.go:457:func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:516:func (s *WebServer) adminFixThreadActivity(c *gin.Context) {
+./internal/web/web_admin_newsgroups.go:555:func (s *WebServer) fixGroupThreadActivity(groupName string) error {
+./internal/web/web_admin_newsgroups.go:682:func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
 ./internal/web/web_admin_nntp.go:130:func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
 ./internal/web/web_admin_nntp.go:210:func (s *WebServer) adminDeleteNNTPUser(c *gin.Context) {
 ./internal/web/web_admin_nntp.go:246:func (s *WebServer) adminToggleNNTPUser(c *gin.Context) {
@@ -984,7 +1018,7 @@
 ./internal/web/web_admin_ollama.go:196:func (s *WebServer) adminSyncOllamaModels(c *gin.Context) {
 ./internal/web/web_admin_ollama.go:33:func (s *WebServer) adminCreateAIModel(c *gin.Context) {
 ./internal/web/web_admin_ollama.go:94:func (s *WebServer) adminUpdateAIModel(c *gin.Context) {
-./internal/web/web_adminPage.go:18:func (s *WebServer) adminPage(c *gin.Context) {
+./internal/web/web_adminPage.go:19:func (s *WebServer) adminPage(c *gin.Context) {
 ./internal/web/web_admin_postqueue.go:12:func (s *WebServer) adminDeletePostQueueEntry(c *gin.Context) {
 ./internal/web/web_admin_provider.go:16:func (s *WebServer) adminCreateProvider(c *gin.Context) {
 ./internal/web/web_admin_provider.go:186:func (s *WebServer) adminUpdateProvider(c *gin.Context) {
@@ -995,17 +1029,18 @@
 ./internal/web/web_admin_sections.go:22:func (s *WebServer) CreateSectionHandler(c *gin.Context) {
 ./internal/web/web_admin_sections.go:349:func (s *WebServer) UnassignNewsgroupHandler(c *gin.Context) {
 ./internal/web/web_admin_sections.go:93:func (s *WebServer) UpdateSectionHandler(c *gin.Context) {
-./internal/web/web_admin_settings_unified.go:238:func (s *WebServer) validateHostname(hostname string) error {
-./internal/web/web_admin_settings_unified.go:246:func (s *WebServer) validateWebPostSize(sizeStr string) error {
-./internal/web/web_admin_settings_unified.go:263:func (s *WebServer) validateEmail(email string) error {
-./internal/web/web_admin_settings_unified.go:272:func (s *WebServer) processHostname(server *WebServer, hostname string) error {
-./internal/web/web_admin_settings_unified.go:276:func (s *WebServer) processRegistrationToggle(server *WebServer, value string) error {
+./internal/web/web_admin_settings_unified.go:266:func (s *WebServer) validateHostname(hostname string) error {
+./internal/web/web_admin_settings_unified.go:274:func (s *WebServer) validateWebPostSize(sizeStr string) error {
 ./internal/web/web_admin_settings_unified.go:27:func (s *WebServer) adminUpdateSettings(c *gin.Context) {
-./internal/web/web_admin_settings_unified.go:301:func (s *WebServer) processBlockBadBotsToggle(server *WebServer, value string) error {
-./internal/web/web_admin_settings_unified.go:333:func (s *WebServer) processBlockBadIPsToggle(server *WebServer, value string) error {
-./internal/web/web_admin_settings_unified.go:364:func (s *WebServer) validateCIDRList(value string) error {
-./internal/web/web_admin_settings_unified.go:391:func (s *WebServer) processBadBotsUpdate(server *WebServer, value string) error {
-./internal/web/web_admin_settings_unified.go:412:func (s *WebServer) processBadIPsUpdate(server *WebServer, value string) error {
+./internal/web/web_admin_settings_unified.go:291:func (s *WebServer) validateEmail(email string) error {
+./internal/web/web_admin_settings_unified.go:300:func (s *WebServer) processHostname(server *WebServer, hostname string) error {
+./internal/web/web_admin_settings_unified.go:304:func (s *WebServer) processRegistrationToggle(server *WebServer, value string) error {
+./internal/web/web_admin_settings_unified.go:329:func (s *WebServer) processBlockBadBotsToggle(server *WebServer, value string) error {
+./internal/web/web_admin_settings_unified.go:361:func (s *WebServer) processBlockBadIPsToggle(server *WebServer, value string) error {
+./internal/web/web_admin_settings_unified.go:393:func (s *WebServer) processAPIEnabledToggle(server *WebServer, value string) error {
+./internal/web/web_admin_settings_unified.go:418:func (s *WebServer) validateCIDRList(value string) error {
+./internal/web/web_admin_settings_unified.go:445:func (s *WebServer) processBadBotsUpdate(server *WebServer, value string) error {
+./internal/web/web_admin_settings_unified.go:466:func (s *WebServer) processBadIPsUpdate(server *WebServer, value string) error {
 ./internal/web/web_admin_sitenews.go:136:func (s *WebServer) adminDeleteSiteNews(c *gin.Context) {
 ./internal/web/web_admin_sitenews.go:166:func (s *WebServer) adminToggleSiteNewsVisibility(c *gin.Context) {
 ./internal/web/web_admin_sitenews.go:16:func (s *WebServer) adminCreateSiteNews(c *gin.Context) {
@@ -1025,19 +1060,20 @@
 ./internal/web/web_aichatPage.go:430:func (s *WebServer) aichatGetCounts(c *gin.Context) {
 ./internal/web/web_aichatPage.go:459:func (s *WebServer) renderChatError(c *gin.Context, title, message string) {
 ./internal/web/web_aichatPage.go:82:func (s *WebServer) aichatPage(c *gin.Context) {
-./internal/web/web_apiHandlers.go:158:func (s *WebServer) getArticle(c *gin.Context) {
-./internal/web/web_apiHandlers.go:188:func (s *WebServer) getArticleByMessageId(c *gin.Context) {
-./internal/web/web_apiHandlers.go:20:// - func (s *WebServer) listGroups(c *gin.Context) (line ~313)
-./internal/web/web_apiHandlers.go:212:func (s *WebServer) getGroupThreads(c *gin.Context) {
-./internal/web/web_apiHandlers.go:22:// - func (s *WebServer) getGroupOverview(c *gin.Context) (line ~354)
-./internal/web/web_apiHandlers.go:236:func (s *WebServer) getStats(c *gin.Context) {
-./internal/web/web_apiHandlers.go:24:// - func (s *WebServer) getArticle(c *gin.Context) (line ~403)
-./internal/web/web_apiHandlers.go:26:// - func (s *WebServer) getArticleByMessageId(c *gin.Context) (line ~428)
-./internal/web/web_apiHandlers.go:28:// - func (s *WebServer) getGroupThreads(c *gin.Context) (line ~447)
-./internal/web/web_apiHandlers.go:307:func (s *WebServer) getArticlePreview(c *gin.Context) {
-./internal/web/web_apiHandlers.go:30:// - func (s *WebServer) getStats(c *gin.Context) (line ~466)
-./internal/web/web_apiHandlers.go:35:func (s *WebServer) listGroups(c *gin.Context) {
-./internal/web/web_apiHandlers.go:70:func (s *WebServer) getGroupOverview(c *gin.Context) {
+./internal/web/web_apiHandlers.go:174:func (s *WebServer) getArticle(c *gin.Context) {
+./internal/web/web_apiHandlers.go:204:func (s *WebServer) getArticleByMessageId(c *gin.Context) {
+./internal/web/web_apiHandlers.go:20:func (s *WebServer) requireAPIEnabled() gin.HandlerFunc {
+./internal/web/web_apiHandlers.go:228:func (s *WebServer) getGroupThreads(c *gin.Context) {
+./internal/web/web_apiHandlers.go:252:func (s *WebServer) getStats(c *gin.Context) {
+./internal/web/web_apiHandlers.go:323:func (s *WebServer) getArticlePreview(c *gin.Context) {
+./internal/web/web_apiHandlers.go:36:// - func (s *WebServer) listGroups(c *gin.Context) (line ~313)
+./internal/web/web_apiHandlers.go:38:// - func (s *WebServer) getGroupOverview(c *gin.Context) (line ~354)
+./internal/web/web_apiHandlers.go:40:// - func (s *WebServer) getArticle(c *gin.Context) (line ~403)
+./internal/web/web_apiHandlers.go:42:// - func (s *WebServer) getArticleByMessageId(c *gin.Context) (line ~428)
+./internal/web/web_apiHandlers.go:44:// - func (s *WebServer) getGroupThreads(c *gin.Context) (line ~447)
+./internal/web/web_apiHandlers.go:46:// - func (s *WebServer) getStats(c *gin.Context) (line ~466)
+./internal/web/web_apiHandlers.go:51:func (s *WebServer) listGroups(c *gin.Context) {
+./internal/web/web_apiHandlers.go:86:func (s *WebServer) getGroupOverview(c *gin.Context) {
 ./internal/web/web_apitokens.go:120:func (s *WebServer) disableAPITokenHandler(c *gin.Context) {
 ./internal/web/web_apitokens.go:14:func (s *WebServer) APIAuthRequired() gin.HandlerFunc {
 ./internal/web/web_apitokens.go:153:func (s *WebServer) enableAPITokenHandler(c *gin.Context) {
@@ -1102,20 +1138,20 @@
 ./internal/web/web_sectionsPage.go:347:func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
 ./internal/web/web_sectionsPage.go:36:func (s *WebServer) sectionsPage(c *gin.Context) {
 ./internal/web/web_sectionsPage.go:65:func (s *WebServer) sectionPage(c *gin.Context) {
-./internal/web/webserver_core_routes.go:282:func (s *WebServer) setupRoutes() {
-./internal/web/webserver_core_routes.go:491:func (s *WebServer) Start() error {
-./internal/web/webserver_core_routes.go:507:func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
-./internal/web/webserver_core_routes.go:553:func (s *WebServer) ReverseProxyMiddleware() gin.HandlerFunc {
-./internal/web/webserver_core_routes.go:630:func (s *WebServer) ApacheLogFormat() gin.HandlerFunc {
-./internal/web/webserver_core_routes.go:647:func (s *WebServer) loadSectionsCache() {
-./internal/web/webserver_core_routes.go:664:func (s *WebServer) refreshSectionsCache() {
-./internal/web/webserver_core_routes.go:669:func (s *WebServer) isValidSection(sectionName string) bool {
-./internal/web/webserver_core_routes.go:677:func (s *WebServer) sectionValidationMiddleware() gin.HandlerFunc {
+./internal/web/webserver_core_routes.go:283:func (s *WebServer) setupRoutes() {
+./internal/web/webserver_core_routes.go:494:func (s *WebServer) Start() error {
+./internal/web/webserver_core_routes.go:510:func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
+./internal/web/webserver_core_routes.go:556:func (s *WebServer) ReverseProxyMiddleware() gin.HandlerFunc {
+./internal/web/webserver_core_routes.go:633:func (s *WebServer) ApacheLogFormat() gin.HandlerFunc {
+./internal/web/webserver_core_routes.go:650:func (s *WebServer) loadSectionsCache() {
+./internal/web/webserver_core_routes.go:667:func (s *WebServer) refreshSectionsCache() {
+./internal/web/webserver_core_routes.go:672:func (s *WebServer) isValidSection(sectionName string) bool {
+./internal/web/webserver_core_routes.go:680:func (s *WebServer) sectionValidationMiddleware() gin.HandlerFunc {
 ./internal/web/web_session_cleanup.go:9:func (s *WebServer) StartSessionCleanup() {
 ./internal/web/web_sitePostPage.go:165:func (s *WebServer) sitePostSubmit(c *gin.Context) {
 ./internal/web/web_sitePostPage.go:40:func (s *WebServer) sitePostPage(c *gin.Context) {
-./internal/web/web_statsPage.go:14://   - func (s *WebServer) statsPage(c *gin.Context) (line ~857)
-./internal/web/web_statsPage.go:18:func (s *WebServer) statsPage(c *gin.Context) {
+./internal/web/web_statsPage.go:15://   - func (s *WebServer) statsPage(c *gin.Context) (line ~857)
+./internal/web/web_statsPage.go:19:func (s *WebServer) statsPage(c *gin.Context) {
 ./internal/web/web_threadPage.go:17://   - func (s *WebServer) singleThreadPage(c *gin.Context) (line ~1394)
 ./internal/web/web_threadPage.go:25:func (s *WebServer) singleThreadPage(c *gin.Context) {
 ./internal/web/web_threadTreePage.go:16://   - func (s *WebServer) threadTreePage(c *gin.Context) (line ~1596)
