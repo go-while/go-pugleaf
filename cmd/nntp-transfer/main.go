@@ -612,32 +612,22 @@ func parseProxyConfig(address, proxyType, username, password string) (*ProxyConf
 }
 
 const query_getArticlesBatchWithDateFilter_selectPart = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles`
-const query_getArticlesBatchWithDateFilter_nodatefilter = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles ORDER BY date_sent ASC, article_num ASC LIMIT ?`
-const query_getArticlesBatchWithDateFilter_nodatefilter_keyset = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles WHERE (date_sent > ? OR (date_sent = ? AND article_num > ?)) ORDER BY date_sent ASC, article_num ASC LIMIT ?`
-const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ?"
-const query_getArticlesBatchWithDateFilter_orderby_keyset = " AND (date_sent > ? OR (date_sent = ? AND article_num > ?)) ORDER BY date_sent ASC LIMIT ?"
+const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ? OFFSET ?"
 
 // getArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
-func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup, lastDateSent *time.Time, lastArticleNum int64, startTime, endTime *time.Time) ([]*models.Article, error) {
+func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup, offset int64, startTime, endTime *time.Time) ([]*models.Article, error) {
 	// Get group database
 	groupDBs, err := db.GetGroupDBs(ng.Name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", ng.Name, err)
 	}
-	defer func() {
-		if ferr := db.ForceCloseGroupDBs(groupDBs); ferr != nil {
-			log.Printf("ForceCloseGroupDBs error for '%s': %v", ng.Name, ferr)
-		}
-	}()
+	defer groupDBs.Return(db)
+
 	var query string
 	var args []interface{}
 
-	// Use keyset pagination (much faster than OFFSET)
-	useKeyset := lastDateSent != nil
-
 	if startTime != nil || endTime != nil {
 		// Build query with date filtering
-
 		var whereConditions []string
 
 		if startTime != nil {
@@ -655,28 +645,12 @@ func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup,
 			whereClause = " WHERE " + strings.Join(whereConditions, " AND ")
 		}
 
-		if useKeyset {
-			// Keyset pagination with date filter
-			query = query_getArticlesBatchWithDateFilter_selectPart + whereClause + query_getArticlesBatchWithDateFilter_orderby_keyset
-			lastDateStr := lastDateSent.UTC().Format("2006-01-02 15:04:05")
-			args = append(args, lastDateStr, lastDateStr, lastArticleNum, dbBatchSize)
-		} else {
-			// First batch with date filter
-			query = query_getArticlesBatchWithDateFilter_selectPart + whereClause + query_getArticlesBatchWithDateFilter_orderby
-			args = append(args, dbBatchSize)
-		}
+		query = query_getArticlesBatchWithDateFilter_selectPart + whereClause + query_getArticlesBatchWithDateFilter_orderby
+		args = append(args, dbBatchSize, offset)
 	} else {
-		// No date filtering
-		if useKeyset {
-			// Keyset pagination without date filter
-			query = query_getArticlesBatchWithDateFilter_nodatefilter_keyset
-			lastDateStr := lastDateSent.UTC().Format("2006-01-02 15:04:05")
-			args = []interface{}{lastDateStr, lastDateStr, lastArticleNum, dbBatchSize}
-		} else {
-			// First batch without date filter
-			query = query_getArticlesBatchWithDateFilter_nodatefilter
-			args = []interface{}{dbBatchSize}
-		}
+		// No date filtering - simple OFFSET pagination
+		query = query_getArticlesBatchWithDateFilter_selectPart + query_getArticlesBatchWithDateFilter_orderby
+		args = []interface{}{dbBatchSize, offset}
 	}
 
 	rows, err := groupDBs.DB.Query(query, args...)
@@ -698,12 +672,15 @@ func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup,
 }
 
 // getArticleCountWithDateFilter gets the total count of articles with optional date filtering
-func getArticleCountWithDateFilter(groupDBs *database.GroupDBs, startTime, endTime *time.Time) (int64, error) {
+// When no date filter is specified, uses cached message_count from newsgroups table in main DB
+func getArticleCountWithDateFilter(db *database.Database, groupDBs *database.GroupDBs, startTime, endTime *time.Time) (int64, error) {
 	var query string
 	var args []interface{}
+	var count int64
+	start := time.Now()
 
 	if startTime != nil || endTime != nil {
-		// Build count query with date filtering
+		// Build count query with date filtering - must use live COUNT(*) query
 		var whereConditions []string
 
 		if startTime != nil {
@@ -722,22 +699,29 @@ func getArticleCountWithDateFilter(groupDBs *database.GroupDBs, startTime, endTi
 		}
 
 		query = "SELECT COUNT(*) FROM articles" + whereClause
+		err := groupDBs.DB.QueryRow(query, args...).Scan(&count)
+		if err != nil {
+			return 0, err
+		}
 	} else {
-		// No date filtering
-		query = "SELECT COUNT(*) FROM articles"
+		// No date filtering - use cached message_count from newsgroups table in main DB
+		// This is MUCH faster than COUNT(*) on large tables (O(1) vs O(N))
+		query = "SELECT COALESCE(message_count, 0) FROM newsgroups WHERE name = ?"
+		err := db.GetMainDB().QueryRow(query, groupDBs.Newsgroup).Scan(&count)
+		if err != nil {
+			// Fallback to direct COUNT if newsgroups table doesn't have the entry
+			log.Printf("WARNING: Could not get message_count from newsgroups table for '%s', falling back to COUNT(*): %v", groupDBs.Newsgroup, err)
+			query = "SELECT COUNT(*) FROM articles"
+			err = groupDBs.DB.QueryRow(query).Scan(&count)
+			if err != nil {
+				return 0, err
+			}
+		}
 	}
 
-	start := time.Now()
-	var count int64
-	err := groupDBs.DB.QueryRow(query, args...).Scan(&count)
 	elapsed := time.Since(start)
-
 	if elapsed > 5*time.Second {
 		log.Printf("WARNING: Slow COUNT query for group '%s' took %v (count=%d)", groupDBs.Newsgroup, elapsed, count)
-	}
-
-	if err != nil {
-		return 0, err
 	}
 
 	return count, nil
@@ -1195,7 +1179,6 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	if err != nil {
 		return fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", ng.Name, err)
 	}
-
 	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Got group DBs, querying article count...", ng.Name)
 	// Initialize newsgroup progress tracking
 	resultsMutex.Lock()
@@ -1210,17 +1193,17 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		}
 	}
 	resultsMutex.Unlock()
+
 	// Get total article count first with date filtering
-	totalArticles, err := getArticleCountWithDateFilter(groupDBsA, startTime, endTime)
+	totalArticles, err := getArticleCountWithDateFilter(db, groupDBsA, startTime, endTime)
 	if err != nil {
+		if ferr := db.ForceCloseGroupDBs(groupDBsA); ferr != nil {
+			log.Printf("ForceCloseGroupDBs error for '%s': %v", ng.Name, ferr)
+		}
 		return fmt.Errorf("failed to get article count for newsgroup '%s': %v", ng.Name, err)
 	}
-
+	groupDBsA.Return(db)
 	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Got article count (%d), closing group DBs...", ng.Name, totalArticles)
-
-	if ferr := db.ForceCloseGroupDBs(groupDBsA); ferr != nil {
-		log.Printf("ForceCloseGroupDBs error for '%s': %v", ng.Name, ferr)
-	}
 
 	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Closed group DBs, checking if articles exist...", ng.Name)
 
@@ -1384,10 +1367,9 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	}(&responseWG)
 	OffsetQueue := &nntp.OffsetQueue{}
 
-	// Use keyset pagination instead of OFFSET for much better performance
-	var lastDateSent *time.Time
-	var lastArticleNum int64
-	articlesProcessed := int64(0)
+	// Use simple OFFSET pagination
+	var articlesProcessed int64
+	var offset int64
 
 	// Get articles in database batches (much larger than network batches)
 	for articlesProcessed < totalArticles {
@@ -1400,8 +1382,8 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			return err
 		}
 		start := time.Now()
-		// Load batch from database using keyset pagination (no OFFSET!)
-		articles, err := getArticlesBatchWithDateFilter(db, ng, lastDateSent, lastArticleNum, startTime, endTime)
+		// Load batch from database using OFFSET pagination
+		articles, err := getArticlesBatchWithDateFilter(db, ng, offset, startTime, endTime)
 		if err != nil {
 			log.Printf("Error loading article batch (processed %d) for newsgroup %s: %v", articlesProcessed, ng.Name, err)
 			return fmt.Errorf("failed to load article batch (processed %d) for newsgroup '%s': %v", articlesProcessed, ng.Name, err)
@@ -1412,10 +1394,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			break
 		}
 
-		// Update keyset for next iteration (last article in current batch)
-		lastArticle := articles[len(articles)-1]
-		lastDateSent = &lastArticle.DateSent
-		lastArticleNum = lastArticle.DBArtNum
+		offset += int64(len(articles))
 		articlesProcessed += int64(len(articles))
 
 		if dryRun && debugCapture {

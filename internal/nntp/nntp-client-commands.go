@@ -167,14 +167,18 @@ func (d *ResponseDemuxer) readAndDispatch() {
 				cmdInfo = cmdInfoBacklog
 				outoforderBacklog[d.LastID+1] = nil
 				delete(outoforderBacklog, d.LastID+1)
+			} else {
+				log.Printf("ResponseDemuxer: no backlog with cmdID=%d found. try PopCommand", d.LastID+1)
+				cmdInfo = d.PopCommand()
 			}
 		} else {
 			cmdInfo = d.PopCommand()
 		}
 		if cmdInfo == nil {
 			if len(outoforderBacklog) > 0 {
-				log.Printf("ResponseDemuxer: got no cmdInfo but have outoforderBacklog: %d", len(outoforderBacklog))
+				log.Printf("ResponseDemuxer: got no cmdInfo but have outoforderBacklog: %d [%v]", len(outoforderBacklog), outoforderBacklog)
 				if _, exists := outoforderBacklog[d.LastID+1]; exists {
+					log.Printf("ResponseDemuxer: pre-processing out-of-order backlog cmdID=%d d.LastID=%d", d.LastID+1, d.LastID)
 					continue
 				}
 			}
@@ -183,7 +187,7 @@ func (d *ResponseDemuxer) readAndDispatch() {
 			continue
 		}
 		if d.LastID+1 != cmdInfo.CmdID {
-			log.Printf("ResponseDemuxer: WARNING - out of order cmdID received, expected %d got %d", d.LastID+1, cmdInfo.CmdID)
+			log.Printf("ResponseDemuxer: WARNING - out-of-order cmdID received, expected %d got %d", d.LastID+1, cmdInfo.CmdID)
 			outoforderBacklog[cmdInfo.CmdID] = cmdInfo
 			continue
 		} else {
