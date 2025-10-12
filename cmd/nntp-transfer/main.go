@@ -104,6 +104,29 @@ var MaxQueuedJobs int = 8
 var BatchCheck int
 var START_WITH_CHECK_MODE bool
 
+// statistics
+var TotalNewsgroups int64
+var NewsgroupsToProcess int64
+var ServerHostName string
+var StartDate string
+var EndDate string
+
+var GlobalSpeed uint64
+
+func CalcGlobalSpeed() {
+	for {
+		time.Sleep(time.Second * 3)
+		var speed uint64
+		resultsMutex.Lock()
+		for _, progress := range nntp.NewsgroupTransferProgressMap {
+			progress.CalcSpeed()
+			speed += progress.GetSpeed()
+		}
+		GlobalSpeed = speed
+		resultsMutex.Unlock()
+	}
+}
+
 func main() {
 	bootTime := time.Now()
 	common.VerboseHeaders = false
@@ -174,6 +197,9 @@ func main() {
 	flag.Parse()
 	common.IgnoreGoogleHeaders = *ignoreGoogleHeaders
 	START_WITH_CHECK_MODE = *startWithCheck
+	ServerHostName = *host
+	StartDate = *startDate
+	EndDate = *endDate
 
 	// Configure garbage collector
 	if *gcPercent != 100 {
@@ -414,6 +440,11 @@ func main() {
 		log.Printf("Starting NNTP connection worker pool...")
 		go BootConnWorkers(pool, redisCli)
 	}
+	resultsMutex.Lock()
+	TotalNewsgroups = int64(len(newsgroups))
+	NewsgroupsToProcess = TotalNewsgroups
+	resultsMutex.Unlock()
+	go CalcGlobalSpeed()
 	// Start transfer process
 	var wgP sync.WaitGroup
 	wgP.Add(2)
@@ -1103,6 +1134,9 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 			if err != nil {
 				log.Printf("Error transferring newsgroup %s: %v", ng.Name, err)
 			}
+			resultsMutex.Lock()
+			NewsgroupsToProcess--
+			resultsMutex.Unlock()
 		}(ng, &wg, redisCli)
 	}
 
@@ -1235,7 +1269,9 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			}
 			return ErrNotInDateRange
 		} else {
-			log.Printf("No articles found in newsgroup: %s", ng.Name)
+			if VERBOSE {
+				log.Printf("No articles found in newsgroup: %s", ng.Name)
+			}
 		}
 		return nil
 	}
@@ -1323,15 +1359,6 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 				// free memory - CRITICAL: Lock and unlock in same scope, not with defer!
 				resp.Job.Mux.Lock()
 				log.Printf("Newsgroup: '%s' | Cleaning up TT job #%d with %d articles (ForceCleanUp)", ng.Name, resp.Job.JobID, len(resp.Job.Articles))
-				/*
-					// Decrement queue length for this worker (job processing complete)
-					workerID := assignWorkerToNewsgroup(*ttMode.Newsgroup)
-					WorkerQueueLengthMux.Lock()
-					if workerID < len(WorkerQueueLength) && WorkerQueueLength[workerID] > 0 {
-						WorkerQueueLength[workerID]--
-					}
-					WorkerQueueLengthMux.Unlock()
-				*/
 				// Clean up Articles and their internal fields
 				for i := range resp.Job.Articles {
 					if resp.Job.Articles[i] != nil {
@@ -1772,14 +1799,14 @@ func assignWorkerToNewsgroup(newsgroup string) int {
 
 	minLoad := WorkerQueueLength[0]
 	workerID := 0
-	for i := 1; i < len(WorkerQueueLength); i++ {
-		if WorkerQueueLength[i] < minLoad {
-			minLoad = WorkerQueueLength[i]
-			workerID = i
-			WorkerQueueLength[i]++
+	for wid := 1; wid < len(WorkerQueueLength); wid++ {
+		if WorkerQueueLength[wid] < minLoad {
+			minLoad = WorkerQueueLength[wid]
+			workerID = wid
 			break
 		}
 	}
+	WorkerQueueLength[workerID]++
 	WorkerQueueLengthMux.Unlock()
 
 	// Assign newsgroup to this worker
@@ -2715,7 +2742,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 			rs.Mux.Unlock()
 			if queueFull {
 				start := time.Now()
-				wait := start
+				lastPrint := start
 			waitForReply:
 				for {
 					select {
@@ -2729,9 +2756,12 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 							break waitForReply
 						}
 						// log every 5s
-						if time.Since(wait) > time.Second {
+						if time.Since(lastPrint) > time.Second {
+							if common.WantShutdown() {
+								return
+							}
 							log.Printf("Newsgroup: '%s' | CHTTworker (%d): pre append job #%d waiting since %v rs.jobs=%d takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, time.Since(start), len(rs.jobs), len(TakeThisQueues[workerID]))
-							wait = time.Now()
+							lastPrint = time.Now()
 						}
 					}
 				}
@@ -2825,10 +2855,10 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>NNTP Transfer Results</title>
+	<title>{{.NewsgroupsToProcess}}:{{.ServerHostName}} - go-pugleaf nntp-transfer</title>
 	<style>
 		body {
-			font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+			font-family: 'Consolas', 'Monaco', monospace;
 			max-width: 1400px;
 			margin: 0 auto;
 			padding: 20px;
@@ -2838,6 +2868,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			color: #333;
 			border-bottom: 3px solid #4CAF50;
 			padding-bottom: 10px;
+		}
+		.text-light {
+			color: #fdfdfdfd;
 		}
 		.stats {
 			background: white;
@@ -2920,15 +2953,37 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			color: #856404;
 		}
 		.progress-bar {
-			height: 20px;
+			height: 24px;
 			background: #e0e0e0;
 			border-radius: 10px;
 			overflow: hidden;
+			position: relative;
+		}
+		.progress-bar-main {
+			height: 32px;
+			background: #e0e0e0;
+			border-radius: 10px;
+			overflow: hidden;
+			position: relative;
 		}
 		.progress-fill {
 			height: 100%;
 			background: linear-gradient(90deg, #4CAF50, #45a049);
 			transition: width 0.3s;
+		}
+		.progress-text {
+			position: absolute;
+			top: 0;
+			left: 0;
+			right: 0;
+			bottom: 0;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			font-size: 11px;
+			font-weight: 600;
+			color: #333;
+			text-shadow: 0 0 3px rgba(255,255,255,0.8);
 		}
 	</style>
 	<script>
@@ -2940,83 +2995,98 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	</script>
 </head>
 <body onload="autoRefresh()">
-	<h1>🚀 NNTP Transfer Results</h1>
-
+	<h1>
+		🚀 NNTP Transfer to {{.ServerHostName}} | <button class="refresh-btn" onclick="location.reload()">🔄 Refresh Now</button>
+	</h1>
+	<h2>
+		Start Date: <em>{{.StartDate}}</em> to
+		End Date: <em>{{.EndDate}}</em>
+	</h2>
 	<div class="stats">
 		{{if eq .Started 0}}
-			<strong>Status:</strong> Waiting for transfers to start...<br>
+			<strong>Waiting for transfers to start...</strong>
 		{{else}}
-			<strong>Transfer Progress:</strong> {{.Finished}}/{{.Started}} newsgroups completed
-			{{if eq .Finished .Started}}
+			{{if eq 0 .NewsgroupsToProcess}}
 				✅ All complete!
 			{{else}}
-				({{subtract .Started .Finished}} in progress)
+				<div class="progress-bar-main" style="max-width: 640px; margin: 10px 0;">
+					<div class="progress-fill" style="width: {{if gt .TotalNewsgroups 0}}{{multiply (divide (subtract .TotalNewsgroups .NewsgroupsToProcess) .TotalNewsgroups) 100}}{{else}}0{{end}}%"></div>
+					<div class="progress-text">
+						<strong><em class="text-light" style="font-size: 24px; color: rgba(220, 15, 238, 1)">{{subtract .TotalNewsgroups .NewsgroupsToProcess}} / {{.TotalNewsgroups}} {{if gt .TotalNewsgroups 0}} @ {{multiply (divide (subtract .TotalNewsgroups .NewsgroupsToProcess) .TotalNewsgroups) 100}}{{else}}0{{end}}%</em></strong>
+					</div>
+				</div>
 			{{end}}
-			<br>
 		{{end}}
-		<button class="refresh-btn" onclick="location.reload()">🔄 Refresh Now</button>
-		<span style="margin-left: 10px; color: #666; font-size: 12px;">(Auto-refresh every 3 seconds)</span>
 	</div>
 
+	{{if .Results}}
+		<h2 style="margin-top: 30px;">View <a href="/results">/results</a></h2>
+	{{else}}
+		<h2 style="margin-top: 30px;">No transfer results yet. Waiting for transfers to complete...</h2>
+	{{end}}
+
+	<div class="timestamp">Last updated: {{.Timestamp}}</div>
+
 	{{if .Progress}}
-	<h2 style="margin-top: 30px; color: #333;">⏳ In Progress</h2>
+	<!--<h2 style="margin-top: 30px; color: #333;">{{subtract .Started .Finished}} Newsgroups In Progress</h2>-->
 	<table class="progress-table">
 		<thead>
 			<tr>
-				<th>Newsgroup</th>
-				<th>Progress</th>
-				<th>Speed</th>
-				<th>CH/s</th>
-				<th>TT/s</th>
-				<th>Active</th>
-				<th>Started</th>
-				<th>Duration</th>
+				<th style="width:55%">NG Workers: ( {{subtract .Started .Finished}} )</th>
+				<th style="width:15% text-align: center;">Progress</th>
+				<th style="width:15% text-align: center;">Speed{{if gtUint64 .GlobalSpeed 0}}<br><strong>{{.GlobalSpeed}} KByte/s</strong>{{end}}</th>
+				<th style="width:15% text-align: center;">CH/s<br>TT/s</th>
 			</tr>
 		</thead>
 		<tbody>
 			{{range .Progress}}
 			<tr>
-				<td><strong>{{.Name}}</strong></td>
-				<td>
+				<td style="width:55%">
+					<strong>{{.Name}}</strong>
+					<br>
+					<small>
+					Started {{.Duration}} ago at {{.Started}} | idle: {{.TimeSince}}
+					</small>
+				</td>
+				<td style="width:15%; text-align: center;">
 					{{if gt .TotalArticles 0}}
-						<div style="display: flex; align-items: center; gap: 10px;">
-							<div class="progress-bar" style="flex: 1;">
-								<div class="progress-fill" style="width: {{if gt .OffsetStart 0}}{{multiply (divide .OffsetStart .TotalArticles) 100}}{{else}}0{{end}}%"></div>
+						<div class="progress-bar" style="margin: 0 auto; max-width: 200px;">
+							<div class="progress-fill" style="width: {{if gt .OffsetStart 0}}{{multiply (divide .OffsetStart .TotalArticles) 100}}{{else}}0{{end}}%">
+								<small><em class="text-light">
+								{{if gt .OffsetStart 0}}{{multiply (divide .OffsetStart .TotalArticles) 100}}{{else}}0{{end}}%
+								</em></small>
 							</div>
-							<span style="font-size: 11px; color: #666;">{{.OffsetStart}}/{{.TotalArticles}}</span>
 						</div>
 					{{else}}
 						<em>Initializing...</em>
 					{{end}}
 				</td>
-				<td style="font-size: 12px;">{{.SpeedKB}} KByte/s</td>
-				<td style="font-size: 12px;">{{.LastArtPerfC}}/s</td>
-				<td style="font-size: 12px;">{{.LastArtPerfT}}/s</td>
-				<td style="font-size: 12px;">{{.TimeSince}} ago</td>
-				<td style="font-size: 12px;">{{.Started}}</td>
-				<td style="font-size: 12px;">{{.Duration}}</td>
-
+				<td style="width:15%; text-align: center;">
+					{{if gt .TotalArticles 0}}
+						<small>{{.OffsetStart}}/{{.TotalArticles}}</small>
+					{{end}}
+					<br>
+					{{if gtUint64 .SpeedKB 0}}
+						<small>{{.SpeedKB}} KByte/s</small>
+					{{else}}
+						<em>-</em>
+					{{end}}
+				</td>
+				<td style="width:15%" style="font-size: 12px;">CH: {{.LastArtPerfC}}/s<br>TT: {{.LastArtPerfT}}/s</td>
 			</tr>
 			{{end}}
 		</tbody>
 	</table>
 	{{end}}
 
-	{{if .Results}}
-		<h2 style="margin-top: 30px; color: #333;">Completed Results</h2>
-		<div class="empty">View results at <a href="/results" style="color: #0066cc;">/results</a></div>
-	{{else}}
-		<div class="empty">No transfer results yet. Waiting for transfers to complete...</div>
-	{{end}}
-
-	<div class="timestamp">Last updated: {{.Timestamp}}</div>
 </body>
 </html>`
 
 	tmpl, err := template.New("index").Funcs(template.FuncMap{
-		"subtract": func(a, b int) int { return a - b },
-		"eq":       func(a, b int) bool { return a == b },
+		"subtract": func(a, b int64) int64 { return a - b },
+		"eq":       func(a, b int64) bool { return a == b },
 		"gt":       func(a, b int64) bool { return a > b },
+		"gtUint64": func(a, b uint64) bool { return a > b },
 		"divide": func(a, b int64) float64 {
 			if b == 0 {
 				return 0
@@ -3047,8 +3117,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		LastArtPerfT  uint64
 	}
 
-	started := len(nntp.NewsgroupTransferProgressMap)
-	finished := 0
+	started := int64(len(nntp.NewsgroupTransferProgressMap))
+	var finished int64
 	var progressList []ProgressInfo
 
 	for name, progress := range nntp.NewsgroupTransferProgressMap {
@@ -3086,17 +3156,29 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	})
 
 	data := struct {
-		Results   []string
-		Started   int
-		Finished  int
-		Progress  []ProgressInfo
-		Timestamp string
+		TotalNewsgroups     int64
+		NewsgroupsToProcess int64
+		Results             []string
+		Started             int64
+		Finished            int64
+		Progress            []ProgressInfo
+		Timestamp           string
+		StartDate           string
+		EndDate             string
+		ServerHostName      string
+		GlobalSpeed         uint64
 	}{
-		Results:   results,
-		Started:   started,
-		Finished:  finished,
-		Progress:  progressList,
-		Timestamp: time.Now().Format("2006-01-02 15:04:05"),
+		TotalNewsgroups:     TotalNewsgroups,
+		NewsgroupsToProcess: NewsgroupsToProcess,
+		Results:             results,
+		Started:             started,
+		Finished:            finished,
+		Progress:            progressList,
+		Timestamp:           time.Now().Format("2006-01-02 15:04:05"),
+		StartDate:           StartDate,
+		EndDate:             EndDate,
+		ServerHostName:      ServerHostName,
+		GlobalSpeed:         GlobalSpeed,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

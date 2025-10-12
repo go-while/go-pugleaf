@@ -438,6 +438,12 @@ type NewsgroupTransferProgress struct {
 	LastArtPerfT  uint64 // takethis articles per second
 }
 
+func (ngp *NewsgroupTransferProgress) GetSpeed() uint64 {
+	ngp.Mux.RLock()
+	defer ngp.Mux.RUnlock()
+	return ngp.LastSpeedKB
+}
+
 func (ngp *NewsgroupTransferProgress) CalcSpeed() {
 	ngp.Mux.Lock()
 	if time.Since(ngp.LastCronTX) >= time.Second*3 {
