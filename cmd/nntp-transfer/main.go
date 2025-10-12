@@ -1663,16 +1663,18 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	conn.Lock()
 	var ttxBytes uint64
 	start := time.Now()
+	astart := start
+	astart2 := start
 	for _, article := range articles {
 		if article == nil {
 			continue // Skip cached articles
 		}
-		astart := time.Now()
+		astart = time.Now()
 		// Send TAKETHIS command with article content (non-blocking)
 		// This also queues the ReadRequest to readTAKETHISResponsesChan BEFORE returning
-		log.Printf("Newsgroup: '%s' | ++Pre-Send TAKETHIS '%s'", newsgroup, article.MessageID)
+		//log.Printf("Newsgroup: '%s' | ++Pre-Send TAKETHIS '%s'", newsgroup, article.MessageID)
 		cmdID, txBytes, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname, newsgroup, demuxer, readTAKETHISResponsesChan, job)
-		astart2 := time.Now()
+		astart2 = time.Now()
 		job.Mux.Lock()
 		job.TTxBytes += uint64(txBytes)
 		job.TmpTxBytes += uint64(txBytes)
@@ -1689,7 +1691,9 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			return redis_cached, fmt.Errorf("failed to send TAKETHIS for %s: %v", article.MessageID, err)
 		}
 		sentCount++
-		log.Printf("Newsgroup: '%s' | DONE TAKETHIS '%s' CmdID=%d (%d/%d sent) in %v awaiting responses astart2='%v'", newsgroup, article.MessageID, cmdID, sentCount, len(articles), time.Since(astart), time.Since(astart2))
+		if VERBOSE {
+			log.Printf("Newsgroup: '%s' | DONE TAKETHIS '%s' CmdID=%d (%d/%d sent) in %v awaiting responses astart2='%v'", newsgroup, article.MessageID, cmdID, sentCount, len(articles), time.Since(astart), time.Since(astart2))
+		}
 	}
 	conn.Unlock()
 	log.Printf("Newsgroup: '%s' | DONE TAKETHIS BATCH sent: %d commands. ttxBytes: %d in %v", newsgroup, sentCount, ttxBytes, time.Since(start))
