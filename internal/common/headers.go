@@ -12,7 +12,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-var VerboseHeaders bool = false
+var VERBOSE_HEADERS bool = false
 var IgnoreGoogleHeaders bool = false
 var UseStrictGroupValidation bool = false
 var ErrNoNewsgroups = fmt.Errorf("ErrNoNewsgroups")
@@ -39,6 +39,18 @@ var IgnoreHeadersMap = map[string]bool{
 	"date":       true,
 	"path":       true,
 	"xref":       true,
+}
+
+// refers to
+// https://github.com/InterNetNews/inn/blob/ba39e0ace92aea2f9e59117f1757deaf28416d91/innd/innd.c#L79
+// const ARTHEADER ARTheaders[] ---> HTreq
+var RequiredHeadersMap = map[string]bool{
+	"date":       true,
+	"from":       true,
+	"message-id": true,
+	"newsgroups": true,
+	"path":       true,
+	"subject":    true,
 }
 
 var formats = []string{
@@ -156,7 +168,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			// DateString is not RFC compliant, try DateSent first
 			if !article.DateSent.IsZero() && article.DateSent.Year() >= 1979 {
 				dateHeader = article.DateSent.UTC().Format(time.RFC1123Z)
-				if VerboseHeaders {
+				if VERBOSE_HEADERS {
 					log.Printf("Using DateSent '%s' instead of DateString '%s' for article %s", dateHeader, article.DateString, article.MessageID)
 				}
 			} else {
@@ -166,7 +178,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 					parsedTime := parseDateReceivedHeader(dateReceivedStr)
 					if !parsedTime.IsZero() && parsedTime.Year() >= 1979 {
 						dateHeader = parsedTime.UTC().Format(time.RFC1123Z)
-						//if VerboseHeaders {
+						//if VERBOSE_HEADERS {
 						log.Printf("Using Date-Received '%s' (parsed as '%s') instead of invalid DateString '%s' and invalid DateSent (year %d) for article %s", dateReceivedStr, dateHeader, article.DateString, article.DateSent.Year(), article.MessageID)
 						//}
 						article.DateSent = parsedTime   // Update article DateSent with corrected time
@@ -193,7 +205,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				parsedTime := parseDateReceivedHeader(dateReceivedStr)
 				if !parsedTime.IsZero() && parsedTime.Year() >= 1979 {
 					dateHeader = parsedTime.UTC().Format(time.RFC1123Z)
-					if VerboseHeaders {
+					if VERBOSE_HEADERS {
 						log.Printf("Using Date-Received '%s' (parsed as '%s') when DateString is empty and DateSent is invalid (year %d) for article %s", dateReceivedStr, dateHeader, article.DateSent.Year(), article.MessageID)
 					}
 					article.DateSent = parsedTime   // Update article DateSent with corrected time
@@ -266,7 +278,7 @@ checkHeader:
 			}
 			// check if first char is lowercase
 			if unicode.IsLower(rune(headerLine[0])) {
-				if VerboseHeaders {
+				if VERBOSE_HEADERS {
 					log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (rewrite)", headerLine, i, article.MessageID)
 				}
 				headerLine = strings.ToUpper(string(headerLine[0])) + headerLine[1:]
@@ -309,8 +321,10 @@ checkHeader:
 			}
 			if !strings.HasPrefix(header, "X-") {
 				if headersMap[strings.ToLower(header)] {
-					log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (rewrite)", headerLine, i, article.MessageID)
-					headerLine = "X-RW-" + headerLine
+					if RequiredHeadersMap[strings.ToLower(header)] {
+						log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (rewrite)", headerLine, i, article.MessageID)
+						headerLine = "X-RW-" + headerLine
+					}
 				}
 				headersMap[strings.ToLower(header)] = true
 			}
@@ -379,7 +393,9 @@ checkHeader:
 					trimmedNG = strings.TrimSpace(trimmedNG)
 					if trimmedNG == "" || strings.Contains(trimmedNG, " ") || !IsValidGroupName(trimmedNG) {
 						if trimmedNG == "" {
-							log.Printf("Invalid newsgroup name: '%s' empty after cleanup in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
+							if VERBOSE_HEADERS {
+								log.Printf("Invalid newsgroup name: '%s' empty after cleanup in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
+							}
 						} else {
 							log.Printf("Invalid newsgroup name: '%s' in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
 						}
@@ -392,8 +408,9 @@ checkHeader:
 					validNewsgroups = append(validNewsgroups, trimmedNG)
 				} // end for checkGroups
 
-				if len(validNewsgroups) == 0 {
-					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' (return err)", headerLine, i, article.MessageID)
+				if len(validNewsgroups) == 0 && newsgroup == "" {
+					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s'", headerLine, i, article.MessageID)
+					return nil, ErrNoNewsgroups
 				}
 
 				if badGroups > 0 {
@@ -407,7 +424,7 @@ checkHeader:
 
 		headers = append(headers, headerLine)
 	} // end for moreHeaders
-	if VerboseHeaders && ignoredLines > 0 {
+	if VERBOSE_HEADERS && ignoredLines > 0 {
 		log.Printf("Reconstructed %d header lines, ignored %d: msgId='%s'", len(headers), ignoredLines, article.MessageID)
 	}
 	fallbackNewsgroup := false

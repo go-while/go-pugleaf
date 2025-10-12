@@ -368,7 +368,7 @@ type TakeThisTracker struct {
 type CHTTJob struct {
 	JobID        uint64 // Unique job ID for tracing
 	Newsgroup    *string
-	Mux          sync.Mutex
+	Mux          sync.RWMutex
 	TTMode       *TakeThisMode
 	ResponseChan chan *TTResponse
 	responseSent bool // Track if response already sent (prevents double send)
@@ -392,6 +392,15 @@ type CHTTJob struct {
 	BatchEnd     int64
 	OffsetQ      *OffsetQueue
 	NGTProgress  *NewsgroupTransferProgress
+}
+
+func (job *CHTTJob) ReturnResponseChan() chan *TTResponse {
+	job.Mux.RLock()
+	defer job.Mux.RUnlock()
+	if job.ResponseChan != nil {
+		return job.ResponseChan
+	}
+	return nil
 }
 
 func (job *CHTTJob) Response(ForceCleanUp bool, Err error) {

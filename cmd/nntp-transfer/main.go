@@ -128,9 +128,10 @@ func CalcGlobalSpeed() {
 }
 
 func main() {
-	bootTime := time.Now()
-	common.VerboseHeaders = false
 	config.AppVersion = appVersion
+
+	bootTime := time.Now()
+	common.VERBOSE_HEADERS = false
 	database.NO_CACHE_BOOT = true // prevents booting caches and several other not needed functions
 	log.Printf("Starting go-pugleaf NNTP Transfer Tool (version %s)", config.AppVersion)
 
@@ -1296,13 +1297,9 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	}
 
 	if !dryRun && !debugCapture {
-		if startTime != nil || endTime != nil {
-			log.Printf("Found %d articles in newsgroup %s (within specified date range) - processing in batches", totalArticles, ng.Name)
-		} else {
-			log.Printf("Found %d articles in newsgroup %s - processing in batches", totalArticles, ng.Name)
-		}
+		log.Printf("+ Found %d articles in newsgroup %s", totalArticles, ng.Name)
 	}
-	//time.Sleep(3 * time.Second) // debug sleep
+
 	remainingArticles := totalArticles
 	ttMode := &nntp.TakeThisMode{
 		Newsgroup: &ng.Name,
@@ -1663,7 +1660,7 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 
 	WorkersCheckChannel <- batchedJob // checkQueue <- batchedJob
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queued Job #%d", *ttMode.Newsgroup, workerID, batchedJob.JobID)
-	return batchedJob.ResponseChan, nil
+	return batchedJob.ReturnResponseChan(), nil
 } // end func processBatch
 
 // sendArticlesBatchViaTakeThis sends multiple articles via TAKETHIS in streaming mode
@@ -1982,12 +1979,16 @@ forever:
 									log.Printf("CHTTWorker (%d) did requeue job %d with %d articles for newsgroup '%s'", workerID, rqj.JobID, len(rqj.Articles), *rqj.Newsgroup)
 									// unlink pointers
 									job.Mux.Lock()
+									select {
+									case job.ResponseChan <- nil:
+										close(job.ResponseChan)
+									default:
+									}
 									if job.TTMode != nil {
 										job.TTMode.Newsgroup = nil
 									}
 									job.Newsgroup = nil
 									job.TTMode = nil
-									job.ResponseChan = nil
 									job.Articles = nil
 									job.ArticleMap = nil
 									job.MessageIDs = nil
