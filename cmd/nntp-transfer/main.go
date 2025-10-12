@@ -102,7 +102,7 @@ var redisCtx = context.Background()
 var REDIS_TTL time.Duration = 3600 * time.Second // default 1h
 var MaxQueuedJobs int = 8
 var BatchCheck int
-var START_WITH_CHECK_MODE bool
+var CHECK_FIRST bool
 
 // statistics
 var TotalNewsgroups int64
@@ -110,7 +110,6 @@ var NewsgroupsToProcess int64
 var ServerHostName string
 var StartDate string
 var EndDate string
-
 var GlobalSpeed uint64
 
 func CalcGlobalSpeed() {
@@ -182,7 +181,7 @@ func main() {
 
 		// History configuration
 		useShortHashLen = flag.Int("useshorthashlen", 7, "Short hash length for history storage (2-7, default: 7)")
-		startWithCheck  = flag.Bool("start-with-check", false, "Enable 'start with check' mode")
+		checkFirst      = flag.Bool("check-first", true, "Use CHECK command before TAKETHIS to avoid duplicates (recommended)")
 
 		// Newsgroup filtering options
 		fileInclude      = flag.String("file-include", "", "File containing newsgroup patterns to include (one per line)")
@@ -197,7 +196,7 @@ func main() {
 	)
 	flag.Parse()
 	common.IgnoreGoogleHeaders = *ignoreGoogleHeaders
-	START_WITH_CHECK_MODE = *startWithCheck
+	CHECK_FIRST = *checkFirst
 	ServerHostName = *host
 	StartDate = *startDate
 	EndDate = *endDate
@@ -1303,7 +1302,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	remainingArticles := totalArticles
 	ttMode := &nntp.TakeThisMode{
 		Newsgroup: &ng.Name,
-		CheckMode: START_WITH_CHECK_MODE,
+		CheckMode: CHECK_FIRST,
 	}
 	ttResponses := make(chan *nntp.TTSetup, totalArticles/int64(batchCheck)+2)
 	start := time.Now()
@@ -1328,12 +1327,12 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			num++
 			//log.Printf("Newsgroup: '%s' | Starting response channel processor num %d (goroutines: %d)", ng.Name, num, runtime.NumGoroutine())
 			responseWG.Add(1)
-			go func(rc chan *nntp.TTResponse, num uint64, responseWG *sync.WaitGroup) {
+			go func(responseChan chan *nntp.TTResponse, num uint64, responseWG *sync.WaitGroup) {
 				defer responseWG.Done()
 				//defer log.Printf("Newsgroup: '%s' | Quit response channel processor num %d (goroutines: %d)", ng.Name, num, runtime.NumGoroutine())
 
 				// Read exactly ONE response from this channel (channel is buffered with cap 1)
-				resp := <-rc // job.Response(ForceCleanUp, err) arrives here
+				resp := <-responseChan // job.Response(ForceCleanUp, err) arrives here
 
 				if resp == nil {
 					log.Printf("Newsgroup: '%s' | Warning: nil TT response received!?", ng.Name)
@@ -1355,7 +1354,9 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 				}
 				// free memory - CRITICAL: Lock and unlock in same scope, not with defer!
 				resp.Job.Mux.Lock()
-				log.Printf("Newsgroup: '%s' | Cleaning up TT job #%d with %d articles (ForceCleanUp)", ng.Name, resp.Job.JobID, len(resp.Job.Articles))
+				if VERBOSE {
+					log.Printf("Newsgroup: '%s' | Cleaning up TT job #%d with %d articles (ForceCleanUp)", ng.Name, resp.Job.JobID, len(resp.Job.Articles))
+				}
 				// Clean up Articles and their internal fields
 				for i := range resp.Job.Articles {
 					if resp.Job.Articles[i] != nil {
@@ -1960,7 +1961,7 @@ forever:
 									// copy articles pointer
 									job.Mux.Lock()
 									if len(job.Articles) == 0 {
-										log.Printf("ERROR in CHTTWorker (%d) job %d has no articles, skipping requeue", workerID, job.JobID)
+										log.Printf("ERROR in CHTTWorker (%d) job #%d has no articles, skipping requeue", workerID, job.JobID)
 										job.Mux.Unlock()
 										continue
 									}
@@ -1976,12 +1977,11 @@ forever:
 									jobRequeueMutex.Lock()
 									jobRequeue[rqj.Newsgroup] = append(jobRequeue[rqj.Newsgroup], rqj)
 									jobRequeueMutex.Unlock()
-									log.Printf("CHTTWorker (%d) did requeue job %d with %d articles for newsgroup '%s'", workerID, rqj.JobID, len(rqj.Articles), *rqj.Newsgroup)
+									log.Printf("CHTTWorker (%d) did requeue job #%d with %d articles for newsgroup '%s'", workerID, rqj.JobID, len(rqj.Articles), *rqj.Newsgroup)
 									// unlink pointers
 									job.Mux.Lock()
 									select {
 									case job.ResponseChan <- nil:
-										close(job.ResponseChan)
 									default:
 									}
 									if job.TTMode != nil {
