@@ -386,8 +386,17 @@ func (pool *Pool) ClosePool() error {
 	pool.mux.Unlock()
 
 	// Close all connections in the pool
-	for client := range pool.connections { // drain channel
-		client.ForceCloseConn()
+closeWait:
+	for {
+		select {
+		case conn := <-pool.connections:
+			if conn != nil {
+				conn.ForceCloseConn()
+			}
+		default:
+			// pass
+			break closeWait
+		}
 	}
 
 	pool.mux.Lock()

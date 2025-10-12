@@ -129,7 +129,7 @@ func main() {
 		proxyPassword = flag.String("proxy-password", "", "Proxy authentication password")
 
 		// Transfer configuration
-		batchCheck      = flag.Int("batch-check", 100, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
+		batchCheck      = flag.Int("batch-check", 1000, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
 		batchDB         = flag.Int64("batch-db", 1000, "Fetch N articles from DB in a batch")
 		maxThreads      = flag.Int("max-threads", 1, "Transfer N newsgroups in concurrent threads. Each thread uses 1 connection.")
 		redisCache      = flag.Bool("redis-cache", true, "Use Redis caching for message IDs")
@@ -166,7 +166,7 @@ func main() {
 		webPort   = flag.Int("web-port", 0, "Enable web server on this port to view results (e.g. 8080, default: disabled)")
 		pprofPort = flag.Int("pprof-port", 0, "Enable pprof profiling server on this port (e.g., 6060). Access at http://localhost:PORT/debug/pprof/")
 		memStats  = flag.Bool("mem-stats", false, "Log memory statistics every 30 seconds")
-		gcPercent = flag.Int("gc-percent", 100, "Set GOGC percentage (default 100). Lower values = more frequent GC, less memory")
+		gcPercent = flag.Int("gc-percent", 50, "Set GOGC percentage (default 100). Lower values = more frequent GC, less memory")
 	)
 	flag.Parse()
 	common.IgnoreGoogleHeaders = *ignoreGoogleHeaders
@@ -311,7 +311,7 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt) // Cross-platform (Ctrl+C on both Windows and Linux)
 
-	//db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
+	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
 	db.WG.Add(1) // Adds for history: one for writer worker
 
 	// Get UseShortHashLen from database (with safety check)
@@ -409,7 +409,6 @@ func main() {
 	if !*dryRun {
 		log.Printf("Starting NNTP connection worker pool...")
 		go BootConnWorkers(pool, redisCli)
-		time.Sleep(2 * time.Second) // Give workers time to establish connections
 	}
 	// Start transfer process
 	var wgP sync.WaitGroup
@@ -523,6 +522,8 @@ func main() {
 	}
 	wgP.Wait()
 	pool.ClosePool()
+	// Signal background tasks to stop
+	close(db.StopChan)
 
 	// Close processor
 	if proc != nil {
@@ -1211,7 +1212,9 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		resultsMutex.Lock()
 		nntp.NewsgroupTransferProgressMap[ng.Name].Finished = true
 		nntp.NewsgroupTransferProgressMap[ng.Name].LastUpdated = time.Now()
-		results = append(results, fmt.Sprintf("END Newsgroup: '%s' | No articles to process", ng.Name))
+		if VERBOSE {
+			results = append(results, fmt.Sprintf("END Newsgroup: '%s' | No articles to process", ng.Name))
+		}
 		resultsMutex.Unlock()
 		// No articles to process
 		if startTime != nil || endTime != nil {
@@ -1365,7 +1368,10 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		}
 		resultsMutex.Unlock()
 	}(&responseWG)
-	OffsetQueue := &nntp.OffsetQueue{}
+	OffsetQueue := &nntp.OffsetQueue{
+		Newsgroup:     &ng.Name,
+		MaxQueuedJobs: MaxQueuedJobs,
+	}
 
 	// Use simple OFFSET pagination
 	var articlesProcessed int64
@@ -1588,19 +1594,26 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 	}
 
 	// Assign job to worker (consistent assignment + load balancing)
+	QueuesMutex.RLock()
 	if len(CheckQueues) == 0 {
+		QueuesMutex.RUnlock()
+		log.Printf("Newsgroup: '%s' | No workers available to process batch job #%d with %d message IDs", *ttMode.Newsgroup, batchedJob.JobID, len(batchedJob.MessageIDs))
 		return nil, fmt.Errorf("no workers available")
 	}
+	QueuesMutex.RUnlock()
 
 	workerID := assignWorkerToNewsgroup(*ttMode.Newsgroup)
-
+	QueuesMutex.RLock()
+	WorkersCheckChannel := CheckQueues[workerID]
+	QueuesMutex.RUnlock()
 	// Track queue length for load balancing
 	WorkerQueueLengthMux.Lock()
 	WorkerQueueLength[workerID]++
 	WorkerQueueLengthMux.Unlock()
 
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queue job #%d with %d message IDs. CheckQ=%d", *ttMode.Newsgroup, workerID, batchedJob.JobID, len(batchedJob.MessageIDs), len(CheckQueues[workerID]))
-	CheckQueues[workerID] <- batchedJob // checkQueue <- batchedJob
+
+	WorkersCheckChannel <- batchedJob // checkQueue <- batchedJob
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queued Job #%d", *ttMode.Newsgroup, workerID, batchedJob.JobID)
 	return batchedJob.ResponseChan, nil
 } // end func processBatch
@@ -1704,6 +1717,7 @@ var jobRequeueMutex sync.RWMutex
 var jobRequeue = make(map[*string][]*nntp.CHTTJob)
 
 // CheckQueues holds per-worker CheckQueue channels for consistent newsgroup routing
+var QueuesMutex sync.RWMutex
 var CheckQueues []chan *nntp.CHTTJob
 var TakeThisQueues []chan *nntp.CHTTJob
 
@@ -1779,6 +1793,7 @@ func BootConnWorkers(pool *nntp.Pool, redisCli *redis.Client) {
 	isleep := defaultSleep
 	var mux sync.Mutex
 	// Create per-worker queues
+	QueuesMutex.Lock()
 	CheckQueues = make([]chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
 	TakeThisQueues = make([]chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
 	WorkerQueueLength = make([]int, nntp.NNTPTransferThreads)
@@ -1787,6 +1802,7 @@ func BootConnWorkers(pool *nntp.Pool, redisCli *redis.Client) {
 		TakeThisQueues[i] = make(chan *nntp.CHTTJob, 2) // allows max 2 queued TT jobs
 		WorkerQueueLength[i] = 0
 	}
+	QueuesMutex.Unlock()
 	allEstablished := false
 forever:
 	for {
@@ -1906,9 +1922,9 @@ forever:
 									job.Mux.Unlock()
 
 									jobRequeueMutex.Lock()
-									jobRequeue[rqj.Newsgroup] = append(jobRequeue[rqj.Newsgroup], rqj) // TODO DEAD END
+									jobRequeue[rqj.Newsgroup] = append(jobRequeue[rqj.Newsgroup], rqj)
 									jobRequeueMutex.Unlock()
-
+									log.Printf("CHTTWorker (%d) did requeue job %d with %d articles for newsgroup '%s'", i, rqj.JobID, len(rqj.Articles), *rqj.Newsgroup)
 									// unlink pointers
 									job.Mux.Lock()
 									if job.TTMode != nil {
@@ -1974,6 +1990,7 @@ forever:
 			}
 		}()
 	} // end forever
+	log.Printf("BootConnWorkers: quit")
 } // end func BootConnWorkers
 
 var DefaultCheckTicker = 5 * time.Second
@@ -2006,14 +2023,14 @@ func (rs *ReturnSignal) GetLockTT() {
 	for {
 		rs.Mux.Lock()
 		if rs.RunTT {
-			log.Printf("GetLockTT: RunTT already true")
+			//log.Printf("GetLockTT: RunTT already true")
 			rs.Mux.Unlock()
 			return
 		}
 		if !rs.RunTT && !rs.CHECK {
 			rs.RunTT = true
 			rs.Mux.Unlock()
-			log.Printf("GetLockTT: acquired RunTT lock")
+			//log.Printf("GetLockTT: acquired RunTT lock")
 			return
 		}
 		rs.Mux.Unlock()
@@ -2054,7 +2071,7 @@ func (rs *ReturnSignal) BlockCHECK() {
 	rs.Mux.Lock()
 	rs.CHECK = false
 	rs.RunTT = true
-	log.Printf("BlockCHECK: set CHECK to false (RunTT=%t)", rs.RunTT)
+	//log.Printf("BlockCHECK: set CHECK to false (RunTT=%t)", rs.RunTT)
 	rs.Mux.Unlock()
 }
 
@@ -2151,9 +2168,12 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					continue loop
 				}
 				workerID := assignWorkerToNewsgroup(*currentJob.Newsgroup)
+				QueuesMutex.RLock()
+				WorkersTTChannel := TakeThisQueues[workerID]
+				QueuesMutex.RUnlock()
 			waiting:
 				for {
-					if len(TakeThisQueues[workerID]) >= MaxQueuedJobs {
+					if len(WorkersTTChannel) >= MaxQueuedJobs {
 						rs.BlockCHECK()
 						log.Printf("CheckWorker (%d): waiting... shared takeThisChan full (%d)", workerID, len(TakeThisQueues[workerID]))
 						time.Sleep(time.Second / 4)
@@ -2204,7 +2224,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					currentJob.WantedIDs = currentJob.MessageIDs
 					//rs.UnlockCHECKforTTwithWait()
 					rs.BlockCHECK()
-					TakeThisQueues[workerID] <- currentJob // local takethis chan sharing the same connection
+					WorkersTTChannel <- currentJob // local takethis chan sharing the same connection
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d sent to local TakeThisChan", *currentJob.Newsgroup, workerID, currentJob.JobID)
 				}
 				//lastRun = time.Now()
@@ -2752,6 +2772,7 @@ func monitorMemoryStats() {
 // startWebServer starts a simple HTTP server to display transfer results
 func startWebServer(port int) {
 	http.HandleFunc("/", handleIndex)
+	http.HandleFunc("/results", handleResults)
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("Starting web server on http://ANY_ADDR:%s", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
@@ -2949,9 +2970,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	{{if .Results}}
 		<h2 style="margin-top: 30px; color: #333;">Completed Results</h2>
-		{{range .Results}}
-		<div class="result">{{.}}</div>
-		{{end}}
+		<div class="empty">View results at <a href="/results" style="color: #0066cc;">/results</a></div>
 	{{else}}
 		<div class="empty">No transfer results yet. Waiting for transfers to complete...</div>
 	{{end}}
@@ -3049,5 +3068,22 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.Execute(w, data); err != nil {
 		log.Printf("Template execution error: %v", err)
+	}
+}
+
+// handleResults serves the results page as plain text
+func handleResults(w http.ResponseWriter, r *http.Request) {
+	resultsMutex.RLock()
+	defer resultsMutex.RUnlock()
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+
+	if len(results) == 0 {
+		fmt.Fprintln(w, "No transfer results yet. Waiting for transfers to complete...")
+		return
+	}
+
+	for _, result := range results {
+		fmt.Fprintln(w, result)
 	}
 }

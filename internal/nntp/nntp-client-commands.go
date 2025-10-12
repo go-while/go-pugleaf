@@ -263,9 +263,11 @@ type TTSetup struct {
 }
 
 type OffsetQueue struct {
-	mux    sync.RWMutex
-	isleep time.Duration
-	queued int
+	Newsgroup     *string
+	MaxQueuedJobs int
+	mux           sync.RWMutex
+	isleep        time.Duration
+	queued        int
 }
 
 var ReturnDelay = time.Millisecond * 16
@@ -308,14 +310,17 @@ func (o *OffsetQueue) Done() {
 	o.mux.Lock()
 	defer o.mux.Unlock()
 	o.queued--
-	log.Printf("OffsetQueue: a batch is done, still queued: %d", o.queued)
+	//log.Printf("OffsetQueue: a batch is done, still queued: %d", o.queued)
 }
 
 func (o *OffsetQueue) Add(n int) {
 	o.mux.Lock()
 	defer o.mux.Unlock()
 	o.queued += n
-	log.Printf("OffsetQueue: added %d batches, now queued: %d", n, o.queued)
+	if o.MaxQueuedJobs > 10 && o.queued > o.MaxQueuedJobs/100*90 {
+		// prints only if occupancy is over 90%
+		log.Printf("Newsgroup: '%s' | OffsetQueue: added %d batches, now queued: %d/%d", *o.Newsgroup, n, o.queued, o.MaxQueuedJobs)
+	}
 }
 
 type TTResponse struct {
