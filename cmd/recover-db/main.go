@@ -33,15 +33,16 @@ func main() {
 	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("go-pugleaf Database Recovery Tool (version: %s)", config.AppVersion)
 	var (
-		dbPath         = flag.String("db", "data", "Data Path to main data directory (required)")
-		newsgroup      = flag.String("group", "$all", "Newsgroup name to check (required) (\\$all to check for all or news.* to check for all in that hierarchy)")
-		verbose        = flag.Bool("v", true, "Verbose output")
-		repair         = flag.Bool("repair", false, "Attempt to repair detected inconsistencies")
-		parseDates     = flag.Bool("parsedates", false, "Check and log date parsing differences between date_string and date_sent")
-		rewriteDates   = flag.Bool("rewritedates", false, "Rewrite incorrect dates (requires -parsedates)")
-		rebuildThreads = flag.Bool("rebuild-threads", false, "Rebuild all thread relationships from scratch (destructive)")
-		maxPar         = flag.Int("max-par", 1, "use with -rebuild-threads to process N newsgroups")
-		dataDir        = flag.String("data", "./data", "Directory to store database files")
+		dbPath              = flag.String("db", "data", "Data Path to main data directory (required)")
+		newsgroup           = flag.String("group", "$all", "Newsgroup name to check (required) (\\$all to check for all or news.* to check for all in that hierarchy)")
+		verbose             = flag.Bool("v", true, "Verbose output")
+		repair              = flag.Bool("repair", false, "Attempt to repair detected inconsistencies")
+		parseDates          = flag.Bool("parsedates", false, "Check and log date parsing differences between date_string and date_sent")
+		rewriteDates        = flag.Bool("rewritedates", false, "Rewrite incorrect dates (requires -parsedates)")
+		rebuildThreads      = flag.Bool("rebuild-threads", false, "Rebuild all thread relationships from scratch (destructive)")
+		maxPar              = flag.Int("max-par", 1, "use with -rebuild-threads to process N newsgroups")
+		dataDir             = flag.String("data", "./data", "Directory to store database files")
+		scanOutOfOrderCheck = flag.Bool("scan-out-of-order-overview", false, "Scan newsgroups for articles with out-of-order date_sent values")
 	)
 	flag.Parse()
 
@@ -180,6 +181,17 @@ func main() {
 		fmt.Printf("   Date mismatches found: %d\n", totalFixed)
 		if *rewriteDates {
 			fmt.Printf("   Dates corrected: %d\n", totalFixed)
+		}
+		os.Exit(0)
+	}
+
+	// If only out-of-order scan is requested, run that and exit
+	if *scanOutOfOrderCheck {
+		fmt.Printf("🔍 Starting out-of-order article scan...\n")
+		fmt.Printf("=====================================\n")
+		err := scanOutOfOrderOverview(db, newsgroups, *verbose)
+		if err != nil {
+			log.Fatalf("Out-of-order scan failed: %v", err)
 		}
 		os.Exit(0)
 	}
@@ -987,4 +999,161 @@ func printDateProblemsSummary(problems []DateProblem, rewriteDates bool) {
 		fmt.Printf("   • Run with -rewritedates flag to fix date mismatches\n")
 	}
 	fmt.Printf("=====================================\n")
+}
+
+// OutOfOrderArticle represents an article that has an out-of-order date_sent
+type OutOfOrderArticle struct {
+	Newsgroup      string
+	ArticleNum     int64
+	DateSent       time.Time
+	PreviousArtNum int64
+	PreviousDate   time.Time
+}
+
+// scanOutOfOrderOverview scans newsgroups for articles with out-of-order date_sent values
+func scanOutOfOrderOverview(db *database.Database, newsgroups []*models.Newsgroup, verbose bool) error {
+	const batchSize = 10000
+	var totalArticles int64
+	var totalOutOfOrder int64
+	var allProblems []OutOfOrderArticle
+
+	for _, newsgroup := range newsgroups {
+		fmt.Printf("\n📊 Scanning newsgroup: %s\n", newsgroup.Name)
+
+		// Get newsgroup database
+		groupDBs, err := db.GetGroupDBs(newsgroup.Name)
+		if err != nil {
+			fmt.Printf("❌ Failed to get database for '%s': %v\n", newsgroup.Name, err)
+			continue
+		}
+		if groupDBs == nil || groupDBs.DB == nil {
+			fmt.Printf("⚠️  No database found for '%s', skipping...\n", newsgroup.Name)
+			continue
+		}
+
+		// Get total article count
+		var count int64
+		err = groupDBs.DB.QueryRow("SELECT COUNT(*) FROM articles").Scan(&count)
+		if err != nil {
+			fmt.Printf("❌ Failed to count articles: %v\n", err)
+			continue
+		}
+
+		if count == 0 {
+			fmt.Printf("📭 Empty newsgroup, skipping...\n")
+			continue
+		}
+
+		fmt.Printf("   Total articles: %d\n", count)
+		totalArticles += count
+
+		var groupProblems []OutOfOrderArticle
+		var lastArticleNum int64
+		var lastDateSent time.Time
+		offset := int64(0)
+		query := `
+				SELECT article_num, date_sent
+				FROM articles
+				ORDER BY article_num ASC
+				LIMIT ? OFFSET ?
+			`
+		for {
+			// Query articles ordered by date_sent ASC using OFFSET pagination
+
+			rows, err := groupDBs.DB.Query(query, batchSize, offset)
+			if err != nil {
+				return fmt.Errorf("failed to query articles at offset %d: %v", offset, err)
+			}
+
+			articlesInBatch := 0
+			for rows.Next() {
+				var articleNum int64
+				var dateSentStr string
+
+				if err := rows.Scan(&articleNum, &dateSentStr); err != nil {
+					rows.Close()
+					return fmt.Errorf("failed to scan article: %v", err)
+				}
+
+				// Parse date_sent
+				dateSent, err := time.Parse("2006-01-02 15:04:05", dateSentStr)
+				if err != nil {
+					rows.Close()
+					return fmt.Errorf("failed to parse date_sent '%s': %v", dateSentStr, err)
+				}
+
+				// Check if this article's date is before the previous one
+				if offset > 0 || articlesInBatch > 0 {
+					if dateSent.Before(lastDateSent) {
+						problem := OutOfOrderArticle{
+							Newsgroup:      newsgroup.Name,
+							ArticleNum:     articleNum,
+							DateSent:       dateSent,
+							PreviousArtNum: lastArticleNum,
+							PreviousDate:   lastDateSent,
+						}
+						groupProblems = append(groupProblems, problem)
+						allProblems = append(allProblems, problem)
+					}
+				}
+
+				lastArticleNum = articleNum
+				lastDateSent = dateSent
+				articlesInBatch++
+			}
+			rows.Close()
+
+			if articlesInBatch == 0 {
+				break
+			}
+
+			offset += int64(articlesInBatch)
+
+			if verbose && offset%100000 == 0 {
+				fmt.Printf("   Progress: %d/%d articles scanned...\n", offset, count)
+			}
+		}
+
+		if len(groupProblems) > 0 {
+			fmt.Printf("⚠️  Found %d out-of-order articles in %s\n", len(groupProblems), newsgroup.Name)
+			totalOutOfOrder += int64(len(groupProblems))
+
+			// Show first few problems
+			showCount := len(groupProblems)
+			if showCount > 10 {
+				showCount = 10
+			}
+			for i := 0; i < showCount; i++ {
+				p := groupProblems[i]
+				fmt.Printf("   • Article %d (%s) comes AFTER article %d (%s)\n",
+					p.ArticleNum, p.DateSent.Format("2006-01-02 15:04:05"),
+					p.PreviousArtNum, p.PreviousDate.Format("2006-01-02 15:04:05"))
+			}
+			if len(groupProblems) > 10 {
+				fmt.Printf("   ... and %d more out-of-order articles\n", len(groupProblems)-10)
+			}
+		} else {
+			fmt.Printf("✅ All articles are in chronological order by date_sent\n")
+		}
+	}
+
+	// Print summary
+	fmt.Printf("\n=====================================\n")
+	fmt.Printf("📊 OUT-OF-ORDER SCAN SUMMARY\n")
+	fmt.Printf("=====================================\n")
+	fmt.Printf("Total articles scanned: %d\n", totalArticles)
+	fmt.Printf("Out-of-order articles:  %d\n", totalOutOfOrder)
+	if totalOutOfOrder > 0 {
+		fmt.Printf("\n⚠️  WARNING: Found articles with dates that don't match their chronological position!\n")
+		fmt.Printf("This can cause issues with keyset pagination in nntp-transfer.\n")
+		fmt.Printf("\n💡 RECOMMENDATIONS:\n")
+		fmt.Printf("   • Review the import process for late-arriving articles\n")
+		fmt.Printf("   • Consider using article_num-based pagination for affected newsgroups\n")
+		fmt.Printf("   • The stuck article detection in nntp-transfer should handle these cases\n")
+	} else {
+		fmt.Printf("\n✅ All articles are properly ordered by date_sent across all newsgroups!\n")
+	}
+	fmt.Printf("=====================================\n")
+
+	return nil
 }
