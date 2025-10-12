@@ -116,13 +116,13 @@ func CalcGlobalSpeed() {
 	for {
 		time.Sleep(time.Second * 3)
 		var speed uint64
-		resultsMutex.Lock()
+		nntp.ResultsMutex.Lock()
 		for _, progress := range nntp.NewsgroupTransferProgressMap {
 			progress.CalcSpeed()
 			speed += progress.GetSpeed()
 		}
 		GlobalSpeed = speed
-		resultsMutex.Unlock()
+		nntp.ResultsMutex.Unlock()
 	}
 }
 
@@ -440,10 +440,10 @@ func main() {
 		log.Printf("Starting NNTP connection worker pool...")
 		go BootConnWorkers(pool, redisCli)
 	}
-	resultsMutex.Lock()
+	nntp.ResultsMutex.Lock()
 	TotalNewsgroups = int64(len(newsgroups))
 	NewsgroupsToProcess = TotalNewsgroups
-	resultsMutex.Unlock()
+	nntp.ResultsMutex.Unlock()
 	go CalcGlobalSpeed()
 	// Start transfer process
 	var wgP sync.WaitGroup
@@ -1095,7 +1095,7 @@ func matchesAnyWildcardPattern(newsgroup string, patterns []string) bool {
 	return false
 }
 
-var totalTransferred, totalUnwanted, totalRejected, totalRedisCacheHits, totalTXErrors, totalConnErrors, nothingInDateRange uint64
+var totalTransferred, totalUnwanted, totalRejected, totalRedisCacheHits, totalTXErrors, totalConnErrors, globalTotalArticles, nothingInDateRange uint64
 var transferMutex sync.Mutex
 
 // runTransfer performs the actual article transfer process
@@ -1134,9 +1134,9 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 			if err != nil {
 				log.Printf("Error transferring newsgroup %s: %v", ng.Name, err)
 			}
-			resultsMutex.Lock()
+			nntp.ResultsMutex.Lock()
 			NewsgroupsToProcess--
-			resultsMutex.Unlock()
+			nntp.ResultsMutex.Unlock()
 		}(ng, &wg, redisCli)
 	}
 
@@ -1147,11 +1147,11 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 	if nothingInDateRange > 0 {
 		log.Printf("Note: %d newsgroups had no articles in the specified date range", nothingInDateRange)
 	}
-	resultsMutex.Lock()
+	nntp.ResultsMutex.Lock()
 	for _, result := range results {
 		log.Print(result)
 	}
-	resultsMutex.Unlock()
+	nntp.ResultsMutex.Unlock()
 	log.Printf("Summary: transferred: %d | redis_cache_hits: %d | unwanted: %d | rejected: %d | TX_Errors: %d | connErrors: %d",
 		totalTransferred, totalRedisCacheHits, totalUnwanted, totalRejected, totalTXErrors, totalConnErrors)
 	return nil
@@ -1225,7 +1225,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	}
 	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Got group DBs, querying article count...", ng.Name)
 	// Initialize newsgroup progress tracking
-	resultsMutex.Lock()
+	nntp.ResultsMutex.Lock()
 	if _, exists := nntp.NewsgroupTransferProgressMap[ng.Name]; !exists {
 		nntp.NewsgroupTransferProgressMap[ng.Name] = &nntp.NewsgroupTransferProgress{
 			Newsgroup:     &ng.Name,
@@ -1236,7 +1236,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			TotalArticles: 0,
 		}
 	}
-	resultsMutex.Unlock()
+	nntp.ResultsMutex.Unlock()
 
 	// Get total article count first with date filtering
 	totalArticles, err := getArticleCountWithDateFilter(db, groupDBsA, startTime, endTime)
@@ -1255,13 +1255,13 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		if ferr := db.ForceCloseGroupDBs(groupDBsA); ferr != nil {
 			log.Printf("ForceCloseGroupDBs error for '%s': %v", ng.Name, ferr)
 		}
-		resultsMutex.Lock()
+		nntp.ResultsMutex.Lock()
 		nntp.NewsgroupTransferProgressMap[ng.Name].Finished = true
 		nntp.NewsgroupTransferProgressMap[ng.Name].LastUpdated = time.Now()
 		if VERBOSE {
 			results = append(results, fmt.Sprintf("END Newsgroup: '%s' | No articles to process", ng.Name))
 		}
-		resultsMutex.Unlock()
+		nntp.ResultsMutex.Unlock()
 		// No articles to process
 		if startTime != nil || endTime != nil {
 			if VERBOSE {
@@ -1278,11 +1278,11 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	groupDBsA.Return(db)
 
 	// Initialize newsgroup progress tracking
-	resultsMutex.Lock()
+	nntp.ResultsMutex.Lock()
 	nntp.NewsgroupTransferProgressMap[ng.Name].TotalArticles = totalArticles
 	nntp.NewsgroupTransferProgressMap[ng.Name].LastUpdated = time.Now()
 	ngtprogress := nntp.NewsgroupTransferProgressMap[ng.Name]
-	resultsMutex.Unlock()
+	nntp.ResultsMutex.Unlock()
 
 	if dryRun {
 		if startTime != nil || endTime != nil {
@@ -1395,9 +1395,21 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		amux.Lock()
 		result := fmt.Sprintf("END Newsgroup: '%s' | transferred: %d/%d  | unwanted: %d | rejected: %d | checked: %d | TX_Errors: %d | connErrors: %d | took %v",
 			ng.Name, transferred, totalArticles, unwanted, rejected, checked, txErrors, connErrors, time.Since(start))
+
 		amux.Unlock()
-		//log.Print(result)
-		resultsMutex.Lock()
+
+		ngtprogress.Mux.Lock()
+		redis_cached := ngtprogress.RedisCached
+		ngtprogress.Mux.Unlock()
+
+		nntp.ResultsMutex.Lock()
+		globalTotalArticles += uint64(totalArticles)
+		totalTransferred += transferred
+		totalRedisCacheHits += redis_cached
+		totalUnwanted += unwanted
+		totalRejected += rejected
+		totalTXErrors += txErrors
+		totalConnErrors += connErrors
 		results = append(results, result)
 		// Mark newsgroup as finished
 		if progress, exists := nntp.NewsgroupTransferProgressMap[ng.Name]; exists {
@@ -1416,7 +1428,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			}
 			delete(rejectedArticles, ng.Name) // free memory
 		}
-		resultsMutex.Unlock()
+		nntp.ResultsMutex.Unlock()
 	}(&responseWG)
 	OffsetQueue := &nntp.OffsetQueue{
 		Newsgroup:     &ng.Name,
@@ -1540,7 +1552,6 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 
 var results []string
 var rejectedArticles = make(map[string][]string)
-var resultsMutex sync.RWMutex
 var lowerLevel float64 = 90.0
 var upperLevel float64 = 95.0
 
@@ -1554,7 +1565,7 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 	}
 
 	// Update newsgroup progress with current offset
-	resultsMutex.RLock()
+	nntp.ResultsMutex.RLock()
 	if progress, exists := nntp.NewsgroupTransferProgressMap[*ttMode.Newsgroup]; exists {
 		progress.Mux.Lock()
 		progress.OffsetStart = dbOffset
@@ -1563,7 +1574,7 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 		progress.LastUpdated = time.Now()
 		progress.Mux.Unlock()
 	}
-	resultsMutex.RUnlock()
+	nntp.ResultsMutex.RUnlock()
 
 	ttMode.FlipMode(lowerLevel, upperLevel)
 
@@ -1612,7 +1623,7 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 				if VERBOSE {
 					log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis (skip [CHECK])", *ttMode.Newsgroup, article.MessageID)
 				}
-				batchedJob.Increment(nntp.IncrFLAG_REDIS_CACHED)
+				batchedJob.Increment(nntp.IncrFLAG_REDIS_CACHED, 1)
 				redis_cache_hits++
 				articles[i] = nil
 				continue
@@ -1637,7 +1648,7 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 
 	if len(batchedJob.MessageIDs) == 0 {
 		log.Printf("Newsgroup: '%s' | No message IDs to check in batch. (redis_cache_hits: %d)", *ttMode.Newsgroup, redis_cache_hits)
-		return nil, nil
+		return batchedJob.QuitResponseChan(), nil
 	}
 	if VERBOSE {
 		log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d/%d articles", *ttMode.Newsgroup, len(batchedJob.MessageIDs), len(articles))
@@ -2390,28 +2401,17 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					return
 				}
 
-				//code := respData.Code
-				//line := respData.Line
-				//err := respData.Err
-
 				if respData.Code == 0 && respData.Err != nil {
 					log.Printf("Failed to read CHECK response: %v", respData.Err)
 					//rr.ReturnReadRequest(rrRetChan)
 					rr.ClearReadRequest()
 					return
 				}
-				/* disabled
-				if err := conn.SetReadDeadline(time.Time{}); err != nil {
-					log.Printf("Failed to set unset read deadline: %v", err)
-					nntp.ReturnReadRequest(rrRetChan)
-					rr.ClearReadRequest()
-					return
-				}
-				*/
+
 				took := time.Since(start)
 				tookTime += took
 				responseCount++
-				rr.Job.Increment(nntp.IncrFLAG_CHECKED)
+				rr.Job.Increment(nntp.IncrFLAG_CHECKED, 1)
 				if rr.N == 1 && took.Milliseconds() > 100 {
 					log.Printf("CheckWorker (%d): time to first response for msgID: %s (cmdID=%d MID=%d/%d) took: %v ms", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, took.Milliseconds())
 					tookTime = 0
@@ -2468,11 +2468,11 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 
 				case 438:
 					//log.Printf("Newsgroup: '%s' | Got Response: Unwanted Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
-					job.Increment(nntp.IncrFLAG_UNWANTED)
+					job.Increment(nntp.IncrFLAG_UNWANTED, 1)
 
 				case 431:
 					//log.Printf("Newsgroup: '%s' | Got Response: Retry Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
-					job.Increment(nntp.IncrFLAG_RETRY)
+					job.Increment(nntp.IncrFLAG_RETRY, 1)
 
 				default:
 					log.Printf("Newsgroup: '%s' | Unknown CHECK response: line='%s' code=%d expected msgID %s", *job.Newsgroup, respData.Line, respData.Code, *rr.MsgID)
@@ -2576,7 +2576,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				if respData.Err != nil {
 					log.Printf("ERROR TTResponseWorker (%d): Failed to read TAKETHIS response for %s: %v",
 						workerID, *rr.MsgID, respData.Err)
-					rr.Job.Increment(nntp.IncrFLAG_CONN_ERRORS)
+					rr.Job.Increment(nntp.IncrFLAG_CONN_ERRORS, 1)
 					rr.ClearReadRequest()
 					conn.ForceCloseConn()
 					return
@@ -2593,7 +2593,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				switch respData.Code {
 				case 239:
 					rr.Job.TTMode.IncrementSuccess()
-					rr.Job.Increment(nntp.IncrFLAG_TRANSFERRED)
+					rr.Job.Increment(nntp.IncrFLAG_TRANSFERRED, 1)
 					// Cache in Redis if enabled (inline, no separate tracker struct needed)
 					if rs.redisCli != nil {
 						err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err()
@@ -2603,7 +2603,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					}
 
 				case 439:
-					rr.Job.Increment(nntp.IncrFLAG_REJECTED)
+					rr.Job.Increment(nntp.IncrFLAG_REJECTED, 1)
 					// Cache rejection in Redis if enabled
 					if rs.redisCli != nil {
 						err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err()
@@ -2619,7 +2619,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				case 400, 480, 500, 501, 502, 503, 504:
 					log.Printf("ERROR Newsgroup: '%s' | Failed to transfer article '%s': response=%d",
 						*rr.Job.Newsgroup, *rr.MsgID, respData.Code)
-					rr.Job.Increment(nntp.IncrFLAG_TX_ERRORS)
+					rr.Job.Increment(nntp.IncrFLAG_TX_ERRORS, 1)
 					rr.ClearReadRequest()
 					conn.ForceCloseConn()
 					return
@@ -2627,7 +2627,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				default:
 					log.Printf("ERROR Newsgroup: '%s' | Failed to transfer article '%s': unknown response=%d",
 						*rr.Job.Newsgroup, *rr.MsgID, respData.Code)
-					rr.Job.Increment(nntp.IncrFLAG_TX_ERRORS)
+					rr.Job.Increment(nntp.IncrFLAG_TX_ERRORS, 1)
 				}
 
 				rr.ClearReadRequest()
@@ -2688,6 +2688,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 			// Send TAKETHIS commands using existing function
 			redis_cached, err := sendArticlesBatchViaTakeThis(conn, wantedArticles, job, *job.Newsgroup, rs.redisCli, demuxer, readTAKETHISResponsesChan)
 			//common.ChanRelease(flipflopChan)
+			job.Increment(nntp.IncrFLAG_REDIS_CACHED, redis_cached)
 			rs.BlockTT()
 			if err != nil {
 				log.Printf("Newsgroup: '%s' | TTworker (%d): Error in TAKETHIS job #%d: %v", *job.Newsgroup, workerID, job.JobID, err)
@@ -2736,7 +2737,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				select {
 				case requestReplyJobDone <- struct{}{}:
 				default:
-					log.Printf("ERROR Newsgroup: '%s' | CHTTworker (%d): job #%d could not signal requestReplyJobDone, channel full", *job.Newsgroup, workerID, job.JobID)
+					log.Printf("Newsgroup: '%s' | Debug: CHTTworker (%d): job #%d could not signal requestReplyJobDone, channel full. pass", *job.Newsgroup, workerID, job.JobID)
 					// pass
 				}
 			}
@@ -2847,8 +2848,8 @@ func startWebServer(port int) {
 
 // handleIndex serves the main page with transfer results
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	resultsMutex.RLock()
-	defer resultsMutex.RUnlock()
+	nntp.ResultsMutex.RLock()
+	defer nntp.ResultsMutex.RUnlock()
 
 	// HTML template for displaying results
 	const htmlTemplate = `<!DOCTYPE html>
@@ -3009,6 +3010,15 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		{{else}}
 			{{if eq 0 .NewsgroupsToProcess}}
 				✅ All complete!
+				<br><br>
+				<strong>Summary Statistics:</strong><br>
+				Total Articles: {{.TotalArticles}}<br>
+				Transferred: {{.TotalTransferred}}<br>
+				Redis Cache Hits: {{.TotalRedisCacheHits}}<br>
+				Unwanted: {{.TotalUnwanted}}<br>
+				Rejected: {{.TotalRejected}}<br>
+				TX Errors: {{.TotalTXErrors}}<br>
+				Conn Errors: {{.TotalConnErrors}}
 			{{else}}
 				<div class="progress-bar-main" style="max-width: 640px; margin: 10px 0;">
 					<div class="progress-fill" style="width: {{if gt .TotalNewsgroups 0}}{{multiply (divide (subtract .TotalNewsgroups .NewsgroupsToProcess) .TotalNewsgroups) 100}}{{else}}0{{end}}%"></div>
@@ -3016,6 +3026,15 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 						<strong><em class="text-light" style="font-size: 24px; color: rgba(220, 15, 238, 1)">{{subtract .TotalNewsgroups .NewsgroupsToProcess}} / {{.TotalNewsgroups}} {{if gt .TotalNewsgroups 0}} @ {{multiply (divide (subtract .TotalNewsgroups .NewsgroupsToProcess) .TotalNewsgroups) 100}}{{else}}0{{end}}%</em></strong>
 					</div>
 				</div>
+				<br>
+				<strong>Live Statistics:</strong><br>
+				Total Articles: {{.TotalArticles}}<br>
+				Transferred: {{.TotalTransferred}}<br>
+				Redis Cache Hits: {{.TotalRedisCacheHits}}<br>
+				Unwanted: {{.TotalUnwanted}}<br>
+				Rejected: {{.TotalRejected}}<br>
+				TX Errors: {{.TotalTXErrors}}<br>
+				Conn Errors: {{.TotalConnErrors}}
 			{{end}}
 		{{end}}
 	</div>
@@ -3168,6 +3187,13 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		EndDate             string
 		ServerHostName      string
 		GlobalSpeed         uint64
+		TotalArticles       uint64
+		TotalTransferred    uint64
+		TotalRedisCacheHits uint64
+		TotalUnwanted       uint64
+		TotalRejected       uint64
+		TotalTXErrors       uint64
+		TotalConnErrors     uint64
 	}{
 		TotalNewsgroups:     TotalNewsgroups,
 		NewsgroupsToProcess: NewsgroupsToProcess,
@@ -3180,6 +3206,13 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		EndDate:             EndDate,
 		ServerHostName:      ServerHostName,
 		GlobalSpeed:         GlobalSpeed,
+		TotalArticles:       globalTotalArticles,
+		TotalTransferred:    totalTransferred,
+		TotalRedisCacheHits: totalRedisCacheHits,
+		TotalUnwanted:       totalUnwanted,
+		TotalRejected:       totalRejected,
+		TotalTXErrors:       totalTXErrors,
+		TotalConnErrors:     totalConnErrors,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -3190,8 +3223,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 
 // handleResults serves the results page as plain text
 func handleResults(w http.ResponseWriter, r *http.Request) {
-	resultsMutex.RLock()
-	defer resultsMutex.RUnlock()
+	nntp.ResultsMutex.RLock()
+	defer nntp.ResultsMutex.RUnlock()
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 

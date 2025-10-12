@@ -403,6 +403,16 @@ func (job *CHTTJob) ReturnResponseChan() chan *TTResponse {
 	return nil
 }
 
+func (job *CHTTJob) QuitResponseChan() chan *TTResponse {
+	job.Response(true, nil)
+	job.Mux.RLock()
+	defer job.Mux.RUnlock()
+	if job.ResponseChan != nil {
+		return job.ResponseChan
+	}
+	return nil
+}
+
 func (job *CHTTJob) Response(ForceCleanUp bool, Err error) {
 	if job.ResponseChan == nil {
 		log.Printf("ERROR CHTTJob.Response(): ResponseChan is nil for job #%d", job.JobID)
@@ -423,7 +433,8 @@ func (job *CHTTJob) Response(ForceCleanUp bool, Err error) {
 	close(job.ResponseChan)
 }
 
-// NewsgroupTransferProgressMap is protected by resultsMutex in nntp-transfer/main.go
+// NewsgroupTransferProgressMap is protected by ResultsMutex, used in nntp-transfer/main.go
+var ResultsMutex sync.RWMutex
 var NewsgroupTransferProgressMap = make(map[string]*NewsgroupTransferProgress)
 
 // NewsgroupProgress tracks the progress of a newsgroup transfer
@@ -436,6 +447,7 @@ type NewsgroupTransferProgress struct {
 	BatchStart    int64
 	BatchEnd      int64
 	TotalArticles int64
+	RedisCached   uint64
 	ArticlesTT    uint64
 	ArticlesCH    uint64
 	Finished      bool
@@ -517,28 +529,28 @@ const IncrFLAG_REDIS_CACHED = 7
 const IncrFLAG_TX_ERRORS = 8
 const IncrFLAG_CONN_ERRORS = 9
 
-func (job *CHTTJob) Increment(counter int) {
+func (job *CHTTJob) Increment(counter int, n uint64) {
 	job.Mux.Lock()
 	defer job.Mux.Unlock()
 	switch counter {
 	case IncrFLAG_CHECKED:
-		job.checked++
+		job.checked += n
 	case IncrFLAG_WANTED:
-		job.wanted++
+		job.wanted += n
 	case IncrFLAG_UNWANTED:
-		job.unwanted++
+		job.unwanted += n
 	case IncrFLAG_REJECTED:
-		job.rejected++
+		job.rejected += n
 	case IncrFLAG_RETRY:
-		job.retry++
+		job.retry += n
 	case IncrFLAG_TRANSFERRED:
-		job.transferred++
+		job.transferred += n
 	case IncrFLAG_REDIS_CACHED:
-		job.redisCached++
+		job.redisCached += n
 	case IncrFLAG_TX_ERRORS:
-		job.TxErrors++
+		job.TxErrors += n
 	case IncrFLAG_CONN_ERRORS:
-		job.ConnErrors++
+		job.ConnErrors += n
 	}
 }
 
@@ -546,7 +558,7 @@ func (job *CHTTJob) AppendWantedMessageID(msgID *string) {
 	job.Mux.Lock()
 	job.WantedIDs = append(job.WantedIDs, msgID)
 	job.Mux.Unlock()
-	job.Increment(IncrFLAG_WANTED)
+	job.Increment(IncrFLAG_WANTED, 1)
 }
 
 func (job *CHTTJob) GetUpdateCounters(transferred, unwanted, rejected, checked, txErrors, connErrors *uint64) {
