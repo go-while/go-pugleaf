@@ -3227,12 +3227,13 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		ServerHostName      string
 		GlobalSpeed         uint64
 		TotalArticles       uint64
-		TotalTransferred    uint64
 		TotalRedisCacheHits uint64
+		TotalChecked        uint64
 		TotalUnwanted       uint64
 		TotalWanted         uint64
-		TotalChecked        uint64
+		TotalTransferred    uint64
 		TotalRejected       uint64
+		TotalRetry          uint64
 		TotalTXErrors       uint64
 		TotalConnErrors     uint64
 	}{
@@ -3248,12 +3249,13 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		ServerHostName:      ServerHostName,
 		GlobalSpeed:         GlobalSpeed,
 		TotalArticles:       globalTotalArticles,
-		TotalTransferred:    totalTransferred,
 		TotalRedisCacheHits: totalRedisCacheHits,
-		TotalUnwanted:       totalUnwanted,
-		TotalWanted:         totalWanted,
 		TotalChecked:        totalChecked,
+		TotalWanted:         totalWanted,
+		TotalUnwanted:       totalUnwanted,
+		TotalTransferred:    totalTransferred,
 		TotalRejected:       totalRejected,
+		TotalRetry:          totalRetry,
 		TotalTXErrors:       totalTXErrors,
 		TotalConnErrors:     totalConnErrors,
 	}
