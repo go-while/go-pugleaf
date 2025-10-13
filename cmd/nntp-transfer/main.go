@@ -112,6 +112,8 @@ var StartDate string
 var EndDate string
 var GlobalSpeed uint64
 
+var totalTransferred, totalChecked, totalWanted, totalUnwanted, totalRejected, totalRetry, totalSkipped, totalRedisCacheHits, totalTXErrors, totalConnErrors, globalTotalArticles, nothingInDateRange uint64
+
 func CalcGlobalSpeed() {
 	for {
 		time.Sleep(time.Second * 3)
@@ -1095,9 +1097,6 @@ func matchesAnyWildcardPattern(newsgroup string, patterns []string) bool {
 	return false
 }
 
-var totalTransferred, totalUnwanted, totalRejected, totalRedisCacheHits, totalTXErrors, totalConnErrors, globalTotalArticles, nothingInDateRange uint64
-var transferMutex sync.Mutex
-
 // runTransfer performs the actual article transfer process
 func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, wgP *sync.WaitGroup, redisCli *redis.Client) error {
 	defer wgP.Done()
@@ -1126,9 +1125,9 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 			}
 			err := transferNewsgroup(db, ng, batchCheck, dryRun, startTime, endTime, debugCapture, redisCli)
 			if err == ErrNotInDateRange {
-				transferMutex.Lock()
+				nntp.ResultsMutex.Lock()
 				nothingInDateRange++
-				transferMutex.Unlock()
+				nntp.ResultsMutex.Unlock()
 				err = nil // not a real error
 			}
 			if err != nil {
@@ -1139,21 +1138,17 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 			nntp.ResultsMutex.Unlock()
 		}(ng, &wg, redisCli)
 	}
-
+	nntp.ResultsMutex.Lock()
 	// Wait for all transfers to complete
-	wg.Wait()
-	transferMutex.Lock()
-	defer transferMutex.Unlock()
 	if nothingInDateRange > 0 {
 		log.Printf("Note: %d newsgroups had no articles in the specified date range", nothingInDateRange)
 	}
-	nntp.ResultsMutex.Lock()
 	for _, result := range results {
 		log.Print(result)
 	}
+	log.Printf("Summary: total: %d | transferred: %d | cache_hits: %d | checked: %d | wanted: %d | unwanted: %d | rejected: %d | retry: %d  | skipped: %d | TX_Errors: %d | connErrors: %d",
+		globalTotalArticles, totalTransferred, totalRedisCacheHits, totalChecked, totalWanted, totalUnwanted, totalRejected, totalRetry, totalSkipped, totalTXErrors, totalConnErrors)
 	nntp.ResultsMutex.Unlock()
-	log.Printf("Summary: transferred: %d | redis_cache_hits: %d | unwanted: %d | rejected: %d | TX_Errors: %d | connErrors: %d",
-		totalTransferred, totalRedisCacheHits, totalUnwanted, totalRejected, totalTXErrors, totalConnErrors)
 	return nil
 }
 
@@ -1239,7 +1234,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	nntp.ResultsMutex.Unlock()
 
 	// Get total article count first with date filtering
-	totalArticles, err := getArticleCountWithDateFilter(db, groupDBsA, startTime, endTime)
+	totalNGArticles, err := getArticleCountWithDateFilter(db, groupDBsA, startTime, endTime)
 	if err != nil {
 		if ferr := db.ForceCloseGroupDBs(groupDBsA); ferr != nil {
 			log.Printf("ForceCloseGroupDBs error for '%s': %v", ng.Name, ferr)
@@ -1251,7 +1246,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 
 	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Closed group DBs, checking if articles exist...", ng.Name)
 
-	if totalArticles == 0 {
+	if totalNGArticles == 0 {
 		if ferr := db.ForceCloseGroupDBs(groupDBsA); ferr != nil {
 			log.Printf("ForceCloseGroupDBs error for '%s': %v", ng.Name, ferr)
 		}
@@ -1279,16 +1274,16 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 
 	// Initialize newsgroup progress tracking
 	nntp.ResultsMutex.Lock()
-	nntp.NewsgroupTransferProgressMap[ng.Name].TotalArticles = totalArticles
+	nntp.NewsgroupTransferProgressMap[ng.Name].TotalArticles = totalNGArticles
 	nntp.NewsgroupTransferProgressMap[ng.Name].LastUpdated = time.Now()
 	ngtprogress := nntp.NewsgroupTransferProgressMap[ng.Name]
 	nntp.ResultsMutex.Unlock()
 
 	if dryRun {
 		if startTime != nil || endTime != nil {
-			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s (within specified date range)", totalArticles, ng.Name)
+			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s (within specified date range)", totalNGArticles, ng.Name)
 		} else {
-			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s", totalArticles, ng.Name)
+			log.Printf("DRY RUN: Would transfer %d articles from newsgroup %s", totalNGArticles, ng.Name)
 		}
 		if !debugCapture {
 			return nil
@@ -1296,15 +1291,15 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	}
 
 	if !dryRun && !debugCapture {
-		log.Printf("+ Found %d articles in newsgroup %s", totalArticles, ng.Name)
+		log.Printf("+ Found %d articles in newsgroup %s", totalNGArticles, ng.Name)
 	}
 
-	remainingArticles := totalArticles
+	remainingArticles := totalNGArticles
 	ttMode := &nntp.TakeThisMode{
 		Newsgroup: &ng.Name,
 		CheckMode: CHECK_FIRST,
 	}
-	ttResponses := make(chan *nntp.TTSetup, totalArticles/int64(batchCheck)+2)
+	ttResponses := make(chan *nntp.TTSetup, totalNGArticles/int64(batchCheck)+2)
 	start := time.Now()
 
 	// WaitGroup to ensure collector goroutine finishes before returning
@@ -1403,40 +1398,42 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		*/
 
 		nntp.ResultsMutex.Lock()
-		result := fmt.Sprintf("END Newsgroup: '%s' | transferred: %d/%d  | unwanted: %d | rejected: %d | checked: %d | redis: %d | TX_Errors: %d | connErrors: %d | took %v",
-			ng.Name, nntp.NewsgroupTransferProgressMap[ng.Name].Transferred,
-			totalArticles,
-			nntp.NewsgroupTransferProgressMap[ng.Name].Unwanted,
-			nntp.NewsgroupTransferProgressMap[ng.Name].Rejected,
-			nntp.NewsgroupTransferProgressMap[ng.Name].Checked,
-			nntp.NewsgroupTransferProgressMap[ng.Name].RedisCached,
-			nntp.NewsgroupTransferProgressMap[ng.Name].TxErrors,
-			nntp.NewsgroupTransferProgressMap[ng.Name].ConnErrors,
+		ngtprogress.Mux.Lock()
+
+		result := fmt.Sprintf("END Newsgroup: '%s' total: %d | transferred: %d | cache_hits: %d | checked: %d | wanted: %d | unwanted: %d | rejected: %d | retry: %d  | skipped: %d | TX_Errors: %d | connErrors: %d | took %v",
+			ng.Name, totalNGArticles,
+			ngtprogress.Transferred, ngtprogress.RedisCached, ngtprogress.Checked,
+			ngtprogress.Wanted, ngtprogress.Unwanted, ngtprogress.Rejected,
+			ngtprogress.Retry, ngtprogress.Skipped,
+			ngtprogress.TxErrors, ngtprogress.ConnErrors,
 			time.Since(start))
 
-		globalTotalArticles += uint64(totalArticles)
-		totalTransferred += nntp.NewsgroupTransferProgressMap[ng.Name].Transferred
-		totalRedisCacheHits += nntp.NewsgroupTransferProgressMap[ng.Name].RedisCached
-		totalUnwanted += nntp.NewsgroupTransferProgressMap[ng.Name].Unwanted
-		totalRejected += nntp.NewsgroupTransferProgressMap[ng.Name].Rejected
-		totalTXErrors += nntp.NewsgroupTransferProgressMap[ng.Name].TxErrors
-		totalConnErrors += nntp.NewsgroupTransferProgressMap[ng.Name].ConnErrors
-		results = append(results, result)
+		globalTotalArticles += uint64(totalNGArticles)
+		totalTransferred += ngtprogress.Transferred
+		totalRedisCacheHits += ngtprogress.RedisCached
+		totalWanted += ngtprogress.Wanted
+		totalUnwanted += ngtprogress.Unwanted
+		totalChecked += ngtprogress.Checked
+		totalRejected += ngtprogress.Rejected
+		totalRetry += ngtprogress.Retry
+		totalSkipped += ngtprogress.Skipped
+		totalTXErrors += ngtprogress.TxErrors
+		totalConnErrors += ngtprogress.ConnErrors
+
 		// Mark newsgroup as finished
-		if progress, exists := nntp.NewsgroupTransferProgressMap[ng.Name]; exists {
-			progress.Mux.Lock()
-			progress.Finished = true
-			progress.LastUpdated = time.Now()
-			progress.LastCronTX = progress.LastUpdated
-			progress.Mux.Unlock()
+		ngtprogress.Finished = true
+		ngtprogress.LastUpdated = time.Now()
+		ngtprogress.LastCronTX = ngtprogress.LastUpdated
+		ngtprogress.Mux.Unlock()
+
+		results = append(results, result)
+
+		for _, msgId := range rejectedArticles[ng.Name] {
+			// prints all at the end again
+			log.Printf("END Newsgroup: '%s' | REJECTED '%s'", ng.Name, msgId)
 		}
-		if VERBOSE {
-			for _, msgId := range rejectedArticles[ng.Name] {
-				// prints all at the end again
-				log.Printf("END Newsgroup: '%s' | REJECTED '%s'", ng.Name, msgId)
-			}
-			delete(rejectedArticles, ng.Name) // free memory
-		}
+		delete(rejectedArticles, ng.Name) // free memory
+
 		nntp.ResultsMutex.Unlock()
 	}(&responseWG)
 	OffsetQueue := &nntp.OffsetQueue{
@@ -1449,7 +1446,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	var offset int64
 
 	// Get articles in database batches (much larger than network batches)
-	for articlesProcessed < totalArticles {
+	for articlesProcessed < totalNGArticles {
 		if common.WantShutdown() {
 			log.Printf("WantShutdown in newsgroup: '%s' (processed %d articles)", ng.Name, articlesProcessed)
 			return nil
@@ -1485,7 +1482,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		for _, a := range articles {
 			size += a.Bytes
 		}
-		log.Printf("Newsgroup: '%s' | Loaded %d articles from database (processed %d/%d) (Bytes=%d) took %v", ng.Name, len(articles), articlesProcessed, totalArticles, size, time.Since(start))
+		log.Printf("Newsgroup: '%s' | Loaded %d articles from database (processed %d/%d) (Bytes=%d) took %v", ng.Name, len(articles), articlesProcessed, totalNGArticles, size, time.Since(start))
 		//}
 		// Process articles in network batches
 		for i := 0; i < len(articles); i += batchCheck {
@@ -1515,7 +1512,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		}
 		remainingArticles -= int64(len(articles))
 		if VERBOSE {
-			log.Printf("Newsgroup: '%s' | Pushed to queue (processed %d/%d) remaining: %d (Check=%t)", ng.Name, articlesProcessed, totalArticles, remainingArticles, ttMode.UseCHECK())
+			log.Printf("Newsgroup: '%s' | Pushed to queue (processed %d/%d) remaining: %d (Check=%t)", ng.Name, articlesProcessed, totalNGArticles, remainingArticles, ttMode.UseCHECK())
 			//log.Printf("Newsgroup: '%s' | Pushed (processed %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t)", ng.Name, articlesProcessed, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.GetMode())
 		}
 
@@ -1774,11 +1771,13 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		ttxBytes += uint64(txBytes)
 		if err != nil {
 			if err == common.ErrNoNewsgroups {
+				job.NGTProgress.Increment(nntp.IncrFLAG_SKIPPED, 1)
 				log.Printf("Newsgroup: '%s' | skipped TAKETHIS '%s': no newsgroups header", newsgroup, article.MessageID)
 				continue
 			}
 			conn.Unlock()
 			conn.ForceCloseConn()
+			job.NGTProgress.Increment(nntp.IncrFLAG_CONN_ERRORS, 1)
 			log.Printf("ERROR Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroup, article.MessageID, err)
 			return redis_cached, fmt.Errorf("failed to send TAKETHIS for %s: %v", article.MessageID, err)
 		}
@@ -3045,10 +3044,14 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 				<br><br>
 				<strong>Summary Statistics:</strong><br>
 				Total Articles: {{.TotalArticles}}<br>
-				Transferred: {{.TotalTransferred}}<br>
-				Redis Cache Hits: {{.TotalRedisCacheHits}}<br>
+				Cache Hits: {{.TotalRedisCacheHits}}<br>
+				Checked: {{.TotalChecked}}<br>
+				Wanted: {{.TotalWanted}}<br>
 				Unwanted: {{.TotalUnwanted}}<br>
+				Transferred: {{.TotalTransferred}}<br>
 				Rejected: {{.TotalRejected}}<br>
+				Retry: {{.TotalRetry}}<br>
+				Skipped: {{.TotalSkipped}}<br>
 				TX Errors: {{.TotalTXErrors}}<br>
 				Conn Errors: {{.TotalConnErrors}}
 			{{else}}
@@ -3061,10 +3064,14 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 				<br>
 				<strong>Live Statistics:</strong><br>
 				Total Articles: {{.TotalArticles}}<br>
-				Transferred: {{.TotalTransferred}}<br>
-				Redis Cache Hits: {{.TotalRedisCacheHits}}<br>
+				Cache Hits: {{.TotalRedisCacheHits}}<br>
+				Checked: {{.TotalChecked}}<br>
+				Wanted: {{.TotalWanted}}<br>
 				Unwanted: {{.TotalUnwanted}}<br>
+				Transferred: {{.TotalTransferred}}<br>
 				Rejected: {{.TotalRejected}}<br>
+				Retry: {{.TotalRetry}}<br>
+				Skipped: {{.TotalSkipped}}<br>
 				TX Errors: {{.TotalTXErrors}}<br>
 				Conn Errors: {{.TotalConnErrors}}
 			{{end}}
@@ -3223,6 +3230,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		TotalTransferred    uint64
 		TotalRedisCacheHits uint64
 		TotalUnwanted       uint64
+		TotalWanted         uint64
+		TotalChecked        uint64
 		TotalRejected       uint64
 		TotalTXErrors       uint64
 		TotalConnErrors     uint64
@@ -3242,6 +3251,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		TotalTransferred:    totalTransferred,
 		TotalRedisCacheHits: totalRedisCacheHits,
 		TotalUnwanted:       totalUnwanted,
+		TotalWanted:         totalWanted,
+		TotalChecked:        totalChecked,
 		TotalRejected:       totalRejected,
 		TotalTXErrors:       totalTXErrors,
 		TotalConnErrors:     totalConnErrors,

@@ -462,6 +462,7 @@ type NewsgroupTransferProgress struct {
 	RedisCached   uint64
 	TxErrors      uint64
 	ConnErrors    uint64
+	Skipped       uint64
 	ArticlesTT    uint64
 	ArticlesCH    uint64
 	Finished      bool
@@ -542,6 +543,7 @@ const IncrFLAG_TRANSFERRED = 6
 const IncrFLAG_REDIS_CACHED = 7
 const IncrFLAG_TX_ERRORS = 8
 const IncrFLAG_CONN_ERRORS = 9
+const IncrFLAG_SKIPPED = 10
 
 func (ntp *NewsgroupTransferProgress) Increment(counter int, n uint64) {
 	ntp.Mux.Lock()
@@ -565,6 +567,8 @@ func (ntp *NewsgroupTransferProgress) Increment(counter int, n uint64) {
 		ntp.TxErrors += n
 	case IncrFLAG_CONN_ERRORS:
 		ntp.ConnErrors += n
+	case IncrFLAG_SKIPPED:
+		ntp.Skipped += n
 	}
 }
 
