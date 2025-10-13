@@ -1311,13 +1311,13 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	var collectorWG sync.WaitGroup
 	collectorWG.Add(1)
 
-	// WaitGroup to track individual response channel processors
+	// WaitGroup to track individual batched jobs response channel processors
 	var responseWG sync.WaitGroup
 
 	go func(responseWG *sync.WaitGroup) {
 		defer collectorWG.Done()
 		var amux sync.Mutex
-		var transferred, unwanted, rejected, checked, txErrors, connErrors uint64
+		var transferred, unwanted, rejected, checked, redis_cached, txErrors, connErrors uint64
 		var num uint64
 		for setup := range ttResponses {
 			if setup == nil || setup.ResponseChan == nil {
@@ -1347,7 +1347,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 				}
 				// get numbers
 				amux.Lock()
-				resp.Job.GetUpdateCounters(&transferred, &unwanted, &rejected, &checked, &txErrors, &connErrors)
+				resp.Job.GetUpdateCounters(&transferred, &unwanted, &rejected, &checked, &redis_cached, &txErrors, &connErrors)
 				amux.Unlock()
 				if !resp.ForceCleanUp {
 					return
@@ -1398,9 +1398,11 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 
 		amux.Unlock()
 
-		ngtprogress.Mux.Lock()
-		redis_cached := ngtprogress.RedisCached
-		ngtprogress.Mux.Unlock()
+		/*
+			ngtprogress.Mux.Lock()
+			redis_cached := ngtprogress.RedisCached
+			ngtprogress.Mux.Unlock()
+		*/
 
 		nntp.ResultsMutex.Lock()
 		globalTotalArticles += uint64(totalArticles)
@@ -1578,7 +1580,7 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 
 	ttMode.FlipMode(lowerLevel, upperLevel)
 
-	batchedJob := &nntp.CHTTJob{
+	job := &nntp.CHTTJob{
 		JobID:        atomic.AddUint64(&nntp.JobIDCounter, 1),
 		Newsgroup:    ttMode.Newsgroup,
 		MessageIDs:   make([]*string, 0, len(articles)),
@@ -1592,7 +1594,7 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 		OffsetQ:      offsetQ,
 		NGTProgress:  ngtprogress,
 	}
-	var redis_cache_hits int
+	var redis_cached uint64
 	if redisCli != nil && len(articles) > 0 {
 		pipe := redisCli.Pipeline()
 		cmds := make([]*redis.IntCmd, len(articles))
@@ -1611,28 +1613,36 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 			log.Printf("Newsgroup: '%s' | Redis pipeline error: %v", *ttMode.Newsgroup, err)
 		}
 
-		// Process results
+		// Process results and filter cached articles
 		for i, cmd := range cmds {
 			if cmd == nil || articles[i] == nil {
-				continue
+				continue // Skip if command wasn't queued or article is nil
 			}
 			article := articles[i]
 			exists, cmdErr := cmd.Result()
 			if cmdErr == nil && exists > 0 {
 				// Cached in Redis - skip this article
 				if VERBOSE {
-					log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis (skip [CHECK])", *ttMode.Newsgroup, article.MessageID)
+					log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis in job #%d (skip CHECK)", *ttMode.Newsgroup, article.MessageID, job.JobID)
 				}
-				batchedJob.Increment(nntp.IncrFLAG_REDIS_CACHED, 1)
-				redis_cache_hits++
+				job.Increment(nntp.IncrFLAG_REDIS_CACHED, 1)
+				redis_cached++
 				articles[i] = nil
 				continue
 			}
-
 			// Not cached - add to valid list
-			batchedJob.Articles = append(batchedJob.Articles, article)
-			batchedJob.ArticleMap[&article.MessageID] = article
-			batchedJob.MessageIDs = append(batchedJob.MessageIDs, &article.MessageID)
+			job.Articles = append(job.Articles, article)
+			job.ArticleMap[&article.MessageID] = article
+			job.MessageIDs = append(job.MessageIDs, &article.MessageID)
+		}
+		if redis_cached == uint64(len(articles)) {
+			if VERBOSE {
+				log.Printf("Newsgroup: '%s' | All %d articles in batch are cached in Redis in job #%d (skip CHECK)", *ttMode.Newsgroup, len(articles), job.JobID)
+			}
+			return job.QuitResponseChan(), nil
+		}
+		if VERBOSE && redis_cached > 0 {
+			log.Printf("Newsgroup: '%s' | Redis got %d/%d cached articles in job #%d (before CHECK)", *ttMode.Newsgroup, redis_cached, len(articles), job.JobID)
 		}
 	} else {
 		// No Redis - add all non-nil message IDs
@@ -1640,25 +1650,24 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 			if article == nil {
 				continue
 			}
-			batchedJob.Articles = append(batchedJob.Articles, article)
-			batchedJob.ArticleMap[&article.MessageID] = article
-			batchedJob.MessageIDs = append(batchedJob.MessageIDs, &article.MessageID)
+			job.Articles = append(job.Articles, article)
+			job.ArticleMap[&article.MessageID] = article
+			job.MessageIDs = append(job.MessageIDs, &article.MessageID)
 		}
 	}
-
-	if len(batchedJob.MessageIDs) == 0 {
-		log.Printf("Newsgroup: '%s' | No message IDs to check in batch. (redis_cache_hits: %d)", *ttMode.Newsgroup, redis_cache_hits)
-		return batchedJob.QuitResponseChan(), nil
+	if len(job.MessageIDs) == 0 {
+		log.Printf("Newsgroup: '%s' | No message IDs to check in batch. (redis_cache_hits: %d)", *ttMode.Newsgroup, redis_cached)
+		return job.QuitResponseChan(), nil
 	}
 	if VERBOSE {
-		log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d/%d articles", *ttMode.Newsgroup, len(batchedJob.MessageIDs), len(articles))
+		log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d/%d articles", *ttMode.Newsgroup, len(job.MessageIDs), len(articles))
 	}
 
 	// Assign job to worker (consistent assignment + load balancing)
 	QueuesMutex.RLock()
 	if len(CheckQueues) == 0 {
 		QueuesMutex.RUnlock()
-		log.Printf("Newsgroup: '%s' | No workers available to process batch job #%d with %d message IDs", *ttMode.Newsgroup, batchedJob.JobID, len(batchedJob.MessageIDs))
+		log.Printf("Newsgroup: '%s' | No workers available to process batch job #%d with %d message IDs", *ttMode.Newsgroup, job.JobID, len(job.MessageIDs))
 		return nil, fmt.Errorf("no workers available")
 	}
 	QueuesMutex.RUnlock()
@@ -1668,11 +1677,11 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 	WorkersCheckChannel := CheckQueues[workerID]
 	QueuesMutex.RUnlock()
 
-	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queue job #%d with %d message IDs. CheckQ=%d", *ttMode.Newsgroup, workerID, batchedJob.JobID, len(batchedJob.MessageIDs), len(CheckQueues[workerID]))
+	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queue job #%d with %d message IDs. CheckQ=%d", *ttMode.Newsgroup, workerID, job.JobID, len(job.MessageIDs), len(CheckQueues[workerID]))
 
-	WorkersCheckChannel <- batchedJob // checkQueue <- batchedJob
-	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queued Job #%d", *ttMode.Newsgroup, workerID, batchedJob.JobID)
-	return batchedJob.ReturnResponseChan(), nil
+	WorkersCheckChannel <- job // checkQueue <- job
+	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queued Job #%d", *ttMode.Newsgroup, workerID, job.JobID)
+	return job.ReturnResponseChan(), nil
 } // end func processBatch
 
 // sendArticlesBatchViaTakeThis sends multiple articles via TAKETHIS in streaming mode
@@ -1684,9 +1693,6 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 
 	// Phase 1: Send all TAKETHIS commands without waiting for responses
 	//log.Printf("Phase 1: Sending %d TAKETHIS commands...", len(articles))
-
-	//commandIDs := make([]uint, 0, len(articles))
-	//checkArticles := make([]*models.Article, 0, len(articles))
 
 	// Batch check Redis cache using pipeline before sending TAKETHIS
 	if redisCli != nil {
@@ -1717,18 +1723,27 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			if cmdErr == nil && exists > 0 {
 				// Cached in Redis - skip this article
 				if VERBOSE {
-					log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis (skip [TAKETHIS])", newsgroup, articles[i].MessageID)
+					log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis in job #%d (skip [TAKETHIS])", newsgroup, articles[i].MessageID, job.JobID)
 				}
-				articles[i] = nil // free memory
+				job.Increment(nntp.IncrFLAG_REDIS_CACHED, 1)
 				redis_cached++
+				articles[i] = nil // free memory
 				continue
 			}
 			// Not cached - will be sent
 		}
+		if redis_cached == uint64(len(articles)) {
+			if VERBOSE {
+				log.Printf("Newsgroup: '%s' | All %d articles are cached in Redis in job #%d (skip TAKETHIS)", newsgroup, len(articles), job.JobID)
+			}
+			return redis_cached, nil
+		}
+		if VERBOSE && redis_cached > 0 {
+			log.Printf("Newsgroup: '%s' | Redis got %d/%d cached articles in job #%d (before TAKETHIS)", newsgroup, redis_cached, len(articles), job.JobID)
+		}
 	}
 
 	// Now send TAKETHIS for non-cached articles
-	// Tracker registration happens inside SendTakeThisArticleStreaming (like SendCheckMultiple)
 	var sentCount int
 	conn.Lock()
 	var ttxBytes uint64
@@ -1737,7 +1752,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	astart2 := start
 	for _, article := range articles {
 		if article == nil {
-			continue // Skip cached articles
+			continue // Skip cached article
 		}
 		astart = time.Now()
 		// Send TAKETHIS command with article content (non-blocking)
@@ -2260,7 +2275,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					}
 					break
 				}
-				currentJob.OffsetQ.Done()
+				currentJob.OffsetQ.OffsetBatchDone()
 				if currentJob.TTMode.UseCHECK() {
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d waits to check %d message IDs in batches of %d", *currentJob.Newsgroup, workerID, currentJob.JobID, len(currentJob.MessageIDs), BatchCheck)
 
@@ -2469,10 +2484,22 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				case 438:
 					//log.Printf("Newsgroup: '%s' | Got Response: Unwanted Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
 					job.Increment(nntp.IncrFLAG_UNWANTED, 1)
+					if rs.redisCli != nil {
+						err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err()
+						if err != nil && VERBOSE {
+							log.Printf("Newsgroup: '%s' | Failed to cache rejected message ID in Redis: %v", *rr.Job.Newsgroup, err)
+						}
+					}
 
 				case 431:
 					//log.Printf("Newsgroup: '%s' | Got Response: Retry Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
 					job.Increment(nntp.IncrFLAG_RETRY, 1)
+					if rs.redisCli != nil {
+						err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err()
+						if err != nil && VERBOSE {
+							log.Printf("Newsgroup: '%s' | Failed to cache rejected message ID in Redis: %v", *rr.Job.Newsgroup, err)
+						}
+					}
 
 				default:
 					log.Printf("Newsgroup: '%s' | Unknown CHECK response: line='%s' code=%d expected msgID %s", *job.Newsgroup, respData.Line, respData.Code, *rr.MsgID)
@@ -2688,7 +2715,6 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 			// Send TAKETHIS commands using existing function
 			redis_cached, err := sendArticlesBatchViaTakeThis(conn, wantedArticles, job, *job.Newsgroup, rs.redisCli, demuxer, readTAKETHISResponsesChan)
 			//common.ChanRelease(flipflopChan)
-			job.Increment(nntp.IncrFLAG_REDIS_CACHED, redis_cached)
 			rs.BlockTT()
 			if err != nil {
 				log.Printf("Newsgroup: '%s' | TTworker (%d): Error in TAKETHIS job #%d: %v", *job.Newsgroup, workerID, job.JobID, err)
@@ -3154,7 +3180,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 
 		progressList = append(progressList, ProgressInfo{
 			Name:          name,
-			OffsetStart:   progress.OffsetStart + progress.BatchStart,
+			OffsetStart:   progress.OffsetStart,
 			BatchStart:    progress.BatchStart,
 			BatchEnd:      progress.BatchEnd,
 			TotalArticles: progress.TotalArticles,

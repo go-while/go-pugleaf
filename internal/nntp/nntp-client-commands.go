@@ -282,7 +282,7 @@ func (o *OffsetQueue) Wait(n int) {
 
 			o.mux.Lock()
 			if time.Since(start).Milliseconds() > 1000 {
-				log.Printf("OffsetQueue: waited (%d ms) for %d batches to finish, currently queued: %d", time.Since(start).Milliseconds(), n, o.queued)
+				log.Printf("Newsgroup: '%s' | OffsetQueue: waited (%d ms) for %d batches to finish, currently queued: %d", *o.Newsgroup, time.Since(start).Milliseconds(), n, o.queued)
 			}
 			o.isleep = o.isleep / 2
 			if o.isleep < time.Millisecond {
@@ -291,8 +291,11 @@ func (o *OffsetQueue) Wait(n int) {
 			o.mux.Unlock()
 			return
 		}
-		if time.Since(lastPrint) > time.Second {
-			log.Printf("OffsetQueue: waiting for batches to finish, currently queued: %d", o.queued)
+		if time.Since(lastPrint) > time.Second*5 {
+			if common.WantShutdown() {
+				return
+			}
+			log.Printf("Newsgroup: '%s' | OffsetQueue: waiting for batches to finish, currently queued: %d", *o.Newsgroup, o.queued)
 			lastPrint = time.Now()
 		}
 		o.mux.RUnlock()
@@ -306,7 +309,7 @@ func (o *OffsetQueue) Wait(n int) {
 	}
 }
 
-func (o *OffsetQueue) Done() {
+func (o *OffsetQueue) OffsetBatchDone() {
 	o.mux.Lock()
 	defer o.mux.Unlock()
 	o.queued--
@@ -404,10 +407,12 @@ func (job *CHTTJob) ReturnResponseChan() chan *TTResponse {
 }
 
 func (job *CHTTJob) QuitResponseChan() chan *TTResponse {
+	job.OffsetQ.OffsetBatchDone()
 	job.Response(true, nil)
 	job.Mux.RLock()
 	defer job.Mux.RUnlock()
 	if job.ResponseChan != nil {
+		log.Printf("Newsgroup: '%s' | CHTTJob.QuitResponseChan(): returning closed ResponseChan for job #%d", *job.Newsgroup, job.JobID)
 		return job.ResponseChan
 	}
 	return nil
@@ -439,10 +444,11 @@ var NewsgroupTransferProgressMap = make(map[string]*NewsgroupTransferProgress)
 
 // NewsgroupProgress tracks the progress of a newsgroup transfer
 type NewsgroupTransferProgress struct {
-	Mux           sync.RWMutex
-	Newsgroup     *string
-	Started       time.Time
-	LastUpdated   time.Time
+	Mux         sync.RWMutex
+	Newsgroup   *string
+	Started     time.Time
+	LastUpdated time.Time
+
 	OffsetStart   int64
 	BatchStart    int64
 	BatchEnd      int64
@@ -561,12 +567,13 @@ func (job *CHTTJob) AppendWantedMessageID(msgID *string) {
 	job.Increment(IncrFLAG_WANTED, 1)
 }
 
-func (job *CHTTJob) GetUpdateCounters(transferred, unwanted, rejected, checked, txErrors, connErrors *uint64) {
+func (job *CHTTJob) GetUpdateCounters(transferred, unwanted, rejected, checked, redisCached, txErrors, connErrors *uint64) {
 	job.Mux.Lock()
 	*transferred += job.transferred
 	*unwanted += job.unwanted
 	*rejected += job.rejected
 	*checked += job.checked
+	*redisCached += job.redisCached
 	*txErrors += job.TxErrors
 	*connErrors += job.ConnErrors
 	job.Mux.Unlock()
