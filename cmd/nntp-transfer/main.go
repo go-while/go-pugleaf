@@ -1316,8 +1316,8 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 
 	go func(responseWG *sync.WaitGroup) {
 		defer collectorWG.Done()
-		var amux sync.Mutex
-		var transferred, unwanted, rejected, checked, redis_cached, txErrors, connErrors uint64
+		//var amux sync.Mutex
+		//var transferred, unwanted, rejected, checked, redis_cached, txErrors, connErrors uint64
 		var num uint64
 		for setup := range ttResponses {
 			if setup == nil || setup.ResponseChan == nil {
@@ -1346,9 +1346,9 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 					return
 				}
 				// get numbers
-				amux.Lock()
-				resp.Job.GetUpdateCounters(&transferred, &unwanted, &rejected, &checked, &redis_cached, &txErrors, &connErrors)
-				amux.Unlock()
+				//amux.Lock()
+				//resp.Job.GetUpdateCounters(&transferred, &unwanted, &rejected, &checked, &redis_cached, &txErrors, &connErrors)
+				//amux.Unlock()
 				if !resp.ForceCleanUp {
 					return
 				}
@@ -1392,11 +1392,9 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		if VERBOSE {
 			log.Printf("Newsgroup: '%s' | Collector: all response processors closed", ng.Name)
 		}
-		amux.Lock()
-		result := fmt.Sprintf("END Newsgroup: '%s' | transferred: %d/%d  | unwanted: %d | rejected: %d | checked: %d | TX_Errors: %d | connErrors: %d | took %v",
-			ng.Name, transferred, totalArticles, unwanted, rejected, checked, txErrors, connErrors, time.Since(start))
+		//amux.Lock()
 
-		amux.Unlock()
+		//amux.Unlock()
 
 		/*
 			ngtprogress.Mux.Lock()
@@ -1405,21 +1403,30 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		*/
 
 		nntp.ResultsMutex.Lock()
+		result := fmt.Sprintf("END Newsgroup: '%s' | transferred: %d/%d  | unwanted: %d | rejected: %d | checked: %d | redis: %d | TX_Errors: %d | connErrors: %d | took %v",
+			ng.Name, nntp.NewsgroupTransferProgressMap[ng.Name].Transferred,
+			totalArticles,
+			nntp.NewsgroupTransferProgressMap[ng.Name].Unwanted,
+			nntp.NewsgroupTransferProgressMap[ng.Name].Rejected,
+			nntp.NewsgroupTransferProgressMap[ng.Name].Checked,
+			nntp.NewsgroupTransferProgressMap[ng.Name].RedisCached,
+			nntp.NewsgroupTransferProgressMap[ng.Name].TxErrors,
+			nntp.NewsgroupTransferProgressMap[ng.Name].ConnErrors,
+			time.Since(start))
+
 		globalTotalArticles += uint64(totalArticles)
-		totalTransferred += transferred
-		totalRedisCacheHits += redis_cached
-		totalUnwanted += unwanted
-		totalRejected += rejected
-		totalTXErrors += txErrors
-		totalConnErrors += connErrors
+		totalTransferred += nntp.NewsgroupTransferProgressMap[ng.Name].Transferred
+		totalRedisCacheHits += nntp.NewsgroupTransferProgressMap[ng.Name].RedisCached
+		totalUnwanted += nntp.NewsgroupTransferProgressMap[ng.Name].Unwanted
+		totalRejected += nntp.NewsgroupTransferProgressMap[ng.Name].Rejected
+		totalTXErrors += nntp.NewsgroupTransferProgressMap[ng.Name].TxErrors
+		totalConnErrors += nntp.NewsgroupTransferProgressMap[ng.Name].ConnErrors
 		results = append(results, result)
 		// Mark newsgroup as finished
 		if progress, exists := nntp.NewsgroupTransferProgressMap[ng.Name]; exists {
 			progress.Mux.Lock()
 			progress.Finished = true
 			progress.LastUpdated = time.Now()
-			progress.TXBytes += progress.TXBytesTMP
-			progress.TXBytesTMP = 0
 			progress.LastCronTX = progress.LastUpdated
 			progress.Mux.Unlock()
 		}
@@ -1625,7 +1632,7 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 				if VERBOSE {
 					log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis in job #%d (skip CHECK)", *ttMode.Newsgroup, article.MessageID, job.JobID)
 				}
-				job.Increment(nntp.IncrFLAG_REDIS_CACHED, 1)
+				job.NGTProgress.Increment(nntp.IncrFLAG_REDIS_CACHED, 1)
 				redis_cached++
 				articles[i] = nil
 				continue
@@ -1725,7 +1732,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 				if VERBOSE {
 					log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis in job #%d (skip [TAKETHIS])", newsgroup, articles[i].MessageID, job.JobID)
 				}
-				job.Increment(nntp.IncrFLAG_REDIS_CACHED, 1)
+				job.NGTProgress.Increment(nntp.IncrFLAG_REDIS_CACHED, 1)
 				redis_cached++
 				articles[i] = nil // free memory
 				continue
@@ -2426,8 +2433,8 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				took := time.Since(start)
 				tookTime += took
 				responseCount++
-				rr.Job.Increment(nntp.IncrFLAG_CHECKED, 1)
-				if rr.N == 1 && took.Milliseconds() > 100 {
+				rr.Job.NGTProgress.Increment(nntp.IncrFLAG_CHECKED, 1)
+				if rr.N == 1 && took.Milliseconds() > 1000 {
 					log.Printf("CheckWorker (%d): time to first response for msgID: %s (cmdID=%d MID=%d/%d) took: %v ms", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, took.Milliseconds())
 					tookTime = 0
 				} else if responseCount >= 10000 {
@@ -2483,7 +2490,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 
 				case 438:
 					//log.Printf("Newsgroup: '%s' | Got Response: Unwanted Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
-					job.Increment(nntp.IncrFLAG_UNWANTED, 1)
+					job.NGTProgress.Increment(nntp.IncrFLAG_UNWANTED, 1)
 					if rs.redisCli != nil {
 						err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err()
 						if err != nil && VERBOSE {
@@ -2493,7 +2500,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 
 				case 431:
 					//log.Printf("Newsgroup: '%s' | Got Response: Retry Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
-					job.Increment(nntp.IncrFLAG_RETRY, 1)
+					job.NGTProgress.Increment(nntp.IncrFLAG_RETRY, 1)
 					if rs.redisCli != nil {
 						err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err()
 						if err != nil && VERBOSE {
@@ -2603,7 +2610,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				if respData.Err != nil {
 					log.Printf("ERROR TTResponseWorker (%d): Failed to read TAKETHIS response for %s: %v",
 						workerID, *rr.MsgID, respData.Err)
-					rr.Job.Increment(nntp.IncrFLAG_CONN_ERRORS, 1)
+					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_CONN_ERRORS, 1)
 					rr.ClearReadRequest()
 					conn.ForceCloseConn()
 					return
@@ -2620,7 +2627,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				switch respData.Code {
 				case 239:
 					rr.Job.TTMode.IncrementSuccess()
-					rr.Job.Increment(nntp.IncrFLAG_TRANSFERRED, 1)
+					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_TRANSFERRED, 1)
 					// Cache in Redis if enabled (inline, no separate tracker struct needed)
 					if rs.redisCli != nil {
 						err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err()
@@ -2630,7 +2637,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					}
 
 				case 439:
-					rr.Job.Increment(nntp.IncrFLAG_REJECTED, 1)
+					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_REJECTED, 1)
 					// Cache rejection in Redis if enabled
 					if rs.redisCli != nil {
 						err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err()
@@ -2639,14 +2646,13 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 						}
 					}
 					if VERBOSE {
-						log.Printf("Newsgroup: '%s' | Rejected article '%s': response=%d",
-							*rr.Job.Newsgroup, *rr.MsgID, respData.Code)
+						log.Printf("Newsgroup: '%s' | Rejected article '%s': response=%d", *rr.Job.Newsgroup, *rr.MsgID, respData.Code)
 					}
 
 				case 400, 480, 500, 501, 502, 503, 504:
 					log.Printf("ERROR Newsgroup: '%s' | Failed to transfer article '%s': response=%d",
 						*rr.Job.Newsgroup, *rr.MsgID, respData.Code)
-					rr.Job.Increment(nntp.IncrFLAG_TX_ERRORS, 1)
+					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_TX_ERRORS, 1)
 					rr.ClearReadRequest()
 					conn.ForceCloseConn()
 					return
@@ -2654,7 +2660,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				default:
 					log.Printf("ERROR Newsgroup: '%s' | Failed to transfer article '%s': unknown response=%d",
 						*rr.Job.Newsgroup, *rr.MsgID, respData.Code)
-					rr.Job.Increment(nntp.IncrFLAG_TX_ERRORS, 1)
+					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_TX_ERRORS, 1)
 				}
 
 				rr.ClearReadRequest()
