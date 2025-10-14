@@ -23,6 +23,41 @@ const (
 	TYPE_TAKETHIS
 )
 
+// Pool of ResponseData structs to reduce allocations
+var ResponseDataPool = make(chan *ResponseData, 64*1024)
+
+// GetResponseData returns a recycled ResponseData struct or makes a new one if none are available
+func GetResponseData(cmdID uint, code int, line string, err error) *ResponseData {
+	select {
+	case rd := <-ResponseDataPool:
+		rd.CmdID = cmdID
+		rd.Code = code
+		rd.Line = line
+		rd.Err = err
+		return rd
+	default:
+		return &ResponseData{
+			CmdID: cmdID,
+			Code:  code,
+			Line:  line,
+			Err:   err,
+		}
+	}
+}
+
+// RecycleResponseData resets a ResponseData struct and recycles it back into the pool
+func RecycleResponseData(rd *ResponseData) {
+	rd.CmdID = 0
+	rd.Code = 0
+	rd.Line = ""
+	rd.Err = nil
+	select {
+	case ResponseDataPool <- rd:
+	default:
+		// pool is full, discard
+	}
+}
+
 // ResponseData holds a read response from the connection
 type ResponseData struct {
 	CmdID uint
@@ -46,9 +81,36 @@ type TakeThisMode struct {
 	CheckMode       bool
 }
 
+// TTSetup holds the response channel for a batched TAKETHIS job
 type TTSetup struct {
 	ResponseChan chan *TTResponse
-	OffsetQ      *OffsetQueue
+}
+
+// Pool of TTSetup structs to reduce allocations
+var TTSetupPool = make(chan *TTSetup, 64*1024)
+
+// GetTTSetup returns a recycled TTSetup struct or makes a new one if none are available
+// the responseChan parameter is received from processBatch() and is mandatory and will be set on the returned struct
+func GetTTSetup(responseChan chan *TTResponse) *TTSetup {
+	select {
+	case ch := <-TTSetupPool:
+		ch.ResponseChan = responseChan
+		return ch
+	default:
+		return &TTSetup{
+			ResponseChan: responseChan,
+		}
+	}
+}
+
+// RecycleTTSetup recycles a TTSetup struct back into the pool
+func RecycleTTSetup(tts *TTSetup) {
+	tts.ResponseChan = nil
+	select {
+	case TTSetupPool <- tts:
+	default:
+		// pool is full, discard
+	}
 }
 
 // OffsetQueue manages the number of concurrent batches being processed for a newsgroup
@@ -136,10 +198,77 @@ func (o *OffsetQueue) Add(n int) {
 	}
 }
 
+// TTResponse holds the response for a batched TAKETHIS job
 type TTResponse struct {
 	Job          *CHTTJob
 	ForceCleanUp bool
 	Err          error
+}
+
+// Pool of TTResponse structs to reduce allocations
+var TTResponsePool = make(chan *TTResponse, 64*1024)
+
+// GetTTResponse returns a recycled TTResponse struct or makes a new one if none are available
+func GetTTResponse(job *CHTTJob, forceCleanup bool, err error) *TTResponse {
+	select {
+	case resp := <-TTResponsePool:
+		resp.Job = job
+		resp.ForceCleanUp = forceCleanup
+		resp.Err = err
+		return resp
+	default:
+		return &TTResponse{
+			Job:          job,
+			ForceCleanUp: forceCleanup,
+			Err:          err,
+		}
+	}
+}
+
+// RecycleTTResponse resets a TTResponse struct and recycles it back into the pool
+func RecycleTTResponse(resp *TTResponse) {
+	resp.Job = nil
+	resp.ForceCleanUp = false
+	resp.Err = nil
+	select {
+	case TTResponsePool <- resp:
+	default:
+		// pool is full, discard
+	}
+}
+
+// Pool of TTResponse chans to reduce allocations
+var TTResponseChans = make(chan chan *TTResponse, 16384)
+
+// GetTTResponseChan returns a recycled chan *TTResponse or makes a new one with capacity of 1 if none are available
+func GetTTResponseChan() chan *TTResponse {
+	select {
+	case ch := <-TTResponseChans:
+		return ch
+	default:
+		return make(chan *TTResponse, 1)
+	}
+}
+
+func RecycleTTResponseChan(ch chan *TTResponse) {
+	if cap(ch) != 1 {
+		log.Printf("Warning: Attempt to recycle chan *TTResponse with wrong capacity: %d", cap(ch))
+		return
+	}
+	// empty out the channel
+	select {
+	case <-ch:
+		// successfully emptied
+	default:
+		// is already empty
+	}
+	// park
+	select {
+	case TTResponseChans <- ch:
+		// successfully recycled
+	default:
+		// channel pool is full, discard
+	}
 }
 
 type CheckResponse struct { // deprecated
@@ -150,29 +279,69 @@ type CheckResponse struct { // deprecated
 type ReadRequest struct {
 	CmdID uint
 	Job   *CHTTJob
+	MsgID *string
 	N     int
 	Reqs  int
-	MsgID *string
 }
 
-func (rr *ReadRequest) ClearReadRequest() {
+// Pool of ReadRequest structs to reduce allocations
+var ReadRequestsPool = make(chan *ReadRequest, 65536)
+
+// ClearReadRequest resets a ReadRequest struct and recycles it back into the pool
+func (rr *ReadRequest) ClearReadRequest(respData *ResponseData) {
+	rr.CmdID = 0
 	rr.Job = nil
 	rr.MsgID = nil
-	rr = nil
+	rr.N = 0
+	rr.Reqs = 0
+	RecycleReadRequest(rr)
+	if respData != nil {
+		RecycleResponseData(respData)
+	}
+}
+
+// GetReadRequest returns a recycled ReadRequest struct or makes a new one if none are available
+func GetReadRequest(CmdID uint, Job *CHTTJob, MsgID *string, n int, reqs int) *ReadRequest {
+	select {
+	case rr := <-ReadRequestsPool:
+		rr.CmdID = CmdID
+		rr.Job = Job
+		rr.MsgID = MsgID
+		rr.N = n
+		rr.Reqs = reqs
+		return rr
+	default:
+		return &ReadRequest{
+			CmdID: CmdID,
+			Job:   Job,
+			MsgID: MsgID,
+			N:     n,
+			Reqs:  reqs,
+		}
+	}
+}
+
+func RecycleReadRequest(rr *ReadRequest) {
+	select {
+	case ReadRequestsPool <- rr:
+	default:
+		// pool is full, discard
+	}
 }
 
 // batched CHECK/TAKETHIS Job
 type CHTTJob struct {
-	JobID        uint64 // Unique job ID for tracing
-	Newsgroup    *string
-	Mux          sync.RWMutex
-	TTMode       *TakeThisMode
-	ResponseChan chan *TTResponse
-	responseSent bool // Track if response already sent (prevents double send)
-	Articles     []*models.Article
-	ArticleMap   map[*string]*models.Article
-	MessageIDs   []*string
-	WantedIDs    []*string
+	JobID            uint64 // Unique job ID for tracing
+	Newsgroup        *string
+	Mux              sync.RWMutex
+	TTMode           *TakeThisMode
+	ResponseChan     chan *TTResponse
+	responseSent     bool // Track if response already sent (prevents double send)
+	Articles         []*models.Article
+	ArticleMap       map[*string]*models.Article
+	MessageIDs       []*string
+	WantedIDs        []*string
+	PendingResponses sync.WaitGroup // Track pending TAKETHIS responses
 	//checked      uint64
 	//wanted       uint64
 	//unwanted     uint64
@@ -191,8 +360,8 @@ type CHTTJob struct {
 	NGTProgress *NewsgroupTransferProgress
 }
 
-// ReturnResponseChan returns the ResponseChan for the job
-func (job *CHTTJob) ReturnResponseChan() chan *TTResponse {
+// GetResponseChan returns the ResponseChan for the job
+func (job *CHTTJob) GetResponseChan() chan *TTResponse {
 	job.Mux.RLock()
 	defer job.Mux.RUnlock()
 	if job.ResponseChan != nil {
@@ -231,8 +400,8 @@ func (job *CHTTJob) Response(ForceCleanUp bool, Err error) {
 	job.responseSent = true
 	job.Mux.Unlock()
 
-	job.ResponseChan <- &TTResponse{Job: job, ForceCleanUp: ForceCleanUp, Err: Err}
-	close(job.ResponseChan)
+	job.ResponseChan <- GetTTResponse(job, ForceCleanUp, Err)
+	//close(job.ResponseChan)
 }
 
 // NewsgroupTransferProgressMap is protected by ResultsMutex, used in nntp-transfer/main.go

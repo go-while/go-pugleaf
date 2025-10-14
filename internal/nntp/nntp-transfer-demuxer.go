@@ -27,8 +27,8 @@ func NewResponseDemuxer(conn *BackendConn, errChan chan struct{}, BatchCheck int
 	return &ResponseDemuxer{
 		conn:              conn,
 		signalChan:        make(chan struct{}, 1),
-		checkResponseChan: make(chan *ResponseData, 128000), // Buffer for CHECK responses
-		ttResponseChan:    make(chan *ResponseData, 128000), // Buffer for TAKETHIS responses
+		checkResponseChan: make(chan *ResponseData, 64*1024), // Buffer for CHECK responses
+		ttResponseChan:    make(chan *ResponseData, 64*1024), // Buffer for TAKETHIS responses
 		errChan:           errChan,
 		started:           false,
 	}
@@ -171,18 +171,11 @@ func (d *ResponseDemuxer) readAndDispatch() {
 			log.Printf("ResponseDemuxer: error reading response for cmdID=%d: %v", cmdInfo.CmdID, err)
 			return
 		}
-		respData := &ResponseData{
-			CmdID: cmdInfo.CmdID,
-			Code:  code,
-			Line:  line,
-			Err:   err,
-		}
 		// Dispatch based on registered type
-
 		switch cmdInfo.RespType {
 		case TYPE_CHECK:
 			select {
-			case d.checkResponseChan <- respData:
+			case d.checkResponseChan <- GetResponseData(cmdInfo.CmdID, code, line, err):
 				// Dispatched successfully
 				//log.Printf("ResponseDemuxer: dispatched CHECK response cmdID=%d d.checkResponseChan=%d", cmdInfo.CmdID, len(d.checkResponseChan))
 			case <-d.errChan:
@@ -193,7 +186,7 @@ func (d *ResponseDemuxer) readAndDispatch() {
 
 		case TYPE_TAKETHIS:
 			select {
-			case d.ttResponseChan <- respData:
+			case d.ttResponseChan <- GetResponseData(cmdInfo.CmdID, code, line, err):
 				// Dispatched successfully
 				//log.Printf("ResponseDemuxer: dispatched TAKETHIS response cmdID=%d d.ttResponseChan=%d", cmdInfo.CmdID, len(d.ttResponseChan))
 			case <-d.errChan:

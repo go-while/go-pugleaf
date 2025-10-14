@@ -1069,7 +1069,8 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponses
 		demuxer.RegisterCommand(cmdID, TYPE_CHECK)
 
 		//log.Printf("Newsgroup: '%s' | CHECK sent '%s' (CmdID=%d) pass notify to readResponsesChan=%d", *job.Newsgroup, *msgID, cmdID, len(readCHECKResponsesChan))
-		readCHECKResponsesChan <- &ReadRequest{CmdID: cmdID, Job: job, MsgID: msgID, N: n + 1, Reqs: len(messageIDs)}
+		//readCHECKResponsesChan <- &ReadRequest{CmdID: cmdID, Job: job, MsgID: msgID, N: n + 1, Reqs: len(messageIDs)}
+		readCHECKResponsesChan <- GetReadRequest(cmdID, job, msgID, n+1, len(messageIDs))
 		//log.Printf("Newsgroup: '%s' | CHECK notified response reader '%s' (CmdID=%d) readCHECKResponsesChan=%d", *job.Newsgroup, *msgID, cmdID, len(readCHECKResponsesChan))
 	}
 	return nil
@@ -1079,7 +1080,7 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponses
 // sends TAKETHIS command and article content without waiting for response
 // Returns command ID for later response reading - used for streaming mode
 // Registers the command ID with the demuxer for proper response routing
-func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string, demuxer *ResponseDemuxer, readTAKETHISResponsesChan chan *ReadRequest, job *CHTTJob) (cmdID uint, txBytes int, err error) {
+func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string, demuxer *ResponseDemuxer, readTAKETHISResponsesChan chan *ReadRequest, job *CHTTJob, n int, reqs int) (cmdID uint, txBytes int, err error) {
 	//start := time.Now()
 	//c.mux.Lock()
 	//defer c.mux.Unlock()
@@ -1173,7 +1174,8 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 
 	//log.Printf("Newsgroup: '%s' | TAKETHIS flushed CmdID=%d '%s' (flushing took: %v) total time: %v readTAKETHISResponsesChan=%d/%d", newsgroup, cmdID, article.MessageID, time.Since(startFlush), time.Since(start), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
 	// Queue ReadRequest IMMEDIATELY after command (like SendCheckMultiple does at line 1608)
-	readTAKETHISResponsesChan <- &ReadRequest{CmdID: cmdID, Job: job, MsgID: &article.MessageID, N: 1, Reqs: 1}
+	//readTAKETHISResponsesChan <- &ReadRequest{CmdID: cmdID, Job: job, MsgID: &article.MessageID, N: 1, Reqs: 1}
+	readTAKETHISResponsesChan <- GetReadRequest(cmdID, job, &article.MessageID, n+1, reqs) // reuse global struct to reduce GC pressure
 	//log.Printf("Newsgroup: '%s' | TAKETHIS notified response reader CmdID=%d '%s' waited %v readTAKETHISResponsesChan=%d/%d", newsgroup, cmdID, article.MessageID, time.Since(chanStart), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
 	// Return command ID without reading response (streaming mode)
 	return cmdID, txBytes, nil
