@@ -16,7 +16,7 @@ var VERBOSE_HEADERS bool = false
 var IgnoreGoogleHeaders bool = false
 var UseStrictGroupValidation bool = false
 var ErrNoNewsgroups = fmt.Errorf("ErrNoNewsgroups")
-var unwantedChars = "\t\x00;:,<>#*§()[]{}?!%$§/\\@\"'`"
+var unwantedChars = "\t\x00;:,<>#*()[]{}?!%$§/\\@\"'`"
 var (
 	// Do NOT change this here! these are needed for runtime !
 	// validGroupNameRegex validates newsgroup names according to RFC standards
