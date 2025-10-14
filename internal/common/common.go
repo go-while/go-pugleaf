@@ -43,7 +43,7 @@ func IsClosedChannel(ch chan struct{}) bool {
 }
 
 func ChanLock(lockChan chan struct{}) {
-	// try aquire lock
+	// try acquire lock
 	lockChan <- struct{}{}
 }
 
