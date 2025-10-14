@@ -383,19 +383,25 @@ func (pool *Pool) ClosePool() error {
 		close(pool.connections)
 	}
 	log.Printf("[NNTP-POOL] Closing (%s:%d) active=%d", pool.Backend.Host, pool.Backend.Port, pool.activeConns)
+	allClosed := pool.activeConns == 0
 	pool.mux.Unlock()
 
-	// Close all connections in the pool
-closeWait:
-	for {
-		select {
-		case conn := <-pool.connections:
-			if conn != nil {
-				conn.ForceCloseConn()
+	if !allClosed {
+		// Close all connections in the pool
+	closeWait:
+		for {
+			select {
+			case conn, ok := <-pool.connections:
+				if !ok {
+					break closeWait
+				}
+				if conn != nil {
+					conn.ForceCloseConn()
+				}
+			default:
+				// pass
+				break closeWait
 			}
-		default:
-			// pass
-			break closeWait
 		}
 	}
 
