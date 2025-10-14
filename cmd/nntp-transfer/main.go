@@ -112,7 +112,7 @@ var StartDate string
 var EndDate string
 var GlobalSpeed uint64
 
-var totalTransferred, totalChecked, totalWanted, totalUnwanted, totalRejected, totalRetry, totalSkipped, totalRedisCacheHits, totalTXErrors, totalConnErrors, globalTotalArticles, nothingInDateRange uint64
+var totalTransferred, totalTTSentCount, totalChecked, totalWanted, totalUnwanted, totalRejected, totalRetry, totalSkipped, totalRedisCacheHits, totalRedisCacheBeforeCheck, totalRedisCacheBeforeTakethis, totalTXErrors, totalConnErrors, globalTotalArticles, nothingInDateRange uint64
 
 func CalcGlobalSpeed() {
 	for {
@@ -1146,9 +1146,10 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 	for _, result := range results {
 		log.Print(result)
 	}
-	log.Printf("Summary: total: %d | transferred: %d | cache_hits: %d | checked: %d | wanted: %d | unwanted: %d | rejected: %d | retry: %d  | skipped: %d | TX_Errors: %d | connErrors: %d",
-		globalTotalArticles, totalTransferred, totalRedisCacheHits, totalChecked, totalWanted, totalUnwanted, totalRejected, totalRetry, totalSkipped, totalTXErrors, totalConnErrors)
+	log.Printf("Summary: total: %d | transferred: %d | cache_hits: %d (before_check: %d, before_takethis: %d) | checked: %d | wanted: %d | unwanted: %d | rejected: %d | retry: %d  | skipped: %d | TX_Errors: %d | connErrors: %d",
+		globalTotalArticles, totalTransferred, totalRedisCacheHits, totalRedisCacheBeforeCheck, totalRedisCacheBeforeTakethis, totalChecked, totalWanted, totalUnwanted, totalRejected, totalRetry, totalSkipped, totalTXErrors, totalConnErrors)
 	nntp.ResultsMutex.Unlock()
+	log.Printf("Debug: StructChansCap1: %d/%d", len(common.StructChansCap1), cap(common.StructChansCap1))
 	return nil
 }
 
@@ -1410,7 +1411,10 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 
 		globalTotalArticles += uint64(totalNGArticles)
 		totalTransferred += ngtprogress.Transferred
+		totalTTSentCount += ngtprogress.TTSentCount
 		totalRedisCacheHits += ngtprogress.RedisCached
+		totalRedisCacheBeforeCheck += ngtprogress.RedisCachedBeforeCheck
+		totalRedisCacheBeforeTakethis += ngtprogress.RedisCachedBeforeTakethis
 		totalWanted += ngtprogress.Wanted
 		totalUnwanted += ngtprogress.Unwanted
 		totalChecked += ngtprogress.Checked
@@ -1436,6 +1440,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 
 		nntp.ResultsMutex.Unlock()
 	}(&responseWG)
+
 	OffsetQueue := &nntp.OffsetQueue{
 		Newsgroup:     &ng.Name,
 		MaxQueuedJobs: MaxQueuedJobs,
@@ -1599,54 +1604,63 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 		NGTProgress:  ngtprogress,
 	}
 	var redis_cached uint64
-	if redisCli != nil && len(articles) > 0 {
+
+	// Batch check Redis cache using pipeline before sending CHECK
+	if redisCli != nil {
 		pipe := redisCli.Pipeline()
 		cmds := make([]*redis.IntCmd, len(articles))
-
+		redis2Check := 0
 		// Queue all EXISTS commands
 		for i, article := range articles {
 			if article == nil {
 				continue
 			}
 			cmds[i] = pipe.Exists(redisCtx, article.MessageID)
+			redis2Check++
 		}
 
 		// Execute all in one network round trip
-		_, err := pipe.Exec(redisCtx)
-		if err != nil && VERBOSE {
+		if _, err := pipe.Exec(redisCtx); err != nil {
 			log.Printf("Newsgroup: '%s' | Redis pipeline error: %v", *ttMode.Newsgroup, err)
-		}
+		} else {
 
-		// Process results and filter cached articles
-		for i, cmd := range cmds {
-			if cmd == nil || articles[i] == nil {
-				continue // Skip if command wasn't queued or article is nil
-			}
-			article := articles[i]
-			exists, cmdErr := cmd.Result()
-			if cmdErr == nil && exists > 0 {
-				// Cached in Redis - skip this article
-				if VERBOSE {
-					log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis in job #%d (skip CHECK)", *ttMode.Newsgroup, article.MessageID, job.JobID)
+			// Process results and filter cached articles
+			for i, cmd := range cmds {
+				if cmd == nil || articles[i] == nil {
+					log.Printf("Newsgroup: '%s' | Warning: nil Redis command or nil article in batch for job #%d (skip CHECK)", *ttMode.Newsgroup, job.JobID)
+					continue // Skip if command wasn't queued or article is nil
 				}
-				job.NGTProgress.Increment(nntp.IncrFLAG_REDIS_CACHED, 1)
-				redis_cached++
-				articles[i] = nil
-				continue
+				article := articles[i]
+				exists, cmdErr := cmd.Result()
+				if cmdErr == nil && exists > 0 {
+					// Cached in Redis - skip this article
+					if VERBOSE {
+						log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis in job #%d (skip CHECK)", *ttMode.Newsgroup, article.MessageID, job.JobID)
+					}
+					job.NGTProgress.Increment(nntp.IncrFLAG_REDIS_CACHED_BEFORE_CHECK, 1)
+					redis_cached++
+					articles[i] = nil
+					continue
+				}
+				if cmdErr != nil {
+					log.Printf("Newsgroup: '%s' | Redis cache error for message ID '%s' in job #%d: %v (include in CHECK)", *ttMode.Newsgroup, article.MessageID, job.JobID, cmdErr)
+				}
+				// Not cached - add to valid list
+				job.Articles = append(job.Articles, article)
+				job.ArticleMap[&article.MessageID] = article
+				job.MessageIDs = append(job.MessageIDs, &article.MessageID)
 			}
-			// Not cached - add to valid list
-			job.Articles = append(job.Articles, article)
-			job.ArticleMap[&article.MessageID] = article
-			job.MessageIDs = append(job.MessageIDs, &article.MessageID)
 		}
 		if redis_cached == uint64(len(articles)) {
 			if VERBOSE {
 				log.Printf("Newsgroup: '%s' | All %d articles in batch are cached in Redis in job #%d (skip CHECK)", *ttMode.Newsgroup, len(articles), job.JobID)
 			}
 			return job.QuitResponseChan(), nil
-		}
-		if VERBOSE && redis_cached > 0 {
-			log.Printf("Newsgroup: '%s' | Redis got %d/%d cached articles in job #%d (before CHECK)", *ttMode.Newsgroup, redis_cached, len(articles), job.JobID)
+
+		} else if redis_cached > 0 {
+			if VERBOSE {
+				log.Printf("Newsgroup: '%s' | Redis got %d/%d cached articles in job #%d (before CHECK)", *ttMode.Newsgroup, redis_cached, len(articles), job.JobID)
+			}
 		}
 	} else {
 		// No Redis - add all non-nil message IDs
@@ -1702,48 +1716,56 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 	if redisCli != nil {
 		pipe := redisCli.Pipeline()
 		cmds := make([]*redis.IntCmd, len(articles))
-
+		//redis2Check := 0
 		// Queue all EXISTS commands (only for non-nil articles)
 		for i, article := range articles {
 			if article == nil {
 				continue
 			}
 			cmds[i] = pipe.Exists(redisCtx, article.MessageID)
+			//redis2Check++
 		}
 
 		// Execute all in one network round trip
 		_, err := pipe.Exec(redisCtx)
-		if err != nil && VERBOSE {
+		if err != nil {
 			log.Printf("Newsgroup: '%s' | Redis pipeline error in TAKETHIS: %v", newsgroup, err)
-		}
+		} else {
 
-		// Process results and filter cached articles
-		for i, cmd := range cmds {
-			if cmd == nil || articles[i] == nil {
-				continue // Skip if command wasn't queued or article is nil
-			}
-
-			exists, cmdErr := cmd.Result()
-			if cmdErr == nil && exists > 0 {
-				// Cached in Redis - skip this article
-				if VERBOSE {
-					log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis in job #%d (skip [TAKETHIS])", newsgroup, articles[i].MessageID, job.JobID)
+			// Process results and filter cached articles
+			for i, cmd := range cmds {
+				if cmd == nil || articles[i] == nil {
+					log.Printf("Newsgroup: '%s' | Warning: nil Redis command or nil article in TAKETHIS batch for job #%d (skip)", newsgroup, job.JobID)
+					continue // Skip if command wasn't queued or article is nil
 				}
-				job.NGTProgress.Increment(nntp.IncrFLAG_REDIS_CACHED, 1)
-				redis_cached++
-				articles[i] = nil // free memory
-				continue
+
+				exists, cmdErr := cmd.Result()
+				if cmdErr == nil && exists > 0 {
+					// Cached in Redis - skip this article
+					if VERBOSE {
+						log.Printf("Newsgroup: '%s' | Message ID '%s' is cached in Redis in job #%d (skip [TAKETHIS])", newsgroup, articles[i].MessageID, job.JobID)
+					}
+					job.NGTProgress.Increment(nntp.IncrFLAG_REDIS_CACHED_BEFORE_TAKETHIS, 1)
+					redis_cached++
+					articles[i] = nil // free memory
+					continue
+				}
+				if cmdErr != nil {
+					log.Printf("Newsgroup: '%s' | Redis cache error for message ID '%s' in job #%d: %v (include in TAKETHIS)", newsgroup, articles[i].MessageID, job.JobID, cmdErr)
+				}
+				// Not cached - will be sent
 			}
-			// Not cached - will be sent
 		}
 		if redis_cached == uint64(len(articles)) {
 			if VERBOSE {
 				log.Printf("Newsgroup: '%s' | All %d articles are cached in Redis in job #%d (skip TAKETHIS)", newsgroup, len(articles), job.JobID)
 			}
 			return redis_cached, nil
-		}
-		if VERBOSE && redis_cached > 0 {
-			log.Printf("Newsgroup: '%s' | Redis got %d/%d cached articles in job #%d (before TAKETHIS)", newsgroup, redis_cached, len(articles), job.JobID)
+
+		} else if redis_cached > 0 {
+			if VERBOSE {
+				log.Printf("Newsgroup: '%s' | Redis got %d/%d cached articles in job #%d (before TAKETHIS)", newsgroup, redis_cached, len(articles), job.JobID)
+			}
 		}
 	}
 
@@ -1782,6 +1804,8 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			return redis_cached, fmt.Errorf("failed to send TAKETHIS for %s: %v", article.MessageID, err)
 		}
 		sentCount++
+		job.NGTProgress.Increment(nntp.IncrFLAG_TTSentCount, 1)
+
 		if VERBOSE {
 			log.Printf("Newsgroup: '%s' | DONE TAKETHIS '%s' CmdID=%d (%d/%d sent) in %v awaiting responses astart2='%v'", newsgroup, article.MessageID, cmdID, sentCount, len(articles), time.Since(astart), time.Since(astart2))
 		}
@@ -1880,8 +1904,8 @@ func BootConnWorkers(pool *nntp.Pool, redisCli *redis.Client) {
 	TakeThisQueues = make([]chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
 	WorkerQueueLength = make([]int, nntp.NNTPTransferThreads)
 	for i := range CheckQueues {
-		CheckQueues[i] = make(chan *nntp.CHTTJob)       // no cap! only accepts if there is a reader!
-		TakeThisQueues[i] = make(chan *nntp.CHTTJob, 2) // allows max 2 queued TT jobs
+		CheckQueues[i] = make(chan *nntp.CHTTJob, MaxQueuedJobs)    // no cap! only accepts if there is a reader!
+		TakeThisQueues[i] = make(chan *nntp.CHTTJob, MaxQueuedJobs) // allows max N queued TT jobs
 		WorkerQueueLength[i] = 0
 	}
 	QueuesMutex.Unlock()
@@ -1908,7 +1932,8 @@ forever:
 		// get connections from pool
 		log.Printf("BootConnWorkers: need %d connections (have %d), getting from pool...", bootN, openConns)
 		returnSignals := make([]*ReturnSignal, bootN)
-		errChan := make(chan struct{}, 1)
+		errChan := common.GetStructChanCap1()
+		defer common.RecycleStructChanCap1(errChan)
 		newConns := 0
 		for workerID := range bootN {
 			// Get a connection from pool
@@ -2211,9 +2236,13 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 	readCHECKResponsesChan := make(chan *nntp.ReadRequest, 128000)
 	readTAKETHISResponsesChan := make(chan *nntp.ReadRequest, 128000)
 	errChan := make(chan struct{}, 4)
-	tickChan := make(chan struct{}, 1)
-	requestReplyJobDone := make(chan struct{}, 1)
-	replyJobDone := make(chan struct{}, 1)
+
+	tickChan := common.GetStructChanCap1()
+	requestReplyJobDone := common.GetStructChanCap1()
+	replyJobDone := common.GetStructChanCap1()
+	defer common.RecycleStructChanCap1(tickChan)
+	defer common.RecycleStructChanCap1(requestReplyJobDone)
+	defer common.RecycleStructChanCap1(replyJobDone)
 
 	// Create ResponseDemuxer to eliminate race conditions in ReadCodeLine
 	demuxer := nntp.NewResponseDemuxer(conn, errChan, BatchCheck)
@@ -2390,14 +2419,12 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				}
 				if common.WantShutdown() {
 					log.Printf("CheckWorker (%d): Read CHECK WantShutdown, exiting", workerID)
-					//rr.ReturnReadRequest(rrRetChan)
 					rr.ClearReadRequest()
 					return
 				}
 				//log.Printf("CheckWorker (%d): Read CHECK response (do conn check) for msgID: %s (cmdID=%d MID=%d/%d)", workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs)
 				if !conn.IsConnected() {
 					log.Printf("CheckWorker (%d): Read CHECK connection lost, exiting", workerID)
-					//rr.ReturnReadRequest(rrRetChan)
 					rr.ClearReadRequest()
 					return
 				}
@@ -2424,7 +2451,6 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 
 				if respData.Code == 0 && respData.Err != nil {
 					log.Printf("Failed to read CHECK response: %v", respData.Err)
-					//rr.ReturnReadRequest(rrRetChan)
 					rr.ClearReadRequest()
 					return
 				}
@@ -2453,13 +2479,11 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				parts := strings.Fields(respData.Line)
 				if len(parts) < 1 {
 					log.Printf("ERROR in CheckWorker: Malformed CHECK response code=%d line: '%s' (cmdID=%d MID=%d/%d)", respData.Code, respData.Line, rr.CmdID, rr.N, rr.Reqs)
-					//rr.ReturnReadRequest(rrRetChan)
 					rr.ClearReadRequest()
 					return
 				}
 				if parts[0] != *rr.MsgID {
 					log.Printf("ERROR in CheckWorker: Mismatched CHECK response: expected '%s', got '%s' code=%d (cmdID=%d MID=%d/%d)", *rr.MsgID, parts[0], respData.Code, rr.CmdID, rr.N, rr.Reqs)
-					//rr.ReturnReadRequest(rrRetChan)
 					rr.ClearReadRequest()
 					return
 				}
@@ -2472,7 +2496,6 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG1 Processing CHECK response for msgID: %s (cmdID=%d MID=%d/%d) code=%d", *job.Newsgroup, workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, code)
 				if !exists {
 					log.Printf("Newsgroup: '%s' | ERROR in CheckWorker: ReadCheckResponse msgId '%s' did not exist in jobMap.", *job.Newsgroup, *rr.MsgID)
-					//rr.ReturnReadRequest(rrRetChan)
 					rr.ClearReadRequest()
 					continue loop
 				}
@@ -2486,13 +2509,14 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				case 238:
 					//log.Printf("Newsgroup: '%s' | Got Response: Wanted Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
 					job.AppendWantedMessageID(rr.MsgID)
+					job.NGTProgress.Increment(nntp.IncrFLAG_WANTED, 1)
 
 				case 438:
 					//log.Printf("Newsgroup: '%s' | Got Response: Unwanted Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
 					job.NGTProgress.Increment(nntp.IncrFLAG_UNWANTED, 1)
+					// Cache unwanted in Redis if enabled
 					if rs.redisCli != nil {
-						err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err()
-						if err != nil && VERBOSE {
+						if err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err(); err != nil && VERBOSE {
 							log.Printf("Newsgroup: '%s' | Failed to cache rejected message ID in Redis: %v", *rr.Job.Newsgroup, err)
 						}
 					}
@@ -2500,12 +2524,13 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				case 431:
 					//log.Printf("Newsgroup: '%s' | Got Response: Retry Article '%s': code=%d", *job.Newsgroup, *rr.MsgID, code)
 					job.NGTProgress.Increment(nntp.IncrFLAG_RETRY, 1)
+					/* disabled caching of retries in Redis for now
 					if rs.redisCli != nil {
-						err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err()
-						if err != nil && VERBOSE {
-							log.Printf("Newsgroup: '%s' | Failed to cache rejected message ID in Redis: %v", *rr.Job.Newsgroup, err)
+						if err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err(); err != nil && VERBOSE {
+							log.Printf("Newsgroup: '%s' | Failed to cache retry message ID in Redis: %v", *rr.Job.Newsgroup, err)
 						}
 					}
+					*/
 
 				default:
 					log.Printf("Newsgroup: '%s' | Unknown CHECK response: line='%s' code=%d expected msgID %s", *job.Newsgroup, respData.Line, respData.Code, *rr.MsgID)
@@ -2518,12 +2543,10 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				rs.Mux.Unlock()
 				if !qexists || !rexists {
 					log.Printf("Newsgroup: '%s' | ERROR in CheckWorker: queuedCount or readCount did not exist for a job?!", *job.Newsgroup)
-					//rr.ReturnReadRequest(rrRetChan)
 					rr.ClearReadRequest()
 					continue loop
 				}
 				//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG4 Processing CHECK response for msgID: %s (cmdID=%d MID=%d/%d) code=%d", *job.Newsgroup, workerID, *rr.MsgID, rr.CmdID, rr.N, rr.Reqs, code)
-				//rr.ReturnReadRequest(rrRetChan)
 				rr.ClearReadRequest()
 				if queuedCount == readCount {
 					rs.Mux.Lock()
@@ -2627,11 +2650,10 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				case 239:
 					rr.Job.TTMode.IncrementSuccess()
 					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_TRANSFERRED, 1)
-					// Cache in Redis if enabled (inline, no separate tracker struct needed)
+					// Cache transferred in Redis if enabled
 					if rs.redisCli != nil {
-						err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err()
-						if err != nil && VERBOSE {
-							log.Printf("Newsgroup: '%s' | Failed to cache message ID in Redis: %v", *rr.Job.Newsgroup, err)
+						if err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err(); err != nil && VERBOSE {
+							log.Printf("Newsgroup: '%s' | Failed to cache transferred message ID in Redis: %v", *rr.Job.Newsgroup, err)
 						}
 					}
 
@@ -2639,8 +2661,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_REJECTED, 1)
 					// Cache rejection in Redis if enabled
 					if rs.redisCli != nil {
-						err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err()
-						if err != nil && VERBOSE {
+						if err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err(); err != nil && VERBOSE {
 							log.Printf("Newsgroup: '%s' | Failed to cache rejected message ID in Redis: %v", *rr.Job.Newsgroup, err)
 						}
 					}
@@ -2649,8 +2670,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					}
 
 				case 400, 480, 500, 501, 502, 503, 504:
-					log.Printf("ERROR Newsgroup: '%s' | Failed to transfer article '%s': response=%d",
-						*rr.Job.Newsgroup, *rr.MsgID, respData.Code)
+					log.Printf("ERROR Newsgroup: '%s' | Failed to transfer article '%s': response=%d", *rr.Job.Newsgroup, *rr.MsgID, respData.Code)
 					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_TX_ERRORS, 1)
 					rr.ClearReadRequest()
 					conn.ForceCloseConn()
@@ -3001,7 +3021,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 		.progress-fill {
 			height: 100%;
-			background: linear-gradient(90deg, #4CAF50, #45a049);
+			background: linear-gradient(90deg, #285829ff, #214b23ff);
 			transition: width 0.3s;
 		}
 		.progress-text {
@@ -3044,7 +3064,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 				<br><br>
 				<strong>Summary Statistics:</strong><br>
 				Total Articles: {{.TotalArticles}}<br>
-				Cache Hits: {{.TotalRedisCacheHits}}<br>
+				Cache Hits (Total): {{.TotalRedisCacheHits}}<br>
+				&nbsp;&nbsp;├─ Before CHECK: {{.TotalRedisCacheBeforeCheck}}<br>
+				&nbsp;&nbsp;└─ Before TAKETHIS: {{.TotalRedisCacheBeforeTakethis}}<br>
 				Checked: {{.TotalChecked}}<br>
 				Wanted: {{.TotalWanted}}<br>
 				Unwanted: {{.TotalUnwanted}}<br>
@@ -3058,16 +3080,19 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 				<div class="progress-bar-main" style="max-width: 640px; margin: 10px 0;">
 					<div class="progress-fill" style="width: {{if gt .TotalNewsgroups 0}}{{multiply (divide (subtract .TotalNewsgroups .NewsgroupsToProcess) .TotalNewsgroups) 100}}{{else}}0{{end}}%"></div>
 					<div class="progress-text">
-						<strong><em class="text-light" style="font-size: 24px; color: rgba(220, 15, 238, 1)">{{subtract .TotalNewsgroups .NewsgroupsToProcess}} / {{.TotalNewsgroups}} {{if gt .TotalNewsgroups 0}} @ {{multiply (divide (subtract .TotalNewsgroups .NewsgroupsToProcess) .TotalNewsgroups) 100}}{{else}}0{{end}}%</em></strong>
+						<strong><em class="text-light" style="font-size: 24px; color: rgba(15, 238, 234, 1)">{{subtract .TotalNewsgroups .NewsgroupsToProcess}} / {{.TotalNewsgroups}} {{if gt .TotalNewsgroups 0}} @ {{multiply (divide (subtract .TotalNewsgroups .NewsgroupsToProcess) .TotalNewsgroups) 100}}{{else}}0{{end}}%</em></strong>
 					</div>
 				</div>
 				<br>
 				<strong>Live Statistics:</strong><br>
 				Total Articles: {{.TotalArticles}}<br>
-				Cache Hits: {{.TotalRedisCacheHits}}<br>
+				Cache Hits (Total): {{.TotalRedisCacheHits}}<br>
+				&nbsp;&nbsp;├─ Before CHECK: {{.TotalRedisCacheBeforeCheck}}<br>
+				&nbsp;&nbsp;└─ Before TAKETHIS: {{.TotalRedisCacheBeforeTakethis}}<br>
 				Checked: {{.TotalChecked}}<br>
 				Wanted: {{.TotalWanted}}<br>
 				Unwanted: {{.TotalUnwanted}}<br>
+				TTSentCount: {{.TotalTTSentCount}}<br>
 				Transferred: {{.TotalTransferred}}<br>
 				Rejected: {{.TotalRejected}}<br>
 				Retry: {{.TotalRetry}}<br>
@@ -3215,49 +3240,57 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	})
 
 	data := struct {
-		TotalNewsgroups     int64
-		NewsgroupsToProcess int64
-		Results             []string
-		Started             int64
-		Finished            int64
-		Progress            []ProgressInfo
-		Timestamp           string
-		StartDate           string
-		EndDate             string
-		ServerHostName      string
-		GlobalSpeed         uint64
-		TotalArticles       uint64
-		TotalRedisCacheHits uint64
-		TotalChecked        uint64
-		TotalUnwanted       uint64
-		TotalWanted         uint64
-		TotalTransferred    uint64
-		TotalRejected       uint64
-		TotalRetry          uint64
-		TotalTXErrors       uint64
-		TotalConnErrors     uint64
+		TotalNewsgroups               int64
+		NewsgroupsToProcess           int64
+		Results                       []string
+		Started                       int64
+		Finished                      int64
+		Progress                      []ProgressInfo
+		Timestamp                     string
+		StartDate                     string
+		EndDate                       string
+		ServerHostName                string
+		GlobalSpeed                   uint64
+		TotalArticles                 uint64
+		TotalRedisCacheHits           uint64
+		TotalRedisCacheBeforeCheck    uint64
+		TotalRedisCacheBeforeTakethis uint64
+		TotalChecked                  uint64
+		TotalUnwanted                 uint64
+		TotalWanted                   uint64
+		TotalTransferred              uint64
+		TotalTTSentCount              uint64
+		TotalRejected                 uint64
+		TotalRetry                    uint64
+		TotalSkipped                  uint64
+		TotalTXErrors                 uint64
+		TotalConnErrors               uint64
 	}{
-		TotalNewsgroups:     TotalNewsgroups,
-		NewsgroupsToProcess: NewsgroupsToProcess,
-		Results:             results,
-		Started:             started,
-		Finished:            finished,
-		Progress:            progressList,
-		Timestamp:           time.Now().Format("2006-01-02 15:04:05"),
-		StartDate:           StartDate,
-		EndDate:             EndDate,
-		ServerHostName:      ServerHostName,
-		GlobalSpeed:         GlobalSpeed,
-		TotalArticles:       globalTotalArticles,
-		TotalRedisCacheHits: totalRedisCacheHits,
-		TotalChecked:        totalChecked,
-		TotalWanted:         totalWanted,
-		TotalUnwanted:       totalUnwanted,
-		TotalTransferred:    totalTransferred,
-		TotalRejected:       totalRejected,
-		TotalRetry:          totalRetry,
-		TotalTXErrors:       totalTXErrors,
-		TotalConnErrors:     totalConnErrors,
+		TotalNewsgroups:               TotalNewsgroups,
+		NewsgroupsToProcess:           NewsgroupsToProcess,
+		Results:                       results,
+		Started:                       started,
+		Finished:                      finished,
+		Progress:                      progressList,
+		Timestamp:                     time.Now().Format("2006-01-02 15:04:05"),
+		StartDate:                     StartDate,
+		EndDate:                       EndDate,
+		ServerHostName:                ServerHostName,
+		GlobalSpeed:                   GlobalSpeed,
+		TotalArticles:                 globalTotalArticles,
+		TotalRedisCacheHits:           totalRedisCacheHits,
+		TotalRedisCacheBeforeCheck:    totalRedisCacheBeforeCheck,
+		TotalRedisCacheBeforeTakethis: totalRedisCacheBeforeTakethis,
+		TotalChecked:                  totalChecked,
+		TotalWanted:                   totalWanted,
+		TotalUnwanted:                 totalUnwanted,
+		TotalTransferred:              totalTransferred,
+		TotalTTSentCount:              totalTTSentCount,
+		TotalRejected:                 totalRejected,
+		TotalRetry:                    totalRetry,
+		TotalSkipped:                  totalSkipped,
+		TotalTXErrors:                 totalTXErrors,
+		TotalConnErrors:               totalConnErrors,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
