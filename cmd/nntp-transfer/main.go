@@ -1467,6 +1467,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		}
 
 		offset += int64(len(articles))
+		articlesProcessed += int64(len(articles))
 
 		if dryRun && debugCapture {
 			debugMutex.Lock()
@@ -1507,7 +1508,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 
 			OffsetQueue.Wait(MaxQueuedJobs) // wait for offset batches to finish, less than N in flight
 		}
-		articlesProcessed += int64(len(articles))
+		// articlesProcessed already incremented above after loading from DB
 		remainingArticles -= int64(len(articles))
 		if VERBOSE {
 			log.Printf("Newsgroup: '%s' | Pushed to queue (processed %d/%d) remaining: %d (Check=%t)", ng.Name, articlesProcessed, totalNGArticles, remainingArticles, ttMode.UseCHECK())
@@ -3251,23 +3252,28 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	{{if .DemuxerStats}}
 	<h2 style="margin-top: 30px; color: #333;">Response Demuxer Statistics ({{len .DemuxerStats}} Workers)</h2>
+	<small>Workers print only if they have non-empty channels or if last request is longer than 15s ago.</small>
 	<table class="progress-table">
 		<thead>
 			<tr>
-				<th style="width:25%">Worker ID</th>
-				<th style="width:25%">Pending Commands</th>
-				<th style="width:25%">CHECK Responses Queued</th>
-				<th style="width:25%">TAKETHIS Responses Queued</th>
+				<th style="width:20%">Worker ID</th>
+				<th style="width:20%">Pending Commands</th>
+				<th style="width:20%">CHECK Responses Queued</th>
+				<th style="width:20%">TAKETHIS Responses Queued</th>
+				<th style="width:20%">Idle Time (seconds)</th>
 			</tr>
 		</thead>
 		<tbody>
 			{{range .DemuxerStats}}
+			{{if or (gt .PendingCommands 0) (gt .CheckResponsesQueued 0) (gt .TTResponsesQueued 0) (gt .IdleSeconds 15)}}
 			<tr>
-				<td style="width:25%; text-align: center;"><strong>Worker #{{.WorkerID}}</strong></td>
-				<td style="width:25%; text-align: center;">{{.PendingCommands}}</td>
-				<td style="width:25%; text-align: center;">{{.CheckResponsesQueued}}</td>
-				<td style="width:25%; text-align: center;">{{.TTResponsesQueued}}</td>
+				<td style="width:20%; text-align: center;"><strong>Worker #{{.WorkerID}}</strong></td>
+				<td style="width:20%; text-align: center;">{{.PendingCommands}}</td>
+				<td style="width:20%; text-align: center;">{{.CheckResponsesQueued}}</td>
+				<td style="width:20%; text-align: center;">{{.TTResponsesQueued}}</td>
+				<td style="width:20%; text-align: center;">{{.IdleSeconds}}</td>
 			</tr>
+			{{end}}
 			{{end}}
 		</tbody>
 	</table>
@@ -3355,17 +3361,25 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		PendingCommands      int
 		CheckResponsesQueued int
 		TTResponsesQueued    int
+		LastRequest          time.Time
+		IdleSeconds          int
 	}
 	var demuxerStats []DemuxerStats
 	DemuxersMutex.RLock()
 	for i, demux := range Demuxers {
 		if demux != nil {
-			pending, checkQueued, ttQueued := demux.GetStatistics()
+			pending, checkQueued, ttQueued, lastReq := demux.GetStatistics()
+			idleSeconds := 0
+			if !lastReq.IsZero() {
+				idleSeconds = int(time.Since(lastReq).Seconds())
+			}
 			demuxerStats = append(demuxerStats, DemuxerStats{
 				WorkerID:             i,
 				PendingCommands:      pending,
 				CheckResponsesQueued: checkQueued,
 				TTResponsesQueued:    ttQueued,
+				LastRequest:          lastReq,
+				IdleSeconds:          idleSeconds,
 			})
 		}
 	}

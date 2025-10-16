@@ -20,6 +20,8 @@ type ResponseDemuxer struct {
 	errChan           chan struct{}
 	started           bool
 	startedMux        sync.Mutex
+	lastRequest       time.Time
+	lastRequestMux    sync.RWMutex
 }
 
 // NewResponseDemuxer creates a new response demultiplexer
@@ -36,6 +38,10 @@ func NewResponseDemuxer(conn *BackendConn, errChan chan struct{}, BatchCheck int
 
 // RegisterCommand registers a command ID with its type (CHECK or TAKETHIS)
 func (d *ResponseDemuxer) RegisterCommand(cmdID uint, cmdType ResponseType) {
+	d.lastRequestMux.Lock()
+	d.lastRequest = time.Now()
+	d.lastRequestMux.Unlock()
+
 	d.cmdIDQMux.Lock()
 	d.cmdIDQ = append(d.cmdIDQ, &CmdIDinfo{CmdID: cmdID, RespType: cmdType})
 	d.cmdIDQMux.Unlock()
@@ -206,13 +212,17 @@ func (d *ResponseDemuxer) readAndDispatch() {
 }
 
 // GetStatistics returns current demuxer statistics
-func (d *ResponseDemuxer) GetStatistics() (pendingCommands int, checkResponsesQueued int, ttResponsesQueued int) {
+func (d *ResponseDemuxer) GetStatistics() (pendingCommands int, checkResponsesQueued int, ttResponsesQueued int, lastRequest time.Time) {
 	d.cmdIDQMux.RLock()
 	pendingCommands = len(d.cmdIDQ)
 	d.cmdIDQMux.RUnlock()
 
+	d.lastRequestMux.RLock()
+	lastRequest = d.lastRequest
+	d.lastRequestMux.RUnlock()
+
 	checkResponsesQueued = len(d.checkResponseChan)
 	ttResponsesQueued = len(d.ttResponseChan)
 
-	return pendingCommands, checkResponsesQueued, ttResponsesQueued
+	return pendingCommands, checkResponsesQueued, ttResponsesQueued, lastRequest
 }
