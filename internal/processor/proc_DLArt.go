@@ -103,7 +103,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 	//log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d, remaining: %d)", newsgroup, start, end, groupInfo.Last, remaining)
 	var lastGoodEnd int64 = start
 	//toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
-	xhdrChan := make(chan *nntp.HeaderLine, 1000)
+	xhdrChan := make(chan nntp.HeaderLine, 1000)
 	errChan := make(chan error, 1)
 	//log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
 	if proc.DB.IsDBshutdown() {
@@ -153,7 +153,6 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 			//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", hdr.ArticleNum, hdr.Value, *item.GroupName)
 			//hdr.Value = ""
 			//hdr.ArticleNum = 0
-			*hdr = nntp.HeaderLine{}
 		} // end for xhdrChan
 		//log.Printf("DownloadArticles: XHdr closed, finished feeding batch queue %d articles for group '%s' (existing: %d) total=%d", queued, newsgroup, exists, queued+exists)
 		if queued == 0 {

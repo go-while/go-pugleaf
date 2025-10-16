@@ -71,7 +71,7 @@ func (pool *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]Ov
 	return result, nil
 }
 
-func (pool *Pool) XHdr(group string, header string, start, end int64) ([]*HeaderLine, error) {
+func (pool *Pool) XHdr(group string, header string, start, end int64) ([]HeaderLine, error) {
 	// Get a connection from the pool
 	client, err := pool.Get(MODE_READER_MV)
 	if err != nil {
@@ -93,7 +93,7 @@ func (pool *Pool) XHdr(group string, header string, start, end int64) ([]*Header
 // XHdrStreamed performs XHDR command and streams results through a channel
 // The channel will be closed when all results are sent or an error occurs
 // NOTE: This function takes ownership of the connection and will return it to the pool when done
-func (pool *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
+func (pool *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) error {
 	// Get a connection from the pool
 	client, err := pool.Get(MODE_READER_MV)
 	if err != nil {
@@ -102,7 +102,7 @@ func (pool *Pool) XHdrStreamed(group string, header string, start, end int64, xh
 	}
 
 	// Handle connection cleanup in a goroutine so the function can return immediately
-	go func(client *BackendConn, group string, header string, start, end int64, resultChan chan<- *HeaderLine, shutdownChan <-chan struct{}) {
+	go func(client *BackendConn, group string, header string, start, end int64, resultChan chan<- HeaderLine, shutdownChan <-chan struct{}) {
 		// Use the streaming XHdr function on the client
 		if err := client.XHdrStreamed(group, header, start, end, resultChan, shutdownChan); err != nil {
 			// If there's an error, close the connection instead of returning it

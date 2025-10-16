@@ -112,7 +112,7 @@ var StartDate string
 var EndDate string
 var GlobalSpeed uint64
 
-var totalTransferred, totalTTSentCount, totalChecked, totalWanted, totalUnwanted, totalRejected, totalRetry, totalSkipped, totalRedisCacheHits, totalRedisCacheBeforeCheck, totalRedisCacheBeforeTakethis, totalTXErrors, totalConnErrors, globalTotalArticles, nothingInDateRange uint64
+var totalTransferred, totalTTSentCount, totalCheckSentCount, totalChecked, totalWanted, totalUnwanted, totalRejected, totalRetry, totalSkipped, totalRedisCacheHits, totalRedisCacheBeforeCheck, totalRedisCacheBeforeTakethis, totalTXErrors, totalConnErrors, globalTotalArticles, nothingInDateRange uint64
 
 func CalcGlobalSpeed() {
 	for {
@@ -667,6 +667,9 @@ func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup,
 		// Build query with date filtering
 		var whereConditions []string
 
+		// Always exclude NULL date_sent values when using ORDER BY date_sent
+		whereConditions = append(whereConditions, "date_sent IS NOT NULL")
+
 		if startTime != nil {
 			whereConditions = append(whereConditions, "date_sent >= ?")
 			args = append(args, startTime.UTC().Format("2006-01-02 15:04:05"))
@@ -725,6 +728,9 @@ func getArticleCountWithDateFilter(db *database.Database, groupDBs *database.Gro
 	if startTime != nil || endTime != nil {
 		// Build count query with date filtering - must use live COUNT(*) query
 		var whereConditions []string
+
+		// Always exclude NULL date_sent values to match SELECT query behavior
+		whereConditions = append(whereConditions, "date_sent IS NOT NULL")
 
 		if startTime != nil {
 			whereConditions = append(whereConditions, "date_sent >= ?")
@@ -1146,8 +1152,8 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 	for _, result := range results {
 		log.Print(result)
 	}
-	log.Printf("Summary: total: %d | transferred: %d | cache_hits: %d (before_check: %d, before_takethis: %d) | checked: %d | wanted: %d | unwanted: %d | rejected: %d | retry: %d  | skipped: %d | TX_Errors: %d | connErrors: %d",
-		globalTotalArticles, totalTransferred, totalRedisCacheHits, totalRedisCacheBeforeCheck, totalRedisCacheBeforeTakethis, totalChecked, totalWanted, totalUnwanted, totalRejected, totalRetry, totalSkipped, totalTXErrors, totalConnErrors)
+	log.Printf("Summary: total: %d | transferred: %d | cache_hits: %d (before_check: %d, before_takethis: %d) | checked: %d/%d | wanted: %d | unwanted: %d | rejected: %d | retry: %d  | skipped: %d | TX_Errors: %d | connErrors: %d",
+		globalTotalArticles, totalTransferred, totalRedisCacheHits, totalRedisCacheBeforeCheck, totalRedisCacheBeforeTakethis, totalChecked, totalCheckSentCount, totalWanted, totalUnwanted, totalRejected, totalRetry, totalSkipped, totalTXErrors, totalConnErrors)
 	nntp.ResultsMutex.Unlock()
 	log.Printf("Debug: StructChansCap1: %d/%d", len(common.StructChansCap1), cap(common.StructChansCap1))
 	return nil
@@ -1386,9 +1392,10 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		nntp.ResultsMutex.Lock()
 		ngtprogress.Mux.Lock()
 
-		result := fmt.Sprintf("END Newsgroup: '%s' total: %d | transferred: %d | cache_hits: %d | checked: %d | wanted: %d | unwanted: %d | rejected: %d | retry: %d  | skipped: %d | TX_Errors: %d | connErrors: %d | took %v",
+		result := fmt.Sprintf("END Newsgroup: '%s' total: %d | CHECK_sent: %d | checked: %d | transferred: %d | cache_hits: %d | wanted: %d | unwanted: %d | rejected: %d | retry: %d  | skipped: %d | TX_Errors: %d | connErrors: %d | took %v",
 			ng.Name, totalNGArticles,
-			ngtprogress.Transferred, ngtprogress.RedisCached, ngtprogress.Checked,
+			ngtprogress.CheckSentCount, ngtprogress.Checked,
+			ngtprogress.Transferred, ngtprogress.RedisCached,
 			ngtprogress.Wanted, ngtprogress.Unwanted, ngtprogress.Rejected,
 			ngtprogress.Retry, ngtprogress.Skipped,
 			ngtprogress.TxErrors, ngtprogress.ConnErrors,
@@ -1397,6 +1404,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		globalTotalArticles += uint64(totalNGArticles)
 		totalTransferred += ngtprogress.Transferred
 		totalTTSentCount += ngtprogress.TTSentCount
+		totalCheckSentCount += ngtprogress.CheckSentCount
 		totalRedisCacheHits += ngtprogress.RedisCached
 		totalRedisCacheBeforeCheck += ngtprogress.RedisCachedBeforeCheck
 		totalRedisCacheBeforeTakethis += ngtprogress.RedisCachedBeforeTakethis
@@ -1459,7 +1467,6 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		}
 
 		offset += int64(len(articles))
-		articlesProcessed += int64(len(articles))
 
 		if dryRun && debugCapture {
 			debugMutex.Lock()
@@ -1664,7 +1671,7 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 		return job.QuitResponseChan(), nil
 	}
 	if VERBOSE {
-		log.Printf("Newsgroup: '%s' | Sending CHECK commands for %d/%d articles", *ttMode.Newsgroup, len(job.MessageIDs), len(articles))
+		log.Printf("Newsgroup: '%s' | processBatch: Received %d articles, queuing %d for CHECK (Redis filtered: %d)", *ttMode.Newsgroup, len(articles), len(job.MessageIDs), redis_cached)
 	}
 
 	// Assign job to worker (consistent assignment + load balancing)
@@ -1819,6 +1826,10 @@ var QueuesMutex sync.RWMutex
 var CheckQueues []chan *nntp.CHTTJob
 var TakeThisQueues []chan *nntp.CHTTJob
 
+// Demuxers holds per-worker demuxer instances for statistics tracking
+var Demuxers []*nntp.ResponseDemuxer
+var DemuxersMutex sync.RWMutex
+
 // NewsgroupWorkerMap tracks which worker is assigned to each newsgroup
 var NewsgroupWorkerMap = make(map[string]int)
 var NewsgroupWorkerMapMux sync.RWMutex
@@ -1897,6 +1908,9 @@ func BootConnWorkers(pool *nntp.Pool, redisCli *redis.Client) {
 	CheckQueues = make([]chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
 	TakeThisQueues = make([]chan *nntp.CHTTJob, nntp.NNTPTransferThreads)
 	WorkerQueueLength = make([]int, nntp.NNTPTransferThreads)
+	DemuxersMutex.Lock()
+	Demuxers = make([]*nntp.ResponseDemuxer, nntp.NNTPTransferThreads)
+	DemuxersMutex.Unlock()
 	for i := range CheckQueues {
 		CheckQueues[i] = make(chan *nntp.CHTTJob, MaxQueuedJobs)    // no cap! only accepts if there is a reader!
 		TakeThisQueues[i] = make(chan *nntp.CHTTJob, MaxQueuedJobs) // allows max N queued TT jobs
@@ -2243,6 +2257,13 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 	// Create ResponseDemuxer to eliminate race conditions in ReadCodeLine
 	demuxer := nntp.NewResponseDemuxer(conn, errChan, BatchCheck)
 
+	// Store demuxer for statistics tracking
+	DemuxersMutex.Lock()
+	if workerID < len(Demuxers) {
+		Demuxers[workerID] = demuxer
+	}
+	DemuxersMutex.Unlock()
+
 	defer func(conn *nntp.BackendConn, rs *ReturnSignal) {
 		conn.ForceCloseConn()
 		rs.ExitChan <- rs
@@ -2349,6 +2370,10 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 						}
 						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d Sent CHECK for batch (offset %d: %d-%d), responses will be read asynchronously...", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
 					}
+					// Add CHECK sent count to progress after all batches are sent
+					currentJob.NGTProgress.Mux.Lock()
+					currentJob.NGTProgress.CheckSentCount += currentJob.CheckSentCount
+					currentJob.NGTProgress.Mux.Unlock()
 				} else {
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d skipping CHECK for %d message IDs (TAKETHIS mode)", *currentJob.Newsgroup, workerID, currentJob.JobID, len(currentJob.MessageIDs))
 					currentJob.WantedIDs = currentJob.MessageIDs
@@ -3224,6 +3249,30 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	</table>
 	{{end}}
 
+	{{if .DemuxerStats}}
+	<h2 style="margin-top: 30px; color: #333;">Response Demuxer Statistics ({{len .DemuxerStats}} Workers)</h2>
+	<table class="progress-table">
+		<thead>
+			<tr>
+				<th style="width:25%">Worker ID</th>
+				<th style="width:25%">Pending Commands</th>
+				<th style="width:25%">CHECK Responses Queued</th>
+				<th style="width:25%">TAKETHIS Responses Queued</th>
+			</tr>
+		</thead>
+		<tbody>
+			{{range .DemuxerStats}}
+			<tr>
+				<td style="width:25%; text-align: center;"><strong>Worker #{{.WorkerID}}</strong></td>
+				<td style="width:25%; text-align: center;">{{.PendingCommands}}</td>
+				<td style="width:25%; text-align: center;">{{.CheckResponsesQueued}}</td>
+				<td style="width:25%; text-align: center;">{{.TTResponsesQueued}}</td>
+			</tr>
+			{{end}}
+		</tbody>
+	</table>
+	{{end}}
+
 </body>
 </html>`
 
@@ -3300,6 +3349,28 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		return progressList[i].Name < progressList[j].Name
 	})
 
+	// Collect demuxer statistics
+	type DemuxerStats struct {
+		WorkerID             int
+		PendingCommands      int
+		CheckResponsesQueued int
+		TTResponsesQueued    int
+	}
+	var demuxerStats []DemuxerStats
+	DemuxersMutex.RLock()
+	for i, demux := range Demuxers {
+		if demux != nil {
+			pending, checkQueued, ttQueued := demux.GetStatistics()
+			demuxerStats = append(demuxerStats, DemuxerStats{
+				WorkerID:             i,
+				PendingCommands:      pending,
+				CheckResponsesQueued: checkQueued,
+				TTResponsesQueued:    ttQueued,
+			})
+		}
+	}
+	DemuxersMutex.RUnlock()
+
 	data := struct {
 		TotalNewsgroups               int64
 		NewsgroupsToProcess           int64
@@ -3307,6 +3378,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		Started                       int64
 		Finished                      int64
 		Progress                      []ProgressInfo
+		DemuxerStats                  []DemuxerStats
 		Timestamp                     string
 		StartDate                     string
 		EndDate                       string
@@ -3333,6 +3405,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		Started:                       started,
 		Finished:                      finished,
 		Progress:                      progressList,
+		DemuxerStats:                  demuxerStats,
 		Timestamp:                     time.Now().Format("2006-01-02 15:04:05"),
 		StartDate:                     StartDate,
 		EndDate:                       EndDate,

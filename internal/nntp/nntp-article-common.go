@@ -28,7 +28,7 @@ type ArticleRetrievalResult struct {
 	Overview   *models.Overview
 	ArticleNum int64
 	MsgIdItem  *history.MessageIdItem
-	GroupDBs   *database.GroupDBs
+	//GroupDBs   *database.GroupDBs
 }
 
 // retrieveArticleCommon handles the common logic for ARTICLE, HEAD, BODY, and STAT commands
@@ -37,15 +37,10 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 
 	// Get article data using common logic
 	result, err := c.getArticleData(args)
-	if result == nil || err != nil {
+	if result.Article == nil || err != nil {
 		log.Printf("retrieveArticleCommon Error retrieving article data: %v", err)
 		return nil // Error already handled in getArticleData
 	}
-	defer func() {
-		if result.GroupDBs != nil {
-			result.GroupDBs.Return(c.server.DB)
-		}
-	}()
 
 	// Update current article if we have a current group
 	if c.currentGroup != "" {
@@ -75,7 +70,7 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 }
 
 // getArticleData handles the common article lookup logic
-func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResult, error) {
+func (c *ClientConnection) getArticleData(args []string) (ArticleRetrievalResult, error) {
 	var groupDBs *database.GroupDBs
 	var articleNum int64
 	var msgIdItem *history.MessageIdItem
@@ -86,21 +81,21 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 		if c.currentGroup == "" {
 			c.rateLimitOnError()
 			c.sendResponse(412, "No newsgroup selected")
-			return nil, nil
+			return ArticleRetrievalResult{}, nil
 		}
 		// Use current article
 		articleNum = c.currentArticle
 		if articleNum == 0 {
 			c.rateLimitOnError()
 			c.sendResponse(420, "Current article number is invalid")
-			return nil, nil
+			return ArticleRetrievalResult{}, nil
 		}
 		// Get group database
 		groupDBs, err = c.server.DB.GetGroupDBs(c.currentGroup)
 		if err != nil {
 			c.rateLimitOnError()
 			c.sendResponse(411, "No such newsgroup")
-			return nil, nil
+			return ArticleRetrievalResult{}, nil
 		}
 
 	} else {
@@ -110,25 +105,25 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 			if msgIdItem == nil {
 				c.rateLimitOnError()
 				c.sendResponse(500, "Error MsgId Cache")
-				return nil, nil
+				return ArticleRetrievalResult{}, nil
 			}
 			if c.server.local430.Check(msgIdItem) {
 				c.rateLimitOnError()
 				c.sendResponse(430, "Cache says no!")
-				return nil, nil
+				return ArticleRetrievalResult{}, nil
 			}
 		} else {
 			if c.currentGroup == "" {
 				c.rateLimitOnError()
 				c.sendResponse(412, "No newsgroup selected")
-				return nil, nil
+				return ArticleRetrievalResult{}, nil
 			}
 			// Article number format
 			articleNum, err = strconv.ParseInt(args[0], 10, 64)
 			if err != nil {
 				c.rateLimitOnError()
 				c.sendResponse(501, "Invalid article number")
-				return nil, nil
+				return ArticleRetrievalResult{}, nil
 			}
 		}
 	}
@@ -144,7 +139,7 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 			c.server.local430.Add(msgIdItem)
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF1")
-			return nil, nil
+			return ArticleRetrievalResult{}, nil
 		}
 
 		found := false
@@ -154,14 +149,14 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 			c.server.local430.Add(msgIdItem)
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF1")
-			return nil, nil
+			return ArticleRetrievalResult{}, nil
 
 		case history.CasePass:
 			// Not found in history
 			c.rateLimitOnError()
 			log.Printf("MsgIdItem not found in history: '%#v'", msgIdItem)
 			c.sendResponse(430, "NotF2")
-			return nil, nil
+			return ArticleRetrievalResult{}, nil
 
 		case history.CaseDupes:
 			// Found in history - storage token should now be available
@@ -174,7 +169,7 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 			log.Printf("MsgIdItem not found in cache: %#v", msgIdItem)
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF2")
-			return nil, nil
+			return ArticleRetrievalResult{}, nil
 		}
 
 		// Extract storage token or use cached values
@@ -192,7 +187,7 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 				c.rateLimitOnError()
 				c.sendResponse(430, "NotF3")
 				log.Printf("Invalid storage token format: %#v", msgIdItem)
-				return nil, nil
+				return ArticleRetrievalResult{}, nil
 			}
 
 			task := c.server.DB.Batch.GetOrCreateTasksMapKey(parts[0])
@@ -200,7 +195,7 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 				c.server.local430.Add(msgIdItem)
 				c.rateLimitOnError()
 				c.sendResponse(430, "NotF4")
-				return nil, nil
+				return ArticleRetrievalResult{}, nil
 			}
 
 			articleNumParsed, err := strconv.ParseInt(parts[1], 10, 64)
@@ -208,7 +203,7 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 				c.server.local430.Add(msgIdItem)
 				c.rateLimitOnError()
 				c.sendResponse(430, "NotF5")
-				return nil, nil
+				return ArticleRetrievalResult{}, nil
 			}
 
 			msgIdItem.Mux.Lock()
@@ -220,7 +215,7 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 				c.server.local430.Add(msgIdItem)
 				c.rateLimitOnError()
 				c.sendResponse(430, "NotF6")
-				return nil, nil
+				return ArticleRetrievalResult{}, nil
 			}
 		}
 
@@ -231,7 +226,7 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 				c.server.local430.Add(msgIdItem)
 				c.rateLimitOnError()
 				c.sendResponse(430, "NotF7")
-				return nil, nil
+				return ArticleRetrievalResult{}, nil
 			}
 		}
 
@@ -241,7 +236,7 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 			c.server.local430.Add(msgIdItem)
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF8")
-			return nil, nil
+			return ArticleRetrievalResult{}, nil
 		}
 		articleNum = article.ArticleNums[groupDBs.NewsgroupPtr]
 
@@ -252,8 +247,9 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 			if err != nil {
 				c.rateLimitOnError()
 				c.sendResponse(411, "No such newsgroup")
-				return nil, nil
+				return ArticleRetrievalResult{}, nil
 			}
+			defer groupDBs.Return(c.server.DB)
 		}
 
 		// For STAT command, we can use overview instead of full article
@@ -261,7 +257,7 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 		if err != nil {
 			c.rateLimitOnError()
 			c.sendResponse(423, "No such article number")
-			return nil, nil
+			return ArticleRetrievalResult{}, nil
 		}
 
 		// For other commands, get the full article
@@ -269,11 +265,11 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 		if err != nil {
 			c.rateLimitOnError()
 			c.sendResponse(423, "No such article number")
-			return nil, nil
+			return ArticleRetrievalResult{}, nil
 		}
 		if article.MessageID == "" {
 			log.Printf("Error in getArticleData: Article with no message-id: %#v", article)
-			return nil, fmt.Errorf("error in getArticleData: article with no message-id")
+			return ArticleRetrievalResult{}, fmt.Errorf("error in getArticleData: article with no message-id")
 		}
 		// Create or get msgIdItem
 		messageID := article.MessageID
@@ -284,7 +280,7 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 		if msgIdItem == nil {
 			c.rateLimitOnError()
 			c.sendResponse(500, "Error MsgId Cache")
-			return nil, fmt.Errorf("error msgid cache")
+			return ArticleRetrievalResult{}, fmt.Errorf("error msgid cache")
 		}
 
 		task := c.server.DB.Batch.GetOrCreateTasksMapKey(groupDBs.Newsgroup)
@@ -296,24 +292,26 @@ func (c *ClientConnection) getArticleData(args []string) (*ArticleRetrievalResul
 		}
 	}
 
-	return &ArticleRetrievalResult{
+	return ArticleRetrievalResult{
 		Article:    article,
 		Overview:   overview,
 		ArticleNum: articleNum,
 		MsgIdItem:  msgIdItem,
-		GroupDBs:   groupDBs,
 	}, nil
 }
 
 // sendArticleContent sends full article (headers + body) for ARTICLE command
-func (c *ClientConnection) sendArticleContent(result *ArticleRetrievalResult) error {
+func (c *ClientConnection) sendArticleContent(result ArticleRetrievalResult) error {
+	if c == nil || c.textConn == nil {
+		return fmt.Errorf("nil connection in sendArticleContent")
+	}
 	// Parse headers and body from the article
-	log.Printf("sendArticleContent for result='%#v", result)
+	//log.Printf("sendArticleContent for result='%#v", result)
 	headers := c.parseArticleHeadersFull(result.Article)
 	bodyLines := c.parseArticleBody(result.Article)
 
 	// Send response: 220 n message-id Article follows
-	if err := c.sendResponse(220, fmt.Sprintf("%d %s Article follows", result.ArticleNum, result.MsgIdItem.MessageId)); err != nil {
+	if err := c.textConn.PrintfLine("220 %d %s Article follows", result.ArticleNum, result.MsgIdItem.MessageId); err != nil {
 		return err
 	}
 
@@ -341,7 +339,10 @@ func (c *ClientConnection) sendArticleContent(result *ArticleRetrievalResult) er
 }
 
 // sendHeadContent sends only headers for HEAD command
-func (c *ClientConnection) sendHeadContent(result *ArticleRetrievalResult) error {
+func (c *ClientConnection) sendHeadContent(result ArticleRetrievalResult) error {
+	if c == nil || c.textConn == nil {
+		return fmt.Errorf("nil connection in sendHeadContent")
+	}
 	// Parse headers from the article
 	headers := c.parseArticleHeadersFull(result.Article)
 
@@ -362,7 +363,10 @@ func (c *ClientConnection) sendHeadContent(result *ArticleRetrievalResult) error
 }
 
 // sendBodyContent sends only body for BODY command
-func (c *ClientConnection) sendBodyContent(result *ArticleRetrievalResult) error {
+func (c *ClientConnection) sendBodyContent(result ArticleRetrievalResult) error {
+	if c == nil || c.textConn == nil {
+		return fmt.Errorf("nil connection in sendBodyContent")
+	}
 	// Parse body from the article
 	bodyLines := c.parseArticleBody(result.Article)
 
@@ -383,7 +387,10 @@ func (c *ClientConnection) sendBodyContent(result *ArticleRetrievalResult) error
 }
 
 // sendStatContent sends only status for STAT command
-func (c *ClientConnection) sendStatContent(result *ArticleRetrievalResult) error {
+func (c *ClientConnection) sendStatContent(result ArticleRetrievalResult) error {
+	if c == nil || c.textConn == nil {
+		return fmt.Errorf("nil connection in sendStatContent")
+	}
 	// Send response: 223 n message-id status
 	return c.sendResponse(223, fmt.Sprintf("%d %s Article exists", result.ArticleNum, result.MsgIdItem.MessageId))
 }

@@ -204,3 +204,15 @@ func (d *ResponseDemuxer) readAndDispatch() {
 		}
 	}
 }
+
+// GetStatistics returns current demuxer statistics
+func (d *ResponseDemuxer) GetStatistics() (pendingCommands int, checkResponsesQueued int, ttResponsesQueued int) {
+	d.cmdIDQMux.RLock()
+	pendingCommands = len(d.cmdIDQ)
+	d.cmdIDQMux.RUnlock()
+
+	checkResponsesQueued = len(d.checkResponseChan)
+	ttResponsesQueued = len(d.ttResponseChan)
+
+	return pendingCommands, checkResponsesQueued, ttResponsesQueued
+}

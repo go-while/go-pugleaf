@@ -8,6 +8,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -490,7 +491,7 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 
 // XHdr retrieves specific header field for a range of articles
 // Automatically limits to max 1000 articles to prevent SQLite overload
-func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]*HeaderLine, error) {
+func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderLine, error) {
 	c.mux.Lock()
 	if !c.IsConnected() {
 		c.mux.Unlock()
@@ -538,13 +539,15 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]*Header
 	}
 
 	// Parse header lines
-	var headers = make([]*HeaderLine, 0, len(lines))
+	var headers = make([]HeaderLine, 0, len(lines))
 	for _, line := range lines {
 		header, err := c.parseHeaderLine(line)
 		if err != nil {
 			continue // Skip malformed lines
 		}
-		headers = append(headers, header)
+		if header.ArticleNum > 0 {
+			headers = append(headers, header)
+		}
 	}
 
 	return headers, nil
@@ -566,7 +569,7 @@ func (c *BackendConn) WantShutdown(shutdownChan <-chan struct{}) bool {
 
 // XHdrStreamed performs XHDR command and streams results line by line through a channel
 // Fetches max 1000 hdrs and starts a new fetch if the channel is less than 10% capacity
-func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
+func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) error {
 	channelCap := cap(xhdrChan)
 	lowWaterMark := channelCap / 10 // 10% threshold
 	if lowWaterMark < 1 {
@@ -622,7 +625,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 }
 
 // XHdrStreamedBatch performs XHDR command and streams results line by line through a channel
-func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
+func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) error {
 	c.mux.Lock()
 	if !c.IsConnected() {
 		c.mux.Unlock()
@@ -1009,22 +1012,22 @@ func (c *BackendConn) parseOverviewLine(line string) (OverviewLine, error) {
 
 // parseHeaderLine parses a single XHDR response line
 // Format: articlenum<space>header-value
-func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
+func (c *BackendConn) parseHeaderLine(line string) (HeaderLine, error) {
 	parts := strings.SplitN(line, " ", 2)
 	if len(parts) < 2 {
-		return nil, fmt.Errorf("malformed XHDR line: %s", line)
+		return HeaderLine{}, fmt.Errorf("malformed XHDR line: %s", line)
 	}
 
 	articleNum, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		log.Printf("Invalid article number in XHDR line: %q", parts[0])
-		return nil, fmt.Errorf("invalid article number in XHDR line: %q", parts[0])
+		return HeaderLine{}, fmt.Errorf("invalid article number in XHDR line: %q", parts[0])
 	}
-
-	return &HeaderLine{
+	headerline := HeaderLine{
 		ArticleNum: articleNum,
 		Value:      parts[1],
-	}, nil
+	}
+	return headerline, nil
 }
 
 // SendCheckMultiple sends CHECK commands for multiple message IDs without returning responses!
@@ -1052,6 +1055,7 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponses
 	//defer writer.Flush()
 	//log.Printf("Newsgroup: '%s' | SendCheckMultiple commands for %d message IDs", *job.Newsgroup, len(messageIDs))
 
+	checksSent := uint64(0)
 	for n, msgID := range messageIDs {
 		if msgID == nil || *msgID == "" {
 			log.Printf("Newsgroup: '%s' | Skipping empty message ID in CHECK command", *job.Newsgroup)
@@ -1065,6 +1069,8 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponses
 			return fmt.Errorf("failed to send CHECK '%s': %w", *msgID, err)
 		}
 
+		checksSent++
+
 		// Register command ID with demuxer as TYPE_CHECK
 		demuxer.RegisterCommand(cmdID, TYPE_CHECK)
 
@@ -1073,6 +1079,10 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponses
 		readCHECKResponsesChan <- GetReadRequest(cmdID, job, msgID, n+1, len(messageIDs))
 		//log.Printf("Newsgroup: '%s' | CHECK notified response reader '%s' (CmdID=%d) readCHECKResponsesChan=%d", *job.Newsgroup, *msgID, cmdID, len(readCHECKResponsesChan))
 	}
+
+	// Update job counter with how many CHECK commands were actually sent
+	atomic.AddUint64(&job.CheckSentCount, checksSent)
+
 	return nil
 }
 

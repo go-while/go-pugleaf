@@ -342,6 +342,7 @@ type CHTTJob struct {
 	MessageIDs       []*string
 	WantedIDs        []*string
 	PendingResponses sync.WaitGroup // Track pending TAKETHIS responses
+	CheckSentCount   uint64         // Track how many CHECK commands were sent
 	//checked      uint64
 	//wanted       uint64
 	//unwanted     uint64
@@ -426,6 +427,7 @@ type NewsgroupTransferProgress struct {
 	Retry                     uint64
 	Transferred               uint64
 	TTSentCount               uint64
+	CheckSentCount            uint64
 	RedisCached               uint64
 	TxErrors                  uint64
 	ConnErrors                uint64
