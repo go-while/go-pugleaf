@@ -192,3 +192,58 @@ func (dbs *GroupDBs) Close(who string) error {
 	}
 	return nil
 }
+
+// GetGroupDBsWithSuffix opens a group database with a custom suffix (e.g., ".new")
+// Returns the database connection, the full file path, and any error
+func (db *Database) GetGroupDBsWithSuffix(groupName, suffix string) (*sql.DB, string, error) {
+	if db.dbconfig == nil {
+		return nil, "", fmt.Errorf("database configuration is not set")
+	}
+
+	groupsHash := GroupHashMap.GroupToHash(groupName)
+	baseGroupDBdir := filepath.Join(db.dbconfig.DataDir, "/db/"+groupsHash)
+
+	if err := createDirIfNotExists(baseGroupDBdir); err != nil {
+		return nil, "", fmt.Errorf("failed to create group database directory: %w", err)
+	}
+
+	groupDBfile := filepath.Join(baseGroupDBdir + "/" + SanitizeGroupName(groupName) + ".db" + suffix)
+
+	// Open database
+	groupDB, err := sql.Open("sqlite3", groupDBfile)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to open database: %w", err)
+	}
+
+	// Apply pragmas for new database
+	if err := db.applySQLitePragmasGroupDB(groupDB); err != nil {
+		if cerr := groupDB.Close(); cerr != nil {
+			log.Printf("Failed to close groupDB during pragma error: %v", cerr)
+		}
+		return nil, "", fmt.Errorf("failed to apply pragmas: %w", err)
+	}
+
+	// Apply schema/migrations
+	tempGroupDBs := &GroupDBs{
+		Newsgroup: groupName,
+		DB:        groupDB,
+		Idle:      time.Now(),
+	}
+
+	if err := db.migrateGroupDB(tempGroupDBs); err != nil {
+		if cerr := groupDB.Close(); cerr != nil {
+			log.Printf("Failed to close groupDB during migration error: %v", cerr)
+		}
+		return nil, "", fmt.Errorf("failed to migrate group database: %w", err)
+	}
+
+	return groupDB, groupDBfile, nil
+}
+
+// CloseGroupDBDirectly closes a database connection directly
+func CloseGroupDBDirectly(db *sql.DB) error {
+	if db == nil {
+		return nil
+	}
+	return db.Close()
+}

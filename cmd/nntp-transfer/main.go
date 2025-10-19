@@ -649,133 +649,6 @@ func parseProxyConfig(address, proxyType, username, password string) (*ProxyConf
 	}, nil
 }
 
-const query_getArticlesBatchWithDateFilter_selectPart = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles`
-const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ? OFFSET ?"
-
-// getArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
-func getArticlesBatchWithDateFilter(db *database.Database, ng *models.Newsgroup, offset int64, startTime, endTime *time.Time) ([]*models.Article, error) {
-	// Get group database
-	groupDBs, err := db.GetGroupDBs(ng.Name)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", ng.Name, err)
-	}
-
-	var query string
-	var args []interface{}
-
-	if startTime != nil || endTime != nil {
-		// Build query with date filtering
-		var whereConditions []string
-
-		// Always exclude NULL date_sent values when using ORDER BY date_sent
-		whereConditions = append(whereConditions, "date_sent IS NOT NULL")
-
-		if startTime != nil {
-			whereConditions = append(whereConditions, "date_sent >= ?")
-			args = append(args, startTime.UTC().Format("2006-01-02 15:04:05"))
-		}
-
-		if endTime != nil {
-			whereConditions = append(whereConditions, "date_sent <= ?")
-			args = append(args, endTime.UTC().Format("2006-01-02 15:04:05"))
-		}
-
-		whereClause := ""
-		if len(whereConditions) > 0 {
-			whereClause = " WHERE " + strings.Join(whereConditions, " AND ")
-		}
-
-		query = query_getArticlesBatchWithDateFilter_selectPart + whereClause + query_getArticlesBatchWithDateFilter_orderby
-		args = append(args, dbBatchSize, offset)
-	} else {
-		// No date filtering - simple OFFSET pagination
-		query = query_getArticlesBatchWithDateFilter_selectPart + query_getArticlesBatchWithDateFilter_orderby
-		args = []interface{}{dbBatchSize, offset}
-	}
-
-	rows, err := groupDBs.DB.Query(query, args...)
-	if err != nil {
-		db.ForceCloseGroupDBs(groupDBs)
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []*models.Article
-	for rows.Next() {
-		var a models.Article
-		if err := rows.Scan(&a.DBArtNum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, &a)
-	}
-
-	if int64(len(out)) < dbBatchSize {
-		db.ForceCloseGroupDBs(groupDBs)
-	} else {
-		groupDBs.Return(db)
-	}
-	return out, nil
-}
-
-// getArticleCountWithDateFilter gets the total count of articles with optional date filtering
-// When no date filter is specified, uses cached message_count from newsgroups table in main DB
-func getArticleCountWithDateFilter(db *database.Database, groupDBs *database.GroupDBs, startTime, endTime *time.Time) (int64, error) {
-	var query string
-	var args []interface{}
-	var count int64
-	start := time.Now()
-
-	if startTime != nil || endTime != nil {
-		// Build count query with date filtering - must use live COUNT(*) query
-		var whereConditions []string
-
-		// Always exclude NULL date_sent values to match SELECT query behavior
-		whereConditions = append(whereConditions, "date_sent IS NOT NULL")
-
-		if startTime != nil {
-			whereConditions = append(whereConditions, "date_sent >= ?")
-			args = append(args, startTime.UTC().Format("2006-01-02 15:04:05"))
-		}
-
-		if endTime != nil {
-			whereConditions = append(whereConditions, "date_sent <= ?")
-			args = append(args, endTime.UTC().Format("2006-01-02 15:04:05"))
-		}
-
-		whereClause := ""
-		if len(whereConditions) > 0 {
-			whereClause = " WHERE " + strings.Join(whereConditions, " AND ")
-		}
-
-		query = "SELECT COUNT(*) FROM articles" + whereClause
-		err := groupDBs.DB.QueryRow(query, args...).Scan(&count)
-		if err != nil {
-			return 0, err
-		}
-	} else {
-		// No date filtering - use cached message_count from newsgroups table in main DB
-		// This is MUCH faster than COUNT(*) on large tables (O(1) vs O(N))
-		query = "SELECT COALESCE(message_count, 0) FROM newsgroups WHERE name = ?"
-		err := db.GetMainDB().QueryRow(query, groupDBs.Newsgroup).Scan(&count)
-		if err != nil {
-			// Fallback to direct COUNT if newsgroups table doesn't have the entry
-			log.Printf("WARNING: Could not get message_count from newsgroups table for '%s', falling back to COUNT(*): %v", groupDBs.Newsgroup, err)
-			query = "SELECT COUNT(*) FROM articles"
-			err = groupDBs.DB.QueryRow(query).Scan(&count)
-			if err != nil {
-				return 0, err
-			}
-		}
-	}
-
-	elapsed := time.Since(start)
-	if elapsed > 5*time.Second {
-		log.Printf("WARNING: Slow COUNT query for group '%s' took %v (count=%d)", groupDBs.Newsgroup, elapsed, count)
-	}
-
-	return count, nil
-}
-
 // testConnection tests the connection to the target NNTP server
 func testConnection(host *string, port *int, username *string, password *string, ssl *bool, timeout *int, proxyConfig *ProxyConfig) error {
 	testProvider := &config.Provider{
@@ -1239,7 +1112,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	nntp.ResultsMutex.Unlock()
 
 	// Get total article count first with date filtering
-	totalNGArticles, err := getArticleCountWithDateFilter(db, groupDBsA, startTime, endTime)
+	totalNGArticles, err := db.GetArticleCountWithDateFilter(groupDBsA, startTime, endTime)
 	if err != nil {
 		if ferr := db.ForceCloseGroupDBs(groupDBsA); ferr != nil {
 			log.Printf("ForceCloseGroupDBs error for '%s': %v", ng.Name, ferr)
@@ -1455,7 +1328,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		}
 		start := time.Now()
 		// Load batch from database using OFFSET pagination
-		articles, err := getArticlesBatchWithDateFilter(db, ng, offset, startTime, endTime)
+		articles, err := db.GetArticlesBatchWithDateFilter(ng, offset, startTime, endTime, dbBatchSize)
 		if err != nil {
 			log.Printf("Error loading article batch (processed %d) for newsgroup %s: %v", articlesProcessed, ng.Name, err)
 			return fmt.Errorf("failed to load article batch (processed %d) for newsgroup '%s': %v", articlesProcessed, ng.Name, err)
@@ -2804,6 +2677,9 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 				// requeue at front
 				rs.jobs = append([]*nntp.CHTTJob{job}, rs.jobs...)
 				rs.Mux.Unlock()
+				mux.Lock()
+				runningTTJobs++
+				mux.Unlock()
 				return
 			}
 			if redis_cached > 0 {

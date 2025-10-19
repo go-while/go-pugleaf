@@ -43,6 +43,7 @@ func main() {
 		maxPar              = flag.Int("max-par", 1, "use with -rebuild-threads to process N newsgroups")
 		dataDir             = flag.String("data", "./data", "Directory to store database files")
 		scanOutOfOrderCheck = flag.Bool("scan-out-of-order-overview", false, "Scan newsgroups for articles with out-of-order date_sent values")
+		reorderByDateSent   = flag.Bool("reorder-by-datesent", false, "Reorder all articles by date_sent and write to new database file with .new extension")
 	)
 	flag.Parse()
 
@@ -147,7 +148,7 @@ func main() {
 					wg.Done()
 				}(wg)
 				fmt.Printf("🧵 [%d/%d] Rebuilding threads for newsgroup: %s\n", i+1, len(newsgroups), newsgroup.Name)
-				report, err := db.RebuildThreadsFromScratch(newsgroup.Name, *verbose)
+				report, err := db.RebuildThreadsFromScratch(newsgroup.Name, *verbose, nil)
 				if err != nil {
 					fmt.Printf("❌ Failed to rebuild threads for '%s': %v\n", newsgroup.Name, err)
 					return
@@ -192,6 +193,17 @@ func main() {
 		err := scanOutOfOrderOverview(db, newsgroups, *verbose)
 		if err != nil {
 			log.Fatalf("Out-of-order scan failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
+	// If reorder-by-datesent is requested, run that and exit
+	if *reorderByDateSent {
+		fmt.Printf("🔄 Starting article reordering by date_sent...\n")
+		fmt.Printf("=====================================\n")
+		err := reorderArticlesByDateSent(db, newsgroups, *verbose, *maxPar)
+		if err != nil {
+			log.Fatalf("Article reordering failed: %v", err)
 		}
 		os.Exit(0)
 	}
@@ -270,7 +282,7 @@ func main() {
 			// Optionally rebuild threads after repair if there were thread-related issues
 			if len(report.OrphanedThreads) > 0 {
 				fmt.Printf("🧵 Rebuilding thread relationships after repair...\n")
-				threadReport, err := db.RebuildThreadsFromScratch(newsgroup.Name, *verbose)
+				threadReport, err := db.RebuildThreadsFromScratch(newsgroup.Name, *verbose, nil)
 				if err != nil {
 					fmt.Printf("❌ Failed to rebuild threads: %v\n", err)
 				} else {
@@ -1156,4 +1168,232 @@ func scanOutOfOrderOverview(db *database.Database, newsgroups []*models.Newsgrou
 	fmt.Printf("=====================================\n")
 
 	return nil
+}
+
+// reorderArticlesByDateSent reorders articles by date_sent and writes to a new database
+func reorderArticlesByDateSent(db *database.Database, newsgroups []*models.Newsgroup, verbose bool, maxPar int) error {
+	fmt.Printf("Processing %d newsgroups with max parallelism: %d\n\n", len(newsgroups), maxPar)
+
+	parChan := make(chan struct{}, maxPar)
+	var wg sync.WaitGroup
+	var totalArticles, totalNewsgroups int64
+	var mu sync.Mutex
+
+	for i, ng := range newsgroups {
+		parChan <- struct{}{} // acquire lock
+		wg.Add(1)
+
+		go func(ng *models.Newsgroup, index int) {
+			defer func() {
+				<-parChan // release lock
+				wg.Done()
+			}()
+
+			fmt.Printf("🔄 [%d/%d] Processing: %s\n", index+1, len(newsgroups), ng.Name)
+
+			articleCount, err := reorderSingleNewsgroup(db, ng.Name, verbose)
+			if err != nil {
+				fmt.Printf("❌ [%d/%d] Failed to reorder %s: %v\n", index+1, len(newsgroups), ng.Name, err)
+				return
+			}
+
+			mu.Lock()
+			totalArticles += articleCount
+			if articleCount > 0 {
+				totalNewsgroups++
+			}
+			mu.Unlock()
+
+			if articleCount > 0 {
+				fmt.Printf("✅ [%d/%d] Completed: %s (%d articles)\n", index+1, len(newsgroups), ng.Name, articleCount)
+			} else {
+				fmt.Printf("⚠️  [%d/%d] Skipped: %s (no articles)\n", index+1, len(newsgroups), ng.Name)
+			}
+		}(ng, i)
+	}
+
+	wg.Wait()
+
+	fmt.Printf("\n=====================================\n")
+	fmt.Printf("📊 REORDER SUMMARY\n")
+	fmt.Printf("=====================================\n")
+	fmt.Printf("Newsgroups processed: %d\n", totalNewsgroups)
+	fmt.Printf("Total articles reordered: %d\n", totalArticles)
+	fmt.Printf("=====================================\n")
+
+	return nil
+}
+
+// reorderSingleNewsgroup reorders articles in a single newsgroup by date_sent
+func reorderSingleNewsgroup(db *database.Database, newsgroupName string, verbose bool) (int64, error) {
+	// Open source database
+	sourceDB, err := db.GetGroupDBs(newsgroupName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open source database: %w", err)
+	}
+	defer db.ForceCloseGroupDBs(sourceDB)
+
+	// Count articles in source database
+	var totalArticles int64
+	err = sourceDB.DB.QueryRow("SELECT COUNT(*) FROM articles WHERE date_sent IS NOT NULL").Scan(&totalArticles)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count articles: %w", err)
+	}
+
+	if totalArticles == 0 {
+		return 0, nil // No articles to process
+	}
+
+	// Open destination database with .new suffix
+	destDB, destPath, err := db.GetGroupDBsWithSuffix(newsgroupName, ".new")
+	if err != nil {
+		return 0, fmt.Errorf("failed to create destination database: %w", err)
+	}
+	defer database.CloseGroupDBDirectly(destDB)
+
+	if verbose {
+		fmt.Printf("   Source: %s\n", sourceDB.Newsgroup)
+		fmt.Printf("   Dest:   %s\n", destPath)
+		fmt.Printf("   Articles to reorder: %d\n", totalArticles)
+	}
+
+	// Process articles in batches to avoid memory issues with large newsgroups
+	const batchSize = 1000
+	var newArticleNum int64 = 1
+	var processed int64
+	var offset int64 = 0
+
+	// Create a temporary newsgroup model for GetArticlesBatchWithDateFilter
+	tempNG := &models.Newsgroup{
+		Name: newsgroupName,
+	}
+
+	// Prepare insert statement for reuse across batches
+	insertSQL := `INSERT INTO articles (article_num, message_id, subject, from_header, date_sent, date_string,
+	                                    "references", bytes, lines, reply_count, path, headers_json, body_text,
+	                                    imported_at, spam, hide)
+	              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	for offset < totalArticles {
+		// Use existing GetArticlesBatchWithDateFilter function to fetch articles
+		// Pass nil for startTime/endTime to get all articles, ordered by date_sent
+		articles, err := db.GetArticlesBatchWithDateFilter(tempNG, offset, nil, nil, batchSize)
+		if err != nil {
+			return processed, fmt.Errorf("failed to query source database at offset %d: %w", offset, err)
+		}
+
+		// Break if no articles returned
+		if len(articles) == 0 {
+			break
+		}
+
+		// Begin transaction for this batch
+		tx, err := destDB.Begin()
+		if err != nil {
+			return processed, fmt.Errorf("failed to begin transaction at offset %d: %w", offset, err)
+		}
+
+		stmt, err := tx.Prepare(insertSQL)
+		if err != nil {
+			tx.Rollback()
+			return processed, fmt.Errorf("failed to prepare insert statement: %w", err)
+		}
+
+		// Process batch
+		batchCount := 0
+		for _, article := range articles {
+			if article == nil {
+				continue
+			}
+
+			// Determine spam/hide flags (these are stored as integers in DB)
+			spam := 0
+			hide := 0
+			// Note: Article model doesn't have Spam/Hide fields, so we default to 0
+
+			// Insert with new sequential article_num
+			_, err = stmt.Exec(
+				newArticleNum, // new sequential article_num
+				article.MessageID,
+				article.Subject,
+				article.FromHeader,
+				article.DateSent,
+				article.DateString,
+				article.References,
+				article.Bytes,
+				article.Lines,
+				article.ReplyCount,
+				article.Path,
+				article.HeadersJSON,
+				article.BodyText,
+				article.ImportedAt,
+				spam,
+				hide,
+			)
+			if err != nil {
+				stmt.Close()
+				tx.Rollback()
+				return processed, fmt.Errorf("failed to insert article %d: %w", newArticleNum, err)
+			}
+
+			newArticleNum++
+			processed++
+			batchCount++
+		}
+
+		stmt.Close()
+
+		// Commit batch transaction
+		if err = tx.Commit(); err != nil {
+			return processed, fmt.Errorf("failed to commit transaction at offset %d: %w", offset, err)
+		}
+
+		if verbose {
+			fmt.Printf("   Progress: %d/%d articles (batch: %d)\n", processed, totalArticles, batchCount)
+		}
+
+		// Break if we got fewer articles than batch size (end of data)
+		if batchCount < int(batchSize) {
+			break
+		}
+
+		offset += int64(batchCount)
+	}
+
+	// Close destination database before rebuilding threads
+	if err := database.CloseGroupDBDirectly(destDB); err != nil {
+		log.Printf("Warning: failed to close destination database: %v", err)
+	}
+
+	// Rebuild threads in the new database
+	if verbose {
+		fmt.Printf("   Rebuilding thread relationships...\n")
+	}
+
+	// Reopen the destination database for thread rebuild
+	destDB, err = sql.Open("sqlite3", destPath)
+	if err != nil {
+		return processed, fmt.Errorf("failed to reopen destination database for thread rebuild: %w", err)
+	}
+	defer destDB.Close()
+
+	// Create a temporary GroupDBs wrapper for the new database
+	tempGroupDBs := &database.GroupDBs{
+		Newsgroup: newsgroupName,
+		DB:        destDB,
+	}
+
+	// Rebuild threads using the existing RebuildThreadsFromScratch function
+	var report *database.ThreadRebuildReport
+	report, err = db.RebuildThreadsFromScratch(newsgroupName, verbose, tempGroupDBs)
+	if err != nil {
+		return processed, fmt.Errorf("failed to rebuild threads: %w", err)
+	}
+
+	if verbose {
+		fmt.Printf("   Thread rebuild complete: %d threads from %d articles\n",
+			report.ThreadsRebuilt, report.TotalArticles)
+	}
+
+	return processed, nil
 }

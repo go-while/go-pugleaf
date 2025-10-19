@@ -29,8 +29,8 @@ func NewResponseDemuxer(conn *BackendConn, errChan chan struct{}, BatchCheck int
 	return &ResponseDemuxer{
 		conn:              conn,
 		signalChan:        make(chan struct{}, 1),
-		checkResponseChan: make(chan *ResponseData, 64*1024), // Buffer for CHECK responses
-		ttResponseChan:    make(chan *ResponseData, 64*1024), // Buffer for TAKETHIS responses
+		checkResponseChan: make(chan *ResponseData, 1024*1024), // Buffer for CHECK responses
+		ttResponseChan:    make(chan *ResponseData, 1024*1024), // Buffer for TAKETHIS responses
 		errChan:           errChan,
 		started:           false,
 	}

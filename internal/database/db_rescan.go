@@ -379,7 +379,8 @@ const query_RebuildThreadsFromScratch5 = "SELECT article_num, message_id FROM ar
 
 // RebuildThreadsFromScratch completely rebuilds all thread relationships for a newsgroup
 // This function deletes all existing threads and rebuilds them from article 1 based on message references
-func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool) (*ThreadRebuildReport, error) {
+// If groupDB is provided (not nil), it will use that instead of opening the newsgroup's database
+func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, groupDB *GroupDBs) (*ThreadRebuildReport, error) {
 	report := &ThreadRebuildReport{
 		Newsgroup: newsgroup,
 		StartTime: time.Now(),
@@ -390,15 +391,24 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool) (*
 		log.Printf("RebuildThreadsFromScratch: Starting complete thread rebuild for newsgroup '%s'", newsgroup)
 	}
 
-	// Get group database
-	groupDB, err := db.GetGroupDBs(newsgroup)
-	if err != nil {
-		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get group database: %v", err))
-		return report, err
+	// Get group database if not provided
+	var shouldCloseDB bool
+	if groupDB == nil {
+		var err error
+		groupDB, err = db.GetGroupDBs(newsgroup)
+		if err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("Failed to get group database: %v", err))
+			return report, err
+		}
+		shouldCloseDB = true
 	}
-	defer groupDB.Return(db)
+
+	if shouldCloseDB {
+		defer groupDB.Return(db)
+	}
 
 	// Get total article count
+	var err error
 	err = retryableQueryRowScan(groupDB.DB, query_RebuildThreadsFromScratch1, []interface{}{}, &report.TotalArticles)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get article count: %v", err))
