@@ -1784,7 +1784,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		// Increment pending responses counter before sending
 		job.PendingResponses.Add(1)
 
-		cmdID, txBytes, err := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname, newsgroup, demuxer, readTAKETHISResponsesChan, job, n, len(articles)-skipped)
+		cmdID, txBytes, err, doContinue := conn.SendTakeThisArticleStreaming(article, &processor.LocalNNTPHostname, newsgroup, demuxer, readTAKETHISResponsesChan, job, n, len(articles)-skipped)
 		astart2 = time.Now()
 		job.Mux.Lock()
 		job.TTxBytes += uint64(txBytes)
@@ -1794,9 +1794,9 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 		if err != nil {
 			// Decrement on error since no response will come
 			job.PendingResponses.Done()
-			if err == common.ErrNoNewsgroups {
+			if err == common.ErrNoNewsgroups || doContinue {
 				job.NGTProgress.Increment(nntp.IncrFLAG_SKIPPED, 1)
-				log.Printf("Newsgroup: '%s' | skipped TAKETHIS '%s': no newsgroups header", newsgroup, article.MessageID)
+				log.Printf("Newsgroup: '%s' | skipped TAKETHIS '%s': bad newsgroups header doContinue=%t", newsgroup, article.MessageID, doContinue)
 				continue
 			}
 			conn.Unlock()
@@ -3176,7 +3176,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 				Cache Hits (Total): {{.TotalRedisCacheHits}}<br>
 				&nbsp;&nbsp;├─ Before CHECK: {{.TotalRedisCacheBeforeCheck}}<br>
 				&nbsp;&nbsp;└─ Before TAKETHIS: {{.TotalRedisCacheBeforeTakethis}}<br>
-				Checked: {{.TotalChecked}}<br>
+				Checked: {{.TotalCheckSentCount}} / {{.TotalChecked}}<br>
 				Wanted: {{.TotalWanted}}<br>
 				Unwanted: {{.TotalUnwanted}}<br>
 				TTSentCount: {{.TotalTTSentCount}}<br>
@@ -3358,26 +3358,26 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	// Collect demuxer statistics
 	type DemuxerStats struct {
 		WorkerID             int
-		PendingCommands      int
-		CheckResponsesQueued int
-		TTResponsesQueued    int
+		PendingCommands      int64
+		CheckResponsesQueued int64
+		TTResponsesQueued    int64
 		LastRequest          time.Time
-		IdleSeconds          int
+		IdleSeconds          int64
 	}
 	var demuxerStats []DemuxerStats
 	DemuxersMutex.RLock()
 	for i, demux := range Demuxers {
 		if demux != nil {
 			pending, checkQueued, ttQueued, lastReq := demux.GetStatistics()
-			idleSeconds := 0
+			var idleSeconds int64
 			if !lastReq.IsZero() {
-				idleSeconds = int(time.Since(lastReq).Seconds())
+				idleSeconds = int64(time.Since(lastReq).Seconds())
 			}
 			demuxerStats = append(demuxerStats, DemuxerStats{
 				WorkerID:             i,
-				PendingCommands:      pending,
-				CheckResponsesQueued: checkQueued,
-				TTResponsesQueued:    ttQueued,
+				PendingCommands:      int64(pending),
+				CheckResponsesQueued: int64(checkQueued),
+				TTResponsesQueued:    int64(ttQueued),
 				LastRequest:          lastReq,
 				IdleSeconds:          idleSeconds,
 			})
@@ -3403,6 +3403,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		TotalRedisCacheBeforeCheck    uint64
 		TotalRedisCacheBeforeTakethis uint64
 		TotalChecked                  uint64
+		TotalCheckSentCount           uint64
 		TotalUnwanted                 uint64
 		TotalWanted                   uint64
 		TotalTransferred              uint64
@@ -3430,6 +3431,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		TotalRedisCacheBeforeCheck:    totalRedisCacheBeforeCheck,
 		TotalRedisCacheBeforeTakethis: totalRedisCacheBeforeTakethis,
 		TotalChecked:                  totalChecked,
+		TotalCheckSentCount:           totalCheckSentCount,
 		TotalWanted:                   totalWanted,
 		TotalUnwanted:                 totalUnwanted,
 		TotalTransferred:              totalTransferred,

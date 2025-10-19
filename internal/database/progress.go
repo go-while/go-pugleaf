@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -14,7 +15,8 @@ import (
 
 // ProgressDB tracks fetching progress for newsgroups per backend
 type ProgressDB struct {
-	db *sql.DB
+	db  *sql.DB
+	mux sync.Mutex
 }
 
 // ProgressEntry represents the fetching progress for a newsgroup on a backend
@@ -120,6 +122,8 @@ ON CONFLICT(backend_name, newsgroup_name) DO UPDATE SET
 
 // UpdateProgress updates the fetching progress for a newsgroup on a backend
 func (p *ProgressDB) UpdateProgress(backendName, newsgroupName string, lastArticle int64) error {
+	p.mux.Lock()
+	defer p.mux.Unlock()
 	_, err := retryableExec(p.db, query_UpdateProgress, backendName, newsgroupName, lastArticle)
 	if err != nil {
 		return fmt.Errorf("failed to update progress: %w", err)

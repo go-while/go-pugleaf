@@ -1090,19 +1090,20 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponses
 // sends TAKETHIS command and article content without waiting for response
 // Returns command ID for later response reading - used for streaming mode
 // Registers the command ID with the demuxer for proper response routing
-func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string, demuxer *ResponseDemuxer, readTAKETHISResponsesChan chan *ReadRequest, job *CHTTJob, n int, reqs int) (cmdID uint, txBytes int, err error) {
+// return value doContinue indicates whether the caller should continue sending more articles
+func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string, demuxer *ResponseDemuxer, readTAKETHISResponsesChan chan *ReadRequest, job *CHTTJob, n int, reqs int) (cmdID uint, txBytes int, err error, doContinue bool) {
 	//start := time.Now()
 	//c.mux.Lock()
 	//defer c.mux.Unlock()
 
 	if !c.IsConnected() {
 		//c.mux.Unlock()
-		return 0, 0, fmt.Errorf("not connected")
+		return 0, 0, fmt.Errorf("not connected"), false
 	}
 
 	if c.ModeReader {
 		//c.mux.Unlock()
-		return 0, 0, fmt.Errorf("cannot send article in reader mode")
+		return 0, 0, fmt.Errorf("cannot send article in reader mode"), false
 	}
 	c.lastUsed = time.Now()
 	//c.mux.Unlock()
@@ -1110,7 +1111,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	// Prepare article for transfer
 	headers, err := common.ReconstructHeaders(article, true, nntphostname, newsgroup)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, err, true
 	}
 	//writer := bufio.NewWriterSize(c.conn, c.GetBufSize(article.Bytes)) // Slightly larger buffer than article size for headers
 	writer := bufio.NewWriter(c.conn) // Slightly larger buffer than article size for headers
@@ -1122,13 +1123,13 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	// Send TAKETHIS command
 	cmdID, err = c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed SendTakeThisArticleStreaming command: %w", err)
+		return 0, 0, fmt.Errorf("failed SendTakeThisArticleStreaming command: %w", err), false
 	}
 
 	// Send headers
 	for _, headerLine := range headers {
 		if tx, err := writer.WriteString(headerLine + CRLF); err != nil {
-			return 0, txBytes, fmt.Errorf("failed to write header SendTakeThisArticleStreaming: %w", err)
+			return 0, txBytes, fmt.Errorf("failed to write header SendTakeThisArticleStreaming: %w", err), false
 		} else {
 			txBytes += tx
 		}
@@ -1136,7 +1137,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 
 	// Send empty line between headers and body
 	if tx, err := writer.WriteString(CRLF); err != nil {
-		return 0, txBytes, fmt.Errorf("failed to write header/body separator SendTakeThisArticleStreaming: %w", err)
+		return 0, txBytes, fmt.Errorf("failed to write header/body separator SendTakeThisArticleStreaming: %w", err), false
 	} else {
 		txBytes += tx
 	}
@@ -1159,7 +1160,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 		}
 
 		if tx, err := writer.WriteString(line + CRLF); err != nil {
-			return 0, txBytes, fmt.Errorf("failed to write body line SendTakeThisArticleStreaming: %w", err)
+			return 0, txBytes, fmt.Errorf("failed to write body line SendTakeThisArticleStreaming: %w", err), false
 		} else {
 			txBytes += tx
 		}
@@ -1167,7 +1168,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 
 	// Send termination line (single dot)
 	if tx, err := writer.WriteString(DOT + CRLF); err != nil {
-		return 0, txBytes, fmt.Errorf("failed to send article terminator SendTakeThisArticleStreaming: %w", err)
+		return 0, txBytes, fmt.Errorf("failed to send article terminator SendTakeThisArticleStreaming: %w", err), false
 	} else {
 		txBytes += tx
 	}
@@ -1175,7 +1176,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 
 	//startFlush := time.Now()
 	if err := writer.Flush(); err != nil {
-		return 0, txBytes, fmt.Errorf("failed to flush article data SendTakeThisArticleStreaming: %w", err)
+		return 0, txBytes, fmt.Errorf("failed to flush article data SendTakeThisArticleStreaming: %w", err), false
 	}
 
 	//chanStart := time.Now()
@@ -1188,7 +1189,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	readTAKETHISResponsesChan <- GetReadRequest(cmdID, job, &article.MessageID, n+1, reqs) // reuse global struct to reduce GC pressure
 	//log.Printf("Newsgroup: '%s' | TAKETHIS notified response reader CmdID=%d '%s' waited %v readTAKETHISResponsesChan=%d/%d", newsgroup, cmdID, article.MessageID, time.Since(chanStart), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
 	// Return command ID without reading response (streaming mode)
-	return cmdID, txBytes, nil
+	return cmdID, txBytes, nil, true
 }
 
 // PostArticle posts an article using the POST command

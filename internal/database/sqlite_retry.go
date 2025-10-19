@@ -10,8 +10,8 @@ import (
 
 const (
 	maxRetries = 1000
-	baseDelay  = 10 * time.Millisecond
-	maxDelay   = 25 * time.Millisecond
+	baseDelay  = 100 * time.Millisecond
+	maxDelay   = 2500 * time.Millisecond
 )
 
 // isRetryableError checks if the error is a retryable SQLite error

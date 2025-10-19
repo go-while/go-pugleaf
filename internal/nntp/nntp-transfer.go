@@ -24,7 +24,7 @@ const (
 )
 
 // Pool of ResponseData structs to reduce allocations
-var ResponseDataPool = make(chan *ResponseData, 64*1024)
+var ResponseDataPool = make(chan *ResponseData, 1024*1024)
 
 // GetResponseData returns a recycled ResponseData struct or makes a new one if none are available
 func GetResponseData(cmdID uint, code int, line string, err error) *ResponseData {
@@ -87,7 +87,7 @@ type TTSetup struct {
 }
 
 // Pool of TTSetup structs to reduce allocations
-var TTSetupPool = make(chan *TTSetup, 64*1024)
+var TTSetupPool = make(chan *TTSetup, 1024*1024)
 
 // GetTTSetup returns a recycled TTSetup struct or makes a new one if none are available
 // the responseChan parameter is received from processBatch() and is mandatory and will be set on the returned struct
@@ -206,7 +206,7 @@ type TTResponse struct {
 }
 
 // Pool of TTResponse structs to reduce allocations
-var TTResponsePool = make(chan *TTResponse, 64*1024)
+var TTResponsePool = make(chan *TTResponse, 1024*1024)
 
 // GetTTResponse returns a recycled TTResponse struct or makes a new one if none are available
 func GetTTResponse(job *CHTTJob, forceCleanup bool, err error) *TTResponse {
@@ -238,7 +238,7 @@ func RecycleTTResponse(resp *TTResponse) {
 }
 
 // Pool of TTResponse chans to reduce allocations
-var TTResponseChans = make(chan chan *TTResponse, 16384)
+var TTResponseChans = make(chan chan *TTResponse, 1024*1024)
 
 // GetTTResponseChan returns a recycled chan *TTResponse or makes a new one with capacity of 1 if none are available
 func GetTTResponseChan() chan *TTResponse {
@@ -285,7 +285,7 @@ type ReadRequest struct {
 }
 
 // Pool of ReadRequest structs to reduce allocations
-var ReadRequestsPool = make(chan *ReadRequest, 65536)
+var ReadRequestsPool = make(chan *ReadRequest, 1024*1024)
 
 // ClearReadRequest resets a ReadRequest struct and recycles it back into the pool
 func (rr *ReadRequest) ClearReadRequest(respData *ResponseData) {
