@@ -8,7 +8,6 @@ import (
 	"log"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -1033,30 +1032,29 @@ func (c *BackendConn) parseHeaderLine(line string) (HeaderLine, error) {
 
 // SendCheckMultiple sends CHECK commands for multiple message IDs without returning responses!
 // Registers each command ID with the demuxer for proper response routing
-func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponsesChan chan *ReadRequest, job *CHTTJob, demuxer *ResponseDemuxer) error {
+func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponsesChan chan *ReadRequest, job *CHTTJob, demuxer *ResponseDemuxer) (checksSent uint64, err error) {
 	c.mux.Lock()
 
 	if !c.IsConnected() {
 		c.mux.Unlock()
-		return fmt.Errorf("not connected")
+		return 0, fmt.Errorf("not connected")
 	}
 
 	if c.ModeReader {
 		c.mux.Unlock()
-		return fmt.Errorf("cannot check article in reader mode")
+		return 0, fmt.Errorf("cannot check article in reader mode")
 	}
 	c.lastUsed = time.Now()
 	c.mux.Unlock()
 
 	if len(messageIDs) == 0 {
-		return fmt.Errorf("no message IDs provided")
+		return 0, fmt.Errorf("no message IDs provided")
 	}
 
 	//writer := bufio.NewWriter(c.conn)
 	//defer writer.Flush()
 	//log.Printf("Newsgroup: '%s' | SendCheckMultiple commands for %d message IDs", *job.Newsgroup, len(messageIDs))
 
-	checksSent := uint64(0)
 	for n, msgID := range messageIDs {
 		if msgID == nil || *msgID == "" {
 			log.Printf("Newsgroup: '%s' | Skipping empty message ID in CHECK command", *job.Newsgroup)
@@ -1067,7 +1065,7 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponses
 		cmdID, err := c.TextConn.Cmd("CHECK %s", *msgID)
 		c.mux.Unlock()
 		if err != nil {
-			return fmt.Errorf("failed to send CHECK '%s': %w", *msgID, err)
+			return checksSent, fmt.Errorf("failed to send CHECK '%s': %w", *msgID, err)
 		}
 
 		checksSent++
@@ -1082,9 +1080,11 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponses
 	}
 
 	// Update job counter with how many CHECK commands were actually sent
-	atomic.AddUint64(&job.CheckSentCount, checksSent)
+	job.Mux.Lock()
+	job.CheckSentCount += checksSent
+	job.Mux.Unlock()
 
-	return nil
+	return checksSent, nil
 }
 
 // SendTakeThisArticleStreaming IS UNSAFE! MUST BE LOCKED AND UNLOCKED OUTSIDE FOR THE WHOLE BATCH!!!

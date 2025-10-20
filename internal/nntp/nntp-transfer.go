@@ -414,9 +414,9 @@ type NewsgroupTransferProgress struct {
 	Started     time.Time
 	LastUpdated time.Time
 
-	OffsetStart               int64
-	BatchStart                int64
-	BatchEnd                  int64
+	OffsetStart int64
+	//BatchStart                int64
+	//BatchEnd                  int64
 	TotalArticles             int64
 	Checked                   uint64
 	Wanted                    uint64

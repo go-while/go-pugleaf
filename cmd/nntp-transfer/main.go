@@ -101,7 +101,7 @@ var appVersion = "-unset-"
 var redisCtx = context.Background()
 var REDIS_TTL time.Duration = 3600 * time.Second // default 1h
 var MaxQueuedJobs int = 8
-var BatchCheck int
+var BatchCheck int64
 var CHECK_FIRST bool
 
 // statistics
@@ -156,7 +156,7 @@ func main() {
 		proxyPassword = flag.String("proxy-password", "", "Proxy authentication password")
 
 		// Transfer configuration
-		batchCheck      = flag.Int("batch-check", 100, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
+		batchCheck      = flag.Int64("batch-check", 100, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
 		batchDB         = flag.Int64("batch-db", 1000, "Fetch N articles from DB in a batch")
 		maxThreads      = flag.Int("max-threads", 1, "Transfer N newsgroups in concurrent threads. Each thread uses 1 connection.")
 		redisCache      = flag.Bool("redis-cache", true, "Use Redis caching for message IDs")
@@ -1019,7 +1019,7 @@ func matchesAnyWildcardPattern(newsgroup string, patterns []string) bool {
 }
 
 // runTransfer performs the actual article transfer process
-func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, wgP *sync.WaitGroup, redisCli *redis.Client) error {
+func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchCheck int64, maxThreads int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, wgP *sync.WaitGroup, redisCli *redis.Client) error {
 	defer wgP.Done()
 	defer log.Printf("runTransfer() quitted")
 	maxThreadsChan := make(chan struct{}, maxThreads)
@@ -1135,7 +1135,7 @@ func processRequeuedJobs(newsgroup string, ttMode *nntp.TakeThisMode, ttResponse
 }
 
 // transferNewsgroup transfers articles from a single newsgroup
-func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, redisCli *redis.Client) error {
+func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck int64, dryRun bool, startTime, endTime *time.Time, debugCapture bool, redisCli *redis.Client) error {
 
 	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Starting (getting group DBs)...", ng.Name)
 
@@ -1298,9 +1298,10 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			log.Printf("Newsgroup: '%s' | Collector: all response processors closed", ng.Name)
 		}
 
-		nntp.ResultsMutex.Lock()
-		ngtprogress.Mux.Lock()
+		var tmpglobalTotalArticles, tmptotalTransferred, tmptotalTTSentCount, tmptotalCheckSentCount, tmptotalRedisCacheHits, tmptotalRedisCacheBeforeCheck, tmptotalRedisCacheBeforeTakethis uint64
+		var tmptotalWanted, tmptotalUnwanted, tmptotalChecked, tmptotalRejected, tmptotalRetry, tmptotalSkipped, tmptotalTXErrors, tmptotalConnErrors uint64
 
+		ngtprogress.Mux.Lock()
 		result := fmt.Sprintf("END Newsgroup: '%s' total: %d | CHECK_sent: %d | checked: %d | transferred: %d | cache_hits: %d | wanted: %d | unwanted: %d | rejected: %d | retry: %d  | skipped: %d | TX_Errors: %d | connErrors: %d | took %v",
 			ng.Name, totalNGArticles,
 			ngtprogress.CheckSentCount, ngtprogress.Checked,
@@ -1309,37 +1310,52 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			ngtprogress.Retry, ngtprogress.Skipped,
 			ngtprogress.TxErrors, ngtprogress.ConnErrors,
 			time.Since(start))
-
-		globalTotalArticles += uint64(totalNGArticles)
-		totalTransferred += ngtprogress.Transferred
-		totalTTSentCount += ngtprogress.TTSentCount
-		totalCheckSentCount += ngtprogress.CheckSentCount
-		totalRedisCacheHits += ngtprogress.RedisCached
-		totalRedisCacheBeforeCheck += ngtprogress.RedisCachedBeforeCheck
-		totalRedisCacheBeforeTakethis += ngtprogress.RedisCachedBeforeTakethis
-		totalWanted += ngtprogress.Wanted
-		totalUnwanted += ngtprogress.Unwanted
-		totalChecked += ngtprogress.Checked
-		totalRejected += ngtprogress.Rejected
-		totalRetry += ngtprogress.Retry
-		totalSkipped += ngtprogress.Skipped
-		totalTXErrors += ngtprogress.TxErrors
-		totalConnErrors += ngtprogress.ConnErrors
-
+		// capture values
+		tmpglobalTotalArticles += uint64(totalNGArticles)
+		tmptotalTransferred += ngtprogress.Transferred
+		tmptotalTTSentCount += ngtprogress.TTSentCount
+		tmptotalCheckSentCount += ngtprogress.CheckSentCount
+		tmptotalRedisCacheHits += ngtprogress.RedisCached
+		tmptotalRedisCacheBeforeCheck += ngtprogress.RedisCachedBeforeCheck
+		tmptotalRedisCacheBeforeTakethis += ngtprogress.RedisCachedBeforeTakethis
+		tmptotalWanted += ngtprogress.Wanted
+		tmptotalUnwanted += ngtprogress.Unwanted
+		tmptotalChecked += ngtprogress.Checked
+		tmptotalRejected += ngtprogress.Rejected
+		tmptotalRetry += ngtprogress.Retry
+		tmptotalSkipped += ngtprogress.Skipped
+		tmptotalTXErrors += ngtprogress.TxErrors
+		tmptotalConnErrors += ngtprogress.ConnErrors
 		// Mark newsgroup as finished
 		ngtprogress.Finished = true
 		ngtprogress.LastUpdated = time.Now()
 		ngtprogress.LastCronTX = ngtprogress.LastUpdated
 		ngtprogress.Mux.Unlock()
 
+		nntp.ResultsMutex.Lock()
+		// capture values
+		globalTotalArticles += tmpglobalTotalArticles
+		totalTransferred += tmptotalTransferred
+		totalTTSentCount += tmptotalTTSentCount
+		totalCheckSentCount += tmptotalCheckSentCount
+		totalRedisCacheHits += tmptotalRedisCacheHits
+		totalRedisCacheBeforeCheck += tmptotalRedisCacheBeforeCheck
+		totalRedisCacheBeforeTakethis += tmptotalRedisCacheBeforeTakethis
+		totalWanted += tmptotalWanted
+		totalUnwanted += tmptotalUnwanted
+		totalChecked += tmptotalChecked
+		totalRejected += tmptotalRejected
+		totalRetry += tmptotalRetry
+		totalSkipped += tmptotalSkipped
+		totalTXErrors += tmptotalTXErrors
+		totalConnErrors += tmptotalConnErrors
+		// store result
 		results = append(results, result)
-
 		for _, msgId := range rejectedArticles[ng.Name] {
 			// prints all at the end again
 			log.Printf("END Newsgroup: '%s' | REJECTED '%s'", ng.Name, msgId)
 		}
 		delete(rejectedArticles, ng.Name) // free memory
-
 		nntp.ResultsMutex.Unlock()
 	}(&responseWG)
 
@@ -1351,9 +1367,10 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	// Use simple OFFSET pagination
 	var processed int64
 	msgIDsChan := make(chan []*string, MaxQueuedJobs)
-	go db.GetMessageIDsWithDateFilter(ng, startTime, endTime, dbBatchSize, msgIDsChan)
+	go db.GetMessageIDsWithDateFilter(ng, startTime, endTime, batchCheck, msgIDsChan)
 	// Get articles in database batches (much larger than network batches)
 	var dbOffset int64
+	//start := time.Now()
 	for messageIDs := range msgIDsChan {
 		if common.WantShutdown() {
 			log.Printf("WantShutdown in newsgroup: '%s' (processed %d messageIDs)", ng.Name, processed)
@@ -1363,7 +1380,6 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		if _, err := processRequeuedJobs(ng.Name, ttMode, ttResponsesSetupChan, redisCli); err != nil {
 			return err
 		}
-		start := time.Now()
 		if len(messageIDs) == 0 {
 			log.Printf("No more articles in newsgroup %s (loaded %d)", ng.Name, processed)
 			break
@@ -1378,9 +1394,9 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			return nil
 		}
 
-		log.Printf("Newsgroup: '%s' | Loaded %d mids | took: %v", ng.Name, len(messageIDs), time.Since(start))
+		//log.Printf("Newsgroup: '%s' | Loaded %d mids | took: %v", ng.Name, len(messageIDs), time.Since(start))
 		// Process articles in network batches
-		start2 := time.Now()
+		//start2 := time.Now()
 		OffsetQueue.Add(1)
 		if common.WantShutdown() {
 			log.Printf("WantShutdown in newsgroup: '%s' (processed %d)", ng.Name, processed)
@@ -1410,9 +1426,9 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		// articlesProcessed already incremented above after loading from DB
 		remainingArticles -= int64(len(messageIDs))
 
-		log.Printf("Newsgroup: '%s' | Pushed to queue (processed %d/%d) remaining: %d (Check=%t) took: %v", ng.Name, processed, totalNGArticles, remainingArticles, ttMode.UseCHECK(), time.Since(start2))
+		//log.Printf("Newsgroup: '%s' | Pushed to queue (processed %d/%d) remaining: %d (Check=%t) took: %v", ng.Name, processed, totalNGArticles, remainingArticles, ttMode.UseCHECK(), time.Since(start2))
 		//log.Printf("Newsgroup: '%s' | Pushed (processed %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t)", ng.Name, articlesProcessed, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.GetMode())
-
+		//start = time.Now()
 	} // end for msgIDsChan
 
 	log.Printf("Newsgroup: '%s' | msgIDsChan closed, checking for requeued jobs...", ng.Name)
@@ -1585,7 +1601,7 @@ func processBatch(ttMode *nntp.TakeThisMode, messageIDs []*string, redisCli *red
 	WorkersCheckChannel := CheckQueues[workerID]
 	QueuesMutex.RUnlock()
 
-	log.Printf("Newsgroup: '%s' | CheckWorker (%d) queueing job #%d with %d msgIDs to worker %d. CheckQ=%d", *ttMode.Newsgroup, workerID, job.JobID, len(job.MessageIDs), workerID, len(CheckQueues[workerID]))
+	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queueing job #%d with %d msgIDs to worker %d. CheckQ=%d", *ttMode.Newsgroup, workerID, job.JobID, len(job.MessageIDs), workerID, len(CheckQueues[workerID]))
 	WorkersCheckChannel <- job // checkQueue <- job // goto: job := <-checkQueue
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queued Job #%d", *ttMode.Newsgroup, workerID, job.JobID)
 	return job.GetResponseChan(), nil
@@ -1898,7 +1914,7 @@ forever:
 			returnSignals[workerID] = returnSignal
 			// assign checkQueue by openConns counter
 			// so restarted workers get same channels to read from
-			go CHTTWorker(db, slotID, conn, returnSignal, CheckQueues[slotID])
+			go CHTTWorker(db, workerID, conn, returnSignal)
 			newConns++
 		}
 		if newConns == 0 {
@@ -2151,12 +2167,17 @@ func replyChan(request chan struct{}, reply chan struct{}) {
 	}
 }
 
-func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs *ReturnSignal, WorkersCheckChannel chan *nntp.CHTTJob) {
+func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs *ReturnSignal) {
 	var mux sync.Mutex
 	var workerWG sync.WaitGroup
 	readCHECKResponsesChan := make(chan *nntp.ReadRequest, 1024*1024)
 	readTAKETHISResponsesChan := make(chan *nntp.ReadRequest, 1024*1024)
 	errChan := make(chan struct{}, 9)
+
+	QueuesMutex.RLock()
+	WorkersTTChannel := TakeThisQueues[workerID]
+	WorkersCheckChannel := CheckQueues[workerID]
+	QueuesMutex.RUnlock()
 
 	tickChan := common.GetStructChanCap1()
 	requestReplyJobDone := common.GetStructChanCap1()
@@ -2166,7 +2187,7 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 	defer common.RecycleStructChanCap1(replyJobDone)
 
 	// Create ResponseDemuxer to eliminate race conditions in ReadCodeLine
-	demuxer := nntp.NewResponseDemuxer(conn, errChan, BatchCheck)
+	demuxer := nntp.NewResponseDemuxer(conn, errChan)
 
 	// Store demuxer for statistics tracking
 	DemuxersMutex.Lock()
@@ -2196,6 +2217,7 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 			common.SignalErrChan(errChan)
 			workerWG.Done()
 			log.Printf("CheckWorker (%d): CHECK sender goroutine exiting", workerID)
+
 		}(workerWG)
 		// tick every n seconds to check if any CHECKs to do
 	loop:
@@ -2219,24 +2241,22 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 					log.Printf("CheckWorker (%d): Ticked but no jobs in queue, continue...", workerID)
 					continue loop
 				}
-				if len(rs.jobs) >= MaxQueuedJobs {
+				if VERBOSE && len(rs.jobs) >= MaxQueuedJobs {
 					log.Printf("CheckWorker (%d): Ticked and found %d jobs in queue (max: %d)", workerID, len(rs.jobs), MaxQueuedJobs)
 				}
 				currentJob := rs.jobs[0]
 				rs.jobs = rs.jobs[1:] // Remove first job from queue
 				rs.Mux.Unlock()
 				if currentJob == nil {
+					log.Printf("ERROR CheckWorker (%d): got nil job from queue, skipping...", workerID)
 					continue loop
 				}
 				workerID := assignWorkerToNewsgroup(*currentJob.Newsgroup)
-				QueuesMutex.RLock()
-				WorkersTTChannel := TakeThisQueues[workerID]
-				QueuesMutex.RUnlock()
 			waiting:
 				for {
 					if len(WorkersTTChannel) >= MaxQueuedJobs {
 						rs.BlockCHECK()
-						log.Printf("CheckWorker (%d): waiting... shared takeThisChan full (%d)", workerID, len(TakeThisQueues[workerID]))
+						log.Printf("CheckWorker (%d): waiting... shared takeThisChan full (%d)", workerID, len(WorkersTTChannel))
 						time.Sleep(time.Second / 4)
 						continue waiting
 					}
@@ -2246,49 +2266,53 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 				if currentJob.TTMode.UseCHECK() {
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d waits to check %d message IDs in batches of %d", *currentJob.Newsgroup, workerID, currentJob.JobID, len(currentJob.MessageIDs), BatchCheck)
 
-					// Process checkIds in batches of BatchCheck
-					for batchStart := 0; batchStart < len(currentJob.MessageIDs); batchStart += BatchCheck {
-						batchEnd := batchStart + BatchCheck
-						if batchEnd > len(currentJob.MessageIDs) {
-							batchEnd = len(currentJob.MessageIDs)
-						}
-						// Lock for this batch only
-
-						//common.ChanLock(flipflopChan)
-						if !conn.IsConnected() {
-							rs.Mux.Lock()
-							rs.jobs = append([]*nntp.CHTTJob{currentJob}, rs.jobs...) // requeue at front
-							rs.Mux.Unlock()
-							//common.ChanRelease(flipflopChan)
-							log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d connection lost before SendCheckMultiple for batch (offset %d: %d-%d)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
-							time.Sleep(time.Second)
-							return
-						}
-						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquire LOCK CHECK for batch (offset %d: %d-%d) (%d messages)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, len(currentJob.MessageIDs[batchStart:batchEnd]))
-						rs.LockCHECK()
-						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquired CHECK lock for batch (offset %d: %d-%d) -> SendCheckMultiple", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
-						err := conn.SendCheckMultiple(currentJob.MessageIDs[batchStart:batchEnd], readCHECKResponsesChan, currentJob, demuxer)
-						if err != nil {
-							log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d SendCheckMultiple error for batch (offset %d: %d-%d): %v", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, err)
-							time.Sleep(time.Second)
-							rs.Mux.Lock()
-							rs.jobs = append([]*nntp.CHTTJob{currentJob}, rs.jobs...) // requeue at front
-							rs.Mux.Unlock()
-							//rs.BlockCHECK()
-							return
-						}
-						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d Sent CHECK for batch (offset %d: %d-%d), responses will be read asynchronously...", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
+					//common.ChanLock(flipflopChan)
+					if !conn.IsConnected() {
+						rs.Mux.Lock()
+						rs.jobs = append([]*nntp.CHTTJob{currentJob}, rs.jobs...) // requeue at front
+						rs.Mux.Unlock()
+						//common.ChanRelease(flipflopChan)
+						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d connection lost before SendCheckMultiple for batch (offset %d: %d-%d)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
+						time.Sleep(time.Second)
+						return
 					}
+					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquire LOCK CHECK for batch (offset %d: %d-%d) (%d messages)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, len(currentJob.MessageIDs[batchStart:batchEnd]))
+					rs.LockCHECK()
+					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquired CHECK lock for batch (offset %d: %d-%d) -> SendCheckMultiple", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
+					checksSent, err := conn.SendCheckMultiple(currentJob.MessageIDs, readCHECKResponsesChan, currentJob, demuxer)
+					if err != nil {
+						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d SendCheckMultiple error for batch (offset %d: %d-%d): %v", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, err)
+						time.Sleep(time.Second)
+						rs.Mux.Lock()
+						rs.jobs = append([]*nntp.CHTTJob{currentJob}, rs.jobs...) // requeue at front
+						rs.Mux.Unlock()
+						//rs.BlockCHECK()
+						return
+					}
+					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d Sent CHECK for batch (offset %d: %d-%d), responses will be read asynchronously...", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
+
 					// Add CHECK sent count to progress after all batches are sent
 					currentJob.NGTProgress.Mux.Lock()
-					currentJob.NGTProgress.CheckSentCount += currentJob.CheckSentCount
+					currentJob.NGTProgress.CheckSentCount += checksSent
 					currentJob.NGTProgress.Mux.Unlock()
 				} else {
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d skipping CHECK for %d message IDs (TAKETHIS mode)", *currentJob.Newsgroup, workerID, currentJob.JobID, len(currentJob.MessageIDs))
 					currentJob.WantedIDs = currentJob.MessageIDs
 					//rs.UnlockCHECKforTTwithWait()
 					rs.BlockCHECK()
-					WorkersTTChannel <- currentJob // local takethis chan sharing the same connection
+				enqueue:
+					for {
+						select {
+						case WorkersTTChannel <- currentJob: // local takethis chan sharing the same connection
+							// passed
+							break enqueue
+						default:
+							// chan full
+							rs.BlockCHECK()
+							time.Sleep(time.Millisecond * 16)
+						}
+					}
+					rs.BlockCHECK()
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d sent to local TakeThisChan", *currentJob.Newsgroup, workerID, currentJob.JobID)
 				}
 				//lastRun = time.Now()
@@ -2316,6 +2340,8 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 				rs.Mux.Unlock()
 				if hasWork {
 					common.SignalTickChan(tickChan)
+				} else {
+					rs.BlockCHECK()
 				}
 			} // end select
 		} // end forever
@@ -2485,16 +2511,16 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 					rs.Mux.Unlock()
 					if len(job.WantedIDs) > 0 {
 						// Pass job to TAKETHIS worker via channel
-						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5 job #%d got all %d CHECK responses, passing to TAKETHIS worker (wanted: %d articles) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, queuedCount, len(job.WantedIDs), len(TakeThisQueues[workerID]))
+						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5 job #%d got all %d CHECK responses, passing to TAKETHIS worker (wanted: %d articles) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, queuedCount, len(job.WantedIDs), len(WorkersTTChannel))
 						rs.UnlockCHECKforTT()
-						TakeThisQueues[workerID] <- job // local takethis chan sharing the same connection
-						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5c Sent job #%d to TAKETHIS worker (wanted: %d/%d) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, len(job.WantedIDs), queuedCount, len(TakeThisQueues[workerID]))
+						WorkersTTChannel <- job // local takethis chan sharing the same connection
+						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5c Sent job #%d to TAKETHIS worker (wanted: %d/%d) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, len(job.WantedIDs), queuedCount, len(WorkersTTChannel))
 
 					} else {
 						//log.Printf("Newsgroup: '%s' | CheckWorker (%d):  DEBUG6 job #%d got %d CHECK responses but server wants none", *job.Newsgroup, workerID, job.JobID, queuedCount)
 						// Send response and close channel for jobs with no wanted articles
 						job.Response(true, nil)
-						if len(TakeThisQueues[workerID]) > 0 {
+						if len(WorkersTTChannel) > 0 {
 							rs.UnlockCHECKforTT()
 						} else {
 							rs.BlockTT()
@@ -2638,7 +2664,6 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 			workerWG.Done()
 		}(workerWG)
 		var job *nntp.CHTTJob
-		WorkersTTChannel := TakeThisQueues[workerID]
 		for {
 			if common.WantShutdown() {
 				log.Printf("TTworker (%d): WantShutdown, exiting", workerID)
@@ -2745,7 +2770,7 @@ forever:
 			// Build jobMap for tracking which message IDs belong to this job
 			// and count queued messages
 			rs.Mux.Lock()
-			queueFull := len(rs.jobs) >= MaxQueuedJobs || len(TakeThisQueues[workerID]) >= MaxQueuedJobs
+			queueFull := len(rs.jobs) >= MaxQueuedJobs || len(WorkersTTChannel) >= MaxQueuedJobs
 			if queueFull {
 				log.Printf("Newsgroup: '%s' | CHTTworker (%d): got job #%d with %d message IDs. queued=%d ... waiting...", *job.Newsgroup, workerID, job.JobID, len(job.MessageIDs), len(rs.jobs))
 				select {
@@ -2766,7 +2791,7 @@ forever:
 						// pass
 					case <-time.After(time.Millisecond * 16):
 						rs.Mux.Lock()
-						queueFull = len(rs.jobs) >= MaxQueuedJobs || len(TakeThisQueues[workerID]) >= MaxQueuedJobs
+						queueFull = len(rs.jobs) >= MaxQueuedJobs || len(WorkersTTChannel) >= MaxQueuedJobs
 						rs.Mux.Unlock()
 						if !queueFull {
 							break waitForReply
@@ -2776,7 +2801,7 @@ forever:
 							if common.WantShutdown() {
 								break forever
 							}
-							log.Printf("Newsgroup: '%s' | CHTTworker (%d): pre append job #%d waiting since %v rs.jobs=%d takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, time.Since(start), len(rs.jobs), len(TakeThisQueues[workerID]))
+							log.Printf("Newsgroup: '%s' | CHTTworker (%d): pre append job #%d waiting since %v rs.jobs=%d takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, time.Since(start), len(rs.jobs), len(WorkersTTChannel))
 							lastPrint = time.Now()
 						}
 					}
@@ -3099,7 +3124,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 				<th style="width:55%">NG Workers: ( {{subtract .Started .Finished}} )</th>
 				<th style="width:15% text-align: center;">Progress</th>
 				<th style="width:15% text-align: center;">Speed{{if gtUint64 .GlobalSpeed 0}}<br><strong>{{.GlobalSpeed}} KByte/s</strong>{{end}}</th>
-				<th style="width:15% text-align: center;">CH/s<br>TT/s</th>
+				<th style="width:15% text-align: center;">{{.LiveCH}} CH/s<br>{{.LiveTT}} TT/s</th>
 			</tr>
 		</thead>
 		<tbody>
@@ -3213,7 +3238,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	started := int64(len(nntp.NewsgroupTransferProgressMap))
 	var finished int64
 	var progressList []ProgressInfo
-
+	var liveCH, liveTT uint64
 	for name, progress := range nntp.NewsgroupTransferProgressMap {
 		progress.CalcSpeed()
 		progress.Mux.RLock()
@@ -3226,10 +3251,10 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		duration := time.Since(progress.Started).Round(time.Second).String()
 
 		progressList = append(progressList, ProgressInfo{
-			Name:          name,
-			OffsetStart:   progress.OffsetStart,
-			BatchStart:    progress.BatchStart,
-			BatchEnd:      progress.BatchEnd,
+			Name:        name,
+			OffsetStart: progress.OffsetStart,
+			//BatchStart:    progress.BatchStart,
+			//BatchEnd:      progress.BatchEnd,
 			TotalArticles: progress.TotalArticles,
 			Started:       progress.Started.Format("15:04:05"),
 			LastUpdated:   progress.LastUpdated.Format("15:04:05"),
@@ -3240,6 +3265,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			Finished:      false,
 			Duration:      duration,
 		})
+		liveCH += progress.LastArtPerfC
+		liveTT += progress.LastArtPerfT
 		progress.Mux.RUnlock()
 	}
 
@@ -3261,16 +3288,16 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	DemuxersMutex.RLock()
 	for i, demux := range Demuxers {
 		if demux != nil {
-			pending, checkQueued, ttQueued, lastReq := demux.GetStatistics()
+			pending, checkQueued, ttQueued, lastReq := demux.GetDemuxerStats()
 			var idleSeconds int64
 			if !lastReq.IsZero() {
 				idleSeconds = int64(time.Since(lastReq).Seconds())
 			}
 			demuxerStats = append(demuxerStats, DemuxerStats{
 				WorkerID:             i,
-				PendingCommands:      int64(pending),
-				CheckResponsesQueued: int64(checkQueued),
-				TTResponsesQueued:    int64(ttQueued),
+				PendingCommands:      pending,
+				CheckResponsesQueued: checkQueued,
+				TTResponsesQueued:    ttQueued,
 				LastRequest:          lastReq,
 				IdleSeconds:          idleSeconds,
 			})
@@ -3306,6 +3333,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		TotalSkipped                  uint64
 		TotalTXErrors                 uint64
 		TotalConnErrors               uint64
+		LiveCH                        uint64
+		LiveTT                        uint64
 	}{
 		TotalNewsgroups:               TotalNewsgroups,
 		NewsgroupsToProcess:           NewsgroupsToProcess,
@@ -3334,6 +3363,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		TotalSkipped:                  totalSkipped,
 		TotalTXErrors:                 totalTXErrors,
 		TotalConnErrors:               totalConnErrors,
+		LiveCH:                        liveCH,
+		LiveTT:                        liveTT,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

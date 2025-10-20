@@ -12,10 +12,10 @@ import (
 // and dispatches them to the appropriate handler channel (CHECK or TAKETHIS)
 // This eliminates race conditions in concurrent ReadCodeLine calls
 type ResponseDemuxer struct {
-	conn              *BackendConn
-	cmdIDQ            []*CmdIDinfo
-	signalChan        chan struct{}
-	cmdIDQMux         sync.RWMutex
+	conn       *BackendConn
+	cmdIDChan  chan *CmdIDinfo
+	signalChan chan struct{}
+	//cmdIDQMux         sync.RWMutex
 	LastID            uint
 	checkResponseChan chan *ResponseData
 	ttResponseChan    chan *ResponseData
@@ -27,12 +27,13 @@ type ResponseDemuxer struct {
 }
 
 // NewResponseDemuxer creates a new response demultiplexer
-func NewResponseDemuxer(conn *BackendConn, errChan chan struct{}, BatchCheck int) *ResponseDemuxer {
+func NewResponseDemuxer(conn *BackendConn, errChan chan struct{}) *ResponseDemuxer {
 	return &ResponseDemuxer{
 		conn:              conn,
-		signalChan:        make(chan struct{}, 1),
+		cmdIDChan:         make(chan *CmdIDinfo, 64*1024),      // Buffer for command IDs
 		checkResponseChan: make(chan *ResponseData, 1024*1024), // Buffer for CHECK responses
 		ttResponseChan:    make(chan *ResponseData, 1024*1024), // Buffer for TAKETHIS responses
+		signalChan:        make(chan struct{}, 1),
 		errChan:           errChan,
 		started:           false,
 	}
@@ -43,28 +44,45 @@ func (d *ResponseDemuxer) RegisterCommand(cmdID uint, cmdType ResponseType) {
 	d.lastRequestMux.Lock()
 	d.lastRequest = time.Now()
 	d.lastRequestMux.Unlock()
-
-	d.cmdIDQMux.Lock()
-	d.cmdIDQ = append(d.cmdIDQ, &CmdIDinfo{CmdID: cmdID, RespType: cmdType})
-	d.cmdIDQMux.Unlock()
+	select {
+	case d.cmdIDChan <- &CmdIDinfo{CmdID: cmdID, RespType: cmdType}:
+		// Registered successfully
+	case <-d.errChan:
+		log.Printf("ResponseDemuxer: got errChan while registering command, exiting")
+		common.SignalErrChan(d.errChan)
+		return
+	}
 	select {
 	case d.signalChan <- struct{}{}:
+		// sent signal
+	case <-d.errChan:
+		log.Printf("ResponseDemuxer: got errChan while signaling command, exiting")
+		common.SignalErrChan(d.errChan)
+		return
 	default:
+		// no-op
 	}
 }
 
 // PopCommand removes a command ID from the queue
 func (d *ResponseDemuxer) PopCommand() *CmdIDinfo {
-	d.cmdIDQMux.Lock()
-	defer d.cmdIDQMux.Unlock()
 
-	if len(d.cmdIDQ) == 0 {
+	if len(d.cmdIDChan) == 0 {
 		return nil
 	}
 
-	cmdIDInfo := d.cmdIDQ[0]
-	d.cmdIDQ = d.cmdIDQ[1:]
-	return cmdIDInfo
+	select {
+	case cmdIDInfo := <-d.cmdIDChan:
+		return cmdIDInfo
+	case <-d.errChan:
+		log.Printf("ResponseDemuxer: got errChan while popping command, exiting")
+		common.SignalErrChan(d.errChan)
+		return nil
+	default:
+		// no-op
+	}
+
+	return nil
 }
 
 // GetCheckResponseChan returns the channel for CHECK responses
@@ -110,6 +128,7 @@ func (d *ResponseDemuxer) readAndDispatch() {
 		common.SignalErrChan(d.errChan)
 	}()
 	outoforderBacklog := make(map[uint]*CmdIDinfo, 1024)
+loop:
 	for {
 		select {
 		case <-d.errChan:
@@ -122,6 +141,7 @@ func (d *ResponseDemuxer) readAndDispatch() {
 		}
 
 		if !d.conn.IsConnected() {
+			common.SignalErrChan(d.errChan)
 			log.Printf("ResponseDemuxer: connection lost, exiting")
 			return
 		}
@@ -145,17 +165,17 @@ func (d *ResponseDemuxer) readAndDispatch() {
 				log.Printf("ResponseDemuxer: got no cmdInfo but have outoforderBacklog: %d [%v]", len(outoforderBacklog), outoforderBacklog)
 				if _, exists := outoforderBacklog[d.LastID+1]; exists {
 					log.Printf("ResponseDemuxer: pre-processing out-of-order backlog cmdID=%d d.LastID=%d", d.LastID+1, d.LastID)
-					continue
+					continue loop
 				}
 			}
 			//log.Printf("ResponseDemuxer: nothing to process, waiting on signalChan")
 			<-d.signalChan
-			continue
+			continue loop
 		}
 		if d.LastID+1 != cmdInfo.CmdID {
 			log.Printf("ResponseDemuxer: WARNING - out-of-order cmdID received, expected %d got %d", d.LastID+1, cmdInfo.CmdID)
 			outoforderBacklog[cmdInfo.CmdID] = cmdInfo
-			continue
+			continue loop
 		} else {
 			d.LastID = cmdInfo.CmdID
 		}
@@ -205,17 +225,15 @@ func (d *ResponseDemuxer) readAndDispatch() {
 }
 
 // GetStatistics returns current demuxer statistics
-func (d *ResponseDemuxer) GetStatistics() (pendingCommands int, checkResponsesQueued int, ttResponsesQueued int, lastRequest time.Time) {
-	d.cmdIDQMux.RLock()
-	pendingCommands = len(d.cmdIDQ)
-	d.cmdIDQMux.RUnlock()
+func (d *ResponseDemuxer) GetDemuxerStats() (pendingCommands int64, checkResponsesQueued int64, ttResponsesQueued int64, lastRequest time.Time) {
+	pendingCommands = int64(len(d.cmdIDChan))
 
 	d.lastRequestMux.RLock()
 	lastRequest = d.lastRequest
 	d.lastRequestMux.RUnlock()
 
-	checkResponsesQueued = len(d.checkResponseChan)
-	ttResponsesQueued = len(d.ttResponseChan)
+	checkResponsesQueued = int64(len(d.checkResponseChan))
+	ttResponsesQueued = int64(len(d.ttResponseChan))
 
 	return pendingCommands, checkResponsesQueued, ttResponsesQueued, lastRequest
 }

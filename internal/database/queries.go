@@ -3283,7 +3283,7 @@ func (db *Database) SearchUserByComputedHash(targetHash string, nonce string) (*
 
 const query_getMessageIDsBatchWithDateFilter_selectPart = `SELECT message_id FROM articles`
 const query_getMessageIDsBatchWithDateFilter_orderby = " ORDER BY date_sent ASC"
-const query_getArticlesBatchWithDateFilter_selectPart = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text FROM articles`
+const query_getArticlesBatchWithDateFilter_selectPart = `SELECT message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, path, headers_json, body_text FROM articles`
 const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ? OFFSET ?"
 
 // GetArticlesByIDs retrieves articles by their message IDs, ordered by date_sent

@@ -265,8 +265,7 @@ func retryableStmtExec(stmt *sql.Stmt, args ...interface{}) (sql.Result, error) 
 			jitter := time.Duration(rand.Int63n(int64(delay) / 2))
 			time.Sleep(delay + jitter)
 
-			log.Printf("SQLite retry attempt %d/%d for prepared statement exec. Error: %v",
-				attempt+1, maxRetries, err)
+			log.Printf("SQLite retry attempt %d/%d for prepared statement exec. Error: %v stmt=%v", attempt+1, maxRetries, err, stmt)
 		}
 	}
 
