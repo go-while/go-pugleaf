@@ -1442,7 +1442,7 @@ var upperLevel float64 = 95.0
 func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCli *redis.Client, batchStart int64, batchEnd int64, dbOffset int64, offsetQ *nntp.OffsetQueue, ngtprogress *nntp.NewsgroupTransferProgress) (chan *nntp.TTResponse, error) {
 
 	if len(articles) == 0 {
-		log.Printf("processBatch: no articles in this batch for newsgroup '%s'", *ttMode.Newsgroup)
+		log.Printf("Newsgroup: '%s' | processBatch: no articles in this batch", *ttMode.Newsgroup)
 		return nil, nil
 	}
 
@@ -1549,7 +1549,6 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 		return job.QuitResponseChan(), nil
 	}
 	if VERBOSE {
-		log.Printf("Newsgroup: '%s' | processBatch: Received %d articles, queuing %d for CHECK (Redis filtered: %d)", *ttMode.Newsgroup, len(articles), len(job.MessageIDs), redis_cached)
 	}
 
 	// Assign job to worker (consistent assignment + load balancing)
@@ -1562,12 +1561,12 @@ func processBatch(ttMode *nntp.TakeThisMode, articles []*models.Article, redisCl
 	QueuesMutex.RUnlock()
 
 	workerID := assignWorkerToNewsgroup(*ttMode.Newsgroup)
+
 	QueuesMutex.RLock()
 	WorkersCheckChannel := CheckQueues[workerID]
 	QueuesMutex.RUnlock()
 
-	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queue job #%d with %d message IDs. CheckQ=%d", *ttMode.Newsgroup, workerID, job.JobID, len(job.MessageIDs), len(CheckQueues[workerID]))
-
+	log.Printf("Newsgroup: '%s' | CheckWorker (%d) queueing job #%d with %d msgIDs to worker %d. CheckQ=%d", *ttMode.Newsgroup, workerID, job.JobID, len(job.MessageIDs), workerID, len(CheckQueues[workerID]))
 	WorkersCheckChannel <- job // checkQueue <- job
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queued Job #%d", *ttMode.Newsgroup, workerID, job.JobID)
 	return job.GetResponseChan(), nil
@@ -1677,7 +1676,6 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 				continue
 			}
 			conn.Unlock()
-			conn.ForceCloseConn()
 			job.NGTProgress.Increment(nntp.IncrFLAG_CONN_ERRORS, 1)
 			log.Printf("ERROR Newsgroup: '%s' | Failed to send TAKETHIS for %s: %v", newsgroup, article.MessageID, err)
 			return redis_cached, fmt.Errorf("failed to send TAKETHIS for %s: %v", article.MessageID, err)
@@ -1790,7 +1788,7 @@ func BootConnWorkers(pool *nntp.Pool, redisCli *redis.Client) {
 	Demuxers = make([]*nntp.ResponseDemuxer, nntp.NNTPTransferThreads)
 	DemuxersMutex.Unlock()
 	for i := range CheckQueues {
-		CheckQueues[i] = make(chan *nntp.CHTTJob, MaxQueuedJobs)    // no cap! only accepts if there is a reader!
+		CheckQueues[i] = make(chan *nntp.CHTTJob)                   // no cap for CH jobs
 		TakeThisQueues[i] = make(chan *nntp.CHTTJob, MaxQueuedJobs) // allows max N queued TT jobs
 		WorkerQueueLength[i] = 0
 	}
@@ -1854,10 +1852,10 @@ forever:
 				errChan:    errChan,
 				redisCli:   redisCli,
 				ExitChan:   make(chan *ReturnSignal, 1),
-				jobsQueued: make(map[*nntp.CHTTJob]uint64, BatchCheck),
-				jobsReadOK: make(map[*nntp.CHTTJob]uint64, BatchCheck),
-				jobMap:     make(map[*string]*nntp.CHTTJob, BatchCheck),
-				jobs:       make([]*nntp.CHTTJob, 0, BatchCheck),
+				jobsQueued: make(map[*nntp.CHTTJob]uint64),
+				jobsReadOK: make(map[*nntp.CHTTJob]uint64),
+				jobMap:     make(map[*string]*nntp.CHTTJob),
+				jobs:       make([]*nntp.CHTTJob, 0, MaxQueuedJobs),
 			}
 
 			returnSignals[workerID] = returnSignal
@@ -2121,8 +2119,8 @@ func replyChan(request chan struct{}, reply chan struct{}) {
 func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQueue chan *nntp.CHTTJob) {
 	var mux sync.Mutex
 	var workerWG sync.WaitGroup
-	readCHECKResponsesChan := make(chan *nntp.ReadRequest, 128000)
-	readTAKETHISResponsesChan := make(chan *nntp.ReadRequest, 128000)
+	readCHECKResponsesChan := make(chan *nntp.ReadRequest, 1024*1024)
+	readTAKETHISResponsesChan := make(chan *nntp.ReadRequest, 1024*1024)
 	errChan := make(chan struct{}, 9)
 
 	tickChan := common.GetStructChanCap1()
@@ -2145,10 +2143,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 	defer func(conn *nntp.BackendConn, rs *ReturnSignal) {
 		conn.ForceCloseConn()
 		rs.ExitChan <- rs
-		select {
-		case errChan <- struct{}{}:
-		default:
-		}
+		common.SignalErrChan(errChan)
 	}(conn, rs)
 	//lastRun := time.Now()
 
@@ -2159,18 +2154,20 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 	// launch go routine which sends CHECK commands
 	workerWG.Add(1)
 	go func(workerWG *sync.WaitGroup) {
-		defer workerWG.Done()
-		// tick every n seconds to check if any CHECKs to do
 		ticker := time.NewTicker(DefaultCheckTicker)
-		defer ticker.Stop()
-		defer func() {
-			errChan <- struct{}{}
-		}()
+		defer func(workerWG *sync.WaitGroup) {
+			conn.ForceCloseConn()
+			ticker.Stop()
+			common.SignalErrChan(errChan)
+			workerWG.Done()
+			log.Printf("CheckWorker (%d): CHECK sender goroutine exiting", workerID)
+		}(workerWG)
+		// tick every n seconds to check if any CHECKs to do
 	loop:
 		for {
 			select {
 			case <-errChan:
-				errChan <- struct{}{}
+				common.SignalErrChan(errChan)
 				log.Printf("CheckWorker (%d): Send CHECK got errChan signal... exiting", workerID)
 				return
 
@@ -2242,8 +2239,7 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 							rs.Mux.Lock()
 							rs.jobs = append([]*nntp.CHTTJob{currentJob}, rs.jobs...) // requeue at front
 							rs.Mux.Unlock()
-							rs.BlockCHECK()
-							//common.ChanRelease(flipflopChan)
+							//rs.BlockCHECK()
 							return
 						}
 						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d Sent CHECK for batch (offset %d: %d-%d), responses will be read asynchronously...", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
@@ -2302,21 +2298,19 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 	// launch a go routine to read CHECK responses from the supplied connection with textproto readline
 	workerWG.Add(1)
 	go func(workerWG *sync.WaitGroup) {
-		defer workerWG.Done()
 		var responseCount int
 		var tookTime time.Duration
-		defer func() {
-			select {
-			case errChan <- struct{}{}:
-			default:
-			}
-		}()
+		defer func(workerWG *sync.WaitGroup) {
+			conn.ForceCloseConn()
+			common.SignalErrChan(errChan)
+			workerWG.Done()
+		}(workerWG)
 	loop:
 		for {
 			select {
 			case <-errChan:
 				log.Printf("CheckWorker (%d): Read CHECK responses got errChan signal...", workerID)
-				errChan <- struct{}{}
+				common.SignalErrChan(errChan)
 				log.Printf("CheckWorker (%d): Read CHECK responses exiting", workerID)
 				return
 
@@ -2492,20 +2486,18 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 	// This follows the EXACT pattern as CHECK response reader (lines 2366-2552)
 	workerWG.Add(1)
 	go func(workerWG *sync.WaitGroup) {
-		defer workerWG.Done()
-		defer func() {
-			select {
-			case errChan <- struct{}{}:
-			default:
-			}
-		}()
+		defer func(workerWG *sync.WaitGroup) {
+			conn.ForceCloseConn()
+			common.SignalErrChan(errChan)
+			workerWG.Done()
+		}(workerWG)
 
 	ttloop:
 		for {
 			select {
 			case <-errChan:
 				log.Printf("TTResponseWorker (%d): got errChan signal, exiting", workerID)
-				errChan <- struct{}{}
+				common.SignalErrChan(errChan)
 				return
 
 			case rr := <-readTAKETHISResponsesChan:
@@ -2557,7 +2549,6 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_CONN_ERRORS, 1)
 					rr.Job.PendingResponses.Done() // Mark response as handled (error case)
 					rr.ClearReadRequest(respData)
-					conn.ForceCloseConn()
 					return
 				}
 
@@ -2597,7 +2588,6 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_TX_ERRORS, 1)
 					rr.Job.PendingResponses.Done() // Mark response handled (error case)
 					rr.ClearReadRequest(respData)
-					conn.ForceCloseConn()
 					return
 
 				default:
@@ -2616,13 +2606,11 @@ func CHTTWorker(workerID int, conn *nntp.BackendConn, rs *ReturnSignal, checkQue
 	// launch a goroutine to process TAKETHIS jobs from local channel sharing the same connection
 	workerWG.Add(1)
 	go func(workerWG *sync.WaitGroup) {
-		defer workerWG.Done()
-		defer func() {
-			select {
-			case errChan <- struct{}{}:
-			default:
-			}
-		}()
+		defer func(workerWG *sync.WaitGroup) {
+			conn.ForceCloseConn()
+			common.SignalErrChan(errChan)
+			workerWG.Done()
+		}(workerWG)
 		var job *nntp.CHTTJob
 		for {
 			if common.WantShutdown() {
@@ -2711,10 +2699,7 @@ forever:
 	for {
 		select {
 		case <-errChan:
-			select {
-			case errChan <- struct{}{}:
-			default:
-			}
+			common.SignalErrChan(errChan)
 			break forever
 
 		case job := <-checkQueue:
@@ -2795,13 +2780,21 @@ forever:
 	workerWG.Wait()
 	startWait := time.Now()
 	lastPrint := startWait
+wait:
 	for {
 		mux.Lock()
 		if runningTTJobs == 0 {
 			mux.Unlock()
-			break
+			break wait
 		}
 		mux.Unlock()
+		select {
+		case <-errChan:
+			common.SignalErrChan(errChan)
+			break wait
+		default:
+			// continue
+		}
 		time.Sleep(time.Millisecond * 50)
 		if time.Since(lastPrint) > time.Second*5 {
 			log.Printf("CHTTworker (%d): waiting since %v for %d running TAKETHIS jobs to complete before exiting...", workerID, time.Since(startWait), runningTTJobs)
@@ -2812,14 +2805,12 @@ forever:
 
 // monitorMemoryStats logs memory statistics periodically
 func monitorMemoryStats() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
 
 	var m runtime.MemStats
 	startTime := time.Now()
 
 	for {
-		<-ticker.C
+		time.Sleep(30 * time.Second)
 		runtime.ReadMemStats(&m)
 
 		// Convert bytes to MB for readability

@@ -43,12 +43,12 @@ const (
 	DefaultConnExpire = 25 * time.Second
 
 	// MaxReadLines is the maximum lines to read per response (allow for large group lists).
-	MaxReadLines = 500000
+	MaxReadLines = 1024 * 1024
 )
 
 // DefaultBufferTX is the default buffer size for bufio.Writer
 // when sending articles via POST/TAKETHIS/IHAVE commands.
-var DefaultBufferTX int = 64 * 1024
+var DefaultBufferTX int = 16 * 1024
 
 // BackendConn represents an NNTP connection to a server.
 // It manages the connection state, authentication, and provides methods
@@ -115,6 +115,7 @@ type GroupInfo struct {
 	FetchStart int64
 	FetchEnd   int64
 	PostingOK  bool
+	Status     string
 }
 
 // OverviewLine represents a line from XOVER command
@@ -370,10 +371,10 @@ func (c *BackendConn) UpdateLastUsed() {
 }
 
 func (c *BackendConn) GetBufSize(size int) int {
-	if size+4096 <= 1024*1024 {
-		return size + 4096
+	if size+1024 <= DefaultBufferTX {
+		return size + 1024
 	}
-	return 1024 * 1024 // hardcoded default max buffer size
+	return DefaultBufferTX // hardcoded default max buffer size
 }
 
 func (c *BackendConn) Lock() {

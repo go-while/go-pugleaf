@@ -52,6 +52,14 @@ func ChanRelease(lockChan chan struct{}) {
 	<-lockChan
 }
 
+func SignalErrChan(errChan chan struct{}) {
+	select {
+	case errChan <- struct{}{}:
+	default:
+		// already signaled
+	}
+}
+
 var StructChansCap1 = make(chan chan struct{}, 16384)
 
 // GetStructChanCap1 returns a recycled chan struct{} or makes a new one with capacity of 1 if none are available

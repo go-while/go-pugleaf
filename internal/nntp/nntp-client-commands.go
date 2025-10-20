@@ -980,6 +980,7 @@ func (c *BackendConn) parseGroupLine(line string) (GroupInfo, error) {
 		First:     first,
 		Last:      last,
 		PostingOK: postingOK,
+		Status:    parts[3],
 	}, nil
 }
 
@@ -1114,7 +1115,7 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 		return 0, 0, err, true
 	}
 	//writer := bufio.NewWriterSize(c.conn, c.GetBufSize(article.Bytes)) // Slightly larger buffer than article size for headers
-	writer := bufio.NewWriter(c.conn) // Slightly larger buffer than article size for headers
+	writer := bufio.NewWriter(c.conn)
 
 	//c.mux.Lock()
 	//defer c.mux.Unlock()

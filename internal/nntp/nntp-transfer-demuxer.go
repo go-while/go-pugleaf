@@ -4,6 +4,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/go-while/go-pugleaf/internal/common"
 )
 
 // ResponseDemuxer reads all responses from a connection in ONE goroutine
@@ -105,20 +107,14 @@ func (d *ResponseDemuxer) readAndDispatch() {
 		if r := recover(); r != nil {
 			log.Printf("ResponseDemuxer: panic in readAndDispatch: %v", r)
 		}
-		select {
-		case d.errChan <- struct{}{}:
-		default:
-		}
+		common.SignalErrChan(d.errChan)
 	}()
 	outoforderBacklog := make(map[uint]*CmdIDinfo, 1024)
 	for {
 		select {
 		case <-d.errChan:
 			log.Printf("ResponseDemuxer: got errChan signal, exiting")
-			select {
-			case d.errChan <- struct{}{}:
-			default:
-			}
+			common.SignalErrChan(d.errChan)
 			// exit
 			return
 		default:
@@ -173,7 +169,7 @@ func (d *ResponseDemuxer) readAndDispatch() {
 			log.Printf("LongWait ResponseDemuxer: received response cmdID=%d: code=%d line='%s' err='%v' respType=%d (waited %v)", cmdInfo.CmdID, code, line, err, cmdInfo.RespType, time.Since(start))
 		}
 		if err != nil && code == 0 {
-			d.errChan <- struct{}{}
+			common.SignalErrChan(d.errChan)
 			log.Printf("ResponseDemuxer: error reading response for cmdID=%d: %v", cmdInfo.CmdID, err)
 			return
 		}
@@ -186,7 +182,7 @@ func (d *ResponseDemuxer) readAndDispatch() {
 				//log.Printf("ResponseDemuxer: dispatched CHECK response cmdID=%d d.checkResponseChan=%d", cmdInfo.CmdID, len(d.checkResponseChan))
 			case <-d.errChan:
 				log.Printf("ResponseDemuxer: got errChan while dispatching CHECK response, exiting")
-				d.errChan <- struct{}{}
+				common.SignalErrChan(d.errChan)
 				return
 			}
 
@@ -196,17 +192,14 @@ func (d *ResponseDemuxer) readAndDispatch() {
 				// Dispatched successfully
 				//log.Printf("ResponseDemuxer: dispatched TAKETHIS response cmdID=%d d.ttResponseChan=%d", cmdInfo.CmdID, len(d.ttResponseChan))
 			case <-d.errChan:
-				d.errChan <- struct{}{}
+				common.SignalErrChan(d.errChan)
 				log.Printf("ResponseDemuxer: got errChan while dispatching TAKETHIS response, exiting")
 				return
 			}
 
 		default:
 			log.Printf("ResponseDemuxer: WARNING - unknown command type for cmdID=%d, signaling ERROR", cmdInfo.CmdID)
-			select {
-			case d.errChan <- struct{}{}:
-			default:
-			}
+			common.SignalErrChan(d.errChan)
 		}
 	}
 }
