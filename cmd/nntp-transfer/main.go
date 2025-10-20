@@ -1021,6 +1021,7 @@ func matchesAnyWildcardPattern(newsgroup string, patterns []string) bool {
 // runTransfer performs the actual article transfer process
 func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchCheck int, maxThreads int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, wgP *sync.WaitGroup, redisCli *redis.Client) error {
 	defer wgP.Done()
+	defer log.Printf("runTransfer() quitted")
 	maxThreadsChan := make(chan struct{}, maxThreads)
 	var wg sync.WaitGroup
 	log.Printf("Todo: %d newsgroups", len(newsgroups))
@@ -1051,16 +1052,21 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 				nntp.ResultsMutex.Unlock()
 				err = nil // not a real error
 			}
-			if err != nil {
-				log.Printf("Error transferring newsgroup %s: %v", ng.Name, err)
-			}
+
 			nntp.ResultsMutex.Lock()
 			NewsgroupsToProcess--
+			if err != nil {
+				log.Printf("Error transferring newsgroup %s: %v", ng.Name, err)
+			} else {
+				log.Printf("Newsgroup: '%s' | completed transferNewsgroup() remaining newsgroups: %d", ng.Name, NewsgroupsToProcess)
+			}
 			nntp.ResultsMutex.Unlock()
 		}(ng, &wg, redisCli)
 	}
-	nntp.ResultsMutex.Lock()
 	// Wait for all transfers to complete
+	wg.Wait()
+
+	nntp.ResultsMutex.Lock()
 	if nothingInDateRange > 0 {
 		log.Printf("Note: %d newsgroups had no articles in the specified date range", nothingInDateRange)
 	}
@@ -1109,7 +1115,7 @@ func processRequeuedJobs(newsgroup string, ttMode *nntp.TakeThisMode, ttResponse
 
 		log.Printf("Newsgroup: '%s' | Processing requeued job %d/%d with %d articles", newsgroup, i+1, len(queuedJobs), len(job.MessageIDs))
 		// pass articles to CHECK or TAKETHIS queue (async!)
-		responseChan, err := processBatch(ttMode, job.MessageIDs, redisCli, job.BatchStart, job.BatchEnd, -1, job.OffsetQ, job.NGTProgress)
+		responseChan, err := processBatch(ttMode, job.MessageIDs, redisCli, job.OffsetStart, job.OffsetQ, job.NGTProgress)
 		if err != nil {
 			log.Printf("Newsgroup: '%s' | Error processing requeued batch: %v", newsgroup, err)
 			jobRequeueMutex.Lock()
@@ -1344,9 +1350,10 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 
 	// Use simple OFFSET pagination
 	var processed int64
-	msgIDsChan := make(chan []*string, 1)
+	msgIDsChan := make(chan []*string, MaxQueuedJobs)
 	go db.GetMessageIDsWithDateFilter(ng, startTime, endTime, dbBatchSize, msgIDsChan)
 	// Get articles in database batches (much larger than network batches)
+	var dbOffset int64
 	for messageIDs := range msgIDsChan {
 		if common.WantShutdown() {
 			log.Printf("WantShutdown in newsgroup: '%s' (processed %d messageIDs)", ng.Name, processed)
@@ -1362,8 +1369,6 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			break
 		}
 
-		processed += int64(len(messageIDs))
-
 		if dryRun && debugCapture {
 			log.Printf("Newsgroup: '%s' | DRY RUN with debug capture: Capturing %d articles (processed %d) BROKEN TODO NEED FIX!", ng.Name, len(messageIDs), processed)
 			//debugMutex.Lock()
@@ -1373,41 +1378,44 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			return nil
 		}
 
-		log.Printf("Newsgroup: '%s' | Loaded %d mids | took %v)", ng.Name, len(messageIDs), time.Since(start))
+		log.Printf("Newsgroup: '%s' | Loaded %d mids | took: %v", ng.Name, len(messageIDs), time.Since(start))
 		// Process articles in network batches
 		start2 := time.Now()
-		for i := 0; i < len(messageIDs); i += batchCheck {
-			OffsetQueue.Add(1)
-			if common.WantShutdown() {
-				log.Printf("WantShutdown in newsgroup: '%s' (processed %d)", ng.Name, processed)
-				return nil
-			}
-			// Determine end index for the batch
-			end := i + batchCheck
-			if end > len(messageIDs) {
-				end = len(messageIDs)
-			}
-			// pass articles to CHECK or TAKETHIS queue (async!)
-			responseChan, err := processBatch(ttMode, messageIDs[i:end], redisCli, int64(i), int64(end), processed-int64(len(messageIDs[i:end]))+int64(i), OffsetQueue, ngtprogress)
-			if err != nil {
-				log.Printf("Newsgroup: '%s' | Error processing batch %d-%d: %v", ng.Name, i+1, end, err)
-				return fmt.Errorf("error processing batch %d-%d for newsgroup '%s': %v", i+1, end, ng.Name, err)
-			}
-			if responseChan != nil {
-				// pass the response channel to the collector channel: ttResponses
-				ttResponsesSetupChan <- nntp.GetTTSetup(responseChan)
-			}
-			OffsetQueue.Wait(MaxQueuedJobs) // wait for offset batches to finish, less than N in flight
+		OffsetQueue.Add(1)
+		if common.WantShutdown() {
+			log.Printf("WantShutdown in newsgroup: '%s' (processed %d)", ng.Name, processed)
+			return nil
 		}
+		// Determine end index for the batch
+		/* disabled
+		//end := i + batchCheck
+		//if end > len(messageIDs) {
+		//	end = len(messageIDs)
+		//}
+		*/
+		// pass articles to CHECK or TAKETHIS queue (async!)
+		responseChan, err := processBatch(ttMode, messageIDs, redisCli, dbOffset, OffsetQueue, ngtprogress)
+		if err != nil {
+			log.Printf("Newsgroup: '%s' | Error processing batch offset %d: %v", ng.Name, dbOffset, err)
+			return fmt.Errorf("error processing batch offset %d for newsgroup '%s': %v", dbOffset, ng.Name, err)
+		}
+		if responseChan != nil {
+			// pass the response channel to the collector channel: ttResponses
+			ttResponsesSetupChan <- nntp.GetTTSetup(responseChan)
+		}
+		dbOffset += int64(len(messageIDs))
+		processed += int64(len(messageIDs))
+
+		OffsetQueue.Wait(MaxQueuedJobs) // wait for offset batches to finish, less than N in flight
 		// articlesProcessed already incremented above after loading from DB
 		remainingArticles -= int64(len(messageIDs))
 
 		log.Printf("Newsgroup: '%s' | Pushed to queue (processed %d/%d) remaining: %d (Check=%t) took: %v", ng.Name, processed, totalNGArticles, remainingArticles, ttMode.UseCHECK(), time.Since(start2))
 		//log.Printf("Newsgroup: '%s' | Pushed (processed %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t)", ng.Name, articlesProcessed, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.GetMode())
 
-	} // end for keyset pagination loop
+	} // end for msgIDsChan
 
-	//log.Printf("Newsgroup: '%s' | Main article loop completed, checking for requeued jobs...", ng.Name)
+	log.Printf("Newsgroup: '%s' | msgIDsChan closed, checking for requeued jobs...", ng.Name)
 
 	// Process any remaining requeued jobs after main loop completes
 	// This handles failures that occurred in the last batch
@@ -1452,7 +1460,7 @@ var upperLevel float64 = 95.0
 
 // processBatch processes a batch of articles using NNTP streaming protocol (RFC 4644)
 // Uses TAKETHIS primarily, falls back to CHECK when success rate < 95%
-func processBatch(ttMode *nntp.TakeThisMode, messageIDs []*string, redisCli *redis.Client, batchStart int64, batchEnd int64, dbOffset int64, offsetQ *nntp.OffsetQueue, ngtprogress *nntp.NewsgroupTransferProgress) (chan *nntp.TTResponse, error) {
+func processBatch(ttMode *nntp.TakeThisMode, messageIDs []*string, redisCli *redis.Client, dbOffset int64, offsetQ *nntp.OffsetQueue, ngtprogress *nntp.NewsgroupTransferProgress) (chan *nntp.TTResponse, error) {
 
 	if len(messageIDs) == 0 {
 		log.Printf("Newsgroup: '%s' | processBatch: no articles in this batch", *ttMode.Newsgroup)
@@ -1464,8 +1472,8 @@ func processBatch(ttMode *nntp.TakeThisMode, messageIDs []*string, redisCli *red
 	if progress, exists := nntp.NewsgroupTransferProgressMap[*ttMode.Newsgroup]; exists {
 		progress.Mux.Lock()
 		progress.OffsetStart = dbOffset
-		progress.BatchStart = batchStart
-		progress.BatchEnd = batchEnd
+		//progress.BatchStart = batchStart
+		//progress.BatchEnd = batchEnd
 		progress.LastUpdated = time.Now()
 		progress.Mux.Unlock()
 	}
@@ -1482,10 +1490,10 @@ func processBatch(ttMode *nntp.TakeThisMode, messageIDs []*string, redisCli *red
 		ResponseChan: nntp.GetTTResponseChan(),
 		TTMode:       ttMode,
 		OffsetStart:  dbOffset,
-		BatchStart:   batchStart,
-		BatchEnd:     batchEnd,
-		OffsetQ:      offsetQ,
-		NGTProgress:  ngtprogress,
+		//BatchStart:   batchStart,
+		//BatchEnd:     batchEnd,
+		OffsetQ:     offsetQ,
+		NGTProgress: ngtprogress,
 	}
 	var redis_cached uint64
 

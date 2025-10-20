@@ -3354,10 +3354,10 @@ func (db *Database) GetMessageIDsWithDateFilter(ng *models.Newsgroup, startTime,
 	}
 	defer close(resultChan)
 	defer db.ForceCloseGroupDBs(groupDBs)
-
+	var loaded uint64
 	var query string
 	var args []interface{}
-
+	start := time.Now()
 	if startTime != nil || endTime != nil {
 		// Build query with date filtering
 		var whereConditions []string
@@ -3385,9 +3385,10 @@ func (db *Database) GetMessageIDsWithDateFilter(ng *models.Newsgroup, startTime,
 		// No date filtering
 		query = query_getMessageIDsBatchWithDateFilter_selectPart + query_getMessageIDsBatchWithDateFilter_orderby
 	}
-
+	log.Printf("Newsgroup: '%s' | GetMessageIDsWithDateFilter: Executing query: '%s' with args: '%v'", ng.Name, query, args)
 	rows, err := groupDBs.DB.Query(query, args...)
 	if err != nil {
+		log.Printf("ERROR Newsgroup: '%s' | GetMessageIDsWithDateFilter: Failed to execute query: %v", ng.Name, err)
 		return err
 	}
 	defer rows.Close()
@@ -3398,6 +3399,7 @@ func (db *Database) GetMessageIDsWithDateFilter(ng *models.Newsgroup, startTime,
 		if err := rows.Scan(
 			&msgid,
 		); err != nil {
+			log.Printf("ERROR GetMessageIDsWithDateFilter: Failed to scan message ID in newsgroup '%s': %v", ng.Name, err)
 			return err
 		}
 
@@ -3409,19 +3411,21 @@ func (db *Database) GetMessageIDsWithDateFilter(ng *models.Newsgroup, startTime,
 					break load
 				default:
 					// chan full
-					db.releaseTmpChan(tmpChan, resultChan, cap(tmpChan))
+					loaded += db.releaseTmpChan(tmpChan, resultChan, cap(tmpChan))
 					tmpChan <- &msgid
+					break load
 				}
 			}
 		}
 	}
-	db.releaseTmpChan(tmpChan, resultChan, 0)
+	loaded += db.releaseTmpChan(tmpChan, resultChan, 0)
+	log.Printf("Newsgroup: '%s' | GetMessageIDsWithDateFilter: Loaded %d message IDs | took: %v", ng.Name, loaded, time.Since(start))
 	return nil
 }
 
-func (db *Database) releaseTmpChan(tmpChan chan *string, resultChan chan []*string, limit int) {
+func (db *Database) releaseTmpChan(tmpChan chan *string, resultChan chan []*string, limit int) (loaded uint64) {
 	if limit > 0 && len(tmpChan) < limit && len(tmpChan) < cap(tmpChan) {
-		return
+		return 0
 	}
 	if len(tmpChan) > 0 {
 		out := make([]*string, 0, len(tmpChan))
@@ -3436,8 +3440,10 @@ func (db *Database) releaseTmpChan(tmpChan chan *string, resultChan chan []*stri
 		}
 		if len(out) > 0 {
 			resultChan <- out
+			loaded += uint64(len(out))
 		}
 	}
+	return loaded
 }
 
 // GetArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
