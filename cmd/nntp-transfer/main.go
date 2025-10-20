@@ -1034,7 +1034,7 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 
 var debugArticles = make(map[string][]*models.Article)
 var debugMutex sync.Mutex
-var ErrNotInDateRange = fmt.Errorf("article not in specified date range")
+var ErrNotInDateRange = fmt.Errorf("notinrange")
 
 // processRequeuedJobs processes any failed jobs that were requeued for retry
 // Returns the number of jobs processed successfully
@@ -1224,21 +1224,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 				if VERBOSE {
 					log.Printf("Newsgroup: '%s' | Cleaning up TT job #%d with %d articles (ForceCleanUp)", ng.Name, resp.Job.JobID, len(resp.Job.Articles))
 				}
-				// Clean up Articles and their internal fields
-				for i := range resp.Job.Articles {
-					if resp.Job.Articles[i] != nil {
-						// Clean article internal fields to free memory
-						resp.Job.Articles[i].RefSlice = nil
-						resp.Job.Articles[i].NNTPhead = nil
-						resp.Job.Articles[i].NNTPbody = nil
-						resp.Job.Articles[i].Headers = nil
-						resp.Job.Articles[i].ArticleNums = nil
-						resp.Job.Articles[i].NewsgroupsPtr = nil
-						resp.Job.Articles[i].ProcessQueue = nil
-						resp.Job.Articles[i].MsgIdItem = nil
-						resp.Job.Articles[i] = nil
-					}
-				}
+				models.RecycleArticles(resp.Job.Articles)
 				resp.Job.Articles = nil
 
 				// Clean up ArticleMap - nil the keys (pointers) before deleting
@@ -1350,12 +1336,21 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		}
 		//if VERBOSE {
 		var size int
+		var skipped int
 		for _, a := range articles {
+			if a == nil {
+				skipped++
+				continue
+			}
 			size += a.Bytes
 		}
-		log.Printf("Newsgroup: '%s' | Loaded %d articles from database (processed %d/%d) (Bytes=%d) took %v", ng.Name, len(articles), articlesProcessed, totalNGArticles, size, time.Since(start))
 		//}
+		if skipped == len(articles) {
+			return fmt.Errorf("all articles in batch are nil for newsgroup '%s'", ng.Name)
+		}
+		log.Printf("Newsgroup: '%s' | Loaded %d articles (Bytes=%d) took %v (skipped: %d)", ng.Name, len(articles), size, time.Since(start), skipped)
 		// Process articles in network batches
+		start2 := time.Now()
 		for i := 0; i < len(articles); i += batchCheck {
 			OffsetQueue.Add(1)
 			if common.WantShutdown() {
@@ -1367,6 +1362,18 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			if end > len(articles) {
 				end = len(articles)
 			}
+			skipped := 0
+			for _, a := range articles[i:end] {
+				if a == nil {
+					//log.Printf("Warning: nil article in batch for newsgroup '%s' (articles %d-%d)", ng.Name, i+1, end)
+					skipped++
+				}
+			}
+			if skipped == (end - i) {
+				log.Printf("Error: all articles in batch are nil for newsgroup '%s' (articles %d-%d)", ng.Name, i+1, end)
+				OffsetQueue.OffsetBatchDone()
+				continue
+			}
 			// pass articles to CHECK or TAKETHIS queue (async!)
 			responseChan, err := processBatch(ttMode, articles[i:end], redisCli, int64(i), int64(end), articlesProcessed-int64(len(articles))+int64(i), OffsetQueue, ngtprogress)
 			if err != nil {
@@ -1376,17 +1383,14 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			if responseChan != nil {
 				// pass the response channel to the collector channel: ttResponses
 				ttResponsesSetupChan <- nntp.GetTTSetup(responseChan)
-
 			}
-
 			OffsetQueue.Wait(MaxQueuedJobs) // wait for offset batches to finish, less than N in flight
 		}
 		// articlesProcessed already incremented above after loading from DB
 		remainingArticles -= int64(len(articles))
-		if VERBOSE {
-			log.Printf("Newsgroup: '%s' | Pushed to queue (processed %d/%d) remaining: %d (Check=%t)", ng.Name, articlesProcessed, totalNGArticles, remainingArticles, ttMode.UseCHECK())
-			//log.Printf("Newsgroup: '%s' | Pushed (processed %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t)", ng.Name, articlesProcessed, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.GetMode())
-		}
+
+		log.Printf("Newsgroup: '%s' | Pushed to queue (processed %d/%d) remaining: %d (Check=%t) (Bytes=%d) took: %v", ng.Name, articlesProcessed, totalNGArticles, remainingArticles, ttMode.UseCHECK(), size, time.Since(start2))
+		//log.Printf("Newsgroup: '%s' | Pushed (processed %d/%d) total: %d/%d (unw: %d / rej: %d) (Check=%t)", ng.Name, articlesProcessed, totalArticles, transferred, remainingArticles, ttMode.Unwanted, ttMode.Rejected, ttMode.GetMode())
 
 	} // end for keyset pagination loop
 

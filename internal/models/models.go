@@ -158,6 +158,63 @@ type Article struct {
 	ProcessQueue  chan *string        `json:"-" db:"-"` // newsgroup ptr for batching
 }
 
+var ArticlePool = make(chan *Article, 128*1024)
+
+func NewArticle() *Article {
+	select {
+	case art := <-ArticlePool:
+		return art
+	default:
+		return &Article{}
+	}
+}
+
+func RecycleArticles(arts []*Article) {
+	for _, art := range arts {
+		RecycleArticle(art)
+	}
+}
+
+func RecycleArticle(art *Article) {
+	// Clear fields to avoid memory leaks
+	art.GetDataFunc = nil
+	art.DBArtNum = 0
+	art.MessageID = ""
+	art.Subject = ""
+	art.FromHeader = ""
+	art.DateSent = time.Time{}
+	art.DateString = ""
+	art.References = ""
+	art.Bytes = 0
+	art.Lines = 0
+	art.ReplyCount = 0
+	art.HeadersJSON = ""
+	art.BodyText = ""
+	art.Path = ""
+	art.ImportedAt = time.Time{}
+	art.Spam = 0
+	art.Hide = 0
+	art.Sanitized = false
+	art.MsgIdItem = nil
+	art.Headers = nil
+	art.ArticleNums = nil
+	art.NNTPhead = nil
+	art.NNTPbody = nil
+	art.IsThrRoot = false
+	art.IsReply = false
+	art.RefSlice = nil
+	art.NewsgroupsPtr = nil
+	art.ProcessQueue = nil
+
+	select {
+	case ArticlePool <- art:
+		// Successfully recycled
+	default:
+		// Pool is full, let it be garbage collected
+		//log.Printf("Warning: ArticlePool is full, discarding article to be garbage collected")
+	}
+}
+
 func (a *Article) GetData(what string, group string) string {
 	if a == nil {
 		return ""

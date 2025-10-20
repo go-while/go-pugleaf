@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	maxRetries = 1000
-	baseDelay  = 100 * time.Millisecond
+	maxRetries = 10000
+	baseDelay  = 10 * time.Millisecond
 	maxDelay   = 2500 * time.Millisecond
 )
 

@@ -3331,14 +3331,14 @@ func (db *Database) GetArticlesBatchWithDateFilter(ng *models.Newsgroup, offset 
 		return nil, err
 	}
 	defer rows.Close()
-	i := 0
-	out := make([]*models.Article, dbBatchSize)
+	//out := make([]*models.Article, dbBatchSize)
+	var out []*models.Article
 	for rows.Next() {
-		out[i] = &models.Article{}
-		if err := rows.Scan(&out[i].DBArtNum, &out[i].MessageID, &out[i].Subject, &out[i].FromHeader, &out[i].DateSent, &out[i].DateString, &out[i].References, &out[i].Bytes, &out[i].Lines, &out[i].ReplyCount, &out[i].Path, &out[i].HeadersJSON, &out[i].BodyText, &out[i].ImportedAt); err != nil {
+		a := models.NewArticle()
+		if err := rows.Scan(&a.DBArtNum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
 			return nil, err
 		}
-		i++
+		out = append(out, a)
 	}
 
 	if int64(len(out)) < dbBatchSize {
