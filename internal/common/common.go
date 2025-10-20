@@ -59,6 +59,13 @@ func SignalErrChan(errChan chan struct{}) {
 		// already signaled
 	}
 }
+func SignalTickChan(achan chan struct{}) {
+	select {
+	case achan <- struct{}{}:
+	default:
+		// already signaled
+	}
+}
 
 var StructChansCap1 = make(chan chan struct{}, 16384)
 

@@ -886,7 +886,7 @@ loopGroups:
 		}
 	}
 
-	log.Printf("Newsgroup list update completed: %d new groups added, %d skipped (prefix filter), out of %d remote groups with total: %d messages",
+	log.Printf("Result: %d new groups, %d skipped, out of %d remote groups with total: %d messages",
 		newGroupCount, skippedCount, len(remoteGroups), messages)
 
 	return nil

@@ -337,8 +337,6 @@ type CHTTJob struct {
 	TTMode           *TakeThisMode
 	ResponseChan     chan *TTResponse
 	responseSent     bool // Track if response already sent (prevents double send)
-	Articles         []*models.Article
-	ArticleMap       map[*string]*models.Article
 	MessageIDs       []*string
 	WantedIDs        []*string
 	PendingResponses sync.WaitGroup // Track pending TAKETHIS responses

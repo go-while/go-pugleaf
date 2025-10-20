@@ -3281,8 +3281,164 @@ func (db *Database) SearchUserByComputedHash(targetHash string, nonce string) (*
 	return nil, nil
 }
 
-const query_getArticlesBatchWithDateFilter_selectPart = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles`
+const query_getMessageIDsBatchWithDateFilter_selectPart = `SELECT message_id FROM articles`
+const query_getMessageIDsBatchWithDateFilter_orderby = " ORDER BY date_sent ASC"
+const query_getArticlesBatchWithDateFilter_selectPart = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text FROM articles`
 const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ? OFFSET ?"
+
+// GetArticlesByIDs retrieves articles by their message IDs, ordered by date_sent
+func (db *Database) GetArticlesByIDs(newsgroup *string, wantedIDs []*string) ([]*models.Article, error) {
+	if len(wantedIDs) == 0 {
+		return nil, nil
+	}
+
+	groupDBs, err := db.GetGroupDBs(*newsgroup)
+	if err != nil {
+		return nil, err
+	}
+	defer groupDBs.Return(db)
+
+	// Build the IN clause with placeholders
+	placeholders := make([]string, len(wantedIDs))
+	args := make([]interface{}, len(wantedIDs))
+	for i, id := range wantedIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	// Build query with IN clause for message_ids
+	query := query_getArticlesBatchWithDateFilter_selectPart +
+		" WHERE message_id IN (" + strings.Join(placeholders, ",") + ") " +
+		"ORDER BY date_sent ASC"
+
+	rows, err := groupDBs.DB.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query articles by IDs: %w", err)
+	}
+	defer rows.Close()
+
+	var articles []*models.Article
+	for rows.Next() {
+		article := &models.Article{}
+		if err := rows.Scan(
+			&article.MessageID,
+			&article.Subject,
+			&article.FromHeader,
+			&article.DateSent,
+			&article.DateString,
+			&article.References,
+			&article.Bytes,
+			&article.Lines,
+			&article.Path,
+			&article.HeadersJSON,
+			&article.BodyText,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan article: %w", err)
+		}
+		articles = append(articles, article)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating article rows: %w", err)
+	}
+
+	return articles, nil
+}
+
+// GetArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
+func (db *Database) GetMessageIDsWithDateFilter(ng *models.Newsgroup, startTime, endTime *time.Time, batchCheck int64, resultChan chan []*string) error {
+	// Get group database
+	groupDBs, err := db.GetGroupDBs(ng.Name)
+	if err != nil {
+		return fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", ng.Name, err)
+	}
+	defer close(resultChan)
+	defer db.ForceCloseGroupDBs(groupDBs)
+
+	var query string
+	var args []interface{}
+
+	if startTime != nil || endTime != nil {
+		// Build query with date filtering
+		var whereConditions []string
+
+		// Always exclude NULL date_sent values when using ORDER BY date_sent
+		whereConditions = append(whereConditions, "date_sent IS NOT NULL")
+
+		if startTime != nil {
+			whereConditions = append(whereConditions, "date_sent >= ?")
+			args = append(args, startTime.UTC().Format("2006-01-02 15:04:05"))
+		}
+
+		if endTime != nil {
+			whereConditions = append(whereConditions, "date_sent <= ?")
+			args = append(args, endTime.UTC().Format("2006-01-02 15:04:05"))
+		}
+
+		whereClause := ""
+		if len(whereConditions) > 0 {
+			whereClause = " WHERE " + strings.Join(whereConditions, " AND ")
+		}
+
+		query = query_getMessageIDsBatchWithDateFilter_selectPart + whereClause + query_getMessageIDsBatchWithDateFilter_orderby
+	} else {
+		// No date filtering
+		query = query_getMessageIDsBatchWithDateFilter_selectPart + query_getMessageIDsBatchWithDateFilter_orderby
+	}
+
+	rows, err := groupDBs.DB.Query(query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	//out := make([]*models.Article, dbBatchSize)
+	tmpChan := make(chan *string, batchCheck)
+	for rows.Next() {
+		var msgid string
+		if err := rows.Scan(
+			&msgid,
+		); err != nil {
+			return err
+		}
+
+		if msgid != "" {
+		load:
+			for {
+				select {
+				case tmpChan <- &msgid:
+					break load
+				default:
+					// chan full
+					db.releaseTmpChan(tmpChan, resultChan, cap(tmpChan))
+					tmpChan <- &msgid
+				}
+			}
+		}
+	}
+	db.releaseTmpChan(tmpChan, resultChan, 0)
+	return nil
+}
+
+func (db *Database) releaseTmpChan(tmpChan chan *string, resultChan chan []*string, limit int) {
+	if limit > 0 && len(tmpChan) < limit && len(tmpChan) < cap(tmpChan) {
+		return
+	}
+	if len(tmpChan) > 0 {
+		out := make([]*string, 0, len(tmpChan))
+	empty:
+		for {
+			select {
+			case mid := <-tmpChan:
+				out = append(out, mid)
+			default:
+				break empty
+			}
+		}
+		if len(out) > 0 {
+			resultChan <- out
+		}
+	}
+}
 
 // GetArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
 func (db *Database) GetArticlesBatchWithDateFilter(ng *models.Newsgroup, offset int64, startTime, endTime *time.Time, dbBatchSize int64) ([]*models.Article, error) {
