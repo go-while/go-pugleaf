@@ -2048,8 +2048,7 @@ var JobsToRetryMux sync.Mutex
 
 type ReturnSignal struct {
 	Mux        sync.Mutex
-	CHECK      bool
-	RunTT      bool
+	ConnMux    sync.Mutex // Simple mutex to serialize connection access
 	slotID     int
 	ExitChan   chan *ReturnSignal
 	errChan    chan struct{}
@@ -2058,99 +2057,6 @@ type ReturnSignal struct {
 	jobsReadOK map[*nntp.CHTTJob]uint64
 	jobMap     map[*string]*nntp.CHTTJob
 	jobs       []*nntp.CHTTJob
-}
-
-func (rs *ReturnSignal) BlockTT() {
-	rs.Mux.Lock()
-	rs.RunTT = false
-	rs.Mux.Unlock()
-	//log.Printf("BlockTT: released RunTT lock")
-}
-
-func (rs *ReturnSignal) GetLockTT() {
-	start := time.Now()
-	printLast := start
-	for {
-		rs.Mux.Lock()
-		if rs.RunTT {
-			//log.Printf("GetLockTT: RunTT already true")
-			rs.Mux.Unlock()
-			return
-		}
-		if !rs.RunTT && !rs.CHECK {
-			rs.RunTT = true
-			rs.Mux.Unlock()
-			//log.Printf("GetLockTT: acquired RunTT lock")
-			return
-		}
-		rs.Mux.Unlock()
-		if time.Since(printLast) > time.Second*30 {
-			log.Printf("GetLockTT: waiting since %v for RunTT to become true...", time.Since(start))
-			printLast = time.Now()
-		}
-		time.Sleep(nntp.ReturnDelay)
-	}
-}
-
-func (rs *ReturnSignal) UnlockCHECKforTTwithWait() {
-	start := time.Now()
-	printLast := start
-	for {
-		rs.Mux.Lock()
-		if !rs.RunTT {
-			rs.CHECK = false
-			rs.RunTT = true
-			rs.Mux.Unlock()
-			log.Printf("UnlockCHECKforTTwithWait: switched CHECK to RunTT")
-			return
-		}
-		rs.Mux.Unlock()
-		if time.Since(printLast) > time.Second*30 {
-			log.Printf("UnlockCHECKforTTwithWait: waiting since %v for RunTT to become false...", time.Since(start))
-			time.Sleep(nntp.ReturnDelay)
-			printLast = time.Now()
-		}
-	}
-}
-
-func (rs *ReturnSignal) UnlockCHECKforTT() {
-	rs.Mux.Lock()
-	defer rs.Mux.Unlock()
-	if !rs.CHECK || rs.RunTT {
-		//log.Printf("UnlockCHECKforTT: already set... CHECK=%t RunTT=%t", rs.CHECK, rs.RunTT)
-		return
-	}
-	//log.Printf("UnlockCHECKforTT: switched CHECK to RunTT")
-	rs.CHECK = false
-	rs.RunTT = true
-}
-
-func (rs *ReturnSignal) BlockCHECK() {
-	rs.Mux.Lock()
-	rs.CHECK = false
-	rs.RunTT = true
-	//log.Printf("BlockCHECK: set CHECK to false (RunTT=%t)", rs.RunTT)
-	rs.Mux.Unlock()
-}
-
-func (rs *ReturnSignal) LockCHECK() {
-	start := time.Now()
-	printLast := start
-	for {
-		rs.Mux.Lock()
-		if !rs.RunTT {
-			rs.CHECK = true
-			//log.Printf("LockCHECK: acquired CHECK lock (RunTT=%t) waited %v", rs.RunTT, time.Since(start))
-			rs.Mux.Unlock()
-			return
-		}
-		if time.Since(printLast) > time.Second*30 {
-			log.Printf("LockCHECK: waiting since %v for RunTT to become false... CHECK=%t RunTT=%t", time.Since(start), rs.CHECK, rs.RunTT)
-			printLast = time.Now()
-		}
-		rs.Mux.Unlock()
-		time.Sleep(nntp.ReturnDelay)
-	}
 }
 
 func replyChan(request chan struct{}, reply chan struct{}) {
@@ -2169,6 +2075,7 @@ func replyChan(request chan struct{}, reply chan struct{}) {
 
 func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs *ReturnSignal) {
 	var mux sync.Mutex
+	var runningTTJobs int // protected by local mux
 	var workerWG sync.WaitGroup
 	readCHECKResponsesChan := make(chan *nntp.ReadRequest, 1024*1024)
 	readTAKETHISResponsesChan := make(chan *nntp.ReadRequest, 1024*1024)
@@ -2255,7 +2162,6 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 			waiting:
 				for {
 					if len(WorkersTTChannel) >= MaxQueuedJobs {
-						rs.BlockCHECK()
 						log.Printf("CheckWorker (%d): waiting... shared takeThisChan full (%d)", workerID, len(WorkersTTChannel))
 						time.Sleep(time.Second / 4)
 						continue waiting
@@ -2266,27 +2172,25 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 				if currentJob.TTMode.UseCHECK() {
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d waits to check %d message IDs in batches of %d", *currentJob.Newsgroup, workerID, currentJob.JobID, len(currentJob.MessageIDs), BatchCheck)
 
-					//common.ChanLock(flipflopChan)
 					if !conn.IsConnected() {
 						rs.Mux.Lock()
 						rs.jobs = append([]*nntp.CHTTJob{currentJob}, rs.jobs...) // requeue at front
 						rs.Mux.Unlock()
-						//common.ChanRelease(flipflopChan)
 						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d connection lost before SendCheckMultiple for batch (offset %d: %d-%d)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
 						time.Sleep(time.Second)
 						return
 					}
-					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquire LOCK CHECK for batch (offset %d: %d-%d) (%d messages)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, len(currentJob.MessageIDs[batchStart:batchEnd]))
-					rs.LockCHECK()
-					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquired CHECK lock for batch (offset %d: %d-%d) -> SendCheckMultiple", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
+					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquire connection lock for batch (offset %d: %d-%d) (%d messages)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, len(currentJob.MessageIDs))
+					rs.ConnMux.Lock()
+					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquired connection lock for batch (offset %d: %d-%d) -> SendCheckMultiple", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
 					checksSent, err := conn.SendCheckMultiple(currentJob.MessageIDs, readCHECKResponsesChan, currentJob, demuxer)
+					rs.ConnMux.Unlock()
 					if err != nil {
 						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d SendCheckMultiple error for batch (offset %d: %d-%d): %v", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, err)
 						time.Sleep(time.Second)
 						rs.Mux.Lock()
 						rs.jobs = append([]*nntp.CHTTJob{currentJob}, rs.jobs...) // requeue at front
 						rs.Mux.Unlock()
-						//rs.BlockCHECK()
 						return
 					}
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d Sent CHECK for batch (offset %d: %d-%d), responses will be read asynchronously...", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
@@ -2298,8 +2202,6 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 				} else {
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d skipping CHECK for %d message IDs (TAKETHIS mode)", *currentJob.Newsgroup, workerID, currentJob.JobID, len(currentJob.MessageIDs))
 					currentJob.WantedIDs = currentJob.MessageIDs
-					//rs.UnlockCHECKforTTwithWait()
-					rs.BlockCHECK()
 				enqueue:
 					for {
 						select {
@@ -2308,11 +2210,9 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 							break enqueue
 						default:
 							// chan full
-							rs.BlockCHECK()
-							time.Sleep(time.Millisecond * 16)
+							time.Sleep(time.Millisecond * 100)
 						}
 					}
-					rs.BlockCHECK()
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d sent to local TakeThisChan", *currentJob.Newsgroup, workerID, currentJob.JobID)
 				}
 				//lastRun = time.Now()
@@ -2339,9 +2239,10 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 				hasWork := len(rs.jobs) > 0
 				rs.Mux.Unlock()
 				if hasWork {
+					//log.Printf("CheckWorker (%d): Ticker found work to do, signaling tickChan...", workerID)
 					common.SignalTickChan(tickChan)
 				} else {
-					rs.BlockCHECK()
+					//log.Printf("CheckWorker (%d): Ticker found no work to do.", workerID)
 				}
 			} // end select
 		} // end forever
@@ -2512,7 +2413,6 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 					if len(job.WantedIDs) > 0 {
 						// Pass job to TAKETHIS worker via channel
 						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5 job #%d got all %d CHECK responses, passing to TAKETHIS worker (wanted: %d articles) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, queuedCount, len(job.WantedIDs), len(WorkersTTChannel))
-						rs.UnlockCHECKforTT()
 						WorkersTTChannel <- job // local takethis chan sharing the same connection
 						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5c Sent job #%d to TAKETHIS worker (wanted: %d/%d) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, len(job.WantedIDs), queuedCount, len(WorkersTTChannel))
 
@@ -2520,11 +2420,6 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 						//log.Printf("Newsgroup: '%s' | CheckWorker (%d):  DEBUG6 job #%d got %d CHECK responses but server wants none", *job.Newsgroup, workerID, job.JobID, queuedCount)
 						// Send response and close channel for jobs with no wanted articles
 						job.Response(true, nil)
-						if len(WorkersTTChannel) > 0 {
-							rs.UnlockCHECKforTT()
-						} else {
-							rs.BlockTT()
-						}
 					}
 				} else {
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG6 job #%d CHECK responses so far: %d/%d readResponsesChan=%d", *job.Newsgroup, workerID, job.JobID, readCount, queuedCount, len(readResponsesChan))
@@ -2654,7 +2549,6 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 		} // end for
 	}(&workerWG)
 
-	var runningTTJobs int // protected by local mux
 	// launch a goroutine to process TAKETHIS jobs from local channel sharing the same connection
 	workerWG.Add(1)
 	go func(workerWG *sync.WaitGroup) {
@@ -2706,14 +2600,12 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 			mux.Lock()
 			runningTTJobs++
 			mux.Unlock()
-			//log.Printf("Newsgroup: '%s' | TTworker (%d): Prepare locking to send TAKETHIS for job #%d with %d wanted articles", *job.Newsgroup, workerID, job.JobID, len(wantedArticles))
-			rs.GetLockTT()
-			//common.ChanLock(flipflopChan)
+			//log.Printf("Newsgroup: '%s' | TTworker (%d): Acquire connection lock to send TAKETHIS for job #%d with %d wanted articles", *job.Newsgroup, workerID, job.JobID, len(wantedArticles))
 			//log.Printf("Newsgroup: '%s' | TTworker (%d): Sending TAKETHIS for job #%d with %d wanted articles", *job.Newsgroup, workerID, job.JobID, len(wantedArticles))
 			// Send TAKETHIS commands using existing function
+			rs.ConnMux.Lock()
 			redis_cached, err := sendArticlesBatchViaTakeThis(conn, wantedArticles, job, *job.Newsgroup, rs.redisCli, demuxer, readTAKETHISResponsesChan)
-			//common.ChanRelease(flipflopChan)
-			rs.BlockTT()
+			rs.ConnMux.Unlock()
 			if err != nil {
 				log.Printf("Newsgroup: '%s' | TTworker (%d): Error in TAKETHIS job #%d: %v", *job.Newsgroup, workerID, job.JobID, err)
 				job.Response(false, err)
@@ -2722,7 +2614,7 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 				rs.jobs = append([]*nntp.CHTTJob{job}, rs.jobs...)
 				rs.Mux.Unlock()
 				mux.Lock()
-				runningTTJobs++
+				runningTTJobs--
 				mux.Unlock()
 				return
 			}
