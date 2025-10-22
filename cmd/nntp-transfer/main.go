@@ -190,6 +190,7 @@ func main() {
 		fileExclude      = flag.String("file-exclude", "", "File containing newsgroup patterns to exclude (one per line)")
 		forceIncludeOnly = flag.Bool("force-include-only", false, "When set, only transfer newsgroups that match patterns in include file (ignores -group pattern)")
 		excludePrefix    = flag.String("exclude-prefix", "", "Exclude newsgroups with this prefix (comma-separated list, supports wildcards like 'alt.binaries.*')")
+		useProgressDB    = flag.Bool("use-progress-db", true, "Use transfer progress database to track transferred newsgroups and stats")
 
 		// Web server and profiling options
 		webPort   = flag.Int("web-port", 0, "Enable web server on this port to view results (e.g. 8080, default: disabled)")
@@ -369,7 +370,16 @@ func main() {
 		}
 		log.Printf("Using stored UseShortHashLen: %d", finalUseShortHashLen)
 	}
-
+	var progressDB *nntp.TransferProgressDB = nil
+	if *useProgressDB {
+		// Open transfer progress database
+		aprogressDB, err := nntp.OpenTransferProgressDB(*dataDir, *host+":"+strconv.Itoa(*port))
+		if err != nil {
+			log.Fatalf("Failed to open transfer progress database: %v", err)
+		}
+		progressDB = aprogressDB
+		defer progressDB.Close()
+	}
 	// Create target server connection pool
 	targetProvider := &config.Provider{
 		Name:       "transfer:" + *host,
@@ -404,17 +414,16 @@ func main() {
 		backendConfig.ProxyUsername = proxyConfig.Username
 		backendConfig.ProxyPassword = proxyConfig.Password
 	}
-	nntphostname, err := db.GetConfigValue("local_nntp_hostname")
+	nntphostname, err := db.GetConfigValue(config.CFG_KEY_HOSTNAME)
 	if err != nil || nntphostname == "" {
-		log.Printf("Failed to get local_nntp_hostname from database: %v", err)
-		os.Exit(1)
+		log.Fatalf("Failed to get local_nntp_hostname from database: %v", err)
 	}
 
 	pool := nntp.NewPool(backendConfig)
 	log.Printf("Created connection pool for target server '%s:%d' with max %d connections", *host, *port, *maxThreads)
 
 	// Get newsgroups to transfer
-	newsgroups, err := getNewsgroupsToTransfer(db, *transferGroup, *fileInclude, *fileExclude, *excludePrefix, *forceIncludeOnly)
+	newsgroups, err := getNewsgroupsToTransfer(db, progressDB, startTime, endTime, *transferGroup, *fileInclude, *fileExclude, *excludePrefix, *forceIncludeOnly)
 	if err != nil {
 		log.Fatalf("Failed to get newsgroups: %v", err)
 	}
@@ -454,7 +463,7 @@ func main() {
 	go func(wgP *sync.WaitGroup, redisCli *redis.Client) {
 		defer wgP.Done()
 		resultChan := make(chan error, 1)
-		resultChan <- runTransfer(db, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, *debugCapture, wgP, redisCli)
+		resultChan <- runTransfer(db, newsgroups, *batchCheck, *maxThreads, *dryRun, startTime, endTime, *debugCapture, wgP, redisCli, progressDB)
 		result := <-resultChan
 		if !*debugCapture {
 			transferDoneChan <- result
@@ -712,7 +721,7 @@ func testConnection(host *string, port *int, username *string, password *string,
 }
 
 // getNewsgroupsToTransfer returns newsgroups matching the specified pattern and file filters
-func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, fileExclude, excludePrefix string, forceIncludeOnly bool) ([]*models.Newsgroup, error) {
+func getNewsgroupsToTransfer(db *database.Database, progressDB *nntp.TransferProgressDB, startTime, endTime *time.Time, groupPattern, fileInclude, fileExclude, excludePrefix string, forceIncludeOnly bool) ([]*models.Newsgroup, error) {
 	var newsgroups []*models.Newsgroup
 
 	// Parse exclude prefix patterns (comma-separated)
@@ -819,6 +828,10 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 			if matchesExcludePrefix(ng.Name, excludePrefixes) {
 				continue
 			}
+			// Check if newsgroup already has results for this remote
+			if IgnoreNewsgroupProgress(ng, progressDB, startTime, endTime) {
+				continue
+			}
 			// Fast exact match check first
 			if includeLookup[ng.Name] {
 				newsgroups = append(newsgroups, ng)
@@ -841,6 +854,10 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 		for _, ng := range allNewsgroups {
 			// Check exclude prefix first
 			if matchesExcludePrefix(ng.Name, excludePrefixes) {
+				continue
+			}
+			// Check if newsgroup already has results for this remote
+			if IgnoreNewsgroupProgress(ng, progressDB, startTime, endTime) {
 				continue
 			}
 			if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup, hasIncludeWildcards, hasExcludeWildcards) {
@@ -869,6 +886,10 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 				if matchesExcludePrefix(ng.Name, excludePrefixes) {
 					continue
 				}
+				// Check if newsgroup already has results for this remote
+				if IgnoreNewsgroupProgress(ng, progressDB, startTime, endTime) {
+					continue
+				}
 				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup, hasIncludeWildcards, hasExcludeWildcards) {
 					newsgroups = append(newsgroups, ng)
 				}
@@ -882,6 +903,10 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 				if matchesExcludePrefix(ng.Name, excludePrefixes) {
 					break
 				}
+				// Check if newsgroup already has results for this remote
+				if IgnoreNewsgroupProgress(ng, progressDB, startTime, endTime) {
+					break
+				}
 				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup, hasIncludeWildcards, hasExcludeWildcards) {
 					newsgroups = append(newsgroups, ng)
 				}
@@ -892,6 +917,20 @@ func getNewsgroupsToTransfer(db *database.Database, groupPattern, fileInclude, f
 	log.Printf("Pattern filtering completed in %v, found %d matching newsgroups", time.Since(start), len(newsgroups))
 
 	return newsgroups, nil
+}
+
+func IgnoreNewsgroupProgress(ng *models.Newsgroup, progressDB *nntp.TransferProgressDB, startTime, endTime *time.Time) bool {
+	if progressDB != nil {
+		exists, err := progressDB.NewsgroupExists(ng.Name, startTime, endTime)
+		if err != nil {
+			log.Printf("Warning: Failed to check if newsgroup %s exists in progress DB: %v", ng.Name, err)
+			return true
+		} else if exists {
+			log.Printf("Skipping newsgroup %s - already has transfer results for this remote", ng.Name)
+			return true
+		}
+	}
+	return false
 }
 
 // matchesExcludePrefix checks if a newsgroup name matches any of the exclude prefixes
@@ -1019,7 +1058,7 @@ func matchesAnyWildcardPattern(newsgroup string, patterns []string) bool {
 }
 
 // runTransfer performs the actual article transfer process
-func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchCheck int64, maxThreads int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, wgP *sync.WaitGroup, redisCli *redis.Client) error {
+func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchCheck int64, maxThreads int, dryRun bool, startTime, endTime *time.Time, debugCapture bool, wgP *sync.WaitGroup, redisCli *redis.Client, progressDB *nntp.TransferProgressDB) error {
 	defer wgP.Done()
 	defer log.Printf("runTransfer() quitted")
 	maxThreadsChan := make(chan struct{}, maxThreads)
@@ -1045,7 +1084,7 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 			if VERBOSE {
 				log.Printf("Newsgroup: '%s' | Start", ng.Name)
 			}
-			err := transferNewsgroup(db, ng, batchCheck, dryRun, startTime, endTime, debugCapture, redisCli)
+			err := transferNewsgroup(db, ng, batchCheck, dryRun, startTime, endTime, debugCapture, redisCli, progressDB)
 			if err == ErrNotInDateRange {
 				nntp.ResultsMutex.Lock()
 				nothingInDateRange++
@@ -1135,7 +1174,7 @@ func processRequeuedJobs(newsgroup string, ttMode *nntp.TakeThisMode, ttResponse
 }
 
 // transferNewsgroup transfers articles from a single newsgroup
-func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck int64, dryRun bool, startTime, endTime *time.Time, debugCapture bool, redisCli *redis.Client) error {
+func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck int64, dryRun bool, startTime, endTime *time.Time, debugCapture bool, redisCli *redis.Client, transferProgressDB *nntp.TransferProgressDB) error {
 
 	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Starting (getting group DBs)...", ng.Name)
 
@@ -1183,6 +1222,12 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			results = append(results, fmt.Sprintf("END Newsgroup: '%s' | No articles to process", ng.Name))
 		}
 		nntp.ResultsMutex.Unlock()
+		// Insert result into progress database
+		if transferProgressDB != nil {
+			if err := transferProgressDB.InsertResult(ng.Name, startTime, endTime, 0, 0, 0, 0, 0, 0, 0, 0); err != nil {
+				log.Printf("Warning: Failed to insert result to progress DB for '%s': %v", ng.Name, err)
+			}
+		}
 		// No articles to process
 		if startTime != nil || endTime != nil {
 			if VERBOSE {
@@ -1357,6 +1402,25 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		}
 		delete(rejectedArticles, ng.Name) // free memory
 		nntp.ResultsMutex.Unlock()
+
+		// Insert result into progress database
+		if transferProgressDB != nil {
+			if err := transferProgressDB.InsertResult(
+				ng.Name,
+				startTime,
+				endTime,
+				int64(tmptotalTransferred),
+				int64(tmptotalUnwanted),
+				int64(tmptotalChecked),
+				int64(tmptotalRejected),
+				int64(tmptotalRetry),
+				int64(tmptotalSkipped),
+				int64(tmptotalTXErrors),
+				int64(tmptotalConnErrors),
+			); err != nil {
+				log.Printf("Warning: Failed to insert result to progress DB for '%s': %v", ng.Name, err)
+			}
+		}
 	}(&responseWG)
 
 	OffsetQueue := &nntp.OffsetQueue{

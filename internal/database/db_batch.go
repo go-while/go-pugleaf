@@ -1142,19 +1142,20 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDBs *GroupDBs, threadUpdates map
 
 		// Process each thread root and its accumulated updates
 		for threadRoot, updates := range threadUpdates {
-			// Get current cache state with retryable logic
+			// Get current cache state - NO retry needed, outer transaction handles it
 			var currentChildren string
 			var currentCount int
 
-			err := retryableStmtQueryRowScan(selectStmt, []interface{}{threadRoot}, &currentChildren, &currentCount)
+			row := selectStmt.QueryRow(threadRoot)
+			err := row.Scan(&currentChildren, &currentCount)
 			if err != nil {
 				// Thread cache entry doesn't exist, initialize it with the first update
 				//firstUpdate := updates[0]
 				// Format dates as UTC strings to avoid timezone encoding issues
 				firstUpdateDateUTC := updates[0].childDate.UTC().Format("2006-01-02 15:04:05")
-				_, err = retryableStmtExec(initStmt, threadRoot, firstUpdateDateUTC, updates[0].childArticleNum, firstUpdateDateUTC)
+				_, err = initStmt.Exec(threadRoot, firstUpdateDateUTC, updates[0].childArticleNum, firstUpdateDateUTC)
 				if err != nil {
-					log.Printf("[BATCH-CACHE] Failed to initialize thread cache for root %d after retries: %v", threadRoot, err)
+					log.Printf("[BATCH-CACHE] Failed to initialize thread cache for root %d: %v", threadRoot, err)
 					return fmt.Errorf("failed to initialize thread cache for root %d: %w", threadRoot, err)
 				}
 				currentChildren = ""
@@ -1182,13 +1183,13 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDBs *GroupDBs, threadUpdates map
 
 			newCount := currentCount + len(updates)
 
-			// Execute the batch update for this thread with retryable logic
+			// Execute the batch update for this thread - NO retry needed, outer transaction handles it
 			// Format lastActivity as UTC string to avoid timezone encoding issues
 			lastActivityUTC := lastActivity.UTC().Format("2006-01-02 15:04:05")
-			_, err = retryableStmtExec(updateStmt, newChildren, newCount, lastChildNum, lastActivityUTC, threadRoot)
+			_, err = updateStmt.Exec(newChildren, newCount, lastChildNum, lastActivityUTC, threadRoot)
 
 			if err != nil {
-				log.Printf("[BATCH-CACHE] Failed to update thread cache for root %d after retries: %v", threadRoot, err)
+				log.Printf("[BATCH-CACHE] Failed to update thread cache for root %d: %v", threadRoot, err)
 				return fmt.Errorf("failed to update thread cache for root %d: %w", threadRoot, err)
 			}
 			updatedCount++

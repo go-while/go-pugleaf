@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,7 +32,7 @@ func isRetryableError(err error) bool {
 func retryableExec(db *sql.DB, query string, args ...interface{}) (sql.Result, error) {
 	var result sql.Result
 	var err error
-
+	atomic.AddUint64(&queryID, 1)
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		result, err = db.Exec(query, args...)
 
@@ -50,8 +51,8 @@ func retryableExec(db *sql.DB, query string, args ...interface{}) (sql.Result, e
 			jitter := time.Duration(rand.Int63n(int64(delay) / 2))
 			time.Sleep(delay + jitter)
 
-			log.Printf("[WARN] SQLite retry attempt %d/%d for query (first 50 chars): %s... Error: %v",
-				attempt+1, maxRetries, truncateString(query, 50), err)
+			log.Printf("(#%d) SQLite retry attempt %d/%d for query (first 50 chars): %s... Error: %v",
+				atomic.LoadUint64(&queryID), attempt+1, maxRetries, truncateString(query, 50), err)
 		}
 	}
 
@@ -99,6 +100,7 @@ func retryableQueryRow(db *sql.DB, query string, args ...interface{}) *sql.Row {
 // retryableQueryRowScan executes a QueryRow and Scan with retry logic
 func retryableQueryRowScan(db *sql.DB, query string, args []interface{}, dest ...interface{}) error {
 	var err error
+	atomic.AddUint64(&queryID, 1)
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		row := db.QueryRow(query, args...)
@@ -118,8 +120,8 @@ func retryableQueryRowScan(db *sql.DB, query string, args []interface{}, dest ..
 			jitter := time.Duration(rand.Int63n(int64(delay) / 2))
 			time.Sleep(delay + jitter)
 
-			log.Printf("SQLite retry attempt %d/%d for QueryRow scan (first 50 chars): %s... Error: %v",
-				attempt+1, maxRetries, truncateString(query, 50), err)
+			log.Printf("(#%d) SQLite retry attempt %d/%d for QueryRow scan (first 50 chars): %s... Error: %v",
+				atomic.LoadUint64(&queryID), attempt+1, maxRetries, truncateString(query, 50), err)
 		}
 	}
 
@@ -130,7 +132,7 @@ func retryableQueryRowScan(db *sql.DB, query string, args []interface{}, dest ..
 func retryableQuery(db *sql.DB, query string, args ...interface{}) (*sql.Rows, error) {
 	var rows *sql.Rows
 	var err error
-
+	atomic.AddUint64(&queryID, 1)
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		rows, err = db.Query(query, args...)
 
@@ -154,8 +156,8 @@ func retryableQuery(db *sql.DB, query string, args ...interface{}) (*sql.Rows, e
 			jitter := time.Duration(rand.Int63n(int64(delay) / 2))
 			time.Sleep(delay + jitter)
 
-			log.Printf("SQLite retry attempt %d/%d for query (first 50 chars): %s... Error: %v",
-				attempt+1, maxRetries, truncateString(query, 50), err)
+			log.Printf("(#%d) SQLite retry attempt %d/%d for query (first 50 chars): %s... Error: %v",
+				atomic.LoadUint64(&queryID), attempt+1, maxRetries, truncateString(query, 50), err)
 		}
 	}
 
@@ -170,7 +172,7 @@ func retryableQuery(db *sql.DB, query string, args ...interface{}) (*sql.Rows, e
 // retryableTransactionExec executes a transaction with retry logic
 func retryableTransactionExec(db *sql.DB, txFunc func(*sql.Tx) error) error {
 	var err error
-
+	atomic.AddUint64(&queryID, 1)
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		tx, err := db.Begin()
 		if err != nil {
@@ -186,7 +188,7 @@ func retryableTransactionExec(db *sql.DB, txFunc func(*sql.Tx) error) error {
 				// Add random jitter (up to 50% of delay)
 				jitter := time.Duration(rand.Int63n(int64(delay) / 2))
 				time.Sleep(delay + jitter)
-				log.Printf("SQLite retry attempt %d/%d for transaction begin: %v", attempt+1, maxRetries, err)
+				log.Printf("(#%d) SQLite retry attempt %d/%d for transaction begin: %v", atomic.LoadUint64(&queryID), attempt+1, maxRetries, err)
 				continue
 			}
 			return err
@@ -207,7 +209,7 @@ func retryableTransactionExec(db *sql.DB, txFunc func(*sql.Tx) error) error {
 				// Add random jitter (up to 50% of delay)
 				jitter := time.Duration(rand.Int63n(int64(delay) / 2))
 				time.Sleep(delay + jitter)
-				log.Printf("SQLite retry attempt %d/%d for transaction: %v", attempt+1, maxRetries, err)
+				log.Printf("(#%d) SQLite retry attempt %d/%d for transaction: %v", atomic.LoadUint64(&queryID), attempt+1, maxRetries, err)
 				continue
 			}
 			return err
@@ -242,11 +244,13 @@ func truncateString(s string, length int) string {
 	return s[:length]
 }
 
+var queryID uint64
+
 // retryableStmtExec executes a prepared statement with retry logic for lock conflicts
 func retryableStmtExec(stmt *sql.Stmt, args ...interface{}) (sql.Result, error) {
 	var result sql.Result
 	var err error
-
+	atomic.AddUint64(&queryID, 1)
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		result, err = stmt.Exec(args...)
 
@@ -265,7 +269,7 @@ func retryableStmtExec(stmt *sql.Stmt, args ...interface{}) (sql.Result, error) 
 			jitter := time.Duration(rand.Int63n(int64(delay) / 2))
 			time.Sleep(delay + jitter)
 
-			log.Printf("SQLite retry attempt %d/%d for prepared statement exec. Error: %v stmt=%v", attempt+1, maxRetries, err, stmt)
+			log.Printf("(#%d) SQLite retry attempt %d/%d for prepared statement exec. Error: %v stmt=%v", atomic.LoadUint64(&queryID), attempt+1, maxRetries, err, stmt)
 		}
 	}
 
@@ -275,7 +279,7 @@ func retryableStmtExec(stmt *sql.Stmt, args ...interface{}) (sql.Result, error) 
 // retryableStmtQueryRowScan executes a prepared statement QueryRow and Scan with retry logic
 func retryableStmtQueryRowScan(stmt *sql.Stmt, args []interface{}, dest ...interface{}) error {
 	var err error
-
+	atomic.AddUint64(&queryID, 1)
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		row := stmt.QueryRow(args...)
 		err = row.Scan(dest...)
@@ -295,8 +299,7 @@ func retryableStmtQueryRowScan(stmt *sql.Stmt, args []interface{}, dest ...inter
 			jitter := time.Duration(rand.Int63n(int64(delay) / 2))
 			time.Sleep(delay + jitter)
 
-			log.Printf("SQLite retry attempt %d/%d for prepared statement QueryRow scan. Error: %v",
-				attempt+1, maxRetries, err)
+			log.Printf("(#%d) SQLite retry attempt %d/%d for prepared statement QueryRow scan. Error: %v", atomic.LoadUint64(&queryID), attempt+1, maxRetries, err)
 		}
 	}
 

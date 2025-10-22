@@ -32,11 +32,10 @@ func (db *Database) GetGroupDBs(groupName string) (*GroupDBs, error) {
 		return nil, fmt.Errorf("database configuration is not set")
 	}
 
-	db.MainMutex.Lock()
+	db.MainMutex.Lock() //mux #d2ef40e0
 	groupDBs := db.groupDBs[groupName]
 	if groupDBs != nil {
-		db.MainMutex.Unlock()
-
+		db.MainMutex.Unlock() //mux #d2ef40e0
 		for {
 			groupDBs.mux.RLock()
 			if groupDBs.state == stateCREATED {
@@ -53,9 +52,10 @@ func (db *Database) GetGroupDBs(groupName string) (*GroupDBs, error) {
 			NewsgroupPtr: db.Batch.GetNewsgroupPointer(groupName),
 			DB:           nil,
 			Idle:         time.Now(),
+			Workers:      1,
 		}
 		db.groupDBs[groupName] = groupDBs
-		db.MainMutex.Unlock()
+		db.MainMutex.Unlock() //mux #d2ef40e0
 
 		groupsHash := GroupHashMap.GroupToHash(groupName)
 
@@ -107,8 +107,6 @@ func (db *Database) GetGroupDBs(groupName string) (*GroupDBs, error) {
 			db.removePartialInitializedGroupDB(groupName)
 			return nil, fmt.Errorf("failed to migrate group database %s: %w", groupName, err)
 		}
-
-		groupDBs.IncrementWorkers()
 
 		db.MainMutex.Lock()
 		db.openDBsNum++
