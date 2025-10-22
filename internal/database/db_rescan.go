@@ -19,7 +19,7 @@ func (db *Database) GetLatestArticleNumberFromOverview(newsgroup string) (int64,
 	defer groupDB.Return(db)
 
 	var latestArticle int64
-	err = retryableQueryRowScan(groupDB.DB, `
+	err = RetryableQueryRowScan(groupDB.DB, `
 		SELECT MAX(article_num)
 		FROM articles
 	`, []interface{}{}, &latestArticle)
@@ -32,7 +32,7 @@ func (db *Database) GetLatestArticleNumberFromOverview(newsgroup string) (int64,
 
 func (db *Database) GetLatestArticleNumbers(newsgroup string) (map[string]int64, error) {
 	// Query the latest article numbers for the specified newsgroup
-	rows, err := retryableQuery(db.GetMainDB(), `
+	rows, err := RetryableQuery(db.GetMainDB(), `
 		SELECT name, last_article
 		FROM newsgroups
 		WHERE name = ?
@@ -105,7 +105,7 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 	defer groupDB.Return(db)
 
 	// 3. Get max article numbers from each table (handle NULL for empty tables)
-	err = retryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", []interface{}{}, &report.ArticlesMaxNum)
+	err = RetryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", []interface{}{}, &report.ArticlesMaxNum)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get max article_num from articles: %v", err))
 	}
@@ -113,13 +113,13 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 	// Since overview is now unified with articles, OverviewMaxNum equals ArticlesMaxNum
 	report.OverviewMaxNum = report.ArticlesMaxNum
 
-	err = retryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(root_article), 0) FROM threads", []interface{}{}, &report.ThreadsMaxNum)
+	err = RetryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(root_article), 0) FROM threads", []interface{}{}, &report.ThreadsMaxNum)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get max root_article from threads: %v", err))
 	}
 
 	// 4. Get counts from each table
-	err = retryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", []interface{}{}, &report.ArticleCount)
+	err = RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", []interface{}{}, &report.ArticleCount)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get article count: %v", err))
 	}
@@ -127,7 +127,7 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 	// Since overview is now unified with articles, OverviewCount equals ArticleCount
 	report.OverviewCount = report.ArticleCount
 
-	err = retryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM threads", []interface{}{}, &report.ThreadCount)
+	err = RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM threads", []interface{}{}, &report.ThreadCount)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get thread count: %v", err))
 	}
@@ -170,7 +170,7 @@ func (db *Database) findMissingArticles(groupDB *GroupDBs, maxArticleNum int64) 
 
 	for offset < maxArticleNum {
 		// Get batch of article numbers
-		rows, err := retryableQuery(groupDB.DB,
+		rows, err := RetryableQuery(groupDB.DB,
 			"SELECT article_num FROM articles WHERE article_num > ? ORDER BY article_num LIMIT ?",
 			offset, RescanBatchSize)
 		if err != nil {
@@ -229,7 +229,7 @@ func (db *Database) findOrphanedThreads(groupDB *GroupDBs) []int64 {
 
 	for {
 		// Get batch of article numbers
-		rows, err := retryableQuery(groupDB.DB,
+		rows, err := RetryableQuery(groupDB.DB,
 			"SELECT article_num FROM articles WHERE article_num > ? ORDER BY article_num LIMIT ?",
 			offset, RescanBatchSize)
 		if err != nil {
@@ -275,7 +275,7 @@ func (db *Database) findOrphanedThreads(groupDB *GroupDBs) []int64 {
 
 	for {
 		// Get batch of distinct root_article numbers from threads table
-		rows, err := retryableQuery(groupDB.DB,
+		rows, err := RetryableQuery(groupDB.DB,
 			"SELECT DISTINCT root_article FROM threads WHERE root_article > ? ORDER BY root_article LIMIT ?",
 			offset, RescanBatchSize)
 		if err != nil {
@@ -409,7 +409,7 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, gr
 
 	// Get total article count
 	var err error
-	err = retryableQueryRowScan(groupDB.DB, query_RebuildThreadsFromScratch1, []interface{}{}, &report.TotalArticles)
+	err = RetryableQueryRowScan(groupDB.DB, query_RebuildThreadsFromScratch1, []interface{}{}, &report.TotalArticles)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get article count: %v", err))
 		return report, err
@@ -489,7 +489,7 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, gr
 		}
 
 		// Load batch of article mappings
-		rows, err := retryableQuery(groupDB.DB, query_RebuildThreadsFromScratch5, currentBatchSize, offset)
+		rows, err := RetryableQuery(groupDB.DB, query_RebuildThreadsFromScratch5, currentBatchSize, offset)
 
 		if err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("Failed to query articles batch: %v", err))
@@ -573,7 +573,7 @@ const query_processThreadBatch3 = "INSERT INTO threads (root_article, parent_art
 // Based on the actual threading system: only ROOT articles go in threads table, replies only update thread_cache
 func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[string]int64, offset, batchSize int64, verbose bool) (int, error) {
 	// Get batch of articles with their references and dates
-	rows, err := retryableQuery(groupDB.DB, query_processThreadBatch1, batchSize, offset)
+	rows, err := RetryableQuery(groupDB.DB, query_processThreadBatch1, batchSize, offset)
 	if err != nil {
 		return 0, fmt.Errorf("failed to query articles: %w", err)
 	}
@@ -774,7 +774,7 @@ func (db *Database) initializeThreadCacheSimple(groupDB *GroupDBs, threadRoot in
 		rootDate = now
 	}
 
-	_, err := retryableExec(groupDB.DB, query_initializeThreadCacheSimple1,
+	_, err := RetryableExec(groupDB.DB, query_initializeThreadCacheSimple1,
 		threadRoot,
 		rootDate.UTC().Format("2006-01-02 15:04:05"),
 		threadRoot, // last_child_number starts as the root itself

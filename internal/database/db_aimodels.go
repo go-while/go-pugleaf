@@ -18,7 +18,7 @@ func (db *Database) GetActiveAIModels() ([]*models.AIModel, error) {
 	          WHERE is_active = 1
 	          ORDER BY sort_order ASC, display_name ASC`
 
-	rows, err := retryableQuery(db.mainDB, query)
+	rows, err := RetryableQuery(db.mainDB, query)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +52,7 @@ func (db *Database) GetDefaultAIModel() (*models.AIModel, error) {
 	          LIMIT 1`
 
 	model := &models.AIModel{}
-	err := retryableQueryRowScan(db.mainDB, query, nil,
+	err := RetryableQueryRowScan(db.mainDB, query, nil,
 		&model.ID, &model.PostKey, &model.OllamaModelName, &model.DisplayName, &model.Description,
 		&model.IsActive, &model.IsDefault, &model.SortOrder,
 		&model.CreatedAt, &model.UpdatedAt,
@@ -80,7 +80,7 @@ func (db *Database) GetFirstActiveAIModel() (*models.AIModel, error) {
 	          LIMIT 1`
 
 	model := &models.AIModel{}
-	err := retryableQueryRowScan(db.mainDB, query, nil,
+	err := RetryableQueryRowScan(db.mainDB, query, nil,
 		&model.ID, &model.PostKey, &model.OllamaModelName, &model.DisplayName, &model.Description,
 		&model.IsActive, &model.IsDefault, &model.SortOrder,
 		&model.CreatedAt, &model.UpdatedAt,
@@ -102,7 +102,7 @@ func (db *Database) GetAIModelByPostKey(postKey string) (*models.AIModel, error)
 	          WHERE post_key = ?`
 
 	model := &models.AIModel{}
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{postKey},
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{postKey},
 		&model.ID, &model.PostKey, &model.OllamaModelName, &model.DisplayName, &model.Description,
 		&model.IsActive, &model.IsDefault, &model.SortOrder,
 		&model.CreatedAt, &model.UpdatedAt,
@@ -122,7 +122,7 @@ func (db *Database) CreateAIModel(postKey, ollamaModelName, displayName, descrip
 	query := `INSERT INTO ai_models (post_key, ollama_model_name, display_name, description, is_active, is_default, sort_order)
 	          VALUES (?, ?, ?, ?, ?, ?, ?)`
 
-	result, err := retryableExec(db.mainDB, query, postKey, ollamaModelName, displayName, description, isActive, isDefault, sortOrder)
+	result, err := RetryableExec(db.mainDB, query, postKey, ollamaModelName, displayName, description, isActive, isDefault, sortOrder)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +159,7 @@ func (db *Database) UpdateAIModel(id int, ollamaModelName, displayName, descript
 	          SET ollama_model_name = ?, display_name = ?, description = ?, is_active = ?, is_default = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP
 	          WHERE id = ?`
 
-	_, err := retryableExec(db.mainDB, query, ollamaModelName, displayName, description, isActive, isDefault, sortOrder, id)
+	_, err := RetryableExec(db.mainDB, query, ollamaModelName, displayName, description, isActive, isDefault, sortOrder, id)
 	return err
 }
 
@@ -168,7 +168,7 @@ func (db *Database) SetDefaultAIModel(id int) error {
 	db.MainMutex.Lock()
 	defer db.MainMutex.Unlock()
 
-	return retryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
+	return RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
 		// First, unset all defaults
 		_, err := tx.Exec("UPDATE ai_models SET is_default = 0")
 		if err != nil {
@@ -186,7 +186,7 @@ func (db *Database) DeleteAIModel(id int) error {
 	db.MainMutex.Lock()
 	defer db.MainMutex.Unlock()
 	query := `DELETE FROM ai_models WHERE id = ?`
-	_, err := retryableExec(db.mainDB, query, id)
+	_, err := RetryableExec(db.mainDB, query, id)
 	return err
 }
 
@@ -199,7 +199,7 @@ func (db *Database) GetAllAIModels() ([]*models.AIModel, error) {
 	          FROM ai_models
 	          ORDER BY sort_order ASC, display_name ASC`
 
-	rows, err := retryableQuery(db.mainDB, query)
+	rows, err := RetryableQuery(db.mainDB, query)
 	if err != nil {
 		return nil, err
 	}

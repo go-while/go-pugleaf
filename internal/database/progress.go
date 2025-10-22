@@ -93,7 +93,7 @@ const query_GetLastArticle = `SELECT last_article FROM progress WHERE backend_na
 func (p *ProgressDB) GetLastArticle(backendName, newsgroupName string) (int64, error) {
 	p.mux.RLock()
 	var lastArticle int64
-	err := retryableQueryRowScan(p.db, query_GetLastArticle, []interface{}{backendName, newsgroupName}, &lastArticle)
+	err := RetryableQueryRowScan(p.db, query_GetLastArticle, []interface{}{backendName, newsgroupName}, &lastArticle)
 	if err == sql.ErrNoRows {
 		p.mux.RUnlock()
 		//log.Printf("progressDB.GetLastArticle: provider '%s', newsgroup '%s' has no progress", backendName, newsgroupName)
@@ -123,7 +123,7 @@ ON CONFLICT(backend_name, newsgroup_name) DO UPDATE SET
 func (p *ProgressDB) UpdateProgress(backendName, newsgroupName string, lastArticle int64) error {
 	p.mux.Lock()
 	defer p.mux.Unlock()
-	_, err := retryableExec(p.db, query_UpdateProgress, backendName, newsgroupName, lastArticle)
+	_, err := RetryableExec(p.db, query_UpdateProgress, backendName, newsgroupName, lastArticle)
 	if err != nil {
 		return fmt.Errorf("failed to update progress: %w", err)
 	}
@@ -141,7 +141,7 @@ ORDER BY backend_name, newsgroup_name
 
 // GetAllProgress returns all progress entries
 func (p *ProgressDB) GetAllProgress() ([]*ProgressEntry, error) {
-	rows, err := retryableQuery(p.db, query_GetAllProgress)
+	rows, err := RetryableQuery(p.db, query_GetAllProgress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query progress: %w", err)
 	}
@@ -181,7 +181,7 @@ ORDER BY newsgroup_name
 
 // GetProgressForBackend returns progress entries for a specific backend
 func (p *ProgressDB) GetProgressForBackend(backendName string) ([]*ProgressEntry, error) {
-	rows, err := retryableQuery(p.db, query_GetProgressForBackend, backendName)
+	rows, err := RetryableQuery(p.db, query_GetProgressForBackend, backendName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query progress for backend: %w", err)
 	}

@@ -15,7 +15,7 @@ func (db *Database) GetAllSections() ([]*models.Section, error) {
 		ORDER BY sort_order ASC, display_name ASC
 	`
 
-	rows, err := retryableQuery(db.mainDB, query)
+	rows, err := RetryableQuery(db.mainDB, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query sections: %w", err)
 	}
@@ -57,7 +57,7 @@ func (db *Database) GetAllSectionsWithCounts() ([]*models.Section, error) {
 		ORDER BY s.sort_order ASC, s.display_name ASC
 	`
 
-	rows, err := retryableQuery(db.mainDB, query)
+	rows, err := RetryableQuery(db.mainDB, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query sections with counts: %w", err)
 	}
@@ -94,7 +94,7 @@ func (db *Database) GetAllSectionGroups() ([]*models.SectionGroup, error) {
 		ORDER BY section_id ASC, sort_order ASC, newsgroup_name ASC
 	`
 
-	rows, err := retryableQuery(db.mainDB, query)
+	rows, err := RetryableQuery(db.mainDB, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query section groups: %w", err)
 	}
@@ -130,7 +130,7 @@ func (db *Database) GetSectionByID(id int) (*models.Section, error) {
 	`
 
 	section := &models.Section{}
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{id},
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{id},
 		&section.ID,
 		&section.Name,
 		&section.DisplayName,
@@ -156,7 +156,7 @@ func (db *Database) SectionNameExists(name string) (bool, error) {
 	query := `SELECT COUNT(*) FROM sections WHERE name = ?`
 
 	var count int
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{name}, &count)
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{name}, &count)
 	if err != nil {
 		return false, fmt.Errorf("failed to check section name existence: %w", err)
 	}
@@ -169,7 +169,7 @@ func (db *Database) SectionNameExistsExcluding(name string, excludeID int) (bool
 	query := `SELECT COUNT(*) FROM sections WHERE name = ? AND id != ?`
 
 	var count int
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{name, excludeID}, &count)
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{name, excludeID}, &count)
 	if err != nil {
 		return false, fmt.Errorf("failed to check section name existence: %w", err)
 	}
@@ -184,7 +184,7 @@ func (db *Database) CreateSection(section *models.Section) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`
 
-	result, err := retryableExec(db.mainDB, query,
+	result, err := RetryableExec(db.mainDB, query,
 		section.Name,
 		section.DisplayName,
 		section.Description,
@@ -215,7 +215,7 @@ func (db *Database) UpdateSection(section *models.Section) error {
 		WHERE id = ?
 	`
 
-	result, err := retryableExec(db.mainDB, query,
+	result, err := RetryableExec(db.mainDB, query,
 		section.Name,
 		section.DisplayName,
 		section.Description,
@@ -243,7 +243,7 @@ func (db *Database) UpdateSection(section *models.Section) error {
 
 // DeleteSection deletes a section and all its group assignments
 func (db *Database) DeleteSection(id int) error {
-	return retryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
+	return RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
 		// Delete section groups first (foreign key constraint)
 		_, err := tx.Exec("DELETE FROM section_groups WHERE section_id = ?", id)
 		if err != nil {
@@ -278,7 +278,7 @@ func (db *Database) GetSectionGroupByID(id int) (*models.SectionGroup, error) {
 	`
 
 	sg := &models.SectionGroup{}
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{id},
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{id},
 		&sg.ID,
 		&sg.SectionID,
 		&sg.NewsgroupName,
@@ -303,7 +303,7 @@ func (db *Database) SectionGroupExists(sectionID int, newsgroupName string) (boo
 	query := `SELECT COUNT(*) FROM section_groups WHERE section_id = ? AND newsgroup_name = ?`
 
 	var count int
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{sectionID, newsgroupName}, &count)
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{sectionID, newsgroupName}, &count)
 	if err != nil {
 		return false, fmt.Errorf("failed to check section group existence: %w", err)
 	}
@@ -318,7 +318,7 @@ func (db *Database) CreateSectionGroup(sg *models.SectionGroup) error {
 		VALUES (?, ?, ?, ?, ?, ?)
 	`
 
-	result, err := retryableExec(db.mainDB, query,
+	result, err := RetryableExec(db.mainDB, query,
 		sg.SectionID,
 		sg.NewsgroupName,
 		sg.GroupDescription,
@@ -344,7 +344,7 @@ func (db *Database) CreateSectionGroup(sg *models.SectionGroup) error {
 func (db *Database) DeleteSectionGroup(id int) error {
 	query := `DELETE FROM section_groups WHERE id = ?`
 
-	result, err := retryableExec(db.mainDB, query, id)
+	result, err := RetryableExec(db.mainDB, query, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete section group: %w", err)
 	}
@@ -371,7 +371,7 @@ func (db *Database) GetNewsgroupByName(name string) (*models.Newsgroup, error) {
 	`
 
 	ng := &models.Newsgroup{}
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{name},
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{name},
 		&ng.ID,
 		&ng.Name,
 		&ng.Active,

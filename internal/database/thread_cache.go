@@ -40,7 +40,7 @@ func (db *Database) InitializeThreadCache(groupDBs *GroupDBs, threadRoot int64, 
 	// Format dates as UTC strings to avoid timezone encoding issues
 	rootDateUTC := rootArticle.DateSent.UTC().Format("2006-01-02 15:04:05")
 
-	_, err := retryableExec(groupDBs.DB, query,
+	_, err := RetryableExec(groupDBs.DB, query,
 		threadRoot,
 		rootDateUTC,
 		threadRoot, // last_child_number starts as the root itself
@@ -62,7 +62,7 @@ func (db *Database) UpdateThreadCache(groupDBs *GroupDBs, threadRoot int64, chil
 	var currentCount int
 
 	query := `SELECT child_articles, message_count FROM thread_cache WHERE thread_root = ?`
-	err := retryableQueryRowScan(groupDBs.DB, query, []interface{}{threadRoot}, &currentChildren, &currentCount)
+	err := RetryableQueryRowScan(groupDBs.DB, query, []interface{}{threadRoot}, &currentChildren, &currentCount)
 	if err != nil {
 		// If the thread cache entry doesn't exist, queue it for batch initialization
 		// This can happen if the root article was processed without initializing the cache
@@ -112,7 +112,7 @@ func (db *Database) UpdateThreadCache(groupDBs *GroupDBs, threadRoot int64, chil
 	// Format childDate as UTC string to avoid timezone encoding issues
 	childDateUTC := childDate.UTC().Format("2006-01-02 15:04:05")
 
-	_, err = retryableExec(groupDBs.DB, updateQuery,
+	_, err = RetryableExec(groupDBs.DB, updateQuery,
 		newChildren,
 		currentCount+1,
 		childArticleNum,
@@ -249,7 +249,7 @@ func (db *Database) GetCachedThreadReplies(groupDBs *GroupDBs, threadRoot int64,
 	var totalReplies int
 
 	query := `SELECT child_articles, message_count FROM thread_cache WHERE thread_root = ?`
-	err := retryableQueryRowScan(groupDBs.DB, query, []interface{}{threadRoot}, &childArticles, &totalReplies)
+	err := RetryableQueryRowScan(groupDBs.DB, query, []interface{}{threadRoot}, &childArticles, &totalReplies)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get thread cache for root %d: %w", threadRoot, err)
 	}
@@ -297,7 +297,7 @@ func (db *Database) GetCachedThreadReplies(groupDBs *GroupDBs, threadRoot int64,
 		args[i] = num
 	}
 
-	rows, err := retryableQuery(groupDBs.DB, childQuery, args...)
+	rows, err := RetryableQuery(groupDBs.DB, childQuery, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to query thread replies: %w", err)
 	}
@@ -330,7 +330,7 @@ func (db *Database) GetOverviewByArticleNum(groupDBs *GroupDBs, articleNum int64
 	`
 
 	overview := &models.Overview{}
-	err := retryableQueryRowScan(groupDBs.DB, query, []interface{}{articleNum},
+	err := RetryableQueryRowScan(groupDBs.DB, query, []interface{}{articleNum},
 		&overview.ArticleNum, &overview.Subject, &overview.FromHeader,
 		&overview.DateSent, &overview.DateString, &overview.MessageID,
 		&overview.References, &overview.Bytes, &overview.Lines,
@@ -461,7 +461,7 @@ func (mem *MemCachedThreads) RefreshThreadCache(db *Database, groupDBs *GroupDBs
 	`
 	args := []interface{}{cacheSize, cacheWindowStart}
 
-	rows, err := retryableQuery(groupDBs.DB, query, args...)
+	rows, err := RetryableQuery(groupDBs.DB, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to query thread cache: %w", err)
 	}
@@ -490,7 +490,7 @@ func (mem *MemCachedThreads) RefreshThreadCache(db *Database, groupDBs *GroupDBs
 		// Quick check if thread root article is hidden (fast single lookup)
 		var hidden int
 		checkQuery := `SELECT hide FROM articles WHERE article_num = ? LIMIT 1`
-		err = retryableQueryRowScan(groupDBs.DB, checkQuery, []interface{}{entry.ThreadRoot}, &hidden)
+		err = RetryableQueryRowScan(groupDBs.DB, checkQuery, []interface{}{entry.ThreadRoot}, &hidden)
 		if err != nil || hidden != 0 {
 			continue // Skip hidden threads
 		}
@@ -515,7 +515,7 @@ func (mem *MemCachedThreads) RefreshThreadCache(db *Database, groupDBs *GroupDBs
 	// Get the REAL total count from database (not just cached count)
 	var realTotalCount int64
 	countQuery := `SELECT COUNT(*) FROM thread_cache`
-	err = retryableQueryRowScan(groupDBs.DB, countQuery, []interface{}{}, &realTotalCount)
+	err = RetryableQueryRowScan(groupDBs.DB, countQuery, []interface{}{}, &realTotalCount)
 	if err != nil {
 		log.Printf("[PERF:REFRESH] Failed to get real total count: %v", err)
 		realTotalCount = int64(len(threadRoots)) // Fallback to cached count

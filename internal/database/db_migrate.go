@@ -179,7 +179,7 @@ func ensureMigrationsTable(db *sql.DB, dbType string) error {
 func getAppliedMigrations(db *sql.DB, dbType string) (map[string]bool, error) {
 	applied := make(map[string]bool)
 
-	rows, err := retryableQuery(db, `SELECT filename FROM schema_migrations WHERE db_type = ? OR db_type = ''`, dbType)
+	rows, err := RetryableQuery(db, `SELECT filename FROM schema_migrations WHERE db_type = ? OR db_type = ''`, dbType)
 	if err != nil {
 		log.Printf("Failed to query applied migrations for %s: %v", dbType, err)
 		return nil, fmt.Errorf("failed to query applied migrations for %s: %w", dbType, err)

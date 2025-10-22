@@ -21,7 +21,7 @@ func (db *Database) InsertNNTPUser(u *models.NNTPUser) error {
 
 	query := `INSERT INTO nntp_users (username, password, maxconns, posting, web_user_id, is_active)
 	          VALUES (?, ?, ?, ?, ?, ?)`
-	_, err = retryableExec(db.mainDB, query, u.Username, string(hashedPassword), u.MaxConns, u.Posting, u.WebUserID, u.IsActive)
+	_, err = RetryableExec(db.mainDB, query, u.Username, string(hashedPassword), u.MaxConns, u.Posting, u.WebUserID, u.IsActive)
 	return err
 }
 
@@ -31,7 +31,7 @@ func (db *Database) GetNNTPUserByUsername(username string) (*models.NNTPUser, er
 	          FROM nntp_users WHERE username = ? AND is_active = 1`
 
 	var u models.NNTPUser
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{username}, &u.ID, &u.Username, &u.Password, &u.MaxConns, &u.Posting, &u.WebUserID,
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{username}, &u.ID, &u.Username, &u.Password, &u.MaxConns, &u.Posting, &u.WebUserID,
 		&u.CreatedAt, &u.UpdatedAt, &u.LastLogin, &u.IsActive)
 	if err != nil {
 		return nil, err
@@ -45,7 +45,7 @@ func (db *Database) GetNNTPUserByID(id int) (*models.NNTPUser, error) {
 	          FROM nntp_users WHERE id = ?`
 
 	var u models.NNTPUser
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{id}, &u.ID, &u.Username, &u.Password, &u.MaxConns, &u.Posting, &u.WebUserID,
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{id}, &u.ID, &u.Username, &u.Password, &u.MaxConns, &u.Posting, &u.WebUserID,
 		&u.CreatedAt, &u.UpdatedAt, &u.LastLogin, &u.IsActive)
 	if err != nil {
 		return nil, err
@@ -59,7 +59,7 @@ func (db *Database) GetNNTPUserByWebUserID(webUserID int64) (*models.NNTPUser, e
 	          FROM nntp_users WHERE web_user_id = ? AND is_active = 1`
 
 	var u models.NNTPUser
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{webUserID}, &u.ID, &u.Username, &u.Password, &u.MaxConns, &u.Posting, &u.WebUserID,
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{webUserID}, &u.ID, &u.Username, &u.Password, &u.MaxConns, &u.Posting, &u.WebUserID,
 		&u.CreatedAt, &u.UpdatedAt, &u.LastLogin, &u.IsActive)
 	if err != nil {
 		return nil, err
@@ -76,7 +76,7 @@ func (db *Database) SearchNNTPUsers(searchTerm string, limit int) ([]*models.NNT
 	          LIMIT ?`
 
 	searchPattern := "%" + searchTerm + "%"
-	rows, err := retryableQuery(db.mainDB, query, searchPattern, limit)
+	rows, err := RetryableQuery(db.mainDB, query, searchPattern, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +97,7 @@ func (db *Database) SearchNNTPUsers(searchTerm string, limit int) ([]*models.NNT
 func (db *Database) GetAllNNTPUsers() ([]*models.NNTPUser, error) {
 	query := `SELECT id, username, password, maxconns, posting, web_user_id, created_at, updated_at, last_login, is_active
 	          FROM nntp_users ORDER BY username`
-	rows, err := retryableQuery(db.mainDB, query)
+	rows, err := RetryableQuery(db.mainDB, query)
 	if err != nil {
 		return nil, err
 	}
@@ -141,48 +141,48 @@ func (db *Database) UpdateNNTPUserPassword(userID int, password string) error {
 	}
 
 	query := `UPDATE nntp_users SET password = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err = retryableExec(db.mainDB, query, string(hashedPassword), userID)
+	_, err = RetryableExec(db.mainDB, query, string(hashedPassword), userID)
 	return err
 }
 
 // UpdateNNTPUserLastLogin updates the last login timestamp
 func (db *Database) UpdateNNTPUserLastLogin(userID int) error {
 	query := `UPDATE nntp_users SET last_login = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err := retryableExec(db.mainDB, query, userID)
+	_, err := RetryableExec(db.mainDB, query, userID)
 	return err
 }
 
 // UpdateNNTPUserPermissions updates maxconns and posting permissions
 func (db *Database) UpdateNNTPUserPermissions(userID int, maxConns int, posting bool) error {
 	query := `UPDATE nntp_users SET maxconns = ?, posting = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err := retryableExec(db.mainDB, query, maxConns, posting, userID)
+	_, err := RetryableExec(db.mainDB, query, maxConns, posting, userID)
 	return err
 }
 
 // DeactivateNNTPUser deactivates an NNTP user (soft delete)
 func (db *Database) DeactivateNNTPUser(userID int) error {
 	query := `UPDATE nntp_users SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err := retryableExec(db.mainDB, query, userID)
+	_, err := RetryableExec(db.mainDB, query, userID)
 	return err
 }
 
 // ActivateNNTPUser activates an NNTP user (reverses soft delete)
 func (db *Database) ActivateNNTPUser(userID int) error {
 	query := `UPDATE nntp_users SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err := retryableExec(db.mainDB, query, userID)
+	_, err := RetryableExec(db.mainDB, query, userID)
 	return err
 }
 
 // DeleteNNTPUser permanently deletes an NNTP user
 func (db *Database) DeleteNNTPUser(userID int) error {
 	// First delete any sessions
-	_, err := retryableExec(db.mainDB, `DELETE FROM nntp_sessions WHERE user_id = ?`, userID)
+	_, err := RetryableExec(db.mainDB, `DELETE FROM nntp_sessions WHERE user_id = ?`, userID)
 	if err != nil {
 		return fmt.Errorf("failed to delete NNTP sessions: %w", err)
 	}
 
 	// Then delete the user
-	_, err = retryableExec(db.mainDB, `DELETE FROM nntp_users WHERE id = ?`, userID)
+	_, err = RetryableExec(db.mainDB, `DELETE FROM nntp_users WHERE id = ?`, userID)
 	return err
 }
 
@@ -191,21 +191,21 @@ func (db *Database) DeleteNNTPUser(userID int) error {
 // CreateNNTPSession creates a new NNTP session
 func (db *Database) CreateNNTPSession(userID int, connectionID, remoteAddr string) error {
 	query := `INSERT INTO nntp_sessions (user_id, connection_id, remote_addr) VALUES (?, ?, ?)`
-	_, err := retryableExec(db.mainDB, query, userID, connectionID, remoteAddr)
+	_, err := RetryableExec(db.mainDB, query, userID, connectionID, remoteAddr)
 	return err
 }
 
 // UpdateNNTPSessionActivity updates the last activity timestamp
 func (db *Database) UpdateNNTPSessionActivity(connectionID string) error {
 	query := `UPDATE nntp_sessions SET last_activity = CURRENT_TIMESTAMP WHERE connection_id = ? AND is_active = 1`
-	_, err := retryableExec(db.mainDB, query, connectionID)
+	_, err := RetryableExec(db.mainDB, query, connectionID)
 	return err
 }
 
 // CloseNNTPSession marks a session as inactive
 func (db *Database) CloseNNTPSession(connectionID string) error {
 	query := `UPDATE nntp_sessions SET is_active = 0 WHERE connection_id = ?`
-	_, err := retryableExec(db.mainDB, query, connectionID)
+	_, err := RetryableExec(db.mainDB, query, connectionID)
 	return err
 }
 
@@ -213,7 +213,7 @@ func (db *Database) CloseNNTPSession(connectionID string) error {
 func (db *Database) GetActiveNNTPSessionsForUser(userID int) (int, error) {
 	query := `SELECT COUNT(*) FROM nntp_sessions WHERE user_id = ? AND is_active = 1`
 	var count int
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{userID}, &count)
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{userID}, &count)
 	return count, err
 }
 
@@ -221,7 +221,7 @@ func (db *Database) GetActiveNNTPSessionsForUser(userID int) (int, error) {
 func (db *Database) CleanupOldNNTPSessions(olderThan time.Duration) error {
 	cutoff := time.Now().Add(-olderThan)
 	query := `DELETE FROM nntp_sessions WHERE is_active = 0 AND last_activity < ?`
-	_, err := retryableExec(db.mainDB, query, cutoff)
+	_, err := RetryableExec(db.mainDB, query, cutoff)
 	return err
 }
 

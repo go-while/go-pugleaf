@@ -54,7 +54,7 @@ const query_AddProvider = `INSERT INTO providers (name, grp, host, port, ssl, us
 	          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (db *Database) AddProvider(provider *models.Provider) error {
-	_, err := retryableExec(db.mainDB, query_AddProvider,
+	_, err := RetryableExec(db.mainDB, query_AddProvider,
 		provider.Name, provider.Grp, provider.Host, provider.Port,
 		provider.SSL, provider.Username, provider.Password,
 		provider.MaxConns, provider.Enabled, provider.Priority,
@@ -69,7 +69,7 @@ func (db *Database) AddProvider(provider *models.Provider) error {
 
 // DeleteProvider deletes a provider from the main database
 func (db *Database) DeleteProvider(id int) error {
-	_, err := retryableExec(db.mainDB, `DELETE FROM providers WHERE id = ?`, id)
+	_, err := RetryableExec(db.mainDB, `DELETE FROM providers WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete provider %d: %w", id, err)
 	}
@@ -83,7 +83,7 @@ const query_SetProvider = `UPDATE providers SET
 		WHERE id = ?`
 
 func (db *Database) SetProvider(provider *models.Provider) error {
-	_, err := retryableExec(db.mainDB, query_SetProvider,
+	_, err := RetryableExec(db.mainDB, query_SetProvider,
 		provider.Grp, provider.Host, provider.Port,
 		provider.SSL, provider.Username, provider.Password,
 		provider.MaxConns, provider.Enabled, provider.Priority,
@@ -100,7 +100,7 @@ func (db *Database) SetProvider(provider *models.Provider) error {
 const query_GetProviders = `SELECT id, enabled, priority, name, host, port, ssl, username, password, max_conns, max_art_size, posting, created_at, proxy_enabled, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password FROM providers order by priority ASC`
 
 func (db *Database) GetProviders() ([]*models.Provider, error) {
-	rows, err := retryableQuery(db.mainDB, query_GetProviders)
+	rows, err := RetryableQuery(db.mainDB, query_GetProviders)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +124,7 @@ func (db *Database) InsertNewsgroup(g *models.Newsgroup) error {
 	if g.Hierarchy == "" {
 		g.Hierarchy = ExtractHierarchyFromGroupName(g.Name)
 	}
-	_, err := retryableExec(db.mainDB, query_InsertNewsgroup, g.Name, g.Description, g.LastArticle, g.MessageCount, g.Active, g.ExpiryDays, g.MaxArticles, g.MaxArtSize, g.HighWater, g.LowWater, g.Status, g.Hierarchy)
+	_, err := RetryableExec(db.mainDB, query_InsertNewsgroup, g.Name, g.Description, g.LastArticle, g.MessageCount, g.Active, g.ExpiryDays, g.MaxArticles, g.MaxArtSize, g.HighWater, g.LowWater, g.Status, g.Hierarchy)
 
 	// Invalidate hierarchy cache for the affected hierarchy
 	if err == nil && db.HierarchyCache != nil {
@@ -138,7 +138,7 @@ const query_MainDBGetAllNewsgroupsCount = `SELECT COUNT(*) FROM newsgroups`
 
 func (db *Database) MainDBGetAllNewsgroupsCount() int64 {
 	var count int64
-	err := retryableQueryRowScan(db.mainDB, query_MainDBGetAllNewsgroupsCount, nil, &count)
+	err := RetryableQueryRowScan(db.mainDB, query_MainDBGetAllNewsgroupsCount, nil, &count)
 	if err != nil {
 		log.Printf("MainDBGetNewsgroupsCount: Failed to get newsgroups count: %v", err)
 		return 0
@@ -151,7 +151,7 @@ const query_GetUsersCount = `SELECT COUNT(*) FROM users`
 
 func (db *Database) GetUsersCount() int64 {
 	var count int64
-	err := retryableQueryRowScan(db.mainDB, query_GetUsersCount, nil, &count)
+	err := RetryableQueryRowScan(db.mainDB, query_GetUsersCount, nil, &count)
 	if err != nil {
 		log.Printf("GetUsersCount: Failed to get users count: %v", err)
 		return 0
@@ -166,7 +166,7 @@ WHERE u.disabled = 0 AND (u.id = 1 OR up.permission = 'admin')`
 
 func (db *Database) GetAdminUsersCount() int64 {
 	var count int64
-	err := retryableQueryRowScan(db.mainDB, query_GetAdminUsersCount, nil, &count)
+	err := RetryableQueryRowScan(db.mainDB, query_GetAdminUsersCount, nil, &count)
 	if err != nil {
 		log.Printf("GetAdminUsersCount: Failed to get admin users count: %v", err)
 		return 0
@@ -178,7 +178,7 @@ const query_MainDBGetNewsgroupsActiveCount = `SELECT COUNT(*) FROM newsgroups WH
 
 func (db *Database) MainDBGetNewsgroupsActiveCount() int64 {
 	var count int64
-	err := retryableQueryRowScan(db.mainDB, query_MainDBGetNewsgroupsActiveCount, nil, &count)
+	err := RetryableQueryRowScan(db.mainDB, query_MainDBGetNewsgroupsActiveCount, nil, &count)
 	if err != nil {
 		log.Printf("MainDBGetNewsgroupsActiveCount: Failed to get newsgroups count: %v", err)
 		return 0
@@ -190,7 +190,7 @@ func (db *Database) MainDBGetNewsgroupsActiveCount() int64 {
 const query_MainDBGetAllNewsgroups = `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy, created_at FROM newsgroups order by name`
 
 func (db *Database) MainDBGetAllNewsgroups() ([]*models.Newsgroup, error) {
-	rows, err := retryableQuery(db.mainDB, query_MainDBGetAllNewsgroups)
+	rows, err := RetryableQuery(db.mainDB, query_MainDBGetAllNewsgroups)
 	if err != nil {
 		log.Printf("MainDBGetAllNewsgroups: Failed to query newsgroups: %v", err)
 		return nil, err
@@ -211,7 +211,7 @@ func (db *Database) MainDBGetAllNewsgroups() ([]*models.Newsgroup, error) {
 const query_MainDBGetNewsgroup = `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy, created_at FROM newsgroups WHERE name = ?`
 
 func (db *Database) MainDBGetNewsgroup(newsgroup string) (*models.Newsgroup, error) {
-	rows, err := retryableQuery(db.mainDB, query_MainDBGetNewsgroup, newsgroup)
+	rows, err := RetryableQuery(db.mainDB, query_MainDBGetNewsgroup, newsgroup)
 	if err != nil {
 		log.Printf("MainDBGetNewsgroup: Failed to query newsgroup '%s': %v", newsgroup, err)
 		return nil, err
@@ -235,7 +235,7 @@ func (db *Database) MainDBGetNewsgroup(newsgroup string) (*models.Newsgroup, err
 const query_MainDBGetNewsgroupByID = `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy, created_at FROM newsgroups WHERE id = ?`
 
 func (db *Database) MainDBGetNewsgroupByID(id int64) (*models.Newsgroup, error) {
-	rows, err := retryableQuery(db.mainDB, query_MainDBGetNewsgroupByID, id)
+	rows, err := RetryableQuery(db.mainDB, query_MainDBGetNewsgroupByID, id)
 	if err != nil {
 		log.Printf("MainDBGetNewsgroupByID: Failed to query newsgroup with ID %d: %v", id, err)
 		return nil, err
@@ -264,7 +264,7 @@ func (db *Database) UpdateNewsgroup(g *models.Newsgroup) error {
 		g.Hierarchy = ExtractHierarchyFromGroupName(g.Name)
 	}
 
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroup,
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroup,
 		g.Description, g.LastArticle, g.MessageCount, g.Active, g.ExpiryDays, g.MaxArticles, g.HighWater, g.LowWater, g.Status, g.Hierarchy, g.Name,
 	)
 
@@ -280,7 +280,7 @@ func (db *Database) UpdateNewsgroup(g *models.Newsgroup) error {
 const query_UpdateNewsgroupExpiry = `UPDATE newsgroups SET expiry_days = ? WHERE name = ?`
 
 func (db *Database) UpdateNewsgroupExpiry(name string, expiryDays int) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupExpiry, expiryDays, name)
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupExpiry, expiryDays, name)
 	return err
 }
 
@@ -288,7 +288,7 @@ func (db *Database) UpdateNewsgroupExpiry(name string, expiryDays int) error {
 const query_UpdateNewsgroupExpiryPrefix = `UPDATE newsgroups SET expiry_days = ? WHERE name LIKE ? `
 
 func (db *Database) UpdateNewsgroupExpiryPrefix(name string, expiryDays int) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupExpiryPrefix, expiryDays, name+"%")
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupExpiryPrefix, expiryDays, name+"%")
 	return err
 }
 
@@ -296,7 +296,7 @@ func (db *Database) UpdateNewsgroupExpiryPrefix(name string, expiryDays int) err
 const query_UpdateNewsgroupMaxArticles = `UPDATE newsgroups SET max_articles = ? WHERE name = ?`
 
 func (db *Database) UpdateNewsgroupMaxArticles(name string, maxArticles int) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupMaxArticles, maxArticles, name)
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupMaxArticles, maxArticles, name)
 	return err
 }
 
@@ -304,7 +304,7 @@ func (db *Database) UpdateNewsgroupMaxArticles(name string, maxArticles int) err
 const query_UpdateNewsgroupMaxArticlesPrefix = `UPDATE newsgroups SET max_articles = ? WHERE name LIKE ?`
 
 func (db *Database) UpdateNewsgroupMaxArticlesPrefix(name string, maxArticles int) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupMaxArticlesPrefix, maxArticles, name+"%")
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupMaxArticlesPrefix, maxArticles, name+"%")
 	return err
 }
 
@@ -312,7 +312,7 @@ func (db *Database) UpdateNewsgroupMaxArticlesPrefix(name string, maxArticles in
 const query_UpdateNewsgroupMaxArtSize = `UPDATE newsgroups SET max_art_size = ? WHERE name = ?`
 
 func (db *Database) UpdateNewsgroupMaxArtSize(name string, maxArtSize int) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupMaxArtSize, maxArtSize, name)
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupMaxArtSize, maxArtSize, name)
 	return err
 }
 
@@ -320,7 +320,7 @@ const query_UpdateNewsgroupActive = `UPDATE newsgroups SET active = ? WHERE name
 
 // UpdateNewsgroupActive updates the active status for a newsgroup
 func (db *Database) UpdateNewsgroupActive(name string, active bool) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupActive, active, name)
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupActive, active, name)
 
 	// Update hierarchy cache with new active status instead of invalidating
 	if err == nil && db.HierarchyCache != nil {
@@ -438,7 +438,7 @@ func (db *Database) BulkDeleteNewsgroups(names []string) (int, error) {
 const query_UpdateNewsgroupDescription = `UPDATE newsgroups SET description = ? WHERE name = ?`
 
 func (db *Database) UpdateNewsgroupDescription(name string, description string) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupDescription, description, name)
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupDescription, description, name)
 	return err
 }
 
@@ -456,7 +456,7 @@ func (db *Database) DeleteNewsgroup(name string) error {
 		hierarchy = ExtractHierarchyFromGroupName(name)
 	}
 
-	_, err = retryableExec(db.mainDB, query_DeleteNewsgroup, name)
+	_, err = RetryableExec(db.mainDB, query_DeleteNewsgroup, name)
 
 	// Invalidate hierarchy cache for the affected hierarchy
 	if err == nil && db.HierarchyCache != nil {
@@ -471,7 +471,7 @@ const query_GetThreadsCount = `SELECT COUNT(*) FROM threads`
 func (db *Database) GetThreadsCount(groupDBs *GroupDBs) (int64, error) {
 	var count int64
 
-	err := retryableQueryRowScan(groupDBs.DB, query_GetThreadsCount, nil, &count)
+	err := RetryableQueryRowScan(groupDBs.DB, query_GetThreadsCount, nil, &count)
 	if err != nil {
 		return 0, err
 	}
@@ -483,7 +483,7 @@ const query_GetArticlesCount = `SELECT COUNT(*) FROM articles`
 func (db *Database) GetArticlesCount(groupDBs *GroupDBs) (int64, error) {
 	var count int64
 
-	err := retryableQueryRowScan(groupDBs.DB, query_GetArticlesCount, nil, &count)
+	err := RetryableQueryRowScan(groupDBs.DB, query_GetArticlesCount, nil, &count)
 	if err != nil {
 		return 0, err
 	}
@@ -508,7 +508,7 @@ const query_GetLastArticleDate = `SELECT MAX(date_sent) FROM articles WHERE hide
 func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
 	var lastDateStr sql.NullString
 
-	err := retryableQueryRowScan(groupDBs.DB, query_GetLastArticleDate, nil, &lastDateStr)
+	err := RetryableQueryRowScan(groupDBs.DB, query_GetLastArticleDate, nil, &lastDateStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get last article date for group %s: %w", groupDBs.Newsgroup, err)
 	}
@@ -534,7 +534,7 @@ func (db *Database) GetArticlesBatch(groupDBs *GroupDBs, limit, offset int) ([]*
 		limit = 100 // Default batch size
 	}
 
-	rows, err := retryableQuery(groupDBs.DB, query_GetArticlesBatch, limit, offset)
+	rows, err := RetryableQuery(groupDBs.DB, query_GetArticlesBatch, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -559,7 +559,7 @@ func (db *Database) GetArticlesBatch(groupDBs *GroupDBs, limit, offset int) ([]*
 const query_InsertThread = `INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, ?, ?)`
 
 func (db *Database) InsertThread(groupDBs *GroupDBs, t *models.Thread, a *models.Article) error {
-	_, err := retryableExec(groupDBs.DB, query_InsertThread,
+	_, err := RetryableExec(groupDBs.DB, query_InsertThread,
 		t.RootArticle, t.ParentArticle, t.ChildArticle, t.Depth, t.ThreadOrder,
 	)
 
@@ -569,7 +569,7 @@ func (db *Database) InsertThread(groupDBs *GroupDBs, t *models.Thread, a *models
 const query_GetThreads = `SELECT id, root_article, parent_article, child_article, depth, thread_order FROM threads`
 
 func (db *Database) GetThreads(groupDBs *GroupDBs) ([]*models.Thread, error) {
-	rows, err := retryableQuery(groupDBs.DB, query_GetThreads)
+	rows, err := RetryableQuery(groupDBs.DB, query_GetThreads)
 	if err != nil {
 		return nil, err
 	}
@@ -602,12 +602,12 @@ func (db *Database) InsertOverview(groupDBs *GroupDBs, o *models.Overview) (int6
 
 	if o.ArticleNum == 0 {
 		// Auto-increment article_num - don't include it in INSERT
-		res, err = retryableExec(groupDBs.DB, query_InsertOverview,
+		res, err = RetryableExec(groupDBs.DB, query_InsertOverview,
 			o.Subject, o.FromHeader, dateSentStr, o.DateString, o.MessageID, o.References, o.Bytes, o.Lines, o.ReplyCount, o.Downloaded,
 		)
 	} else {
 		// Explicit article_num provided (e.g. from ImportOverview)
-		res, err = retryableExec(groupDBs.DB, query_ImportOverview,
+		res, err = RetryableExec(groupDBs.DB, query_ImportOverview,
 			o.ArticleNum, o.Subject, o.FromHeader, dateSentStr, o.DateString, o.MessageID, o.References, o.Bytes, o.Lines, o.ReplyCount, o.Downloaded,
 		)
 	}
@@ -623,7 +623,7 @@ const query_GetOverviews = `SELECT article_num, subject, from_header, date_sent,
 func (db *Database) GetOverviews(groupDBs *GroupDBs) ([]*models.Overview, error) {
 	log.Printf("GetOverviews: group '%s' fetching overviews from articles table", groupDBs.Newsgroup)
 
-	rows, err := retryableQuery(groupDBs.DB, query_GetOverviews)
+	rows, err := RetryableQuery(groupDBs.DB, query_GetOverviews)
 	if err != nil {
 		return nil, err
 	}
@@ -869,7 +869,7 @@ func (db *Database) GetArticleByMessageID(groupDBs *GroupDBs, messageID string) 
 const query_UpdateReplyCount = `UPDATE articles SET reply_count = ? WHERE message_id = ?`
 
 func (db *Database) UpdateReplyCount(groupDBs *GroupDBs, messageID string, replyCount int) error {
-	_, err := retryableExec(groupDBs.DB, query_UpdateReplyCount, replyCount, messageID)
+	_, err := RetryableExec(groupDBs.DB, query_UpdateReplyCount, replyCount, messageID)
 	return err
 }
 
@@ -877,7 +877,7 @@ func (db *Database) UpdateReplyCount(groupDBs *GroupDBs, messageID string, reply
 const query_IncrementReplyCount = `UPDATE articles SET reply_count = reply_count + 1 WHERE message_id = ?`
 
 func (db *Database) IncrementReplyCount(groupDBs *GroupDBs, messageID string) error {
-	_, err := retryableExec(groupDBs.DB,
+	_, err := RetryableExec(groupDBs.DB,
 		query_IncrementReplyCount,
 		messageID,
 	)
@@ -903,7 +903,7 @@ func (db *Database) GetReplyCount(groupDBs *GroupDBs, messageID string) (int, er
 const query_UpdateArticleDateSent = `UPDATE articles SET date_sent = ?, date_string = ? WHERE message_id = ?`
 
 func (db *Database) UpdateArticleDateSent(groupDBs *GroupDBs, messageID string, dateSent time.Time, dateString string) error {
-	_, err := retryableExec(groupDBs.DB, query_UpdateArticleDateSent, dateSent.UTC().Format("2006-01-02 15:04:05"), dateString, messageID)
+	_, err := RetryableExec(groupDBs.DB, query_UpdateArticleDateSent, dateSent.UTC().Format("2006-01-02 15:04:05"), dateString, messageID)
 	return err
 }
 
@@ -911,7 +911,7 @@ func (db *Database) UpdateArticleDateSent(groupDBs *GroupDBs, messageID string, 
 const query_UpdateOverviewReplyCount = `UPDATE articles SET reply_count = ? WHERE message_id = ?`
 
 func (db *Database) UpdateOverviewReplyCount(groupDBs *GroupDBs, messageID string, replyCount int) error {
-	_, err := retryableExec(groupDBs.DB,
+	_, err := RetryableExec(groupDBs.DB,
 		query_UpdateOverviewReplyCount,
 		replyCount, messageID,
 	)
@@ -923,7 +923,7 @@ const query_IncrementOverviewReplyCount = `UPDATE articles SET reply_count = rep
 
 func (db *Database) IncrementOverviewReplyCount(groupDBs *GroupDBs, messageID string) error {
 
-	_, err := retryableExec(groupDBs.DB,
+	_, err := RetryableExec(groupDBs.DB,
 		query_IncrementOverviewReplyCount,
 		messageID,
 	)
@@ -2980,7 +2980,7 @@ func (db *Database) ResetNewsgroupCounters(newsgroupName string) error {
 	log.Printf("ResetNewsgroupCounters: Resetting counters for newsgroup '%s'", newsgroupName)
 
 	// Reset all counters to 0 and water marks to default values
-	_, err := retryableExec(db.mainDB, query_ResetNewsgroupCounters, newsgroupName)
+	_, err := RetryableExec(db.mainDB, query_ResetNewsgroupCounters, newsgroupName)
 
 	if err != nil {
 		return fmt.Errorf("failed to reset counters for newsgroup '%s': %w", newsgroupName, err)
@@ -2997,7 +2997,7 @@ const query_GetAllSiteNews = `SELECT id, subject, content, date_published, is_vi
 			  FROM site_news ORDER BY date_published DESC`
 
 func (db *Database) GetAllSiteNews() ([]*models.SiteNews, error) {
-	rows, err := retryableQuery(db.mainDB, query_GetAllSiteNews)
+	rows, err := RetryableQuery(db.mainDB, query_GetAllSiteNews)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query all site news: %w", err)
 	}
@@ -3026,7 +3026,7 @@ const query_GetVisibleSiteNews = `SELECT id, subject, content, date_published, i
 			  FROM site_news WHERE is_visible = 1 ORDER BY date_published DESC`
 
 func (db *Database) GetVisibleSiteNews() ([]*models.SiteNews, error) {
-	rows, err := retryableQuery(db.mainDB, query_GetVisibleSiteNews)
+	rows, err := RetryableQuery(db.mainDB, query_GetVisibleSiteNews)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query visible site news: %w", err)
 	}
@@ -3057,7 +3057,7 @@ const query_GetSiteNewsByID = `SELECT id, subject, content, date_published, is_v
 func (db *Database) GetSiteNewsByID(id int) (*models.SiteNews, error) {
 	var item models.SiteNews
 	var isVisibleInt int
-	err := retryableQueryRowScan(db.mainDB, query_GetSiteNewsByID, []interface{}{id},
+	err := RetryableQueryRowScan(db.mainDB, query_GetSiteNewsByID, []interface{}{id},
 		&item.ID, &item.Subject, &item.Content, &item.DatePublished,
 		&isVisibleInt, &item.CreatedAt, &item.UpdatedAt)
 
@@ -3082,7 +3082,7 @@ func (db *Database) CreateSiteNews(news *models.SiteNews) error {
 		isVisibleInt = 1
 	}
 
-	result, err := retryableExec(db.mainDB, query_CreateSiteNews, news.Subject, news.Content,
+	result, err := RetryableExec(db.mainDB, query_CreateSiteNews, news.Subject, news.Content,
 		news.DatePublished, isVisibleInt)
 	if err != nil {
 		return fmt.Errorf("failed to create site news: %w", err)
@@ -3107,7 +3107,7 @@ func (db *Database) UpdateSiteNews(news *models.SiteNews) error {
 		isVisibleInt = 1
 	}
 
-	_, err := retryableExec(db.mainDB, query_UpdateSiteNews, news.Subject, news.Content,
+	_, err := RetryableExec(db.mainDB, query_UpdateSiteNews, news.Subject, news.Content,
 		news.DatePublished, isVisibleInt, news.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update site news ID %d: %w", news.ID, err)
@@ -3120,7 +3120,7 @@ func (db *Database) UpdateSiteNews(news *models.SiteNews) error {
 const query_DeleteSiteNews = `DELETE FROM site_news WHERE id = ?`
 
 func (db *Database) DeleteSiteNews(id int) error {
-	_, err := retryableExec(db.mainDB, query_DeleteSiteNews, id)
+	_, err := RetryableExec(db.mainDB, query_DeleteSiteNews, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete site news ID %d: %w", id, err)
 	}
@@ -3131,7 +3131,7 @@ func (db *Database) DeleteSiteNews(id int) error {
 const query_ToggleSiteNewsVisibility = `UPDATE site_news SET is_visible = (1 - is_visible) WHERE id = ?`
 
 func (db *Database) ToggleSiteNewsVisibility(id int) error {
-	_, err := retryableExec(db.mainDB, query_ToggleSiteNewsVisibility, id)
+	_, err := RetryableExec(db.mainDB, query_ToggleSiteNewsVisibility, id)
 	if err != nil {
 		return fmt.Errorf("failed to toggle visibility for site news ID %d: %w", id, err)
 	}

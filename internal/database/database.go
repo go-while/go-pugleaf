@@ -252,7 +252,7 @@ func (db *Database) GetHistoryUseShortHashLen(defaultValue int) (int, bool, erro
 	var locked string
 
 	// Get the UseShortHashLen value
-	err := retryableQueryRowScan(db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{"history_use_short_hash_len"}, &value)
+	err := RetryableQueryRowScan(db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{"history_use_short_hash_len"}, &value)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Not found, use default
@@ -262,7 +262,7 @@ func (db *Database) GetHistoryUseShortHashLen(defaultValue int) (int, bool, erro
 	}
 
 	// Check if config is locked
-	err = retryableQueryRowScan(db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{"history_config_locked"}, &locked)
+	err = RetryableQueryRowScan(db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{"history_config_locked"}, &locked)
 	if err != nil && err != sql.ErrNoRows {
 		return 0, false, fmt.Errorf("failed to query history_config_locked: %w", err)
 	}
@@ -296,14 +296,14 @@ func (db *Database) SetHistoryUseShortHashLen(value int) error {
 	}
 
 	// Store the value
-	_, err = retryableExec(db.mainDB, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+	_, err = RetryableExec(db.mainDB, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
 		"history_use_short_hash_len", fmt.Sprintf("%d", value))
 	if err != nil {
 		return fmt.Errorf("failed to store history_use_short_hash_len: %w", err)
 	}
 
 	// Lock the configuration to prevent future changes
-	_, err = retryableExec(db.mainDB, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+	_, err = RetryableExec(db.mainDB, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
 		"history_config_locked", "true")
 	if err != nil {
 		return fmt.Errorf("failed to lock history configuration: %w", err)
@@ -330,7 +330,7 @@ func (db *Database) InitializeSystemStatus(appVersion string) error {
 	hostname, _ := os.Hostname()
 	pid := os.Getpid()
 
-	_, err := retryableExec(db.mainDB, query, appVersion, pid, hostname)
+	_, err := RetryableExec(db.mainDB, query, appVersion, pid, hostname)
 	if err != nil {
 		return fmt.Errorf("failed to initialize system status: %w", err)
 	}
@@ -342,7 +342,7 @@ func (db *Database) InitializeSystemStatus(appVersion string) error {
 // GetNewsgroupID returns the ID of a newsgroup by name
 func (db *Database) GetNewsgroupID(groupName string) (int, error) {
 	var id int
-	err := retryableQueryRowScan(db.mainDB, "SELECT id FROM newsgroups WHERE name = ?", []interface{}{groupName}, &id)
+	err := RetryableQueryRowScan(db.mainDB, "SELECT id FROM newsgroups WHERE name = ?", []interface{}{groupName}, &id)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get newsgroup ID for '%s': %w", groupName, err)
 	}
@@ -369,7 +369,7 @@ func (db *Database) IncrementArticleSpam(groupName string, articleNum int64) err
 	defer groupDBs.Return(db)
 
 	// Update spam counter in group database
-	result, err := retryableExec(groupDBs.DB, "UPDATE articles SET spam = spam + 1 WHERE article_num = ?", articleNum)
+	result, err := RetryableExec(groupDBs.DB, "UPDATE articles SET spam = spam + 1 WHERE article_num = ?", articleNum)
 	if err != nil {
 		log.Printf("DEBUG: Failed to update spam count in group DB: %v", err)
 		return fmt.Errorf("failed to increment spam count: %w", err)
@@ -379,7 +379,7 @@ func (db *Database) IncrementArticleSpam(groupName string, articleNum int64) err
 	log.Printf("DEBUG: Updated %d rows in articles table for article %d", rowsAffected, articleNum)
 
 	// Add to main database spam table
-	result2, err := retryableExec(db.mainDB, "INSERT OR IGNORE INTO spam (newsgroup_id, article_num) VALUES (?, ?)", newsgroupID, articleNum)
+	result2, err := RetryableExec(db.mainDB, "INSERT OR IGNORE INTO spam (newsgroup_id, article_num) VALUES (?, ?)", newsgroupID, articleNum)
 	if err != nil {
 		log.Printf("DEBUG: Failed to insert into spam table: %v", err)
 		return fmt.Errorf("failed to add to spam table: %w", err)
@@ -399,7 +399,7 @@ func (db *Database) IncrementArticleHide(groupName string, articleNum int64) err
 	}
 	defer groupDBs.Return(db)
 
-	_, err = retryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ? AND spam > 0", articleNum)
+	_, err = RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ? AND spam > 0", articleNum)
 	if err != nil {
 		return fmt.Errorf("failed to increment hide count: %w", err)
 	}
@@ -415,7 +415,7 @@ func (db *Database) UnHideArticle(groupName string, articleNum int64) error {
 	}
 	defer groupDBs.Return(db)
 
-	_, err = retryableExec(groupDBs.DB, "UPDATE articles SET hide = 0 WHERE article_num = ?", articleNum)
+	_, err = RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 0 WHERE article_num = ?", articleNum)
 	if err != nil {
 		return fmt.Errorf("failed to unhide: %w", err)
 	}
@@ -444,7 +444,7 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 
 	// Check current spam count first
 	var currentSpam int
-	err = retryableQueryRowScan(groupDBs.DB, "SELECT spam FROM articles WHERE article_num = ?", []interface{}{articleNum}, &currentSpam)
+	err = RetryableQueryRowScan(groupDBs.DB, "SELECT spam FROM articles WHERE article_num = ?", []interface{}{articleNum}, &currentSpam)
 	if err != nil {
 		log.Printf("DEBUG: Failed to get current spam count: %v", err)
 		return fmt.Errorf("failed to get current spam count: %w", err)
@@ -456,7 +456,7 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 	}
 
 	// Decrement spam counter in group database
-	result, err := retryableExec(groupDBs.DB, "UPDATE articles SET spam = spam - 1 WHERE article_num = ? AND spam > 0", articleNum)
+	result, err := RetryableExec(groupDBs.DB, "UPDATE articles SET spam = spam - 1 WHERE article_num = ? AND spam > 0", articleNum)
 	if err != nil {
 		log.Printf("DEBUG: Failed to decrement spam count in group DB: %v", err)
 		return fmt.Errorf("failed to decrement spam count: %w", err)
@@ -467,7 +467,7 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 
 	// If spam count reaches 0, remove from main database spam table and clear all user flags
 	if currentSpam == 1 {
-		result2, err := retryableExec(db.mainDB, "DELETE FROM spam WHERE newsgroup_id = ? AND article_num = ?", newsgroupID, articleNum)
+		result2, err := RetryableExec(db.mainDB, "DELETE FROM spam WHERE newsgroup_id = ? AND article_num = ?", newsgroupID, articleNum)
 		if err != nil {
 			log.Printf("DEBUG: Failed to remove from spam table: %v", err)
 			return fmt.Errorf("failed to remove from spam table: %w", err)
@@ -477,7 +477,7 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 		log.Printf("DEBUG: Removed %d rows from spam table", rowsAffected2)
 
 		// Also remove all user spam flags for this article
-		result3, err := retryableExec(db.mainDB, "DELETE FROM user_spam_flags WHERE newsgroup_id = ? AND article_num = ?", newsgroupID, articleNum)
+		result3, err := RetryableExec(db.mainDB, "DELETE FROM user_spam_flags WHERE newsgroup_id = ? AND article_num = ?", newsgroupID, articleNum)
 		if err != nil {
 			log.Printf("DEBUG: Failed to clear user spam flags: %v", err)
 			return fmt.Errorf("failed to clear user spam flags: %w", err)
@@ -499,7 +499,7 @@ func (db *Database) HasUserFlaggedSpam(userID int64, groupName string, articleNu
 	}
 
 	var count int
-	err = retryableQueryRowScan(db.mainDB, `
+	err = RetryableQueryRowScan(db.mainDB, `
 		SELECT COUNT(*) FROM user_spam_flags
 		WHERE user_id = ? AND newsgroup_id = ? AND article_num = ?`,
 		[]interface{}{userID, newsgroupID, articleNum}, &count)
@@ -519,7 +519,7 @@ func (db *Database) RecordUserSpamFlag(userID int64, groupName string, articleNu
 		return fmt.Errorf("failed to get newsgroup ID: %w", err)
 	}
 
-	_, err = retryableExec(db.mainDB, `
+	_, err = RetryableExec(db.mainDB, `
 		INSERT OR IGNORE INTO user_spam_flags (user_id, newsgroup_id, article_num)
 		VALUES (?, ?, ?)`,
 		userID, newsgroupID, articleNum)

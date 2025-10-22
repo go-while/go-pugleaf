@@ -170,7 +170,7 @@ func (dbs *GroupDBs) Return(db *Database) {
 func (db *GroupDBs) ExistsMsgIdInArticlesDB(messageID string) bool {
 	query := "SELECT 1 FROM articles WHERE message_id = ? LIMIT 1"
 	var exists bool
-	if err := retryableQueryRowScan(db.DB, query, []interface{}{messageID}, &exists); err != nil {
+	if err := RetryableQueryRowScan(db.DB, query, []interface{}{messageID}, &exists); err != nil {
 		return false
 	}
 	return exists

@@ -669,7 +669,7 @@ retry2:
 		//LockQueryChan()
 		//defer ReturnQueryChan()
 		// Use retryable transaction to prevent race conditions between concurrent batches
-		err = retryableTransactionExec(sq.db.mainDB, func(tx *sql.Tx) error {
+		err = RetryableTransactionExec(sq.db.mainDB, func(tx *sql.Tx) error {
 			// Use UPSERT to handle both new and existing newsgroups
 			_, txErr := tx.Exec(query_processNewsgroupBatch,
 				*task.Newsgroup, len(batches), maxArticleNum, time.Now().UTC().Format("2006-01-02 15:04:05"))
@@ -786,7 +786,7 @@ func (c *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.Ar
 	// ORDER BY not needed; we map by message_id
 	query := query_processOverviewBatch2 + getPlaceholders(len(args)) + `)`
 	log.Printf("[OVB-BATCH] group '%s': Selecting article numbers for %d articles queryLen=%d", groupDBs.Newsgroup, len(batches), len(query))
-	rows, err := retryableQuery(groupDBs.DB, query, args...)
+	rows, err := RetryableQuery(groupDBs.DB, query, args...)
 	if err != nil {
 		log.Printf("[OVB-BATCH] group '%s': Failed to execute batch select: %v", groupDBs.Newsgroup, err)
 		return fmt.Errorf("failed to execute batch select for group '%s': %w", groupDBs.Newsgroup, err)
@@ -1073,7 +1073,7 @@ func (c *SQ3batch) batchUpdateReplyCounts(groupDBs *GroupDBs, parentCounts map[*
 	// Use strings.Repeat for efficient SQL building - zero string copies
 	// Execute the batch UPDATE
 	//log.Printf("[P-BATCH] group '%s': update batch reply count for %d articles (queryLen=%d)", groupDBs.Newsgroup, len(messageIDs), len(sql))
-	_, err := retryableExec(groupDBs.DB, fmt.Sprintf(query_batchUpdateReplyCounts2, strings.Repeat(query_batchUpdateReplyCounts1, len(messageIDs)), getPlaceholders(len(messageIDs))), args...)
+	_, err := RetryableExec(groupDBs.DB, fmt.Sprintf(query_batchUpdateReplyCounts2, strings.Repeat(query_batchUpdateReplyCounts1, len(messageIDs)), getPlaceholders(len(messageIDs))), args...)
 	if err != nil {
 		log.Printf("[P-BATCH] group '%s': Failed to execute batch reply count update: %v", groupDBs.Newsgroup, err)
 	}
@@ -1098,7 +1098,7 @@ func (c *SQ3batch) findThreadRoot(groupDBs *GroupDBs, refs []string) (int64, err
 		// Check if this article is a thread root with retryable logic
 		var rootArticle int64
 		threadQuery := `SELECT root_article FROM threads WHERE root_article = (SELECT article_num FROM articles WHERE message_id = ? LIMIT 1) LIMIT 1`
-		err := retryableQueryRowScan(groupDBs.DB, threadQuery, []interface{}{refMessageID}, &rootArticle)
+		err := RetryableQueryRowScan(groupDBs.DB, threadQuery, []interface{}{refMessageID}, &rootArticle)
 		if err == nil {
 			return rootArticle, nil
 		}
@@ -1115,8 +1115,8 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDBs *GroupDBs, threadUpdates map
 	var updatedCount int
 	var initializedCount int
 
-	// Use retryableTransactionExec for SQLite lock safety
-	err := retryableTransactionExec(groupDBs.DB, func(tx *sql.Tx) error {
+	// Use RetryableTransactionExec for SQLite lock safety
+	err := RetryableTransactionExec(groupDBs.DB, func(tx *sql.Tx) error {
 		// Reset ShutDownCounters for each retry attempt
 		updatedCount = 0
 		initializedCount = 0
@@ -1200,7 +1200,7 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDBs *GroupDBs, threadUpdates map
 			}
 		}
 
-		return nil // Transaction will be committed by retryableTransactionExec
+		return nil // Transaction will be committed by RetryableTransactionExec
 	})
 
 	if err != nil {
