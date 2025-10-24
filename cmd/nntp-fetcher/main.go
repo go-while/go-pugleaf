@@ -311,8 +311,18 @@ func main() {
 				continue
 			}
 			nga, err := db.MainDBGetNewsgroup(ng.Name)
-			if err != nil || nga == nil || *fetchActiveOnly && !nga.Active {
-				//log.Printf("[FETCHER] ignore newsgroup '%s' err='%v' ng='%#v'", ng.Name, err, ng)
+			if err != nil || nga == nil {
+				log.Printf("[FETCHER] Failed to get newsgroup '%s' from database: err='%v' nga='%#v'", ng.Name, err, nga)
+				return
+			}
+
+			if *fetchActiveOnly && !nga.Active {
+				//log.Printf("[FETCHER] ignore inactive newsgroup '%s'", ng.Name)
+				continue
+			}
+
+			if !*fetchActiveOnly && nga.Active {
+				//log.Printf("[FETCHER] ignore active newsgroup '%s'", ng.Name)
 				continue
 			}
 

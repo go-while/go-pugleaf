@@ -2757,7 +2757,9 @@ forever:
 							if common.WantShutdown() {
 								break forever
 							}
+							rs.Mux.Lock()
 							log.Printf("Newsgroup: '%s' | CHTTworker (%d): pre append job #%d waiting since %v rs.jobs=%d takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, time.Since(start), len(rs.jobs), len(WorkersTTChannel))
+							rs.Mux.Unlock()
 							lastPrint = time.Now()
 						}
 					}

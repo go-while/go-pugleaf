@@ -165,17 +165,17 @@ func (tpdb *TransferProgressDB) InsertResult(newsgroup string, startDate, endDat
 	tpdb.mu.Lock()
 	defer tpdb.mu.Unlock()
 
-	// Convert time pointers to nullable strings
-	var startDateStr, endDateStr interface{}
+	// Convert time pointers to strings (empty string if nil to match NOT NULL DEFAULT "")
+	var startDateStr, endDateStr string
 	if startDate != nil {
 		startDateStr = startDate.UTC().Format("2006-01-02 15:04:05")
 	} else {
-		startDateStr = nil
+		startDateStr = ""
 	}
 	if endDate != nil {
 		endDateStr = endDate.UTC().Format("2006-01-02 15:04:05")
 	} else {
-		endDateStr = nil
+		endDateStr = ""
 	}
 
 	_, err := database.RetryableExec(
@@ -291,32 +291,31 @@ func (tpdb *TransferProgressDB) GetRecentTransfers(limit int) ([]TransferResult,
 }
 
 // NewsgroupExists checks if a newsgroup already has transfer results for the current remote
-// with exactly the same start_date and end_date (including NULL values)
+// with exactly the same start_date and end_date (empty string represents no filter)
 func (tpdb *TransferProgressDB) NewsgroupExists(newsgroup string, startDate, endDate *time.Time) (bool, error) {
 	tpdb.mu.RLock()
 	defer tpdb.mu.RUnlock()
 
-	// Convert time pointers to nullable strings for comparison
-	var startDateStr, endDateStr interface{}
+	// Convert time pointers to strings (empty string if nil to match schema)
+	var startDateStr, endDateStr string
 	if startDate != nil {
 		startDateStr = startDate.UTC().Format("2006-01-02 15:04:05")
 	} else {
-		startDateStr = nil
+		startDateStr = ""
 	}
 	if endDate != nil {
 		endDateStr = endDate.UTC().Format("2006-01-02 15:04:05")
 	} else {
-		endDateStr = nil
+		endDateStr = ""
 	}
 
-	// Query that checks for exact match including NULL values
-	// Using IS to handle NULL comparisons properly
+	// Query that checks for exact match including empty strings
 	query := `
 		SELECT COUNT(*) FROM transfers
 		WHERE remote_id = ?
 		AND newsgroup = ?
-		AND (start_date IS ? OR (start_date IS NOT NULL AND ? IS NOT NULL AND start_date = ?))
-		AND (end_date IS ? OR (end_date IS NOT NULL AND ? IS NOT NULL AND end_date = ?))
+		AND start_date = ?
+		AND end_date = ?
 	`
 
 	var count int64
@@ -326,8 +325,8 @@ func (tpdb *TransferProgressDB) NewsgroupExists(newsgroup string, startDate, end
 		[]interface{}{
 			tpdb.remoteID,
 			newsgroup,
-			startDateStr, startDateStr, startDateStr,
-			endDateStr, endDateStr, endDateStr,
+			startDateStr,
+			endDateStr,
 		},
 		&count,
 	)
