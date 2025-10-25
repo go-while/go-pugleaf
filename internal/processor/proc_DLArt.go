@@ -162,7 +162,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 		}
 	}()
 	var dups, lastDups, gots, lastGots, notf, lastNotf, errs, lastErrs int64
-	aliveCheck := 5 * time.Second
+	aliveCheck := 9 * time.Second
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	startTime := time.Now()
@@ -202,7 +202,7 @@ forProcessing:
 				nextCheck = time.Now().Add(aliveCheck) // Reset last check time
 				deathCounter++
 			}
-			if deathCounter > 3 { // If we are stuck for too long
+			if deathCounter > 9 { // If we are stuck for too long
 				log.Printf("DownloadArticles: '%s' Timeout... stopping import deathCounter=%d", newsgroup, deathCounter)
 				return fmt.Errorf("DownloadArticles: '%s' Timeout... %d articles processed (%d dups, %d got, %d errs)", newsgroup, dups+gots+notf+errs, dups, gots, errs)
 			}

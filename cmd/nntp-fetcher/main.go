@@ -292,9 +292,9 @@ func main() {
 	DLParChan := make(chan struct{}, DownloadMaxPar)
 	var mux sync.Mutex
 	downloaded := 0
-	// scan group worker
 	queued := 0
 	todo := 0
+	// scan group worker
 	go func() {
 		defer close(processor.Batch.Check)
 		for _, ng := range newsgroups {
