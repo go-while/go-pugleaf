@@ -1029,7 +1029,7 @@ func (db *Database) GetNewsgroupsPaginated(page, pageSize int) ([]*models.Newsgr
 
 // GetNewsgroupsPaginatedAdmin returns ALL newsgroups with pagination
 const query_GetNewsgroupsPaginatedAdmin1 = `SELECT COUNT(*) FROM newsgroups`
-const query_GetNewsgroupsPaginatedAdmin2 = `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at
+const query_GetNewsgroupsPaginatedAdmin2 = `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at
 FROM newsgroups
 ORDER BY name
 LIMIT ? OFFSET ?`
@@ -1053,7 +1053,7 @@ func (db *Database) GetNewsgroupsPaginatedAdmin(page, pageSize int) ([]*models.N
 	var out []*models.Newsgroup
 	for rows.Next() {
 		var g models.Newsgroup
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.CreatedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.Status, &g.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, &g)
@@ -1439,7 +1439,7 @@ func (db *Database) GetTotalThreadsCount() (int64, error) {
 
 // SearchNewsgroups searches for newsgroups by name pattern with pagination
 const query_SearchNewsgroups = `
-		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
 		FROM newsgroups
 		WHERE active = 1 AND (name LIKE ? COLLATE NOCASE
 		OR description LIKE ? COLLATE NOCASE)
@@ -1449,7 +1449,7 @@ const query_SearchNewsgroups = `
 
 // Search queries with description
 const query_SearchNewsgroupsWithDesc = `
-		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
 		FROM newsgroups
 		WHERE active = 1 AND (name LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE)
 		ORDER BY message_count DESC, name ASC
@@ -1457,7 +1457,7 @@ const query_SearchNewsgroupsWithDesc = `
 	`
 
 const query_SearchNewsgroupsAdminWithDesc = `
-		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
 		FROM newsgroups
 		WHERE (name LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE)
 		ORDER BY message_count DESC, name ASC
@@ -1466,7 +1466,7 @@ const query_SearchNewsgroupsAdminWithDesc = `
 
 // Search queries name-only
 const query_SearchNewsgroupsNameOnly = `
-		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
 		FROM newsgroups
 		WHERE active = 1 AND name LIKE ? COLLATE NOCASE
 		ORDER BY message_count DESC, name ASC
@@ -1474,7 +1474,7 @@ const query_SearchNewsgroupsNameOnly = `
 	`
 
 const query_SearchNewsgroupsAdminNameOnly = `
-		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
 		FROM newsgroups
 		WHERE name LIKE ? COLLATE NOCASE
 		ORDER BY message_count DESC, name ASC
@@ -1482,7 +1482,7 @@ const query_SearchNewsgroupsAdminNameOnly = `
 	`
 
 const query_SearchNewsgroupsAdmin = `
-		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
 		FROM newsgroups
 		WHERE (name LIKE ? COLLATE NOCASE
 		OR description LIKE ? COLLATE NOCASE)
@@ -1534,7 +1534,7 @@ func (db *Database) SearchNewsgroupsWithOptions(searchTerm string, limit, offset
 		g := &models.Newsgroup{}
 		err := rows.Scan(
 			&g.Name, &g.Description, &g.LastArticle, &g.MessageCount,
-			&g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.CreatedAt, &g.UpdatedAt,
+			&g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.Status, &g.CreatedAt, &g.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err

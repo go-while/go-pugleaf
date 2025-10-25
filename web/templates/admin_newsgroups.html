@@ -97,13 +97,12 @@
                           <thead>
                               <tr>
                                   <th width="30">
-                                      <input type="checkbox" id="headerCheckbox" class="form-check-input">
+                                      x<!--<input type="checkbox" id="headerCheckbox" class="form-check-input">-->
                                   </th>
                                   <th>ON</th>
+                                  <th>Count<br>Last</th>
                                   <th>Edit</th>
                                   <th>Newsgroup</th>
-                                  <th>Count<br>Last</th>
-                                  <th>Status</th>
                                   <th>Section</th>
                                   <th>Expiry</th>
                                   <th>Actions</th>
@@ -114,7 +113,7 @@
                               {{range .Newsgroups}}
                               <tr>
                                   <td>
-                                      <input type="checkbox" class="form-check-input newsgroup-checkbox"
+                                      <input title="Select {{.Name}}" type="checkbox" class="form-check-input newsgroup-checkbox"
                                              name="newsgroups" value="{{.Name}}" data-active="{{.Active}}"
                                              form="bulkActionsForm" onchange="updateSelectedCount()">
                                   </td>
@@ -130,19 +129,38 @@
                                         {{end}}
                                         <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                         {{if .Active}}
-                                        <button type="submit" class="btn btn-outline-success btn-sm">
+                                        <button type="submit" class="btn btn-outline-success btn-sm" title="{{.Name}} is Enabled. Click to disable.">
                                             ✅
                                         </button>
                                         {{else}}
-                                        <button type="submit" class="btn btn-outline-success btn-sm">
+                                        <button type="submit" class="btn btn-outline-success btn-sm" title="{{.Name}} is Disabled. Click to enable.">
                                             ❌
                                         </button>
                                         {{end}}
-
                                     </form>
+
+                                    {{if .Status}}
+                                    <span class="badge {{if eq .Status "y"}}bg-success{{else if eq .Status "m"}}bg-warning text-dark{{else if eq .Status "n"}}bg-secondary{{else if eq .Status "j"}}bg-info text-dark{{else if eq .Status "x"}}bg-danger{{else}}bg-primary{{end}}">
+                                        {{if eq .Status "y"}}y
+                                        {{else if eq .Status "m"}}m
+                                        {{else if eq .Status "n"}}n
+                                        {{else if eq .Status "j"}}j
+                                        {{else if eq .Status "x"}}x
+                                        {{else}}[{{.Status}}]{{end}}
+                                    </span>
+                                    {{else}}
+                                    <span class="badge bg-secondary">
+                                        <em>err!</em>
+                                    </span>
+                                    {{end}}
                                   </td>
                                   <td>
-                                    <button type="button" class="btn btn-outline-primary btn-sm edit-newsgroup-btn"
+                                    <small>C:{{.MessageCount}}</small>
+                                    <br>
+                                    <small>L#{{if .LastArticle}}{{.LastArticle}}{{else}}-{{end}}</small>
+                                  </td>
+                                  <td>
+                                    <button title="Edit {{.Name}}" type="button" class="btn btn-outline-primary btn-sm edit-newsgroup-btn"
                                             data-name="{{.Name}}"
                                             data-description="{{.Description}}"
                                             data-expiry-days="{{if .ExpiryDays}}{{.ExpiryDays}}{{else}}0{{end}}"
@@ -159,16 +177,6 @@
                                     <strong><a href="/groups/{{.Name}}" target="_blank" class="btn btn-outline-success btn-sm">{{.Name}}</a></strong>
                                     <br>
                                     <small>{{if .Description}}{{.Description}}{{else}}<em>No description</em>{{end}}</small>
-                                  </td>
-                                  <td>
-                                    <small>C:{{.MessageCount}}</small>
-                                    <br>
-                                    <small>L#{{if .LastArticle}}{{.LastArticle}}{{else}}-{{end}}</small>
-                                  </td>
-                                  <td>
-                                      <span class="badge {{if eq .Status "y"}}bg-success{{else if eq .Status "m"}}bg-warning text-dark{{else if eq .Status "n"}}bg-secondary{{else if eq .Status "j"}}bg-info text-dark{{else if eq .Status "x"}}bg-danger{{else}}bg-primary{{end}}">
-                                          {{if eq .Status "y"}}y - Posting{{else if eq .Status "m"}}m - Moderated{{else if eq .Status "n"}}n - No Post{{else if eq .Status "j"}}j - Junk{{else if eq .Status "x"}}x - Disabled{{else}}{{.Status}}{{end}}
-                                      </span>
                                   </td>
                                   <td>
                                       {{/* Find current section assignment */}}

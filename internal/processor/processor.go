@@ -33,23 +33,25 @@ type Processor struct {
 }
 
 var (
+	DownloadMaxPar int = 10 // HARDCODED Maximum number of parallel newsgroups downloads
+
 	// these list of ' var ' can be set after importing the lib before starting!!
-	MaxCrossPosts int = 15 // HARDCODED Maximum number of crossposts to allow per article
+	MaxCrossPosts int = 9 // HARDCODED Maximum number of crossposts to allow per article
 
 	LocalNNTPHostname string = "" // Hostname must be set before processing articles
 
 	// MaxBatch defines the maximum number of articles to fetch in a single batch
-	MaxBatchSize int64 = 128
+	MaxBatchSize int64 = 1000
 
 	// RunRSLIGHTImport is used to indicate if the importer should run the legacy RockSolid Light importer
 	RunRSLIGHTImport = false
 
 	// Global Batch Queue (proc_DLArt.go)
 	Batch = &BatchQueue{
-		Check:       make(chan *string),           // check newsgroups
-		TodoQ:       make(chan *nntp.GroupInfo),   // todo newsgroups
-		GetQ:        make(chan *BatchItem),        // get articles, blocking channel
-		GroupQueues: make(map[string]*GroupBatch), // per-newsgroup queues
+		Check:       make(chan *string, 1),                      // check newsgroups
+		TodoQ:       make(chan *nntp.GroupInfo, DownloadMaxPar), // todo newsgroups
+		GetQ:        make(chan *BatchItem, 128),                 // get articles
+		GroupQueues: make(map[string]*GroupBatch),               // per-newsgroup queues
 	}
 )
 

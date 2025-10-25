@@ -15,17 +15,17 @@ import (
 
 // SQLite safety limits: split large batches to avoid parameter/length limits
 var BatchInterval = 3 * time.Second
-var MaxBatchSize int = 100
+var MaxBatchSize int = 1000
 
 // don't process more than N groups in parallel: better have some cpu & mem when importing hard!
 var MaxBatchThreads = 16                   // -max-batch-threads N
-var MaxQueued = 16384                      // -max-queue N
+var MaxQueued = 1280                       // -max-queue N
 var InitialBatchChannelSize = MaxBatchSize // @AI: DO NOT CHANGE THIS!!!! per group cache channel size. should be less or equal to MaxBatch in processor aka MaxReadLinesXover in nntp-client-commands
 
 // Cache for placeholder strings to avoid rebuilding them repeatedly
 var placeholderCache sync.Map // map[int]string
 
-const DefaultShutDownCounter = 5
+const DefaultShutDownCounter = 25
 
 // getPlaceholders returns a comma-separated string of SQL placeholders (?) for the given count
 func getPlaceholders(count int) string {
@@ -1296,10 +1296,10 @@ func (o *BatchOrchestrator) StartOrchestrator() {
 				log.Printf("[ORCHESTRATOR2] o.batch.proc not set. shutting down.")
 				return
 			}
+			sleep = 500 * 1000 // 500ms
 			if ShutDownCounter == DefaultShutDownCounter {
 				log.Printf("[ORCHESTRATOR2] Database shutdown detected ShutDownCounter=%d", ShutDownCounter)
 			}
-			sleep = 500 * 1000
 			if !wantShutdown {
 				wantShutdown = true
 			}

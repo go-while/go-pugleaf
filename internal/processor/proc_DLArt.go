@@ -66,6 +66,9 @@ func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
 
 // DownloadArticles fetches full articles and stores them in the articles DB.
 func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64, shutdownChan <-chan struct{}) error {
+	if common.WantShutdown() || proc.DB.IsDBshutdown() {
+		return fmt.Errorf("DownloadArticles: shutdown triggered. group '%s'", newsgroup)
+	}
 	//log.Printf("DEBUG-DownloadArticles: ng='%s' called with start=%d end=%d", newsgroup, start, end)
 	DLParChan <- struct{}{} // aquire lock
 	defer func() {
@@ -96,8 +99,8 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 		return fmt.Errorf("error in DownloadArticles: failed to get group DBs err='%v'", err)
 	}
 	defer proc.DB.ForceCloseGroupDBs(groupDBs)
-	if proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
+	if common.WantShutdown() || proc.DB.IsDBshutdown() {
+		return fmt.Errorf("DownloadArticles: shutdown triggered. group '%s'", newsgroup)
 	}
 	//remaining := groupInfo.Last - end
 	//log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d, remaining: %d)", newsgroup, start, end, groupInfo.Last, remaining)
@@ -106,8 +109,8 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 	xhdrChan := make(chan nntp.HeaderLine, 1000)
 	errChan := make(chan error, 1)
 	//log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
-	if proc.DB.IsDBshutdown() {
-		return fmt.Errorf("got shutdown in DownloadArticles: Database shutdown while in group '%s'", newsgroup)
+	if common.WantShutdown() || proc.DB.IsDBshutdown() {
+		return fmt.Errorf("DownloadArticles: shutdown triggered. group '%s'", newsgroup)
 	}
 	go func() {
 		errChan <- proc.Pool.XHdrStreamed(newsgroup, "message-id", start, end, xhdrChan, shutdownChan)
@@ -183,6 +186,9 @@ forProcessing:
 			//log.Printf("DownloadArticles: releaseChan triggered '%s'", newsgroup)
 			break forProcessing
 		case <-ticker.C:
+			if common.WantShutdown() || proc.DB.IsDBshutdown() {
+				return fmt.Errorf("DownloadArticles: shutdown triggered in group '%s'", newsgroup)
+			}
 			// Periodically check if we are done or stuck
 			if gotQueued > 0 && gots+errs+notf == gotQueued {
 				//log.Printf("OK-DA1: '%s' (dups: %d, gots: %d, notf: %d, errs: %d, gotQueued: %d)", newsgroup, dups, gots, notf, errs, gotQueued)
@@ -231,8 +237,8 @@ forProcessing:
 					errs++
 				}
 			} else if item.Error == nil && item.Article != nil {
-				if proc.DB.IsDBshutdown() {
-					return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
+				if common.WantShutdown() || proc.DB.IsDBshutdown() {
+					return fmt.Errorf("DownloadArticles: shutdown triggered. group '%s'", newsgroup)
 				}
 				//log.Printf("DownloadArticles --> proc.processArticle '%s' in group '%s'", *item.MessageID, newsgroup)
 				response, err := proc.processArticle(item.Article, newsgroup, bulkmode)
@@ -257,12 +263,8 @@ forProcessing:
 			}
 		}
 	} // end for processing routine (counts only)
-	if common.WantShutdown() {
-		log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
-		return fmt.Errorf("shutdown requested")
-	}
-	if proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
+	if common.WantShutdown() || proc.DB.IsDBshutdown() {
+		return fmt.Errorf("DownloadArticles: shutdown triggered. group '%s'", newsgroup)
 	}
 	xerr := <-errChan
 	if xerr != nil {
@@ -281,8 +283,8 @@ forProcessing:
 	// do another one if we haven't run enough times
 	runtime.GC()
 
-	if proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: Database shutdown detected for group '%s'", newsgroup)
+	if common.WantShutdown() || proc.DB.IsDBshutdown() {
+		return fmt.Errorf("DownloadArticles: shutdown triggered. group '%s'", newsgroup)
 	}
 	return nil
 } // end func DownloadArticles

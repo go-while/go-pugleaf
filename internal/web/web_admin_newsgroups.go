@@ -138,12 +138,31 @@ func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
 	maxArticlesStr := strings.TrimSpace(c.PostForm("max_articles"))
 	maxArtSizeStr := strings.TrimSpace(c.PostForm("max_art_size"))
 	activeStr := c.PostForm("active")
+	status := strings.TrimSpace(c.PostForm("status"))
 
 	// Validate input
 	if name == "" {
 		session.SetError("Newsgroup name is required")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
 		return
+	}
+
+	// Validate status field
+	if status != "" {
+		validStatuses := []string{"y", "m", "n", "j", "x"}
+		isValid := false
+		for _, validStatus := range validStatuses {
+			if status == validStatus {
+				isValid = true
+				break
+			}
+		}
+		// Check if it's a redirect status (starts with =)
+		if !isValid && !strings.HasPrefix(status, "=") {
+			session.SetError("Invalid status value. Must be y, m, n, j, x, or =group.name")
+			c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
+			return
+		}
 	}
 
 	// Parse expiry days
@@ -216,6 +235,16 @@ func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
 		session.SetError("Failed to update newsgroup status")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
 		return
+	}
+
+	// Update status if provided
+	if status != "" {
+		err = s.DB.UpdateNewsgroupStatus(name, status)
+		if err != nil {
+			session.SetError("Failed to update newsgroup NNTP status")
+			c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
+			return
+		}
 	}
 
 	session.SetSuccess("Newsgroup updated successfully")

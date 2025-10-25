@@ -89,6 +89,7 @@ func main() {
 
 	if *downloadMaxPar < 1 {
 		*downloadMaxPar = 1
+		processor.DownloadMaxPar = *downloadMaxPar
 	}
 	if *maxBatch < 10 {
 		*maxBatch = 10
@@ -99,12 +100,12 @@ func main() {
 	if *maxQueued < 1 {
 		*maxQueued = 1
 	}
-	if *maxBatchThreads > 128 {
-		*maxBatchThreads = 128
-		log.Printf("[WARN] max batch threads: %d (should be between 1 and 128. recommended: 16)", *maxBatchThreads)
+	if *maxBatchThreads > 1024 {
+		*maxBatchThreads = 1024
+		log.Printf("[WARN] max batch threads: %d (should be between 1 and 1024. recommended: 1-16)", *maxBatchThreads)
 	}
 	if *maxBatch > 1000 {
-		log.Printf("[WARN] max batch: %d (should be between 100 and 1000)", *maxBatch)
+		log.Printf("[WARN] max batch: %d (should be between 100 and 10000. recommended: 1000-10000)", *maxBatch)
 	}
 	// Validate command-line flag
 	if *useShortHashLenPtr < 2 || *useShortHashLenPtr > 7 {
@@ -330,9 +331,12 @@ func main() {
 			//log.Printf("Checking ng: %s", ng.Name)
 			mux.Lock()
 			queued++
+			if queued%10000 == 0 {
+				log.Printf("Queued %d/%d newsgroups", queued, len(newsgroups))
+			}
 			mux.Unlock()
 		}
-		log.Printf("Queued %d newsgroups", queued)
+		log.Printf("Queued %d/%d newsgroups", queued, len(newsgroups))
 	}()
 	var wgCheck sync.WaitGroup
 	startDates := make(map[string]string)
