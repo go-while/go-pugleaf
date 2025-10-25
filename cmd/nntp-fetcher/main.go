@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -273,7 +274,7 @@ func main() {
 	fetchDoneChan := make(chan error, 1)
 	go func() {
 		<-sigChan
-		log.Printf("[FETCHER]: Received shutdown signal, initiating graceful shutdown...")
+		log.Printf("[FETCHER]: sigChan received shutdown signal")
 		// Signal all worker goroutines to stop
 		common.ForceShutdown()
 	}()
@@ -303,10 +304,12 @@ func main() {
 				//log.Printf("[FETCHER]: Feed Batch.Check shutdown")
 				return
 			}
+			/* disabled
 			if db.IsDBshutdown() {
 				//log.Printf("[FETCHER]: Feed Batch.Check shutdown")
 				return
 			}
+			*/
 			if wildcardNG != "" && !strings.HasPrefix(ng.Name, wildcardNG) {
 				//log.Printf("[FETCHER] Skipping newsgroup '%s' as it does not match prefix '%s'", ng.Name, wildcardNG)
 				continue
@@ -340,7 +343,18 @@ func main() {
 	}()
 	var wgCheck sync.WaitGroup
 	startDates := make(map[string]string)
-	for i := 1; i <= proc.Pool.Backend.MaxConns; i++ {
+	limitCheckWorker := runtime.NumCPU()
+	if limitCheckWorker <= 0 {
+		limitCheckWorker = 4
+	}
+	if proc.Pool.Backend.MaxConns < limitCheckWorker {
+		limitCheckWorker = proc.Pool.Backend.MaxConns
+	}
+	if limitCheckWorker <= 0 {
+		log.Fatalf("[FETCHER]: Invalid limitCheckWorker: %d, proc.Pool.Backend.MaxConns: %d", limitCheckWorker, proc.Pool.Backend.MaxConns)
+	}
+	log.Printf("[FETCHER]: Starting %d check group workers", limitCheckWorker)
+	for i := 1; i <= limitCheckWorker; i++ {
 		wgCheck.Add(1)
 		go func(worker int, wgCheck *sync.WaitGroup, progressDB *database.ProgressDB) {
 			defer wgCheck.Done()
@@ -349,10 +363,12 @@ func main() {
 					//log.Printf("[FETCHER]: Batch.Check shutdown")
 					return
 				}
+				/* disabled
 				if db.IsDBshutdown() {
 					//log.Printf("[FETCHER]: Batch.Check DB shutdown")
 					return
 				}
+				*/
 				groupInfo, err := proc.Pool.SelectGroup(*ng)
 				if err != nil || groupInfo == nil {
 					switch err {
@@ -481,10 +497,12 @@ func main() {
 					//log.Printf("[FETCHER]: Batch.GetQ shutdown")
 					return
 				}
+				/* disabled
 				if db.IsDBshutdown() {
 					//log.Printf("[FETCHER]: Batch.GetQ DB shutdown")
 					return
 				}
+				*/
 				//log.Printf("DownloadArticles: Worker %d GetArticle group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
 				art, err := proc.Pool.GetArticle(item.MessageID, true)
 				if err != nil || art == nil {
@@ -495,13 +513,15 @@ func main() {
 						// article not found, not a big deal
 						continue
 					case io.EOF:
-						log.Printf("ERROR DownloadArticles: pool.GetArticle failed. connection EOF ... quitting! ng: '%s'", *item.GroupName)
-						common.ForceShutdown()
-						return
+						log.Printf("ERROR DownloadArticles: pool.GetArticle failed. connection EOF ... continue! ng: '%s'", *item.GroupName)
+						//common.ForceShutdown()
+						//return
+						continue
 					default:
-						log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle '%s' err='%v' ... quitting! ng: '%s'", *item.MessageID, err, *item.GroupName)
-						common.ForceShutdown()
-						return
+						log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle '%s' err='%v' ... continue! ng: '%s'", *item.MessageID, err, *item.GroupName)
+						//common.ForceShutdown()
+						//return
+						continue
 					}
 				}
 				item.Article = art   // set pointer
@@ -527,7 +547,7 @@ func main() {
 				}
 			}()
 			for {
-				if common.WantShutdown() {
+				if common.WantShutdown() && len(processor.Batch.TodoQ) == 0 {
 					//log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
 					return
 				}
@@ -542,15 +562,17 @@ func main() {
 						//log.Printf("[FETCHER]: TodoQ closed, worker stopping")
 						return
 					}
-					if common.WantShutdown() {
+					if common.WantShutdown() && len(processor.Batch.TodoQ) == 0 {
 						//log.Printf("[FETCHER]: Worker received shutdown signal, stopping")
 						return
 					}
+					/* disabled
 					// Check if database is shutting down
-					if db.IsDBshutdown() {
+					if db.IsDBshutdown() && len(processor.Batch.TodoQ) == 0 {
 						//log.Printf("[FETCHER]: TodoQ Database shutdown detected, stopping processing. still queued in TodoQ: %d", len(processor.Batch.TodoQ))
 						return
 					}
+					*/
 					/*
 						realMem, err := getRealMemoryUsage()
 						// Emergency stop if RSS exceeds N GB
@@ -673,10 +695,10 @@ func main() {
 	select {
 	case _, ok := <-common.ShutdownChan:
 		if !ok {
-			//log.Printf("[FETCHER]: Shutdown channel closed, initiating graceful shutdown...")
+			log.Printf("[FETCHER]: common.ShutdownChan closed, initiating graceful shutdown...")
 		}
 	case err := <-fetchDoneChan:
-		log.Printf("[FETCHER]: DONE! err='%v'", err)
+		log.Printf("[FETCHER]: got fetchDoneChan: DONE! err='%v'", err)
 	}
 	waitHere.Wait()
 	// Signal background tasks to stop

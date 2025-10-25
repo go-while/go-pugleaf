@@ -66,8 +66,8 @@ func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
 
 // DownloadArticles fetches full articles and stores them in the articles DB.
 func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64, shutdownChan <-chan struct{}) error {
-	if common.WantShutdown() || proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: shutdown triggered. group '%s'", newsgroup)
+	if common.WantShutdown() {
+		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
 	}
 	//log.Printf("DEBUG-DownloadArticles: ng='%s' called with start=%d end=%d", newsgroup, start, end)
 	DLParChan <- struct{}{} // aquire lock
@@ -99,8 +99,8 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 		return fmt.Errorf("error in DownloadArticles: failed to get group DBs err='%v'", err)
 	}
 	defer proc.DB.ForceCloseGroupDBs(groupDBs)
-	if common.WantShutdown() || proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: shutdown triggered. group '%s'", newsgroup)
+	if common.WantShutdown() {
+		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
 	}
 	//remaining := groupInfo.Last - end
 	//log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d, remaining: %d)", newsgroup, start, end, groupInfo.Last, remaining)
@@ -109,8 +109,8 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 	xhdrChan := make(chan nntp.HeaderLine, 1000)
 	errChan := make(chan error, 1)
 	//log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
-	if common.WantShutdown() || proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: shutdown triggered. group '%s'", newsgroup)
+	if common.WantShutdown() {
+		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
 	}
 	go func() {
 		errChan <- proc.Pool.XHdrStreamed(newsgroup, "message-id", start, end, xhdrChan, shutdownChan)
@@ -125,7 +125,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 		var exists, queued int64
 		for hdr := range xhdrChan {
 			if common.WantShutdown() {
-				log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
+				log.Printf("DownloadArticlesFromDate:common.WantShutdown(): stopping")
 				return
 			}
 			/*
@@ -174,7 +174,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 	bulkmode := true
 	var gotQueued int64 = -1
 	if common.WantShutdown() {
-		log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
+		log.Printf("DownloadArticlesFromDate: common.WantShutdown(): stopping")
 		return fmt.Errorf("shutdown requested")
 	}
 	// Start processing loop
@@ -186,8 +186,8 @@ forProcessing:
 			//log.Printf("DownloadArticles: releaseChan triggered '%s'", newsgroup)
 			break forProcessing
 		case <-ticker.C:
-			if common.WantShutdown() || proc.DB.IsDBshutdown() {
-				return fmt.Errorf("DownloadArticles: shutdown triggered in group '%s'", newsgroup)
+			if common.WantShutdown() {
+				return fmt.Errorf("DownloadArticles:common.WantShutdown() group '%s'", newsgroup)
 			}
 			// Periodically check if we are done or stuck
 			if gotQueued > 0 && gots+errs+notf == gotQueued {
@@ -237,8 +237,8 @@ forProcessing:
 					errs++
 				}
 			} else if item.Error == nil && item.Article != nil {
-				if common.WantShutdown() || proc.DB.IsDBshutdown() {
-					return fmt.Errorf("DownloadArticles: shutdown triggered. group '%s'", newsgroup)
+				if common.WantShutdown() {
+					return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
 				}
 				//log.Printf("DownloadArticles --> proc.processArticle '%s' in group '%s'", *item.MessageID, newsgroup)
 				response, err := proc.processArticle(item.Article, newsgroup, bulkmode)
@@ -263,8 +263,8 @@ forProcessing:
 			}
 		}
 	} // end for processing routine (counts only)
-	if common.WantShutdown() || proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: shutdown triggered. group '%s'", newsgroup)
+	if common.WantShutdown() {
+		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
 	}
 	xerr := <-errChan
 	if xerr != nil {
@@ -283,8 +283,8 @@ forProcessing:
 	// do another one if we haven't run enough times
 	runtime.GC()
 
-	if common.WantShutdown() || proc.DB.IsDBshutdown() {
-		return fmt.Errorf("DownloadArticles: shutdown triggered. group '%s'", newsgroup)
+	if common.WantShutdown() {
+		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
 	}
 	return nil
 } // end func DownloadArticles
@@ -342,6 +342,9 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 
 	// Binary search using 50% approach
 	for groupInfo.FetchEnd-groupInfo.FetchStart > 1 {
+		if common.WantShutdown() {
+			return 0, fmt.Errorf("FindStartArticleByDate: common.WantShutdown() group '%s'", groupName)
+		}
 		mid := groupInfo.FetchStart + (groupInfo.FetchEnd-groupInfo.FetchStart)/2
 
 		// Get XOVER for this article
@@ -351,9 +354,7 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 			groupInfo.FetchStart = mid
 			continue
 		}
-		if proc.DB.IsDBshutdown() {
-			return 0, fmt.Errorf("FindStartArticleByDate: Database shutdown detected for group '%s'", groupName)
-		}
+
 		articleDate := ParseNNTPDate(overviews[0].Date)
 		if articleDate.IsZero() {
 			groupInfo.FetchStart = mid
@@ -367,6 +368,9 @@ func (proc *Processor) FindStartArticleByDate(groupName string, targetDate time.
 		} else {
 			groupInfo.FetchEnd = mid
 		}
+	}
+	if common.WantShutdown() {
+		return 0, fmt.Errorf("FindStartArticleByDate: common.WantShutdown() group '%s'", groupName)
 	}
 	log.Printf("Found start article: %d, ng: %s", groupInfo.FetchEnd, groupName)
 	return groupInfo.FetchEnd, nil
@@ -437,7 +441,7 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 		downloadEnd = groupInfo.Last
 	}
 	if common.WantShutdown() {
-		log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
+		log.Printf("DownloadArticlesFromDate: common.WantShutdown(): stopping")
 		return fmt.Errorf("shutdown requested")
 	}
 	//log.Printf("DownloadArticlesFromDate: Downloading range %d-%d for group '%s' (group last: %d)",	downloadStart, downloadEnd, groupName, groupInfo.Last)
@@ -446,7 +450,7 @@ func (proc *Processor) DownloadArticlesFromDate(groupName string, startDate time
 	err = proc.DownloadArticles(groupName, DLParChan, progressDB, downloadStart, downloadEnd, shutdownChan)
 
 	if common.WantShutdown() {
-		log.Printf("DownloadArticlesFromDate: Worker received shutdown signal, stopping")
+		log.Printf("DownloadArticlesFromDate: common.WantShutdown(): stopping")
 		return fmt.Errorf("shutdown requested")
 	}
 	// If there was an error and we haven't made progress, restore the original progress

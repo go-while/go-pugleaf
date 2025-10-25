@@ -25,7 +25,7 @@ var InitialBatchChannelSize = MaxBatchSize // @AI: DO NOT CHANGE THIS!!!! per gr
 // Cache for placeholder strings to avoid rebuilding them repeatedly
 var placeholderCache sync.Map // map[int]string
 
-const DefaultShutDownCounter = 25
+const DefaultShutDownCounter = 100
 
 // getPlaceholders returns a comma-separated string of SQL placeholders (?) for the given count
 func getPlaceholders(count int) string {
