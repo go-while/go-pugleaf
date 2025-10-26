@@ -109,9 +109,6 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 	xhdrChan := make(chan nntp.HeaderLine, 1000)
 	errChan := make(chan error, 1)
 	//log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
-	if common.WantShutdown() {
-		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
-	}
 	go func() {
 		errChan <- proc.Pool.XHdrStreamed(newsgroup, "message-id", start, end, xhdrChan, shutdownChan)
 	}()
@@ -125,7 +122,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 		var exists, queued int64
 		for hdr := range xhdrChan {
 			if common.WantShutdown() {
-				log.Printf("DownloadArticlesFromDate:common.WantShutdown(): stopping")
+				log.Printf("DownloadArticlesFromDate: xhdrChan common.WantShutdown(): stopping")
 				return
 			}
 			/*
@@ -151,7 +148,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 				GroupName: proc.DB.Batch.GetNewsgroupPointer(newsgroup),
 			}
 			item.ReturnQ = groupBatch.ReturnQ
-			Batch.GetQ <- item // send to fetcher/main.go:461: for item := range processor.Batch.GetQ
+			Batch.GetQ <- item // send to fetcher/main.go:~L495: for item := range processor.Batch.GetQ
 			queued++
 			//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", hdr.ArticleNum, hdr.Value, *item.GroupName)
 			//hdr.Value = ""
@@ -165,7 +162,8 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 		}
 	}()
 	var dups, lastDups, gots, lastGots, notf, lastNotf, errs, lastErrs int64
-	aliveCheck := 9 * time.Second
+	aliveCheck := 5 * time.Second
+	maxDeathCounter := 6 // Maximum number of allowed "stuck" checks done every aliveCheck interval
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	startTime := time.Now()
@@ -186,9 +184,11 @@ forProcessing:
 			//log.Printf("DownloadArticles: releaseChan triggered '%s'", newsgroup)
 			break forProcessing
 		case <-ticker.C:
+			/* disabled
 			if common.WantShutdown() {
 				return fmt.Errorf("DownloadArticles:common.WantShutdown() group '%s'", newsgroup)
 			}
+			*/
 			// Periodically check if we are done or stuck
 			if gotQueued > 0 && gots+errs+notf == gotQueued {
 				//log.Printf("OK-DA1: '%s' (dups: %d, gots: %d, notf: %d, errs: %d, gotQueued: %d)", newsgroup, dups, gots, notf, errs, gotQueued)
@@ -208,7 +208,7 @@ forProcessing:
 				nextCheck = time.Now().Add(aliveCheck) // Reset last check time
 				deathCounter++
 			}
-			if deathCounter > 9 { // If we are stuck for too long
+			if deathCounter > maxDeathCounter { // If we are stuck for too long
 				log.Printf("DownloadArticles: '%s' Timeout... stopping import deathCounter=%d", newsgroup, deathCounter)
 				return fmt.Errorf("DownloadArticles: '%s' Timeout... %d articles processed (%d dups, %d got, %d errs)", newsgroup, dups+gots+notf+errs, dups, gots, errs)
 			}
@@ -237,9 +237,6 @@ forProcessing:
 					errs++
 				}
 			} else if item.Error == nil && item.Article != nil {
-				if common.WantShutdown() {
-					return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
-				}
 				//log.Printf("DownloadArticles --> proc.processArticle '%s' in group '%s'", *item.MessageID, newsgroup)
 				response, err := proc.processArticle(item.Article, newsgroup, bulkmode)
 				if err != nil {

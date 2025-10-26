@@ -25,7 +25,7 @@ var InitialBatchChannelSize = MaxBatchSize // @AI: DO NOT CHANGE THIS!!!! per gr
 // Cache for placeholder strings to avoid rebuilding them repeatedly
 var placeholderCache sync.Map // map[int]string
 
-const DefaultShutDownCounter = 100
+const DefaultShutDownCounter = 128
 
 // getPlaceholders returns a comma-separated string of SQL placeholders (?) for the given count
 func getPlaceholders(count int) string {
@@ -1244,9 +1244,9 @@ func (o *BatchOrchestrator) StartOrch() {
 	ShutDownCounter := DefaultShutDownCounter
 	wantShutdown := false
 	for {
-		time.Sleep(time.Second / 2)
+		time.Sleep(time.Second / 8) // 125 ms
 		if o.batch.db.IsDBshutdown() {
-			if ShutDownCounter == DefaultShutDownCounter {
+			if ShutDownCounter == DefaultShutDownCounter || ShutDownCounter%10 == 0 {
 				log.Printf("[ORCHESTRATOR1] Database shutdown detected ShutDownCounter=%d", ShutDownCounter)
 			}
 			o.batch.processAllPendingBatches(&wgProcessAllBatches, MaxBatchSize)
@@ -1292,12 +1292,8 @@ func (o *BatchOrchestrator) StartOrchestrator() {
 		hasWork := o.checkThresholds()
 		//log.Printf("[ORCHESTRATOR2] Current sleep interval: (%d ms) hasWork=%t", sleep, hasWork)
 		if o.batch.db.IsDBshutdown() {
-			if o.batch.proc == nil {
-				log.Printf("[ORCHESTRATOR2] o.batch.proc not set. shutting down.")
-				return
-			}
-			sleep = 500 * 1000 // 500ms
-			if ShutDownCounter == DefaultShutDownCounter {
+			sleep = 250 * 1000 // 250 ms
+			if ShutDownCounter == DefaultShutDownCounter || ShutDownCounter%10 == 0 {
 				log.Printf("[ORCHESTRATOR2] Database shutdown detected ShutDownCounter=%d", ShutDownCounter)
 			}
 			if !wantShutdown {

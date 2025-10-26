@@ -9,6 +9,7 @@ var shutdownMutex sync.Mutex
 var closedShutdownChan bool
 var ShutdownChan = make(chan struct{})
 
+// ForceShutdown signals all goroutines to forcefully shut down because we triggered an error!
 func ForceShutdown() {
 	shutdownMutex.Lock()
 	defer shutdownMutex.Unlock()
@@ -18,6 +19,8 @@ func ForceShutdown() {
 	}
 }
 
+// WantShutdown will be called in places where we want to break out from any running jobs!
+// To Check for a clean shutdown call db.IsDBshutdown() and wait for workers to finish their jobs!
 func WantShutdown() bool {
 	select {
 	case _, ok := <-ShutdownChan:
@@ -59,6 +62,7 @@ func SignalErrChan(errChan chan struct{}) {
 		// already signaled
 	}
 }
+
 func SignalTickChan(achan chan struct{}) {
 	select {
 	case achan <- struct{}{}:
