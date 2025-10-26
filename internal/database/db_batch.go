@@ -338,7 +338,7 @@ func (sq *SQ3batch) getOrCreateTmpTasksChan() (tasksChan chan *BatchTasks) {
 }
 
 // processAllPendingBatches processes all pending batches in the correct sequential order
-func (sq *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup, limit int) {
+func (sq *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup, limit int) (moreWork bool) {
 	if !sq.LockPending() {
 		log.Printf("[BATCH] processAllPendingBatches: LockPending failed")
 		return
@@ -363,6 +363,7 @@ fill:
 			select {
 			case tasksToProcess <- task: // Send the task to the channel
 			default:
+				moreWork = true
 				break fill
 			}
 		}
@@ -428,6 +429,7 @@ process:
 	} // end for tasksToProcess
 	//log.Printf("[BATCH] processAllPendingBatches: launched %d goroutines, remaining tasks %d / %d, done %d", launched, len(tasksToProcess)-toProcess, len(tasksToProcess), len(doneProcessing))
 	wgProcessAllBatches.Wait() // Wait for all goroutines to finish
+	return
 }
 
 // processNewsgroupBatch processes a single newsgroup's batch in the correct sequential order:
@@ -1236,7 +1238,7 @@ type threadCacheUpdateData struct {
 type BatchOrchestrator struct {
 	// Configuration
 	BatchInterval time.Duration // Timer interval for fallback processing
-
+	mux           sync.RWMutex
 	// Control
 	batch *SQ3batch
 }
@@ -1258,20 +1260,23 @@ func (o *BatchOrchestrator) StartOrch() {
 	var wgProcessAllBatches sync.WaitGroup
 	ShutDownCounter := DefaultShutDownCounter
 	wantShutdown := false
+wait:
 	for {
 		time.Sleep(time.Second / 8) // 125 ms
+	nosleep:
 		if o.batch.db.IsDBshutdown() {
 			if ShutDownCounter == DefaultShutDownCounter || ShutDownCounter%10 == 0 {
 				log.Printf("[ORCHESTRATOR1] Database shutdown detected ShutDownCounter=%d", ShutDownCounter)
 			}
-			o.batch.processAllPendingBatches(&wgProcessAllBatches, o.batch.maxDBbatch)
 			if !wantShutdown {
 				wantShutdown = true
 			}
-
+			if o.batch.processAllPendingBatches(&wgProcessAllBatches, o.batch.maxDBbatch) {
+				goto nosleep
+			}
 			if !o.batch.CheckNoMoreWorkInMaps() {
 				ShutDownCounter = DefaultShutDownCounter
-				continue
+				continue wait
 			} else {
 				ShutDownCounter--
 			}
@@ -1281,9 +1286,12 @@ func (o *BatchOrchestrator) StartOrch() {
 		}
 		if !wantShutdown {
 			if time.Since(lastFlush) > o.BatchInterval {
-				//log.Printf("[ORCHESTRATOR1] Timer triggered - processing all pending batches smaller than sq.maxDBbatch")
-				o.batch.processAllPendingBatches(&wgProcessAllBatches, o.batch.maxDBbatch-1)
 				lastFlush = time.Now()
+				//log.Printf("[ORCHESTRATOR1] Timer triggered - processing all pending batches smaller than sq.maxDBbatch")
+			loop:
+				if o.batch.processAllPendingBatches(&wgProcessAllBatches, o.batch.maxDBbatch-1) {
+					goto loop
+				}
 			}
 		}
 	}
