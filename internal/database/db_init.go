@@ -103,9 +103,9 @@ func DefaultDBConfig() (dbconfig *DBConfig) {
 		BackupDir:          "./backups",
 		ArticleCacheSize:   1000,             // Default cache size
 		ArticleCacheExpiry: 15 * time.Minute, // Default cache expiry
-		MaxDBbatch:         1000,             // default max DB batch size
-		MaxDBthreads:       16,               // default max DB threads
-		MaxQueued:          1280,             // default max queued articles
+		MaxDBbatch:         1000,             // default max DB batch size (db_batch.go -> *SQ3batch)
+		MaxDBthreads:       16,               // default max DB threads (db_batch.go -> *SQ3batch)
+		MaxQueued:          1280,             // default max queued articles (db_batch.go -> *SQ3batch)
 	}
 }
 

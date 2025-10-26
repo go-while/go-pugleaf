@@ -123,13 +123,13 @@ type BatchTasks struct {
 func NewSQ3batch(db *Database) *SQ3batch {
 	if db.dbconfig.MaxDBbatch < 100 {
 		db.dbconfig.MaxDBbatch = 100 // hardcoded lower limit
-	} else if db.dbconfig.MaxDBbatch > 10000 {
-		db.dbconfig.MaxDBbatch = 10000 // hardcoded upper limit
+	} else if db.dbconfig.MaxDBbatch > 1000 {
+		db.dbconfig.MaxDBbatch = 1000 // hardcoded upper limit
 	}
 	if db.dbconfig.MaxDBthreads < 1 {
 		db.dbconfig.MaxDBthreads = 1 // hardcoded lower limit
-	} else if db.dbconfig.MaxDBthreads > 1024 {
-		db.dbconfig.MaxDBthreads = 1024 // hardcoded upper limit
+	} else if db.dbconfig.MaxDBthreads > 256 {
+		db.dbconfig.MaxDBthreads = 256 // hardcoded upper limit
 	}
 	if db.dbconfig.MaxQueued < 16 {
 		db.dbconfig.MaxQueued = 16 // hardcoded lower limit
