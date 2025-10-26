@@ -59,12 +59,12 @@ func updateNewsgroupLastActivity(db *database.Database, updateNGAConcurrent int)
 				mux.Unlock()
 				wg.Done()
 			}(wg)
-			groupDBs, err := db.GetGroupDBs(name)
+			groupDB, err := db.GetGroupDB(name)
 			if err != nil {
 				log.Printf("[WEB]: ERROR updateNewsgroupLastActivity GetGroupDB %s: %v", name, err)
 				return
 			}
-			if err := updateNewsGroupActivityValue(db, id, groupDBs); err == nil {
+			if err := updateNewsGroupActivityValue(db, id, groupDB); err == nil {
 				mux.Lock()
 				updatedCount++
 				mux.Unlock()
@@ -87,27 +87,27 @@ func updateNewsgroupLastActivity(db *database.Database, updateNGAConcurrent int)
 const query_updateNewsGroupActivityValue1 = "SELECT MAX(date_sent) FROM articles WHERE hide = 0"
 const query_updateNewsGroupActivityValue2 = "UPDATE newsgroups SET updated_at = ? WHERE id = ? AND updated_at != ?"
 
-func updateNewsGroupActivityValue(db *database.Database, id int, groupDBs *database.GroupDBs) error {
-	defer db.ForceCloseGroupDBs(groupDBs)
+func updateNewsGroupActivityValue(db *database.Database, id int, groupDB *database.GroupDB) error {
+	defer db.ForceCloseGroupDB(groupDB)
 
 	var formattedDate string
 	var parsedDate time.Time
 	var latestDate sql.NullString
 
 	/*
-		_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET spam = 1 WHERE spam = 0 AND hide = 1", nil)
+		_, err = database.RetryableExec(groupDB.DB, "UPDATE articles SET spam = 1 WHERE spam = 0 AND hide = 1", nil)
 		if err != nil {
-			db.ForceCloseGroupDBs(groupDBs)
+			db.ForceCloseGroupDB(groupDB)
 			log.Printf("[WEB]: Failed to update spam flags for newsgroup %s: %v", name, err)
 			continue
 		}
 	*/
 
 	// Query the latest article date from the group's articles table (excluding hidden articles)
-	rows, err := database.RetryableQuery(groupDBs.DB, query_updateNewsGroupActivityValue1, nil, latestDate)
-	//groupDBs.Return(db) // Always return the database connection
+	rows, err := database.RetryableQuery(groupDB.DB, query_updateNewsGroupActivityValue1, nil, latestDate)
+	//groupDB.Return(db) // Always return the database connection
 	if err != nil {
-		log.Printf("[WEB]: updateNewsgroupLastActivity RetryableQueryRowScan %s: %v", groupDBs.Newsgroup, err)
+		log.Printf("[WEB]: updateNewsgroupLastActivity RetryableQueryRowScan %s: %v", groupDB.Newsgroup, err)
 		return err
 	}
 	defer rows.Close()
@@ -115,13 +115,13 @@ func updateNewsGroupActivityValue(db *database.Database, id int, groupDBs *datab
 		rows.Scan(&latestDate)
 		// Only update if we found a latest date
 		if !latestDate.Valid {
-			return fmt.Errorf("error updateNewsgroupLastActivity no valid latestDate in ng: '%s'", groupDBs.Newsgroup)
+			return fmt.Errorf("error updateNewsgroupLastActivity no valid latestDate in ng: '%s'", groupDB.Newsgroup)
 		}
 
 		// Parse the date and format it consistently as UTC
 		if latestDate.String == "" {
-			log.Printf("[WEB]: updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", groupDBs.Newsgroup)
-			return fmt.Errorf("error updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", groupDBs.Newsgroup)
+			log.Printf("[WEB]: updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", groupDB.Newsgroup)
+			return fmt.Errorf("error updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", groupDB.Newsgroup)
 		}
 		// Try multiple date formats to handle various edge cases
 		for _, format := range testFormats {
@@ -131,7 +131,7 @@ func updateNewsGroupActivityValue(db *database.Database, id int, groupDBs *datab
 			}
 		}
 		if err != nil {
-			log.Printf("[WEB]: updateNewsgroupLastActivity parsing date '%s' for %s: %v", latestDate.String, groupDBs.Newsgroup, err)
+			log.Printf("[WEB]: updateNewsgroupLastActivity parsing date '%s' for %s: %v", latestDate.String, groupDB.Newsgroup, err)
 			return err
 		}
 
@@ -139,11 +139,11 @@ func updateNewsGroupActivityValue(db *database.Database, id int, groupDBs *datab
 		formattedDate = parsedDate.UTC().Format("2006-01-02 15:04:05")
 		result, err := db.GetMainDB().Exec(query_updateNewsGroupActivityValue2, formattedDate, id, formattedDate)
 		if err != nil {
-			log.Printf("[WEB]: error updateNewsgroupLastActivity updating newsgroup %s: %v", groupDBs.Newsgroup, err)
+			log.Printf("[WEB]: error updateNewsgroupLastActivity updating newsgroup %s: %v", groupDB.Newsgroup, err)
 			return err
 		}
 		if _, err := result.RowsAffected(); err != nil {
-			log.Printf("[WEB]: updateNewsgroupLastActivity: '%s' dateStr=%s formattedDate=%s", groupDBs.Newsgroup, latestDate.String, formattedDate)
+			log.Printf("[WEB]: updateNewsgroupLastActivity: '%s' dateStr=%s formattedDate=%s", groupDB.Newsgroup, latestDate.String, formattedDate)
 		}
 	}
 	return nil
@@ -176,7 +176,7 @@ func hideFuturePosts(db *database.Database) error {
 		}
 
 		// Get the group database for this newsgroup
-		groupDBs, err := db.GetGroupDBs(name)
+		groupDB, err := db.GetGroupDB(name)
 		if err != nil {
 			log.Printf("[WEB]: Future posts migration error getting group DB for %s: %v", name, err)
 			skippedGroups++
@@ -184,10 +184,10 @@ func hideFuturePosts(db *database.Database) error {
 		}
 
 		// Find articles that are posted more than 48 hours in the future and not already hidden
-		articleRows, err := groupDBs.DB.Query("SELECT article_num FROM articles WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
+		articleRows, err := groupDB.DB.Query("SELECT article_num FROM articles WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
 		if err != nil {
 			log.Printf("[WEB]: Future posts migration error querying articles for %s: %v", name, err)
-			db.ForceCloseGroupDBs(groupDBs)
+			db.ForceCloseGroupDB(groupDB)
 			skippedGroups++
 			continue
 		}
@@ -202,7 +202,7 @@ func hideFuturePosts(db *database.Database) error {
 			futureArticles = append(futureArticles, articleNum)
 		}
 		articleRows.Close()
-		db.ForceCloseGroupDBs(groupDBs)
+		db.ForceCloseGroupDB(groupDB)
 
 		// Process each future article using the proper spam increment system
 		groupArticleCount := 0
@@ -217,13 +217,13 @@ func hideFuturePosts(db *database.Database) error {
 			}
 
 			// Also set the hide flag for these future-dated articles
-			groupDBs, err := db.GetGroupDBs(name)
+			groupDB, err := db.GetGroupDB(name)
 			if err != nil {
 				log.Printf("[WEB]: Future posts migration error getting group DB for hide update %s: %v", name, err)
 				continue
 			}
-			_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ?", articleNum)
-			db.ForceCloseGroupDBs(groupDBs)
+			_, err = database.RetryableExec(groupDB.DB, "UPDATE articles SET hide = 1 WHERE article_num = ?", articleNum)
+			db.ForceCloseGroupDB(groupDB)
 
 			if err != nil {
 				log.Printf("[WEB]: Future posts migration error setting hide flag for %s article %d: %v", name, articleNum, err)

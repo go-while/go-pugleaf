@@ -46,15 +46,15 @@ func (c *ClientConnection) handleListGroup(args []string) error {
 	}
 
 	// Get group database
-	groupDBs, err := c.server.DB.GetGroupDBs(groupName)
+	groupDB, err := c.server.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.rateLimitOnError()
 		return c.sendResponse(411, "No such newsgroup")
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
 	// Get overview data to list article numbers
-	overviews, err := c.server.DB.GetOverviews(groupDBs)
+	overviews, err := c.server.DB.GetOverviews(groupDB)
 	if err != nil {
 		c.rateLimitOnError()
 		return c.sendResponse(503, "Failed to retrieve article list")

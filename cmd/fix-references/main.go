@@ -129,7 +129,7 @@ func main() {
 	for i, newsgroup := range newsgroups {
 		fmt.Printf("🔍 [%d/%d] Processing newsgroup: %s\n", i+1, len(newsgroups), newsgroup.Name)
 
-		groupDB, err := db.GetGroupDBs(newsgroup.Name)
+		groupDB, err := db.GetGroupDB(newsgroup.Name)
 		if err != nil {
 			fmt.Printf("   ❌ Failed to get group database: %v\n", err)
 			continue
@@ -186,7 +186,7 @@ func main() {
 	}
 }
 
-func fixReferencesInNewsgroup(groupDB *database.GroupDBs, dryRun, verbose bool, limit, batchSize int) (int, int, error) {
+func fixReferencesInNewsgroup(groupDB *database.GroupDB, dryRun, verbose bool, limit, batchSize int) (int, int, error) {
 	// Get total count for progress tracking
 	var totalCount int
 	countQuery := "SELECT COUNT(*) FROM articles WHERE headers_json IS NOT NULL AND headers_json != ''"
@@ -234,7 +234,7 @@ func fixReferencesInNewsgroup(groupDB *database.GroupDBs, dryRun, verbose bool, 
 	return totalProcessed, totalFixed, nil
 }
 
-func processBatch(groupDB *database.GroupDBs, dryRun, verbose bool, offset, batchSize int) (int, int, error) {
+func processBatch(groupDB *database.GroupDB, dryRun, verbose bool, offset, batchSize int) (int, int, error) {
 	// Query articles with potentially broken references
 	query := `
 		SELECT article_num, message_id, "references", headers_json
@@ -320,7 +320,7 @@ func processBatch(groupDB *database.GroupDBs, dryRun, verbose bool, offset, batc
 }
 
 // rebuildThreadsInNewsgroup rebuilds thread relationships for a newsgroup using batched processing
-func rebuildThreadsInNewsgroup(groupDB *database.GroupDBs, verbose bool, batchSize int) (int, error) {
+func rebuildThreadsInNewsgroup(groupDB *database.GroupDB, verbose bool, batchSize int) (int, error) {
 	// Get total article count
 	var totalCount int
 	err := database.RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", nil, &totalCount)
@@ -419,7 +419,7 @@ func rebuildThreadsInNewsgroup(groupDB *database.GroupDBs, verbose bool, batchSi
 	return totalThreadsBuilt, nil
 }
 
-func processThreadBatch(groupDB *database.GroupDBs, msgIDToArticleNum map[string]int64, offset, batchSize int, verbose bool) (int, error) {
+func processThreadBatch(groupDB *database.GroupDB, msgIDToArticleNum map[string]int64, offset, batchSize int, verbose bool) (int, error) {
 	// Get batch of articles with their references
 	rows, err := database.RetryableQuery(groupDB.DB, `
 		SELECT article_num, message_id, "references"

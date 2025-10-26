@@ -15,8 +15,8 @@ func (proc *Processor) IsNewsGroupInSectionsDB(name *string) bool {
 	return proc.DB.IsNewsGroupInSections(*name)
 }
 
-// ForceCloseGroupDBs implements the ThreadingProcessor interface
+// ForceCloseGroupDB implements the ThreadingProcessor interface
 // Forces closure of group database connections
-func (proc *Processor) ForceCloseGroupDBs(groupsDB *database.GroupDBs) error {
-	return proc.DB.ForceCloseGroupDBs(groupsDB)
+func (proc *Processor) ForceCloseGroupDB(groupsDB *database.GroupDB) error {
+	return proc.DB.ForceCloseGroupDB(groupsDB)
 }

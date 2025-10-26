@@ -480,7 +480,7 @@ func main() {
 			fmt.Printf("Debug capture - Newsgroup: %s, Articles: %d\n", newsgroup, len(articles))
 
 			// Get group database for updates if needed
-			groupDBs, err := db.GetGroupDBs(newsgroup)
+			groupDB, err := db.GetGroupDB(newsgroup)
 			if err != nil {
 				fmt.Printf("! Error getting group database for %s: %v\n", newsgroup, err)
 				continue
@@ -510,7 +510,7 @@ func main() {
 							originalDateString,
 							article.DateString)
 
-						if err := db.UpdateArticleDateSent(groupDBs, article.MessageID, article.DateSent, article.DateString); err != nil {
+						if err := db.UpdateArticleDateSent(groupDB, article.MessageID, article.DateSent, article.DateString); err != nil {
 							fmt.Printf("! Error updating database for article '%s': %v\n", article.MessageID, err)
 						} else {
 							fmt.Printf("! Database updated for article '%s'\n", article.MessageID)
@@ -526,7 +526,7 @@ func main() {
 				//fmt.Printf("%s\n", article.BodyText)
 				//fmt.Printf("### BODY EOF '%s' ###\n\n", article.MessageID)
 			}
-			groupDBs.Return()
+			groupDB.Return()
 		}
 		transferDoneChan <- result
 	}(&wgP, redisCli)
@@ -1179,7 +1179,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Starting (getting group DBs)...", ng.Name)
 
 	// Get group database
-	groupDBsA, err := db.GetGroupDBs(ng.Name)
+	groupDBA, err := db.GetGroupDB(ng.Name)
 	if err != nil {
 		return fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", ng.Name, err)
 	}
@@ -1199,10 +1199,10 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	nntp.ResultsMutex.Unlock()
 
 	// Get total article count first with date filtering
-	totalNGArticles, err := db.GetArticleCountWithDateFilter(groupDBsA, startTime, endTime)
+	totalNGArticles, err := db.GetArticleCountWithDateFilter(groupDBA, startTime, endTime)
 	if err != nil {
-		if ferr := db.ForceCloseGroupDBs(groupDBsA); ferr != nil {
-			log.Printf("ForceCloseGroupDBs error for '%s': %v", ng.Name, ferr)
+		if ferr := db.ForceCloseGroupDB(groupDBA); ferr != nil {
+			log.Printf("ForceCloseGroupDB error for '%s': %v", ng.Name, ferr)
 		}
 		return fmt.Errorf("failed to get article count for newsgroup '%s': %v", ng.Name, err)
 	}
@@ -1212,8 +1212,8 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 	//log.Printf("Newsgroup: '%s' | transferNewsgroup: Closed group DBs, checking if articles exist...", ng.Name)
 
 	if totalNGArticles == 0 {
-		if ferr := db.ForceCloseGroupDBs(groupDBsA); ferr != nil {
-			log.Printf("ForceCloseGroupDBs error for '%s': %v", ng.Name, ferr)
+		if ferr := db.ForceCloseGroupDB(groupDBA); ferr != nil {
+			log.Printf("ForceCloseGroupDB error for '%s': %v", ng.Name, ferr)
 		}
 		nntp.ResultsMutex.Lock()
 		nntp.NewsgroupTransferProgressMap[ng.Name].Finished = true
@@ -1241,7 +1241,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		}
 		return nil
 	}
-	groupDBsA.Return()
+	groupDBA.Return()
 
 	// Initialize newsgroup progress tracking
 	nntp.ResultsMutex.Lock()

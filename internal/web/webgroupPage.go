@@ -49,9 +49,9 @@ func (s *WebServer) groupPage(c *gin.Context) {
 	}
 
 	// Try to get group overview with pagination
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
-		// Handle error case - groupDBs is nil, so don't try to return it
+		// Handle error case - groupDB is nil, so don't try to return it
 		data := GroupPageData{
 			TemplateData: s.getBaseTemplateData(c, groupName),
 			GroupName:    groupName,
@@ -68,7 +68,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 		}
 		return
 	}
-	defer groupDBs.Return() // Only defer if groupDBs is not nil
+	defer groupDB.Return() // Only defer if groupDB is not nil
 
 	var articles []*models.Overview
 	var totalCount int
@@ -87,7 +87,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 
 		// Get the article_num at the skip position by querying with OFFSET once
 		var cursorArticleNum int64
-		err = database.RetryableQueryRowScan(groupDBs.DB, `
+		err = database.RetryableQueryRowScan(groupDB.DB, `
 			SELECT article_num FROM articles
 			WHERE hide = 0
 			ORDER BY article_num DESC
@@ -99,14 +99,14 @@ func (s *WebServer) groupPage(c *gin.Context) {
 		}
 	}
 
-	articles, totalCount, hasMore, err = s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, LIMIT_groupPage)
+	articles, totalCount, hasMore, err = s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_groupPage)
 	if err == nil {
 		// Initialize ArticleNums for all articles
 		for _, article := range articles {
 			if article.ArticleNums == nil {
 				article.ArticleNums = make(map[*string]int64)
 			}
-			article.ArticleNums[groupDBs.NewsgroupPtr] = article.ArticleNum
+			article.ArticleNums[groupDB.NewsgroupPtr] = article.ArticleNum
 		}
 
 		if page > 0 {
@@ -127,7 +127,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 	data := GroupPageData{
 		TemplateData: s.getBaseTemplateData(c, groupName),
 		GroupName:    groupName,
-		GroupPtr:     groupDBs.NewsgroupPtr,
+		GroupPtr:     groupDB.NewsgroupPtr,
 		Articles:     articles,
 		Pagination:   pagination,
 	}

@@ -78,7 +78,7 @@ type ThreadingProcessor interface {
 	FindThreadRootInCache(groupName *string, refs []string) *MsgIdTmpCacheItem
 	CheckNoMoreWorkInHistory() bool
 	// Add method for force closing group databases
-	ForceCloseGroupDBs(groupsDB *GroupDBs) error
+	ForceCloseGroupDB(groupsDB *GroupDB) error
 }
 
 // SetProcessor sets the threading processor callback interface
@@ -570,18 +570,18 @@ drainChannel:
 
 retry1:
 	// Get database connection for this newsgroup
-	groupDBs, err := sq.db.GetGroupDBs(*task.Newsgroup)
+	groupDB, err := sq.db.GetGroupDB(*task.Newsgroup)
 	if err != nil {
 		log.Printf("[BATCH] processNewsgroupBatch Failed to get database for group '%s': %v", *task.Newsgroup, err)
 		return
 	}
 
 	// PHASE 1: Insert complete articles (overview + article data unified) and set article numbers directly on batches
-	if err := sq.batchInsertOverviews(*task.Newsgroup, batches, groupDBs, task.Newsgroup); err != nil {
-		if groupDBs != nil {
-			sq.proc.ForceCloseGroupDBs(groupDBs)
-			log.Printf("[BATCH] processNewsgroupBatch Failed1 to process batch for group '%s': %v groupDBs='%#v'", *task.Newsgroup, err, groupDBs)
-			groupDBs = nil
+	if err := sq.batchInsertOverviews(*task.Newsgroup, batches, groupDB, task.Newsgroup); err != nil {
+		if groupDB != nil {
+			sq.proc.ForceCloseGroupDB(groupDB)
+			log.Printf("[BATCH] processNewsgroupBatch Failed1 to process batch for group '%s': %v groupDB='%#v'", *task.Newsgroup, err, groupDB)
+			groupDB = nil
 		}
 		time.Sleep(time.Second)
 		goto retry1
@@ -605,23 +605,23 @@ retry1:
 	//log.Printf("[BATCH] processNewsgroupBatch Starting threading phase for %d articles in group '%s'", len(batches), *task.Newsgroup)
 	//start := time.Now()
 retry2:
-	if groupDBs == nil {
-		groupDBs, err = sq.db.GetGroupDBs(*task.Newsgroup)
+	if groupDB == nil {
+		groupDB, err = sq.db.GetGroupDB(*task.Newsgroup)
 		if err != nil {
 			log.Printf("[BATCH] processNewsgroupBatch Failed2 to get database for group '%s': %v", *task.Newsgroup, err)
 			return
 		}
 	}
-	if err := sq.batchProcessThreading(task.Newsgroup, batches, groupDBs); err != nil {
+	if err := sq.batchProcessThreading(task.Newsgroup, batches, groupDB); err != nil {
 		time.Sleep(time.Second)
-		if groupDBs != nil {
-			sq.proc.ForceCloseGroupDBs(groupDBs)
-			log.Printf("[BATCH] processNewsgroupBatch Failed2 to process threading for group '%s': %v groupDBs='%#v'", *task.Newsgroup, err, groupDBs)
-			groupDBs = nil
+		if groupDB != nil {
+			sq.proc.ForceCloseGroupDB(groupDB)
+			log.Printf("[BATCH] processNewsgroupBatch Failed2 to process threading for group '%s': %v groupDB='%#v'", *task.Newsgroup, err, groupDB)
+			groupDB = nil
 		}
 		goto retry2
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 	//threadingDuration := time.Since(start)
 	//log.Printf("[BATCH] processNewsgroupBatch Completed threading phase for group '%s' in %v", *task.Newsgroup, threadingDuration)
 
@@ -711,15 +711,15 @@ retry2:
 	sq.GMux.Unlock()
 }
 
-// batchInsertOverviews - now sets ArticleNum directly on each batch's Article and reuses the GroupDBs connection
-func (sq *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Article, groupDBs *GroupDBs, taskNewsgroup *string) error {
+// batchInsertOverviews - now sets ArticleNum directly on each batch's Article and reuses the GroupDB connection
+func (sq *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Article, groupDB *GroupDB, taskNewsgroup *string) error {
 	if len(batches) == 0 {
 		return fmt.Errorf("no batches to process for group '%s'", newsgroup)
 	}
 
 	if len(batches) <= sq.maxDBbatch {
 		// Small batch - process directly
-		if err := sq.processOverviewBatch(groupDBs, batches, taskNewsgroup); err != nil {
+		if err := sq.processOverviewBatch(groupDB, batches, taskNewsgroup); err != nil {
 			log.Printf("[OVB-BATCH] Failed to process small batch for group '%s': %v", newsgroup, err)
 			return fmt.Errorf("failed to process small batch for group '%s': %w", newsgroup, err)
 		}
@@ -733,7 +733,7 @@ func (sq *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Art
 			end = len(batches)
 		}
 
-		if err := sq.processOverviewBatch(groupDBs, batches[i:end], taskNewsgroup); err != nil {
+		if err := sq.processOverviewBatch(groupDB, batches[i:end], taskNewsgroup); err != nil {
 			log.Printf("[OVB-BATCH] Failed to process chunk %d-%d for group '%s': %v", i, end, newsgroup, err)
 			return fmt.Errorf("failed to process chunk %d-%d for group '%s': %w", i, end, newsgroup, err)
 		}
@@ -745,12 +745,12 @@ const query_processOverviewBatch = `INSERT OR IGNORE INTO articles (message_id, 
 const query_processOverviewBatch2 = `SELECT message_id, article_num FROM articles WHERE message_id IN (`
 
 // processSingleUnifiedArticleBatch handles a single batch that's within SQLite limits
-func (sq *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.Article, taskNewsgroup *string) error {
+func (sq *SQ3batch) processOverviewBatch(groupDB *GroupDB, batches []*models.Article, taskNewsgroup *string) error {
 	// Get timestamp once for the entire batch instead of per article
 	importedAt := time.Now()
 
 	// Use a transaction for the batch insert
-	tx, err := groupDBs.DB.Begin()
+	tx, err := groupDB.DB.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -800,11 +800,11 @@ func (sq *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.A
 	}
 	// ORDER BY not needed; we map by message_id
 	query := query_processOverviewBatch2 + sq.getPlaceholders(len(args)) + `)`
-	log.Printf("[OVB-BATCH] group '%s': Selecting article numbers for %d articles queryLen=%d", groupDBs.Newsgroup, len(batches), len(query))
-	rows, err := RetryableQuery(groupDBs.DB, query, args...)
+	log.Printf("[OVB-BATCH] group '%s': Selecting article numbers for %d articles queryLen=%d", groupDB.Newsgroup, len(batches), len(query))
+	rows, err := RetryableQuery(groupDB.DB, query, args...)
 	if err != nil {
-		log.Printf("[OVB-BATCH] group '%s': Failed to execute batch select: %v", groupDBs.Newsgroup, err)
-		return fmt.Errorf("failed to execute batch select for group '%s': %w", groupDBs.Newsgroup, err)
+		log.Printf("[OVB-BATCH] group '%s': Failed to execute batch select: %v", groupDB.Newsgroup, err)
+		return fmt.Errorf("failed to execute batch select for group '%s': %w", groupDB.Newsgroup, err)
 	}
 	defer rows.Close()
 
@@ -814,7 +814,7 @@ func (sq *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.A
 	// Iterate through the results and map article numbers back to batches
 	for rows.Next() {
 		if err := rows.Scan(&messageID, &articleNum); err != nil {
-			log.Printf("[OVB-BATCH] group '%s': Failed to scan article number: %v", groupDBs.Newsgroup, err)
+			log.Printf("[OVB-BATCH] group '%s': Failed to scan article number: %v", groupDB.Newsgroup, err)
 			continue
 		}
 		// O(n²) complexity: nested loop through batches for each DB row
@@ -829,7 +829,7 @@ func (sq *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.A
 				if article.ArticleNums[taskNewsgroup] == 0 {
 					article.ArticleNums[taskNewsgroup] = articleNum
 				} else {
-					log.Printf("[OVB-BATCH] group '%s': Article with message_id %s already assigned article number %d, did not reassign from db: %d", groupDBs.Newsgroup, messageID, article.ArticleNums[taskNewsgroup], articleNum)
+					log.Printf("[OVB-BATCH] group '%s': Article with message_id %s already assigned article number %d, did not reassign from db: %d", groupDB.Newsgroup, messageID, article.ArticleNums[taskNewsgroup], articleNum)
 				}
 				article.Mux.Unlock()
 				timeSpent += time.Since(startN).Microseconds()
@@ -843,12 +843,12 @@ func (sq *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.A
 	if timeSpent > 1000 {
 		spentms = timeSpent / 1000
 	}
-	log.Printf("[OVB-BATCH] group '%s': assigned %d/%d articles (took %d ms, spent %d microsec (%d ms) loops: %d)", groupDBs.Newsgroup, idToArticleNum, len(batches), took, timeSpent, spentms, loops)
+	log.Printf("[OVB-BATCH] group '%s': assigned %d/%d articles (took %d ms, spent %d microsec (%d ms) loops: %d)", groupDB.Newsgroup, idToArticleNum, len(batches), took, timeSpent, spentms, loops)
 	return nil
 }
 
-// batchProcessThreading processes all threading operations using existing GroupDBs connection
-func (sq *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*models.Article, groupDBs *GroupDBs) error {
+// batchProcessThreading processes all threading operations using existing GroupDB connection
+func (sq *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*models.Article, groupDB *GroupDB) error {
 	if len(batches) == 0 {
 		return nil
 	}
@@ -875,7 +875,7 @@ func (sq *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*mode
 
 	// Process thread roots first (they need to exist before replies can reference them)
 	if roots > 0 {
-		if err := sq.batchProcessThreadRoots(groupDBs, batches, taskNewsgroup); err != nil {
+		if err := sq.batchProcessThreadRoots(groupDB, batches, taskNewsgroup); err != nil {
 			log.Printf("[THR-BATCH] group '%s': Failed to batch process thread roots: %v", *taskNewsgroup, err)
 			// Continue processing - don't fail the whole batch
 		}
@@ -883,7 +883,7 @@ func (sq *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*mode
 
 	// Process replies
 	if replies > 0 {
-		if err := sq.batchProcessReplies(groupDBs, batches, taskNewsgroup); err != nil {
+		if err := sq.batchProcessReplies(groupDB, batches, taskNewsgroup); err != nil {
 			log.Printf("[THR-BATCH] group '%s': Failed to batch process replies: %v", *taskNewsgroup, err)
 			// Continue processing - don't fail the whole batch
 		}
@@ -895,13 +895,13 @@ func (sq *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*mode
 const query_batchProcessThreadRoots = "INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, 0, 0)"
 
 // batchProcessThreadRoots processes thread root articles in TRUE batch
-func (sq *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*models.Article, taskNewsgroup *string) error {
+func (sq *SQ3batch) batchProcessThreadRoots(groupDB *GroupDB, rootBatches []*models.Article, taskNewsgroup *string) error {
 	if len(rootBatches) == 0 {
 		return nil
 	}
 
 	// Use a transaction with prepared statement for cleaner, more efficient execution
-	tx, err := groupDBs.DB.Begin()
+	tx, err := groupDB.DB.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction in batchProcessThreadRoots: %w", err)
 	}
@@ -963,8 +963,8 @@ func (sq *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*m
 	// Do post-processing AFTER transaction is committed to avoid SQLite lock conflicts
 	for _, entry := range threadCacheEntries {
 		entry.article.Mux.RLock()
-		if err := sq.db.InitializeThreadCache(groupDBs, entry.articleNum, entry.article); err != nil {
-			log.Printf("[P-BATCH] group '%s': Failed to initialize thread cache for root %d: %v", groupDBs.Newsgroup, entry.articleNum, err)
+		if err := sq.db.InitializeThreadCache(groupDB, entry.articleNum, entry.article); err != nil {
+			log.Printf("[P-BATCH] group '%s': Failed to initialize thread cache for root %d: %v", groupDB.Newsgroup, entry.articleNum, err)
 			// Don't fail the whole operation for cache errors
 		}
 		entry.article.Mux.RUnlock()
@@ -974,7 +974,7 @@ func (sq *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*m
 }
 
 // batchProcessReplies processes reply articles in TRUE batch
-func (sq *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*models.Article, taskNewsgroup *string) error {
+func (sq *SQ3batch) batchProcessReplies(groupDB *GroupDB, replyBatches []*models.Article, taskNewsgroup *string) error {
 	if len(replyBatches) == 0 {
 		return nil
 	}
@@ -1008,7 +1008,7 @@ func (sq *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*mode
 
 		// Find thread root and collect data
 		var threadRoot int64
-		if root, err := sq.findThreadRoot(groupDBs, article.RefSlice); err == nil {
+		if root, err := sq.findThreadRoot(groupDB, article.RefSlice); err == nil {
 			threadRoot = root
 		}
 
@@ -1025,14 +1025,14 @@ func (sq *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*mode
 
 	// Batch update reply counts for articles table (single call since overview is unified)
 	if len(parentMessageIDs) > 0 {
-		if err := sq.batchUpdateReplyCounts(groupDBs, parentMessageIDs); err != nil {
-			log.Printf("[P-BATCH] group '%s': Failed to batch update article reply counts: %v", groupDBs.Newsgroup, err)
+		if err := sq.batchUpdateReplyCounts(groupDB, parentMessageIDs); err != nil {
+			log.Printf("[P-BATCH] group '%s': Failed to batch update article reply counts: %v", groupDB.Newsgroup, err)
 		}
 	}
 
 	if preAllocThreadRoots > 0 {
 		threadUpdates := make(map[int64][]threadCacheUpdateData, preAllocThreadRoots)
-		//log.Printf("[P-BATCH] group '%s': Pre-allocated thread updates map with capacity %d", groupDBs.Newsgroup, preAllocThreadRoots)
+		//log.Printf("[P-BATCH] group '%s': Pre-allocated thread updates map with capacity %d", groupDB.Newsgroup, preAllocThreadRoots)
 		for _, data := range replyData {
 			if data.threadRoot > 0 {
 				threadUpdates[data.threadRoot] = append(threadUpdates[data.threadRoot], threadCacheUpdateData{
@@ -1044,10 +1044,10 @@ func (sq *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*mode
 
 		// Execute ALL thread cache updates in a single transaction
 		if len(threadUpdates) > 0 {
-			if err := sq.batchUpdateThreadCache(groupDBs, threadUpdates); err != nil {
-				log.Printf("[P-BATCH] group '%s': Failed to batch update thread cache: %v", groupDBs.Newsgroup, err)
+			if err := sq.batchUpdateThreadCache(groupDB, threadUpdates); err != nil {
+				log.Printf("[P-BATCH] group '%s': Failed to batch update thread cache: %v", groupDB.Newsgroup, err)
 			}
-			log.Printf("[P-BATCH] group '%s': Updated thread cache for %d thread roots", groupDBs.Newsgroup, len(threadUpdates))
+			log.Printf("[P-BATCH] group '%s': Updated thread cache for %d thread roots", groupDB.Newsgroup, len(threadUpdates))
 		}
 	}
 
@@ -1058,7 +1058,7 @@ var query_batchUpdateReplyCounts1 string = "WHEN message_id = ? THEN reply_count
 var query_batchUpdateReplyCounts2 string = "UPDATE articles SET reply_count = CASE %s END WHERE message_id IN (%s)"
 
 // batchUpdateReplyCounts performs batch update of reply counts using CASE WHEN
-func (sq *SQ3batch) batchUpdateReplyCounts(groupDBs *GroupDBs, parentCounts map[*string]int) error {
+func (sq *SQ3batch) batchUpdateReplyCounts(groupDB *GroupDB, parentCounts map[*string]int) error {
 	if len(parentCounts) == 0 {
 		return nil
 	}
@@ -1087,22 +1087,22 @@ func (sq *SQ3batch) batchUpdateReplyCounts(groupDBs *GroupDBs, parentCounts map[
 	// Build the complete batch UPDATE statement with a single sprintf
 	// Use strings.Repeat for efficient SQL building - zero string copies
 	// Execute the batch UPDATE
-	//log.Printf("[P-BATCH] group '%s': update batch reply count for %d articles (queryLen=%d)", groupDBs.Newsgroup, len(messageIDs), len(sql))
-	_, err := RetryableExec(groupDBs.DB, fmt.Sprintf(query_batchUpdateReplyCounts2, strings.Repeat(query_batchUpdateReplyCounts1, len(messageIDs)), sq.getPlaceholders(len(messageIDs))), args...)
+	//log.Printf("[P-BATCH] group '%s': update batch reply count for %d articles (queryLen=%d)", groupDB.Newsgroup, len(messageIDs), len(sql))
+	_, err := RetryableExec(groupDB.DB, fmt.Sprintf(query_batchUpdateReplyCounts2, strings.Repeat(query_batchUpdateReplyCounts1, len(messageIDs)), sq.getPlaceholders(len(messageIDs))), args...)
 	if err != nil {
-		log.Printf("[P-BATCH] group '%s': Failed to execute batch reply count update: %v", groupDBs.Newsgroup, err)
+		log.Printf("[P-BATCH] group '%s': Failed to execute batch reply count update: %v", groupDB.Newsgroup, err)
 	}
 	return err
 }
 
 // findThreadRootForBatch is a simplified version for batch processing
-func (sq *SQ3batch) findThreadRoot(groupDBs *GroupDBs, refs []string) (int64, error) {
+func (sq *SQ3batch) findThreadRoot(groupDB *GroupDB, refs []string) (int64, error) {
 	if len(refs) == 0 || sq.proc == nil {
 		return 0, fmt.Errorf("no references or processor not available")
 	}
 
 	// Try to find thread root in processor cache first
-	if cachedRoot := sq.proc.FindThreadRootInCache(sq.GetNewsgroupPointer(groupDBs.Newsgroup), refs); cachedRoot != nil {
+	if cachedRoot := sq.proc.FindThreadRootInCache(sq.GetNewsgroupPointer(groupDB.Newsgroup), refs); cachedRoot != nil {
 		return cachedRoot.ArtNum, nil
 	}
 
@@ -1113,7 +1113,7 @@ func (sq *SQ3batch) findThreadRoot(groupDBs *GroupDBs, refs []string) (int64, er
 		// Check if this article is a thread root with retryable logic
 		var rootArticle int64
 		threadQuery := `SELECT root_article FROM threads WHERE root_article = (SELECT article_num FROM articles WHERE message_id = ? LIMIT 1) LIMIT 1`
-		err := RetryableQueryRowScan(groupDBs.DB, threadQuery, []interface{}{refMessageID}, &rootArticle)
+		err := RetryableQueryRowScan(groupDB.DB, threadQuery, []interface{}{refMessageID}, &rootArticle)
 		if err == nil {
 			return rootArticle, nil
 		}
@@ -1123,7 +1123,7 @@ func (sq *SQ3batch) findThreadRoot(groupDBs *GroupDBs, refs []string) (int64, er
 }
 
 // batchUpdateThreadCache performs TRUE batch update of thread cache entries in a single transaction with retry logic
-func (sq *SQ3batch) batchUpdateThreadCache(groupDBs *GroupDBs, threadUpdates map[int64][]threadCacheUpdateData) error {
+func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[int64][]threadCacheUpdateData) error {
 	if len(threadUpdates) == 0 {
 		return nil
 	}
@@ -1131,7 +1131,7 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDBs *GroupDBs, threadUpdates map
 	var initializedCount int
 
 	// Use RetryableTransactionExec for SQLite lock safety
-	err := RetryableTransactionExec(groupDBs.DB, func(tx *sql.Tx) error {
+	err := RetryableTransactionExec(groupDB.DB, func(tx *sql.Tx) error {
 		// Reset ShutDownCounters for each retry attempt
 		updatedCount = 0
 		initializedCount = 0
@@ -1211,7 +1211,7 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDBs *GroupDBs, threadUpdates map
 
 			// Update memory cache if available
 			if sq.db.MemThreadCache != nil {
-				sq.db.MemThreadCache.UpdateThreadMetadata(groupDBs.Newsgroup, threadRoot, newCount, lastActivity, newChildren)
+				sq.db.MemThreadCache.UpdateThreadMetadata(groupDB.Newsgroup, threadRoot, newCount, lastActivity, newChildren)
 			}
 		}
 
@@ -1223,7 +1223,7 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDBs *GroupDBs, threadUpdates map
 	}
 	/*
 		log.Printf("[BATCH-CACHE] group '%s': Successfully batch updated %d thread cache entries (initialized %d) in single retryable transaction with %d total updates",
-			groupDBs.Newsgroup, updatedCount, initializedCount, len(threadUpdates))
+			groupDB.Newsgroup, updatedCount, initializedCount, len(threadUpdates))
 	*/
 	return nil
 }

@@ -86,19 +86,19 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 		return fmt.Errorf("DownloadArticles: NNTP pool is nil for group '%s'", newsgroup)
 	}
 	//log.Printf("DownloadArticles: ng: '%s' @ (%s)", newsgroup, providerName)
-	groupDBs, err := proc.DB.GetGroupDBs(newsgroup)
+	groupDB, err := proc.DB.GetGroupDB(newsgroup)
 	if err != nil {
 		log.Printf("Failed to get group DBs for newsgroup '%s': %v", newsgroup, err)
-		if groupDBs != nil {
-			if err := proc.DB.ForceCloseGroupDBs(groupDBs); err != nil {
-				log.Printf("error in DownloadArticles ForceCloseGroupDBs err='%v'", err)
+		if groupDB != nil {
+			if err := proc.DB.ForceCloseGroupDB(groupDB); err != nil {
+				log.Printf("error in DownloadArticles ForceCloseGroupDB err='%v'", err)
 			}
-			//groupDBs.Return(proc.DB) // Return connection even on error
+			//groupDB.Return(proc.DB) // Return connection even on error
 		}
 		log.Printf("DownloadArticles: Failed to get group DBs for newsgroup '%s': %v", newsgroup, err)
 		return fmt.Errorf("error in DownloadArticles: failed to get group DBs err='%v'", err)
 	}
-	defer proc.DB.ForceCloseGroupDBs(groupDBs)
+	defer proc.DB.ForceCloseGroupDB(groupDB)
 	if common.WantShutdown() {
 		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
 	}
@@ -133,7 +133,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 				}
 			*/
 			//log.Printf("DownloadArticles: Checking if article '%s' exists in group '%s'", msgID.Value, newsgroup)
-			if groupDBs.ExistsMsgIdInArticlesDB(hdr.Value) {
+			if groupDB.ExistsMsgIdInArticlesDB(hdr.Value) {
 				exists++
 				groupBatch.ReturnQ <- &BatchItem{Error: errIsDuplicateError}
 				continue

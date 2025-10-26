@@ -153,14 +153,14 @@ func (pm *PosterManager) processEntry(entry database.PostQueueEntry) error {
 // getArticleByMessageID retrieves an article from the local database
 func (pm *PosterManager) getArticleByMessageID(messageID, newsgroup string) (*models.Article, error) {
 	// Get group database connection
-	groupDBs, err := pm.DB.GetGroupDBs(newsgroup)
+	groupDB, err := pm.DB.GetGroupDB(newsgroup)
 	if err != nil {
 		return nil, err
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
-	// Get article by message ID using the database method (not groupDBs method)
-	article, err := pm.DB.GetArticleByMessageID(groupDBs, messageID)
+	// Get article by message ID using the database method (not groupDB method)
+	article, err := pm.DB.GetArticleByMessageID(groupDB, messageID)
 	if err != nil {
 		return nil, err
 	}

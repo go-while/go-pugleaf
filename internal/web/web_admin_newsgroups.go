@@ -507,7 +507,7 @@ func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
 	}
 
 	// Get the group database for this newsgroup
-	groupDBs, err := s.DB.GetGroupDBs(name)
+	groupDB, err := s.DB.GetGroupDB(name)
 	if err != nil {
 		session.SetError("Failed to access newsgroup database: " + err.Error())
 		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
@@ -516,8 +516,8 @@ func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
 
 	// Query the latest article date from visible articles only
 	var latestDate sql.NullString
-	err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT MAX(date_sent) FROM articles WHERE hide = 0", nil, &latestDate)
-	groupDBs.Return() // Always return the database connection
+	err = database.RetryableQueryRowScan(groupDB.DB, "SELECT MAX(date_sent) FROM articles WHERE hide = 0", nil, &latestDate)
+	groupDB.Return() // Always return the database connection
 
 	if err != nil {
 		session.SetError("Failed to query latest article for " + name + ": " + err.Error())
@@ -582,13 +582,13 @@ const query_fixGroupThreadActivity3 = "UPDATE thread_cache SET last_activity = ?
 
 // fixGroupThreadActivity implements the same logic as cmd/fix-thread-activity for a single group
 func (s *WebServer) fixGroupThreadActivity(groupName string) error {
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		return fmt.Errorf("failed to get group DB: %w", err)
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
-	rows, err := database.RetryableQuery(groupDBs.DB, query_fixGroupThreadActivity1)
+	rows, err := database.RetryableQuery(groupDB.DB, query_fixGroupThreadActivity1)
 	if err != nil {
 		return fmt.Errorf("failed to query thread cache: %w", err)
 	}
@@ -642,7 +642,7 @@ func (s *WebServer) fixGroupThreadActivity(groupName string) error {
 
 			var dateSent time.Time
 			var dateStr sql.NullString
-			err := database.RetryableQueryRowScan(groupDBs.DB, query_fixGroupThreadActivity2, []interface{}{articleNum}, &dateStr)
+			err := database.RetryableQueryRowScan(groupDB.DB, query_fixGroupThreadActivity2, []interface{}{articleNum}, &dateStr)
 
 			if err != nil || !dateStr.Valid {
 				log.Printf("Skipping article %d in thread %d: no valid date_sent\n", articleNum, thread.root)
@@ -689,7 +689,7 @@ func (s *WebServer) fixGroupThreadActivity(groupName string) error {
 			// Format as UTC string to avoid timezone encoding issues
 			utcTimeStr := maxDate.UTC().Format("2006-01-02 15:04:05")
 
-			_, err := database.RetryableExec(groupDBs.DB, query_fixGroupThreadActivity3, utcTimeStr, thread.root)
+			_, err := database.RetryableExec(groupDB.DB, query_fixGroupThreadActivity3, utcTimeStr, thread.root)
 
 			if err != nil {
 				log.Print("Failed to update thread activity for thread ", thread.root, ": ", err)
@@ -735,7 +735,7 @@ func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
 	cutoffTime := time.Now().Add(48 * time.Hour)
 
 	// Get the group database for this newsgroup
-	groupDBs, err := s.DB.GetGroupDBs(name)
+	groupDB, err := s.DB.GetGroupDB(name)
 	if err != nil {
 		session.SetError("Failed to access newsgroup database: " + err.Error())
 		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
@@ -743,9 +743,9 @@ func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
 	}
 
 	// Find articles that are posted more than 48 hours in the future and not already hidden
-	articleRows, err := groupDBs.DB.Query("SELECT article_num FROM articles WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
+	articleRows, err := groupDB.DB.Query("SELECT article_num FROM articles WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
 	if err != nil {
-		groupDBs.Return()
+		groupDB.Return()
 		session.SetError("Failed to query future articles: " + err.Error())
 		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
 		return
@@ -760,7 +760,7 @@ func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
 		futureArticles = append(futureArticles, articleNum)
 	}
 	articleRows.Close()
-	groupDBs.Return()
+	groupDB.Return()
 
 	if len(futureArticles) == 0 {
 		session.SetSuccess("No future-dated articles found in newsgroup: " + name)
@@ -780,12 +780,12 @@ func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
 		}
 
 		// Also set the hide flag for these future-dated articles
-		groupDBs, err := s.DB.GetGroupDBs(name)
+		groupDB, err := s.DB.GetGroupDB(name)
 		if err != nil {
 			continue // Skip if can't get DB connection
 		}
-		_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ?", articleNum)
-		groupDBs.Return()
+		_, err = database.RetryableExec(groupDB.DB, "UPDATE articles SET hide = 1 WHERE article_num = ?", articleNum)
+		groupDB.Return()
 
 		if err != nil {
 			continue // Skip articles that fail hide update

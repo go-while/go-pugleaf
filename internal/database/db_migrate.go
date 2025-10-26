@@ -279,18 +279,18 @@ func (db *Database) migrateMainDB() error {
 
 // MigrateGroup applies migrations for a specific newsgroup database
 func (db *Database) MigrateGroup(groupName string) error {
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		log.Printf("Failed to get group database for %s: %v", groupName, err)
 		return fmt.Errorf("failed to get group database: %w", err)
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
-	return db.migrateGroupDB(groupDBs)
+	return db.migrateGroupDB(groupDB)
 }
 
 // migrateGroupDB applies migrations to a group database
-func (db *Database) migrateGroupDB(groupDBs *GroupDBs) error {
+func (db *Database) migrateGroupDB(groupDB *GroupDB) error {
 	// Initialize cache if needed
 	initMigratedDBsCache()
 
@@ -302,7 +302,7 @@ func (db *Database) migrateGroupDB(groupDBs *GroupDBs) error {
 	}
 
 	// Create a cache key based on group name
-	cacheKey := fmt.Sprintf("%s:group", groupDBs.Newsgroup)
+	cacheKey := fmt.Sprintf("%s:group", groupDB.Newsgroup)
 
 	// Check if this database is already known to be fully migrated
 	migratedDBsMux.RLock()
@@ -315,13 +315,13 @@ func (db *Database) migrateGroupDB(groupDBs *GroupDBs) error {
 	}
 
 	// Ensure migrations table exists
-	if err := ensureMigrationsTable(groupDBs.DB, "group"); err != nil {
+	if err := ensureMigrationsTable(groupDB.DB, "group"); err != nil {
 		log.Printf("Failed to ensure migrations table for group: %v", err)
 		return fmt.Errorf("failed to ensure migrations table for group: %w", err)
 	}
 
 	// Get applied migrations
-	applied, err := getAppliedMigrations(groupDBs.DB, "group")
+	applied, err := getAppliedMigrations(groupDB.DB, "group")
 	if err != nil {
 		log.Printf("Failed to get applied migrations for group: %v", err)
 		return fmt.Errorf("failed to get applied migrations for group: %w", err)
@@ -349,7 +349,7 @@ func (db *Database) migrateGroupDB(groupDBs *GroupDBs) error {
 	// Apply missing migrations for group database
 	for _, migration := range migrations {
 		if migration.Type == MigrationTypeGroup && !applied[migration.FileName] {
-			if err := applyMigration(groupDBs.DB, migration, "group"); err != nil {
+			if err := applyMigration(groupDB.DB, migration, "group"); err != nil {
 				return fmt.Errorf("failed to apply migration %s to group database: %w", migration.FileName, err)
 			}
 			//log.Printf("Done: apply migration %s to group database\n", migration.FileName)

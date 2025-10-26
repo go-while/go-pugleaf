@@ -12,14 +12,14 @@ import (
 
 // ImportOverview fetches XOVER data for a group and stores it in the overview DB.
 func (proc *Processor) ImportOverview(groupName string) error {
-	groupDBs, err := proc.DB.GetGroupDBs(groupName)
+	groupDB, err := proc.DB.GetGroupDB(groupName)
 	if err != nil {
 		return err
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 	/*
 		defer func() {
-			err := proc.DB.CloseGroupDBs()
+			err := proc.DB.CloseGroupDB()
 			if err != nil {
 				log.Printf("ImportOverview: Failed to close group DBs for %s: %v", groupName, err)
 			}
@@ -31,7 +31,7 @@ func (proc *Processor) ImportOverview(groupName string) error {
 	}
 	// Efficiently find the highest article number already in articles table
 	var maxNum sql.NullInt64
-	if err := database.RetryableQueryRowScan(groupDBs.DB, "SELECT MAX(article_num) FROM articles", nil, &maxNum); err != nil {
+	if err := database.RetryableQueryRowScan(groupDB.DB, "SELECT MAX(article_num) FROM articles", nil, &maxNum); err != nil {
 		return err
 	}
 	start := groupInfo.First        // Start from the first article in the remote group
@@ -82,7 +82,7 @@ func (proc *Processor) ImportOverview(groupName string) error {
 			Lines:      int(ov.Lines),
 			ReplyCount: 0, // Initialize to 0, will be updated when replies are found
 		}
-		if num, err := proc.DB.InsertOverview(groupDBs, o); err != nil || num == 0 {
+		if num, err := proc.DB.InsertOverview(groupDB, o); err != nil || num == 0 {
 			log.Printf("Failed to insert overview for article %d: %v", num, err)
 		} else {
 			importedCount++
@@ -91,21 +91,21 @@ func (proc *Processor) ImportOverview(groupName string) error {
 
 	// In ImportOverview after inserting overviews
 	log.Printf("ImportOverview: Inserted %d overviews to newsgroup '%s', forcing commit", importedCount, groupName)
-	if tx, err := groupDBs.DB.Begin(); err == nil {
+	if tx, err := groupDB.DB.Begin(); err == nil {
 		tx.Commit() // Force any pending transactions to commit
 		log.Printf("ImportOverview: Forced commit completed newsgroup '%s'", groupName)
 	} else {
 		log.Printf("ImportOverview: Could not begin transaction for commit newsgroup '%s': %v", groupName, err)
 	}
 	// After overview inserts, force WAL to sync
-	_, err = database.RetryableExec(groupDBs.DB, "PRAGMA wal_checkpoint(FULL)")
+	_, err = database.RetryableExec(groupDB.DB, "PRAGMA wal_checkpoint(FULL)")
 	if err != nil {
 		log.Printf("ImportOverview: WAL checkpoint failed newsgroup '%s': %v", groupName, err)
 	} else {
 		log.Printf("ImportOverview: WAL checkpoint completed newsgroup '%s'", groupName)
 	}
 	// After all overview inserts in ImportOverview
-	_, err = database.RetryableExec(groupDBs.DB, "PRAGMA synchronous = FULL")
+	_, err = database.RetryableExec(groupDB.DB, "PRAGMA synchronous = FULL")
 	if err != nil {
 		log.Printf("Warning: Could not set synchronous mode: %v", err)
 	}

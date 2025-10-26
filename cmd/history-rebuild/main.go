@@ -427,26 +427,26 @@ func getRealMemoryUsageSimple() uint64 {
 func processGroup(db *database.Database, proc *processor.Processor, groupName string, progressInterval int, validateOnly, verbose bool, stats *RebuildStats) error {
 
 	// Get group databases
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 	/*
 		// Configure SQLite for memory efficiency
-		if groupDBs.DB != nil {
+		if groupDB.DB != nil {
 			// Reduce SQLite memory usage
-			groupDBs.DB.Exec("PRAGMA cache_size = 1000")     // Reduce page cache (default ~2MB)
-			groupDBs.DB.Exec("PRAGMA temp_store = MEMORY")   // Use memory for temp storage (faster)
-			groupDBs.DB.Exec("PRAGMA mmap_size = 134217728") // Limit mmap to 128MB
-			groupDBs.DB.Exec("PRAGMA journal_mode = WAL")    // Use WAL mode for better concurrency
+			groupDB.DB.Exec("PRAGMA cache_size = 1000")     // Reduce page cache (default ~2MB)
+			groupDB.DB.Exec("PRAGMA temp_store = MEMORY")   // Use memory for temp storage (faster)
+			groupDB.DB.Exec("PRAGMA mmap_size = 134217728") // Limit mmap to 128MB
+			groupDB.DB.Exec("PRAGMA journal_mode = WAL")    // Use WAL mode for better concurrency
 			log.Printf("[SQLITE-CONFIG] Configured SQLite memory limits for group '%s'", groupName)
 		}
 	*/
 
 	// Get total count first
 	var totalArticles int64
-	err = database.RetryableQueryRowScan(groupDBs.DB, `SELECT COUNT(*) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &totalArticles)
+	err = database.RetryableQueryRowScan(groupDB.DB, `SELECT COUNT(*) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &totalArticles)
 	if err != nil {
 		return fmt.Errorf("failed to count articles: %w", err)
 	}
@@ -460,7 +460,7 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 
 	// Get the min and max article numbers for efficient range processing
 	var minArtNum, maxArtNum int64
-	err = database.RetryableQueryRowScan(groupDBs.DB, `SELECT MIN(article_num), MAX(article_num) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &minArtNum, &maxArtNum)
+	err = database.RetryableQueryRowScan(groupDB.DB, `SELECT MIN(article_num), MAX(article_num) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &minArtNum, &maxArtNum)
 	if err != nil {
 		return fmt.Errorf("failed to get article number range: %w", err)
 	}
@@ -483,7 +483,7 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 				    AND article_num >= ? AND article_num <= ?
 		          ORDER BY article_num`
 
-		rows, err := database.RetryableQuery(groupDBs.DB, query, currentArtNum, maxRangeArtNum)
+		rows, err := database.RetryableQuery(groupDB.DB, query, currentArtNum, maxRangeArtNum)
 		if err != nil {
 			return fmt.Errorf("failed to query article range %d-%d: %w", currentArtNum, maxRangeArtNum, err)
 		}
@@ -651,9 +651,9 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 				if realMem > 2*1024*1024*1024 { // 2GB threshold
 					log.Printf("[MEMORY-CRITICAL] RSS exceeds 2GB, forcing database memory release...")
 					// Try to force SQLite memory release via PRAGMA
-					if groupDBs != nil && groupDBs.DB != nil {
-						groupDBs.DB.Exec("PRAGMA shrink_memory")
-						groupDBs.DB.Exec("PRAGMA cache_size = 1000") // Reduce cache
+					if groupDB != nil && groupDB.DB != nil {
+						groupDB.DB.Exec("PRAGMA shrink_memory")
+						groupDB.DB.Exec("PRAGMA cache_size = 1000") // Reduce cache
 					}
 				}
 			*/

@@ -31,11 +31,11 @@ type TreeViewResponse struct {
 }
 
 // GetThreadTreeView returns a hierarchical tree view for a thread
-func (db *Database) GetThreadTreeView(groupDBs *GroupDBs, threadRoot int64, options TreeViewOptions) (*TreeViewResponse, error) {
+func (db *Database) GetThreadTreeView(groupDB *GroupDB, threadRoot int64, options TreeViewOptions) (*TreeViewResponse, error) {
 	startTime := time.Now()
 
 	// Build or retrieve the thread tree
-	tree, err := db.BuildThreadTree(groupDBs, threadRoot)
+	tree, err := db.BuildThreadTree(groupDB, threadRoot)
 	if err != nil {
 		return &TreeViewResponse{
 			ThreadRoot: threadRoot,
@@ -45,7 +45,7 @@ func (db *Database) GetThreadTreeView(groupDBs *GroupDBs, threadRoot int64, opti
 
 	// Apply view options
 	if options.IncludeOverview {
-		if err := db.loadOverviewDataForTree(groupDBs, tree); err != nil {
+		if err := db.loadOverviewDataForTree(groupDB, tree); err != nil {
 			log.Printf("Failed to load overview data for tree: %v", err)
 			// Continue without overview data
 		}
@@ -67,10 +67,10 @@ func (db *Database) GetThreadTreeView(groupDBs *GroupDBs, threadRoot int64, opti
 }
 
 // loadOverviewDataForTree populates Overview data for all nodes in the tree
-func (db *Database) loadOverviewDataForTree(groupDBs *GroupDBs, tree *ThreadTree) error {
+func (db *Database) loadOverviewDataForTree(groupDB *GroupDB, tree *ThreadTree) error {
 	for articleNum, node := range tree.NodeMap {
 		if node.Overview == nil {
-			overview, err := db.GetOverviewByArticleNum(groupDBs, articleNum)
+			overview, err := db.GetOverviewByArticleNum(groupDB, articleNum)
 			if err != nil {
 				log.Printf("Failed to load overview for article %d: %v", articleNum, err)
 				continue
@@ -115,12 +115,12 @@ func (db *Database) HandleThreadTreeAPI(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Get group database
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to get group database: %v", err), http.StatusInternalServerError)
 		return
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
 	// Parse options
 	options := TreeViewOptions{
@@ -143,7 +143,7 @@ func (db *Database) HandleThreadTreeAPI(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Get tree view
-	response, err := db.GetThreadTreeView(groupDBs, threadRoot, options)
+	response, err := db.GetThreadTreeView(groupDB, threadRoot, options)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to get tree view: %v", err), http.StatusInternalServerError)
 		return

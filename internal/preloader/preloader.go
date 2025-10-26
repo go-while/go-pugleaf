@@ -275,7 +275,7 @@ func RepairNewsgroupWatermarks(ctx context.Context, db *database.Database) error
 
 	for _, newsgroup := range newsgroups {
 		// Get group database to check actual articles
-		groupDBs, err := db.GetGroupDBs(newsgroup.Name)
+		groupDB, err := db.GetGroupDB(newsgroup.Name)
 		if err != nil {
 			log.Printf("PreLoader: Failed to get group DBs for %s: %v", newsgroup.Name, err)
 			errorCount++
@@ -286,33 +286,33 @@ func RepairNewsgroupWatermarks(ctx context.Context, db *database.Database) error
 		var maxArticle, minArticle, articleCount int64
 
 		// Get max article number
-		err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", nil, &maxArticle)
+		err = database.RetryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", nil, &maxArticle)
 		if err != nil {
 			log.Printf("PreLoader: Failed to get max article for %s: %v", newsgroup.Name, err)
-			groupDBs.Return()
+			groupDB.Return()
 			errorCount++
 			continue
 		}
 
 		// Get min article number
-		err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COALESCE(MIN(article_num), 1) FROM articles", nil, &minArticle)
+		err = database.RetryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MIN(article_num), 1) FROM articles", nil, &minArticle)
 		if err != nil {
 			log.Printf("PreLoader: Failed to get min article for %s: %v", newsgroup.Name, err)
-			groupDBs.Return()
+			groupDB.Return()
 			errorCount++
 			continue
 		}
 
 		// Get article count
-		err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COUNT(*) FROM articles", nil, &articleCount)
+		err = database.RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", nil, &articleCount)
 		if err != nil {
 			log.Printf("PreLoader: Failed to get article count for %s: %v", newsgroup.Name, err)
-			groupDBs.Return()
+			groupDB.Return()
 			errorCount++
 			continue
 		}
 
-		groupDBs.Return()
+		groupDB.Return()
 
 		// If no articles, set defaults
 		if articleCount == 0 {

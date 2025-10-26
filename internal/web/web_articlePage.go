@@ -35,22 +35,22 @@ func (s *WebServer) articlePage(c *gin.Context) {
 		return
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
-	if groupDBs == nil || err != nil {
+	groupDB, err := s.DB.GetGroupDB(groupName)
+	if groupDB == nil || err != nil {
 		c.String(http.StatusNotFound, "Group not found: %v", err)
 		return
 	}
-	defer groupDBs.Return()
-	if groupDBs.NewsgroupPtr == nil {
+	defer groupDB.Return()
+	if groupDB.NewsgroupPtr == nil {
 		c.String(http.StatusInternalServerError, "Group pointer is nil for group %s", groupName)
 		return
 	}
 	// Get the article
-	article, err := s.DB.GetArticleByNum(groupDBs, articleNum)
+	article, err := s.DB.GetArticleByNum(groupDB, articleNum)
 	if err != nil {
 		/* TODO: THIS DOES NOT SCALE WELL!
 		// Article not found in articles table, let's check if it exists in overview
-		overviews, _ := s.DB.GetOverviews(groupDBs)
+		overviews, _ := s.DB.GetOverviews(groupDB)
 		var foundInOverview bool
 		for _, overview := range overviews {
 			if overview.ArticleNum == articleNum {
@@ -81,7 +81,7 @@ func (s *WebServer) articlePage(c *gin.Context) {
 	data := ArticlePageData{
 		TemplateData: s.getBaseTemplateData(c, subjectText+" - Article "+articleNumStr),
 		GroupName:    groupName,
-		GroupPtr:     groupDBs.NewsgroupPtr,
+		GroupPtr:     groupDB.NewsgroupPtr,
 		ArticleNum:   articleNum,
 		Article:      article,
 		Thread:       thread,
@@ -108,14 +108,14 @@ func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
 		return // Error response already sent by checkGroupAccess
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.String(http.StatusNotFound, "Group not found: %v", err)
 		return
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 	// Get the article by message ID
-	article, err := s.DB.GetArticleByMessageID(groupDBs, messageId)
+	article, err := s.DB.GetArticleByMessageID(groupDB, messageId)
 	if err != nil {
 		c.String(http.StatusNotFound, "Article with message ID %s not found in group %s", messageId, groupName)
 		return
@@ -134,14 +134,14 @@ func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
 	subjectText := article.GetCleanSubject()
 
 	data := ArticlePageData{
-		TemplateData: s.getBaseTemplateData(c, subjectText+" - Article "+strconv.FormatInt(article.ArticleNums[groupDBs.NewsgroupPtr], 10)),
+		TemplateData: s.getBaseTemplateData(c, subjectText+" - Article "+strconv.FormatInt(article.ArticleNums[groupDB.NewsgroupPtr], 10)),
 		GroupName:    groupName,
-		GroupPtr:     groupDBs.NewsgroupPtr,
-		ArticleNum:   article.ArticleNums[groupDBs.NewsgroupPtr],
+		GroupPtr:     groupDB.NewsgroupPtr,
+		ArticleNum:   article.ArticleNums[groupDB.NewsgroupPtr],
 		Article:      article,
 		Thread:       thread,
-		PrevArticle:  article.ArticleNums[groupDBs.NewsgroupPtr] - 1,
-		NextArticle:  article.ArticleNums[groupDBs.NewsgroupPtr] + 1,
+		PrevArticle:  article.ArticleNums[groupDB.NewsgroupPtr] - 1,
+		NextArticle:  article.ArticleNums[groupDB.NewsgroupPtr] + 1,
 	}
 
 	// Load template individually to avoid conflicts

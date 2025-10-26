@@ -360,7 +360,7 @@ func repairDatabase(db *database.Database, newsgroup string, report *database.Co
 	fmt.Printf("Starting repair process for %s...\n", newsgroup)
 
 	// Get group databases
-	groupDB, err := db.GetGroupDBs(newsgroup)
+	groupDB, err := db.GetGroupDB(newsgroup)
 	if err != nil {
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
@@ -479,7 +479,7 @@ func repairDatabase(db *database.Database, newsgroup string, report *database.Co
 
 /*
 // createMissingOverview creates a missing overview entry from the corresponding article
-func createMissingOverview(groupDB *database.GroupDBs, articleNum int64) error {
+func createMissingOverview(groupDB *database.GroupDB, articleNum int64) error {
 	var article struct {
 		MessageID  string
 		Subject    string
@@ -715,7 +715,7 @@ func checkAndFixDates(db *database.Database, newsgroups []*models.Newsgroup, rew
 	for i, newsgroup := range newsgroups {
 		fmt.Printf("📅 [%d/%d] Checking dates in newsgroup: %s\n", i+1, len(newsgroups), newsgroup.Name)
 
-		groupDB, err := db.GetGroupDBs(newsgroup.Name)
+		groupDB, err := db.GetGroupDB(newsgroup.Name)
 		if err != nil {
 			fmt.Printf("   ❌ Failed to get group database: %v\n", err)
 			continue
@@ -758,7 +758,7 @@ func checkAndFixDates(db *database.Database, newsgroups []*models.Newsgroup, rew
 }
 
 // checkGroupDates checks and optionally fixes date mismatches in a single newsgroup
-func checkGroupDates(groupDB *database.GroupDBs, newsgroupName string, rewriteDates, verbose bool) (int64, int64, []DateProblem, error) {
+func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDates, verbose bool) (int64, int64, []DateProblem, error) {
 	// Query all articles with their date information - get date_sent as string to avoid timezone parsing issues
 	rows, err := database.RetryableQuery(groupDB.DB, `
 		SELECT article_num, message_id, date_string, date_sent
@@ -1033,19 +1033,19 @@ func scanOutOfOrderOverview(db *database.Database, newsgroups []*models.Newsgrou
 		fmt.Printf("\n📊 Scanning newsgroup: %s\n", newsgroup.Name)
 
 		// Get newsgroup database
-		groupDBs, err := db.GetGroupDBs(newsgroup.Name)
+		groupDB, err := db.GetGroupDB(newsgroup.Name)
 		if err != nil {
 			fmt.Printf("❌ Failed to get database for '%s': %v\n", newsgroup.Name, err)
 			continue
 		}
-		if groupDBs == nil || groupDBs.DB == nil {
+		if groupDB == nil || groupDB.DB == nil {
 			fmt.Printf("⚠️  No database found for '%s', skipping...\n", newsgroup.Name)
 			continue
 		}
 
 		// Get total article count
 		var count int64
-		err = groupDBs.DB.QueryRow("SELECT COUNT(*) FROM articles").Scan(&count)
+		err = groupDB.DB.QueryRow("SELECT COUNT(*) FROM articles").Scan(&count)
 		if err != nil {
 			fmt.Printf("❌ Failed to count articles: %v\n", err)
 			continue
@@ -1072,7 +1072,7 @@ func scanOutOfOrderOverview(db *database.Database, newsgroups []*models.Newsgrou
 		for {
 			// Query articles ordered by date_sent ASC using OFFSET pagination
 
-			rows, err := groupDBs.DB.Query(query, batchSize, offset)
+			rows, err := groupDB.DB.Query(query, batchSize, offset)
 			if err != nil {
 				return fmt.Errorf("failed to query articles at offset %d: %v", offset, err)
 			}
@@ -1227,11 +1227,11 @@ func reorderArticlesByDateSent(db *database.Database, newsgroups []*models.Newsg
 // reorderSingleNewsgroup reorders articles in a single newsgroup by date_sent
 func reorderSingleNewsgroup(db *database.Database, newsgroupName string, verbose bool) (int64, error) {
 	// Open source database
-	sourceDB, err := db.GetGroupDBs(newsgroupName)
+	sourceDB, err := db.GetGroupDB(newsgroupName)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open source database: %w", err)
 	}
-	defer db.ForceCloseGroupDBs(sourceDB)
+	defer db.ForceCloseGroupDB(sourceDB)
 
 	// Count articles in source database
 	var totalArticles int64
@@ -1245,7 +1245,7 @@ func reorderSingleNewsgroup(db *database.Database, newsgroupName string, verbose
 	}
 
 	// Open destination database with .new suffix
-	destDB, destPath, err := db.GetGroupDBsWithSuffix(newsgroupName, ".new")
+	destDB, destPath, err := db.GetGroupDBWithSuffix(newsgroupName, ".new")
 	if err != nil {
 		return 0, fmt.Errorf("failed to create destination database: %w", err)
 	}
@@ -1377,15 +1377,15 @@ func reorderSingleNewsgroup(db *database.Database, newsgroupName string, verbose
 	}
 	defer destDB.Close()
 
-	// Create a temporary GroupDBs wrapper for the new database
-	tempGroupDBs := &database.GroupDBs{
+	// Create a temporary GroupDB wrapper for the new database
+	tempGroupDB := &database.GroupDB{
 		Newsgroup: newsgroupName,
 		DB:        destDB,
 	}
 
 	// Rebuild threads using the existing RebuildThreadsFromScratch function
 	var report *database.ThreadRebuildReport
-	report, err = db.RebuildThreadsFromScratch(newsgroupName, verbose, tempGroupDBs)
+	report, err = db.RebuildThreadsFromScratch(newsgroupName, verbose, tempGroupDB)
 	if err != nil {
 		return processed, fmt.Errorf("failed to rebuild threads: %w", err)
 	}

@@ -468,10 +468,10 @@ func (db *Database) DeleteNewsgroup(name string) error {
 
 const query_GetThreadsCount = `SELECT COUNT(*) FROM threads`
 
-func (db *Database) GetThreadsCount(groupDBs *GroupDBs) (int64, error) {
+func (db *Database) GetThreadsCount(groupDB *GroupDB) (int64, error) {
 	var count int64
 
-	err := RetryableQueryRowScan(groupDBs.DB, query_GetThreadsCount, nil, &count)
+	err := RetryableQueryRowScan(groupDB.DB, query_GetThreadsCount, nil, &count)
 	if err != nil {
 		return 0, err
 	}
@@ -480,10 +480,10 @@ func (db *Database) GetThreadsCount(groupDBs *GroupDBs) (int64, error) {
 
 const query_GetArticlesCount = `SELECT COUNT(*) FROM articles`
 
-func (db *Database) GetArticlesCount(groupDBs *GroupDBs) (int64, error) {
+func (db *Database) GetArticlesCount(groupDB *GroupDB) (int64, error) {
 	var count int64
 
-	err := RetryableQueryRowScan(groupDBs.DB, query_GetArticlesCount, nil, &count)
+	err := RetryableQueryRowScan(groupDB.DB, query_GetArticlesCount, nil, &count)
 	if err != nil {
 		return 0, err
 	}
@@ -505,12 +505,12 @@ func (db *Database) GetArticleCountFromMainDB(groupName string) (int64, error) {
 // Returns nil if no articles found
 const query_GetLastArticleDate = `SELECT MAX(date_sent) FROM articles WHERE hide = 0`
 
-func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
+func (db *Database) GetLastArticleDate(groupDB *GroupDB) (*time.Time, error) {
 	var lastDateStr sql.NullString
 
-	err := RetryableQueryRowScan(groupDBs.DB, query_GetLastArticleDate, nil, &lastDateStr)
+	err := RetryableQueryRowScan(groupDB.DB, query_GetLastArticleDate, nil, &lastDateStr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get last article date for group %s: %w", groupDBs.Newsgroup, err)
+		return nil, fmt.Errorf("failed to get last article date for group %s: %w", groupDB.Newsgroup, err)
 	}
 
 	if !lastDateStr.Valid || lastDateStr.String == "" {
@@ -520,7 +520,7 @@ func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
 	// Parse the date string using the adapter
 	lastDate := parseDateString(lastDateStr.String)
 	if lastDate.IsZero() {
-		return nil, fmt.Errorf("failed to parse last article date '%s' for group %s", lastDateStr.String, groupDBs.Newsgroup)
+		return nil, fmt.Errorf("failed to parse last article date '%s' for group %s", lastDateStr.String, groupDB.Newsgroup)
 	}
 
 	return &lastDate, nil
@@ -529,12 +529,12 @@ func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
 const query_GetArticlesBatch = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles ORDER BY article_num ASC LIMIT ? OFFSET ?`
 
 // GetArticlesBatch retrieves articles from a group database in batches for memory efficiency
-func (db *Database) GetArticlesBatch(groupDBs *GroupDBs, limit, offset int) ([]*models.Article, error) {
+func (db *Database) GetArticlesBatch(groupDB *GroupDB, limit, offset int) ([]*models.Article, error) {
 	if limit <= 0 {
 		limit = 100 // Default batch size
 	}
 
-	rows, err := RetryableQuery(groupDBs.DB, query_GetArticlesBatch, limit, offset)
+	rows, err := RetryableQuery(groupDB.DB, query_GetArticlesBatch, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -548,8 +548,8 @@ func (db *Database) GetArticlesBatch(groupDBs *GroupDBs, limit, offset int) ([]*
 			return nil, err
 		}
 		a.ArticleNums = make(map[*string]int64)
-		a.ArticleNums[groupDBs.NewsgroupPtr] = artnum
-		a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDBs.NewsgroupPtr)
+		a.ArticleNums[groupDB.NewsgroupPtr] = artnum
+		a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDB.NewsgroupPtr)
 		out = append(out, &a)
 	}
 	return out, nil
@@ -558,8 +558,8 @@ func (db *Database) GetArticlesBatch(groupDBs *GroupDBs, limit, offset int) ([]*
 // InsertThread inserts a thread into a group's threads database
 const query_InsertThread = `INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, ?, ?)`
 
-func (db *Database) InsertThread(groupDBs *GroupDBs, t *models.Thread, a *models.Article) error {
-	_, err := RetryableExec(groupDBs.DB, query_InsertThread,
+func (db *Database) InsertThread(groupDB *GroupDB, t *models.Thread, a *models.Article) error {
+	_, err := RetryableExec(groupDB.DB, query_InsertThread,
 		t.RootArticle, t.ParentArticle, t.ChildArticle, t.Depth, t.ThreadOrder,
 	)
 
@@ -568,8 +568,8 @@ func (db *Database) InsertThread(groupDBs *GroupDBs, t *models.Thread, a *models
 
 const query_GetThreads = `SELECT id, root_article, parent_article, child_article, depth, thread_order FROM threads`
 
-func (db *Database) GetThreads(groupDBs *GroupDBs) ([]*models.Thread, error) {
-	rows, err := RetryableQuery(groupDBs.DB, query_GetThreads)
+func (db *Database) GetThreads(groupDB *GroupDB) ([]*models.Thread, error) {
+	rows, err := RetryableQuery(groupDB.DB, query_GetThreads)
 	if err != nil {
 		return nil, err
 	}
@@ -593,7 +593,7 @@ func (db *Database) GetThreads(groupDBs *GroupDBs) ([]*models.Thread, error) {
 const query_InsertOverview = `INSERT INTO articles (subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 const query_ImportOverview = `INSERT INTO articles (article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-func (db *Database) InsertOverview(groupDBs *GroupDBs, o *models.Overview) (int64, error) {
+func (db *Database) InsertOverview(groupDB *GroupDB, o *models.Overview) (int64, error) {
 	var res sql.Result
 	var err error
 
@@ -602,12 +602,12 @@ func (db *Database) InsertOverview(groupDBs *GroupDBs, o *models.Overview) (int6
 
 	if o.ArticleNum == 0 {
 		// Auto-increment article_num - don't include it in INSERT
-		res, err = RetryableExec(groupDBs.DB, query_InsertOverview,
+		res, err = RetryableExec(groupDB.DB, query_InsertOverview,
 			o.Subject, o.FromHeader, dateSentStr, o.DateString, o.MessageID, o.References, o.Bytes, o.Lines, o.ReplyCount, o.Downloaded,
 		)
 	} else {
 		// Explicit article_num provided (e.g. from ImportOverview)
-		res, err = RetryableExec(groupDBs.DB, query_ImportOverview,
+		res, err = RetryableExec(groupDB.DB, query_ImportOverview,
 			o.ArticleNum, o.Subject, o.FromHeader, dateSentStr, o.DateString, o.MessageID, o.References, o.Bytes, o.Lines, o.ReplyCount, o.Downloaded,
 		)
 	}
@@ -620,10 +620,10 @@ func (db *Database) InsertOverview(groupDBs *GroupDBs, o *models.Overview) (int6
 
 const query_GetOverviews = `SELECT article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded FROM articles`
 
-func (db *Database) GetOverviews(groupDBs *GroupDBs) ([]*models.Overview, error) {
-	log.Printf("GetOverviews: group '%s' fetching overviews from articles table", groupDBs.Newsgroup)
+func (db *Database) GetOverviews(groupDB *GroupDB) ([]*models.Overview, error) {
+	log.Printf("GetOverviews: group '%s' fetching overviews from articles table", groupDB.Newsgroup)
 
-	rows, err := RetryableQuery(groupDBs.DB, query_GetOverviews)
+	rows, err := RetryableQuery(groupDB.DB, query_GetOverviews)
 	if err != nil {
 		return nil, err
 	}
@@ -641,11 +641,11 @@ func (db *Database) GetOverviews(groupDBs *GroupDBs) ([]*models.Overview, error)
 
 /*
 // SetOverviewDownloaded sets the downloaded flag for an article in the articles table
-func (db *Database) SetOverviewDownloaded(groupDBs *GroupDBs, articleNum int64, downloaded int) error {
-	db.Batch.BatchCaptureSetOverviewDownloaded(groupDBs.Newsgroup, articleNum)
+func (db *Database) SetOverviewDownloaded(groupDB *GroupDB, articleNum int64, downloaded int) error {
+	db.Batch.BatchCaptureSetOverviewDownloaded(groupDB.Newsgroup, articleNum)
 	//
 
-		_, err := groupDBs.DB.Exec(
+		_, err := groupDB.DB.Exec(
 			`UPDATE articles SET downloaded = ? WHERE article_num = ?`,
 			downloaded, articleNum,
 		)
@@ -659,8 +659,8 @@ func (db *Database) SetOverviewDownloaded(groupDBs *GroupDBs, articleNum int64, 
 // GetUndownloadedOverviews returns all overview entries from articles table that have not been downloaded
 const query_GetUndownloadedOverviews = `SELECT article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded FROM articles WHERE downloaded = 0 ORDER BY article_num ASC LIMIT ?`
 
-func (db *Database) GetUndownloadedOverviews(groupDBs *GroupDBs, fetchMax int) ([]*models.Overview, error) {
-	rows, err := groupDBs.DB.Query(query_GetUndownloadedOverviews, fetchMax)
+func (db *Database) GetUndownloadedOverviews(groupDB *GroupDB, fetchMax int) ([]*models.Overview, error) {
+	rows, err := groupDB.DB.Query(query_GetUndownloadedOverviews, fetchMax)
 	if err != nil {
 		return nil, err
 	}
@@ -818,26 +818,26 @@ func (db *Database) GetUserPermissions(userID int64) ([]*models.UserPermission, 
 // GetArticleByNum retrieves an article by its article number
 const query_GetArticleByNum = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles WHERE article_num = ?`
 
-func (db *Database) GetArticleByNum(groupDBs *GroupDBs, articleNum int64) (*models.Article, error) {
+func (db *Database) GetArticleByNum(groupDB *GroupDB, articleNum int64) (*models.Article, error) {
 	// Try cache first
 	if db.ArticleCache != nil {
-		if article, found := db.ArticleCache.Get(groupDBs.Newsgroup, articleNum); found {
+		if article, found := db.ArticleCache.Get(groupDB.Newsgroup, articleNum); found {
 			return article, nil
 		}
 	}
-	row := groupDBs.DB.QueryRow(query_GetArticleByNum, articleNum)
+	row := groupDB.DB.QueryRow(query_GetArticleByNum, articleNum)
 	var a models.Article
 	var artnum int64
 	if err := row.Scan(&artnum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
 		return nil, err
 	}
 	a.ArticleNums = make(map[*string]int64)
-	a.ArticleNums[groupDBs.NewsgroupPtr] = artnum
-	a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDBs.NewsgroupPtr)
+	a.ArticleNums[groupDB.NewsgroupPtr] = artnum
+	a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDB.NewsgroupPtr)
 
 	// Cache the result
 	if db.ArticleCache != nil {
-		db.ArticleCache.Put(groupDBs.Newsgroup, articleNum, &a)
+		db.ArticleCache.Put(groupDB.Newsgroup, articleNum, &a)
 	}
 	return &a, nil
 }
@@ -845,22 +845,22 @@ func (db *Database) GetArticleByNum(groupDBs *GroupDBs, articleNum int64) (*mode
 // GetArticleByMessageID retrieves an article by its message ID
 const query_GetArticleByMessageID = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles WHERE message_id = ?`
 
-func (db *Database) GetArticleByMessageID(groupDBs *GroupDBs, messageID string) (*models.Article, error) {
-	//log.Printf("GetArticleByMessageID: group '%s' fetching article with message ID '%s'", groupDBs.Newsgroup, messageID)
+func (db *Database) GetArticleByMessageID(groupDB *GroupDB, messageID string) (*models.Article, error) {
+	//log.Printf("GetArticleByMessageID: group '%s' fetching article with message ID '%s'", groupDB.Newsgroup, messageID)
 
-	row := groupDBs.DB.QueryRow(query_GetArticleByMessageID, messageID)
+	row := groupDB.DB.QueryRow(query_GetArticleByMessageID, messageID)
 	var a models.Article
 	var artnum int64
 	if err := row.Scan(&artnum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
 		return nil, err
 	}
 	a.ArticleNums = make(map[*string]int64)
-	a.ArticleNums[groupDBs.NewsgroupPtr] = artnum
-	a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDBs.NewsgroupPtr)
+	a.ArticleNums[groupDB.NewsgroupPtr] = artnum
+	a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDB.NewsgroupPtr)
 
 	// Cache the result
 	if db.ArticleCache != nil {
-		db.ArticleCache.Put(groupDBs.Newsgroup, a.ArticleNums[groupDBs.NewsgroupPtr], &a)
+		db.ArticleCache.Put(groupDB.Newsgroup, a.ArticleNums[groupDB.NewsgroupPtr], &a)
 	}
 	return &a, nil
 }
@@ -868,16 +868,16 @@ func (db *Database) GetArticleByMessageID(groupDBs *GroupDBs, messageID string) 
 // UpdateReplyCount updates the reply count for an article
 const query_UpdateReplyCount = `UPDATE articles SET reply_count = ? WHERE message_id = ?`
 
-func (db *Database) UpdateReplyCount(groupDBs *GroupDBs, messageID string, replyCount int) error {
-	_, err := RetryableExec(groupDBs.DB, query_UpdateReplyCount, replyCount, messageID)
+func (db *Database) UpdateReplyCount(groupDB *GroupDB, messageID string, replyCount int) error {
+	_, err := RetryableExec(groupDB.DB, query_UpdateReplyCount, replyCount, messageID)
 	return err
 }
 
 // IncrementReplyCount increments the reply count for an article
 const query_IncrementReplyCount = `UPDATE articles SET reply_count = reply_count + 1 WHERE message_id = ?`
 
-func (db *Database) IncrementReplyCount(groupDBs *GroupDBs, messageID string) error {
-	_, err := RetryableExec(groupDBs.DB,
+func (db *Database) IncrementReplyCount(groupDB *GroupDB, messageID string) error {
+	_, err := RetryableExec(groupDB.DB,
 		query_IncrementReplyCount,
 		messageID,
 	)
@@ -887,8 +887,8 @@ func (db *Database) IncrementReplyCount(groupDBs *GroupDBs, messageID string) er
 // GetReplyCount gets the current reply count for an article
 const query_GetReplyCount = `SELECT reply_count FROM articles WHERE message_id = ?`
 
-func (db *Database) GetReplyCount(groupDBs *GroupDBs, messageID string) (int, error) {
-	row := groupDBs.DB.QueryRow(
+func (db *Database) GetReplyCount(groupDB *GroupDB, messageID string) (int, error) {
+	row := groupDB.DB.QueryRow(
 		query_GetReplyCount,
 		messageID,
 	)
@@ -902,16 +902,16 @@ func (db *Database) GetReplyCount(groupDBs *GroupDBs, messageID string) (int, er
 // UpdateArticleDateSent updates the date_sent field for an article
 const query_UpdateArticleDateSent = `UPDATE articles SET date_sent = ?, date_string = ? WHERE message_id = ?`
 
-func (db *Database) UpdateArticleDateSent(groupDBs *GroupDBs, messageID string, dateSent time.Time, dateString string) error {
-	_, err := RetryableExec(groupDBs.DB, query_UpdateArticleDateSent, dateSent.UTC().Format("2006-01-02 15:04:05"), dateString, messageID)
+func (db *Database) UpdateArticleDateSent(groupDB *GroupDB, messageID string, dateSent time.Time, dateString string) error {
+	_, err := RetryableExec(groupDB.DB, query_UpdateArticleDateSent, dateSent.UTC().Format("2006-01-02 15:04:05"), dateString, messageID)
 	return err
 }
 
 // UpdateOverviewReplyCount updates the reply count for an article in the articles table
 const query_UpdateOverviewReplyCount = `UPDATE articles SET reply_count = ? WHERE message_id = ?`
 
-func (db *Database) UpdateOverviewReplyCount(groupDBs *GroupDBs, messageID string, replyCount int) error {
-	_, err := RetryableExec(groupDBs.DB,
+func (db *Database) UpdateOverviewReplyCount(groupDB *GroupDB, messageID string, replyCount int) error {
+	_, err := RetryableExec(groupDB.DB,
 		query_UpdateOverviewReplyCount,
 		replyCount, messageID,
 	)
@@ -921,9 +921,9 @@ func (db *Database) UpdateOverviewReplyCount(groupDBs *GroupDBs, messageID strin
 // IncrementOverviewReplyCount increments the reply count for an article in the articles table
 const query_IncrementOverviewReplyCount = `UPDATE articles SET reply_count = reply_count + 1 WHERE message_id = ?`
 
-func (db *Database) IncrementOverviewReplyCount(groupDBs *GroupDBs, messageID string) error {
+func (db *Database) IncrementOverviewReplyCount(groupDB *GroupDB, messageID string) error {
 
-	_, err := RetryableExec(groupDBs.DB,
+	_, err := RetryableExec(groupDB.DB,
 		query_IncrementOverviewReplyCount,
 		messageID,
 	)
@@ -1079,11 +1079,11 @@ const query_GetOverviewsPaginated3 = `SELECT article_num FROM articles
 			 ORDER BY article_num DESC
 			 LIMIT 1`
 
-func (db *Database) GetOverviewsPaginated(groupDBs *GroupDBs, lastArticleNum int64, pageSize int) ([]*models.Overview, int, bool, error) {
+func (db *Database) GetOverviewsPaginated(groupDB *GroupDB, lastArticleNum int64, pageSize int) ([]*models.Overview, int, bool, error) {
 
 	// Get total count from newsgroups table in main database (much faster than COUNT(*) on articles)
 	var totalCount int
-	newsgroupInfo, err := db.MainDBGetNewsgroup(groupDBs.Newsgroup)
+	newsgroupInfo, err := db.MainDBGetNewsgroup(groupDB.Newsgroup)
 	if err != nil || newsgroupInfo == nil {
 		totalCount = -1 // Fallback if newsgroup not found
 	} else {
@@ -1095,7 +1095,7 @@ func (db *Database) GetOverviewsPaginated(groupDBs *GroupDBs, lastArticleNum int
 	if lastArticleNum > 0 {
 		// Continue from last seen article (descending order by article_num)
 		args := []interface{}{lastArticleNum, pageSize}
-		rows, err = groupDBs.DB.Query(query_GetOverviewsPaginated1, args...)
+		rows, err = groupDB.DB.Query(query_GetOverviewsPaginated1, args...)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -1103,7 +1103,7 @@ func (db *Database) GetOverviewsPaginated(groupDBs *GroupDBs, lastArticleNum int
 	} else {
 		// First page
 		args := []interface{}{pageSize}
-		rows, err = groupDBs.DB.Query(query_GetOverviewsPaginated2, args...)
+		rows, err = groupDB.DB.Query(query_GetOverviewsPaginated2, args...)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -1123,7 +1123,7 @@ func (db *Database) GetOverviewsPaginated(groupDBs *GroupDBs, lastArticleNum int
 	hasMore := false
 	if len(out) == pageSize {
 		var nextArticleNum int64
-		err := groupDBs.DB.QueryRow(query_GetOverviewsPaginated3,
+		err := groupDB.DB.QueryRow(query_GetOverviewsPaginated3,
 			out[len(out)-1].ArticleNum).Scan(&nextArticleNum)
 		if err == nil {
 			hasMore = true
@@ -1418,20 +1418,20 @@ func (db *Database) GetTotalThreadsCount() (int64, error) {
 	var totalThreads int64
 	for _, group := range groups {
 		// Get group database
-		groupDBs, err := db.GetGroupDBs(group.Name)
+		groupDB, err := db.GetGroupDB(group.Name)
 		if err != nil {
 			continue // Skip groups that don't have databases yet
 		}
 
 		// Count threads in this group
-		threadCount, err := db.GetThreadsCount(groupDBs)
+		threadCount, err := db.GetThreadsCount(groupDB)
 		if err != nil {
-			groupDBs.Return()
+			groupDB.Return()
 			continue // Skip groups with errors
 		}
 
 		totalThreads += threadCount
-		groupDBs.Return()
+		groupDB.Return()
 	}
 
 	return totalThreads, nil
@@ -1668,7 +1668,7 @@ const query_GetOverviewsRange = `SELECT article_num, subject, from_header, date_
 		 WHERE article_num >= ? AND article_num <= ?
 		 ORDER BY article_num ASC`
 
-func (db *Database) GetOverviewsRange(groupDBs *GroupDBs, startNum, endNum int64) ([]*models.Overview, error) {
+func (db *Database) GetOverviewsRange(groupDB *GroupDB, startNum, endNum int64) ([]*models.Overview, error) {
 	if startNum > endNum {
 		return nil, fmt.Errorf("start number %d is greater than end number %d", startNum, endNum)
 	}
@@ -1678,7 +1678,7 @@ func (db *Database) GetOverviewsRange(groupDBs *GroupDBs, startNum, endNum int64
 		endNum = startNum + 1000
 	}
 
-	rows, err := groupDBs.DB.Query(query_GetOverviewsRange, startNum, endNum)
+	rows, err := groupDB.DB.Query(query_GetOverviewsRange, startNum, endNum)
 	if err != nil {
 		return nil, err
 	}
@@ -1705,9 +1705,9 @@ const query_GetOverviewByMessageID = `
 		WHERE message_id = ? LIMIT 1
 	`
 
-func (db *Database) GetOverviewByMessageID(groupDBs *GroupDBs, messageID string) (*models.Overview, error) {
+func (db *Database) GetOverviewByMessageID(groupDB *GroupDB, messageID string) (*models.Overview, error) {
 	overview := &models.Overview{}
-	err := groupDBs.DB.QueryRow(query_GetOverviewByMessageID, messageID).Scan(
+	err := groupDB.DB.QueryRow(query_GetOverviewByMessageID, messageID).Scan(
 		&overview.ArticleNum, &overview.Subject, &overview.FromHeader,
 		&overview.DateSent, &overview.DateString, &overview.MessageID,
 		&overview.References, &overview.Bytes, &overview.Lines,
@@ -1730,7 +1730,7 @@ const query_GetHeaderFieldRange5 = `SELECT article_num, "references" FROM articl
 const query_GetHeaderFieldRange6 = `SELECT article_num, bytes FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
 const query_GetHeaderFieldRange7 = `SELECT article_num, lines FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
 
-func (db *Database) GetHeaderFieldRange(groupDBs *GroupDBs, field string, startNum, endNum int64) (map[int64]string, error) {
+func (db *Database) GetHeaderFieldRange(groupDB *GroupDB, field string, startNum, endNum int64) (map[int64]string, error) {
 	if startNum > endNum {
 		return nil, fmt.Errorf("start number %d is greater than end number %d", startNum, endNum)
 	}
@@ -1746,25 +1746,25 @@ func (db *Database) GetHeaderFieldRange(groupDBs *GroupDBs, field string, startN
 	switch strings.ToLower(field) {
 	case "subject":
 		query = query_GetHeaderFieldRange1
-		dbToQuery = groupDBs.DB
+		dbToQuery = groupDB.DB
 	case "from":
 		query = query_GetHeaderFieldRange2
-		dbToQuery = groupDBs.DB
+		dbToQuery = groupDB.DB
 	case "date":
 		query = query_GetHeaderFieldRange3
-		dbToQuery = groupDBs.DB
+		dbToQuery = groupDB.DB
 	case "message-id":
 		query = query_GetHeaderFieldRange4
-		dbToQuery = groupDBs.DB
+		dbToQuery = groupDB.DB
 	case "references":
 		query = query_GetHeaderFieldRange5
-		dbToQuery = groupDBs.DB
+		dbToQuery = groupDB.DB
 	case "bytes":
 		query = query_GetHeaderFieldRange6
-		dbToQuery = groupDBs.DB
+		dbToQuery = groupDB.DB
 	case "lines":
 		query = query_GetHeaderFieldRange7
-		dbToQuery = groupDBs.DB
+		dbToQuery = groupDB.DB
 	default:
 		// For other headers, try to get from the full article headers
 		// For now, return empty result for unsupported headers
@@ -2892,16 +2892,16 @@ func (db *Database) ResetNewsgroupData(newsgroupName string) error {
 	log.Printf("ResetNewsgroupData: Resetting data for newsgroup '%s'", newsgroupName)
 
 	// Get the group database connection
-	groupDBs, err := db.GetGroupDBs(newsgroupName)
+	groupDB, err := db.GetGroupDB(newsgroupName)
 	if err != nil {
 		// If group database doesn't exist yet, nothing to reset
 		log.Printf("ResetNewsgroupData: No database found for newsgroup '%s', skipping", newsgroupName)
 		return nil
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
 	// Begin transaction for atomic reset
-	tx, err := groupDBs.DB.Begin()
+	tx, err := groupDB.DB.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to start transaction for newsgroup '%s': %w", newsgroupName, err)
 	}
@@ -3175,7 +3175,7 @@ func (db *Database) GetSpamArticles(offset, limit int) ([]*models.Overview, []st
 		}
 
 		// Get article details from the specific newsgroup database
-		groupDBs, err := db.GetGroupDBs(newsgroupName)
+		groupDB, err := db.GetGroupDB(newsgroupName)
 		if err != nil {
 			// Log error but continue with next article
 			log.Printf("Failed to get group database for %s: %v", newsgroupName, err)
@@ -3183,8 +3183,8 @@ func (db *Database) GetSpamArticles(offset, limit int) ([]*models.Overview, []st
 		}
 
 		// Use existing function to get article overview
-		overview, err := db.GetOverviewByArticleNum(groupDBs, int64(articleNum))
-		groupDBs.Return()
+		overview, err := db.GetOverviewByArticleNum(groupDB, int64(articleNum))
+		groupDB.Return()
 
 		if err != nil {
 			// Log error but continue with next article - article might have been deleted
@@ -3292,11 +3292,11 @@ func (db *Database) GetArticlesByIDs(newsgroup *string, wantedIDs []*string) ([]
 		return nil, nil
 	}
 
-	groupDBs, err := db.GetGroupDBs(*newsgroup)
+	groupDB, err := db.GetGroupDB(*newsgroup)
 	if err != nil {
 		return nil, err
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
 	// Build the IN clause with placeholders
 	placeholders := make([]string, len(wantedIDs))
@@ -3311,7 +3311,7 @@ func (db *Database) GetArticlesByIDs(newsgroup *string, wantedIDs []*string) ([]
 		" WHERE message_id IN (" + strings.Join(placeholders, ",") + ") " +
 		"ORDER BY date_sent ASC"
 
-	rows, err := groupDBs.DB.Query(query, args...)
+	rows, err := groupDB.DB.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query articles by IDs: %w", err)
 	}
@@ -3348,12 +3348,12 @@ func (db *Database) GetArticlesByIDs(newsgroup *string, wantedIDs []*string) ([]
 // GetArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
 func (db *Database) GetMessageIDsWithDateFilter(ng *models.Newsgroup, startTime, endTime *time.Time, batchCheck int64, resultChan chan []*string) error {
 	// Get group database
-	groupDBs, err := db.GetGroupDBs(ng.Name)
+	groupDB, err := db.GetGroupDB(ng.Name)
 	if err != nil {
 		return fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", ng.Name, err)
 	}
 	defer close(resultChan)
-	defer db.ForceCloseGroupDBs(groupDBs)
+	defer db.ForceCloseGroupDB(groupDB)
 	var loaded uint64
 	var query string
 	var args []interface{}
@@ -3386,7 +3386,7 @@ func (db *Database) GetMessageIDsWithDateFilter(ng *models.Newsgroup, startTime,
 		query = query_getMessageIDsBatchWithDateFilter_selectPart + query_getMessageIDsBatchWithDateFilter_orderby
 	}
 	log.Printf("Newsgroup: '%s' | GetMessageIDsWithDateFilter: Executing query: '%s' with args: '%v'", ng.Name, query, args)
-	rows, err := groupDBs.DB.Query(query, args...)
+	rows, err := groupDB.DB.Query(query, args...)
 	if err != nil {
 		log.Printf("ERROR Newsgroup: '%s' | GetMessageIDsWithDateFilter: Failed to execute query: %v", ng.Name, err)
 		return err
@@ -3449,7 +3449,7 @@ func (db *Database) releaseTmpChan(tmpChan chan *string, resultChan chan []*stri
 // GetArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
 func (db *Database) GetArticlesBatchWithDateFilter(ng *models.Newsgroup, offset int64, startTime, endTime *time.Time, dbBatchSize int64) ([]*models.Article, error) {
 	// Get group database
-	groupDBs, err := db.GetGroupDBs(ng.Name)
+	groupDB, err := db.GetGroupDB(ng.Name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", ng.Name, err)
 	}
@@ -3487,9 +3487,9 @@ func (db *Database) GetArticlesBatchWithDateFilter(ng *models.Newsgroup, offset 
 		args = []interface{}{dbBatchSize, offset}
 	}
 
-	rows, err := groupDBs.DB.Query(query, args...)
+	rows, err := groupDB.DB.Query(query, args...)
 	if err != nil {
-		db.ForceCloseGroupDBs(groupDBs)
+		db.ForceCloseGroupDB(groupDB)
 		return nil, err
 	}
 	defer rows.Close()
@@ -3504,16 +3504,16 @@ func (db *Database) GetArticlesBatchWithDateFilter(ng *models.Newsgroup, offset 
 	}
 
 	if int64(len(out)) < dbBatchSize {
-		db.ForceCloseGroupDBs(groupDBs)
+		db.ForceCloseGroupDB(groupDB)
 	} else {
-		groupDBs.Return()
+		groupDB.Return()
 	}
 	return out, nil
 }
 
 // GetArticleCountWithDateFilter gets the total count of articles with optional date filtering
 // When no date filter is specified, uses cached message_count from newsgroups table in main DB
-func (db *Database) GetArticleCountWithDateFilter(groupDBs *GroupDBs, startTime, endTime *time.Time) (int64, error) {
+func (db *Database) GetArticleCountWithDateFilter(groupDB *GroupDB, startTime, endTime *time.Time) (int64, error) {
 	var query string
 	var args []interface{}
 	var count int64
@@ -3542,7 +3542,7 @@ func (db *Database) GetArticleCountWithDateFilter(groupDBs *GroupDBs, startTime,
 		}
 
 		query = "SELECT COUNT(*) FROM articles" + whereClause
-		err := groupDBs.DB.QueryRow(query, args...).Scan(&count)
+		err := groupDB.DB.QueryRow(query, args...).Scan(&count)
 		if err != nil {
 			return 0, err
 		}
@@ -3550,12 +3550,12 @@ func (db *Database) GetArticleCountWithDateFilter(groupDBs *GroupDBs, startTime,
 		// No date filtering - use cached message_count from newsgroups table in main DB
 		// This is MUCH faster than COUNT(*) on large tables (O(1) vs O(N))
 		query = "SELECT COALESCE(message_count, 0) FROM newsgroups WHERE name = ?"
-		err := db.GetMainDB().QueryRow(query, groupDBs.Newsgroup).Scan(&count)
+		err := db.GetMainDB().QueryRow(query, groupDB.Newsgroup).Scan(&count)
 		if err != nil {
 			// Fallback to direct COUNT if newsgroups table doesn't have the entry
-			log.Printf("WARNING: Could not get message_count from newsgroups table for '%s', falling back to COUNT(*): %v", groupDBs.Newsgroup, err)
+			log.Printf("WARNING: Could not get message_count from newsgroups table for '%s', falling back to COUNT(*): %v", groupDB.Newsgroup, err)
 			query = "SELECT COUNT(*) FROM articles"
-			err = groupDBs.DB.QueryRow(query).Scan(&count)
+			err = groupDB.DB.QueryRow(query).Scan(&count)
 			if err != nil {
 				return 0, err
 			}
@@ -3564,7 +3564,7 @@ func (db *Database) GetArticleCountWithDateFilter(groupDBs *GroupDBs, startTime,
 
 	elapsed := time.Since(start)
 	if elapsed > 5*time.Second {
-		log.Printf("WARNING: Slow COUNT query for group '%s' took %v (count=%d)", groupDBs.Newsgroup, elapsed, count)
+		log.Printf("WARNING: Slow COUNT query for group '%s' took %v (count=%d)", groupDB.Newsgroup, elapsed, count)
 	}
 
 	return count, nil

@@ -73,9 +73,9 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 		// Get the original article to extract subject and body for reply
 		if articleNum, err := strconv.ParseInt(replyToArticleNum, 10, 64); err == nil {
 			// Get group database connection
-			if groupDBs, err := s.DB.GetGroupDBs(prefilledNewsgroup); err == nil {
-				defer groupDBs.Return()
-				if reply_article, err := s.DB.GetArticleByNum(groupDBs, articleNum); err == nil {
+			if groupDB, err := s.DB.GetGroupDB(prefilledNewsgroup); err == nil {
+				defer groupDB.Return()
+				if reply_article, err := s.DB.GetArticleByNum(groupDB, articleNum); err == nil {
 					// Handle subject with "Re: " prefix
 					if !strings.HasPrefix(strings.ToLower(reply_article.Subject), "re:") {
 						article.Subject = "Re: " + models.ConvertToUTF8(reply_article.Subject)
@@ -375,14 +375,14 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		// Try to find the original article to get its References
 		var originalRefs string
 		for _, newsgroup := range newsgroups {
-			groupDBs, err := s.DB.GetGroupDBs(newsgroup)
+			groupDB, err := s.DB.GetGroupDB(newsgroup)
 			if err != nil {
 				log.Printf("Warning: Failed to get group DB for %s: %v", newsgroup, err)
 				continue
 			}
-			defer groupDBs.Return()
+			defer groupDB.Return()
 
-			originalArticle, err := s.DB.GetArticleByMessageID(groupDBs, messageID)
+			originalArticle, err := s.DB.GetArticleByMessageID(groupDB, messageID)
 			if err != nil {
 				log.Printf("Warning: Failed to find original article %s in %s: %v", messageID, newsgroup, err)
 				continue

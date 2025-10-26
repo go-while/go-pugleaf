@@ -12,7 +12,7 @@ var RescanBatchSize int64 = 25000
 
 func (db *Database) GetLatestArticleNumberFromOverview(newsgroup string) (int64, error) {
 	// Since overview table is unified with articles, query articles table instead
-	groupDB, err := db.GetGroupDBs(newsgroup)
+	groupDB, err := db.GetGroupDB(newsgroup)
 	if err != nil {
 		return 0, err
 	}
@@ -97,7 +97,7 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 	}
 
 	// 2. Get group databases
-	groupDB, err := db.GetGroupDBs(newsgroup)
+	groupDB, err := db.GetGroupDB(newsgroup)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get group databases: %v", err))
 		return report, nil
@@ -157,7 +157,7 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 }
 
 // findMissingArticles finds gaps in article numbering using batched processing
-func (db *Database) findMissingArticles(groupDB *GroupDBs, maxArticleNum int64) []int64 {
+func (db *Database) findMissingArticles(groupDB *GroupDB, maxArticleNum int64) []int64 {
 	var missing []int64
 	if maxArticleNum <= 0 {
 		return missing
@@ -217,7 +217,7 @@ func (db *Database) findMissingArticles(groupDB *GroupDBs, maxArticleNum int64) 
 }
 
 // findOrphanedThreads finds thread entries pointing to non-existent articles using batched processing
-func (db *Database) findOrphanedThreads(groupDB *GroupDBs) []int64 {
+func (db *Database) findOrphanedThreads(groupDB *GroupDB) []int64 {
 	var orphaned []int64
 
 	log.Printf("Building article index in batches of %d", RescanBatchSize)
@@ -380,7 +380,7 @@ const query_RebuildThreadsFromScratch5 = "SELECT article_num, message_id FROM ar
 // RebuildThreadsFromScratch completely rebuilds all thread relationships for a newsgroup
 // This function deletes all existing threads and rebuilds them from article 1 based on message references
 // If groupDB is provided (not nil), it will use that instead of opening the newsgroup's database
-func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, groupDB *GroupDBs) (*ThreadRebuildReport, error) {
+func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, groupDB *GroupDB) (*ThreadRebuildReport, error) {
 	report := &ThreadRebuildReport{
 		Newsgroup: newsgroup,
 		StartTime: time.Now(),
@@ -395,7 +395,7 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, gr
 	var shouldCloseDB bool
 	if groupDB == nil {
 		var err error
-		groupDB, err = db.GetGroupDBs(newsgroup)
+		groupDB, err = db.GetGroupDB(newsgroup)
 		if err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("Failed to get group database: %v", err))
 			return report, err
@@ -571,7 +571,7 @@ const query_processThreadBatch3 = "INSERT INTO threads (root_article, parent_art
 
 // processThreadBatch processes a batch of articles to build thread relationships
 // Based on the actual threading system: only ROOT articles go in threads table, replies only update thread_cache
-func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[string]int64, offset, batchSize int64, verbose bool) (int, error) {
+func (db *Database) processThreadBatch(groupDB *GroupDB, msgIDToArticleNum map[string]int64, offset, batchSize int64, verbose bool) (int, error) {
 	// Get batch of articles with their references and dates
 	rows, err := RetryableQuery(groupDB.DB, query_processThreadBatch1, batchSize, offset)
 	if err != nil {
@@ -762,7 +762,7 @@ const query_initializeThreadCacheSimple1 = `
 	`
 
 // initializeThreadCacheSimple initializes thread cache for a root article
-func (db *Database) initializeThreadCacheSimple(groupDB *GroupDBs, threadRoot int64, rootDate time.Time) error {
+func (db *Database) initializeThreadCacheSimple(groupDB *GroupDB, threadRoot int64, rootDate time.Time) error {
 	// Validate root date - skip obvious future posts
 	now := time.Now().UTC()
 	futureLimit := now.Add(25 * time.Hour)
@@ -797,7 +797,7 @@ const query_updateThreadCacheWithChildren2 = `
 		`
 
 // updateThreadCacheWithChildren updates the thread_cache table with child article lists
-func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDBs, rootUpdates map[int64][]int64, verbose bool) error {
+func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDB, rootUpdates map[int64][]int64, verbose bool) error {
 	if len(rootUpdates) == 0 {
 		return nil
 	}

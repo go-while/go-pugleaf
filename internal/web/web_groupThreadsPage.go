@@ -28,16 +28,16 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 	}
 
 	// Get group database connections
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		log.Printf("Failed to get group databases for %s: %v", groupName, err)
 		s.renderError(c, http.StatusInternalServerError, "Database error", err.Error())
 		return
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
 	// Use cached thread data for fast performance
-	forumThreads, totalThreads, err := s.DB.GetCachedThreads(groupDBs, page, Threads_perPage)
+	forumThreads, totalThreads, err := s.DB.GetCachedThreads(groupDB, page, Threads_perPage)
 	if err != nil {
 		log.Printf("Failed to get cached threads for %s: %v", groupName, err)
 		s.renderError(c, http.StatusInternalServerError, "Failed to load threads", err.Error())
@@ -53,7 +53,7 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 				ft.RootArticle.ArticleNums = make(map[*string]int64)
 			}
 			// Store the article number for this newsgroup
-			ft.RootArticle.ArticleNums[groupDBs.NewsgroupPtr] = ft.RootArticle.ArticleNum
+			ft.RootArticle.ArticleNums[groupDB.NewsgroupPtr] = ft.RootArticle.ArticleNum
 			rootOverviews = append(rootOverviews, ft.RootArticle)
 		}
 	}
@@ -89,7 +89,7 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 		"AvailableSections":   baseData.AvailableSections,
 		"AvailableAIModels":   baseData.AvailableAIModels,
 		"GroupName":           groupName,
-		"GroupPtr":            groupDBs.NewsgroupPtr,
+		"GroupPtr":            groupDB.NewsgroupPtr,
 		"ForumThreads":        forumThreads,
 		"TotalThreads":        totalThreads,
 		"TotalMessages":       totalMessages,

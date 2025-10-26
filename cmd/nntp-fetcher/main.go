@@ -403,15 +403,15 @@ func main() {
 				switch lastArticle {
 				case 0:
 					// Open group DB only when we need to check last-article date
-					groupDBs, err := proc.DB.GetGroupDBs(*ng)
+					groupDB, err := proc.DB.GetGroupDB(*ng)
 					if err != nil {
 						log.Printf("[FETCHER]: Failed to get group DBs for newsgroup '%s': %v", *ng, err)
 						continue
 					}
-					lastArticleDate, checkDateErr := proc.DB.GetLastArticleDate(groupDBs)
+					lastArticleDate, checkDateErr := proc.DB.GetLastArticleDate(groupDB)
 					// ensure close regardless of errors
-					if ferr := proc.DB.ForceCloseGroupDBs(groupDBs); ferr != nil {
-						log.Printf("[FETCHER]: ForceCloseGroupDBs error for '%s': %v", *ng, ferr)
+					if ferr := proc.DB.ForceCloseGroupDB(groupDB); ferr != nil {
+						log.Printf("[FETCHER]: ForceCloseGroupDB error for '%s': %v", *ng, ferr)
 					}
 					if checkDateErr != nil {
 						log.Printf("[FETCHER]: Failed to get last article date for '%s': %v", *ng, checkDateErr)

@@ -41,17 +41,17 @@ func (db *Database) cleanupIdleGroups() {
 		}
 		var candidates []dbAge
 
-		for groupName, groupDBs := range db.groupDBs {
-			if groupDBs == nil {
-				log.Printf("cleanupIdleGroups Warning: GroupDBs for '%s' is nil, skipping", groupName)
+		for groupName, groupDB := range db.groupDB {
+			if groupDB == nil {
+				log.Printf("cleanupIdleGroups Warning: GroupDB for '%s' is nil, skipping", groupName)
 				continue
 			}
-			groupDBs.mux.RLock()
+			groupDB.mux.RLock()
 			candidates = append(candidates, dbAge{
 				name: groupName,
-				age:  time.Since(groupDBs.Idle),
+				age:  time.Since(groupDB.Idle),
 			})
-			groupDBs.mux.RUnlock()
+			groupDB.mux.RUnlock()
 		}
 
 		// Sort by age (oldest first)
@@ -71,22 +71,22 @@ func (db *Database) cleanupIdleGroups() {
 			if db.openDBsNum <= MaxOpenDatabases/2 {
 				break
 			}
-			groupDBs := db.groupDBs[candidate.name]
-			if groupDBs != nil {
-				groupDBs.mux.Lock()
-				if groupDBs.Workers == 0 {
-					if err := groupDBs.Close("force cleanup"); err != nil {
+			groupDB := db.groupDB[candidate.name]
+			if groupDB != nil {
+				groupDB.mux.Lock()
+				if groupDB.Workers == 0 {
+					if err := groupDB.Close("force cleanup"); err != nil {
 						log.Printf("Failed to force close group database for '%s': %v", candidate.name, err)
 					} else {
-						delete(db.groupDBs, candidate.name)
+						delete(db.groupDB, candidate.name)
 						db.openDBsNum--
 						closedCount++
 						log.Printf("Force closed idle DB ng: '%s' (age: %v)", candidate.name, candidate.age)
 					}
 				} else {
-					//log.Printf("Skipping force close for busy group DB '%s' (workers: %d)", candidate.name, groupDBs.Workers)
+					//log.Printf("Skipping force close for busy group DB '%s' (workers: %d)", candidate.name, groupDB.Workers)
 				}
-				groupDBs.mux.Unlock()
+				groupDB.mux.Unlock()
 			}
 		}
 		log.Printf("Force closed %d databases due to exceeding limit (%d >= %d)", closedCount, db.openDBsNum+closedCount, MaxOpenDatabases)
@@ -97,37 +97,37 @@ func (db *Database) cleanupIdleGroups() {
 
 	db.MainMutex.Lock()
 	// normal idle processing with idle time
-	for groupName, groupDBs := range db.groupDBs {
-		if groupDBs == nil {
-			log.Printf("cleanupIdleGroups Warning: GroupDBs for '%s' is nil, skipping", groupName)
+	for groupName, groupDB := range db.groupDB {
+		if groupDB == nil {
+			log.Printf("cleanupIdleGroups Warning: GroupDB for '%s' is nil, skipping", groupName)
 			continue
 		}
 
 		// Use a non-blocking check to avoid holding locks too long
-		groupDBs.mux.Lock()
-		if groupDBs.Workers < 0 {
-			log.Printf("Warning: Negative worker count for group '%s': %d", groupName, groupDBs.Workers)
+		groupDB.mux.Lock()
+		if groupDB.Workers < 0 {
+			log.Printf("Warning: Negative worker count for group '%s': %d", groupName, groupDB.Workers)
 		}
-		isIdle := (groupDBs.Workers == 0 && time.Since(groupDBs.Idle) > DBidleTimeOut)
+		isIdle := (groupDB.Workers == 0 && time.Since(groupDB.Idle) > DBidleTimeOut)
 		if isIdle {
 			// Mark for closure and remove from active map immediately
-			if err := groupDBs.Close("cleanupIdleGroups"); err != nil {
-				log.Printf("Failed to close group database for '%s': %v", groupDBs.Newsgroup, err)
-				groupDBs.mux.Unlock()
+			if err := groupDB.Close("cleanupIdleGroups"); err != nil {
+				log.Printf("Failed to close group database for '%s': %v", groupDB.Newsgroup, err)
+				groupDB.mux.Unlock()
 				continue
 			}
-			//groupsToClose = append(groupsToClose, groupDBs)
-			delete(db.groupDBs, groupName)
+			//groupsToClose = append(groupsToClose, groupDB)
+			delete(db.groupDB, groupName)
 			db.openDBsNum--
 		}
-		groupDBs.mux.Unlock()
+		groupDB.mux.Unlock()
 	}
 	db.MainMutex.Unlock()
 }
 
 func (db *Database) removePartialInitializedGroupDB(groupName string) {
 	db.MainMutex.Lock()
-	db.groupDBs[groupName] = nil
+	db.groupDB[groupName] = nil
 	db.MainMutex.Unlock()
 }
 
@@ -137,16 +137,16 @@ func (db *Database) Shutdown() error {
 
 	// Close per-group databases first (thousands of them)
 	db.MainMutex.Lock()
-	log.Printf("[DATABASE] Closing %d group databases...", len(db.groupDBs))
+	log.Printf("[DATABASE] Closing %d group databases...", len(db.groupDB))
 	groupCloseErrors := 0
-	for groupName, groupDBs := range db.groupDBs {
-		if groupDBs != nil && groupDBs.DB != nil {
-			groupDBs.mux.Lock()
-			if err := groupDBs.DB.Close(); err != nil {
+	for groupName, groupDB := range db.groupDB {
+		if groupDB != nil && groupDB.DB != nil {
+			groupDB.mux.Lock()
+			if err := groupDB.DB.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("failed to close group database %s: %w", groupName, err))
 				groupCloseErrors++
 			}
-			groupDBs.mux.Unlock()
+			groupDB.mux.Unlock()
 		}
 	}
 	db.MainMutex.Unlock()
@@ -156,7 +156,7 @@ func (db *Database) Shutdown() error {
 
 	// Clear the group databases map
 	db.MainMutex.Lock()
-	db.groupDBs = make(map[string]*GroupDBs)
+	db.groupDB = make(map[string]*GroupDB)
 	db.MainMutex.Unlock()
 	log.Printf("[DATABASE] Group databases closed")
 
@@ -190,7 +190,7 @@ type Stats struct {
 		WaitCount       int64
 		WaitDuration    time.Duration
 	}
-	GroupDBs map[string]struct {
+	GroupDB map[string]struct {
 		OpenConnections int
 		IdleConnections int
 		WaitCount       int64
@@ -201,7 +201,7 @@ type Stats struct {
 // GetDatabaseStats returns database connection statistics
 func (db *Database) GetDatabaseStats() *Stats {
 	stats := &Stats{
-		GroupDBs: make(map[string]struct {
+		GroupDB: make(map[string]struct {
 			OpenConnections int
 			IdleConnections int
 			WaitCount       int64
@@ -221,12 +221,12 @@ func (db *Database) GetDatabaseStats() *Stats {
 	// Group database stats
 	db.MainMutex.RLock()
 	defer db.MainMutex.RUnlock()
-	for groupName, groupDBs := range db.groupDBs {
-		if groupDBs != nil {
-			groupDBs.mux.RLock()
-			if groupDBs.DB != nil {
-				dbStats := groupDBs.DB.Stats()
-				stats.GroupDBs[groupName] = struct {
+	for groupName, groupDB := range db.groupDB {
+		if groupDB != nil {
+			groupDB.mux.RLock()
+			if groupDB.DB != nil {
+				dbStats := groupDB.DB.Stats()
+				stats.GroupDB[groupName] = struct {
 					OpenConnections int
 					IdleConnections int
 					WaitCount       int64
@@ -238,7 +238,7 @@ func (db *Database) GetDatabaseStats() *Stats {
 					WaitDuration:    dbStats.WaitDuration,
 				}
 			}
-			groupDBs.mux.RUnlock()
+			groupDB.mux.RUnlock()
 		}
 	}
 
@@ -361,15 +361,15 @@ func (db *Database) IncrementArticleSpam(groupName string, articleNum int64) err
 	}
 	log.Printf("DEBUG: Found newsgroupID=%d for group %s", newsgroupID, groupName)
 
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		log.Printf("DEBUG: Failed to get group databases for %s: %v", groupName, err)
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
 	// Update spam counter in group database
-	result, err := RetryableExec(groupDBs.DB, "UPDATE articles SET spam = spam + 1 WHERE article_num = ?", articleNum)
+	result, err := RetryableExec(groupDB.DB, "UPDATE articles SET spam = spam + 1 WHERE article_num = ?", articleNum)
 	if err != nil {
 		log.Printf("DEBUG: Failed to update spam count in group DB: %v", err)
 		return fmt.Errorf("failed to increment spam count: %w", err)
@@ -393,13 +393,13 @@ func (db *Database) IncrementArticleSpam(groupName string, articleNum int64) err
 
 // IncrementArticleHide increments the hide counter for a specific article
 func (db *Database) IncrementArticleHide(groupName string, articleNum int64) error {
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
-	_, err = RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ? AND spam > 0", articleNum)
+	_, err = RetryableExec(groupDB.DB, "UPDATE articles SET hide = 1 WHERE article_num = ? AND spam > 0", articleNum)
 	if err != nil {
 		return fmt.Errorf("failed to increment hide count: %w", err)
 	}
@@ -409,13 +409,13 @@ func (db *Database) IncrementArticleHide(groupName string, articleNum int64) err
 
 // UnHideArticle sets the hide counter to zero for a specific article
 func (db *Database) UnHideArticle(groupName string, articleNum int64) error {
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
-	_, err = RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 0 WHERE article_num = ?", articleNum)
+	_, err = RetryableExec(groupDB.DB, "UPDATE articles SET hide = 0 WHERE article_num = ?", articleNum)
 	if err != nil {
 		return fmt.Errorf("failed to unhide: %w", err)
 	}
@@ -435,16 +435,16 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 	}
 	log.Printf("DEBUG: Found newsgroupID=%d for group %s", newsgroupID, groupName)
 
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		log.Printf("DEBUG: Failed to get group databases for %s: %v", groupName, err)
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
 	// Check current spam count first
 	var currentSpam int
-	err = RetryableQueryRowScan(groupDBs.DB, "SELECT spam FROM articles WHERE article_num = ?", []interface{}{articleNum}, &currentSpam)
+	err = RetryableQueryRowScan(groupDB.DB, "SELECT spam FROM articles WHERE article_num = ?", []interface{}{articleNum}, &currentSpam)
 	if err != nil {
 		log.Printf("DEBUG: Failed to get current spam count: %v", err)
 		return fmt.Errorf("failed to get current spam count: %w", err)
@@ -456,7 +456,7 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 	}
 
 	// Decrement spam counter in group database
-	result, err := RetryableExec(groupDBs.DB, "UPDATE articles SET spam = spam - 1 WHERE article_num = ? AND spam > 0", articleNum)
+	result, err := RetryableExec(groupDB.DB, "UPDATE articles SET spam = spam - 1 WHERE article_num = ? AND spam > 0", articleNum)
 	if err != nil {
 		log.Printf("DEBUG: Failed to decrement spam count in group DB: %v", err)
 		return fmt.Errorf("failed to decrement spam count: %w", err)

@@ -28,7 +28,7 @@ type ArticleRetrievalResult struct {
 	Overview   *models.Overview
 	ArticleNum int64
 	MsgIdItem  *history.MessageIdItem
-	//GroupDBs   *database.GroupDBs
+	//GroupDB   *database.GroupDB
 }
 
 // retrieveArticleCommon handles the common logic for ARTICLE, HEAD, BODY, and STAT commands
@@ -71,7 +71,7 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 
 // getArticleData handles the common article lookup logic
 func (c *ClientConnection) getArticleData(args []string) (ArticleRetrievalResult, error) {
-	var groupDBs *database.GroupDBs
+	var groupDB *database.GroupDB
 	var articleNum int64
 	var msgIdItem *history.MessageIdItem
 	var err error
@@ -91,7 +91,7 @@ func (c *ClientConnection) getArticleData(args []string) (ArticleRetrievalResult
 			return ArticleRetrievalResult{}, nil
 		}
 		// Get group database
-		groupDBs, err = c.server.DB.GetGroupDBs(c.currentGroup)
+		groupDB, err = c.server.DB.GetGroupDB(c.currentGroup)
 		if err != nil {
 			c.rateLimitOnError()
 			c.sendResponse(411, "No such newsgroup")
@@ -220,8 +220,8 @@ func (c *ClientConnection) getArticleData(args []string) (ArticleRetrievalResult
 		}
 
 		// Get group database for the specific group from storage token
-		if groupDBs == nil || groupDBs.Newsgroup != *msgIdItem.GroupName {
-			groupDBs, err = c.server.DB.GetGroupDBs(*msgIdItem.GroupName)
+		if groupDB == nil || groupDB.Newsgroup != *msgIdItem.GroupName {
+			groupDB, err = c.server.DB.GetGroupDB(*msgIdItem.GroupName)
 			if err != nil {
 				c.server.local430.Add(msgIdItem)
 				c.rateLimitOnError()
@@ -231,29 +231,29 @@ func (c *ClientConnection) getArticleData(args []string) (ArticleRetrievalResult
 		}
 
 		// Get article by the specific article number from storage token
-		article, err = c.server.DB.GetArticleByNum(groupDBs, msgIdItem.ArtNum)
+		article, err = c.server.DB.GetArticleByNum(groupDB, msgIdItem.ArtNum)
 		if err != nil {
 			c.server.local430.Add(msgIdItem)
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF8")
 			return ArticleRetrievalResult{}, nil
 		}
-		articleNum = article.ArticleNums[groupDBs.NewsgroupPtr]
+		articleNum = article.ArticleNums[groupDB.NewsgroupPtr]
 
 	} else {
 		// Handle article number lookup
-		if groupDBs == nil {
-			groupDBs, err = c.server.DB.GetGroupDBs(c.currentGroup)
+		if groupDB == nil {
+			groupDB, err = c.server.DB.GetGroupDB(c.currentGroup)
 			if err != nil {
 				c.rateLimitOnError()
 				c.sendResponse(411, "No such newsgroup")
 				return ArticleRetrievalResult{}, nil
 			}
-			defer groupDBs.Return()
+			defer groupDB.Return()
 		}
 
 		// For STAT command, we can use overview instead of full article
-		overview, err = c.server.DB.GetOverviewByArticleNum(groupDBs, articleNum)
+		overview, err = c.server.DB.GetOverviewByArticleNum(groupDB, articleNum)
 		if err != nil {
 			c.rateLimitOnError()
 			c.sendResponse(423, "No such article number")
@@ -261,7 +261,7 @@ func (c *ClientConnection) getArticleData(args []string) (ArticleRetrievalResult
 		}
 
 		// For other commands, get the full article
-		article, err = c.server.DB.GetArticleByNum(groupDBs, articleNum)
+		article, err = c.server.DB.GetArticleByNum(groupDB, articleNum)
 		if err != nil {
 			c.rateLimitOnError()
 			c.sendResponse(423, "No such article number")
@@ -283,7 +283,7 @@ func (c *ClientConnection) getArticleData(args []string) (ArticleRetrievalResult
 			return ArticleRetrievalResult{}, fmt.Errorf("error msgid cache")
 		}
 
-		task := c.server.DB.Batch.GetOrCreateTasksMapKey(groupDBs.Newsgroup)
+		task := c.server.DB.Batch.GetOrCreateTasksMapKey(groupDB.Newsgroup)
 		if task != nil {
 			msgIdItem.Mux.Lock()
 			msgIdItem.GroupName = task.Newsgroup

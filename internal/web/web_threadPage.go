@@ -44,15 +44,15 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 		page = 1
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.String(http.StatusNotFound, "Group not found: %v", err)
 		return
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
 	// Get the thread root overview first
-	rootOverview, err := s.DB.GetOverviewByArticleNum(groupDBs, threadRoot)
+	rootOverview, err := s.DB.GetOverviewByArticleNum(groupDB, threadRoot)
 	if err != nil {
 		c.String(http.StatusNotFound, "Thread root article %d not found: %v", threadRoot, err)
 		return
@@ -65,7 +65,7 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 	}
 
 	// Load the full ThreadRoot article to get ArticleNums populated
-	threadRootArticle, err := s.DB.GetArticleByNum(groupDBs, threadRoot)
+	threadRootArticle, err := s.DB.GetArticleByNum(groupDB, threadRoot)
 	if err != nil {
 		c.String(http.StatusNotFound, "Thread root article %d not found: %v", threadRoot, err)
 		return
@@ -75,10 +75,10 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 	if threadRootArticle.ArticleNums == nil {
 		threadRootArticle.ArticleNums = make(map[*string]int64)
 	}
-	threadRootArticle.ArticleNums[groupDBs.NewsgroupPtr] = threadRoot
+	threadRootArticle.ArticleNums[groupDB.NewsgroupPtr] = threadRoot
 
 	// Use cached thread replies with pagination
-	threadReplies, totalReplies, err := s.DB.GetCachedThreadReplies(groupDBs, threadRoot, page, ThreadMessages_perPage)
+	threadReplies, totalReplies, err := s.DB.GetCachedThreadReplies(groupDB, threadRoot, page, ThreadMessages_perPage)
 	if err != nil {
 		log.Printf("Failed to get cached thread replies for %s/%d: %v", groupName, threadRoot, err)
 		s.renderError(c, http.StatusInternalServerError, "Failed to load thread replies", err.Error())
@@ -115,7 +115,7 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 			continue
 		}
 
-		article, err := s.DB.GetArticleByNum(groupDBs, overview.ArticleNum)
+		article, err := s.DB.GetArticleByNum(groupDB, overview.ArticleNum)
 		if err != nil {
 			log.Printf("Warning: Could not load article %d: %v", overview.ArticleNum, err)
 			// If we can't load the full article, we could fall back to overview data
@@ -127,7 +127,7 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 		if article.ArticleNums == nil {
 			article.ArticleNums = make(map[*string]int64)
 		}
-		article.ArticleNums[groupDBs.NewsgroupPtr] = overview.ArticleNum
+		article.ArticleNums[groupDB.NewsgroupPtr] = overview.ArticleNum
 		article.Mux.Unlock()
 		threadMessages = append(threadMessages, article)
 	}
@@ -153,7 +153,7 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 		"AvailableSections":   baseData.AvailableSections,
 		"AvailableAIModels":   baseData.AvailableAIModels,
 		"GroupName":           groupName,
-		"GroupPtr":            groupDBs.NewsgroupPtr,
+		"GroupPtr":            groupDB.NewsgroupPtr,
 		"ThreadRoot":          threadRootArticle,
 		"ThreadMessages":      threadMessages,
 		"MessageCount":        totalMessages,

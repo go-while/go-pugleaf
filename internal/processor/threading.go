@@ -231,29 +231,29 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 			}
 
 			//log.Printf("Crossposted article '%s' to newsgroup '%s'", article.MessageID, group)
-			groupDBs, err := proc.DB.GetGroupDBs(newsgroup)
+			groupDB, err := proc.DB.GetGroupDB(newsgroup)
 			if err != nil {
 				log.Printf("Failed to get group DBs for newsgroup '%s': %v", newsgroup, err)
-				if groupDBs != nil {
-					groupDBs.Return() // Return connection even on error
+				if groupDB != nil {
+					groupDB.Return() // Return connection even on error
 				}
 				continue // Continue with other groups
 			}
-			if groupDBs.ExistsMsgIdInArticlesDB(article.MessageID) {
-				groupDBs.Return() // Return connection before continuing
+			if groupDB.ExistsMsgIdInArticlesDB(article.MessageID) {
+				groupDB.Return() // Return connection before continuing
 				continue
 			}
 			/*
 				// Skip database duplicate check for bulk legacy imports
 				if !bulkmode {
 					// check if article exists in articledb - this is the expensive operation
-					if groupDBs.ExistsMsgIdInArticlesDB(article.MessageID) {
-						groupDBs.Return(proc.DB) // Return connection before continuing
+					if groupDB.ExistsMsgIdInArticlesDB(article.MessageID) {
+						groupDB.Return(proc.DB) // Return connection before continuing
 						continue
 					}
 				}
 			*/
-			groupDBs.Return()
+			groupDB.Return()
 
 			go proc.DB.Batch.BatchCaptureOverviewForLater(newsgroupPtr, article)
 

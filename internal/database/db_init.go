@@ -36,8 +36,8 @@ type Database struct {
 	mainDB *sql.DB
 
 	// Per-group database connections (cached)
-	groupDBs   map[string]*GroupDBs // map with open database pointers
-	openDBsNum int                  // Total number of open group databases
+	groupDB   map[string]*GroupDB // map with open database pointers
+	openDBsNum int                 // Total number of open group databases
 
 	MainMutex sync.RWMutex
 
@@ -148,7 +148,7 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 
 	db := &Database{
 		dbconfig: dbconfig,
-		groupDBs: make(map[string]*GroupDBs),
+		groupDB: make(map[string]*GroupDB),
 		WG:       &sync.WaitGroup{}, // Initialize wait group for background tasks
 
 	}

@@ -310,11 +310,11 @@ func getNewsgroupsToExpire(db *database.Database, targetGroup string) ([]*models
 // expireArticlesInGroup expires articles older than cutoffDate in the specified group
 func expireArticlesInGroup(db *database.Database, groupName string, cutoffDate time.Time, batchSize int, dryRun bool) (int, int, error) {
 	// Get group database
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get group database: %v", err)
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
 	totalExpired := 0
 	totalScanned := 0
@@ -324,7 +324,7 @@ func expireArticlesInGroup(db *database.Database, groupName string, cutoffDate t
 	offset := 0
 	for {
 		// Get batch of articles
-		articles, err := getArticleBatch(groupDBs, offset, batchSize)
+		articles, err := getArticleBatch(groupDB, offset, batchSize)
 		if err != nil {
 			return totalExpired, totalScanned, fmt.Errorf("failed to get article batch: %v", err)
 		}
@@ -357,7 +357,7 @@ func expireArticlesInGroup(db *database.Database, groupName string, cutoffDate t
 
 		// Delete articles in this batch if not dry run
 		if !dryRun && len(articlesToDelete) > 0 {
-			if err := deleteArticles(groupDBs, articlesToDelete); err != nil {
+			if err := deleteArticles(groupDB, articlesToDelete); err != nil {
 				return totalExpired, totalScanned, fmt.Errorf("failed to delete articles: %v", err)
 			}
 		}
@@ -380,7 +380,7 @@ func expireArticlesInGroup(db *database.Database, groupName string, cutoffDate t
 }
 
 // getArticleBatch retrieves a batch of articles from the group database
-func getArticleBatch(groupDBs *database.GroupDBs, offset, limit int) ([]*models.Article, error) {
+func getArticleBatch(groupDB *database.GroupDB, offset, limit int) ([]*models.Article, error) {
 	query := `
 		SELECT article_num, date_sent
 		FROM articles
@@ -388,7 +388,7 @@ func getArticleBatch(groupDBs *database.GroupDBs, offset, limit int) ([]*models.
 		LIMIT ? OFFSET ?
 	`
 
-	rows, err := database.RetryableQuery(groupDBs.DB, query, limit, offset)
+	rows, err := database.RetryableQuery(groupDB.DB, query, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -398,8 +398,8 @@ func getArticleBatch(groupDBs *database.GroupDBs, offset, limit int) ([]*models.
 	for rows.Next() {
 		article := &models.Article{}
 		article.ArticleNums = make(map[*string]int64)
-		article.ArticleNums[groupDBs.NewsgroupPtr] = -1 // Initialize with group name
-		err := rows.Scan(article.ArticleNums[groupDBs.NewsgroupPtr], &article.DateSent)
+		article.ArticleNums[groupDB.NewsgroupPtr] = -1 // Initialize with group name
+		err := rows.Scan(article.ArticleNums[groupDB.NewsgroupPtr], &article.DateSent)
 		if err != nil {
 			return nil, err
 		}
@@ -410,13 +410,13 @@ func getArticleBatch(groupDBs *database.GroupDBs, offset, limit int) ([]*models.
 }
 
 // deleteArticles removes articles from the database using proper batch operations
-func deleteArticles(groupDBs *database.GroupDBs, articleNums []int64) error {
+func deleteArticles(groupDB *database.GroupDB, articleNums []int64) error {
 	if len(articleNums) == 0 {
 		return nil
 	}
 
 	// Begin transaction
-	tx, err := groupDBs.DB.Begin()
+	tx, err := groupDB.DB.Begin()
 	if err != nil {
 		return err
 	}
@@ -495,15 +495,15 @@ func getPlaceholders(count int) string {
 // pruneArticlesInGroup removes oldest articles to keep the group under maxArticles limit
 func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles int, batchSize int, dryRun bool) (int, int, error) {
 	// Get group database
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get group database: %v", err)
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
 	// First count total articles
 	var totalArticles int
-	err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COUNT(*) FROM articles", nil, &totalArticles)
+	err = database.RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", nil, &totalArticles)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to count articles: %v", err)
 	}
@@ -525,7 +525,7 @@ func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles i
 		LIMIT ?
 	`
 
-	rows, err := database.RetryableQuery(groupDBs.DB, query, articlesToRemove)
+	rows, err := database.RetryableQuery(groupDB.DB, query, articlesToRemove)
 	if err != nil {
 		return 0, totalArticles, fmt.Errorf("failed to query oldest articles: %v", err)
 	}
@@ -556,7 +556,7 @@ func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles i
 			}
 
 			batch := articlesToDelete[i:end]
-			if err := deleteArticles(groupDBs, batch); err != nil {
+			if err := deleteArticles(groupDB, batch); err != nil {
 				return totalPruned, totalArticles, fmt.Errorf("failed to delete article batch: %v", err)
 			}
 
@@ -577,22 +577,22 @@ func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles i
 // updateNewsgroupCounters updates the message count and last article number for a newsgroup
 func updateNewsgroupCounters(db *database.Database, groupName string) error {
 	// Get group database to count current articles
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return fmt.Errorf("failed to get group database: %v", err)
 	}
-	defer groupDBs.Return()
+	defer groupDB.Return()
 
 	// Count current articles
 	var messageCount int64
-	err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COUNT(*) FROM articles", nil, &messageCount)
+	err = database.RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", nil, &messageCount)
 	if err != nil {
 		return fmt.Errorf("failed to count articles: %v", err)
 	}
 
 	// Get the highest article number
 	var lastArticle int64
-	err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", nil, &lastArticle)
+	err = database.RetryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", nil, &lastArticle)
 	if err != nil {
 		return fmt.Errorf("failed to get last article: %v", err)
 	}
