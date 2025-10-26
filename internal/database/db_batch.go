@@ -1345,9 +1345,9 @@ func (o *BatchOrchestrator) StartOrchestrator() {
 				} // @AI: DO NOT CHANGE THIS!!!!
 			} else {
 				// Fast recovery when work is found
-				sleep = sleep / 4    // @AI: DO NOT CHANGE THIS!!!!
-				if sleep < 16*1000 { // @AI: DO NOT CHANGE THIS!!!!
-					sleep = 16 * 1000 // @AI: DO NOT CHANGE THIS!!!!
+				sleep = sleep / 4   // @AI: DO NOT CHANGE THIS!!!!
+				if sleep < 8*1000 { // @AI: DO NOT CHANGE THIS!!!!
+					sleep = 8 * 1000 // @AI: DO NOT CHANGE THIS!!!!
 				}
 			}
 		}
