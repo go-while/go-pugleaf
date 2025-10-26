@@ -375,11 +375,11 @@ func main() {
 						//log.Printf("[FETCHER]: Newsgroup not found: '%s'", *ng)
 						continue
 					case io.EOF:
-						log.Printf("pool.SelectGroup failed. connection EOF. skipping ng: '%s'", *ng)
+						log.Printf("[FETCHER]: pool.SelectGroup failed. connection EOF. skipping ng: '%s'", *ng)
 						continue
 					default:
 						log.Printf("[FETCHER]: Error in select ng='%s' groupInfo='%#v' err='%v'", *ng, groupInfo, err)
-						return
+						continue
 					}
 				}
 				if groupInfo.Last == 0 || groupInfo.Last < groupInfo.First {

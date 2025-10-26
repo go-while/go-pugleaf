@@ -739,6 +739,7 @@ func getNewsgroupsToTransfer(db *database.Database, progressDB *nntp.TransferPro
 	var includeLookup, excludeLookup map[string]bool
 	var hasIncludeWildcards, hasExcludeWildcards bool
 	var err error
+	var notExists []string
 
 	if fileInclude != "" {
 		includePatterns, err = loadPatternsFromFile(fileInclude)
@@ -786,7 +787,21 @@ func getNewsgroupsToTransfer(db *database.Database, progressDB *nntp.TransferPro
 		return nil, fmt.Errorf("failed to get newsgroups from database: %v", err)
 	}
 	log.Printf("Loaded %d newsgroups from database in %v", len(allNewsgroups), time.Since(start))
-
+	quickLookup := make(map[string]bool, len(allNewsgroups))
+	for _, ng := range allNewsgroups {
+		quickLookup[ng.Name] = true
+	}
+	for ng := range includeLookup {
+		if !quickLookup[ng] {
+			notExists = append(notExists, ng)
+		}
+	}
+	if len(notExists) > 0 {
+		log.Printf("%d newsgroup not found locally.", len(notExists))
+		for _, ngName := range notExists {
+			log.Printf(" - %s (not found locally)", ngName)
+		}
+	}
 	// Handle force-include-only mode
 	if forceIncludeOnly {
 		if len(includePatterns) == 0 {
@@ -843,7 +858,8 @@ func getNewsgroupsToTransfer(db *database.Database, progressDB *nntp.TransferPro
 			}
 			// If no wildcards exist and no exact match, skip this newsgroup
 		}
-		log.Printf("Applied include pattern filtering in %v", time.Since(start))
+		log.Printf("Applied include pattern filtering in %v.", time.Since(start))
+		log.Printf("Force-include-only mode: found %d newsgroups to transfer after filtering", len(newsgroups))
 		return newsgroups, nil
 	}
 
