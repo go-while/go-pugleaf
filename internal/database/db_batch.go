@@ -15,25 +15,19 @@ import (
 
 // SQLite safety limits: split large batches to avoid parameter/length limits
 var BatchInterval = 3 * time.Second
-var MaxBatchSize int = 1000
-
-// don't process more than N groups in parallel: better have some cpu & mem when importing hard!
-var MaxBatchThreads = 16                   // -max-batch-threads N
-var MaxQueued = 1280                       // -max-queue N
-var InitialBatchChannelSize = MaxBatchSize // @AI: DO NOT CHANGE THIS!!!! per group cache channel size. should be less or equal to MaxBatch in processor aka MaxReadLinesXover in nntp-client-commands
 
 // Cache for placeholder strings to avoid rebuilding them repeatedly
 var placeholderCache sync.Map // map[int]string
 
-const DefaultShutDownCounter = 128
+const DefaultShutDownCounter = 120
 
 // getPlaceholders returns a comma-separated string of SQL placeholders (?) for the given count
-func getPlaceholders(count int) string {
+func (sq *SQ3batch) getPlaceholders(count int) string {
 	if count <= 0 {
 		return ""
 	}
 
-	if count == MaxBatchSize {
+	if count == sq.maxDBbatch {
 		if v, ok := placeholderCache.Load(count); ok {
 			return v.(string)
 		}
@@ -47,7 +41,7 @@ func getPlaceholders(count int) string {
 		s = strings.Repeat("?, ", count-1) + "?"
 	}
 
-	if count == MaxBatchSize {
+	if count == sq.maxDBbatch {
 		placeholderCache.Store(count, s)
 	}
 	return s
@@ -88,11 +82,11 @@ type ThreadingProcessor interface {
 }
 
 // SetProcessor sets the threading processor callback interface
-func (c *SQ3batch) SetProcessor(proc ThreadingProcessor) {
-	c.proc = proc
-	if MaxBatchSize > 1000 {
-		//log.Printf("[BATCH] MaxBatchSize is set to %d, reduced to 1000 in db_batch", MaxBatchSize)
-		MaxBatchSize = 1000
+func (sq *SQ3batch) SetProcessor(proc ThreadingProcessor) {
+	sq.proc = proc
+	if sq.maxDBbatch > 1000 {
+		//log.Printf("[BATCH] sq.maxDBbatch is set to %d, reduced to 1000 in db_batch", sq.maxDBbatch)
+		sq.maxDBbatch = 1000
 	}
 }
 
@@ -100,6 +94,9 @@ type SQ3batch struct {
 	db           *Database          // Reference to the main database
 	proc         ThreadingProcessor // Threading processor interface for message ID checks
 	orchestrator *BatchOrchestrator // Smart orchestrator for batch processing
+	maxDBbatch   int                // limits db batches to avoid mem and sqlite limits
+	maxDBthreads int                // limits number of concurrent db batch threads
+	maxQueued    int                // limits number of queued articles for batch processing
 
 	GMux               sync.RWMutex           // Mutex for TasksMap to ensure thread safety
 	TasksMap           map[string]*BatchTasks // Map which holds newsgroup cron taskspointers
@@ -109,6 +106,8 @@ type SQ3batch struct {
 	TmpStringPtrSlices chan []*string         // holds temporary string slices for valuesClauses, messageIDs etc
 	TmpInterfaceSlices chan []interface{}     // holds temporary interface slices for args in threading operations
 	queued             int                    // number of queued articles for batch processing
+	LimitChan          chan struct{}          // limits number of concurrent db batch threads
+	LPending           chan struct{}          // limits number of pending db batch threads
 }
 
 type BatchTasks struct {
@@ -122,14 +121,34 @@ type BatchTasks struct {
 }
 
 func NewSQ3batch(db *Database) *SQ3batch {
+	if db.dbconfig.MaxDBbatch < 100 {
+		db.dbconfig.MaxDBbatch = 100 // hardcoded lower limit
+	} else if db.dbconfig.MaxDBbatch > 10000 {
+		db.dbconfig.MaxDBbatch = 10000 // hardcoded upper limit
+	}
+	if db.dbconfig.MaxDBthreads < 1 {
+		db.dbconfig.MaxDBthreads = 1 // hardcoded lower limit
+	} else if db.dbconfig.MaxDBthreads > 1024 {
+		db.dbconfig.MaxDBthreads = 1024 // hardcoded upper limit
+	}
+	if db.dbconfig.MaxQueued < 16 {
+		db.dbconfig.MaxQueued = 16 // hardcoded lower limit
+	} else if db.dbconfig.MaxQueued > 100000 {
+		db.dbconfig.MaxQueued = 100000 // hardcoded upper limit
+	}
 	batch := &SQ3batch{
 		db:                 db,
+		maxDBbatch:         db.dbconfig.MaxDBbatch,
+		maxDBthreads:       db.dbconfig.MaxDBthreads,
+		maxQueued:          db.dbconfig.MaxQueued,
 		TasksMap:           make(map[string]*BatchTasks, 128), // Initialize TasksMap
 		TmpTasksChans:      make(chan chan *BatchTasks, 128),
 		TmpArticleSlices:   make(chan []*models.Article, 128),
 		TmpStringSlices:    make(chan []string, 128),
 		TmpStringPtrSlices: make(chan []*string, 128),
 		TmpInterfaceSlices: make(chan []interface{}, 128),
+		LimitChan:          make(chan struct{}, db.dbconfig.MaxDBthreads),
+		LPending:           make(chan struct{}, 1),
 	}
 	batch.orchestrator = NewBatchOrchestrator(batch)
 	return batch
@@ -229,25 +248,25 @@ func (sq *SQ3batch) GetOrCreateTasksMapKey(newsgroup string) *BatchTasks {
 }
 
 // CheckNoMoreWorkInMaps checks if all batch channels are empty and not processing
-func (c *SQ3batch) CheckNoMoreWorkInMaps() bool {
+func (sq *SQ3batch) CheckNoMoreWorkInMaps() bool {
 	if len(BatchDividerChan) > 0 {
 		return false
 	}
-	if c.proc == nil {
-		log.Printf("CheckNoMoreWorkInMaps c.proc not set")
+	if sq.proc == nil {
+		log.Printf("CheckNoMoreWorkInMaps sq.proc not set")
 		return true
 	}
-	if !c.proc.CheckNoMoreWorkInHistory() {
+	if !sq.proc.CheckNoMoreWorkInHistory() {
 		log.Printf("[CRON-SHUTDOWN] History still has work")
 		return false
 	}
-	c.GMux.RLock()         // Lock the mutex to ensure thread safety
-	defer c.GMux.RUnlock() // Ensure we unlock the mutex when done
+	sq.GMux.RLock()         // Lock the mutex to ensure thread safety
+	defer sq.GMux.RUnlock() // Ensure we unlock the mutex when done
 	// Check if all maps are empty and not processing
 	//log.Printf("[CRON-SHUTDOWN] do CheckNoMoreWorkInMaps...")
 
 	// Iterate through all tasks to check channels
-	for newsgroup, tasks := range c.TasksMap {
+	for newsgroup, tasks := range sq.TasksMap {
 		tasks.Mux.RLock()
 		isEmpty := len(tasks.BATCHchan) == 0 && !tasks.BATCHprocessing
 		batchChan, batchProc := len(tasks.BATCHchan), tasks.BATCHprocessing
@@ -264,35 +283,31 @@ func (c *SQ3batch) CheckNoMoreWorkInMaps() bool {
 	return true
 }
 
-var QueryChan = make(chan struct{}, MaxBatchThreads)
-var LimitChan = make(chan struct{}, MaxBatchThreads)
-var LPending = make(chan struct{}, 1)
-
 const LockLimitBlocking = true
 
-func LockLimitChan() bool {
+func (sq *SQ3batch) LockLimitChan() bool {
 	if !LockLimitBlocking {
 		select {
-		case LimitChan <- struct{}{}:
+		case sq.LimitChan <- struct{}{}:
 			// Successfully locked
 			return true
 		default:
 			// pass
 		}
 	} else {
-		LimitChan <- struct{}{}
+		sq.LimitChan <- struct{}{}
 		return true
 	}
 	return false
 }
 
-func ReturnLimitChan() {
-	<-LimitChan
+func (sq *SQ3batch) ReturnLimitChan() {
+	<-sq.LimitChan
 }
 
-func LockPending() bool {
+func (sq *SQ3batch) LockPending() bool {
 	select {
-	case LPending <- struct{}{}:
+	case sq.LPending <- struct{}{}:
 		// Successfully locked
 	default:
 		return false
@@ -300,22 +315,22 @@ func LockPending() bool {
 	return true
 }
 
-func ReturnPending() {
-	<-LPending
+func (sq *SQ3batch) ReturnPending() {
+	<-sq.LPending
 }
 
-func (c *SQ3batch) returnTmpTasksChan(tasksChan chan *BatchTasks) {
+func (sq *SQ3batch) returnTmpTasksChan(tasksChan chan *BatchTasks) {
 	select {
-	case c.TmpTasksChans <- tasksChan:
+	case sq.TmpTasksChans <- tasksChan:
 		// Successfully returned to pool
 	default:
 		// Pool is full, discard the channel
 	}
 }
 
-func (c *SQ3batch) getOrCreateTmpTasksChan() (tasksChan chan *BatchTasks) {
+func (sq *SQ3batch) getOrCreateTmpTasksChan() (tasksChan chan *BatchTasks) {
 	select {
-	case tasksChan = <-c.TmpTasksChans:
+	case tasksChan = <-sq.TmpTasksChans:
 		return tasksChan
 	default:
 		return make(chan *BatchTasks, 128)
@@ -323,21 +338,21 @@ func (c *SQ3batch) getOrCreateTmpTasksChan() (tasksChan chan *BatchTasks) {
 }
 
 // processAllPendingBatches processes all pending batches in the correct sequential order
-func (c *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup, limit int) {
-	if !LockPending() {
+func (sq *SQ3batch) processAllPendingBatches(wgProcessAllBatches *sync.WaitGroup, limit int) {
+	if !sq.LockPending() {
 		log.Printf("[BATCH] processAllPendingBatches: LockPending failed")
 		return
 	}
-	defer ReturnPending()
+	defer sq.ReturnPending()
 
 	// Get a snapshot of tasks to avoid holding the lock too long
 	//log.Printf("[BATCH-DEBUG] processAllPendingBatches: acquiring GMux.RLock to get tasks snapshot")
-	c.GMux.RLock()
-	tasksToProcess := c.getOrCreateTmpTasksChan()
-	defer c.returnTmpTasksChan(tasksToProcess)
+	sq.GMux.RLock()
+	tasksToProcess := sq.getOrCreateTmpTasksChan()
+	defer sq.returnTmpTasksChan(tasksToProcess)
 	queued := 0
 fill:
-	for _, task := range c.TasksMap {
+	for _, task := range sq.TasksMap {
 		task.Mux.RLock()
 		if task.BATCHchan == nil || task.BATCHprocessing {
 			task.Mux.RUnlock()
@@ -353,7 +368,7 @@ fill:
 		}
 		queued += len(task.BATCHchan)
 	}
-	c.GMux.RUnlock()
+	sq.GMux.RUnlock()
 	if len(tasksToProcess) == 0 {
 		return
 	}
@@ -390,7 +405,7 @@ process:
 			task.BATCHprocessing = true
 			task.Mux.Unlock()
 
-			if !LockLimitChan() {
+			if !sq.LockLimitChan() {
 				//log.Printf("[BATCH-DEBUG] processAllPendingBatches: LimitChan acquisition failed for task '%s', resetting processing flag", *task.Newsgroup)
 				task.Mux.Lock()
 				task.BATCHprocessing = false
@@ -406,7 +421,7 @@ process:
 				defer wgProcessAllBatches.Done()
 				//log.Printf("[BATCH] RUN processAllPendingBatches: processNewsgroupBatch task='%s'", *task.Newsgroup)
 				gostart := time.Now()
-				c.processNewsgroupBatch(task)
+				sq.processNewsgroupBatch(task)
 				log.Printf("[BATCH] END processAllPendingBatches: processNewsgroupBatch task='%s' took %v", *task.Newsgroup, time.Since(gostart))
 			}(task, wgProcessAllBatches) // Pass the task and wait group
 		}
@@ -430,90 +445,90 @@ const query_processNewsgroupBatch = `
 					END,
 					updated_at = excluded.updated_at`
 
-func (c *SQ3batch) returnModelsArticleSlice(batches []*models.Article) {
+func (sq *SQ3batch) returnModelsArticleSlice(batches []*models.Article) {
 	for i := range batches {
 		batches[i] = nil
 	}
 	select {
-	case c.TmpArticleSlices <- batches:
+	case sq.TmpArticleSlices <- batches:
 	default:
 		log.Printf("[BATCH] returnModelsArticleSlice: TmpArticleSlices full, discarding slice of len %d", len(batches))
 	}
 }
 
-func (c *SQ3batch) getOrCreateModelsArticleSlice() []*models.Article {
+func (sq *SQ3batch) getOrCreateModelsArticleSlice() []*models.Article {
 	select {
-	case retchan := <-c.TmpArticleSlices:
+	case retchan := <-sq.TmpArticleSlices:
 		return retchan
 	default:
 	}
-	return make([]*models.Article, 0, MaxBatchSize)
+	return make([]*models.Article, 0, sq.maxDBbatch)
 }
 
-func (c *SQ3batch) getOrCreateStringSlice() []string {
+func (sq *SQ3batch) getOrCreateStringSlice() []string {
 	select {
-	case retslice := <-c.TmpStringSlices:
+	case retslice := <-sq.TmpStringSlices:
 		return retslice
 	default:
 	}
-	return make([]string, 0, MaxBatchSize)
+	return make([]string, 0, sq.maxDBbatch)
 }
 
-func (c *SQ3batch) returnStringSlice(slice []string) {
+func (sq *SQ3batch) returnStringSlice(slice []string) {
 	// Clear the slice contents
 	for i := range slice {
 		slice[i] = ""
 	}
 	slice = slice[:0]
 	select {
-	case c.TmpStringSlices <- slice:
+	case sq.TmpStringSlices <- slice:
 	default:
 		// Pool is full, discard the slice
 	}
 }
 
-func (c *SQ3batch) getOrCreateStringPtrSlice() []*string {
+func (sq *SQ3batch) getOrCreateStringPtrSlice() []*string {
 	select {
-	case retslice := <-c.TmpStringPtrSlices:
+	case retslice := <-sq.TmpStringPtrSlices:
 		return retslice
 	default:
 	}
-	return make([]*string, 0, MaxBatchSize)
+	return make([]*string, 0, sq.maxDBbatch)
 }
 
-func (c *SQ3batch) returnStringPtrSlice(slice []*string) {
+func (sq *SQ3batch) returnStringPtrSlice(slice []*string) {
 	// Clear the slice contents
 	for i := range slice {
 		slice[i] = nil
 	}
 	slice = slice[:0]
 	select {
-	case c.TmpStringPtrSlices <- slice:
+	case sq.TmpStringPtrSlices <- slice:
 	default:
 		// Pool is full, discard the slice
 	}
 }
 
-func (c *SQ3batch) returnInterfaceSlice(slice []interface{}) {
+func (sq *SQ3batch) returnInterfaceSlice(slice []interface{}) {
 	// Clear the slice contents
 	for i := range slice {
 		slice[i] = nil
 	}
 	slice = slice[:0]
 	select {
-	case c.TmpInterfaceSlices <- slice:
+	case sq.TmpInterfaceSlices <- slice:
 	default:
 		// Pool is full, discard the slice
 	}
 }
 
-func (c *SQ3batch) getOrCreateInterfaceSlice() []interface{} {
+func (sq *SQ3batch) getOrCreateInterfaceSlice() []interface{} {
 	select {
-	case retslice := <-c.TmpInterfaceSlices:
+	case retslice := <-sq.TmpInterfaceSlices:
 		return retslice
 	default:
 	}
-	return make([]interface{}, 0, MaxBatchSize*3) // up to 3x for reply count updates
+	return make([]interface{}, 0, sq.maxDBbatch*3) // up to 3x for reply count updates
 }
 
 func (sq *SQ3batch) processNewsgroupBatch(task *BatchTasks) {
@@ -528,7 +543,7 @@ func (sq *SQ3batch) processNewsgroupBatch(task *BatchTasks) {
 		task.Mux.Unlock()
 		//totalDuration := time.Since(startTime)
 		//log.Printf("[BATCH] processNewsgroupBatch newsgroup '%s' took %v: now Return LimitChan", *task.Newsgroup, totalDuration)
-		ReturnLimitChan()
+		sq.ReturnLimitChan()
 		//log.Printf("[BATCH] processNewsgroupBatch newsgroup '%s' returned LimitChan", *task.Newsgroup)
 	}(task, startTime)
 
@@ -538,7 +553,7 @@ func (sq *SQ3batch) processNewsgroupBatch(task *BatchTasks) {
 
 	// Drain the channel
 drainChannel:
-	for len(batches) < MaxBatchSize {
+	for len(batches) < sq.maxDBbatch {
 		select {
 		case article := <-task.BATCHchan:
 			batches = append(batches, article)
@@ -697,14 +712,14 @@ retry2:
 }
 
 // batchInsertOverviews - now sets ArticleNum directly on each batch's Article and reuses the GroupDBs connection
-func (c *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Article, groupDBs *GroupDBs, taskNewsgroup *string) error {
+func (sq *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Article, groupDBs *GroupDBs, taskNewsgroup *string) error {
 	if len(batches) == 0 {
 		return fmt.Errorf("no batches to process for group '%s'", newsgroup)
 	}
 
-	if len(batches) <= MaxBatchSize {
+	if len(batches) <= sq.maxDBbatch {
 		// Small batch - process directly
-		if err := c.processOverviewBatch(groupDBs, batches, taskNewsgroup); err != nil {
+		if err := sq.processOverviewBatch(groupDBs, batches, taskNewsgroup); err != nil {
 			log.Printf("[OVB-BATCH] Failed to process small batch for group '%s': %v", newsgroup, err)
 			return fmt.Errorf("failed to process small batch for group '%s': %w", newsgroup, err)
 		}
@@ -712,13 +727,13 @@ func (c *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Arti
 	}
 
 	// Large batch - split into chunks
-	for i := 0; i < len(batches); i += MaxBatchSize {
-		end := i + MaxBatchSize
+	for i := 0; i < len(batches); i += sq.maxDBbatch {
+		end := i + sq.maxDBbatch
 		if end > len(batches) {
 			end = len(batches)
 		}
 
-		if err := c.processOverviewBatch(groupDBs, batches[i:end], taskNewsgroup); err != nil {
+		if err := sq.processOverviewBatch(groupDBs, batches[i:end], taskNewsgroup); err != nil {
 			log.Printf("[OVB-BATCH] Failed to process chunk %d-%d for group '%s': %v", i, end, newsgroup, err)
 			return fmt.Errorf("failed to process chunk %d-%d for group '%s': %w", i, end, newsgroup, err)
 		}
@@ -730,7 +745,7 @@ const query_processOverviewBatch = `INSERT OR IGNORE INTO articles (message_id, 
 const query_processOverviewBatch2 = `SELECT message_id, article_num FROM articles WHERE message_id IN (`
 
 // processSingleUnifiedArticleBatch handles a single batch that's within SQLite limits
-func (c *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.Article, taskNewsgroup *string) error {
+func (sq *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.Article, taskNewsgroup *string) error {
 	// Get timestamp once for the entire batch instead of per article
 	importedAt := time.Now()
 
@@ -784,7 +799,7 @@ func (c *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.Ar
 		args = append(args, article.MessageID)
 	}
 	// ORDER BY not needed; we map by message_id
-	query := query_processOverviewBatch2 + getPlaceholders(len(args)) + `)`
+	query := query_processOverviewBatch2 + sq.getPlaceholders(len(args)) + `)`
 	log.Printf("[OVB-BATCH] group '%s': Selecting article numbers for %d articles queryLen=%d", groupDBs.Newsgroup, len(batches), len(query))
 	rows, err := RetryableQuery(groupDBs.DB, query, args...)
 	if err != nil {
@@ -833,7 +848,7 @@ func (c *SQ3batch) processOverviewBatch(groupDBs *GroupDBs, batches []*models.Ar
 }
 
 // batchProcessThreading processes all threading operations using existing GroupDBs connection
-func (c *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*models.Article, groupDBs *GroupDBs) error {
+func (sq *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*models.Article, groupDBs *GroupDBs) error {
 	if len(batches) == 0 {
 		return nil
 	}
@@ -860,7 +875,7 @@ func (c *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*model
 
 	// Process thread roots first (they need to exist before replies can reference them)
 	if roots > 0 {
-		if err := c.batchProcessThreadRoots(groupDBs, batches, taskNewsgroup); err != nil {
+		if err := sq.batchProcessThreadRoots(groupDBs, batches, taskNewsgroup); err != nil {
 			log.Printf("[THR-BATCH] group '%s': Failed to batch process thread roots: %v", *taskNewsgroup, err)
 			// Continue processing - don't fail the whole batch
 		}
@@ -868,7 +883,7 @@ func (c *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*model
 
 	// Process replies
 	if replies > 0 {
-		if err := c.batchProcessReplies(groupDBs, batches, taskNewsgroup); err != nil {
+		if err := sq.batchProcessReplies(groupDBs, batches, taskNewsgroup); err != nil {
 			log.Printf("[THR-BATCH] group '%s': Failed to batch process replies: %v", *taskNewsgroup, err)
 			// Continue processing - don't fail the whole batch
 		}
@@ -880,7 +895,7 @@ func (c *SQ3batch) batchProcessThreading(taskNewsgroup *string, batches []*model
 const query_batchProcessThreadRoots = "INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, 0, 0)"
 
 // batchProcessThreadRoots processes thread root articles in TRUE batch
-func (c *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*models.Article, taskNewsgroup *string) error {
+func (sq *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*models.Article, taskNewsgroup *string) error {
 	if len(rootBatches) == 0 {
 		return nil
 	}
@@ -948,7 +963,7 @@ func (c *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*mo
 	// Do post-processing AFTER transaction is committed to avoid SQLite lock conflicts
 	for _, entry := range threadCacheEntries {
 		entry.article.Mux.RLock()
-		if err := c.db.InitializeThreadCache(groupDBs, entry.articleNum, entry.article); err != nil {
+		if err := sq.db.InitializeThreadCache(groupDBs, entry.articleNum, entry.article); err != nil {
 			log.Printf("[P-BATCH] group '%s': Failed to initialize thread cache for root %d: %v", groupDBs.Newsgroup, entry.articleNum, err)
 			// Don't fail the whole operation for cache errors
 		}
@@ -959,11 +974,11 @@ func (c *SQ3batch) batchProcessThreadRoots(groupDBs *GroupDBs, rootBatches []*mo
 }
 
 // batchProcessReplies processes reply articles in TRUE batch
-func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*models.Article, taskNewsgroup *string) error {
+func (sq *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*models.Article, taskNewsgroup *string) error {
 	if len(replyBatches) == 0 {
 		return nil
 	}
-	parentMessageIDs := make(map[*string]int, MaxBatchSize) // Pre-allocate map with expected size
+	parentMessageIDs := make(map[*string]int, sq.maxDBbatch) // Pre-allocate map with expected size
 	defer func() {
 		for k := range parentMessageIDs {
 			delete(parentMessageIDs, k)
@@ -993,7 +1008,7 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 
 		// Find thread root and collect data
 		var threadRoot int64
-		if root, err := c.findThreadRoot(groupDBs, article.RefSlice); err == nil {
+		if root, err := sq.findThreadRoot(groupDBs, article.RefSlice); err == nil {
 			threadRoot = root
 		}
 
@@ -1010,7 +1025,7 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 
 	// Batch update reply counts for articles table (single call since overview is unified)
 	if len(parentMessageIDs) > 0 {
-		if err := c.batchUpdateReplyCounts(groupDBs, parentMessageIDs); err != nil {
+		if err := sq.batchUpdateReplyCounts(groupDBs, parentMessageIDs); err != nil {
 			log.Printf("[P-BATCH] group '%s': Failed to batch update article reply counts: %v", groupDBs.Newsgroup, err)
 		}
 	}
@@ -1029,7 +1044,7 @@ func (c *SQ3batch) batchProcessReplies(groupDBs *GroupDBs, replyBatches []*model
 
 		// Execute ALL thread cache updates in a single transaction
 		if len(threadUpdates) > 0 {
-			if err := c.batchUpdateThreadCache(groupDBs, threadUpdates); err != nil {
+			if err := sq.batchUpdateThreadCache(groupDBs, threadUpdates); err != nil {
 				log.Printf("[P-BATCH] group '%s': Failed to batch update thread cache: %v", groupDBs.Newsgroup, err)
 			}
 			log.Printf("[P-BATCH] group '%s': Updated thread cache for %d thread roots", groupDBs.Newsgroup, len(threadUpdates))
@@ -1043,19 +1058,19 @@ var query_batchUpdateReplyCounts1 string = "WHEN message_id = ? THEN reply_count
 var query_batchUpdateReplyCounts2 string = "UPDATE articles SET reply_count = CASE %s END WHERE message_id IN (%s)"
 
 // batchUpdateReplyCounts performs batch update of reply counts using CASE WHEN
-func (c *SQ3batch) batchUpdateReplyCounts(groupDBs *GroupDBs, parentCounts map[*string]int) error {
+func (sq *SQ3batch) batchUpdateReplyCounts(groupDBs *GroupDBs, parentCounts map[*string]int) error {
 	if len(parentCounts) == 0 {
 		return nil
 	}
 
 	// Get pooled slices to avoid repeated memory allocations
-	messageIDs := c.getOrCreateStringPtrSlice()
-	args := c.getOrCreateInterfaceSlice()
+	messageIDs := sq.getOrCreateStringPtrSlice()
+	args := sq.getOrCreateInterfaceSlice()
 
 	defer func() {
 		// Reset and return all to pools
-		c.returnStringPtrSlice(messageIDs)
-		c.returnInterfaceSlice(args)
+		sq.returnStringPtrSlice(messageIDs)
+		sq.returnInterfaceSlice(args)
 	}()
 
 	// Build args efficiently - no string copying needed
@@ -1073,7 +1088,7 @@ func (c *SQ3batch) batchUpdateReplyCounts(groupDBs *GroupDBs, parentCounts map[*
 	// Use strings.Repeat for efficient SQL building - zero string copies
 	// Execute the batch UPDATE
 	//log.Printf("[P-BATCH] group '%s': update batch reply count for %d articles (queryLen=%d)", groupDBs.Newsgroup, len(messageIDs), len(sql))
-	_, err := RetryableExec(groupDBs.DB, fmt.Sprintf(query_batchUpdateReplyCounts2, strings.Repeat(query_batchUpdateReplyCounts1, len(messageIDs)), getPlaceholders(len(messageIDs))), args...)
+	_, err := RetryableExec(groupDBs.DB, fmt.Sprintf(query_batchUpdateReplyCounts2, strings.Repeat(query_batchUpdateReplyCounts1, len(messageIDs)), sq.getPlaceholders(len(messageIDs))), args...)
 	if err != nil {
 		log.Printf("[P-BATCH] group '%s': Failed to execute batch reply count update: %v", groupDBs.Newsgroup, err)
 	}
@@ -1081,13 +1096,13 @@ func (c *SQ3batch) batchUpdateReplyCounts(groupDBs *GroupDBs, parentCounts map[*
 }
 
 // findThreadRootForBatch is a simplified version for batch processing
-func (c *SQ3batch) findThreadRoot(groupDBs *GroupDBs, refs []string) (int64, error) {
-	if len(refs) == 0 || c.proc == nil {
+func (sq *SQ3batch) findThreadRoot(groupDBs *GroupDBs, refs []string) (int64, error) {
+	if len(refs) == 0 || sq.proc == nil {
 		return 0, fmt.Errorf("no references or processor not available")
 	}
 
 	// Try to find thread root in processor cache first
-	if cachedRoot := c.proc.FindThreadRootInCache(c.GetNewsgroupPointer(groupDBs.Newsgroup), refs); cachedRoot != nil {
+	if cachedRoot := sq.proc.FindThreadRootInCache(sq.GetNewsgroupPointer(groupDBs.Newsgroup), refs); cachedRoot != nil {
 		return cachedRoot.ArtNum, nil
 	}
 
@@ -1249,7 +1264,7 @@ func (o *BatchOrchestrator) StartOrch() {
 			if ShutDownCounter == DefaultShutDownCounter || ShutDownCounter%10 == 0 {
 				log.Printf("[ORCHESTRATOR1] Database shutdown detected ShutDownCounter=%d", ShutDownCounter)
 			}
-			o.batch.processAllPendingBatches(&wgProcessAllBatches, MaxBatchSize)
+			o.batch.processAllPendingBatches(&wgProcessAllBatches, o.batch.maxDBbatch)
 			if !wantShutdown {
 				wantShutdown = true
 			}
@@ -1266,8 +1281,8 @@ func (o *BatchOrchestrator) StartOrch() {
 		}
 		if !wantShutdown {
 			if time.Since(lastFlush) > o.BatchInterval {
-				//log.Printf("[ORCHESTRATOR1] Timer triggered - processing all pending batches smaller than MaxBatchSize")
-				o.batch.processAllPendingBatches(&wgProcessAllBatches, MaxBatchSize-1)
+				//log.Printf("[ORCHESTRATOR1] Timer triggered - processing all pending batches smaller than sq.maxDBbatch")
+				o.batch.processAllPendingBatches(&wgProcessAllBatches, o.batch.maxDBbatch-1)
 				lastFlush = time.Now()
 			}
 		}
@@ -1338,7 +1353,7 @@ func (o *BatchOrchestrator) checkThresholds() (haswork bool) {
 fillQ:
 	for _, task := range o.batch.TasksMap {
 		task.Mux.RLock()
-		if task.BATCHprocessing || len(task.BATCHchan) < MaxBatchSize {
+		if task.BATCHprocessing || len(task.BATCHchan) < o.batch.maxDBbatch {
 			task.Mux.RUnlock()
 			continue
 		}
@@ -1366,7 +1381,7 @@ fillQ:
 		}
 		totalQueued += batchCount
 
-		if batchCount >= MaxBatchSize {
+		if batchCount >= o.batch.maxDBbatch {
 			haswork = true
 			task.Mux.Lock()
 			if task.BATCHprocessing {
@@ -1377,10 +1392,10 @@ fillQ:
 			task.BATCHprocessing = true
 			task.Mux.Unlock()
 
-			if !LockLimitChan() {
+			if !o.batch.LockLimitChan() {
 				/*
 					log.Printf("[ORCHESTRATOR] Threshold exceeded for group '%s': %d articles (threshold: %d) LimitChan acquisition failed, retry later",
-						*task.Newsgroup, batchCount, MaxBatchSize)
+						*task.Newsgroup, batchCount, sq.maxDBbatch)
 				*/
 				//log.Printf("[BATCH-PROC] LimitChan acquisition failed for group '%s', resetting processing flag", *task.Newsgroup)
 				task.Mux.Lock()
@@ -1388,7 +1403,7 @@ fillQ:
 				task.Mux.Unlock()
 				return true
 			} else {
-				//log.Printf("[BATCH-BIG] Threshold exceeded for group '%s': %d articles (threshold: %d)", *task.Newsgroup, batchCount, MaxBatchSize)
+				//log.Printf("[BATCH-BIG] Threshold exceeded for group '%s': %d articles (threshold: %d)", *task.Newsgroup, batchCount, sq.maxDBbatch)
 				go o.batch.processNewsgroupBatch(task)
 				totalQueued -= batchCount
 			}
@@ -1396,7 +1411,7 @@ fillQ:
 			// Log groups with pending work but below threshold
 			/*
 				log.Printf("[ORCHESTRATOR-PENDING] Group '%s' has %d articles (below threshold: %d)",
-					*task.Newsgroup, batchCount, MaxBatchSize)
+					*task.Newsgroup, batchCount, sq.maxDBbatch)
 			*/
 		}
 	} // end for
@@ -1410,31 +1425,29 @@ fillQ:
 	return haswork
 }
 
-var BatchDividerChan = make(chan *models.Article, 1)
+var BatchDividerChan = make(chan *models.Article, 128)
 
 // BatchDivider reads incoming articles and routes them to the appropriate per-newsgroup channel
 // It also enforces the global MaxQueued limit to prevent overload
 // Each newsgroup channel is created lazily on first use
-// This runs as a single goroutine to avoid locking issues
-
 func (sq *SQ3batch) BatchDivider() {
 	var tmpQueued, realQueue int
-	var maxQueue int = MaxQueued / 100 * 80
-	var target int = MaxQueued / 100 * 20
+	var maxQueue int = sq.maxQueued / 100 * 80
+	var target int = sq.maxQueued / 100 * 20
 	for {
 		var newsgroupPtr *string
-		task := <-BatchDividerChan
-		if task == nil {
+		article := <-BatchDividerChan
+		if article == nil {
 			log.Printf("[BATCH-DIVIDER] Received nil task?!")
 			continue
 		}
-		task.Mux.Lock()
+		article.Mux.Lock()
 		select {
-		case newsgroupPtr = <-task.ProcessQueue:
-			task.Mux.Unlock()
+		case newsgroupPtr = <-article.ProcessQueue:
+			article.Mux.Unlock()
 		default:
-			task.Mux.Unlock()
-			log.Printf("Error in BatchDivider, received task (%#v) but no newsgroupPtr", task)
+			article.Mux.Unlock()
+			log.Printf("Error in BatchDivider, received task (%#v) but no newsgroupPtr", article)
 			continue
 		}
 		//log.Printf("[BATCH-DIVIDER] Received task for group '%s'", *task.Newsgroup)
@@ -1443,14 +1456,14 @@ func (sq *SQ3batch) BatchDivider() {
 		tasks.Mux.Lock()
 		// Lazily create the per-group channel on first enqueue
 		if tasks.BATCHchan == nil {
-			tasks.BATCHchan = make(chan *models.Article, InitialBatchChannelSize)
+			tasks.BATCHchan = make(chan *models.Article, sq.maxDBbatch)
 		}
 		tasks.Mux.Unlock()
 		if realQueue >= maxQueue {
-			log.Printf("[BATCH-DIVIDER] MaxQueued reached (%d), waiting to enqueue more (current Queue=%d, tmpQueued=%d)", MaxQueued, realQueue, tmpQueued)
+			log.Printf("[BATCH-DIVIDER] MaxQueued reached (%d), waiting to enqueue more (current Queue=%d, tmpQueued=%d)", sq.maxQueued, realQueue, tmpQueued)
 
 			for {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(16 * time.Millisecond)
 				sq.GMux.RLock()
 				if sq.queued <= target {
 					realQueue = sq.queued
@@ -1460,9 +1473,9 @@ func (sq *SQ3batch) BatchDivider() {
 				sq.GMux.RUnlock()
 			}
 		}
-		tasks.BATCHchan <- task
+		tasks.BATCHchan <- article
 		tmpQueued++
-		if tmpQueued >= MaxBatchSize {
+		if tmpQueued >= sq.maxDBbatch {
 			sq.GMux.Lock()
 			//log.Printf("[BATCH-DIVIDER] Enqueued %d articles to group '%s' (current Queue=%d, tmpQueued=%d)", tmpQueued, *newsgroupPtr, realQueue, tmpQueued)
 			sq.queued += tmpQueued

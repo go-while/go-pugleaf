@@ -113,16 +113,15 @@ func main() {
 		log.Fatalf("Invalid UseShortHashLen: %d (must be between 2 and 7)", *useShortHashLenPtr)
 	}
 
-	database.InitialBatchChannelSize = *maxBatch
-	database.MaxBatchThreads = *maxBatchThreads
-	database.MaxBatchSize = *maxBatch
-	database.MaxQueued = *maxQueued
 	nntp.MaxReadLinesXover = int64(*maxBatch)
 	processor.MaxBatchSize = int64(*maxBatch)
 
 	// Initialize database (default config, data in ./data)
 	dbConfig := database.DefaultDBConfig()
 	dbConfig.DataDir = *dataDir
+	dbConfig.MaxDBbatch = *maxBatch
+	dbConfig.MaxDBthreads = *maxBatchThreads
+	dbConfig.MaxQueued = *maxQueued
 
 	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
@@ -839,7 +838,11 @@ func UpdateNewsgroupList(updateList *string, excludePrefix *string, updateListFo
 	if excludePrefix != nil && *excludePrefix != "" {
 		excludePrefixes = strings.Split(*excludePrefix, ",")
 		for i, p := range excludePrefixes {
-			excludePrefixes[i] = strings.TrimSpace(p)
+			trimmed := strings.TrimSpace(p)
+			if trimmed == "" {
+				continue
+			}
+			excludePrefixes[i] = trimmed
 			log.Printf("UpdateNewsgroupList: Excluding newsgroups with prefix: '%s'", excludePrefixes[i])
 		}
 	}

@@ -68,10 +68,13 @@ type DBConfig struct {
 	ConnMaxLifetime time.Duration
 
 	// Performance settings
-	WALMode   bool   // Write-Ahead Logging
-	SyncMode  string // OFF, NORMAL, FULL
-	CacheSize int    // KB
-	TempStore string // MEMORY, FILE
+	WALMode      bool   // Write-Ahead Logging
+	SyncMode     string // OFF, NORMAL, FULL
+	CacheSize    int    // KB
+	TempStore    string // MEMORY, FILE
+	MaxDBbatch   int    // maximum number of DB operations in a batch
+	MaxDBthreads int    // maximum number of concurrent DB batch threads
+	MaxQueued    int    // maximum number of queued articles for batch processing
 
 	// Backup settings
 	BackupEnabled  bool
@@ -81,6 +84,7 @@ type DBConfig struct {
 	// Cache settings
 	ArticleCacheSize   int           // Maximum number of cached articles
 	ArticleCacheExpiry time.Duration // Cache expiry duration
+
 }
 
 // DefaultDBConfig returns default database configuration
@@ -99,6 +103,9 @@ func DefaultDBConfig() (dbconfig *DBConfig) {
 		BackupDir:          "./backups",
 		ArticleCacheSize:   1000,             // Default cache size
 		ArticleCacheExpiry: 15 * time.Minute, // Default cache expiry
+		MaxDBbatch:         1000,             // default max DB batch size
+		MaxDBthreads:       16,               // default max DB threads
+		MaxQueued:          1280,             // default max queued articles
 	}
 }
 
