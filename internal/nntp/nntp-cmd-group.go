@@ -51,7 +51,7 @@ func (c *ClientConnection) handleListGroup(args []string) error {
 		c.rateLimitOnError()
 		return c.sendResponse(411, "No such newsgroup")
 	}
-	defer groupDBs.Return(c.server.DB)
+	defer groupDBs.Return()
 
 	// Get overview data to list article numbers
 	overviews, err := c.server.DB.GetOverviews(groupDBs)

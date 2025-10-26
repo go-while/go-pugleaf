@@ -526,7 +526,7 @@ func main() {
 				//fmt.Printf("%s\n", article.BodyText)
 				//fmt.Printf("### BODY EOF '%s' ###\n\n", article.MessageID)
 			}
-			groupDBs.Return(db)
+			groupDBs.Return()
 		}
 		transferDoneChan <- result
 	}(&wgP, redisCli)
@@ -1241,7 +1241,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		}
 		return nil
 	}
-	groupDBsA.Return(db)
+	groupDBsA.Return()
 
 	// Initialize newsgroup progress tracking
 	nntp.ResultsMutex.Lock()

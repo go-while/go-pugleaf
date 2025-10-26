@@ -144,7 +144,7 @@ func (w *PostQueueWorker) processArticleForNewsgroup(article *models.Article, ne
 	if err != nil {
 		return err
 	}
-	defer groupDBs.Return(w.processor.DB)
+	defer groupDBs.Return()
 
 	// Use the existing threading function to process the article
 	// This will handle all the threading logic, database insertion, etc.

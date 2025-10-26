@@ -138,7 +138,7 @@ func main() {
 		processed, fixed, err := fixReferencesInNewsgroup(groupDB, *dryRun, *verbose, *limit, *batchSize)
 		if err != nil {
 			fmt.Printf("   ❌ Failed to fix references: %v\n", err)
-			groupDB.Return(db)
+			groupDB.Return()
 			continue
 		}
 
@@ -156,7 +156,7 @@ func main() {
 			}
 		}
 
-		groupDB.Return(db)
+		groupDB.Return()
 
 		if processed > 0 {
 			if fixed > 0 {

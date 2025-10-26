@@ -439,7 +439,7 @@ func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads in
 			// Don't close on error, this is a different type of error
 		} else {
 			// Return the groupDBs connection immediately - we were just testing if the group exists
-			groupDBs.Return(leg.proc.DB)
+			groupDBs.Return()
 			err = leg.insertNewsgroupIfNotExists(newsgroup, "") // Insert newsgroup if it doesn't exist
 			if err != nil {
 				log.Printf("internal/legacy/main.go: Warning: failed to insert newsgroup %s: %v", newsgroup, err)

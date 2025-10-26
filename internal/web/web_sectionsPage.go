@@ -190,7 +190,7 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 			"The group '"+groupName+"' database does not exist. Try importing data first.")
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDBs.Return()
 	// Get pagination parameters
 	page := 1
 	var lastArticleNum int64
@@ -318,7 +318,7 @@ func (s *WebServer) sectionArticlePage(c *gin.Context) {
 			"The group '"+groupName+"' database does not exist.")
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDBs.Return()
 	// Get the article
 	article, err := s.DB.GetArticleByNum(groupDBs, articleNum)
 	if err != nil {
@@ -386,7 +386,7 @@ func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
 			"The group '"+groupName+"' database does not exist.")
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDBs.Return()
 	// Get the article by message ID
 	article, err := s.DB.GetArticleByMessageID(groupDBs, messageId)
 	if err != nil {

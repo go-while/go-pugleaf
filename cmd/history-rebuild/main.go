@@ -431,7 +431,7 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 	if err != nil {
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 	/*
 		// Configure SQLite for memory efficiency
 		if groupDBs.DB != nil {

@@ -249,7 +249,7 @@ func (c *ClientConnection) getArticleData(args []string) (ArticleRetrievalResult
 				c.sendResponse(411, "No such newsgroup")
 				return ArticleRetrievalResult{}, nil
 			}
-			defer groupDBs.Return(c.server.DB)
+			defer groupDBs.Return()
 		}
 
 		// For STAT command, we can use overview instead of full article

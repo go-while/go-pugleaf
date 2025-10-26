@@ -364,7 +364,7 @@ func repairDatabase(db *database.Database, newsgroup string, report *database.Co
 	if err != nil {
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDB.Return(db)
+	defer groupDB.Return()
 
 	repairCount := 0
 
@@ -724,14 +724,14 @@ func checkAndFixDates(db *database.Database, newsgroups []*models.Newsgroup, rew
 		fixed, checked, problems, err := checkGroupDates(groupDB, newsgroup.Name, rewriteDates, verbose)
 		if err != nil {
 			fmt.Printf("   ❌ Failed to check dates: %v\n", err)
-			groupDB.Return(db)
+			groupDB.Return()
 			continue
 		}
 
 		totalFixed += fixed
 		totalChecked += checked
 		allProblems = append(allProblems, problems...)
-		groupDB.Return(db)
+		groupDB.Return()
 
 		if checked > 0 {
 			if fixed > 0 {

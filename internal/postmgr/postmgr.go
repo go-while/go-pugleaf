@@ -157,7 +157,7 @@ func (pm *PosterManager) getArticleByMessageID(messageID, newsgroup string) (*mo
 	if err != nil {
 		return nil, err
 	}
-	defer groupDBs.Return(pm.DB)
+	defer groupDBs.Return()
 
 	// Get article by message ID using the database method (not groupDBs method)
 	article, err := pm.DB.GetArticleByMessageID(groupDBs, messageID)

@@ -16,7 +16,7 @@ func (db *Database) GetLatestArticleNumberFromOverview(newsgroup string) (int64,
 	if err != nil {
 		return 0, err
 	}
-	defer groupDB.Return(db)
+	defer groupDB.Return()
 
 	var latestArticle int64
 	err = RetryableQueryRowScan(groupDB.DB, `
@@ -102,7 +102,7 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get group databases: %v", err))
 		return report, nil
 	}
-	defer groupDB.Return(db)
+	defer groupDB.Return()
 
 	// 3. Get max article numbers from each table (handle NULL for empty tables)
 	err = RetryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", []interface{}{}, &report.ArticlesMaxNum)
@@ -404,7 +404,7 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, gr
 	}
 
 	if shouldCloseDB {
-		defer groupDB.Return(db)
+		defer groupDB.Return()
 	}
 
 	// Get total article count

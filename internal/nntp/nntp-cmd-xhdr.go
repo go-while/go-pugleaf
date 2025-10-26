@@ -79,7 +79,7 @@ func (c *ClientConnection) handleXHdr(args []string) error {
 		c.rateLimitOnError()
 		return c.sendResponse(411, "No such newsgroup")
 	}
-	defer groupDBs.Return(c.server.DB)
+	defer groupDBs.Return()
 
 	// Get header field data for the range
 	headerData, err := c.server.DB.GetHeaderFieldRange(groupDBs, headerField, startNum, endNum)

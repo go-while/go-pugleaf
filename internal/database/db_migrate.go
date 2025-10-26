@@ -284,7 +284,7 @@ func (db *Database) MigrateGroup(groupName string) error {
 		log.Printf("Failed to get group database for %s: %v", groupName, err)
 		return fmt.Errorf("failed to get group database: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 
 	return db.migrateGroupDB(groupDBs)
 }

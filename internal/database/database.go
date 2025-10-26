@@ -366,7 +366,7 @@ func (db *Database) IncrementArticleSpam(groupName string, articleNum int64) err
 		log.Printf("DEBUG: Failed to get group databases for %s: %v", groupName, err)
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 
 	// Update spam counter in group database
 	result, err := RetryableExec(groupDBs.DB, "UPDATE articles SET spam = spam + 1 WHERE article_num = ?", articleNum)
@@ -397,7 +397,7 @@ func (db *Database) IncrementArticleHide(groupName string, articleNum int64) err
 	if err != nil {
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 
 	_, err = RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ? AND spam > 0", articleNum)
 	if err != nil {
@@ -413,7 +413,7 @@ func (db *Database) UnHideArticle(groupName string, articleNum int64) error {
 	if err != nil {
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 
 	_, err = RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 0 WHERE article_num = ?", articleNum)
 	if err != nil {
@@ -440,7 +440,7 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 		log.Printf("DEBUG: Failed to get group databases for %s: %v", groupName, err)
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 
 	// Check current spam count first
 	var currentSpam int

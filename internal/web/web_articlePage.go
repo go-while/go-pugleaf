@@ -40,7 +40,7 @@ func (s *WebServer) articlePage(c *gin.Context) {
 		c.String(http.StatusNotFound, "Group not found: %v", err)
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDBs.Return()
 	if groupDBs.NewsgroupPtr == nil {
 		c.String(http.StatusInternalServerError, "Group pointer is nil for group %s", groupName)
 		return
@@ -113,7 +113,7 @@ func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
 		c.String(http.StatusNotFound, "Group not found: %v", err)
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDBs.Return()
 	// Get the article by message ID
 	article, err := s.DB.GetArticleByMessageID(groupDBs, messageId)
 	if err != nil {

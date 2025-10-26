@@ -68,7 +68,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 		}
 		return
 	}
-	defer groupDBs.Return(s.DB) // Only defer if groupDBs is not nil
+	defer groupDBs.Return() // Only defer if groupDBs is not nil
 
 	var articles []*models.Overview
 	var totalCount int

@@ -615,13 +615,13 @@ retry2:
 	if err := sq.batchProcessThreading(task.Newsgroup, batches, groupDBs); err != nil {
 		time.Sleep(time.Second)
 		if groupDBs != nil {
-			groupDBs.Return(sq.db)
+			sq.proc.ForceCloseGroupDBs(groupDBs)
 			log.Printf("[BATCH] processNewsgroupBatch Failed2 to process threading for group '%s': %v groupDBs='%#v'", *task.Newsgroup, err, groupDBs)
 			groupDBs = nil
 		}
 		goto retry2
 	}
-	defer groupDBs.Return(sq.db)
+	defer groupDBs.Return()
 	//threadingDuration := time.Since(start)
 	//log.Printf("[BATCH] processNewsgroupBatch Completed threading phase for group '%s' in %v", *task.Newsgroup, threadingDuration)
 

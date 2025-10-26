@@ -73,7 +73,7 @@ func (c *ClientConnection) handleXOver(args []string) error {
 		c.rateLimitOnError()
 		return c.sendResponse(411, "No such newsgroup")
 	}
-	defer groupDBs.Return(c.server.DB)
+	defer groupDBs.Return()
 
 	// Get overview data for the range
 	overviews, err := c.server.DB.GetOverviewsRange(groupDBs, startNum, endNum)

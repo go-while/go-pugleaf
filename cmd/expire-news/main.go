@@ -314,7 +314,7 @@ func expireArticlesInGroup(db *database.Database, groupName string, cutoffDate t
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get group database: %v", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 
 	totalExpired := 0
 	totalScanned := 0
@@ -499,7 +499,7 @@ func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles i
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get group database: %v", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 
 	// First count total articles
 	var totalArticles int
@@ -581,7 +581,7 @@ func updateNewsgroupCounters(db *database.Database, groupName string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get group database: %v", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 
 	// Count current articles
 	var messageCount int64

@@ -49,7 +49,7 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 		c.String(http.StatusNotFound, "Group not found: %v", err)
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDBs.Return()
 
 	// Get the thread root overview first
 	rootOverview, err := s.DB.GetOverviewByArticleNum(groupDBs, threadRoot)

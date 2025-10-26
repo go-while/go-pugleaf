@@ -16,7 +16,7 @@ func (proc *Processor) ImportOverview(groupName string) error {
 	if err != nil {
 		return err
 	}
-	defer groupDBs.Return(proc.DB)
+	defer groupDBs.Return()
 	/*
 		defer func() {
 			err := proc.DB.CloseGroupDBs()

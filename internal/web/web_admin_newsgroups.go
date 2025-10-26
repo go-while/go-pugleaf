@@ -517,7 +517,7 @@ func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
 	// Query the latest article date from visible articles only
 	var latestDate sql.NullString
 	err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT MAX(date_sent) FROM articles WHERE hide = 0", nil, &latestDate)
-	groupDBs.Return(s.DB) // Always return the database connection
+	groupDBs.Return() // Always return the database connection
 
 	if err != nil {
 		session.SetError("Failed to query latest article for " + name + ": " + err.Error())
@@ -586,7 +586,7 @@ func (s *WebServer) fixGroupThreadActivity(groupName string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get group DB: %w", err)
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDBs.Return()
 
 	rows, err := database.RetryableQuery(groupDBs.DB, query_fixGroupThreadActivity1)
 	if err != nil {
@@ -745,7 +745,7 @@ func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
 	// Find articles that are posted more than 48 hours in the future and not already hidden
 	articleRows, err := groupDBs.DB.Query("SELECT article_num FROM articles WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
 	if err != nil {
-		groupDBs.Return(s.DB)
+		groupDBs.Return()
 		session.SetError("Failed to query future articles: " + err.Error())
 		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
 		return
@@ -760,7 +760,7 @@ func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
 		futureArticles = append(futureArticles, articleNum)
 	}
 	articleRows.Close()
-	groupDBs.Return(s.DB)
+	groupDBs.Return()
 
 	if len(futureArticles) == 0 {
 		session.SetSuccess("No future-dated articles found in newsgroup: " + name)
@@ -785,7 +785,7 @@ func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
 			continue // Skip if can't get DB connection
 		}
 		_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ?", articleNum)
-		groupDBs.Return(s.DB)
+		groupDBs.Return()
 
 		if err != nil {
 			continue // Skip articles that fail hide update

@@ -34,7 +34,7 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 		s.renderError(c, http.StatusInternalServerError, "Database error", err.Error())
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDBs.Return()
 
 	// Use cached thread data for fast performance
 	forumThreads, totalThreads, err := s.DB.GetCachedThreads(groupDBs, page, Threads_perPage)

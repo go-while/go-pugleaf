@@ -1426,12 +1426,12 @@ func (db *Database) GetTotalThreadsCount() (int64, error) {
 		// Count threads in this group
 		threadCount, err := db.GetThreadsCount(groupDBs)
 		if err != nil {
-			groupDBs.Return(db)
+			groupDBs.Return()
 			continue // Skip groups with errors
 		}
 
 		totalThreads += threadCount
-		groupDBs.Return(db)
+		groupDBs.Return()
 	}
 
 	return totalThreads, nil
@@ -2898,7 +2898,7 @@ func (db *Database) ResetNewsgroupData(newsgroupName string) error {
 		log.Printf("ResetNewsgroupData: No database found for newsgroup '%s', skipping", newsgroupName)
 		return nil
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 
 	// Begin transaction for atomic reset
 	tx, err := groupDBs.DB.Begin()
@@ -3184,7 +3184,7 @@ func (db *Database) GetSpamArticles(offset, limit int) ([]*models.Overview, []st
 
 		// Use existing function to get article overview
 		overview, err := db.GetOverviewByArticleNum(groupDBs, int64(articleNum))
-		groupDBs.Return(db)
+		groupDBs.Return()
 
 		if err != nil {
 			// Log error but continue with next article - article might have been deleted
@@ -3296,7 +3296,7 @@ func (db *Database) GetArticlesByIDs(newsgroup *string, wantedIDs []*string) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 
 	// Build the IN clause with placeholders
 	placeholders := make([]string, len(wantedIDs))
@@ -3506,7 +3506,7 @@ func (db *Database) GetArticlesBatchWithDateFilter(ng *models.Newsgroup, offset 
 	if int64(len(out)) < dbBatchSize {
 		db.ForceCloseGroupDBs(groupDBs)
 	} else {
-		groupDBs.Return(db)
+		groupDBs.Return()
 	}
 	return out, nil
 }

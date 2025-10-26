@@ -74,7 +74,7 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 		if articleNum, err := strconv.ParseInt(replyToArticleNum, 10, 64); err == nil {
 			// Get group database connection
 			if groupDBs, err := s.DB.GetGroupDBs(prefilledNewsgroup); err == nil {
-				defer groupDBs.Return(s.DB)
+				defer groupDBs.Return()
 				if reply_article, err := s.DB.GetArticleByNum(groupDBs, articleNum); err == nil {
 					// Handle subject with "Re: " prefix
 					if !strings.HasPrefix(strings.ToLower(reply_article.Subject), "re:") {
@@ -380,7 +380,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 				log.Printf("Warning: Failed to get group DB for %s: %v", newsgroup, err)
 				continue
 			}
-			defer groupDBs.Return(s.DB)
+			defer groupDBs.Return()
 
 			originalArticle, err := s.DB.GetArticleByMessageID(groupDBs, messageID)
 			if err != nil {

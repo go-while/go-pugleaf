@@ -156,14 +156,14 @@ func (dbs *GroupDBs) IncrementWorkers() {
 	dbs.mux.Unlock()
 }
 
-func (dbs *GroupDBs) Return(db *Database) {
-	if dbs != nil && db != nil {
+func (dbs *GroupDBs) Return() {
+	if dbs != nil && dbs.DB != nil {
 		dbs.mux.Lock()
 		dbs.Idle = time.Now() // Update idle time to now
 		dbs.Workers--
 		dbs.mux.Unlock()
 	} else {
-		log.Printf("Warning: Attempted to return a nil db=%#v dbs=%#v", db, dbs)
+		log.Printf("Warning: Attempted to return a nil db=%#v dbs=%#v", dbs.DB, dbs)
 	}
 }
 

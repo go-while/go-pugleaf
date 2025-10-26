@@ -235,12 +235,12 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 			if err != nil {
 				log.Printf("Failed to get group DBs for newsgroup '%s': %v", newsgroup, err)
 				if groupDBs != nil {
-					groupDBs.Return(proc.DB) // Return connection even on error
+					groupDBs.Return() // Return connection even on error
 				}
 				continue // Continue with other groups
 			}
 			if groupDBs.ExistsMsgIdInArticlesDB(article.MessageID) {
-				groupDBs.Return(proc.DB) // Return connection before continuing
+				groupDBs.Return() // Return connection before continuing
 				continue
 			}
 			/*
@@ -253,7 +253,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 					}
 				}
 			*/
-			groupDBs.Return(proc.DB)
+			groupDBs.Return()
 
 			go proc.DB.Batch.BatchCaptureOverviewForLater(newsgroupPtr, article)
 

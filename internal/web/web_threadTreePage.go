@@ -52,7 +52,7 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 		})
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDBs.Return()
 
 	// Parse options
 	options := database.TreeViewOptions{
@@ -110,7 +110,7 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 		s.renderError(c, http.StatusNotFound, "Group Not Found", "Group not found: "+groupName)
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDBs.Return()
 
 	// Get tree view
 	options := database.TreeViewOptions{
@@ -195,7 +195,7 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 		s.renderError(c, http.StatusNotFound, "Group Not Found", "Group not found: "+groupName)
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDBs.Return()
 
 	// Get tree view
 	options := database.TreeViewOptions{

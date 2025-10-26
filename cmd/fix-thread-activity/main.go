@@ -64,7 +64,7 @@ func fixGroupThreadActivity(db *database.Database, groupName string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get group DB: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 
 	// Get only thread cache entries that have future last_activity timestamps
 	rows, err := database.RetryableQuery(groupDBs.DB, `

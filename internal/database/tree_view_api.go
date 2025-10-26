@@ -120,7 +120,7 @@ func (db *Database) HandleThreadTreeAPI(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, fmt.Sprintf("Failed to get group database: %v", err), http.StatusInternalServerError)
 		return
 	}
-	defer groupDBs.Return(db)
+	defer groupDBs.Return()
 
 	// Parse options
 	options := TreeViewOptions{
