@@ -409,7 +409,7 @@ func main() {
 				groupInfo, err := proc.Pool.SelectGroup(*ng)
 				if err != nil || groupInfo == nil {
 					switch err {
-					case nntp.ErrNewsgroupNotFound:
+					case nntp.ErrNewsgroupNotFound, "480 Read access denied":
 						//log.Printf("[FETCHER]: Newsgroup not found: '%s'", *ng)
 						continue
 					case io.EOF:

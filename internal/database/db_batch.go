@@ -432,21 +432,6 @@ process:
 	return
 }
 
-// processNewsgroupBatch processes a single newsgroup's batch in the correct sequential order:
-// 1. Complete article insertion (unified overview + article data)
-// 2. Threading processing (relationships)
-// 3. Thread cache updates
-const query_processNewsgroupBatch = `
-				INSERT INTO newsgroups (name, message_count, last_article, updated_at)
-				VALUES (?, ?, ?, ?)
-				ON CONFLICT(name) DO UPDATE SET
-					message_count = message_count + excluded.message_count,
-					last_article = CASE
-						WHEN excluded.last_article > last_article THEN excluded.last_article
-						ELSE last_article
-					END,
-					updated_at = excluded.updated_at`
-
 func (sq *SQ3batch) returnModelsArticleSlice(batches []*models.Article) {
 	for i := range batches {
 		batches[i] = nil
@@ -533,6 +518,21 @@ func (sq *SQ3batch) getOrCreateInterfaceSlice() []interface{} {
 	return make([]interface{}, 0, sq.maxDBbatch*3) // up to 3x for reply count updates
 }
 
+// processNewsgroupBatch processes a single newsgroup's batch in the correct sequential order:
+// 1. Complete article insertion (unified overview + article data)
+// 2. Threading processing (relationships)
+// 3. Thread cache updates
+const query_updateNewsgroupsStats = `
+				INSERT INTO newsgroups (name, message_count, last_article, updated_at)
+				VALUES (?, ?, ?, ?)
+				ON CONFLICT(name) DO UPDATE SET
+					message_count = message_count + excluded.message_count,
+					last_article = CASE
+						WHEN excluded.last_article > last_article THEN excluded.last_article
+						ELSE last_article
+					END,
+					updated_at = excluded.updated_at`
+
 func (sq *SQ3batch) processNewsgroupBatch(task *BatchTasks) {
 	startTime := time.Now()
 	task.Mux.Lock()
@@ -552,7 +552,6 @@ func (sq *SQ3batch) processNewsgroupBatch(task *BatchTasks) {
 	// Collect all batches for this newsgroup
 	batches := sq.getOrCreateModelsArticleSlice()
 	defer sq.returnModelsArticleSlice(batches)
-
 	// Drain the channel
 drainChannel:
 	for len(batches) < sq.maxDBbatch {
@@ -567,7 +566,11 @@ drainChannel:
 	if len(batches) == 0 {
 		return
 	}
-
+	defer func(batched int) {
+		sq.GMux.Lock()
+		sq.queued -= batched
+		sq.GMux.Unlock()
+	}(len(batches))
 	log.Printf("[BATCH] processNewsgroupBatch: ng: '%s' with %d articles (more queued: %d)", *task.Newsgroup, len(batches), len(task.BATCHchan))
 
 retry1:
@@ -630,7 +633,7 @@ retry2:
 	// PHASE 3: Handle history and processor cache updates
 	//log.Printf("[BATCH] processNewsgroupBatch Starting history/cache updates for %d articles in group '%s'", len(batches), *task.Newsgroup)
 	//start = time.Now()
-
+	var latestDate time.Time
 	for _, article := range batches {
 		//log.Printf("[BATCH] processNewsgroupBatch Updating history/cache for article %d/%d in group '%s'", i+1, len(batches), *task.Newsgroup)
 		// Read article number under read lock to avoid concurrent map access
@@ -659,6 +662,9 @@ retry2:
 		article.MessageID = ""
 		article.Subject = ""
 		article.FromHeader = ""
+		if article.DateSent.After(latestDate) {
+			latestDate = article.DateSent
+		}
 		article.DateSent = time.Time{}
 		article.DateString = ""
 		article.References = ""
@@ -677,19 +683,14 @@ retry2:
 	}
 	//historyDuration := time.Since(start)
 	//log.Printf("[BATCH] processNewsgroupBatch Completed history/cache updates for group '%s' in %v", *task.Newsgroup, historyDuration)
-	// Update newsgroup statistics with retryable transaction to avoid race conditions
-	// Safety check for nil database connection
 	if sq.db == nil || sq.db.mainDB == nil {
 		log.Printf("[BATCH] processNewsgroupBatch Main database connection is nil, cannot update newsgroup stats for '%s'", *task.Newsgroup)
 		err = fmt.Errorf("processNewsgroupBatch main database connection is nil")
 	} else {
-		//LockQueryChan()
-		//defer ReturnQueryChan()
-		// Use retryable transaction to prevent race conditions between concurrent batches
+		//lastUpdate = time.Now().UTC().Format("2006-01-02 15:04:05")
 		err = RetryableTransactionExec(sq.db.mainDB, func(tx *sql.Tx) error {
-			// Use UPSERT to handle both new and existing newsgroups
-			_, txErr := tx.Exec(query_processNewsgroupBatch,
-				*task.Newsgroup, len(batches), maxArticleNum, time.Now().UTC().Format("2006-01-02 15:04:05"))
+			_, txErr := tx.Exec(query_updateNewsgroupsStats,
+				*task.Newsgroup, len(batches), maxArticleNum, latestDate.UTC().Format("2006-01-02 15:04:05"))
 			return txErr
 		})
 
@@ -708,9 +709,6 @@ retry2:
 		log.Printf("[BATCH] processNewsgroupBatch Failed to update newsgroup stats for '%s': %v", *task.Newsgroup, err)
 	}
 	log.Printf("[BATCH-END] newsgroup '%s' processed articles: %d (took %v)", *task.Newsgroup, len(batches), time.Since(startTime))
-	sq.GMux.Lock()
-	sq.queued -= len(batches)
-	sq.GMux.Unlock()
 }
 
 // batchInsertOverviews - now sets ArticleNum directly on each batch's Article and reuses the GroupDB connection
@@ -1124,6 +1122,10 @@ func (sq *SQ3batch) findThreadRoot(groupDB *GroupDB, refs []string) (int64, erro
 	return 0, fmt.Errorf("could not find thread root for any reference")
 }
 
+const query_batchUpdateThreadCacheSelect = `SELECT child_articles, message_count FROM thread_cache WHERE thread_root = ?`
+const query_batchUpdateThreadCacheUpdate = `UPDATE thread_cache SET child_articles = ?, message_count = ?, last_child_number = ?, last_activity = ? WHERE thread_root = ?`
+const query_batchUpdateThreadCacheInsert = `INSERT INTO thread_cache (thread_root, root_date, message_count, child_articles, last_child_number, last_activity) VALUES (?, ?, 1, '', ?, ?) ON CONFLICT(thread_root) DO UPDATE SET root_date = excluded.root_date, last_child_number = excluded.last_child_number, last_activity = excluded.last_activity`
+
 // batchUpdateThreadCache performs TRUE batch update of thread cache entries in a single transaction with retry logic
 func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[int64][]threadCacheUpdateData) error {
 	if len(threadUpdates) == 0 {
@@ -1139,19 +1141,19 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[i
 		initializedCount = 0
 
 		// Prepare statements for batch operations
-		selectStmt, err := tx.Prepare(`SELECT child_articles, message_count FROM thread_cache WHERE thread_root = ?`)
+		selectStmt, err := tx.Prepare(query_batchUpdateThreadCacheSelect)
 		if err != nil {
 			return fmt.Errorf("failed to prepare select statement: %w", err)
 		}
 		defer selectStmt.Close()
 
-		updateStmt, err := tx.Prepare(`UPDATE thread_cache SET child_articles = ?, message_count = ?, last_child_number = ?, last_activity = ? WHERE thread_root = ?`)
+		updateStmt, err := tx.Prepare(query_batchUpdateThreadCacheUpdate)
 		if err != nil {
 			return fmt.Errorf("failed to prepare update statement: %w", err)
 		}
 		defer updateStmt.Close()
 
-		initStmt, err := tx.Prepare(`INSERT INTO thread_cache (thread_root, root_date, message_count, child_articles, last_child_number, last_activity) VALUES (?, ?, 1, '', ?, ?) ON CONFLICT(thread_root) DO UPDATE SET root_date = excluded.root_date, last_child_number = excluded.last_child_number, last_activity = excluded.last_activity`)
+		initStmt, err := tx.Prepare(query_batchUpdateThreadCacheInsert)
 		if err != nil {
 			return fmt.Errorf("failed to prepare init statement: %w", err)
 		}
