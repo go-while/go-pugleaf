@@ -289,7 +289,7 @@ func main() {
 	}
 	quickRGLookup := make(map[string]bool, len(remoteGroups))
 	for _, rg := range remoteGroups {
-		quickRGLookup[rg.Name] = true
+		quickRGLookup[rg] = true
 	}
 	var validNGs []*models.Newsgroup
 	for _, ng := range newsgroups {

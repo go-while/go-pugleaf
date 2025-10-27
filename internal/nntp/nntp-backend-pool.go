@@ -555,7 +555,7 @@ func (pool *Pool) startCleanupWorker() {
 	}
 }
 
-func (pool *Pool) FileCachedListNewsgroups() ([]GroupInfo, error) {
+func (pool *Pool) FileCachedListNewsgroups() ([]string, error) {
 	cacheFile := filepath.Join("data", "cache", fmt.Sprintf("%s.list", pool.Backend.Provider.Host))
 	groups, err := LoadNewsgroupListFromFile(cacheFile)
 	if len(groups) > 0 && err == nil {
@@ -571,7 +571,11 @@ func (pool *Pool) FileCachedListNewsgroups() ([]GroupInfo, error) {
 	if err := WriteNewsgroupListToFile(cacheFile, remoteGroups); err != nil {
 		log.Printf("[NNTP-POOL] Failed to write cached newsgroup list to %s: %v", cacheFile, err)
 	}
-	return remoteGroups, nil
+	var returnGroups []string
+	for i := range remoteGroups {
+		returnGroups = append(returnGroups, remoteGroups[i].Name)
+	}
+	return returnGroups, nil
 }
 
 func WriteNewsgroupListToFile(filename string, groups []GroupInfo) error {
@@ -599,8 +603,8 @@ func WriteNewsgroupListToFile(filename string, groups []GroupInfo) error {
 	return nil
 }
 
-func LoadNewsgroupListFromFile(filename string) ([]GroupInfo, error) {
-	var groups []GroupInfo
+func LoadNewsgroupListFromFile(filename string) ([]string, error) {
+	var groups []string
 	file, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
@@ -622,12 +626,11 @@ func LoadNewsgroupListFromFile(filename string) ([]GroupInfo, error) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
-		group, err := ParseGroupLine(line)
-		if err != nil {
+		if line == "" {
 			log.Printf("[NNTP-POOL] Failed to parse group info from line %q: %v", line, err)
 			continue
 		}
-		groups = append(groups, group)
+		groups = append(groups, line)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
