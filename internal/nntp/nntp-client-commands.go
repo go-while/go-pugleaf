@@ -268,7 +268,7 @@ func (c *BackendConn) ListGroups() ([]GroupInfo, error) {
 	// Parse group information
 	var groups = make([]GroupInfo, 0, len(lines))
 	for _, line := range lines {
-		group, err := c.parseGroupLine(line)
+		group, err := ParseGroupLine(line)
 		if err != nil {
 			continue // Skip malformed lines
 		}
@@ -334,7 +334,7 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 		}
 
 		// Parse group information
-		group, err := c.parseGroupLine(line)
+		group, err := ParseGroupLine(line)
 		if err != nil {
 			continue // Skip malformed lines
 		}
@@ -951,7 +951,7 @@ func ParseHeaders(article *models.Article, headerLines []string) error {
 }
 
 // parseGroupLine parses a single line from LIST command response
-func (c *BackendConn) parseGroupLine(line string) (GroupInfo, error) {
+func ParseGroupLine(line string) (GroupInfo, error) {
 	// Format: "group last first posting"
 	parts := strings.Fields(line)
 	if len(parts) < 4 {

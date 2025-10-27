@@ -1,8 +1,11 @@
 package nntp
 
 import (
+	"bufio"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -88,6 +91,26 @@ func (pool *Pool) XHdr(group string, header string, start, end int64) ([]HeaderL
 	// Put back connection only if no error
 	pool.Put(client)
 	return result, nil
+}
+
+// ListNewsgroups lists available newsgroups from the NNTP server
+func (pool *Pool) ListNewsgroups() ([]GroupInfo, error) {
+	// Get a connection from the pool
+	client, err := pool.Get(MODE_READER_MV)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get connection: %w", err)
+	}
+
+	remoteGroups, err := client.ListGroups()
+	if err != nil {
+		// Close connection on error
+		client.ForceCloseConn()
+		return nil, err
+	}
+
+	// Put back connection only if no error
+	pool.Put(client)
+	return remoteGroups, nil
 }
 
 // XHdrStreamed performs XHDR command and streams results through a channel
@@ -518,17 +541,97 @@ done:
 
 // startCleanupWorker starts a goroutine that periodically cleans up expired connections
 func (pool *Pool) startCleanupWorker() {
+	var closed bool
 	for {
 		time.Sleep(5 * time.Second)
 		pool.Cleanup()
-
 		// Check if pool is closed
 		pool.mux.RLock()
-		closed := pool.closed
+		closed = pool.closed
 		pool.mux.RUnlock()
-
 		if closed {
 			return
 		}
 	}
+}
+
+func (pool *Pool) FileCachedListNewsgroups() ([]GroupInfo, error) {
+	cacheFile := filepath.Join("data", "cache", fmt.Sprintf("%s.list", pool.Backend.Provider.Host))
+	groups, err := LoadNewsgroupListFromFile(cacheFile)
+	if len(groups) > 0 && err == nil {
+		return groups, nil
+	} else if err != nil {
+		log.Printf("[NNTP-POOL] Failed to load cached newsgroup list from %s: %v", cacheFile, err)
+	}
+	log.Printf("[NNTP-POOL] No valid cached newsgroup list found at %s, fetching from server...", cacheFile)
+	remoteGroups, err := pool.ListNewsgroups()
+	if err != nil {
+		return nil, err
+	}
+	if err := WriteNewsgroupListToFile(cacheFile, remoteGroups); err != nil {
+		log.Printf("[NNTP-POOL] Failed to write cached newsgroup list to %s: %v", cacheFile, err)
+	}
+	return remoteGroups, nil
+}
+
+func WriteNewsgroupListToFile(filename string, groups []GroupInfo) error {
+	// Ensure the directory exists
+	dir := filepath.Dir(filename)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	defer file.Close()
+	writer := bufio.NewWriter(file)
+	for _, group := range groups {
+		line := fmt.Sprintf("%s\n", group.Name)
+		_, err := writer.WriteString(line)
+		if err != nil {
+			return fmt.Errorf("failed to write to file: %w", err)
+		}
+	}
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush writer: %w", err)
+	}
+	return nil
+}
+
+func LoadNewsgroupListFromFile(filename string) ([]GroupInfo, error) {
+	var groups []GroupInfo
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+	// check file age
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+	if time.Since(info.ModTime()) > 24*time.Hour {
+		err := os.Remove(filename)
+		if err != nil {
+			return nil, fmt.Errorf("failed to remove stale cache file: %w", err)
+		}
+		log.Printf("[NNTP-POOL] Cache file %s is stale (age: %v), refreshing...", filename, time.Since(info.ModTime()))
+		return nil, nil
+	}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		group, err := ParseGroupLine(line)
+		if err != nil {
+			log.Printf("[NNTP-POOL] Failed to parse group info from line %q: %v", line, err)
+			continue
+		}
+		groups = append(groups, group)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+	log.Printf("[NNTP-POOL] Loaded %d newsgroups from cache file %s", len(groups), filename)
+	return groups, nil
 }

@@ -73,6 +73,7 @@ func main() {
 		dataDir            = flag.String("data", "./data", "Directory to store database files")
 		// Download options with date filtering
 		downloadStartDate = flag.String("download-start-date", "", "Start downloading articles from this date (YYYY-MM-DD format)")
+		resetProgress     = flag.Int64("reset-progress", 0, "Reset download progress for all newsgroups on primary provider")
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
 	)
 	flag.Parse()
@@ -178,7 +179,6 @@ func main() {
 		return
 	}
 	log.Printf("Loaded %d providers from database", len(providers))
-
 	// Get all newsgroups from database using admin function (includes empty groups)
 	suffixWildcard := strings.HasSuffix(*fetchNewsgroup, "*")
 	var wildcardNG string
@@ -270,6 +270,44 @@ func main() {
 		break // Only use the first provider for import
 	}
 
+	if *resetProgress > 0 {
+		log.Printf("[FETCHER]: Resetting download progress to %d for all newsgroups on primary provider", *resetProgress)
+		for _, ng := range newsgroups {
+			//last, err = progressDB.GetLastArticle(pools[0].Backend.Provider.Name, ng.Name) // get last article
+			err = progressDB.UpdateProgress(pools[0].Backend.Provider.Name, ng.Name, *resetProgress)
+			if err != nil {
+				log.Fatalf("Failed to update progress for provider '%s' group '%s': %v", pools[0].Backend.Provider.Name, ng.Name, err)
+			}
+		}
+		log.Printf("[FETCHER]: Download progress reset completed.")
+		os.Exit(0)
+	}
+
+	remoteGroups, err := pools[0].FileCachedListNewsgroups()
+	if err != nil || len(remoteGroups) == 0 {
+		log.Fatalf("failed to fetch newsgroup list from remote server: %v", err)
+	}
+	quickRGLookup := make(map[string]bool, len(remoteGroups))
+	for _, rg := range remoteGroups {
+		quickRGLookup[rg.Name] = true
+	}
+	var validNGs []*models.Newsgroup
+	for _, ng := range newsgroups {
+		if _, exists := quickRGLookup[ng.Name]; exists {
+			validNGs = append(validNGs, ng)
+		} else {
+			//log.Printf("[FETCHER]: WARNING: Newsgroup '%s' not found on remote server!", ng.Name)
+		}
+	}
+	if len(validNGs) == 0 {
+		log.Printf("[FETCHER]: No valid newsgroups to process after checking remote server list.")
+		return
+	}
+	newsgroups = validNGs
+	log.Printf("[FETCHER]: Starting fetch for %d newsgroups", len(newsgroups))
+	time.Sleep(time.Second * 2) // debug sleep
+
+	// Start shutdown listener goroutine
 	fetchDoneChan := make(chan error, 1)
 	go func() {
 		<-sigChan
@@ -799,22 +837,11 @@ func UpdateNewsgroupList(updateList *string, excludePrefix *string, updateListFo
 	// Create NNTP pool
 	pool := nntp.NewPool(backendConfig)
 	defer pool.ClosePool()
-
-	// Get a connection from the pool
-	conn, err := pool.Get(nntp.MODE_READER_MV)
+	// Fetch remote newsgroup list
+	remoteGroups, err := pool.ListNewsgroups()
 	if err != nil {
-		return fmt.Errorf("failed to get NNTP connection: %w", err)
+		return fmt.Errorf("failed to fetch newsgroup list from remote server: %w", err)
 	}
-	defer pool.Put(conn)
-
-	log.Printf("UpdateNewsgroupList: Connected to %s:%d, fetching newsgroup list...", firstProvider.Host, firstProvider.Port)
-
-	// Fetch the complete newsgroup list
-	remoteGroups, err := conn.ListGroups()
-	if err != nil {
-		return fmt.Errorf("failed to fetch newsgroup list: %w", err)
-	}
-
 	log.Printf("UpdateNewsgroupList: Fetched %d newsgroups from remote server", len(remoteGroups))
 
 	// Parse the update pattern to determine filtering
