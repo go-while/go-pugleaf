@@ -1225,6 +1225,8 @@ func reorderArticlesByDateSent(db *database.Database, newsgroups []*models.Newsg
 }
 
 // reorderSingleNewsgroup reorders articles in a single newsgroup by date_sent
+const query_reorderSingleNewsgroup_insertSQL = `INSERT INTO articles (message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at, spam, hide) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
 func reorderSingleNewsgroup(db *database.Database, newsgroupName string, verbose bool) (int64, error) {
 	// Open source database
 	sourceDB, err := db.GetGroupDB(newsgroupName)
@@ -1267,12 +1269,6 @@ func reorderSingleNewsgroup(db *database.Database, newsgroupName string, verbose
 		Name: newsgroupName,
 	}
 
-	// Prepare insert statement for reuse across batches
-	insertSQL := `INSERT INTO articles (article_num, message_id, subject, from_header, date_sent, date_string,
-	                                    "references", bytes, lines, reply_count, path, headers_json, body_text,
-	                                    imported_at, spam, hide)
-	              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-
 	for offset < totalArticles {
 		// Use existing GetArticlesBatchWithDateFilter function to fetch articles
 		// Pass nil for startTime/endTime to get all articles, ordered by date_sent
@@ -1292,7 +1288,7 @@ func reorderSingleNewsgroup(db *database.Database, newsgroupName string, verbose
 			return processed, fmt.Errorf("failed to begin transaction at offset %d: %w", offset, err)
 		}
 
-		stmt, err := tx.Prepare(insertSQL)
+		stmt, err := tx.Prepare(query_reorderSingleNewsgroup_insertSQL)
 		if err != nil {
 			tx.Rollback()
 			return processed, fmt.Errorf("failed to prepare insert statement: %w", err)
