@@ -345,7 +345,7 @@ func (db *Database) migrateGroupDB(groupDB *GroupDB, useCache bool) error {
 			if err := applyMigration(groupDB.DB, migration, "group"); err != nil {
 				return fmt.Errorf("failed to apply migration %s to group database: %w", migration.FileName, err)
 			}
-			log.Printf("Done: apply migration %s to group database\n", migration.FileName)
+			//log.Printf("Done: apply migration %s to group database\n", migration.FileName)
 		}
 	}
 
