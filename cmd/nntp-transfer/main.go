@@ -222,8 +222,8 @@ func main() {
 	}
 
 	// Validate batch size
-	if *batchCheck < 1 || *batchCheck > 10000 {
-		log.Fatalf("Error: batch-check must be between 1 and 10000 (got %d)", *batchCheck)
+	if *batchCheck < 1 || *batchCheck > 100000 {
+		log.Fatalf("Error: batch-check must be between 1 and 100000 (got %d)", *batchCheck)
 	}
 	BatchCheck = *batchCheck
 
@@ -942,7 +942,7 @@ func IgnoreNewsgroupProgress(ng *models.Newsgroup, progressDB *nntp.TransferProg
 			log.Printf("Warning: Failed to check if newsgroup %s exists in progress DB: %v", ng.Name, err)
 			return true
 		} else if exists {
-			log.Printf("Skipping newsgroup %s - already has transfer results for this remote", ng.Name)
+			//log.Printf("Skipping newsgroup %s - already has transfer results for this remote", ng.Name)
 			return true
 		}
 	}
@@ -1551,8 +1551,8 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 
 var results []string
 var rejectedArticles = make(map[string][]string)
-var lowerLevel float64 = 90.0
-var upperLevel float64 = 95.0
+var LowerLevel float64 = 90.0
+var UpperLevel float64 = 95.0
 
 // processBatch processes a batch of articles using NNTP streaming protocol (RFC 4644)
 // Uses TAKETHIS primarily, falls back to CHECK when success rate < 95%
@@ -1568,28 +1568,22 @@ func processBatch(ttMode *nntp.TakeThisMode, messageIDs []*string, redisCli *red
 	if progress, exists := nntp.NewsgroupTransferProgressMap[*ttMode.Newsgroup]; exists {
 		progress.Mux.Lock()
 		progress.OffsetStart = dbOffset
-		//progress.BatchStart = batchStart
-		//progress.BatchEnd = batchEnd
 		progress.LastUpdated = time.Now()
 		progress.Mux.Unlock()
 	}
 	nntp.ResultsMutex.RUnlock()
 
-	ttMode.FlipMode(lowerLevel, upperLevel)
+	ttMode.FlipMode(LowerLevel, UpperLevel)
 
 	job := &nntp.CHTTJob{
-		JobID:      atomic.AddUint64(&nntp.JobIDCounter, 1),
-		Newsgroup:  ttMode.Newsgroup,
-		MessageIDs: make([]*string, 0, len(messageIDs)),
-		//Articles:     make([]*models.Article, 0, len(messageIDs)),
-		//ArticleMap:   make(map[*string]*models.Article, len(messageIDs)),
+		JobID:        atomic.AddUint64(&nntp.JobIDCounter, 1),
+		Newsgroup:    ttMode.Newsgroup,
+		MessageIDs:   make([]*string, 0, len(messageIDs)),
 		ResponseChan: nntp.GetTTResponseChan(),
 		TTMode:       ttMode,
 		OffsetStart:  dbOffset,
-		//BatchStart:   batchStart,
-		//BatchEnd:     batchEnd,
-		OffsetQ:     offsetQ,
-		NGTProgress: ngtprogress,
+		OffsetQ:      offsetQ,
+		NGTProgress:  ngtprogress,
 	}
 	var redis_cached uint64
 
@@ -1682,7 +1676,7 @@ func processBatch(ttMode *nntp.TakeThisMode, messageIDs []*string, redisCli *red
 	QueuesMutex.RUnlock()
 
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queueing job #%d with %d msgIDs to worker %d. CheckQ=%d", *ttMode.Newsgroup, workerID, job.JobID, len(job.MessageIDs), workerID, len(CheckQueues[workerID]))
-	WorkersCheckChannel <- job // checkQueue <- job // goto: job := <-checkQueue
+	WorkersCheckChannel <- job // checkQueue <- job // goto: job := <-WorkersCheckChannel
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queued Job #%d", *ttMode.Newsgroup, workerID, job.JobID)
 	return job.GetResponseChan(), nil
 } // end func processBatch
@@ -2157,6 +2151,8 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 	var mux sync.Mutex
 	var runningTTJobs int // protected by local mux
 	var workerWG sync.WaitGroup
+	TTworkerRequestChan := make(chan struct{}, 1)
+	TTworkerReleaseChan := make(chan struct{}, 1)
 	readCHECKResponsesChan := make(chan *nntp.ReadRequest, 1024*1024)
 	readTAKETHISResponsesChan := make(chan *nntp.ReadRequest, 1024*1024)
 	errChan := make(chan struct{}, 9)
@@ -2239,16 +2235,43 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 					continue loop
 				}
 				workerID := assignWorkerToNewsgroup(*currentJob.Newsgroup)
+				requestedRelease := false
+				if len(WorkersTTChannel) >= cap(WorkersTTChannel) {
+					log.Printf("CheckWorker (%d): waiting... takeThisChan full (%d)", workerID, len(WorkersTTChannel))
+					select {
+					case TTworkerRequestChan <- struct{}{}:
+						requestedRelease = true
+					default:
+					}
+				}
 			waiting:
 				for {
-					if len(WorkersTTChannel) >= MaxQueuedJobs {
-						log.Printf("CheckWorker (%d): waiting... shared takeThisChan full (%d)", workerID, len(WorkersTTChannel))
-						time.Sleep(time.Second / 4)
-						continue waiting
+					if len(WorkersTTChannel) < cap(WorkersTTChannel) {
+						break waiting
 					}
-					break
+					select {
+					case <-errChan:
+						common.SignalErrChan(errChan)
+						log.Printf("CheckWorker (%d): waiting for TakeThisChan got errChan signal... exiting", workerID)
+						return
+					case <-time.After(time.Millisecond * 16):
+						if len(WorkersTTChannel) < cap(WorkersTTChannel) {
+							break waiting
+						}
+					case <-TTworkerReleaseChan:
+						if len(WorkersTTChannel) < cap(WorkersTTChannel) {
+							break waiting
+						}
+						if !requestedRelease {
+							TTworkerRequestChan <- struct{}{}
+							requestedRelease = true
+						}
+					default:
+						// continues waiting loop
+					}
 				}
 				currentJob.OffsetQ.OffsetBatchDone()
+				currentJob.TTMode.FlipMode(LowerLevel, UpperLevel)
 				if currentJob.TTMode.UseCHECK() {
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d waits to check %d message IDs in batches of %d", *currentJob.Newsgroup, workerID, currentJob.JobID, len(currentJob.MessageIDs), BatchCheck)
 
@@ -2282,16 +2305,17 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 				} else {
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d skipping CHECK for %d message IDs (TAKETHIS mode)", *currentJob.Newsgroup, workerID, currentJob.JobID, len(currentJob.MessageIDs))
 					currentJob.WantedIDs = currentJob.MessageIDs
-				enqueue:
-					for {
-						select {
-						case WorkersTTChannel <- currentJob: // local takethis chan sharing the same connection
-							// passed
-							break enqueue
-						default:
-							// chan full
-							time.Sleep(time.Millisecond * 100)
-						}
+					// Use blocking send with select for graceful shutdown support
+					select {
+					case WorkersTTChannel <- currentJob: // local takethis chan sharing the same connection
+						// Job successfully enqueued
+					case <-errChan:
+						// Shutdown requested, requeue job and exit
+						rs.Mux.Lock()
+						rs.jobs = append([]*nntp.CHTTJob{currentJob}, rs.jobs...)
+						rs.Mux.Unlock()
+						log.Printf("CheckWorker (%d): Shutdown while waiting to enqueue TAKETHIS job", workerID)
+						return
 					}
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d sent to local TakeThisChan", *currentJob.Newsgroup, workerID, currentJob.JobID)
 				}
@@ -2645,8 +2669,22 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 			}
 
 			select {
-			case ajob := <-WorkersTTChannel:
-				job = ajob
+			case job = <-WorkersTTChannel:
+				// got new job
+				if len(WorkersTTChannel) >= cap(WorkersTTChannel)-1 {
+					// see if anybody is waiting
+					select {
+					case <-TTworkerRequestChan:
+						// anybody IS waiting!
+						select {
+						case TTworkerReleaseChan <- struct{}{}:
+							// sent release notify
+						default:
+						}
+					default:
+						// nobody was waiting
+					}
+				}
 
 			case <-errChan:
 				log.Printf("TTworker (%d): got errChan signal, exiting", workerID)
@@ -2794,7 +2832,7 @@ forever:
 			// Add job to processing queue
 			rs.jobs = append(rs.jobs, job)
 			// Signal ticker to process this job
-			common.SignalTickChan(tickChan)
+			common.SignalTickChan(tickChan) // goto: case <-tickChan:
 			rs.Mux.Unlock()
 		} // end select
 	} // end for

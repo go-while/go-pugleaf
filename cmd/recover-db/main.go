@@ -1244,8 +1244,8 @@ func reorderSingleNewsgroup(db *database.Database, newsgroupName string, verbose
 		return 0, nil // No articles to process
 	}
 
-	// Open destination database with .new suffix
-	destDB, destPath, err := db.GetGroupDBWithSuffix(newsgroupName, ".new")
+	// Open destination database with db.new suffix in db folder path
+	destDB, destPath, err := db.GetGroupDBWithSuffix(newsgroupName, "new")
 	if err != nil {
 		return 0, fmt.Errorf("failed to create destination database: %w", err)
 	}
@@ -1259,7 +1259,6 @@ func reorderSingleNewsgroup(db *database.Database, newsgroupName string, verbose
 
 	// Process articles in batches to avoid memory issues with large newsgroups
 	const batchSize = 1000
-	var newArticleNum int64 = 1
 	var processed int64
 	var offset int64 = 0
 
@@ -1306,14 +1305,8 @@ func reorderSingleNewsgroup(db *database.Database, newsgroupName string, verbose
 				continue
 			}
 
-			// Determine spam/hide flags (these are stored as integers in DB)
-			spam := 0
-			hide := 0
-			// Note: Article model doesn't have Spam/Hide fields, so we default to 0
-
 			// Insert with new sequential article_num
 			_, err = stmt.Exec(
-				newArticleNum, // new sequential article_num
 				article.MessageID,
 				article.Subject,
 				article.FromHeader,
@@ -1327,16 +1320,15 @@ func reorderSingleNewsgroup(db *database.Database, newsgroupName string, verbose
 				article.HeadersJSON,
 				article.BodyText,
 				article.ImportedAt,
-				spam,
-				hide,
+				article.Spam,
+				article.Hide,
 			)
 			if err != nil {
 				stmt.Close()
 				tx.Rollback()
-				return processed, fmt.Errorf("failed to insert article %d: %w", newArticleNum, err)
+				return processed, fmt.Errorf("failed to insert article %w", err)
 			}
 
-			newArticleNum++
 			processed++
 			batchCount++
 		}

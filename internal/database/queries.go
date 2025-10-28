@@ -3283,7 +3283,7 @@ func (db *Database) SearchUserByComputedHash(targetHash string, nonce string) (*
 
 const query_getMessageIDsBatchWithDateFilter_selectPart = `SELECT message_id FROM articles`
 const query_getMessageIDsBatchWithDateFilter_orderby = " ORDER BY date_sent ASC"
-const query_getArticlesBatchWithDateFilter_selectPart = `SELECT message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, path, headers_json, body_text FROM articles`
+const query_getArticlesBatchWithDateFilter_selectPart = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, headers_json, body_text, path, imported_at, spam, hide FROM articles`
 const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ? OFFSET ?"
 
 // GetArticlesByIDs retrieves articles by their message IDs, ordered by date_sent
@@ -3497,7 +3497,7 @@ func (db *Database) GetArticlesBatchWithDateFilter(ng *models.Newsgroup, offset 
 	var out []*models.Article
 	for rows.Next() {
 		a := models.NewArticle()
-		if err := rows.Scan(&a.DBArtNum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
+		if err := rows.Scan(&a.DBArtNum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.HeadersJSON, &a.BodyText, &a.Path, &a.ImportedAt, &a.Spam, &a.Hide); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

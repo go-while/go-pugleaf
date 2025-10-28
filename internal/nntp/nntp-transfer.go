@@ -602,27 +602,26 @@ func (ttMode *TakeThisMode) SetNoCHECK() {
 }
 
 // FlipMode checks the TAKETHIS success rate and flips between CHECK and TAKETHIS modes
-func (ttMode *TakeThisMode) FlipMode(lowerLevel float64, upperLevel float64) bool {
+func (ttMode *TakeThisMode) FlipMode(lowerLevel float64, upperLevel float64) {
 	ttMode.mux.Lock()
 	defer ttMode.mux.Unlock()
-	if ttMode.TmpSuccessCount < 10 || ttMode.TmpTTotalsCount < 100 {
-		return true // Force CHECK mode for this batch
+	if ttMode.TmpSuccessCount < 100 || ttMode.TmpTTotalsCount < 100 {
+		ttMode.CheckMode = true
+		return // Force CHECK mode for this batch
 	}
 	successRate := float64(ttMode.TmpSuccessCount) / float64(ttMode.TmpTTotalsCount) * 100.0
-	ttMode.TmpSuccessCount = 0
-	ttMode.TmpTTotalsCount = 0
 	switch ttMode.CheckMode {
 	case false: // Currently in TAKETHIS mode
 		if successRate < lowerLevel {
 			ttMode.CheckMode = true
-			log.Printf("Newsgroup: '%s' | TAKETHIS success rate %.1f%% < %f%%, switching to CHECK mode", *ttMode.Newsgroup, successRate, lowerLevel)
+			log.Printf("Newsgroup: '%s' | TAKETHIS success rate %.1f%% < %f%%, switching to CHECK mode (%d/%d)", *ttMode.Newsgroup, successRate, lowerLevel, ttMode.TmpSuccessCount, ttMode.TmpTTotalsCount)
 		}
 	case true: // Currently in CHECK mode
 		if successRate > upperLevel {
 			ttMode.CheckMode = false
-			log.Printf("Newsgroup: '%s' | TAKETHIS success rate %.1f%% >= %f%%, switching to TAKETHIS mode", *ttMode.Newsgroup, successRate, upperLevel)
+			log.Printf("Newsgroup: '%s' | TAKETHIS success rate %.1f%% >= %f%%, switching to TAKETHIS mode (%d/%d)", *ttMode.Newsgroup, successRate, upperLevel, ttMode.TmpSuccessCount, ttMode.TmpTTotalsCount)
 		}
 	}
-	retval := ttMode.CheckMode
-	return retval
+	ttMode.TmpSuccessCount = 0
+	ttMode.TmpTTotalsCount = 0
 }

@@ -100,7 +100,7 @@ func (db *Database) GetGroupDB(groupName string) (*GroupDB, error) {
 
 		// Apply schemas using the new migration system instead of direct file application
 		// Apply all migrations to ensure schema is up to date
-		if err := db.migrateGroupDB(groupDB); err != nil {
+		if err := db.migrateGroupDB(groupDB, true); err != nil {
 			if cerr := groupsDB.Close(); cerr != nil {
 				log.Printf("Failed to close groupsDB %s during migration error: %v", groupName, cerr)
 			}
@@ -199,13 +199,13 @@ func (db *Database) GetGroupDBWithSuffix(groupName, suffix string) (*sql.DB, str
 	}
 
 	groupsHash := GroupHashMap.GroupToHash(groupName)
-	baseGroupDBdir := filepath.Join(db.dbconfig.DataDir, "/db/"+groupsHash)
+	baseGroupDBdir := filepath.Join(db.dbconfig.DataDir, "/db."+suffix+"/"+groupsHash)
 
 	if err := createDirIfNotExists(baseGroupDBdir); err != nil {
 		return nil, "", fmt.Errorf("failed to create group database directory: %w", err)
 	}
 
-	groupDBfile := filepath.Join(baseGroupDBdir + "/" + SanitizeGroupName(groupName) + ".db" + suffix)
+	groupDBfile := filepath.Join(baseGroupDBdir + "/" + SanitizeGroupName(groupName) + ".db")
 
 	// Open database
 	groupDB, err := sql.Open("sqlite3", groupDBfile)
@@ -228,7 +228,7 @@ func (db *Database) GetGroupDBWithSuffix(groupName, suffix string) (*sql.DB, str
 		Idle:      time.Now(),
 	}
 
-	if err := db.migrateGroupDB(tempGroupDB); err != nil {
+	if err := db.migrateGroupDB(tempGroupDB, false); err != nil {
 		if cerr := groupDB.Close(); cerr != nil {
 			log.Printf("Failed to close groupDB during migration error: %v", cerr)
 		}
