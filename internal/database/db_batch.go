@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -55,14 +54,6 @@ type MsgIdTmpCacheItem struct {
 	IsThreadRoot bool  // True if this article is a thread root
 }
 
-// OverviewBatch represents a staged overview waiting for batch processing
-/*
-type OverviewBatch struct {
-	Article *models.Article
-	//Newsgroup *string
-}
-*/
-
 // ThreadCacheBatch represents a staged thread cache initialization waiting for batch processing
 type ThreadCacheBatch struct {
 	Newsgroup  string
@@ -70,19 +61,20 @@ type ThreadCacheBatch struct {
 	Article    *models.Article
 }
 
-type ThreadingProcessor interface {
-	MsgIdExists(group *string, messageID string) bool
+type ProcessorInterface interface {
+	//MsgIdExists(group *string, messageID string) bool
 	// Add methods for history and cache operations
-	AddProcessedArticleToHistory(msgIdItem *history.MessageIdItem, newsgroup *string, articleNumber int64)
+	//AddProcessedArticleToHistory(msgIdItem *history.MessageIdItem) bool // interface
 	// Add method for finding thread roots - matches proc_MsgIDtmpCache.go signature (updated to use pointer)
-	FindThreadRootInCache(groupName *string, refs []string) *MsgIdTmpCacheItem
+	//FindThreadRootInCache(groupName *string, refs []string) *MsgIdTmpCacheItem
+	// Add method for checking if there is no more work in history
 	CheckNoMoreWorkInHistory() bool
 	// Add method for force closing group databases
 	ForceCloseGroupDB(groupsDB *GroupDB) error
 }
 
 // SetProcessor sets the threading processor callback interface
-func (sq *SQ3batch) SetProcessor(proc ThreadingProcessor) {
+func (sq *SQ3batch) SetProcessor(proc ProcessorInterface) {
 	sq.proc = proc
 	if sq.maxDBbatch > 1000 {
 		//log.Printf("[BATCH] sq.maxDBbatch is set to %d, reduced to 1000 in db_batch", sq.maxDBbatch)
@@ -92,7 +84,7 @@ func (sq *SQ3batch) SetProcessor(proc ThreadingProcessor) {
 
 type SQ3batch struct {
 	db           *Database          // Reference to the main database
-	proc         ThreadingProcessor // Threading processor interface for message ID checks
+	proc         ProcessorInterface // processor interface for various callbacks
 	orchestrator *BatchOrchestrator // Smart orchestrator for batch processing
 	maxDBbatch   int                // limits db batches to avoid mem and sqlite limits
 	maxDBthreads int                // limits number of concurrent db batch threads
@@ -637,9 +629,9 @@ retry2:
 	for _, article := range batches {
 		//log.Printf("[BATCH] processNewsgroupBatch Updating history/cache for article %d/%d in group '%s'", i+1, len(batches), *task.Newsgroup)
 		// Read article number under read lock to avoid concurrent map access
-		article.Mux.RLock()
-		sq.proc.AddProcessedArticleToHistory(article.MsgIdItem, task.Newsgroup, article.ArticleNums[task.Newsgroup])
-		article.Mux.RUnlock()
+		//article.Mux.RLock()
+		//sq.proc.AddProcessedArticleToHistory(article.MsgIdItem, task.Newsgroup, article.ArticleNums[task.Newsgroup])
+		//article.Mux.RUnlock()
 		article.Mux.Lock()
 		if len(article.NewsgroupsPtr) > 0 {
 			index := -1
@@ -658,7 +650,7 @@ retry2:
 				continue
 			}
 		}
-		// The MsgIdItem is now in history system, clear the Article's reference to it
+		// clear values and unlink pointers to free memory
 		article.MessageID = ""
 		article.Subject = ""
 		article.FromHeader = ""
@@ -687,6 +679,9 @@ retry2:
 		log.Printf("[BATCH] processNewsgroupBatch Main database connection is nil, cannot update newsgroup stats for '%s'", *task.Newsgroup)
 		err = fmt.Errorf("processNewsgroupBatch main database connection is nil")
 	} else {
+		if latestDate.After(time.Now().UTC()) {
+			latestDate = time.Now().UTC()
+		}
 		//lastUpdate = time.Now().UTC().Format("2006-01-02 15:04:05")
 		err = RetryableTransactionExec(sq.db.mainDB, func(tx *sql.Tx) error {
 			_, txErr := tx.Exec(query_updateNewsgroupsStats,
@@ -1100,13 +1095,6 @@ func (sq *SQ3batch) findThreadRoot(groupDB *GroupDB, refs []string) (int64, erro
 	if len(refs) == 0 || sq.proc == nil {
 		return 0, fmt.Errorf("no references or processor not available")
 	}
-
-	// Try to find thread root in processor cache first
-	if cachedRoot := sq.proc.FindThreadRootInCache(sq.GetNewsgroupPointer(groupDB.Newsgroup), refs); cachedRoot != nil {
-		return cachedRoot.ArtNum, nil
-	}
-
-	// Fall back to database search for any referenced message
 	for i := len(refs) - 1; i >= 0; i-- {
 		refMessageID := refs[i]
 

@@ -102,7 +102,8 @@ func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Arti
 	if code != ArticleFollows {
 		switch code {
 		case NoSuchArticle:
-			log.Printf("[BECONN] GetArticle: not found: '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
+			// ---> internal/nntp/nntp-backend-pool.go:158
+			//log.Printf("[BECONN] GetArticle: not found: '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
 			return nil, ErrArticleNotFound
 		case DMCA:
 			log.Printf("[BECONN] GetArticle: removed (DMCA): '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
@@ -1342,12 +1343,12 @@ func (c *BackendConn) SwitchToModeReader() error {
 	defer c.TextConn.EndResponse(id)
 
 	code, line, err := c.TextConn.ReadCodeLine(200)
-	if err != nil {
+	if code == 0 && err != nil {
 		return fmt.Errorf("failed to read MODE READER response: %w", err)
 	}
 
-	if code != 200 {
-		return fmt.Errorf("MODE READER failed (code %d): %s", code, line)
+	if code < 200 || code > 201 {
+		return fmt.Errorf("set MODE READER failed (code %d): %s", code, line)
 	}
 
 	c.ModeReader = true

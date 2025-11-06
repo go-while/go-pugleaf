@@ -64,7 +64,7 @@ func (c *ClientConnection) handleIHave(args []string) error {
 	}
 
 	// Check if we already have this article
-	response, err := c.server.Processor.Lookup(msgIdItem)
+	response, _, err := c.server.Processor.Lookup(msgIdItem, true)
 	if err != nil {
 		log.Printf("Error looking up message ID %s in history: %v", msgIdItem.MessageId, err)
 		c.rateLimitOnError()
@@ -130,7 +130,7 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	}
 
 	// Check if we already have this article
-	response, err := c.server.Processor.Lookup(msgIdItem)
+	response, _, err := c.server.Processor.Lookup(msgIdItem, true)
 	if err != nil {
 		log.Printf("Error looking up message ID %s in history: %v", msgIdItem.MessageId, err)
 		c.rateLimitOnError()

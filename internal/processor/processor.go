@@ -116,66 +116,14 @@ func (proc *Processor) CheckNoMoreWorkInHistory() bool {
 }
 
 // AddProcessedArticleToHistory adds a successfully processed article to history with correct group and article number
-func (proc *Processor) AddProcessedArticleToHistory(msgIdItem *history.MessageIdItem, newsgroupPtr *string, articleNumber int64) {
-	if msgIdItem == nil || newsgroupPtr == nil {
+func (proc *Processor) AddProcessedArticleToHistory(msgIdItem *history.MessageIdItem) bool {
+	if msgIdItem == nil {
 		//log.Print("ERROR: addProcessedArticleToHistory called with nil MessageIdItem or newsgroupPtr")
-		return
+		return false
 	}
-	if *newsgroupPtr == "" || articleNumber <= 0 {
-		//log.Printf("ERROR: addProcessedArticleToHistory called with invalid parameters: newsgroupPtr='%s', articleNumber=%d msgIdItem='%#v'", *newsgroupPtr, articleNumber, msgIdItem)
-		return
-	}
-
-	msgIdItem.Mux.Lock()
-	if msgIdItem.FileOffset > 0 || msgIdItem.ArtNum > 0 || msgIdItem.GroupName != nil {
-		msgIdItem.Response = history.CaseDupes
-		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
-		//log.Printf("ERROR: addProcessedArticleToHistory called with existing FileOffset %d or ArtNum %d or GroupName '%v', ignoring new values for msgIdItem='%#v'", msgIdItem.FileOffset, msgIdItem.ArtNum, *msgIdItem.GroupName, msgIdItem)
-		msgIdItem.Mux.Unlock()
-		return
-	}
-	if msgIdItem.GroupName == nil && msgIdItem.ArtNum <= 0 {
-		msgIdItem.GroupName = newsgroupPtr
-		msgIdItem.ArtNum = articleNumber // Set article number if not already set
-		//msgIdItem.StorageToken = fmt.Sprintf("%s:%d", *newsgroupPtr, articleNumber) // Set the storage token in the item
-	} else {
-		msgIdItem.Response = history.CaseDupes
-		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
-		//log.Printf("WARNING: addProcessedArticleToHistory called with existing GroupName '%s' or ArtNum %d, ignoring new values for msgIdItem='%#v'", *msgIdItem.GroupName, msgIdItem.ArtNum, msgIdItem)
-		msgIdItem.Mux.Unlock()
-		return
-	}
-	msgIdItem.Mux.Unlock()
 
 	// Add to history channel
-	proc.History.Add(msgIdItem)
-}
-
-// FindThreadRootInCache - public wrapper for the interface
-func (proc *Processor) FindThreadRootInCache(newsgroupPtr *string, refs []string) *database.MsgIdTmpCacheItem {
-	item := proc.MsgIdCache.FindThreadRootInCache(newsgroupPtr, refs)
-	if item == nil {
-		return nil
-	}
-
-	// Convert from history.MessageIdItem to database.MsgIdTmpCacheItem for interface compatibility
-	item.Mux.RLock()
-	defer item.Mux.RUnlock()
-
-	// Get group-specific threading information
-	threadingInfo, exists := item.GroupThreading[newsgroupPtr]
-	if !exists {
-		return nil // No threading info for this group
-	}
-
-	result := &database.MsgIdTmpCacheItem{
-		MessageId:    item.MessageId,
-		ArtNum:       threadingInfo.ArtNum,
-		RootArticle:  threadingInfo.RootArticle,
-		IsThreadRoot: threadingInfo.IsThreadRoot,
-	}
-
-	return result
+	return proc.History.Add(msgIdItem)
 }
 
 // GetHistoryStats returns current history statistics
@@ -237,8 +185,8 @@ func (proc *Processor) WaitForBatchCompletion() {
 // Public methods for NNTP server integration
 
 // Lookup looks up a message-ID in history and returns the storage token in the item
-func (proc *Processor) Lookup(msgIdItem *history.MessageIdItem) (int, error) {
-	return proc.History.Lookup(msgIdItem)
+func (proc *Processor) Lookup(msgIdItem *history.MessageIdItem, quick bool) (response int, newsgroupIDs []int64, err error) {
+	return proc.History.Lookup(msgIdItem, quick)
 }
 
 /*

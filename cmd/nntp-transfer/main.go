@@ -476,8 +476,8 @@ func main() {
 		// you did create a backup before, right?
 		debugMutex.Lock()
 		defer debugMutex.Unlock()
-		for newsgroup, articles := range debugArticles {
-			fmt.Printf("Debug capture - Newsgroup: %s, Articles: %d\n", newsgroup, len(articles))
+		for newsgroup, messageIDs := range debugArticles {
+			fmt.Printf("Debug capture - Newsgroup: %s, Articles: %d\n", newsgroup, len(messageIDs))
 
 			// Get group database for updates if needed
 			groupDB, err := db.GetGroupDB(newsgroup)
@@ -486,7 +486,12 @@ func main() {
 				continue
 			}
 
-			for _, article := range articles {
+			for _, messageId := range messageIDs {
+				article, err := db.GetArticleByMessageID(groupDB, *messageId)
+				if err != nil {
+					fmt.Printf("! Error getting article '%s': %v\n", *messageId, err)
+					continue
+				}
 				fmt.Printf("# %s: #%d : '%s' | orgDate='%s' parsed='%#v'\n", newsgroup, article.DBArtNum, article.MessageID, article.DateString, article.DateSent)
 
 				// Track original values to detect changes
@@ -869,17 +874,25 @@ func getNewsgroupsToTransfer(db *database.Database, progressDB *nntp.TransferPro
 		start := time.Now()
 		for _, ng := range allNewsgroups {
 			// Check exclude prefix first
-			if matchesExcludePrefix(ng.Name, excludePrefixes) {
-				continue
+			if len(excludePrefixes) > 0 {
+				if matchesExcludePrefix(ng.Name, excludePrefixes) {
+					continue
+				}
 			}
 			// Check if newsgroup already has results for this remote
-			if IgnoreNewsgroupProgress(ng, progressDB, startTime, endTime) {
+			if startTime != nil || endTime != nil {
+				if IgnoreNewsgroupProgress(ng, progressDB, startTime, endTime) {
+					log.Printf("Skipping newsgroup %s - already has transfer results for this remote", ng.Name)
+					continue
+				}
+			}
+			if !shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup, hasIncludeWildcards, hasExcludeWildcards) {
+				log.Printf("Excluding newsgroup %s based on include/exclude patterns", ng.Name)
 				continue
 			}
-			if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup, hasIncludeWildcards, hasExcludeWildcards) {
-				newsgroups = append(newsgroups, ng)
-			}
+			newsgroups = append(newsgroups, ng)
 		}
+
 		log.Printf("Filtered %d newsgroups from %d total in %v", len(newsgroups), len(allNewsgroups), time.Since(start))
 		return newsgroups, nil
 	}
@@ -1135,7 +1148,7 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 	return nil
 }
 
-var debugArticles = make(map[string][]*models.Article)
+var debugArticles = make(map[string][]*string)
 var debugMutex sync.Mutex
 var ErrNotInDateRange = fmt.Errorf("notinrange")
 
@@ -1469,7 +1482,7 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 			log.Printf("Newsgroup: '%s' | DRY RUN with debug capture: Capturing %d articles (processed %d) BROKEN TODO NEED FIX!", ng.Name, len(messageIDs), processed)
 			//debugMutex.Lock()
 			// TODO: broken debug catpure code fetch articles here
-			//debugArticles[ng.Name] = append(debugArticles[ng.Name], articles...)
+			debugArticles[ng.Name] = append(debugArticles[ng.Name], messageIDs...)
 			//debugMutex.Unlock()
 			return nil
 		}

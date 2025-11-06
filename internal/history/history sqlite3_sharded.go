@@ -5,7 +5,30 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"sync"
+	"time"
 )
+
+// SQLite3DB represents a SQLite database connection pool
+type SQLite3DB struct {
+	dbPath   string
+	params   string
+	maxOpen  int
+	initOpen int
+	timeout  int64
+	DB       *sql.DB
+	mux      sync.RWMutex
+}
+
+// Close closes the database connection
+func (p *SQLite3DB) Close() error {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+	if p.DB != nil {
+		return p.DB.Close()
+	}
+	return nil
+}
 
 // SQLite3ShardedDB manages multiple SQLite databases for sharding
 type SQLite3ShardedDB struct {
@@ -16,7 +39,6 @@ type SQLite3ShardedDB struct {
 	baseDir     string
 	maxOpen     int
 	timeout     int64
-	//mux         sync.RWMutex // Mutex for thread-safe access
 }
 
 // ShardConfig defines the sharding configuration
@@ -30,6 +52,50 @@ type ShardConfig struct {
 // GetShardConfig returns the configuration for a given shard mode
 func GetShardConfig(mode int) (numDBs, tablesPerDB int, description string) {
 	return 16, 256, "16 databases with 256 tables each" // unchangeable !
+}
+
+// NewSQLite3DB creates a new SQLite3 database pool
+func NewSQLite3DB(opts *SQLite3Opts, createTables bool, mode int) (*SQLite3DB, error) {
+	log.Printf("Opening database: %s", opts.dbPath)
+
+	// Open database with just the file path, no connection parameters
+	// This follows the same pattern as group databases to avoid locking issues
+	connectionString := opts.dbPath
+	if opts.params != "" {
+		connectionString += opts.params
+	}
+
+	db, err := sql.Open("sqlite3", connectionString)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %v", err)
+	}
+
+	db.SetMaxOpenConns(opts.maxOpen)
+	db.SetMaxIdleConns(opts.initOpen)
+	db.SetConnMaxLifetime(time.Duration(opts.timeout) * time.Second)
+
+	log.Printf("Testing database connection for: %s", opts.dbPath)
+	// Test connection
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to ping database: %v", err)
+	}
+
+	log.Printf("Applying performance settings for: %s", opts.dbPath)
+	// Apply additional high-performance settings
+	if err := applyPerformanceSettings(db, mode); err != nil {
+		log.Printf("WARN: Failed to apply some performance settings: %v", err)
+	}
+	log.Printf("Performance settings applied for: %s", opts.dbPath)
+
+	DB := &SQLite3DB{
+		dbPath:   opts.dbPath,
+		params:   opts.params,
+		maxOpen:  opts.maxOpen,
+		initOpen: opts.initOpen,
+		timeout:  opts.timeout,
+		DB:       db,
+	}
+	return DB, nil
 }
 
 // NewSQLite3ShardedDB creates a new sharded SQLite3 database system
@@ -72,7 +138,7 @@ func NewSQLite3ShardedDB(config *ShardConfig, createTables bool, useShortHashLen
 			timeout:  config.Timeout,
 		}
 
-		db, err := NewSQLite3DB(opts, false, useShortHashLen, config.Mode) // Don't create tables yet
+		db, err := NewSQLite3DB(opts, false, config.Mode) // Don't create tables yet
 		if err != nil {
 			return nil, fmt.Errorf("failed to create database pool %d: %v", i, err)
 		}
@@ -81,7 +147,7 @@ func NewSQLite3ShardedDB(config *ShardConfig, createTables bool, useShortHashLen
 	}
 
 	if createTables {
-		if err := s.CreateAllTables(useShortHashLen); err != nil {
+		if err := s.CreateAllTables(); err != nil {
 			return nil, err
 		}
 	}
@@ -110,12 +176,12 @@ func (s *SQLite3ShardedDB) Close() error {
 }
 
 // CreateAllTables creates all required tables across all databases
-func (s *SQLite3ShardedDB) CreateAllTables(useShortHashLen int) error {
+func (s *SQLite3ShardedDB) CreateAllTables() error {
 	log.Printf("Creating tables for sharding mode %d (%d databases, %d tables per DB)",
 		s.shardMode, s.numDBs, s.tablesPerDB)
 
 	for dbIndex := 0; dbIndex < s.numDBs; dbIndex++ {
-		if err := s.createTablesForDB(dbIndex, useShortHashLen); err != nil {
+		if err := s.createTablesForDB(dbIndex); err != nil {
 			return fmt.Errorf("failed to create tables for database %d: %v", dbIndex, err)
 		}
 	}
@@ -125,31 +191,30 @@ func (s *SQLite3ShardedDB) CreateAllTables(useShortHashLen int) error {
 }
 
 // createTablesForDB creates tables for a specific database
-func (s *SQLite3ShardedDB) createTablesForDB(dbIndex int, useShortHashLen int) error {
+func (s *SQLite3ShardedDB) createTablesForDB(dbIndex int) error {
 	db := s.DBPools[dbIndex].DB
 	if db == nil {
 		return fmt.Errorf("database connection is nil")
 	}
 
 	// Create multiple tables per database
-	tableNames := s.getTableNamesForDB()
-	for _, tableName := range tableNames {
+	for _, tableName := range s.getTableNamesForDB() {
 		query := fmt.Sprintf(`
 			CREATE TABLE IF NOT EXISTS %s (
-				h CHAR(%d) NOT NULL PRIMARY KEY,
-				o TEXT
+				message_id TEXT NOT NULL PRIMARY KEY,
+				newsgroups TEXT
 			) WITHOUT ROWID;
-		`, tableName, useShortHashLen)
+		`, tableName)
 
 		if _, err := db.Exec(query); err != nil {
 			return fmt.Errorf("failed to create table %s: %v", tableName, err)
 		}
 
 		// Create index
-		indexQuery := fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_%s_h ON %s(h);", tableName, tableName)
-		if _, err := db.Exec(indexQuery); err != nil {
-			log.Printf("WARN: Failed to create index for table %s: %v", tableName, err)
-		}
+		//indexQuery := fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_%s_h ON %s(h);", tableName, tableName)
+		//if _, err := db.Exec(indexQuery); err != nil {
+		//	log.Printf("WARN: Failed to create index for table %s: %v", tableName, err)
+		//}
 	}
 	return nil
 }
@@ -158,7 +223,7 @@ func (s *SQLite3ShardedDB) createTablesForDB(dbIndex int, useShortHashLen int) e
 func (s *SQLite3ShardedDB) getTableNamesForDB() []string {
 	var tables []string
 	for i := 0; i < s.tablesPerDB; i++ {
-		tables = append(tables, fmt.Sprintf("s%02x", i))
+		tables = append(tables, fmt.Sprintf("_%02x", i))
 	}
 	return tables
 }

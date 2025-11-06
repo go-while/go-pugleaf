@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -92,7 +93,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		default:
 			// Also check history database for final determination
 			msgIdItem.Mux.Unlock()
-			response, err := proc.Lookup(msgIdItem)
+			response, _, err := proc.Lookup(msgIdItem, true)
 			if err != nil {
 				log.Printf("Error looking up message ID %s in history: %v", msgIdItem.MessageId, err)
 				return history.CaseError, err
@@ -119,6 +120,32 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		msgIdItem.Mux.Unlock()
 		// dont process crossposts if we downloaded articles in bulkmode
 		// Use legacy newsgroup in bulkmode. add article only to single newsgroup db.
+
+		newsgroupsStr := common.GetHeaderFirst(article.Headers, "newsgroups")
+		if newsgroupsStr == "" {
+			log.Printf("[SPAM:HDR] Article '%s' no newsgroups header", article.MessageID)
+			proc.setCaseDupes(msgIdItem, bulkmode)
+			return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'newsgroups' header", article.MessageID)
+		}
+
+		ngs := proc.extractGroupsFromHeaders(article.MessageID, newsgroupsStr)
+		if len(ngs) == 0 || len(ngs) > MaxCrossPosts {
+			log.Printf("[SPAM:EMP] Article '%s' newsgroups=%d", article.MessageID, len(ngs))
+			proc.setCaseDupes(msgIdItem, bulkmode)
+			return history.CaseError, fmt.Errorf("error processArticle: article '%s' crossposts=%d", article.MessageID, len(ngs))
+		}
+		for _, ngName := range ngs {
+			ngid, err := proc.DB.MainDBGetNewsgroup(ngName)
+			if err != nil {
+				log.Printf("processArticle: failed to get newsgroup ID for name '%s': %v", ngName, err)
+				continue
+			}
+			msgIdItem.Mux.Lock()
+			if !slices.Contains(msgIdItem.NewsgroupIDs, ngid.ID) {
+				msgIdItem.NewsgroupIDs = append(msgIdItem.NewsgroupIDs, ngid.ID)
+			}
+			msgIdItem.Mux.Unlock()
+		}
 		newsgroups = append(newsgroups, legacyNewsgroup)
 
 	} else if !RunRSLIGHTImport && !bulkmode {
@@ -131,16 +158,28 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		}
 
 		newsgroups = proc.extractGroupsFromHeaders(article.MessageID, newsgroupsStr)
-		if len(newsgroups) > MaxCrossPosts {
+		if len(newsgroups) == 0 || len(newsgroups) > MaxCrossPosts {
 			log.Printf("[SPAM:EMP] Article '%s' newsgroups=%d", article.MessageID, len(newsgroups))
 			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, fmt.Errorf("error processArticle: article '%s' crossposts=%d", article.MessageID, len(newsgroups))
 		}
+		for _, ngName := range newsgroups {
+			ngid, err := proc.DB.MainDBGetNewsgroup(ngName)
+			if err != nil {
+				log.Printf("processArticle: failed to get newsgroup ID for name '%s': %v", ngName, err)
+				continue
+			}
+			msgIdItem.Mux.Lock()
+			if !slices.Contains(msgIdItem.NewsgroupIDs, ngid.ID) {
+				msgIdItem.NewsgroupIDs = append(msgIdItem.NewsgroupIDs, ngid.ID)
+			}
+			msgIdItem.Mux.Unlock()
+		}
 
 	} else {
-		log.Printf("ERROR processArticle: article '%s' has no 'newsgroups' header and no legacy newsgroup provided", article.MessageID)
+		log.Printf("ERROR in processArticle: invalid bulk import flags")
 		proc.setCaseDupes(msgIdItem, bulkmode)
-		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'newsgroups' header", article.MessageID)
+		return history.CaseError, fmt.Errorf("error processArticle")
 	}
 	if article.Subject == "" {
 		log.Printf("[HDR-SPAM] Article '%s' empty subject... headers='%#v'", article.MessageID, article.Headers)
@@ -154,14 +193,12 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no 'from' header", article.MessageID)
 	}
 
+	article.DateSent = ParseNNTPDate(article.DateString)
 	if article.DateSent.IsZero() {
-		article.DateSent = ParseNNTPDate(article.DateString)
-		if article.DateSent.IsZero() {
-			log.Printf("[ERROR-HDR] Article '%s' no valid date... headerDate='%v' dateString='%s'", article.MessageID, article.DateSent, article.DateString)
-			proc.setCaseDupes(msgIdItem, bulkmode)
-			//dateString = time.Now().Format(time.RFC1123Z) // Use current time as fallback
-			return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no valid 'date' header", article.MessageID)
-		}
+		log.Printf("[ERROR-HDR] Article '%s' no valid date... headerDate='%v' dateString='%s'", article.MessageID, article.DateSent, article.DateString)
+		proc.setCaseDupes(msgIdItem, bulkmode)
+		//dateString = time.Now().Format(time.RFC1123Z) // Use current time as fallback
+		return history.CaseError, fmt.Errorf("error processArticle: article '%s' has no valid 'date' header", article.MessageID)
 	}
 	// Check for future posts (more than 25 hours in the future) and skip processing
 	if article.DateSent.After(time.Now().Add(25 * time.Hour)) {
@@ -169,10 +206,12 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		proc.setCaseDupes(msgIdItem, bulkmode)
 		return history.CaseError, fmt.Errorf("article '%s' posted too far in future: %v", article.MessageID, article.DateSent)
 	}
+	// TODO: add article cutoff date checks here
 
 	// part of parsing data moved to nntp-client-commands.go:L~850 (func ParseLegacyArticleLines)
-	article.ReplyCount = 0 // Will be updated by threading
 	article.MsgIdItem = msgIdItem
+	proc.AddProcessedArticleToHistory(msgIdItem)
+
 	article.ArticleNums = make(map[*string]int64)
 	article.ProcessQueue = make(chan *string, 16) // Initialize process queue
 
@@ -224,10 +263,10 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 			if !bulkmode { // @AI !!! NO CACHE CHECK for bulk legacy import!!
 				// @AI !!! NO CACHE CHECK for bulk legacy import!!
 				// Cache check still provides some throttling while avoiding the expensive DB query
-				if proc.MsgIdCache.HasMessageIDInGroup(article.MessageID, newsgroupPtr) { // CHECK GLOBAL PROCESSOR CACHE with POINTER
-					log.Printf("processArticle: article '%s' already exists in cache for newsgroup '%s', skipping crosspost", article.MessageID, *newsgroupPtr)
-					continue
-				}
+				//if proc.MsgIdCache.HasMessageIDInGroup(article.MessageID, newsgroupPtr) { // CHECK GLOBAL PROCESSOR CACHE with POINTER
+				//	log.Printf("processArticle: article '%s' already exists in cache for newsgroup '%s', skipping crosspost", article.MessageID, *newsgroupPtr)
+				//	continue
+				//}
 			}
 
 			//log.Printf("Crossposted article '%s' to newsgroup '%s'", article.MessageID, group)

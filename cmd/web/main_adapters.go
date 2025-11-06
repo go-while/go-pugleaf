@@ -24,8 +24,8 @@ func (pa *ProcessorAdapter) ProcessIncomingArticle(article *models.Article) (int
 }
 
 // Lookup checks if a message-ID exists in history
-func (pa *ProcessorAdapter) Lookup(msgIdItem *history.MessageIdItem) (int, error) {
-	return pa.processor.History.Lookup(msgIdItem)
+func (pa *ProcessorAdapter) Lookup(msgIdItem *history.MessageIdItem, quick bool) (response int, newsgroupIDs []int64, err error) {
+	return pa.processor.History.Lookup(msgIdItem, quick)
 }
 
 // CheckNoMoreWorkInHistory checks if there's no more work in history

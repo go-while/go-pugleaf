@@ -23,6 +23,10 @@ import (
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
+const BW_V4_Prefix = "24.182.239.6"   // news.blueworldhosting.com.
+const ET_V4 = "157.180.91.226"        // news.eternal-september.org.
+const ET_V6 = "2a01:4f9:c012:f55a::1" // news.eternal-september.org.
+
 // showUsageExamples displays usage examples for connection testing
 func showUsageExamples() {
 	fmt.Println("\n=== NNTP Fetcher - Connection Testing Examples ===")
@@ -35,15 +39,11 @@ func showUsageExamples() {
 	fmt.Println("Article Downloading:")
 	fmt.Println("  ./nntp-fetcher -group alt.* (downloads all groups with prefix alt.*)")
 	fmt.Println("  ./nntp-fetcher -group alt.test")
-	fmt.Println("  ./nntp-fetcher -group alt.test -xover-copy (use xover-copy to do identical copy from remote server!)")
 	fmt.Println("  ./nntp-fetcher -group alt.test -download-start-date 2024-12-31")
 	fmt.Println()
 	fmt.Println("Newsgroup List Update:")
 	fmt.Println("  ./nntp-fetcher -update-list (fetch remote newsgroup list and add new groups to database)")
 	fmt.Println()
-	fmt.Println("Server Configuration:")
-	fmt.Println("  ./nntp-fetcher -test-conn -host news.server.com -port 563")
-	fmt.Println("  ./nntp-fetcher -test-conn -username user -password pass")
 	fmt.Println()
 	fmt.Println("Note: For newsgroup analysis use cmd/nntp-analyze instead")
 	fmt.Println()
@@ -203,24 +203,23 @@ func main() {
 	} else if *fetchNewsgroup != "" {
 		newsgroups = append(newsgroups, &models.Newsgroup{Name: *fetchNewsgroup})
 	}
-
 	pools := make([]*nntp.Pool, 0, len(providers))
 	for _, p := range providers {
 		if !p.Enabled || p.Host == "" || p.Port <= 0 || p.MaxConns <= 0 {
 			//log.Printf("Ignore disabled Provider: %s", p.Name)
 			continue
 		}
-		if strings.Contains(p.Host, "eternal-september") && p.MaxConns > 3 {
+		if (strings.Contains(p.Host, "eternal-september") || p.Host == ET_V4 || p.Host == ET_V6) && p.MaxConns > 3 {
 			p.MaxConns = 3
-		} else if strings.Contains(p.Host, "blueworldhosting") && p.MaxConns > 3 {
-			p.MaxConns = 3
+		} else if (strings.Contains(p.Host, "blueworldhosting") || strings.HasPrefix(p.Host, BW_V4_Prefix)) && p.MaxConns > 16 {
+			p.MaxConns = 16
 		}
+		/* disabled
 		if p.MaxConns > *maxBatch {
 			p.MaxConns = *maxBatch // limit conns to maxBatch
 		}
-		log.Printf("Provider: %s (ID: %d, Host: %s, Port: %d, SSL: %v, MaxConns: %d)",
-			p.Name, p.ID, p.Host, p.Port, p.SSL, p.MaxConns)
-
+		*/
+		log.Printf("[FETCHER]: Provider '%s' (ID: %d, Host: %s, Port: %d, SSL: %v, MaxConns: %d)", p.Name, p.ID, p.Host, p.Port, p.SSL, p.MaxConns)
 		// Convert models.Provider to config.Provider for the BackendConfig
 		configProvider := &config.Provider{
 			Grp:        p.Grp,
@@ -265,7 +264,7 @@ func main() {
 		}
 		pool := nntp.NewPool(backendConfig)
 		pools = append(pools, pool)
-		log.Printf("Created connection pool for provider '%s' with max %d connections", p.Name, p.MaxConns)
+		log.Printf("[FETCHER]: Created connection pool for provider '%s' with max %d connections", p.Name, p.MaxConns)
 		defer pool.ClosePool()
 		break // Only use the first provider for import
 	}
@@ -330,12 +329,11 @@ func main() {
 	DownloadMaxPar := *downloadMaxPar // unchangeable (code not working yet)
 	DLParChan := make(chan struct{}, DownloadMaxPar)
 	var mux sync.Mutex
-	downloaded := 0
-	queued := 0
-	todo := 0
+	var downloaded, queued, notfound, todo uint64
 	// scan group worker
 	go func() {
 		defer close(processor.Batch.Check)
+		var skippedWildcard, skippedInActive, skippedActive uint64
 		for _, ng := range newsgroups {
 			if common.WantShutdown() {
 				//log.Printf("[FETCHER]: Feed Batch.Check common.WantShutdown()")
@@ -349,21 +347,24 @@ func main() {
 			*/
 			if wildcardNG != "" && !strings.HasPrefix(ng.Name, wildcardNG) {
 				//log.Printf("[FETCHER] Skipping newsgroup '%s' as it does not match prefix '%s'", ng.Name, wildcardNG)
+				skippedWildcard++
 				continue
 			}
 			nga, err := db.MainDBGetNewsgroup(ng.Name)
 			if err != nil || nga == nil {
-				log.Printf("[FETCHER] Failed to get newsgroup '%s' from database: err='%v' nga='%#v'", ng.Name, err, nga)
+				log.Printf("[FETCHER]: Failed to get newsgroup '%s' from database: err='%v' nga='%#v'", ng.Name, err, nga)
 				return
 			}
 
 			if *fetchActiveOnly && !nga.Active {
-				//log.Printf("[FETCHER] ignore inactive newsgroup '%s'", ng.Name)
+				//log.Printf("[FETCHER]: ignore inactive newsgroup '%s'", ng.Name)
+				skippedInActive++
 				continue
 			}
 
 			if !*fetchActiveOnly && nga.Active {
-				//log.Printf("[FETCHER] ignore active newsgroup '%s'", ng.Name)
+				//log.Printf("[FETCHER]: ignore active newsgroup '%s'", ng.Name)
+				skippedActive++
 				continue
 			}
 
@@ -371,12 +372,13 @@ func main() {
 			//log.Printf("Checking ng: %s", ng.Name)
 			mux.Lock()
 			queued++
-			if queued%10000 == 0 {
-				log.Printf("Queued %d/%d newsgroups", queued, len(newsgroups))
+			if queued%1000 == 0 {
+				log.Printf("[FETCHER]: Queued %d/%d newsgroups", queued, len(newsgroups))
 			}
 			mux.Unlock()
 		}
-		log.Printf("Queued %d/%d newsgroups", queued, len(newsgroups))
+		totalSkipped := skippedWildcard + skippedInActive + skippedActive
+		log.Printf("[FETCHER]: Feeding Queue Done: %d/%d newsgroups (skipped: %d). Wildcard skipped: %d, skippedInActive: %d, skippedActive: %d. fetchActiveOnly=%t", queued, len(newsgroups), totalSkipped, skippedWildcard, skippedInActive, skippedActive, *fetchActiveOnly)
 	}()
 	var wgCheck sync.WaitGroup
 	startDates := make(map[string]string)
@@ -545,6 +547,9 @@ func main() {
 					switch err {
 					case nntp.ErrArticleNotFound, nntp.ErrArticleRemoved:
 						// article not found, not a big deal
+						mux.Lock()
+						notfound++
+						mux.Unlock()
 						continue
 					case io.EOF:
 						log.Printf("ERROR DownloadArticles: pool.GetArticle failed. connection EOF ... continue! ng: '%s'", *item.GroupName)
@@ -759,7 +764,7 @@ func main() {
 	}
 
 	mux.Lock()
-	log.Printf("[FETCHER]: Total downloaded: %d articles (newsgroups: %d)", downloaded, queued)
+	log.Printf("[FETCHER]: Total downloaded: %d articles, notfound: %d (newsgroups: %d)", downloaded, notfound, queued)
 	mux.Unlock()
 
 	log.Printf("[FETCHER]: Graceful shutdown completed. Exiting here.")

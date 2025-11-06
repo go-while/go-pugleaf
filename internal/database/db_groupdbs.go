@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/go-while/go-pugleaf/internal/history"
+	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 const MaxOpenDatabases = 256
@@ -22,6 +25,73 @@ type GroupDB struct {
 	Idle         time.Time // Last time this group was used
 	Workers      int64     // how many are working with this DB
 	DB           *sql.DB   // Single database containing articles, overview, threads, etc.
+}
+
+// NewsgroupDBsIDcache cache maps newsgroup IDs to names
+var NewsgroupDBsIDcache = &NewsgroupDBsIDcacheStruct{
+	cache: make(map[int64]string),
+}
+
+type NewsgroupDBsIDcacheStruct struct {
+	mux   sync.RWMutex
+	cache map[int64]string // map[newsgroupID]newsgroupName
+}
+
+func (c *NewsgroupDBsIDcacheStruct) GetNewsgroupNameByID(newsgroupID int64, db *Database) (ngname string, exists bool) {
+	c.mux.RLock()
+	ngname, exists = c.cache[newsgroupID]
+	c.mux.RUnlock()
+	if !exists {
+		ng, err := db.MainDBGetNewsgroupByID(newsgroupID)
+		if err != nil {
+			log.Printf("GetNewsgroupNameByID: failed to get newsgroup name for ID %d: %v", newsgroupID, err)
+			return
+		}
+		c.mux.Lock()
+		c.cache[newsgroupID] = ng.Name
+		c.mux.Unlock()
+		ngname = ng.Name
+		exists = true
+	}
+	return ngname, exists
+}
+
+func (c *NewsgroupDBsIDcacheStruct) SetNewsgroupNameByID(newsgroupID int64, newsgroupName string) {
+	c.mux.Lock()
+	c.cache[newsgroupID] = newsgroupName
+	c.mux.Unlock()
+}
+
+func (db *Database) GetAnyNewsgroupDBfromIDs(newsgroupIDs []int64) (*GroupDB, error) {
+	for _, ngID := range newsgroupIDs {
+		if ngName, exists := NewsgroupDBsIDcache.GetNewsgroupNameByID(ngID, db); exists {
+			return db.GetGroupDB(ngName)
+		}
+	}
+	return nil, fmt.Errorf("failed to get any newsgroup DB for IDs: %v", newsgroupIDs)
+}
+
+func (db *Database) GetArticleFromAnyNewsgroupDB(msgIdItem *history.MessageIdItem) (*models.Article, error) {
+	for _, ngID := range msgIdItem.NewsgroupIDs {
+		if ngName, exists := NewsgroupDBsIDcache.GetNewsgroupNameByID(ngID, db); exists {
+			groupDB, err := db.GetGroupDB(ngName)
+			if err != nil {
+				continue
+			}
+			article, err := db.GetArticleByMessageID(groupDB, msgIdItem.MessageId)
+			if err == nil {
+				return article, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("failed to get article from any newsgroup DB for message ID: %s", msgIdItem.MessageId)
+}
+
+func (db *Database) GetNewsgroupsDBbyID(newsgroupID int64) (*GroupDB, error) {
+	if ngName, exists := NewsgroupDBsIDcache.GetNewsgroupNameByID(newsgroupID, db); exists {
+		return db.GetGroupDB(ngName)
+	}
+	return nil, fmt.Errorf("failed to get newsgroup DB for ID: %d", newsgroupID)
 }
 
 // GetGroupDB returns groupDB for a specific newsgroup

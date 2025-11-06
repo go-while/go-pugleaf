@@ -856,6 +856,7 @@ func (db *Database) GetArticleByMessageID(groupDB *GroupDB, messageID string) (*
 	}
 	a.ArticleNums = make(map[*string]int64)
 	a.ArticleNums[groupDB.NewsgroupPtr] = artnum
+	a.DBArtNum = artnum
 	a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDB.NewsgroupPtr)
 
 	// Cache the result
@@ -3283,7 +3284,9 @@ func (db *Database) SearchUserByComputedHash(targetHash string, nonce string) (*
 
 const query_getMessageIDsBatchWithDateFilter_selectPart = `SELECT message_id FROM articles`
 const query_getMessageIDsBatchWithDateFilter_orderby = " ORDER BY date_sent ASC"
-const query_getArticlesBatchWithDateFilter_selectPart = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, headers_json, body_text, path, imported_at, spam, hide FROM articles`
+const query_getArticlesBatchWithDateFilter_selectPart = `SELECT article_num, message_id, subject, from_header,
+date_sent, date_string, "references", bytes, lines, headers_json, body_text,
+path, imported_at, spam, hide FROM articles`
 const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ? OFFSET ?"
 
 // GetArticlesByIDs retrieves articles by their message IDs, ordered by date_sent
@@ -3321,6 +3324,7 @@ func (db *Database) GetArticlesByIDs(newsgroup *string, wantedIDs []*string) ([]
 	for rows.Next() {
 		article := &models.Article{}
 		if err := rows.Scan(
+			&article.DBArtNum,
 			&article.MessageID,
 			&article.Subject,
 			&article.FromHeader,
@@ -3332,6 +3336,9 @@ func (db *Database) GetArticlesByIDs(newsgroup *string, wantedIDs []*string) ([]
 			&article.Path,
 			&article.HeadersJSON,
 			&article.BodyText,
+			&article.ImportedAt,
+			&article.Spam,
+			&article.Hide,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan article: %w", err)
 		}

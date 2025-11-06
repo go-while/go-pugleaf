@@ -87,13 +87,14 @@ var appVersion = "-unset-"
 
 func main() {
 	config.AppVersion = appVersion
+	models.DisableSanitizedCache = false
 
 	// Initialize embedded filesystems
 	database.SetEmbeddedMigrations(database.EmbeddedMigrationsFS)
 
 	flag.IntVar(&maxSanArtCache, "maxsanartcache", 10000, "maximum number of cached sanitized articles (default: 10000)")
 	flag.IntVar(&maxSanArtCacheExpiry, "maxsanartcacheexpiry", 30, "expiry of cached sanitized articles in minutes (default: 30 minutes)")
-	flag.IntVar(&maxNGpageCache, "maxngpagecache", 4096, "maximum number of cached newsgroup pages (25 groups per page) (default: 4K pages) [~12-16 KB/entry * 4096 = ~64 MB (+overhead) with 100k active groups!]")
+	flag.IntVar(&maxNGpageCache, "maxngpagecache", 4096, "maximum number of cached newsgroup pages (default: 4K pages)")
 	flag.IntVar(&maxNGpageCacheExpiry, "maxngpagecacheexpiry", 5, "expiry of cached newsgroup pages in minutes (default: 5 minutes)")
 	flag.IntVar(&maxArticleCache, "maxarticlecache", 10000, "maximum number of cached articles (default: 10000) [~8-12 KB/entry] 10000 = ~128 MB")
 	flag.IntVar(&maxArticleCacheExpiry, "maxarticlecacheexpiry", 60, "expiry of cached articles in minutes (default: 60 minutes)")

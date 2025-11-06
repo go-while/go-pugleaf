@@ -163,7 +163,7 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 	}()
 	var dups, lastDups, gots, lastGots, notf, lastNotf, errs, lastErrs int64
 	aliveCheck := 5 * time.Second
-	maxDeathCounter := 6 // Maximum number of allowed "stuck" checks done every aliveCheck interval
+	maxDeathCounter := 12 // Maximum number of allowed "stuck" checks done every aliveCheck interval
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	startTime := time.Now()
@@ -184,6 +184,7 @@ forProcessing:
 			//log.Printf("DownloadArticles: releaseChan triggered '%s'", newsgroup)
 			break forProcessing
 		case <-ticker.C:
+
 			/* disabled
 			if common.WantShutdown() {
 				return fmt.Errorf("DownloadArticles:common.WantShutdown() group '%s'", newsgroup)
@@ -202,7 +203,11 @@ forProcessing:
 				lastErrs = errs
 				deathCounter = 0 // Reset death counter on progress
 			}
+
 			if nextCheck.Before(time.Now()) {
+				if common.WantShutdown() {
+					return fmt.Errorf("DownloadArticles: got common.WantShutdown() in group '%s'", newsgroup)
+				}
 				// If we haven't made progress in N seconds, log a warning
 				log.Printf("DownloadArticles: '%s' Stuck? %d articles processed (%d dups, %d gots, %d notf, %d errs, gotQueued: %d) (since Start=%v)", newsgroup, dups+gots+notf+errs, dups, gots, notf, errs, gotQueued, time.Since(startTime))
 				nextCheck = time.Now().Add(aliveCheck) // Reset last check time
@@ -217,6 +222,15 @@ forProcessing:
 			//log.Printf("DEBUG-RETURN: received item: Error=%v, Article=%v", item != nil && item.Error != nil, item != nil && item.Article != nil)
 			if item == nil || item.Error != nil || item.Article == nil {
 				if item != nil {
+					if item.MessageID != nil {
+						msgIdItem := history.MsgIdCache.GetORCreate(*item.MessageID)
+						if msgIdItem != nil && msgIdItem.MessageId == *item.MessageID {
+							msgIdItem.Mux.Lock()
+							msgIdItem.CachedEntryExpires = time.Now().Add(5 * time.Second)
+							msgIdItem.Response = history.CaseError
+							msgIdItem.Mux.Unlock()
+						}
+					}
 					switch item.Error {
 					case errIsDuplicateError:
 						dups++
@@ -266,6 +280,9 @@ forProcessing:
 	xerr := <-errChan
 	if xerr != nil {
 		end = lastGoodEnd
+	}
+	if common.WantShutdown() {
+		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
 	}
 	if gotQueued > 0 || dups > 0 {
 		// only update progress if we actually got something

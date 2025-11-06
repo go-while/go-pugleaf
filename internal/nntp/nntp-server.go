@@ -18,7 +18,7 @@ import (
 // Processor interface for article processing
 type ArticleProcessor interface {
 	ProcessIncomingArticle(article *models.Article) (int, error)
-	Lookup(msgIdItem *history.MessageIdItem) (int, error)
+	Lookup(msgIdItem *history.MessageIdItem, quick bool) (response int, newsgroupIDs []int64, err error)
 }
 
 const (

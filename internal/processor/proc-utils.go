@@ -416,7 +416,7 @@ func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []stri
 	rawGroups := common.SeparatorRegex.Split(groupsline, -1)
 
 	var validGroups []string
-	seen := make(map[string]bool) // For deduplication
+	seen := make(map[string]bool, len(rawGroups)) // For deduplication
 
 	for _, group := range rawGroups {
 		group = strings.TrimSpace(group)
@@ -446,10 +446,8 @@ func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []stri
 		}
 
 		// Deduplicate using map (faster than slices.Contains)
-		if !seen[group] {
-			seen[group] = true
-			validGroups = append(validGroups, group)
-		}
+		seen[group] = true
+		validGroups = append(validGroups, group)
 	}
 
 	return validGroups

@@ -155,7 +155,8 @@ func (pool *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article,
 	article, err := client.GetArticle(messageID, bulkmode)
 	if err != nil || article == nil {
 		if err == ErrArticleNotFound || err == ErrArticleRemoved {
-			log.Printf("[NNTP-POOL] Article '%s' not found err='%v'", *messageID, err)
+			// <-- internal/nntp/nntp-client-commands.go:105
+			//log.Printf("[NNTP-POOL] Article '%s' not found err='%v'", *messageID, err)
 			pool.Put(client)
 			return nil, err
 		} else {
