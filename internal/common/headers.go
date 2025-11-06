@@ -151,6 +151,9 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 	if article.MessageID == "" {
 		return nil, fmt.Errorf("article missing Message-ID")
 	}
+	if strings.HasSuffix(article.MessageID, "@msgid-missing>") {
+		return nil, fmt.Errorf("article has placeholder Message-ID")
+	}
 	if article.Subject == "" {
 		return nil, fmt.Errorf("article missing Subject")
 	}
@@ -328,7 +331,7 @@ checkHeader:
 				}
 				headersMap[strings.ToLower(header)] = true
 			}
-			if header == "Newsgroups" {
+			if strings.ToLower(header) == "newsgroups" {
 				// Check if Newsgroups header contains at least one valid newsgroup name
 				// check if next headerlines are continued lines
 			getLines:
