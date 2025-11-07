@@ -807,6 +807,20 @@ func getNewsgroupsToTransfer(db *database.Database, progressDB *nntp.TransferPro
 			log.Printf(" - %s (not found locally)", ngName)
 		}
 	}
+
+	// Fetch all progress newsgroups once for fast lookup (used by all paths below)
+	progressMap := make(map[string]bool, 125000)
+	if progressDB != nil {
+		progressFetchStart := time.Now()
+		progressMap, err = progressDB.GetAllProgressNewsgroups(startTime, endTime)
+		if err != nil {
+			log.Printf("Warning: Failed to fetch progress newsgroups: %v (will skip progress checks)", err)
+			progressMap = make(map[string]bool)
+		} else {
+			log.Printf("Fetched %d newsgroups with existing progress in %v", len(progressMap), time.Since(progressFetchStart))
+		}
+	}
+
 	// Handle force-include-only mode
 	if forceIncludeOnly {
 		if len(includePatterns) == 0 {
@@ -845,11 +859,14 @@ func getNewsgroupsToTransfer(db *database.Database, progressDB *nntp.TransferPro
 		start = time.Now()
 		for _, ng := range groupFiltered {
 			// Check exclude prefix first
-			if matchesExcludePrefix(ng.Name, excludePrefixes) {
-				continue
+			if len(excludePrefixes) > 0 {
+				if matchesExcludePrefix(ng.Name, excludePrefixes) {
+					continue
+				}
 			}
-			// Check if newsgroup already has results for this remote
-			if IgnoreNewsgroupProgress(ng, progressDB, startTime, endTime) {
+			// Check if newsgroup already has results for this remote (fast map lookup)
+			if progressMap[ng.Name] {
+				log.Printf("Skipping newsgroup %s - already has transfer results for this remote", ng.Name)
 				continue
 			}
 			// Fast exact match check first
@@ -879,12 +896,10 @@ func getNewsgroupsToTransfer(db *database.Database, progressDB *nntp.TransferPro
 					continue
 				}
 			}
-			// Check if newsgroup already has results for this remote
-			if startTime != nil || endTime != nil {
-				if IgnoreNewsgroupProgress(ng, progressDB, startTime, endTime) {
-					log.Printf("Skipping newsgroup %s - already has transfer results for this remote", ng.Name)
-					continue
-				}
+			// Check if newsgroup already has results for this remote (fast map lookup)
+			if progressMap[ng.Name] {
+				log.Printf("Skipping newsgroup %s - already has transfer results for this remote", ng.Name)
+				continue
 			}
 			if !shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup, hasIncludeWildcards, hasExcludeWildcards) {
 				log.Printf("Excluding newsgroup %s based on include/exclude patterns", ng.Name)
@@ -915,8 +930,9 @@ func getNewsgroupsToTransfer(db *database.Database, progressDB *nntp.TransferPro
 				if matchesExcludePrefix(ng.Name, excludePrefixes) {
 					continue
 				}
-				// Check if newsgroup already has results for this remote
-				if IgnoreNewsgroupProgress(ng, progressDB, startTime, endTime) {
+				// Check if newsgroup already has results for this remote (fast map lookup)
+				if progressMap[ng.Name] {
+					log.Printf("Skipping newsgroup %s - already has transfer results for this remote", ng.Name)
 					continue
 				}
 				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup, hasIncludeWildcards, hasExcludeWildcards) {
@@ -932,8 +948,9 @@ func getNewsgroupsToTransfer(db *database.Database, progressDB *nntp.TransferPro
 				if matchesExcludePrefix(ng.Name, excludePrefixes) {
 					break
 				}
-				// Check if newsgroup already has results for this remote
-				if IgnoreNewsgroupProgress(ng, progressDB, startTime, endTime) {
+				// Check if newsgroup already has results for this remote (fast map lookup)
+				if progressMap[ng.Name] {
+					log.Printf("Skipping newsgroup %s - already has transfer results for this remote", ng.Name)
 					break
 				}
 				if shouldIncludeNewsgroup(ng.Name, includePatterns, excludePatterns, includeLookup, excludeLookup, hasIncludeWildcards, hasExcludeWildcards) {

@@ -337,6 +337,60 @@ func (tpdb *TransferProgressDB) NewsgroupExists(newsgroup string, startDate, end
 	return count > 0, nil
 }
 
+// GetAllProgressNewsgroups fetches all newsgroup names that have progress records for the current remote and date range
+// Returns a map for O(1) lookup performance
+func (tpdb *TransferProgressDB) GetAllProgressNewsgroups(startDate, endDate *time.Time) (map[string]bool, error) {
+	tpdb.mu.RLock()
+	defer tpdb.mu.RUnlock()
+
+	// Convert time pointers to strings (empty string if nil to match schema)
+	var startDateStr, endDateStr string
+	if startDate != nil {
+		startDateStr = startDate.UTC().Format("2006-01-02 15:04:05")
+	} else {
+		startDateStr = ""
+	}
+	if endDate != nil {
+		endDateStr = endDate.UTC().Format("2006-01-02 15:04:05")
+	} else {
+		endDateStr = ""
+	}
+
+	query := `
+		SELECT DISTINCT newsgroup FROM transfers
+		WHERE remote_id = ?
+		AND start_date = ?
+		AND end_date = ?
+	`
+
+	rows, err := database.RetryableQuery(
+		tpdb.db,
+		query,
+		tpdb.remoteID,
+		startDateStr,
+		endDateStr,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch progress newsgroups: %v", err)
+	}
+	defer rows.Close()
+
+	progressMap := make(map[string]bool)
+	for rows.Next() {
+		var newsgroup string
+		if err := rows.Scan(&newsgroup); err != nil {
+			return nil, fmt.Errorf("failed to scan newsgroup: %v", err)
+		}
+		progressMap[newsgroup] = true
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating progress newsgroups: %v", err)
+	}
+
+	return progressMap, nil
+}
+
 // Close closes the database connection
 func (tpdb *TransferProgressDB) Close() error {
 	if tpdb.db != nil {
