@@ -239,11 +239,10 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			}
 		}
 	}
-	headers = append(headers, "Message-ID: "+article.MessageID)
-	headers = append(headers, "Subject: "+article.Subject)
 	headers = append(headers, "Date: "+dateHeader)
 	headers = append(headers, "From: "+article.FromHeader)
-
+	headers = append(headers, "Message-ID: "+article.MessageID)
+	headers = append(headers, "Subject: "+article.Subject)
 	if article.References != "" {
 		var refline string = "References:"
 		refs := strings.Fields(article.References)
@@ -267,6 +266,29 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 	switch withPath {
 	case true:
 		if article.Path != "" {
+			var pathline string
+			if nntphostname != nil && *nntphostname != "" {
+				pathline = "Path: " + *nntphostname + "!.TX!" + article.Path
+			} else {
+				pathline = "Path: " + article.Path
+			}
+			paths := strings.Fields(pathline)
+			for i, path := range paths {
+				if i > 0 {
+					if len(pathline)+1+len(path) > 1000 {
+						// line would exceed 1000 chars, start a new line
+						headers = append(headers, pathline)
+						pathline = " " + path // continuation line starts with space
+					} else {
+						pathline += " " + path
+					}
+				} else {
+					pathline += " " + path
+				}
+			}
+			if strings.TrimSpace(pathline) != "" {
+				headers = append(headers, pathline)
+			}
 			if nntphostname != nil && *nntphostname != "" {
 				headers = append(headers, "Path: "+*nntphostname+"!.TX!"+article.Path)
 			} else {
