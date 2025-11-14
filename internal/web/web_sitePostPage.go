@@ -17,7 +17,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/utils"
 )
 
-var WebPostingBackOff = 42 * time.Second
+var WebPostingBackOff = 42 * time.Second // TODO: make configurable
 
 // PostPageData represents data for posting page
 type PostPageData struct {
@@ -330,7 +330,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	}
 	displayName := strings.TrimSpace(session.User.DisplayName)
 	if displayName != "" && !strings.Contains(displayName, "<") && !strings.Contains(displayName, ">") {
-		displayName = fmt.Sprintf("%s <noreply@pugleaf.invalid>", session.User.DisplayName)
+		displayName = fmt.Sprintf("%s <noreply@pugleaf.net.invalid>", session.User.DisplayName)
 	}
 	if displayName == "" {
 		// Fallback if display name is empty
@@ -345,8 +345,8 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	headers = append(headers, "Newsgroups: "+strings.Join(newsgroups, ","))
 	// Injection-Info / X-Trace header for tracking
 	headers = append(headers, "X-pugleaf-Trace: "+processor.LocalNNTPHostname+";")
-	headers = append(headers, "\tnonce=\""+nonce+"\"; mail-complaints-to=\""+abuseMail+"\";")
-	headers = append(headers, "\tposting-account=\""+hashedUser+"\";")
+	headers = append(headers, " nonce=\""+nonce+"\"; mail-complaints-to=\""+abuseMail+"\";")
+	headers = append(headers, " posting-account=\""+hashedUser+"\";")
 	headers = append(headers, "From: "+displayName)
 	headers = append(headers, "Lines: "+strconv.Itoa(linesCount))
 	headers = append(headers, "Bytes: "+strconv.Itoa(bytesCount))
