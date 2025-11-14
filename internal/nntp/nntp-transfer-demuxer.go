@@ -12,9 +12,9 @@ import (
 // and dispatches them to the appropriate handler channel (CHECK or TAKETHIS)
 // This eliminates race conditions in concurrent ReadCodeLine calls
 type ResponseDemuxer struct {
-	conn       *BackendConn
-	cmdIDChan  chan *CmdIDinfo
-	signalChan chan struct{}
+	conn      *BackendConn
+	cmdIDChan chan *CmdIDinfo
+	//signalChan chan struct{}
 	//cmdIDQMux         sync.RWMutex
 	LastID            uint
 	checkResponseChan chan *ResponseData
@@ -33,9 +33,9 @@ func NewResponseDemuxer(conn *BackendConn, errChan chan struct{}) *ResponseDemux
 		cmdIDChan:         make(chan *CmdIDinfo, 64*1024),      // Buffer for command IDs
 		checkResponseChan: make(chan *ResponseData, 1024*1024), // Buffer for CHECK responses
 		ttResponseChan:    make(chan *ResponseData, 1024*1024), // Buffer for TAKETHIS responses
-		signalChan:        make(chan struct{}, 1),
-		errChan:           errChan,
-		started:           false,
+		//signalChan:        make(chan struct{}, 64*1024),
+		errChan: errChan,
+		started: false,
 	}
 }
 
@@ -52,24 +52,28 @@ func (d *ResponseDemuxer) RegisterCommand(cmdID uint, cmdType ResponseType) {
 		common.SignalErrChan(d.errChan)
 		return
 	}
-	select {
-	case d.signalChan <- struct{}{}:
-		// sent signal
-	case <-d.errChan:
-		log.Printf("ResponseDemuxer: got errChan while signaling command, exiting")
-		common.SignalErrChan(d.errChan)
-		return
-	default:
-		// no-op
-	}
+	/*
+		select {
+		case d.signalChan <- struct{}{}:
+			// sent signal
+		case <-d.errChan:
+			log.Printf("ResponseDemuxer: got errChan while signaling command, exiting")
+			common.SignalErrChan(d.errChan)
+			return
+			/,* disabled
+			default:
+				// no-op
+			*,/
+		}
+	*/
 }
 
 // PopCommand removes a command ID from the queue
 func (d *ResponseDemuxer) PopCommand() *CmdIDinfo {
 
-	if len(d.cmdIDChan) == 0 {
-		return nil
-	}
+	//if len(d.cmdIDChan) == 0 {
+	//	return nil
+	//}
 
 	select {
 	case cmdIDInfo := <-d.cmdIDChan:
@@ -78,11 +82,11 @@ func (d *ResponseDemuxer) PopCommand() *CmdIDinfo {
 		log.Printf("ResponseDemuxer: got errChan while popping command, exiting")
 		common.SignalErrChan(d.errChan)
 		return nil
-	default:
-		// no-op
+		//default:
+		//	// no-op
 	}
 
-	return nil
+	//return nil
 }
 
 // GetCheckResponseChan returns the channel for CHECK responses
@@ -107,26 +111,30 @@ func (d *ResponseDemuxer) Start() {
 
 	go d.readAndDispatch()
 
+	/* disabled
 	go func() {
 		// keep alive
 		for {
-			time.Sleep(1 * time.Second)
+			<-time.After(time.Millisecond * 16)
 			select {
 			case d.signalChan <- struct{}{}:
 			default:
 			}
 		}
 	}()
+	*/
 }
 
 // readAndDispatch is the SINGLE goroutine that reads ALL responses from the shared connection
 func (d *ResponseDemuxer) readAndDispatch() {
+	/* disabled
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("ResponseDemuxer: panic in readAndDispatch: %v", r)
 		}
 		common.SignalErrChan(d.errChan)
 	}()
+	*/
 	outoforderBacklog := make(map[uint]*CmdIDinfo, 1024)
 loop:
 	for {
@@ -161,6 +169,7 @@ loop:
 			cmdInfo = d.PopCommand()
 		}
 		if cmdInfo == nil {
+			/* disabled
 			if len(outoforderBacklog) > 0 {
 				log.Printf("ResponseDemuxer: got no cmdInfo but have outoforderBacklog: %d [%v]", len(outoforderBacklog), outoforderBacklog)
 				if _, exists := outoforderBacklog[d.LastID+1]; exists {
@@ -168,8 +177,9 @@ loop:
 					continue loop
 				}
 			}
+			*/
 			//log.Printf("ResponseDemuxer: nothing to process, waiting on signalChan")
-			<-d.signalChan
+			//<-d.signalChan
 			continue loop
 		}
 		if d.LastID+1 != cmdInfo.CmdID {
@@ -226,14 +236,14 @@ loop:
 
 // GetStatistics returns current demuxer statistics
 func (d *ResponseDemuxer) GetDemuxerStats() (pendingCommands int64, checkResponsesQueued int64, ttResponsesQueued int64, lastRequest time.Time) {
+
 	pendingCommands = int64(len(d.cmdIDChan))
+	checkResponsesQueued = int64(len(d.checkResponseChan))
+	ttResponsesQueued = int64(len(d.ttResponseChan))
 
 	d.lastRequestMux.RLock()
 	lastRequest = d.lastRequest
 	d.lastRequestMux.RUnlock()
-
-	checkResponsesQueued = int64(len(d.checkResponseChan))
-	ttResponsesQueued = int64(len(d.ttResponseChan))
 
 	return pendingCommands, checkResponsesQueued, ttResponsesQueued, lastRequest
 }

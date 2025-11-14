@@ -143,6 +143,28 @@ func parseDateReceivedHeader(dateStr string) time.Time {
 	return time.Time{}
 }
 
+func parseReferencesToContinuedLineString(input string) string {
+	if len(input) < 1000 {
+		return input
+	}
+	var builder strings.Builder
+	refs := strings.Fields(input)
+	lineLen := 0
+	for i, ref := range refs {
+		if i > 0 {
+			builder.WriteString(" ")
+			lineLen++
+		}
+		builder.WriteString(ref)
+		lineLen += len(ref)
+		if lineLen > 998 {
+			builder.WriteString("\r\n ")
+			lineLen = 1 // Account for the space added at the beginning of the new line
+		}
+	}
+	return builder.String()
+}
+
 // ReconstructHeaders reconstructs the header lines from an article for transmission
 func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *string, newsgroup string) ([]string, error) {
 	var headers []string
@@ -226,7 +248,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 	headers = append(headers, "Date: "+dateHeader)
 	headers = append(headers, "From: "+article.FromHeader)
 	if article.References != "" {
-		headers = append(headers, "References: "+article.References)
+		headers = append(headers, "References: "+parseReferencesToContinuedLineString(article.References))
 	}
 	switch withPath {
 	case true:
@@ -533,7 +555,7 @@ func GetHeaderFirst(headers map[string][]string, key string) string {
 	if vals, ok := headers[key]; ok && len(vals) > 0 {
 		// For headers that can be folded across multiple lines (like References),
 		// we need to join with spaces instead of newlines to properly unfold them
-		if key == "references" || key == "References" || key == "in-reply-to" || key == "In-Reply-To" {
+		if strings.ToLower(key) == "references" || strings.ToLower(key) == "in-reply-to" {
 			return multiLineHeaderToStringSpaced(vals)
 		}
 		return multiLineHeaderToMergedString(vals)

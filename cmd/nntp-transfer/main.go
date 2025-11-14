@@ -2625,8 +2625,7 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 				}
 
 				if respData.Err != nil {
-					log.Printf("ERROR TTResponseWorker (%d): Failed to read TAKETHIS response for %s: %v",
-						workerID, *rr.MsgID, respData.Err)
+					log.Printf("ERROR TTResponseWorker (%d): Failed to read TAKETHIS response for %s: %v", workerID, *rr.MsgID, respData.Err)
 					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_CONN_ERRORS, 1)
 					rr.Job.PendingResponses.Done() // Mark response as handled (error case)
 					rr.ClearReadRequest(respData)
