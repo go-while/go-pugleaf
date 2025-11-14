@@ -259,6 +259,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				refline += " " + ref
 			}
 		}
+		// append remaining refline
 		if strings.TrimSpace(refline) != "" {
 			headers = append(headers, refline)
 		}

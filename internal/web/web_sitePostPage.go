@@ -218,8 +218,8 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		if subject == "" {
 			errors = append(errors, "Subject is required")
 		}
-		if len(subject) > 255 {
-			errors = append(errors, "Subject limited to 255 characters")
+		if len(subject) > 1000 {
+			errors = append(errors, "Subject limited to 1000 characters")
 		}
 		if body == "" {
 			errors = append(errors, "Message body is required")
@@ -328,26 +328,27 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		}
 		return
 	}
+	//displayName := fmt.Sprintf("%s <noreply@pugleaf.net.invalid>", session.User.DisplayName)
 	displayName := strings.TrimSpace(session.User.DisplayName)
 	if displayName != "" && !strings.Contains(displayName, "<") && !strings.Contains(displayName, ">") {
 		displayName = fmt.Sprintf("%s <noreply@pugleaf.net.invalid>", session.User.DisplayName)
 	}
 	if displayName == "" {
 		// Fallback if display name is empty
-		displayName = fmt.Sprintf("Lorem Ipsum <oops@%s>", processor.LocalNNTPHostname)
+		displayName = fmt.Sprintf("Lorem Ipsum <oops@%s.invalid>", processor.LocalNNTPHostname)
 	}
 	var headers []string
 	linesCount := strings.Count(body, "\n") + 1
-	bytesCount := len(body)
+	bytesCount := len(body) - linesCount
 	headers = append(headers, "MIME-Version: 1.0")
 	headers = append(headers, "Content-Type: text/plain; charset=\"UTF-8\"")
 	headers = append(headers, "Content-Transfer-Encoding: 8bit")
-	headers = append(headers, "Newsgroups: "+strings.Join(newsgroups, ","))
 	// Injection-Info / X-Trace header for tracking
 	headers = append(headers, "X-pugleaf-Trace: "+processor.LocalNNTPHostname+";")
 	headers = append(headers, " nonce=\""+nonce+"\"; mail-complaints-to=\""+abuseMail+"\";")
 	headers = append(headers, " posting-account=\""+hashedUser+"\";")
 	headers = append(headers, "From: "+displayName)
+	headers = append(headers, "Newsgroups: "+strings.Join(newsgroups, ","))
 	headers = append(headers, "Lines: "+strconv.Itoa(linesCount))
 	headers = append(headers, "Bytes: "+strconv.Itoa(bytesCount))
 
