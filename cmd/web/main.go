@@ -88,6 +88,7 @@ var appVersion = "-unset-"
 func main() {
 	config.AppVersion = appVersion
 	models.DisableSanitizedCache = false
+	history.ENABLE_HISTORY = false
 
 	// Initialize embedded filesystems
 	database.SetEmbeddedMigrations(database.EmbeddedMigrationsFS)
@@ -478,7 +479,7 @@ func main() {
 	// Create and start web server in a goroutine for non-blocking startup
 	server := web.NewWebServer(db, webConfig, nntpServer, editCronjobs, noCronjobs)
 	if !noCronjobs && server.CronManager != nil {
-		db.WG.Add(2) // Adds for cronjobs
+		db.WG.Add(1)
 	}
 	// Set up cross-platform signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)

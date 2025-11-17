@@ -112,7 +112,7 @@ func (cm *CronJobManager) StartCronManager() {
 // Stop gracefully shuts down the cron job manager
 func (cm *CronJobManager) StopCronManager() {
 	go func(cm *CronJobManager) {
-		log.Printf("[CRON] Stopping cron job manager...")
+		//log.Printf("[CRON] Stopping cron job manager...")
 		close(cm.stopChannel)
 		defer cm.db.WG.Done() // (defer MainWG)
 		defer log.Printf("[CRON] Cron job manager stopped (defer MainWG)")

@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const ENABLE_HISTORY = true // EXPERIMENTAL !
+var ENABLE_HISTORY = false // EXPERIMENTAL !
 
 var ErrNoMatch = fmt.Errorf("no match")
 
@@ -73,12 +73,15 @@ func NewHistory(config *HistoryConfig, mainWG *sync.WaitGroup) (*History, error)
 		//if err := h.openHistoryFile(); err != nil {
 		//	return nil, fmt.Errorf("failed to open history file: %w", err)
 		//}
+		go h.writerWorker() // +1 wg mainWG waitGroup
 	}
-	go h.writerWorker() // +1 wg mainWG waitGroup
 	return h, nil
 }
 
 func (h *History) AddDBQueued(msgIdItem *MessageIdItem) bool {
+	if !ENABLE_HISTORY {
+		return true
+	}
 	h.mux.Lock()
 	defer h.mux.Unlock()
 	if h.dbQueued[msgIdItem] {
@@ -174,7 +177,7 @@ func (h *History) Add(msgIdItem *MessageIdItem) bool {
 	if response, _, err := h.Lookup(msgIdItem, true); err != nil || response != CasePass {
 		msgIdItem.Mux.Lock()
 		if response != CaseDupes {
-			log.Printf("[HISTORY] DEBUG Add()->Lookup(): msgId: '%s'response = %x != CasePass entry.msgIdItem.Response=%x", msgIdItem.MessageId, response, msgIdItem.Response)
+			log.Printf("[HISTORY] DEBUG Add()->Lookup(): msgId: '%s' response = %x != CasePass entry.msgIdItem.Response=%x", msgIdItem.MessageId, response, msgIdItem.Response)
 		}
 		msgIdItem.CachedEntryExpires = time.Now().Add(3 * time.Second)
 		msgIdItem.Mux.Unlock()
@@ -340,6 +343,9 @@ var NOTIFY = struct{}{}
 
 // writerWorker handles background writing of history entries with batching
 func (h *History) writerWorker() {
+	if !ENABLE_HISTORY {
+		return
+	}
 	// Signal completion to main waitgroup
 	if h.mainWG == nil {
 		log.Fatalf("Main waitgroup is nil, cannot signal completion")
@@ -393,9 +399,7 @@ func (h *History) writerWorker() {
 			<-h.tickChan
 			// Handle shutdown
 			if h.ServerShutdown() && h.CheckNoMoreWorkInHistory() {
-				if !ENABLE_HISTORY {
-					return
-				}
+
 				//log.Printf("[HISTORY] writerWorker Server shutdown initiated, checking for pending work...")
 				time.Sleep(100 * time.Millisecond)
 				shutdownCounter--
@@ -739,6 +743,10 @@ func (h *History) processTableInTransaction(tx *sql.Tx, tableName string, msgIdI
 
 // CheckNoMoreWorkInHistory checks if there's no more pending work (similar to CheckNoMoreWorkInMaps)
 func (h *History) CheckNoMoreWorkInHistory() bool {
+	if !ENABLE_HISTORY {
+		return true
+	}
+
 	// Check if writer channel has pending entries
 	if h.dbMoreQueued() {
 		return false

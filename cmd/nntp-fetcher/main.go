@@ -18,6 +18,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/processor"
@@ -55,6 +56,7 @@ func main() {
 	config.AppVersion = appVersion
 	database.DBidleTimeOut = 15 * time.Second
 	database.NO_CACHE_BOOT = true // prevents booting caches
+	history.ENABLE_HISTORY = false
 	log.Printf("Starting go-pugleaf NNTP Fetcher (version %s)", config.AppVersion)
 	// Command line flags for NNTP fetcher configuration
 	var newsgroups []*models.Newsgroup
@@ -141,8 +143,9 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt) // Cross-platform (Ctrl+C on both Windows and Linux)
 
 	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
-	db.WG.Add(1) // Adds for history: one for writer worker
-	db.WG.Add(1) // this fetch loop below
+	if history.ENABLE_HISTORY {
+		db.WG.Add(1) // Adds for history: one for writer worker
+	}
 
 	// Get UseShortHashLen from database (with safety check)
 	storedUseShortHashLen, isLocked, err := db.GetHistoryUseShortHashLen(*useShortHashLenPtr)
@@ -732,7 +735,6 @@ func main() {
 			}
 		}(&waitHere)
 	}
-	db.WG.Done()
 	// Wait for either shutdown signal or server error
 	select {
 	case _, ok := <-common.ShutdownChan:
