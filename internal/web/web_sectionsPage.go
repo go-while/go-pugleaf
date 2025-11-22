@@ -184,13 +184,13 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 	}
 
 	// Get group database
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Group database not found",
 			"The group '"+groupName+"' database does not exist. Try importing data first.")
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 	// Get pagination parameters
 	page := 1
 	var lastArticleNum int64
@@ -213,7 +213,7 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 	if page > 1 && lastArticleNum == 0 {
 		skipCount := (page - 1) * LIMIT_sectionGroupPage
 		var cursorArticleNum int64
-		err = database.RetryableQueryRowScan(groupDBs.DB, `
+		err = database.RetryableQueryRowScan(groupDB.DB, `
 			SELECT article_num FROM articles
 			WHERE hide = 0
 			ORDER BY article_num DESC
@@ -226,7 +226,7 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 	}
 
 	// Get articles (overview data) for this group with pagination
-	articles, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, LIMIT_sectionGroupPage)
+	articles, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_sectionGroupPage)
 	if err != nil {
 		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
 		return
@@ -312,15 +312,15 @@ func (s *WebServer) sectionArticlePage(c *gin.Context) {
 	}
 
 	// Get group database
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Group database not found",
 			"The group '"+groupName+"' database does not exist.")
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 	// Get the article
-	article, err := s.DB.GetArticleByNum(groupDBs, articleNum)
+	article, err := s.DB.GetArticleByNum(groupDB, articleNum)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Article not found",
 			"Article "+articleNumStr+" not found in group '"+groupName+"'. It may not have been imported yet.")
@@ -380,15 +380,15 @@ func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
 	}
 
 	// Get group database
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Group database not found",
 			"The group '"+groupName+"' database does not exist.")
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 	// Get the article by message ID
-	article, err := s.DB.GetArticleByMessageID(groupDBs, messageId)
+	article, err := s.DB.GetArticleByMessageID(groupDB, messageId)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Article not found",
 			"Article with message ID '"+messageId+"' not found in group '"+groupName+"'. It may not have been imported yet.")
@@ -401,7 +401,7 @@ func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
 		TemplateData: s.getBaseTemplateData(c, section.DisplayName+" - "+groupName+" - "+subjectText),
 		Section:      section,
 		GroupName:    groupName,
-		ArticleNum:   article.ArticleNums[groupDBs.NewsgroupPtr],
+		ArticleNum:   article.ArticleNums[groupDB.NewsgroupPtr],
 		Article:      article,
 		Thread:       []*models.Overview{}, // TODO: Implement threading
 		PrevArticle:  0,                    // TODO: Implement navigation

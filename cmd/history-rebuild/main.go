@@ -59,7 +59,6 @@ func main() {
 	//debug.SetMemoryLimit(4 * 1024 * 1024 * 1024) // 4GB limit
 
 	var (
-		nntpHostname     = flag.String("nntphostname", "", "NNTP hostname (required for proper article processing)")
 		batchSize        = flag.Int("batch-size", 5000, "Number of articles to process per batch (deprecated - now processes individually)")
 		progressInterval = flag.Int("progress", 2500, "Show progress every N articles")
 		validateOnly     = flag.Bool("validate-only", false, "Only validate existing history, don't rebuild")
@@ -91,7 +90,6 @@ func main() {
 	fmt.Println("======================================")
 
 	fmt.Printf("Configuration:\n")
-	fmt.Printf("  NNTP Hostname:      %s\n", *nntpHostname)
 	fmt.Printf("  Batch Size:         %d\n", *batchSize)
 	fmt.Printf("  Validate Only:      %t\n", *validateOnly)
 	fmt.Printf("  Analyze Only:       %t\n", *analyzeOnly)
@@ -135,10 +133,6 @@ func main() {
 		fmt.Printf("✅ Using locked UseShortHashLen: %d\n", lockedHashLen)
 	}
 
-	if *nntpHostname == "" && *readOffset < 0 {
-		log.Fatalf("ERROR: NNTP hostname must be set with -nntphostname flag (unless using -read-offset)")
-	}
-
 	// Handle offset reading mode (doesn't need processor)
 	if *readOffset >= 0 {
 		fmt.Printf("🔍 Reading history.dat at offset %d...\n", *readOffset)
@@ -153,11 +147,6 @@ func main() {
 		}
 		log.Printf("[HISTORY-REBUILD]: Database shutdown successfully")
 		return
-	}
-
-	// Set hostname in processor with database fallback support
-	if err := processor.SetHostname(*nntpHostname, db); err != nil {
-		log.Fatalf("Failed to set NNTP hostname: %v", err)
 	}
 
 	// Initialize processor with proper cache management
@@ -424,29 +413,34 @@ func getRealMemoryUsageSimple() uint64 {
 	return mem
 }
 
+const query_processGroup = `SELECT message_id, article_num FROM articles
+				  WHERE message_id IS NOT NULL AND message_id != ''
+				    AND article_num >= ? AND article_num <= ?
+		          ORDER BY article_num`
+
 func processGroup(db *database.Database, proc *processor.Processor, groupName string, progressInterval int, validateOnly, verbose bool, stats *RebuildStats) error {
 
 	// Get group databases
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDB.Return()
 	/*
 		// Configure SQLite for memory efficiency
-		if groupDBs.DB != nil {
+		if groupDB.DB != nil {
 			// Reduce SQLite memory usage
-			groupDBs.DB.Exec("PRAGMA cache_size = 1000")     // Reduce page cache (default ~2MB)
-			groupDBs.DB.Exec("PRAGMA temp_store = MEMORY")   // Use memory for temp storage (faster)
-			groupDBs.DB.Exec("PRAGMA mmap_size = 134217728") // Limit mmap to 128MB
-			groupDBs.DB.Exec("PRAGMA journal_mode = WAL")    // Use WAL mode for better concurrency
+			groupDB.DB.Exec("PRAGMA cache_size = 1000")     // Reduce page cache (default ~2MB)
+			groupDB.DB.Exec("PRAGMA temp_store = MEMORY")   // Use memory for temp storage (faster)
+			groupDB.DB.Exec("PRAGMA mmap_size = 134217728") // Limit mmap to 128MB
+			groupDB.DB.Exec("PRAGMA journal_mode = WAL")    // Use WAL mode for better concurrency
 			log.Printf("[SQLITE-CONFIG] Configured SQLite memory limits for group '%s'", groupName)
 		}
 	*/
 
 	// Get total count first
 	var totalArticles int64
-	err = database.RetryableQueryRowScan(groupDBs.DB, `SELECT COUNT(*) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &totalArticles)
+	err = database.RetryableQueryRowScan(groupDB.DB, `SELECT COUNT(*) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &totalArticles)
 	if err != nil {
 		return fmt.Errorf("failed to count articles: %w", err)
 	}
@@ -460,7 +454,7 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 
 	// Get the min and max article numbers for efficient range processing
 	var minArtNum, maxArtNum int64
-	err = database.RetryableQueryRowScan(groupDBs.DB, `SELECT MIN(article_num), MAX(article_num) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &minArtNum, &maxArtNum)
+	err = database.RetryableQueryRowScan(groupDB.DB, `SELECT MIN(article_num), MAX(article_num) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &minArtNum, &maxArtNum)
 	if err != nil {
 		return fmt.Errorf("failed to get article number range: %w", err)
 	}
@@ -476,14 +470,7 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 		if maxRangeArtNum > maxArtNum {
 			maxRangeArtNum = maxArtNum
 		}
-
-		// Use article number range instead of OFFSET - much faster!
-		query := `SELECT message_id, article_num FROM articles
-				  WHERE message_id IS NOT NULL AND message_id != ''
-				    AND article_num >= ? AND article_num <= ?
-		          ORDER BY article_num`
-
-		rows, err := database.RetryableQuery(groupDBs.DB, query, currentArtNum, maxRangeArtNum)
+		rows, err := database.RetryableQuery(groupDB.DB, query_processGroup, currentArtNum, maxRangeArtNum)
 		if err != nil {
 			return fmt.Errorf("failed to query article range %d-%d: %w", currentArtNum, maxRangeArtNum, err)
 		}
@@ -541,8 +528,8 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 					msgIdItem.Mux.Unlock()
 					continue
 				}
-				msgIdItem.GroupName = db.Batch.GetNewsgroupPointer(groupName)
-				msgIdItem.ArtNum = articleNum
+				//msgIdItem.GroupName = db.Batch.GetNewsgroupPointer(groupName)
+				//msgIdItem.ArtNum = articleNum
 				msgIdItem.Response = history.CaseLock
 				/*
 					if messageID == "<32304224.79C1@parkcity.com>" {
@@ -559,7 +546,7 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 				msgIdItem.CachedEntryExpires = time.Now().Add(history.CachedEntryTTL)
 				msgIdItem.Mux.Unlock()
 				// Validation mode: check if article exists in history
-				result, err := proc.History.Lookup(msgIdItem)
+				result, _, err := proc.History.Lookup(msgIdItem, true)
 				if err == nil && result == history.CaseDupes {
 					stats.HistoryFound++
 					msgIdItem.Mux.Lock()
@@ -568,7 +555,7 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 					msgIdItem.Mux.Unlock()
 				} else {
 					if verbose {
-						log.Printf("Missing from history: %s (%s)", msgIdItem.MessageId, msgIdItem.StorageToken)
+						log.Printf("[HISTORY] miss: '%s'", msgIdItem.MessageId)
 					}
 					msgIdItem.Mux.Lock()
 					msgIdItem.Response = history.CaseError
@@ -583,13 +570,18 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 					}
 				*/
 				// Rebuild mode: add article to history
-				proc.History.Add(msgIdItem)
+				if proc.History.Add(msgIdItem) {
+					stats.HistoryAdded++
+				} else {
+					log.Printf("[HISTORY-REBUILD] did not add: '%s'", msgIdItem.MessageId)
+					stats.ArticlesSkipped++
+				}
 				/*
 					if messageID == "<32304224.79C1@parkcity.com>" {
 						log.Printf("[DEBUG-STEP7] Called proc.History.Add() for target message ID: %s - should reach history system now!", messageID)
 					}
 				*/
-				stats.HistoryAdded++
+
 			}
 			//addTime := time.Since(addStart)
 
@@ -628,8 +620,8 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 		// Move to next article number range
 		currentArtNum = maxRangeArtNum + 1
 
-		// Aggressive memory management every 5K articles
-		if processed%100000 == 0 {
+		// Aggressive memory management every N articles
+		if processed%10000 == 0 {
 			// Force garbage collection
 			runtime.GC() // Second GC to clean up finalizers
 
@@ -651,17 +643,17 @@ func processGroup(db *database.Database, proc *processor.Processor, groupName st
 				if realMem > 2*1024*1024*1024 { // 2GB threshold
 					log.Printf("[MEMORY-CRITICAL] RSS exceeds 2GB, forcing database memory release...")
 					// Try to force SQLite memory release via PRAGMA
-					if groupDBs != nil && groupDBs.DB != nil {
-						groupDBs.DB.Exec("PRAGMA shrink_memory")
-						groupDBs.DB.Exec("PRAGMA cache_size = 1000") // Reduce cache
+					if groupDB != nil && groupDB.DB != nil {
+						groupDB.DB.Exec("PRAGMA shrink_memory")
+						groupDB.DB.Exec("PRAGMA cache_size = 1000") // Reduce cache
 					}
 				}
 			*/
 
 			// Emergency stop if RSS exceeds N GB
-			if realMem > 4*1024*1024*1024 {
-				log.Printf("[MEMORY-EMERGENCY] RSS HIGH! Pausing for 30 seconds to allow memory cleanup...")
-				time.Sleep(30 * time.Second)
+			if realMem > 16*1024*1024*1024 {
+				log.Printf("[MEMORY-EMERGENCY] RSS HIGH! Pausing for 10 seconds to allow memory cleanup...")
+				<-time.After(time.Second * 10)
 
 				// Check again after cleanup
 				newRealMem, _ := getRealMemoryUsage()

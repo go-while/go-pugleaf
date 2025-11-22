@@ -66,6 +66,10 @@ var (
 	// Compare flags
 	compareActiveFile        string
 	compareActiveMinArticles int64
+	disableActiveFile        string
+
+	// Expiry update flag
+	updateNewsgroupsExpiryFile string
 
 	// Bridge flags (disabled by default)
 	/* code path disabled (not tested)
@@ -83,13 +87,15 @@ var appVersion = "-unset-"
 
 func main() {
 	config.AppVersion = appVersion
+	models.DisableSanitizedCache = false
+	history.ENABLE_HISTORY = false
 
 	// Initialize embedded filesystems
 	database.SetEmbeddedMigrations(database.EmbeddedMigrationsFS)
 
 	flag.IntVar(&maxSanArtCache, "maxsanartcache", 10000, "maximum number of cached sanitized articles (default: 10000)")
 	flag.IntVar(&maxSanArtCacheExpiry, "maxsanartcacheexpiry", 30, "expiry of cached sanitized articles in minutes (default: 30 minutes)")
-	flag.IntVar(&maxNGpageCache, "maxngpagecache", 4096, "maximum number of cached newsgroup pages (25 groups per page) (default: 4K pages) [~12-16 KB/entry * 4096 = ~64 MB (+overhead) with 100k active groups!]")
+	flag.IntVar(&maxNGpageCache, "maxngpagecache", 4096, "maximum number of cached newsgroup pages (default: 4K pages)")
 	flag.IntVar(&maxNGpageCacheExpiry, "maxngpagecacheexpiry", 5, "expiry of cached newsgroup pages in minutes (default: 5 minutes)")
 	flag.IntVar(&maxArticleCache, "maxarticlecache", 10000, "maximum number of cached articles (default: 10000) [~8-12 KB/entry] 10000 = ~128 MB")
 	flag.IntVar(&maxArticleCacheExpiry, "maxarticlecacheexpiry", 60, "expiry of cached articles in minutes (default: 60 minutes)")
@@ -107,13 +113,13 @@ func main() {
 	flag.IntVar(&nntptlsport, "nntptlsport", 0, "NNTP TLS port")
 	flag.StringVar(&nntpcertFile, "nntpcertfile", "", "NNTP TLS certificate file (/path/to/fullchain.pem)")
 	flag.StringVar(&nntpkeyFile, "nntpkeyfile", "", "NNTP TLS key file (/path/to/privkey.pem)")
-	flag.BoolVar(&forceReloadDesc, "update-descr", false, "Updates (overwrites existing!) internal newsgroup descriptions from file preload/newsgroups.descriptions (default: false)")
-	flag.StringVar(&importActiveFile, "import-active", "", "Import newsgroups from NNTP active file (format: groupname highwater lowwater status)")
-	flag.StringVar(&importDescFile, "import-desc", "", "Import newsgroups from descriptions file (format: groupname\\tdescription)")
-	flag.BoolVar(&importCreateMissing, "import-create", false, "Create missing newsgroups when importing from descriptions file (default: false)")
+	flag.BoolVar(&forceReloadDesc, "update-overwrite-newsgroups-descriptions", false, "Updates (overwrites existing!) internal newsgroup descriptions from file preload/newsgroups.descriptions (default: false)")
+	flag.StringVar(&importDescFile, "update-newsgroups-descriptions-file", "", "Import newsgroups from descriptions file (format: groupname\\tdescription)")
+	flag.BoolVar(&importCreateMissing, "update-newsgroups-descriptions-import-create-newsgroups", false, "Create missing newsgroups when importing from descriptions file (default: false)")
 	flag.BoolVar(&repairWatermarks, "repair-watermarks", false, "Repair corrupted newsgroup watermarks caused by preloader (default: false)")
-	flag.IntVar(&updateNGAConcurrent, "update-newsgroups-activity", 0, "Updates newsgroup updated_at timestamps to reflect actual article activity. N = process this many newsgroups concurrently")
+	flag.IntVar(&updateNGAConcurrent, "update-newsgroups-activity", 0, "Updates newsgroup updated_at timestamps to reflect actual article activity. Set N to process this many newsgroups concurrently")
 	flag.BoolVar(&updateNewsgroupsHideFuture, "update-newsgroups-hide-futureposts", false, "Hide articles posted more than 48 hours in the future (default: false)")
+	flag.StringVar(&importActiveFile, "import-active", "", "Import newsgroups from NNTP active file (format: groupname highwater lowwater status)")
 	flag.StringVar(&writeActiveFile, "write-active-file", "", "Write NNTP active file from main database newsgroups table to specified path")
 	flag.BoolVar(&writeActiveOnly, "write-active-only", true, "use with -write-active-file (false writes only non active groups!)")
 	flag.StringVar(&rsyncInactiveGroups, "rsync-inactive-groups", "", "path to new data dir, uses rsync to copy all inactive group databases to new data folder.")
@@ -122,7 +128,9 @@ func main() {
 	flag.BoolVar(&noCronjobs, "no-cronjobs", false, "use this flag to not run cron jobs")
 	flag.BoolVar(&findOrphanDBs, "find-orphan-dbs", false, "Find orphaned database folders in data/db that don't correspond to any newsgroup in main database")
 	flag.StringVar(&compareActiveFile, "compare-active", "", "Compare active file with database and show missing groups (format: groupname highwater lowwater status)")
+	flag.StringVar(&disableActiveFile, "disable-active", "", "Disable newsgroups not listed in active file (format: groupname highwater lowwater status)")
 	flag.Int64Var(&compareActiveMinArticles, "compare-active-min-articles", 0, "use with -compare-active: only show groups with more than N articles (calculated as high-low)")
+	flag.StringVar(&updateNewsgroupsExpiryFile, "update-newsgroups-expiry-from-file", "", "Update newsgroup expiry_days from file (format: newsgroup:days, one per line)")
 	flag.BoolVar(&verbose, "verbose", false, "print more (debug) output")
 	flag.StringVar(&dataDir, "data", "./data", "path to database and config directory")
 
@@ -294,6 +302,18 @@ func main() {
 		}
 	}
 
+	// disableActiveFile
+	if disableActiveFile != "" {
+		log.Printf("[WEB]: Disabling newsgroups not listed in active file: %s", disableActiveFile)
+		if err := disableNewsgroupsNotInActiveFile(db, disableActiveFile); err != nil {
+			log.Printf("[WEB]: Error: Failed to disable newsgroups: %v", err)
+			os.Exit(1)
+		} else {
+			log.Printf("[WEB]: Newsgroup disabling completed successfully")
+			os.Exit(0)
+		}
+	}
+
 	// findOrphanDBs
 	if findOrphanDBs {
 		log.Printf("[WEB]: Finding orphaned database folders...")
@@ -302,6 +322,18 @@ func main() {
 			os.Exit(1)
 		} else {
 			log.Printf("[WEB]: Orphaned database scan completed successfully")
+			os.Exit(0)
+		}
+	}
+
+	// updateNewsgroupsExpiryFile
+	if updateNewsgroupsExpiryFile != "" {
+		log.Printf("[WEB]: Updating newsgroup expiry from file: %s", updateNewsgroupsExpiryFile)
+		if err := updateNewsgroupsExpiryFromFile(db, updateNewsgroupsExpiryFile); err != nil {
+			log.Printf("[WEB]: Error: Failed to update newsgroup expiry: %v", err)
+			os.Exit(1)
+		} else {
+			log.Printf("[WEB]: Newsgroup expiry update completed successfully")
 			os.Exit(0)
 		}
 	}
@@ -447,7 +479,7 @@ func main() {
 	// Create and start web server in a goroutine for non-blocking startup
 	server := web.NewWebServer(db, webConfig, nntpServer, editCronjobs, noCronjobs)
 	if !noCronjobs && server.CronManager != nil {
-		db.WG.Add(2) // Adds for cronjobs
+		db.WG.Add(1)
 	}
 	// Set up cross-platform signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)

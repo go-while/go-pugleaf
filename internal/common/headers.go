@@ -12,11 +12,11 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-var VerboseHeaders bool = false
+var VERBOSE_HEADERS bool = false
 var IgnoreGoogleHeaders bool = false
 var UseStrictGroupValidation bool = false
 var ErrNoNewsgroups = fmt.Errorf("ErrNoNewsgroups")
-var unwantedChars = "\t\x00;:,<>#*§()[]{}?!%$§/\\@\"'`"
+var unwantedChars = "\t\x00;:,<>#*()[]{}?!%$§/\\@\"'`"
 var (
 	// Do NOT change this here! these are needed for runtime !
 	// validGroupNameRegex validates newsgroup names according to RFC standards
@@ -39,6 +39,18 @@ var IgnoreHeadersMap = map[string]bool{
 	"date":       true,
 	"path":       true,
 	"xref":       true,
+}
+
+// refers to
+// https://github.com/InterNetNews/inn/blob/ba39e0ace92aea2f9e59117f1757deaf28416d91/innd/innd.c#L79
+// const ARTHEADER ARTheaders[] ---> HTreq
+var RequiredHeadersMap = map[string]bool{
+	"date":       true,
+	"from":       true,
+	"message-id": true,
+	"newsgroups": true,
+	"path":       true,
+	"subject":    true,
 }
 
 var formats = []string{
@@ -131,6 +143,24 @@ func parseDateReceivedHeader(dateStr string) time.Time {
 	return time.Time{}
 }
 
+func parseReferencesToContinuedLineString(input string) string {
+	if len(input) < 1000 {
+		return input
+	}
+	var builder strings.Builder
+	refs := strings.Fields(input)
+	lineLen := 0
+	for _, ref := range refs {
+		builder.WriteString(ref)
+		lineLen += len(ref)
+		if lineLen > 500 {
+			builder.WriteString("\r\n ")
+			lineLen = 1 // Account for the space added at the beginning of the new line
+		}
+	}
+	return builder.String()
+}
+
 // ReconstructHeaders reconstructs the header lines from an article for transmission
 func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *string, newsgroup string) ([]string, error) {
 	var headers []string
@@ -138,6 +168,9 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 	// Add basic headers that we know about
 	if article.MessageID == "" {
 		return nil, fmt.Errorf("article missing Message-ID")
+	}
+	if strings.HasSuffix(article.MessageID, "@msgid-missing>") {
+		return nil, fmt.Errorf("article has placeholder Message-ID")
 	}
 	if article.Subject == "" {
 		return nil, fmt.Errorf("article missing Subject")
@@ -156,7 +189,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			// DateString is not RFC compliant, try DateSent first
 			if !article.DateSent.IsZero() && article.DateSent.Year() >= 1979 {
 				dateHeader = article.DateSent.UTC().Format(time.RFC1123Z)
-				if VerboseHeaders {
+				if VERBOSE_HEADERS {
 					log.Printf("Using DateSent '%s' instead of DateString '%s' for article %s", dateHeader, article.DateString, article.MessageID)
 				}
 			} else {
@@ -166,7 +199,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 					parsedTime := parseDateReceivedHeader(dateReceivedStr)
 					if !parsedTime.IsZero() && parsedTime.Year() >= 1979 {
 						dateHeader = parsedTime.UTC().Format(time.RFC1123Z)
-						//if VerboseHeaders {
+						//if VERBOSE_HEADERS {
 						log.Printf("Using Date-Received '%s' (parsed as '%s') instead of invalid DateString '%s' and invalid DateSent (year %d) for article %s", dateReceivedStr, dateHeader, article.DateString, article.DateSent.Year(), article.MessageID)
 						//}
 						article.DateSent = parsedTime   // Update article DateSent with corrected time
@@ -193,7 +226,7 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 				parsedTime := parseDateReceivedHeader(dateReceivedStr)
 				if !parsedTime.IsZero() && parsedTime.Year() >= 1979 {
 					dateHeader = parsedTime.UTC().Format(time.RFC1123Z)
-					if VerboseHeaders {
+					if VERBOSE_HEADERS {
 						log.Printf("Using Date-Received '%s' (parsed as '%s') when DateString is empty and DateSent is invalid (year %d) for article %s", dateReceivedStr, dateHeader, article.DateSent.Year(), article.MessageID)
 					}
 					article.DateSent = parsedTime   // Update article DateSent with corrected time
@@ -206,16 +239,57 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			}
 		}
 	}
-	headers = append(headers, "Message-ID: "+article.MessageID)
-	headers = append(headers, "Subject: "+article.Subject)
 	headers = append(headers, "Date: "+dateHeader)
 	headers = append(headers, "From: "+article.FromHeader)
+	headers = append(headers, "Message-ID: "+article.MessageID)
+	headers = append(headers, "Subject: "+article.Subject)
 	if article.References != "" {
-		headers = append(headers, "References: "+article.References)
+		var refline string = "References:"
+		refs := strings.Fields(article.References)
+		for i, ref := range refs {
+			if i > 0 {
+				if len(refline)+1+len(ref) > 1000 {
+					// line would exceed 1000 chars, start a new line
+					headers = append(headers, refline)
+					refline = " " + ref // continuation line starts with space
+				} else {
+					refline += " " + ref
+				}
+			} else {
+				refline += " " + ref
+			}
+		}
+		// append remaining refline
+		if strings.TrimSpace(refline) != "" {
+			headers = append(headers, refline)
+		}
 	}
 	switch withPath {
 	case true:
 		if article.Path != "" {
+			var pathline string
+			if nntphostname != nil && *nntphostname != "" {
+				pathline = "Path: " + *nntphostname + "!.TX!" + article.Path
+			} else {
+				pathline = "Path: " + article.Path
+			}
+			paths := strings.Fields(pathline)
+			for i, path := range paths {
+				if i > 0 {
+					if len(pathline)+1+len(path) > 1000 {
+						// line would exceed 1000 chars, start a new line
+						headers = append(headers, pathline)
+						pathline = " " + path // continuation line starts with space
+					} else {
+						pathline += " " + path
+					}
+				} else {
+					pathline += " " + path
+				}
+			}
+			if strings.TrimSpace(pathline) != "" {
+				headers = append(headers, pathline)
+			}
 			if nntphostname != nil && *nntphostname != "" {
 				headers = append(headers, "Path: "+*nntphostname+"!.TX!"+article.Path)
 			} else {
@@ -266,7 +340,7 @@ checkHeader:
 			}
 			// check if first char is lowercase
 			if unicode.IsLower(rune(headerLine[0])) {
-				if VerboseHeaders {
+				if VERBOSE_HEADERS {
 					log.Printf("Lowercase header: '%s' line=%d in msgId='%s' (rewrite)", headerLine, i, article.MessageID)
 				}
 				headerLine = strings.ToUpper(string(headerLine[0])) + headerLine[1:]
@@ -309,12 +383,14 @@ checkHeader:
 			}
 			if !strings.HasPrefix(header, "X-") {
 				if headersMap[strings.ToLower(header)] {
-					log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (rewrite)", headerLine, i, article.MessageID)
-					headerLine = "X-RW-" + headerLine
+					if RequiredHeadersMap[strings.ToLower(header)] {
+						log.Printf("Duplicate header: '%s' line=%d in msgId='%s' (rewrite)", headerLine, i, article.MessageID)
+						headerLine = "X-RW-" + headerLine
+					}
 				}
 				headersMap[strings.ToLower(header)] = true
 			}
-			if header == "Newsgroups" {
+			if strings.ToLower(header) == "newsgroups" {
 				// Check if Newsgroups header contains at least one valid newsgroup name
 				// check if next headerlines are continued lines
 			getLines:
@@ -379,7 +455,9 @@ checkHeader:
 					trimmedNG = strings.TrimSpace(trimmedNG)
 					if trimmedNG == "" || strings.Contains(trimmedNG, " ") || !IsValidGroupName(trimmedNG) {
 						if trimmedNG == "" {
-							log.Printf("Invalid newsgroup name: '%s' empty after cleanup in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
+							if VERBOSE_HEADERS {
+								log.Printf("Invalid newsgroup name: '%s' empty after cleanup in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
+							}
 						} else {
 							log.Printf("Invalid newsgroup name: '%s' in line=%d idx=%d in msgId='%s'", group, i, x, article.MessageID)
 						}
@@ -392,8 +470,9 @@ checkHeader:
 					validNewsgroups = append(validNewsgroups, trimmedNG)
 				} // end for checkGroups
 
-				if len(validNewsgroups) == 0 {
-					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s' (return err)", headerLine, i, article.MessageID)
+				if len(validNewsgroups) == 0 && newsgroup == "" {
+					log.Printf("Invalid Newsgroups header: '%s' line=%d in msgId='%s'", headerLine, i, article.MessageID)
+					return nil, ErrNoNewsgroups
 				}
 
 				if badGroups > 0 {
@@ -407,7 +486,7 @@ checkHeader:
 
 		headers = append(headers, headerLine)
 	} // end for moreHeaders
-	if VerboseHeaders && ignoredLines > 0 {
+	if VERBOSE_HEADERS && ignoredLines > 0 {
 		log.Printf("Reconstructed %d header lines, ignored %d: msgId='%s'", len(headers), ignoredLines, article.MessageID)
 	}
 	fallbackNewsgroup := false
@@ -513,7 +592,7 @@ func GetHeaderFirst(headers map[string][]string, key string) string {
 	if vals, ok := headers[key]; ok && len(vals) > 0 {
 		// For headers that can be folded across multiple lines (like References),
 		// we need to join with spaces instead of newlines to properly unfold them
-		if key == "references" || key == "References" || key == "in-reply-to" || key == "In-Reply-To" {
+		if strings.ToLower(key) == "references" || strings.ToLower(key) == "in-reply-to" {
 			return multiLineHeaderToStringSpaced(vals)
 		}
 		return multiLineHeaderToMergedString(vals)

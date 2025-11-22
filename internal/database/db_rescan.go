@@ -1,6 +1,7 @@
 package database
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"strings"
@@ -8,18 +9,18 @@ import (
 )
 
 // RecoverDatabase attempts to recover the database by checking for missing articles and last_insert_ids mismatches
-var RescanBatchSize int64 = 25000
+var RescanBatchSize int64 = 1000
 
 func (db *Database) GetLatestArticleNumberFromOverview(newsgroup string) (int64, error) {
 	// Since overview table is unified with articles, query articles table instead
-	groupDB, err := db.GetGroupDBs(newsgroup)
+	groupDB, err := db.GetGroupDB(newsgroup)
 	if err != nil {
 		return 0, err
 	}
-	defer groupDB.Return(db)
+	defer groupDB.Return()
 
 	var latestArticle int64
-	err = retryableQueryRowScan(groupDB.DB, `
+	err = RetryableQueryRowScan(groupDB.DB, `
 		SELECT MAX(article_num)
 		FROM articles
 	`, []interface{}{}, &latestArticle)
@@ -32,7 +33,7 @@ func (db *Database) GetLatestArticleNumberFromOverview(newsgroup string) (int64,
 
 func (db *Database) GetLatestArticleNumbers(newsgroup string) (map[string]int64, error) {
 	// Query the latest article numbers for the specified newsgroup
-	rows, err := retryableQuery(db.GetMainDB(), `
+	rows, err := RetryableQuery(db.GetMainDB(), `
 		SELECT name, last_article
 		FROM newsgroups
 		WHERE name = ?
@@ -97,15 +98,15 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 	}
 
 	// 2. Get group databases
-	groupDB, err := db.GetGroupDBs(newsgroup)
+	groupDB, err := db.GetGroupDB(newsgroup)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get group databases: %v", err))
 		return report, nil
 	}
-	defer groupDB.Return(db)
+	defer groupDB.Return()
 
 	// 3. Get max article numbers from each table (handle NULL for empty tables)
-	err = retryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", []interface{}{}, &report.ArticlesMaxNum)
+	err = RetryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", []interface{}{}, &report.ArticlesMaxNum)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get max article_num from articles: %v", err))
 	}
@@ -113,13 +114,13 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 	// Since overview is now unified with articles, OverviewMaxNum equals ArticlesMaxNum
 	report.OverviewMaxNum = report.ArticlesMaxNum
 
-	err = retryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(root_article), 0) FROM threads", []interface{}{}, &report.ThreadsMaxNum)
+	err = RetryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(root_article), 0) FROM threads", []interface{}{}, &report.ThreadsMaxNum)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get max root_article from threads: %v", err))
 	}
 
 	// 4. Get counts from each table
-	err = retryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", []interface{}{}, &report.ArticleCount)
+	err = RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", []interface{}{}, &report.ArticleCount)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get article count: %v", err))
 	}
@@ -127,7 +128,7 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 	// Since overview is now unified with articles, OverviewCount equals ArticleCount
 	report.OverviewCount = report.ArticleCount
 
-	err = retryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM threads", []interface{}{}, &report.ThreadCount)
+	err = RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM threads", []interface{}{}, &report.ThreadCount)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get thread count: %v", err))
 	}
@@ -157,7 +158,7 @@ func (db *Database) CheckDatabaseConsistency(newsgroup string) (*ConsistencyRepo
 }
 
 // findMissingArticles finds gaps in article numbering using batched processing
-func (db *Database) findMissingArticles(groupDB *GroupDBs, maxArticleNum int64) []int64 {
+func (db *Database) findMissingArticles(groupDB *GroupDB, maxArticleNum int64) []int64 {
 	var missing []int64
 	if maxArticleNum <= 0 {
 		return missing
@@ -170,7 +171,7 @@ func (db *Database) findMissingArticles(groupDB *GroupDBs, maxArticleNum int64) 
 
 	for offset < maxArticleNum {
 		// Get batch of article numbers
-		rows, err := retryableQuery(groupDB.DB,
+		rows, err := RetryableQuery(groupDB.DB,
 			"SELECT article_num FROM articles WHERE article_num > ? ORDER BY article_num LIMIT ?",
 			offset, RescanBatchSize)
 		if err != nil {
@@ -217,7 +218,7 @@ func (db *Database) findMissingArticles(groupDB *GroupDBs, maxArticleNum int64) 
 }
 
 // findOrphanedThreads finds thread entries pointing to non-existent articles using batched processing
-func (db *Database) findOrphanedThreads(groupDB *GroupDBs) []int64 {
+func (db *Database) findOrphanedThreads(groupDB *GroupDB) []int64 {
 	var orphaned []int64
 
 	log.Printf("Building article index in batches of %d", RescanBatchSize)
@@ -229,7 +230,7 @@ func (db *Database) findOrphanedThreads(groupDB *GroupDBs) []int64 {
 
 	for {
 		// Get batch of article numbers
-		rows, err := retryableQuery(groupDB.DB,
+		rows, err := RetryableQuery(groupDB.DB,
 			"SELECT article_num FROM articles WHERE article_num > ? ORDER BY article_num LIMIT ?",
 			offset, RescanBatchSize)
 		if err != nil {
@@ -275,7 +276,7 @@ func (db *Database) findOrphanedThreads(groupDB *GroupDBs) []int64 {
 
 	for {
 		// Get batch of distinct root_article numbers from threads table
-		rows, err := retryableQuery(groupDB.DB,
+		rows, err := RetryableQuery(groupDB.DB,
 			"SELECT DISTINCT root_article FROM threads WHERE root_article > ? ORDER BY root_article LIMIT ?",
 			offset, RescanBatchSize)
 		if err != nil {
@@ -375,11 +376,12 @@ const query_RebuildThreadsFromScratch1 = "SELECT COUNT(*) FROM articles"
 const query_RebuildThreadsFromScratch2 = "SELECT COUNT(*) FROM threads"
 const query_RebuildThreadsFromScratch3 = "DELETE FROM %s"
 const query_RebuildThreadsFromScratch4 = "DELETE FROM sqlite_sequence WHERE name = 'threads'"
-const query_RebuildThreadsFromScratch5 = "SELECT article_num, message_id FROM articles ORDER BY article_num	LIMIT ? OFFSET ?"
+const query_RebuildThreadsFromScratch5 = "SELECT article_num, message_id FROM articles ORDER BY date_sent ASC LIMIT ? OFFSET ?"
 
 // RebuildThreadsFromScratch completely rebuilds all thread relationships for a newsgroup
 // This function deletes all existing threads and rebuilds them from article 1 based on message references
-func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool) (*ThreadRebuildReport, error) {
+// If groupDB is provided (not nil), it will use that instead of opening the newsgroup's database
+func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool, groupDB *GroupDB) (*ThreadRebuildReport, error) {
 	report := &ThreadRebuildReport{
 		Newsgroup: newsgroup,
 		StartTime: time.Now(),
@@ -390,19 +392,36 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool) (*
 		log.Printf("RebuildThreadsFromScratch: Starting complete thread rebuild for newsgroup '%s'", newsgroup)
 	}
 
-	// Get group database
-	groupDB, err := db.GetGroupDBs(newsgroup)
-	if err != nil {
-		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get group database: %v", err))
-		return report, err
+	// TIMER: Get group database
+	stepStart := time.Now()
+	var shouldCloseDB bool
+	if groupDB == nil {
+		var err error
+		groupDB, err = db.GetGroupDB(newsgroup)
+		if err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("Failed to get group database: %v", err))
+			return report, err
+		}
+		shouldCloseDB = true
 	}
-	defer groupDB.Return(db)
+	if verbose {
+		log.Printf("⏱️  TIMER: GetGroupDB took %v", time.Since(stepStart))
+	}
 
-	// Get total article count
-	err = retryableQueryRowScan(groupDB.DB, query_RebuildThreadsFromScratch1, []interface{}{}, &report.TotalArticles)
+	if shouldCloseDB {
+		defer groupDB.Return()
+	}
+
+	// TIMER: Get total article count
+	stepStart = time.Now()
+	var err error
+	err = RetryableQueryRowScan(groupDB.DB, query_RebuildThreadsFromScratch1, []interface{}{}, &report.TotalArticles)
 	if err != nil {
 		report.Errors = append(report.Errors, fmt.Sprintf("Failed to get article count: %v", err))
 		return report, err
+	}
+	if verbose {
+		log.Printf("⏱️  TIMER: Get article count took %v", time.Since(stepStart))
 	}
 
 	if report.TotalArticles == 0 {
@@ -418,7 +437,8 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool) (*
 		log.Printf("RebuildThreadsFromScratch: Found %d articles to process", report.TotalArticles)
 	}
 
-	// Step 1: Clear existing thread data
+	// TIMER: Step 1: Clear existing thread data
+	stepStart = time.Now()
 	if verbose {
 		log.Printf("RebuildThreadsFromScratch: Clearing existing thread data...")
 	}
@@ -438,10 +458,14 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool) (*
 	// Clear thread-related tables in dependency order
 	tables := []string{"tree_stats", "cached_trees", "thread_cache", "threads"}
 	for _, table := range tables {
+		tableStart := time.Now()
 		_, err = tx.Exec(fmt.Sprintf(query_RebuildThreadsFromScratch3, table))
 		if err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("Failed to clear table %s: %v", table, err))
 			return report, err
+		}
+		if verbose {
+			log.Printf("⏱️    TIMER: Clear table %s took %v", table, time.Since(tableStart))
 		}
 	}
 
@@ -462,24 +486,28 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool) (*
 
 	if verbose {
 		log.Printf("RebuildThreadsFromScratch: Cleared %d existing thread entries", existingThreads)
+		log.Printf("⏱️  TIMER: Clear existing thread data (total) took %v", time.Since(stepStart))
 	}
 
-	// Step 2: Build message-ID to article-number mapping
+	// TIMER: Step 2: Build message-ID to article-number mapping
+	stepStart = time.Now()
 	if verbose {
 		log.Printf("RebuildThreadsFromScratch: Building message-ID mapping...")
 	}
 
 	msgIDToArticleNum := make(map[string]int64)
 	var offset int64 = 0
+	var totalBatches int64 = 0
 
 	for offset < report.TotalArticles {
+		batchStart := time.Now()
 		currentBatchSize := RescanBatchSize
 		if offset+RescanBatchSize > report.TotalArticles {
 			currentBatchSize = report.TotalArticles - offset
 		}
 
 		// Load batch of article mappings
-		rows, err := retryableQuery(groupDB.DB, query_RebuildThreadsFromScratch5, currentBatchSize, offset)
+		rows, err := RetryableQuery(groupDB.DB, query_RebuildThreadsFromScratch5, currentBatchSize, offset)
 
 		if err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("Failed to query articles batch: %v", err))
@@ -499,23 +527,30 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool) (*
 		rows.Close()
 
 		offset += int64(currentBatchSize)
+		totalBatches++
 
-		if verbose && offset%1000 == 0 {
-			log.Printf("RebuildThreadsFromScratch: Built message-ID mapping: %d/%d articles", offset, report.TotalArticles)
+		if verbose && offset%10000 == 0 {
+			log.Printf("RebuildThreadsFromScratch: Built message-ID mapping: %d/%d articles (batch took %v)",
+				offset, report.TotalArticles, time.Since(batchStart))
 		}
 	}
 
 	if verbose {
+		avgBatchTime := time.Since(stepStart) / time.Duration(totalBatches)
 		log.Printf("RebuildThreadsFromScratch: Message-ID mapping complete: %d entries", len(msgIDToArticleNum))
+		log.Printf("⏱️  TIMER: Build message-ID mapping (total) took %v (avg batch: %v)", time.Since(stepStart), avgBatchTime)
 	}
 
-	// Step 3: Process articles in batches to build thread relationships
+	// TIMER: Step 3: Process articles in batches to build thread relationships
+	stepStart = time.Now()
 	if verbose {
 		log.Printf("RebuildThreadsFromScratch: Building thread relationships...")
 	}
 
 	offset = 0
+	totalBatches = 0
 	for offset < report.TotalArticles {
+		batchStart := time.Now()
 		currentBatchSize := RescanBatchSize
 		if offset+RescanBatchSize > report.TotalArticles {
 			currentBatchSize = report.TotalArticles - offset
@@ -529,11 +564,17 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool) (*
 
 		report.ThreadsRebuilt += int64(threadsBuilt)
 		offset += int64(currentBatchSize)
+		totalBatches++
 
-		if verbose && offset%1000 == 0 {
-			log.Printf("RebuildThreadsFromScratch: Threading progress: %d/%d articles processed, %d threads built",
-				offset, report.TotalArticles, report.ThreadsRebuilt)
+		if verbose && offset%10000 == 0 {
+			log.Printf("RebuildThreadsFromScratch: Threading progress: %d/%d articles processed, %d threads built (batch took %v)",
+				offset, report.TotalArticles, report.ThreadsRebuilt, time.Since(batchStart))
 		}
+	}
+
+	if verbose {
+		avgBatchTime := time.Since(stepStart) / time.Duration(totalBatches)
+		log.Printf("⏱️  TIMER: Build thread relationships (total) took %v (avg batch: %v)", time.Since(stepStart), avgBatchTime)
 	}
 
 	report.EndTime = time.Now()
@@ -553,7 +594,7 @@ func (db *Database) RebuildThreadsFromScratch(newsgroup string, verbose bool) (*
 const query_processThreadBatch1 = `
 		SELECT article_num, message_id, "references", date_sent
 		FROM articles
-		ORDER BY article_num
+		ORDER BY date_sent ASC
 		LIMIT ? OFFSET ?
 	`
 const query_processThreadBatch2 = "INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, 0, 0)"
@@ -561,15 +602,22 @@ const query_processThreadBatch3 = "INSERT INTO threads (root_article, parent_art
 
 // processThreadBatch processes a batch of articles to build thread relationships
 // Based on the actual threading system: only ROOT articles go in threads table, replies only update thread_cache
-func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[string]int64, offset, batchSize int64, verbose bool) (int, error) {
-	// Get batch of articles with their references and dates
-	rows, err := retryableQuery(groupDB.DB, query_processThreadBatch1, batchSize, offset)
+func (db *Database) processThreadBatch(groupDB *GroupDB, msgIDToArticleNum map[string]int64, offset, batchSize int64, verbose bool) (int, error) {
+	batchStartTime := time.Now()
+
+	// TIMER: Get batch of articles with their references and dates
+	stepStart := time.Now()
+	rows, err := RetryableQuery(groupDB.DB, query_processThreadBatch1, batchSize, offset)
 	if err != nil {
 		return 0, fmt.Errorf("failed to query articles: %w", err)
 	}
 	defer rows.Close()
+	if verbose {
+		log.Printf("⏱️    processThreadBatch: Query articles took %v", time.Since(stepStart))
+	}
 
-	// Separate roots and replies for processing
+	// TIMER: Separate roots and replies for processing
+	stepStart = time.Now()
 	var threadRoots []struct {
 		articleNum int64
 		dateSent   time.Time
@@ -583,6 +631,7 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 	}
 
 	// Process each article to determine if it's a root or reply
+	rowCount := 0
 	for rows.Next() {
 		var articleNum int64
 		var messageID, references string
@@ -595,6 +644,7 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 			}
 			continue
 		}
+		rowCount++
 
 		refs := db.parseReferences(references)
 
@@ -646,11 +696,16 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 	if err = rows.Err(); err != nil {
 		return 0, fmt.Errorf("error iterating articles: %w", err)
 	}
+	if verbose {
+		log.Printf("⏱️    processThreadBatch: Process %d rows (roots=%d, replies=%d) took %v",
+			rowCount, len(threadRoots), len(threadReplies), time.Since(stepStart))
+	}
 
 	threadsBuilt := 0
 
-	// Step 1: Insert thread ROOTS into threads table
+	// TIMER: Step 1: Insert thread ROOTS into threads table
 	if len(threadRoots) > 0 {
+		stepStart = time.Now()
 		tx, err := groupDB.DB.Begin()
 		if err != nil {
 			return 0, fmt.Errorf("failed to begin threads transaction: %w", err)
@@ -678,21 +733,26 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 		if err := tx.Commit(); err != nil {
 			return threadsBuilt, fmt.Errorf("failed to commit threads transaction: %w", err)
 		}
+		if verbose {
+			log.Printf("⏱️    processThreadBatch: Insert %d thread roots took %v", len(threadRoots), time.Since(stepStart))
+		}
 
-		// Step 2: Initialize thread_cache for roots
-		for _, root := range threadRoots {
-			err := db.initializeThreadCacheSimple(groupDB, root.articleNum, root.dateSent)
-			if err != nil {
-				if verbose {
-					log.Printf("processThreadBatch: Failed to initialize thread cache for root %d: %v", root.articleNum, err)
-				}
-				// Don't fail the whole operation for cache errors
+		// TIMER: Step 2: Initialize thread_cache for roots (BATCHED)
+		stepStart = time.Now()
+		if err := db.batchInitializeThreadCache(groupDB, threadRoots); err != nil {
+			if verbose {
+				log.Printf("processThreadBatch: Failed to batch initialize thread cache: %v", err)
 			}
+			// Don't fail the whole operation for cache errors
+		}
+		if verbose {
+			log.Printf("⏱️    processThreadBatch: Batch initialize %d thread caches took %v", len(threadRoots), time.Since(stepStart))
 		}
 	}
 
-	// Step 3: Insert REPLIES into threads table
+	// TIMER: Step 3: Insert REPLIES into threads table
 	if len(threadReplies) > 0 {
+		stepStart = time.Now()
 		tx, err := groupDB.DB.Begin()
 		if err != nil {
 			return threadsBuilt, fmt.Errorf("failed to begin replies transaction: %w", err)
@@ -722,11 +782,12 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 			return threadsBuilt, fmt.Errorf("failed to commit replies transaction: %w", err)
 		}
 
-		if verbose && repliesBuilt > 0 {
-			log.Printf("processThreadBatch: Inserted %d replies into threads table", repliesBuilt)
+		if verbose {
+			log.Printf("⏱️    processThreadBatch: Insert %d replies took %v", repliesBuilt, time.Since(stepStart))
 		}
 
-		// Step 4: Update thread_cache for replies (build cache updates from replies)
+		// TIMER: Step 4: Update thread_cache for replies (build cache updates from replies)
+		stepStart = time.Now()
 		threadCacheUpdates := make(map[int64][]int64) // Changed to map[rootID][]childArticleNums
 		for _, reply := range threadReplies {
 			threadCacheUpdates[reply.rootNum] = append(threadCacheUpdates[reply.rootNum], reply.articleNum)
@@ -740,6 +801,13 @@ func (db *Database) processThreadBatch(groupDB *GroupDBs, msgIDToArticleNum map[
 				// Don't fail the whole operation for cache errors
 			}
 		}
+		if verbose {
+			log.Printf("⏱️    processThreadBatch: Update thread cache for %d roots took %v", len(threadCacheUpdates), time.Since(stepStart))
+		}
+	}
+
+	if verbose {
+		log.Printf("⏱️  processThreadBatch: TOTAL batch processing took %v", time.Since(batchStartTime))
 	}
 
 	return threadsBuilt, nil
@@ -752,7 +820,8 @@ const query_initializeThreadCacheSimple1 = `
 	`
 
 // initializeThreadCacheSimple initializes thread cache for a root article
-func (db *Database) initializeThreadCacheSimple(groupDB *GroupDBs, threadRoot int64, rootDate time.Time) error {
+// DEPRECATED: Use batchInitializeThreadCache for better performance
+func (db *Database) initializeThreadCacheSimple(groupDB *GroupDB, threadRoot int64, rootDate time.Time) error {
 	// Validate root date - skip obvious future posts
 	now := time.Now().UTC()
 	futureLimit := now.Add(25 * time.Hour)
@@ -764,7 +833,7 @@ func (db *Database) initializeThreadCacheSimple(groupDB *GroupDBs, threadRoot in
 		rootDate = now
 	}
 
-	_, err := retryableExec(groupDB.DB, query_initializeThreadCacheSimple1,
+	_, err := RetryableExec(groupDB.DB, query_initializeThreadCacheSimple1,
 		threadRoot,
 		rootDate.UTC().Format("2006-01-02 15:04:05"),
 		threadRoot, // last_child_number starts as the root itself
@@ -773,6 +842,59 @@ func (db *Database) initializeThreadCacheSimple(groupDB *GroupDBs, threadRoot in
 
 	if err != nil {
 		return fmt.Errorf("failed to initialize thread cache for root %d: %w", threadRoot, err)
+	}
+
+	return nil
+}
+
+// batchInitializeThreadCache initializes thread cache for multiple root articles in a single transaction
+func (db *Database) batchInitializeThreadCache(groupDB *GroupDB, threadRoots []struct {
+	articleNum int64
+	dateSent   time.Time
+}) error {
+	if len(threadRoots) == 0 {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	futureLimit := now.Add(25 * time.Hour)
+
+	// Use RetryableTransactionExec for SQLite lock safety
+	err := RetryableTransactionExec(groupDB.DB, func(tx *sql.Tx) error {
+		// Prepare statement for batch inserts
+		stmt, err := tx.Prepare(query_initializeThreadCacheSimple1)
+		if err != nil {
+			return fmt.Errorf("failed to prepare thread cache insert statement: %w", err)
+		}
+		defer stmt.Close()
+
+		// Batch insert all thread cache entries
+		for _, root := range threadRoots {
+			rootDate := root.dateSent
+
+			// Validate root date - skip obvious future posts
+			if rootDate.UTC().After(futureLimit) {
+				log.Printf("batchInitializeThreadCache: Using current time for thread root %d with future date %v",
+					root.articleNum, rootDate.Format("2006-01-02 15:04:05"))
+				rootDate = now
+			}
+
+			_, err = stmt.Exec(
+				root.articleNum,
+				rootDate.UTC().Format("2006-01-02 15:04:05"),
+				root.articleNum, // last_child_number starts as the root itself
+				rootDate.UTC().Format("2006-01-02 15:04:05"),
+			)
+			if err != nil {
+				return fmt.Errorf("failed to initialize thread cache for root %d: %w", root.articleNum, err)
+			}
+		}
+
+		return nil // Transaction will be committed by RetryableTransactionExec
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to batch initialize thread cache: %w", err)
 	}
 
 	return nil
@@ -787,18 +909,27 @@ const query_updateThreadCacheWithChildren2 = `
 		`
 
 // updateThreadCacheWithChildren updates the thread_cache table with child article lists
-func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDBs, rootUpdates map[int64][]int64, verbose bool) error {
+func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDB, rootUpdates map[int64][]int64, verbose bool) error {
 	if len(rootUpdates) == 0 {
 		return nil
 	}
 
+	funcStart := time.Now()
+
+	// TIMER: Begin transaction
+	stepStart := time.Now()
 	tx, err := groupDB.DB.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin thread cache transaction: %w", err)
 	}
 	defer tx.Rollback()
+	txTime := time.Since(stepStart)
 
-	// Update each thread root's cache
+	// TIMER: Update each thread root's cache
+	stepStart = time.Now()
+	updatedCount := 0
+	skippedCount := 0
+
 	for rootArticle, childArticleNums := range rootUpdates {
 		// Build comma-separated child articles list
 		childArticlesStr := ""
@@ -815,9 +946,10 @@ func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDBs, rootUpdates
 		var currentChildren string
 		err := tx.QueryRow(query_updateThreadCacheWithChildren1, rootArticle).Scan(&currentCount, &currentChildren)
 		if err != nil {
-			if verbose {
-				log.Printf("updateThreadCacheWithChildren: No thread cache entry for root %d, skipping", rootArticle)
-			}
+			//if verbose {
+			//	log.Printf("updateThreadCacheWithChildren: No thread cache entry for root %d, skipping", rootArticle)
+			//}
+			skippedCount++
 			continue
 		}
 
@@ -850,19 +982,28 @@ func (db *Database) updateThreadCacheWithChildren(groupDB *GroupDBs, rootUpdates
 		_, err = tx.Exec(query_updateThreadCacheWithChildren2, finalChildrenStr, newMessageCount, rootArticle)
 
 		if err != nil {
-			if verbose {
-				log.Printf("updateThreadCacheWithChildren: Failed to update cache for root %d: %v", rootArticle, err)
-			}
+			log.Printf("updateThreadCacheWithChildren: Failed to update cache for root %d: %v", rootArticle, err)
 			continue
 		}
+		updatedCount++
 
-		if verbose {
-			log.Printf("updateThreadCacheWithChildren: Updated root %d with %d replies: %s",
-				rootArticle, len(finalChildren), finalChildrenStr)
-		}
+		//if verbose {
+		//	log.Printf("updateThreadCacheWithChildren: Updated root %d with %d replies: %s", rootArticle, len(finalChildren), finalChildrenStr)
+		//}
+	}
+	updateTime := time.Since(stepStart)
+
+	// TIMER: Commit transaction
+	stepStart = time.Now()
+	commitErr := tx.Commit()
+	commitTime := time.Since(stepStart)
+
+	if verbose {
+		log.Printf("⏱️      updateThreadCacheWithChildren: Begin=%v, Update %d roots=%v, Commit=%v, TOTAL=%v (skipped %d)",
+			txTime, updatedCount, updateTime, commitTime, time.Since(funcStart), skippedCount)
 	}
 
-	return tx.Commit()
+	return commitErr
 }
 
 // parseReferences parses the references header into individual message IDs

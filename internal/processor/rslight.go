@@ -434,12 +434,12 @@ func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads in
 		if newsgroup != anewsgroup {
 			log.Printf("[RSLIGHT-IMPORT] Info: newsgroup '%s' from file '%s' does not match expected newsgroup '%s'", anewsgroup, file, newsgroup)
 		}
-		if groupDBs, err := leg.proc.DB.GetGroupDBs(newsgroup); err != nil {
+		if groupDB, err := leg.proc.DB.GetGroupDB(newsgroup); err != nil {
 			log.Printf("[RSLIGHT-IMPORT] Warning: failed to get group DBs for newsgroup '%s': %v", newsgroup, err)
 			// Don't close on error, this is a different type of error
 		} else {
-			// Return the groupDBs connection immediately - we were just testing if the group exists
-			groupDBs.Return(leg.proc.DB)
+			// Return the groupDB connection immediately - we were just testing if the group exists
+			groupDB.Return()
 			err = leg.insertNewsgroupIfNotExists(newsgroup, "") // Insert newsgroup if it doesn't exist
 			if err != nil {
 				log.Printf("internal/legacy/main.go: Warning: failed to insert newsgroup %s: %v", newsgroup, err)

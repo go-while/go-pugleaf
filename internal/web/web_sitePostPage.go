@@ -17,7 +17,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/utils"
 )
 
-var WebPostingBackOff = 42 * time.Second
+var WebPostingBackOff = 42 * time.Second // TODO: make configurable
 
 // PostPageData represents data for posting page
 type PostPageData struct {
@@ -73,9 +73,9 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 		// Get the original article to extract subject and body for reply
 		if articleNum, err := strconv.ParseInt(replyToArticleNum, 10, 64); err == nil {
 			// Get group database connection
-			if groupDBs, err := s.DB.GetGroupDBs(prefilledNewsgroup); err == nil {
-				defer groupDBs.Return(s.DB)
-				if reply_article, err := s.DB.GetArticleByNum(groupDBs, articleNum); err == nil {
+			if groupDB, err := s.DB.GetGroupDB(prefilledNewsgroup); err == nil {
+				defer groupDB.Return()
+				if reply_article, err := s.DB.GetArticleByNum(groupDB, articleNum); err == nil {
 					// Handle subject with "Re: " prefix
 					if !strings.HasPrefix(strings.ToLower(reply_article.Subject), "re:") {
 						article.Subject = "Re: " + models.ConvertToUTF8(reply_article.Subject)
@@ -218,8 +218,8 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		if subject == "" {
 			errors = append(errors, "Subject is required")
 		}
-		if len(subject) > 255 {
-			errors = append(errors, "Subject limited to 255 characters")
+		if len(subject) > 1000 {
+			errors = append(errors, "Subject limited to 1000 characters")
 		}
 		if body == "" {
 			errors = append(errors, "Message body is required")
@@ -328,26 +328,27 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		}
 		return
 	}
+	//displayName := fmt.Sprintf("%s <noreply@pugleaf.net.invalid>", session.User.DisplayName)
 	displayName := strings.TrimSpace(session.User.DisplayName)
 	if displayName != "" && !strings.Contains(displayName, "<") && !strings.Contains(displayName, ">") {
-		displayName = fmt.Sprintf("%s <noreply@pugleaf.invalid>", session.User.DisplayName)
+		displayName = fmt.Sprintf("%s <noreply@pugleaf.net.invalid>", session.User.DisplayName)
 	}
 	if displayName == "" {
 		// Fallback if display name is empty
-		displayName = fmt.Sprintf("Lorem Ipsum <oops@%s>", processor.LocalNNTPHostname)
+		displayName = fmt.Sprintf("Lorem Ipsum <oops@%s.invalid>", processor.LocalNNTPHostname)
 	}
 	var headers []string
 	linesCount := strings.Count(body, "\n") + 1
-	bytesCount := len(body)
+	bytesCount := len(body) - linesCount
 	headers = append(headers, "MIME-Version: 1.0")
 	headers = append(headers, "Content-Type: text/plain; charset=\"UTF-8\"")
 	headers = append(headers, "Content-Transfer-Encoding: 8bit")
-	headers = append(headers, "Newsgroups: "+strings.Join(newsgroups, ","))
 	// Injection-Info / X-Trace header for tracking
 	headers = append(headers, "X-pugleaf-Trace: "+processor.LocalNNTPHostname+";")
-	headers = append(headers, "\tnonce=\""+nonce+"\"; mail-complaints-to=\""+abuseMail+"\";")
-	headers = append(headers, "\tposting-account=\""+hashedUser+"\";")
+	headers = append(headers, " nonce=\""+nonce+"\"; mail-complaints-to=\""+abuseMail+"\";")
+	headers = append(headers, " posting-account=\""+hashedUser+"\";")
 	headers = append(headers, "From: "+displayName)
+	headers = append(headers, "Newsgroups: "+strings.Join(newsgroups, ","))
 	headers = append(headers, "Lines: "+strconv.Itoa(linesCount))
 	headers = append(headers, "Bytes: "+strconv.Itoa(bytesCount))
 
@@ -375,14 +376,14 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		// Try to find the original article to get its References
 		var originalRefs string
 		for _, newsgroup := range newsgroups {
-			groupDBs, err := s.DB.GetGroupDBs(newsgroup)
+			groupDB, err := s.DB.GetGroupDB(newsgroup)
 			if err != nil {
 				log.Printf("Warning: Failed to get group DB for %s: %v", newsgroup, err)
 				continue
 			}
-			defer groupDBs.Return(s.DB)
+			defer groupDB.Return()
 
-			originalArticle, err := s.DB.GetArticleByMessageID(groupDBs, messageID)
+			originalArticle, err := s.DB.GetArticleByMessageID(groupDB, messageID)
 			if err != nil {
 				log.Printf("Warning: Failed to find original article %s in %s: %v", messageID, newsgroup, err)
 				continue

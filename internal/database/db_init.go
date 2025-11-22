@@ -36,8 +36,8 @@ type Database struct {
 	mainDB *sql.DB
 
 	// Per-group database connections (cached)
-	groupDBs   map[string]*GroupDBs // map with open database pointers
-	openDBsNum int                  // Total number of open group databases
+	groupDB   map[string]*GroupDB // map with open database pointers
+	openDBsNum int                 // Total number of open group databases
 
 	MainMutex sync.RWMutex
 
@@ -68,10 +68,13 @@ type DBConfig struct {
 	ConnMaxLifetime time.Duration
 
 	// Performance settings
-	WALMode   bool   // Write-Ahead Logging
-	SyncMode  string // OFF, NORMAL, FULL
-	CacheSize int    // KB
-	TempStore string // MEMORY, FILE
+	WALMode      bool   // Write-Ahead Logging
+	SyncMode     string // OFF, NORMAL, FULL
+	CacheSize    int    // KB
+	TempStore    string // MEMORY, FILE
+	MaxDBbatch   int    // maximum number of DB operations in a batch
+	MaxDBthreads int    // maximum number of concurrent DB batch threads
+	MaxQueued    int    // maximum number of queued articles for batch processing
 
 	// Backup settings
 	BackupEnabled  bool
@@ -81,6 +84,7 @@ type DBConfig struct {
 	// Cache settings
 	ArticleCacheSize   int           // Maximum number of cached articles
 	ArticleCacheExpiry time.Duration // Cache expiry duration
+
 }
 
 // DefaultDBConfig returns default database configuration
@@ -99,6 +103,9 @@ func DefaultDBConfig() (dbconfig *DBConfig) {
 		BackupDir:          "./backups",
 		ArticleCacheSize:   1000,             // Default cache size
 		ArticleCacheExpiry: 15 * time.Minute, // Default cache expiry
+		MaxDBbatch:         1000,             // default max DB batch size (db_batch.go -> *SQ3batch)
+		MaxDBthreads:       16,               // default max DB threads (db_batch.go -> *SQ3batch)
+		MaxQueued:          1280,             // default max queued articles (db_batch.go -> *SQ3batch)
 	}
 }
 
@@ -141,7 +148,7 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 
 	db := &Database{
 		dbconfig: dbconfig,
-		groupDBs: make(map[string]*GroupDBs),
+		groupDB: make(map[string]*GroupDB),
 		WG:       &sync.WaitGroup{}, // Initialize wait group for background tasks
 
 	}

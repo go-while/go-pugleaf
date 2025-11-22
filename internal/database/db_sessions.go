@@ -49,7 +49,7 @@ func (db *Database) CreateUserSession(userID int64, remoteIP string) (string, er
 		updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`
 
-	_, err = retryableExec(db.mainDB, query, sessionID, remoteIP, expiresAt, userID)
+	_, err = RetryableExec(db.mainDB, query, sessionID, remoteIP, expiresAt, userID)
 	if err != nil {
 		return "", fmt.Errorf("failed to create user session: %w", err)
 	}
@@ -69,7 +69,7 @@ func (db *Database) ValidateUserSession(sessionID string) (*models.User, error) 
 		FROM users WHERE session_id = ? AND session_expires_at > CURRENT_TIMESTAMP`
 
 	var user models.User
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{sessionID},
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{sessionID},
 		&user.ID, &user.Username, &user.Email, &user.PasswordHash,
 		&user.DisplayName, &user.SessionID, &user.LastLoginIP,
 		&user.SessionExpiresAt, &user.LoginAttempts, &user.CreatedAt, &user.UpdatedAt)
@@ -81,7 +81,7 @@ func (db *Database) ValidateUserSession(sessionID string) (*models.User, error) 
 	// Extend session expiration (sliding timeout) in UTC - write operation
 	newExpiresAt := time.Now().UTC().Add(SessionTimeout)
 	updateQuery := `UPDATE users SET session_expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err = retryableExec(db.mainDB, updateQuery, newExpiresAt, user.ID)
+	_, err = RetryableExec(db.mainDB, updateQuery, newExpiresAt, user.ID)
 	if err != nil {
 		// Log error but don't fail validation
 		fmt.Printf("Warning: Failed to extend session expiration: %v\n", err)
@@ -99,7 +99,7 @@ func (db *Database) InvalidateUserSession(userID int64) error {
 		session_expires_at = NULL,
 		updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`
-	_, err := retryableExec(db.mainDB, query, userID)
+	_, err := RetryableExec(db.mainDB, query, userID)
 	return err
 }
 
@@ -110,7 +110,7 @@ func (db *Database) InvalidateUserSessionBySessionID(sessionID string) error {
 		session_expires_at = NULL,
 		updated_at = CURRENT_TIMESTAMP
 		WHERE session_id = ?`
-	_, err := retryableExec(db.mainDB, query, sessionID)
+	_, err := RetryableExec(db.mainDB, query, sessionID)
 	return err
 }
 
@@ -121,7 +121,7 @@ func (db *Database) IncrementLoginAttempts(username string) error {
 		updated_at = CURRENT_TIMESTAMP
 		WHERE username = ?`
 
-	_, err := retryableExec(db.mainDB, query, username)
+	_, err := RetryableExec(db.mainDB, query, username)
 	return err
 }
 
@@ -132,7 +132,7 @@ func (db *Database) ResetLoginAttempts(userID int64) error {
 		updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`
 
-	_, err := retryableExec(db.mainDB, query, userID)
+	_, err := RetryableExec(db.mainDB, query, userID)
 	return err
 }
 
@@ -142,7 +142,7 @@ func (db *Database) IsUserLockedOut(username string) (bool, error) {
 
 	var attempts int
 	var updatedAt time.Time
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{username}, &attempts, &updatedAt)
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{username}, &attempts, &updatedAt)
 	if err != nil {
 		return false, err
 	}
@@ -156,7 +156,7 @@ func (db *Database) IsUserLockedOut(username string) (bool, error) {
 		} else {
 			// Lockout period expired, reset attempts
 			resetQuery := `UPDATE users SET login_attempts = 0, updated_at = CURRENT_TIMESTAMP WHERE username = ?`
-			retryableExec(db.mainDB, resetQuery, username)
+			RetryableExec(db.mainDB, resetQuery, username)
 		}
 	}
 
@@ -171,7 +171,7 @@ func (db *Database) CleanupExpiredSessions() error {
 		updated_at = CURRENT_TIMESTAMP
 		WHERE session_expires_at < CURRENT_TIMESTAMP`
 
-	result, err := retryableExec(db.mainDB, query)
+	result, err := RetryableExec(db.mainDB, query)
 	if err != nil {
 		return err
 	}

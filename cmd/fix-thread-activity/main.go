@@ -60,14 +60,14 @@ func main() {
 }
 
 func fixGroupThreadActivity(db *database.Database, groupName string) error {
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return fmt.Errorf("failed to get group DB: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDB.Return()
 
 	// Get only thread cache entries that have future last_activity timestamps
-	rows, err := database.RetryableQuery(groupDBs.DB, `
+	rows, err := database.RetryableQuery(groupDB.DB, `
 		SELECT thread_root, child_articles, last_activity
 		FROM thread_cache
 		WHERE last_activity > datetime('now', '+25 hour')
@@ -136,7 +136,7 @@ func fixGroupThreadActivity(db *database.Database, groupName string) error {
 		for _, articleNum := range articleNums {
 			var dateSent time.Time
 			var hide int
-			err := database.RetryableQueryRowScan(groupDBs.DB, `
+			err := database.RetryableQueryRowScan(groupDB.DB, `
 				SELECT date_sent, hide
 				FROM articles
 				WHERE article_num = ?`, []interface{}{articleNum}, &dateSent, &hide)
@@ -161,7 +161,7 @@ func fixGroupThreadActivity(db *database.Database, groupName string) error {
 			// Format as UTC string to avoid timezone encoding issues
 			utcTimeStr := maxDate.UTC().Format("2006-01-02 15:04:05")
 
-			_, err := database.RetryableExec(groupDBs.DB, `
+			_, err := database.RetryableExec(groupDB.DB, `
 				UPDATE thread_cache
 				SET last_activity = ?
 				WHERE thread_root = ?`, utcTimeStr, thread.root)

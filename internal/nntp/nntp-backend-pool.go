@@ -1,8 +1,11 @@
 package nntp
 
 import (
+	"bufio"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -71,7 +74,7 @@ func (pool *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]Ov
 	return result, nil
 }
 
-func (pool *Pool) XHdr(group string, header string, start, end int64) ([]*HeaderLine, error) {
+func (pool *Pool) XHdr(group string, header string, start, end int64) ([]HeaderLine, error) {
 	// Get a connection from the pool
 	client, err := pool.Get(MODE_READER_MV)
 	if err != nil {
@@ -90,10 +93,30 @@ func (pool *Pool) XHdr(group string, header string, start, end int64) ([]*Header
 	return result, nil
 }
 
+// ListNewsgroups lists available newsgroups from the NNTP server
+func (pool *Pool) ListNewsgroups() ([]GroupInfo, error) {
+	// Get a connection from the pool
+	client, err := pool.Get(MODE_READER_MV)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get connection: %w", err)
+	}
+
+	remoteGroups, err := client.ListGroups()
+	if err != nil {
+		// Close connection on error
+		client.ForceCloseConn()
+		return nil, err
+	}
+
+	// Put back connection only if no error
+	pool.Put(client)
+	return remoteGroups, nil
+}
+
 // XHdrStreamed performs XHDR command and streams results through a channel
 // The channel will be closed when all results are sent or an error occurs
 // NOTE: This function takes ownership of the connection and will return it to the pool when done
-func (pool *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
+func (pool *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) error {
 	// Get a connection from the pool
 	client, err := pool.Get(MODE_READER_MV)
 	if err != nil {
@@ -102,7 +125,7 @@ func (pool *Pool) XHdrStreamed(group string, header string, start, end int64, xh
 	}
 
 	// Handle connection cleanup in a goroutine so the function can return immediately
-	go func(client *BackendConn, group string, header string, start, end int64, resultChan chan<- *HeaderLine, shutdownChan <-chan struct{}) {
+	go func(client *BackendConn, group string, header string, start, end int64, resultChan chan<- HeaderLine, shutdownChan <-chan struct{}) {
 		// Use the streaming XHdr function on the client
 		if err := client.XHdrStreamed(group, header, start, end, resultChan, shutdownChan); err != nil {
 			// If there's an error, close the connection instead of returning it
@@ -132,7 +155,8 @@ func (pool *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article,
 	article, err := client.GetArticle(messageID, bulkmode)
 	if err != nil || article == nil {
 		if err == ErrArticleNotFound || err == ErrArticleRemoved {
-			log.Printf("[NNTP-POOL] Article '%s' not found err='%v'", *messageID, err)
+			// <-- internal/nntp/nntp-client-commands.go:105
+			//log.Printf("[NNTP-POOL] Article '%s' not found err='%v'", *messageID, err)
 			pool.Put(client)
 			return nil, err
 		} else {
@@ -162,7 +186,7 @@ func (pool *Pool) SelectGroup(group string) (*GroupInfo, error) {
 	}
 
 	gi, code, err := client.SelectGroup(group)
-	if err != nil && code != 411 {
+	if err != nil && (code != 411 && code != 480) {
 		// Close connection on unexpected any other error than "group not found"
 		client.ForceCloseConn()
 		return nil, err
@@ -171,9 +195,11 @@ func (pool *Pool) SelectGroup(group string) (*GroupInfo, error) {
 	// Put back connection (even for code 411 - group not found)
 	pool.Put(client)
 
-	if code == 411 {
+	switch code {
+	case 411, 480:
 		err = ErrNewsgroupNotFound // silence error
 	}
+
 	return gi, err
 }
 
@@ -248,6 +274,7 @@ newConn:
 			pool.activeConns--
 			pool.failedConns++
 			pool.mux.Unlock()
+			log.Printf("[NNTP-POOL] Failed to create new connection: provider='%s': %v", pool.Backend.Provider.Name, err)
 			return nil, err
 		}
 		err = pconn.SwitchMode(wantMode)
@@ -312,7 +339,7 @@ func (pool *Pool) Put(conn *BackendConn) error {
 	// Check if connection should be closed
 	if conn != nil {
 		conn.mux.Lock()
-		if conn.forceClose || !conn.connected {
+		if conn.forceClose || !conn.IsConnected() {
 			forceClose = true
 		}
 		conn.mux.Unlock()
@@ -332,7 +359,6 @@ func (pool *Pool) Put(conn *BackendConn) error {
 		pool.mux.Unlock()
 		return nil
 	}
-	conn.writer.Reset(conn.conn)
 	pool.mux.RUnlock()
 
 	conn.UpdateLastUsed() // set lastused before returning to pool
@@ -383,11 +409,26 @@ func (pool *Pool) ClosePool() error {
 		close(pool.connections)
 	}
 	log.Printf("[NNTP-POOL] Closing (%s:%d) active=%d", pool.Backend.Host, pool.Backend.Port, pool.activeConns)
+	allClosed := pool.activeConns == 0
 	pool.mux.Unlock()
 
-	// Close all connections in the pool
-	for client := range pool.connections { // drain channel
-		client.ForceCloseConn()
+	if !allClosed {
+		// Close all connections in the pool
+	closeWait:
+		for {
+			select {
+			case conn, ok := <-pool.connections:
+				if !ok {
+					break closeWait
+				}
+				if conn != nil {
+					conn.ForceCloseConn()
+				}
+			default:
+				// pass
+				break closeWait
+			}
+		}
 	}
 
 	pool.mux.Lock()
@@ -434,7 +475,7 @@ func (pool *Pool) createConnection() (*BackendConn, error) {
 		log.Printf("[NNTP-POOL] Failed to create connection to %s:%d: %v", pool.Backend.Host, pool.Backend.Port, err)
 		return nil, fmt.Errorf("failed to create connection: %w", err)
 	}
-	//log.Printf("[NNTP-POOL] Successfully created connection to %s:%d", pool.Backend.Host, pool.Backend.Port)
+	log.Printf("[NNTP-POOL] Successfully created connection to %s:%d", pool.Backend.Host, pool.Backend.Port)
 	return client, nil
 }
 
@@ -448,7 +489,7 @@ func (pool *Pool) isConnectionValid(client *BackendConn) bool {
 	client.mux.Lock()
 	defer client.mux.Unlock()
 
-	if client.forceClose || !client.connected {
+	if client.forceClose || !client.IsConnected() {
 		return false
 	}
 
@@ -503,17 +544,100 @@ done:
 
 // startCleanupWorker starts a goroutine that periodically cleans up expired connections
 func (pool *Pool) startCleanupWorker() {
+	var closed bool
 	for {
 		time.Sleep(5 * time.Second)
 		pool.Cleanup()
-
 		// Check if pool is closed
 		pool.mux.RLock()
-		closed := pool.closed
+		closed = pool.closed
 		pool.mux.RUnlock()
-
 		if closed {
 			return
 		}
 	}
+}
+
+func (pool *Pool) FileCachedListNewsgroups() ([]string, error) {
+	cacheFile := filepath.Join("data", "cache", fmt.Sprintf("%s.list", pool.Backend.Provider.Host))
+	groups, err := LoadNewsgroupListFromFile(cacheFile)
+	if len(groups) > 0 && err == nil {
+		return groups, nil
+	} else if err != nil {
+		log.Printf("[NNTP-POOL] Failed to load cached newsgroup list from %s: %v", cacheFile, err)
+	}
+	log.Printf("[NNTP-POOL] No valid cached newsgroup list found at %s, fetching from server...", cacheFile)
+	remoteGroups, err := pool.ListNewsgroups()
+	if err != nil {
+		return nil, err
+	}
+	if err := WriteNewsgroupListToFile(cacheFile, remoteGroups); err != nil {
+		log.Printf("[NNTP-POOL] Failed to write cached newsgroup list to %s: %v", cacheFile, err)
+	}
+	var returnGroups []string
+	for i := range remoteGroups {
+		returnGroups = append(returnGroups, remoteGroups[i].Name)
+	}
+	return returnGroups, nil
+}
+
+func WriteNewsgroupListToFile(filename string, groups []GroupInfo) error {
+	// Ensure the directory exists
+	dir := filepath.Dir(filename)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	defer file.Close()
+	writer := bufio.NewWriter(file)
+	for _, group := range groups {
+		line := fmt.Sprintf("%s\n", group.Name)
+		_, err := writer.WriteString(line)
+		if err != nil {
+			return fmt.Errorf("failed to write to file: %w", err)
+		}
+	}
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush writer: %w", err)
+	}
+	return nil
+}
+
+func LoadNewsgroupListFromFile(filename string) ([]string, error) {
+	var groups []string
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+	// check file age
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+	if time.Since(info.ModTime()) > 24*time.Hour {
+		err := os.Remove(filename)
+		if err != nil {
+			return nil, fmt.Errorf("failed to remove stale cache file: %w", err)
+		}
+		log.Printf("[NNTP-POOL] Cache file %s is stale (age: %v), refreshing...", filename, time.Since(info.ModTime()))
+		return nil, nil
+	}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			log.Printf("[NNTP-POOL] Failed to parse group info from line %q: %v", line, err)
+			continue
+		}
+		groups = append(groups, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+	log.Printf("[NNTP-POOL] Loaded %d newsgroups from cache file %s", len(groups), filename)
+	return groups, nil
 }

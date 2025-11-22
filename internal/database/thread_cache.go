@@ -25,7 +25,7 @@ type ThreadCacheEntry struct {
 }
 
 // InitializeThreadCache creates a new cache entry for a thread root
-func (db *Database) InitializeThreadCache(groupDBs *GroupDBs, threadRoot int64, rootArticle *models.Article) error {
+func (db *Database) InitializeThreadCache(groupDB *GroupDB, threadRoot int64, rootArticle *models.Article) error {
 
 	query := `
 		INSERT INTO thread_cache (
@@ -40,7 +40,7 @@ func (db *Database) InitializeThreadCache(groupDBs *GroupDBs, threadRoot int64, 
 	// Format dates as UTC strings to avoid timezone encoding issues
 	rootDateUTC := rootArticle.DateSent.UTC().Format("2006-01-02 15:04:05")
 
-	_, err := retryableExec(groupDBs.DB, query,
+	_, err := RetryableExec(groupDB.DB, query,
 		threadRoot,
 		rootDateUTC,
 		threadRoot, // last_child_number starts as the root itself
@@ -55,14 +55,14 @@ func (db *Database) InitializeThreadCache(groupDBs *GroupDBs, threadRoot int64, 
 }
 
 // UpdateThreadCache updates an existing cache entry when a reply is added
-func (db *Database) UpdateThreadCache(groupDBs *GroupDBs, threadRoot int64, childArticleNum int64, childDate time.Time) error {
+func (db *Database) UpdateThreadCache(groupDB *GroupDB, threadRoot int64, childArticleNum int64, childDate time.Time) error {
 
 	// First, get the current cache entry
 	var currentChildren string
 	var currentCount int
 
 	query := `SELECT child_articles, message_count FROM thread_cache WHERE thread_root = ?`
-	err := retryableQueryRowScan(groupDBs.DB, query, []interface{}{threadRoot}, &currentChildren, &currentCount)
+	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{threadRoot}, &currentChildren, &currentCount)
 	if err != nil {
 		// If the thread cache entry doesn't exist, queue it for batch initialization
 		// This can happen if the root article was processed without initializing the cache
@@ -74,7 +74,7 @@ func (db *Database) UpdateThreadCache(groupDBs *GroupDBs, threadRoot int64, chil
 		}
 
 		// Initialize directly instead of batch processing
-		err = db.InitializeThreadCache(groupDBs, threadRoot, rootArticle)
+		err = db.InitializeThreadCache(groupDB, threadRoot, rootArticle)
 		if err != nil {
 			log.Printf("Failed to initialize thread cache for root %d: %v", threadRoot, err)
 			// Continue with defaults to allow the update to proceed
@@ -83,7 +83,7 @@ func (db *Database) UpdateThreadCache(groupDBs *GroupDBs, threadRoot int64, chil
 		// Update memory cache immediately so subsequent operations can use it
 		if db.MemThreadCache != nil {
 			// Initialize with minimal values - batch processing will update the database
-			db.MemThreadCache.UpdateThreadMetadata(groupDBs.Newsgroup, threadRoot, 1, childDate, "")
+			db.MemThreadCache.UpdateThreadMetadata(groupDB.Newsgroup, threadRoot, 1, childDate, "")
 		}
 
 		// For now, set defaults so we can continue with the update
@@ -112,7 +112,7 @@ func (db *Database) UpdateThreadCache(groupDBs *GroupDBs, threadRoot int64, chil
 	// Format childDate as UTC string to avoid timezone encoding issues
 	childDateUTC := childDate.UTC().Format("2006-01-02 15:04:05")
 
-	_, err = retryableExec(groupDBs.DB, updateQuery,
+	_, err = RetryableExec(groupDB.DB, updateQuery,
 		newChildren,
 		currentCount+1,
 		childArticleNum,
@@ -126,7 +126,7 @@ func (db *Database) UpdateThreadCache(groupDBs *GroupDBs, threadRoot int64, chil
 
 	// Update memory cache
 	if db.MemThreadCache != nil {
-		db.MemThreadCache.UpdateThreadMetadata(groupDBs.Newsgroup, threadRoot, currentCount+1, childDate, newChildren)
+		db.MemThreadCache.UpdateThreadMetadata(groupDB.Newsgroup, threadRoot, currentCount+1, childDate, newChildren)
 	}
 
 	return nil
@@ -205,32 +205,32 @@ func (mem *MemCachedThreads) GetMemCachedTreadsCount(group string) int64 {
 
 // GetCachedThreads retrieves cached thread data with pagination (thread list only - no children)
 // First tries memory cache, falls back to database if cache miss
-func (db *Database) GetCachedThreads(groupDBs *GroupDBs, page int64, pageSize int64) ([]*models.ForumThread, int64, error) {
+func (db *Database) GetCachedThreads(groupDB *GroupDB, page int64, pageSize int64) ([]*models.ForumThread, int64, error) {
 	startTime := time.Now()
-	log.Printf("[PERF:THREADS] Starting GetCachedThreads for group '%s', page %d, pageSize %d", groupDBs.Newsgroup, page, pageSize)
+	log.Printf("[PERF:THREADS] Starting GetCachedThreads for group '%s', page %d, pageSize %d", groupDB.Newsgroup, page, pageSize)
 
 	// Try memory cache first (fast path)
 	if db.MemThreadCache != nil {
 		cacheStartTime := time.Now()
-		if threads, count, hit := db.MemThreadCache.GetCachedThreadsFromMemory(db, groupDBs, groupDBs.Newsgroup, page, pageSize); hit {
-			log.Printf("[PERF:THREADS] Memory cache HIT took %v for group '%s' (%d threads)", time.Since(cacheStartTime), groupDBs.Newsgroup, len(threads))
+		if threads, count, hit := db.MemThreadCache.GetCachedThreadsFromMemory(db, groupDB, groupDB.Newsgroup, page, pageSize); hit {
+			log.Printf("[PERF:THREADS] Memory cache HIT took %v for group '%s' (%d threads)", time.Since(cacheStartTime), groupDB.Newsgroup, len(threads))
 			log.Printf("[PERF:THREADS] Total GetCachedThreads took %v (cache hit)", time.Since(startTime))
 			return threads, count, nil
 		}
-		log.Printf("[PERF:THREADS] Memory cache MISS took %v for group '%s'", time.Since(cacheStartTime), groupDBs.Newsgroup)
+		log.Printf("[PERF:THREADS] Memory cache MISS took %v for group '%s'", time.Since(cacheStartTime), groupDB.Newsgroup)
 
 		// Cache miss - refresh from database
 		refreshStartTime := time.Now()
-		log.Printf("[MEM:MISS] Refreshing thread cache for group '%s'", groupDBs.Newsgroup)
-		if err := db.MemThreadCache.RefreshThreadCache(db, groupDBs, groupDBs.Newsgroup, page, pageSize); err != nil {
+		log.Printf("[MEM:MISS] Refreshing thread cache for group '%s'", groupDB.Newsgroup)
+		if err := db.MemThreadCache.RefreshThreadCache(db, groupDB, groupDB.Newsgroup, page, pageSize); err != nil {
 			log.Printf("Failed to refresh thread cache: %v", err)
 			// Continue to database fallback
 		} else {
-			log.Printf("[PERF:THREADS] RefreshThreadCache took %v for group '%s'", time.Since(refreshStartTime), groupDBs.Newsgroup)
+			log.Printf("[PERF:THREADS] RefreshThreadCache took %v for group '%s'", time.Since(refreshStartTime), groupDB.Newsgroup)
 			// Try memory cache again after refresh
 			retryStartTime := time.Now()
-			if threads, count, hit := db.MemThreadCache.GetCachedThreadsFromMemory(db, groupDBs, groupDBs.Newsgroup, page, pageSize); hit {
-				log.Printf("[PERF:THREADS] Memory cache retry took %v for group '%s' (%d threads)", time.Since(retryStartTime), groupDBs.Newsgroup, len(threads))
+			if threads, count, hit := db.MemThreadCache.GetCachedThreadsFromMemory(db, groupDB, groupDB.Newsgroup, page, pageSize); hit {
+				log.Printf("[PERF:THREADS] Memory cache retry took %v for group '%s' (%d threads)", time.Since(retryStartTime), groupDB.Newsgroup, len(threads))
 				log.Printf("[PERF:THREADS] Total GetCachedThreads took %v (after refresh)", time.Since(startTime))
 				return threads, count, nil
 			}
@@ -239,17 +239,17 @@ func (db *Database) GetCachedThreads(groupDBs *GroupDBs, page int64, pageSize in
 		log.Printf("[WARN] MemThreadCache is nil")
 	}
 	log.Printf("[PERF:THREADS] Total GetCachedThreads FAILED took %v", time.Since(startTime))
-	return nil, 0, fmt.Errorf("no cached threads found for group '%s'", groupDBs.Newsgroup)
+	return nil, 0, fmt.Errorf("no cached threads found for group '%s'", groupDB.Newsgroup)
 }
 
 // GetCachedThreadReplies retrieves paginated replies for a specific thread
-func (db *Database) GetCachedThreadReplies(groupDBs *GroupDBs, threadRoot int64, page int, pageSize int) ([]*models.Overview, int, error) {
+func (db *Database) GetCachedThreadReplies(groupDB *GroupDB, threadRoot int64, page int, pageSize int) ([]*models.Overview, int, error) {
 	// Get the cached thread entry
 	var childArticles string
 	var totalReplies int
 
 	query := `SELECT child_articles, message_count FROM thread_cache WHERE thread_root = ?`
-	err := retryableQueryRowScan(groupDBs.DB, query, []interface{}{threadRoot}, &childArticles, &totalReplies)
+	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{threadRoot}, &childArticles, &totalReplies)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get thread cache for root %d: %w", threadRoot, err)
 	}
@@ -297,7 +297,7 @@ func (db *Database) GetCachedThreadReplies(groupDBs *GroupDBs, threadRoot int64,
 		args[i] = num
 	}
 
-	rows, err := retryableQuery(groupDBs.DB, childQuery, args...)
+	rows, err := RetryableQuery(groupDB.DB, childQuery, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to query thread replies: %w", err)
 	}
@@ -321,7 +321,7 @@ func (db *Database) GetCachedThreadReplies(groupDBs *GroupDBs, threadRoot int64,
 }
 
 // GetOverviewByArticleNum gets a single overview from articles table by article number
-func (db *Database) GetOverviewByArticleNum(groupDBs *GroupDBs, articleNum int64) (*models.Overview, error) {
+func (db *Database) GetOverviewByArticleNum(groupDB *GroupDB, articleNum int64) (*models.Overview, error) {
 	query := `
 		SELECT article_num, subject, from_header, date_sent, date_string,
 			   message_id, "references", bytes, lines, reply_count, downloaded, spam, hide
@@ -330,7 +330,7 @@ func (db *Database) GetOverviewByArticleNum(groupDBs *GroupDBs, articleNum int64
 	`
 
 	overview := &models.Overview{}
-	err := retryableQueryRowScan(groupDBs.DB, query, []interface{}{articleNum},
+	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{articleNum},
 		&overview.ArticleNum, &overview.Subject, &overview.FromHeader,
 		&overview.DateSent, &overview.DateString, &overview.MessageID,
 		&overview.References, &overview.Bytes, &overview.Lines,
@@ -345,7 +345,7 @@ func (db *Database) GetOverviewByArticleNum(groupDBs *GroupDBs, articleNum int64
 }
 
 // GetCachedThreadsFromMemory retrieves threads using the two-level memory cache
-func (mem *MemCachedThreads) GetCachedThreadsFromMemory(db *Database, groupDBs *GroupDBs, group string, page int64, pageSize int64) ([]*models.ForumThread, int64, bool) {
+func (mem *MemCachedThreads) GetCachedThreadsFromMemory(db *Database, groupDB *GroupDB, group string, page int64, pageSize int64) ([]*models.ForumThread, int64, bool) {
 	startTime := time.Now()
 	mem.mux.RLock()
 	defer mem.mux.RUnlock()
@@ -407,7 +407,7 @@ func (mem *MemCachedThreads) GetCachedThreadsFromMemory(db *Database, groupDBs *
 		}
 
 		// Get the root overview (this should be fast from articles table)
-		rootOverview, err := db.GetOverviewByArticleNum(groupDBs, rootID) // TODO maybe add caching here too
+		rootOverview, err := db.GetOverviewByArticleNum(groupDB, rootID) // TODO maybe add caching here too
 		if err != nil {
 			log.Printf("failed to get root overview for thread %d: %v", rootID, err)
 			continue
@@ -431,7 +431,7 @@ func (mem *MemCachedThreads) GetCachedThreadsFromMemory(db *Database, groupDBs *
 
 // RefreshThreadCache loads thread data from database and updates memory cache
 // Uses hybrid cursor+page pagination like articles for ultra-fast performance
-func (mem *MemCachedThreads) RefreshThreadCache(db *Database, groupDBs *GroupDBs, group string, requestedPage int64, pageSize int64) error {
+func (mem *MemCachedThreads) RefreshThreadCache(db *Database, groupDB *GroupDB, group string, requestedPage int64, pageSize int64) error {
 	startTime := time.Now()
 	log.Printf("[PERF:REFRESH] Starting RefreshThreadCache for group '%s', page %d", group, requestedPage)
 
@@ -461,7 +461,7 @@ func (mem *MemCachedThreads) RefreshThreadCache(db *Database, groupDBs *GroupDBs
 	`
 	args := []interface{}{cacheSize, cacheWindowStart}
 
-	rows, err := retryableQuery(groupDBs.DB, query, args...)
+	rows, err := RetryableQuery(groupDB.DB, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to query thread cache: %w", err)
 	}
@@ -490,7 +490,7 @@ func (mem *MemCachedThreads) RefreshThreadCache(db *Database, groupDBs *GroupDBs
 		// Quick check if thread root article is hidden (fast single lookup)
 		var hidden int
 		checkQuery := `SELECT hide FROM articles WHERE article_num = ? LIMIT 1`
-		err = retryableQueryRowScan(groupDBs.DB, checkQuery, []interface{}{entry.ThreadRoot}, &hidden)
+		err = RetryableQueryRowScan(groupDB.DB, checkQuery, []interface{}{entry.ThreadRoot}, &hidden)
 		if err != nil || hidden != 0 {
 			continue // Skip hidden threads
 		}
@@ -515,7 +515,7 @@ func (mem *MemCachedThreads) RefreshThreadCache(db *Database, groupDBs *GroupDBs
 	// Get the REAL total count from database (not just cached count)
 	var realTotalCount int64
 	countQuery := `SELECT COUNT(*) FROM thread_cache`
-	err = retryableQueryRowScan(groupDBs.DB, countQuery, []interface{}{}, &realTotalCount)
+	err = RetryableQueryRowScan(groupDB.DB, countQuery, []interface{}{}, &realTotalCount)
 	if err != nil {
 		log.Printf("[PERF:REFRESH] Failed to get real total count: %v", err)
 		realTotalCount = int64(len(threadRoots)) // Fallback to cached count

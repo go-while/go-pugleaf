@@ -45,14 +45,14 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 	}
 
 	// Get group database
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to get group database: " + err.Error(),
 		})
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 
 	// Parse options
 	options := database.TreeViewOptions{
@@ -75,7 +75,7 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 	}
 
 	// Get tree view
-	response, err := s.DB.GetThreadTreeView(groupDBs, threadRoot, options)
+	response, err := s.DB.GetThreadTreeView(groupDB, threadRoot, options)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to get tree view: " + err.Error(),
@@ -105,12 +105,12 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 	}
 
 	// Get group database
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Group Not Found", "Group not found: "+groupName)
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 
 	// Get tree view
 	options := database.TreeViewOptions{
@@ -120,14 +120,14 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 		SortBy:          "date",
 	}
 
-	treeResponse, err := s.DB.GetThreadTreeView(groupDBs, threadRoot, options)
+	treeResponse, err := s.DB.GetThreadTreeView(groupDB, threadRoot, options)
 	if err != nil {
 		s.renderError(c, http.StatusInternalServerError, "Tree Error", "Failed to build thread tree: "+err.Error())
 		return
 	}
 
 	// Get root article for title
-	rootOverview, err := s.DB.GetOverviewByArticleNum(groupDBs, threadRoot)
+	rootOverview, err := s.DB.GetOverviewByArticleNum(groupDB, threadRoot)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Article Not Found", "Root article not found")
 		return
@@ -190,12 +190,12 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 	}
 
 	// Get group database
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Group Not Found", "Group not found: "+groupName)
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 
 	// Get tree view
 	options := database.TreeViewOptions{
@@ -205,14 +205,14 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 		SortBy:          "date",
 	}
 
-	treeResponse, err := s.DB.GetThreadTreeView(groupDBs, threadRoot, options)
+	treeResponse, err := s.DB.GetThreadTreeView(groupDB, threadRoot, options)
 	if err != nil {
 		s.renderError(c, http.StatusInternalServerError, "Tree Error", "Failed to build thread tree: "+err.Error())
 		return
 	}
 
 	// Get root article for title
-	rootOverview, err := s.DB.GetOverviewByArticleNum(groupDBs, threadRoot)
+	rootOverview, err := s.DB.GetOverviewByArticleNum(groupDB, threadRoot)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Article Not Found", "Root article not found")
 		return

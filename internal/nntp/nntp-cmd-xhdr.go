@@ -74,15 +74,15 @@ func (c *ClientConnection) handleXHdr(args []string) error {
 	}
 
 	// Get group database
-	groupDBs, err := c.server.DB.GetGroupDBs(c.currentGroup)
+	groupDB, err := c.server.DB.GetGroupDB(c.currentGroup)
 	if err != nil {
 		c.rateLimitOnError()
 		return c.sendResponse(411, "No such newsgroup")
 	}
-	defer groupDBs.Return(c.server.DB)
+	defer groupDB.Return()
 
 	// Get header field data for the range
-	headerData, err := c.server.DB.GetHeaderFieldRange(groupDBs, headerField, startNum, endNum)
+	headerData, err := c.server.DB.GetHeaderFieldRange(groupDB, headerField, startNum, endNum)
 	if err != nil {
 		c.rateLimitOnError()
 		return c.sendResponse(503, "Failed to retrieve header data")

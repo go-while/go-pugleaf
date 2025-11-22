@@ -13,7 +13,7 @@ const query_GetAllCronJobs = `SELECT id, name, command, interval_minutes, start_
 
 // GetAllCronJobs retrieves all cron jobs
 func (db *Database) GetAllCronJobs() ([]*models.CronJob, error) {
-	rows, err := retryableQuery(db.mainDB, query_GetAllCronJobs)
+	rows, err := RetryableQuery(db.mainDB, query_GetAllCronJobs)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +45,7 @@ func (db *Database) GetCronJobByID(id int64) (*models.CronJob, error) {
 	var cronJob models.CronJob
 	var lastRun sql.NullTime
 
-	err := retryableQueryRowScan(db.mainDB, query_GetCronJobByID, []interface{}{id},
+	err := RetryableQueryRowScan(db.mainDB, query_GetCronJobByID, []interface{}{id},
 		&cronJob.ID, &cronJob.Name, &cronJob.Command, &cronJob.IntervalMinutes,
 		&cronJob.StartHourMinute, &cronJob.Enabled, &lastRun, &cronJob.RunCount, &cronJob.CreatedAt, &cronJob.UpdatedAt)
 	if err != nil {
@@ -63,7 +63,7 @@ const query_InsertCronJob = `INSERT INTO cron_jobs (name, command, interval_minu
 
 // InsertCronJob creates a new cron job
 func (db *Database) InsertCronJob(cronJob *models.CronJob) error {
-	_, err := retryableExec(db.mainDB, query_InsertCronJob, cronJob.Name, cronJob.Command, cronJob.IntervalMinutes, cronJob.StartHourMinute, cronJob.Enabled)
+	_, err := RetryableExec(db.mainDB, query_InsertCronJob, cronJob.Name, cronJob.Command, cronJob.IntervalMinutes, cronJob.StartHourMinute, cronJob.Enabled)
 	return err
 }
 
@@ -71,7 +71,7 @@ const query_UpdateCronJob = `UPDATE cron_jobs SET name = ?, command = ?, interva
 
 // UpdateCronJob updates an existing cron job
 func (db *Database) UpdateCronJob(cronJob *models.CronJob) error {
-	_, err := retryableExec(db.mainDB, query_UpdateCronJob, cronJob.Name, cronJob.Command, cronJob.IntervalMinutes, cronJob.StartHourMinute, cronJob.Enabled, cronJob.ID)
+	_, err := RetryableExec(db.mainDB, query_UpdateCronJob, cronJob.Name, cronJob.Command, cronJob.IntervalMinutes, cronJob.StartHourMinute, cronJob.Enabled, cronJob.ID)
 	return err
 }
 
@@ -79,7 +79,7 @@ const query_DeleteCronJob = `DELETE FROM cron_jobs WHERE id = ?`
 
 // DeleteCronJob deletes a cron job
 func (db *Database) DeleteCronJob(id int64) error {
-	_, err := retryableExec(db.mainDB, query_DeleteCronJob, id)
+	_, err := RetryableExec(db.mainDB, query_DeleteCronJob, id)
 	return err
 }
 
@@ -91,7 +91,7 @@ func (db *Database) ToggleCronJob(id int64) error {
 	if err != nil {
 		return err
 	}
-	_, err = retryableExec(db.mainDB, query_ToggleCronJob, !cronJob.Enabled, id)
+	_, err = RetryableExec(db.mainDB, query_ToggleCronJob, !cronJob.Enabled, id)
 	return err
 }
 
@@ -99,6 +99,6 @@ const query_UpdateCronJobRunStats = `UPDATE cron_jobs SET last_run = ?, run_coun
 
 // UpdateCronJobRunStats updates the run statistics after a cron job execution
 func (db *Database) UpdateCronJobRunStats(id int64) error {
-	_, err := retryableExec(db.mainDB, query_UpdateCronJobRunStats, time.Now(), id)
+	_, err := RetryableExec(db.mainDB, query_UpdateCronJobRunStats, time.Now(), id)
 	return err
 }

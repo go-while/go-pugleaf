@@ -16,7 +16,7 @@ func (db *Database) GetConfigValue(key string) (string, error) {
 // getConfigValueDirect retrieves a configuration value directly from the database
 func (db *Database) getConfigValueDirect(key string) (string, error) {
 	var value string
-	err := retryableQueryRowScan(db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{key}, &value)
+	err := RetryableQueryRowScan(db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{key}, &value)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", nil // Return empty string for missing keys
@@ -37,7 +37,7 @@ func (db *Database) SetConfigValue(key, value string) error {
 
 // setConfigValueDirect sets or updates a configuration value directly in the database
 func (db *Database) setConfigValueDirect(key, value string) error {
-	_, err := retryableExec(db.mainDB, `
+	_, err := RetryableExec(db.mainDB, `
 		INSERT OR REPLACE INTO config (key, value)
 		VALUES (?, ?)
 	`, key, value)

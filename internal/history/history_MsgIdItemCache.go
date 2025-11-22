@@ -314,13 +314,13 @@ func (c *MsgIdItemCache) cleanupMessageIdItem(item *MessageIdItem) {
 	// Clear string fields
 	item.MessageId = ""
 	item.MessageIdHash = ""
-	item.StorageToken = ""
+	//item.StorageToken = ""
 
 	// Reset other fields to zero values
-	item.ArtNum = 0
+	//item.ArtNum = 0
 	item.Arrival = 0
 	item.Response = 0
-	item.GroupName = nil
+	//item.GroupName = nil
 	item.Mux.Unlock()
 }
 
@@ -447,6 +447,7 @@ func (c *MsgIdItemCache) GetResizeInfo() (bucketCount int, itemCount int, loadFa
 	return
 }
 
+/*
 // GetMsgIdFromCache retrieves threading information for a message ID in a specific group
 // This replaces the functionality from MsgTmpCache.GetMsgIdFromTmpCache
 func (c *MsgIdItemCache) GetMsgIdFromCache(newsgroupPtr *string, messageID string) (int64, int64, bool) {
@@ -485,9 +486,10 @@ func (c *MsgIdItemCache) GetMsgIdFromCache(newsgroupPtr *string, messageID strin
 	} // end for
 	return 0, 0, false
 }
-
+*/
+/*
 // SetThreadingInfo sets threading information for a message ID in a specific group
-func (c *MsgIdItemCache) SetThreadingInfo(messageID string, rootArticle int64, isThreadRoot bool) bool {
+func (c *MsgIdItemCache) xxSetThreadingInfo(messageID string, rootArticle int64, isThreadRoot bool) bool {
 	// This is a compatibility method that requires the item to already have a group set
 	// For new code, use SetThreadingInfoForGroup instead with explicit group parameter
 	item := c.GetORCreate(messageID)
@@ -522,7 +524,7 @@ func (c *MsgIdItemCache) SetThreadingInfo(messageID string, rootArticle int64, i
 }
 
 // SetThreadingInfoForGroup sets threading information for a message ID in a specific group
-func (c *MsgIdItemCache) SetThreadingInfoForGroup(newsgroupPtr *string, messageID string, artNum int64, rootArticle int64, isThreadRoot bool) bool {
+func (c *MsgIdItemCache) xxSetThreadingInfoForGroup(newsgroupPtr *string, messageID string, artNum int64, rootArticle int64, isThreadRoot bool) bool {
 	item := c.GetORCreate(messageID)
 	if item == nil {
 		return false
@@ -549,7 +551,7 @@ func (c *MsgIdItemCache) SetThreadingInfoForGroup(newsgroupPtr *string, messageI
 }
 
 // AddMsgIdToCache adds a message ID with article number to the cache for a specific group
-func (c *MsgIdItemCache) AddMsgIdToCache(newsgroupPtr *string, messageID string, articleNum int64) bool {
+func (c *MsgIdItemCache) xxAddMsgIdToCache(newsgroupPtr *string, messageID string, articleNum int64) bool {
 	item := c.GetORCreate(messageID)
 	if item == nil {
 		return false
@@ -581,6 +583,7 @@ func (c *MsgIdItemCache) AddMsgIdToCache(newsgroupPtr *string, messageID string,
 
 	return true
 }
+*/
 
 // CleanExpiredEntries removes expired temporary cache entries
 // This replaces the functionality from MsgTmpCache.CronClean
@@ -775,32 +778,13 @@ func (c *MsgIdItemCache) StartCleanupRoutine() {
 	}()
 }
 
-// GetOrCreateForGroup gets or creates a message ID item for a specific group
-// This provides group-specific functionality similar to MsgTmpCache
-func (c *MsgIdItemCache) GetOrCreateForGroup(messageID string, newsgroupPtr *string) *MessageIdItem {
-	item := c.GetORCreate(messageID)
-	if item == nil {
-		return nil
-	}
-
-	item.Mux.Lock()
-	defer item.Mux.Unlock()
-
-	// If this is the first time we're seeing this messageID for this group,
-	// or if it's for a different group, update the group information
-	if item.GroupName == nil || item.GroupName != newsgroupPtr {
-		item.GroupName = newsgroupPtr
-		item.Arrival = time.Now().Unix()
-	}
-
-	return item
-}
-
+/*
 // HasMessageIDInGroup checks if a message ID exists in a specific group and hasn't expired
-func (c *MsgIdItemCache) HasMessageIDInGroup(messageID string, newsgroupPtr *string) bool {
+func (c *MsgIdItemCache) xxHasMessageIDInGroup(messageID string, newsgroupPtr *string) bool {
 	artNum, _, _ := c.GetMsgIdFromCache(newsgroupPtr, messageID)
 	return artNum != 0 // If artNum is 0, the item wasn't found or expired
 }
+
 
 // FindThreadRootInCache searches for thread root in cache by following references
 // This replaces the functionality from MsgTmpCache.FindThreadRootInCache
@@ -854,10 +838,11 @@ func (c *MsgIdItemCache) FindThreadRootInCache(newsgroupPtr *string, references 
 	}
 	return nil
 }
-
+*/
+/*
 // UpdateThreadRootToTmpCache updates an existing cache entry with thread root information
 // This replaces the functionality from MsgTmpCache.UpdateThreadRootToTmpCache
-func (c *MsgIdItemCache) UpdateThreadRootToTmpCache(newsgroupPtr *string, messageID string, rootArticle int64, isThreadRoot bool) bool {
+func (c *MsgIdItemCache) xxUpdateThreadRootToTmpCache(newsgroupPtr *string, messageID string, rootArticle int64, isThreadRoot bool) bool {
 	// Get or create the item
 	item := c.GetORCreate(messageID)
 	if item == nil {
@@ -892,12 +877,14 @@ func (c *MsgIdItemCache) UpdateThreadRootToTmpCache(newsgroupPtr *string, messag
 	return true
 }
 
+
 // MsgIdExists checks if a message ID exists in the cache for a specific group
 // This replaces the functionality from MsgTmpCache.MsgIdExists
-func (c *MsgIdItemCache) MsgIdExists(newsgroupPtr *string, messageID string) *MessageIdItem {
+func (c *MsgIdItemCache) xxMsgIdExists(newsgroupPtr *string, messageID string) *MessageIdItem {
 	artNum, _, _ := c.GetMsgIdFromCache(newsgroupPtr, messageID)
 	if artNum != 0 {
 		return c.GetORCreate(messageID)
 	}
 	return nil
 }
+*/

@@ -59,12 +59,12 @@ func updateNewsgroupLastActivity(db *database.Database, updateNGAConcurrent int)
 				mux.Unlock()
 				wg.Done()
 			}(wg)
-			groupDBs, err := db.GetGroupDBs(name)
+			groupDB, err := db.GetGroupDB(name)
 			if err != nil {
 				log.Printf("[WEB]: ERROR updateNewsgroupLastActivity GetGroupDB %s: %v", name, err)
 				return
 			}
-			if err := updateNewsGroupActivityValue(db, id, groupDBs); err == nil {
+			if err := updateNewsGroupActivityValue(db, id, groupDB); err == nil {
 				mux.Lock()
 				updatedCount++
 				mux.Unlock()
@@ -87,27 +87,27 @@ func updateNewsgroupLastActivity(db *database.Database, updateNGAConcurrent int)
 const query_updateNewsGroupActivityValue1 = "SELECT MAX(date_sent) FROM articles WHERE hide = 0"
 const query_updateNewsGroupActivityValue2 = "UPDATE newsgroups SET updated_at = ? WHERE id = ? AND updated_at != ?"
 
-func updateNewsGroupActivityValue(db *database.Database, id int, groupDBs *database.GroupDBs) error {
-	defer db.ForceCloseGroupDBs(groupDBs)
+func updateNewsGroupActivityValue(db *database.Database, id int, groupDB *database.GroupDB) error {
+	defer db.ForceCloseGroupDB(groupDB)
 
 	var formattedDate string
 	var parsedDate time.Time
 	var latestDate sql.NullString
 
 	/*
-		_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET spam = 1 WHERE spam = 0 AND hide = 1", nil)
+		_, err = database.RetryableExec(groupDB.DB, "UPDATE articles SET spam = 1 WHERE spam = 0 AND hide = 1", nil)
 		if err != nil {
-			db.ForceCloseGroupDBs(groupDBs)
+			db.ForceCloseGroupDB(groupDB)
 			log.Printf("[WEB]: Failed to update spam flags for newsgroup %s: %v", name, err)
 			continue
 		}
 	*/
 
 	// Query the latest article date from the group's articles table (excluding hidden articles)
-	rows, err := database.RetryableQuery(groupDBs.DB, query_updateNewsGroupActivityValue1, nil, latestDate)
-	//groupDBs.Return(db) // Always return the database connection
+	rows, err := database.RetryableQuery(groupDB.DB, query_updateNewsGroupActivityValue1, nil, latestDate)
+	//groupDB.Return(db) // Always return the database connection
 	if err != nil {
-		log.Printf("[WEB]: updateNewsgroupLastActivity RetryableQueryRowScan %s: %v", groupDBs.Newsgroup, err)
+		log.Printf("[WEB]: updateNewsgroupLastActivity RetryableQueryRowScan %s: %v", groupDB.Newsgroup, err)
 		return err
 	}
 	defer rows.Close()
@@ -115,13 +115,13 @@ func updateNewsGroupActivityValue(db *database.Database, id int, groupDBs *datab
 		rows.Scan(&latestDate)
 		// Only update if we found a latest date
 		if !latestDate.Valid {
-			return fmt.Errorf("error updateNewsgroupLastActivity no valid latestDate in ng: '%s'", groupDBs.Newsgroup)
+			return fmt.Errorf("error updateNewsgroupLastActivity no valid latestDate in ng: '%s'", groupDB.Newsgroup)
 		}
 
 		// Parse the date and format it consistently as UTC
 		if latestDate.String == "" {
-			log.Printf("[WEB]: updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", groupDBs.Newsgroup)
-			return fmt.Errorf("error updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", groupDBs.Newsgroup)
+			log.Printf("[WEB]: updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", groupDB.Newsgroup)
+			return fmt.Errorf("error updateNewsgroupLastActivity empty latestDate.String in ng: '%s'", groupDB.Newsgroup)
 		}
 		// Try multiple date formats to handle various edge cases
 		for _, format := range testFormats {
@@ -131,7 +131,7 @@ func updateNewsGroupActivityValue(db *database.Database, id int, groupDBs *datab
 			}
 		}
 		if err != nil {
-			log.Printf("[WEB]: updateNewsgroupLastActivity parsing date '%s' for %s: %v", latestDate.String, groupDBs.Newsgroup, err)
+			log.Printf("[WEB]: updateNewsgroupLastActivity parsing date '%s' for %s: %v", latestDate.String, groupDB.Newsgroup, err)
 			return err
 		}
 
@@ -139,11 +139,11 @@ func updateNewsGroupActivityValue(db *database.Database, id int, groupDBs *datab
 		formattedDate = parsedDate.UTC().Format("2006-01-02 15:04:05")
 		result, err := db.GetMainDB().Exec(query_updateNewsGroupActivityValue2, formattedDate, id, formattedDate)
 		if err != nil {
-			log.Printf("[WEB]: error updateNewsgroupLastActivity updating newsgroup %s: %v", groupDBs.Newsgroup, err)
+			log.Printf("[WEB]: error updateNewsgroupLastActivity updating newsgroup %s: %v", groupDB.Newsgroup, err)
 			return err
 		}
 		if _, err := result.RowsAffected(); err != nil {
-			log.Printf("[WEB]: updateNewsgroupLastActivity: '%s' dateStr=%s formattedDate=%s", groupDBs.Newsgroup, latestDate.String, formattedDate)
+			log.Printf("[WEB]: updateNewsgroupLastActivity: '%s' dateStr=%s formattedDate=%s", groupDB.Newsgroup, latestDate.String, formattedDate)
 		}
 	}
 	return nil
@@ -176,7 +176,7 @@ func hideFuturePosts(db *database.Database) error {
 		}
 
 		// Get the group database for this newsgroup
-		groupDBs, err := db.GetGroupDBs(name)
+		groupDB, err := db.GetGroupDB(name)
 		if err != nil {
 			log.Printf("[WEB]: Future posts migration error getting group DB for %s: %v", name, err)
 			skippedGroups++
@@ -184,10 +184,10 @@ func hideFuturePosts(db *database.Database) error {
 		}
 
 		// Find articles that are posted more than 48 hours in the future and not already hidden
-		articleRows, err := groupDBs.DB.Query("SELECT article_num FROM articles WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
+		articleRows, err := groupDB.DB.Query("SELECT article_num FROM articles WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
 		if err != nil {
 			log.Printf("[WEB]: Future posts migration error querying articles for %s: %v", name, err)
-			db.ForceCloseGroupDBs(groupDBs)
+			db.ForceCloseGroupDB(groupDB)
 			skippedGroups++
 			continue
 		}
@@ -202,7 +202,7 @@ func hideFuturePosts(db *database.Database) error {
 			futureArticles = append(futureArticles, articleNum)
 		}
 		articleRows.Close()
-		db.ForceCloseGroupDBs(groupDBs)
+		db.ForceCloseGroupDB(groupDB)
 
 		// Process each future article using the proper spam increment system
 		groupArticleCount := 0
@@ -217,13 +217,13 @@ func hideFuturePosts(db *database.Database) error {
 			}
 
 			// Also set the hide flag for these future-dated articles
-			groupDBs, err := db.GetGroupDBs(name)
+			groupDB, err := db.GetGroupDB(name)
 			if err != nil {
 				log.Printf("[WEB]: Future posts migration error getting group DB for hide update %s: %v", name, err)
 				continue
 			}
-			_, err = database.RetryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ?", articleNum)
-			db.ForceCloseGroupDBs(groupDBs)
+			_, err = database.RetryableExec(groupDB.DB, "UPDATE articles SET hide = 1 WHERE article_num = ?", articleNum)
+			db.ForceCloseGroupDB(groupDB)
 
 			if err != nil {
 				log.Printf("[WEB]: Future posts migration error setting hide flag for %s article %d: %v", name, articleNum, err)
@@ -933,4 +933,162 @@ func formatBytes(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// updateNewsgroupsExpiryFromFile reads a file with newsgroup:days format and updates expiry_days
+func updateNewsgroupsExpiryFromFile(db *database.Database, filename string) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+	updated := 0
+	errors := 0
+
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Parse line: newsgroup:days
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			log.Printf("[EXPIRY] Line %d: invalid format (expected 'newsgroup:days'): %s", lineNum, line)
+			errors++
+			continue
+		}
+
+		newsgroup := strings.TrimSpace(parts[0])
+		daysStr := strings.TrimSpace(parts[1])
+
+		// Strip optional 'd' suffix (e.g., "30d" -> "30")
+		daysStr = strings.TrimSuffix(daysStr, "d")
+		daysStr = strings.TrimSuffix(daysStr, "D")
+
+		// Parse days as integer
+		days, err := strconv.Atoi(daysStr)
+		if err != nil {
+			log.Printf("[EXPIRY] Line %d: invalid days value '%s' for newsgroup '%s': %v", lineNum, daysStr, newsgroup, err)
+			errors++
+			continue
+		}
+
+		// Update database
+		if err := db.UpdateNewsgroupExpiry(newsgroup, days); err != nil {
+			log.Printf("[EXPIRY] Line %d: failed to update newsgroup '%s': %v", lineNum, newsgroup, err)
+			errors++
+			continue
+		}
+
+		updated++
+		if verbose {
+			log.Printf("[EXPIRY] Updated '%s' to %d days", newsgroup, days)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading file: %w", err)
+	}
+
+	log.Printf("[EXPIRY] Processed %d lines: %d updated, %d errors", lineNum, updated, errors)
+
+	if errors > 0 {
+		return fmt.Errorf("completed with %d errors", errors)
+	}
+
+	return nil
+}
+
+// disableNewsgroupsNotInActiveFile disables newsgroups NOT listed in the active file
+func disableNewsgroupsNotInActiveFile(db *database.Database, activeFilePath string) error {
+	log.Printf("[WEB]: Disabling newsgroups not listed in active file: %s", activeFilePath)
+
+	// Open and read the active file
+	file, err := os.Open(activeFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to open active file '%s': %w", activeFilePath, err)
+	}
+	defer file.Close()
+
+	// Parse active file to get list of groups to KEEP active
+	activeGroups := make(map[string]bool)
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Parse active file format: groupname high low status
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			log.Printf("[WEB]: Warning: Skipping malformed line %d in active file: %s", lineNum, line)
+			continue
+		}
+
+		groupName := fields[0]
+		if groupName != "" {
+			activeGroups[groupName] = true
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading active file: %w", err)
+	}
+
+	log.Printf("[WEB]: Found %d active groups in file", len(activeGroups))
+
+	// Get all newsgroups from database
+	dbGroups, err := db.MainDBGetAllNewsgroups()
+	if err != nil {
+		return fmt.Errorf("failed to get newsgroups from database: %w", err)
+	}
+
+	log.Printf("[WEB]: Found %d total newsgroups in database", len(dbGroups))
+
+	// Disable groups NOT in active file
+	disabledCount := 0
+	alreadyInactiveCount := 0
+	keptActiveCount := 0
+
+	for _, group := range dbGroups {
+		if _, exists := activeGroups[group.Name]; !exists {
+			// Group not in active file - disable it
+			if group.Active {
+				if err := db.UpdateNewsgroupActive(group.Name, false); err != nil {
+					log.Printf("[WEB]: Warning: Failed to disable newsgroup '%s': %v", group.Name, err)
+					continue
+				}
+				disabledCount++
+				if disabledCount%1000 == 0 {
+					log.Printf("[WEB]: Disabled %d newsgroups so far...", disabledCount)
+				}
+			} else {
+				alreadyInactiveCount++
+			}
+		} else {
+			// Group IS in active file - keep it active
+			keptActiveCount++
+		}
+	}
+
+	log.Printf("[WEB]: Disable operation completed:")
+	log.Printf("[WEB]:   - Groups kept active (in active file): %d", keptActiveCount)
+	log.Printf("[WEB]:   - Groups newly disabled (not in active file): %d", disabledCount)
+	log.Printf("[WEB]:   - Groups already inactive (not in active file): %d", alreadyInactiveCount)
+	log.Printf("[WEB]:   - Total groups processed: %d", len(dbGroups))
+
+	return nil
 }

@@ -52,7 +52,7 @@ func (db *Database) CreateAPIToken(ownerName string, ownerID int64, expiresAt *t
 	db.MainMutex.Lock()
 	defer db.MainMutex.Unlock()
 
-	result, err := retryableExec(db.mainDB, query_CreateAPIToken, hashedToken, ownerName, ownerID, expiresAt)
+	result, err := RetryableExec(db.mainDB, query_CreateAPIToken, hashedToken, ownerName, ownerID, expiresAt)
 	if err != nil {
 		return nil, "", err
 	}
@@ -88,7 +88,7 @@ func (db *Database) ValidateAPIToken(plainToken string) (*APIToken, error) {
 	          WHERE apitoken = ? AND is_enabled = 1`
 
 	var token APIToken
-	err := retryableQueryRowScan(db.mainDB, query, []interface{}{hashedToken},
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{hashedToken},
 		&token.ID, &token.APIToken, &token.OwnerName, &token.OwnerID,
 		&token.CreatedAt, &token.LastUsedAt, &token.ExpiresAt,
 		&token.IsEnabled, &token.UsageCount,
@@ -114,7 +114,7 @@ func (db *Database) UpdateTokenUsage(tokenID int64) error {
 	          SET last_used_at = CURRENT_TIMESTAMP, usage_count = usage_count + 1
 	          WHERE id = ?`
 
-	_, err := retryableExec(db.mainDB, query, tokenID)
+	_, err := RetryableExec(db.mainDB, query, tokenID)
 	return err
 }
 
@@ -127,7 +127,7 @@ func (db *Database) ListAPITokens() ([]*APIToken, error) {
 	          FROM api_tokens
 	          ORDER BY created_at DESC`
 
-	rows, err := retryableQuery(db.mainDB, query)
+	rows, err := RetryableQuery(db.mainDB, query)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +156,7 @@ func (db *Database) DisableAPIToken(tokenID int) error {
 	defer db.MainMutex.Unlock()
 
 	query := `UPDATE api_tokens SET is_enabled = 0 WHERE id = ?`
-	_, err := retryableExec(db.mainDB, query, tokenID)
+	_, err := RetryableExec(db.mainDB, query, tokenID)
 	return err
 }
 
@@ -166,7 +166,7 @@ func (db *Database) EnableAPIToken(tokenID int) error {
 	defer db.MainMutex.Unlock()
 
 	query := `UPDATE api_tokens SET is_enabled = 1 WHERE id = ?`
-	_, err := retryableExec(db.mainDB, query, tokenID)
+	_, err := RetryableExec(db.mainDB, query, tokenID)
 	return err
 }
 
@@ -176,7 +176,7 @@ func (db *Database) DeleteAPIToken(tokenID int) error {
 	defer db.MainMutex.Unlock()
 
 	query := `DELETE FROM api_tokens WHERE id = ?`
-	_, err := retryableExec(db.mainDB, query, tokenID)
+	_, err := RetryableExec(db.mainDB, query, tokenID)
 	return err
 }
 
@@ -186,7 +186,7 @@ func (db *Database) CleanupExpiredTokens() (int, error) {
 	defer db.MainMutex.Unlock()
 
 	query := `DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP`
-	result, err := retryableExec(db.mainDB, query)
+	result, err := RetryableExec(db.mainDB, query)
 	if err != nil {
 		return 0, err
 	}

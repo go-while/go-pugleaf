@@ -60,10 +60,10 @@
                                       <small>{{.Created.Format "2006-01-02 15:04"}}</small>
                                   </td>
                                   <td>
-                                      <small><code>{{.Newsgroup}}</code></small>
+                                      <small><code><a href="/groups/{{.Newsgroup}}/threads">{{.Newsgroup}}</a></code></small>
                                   </td>
                                   <td>
-                                      <small><code>{{.MessageID}}</code></small>
+                                      <small><code><a href="/groups/{{.Newsgroup}}/message/{{.MessageID}}">{{.MessageID}}</a></code></small>
                                   </td>
                                   <td>
                                       {{if eq .Status "pending"}}

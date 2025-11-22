@@ -6,10 +6,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -52,14 +50,15 @@ type ThreadingInfo struct {
 type MessageIdItem struct {
 	Mux                sync.RWMutex // Protects all fields below
 	CachedEntryExpires time.Time    // Exported field for cache entry expiration
-	MessageIdHash      string       // Computed hash of the message-ID
-	StorageToken       string       // pointer to storage token
 	MessageId          string       // pointer to article.messageid
-	ArtNum             int64        // Article number in the history (primary/first occurrence)
-	GroupName          *string      // Group name this article belongs to (primary group)
-	Arrival            int64        // When article arrived
-	Response           int          // @AI IGNORE Response``` FOR THE MOMENT; RESPONSE LOGIC NEEDS PROPER THINKING! NOT A JOB FOR NOW!
-	FileOffset         int64        // File offset in history.dat where this entry is stored
+	MessageIdHash      string       // Computed hash of the message-ID
+	NewsgroupIDs       []int64      // Newsgroup IDs this message-ID belongs to
+	//StorageToken       string       // pointer to storage token
+
+	//ArtNums   map[int64]int64 // maps newsgroup IDs (key) to Article numbers
+	//GroupName *string // Group name this article belongs to (primary group)
+	Arrival  int64 // When article arrived
+	Response int
 
 	// Group-specific threading information (replaces global threading fields)
 	GroupThreading map[*string]*ThreadingInfo // Per-group threading info for crossposted articles
@@ -72,22 +71,15 @@ type DatabaseWorkChecker interface {
 
 // History manages message-ID history tracking using INN2-style architecture
 type History struct {
-	config          *HistoryConfig
-	mux             sync.RWMutex
-	historyFile     *os.File
-	HistoryFilePath string
-	offset          int64
+	config      *HistoryConfig
+	mux         sync.RWMutex
+	historyFile *os.File
 
 	// Database backend (SQLite with sharding)
 	db SQLite3ShardedPool
 
-	// L1 cache for recent lookups
-	//l1Cache *L1CACHE
-
-	// Channels for async operations
-	lookupChan chan *MessageIdItem
-	writerChan chan *MessageIdItem
-	dbChan     chan *MessageIdItem
+	dbChan   chan *MessageIdItem
+	dbQueued map[*MessageIdItem]bool
 
 	// Shutdown signaling (similar to db_batch.go pattern)
 	stopChan chan struct{}
@@ -317,27 +309,5 @@ func (h *History) initDatabase() error {
 	numDBs, tablesPerDB, description := GetShardConfig(h.config.ShardMode)
 	log.Printf("SQLite3 sharded system initialized: %s (%d DBs, %d tables per DB)",
 		description, numDBs, tablesPerDB)
-	return nil
-}
-
-// openHistoryFile opens or creates the history.dat file
-func (h *History) openHistoryFile() error {
-	h.HistoryFilePath = filepath.Join(h.config.HistoryDir, HistoryFileName)
-
-	var err error
-	h.historyFile, err = os.OpenFile(h.HistoryFilePath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open history file %s: %v", h.HistoryFilePath, err)
-	}
-	// Initialize buffered writer for efficient file operations
-	h.fileWriter = bufio.NewWriterSize(h.historyFile, 1024*1024)
-
-	// Get current file offset
-	h.offset, err = h.historyFile.Seek(0, io.SeekEnd)
-	if err != nil {
-		return fmt.Errorf("failed to seek to end of history file: %v", err)
-	}
-
-	log.Printf("History file opened: %s (offset: %d)", h.HistoryFilePath, h.offset)
 	return nil
 }

@@ -9,7 +9,7 @@ import (
 
 // Global toggle to enable/disable the sanitized cache at compile-time.
 // Set to true to completely bypass Get/Set operations for sanitized cache.
-const DisableSanitizedCache = true
+var DisableSanitizedCache = true
 
 // Global sanitized cache instance
 var sanitizedCache *cache.SanitizedCache

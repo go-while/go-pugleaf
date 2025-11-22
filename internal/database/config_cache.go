@@ -105,7 +105,7 @@ func (cc *ConfigCache) RefreshCache() error {
 // getConfigValueDirect performs a direct database query (fallback method)
 func (cc *ConfigCache) getConfigValueDirect(key string) (string, error) {
 	var value string
-	err := retryableQueryRowScan(cc.db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{key}, &value)
+	err := RetryableQueryRowScan(cc.db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{key}, &value)
 	if err != nil {
 		if err.Error() == "sql: no rows in result set" {
 			return "", nil // Return empty string for missing keys

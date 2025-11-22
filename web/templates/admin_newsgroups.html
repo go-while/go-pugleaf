@@ -97,12 +97,12 @@
                           <thead>
                               <tr>
                                   <th width="30">
-                                      <input type="checkbox" id="headerCheckbox" class="form-check-input">
+                                      x<!--<input type="checkbox" id="headerCheckbox" class="form-check-input">-->
                                   </th>
                                   <th>ON</th>
+                                  <th>Count<br>Last</th>
                                   <th>Edit</th>
                                   <th>Newsgroup</th>
-                                  <th>Count<br>Last</th>
                                   <th>Section</th>
                                   <th>Expiry</th>
                                   <th>Actions</th>
@@ -113,7 +113,7 @@
                               {{range .Newsgroups}}
                               <tr>
                                   <td>
-                                      <input type="checkbox" class="form-check-input newsgroup-checkbox"
+                                      <input title="Select {{.Name}}" type="checkbox" class="form-check-input newsgroup-checkbox"
                                              name="newsgroups" value="{{.Name}}" data-active="{{.Active}}"
                                              form="bulkActionsForm" onchange="updateSelectedCount()">
                                   </td>
@@ -129,25 +129,45 @@
                                         {{end}}
                                         <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                         {{if .Active}}
-                                        <button type="submit" class="btn btn-outline-success btn-sm">
+                                        <button type="submit" class="btn btn-outline-success btn-sm" title="{{.Name}} is Enabled. Click to disable.">
                                             ✅
                                         </button>
                                         {{else}}
-                                        <button type="submit" class="btn btn-outline-success btn-sm">
+                                        <button type="submit" class="btn btn-outline-success btn-sm" title="{{.Name}} is Disabled. Click to enable.">
                                             ❌
                                         </button>
                                         {{end}}
-
                                     </form>
+
+                                    {{if .Status}}
+                                    <span class="badge {{if eq .Status "y"}}bg-success{{else if eq .Status "m"}}bg-warning text-dark{{else if eq .Status "n"}}bg-secondary{{else if eq .Status "j"}}bg-info text-dark{{else if eq .Status "x"}}bg-danger{{else}}bg-primary{{end}}">
+                                        {{if eq .Status "y"}}y
+                                        {{else if eq .Status "m"}}m
+                                        {{else if eq .Status "n"}}n
+                                        {{else if eq .Status "j"}}j
+                                        {{else if eq .Status "x"}}x
+                                        {{else}}[{{.Status}}]{{end}}
+                                    </span>
+                                    {{else}}
+                                    <span class="badge bg-secondary">
+                                        <em>err!</em>
+                                    </span>
+                                    {{end}}
                                   </td>
                                   <td>
-                                    <button type="button" class="btn btn-outline-primary btn-sm edit-newsgroup-btn"
+                                    <small>C:{{.MessageCount}}</small>
+                                    <br>
+                                    <small>L#{{if .LastArticle}}{{.LastArticle}}{{else}}-{{end}}</small>
+                                  </td>
+                                  <td>
+                                    <button title="Edit {{.Name}}" type="button" class="btn btn-outline-primary btn-sm edit-newsgroup-btn"
                                             data-name="{{.Name}}"
                                             data-description="{{.Description}}"
                                             data-expiry-days="{{if .ExpiryDays}}{{.ExpiryDays}}{{else}}0{{end}}"
                                             data-max-articles="{{if .MaxArticles}}{{.MaxArticles}}{{else}}0{{end}}"
                                             data-max-art-size="{{if .MaxArtSize}}{{.MaxArtSize}}{{else}}0{{end}}"
-                                            data-active="{{.Active}}">
+                                            data-active="{{.Active}}"
+                                            data-status="{{.Status}}">
                                         Edit
                                     </button>
                                     <br>
@@ -157,11 +177,6 @@
                                     <strong><a href="/groups/{{.Name}}" target="_blank" class="btn btn-outline-success btn-sm">{{.Name}}</a></strong>
                                     <br>
                                     <small>{{if .Description}}{{.Description}}{{else}}<em>No description</em>{{end}}</small>
-                                  </td>
-                                  <td>
-                                    <small>C:{{.MessageCount}}</small>
-                                    <br>
-                                    <small>L#{{if .LastArticle}}{{.LastArticle}}{{else}}-{{end}}</small>
                                   </td>
                                   <td>
                                       {{/* Find current section assignment */}}
@@ -218,7 +233,7 @@
                                               {{end}}
                                               <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                               <button type="submit" class="btn btn-outline-primary btn-sm"
-                                                      title="Fix Activity recalculates last activity timestamp for this newsgroup">
+                                                      title="Fix Activity recalculates last activity timestamp for this newsgroup. Run it on all newsgroups with the webserver flag '-update-newsgroups-activity N' ( N is the number of newsgroups to process concurrently! )">
                                                   <i class="bi bi-clock me-1"></i>FNA
                                               </button>
                                           </form>
@@ -246,7 +261,7 @@
                                               {{end}}
                                               <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                               <button type="submit" class="btn btn-outline-warning btn-sm"
-                                                      title="Hide Future Posts finds and marks future-dated articles (>48h) as spam. Articles will appear in spam management.">
+                                                      title="Hide Future Posts finds and marks future-dated articles (>48h) as spam. Articles will appear in spam management. Run it on all newsgroups with the webserver flag '-update-newsgroups-hide-futureposts'">
                                                   <i class="bi bi-clock-history me-1"></i>HFP
                                               </button>
                                           </form>
@@ -483,6 +498,22 @@
                             </label>
                         </div>
                     </div>
+
+                    <div class="mb-3">
+                        <label for="edit_newsgroup_status" class="form-label">Status</label>
+                        <select class="form-select" id="edit_newsgroup_status" name="status">
+                            <option value="y">y - Local postings and articles from peers are allowed</option>
+                            <option value="m">m - Moderated (all postings must be approved)</option>
+                            <option value="n">n - No local postings, only articles from peers</option>
+                            <option value="j">j - Articles from peers filed in junk group</option>
+                            <option value="x">x - No local postings, articles from peers ignored</option>
+                            <option value="=" disabled>= - Redirect to another group (enter manually)</option>
+                        </select>
+                        <div class="form-text">
+                            Controls posting permissions and article handling.
+                            For redirect (=), manually enter "=foo.bar" to file articles in foo.bar instead.
+                        </div>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -507,6 +538,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const maxArticles = parseInt(this.dataset.maxArticles) || 0;
             const maxArtSize = parseInt(this.dataset.maxArtSize) || 0;
             const active = this.dataset.active === 'true';
+            const status = this.dataset.status || 'y';
 
             // Populate the modal form
             document.getElementById('edit_newsgroup_original_name').value = name;
@@ -516,6 +548,23 @@ document.addEventListener('DOMContentLoaded', function() {
             document.getElementById('edit_max_articles').value = maxArticles;
             document.getElementById('edit_max_art_size').value = maxArtSize;
             document.getElementById('edit_newsgroup_active').checked = active;
+
+            // Handle status - if it starts with '=', it's a redirect
+            const statusSelect = document.getElementById('edit_newsgroup_status');
+            if (status.startsWith('=')) {
+                // For redirect status, select the '=' option and show a note
+                statusSelect.value = '=';
+                // If '=' option doesn't exist in select, add it with the full value
+                if (!statusSelect.querySelector('option[value="' + status + '"]')) {
+                    const redirectOption = document.createElement('option');
+                    redirectOption.value = status;
+                    redirectOption.text = status + ' - Redirect to ' + status.substring(1);
+                    redirectOption.selected = true;
+                    statusSelect.appendChild(redirectOption);
+                }
+            } else {
+                statusSelect.value = status;
+            }
 
             // Show the modal
             editModal.show();

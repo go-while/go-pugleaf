@@ -179,7 +179,7 @@ func ensureMigrationsTable(db *sql.DB, dbType string) error {
 func getAppliedMigrations(db *sql.DB, dbType string) (map[string]bool, error) {
 	applied := make(map[string]bool)
 
-	rows, err := retryableQuery(db, `SELECT filename FROM schema_migrations WHERE db_type = ? OR db_type = ''`, dbType)
+	rows, err := RetryableQuery(db, `SELECT filename FROM schema_migrations WHERE db_type = ? OR db_type = ''`, dbType)
 	if err != nil {
 		log.Printf("Failed to query applied migrations for %s: %v", dbType, err)
 		return nil, fmt.Errorf("failed to query applied migrations for %s: %w", dbType, err)
@@ -277,20 +277,8 @@ func (db *Database) migrateMainDB() error {
 	return nil
 }
 
-// MigrateGroup applies migrations for a specific newsgroup database
-func (db *Database) MigrateGroup(groupName string) error {
-	groupDBs, err := db.GetGroupDBs(groupName)
-	if err != nil {
-		log.Printf("Failed to get group database for %s: %v", groupName, err)
-		return fmt.Errorf("failed to get group database: %w", err)
-	}
-	defer groupDBs.Return(db)
-
-	return db.migrateGroupDB(groupDBs)
-}
-
 // migrateGroupDB applies migrations to a group database
-func (db *Database) migrateGroupDB(groupDBs *GroupDBs) error {
+func (db *Database) migrateGroupDB(groupDB *GroupDB, useCache bool) error {
 	// Initialize cache if needed
 	initMigratedDBsCache()
 
@@ -300,28 +288,30 @@ func (db *Database) migrateGroupDB(groupDBs *GroupDBs) error {
 		log.Printf("Failed to get migration files: %v", err)
 		return err
 	}
+	var cacheKey string
+	if useCache {
+		// Create a cache key based on group name
+		cacheKey = fmt.Sprintf("%s:group", groupDB.Newsgroup)
 
-	// Create a cache key based on group name
-	cacheKey := fmt.Sprintf("%s:group", groupDBs.Newsgroup)
+		// Check if this database is already known to be fully migrated
+		migratedDBsMux.RLock()
+		isFullyMigrated := migratedDBsCache[cacheKey]
+		migratedDBsMux.RUnlock()
 
-	// Check if this database is already known to be fully migrated
-	migratedDBsMux.RLock()
-	isFullyMigrated := migratedDBsCache[cacheKey]
-	migratedDBsMux.RUnlock()
-
-	if isFullyMigrated {
-		// Skip migration checks for this database
-		return nil
+		if isFullyMigrated {
+			// Skip migration checks for this database
+			return nil
+		}
 	}
 
 	// Ensure migrations table exists
-	if err := ensureMigrationsTable(groupDBs.DB, "group"); err != nil {
+	if err := ensureMigrationsTable(groupDB.DB, "group"); err != nil {
 		log.Printf("Failed to ensure migrations table for group: %v", err)
 		return fmt.Errorf("failed to ensure migrations table for group: %w", err)
 	}
 
 	// Get applied migrations
-	applied, err := getAppliedMigrations(groupDBs.DB, "group")
+	applied, err := getAppliedMigrations(groupDB.DB, "group")
 	if err != nil {
 		log.Printf("Failed to get applied migrations for group: %v", err)
 		return fmt.Errorf("failed to get applied migrations for group: %w", err)
@@ -339,17 +329,20 @@ func (db *Database) migrateGroupDB(groupDBs *GroupDBs) error {
 			}
 		}
 	}
-	// If all migrations are applied, cache this fact
-	if allApplied && migrationsToApply > 0 {
-		migratedDBsMux.Lock()
-		migratedDBsCache[cacheKey] = true
-		migratedDBsMux.Unlock()
+
+	if useCache {
+		// If all migrations are applied, cache this fact
+		if allApplied && migrationsToApply > 0 {
+			migratedDBsMux.Lock()
+			migratedDBsCache[cacheKey] = true
+			migratedDBsMux.Unlock()
+		}
 	}
 
 	// Apply missing migrations for group database
 	for _, migration := range migrations {
 		if migration.Type == MigrationTypeGroup && !applied[migration.FileName] {
-			if err := applyMigration(groupDBs.DB, migration, "group"); err != nil {
+			if err := applyMigration(groupDB.DB, migration, "group"); err != nil {
 				return fmt.Errorf("failed to apply migration %s to group database: %w", migration.FileName, err)
 			}
 			//log.Printf("Done: apply migration %s to group database\n", migration.FileName)

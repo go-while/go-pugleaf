@@ -110,18 +110,18 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 		}
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 
 	// Handle page-based to cursor conversion for compatibility
 	if page > 1 && lastArticleNum == 0 {
 		skipCount := (page - 1) * LIMIT_listGroups
 		var cursorArticleNum int64
-		err = database.RetryableQueryRowScan(groupDBs.DB, `
+		err = database.RetryableQueryRowScan(groupDB.DB, `
 			SELECT article_num FROM articles
 			WHERE hide = 0
 			ORDER BY article_num DESC
@@ -133,7 +133,7 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 		}
 	}
 
-	overviews, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, LIMIT_listGroups)
+	overviews, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_listGroups)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -186,13 +186,13 @@ func (s *WebServer) getArticle(c *gin.Context) {
 		return
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
 		return
 	}
-	defer groupDBs.Return(s.DB)
-	article, err := s.DB.GetArticleByNum(groupDBs, articleNum)
+	defer groupDB.Return()
+	article, err := s.DB.GetArticleByNum(groupDB, articleNum)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
 		return
@@ -210,13 +210,13 @@ func (s *WebServer) getArticleByMessageId(c *gin.Context) {
 		return // Error response already sent by checkGroupAccessAPI
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
 		return
 	}
-	defer groupDBs.Return(s.DB)
-	article, err := s.DB.GetArticleByMessageID(groupDBs, messageId)
+	defer groupDB.Return()
+	article, err := s.DB.GetArticleByMessageID(groupDB, messageId)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
 		return
@@ -233,13 +233,13 @@ func (s *WebServer) getGroupThreads(c *gin.Context) {
 		return // Error response already sent by checkGroupAccessAPI
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
 		return
 	}
-	defer groupDBs.Return(s.DB)
-	threads, err := s.DB.GetThreads(groupDBs)
+	defer groupDB.Return()
+	threads, err := s.DB.GetThreads(groupDB)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -336,22 +336,22 @@ func (s *WebServer) getArticlePreview(c *gin.Context) {
 	}
 
 	// Get group database
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 
 	// Get article overview for basic info
-	overview, err := s.DB.GetOverviewByArticleNum(groupDBs, articleNum)
+	overview, err := s.DB.GetOverviewByArticleNum(groupDB, articleNum)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
 		return
 	}
 
 	// Get article content (limited for preview)
-	article, err := s.DB.GetArticleByNum(groupDBs, articleNum)
+	article, err := s.DB.GetArticleByNum(groupDB, articleNum)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Article content not found"})
 		return

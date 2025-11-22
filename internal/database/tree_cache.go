@@ -63,9 +63,9 @@ func (tree *ThreadTree) GetTreeStats() TreeStats {
 }
 
 // BuildThreadTree constructs a hierarchical tree for a given thread root
-func (db *Database) BuildThreadTree(groupDBs *GroupDBs, threadRoot int64) (*ThreadTree, error) {
+func (db *Database) BuildThreadTree(groupDB *GroupDB, threadRoot int64) (*ThreadTree, error) {
 	// First check if we have a cached tree
-	if tree, err := db.GetCachedTree(groupDBs, threadRoot); err == nil {
+	if tree, err := db.GetCachedTree(groupDB, threadRoot); err == nil {
 		return tree, nil
 	}
 
@@ -75,7 +75,7 @@ func (db *Database) BuildThreadTree(groupDBs *GroupDBs, threadRoot int64) (*Thre
 	// Get all articles in this thread from thread_cache
 	var childArticles string
 	query := `SELECT child_articles FROM thread_cache WHERE thread_root = ?`
-	err := retryableQueryRowScan(groupDBs.DB, query, []interface{}{threadRoot}, &childArticles)
+	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{threadRoot}, &childArticles)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Thread cache not yet built - fall back to single article
@@ -100,7 +100,7 @@ func (db *Database) BuildThreadTree(groupDBs *GroupDBs, threadRoot int64) (*Thre
 	// Get overview data for all articles to access References headers
 	overviews := make(map[int64]*models.Overview)
 	for _, artNum := range allArticles {
-		if overview, err := db.GetOverviewByArticleNum(groupDBs, artNum); err == nil {
+		if overview, err := db.GetOverviewByArticleNum(groupDB, artNum); err == nil {
 			overviews[artNum] = overview
 		}
 	}
@@ -187,7 +187,7 @@ func (db *Database) BuildThreadTree(groupDBs *GroupDBs, threadRoot int64) (*Thre
 	tree.assignSortOrder()
 
 	// Cache the tree structure
-	if err := db.CacheTreeStructure(groupDBs, tree); err != nil {
+	if err := db.CacheTreeStructure(groupDB, tree); err != nil {
 		log.Printf("Failed to cache tree structure: %v", err)
 		// Don't fail - tree is still usable
 	}
@@ -196,11 +196,11 @@ func (db *Database) BuildThreadTree(groupDBs *GroupDBs, threadRoot int64) (*Thre
 }
 
 // GetCachedTree retrieves a pre-computed tree from the cache
-func (db *Database) GetCachedTree(groupDBs *GroupDBs, threadRoot int64) (*ThreadTree, error) {
+func (db *Database) GetCachedTree(groupDB *GroupDB, threadRoot int64) (*ThreadTree, error) {
 	// Check if tree cache exists and is recent
 	var lastUpdated time.Time
 	query := `SELECT last_updated FROM tree_stats WHERE thread_root = ?`
-	err := retryableQueryRowScan(groupDBs.DB, query, []interface{}{threadRoot}, &lastUpdated)
+	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{threadRoot}, &lastUpdated)
 	if err != nil {
 		return nil, fmt.Errorf("no cached tree found: %w", err)
 	}
@@ -211,7 +211,7 @@ func (db *Database) GetCachedTree(groupDBs *GroupDBs, threadRoot int64) (*Thread
 	}
 
 	// Load tree structure from cache
-	rows, err := retryableQuery(groupDBs.DB, `
+	rows, err := RetryableQuery(groupDB.DB, `
 		SELECT article_num, parent_article, depth, child_count, descendant_count,
 		       tree_path, sort_order
 		FROM cached_trees
@@ -270,7 +270,7 @@ func (db *Database) GetCachedTree(groupDBs *GroupDBs, threadRoot int64) (*Thread
 
 	// Load tree stats
 	statsQuery := `SELECT max_depth, total_nodes, leaf_count FROM tree_stats WHERE thread_root = ?`
-	err = retryableQueryRowScan(groupDBs.DB, statsQuery, []interface{}{threadRoot},
+	err = RetryableQueryRowScan(groupDB.DB, statsQuery, []interface{}{threadRoot},
 		&tree.MaxDepth, &tree.TotalNodes, &tree.LeafCount)
 	if err != nil {
 		log.Printf("Failed to load tree stats: %v", err)
@@ -285,9 +285,9 @@ func (db *Database) GetCachedTree(groupDBs *GroupDBs, threadRoot int64) (*Thread
 }
 
 // CacheTreeStructure saves a computed tree to the cache
-func (db *Database) CacheTreeStructure(groupDBs *GroupDBs, tree *ThreadTree) error {
+func (db *Database) CacheTreeStructure(groupDB *GroupDB, tree *ThreadTree) error {
 	// Start transaction for atomicity
-	tx, err := groupDBs.DB.Begin()
+	tx, err := groupDB.DB.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to start transaction: %w", err)
 	}
@@ -385,13 +385,13 @@ func (db *Database) CacheTreeStructure(groupDBs *GroupDBs, tree *ThreadTree) err
 }
 
 // InvalidateTreeCache removes cached tree data when thread structure changes
-func (db *Database) InvalidateTreeCache(groupDBs *GroupDBs, threadRoot int64) error {
-	_, err := retryableExec(groupDBs.DB, `DELETE FROM cached_trees WHERE thread_root = ?`, threadRoot)
+func (db *Database) InvalidateTreeCache(groupDB *GroupDB, threadRoot int64) error {
+	_, err := RetryableExec(groupDB.DB, `DELETE FROM cached_trees WHERE thread_root = ?`, threadRoot)
 	if err != nil {
 		return fmt.Errorf("failed to invalidate tree cache: %w", err)
 	}
 
-	_, err = retryableExec(groupDBs.DB, `DELETE FROM tree_stats WHERE thread_root = ?`, threadRoot)
+	_, err = RetryableExec(groupDB.DB, `DELETE FROM tree_stats WHERE thread_root = ?`, threadRoot)
 	if err != nil {
 		return fmt.Errorf("failed to invalidate tree stats: %w", err)
 	}

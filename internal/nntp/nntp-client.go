@@ -3,7 +3,6 @@ package nntp
 // nntp provides NNTP client functionality for go-pugleaf.
 
 import (
-	"bufio"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -12,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 )
 
@@ -43,32 +43,31 @@ const (
 	DefaultConnExpire = 25 * time.Second
 
 	// MaxReadLines is the maximum lines to read per response (allow for large group lists).
-	MaxReadLines = 500000
+	MaxReadLines = 1024 * 1024
 )
 
 // DefaultBufferTX is the default buffer size for bufio.Writer
 // when sending articles via POST/TAKETHIS/IHAVE commands.
-var DefaultBufferTX int = 64 * 1024
+var DefaultBufferTX int = 16 * 1024
 
 // BackendConn represents an NNTP connection to a server.
 // It manages the connection state, authentication, and provides methods
 // for interacting with the NNTP server.
 type BackendConn struct {
 	conn     net.Conn
-	textConn *textproto.Conn
-	writer   *bufio.Writer
+	TextConn *textproto.Conn
 	Backend  *BackendConfig
 	mux      sync.RWMutex
 	Pool     *Pool // link to parent pool
 
 	// Connection state
-	connected     bool
-	authenticated bool
-	ModeReader    bool
-	ModeStream    bool
-	forceClose    bool
-	created       time.Time
-	lastUsed      time.Time
+	isConnected chan struct{}
+	hasClosed   chan struct{}
+	ModeReader  bool
+	ModeStream  bool
+	forceClose  bool
+	created     time.Time
+	lastUsed    time.Time
 	// INN allows switching to mode reader when mode stream is active
 	// but INN does not allow switching to mode stream when mode reader is active
 	// when using check/takethis and we got a mode reader connection from pool
@@ -116,6 +115,7 @@ type GroupInfo struct {
 	FetchStart int64
 	FetchEnd   int64
 	PostingOK  bool
+	Status     string
 }
 
 // OverviewLine represents a line from XOVER command
@@ -139,8 +139,10 @@ type HeaderLine struct {
 // NewConn creates a new empty NNTP connection with the provided backend configuration.
 func NewConn(backend *BackendConfig) *BackendConn {
 	return &BackendConn{
-		Backend: backend,
-		created: time.Now(),
+		Backend:     backend,
+		created:     time.Now(),
+		isConnected: make(chan struct{}, 1),
+		hasClosed:   make(chan struct{}, 1),
 	}
 }
 
@@ -151,10 +153,12 @@ func (c *BackendConn) Connect() error {
 		c.Backend.ConnectTimeout = config.DefaultConnectTimeout
 	}
 	c.Backend.Mux.Unlock()
+
 	c.mux.Lock()
 	defer c.mux.Unlock()
-	if c.connected {
-		return nil
+	if c.IsConnected() {
+		log.Printf("[NNTP-CONN] ERROR: Tried Connect() but this conn is already connected to %s:%d hasClosed=%d", c.Backend.Host, c.Backend.Port, len(c.hasClosed))
+		return fmt.Errorf("connection already established to %s:%d", c.Backend.Host, c.Backend.Port)
 	}
 
 	// Check if this is a .onion address and automatically enable Tor if not already configured
@@ -200,11 +204,11 @@ func (c *BackendConn) Connect() error {
 	}
 
 	c.conn = conn
-	c.textConn = textproto.NewConn(conn)
-	c.writer = bufio.NewWriterSize(conn, DefaultBufferTX) // bufio writer with defined buffer size
+	c.TextConn = textproto.NewConn(conn)
+	//c.Writer = bufio.NewWriterSize(conn, DefaultBufferTX) // bufio writer with defined buffer size
 
 	// Read welcome message
-	code, message, err := c.textConn.ReadCodeLine(NNTPWelcomeCodeMin)
+	code, message, err := c.TextConn.ReadCodeLine(NNTPWelcomeCodeMin)
 	if err != nil {
 		log.Printf("[NNTP-CONN] Error reading welcome from %s:%d: %v", c.Backend.Host, c.Backend.Port, err)
 		return err
@@ -217,36 +221,35 @@ func (c *BackendConn) Connect() error {
 
 	//log.Printf("[NNTP-CONN] Successfully connected to %s:%d with welcome code %d", c.Backend.Host, c.Backend.Port, code)
 
-	c.connected = true
 	c.lastUsed = time.Now()
 
 	// Authenticate if credentials provided
 	if c.Backend.Username != "" {
 		//log.Printf("[NNTP-AUTH] Attempting authentication for user '%s' on %s:%d", c.Backend.Username, c.Backend.Host, c.Backend.Port)
 		if err := c.authenticate(); err != nil {
-			log.Printf("[NNTP-AUTH] Authentication FAILED for user '%s' on %s:%d err: %v", c.Backend.Username, c.Backend.Host, c.Backend.Port, err)
-			time.Sleep(time.Second * 5)
+			log.Printf("[NNTP-AUTH] Authentication FAILED for user '%s' on %s:%d err: %v (sleep 15s)", c.Backend.Username, c.Backend.Host, c.Backend.Port, err)
+			time.Sleep(time.Second * 15)
 			return err
 		}
 		//log.Printf("[NNTP-AUTH] Authentication SUCCESS for user '%s' on %s:%d", c.Backend.Username, c.Backend.Host, c.Backend.Port)
 	} else {
 		//log.Printf("[NNTP-AUTH] No credentials provided, skipping authentication for %s:%d", c.Backend.Host, c.Backend.Port)
 	}
-
+	c.isConnected <- struct{}{}
 	return nil
 }
 
 // authenticate performs NNTP authentication
 func (c *BackendConn) authenticate() error {
 	// Send AUTHINFO USER
-	id, err := c.textConn.Cmd("AUTHINFO USER %s", c.Backend.Username)
+	id, err := c.TextConn.Cmd("AUTHINFO USER %s", c.Backend.Username)
 	if err != nil {
 		return err
 	}
 
-	c.textConn.StartResponse(id)
-	code, message, err := c.textConn.ReadCodeLine(NNTPMoreInfoCode)
-	c.textConn.EndResponse(id)
+	c.TextConn.StartResponse(id)
+	code, message, err := c.TextConn.ReadCodeLine(NNTPMoreInfoCode)
+	c.TextConn.EndResponse(id)
 
 	if err != nil {
 		return err
@@ -257,14 +260,14 @@ func (c *BackendConn) authenticate() error {
 	}
 
 	// Send AUTHINFO PASS
-	id, err = c.textConn.Cmd("AUTHINFO PASS %s", c.Backend.Password)
+	id, err = c.TextConn.Cmd("AUTHINFO PASS %s", c.Backend.Password)
 	if err != nil {
 		return err
 	}
 
-	c.textConn.StartResponse(id)
-	code, message, err = c.textConn.ReadCodeLine(NNTPAuthSuccess)
-	c.textConn.EndResponse(id)
+	c.TextConn.StartResponse(id)
+	code, message, err = c.TextConn.ReadCodeLine(NNTPAuthSuccess)
+	c.TextConn.EndResponse(id)
 
 	if err != nil {
 		return err
@@ -274,7 +277,6 @@ func (c *BackendConn) authenticate() error {
 		return fmt.Errorf("authentication failed: %d %s", code, message)
 	}
 
-	c.authenticated = true
 	return nil
 }
 
@@ -283,29 +285,61 @@ func (c *BackendConn) CloseFromPoolOnly() error {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil
 	}
 
-	if c.textConn != nil {
-		if err := c.textConn.Close(); err != nil {
+	if c.TextConn != nil {
+		if err := c.TextConn.Close(); err != nil {
 			//log.Printf("Error closing text connection: %v", err)
 		}
 	}
 
 	if c.conn != nil {
 		if err := c.conn.Close(); err != nil {
-			//log.Printf("xx Error closing connection: %v", err)
+			//log.Printf("Error closing connection: %v", err)
 		}
 	}
 
-	c.connected = false
-	c.authenticated = false
-	c.textConn = nil // CloseFromPoolOnly
-	c.conn = nil     // CloseFromPoolOnly
-	c.writer = nil
-	//log.Printf("Closed NNTP Connection to %s", c.Backend.Host)
+	close(c.hasClosed)
+	<-c.isConnected
+	//c.TextConn = nil // CloseFromPoolOnly
+	//c.conn = nil     // CloseFromPoolOnly
+	//c.Writer = nil
+	log.Printf("Closed NNTP Connection to %s", c.Backend.Host)
 	return nil
+}
+
+func (c *BackendConn) ForceCloseConn() {
+	go func() {
+		c.mux.Lock()
+		if !c.forceClose {
+			c.forceClose = true
+		}
+		c.mux.Unlock()
+		c.Pool.Put(c)
+	}()
+}
+
+func (c *BackendConn) IsConnected() bool {
+	if common.IsClosedChannel(c.hasClosed) {
+		return false
+	}
+	if len(c.isConnected) == 0 {
+		return false
+	}
+	/*
+		c.mux.Lock()
+		//log.Printf("IsConnected check: connected=%v conn=%v", c.connected, c.conn)
+		defer c.mux.Unlock()
+		if !c.connected {
+			return false
+		}
+		if c.conn == nil {
+			return false
+		}
+	*/
+	return true
 }
 
 // SetReadDeadline sets the read deadline for the connection
@@ -334,4 +368,18 @@ func (c *BackendConn) UpdateLastUsed() {
 	c.mux.Unlock()
 	//c.SetReadDeadline(time.Now().Add(c.Backend.ReadTimeout))
 	//c.SetWriteDeadline(time.Now().Add(c.Backend.WriteTimeout))
+}
+
+func (c *BackendConn) GetBufSize(size int) int {
+	if size+1024 <= DefaultBufferTX {
+		return size + 1024
+	}
+	return DefaultBufferTX // hardcoded default max buffer size
+}
+
+func (c *BackendConn) Lock() {
+	c.mux.Lock()
+}
+func (c *BackendConn) Unlock() {
+	c.mux.Unlock()
 }

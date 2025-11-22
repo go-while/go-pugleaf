@@ -68,15 +68,15 @@ func (c *ClientConnection) handleXOver(args []string) error {
 	}
 
 	// Get group database
-	groupDBs, err := c.server.DB.GetGroupDBs(c.currentGroup)
+	groupDB, err := c.server.DB.GetGroupDB(c.currentGroup)
 	if err != nil {
 		c.rateLimitOnError()
 		return c.sendResponse(411, "No such newsgroup")
 	}
-	defer groupDBs.Return(c.server.DB)
+	defer groupDB.Return()
 
 	// Get overview data for the range
-	overviews, err := c.server.DB.GetOverviewsRange(groupDBs, startNum, endNum)
+	overviews, err := c.server.DB.GetOverviewsRange(groupDB, startNum, endNum)
 	if err != nil {
 		c.rateLimitOnError()
 		return c.sendResponse(503, "Failed to retrieve overview data")
