@@ -1,7 +1,6 @@
 package history
 
 import (
-	"bufio"
 	"crypto/md5"
 	"database/sql"
 	"encoding/hex"
@@ -10,7 +9,10 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/mattn/go-sqlite3"
 )
 
 const (
@@ -69,51 +71,66 @@ type DatabaseWorkChecker interface {
 	CheckNoMoreWorkInMaps() bool
 }
 
-// History manages message-ID history tracking using INN2-style architecture
+// History manages the global message-ID history index:
+// message-id -> comma-separated main-DB newsgroup IDs where the article is stored.
+// Group DBs are the source of truth, the index is idempotent and rebuildable.
 type History struct {
-	config      *HistoryConfig
-	mux         sync.RWMutex
-	historyFile *os.File
+	config  *HistoryConfig
+	enabled bool // copied once from ENABLE_HISTORY in NewHistory
 
 	// Database backend (SQLite with sharding)
-	db SQLite3ShardedPool
+	db *SQLite3ShardedDB
 
-	dbChan   chan *MessageIdItem
-	dbQueued map[*MessageIdItem]bool
+	// Writer queue: small value ops, no shared pointers
+	opChan  chan historyOp
+	pending atomic.Int64 // ops counted but not yet committed (queued, in channel or in current batch)
 
-	// Shutdown signaling (similar to db_batch.go pattern)
-	stopChan chan struct{}
-	tickChan chan struct{}
-	// Batching for high-throughput writes
-	//pendingBatch []*MessageIdItem
-	batchMux sync.RWMutex
-	//flushMux   sync.Mutex // Prevents concurrent flush operations
-	lastFlush  time.Time
-	processing bool
+	// Shutdown signaling
+	closed      atomic.Bool   // set by Close(): no new ops accepted
+	dbClosed    atomic.Bool   // set right before the DB pools get closed: no more reads
+	closeChan   chan struct{} // closed by Close() to wake up the writer
+	closeOnce   sync.Once
+	writerDone  chan struct{} // closed by the writer after its final flush + checkpoint
+	writerAlive bool          // writer goroutine was started (immutable after NewHistory)
 
-	// Wait group for graceful shutdown (passed from main application)
+	// Wait group for graceful shutdown (passed from main application, may be nil)
 	mainWG *sync.WaitGroup
 
 	// Database work checker interface for coordinated shutdown
+	checkerMux    sync.RWMutex
 	dbWorkChecker DatabaseWorkChecker
 
-	// Buffered writer for efficient file operations
-	fileWriter *bufio.Writer
+	// Log throttling
+	invalidOps   atomic.Int64
+	closedWarned atomic.Bool
 
 	// Statistics
-	stats *HistoryStats
+	stats historyCounters
 }
 
-// HistoryEntry represents an entry in the history system
-// HistoryStats tracks statistics for the history system
+// historyCounters holds the live statistics counters
+type historyCounters struct {
+	lookups    atomic.Int64
+	adds       atomic.Int64
+	removes    atomic.Int64
+	duplicates atomic.Int64
+	errors     atomic.Int64
+	flushes    atomic.Int64
+	committed  atomic.Int64
+}
+
+// HistoryStats is a point-in-time snapshot of the history statistics
 type HistoryStats struct {
-	mux              sync.RWMutex
 	TotalLookups     int64
-	TotalFileLookups int64
-	TotalAdds        int64
-	CacheHits        int64
-	CacheMisses      int64
-	Duplicates       int64
+	TotalFileLookups int64 // legacy, always 0
+	TotalAdds        int64 // AddArticle ops queued
+	TotalRemoves     int64 // RemoveArticle ops queued
+	TotalCommitted   int64 // ops written to the index
+	Flushes          int64
+	Pending          int64
+	CacheHits        int64 // legacy, always 0
+	CacheMisses      int64 // legacy, always 0
+	Duplicates       int64 // lookups that found an existing row
 	Errors           int64
 }
 
@@ -124,12 +141,11 @@ type HistoryConfig struct {
 	CachePurge      int64  `yaml:"cache_purge" json:"cache_purge"`
 	ShardMode       int    `yaml:"shard_mode" json:"shard_mode"`
 	MaxConnections  int    `yaml:"max_connections" json:"max_connections"`
-	UseShortHashLen int    `yaml:"use_short_hash_len" json:"use_short_hash_len"` // 2-7 chars stored in DB (default 3)
+	UseShortHashLen int    `yaml:"use_short_hash_len" json:"use_short_hash_len"` // legacy, unused by the message_id schema
 
 	// Batching configuration for high-throughput writes
-	BatchSize    int   `yaml:"batch_size" json:"batch_size"`       // Number of entries to batch (default 200)
-	BatchTimeout int64 `yaml:"batch_timeout" json:"batch_timeout"` // Timeout in milliseconds for forced flush (default 5000)
-	//WriterChanSize int   `yaml:"writer_chan_size" json:"writer_chan_size"` // Writer channel buffer size (default 65535)
+	BatchSize    int   `yaml:"batch_size" json:"batch_size"`       // Number of ops per flush (default DefaultBatchSize)
+	BatchTimeout int64 `yaml:"batch_timeout" json:"batch_timeout"` // Milliseconds between forced flushes (default DefaultBatchTimeout)
 }
 
 // DefaultConfig returns a default history configuration
@@ -140,23 +156,20 @@ func DefaultConfig() *HistoryConfig {
 		CachePurge:      DefaultCachePurge,
 		ShardMode:       SHARD_16_256, // 16 databases with 256 tables
 		MaxConnections:  32,           //
-		UseShortHashLen: 7,            // 3+7 = 10 bits of entropy
+		UseShortHashLen: 7,            // legacy
 
 		// Batching configuration for high throughput
 		BatchSize:    DefaultBatchSize,
 		BatchTimeout: DefaultBatchTimeout,
-		//WriterChanSize: DefaultWriterChanSize,
 	}
 }
 
 // ValidateConfig validates and adjusts configuration values
 func (c *HistoryConfig) ValidateConfig() error {
 	if c.UseShortHashLen < 2 {
-		log.Printf("WARN: UseShortHashLen %d too small, adjusting to 2", c.UseShortHashLen)
 		c.UseShortHashLen = 2
 	}
 	if c.UseShortHashLen > 7 {
-		log.Printf("WARN: UseShortHashLen %d too large, adjusting to 7", c.UseShortHashLen)
 		c.UseShortHashLen = 7
 	}
 
@@ -172,6 +185,13 @@ func (c *HistoryConfig) ValidateConfig() error {
 		c.CachePurge = DefaultCachePurge
 	}
 
+	if c.ShardMode != SHARD_16_256 {
+		if c.ShardMode != 0 {
+			log.Printf("[HISTORY] WARN: ShardMode %d unsupported, using SHARD_16_256", c.ShardMode)
+		}
+		c.ShardMode = SHARD_16_256 // unchangeable !
+	}
+
 	if c.MaxConnections <= 0 {
 		c.MaxConnections = 8
 	}
@@ -180,66 +200,49 @@ func (c *HistoryConfig) ValidateConfig() error {
 	if c.BatchSize <= 0 {
 		c.BatchSize = DefaultBatchSize
 	}
-	if c.BatchSize > 10000 { // Reasonable upper limit
-		log.Printf("WARN: BatchSize %d very large, consider reducing for memory usage", c.BatchSize)
+	if c.BatchSize > 100000 { // Reasonable upper limit
+		log.Printf("[HISTORY] WARN: BatchSize %d very large, consider reducing for memory usage", c.BatchSize)
 	}
 
 	if c.BatchTimeout <= 0 {
 		c.BatchTimeout = DefaultBatchTimeout
 	}
-	/*
-		if c.WriterChanSize <= 0 {
-			c.WriterChanSize = DefaultWriterChanSize
-		}
-	*/
 	return nil
 }
 
-// applyPerformanceSettings applies SQLite performance optimizations via PRAGMA
-// Following the same pattern as group databases to avoid locking issues
-func applyPerformanceSettings(db *sql.DB, mode int) error {
-	// Critical: Apply WAL mode FIRST to eliminate all locking issues
-	criticalPragmas := []string{
-		"PRAGMA journal_mode = WAL",    // MUST be first - eliminates read/write locks
-		"PRAGMA locking_mode = NORMAL", // Ensure normal locking (not EXCLUSIVE)
-		"PRAGMA synchronous = OFF",     // performance
-		"PRAGMA busy_timeout = 30000",  // 30s busy timeout BEFORE other operations
-	}
+// historyDriverName is the database/sql driver used for the history DBs.
+// It is the regular go-sqlite3 driver plus a ConnectHook, so every pooled
+// connection gets the same settings (a plain db.Exec("PRAGMA ...") only reaches one connection).
+const historyDriverName = "sqlite3_history"
 
-	// Apply critical settings first - use simple Exec() like group databases
-	for _, pragma := range criticalPragmas {
-		if _, err := db.Exec(pragma); err != nil {
-			log.Printf("ERROR: Critical PRAGMA failed: %s - %v", pragma, err)
-			return fmt.Errorf("critical PRAGMA failed: %s - %v", pragma, err)
-		}
-		//log.Printf("INFO: Applied %s", pragma)
-	}
+// historyDSNParams are applied by go-sqlite3 on every new connection
+const historyDSNParams = "?_journal_mode=WAL&_synchronous=OFF&_busy_timeout=30000&_txlock=immediate&_cache_size=-8000"
 
-	// Apply remaining performance optimizations
+var historyDriverOnce sync.Once
+
+// registerHistoryDriver registers the history sqlite3 driver exactly once
+func registerHistoryDriver() {
+	historyDriverOnce.Do(func() {
+		sql.Register(historyDriverName, &sqlite3.SQLiteDriver{
+			ConnectHook: applyPerformanceSettings,
+		})
+	})
+}
+
+// applyPerformanceSettings applies the PRAGMAs that have no DSN parameter.
+// Runs as ConnectHook on every new connection (after the DSN params were applied).
+func applyPerformanceSettings(conn *sqlite3.SQLiteConn) error {
 	pragmas := []string{
-		"PRAGMA cache_size = -16000", // MB cache = /-1000
-		"PRAGMA temp_store = MEMORY", // Temp tables/indices in RAM
-		"PRAGMA mmap_size = 16777216",
-		"PRAGMA page_size = 4096",          // 4KB page size (default)
+		"PRAGMA temp_store = MEMORY",       // Temp tables/indices in RAM
+		"PRAGMA mmap_size = 16777216",      // 16MB mmap
 		"PRAGMA wal_autocheckpoint = 2000", // Checkpoint every N pages
-		//"PRAGMA foreign_keys = OFF",        // Disable FK checks (we don't use them)
-		"PRAGMA auto_vacuum = INCREMENTAL", // Incremental vacuum for space reclaim
-		"PRAGMA wal_checkpoint(TRUNCATE)",  // Clean WAL on startup
-		//"PRAGMA analysis_limit = 1000",     // Limit ANALYZE for faster startup
-		//"PRAGMA optimize",                  // Run query planner optimizations
 	}
-
-	// Apply cache size based on shard mode
-	cacheSize := getAdaptiveCacheSize(mode)
-	pragmas = append(pragmas, fmt.Sprintf("PRAGMA cache_size = %d", cacheSize))
-
 	for _, pragma := range pragmas {
-		if _, err := db.Exec(pragma); err != nil {
-			log.Printf("WARN: Failed to execute %s: %v", pragma, err)
-			// Continue with other pragmas even if one fails
+		if _, err := conn.Exec(pragma, nil); err != nil {
+			// best-effort: performance only, never fail the connection
+			log.Printf("[HISTORY] WARN: Failed to execute %s: %v", pragma, err)
 		}
 	}
-
 	return nil
 }
 
@@ -249,23 +252,12 @@ func dirExists(path string) bool {
 	if os.IsNotExist(err) {
 		return false
 	}
-	return info.IsDir()
+	return err == nil && info.IsDir()
 }
 
 func mkdir(path string) bool {
 	err := os.MkdirAll(path, 0755)
 	return err == nil
-}
-
-// getAdaptiveCacheSize returns optimal cache_size for each sharding mode
-func getAdaptiveCacheSize(mode int) int {
-	switch mode {
-	case SHARD_16_256:
-		return 2000 // ~8MB per DB, total ~128MB
-	default:
-		log.Fatalf("ERROR: Unsupported shard mode %d", mode)
-	}
-	return 0 // Unreachable, but keeps compiler happy
 }
 
 // hexToInt converts a hex string to int
@@ -280,16 +272,6 @@ func ComputeMessageIDHash(messageID string) string {
 	return hex.EncodeToString(hash[:])
 }
 
-/*
-// GetHashPrefix returns the configured length prefix of a hash
-func (h *History) xxxGetHashPrefix(hash string) string {
-	if len(hash) < h.config.HashPrefixLen {
-		return hash
-	}
-	return hash[:h.config.HashPrefixLen]
-}
-*/
-
 // initDatabase initializes the database backend with sharding
 func (h *History) initDatabase() error {
 	// Use sharded database implementation
@@ -297,17 +279,16 @@ func (h *History) initDatabase() error {
 		Mode:         h.config.ShardMode,
 		BaseDir:      h.config.HistoryDir,
 		MaxOpenPerDB: h.config.MaxConnections,
-		//Timeout:      30,
 	}
 
-	shardedDB, err := NewSQLite3ShardedDB(config, true, h.config.UseShortHashLen)
+	shardedDB, err := NewSQLite3ShardedDB(config, true)
 	if err != nil {
 		return fmt.Errorf("failed to initialize SQLite3 sharded system: %v", err)
 	}
 
 	h.db = shardedDB
 	numDBs, tablesPerDB, description := GetShardConfig(h.config.ShardMode)
-	log.Printf("SQLite3 sharded system initialized: %s (%d DBs, %d tables per DB)",
+	log.Printf("[HISTORY] SQLite3 sharded system initialized: %s (%d DBs, %d tables per DB)",
 		description, numDBs, tablesPerDB)
 	return nil
 }
