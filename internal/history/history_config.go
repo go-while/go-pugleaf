@@ -39,29 +39,13 @@ type SQLite3Opts struct {
 	timeout  int64
 }
 
-// ThreadingInfo holds per-group threading information for a message
-type ThreadingInfo struct {
-	RootArticle  int64 // Thread root article number (0 if this IS the root)
-	ChildArticle int64 // Child article reference (for threading hierarchy)
-	IsThreadRoot bool  // True if this article is a thread root
-	ArtNum       int64 // Article number in this specific group
-}
-
 type MessageIdItem struct {
 	Mux                sync.RWMutex // Protects all fields below
 	CachedEntryExpires time.Time    // Exported field for cache entry expiration
 	MessageId          string       // pointer to article.messageid
 	MessageIdHash      string       // Computed hash of the message-ID
 	NewsgroupIDs       []int64      // Newsgroup IDs this message-ID belongs to
-	//StorageToken       string       // pointer to storage token
-
-	//ArtNums   map[int64]int64 // maps newsgroup IDs (key) to Article numbers
-	//GroupName *string // Group name this article belongs to (primary group)
-	Arrival  int64 // When article arrived
-	Response int
-
-	// Group-specific threading information (replaces global threading fields)
-	GroupThreading map[*string]*ThreadingInfo // Per-group threading info for crossposted articles
+	Response           int
 }
 
 // DatabaseWorkChecker interface allows History to check if database batch system has pending work
