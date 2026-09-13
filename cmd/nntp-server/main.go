@@ -81,12 +81,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer db.Shutdown()
 
 	// Add waitgroup coordination for proper shutdown
 	wg := &sync.WaitGroup{}
-	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
-	db.WG.Add(1) // Adds for history: one for writer worker
 
 	// Set hostname in processor with database fallback support
 	if err := processor.SetHostname(nntphostname, db); err != nil {
@@ -145,7 +142,26 @@ func main() {
 		log.Printf("Error shutting down NNTP server: %v", err)
 	}
 	wg.Wait()
-	db.Shutdown()
+	log.Printf("[NNTP]: Server stopped, initiating database shutdown...")
+
+	// Signal database background workers (batch orchestrators) to stop
+	close(db.StopChan)
+
+	// Close the processor
+	if err := proc.Close(); err != nil {
+		log.Printf("[NNTP]: Warning: Failed to close processor: %v", err)
+	} else {
+		log.Printf("[NNTP]: Processor closed successfully")
+	}
+
+	log.Printf("[NNTP]: Database: waiting for background tasks to finish...")
 	db.WG.Wait()
-	log.Println("NNTP server example stopped")
+	log.Printf("[NNTP]: Database: all background tasks completed")
+
+	if err := db.Shutdown(); err != nil {
+		log.Printf("[NNTP]: Failed to shutdown database: %v", err)
+	} else {
+		log.Printf("[NNTP]: Database shutdown successfully")
+	}
+	log.Println("NNTP server stopped")
 }

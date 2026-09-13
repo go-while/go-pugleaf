@@ -153,8 +153,6 @@ func main() {
 	log.Printf("Starting SQLite import from: %s", *sqliteDir)
 	log.Printf("Target database directory: %s", *dataDir)
 
-	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
-	db.WG.Add(1) // Adds for history: one for writer worker
 	err = proc.ImportAllSQLiteDatabases(*sqliteDir, *threads)
 	if err != nil {
 		log.Fatalf("Failed to import SQLite databases: %v", err)

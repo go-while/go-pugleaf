@@ -229,11 +229,7 @@ func main() {
 	database.GlobalDateParser = processor.ParseNNTPDate
 	//log.Printf("[WEB]: Date parser adapter initialized with processor.ParseNNTPDate")
 
-	// Note: Database batch workers are started automatically by OpenDatabase()
-	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
-	if history.ENABLE_HISTORY {
-		db.WG.Add(1) // Adds for history: one for writer worker
-	}
+	// Note: Database batch workers are started automatically by OpenDatabase() (which also adds them to db.WG)
 
 	// Set hostname in processor with database fallback support
 	if err := processor.SetHostname(nntphostname, db); err != nil {
