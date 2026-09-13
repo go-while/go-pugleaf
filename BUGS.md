@@ -13,8 +13,7 @@
 
 # nntp-server (low priority)
  - reading should work but needs testing
- - requesting articles via message-id does not work
- - posting does not work because history and hashdb is disabled
- - history + hashdb (sqlite3_sharded) eats memory and has IO issues
- - peering does not work. unfinished code.
-
+ - requesting articles via message-id uses the history index (message-id -> newsgroups), needs testing
+ - posting / IHAVE / TAKETHIS check the history index for duplicates, needs testing
+ - peering does not work: CHECK and outgoing feeds are unfinished code
+ - the history index must be (re)built with cmd/history-rebuild for articles imported before it was enabled

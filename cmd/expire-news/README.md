@@ -48,7 +48,8 @@ The `expire-news` tool manages article lifecycle in newsgroups by providing two 
 | `-dry-run` | Preview mode - show what would be deleted | false |
 | `-force` | Required for actual deletions | false |
 | `-batch-size` | Articles to process per batch | 1000 |
-| `-nntphostname` | Server hostname | Required |
+| `-trim-history` | Also remove deleted articles from the message-id history index | false |
+| `-data` | Data directory | `./data` |
 
 ### Group Selection Patterns
 
@@ -88,6 +89,29 @@ Removes oldest articles (by `article_num`) to keep groups under their `max_artic
 **Default Behavior**: Groups with `max_articles = 0` are considered to have no count limit (keep forever).
 
 **Pruning Logic**: If a group has 920 articles and `max_articles = 10`, it will delete articles 1-910 and keep articles 911-920 (the newest 10).
+
+### History Index (`-trim-history`)
+
+By default expired or pruned articles **stay in the message-id history index**
+(`<data>/history`), INN-style "remember": the server keeps rejecting them as duplicates
+when a peer or fetcher offers them again.
+
+With `-trim-history` (live mode only, ignored with `-dry-run`) the message-ids of the
+deleted articles are read inside the delete transaction and, after the commit, this
+group's ID is removed from their history entries. An entry without any group left is
+deleted. Crossposts stay in the index for their other groups.
+
+```bash
+./expire-news -group '$all' -days 30 -force -trim-history
+```
+
+The whole index can also be trimmed later with `history-rebuild -trim`.
+
+### Articles without date_sent
+
+Articles with a NULL or unparseable `date_sent` are never expired by age. They are
+counted and reported per group (`skipped N articles without a valid date_sent`);
+`-prune` still removes them by article number.
 
 ## Database Schema Requirements
 
@@ -189,6 +213,9 @@ The tool handles various error conditions gracefully:
 - Database connection issues are logged and processing continues with other groups
 - Invalid article data is logged but doesn't stop the process
 - Transaction failures cause rollback and error reporting
+- Ctrl+C stops after the current group; queued history removals are flushed and the
+  databases are shut down cleanly
+- Exit code: 0 ok, 1 errors, 130 interrupted
 
 ## Integration
 

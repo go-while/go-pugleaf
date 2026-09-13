@@ -3,16 +3,18 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
-	"math"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,33 +22,39 @@ import (
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
-	"github.com/go-while/go-pugleaf/internal/processor"
+	"github.com/go-while/go-pugleaf/internal/models"
 )
 
+// maxPrintedMisses limits the misses printed with -validate-only -verbose
+const maxPrintedMisses = 100
+
+// trimChunkSize is the number of history rows read per query during -trim
+const trimChunkSize = 10000
+
 type RebuildStats struct {
+	GroupsTotal       int64
 	GroupsProcessed   int64
+	GroupsSkipped     int64 // resumed or without group DB file
 	ArticlesProcessed int64
-	ArticlesSkipped   int64
-	HistoryAdded      int64
-	HistoryFound      int64 // Articles found in history during validation
+	HistoryQueued     int64 // AddArticle calls (rebuild)
+	HistoryFound      int64 // validate: message-id found with this group
+	HistoryMissing    int64 // validate: message-id not in history
+	HistoryWrongGroup int64 // validate: message-id in history, but without this group
 	Errors            int64
 	StartTime         time.Time
+	EndTime           time.Time // set when scanning is done (before flush/shutdown)
+	lastProgress      int64
 }
 
-type HistoryAnalysisStats struct {
-	TotalEntries          int64
-	SingleOffsets         int64
-	MultipleOffsets       int64
-	MaxCollisions         int
-	TotalCollisions       int64
-	DatabaseCount         int
-	TableCount            int
-	AverageCollisions     float64
-	CollisionRate         float64
-	UseShortHashLen       int
-	WorstCollisionHash    string
-	WorstCollisionCount   int
-	CollisionDistribution map[int]int64 // collision count -> how many hashes have that many collisions
+type TrimStats struct {
+	RowsScanned    int64
+	GroupRefs      int64
+	Removed        int64
+	GroupsMissing  int64 // refs to a group ID not in the main DB (or without group DB file)
+	ArticleMissing int64 // refs where the group DB does not have the article
+	Errors         int64
+	StartTime      time.Time
+	EndTime        time.Time
 }
 
 var appVersion = "-unset-"
@@ -55,309 +63,659 @@ func main() {
 	config.AppVersion = appVersion
 	log.Printf("Starting go-pugleaf History Rebuild Tool (version %s)", config.AppVersion)
 
-	// Set Go runtime memory limit to 4GB to prevent excessive heap growth
-	//debug.SetMemoryLimit(4 * 1024 * 1024 * 1024) // 4GB limit
-
 	var (
-		batchSize        = flag.Int("batch-size", 5000, "Number of articles to process per batch (deprecated - now processes individually)")
-		progressInterval = flag.Int("progress", 2500, "Show progress every N articles")
-		validateOnly     = flag.Bool("validate-only", false, "Only validate existing history, don't rebuild")
-		clearFirst       = flag.Bool("clear-first", false, "Clear existing history before rebuild")
+		batchSize        = flag.Int("batch-size", 10000, "Article number range scanned per query")
+		progressInterval = flag.Int("progress", 100000, "Show progress every N articles")
+		validateOnly     = flag.Bool("validate-only", false, "Only check that every article of every group is in the history index (no writes)")
+		analyzeOnly      = flag.Bool("analyze-only", false, "Only analyze the history database files (read-only row counts and groups-per-message-id histogram)")
+		trim             = flag.Bool("trim", false, "Remove history entries whose article no longer exists in the group DB (slow full sweep)")
+		restart          = flag.Bool("restart", false, "Rebuild: ignore and remove the rebuild.progress file and start with the first group")
 		verbose          = flag.Bool("verbose", false, "Enable verbose logging")
-		useShortHashLen  = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
-		analyzeOnly      = flag.Bool("analyze-only", false, "Only analyze existing history databases and show statistics")
-		showCollisions   = flag.Bool("show-collisions", false, "Show detailed collision information (use with -analyze-only)")
-		readOffset       = flag.Int64("read-offset", -1, "Read and display history.dat entry at specific offset (for debugging hash mismatches)")
+		useShortHashLen  = flag.Int("useshorthashlen", 7, "No effect since Nov 2025 (history stores full message-ids), accepted for compatibility")
 		pprofAddr        = flag.String("pprof", "", "Enable pprof HTTP server on specified address (e.g., ':6060')")
 		dataDir          = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
+	_ = useShortHashLen
 
-	// Start pprof server if requested
+	modes := 0
+	for _, m := range []bool{*validateOnly, *analyzeOnly, *trim} {
+		if m {
+			modes++
+		}
+	}
+	if modes > 1 {
+		log.Fatalf("Only one of -validate-only, -analyze-only, -trim can be used")
+	}
+	if *batchSize <= 0 {
+		log.Fatalf("-batch-size must be > 0")
+	}
+	if *progressInterval <= 0 {
+		*progressInterval = 100000
+	}
+
 	if *pprofAddr != "" {
 		go func() {
-			log.Printf("🔍 Starting pprof server on %s", *pprofAddr)
-			log.Printf("   Memory profile: http://localhost%s/debug/pprof/heap", *pprofAddr)
-			log.Printf("   CPU profile: http://localhost%s/debug/pprof/profile", *pprofAddr)
-			log.Printf("   Goroutines: http://localhost%s/debug/pprof/goroutine", *pprofAddr)
+			log.Printf("Starting pprof server on %s", *pprofAddr)
 			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
 				log.Printf("pprof server failed: %v", err)
 			}
 		}()
 	}
 
-	fmt.Println("🔄 Go-Pugleaf History Rebuild Utility")
-	fmt.Println("======================================")
+	historyDir := filepath.Join(*dataDir, "history")
 
-	fmt.Printf("Configuration:\n")
-	fmt.Printf("  Batch Size:         %d\n", *batchSize)
-	fmt.Printf("  Validate Only:      %t\n", *validateOnly)
-	fmt.Printf("  Analyze Only:       %t\n", *analyzeOnly)
+	fmt.Println("Go-Pugleaf History Rebuild Utility")
+	fmt.Println("==================================")
+	fmt.Printf("  Data dir:       %s\n", *dataDir)
+	fmt.Printf("  History dir:    %s\n", historyDir)
+	switch {
+	case *analyzeOnly:
+		fmt.Printf("  Mode:           analyze (read-only)\n")
+	case *validateOnly:
+		fmt.Printf("  Mode:           validate (read-only)\n")
+	case *trim:
+		fmt.Printf("  Mode:           trim\n")
+	default:
+		fmt.Printf("  Mode:           rebuild (restart=%t)\n", *restart)
+	}
+	fmt.Println()
+
+	// analyze reads the history files directly, no main DB needed
 	if *analyzeOnly {
-		fmt.Printf("  Show Collisions:    %t\n", *showCollisions)
+		res, err := analyzeHistoryDir(historyDir)
+		if err != nil {
+			log.Fatalf("Failed to analyze history: %v", err)
+		}
+		printHistoryAnalysis(res, *verbose)
+		if res.MissingFiles > 0 {
+			os.Exit(1)
+		}
+		return
 	}
-	if *readOffset >= 0 {
-		fmt.Printf("  Read Offset:        %d\n", *readOffset)
-	}
-	if *pprofAddr != "" {
-		fmt.Printf("  Pprof Server:       %s\n", *pprofAddr)
-	}
-	fmt.Printf("  Clear First:        %t\n", *clearFirst)
-	fmt.Printf("\n")
 
-	// Initialize database
-	fmt.Println("📊 Initializing database connection...")
+	if (*validateOnly || *trim) && !history.DirExists(historyDir) {
+		log.Fatalf("History directory %s does not exist, nothing to validate/trim", historyDir)
+	}
+
+	database.NO_CACHE_BOOT = true // prevents booting caches
 	dbConfig := database.DefaultDBConfig()
 	dbConfig.DataDir = *dataDir
-
 	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer db.Shutdown()
 
-	// Handle UseShortHashLen configuration with locking
-	fmt.Println("🔒 Checking locked history configuration...")
-	lockedHashLen, isLocked, err := db.GetHistoryUseShortHashLen(*useShortHashLen)
+	history.ENABLE_HISTORY = true
+	hcfg := history.DefaultConfig()
+	hcfg.HistoryDir = historyDir
+	h, err := history.NewHistory(hcfg, db.WG)
 	if err != nil {
-		log.Fatalf("Failed to get locked history hash length: %v", err)
+		log.Printf("Failed to open history: %v", err)
+		shutdownDatabase(db)
+		os.Exit(1)
 	}
 
-	if !isLocked {
-		log.Fatalf("ERROR: History system not initialized. UseShortHashLen must be locked by running the main web server or other tools first.")
-	}
-
-	if *useShortHashLen != lockedHashLen {
-		log.Printf("WARNING: Command line UseShortHashLen (%d) differs from locked value (%d). Using locked value to prevent data corruption.", *useShortHashLen, lockedHashLen)
-	} else {
-		fmt.Printf("✅ Using locked UseShortHashLen: %d\n", lockedHashLen)
-	}
-
-	// Handle offset reading mode (doesn't need processor)
-	if *readOffset >= 0 {
-		fmt.Printf("🔍 Reading history.dat at offset %d...\n", *readOffset)
-		err := readHistoryAtOffset(*readOffset, lockedHashLen)
-		if err != nil {
-			log.Fatalf("Failed to read history at offset %d: %v", *readOffset, err)
-		}
-
-		// Simple database shutdown for read-only operation
-		if err := db.Shutdown(); err != nil {
-			log.Fatalf("[HISTORY-REBUILD]: Failed to shutdown database: %v", err)
-		}
-		log.Printf("[HISTORY-REBUILD]: Database shutdown successfully")
-		return
-	}
-
-	// Initialize processor with proper cache management
-	fmt.Println("🔧 Initializing processor for cache management...")
-	proc := processor.NewProcessor(db, nil, lockedHashLen) // nil pool since we're not fetching
-	// Set up the date parser adapter to use processor's ParseNNTPDate
-	database.GlobalDateParser = processor.ParseNNTPDate
-	// Cleanup function for graceful shutdown
-	cleanup := func() {
-		// Close the proc/processor (flushes history, stops processing)
-		log.Printf("[HISTORY-REBUILD]: Shutting down processor and waiting for workers to finish...")
-		if err := proc.Close(); err != nil {
-			log.Printf("[HISTORY-REBUILD]: Warning: Failed to close processor: %v", err)
-		} else {
-			log.Printf("[HISTORY-REBUILD]: Processor closed successfully")
-		}
-
-		// Signal background tasks to stop
-		close(db.StopChan)
-
-		// Wait for all database operations to complete
-		log.Printf("[HISTORY-REBUILD]: Waiting for background tasks to finish...")
-		db.WG.Wait()
-		log.Printf("[HISTORY-REBUILD]: All background tasks completed, shutting down database...")
-
-		if err := db.Shutdown(); err != nil {
-			log.Fatalf("[HISTORY-REBUILD]: Failed to shutdown database: %v", err)
-		} else {
-			log.Printf("[HISTORY-REBUILD]: Database shutdown successfully")
-		}
-
-		log.Printf("[HISTORY-REBUILD]: Graceful shutdown completed")
-	}
-
-	// Check if we should only analyze existing history
-	if *analyzeOnly {
-		fmt.Println("📊 Analyzing existing history databases...")
-
-		analysisStats, err := analyzeHistoryDatabasesReal(*showCollisions, lockedHashLen)
-		if err != nil {
-			log.Fatalf("Failed to analyze history databases: %v", err)
-		}
-
-		printHistoryAnalysis(analysisStats)
-		cleanup()
-		return
-	}
-
-	if *clearFirst && !*validateOnly {
-		fmt.Println("🗑️  Clearing existing history...")
-		if err := clearHistory(); err != nil {
-			log.Fatalf("Failed to clear history: %v", err)
-		}
-		fmt.Println("✅ History cleared")
-	}
-
-	// Get all newsgroups
-	fmt.Println("📋 Getting list of newsgroups...")
-	groups, err := db.MainDBGetAllNewsgroups()
-	if err != nil {
-		log.Fatalf("Failed to get newsgroups: %v", err)
-	}
-
-	fmt.Printf("Found %d newsgroups to process\n\n", len(groups))
-
-	// Set up cross-platform signal handling for graceful shutdown
+	// Ctrl+C: stop after the current range/chunk, then flush and shut down
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt) // Cross-platform (Ctrl+C on both Windows and Linux)
-
-	// Create context for cancellation
+	signal.Notify(sigChan, os.Interrupt)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Monitor for shutdown signals in background
 	go func() {
 		<-sigChan
-		log.Printf("[HISTORY-REBUILD]: Received shutdown signal, initiating graceful shutdown...")
+		log.Printf("[HISTORY-REBUILD]: Received shutdown signal, stopping after the current range...")
 		cancel()
 	}()
 
-	// Initialize statistics
-	stats := &RebuildStats{
-		StartTime: time.Now(),
+	var errCount int64
+	var trimStats *TrimStats
+	var groupStats *RebuildStats
+	if *trim {
+		trimStats = runTrim(ctx, db, h, *dataDir, historyDir, *verbose)
+		trimStats.EndTime = time.Now()
+		errCount = trimStats.Errors
+	} else {
+		groupStats = runGroups(ctx, db, h, *dataDir, historyDir, *batchSize, *progressInterval, *validateOnly, *restart, *verbose)
+		groupStats.EndTime = time.Now()
+		errCount = groupStats.Errors
 	}
 
-	// Process each group
-processingLoop:
+	// Shutdown: history first (blocks until all queued ops are committed), then the database
+	log.Printf("[HISTORY-REBUILD]: Closing history (pending=%d)...", h.GetStats().Pending)
+	if err := h.Close(); err != nil {
+		log.Printf("[HISTORY-REBUILD]: Failed to close history: %v", err)
+		errCount++
+	}
+	hs := h.GetStats()
+	log.Printf("[HISTORY-REBUILD]: History closed: adds=%d removes=%d committed=%d flushes=%d errors=%d",
+		hs.TotalAdds, hs.TotalRemoves, hs.TotalCommitted, hs.Flushes, hs.Errors)
+	errCount += hs.Errors
+	if !shutdownDatabase(db) {
+		errCount++
+	}
+
+	if trimStats != nil {
+		trimStats.PrintFinal(ctx.Err() != nil)
+	} else {
+		groupStats.PrintFinal(*validateOnly, ctx.Err() != nil)
+	}
+
+	switch {
+	case errCount > 0:
+		fmt.Printf("\nCompleted with %d errors. Check logs for details.\n", errCount)
+		os.Exit(1)
+	case ctx.Err() != nil:
+		fmt.Println("\nInterrupted. Queued history ops were flushed; re-run to continue.")
+		os.Exit(130)
+	}
+}
+
+// shutdownDatabase stops the database background workers and closes all databases
+func shutdownDatabase(db *database.Database) bool {
+	close(db.StopChan)
+	db.WG.Wait()
+	if err := db.Shutdown(); err != nil {
+		log.Printf("[HISTORY-REBUILD]: Failed to shutdown database: %v", err)
+		return false
+	}
+	return true
+}
+
+// runGroups rebuilds (default) or validates the history index from all group databases
+func runGroups(ctx context.Context, db *database.Database, h *history.History, dataDir, historyDir string,
+	batchSize, progressInterval int, validateOnly, restart, verbose bool) *RebuildStats {
+
+	stats := &RebuildStats{StartTime: time.Now()}
+
+	groups, err := db.MainDBGetAllNewsgroups()
+	if err != nil {
+		log.Printf("Failed to get newsgroups: %v", err)
+		stats.Errors++
+		return stats
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
+	stats.GroupsTotal = int64(len(groups))
+
+	lastDone := ""
+	if !validateOnly {
+		if restart {
+			if err := removeRebuildProgress(historyDir); err != nil {
+				log.Printf("Failed to remove progress file: %v", err)
+				stats.Errors++
+				return stats
+			}
+		} else {
+			lastDone, err = readRebuildProgress(historyDir)
+			if err != nil {
+				log.Printf("Failed to read progress file: %v", err)
+				stats.Errors++
+				return stats
+			}
+			if lastDone != "" {
+				log.Printf("[REBUILD] Resuming after group '%s' (use -restart to start over)", lastDone)
+			}
+		}
+	}
+	fmt.Printf("Found %d newsgroups to process\n\n", len(groups))
+
 	for _, group := range groups {
-		// Check for cancellation
-		select {
-		case <-ctx.Done():
-			log.Printf("[HISTORY-REBUILD]: Shutdown requested, stopping processing...")
-			break processingLoop
-		default:
-			// Continue processing
+		if ctx.Err() != nil {
+			break
+		}
+		if skipGroupForResume(group.Name, lastDone) {
+			stats.GroupsSkipped++
+			continue
+		}
+		if !database.FileExists(groupDBFilePath(dataDir, group.Name)) {
+			if verbose {
+				log.Printf("[REBUILD] Skipping group '%s': no group DB file", group.Name)
+			}
+			stats.GroupsSkipped++
+			if !validateOnly {
+				if err := writeRebuildProgress(historyDir, group.Name); err != nil {
+					log.Printf("Failed to write progress file: %v", err)
+					stats.Errors++
+				}
+			}
+			continue
 		}
 
-		if *verbose {
-			fmt.Printf("Processing group: %s\n", group.Name)
-		}
-
-		err := processGroup(db, proc, group.Name, *progressInterval, *validateOnly, *verbose, stats)
+		completed, err := processGroup(ctx, db, h, group, batchSize, progressInterval, validateOnly, verbose, stats)
 		if err != nil {
 			log.Printf("Error processing group '%s': %v", group.Name, err)
 			stats.Errors++
+			continue
 		}
-
+		if !completed {
+			break // interrupted inside the group: do not mark it done
+		}
 		stats.GroupsProcessed++
-
-		// Show progress every group
-		stats.PrintProgress()
-	}
-
-	// Check if shutdown was requested during processing
-	select {
-	case <-ctx.Done():
-		log.Printf("[HISTORY-REBUILD]: Processing was interrupted by shutdown signal")
-		fmt.Println("\n⚠️  Processing interrupted by shutdown signal")
-	default:
-		// Normal completion
-	}
-
-	// Perform graceful shutdown
-	cleanup()
-
-	// Final statistics
-	stats.PrintFinal()
-
-	if stats.Errors > 0 {
-		fmt.Printf("\n⚠️  Completed with %d errors. Check logs for details.\n", stats.Errors)
-		os.Exit(1)
-	} else {
-		if ctx.Err() != nil {
-			fmt.Println("\n⚠️  Processing was interrupted but completed gracefully!")
-		} else {
-			fmt.Println("\n🎉 All groups processed successfully!")
-		}
-	}
-}
-
-func (s *RebuildStats) PrintProgress() {
-	elapsed := time.Since(s.StartTime)
-	rate := float64(s.ArticlesProcessed) / elapsed.Seconds()
-
-	// Get memory stats for progress output
-	realMem, _ := getRealMemoryUsage()
-
-	if s.HistoryAdded > 0 {
-		// Rebuild mode
-		fmt.Printf("\r📊 Progress: %d groups, %d articles processed, %d added to history, %d errors | %.1f articles/sec | %v elapsed | RSS: %s\n",
-			s.GroupsProcessed,
-			s.ArticlesProcessed,
-			s.HistoryAdded,
-			s.Errors,
-			rate,
-			elapsed.Truncate(time.Second),
-			formatBytes(realMem))
-	} else {
-		// Validation mode
-		fmt.Printf("\r📊 Progress: %d groups, %d articles processed, %d found in history, %d missing, %d errors | %.1f articles/sec | %v elapsed | RSS: %s\n",
-			s.GroupsProcessed,
-			s.ArticlesProcessed,
-			s.HistoryFound,
-			s.ArticlesSkipped,
-			s.Errors,
-			rate,
-			elapsed.Truncate(time.Second),
-			formatBytes(realMem))
-	}
-}
-
-func (s *RebuildStats) PrintFinal() {
-	elapsed := time.Since(s.StartTime)
-	rate := float64(s.ArticlesProcessed) / elapsed.Seconds()
-
-	if s.HistoryAdded > 0 {
-		// Rebuild mode
-		fmt.Printf("\n\n✅ Rebuild Complete!\n")
-		fmt.Printf("=====================================\n")
-		fmt.Printf("Groups Processed:    %d\n", s.GroupsProcessed)
-		fmt.Printf("Articles Processed:  %d\n", s.ArticlesProcessed)
-		fmt.Printf("Articles Skipped:    %d\n", s.ArticlesSkipped)
-		fmt.Printf("History Entries:     %d\n", s.HistoryAdded)
-		fmt.Printf("Errors:              %d\n", s.Errors)
-		fmt.Printf("Total Time:          %v\n", elapsed.Truncate(time.Second))
-		fmt.Printf("Processing Rate:     %.1f articles/sec\n", rate)
-		fmt.Printf("Memory Usage:        %s\n", formatBytes(getRealMemoryUsageSimple()))
-	} else {
-		// Validation mode
-		fmt.Printf("\n\n✅ Validation Complete!\n")
-		fmt.Printf("=====================================\n")
-		fmt.Printf("Groups Processed:    %d\n", s.GroupsProcessed)
-		fmt.Printf("Articles Processed:  %d\n", s.ArticlesProcessed)
-		fmt.Printf("Found in History:    %d\n", s.HistoryFound)
-		fmt.Printf("Missing from History:%d\n", s.ArticlesSkipped)
-		fmt.Printf("Errors:              %d\n", s.Errors)
-		fmt.Printf("Total Time:          %v\n", elapsed.Truncate(time.Second))
-		fmt.Printf("Processing Rate:     %.1f articles/sec\n", rate)
-		fmt.Printf("Memory Usage:        %s\n", formatBytes(getRealMemoryUsageSimple()))
-
-		// Add validation summary
-		if s.ArticlesProcessed > 0 {
-			foundPercentage := float64(s.HistoryFound) / float64(s.ArticlesProcessed) * 100
-			fmt.Printf("\n📊 Validation Summary:\n")
-			fmt.Printf("  Coverage:            %.2f%% of articles found in history\n", foundPercentage)
-			if s.ArticlesSkipped > 0 {
-				fmt.Printf("  ⚠️  %d articles missing from history (%.2f%%)\n", s.ArticlesSkipped, 100-foundPercentage)
-			} else {
-				fmt.Printf("  ✅ All articles found in history!\n")
+		if !validateOnly {
+			if err := writeRebuildProgress(historyDir, group.Name); err != nil {
+				log.Printf("Failed to write progress file: %v", err)
+				stats.Errors++
 			}
 		}
+		stats.PrintProgress(h, validateOnly)
+	}
+
+	if !validateOnly && ctx.Err() == nil {
+		// loop finished (not interrupted): the next run starts from the beginning again
+		if err := removeRebuildProgress(historyDir); err != nil {
+			log.Printf("Failed to remove progress file: %v", err)
+		}
+	}
+	return stats
+}
+
+const query_processGroup = `SELECT message_id, article_num FROM articles
+				  WHERE message_id IS NOT NULL AND message_id != ''
+				    AND article_num >= ? AND article_num <= ?
+		          ORDER BY article_num`
+
+const query_processGroupNext = `SELECT MIN(article_num) FROM articles WHERE message_id IS NOT NULL AND message_id != '' AND article_num > ?`
+
+// processGroup scans one group DB by article_num ranges. completed=false if ctx was cancelled.
+func processGroup(ctx context.Context, db *database.Database, h *history.History, group *models.Newsgroup,
+	batchSize, progressInterval int, validateOnly, verbose bool, stats *RebuildStats) (completed bool, err error) {
+
+	if group.ID <= 0 {
+		return false, fmt.Errorf("invalid group ID %d", group.ID)
+	}
+	groupDB, err := db.GetGroupDB(group.Name)
+	if err != nil {
+		return false, fmt.Errorf("failed to get group database: %w", err)
+	}
+	defer groupDB.Return()
+
+	var minArtNum, maxArtNum sql.NullInt64
+	err = database.RetryableQueryRowScan(groupDB.DB, `SELECT MIN(article_num), MAX(article_num) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &minArtNum, &maxArtNum)
+	if err != nil {
+		return false, fmt.Errorf("failed to get article number range: %w", err)
+	}
+	if !minArtNum.Valid || !maxArtNum.Valid {
+		return true, nil // no articles
+	}
+	if verbose {
+		log.Printf("[REBUILD] Processing group '%s' (id=%d): article range %d-%d", group.Name, group.ID, minArtNum.Int64, maxArtNum.Int64)
+	}
+
+	var groupArticles int64
+	groupStart := time.Now()
+	current := minArtNum.Int64
+	for current <= maxArtNum.Int64 {
+		if ctx.Err() != nil {
+			return false, nil
+		}
+		rangeEnd := current + int64(batchSize) - 1
+		if rangeEnd > maxArtNum.Int64 {
+			rangeEnd = maxArtNum.Int64
+		}
+		n, err := processRange(groupDB, h, group, current, rangeEnd, validateOnly, verbose, stats)
+		if err != nil {
+			return false, err
+		}
+		groupArticles += n
+
+		if stats.ArticlesProcessed-stats.lastProgress >= int64(progressInterval) {
+			stats.lastProgress = stats.ArticlesProcessed
+			stats.PrintProgress(h, validateOnly)
+		}
+
+		if rangeEnd >= maxArtNum.Int64 {
+			break
+		}
+		current = rangeEnd + 1
+		if n == 0 {
+			// sparse numbering: jump to the next existing article
+			var next sql.NullInt64
+			if err := database.RetryableQueryRowScan(groupDB.DB, query_processGroupNext, []interface{}{rangeEnd}, &next); err != nil {
+				return false, fmt.Errorf("failed to find next article after %d: %w", rangeEnd, err)
+			}
+			if !next.Valid {
+				break
+			}
+			current = next.Int64
+		}
+	}
+	if verbose || groupArticles >= 10000 {
+		log.Printf("[REBUILD] Group '%s': %d articles in %v", group.Name, groupArticles, time.Since(groupStart).Truncate(time.Millisecond))
+	}
+	return true, nil
+}
+
+// processRange handles the articles of one article_num range, returns the number of articles seen
+func processRange(groupDB *database.GroupDB, h *history.History, group *models.Newsgroup, from, to int64,
+	validateOnly, verbose bool, stats *RebuildStats) (int64, error) {
+
+	rows, err := database.RetryableQuery(groupDB.DB, query_processGroup, from, to)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query article range %d-%d: %w", from, to, err)
+	}
+	defer rows.Close()
+
+	var n int64
+	for rows.Next() {
+		var messageID string
+		var articleNum int64
+		if err := rows.Scan(&messageID, &articleNum); err != nil {
+			log.Printf("Error scanning row in group '%s': %v", group.Name, err)
+			stats.Errors++
+			continue
+		}
+		n++
+		stats.ArticlesProcessed++
+
+		if !validateOnly {
+			h.AddArticle(messageID, group.ID)
+			stats.HistoryQueued++
+			continue
+		}
+
+		groupIDs, err := h.LookupGroups(messageID)
+		switch {
+		case err != nil:
+			log.Printf("[VALIDATE] lookup failed for '%s' in '%s': %v", messageID, group.Name, err)
+			stats.Errors++
+		case groupIDs == nil:
+			stats.HistoryMissing++
+			if verbose && stats.HistoryMissing+stats.HistoryWrongGroup <= maxPrintedMisses {
+				log.Printf("[VALIDATE] miss: '%s' (group '%s' article %d)", messageID, group.Name, articleNum)
+			}
+		case !containsID(groupIDs, group.ID):
+			stats.HistoryWrongGroup++
+			if verbose && stats.HistoryMissing+stats.HistoryWrongGroup <= maxPrintedMisses {
+				log.Printf("[VALIDATE] group missing: '%s' (group '%s' id=%d article %d, history has %v)", messageID, group.Name, group.ID, articleNum, groupIDs)
+			}
+		default:
+			stats.HistoryFound++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return n, fmt.Errorf("error reading article range %d-%d: %w", from, to, err)
+	}
+	return n, nil
+}
+
+func containsID(ids []int64, id int64) bool {
+	for _, v := range ids {
+		if v == id {
+			return true
+		}
+	}
+	return false
+}
+
+// trimGroupInfo caches the result of resolving a group ID during -trim
+type trimGroupInfo struct {
+	name   string
+	usable bool // group exists in the main DB and has a group DB file
+}
+
+// runTrim sweeps every history row and removes group IDs whose article is gone from the group DB
+func runTrim(ctx context.Context, db *database.Database, h *history.History, dataDir, historyDir string, verbose bool) *TrimStats {
+	ts := &TrimStats{StartTime: time.Now()}
+	fmt.Println("NOTE: -trim is a slow full sweep: every history row is checked against the group databases.")
+
+	numDBs, tablesPerDB, _ := history.GetShardConfig(history.SHARD_16_256)
+	groupCache := make(map[int64]*trimGroupInfo)
+	lastReport := time.Now()
+
+	for dbIndex := 0; dbIndex < numDBs; dbIndex++ {
+		path := historyFilePath(historyDir, dbIndex)
+		rodb, err := openHistoryFileReadOnly(path)
+		if err != nil {
+			log.Printf("[TRIM] Failed to open %s read-only: %v", path, err)
+			ts.Errors++
+			continue
+		}
+		for tableIndex := 0; tableIndex < tablesPerDB; tableIndex++ {
+			if ctx.Err() != nil {
+				rodb.Close()
+				return ts
+			}
+			tableName := historyTableName(tableIndex)
+			if err := trimTable(ctx, db, h, rodb, tableName, dataDir, groupCache, verbose, ts); err != nil {
+				log.Printf("[TRIM] Error in %s table %s: %v", path, tableName, err)
+				ts.Errors++
+			}
+			if time.Since(lastReport) >= 10*time.Second {
+				lastReport = time.Now()
+				log.Printf("[TRIM] db %x table %s: scanned=%d refs=%d removed=%d errors=%d (%v elapsed)",
+					dbIndex, tableName, ts.RowsScanned, ts.GroupRefs, ts.Removed, ts.Errors, time.Since(ts.StartTime).Truncate(time.Second))
+			}
+		}
+		rodb.Close()
+		log.Printf("[TRIM] Finished %s: scanned=%d removed=%d", path, ts.RowsScanned, ts.Removed)
+	}
+	return ts
+}
+
+type trimRow struct {
+	messageID  string
+	newsgroups string
+}
+
+// trimTable scans one history table in message_id order (keyset chunks)
+func trimTable(ctx context.Context, db *database.Database, h *history.History, rodb *sql.DB, tableName, dataDir string,
+	groupCache map[int64]*trimGroupInfo, verbose bool, ts *TrimStats) error {
+
+	query := "SELECT message_id, newsgroups FROM " + tableName + " WHERE message_id > ? ORDER BY message_id LIMIT ?"
+	after := ""
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		// read the chunk fully before checking groups: keeps the read transaction short
+		rows, err := rodb.Query(query, after, trimChunkSize)
+		if err != nil {
+			return err
+		}
+		chunk := make([]trimRow, 0, trimChunkSize)
+		for rows.Next() {
+			var r trimRow
+			var ng sql.NullString
+			if err := rows.Scan(&r.messageID, &ng); err != nil {
+				rows.Close()
+				return err
+			}
+			r.newsgroups = ng.String
+			chunk = append(chunk, r)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if len(chunk) == 0 {
+			return nil
+		}
+
+		for _, r := range chunk {
+			ts.RowsScanned++
+			for _, part := range strings.Split(r.newsgroups, ",") {
+				part = strings.TrimSpace(part)
+				if part == "" {
+					continue
+				}
+				groupID, err := strconv.ParseInt(part, 10, 64)
+				if err != nil || groupID <= 0 {
+					log.Printf("[TRIM] invalid group id '%s' for '%s'", part, r.messageID)
+					ts.Errors++
+					continue
+				}
+				ts.GroupRefs++
+				info, err := resolveTrimGroup(db, dataDir, groupID, groupCache)
+				if err != nil {
+					log.Printf("[TRIM] failed to resolve group id %d: %v", groupID, err)
+					ts.Errors++
+					continue
+				}
+				if !info.usable {
+					ts.GroupsMissing++
+					h.RemoveArticle(r.messageID, groupID)
+					ts.Removed++
+					continue
+				}
+				exists, err := articleExistsInGroup(db, info.name, r.messageID)
+				if err != nil {
+					log.Printf("[TRIM] failed to check '%s' in '%s': %v", r.messageID, info.name, err)
+					ts.Errors++
+					continue
+				}
+				if !exists {
+					ts.ArticleMissing++
+					if verbose {
+						log.Printf("[TRIM] remove '%s' from group '%s' (id=%d)", r.messageID, info.name, groupID)
+					}
+					h.RemoveArticle(r.messageID, groupID)
+					ts.Removed++
+				}
+			}
+		}
+		after = chunk[len(chunk)-1].messageID
+		if len(chunk) < trimChunkSize {
+			return nil
+		}
+	}
+}
+
+// resolveTrimGroup resolves (and caches) a group ID. A group that is not in the main DB or has no
+// group DB file is not usable: none of its articles exist. Other lookup errors are returned (no removal).
+func resolveTrimGroup(db *database.Database, dataDir string, groupID int64, cache map[int64]*trimGroupInfo) (*trimGroupInfo, error) {
+	if info, ok := cache[groupID]; ok {
+		return info, nil
+	}
+	info := &trimGroupInfo{}
+	ng, err := db.MainDBGetNewsgroupByID(groupID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		log.Printf("[TRIM] group id %d does not exist in the main DB: removing its history refs", groupID)
+	case err != nil:
+		return nil, err
+	default:
+		info.name = ng.Name
+		database.NewsgroupDBsIDcache.SetNewsgroupNameByID(groupID, ng.Name)
+		if database.FileExists(groupDBFilePath(dataDir, ng.Name)) {
+			info.usable = true
+		} else {
+			log.Printf("[TRIM] group '%s' (id=%d) has no group DB file: removing its history refs", ng.Name, groupID)
+		}
+	}
+	cache[groupID] = info
+	return info, nil
+}
+
+// articleExistsInGroup is like GroupDB.ExistsMsgIdInArticlesDB, but returns query errors
+// instead of reporting them as "not found" (trim must not remove entries on a DB error).
+func articleExistsInGroup(db *database.Database, groupName, messageID string) (bool, error) {
+	groupDB, err := db.GetGroupDB(groupName)
+	if err != nil {
+		return false, err
+	}
+	defer groupDB.Return()
+	var one int
+	err = database.RetryableQueryRowScan(groupDB.DB, "SELECT 1 FROM articles WHERE message_id = ? LIMIT 1", []interface{}{messageID}, &one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *RebuildStats) PrintProgress(h *history.History, validateOnly bool) {
+	elapsed := time.Since(s.StartTime)
+	rate := float64(s.ArticlesProcessed) / elapsed.Seconds()
+	realMem, _ := getRealMemoryUsage()
+	if validateOnly {
+		fmt.Printf("Progress: %d/%d groups (%d skipped), %d articles, %d found, %d missing, %d wrong group, %d errors | %.1f articles/sec | %v elapsed | RSS: %s\n",
+			s.GroupsProcessed, s.GroupsTotal, s.GroupsSkipped, s.ArticlesProcessed, s.HistoryFound, s.HistoryMissing, s.HistoryWrongGroup, s.Errors,
+			rate, elapsed.Truncate(time.Second), formatBytes(realMem))
+		return
+	}
+	hs := h.GetStats()
+	fmt.Printf("Progress: %d/%d groups (%d skipped), %d articles, %d queued, %d committed, %d pending, %d errors | %.1f articles/sec | %v elapsed | RSS: %s\n",
+		s.GroupsProcessed, s.GroupsTotal, s.GroupsSkipped, s.ArticlesProcessed, s.HistoryQueued, hs.TotalCommitted, hs.Pending, s.Errors+hs.Errors,
+		rate, elapsed.Truncate(time.Second), formatBytes(realMem))
+}
+
+func (s *RebuildStats) PrintFinal(validateOnly, interrupted bool) {
+	elapsed := s.EndTime.Sub(s.StartTime)
+	rate := float64(s.ArticlesProcessed) / elapsed.Seconds()
+	fmt.Printf("\n%s %s\n", map[bool]string{true: "Validation", false: "Rebuild"}[validateOnly], finalState(interrupted))
+	fmt.Printf("=====================================\n")
+	fmt.Printf("Groups:              %d total, %d processed, %d skipped\n", s.GroupsTotal, s.GroupsProcessed, s.GroupsSkipped)
+	fmt.Printf("Articles Processed:  %d\n", s.ArticlesProcessed)
+	if validateOnly {
+		fmt.Printf("Found in History:    %d\n", s.HistoryFound)
+		fmt.Printf("Missing:             %d\n", s.HistoryMissing)
+		fmt.Printf("Group not in entry:  %d\n", s.HistoryWrongGroup)
+		if s.ArticlesProcessed > 0 {
+			fmt.Printf("Coverage:            %.2f%%\n", float64(s.HistoryFound)/float64(s.ArticlesProcessed)*100)
+		}
+	} else {
+		fmt.Printf("History Ops Queued:  %d\n", s.HistoryQueued)
+	}
+	fmt.Printf("Errors:              %d\n", s.Errors)
+	fmt.Printf("Scan Time:           %v (without final flush)\n", elapsed.Truncate(time.Millisecond))
+	fmt.Printf("Processing Rate:     %.1f articles/sec\n", rate)
+}
+
+func (ts *TrimStats) PrintFinal(interrupted bool) {
+	fmt.Printf("\nTrim %s\n", finalState(interrupted))
+	fmt.Printf("=====================================\n")
+	fmt.Printf("History Rows Scanned: %d\n", ts.RowsScanned)
+	fmt.Printf("Group References:     %d\n", ts.GroupRefs)
+	fmt.Printf("Removed References:   %d (group gone: %d, article gone: %d)\n", ts.Removed, ts.GroupsMissing, ts.ArticleMissing)
+	fmt.Printf("Errors:               %d\n", ts.Errors)
+	fmt.Printf("Scan Time:            %v (without final flush)\n", ts.EndTime.Sub(ts.StartTime).Truncate(time.Millisecond))
+}
+
+func finalState(interrupted bool) string {
+	if interrupted {
+		return "Interrupted"
+	}
+	return "Complete"
+}
+
+// printHistoryAnalysis prints the result of analyzeHistoryDir
+func printHistoryAnalysis(res *HistoryAnalysis, verbose bool) {
+	fmt.Printf("History Database Analysis: %s\n", res.HistoryDir)
+	fmt.Printf("=====================================\n")
+	for i, fa := range res.Files {
+		if fa.Missing {
+			fmt.Printf("  hashdb_%x.sqlite3: MISSING\n", i)
+			continue
+		}
+		fmt.Printf("  hashdb_%x.sqlite3: %12d rows | tables %d | min %s=%d max %s=%d\n",
+			i, fa.Rows, fa.Tables, fa.MinTable, fa.MinRows, fa.MaxTable, fa.MaxRows)
+		if verbose {
+			for t, n := range fa.TableRows {
+				fmt.Printf("      %s: %d\n", historyTableName(t), n)
+			}
+		}
+	}
+	fmt.Printf("\nTotal message-ids:   %d\n", res.TotalRows)
+	if res.MissingFiles > 0 {
+		fmt.Printf("Missing files:       %d\n", res.MissingFiles)
+	}
+	fmt.Printf("\nGroups per message-id:\n")
+	keys := make([]int, 0, len(res.GroupsHistogram))
+	for k := range res.GroupsHistogram {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	var histTotal int64
+	for _, n := range res.GroupsHistogram {
+		histTotal += n
+	}
+	for _, k := range keys {
+		pct := 0.0
+		if histTotal > 0 {
+			pct = float64(res.GroupsHistogram[k]) / float64(histTotal) * 100
+		}
+		fmt.Printf("  %4d groups: %12d (%.2f%%)\n", k, res.GroupsHistogram[k], pct)
 	}
 }
 
@@ -374,19 +732,13 @@ func formatBytes(bytes uint64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-func getMemoryUsage() uint64 {
-	var m runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&m)
-	return m.Alloc
-}
-
 // getRealMemoryUsage gets actual RSS memory usage from /proc/self/status on Linux
 func getRealMemoryUsage() (uint64, error) {
 	file, err := os.Open("/proc/self/status")
 	if err != nil {
-		// Fallback to runtime stats if /proc/self/status not available
-		return getMemoryUsage(), nil
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return m.Alloc, nil
 	}
 	defer file.Close()
 
@@ -394,665 +746,15 @@ func getRealMemoryUsage() (uint64, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "VmRSS:") {
-			// Parse VmRSS line: "VmRSS: 123456 kB"
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
 				if kb, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
-					return kb * 1024, nil // Convert KB to bytes
+					return kb * 1024, nil
 				}
 			}
 		}
 	}
-	// Fallback to runtime stats if VmRSS not found
-	return getMemoryUsage(), nil
-}
-
-// getRealMemoryUsageSimple gets real memory usage without error handling
-func getRealMemoryUsageSimple() uint64 {
-	mem, _ := getRealMemoryUsage()
-	return mem
-}
-
-const query_processGroup = `SELECT message_id, article_num FROM articles
-				  WHERE message_id IS NOT NULL AND message_id != ''
-				    AND article_num >= ? AND article_num <= ?
-		          ORDER BY article_num`
-
-func processGroup(db *database.Database, proc *processor.Processor, groupName string, progressInterval int, validateOnly, verbose bool, stats *RebuildStats) error {
-
-	// Get group databases
-	groupDB, err := db.GetGroupDB(groupName)
-	if err != nil {
-		return fmt.Errorf("failed to get group databases: %w", err)
-	}
-	defer groupDB.Return()
-	/*
-		// Configure SQLite for memory efficiency
-		if groupDB.DB != nil {
-			// Reduce SQLite memory usage
-			groupDB.DB.Exec("PRAGMA cache_size = 1000")     // Reduce page cache (default ~2MB)
-			groupDB.DB.Exec("PRAGMA temp_store = MEMORY")   // Use memory for temp storage (faster)
-			groupDB.DB.Exec("PRAGMA mmap_size = 134217728") // Limit mmap to 128MB
-			groupDB.DB.Exec("PRAGMA journal_mode = WAL")    // Use WAL mode for better concurrency
-			log.Printf("[SQLITE-CONFIG] Configured SQLite memory limits for group '%s'", groupName)
-		}
-	*/
-
-	// Get total count first
-	var totalArticles int64
-	err = database.RetryableQueryRowScan(groupDB.DB, `SELECT COUNT(*) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &totalArticles)
-	if err != nil {
-		return fmt.Errorf("failed to count articles: %w", err)
-	}
-
-	if totalArticles == 0 {
-		return nil // No articles to process
-	}
-
-	// Process articles using article number ranges for better performance
-	const batchSize = 10000
-
-	// Get the min and max article numbers for efficient range processing
-	var minArtNum, maxArtNum int64
-	err = database.RetryableQueryRowScan(groupDB.DB, `SELECT MIN(article_num), MAX(article_num) FROM articles WHERE message_id IS NOT NULL AND message_id != ''`, nil, &minArtNum, &maxArtNum)
-	if err != nil {
-		return fmt.Errorf("failed to get article number range: %w", err)
-	}
-
-	log.Printf("[REBUILD] Processing group '%s': article range %d-%d (%d total articles)", groupName, minArtNum, maxArtNum, totalArticles)
-
-	processed := 0
-	currentArtNum := minArtNum
-	groupStartTime := time.Now() // Track total time for this group
-
-	for currentArtNum <= maxArtNum {
-		maxRangeArtNum := currentArtNum + batchSize - 1
-		if maxRangeArtNum > maxArtNum {
-			maxRangeArtNum = maxArtNum
-		}
-		rows, err := database.RetryableQuery(groupDB.DB, query_processGroup, currentArtNum, maxRangeArtNum)
-		if err != nil {
-			return fmt.Errorf("failed to query article range %d-%d: %w", currentArtNum, maxRangeArtNum, err)
-		}
-
-		batchCount := 0
-		// Process each row immediately instead of loading into memory
-		for rows.Next() {
-			var messageID string
-			var articleNum int64
-
-			if err := rows.Scan(&messageID, &articleNum); err != nil {
-				log.Printf("Error scanning row in group '%s': %v", groupName, err)
-				stats.Errors++
-				continue
-			}
-
-			batchCount++
-			/*
-				if messageID == "<32304224.79C1@parkcity.com>" {
-					log.Printf("[DEBUG-STEP1] Found specific message ID: %s in ng: %s (article num: %d)", messageID, groupName, articleNum)
-					//os.Exit(1) // Debug exit for specific message ID
-				}*/
-
-			// Process article immediately to avoid memory accumulation
-			// Process article immediately to avoid memory accumulation
-			/*
-				if messageID == "<32304224.79C1@parkcity.com>" {
-					log.Printf("[DEBUG-STEP2] Processing target message ID: %s (article num: %d) in ng: %s", messageID, articleNum, groupName)
-				}*/
-
-			//itemStart := time.Now()
-			// Use the processor's MsgIdCache for proper cache management
-			msgIdItem := proc.MsgIdCache.GetORCreate(messageID)
-			if msgIdItem == nil {
-				log.Printf("Error: MsgIdItem is nil for message ID %s", messageID)
-				stats.Errors++
-				continue
-			}
-
-			/*
-				if messageID == "<32304224.79C1@parkcity.com>" {
-					log.Printf("[DEBUG-STEP3] Created msgIdItem for target message ID: %s, current response: %x", messageID, msgIdItem.Response)
-				}*/
-
-			//setupStart := time.Now()
-			// Thread-safe update of MessageIdItem fields
-			msgIdItem.Mux.Lock()
-			if !validateOnly {
-				if msgIdItem.Response > 0 {
-					/*
-						if messageID == "<32304224.79C1@parkcity.com>" {
-							log.Printf("[DEBUG-STEP4-SKIP] Target message ID already processed with response %x, skipping!", msgIdItem.Response)
-						}*/
-					//log.Printf("[DUPLICATE] response (%x) msgId='%s' ng: '%s'", msgIdItem.Response, messageID, groupName)
-					msgIdItem.Mux.Unlock()
-					continue
-				}
-				//msgIdItem.GroupName = db.Batch.GetNewsgroupPointer(groupName)
-				//msgIdItem.ArtNum = articleNum
-				msgIdItem.Response = history.CaseLock
-				/*
-					if messageID == "<32304224.79C1@parkcity.com>" {
-						log.Printf("[DEBUG-STEP5] Set up target message ID for history add: response=%x, token=%s", msgIdItem.Response, msgIdItem.StorageToken)
-					}*/
-			}
-			msgIdItem.Mux.Unlock()
-
-			//addStart := time.Now()
-			// Process article
-			if validateOnly {
-				msgIdItem.Mux.Lock()
-				msgIdItem.Response = history.CaseLock
-				msgIdItem.CachedEntryExpires = time.Now().Add(history.CachedEntryTTL)
-				msgIdItem.Mux.Unlock()
-				// Validation mode: check if article exists in history
-				result, _, err := proc.History.Lookup(msgIdItem, true)
-				if err == nil && result == history.CaseDupes {
-					stats.HistoryFound++
-					msgIdItem.Mux.Lock()
-					msgIdItem.Response = history.CaseDupes
-					msgIdItem.CachedEntryExpires = time.Now().Add(history.CachedEntryTTL)
-					msgIdItem.Mux.Unlock()
-				} else {
-					if verbose {
-						log.Printf("[HISTORY] miss: '%s'", msgIdItem.MessageId)
-					}
-					msgIdItem.Mux.Lock()
-					msgIdItem.Response = history.CaseError
-					msgIdItem.CachedEntryExpires = time.Now().Add(history.CachedEntryTTL)
-					msgIdItem.Mux.Unlock()
-					stats.ArticlesSkipped++
-				}
-			} else {
-				/*
-					if messageID == "<32304224.79C1@parkcity.com>" {
-						log.Printf("[DEBUG-STEP6] About to call proc.History.Add() for target message ID: %s", messageID)
-					}
-				*/
-				// Rebuild mode: add article to history
-				if proc.History.Add(msgIdItem) {
-					stats.HistoryAdded++
-				} else {
-					log.Printf("[HISTORY-REBUILD] did not add: '%s'", msgIdItem.MessageId)
-					stats.ArticlesSkipped++
-				}
-				/*
-					if messageID == "<32304224.79C1@parkcity.com>" {
-						log.Printf("[DEBUG-STEP7] Called proc.History.Add() for target message ID: %s - should reach history system now!", messageID)
-					}
-				*/
-
-			}
-			//addTime := time.Since(addStart)
-
-			stats.ArticlesProcessed++
-			processed++
-
-			// Show periodic debug info
-			if processed%10000 == 0 {
-				totalElapsed := time.Since(groupStartTime)
-				rate := float64(processed) / totalElapsed.Seconds()
-
-				// Check channel length indirectly via CheckNoMoreWorkInHistory
-				hasWork := !proc.History.CheckNoMoreWorkInHistory()
-				channelStatus := "empty"
-				if hasWork {
-					channelStatus = "has-work"
-				}
-
-				// Get detailed memory stats
-				var m runtime.MemStats
-				runtime.ReadMemStats(&m)
-				realMem, _ := getRealMemoryUsage()
-
-				log.Printf("[REBUILD-DEBUG] %d articles in %v (%.1f/sec) - channel: %s | Heap=%s RSS=%s Sys=%s NumGC=%d",
-					processed, totalElapsed, rate, channelStatus, formatBytes(m.Alloc), formatBytes(realMem), formatBytes(m.Sys), m.NumGC)
-			}
-		}
-		rows.Close()
-
-		//log.Printf("[REBUILD] DB get %d articles ng: '%s' (range %d-%d) query took %v", batchCount, groupName, currentArtNum, maxRangeArtNum, time.Since(start0))
-
-		if stats.ArticlesProcessed%int64(progressInterval) == 0 {
-			stats.PrintProgress()
-		}
-
-		// Move to next article number range
-		currentArtNum = maxRangeArtNum + 1
-
-		// Aggressive memory management every N articles
-		if processed%10000 == 0 {
-			// Force garbage collection
-			runtime.GC() // Second GC to clean up finalizers
-
-			// Get memory stats
-			var m runtime.MemStats
-			runtime.ReadMemStats(&m)
-			realMem, _ := getRealMemoryUsage()
-
-			log.Printf("[MEMORY-MGMT] After %d articles: Heap=%s RSS=%s Gap=%.1fx | Mallocs=%d Frees=%d",
-				processed,
-				formatBytes(m.Alloc),
-				formatBytes(realMem),
-				float64(realMem)/float64(m.Alloc),
-				m.Mallocs,
-				m.Frees)
-
-			// Force SQLite to release memory if RSS is too high
-			/*
-				if realMem > 2*1024*1024*1024 { // 2GB threshold
-					log.Printf("[MEMORY-CRITICAL] RSS exceeds 2GB, forcing database memory release...")
-					// Try to force SQLite memory release via PRAGMA
-					if groupDB != nil && groupDB.DB != nil {
-						groupDB.DB.Exec("PRAGMA shrink_memory")
-						groupDB.DB.Exec("PRAGMA cache_size = 1000") // Reduce cache
-					}
-				}
-			*/
-
-			// Emergency stop if RSS exceeds N GB
-			if realMem > 16*1024*1024*1024 {
-				log.Printf("[MEMORY-EMERGENCY] RSS HIGH! Pausing for 10 seconds to allow memory cleanup...")
-				<-time.After(time.Second * 10)
-
-				// Check again after cleanup
-				newRealMem, _ := getRealMemoryUsage()
-				log.Printf("[MEMORY-EMERGENCY] After cleanup: RSS reduced from %s to %s",
-					formatBytes(realMem), formatBytes(newRealMem))
-
-			}
-		}
-	}
-
-	return nil
-}
-
-// analyzeHistoryDatabases analyzes the history databases and provides comprehensive statistics
-func analyzeHistoryDatabases(showCollisions bool, useShortHashLen int) (*HistoryAnalysisStats, error) {
-	stats := &HistoryAnalysisStats{
-		CollisionDistribution: make(map[int]int64),
-		UseShortHashLen:       useShortHashLen,
-	}
-
-	fmt.Println("🔍 Scanning history databases...")
-
-	// Use reflection or direct database access to analyze the sharded databases
-	// Since the history package doesn't expose internal database structure,
-	// we'll need to work with the available interfaces
-
-	// For now, we'll estimate based on configuration
-	// This would need to be expanded with actual database scanning
-	config := history.DefaultConfig()
-	config.UseShortHashLen = useShortHashLen
-
-	numDBs, tablesPerDB, _ := history.GetShardConfig(config.ShardMode)
-	stats.DatabaseCount = numDBs
-	stats.TableCount = tablesPerDB
-
-	fmt.Printf("📈 Analyzing %d databases with %d tables each...\n", numDBs, tablesPerDB)
-
-	// This is a simplified analysis - in a real implementation, you'd need
-	// direct database access to scan all tables for collision statistics
-	// For demonstration, we'll show how the analysis would work
-
-	// Simulate analysis results (replace with real database scanning)
-	stats.TotalEntries = 1000000  // Example: 1M entries
-	stats.SingleOffsets = 950000  // 95% single offsets
-	stats.MultipleOffsets = 50000 // 5% collisions
-	stats.TotalCollisions = 75000 // Total collision instances
-	stats.MaxCollisions = 8
-	stats.WorstCollisionHash = "a1b2c3"
-	stats.WorstCollisionCount = 8
-
-	// Distribution simulation
-	stats.CollisionDistribution[2] = 40000 // 40k hashes with 2 collisions
-	stats.CollisionDistribution[3] = 8000  // 8k hashes with 3 collisions
-	stats.CollisionDistribution[4] = 1500  // 1.5k hashes with 4 collisions
-	stats.CollisionDistribution[5] = 400   // 400 hashes with 5 collisions
-	stats.CollisionDistribution[6] = 80    // 80 hashes with 6 collisions
-	stats.CollisionDistribution[7] = 15    // 15 hashes with 7 collisions
-	stats.CollisionDistribution[8] = 5     // 5 hashes with 8 collisions
-
-	// Calculate rates
-	if stats.TotalEntries > 0 {
-		stats.CollisionRate = float64(stats.MultipleOffsets) / float64(stats.TotalEntries) * 100
-		stats.AverageCollisions = float64(stats.TotalCollisions) / float64(stats.MultipleOffsets)
-	}
-
-	if showCollisions {
-		fmt.Println("🔍 Detailed collision analysis...")
-		analyzeDetailedCollisions(stats)
-	}
-
-	return stats, nil
-}
-
-// scanActualHistoryDatabase performs real database scanning for accurate statistics
-// This would require access to the internal database structure
-func scanActualHistoryDatabase(useShortHashLen int) (*HistoryAnalysisStats, error) {
-	stats := &HistoryAnalysisStats{
-		CollisionDistribution: make(map[int]int64),
-		UseShortHashLen:       useShortHashLen,
-	}
-
-	// Determine sharding configuration
-	config := history.DefaultConfig()
-	config.UseShortHashLen = useShortHashLen
-	numDBs, tablesPerDB, _ := history.GetShardConfig(config.ShardMode)
-
-	stats.DatabaseCount = numDBs
-	stats.TableCount = tablesPerDB
-
-	fmt.Printf("🔍 Scanning %d database files with %d tables each...\n", numDBs, tablesPerDB)
-
-	// This is where you'd implement actual database scanning
-	// For each database file, for each table, count entries and analyze collisions
-
-	// Example implementation outline:
-	/*
-		for dbIndex := 0; dbIndex < numDBs; dbIndex++ {
-			dbPath := filepath.Join(historyDir, fmt.Sprintf("hashdb_%x.sqlite3", dbIndex))
-
-			db, err := sql.Open("sqlite3", dbPath)
-			if err != nil {
-				continue // Skip missing databases
-			}
-			defer db.Close()
-
-			for tableIndex := 0; tableIndex < tablesPerDB; tableIndex++ {
-				tableName := fmt.Sprintf("s%02x", tableIndex)
-
-				// Count total entries in this table
-				var count int64
-				err = database.RetryableQueryRowScan(db, fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName), nil, &count)
-				if err != nil {
-					continue
-				}
-				stats.TotalEntries += count
-
-				// Analyze collisions in this table
-				rows, err := database.RetryableQuery(db, fmt.Sprintf("SELECT h, o FROM %s", tableName))
-				if err != nil {
-					continue
-				}
-
-				for rows.Next() {
-					var hash, offsets string
-					if err := rows.Scan(&hash, &offsets); err != nil {
-						continue
-					}
-
-					offsetCount := len(strings.Split(offsets, ","))
-					if offsetCount == 1 {
-						stats.SingleOffsets++
-					} else {
-						stats.MultipleOffsets++
-						stats.TotalCollisions += int64(offsetCount)
-						stats.CollisionDistribution[offsetCount]++
-
-						if offsetCount > stats.MaxCollisions {
-							stats.MaxCollisions = offsetCount
-							stats.WorstCollisionHash = hash
-							stats.WorstCollisionCount = offsetCount
-						}
-					}
-				}
-				rows.Close()
-			}
-		}
-	*/
-
-	// For now, return simulated data with a note
-	fmt.Println("📝 Note: Real database scanning not implemented yet")
-	fmt.Println("   The following analysis uses simulated data for demonstration")
-
-	return stats, nil
-}
-
-// Helper function to update the main analysis to use real scanning if available
-func analyzeHistoryDatabasesReal(showCollisions bool, useShortHashLen int) (*HistoryAnalysisStats, error) {
-	// Try real scanning first
-	if stats, err := scanActualHistoryDatabase(useShortHashLen); err == nil {
-		if showCollisions {
-			analyzeDetailedCollisions(stats)
-		}
-		return stats, nil
-	}
-
-	// Fall back to simulated analysis
-	return analyzeHistoryDatabases(showCollisions, useShortHashLen)
-}
-
-func analyzeDetailedCollisions(stats *HistoryAnalysisStats) {
-	fmt.Println("\n📊 Collision Distribution:")
-	for collisions := 2; collisions <= stats.MaxCollisions; collisions++ {
-		count := stats.CollisionDistribution[collisions]
-		if count > 0 {
-			percentage := float64(count) / float64(stats.MultipleOffsets) * 100
-			fmt.Printf("  %d collisions: %d hashes (%.2f%% of colliding hashes)\n",
-				collisions, count, percentage)
-		}
-	}
-}
-
-// printHistoryAnalysis prints comprehensive analysis results
-func printHistoryAnalysis(stats *HistoryAnalysisStats) {
-	fmt.Printf("\n🎯 History Database Analysis Results\n")
-	fmt.Printf("=====================================\n\n")
-
-	fmt.Printf("📋 Database Configuration:\n")
-	fmt.Printf("  UseShortHashLen:     %d characters\n", stats.UseShortHashLen)
-	fmt.Printf("  Total Combinations:  %s\n", formatCombinations(stats.UseShortHashLen))
-	fmt.Printf("  Database Count:      %d\n", stats.DatabaseCount)
-	fmt.Printf("  Tables per DB:       %d\n", stats.TableCount)
-	fmt.Printf("  Total Tables:        %d\n", stats.DatabaseCount*stats.TableCount)
-	fmt.Printf("\n")
-
-	fmt.Printf("📊 Entry Statistics:\n")
-	fmt.Printf("  Total Entries:       %s\n", formatNumber(stats.TotalEntries))
-	fmt.Printf("  Single Offsets:      %s (%.2f%%)\n",
-		formatNumber(stats.SingleOffsets),
-		float64(stats.SingleOffsets)/float64(stats.TotalEntries)*100)
-	fmt.Printf("  Multiple Offsets:    %s (%.2f%%)\n",
-		formatNumber(stats.MultipleOffsets),
-		stats.CollisionRate)
-	fmt.Printf("  Total Collisions:    %s\n", formatNumber(stats.TotalCollisions))
-	fmt.Printf("\n")
-
-	fmt.Printf("💥 Collision Analysis:\n")
-	fmt.Printf("  Collision Rate:      %.4f%%\n", stats.CollisionRate)
-	fmt.Printf("  Average Collisions:  %.2f per hash\n", stats.AverageCollisions)
-	fmt.Printf("  Max Collisions:      %d\n", stats.MaxCollisions)
-	fmt.Printf("  Worst Hash:          %s (%d collisions)\n",
-		stats.WorstCollisionHash, stats.WorstCollisionCount)
-	fmt.Printf("\n")
-
-	fmt.Printf("📈 Performance Impact:\n")
-	estimatedSlowLookups := float64(stats.MultipleOffsets) * stats.AverageCollisions
-	fmt.Printf("  Est. Slow Lookups:   %.0f (%.2f%% of total)\n",
-		estimatedSlowLookups,
-		estimatedSlowLookups/float64(stats.TotalEntries)*100)
-
-	diskReadMultiplier := (float64(stats.SingleOffsets) + estimatedSlowLookups) / float64(stats.TotalEntries)
-	fmt.Printf("  Disk Read Overhead:  %.2fx normal\n", diskReadMultiplier)
-	fmt.Printf("\n")
-
-	fmt.Printf("🎯 Recommendations:\n")
-	if stats.CollisionRate > 10.0 {
-		fmt.Printf("  ⚠️  HIGH collision rate! Consider increasing UseShortHashLen\n")
-	} else if stats.CollisionRate > 5.0 {
-		fmt.Printf("  ⚠️  Moderate collision rate. Monitor performance\n")
-	} else if stats.CollisionRate > 1.0 {
-		fmt.Printf("  ✅ Acceptable collision rate for current load\n")
-	} else {
-		fmt.Printf("  ✅ Excellent collision rate - very low overhead\n")
-	}
-
-	if stats.MaxCollisions > 10 {
-		fmt.Printf("  ⚠️  Some hashes have very high collision counts\n")
-	}
-
-	// Capacity analysis
-	expectedFirstCollision := calculateExpectedCollision(stats.UseShortHashLen)
-	fmt.Printf("\n📏 Capacity Analysis:\n")
-	fmt.Printf("  Expected 1st Collision: ~%s articles\n", formatNumber(expectedFirstCollision))
-	fmt.Printf("  Current Load:           %s articles\n", formatNumber(stats.TotalEntries))
-
-	loadFactor := float64(stats.TotalEntries) / float64(expectedFirstCollision)
-	fmt.Printf("  Load Factor:            %.2fx expected collision threshold\n", loadFactor)
-
-	if loadFactor > 10 {
-		fmt.Printf("  📊 Status: Heavy load - collisions expected and normal\n")
-	} else if loadFactor > 2 {
-		fmt.Printf("  📊 Status: Moderate load - some collisions normal\n")
-	} else {
-		fmt.Printf("  📊 Status: Light load - minimal collisions expected\n")
-	}
-}
-
-// Helper functions for formatting
-func formatCombinations(useShortHashLen int) string {
-	totalChars := 3 + useShortHashLen // 3 for routing + N for storage
-	combinations := int64(1)
-	for i := 0; i < totalChars; i++ {
-		combinations *= 16
-	}
-	return formatNumber(combinations)
-}
-
-func formatNumber(n int64) string {
-	if n >= 1000000000 {
-		return fmt.Sprintf("%.1fB", float64(n)/1000000000)
-	} else if n >= 1000000 {
-		return fmt.Sprintf("%.1fM", float64(n)/1000000)
-	} else if n >= 1000 {
-		return fmt.Sprintf("%.1fK", float64(n)/1000)
-	}
-	return fmt.Sprintf("%d", n)
-}
-
-func calculateExpectedCollision(useShortHashLen int) int64 {
-	totalChars := 3 + useShortHashLen
-	totalCombinations := int64(1)
-	for i := 0; i < totalChars; i++ {
-		totalCombinations *= 16
-	}
-	// Birthday paradox: approximately sqrt(N)
-	return int64(math.Sqrt(float64(totalCombinations)))
-}
-
-func clearHistory() error {
-	// Note: The history package would need a Clear() method for this to work
-	// For now, we'll just log that this feature is not implemented
-	log.Println("⚠️  Clear history feature not implemented in history package")
-	log.Println("    You may need to manually delete the history directory")
-	return nil
-}
-
-// readHistoryAtOffset reads and displays a history entry at a specific offset in history.dat
-func readHistoryAtOffset(offset int64, useShortHashLen int) error {
-	// Get history directory from config
-	config := history.DefaultConfig()
-	config.UseShortHashLen = useShortHashLen
-	historyPath := filepath.Join(config.HistoryDir, history.HistoryFileName)
-
-	fmt.Printf("📄 Reading from: %s\n", historyPath)
-	fmt.Printf("🎯 Target offset: %d\n", offset)
-
-	// Open history.dat file
-	file, err := os.Open(historyPath)
-	if err != nil {
-		return fmt.Errorf("failed to open history file %s: %w", historyPath, err)
-	}
-	defer file.Close()
-
-	// Get file size
-	fileInfo, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("failed to stat history file: %w", err)
-	}
-	fmt.Printf("📏 File size: %d bytes\n", fileInfo.Size())
-
-	if offset >= fileInfo.Size() {
-		return fmt.Errorf("offset %d is beyond file size %d", offset, fileInfo.Size())
-	}
-
-	// Seek to the offset
-	_, err = file.Seek(offset, 0)
-	if err != nil {
-		return fmt.Errorf("failed to seek to offset %d: %w", offset, err)
-	}
-
-	// Read the line at this offset
-	scanner := bufio.NewScanner(file)
-	if !scanner.Scan() {
-		return fmt.Errorf("failed to read line at offset %d", offset)
-	}
-
-	line := scanner.Text()
-	fmt.Printf("\n📋 Raw line at offset %d:\n", offset)
-	fmt.Printf("   %q\n", line)
-	fmt.Printf("   Length: %d bytes\n", len(line))
-
-	// Parse the line to analyze the components
-	parts := strings.Split(line, "\t")
-	fmt.Printf("\n🔍 Parsed components (%d parts):\n", len(parts))
-	for i, part := range parts {
-		fmt.Printf("   [%d]: %q\n", i, part)
-	}
-
-	// If we have at least the expected parts, analyze them
-	if len(parts) == 4 {
-		messageId := parts[0]
-		flagsStr := parts[1]
-		storageToken := parts[2]
-		timestampStr := parts[3]
-
-		fmt.Printf("\n📊 Analysis:\n")
-		fmt.Printf("   messageId:       %s (len=%d)\n", messageId, len(messageId))
-		fmt.Printf("   Flags:           %x\n", flagsStr)
-		fmt.Printf("   Storage Token:   %s\n", storageToken)
-		fmt.Printf("   Timestamp:       %s\n", timestampStr)
-
-		// Parse timestamp if possible
-		if timestampStr != "" {
-			if timestamp, err := strconv.ParseInt(timestampStr, 10, 64); err == nil {
-				timeVal := time.Unix(timestamp, 0)
-				fmt.Printf("   Parsed Time:     %s\n", timeVal.Format("2006-01-02 15:04:05 UTC"))
-			}
-		}
-	}
-
-	// Show some context around this offset
-	fmt.Printf("\n📍 Context (showing 2 lines before and after):\n")
-
-	// Go back to beginning and read to show context
-	_, err = file.Seek(0, 0)
-	if err != nil {
-		return fmt.Errorf("failed to seek to beginning for context: %w", err)
-	}
-
-	scanner = bufio.NewScanner(file)
-	var currentOffset int64 = 0
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		lineLen := int64(len(line) + 1) // +1 for newline
-
-		// Keep lines around our target offset
-		if currentOffset >= offset-200 && currentOffset <= offset+200 {
-			prefix := "   "
-			if currentOffset == offset {
-				prefix = ">>>"
-			}
-			fmt.Printf("%s [%d]: %q\n", prefix, currentOffset, line)
-		}
-
-		currentOffset += lineLen
-		if currentOffset > offset+200 {
-			break
-		}
-	}
-
-	return nil
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.Alloc, nil
 }
