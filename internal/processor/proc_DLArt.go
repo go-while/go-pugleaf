@@ -5,6 +5,7 @@ import (
 	"log"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -106,6 +107,17 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 	//log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d, remaining: %d)", newsgroup, start, end, groupInfo.Last, remaining)
 	var lastGoodEnd int64 = start
 	//toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
+	// resolve the main-DB ID once: needed to reuse crossposts stored in other groups
+	reuseEnabled := ReuseCrossposts && proc.History.Enabled()
+	var currentGroupID int64
+	if reuseEnabled {
+		if ng, err := proc.DB.MainDBGetNewsgroup(newsgroup); err != nil || ng == nil || ng.ID <= 0 {
+			reuseEnabled = false // can not exclude the current group: download everything
+		} else {
+			currentGroupID = ng.ID
+		}
+	}
+	var reused atomic.Int64 // written by the xhdr goroutine, read at the end
 	xhdrChan := make(chan nntp.HeaderLine, MaxBatchSize)
 	errChan := make(chan error, 1)
 	//log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
@@ -138,11 +150,28 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 				groupBatch.ReturnQ <- &BatchItem{Error: errIsDuplicateError}
 				continue
 			}
+			var art *models.Article
+			if reuseEnabled {
+				art = proc.reuseStoredArticle(hdr.Value, currentGroupID, newsgroup)
+			}
 			msgIdItem := history.MsgIdCache.GetORCreate(hdr.Value)
 			msgIdItem.Mux.Lock()
 			msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
 			msgIdItem.Response = history.CaseLock
 			msgIdItem.Mux.Unlock()
+			if art != nil {
+				// crosspost already stored in another group: skip the download.
+				// counts as queued, the consumer counts it as gots or errs like a downloaded article.
+				groupBatch.ReturnQ <- &BatchItem{
+					MessageID: &msgIdItem.MessageId,
+					GroupName: proc.DB.Batch.GetNewsgroupPointer(newsgroup),
+					Article:   art,
+					ReturnQ:   groupBatch.ReturnQ,
+				}
+				queued++
+				reused.Add(1)
+				continue
+			}
 			item := &BatchItem{
 				MessageID: &msgIdItem.MessageId, // Use pointer to avoid copying
 				GroupName: proc.DB.Batch.GetNewsgroupPointer(newsgroup),
@@ -293,7 +322,7 @@ forProcessing:
 	}
 	// threading.go:296: GroupCounter.Increment(newsgroup) // Increment the group counter
 	groupCnt := GroupCounter.GetReset(newsgroup)
-	log.Printf("DownloadArticles: '%s' processed %d articles [gotQueued=%d] (dups: %d, gots: %d, errs: %d, adds: %d) in %v end=%d", newsgroup, gots+errs+dups, gotQueued, dups, gots, errs, groupCnt, time.Since(startTime), end)
+	log.Printf("DownloadArticles: '%s' processed %d articles [gotQueued=%d] (dups: %d, gots: %d, errs: %d, adds: %d, reused: %d) in %v end=%d", newsgroup, gots+errs+dups, gotQueued, dups, gots, errs, groupCnt, reused.Load(), time.Since(startTime), end)
 	// do another one if we haven't run enough times
 	runtime.GC()
 

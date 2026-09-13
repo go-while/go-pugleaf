@@ -73,12 +73,14 @@ func main() {
 		updateList         = flag.String("fetch-newsgroups-from-remote", "", "UpdateNewsgroupList: get remote newsgroup list from first enabled provider (default: empty, nothing. use \"group.*\" or \"\\$all\")")
 		updateListForce    = flag.Bool("fetch-newsgroups-force", false, "use with -fetch-newsgroups-from-remote .. to really add them to database")
 		dataDir            = flag.String("data", "./data", "Directory to store database files")
+		reuseCrossposts    = flag.Bool("reuse-crossposts", true, "copy crossposted articles already stored in another group (needs history) instead of downloading them again")
 		// Download options with date filtering
 		downloadStartDate = flag.String("download-start-date", "", "Start downloading articles from this date (YYYY-MM-DD format)")
 		resetProgress     = flag.Int64("reset-progress", 0, "Reset download progress for all newsgroups on primary provider")
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
 	)
 	flag.Parse()
+	processor.ReuseCrossposts = *reuseCrossposts
 	// Show help if requested
 	if *showHelp {
 		showUsageExamples()
