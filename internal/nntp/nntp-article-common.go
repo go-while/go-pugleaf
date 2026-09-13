@@ -1,13 +1,13 @@
 package nntp
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -51,8 +51,10 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 		// 430 error handled in getArticleData
 		return nil
 	}
-	// Update current article if we have a current group
-	if c.currentGroup != "" {
+	// Update the current article only for the article-number form (RFC 3977 6.2.1):
+	// a message-id lookup must not change the current article number
+	isMessageID := strings.HasPrefix(args[0], "<") && strings.HasSuffix(args[0], ">")
+	if c.currentGroup != "" && !isMessageID {
 		c.currentArticle = article.DBArtNum
 		/* disabled
 		task := c.server.DB.Batch.GetOrCreateTasksMapKey(c.currentGroup)
@@ -128,57 +130,24 @@ func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRe
 			return nil
 		}
 
-		// (b) global history lookup
+		// (b) global lookup via the history index
 		if c.server.Processor == nil {
 			// read-only server without history
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF0")
 			return nil
 		}
-		// throwaway item: do NOT store client supplied message-ids in the MsgIdCache
-		msgIdItem := &history.MessageIdItem{MessageId: messageID}
-		response, _, err := c.server.Processor.Lookup(msgIdItem, false)
-		if err != nil {
-			c.server.local430.Add(messageID)
-			c.rateLimitOnError()
-			c.sendResponse(430, "NotF0")
-			return nil
-		}
-		found := false
-		switch response {
-
-		case history.CaseError:
-			c.server.local430.Add(messageID)
+		var err error
+		article, err = c.server.Processor.FindArticleByMessageID(messageID, c.currentGroup)
+		if err != nil || article == nil {
+			if errors.Is(err, ErrArticleNotFound) {
+				// definite miss: remember it for a while
+				c.server.local430.Add(messageID)
+			} else if err != nil {
+				log.Printf("getArticleData: lookup of %s failed: %v", messageID, err)
+			}
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF1")
-			return nil
-
-		case history.CasePass:
-			// Not found in history
-			c.rateLimitOnError()
-			c.sendResponse(430, "NotF2")
-			return nil
-
-		case history.CaseDupes:
-			// Found in history- should have newsgroupIDs
-			msgIdItem.Mux.RLock()
-			found = len(msgIdItem.NewsgroupIDs) > 0
-			msgIdItem.Mux.RUnlock()
-		}
-
-		if !found {
-			log.Printf("getArticleData: history hit without newsgroup IDs for %s", messageID)
-			c.rateLimitOnError()
-			c.sendResponse(430, "NotF3")
-			return nil
-		}
-
-		// Get the article from any newsgroup DB listed in history
-		article, err = c.server.DB.GetArticleFromAnyNewsgroupDB(msgIdItem)
-		if err != nil || article == nil {
-			c.server.local430.Add(messageID)
-			c.rateLimitOnError()
-			c.sendResponse(430, "NotF8")
 			return nil
 		}
 		return article

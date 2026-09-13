@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
@@ -23,6 +24,7 @@ var (
 	useShortHashLen int
 	maxConnections  int
 	dataDir         string
+	useHistory      bool
 )
 
 var appVersion = "-unset-"
@@ -32,6 +34,7 @@ func main() {
 	log.Printf("Starting go-pugleaf dedicated NNTP Server (version: %s)", config.AppVersion)
 
 	flag.StringVar(&nntphostname, "nntphostname", "", "Your hostname must be set!")
+	flag.BoolVar(&useHistory, "history", true, "maintain and use the message-id history index (data/history)")
 	flag.IntVar(&nntptcpport, "nntptcpport", 0, "NNTP TCP port")
 	flag.IntVar(&nntptlsport, "nntptlsport", 0, "NNTP TLS port")
 	flag.StringVar(&nntpcertFile, "nntpcertfile", "", "NNTP TLS certificate file (/path/to/fullchain.pem)")
@@ -40,6 +43,7 @@ func main() {
 	flag.IntVar(&maxConnections, "maxconnections", 500, "allow max of N authenticated connections (default: 500)")
 	flag.StringVar(&dataDir, "data", "./data", "Directory to store database files")
 	flag.Parse()
+	history.ENABLE_HISTORY = useHistory
 
 	mainConfig := config.NewDefaultConfig()
 	mainConfig.Server.NNTP.Enabled = true

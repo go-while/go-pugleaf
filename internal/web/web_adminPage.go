@@ -302,45 +302,62 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	}
 
 	// Get message ID cache statistics
+	// The cache is a fixed set of shards (maps); the older "bucket" keys are kept for the template.
 	var messageIdCacheStats map[string]interface{}
 	if history.MsgIdCache != nil {
-		totalBuckets, occupiedBuckets, items, maxChainLength, loadFactor := history.MsgIdCache.DetailedStats()
+		shards, occupiedShards, items, largestShard, itemsPerShard := history.MsgIdCache.DetailedStats()
 
-		// Calculate utilization percentage (how much of the available capacity is used)
-		utilizationPercent := 0.0
-		if history.UpperLimitMsgIdCacheSize > 0 {
-			utilizationPercent = float64(totalBuckets) / float64(history.UpperLimitMsgIdCacheSize) * 100
+		// share of all items held by the largest shard
+		largestShardPercent := 0.0
+		if items > 0 {
+			largestShardPercent = float64(largestShard) / float64(items) * 100
 		}
-
-		// Calculate bucket occupancy percentage (how many buckets have items)
-		bucketOccupancyPercent := 0.0
-		if totalBuckets > 0 {
-			bucketOccupancyPercent = float64(occupiedBuckets) / float64(totalBuckets) * 100
+		// largest shard relative to the average shard (1.00 = perfectly even distribution)
+		shardSkew := 0.0
+		if itemsPerShard > 0 {
+			shardSkew = float64(largestShard) / itemsPerShard
+		}
+		shardOccupancyPercent := 0.0
+		if shards > 0 {
+			shardOccupancyPercent = float64(occupiedShards) / float64(shards) * 100
 		}
 
 		messageIdCacheStats = map[string]interface{}{
-			"total_buckets":            totalBuckets,
-			"occupied_buckets":         occupiedBuckets,
-			"items":                    items,
-			"max_chain_length":         maxChainLength,
-			"load_factor":              loadFactor,
-			"utilization_percent":      utilizationPercent,
-			"bucket_occupancy_percent": bucketOccupancyPercent,
-			"max_buckets":              history.UpperLimitMsgIdCacheSize,
-			"max_load_factor":          history.MaxLoadFactor,
+			"shards":                shards,
+			"occupied_shards":       occupiedShards,
+			"items":                 items,
+			"largest_shard":         largestShard,
+			"items_per_shard":       itemsPerShard,
+			"largest_shard_percent": largestShardPercent,
+			"shard_skew":            shardSkew,
+			// keys used by admin_statistics.html
+			"total_buckets":            shards,
+			"occupied_buckets":         occupiedShards,
+			"max_chain_length":         largestShard,
+			"load_factor":              itemsPerShard,
+			"utilization_percent":      largestShardPercent,
+			"bucket_occupancy_percent": shardOccupancyPercent,
+			"max_buckets":              shards,
+			"max_load_factor":          shardSkew,
 			"status":                   "active",
 		}
 	} else {
 		messageIdCacheStats = map[string]interface{}{
+			"shards":                   0,
+			"occupied_shards":          0,
+			"items":                    0,
+			"largest_shard":            0,
+			"items_per_shard":          0.0,
+			"largest_shard_percent":    0.0,
+			"shard_skew":               0.0,
 			"total_buckets":            0,
 			"occupied_buckets":         0,
-			"items":                    0,
 			"max_chain_length":         0,
 			"load_factor":              0.0,
 			"utilization_percent":      0.0,
 			"bucket_occupancy_percent": 0.0,
-			"max_buckets":              history.UpperLimitMsgIdCacheSize,
-			"max_load_factor":          history.MaxLoadFactor,
+			"max_buckets":              0,
+			"max_load_factor":          0.0,
 			"status":                   "not initialized",
 		}
 	}

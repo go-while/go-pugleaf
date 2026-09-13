@@ -56,7 +56,6 @@ func main() {
 	config.AppVersion = appVersion
 	database.DBidleTimeOut = 15 * time.Second
 	database.NO_CACHE_BOOT = true // prevents booting caches
-	history.ENABLE_HISTORY = false
 	log.Printf("Starting go-pugleaf NNTP Fetcher (version %s)", config.AppVersion)
 	// Command line flags for NNTP fetcher configuration
 	var newsgroups []*models.Newsgroup
@@ -66,6 +65,7 @@ func main() {
 		maxQueued          = flag.Int("max-queue", 1280, "Limit db_batch to have max N articles queued over all newsgroups")
 		fetchNewsgroup     = flag.String("group", "", "Newsgroup to fetch (default: empty = all groups once up to max-batch) or rocksolid.* with final wildcard to match prefix.*")
 		nntphostname       = flag.String("nntphostname", "", "Your hostname must be set!")
+		useHistory         = flag.Bool("history", true, "maintain and use the message-id history index (data/history)")
 		useShortHashLenPtr = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
 		fetchActiveOnly    = flag.Bool("fetch-active-only", true, "Downloads only active newsgroups (default: true) To download only disabled newsgroups set to false!")
 		excludePrefix      = flag.String("exclude-prefix", "", "use with UpdateNewsgroupList to exclude newsgroups with this prefix (default: empty = no exclusion) allows comma separation and wildcards alt.*,comp.*")
@@ -79,6 +79,7 @@ func main() {
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
 	)
 	flag.Parse()
+	history.ENABLE_HISTORY = *useHistory
 	// Show help if requested
 	if *showHelp {
 		showUsageExamples()
