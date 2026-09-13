@@ -81,13 +81,16 @@ func NewLegacyImporter(db *database.Database, etcPath, spoolPath string, useShor
 	return importer
 }
 
-// Close properly shuts down the legacy importer
-// Note: We don't close the processor as it may share database connections with the main application
+// Close properly shuts down the legacy importer.
+// Processor.Close waits for pending batches and closes the history writer;
+// it does not close the shared database (main does that after db.WG.Wait()).
 func (leg *LegacyImporter) Close() error {
-	// Don't close the processor as it shares database resources with the main application
-	// The processor will be closed when the main application shuts down
-	leg.proc = nil // Just clear the reference
-	return nil
+	if leg.proc == nil {
+		return nil
+	}
+	err := leg.proc.Close()
+	leg.proc = nil
+	return err
 }
 
 // ImportSections imports all sections from the legacy RockSolid Light installation
