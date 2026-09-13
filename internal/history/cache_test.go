@@ -182,20 +182,15 @@ func TestCacheEvictedItemUntouched(t *testing.T) {
 	id := "<untouched@t>"
 	past := time.Now().Add(-time.Second)
 	item := cacheTestSetState(c, id, CaseDupes, past)
-	item.Mux.Lock()
-	item.MessageIdHash = "abc"
-	item.NewsgroupIDs = []int64{1, 2}
-	item.Mux.Unlock()
 
 	if n := c.CleanExpiredEntries(); n != 1 {
 		t.Fatalf("evicted %d want 1", n)
 	}
 	item.Mux.RLock()
 	defer item.Mux.RUnlock()
-	if item.MessageId != id || item.Response != CaseDupes || item.MessageIdHash != "abc" ||
-		len(item.NewsgroupIDs) != 2 || !item.CachedEntryExpires.Equal(past) {
-		t.Fatalf("evicted item was modified: MessageId=%q Response=%x Hash=%q NG=%v Expires=%v",
-			item.MessageId, item.Response, item.MessageIdHash, item.NewsgroupIDs, item.CachedEntryExpires)
+	if item.MessageId != id || item.Response != CaseDupes || !item.CachedEntryExpires.Equal(past) {
+		t.Fatalf("evicted item was modified: MessageId=%q Response=%x Expires=%v",
+			item.MessageId, item.Response, item.CachedEntryExpires)
 	}
 
 	// Delete must not modify the item either

@@ -233,50 +233,6 @@ func TestHistoryCore(t *testing.T) {
 		}
 	})
 
-	t.Run("CompatWrappers", func(t *testing.T) {
-		item := &MessageIdItem{MessageId: "<compat@test>", NewsgroupIDs: []int64{3, 4}, Response: CaseLock}
-
-		resp, ids, err := h.Lookup(item, false)
-		if err != nil || resp != CasePass || ids != nil {
-			t.Fatalf("Lookup before Add = %x, %v, %v", resp, ids, err)
-		}
-
-		if !h.Add(item) {
-			t.Fatal("Add returned false")
-		}
-		item.Mux.RLock()
-		if item.Response != CaseDupes || time.Until(item.CachedEntryExpires) <= 0 {
-			t.Fatalf("Add did not set Response/CachedEntryExpires: %x %v", item.Response, item.CachedEntryExpires)
-		}
-		item.Mux.RUnlock()
-		histTestWaitIdle(t, h)
-
-		lookupItem := &MessageIdItem{MessageId: "<compat@test>"}
-		resp, ids, err = h.Lookup(lookupItem, true)
-		if err != nil || resp != CaseDupes || !reflect.DeepEqual(ids, []int64{3, 4}) {
-			t.Fatalf("Lookup quick = %x, %v, %v", resp, ids, err)
-		}
-		if lookupItem.NewsgroupIDs != nil {
-			t.Fatal("quick Lookup must not set NewsgroupIDs")
-		}
-		resp, _, err = h.Lookup(lookupItem, false)
-		if err != nil || resp != CaseDupes || !reflect.DeepEqual(lookupItem.NewsgroupIDs, []int64{3, 4}) {
-			t.Fatalf("Lookup full = %x, %v, %v", resp, lookupItem.NewsgroupIDs, err)
-		}
-
-		exists, ids, err := h.LookupMID(&MessageIdItem{MessageId: "<compat@test>"}, true)
-		if err != nil || !exists || !reflect.DeepEqual(ids, []int64{3, 4}) {
-			t.Fatalf("LookupMID = %v, %v, %v", exists, ids, err)
-		}
-
-		if h.Add(nil) {
-			t.Fatal("Add(nil) must return false")
-		}
-		if h.Add(&MessageIdItem{MessageId: "<no-groups@test>"}) {
-			t.Fatal("Add without group IDs must return false")
-		}
-	})
-
 	t.Run("Stats", func(t *testing.T) {
 		st := h.GetStats()
 		if st.TotalAdds == 0 || st.TotalCommitted == 0 || st.Flushes == 0 || st.Pending != 0 || st.Errors != 0 {
@@ -370,9 +326,7 @@ func TestHistoryCloseFlushesAndWaitGroup(t *testing.T) {
 	if ids, err := h.LookupGroups("<close-1@test>"); ids != nil || err == nil {
 		t.Fatalf("LookupGroups after Close = %v, %v", ids, err)
 	}
-	if resp, _, _ := h.Lookup(&MessageIdItem{MessageId: "<close-1@test>"}, true); resp != CaseError {
-		t.Fatalf("Lookup after Close = %x, want CaseError", resp)
-	}
+	h.AddArticle("<after-close@test>", 1) // must not panic or block
 	_ = h.GetStats()
 }
 
@@ -476,15 +430,10 @@ func TestHistoryDisabled(t *testing.T) {
 		t.Fatalf("LookupGroups = %v, %v", ids, err)
 	}
 
-	item := &MessageIdItem{MessageId: "<m@test>", NewsgroupIDs: []int64{1}, Response: CaseLock}
-	if h.Add(item) {
-		t.Fatal("disabled Add must return false")
-	}
-	if item.Response != CaseDupes || time.Until(item.CachedEntryExpires) <= 0 {
-		t.Fatalf("disabled Add: Response=%x expires=%v", item.Response, item.CachedEntryExpires)
-	}
-	if resp, ids, err := h.Lookup(item, false); resp != CasePass || ids != nil || err != nil {
-		t.Fatalf("disabled Lookup = %x, %v, %v", resp, ids, err)
+	h.AddArticle("<m@test>", 1)
+	h.RemoveArticle("<m@test>", 1)
+	if !h.CheckNoMoreWorkInHistory() {
+		t.Fatal("disabled history must never report pending work")
 	}
 	h.SetDatabaseWorkChecker(&histTestChecker{})
 	_ = h.GetStats()
@@ -513,10 +462,8 @@ func TestHistoryNilReceiver(t *testing.T) {
 	if ids, err := h.LookupGroups("<x@test>"); ids != nil || err != nil {
 		t.Fatal("nil LookupGroups")
 	}
-	if resp, _, _ := h.Lookup(&MessageIdItem{MessageId: "<x@test>"}, true); resp != CasePass {
-		t.Fatal("nil Lookup")
-	}
-	h.Add(&MessageIdItem{MessageId: "<x@test>"})
+	h.AddArticle("<x@test>", 1)
+	h.RemoveArticle("<x@test>", 1)
 	_ = h.GetStats()
 	if err := h.Close(); err != nil {
 		t.Fatal(err)

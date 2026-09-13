@@ -65,7 +65,6 @@ type ThreadCacheBatch struct {
 type ProcessorInterface interface {
 	//MsgIdExists(group *string, messageID string) bool
 	// Add methods for history and cache operations
-	//AddProcessedArticleToHistory(msgIdItem *history.MessageIdItem) bool // interface
 	// Add method for finding thread roots - matches proc_MsgIDtmpCache.go signature (updated to use pointer)
 	//FindThreadRootInCache(groupName *string, refs []string) *MsgIdTmpCacheItem
 	// Add method for checking if there is no more work in history

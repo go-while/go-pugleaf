@@ -45,8 +45,6 @@ type MessageIdItem struct {
 	Mux                sync.RWMutex // Protects all fields below
 	CachedEntryExpires time.Time    // Exported field for cache entry expiration
 	MessageId          string       // pointer to article.messageid
-	MessageIdHash      string       // Computed hash of the message-ID
-	NewsgroupIDs       []int64      // Newsgroup IDs this message-ID belongs to
 	Response           int
 }
 

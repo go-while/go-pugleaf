@@ -26,7 +26,6 @@ const (
 
 	// History file constants
 	DefaultHistoryDir = "./data/history" // TODO set via config
-	HistoryFileName   = "history.dat"    // legacy, used by cmd/history-rebuild
 
 	// Cache configuration
 	DefaultCacheExpires = 15 // seconds
@@ -253,86 +252,6 @@ func (h *History) readDB(messageID string) (*sql.DB, string, error) {
 		return nil, "", fmt.Errorf("failed to get database connection: %v", err)
 	}
 	return db, tableName, nil
-}
-
-// Add queues all NewsgroupIDs of msgIdItem.
-//
-// Deprecated: removed after wave 2 integration. Use AddArticle.
-func (h *History) Add(msgIdItem *MessageIdItem) bool {
-	if msgIdItem == nil {
-		return false
-	}
-	if h == nil || !h.enabled {
-		msgIdItem.Mux.Lock()
-		msgIdItem.Response = CaseDupes
-		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
-		msgIdItem.Mux.Unlock()
-		return false
-	}
-	msgIdItem.Mux.Lock()
-	messageID := msgIdItem.MessageId
-	groupIDs := append([]int64(nil), msgIdItem.NewsgroupIDs...)
-	msgIdItem.Response = CaseDupes
-	msgIdItem.CachedEntryExpires = time.Now().Add(CachedEntryTTL)
-	msgIdItem.Mux.Unlock()
-
-	// queue outside the item lock: enqueue may block on backpressure
-	queued := false
-	for _, groupID := range groupIDs {
-		if h.enqueue(opAdd, messageID, groupID) {
-			queued = true
-		}
-	}
-	return queued
-}
-
-// Lookup returns CaseDupes (+ group IDs) if msgIdItem.MessageId is in the index, CasePass if not, CaseError on error.
-//
-// Deprecated: removed after wave 2 integration. Use LookupGroups / Exists.
-func (h *History) Lookup(msgIdItem *MessageIdItem, quick bool) (response int, newsgroupIDs []int64, err error) {
-	if h == nil || !h.enabled {
-		return CasePass, nil, nil
-	}
-	exists, newsgroupIDs, err := h.LookupMID(msgIdItem, quick)
-	if err != nil {
-		return CaseError, nil, err
-	}
-	if exists {
-		return CaseDupes, newsgroupIDs, nil
-	}
-	return CasePass, nil, nil
-}
-
-// LookupMID checks if msgIdItem.MessageId is in the index. When !quick it stores the group IDs in msgIdItem.NewsgroupIDs.
-//
-// Deprecated: removed after wave 2 integration. Use LookupGroups / Exists.
-func (h *History) LookupMID(msgIdItem *MessageIdItem, quick bool) (exists bool, newsgroupIDs []int64, err error) {
-	if h == nil || !h.enabled {
-		return false, nil, nil
-	}
-	if msgIdItem == nil {
-		return false, nil, fmt.Errorf("LookupMID called with nil MessageIdItem")
-	}
-	msgIdItem.Mux.RLock()
-	messageID := msgIdItem.MessageId
-	msgIdItem.Mux.RUnlock()
-
-	newsgroupIDs, err = h.LookupGroups(messageID)
-	if err != nil {
-		log.Printf("[HISTORY] ERROR: Lookup failed for msgId='%s': %v", messageID, err)
-		return false, nil, err
-	}
-	if newsgroupIDs == nil {
-		return false, nil, nil
-	}
-	if !quick {
-		itemIDs := make([]int64, len(newsgroupIDs))
-		copy(itemIDs, newsgroupIDs)
-		msgIdItem.Mux.Lock()
-		msgIdItem.NewsgroupIDs = itemIDs
-		msgIdItem.Mux.Unlock()
-	}
-	return true, newsgroupIDs, nil
 }
 
 // GetStats returns current statistics
