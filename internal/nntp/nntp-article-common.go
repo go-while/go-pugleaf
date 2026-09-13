@@ -84,7 +84,7 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 // getArticleData handles the common article lookup logic
 func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRetrievalType) (article *models.Article) {
 	var wantArticleNum int64
-	var msgIdItem *history.MessageIdItem
+	var messageID string
 	// Parse argument: can be article number or message-id
 	if len(args) == 0 {
 		c.rateLimitOnError()
@@ -94,17 +94,7 @@ func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRe
 
 	if strings.HasPrefix(args[0], "<") && strings.HasSuffix(args[0], ">") {
 		// Message-ID format
-		msgIdItem = history.MsgIdCache.GetORCreate(args[0])
-		if msgIdItem == nil {
-			c.rateLimitOnError()
-			c.sendResponse(500, "Error MsgId Cache")
-			return
-		}
-		if c.server.local430.Check(msgIdItem) {
-			c.rateLimitOnError()
-			c.sendResponse(430, "Cache says no!")
-			return
-		}
+		messageID = args[0]
 
 	} else {
 		if c.currentGroup == "" {
@@ -123,30 +113,51 @@ func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRe
 	}
 
 	// Get article
-	if msgIdItem != nil && wantArticleNum == 0 {
+	if messageID != "" && wantArticleNum == 0 {
 		// Handle message-ID lookup
-		response, _, err := c.server.Processor.Lookup(msgIdItem, false)
-		if err != nil {
-			c.server.local430.Add(msgIdItem)
+		// (a) try the currently selected group first: cheap and needs no history
+		if c.currentGroup != "" {
+			if article = c.getArticleByMessageIDFromGroup(c.currentGroup, messageID); article != nil {
+				return article
+			}
+		}
+
+		if c.server.local430.Check(messageID) {
+			c.rateLimitOnError()
+			c.sendResponse(430, "Cache says no!")
+			return nil
+		}
+
+		// (b) global history lookup
+		if c.server.Processor == nil {
+			// read-only server without history
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF0")
-			return
+			return nil
+		}
+		// throwaway item: do NOT store client supplied message-ids in the MsgIdCache
+		msgIdItem := &history.MessageIdItem{MessageId: messageID}
+		response, _, err := c.server.Processor.Lookup(msgIdItem, false)
+		if err != nil {
+			c.server.local430.Add(messageID)
+			c.rateLimitOnError()
+			c.sendResponse(430, "NotF0")
+			return nil
 		}
 		found := false
 		switch response {
 
 		case history.CaseError:
-			c.server.local430.Add(msgIdItem)
+			c.server.local430.Add(messageID)
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF1")
-			return
+			return nil
 
 		case history.CasePass:
 			// Not found in history
-			log.Printf("MsgIdItem not found in history: '%#v'", msgIdItem)
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF2")
-			return
+			return nil
 
 		case history.CaseDupes:
 			// Found in history- should have newsgroupIDs
@@ -156,19 +167,19 @@ func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRe
 		}
 
 		if !found {
-			log.Printf("MsgIdItem not found in cache: %#v", msgIdItem)
+			log.Printf("getArticleData: history hit without newsgroup IDs for %s", messageID)
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF3")
-			return
+			return nil
 		}
 
-		// Get group database for the specific group from storage token
+		// Get the article from any newsgroup DB listed in history
 		article, err = c.server.DB.GetArticleFromAnyNewsgroupDB(msgIdItem)
-		if err != nil {
-			c.server.local430.Add(msgIdItem)
+		if err != nil || article == nil {
+			c.server.local430.Add(messageID)
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF8")
-			return
+			return nil
 		}
 		return article
 
@@ -209,6 +220,21 @@ func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRe
 	c.rateLimitOnError()
 	c.sendResponse(502, "Article not retrieved")
 	return nil
+}
+
+// getArticleByMessageIDFromGroup looks up a message-id in a single newsgroup DB.
+// Returns nil if the group DB is not available or the article is not in it.
+func (c *ClientConnection) getArticleByMessageIDFromGroup(groupName string, messageID string) *models.Article {
+	groupDB, err := c.server.DB.GetGroupDB(groupName)
+	if err != nil || groupDB == nil {
+		return nil
+	}
+	defer groupDB.Return()
+	article, err := c.server.DB.GetArticleByMessageID(groupDB, messageID)
+	if err != nil {
+		return nil
+	}
+	return article
 }
 
 // sendArticleContent sends full article (headers + body) for ARTICLE command

@@ -3,14 +3,12 @@ package nntp
 import (
 	"sync"
 	"time"
-
-	"github.com/go-while/go-pugleaf/internal/history"
 )
 
 // Local430 is a simple in-memory cache for 430 responses
 type Local430 struct {
 	mu    sync.RWMutex
-	cache map[*history.MessageIdItem]time.Time // Map of message IDs to their last 430 response time
+	cache map[string]time.Time // Map of message IDs to their last 430 response time
 }
 
 // NewLocal430 creates a new Local430 cache
@@ -22,20 +20,20 @@ func (lc *Local430) CronLocal430() {
 }
 
 // Check checks if a message ID is in the cache
-func (lc *Local430) Check(msgIdItem *history.MessageIdItem) bool {
+func (lc *Local430) Check(messageID string) bool {
 	lc.mu.RLock()
 	defer lc.mu.RUnlock()
 
-	_, exists := lc.cache[msgIdItem]
+	_, exists := lc.cache[messageID]
 	return exists
 }
 
 // Add adds a message ID to the cache with the current time
-func (lc *Local430) Add(msgIdItem *history.MessageIdItem) bool {
+func (lc *Local430) Add(messageID string) bool {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
 	// Add to cache with current time
-	lc.cache[msgIdItem] = time.Now()
+	lc.cache[messageID] = time.Now()
 	return true
 }
 
@@ -46,9 +44,9 @@ func (lc *Local430) Cleanup() {
 
 	// Remove entries older than N
 	cutoff := time.Now().Add(-1 * time.Minute) // TODO HARDCODED Local430
-	for msgIdItem, lastTime := range lc.cache {
+	for messageID, lastTime := range lc.cache {
 		if lastTime.Before(cutoff) {
-			delete(lc.cache, msgIdItem)
+			delete(lc.cache, messageID)
 		}
 	}
 }

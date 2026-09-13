@@ -56,6 +56,16 @@ func (c *ClientConnection) handleIHave(args []string) error {
 	if len(args) != 1 {
 		return c.sendResponse(501, "IHAVE command requires exactly one argument (message-ID)")
 	}
+
+	// Check authentication and permission before requesting the article
+	if !c.authenticated {
+		c.rateLimitOnError()
+		return c.sendResponse(480, "Transfer permission denied (authentication required)")
+	}
+	if c.user != nil && !c.user.Posting {
+		c.rateLimitOnError()
+		return c.sendResponse(502, "Transfer not permitted for this user")
+	}
 	//messageID := args[0]
 	msgIdItem := history.MsgIdCache.GetORCreate(args[0])
 	if msgIdItem == nil {
@@ -81,7 +91,7 @@ func (c *ClientConnection) handleIHave(args []string) error {
 	case history.CaseDupes:
 		// If we already have the article, we can skip processing
 		log.Printf("Article %s already exists in history, skipping transfer", msgIdItem.MessageId)
-		c.sendResponse(435, "Not wanted")
+		return c.sendResponse(435, "Not wanted")
 	case history.CasePass:
 		// pass
 	}
@@ -122,11 +132,29 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 		return c.sendResponse(500, "Error MsgId Cache")
 	}
 
-	// Read article data immediately (streaming mode)
-	article, err := c.readArticleData()
+	// Read article data immediately (streaming mode):
+	// the client sends the article without waiting, so it must be consumed
+	// before replying to keep the stream in sync.
+	headLines, bodyLines, err := c.readArticleLines()
 	if err != nil {
 		log.Printf("Failed to read TAKETHIS article data: %v", err)
 		return c.sendResponse(439, fmt.Sprintf("%s Transfer failed (unable to read article)", msgIdItem.MessageId))
+	}
+
+	// Check authentication and permission (exactly one response per TAKETHIS)
+	if !c.authenticated {
+		c.rateLimitOnError()
+		return c.sendResponse(480, "Transfer permission denied (authentication required)")
+	}
+	if c.user != nil && !c.user.Posting {
+		c.rateLimitOnError()
+		return c.sendResponse(502, "Transfer not permitted for this user")
+	}
+
+	article, err := c.buildIncomingArticle(headLines, bodyLines)
+	if err != nil {
+		log.Printf("Failed to parse TAKETHIS article data: %v", err)
+		return c.sendResponse(439, fmt.Sprintf("%s Transfer failed (invalid article)", msgIdItem.MessageId))
 	}
 
 	// Check if we already have this article
@@ -147,7 +175,7 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 	case history.CaseDupes:
 		// If we already have the article, we can skip processing
 		log.Printf("Article %s already exists in history, skipping transfer", msgIdItem.MessageId)
-		c.sendResponse(439, fmt.Sprintf("%s Not", msgIdItem.MessageId))
+		return c.sendResponse(439, fmt.Sprintf("%s Not", msgIdItem.MessageId))
 	case history.CasePass:
 		// pass
 	}
@@ -170,29 +198,47 @@ type ArticleData struct {
 */
 
 // readArticleData reads article data from the client until terminator (.<CR><LF>)
-// and parses headers on-the-fly to extract newsgroup information and enable spam checking
+// and parses it into a models.Article with newsgroup pointers set.
 func (c *ClientConnection) readArticleData() (*models.Article, error) {
-	var head []string
-	var body []string
-	var newsgroups []string
-	var currentHeader string
-	headers := make(map[string][]string)
+	headLines, bodyLines, err := c.readArticleLines()
+	if err != nil {
+		return nil, err
+	}
+	return c.buildIncomingArticle(headLines, bodyLines)
+}
+
+// buildIncomingArticle parses raw head/body lines and maps the newsgroups to pointers
+func (c *ClientConnection) buildIncomingArticle(headLines, bodyLines []string) (*models.Article, error) {
+	article, newsgroups, err := parseIncomingArticleLines(headLines, bodyLines)
+	if err != nil {
+		return nil, err
+	}
+	article.ArticleNums = make(map[*string]int64, len(newsgroups))
+	for _, ng := range newsgroups {
+		newsgroupPtr := c.server.DB.Batch.GetNewsgroupPointer(ng)
+		article.NewsgroupsPtr = append(article.NewsgroupsPtr, newsgroupPtr)
+		article.ArticleNums[newsgroupPtr] = -1
+	}
+	return article, nil
+}
+
+// readArticleLines reads raw article lines from the client until terminator (.<CR><LF>),
+// undoing dot-stuffing and splitting at the first empty line into head and body lines.
+func (c *ClientConnection) readArticleLines() (headLines []string, bodyLines []string, err error) {
 	inHeaders := true
 	lineCount, headCount := 0, 0
 	maxLines, maxHead := 16384, 1024 // HARDCODED limit for article size
-	var rxb int                      // Received bytes
 
 	for {
 		if headCount > maxHead || lineCount > maxLines {
 			c.textConn.Close()
-			return nil, fmt.Errorf("article too large (limit: %d lines)", maxLines)
+			return nil, nil, fmt.Errorf("article too large (limit: %d lines)", maxLines)
 		}
 
 		line, err := c.textConn.ReadLine()
 		if err != nil {
-			return nil, fmt.Errorf("failed to read article line: %w", err)
+			return nil, nil, fmt.Errorf("failed to read article line: %w", err)
 		}
-		rxb += len(line)
 
 		// Check for end marker
 		if line == "." {
@@ -204,100 +250,78 @@ func (c *ClientConnection) readArticleData() (*models.Article, error) {
 			line = line[1:]
 		}
 
-		// Parse headers on-the-fly until we hit the empty line separator
 		if inHeaders {
 			if line == "" {
 				// Empty line marks end of headers, start of body
 				inHeaders = false
 			} else {
-				// Check for header continuation (line starts with space or tab)
-				if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
-					// This is a continuation of the previous header
-					// Append continuation to existing header value
-					if currentHeader != "" {
-						if _, exists := headers[currentHeader]; exists {
-							headers[currentHeader] = append(headers[currentHeader], line)
-						}
-					}
-				} else {
-					// Parse new header
-					colonPos := strings.Index(line, ":")
-					if colonPos != -1 {
-						headerName := strings.TrimSpace(line[:colonPos])
-						headerValue := strings.TrimSpace(line[colonPos+1:])
-						if currentHeader == "" || headerValue == "" {
-							log.Printf("Invalid header format: %s", line)
-							continue
-						}
-						currentHeader = strings.ToLower(headerName)
-						if currentHeader == "xref" {
-							// skip bad or Xref header
-							currentHeader = ""
-							continue
-						}
-						headers[currentHeader] = append(headers[currentHeader], line)
-
-						// Extract ALL newsgroups if this is the Newsgroups header
-						if currentHeader == "newsgroups" && len(newsgroups) == 0 {
-							// Split by comma and trim each newsgroup
-							groupList := strings.Split(headerValue, ",")
-							for _, group := range groupList {
-								group = strings.TrimSpace(group)
-								if group != "" {
-									newsgroups = append(newsgroups, group)
-								}
-							}
-						}
-					}
-				}
-				head = append(head, line)
+				headLines = append(headLines, line)
 				headCount++
 			}
 		} else {
-			body = append(body, line)
+			bodyLines = append(bodyLines, line)
 		}
 		lineCount++
 	}
+	return headLines, bodyLines, nil
+}
 
+// parseIncomingArticleLines builds a models.Article from already dot-unstuffed head and body lines
+// (without the separating empty line) and returns the newsgroups from the Newsgroups header.
+// It does not access the server or database.
+func parseIncomingArticleLines(headLines, bodyLines []string) (*models.Article, []string, error) {
+	messageID := extractHeaderValue(headLines, "message-id")
+
+	lines := make([]string, 0, len(headLines)+1+len(bodyLines))
+	lines = append(lines, headLines...)
+	lines = append(lines, "")
+	lines = append(lines, bodyLines...)
+
+	article, err := ParseLegacyArticleLines(messageID, lines, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Preserve original lines for peering, also when the body is empty
+	article.NNTPhead = headLines
+	article.NNTPbody = bodyLines
+
+	var newsgroups []string
+	for _, group := range strings.Split(common.GetHeaderFirst(article.Headers, "newsgroups"), ",") {
+		group = strings.TrimSpace(group)
+		if group != "" {
+			newsgroups = append(newsgroups, group)
+		}
+	}
 	if len(newsgroups) == 0 {
-		return nil, fmt.Errorf("no Newsgroups header found in article")
+		return nil, nil, fmt.Errorf("no Newsgroups header found in article")
 	}
+	return article, newsgroups, nil
+}
 
-	// Convert to models.Article
-	article := &models.Article{
-		Headers:     headers,
-		BodyText:    strings.Join(body, "\n"),
-		Lines:       len(body),
-		NNTPhead:    head, // Preserve original header order for peering
-		NNTPbody:    body, // Preserve original body lines for peering
-		ArticleNums: make(map[*string]int64),
+// extractHeaderValue returns the trimmed value of the first header named name (case-insensitive),
+// unfolding continuation lines.
+func extractHeaderValue(headLines []string, name string) string {
+	for i, line := range headLines {
+		if line == "" || line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		colonPos := strings.Index(line, ":")
+		if colonPos == -1 || !strings.EqualFold(strings.TrimSpace(line[:colonPos]), name) {
+			continue
+		}
+		value := strings.TrimSpace(line[colonPos+1:])
+		for _, cont := range headLines[i+1:] {
+			if cont == "" || (cont[0] != ' ' && cont[0] != '\t') {
+				break
+			}
+			if part := strings.TrimSpace(cont); part != "" {
+				if value != "" {
+					value += " "
+				}
+				value += part
+			}
+		}
+		return value
 	}
-	for _, ng := range newsgroups {
-		newsgroupPtr := c.server.DB.Batch.GetNewsgroupPointer(ng)
-		article.NewsgroupsPtr = append(article.NewsgroupsPtr, newsgroupPtr)
-		article.ArticleNums[newsgroupPtr] = -1
-	}
-	article.Bytes = rxb
-	// Extract individual header fields if they exist
-	if msgID := common.GetHeaderFirst(headers, "message-id"); msgID != "" {
-		article.MessageID = msgID
-	}
-	if subject := common.GetHeaderFirst(headers, "subject"); subject != "" {
-		article.Subject = subject
-	}
-	if from := common.GetHeaderFirst(headers, "from"); from != "" {
-		article.FromHeader = from
-	}
-	if references := common.GetHeaderFirst(headers, "references"); references != "" {
-		article.References = references
-	}
-	if path := common.GetHeaderFirst(headers, "path"); path != "" {
-		article.Path = path
-	}
-	if dateStr := common.GetHeaderFirst(headers, "date"); dateStr != "" {
-		article.DateString = dateStr
-		// TODO: Parse DateSent from dateStr if needed
-	}
-
-	return article, nil
+	return ""
 }
