@@ -79,6 +79,7 @@ func (db *Database) GetArticleFromAnyNewsgroupDB(msgIdItem *history.MessageIdIte
 				continue
 			}
 			article, err := db.GetArticleByMessageID(groupDB, msgIdItem.MessageId)
+			groupDB.Return()
 			if err == nil {
 				return article, nil
 			}

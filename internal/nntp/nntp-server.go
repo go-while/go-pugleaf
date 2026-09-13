@@ -66,7 +66,7 @@ func NewNNTPServer(db *database.Database, cfg *config.ServerConfig, mainWG *sync
 		Processor:   processor,
 		shutdown:    make(chan struct{}),
 		wg:          mainWG, // Use external waitgroup for coordination
-		local430:    &Local430{cache: make(map[*history.MessageIdItem]time.Time, 65535)},
+		local430:    &Local430{cache: make(map[string]time.Time, 65535)},
 	}
 	go server.local430.CronLocal430() // Start local 430 cache cleanup goroutine
 	return server, nil
