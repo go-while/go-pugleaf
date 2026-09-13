@@ -427,7 +427,7 @@
                       <div class="col-6">
                           <div class="text-center">
                               <h4>{{.MessageIdCacheStats.total_buckets}}</h4>
-                              <small class="text-muted">Total Buckets</small>
+                              <small class="text-muted">Shards</small>
                           </div>
                       </div>
                   </div>
@@ -435,15 +435,15 @@
                   <div class="row text-center">
                       <div class="col-4">
                           <h5>{{printf "%.3f" .MessageIdCacheStats.load_factor}}</h5>
-                          <small class="text-muted">Load Factor</small>
+                          <small class="text-muted">Items per Shard</small>
                       </div>
                       <div class="col-4">
                           <h5>{{.MessageIdCacheStats.max_chain_length}}</h5>
-                          <small class="text-muted">Max Chain</small>
+                          <small class="text-muted">Largest Shard</small>
                       </div>
                       <div class="col-4">
                           <h5>{{printf "%.1f" .MessageIdCacheStats.utilization_percent}}%</h5>
-                          <small class="text-muted">Capacity Used</small>
+                          <small class="text-muted">Largest Shard Share</small>
                       </div>
                   </div>
                   <hr>
@@ -451,26 +451,26 @@
                       <div class="col-4">
                           <div class="text-center">
                               <h5>{{.MessageIdCacheStats.occupied_buckets}}</h5>
-                              <small class="text-muted">Occupied Buckets</small>
+                              <small class="text-muted">Occupied Shards</small>
                           </div>
                       </div>
                       <div class="col-4">
                           <div class="text-center">
                               <h5>{{printf "%.1f" .MessageIdCacheStats.bucket_occupancy_percent}}%</h5>
-                              <small class="text-muted">Bucket Fill</small>
+                              <small class="text-muted">Shard Fill</small>
                           </div>
                       </div>
                       <div class="col-4">
                           <div class="text-center">
                               <h5>{{printf "%.2f" .MessageIdCacheStats.max_load_factor}}</h5>
-                              <small class="text-muted">Max Load Factor</small>
+                              <small class="text-muted">Shard Skew (1.00 = even)</small>
                           </div>
                       </div>
                   </div>
                   {{if .MessageIdCacheStats.status}}
                   <div class="text-center mt-2">
                       <span class="badge bg-success me-2">Status: {{.MessageIdCacheStats.status}}</span>
-                      <span class="badge bg-info">Max: {{.MessageIdCacheStats.max_buckets}} buckets</span>
+                      <span class="badge bg-info">{{.MessageIdCacheStats.max_buckets}} fixed shards</span>
                   </div>
                   {{end}}
               </div>

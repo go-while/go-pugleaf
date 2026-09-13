@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -74,7 +75,7 @@ func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen in
 
 	// Initialize history system with 16-DB sharding
 	historyConfig := &history.HistoryConfig{
-		HistoryDir:      "./data/history",
+		HistoryDir:      filepath.Join(db.GetDataDir(), "history"),
 		CacheExpires:    60,                   // HARDCODED
 		CachePurge:      15,                   // HARDCODED
 		ShardMode:       history.SHARD_16_256, // CAN NOT BE CHANGED ! ! 16 databases with 256 tables each
@@ -115,15 +116,10 @@ func (proc *Processor) CheckNoMoreWorkInHistory() bool {
 	return proc.History.CheckNoMoreWorkInHistory()
 }
 
-// AddProcessedArticleToHistory adds a successfully processed article to history with correct group and article number
-func (proc *Processor) AddProcessedArticleToHistory(msgIdItem *history.MessageIdItem) bool {
-	if msgIdItem == nil {
-		//log.Print("ERROR: addProcessedArticleToHistory called with nil MessageIdItem or newsgroupPtr")
-		return false
-	}
-
-	// Add to history channel
-	return proc.History.Add(msgIdItem)
+// AddArticleToHistory records a committed article (message-id -> main-DB newsgroup ID) in the history index.
+// Called by the database batch system after the article was stored and numbered. No-op if history is disabled.
+func (proc *Processor) AddArticleToHistory(messageID string, groupID int64) {
+	proc.History.AddArticle(messageID, groupID)
 }
 
 // GetHistoryStats returns current history statistics
@@ -184,17 +180,80 @@ func (proc *Processor) WaitForBatchCompletion() {
 
 // Public methods for NNTP server integration
 
-// Lookup looks up a message-ID in history and returns the storage token in the item
-func (proc *Processor) Lookup(msgIdItem *history.MessageIdItem, quick bool) (response int, newsgroupIDs []int64, err error) {
-	return proc.History.Lookup(msgIdItem, quick)
+// CheckMessageID reports whether an offered message-id is wanted (IHAVE/TAKETHIS pre-check).
+// Returns history.CaseRetry while another goroutine is processing it (CaseLock/CaseWrite),
+// history.CaseDupes if it is known, history.CaseError on a history error and history.CasePass if it is new.
+// It never changes the state of the cache item.
+func (proc *Processor) CheckMessageID(messageID string) int {
+	if messageID == "" {
+		return history.CaseError
+	}
+	if history.MsgIdCache != nil {
+		if item := history.MsgIdCache.GetORCreate(messageID); item != nil {
+			item.Mux.RLock()
+			response := item.Response
+			item.Mux.RUnlock()
+			switch response {
+			case history.CaseLock, history.CaseWrite:
+				return history.CaseRetry
+			case history.CaseDupes:
+				return history.CaseDupes
+			}
+		}
+	}
+	exists, err := proc.History.Exists(messageID)
+	if err != nil {
+		log.Printf("[PROCESSOR] CheckMessageID: history error for '%s': %v", messageID, err)
+		return history.CaseError
+	}
+	if exists {
+		return history.CaseDupes
+	}
+	return history.CasePass
 }
 
-/*
-// AddArticleToHistory adds an article to history (public wrapper)
-func (proc *Processor) AddArticleToHistory(article *nntp.Article, newsgroup string) {
-	proc.addArticleToHistory(article, newsgroup)
+// FindArticleByMessageID finds an article by message-id: the current group first,
+// then the groups listed in the history index. The first hit wins.
+// Returns an error wrapping nntp.ErrArticleNotFound if no group has the article.
+func (proc *Processor) FindArticleByMessageID(messageID, currentGroup string) (*models.Article, error) {
+	if messageID == "" {
+		return nil, fmt.Errorf("empty message-id: %w", nntp.ErrArticleNotFound)
+	}
+	if currentGroup != "" {
+		if article := proc.findArticleInGroup(messageID, currentGroup); article != nil {
+			return article, nil
+		}
+	}
+	groupIDs, err := proc.History.LookupGroups(messageID)
+	if err != nil {
+		return nil, fmt.Errorf("history lookup for '%s' failed: %w", messageID, err)
+	}
+	for _, groupID := range groupIDs {
+		groupName, exists := database.NewsgroupDBsIDcache.GetNewsgroupNameByID(groupID, proc.DB)
+		if !exists || groupName == "" || groupName == currentGroup {
+			continue
+		}
+		if article := proc.findArticleInGroup(messageID, groupName); article != nil {
+			return article, nil
+		}
+	}
+	return nil, fmt.Errorf("message-id '%s': %w", messageID, nntp.ErrArticleNotFound)
 }
-*/
+
+// findArticleInGroup returns the article from one newsgroup DB or nil
+func (proc *Processor) findArticleInGroup(messageID, groupName string) *models.Article {
+	groupDB, err := proc.DB.GetGroupDB(groupName)
+	if err != nil || groupDB == nil {
+		return nil
+	}
+	defer groupDB.Return()
+	article, err := proc.DB.GetArticleByMessageID(groupDB, messageID)
+	if err != nil {
+		return nil
+	}
+	return article
+}
+
 // ProcessIncomingArticle processes an incoming article and stores it in the database
 func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, error) {
 	if article == nil {

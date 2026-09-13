@@ -66,34 +66,21 @@ func (c *ClientConnection) handleIHave(args []string) error {
 		c.rateLimitOnError()
 		return c.sendResponse(502, "Transfer not permitted for this user")
 	}
-	//messageID := args[0]
-	msgIdItem := history.MsgIdCache.GetORCreate(args[0])
-	if msgIdItem == nil {
-		c.rateLimitOnError()
-		return c.sendResponse(500, "Error MsgId Cache")
-	}
+	messageID := args[0]
 
-	// Check if we already have this article
-	response, _, err := c.server.Processor.Lookup(msgIdItem, true)
-	if err != nil {
-		log.Printf("Error looking up message ID %s in history: %v", msgIdItem.MessageId, err)
+	// Check if we want this article
+	switch c.server.Processor.CheckMessageID(messageID) {
+	case history.CasePass:
+		// wanted
+	case history.CaseDupes:
+		return c.sendResponse(435, "Not wanted")
+	case history.CaseRetry:
+		// another connection is transferring it right now
+		return c.sendResponse(436, "Retry later")
+	default: // history.CaseError
+		log.Printf("Error checking article history for %s", messageID)
 		c.rateLimitOnError()
 		return c.sendResponse(436, "Retry later (history error)")
-	}
-	switch response {
-	case history.CaseError:
-		log.Printf("Error checking article history for %s", msgIdItem.MessageId)
-		return c.sendResponse(436, "Retry later (history error)")
-	case history.CaseRetry:
-		// Retry case, we can skip processing
-		log.Printf("Article %s is in retry state, skipping transfer", msgIdItem.MessageId)
-		return c.sendResponse(436, "Retry later")
-	case history.CaseDupes:
-		// If we already have the article, we can skip processing
-		log.Printf("Article %s already exists in history, skipping transfer", msgIdItem.MessageId)
-		return c.sendResponse(435, "Not wanted")
-	case history.CasePass:
-		// pass
 	}
 
 	// Request the article
@@ -107,38 +94,51 @@ func (c *ClientConnection) handleIHave(args []string) error {
 		log.Printf("Failed to read IHAVE article data: %v", err)
 		return c.sendResponse(436, "Bad") //Invalid
 	}
-
-	if response, err := c.server.Processor.ProcessIncomingArticle(article); response != history.CasePass || err != nil {
-		return c.sendResponse(436, "Transfer failed (processing error)")
+	if !reconcileMessageID(article, messageID) {
+		log.Printf("IHAVE message-id mismatch: command '%s' article '%s'", messageID, article.MessageID)
+		return c.sendResponse(437, "Rejected (Message-ID mismatch)")
 	}
 
-	return c.sendResponse(235, "Article transferred successfully")
+	response, err := c.server.Processor.ProcessIncomingArticle(article)
+	switch {
+	case err == nil && response == history.CasePass:
+		return c.sendResponse(235, "Article transferred successfully")
+	case response == history.CaseDupes:
+		return c.sendResponse(437, "Rejected (duplicate)")
+	default:
+		return c.sendResponse(436, "Transfer failed (processing error)")
+	}
+}
+
+// reconcileMessageID sets the article's Message-ID from the command argument if the article has none.
+// Returns false if both exist and differ.
+func reconcileMessageID(article *models.Article, cmdMessageID string) bool {
+	if article.MessageID == "" {
+		article.MessageID = cmdMessageID
+		return true
+	}
+	return article.MessageID == cmdMessageID
 }
 
 // handleTakeThis handles the TAKETHIS command for streaming article transfer
 func (c *ClientConnection) handleTakeThis(args []string) error {
+	// Read article data immediately (streaming mode):
+	// the client sends the article without waiting, so it must be consumed
+	// before replying to keep the stream in sync (also for the early error replies).
+	headLines, bodyLines, err := c.readArticleLines()
+
 	// Check if processor is available
 	if c.server.Processor == nil {
 		return c.sendResponse(502, "Streaming not supported on this server")
 	}
-
 	if len(args) != 1 {
 		return c.sendResponse(501, "TAKETHIS command requires exactly one argument (message-ID)")
 	}
-	//messageID := args[0]
-	msgIdItem := history.MsgIdCache.GetORCreate(args[0])
-	if msgIdItem == nil {
-		c.rateLimitOnError()
-		return c.sendResponse(500, "Error MsgId Cache")
-	}
+	messageID := args[0]
 
-	// Read article data immediately (streaming mode):
-	// the client sends the article without waiting, so it must be consumed
-	// before replying to keep the stream in sync.
-	headLines, bodyLines, err := c.readArticleLines()
 	if err != nil {
 		log.Printf("Failed to read TAKETHIS article data: %v", err)
-		return c.sendResponse(439, fmt.Sprintf("%s Transfer failed (unable to read article)", msgIdItem.MessageId))
+		return c.sendResponse(439, fmt.Sprintf("%s Transfer failed (unable to read article)", messageID))
 	}
 
 	// Check authentication and permission (exactly one response per TAKETHIS)
@@ -151,40 +151,34 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 		return c.sendResponse(502, "Transfer not permitted for this user")
 	}
 
+	// Check if we want this article
+	switch c.server.Processor.CheckMessageID(messageID) {
+	case history.CasePass:
+		// wanted
+	case history.CaseDupes:
+		return c.sendResponse(439, fmt.Sprintf("%s Not wanted", messageID))
+	case history.CaseRetry:
+		return c.sendResponse(439, fmt.Sprintf("%s Retry later", messageID))
+	default: // history.CaseError
+		log.Printf("Error checking article history for %s", messageID)
+		return c.sendResponse(439, fmt.Sprintf("%s Retry later (history error)", messageID))
+	}
+
 	article, err := c.buildIncomingArticle(headLines, bodyLines)
 	if err != nil {
 		log.Printf("Failed to parse TAKETHIS article data: %v", err)
-		return c.sendResponse(439, fmt.Sprintf("%s Transfer failed (invalid article)", msgIdItem.MessageId))
+		return c.sendResponse(439, fmt.Sprintf("%s Transfer failed (invalid article)", messageID))
 	}
-
-	// Check if we already have this article
-	response, _, err := c.server.Processor.Lookup(msgIdItem, true)
-	if err != nil {
-		log.Printf("Error looking up message ID %s in history: %v", msgIdItem.MessageId, err)
-		c.rateLimitOnError()
-		return c.sendResponse(439, fmt.Sprintf("%s Retry later (history error)", msgIdItem.MessageId))
-	}
-	switch response {
-	case history.CaseError:
-		log.Printf("Error checking article history for %s", msgIdItem.MessageId)
-		return c.sendResponse(439, fmt.Sprintf("%s Err", msgIdItem.MessageId))
-	case history.CaseRetry:
-		// Retry case, we can skip processing
-		log.Printf("Article %s is in retry state, skipping transfer", msgIdItem.MessageId)
-		return c.sendResponse(439, fmt.Sprintf("%s Ret", msgIdItem.MessageId))
-	case history.CaseDupes:
-		// If we already have the article, we can skip processing
-		log.Printf("Article %s already exists in history, skipping transfer", msgIdItem.MessageId)
-		return c.sendResponse(439, fmt.Sprintf("%s Not", msgIdItem.MessageId))
-	case history.CasePass:
-		// pass
+	if !reconcileMessageID(article, messageID) {
+		log.Printf("TAKETHIS message-id mismatch: command '%s' article '%s'", messageID, article.MessageID)
+		return c.sendResponse(439, fmt.Sprintf("%s Transfer failed (Message-ID mismatch)", messageID))
 	}
 
 	if response, err := c.server.Processor.ProcessIncomingArticle(article); response != history.CasePass || err != nil {
-		return c.sendResponse(439, fmt.Sprintf("%s Transfer failed", msgIdItem.MessageId))
+		return c.sendResponse(439, fmt.Sprintf("%s Transfer failed", messageID))
 	}
 
-	return c.sendResponse(239, fmt.Sprintf("%s Article transferred successfully", msgIdItem.MessageId))
+	return c.sendResponse(239, fmt.Sprintf("%s Article transferred successfully", messageID))
 }
 
 /*

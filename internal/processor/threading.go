@@ -4,7 +4,6 @@ import (
 	"crypto/md5"
 	"fmt"
 	"log"
-	"slices"
 	"strings"
 	"time"
 
@@ -49,7 +48,7 @@ func (proc *Processor) setCaseDupes(msgIdItem *history.MessageIdItem, bulkmode b
 	if msgIdItem != nil {
 		msgIdItem.Mux.Lock()
 		msgIdItem.Response = history.CaseDupes
-		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
+		msgIdItem.CachedEntryExpires = time.Now().Add(history.CachedEntryTTL)
 		msgIdItem.Mux.Unlock()
 	}
 }
@@ -72,45 +71,30 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 	// Pipeline safety: Implement CaseWrite/CaseDupes logic for deduplication
 	if !bulkmode { // rslight legacy importer runs in bulkmode! so we skip history checks here!!!
 
-		// Thread-safe check and set of processing state
+		// claim the message-id first, then check history: only one goroutine can hold the claim
 		msgIdItem.Mux.Lock()
-
-		// Check current state of the message
 		switch msgIdItem.Response {
-		case history.CaseDupes:
-			// Article already processed and written to database
+		case history.CaseLock, history.CaseWrite, history.CaseDupes:
+			// being processed by another goroutine or already stored
 			msgIdItem.Mux.Unlock()
 			return history.CaseDupes, nil
-		case history.CaseWrite:
-			// Article is currently being processed by another goroutine
-			msgIdItem.Mux.Unlock()
-			return history.CaseDupes, nil // Return duplicate to avoid race condition
-		case history.CasePass:
-			// Article is new, mark as being processed
-			msgIdItem.Response = history.CaseLock
-			msgIdItem.Mux.Unlock()
-			// Continue with processing
-		default:
-			// Also check history database for final determination
-			msgIdItem.Mux.Unlock()
-			response, _, err := proc.Lookup(msgIdItem, true)
-			if err != nil {
-				log.Printf("Error looking up message ID %s in history: %v", msgIdItem.MessageId, err)
-				return history.CaseError, err
-			}
-			if response != history.CasePass {
-				return history.CaseDupes, nil // Already exists in history
-			}
-			// If not in history, mark as being processed
+		}
+		msgIdItem.Response = history.CaseLock
+		msgIdItem.CachedEntryExpires = time.Now().Add(history.TmpCacheTTL)
+		msgIdItem.Mux.Unlock()
+
+		exists, err := proc.History.Exists(article.MessageID)
+		if err != nil {
+			log.Printf("Error looking up message ID %s in history: %v", article.MessageID, err)
 			msgIdItem.Mux.Lock()
-			if msgIdItem.Response == history.CasePass { // Re-check after lock
-				msgIdItem.Response = history.CaseWrite
-			} else {
-				// State changed while we were checking history, treat as duplicate
-				msgIdItem.Mux.Unlock()
-				return history.CaseDupes, nil
-			}
+			msgIdItem.Response = history.CaseError
+			msgIdItem.CachedEntryExpires = time.Now().Add(history.ErrorCaseTTL)
 			msgIdItem.Mux.Unlock()
+			return history.CaseError, err
+		}
+		if exists {
+			proc.setCaseDupes(msgIdItem, bulkmode)
+			return history.CaseDupes, nil
 		}
 	}
 
@@ -134,18 +118,6 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, fmt.Errorf("error processArticle: article '%s' crossposts=%d", article.MessageID, len(ngs))
 		}
-		for _, ngName := range ngs {
-			ngid, err := proc.DB.MainDBGetNewsgroup(ngName)
-			if err != nil {
-				log.Printf("processArticle: failed to get newsgroup ID for name '%s': %v", ngName, err)
-				continue
-			}
-			msgIdItem.Mux.Lock()
-			if !slices.Contains(msgIdItem.NewsgroupIDs, ngid.ID) {
-				msgIdItem.NewsgroupIDs = append(msgIdItem.NewsgroupIDs, ngid.ID)
-			}
-			msgIdItem.Mux.Unlock()
-		}
 		newsgroups = append(newsgroups, legacyNewsgroup)
 
 	} else if !RunRSLIGHTImport && !bulkmode {
@@ -163,19 +135,6 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, fmt.Errorf("error processArticle: article '%s' crossposts=%d", article.MessageID, len(newsgroups))
 		}
-		for _, ngName := range newsgroups {
-			ngid, err := proc.DB.MainDBGetNewsgroup(ngName)
-			if err != nil {
-				log.Printf("processArticle: failed to get newsgroup ID for name '%s': %v", ngName, err)
-				continue
-			}
-			msgIdItem.Mux.Lock()
-			if !slices.Contains(msgIdItem.NewsgroupIDs, ngid.ID) {
-				msgIdItem.NewsgroupIDs = append(msgIdItem.NewsgroupIDs, ngid.ID)
-			}
-			msgIdItem.Mux.Unlock()
-		}
-
 	} else {
 		log.Printf("ERROR in processArticle: invalid bulk import flags")
 		proc.setCaseDupes(msgIdItem, bulkmode)
@@ -209,8 +168,8 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 	// TODO: add article cutoff date checks here
 
 	// part of parsing data moved to nntp-client-commands.go:L~850 (func ParseLegacyArticleLines)
+	// the history index is written by the batch system after the article was committed (db_batch.go)
 	article.MsgIdItem = msgIdItem
-	proc.AddProcessedArticleToHistory(msgIdItem)
 
 	article.ArticleNums = make(map[*string]int64)
 	article.ProcessQueue = make(chan *string, 16) // Initialize process queue
@@ -248,7 +207,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 	//article.Newsgroups = nil // Free newsgroups slice if it exists
 	if len(newsgroups) > 0 {
 		// Process groups directly inline - no goroutines/channels needed
-
+		queued := 0 // groups the article was queued for
 		for _, newsgroup := range newsgroups {
 
 			// Get the newsgroup pointer once from batch system for memory efficiency
@@ -295,6 +254,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 			groupDB.Return()
 
 			go proc.DB.Batch.BatchCaptureOverviewForLater(newsgroupPtr, article)
+			queued++
 
 			// Return connection immediately after processing
 			//log.Printf("BatchCaptureOverviewForLater: msgid='%s' ng: '%s'", article.MessageID, group)
@@ -307,6 +267,11 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 			*/
 		}
 		//log.Printf("All posts completed: (%d) for article %s", len(newsgroups), article.MessageID)
+		if queued == 0 {
+			// nothing to store (e.g. every group already has it): the batch system will not
+			// finalize the item, so do not leave it in CaseLock
+			proc.setCaseDupes(msgIdItem, bulkmode)
+		}
 
 	} else {
 		log.Printf("No newsgroups found in article '%s', skipping processing", article.MessageID)

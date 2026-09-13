@@ -1,7 +1,6 @@
 package main
 
 import (
-	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
@@ -23,9 +22,14 @@ func (pa *ProcessorAdapter) ProcessIncomingArticle(article *models.Article) (int
 	return pa.processor.ProcessIncomingArticle(article)
 }
 
-// Lookup checks if a message-ID exists in history
-func (pa *ProcessorAdapter) Lookup(msgIdItem *history.MessageIdItem, quick bool) (response int, newsgroupIDs []int64, err error) {
-	return pa.processor.History.Lookup(msgIdItem, quick)
+// CheckMessageID checks if an offered message-ID is wanted (IHAVE/TAKETHIS)
+func (pa *ProcessorAdapter) CheckMessageID(messageID string) int {
+	return pa.processor.CheckMessageID(messageID)
+}
+
+// FindArticleByMessageID finds an article by message-ID (current group first, then history)
+func (pa *ProcessorAdapter) FindArticleByMessageID(messageID, currentGroup string) (*models.Article, error) {
+	return pa.processor.FindArticleByMessageID(messageID, currentGroup)
 }
 
 // CheckNoMoreWorkInHistory checks if there's no more work in history
