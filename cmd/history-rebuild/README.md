@@ -1,62 +1,68 @@
-# UseShortHashLen
+# history-rebuild
 
-# ShortHashLen can NOT be changed after hashdb creation.
-# One should think wisely before creating the hashdb.
-# Changing this value later will require a complete rebuild of the history database, which not really tested yet.
+Maintenance tool for the go-pugleaf message-id history index.
 
-**Hash routing breakdown:**
-- **1st char**: Database selection (0-f) (16 hash databases)
-- **2nd+3rd chars**: Table selection (s00-sff) (256 tables per database)
-- **4th-6th chars**: short hash (default UseShortHashLen=3)
-- **Total**: Default UseShortHashLen = 3 + 3 (db[0-f]:table[s00-sff]) = 6 characters = 16^6 = **16,777,216 combinations**
+## What the history index is
 
+A global lookup table `message-id -> newsgroup IDs` (IDs of the `newsgroups` table in
+`<data>/cfg/pugleaf.sq3`). It is used for duplicate checks (posting, IHAVE, TAKETHIS)
+and to find an article by message-id without searching every group database.
 
-ShortHashLen:
-- "2" (+ 3 for db[0-f]:table[s00-sff] selection) total of 5 chars = 16^5 combinations = 1,048,576)
-- "3" (+ 3 for db[0-f]:table[s00-sff] selection) total of 6 chars = 16^6 combinations = 16,777,216)
-- "4" (+ 3 for db[0-f]:table[s00-sff] selection) total of 7 chars = 16^7 combinations = 268,435,456)
-- "5" (+ 3 for db[0-f]:table[s00-sff] selection) total of 8 chars = 16^8 combinations = 4,294,967,296)
-- "6" (+ 3 for db[0-f]:table[s00-sff] selection) total of 9 chars = 16^9 combinations = 68,719,476,736)
-- "7" (+ 3 for db[0-f]:table[s00-sff] selection) total of 10 chars = 16^10 combinations = 1,099,511,627,776)
+The per-group databases (`<data>/db/...`) are the source of truth. The index only
+mirrors them, so it can always be rebuilt from the group databases.
 
+## File layout
 
-### Collision Example: UseShortHashLen=2 with 1M articles
+```
+<data>/history/hashdb_0.sqlite3 ... hashdb_f.sqlite3   16 SQLite files
+    tables _00 ... _ff                                 256 tables per file
+        message_id TEXT PRIMARY KEY, newsgroups TEXT   newsgroups = "12,345,6789"
+<data>/history/rebuild.progress                        last fully rebuilt group (resume)
+```
 
-**The math:**
-- UseShortHashLen=2 = 1,048,576 possible hash slots
-- 1M articles = nearly 100% capacity utilization
-- Result: Many collisions, but system handles them gracefully
+Routing: `md5(message-id)` as hex; the 1st char selects the file, chars 2-3 select the table.
+Full message-ids are stored, so there are no hash collisions. `-useshorthashlen` is still
+accepted but has no effect since Nov 2025.
 
-**What happens in practice:**
-- Many hash entries store multiple comma-separated file offsets
-- Example: A single hash might store "12345,23456,34567,45678" (4 colliding articles)
-- During lookups, the system reads all 4 positions from history.dat and verifies the full hash of each to find the correct article
-- **Performance impact**: Instead of 1 disk read, many lookups require 3-5+ disk reads
+## Modes
 
-**Why performance degrades:**
-- With 1M articles in 1M slots, frequent collisions occur
-- Each collision increases lookup time proportionally
-- The system works correctly, but slower due to additional I/O operations
+| Command | What it does | Writes |
+|---------|--------------|--------|
+| `history-rebuild` | Rebuild: scan all groups (sorted by name) and add every article | yes |
+| `history-rebuild -restart` | Rebuild from the first group, ignore/remove `rebuild.progress` | yes |
+| `history-rebuild -validate-only [-verbose]` | Check every article: missing message-id, or entry without this group. `-verbose` prints the first 100 misses | no |
+| `history-rebuild -analyze-only [-verbose]` | Open the 16 files read-only: rows per file (per table with `-verbose`), total, histogram of groups per message-id | no |
+| `history-rebuild -trim` | Full sweep over all history rows: remove group IDs whose group is gone from the main DB, has no group DB file, or no longer has the article | yes |
 
-The collision handling is robust and reliable - it's a performance trade-off, not a failure mode.
+Other flags: `-data <dir>` (default `./data`), `-progress N` (progress line every N articles),
+`-batch-size N` (article_num range per query, default 10000), `-verbose`, `-pprof :6060`.
 
-### Implementation Background
+Exit code: 0 ok, 1 errors, 130 interrupted.
 
-This hash-based history system follows design principles similar to traditional Usenet news servers, particularly inspired by approaches used in systems like INN2 (InterNetNews). The core concept involves:
+## Resuming and idempotency
 
-**Traditional Usenet History Approach:**
-- Hash-based duplicate detection using message-id hashes
-- File offset storage for quick article retrieval
-- Sharded databases to distribute load and improve concurrency
-- Collision handling through chaining (multiple offsets per hash)
+- After each fully processed group its name is written to `rebuild.progress`
+  (tmp file + rename). A new run skips all groups up to and including that name.
+  When the run reaches the end, the file is removed.
+- Ctrl+C stops after the current range. Queued history writes are flushed before exit;
+  the interrupted group is not marked done and is scanned again on the next run.
+- Adding is idempotent (a group ID is only appended once), so re-running a rebuild
+  or rebuilding while the index already has entries is safe.
+- Groups without a group DB file are skipped.
 
-**Our Implementation:**
-- **Hash Routing**: Uses first 3 characters for database/table selection (16 DBs × 256 tables = 4,096 shards)
-- **Storage Hash**: Configurable UseShortHashLen for collision resistance vs. storage efficiency
-- **File Offsets**: Stores byte positions in history.dat for direct article access
-- **Collision Management**: Comma-separated offsets with full hash verification during lookups
-- **Graceful Degradation**: System remains functional under high collision scenarios
+## When to use -trim
 
-The sharding strategy (16 databases × 256 tables each) provides excellent distribution and allows for high-concurrency operations while maintaining the simplicity and reliability that traditional Usenet history systems are known for.
+Articles deleted from group databases (expire-news without `-trim-history`, deleted groups,
+manual deletes) keep their history entries, so they are still rejected as duplicates.
+This is intended (INN-style remember). Run `-trim` when you want the index to match the
+group databases again, e.g. after deleting groups or to reclaim space.
 
+`-trim` is slow: every row triggers lookups in the group databases. Run it while no
+fetcher / nntp-server is importing articles, otherwise a just-imported article whose
+group DB write is still queued can be trimmed (a rebuild fixes that).
 
+## Building
+
+```bash
+go build -o build/history-rebuild ./cmd/history-rebuild
+```

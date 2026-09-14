@@ -8,8 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-while/go-pugleaf/internal/history"
-	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 const MaxOpenDatabases = 256
@@ -69,22 +67,6 @@ func (db *Database) GetAnyNewsgroupDBfromIDs(newsgroupIDs []int64) (*GroupDB, er
 		}
 	}
 	return nil, fmt.Errorf("failed to get any newsgroup DB for IDs: %v", newsgroupIDs)
-}
-
-func (db *Database) GetArticleFromAnyNewsgroupDB(msgIdItem *history.MessageIdItem) (*models.Article, error) {
-	for _, ngID := range msgIdItem.NewsgroupIDs {
-		if ngName, exists := NewsgroupDBsIDcache.GetNewsgroupNameByID(ngID, db); exists {
-			groupDB, err := db.GetGroupDB(ngName)
-			if err != nil {
-				continue
-			}
-			article, err := db.GetArticleByMessageID(groupDB, msgIdItem.MessageId)
-			if err == nil {
-				return article, nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("failed to get article from any newsgroup DB for message ID: %s", msgIdItem.MessageId)
 }
 
 func (db *Database) GetNewsgroupsDBbyID(newsgroupID int64) (*GroupDB, error) {

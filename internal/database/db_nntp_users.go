@@ -19,15 +19,16 @@ func (db *Database) InsertNNTPUser(u *models.NNTPUser) error {
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
 
+	// web_user_id 0 means "no web user": store NULL, the column is a foreign key to users(id)
 	query := `INSERT INTO nntp_users (username, password, maxconns, posting, web_user_id, is_active)
-	          VALUES (?, ?, ?, ?, ?, ?)`
+	          VALUES (?, ?, ?, ?, NULLIF(?, 0), ?)`
 	_, err = RetryableExec(db.mainDB, query, u.Username, string(hashedPassword), u.MaxConns, u.Posting, u.WebUserID, u.IsActive)
 	return err
 }
 
 // GetNNTPUserByUsername retrieves an NNTP user by username
 func (db *Database) GetNNTPUserByUsername(username string) (*models.NNTPUser, error) {
-	query := `SELECT id, username, password, maxconns, posting, web_user_id, created_at, updated_at, last_login, is_active
+	query := `SELECT id, username, password, maxconns, posting, COALESCE(web_user_id, 0), created_at, updated_at, last_login, is_active
 	          FROM nntp_users WHERE username = ? AND is_active = 1`
 
 	var u models.NNTPUser
@@ -41,7 +42,7 @@ func (db *Database) GetNNTPUserByUsername(username string) (*models.NNTPUser, er
 
 // GetNNTPUserByID retrieves an NNTP user by ID
 func (db *Database) GetNNTPUserByID(id int) (*models.NNTPUser, error) {
-	query := `SELECT id, username, password, maxconns, posting, web_user_id, created_at, updated_at, last_login, is_active
+	query := `SELECT id, username, password, maxconns, posting, COALESCE(web_user_id, 0), created_at, updated_at, last_login, is_active
 	          FROM nntp_users WHERE id = ?`
 
 	var u models.NNTPUser
@@ -55,7 +56,7 @@ func (db *Database) GetNNTPUserByID(id int) (*models.NNTPUser, error) {
 
 // GetNNTPUserByWebUserID retrieves an NNTP user by web user ID
 func (db *Database) GetNNTPUserByWebUserID(webUserID int64) (*models.NNTPUser, error) {
-	query := `SELECT id, username, password, maxconns, posting, web_user_id, created_at, updated_at, last_login, is_active
+	query := `SELECT id, username, password, maxconns, posting, COALESCE(web_user_id, 0), created_at, updated_at, last_login, is_active
 	          FROM nntp_users WHERE web_user_id = ? AND is_active = 1`
 
 	var u models.NNTPUser
@@ -69,7 +70,7 @@ func (db *Database) GetNNTPUserByWebUserID(webUserID int64) (*models.NNTPUser, e
 
 // SearchNNTPUsers searches for NNTP users by username with a limit
 func (db *Database) SearchNNTPUsers(searchTerm string, limit int) ([]*models.NNTPUser, error) {
-	query := `SELECT id, username, password, maxconns, posting, web_user_id, created_at, updated_at, last_login, is_active
+	query := `SELECT id, username, password, maxconns, posting, COALESCE(web_user_id, 0), created_at, updated_at, last_login, is_active
 	          FROM nntp_users
 	          WHERE username LIKE ?
 	          ORDER BY username
@@ -95,7 +96,7 @@ func (db *Database) SearchNNTPUsers(searchTerm string, limit int) ([]*models.NNT
 
 // GetAllNNTPUsers retrieves all NNTP users
 func (db *Database) GetAllNNTPUsers() ([]*models.NNTPUser, error) {
-	query := `SELECT id, username, password, maxconns, posting, web_user_id, created_at, updated_at, last_login, is_active
+	query := `SELECT id, username, password, maxconns, posting, COALESCE(web_user_id, 0), created_at, updated_at, last_login, is_active
 	          FROM nntp_users ORDER BY username`
 	rows, err := RetryableQuery(db.mainDB, query)
 	if err != nil {

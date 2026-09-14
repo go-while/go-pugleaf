@@ -1,6 +1,6 @@
 rm data/history -r
 sqlite3 data/cfg/pugleaf.sq3 "update config set value = 7 WHERE key = 'history_use_short_hash_len';"
-./history-rebuild -nntphostname pugleaf.net
+./history-rebuild
 
 ./recover-db -parsedates -rewritedates
 ./webserver -update-newsgroups-hide-futureposts -update-newsgroup-activity;

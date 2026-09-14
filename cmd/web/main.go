@@ -55,6 +55,7 @@ var (
 	findOrphanDBs         bool
 	verbose               bool
 	dataDir               string
+	useHistory            bool
 	//ignoreInitialTinyGroups int64 // code path disabled
 
 	// Migration flags
@@ -88,7 +89,6 @@ var appVersion = "-unset-"
 func main() {
 	config.AppVersion = appVersion
 	models.DisableSanitizedCache = false
-	history.ENABLE_HISTORY = false
 
 	// Initialize embedded filesystems
 	database.SetEmbeddedMigrations(database.EmbeddedMigrationsFS)
@@ -107,6 +107,7 @@ func main() {
 	//flag.Int64Var(&isleep, "isleep", 300, "Sleeps in fetch routines. if started with: -withfetch (default: 300 seconds = 5min)")
 	//flag.Int64Var(&ignoreInitialTinyGroups, "ignore-initial-tiny-groups", 0, "If > 0: initial fetch ignores tiny groups with fewer articles than this (default: 0)")
 	flag.StringVar(&nntphostname, "nntphostname", "", "your hostname must be set")
+	flag.BoolVar(&useHistory, "history", true, "maintain and use the message-id history index (data/history)")
 	flag.StringVar(&webcertFile, "websslcert", "", "SSL certificate file (/path/to/fullchain.pem)")
 	flag.StringVar(&webkeyFile, "websslkey", "", "SSL key file (/path/to/privkey.pem)")
 	flag.IntVar(&nntptcpport, "nntptcpport", 0, "NNTP TCP port")
@@ -144,6 +145,7 @@ func main() {
 		flag.StringVar(&matrixUserID, "matrix-userid", "", "Matrix user ID")
 	*/
 	flag.Parse()
+	history.ENABLE_HISTORY = useHistory
 	mainConfig := config.NewDefaultConfig()
 	log.Printf("Starting go-pugleaf: Web Server NNTP=%t Fetch=%t (version: %s)", withnntp, withfetch, appVersion)
 
@@ -229,11 +231,7 @@ func main() {
 	database.GlobalDateParser = processor.ParseNNTPDate
 	//log.Printf("[WEB]: Date parser adapter initialized with processor.ParseNNTPDate")
 
-	// Note: Database batch workers are started automatically by OpenDatabase()
-	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
-	if history.ENABLE_HISTORY {
-		db.WG.Add(1) // Adds for history: one for writer worker
-	}
+	// Note: Database batch workers are started automatically by OpenDatabase() (which also adds them to db.WG)
 
 	// Set hostname in processor with database fallback support
 	if err := processor.SetHostname(nntphostname, db); err != nil {

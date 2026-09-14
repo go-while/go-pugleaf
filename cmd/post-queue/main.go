@@ -12,7 +12,6 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
-	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/postmgr"
@@ -24,7 +23,6 @@ func main() {
 	config.AppVersion = appVersion
 	database.DBidleTimeOut = 15 * time.Second
 	database.NO_CACHE_BOOT = true // prevents booting caches
-	history.ENABLE_HISTORY = false
 	log.Printf("Starting go-pugleaf Post Queue Tool (version %s)", config.AppVersion)
 
 	// Command line flags

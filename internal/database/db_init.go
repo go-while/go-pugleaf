@@ -185,7 +185,9 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 	go db.CronDB()
 
 	// Start the smart orchestrator that monitors channel thresholds and timers
-	go db.Batch.orchestrator.StartOrch() // main wg waitGroup Add(+1)
+	// StartOrch and the StartOrchestrator goroutine it spawns each call db.WG.Done() on exit
+	db.WG.Add(2)
+	go db.Batch.orchestrator.StartOrch()
 	// Periodically expire idle per-group batch state (keeps memory bounded during scans)
 	go db.Batch.ExpireCache()
 

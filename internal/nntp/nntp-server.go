@@ -10,7 +10,6 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
-	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -18,7 +17,12 @@ import (
 // Processor interface for article processing
 type ArticleProcessor interface {
 	ProcessIncomingArticle(article *models.Article) (int, error)
-	Lookup(msgIdItem *history.MessageIdItem, quick bool) (response int, newsgroupIDs []int64, err error)
+	// CheckMessageID returns history.CasePass (wanted), history.CaseDupes (have it),
+	// history.CaseRetry (in progress) or history.CaseError for an offered message-id
+	CheckMessageID(messageID string) int
+	// FindArticleByMessageID looks in currentGroup first, then in the groups from the history index.
+	// A definite miss returns an error wrapping ErrArticleNotFound (nntp-backend-pool.go).
+	FindArticleByMessageID(messageID, currentGroup string) (*models.Article, error)
 }
 
 const (
@@ -66,7 +70,7 @@ func NewNNTPServer(db *database.Database, cfg *config.ServerConfig, mainWG *sync
 		Processor:   processor,
 		shutdown:    make(chan struct{}),
 		wg:          mainWG, // Use external waitgroup for coordination
-		local430:    &Local430{cache: make(map[*history.MessageIdItem]time.Time, 65535)},
+		local430:    &Local430{cache: make(map[string]time.Time, 65535)},
 	}
 	go server.local430.CronLocal430() // Start local 430 cache cleanup goroutine
 	return server, nil

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -18,7 +19,9 @@ var BatchInterval = 3 * time.Second
 // Cache for placeholder strings to avoid rebuilding them repeatedly
 var placeholderCache sync.Map // map[int]string
 
-const DefaultShutDownCounter = 120
+// DefaultShutDownCounter is how many consecutive idle checks (125ms apart) the orchestrators
+// wait after db.StopChan is closed before they exit: about 2 seconds. Any work resets it.
+const DefaultShutDownCounter = 16
 
 // getPlaceholders returns a comma-separated string of SQL placeholders (?) for the given count
 func (sq *SQ3batch) getPlaceholders(count int) string {
@@ -64,11 +67,12 @@ type ThreadCacheBatch struct {
 type ProcessorInterface interface {
 	//MsgIdExists(group *string, messageID string) bool
 	// Add methods for history and cache operations
-	//AddProcessedArticleToHistory(msgIdItem *history.MessageIdItem) bool // interface
 	// Add method for finding thread roots - matches proc_MsgIDtmpCache.go signature (updated to use pointer)
 	//FindThreadRootInCache(groupName *string, refs []string) *MsgIdTmpCacheItem
 	// Add method for checking if there is no more work in history
 	CheckNoMoreWorkInHistory() bool
+	// AddArticleToHistory records a committed article (message-id -> main-DB newsgroup ID) in the history index
+	AddArticleToHistory(messageID string, groupID int64)
 	// Add method for force closing group databases
 	ForceCloseGroupDB(groupsDB *GroupDB) error
 }
@@ -239,17 +243,45 @@ func (sq *SQ3batch) GetOrCreateTasksMapKey(newsgroup string) *BatchTasks {
 	return batchTasks
 }
 
+// shutdownLogInterval limits how often CheckNoMoreWorkInMaps logs the same kind of message
+const shutdownLogInterval = 5 * time.Second
+
+// logRateLimiter allows one log line per key per interval
+type logRateLimiter struct {
+	mux  sync.Mutex
+	last map[string]time.Time
+}
+
+var shutdownLogLimiter = &logRateLimiter{last: make(map[string]time.Time)}
+
+// allow reports whether a message of this kind may be logged now
+func (l *logRateLimiter) allow(key string) bool {
+	now := time.Now()
+	l.mux.Lock()
+	defer l.mux.Unlock()
+	if last, ok := l.last[key]; ok && now.Sub(last) < shutdownLogInterval {
+		return false
+	}
+	l.last[key] = now
+	return true
+}
+
 // CheckNoMoreWorkInMaps checks if all batch channels are empty and not processing
 func (sq *SQ3batch) CheckNoMoreWorkInMaps() bool {
 	if len(BatchDividerChan) > 0 {
 		return false
 	}
 	if sq.proc == nil {
-		log.Printf("CheckNoMoreWorkInMaps sq.proc not set")
+		// tools without a processor (expire-news, history-rebuild, ...)
+		if shutdownLogLimiter.allow("proc-not-set") {
+			log.Printf("CheckNoMoreWorkInMaps sq.proc not set")
+		}
 		return true
 	}
 	if !sq.proc.CheckNoMoreWorkInHistory() {
-		log.Printf("[CRON-SHUTDOWN] History still has work")
+		if shutdownLogLimiter.allow("history") {
+			log.Printf("[CRON-SHUTDOWN] History still has work")
+		}
 		return false
 	}
 	sq.GMux.RLock()         // Lock the mutex to ensure thread safety
@@ -265,8 +297,10 @@ func (sq *SQ3batch) CheckNoMoreWorkInMaps() bool {
 		tasks.Mux.RUnlock()
 
 		if !isEmpty {
-			log.Printf("[CRON-SHUTDOWN] Work remaining in group '%s': BATCH(chan:%d,proc:%v)",
-				newsgroup, batchChan, batchProc)
+			if shutdownLogLimiter.allow("groups") {
+				log.Printf("[CRON-SHUTDOWN] Work remaining in group '%s': BATCH(chan:%d,proc:%v)",
+					newsgroup, batchChan, batchProc)
+			}
 			return false // If any channel has work or is processing, return false
 		}
 	}
@@ -625,13 +659,40 @@ retry2:
 	// PHASE 3: Handle history and processor cache updates
 	//log.Printf("[BATCH] processNewsgroupBatch Starting history/cache updates for %d articles in group '%s'", len(batches), *task.Newsgroup)
 	//start = time.Now()
+	// The articles are committed and numbered now: record them in the history index.
+	// The group's main-DB ID is resolved once per batch.
+	var historyGroupID int64
+	historyOK := false
+	if sq.proc != nil {
+		if ng, ngErr := sq.db.MainDBGetNewsgroup(*task.Newsgroup); ngErr != nil || ng == nil {
+			log.Printf("[BATCH] processNewsgroupBatch cannot resolve newsgroup ID for '%s', skipping history adds for %d articles: %v", *task.Newsgroup, len(batches), ngErr)
+		} else {
+			historyGroupID = ng.ID
+			historyOK = true
+		}
+	}
 	var latestDate time.Time
 	for _, article := range batches {
-		//log.Printf("[BATCH] processNewsgroupBatch Updating history/cache for article %d/%d in group '%s'", i+1, len(batches), *task.Newsgroup)
-		// Read article number under read lock to avoid concurrent map access
-		//article.Mux.RLock()
-		//sq.proc.AddProcessedArticleToHistory(article.MsgIdItem, task.Newsgroup, article.ArticleNums[task.Newsgroup])
-		//article.Mux.RUnlock()
+		if article == nil {
+			continue
+		}
+		if historyOK {
+			// read under the article lock and release it before touching the item or history (AddArticle may block)
+			article.Mux.RLock()
+			messageID := article.MessageID
+			committed := article.ArticleNums[task.Newsgroup] > 0
+			msgIdItem := article.MsgIdItem
+			article.Mux.RUnlock()
+			if committed && messageID != "" {
+				sq.proc.AddArticleToHistory(messageID, historyGroupID)
+				if msgIdItem != nil {
+					msgIdItem.Mux.Lock()
+					msgIdItem.Response = history.CaseDupes
+					msgIdItem.CachedEntryExpires = time.Now().Add(history.CachedEntryTTL)
+					msgIdItem.Mux.Unlock()
+				}
+			}
+		}
 		article.Mux.Lock()
 		if len(article.NewsgroupsPtr) > 0 {
 			index := -1

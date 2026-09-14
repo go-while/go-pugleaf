@@ -25,6 +25,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/processor"
@@ -345,9 +346,6 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt) // Cross-platform (Ctrl+C on both Windows and Linux)
 
-	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
-	db.WG.Add(1) // Adds for history: one for writer worker
-
 	// Get UseShortHashLen from database (with safety check)
 	storedUseShortHashLen, isLocked, err := db.GetHistoryUseShortHashLen(*useShortHashLen)
 	if err != nil {
@@ -436,6 +434,7 @@ func main() {
 	log.Printf("Found %d newsgroups to transfer", len(newsgroups))
 
 	// Initialize processor for article handling
+	history.ENABLE_HISTORY = false // nntp-transfer never uses the history index
 	proc := processor.NewProcessor(db, pool, finalUseShortHashLen)
 	if proc == nil {
 		log.Fatalf("Failed to create processor")

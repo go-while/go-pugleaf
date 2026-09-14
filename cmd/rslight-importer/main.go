@@ -12,6 +12,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
@@ -33,9 +34,11 @@ func main() {
 		threads         = flag.Int("threads", 1, "parallel import threads (default: 1)")
 		useShortHashLen = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
 		nntphostname    = flag.String("nntphostname", "", "your hostname must be set")
+		useHistory      = flag.Bool("history", true, "maintain and use the message-id history index (data/history)")
 	)
 
 	flag.Parse()
+	history.ENABLE_HISTORY = *useHistory
 
 	if *dataDir == "" || *legacyPath == "" {
 		fmt.Fprintf(os.Stderr, "Usage: %s [-data <path>] [-etc <path>] [-spool <path>] [-resetallgroups]\n", os.Args[0])
@@ -153,8 +156,6 @@ func main() {
 	log.Printf("Starting SQLite import from: %s", *sqliteDir)
 	log.Printf("Target database directory: %s", *dataDir)
 
-	db.WG.Add(2) // Adds to wait group for db_batch.go cron jobs
-	db.WG.Add(1) // Adds for history: one for writer worker
 	err = proc.ImportAllSQLiteDatabases(*sqliteDir, *threads)
 	if err != nil {
 		log.Fatalf("Failed to import SQLite databases: %v", err)
