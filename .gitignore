@@ -41,3 +41,4 @@ active_files/local-mode.active
 cmd/tcp2tor/tcp2tor
 cmd/tcp2tor/tcp2tor.sha256
 /legacy-sqlite3
+.update
