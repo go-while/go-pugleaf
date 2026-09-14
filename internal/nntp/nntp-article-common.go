@@ -46,7 +46,7 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 	time.Sleep(time.Second / 5) // TODO hardcoded ratelimit
 
 	// Get article data using common logic
-	article := c.getArticleData(args, retrievalType)
+	article, replyNum := c.getArticleData(args, retrievalType)
 	if article == nil {
 		// 430 error handled in getArticleData
 		return nil
@@ -71,20 +71,22 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 	switch retrievalType {
 	case RetrievalArticle:
 
-		return c.sendArticleContent(article)
+		return c.sendArticleContent(article, replyNum)
 	case RetrievalHead:
-		return c.sendHeadContent(article)
+		return c.sendHeadContent(article, replyNum)
 	case RetrievalBody:
-		return c.sendBodyContent(article)
+		return c.sendBodyContent(article, replyNum)
 	case RetrievalStat:
-		return c.sendStatContent(article)
+		return c.sendStatContent(article, replyNum)
 	default:
 		return c.sendResponse(500, "Internal error: unknown retrieval type")
 	}
 }
 
-// getArticleData handles the common article lookup logic
-func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRetrievalType) (article *models.Article) {
+// getArticleData handles the common article lookup logic.
+// replyNum is the article number for the response line: the number in the
+// current group, or 0 when the article was found by message-id outside it (RFC 3977 6.2.1).
+func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRetrievalType) (article *models.Article, replyNum int64) {
 	var wantArticleNum int64
 	var messageID string
 	// Parse argument: can be article number or message-id
@@ -120,14 +122,14 @@ func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRe
 		// (a) try the currently selected group first: cheap and needs no history
 		if c.currentGroup != "" {
 			if article = c.getArticleByMessageIDFromGroup(c.currentGroup, messageID); article != nil {
-				return article
+				return article, article.DBArtNum
 			}
 		}
 
 		if c.server.local430.Check(messageID) {
 			c.rateLimitOnError()
 			c.sendResponse(430, "Cache says no!")
-			return nil
+			return nil, 0
 		}
 
 		// (b) global lookup via the history index
@@ -135,10 +137,11 @@ func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRe
 			// read-only server without history
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF0")
-			return nil
+			return nil, 0
 		}
+		// the current group was checked above, so search the other groups only
 		var err error
-		article, err = c.server.Processor.FindArticleByMessageID(messageID, c.currentGroup)
+		article, err = c.server.Processor.FindArticleByMessageID(messageID, "")
 		if err != nil || article == nil {
 			if errors.Is(err, ErrArticleNotFound) {
 				// definite miss: remember it for a while
@@ -148,9 +151,10 @@ func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRe
 			}
 			c.rateLimitOnError()
 			c.sendResponse(430, "NotF1")
-			return nil
+			return nil, 0
 		}
-		return article
+		// found in another group: its article number means nothing in the current group
+		return article, 0
 
 	} else if wantArticleNum > 0 {
 		// Handle article number lookup
@@ -173,7 +177,7 @@ func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRe
 			return &models.Article{
 				DBArtNum:  wantArticleNum,
 				MessageID: overview.MessageID,
-			}
+			}, wantArticleNum
 		}
 
 		// For other commands, get the full article
@@ -183,12 +187,12 @@ func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRe
 			c.sendResponse(423, "No such article number")
 			return
 		}
-		return article
+		return article, wantArticleNum
 	}
 
 	c.rateLimitOnError()
 	c.sendResponse(502, "Article not retrieved")
-	return nil
+	return nil, 0
 }
 
 // getArticleByMessageIDFromGroup looks up a message-id in a single newsgroup DB.
@@ -207,7 +211,7 @@ func (c *ClientConnection) getArticleByMessageIDFromGroup(groupName string, mess
 }
 
 // sendArticleContent sends full article (headers + body) for ARTICLE command
-func (c *ClientConnection) sendArticleContent(article *models.Article) error {
+func (c *ClientConnection) sendArticleContent(article *models.Article, replyNum int64) error {
 	if c == nil || c.textConn == nil {
 		return fmt.Errorf("nil connection in sendArticleContent")
 	}
@@ -217,7 +221,7 @@ func (c *ClientConnection) sendArticleContent(article *models.Article) error {
 	bodyLines := c.parseArticleBody(article)
 
 	// Send response: 220 n message-id Article follows
-	if err := c.textConn.PrintfLine("220 %d %s Article follows", article.DBArtNum, article.MessageID); err != nil {
+	if err := c.textConn.PrintfLine("220 %d %s Article follows", replyNum, article.MessageID); err != nil {
 		return err
 	}
 
@@ -245,7 +249,7 @@ func (c *ClientConnection) sendArticleContent(article *models.Article) error {
 }
 
 // sendHeadContent sends only headers for HEAD command
-func (c *ClientConnection) sendHeadContent(article *models.Article) error {
+func (c *ClientConnection) sendHeadContent(article *models.Article, replyNum int64) error {
 	if c == nil || c.textConn == nil {
 		return fmt.Errorf("nil connection in sendHeadContent")
 	}
@@ -253,7 +257,7 @@ func (c *ClientConnection) sendHeadContent(article *models.Article) error {
 	headers := c.parseArticleHeadersFull(article)
 
 	// Send response: 221 n message-id Headers follow
-	if err := c.sendResponse(221, fmt.Sprintf("%d %s Headers follow", article.DBArtNum, article.MessageID)); err != nil {
+	if err := c.sendResponse(221, fmt.Sprintf("%d %s Headers follow", replyNum, article.MessageID)); err != nil {
 		return err
 	}
 
@@ -269,7 +273,7 @@ func (c *ClientConnection) sendHeadContent(article *models.Article) error {
 }
 
 // sendBodyContent sends only body for BODY command
-func (c *ClientConnection) sendBodyContent(article *models.Article) error {
+func (c *ClientConnection) sendBodyContent(article *models.Article, replyNum int64) error {
 	if c == nil || c.textConn == nil {
 		return fmt.Errorf("nil connection in sendBodyContent")
 	}
@@ -277,7 +281,7 @@ func (c *ClientConnection) sendBodyContent(article *models.Article) error {
 	bodyLines := c.parseArticleBody(article)
 
 	// Send response: 222 n message-id Body follows
-	if err := c.sendResponse(222, fmt.Sprintf("%d %s Body follows", article.DBArtNum, article.MessageID)); err != nil {
+	if err := c.sendResponse(222, fmt.Sprintf("%d %s Body follows", replyNum, article.MessageID)); err != nil {
 		return err
 	}
 
@@ -293,10 +297,10 @@ func (c *ClientConnection) sendBodyContent(article *models.Article) error {
 }
 
 // sendStatContent sends only status for STAT command
-func (c *ClientConnection) sendStatContent(article *models.Article) error {
+func (c *ClientConnection) sendStatContent(article *models.Article, replyNum int64) error {
 	if c == nil || c.textConn == nil {
 		return fmt.Errorf("nil connection in sendStatContent")
 	}
 	// Send response: 223 n message-id status
-	return c.sendResponse(223, fmt.Sprintf("%d %s Article exists", article.DBArtNum, article.MessageID))
+	return c.sendResponse(223, fmt.Sprintf("%d %s Article exists", replyNum, article.MessageID))
 }

@@ -19,7 +19,9 @@ var BatchInterval = 3 * time.Second
 // Cache for placeholder strings to avoid rebuilding them repeatedly
 var placeholderCache sync.Map // map[int]string
 
-const DefaultShutDownCounter = 120
+// DefaultShutDownCounter is how many consecutive idle checks (125ms apart) the orchestrators
+// wait after db.StopChan is closed before they exit: about 2 seconds. Any work resets it.
+const DefaultShutDownCounter = 16
 
 // getPlaceholders returns a comma-separated string of SQL placeholders (?) for the given count
 func (sq *SQ3batch) getPlaceholders(count int) string {
@@ -241,7 +243,6 @@ func (sq *SQ3batch) GetOrCreateTasksMapKey(newsgroup string) *BatchTasks {
 	return batchTasks
 }
 
-// CheckNoMoreWorkInMaps checks if all batch channels are empty and not processing
 // shutdownLogInterval limits how often CheckNoMoreWorkInMaps logs the same kind of message
 const shutdownLogInterval = 5 * time.Second
 
@@ -265,12 +266,16 @@ func (l *logRateLimiter) allow(key string) bool {
 	return true
 }
 
+// CheckNoMoreWorkInMaps checks if all batch channels are empty and not processing
 func (sq *SQ3batch) CheckNoMoreWorkInMaps() bool {
 	if len(BatchDividerChan) > 0 {
 		return false
 	}
 	if sq.proc == nil {
-		log.Printf("CheckNoMoreWorkInMaps sq.proc not set")
+		// tools without a processor (expire-news, history-rebuild, ...)
+		if shutdownLogLimiter.allow("proc-not-set") {
+			log.Printf("CheckNoMoreWorkInMaps sq.proc not set")
+		}
 		return true
 	}
 	if !sq.proc.CheckNoMoreWorkInHistory() {

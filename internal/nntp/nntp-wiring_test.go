@@ -25,6 +25,7 @@ type wiringTestProcessor struct {
 	findArticle   *models.Article
 	findErr       error
 	findCalls     int
+	lastFindGroup string
 }
 
 func (p *wiringTestProcessor) ProcessIncomingArticle(article *models.Article) (int, error) {
@@ -45,6 +46,7 @@ func (p *wiringTestProcessor) FindArticleByMessageID(messageID, currentGroup str
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.findCalls++
+	p.lastFindGroup = currentGroup
 	return p.findArticle, p.findErr
 }
 
@@ -313,11 +315,22 @@ func TestWiringMessageIDLookupKeepsCurrentArticle(t *testing.T) {
 	c.currentGroup = "alt.test"
 	c.currentArticle = 5
 	done := wiringTestRun(t, func() error { return c.handleStat([]string{msgid}) })
-	if code, line := wiringTestReadCode(t, client); code != 223 {
+	code, line := wiringTestReadCode(t, client)
+	if code != 223 {
 		t.Fatalf("got %q, want 223", line)
+	}
+	// found outside the current group: the reply carries article number 0 (RFC 3977 6.2.1)
+	if !strings.HasPrefix(line, "223 0 "+msgid) {
+		t.Fatalf("reply %q, want article number 0", line)
 	}
 	wiringTestWait(t, done, "STAT")
 	if c.currentArticle != 5 {
 		t.Fatalf("currentArticle = %d, want 5", c.currentArticle)
+	}
+	if proc.findArticle.DBArtNum != 77 {
+		t.Fatalf("shared article DBArtNum changed to %d", proc.findArticle.DBArtNum)
+	}
+	if proc.lastFindGroup != "" {
+		t.Fatalf("FindArticleByMessageID currentGroup = %q, want \"\" (current group already checked)", proc.lastFindGroup)
 	}
 }
