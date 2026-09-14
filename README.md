@@ -94,10 +94,14 @@ usermgr -create -username admin -email admin@example.com -display "Administrator
 
 Choose one method:
 - **Web interface**: Admin → Add groups manually
-- **Command line**: Import from active file
+- **Command line**: Import from active file or descriptions file
+- Files are in `preload/` or `active_files/` directory.
+- The defaults may contain a large number of binary groups; modify as needed.
 ```bash
 ./webserver -import-active preload/active.txt
-./webserver -update-descr preload/newsgroups.descriptions
+./webserver -update-newsgroups-descriptions "preload/newsgroups.descriptions" \
+ -update-overwrite-newsgroups-descriptions=false \
+ -update-newsgroups-descriptions-import-create-newsgroups=false
 
 # import rocksolid light backups
 ./rslight-importer -data data/ -etc etc/ -spool spool/
