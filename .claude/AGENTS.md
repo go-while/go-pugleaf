@@ -1,0 +1,1 @@
+Create isolated worktrees in /tank0/claude/trees if available and allowed: else ask the user!

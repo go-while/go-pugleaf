@@ -42,3 +42,9 @@ cmd/tcp2tor/tcp2tor
 cmd/tcp2tor/tcp2tor.sha256
 /legacy-sqlite3
 .update
+
+# Claude Code local state
+.claude/settings.local.json
+.claude/worktrees/
+.claude/agent-memory-local/
+CLAUDE.local.md

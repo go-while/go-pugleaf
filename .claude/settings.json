@@ -1,0 +1,59 @@
+{
+  "plansDirectory": ".claude/plans/queued",
+  "worktree": {
+    "baseRef": "head"
+  },
+  "permissions": {
+    "additionalDirectories": [
+      "/tank0/claude/trees"
+    ],
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(go vet:*)",
+      "Bash(go test:*)",
+      "Bash(go list:*)",
+      "Bash(go doc:*)",
+      "Bash(gofmt -l:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git worktree list:*)",
+      "Bash(git merge-base:*)",
+      "Bash(git rev-parse:*)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)"
+    ],
+    "deny": [
+      "Edit(/data/**)",
+      "Edit(/data_ram/**)",
+      "Edit(/data_local/**)"
+    ]
+  },
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/worktree-create.sh"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/worktree-remove.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
