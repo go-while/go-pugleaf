@@ -11,19 +11,13 @@ import (
 // For non-admin users, only active groups are accessible
 // Admin users can access both active and inactive groups
 func (s *WebServer) checkGroupAccess(c *gin.Context, groupName string) bool {
-	// Check if user is admin
-	session := s.getWebSession(c)
-	var isAdminUser bool
-
-	if session != nil {
-		currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-		if err == nil {
-			isAdminUser = s.isAdmin(currentUser)
+	// Admin users can access inactive groups too, but the group must exist:
+	// callers open the group DB next, and GetGroupDB creates files for any name
+	if s.isAdminRequest(c) {
+		if _, err := s.DB.GetNewsgroupID(groupName); err != nil {
+			s.renderError(c, http.StatusNotFound, "Group Not Found", "The requested newsgroup does not exist or is not active.")
+			return false
 		}
-	}
-
-	// Admin users can access any group
-	if isAdminUser {
 		return true
 	}
 
@@ -43,19 +37,13 @@ func (s *WebServer) checkGroupAccess(c *gin.Context, groupName string) bool {
 // For non-admin users, only active groups are accessible
 // Admin users can access both active and inactive groups
 func (s *WebServer) checkGroupAccessAPI(c *gin.Context, groupName string) bool {
-	// Check if user is admin
-	session := s.getWebSession(c)
-	var isAdminUser bool
-
-	if session != nil {
-		currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-		if err == nil {
-			isAdminUser = s.isAdmin(currentUser)
+	// Admin users can access inactive groups too, but the group must exist:
+	// callers open the group DB next, and GetGroupDB creates files for any name
+	if s.isAdminRequest(c) {
+		if _, err := s.DB.GetNewsgroupID(groupName); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "The requested newsgroup does not exist or is not active"})
+			return false
 		}
-	}
-
-	// Admin users can access any group
-	if isAdminUser {
 		return true
 	}
 

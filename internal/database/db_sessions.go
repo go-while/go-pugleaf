@@ -2,8 +2,10 @@ package database
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -66,7 +68,7 @@ func (db *Database) ValidateUserSession(sessionID string) (*models.User, error) 
 	// Get user by session ID (read operation)
 	query := `SELECT id, username, email, password_hash, display_name, session_id,
 		last_login_ip, session_expires_at, login_attempts, created_at, updated_at
-		FROM users WHERE session_id = ? AND session_expires_at > CURRENT_TIMESTAMP`
+		FROM users WHERE session_id = ? AND session_expires_at > CURRENT_TIMESTAMP AND disabled = 0`
 
 	var user models.User
 	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{sessionID},
@@ -78,17 +80,23 @@ func (db *Database) ValidateUserSession(sessionID string) (*models.User, error) 
 		return nil, fmt.Errorf("invalid or expired session")
 	}
 
-	// Extend session expiration (sliding timeout) in UTC - write operation
-	newExpiresAt := time.Now().UTC().Add(SessionTimeout)
-	updateQuery := `UPDATE users SET session_expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err = RetryableExec(db.mainDB, updateQuery, newExpiresAt, user.ID)
-	if err != nil {
-		// Log error but don't fail validation
-		fmt.Printf("Warning: Failed to extend session expiration: %v\n", err)
+	if user.SessionExpiresAt == nil {
+		return nil, fmt.Errorf("invalid or expired session")
 	}
 
-	// Update the user struct with new expiration
-	user.SessionExpiresAt = &newExpiresAt
+	// Extend session expiration (sliding timeout) in UTC, but only once less than half of
+	// SessionTimeout remains: sliding on every request costs a write per page view.
+	// updated_at is left alone so the login lockout window is not disturbed.
+	if time.Until(*user.SessionExpiresAt) < SessionTimeout/2 {
+		newExpiresAt := time.Now().UTC().Add(SessionTimeout)
+		updateQuery := `UPDATE users SET session_expires_at = ? WHERE id = ?`
+		if _, err := RetryableExec(db.mainDB, updateQuery, newExpiresAt, user.ID); err != nil {
+			// Log error but don't fail validation
+			log.Printf("[DATABASE]: Warning: failed to extend session expiration for user %d: %v", user.ID, err)
+		} else {
+			user.SessionExpiresAt = &newExpiresAt
+		}
+	}
 	return &user, nil
 }
 
@@ -161,6 +169,70 @@ func (db *Database) IsUserLockedOut(username string) (bool, error) {
 	}
 
 	return false, nil
+}
+
+// IncrementLoginAttemptsByID increases the failed login counter of the user with the given ID.
+// updated_at marks the last failure and starts the lockout window.
+func (db *Database) IncrementLoginAttemptsByID(userID int64) error {
+	query := `UPDATE users SET
+		login_attempts = login_attempts + 1,
+		updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`
+
+	_, err := RetryableExec(db.mainDB, query, userID)
+	return err
+}
+
+// IsUserLockedOutByID checks if the user with the given ID is temporarily locked out due to
+// failed login attempts. An expired lockout resets the counter.
+func (db *Database) IsUserLockedOutByID(userID int64) (bool, error) {
+	query := `SELECT COALESCE(login_attempts, 0), updated_at FROM users WHERE id = ?`
+
+	var attempts int
+	var updatedAt sql.NullTime
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{userID}, &attempts, &updatedAt)
+	if err != nil {
+		return false, err
+	}
+
+	if attempts < MaxLoginAttempts {
+		return false, nil
+	}
+	if updatedAt.Valid && time.Now().Before(updatedAt.Time.Add(LoginLockoutTime)) {
+		return true, nil // Still locked out
+	}
+
+	// Lockout period expired, reset attempts
+	resetQuery := `UPDATE users SET login_attempts = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	if _, err := RetryableExec(db.mainDB, resetQuery, userID); err != nil {
+		log.Printf("[DATABASE]: failed to reset login attempts for user %d: %v", userID, err)
+	}
+	return false, nil
+}
+
+// ReserveLoginAttemptByID atomically counts one login attempt for the user before the
+// password is checked. It returns allowed=false (and counts nothing) while the user has
+// MaxLoginAttempts attempts inside the LoginLockoutTime window since the last counted one.
+// Once the window has passed, the counter restarts at 1. A successful login resets it
+// (CreateUserSession). Being a single UPDATE, concurrent attempts cannot exceed the limit.
+func (db *Database) ReserveLoginAttemptByID(userID int64) (bool, error) {
+	query := `UPDATE users SET
+		login_attempts = CASE WHEN COALESCE(login_attempts, 0) >= ? THEN 1 ELSE COALESCE(login_attempts, 0) + 1 END,
+		updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND (COALESCE(login_attempts, 0) < ?
+			OR datetime(updated_at) IS NULL
+			OR datetime(updated_at) < datetime('now', ?))`
+
+	window := fmt.Sprintf("-%d seconds", int64(LoginLockoutTime/time.Second))
+	res, err := RetryableExec(db.mainDB, query, MaxLoginAttempts, userID, MaxLoginAttempts, window)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 // CleanupExpiredSessions removes expired sessions from the database

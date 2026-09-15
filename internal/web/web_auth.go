@@ -1,43 +1,71 @@
 package web
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
-	"github.com/go-while/go-pugleaf/internal/models"
 	"golang.org/x/crypto/bcrypt"
 )
 
 // Global flash message map and mutex
 var (
 	flashMessages   = make(map[string]map[string]string)
+	flashSetAt      = make(map[string]time.Time) // last Set per session, for pruning
+	flashLastPrune  time.Time                    // last prune scan, throttled to flashPruneEvery
 	flashMessagesMu sync.RWMutex
 )
+
+const (
+	flashMaxSessions = 1000             // prune once more sessions than this hold messages
+	flashMaxAge      = 15 * time.Minute // messages older than this are pruned
+	flashPruneEvery  = time.Minute      // at most one prune scan per interval
+)
+
+// setFlashLocked stores one flash message; the caller holds flashMessagesMu.
+// Messages that are never read (for example after a redirect the client did not follow)
+// would otherwise stay in the map forever, so old entries are pruned when it grows.
+func setFlashLocked(sessionID, mtype, msg string) {
+	now := time.Now()
+	if len(flashMessages) > flashMaxSessions && now.Sub(flashLastPrune) >= flashPruneEvery {
+		flashLastPrune = now
+		for id, at := range flashSetAt {
+			if now.Sub(at) > flashMaxAge {
+				delete(flashMessages, id)
+				delete(flashSetAt, id)
+			}
+		}
+		for id := range flashMessages {
+			if _, ok := flashSetAt[id]; !ok {
+				delete(flashMessages, id)
+			}
+		}
+	}
+	if flashMessages[sessionID] == nil {
+		flashMessages[sessionID] = make(map[string]string)
+	}
+	flashMessages[sessionID][mtype] = msg
+	flashSetAt[sessionID] = now
+}
 
 // SetFlashError sets a temporary error message for a session
 func SetFlashError(sessionID, msg string) {
 	flashMessagesMu.Lock()
-	if flashMessages[sessionID] == nil {
-		flashMessages[sessionID] = make(map[string]string)
-	}
-	flashMessages[sessionID]["error"] = msg
+	setFlashLocked(sessionID, "error", msg)
 	flashMessagesMu.Unlock()
 }
 
 // SetFlashSuccess sets a temporary success message for a session
 func SetFlashSuccess(sessionID, msg string) {
 	flashMessagesMu.Lock()
-	if flashMessages[sessionID] == nil {
-		flashMessages[sessionID] = make(map[string]string)
-	}
-	flashMessages[sessionID]["success"] = msg
+	setFlashLocked(sessionID, "success", msg)
 	flashMessagesMu.Unlock()
 }
 
@@ -54,9 +82,11 @@ func GetAndClearFlash(sessionID string, mtype string) (success, errorMsg string)
 	}
 	if len(flashMessages[sessionID]) == 0 {
 		delete(flashMessages, sessionID)
+		delete(flashSetAt, sessionID)
 	}
 	if len(flashMessages) == 0 {
 		flashMessages = make(map[string]map[string]string)
+		flashSetAt = make(map[string]time.Time)
 	}
 	flashMessagesMu.Unlock()
 	return
@@ -108,7 +138,7 @@ func (s *WebServer) WebAuthRequired() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		session := s.getWebSession(c)
 		if session == nil {
-			c.Redirect(http.StatusSeeOther, "/login?redirect="+c.Request.URL.Path)
+			c.Redirect(http.StatusSeeOther, "/login?redirect="+url.QueryEscape(c.Request.URL.RequestURI()))
 			c.Abort()
 			return
 		}
@@ -124,7 +154,7 @@ func (s *WebServer) WebAdminRequired() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		session := s.getWebSession(c)
 		if session == nil {
-			c.Redirect(http.StatusSeeOther, "/login?redirect="+c.Request.URL.Path)
+			c.Redirect(http.StatusSeeOther, "/login?redirect="+url.QueryEscape(c.Request.URL.RequestURI()))
 			c.Abort()
 			return
 		}
@@ -156,8 +186,31 @@ func (s *WebServer) WebAdminRequired() gin.HandlerFunc {
 	}
 }
 
-// getWebSession retrieves session from cookie and returns full session data
+// Gin context keys of the per-request auth cache.
+const (
+	ctxKeyWebSessionChecked = "pugleaf.webSessionChecked" // bool: getWebSession already ran
+	ctxKeyWebSession        = "pugleaf.webSession"        // *SessionData or nil
+	ctxKeyIsAdmin           = "pugleaf.isAdmin"           // bool: memoized isAdminRequest
+)
+
+// getWebSession retrieves session from cookie and returns full session data.
+// The result (including "not logged in") is memoized in the gin context, so helpers
+// called several times per request validate the session only once.
 func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
+	if v, ok := c.Get(ctxKeyWebSessionChecked); ok {
+		if checked, _ := v.(bool); checked {
+			sd, _ := c.MustGet(ctxKeyWebSession).(*SessionData)
+			return sd
+		}
+	}
+	session := s.lookupWebSession(c)
+	c.Set(ctxKeyWebSession, session)
+	c.Set(ctxKeyWebSessionChecked, true)
+	return session
+}
+
+// lookupWebSession validates the session cookie against the database.
+func (s *WebServer) lookupWebSession(c *gin.Context) *SessionData {
 	sessionID, err := c.Cookie("session_id")
 	if err != nil {
 		return nil
@@ -188,34 +241,70 @@ func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
 	}
 }
 
-// createWebSession creates a new session for user
-func (s *WebServer) createWebSession(c *gin.Context, userID int64) error {
-	// Generate random session ID
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return err
+// clearRequestSession drops the memoized session and admin flag of this request
+// (after login or logout changed the session).
+func (s *WebServer) clearRequestSession(c *gin.Context) {
+	c.Set(ctxKeyWebSessionChecked, false)
+	c.Set(ctxKeyWebSession, (*SessionData)(nil))
+	c.Set(ctxKeyIsAdmin, nil)
+}
+
+// isAdminRequest reports whether the logged-in user of this request is an admin.
+// The result is memoized in the gin context.
+func (s *WebServer) isAdminRequest(c *gin.Context) bool {
+	if v, ok := c.Get(ctxKeyIsAdmin); ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
 	}
-	sessionID := hex.EncodeToString(bytes)
-
-	// Set expiration to server session timeout for consistency
-	expiresAt := time.Now().Add(database.SessionTimeout)
-
-	// Store session in database
-	session := &models.Session{
-		ID:        sessionID,
-		UserID:    userID,
-		CreatedAt: time.Now(),
-		ExpiresAt: expiresAt,
+	admin := false
+	if session := s.getWebSession(c); session != nil {
+		if user, err := s.DB.GetUserByID(session.UserID); err == nil {
+			admin = s.isAdmin(user)
+		}
 	}
+	c.Set(ctxKeyIsAdmin, admin)
+	return admin
+}
 
-	err := s.DB.InsertSession(session)
-	if err != nil {
-		return err
+// safeRedirect returns u when it is a local path on this site, otherwise "/".
+// It rejects absolute and scheme-relative URLs ("//host", "/\host") and header-breaking input.
+func safeRedirect(u string) string {
+	if u == "" || len(u) > 2048 || strings.ContainsAny(u, "\r\n\\") {
+		return "/"
 	}
+	if !strings.HasPrefix(u, "/") || strings.HasPrefix(u, "//") {
+		return "/"
+	}
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" {
+		return "/"
+	}
+	return u
+}
 
-	// Set cookie
-	s.setSessionCookie(c, sessionID)
+// validateDisplayName checks a user-supplied display name: at most 64 runes, no control
+// characters and none of < > " (it ends up in the From: header of web posts). Empty is allowed.
+func validateDisplayName(name string) error {
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("display name contains invalid characters")
+	}
+	if utf8.RuneCountInString(name) > 64 {
+		return fmt.Errorf("display name must be at most 64 characters")
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || r == '<' || r == '>' || r == '"' {
+			return fmt.Errorf("display name contains invalid characters")
+		}
+	}
 	return nil
+}
+
+// dummyPasswordHash is compared against when a login names an unknown user, so that
+// the response time does not reveal whether the user exists.
+var dummyPasswordHash struct {
+	once sync.Once
+	hash []byte
 }
 
 // hashPassword creates a bcrypt hash of the password
@@ -258,8 +347,9 @@ func validatePassword(password string) error {
 	if len(password) < 12 {
 		return fmt.Errorf("password must be at least 12 characters long")
 	}
-	if len(password) > 255 {
-		return fmt.Errorf("maximum password length is 255 characters")
+	if len(password) > 72 {
+		// bcrypt rejects longer passwords (ErrPasswordTooLong)
+		return fmt.Errorf("password must be at most 72 bytes")
 	}
 	return nil
 }
