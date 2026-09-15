@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 )
 
 // ErrArticleNotFound is returned by FlagArticleSpamByUser when the article does not exist in the group.
@@ -48,13 +49,20 @@ func (db *Database) FlagArticleSpamByUser(userID int64, groupName string, articl
 		return false, nil // already flagged by this user
 	}
 
-	if err := db.IncrementArticleSpam(groupName, articleNum); err != nil {
+	// Increment the counter with the handle we hold; roll the flag back when that fails,
+	// so flag row and counter stay consistent.
+	if _, err := RetryableExec(groupDB.DB, "UPDATE articles SET spam = spam + 1 WHERE article_num = ?", articleNum); err != nil {
 		if _, delErr := RetryableExec(db.mainDB,
 			"DELETE FROM user_spam_flags WHERE user_id = ? AND newsgroup_id = ? AND article_num = ?",
 			userID, newsgroupID, articleNum); delErr != nil {
-			return false, fmt.Errorf("increment spam: %w (removing flag failed: %v)", err, delErr)
+			return false, fmt.Errorf("failed to increment spam count: %w (removing flag failed: %v)", err, delErr)
 		}
-		return false, err
+		return false, fmt.Errorf("failed to increment spam count: %w", err)
+	}
+
+	// The main spam index is secondary: counter and flag are already consistent.
+	if _, err := RetryableExec(db.mainDB, "INSERT OR IGNORE INTO spam (newsgroup_id, article_num) VALUES (?, ?)", newsgroupID, articleNum); err != nil {
+		log.Printf("[DATABASE] FlagArticleSpamByUser: add to spam table group=%s article=%d: %v", groupName, articleNum, err)
 	}
 	return true, nil
 }

@@ -144,9 +144,8 @@ func TestW1APISectionTreeGroupNotInSection(t *testing.T) {
 	if err := db.CreateSection(section); err != nil {
 		t.Fatalf("CreateSection: %v", err)
 	}
-	// The router only serves known sections (web cache); the handler also checks the DB cache.
+	// The router only serves sections known to the web sections cache.
 	w0Srv.loadSectionsCache()
-	db.SectionsCache.AddGroupToSectionsCache(sectionName)
 
 	unknown := w0Name("w1api.secfake")
 	rec := w0Do(t, w0Req{Path: "/" + sectionName + "/" + unknown + "/tree/1"})
@@ -169,6 +168,65 @@ func TestW1APISectionTreeGroupNotInSection(t *testing.T) {
 		t.Fatalf("group of another section: status %d, want 404", rec.Code)
 	}
 	w1APINoGroupFile(t, group)
+}
+
+func TestW1APISectionTreeValidGroup(t *testing.T) {
+	db := w0DB(t)
+	sectionName := fmt.Sprintf("w1apisec%d", w0Seq.Add(1))
+	section := &models.Section{Name: sectionName, DisplayName: "W1API tree", CreatedAt: time.Now()}
+	if err := db.CreateSection(section); err != nil {
+		t.Fatalf("CreateSection: %v", err)
+	}
+	w0Srv.loadSectionsCache()
+	group := w0NewGroup(t, true)
+	if err := db.CreateSectionGroup(&models.SectionGroup{SectionID: section.ID, NewsgroupName: group, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateSectionGroup: %v", err)
+	}
+
+	// Root article 1 with one reply 2, plus the threads/thread_cache rows the tree code reads.
+	groupDB, err := db.GetGroupDB(group)
+	if err != nil {
+		t.Fatalf("GetGroupDB: %v", err)
+	}
+	now := time.Now().Add(-time.Hour)
+	arts := []*models.Overview{
+		{ArticleNum: 1, Subject: "w1api tree root", FromHeader: "a <a@test.invalid>", DateSent: now,
+			DateString: now.Format(time.RFC1123Z), MessageID: "<w1api-tree-1@test.invalid>", Downloaded: 1},
+		{ArticleNum: 2, Subject: "Re: w1api tree root", FromHeader: "b <b@test.invalid>", DateSent: now.Add(time.Minute),
+			DateString: now.Add(time.Minute).Format(time.RFC1123Z), MessageID: "<w1api-tree-2@test.invalid>",
+			References: "<w1api-tree-1@test.invalid>", Downloaded: 1},
+	}
+	stmts := []struct {
+		q    string
+		args []any
+	}{
+		{"INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (1, NULL, 1, 0, 0)", nil},
+		{"INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (1, 1, 2, 1, 1)", nil},
+		{"INSERT INTO thread_cache (thread_root, root_date, message_count, child_articles, last_child_number, last_activity) VALUES (1, ?, 2, '2', 2, ?)",
+			[]any{now.UTC().Format("2006-01-02 15:04:05"), now.UTC().Format("2006-01-02 15:04:05")}},
+	}
+	func() {
+		defer groupDB.Return()
+		for _, a := range arts {
+			if _, err := db.InsertOverview(groupDB, a); err != nil {
+				t.Fatalf("InsertOverview: %v", err)
+			}
+		}
+		for _, st := range stmts {
+			if _, err := database.RetryableExec(groupDB.DB, st.q, st.args...); err != nil {
+				t.Fatalf("%s: %v", st.q, err)
+			}
+		}
+	}()
+
+	rec := w0Do(t, w0Req{Path: "/" + sectionName + "/" + group + "/tree/1"})
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body: %.500s", rec.Code, body)
+	}
+	if strings.Contains(body, "Section Not Found") || !strings.Contains(body, "thread-tree") {
+		t.Fatalf("tree page not rendered: %.500s", body)
+	}
 }
 
 func TestW1APISitePostPrefillUnknownGroup(t *testing.T) {

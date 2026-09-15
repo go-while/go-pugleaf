@@ -182,15 +182,9 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 	section := c.Param("section")
 	// The group parameter is the full group name, like in the other section routes
 	groupName := c.Param("group")
-	group := groupName
 	threadRootStr := c.Param("threadRoot")
 
-	// Validate section
-	if !s.DB.SectionsCache.IsInSections(section) {
-		s.renderError(c, http.StatusNotFound, "Section Not Found", "Section not found: "+section)
-		return
-	}
-
+	// Unknown sections are rejected by sectionValidationMiddleware.
 	// Section + group membership check before opening any group DB
 	if _, ok := s.sectionGroupAllowed(c, section, groupName); !ok {
 		return // Error response already sent by sectionGroupAllowed
@@ -249,7 +243,7 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 		"AvailableSections":   baseData.AvailableSections,
 		"AvailableAIModels":   baseData.AvailableAIModels,
 		"Section":             section,
-		"Group":               group,
+		"Group":               groupName,
 		"GroupName":           groupName,
 		"ThreadRoot":          rootOverview,
 		"TreeHTML":            treeResponse.Tree.GetThreadTreeHTML(groupName),

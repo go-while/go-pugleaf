@@ -2,6 +2,7 @@
 package web
 
 import (
+	"errors"
 	"html/template"
 	"log"
 	"net/http"
@@ -180,6 +181,11 @@ func (s *WebServer) incrementSpam(c *gin.Context) {
 	flagged, err := s.DB.FlagArticleSpamByUser(user.ID, group, articleNum)
 	if err != nil {
 		log.Printf("[WEB]: Error flagging spam group=%s article=%d user=%d: %v", group, articleNum, user.ID, err)
+		if errors.Is(err, database.ErrArticleNotFound) {
+			session.SetError("Article not found")
+		} else {
+			session.SetError("Could not flag article")
+		}
 	} else if !flagged {
 		log.Printf("[WEB]: User %d already flagged article %d in group %s", user.ID, articleNum, group)
 		// Redirect without incrementing

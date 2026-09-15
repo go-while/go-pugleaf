@@ -96,6 +96,16 @@ func TestW1APIFlagArticleSpamByUserConcurrent(t *testing.T) {
 	if spam != 1 {
 		t.Fatalf("spam = %d, want 1", spam)
 	}
+	var flags, spamRows int
+	if err := RetryableQueryRowScan(db.GetMainDB(),
+		"SELECT (SELECT COUNT(*) FROM user_spam_flags WHERE user_id = ? AND article_num = 1 AND newsgroup_id = (SELECT id FROM newsgroups WHERE name = ?)), "+
+			"(SELECT COUNT(*) FROM spam WHERE article_num = 1 AND newsgroup_id = (SELECT id FROM newsgroups WHERE name = ?))",
+		[]interface{}{user.ID, group, group}, &flags, &spamRows); err != nil {
+		t.Fatalf("count flags: %v", err)
+	}
+	if flags != 1 || spamRows != 1 {
+		t.Fatalf("user_spam_flags rows = %d, spam rows = %d; want 1 and 1", flags, spamRows)
+	}
 
 	// A second user counts once more.
 	other := w1APIUser(t)
