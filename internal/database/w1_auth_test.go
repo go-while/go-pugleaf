@@ -1,6 +1,8 @@
 package database
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,5 +132,74 @@ func TestW1AuthLoginAttemptsByID(t *testing.T) {
 
 	if _, err := db.IsUserLockedOutByID(-1); err == nil {
 		t.Fatalf("IsUserLockedOutByID(unknown) returned no error")
+	}
+}
+
+func TestW1AuthReserveLoginAttemptByID(t *testing.T) {
+	db := w0DB(t)
+	u := w1AuthUser(t)
+
+	const workers = 20
+	var allowed atomic.Int64
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, err := db.ReserveLoginAttemptByID(u.ID)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if ok {
+				allowed.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("ReserveLoginAttemptByID: %v", err)
+	}
+	if got := allowed.Load(); got != int64(MaxLoginAttempts) {
+		t.Fatalf("%d concurrent reservations allowed %d, want %d", workers, got, MaxLoginAttempts)
+	}
+	if locked, err := db.IsUserLockedOutByID(u.ID); err != nil || !locked {
+		t.Fatalf("IsUserLockedOutByID after the limit = %v, %v; want true", locked, err)
+	}
+
+	// Window passed: the next attempt is allowed and the counter restarts at 1
+	old := time.Now().UTC().Add(-2 * LoginLockoutTime).Format("2006-01-02 15:04:05")
+	if _, err := RetryableExec(db.GetMainDB(), "UPDATE users SET updated_at = ? WHERE id = ?", old, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := db.ReserveLoginAttemptByID(u.ID)
+	if err != nil || !ok {
+		t.Fatalf("ReserveLoginAttemptByID after the window = %v, %v; want true", ok, err)
+	}
+	var attempts int
+	if err := RetryableQueryRowScan(db.GetMainDB(), "SELECT login_attempts FROM users WHERE id = ?", []interface{}{u.ID}, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 {
+		t.Fatalf("login_attempts = %d after the window, want 1", attempts)
+	}
+
+	// A successful login (CreateUserSession) resets the counter
+	if _, err := db.CreateUserSession(u.ID, "192.0.2.1"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < MaxLoginAttempts; i++ {
+		if ok, err := db.ReserveLoginAttemptByID(u.ID); err != nil || !ok {
+			t.Fatalf("reservation %d after reset = %v, %v; want true", i, ok, err)
+		}
+	}
+	if ok, err := db.ReserveLoginAttemptByID(u.ID); err != nil || ok {
+		t.Fatalf("reservation past the limit = %v, %v; want false", ok, err)
+	}
+
+	if ok, err := db.ReserveLoginAttemptByID(-1); err != nil || ok {
+		t.Fatalf("ReserveLoginAttemptByID(unknown) = %v, %v; want false, nil", ok, err)
 	}
 }

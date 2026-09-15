@@ -210,6 +210,31 @@ func (db *Database) IsUserLockedOutByID(userID int64) (bool, error) {
 	return false, nil
 }
 
+// ReserveLoginAttemptByID atomically counts one login attempt for the user before the
+// password is checked. It returns allowed=false (and counts nothing) while the user has
+// MaxLoginAttempts attempts inside the LoginLockoutTime window since the last counted one.
+// Once the window has passed, the counter restarts at 1. A successful login resets it
+// (CreateUserSession). Being a single UPDATE, concurrent attempts cannot exceed the limit.
+func (db *Database) ReserveLoginAttemptByID(userID int64) (bool, error) {
+	query := `UPDATE users SET
+		login_attempts = CASE WHEN COALESCE(login_attempts, 0) >= ? THEN 1 ELSE COALESCE(login_attempts, 0) + 1 END,
+		updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND (COALESCE(login_attempts, 0) < ?
+			OR datetime(updated_at) IS NULL
+			OR datetime(updated_at) < datetime('now', ?))`
+
+	window := fmt.Sprintf("-%d seconds", int64(LoginLockoutTime/time.Second))
+	res, err := RetryableExec(db.mainDB, query, MaxLoginAttempts, userID, MaxLoginAttempts, window)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // CleanupExpiredSessions removes expired sessions from the database
 func (db *Database) CleanupExpiredSessions() error {
 	query := `UPDATE users SET

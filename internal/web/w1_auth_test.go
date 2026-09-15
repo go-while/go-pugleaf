@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -183,7 +184,8 @@ func TestW1AuthNoUsernameEnumeration(t *testing.T) {
 func TestW1AuthLockoutByID(t *testing.T) {
 	w1AuthNoDelay(t)
 	u, _ := w0NewUser(t, false)
-	// Failures by email count against the same user ID as failures by username.
+	// Failures by email count against the same user ID as failures by username;
+	// each one is reserved (counted) before the password check.
 	for i := 0; i < database.MaxLoginAttempts; i++ {
 		login := u.Username
 		if i%2 == 0 {
@@ -356,25 +358,148 @@ func TestW1AuthRequestCache(t *testing.T) {
 	}
 }
 
-func TestW1AuthFlashPrune(t *testing.T) {
+// w1AuthFillOldFlash adds more than flashMaxSessions flash entries older than flashMaxAge.
+func w1AuthFillOldFlash() {
 	flashMessagesMu.Lock()
+	defer flashMessagesMu.Unlock()
 	for i := 0; i < flashMaxSessions+10; i++ {
 		id := fmt.Sprintf("w1auth-old-%d", i)
 		flashMessages[id] = map[string]string{"error": "x"}
 		flashSetAt[id] = time.Now().Add(-time.Hour)
 	}
-	flashMessagesMu.Unlock()
+}
 
-	SetFlashError("w1auth-new", "hello")
-
+// w1AuthOldFlashLeft reports whether an old entry is still present, and the map size.
+func w1AuthOldFlashLeft() (bool, int) {
 	flashMessagesMu.Lock()
-	_, oldLeft := flashMessages["w1auth-old-0"]
-	n := len(flashMessages)
+	defer flashMessagesMu.Unlock()
+	_, ok := flashMessages["w1auth-old-0"]
+	return ok, len(flashMessages)
+}
+
+func TestW1AuthFlashPrune(t *testing.T) {
+	t.Cleanup(func() {
+		flashMessagesMu.Lock()
+		defer flashMessagesMu.Unlock()
+		for i := 0; i < flashMaxSessions+10; i++ {
+			id := fmt.Sprintf("w1auth-old-%d", i)
+			delete(flashMessages, id)
+			delete(flashSetAt, id)
+		}
+	})
+
+	// First prune: the scan runs and removes the old entries
+	flashMessagesMu.Lock()
+	flashLastPrune = time.Time{}
 	flashMessagesMu.Unlock()
-	if oldLeft || n > flashMaxSessions {
+	w1AuthFillOldFlash()
+	SetFlashError("w1auth-new", "hello")
+	if oldLeft, n := w1AuthOldFlashLeft(); oldLeft || n > flashMaxSessions {
 		t.Fatalf("old flash messages not pruned: len=%d oldLeft=%v", n, oldLeft)
 	}
 	if _, msg := GetAndClearFlash("w1auth-new", "error"); msg != "hello" {
 		t.Fatalf("new flash message lost: %q", msg)
+	}
+
+	// Within flashPruneEvery no second scan runs
+	w1AuthFillOldFlash()
+	SetFlashError("w1auth-new", "again")
+	if oldLeft, _ := w1AuthOldFlashLeft(); !oldLeft {
+		t.Fatalf("prune scan ran again within flashPruneEvery")
+	}
+
+	// After flashPruneEvery the next Set prunes again
+	flashMessagesMu.Lock()
+	flashLastPrune = time.Now().Add(-2 * flashPruneEvery)
+	flashMessagesMu.Unlock()
+	SetFlashSuccess("w1auth-new", "third")
+	if oldLeft, n := w1AuthOldFlashLeft(); oldLeft || n > flashMaxSessions {
+		t.Fatalf("old flash messages not pruned after the interval: len=%d oldLeft=%v", n, oldLeft)
+	}
+	if succ, _ := GetAndClearFlash("w1auth-new", "success"); succ != "third" {
+		t.Fatalf("flash success message lost: %q", succ)
+	}
+	if _, msg := GetAndClearFlash("w1auth-new", "error"); msg != "again" {
+		t.Fatalf("flash error message lost: %q", msg)
+	}
+}
+
+// w1AuthGroupAccessEngine serves the two access helpers like the handlers that call them:
+// check access, then open the group DB.
+func w1AuthGroupAccessEngine() *gin.Engine {
+	r := gin.New()
+	r.GET("/api/:group", func(c *gin.Context) {
+		group := c.Param("group")
+		if !w0Srv.checkGroupAccessAPI(c, group) {
+			return
+		}
+		groupDB, err := w0Srv.DB.GetGroupDB(group)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		groupDB.Return()
+		c.String(http.StatusOK, "ok")
+	})
+	r.GET("/html/:group", func(c *gin.Context) {
+		if !w0Srv.checkGroupAccess(c, c.Param("group")) {
+			return
+		}
+		c.String(http.StatusOK, "ok")
+	})
+	return r
+}
+
+// w1AuthGroupDBFiles lists group DB files created for group.
+func w1AuthGroupDBFiles(t *testing.T, group string) []string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(w0DataDir, "db", "*", database.SanitizeGroupName(group)+".db*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func TestW1AuthGroupAccessUnknownGroupAdmin(t *testing.T) {
+	_, adminCookie := w0NewUser(t, true)
+	_, userCookie := w0NewUser(t, false)
+	r := w1AuthGroupAccessEngine()
+	serve := func(path string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	unknown := w0Name("w1auth.nosuchgroup")
+	for _, ck := range []*http.Cookie{adminCookie, userCookie, nil} {
+		if rec := serve("/api/"+unknown, ck); rec.Code != http.StatusNotFound {
+			t.Fatalf("API access to unknown group = %d, want 404", rec.Code)
+		}
+		if rec := serve("/html/"+unknown, ck); rec.Code != http.StatusNotFound {
+			t.Fatalf("HTML access to unknown group = %d, want 404", rec.Code)
+		}
+	}
+	if files := w1AuthGroupDBFiles(t, unknown); len(files) != 0 {
+		t.Fatalf("group DB files created for an unknown group: %v", files)
+	}
+
+	// Admins keep access to inactive groups; others do not
+	inactive := w0NewGroup(t, false)
+	if rec := serve("/html/"+inactive, adminCookie); rec.Code != http.StatusOK {
+		t.Fatalf("admin HTML access to inactive group = %d, want 200", rec.Code)
+	}
+	if rec := serve("/api/"+inactive, adminCookie); rec.Code != http.StatusOK {
+		t.Fatalf("admin API access to inactive group = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	if rec := serve("/api/"+inactive, userCookie); rec.Code != http.StatusNotFound {
+		t.Fatalf("user API access to inactive group = %d, want 404", rec.Code)
+	}
+	active := w0NewGroup(t, true)
+	if rec := serve("/html/"+active, userCookie); rec.Code != http.StatusOK {
+		t.Fatalf("user HTML access to active group = %d, want 200", rec.Code)
 	}
 }

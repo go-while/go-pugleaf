@@ -19,12 +19,14 @@ import (
 var (
 	flashMessages   = make(map[string]map[string]string)
 	flashSetAt      = make(map[string]time.Time) // last Set per session, for pruning
+	flashLastPrune  time.Time                    // last prune scan, throttled to flashPruneEvery
 	flashMessagesMu sync.RWMutex
 )
 
 const (
 	flashMaxSessions = 1000             // prune once more sessions than this hold messages
 	flashMaxAge      = 15 * time.Minute // messages older than this are pruned
+	flashPruneEvery  = time.Minute      // at most one prune scan per interval
 )
 
 // setFlashLocked stores one flash message; the caller holds flashMessagesMu.
@@ -32,7 +34,8 @@ const (
 // would otherwise stay in the map forever, so old entries are pruned when it grows.
 func setFlashLocked(sessionID, mtype, msg string) {
 	now := time.Now()
-	if len(flashMessages) > flashMaxSessions {
+	if len(flashMessages) > flashMaxSessions && now.Sub(flashLastPrune) >= flashPruneEvery {
+		flashLastPrune = now
 		for id, at := range flashSetAt {
 			if now.Sub(at) > flashMaxAge {
 				delete(flashMessages, id)

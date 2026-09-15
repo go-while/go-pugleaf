@@ -24,8 +24,6 @@ import (
 //   Returns the NNTP TLS port
 // - func (s *WebServer) getBaseTemplateData(c *gin.Context, title string) TemplateData (line ~255)
 //   Creates base template data used by all page handlers
-// - func (s *WebServer) isAdminUser(user *models.User) bool (line ~279)
-//   Checks if a user has admin privileges
 // - func (s *WebServer) renderError(c *gin.Context, statusCode int, message string, errstring string) (line ~1280)
 //   Renders error pages with consistent formatting
 // - func (s *WebServer) renderTemplate(c *gin.Context, templateName string, data interface{}) (line ~1308)

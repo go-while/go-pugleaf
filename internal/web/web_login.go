@@ -82,37 +82,32 @@ func (s *WebServer) loginSubmit(c *gin.Context) {
 	} else {
 		user, err = s.DB.GetUserByUsername(username)
 	}
-	// Every failure below shows the same message, so the response does not reveal whether
+	// Every failure below shows the same message, and every rejection before the real
+	// password check spends the same bcrypt time, so the response does not reveal whether
 	// a username or email exists, is locked out or disabled.
 	if err != nil || user == nil {
-		// Spend the same bcrypt time as for a known user
-		dummyPasswordHash.once.Do(func() {
-			dummyPasswordHash.hash, _ = bcrypt.GenerateFromPassword([]byte("pugleaf-dummy-password"), bcrypt.DefaultCost)
-		})
-		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash.hash, []byte(password))
+		dummyPasswordCompare(password)
 		s.renderLoginError(c, "Invalid username/email or password", redirectURL)
 		log.Printf("[WEB]: Login failed for username/email: '%x' err='%v'", username, err)
 		return
 	}
 
-	// Check if user is locked out
-	lockedOut, err := s.DB.IsUserLockedOutByID(user.ID)
+	// Count this attempt atomically before checking the password (lockout by user ID)
+	allowed, err := s.DB.ReserveLoginAttemptByID(user.ID)
 	if err != nil {
 		s.renderLoginError(c, "Login error. Please try again.", redirectURL)
-		log.Printf("[WEB]: Login lockout check failed for user %d: %v", user.ID, err)
+		log.Printf("[WEB]: Login attempt reservation failed for user %d: %v", user.ID, err)
 		return
 	}
-	if lockedOut {
+	if !allowed {
+		dummyPasswordCompare(password)
 		s.renderLoginError(c, "Invalid username/email or password", redirectURL)
 		log.Printf("[WEB]: Login locked out for username/email: '%x'", username)
 		return
 	}
 
-	// Check password
+	// Check password (the attempt is already counted)
 	if !checkPassword(password, user.PasswordHash) {
-		if err := s.DB.IncrementLoginAttemptsByID(user.ID); err != nil {
-			log.Printf("[WEB]: Failed to increment login attempts for user %d: %v", user.ID, err)
-		}
 		s.renderLoginError(c, "Invalid username/email or password", redirectURL)
 		log.Printf("[WEB]: Login failed for username/email: '%x' (wrong password)", username)
 		return
@@ -139,6 +134,15 @@ func (s *WebServer) loginSubmit(c *gin.Context) {
 
 	// Redirect to destination
 	c.Redirect(http.StatusSeeOther, redirectURL)
+}
+
+// dummyPasswordCompare spends the bcrypt time of a real password check, for login
+// rejections that happen before the user's own hash is compared.
+func dummyPasswordCompare(password string) {
+	dummyPasswordHash.once.Do(func() {
+		dummyPasswordHash.hash, _ = bcrypt.GenerateFromPassword([]byte("pugleaf-dummy-password"), bcrypt.DefaultCost)
+	})
+	_ = bcrypt.CompareHashAndPassword(dummyPasswordHash.hash, []byte(password))
 }
 
 // logout handles user logout
