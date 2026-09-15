@@ -2,8 +2,6 @@
 package web
 
 import (
-	"html/template"
-	"log"
 	"net/http"
 	"strconv"
 
@@ -50,15 +48,7 @@ func (s *WebServer) sectionsPage(c *gin.Context) {
 		Sections:     sections,
 	}
 
-	// Load template individually
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sections.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		log.Printf("Error rendering sections template: %v", err)
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "sections.html")
 }
 
 // sectionPage handles /:section/ - shows groups in a section
@@ -137,27 +127,17 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 		SortBy:            sortBy,
 	}
 
-	// Load template individually to include pagination support
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/section.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		log.Printf("Error rendering section template: %v", err)
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, "section.html", "pagination.html")
 }
 
-// sectionGroupPage handles /:section/:group/ - shows articles in a group within a section
-func (s *WebServer) sectionGroupPage(c *gin.Context) {
-	sectionName := c.Param("section")
-	groupName := c.Param("group")
-
-	// Get section info
+// sectionGroupAllowed loads the section and checks that groupName is one of its groups.
+// On failure it renders the 404 page and returns false. It never opens a group DB.
+func (s *WebServer) sectionGroupAllowed(c *gin.Context, sectionName, groupName string) (*models.Section, bool) {
 	section, err := s.DB.GetSectionByName(sectionName)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Section not found",
 			"The section '"+sectionName+"' does not exist.")
-		return
+		return nil, false
 	}
 
 	// Verify group exists in this section
@@ -165,22 +145,30 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 	if err != nil || len(sectionGroups) == 0 {
 		s.renderError(c, http.StatusNotFound, "Group not found",
 			"The group '"+groupName+"' does not exist or is not in section '"+sectionName+"'.")
-		return
+		return nil, false
 	}
 
 	// Check if this group belongs to the specified section
-	groupInSection := false
 	for _, sg := range sectionGroups {
 		if sg.SectionID == section.ID {
-			groupInSection = true
-			break
+			return section, true
 		}
 	}
 
-	if !groupInSection {
-		s.renderError(c, http.StatusNotFound, "Group not in section",
-			"The group '"+groupName+"' is not in section '"+sectionName+"'.")
-		return
+	s.renderError(c, http.StatusNotFound, "Group not in section",
+		"The group '"+groupName+"' is not in section '"+sectionName+"'.")
+	return nil, false
+}
+
+// sectionGroupPage handles /:section/:group/ - shows articles in a group within a section
+func (s *WebServer) sectionGroupPage(c *gin.Context) {
+	sectionName := c.Param("section")
+	groupName := c.Param("group")
+
+	// Get section info and verify the group belongs to it
+	section, ok := s.sectionGroupAllowed(c, sectionName, groupName)
+	if !ok {
+		return // Error response already sent by sectionGroupAllowed
 	}
 
 	// Get group database
@@ -197,7 +185,7 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 
 	if p := c.Query("page"); p != "" && p != "1" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 1 {
-			page = parsed
+			page = clampOffsetPage(parsed, LIMIT_sectionGroupPage, maxOffsetArticles)
 		}
 	}
 
@@ -257,14 +245,7 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 		GroupExists:  true,
 	}
 
-	// Load template individually to include pagination support
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/section-group.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		log.Printf("Error rendering section-group template: %v", err)
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, "section-group.html", "pagination.html")
 }
 
 // sectionArticlePage handles /:section/:group/articles/:articleNum - shows a specific article
@@ -281,34 +262,10 @@ func (s *WebServer) sectionArticlePage(c *gin.Context) {
 		return
 	}
 
-	// Get section info
-	section, err := s.DB.GetSectionByName(sectionName)
-	if err != nil {
-		s.renderError(c, http.StatusNotFound, "Section not found",
-			"The section '"+sectionName+"' does not exist.")
-		return
-	}
-
-	// Verify group exists in this section (same as sectionGroupPage)
-	sectionGroups, err := s.DB.GetSectionGroupsByName(groupName)
-	if err != nil || len(sectionGroups) == 0 {
-		s.renderError(c, http.StatusNotFound, "Group not found",
-			"The group '"+groupName+"' does not exist or is not in section '"+sectionName+"'.")
-		return
-	}
-
-	groupInSection := false
-	for _, sg := range sectionGroups {
-		if sg.SectionID == section.ID {
-			groupInSection = true
-			break
-		}
-	}
-
-	if !groupInSection {
-		s.renderError(c, http.StatusNotFound, "Group not in section",
-			"The group '"+groupName+"' is not in section '"+sectionName+"'.")
-		return
+	// Get section info and verify the group belongs to it
+	section, ok := s.sectionGroupAllowed(c, sectionName, groupName)
+	if !ok {
+		return // Error response already sent by sectionGroupAllowed
 	}
 
 	// Get group database
@@ -349,34 +306,10 @@ func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
 	groupName := c.Param("group")
 	messageId := c.Param("messageId")
 
-	// Get section info
-	section, err := s.DB.GetSectionByName(sectionName)
-	if err != nil {
-		s.renderError(c, http.StatusNotFound, "Section not found",
-			"The section '"+sectionName+"' does not exist.")
-		return
-	}
-
-	// Verify group exists in this section (same as sectionGroupPage)
-	sectionGroups, err := s.DB.GetSectionGroupsByName(groupName)
-	if err != nil || len(sectionGroups) == 0 {
-		s.renderError(c, http.StatusNotFound, "Group not found",
-			"The group '"+groupName+"' does not exist or is not in section '"+sectionName+"'.")
-		return
-	}
-
-	groupInSection := false
-	for _, sg := range sectionGroups {
-		if sg.SectionID == section.ID {
-			groupInSection = true
-			break
-		}
-	}
-
-	if !groupInSection {
-		s.renderError(c, http.StatusNotFound, "Group not in section",
-			"The group '"+groupName+"' is not in section '"+sectionName+"'.")
-		return
+	// Get section info and verify the group belongs to it
+	section, ok := s.sectionGroupAllowed(c, sectionName, groupName)
+	if !ok {
+		return // Error response already sent by sectionGroupAllowed
 	}
 
 	// Get group database

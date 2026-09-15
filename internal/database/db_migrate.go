@@ -1,11 +1,14 @@
 package database
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -224,21 +227,101 @@ func applyMigration(db *sql.DB, migration *MigrationFile, dbType string) error {
 		content = string(contentBytes)
 	}
 
-	// Apply the migration
-	if _, err := db.Exec(content); err != nil {
+	// Run the migration and its schema_migrations row atomically on one dedicated
+	// connection. foreign_keys can't change inside a transaction, so it is switched
+	// off before BEGIN and restored on the same connection before it is released.
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get connection for migration %s for %s: %w", migration.FileName, dbType, err)
+	}
+	defer func() {
+		if cerr := conn.Close(); cerr != nil {
+			log.Printf("[DATABASE] Failed to release connection after migration %s for %s: %v", migration.FileName, dbType, cerr)
+		}
+	}()
+
+	foreignKeys := SQLITE_foreign_keys
+	if dbType == "main" {
+		foreignKeys = "ON" // the main DB always runs with foreign keys (see buildMainConnPragmas)
+	}
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
+		return fmt.Errorf("failed to disable foreign keys for migration %s for %s: %w", migration.FileName, dbType, err)
+	}
+	defer func() {
+		if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys="+foreignKeys); err != nil {
+			log.Printf("[DATABASE] Failed to restore foreign_keys=%s after migration %s for %s: %v", foreignKeys, migration.FileName, dbType, err)
+			// don't return a connection with the wrong setting to the pool
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin migration %s for %s: %w", migration.FileName, dbType, err)
+	}
+	if _, err := tx.ExecContext(ctx, stripMigrationPragmas(content)); err != nil {
+		if rerr := tx.Rollback(); rerr != nil {
+			log.Printf("[DATABASE] Failed to roll back migration %s for %s: %v", migration.FileName, dbType, rerr)
+		}
 		log.Printf("Failed to execute migration %s for %s: %v", migration.FileName, dbType, err)
 		return fmt.Errorf("failed to execute migration %s for %s: %w", migration.FileName, dbType, err)
 	}
 
 	// Record the migration as applied
-	_, err = db.Exec(`INSERT INTO schema_migrations (filename, db_type) VALUES (?, ?)`, migration.FileName, dbType)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (filename, db_type) VALUES (?, ?)`, migration.FileName, dbType); err != nil {
+		if rerr := tx.Rollback(); rerr != nil {
+			log.Printf("[DATABASE] Failed to roll back migration %s for %s: %v", migration.FileName, dbType, rerr)
+		}
 		log.Printf("Failed to record migration %s for %s: %v", migration.FileName, dbType, err)
 		return fmt.Errorf("failed to record migration %s for %s: %w", migration.FileName, dbType, err)
 	}
 
+	if err := tx.Commit(); err != nil {
+		log.Printf("Failed to commit migration %s for %s: %v", migration.FileName, dbType, err)
+		return fmt.Errorf("failed to commit migration %s for %s: %w", migration.FileName, dbType, err)
+	}
+
+	// Report (but don't fail on) foreign key violations left by the migration
+	rows, err := conn.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		log.Printf("[DATABASE] foreign_key_check after migration %s for %s failed: %v", migration.FileName, dbType, err)
+		return nil
+	}
+	defer rows.Close()
+	violations := 0
+	for rows.Next() {
+		var table, parent sql.NullString
+		var rowid, fkid sql.NullInt64
+		if err := rows.Scan(&table, &rowid, &parent, &fkid); err != nil {
+			log.Printf("[DATABASE] foreign_key_check scan after migration %s for %s: %v", migration.FileName, dbType, err)
+			break
+		}
+		violations++
+		if violations <= 10 {
+			log.Printf("[DATABASE] foreign key violation after migration %s for %s: table=%s rowid=%d parent=%s fkid=%d",
+				migration.FileName, dbType, table.String, rowid.Int64, parent.String, fkid.Int64)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[DATABASE] foreign_key_check rows after migration %s for %s: %v", migration.FileName, dbType, err)
+	}
+	if violations > 10 {
+		log.Printf("[DATABASE] %d foreign key violations after migration %s for %s", violations, migration.FileName, dbType)
+	}
+
 	//log.Printf("Applied migration %s to %s database", migration.FileName, dbType)
 	return nil
+}
+
+// migrationPragmaLine matches a whole line holding one PRAGMA statement (optionally
+// followed by a -- comment). Pragmas are no-ops or harmful inside the migration
+// transaction; connection settings come from the driver's ConnectHook.
+var migrationPragmaLine = regexp.MustCompile(`(?im)^\s*PRAGMA\s+[^;]*;\s*(--[^\n]*)?$`)
+
+// stripMigrationPragmas removes whole-line PRAGMA statements from migration SQL.
+func stripMigrationPragmas(content string) string {
+	return migrationPragmaLine.ReplaceAllString(content, "")
 }
 
 // migrateMainDB applies migrations to the main database

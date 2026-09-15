@@ -3,9 +3,11 @@ package database
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -221,7 +223,8 @@ func (tree *ThreadTree) GetThreadTreeHTML(groupName string) template.HTML {
 		return template.HTML("<p>No tree data available</p>")
 	}
 
-	html := fmt.Sprintf(`
+	escGroup := html.EscapeString(groupName)
+	out := fmt.Sprintf(`
 <div class="thread-tree" data-thread-root="%d" data-group-name="%s">
 	<div class="tree-stats">
 		<span class="node-count">%d nodes</span>
@@ -229,14 +232,14 @@ func (tree *ThreadTree) GetThreadTreeHTML(groupName string) template.HTML {
 		<span class="leaf-count">%d leaves</span>
 	</div>
 	<ul class="tree-root">
-`, tree.ThreadRoot, groupName, tree.TotalNodes, tree.MaxDepth, tree.LeafCount)
+`, tree.ThreadRoot, escGroup, tree.TotalNodes, tree.MaxDepth, tree.LeafCount)
 
-	html += tree.getNodeHTML(tree.RootNode, groupName)
-	html += `
+	out += tree.getNodeHTML(tree.RootNode, groupName)
+	out += `
 	</ul>
 </div>`
 
-	return template.HTML(html)
+	return template.HTML(out)
 }
 
 func (tree *ThreadTree) getNodeHTML(node *TreeNode, groupName string) string {
@@ -256,11 +259,14 @@ func (tree *ThreadTree) getNodeHTML(node *TreeNode, groupName string) string {
 		expandClass = " expandable"
 	}
 
-	var html string
+	escGroup := html.EscapeString(groupName)
+	hrefGroup := html.EscapeString(url.PathEscape(groupName))
+
+	var out string
 
 	// Use details/summary for graceful degradation without JavaScript
 	if hasChildren {
-		html = fmt.Sprintf(`
+		out = fmt.Sprintf(`
 <li class="tree-node%s" data-article-num="%d" data-depth="%d">
 	<div class="node-content">
 		<details open class="tree-details" style="display: inline;">
@@ -283,15 +289,15 @@ func (tree *ThreadTree) getNodeHTML(node *TreeNode, groupName string) string {
 			<div class="preview-loading">Loading...</div>
 		</div>
 	</div>`,
-			expandClass, node.ArticleNum, node.Depth, node.ArticleNum, groupName, subject, author, dateStr, groupName, node.ArticleNum, node.ArticleNum, node.ArticleNum)
+			expandClass, node.ArticleNum, node.Depth, node.ArticleNum, escGroup, subject, author, dateStr, hrefGroup, node.ArticleNum, node.ArticleNum, node.ArticleNum)
 
-		html += `<ul class="tree-children">`
+		out += `<ul class="tree-children">`
 		for _, child := range node.Children {
-			html += tree.getNodeHTML(child, groupName)
+			out += tree.getNodeHTML(child, groupName)
 		}
-		html += `</ul>`
+		out += `</ul>`
 	} else {
-		html = fmt.Sprintf(`
+		out = fmt.Sprintf(`
 <li class="tree-node%s" data-article-num="%d" data-depth="%d">
 	<div class="node-content">
 		<span class="node-toggle"></span>
@@ -310,9 +316,9 @@ func (tree *ThreadTree) getNodeHTML(node *TreeNode, groupName string) string {
 			<div class="preview-loading">Loading...</div>
 		</div>
 	</div>`,
-			expandClass, node.ArticleNum, node.Depth, node.ArticleNum, groupName, subject, author, dateStr, groupName, node.ArticleNum, node.ArticleNum, node.ArticleNum)
+			expandClass, node.ArticleNum, node.Depth, node.ArticleNum, escGroup, subject, author, dateStr, hrefGroup, node.ArticleNum, node.ArticleNum, node.ArticleNum)
 	}
 
-	html += `</li>`
-	return html
+	out += `</li>`
+	return out
 }

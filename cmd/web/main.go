@@ -211,6 +211,7 @@ func main() {
 
 	// Initialize database with custom cache configuration
 	dbConfig := database.DefaultDBConfig() // Start with defaults
+	dbConfig.DataDir = dataDir             // honor -data (main DB, group DBs, history)
 	// Override cache settings with command-line flag values
 	dbConfig.ArticleCacheSize = maxArticleCache
 	dbConfig.ArticleCacheExpiry = time.Duration(maxArticleCacheExpiry) * time.Minute
@@ -221,7 +222,8 @@ func main() {
 	}
 
 	// Initialize progress database once to avoid opening/closing for each group
-	progressDB, err := database.NewProgressDB("data/progress.db")
+	// (NewProgressDB takes a directory: the default stays data/progress.db/progress.db)
+	progressDB, err := database.NewProgressDB(filepath.Join(dataDir, "progress.db"))
 	if err != nil {
 		log.Fatalf("[WEB]: Failed to initialize progress database: %v", err)
 	}
@@ -479,6 +481,7 @@ func main() {
 	if !noCronjobs && server.CronManager != nil {
 		db.WG.Add(1)
 	}
+	server.StartSessionCleanup() // stops on server.Shutdown
 	// Set up cross-platform signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt) // Cross-platform (Ctrl+C on both Windows and Linux)
@@ -507,6 +510,13 @@ func main() {
 	case <-updateFileChan:
 		log.Printf("[WEB]: Update file detected, initiating graceful shutdown for update...")
 	}
+
+	// Stop accepting web requests and wait (bounded) for active ones
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[WEB]: web server shutdown: %v", err)
+	}
+	cancelShutdown()
 
 	// Stop NNTP server if running
 	if nntpServer != nil {

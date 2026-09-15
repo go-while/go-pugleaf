@@ -4,8 +4,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"time"
 )
+
+// ErrAPITokenExpired is returned by ValidateAPIToken for a token past its expires_at.
+var ErrAPITokenExpired = errors.New("api token expired")
 
 // APIToken represents an API token record
 type APIToken struct {
@@ -49,9 +53,6 @@ func (db *Database) CreateAPIToken(ownerName string, ownerID int64, expiresAt *t
 	// Hash for storage
 	hashedToken := HashToken(plainToken)
 
-	db.MainMutex.Lock()
-	defer db.MainMutex.Unlock()
-
 	result, err := RetryableExec(db.mainDB, query_CreateAPIToken, hashedToken, ownerName, ownerID, expiresAt)
 	if err != nil {
 		return nil, "", err
@@ -80,9 +81,6 @@ func (db *Database) CreateAPIToken(ownerName string, ownerID int64, expiresAt *t
 func (db *Database) ValidateAPIToken(plainToken string) (*APIToken, error) {
 	hashedToken := HashToken(plainToken)
 
-	db.MainMutex.RLock()
-	defer db.MainMutex.RUnlock()
-
 	query := `SELECT id, apitoken, ownername, ownerid, created_at, last_used_at, expires_at, is_enabled, usage_count
 	          FROM api_tokens
 	          WHERE apitoken = ? AND is_enabled = 1`
@@ -99,7 +97,7 @@ func (db *Database) ValidateAPIToken(plainToken string) (*APIToken, error) {
 
 	// Check if token has expired
 	if token.ExpiresAt != nil && token.ExpiresAt.Before(time.Now()) {
-		return nil, err // Token expired
+		return nil, ErrAPITokenExpired
 	}
 
 	return &token, nil
@@ -107,8 +105,6 @@ func (db *Database) ValidateAPIToken(plainToken string) (*APIToken, error) {
 
 // UpdateTokenUsage updates the last_used_at timestamp and increments usage_count
 func (db *Database) UpdateTokenUsage(tokenID int64) error {
-	db.MainMutex.Lock()
-	defer db.MainMutex.Unlock()
 
 	query := `UPDATE api_tokens
 	          SET last_used_at = CURRENT_TIMESTAMP, usage_count = usage_count + 1
@@ -120,8 +116,6 @@ func (db *Database) UpdateTokenUsage(tokenID int64) error {
 
 // ListAPITokens returns all API tokens (for admin purposes)
 func (db *Database) ListAPITokens() ([]*APIToken, error) {
-	db.MainMutex.RLock()
-	defer db.MainMutex.RUnlock()
 
 	query := `SELECT id, apitoken, ownername, ownerid, created_at, last_used_at, expires_at, is_enabled, usage_count
 	          FROM api_tokens
@@ -152,8 +146,6 @@ func (db *Database) ListAPITokens() ([]*APIToken, error) {
 
 // DisableAPIToken deactivates a token
 func (db *Database) DisableAPIToken(tokenID int) error {
-	db.MainMutex.Lock()
-	defer db.MainMutex.Unlock()
 
 	query := `UPDATE api_tokens SET is_enabled = 0 WHERE id = ?`
 	_, err := RetryableExec(db.mainDB, query, tokenID)
@@ -162,8 +154,6 @@ func (db *Database) DisableAPIToken(tokenID int) error {
 
 // EnableAPIToken reactivates a token
 func (db *Database) EnableAPIToken(tokenID int) error {
-	db.MainMutex.Lock()
-	defer db.MainMutex.Unlock()
 
 	query := `UPDATE api_tokens SET is_enabled = 1 WHERE id = ?`
 	_, err := RetryableExec(db.mainDB, query, tokenID)
@@ -172,8 +162,6 @@ func (db *Database) EnableAPIToken(tokenID int) error {
 
 // DeleteAPIToken permanently removes a token
 func (db *Database) DeleteAPIToken(tokenID int) error {
-	db.MainMutex.Lock()
-	defer db.MainMutex.Unlock()
 
 	query := `DELETE FROM api_tokens WHERE id = ?`
 	_, err := RetryableExec(db.mainDB, query, tokenID)
@@ -182,8 +170,6 @@ func (db *Database) DeleteAPIToken(tokenID int) error {
 
 // CleanupExpiredTokens removes expired tokens from the database
 func (db *Database) CleanupExpiredTokens() (int, error) {
-	db.MainMutex.Lock()
-	defer db.MainMutex.Unlock()
 
 	query := `DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP`
 	result, err := RetryableExec(db.mainDB, query)

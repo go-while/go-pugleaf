@@ -795,3 +795,149 @@ echo "SUMMARY pass=$PASSES fail=$FAILS data=$DATA log=$LOG"
 [ "$FAILS" -gt 125 ] && FAILS=125
 exit "$FAILS"
 ```
+
+---
+
+## Progress
+
+### Wave 0 (orchestrator, 2026-09-15)
+- Integration branch `plan-web-sqlite-hardening` from `testing-001` @ 0f27e76; the plan moved to `wip/`.
+- Baseline checks at 0f27e76: `gofmt -l` lists only the 4 known files. `go vet`, `go build`, `go test -race`
+  (history, nntp, processor, expire-news, history-rebuild; database and web had no tests) and `./build_webserver.sh` PASS.
+- **Deviations from the wave-0 steps** (all found while running them; wave-1 slices build on these):
+  1. **`cmd/web` ignored `-data`.** It was the only tool that never set `dbConfig.DataDir`, and the progress DB path
+     was hardcoded to `data/progress.db`. The e2e script as written would have run against the checkout's production
+     `./data`. Fixed inline in `cmd/web/main.go`: `dbConfig.DataDir = dataDir` and
+     `NewProgressDB(filepath.Join(dataDir, "progress.db"))`. The default is unchanged (`./data`,
+     `data/progress.db/progress.db`), and `run_web*.sh` pass no `-data`.
+     **Behaviour change to report:** a deployment that passes `-data <dir>` to the webserver now really uses `<dir>`.
+     `w1-server` owns `cmd/web/main.go` and must keep this.
+  2. **Web test harness cwd.** Instead of `os.Chdir("../..")`, `TestMain` runs from a temp dir that only symlinks
+     `<checkout>/web`, so cwd-relative paths (`./data`, cron job commands) never reach the checkout. Additions:
+     `w0RepoRoot`, `w0DataDir` (group DBs under `<w0DataDir>/db`), `w0TestDB`, `w0DB(t)` (also in web), `w0CreateUser`.
+     It sets `config.AppVersion = "test"` first (`NewDefaultConfig` log.Fatalf's while unset, `config.go:542`),
+     plus `database.GlobalDateParser` and the model caches, like cmd/web. `w0NewUser` names users `w0user_<n>`
+     (the username validator rejects dots) and uses bcrypt MinCost. `w0NewGroup` also sets `hierarchy`, because
+     `MainDBGetNewsgroup` scans it into a string and fails on NULL.
+  3. **e2e script fixes** (real script bugs; the listing above is outdated on these points):
+     - The server's working dir is `$DATA/run` (only `web/` is linked there), with an absolute `-data`. The script
+       aborts when the schema does not appear in `$DB` (a binary that ignores `-data`), refuses `DATA` containing
+       `..`, and refuses a port that already answers.
+     - `-nntphostname smoke.invalid` can never start: `processor.SetHostname` requires an FQDN that resolves
+       (`net.LookupIP`). The script uses `$NNTPHOST`, or else the first resolvable of `hostname -f`,
+       `<hostname>.local`, `<hostname>.lan` (here `nuc.local` from `/etc/hosts`).
+     - The default config blocks User-Agents containing `curl` (migration 0023, `BlockBadBots=true`), so every
+       request got 403. A `curl()` wrapper sends `User-Agent: pugleaf-smoke/1.0`; bot blocking stays on.
+     - Seeded newsgroups get `hierarchy='smoke'`.
+- `go test -race ./internal/database/ ./internal/web/ -run W0 -count=3`: PASS, no races.
+- Baseline e2e (`PORT=18980`, binary built from the wave-0 tree): `SUMMARY pass=4 fail=21`.
+  - PASS: E07, E10, E14, E19. E19 did not catch the race at baseline; `TestW1ServerSectionsCacheRace` is the real check.
+  - FAIL: E01–E06, E08, E09, E11–E13, E15–E18, E20, E21, E23, E25–E27. Confirmed in the log: E06 is the nil deref
+    at `web_apitokens.go:40` (C1), E23 the nil deref at `cronjobs.go:74` (C2), E08 `status=500 files=1` (C4),
+    E20 `rc=124 elapsed=30s` (C6).
+  - INFO: E22 `0` races; E24 `634.25 req/s` on `/groups`.
+- Leftover found: `cmd/nntp-fetcher/main.go:138` also hardcodes `NewProgressDB("data/progress.db")` (cwd-relative,
+  ignores `-data`).
+
+### Wave 1 (4 implementers from ec49c42, 2026-09-15)
+| Slice | Branch (worktree under `/tank0/claude/trees/go-pugleaf/`) | Commits | Review | Merge |
+|----|----|----|----|----|
+| w1-server | `worktree-agent-ad775f2d908a6a483` | 2afcc00, fixes 7d7e0ba | MERGE (3 minors fixed) | 21ee361 |
+| w1-api | `worktree-agent-aaa5ffc7b67a44945` | bd1f890, fixes c1c158f | MERGE AFTER FIXES | 36ba59c |
+| w1-auth | `worktree-agent-a2f51973cbba640e7` | 3f32a4f, fixes 79dcfa4, 600e0e1 | MERGE (5 items fixed) | d871556 |
+| w1-sqlite | `worktree-agent-ab1679615bd992f08` | 14cd766 (gofmt), 07e5b63, fixes 60d52b2 | MERGE AFTER FIXES, re-review MERGE | b084d72 |
+
+- **Merge order** deviated from the plan (sqlite, server, auth, api): branches were merged as they became ready
+  (server, api, auth, sqlite). The file sets are disjoint; the full `## Checks` passed after every merge.
+- **Review fixes beyond the slice text:**
+  - w1-sqlite: the first version's GetGroupDB fast path could hand out a DB that cleanup closed in between
+    ("group database is closed", 2/10 test runs). Now acquire happens under `MainMutex.RLock` + `mux`, every close
+    happens under `MainMutex.Lock` + `mux`, and Shutdown during init is handled. 50 stress runs are clean.
+  - w1-api: the section tree kept `s.DB.SectionsCache.IsInSections(section)`, but that cache is keyed by *group*
+    names, so the route always 404'd. The check is removed; `sectionGroupAllowed` gates it like the other section
+    routes, with a positive test. `FlagArticleSpamByUser` increments the counter with its own handle and rolls the
+    flag back only when that fails.
+  - w1-auth: login attempts are reserved atomically before the password check (`ReserveLoginAttemptByID`, at most
+    `MaxLoginAttempts` per `LoginLockoutTime` window, also under concurrency), and every rejection spends bcrypt time.
+    `checkGroupAccess`/`checkGroupAccessAPI` give admins 404 for unknown groups (before, admins could make
+    GetGroupDB create files for any name).
+  - w1-server: CSRF rejections are logged (sampled, `[WEB]: cross-origin request rejected ...`), session cleanup
+    holds a `db.WG` slot, and the chat test deletes its AI model.
+- **Checks on b084d72:** gofmt lists only the known baseline files; vet, build, `go test -race` (database, web,
+  history, nntp, processor, expire-news, history-rebuild) and `./build_webserver.sh` PASS.
+- **e2e on b084d72** (`PORT=18980`): `SUMMARY pass=24 fail=1`, the only FAIL is E21 (w2-dbperf). 0 panics, 0 DATA
+  RACE, no FOREIGN KEY or retry give-up lines. E24 `548 req/s`, measured at load 7–13 while agents ran race tests,
+  so not comparable with the wave-0 number. The verifier compares both binaries back to back
+  (baseline binary built from ec49c42).
+- **Additional behaviour changes to report** (on top of the plan's decisions):
+  1. `PRAGMA foreign_keys=ON` is now effective on every connection. Cascades really happen: deleting a user removes
+     its sessions, permissions and spam flags; deleting a newsgroup removes its post_queue rows; clearing
+     thread_cache removes tree_stats. `CreateSectionGroup` with a missing section fails instead of writing an orphan.
+  2. `GetGroupDB` after `Database.Shutdown` returns an error instead of reopening a DB.
+  3. After `MaxLoginAttempts` attempts (correct or not) within the window, logins are refused for `LoginLockoutTime`;
+     a successful login resets the counter.
+  4. Admins get 404 for group names that are not in `newsgroups` (inactive groups stay accessible).
+  5. A plain-HTTP deployment behind a proxy that rewrites `Host` gets 403 on browser POSTs; the log line names it.
+  6. `POST /aichat/clear/all` works now (it always answered 400); the chat rate limit is per user.
+  7. `requireAdminAuthJSON` answers 403 (not 500) when the user row cannot be loaded; the cron log viewer answers
+     503 with `-no-cronjobs`.
+  8. The section tree route `/:section/:group/tree/:root` works for real section groups (it always 404'd).
+- **Deferred to leftovers:**
+  - `server.Shutdown` waits 10s; longer handlers (AI chat up to 90s, slow admin POSTs) still run while the DB shuts
+    down.
+  - Concurrent AI chat sends to the same model overwrite each other's stored history (existing behaviour).
+  - `TryReserveWebPost` charges the back-off even when the post queue is full ("Server is busy"), as before.
+  - `getStats` cache has no singleflight; concurrent misses recompute.
+  - Unused `database.HandleThreadTreeAPI` (tree_view_api.go) still calls GetGroupDB for any name.
+  - `defer groupDB.Return()` inside the reply loop of sitePostSubmit (bounded by MaxCrossPosts).
+  - Dead code `initializeThreadCacheSimple` (db_rescan.go:817) uses `INSERT OR REPLACE INTO thread_cache`, which
+    would now cascade-delete tree_stats if it were called again.
+  - `SQLiteMaxRetryWait` is read on every retry: tools that change it must do so before any DB activity.
+  - The cmd/web FetchRoutine goroutine is not in `db.WG` and may log group DB errors during exit.
+  - `internal/web/README.md` still lists removed functions (`createWebSession`, `isAdminUser`).
+
+### Wave 2 (2 implementers from 72285ca, 2026-09-15)
+| Slice | Branch (worktree under `/tank0/claude/trees/go-pugleaf/`) | Commits | Review | Merge |
+|----|----|----|----|----|
+| w2-templates | `worktree-agent-a1fdabf6f696a853e` | 6101472 | MERGE (minor notes only) | 21191ab |
+| w2-dbperf | `worktree-agent-af547bc9d754b7844` | a087478 | MERGE (2 optional minors) | e16b00e |
+
+- The orchestrator fixed the two w2-dbperf minors inline in 8cc6ebe: `InsertSection` and `loadHeaderSections` now
+  use the Retryable helpers, and `TestW2DBPerfTTLCacheConcurrent` invalidates only while all readers run.
+- **w2-templates:** all 37 parse sites go through `loadTemplates`/`renderPage`/`renderTemplateSet`
+  (`web_templates.go`) with the same template files, data and status codes (400 for login/register errors, the
+  given code in `renderError`, 200 elsewhere). `renderError` cannot recurse (`c.String` fallback). Worktree e2e:
+  24/25 (E21 belonged to w2-dbperf); E24 1084.59 req/s at load 6.5.
+- **w2-dbperf:**
+  - 30s TTL caches with a generation counter for visible site news, header sections and active AI models; every
+    writer in the database package invalidates.
+  - Search uses `LIKE ? ESCAPE '\'` and the non-admin name-only queries use `+active = 1`.
+  - EXPLAIN QUERY PLAN: name search and count now run `SEARCH ... USING INDEX idx_newsgroups_name_nocase
+    (name>? AND name<?)` (before: `idx_active` search + temp B-tree, admin `SCAN ... idx_message_count`); the
+    description variants are unchanged.
+  - After 0009, the overview queries use `idx_articles_hide_article_num` and the spam queries
+    `idx_articles_spam_hide`; message-id lookups keep `sqlite_autoindex_articles_1`; no plan became a SCAN.
+  - The reviewer confirmed identical search results for 20 terms (mixed case, non-ASCII, `\`, empty), except that
+    `_` is now literal.
+  - Worktree e2e: `SUMMARY pass=25 fail=0`.
+- **Checks on 8cc6ebe:** gofmt lists only the known baseline files; vet, build, `go test -race` (database, web,
+  history, nntp, processor, expire-news, history-rebuild) and `./build_webserver.sh` PASS.
+- **Additional behaviour changes to report:**
+  1. Templates are parsed once per process: template edits need a restart, or `PUGLEAF_DEV_TEMPLATES=1` while
+     developing.
+  2. Page titles are escaped text: a subject with `<b>` shows literally, `&amp;` shows as `&amp;`.
+  3. HTML responses are `text/html; charset=utf-8`. A template error gives the full 500 error page (never a partial
+     page); AI chat template errors use the site error page.
+  4. Site news, header sections and active AI models are cached for 30s per process. Changes made through the web
+     admin show immediately; changes from other processes (rslight-importer, direct SQL) within 30s.
+  5. Group search: `%` and `_` are literal characters (prefix matching as before).
+  6. Migrations: main 0027 adds `idx_newsgroups_name_nocase` and drops `idx_name`. Group 0009 drops
+     `idx_articles_message_id`, `idx_articles_hide`, `idx_articles_spam` when each group DB is first opened by the
+     new code: a one-time delay proportional to the index size on very large groups.
+- **Deferred to leftovers:**
+  - The template cache key records only whether a FuncMap is used, not which one (only the admin page uses one);
+    a future call site must use a distinct name.
+  - The 500 page shows the template error text, as most pages did before.
+  - The DB-error `error.html` pages in groups/hierarchies still answer 200.
+  - Without `sqlite_stat1`, the thread_cache child query (`thread_cache.go:290`) walks `idx_articles_hide_date`
+    instead of rowid lookups (existing behaviour; `ANALYZE` changes the plan).

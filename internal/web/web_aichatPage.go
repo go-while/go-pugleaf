@@ -3,10 +3,11 @@ package web
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
-	"html/template"
+	"io"
 	"log"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,44 +20,126 @@ const maxChatInputLineLength = 1024
 
 const ollamaProxyURL = "http://ollama-proxy.local:21434/proxy"
 
+// chatHTTPClient calls the Ollama proxy; the timeout bounds a hung proxy (the request context
+// additionally ends when the client goes away).
+var chatHTTPClient = &http.Client{Timeout: 90 * time.Second}
+
+const (
+	maxChatProxyResponseBytes = 1 << 20          // proxy responses larger than this are rejected
+	chatHistoryMaxIdle        = 2 * time.Hour    // histories unused for longer are swept
+	chatCacheMaxEntries       = 10000            // per map; the oldest entries are evicted beyond it
+	chatSweepInterval         = 10 * time.Minute // how often runChatCacheSweeper runs
+)
+
 // Rate limiting for AI chat
 var (
-	chatRateLimiter = make(map[string]time.Time) // sessionID -> last request time
-	rateLimiterMux  sync.RWMutex
+	chatRateLimiter = make(map[int64]time.Time) // user ID -> last request time
+	rateLimiterMux  sync.Mutex
 	chatCooldown    = 5 * time.Second
 )
 
-// Chat history cache - in-memory storage per session
+// chatEntry is the chat history of one user with one model.
+type chatEntry struct {
+	msgs     []ChatMessage
+	lastUsed time.Time
+}
+
+// Chat history cache - in-memory storage per user and model (key: chatHistoryKey)
 var (
-	chatHistoryCache = make(map[string][]ChatMessage) // sessionToken -> chat history
+	chatHistoryCache = make(map[string]*chatEntry)
 	chatCacheMux     sync.RWMutex
-	maxHistoryLength = 200 // Keep last N messages per session
+	maxHistoryLength = 200 // Keep last N messages per user and model
 )
 
-// getModelCacheKey generates a model-specific cache key
-func getModelCacheKey(sessionToken, modelPostKey string) string {
-	return sessionToken + "_" + modelPostKey
+// chatHistoryKey returns the history cache key of a user and model.
+func chatHistoryKey(userID int64, modelPostKey string) string {
+	return strconv.FormatInt(userID, 10) + "_" + modelPostKey
 }
 
-// getChatHistoryCount gets chat history count for a specific model
-func getChatHistoryCount(sessionToken, modelPostKey string) int {
+// getChatHistory returns a copy of the history (never nil) and marks the entry as used.
+func getChatHistory(key string, now time.Time) []ChatMessage {
+	chatCacheMux.Lock()
+	defer chatCacheMux.Unlock()
+	entry, ok := chatHistoryCache[key]
+	if !ok {
+		return []ChatMessage{}
+	}
+	entry.lastUsed = now
+	return slices.Clone(entry.msgs)
+}
+
+// getAllChatHistoryCounts gets chat history counts of a user for all models
+func getAllChatHistoryCounts(userID int64, models []*models.AIModel) map[string]int {
 	chatCacheMux.RLock()
 	defer chatCacheMux.RUnlock()
-
-	cacheKey := getModelCacheKey(sessionToken, modelPostKey)
-	if history, exists := chatHistoryCache[cacheKey]; exists {
-		return len(history)
-	}
-	return 0
-}
-
-// getAllChatHistoryCounts gets chat history counts for all models
-func getAllChatHistoryCounts(sessionToken string, models []*models.AIModel) map[string]int {
-	counts := make(map[string]int)
+	counts := make(map[string]int, len(models))
 	for _, model := range models {
-		counts[model.PostKey] = getChatHistoryCount(sessionToken, model.PostKey)
+		if entry, ok := chatHistoryCache[chatHistoryKey(userID, model.PostKey)]; ok {
+			counts[model.PostKey] = len(entry.msgs)
+		} else {
+			counts[model.PostKey] = 0
+		}
 	}
 	return counts
+}
+
+// sweepChatCaches removes chat histories idle for more than chatHistoryMaxIdle and rate-limiter
+// entries older than 10*chatCooldown, then caps both maps at chatCacheMaxEntries by evicting the
+// oldest entries. It takes chatCacheMux and rateLimiterMux itself.
+func sweepChatCaches(now time.Time) {
+	chatCacheMux.Lock()
+	for key, entry := range chatHistoryCache {
+		if now.Sub(entry.lastUsed) > chatHistoryMaxIdle {
+			delete(chatHistoryCache, key)
+		}
+	}
+	if over := len(chatHistoryCache) - chatCacheMaxEntries; over > 0 {
+		keys := make([]string, 0, len(chatHistoryCache))
+		for key := range chatHistoryCache {
+			keys = append(keys, key)
+		}
+		slices.SortFunc(keys, func(a, b string) int {
+			return chatHistoryCache[a].lastUsed.Compare(chatHistoryCache[b].lastUsed)
+		})
+		for _, key := range keys[:over] {
+			delete(chatHistoryCache, key)
+		}
+	}
+	chatCacheMux.Unlock()
+
+	rateLimiterMux.Lock()
+	for uid, last := range chatRateLimiter {
+		if now.Sub(last) > 10*chatCooldown {
+			delete(chatRateLimiter, uid)
+		}
+	}
+	if over := len(chatRateLimiter) - chatCacheMaxEntries; over > 0 {
+		uids := make([]int64, 0, len(chatRateLimiter))
+		for uid := range chatRateLimiter {
+			uids = append(uids, uid)
+		}
+		slices.SortFunc(uids, func(a, b int64) int {
+			return chatRateLimiter[a].Compare(chatRateLimiter[b])
+		})
+		for _, uid := range uids[:over] {
+			delete(chatRateLimiter, uid)
+		}
+	}
+	rateLimiterMux.Unlock()
+}
+
+// runChatCacheSweeper runs sweepChatCaches periodically until Shutdown.
+func (s *WebServer) runChatCacheSweeper() {
+	ticker := time.NewTicker(chatSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case now := <-ticker.C:
+			sweepChatCaches(now)
+		}
+	}
 }
 
 // ChatMessage represents a single chat message
@@ -71,7 +154,6 @@ type AIChatPageData struct {
 	TemplateData
 	ChatHistory     []ChatMessage
 	Error           string
-	SessionToken    string            // Strong session token for chat history
 	AvailableModels []*models.AIModel // Available AI models for selection
 	DefaultModel    *models.AIModel   // Default selected model
 	ChatCounts      map[string]int    // Chat message counts per model
@@ -85,9 +167,6 @@ func (s *WebServer) aichatPage(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, "/login?redirect=/aichat")
 		return
 	}
-
-	// Use web session ID as chat session token for persistence across page reloads
-	sessionToken := session.SessionID
 
 	// Load available AI models from database
 	availableModels, err := s.DB.GetActiveAIModels()
@@ -110,43 +189,23 @@ func (s *WebServer) aichatPage(c *gin.Context) {
 		}
 	}
 
-	// Load existing chat history for the default model
-	defaultCacheKey := getModelCacheKey(sessionToken, defaultModel.PostKey)
-	chatCacheMux.RLock()
-	existingHistory := chatHistoryCache[defaultCacheKey]
-	if existingHistory == nil {
-		existingHistory = []ChatMessage{}
-	}
-	chatCacheMux.RUnlock()
+	// Load existing chat history for the default model (keyed by user, never by the session ID)
+	existingHistory := getChatHistory(chatHistoryKey(session.UserID, defaultModel.PostKey), time.Now())
 
 	// Get chat counts for all models
-	chatCounts := getAllChatHistoryCounts(sessionToken, availableModels)
+	chatCounts := getAllChatHistoryCounts(session.UserID, availableModels)
 
 	data := AIChatPageData{
 		TemplateData:    s.getBaseTemplateData(c, "AI Chat"),
 		ChatHistory:     existingHistory,
 		Error:           c.Query("error"),
-		SessionToken:    sessionToken,
 		AvailableModels: availableModels,
 		DefaultModel:    defaultModel,
 		ChatCounts:      chatCounts,
 		MaxInputLength:  maxChatInputLineLength,
 	}
 
-	tmpl, err := template.ParseFiles("web/templates/base_chat.html", "web/templates/aichat.html")
-	if err != nil {
-		log.Printf("Failed to parse chat templates: %v", err)
-		s.renderChatError(c, "Template Parse Error", fmt.Sprintf("Failed to load chat interface: %v", err))
-		return
-	}
-
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base_chat.html", data)
-	if err != nil {
-		log.Printf("Failed to execute chat template: %v", err)
-		s.renderChatError(c, "Template Execution Error", fmt.Sprintf("Failed to render chat interface: %v", err))
-		return
-	}
+	s.renderTemplateSet(c, http.StatusOK, "chat", nil, "base_chat.html", data, "base_chat.html", "aichat.html")
 }
 
 // aichatSend handles chat message POSTs and proxies to Ollama
@@ -157,30 +216,26 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 		return
 	}
 
-	// Rate limiting logic
-	rateLimiterMux.RLock()
-	lastRequestTime, ok := chatRateLimiter[session.SessionID]
-	rateLimiterMux.RUnlock()
-
-	if ok && time.Since(lastRequestTime) < chatCooldown {
+	// Rate limiting: check and record under one lock (before processing the request)
+	now := time.Now()
+	rateLimiterMux.Lock()
+	lastRequestTime, ok := chatRateLimiter[session.UserID]
+	if ok && now.Sub(lastRequestTime) < chatCooldown {
+		rateLimiterMux.Unlock()
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many requests. Please wait before sending another message."})
 		return
 	}
-
-	// Update last request time for rate limiting (before processing the request)
-	rateLimiterMux.Lock()
-	chatRateLimiter[session.SessionID] = time.Now()
+	chatRateLimiter[session.UserID] = now
 	rateLimiterMux.Unlock()
 
-	// Accept new message, session token, and model selection from frontend
+	// Accept new message and model selection from frontend (a legacy sessionToken field is ignored)
 	var req struct {
-		Message      string `json:"message"`
-		SessionToken string `json:"sessionToken"`
-		Model        string `json:"model"` // Selected model's post key
+		Message string `json:"message"`
+		Model   string `json:"model"` // Selected model's post key
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.Message == "" || req.SessionToken == "" {
+	if err := c.ShouldBindJSON(&req); err != nil || req.Message == "" {
 		log.Printf("AI Chat Invalid request: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: message and sessionToken required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: message required"})
 		return
 	}
 
@@ -199,7 +254,7 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 	// Validate the selected model exists and is active
 	selectedModel, err := s.DB.GetAIModelByPostKey(modelPostKey)
 	if err != nil || !selectedModel.IsActive {
-		log.Printf("AI Chat invalid model: %s, err: %v", modelPostKey, err)
+		log.Printf("AI Chat invalid model: %q, err: %v", modelPostKey, err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid or inactive AI model selected"})
 		return
 	}
@@ -211,25 +266,15 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 		return
 	}
 
-	// Get existing chat history from model-specific cache
-	modelCacheKey := getModelCacheKey(req.SessionToken, modelPostKey)
-	chatCacheMux.RLock()
-	history := chatHistoryCache[modelCacheKey]
-	if history == nil {
-		history = []ChatMessage{}
-	} else {
-		// Make a copy to avoid race conditions
-		historyCopy := make([]ChatMessage, len(history))
-		copy(historyCopy, history)
-		history = historyCopy
-	}
-	chatCacheMux.RUnlock()
+	// Get a copy of the existing chat history of this user and model
+	modelCacheKey := chatHistoryKey(session.UserID, modelPostKey)
+	history := getChatHistory(modelCacheKey, now)
 
 	// Add new user message to history
-	userMessage := ChatMessage{Role: "user", Content: req.Message}
-	history = append(history, userMessage)
+	history = append(history, ChatMessage{Role: "user", Content: req.Message})
 
-	log.Printf("Received chat request: session=%s, message='%s', model='%s', history_len=%d", req.SessionToken[:8], req.Message, selectedModel.DisplayName, len(history))
+	// Never log message contents: lengths and the model only
+	log.Printf("AI Chat request: user=%d model='%s' msg_len=%d history_len=%d", session.UserID, selectedModel.DisplayName, len(req.Message), len(history))
 
 	// Prepare request for proxy (using the real Ollama model name)
 	proxyReq := struct {
@@ -247,19 +292,33 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 		return
 	}
 
-	resp, err := http.Post(ollamaProxyURL, "application/json", bytes.NewReader(proxyBody))
+	httpReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, ollamaProxyURL, bytes.NewReader(proxyBody))
+	if err != nil {
+		log.Printf("AI Chat Proxy request build error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to build proxy request"})
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := chatHTTPClient.Do(httpReq)
 	if err != nil {
 		log.Printf("AI Chat Proxy request error: %v", err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Ollama proxy error"})
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("AI Chat Proxy returned status %d", resp.StatusCode)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Ollama proxy error"})
+		return
+	}
 
 	// Parse the proxy response (simple format: {"reply": "..."})
 	var proxyResp struct {
 		Reply string `json:"reply"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&proxyResp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxChatProxyResponseBytes)).Decode(&proxyResp); err != nil {
 		log.Printf("AI Chat Proxy decode error: %v", err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to decode proxy response"})
 		return
@@ -272,8 +331,7 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 	}
 
 	// Add AI response to history
-	aiMessage := ChatMessage{Role: "assistant", Content: proxyResp.Reply}
-	history = append(history, aiMessage)
+	history = append(history, ChatMessage{Role: "assistant", Content: proxyResp.Reply})
 
 	// Trim history if it gets too long (keep last N messages)
 	if len(history) > maxHistoryLength {
@@ -282,12 +340,11 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 
 	// Save updated history to model-specific cache
 	chatCacheMux.Lock()
-	chatHistoryCache[modelCacheKey] = history
+	chatHistoryCache[modelCacheKey] = &chatEntry{msgs: history, lastUsed: time.Now()}
 	chatCacheMux.Unlock()
 
-	log.Printf("AI Chat got reply: %s", proxyResp.Reply)
+	log.Printf("AI Chat got reply: user=%d model='%s' reply_len=%d", session.UserID, selectedModel.DisplayName, len(proxyResp.Reply))
 	c.JSON(http.StatusOK, gin.H{"reply": proxyResp.Reply})
-
 }
 
 // aichatModels returns available AI models for frontend selection
@@ -321,7 +378,7 @@ func (s *WebServer) aichatModels(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-// aichatLoadHistory loads chat history for a specific model
+// aichatLoadHistory loads the chat history of the logged-in user for a specific model
 func (s *WebServer) aichatLoadHistory(c *gin.Context) {
 	session := s.getWebSession(c)
 	if session == nil {
@@ -331,16 +388,6 @@ func (s *WebServer) aichatLoadHistory(c *gin.Context) {
 
 	// Get model from URL parameter
 	modelPostKey := c.Param("model")
-
-	// Get sessionToken from JSON body
-	var req struct {
-		SessionToken string `json:"sessionToken"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.SessionToken == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "sessionToken required in request body"})
-		return
-	}
-
 	if modelPostKey == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "model parameter required in URL"})
 		return
@@ -354,13 +401,7 @@ func (s *WebServer) aichatLoadHistory(c *gin.Context) {
 	}
 
 	// Get model-specific history
-	modelCacheKey := getModelCacheKey(req.SessionToken, modelPostKey)
-	chatCacheMux.RLock()
-	history := chatHistoryCache[modelCacheKey]
-	if history == nil {
-		history = []ChatMessage{}
-	}
-	chatCacheMux.RUnlock()
+	history := getChatHistory(chatHistoryKey(session.UserID, modelPostKey), time.Now())
 
 	c.JSON(http.StatusOK, gin.H{
 		"history": history,
@@ -369,7 +410,7 @@ func (s *WebServer) aichatLoadHistory(c *gin.Context) {
 	})
 }
 
-// aichatClearHistory clears chat history for a specific model or all models
+// aichatClearHistory clears the chat history of the logged-in user for a specific model or all models
 func (s *WebServer) aichatClearHistory(c *gin.Context) {
 	session := s.getWebSession(c)
 	if session == nil {
@@ -379,64 +420,37 @@ func (s *WebServer) aichatClearHistory(c *gin.Context) {
 
 	// Get model from URL parameter (can be "all" for clearing all)
 	modelParam := c.Param("model")
-
-	// Get sessionToken from form data or JSON body
-	var sessionToken string
-
-	// Try form data first (for HTML form submissions)
-	sessionToken = c.PostForm("sessionToken")
-
-	// If not in form data, try JSON body (for AJAX requests)
-	if sessionToken == "" {
-		var req struct {
-			SessionToken string `json:"sessionToken"`
-		}
-		if err := c.ShouldBindJSON(&req); err == nil && req.SessionToken != "" {
-			sessionToken = req.SessionToken
-		}
-	}
-
-	if sessionToken == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "sessionToken required in request body or form data"})
-		return
+	if modelParam == "" && c.FullPath() == "/aichat/clear/all" {
+		// The static /aichat/clear/all route has no :model parameter
+		modelParam = "all"
 	}
 
 	chatCacheMux.Lock()
 	defer chatCacheMux.Unlock()
 
 	if modelParam == "all" {
-		// Clear all model histories for this session
-		toDelete := []string{}
+		// Clear all model histories for this user
+		prefix := strconv.FormatInt(session.UserID, 10) + "_"
 		for key := range chatHistoryCache {
-			if strings.HasPrefix(key, sessionToken+"_") {
-				toDelete = append(toDelete, key)
+			if strings.HasPrefix(key, prefix) {
+				delete(chatHistoryCache, key)
 			}
-		}
-		for _, key := range toDelete {
-			delete(chatHistoryCache, key)
 		}
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": "All chats cleared"})
 	} else if modelParam != "" {
 		// Clear specific model history
-		modelCacheKey := getModelCacheKey(sessionToken, modelParam)
-		delete(chatHistoryCache, modelCacheKey)
+		delete(chatHistoryCache, chatHistoryKey(session.UserID, modelParam))
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Model chat cleared"})
 	} else {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Model parameter required in URL"})
 	}
 }
 
-// aichatGetCounts returns chat message counts for all models
+// aichatGetCounts returns chat message counts of the logged-in user for all models
 func (s *WebServer) aichatGetCounts(c *gin.Context) {
 	session := s.getWebSession(c)
 	if session == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
-		return
-	}
-
-	sessionToken := c.Query("sessionToken")
-	if sessionToken == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "sessionToken parameter required"})
 		return
 	}
 
@@ -448,7 +462,7 @@ func (s *WebServer) aichatGetCounts(c *gin.Context) {
 	}
 
 	// Get chat counts for all models
-	chatCounts := getAllChatHistoryCounts(sessionToken, availableModels)
+	chatCounts := getAllChatHistoryCounts(session.UserID, availableModels)
 
 	c.JSON(http.StatusOK, gin.H{
 		"counts": chatCounts,

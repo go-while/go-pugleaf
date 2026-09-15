@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +16,55 @@ import (
 
 // This file should contain the API endpoint functions from server.go:
 var LIMIT_listGroups = 128
+
+// maxOffsetArticles caps the OFFSET used by page-based article listings (deep OFFSET scans are slow).
+// Deeper pages must use the cursor parameter.
+const maxOffsetArticles = 12800
+
+// Limits of /api/v1/groups/:group/threads
+const (
+	apiThreadsDefaultLimit = 500
+	apiThreadsMaxLimit     = 2000
+	apiThreadsMaxOffset    = 1_000_000
+	apiStatsTTL            = 60 * time.Second
+)
+
+// clampOffsetPage returns page limited to 1..N so that (page-1)*pageSize <= maxOffset.
+func clampOffsetPage(page, pageSize, maxOffset int) int {
+	if page < 1 {
+		return 1
+	}
+	if pageSize < 1 {
+		return page
+	}
+	maxPage := maxOffset/pageSize + 1
+	if page > maxPage {
+		return maxPage
+	}
+	return page
+}
+
+// truncateRunes cuts s to at most n runes and appends "..." when it was cut.
+func truncateRunes(s string, n int) string {
+	if n < 0 {
+		n = 0
+	}
+	count := 0
+	for i := range s {
+		if count == n {
+			return s[:i] + "..."
+		}
+		count++
+	}
+	return s
+}
+
+// apiStatsCache holds the last /api/v1/stats response for apiStatsTTL.
+var apiStatsCache struct {
+	mu    sync.Mutex
+	at    time.Time
+	stats gin.H
+}
 
 // requireAPIEnabled is a middleware that checks if API is enabled
 func (s *WebServer) requireAPIEnabled() gin.HandlerFunc {
@@ -98,7 +148,10 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 
 	if p := c.Query("page"); p != "" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
-			page = parsed
+			page = clampOffsetPage(parsed, LIMIT_listGroups, maxOffsetArticles)
+			if page != parsed {
+				c.Header("X-Page-Clamped", "1")
+			}
 		}
 	}
 
@@ -233,23 +286,49 @@ func (s *WebServer) getGroupThreads(c *gin.Context) {
 		return // Error response already sent by checkGroupAccessAPI
 	}
 
+	limit := apiThreadsDefaultLimit
+	if v := c.Query("limit"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			limit = min(max(parsed, 1), apiThreadsMaxLimit)
+		}
+	}
+	offset := 0
+	if v := c.Query("offset"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			offset = min(max(parsed, 0), apiThreadsMaxOffset)
+		}
+	}
+
 	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
 		return
 	}
 	defer groupDB.Return()
-	threads, err := s.DB.GetThreads(groupDB)
+	threads, err := s.DB.GetThreadsPaged(groupDB, limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
+	if len(threads) == limit {
+		c.Header("X-Next-Offset", strconv.Itoa(offset+limit))
+	}
 	c.JSON(http.StatusOK, threads)
 }
 
-// getStats returns JSON statistics data for the API
+// getStats returns JSON statistics data for the API (cached for apiStatsTTL)
 func (s *WebServer) getStats(c *gin.Context) {
+	// The cached map is never modified after it is stored, so it can be served without the lock.
+	apiStatsCache.mu.Lock()
+	cached := apiStatsCache.stats
+	fresh := cached != nil && time.Since(apiStatsCache.at) < apiStatsTTL
+	apiStatsCache.mu.Unlock()
+	if fresh {
+		c.JSON(http.StatusOK, cached)
+		return
+	}
+
 	groups, err := s.DB.GetActiveNewsgroups()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get statistics"})
@@ -316,6 +395,10 @@ func (s *WebServer) getStats(c *gin.Context) {
 		stats["newest_article"] = newestArticle.Format(time.RFC3339)
 	}
 
+	apiStatsCache.mu.Lock()
+	apiStatsCache.stats = stats
+	apiStatsCache.at = time.Now()
+	apiStatsCache.mu.Unlock()
 	c.JSON(http.StatusOK, stats)
 }
 
@@ -361,12 +444,7 @@ func (s *WebServer) getArticlePreview(c *gin.Context) {
 	// Use ConvertToUTF8 to decode the text properly but without HTML escaping (since JS will handle HTML context)
 	// This is the same decoding used by PrintSanitized but without the html.EscapeString step
 	fullBodyDecoded := models.ConvertToUTF8(article.BodyText)
-	bodyPreview := ""
-	if len(fullBodyDecoded) > 500 {
-		bodyPreview = fullBodyDecoded[:500] + "..."
-	} else {
-		bodyPreview = fullBodyDecoded
-	}
+	bodyPreview := truncateRunes(fullBodyDecoded, 500)
 
 	response := gin.H{
 		"article_num": articleNum,

@@ -583,7 +583,9 @@ func NewDefaultConfig() *MainConfig {
 	return maincfg
 }
 
-// UpdateBadBots safely updates the global bad bots configuration
+// UpdateBadBots safely updates the global bad bots configuration.
+// Patterns are stored lowercase (the web middleware matches the lowercased User-Agent), and the
+// list is replaced by a new slice, never mutated, so readers may keep a copied slice header.
 func UpdateBadBots(badBotsStr string, blockEnabled bool) {
 	BadBotsMutex.Lock()
 	defer BadBotsMutex.Unlock()
@@ -592,20 +594,22 @@ func UpdateBadBots(badBotsStr string, blockEnabled bool) {
 
 	if badBotsStr != "" {
 		// Parse comma-separated list and trim whitespace
-		Default_BadBots = []string{}
+		patterns := []string{}
 		for _, pattern := range strings.Split(badBotsStr, ",") {
 			trimmed := strings.TrimSpace(pattern)
 			if trimmed != "" {
-				Default_BadBots = append(Default_BadBots, trimmed)
+				patterns = append(patterns, strings.ToLower(trimmed))
 			}
 		}
+		Default_BadBots = patterns
 		log.Printf("Updated BadBots list (%d patterns)", len(Default_BadBots))
 	}
 
 	log.Printf("Bot configuration updated: BlockBadBots=%t, patterns=%d", BlockBadBots, len(Default_BadBots))
 }
 
-// UpdateBadIPs safely updates the global bad IPs configuration
+// UpdateBadIPs safely updates the global bad IPs configuration.
+// The list is replaced by a new slice, never mutated, so readers may keep a copied slice header.
 func UpdateBadIPs(badIPsStr string, blockEnabled bool) error {
 	BadIPsMutex.Lock()
 	defer BadIPsMutex.Unlock()
@@ -621,19 +625,20 @@ func UpdateBadIPs(badIPsStr string, blockEnabled bool) error {
 			"185.191.171.0/24", // semrush
 		}
 
-		Default_BlockedIPs = make([]*net.IPNet, 0, len(defaultRanges))
+		blocked := make([]*net.IPNet, 0, len(defaultRanges))
 		for _, cidr := range defaultRanges {
 			_, ipNet, err := net.ParseCIDR(cidr)
 			if err != nil {
 				log.Printf("Warning: failed to parse default CIDR %s: %v", cidr, err)
 				continue
 			}
-			Default_BlockedIPs = append(Default_BlockedIPs, ipNet)
+			blocked = append(blocked, ipNet)
 		}
+		Default_BlockedIPs = blocked
 		log.Printf("Using default BlockedIPs list (%d ranges)", len(Default_BlockedIPs))
 	} else {
 		// Parse comma-separated list and trim whitespace
-		Default_BlockedIPs = []*net.IPNet{}
+		blocked := []*net.IPNet{}
 		for _, cidr := range strings.Split(badIPsStr, ",") {
 			trimmed := strings.TrimSpace(cidr)
 			if trimmed == "" {
@@ -657,8 +662,9 @@ func UpdateBadIPs(badIPsStr string, blockEnabled bool) error {
 				log.Printf("Warning: failed to parse CIDR %s: %v", trimmed, err)
 				continue
 			}
-			Default_BlockedIPs = append(Default_BlockedIPs, ipNet)
+			blocked = append(blocked, ipNet)
 		}
+		Default_BlockedIPs = blocked
 		log.Printf("Updated BlockedIPs list (%d ranges)", len(Default_BlockedIPs))
 	}
 

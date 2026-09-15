@@ -2,7 +2,6 @@ package web
 
 import (
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
 	"strings"
@@ -72,13 +71,7 @@ func (s *WebServer) profilePage(c *gin.Context) {
 		Success:             session.GetSuccess(),
 	}
 
-	// Load template
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/profile.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template Error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, "profile.html")
 }
 
 // profileUpdate handles profile updates
@@ -144,6 +137,13 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 	// Validate email
 	if email == "" {
 		session.SetError("Email is required")
+		c.Redirect(http.StatusSeeOther, "/profile")
+		return
+	}
+
+	// Validate display name (it ends up in the From: header of web posts)
+	if err := validateDisplayName(displayName); err != nil {
+		session.SetError(err.Error())
 		c.Redirect(http.StatusSeeOther, "/profile")
 		return
 	}

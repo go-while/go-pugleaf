@@ -2,7 +2,6 @@
 package web
 
 import (
-	"html/template"
 	"net/http"
 	"strconv"
 
@@ -37,10 +36,7 @@ func (s *WebServer) groupsPage(c *gin.Context) {
 		// Cache miss - fetch from database
 		groups, totalCount, err = s.DB.GetNewsgroupsPaginated(page, pageSize)
 		if err != nil {
-			// Load error template individually
-			tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/error.html"))
-			c.Header("Content-Type", "text/html")
-			tmpl.ExecuteTemplate(c.Writer, "base.html", gin.H{"Error": err.Error()})
+			s.renderPage(c, http.StatusOK, gin.H{"Error": err.Error()}, "error.html")
 			return
 		}
 
@@ -57,12 +53,5 @@ func (s *WebServer) groupsPage(c *gin.Context) {
 	}
 	data.GroupCount = totalCount
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/groups.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "groups.html", "pagination.html")
 }

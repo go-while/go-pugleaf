@@ -2,13 +2,16 @@
 package web
 
 import (
+	"errors"
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
@@ -71,7 +74,16 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	article := &models.Article{}
 	if isReply {
 		// Get the original article to extract subject and body for reply
-		if articleNum, err := strconv.ParseInt(replyToArticleNum, 10, 64); err == nil {
+		// Only open the group DB of an existing, active group: GetGroupDB creates files for unknown names
+		groupOK := processor.IsValidGroupName(prefilledNewsgroup)
+		if groupOK {
+			if ng, err := s.DB.GetActiveNewsgroupByName(prefilledNewsgroup); err != nil || ng == nil {
+				groupOK = false
+			}
+		}
+		if !groupOK {
+			log.Printf("[WEB]: SitePost reply prefill: newsgroup %q is not a valid active group", prefilledNewsgroup)
+		} else if articleNum, err := strconv.ParseInt(replyToArticleNum, 10, 64); err == nil {
 			// Get group database connection
 			if groupDB, err := s.DB.GetGroupDB(prefilledNewsgroup); err == nil {
 				defer groupDB.Return()
@@ -151,14 +163,8 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 		ReplySubject:          prefilledSubjectStr,
 	}
 
-	// Load and render the posting form template
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	// Render the posting form template
+	s.renderPage(c, http.StatusOK, data, "sitepost.html")
 }
 
 // sitePostSubmit handles the POST submission of new articles from web interface
@@ -187,12 +193,25 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	isReply := replyTo != "" && messageID != ""
 	var errors []string
 
+	// Header values end up in HeadersJSON (split on "\n" by the NNTP server): validate them
+	// unconditionally so the message is shown even when other errors exist.
+	if err := validatePostHeaders(subject, messageID, isReply); err != nil {
+		errors = append(errors, err.Error())
+	}
+	if strings.ContainsRune(body, 0) {
+		errors = append(errors, "Message body contains invalid characters")
+	}
+
 	abuseMail, err := s.DB.GetConfigValue(config.CFG_KEY_ABUSEMAIL)
 	if err != nil {
 		log.Printf("Warning: Failed to get AbuseMail config: %v", err)
 	}
 	if abuseMail == "" || abuseMail == "abuse@invalid.invalid" {
 		errors = append(errors, "System Abuse email is not configured. Please contact the administrator.")
+	}
+	if strings.ContainsAny(abuseMail, "\r\n") || strings.ContainsAny(processor.LocalNNTPHostname, "\r\n") {
+		log.Printf("[WEB]: SitePost: AbuseMail or NNTP hostname contains CR/LF, refusing to post")
+		errors = append(errors, "Server configuration error: invalid AbuseMail or hostname")
 	}
 
 	// Get max article size from database config
@@ -300,9 +319,13 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		errors = append(errors, "Failed to compute hashed username")
 	}
 	if len(errors) == 0 {
-		if err := s.DB.UpdateUserPostCount(session.User.ID, now); err != nil {
-			log.Printf("Failed to update user post count: %v", err)
+		// Atomic back-off check + post count update (concurrent submits can't bypass the back-off)
+		ok, err := s.DB.TryReserveWebPost(user.ID, now, int64(WebPostingBackOff.Seconds()))
+		if err != nil {
+			log.Printf("[WEB]: Failed to update user post count: %v", err)
 			errors = append(errors, "Failed to update post count")
+		} else if !ok {
+			errors = append(errors, fmt.Sprintf("You can only post once every %d seconds", int(WebPostingBackOff.Seconds())))
 		}
 	}
 
@@ -320,20 +343,13 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 			ReplyToMessageID:      messageID,
 		}
 
-		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
-		c.Header("Content-Type", "text/html")
-		err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-		if err != nil {
-			s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		}
+		s.renderPage(c, http.StatusOK, data, "sitepost.html")
 		return
 	}
-	//displayName := fmt.Sprintf("%s <noreply@pugleaf.net.invalid>", session.User.DisplayName)
-	displayName := strings.TrimSpace(session.User.DisplayName)
-	if displayName != "" && !strings.Contains(displayName, "<") && !strings.Contains(displayName, ">") {
-		displayName = fmt.Sprintf("%s <noreply@pugleaf.net.invalid>", session.User.DisplayName)
-	}
-	if displayName == "" {
+	displayName := sanitizePostDisplayName(session.User.DisplayName)
+	if displayName != "" {
+		displayName = displayName + " <noreply@pugleaf.net.invalid>"
+	} else {
 		// Fallback if display name is empty
 		displayName = fmt.Sprintf("Lorem Ipsum <oops@%s.invalid>", processor.LocalNNTPHostname)
 	}
@@ -423,12 +439,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 			ReplyToMessageID:      messageID,
 		}
 
-		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
-		c.Header("Content-Type", "text/html")
-		err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-		if err != nil {
-			s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		}
+		s.renderPage(c, http.StatusOK, data, "sitepost.html")
 		return
 	}
 
@@ -446,13 +457,44 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		WebPostMaxArticleSize: strconv.Itoa(maxArticleSize),
 	}
 
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
+	s.renderPage(c, http.StatusOK, data, "sitepost.html")
+}
+
+// postMessageIDRe matches a single message-id as accepted for replies.
+var postMessageIDRe = regexp.MustCompile(`^<[^<>\s@]+@[^<>\s@]+>$`)
+
+// validatePostHeaders rejects subject and reply message-id values that could inject header lines.
+func validatePostHeaders(subject, messageID string, isReply bool) error {
+	if strings.ContainsAny(subject, "\r\n\x00") {
+		return errors.New("Subject contains invalid characters")
 	}
+	if isReply && (len(messageID) > 250 || !postMessageIDRe.MatchString(messageID)) {
+		return errors.New("Invalid reply message-id")
+	}
+	return nil
+}
+
+// sanitizePostDisplayName makes a user display name safe for the From header:
+// control runes and <>" are dropped, whitespace is collapsed and the result is capped at 64 runes.
+func sanitizePostDisplayName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '<' || r == '>' || r == '"':
+			continue
+		case unicode.IsSpace(r):
+			b.WriteRune(' ')
+		case unicode.IsControl(r) || r == utf8.RuneError:
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	name := strings.Join(strings.Fields(b.String()), " ")
+	if utf8.RuneCountInString(name) > 64 {
+		name = strings.TrimSpace(string([]rune(name)[:64]))
+	}
+	return name
 }
 
 // generateMessageID creates a unique message ID for web-posted articles

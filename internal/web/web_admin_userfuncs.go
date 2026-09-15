@@ -64,8 +64,14 @@ func (s *WebServer) adminCreateUser(c *gin.Context) {
 		return
 	}
 
-	if len(password) < 12 {
-		session.SetError("Password must be at least 12 characters")
+	if err := validatePassword(password); err != nil {
+		session.SetError(err.Error())
+		c.Redirect(http.StatusSeeOther, "/admin?tab=users")
+		return
+	}
+
+	if err := validateDisplayName(displayName); err != nil {
+		session.SetError(err.Error())
 		c.Redirect(http.StatusSeeOther, "/admin?tab=users")
 		return
 	}

@@ -579,40 +579,39 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		ActiveTab:             activeTab,
 	}
 
-	// Load modular admin templates
-	tmpl := template.Must(template.New("").Funcs(template.FuncMap{
-		"since": func(t time.Time) int64 {
-			return int64(time.Since(t).Seconds())
-		},
-		"div": func(a, b int64) int64 {
-			if b == 0 {
-				return 0
-			}
-			return a / b
-		},
-	}).ParseFiles(
-		"web/templates/base.html",
-		"web/templates/admin_modular.html",
-		"web/templates/admin_users.html",
-		"web/templates/admin_newsgroups.html",
-		"web/templates/admin_providers.html",
-		"web/templates/admin_apitokens.html",
-		"web/templates/admin_aimodels.html",
-		"web/templates/admin_nntpusers.html",
-		"web/templates/admin_sitenews.html",
-		"web/templates/admin_sections.html",
-		"web/templates/admin_statistics.html",
-		"web/templates/admin_spam.html",
-		"web/templates/admin_settings.html",
-		"web/templates/admin_crons.html",
-		"web/templates/admin_postqueue.html",
-	))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		// Log the error but don't render error page since response has started
-		log.Printf("[ERROR] Template execution failed: %v", err)
-		// Write a simple error message that won't break the layout
-		c.Writer.WriteString(`<div class="alert alert-danger">Template Error: ` + err.Error() + `</div>`)
-	}
+	// Render the modular admin templates (cached under the "admin" name with adminTemplateFuncs)
+	s.renderTemplateSet(c, http.StatusOK, "admin", adminTemplateFuncs, "base.html", data, adminTemplateFiles...)
+}
+
+// adminTemplateFuncs are the template functions of the admin page. They hold no request state,
+// so the parsed set can be cached.
+var adminTemplateFuncs = template.FuncMap{
+	"since": func(t time.Time) int64 {
+		return int64(time.Since(t).Seconds())
+	},
+	"div": func(a, b int64) int64 {
+		if b == 0 {
+			return 0
+		}
+		return a / b
+	},
+}
+
+// adminTemplateFiles are the modular admin templates (names inside web/templates).
+var adminTemplateFiles = []string{
+	"base.html",
+	"admin_modular.html",
+	"admin_users.html",
+	"admin_newsgroups.html",
+	"admin_providers.html",
+	"admin_apitokens.html",
+	"admin_aimodels.html",
+	"admin_nntpusers.html",
+	"admin_sitenews.html",
+	"admin_sections.html",
+	"admin_statistics.html",
+	"admin_spam.html",
+	"admin_settings.html",
+	"admin_crons.html",
+	"admin_postqueue.html",
 }
