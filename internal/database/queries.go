@@ -1140,6 +1140,7 @@ func (db *Database) GetOverviewsPaginated(groupDB *GroupDB, lastArticleNum int64
 const query_InsertSection = `INSERT INTO sections (name, display_name, description, show_in_header, enable_local_spool, sort_order) VALUES (?, ?, ?, ?, ?, ?)`
 
 func (db *Database) InsertSection(s *models.Section) error {
+	defer uiCacheHeaderSections.invalidate()
 	_, err := db.mainDB.Exec(
 		query_InsertSection,
 		s.Name, s.DisplayName, s.Description, s.ShowInHeader, s.EnableLocalSpool, s.SortOrder,
@@ -1182,7 +1183,17 @@ func (db *Database) GetSectionByName(name string) (*models.Section, error) {
 // GetHeaderSections returns sections that should be shown in the header
 const query_GetHeaderSections = `SELECT id, name, display_name, description, show_in_header, enable_local_spool, sort_order, created_at FROM sections WHERE show_in_header = 1 ORDER BY sort_order, name`
 
+// GetHeaderSections is cached for uiCacheTTL; section writers in this package invalidate it.
+// Callers get a new slice of shared pointers and must not modify the sections.
 func (db *Database) GetHeaderSections() ([]*models.Section, error) {
+	out, err := uiCacheHeaderSections.get(uiCacheTTL, db.loadHeaderSections)
+	if err != nil {
+		return nil, err
+	}
+	return uiCacheCopy(out), nil
+}
+
+func (db *Database) loadHeaderSections() ([]*models.Section, error) {
 	rows, err := db.mainDB.Query(query_GetHeaderSections)
 	if err != nil {
 		return nil, err
@@ -1196,7 +1207,7 @@ func (db *Database) GetHeaderSections() ([]*models.Section, error) {
 		}
 		out = append(out, &s)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // --- Section Group Queries ---
@@ -1448,11 +1459,11 @@ const query_SearchNewsgroups = `
 		LIMIT ? OFFSET ?
 	` // SearchNewsgroups searches for newsgroups by name pattern with pagination
 
-// Search queries with description
+// Search queries with description (patterns come from escapeLike, hence ESCAPE)
 const query_SearchNewsgroupsWithDesc = `
 		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
 		FROM newsgroups
-		WHERE active = 1 AND (name LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE)
+		WHERE active = 1 AND (name LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\')
 		ORDER BY message_count DESC, name ASC
 		LIMIT ? OFFSET ?
 	`
@@ -1460,16 +1471,19 @@ const query_SearchNewsgroupsWithDesc = `
 const query_SearchNewsgroupsAdminWithDesc = `
 		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
 		FROM newsgroups
-		WHERE (name LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE)
+		WHERE (name LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\')
 		ORDER BY message_count DESC, name ASC
 		LIMIT ? OFFSET ?
 	`
 
 // Search queries name-only
+// A plain "name LIKE ? ESCAPE" (no COLLATE) lets SQLite apply the LIKE optimization to a
+// prefix pattern and range-scan idx_newsgroups_name_nocase (migration 0027). The unary +
+// on active keeps the planner from choosing idx_active, which visits every active group.
 const query_SearchNewsgroupsNameOnly = `
 		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
 		FROM newsgroups
-		WHERE active = 1 AND name LIKE ? COLLATE NOCASE
+		WHERE +active = 1 AND name LIKE ? ESCAPE '\'
 		ORDER BY message_count DESC, name ASC
 		LIMIT ? OFFSET ?
 	`
@@ -1477,7 +1491,7 @@ const query_SearchNewsgroupsNameOnly = `
 const query_SearchNewsgroupsAdminNameOnly = `
 		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
 		FROM newsgroups
-		WHERE name LIKE ? COLLATE NOCASE
+		WHERE name LIKE ? ESCAPE '\'
 		ORDER BY message_count DESC, name ASC
 		LIMIT ? OFFSET ?
 	`
@@ -1500,8 +1514,8 @@ func (db *Database) SearchNewsgroupsWithOptions(searchTerm string, limit, offset
 	var query string
 	var args []interface{}
 
-	// Use prefix matching (term%) instead of substring (%term%)
-	searchPattern := searchTerm + "%"
+	// Use prefix matching (term%) instead of substring (%term%); % and _ in the term are literal
+	searchPattern := escapeLike(searchTerm) + "%"
 
 	if searchDescription {
 		// Search both name and description
@@ -1558,27 +1572,45 @@ const query_CountSearchNewsgroups = `
 const query_CountSearchNewsgroupsWithDesc = `
 		SELECT COUNT(*)
 		FROM newsgroups
-		WHERE active = 1 AND (name LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE)
+		WHERE active = 1 AND (name LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\')
 	`
 
 const query_CountSearchNewsgroupsAdminWithDesc = `
 		SELECT COUNT(*)
 		FROM newsgroups
-		WHERE (name LIKE ? COLLATE NOCASE OR description LIKE ? COLLATE NOCASE)
+		WHERE (name LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\')
 	`
 
-// Count queries name-only
+// Count queries name-only (index notes: see query_SearchNewsgroupsNameOnly)
 const query_CountSearchNewsgroupsNameOnly = `
 		SELECT COUNT(*)
 		FROM newsgroups
-		WHERE active = 1 AND name LIKE ? COLLATE NOCASE
+		WHERE +active = 1 AND name LIKE ? ESCAPE '\'
 	`
 
 const query_CountSearchNewsgroupsAdminNameOnly = `
 		SELECT COUNT(*)
 		FROM newsgroups
-		WHERE name LIKE ? COLLATE NOCASE
+		WHERE name LIKE ? ESCAPE '\'
 	`
+
+// escapeLike escapes the LIKE wildcards % and _ and the escape character \ itself,
+// for patterns used with ESCAPE '\'.
+func escapeLike(s string) string {
+	if !strings.ContainsAny(s, `\%_`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' || c == '%' || c == '_' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
 
 func (db *Database) CountSearchNewsgroups(searchTerm string) (int, error) {
 	return db.CountSearchNewsgroupsWithOptions(searchTerm, false, false)
@@ -1586,8 +1618,8 @@ func (db *Database) CountSearchNewsgroups(searchTerm string) (int, error) {
 
 // CountSearchNewsgroupsWithOptions counts newsgroups with configurable options
 func (db *Database) CountSearchNewsgroupsWithOptions(searchTerm string, searchDescription bool, admin bool) (int, error) {
-	// Use prefix matching (term%) instead of substring (%term%)
-	searchPattern := searchTerm + "%"
+	// Use prefix matching (term%) instead of substring (%term%); % and _ in the term are literal
+	searchPattern := escapeLike(searchTerm) + "%"
 
 	var query string
 	var args []interface{}
@@ -3026,7 +3058,17 @@ func (db *Database) GetAllSiteNews() ([]*models.SiteNews, error) {
 const query_GetVisibleSiteNews = `SELECT id, subject, content, date_published, is_visible, created_at, updated_at
 			  FROM site_news WHERE is_visible = 1 ORDER BY date_published DESC`
 
+// GetVisibleSiteNews is cached for uiCacheTTL; the site news writers invalidate it.
+// Callers get a new slice of shared pointers and must not modify the entries.
 func (db *Database) GetVisibleSiteNews() ([]*models.SiteNews, error) {
+	news, err := uiCacheSiteNews.get(uiCacheTTL, db.loadVisibleSiteNews)
+	if err != nil {
+		return nil, err
+	}
+	return uiCacheCopy(news), nil
+}
+
+func (db *Database) loadVisibleSiteNews() ([]*models.SiteNews, error) {
 	rows, err := RetryableQuery(db.mainDB, query_GetVisibleSiteNews)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query visible site news: %w", err)
@@ -3046,6 +3088,10 @@ func (db *Database) GetVisibleSiteNews() ([]*models.SiteNews, error) {
 
 		item.IsVisible = isVisibleInt == 1
 		news = append(news, &item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate visible site news: %w", err)
 	}
 
 	return news, nil
@@ -3078,6 +3124,8 @@ const query_CreateSiteNews = `INSERT INTO site_news (subject, content, date_publ
 			  VALUES (?, ?, ?, ?)`
 
 func (db *Database) CreateSiteNews(news *models.SiteNews) error {
+	defer uiCacheSiteNews.invalidate()
+
 	isVisibleInt := 0
 	if news.IsVisible {
 		isVisibleInt = 1
@@ -3103,6 +3151,8 @@ const query_UpdateSiteNews = `UPDATE site_news SET subject = ?, content = ?, dat
 			  is_visible = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
 
 func (db *Database) UpdateSiteNews(news *models.SiteNews) error {
+	defer uiCacheSiteNews.invalidate()
+
 	isVisibleInt := 0
 	if news.IsVisible {
 		isVisibleInt = 1
@@ -3121,6 +3171,8 @@ func (db *Database) UpdateSiteNews(news *models.SiteNews) error {
 const query_DeleteSiteNews = `DELETE FROM site_news WHERE id = ?`
 
 func (db *Database) DeleteSiteNews(id int) error {
+	defer uiCacheSiteNews.invalidate()
+
 	_, err := RetryableExec(db.mainDB, query_DeleteSiteNews, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete site news ID %d: %w", id, err)
@@ -3132,6 +3184,8 @@ func (db *Database) DeleteSiteNews(id int) error {
 const query_ToggleSiteNewsVisibility = `UPDATE site_news SET is_visible = (1 - is_visible) WHERE id = ?`
 
 func (db *Database) ToggleSiteNewsVisibility(id int) error {
+	defer uiCacheSiteNews.invalidate()
+
 	_, err := RetryableExec(db.mainDB, query_ToggleSiteNewsVisibility, id)
 	if err != nil {
 		return fmt.Errorf("failed to toggle visibility for site news ID %d: %w", id, err)

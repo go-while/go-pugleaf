@@ -179,6 +179,8 @@ func (db *Database) SectionNameExistsExcluding(name string, excludeID int) (bool
 
 // CreateSection creates a new section
 func (db *Database) CreateSection(section *models.Section) error {
+	defer uiCacheHeaderSections.invalidate()
+
 	query := `
 		INSERT INTO sections (name, display_name, description, show_in_header, enable_local_spool, sort_order, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -209,6 +211,8 @@ func (db *Database) CreateSection(section *models.Section) error {
 
 // UpdateSection updates an existing section
 func (db *Database) UpdateSection(section *models.Section) error {
+	defer uiCacheHeaderSections.invalidate()
+
 	query := `
 		UPDATE sections
 		SET name = ?, display_name = ?, description = ?, show_in_header = ?, enable_local_spool = ?, sort_order = ?
@@ -243,6 +247,8 @@ func (db *Database) UpdateSection(section *models.Section) error {
 
 // DeleteSection deletes a section and all its group assignments
 func (db *Database) DeleteSection(id int) error {
+	defer uiCacheHeaderSections.invalidate()
+
 	return RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
 		// Delete section groups first (foreign key constraint)
 		_, err := tx.Exec("DELETE FROM section_groups WHERE section_id = ?", id)
@@ -313,6 +319,8 @@ func (db *Database) SectionGroupExists(sectionID int, newsgroupName string) (boo
 
 // CreateSectionGroup creates a new section group assignment
 func (db *Database) CreateSectionGroup(sg *models.SectionGroup) error {
+	defer uiCacheHeaderSections.invalidate()
+
 	query := `
 		INSERT INTO section_groups (section_id, newsgroup_name, group_description, sort_order, is_category_header, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
@@ -342,6 +350,8 @@ func (db *Database) CreateSectionGroup(sg *models.SectionGroup) error {
 
 // DeleteSectionGroup deletes a section group assignment
 func (db *Database) DeleteSectionGroup(id int) error {
+	defer uiCacheHeaderSections.invalidate()
+
 	query := `DELETE FROM section_groups WHERE id = ?`
 
 	result, err := RetryableExec(db.mainDB, query, id)
