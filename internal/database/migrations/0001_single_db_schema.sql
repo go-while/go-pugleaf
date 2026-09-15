@@ -5,12 +5,7 @@
 -- Based on EXACT original schemas from 0001_articles_schema.sql, 0001_overview_schema.sql, 0001_threads_schema.sql
 
 -- Performance optimizations for batch processing
-PRAGMA foreign_keys = ON;
 
-PRAGMA synchronous = OFF;    -- Maximum speed, minimal safety for testing
-PRAGMA journal_mode = DELETE; -- Back to rollback journal for testing
-PRAGMA cache_size = -64000;  -- 64MB cache size
-PRAGMA temp_store = MEMORY;  -- Use memory for temporary storage
 
 -- Articles table: stores full article data
 CREATE TABLE IF NOT EXISTS articles (

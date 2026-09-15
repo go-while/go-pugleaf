@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/mattn/go-sqlite3"
 )
 
 var GroupHashMap *GHmap // Global variable for group hash map
@@ -247,10 +249,16 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 		}
 	}()
 	go func() {
-		time.Sleep(1 * time.Minute)
+		wait := time.NewTimer(1 * time.Minute)
+		defer wait.Stop()
 		for {
+			select {
+			case <-db.StopChan:
+				return
+			case <-wait.C:
+			}
 			log.Printf("\n *** Database Statistics:\n ::: %+v", db.GetDatabaseStats())
-			time.Sleep(5 * time.Minute)
+			wait.Reset(5 * time.Minute)
 		}
 	}()
 	//log.Printf("Database initialized: %+v", db)
@@ -282,8 +290,12 @@ func (db *Database) initMainDB() error {
 		return fmt.Errorf("failed to create data directory: %w", err)
 	}
 
+	// Pragmas run on every pooled connection through the driver's ConnectHook
+	pragmas := db.buildMainConnPragmas()
+	mainConnPragmas.Store(&pragmas)
+
 	// Open main database
-	mainDB, err := sql.Open("sqlite3", dbPath)
+	mainDB, err := sql.Open(driverNameMain, dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to open main database: %w", err)
 	}
@@ -293,7 +305,7 @@ func (db *Database) initMainDB() error {
 	mainDB.SetMaxIdleConns(db.dbconfig.MaxIdleConns)
 	mainDB.SetConnMaxLifetime(db.dbconfig.ConnMaxLifetime)
 
-	// Test connection
+	// Test connection (the first connection also runs the pragmas)
 	if err := mainDB.Ping(); err != nil {
 		if cerr := mainDB.Close(); cerr != nil {
 			return fmt.Errorf("failed to ping main database: %w; also failed to close mainDB: %v", err, cerr)
@@ -301,26 +313,56 @@ func (db *Database) initMainDB() error {
 		return fmt.Errorf("failed to ping main database: %w", err)
 	}
 
-	// Apply SQLite pragmas for performance
-	if err := db.applySQLitePragmas(mainDB); err != nil {
-		if cerr := mainDB.Close(); cerr != nil {
-			return fmt.Errorf("failed to apply SQLite pragmas: %w; also failed to close mainDB: %v", err, cerr)
-		}
-		return fmt.Errorf("failed to apply SQLite pragmas: %w", err)
-	}
-
 	db.mainDB = mainDB
 	return nil
 }
 
-// applySQLitePragmas applies performance and configuration pragmas to SQLite connection
-func (db *Database) applySQLitePragmas(conn *sql.DB) error {
+// SQLite driver names used by the main DB and the group DBs. Both drivers run the
+// pragma list stored in mainConnPragmas / groupConnPragmas on every new pooled
+// connection (ConnectHook), so busy_timeout, foreign_keys, synchronous, ... are
+// active on all connections, not only on the first one.
+// progress.go, internal/nntp and cmd/* keep using the plain "sqlite3" driver.
+const (
+	driverNameMain  = "sqlite3_pugleaf_main"
+	driverNameGroup = "sqlite3_pugleaf_group"
+)
+
+var (
+	mainConnPragmas  atomic.Pointer[[]string]
+	groupConnPragmas atomic.Pointer[[]string]
+)
+
+func init() {
+	for name, list := range map[string]*atomic.Pointer[[]string]{
+		driverNameMain:  &mainConnPragmas,
+		driverNameGroup: &groupConnPragmas,
+	} {
+		sql.Register(name, &sqlite3.SQLiteDriver{
+			ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+				pragmas := list.Load()
+				if pragmas == nil {
+					return nil
+				}
+				for _, p := range *pragmas {
+					if _, err := conn.Exec(p, nil); err != nil {
+						return fmt.Errorf("pragma %q: %w", p, err)
+					}
+				}
+				return nil
+			},
+		})
+	}
+}
+
+// buildMainConnPragmas returns the per-connection pragmas of the main database.
+// busy_timeout comes first so the following pragmas already wait on locks.
+func (db *Database) buildMainConnPragmas() []string {
 	pragmas := []string{
-		fmt.Sprintf("PRAGMA cache_size = %d", db.dbconfig.CacheSize),
-		fmt.Sprintf("PRAGMA synchronous = %s", db.dbconfig.SyncMode),
-		fmt.Sprintf("PRAGMA temp_store = %s", db.dbconfig.TempStore),
-		"PRAGMA foreign_keys = ON",
 		"PRAGMA busy_timeout = 30000", // 30 seconds
+		"PRAGMA foreign_keys = ON",
+		fmt.Sprintf("PRAGMA synchronous = %s", db.dbconfig.SyncMode),
+		fmt.Sprintf("PRAGMA cache_size = %d", db.dbconfig.CacheSize),
+		fmt.Sprintf("PRAGMA temp_store = %s", db.dbconfig.TempStore),
 		"PRAGMA mmap_size = 0",
 	}
 
@@ -328,57 +370,41 @@ func (db *Database) applySQLitePragmas(conn *sql.DB) error {
 		pragmas = append(pragmas, "PRAGMA journal_mode = WAL")
 		pragmas = append(pragmas, "PRAGMA wal_autocheckpoint = 1000")
 	}
-
-	for _, pragma := range pragmas {
-		if _, err := conn.Exec(pragma); err != nil {
-			return fmt.Errorf("failed to execute pragma '%s': %w", pragma, err)
-		}
-	}
-
-	return nil
+	return pragmas
 }
 
-var PragmaMutex sync.RWMutex // Mutex to protect pragma execution
+var PragmaMutex sync.RWMutex // Mutex to protect building the group pragma list
 var PragmasGroupDB []string
 
-// applySQLitePragmas applies performance and configuration pragmas to SQLite connection
-func (db *Database) applySQLitePragmasGroupDB(conn *sql.DB) error {
-	PragmaMutex.RLock()
-	exists := len(PragmasGroupDB) > 0
-	PragmaMutex.RUnlock()
-	if !exists {
-		PragmaMutex.Lock()
-		exists = len(PragmasGroupDB) > 0
-		if !exists {
-			PragmasGroupDB = []string{
-				fmt.Sprintf("PRAGMA cache_size = %d", SQLITE_cache_size),
-				fmt.Sprintf("PRAGMA busy_timeout = %d", SQLITE_busy_timeout),
-				fmt.Sprintf("PRAGMA foreign_keys = %s", SQLITE_foreign_keys),
-				fmt.Sprintf("PRAGMA synchronous = %s", SQLITE_sync_mode),
-				fmt.Sprintf("PRAGMA temp_store = %s", SQLITE_temp_store),
-			}
-
-			if db.dbconfig.WALMode {
-				PragmasGroupDB = append(PragmasGroupDB, "PRAGMA journal_mode = WAL")
-				PragmasGroupDB = append(PragmasGroupDB, "PRAGMA wal_autocheckpoint = 2000")
-			}
-			exists = true
-		}
-		PragmaMutex.Unlock()
+// ensureGroupConnPragmas builds the per-connection pragma list of the group databases
+// once (from the SQLITE_* vars and WALMode) and stores it for the group driver's
+// ConnectHook. It runs before every group database open.
+func (db *Database) ensureGroupConnPragmas() {
+	if groupConnPragmas.Load() != nil {
+		return
 	}
-
-	if exists {
-		for _, pragma := range PragmasGroupDB {
-			if _, err := conn.Exec(pragma); err != nil {
-				return fmt.Errorf("failed to execute pragma '%s': %w", pragma, err)
-			}
-		}
-		return nil
-	} else {
-		log.Printf("Error: Pragmas not found?! using defaults...")
+	PragmaMutex.Lock()
+	defer PragmaMutex.Unlock()
+	if groupConnPragmas.Load() != nil {
+		return
 	}
+	if len(PragmasGroupDB) == 0 {
+		PragmasGroupDB = []string{
+			fmt.Sprintf("PRAGMA busy_timeout = %d", SQLITE_busy_timeout),
+			fmt.Sprintf("PRAGMA foreign_keys = %s", SQLITE_foreign_keys),
+			fmt.Sprintf("PRAGMA synchronous = %s", SQLITE_sync_mode),
+			fmt.Sprintf("PRAGMA cache_size = %d", SQLITE_cache_size),
+			fmt.Sprintf("PRAGMA temp_store = %s", SQLITE_temp_store),
+		}
 
-	return nil
+		if db.dbconfig.WALMode {
+			PragmasGroupDB = append(PragmasGroupDB, "PRAGMA journal_mode = WAL")
+			PragmasGroupDB = append(PragmasGroupDB, "PRAGMA wal_autocheckpoint = 2000")
+		}
+	}
+	pragmas := make([]string, len(PragmasGroupDB))
+	copy(pragmas, PragmasGroupDB)
+	groupConnPragmas.Store(&pragmas)
 }
 
 // sync default config providers to database
