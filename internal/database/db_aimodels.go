@@ -10,9 +10,6 @@ import (
 
 // GetActiveAIModels returns all active AI models ordered by sort_order
 func (db *Database) GetActiveAIModels() ([]*models.AIModel, error) {
-	db.MainMutex.RLock()
-	defer db.MainMutex.RUnlock()
-
 	query := `SELECT id, post_key, ollama_model_name, display_name, description, is_active, is_default, sort_order, created_at, updated_at
 	          FROM ai_models
 	          WHERE is_active = 1
@@ -43,9 +40,6 @@ func (db *Database) GetActiveAIModels() ([]*models.AIModel, error) {
 
 // GetDefaultAIModel returns the default AI model for new chats
 func (db *Database) GetDefaultAIModel() (*models.AIModel, error) {
-	db.MainMutex.RLock()
-	defer db.MainMutex.RUnlock()
-
 	query := `SELECT id, post_key, ollama_model_name, display_name, description, is_active, is_default, sort_order, created_at, updated_at
 	          FROM ai_models
 	          WHERE is_default = 1 AND is_active = 1
@@ -70,9 +64,6 @@ func (db *Database) GetDefaultAIModel() (*models.AIModel, error) {
 
 // GetFirstActiveAIModel returns the first active AI model as fallback
 func (db *Database) GetFirstActiveAIModel() (*models.AIModel, error) {
-	db.MainMutex.RLock()
-	defer db.MainMutex.RUnlock()
-
 	query := `SELECT id, post_key, ollama_model_name, display_name, description, is_active, is_default, sort_order, created_at, updated_at
 	          FROM ai_models
 	          WHERE is_active = 1
@@ -94,9 +85,6 @@ func (db *Database) GetFirstActiveAIModel() (*models.AIModel, error) {
 
 // GetAIModelByPostKey returns an AI model by its post_key
 func (db *Database) GetAIModelByPostKey(postKey string) (*models.AIModel, error) {
-	db.MainMutex.RLock()
-	defer db.MainMutex.RUnlock()
-
 	query := `SELECT id, post_key, ollama_model_name, display_name, description, is_active, is_default, sort_order, created_at, updated_at
 	          FROM ai_models
 	          WHERE post_key = ?`
@@ -116,9 +104,6 @@ func (db *Database) GetAIModelByPostKey(postKey string) (*models.AIModel, error)
 
 // CreateAIModel creates a new AI model
 func (db *Database) CreateAIModel(postKey, ollamaModelName, displayName, description string, isActive, isDefault bool, sortOrder int) (*models.AIModel, error) {
-	db.MainMutex.Lock()
-	defer db.MainMutex.Unlock()
-
 	query := `INSERT INTO ai_models (post_key, ollama_model_name, display_name, description, is_active, is_default, sort_order)
 	          VALUES (?, ?, ?, ?, ?, ?, ?)`
 
@@ -150,9 +135,6 @@ func (db *Database) CreateAIModel(postKey, ollamaModelName, displayName, descrip
 
 // UpdateAIModel updates an existing AI model
 func (db *Database) UpdateAIModel(id int, ollamaModelName, displayName, description string, isActive, isDefault bool, sortOrder int) error {
-	db.MainMutex.Lock()
-	defer db.MainMutex.Unlock()
-
 	log.Printf("Updating AI model ID %d: %s, %s, %s, active=%t, default=%t, sort_order=%d", id, ollamaModelName, displayName, description, isActive, isDefault, sortOrder)
 
 	query := `UPDATE ai_models
@@ -165,9 +147,6 @@ func (db *Database) UpdateAIModel(id int, ollamaModelName, displayName, descript
 
 // SetDefaultAIModel sets a model as default (and unsets others)
 func (db *Database) SetDefaultAIModel(id int) error {
-	db.MainMutex.Lock()
-	defer db.MainMutex.Unlock()
-
 	return RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
 		// First, unset all defaults
 		_, err := tx.Exec("UPDATE ai_models SET is_default = 0")
@@ -183,8 +162,6 @@ func (db *Database) SetDefaultAIModel(id int) error {
 
 // DeleteAIModel deletes an AI model (if it's not the last active one)
 func (db *Database) DeleteAIModel(id int) error {
-	db.MainMutex.Lock()
-	defer db.MainMutex.Unlock()
 	query := `DELETE FROM ai_models WHERE id = ?`
 	_, err := RetryableExec(db.mainDB, query, id)
 	return err
@@ -192,9 +169,6 @@ func (db *Database) DeleteAIModel(id int) error {
 
 // GetAllAIModels returns all AI models (for admin interface)
 func (db *Database) GetAllAIModels() ([]*models.AIModel, error) {
-	db.MainMutex.RLock()
-	defer db.MainMutex.RUnlock()
-
 	query := `SELECT id, post_key, ollama_model_name, display_name, description, is_active, is_default, sort_order, created_at, updated_at
 	          FROM ai_models
 	          ORDER BY sort_order ASC, display_name ASC`
