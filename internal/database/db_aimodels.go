@@ -8,8 +8,18 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-// GetActiveAIModels returns all active AI models ordered by sort_order
+// GetActiveAIModels returns all active AI models ordered by sort_order.
+// The result is cached for uiCacheTTL; the AI model writers invalidate it.
+// Callers get a new slice of shared pointers and must not modify the models.
 func (db *Database) GetActiveAIModels() ([]*models.AIModel, error) {
+	out, err := uiCacheActiveAIModels.get(uiCacheTTL, db.loadActiveAIModels)
+	if err != nil {
+		return nil, err
+	}
+	return uiCacheCopy(out), nil
+}
+
+func (db *Database) loadActiveAIModels() ([]*models.AIModel, error) {
 	query := `SELECT id, post_key, ollama_model_name, display_name, description, is_active, is_default, sort_order, created_at, updated_at
 	          FROM ai_models
 	          WHERE is_active = 1
@@ -104,6 +114,8 @@ func (db *Database) GetAIModelByPostKey(postKey string) (*models.AIModel, error)
 
 // CreateAIModel creates a new AI model
 func (db *Database) CreateAIModel(postKey, ollamaModelName, displayName, description string, isActive, isDefault bool, sortOrder int) (*models.AIModel, error) {
+	defer uiCacheActiveAIModels.invalidate()
+
 	query := `INSERT INTO ai_models (post_key, ollama_model_name, display_name, description, is_active, is_default, sort_order)
 	          VALUES (?, ?, ?, ?, ?, ?, ?)`
 
@@ -135,6 +147,8 @@ func (db *Database) CreateAIModel(postKey, ollamaModelName, displayName, descrip
 
 // UpdateAIModel updates an existing AI model
 func (db *Database) UpdateAIModel(id int, ollamaModelName, displayName, description string, isActive, isDefault bool, sortOrder int) error {
+	defer uiCacheActiveAIModels.invalidate()
+
 	log.Printf("Updating AI model ID %d: %s, %s, %s, active=%t, default=%t, sort_order=%d", id, ollamaModelName, displayName, description, isActive, isDefault, sortOrder)
 
 	query := `UPDATE ai_models
@@ -147,6 +161,8 @@ func (db *Database) UpdateAIModel(id int, ollamaModelName, displayName, descript
 
 // SetDefaultAIModel sets a model as default (and unsets others)
 func (db *Database) SetDefaultAIModel(id int) error {
+	defer uiCacheActiveAIModels.invalidate()
+
 	return RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
 		// First, unset all defaults
 		_, err := tx.Exec("UPDATE ai_models SET is_default = 0")
@@ -162,6 +178,8 @@ func (db *Database) SetDefaultAIModel(id int) error {
 
 // DeleteAIModel deletes an AI model (if it's not the last active one)
 func (db *Database) DeleteAIModel(id int) error {
+	defer uiCacheActiveAIModels.invalidate()
+
 	query := `DELETE FROM ai_models WHERE id = ?`
 	_, err := RetryableExec(db.mainDB, query, id)
 	return err
