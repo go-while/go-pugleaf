@@ -104,30 +104,10 @@ func (s *WebServer) getBaseTemplateData(c *gin.Context, title string) TemplateDa
 	// Add user information if logged in
 	if session := s.getWebSession(c); session != nil {
 		data.User = session.User
-		// Check if user is admin
-		if userModel, err := s.DB.GetUserByID(session.UserID); err == nil {
-			data.IsAdmin = s.isAdminUser(userModel)
-		}
+		data.IsAdmin = s.isAdminRequest(c)
 	}
 
 	return data
-}
-
-// isAdminUser checks if a user has admin permissions (helper for base template)
-func (s *WebServer) isAdminUser(user *models.User) bool {
-	if user.ID == 1 {
-		return true
-	}
-	permissions, err := s.DB.GetUserPermissions(user.ID)
-	if err != nil {
-		return false
-	}
-	for _, perm := range permissions {
-		if perm.Permission == "admin" {
-			return true
-		}
-	}
-	return false
 }
 
 // requireAdminAuth checks authentication and admin permissions for admin handlers
@@ -141,8 +121,7 @@ func (s *WebServer) requireAdminAuth(c *gin.Context) bool {
 	}
 
 	// Check admin permissions
-	currentUser, err := s.DB.GetUserByID(session.UserID)
-	if err != nil || !s.isAdmin(currentUser) {
+	if !s.isAdminRequest(c) {
 		session.SetError("Access denied")
 		c.Redirect(http.StatusSeeOther, "/profile")
 		return false
@@ -162,13 +141,7 @@ func (s *WebServer) requireAdminAuthJSON(c *gin.Context) bool {
 	}
 
 	// Check admin permissions
-	currentUser, err := s.DB.GetUserByID(session.UserID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load user"})
-		return false
-	}
-
-	if !s.isAdmin(currentUser) {
+	if !s.isAdminRequest(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
 		return false
 	}

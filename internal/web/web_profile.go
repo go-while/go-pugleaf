@@ -148,6 +148,13 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 		return
 	}
 
+	// Validate display name (it ends up in the From: header of web posts)
+	if err := validateDisplayName(displayName); err != nil {
+		session.SetError(err.Error())
+		c.Redirect(http.StatusSeeOther, "/profile")
+		return
+	}
+
 	// Validate current password
 	if !checkPassword(currentPassword, user.PasswordHash) {
 		session.SetError("Current password is incorrect")

@@ -9,7 +9,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"golang.org/x/crypto/bcrypt"
 )
+
+// loginDelay slows down every login attempt (simple brute-force protection).
+// Tests set it to 0.
+var loginDelay = 2 * time.Second
 
 // LoginPageData represents data for login page
 type LoginPageData struct {
@@ -22,11 +27,7 @@ type LoginPageData struct {
 func (s *WebServer) loginPage(c *gin.Context) {
 	// Check if user is already logged in
 	if user, exists := c.Get("user"); exists && user != nil {
-		redirectURL := c.Query("redirect")
-		if redirectURL == "" {
-			redirectURL = "/"
-		}
-		c.Redirect(http.StatusSeeOther, redirectURL)
+		c.Redirect(http.StatusSeeOther, safeRedirect(c.Query("redirect")))
 		return
 	}
 
@@ -40,10 +41,14 @@ func (s *WebServer) loginPage(c *gin.Context) {
 		errorMsg = "" // No error for normal logout
 	}
 
+	redirectURL := ""
+	if r := c.Query("redirect"); r != "" {
+		redirectURL = safeRedirect(r)
+	}
 	data := LoginPageData{
 		TemplateData: s.getBaseTemplateData(c, "Login"),
 		Error:        errorMsg,
-		RedirectURL:  c.Query("redirect"),
+		RedirectURL:  redirectURL,
 	}
 
 	// Load template individually
@@ -59,13 +64,9 @@ func (s *WebServer) loginPage(c *gin.Context) {
 func (s *WebServer) loginSubmit(c *gin.Context) {
 	username := strings.TrimSpace(c.PostForm("username"))
 	password := c.PostForm("password")
-	redirectURL := c.PostForm("redirect")
+	redirectURL := safeRedirect(c.PostForm("redirect"))
 
-	time.Sleep(2 * time.Second) // stupid brute-force protection
-
-	if redirectURL == "" {
-		redirectURL = "/"
-	}
+	time.Sleep(loginDelay) // stupid brute-force protection
 
 	// Validate input
 	if username == "" || password == "" {
@@ -73,47 +74,54 @@ func (s *WebServer) loginSubmit(c *gin.Context) {
 		return
 	}
 
+	// Find the user by email (contains @) or username
+	var user *models.User
+	var err error
+	if strings.Contains(username, "@") {
+		user, err = s.DB.GetUserByEmail(username)
+	} else {
+		user, err = s.DB.GetUserByUsername(username)
+	}
+	// Every failure below shows the same message, so the response does not reveal whether
+	// a username or email exists, is locked out or disabled.
+	if err != nil || user == nil {
+		// Spend the same bcrypt time as for a known user
+		dummyPasswordHash.once.Do(func() {
+			dummyPasswordHash.hash, _ = bcrypt.GenerateFromPassword([]byte("pugleaf-dummy-password"), bcrypt.DefaultCost)
+		})
+		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash.hash, []byte(password))
+		s.renderLoginError(c, "Invalid username/email or password", redirectURL)
+		log.Printf("[WEB]: Login failed for username/email: '%x' err='%v'", username, err)
+		return
+	}
+
 	// Check if user is locked out
-	lockedOut, err := s.DB.IsUserLockedOut(username)
+	lockedOut, err := s.DB.IsUserLockedOutByID(user.ID)
 	if err != nil {
 		s.renderLoginError(c, "Login error. Please try again.", redirectURL)
+		log.Printf("[WEB]: Login lockout check failed for user %d: %v", user.ID, err)
 		return
 	}
 	if lockedOut {
 		s.renderLoginError(c, "Invalid username/email or password", redirectURL)
-		log.Printf("Login locked out for username/email: '%x'", username)
+		log.Printf("[WEB]: Login locked out for username/email: '%x'", username)
 		return
-	}
-
-	// Try to find user by username or email
-	var user *models.User
-
-	// Check if username contains @ (email login)
-	if strings.Contains(username, "@") {
-		// Try to get user by email
-		user, err = s.DB.GetUserByEmail(username)
-		if err != nil {
-			s.DB.IncrementLoginAttempts(username)
-			s.renderLoginError(c, "Invalid username/email or password", redirectURL)
-			log.Printf("Login failed for email: '%x' err='%v'", username, err)
-			return
-		}
-	} else {
-		// Get user by username
-		user, err = s.DB.GetUserByUsername(username)
-		if err != nil {
-			s.DB.IncrementLoginAttempts(username)
-			s.renderLoginError(c, "Invalid username/email or password", redirectURL)
-			log.Printf("Login failed for username: '%x' err='%v'", username, err)
-			return
-		}
 	}
 
 	// Check password
 	if !checkPassword(password, user.PasswordHash) {
-		s.DB.IncrementLoginAttempts(username)
+		if err := s.DB.IncrementLoginAttemptsByID(user.ID); err != nil {
+			log.Printf("[WEB]: Failed to increment login attempts for user %d: %v", user.ID, err)
+		}
 		s.renderLoginError(c, "Invalid username/email or password", redirectURL)
-		log.Printf("Login failed for username: '%x' err='%v'", username, err)
+		log.Printf("[WEB]: Login failed for username/email: '%x' (wrong password)", username)
+		return
+	}
+
+	// Disabled users cannot log in
+	if user.Disabled > 0 {
+		s.renderLoginError(c, "Invalid username/email or password", redirectURL)
+		log.Printf("[WEB]: Login rejected for disabled user %d: '%x'", user.ID, username)
 		return
 	}
 
@@ -121,12 +129,13 @@ func (s *WebServer) loginSubmit(c *gin.Context) {
 	sessionID, err := s.DB.CreateUserSession(user.ID, c.ClientIP())
 	if err != nil {
 		s.renderLoginError(c, "Failed to create session", redirectURL)
-		log.Printf("Failed to create session for user: '%s' err='%v'", username, err)
+		log.Printf("[WEB]: Failed to create session for user: '%x' err='%v'", username, err)
 		return
 	}
 
 	// Set secure session cookie
 	s.setSessionCookie(c, sessionID)
+	s.clearRequestSession(c)
 
 	// Redirect to destination
 	c.Redirect(http.StatusSeeOther, redirectURL)
@@ -134,14 +143,24 @@ func (s *WebServer) loginSubmit(c *gin.Context) {
 
 // logout handles user logout
 func (s *WebServer) logout(c *gin.Context) {
+	// GET /logout must not be triggerable by other sites (CSRF): ignore cross-site requests
+	switch strings.ToLower(c.GetHeader("Sec-Fetch-Site")) {
+	case "cross-site", "same-site":
+		c.Redirect(http.StatusSeeOther, "/")
+		return
+	}
+
 	// Get current session to invalidate it
 	session := s.getWebSession(c)
 	if session != nil {
-		s.DB.InvalidateUserSession(session.UserID)
+		if err := s.DB.InvalidateUserSession(session.UserID); err != nil {
+			log.Printf("[WEB]: Failed to invalidate session of user %d: %v", session.UserID, err)
+		}
 	}
 
 	// Clear session cookie
 	s.clearSessionCookie(c)
+	s.clearRequestSession(c)
 
 	c.Redirect(http.StatusSeeOther, "/login?message=logged_out")
 }

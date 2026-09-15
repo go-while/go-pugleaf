@@ -11,19 +11,8 @@ import (
 // For non-admin users, only active groups are accessible
 // Admin users can access both active and inactive groups
 func (s *WebServer) checkGroupAccess(c *gin.Context, groupName string) bool {
-	// Check if user is admin
-	session := s.getWebSession(c)
-	var isAdminUser bool
-
-	if session != nil {
-		currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-		if err == nil {
-			isAdminUser = s.isAdmin(currentUser)
-		}
-	}
-
 	// Admin users can access any group
-	if isAdminUser {
+	if s.isAdminRequest(c) {
 		return true
 	}
 
@@ -43,19 +32,8 @@ func (s *WebServer) checkGroupAccess(c *gin.Context, groupName string) bool {
 // For non-admin users, only active groups are accessible
 // Admin users can access both active and inactive groups
 func (s *WebServer) checkGroupAccessAPI(c *gin.Context, groupName string) bool {
-	// Check if user is admin
-	session := s.getWebSession(c)
-	var isAdminUser bool
-
-	if session != nil {
-		currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-		if err == nil {
-			isAdminUser = s.isAdmin(currentUser)
-		}
-	}
-
 	// Admin users can access any group
-	if isAdminUser {
+	if s.isAdminRequest(c) {
 		return true
 	}
 
