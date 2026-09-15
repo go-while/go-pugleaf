@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -52,8 +53,26 @@ func newHTTPServer(addr string, h http.Handler) *http.Server {
 // rootHandler is the handler chain Start serves: cross-origin (CSRF) protection around the router.
 // Unsafe methods (POST, ...) are rejected with 403 when Sec-Fetch-Site or Origin show a
 // cross-origin browser request; requests without those headers (curl, API clients) pass.
+// Rejections are logged (at most one line per second), because a reverse proxy that rewrites Host
+// makes every browser POST fail the Origin/Host comparison.
 func (s *WebServer) rootHandler() http.Handler {
-	return http.NewCrossOriginProtection().Handler(s.Router)
+	cop := http.NewCrossOriginProtection()
+	cop.SetDenyHandler(http.HandlerFunc(crossOriginDenied))
+	return cop.Handler(s.Router)
+}
+
+// crossOriginLogLast is the UnixNano time of the last logged cross-origin rejection.
+var crossOriginLogLast atomic.Int64
+
+// crossOriginDenied answers a request rejected by CrossOriginProtection with 403 and logs it (sampled).
+func crossOriginDenied(w http.ResponseWriter, r *http.Request) {
+	now := time.Now().UnixNano()
+	last := crossOriginLogLast.Load()
+	if now-last >= int64(time.Second) && crossOriginLogLast.CompareAndSwap(last, now) {
+		log.Printf("[WEB]: cross-origin request rejected: method=%s path=%s origin=%q sec-fetch-site=%q host=%q",
+			r.Method, r.URL.Path, r.Header.Get("Origin"), r.Header.Get("Sec-Fetch-Site"), r.Host)
+	}
+	http.Error(w, "403 cross-origin request rejected", http.StatusForbidden)
 }
 
 // Start starts the web server with SSL support if configured.

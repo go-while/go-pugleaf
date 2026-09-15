@@ -208,7 +208,7 @@ func TestW1ServerTrustedProxies(t *testing.T) {
 
 func TestW1ServerCrossOrigin(t *testing.T) {
 	h := w0Srv.rootHandler()
-	do := func(header map[string]string) int {
+	do := func(header map[string]string) (int, string) {
 		req := httptest.NewRequest(http.MethodPost, "/admin/sections", strings.NewReader("name=w1csrf&display_name=x"))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.RemoteAddr = "192.0.2.10:1234"
@@ -217,18 +217,21 @@ func TestW1ServerCrossOrigin(t *testing.T) {
 		}
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-		return rec.Code
+		return rec.Code, rec.Body.String()
 	}
-	if code := do(map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"}); code != http.StatusForbidden {
-		t.Errorf("cross-site POST: status %d, want 403", code)
+	// Two rejections within a second: both get 403 (only the log line is sampled).
+	for i := 0; i < 2; i++ {
+		if code, body := do(map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"}); code != http.StatusForbidden || !strings.Contains(body, "cross-origin request rejected") {
+			t.Errorf("cross-site POST #%d: status %d body %q, want 403 from the deny handler", i, code, body)
+		}
 	}
-	if code := do(map[string]string{"Origin": "https://evil.example"}); code != http.StatusForbidden {
+	if code, _ := do(map[string]string{"Origin": "https://evil.example"}); code != http.StatusForbidden {
 		t.Errorf("POST with foreign Origin only: status %d, want 403", code)
 	}
-	if code := do(map[string]string{"Sec-Fetch-Site": "same-origin"}); code == http.StatusForbidden {
+	if code, _ := do(map[string]string{"Sec-Fetch-Site": "same-origin"}); code == http.StatusForbidden {
 		t.Errorf("same-origin POST: status 403")
 	}
-	if code := do(nil); code == http.StatusForbidden {
+	if code, _ := do(nil); code == http.StatusForbidden {
 		t.Errorf("POST without browser headers: status 403")
 	}
 }
@@ -313,9 +316,16 @@ func TestW1ServerStartShutdown(t *testing.T) {
 func TestW1ServerChatNoSessionIDInPage(t *testing.T) {
 	postKey := strings.ReplaceAll(w0Name("w1srvai"), ".", "_")
 	display := "W1 Server Model " + postKey
-	if _, err := w0DB(t).CreateAIModel(postKey, "w1-ollama", display, "test model", true, false, 0); err != nil {
+	model, err := w0DB(t).CreateAIModel(postKey, "w1-ollama", display, "test model", true, false, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
+	// Leave no active model behind for later tests of the shared DB.
+	t.Cleanup(func() {
+		if err := w0DB(t).DeleteAIModel(model.ID); err != nil {
+			t.Errorf("DeleteAIModel(%d): %v", model.ID, err)
+		}
+	})
 	user, cookie := w0NewUser(t, false)
 	other, otherCookie := w0NewUser(t, false)
 	t.Cleanup(func() {
