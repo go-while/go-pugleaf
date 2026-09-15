@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
-
 )
 
 const MaxOpenDatabases = 256
