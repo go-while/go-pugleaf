@@ -13,9 +13,14 @@ import (
 const MaxOpenDatabases = 256
 
 // GroupDB states. A GroupDB starts in state 0 (init) while its creator opens and
-// migrates the database. Workers are only added under GroupDB.mux while the state is
-// stateCREATED; closers set stateCLOSED under the same mutex (with Workers == 0) and
-// remove the entry from Database.groupDB before closing the *sql.DB outside the locks.
+// migrates the database.
+//
+// Locking: Database.MainMutex is always taken before GroupDB.mux, never the other way.
+// Workers are only added while holding MainMutex (read or write) and GroupDB.mux with
+// the state stateCREATED. Every state change away from init/CREATED (FAILED, CLOSED)
+// and the matching delete from Database.groupDB happen while holding MainMutex.Lock and
+// GroupDB.mux, so an entry found in the map under MainMutex.RLock is never CLOSED or
+// FAILED-and-removed before its worker is counted. The *sql.DB is closed outside the locks.
 const (
 	stateCREATED = 1 // open and usable
 	stateFAILED  = 2 // initialization failed, entry is removed from the map
@@ -89,33 +94,19 @@ func (db *Database) GetNewsgroupsDBbyID(newsgroupID int64) (*GroupDB, error) {
 	return nil, fmt.Errorf("failed to get newsgroup DB for ID: %d", newsgroupID)
 }
 
-// acquire adds a worker once the group database is CREATED. It waits while another
-// goroutine initializes the database and returns errGroupDBInitFailed or
-// errGroupDBClosed when the entry can no longer be used.
-func (dbs *GroupDB) acquire(deadline time.Time) error {
-	for {
-		dbs.mux.Lock()
-		switch dbs.state {
-		case stateCREATED:
-			if dbs.DB != nil {
-				dbs.Workers++
-				dbs.Idle = time.Now()
-				dbs.mux.Unlock()
-				return nil
-			}
-		case stateFAILED:
-			dbs.mux.Unlock()
-			return errGroupDBInitFailed
-		case stateCLOSED:
-			dbs.mux.Unlock()
-			return errGroupDBClosed
-		}
-		dbs.mux.Unlock()
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for group database '%s' initialization", dbs.Newsgroup)
-		}
-		time.Sleep(10 * time.Millisecond)
+// acquire adds a worker when the group database is CREATED and returns the state it
+// saw and whether a worker was added. The caller must hold db.MainMutex (read or
+// write lock) and must have found dbs in db.groupDB under that lock; this makes the
+// check and the increment atomic with respect to every closer.
+func (dbs *GroupDB) acquire() (state int64, ok bool) {
+	dbs.mux.Lock()
+	defer dbs.mux.Unlock()
+	if dbs.state == stateCREATED && dbs.DB != nil {
+		dbs.Workers++
+		dbs.Idle = time.Now()
+		return dbs.state, true
 	}
+	return dbs.state, false
 }
 
 // GetGroupDB returns groupDB for a specific newsgroup
@@ -127,18 +118,36 @@ func (db *Database) GetGroupDB(groupName string) (*GroupDB, error) {
 	}
 
 	deadline := time.Now().Add(60 * time.Second)
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		// fast path: existing entry
+	var waitingOn *GroupDB // entry seen in init on the previous iteration
+	for {
+		if waitingOn != nil {
+			// the entry we waited for failed to initialize: don't retry the init ourselves
+			waitingOn.mux.RLock()
+			failed := waitingOn.state == stateFAILED
+			waitingOn.mux.RUnlock()
+			if failed {
+				return nil, fmt.Errorf("failed to get group database %s: %w", groupName, errGroupDBInitFailed)
+			}
+			waitingOn = nil
+		}
+		// fast path: existing entry, acquired while still holding the read lock
 		db.MainMutex.RLock()
+		if db.groupDBsShutdown {
+			db.MainMutex.RUnlock()
+			return nil, fmt.Errorf("failed to get group database %s: %w", groupName, errGroupDBClosed)
+		}
 		groupDB := db.groupDB[groupName]
+		var state int64
+		var ok bool
+		if groupDB != nil {
+			state, ok = groupDB.acquire()
+		}
 		db.MainMutex.RUnlock()
 
 		if groupDB == nil {
 			// slow path: create the entry unless someone else did meanwhile
 			db.MainMutex.Lock() //mux #d2ef40e0
-			groupDB = db.groupDB[groupName]
-			if groupDB == nil {
+			if db.groupDB[groupName] == nil && !db.groupDBsShutdown {
 				groupDB = &GroupDB{
 					Newsgroup:    groupName,
 					NewsgroupPtr: db.Batch.GetNewsgroupPointer(groupName),
@@ -154,18 +163,26 @@ func (db *Database) GetGroupDB(groupName string) (*GroupDB, error) {
 				return groupDB, nil
 			}
 			db.MainMutex.Unlock() //mux #d2ef40e0
+			// created by someone else or shut down: look it up again
+			continue
 		}
 
-		err := groupDB.acquire(deadline)
-		if err == nil {
+		if ok {
 			return groupDB, nil
 		}
-		if !errors.Is(err, errGroupDBClosed) {
-			return nil, fmt.Errorf("failed to get group database %s: %w", groupName, err)
+		if state == stateFAILED {
+			return nil, fmt.Errorf("failed to get group database %s: %w", groupName, errGroupDBInitFailed)
 		}
-		lastErr = err // closed between lookup and acquire: look it up again
+		// init (or, defensively, CLOSED): wait and look it up again
+		if time.Now().After(deadline) {
+			if state == stateCLOSED {
+				return nil, fmt.Errorf("failed to get group database %s: %w", groupName, errGroupDBClosed)
+			}
+			return nil, fmt.Errorf("timeout waiting for group database '%s' initialization", groupName)
+		}
+		waitingOn = groupDB
+		time.Sleep(10 * time.Millisecond)
 	}
-	return nil, fmt.Errorf("failed to get group database %s: %w", groupName, lastErr)
 }
 
 // initGroupDB opens and migrates the database of a new map entry created by GetGroupDB.
@@ -175,20 +192,22 @@ func (db *Database) initGroupDB(groupDB *GroupDB) error {
 	var groupsDB *sql.DB
 
 	fail := func(err error) error {
+		db.MainMutex.Lock()
 		groupDB.mux.Lock()
-		groupDB.state = stateFAILED
+		if groupDB.state == 0 {
+			groupDB.state = stateFAILED
+		}
 		groupDB.DB = nil
+		if db.groupDB[groupName] == groupDB {
+			delete(db.groupDB, groupName)
+		}
 		groupDB.mux.Unlock()
+		db.MainMutex.Unlock()
 		if groupsDB != nil {
 			if cerr := groupsDB.Close(); cerr != nil {
 				log.Printf("[DATABASE] Failed to close groupsDB %s after init error: %v", groupName, cerr)
 			}
 		}
-		db.MainMutex.Lock()
-		if db.groupDB[groupName] == groupDB {
-			delete(db.groupDB, groupName)
-		}
-		db.MainMutex.Unlock()
 		return err
 	}
 
@@ -225,13 +244,23 @@ func (db *Database) initGroupDB(groupDB *GroupDB) error {
 	}
 
 	db.MainMutex.Lock()
-	db.openDBsNum++
-	db.MainMutex.Unlock()
-
 	groupDB.mux.Lock()
+	if groupDB.state != 0 || db.groupDB[groupName] != groupDB {
+		// Shutdown closed the entry while it was initializing (Shutdown leaves the
+		// *sql.DB of an entry in init to its creator)
+		groupDB.DB = nil
+		groupDB.mux.Unlock()
+		db.MainMutex.Unlock()
+		if cerr := groupsDB.Close(); cerr != nil {
+			log.Printf("[DATABASE] Failed to close groupsDB %s after shutdown during init: %v", groupName, cerr)
+		}
+		return fmt.Errorf("failed to get group database %s: %w", groupName, errGroupDBClosed)
+	}
 	groupDB.state = stateCREATED
 	groupDB.Idle = time.Now()
+	db.openDBsNum++
 	groupDB.mux.Unlock()
+	db.MainMutex.Unlock()
 
 	return nil
 }

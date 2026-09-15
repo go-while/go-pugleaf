@@ -40,6 +40,8 @@ type Database struct {
 	// Per-group database connections (cached)
 	groupDB    map[string]*GroupDB // map with open database pointers
 	openDBsNum int                 // Total number of open group databases
+	// groupDBsShutdown is set by Shutdown (guarded by MainMutex); GetGroupDB then fails
+	groupDBsShutdown bool
 
 	MainMutex sync.RWMutex
 

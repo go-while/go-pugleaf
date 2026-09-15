@@ -81,12 +81,109 @@ func TestW1SQLiteNewGroupDBIsWAL(t *testing.T) {
 }
 
 // Concurrent GetGroupDB/Return while idle cleanup closes every unused group DB must
-// never hand out a closed *sql.DB.
+// never hand out a closed *sql.DB and never fail.
 func TestW1SQLiteConcurrentAcquireAndCleanup(t *testing.T) {
 	db := w0DB(t)
+	w1SQLiteRunAcquireAndCleanup(t, db, "w1sqlite.conc", func() { db.cleanupIdleGroupsWith(0) })
+}
+
+// Same with the force path (openDBsNum >= limit closes regardless of idle time).
+func TestW1SQLiteConcurrentAcquireAndForceCleanup(t *testing.T) {
+	db := w0DB(t)
+	w1SQLiteRunAcquireAndCleanup(t, db, "w1sqlite.force", func() { db.cleanupGroupDBsWithLimit(time.Hour, 1) })
+}
+
+// ForceCloseGroupDB by one worker while others acquire the same groups.
+func TestW1SQLiteConcurrentAcquireAndForceClose(t *testing.T) {
+	db := w0DB(t)
+	names := make([]string, 4)
+	for i := range names {
+		names[i] = w0Name("w1sqlite.fclose")
+	}
+	var failures atomic.Int64
+	var firstErr atomic.Value
+	var wg sync.WaitGroup
+	for w := 0; w < 12; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 150; i++ {
+				name := names[(w+i)%len(names)]
+				g, err := db.GetGroupDB(name)
+				if err != nil {
+					failures.Add(1)
+					firstErr.CompareAndSwap(nil, fmt.Sprintf("GetGroupDB(%s): %v", name, err))
+					continue
+				}
+				var one int
+				if err := g.DB.QueryRow("SELECT 1").Scan(&one); err != nil {
+					failures.Add(1)
+					firstErr.CompareAndSwap(nil, fmt.Sprintf("SELECT 1 on %s: %v", name, err))
+				}
+				if w%2 == 0 {
+					if err := db.ForceCloseGroupDB(g); err != nil {
+						failures.Add(1)
+						firstErr.CompareAndSwap(nil, fmt.Sprintf("ForceCloseGroupDB(%s): %v", name, err))
+					}
+				} else {
+					g.Return()
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	if n := failures.Load(); n > 0 {
+		t.Fatalf("%d failures, first: %v", n, firstErr.Load())
+	}
+	db.cleanupIdleGroupsWith(0)
+}
+
+// Shutdown racing group DB creation leaves no open DB counted and no map entries,
+// and GetGroupDB fails with errGroupDBClosed afterwards. Uses its own Database value
+// (not OpenDatabase) sharing the test data root layout in a temp dir.
+func TestW1SQLiteShutdownDuringInit(t *testing.T) {
+	shared := w0DB(t)
+	cfg := *shared.dbconfig
+	cfg.DataDir = t.TempDir()
+	fresh := &Database{dbconfig: &cfg, groupDB: make(map[string]*GroupDB), Batch: shared.Batch}
+
+	const callers = 8
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			g, err := fresh.GetGroupDB(w0Name("w1sqlite.shut"))
+			if err == nil {
+				g.Return()
+			}
+		}()
+	}
+	close(start)
+	time.Sleep(2 * time.Millisecond)
+	if err := fresh.Shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+
+	fresh.MainMutex.RLock()
+	open, entries := fresh.openDBsNum, len(fresh.groupDB)
+	fresh.MainMutex.RUnlock()
+	if open != 0 || entries != 0 {
+		t.Fatalf("after Shutdown: openDBsNum=%d entries=%d, want 0 and 0", open, entries)
+	}
+	if _, err := fresh.GetGroupDB(w0Name("w1sqlite.shut")); !errors.Is(err, errGroupDBClosed) {
+		t.Fatalf("GetGroupDB after Shutdown: err=%v, want errGroupDBClosed", err)
+	}
+}
+
+func w1SQLiteRunAcquireAndCleanup(t *testing.T, db *Database, prefix string, cleanup func()) {
+	t.Helper()
 	names := make([]string, 8)
 	for i := range names {
-		names[i] = w0Name("w1sqlite.conc")
+		names[i] = w0Name(prefix)
 	}
 
 	stop := make(chan struct{})
@@ -100,7 +197,7 @@ func TestW1SQLiteConcurrentAcquireAndCleanup(t *testing.T) {
 				return
 			default:
 			}
-			db.cleanupIdleGroupsWith(0)
+			cleanup()
 			time.Sleep(time.Millisecond)
 		}
 	}()
@@ -140,6 +237,10 @@ func TestW1SQLiteConcurrentAcquireAndCleanup(t *testing.T) {
 }
 
 // When group DB initialization fails, all concurrent callers return an error.
+// A regular file sits where the group's hash directory belongs. createDirIfNotExists
+// returns nil for an existing path (it only checks os.Stat), so the failure comes
+// from SQLite opening "<file>/<group>.db" ("unable to open database file: not a
+// directory") during the first connection in migrateGroupDB.
 func TestW1SQLiteInitFailureWaitersReturn(t *testing.T) {
 	db := w0DB(t)
 	name := w0Name("w1sqlite.fail")

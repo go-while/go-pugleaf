@@ -50,6 +50,11 @@ func (db *Database) cleanupIdleGroups() {
 // Entries are marked CLOSED and removed under the locks; the *sql.DB is closed after
 // the locks are released.
 func (db *Database) cleanupIdleGroupsWith(idle time.Duration) {
+	db.cleanupGroupDBsWithLimit(idle, MaxOpenDatabases)
+}
+
+// cleanupGroupDBsWithLimit is cleanupIdleGroupsWith with maxOpen in place of MaxOpenDatabases (tests).
+func (db *Database) cleanupGroupDBsWithLimit(idle time.Duration, maxOpen int) {
 	type candidate struct {
 		name    string
 		groupDB *GroupDB
@@ -57,7 +62,7 @@ func (db *Database) cleanupIdleGroupsWith(idle time.Duration) {
 	}
 
 	db.MainMutex.RLock()
-	force := db.openDBsNum >= MaxOpenDatabases // TODO HARDCODED
+	force := db.openDBsNum >= maxOpen
 	candidates := make([]candidate, 0, len(db.groupDB))
 	for groupName, groupDB := range db.groupDB {
 		if groupDB == nil {
@@ -79,7 +84,7 @@ func (db *Database) cleanupIdleGroupsWith(idle time.Duration) {
 	var toClose []groupDBToClose
 	db.MainMutex.Lock()
 	for _, c := range candidates {
-		if force && db.openDBsNum <= MaxOpenDatabases/2 {
+		if force && db.openDBsNum <= maxOpen/2 {
 			break
 		}
 		if db.groupDB[c.name] != c.groupDB {
@@ -116,7 +121,7 @@ func (db *Database) cleanupIdleGroupsWith(idle time.Duration) {
 		}
 	}
 	if force {
-		log.Printf("Force closed %d databases due to exceeding limit (%d >= %d)", closedCount, openNow+len(toClose), MaxOpenDatabases)
+		log.Printf("Force closed %d databases due to exceeding limit (%d >= %d)", closedCount, openNow+len(toClose), maxOpen)
 	}
 }
 
@@ -127,16 +132,19 @@ func (db *Database) Shutdown() error {
 	// Close per-group databases first (thousands of them)
 	var toClose []groupDBToClose
 	db.MainMutex.Lock()
+	db.groupDBsShutdown = true
 	log.Printf("[DATABASE] Closing %d group databases...", len(db.groupDB))
 	for groupName, groupDB := range db.groupDB {
 		if groupDB == nil {
 			continue
 		}
 		groupDB.mux.Lock()
-		groupDB.state = stateCLOSED
-		if groupDB.DB != nil {
+		// An entry still initializing (state 0) keeps its *sql.DB: its creator sees
+		// CLOSED and closes it, so it is not closed under a running migration.
+		if groupDB.state != 0 && groupDB.DB != nil {
 			toClose = append(toClose, groupDBToClose{name: groupName, db: groupDB.DB})
 		}
+		groupDB.state = stateCLOSED
 		groupDB.mux.Unlock()
 	}
 	// Clear the group databases map
