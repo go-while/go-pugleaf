@@ -2,15 +2,15 @@
 package web
 
 import (
-	"errors"
 	"fmt"
 	"html/template"
 	"log"
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-contrib/secure"
@@ -28,11 +28,18 @@ type WebServer struct {
 	Config        *config.WebConfig
 	NNTP          *nntp.NNTPServer
 	templates     *template.Template
-	StartTime     time.Time       // Track server start time for uptime calculations
-	SectionsCache map[string]bool // In-memory cache of valid section names for route filtering
-	robotsTxtPath string          // Path to robots.txt file if it exists
-	CronManager   *CronJobManager // Background cron job manager
+	StartTime     time.Time                       // Track server start time for uptime calculations
+	sectionsCache atomic.Pointer[map[string]bool] // Valid section names for route filtering (replaced as a whole, never mutated)
+	robotsTxtPath string                          // Path to robots.txt file if it exists
+	CronManager   *CronJobManager                 // Background cron job manager (nil with -no-cronjobs)
 	CronEdit      bool
+
+	trustedProxyNets []*net.IPNet // reverse proxies whose X-Forwarded-* headers are trusted
+
+	httpServerMu sync.Mutex
+	httpServer   *http.Server  // set by Start, stopped by Shutdown
+	stopCh       chan struct{} // closed by Shutdown; background goroutines of the server stop on it
+	stopOnce     sync.Once
 }
 
 // TemplateData represents common template data
@@ -208,14 +215,12 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 
 	router := gin.Default()
 
-	// Configure Gin to trust reverse proxy headers
-	// Set trusted proxies for common reverse proxy setups (nginx, etc.)
+	// Client IPs come from X-Forwarded-For/X-Real-IP only when the peer is a trusted proxy
 	ReverseProxyAddr, err := db.GetConfigValue(config.CFG_KEY_REVERSEPROXY)
 	if err != nil {
-		log.Printf("Error getting ReverseProxyAddr: %v", err)
+		log.Printf("[WEB]: Error getting ReverseProxyAddr: %v", err)
 	}
-	addrs := strings.Replace(ReverseProxyAddr, ",", " ", -1)
-	router.SetTrustedProxies(strings.Fields(addrs))
+	trustedProxyNets := configureTrustedProxies(router, ReverseProxyAddr)
 
 	// Configure security headers based on SSL setup
 	secureConfig := secure.Config{
@@ -247,14 +252,15 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	}
 
 	server := &WebServer{
-		DB:            db,
-		Router:        router,
-		Config:        webconfig,
-		NNTP:          nntpconfig,
-		templates:     nil, // We'll handle templates individually
-		SectionsCache: make(map[string]bool),
-		CronManager:   cronmgr,
-		CronEdit:      cronEdit,
+		DB:               db,
+		Router:           router,
+		Config:           webconfig,
+		NNTP:             nntpconfig,
+		templates:        nil, // We'll handle templates individually
+		CronManager:      cronmgr,
+		CronEdit:         cronEdit,
+		trustedProxyNets: trustedProxyNets,
+		stopCh:           make(chan struct{}),
 	}
 
 	// Check if robots.txt file exists
@@ -269,8 +275,13 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	// Initialize sections cache
 	server.loadSectionsCache()
 
-	// Start the cron job manager
-	server.CronManager.StartCronManager()
+	// Start the cron job manager (nil with -no-cronjobs)
+	if server.CronManager != nil {
+		server.CronManager.StartCronManager()
+	}
+
+	// Expire idle AI chat histories and rate-limiter entries until Shutdown
+	go server.runChatCacheSweeper()
 
 	// Add reverse proxy middleware for handling X-Forwarded headers
 	router.Use(server.ReverseProxyMiddleware())
@@ -490,35 +501,29 @@ func (s *WebServer) setupRoutes() {
 	}
 }
 
-// Start starts the web server with SSL support if configured
-func (s *WebServer) Start() error {
-	addr := ":" + strconv.Itoa(s.Config.ListenPort)
-	s.StartTime = time.Now() // Set the start time for uptime calculations
-	if s.Config.SSL {
-		if s.Config.CertFile == "" || s.Config.KeyFile == "" {
-			return errors.New("SSL enabled but cert_file or key_file not specified in config")
-		}
-		log.Printf("Starting HTTPS server on %s", addr)
-		return s.Router.RunTLS(addr, s.Config.CertFile, s.Config.KeyFile)
-	} else {
-		log.Printf("Starting HTTP server on %s", addr)
-		return s.Router.Run(addr)
-	}
-}
-
 // Custom bot detection middleware
 func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Check IP blocking first
+		// Copy the settings under the read locks and never hold them across c.Next():
+		// UpdateBadBots/UpdateBadIPs would wait for the slowest request and block every new one.
+		// The update functions replace the slices instead of mutating them, so the copies stay valid.
 		config.BadIPsMutex.RLock()
-		if config.BlockBadIPs {
-			ip := net.ParseIP(c.ClientIP())
-			if ip != nil {
-				for _, ipNet := range config.Default_BlockedIPs {
+		blockBadIPs := config.BlockBadIPs
+		blockedIPs := config.Default_BlockedIPs
+		config.BadIPsMutex.RUnlock()
+
+		config.BadBotsMutex.RLock()
+		blockBadBots := config.BlockBadBots
+		badBots := config.Default_BadBots
+		config.BadBotsMutex.RUnlock()
+
+		// Check IP blocking first
+		if blockBadIPs && len(blockedIPs) > 0 {
+			clientIP := c.ClientIP()
+			if ip := net.ParseIP(clientIP); ip != nil {
+				for _, ipNet := range blockedIPs {
 					if ipNet.Contains(ip) {
-						config.BadIPsMutex.RUnlock()
-						// Log blocked IP
-						log.Printf("IP blocked: %s (matches %s)", c.ClientIP(), ipNet.String())
+						log.Printf("IP blocked: %s (matches %s)", clientIP, ipNet.String())
 						c.String(403, "403")
 						c.Abort()
 						return
@@ -526,108 +531,98 @@ func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
 				}
 			}
 		}
-		config.BadIPsMutex.RUnlock()
 
-		// Check bot detection
-		config.BadBotsMutex.RLock()
-		defer config.BadBotsMutex.RUnlock()
-		// Check if bot blocking is enabled (use global variable)
-		if !config.BlockBadBots {
-			// Bot blocking is disabled, allow all requests
-			c.Next()
-			return
-		}
-
-		// Check user agent against bad bot patterns (use global variable)
-		for _, pattern := range config.Default_BadBots {
-			if strings.Contains(strings.ToLower(c.GetHeader("User-Agent")), pattern) {
-				// Log bot request
-				log.Printf("Bot blocked: '%s' IP: '%s'", c.GetHeader("User-Agent"), c.ClientIP())
-				c.String(403, "403")
-				c.Abort()
-				return
+		// Check user agent against bad bot patterns (UpdateBadBots stores them lowercase)
+		if blockBadBots && len(badBots) > 0 {
+			ua := strings.ToLower(c.GetHeader("User-Agent"))
+			for _, pattern := range badBots {
+				if pattern != "" && strings.Contains(ua, pattern) {
+					log.Printf("Bot blocked: '%s' IP: '%s'", c.GetHeader("User-Agent"), c.ClientIP())
+					c.String(403, "403")
+					c.Abort()
+					return
+				}
 			}
 		}
 		c.Next()
 	}
 }
 
-// ReverseProxyMiddleware handles X-Forwarded headers when running behind a reverse proxy
+// configureTrustedProxies makes gin take the client IP from X-Forwarded-For/X-Real-IP only when the
+// direct peer is a configured reverse proxy (comma or whitespace separated IPs/CIDRs; empty or
+// all-invalid means DefaultReverseProxy). gin evaluates X-Forwarded-For right to left and ignores
+// invalid addresses. It returns the parsed networks for isTrustedPeer.
+func configureTrustedProxies(router *gin.Engine, addrs string) []*net.IPNet {
+	list, nets := parseTrustedProxyList(strings.Fields(strings.ReplaceAll(addrs, ",", " ")))
+	if len(list) == 0 {
+		list, nets = parseTrustedProxyList(DefaultReverseProxy)
+	}
+	if err := router.SetTrustedProxies(list); err != nil {
+		log.Printf("[WEB]: Error setting trusted proxies %v: %v", list, err)
+	}
+	router.ForwardedByClientIP = true
+	router.RemoteIPHeaders = []string{"X-Forwarded-For", "X-Real-IP"}
+	return nets
+}
+
+// parseTrustedProxyList parses IPs (as /32 or /128) and CIDRs, skipping invalid entries.
+func parseTrustedProxyList(entries []string) ([]string, []*net.IPNet) {
+	list := make([]string, 0, len(entries))
+	nets := make([]*net.IPNet, 0, len(entries))
+	for _, entry := range entries {
+		var ipNet *net.IPNet
+		if strings.Contains(entry, "/") {
+			_, n, err := net.ParseCIDR(entry)
+			if err != nil {
+				log.Printf("[WEB]: Ignoring invalid reverse proxy address '%s': %v", entry, err)
+				continue
+			}
+			ipNet = n
+		} else {
+			ip := net.ParseIP(entry)
+			if ip == nil {
+				log.Printf("[WEB]: Ignoring invalid reverse proxy address '%s'", entry)
+				continue
+			}
+			if ip4 := ip.To4(); ip4 != nil {
+				ipNet = &net.IPNet{IP: ip4, Mask: net.CIDRMask(32, 32)}
+			} else {
+				ipNet = &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}
+			}
+		}
+		list = append(list, entry)
+		nets = append(nets, ipNet)
+	}
+	return list, nets
+}
+
+// isTrustedPeer reports whether the direct peer is a configured reverse proxy.
+func (s *WebServer) isTrustedPeer(peer net.IP) bool {
+	if peer == nil {
+		return false
+	}
+	for _, ipNet := range s.trustedProxyNets {
+		if ipNet.Contains(peer) {
+			return true
+		}
+	}
+	return false
+}
+
+// ReverseProxyMiddleware detects HTTPS terminated by a trusted reverse proxy.
+// The client IP is resolved by gin (see configureTrustedProxies); RemoteAddr and Host are never rewritten.
 func (s *WebServer) ReverseProxyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Capture the immediate peer before any overrides
-		remoteHost, _, err := net.SplitHostPort(c.Request.RemoteAddr)
-		if err != nil {
-			remoteHost = c.Request.RemoteAddr // Fallback if no port
-		}
-
-		// Determine if the request came from a trusted proxy (private/loopback)
-		trustedProxy := isPrivateOrLoopbackIP(remoteHost)
-
-		// Determine HTTPS: direct TLS or forwarded by trusted proxy
-		isHTTPS := c.Request.TLS != nil
-		if !isHTTPS && trustedProxy && strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") {
-			isHTTPS = true
+		peer := net.ParseIP(c.RemoteIP())
+		isHTTPS := c.Request.TLS != nil ||
+			(s.isTrustedPeer(peer) && strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https"))
+		if isHTTPS {
 			c.Request.URL.Scheme = "https"
 		}
 		// Expose scheme result to handlers
 		c.Set("is_https", isHTTPS)
-
-		if trustedProxy {
-			// Handle X-Forwarded-For to get the real client IP
-			if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
-				// Take the first IP from the list (original client)
-				ips := strings.Split(xff, ",")
-				if len(ips) > 0 {
-					clientIP := strings.TrimSpace(ips[0])
-					c.Request.RemoteAddr = clientIP + ":0"
-				}
-			}
-
-			// Handle X-Real-IP as an alternative
-			if realIP := c.GetHeader("X-Real-IP"); realIP != "" {
-				c.Request.RemoteAddr = realIP + ":0"
-			}
-
-			// Handle X-Forwarded-Host to get the original host
-			if host := c.GetHeader("X-Forwarded-Host"); host != "" {
-				c.Request.Host = host
-			}
-		}
-
 		c.Next()
 	}
-}
-
-// isPrivateOrLoopbackIP returns true if the given host string is loopback or RFC1918/private
-func isPrivateOrLoopbackIP(host string) bool {
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	if ip.IsLoopback() {
-		return true
-	}
-	// RFC1918 IPv4 ranges
-	if ip4 := ip.To4(); ip4 != nil {
-		// 10.0.0.0/8
-		if ip4[0] == 10 {
-			return true
-		}
-		// 172.16.0.0/12
-		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
-			return true
-		}
-		// 192.168.0.0/16
-		if ip4[0] == 192 && ip4[1] == 168 {
-			return true
-		}
-	}
-	// IPv6 unique local addresses (fc00::/7)
-	if ip.To16() != nil && (ip[0]&0xfe) == 0xfc {
-		return true
-	}
-	return false
 }
 
 func (s *WebServer) ApacheLogFormat() gin.HandlerFunc {
@@ -654,13 +649,14 @@ func (s *WebServer) loadSectionsCache() {
 		return
 	}
 
-	// Clear and rebuild cache
-	s.SectionsCache = make(map[string]bool)
+	// Build a new map and publish it atomically; readers keep the old map until then
+	m := make(map[string]bool, len(sections))
 	for _, section := range sections {
-		s.SectionsCache[section.Name] = true
+		m[section.Name] = true
 	}
+	s.sectionsCache.Store(&m)
 
-	log.Printf("Loaded %d sections into cache", len(s.SectionsCache))
+	log.Printf("Loaded %d sections into cache", len(m))
 }
 
 // refreshSectionsCache reloads the sections cache
@@ -670,10 +666,33 @@ func (s *WebServer) refreshSectionsCache() {
 
 // isValidSection checks if a section name exists in the cache
 func (s *WebServer) isValidSection(sectionName string) bool {
-	if s.SectionsCache == nil {
-		return false
-	}
-	return s.SectionsCache[sectionName]
+	p := s.sectionsCache.Load()
+	return p != nil && (*p)[sectionName]
+}
+
+// knownNonSectionPaths are first path segments that are never section names
+var knownNonSectionPaths = map[string]bool{
+	"favicon.ico":      true,
+	"robots.txt":       true,
+	"static":           true,
+	"admin":            true,
+	"api":              true,
+	"login":            true,
+	"logout":           true,
+	"register":         true,
+	"profile":          true,
+	"groups":           true,
+	"hierarchies":      true,
+	"hierarchy":        true,
+	"search":           true,
+	"stats":            true,
+	"SiteHelp":         true,
+	"SiteNews":         true,
+	"sections":         true,
+	"demo":             true,
+	"ping":             true,
+	"aichat":           true,
+	"hierarchy-groups": true,
 }
 
 // sectionValidationMiddleware validates section names against the cache before routing
@@ -696,31 +715,7 @@ func (s *WebServer) sectionValidationMiddleware() gin.HandlerFunc {
 		potentialSection := pathSegments[0]
 
 		// Skip validation for known non-section paths
-		knownPaths := map[string]bool{
-			"favicon.ico":      true,
-			"robots.txt":       true,
-			"static":           true,
-			"admin":            true,
-			"api":              true,
-			"login":            true,
-			"logout":           true,
-			"register":         true,
-			"profile":          true,
-			"groups":           true,
-			"hierarchies":      true,
-			"hierarchy":        true,
-			"search":           true,
-			"stats":            true,
-			"SiteHelp":         true,
-			"SiteNews":         true,
-			"sections":         true,
-			"demo":             true,
-			"ping":             true,
-			"aichat":           true,
-			"hierarchy-groups": true,
-		}
-
-		if knownPaths[potentialSection] {
+		if knownNonSectionPaths[potentialSection] {
 			c.Next()
 			return
 		}

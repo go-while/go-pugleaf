@@ -2,6 +2,7 @@ package web
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -68,6 +69,9 @@ func NewCronJobManager(db *database.Database) *CronJobManager {
 
 // Start initializes and starts all active cron jobs
 func (cm *CronJobManager) StartCronManager() {
+	if cm == nil { // cron jobs disabled (-no-cronjobs)
+		return
+	}
 	//log.Printf("[CRON] Starting cron job manager...")
 	go func(cm *CronJobManager) {
 		for {
@@ -111,6 +115,9 @@ func (cm *CronJobManager) StartCronManager() {
 
 // Stop gracefully shuts down the cron job manager
 func (cm *CronJobManager) StopCronManager() {
+	if cm == nil { // cron jobs disabled (-no-cronjobs): nothing started, no MainWG slot taken
+		return
+	}
 	go func(cm *CronJobManager) {
 		//log.Printf("[CRON] Stopping cron job manager...")
 		close(cm.stopChannel)
@@ -217,6 +224,9 @@ func calculateNextRun(job *models.CronJob, now time.Time) (time.Time, error) {
 
 // GetJobOutput returns the last output lines for a specific cron job
 func (cm *CronJobManager) GetJobOutput(jobID int64) []string {
+	if cm == nil { // cron jobs disabled (-no-cronjobs)
+		return nil
+	}
 	cm.mutex.RLock()
 	job, exists := cm.jobs[jobID]
 	cm.mutex.RUnlock()
@@ -236,6 +246,9 @@ var ErrCronExists error = fmt.Errorf("cronExists")
 var ErrCronNotFound error = fmt.Errorf("cron404")
 
 func (cm *CronJobManager) StopJob(jobId int64) error {
+	if cm == nil {
+		return errors.New("cron jobs are disabled (-no-cronjobs)")
+	}
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
 	if job, exists := cm.jobs[jobId]; exists {

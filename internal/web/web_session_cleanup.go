@@ -5,11 +5,17 @@ import (
 	"time"
 )
 
-// StartSessionCleanup starts a background goroutine to clean up expired sessions
+// StartSessionCleanup starts a background goroutine to clean up expired sessions.
+// The goroutine stops on Shutdown.
 func (s *WebServer) StartSessionCleanup() {
 	go func() {
 		for {
-			time.Sleep(15 * time.Minute)
+			select {
+			case <-s.stopCh:
+				log.Printf("[WEB]: Session cleanup stopped")
+				return
+			case <-time.After(15 * time.Minute):
+			}
 			if err := s.DB.CleanupExpiredSessions(); err != nil {
 				log.Printf("Error cleaning up expired sessions: %v", err)
 			}
