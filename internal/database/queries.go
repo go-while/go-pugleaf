@@ -1141,7 +1141,7 @@ const query_InsertSection = `INSERT INTO sections (name, display_name, descripti
 
 func (db *Database) InsertSection(s *models.Section) error {
 	defer uiCacheHeaderSections.invalidate()
-	_, err := db.mainDB.Exec(
+	_, err := RetryableExec(db.mainDB,
 		query_InsertSection,
 		s.Name, s.DisplayName, s.Description, s.ShowInHeader, s.EnableLocalSpool, s.SortOrder,
 	)
@@ -1194,7 +1194,7 @@ func (db *Database) GetHeaderSections() ([]*models.Section, error) {
 }
 
 func (db *Database) loadHeaderSections() ([]*models.Section, error) {
-	rows, err := db.mainDB.Query(query_GetHeaderSections)
+	rows, err := RetryableQuery(db.mainDB, query_GetHeaderSections)
 	if err != nil {
 		return nil, err
 	}

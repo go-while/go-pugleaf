@@ -133,13 +133,19 @@ func TestW2DBPerfTTLCacheInvalidateWinsOverInflightLoad(t *testing.T) {
 
 func TestW2DBPerfTTLCacheConcurrent(t *testing.T) {
 	var c ttlCache[[]*int]
-	var wg sync.WaitGroup
+	var wg, running sync.WaitGroup
+	var gets atomic.Int64
 	stop := make(chan struct{})
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
+		running.Add(1)
 		go func() {
 			defer wg.Done()
+			first := true
 			for {
+				if !first {
+					gets.Add(1)
+				}
 				select {
 				case <-stop:
 					return
@@ -151,17 +157,31 @@ func TestW2DBPerfTTLCacheConcurrent(t *testing.T) {
 				})
 				if err != nil || len(v) != 1 || *v[0] != 1 {
 					t.Errorf("get = %v, %v", v, err)
+					if first {
+						running.Done()
+					}
 					return
 				}
 				_ = uiCacheCopy(v)
+				if first {
+					first = false
+					running.Done()
+				}
 			}
 		}()
 	}
-	for i := 0; i < 500; i++ {
+	// invalidate only while every reader is inside its loop, so gets and invalidations overlap
+	running.Wait()
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
 		c.invalidate()
+		time.Sleep(50 * time.Microsecond)
 	}
 	close(stop)
 	wg.Wait()
+	if n := gets.Load(); n < 100 {
+		t.Fatalf("readers did only %d gets while invalidating", n)
+	}
 }
 
 func TestW2DBPerfSiteNewsCacheInvalidation(t *testing.T) {
