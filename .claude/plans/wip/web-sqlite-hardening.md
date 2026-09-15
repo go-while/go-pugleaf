@@ -895,3 +895,49 @@ exit "$FAILS"
   - `SQLiteMaxRetryWait` is read on every retry: tools that change it must do so before any DB activity.
   - The cmd/web FetchRoutine goroutine is not in `db.WG` and may log group DB errors during exit.
   - `internal/web/README.md` still lists removed functions (`createWebSession`, `isAdminUser`).
+
+### Wave 2 (2 implementers from 72285ca, 2026-09-15)
+| Slice | Branch (worktree under `/tank0/claude/trees/go-pugleaf/`) | Commits | Review | Merge |
+|----|----|----|----|----|
+| w2-templates | `worktree-agent-a1fdabf6f696a853e` | 6101472 | MERGE (minor notes only) | 21191ab |
+| w2-dbperf | `worktree-agent-af547bc9d754b7844` | a087478 | MERGE (2 optional minors) | e16b00e |
+
+- The orchestrator fixed the two w2-dbperf minors inline in 8cc6ebe: `InsertSection` and `loadHeaderSections` now
+  use the Retryable helpers, and `TestW2DBPerfTTLCacheConcurrent` invalidates only while all readers run.
+- **w2-templates:** all 37 parse sites go through `loadTemplates`/`renderPage`/`renderTemplateSet`
+  (`web_templates.go`) with the same template files, data and status codes (400 for login/register errors, the
+  given code in `renderError`, 200 elsewhere). `renderError` cannot recurse (`c.String` fallback). Worktree e2e:
+  24/25 (E21 belonged to w2-dbperf); E24 1084.59 req/s at load 6.5.
+- **w2-dbperf:**
+  - 30s TTL caches with a generation counter for visible site news, header sections and active AI models; every
+    writer in the database package invalidates.
+  - Search uses `LIKE ? ESCAPE '\'` and the non-admin name-only queries use `+active = 1`.
+  - EXPLAIN QUERY PLAN: name search and count now run `SEARCH ... USING INDEX idx_newsgroups_name_nocase
+    (name>? AND name<?)` (before: `idx_active` search + temp B-tree, admin `SCAN ... idx_message_count`); the
+    description variants are unchanged.
+  - After 0009, the overview queries use `idx_articles_hide_article_num` and the spam queries
+    `idx_articles_spam_hide`; message-id lookups keep `sqlite_autoindex_articles_1`; no plan became a SCAN.
+  - The reviewer confirmed identical search results for 20 terms (mixed case, non-ASCII, `\`, empty), except that
+    `_` is now literal.
+  - Worktree e2e: `SUMMARY pass=25 fail=0`.
+- **Checks on 8cc6ebe:** gofmt lists only the known baseline files; vet, build, `go test -race` (database, web,
+  history, nntp, processor, expire-news, history-rebuild) and `./build_webserver.sh` PASS.
+- **Additional behaviour changes to report:**
+  1. Templates are parsed once per process: template edits need a restart, or `PUGLEAF_DEV_TEMPLATES=1` while
+     developing.
+  2. Page titles are escaped text: a subject with `<b>` shows literally, `&amp;` shows as `&amp;`.
+  3. HTML responses are `text/html; charset=utf-8`. A template error gives the full 500 error page (never a partial
+     page); AI chat template errors use the site error page.
+  4. Site news, header sections and active AI models are cached for 30s per process. Changes made through the web
+     admin show immediately; changes from other processes (rslight-importer, direct SQL) within 30s.
+  5. Group search: `%` and `_` are literal characters (prefix matching as before).
+  6. Migrations: main 0027 adds `idx_newsgroups_name_nocase` and drops `idx_name`. Group 0009 drops
+     `idx_articles_message_id`, `idx_articles_hide`, `idx_articles_spam` when each group DB is first opened by the
+     new code: a one-time delay proportional to the index size on very large groups.
+- **Deferred to leftovers:**
+  - The template cache key records only whether a FuncMap is used, not which one (only the admin page uses one);
+    a future call site must use a distinct name.
+  - The 500 page shows the template error text, as most pages did before.
+  - The DB-error `error.html` pages in groups/hierarchies still answer 200.
+  - Without `sqlite_stat1`, the thread_cache child query (`thread_cache.go:290`) walks `idx_articles_hide_date`
+    instead of rowid lookups (existing behaviour; `ANALYZE` changes the plan).
