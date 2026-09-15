@@ -941,3 +941,69 @@ exit "$FAILS"
   - The DB-error `error.html` pages in groups/hierarchies still answer 200.
   - Without `sqlite_stat1`, the thread_cache child query (`thread_cache.go:290`) walks `idx_articles_hide_date`
     instead of rowid lookups (existing behaviour; `ANALYZE` changes the plan).
+
+---
+
+## Outcome
+
+- **Done 2026-09-15.** Integration branch `plan-web-sqlite-hardening` (tip 9a586cf, from `testing-001` @ 0f27e76)
+  merged into `testing-001` with `--no-ff` as **03d0178** after the user's OK. Not pushed.
+- **Commits on the integration branch** (first parent): ec49c42 wave 0 · 21ee361 w1-server · 36ba59c w1-api ·
+  d871556 w1-auth · b084d72 w1-sqlite · 72285ca wave-1 note · 21191ab w2-templates · e16b00e w2-dbperf ·
+  8cc6ebe w2-dbperf review follow-ups · 9a586cf wave-2 note. 65 files, +5774/−1450 (3248 lines of tests).
+- **Worktrees and branches** (left in place for the user to clean up):
+
+  | Slice | Worktree | Branch | Tip |
+  |----|----|----|----|
+  | w1-server | `/tank0/claude/trees/go-pugleaf/agent-ad775f2d908a6a483` | `worktree-agent-ad775f2d908a6a483` | 7d7e0ba |
+  | w1-api | `/tank0/claude/trees/go-pugleaf/agent-aaa5ffc7b67a44945` | `worktree-agent-aaa5ffc7b67a44945` | c1c158f |
+  | w1-auth | `/tank0/claude/trees/go-pugleaf/agent-a2f51973cbba640e7` | `worktree-agent-a2f51973cbba640e7` | 600e0e1 |
+  | w1-sqlite | `/tank0/claude/trees/go-pugleaf/agent-ab1679615bd992f08` | `worktree-agent-ab1679615bd992f08` | 60d52b2 |
+  | w2-templates | `/tank0/claude/trees/go-pugleaf/agent-a1fdabf6f696a853e` | `worktree-agent-a1fdabf6f696a853e` | 6101472 |
+  | w2-dbperf | `/tank0/claude/trees/go-pugleaf/agent-af547bc9d754b7844` | `worktree-agent-af547bc9d754b7844` | a087478 |
+
+  Also left: the branch `plan-web-sqlite-hardening`; scratch dirs `data-test-web-sqlite-hardening`,
+  `data-test-ab-base`, `data-test-upgrade` in the main checkout (gitignored) and `data-test-*` dirs in each worktree.
+- **Verification** (`pugleaf-verifier` on the main checkout @ 9a586cf):
+  - `gofmt -l ./cmd ./internal` lists only `internal/database/embedded_migrations.go` and
+    `internal/web/web_admin_provider.go`; `go vet ./...`, `go build ./...`, `go test -race -count=1` over the
+    seven packages from `## Checks`, a `-count=3` flake run of database and web, and `./build_webserver.sh`: PASS.
+  - e2e `PORT=18981 DATA=./data-test-web-sqlite-hardening scripts/test-web-hardening.sh`:
+    `SUMMARY pass=25 fail=0`, `E22` 0 races. The log has 0 `DATA RACE`, 0 `panic:`, 0 FOREIGN KEY or
+    constraint errors, 0 retry give-ups. The baseline binary (ec49c42) scores `pass=5 fail=20` with the known
+    panics at `web_apitokens.go:40` and `cronjobs.go:74`.
+  - Throughput, back to back with `ab -n 3000 -c 10` (medians of 3; the final build ran at the higher load):
+
+    | path | baseline ec49c42 | final 9a586cf | ratio |
+    |----|----|----|----|
+    | `/groups` | 518.72 req/s | 1770.40 req/s | 3.41 |
+    | `/` | 560.11 req/s | 1946.01 req/s | 3.47 |
+
+  - Upgrade path: the final binary on a copy of data written by the baseline binary. Main migration 0027 applied
+    (`idx_newsgroups_name_nocase` present, `idx_name` gone); the old group DB went from `journal_mode=delete` to
+    `wal` with group migration 0009 applied and the three indexes gone; `foreign_key_check` empty; login,
+    `/profile`, `/groups`, search, `/smokesec/` and the API overview returned 200/303 as expected; clean shutdown.
+  - Production `data/cfg/pugleaf.sq3` was unchanged before and after (mtime and size).
+- **Behaviour changes to report:** decisions 1–9 in `## Context`, plus the lists in `## Progress` (wave 0: `-data`;
+  wave 1: 8 items; wave 2: 6 items). The ones that affect a deployment first:
+  1. `cmd/web` honors `-data` (it always used `./data`).
+  2. Client IP only from trusted proxies (`ReverseProxyAddr`, default loopback + RFC1918); a reverse proxy must
+     pass `Host` through or browser POSTs get 403 (logged).
+  3. `PRAGMA foreign_keys=ON` is effective on every connection (cascades now happen). Suggested before deploying:
+     `PRAGMA foreign_key_check;` on a copy of the production main DB.
+  4. Group DBs switch to WAL and drop three indexes on their first open by the new code (one-time cost).
+  5. Templates are parsed once per process (restart after template edits, or `PUGLEAF_DEV_TEMPLATES=1`).
+- **Leftovers / known issues** (candidates for a queued follow-up plan):
+  - Out of scope from the start: hashing `users.session_id` at rest; main DB `MaxOpenConns` tuning;
+    `SanitizeGroupName` `.`→`_` file-name collisions; linking the API preview endpoint to `APIEnabled`.
+  - `cmd/nntp-fetcher/main.go:138` hardcodes `NewProgressDB("data/progress.db")` (ignores `-data`).
+  - Existing rows with CR/LF injected into `From`/`Subject`/message-id before this plan are not cleaned (the
+    validation only blocks new posts); worth an audit of production web posts.
+  - Wave 1: shutdown waits only 10s for running handlers; concurrent AI chat sends overwrite stored history;
+    `TryReserveWebPost` charges the back-off when the post queue is full; `getStats` cache has no singleflight;
+    unused `database.HandleThreadTreeAPI` calls GetGroupDB for any name; `defer groupDB.Return()` inside the
+    sitePostSubmit reply loop; dead `initializeThreadCacheSimple` REPLACE into thread_cache would cascade;
+    `SQLiteMaxRetryWait` must be set before DB activity; cmd/web FetchRoutine is not in `db.WG`;
+    `internal/web/README.md` lists removed functions.
+  - Wave 2: template cache key does not distinguish FuncMaps; 500 pages show template error text; DB-error
+    `error.html` pages in groups/hierarchies answer 200; thread_cache child query plan without `ANALYZE`.
