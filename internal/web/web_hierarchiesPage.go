@@ -2,7 +2,6 @@
 package web
 
 import (
-	"html/template"
 	"net/http"
 	"sort"
 	"strconv"
@@ -38,10 +37,7 @@ func (s *WebServer) hierarchiesPage(c *gin.Context) {
 
 	hierarchies, totalCount, err := s.DB.GetHierarchiesPaginated(page, LIMIT_hierarchiesPage, sortBy)
 	if err != nil {
-		// Load error template individually
-		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/error.html"))
-		c.Header("Content-Type", "text/html")
-		tmpl.ExecuteTemplate(c.Writer, "base.html", gin.H{"Error": err.Error()})
+		s.renderPage(c, http.StatusOK, gin.H{"Error": err.Error()}, "error.html")
 		return
 	}
 
@@ -54,14 +50,7 @@ func (s *WebServer) hierarchiesPage(c *gin.Context) {
 		SortBy:       sortBy,
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/hierarchies.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "hierarchies.html", "pagination.html")
 }
 
 // hierarchyGroupsPage displays all newsgroups within a specific hierarchy
@@ -89,10 +78,7 @@ func (s *WebServer) hierarchyGroupsPage(c *gin.Context) {
 
 	groups, totalCount, err := s.DB.GetNewsgroupsByHierarchy(hierarchyName, page, LIMIT_hierarchyGroupsPage, sortBy)
 	if err != nil {
-		// Load error template individually
-		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/error.html"))
-		c.Header("Content-Type", "text/html")
-		tmpl.ExecuteTemplate(c.Writer, "base.html", gin.H{"Error": err.Error()})
+		s.renderPage(c, http.StatusOK, gin.H{"Error": err.Error()}, "error.html")
 		return
 	}
 
@@ -106,14 +92,7 @@ func (s *WebServer) hierarchyGroupsPage(c *gin.Context) {
 		SortBy:        sortBy,
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/hierarchy_groups.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "hierarchy_groups.html", "pagination.html")
 }
 
 // adminUpdateHierarchies updates the hierarchy counts and structure
@@ -262,14 +241,7 @@ func (s *WebServer) hierarchyTreePage(c *gin.Context) {
 		AtMaxDepth:     atMaxDepth,
 	}
 
-	// Load template
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/hierarchy_tree.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "hierarchy_tree.html", "pagination.html")
 }
 
 // getHierarchyLevel returns sub-hierarchies and groups for a given hierarchy level with pagination

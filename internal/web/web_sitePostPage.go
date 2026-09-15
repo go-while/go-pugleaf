@@ -4,7 +4,6 @@ package web
 import (
 	"errors"
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
 	"regexp"
@@ -164,14 +163,8 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 		ReplySubject:          prefilledSubjectStr,
 	}
 
-	// Load and render the posting form template
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	// Render the posting form template
+	s.renderPage(c, http.StatusOK, data, "sitepost.html")
 }
 
 // sitePostSubmit handles the POST submission of new articles from web interface
@@ -350,12 +343,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 			ReplyToMessageID:      messageID,
 		}
 
-		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
-		c.Header("Content-Type", "text/html")
-		err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-		if err != nil {
-			s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		}
+		s.renderPage(c, http.StatusOK, data, "sitepost.html")
 		return
 	}
 	displayName := sanitizePostDisplayName(session.User.DisplayName)
@@ -451,12 +439,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 			ReplyToMessageID:      messageID,
 		}
 
-		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
-		c.Header("Content-Type", "text/html")
-		err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-		if err != nil {
-			s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		}
+		s.renderPage(c, http.StatusOK, data, "sitepost.html")
 		return
 	}
 
@@ -474,13 +457,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		WebPostMaxArticleSize: strconv.Itoa(maxArticleSize),
 	}
 
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "sitepost.html")
 }
 
 // postMessageIDRe matches a single message-id as accepted for replies.

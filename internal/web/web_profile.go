@@ -2,7 +2,6 @@ package web
 
 import (
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
 	"strings"
@@ -72,13 +71,7 @@ func (s *WebServer) profilePage(c *gin.Context) {
 		Success:             session.GetSuccess(),
 	}
 
-	// Load template
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/profile.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template Error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, "profile.html")
 }
 
 // profileUpdate handles profile updates

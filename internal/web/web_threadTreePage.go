@@ -2,7 +2,6 @@
 package web
 
 import (
-	"html/template"
 	"log"
 	"net/http"
 	"strconv"
@@ -167,14 +166,7 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 		"CacheHit":            treeResponse.CacheHit,
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/thread-tree.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "thread-tree.html")
 }
 
 // sectionThreadTreePage displays a thread in tree view format within a section
@@ -252,14 +244,7 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 		"CacheHit":            treeResponse.CacheHit,
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/thread-tree.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "thread-tree.html")
 }
 
 // threadTreeDemoPage serves the tree view demo page

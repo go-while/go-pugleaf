@@ -2,7 +2,6 @@
 package web
 
 import (
-	"html/template"
 	"log"
 	"net/http"
 	"strconv"
@@ -167,12 +166,5 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 		"ThreadRootNum":       threadRoot, // For pagination URLs
 	}
 
-	// Load template
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/thread.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "thread.html")
 }

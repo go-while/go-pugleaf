@@ -1,7 +1,6 @@
 package web
 
 import (
-	"html/template"
 	"log"
 	"net/http"
 	"strings"
@@ -51,13 +50,7 @@ func (s *WebServer) loginPage(c *gin.Context) {
 		RedirectURL:  redirectURL,
 	}
 
-	// Load template individually
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/login.html"))
-	c.Header("Content-Type", "text/html")
-	err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template Error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, "login.html")
 }
 
 // loginSubmit processes login form submission
@@ -177,11 +170,5 @@ func (s *WebServer) renderLoginError(c *gin.Context, errorMsg, redirectURL strin
 		RedirectURL:  redirectURL,
 	}
 
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/login.html"))
-	c.Header("Content-Type", "text/html")
-	c.Status(http.StatusBadRequest)
-	err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template Error", err.Error())
-	}
+	s.renderPage(c, http.StatusBadRequest, data, "login.html")
 }

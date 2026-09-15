@@ -2,7 +2,6 @@ package web
 
 import (
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
 	"strings"
@@ -43,12 +42,7 @@ func (s *WebServer) registerPage(c *gin.Context) {
 		TemplateData: s.getBaseTemplateData(c, "Register"),
 	}
 
-	// Load template individually
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/register.html"))
-	c.Header("Content-Type", "text/html")
-	if err := tmpl.ExecuteTemplate(c.Writer, "base.html", data); err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template Error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, "register.html")
 }
 
 // registerSubmit processes registration form submission
@@ -189,11 +183,5 @@ func (s *WebServer) renderRegisterError(c *gin.Context, errorMsg, username, emai
 		Email:        email,
 	}
 
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/register.html"))
-	c.Header("Content-Type", "text/html")
-	c.Status(http.StatusBadRequest)
-	err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template Error", err.Error())
-	}
+	s.renderPage(c, http.StatusBadRequest, data, "register.html")
 }

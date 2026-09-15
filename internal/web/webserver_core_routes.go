@@ -44,7 +44,7 @@ type WebServer struct {
 
 // TemplateData represents common template data
 type TemplateData struct {
-	Title               template.HTML
+	Title               string
 	CurrentTime         string
 	Port                int
 	NNTPtcpPort         int

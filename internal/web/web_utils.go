@@ -2,7 +2,6 @@
 package web
 
 import (
-	"html/template"
 	"log"
 	"net/http"
 	"time"
@@ -86,7 +85,7 @@ func (s *WebServer) getBaseTemplateData(c *gin.Context, title string) TemplateDa
 	}
 
 	data := TemplateData{
-		Title:               template.HTML(title),
+		Title:               title,
 		CurrentTime:         time.Now().Format("2006-01-02 15:04:05"),
 		Port:                s.GetPort(),
 		NNTPtcpPort:         s.NNTPGetTCPPort(),
@@ -160,27 +159,17 @@ func (s *WebServer) renderError(c *gin.Context, statusCode int, message string, 
 	}
 	log.Printf("[ERROR]:internal/web/server.go: Error %d: %s - %s", statusCode, message, errstring)
 
-	// Load template individually to avoid engine setup issues
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/error.html"))
-	c.Header("Content-Type", "text/html")
-	c.Status(statusCode)
-	err := tmpl.ExecuteTemplate(c.Writer, "base.html", errorData)
-	if err != nil {
-		log.Printf("Error rendering error template: %v", err)
+	// Render the error page directly (not via renderPage): if its own template set fails,
+	// fall back to plain text instead of recursing into renderError.
+	if err := writeTemplateSet(c, statusCode, "page", nil, "base.html", errorData, "base.html", "error.html"); err != nil {
+		log.Printf("[WEB]: Error rendering error template: %v", err)
 		c.String(statusCode, "Error: %s - %s", message, errstring)
 	}
 }
 
 // renderTemplate renders a template with base template data
 func (s *WebServer) renderTemplate(c *gin.Context, templateName string, data interface{}) {
-	// Load template individually to avoid engine setup issues
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/"+templateName))
-	c.Header("Content-Type", "text/html")
-	err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		log.Printf("Error rendering template %s: %v", templateName, err)
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, templateName)
 }
 
 // GetGroupCount returns the total number of active newsgroups
