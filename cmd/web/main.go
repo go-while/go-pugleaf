@@ -481,6 +481,7 @@ func main() {
 	if !noCronjobs && server.CronManager != nil {
 		db.WG.Add(1)
 	}
+	server.StartSessionCleanup() // stops on server.Shutdown
 	// Set up cross-platform signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt) // Cross-platform (Ctrl+C on both Windows and Linux)
@@ -509,6 +510,13 @@ func main() {
 	case <-updateFileChan:
 		log.Printf("[WEB]: Update file detected, initiating graceful shutdown for update...")
 	}
+
+	// Stop accepting web requests and wait (bounded) for active ones
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[WEB]: web server shutdown: %v", err)
+	}
+	cancelShutdown()
 
 	// Stop NNTP server if running
 	if nntpServer != nil {

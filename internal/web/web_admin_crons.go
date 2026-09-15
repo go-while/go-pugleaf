@@ -11,6 +11,9 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
+// cronJobsDisabledMsg is shown when the server runs with -no-cronjobs (CronManager is nil)
+const cronJobsDisabledMsg = "Cron jobs are disabled on this instance"
+
 // adminCreateCronJob creates a new cron job
 func (s *WebServer) adminCreateCronJob(c *gin.Context) {
 	if !s.requireAdminAuth(c) {
@@ -230,6 +233,11 @@ func (s *WebServer) adminViewCronJobLog(c *gin.Context) {
 		return
 	}
 
+	if s.CronManager == nil {
+		c.String(http.StatusServiceUnavailable, cronJobsDisabledMsg)
+		return
+	}
+
 	// Get the cron job
 	cronJob, err := s.DB.GetCronJobByID(id)
 	if err != nil {
@@ -302,6 +310,12 @@ func (s *WebServer) adminStopCronJob(c *gin.Context) {
 	}
 
 	session := s.getWebSession(c)
+
+	if s.CronManager == nil {
+		session.SetError(cronJobsDisabledMsg)
+		c.Redirect(http.StatusSeeOther, "/admin?tab=crons")
+		return
+	}
 
 	// Get cron job ID
 	cronIDStr := c.PostForm("cron_id")

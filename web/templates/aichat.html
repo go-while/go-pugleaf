@@ -220,7 +220,6 @@ const charCount = document.getElementById('char-count');
 const modelSelect = document.getElementById('model-select');
 const activeModelName = document.getElementById('active-model-name');
 const activeModelDescription = document.getElementById('active-model-description');
-const sessionToken = "{{.SessionToken}}"; // Strong session token from backend
 
 // Available models data from backend
 const availableModels = {};
@@ -240,7 +239,7 @@ function loadInitialChatHistory() {
   fetch(`/aichat/history/${currentModel}`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sessionToken: sessionToken})
+    body: JSON.stringify({})
   })
   .then(r => r.json())
   .then(data => {
@@ -354,7 +353,7 @@ function updateActiveModelInfo(modelKey) {
 
 function updateModelSelectCounts() {
   // Update the dropdown options with current message counts
-  fetch(`/aichat/counts?sessionToken=${sessionToken}`)
+  fetch('/aichat/counts')
   .then(r => r.json())
   .then(data => {
     if (data.counts) {
@@ -387,7 +386,7 @@ function switchModel() {
   fetch(`/aichat/history/${newModel}`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sessionToken: sessionToken})
+    body: JSON.stringify({})
   })
   .then(r => r.json())
   .then(data => {
@@ -440,7 +439,6 @@ function sendMessage() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       message: msg,
-      sessionToken: sessionToken,
       model: currentModel
     })
   })
@@ -476,9 +474,7 @@ function clearCurrentModel() {
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      sessionToken: '{{.SessionToken}}'
-    })
+    body: JSON.stringify({})
   })
   .then(response => response.json())
   .then(data => {
@@ -508,9 +504,7 @@ function clearAllModels() {
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      sessionToken: '{{.SessionToken}}'
-    })
+    body: JSON.stringify({})
   })
   .then(response => response.json())
   .then(data => {
