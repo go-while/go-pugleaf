@@ -3,6 +3,7 @@ package web
 
 import (
 	"html/template"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -44,11 +45,18 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 		return
 	}
 
+	// Check group access (exists + active, admin bypass) before opening any group DB:
+	// GetGroupDB creates the database file for unknown names.
+	if !s.checkGroupAccessAPI(c, groupName) {
+		return // Error response already sent by checkGroupAccessAPI
+	}
+
 	// Get group database
 	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
+		log.Printf("[WEB]: thread-tree API: GetGroupDB(%q) failed: %v", groupName, err)
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to get group database: " + err.Error(),
+			"error": "Failed to build thread tree",
 		})
 		return
 	}
@@ -66,7 +74,7 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 	// Override with query parameters if provided
 	if maxDepthStr := c.Query("max_depth"); maxDepthStr != "" {
 		if maxDepth, err := strconv.Atoi(maxDepthStr); err == nil {
-			options.MaxDepth = maxDepth
+			options.MaxDepth = min(max(maxDepth, 0), 50)
 		}
 	}
 
@@ -77,8 +85,9 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 	// Get tree view
 	response, err := s.DB.GetThreadTreeView(groupDB, threadRoot, options)
 	if err != nil {
+		log.Printf("[WEB]: thread-tree API: group %q root %d: %v", groupName, threadRoot, err)
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to get tree view: " + err.Error(),
+			"error": "Failed to build thread tree",
 		})
 		return
 	}
@@ -171,7 +180,9 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 // sectionThreadTreePage displays a thread in tree view format within a section
 func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 	section := c.Param("section")
-	group := c.Param("group")
+	// The group parameter is the full group name, like in the other section routes
+	groupName := c.Param("group")
+	group := groupName
 	threadRootStr := c.Param("threadRoot")
 
 	// Validate section
@@ -180,8 +191,10 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 		return
 	}
 
-	// Construct full group name
-	groupName := section + "." + group
+	// Section + group membership check before opening any group DB
+	if _, ok := s.sectionGroupAllowed(c, section, groupName); !ok {
+		return // Error response already sent by sectionGroupAllowed
+	}
 
 	threadRoot, err := strconv.ParseInt(threadRootStr, 10, 64)
 	if err != nil {

@@ -29,16 +29,17 @@ func (s *WebServer) APIAuthRequired() gin.HandlerFunc {
 
 		// Validate token
 		apiToken, err := s.DB.ValidateAPIToken(token)
-		if err != nil {
+		if err != nil || apiToken == nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
 			c.Abort()
 			return
 		}
 
 		// Update usage statistics (non-blocking)
+		tokenID := apiToken.ID
 		go func() {
-			if err := s.DB.UpdateTokenUsage(apiToken.ID); err != nil {
-				log.Printf("Failed to update token usage: %v", err)
+			if err := s.DB.UpdateTokenUsage(tokenID); err != nil {
+				log.Printf("[API]: Failed to update token usage: %v", err)
 			}
 		}()
 

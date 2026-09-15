@@ -37,7 +37,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 
 	if p := c.Query("page"); p != "" && p != "1" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 1 {
-			page = parsed
+			page = clampOffsetPage(parsed, LIMIT_groupPage, maxOffsetArticles)
 		}
 	}
 	// Check for cursor parameter (more efficient than page-based)
@@ -166,13 +166,22 @@ func (s *WebServer) incrementSpam(c *gin.Context) {
 		return
 	}
 
-	// Check if user has already flagged this article
-	alreadyFlagged, err := s.DB.HasUserFlaggedSpam(user.ID, group, articleNum)
+	// Non-admins may only flag articles in existing, active groups
+	// (FlagArticleSpamByUser opens the group DB, which creates it for unknown names).
+	if !s.isAdmin(user) {
+		if ng, err := s.DB.GetActiveNewsgroupByName(group); err != nil || ng == nil {
+			session.SetError("The requested newsgroup does not exist or is not active")
+			c.Redirect(http.StatusSeeOther, "/groups")
+			return
+		}
+	}
+
+	// Record the flag and increment the spam counter once per user (atomic)
+	flagged, err := s.DB.FlagArticleSpamByUser(user.ID, group, articleNum)
 	if err != nil {
-		log.Printf("Error checking user spam flag: %v", err)
-		// Continue anyway - don't block the user
-	} else if alreadyFlagged {
-		log.Printf("DEBUG: User %d already flagged article %d in group %s", user.ID, articleNum, group)
+		log.Printf("[WEB]: Error flagging spam group=%s article=%d user=%d: %v", group, articleNum, user.ID, err)
+	} else if !flagged {
+		log.Printf("[WEB]: User %d already flagged article %d in group %s", user.ID, articleNum, group)
 		// Redirect without incrementing
 		referer := c.GetHeader("Referer")
 		if strings.Contains(referer, "/admin") {
@@ -183,22 +192,6 @@ func (s *WebServer) incrementSpam(c *gin.Context) {
 			c.Redirect(http.StatusSeeOther, "/groups/"+group)
 		}
 		return
-	}
-
-	// Update spam counter in database
-	log.Printf("DEBUG: Incrementing spam for group=%s, articleNum=%d", group, articleNum)
-	err = s.DB.IncrementArticleSpam(group, articleNum)
-	if err != nil {
-		log.Printf("Error incrementing spam count: %v", err)
-	} else {
-		log.Printf("DEBUG: Successfully incremented spam count for article %d", articleNum)
-
-		// Record that this user has flagged this article
-		err = s.DB.RecordUserSpamFlag(user.ID, group, articleNum)
-		if err != nil {
-			log.Printf("Error recording user spam flag: %v", err)
-			// Don't fail the operation if we can't record the flag
-		}
 	}
 
 	// Check referer to determine redirect location and preserve pagination
