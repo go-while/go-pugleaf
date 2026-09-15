@@ -838,3 +838,60 @@ exit "$FAILS"
   - INFO: E22 `0` races; E24 `634.25 req/s` on `/groups`.
 - Leftover found: `cmd/nntp-fetcher/main.go:138` also hardcodes `NewProgressDB("data/progress.db")` (cwd-relative,
   ignores `-data`).
+
+### Wave 1 (4 implementers from ec49c42, 2026-09-15)
+| Slice | Branch (worktree under `/tank0/claude/trees/go-pugleaf/`) | Commits | Review | Merge |
+|----|----|----|----|----|
+| w1-server | `worktree-agent-ad775f2d908a6a483` | 2afcc00, fixes 7d7e0ba | MERGE (3 minors fixed) | 21ee361 |
+| w1-api | `worktree-agent-aaa5ffc7b67a44945` | bd1f890, fixes c1c158f | MERGE AFTER FIXES | 36ba59c |
+| w1-auth | `worktree-agent-a2f51973cbba640e7` | 3f32a4f, fixes 79dcfa4, 600e0e1 | MERGE (5 items fixed) | d871556 |
+| w1-sqlite | `worktree-agent-ab1679615bd992f08` | 14cd766 (gofmt), 07e5b63, fixes 60d52b2 | MERGE AFTER FIXES, re-review MERGE | b084d72 |
+
+- **Merge order** deviated from the plan (sqlite, server, auth, api): branches were merged as they became ready
+  (server, api, auth, sqlite). The file sets are disjoint; the full `## Checks` passed after every merge.
+- **Review fixes beyond the slice text:**
+  - w1-sqlite: the first version's GetGroupDB fast path could hand out a DB that cleanup closed in between
+    ("group database is closed", 2/10 test runs). Now acquire happens under `MainMutex.RLock` + `mux`, every close
+    happens under `MainMutex.Lock` + `mux`, and Shutdown during init is handled. 50 stress runs are clean.
+  - w1-api: the section tree kept `s.DB.SectionsCache.IsInSections(section)`, but that cache is keyed by *group*
+    names, so the route always 404'd. The check is removed; `sectionGroupAllowed` gates it like the other section
+    routes, with a positive test. `FlagArticleSpamByUser` increments the counter with its own handle and rolls the
+    flag back only when that fails.
+  - w1-auth: login attempts are reserved atomically before the password check (`ReserveLoginAttemptByID`, at most
+    `MaxLoginAttempts` per `LoginLockoutTime` window, also under concurrency), and every rejection spends bcrypt time.
+    `checkGroupAccess`/`checkGroupAccessAPI` give admins 404 for unknown groups (before, admins could make
+    GetGroupDB create files for any name).
+  - w1-server: CSRF rejections are logged (sampled, `[WEB]: cross-origin request rejected ...`), session cleanup
+    holds a `db.WG` slot, and the chat test deletes its AI model.
+- **Checks on b084d72:** gofmt lists only the known baseline files; vet, build, `go test -race` (database, web,
+  history, nntp, processor, expire-news, history-rebuild) and `./build_webserver.sh` PASS.
+- **e2e on b084d72** (`PORT=18980`): `SUMMARY pass=24 fail=1`, the only FAIL is E21 (w2-dbperf). 0 panics, 0 DATA
+  RACE, no FOREIGN KEY or retry give-up lines. E24 `548 req/s`, measured at load 7–13 while agents ran race tests,
+  so not comparable with the wave-0 number. The verifier compares both binaries back to back
+  (baseline binary built from ec49c42).
+- **Additional behaviour changes to report** (on top of the plan's decisions):
+  1. `PRAGMA foreign_keys=ON` is now effective on every connection. Cascades really happen: deleting a user removes
+     its sessions, permissions and spam flags; deleting a newsgroup removes its post_queue rows; clearing
+     thread_cache removes tree_stats. `CreateSectionGroup` with a missing section fails instead of writing an orphan.
+  2. `GetGroupDB` after `Database.Shutdown` returns an error instead of reopening a DB.
+  3. After `MaxLoginAttempts` attempts (correct or not) within the window, logins are refused for `LoginLockoutTime`;
+     a successful login resets the counter.
+  4. Admins get 404 for group names that are not in `newsgroups` (inactive groups stay accessible).
+  5. A plain-HTTP deployment behind a proxy that rewrites `Host` gets 403 on browser POSTs; the log line names it.
+  6. `POST /aichat/clear/all` works now (it always answered 400); the chat rate limit is per user.
+  7. `requireAdminAuthJSON` answers 403 (not 500) when the user row cannot be loaded; the cron log viewer answers
+     503 with `-no-cronjobs`.
+  8. The section tree route `/:section/:group/tree/:root` works for real section groups (it always 404'd).
+- **Deferred to leftovers:**
+  - `server.Shutdown` waits 10s; longer handlers (AI chat up to 90s, slow admin POSTs) still run while the DB shuts
+    down.
+  - Concurrent AI chat sends to the same model overwrite each other's stored history (existing behaviour).
+  - `TryReserveWebPost` charges the back-off even when the post queue is full ("Server is busy"), as before.
+  - `getStats` cache has no singleflight; concurrent misses recompute.
+  - Unused `database.HandleThreadTreeAPI` (tree_view_api.go) still calls GetGroupDB for any name.
+  - `defer groupDB.Return()` inside the reply loop of sitePostSubmit (bounded by MaxCrossPosts).
+  - Dead code `initializeThreadCacheSimple` (db_rescan.go:817) uses `INSERT OR REPLACE INTO thread_cache`, which
+    would now cascade-delete tree_stats if it were called again.
+  - `SQLiteMaxRetryWait` is read on every retry: tools that change it must do so before any DB activity.
+  - The cmd/web FetchRoutine goroutine is not in `db.WG` and may log group DB errors during exit.
+  - `internal/web/README.md` still lists removed functions (`createWebSession`, `isAdminUser`).
