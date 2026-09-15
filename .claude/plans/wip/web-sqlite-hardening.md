@@ -795,3 +795,46 @@ echo "SUMMARY pass=$PASSES fail=$FAILS data=$DATA log=$LOG"
 [ "$FAILS" -gt 125 ] && FAILS=125
 exit "$FAILS"
 ```
+
+---
+
+## Progress
+
+### Wave 0 (orchestrator, 2026-09-15)
+- Integration branch `plan-web-sqlite-hardening` from `testing-001` @ 0f27e76; the plan moved to `wip/`.
+- Baseline checks at 0f27e76: `gofmt -l` lists only the 4 known files. `go vet`, `go build`, `go test -race`
+  (history, nntp, processor, expire-news, history-rebuild; database and web had no tests) and `./build_webserver.sh` PASS.
+- **Deviations from the wave-0 steps** (all found while running them; wave-1 slices build on these):
+  1. **`cmd/web` ignored `-data`.** It was the only tool that never set `dbConfig.DataDir`, and the progress DB path
+     was hardcoded to `data/progress.db`. The e2e script as written would have run against the checkout's production
+     `./data`. Fixed inline in `cmd/web/main.go`: `dbConfig.DataDir = dataDir` and
+     `NewProgressDB(filepath.Join(dataDir, "progress.db"))`. The default is unchanged (`./data`,
+     `data/progress.db/progress.db`), and `run_web*.sh` pass no `-data`.
+     **Behaviour change to report:** a deployment that passes `-data <dir>` to the webserver now really uses `<dir>`.
+     `w1-server` owns `cmd/web/main.go` and must keep this.
+  2. **Web test harness cwd.** Instead of `os.Chdir("../..")`, `TestMain` runs from a temp dir that only symlinks
+     `<checkout>/web`, so cwd-relative paths (`./data`, cron job commands) never reach the checkout. Additions:
+     `w0RepoRoot`, `w0DataDir` (group DBs under `<w0DataDir>/db`), `w0TestDB`, `w0DB(t)` (also in web), `w0CreateUser`.
+     It sets `config.AppVersion = "test"` first (`NewDefaultConfig` log.Fatalf's while unset, `config.go:542`),
+     plus `database.GlobalDateParser` and the model caches, like cmd/web. `w0NewUser` names users `w0user_<n>`
+     (the username validator rejects dots) and uses bcrypt MinCost. `w0NewGroup` also sets `hierarchy`, because
+     `MainDBGetNewsgroup` scans it into a string and fails on NULL.
+  3. **e2e script fixes** (real script bugs; the listing above is outdated on these points):
+     - The server's working dir is `$DATA/run` (only `web/` is linked there), with an absolute `-data`. The script
+       aborts when the schema does not appear in `$DB` (a binary that ignores `-data`), refuses `DATA` containing
+       `..`, and refuses a port that already answers.
+     - `-nntphostname smoke.invalid` can never start: `processor.SetHostname` requires an FQDN that resolves
+       (`net.LookupIP`). The script uses `$NNTPHOST`, or else the first resolvable of `hostname -f`,
+       `<hostname>.local`, `<hostname>.lan` (here `nuc.local` from `/etc/hosts`).
+     - The default config blocks User-Agents containing `curl` (migration 0023, `BlockBadBots=true`), so every
+       request got 403. A `curl()` wrapper sends `User-Agent: pugleaf-smoke/1.0`; bot blocking stays on.
+     - Seeded newsgroups get `hierarchy='smoke'`.
+- `go test -race ./internal/database/ ./internal/web/ -run W0 -count=3`: PASS, no races.
+- Baseline e2e (`PORT=18980`, binary built from the wave-0 tree): `SUMMARY pass=4 fail=21`.
+  - PASS: E07, E10, E14, E19. E19 did not catch the race at baseline; `TestW1ServerSectionsCacheRace` is the real check.
+  - FAIL: E01–E06, E08, E09, E11–E13, E15–E18, E20, E21, E23, E25–E27. Confirmed in the log: E06 is the nil deref
+    at `web_apitokens.go:40` (C1), E23 the nil deref at `cronjobs.go:74` (C2), E08 `status=500 files=1` (C4),
+    E20 `rc=124 elapsed=30s` (C6).
+  - INFO: E22 `0` races; E24 `634.25 req/s` on `/groups`.
+- Leftover found: `cmd/nntp-fetcher/main.go:138` also hardcodes `NewProgressDB("data/progress.db")` (cwd-relative,
+  ignores `-data`).

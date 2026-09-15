@@ -211,6 +211,7 @@ func main() {
 
 	// Initialize database with custom cache configuration
 	dbConfig := database.DefaultDBConfig() // Start with defaults
+	dbConfig.DataDir = dataDir             // honor -data (main DB, group DBs, history)
 	// Override cache settings with command-line flag values
 	dbConfig.ArticleCacheSize = maxArticleCache
 	dbConfig.ArticleCacheExpiry = time.Duration(maxArticleCacheExpiry) * time.Minute
@@ -221,7 +222,8 @@ func main() {
 	}
 
 	// Initialize progress database once to avoid opening/closing for each group
-	progressDB, err := database.NewProgressDB("data/progress.db")
+	// (NewProgressDB takes a directory: the default stays data/progress.db/progress.db)
+	progressDB, err := database.NewProgressDB(filepath.Join(dataDir, "progress.db"))
 	if err != nil {
 		log.Fatalf("[WEB]: Failed to initialize progress database: %v", err)
 	}
