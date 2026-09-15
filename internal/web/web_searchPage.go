@@ -2,7 +2,6 @@
 package web
 
 import (
-	"html/template"
 	"log"
 	"net/http"
 	"strconv"
@@ -71,7 +70,7 @@ func (s *WebServer) searchPage(c *gin.Context) {
 			data.ResultCount = totalCount
 			data.HasResults = len(groups) > 0
 			data.Pagination = pagination
-			data.Title = template.HTML("Search Results: " + query)
+			data.Title = "Search Results: " + query
 
 		case "subjects":
 			// TODO: Implement article subject search
@@ -110,16 +109,9 @@ func (s *WebServer) searchPage(c *gin.Context) {
 			data.ResultCount = totalCount
 			data.HasResults = len(groups) > 0
 			data.Pagination = pagination
-			data.Title = template.HTML("Search Results: " + query)
+			data.Title = "Search Results: " + query
 		}
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/search.html"))
-	c.Header("Content-Type", "text/html")
-	err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "search.html")
 }

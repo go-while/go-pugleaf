@@ -2,8 +2,6 @@
 package web
 
 import (
-	"html/template"
-	"log"
 	"net/http"
 	"strconv"
 
@@ -50,15 +48,7 @@ func (s *WebServer) sectionsPage(c *gin.Context) {
 		Sections:     sections,
 	}
 
-	// Load template individually
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sections.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		log.Printf("Error rendering sections template: %v", err)
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "sections.html")
 }
 
 // sectionPage handles /:section/ - shows groups in a section
@@ -137,14 +127,7 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 		SortBy:            sortBy,
 	}
 
-	// Load template individually to include pagination support
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/section.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		log.Printf("Error rendering section template: %v", err)
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, "section.html", "pagination.html")
 }
 
 // sectionGroupAllowed loads the section and checks that groupName is one of its groups.
@@ -262,14 +245,7 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 		GroupExists:  true,
 	}
 
-	// Load template individually to include pagination support
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/section-group.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		log.Printf("Error rendering section-group template: %v", err)
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, "section-group.html", "pagination.html")
 }
 
 // sectionArticlePage handles /:section/:group/articles/:articleNum - shows a specific article

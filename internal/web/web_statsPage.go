@@ -2,7 +2,6 @@
 package web
 
 import (
-	"html/template"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -46,12 +45,5 @@ func (s *WebServer) statsPage(c *gin.Context) {
 	}
 	data.GroupCount = totalCount
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/stats.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "stats.html")
 }

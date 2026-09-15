@@ -3,7 +3,6 @@ package web
 
 import (
 	"errors"
-	"html/template"
 	"log"
 	"net/http"
 	"net/url"
@@ -60,13 +59,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 			Articles:     nil,
 			Pagination:   nil,
 		}
-		// Load template individually to avoid conflicts
-		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/group.html", "web/templates/pagination.html"))
-		c.Header("Content-Type", "text/html")
-		err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-		if err != nil {
-			s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		}
+		s.renderPage(c, http.StatusOK, data, "group.html", "pagination.html")
 		return
 	}
 	defer groupDB.Return() // Only defer if groupDB is not nil
@@ -133,14 +126,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 		Pagination:   pagination,
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/group.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "group.html", "pagination.html")
 }
 
 func (s *WebServer) incrementSpam(c *gin.Context) {

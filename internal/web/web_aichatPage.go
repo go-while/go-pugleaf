@@ -3,8 +3,6 @@ package web
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
-	"html/template"
 	"io"
 	"log"
 	"net/http"
@@ -207,20 +205,7 @@ func (s *WebServer) aichatPage(c *gin.Context) {
 		MaxInputLength:  maxChatInputLineLength,
 	}
 
-	tmpl, err := template.ParseFiles("web/templates/base_chat.html", "web/templates/aichat.html")
-	if err != nil {
-		log.Printf("Failed to parse chat templates: %v", err)
-		s.renderChatError(c, "Template Parse Error", fmt.Sprintf("Failed to load chat interface: %v", err))
-		return
-	}
-
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base_chat.html", data)
-	if err != nil {
-		log.Printf("Failed to execute chat template: %v", err)
-		s.renderChatError(c, "Template Execution Error", fmt.Sprintf("Failed to render chat interface: %v", err))
-		return
-	}
+	s.renderTemplateSet(c, http.StatusOK, "chat", nil, "base_chat.html", data, "base_chat.html", "aichat.html")
 }
 
 // aichatSend handles chat message POSTs and proxies to Ollama
