@@ -30,6 +30,10 @@ const (
 var (
 	errGroupDBClosed     = errors.New("group database is closed")
 	errGroupDBInitFailed = errors.New("group database initialization failed")
+	// errGroupDBInitTimeout means another goroutine is still initializing the group
+	// database (WAL hook, migrations, busy_timeout). The database is not broken, so a
+	// caller that already holds data for the group waits instead of dropping it.
+	errGroupDBInitTimeout = errors.New("timeout waiting for group database initialization")
 )
 
 // GroupDB holds a single database connection for a group
@@ -178,7 +182,7 @@ func (db *Database) GetGroupDB(groupName string) (*GroupDB, error) {
 			if state == stateCLOSED {
 				return nil, fmt.Errorf("failed to get group database %s: %w", groupName, errGroupDBClosed)
 			}
-			return nil, fmt.Errorf("timeout waiting for group database '%s' initialization", groupName)
+			return nil, fmt.Errorf("group database %s: %w", groupName, errGroupDBInitTimeout)
 		}
 		waitingOn = groupDB
 		time.Sleep(10 * time.Millisecond)

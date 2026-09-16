@@ -49,15 +49,16 @@ func (db *Database) FlagArticleSpamByUser(userID int64, groupName string, articl
 		return false, nil // already flagged by this user
 	}
 
-	// Increment the counter with the handle we hold; roll the flag back when that fails,
-	// so flag row and counter stay consistent.
-	if _, err := RetryableExec(groupDB.DB, "UPDATE articles SET spam = spam + 1 WHERE article_num = ?", articleNum); err != nil {
+	// Increment the counter with the handle we hold; roll the flag back when that fails
+	// or matches no row (the article was removed between the check above and the UPDATE),
+	// so flag row and counter stay consistent and no orphan flag is left behind.
+	if incErr := incrementArticleSpamCount(groupDB.DB, articleNum); incErr != nil {
 		if _, delErr := RetryableExec(db.mainDB,
 			"DELETE FROM user_spam_flags WHERE user_id = ? AND newsgroup_id = ? AND article_num = ?",
 			userID, newsgroupID, articleNum); delErr != nil {
-			return false, fmt.Errorf("failed to increment spam count: %w (removing flag failed: %v)", err, delErr)
+			return false, fmt.Errorf("%w (removing flag failed: %v)", incErr, delErr)
 		}
-		return false, fmt.Errorf("failed to increment spam count: %w", err)
+		return false, incErr
 	}
 
 	// The main spam index is secondary: counter and flag are already consistent.
@@ -65,4 +66,22 @@ func (db *Database) FlagArticleSpamByUser(userID int64, groupName string, articl
 		log.Printf("[DATABASE] FlagArticleSpamByUser: add to spam table group=%s article=%d: %v", groupName, articleNum, err)
 	}
 	return true, nil
+}
+
+// incrementArticleSpamCount raises the spam counter of one article. It returns
+// ErrArticleNotFound when the UPDATE matched no row, so the caller can roll its flag
+// row back instead of reporting a success that changed nothing.
+func incrementArticleSpamCount(groupDB *sql.DB, articleNum int64) error {
+	res, err := RetryableExec(groupDB, "UPDATE articles SET spam = spam + 1 WHERE article_num = ?", articleNum)
+	if err != nil {
+		return fmt.Errorf("failed to increment spam count: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to increment spam count: %w", err)
+	}
+	if n == 0 {
+		return ErrArticleNotFound
+	}
+	return nil
 }

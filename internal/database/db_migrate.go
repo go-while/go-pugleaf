@@ -317,7 +317,10 @@ func applyMigration(db *sql.DB, migration *MigrationFile, dbType string) error {
 // migrationPragmaLine matches a whole line holding one PRAGMA statement (optionally
 // followed by a -- comment). Pragmas are no-ops or harmful inside the migration
 // transaction; connection settings come from the driver's ConnectHook.
-var migrationPragmaLine = regexp.MustCompile(`(?im)^\s*PRAGMA\s+[^;]*;\s*(--[^\n]*)?$`)
+// The character classes stop at the line end on purpose: a PRAGMA line without its
+// semicolon is left in place, so the migration fails loudly instead of silently losing
+// the statements that follow it.
+var migrationPragmaLine = regexp.MustCompile(`(?im)^[ \t]*PRAGMA[ \t]+[^;\n]*;[ \t\r]*(--[^\n]*)?$`)
 
 // stripMigrationPragmas removes whole-line PRAGMA statements from migration SQL.
 func stripMigrationPragmas(content string) string {
