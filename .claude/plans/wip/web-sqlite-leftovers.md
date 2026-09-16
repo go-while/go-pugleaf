@@ -714,3 +714,75 @@ network connection: the default DB seeds 23 providers all with `enabled=0`, so n
 and the missing guard became **A1b** in the `lo-paths` slice (same file, same lines that slice already edits).
 
 **Base commit for wave 1:** the commit below.
+
+### Wave 1 — merged, all 5 slices
+
+Merge commits on `plan-web-sqlite-leftovers`, in merge order:
+
+| Slice | Branch | Impl commits | Merge | Review verdict |
+|----|----|----|----|----|
+| `lo-paths` | `worktree-agent-abc86bcd09fd14b0c` | `00fffba` | `b59d869` (+ minors `24c5e85`) | MERGE |
+| `lo-db` | `worktree-agent-a5e5d0ec0bce9dec8` | `d973d66`, `c4bb5ff`, `3df5c79` | `22bcb97` (+ minors `c5c5b89`) | MERGE |
+| `lo-web-handlers` | `worktree-agent-ad3e4d0aaa02c68e3` | `6322123`, `85356fe` | `46d90fd` | MERGE AFTER FIXES → fixed |
+| `lo-web-core` | `worktree-agent-aab185f8152794720` | `37a5300`, `f5646fc` | `2544883` | MERGE AFTER FIXES → fixed |
+| `lo-audit-tool` | `worktree-agent-a103990bc940c4fa8` | `40db1ac`, `0a6203c` | `cad30fd` | MERGE AFTER FIXES → fixed |
+
+**Checks on the fully merged tree (`cad30fd`):** `gofmt -l ./cmd ./internal` lists only the two baseline
+files; `go vet ./...` and `go build ./...` clean; `go test -race -count=1` green for database, web,
+history, nntp, processor, expire-news, history-rebuild and audit-web-posts; all three build scripts
+produce their binaries. `scripts/test-web-leftovers.sh` → **`pass=11 fail=5`** (L01-L11 all PASS; the 5
+failures are exactly the wave-2 tags L12-L16). `scripts/test-web-hardening.sh` → **`pass=25 fail=0`**,
+0 DATA RACE reports in both scratch logs.
+
+**Review findings that mattered** (each was missed by the slice's own passing tests):
+1. **`lo-audit-tool`, blocker.** `mode=ro` does not stop SQLite creating the wal-index: every pugleaf DB
+   is WAL, so the tool left `-shm`/`-wal` next to every database it opened, i.e. it wrote into `data/cfg/`
+   and `data/db/`. Its tests passed because the fixtures were built without pragmas and were therefore
+   `journal_mode=delete`. Fixed with `immutable=1`, gated: used when no non-empty `-wal` sibling exists,
+   otherwise a plain `mode=ro` open plus a stderr warning, with the new `-strict` flag to refuse instead.
+   Refuse-by-default was tried first and **failed L11** — a pending `-wal` is routinely left behind
+   (`stop_server`, and the fetcher's `log.Fatalf` path exits without checkpointing).
+2. **`lo-audit-tool`, major.** `-all` applied the web-poster header allow-list to peer-fetched articles,
+   which legitimately carry `Path`, `Date`, `Organization`…: one normal peer article produced 5 findings
+   and rc 1. Now rules 1-3 apply to all articles and rule 4 only to queued rows or `path = '.POSTED!not-for-mail'`.
+3. **`lo-web-handlers`, major — a finding against this plan, not the implementer.** The plan specified
+   `funcMapKey` = the FuncMap's *address*, but nothing retained the map (`Template.Funcs` copies entries),
+   and a reproduction showed **1 distinct address across 2000 allocate/drop/GC cycles**. The first call site
+   building a per-request FuncMap would have silently rendered one request's page with another's functions.
+   Fixed by storing the map in the cache entry (`tmplEntry`), making the key unique by construction.
+4. **`lo-web-core`, major.** `Shutdown` closed `stopCh` first, so the token-usage flusher did its final
+   flush and exited *before* `srv.Shutdown(ctx)` drained in-flight requests; usage recorded during the
+   drain was lost on every shutdown — a deterministic regression of the property B6 exists to protect.
+   Fixed with a final `flushTokenUsage()` after the drain, plus explicit `[API]` logging of counts that
+   still could not be written. Regression test verified to fail without the fix.
+5. **`lo-db`, minor but load-bearing.** `w2_dbperf_test.go` kept its own copy of the child query spelled
+   `AND hide = 0`. Since that guard only asserts `!strings.Contains(plan, "SCAN articles")` and the old
+   spelling plans as a `SEARCH` on `idx_articles_hide_date`, a revert of C4 would have passed the guard.
+
+**Corrections to the plan's findings, for the Outcome:**
+- **B7 was overstated.** `renderError` only ever put `message` into the template data, so most of the 17
+  sites were not leaking internal text to visitors. Only the three `error.html` 200s and a rare `c.String`
+  fallback did. The change is still correct defence-in-depth, but it did not close 17 live leaks.
+- **B9's live half was not `getContentType`.** `/static/*` is served by `http.FileServer` (Go's own mime
+  table), and `EmbeddedFileHandler` has no caller, so the content-type table is test-only. The real defect
+  was that `/favicon.ico` was registered for GET only and gin answers HEAD from a separate route tree:
+  `curl -sI` fell through to the built-in 404 with `text/plain`. That, not `/etc/mime.types`, is what the
+  wave-0 baseline recorded.
+- **A5 has a live-data consequence.** `rslight-importer -reset-groups` used to be a guaranteed no-op
+  (it looked for a `<data>/groups` directory that never exists). It now really deletes articles, threads
+  and caches in every group DB that has a file; the only guard is the 5-second countdown at
+  `cmd/rslight-importer/main.go:121-132`. Worth a release note.
+
+**Deliberate departure from the plan text:** the queue-full post undo restores a bounded ~5s back-off
+(`now - WebPostingBackOff + 5`) rather than the full previous `lastpost_unix` the Design specifies.
+`WebPostingBackOff` is the only per-user throttle on `/SitePostSubmit`, so restoring it fully let a client
+hammer the route while the queue is full. B3's intent (not charging the user a post, not punishing them
+for 42s over a server-side failure) is preserved.
+
+**New leftovers raised by wave 1:**
+- `EmbeddedFileHandler`/`staticContentType` are dead in production — wire them back or delete both.
+  `.scss` is shipped under `internal/web/static/` but absent from the type table (harmless today).
+- `audit-web-posts` against a live-ish data dir may warn about a pending `-wal` and, for a database whose
+  wal-index is absent, create `-shm`/`-wal`. `-strict` guarantees zero touch; auditing a copy is the other way.
+- `InvalidateUserSessionBySessionID` still has no in-tree caller (logout goes through `InvalidateUserSession`).
+- `rsyncInactiveGroupsToDir` never checks `rows.Err()` (pre-existing, outside the wave-1 slices).
