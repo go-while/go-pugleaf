@@ -18,8 +18,8 @@ and a message-id history index (`internal/history`, rebuilt with `cmd/history-re
 gofmt -l <each touched dir>          # must print nothing
 go vet ./...                          # clean baseline, ~2s
 go build ./...
-go test -race ./internal/history/... ./internal/nntp/... ./internal/processor/... \
-              ./cmd/expire-news/... ./cmd/history-rebuild/...
+go test -race ./internal/database/... ./internal/web/... ./internal/history/... ./internal/nntp/... \
+              ./internal/processor/... ./cmd/expire-news/... ./cmd/history-rebuild/...
 ```
 
 - Add or extend `_test.go` files for new logic when practical; most packages have no tests yet.

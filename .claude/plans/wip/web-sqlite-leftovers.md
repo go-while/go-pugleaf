@@ -108,7 +108,7 @@ WSH merged on 2026-09-15 (03d0178). Its `## Outcome` lists leftovers. This plan 
 8. **C6:** measurement and report only. Pool defaults change only after the user has read the report.
 9. **D1:** new read-only tool `cmd/audit-web-posts` with `build_audit-web-posts.sh`. It reports and exits 1 when it finds something; remediation (delete, cancel) is the user's decision.
 10. **E1:** add `./internal/database/... ./internal/web/...` to the CLAUDE.md test line. NAT wave 3 adds `./cmd/nntp-server/...` later.
-11. **F1:** from page 101 on, the group and section group pages continue with `?cursor=` links (Next and Previous). "Last" is hidden when a group has more pages than can be linked by number, and cursor pages show "older articles" instead of a page number.
+11. **F1: DEFERRED** (user decision, wave 0 of the run on 2026-09-16). Deep group pages keep today's behaviour: from page 101 the Next/Last links reload page 101 and older articles stay unreachable by number. No cursor links, no `PaginationInfo` fields, no `GetOverviewsPrevCursor`, no `pagination.html` change. Carried into the Outcome as a known limitation; `lo2-web-pages` keeps only F6/F9/F10/F15.
 12. **F2:** the DB expiry slides at most once every 5 minutes, so the idle timeout is at least 55 minutes, and the cookie Max-Age follows the DB expiry.
 13. **F3/F4:** the client IP comes from one configured header: the new setting `ReverseProxyIPHeader` (`X-Forwarded-For` by default, or `X-Real-IP`), set in admin settings and applied after a restart. `DefaultReverseProxy` adds `127.0.0.0/8` and `fc00::/7`. Forwarded headers from an untrusted private or loopback peer are logged once per IP.
 14. **F5/F6:** the display name is validated only when it changes, the limit is 64 characters (runes) in web and DB, and the profile page stops suggesting `Name <address>`.
@@ -132,7 +132,7 @@ WSH merged on 2026-09-15 (03d0178). Its `## Outcome` lists leftovers. This plan 
 - **Contracts:** NAT K1 pins "all `internal/database` exported functions". This plan removes the dead `database.HandleThreadTreeAPI`, replaces the var `SQLiteMaxRetryWait` with `SetSQLiteMaxRetryWait`/`GetSQLiteMaxRetryWait`, and adds `HashSessionToken`, `AddTokenUsage`, `ReleaseWebPost`. None of these is used by NAT's harness.
 - **Review note for NAT:** its seed findings and `audit-web`/`audit-db` scope must be re-anchored on the tree after this plan (`.claude/plans/done/web-sqlite-leftovers.md`).
 - **F22** changes `AuthenticateNNTPUser` so that cache hits re-check `is_active`, which is part of NAT SEC-6. NAT's review must re-anchor SEC-6 after this plan; its password-change half stays open.
-- **New exported DB functions from the review fixes:** `GetOverviewsPrevCursor`, `UpsertSectionID`. Neither is used by NAT's harness.
+- **New exported DB functions from the review fixes:** `UpsertSectionID` (`GetOverviewsPrevCursor` dropped with F1). Not used by NAT's harness.
 
 ---
 
@@ -152,7 +152,7 @@ WSH merged on 2026-09-15 (03d0178). Its `## Outcome` lists leftovers. This plan 
   - `lo-audit-tool`: package `main` in `cmd/audit-web-posts`; `build_audit-web-posts.sh`.
   - `lo2-pool`: `BenchmarkLo2Pool*`, `lo2Pool*`.
   - `lo2-db-writer`: `errGroupDBInitTimeout`, `batchGroupDBRetry`, `batchGroupDBAttempts`, `updateNewsgroupStatsWithRetry`, `batchStatsRetryEvery`, `(*Database).cronDBEvery`, `(*Database).UpsertSectionID`, `query_nntpUserAuthState`.
-  - `lo2-web-pages`: `buildGroupPagination`, `nextThreadsOffsetHeader`, `(*Database).GetOverviewsPrevCursor`, `query_GetOverviewsPrevCursor`, `query_DeleteSectionGroupsByNewsgroup`, and the fields `models.PaginationInfo.NextCursor`, `.PrevCursor`, `.HideLast`.
+  - `lo2-web-pages`: `nextThreadsOffsetHeader`, `query_DeleteSectionGroupsByNewsgroup`. (F1 deferred: no `buildGroupPagination`, `GetOverviewsPrevCursor`, `query_GetOverviewsPrevCursor` or new `models.PaginationInfo` fields.)
   - `lo2-web-forms`: `sessionSlideEvery`, `(*WebServer).setSessionCookieMaxAge`, `sessionCookieMaxAge`.
   - `lo2-web-server`: `CFG_KEY_REVERSEPROXY_IPHEADER`, `FORM_FIELD_REVERSEPROXY_IPHEADER`, `configureTrustedProxiesWithHeader`, `untrustedForwarderSeen`, `(*WebServer).noteUntrustedForwarder`, `maxChatRequestBytes`, `ollamaSyncHTTPClient`, `(*CronJobManager).loadAndStartJobs`, and the fields `CronJobManager.reloadEvery`, `CronJobManager.loadJobs`.
 - **K3: tests.**
@@ -322,6 +322,9 @@ Owned files:
 
 Changes:
 1. **A1:** `database.NewProgressDB(filepath.Join(*dataDir, "progress.db"))`. The default stays `data/progress.db/progress.db`.
+1b. **A1b** (found in wave 0, same file, same lines you already edit): with no *enabled* provider, `pools` stays empty and `pools[0].FileCachedListNewsgroups()` at `:286` panics with `index out of range [0] with length 0`. The `GetProviders` guard at `:176` does not catch it, because the default DB seeds 23 providers with `enabled=0`. Before `:286` (and before the `*resetProgress` block at `:273`, which also indexes `pools[0]`), add
+   `if len(pools) == 0 { log.Fatalf("[FETCHER]: No enabled provider backend available (%d providers, none enabled)", len(providers)) }`.
+   No network connection happens on this path either way — verified in wave 0 — so the e2e check L10 is safe to run.
 2. **A2:** `FileCachedListNewsgroups(cacheDir string)` uses `filepath.Join(cacheDir, host+".list")`; `WriteNewsgroupListToFile` already creates the directory. The fetcher passes `filepath.Join(*dataDir, "cache")`.
 3. **A3:** `getCacheFilePath` uses `analyzeCachePath(dataDir, provider, group)`, where `dataDir = proc.DB.GetDataDir()` (fall back to `"data"` only when `proc.DB` is nil). The file name stays unchanged.
 4. **A4:** `rsyncInactiveGroupsToDir` builds the source dir as `filepath.Join(db.GetDataDir(), "db", groupsHash)`.
@@ -449,30 +452,18 @@ Acceptance: the listed tests pass with `-race`; the WSH script stays at `fail=0`
 
 ---
 
-#### Slice `lo2-web-pages`: deep pagination, section access, huge pages, threads API offset, display-name DB limit
-Findings: F1, F6 (DB half), F9, F10, F15. Tag `lo2-web-pages`, ports 18997/19007.
+#### Slice `lo2-web-pages`: section access, huge pages, threads API offset, display-name DB limit
+Findings: F6 (DB half), F9, F10, F15. **F1 is deferred** (decision 11): do not touch pagination, `webgroupPage.go`, `models.PaginationInfo` or `pagination.html`. Tag `lo2-web-pages`, ports 18997/19007.
 
 Owned files:
-- `internal/web/webgroupPage.go`
 - `internal/web/web_sectionsPage.go`
-- `internal/web/web_group_pagination.go` (new)
 - `internal/web/web_apiHandlers.go` (the `X-Next-Offset` line in `getGroupThreads` only)
-- `internal/models/models.go` (the three new `PaginationInfo` fields only)
-- `web/templates/pagination.html`
 - `internal/database/queries.go` (`DeleteNewsgroup` and `UpdateUserDisplayName` only)
-- `internal/database/db_overview_cursor.go` (new)
 - `internal/database/thread_cache.go` (the offset guard in `GetCachedThreadReplies` only)
 - `internal/web/lo2_pages_test.go` (new), `internal/database/lo2_pages_test.go` (new)
 
 Changes:
-1. **F1:**
-   - `PaginationInfo` gets `NextCursor int64`, `PrevCursor int64` and `HideLast bool`. Zero values leave every other page unchanged.
-   - `pagination.html`: Next links `?cursor={{.NextCursor}}` when it is set, else `?page=`; Previous does the same with `PrevCursor`; Last is rendered only without `HideLast`; with `CurrentPage` 0 the info text says "(older articles)" and the active item shows `…`.
-   - `GetOverviewsPrevCursor(groupDB *GroupDB, firstArticleNum int64, pageSize int) (int64, error)` runs `SELECT article_num FROM articles WHERE hide = 0 AND article_num > ? ORDER BY article_num ASC LIMIT 1 OFFSET ?` with `(first, pageSize-1)` and returns that number + 1, or 0 on `sql.ErrNoRows` (the previous page is page 1).
-   - `buildGroupPagination(page int, cursor int64, articles []*models.Overview, totalCount int, hasMore bool, pageSize, maxOffset int, prevCursor func(int64) (int64, error)) *models.PaginationInfo`, with `maxPage := maxOffset/pageSize + 1`:
-     - page mode: start from `NewPaginationInfo`; set `HideLast = TotalPages > maxPage`; when `page >= maxPage && HasNext`, set `NextCursor` to the last article's number.
-     - cursor mode: `CurrentPage 0`, `HasNext hasMore`, `HasPrev true`, `PrevPage 1`, `HideLast true`; `NextCursor` is the last article's number when `hasMore`; `PrevCursor` comes from `prevCursor(articles[0].ArticleNum)`, and on error it logs `[WEB]` and keeps `PrevPage 1`.
-   - `groupPage` and `sectionGroupPage` use it (with `maxOffsetArticles`) in place of their inline pagination blocks.
+1. **F1: skipped** (deferred by the user in wave 0; see Decisions 11).
 2. **F15:**
    - `sectionPage`: clamp `page` to `max(1, ceil(totalCount/LIMIT_sectionPage))` before computing `start`.
    - `GetCachedThreadReplies`: set `page = max(page, 1)` and return an empty slice with `totalReplies` when `pageSize <= 0 || page-1 >= ceil(len(childNums)/pageSize)`, before any multiplication.
@@ -483,13 +474,10 @@ Changes:
 5. **F6 (DB half):** `UpdateUserDisplayName` rejects `utf8.RuneCountInString(displayName) > 64` instead of a byte length.
 6. Tests:
    - web (`lo2_pages_test.go`):
-     - `BuildGroupPagination` table: page 2 of 8 (no cursors, Last shown); page 101 of 157 with `maxOffset` 12800 and size 128 (NextCursor set, HideLast); cursor mode with more rows (CurrentPage 0, both cursors, stubbed `prevCursor`); cursor mode on the last rows (no Next).
-     - `PaginationTemplate` through `loadTemplates`: a cursor-mode value contains `?cursor=` and no `aria-label="Last"`; `NewPaginationInfo(2, 128, 1000)` contains `href="?page=3"` and `href="?page=8"` and no `cursor=`.
      - `SectionHugePage`: a section with one active group; `GET /<section>/?page=100000000000000000` returns 200.
      - `SectionRouteNeedsGroup`: a `section_groups` row for a name with no `newsgroups` row gives 404 on `/<section>/<name>/` and `/<section>/<name>/tree/1`, and `filepath.Glob(<datadir>/db/*/<sanitized>.db*)` stays empty; an inactive member group gives 404 for anonymous users and 200 for an admin.
      - `NextThreadsOffsetHeader` table: `(0,500,500)`→`"500"`, `(999000,1000,1000)`→`"1000000"`, `(1000000,2000,2000)`→`""`, `n<limit`→`""`.
    - database (`lo2_pages_test.go`):
-     - `PrevCursor`: 300 visible articles with hidden ones in between, size 128; the prev cursor of the second page is 0, for the third page it is the 129th newest `article_num` + 1, and `GetOverviewsPaginated` from it returns exactly the second page.
      - `ThreadRepliesHugePage`: a `thread_cache` row with 3 children; page `1<<60` returns an empty slice without panicking.
      - `DeleteNewsgroupRemovesSectionGroups`: deleting an inactive group removes its `section_groups` rows; an active group is not deleted and keeps its rows.
      - `DisplayNameRuneLimit`: 64 × `ä` is accepted, 65 × `ä` is rejected.
@@ -577,7 +565,7 @@ Acceptance: L12 and L16 PASS; WSH E11-E14, E18-E20 and E23 still PASS.
   - reverse proxy: `ReverseProxyAddr`, `X-Forwarded-For`/`X-Forwarded-Proto`, `Host` passthrough, e.g. `proxy_set_header Host $http_host`
   - reverse proxy, from the review fixes: the `ReverseProxyIPHeader` setting (which header your proxy actually sets, with an nginx example for each choice), the widened default trusted ranges, and the "ignoring forwarded client IP headers" log line
   - sessions: the idle timeout is 55-60 minutes and the cookie follows the server-side expiry
-  - group pages: after page 100 the links continue with `?cursor=`
+  - group pages: known limitation, numbered links stop at page 100 (F1 deferred)
   - CSRF behaviour and its log line
   - sessions: hashed at rest, one re-login after 0028, lockout rules
   - foreign keys: what cascades; run `PRAGMA foreign_key_check;` on a copy before deploying
@@ -629,7 +617,7 @@ Upgrade check (verifier, scratch only):
 ### `scripts/test-web-leftovers.sh` (wave 0 writes it; fix only real script bugs later)
 Build it from `scripts/test-web-hardening.sh`:
 - **Copy the whole safety skeleton** (lines 1–76 at d11201a): `git rev-parse` cd, the `PORT`/`DATA`/`BIN` defaults, the `..` and `./data-test-*` guards, the tool checks, the `curl()` User-Agent wrapper, `NNTPHOST` detection, the `.update` guard, `BIN_ABS`, `rm -rf "$DATA"; mkdir -p "$DATA/run"`, the `web` symlink, `pass`/`fail`/`info`/`q`/`code`/`alive`, `start_server` with cwd `$RUN` and absolute `-data`, `stop_server`, `ensure_up`, the trap, the port-in-use refusal, and the schema check after the first start.
-- **Defaults:** `PORT=18990`, `DATA=./data-test-web-sqlite-leftovers`, `BIN=./build/webserver`, `FETCHER=./build/nntp-fetcher`, `AUDIT=./build/audit-web-posts`.
+- **Defaults:** `PORT=18990`, `DATA=./data-test-web-sqlite-leftovers`, `BIN=./build/webserver`, `FETCHER=./build/pugleaf-fetcher` (the real output name of `build_fetcher.sh`; the plan said `nntp-fetcher`), `AUDIT=./build/audit-web-posts`.
 - **Seed** while stopped: `APIEnabled=true`, `registration_enabled=true`, `AbuseMail`; newsgroup `smoke.test` (active, `hierarchy='smoke'`); API token `smoke-valid-token` (sha256 hex). Register `smokeadmin` (user id 1) and log in with a cookie jar, as the WSH script does.
 - **Seed for the review checks**, also while stopped: the active AI model row the WSH script seeds; newsgroup `smoke.inactive2` (inactive, `hierarchy='smoke'`); section `lo2sec` with `section_groups` rows for `zz.lo2.gone` (which has no `newsgroups` row) and for `smoke.inactive2`. After the start, register the user `smokeip` the same way as `smokeadmin`, with its own jar.
 
@@ -669,3 +657,60 @@ Checks (tag in brackets):
 - **L15 [lo2-web-pages] huge page numbers:** `code "$BASE/lo2sec/?page=100000000000000000"` is 200 (500 at baseline).
 - **L16 [lo2-web-server] chat body limit:** write `{"message":"<200000 × a>"}` to `$DATA/big.json`, then `code -b "$JAR_ADMIN" -H 'Content-Type: application/json' -X POST --data-binary @"$DATA/big.json" "$BASE/aichat/send"` is 413.
 - **Finish:** print `SUMMARY pass=<n> fail=<n> data=$DATA log=$LOG` and exit with the fail count (capped at 125), as the WSH script does.
+
+---
+
+## Progress
+
+### Wave 0 — 2026-09-16, `plan-web-sqlite-leftovers` from `testing-001` @ `194a8c2`
+
+**Preflight.** Working tree clean, `03d0178` confirmed as an ancestor of HEAD, `/tank0/claude/trees` writable.
+Baseline `## Checks` on `194a8c2`: `gofmt -l ./cmd ./internal` lists only the two known files
+(`internal/database/embedded_migrations.go`, `internal/web/web_admin_provider.go`); `go vet ./...` clean;
+`go build ./...` clean; `go test -race -count=1` green for database, web, history, nntp, processor,
+expire-news, history-rebuild. `PORT=18981 DATA=./data-test-web-sqlite-hardening scripts/test-web-hardening.sh`
+→ **`SUMMARY pass=25 fail=0`**.
+
+**Decisions confirmed with the user.**
+- 1 (C1 hashed sessions + migration 0028 clearing `session_id`/`session_expires_at`, one re-login for everyone): **as written**.
+- 11 (F1 deep pagination): **DEFERRED**, see Decisions 11. `lo2-web-pages` loses F1; `webgroupPage.go`,
+  `models.PaginationInfo`, `pagination.html`, `web_group_pagination.go` and `db_overview_cursor.go` are untouched.
+- 13 (F3/F4 `ReverseProxyIPHeader` setting + widened `DefaultReverseProxy` + untrusted-forwarder log): **as written**.
+- 2-10, 12, 14-17: **as written**.
+
+**E1 done.** `.claude/CLAUDE.md` test line now includes `./internal/database/... ./internal/web/...`.
+
+**`scripts/test-web-leftovers.sh` written** (safety skeleton copied from `test-web-hardening.sh`), `chmod +x`, `bash -n` clean.
+Two corrections against the plan text: `FETCHER` defaults to `./build/pugleaf-fetcher` (the real output of
+`build_fetcher.sh`), and L03 compares a usage-count *delta* instead of the absolute 5, so it stays valid
+wherever it runs in the sequence.
+
+**Baseline run** `PORT=18990 scripts/test-web-leftovers.sh` → **`SUMMARY pass=1 fail=15`**, matching the plan's
+expectation exactly:
+
+| Check | Baseline | Detail |
+|----|----|----|
+| L01 lo-db | FAIL | `session_id` in the DB equals the cookie value |
+| L02 lo-db | FAIL | no 0028 migration, no `login_attempt_at` |
+| L03 lo-web-core | **PASS** | regression guard for the buffering (today's per-request goroutine already counts) |
+| L04 lo-web-core | FAIL | web preview route 404 |
+| L05 lo-web-core | FAIL | API preview answers 200 with `APIEnabled=false` |
+| L06 lo-web-core | FAIL | `thread-tree.js` still fetches `/api/v1/groups/` |
+| L07 lo-web-core | FAIL | `/favicon.ico` → `Content-Type: text/plain` (B9 confirmed, not the mime.types fallback the plan expected) |
+| L08 lo-web-handlers | FAIL | 17 sites show `err.Error()` to visitors |
+| L09 lo-web-core | FAIL | 3 API sites show `err.Error()` |
+| L10 lo-paths | FAIL | `$RUN/data/progress.db/progress.db` created relative to the cwd |
+| L11 lo-audit-tool | FAIL | missing binary (tool does not exist yet) |
+| L12 lo2-web-server | FAIL | `X-Real-IP` setting has no effect (both 198.51.100.9) |
+| L13 lo2-web-forms | FAIL | legacy display name blocks the email change |
+| L14 lo2-web-pages | FAIL | `/lo2sec/zz.lo2.gone/` 200, tree 500, 3 group DB files created, inactive group 200 |
+| L15 lo2-web-pages | FAIL | `?page=100000000000000000` → 500 |
+| L16 lo2-web-server | FAIL | oversized chat body → 400, not 413 |
+
+**L10 precondition checked** (plan wave-0 step 4). With the scratch data dir the fetcher does **not** open any
+network connection: the default DB seeds 23 providers all with `enabled=0`, so no pool is built and
+`nntp.NewPool` is never called. It does not exit cleanly either — it panics at
+`cmd/nntp-fetcher/main.go:286` with `index out of range [0] with length 0`. L10 therefore stays in the script,
+and the missing guard became **A1b** in the `lo-paths` slice (same file, same lines that slice already edits).
+
+**Base commit for wave 1:** the commit below.
