@@ -266,14 +266,19 @@ func (db *Database) GetCachedThreadReplies(groupDB *GroupDB, threadRoot int64, p
 		return []*models.Overview{}, 0, nil
 	}
 
-	// Calculate pagination for replies
+	// Calculate pagination for replies.
+	// Check the page against the number of pages *before* multiplying: (page-1)*pageSize
+	// overflows to a negative offset for a huge page number, and slicing then panics (F15).
+	if page < 1 {
+		page = 1
+	}
+	if pageSize <= 0 || page-1 >= (len(childNums)+pageSize-1)/pageSize {
+		return []*models.Overview{}, totalReplies, nil
+	}
 	offset := (page - 1) * pageSize
 	end := offset + pageSize
 	if end > len(childNums) {
 		end = len(childNums)
-	}
-	if offset >= len(childNums) {
-		return []*models.Overview{}, totalReplies, nil
 	}
 
 	// Get only the slice of children for this page

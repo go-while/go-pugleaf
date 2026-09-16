@@ -322,10 +322,20 @@ func (s *WebServer) getGroupThreads(c *gin.Context) {
 		return
 	}
 
-	if len(threads) == limit {
-		c.Header("X-Next-Offset", strconv.Itoa(offset+limit))
+	if next := nextThreadsOffsetHeader(offset, limit, len(threads), apiThreadsMaxOffset); next != "" {
+		c.Header("X-Next-Offset", next)
 	}
 	c.JSON(http.StatusOK, threads)
+}
+
+// nextThreadsOffsetHeader returns the X-Next-Offset value for a threads page, or "" when
+// there is no next page to advertise: either the page was short, or the next offset would
+// be beyond maxOffset, where getGroupThreads clamps and would serve this page again (F9).
+func nextThreadsOffsetHeader(offset, limit, n, maxOffset int) string {
+	if n != limit || offset+limit > maxOffset {
+		return ""
+	}
+	return strconv.Itoa(offset + limit)
 }
 
 // getStats returns JSON statistics data for the API (cached for apiStatsTTL).

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -445,6 +446,10 @@ func (db *Database) UpdateNewsgroupDescription(name string, description string) 
 // DeleteNewsgroup deletes a newsgroup from the main database
 const query_DeleteNewsgroup = `DELETE FROM newsgroups WHERE name = ? AND active = 0`
 
+// query_DeleteSectionGroupsByNewsgroup drops the section memberships of a deleted newsgroup.
+// Without it the section routes keep listing and serving a group that no longer exists (F10).
+const query_DeleteSectionGroupsByNewsgroup = `DELETE FROM section_groups WHERE newsgroup_name = ?`
+
 func (db *Database) DeleteNewsgroup(name string) error {
 	// Get hierarchy before deletion for cache invalidation
 	newsgroup, err := db.MainDBGetNewsgroup(name)
@@ -456,14 +461,41 @@ func (db *Database) DeleteNewsgroup(name string) error {
 		hierarchy = ExtractHierarchyFromGroupName(name)
 	}
 
-	_, err = RetryableExec(db.mainDB, query_DeleteNewsgroup, name)
-
-	// Invalidate hierarchy cache for the affected hierarchy
-	if err == nil && db.HierarchyCache != nil {
-		db.HierarchyCache.InvalidateHierarchy(hierarchy)
+	// The newsgroup row and its section_groups rows go in one transaction: the group is only
+	// removed from its sections when it was really deleted (the DELETE is a no-op while active).
+	var deleted bool
+	err = RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
+		deleted = false
+		result, err := tx.Exec(query_DeleteNewsgroup, name)
+		if err != nil {
+			return fmt.Errorf("failed to delete newsgroup %s: %w", name, err)
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected for newsgroup %s: %w", name, err)
+		}
+		if rowsAffected != 1 {
+			return nil
+		}
+		if _, err := tx.Exec(query_DeleteSectionGroupsByNewsgroup, name); err != nil {
+			return fmt.Errorf("failed to delete section groups of %s: %w", name, err)
+		}
+		deleted = true
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
-	return err
+	// Invalidate hierarchy cache for the affected hierarchy
+	if db.HierarchyCache != nil {
+		db.HierarchyCache.InvalidateHierarchy(hierarchy)
+	}
+	if deleted {
+		uiCacheHeaderSections.invalidate()
+	}
+
+	return nil
 }
 
 const query_GetThreadsCount = `SELECT COUNT(*) FROM threads`
@@ -739,7 +771,9 @@ func (db *Database) UpdateUserPassword(userID int64, passwordHash string) error 
 const query_UpdateUserDisplayName = `UPDATE users SET display_name = ? WHERE id = ?`
 
 func (db *Database) UpdateUserDisplayName(userID int64, displayName string) error {
-	if len(displayName) > 64 {
+	// Count characters, not bytes: the web validation is 64 runes, so a byte limit here
+	// rejected names the form had already accepted, after the other profile writes (F6).
+	if utf8.RuneCountInString(displayName) > 64 {
 		return fmt.Errorf("display name is too long")
 	}
 	_, err := db.mainDB.Exec(query_UpdateUserDisplayName, displayName, userID)
