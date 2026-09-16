@@ -141,8 +141,10 @@ func TestLo1CoreShutdownCancelsInFlight(t *testing.T) {
 	go func() { done <- srv.Shutdown(ctx) }()
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("Shutdown returned nil although a handler blocked past the deadline")
+		// The handler stopped on the cancellation and within the grace, so the shutdown did
+		// complete: the graceful deadline alone is not reported as a failure.
+		if err != nil {
+			t.Fatalf("Shutdown = %v, want nil after the cancelled handler finished", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Shutdown did not return within 2s")
@@ -220,6 +222,59 @@ func TestLo1CoreTokenUsageBuffered(t *testing.T) {
 	if count, _ := lo1CoreTokenUsage(t, token.ID); count != 10 {
 		t.Fatalf("usage_count = %d after Shutdown, want 10", count)
 	}
+}
+
+// TestLo1CoreFinalFlushBounded: the last usage flush of Shutdown cannot hold the shutdown. One
+// UPDATE on a main DB that somebody else keeps locked blocks for busy_timeout (30s) per attempt
+// and retries for minutes of busy time, while the NNTP server, the workers and the database are
+// all still up, so Shutdown must give up on it after shutdownGrace.
+func TestLo1CoreFinalFlushBounded(t *testing.T) {
+	lo1CoreSetAPIEnabled(t, "true")
+	db := w0DB(t)
+	token, _, err := db.CreateAPIToken("lo1core-bound", 0, nil)
+	if err != nil {
+		t.Fatalf("CreateAPIToken: %v", err)
+	}
+	srv := lo1CoreNewServer(t)
+
+	// First shutdown: the flusher does its own last flush and stops (tokenUsageDone is closed),
+	// so the second one below runs exactly the final flush this test is about.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("first Shutdown: %v", err)
+	}
+	// Usage counted after that, as a request served during the drain does.
+	srv.recordTokenUsage(token.ID, time.Now())
+
+	// Hold the main DB write lock, so every AddTokenUsage attempt runs into SQLITE_BUSY.
+	tx, err := db.GetMainDB().Begin()
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := tx.Exec("UPDATE api_tokens SET ownername = ownername WHERE id = ?", token.ID); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("lock the main DB: %v", err)
+	}
+	var once sync.Once
+	release := func() { once.Do(func() { _ = tx.Rollback() }) }
+	defer release()
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		_ = srv.Shutdown(ctx)
+		done <- time.Since(start)
+	}()
+	select {
+	case took := <-done:
+		if took > shutdownGrace+3*time.Second {
+			t.Fatalf("Shutdown took %v with a locked main DB, want at most the %v grace", took, shutdownGrace)
+		}
+	case <-time.After(shutdownGrace + 3*time.Second):
+		t.Fatalf("Shutdown did not return within %v although the main DB is locked", shutdownGrace+3*time.Second)
+	}
+	release() // let the abandoned writer finish instead of retrying into the next test
 }
 
 // TestLo1CoreTokenUsageDuringDrain: the usage of a request that is served while Shutdown drains
