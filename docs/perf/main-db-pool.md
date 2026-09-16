@@ -8,13 +8,15 @@ measured against SQLite. Finding C6 of the `web-sqlite-leftovers` plan asks for 
 measurement; decision 8 of that plan says **measurement and report only** — this
 document changes no production code, and `db_init.go` is untouched.
 
-**TL;DR — recommendation: keep the current defaults.** Across 30 measured
-configurations there were zero `SQLITE_BUSY` retries at any pool size; throughput is
-flat above 8 connections; median latency keeps improving as the pool grows; and
-`sql.DB` never opened more than the offered concurrency (34 connections against a
-ceiling of 100), so the 100 costs nothing at normal load. The only value that is
-clearly wrong is a small one: `MaxOpenConns = 4` loses ~40 % throughput. See
-[Recommendation](#recommendation).
+**TL;DR — recommendation: keep the current defaults.** Across 35 measured
+configurations there were zero `SQLITE_BUSY` retries at any pool size; throughput
+plateaus above 8-16 connections; the latency of the cheap statements (the point read
+and the session-slide write, i.e. what a web request actually does) keeps improving as
+the pool grows, in the median *and* at p99; and `sql.DB` never opened more than the
+offered concurrency (34 connections against a ceiling of 100), so the 100 costs
+nothing at normal load. The only value that is clearly wrong is a small one:
+`MaxOpenConns = 4` loses 30-40 % throughput and turns a 150 µs read into a 3.4 ms one.
+See [Recommendation](#recommendation).
 
 ## The benchmark
 
@@ -49,7 +51,9 @@ deliberate: `internal/database/sqlite_retry.go` is owned by another slice in the
 wave, so the measurement must not depend on it, and everything reported here is wall
 clock, not the retry clock.
 
-Command (three times per size, `uptime` recorded before each run):
+Command (three times per size on each of the two filesystems, plus one
+confirmation sweep on the quietest window the box offered, `uptime` recorded before
+each run):
 
 ```
 go test -run '^$' -bench Lo2PoolMix -benchtime 10s ./internal/database/
@@ -152,6 +156,28 @@ another build saturated the machine, so this median is noise, not a result. ZFS 
 (9 403 ops/s, read p50 1.84 ms) is the only usable `16` sample and fits the tmpfs
 curve.
 
+### Confirmation sweep — the quietest run
+
+One more sweep after the sweeps above, started at load average 5.73, which is the
+quietest window this box offered. It is the only sweep with no noise-collapsed cell,
+and it is the one to read if you read only one table. It was produced by the final
+benchmark code (the sweeps above predate the added RSS and connection-count logging;
+the measured mix is identical).
+
+| MaxOpenConns | peak open conns | ops/s | reads/s | writes/s | user read p50 | user read p99 | site_news p50 | site_news p99 | write p50 | write p99 | busy retries | peak RSS |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 4 | 4 | 6 299 | 5 931 | 368 | 3.41 ms | 27.3 ms | 6.8 ms | 31.5 ms | 3.93 ms | 27.3 ms | 0 | 19 MiB |
+| 8 | 8 | 8 577 | 8 086 | 490 | 2.10 ms | 18.9 ms | 7.3 ms | 27.3 ms | 2.88 ms | 18.9 ms | 0 | 22 MiB |
+| 16 | 16 | 11 805 | 11 092 | 713 | 1.18 ms | 14.7 ms | 6.8 ms | 29.4 ms | 1.84 ms | 16.8 ms | 0 | 26 MiB |
+| 32 | 32 | 10 959 | 9 953 | 1 006 | 262 µs | 15.7 ms | 7.3 ms | 167.8 ms | 492 µs | 25.2 ms | 0 | 49 MiB |
+| 100 | **34** | 12 554 | 10 847 | 1 707 | **147 µs** | **9.4 ms** | 6.8 ms | 201.3 ms | **262 µs** | **15.7 ms** | 0 | 49 MiB |
+
+On a quiet machine the picture is monotone and unambiguous: throughput rises to a
+plateau at 16-100, and *both* the median and the p99 of the two cheap statements — the
+`GetUserByID` read and the session-slide write, which is what almost every web request
+actually does — improve all the way up to the largest pool. The only number that gets
+worse with a larger pool is the p99 of the 100-row site-news scan (31 ms → 201 ms).
+
 ## What the numbers say
 
 **1. The pool is never the source of lock contention.** `busy_retries = 0` in every
@@ -166,9 +192,10 @@ a lock-safety question here.
 box. Only `MaxOpenConns = 4` is clearly too small: it queues 34 workers behind 4
 connections.
 
-**3. Median latency keeps improving with pool size, tail latency keeps getting
-worse.** This is the clearest and most reproducible signal, present in all six sweeps.
-Per-statement p50/p99 on tmpfs (median of the three runs):
+**3. Latency of the cheap statements keeps improving with pool size; only the heavy
+query's tail gets worse.** This is the clearest and most reproducible signal, present
+in all seven sweeps. Per-statement p50/p99 on tmpfs (median of the three loaded runs;
+the confirmation sweep above shows the same shape with a cleaner p99):
 
 | MaxOpenConns | user read p50 | user read p99 | site_news p50 | site_news p99 | write p50 | write p99 |
 |---|---|---|---|---|---|---|
@@ -183,6 +210,9 @@ A cheap point read goes from 2.9 ms to 164 µs as the pool grows, because at
 `database/sql`, not inside SQLite. The p99 of the *heavy* query moves the other way:
 with a large pool all the expensive 100-row scans run at once on 12 hardware threads
 and time-slice against each other, so the site-news p99 grows from 23 ms to 185 ms.
+The cheap statements do not pay that price — in the quiet confirmation sweep their p99
+improves along with their median (user read p99 27.3 ms → 9.4 ms, write p99 27.3 ms →
+15.7 ms), because a short statement finishes before the scheduler can starve it.
 
 **4. Real storage slows the writes, not the reads, and does not change the shape.**
 On ZFS the write p50 roughly doubles (6.8 ms vs 3.1 ms at 4 connections, 590 µs vs
@@ -244,13 +274,15 @@ The reasoning, in the order the evidence supports it:
    heavy query.** Median throughput at 100 is at the top of the measured range on both
    filesystems (11 868 ops/s tmpfs, 10 789 ops/s ZFS, the best ZFS number of all), and
    median latency is the best by a wide margin (164 µs vs 2.9 ms for a point read at
-   `MaxOpenConns = 4`).
+   `MaxOpenConns = 4`). In the quiet confirmation sweep, `MaxOpenConns = 100` wins
+   every column except the site-news p99: best throughput (12 554 ops/s), best user
+   read p50 *and* p99 (147 µs / 9.4 ms), best write p50 and p99 (262 µs / 15.7 ms).
 2. **The 100 is a ceiling that is never reached.** The pool opened 34 connections
    under 34 offered concurrent operations. Lowering `MaxOpenConns` to, say, 16 would
    not "save" anything at normal load — it would only start queueing once more than 16
    handlers happen to be inside a main-DB statement at the same time, which is exactly
    the burst you want the pool to absorb.
-3. **No lock pressure at any size.** `busy_retries = 0` in all 30 measured cells. The
+3. **No lock pressure at any size.** `busy_retries = 0` in all 35 measured cells (7 sweeps x 5 sizes). The
    per-connection `busy_timeout = 30000` absorbs everything 32 readers and 2 writers
    can produce. A larger pool is not creating `SQLITE_BUSY` storms, which was the main
    thing to check for SQLite.
