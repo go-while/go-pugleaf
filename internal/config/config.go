@@ -45,6 +45,10 @@ const CFG_KEY_WEBPOSTSIZE string = "WebPostMaxArticleSize"
 const CFG_KEY_ABUSEMAIL string = "AbuseMail"
 const CFG_KEY_WEBLOCALNNTP string = "WebLocalNNTPServerAddrInfo"
 const CFG_KEY_REVERSEPROXY string = "ReverseProxyAddr"
+
+// CFG_KEY_REVERSEPROXY_IPHEADER names the single header the client IP is taken from behind a
+// trusted proxy ("X-Forwarded-For" or "X-Real-IP"). A missing key reads as "" = X-Forwarded-For.
+const CFG_KEY_REVERSEPROXY_IPHEADER string = "ReverseProxyIPHeader"
 const CFG_KEY_REGISTRATION string = "registration_enabled"
 const CFG_KEY_USERSALT string = "UserSalt"
 const CFG_KEY_BADBOTS string = "BadBots"
@@ -59,6 +63,7 @@ const FORM_FIELD_WEBPOSTSIZE string = "web_post_size"
 const FORM_FIELD_ABUSEMAIL string = "abuse_mail"
 const FORM_FIELD_WEBLOCALNNTP string = "web_local_nntp_server_addr_info"
 const FORM_FIELD_REVERSEPROXY string = "reverse_proxy_addr"
+const FORM_FIELD_REVERSEPROXY_IPHEADER string = "reverse_proxy_ip_header"
 const FORM_FIELD_REGISTRATION string = "registration_toggle"
 const FORM_FIELD_BADBOTS string = "bad_bots"
 const FORM_FIELD_BLOCKBADBOTS string = "block_bad_bots"
@@ -586,24 +591,23 @@ func NewDefaultConfig() *MainConfig {
 // UpdateBadBots safely updates the global bad bots configuration.
 // Patterns are stored lowercase (the web middleware matches the lowercased User-Agent), and the
 // list is replaced by a new slice, never mutated, so readers may keep a copied slice header.
+// An empty setting clears the list, so the running server matches a start with an empty setting.
 func UpdateBadBots(badBotsStr string, blockEnabled bool) {
 	BadBotsMutex.Lock()
 	defer BadBotsMutex.Unlock()
 
 	BlockBadBots = blockEnabled
 
-	if badBotsStr != "" {
-		// Parse comma-separated list and trim whitespace
-		patterns := []string{}
-		for _, pattern := range strings.Split(badBotsStr, ",") {
-			trimmed := strings.TrimSpace(pattern)
-			if trimmed != "" {
-				patterns = append(patterns, strings.ToLower(trimmed))
-			}
+	// Parse comma-separated list and trim whitespace
+	var patterns []string
+	for _, pattern := range strings.Split(badBotsStr, ",") {
+		trimmed := strings.TrimSpace(pattern)
+		if trimmed != "" {
+			patterns = append(patterns, strings.ToLower(trimmed))
 		}
-		Default_BadBots = patterns
-		log.Printf("Updated BadBots list (%d patterns)", len(Default_BadBots))
 	}
+	Default_BadBots = patterns
+	log.Printf("Updated BadBots list (%d patterns)", len(Default_BadBots))
 
 	log.Printf("Bot configuration updated: BlockBadBots=%t, patterns=%d", BlockBadBots, len(Default_BadBots))
 }

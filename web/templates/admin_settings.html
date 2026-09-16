@@ -169,6 +169,29 @@
                         </td>
                     </tr>
 
+                    <!-- Reverse Proxy Client IP Header Setting -->
+                    <tr>
+                        <td>
+                            <strong>🧭 Client IP Header</strong>
+                            <code>{{if eq .ReverseProxyIPHeader "X-Real-IP"}}X-Real-IP{{else}}X-Forwarded-For{{end}}</code>
+                            <br>
+                            <span class="text-muted">The one header the client IP is taken from behind a trusted proxy. Set it to the header your proxy really sets; the other one is ignored. Restart the web server to apply.</span>
+                            <br>
+                        </td>
+                        <td>
+                            <form action="/admin/settings" method="post" class="d-flex gap-1">
+                                <input type="hidden" name="setting" value="{{.FormFieldReverseProxyIPHeader}}">
+                                <select class="form-select form-select-sm" name="{{.FormFieldReverseProxyIPHeader}}" style="min-width: 150px;">
+                                    <option value="X-Forwarded-For" {{if ne .ReverseProxyIPHeader "X-Real-IP"}}selected{{end}}>X-Forwarded-For</option>
+                                    <option value="X-Real-IP" {{if eq .ReverseProxyIPHeader "X-Real-IP"}}selected{{end}}>X-Real-IP</option>
+                                </select>
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-arrow-left-right"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+
                     <!-- Block Bad Bots Setting -->
                     <tr>
                         <td>

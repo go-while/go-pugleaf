@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -17,6 +18,10 @@ import (
 )
 
 const maxChatInputLineLength = 1024
+
+// maxChatRequestBytes bounds the JSON body of a chat send. The message itself may be at most
+// maxChatInputLineLength; the rest leaves room for the model field and JSON escaping.
+const maxChatRequestBytes = 64 << 10
 
 // ollamaProxyURL is the endpoint every chat request is proxied to. It is a var so tests can
 // point it at a fake proxy; nothing but aichatSend reads it.
@@ -277,7 +282,15 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 		Message string `json:"message"`
 		Model   string `json:"model"` // Selected model's post key
 	}
+	// Bound the body before decoding it: the message length is only checked after ShouldBindJSON,
+	// so without this an authenticated client could make the decoder allocate without limit.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxChatRequestBytes)
 	if err := c.ShouldBindJSON(&req); err != nil || req.Message == "" {
+		if errors.As(err, new(*http.MaxBytesError)) {
+			log.Printf("AI Chat request body too large (user %d, limit %d bytes)", session.UserID, maxChatRequestBytes)
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "Request too large"})
+			return
+		}
 		log.Printf("AI Chat Invalid request: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: message required"})
 		return

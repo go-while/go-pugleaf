@@ -469,6 +469,13 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		reverseProxyAddr = "" // Default to empty on error
 	}
 
+	// Get current ReverseProxyIPHeader from database
+	reverseProxyIPHeader, err := s.DB.GetConfigValue(config.CFG_KEY_REVERSEPROXY_IPHEADER)
+	if err != nil {
+		log.Printf("Failed to get ReverseProxyIPHeader: %v", err)
+		reverseProxyIPHeader = "" // Default to empty (X-Forwarded-For) on error
+	}
+
 	// Get current BadBots from database
 	badBots, err := s.DB.GetConfigValue(config.CFG_KEY_BADBOTS)
 	if err != nil {
@@ -553,30 +560,32 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		AbuseMail:                  abuseMail,
 		WebLocalNNTPServerAddrInfo: webLocalNNTPServerAddrInfo,
 		ReverseProxyAddr:           reverseProxyAddr,
+		ReverseProxyIPHeader:       reverseProxyIPHeader,
 		BadBots:                    badBots,
 		BlockBadBots:               blockBadBots,
 		BadIPs:                     badIPs,
 		BlockBadIPs:                blockBadIPs,
 		APIEnabled:                 apiEnabled,
 		// Form field constants for admin settings
-		FormFieldHostname:     config.FORM_FIELD_HOSTNAME,
-		FormFieldWebPostSize:  config.FORM_FIELD_WEBPOSTSIZE,
-		FormFieldAbuseMail:    config.FORM_FIELD_ABUSEMAIL,
-		FormFieldWebLocalNNTP: config.FORM_FIELD_WEBLOCALNNTP,
-		FormFieldReverseProxy: config.FORM_FIELD_REVERSEPROXY,
-		FormFieldRegistration: config.FORM_FIELD_REGISTRATION,
-		FormFieldBadBots:      config.FORM_FIELD_BADBOTS,
-		FormFieldBlockBadBots: config.FORM_FIELD_BLOCKBADBOTS,
-		FormFieldBadIPs:       config.FORM_FIELD_BADIPS,
-		FormFieldBlockBadIPs:  config.FORM_FIELD_BLOCKBADIPS,
-		FormFieldAPIEnabled:   config.FORM_FIELD_API_ENABLED,
-		PostQueue:             postQueue,
-		QueueStats:            queueStats,
-		StatusFilter:          statusFilter,
-		QueueSearch:           queueSearch,
-		Success:               session.GetSuccess(),
-		Error:                 session.GetError(),
-		ActiveTab:             activeTab,
+		FormFieldHostname:             config.FORM_FIELD_HOSTNAME,
+		FormFieldWebPostSize:          config.FORM_FIELD_WEBPOSTSIZE,
+		FormFieldAbuseMail:            config.FORM_FIELD_ABUSEMAIL,
+		FormFieldWebLocalNNTP:         config.FORM_FIELD_WEBLOCALNNTP,
+		FormFieldReverseProxy:         config.FORM_FIELD_REVERSEPROXY,
+		FormFieldReverseProxyIPHeader: config.FORM_FIELD_REVERSEPROXY_IPHEADER,
+		FormFieldRegistration:         config.FORM_FIELD_REGISTRATION,
+		FormFieldBadBots:              config.FORM_FIELD_BADBOTS,
+		FormFieldBlockBadBots:         config.FORM_FIELD_BLOCKBADBOTS,
+		FormFieldBadIPs:               config.FORM_FIELD_BADIPS,
+		FormFieldBlockBadIPs:          config.FORM_FIELD_BLOCKBADIPS,
+		FormFieldAPIEnabled:           config.FORM_FIELD_API_ENABLED,
+		PostQueue:                     postQueue,
+		QueueStats:                    queueStats,
+		StatusFilter:                  statusFilter,
+		QueueSearch:                   queueSearch,
+		Success:                       session.GetSuccess(),
+		Error:                         session.GetError(),
+		ActiveTab:                     activeTab,
 	}
 
 	// Render the modular admin templates (cached under the "admin" name with adminTemplateFuncs)
