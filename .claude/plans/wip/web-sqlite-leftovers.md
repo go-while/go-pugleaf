@@ -874,3 +874,79 @@ with a valid one too. The outcome is strictly safer and the real coverage moved 
   `batchGroupDBShutdownAttempts` 120, both ≈2 min); a loaded box may want more.
 - `getBatchGroupDB`'s shutdown bound has no unit test — reaching it costs the real 60s `GetGroupDB`
   deadline. It is a plain counter beside the tested `batchGroupDBRetry` table.
+
+### Post-merge review wave — 2026-09-16, on the fully merged tree
+
+Four reviewers over what the per-slice reviews structurally could not see: the orchestrator's own
+inline commits (never reviewed by anyone), the combined `internal/web` and `internal/database` diffs
+as single units, and the two documentation files. Two majors were **cross-wave defects** — each half
+was correct and reviewed in isolation, and only their combination is broken.
+
+| Target | Verdict | Fixed in |
+|----|----|----|
+| orchestrator inline commits | MERGE (3 minors) | `d1d5fdb` |
+| `internal/web` combined | MERGE AFTER FIXES | `efb452d` → merge `ac87e08` |
+| `internal/database` combined | MERGE AFTER FIXES | `5129efe` → merge `0914aa0` |
+| `docs/web-deployment.md`, `internal/web/README.md` | ship after 3 fixes | `d1d5fdb` |
+
+**1. Cross-wave, both halves of the same shape.**
+- *Web:* wave 1 added the final `flushTokenUsage()` after the shutdown drain; wave 2's F17 made the
+  retry cap measure **busy time** rather than wall clock. Together, `Shutdown`'s last step could sit in
+  `AddTokenUsage` for ~5 min per token (x2 attempts) with the NNTP server, post queue, cron and the
+  database all still up. Now a goroutine bounded by `shutdownGrace`, with a matching budget inside
+  `flushTokenUsage` so the abandoned writer stops too. `TestLo1CoreFinalFlushBounded` holds the main DB
+  write lock and asserts `Shutdown` returns within the grace; it fails at 8s without the fix.
+- *Database:* the `goto retry1`/`retry2` loops were unbounded and **enclosed** the bounds `lo2-db-writer`
+  added — `ForceCloseGroupDB` drops the handle, the reopen succeeds in milliseconds, so only
+  `batchInsertOverviews` keeps failing and the bound never fires. That was the last path able to block
+  `db.WG.Wait()` forever.
+
+**2. The bounds were ~60x their documented value.** `batchGroupDBShutdownAttempts = 120` and
+`batchStatsShutdownRounds = 24` counted *attempts*, but an attempt can spend 60 s inside `GetGroupDB`
+or a full `GetSQLiteMaxRetryWait` (5 min) inside `RetryableTransactionExec` — so "~2 minutes" was
+really ~2 hours. Replaced by one `batchShutdownClock` with a wall-clock deadline captured on the first
+check that reports shutdown, insensitive to how long an inner call takes.
+
+**3. The F15 clamp only moved the panic.** `NewPaginationInfo` divides by the page size
+(`models.go:413`), so `LIMIT_sectionPage = 0` still panicked, two lines after the clamp that was
+supposed to close it. Fixed with a single clamped `size` used for the page math, the slice and the
+pagination info, plus a guard inside `NewPaginationInfo` for its other callers.
+
+**4. The perf guard could not catch the revert it was supposed to catch.** Three textual copies of the
+thread-child query existed (`thread_cache.go`, `w2_dbperf_test.go`, `lo1_db_test.go`). Now one
+`threadChildrenQuery`; the tests build from it, so reverting `+hide = 0` fails the plan assertion.
+
+**5. Three operator-facing documentation errors**, all written from the plan's intent rather than from
+the code: the `Host` passthrough rationale was cosmetic in the text but is actually the CSRF
+`Origin`/`Host` comparison (a rewritten `Host` returns **403 on every browser POST**, stated outright
+in the code comment at `webserver.go:57-58`); the page cap is **101** and a *silent* clamp, not a
+missing link, and does not apply to the section group-list page; and `?cursor=` **is** implemented
+server-side, only unlinked in `pagination.html`.
+
+**Final state (`ac87e08`):** gofmt/vet/build clean; `go test -race -count=1` green across all 8
+packages (and `-shuffle=on`/`-count=2` green for web and database during review);
+`scripts/test-web-leftovers.sh` **`pass=16 fail=0`**; `scripts/test-web-hardening.sh`
+**`pass=25 fail=0`**; 0 DATA RACE reports in both scratch logs.
+
+**Process notes for the next run of this skill:**
+- Two instructions to the implementers were wrong and they correctly refused rather than routing
+  around them: I told worktree-isolated agents to work in the main checkout (their isolation forbids
+  it — they branched and asked for a re-merge), and I demanded `pass=16 fail=0` from a worktree
+  branched before the wave-2 web slices, where it is unreachable by construction.
+- The orchestrator's own inline commits are a blind spot by default: nothing in the skill reviews
+  them. Two real defects were in them.
+
+**Remaining leftovers** (unchanged from the wave-2 list, minus the bad-IPs entry which is now fixed):
+- `retry1`/`retry2`'s loop bounds have no unit test — exercising them needs a live `SQ3batch` plus a
+  group DB whose insert keeps failing. The `batchShutdownClock` itself is tested.
+- `profileUpdate`'s three writes are separate un-transacted statements (now `RetryableExec`, but a
+  failure on the second still leaves the first committed). Full fix: one `RetryableTransactionExec`.
+- `runTokenUsageFlusher` takes no `db.WG` slot, deliberately: a slot would move the block into
+  `db.WG.Wait()`. With the bounded flush the write-to-a-closing-DB window is short and logged.
+- `DeleteNewsgroup` leaves `user_spam_flags` rows keyed on the deleted `newsgroup_id` (dead rows only;
+  ids are `AUTOINCREMENT` so never reused).
+- `cronjobs.go`: a job started during shutdown can escape `StopCronManager`'s snapshot (pre-existing,
+  window now smaller).
+- `cmd/nntp-analyze/main.go:280` closes `StopChan` without `db.Shutdown()`.
+- `EmbeddedFileHandler`/`staticContentType` are dead in production; `.scss` is shipped but absent from
+  the type table.
