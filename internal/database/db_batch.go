@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -559,6 +560,160 @@ const query_updateNewsgroupsStats = `
 					END,
 					updated_at = excluded.updated_at`
 
+// batchGroupDBAttempts is how often processNewsgroupBatch opens a group database that
+// fails to initialize before it drops the drained articles.
+const batchGroupDBAttempts = 8
+
+// batchStatsRetryEvery is the pause between two rounds of the newsgroup stats update
+// while the main database is busy.
+const batchStatsRetryEvery = 5 * time.Second
+
+// batchShutdownGrace is how much wall-clock time a retry loop of the batch writer gets
+// after shutdown has begun before it abandons its batch. Every tool closes StopChan,
+// waits for db.WG and only then closes the databases; processNewsgroupBatch runs inside
+// db.WG (StartOrch -> processAllPendingBatches), so a loop that keeps retrying here
+// blocks db.WG.Wait() and the process has to be killed.
+//
+// It is wall-clock on purpose: counting attempts or rounds hides how long each attempt
+// takes. One GetGroupDB attempt can sit in its own 60s wait, and one stats round runs a
+// RetryableTransactionExec that retries busy errors for GetSQLiteMaxRetryWait (5 minutes
+// by default, more when a tool raised it) before it returns.
+const batchShutdownGrace = 2 * time.Minute
+
+// batchShutdownClock bounds one retry loop once shutdown has begun. The zero value has
+// not started; the clock starts on the first check that reports shutdown, so a loop that
+// began while the database was live keeps its full grace.
+type batchShutdownClock struct {
+	grace    time.Duration
+	deadline time.Time
+}
+
+// expired reports whether the loop must stop now. While isShutdown is nil or reports a
+// live database it never expires, which keeps the unbounded retry the batch writer needs
+// in normal operation.
+func (c *batchShutdownClock) expired(isShutdown func() bool) bool {
+	if isShutdown == nil || !isShutdown() {
+		return false
+	}
+	if c.deadline.IsZero() {
+		c.deadline = time.Now().Add(c.grace)
+		return false
+	}
+	return !time.Now().Before(c.deadline)
+}
+
+// batchGroupDBRetry decides whether processNewsgroupBatch tries GetGroupDB again after
+// err on attempt (0-based), and how long it waits first:
+//   - errGroupDBClosed: never, the group databases are shut down.
+//   - errGroupDBInitTimeout: every second without a limit, the initialization of that
+//     group is still running and the articles are only held in memory.
+//   - anything else: min(2^attempt s, 30 s), for batchGroupDBAttempts attempts.
+func batchGroupDBRetry(err error, attempt int) (retry bool, delay time.Duration) {
+	switch {
+	case err == nil:
+		return false, 0
+	case errors.Is(err, errGroupDBClosed):
+		return false, 0
+	case errors.Is(err, errGroupDBInitTimeout):
+		return true, time.Second
+	}
+	if attempt >= batchGroupDBAttempts-1 {
+		return false, 0
+	}
+	delay = time.Duration(1<<uint(attempt)) * time.Second
+	if delay > 30*time.Second {
+		delay = 30 * time.Second
+	}
+	return true, delay
+}
+
+// getBatchGroupDB opens the group database for a batch that is already drained out of
+// BATCHchan. It returns an error only once batchGroupDBRetry gives up, or once
+// batchShutdownGrace has passed since shutdown began: this loop runs inside db.WG,
+// which every tool waits for before it closes the databases, so a wedged initialization
+// must not pin the process. giveUp, when set, is called with the first and the last
+// error before the error is returned; the two call sites word the consequence
+// differently.
+func (sq *SQ3batch) getBatchGroupDB(newsgroup *string, articles int, giveUp func(firstErr, lastErr error)) (*GroupDB, error) {
+	var firstErr error
+	clock := batchShutdownClock{grace: batchShutdownGrace}
+	for attempt := 0; ; attempt++ {
+		groupDB, err := sq.db.GetGroupDB(*newsgroup)
+		if err == nil {
+			return groupDB, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		retry, delay := batchGroupDBRetry(err, attempt)
+		if retry && clock.expired(sq.db.IsDBshutdown) {
+			log.Printf("[BATCH] group database '%s' still unavailable %v into shutdown, giving up: %v",
+				*newsgroup, batchShutdownGrace, err)
+			retry = false
+		}
+		if !retry {
+			if giveUp != nil {
+				giveUp(firstErr, err)
+			}
+			return nil, err
+		}
+		if attempt == 0 || (attempt+1)%100 == 0 {
+			log.Printf("[BATCH] waiting for group database '%s' holding %d articles (attempt %d, retry in %v): %v",
+				*newsgroup, articles, attempt+1, delay, err)
+		}
+		time.Sleep(delay)
+	}
+}
+
+// forceCloseGroupDB returns the worker and closes the group database handle after a
+// failed batch phase. It goes through the processor when one is set: sq.proc stays nil
+// until SetProcessor runs (tools and tests drive the batch writer without a processor),
+// and calling through the nil interface would panic in a path that is now entered more
+// often than before.
+func (sq *SQ3batch) forceCloseGroupDB(groupDB *GroupDB) {
+	if groupDB == nil {
+		return
+	}
+	var err error
+	if sq.proc != nil {
+		err = sq.proc.ForceCloseGroupDB(groupDB)
+	} else {
+		err = sq.db.ForceCloseGroupDB(groupDB)
+	}
+	if err != nil {
+		log.Printf("[BATCH] ForceCloseGroupDB '%s': %v", groupDB.Newsgroup, err)
+	}
+}
+
+// updateNewsgroupStatsWithRetry repeats exec while it fails with a busy/locked SQLite
+// error, waiting every between rounds. The articles are already committed to the group
+// database at this point, so giving up would lose the message_count/last_article
+// increment for good (F17). Any other error is returned at once, as before.
+//
+// isShutdown, when set, bounds the retry to grace wall-clock time once shutdown has
+// begun. The caller runs inside db.WG and every tool closes StopChan, waits for db.WG
+// and only then closes the databases, so an unbounded retry here would keep a process
+// that hit a long-held write lock on the main database alive for good. grace is a
+// parameter so the test can use a short one; the caller passes batchShutdownGrace.
+func updateNewsgroupStatsWithRetry(exec func() error, every time.Duration, what string, isShutdown func() bool, grace time.Duration) error {
+	clock := batchShutdownClock{grace: grace}
+	for round := 1; ; round++ {
+		err := exec()
+		if err == nil || !isRetryableSQLiteError(err) {
+			return err
+		}
+		if clock.expired(isShutdown) {
+			log.Printf("[BATCH] newsgroup stats for %s still busy %v into shutdown, giving up (counters miss this batch): %v",
+				what, grace, err)
+			return err
+		}
+		if round == 1 || round%100 == 0 {
+			log.Printf("[BATCH] newsgroup stats still busy for %s (round %d, retry in %v): %v", what, round, every, err)
+		}
+		time.Sleep(every)
+	}
+}
+
 func (sq *SQ3batch) processNewsgroupBatch(task *BatchTasks) {
 	startTime := time.Now()
 	task.Mux.Lock()
@@ -599,20 +754,39 @@ drainChannel:
 	}(len(batches))
 	log.Printf("[BATCH] processNewsgroupBatch: ng: '%s' with %d articles (more queued: %d)", *task.Newsgroup, len(batches), len(task.BATCHchan))
 
+	// The retry1 loop below is unbounded while the database is live (an insert that keeps
+	// failing, e.g. a full filesystem, must not lose the drained articles), but it runs
+	// inside db.WG: once shutdown has begun it gets batchShutdownGrace and then drops the
+	// batch, so db.WG.Wait() cannot block on it.
+	insertClock := batchShutdownClock{grace: batchShutdownGrace}
+	insertAttempts := 0
 retry1:
-	// Get database connection for this newsgroup
-	groupDB, err := sq.db.GetGroupDB(*task.Newsgroup)
+	// Get database connection for this newsgroup. The articles are already drained out
+	// of BATCHchan, so giving up here loses them: wait while the group database is only
+	// still initializing and drop them only after batchGroupDBRetry gives up (F16).
+	groupDB, err := sq.getBatchGroupDB(task.Newsgroup, len(batches), func(firstErr, lastErr error) {
+		if firstErr != nil && firstErr != lastErr {
+			log.Printf("[BATCH] dropping %d articles for '%s' (first %s): %v", len(batches), *task.Newsgroup, firstErr, lastErr)
+			return
+		}
+		log.Printf("[BATCH] dropping %d articles for '%s': %v", len(batches), *task.Newsgroup, lastErr)
+	})
 	if err != nil {
-		log.Printf("[BATCH] processNewsgroupBatch Failed to get database for group '%s': %v", *task.Newsgroup, err)
 		return
 	}
 
 	// PHASE 1: Insert complete articles (overview + article data unified) and set article numbers directly on batches
 	if err := sq.batchInsertOverviews(*task.Newsgroup, batches, groupDB, task.Newsgroup); err != nil {
 		if groupDB != nil {
-			sq.proc.ForceCloseGroupDB(groupDB)
+			sq.forceCloseGroupDB(groupDB)
 			log.Printf("[BATCH] processNewsgroupBatch Failed1 to process batch for group '%s': %v groupDB='%#v'", *task.Newsgroup, err, groupDB)
 			groupDB = nil
+		}
+		insertAttempts++
+		if insertClock.expired(sq.db.IsDBshutdown) {
+			log.Printf("[BATCH] dropping %d articles for '%s': insert still failing %v into shutdown (%d attempts): %v",
+				len(batches), *task.Newsgroup, batchShutdownGrace, insertAttempts, err)
+			return
 		}
 		time.Sleep(time.Second)
 		goto retry1
@@ -635,21 +809,37 @@ retry1:
 	// PHASE 2: Process threading for all articles (reusing the same DB connection)
 	//log.Printf("[BATCH] processNewsgroupBatch Starting threading phase for %d articles in group '%s'", len(batches), *task.Newsgroup)
 	//start := time.Now()
+	// Same bounding as retry1: unbounded while the database is live, batchShutdownGrace
+	// once shutdown has begun. The articles are committed at this point, so giving up
+	// leaves them without threading, history and stats instead of losing them.
+	threadClock := batchShutdownClock{grace: batchShutdownGrace}
+	threadAttempts := 0
 retry2:
 	if groupDB == nil {
-		groupDB, err = sq.db.GetGroupDB(*task.Newsgroup)
+		// Phase 1 committed these articles already: returning here leaves them without
+		// threading, history entries and stats, so wait for the group database exactly
+		// as retry1 does and say what is left behind when that fails.
+		groupDB, err = sq.getBatchGroupDB(task.Newsgroup, len(batches), func(_, lastErr error) {
+			log.Printf("[BATCH] %d articles for '%s' are committed without threading/history/stats (rebuild needed): %v",
+				len(batches), *task.Newsgroup, lastErr)
+		})
 		if err != nil {
-			log.Printf("[BATCH] processNewsgroupBatch Failed2 to get database for group '%s': %v", *task.Newsgroup, err)
 			return
 		}
 	}
 	if err := sq.batchProcessThreading(task.Newsgroup, batches, groupDB); err != nil {
-		time.Sleep(time.Second)
 		if groupDB != nil {
-			sq.proc.ForceCloseGroupDB(groupDB)
+			sq.forceCloseGroupDB(groupDB)
 			log.Printf("[BATCH] processNewsgroupBatch Failed2 to process threading for group '%s': %v groupDB='%#v'", *task.Newsgroup, err, groupDB)
 			groupDB = nil
 		}
+		threadAttempts++
+		if threadClock.expired(sq.db.IsDBshutdown) {
+			log.Printf("[BATCH] %d articles for '%s' are committed without threading/history/stats (rebuild needed): threading still failing %v into shutdown (%d attempts): %v",
+				len(batches), *task.Newsgroup, batchShutdownGrace, threadAttempts, err)
+			return
+		}
+		time.Sleep(time.Second)
 		goto retry2
 	}
 	defer groupDB.Return()
@@ -744,11 +934,14 @@ retry2:
 			latestDate = time.Now().UTC()
 		}
 		//lastUpdate = time.Now().UTC().Format("2006-01-02 15:04:05")
-		err = RetryableTransactionExec(sq.db.mainDB, func(tx *sql.Tx) error {
-			_, txErr := tx.Exec(query_updateNewsgroupsStats,
-				*task.Newsgroup, len(batches), maxArticleNum, latestDate.UTC().Format("2006-01-02 15:04:05"))
-			return txErr
-		})
+		statsWhat := fmt.Sprintf("'%s' (+%d articles, max_article=%d)", *task.Newsgroup, len(batches), maxArticleNum)
+		err = updateNewsgroupStatsWithRetry(func() error {
+			return RetryableTransactionExec(sq.db.mainDB, func(tx *sql.Tx) error {
+				_, txErr := tx.Exec(query_updateNewsgroupsStats,
+					*task.Newsgroup, len(batches), maxArticleNum, latestDate.UTC().Format("2006-01-02 15:04:05"))
+				return txErr
+			})
+		}, batchStatsRetryEvery, statsWhat, sq.db.IsDBshutdown, batchShutdownGrace)
 
 		if err != nil {
 			log.Printf("[BATCH] processNewsgroupBatch Failed to update newsgroup stats for '%s': %v", *task.Newsgroup, err)

@@ -133,59 +133,6 @@ func (s *SessionData) GetError() string {
 	return err
 }
 
-// WebAuthRequired middleware for web authentication (different from API auth)
-func (s *WebServer) WebAuthRequired() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		session := s.getWebSession(c)
-		if session == nil {
-			c.Redirect(http.StatusSeeOther, "/login?redirect="+url.QueryEscape(c.Request.URL.RequestURI()))
-			c.Abort()
-			return
-		}
-
-		// Store user in context for handlers
-		c.Set("user", session.User)
-		c.Next()
-	}
-}
-
-// WebAdminRequired middleware for admin-only routes
-func (s *WebServer) WebAdminRequired() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		session := s.getWebSession(c)
-		if session == nil {
-			c.Redirect(http.StatusSeeOther, "/login?redirect="+url.QueryEscape(c.Request.URL.RequestURI()))
-			c.Abort()
-			return
-		}
-
-		// Check if user has admin permission
-		permissions, err := s.DB.GetUserPermissions(session.UserID)
-		if err != nil {
-			s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
-			c.Abort()
-			return
-		}
-
-		hasAdminPerm := false
-		for _, perm := range permissions {
-			if perm.Permission == "admin" {
-				hasAdminPerm = true
-				break
-			}
-		}
-
-		if !hasAdminPerm {
-			s.renderError(c, http.StatusForbidden, "Access Denied", "Admin access required")
-			c.Abort()
-			return
-		}
-
-		c.Set("user", session.User)
-		c.Next()
-	}
-}
-
 // Gin context keys of the per-request auth cache.
 const (
 	ctxKeyWebSessionChecked = "pugleaf.webSessionChecked" // bool: getWebSession already ran
@@ -222,8 +169,9 @@ func (s *WebServer) lookupWebSession(c *gin.Context) *SessionData {
 		return nil
 	}
 
-	// Refresh cookie to keep client-side max age in sync with sliding server timeout
-	s.setSessionCookie(c, sessionID)
+	// Refresh cookie to keep client-side max age in sync with the server-side expiry,
+	// which slides only every database.sessionSlideEvery.
+	s.setSessionCookieMaxAge(c, sessionID, sessionCookieMaxAge(*user.SessionExpiresAt))
 
 	authUser := &AuthUser{
 		ID:          user.ID,
@@ -354,30 +302,41 @@ func validatePassword(password string) error {
 	return nil
 }
 
-// Helper function to set session cookie
+// setSessionCookie sets the session cookie of a freshly created session, which lasts a
+// full SessionTimeout. Requests on an existing session use setSessionCookieMaxAge with
+// sessionCookieMaxAge, so the cookie follows the server-side expiry.
 func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
+	s.setSessionCookieMaxAge(c, sessionID, int(database.SessionTimeout.Seconds()))
+}
+
+// sessionCookieMaxAge returns the cookie Max-Age (seconds) for a server-side session
+// expiry: the remaining lifetime, clamped to 1..SessionTimeout. The DB expiry slides only
+// every database.sessionSlideEvery, so a fixed full-timeout Max-Age would leave the
+// browser holding a valid-looking cookie for a session the server already dropped.
+func sessionCookieMaxAge(expiresAt time.Time) int {
+	maxAge := int(database.SessionTimeout.Seconds())
+	remaining := int(time.Until(expiresAt).Seconds())
+	if remaining < 1 {
+		return 1
+	}
+	if remaining > maxAge {
+		return maxAge
+	}
+	return remaining
+}
+
+// setSessionCookieMaxAge writes the session cookie with an explicit Max-Age.
+func (s *WebServer) setSessionCookieMaxAge(c *gin.Context, sessionID string, maxAge int) {
 	// Detect HTTPS from the current request perspective only
 	// Prefer actual TLS on the request or trusted reverse proxy header
 	// Gin guarantees c.Request is non-nil for handlers
+	isHTTPS := c.Request.TLS != nil
 	if v, exists := c.Get("is_https"); exists {
 		if b, ok := v.(bool); ok {
 			// Use scheme determined by ReverseProxyMiddleware
-			isHTTPS := b
-			cookie := &http.Cookie{
-				Name:     "session_id",
-				Value:    sessionID,
-				Path:     "/",
-				HttpOnly: true,
-				Secure:   isHTTPS,
-				SameSite: http.SameSiteLaxMode,                   // Works well with reverse proxies
-				MaxAge:   int(database.SessionTimeout.Seconds()), // align with server-side sliding timeout
-			}
-			http.SetCookie(c.Writer, cookie)
-			return
+			isHTTPS = b
 		}
 	}
-	// Fallback if middleware wasn't applied
-	isHTTPS := c.Request.TLS != nil
 
 	cookie := &http.Cookie{
 		Name:     "session_id",
@@ -385,8 +344,8 @@ func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   isHTTPS,
-		SameSite: http.SameSiteLaxMode,                   // Works well with reverse proxies
-		MaxAge:   int(database.SessionTimeout.Seconds()), // align with server-side sliding timeout
+		SameSite: http.SameSiteLaxMode, // Works well with reverse proxies
+		MaxAge:   maxAge,               // follows the server-side sliding timeout
 	}
 
 	http.SetCookie(c.Writer, cookie)

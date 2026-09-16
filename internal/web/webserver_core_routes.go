@@ -2,6 +2,7 @@
 package web
 
 import (
+	"context"
 	"fmt"
 	"html/template"
 	"log"
@@ -37,9 +38,22 @@ type WebServer struct {
 	trustedProxyNets []*net.IPNet // reverse proxies whose X-Forwarded-* headers are trusted
 
 	httpServerMu sync.Mutex
-	httpServer   *http.Server  // set by Start, stopped by Shutdown
+	httpServer   *http.Server  // set by Start/serveOn, stopped by Shutdown
 	stopCh       chan struct{} // closed by Shutdown; background goroutines of the server stop on it
 	stopOnce     sync.Once
+
+	inFlightRequests atomic.Int64       // requests currently inside a handler (trackInFlight)
+	baseCtx          context.Context    // parent of every request context (http.Server.BaseContext)
+	cancelBase       context.CancelFunc // cancels baseCtx, so Shutdown can stop handlers that outlive its deadline
+
+	// tokenUsageBuffer collects API token usage between flushes: counts per token id and the
+	// time of the last request. runTokenUsageFlusher writes and empties it.
+	tokenUsageBuffer struct {
+		mu     sync.Mutex
+		counts map[int64]int64
+		last   map[int64]time.Time
+	}
+	tokenUsageDone chan struct{} // closed by runTokenUsageFlusher after its final flush
 }
 
 // TemplateData represents common template data
@@ -206,7 +220,9 @@ type SearchPageData struct {
 	Pagination  *models.PaginationInfo
 }
 
-var DefaultReverseProxy = []string{"127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+// DefaultReverseProxy is the trusted-proxy list used when ReverseProxyAddr is empty or has no
+// usable entry: loopback and the private ranges a proxy on the same host or in a container runs in.
+var DefaultReverseProxy = []string{"127.0.0.0/8", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
 
 // NewWebServer creates a new web server instance
 func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *nntp.NNTPServer, cronEdit bool, noCronjobs bool) *WebServer {
@@ -215,12 +231,50 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 
 	router := gin.Default()
 
-	// Client IPs come from X-Forwarded-For/X-Real-IP only when the peer is a trusted proxy
+	// Client IPs come from one configured header, and only when the peer is a trusted proxy
 	ReverseProxyAddr, err := db.GetConfigValue(config.CFG_KEY_REVERSEPROXY)
 	if err != nil {
 		log.Printf("[WEB]: Error getting ReverseProxyAddr: %v", err)
 	}
-	trustedProxyNets := configureTrustedProxies(router, ReverseProxyAddr)
+	ReverseProxyIPHeader, err := db.GetConfigValue(config.CFG_KEY_REVERSEPROXY_IPHEADER)
+	if err != nil {
+		log.Printf("[WEB]: Error getting ReverseProxyIPHeader: %v", err)
+	}
+	trustedProxyNets := configureTrustedProxiesWithHeader(router, ReverseProxyAddr, ReverseProxyIPHeader)
+	log.Printf("[WEB]: Trusted reverse proxies: %v | client IP header: %v", trustedProxyNets, router.RemoteIPHeaders)
+
+	// Don't use ParseGlob - it causes template name conflicts
+	// Instead, we'll load templates individually in each handler
+	// router.SetHTMLTemplate(templates)
+	var cronmgr *CronJobManager
+	if !noCronjobs {
+		cronmgr = NewCronJobManager(db)
+	} else {
+		cronEdit = false
+	}
+
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	server := &WebServer{
+		DB:               db,
+		Router:           router,
+		Config:           webconfig,
+		NNTP:             nntpconfig,
+		templates:        nil, // We'll handle templates individually
+		CronManager:      cronmgr,
+		CronEdit:         cronEdit,
+		trustedProxyNets: trustedProxyNets,
+		stopCh:           make(chan struct{}),
+		baseCtx:          baseCtx,
+		cancelBase:       cancelBase,
+		tokenUsageDone:   make(chan struct{}),
+	}
+	server.tokenUsageBuffer.counts = make(map[int64]int64)
+	server.tokenUsageBuffer.last = make(map[int64]time.Time)
+
+	// Count in-flight requests, so Shutdown knows when the handlers are done. This is the first
+	// of the application middlewares; gin's own Logger and Recovery run in front of it. Every
+	// route is covered, because this registration precedes setupRoutes.
+	router.Use(server.trackInFlight())
 
 	// Configure security headers based on SSL setup
 	secureConfig := secure.Config{
@@ -241,28 +295,6 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	// Apply security middleware
 	router.Use(secure.New(secureConfig))
 
-	// Don't use ParseGlob - it causes template name conflicts
-	// Instead, we'll load templates individually in each handler
-	// router.SetHTMLTemplate(templates)
-	var cronmgr *CronJobManager
-	if !noCronjobs {
-		cronmgr = NewCronJobManager(db)
-	} else {
-		cronEdit = false
-	}
-
-	server := &WebServer{
-		DB:               db,
-		Router:           router,
-		Config:           webconfig,
-		NNTP:             nntpconfig,
-		templates:        nil, // We'll handle templates individually
-		CronManager:      cronmgr,
-		CronEdit:         cronEdit,
-		trustedProxyNets: trustedProxyNets,
-		stopCh:           make(chan struct{}),
-	}
-
 	// Check if robots.txt file exists
 	robotsPath := "./web/robots.txt"
 	if _, err := os.Stat(robotsPath); err == nil {
@@ -282,6 +314,9 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 
 	// Expire idle AI chat histories and rate-limiter entries until Shutdown
 	go server.runChatCacheSweeper()
+
+	// Write the buffered API token usage every tokenUsageFlushEvery and once more on Shutdown
+	go server.runTokenUsageFlusher()
 
 	// Add reverse proxy middleware for handling X-Forwarded headers
 	router.Use(server.ReverseProxyMiddleware())
@@ -304,14 +339,18 @@ func (s *WebServer) setupRoutes() {
 		log.Printf("[WEB]: Using filesystem static files from ./web/static")
 	}
 
-	// Handle favicon to prevent it from being caught by section routes
-	if UseEmbeddedStatic() {
-		s.Router.GET("/favicon.ico", EmbeddedFileHandler("web/favicon.ico"))
-	} else {
-		s.Router.GET("/favicon.ico", func(c *gin.Context) {
-			c.File("web/favicon.ico")
-		})
+	// Handle favicon to prevent it from being caught by section routes.
+	// web/favicon.ico is not part of the embedded static/* FS, so it always comes from disk;
+	// the type is set explicitly because .ico is mapped to text/plain on some systems.
+	// A missing file still answers 404 (http.ServeFile overwrites the header then).
+	// HEAD is registered too: browsers and proxies probe the icon that way, and gin does not
+	// answer HEAD from a GET route (it used to reply 404 with text/plain).
+	faviconHandler := func(c *gin.Context) {
+		c.Header("Content-Type", "image/x-icon")
+		c.File("web/favicon.ico")
 	}
+	s.Router.GET("/favicon.ico", faviconHandler)
+	s.Router.HEAD("/favicon.ico", faviconHandler)
 	s.Router.GET("/sitemap.xml", func(c *gin.Context) {
 		c.Status(http.StatusNotFound)
 	})
@@ -347,9 +386,9 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/api/v1/stats", s.requireAPIEnabled(), s.getStats)  // API endpoint for stats
 	s.Router.GET("/api/v1/stats/", s.requireAPIEnabled(), s.getStats) // API endpoint for stats
 
-	// Public article preview endpoint (no auth required)
-	//s.Router.GET("/api/v1/groups/:group/articles/:articleNum/preview", s.requireAPIEnabled(), s.getArticlePreview)
-	s.Router.GET("/api/v1/groups/:group/articles/:articleNum/preview", s.getArticlePreview)
+	// Public article preview endpoint (no token required, but it follows the API setting).
+	// The web route below serves the tree view, which must keep working with the API disabled.
+	s.Router.GET("/api/v1/groups/:group/articles/:articleNum/preview", s.requireAPIEnabled(), s.getArticlePreview)
 
 	api := s.Router.Group("/api/v1")
 	api.Use(s.requireAPIEnabled()) // Check if API is enabled
@@ -460,6 +499,7 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/groups/:group/threads", s.groupThreadsPage)                           // Legacy threads access
 	s.Router.GET("/groups/:group/thread/:threadRoot", s.singleThreadPage)                // View single thread flat
 	s.Router.GET("/groups/:group/articles/:articleNum", s.articlePage)                   // Legacy article access
+	s.Router.GET("/groups/:group/articles/:articleNum/preview", s.getArticlePreview)     // Article preview (tree view hover)
 	s.Router.GET("/groups/:group/message/:messageId", s.articleByMessageIdPage)          // Article by message ID
 	s.Router.GET("/groups/:group/tree/:threadRoot", s.threadTreePage)                    // View thread as tree
 	s.Router.GET("/search", s.searchPage)
@@ -498,6 +538,16 @@ func (s *WebServer) setupRoutes() {
 		sectionRoutes.GET("/:section/:group/articles/:articleNum", s.sectionArticlePage)          // /rocksolid/group.name/articles/123
 		sectionRoutes.GET("/:section/:group/message/:messageId", s.sectionArticleByMessageIdPage) // /rocksolid/group.name/message/msgid
 		sectionRoutes.GET("/:section/:group/tree/:threadRoot", s.sectionThreadTreePage)           // View thread as tree in section
+	}
+}
+
+// trackInFlight counts the requests that are inside a handler. Shutdown waits for the counter to
+// reach zero after it cancelled the request contexts, so it can report handlers that keep running.
+func (s *WebServer) trackInFlight() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		s.inFlightRequests.Add(1)
+		defer s.inFlightRequests.Add(-1)
+		c.Next()
 	}
 }
 
@@ -548,11 +598,23 @@ func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
 	}
 }
 
-// configureTrustedProxies makes gin take the client IP from X-Forwarded-For/X-Real-IP only when the
-// direct peer is a configured reverse proxy (comma or whitespace separated IPs/CIDRs; empty or
-// all-invalid means DefaultReverseProxy). gin evaluates X-Forwarded-For right to left and ignores
-// invalid addresses. It returns the parsed networks for isTrustedPeer.
+// configureTrustedProxies configures the trusted proxies with the default client IP header.
+// It returns the parsed networks for isTrustedPeer.
 func configureTrustedProxies(router *gin.Engine, addrs string) []*net.IPNet {
+	return configureTrustedProxiesWithHeader(router, addrs, "")
+}
+
+// configureTrustedProxiesWithHeader makes gin take the client IP from exactly one forwarded header,
+// and only when the direct peer is a configured reverse proxy (comma or whitespace separated
+// IPs/CIDRs; empty or all-invalid means DefaultReverseProxy).
+//
+// Trusting more than one header is unsafe: behind a proxy that sets only X-Real-IP and passes the
+// client's own X-Forwarded-For through, the client picks its own address. header is the value of
+// CFG_KEY_REVERSEPROXY_IPHEADER: "" or "X-Forwarded-For" selects X-Forwarded-For (gin evaluates it
+// right to left and ignores invalid addresses), "X-Real-IP" selects X-Real-IP, anything else is
+// logged and falls back to X-Forwarded-For.
+// It returns the parsed networks for isTrustedPeer.
+func configureTrustedProxiesWithHeader(router *gin.Engine, addrs, header string) []*net.IPNet {
 	list, nets := parseTrustedProxyList(strings.Fields(strings.ReplaceAll(addrs, ",", " ")))
 	if len(list) == 0 {
 		list, nets = parseTrustedProxyList(DefaultReverseProxy)
@@ -561,7 +623,16 @@ func configureTrustedProxies(router *gin.Engine, addrs string) []*net.IPNet {
 		log.Printf("[WEB]: Error setting trusted proxies %v: %v", list, err)
 	}
 	router.ForwardedByClientIP = true
-	router.RemoteIPHeaders = []string{"X-Forwarded-For", "X-Real-IP"}
+
+	switch want := strings.TrimSpace(header); {
+	case strings.EqualFold(want, "X-Real-IP"):
+		router.RemoteIPHeaders = []string{"X-Real-IP"}
+	case want == "" || strings.EqualFold(want, "X-Forwarded-For"):
+		router.RemoteIPHeaders = []string{"X-Forwarded-For"}
+	default:
+		log.Printf("[WEB]: Unknown %s '%s', using X-Forwarded-For (valid: X-Forwarded-For, X-Real-IP)", config.CFG_KEY_REVERSEPROXY_IPHEADER, header)
+		router.RemoteIPHeaders = []string{"X-Forwarded-For"}
+	}
 	return nets
 }
 
@@ -609,13 +680,55 @@ func (s *WebServer) isTrustedPeer(peer net.IP) bool {
 	return false
 }
 
+// untrustedForwarderSeen remembers peers noteUntrustedForwarder has already logged, so a
+// misconfigured proxy produces one line instead of one per request. Both the map and the logging
+// are bounded: after maxUntrustedForwarderIPs distinct peers the set is closed (full) and further
+// peers are neither remembered nor logged, so neither memory nor the log can grow without end.
+var untrustedForwarderSeen = struct {
+	sync.Mutex
+	ips  map[string]struct{}
+	full bool // cap reached: the suppression notice was logged and nothing more is said
+}{ips: make(map[string]struct{})}
+
+const maxUntrustedForwarderIPs = 256
+
+// noteUntrustedForwarder logs once per peer that its forwarded client IP headers are ignored.
+func (s *WebServer) noteUntrustedForwarder(peer net.IP) {
+	key := peer.String()
+	untrustedForwarderSeen.Lock()
+	if untrustedForwarderSeen.full {
+		untrustedForwarderSeen.Unlock()
+		return
+	}
+	if _, seen := untrustedForwarderSeen.ips[key]; seen {
+		untrustedForwarderSeen.Unlock()
+		return
+	}
+	untrustedForwarderSeen.ips[key] = struct{}{}
+	full := len(untrustedForwarderSeen.ips) >= maxUntrustedForwarderIPs
+	untrustedForwarderSeen.full = full
+	untrustedForwarderSeen.Unlock()
+
+	log.Printf("[WEB]: ignoring forwarded client IP headers from untrusted proxy %s: add it to %s", key, config.CFG_KEY_REVERSEPROXY)
+	if full {
+		log.Printf("[WEB]: %d untrusted forwarders seen, suppressing further notices: check %s", maxUntrustedForwarderIPs, config.CFG_KEY_REVERSEPROXY)
+	}
+}
+
 // ReverseProxyMiddleware detects HTTPS terminated by a trusted reverse proxy.
-// The client IP is resolved by gin (see configureTrustedProxies); RemoteAddr and Host are never rewritten.
+// The client IP is resolved by gin (see configureTrustedProxiesWithHeader); RemoteAddr and Host are
+// never rewritten. A private or loopback peer that sends forwarded headers but is not trusted is
+// logged once: that is almost always a proxy missing from ReverseProxyAddr.
 func (s *WebServer) ReverseProxyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		peer := net.ParseIP(c.RemoteIP())
+		trusted := s.isTrustedPeer(peer)
+		if !trusted && peer != nil && (peer.IsLoopback() || peer.IsPrivate()) &&
+			(c.GetHeader("X-Forwarded-For") != "" || c.GetHeader("X-Real-IP") != "") {
+			s.noteUntrustedForwarder(peer)
+		}
 		isHTTPS := c.Request.TLS != nil ||
-			(s.isTrustedPeer(peer) && strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https"))
+			(trusted && strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https"))
 		if isHTTPS {
 			c.Request.URL.Scheme = "https"
 		}

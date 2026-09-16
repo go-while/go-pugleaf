@@ -169,7 +169,10 @@ func TestW1ServerTrustedProxies(t *testing.T) {
 		{"xff right-most untrusted", "", "127.0.0.1:1", map[string]string{"X-Forwarded-For": "203.0.113.9, 198.51.100.7"}, "198.51.100.7", false},
 		{"xff skips trusted hops", "", "127.0.0.1:1", map[string]string{"X-Forwarded-For": "198.51.100.7, 10.0.0.5"}, "198.51.100.7", false},
 		{"invalid x-real-ip ignored", "", "127.0.0.1:1", map[string]string{"X-Real-IP": "not-an-ip"}, "127.0.0.1", false},
-		{"valid x-real-ip from trusted peer", "", "192.168.1.1:1", map[string]string{"X-Real-IP": "198.51.100.8"}, "198.51.100.8", false},
+		// F3: only the one configured header is consulted. The default is X-Forwarded-For,
+		// so X-Real-IP is ignored even from a trusted peer and ClientIP falls back to the
+		// peer itself. X-Real-IP as the configured header is covered by TestLo2ServerTrustedHeader.
+		{"x-real-ip ignored under the default header", "", "192.168.1.1:1", map[string]string{"X-Real-IP": "198.51.100.8"}, "192.168.1.1", false},
 		{"untrusted peer xff ignored", "", "203.0.113.50:1", map[string]string{"X-Forwarded-For": "1.2.3.4"}, "203.0.113.50", false},
 		{"untrusted peer proto ignored", "", "203.0.113.50:1", map[string]string{"X-Forwarded-Proto": "https"}, "203.0.113.50", false},
 		{"trusted peer proto https", "", "127.0.0.1:1", map[string]string{"X-Forwarded-Proto": "HTTPS"}, "127.0.0.1", true},

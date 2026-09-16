@@ -283,7 +283,18 @@ func (db *Database) AuthenticateNNTPUser(username, password string) (*models.NNT
 	if db.NNTPAuthCache != nil {
 		if userID, found := db.NNTPAuthCache.Get(username, password); found {
 			// Cache hit - get the user details (this is fast)
-			return db.GetNNTPUserByID(userID)
+			user, err := db.GetNNTPUserByID(userID)
+			if err != nil {
+				// The row is gone (deleted user) or unreadable: drop the cached
+				// credentials, so only logins that were allowed stay cached.
+				db.InvalidateNNTPUserAuth(username)
+				return nil, err
+			}
+			// A cached login must not outlive the account: re-check on every hit.
+			if err := db.refuseDisabledNNTPUser(username, user.ID); err != nil {
+				return nil, err
+			}
+			return user, nil
 		}
 	}
 
@@ -299,6 +310,12 @@ func (db *Database) AuthenticateNNTPUser(username, password string) (*models.NNT
 		return nil, fmt.Errorf("invalid password")
 	}
 
+	// The password is right: refuse (and do not cache) an inactive NNTP account or one
+	// whose linked web user is disabled.
+	if err := db.refuseDisabledNNTPUser(username, user.ID); err != nil {
+		return nil, err
+	}
+
 	// Authentication successful - cache it
 	if db.NNTPAuthCache != nil {
 		db.NNTPAuthCache.Set(user.ID, username, password)
@@ -308,6 +325,28 @@ func (db *Database) AuthenticateNNTPUser(username, password string) (*models.NNT
 	db.UpdateNNTPUserLastLogin(user.ID)
 
 	return user, nil
+}
+
+// query_nntpUserAuthState reads the two flags that decide whether an NNTP login is
+// allowed: the NNTP account's own is_active and the disabled flag of the linked web
+// user, if there is one.
+const query_nntpUserAuthState = `SELECT n.is_active, COALESCE(u.disabled, 0) FROM nntp_users n LEFT JOIN users u ON u.id = n.web_user_id WHERE n.id = ?`
+
+// refuseDisabledNNTPUser returns an error when the NNTP user is inactive or its linked
+// web user is disabled, and drops the cached credentials so a refused login does not
+// stay usable through the authentication cache. A read error fails closed.
+func (db *Database) refuseDisabledNNTPUser(username string, userID int) error {
+	var isActive, disabled int
+	err := RetryableQueryRowScan(db.mainDB, query_nntpUserAuthState, []interface{}{userID}, &isActive, &disabled)
+	if err != nil {
+		db.InvalidateNNTPUserAuth(username)
+		return fmt.Errorf("failed to check user state: %w", err)
+	}
+	if isActive == 0 || disabled != 0 {
+		db.InvalidateNNTPUserAuth(username)
+		return fmt.Errorf("user disabled")
+	}
+	return nil
 }
 
 // InvalidateNNTPUserAuth removes a user from the authentication cache

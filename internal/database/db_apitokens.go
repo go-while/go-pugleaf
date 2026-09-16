@@ -114,6 +114,25 @@ func (db *Database) UpdateTokenUsage(tokenID int64) error {
 	return err
 }
 
+const query_AddTokenUsage = `UPDATE api_tokens
+	          SET last_used_at = ?, usage_count = usage_count + ?
+	          WHERE id = ?`
+
+// AddTokenUsage adds count buffered requests to a token and sets last_used_at.
+// The web server counts API requests in memory and flushes them periodically (one write per
+// token and flush instead of one write per request), so count may be greater than 1.
+func (db *Database) AddTokenUsage(tokenID int64, count int64, lastUsed time.Time) error {
+	if count <= 0 {
+		return nil
+	}
+	if lastUsed.IsZero() {
+		lastUsed = time.Now()
+	}
+	_, err := RetryableExec(db.mainDB, query_AddTokenUsage,
+		lastUsed.UTC().Format("2006-01-02 15:04:05"), count, tokenID)
+	return err
+}
+
 // ListAPITokens returns all API tokens (for admin purposes)
 func (db *Database) ListAPITokens() ([]*APIToken, error) {
 

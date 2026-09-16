@@ -6,9 +6,10 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"os"
+	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -445,6 +446,10 @@ func (db *Database) UpdateNewsgroupDescription(name string, description string) 
 // DeleteNewsgroup deletes a newsgroup from the main database
 const query_DeleteNewsgroup = `DELETE FROM newsgroups WHERE name = ? AND active = 0`
 
+// query_DeleteSectionGroupsByNewsgroup drops the section memberships of a deleted newsgroup.
+// Without it the section routes keep listing and serving a group that no longer exists (F10).
+const query_DeleteSectionGroupsByNewsgroup = `DELETE FROM section_groups WHERE newsgroup_name = ?`
+
 func (db *Database) DeleteNewsgroup(name string) error {
 	// Get hierarchy before deletion for cache invalidation
 	newsgroup, err := db.MainDBGetNewsgroup(name)
@@ -456,14 +461,39 @@ func (db *Database) DeleteNewsgroup(name string) error {
 		hierarchy = ExtractHierarchyFromGroupName(name)
 	}
 
-	_, err = RetryableExec(db.mainDB, query_DeleteNewsgroup, name)
-
-	// Invalidate hierarchy cache for the affected hierarchy
-	if err == nil && db.HierarchyCache != nil {
-		db.HierarchyCache.InvalidateHierarchy(hierarchy)
+	// The newsgroup row and its section_groups rows go in one transaction: the group is only
+	// removed from its sections when it was really deleted (the DELETE is a no-op while active).
+	err = RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
+		result, err := tx.Exec(query_DeleteNewsgroup, name)
+		if err != nil {
+			return fmt.Errorf("failed to delete newsgroup %s: %w", name, err)
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected for newsgroup %s: %w", name, err)
+		}
+		if rowsAffected != 1 {
+			return nil
+		}
+		if _, err := tx.Exec(query_DeleteSectionGroupsByNewsgroup, name); err != nil {
+			return fmt.Errorf("failed to delete section groups of %s: %w", name, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
-	return err
+	// Invalidate hierarchy cache for the affected hierarchy
+	if db.HierarchyCache != nil {
+		db.HierarchyCache.InvalidateHierarchy(hierarchy)
+	}
+	// No uiCacheHeaderSections.invalidate() here: that cache holds rows of the sections
+	// table only (query_GetHeaderSections), which deleting a newsgroup and its
+	// section_groups rows cannot change. Invalidating it would be dead work and would
+	// make every concurrent in-flight load discard its result.
+
+	return nil
 }
 
 const query_GetThreadsCount = `SELECT COUNT(*) FROM threads`
@@ -723,7 +753,7 @@ func (db *Database) GetUserByID(id int64) (*models.User, error) {
 const query_UpdateUserEmail = `UPDATE users SET email = ? WHERE id = ?`
 
 func (db *Database) UpdateUserEmail(userID int64, email string) error {
-	_, err := db.mainDB.Exec(query_UpdateUserEmail, email, userID)
+	_, err := RetryableExec(db.mainDB, query_UpdateUserEmail, email, userID)
 	return err
 }
 
@@ -731,7 +761,7 @@ func (db *Database) UpdateUserEmail(userID int64, email string) error {
 const query_UpdateUserPassword = `UPDATE users SET password_hash = ? WHERE id = ?`
 
 func (db *Database) UpdateUserPassword(userID int64, passwordHash string) error {
-	_, err := db.mainDB.Exec(query_UpdateUserPassword, passwordHash, userID)
+	_, err := RetryableExec(db.mainDB, query_UpdateUserPassword, passwordHash, userID)
 	return err
 }
 
@@ -739,10 +769,12 @@ func (db *Database) UpdateUserPassword(userID int64, passwordHash string) error 
 const query_UpdateUserDisplayName = `UPDATE users SET display_name = ? WHERE id = ?`
 
 func (db *Database) UpdateUserDisplayName(userID int64, displayName string) error {
-	if len(displayName) > 64 {
+	// Count characters, not bytes: the web validation is 64 runes, so a byte limit here
+	// rejected names the form had already accepted, after the other profile writes (F6).
+	if utf8.RuneCountInString(displayName) > 64 {
 		return fmt.Errorf("display name is too long")
 	}
-	_, err := db.mainDB.Exec(query_UpdateUserDisplayName, displayName, userID)
+	_, err := RetryableExec(db.mainDB, query_UpdateUserDisplayName, displayName, userID)
 	return err
 }
 
@@ -2846,6 +2878,41 @@ func (db *Database) DeleteUser(userID int64) error {
 	return nil
 }
 
+// groupDBFileExists reports whether the group database file of newsgroupName is
+// already present below the configured data directory. It uses the same layout as
+// GetGroupDB (<data>/db/<MD5Hash(name)>/<SanitizeGroupName(name)>.db) but never
+// creates anything, so callers can skip groups that have no database yet.
+func (db *Database) groupDBFileExists(newsgroupName string) bool {
+	// No DataDir fallback here on purpose: GetGroupDB resolves the same layout from
+	// db.dbconfig.DataDir verbatim, so a fallback would probe a different directory
+	// than the one GetGroupDB would create the database in.
+	groupDBfile := filepath.Join(db.dbconfig.DataDir, "db", MD5Hash(newsgroupName), SanitizeGroupName(newsgroupName)+".db")
+	return FileExists(groupDBfile)
+}
+
+// listNewsgroupNames returns every newsgroup name from the main database. It is a
+// separate method so the read cursor is closed before the caller starts long-running
+// work (ResetAllNewsgroupData resets one group database per name).
+func (db *Database) listNewsgroupNames() ([]string, error) {
+	rows, err := RetryableQuery(db.mainDB, `SELECT name FROM newsgroups`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list newsgroups: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("failed to scan newsgroup name: %w", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read newsgroup names: %w", err)
+	}
+	return names, nil
+}
+
 // ResetAllNewsgroupData resets all newsgroup counters and flushes all articles, threads, overview, and cache tables
 // WARNING: This will permanently delete ALL articles, threads, and overview data from ALL newsgroups!
 func (db *Database) ResetAllNewsgroupData() error {
@@ -2866,35 +2933,30 @@ func (db *Database) ResetAllNewsgroupData() error {
 	rowsAffected, _ := result.RowsAffected()
 	log.Printf("ResetAllNewsgroupData: Reset counters for %d newsgroups in main database", rowsAffected)
 
-	// Step 2: Only process actual newsgroup databases that exist
-	// Check data directory for existing newsgroup databases
-	dataDir := db.dbconfig.DataDir
-	if dataDir == "" {
-		dataDir = "./data"
+	// Step 2: Only process newsgroups whose group database file already exists.
+	// Group DBs live in <data>/db/<MD5Hash(name)>/<SanitizeGroupName(name)>.db, so the
+	// newsgroup names come from the main DB, not from a directory listing. Calling
+	// ResetNewsgroupData for a name without a file would create an empty database
+	// (GetGroupDB creates one for any name), so the file is checked first.
+	names, err := db.listNewsgroupNames()
+	if err != nil {
+		return err
 	}
 
-	groupsDir := dataDir + "/groups"
-	entries, err := os.ReadDir(groupsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			log.Printf("ResetAllNewsgroupData: No groups directory found at %s, only main database counters reset", groupsDir)
-			return nil
+	var existing []string
+	for _, name := range names {
+		if db.groupDBFileExists(name) {
+			existing = append(existing, name)
 		}
-		return fmt.Errorf("failed to read groups directory %s: %w", groupsDir, err)
 	}
 
 	var resetCount int
 	var errorCount int
 
-	log.Printf("ResetAllNewsgroupData: Found %d newsgroup databases to reset", len(entries))
+	log.Printf("ResetAllNewsgroupData: Found %d newsgroup databases to reset (of %d newsgroups)", len(existing), len(names))
 
 	// Process only existing newsgroup databases
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		newsgroupName := entry.Name()
+	for _, newsgroupName := range existing {
 		log.Printf("ResetAllNewsgroupData: Resetting database for newsgroup '%s'...", newsgroupName)
 
 		// Reset the group database tables
@@ -2913,7 +2975,7 @@ func (db *Database) ResetAllNewsgroupData() error {
 
 	if errorCount > 0 {
 		log.Printf("ResetAllNewsgroupData: Completed with %d successful database resets and %d errors", resetCount, errorCount)
-		return fmt.Errorf("reset completed with %d errors out of %d newsgroup databases", errorCount, len(entries))
+		return fmt.Errorf("reset completed with %d errors out of %d newsgroup databases", errorCount, len(existing))
 	}
 
 	log.Printf("ResetAllNewsgroupData: Successfully reset %d newsgroup databases and %d main database entries", resetCount, rowsAffected)

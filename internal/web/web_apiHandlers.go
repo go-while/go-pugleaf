@@ -2,10 +2,12 @@
 package web
 
 import (
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -59,12 +61,18 @@ func truncateRunes(s string, n int) string {
 	return s
 }
 
-// apiStatsCache holds the last /api/v1/stats response for apiStatsTTL.
+// apiStatsCache holds the last /api/v1/stats response for apiStatsTTL. loading is set while one
+// request recomputes the statistics and is closed when it is done, so concurrent requests wait
+// for that one instead of loading every group themselves.
 var apiStatsCache struct {
-	mu    sync.Mutex
-	at    time.Time
-	stats gin.H
+	mu      sync.Mutex
+	at      time.Time
+	stats   gin.H
+	loading chan struct{}
 }
+
+// statsComputeCount counts how often getStats recomputed the statistics.
+var statsComputeCount atomic.Int64
 
 // requireAPIEnabled is a middleware that checks if API is enabled
 func (s *WebServer) requireAPIEnabled() gin.HandlerFunc {
@@ -111,7 +119,8 @@ func (s *WebServer) listGroups(c *gin.Context) {
 
 	groups, totalCount, err := s.DB.GetNewsgroupsPaginated(page, LIMIT_listGroups)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API]: listGroups page=%d: %v", page, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
 
@@ -188,7 +197,8 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 
 	overviews, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_listGroups)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API]: getGroupOverview group='%s': %v", groupName, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
 
@@ -307,27 +317,59 @@ func (s *WebServer) getGroupThreads(c *gin.Context) {
 	defer groupDB.Return()
 	threads, err := s.DB.GetThreadsPaged(groupDB, limit, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API]: getGroupThreads group='%s' limit=%d offset=%d: %v", groupName, limit, offset, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
 
-	if len(threads) == limit {
-		c.Header("X-Next-Offset", strconv.Itoa(offset+limit))
+	if next := nextThreadsOffsetHeader(offset, limit, len(threads), apiThreadsMaxOffset); next != "" {
+		c.Header("X-Next-Offset", next)
 	}
 	c.JSON(http.StatusOK, threads)
 }
 
-// getStats returns JSON statistics data for the API (cached for apiStatsTTL)
+// nextThreadsOffsetHeader returns the X-Next-Offset value for a threads page, or "" when
+// there is no next page to advertise: either the page was short, or the next offset would
+// be beyond maxOffset, where getGroupThreads clamps and would serve this page again (F9).
+func nextThreadsOffsetHeader(offset, limit, n, maxOffset int) string {
+	if n != limit || offset+limit > maxOffset {
+		return ""
+	}
+	return strconv.Itoa(offset + limit)
+}
+
+// getStats returns JSON statistics data for the API (cached for apiStatsTTL).
+// When the cache is cold or expired, only one request recomputes; the others wait for it.
 func (s *WebServer) getStats(c *gin.Context) {
 	// The cached map is never modified after it is stored, so it can be served without the lock.
-	apiStatsCache.mu.Lock()
-	cached := apiStatsCache.stats
-	fresh := cached != nil && time.Since(apiStatsCache.at) < apiStatsTTL
-	apiStatsCache.mu.Unlock()
-	if fresh {
-		c.JSON(http.StatusOK, cached)
-		return
+	var mine chan struct{}
+	for {
+		apiStatsCache.mu.Lock()
+		if cached := apiStatsCache.stats; cached != nil && time.Since(apiStatsCache.at) < apiStatsTTL {
+			apiStatsCache.mu.Unlock()
+			c.JSON(http.StatusOK, cached)
+			return
+		}
+		if loading := apiStatsCache.loading; loading != nil {
+			apiStatsCache.mu.Unlock()
+			<-loading // another request is computing: serve its result (or compute if it failed)
+			continue
+		}
+		mine = make(chan struct{})
+		apiStatsCache.loading = mine
+		apiStatsCache.mu.Unlock()
+		break
 	}
+	// This request computes; every other one waits on mine until this returns.
+	defer func() {
+		apiStatsCache.mu.Lock()
+		if apiStatsCache.loading == mine {
+			apiStatsCache.loading = nil
+		}
+		apiStatsCache.mu.Unlock()
+		close(mine)
+	}()
+	statsComputeCount.Add(1)
 
 	groups, err := s.DB.GetActiveNewsgroups()
 	if err != nil {

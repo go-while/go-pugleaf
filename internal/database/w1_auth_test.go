@@ -112,7 +112,7 @@ func TestW1AuthLoginAttemptsByID(t *testing.T) {
 
 	// Lockout window expired: not locked and the counter is reset.
 	old := time.Now().UTC().Add(-2 * LoginLockoutTime).Format("2006-01-02 15:04:05")
-	if _, err := RetryableExec(db.GetMainDB(), "UPDATE users SET updated_at = ? WHERE id = ?", old, u.ID); err != nil {
+	if _, err := RetryableExec(db.GetMainDB(), "UPDATE users SET login_attempt_at = ? WHERE id = ?", old, u.ID); err != nil {
 		t.Fatal(err)
 	}
 	locked, err = db.IsUserLockedOutByID(u.ID)
@@ -171,7 +171,7 @@ func TestW1AuthReserveLoginAttemptByID(t *testing.T) {
 
 	// Window passed: the next attempt is allowed and the counter restarts at 1
 	old := time.Now().UTC().Add(-2 * LoginLockoutTime).Format("2006-01-02 15:04:05")
-	if _, err := RetryableExec(db.GetMainDB(), "UPDATE users SET updated_at = ? WHERE id = ?", old, u.ID); err != nil {
+	if _, err := RetryableExec(db.GetMainDB(), "UPDATE users SET login_attempt_at = ? WHERE id = ?", old, u.ID); err != nil {
 		t.Fatal(err)
 	}
 	ok, err := db.ReserveLoginAttemptByID(u.ID)

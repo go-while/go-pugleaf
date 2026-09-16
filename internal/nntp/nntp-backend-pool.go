@@ -558,8 +558,11 @@ func (pool *Pool) startCleanupWorker() {
 	}
 }
 
-func (pool *Pool) FileCachedListNewsgroups() ([]string, error) {
-	cacheFile := filepath.Join("data", "cache", fmt.Sprintf("%s.list", pool.Backend.Provider.Host))
+// FileCachedListNewsgroups returns the remote newsgroup list, cached in
+// cacheDir/<provider host>.list. cacheDir comes from the caller's -data root
+// (e.g. filepath.Join(dataDir, "cache")); WriteNewsgroupListToFile creates it.
+func (pool *Pool) FileCachedListNewsgroups(cacheDir string) ([]string, error) {
+	cacheFile := filepath.Join(cacheDir, fmt.Sprintf("%s.list", pool.Backend.Provider.Host))
 	groups, err := LoadNewsgroupListFromFile(cacheFile)
 	if len(groups) > 0 && err == nil {
 		return groups, nil

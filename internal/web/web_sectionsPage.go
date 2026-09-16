@@ -2,6 +2,7 @@
 package web
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 
@@ -35,8 +36,8 @@ func (s *WebServer) sectionsPage(c *gin.Context) {
 	// Get all sections
 	sections, err := s.DB.GetSections()
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error",
-			"Could not retrieve sections: "+err.Error())
+		log.Printf("[WEB]: sectionsPage: GetSections: %v", err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 
@@ -92,14 +93,32 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 	// Get groups for this section with activity data (includes sorting)
 	allGroups, err := s.DB.GetSectionGroupsWithActivity(section.ID, sortBy)
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
+		log.Printf("[WEB]: sectionPage: GetSectionGroupsWithActivity(section=%d sort=%s): %v", section.ID, sortBy, err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 
 	// Calculate pagination
 	totalCount := len(allGroups)
-	start := (page - 1) * LIMIT_sectionPage
-	end := start + LIMIT_sectionPage
+
+	// LIMIT_sectionPage is a package var, so treat a non-positive value as 1 once and use
+	// that size for every calculation below: page math, slicing and NewPaginationInfo (which
+	// divides by the page size). Clamp the page before any multiplication, because
+	// (page-1)*size overflows to a negative offset for a huge ?page= and slicing panics (F15).
+	size := LIMIT_sectionPage
+	if size < 1 {
+		size = 1
+	}
+	maxPage := (totalCount + size - 1) / size
+	if maxPage < 1 {
+		maxPage = 1
+	}
+	if page > maxPage {
+		page = maxPage
+	}
+
+	start := (page - 1) * size
+	end := start + size
 
 	if start > totalCount {
 		start = totalCount
@@ -109,7 +128,7 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 	}
 
 	groups := allGroups[start:end]
-	pagination := models.NewPaginationInfo(page, LIMIT_sectionPage, totalCount)
+	pagination := models.NewPaginationInfo(page, size, totalCount)
 
 	// Get all sections for navigation
 	sections, err := s.DB.GetHeaderSections()
@@ -130,7 +149,10 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 	s.renderPage(c, http.StatusOK, data, "section.html", "pagination.html")
 }
 
-// sectionGroupAllowed loads the section and checks that groupName is one of its groups.
+// sectionGroupAllowed loads the section and checks that groupName is one of its groups,
+// and that the group itself is accessible (it exists in newsgroups, and is active unless
+// the request is from an admin) - section_groups rows outlive a deleted newsgroup, and
+// callers open the group DB next, which would create files for any name.
 // On failure it renders the 404 page and returns false. It never opens a group DB.
 func (s *WebServer) sectionGroupAllowed(c *gin.Context, sectionName, groupName string) (*models.Section, bool) {
 	section, err := s.DB.GetSectionByName(sectionName)
@@ -151,6 +173,11 @@ func (s *WebServer) sectionGroupAllowed(c *gin.Context, sectionName, groupName s
 	// Check if this group belongs to the specified section
 	for _, sg := range sectionGroups {
 		if sg.SectionID == section.ID {
+			// Same access rule as /groups/:group: the newsgroup must exist and,
+			// for non-admins, be active. checkGroupAccess renders the 404 itself.
+			if !s.checkGroupAccess(c, groupName) {
+				return nil, false
+			}
 			return section, true
 		}
 	}
@@ -216,7 +243,8 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 	// Get articles (overview data) for this group with pagination
 	articles, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_sectionGroupPage)
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
+		log.Printf("[WEB]: sectionGroupPage: GetOverviewsPaginated(last=%d): %v", lastArticleNum, err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 

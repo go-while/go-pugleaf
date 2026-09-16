@@ -1,104 +1,67 @@
-admin.go:type AdminPageData struct {
-admin.go:func (s *WebServer) getUptime() string {
-admin.go:func (s *WebServer) countEnabledAPITokens(tokens []*database.APIToken) int {
-admin.go:func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
-admin.go:func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
-admin.go:func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
-admin.go:func (s *WebServer) adminCreateProvider(c *gin.Context) {
-admin.go:func (s *WebServer) adminUpdateProvider(c *gin.Context) {
-admin.go:func (s *WebServer) adminDeleteProvider(c *gin.Context) {
-admin.go:func (s *WebServer) adminCreateAPIToken(c *gin.Context) {
-admin.go:func (s *WebServer) adminToggleAPIToken(c *gin.Context) {
-admin.go:func (s *WebServer) adminDeleteAPIToken(c *gin.Context) {
-admin.go:func (s *WebServer) adminCleanupExpiredTokens(c *gin.Context) {
-admin_userfuncs.go:func (s *WebServer) countAdminUsers(users []*models.User) int {
-admin_userfuncs.go:func (s *WebServer) countActiveSessions() int {
-admin_userfuncs.go:func (s *WebServer) adminPage(c *gin.Context) {
-admin_userfuncs.go:func (s *WebServer) adminCreateUser(c *gin.Context) {
-admin_userfuncs.go:func (s *WebServer) adminUpdateUser(c *gin.Context) {
-admin_userfuncs.go:func (s *WebServer) adminDeleteUser(c *gin.Context) {
-admin_userfuncs.go:func (s *WebServer) isAdmin(user *models.User) bool {
-aichatPage.go:type ChatMessage struct {
-aichatPage.go:type AIChatPageData struct {
-aichatPage.go:func (s *WebServer) aichatPage(c *gin.Context) {
-aichatPage.go:func (s *WebServer) aichatSend(c *gin.Context) {
-apiHandlers.go:func (s *WebServer) listGroups(c *gin.Context) {
-apiHandlers.go:func (s *WebServer) getGroupOverview(c *gin.Context) {
-apiHandlers.go:func (s *WebServer) getArticle(c *gin.Context) {
-apiHandlers.go:func (s *WebServer) getArticleByMessageId(c *gin.Context) {
-apiHandlers.go:func (s *WebServer) getGroupThreads(c *gin.Context) {
-apiHandlers.go:func (s *WebServer) getStats(c *gin.Context) {
-apitokens.go:func (s *WebServer) APIAuthRequired() gin.HandlerFunc {
-apitokens.go:func (s *WebServer) createAPITokenHandler(c *gin.Context) {
-apitokens.go:func (s *WebServer) listAPITokensHandler(c *gin.Context) {
-apitokens.go:func (s *WebServer) disableAPITokenHandler(c *gin.Context) {
-apitokens.go:func (s *WebServer) enableAPITokenHandler(c *gin.Context) {
-apitokens.go:func (s *WebServer) deleteAPITokenHandler(c *gin.Context) {
-apitokens.go:func (s *WebServer) cleanupExpiredTokensHandler(c *gin.Context) {
-articlePage.go:func (s *WebServer) articlePage(c *gin.Context) {
-articlePage.go:func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
-auth.go:type AuthUser struct {
-auth.go:type SessionData struct {
-auth.go:func (s *WebServer) WebAuthRequired() gin.HandlerFunc {
-auth.go:func (s *WebServer) WebAdminRequired() gin.HandlerFunc {
-auth.go:func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
-auth.go:func (s *WebServer) createWebSession(c *gin.Context, userID int64) error {
-auth.go:func (s *WebServer) destroyWebSession(c *gin.Context) {
-auth.go:func hashPassword(password string) (string, error) {
-auth.go:func checkPassword(password, hash string) bool {
-auth.go:func validateEmail(email string) bool {
-auth.go:func validateUsername(username string) error {
-auth.go:func validatePassword(password string) error {
-groupPage.go:func (s *WebServer) groupPage(c *gin.Context) {
-groupsPage.go:func (s *WebServer) groupsPage(c *gin.Context) {
-groupThreadsPage.go:func (s *WebServer) groupThreadsPage(c *gin.Context) {
-helpPage.go:func (s *WebServer) helpPage(c *gin.Context) {
-homePage.go:func (s *WebServer) homePage(c *gin.Context) {
-login.go:type LoginPageData struct {
-login.go:func (s *WebServer) loginPage(c *gin.Context) {
-login.go:func (s *WebServer) loginSubmit(c *gin.Context) {
-login.go:func (s *WebServer) logout(c *gin.Context) {
-login.go:func (s *WebServer) renderLoginError(c *gin.Context, errorMsg, redirectURL string) {
-profile.go:type ProfilePageData struct {
-profile.go:func (s *WebServer) profilePage(c *gin.Context) {
-profile.go:func (s *WebServer) profileUpdate(c *gin.Context) {
-register.go:type RegisterPageData struct {
-register.go:func (s *WebServer) registerPage(c *gin.Context) {
-register.go:func (s *WebServer) registerSubmit(c *gin.Context) {
-register.go:func (s *WebServer) createUser(username, email, passwordHash, displayName string) (*models.User, error) {
-register.go:func (s *WebServer) renderRegisterError(c *gin.Context, errorMsg, username, email string) {
-searchPage.go:func (s *WebServer) searchPage(c *gin.Context) {
-sectionsPage.go:func (s *WebServer) sectionsPage(c *gin.Context) {
-sectionsPage.go:func (s *WebServer) sectionPage(c *gin.Context) {
-sectionsPage.go:func (s *WebServer) sectionGroupPage(c *gin.Context) {
-sectionsPage.go:func (s *WebServer) sectionArticlePage(c *gin.Context) {
-sectionsPage.go:func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
-server_core.go:type WebServer struct {
-server_core.go:type TemplateData struct {
-server_core.go:type GroupPageData struct {
-server_core.go:type ArticlePageData struct {
-server_core.go:type StatsPageData struct {
-server_core.go:type GroupsPageData struct {
-server_core.go:type SectionPageData struct {
-server_core.go:type SectionGroupPageData struct {
-server_core.go:type SectionArticlePageData struct {
-server_core.go:type SearchPageData struct {
-server_core.go:func NewServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *nntp.NNTPServer) *WebServer {
-server_core.go:func (s *WebServer) setupRoutes() {
-server_core.go:func (s *WebServer) Start() error {
-statsPage.go:func (s *WebServer) statsPage(c *gin.Context) {
-threadPage.go:func (s *WebServer) singleThreadPage(c *gin.Context) {
-threadTreePage.go:func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
-threadTreePage.go:func (s *WebServer) threadTreePage(c *gin.Context) {
-threadTreePage.go:func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
-threadTreePage.go:func (s *WebServer) threadTreeDemoPage(c *gin.Context) {
-utils.go:func (s *WebServer) GetPort() int {
-utils.go:func (s *WebServer) NNTPGetTCPPort() int {
-utils.go:func (s *WebServer) NNTPGetTLSPort() int {
-utils.go:func (s *WebServer) getBaseTemplateData(c *gin.Context, title string) TemplateData {
-utils.go:func (s *WebServer) isAdminUser(user *models.User) bool {
-utils.go:func (s *WebServer) renderError(c *gin.Context, statusCode int, message string, errstring string) {
-utils.go:func (s *WebServer) renderTemplate(c *gin.Context, templateName string, data interface{}) {
-utils.go:func (s *WebServer) GetGroupCount() int {
-utils.go:func referencesAnyInThread(references string, threadMessageIDs map[string]bool) bool {
-utils.go:func parseReferences(references string) []string {
+# internal/web
+
+Gin web gateway for go-pugleaf: the public site, the JSON API under `/api/v1`, and the admin UI.
+Started from `cmd/web`, which owns the process lifecycle; this package owns the HTTP surface.
+
+For signatures and details use `go doc ./internal/web` — this file is a map, not an API reference.
+Deployment and operational behaviour (reverse proxy, sessions, CSRF, `-data`) live in
+[`docs/web-deployment.md`](../../docs/web-deployment.md).
+
+## Server and routing
+
+| File | Responsibility |
+|---|---|
+| `webserver.go` | `WebServer` lifecycle: `Start`, `serveOn`, `Shutdown` (drains in-flight requests, then cancels their contexts) |
+| `webserver_core_routes.go` | `NewWebServer`, route table, middleware order, trusted proxies and the client-IP header, background goroutine starts |
+| `web_templates.go` | template parsing and the process-wide template cache; `renderPage`, `renderTemplateSet`, `publicErrorDetail` |
+| `web_helpers.go` | `checkGroupAccess` / `checkGroupAccessAPI` — the group existence and active checks every group route funnels through |
+| `web_utils.go` | `renderError`, `getBaseTemplateData` and other shared render helpers |
+| `embedded_static.go` | embedded `static/*` FS and `staticContentType` (`/static/*` itself is served by `http.FileServer`) |
+| `cronjobs.go` | `CronJobManager`: loads jobs from the DB on an interval and starts/stops them |
+| `web_session_cleanup.go` | periodic expiry of stale sessions |
+
+## Auth, sessions and users
+
+| File | Responsibility |
+|---|---|
+| `web_auth.go` | session cookie and lookup, `isAdminRequest`, display-name validation |
+| `web_login.go` | login and logout, lockout handling |
+| `web_registerPage.go` | registration |
+| `web_profile.go` | profile form: email, password and display name |
+
+Session tokens are stored hashed (`database.HashSessionToken`); the raw token only ever lives in
+the cookie. The login lockout uses `users.login_attempt_at`, not `updated_at`.
+
+## Public pages
+
+| File | Responsibility |
+|---|---|
+| `web_homePage.go`, `web_newsPage.go`, `web_statsPage.go`, `web_helpPage.go`, `web_ircPage.go` | site pages |
+| `web_groupsPage.go`, `webgroupPage.go` | group index and one group's article list |
+| `web_groupThreadsPage.go`, `web_threadPage.go`, `web_threadTreePage.go` | thread list, single thread, tree view |
+| `web_articlePage.go` | single article and article preview |
+| `web_hierarchiesPage.go`, `web_sectionsPage.go` | hierarchy and section browsing |
+| `web_searchPage.go` | search |
+| `web_sitePostPage.go` | web posting: validation, reservation and the post queue |
+| `web_aichatPage.go` | AI chat proxy and its per-user/model history |
+
+## API and admin
+
+| File | Responsibility |
+|---|---|
+| `web_apiHandlers.go` | `/api/v1` handlers (groups, overview, threads, stats, article preview) |
+| `web_apitokens.go` | API token auth and buffered usage accounting |
+| `web_admin.go`, `web_adminPage.go` | admin page data and dashboard |
+| `web_admin_settings_unified.go` | the settings form: one entry per setting, with validator and success message |
+| `web_admin_*.go` | per-area admin handlers (users, sections, newsgroups, providers, spam, cron, post queue, NNTP, Ollama, cache, API tokens, site news); `isAdmin` lives in `web_admin_userfuncs.go` |
+
+The settings form (`web_admin_settings_unified.go`) deliberately shows real error text to the admin;
+most other admin handlers use a generic message. Visitor-facing pages show `publicErrorDetail` and log
+the detail with a `[WEB]` prefix.
+
+## Tests
+
+`testmain_test.go` owns the shared fixtures (`w0Srv`, `w0DB`, `w0Do`, `w0NewUser`, `w0NewGroup`,
+`w0Name`, ...) and must not be edited by feature work. Tests never shut down `w0Srv`, never call
+`t.Parallel` while mutating a global, and restore anything they change with `t.Cleanup`.
+End-to-end coverage lives in `scripts/test-web-hardening.sh` and `scripts/test-web-leftovers.sh`.

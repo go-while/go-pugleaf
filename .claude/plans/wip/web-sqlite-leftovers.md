@@ -108,7 +108,7 @@ WSH merged on 2026-09-15 (03d0178). Its `## Outcome` lists leftovers. This plan 
 8. **C6:** measurement and report only. Pool defaults change only after the user has read the report.
 9. **D1:** new read-only tool `cmd/audit-web-posts` with `build_audit-web-posts.sh`. It reports and exits 1 when it finds something; remediation (delete, cancel) is the user's decision.
 10. **E1:** add `./internal/database/... ./internal/web/...` to the CLAUDE.md test line. NAT wave 3 adds `./cmd/nntp-server/...` later.
-11. **F1:** from page 101 on, the group and section group pages continue with `?cursor=` links (Next and Previous). "Last" is hidden when a group has more pages than can be linked by number, and cursor pages show "older articles" instead of a page number.
+11. **F1: DEFERRED** (user decision, wave 0 of the run on 2026-09-16). Deep group pages keep today's behaviour: from page 101 the Next/Last links reload page 101 and older articles stay unreachable by number. No cursor links, no `PaginationInfo` fields, no `GetOverviewsPrevCursor`, no `pagination.html` change. Carried into the Outcome as a known limitation; `lo2-web-pages` keeps only F6/F9/F10/F15.
 12. **F2:** the DB expiry slides at most once every 5 minutes, so the idle timeout is at least 55 minutes, and the cookie Max-Age follows the DB expiry.
 13. **F3/F4:** the client IP comes from one configured header: the new setting `ReverseProxyIPHeader` (`X-Forwarded-For` by default, or `X-Real-IP`), set in admin settings and applied after a restart. `DefaultReverseProxy` adds `127.0.0.0/8` and `fc00::/7`. Forwarded headers from an untrusted private or loopback peer are logged once per IP.
 14. **F5/F6:** the display name is validated only when it changes, the limit is 64 characters (runes) in web and DB, and the profile page stops suggesting `Name <address>`.
@@ -132,7 +132,7 @@ WSH merged on 2026-09-15 (03d0178). Its `## Outcome` lists leftovers. This plan 
 - **Contracts:** NAT K1 pins "all `internal/database` exported functions". This plan removes the dead `database.HandleThreadTreeAPI`, replaces the var `SQLiteMaxRetryWait` with `SetSQLiteMaxRetryWait`/`GetSQLiteMaxRetryWait`, and adds `HashSessionToken`, `AddTokenUsage`, `ReleaseWebPost`. None of these is used by NAT's harness.
 - **Review note for NAT:** its seed findings and `audit-web`/`audit-db` scope must be re-anchored on the tree after this plan (`.claude/plans/done/web-sqlite-leftovers.md`).
 - **F22** changes `AuthenticateNNTPUser` so that cache hits re-check `is_active`, which is part of NAT SEC-6. NAT's review must re-anchor SEC-6 after this plan; its password-change half stays open.
-- **New exported DB functions from the review fixes:** `GetOverviewsPrevCursor`, `UpsertSectionID`. Neither is used by NAT's harness.
+- **New exported DB functions from the review fixes:** `UpsertSectionID` (`GetOverviewsPrevCursor` dropped with F1). Not used by NAT's harness.
 
 ---
 
@@ -152,7 +152,7 @@ WSH merged on 2026-09-15 (03d0178). Its `## Outcome` lists leftovers. This plan 
   - `lo-audit-tool`: package `main` in `cmd/audit-web-posts`; `build_audit-web-posts.sh`.
   - `lo2-pool`: `BenchmarkLo2Pool*`, `lo2Pool*`.
   - `lo2-db-writer`: `errGroupDBInitTimeout`, `batchGroupDBRetry`, `batchGroupDBAttempts`, `updateNewsgroupStatsWithRetry`, `batchStatsRetryEvery`, `(*Database).cronDBEvery`, `(*Database).UpsertSectionID`, `query_nntpUserAuthState`.
-  - `lo2-web-pages`: `buildGroupPagination`, `nextThreadsOffsetHeader`, `(*Database).GetOverviewsPrevCursor`, `query_GetOverviewsPrevCursor`, `query_DeleteSectionGroupsByNewsgroup`, and the fields `models.PaginationInfo.NextCursor`, `.PrevCursor`, `.HideLast`.
+  - `lo2-web-pages`: `nextThreadsOffsetHeader`, `query_DeleteSectionGroupsByNewsgroup`. (F1 deferred: no `buildGroupPagination`, `GetOverviewsPrevCursor`, `query_GetOverviewsPrevCursor` or new `models.PaginationInfo` fields.)
   - `lo2-web-forms`: `sessionSlideEvery`, `(*WebServer).setSessionCookieMaxAge`, `sessionCookieMaxAge`.
   - `lo2-web-server`: `CFG_KEY_REVERSEPROXY_IPHEADER`, `FORM_FIELD_REVERSEPROXY_IPHEADER`, `configureTrustedProxiesWithHeader`, `untrustedForwarderSeen`, `(*WebServer).noteUntrustedForwarder`, `maxChatRequestBytes`, `ollamaSyncHTTPClient`, `(*CronJobManager).loadAndStartJobs`, and the fields `CronJobManager.reloadEvery`, `CronJobManager.loadJobs`.
 - **K3: tests.**
@@ -322,6 +322,9 @@ Owned files:
 
 Changes:
 1. **A1:** `database.NewProgressDB(filepath.Join(*dataDir, "progress.db"))`. The default stays `data/progress.db/progress.db`.
+1b. **A1b** (found in wave 0, same file, same lines you already edit): with no *enabled* provider, `pools` stays empty and `pools[0].FileCachedListNewsgroups()` at `:286` panics with `index out of range [0] with length 0`. The `GetProviders` guard at `:176` does not catch it, because the default DB seeds 23 providers with `enabled=0`. Before `:286` (and before the `*resetProgress` block at `:273`, which also indexes `pools[0]`), add
+   `if len(pools) == 0 { log.Fatalf("[FETCHER]: No enabled provider backend available (%d providers, none enabled)", len(providers)) }`.
+   No network connection happens on this path either way — verified in wave 0 — so the e2e check L10 is safe to run.
 2. **A2:** `FileCachedListNewsgroups(cacheDir string)` uses `filepath.Join(cacheDir, host+".list")`; `WriteNewsgroupListToFile` already creates the directory. The fetcher passes `filepath.Join(*dataDir, "cache")`.
 3. **A3:** `getCacheFilePath` uses `analyzeCachePath(dataDir, provider, group)`, where `dataDir = proc.DB.GetDataDir()` (fall back to `"data"` only when `proc.DB` is nil). The file name stays unchanged.
 4. **A4:** `rsyncInactiveGroupsToDir` builds the source dir as `filepath.Join(db.GetDataDir(), "db", groupsHash)`.
@@ -449,47 +452,32 @@ Acceptance: the listed tests pass with `-race`; the WSH script stays at `fail=0`
 
 ---
 
-#### Slice `lo2-web-pages`: deep pagination, section access, huge pages, threads API offset, display-name DB limit
-Findings: F1, F6 (DB half), F9, F10, F15. Tag `lo2-web-pages`, ports 18997/19007.
+#### Slice `lo2-web-pages`: section access, huge pages, threads API offset, display-name DB limit
+Findings: F6 (DB half), F9, F10, F15. **F1 is deferred** (decision 11): do not touch pagination, `webgroupPage.go`, `models.PaginationInfo` or `pagination.html`. Tag `lo2-web-pages`, ports 18997/19007.
 
 Owned files:
-- `internal/web/webgroupPage.go`
 - `internal/web/web_sectionsPage.go`
-- `internal/web/web_group_pagination.go` (new)
 - `internal/web/web_apiHandlers.go` (the `X-Next-Offset` line in `getGroupThreads` only)
-- `internal/models/models.go` (the three new `PaginationInfo` fields only)
-- `web/templates/pagination.html`
 - `internal/database/queries.go` (`DeleteNewsgroup` and `UpdateUserDisplayName` only)
-- `internal/database/db_overview_cursor.go` (new)
 - `internal/database/thread_cache.go` (the offset guard in `GetCachedThreadReplies` only)
 - `internal/web/lo2_pages_test.go` (new), `internal/database/lo2_pages_test.go` (new)
 
 Changes:
-1. **F1:**
-   - `PaginationInfo` gets `NextCursor int64`, `PrevCursor int64` and `HideLast bool`. Zero values leave every other page unchanged.
-   - `pagination.html`: Next links `?cursor={{.NextCursor}}` when it is set, else `?page=`; Previous does the same with `PrevCursor`; Last is rendered only without `HideLast`; with `CurrentPage` 0 the info text says "(older articles)" and the active item shows `…`.
-   - `GetOverviewsPrevCursor(groupDB *GroupDB, firstArticleNum int64, pageSize int) (int64, error)` runs `SELECT article_num FROM articles WHERE hide = 0 AND article_num > ? ORDER BY article_num ASC LIMIT 1 OFFSET ?` with `(first, pageSize-1)` and returns that number + 1, or 0 on `sql.ErrNoRows` (the previous page is page 1).
-   - `buildGroupPagination(page int, cursor int64, articles []*models.Overview, totalCount int, hasMore bool, pageSize, maxOffset int, prevCursor func(int64) (int64, error)) *models.PaginationInfo`, with `maxPage := maxOffset/pageSize + 1`:
-     - page mode: start from `NewPaginationInfo`; set `HideLast = TotalPages > maxPage`; when `page >= maxPage && HasNext`, set `NextCursor` to the last article's number.
-     - cursor mode: `CurrentPage 0`, `HasNext hasMore`, `HasPrev true`, `PrevPage 1`, `HideLast true`; `NextCursor` is the last article's number when `hasMore`; `PrevCursor` comes from `prevCursor(articles[0].ArticleNum)`, and on error it logs `[WEB]` and keeps `PrevPage 1`.
-   - `groupPage` and `sectionGroupPage` use it (with `maxOffsetArticles`) in place of their inline pagination blocks.
+1. **F1: skipped** (deferred by the user in wave 0; see Decisions 11).
 2. **F15:**
    - `sectionPage`: clamp `page` to `max(1, ceil(totalCount/LIMIT_sectionPage))` before computing `start`.
    - `GetCachedThreadReplies`: set `page = max(page, 1)` and return an empty slice with `totalReplies` when `pageSize <= 0 || page-1 >= ceil(len(childNums)/pageSize)`, before any multiplication.
 3. **F9:** the header comes from `nextThreadsOffsetHeader(offset, limit, len(threads), apiThreadsMaxOffset) string`, which returns `""` unless `n == limit && offset+limit <= maxOffset`.
 4. **F10:**
    - `sectionGroupAllowed` calls `s.checkGroupAccess(c, groupName)` after the membership match and returns `nil, false` when it fails; that renders the same 404 as `/groups/:group`, and admins keep access to inactive groups.
-   - `DeleteNewsgroup` runs the newsgroup delete and `query_DeleteSectionGroupsByNewsgroup` (`DELETE FROM section_groups WHERE newsgroup_name = ?`) in one `RetryableTransactionExec`, the second only when the first affected 1 row. On success it also calls `uiCacheHeaderSections.invalidate()` and keeps the hierarchy cache invalidation.
+   - `DeleteNewsgroup` runs the newsgroup delete and `query_DeleteSectionGroupsByNewsgroup` (`DELETE FROM section_groups WHERE newsgroup_name = ?`) in one `RetryableTransactionExec`, the second only when the first affected 1 row. On success it keeps the hierarchy cache invalidation. (**Amended during the run:** the spec also asked for `uiCacheHeaderSections.invalidate()`. That call was implemented, then removed again in `51ac7a6` — the cache holds `sections` rows only (`query_GetHeaderSections`), which deleting a newsgroup and its `section_groups` rows cannot change, so it was dead work that also made every concurrent in-flight load discard its result. The removal's justification was independently re-verified in the post-merge review wave; no cache covers section→group membership at all.)
 5. **F6 (DB half):** `UpdateUserDisplayName` rejects `utf8.RuneCountInString(displayName) > 64` instead of a byte length.
 6. Tests:
    - web (`lo2_pages_test.go`):
-     - `BuildGroupPagination` table: page 2 of 8 (no cursors, Last shown); page 101 of 157 with `maxOffset` 12800 and size 128 (NextCursor set, HideLast); cursor mode with more rows (CurrentPage 0, both cursors, stubbed `prevCursor`); cursor mode on the last rows (no Next).
-     - `PaginationTemplate` through `loadTemplates`: a cursor-mode value contains `?cursor=` and no `aria-label="Last"`; `NewPaginationInfo(2, 128, 1000)` contains `href="?page=3"` and `href="?page=8"` and no `cursor=`.
      - `SectionHugePage`: a section with one active group; `GET /<section>/?page=100000000000000000` returns 200.
      - `SectionRouteNeedsGroup`: a `section_groups` row for a name with no `newsgroups` row gives 404 on `/<section>/<name>/` and `/<section>/<name>/tree/1`, and `filepath.Glob(<datadir>/db/*/<sanitized>.db*)` stays empty; an inactive member group gives 404 for anonymous users and 200 for an admin.
      - `NextThreadsOffsetHeader` table: `(0,500,500)`→`"500"`, `(999000,1000,1000)`→`"1000000"`, `(1000000,2000,2000)`→`""`, `n<limit`→`""`.
    - database (`lo2_pages_test.go`):
-     - `PrevCursor`: 300 visible articles with hidden ones in between, size 128; the prev cursor of the second page is 0, for the third page it is the 129th newest `article_num` + 1, and `GetOverviewsPaginated` from it returns exactly the second page.
      - `ThreadRepliesHugePage`: a `thread_cache` row with 3 children; page `1<<60` returns an empty slice without panicking.
      - `DeleteNewsgroupRemovesSectionGroups`: deleting an inactive group removes its `section_groups` rows; an active group is not deleted and keeps its rows.
      - `DisplayNameRuneLimit`: 64 × `ä` is accepted, 65 × `ä` is rejected.
@@ -577,7 +565,7 @@ Acceptance: L12 and L16 PASS; WSH E11-E14, E18-E20 and E23 still PASS.
   - reverse proxy: `ReverseProxyAddr`, `X-Forwarded-For`/`X-Forwarded-Proto`, `Host` passthrough, e.g. `proxy_set_header Host $http_host`
   - reverse proxy, from the review fixes: the `ReverseProxyIPHeader` setting (which header your proxy actually sets, with an nginx example for each choice), the widened default trusted ranges, and the "ignoring forwarded client IP headers" log line
   - sessions: the idle timeout is 55-60 minutes and the cookie follows the server-side expiry
-  - group pages: after page 100 the links continue with `?cursor=`
+  - group pages: known limitation, numbered links stop at page 100 (F1 deferred)
   - CSRF behaviour and its log line
   - sessions: hashed at rest, one re-login after 0028, lockout rules
   - foreign keys: what cascades; run `PRAGMA foreign_key_check;` on a copy before deploying
@@ -629,7 +617,7 @@ Upgrade check (verifier, scratch only):
 ### `scripts/test-web-leftovers.sh` (wave 0 writes it; fix only real script bugs later)
 Build it from `scripts/test-web-hardening.sh`:
 - **Copy the whole safety skeleton** (lines 1–76 at d11201a): `git rev-parse` cd, the `PORT`/`DATA`/`BIN` defaults, the `..` and `./data-test-*` guards, the tool checks, the `curl()` User-Agent wrapper, `NNTPHOST` detection, the `.update` guard, `BIN_ABS`, `rm -rf "$DATA"; mkdir -p "$DATA/run"`, the `web` symlink, `pass`/`fail`/`info`/`q`/`code`/`alive`, `start_server` with cwd `$RUN` and absolute `-data`, `stop_server`, `ensure_up`, the trap, the port-in-use refusal, and the schema check after the first start.
-- **Defaults:** `PORT=18990`, `DATA=./data-test-web-sqlite-leftovers`, `BIN=./build/webserver`, `FETCHER=./build/nntp-fetcher`, `AUDIT=./build/audit-web-posts`.
+- **Defaults:** `PORT=18990`, `DATA=./data-test-web-sqlite-leftovers`, `BIN=./build/webserver`, `FETCHER=./build/pugleaf-fetcher` (the real output name of `build_fetcher.sh`; the plan said `nntp-fetcher`), `AUDIT=./build/audit-web-posts`.
 - **Seed** while stopped: `APIEnabled=true`, `registration_enabled=true`, `AbuseMail`; newsgroup `smoke.test` (active, `hierarchy='smoke'`); API token `smoke-valid-token` (sha256 hex). Register `smokeadmin` (user id 1) and log in with a cookie jar, as the WSH script does.
 - **Seed for the review checks**, also while stopped: the active AI model row the WSH script seeds; newsgroup `smoke.inactive2` (inactive, `hierarchy='smoke'`); section `lo2sec` with `section_groups` rows for `zz.lo2.gone` (which has no `newsgroups` row) and for `smoke.inactive2`. After the start, register the user `smokeip` the same way as `smokeadmin`, with its own jar.
 
@@ -669,3 +657,296 @@ Checks (tag in brackets):
 - **L15 [lo2-web-pages] huge page numbers:** `code "$BASE/lo2sec/?page=100000000000000000"` is 200 (500 at baseline).
 - **L16 [lo2-web-server] chat body limit:** write `{"message":"<200000 × a>"}` to `$DATA/big.json`, then `code -b "$JAR_ADMIN" -H 'Content-Type: application/json' -X POST --data-binary @"$DATA/big.json" "$BASE/aichat/send"` is 413.
 - **Finish:** print `SUMMARY pass=<n> fail=<n> data=$DATA log=$LOG` and exit with the fail count (capped at 125), as the WSH script does.
+
+---
+
+## Progress
+
+### Wave 0 — 2026-09-16, `plan-web-sqlite-leftovers` from `testing-001` @ `194a8c2`
+
+**Preflight.** Working tree clean, `03d0178` confirmed as an ancestor of HEAD, `/tank0/claude/trees` writable.
+Baseline `## Checks` on `194a8c2`: `gofmt -l ./cmd ./internal` lists only the two known files
+(`internal/database/embedded_migrations.go`, `internal/web/web_admin_provider.go`); `go vet ./...` clean;
+`go build ./...` clean; `go test -race -count=1` green for database, web, history, nntp, processor,
+expire-news, history-rebuild. `PORT=18981 DATA=./data-test-web-sqlite-hardening scripts/test-web-hardening.sh`
+→ **`SUMMARY pass=25 fail=0`**.
+
+**Decisions confirmed with the user.**
+- 1 (C1 hashed sessions + migration 0028 clearing `session_id`/`session_expires_at`, one re-login for everyone): **as written**.
+- 11 (F1 deep pagination): **DEFERRED**, see Decisions 11. `lo2-web-pages` loses F1; `webgroupPage.go`,
+  `models.PaginationInfo`, `pagination.html`, `web_group_pagination.go` and `db_overview_cursor.go` are untouched.
+- 13 (F3/F4 `ReverseProxyIPHeader` setting + widened `DefaultReverseProxy` + untrusted-forwarder log): **as written**.
+- 2-10, 12, 14-17: **as written**.
+
+**E1 done.** `.claude/CLAUDE.md` test line now includes `./internal/database/... ./internal/web/...`.
+
+**`scripts/test-web-leftovers.sh` written** (safety skeleton copied from `test-web-hardening.sh`), `chmod +x`, `bash -n` clean.
+Two corrections against the plan text: `FETCHER` defaults to `./build/pugleaf-fetcher` (the real output of
+`build_fetcher.sh`), and L03 compares a usage-count *delta* instead of the absolute 5, so it stays valid
+wherever it runs in the sequence.
+
+**Baseline run** `PORT=18990 scripts/test-web-leftovers.sh` → **`SUMMARY pass=1 fail=15`**, matching the plan's
+expectation exactly:
+
+| Check | Baseline | Detail |
+|----|----|----|
+| L01 lo-db | FAIL | `session_id` in the DB equals the cookie value |
+| L02 lo-db | FAIL | no 0028 migration, no `login_attempt_at` |
+| L03 lo-web-core | **PASS** | regression guard for the buffering (today's per-request goroutine already counts) |
+| L04 lo-web-core | FAIL | web preview route 404 |
+| L05 lo-web-core | FAIL | API preview answers 200 with `APIEnabled=false` |
+| L06 lo-web-core | FAIL | `thread-tree.js` still fetches `/api/v1/groups/` |
+| L07 lo-web-core | FAIL | `/favicon.ico` → `Content-Type: text/plain` (B9 confirmed, not the mime.types fallback the plan expected) |
+| L08 lo-web-handlers | FAIL | 17 sites show `err.Error()` to visitors |
+| L09 lo-web-core | FAIL | 3 API sites show `err.Error()` |
+| L10 lo-paths | FAIL | `$RUN/data/progress.db/progress.db` created relative to the cwd |
+| L11 lo-audit-tool | FAIL | missing binary (tool does not exist yet) |
+| L12 lo2-web-server | FAIL | `X-Real-IP` setting has no effect (both 198.51.100.9) |
+| L13 lo2-web-forms | FAIL | legacy display name blocks the email change |
+| L14 lo2-web-pages | FAIL | `/lo2sec/zz.lo2.gone/` 200, tree 500, 3 group DB files created, inactive group 200 |
+| L15 lo2-web-pages | FAIL | `?page=100000000000000000` → 500 |
+| L16 lo2-web-server | FAIL | oversized chat body → 400, not 413 |
+
+**L10 precondition checked** (plan wave-0 step 4). With the scratch data dir the fetcher does **not** open any
+network connection: the default DB seeds 23 providers all with `enabled=0`, so no pool is built and
+`nntp.NewPool` is never called. It does not exit cleanly either — it panics at
+`cmd/nntp-fetcher/main.go:286` with `index out of range [0] with length 0`. L10 therefore stays in the script,
+and the missing guard became **A1b** in the `lo-paths` slice (same file, same lines that slice already edits).
+
+**Base commit for wave 1:** the commit below.
+
+### Wave 1 — merged, all 5 slices
+
+Merge commits on `plan-web-sqlite-leftovers`, in merge order:
+
+| Slice | Branch | Impl commits | Merge | Review verdict |
+|----|----|----|----|----|
+| `lo-paths` | `worktree-agent-abc86bcd09fd14b0c` | `00fffba` | `b59d869` (+ minors `24c5e85`) | MERGE |
+| `lo-db` | `worktree-agent-a5e5d0ec0bce9dec8` | `d973d66`, `c4bb5ff`, `3df5c79` | `22bcb97` (+ minors `c5c5b89`) | MERGE |
+| `lo-web-handlers` | `worktree-agent-ad3e4d0aaa02c68e3` | `6322123`, `85356fe` | `46d90fd` | MERGE AFTER FIXES → fixed |
+| `lo-web-core` | `worktree-agent-aab185f8152794720` | `37a5300`, `f5646fc` | `2544883` | MERGE AFTER FIXES → fixed |
+| `lo-audit-tool` | `worktree-agent-a103990bc940c4fa8` | `40db1ac`, `0a6203c` | `cad30fd` | MERGE AFTER FIXES → fixed |
+
+**Checks on the fully merged tree (`cad30fd`):** `gofmt -l ./cmd ./internal` lists only the two baseline
+files; `go vet ./...` and `go build ./...` clean; `go test -race -count=1` green for database, web,
+history, nntp, processor, expire-news, history-rebuild and audit-web-posts; all three build scripts
+produce their binaries. `scripts/test-web-leftovers.sh` → **`pass=11 fail=5`** (L01-L11 all PASS; the 5
+failures are exactly the wave-2 tags L12-L16). `scripts/test-web-hardening.sh` → **`pass=25 fail=0`**,
+0 DATA RACE reports in both scratch logs.
+
+**Review findings that mattered** (each was missed by the slice's own passing tests):
+1. **`lo-audit-tool`, blocker.** `mode=ro` does not stop SQLite creating the wal-index: every pugleaf DB
+   is WAL, so the tool left `-shm`/`-wal` next to every database it opened, i.e. it wrote into `data/cfg/`
+   and `data/db/`. Its tests passed because the fixtures were built without pragmas and were therefore
+   `journal_mode=delete`. Fixed with `immutable=1`, gated: used when no non-empty `-wal` sibling exists,
+   otherwise a plain `mode=ro` open plus a stderr warning, with the new `-strict` flag to refuse instead.
+   Refuse-by-default was tried first and **failed L11** — a pending `-wal` is routinely left behind
+   (`stop_server`, and the fetcher's `log.Fatalf` path exits without checkpointing).
+2. **`lo-audit-tool`, major.** `-all` applied the web-poster header allow-list to peer-fetched articles,
+   which legitimately carry `Path`, `Date`, `Organization`…: one normal peer article produced 5 findings
+   and rc 1. Now rules 1-3 apply to all articles and rule 4 only to queued rows or `path = '.POSTED!not-for-mail'`.
+3. **`lo-web-handlers`, major — a finding against this plan, not the implementer.** The plan specified
+   `funcMapKey` = the FuncMap's *address*, but nothing retained the map (`Template.Funcs` copies entries),
+   and a reproduction showed **1 distinct address across 2000 allocate/drop/GC cycles**. The first call site
+   building a per-request FuncMap would have silently rendered one request's page with another's functions.
+   Fixed by storing the map in the cache entry (`tmplEntry`), making the key unique by construction.
+4. **`lo-web-core`, major.** `Shutdown` closed `stopCh` first, so the token-usage flusher did its final
+   flush and exited *before* `srv.Shutdown(ctx)` drained in-flight requests; usage recorded during the
+   drain was lost on every shutdown — a deterministic regression of the property B6 exists to protect.
+   Fixed with a final `flushTokenUsage()` after the drain, plus explicit `[API]` logging of counts that
+   still could not be written. Regression test verified to fail without the fix.
+5. **`lo-db`, minor but load-bearing.** `w2_dbperf_test.go` kept its own copy of the child query spelled
+   `AND hide = 0`. Since that guard only asserts `!strings.Contains(plan, "SCAN articles")` and the old
+   spelling plans as a `SEARCH` on `idx_articles_hide_date`, a revert of C4 would have passed the guard.
+
+**Corrections to the plan's findings, for the Outcome:**
+- **B7 was overstated.** `renderError` only ever put `message` into the template data, so most of the 17
+  sites were not leaking internal text to visitors. Only the three `error.html` 200s and a rare `c.String`
+  fallback did. The change is still correct defence-in-depth, but it did not close 17 live leaks.
+- **B9's live half was not `getContentType`.** `/static/*` is served by `http.FileServer` (Go's own mime
+  table), and `EmbeddedFileHandler` has no caller, so the content-type table is test-only. The real defect
+  was that `/favicon.ico` was registered for GET only and gin answers HEAD from a separate route tree:
+  `curl -sI` fell through to the built-in 404 with `text/plain`. That, not `/etc/mime.types`, is what the
+  wave-0 baseline recorded.
+- **A5 has a live-data consequence.** `rslight-importer -reset-groups` used to be a guaranteed no-op
+  (it looked for a `<data>/groups` directory that never exists). It now really deletes articles, threads
+  and caches in every group DB that has a file; the only guard is the 5-second countdown at
+  `cmd/rslight-importer/main.go:121-132`. Worth a release note.
+
+**Deliberate departure from the plan text:** the queue-full post undo restores a bounded ~5s back-off
+(`now - WebPostingBackOff + 5`) rather than the full previous `lastpost_unix` the Design specifies.
+`WebPostingBackOff` is the only per-user throttle on `/SitePostSubmit`, so restoring it fully let a client
+hammer the route while the queue is full. B3's intent (not charging the user a post, not punishing them
+for 42s over a server-side failure) is preserved.
+
+**New leftovers raised by wave 1:**
+- `EmbeddedFileHandler`/`staticContentType` are dead in production — wire them back or delete both.
+  `.scss` is shipped under `internal/web/static/` but absent from the type table (harmless today).
+- `audit-web-posts` against a live-ish data dir may warn about a pending `-wal` and, for a database whose
+  wal-index is absent, create `-shm`/`-wal`. `-strict` guarantees zero touch; auditing a copy is the other way.
+- `InvalidateUserSessionBySessionID` still has no in-tree caller (logout goes through `InvalidateUserSession`).
+- `rsyncInactiveGroupsToDir` never checks `rows.Err()` (pre-existing, outside the wave-1 slices).
+
+### Wave 2 — merged, all 5 slices + inline docs
+
+| Slice | Branch | Impl commits | Merge | Review verdict |
+|----|----|----|----|----|
+| `lo2-web-pages` | `worktree-agent-a587de24703d4f43e` | `3cefdc9`, `bc4050b` | `d4efcef` (+ minors `51ac7a6`) | MERGE |
+| `lo2-web-forms` | `worktree-agent-ad2a075c1c0ccb2de` | `3a0095b`, `d577846`, `a31391d` | `30dab58` (+ minors `49d2755`) | MERGE |
+| `lo2-pool` | `worktree-agent-abf4ef7566b16b3ac` | `981aada`, `eab8aff`, `1f4437a` | `72d9277` | measurement only, no review agent |
+| `lo2-db-writer` | `worktree-agent-ae0262a129317988b` | `cf86624`, `85a7ba4`, `39f8387` | `01a544e` | MERGE AFTER FIXES → fixed |
+| `lo2-web-server` | `worktree-agent-a16c71c90604c2787` | `9ae6416`, `24319fc`, `0efaaca` | `a8fad7a` (+ test row `c9d6565`) | MERGE AFTER FIXES → fixed |
+
+Inline: `a50b385` (B12 `internal/web/README.md`, B13 `docs/web-deployment.md`).
+
+**Checks on the fully merged tree (`a50b385`):** gofmt/vet/build clean (two baseline files only);
+`go test -race -count=1` green across all 8 packages, with `./internal/processor/...` and
+`./internal/nntp/...` run twice because the retry clock moved. **`scripts/test-web-leftovers.sh`
+→ `pass=16 fail=0`** (baseline was `pass=1 fail=15`), **`scripts/test-web-hardening.sh` →
+`pass=25 fail=0`**, 0 DATA RACE reports in both scratch logs.
+
+**Review findings that mattered in wave 2** (again, each missed by the slice's own passing tests):
+1. **`lo2-db-writer`, major — shutdown could hang forever.** `updateNewsgroupStatsWithRetry` retried
+   SQLITE_BUSY unbounded (Decision 17) while sitting on the `db.WG.Wait()` path. Every tool runs
+   `close(StopChan)` → `WG.Wait()` → **then** `db.Shutdown()`, so the "it exits when the DB closes"
+   escape could never fire — the close is downstream of the wait it blocks. A foreign write lock on
+   `pugleaf.sq3` during a fetcher shutdown meant SIGKILL. Now bounded once `IsDBshutdown()` is true.
+2. **`lo2-db-writer`, major — `retry2` abandoned a batch mid-write.** After phase 1 committed the
+   articles, a threading failure plus a failed reopen left them with no threading, no history entries
+   and no `message_count`/`last_article`, announced by a single `Failed2` log line. Now retried like
+   `retry1`, with its own "committed without threading/history/stats (rebuild needed)" wording.
+   **Not** recorded as covered by F16.
+3. **`lo2-web-server`, major — F14's fix was unreachable.** `config.UpdateBadBots("")` is correct and
+   unit-tested, but the admin dispatch at `web_admin_settings_unified.go:208` never called the BadBots
+   processor, so `processBadBotsUpdate` was dead code. Clearing the field wrote the row, displayed the
+   new "Bad bots list cleared (no patterns)" message, and left the server blocking those agents until
+   restart — the slice made a pre-existing bug user-visible by asserting a state the server was not in.
+   Now wired, with a test that drives the real admin form and fails without the fix.
+4. **`lo2-web-server`, minor — the fix for F4 could itself flood the log.** `noteUntrustedForwarder`
+   stopped *inserting* at 256 IPs but kept *logging*, i.e. one line per request instead of one per IP.
+   Bounded now by a `full` flag plus one suppression line.
+5. **`lo2-web-pages`, minor — the F15 clamp had a hole.** A non-positive `LIMIT_sectionPage` (a package
+   `var`) makes `end` negative, which neither existing clamp catches — the same panic class the slice
+   closes. Fixed at merge.
+
+**Intended behaviour change that broke an existing test.** F3 reduces `RemoteIPHeaders` to the one
+configured header, so `TestW1ServerTrustedProxies/"valid x-real-ip from trusted peer"` no longer holds:
+with no XFF present, gin returns the trusted peer's own address. Confirmed against the gin source
+(`gin.go:472-475`, `context.go:951-959`); the row now expects `192.168.1.1` and is renamed
+(`c9d6565`). X-Real-IP as the *configured* header is covered by `TestLo2ServerTrustedHeader`.
+
+**C6 outcome (Decision 8): keep `MaxOpenConns 100` / `MaxIdleConns 25`.** `db_init.go` unchanged.
+Across 35 measured cells (7 sweeps × 5 sizes, tmpfs and ZFS) there were **zero** SQLITE_BUSY retries,
+and `MaxOpenConns=100` never opened more than **34** connections — `sql.DB` opens lazily, so the 100
+is a ceiling, not an allocation. Cheap statements improve monotonically with pool size (147 µs p50 at
+100 vs 3.41 ms at 4); the only clearly wrong value is a *small* pool, which costs 30-50% throughput.
+The real memory lever is `CacheSize` (16 MiB per connection), not the pool size. Full report:
+`docs/perf/main-db-pool.md`.
+
+**Honest caveat on the regression suite.** WSH check E12 now passes for a weaker reason: it sends an
+invalid `X-Real-IP` and asserts the peer IP, but X-Real-IP is never consulted now, so it would pass
+with a valid one too. The outcome is strictly safer and the real coverage moved to
+`TestLo2ServerTrustedHeader`; K4 forbids editing the script, so this is a note, not a change.
+
+**New leftovers raised by wave 2:**
+- ~~`processBadIPsUpdate` is dead~~ — **fixed after the wave, in `3995443`.** The note first recorded
+  here was wrong on two counts and is corrected for the record: `FORM_FIELD_BADIPS` did **not** have the
+  same defect as BadBots. Its table entry declared `Processor: nil` *deliberately*
+  (`web_admin_settings_unified.go:154`), and its success message never claimed "applied immediately" —
+  that string is line 138, the BadBots one. So the "one-line fix" first written here (adding the field to
+  the `:208` dispatch alone) would have called `cfg.Processor(s, value)` on a nil func and panicked on
+  every save of the IP list. What was true: `processBadIPsUpdate` had no reference anywhere, and saving
+  the blocked-IP list wrote the config row without calling `config.UpdateBadIPs`, so the running server
+  kept its old ranges until a restart. The real fix needed three edits — set the processor at `:154`, add
+  the field to the `:208` condition, add a `case` at `:224` — plus `TestLo2ServerBadIPsSettingApplied`,
+  verified to fail without the dispatch change. It also makes the existing "Bad IPs list cleared (using
+  defaults)" message true for the first time.
+  *Process note:* this entry originally repeated an implementer's aside without opening the file. Claims
+  that do not gate a merge still reach the reader as assertions and need the same verification.
+- `profileUpdate`'s three writes (password, email, display name) are separate un-transacted statements.
+  They now go through `RetryableExec`, but a transient failure on the second still leaves the first
+  committed. The full fix is one `RetryableTransactionExec` around all three.
+- `cronjobs.go`: a job started during shutdown can escape `StopCronManager`'s `jobIDs` snapshot.
+  Pre-existing; the window is now smaller, not larger.
+- `cmd/nntp-analyze/main.go:280` closes `StopChan` without `db.Shutdown()`, so with F20 `cronDBEvery`
+  never returns there. Harmless (outside `db.WG`, process exits), left untouched.
+- The shutdown bounds are time-shaped constants (`batchStatsShutdownRounds` 24,
+  `batchGroupDBShutdownAttempts` 120, both ≈2 min); a loaded box may want more.
+- `getBatchGroupDB`'s shutdown bound has no unit test — reaching it costs the real 60s `GetGroupDB`
+  deadline. It is a plain counter beside the tested `batchGroupDBRetry` table.
+
+### Post-merge review wave — 2026-09-16, on the fully merged tree
+
+Four reviewers over what the per-slice reviews structurally could not see: the orchestrator's own
+inline commits (never reviewed by anyone), the combined `internal/web` and `internal/database` diffs
+as single units, and the two documentation files. Two majors were **cross-wave defects** — each half
+was correct and reviewed in isolation, and only their combination is broken.
+
+| Target | Verdict | Fixed in |
+|----|----|----|
+| orchestrator inline commits | MERGE (3 minors) | `d1d5fdb` |
+| `internal/web` combined | MERGE AFTER FIXES | `efb452d` → merge `ac87e08` |
+| `internal/database` combined | MERGE AFTER FIXES | `5129efe` → merge `0914aa0` |
+| `docs/web-deployment.md`, `internal/web/README.md` | ship after 3 fixes | `d1d5fdb` |
+
+**1. Cross-wave, both halves of the same shape.**
+- *Web:* wave 1 added the final `flushTokenUsage()` after the shutdown drain; wave 2's F17 made the
+  retry cap measure **busy time** rather than wall clock. Together, `Shutdown`'s last step could sit in
+  `AddTokenUsage` for ~5 min per token (x2 attempts) with the NNTP server, post queue, cron and the
+  database all still up. Now a goroutine bounded by `shutdownGrace`, with a matching budget inside
+  `flushTokenUsage` so the abandoned writer stops too. `TestLo1CoreFinalFlushBounded` holds the main DB
+  write lock and asserts `Shutdown` returns within the grace; it fails at 8s without the fix.
+- *Database:* the `goto retry1`/`retry2` loops were unbounded and **enclosed** the bounds `lo2-db-writer`
+  added — `ForceCloseGroupDB` drops the handle, the reopen succeeds in milliseconds, so only
+  `batchInsertOverviews` keeps failing and the bound never fires. That was the last path able to block
+  `db.WG.Wait()` forever.
+
+**2. The bounds were ~60x their documented value.** `batchGroupDBShutdownAttempts = 120` and
+`batchStatsShutdownRounds = 24` counted *attempts*, but an attempt can spend 60 s inside `GetGroupDB`
+or a full `GetSQLiteMaxRetryWait` (5 min) inside `RetryableTransactionExec` — so "~2 minutes" was
+really ~2 hours. Replaced by one `batchShutdownClock` with a wall-clock deadline captured on the first
+check that reports shutdown, insensitive to how long an inner call takes.
+
+**3. The F15 clamp only moved the panic.** `NewPaginationInfo` divides by the page size
+(`models.go:413`), so `LIMIT_sectionPage = 0` still panicked, two lines after the clamp that was
+supposed to close it. Fixed with a single clamped `size` used for the page math, the slice and the
+pagination info, plus a guard inside `NewPaginationInfo` for its other callers.
+
+**4. The perf guard could not catch the revert it was supposed to catch.** Three textual copies of the
+thread-child query existed (`thread_cache.go`, `w2_dbperf_test.go`, `lo1_db_test.go`). Now one
+`threadChildrenQuery`; the tests build from it, so reverting `+hide = 0` fails the plan assertion.
+
+**5. Three operator-facing documentation errors**, all written from the plan's intent rather than from
+the code: the `Host` passthrough rationale was cosmetic in the text but is actually the CSRF
+`Origin`/`Host` comparison (a rewritten `Host` returns **403 on every browser POST**, stated outright
+in the code comment at `webserver.go:57-58`); the page cap is **101** and a *silent* clamp, not a
+missing link, and does not apply to the section group-list page; and `?cursor=` **is** implemented
+server-side, only unlinked in `pagination.html`.
+
+**Final state (`ac87e08`):** gofmt/vet/build clean; `go test -race -count=1` green across all 8
+packages (and `-shuffle=on`/`-count=2` green for web and database during review);
+`scripts/test-web-leftovers.sh` **`pass=16 fail=0`**; `scripts/test-web-hardening.sh`
+**`pass=25 fail=0`**; 0 DATA RACE reports in both scratch logs.
+
+**Process notes for the next run of this skill:**
+- Two instructions to the implementers were wrong and they correctly refused rather than routing
+  around them: I told worktree-isolated agents to work in the main checkout (their isolation forbids
+  it — they branched and asked for a re-merge), and I demanded `pass=16 fail=0` from a worktree
+  branched before the wave-2 web slices, where it is unreachable by construction.
+- The orchestrator's own inline commits are a blind spot by default: nothing in the skill reviews
+  them. Two real defects were in them.
+
+**Remaining leftovers** (unchanged from the wave-2 list, minus the bad-IPs entry which is now fixed):
+- `retry1`/`retry2`'s loop bounds have no unit test — exercising them needs a live `SQ3batch` plus a
+  group DB whose insert keeps failing. The `batchShutdownClock` itself is tested.
+- `profileUpdate`'s three writes are separate un-transacted statements (now `RetryableExec`, but a
+  failure on the second still leaves the first committed). Full fix: one `RetryableTransactionExec`.
+- `runTokenUsageFlusher` takes no `db.WG` slot, deliberately: a slot would move the block into
+  `db.WG.Wait()`. With the bounded flush the write-to-a-closing-DB window is short and logged.
+- `DeleteNewsgroup` leaves `user_spam_flags` rows keyed on the deleted `newsgroup_id` (dead rows only;
+  ids are `AUTOINCREMENT` so never reused).
+- `cronjobs.go`: a job started during shutdown can escape `StopCronManager`'s snapshot (pre-existing,
+  window now smaller).
+- `cmd/nntp-analyze/main.go:280` closes `StopChan` without `db.Shutdown()`.
+- `EmbeddedFileHandler`/`staticContentType` are dead in production; `.scss` is shipped but absent from
+  the type table.

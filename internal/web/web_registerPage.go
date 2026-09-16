@@ -24,7 +24,8 @@ func (s *WebServer) registerPage(c *gin.Context) {
 	// Check if registration is enabled
 	registrationEnabled, err := s.DB.IsRegistrationEnabled()
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
+		log.Printf("[WEB]: registerPage: IsRegistrationEnabled: %v", err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 	if !registrationEnabled {
@@ -50,7 +51,8 @@ func (s *WebServer) registerSubmit(c *gin.Context) {
 	// Check if registration is enabled
 	registrationEnabled, err := s.DB.IsRegistrationEnabled()
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
+		log.Printf("[WEB]: registerSubmit: IsRegistrationEnabled: %v", err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 	if !registrationEnabled {

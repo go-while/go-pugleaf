@@ -21,15 +21,25 @@ func (db *Database) GetMainDB() *sql.DB {
 }
 
 func (db *Database) CronDB() {
-	ticker := time.NewTicker(10 * time.Second)
+	db.cronDBEvery(10 * time.Second)
+}
+
+// cronDBEvery closes idle group databases on every tick until Shutdown has marked the
+// group databases closed. It deliberately does not stop on StopChan: the batch drain
+// keeps opening group databases after that channel is closed, and without this loop a
+// large backlog would exceed MaxOpenDatabases and the fd limit during the final flush.
+// CronDB is started outside db.WG (db_init.go), so db.WG.Wait() never waits for it.
+func (db *Database) cronDBEvery(every time.Duration) {
+	ticker := time.NewTicker(every)
 	defer ticker.Stop()
-	for {
-		select {
-		case <-db.StopChan:
+	for range ticker.C {
+		db.MainMutex.RLock()
+		shutdown := db.groupDBsShutdown
+		db.MainMutex.RUnlock()
+		if shutdown {
 			return
-		case <-ticker.C:
-			db.cleanupIdleGroups()
 		}
+		db.cleanupIdleGroups()
 	}
 }
 

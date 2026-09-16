@@ -130,7 +130,8 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 
 	treeResponse, err := s.DB.GetThreadTreeView(groupDB, threadRoot, options)
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Tree Error", "Failed to build thread tree: "+err.Error())
+		log.Printf("[WEB]: threadTreePage: GetThreadTreeView(%s/%d): %v", groupName, threadRoot, err)
+		s.renderError(c, http.StatusInternalServerError, "Tree Error", publicErrorDetail)
 		return
 	}
 
@@ -206,7 +207,8 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 
 	treeResponse, err := s.DB.GetThreadTreeView(groupDB, threadRoot, options)
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Tree Error", "Failed to build thread tree: "+err.Error())
+		log.Printf("[WEB]: sectionThreadTreePage: GetThreadTreeView(%s/%s/%d): %v", section, groupName, threadRoot, err)
+		s.renderError(c, http.StatusInternalServerError, "Tree Error", publicErrorDetail)
 		return
 	}
 
