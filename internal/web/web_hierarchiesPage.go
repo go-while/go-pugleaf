@@ -2,6 +2,7 @@
 package web
 
 import (
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -37,7 +38,8 @@ func (s *WebServer) hierarchiesPage(c *gin.Context) {
 
 	hierarchies, totalCount, err := s.DB.GetHierarchiesPaginated(page, LIMIT_hierarchiesPage, sortBy)
 	if err != nil {
-		s.renderPage(c, http.StatusOK, gin.H{"Error": err.Error()}, "error.html")
+		log.Printf("[WEB]: hierarchiesPage: GetHierarchiesPaginated(page=%d sort=%s): %v", page, sortBy, err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 
@@ -78,7 +80,8 @@ func (s *WebServer) hierarchyGroupsPage(c *gin.Context) {
 
 	groups, totalCount, err := s.DB.GetNewsgroupsByHierarchy(hierarchyName, page, LIMIT_hierarchyGroupsPage, sortBy)
 	if err != nil {
-		s.renderPage(c, http.StatusOK, gin.H{"Error": err.Error()}, "error.html")
+		log.Printf("[WEB]: hierarchyGroupsPage: GetNewsgroupsByHierarchy(%s page=%d): %v", hierarchyName, page, err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 
@@ -207,7 +210,8 @@ func (s *WebServer) hierarchyTreePage(c *gin.Context) {
 	// Get sub-hierarchies and groups for this level
 	subHierarchies, groups, totalSubHierarchies, totalGroups, err := s.getHierarchyLevel(currentPath, sortBy, page, LIMIT_hierarchyTreePage)
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database error", err.Error())
+		log.Printf("[WEB]: hierarchyTreePage: getHierarchyLevel(%s page=%d): %v", currentPath, page, err)
+		s.renderError(c, http.StatusInternalServerError, "Database error", publicErrorDetail)
 		return
 	}
 

@@ -29,8 +29,8 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 	// Get group database connections
 	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
-		log.Printf("Failed to get group databases for %s: %v", groupName, err)
-		s.renderError(c, http.StatusInternalServerError, "Database error", err.Error())
+		log.Printf("[WEB]: groupThreadsPage: GetGroupDB(%s): %v", groupName, err)
+		s.renderError(c, http.StatusInternalServerError, "Database error", publicErrorDetail)
 		return
 	}
 	defer groupDB.Return()
@@ -38,8 +38,8 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 	// Use cached thread data for fast performance
 	forumThreads, totalThreads, err := s.DB.GetCachedThreads(groupDB, page, Threads_perPage)
 	if err != nil {
-		log.Printf("Failed to get cached threads for %s: %v", groupName, err)
-		s.renderError(c, http.StatusInternalServerError, "Failed to load threads", err.Error())
+		log.Printf("[WEB]: groupThreadsPage: GetCachedThreads(%s page=%d): %v", groupName, page, err)
+		s.renderError(c, http.StatusInternalServerError, "Failed to load threads", publicErrorDetail)
 		return
 	}
 

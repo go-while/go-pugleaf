@@ -2,6 +2,7 @@
 package web
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 
@@ -36,7 +37,8 @@ func (s *WebServer) groupsPage(c *gin.Context) {
 		// Cache miss - fetch from database
 		groups, totalCount, err = s.DB.GetNewsgroupsPaginated(page, pageSize)
 		if err != nil {
-			s.renderPage(c, http.StatusOK, gin.H{"Error": err.Error()}, "error.html")
+			log.Printf("[WEB]: groupsPage: GetNewsgroupsPaginated(page=%d): %v", page, err)
+			s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 			return
 		}
 
