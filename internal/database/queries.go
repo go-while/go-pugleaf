@@ -463,9 +463,7 @@ func (db *Database) DeleteNewsgroup(name string) error {
 
 	// The newsgroup row and its section_groups rows go in one transaction: the group is only
 	// removed from its sections when it was really deleted (the DELETE is a no-op while active).
-	var deleted bool
 	err = RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
-		deleted = false
 		result, err := tx.Exec(query_DeleteNewsgroup, name)
 		if err != nil {
 			return fmt.Errorf("failed to delete newsgroup %s: %w", name, err)
@@ -480,7 +478,6 @@ func (db *Database) DeleteNewsgroup(name string) error {
 		if _, err := tx.Exec(query_DeleteSectionGroupsByNewsgroup, name); err != nil {
 			return fmt.Errorf("failed to delete section groups of %s: %w", name, err)
 		}
-		deleted = true
 		return nil
 	})
 	if err != nil {
@@ -491,9 +488,10 @@ func (db *Database) DeleteNewsgroup(name string) error {
 	if db.HierarchyCache != nil {
 		db.HierarchyCache.InvalidateHierarchy(hierarchy)
 	}
-	if deleted {
-		uiCacheHeaderSections.invalidate()
-	}
+	// No uiCacheHeaderSections.invalidate() here: that cache holds rows of the sections
+	// table only (query_GetHeaderSections), which deleting a newsgroup and its
+	// section_groups rows cannot change. Invalidating it would be dead work and would
+	// make every concurrent in-flight load discard its result.
 
 	return nil
 }

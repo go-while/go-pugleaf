@@ -125,6 +125,11 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 	if end > totalCount {
 		end = totalCount
 	}
+	// LIMIT_sectionPage is a var: a non-positive value makes end < start, which the two
+	// clamps above do not catch and which panics in the slice below.
+	if end < start {
+		end = start
+	}
 
 	groups := allGroups[start:end]
 	pagination := models.NewPaginationInfo(page, LIMIT_sectionPage, totalCount)
