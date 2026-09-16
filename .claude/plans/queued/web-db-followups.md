@@ -74,9 +74,14 @@ Nothing here is a regression introduced by WSL. Two items (D1, D2) are decisions
   Everything else keeps its signature, in particular the WSL K1 list (`NewWebServer`, `getWebSession`,
   `checkGroupAccess*`, `renderError`, `CreateUserSession`, `ValidateUserSession`, `Retryable*`,
   `GetGroupDB`/`Return`, `AuthenticateNNTPUser`, `configureTrustedProxies`, `setSessionCookie`).
-- **K2: new names, one owner each** — `fu-web-forms`: `(*Database).UpdateUserProfile`;
-  `fu-db-hygiene`: `query_DeleteUserSpamFlagsByNewsgroup`; `fu-batch-tests`: `lo3Batch…` helpers;
-  `fu-sections`: `query_GetSectionGroupsWithActivityStrict`.
+- **K2: new names, one owner each** —
+  `fu-web-forms`: `(*Database).UpdateUserProfile` (in the new `db_user_profile.go`);
+  `fu-queries`: `query_DeleteUserSpamFlagsByNewsgroup` (A4) and
+  `query_GetSectionGroupsWithActivityStrict` (E1);
+  `fu-batch-tests`: `fuBatch…` helpers;
+  `fu-misc-hygiene`: `fuHygiene…` helpers;
+  `fu-deadcode`: no new names (deletions only).
+  Check each with `grep -rnw '<name>' internal cmd` at the base commit before using it.
 - **K3: tests** are `fu_<slice>_test.go` with identifiers prefixed `fu<Slice>…`. The WSL and WSH
   helpers are reused and never edited: `internal/database/testmain_test.go` (`w0DB`, `w0Name`) and
   `internal/web/testmain_test.go` (`w0Srv`, `w0DB`, `w0Do`, `w0NewUser`, `w0NewGroup`, `w0DataDir`).
@@ -85,7 +90,7 @@ Nothing here is a regression introduced by WSL. Two items (D1, D2) are decisions
   uses an isolated `&Database{...}`.
 - **K4:** nobody changes `go.mod`/`go.sum`, `appVersion.txt`, `FuncStructList.txt`, `BUGS.md`, root
   `README.md`, `build_ALL.sh`, or the NAT-owned NNTP files. `scripts/test-web-hardening.sh` is
-  editable **only** for E3's relabel. `scripts/test-web-leftovers.sh` must keep passing unchanged.
+  editable **only** for E3's relabel, which wave 0 does inline. `scripts/test-web-leftovers.sh` must keep passing unchanged.
 - **K5:** no slice calls a helper another slice of the same wave adds.
 
 ### Component designs
@@ -106,36 +111,58 @@ Nothing here is a regression introduced by WSL. Two items (D1, D2) are decisions
 
 ## Waves
 
+`internal/database/queries.go` carries **four** of the findings in three separate regions
+(`ResetAllNewsgroupData` for A2, `DeleteNewsgroup` for A4 and B3, `query_GetSectionGroupsWithActivity`
+for E1). Two slices in one wave cannot both edit it, so **one slice owns that file outright** and the
+rest are arranged around it. Two atomicity constraints drove the layout:
+
+- **B3 cannot be split across waves.** Changing `DeleteNewsgroup` to `(bool, error)` and updating
+  `adminDeleteNewsgroup` must land together, or the tree does not build between waves. So whichever
+  slice owns `queries.go` also owns `internal/web/web_admin_newsgroups.go`.
+- **A1 does not need `queries.go` at all.** `UpdateUserProfile` goes in a new
+  `internal/database/db_user_profile.go`; the existing per-field helpers stay untouched for their other
+  callers (`web_admin_userfuncs.go`, `cmd/usermgr`). That is what frees A1 to run in parallel.
+
 ### Wave 0 (inline, orchestrator)
-1. Preflight from the skill; `git merge-base --is-ancestor <WSL merge> HEAD` must succeed.
-2. Baseline: the `## Checks` below, plus both e2e scripts (expect `pass=16 fail=0` and `pass=25 fail=0`).
-3. Confirm **D1** and **D2** with the user before wave 1, and adjust or drop the affected slices.
+1. Preflight from the skill; `git merge-base --is-ancestor e52d1a8 HEAD` must succeed.
+2. Baseline: the `## Checks` below, plus both e2e scripts (expect `pass=25 fail=0` and `pass=16 fail=0`).
+3. Confirm **D1** and **D2** with the user. D1 decides whether wave 3 runs at all; D2 may be a one-line
+   default change in `cmd/audit-web-posts` that the orchestrator takes inline.
+4. **E3** inline: relabel E12 in `scripts/test-web-hardening.sh` (label only — the assertion does not
+   change, and `pass=25 fail=0` must still hold). This is the only edit K4 permits to that script.
 
-### Wave 1 (3 parallel slices)
-- slice `fu-web-forms` — **A1**, **B3**. Owns `internal/web/web_profile.go`,
-  `internal/web/web_admin_newsgroups.go`, `internal/database/db_user_profile.go` (new),
-  `internal/database/queries.go` (`DeleteNewsgroup` only), `internal/web/fu_forms_test.go` (new).
-  Checks: a profile POST that fails on the second write leaves the first unwritten; deleting an active
-  group no longer flashes success.
-- slice `fu-db-hygiene` — **A2**, **A3**, **A4**, **E2**. Owns `internal/database/queries.go`
-  (`ResetAllNewsgroupData` step 1 and the `user_spam_flags` delete only — coordinate with
-  `fu-web-forms`, which owns `DeleteNewsgroup` in the same file: **wave 1 cannot have both**, so move
-  A4 to wave 2 or give one slice the whole file), `cmd/web/main_functions.go`,
-  `internal/database/thread_cache.go`, `internal/database/fu_hygiene_test.go` (new).
+### Wave 1 (3 parallel slices — no `queries.go`, fully disjoint)
 - slice `fu-deadcode` — **B1**, **B2**, **C3**. Owns `internal/web/embedded_static.go`,
-  `internal/database/db_sessions.go` (the one function only), `cmd/nntp-analyze/main.go`,
-  `internal/web/fu_deadcode_test.go` (new). Grep for callers before every deletion.
-
-### Wave 2 (based on merged wave 1)
+  `internal/database/db_sessions.go` (`InvalidateUserSessionBySessionID` only),
+  `cmd/nntp-analyze/main.go`, `internal/web/fu_deadcode_test.go` (new).
+  Grep for callers before every deletion; if `EmbeddedFileHandler` is deleted, its test in
+  `lo1_core_test.go` goes too — that file is otherwise **not** owned, so touch only those cases.
 - slice `fu-batch-tests` — **C1**, **C2**. Owns `internal/database/fu_batch_test.go` (new),
   `internal/web/cronjobs.go`, `internal/web/fu_cron_test.go` (new).
-- slice `fu-sections` — **E1**, **E3**. Owns `internal/database/queries.go`
-  (`query_GetSectionGroupsWithActivity` only), `internal/web/web_sectionsPage.go`,
-  `scripts/test-web-hardening.sh` (the E12 label only), `internal/web/fu_sections_test.go` (new).
-- slice `fu-pagination` — **D1**, only if the user chose to act on it in wave 0. Owns
-  `web/templates/pagination.html`, `internal/models/models.go` (`PaginationInfo` fields),
-  `internal/web/webgroupPage.go`, `internal/web/web_sectionsPage.go` (pagination block only — conflicts
-  with `fu-sections`, so these two cannot share a wave; put `fu-pagination` in wave 3 if both run).
+  C1 is the substantial one: it is the first real test of the loop bounds that stop a wedged batch
+  pinning `db.WG.Wait()`.
+- slice `fu-misc-hygiene` — **A3**, **E2**. Owns `cmd/web/main_functions.go`
+  (`rsyncInactiveGroupsToDir` only), `internal/database/thread_cache.go`
+  (`GetCachedThreadReplies`' `totalReplies` only — **do not** touch `threadChildrenQuery` or the
+  overflow guard), `internal/database/fu_hygiene_test.go` (new).
+
+### Wave 2 (2 parallel slices, based on merged wave 1)
+- slice `fu-queries` — **A2**, **A4**, **B3**, **E1**. Owns `internal/database/queries.go`
+  **in full**, plus `internal/web/web_admin_newsgroups.go` (B3's caller, atomic with the signature)
+  and `internal/web/web_sectionsPage.go` (E1's listing filter), `internal/database/fu_queries_test.go`
+  (new), `internal/web/fu_queries_test.go` (new).
+  Note it inherits WSL's constraint in reverse: it may change `DeleteNewsgroup`,
+  `ResetAllNewsgroupData` and `query_GetSectionGroupsWithActivity`, and must leave every other
+  function in that ~3700-line file byte-identical (verify with `git diff -U0`).
+- slice `fu-web-forms` — **A1**. Owns `internal/web/web_profile.go` (`profileUpdate` only),
+  `internal/database/db_user_profile.go` (new), `internal/web/fu_forms_test.go` (new).
+  Must not touch `queries.go`.
+
+### Wave 3 (only if the user chose to act on D1 in wave 0)
+- slice `fu-pagination` — **D1**. Owns `web/templates/pagination.html`,
+  `internal/models/models.go` (`PaginationInfo` fields only), `internal/web/webgroupPage.go`,
+  `internal/web/web_sectionsPage.go` (the pagination block only).
+  It shares `web_sectionsPage.go` with `fu-queries`, which is why it cannot run before wave 2.
 
 ---
 
