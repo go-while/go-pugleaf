@@ -2851,12 +2851,34 @@ func (db *Database) DeleteUser(userID int64) error {
 // GetGroupDB (<data>/db/<MD5Hash(name)>/<SanitizeGroupName(name)>.db) but never
 // creates anything, so callers can skip groups that have no database yet.
 func (db *Database) groupDBFileExists(newsgroupName string) bool {
-	dataDir := db.dbconfig.DataDir
-	if dataDir == "" {
-		dataDir = "./data"
-	}
-	groupDBfile := filepath.Join(dataDir, "db", MD5Hash(newsgroupName), SanitizeGroupName(newsgroupName)+".db")
+	// No DataDir fallback here on purpose: GetGroupDB resolves the same layout from
+	// db.dbconfig.DataDir verbatim, so a fallback would probe a different directory
+	// than the one GetGroupDB would create the database in.
+	groupDBfile := filepath.Join(db.dbconfig.DataDir, "db", MD5Hash(newsgroupName), SanitizeGroupName(newsgroupName)+".db")
 	return FileExists(groupDBfile)
+}
+
+// listNewsgroupNames returns every newsgroup name from the main database. It is a
+// separate method so the read cursor is closed before the caller starts long-running
+// work (ResetAllNewsgroupData resets one group database per name).
+func (db *Database) listNewsgroupNames() ([]string, error) {
+	rows, err := RetryableQuery(db.mainDB, `SELECT name FROM newsgroups`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list newsgroups: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("failed to scan newsgroup name: %w", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read newsgroup names: %w", err)
+	}
+	return names, nil
 }
 
 // ResetAllNewsgroupData resets all newsgroup counters and flushes all articles, threads, overview, and cache tables
@@ -2884,24 +2906,10 @@ func (db *Database) ResetAllNewsgroupData() error {
 	// newsgroup names come from the main DB, not from a directory listing. Calling
 	// ResetNewsgroupData for a name without a file would create an empty database
 	// (GetGroupDB creates one for any name), so the file is checked first.
-	rows, err := RetryableQuery(db.mainDB, `SELECT name FROM newsgroups`)
+	names, err := db.listNewsgroupNames()
 	if err != nil {
-		return fmt.Errorf("failed to list newsgroups: %w", err)
+		return err
 	}
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to scan newsgroup name: %w", err)
-		}
-		names = append(names, name)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("failed to read newsgroup names: %w", err)
-	}
-	rows.Close()
 
 	var existing []string
 	for _, name := range names {
