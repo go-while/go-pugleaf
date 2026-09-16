@@ -813,39 +813,16 @@ func (db *Database) processThreadBatch(groupDB *GroupDB, msgIDToArticleNum map[s
 	return threadsBuilt, nil
 }
 
+// query_initializeThreadCacheSimple1 is used by batchInitializeThreadCache (thread
+// rebuilds). INSERT OR REPLACE deletes an existing thread_cache row and inserts a new
+// one, so with foreign_keys=ON the delete cascades to tree_stats. That is the correct
+// invalidation for derived cache data, and RebuildThreadsFromScratch clears tree_stats
+// (and cached_trees, thread_cache, threads) before it runs anyway.
 const query_initializeThreadCacheSimple1 = `
 		INSERT OR REPLACE INTO thread_cache (
 			thread_root, root_date, message_count, child_articles, last_child_number, last_activity
 		) VALUES (?, ?, 1, '', ?, ?)
 	`
-
-// initializeThreadCacheSimple initializes thread cache for a root article
-// DEPRECATED: Use batchInitializeThreadCache for better performance
-func (db *Database) initializeThreadCacheSimple(groupDB *GroupDB, threadRoot int64, rootDate time.Time) error {
-	// Validate root date - skip obvious future posts
-	now := time.Now().UTC()
-	futureLimit := now.Add(25 * time.Hour)
-
-	if rootDate.UTC().After(futureLimit) {
-		log.Printf("initializeThreadCacheSimple: Skipping thread root %d with future date %v",
-			threadRoot, rootDate.Format("2006-01-02 15:04:05"))
-		// Use current time as fallback for obvious future posts
-		rootDate = now
-	}
-
-	_, err := RetryableExec(groupDB.DB, query_initializeThreadCacheSimple1,
-		threadRoot,
-		rootDate.UTC().Format("2006-01-02 15:04:05"),
-		threadRoot, // last_child_number starts as the root itself
-		rootDate.UTC().Format("2006-01-02 15:04:05"),
-	)
-
-	if err != nil {
-		return fmt.Errorf("failed to initialize thread cache for root %d: %w", threadRoot, err)
-	}
-
-	return nil
-}
 
 // batchInitializeThreadCache initializes thread cache for multiple root articles in a single transaction
 func (db *Database) batchInitializeThreadCache(groupDB *GroupDB, threadRoots []struct {

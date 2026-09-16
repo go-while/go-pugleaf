@@ -283,11 +283,15 @@ func (db *Database) GetCachedThreadReplies(groupDB *GroupDB, threadRoot int64, p
 	placeholders := strings.Repeat("?,", len(pageChildNums))
 	placeholders = placeholders[:len(placeholders)-1] // Remove trailing comma
 
+	// "+hide = 0" keeps hide out of index selection: at most pageSize article numbers
+	// are looked up by rowid (INTEGER PRIMARY KEY) and hide is filtered afterwards.
+	// Without it SQLite prefers idx_articles_hide_date (hide=?) and walks every
+	// visible article of the group when sqlite_stat1 is absent. Same results.
 	childQuery := fmt.Sprintf(`
 		SELECT article_num, subject, from_header, date_sent, date_string,
 			   message_id, "references", bytes, lines, reply_count, downloaded
 		FROM articles
-		WHERE article_num IN (%s) AND hide = 0
+		WHERE article_num IN (%s) AND +hide = 0
 		ORDER BY date_sent ASC
 	`, placeholders)
 

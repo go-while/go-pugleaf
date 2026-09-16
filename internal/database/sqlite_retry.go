@@ -18,9 +18,30 @@ const (
 	maxDelay   = 2500 * time.Millisecond
 )
 
-// SQLiteMaxRetryWait caps the total time a Retryable* helper keeps retrying a
-// busy/locked SQLite operation. Tools may raise it before opening the database.
-var SQLiteMaxRetryWait = 5 * time.Minute
+// defaultSQLiteMaxRetryWait is the cap restored by SetSQLiteMaxRetryWait(0).
+const defaultSQLiteMaxRetryWait = 5 * time.Minute
+
+// sqliteMaxRetryWait caps, in nanoseconds, the total time a Retryable* helper keeps
+// retrying a busy/locked SQLite operation. It is read on every retry decision, so it
+// is atomic: a tool may change it while the batch writer is running.
+var sqliteMaxRetryWait atomic.Int64
+
+func init() {
+	sqliteMaxRetryWait.Store(int64(defaultSQLiteMaxRetryWait))
+}
+
+// SetSQLiteMaxRetryWait sets the retry cap. d <= 0 restores the 5 minute default.
+func SetSQLiteMaxRetryWait(d time.Duration) {
+	if d <= 0 {
+		d = defaultSQLiteMaxRetryWait
+	}
+	sqliteMaxRetryWait.Store(int64(d))
+}
+
+// GetSQLiteMaxRetryWait returns the current retry cap.
+func GetSQLiteMaxRetryWait() time.Duration {
+	return time.Duration(sqliteMaxRetryWait.Load())
+}
 
 // isRetryableSQLiteError reports whether err is SQLITE_BUSY or SQLITE_LOCKED.
 func isRetryableSQLiteError(err error) bool {
@@ -51,11 +72,11 @@ func retryLogThrottle(n int) bool {
 }
 
 // retryBackoff decides whether a failed attempt (0-based) is retried. It gives up
-// (and logs) after maxRetries attempts or once SQLiteMaxRetryWait has passed since
-// start; otherwise it sleeps with backoff and jitter and returns true.
+// (and logs) after maxRetries attempts or once the retry cap (GetSQLiteMaxRetryWait)
+// has passed since start; otherwise it sleeps with backoff and jitter and returns true.
 func retryBackoff(start time.Time, attempt int, what string, err error) bool {
 	elapsed := time.Since(start)
-	if attempt >= maxRetries-1 || elapsed > SQLiteMaxRetryWait {
+	if attempt >= maxRetries-1 || elapsed > GetSQLiteMaxRetryWait() {
 		log.Printf("[DATABASE] (#%d) SQLite giving up after %d attempts (%v) for %s: %v",
 			atomic.LoadUint64(&queryID), attempt+1, elapsed, what, err)
 		return false
