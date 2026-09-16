@@ -273,10 +273,12 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 				}
 			}
 		}
-	}
-
-	if len(newsgroups) == 0 {
-		errors = append(errors, "No valid newsgroups specified")
+		// Only report this when parsing actually ran and found nothing: otherwise it was
+		// added next to an unrelated error (for example "Invalid reply message-id"), which
+		// skipped the parse block in the first place.
+		if len(errors) == 0 && len(newsgroups) == 0 {
+			errors = append(errors, "No valid newsgroups specified")
+		}
 	}
 	if len(newsgroups) > processor.MaxCrossPosts {
 		errors = append(errors, fmt.Sprintf("You can post to a maximum of %d newsgroups at once", processor.MaxCrossPosts))
@@ -475,8 +477,11 @@ func (s *WebServer) lookupReplyReferences(newsgroups []string, messageID string)
 	return ""
 }
 
-// postMessageIDRe matches a single message-id as accepted for replies.
-var postMessageIDRe = regexp.MustCompile(`^<[^<>\s@]+@[^<>\s@]+>$`)
+// postMessageIDRe matches a single message-id as accepted for replies: printable ASCII
+// without '<', '>' and space between the brackets. Control bytes (CR, LF, NUL, \x0b,
+// \x7f) and non-ASCII are rejected, so nothing can inject a header line. There is no
+// '@' requirement: stored legacy ids such as <bnews.x.1> must stay replyable.
+var postMessageIDRe = regexp.MustCompile(`^<[\x21-\x3B\x3D\x3F-\x7E]{1,248}>$`)
 
 // validatePostHeaders rejects subject and reply message-id values that could inject header lines.
 func validatePostHeaders(subject, messageID string, isReply bool) error {

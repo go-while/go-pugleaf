@@ -15,6 +15,12 @@ import (
 // Session security constants
 const (
 	SessionIDLength = 64
+
+	// sessionSlideEvery bounds how often ValidateUserSession rewrites session_expires_at:
+	// the DB expiry moves at most once every 5 minutes per user, so an active session is
+	// never written on every page view and an idle one survives at least
+	// SessionTimeout-sessionSlideEvery (55 minutes) instead of 30.
+	sessionSlideEvery = 5 * time.Minute
 )
 
 var (
@@ -97,10 +103,11 @@ func (db *Database) ValidateUserSession(sessionID string) (*models.User, error) 
 		return nil, fmt.Errorf("invalid or expired session")
 	}
 
-	// Extend session expiration (sliding timeout) in UTC, but only once less than half of
-	// SessionTimeout remains: sliding on every request costs a write per page view.
+	// Extend session expiration (sliding timeout) in UTC, but at most one write per user
+	// every sessionSlideEvery: sliding on every request costs a write per page view, while
+	// sliding only at half the timeout let idle sessions die after 30 minutes.
 	// login_attempt_at is left alone so the login lockout window is not disturbed.
-	if time.Until(*user.SessionExpiresAt) < SessionTimeout/2 {
+	if time.Until(*user.SessionExpiresAt) < SessionTimeout-sessionSlideEvery {
 		newExpiresAt := time.Now().UTC().Add(SessionTimeout)
 		updateQuery := `UPDATE users SET session_expires_at = ? WHERE id = ?`
 		if _, err := RetryableExec(db.mainDB, updateQuery, newExpiresAt, user.ID); err != nil {

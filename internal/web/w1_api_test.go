@@ -289,8 +289,11 @@ func TestW1APIValidatePostHeaders(t *testing.T) {
 		{"Re: x", "<a@b>\r\nControl: cancel <x@y>", true, "Invalid reply message-id"},
 		{"Re: x", "a@b", true, "Invalid reply message-id"},
 		{"Re: x", "<a b@c>", true, "Invalid reply message-id"},
-		{"Re: x", "<a@b@c>", true, "Invalid reply message-id"},
-		{"Re: x", "<ab>", true, "Invalid reply message-id"},
+		{"Re: x", "<a@b@c>", true, ""}, // legacy ids: the '@' rule was dropped (F7)
+		{"Re: x", "<ab>", true, ""},
+		{"Re: x", "<a\x0bb@c>", true, "Invalid reply message-id"},
+		{"Re: x", "<a\x7f@c>", true, "Invalid reply message-id"},
+		{"Re: x", "<ä@c>", true, "Invalid reply message-id"},
 		{"Re: x", "<a@b><c@d>", true, "Invalid reply message-id"},
 		{"Re: x", long, true, "Invalid reply message-id"},
 	}
