@@ -152,6 +152,11 @@ func (s *WebServer) Shutdown(ctx context.Context) error {
 			}
 			if n := s.inFlightRequests.Load(); n > 0 {
 				log.Printf("[WEB]: %d request(s) still running after %v, continuing shutdown", n, shutdownGrace)
+			} else {
+				// Every handler stopped after the cancellation, so the shutdown did complete:
+				// do not report the graceful deadline as a failure to the caller.
+				log.Printf("[WEB]: all requests finished after cancellation, web server stopped")
+				err = nil
 			}
 		}
 	}
@@ -165,8 +170,23 @@ func (s *WebServer) Shutdown(ctx context.Context) error {
 	}
 	// The flusher stops as soon as stopCh closes, which is before the drain above: every API
 	// request served during the drain was counted into a buffer nobody writes any more.
-	// Flush once more here, with the drained requests included.
-	s.flushTokenUsage()
+	// Flush once more here, with the drained requests included, but bounded like every other
+	// step: one UPDATE on a main DB that another process holds open retries for minutes of
+	// busy time (busy_timeout is 30s per attempt, the retry cap counts busy time only), and
+	// nothing else may shut down meanwhile. flushTokenUsage logs the counts it could not
+	// write, so giving up here loses no information.
+	flushed := make(chan struct{})
+	go func() {
+		defer close(flushed)
+		s.flushTokenUsage()
+	}()
+	// Bounded by shutdownGrace, not by ctx: when ctx already ended (the case this flush exists
+	// for) a ctx bound would give the drained counts no chance at all.
+	select {
+	case <-flushed:
+	case <-time.After(shutdownGrace):
+		log.Printf("[WEB]: API token usage of the drained requests not written within %v, giving up on it", shutdownGrace)
+	}
 
 	if s.cancelBase != nil {
 		s.cancelBase()

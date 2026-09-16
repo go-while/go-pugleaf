@@ -271,7 +271,9 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	server.tokenUsageBuffer.counts = make(map[int64]int64)
 	server.tokenUsageBuffer.last = make(map[int64]time.Time)
 
-	// Count in-flight requests before anything else runs, so Shutdown knows when handlers are done
+	// Count in-flight requests, so Shutdown knows when the handlers are done. This is the first
+	// of the application middlewares; gin's own Logger and Recovery run in front of it. Every
+	// route is covered, because this registration precedes setupRoutes.
 	router.Use(server.trackInFlight())
 
 	// Configure security headers based on SSL setup

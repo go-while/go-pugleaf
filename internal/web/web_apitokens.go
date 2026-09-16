@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"strings"
@@ -79,12 +80,21 @@ func (s *WebServer) runTokenUsageFlusher() {
 // pause and, if that fails too, the lost counts are logged per token so they stay recoverable.
 // The UPDATE adds to usage_count, so a concurrent flush (Shutdown flushes after the flusher has
 // stopped) can only write counts twice if they were buffered twice, which the mutex prevents.
+//
+// While stopping, the whole flush keeps to a budget of shutdownGrace: a single RetryableExec
+// gives up only after minutes of busy time, and Shutdown stops waiting for this flush after the
+// same grace, so without the budget the remaining tokens would keep a pointless writer alive
+// long after the database was closed.
 func (s *WebServer) flushTokenUsage() {
 	stopping := false
 	select {
 	case <-s.stopCh:
 		stopping = true
 	default:
+	}
+	var budget time.Time
+	if stopping {
+		budget = time.Now().Add(shutdownGrace)
 	}
 
 	s.tokenUsageBuffer.mu.Lock()
@@ -98,11 +108,18 @@ func (s *WebServer) flushTokenUsage() {
 	s.tokenUsageBuffer.mu.Unlock()
 
 	for tokenID, count := range counts {
-		err := s.DB.AddTokenUsage(tokenID, count, last[tokenID])
-		if err != nil && stopping {
-			// No periodic flush follows: give a transient busy error one more chance.
-			time.Sleep(100 * time.Millisecond)
+		var err error
+		if stopping && !time.Now().Before(budget) {
+			// The shutdown budget is gone: do not start another write that can block for
+			// half a minute on a busy database while everything else waits to stop.
+			err = context.DeadlineExceeded
+		} else {
 			err = s.DB.AddTokenUsage(tokenID, count, last[tokenID])
+			if err != nil && stopping && time.Now().Before(budget) {
+				// No periodic flush follows: give a transient busy error one more chance.
+				time.Sleep(100 * time.Millisecond)
+				err = s.DB.AddTokenUsage(tokenID, count, last[tokenID])
+			}
 		}
 		if err == nil {
 			continue
