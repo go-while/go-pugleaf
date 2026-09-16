@@ -285,6 +285,9 @@ func (db *Database) AuthenticateNNTPUser(username, password string) (*models.NNT
 			// Cache hit - get the user details (this is fast)
 			user, err := db.GetNNTPUserByID(userID)
 			if err != nil {
+				// The row is gone (deleted user) or unreadable: drop the cached
+				// credentials, so only logins that were allowed stay cached.
+				db.InvalidateNNTPUserAuth(username)
 				return nil, err
 			}
 			// A cached login must not outlive the account: re-check on every hit.

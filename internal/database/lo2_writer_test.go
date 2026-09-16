@@ -103,6 +103,8 @@ func TestLo2WriterRetryCapCountsBusyTime(t *testing.T) {
 // TestLo2WriterStatsRetry: the batch stats update rides out busy errors (the articles
 // are already committed) and returns any other error at once (F17).
 func TestLo2WriterStatsRetry(t *testing.T) {
+	running := func() bool { return false }
+
 	calls := 0
 	err := updateNewsgroupStatsWithRetry(func() error {
 		calls++
@@ -110,7 +112,7 @@ func TestLo2WriterStatsRetry(t *testing.T) {
 			return sqlite3.Error{Code: sqlite3.ErrBusy}
 		}
 		return nil
-	}, time.Millisecond, "'lo2writer.stats' (+3 articles, max_article=7)")
+	}, time.Millisecond, "'lo2writer.stats' (+3 articles, max_article=7)", running)
 	if err != nil || calls != 3 {
 		t.Fatalf("busy twice: err=%v calls=%d; want nil, 3", err, calls)
 	}
@@ -120,14 +122,37 @@ func TestLo2WriterStatsRetry(t *testing.T) {
 	err = updateNewsgroupStatsWithRetry(func() error {
 		calls++
 		return fatal
-	}, time.Millisecond, "'lo2writer.stats'")
+	}, time.Millisecond, "'lo2writer.stats'", running)
 	if !errors.Is(err, fatal) || calls != 1 {
 		t.Fatalf("non-retryable: err=%v calls=%d; want %v, 1", err, calls, fatal)
 	}
 
 	calls = 0
-	if err := updateNewsgroupStatsWithRetry(func() error { calls++; return nil }, time.Millisecond, "ok"); err != nil || calls != 1 {
+	if err := updateNewsgroupStatsWithRetry(func() error { calls++; return nil }, time.Millisecond, "ok", running); err != nil || calls != 1 {
 		t.Fatalf("success: err=%v calls=%d; want nil, 1", err, calls)
+	}
+
+	// Shutdown has begun: the loop must stop, because every tool waits for db.WG before
+	// it closes the databases. A permanently busy main DB would otherwise hang the exit.
+	busy := sqlite3.Error{Code: sqlite3.ErrBusy}
+	calls = 0
+	done := make(chan error, 1)
+	go func() {
+		done <- updateNewsgroupStatsWithRetry(func() error {
+			calls++
+			return busy
+		}, time.Millisecond, "'lo2writer.stats'", func() bool { return true })
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, busy) {
+			t.Fatalf("shutdown bound: err=%v, want the busy error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("updateNewsgroupStatsWithRetry did not stop after shutdown began")
+	}
+	if calls != batchStatsShutdownRounds {
+		t.Fatalf("shutdown bound: calls=%d, want batchStatsShutdownRounds=%d", calls, batchStatsShutdownRounds)
 	}
 }
 
@@ -341,5 +366,25 @@ func TestLo2WriterNNTPAuthDisabledWebUser(t *testing.T) {
 	}
 	if _, found := db.NNTPAuthCache.Get(soloName, password); found {
 		t.Fatal("a refused solo login stayed in the authentication cache")
+	}
+
+	// A deleted NNTP user: the cached login must not survive the missing row either.
+	goneName := w0Name("lo2nntp_gone")
+	if err := db.InsertNNTPUser(&models.NNTPUser{Username: goneName, Password: password, MaxConns: 1, IsActive: true}); err != nil {
+		t.Fatalf("InsertNNTPUser (gone): %v", err)
+	}
+	t.Cleanup(func() { db.NNTPAuthCache.Remove(goneName) })
+	gone, err := db.AuthenticateNNTPUser(goneName, password)
+	if err != nil || gone == nil {
+		t.Fatalf("AuthenticateNNTPUser (gone): %v", err)
+	}
+	if err := db.DeleteNNTPUser(gone.ID); err != nil {
+		t.Fatalf("DeleteNNTPUser: %v", err)
+	}
+	if u, err := db.AuthenticateNNTPUser(goneName, password); err == nil {
+		t.Fatalf("AuthenticateNNTPUser for a deleted NNTP user returned %+v, want an error", u)
+	}
+	if _, found := db.NNTPAuthCache.Get(goneName, password); found {
+		t.Fatal("a deleted NNTP user stayed in the authentication cache")
 	}
 }
