@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -144,17 +145,24 @@ func TestLo2ServerDefaultProxies(t *testing.T) {
 	}
 }
 
-// F4: a private peer that forwards headers but is not trusted is logged exactly once.
-func TestLo2ServerUntrustedForwarderLoggedOnce(t *testing.T) {
+// lo2ServerResetForwarderSet empties the untrusted-forwarder notice set for one test and puts
+// the process-wide one back afterwards.
+func lo2ServerResetForwarderSet(t *testing.T) {
+	t.Helper()
 	untrustedForwarderSeen.Lock()
-	old := untrustedForwarderSeen.ips
-	untrustedForwarderSeen.ips = make(map[string]struct{})
+	oldIPs, oldFull := untrustedForwarderSeen.ips, untrustedForwarderSeen.full
+	untrustedForwarderSeen.ips, untrustedForwarderSeen.full = make(map[string]struct{}), false
 	untrustedForwarderSeen.Unlock()
 	t.Cleanup(func() {
 		untrustedForwarderSeen.Lock()
-		untrustedForwarderSeen.ips = old
+		untrustedForwarderSeen.ips, untrustedForwarderSeen.full = oldIPs, oldFull
 		untrustedForwarderSeen.Unlock()
 	})
+}
+
+// F4: a private peer that forwards headers but is not trusted is logged exactly once.
+func TestLo2ServerUntrustedForwarderLoggedOnce(t *testing.T) {
+	lo2ServerResetForwarderSet(t)
 
 	logs := lo2ServerCaptureLog(t)
 	engine := lo2ServerClientIPEngine("127.0.0.1", "")
@@ -178,18 +186,11 @@ func TestLo2ServerUntrustedForwarderLoggedOnce(t *testing.T) {
 	}
 }
 
-// F4: noteUntrustedForwarder must not grow without bound, and must be safe under concurrency.
+// F4: neither the notice set nor the log may grow without bound, and the helper must be safe
+// under concurrency. Past the cap the helper goes quiet instead of logging every request.
 func TestLo2ServerUntrustedForwarderBounded(t *testing.T) {
-	untrustedForwarderSeen.Lock()
-	old := untrustedForwarderSeen.ips
-	untrustedForwarderSeen.ips = make(map[string]struct{})
-	untrustedForwarderSeen.Unlock()
-	t.Cleanup(func() {
-		untrustedForwarderSeen.Lock()
-		untrustedForwarderSeen.ips = old
-		untrustedForwarderSeen.Unlock()
-	})
-	lo2ServerCaptureLog(t)
+	lo2ServerResetForwarderSet(t)
+	logs := lo2ServerCaptureLog(t)
 
 	s := &WebServer{}
 	var wg sync.WaitGroup
@@ -209,6 +210,20 @@ func TestLo2ServerUntrustedForwarderBounded(t *testing.T) {
 	untrustedForwarderSeen.Unlock()
 	if n > maxUntrustedForwarderIPs {
 		t.Errorf("untrustedForwarderSeen holds %d IPs, want at most %d", n, maxUntrustedForwarderIPs)
+	}
+	if got := logs.countLines("suppressing further notices"); got != 1 {
+		t.Errorf("suppression notices = %d, want exactly 1:\n%s", got, logs.String())
+	}
+	if got := logs.countLines("ignoring forwarded client IP headers"); got > maxUntrustedForwarderIPs {
+		t.Errorf("%d notice lines for 800 peers, want at most %d", got, maxUntrustedForwarderIPs)
+	}
+
+	// Past the cap a new peer must stay silent, however often it comes back.
+	for i := 0; i < 5; i++ {
+		s.noteUntrustedForwarder(net.ParseIP("172.16.9.9"))
+	}
+	if got := logs.countLines("172.16.9.9"); got != 0 {
+		t.Errorf("log lines naming a peer seen after the cap = %d, want 0", got)
 	}
 }
 
@@ -351,8 +366,16 @@ func TestLo2ServerCronLoopSurvivesLoadError(t *testing.T) {
 	}
 }
 
-// F14: clearing the setting clears the patterns, like a start with an empty setting.
-func TestLo2ServerClearBadBots(t *testing.T) {
+// lo2ServerBadBots copies the active bad bot patterns under the lock the middleware uses.
+func lo2ServerBadBots() []string {
+	config.BadBotsMutex.RLock()
+	defer config.BadBotsMutex.RUnlock()
+	return append([]string(nil), config.Default_BadBots...)
+}
+
+// lo2ServerKeepBadBots restores the BadBots setting and globals after one test.
+func lo2ServerKeepBadBots(t *testing.T) {
+	t.Helper()
 	config.BadBotsMutex.RLock()
 	oldBots, oldBlock := config.Default_BadBots, config.BlockBadBots
 	config.BadBotsMutex.RUnlock()
@@ -361,23 +384,71 @@ func TestLo2ServerClearBadBots(t *testing.T) {
 		config.Default_BadBots, config.BlockBadBots = oldBots, oldBlock
 		config.BadBotsMutex.Unlock()
 	})
+}
+
+// F14: clearing the setting clears the patterns, like a start with an empty setting.
+func TestLo2ServerClearBadBots(t *testing.T) {
+	lo2ServerKeepBadBots(t)
 
 	config.UpdateBadBots("lo2serverbot-a,lo2serverbot-b", true)
-	config.BadBotsMutex.RLock()
-	n := len(config.Default_BadBots)
-	config.BadBotsMutex.RUnlock()
-	if n != 2 {
+	if n := len(lo2ServerBadBots()); n != 2 {
 		t.Fatalf("Default_BadBots has %d patterns after setting two, want 2", n)
 	}
 
 	config.UpdateBadBots("", true)
-	config.BadBotsMutex.RLock()
-	got, block := config.Default_BadBots, config.BlockBadBots
-	config.BadBotsMutex.RUnlock()
-	if len(got) != 0 {
+	if got := lo2ServerBadBots(); len(got) != 0 {
 		t.Errorf("Default_BadBots = %q after clearing, want empty", got)
 	}
+	config.BadBotsMutex.RLock()
+	block := config.BlockBadBots
+	config.BadBotsMutex.RUnlock()
 	if !block {
 		t.Error("BlockBadBots = false after clearing the list, want the flag untouched")
+	}
+}
+
+// F14 through the admin form: the success message claims the change took effect, so the running
+// server must really be updated. The dispatch used to store the row without calling UpdateBadBots.
+func TestLo2ServerBadBotsSettingApplied(t *testing.T) {
+	db := w0DB(t)
+	oldValue, err := db.GetConfigValue(config.CFG_KEY_BADBOTS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lo2ServerKeepBadBots(t)
+	t.Cleanup(func() {
+		if err := db.SetConfigValue(config.CFG_KEY_BADBOTS, oldValue); err != nil {
+			t.Errorf("restoring %s: %v", config.CFG_KEY_BADBOTS, err)
+		}
+	})
+
+	_, cookie := w0NewUser(t, true)
+	post := func(value string) *httptest.ResponseRecorder {
+		return w0Do(t, w0Req{
+			Method:  http.MethodPost,
+			Path:    "/admin/settings",
+			Form:    url.Values{"setting": {config.FORM_FIELD_BADBOTS}, config.FORM_FIELD_BADBOTS: {value}},
+			Cookies: []*http.Cookie{cookie},
+		})
+	}
+
+	if rec := post("Lo2ServerBot"); rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST bad bots list: status %d, want 303 (body %q)", rec.Code, rec.Body.String())
+	}
+	if got := lo2ServerBadBots(); len(got) != 1 || got[0] != "lo2serverbot" {
+		t.Fatalf("Default_BadBots = %q after saving one pattern, want [lo2serverbot]: the form does not apply the list", got)
+	}
+	if v, err := db.GetConfigValue(config.CFG_KEY_BADBOTS); err != nil || v != "Lo2ServerBot" {
+		t.Errorf("stored %s = %q (err %v), want \"Lo2ServerBot\"", config.CFG_KEY_BADBOTS, v, err)
+	}
+
+	if rec := post(""); rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST empty bad bots list: status %d, want 303 (body %q)", rec.Code, rec.Body.String())
+	}
+	if got := lo2ServerBadBots(); len(got) != 0 {
+		t.Errorf("Default_BadBots = %q after clearing through the form, want empty", got)
+	}
+	if v, err := db.GetConfigValue(config.CFG_KEY_BADBOTS); err != nil || v != "" {
+		t.Errorf("stored %s = %q (err %v), want empty", config.CFG_KEY_BADBOTS, v, err)
 	}
 }

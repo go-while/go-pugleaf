@@ -205,7 +205,7 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 	}
 
 	// Process the setting
-	if settingType == config.FORM_FIELD_HOSTNAME || settingType == config.FORM_FIELD_REGISTRATION || settingType == config.FORM_FIELD_BLOCKBADBOTS || settingType == config.FORM_FIELD_BLOCKBADIPS || settingType == config.FORM_FIELD_API_ENABLED {
+	if settingType == config.FORM_FIELD_HOSTNAME || settingType == config.FORM_FIELD_REGISTRATION || settingType == config.FORM_FIELD_BLOCKBADBOTS || settingType == config.FORM_FIELD_BLOCKBADIPS || settingType == config.FORM_FIELD_API_ENABLED || settingType == config.FORM_FIELD_BADBOTS {
 		if err := cfg.Processor(s, value); err != nil {
 			switch settingType {
 			case config.FORM_FIELD_HOSTNAME:
@@ -218,6 +218,8 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 				session.SetError("Failed to toggle IP blocking: " + err.Error())
 			case config.FORM_FIELD_API_ENABLED:
 				session.SetError("Failed to toggle API: " + err.Error())
+			case config.FORM_FIELD_BADBOTS:
+				session.SetError("Failed to update the bad bots list: " + err.Error())
 			}
 			c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 			return

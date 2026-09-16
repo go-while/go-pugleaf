@@ -679,12 +679,13 @@ func (s *WebServer) isTrustedPeer(peer net.IP) bool {
 }
 
 // untrustedForwarderSeen remembers peers noteUntrustedForwarder has already logged, so a
-// misconfigured proxy produces one line instead of one per request. It is bounded: beyond
-// maxUntrustedForwarderIPs nothing is added (and those peers are logged again), which keeps a
-// flood of forged headers from untrusted addresses out of memory.
+// misconfigured proxy produces one line instead of one per request. Both the map and the logging
+// are bounded: after maxUntrustedForwarderIPs distinct peers the set is closed (full) and further
+// peers are neither remembered nor logged, so neither memory nor the log can grow without end.
 var untrustedForwarderSeen = struct {
 	sync.Mutex
-	ips map[string]struct{}
+	ips  map[string]struct{}
+	full bool // cap reached: the suppression notice was logged and nothing more is said
 }{ips: make(map[string]struct{})}
 
 const maxUntrustedForwarderIPs = 256
@@ -693,15 +694,23 @@ const maxUntrustedForwarderIPs = 256
 func (s *WebServer) noteUntrustedForwarder(peer net.IP) {
 	key := peer.String()
 	untrustedForwarderSeen.Lock()
+	if untrustedForwarderSeen.full {
+		untrustedForwarderSeen.Unlock()
+		return
+	}
 	if _, seen := untrustedForwarderSeen.ips[key]; seen {
 		untrustedForwarderSeen.Unlock()
 		return
 	}
-	if len(untrustedForwarderSeen.ips) < maxUntrustedForwarderIPs {
-		untrustedForwarderSeen.ips[key] = struct{}{}
-	}
+	untrustedForwarderSeen.ips[key] = struct{}{}
+	full := len(untrustedForwarderSeen.ips) >= maxUntrustedForwarderIPs
+	untrustedForwarderSeen.full = full
 	untrustedForwarderSeen.Unlock()
+
 	log.Printf("[WEB]: ignoring forwarded client IP headers from untrusted proxy %s: add it to %s", key, config.CFG_KEY_REVERSEPROXY)
+	if full {
+		log.Printf("[WEB]: %d untrusted forwarders seen, suppressing further notices: check %s", maxUntrustedForwarderIPs, config.CFG_KEY_REVERSEPROXY)
+	}
 }
 
 // ReverseProxyMiddleware detects HTTPS terminated by a trusted reverse proxy.

@@ -173,7 +173,7 @@
                     <tr>
                         <td>
                             <strong>🧭 Client IP Header</strong>
-                            <code>{{if .ReverseProxyIPHeader}}{{.ReverseProxyIPHeader}}{{else}}X-Forwarded-For{{end}}</code>
+                            <code>{{if eq .ReverseProxyIPHeader "X-Real-IP"}}X-Real-IP{{else}}X-Forwarded-For{{end}}</code>
                             <br>
                             <span class="text-muted">The one header the client IP is taken from behind a trusted proxy. Set it to the header your proxy really sets; the other one is ignored. Restart the web server to apply.</span>
                             <br>
