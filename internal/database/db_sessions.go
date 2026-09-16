@@ -2,6 +2,7 @@ package database
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
@@ -31,7 +32,16 @@ func GenerateSecureSessionID() (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
-// CreateUserSession creates a new session for the user and invalidates any existing session
+// HashSessionToken returns the value stored in users.session_id for a raw session
+// token: lowercase hex of its SHA-256. The raw token only ever lives in the cookie,
+// so a DB read (backup, copied file, SQL access) does not yield working sessions.
+func HashSessionToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// CreateUserSession creates a new session for the user and invalidates any existing
+// session. It returns the raw token for the cookie; the database stores its hash.
 func (db *Database) CreateUserSession(userID int64, remoteIP string) (string, error) {
 	// Generate new session ID
 	sessionID, err := GenerateSecureSessionID()
@@ -42,7 +52,9 @@ func (db *Database) CreateUserSession(userID int64, remoteIP string) (string, er
 	// Calculate expiration time in UTC for consistent DB comparison
 	expiresAt := time.Now().UTC().Add(SessionTimeout)
 
-	// Update user with new session (this invalidates any existing session)
+	// Update user with new session (this invalidates any existing session).
+	// login_attempt_at is left alone: a successful login clears the counter, and
+	// the lockout window is driven by login_attempt_at only while attempts remain.
 	query := `UPDATE users SET
 		session_id = ?,
 		last_login_ip = ?,
@@ -51,7 +63,7 @@ func (db *Database) CreateUserSession(userID int64, remoteIP string) (string, er
 		updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`
 
-	_, err = RetryableExec(db.mainDB, query, sessionID, remoteIP, expiresAt, userID)
+	_, err = RetryableExec(db.mainDB, query, HashSessionToken(sessionID), remoteIP, expiresAt, userID)
 	if err != nil {
 		return "", fmt.Errorf("failed to create user session: %w", err)
 	}
@@ -59,19 +71,20 @@ func (db *Database) CreateUserSession(userID int64, remoteIP string) (string, er
 	return sessionID, nil
 }
 
-// ValidateUserSession checks if the session is valid and extends expiration
+// ValidateUserSession checks if the session is valid and extends expiration.
+// sessionID is the raw token from the cookie; the lookup uses its hash.
 func (db *Database) ValidateUserSession(sessionID string) (*models.User, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("empty session ID")
 	}
 
-	// Get user by session ID (read operation)
+	// Get user by session ID (read operation). user.SessionID holds the hash.
 	query := `SELECT id, username, email, password_hash, display_name, session_id,
 		last_login_ip, session_expires_at, login_attempts, created_at, updated_at
 		FROM users WHERE session_id = ? AND session_expires_at > CURRENT_TIMESTAMP AND disabled = 0`
 
 	var user models.User
-	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{sessionID},
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{HashSessionToken(sessionID)},
 		&user.ID, &user.Username, &user.Email, &user.PasswordHash,
 		&user.DisplayName, &user.SessionID, &user.LastLoginIP,
 		&user.SessionExpiresAt, &user.LoginAttempts, &user.CreatedAt, &user.UpdatedAt)
@@ -86,7 +99,7 @@ func (db *Database) ValidateUserSession(sessionID string) (*models.User, error) 
 
 	// Extend session expiration (sliding timeout) in UTC, but only once less than half of
 	// SessionTimeout remains: sliding on every request costs a write per page view.
-	// updated_at is left alone so the login lockout window is not disturbed.
+	// login_attempt_at is left alone so the login lockout window is not disturbed.
 	if time.Until(*user.SessionExpiresAt) < SessionTimeout/2 {
 		newExpiresAt := time.Now().UTC().Add(SessionTimeout)
 		updateQuery := `UPDATE users SET session_expires_at = ? WHERE id = ?`
@@ -111,21 +124,23 @@ func (db *Database) InvalidateUserSession(userID int64) error {
 	return err
 }
 
-// InvalidateUserSessionBySessionID clears session by session ID
+// InvalidateUserSessionBySessionID clears the session of the raw session token.
 func (db *Database) InvalidateUserSessionBySessionID(sessionID string) error {
 	query := `UPDATE users SET
 		session_id = '',
 		session_expires_at = NULL,
 		updated_at = CURRENT_TIMESTAMP
 		WHERE session_id = ?`
-	_, err := RetryableExec(db.mainDB, query, sessionID)
+	_, err := RetryableExec(db.mainDB, query, HashSessionToken(sessionID))
 	return err
 }
 
-// IncrementLoginAttempts increases the failed login counter
+// IncrementLoginAttempts increases the failed login counter.
+// login_attempt_at marks the last failure and starts the lockout window.
 func (db *Database) IncrementLoginAttempts(username string) error {
 	query := `UPDATE users SET
 		login_attempts = login_attempts + 1,
+		login_attempt_at = CURRENT_TIMESTAMP,
 		updated_at = CURRENT_TIMESTAMP
 		WHERE username = ?`
 
@@ -133,10 +148,11 @@ func (db *Database) IncrementLoginAttempts(username string) error {
 	return err
 }
 
-// ResetLoginAttempts clears the failed login counter
+// ResetLoginAttempts clears the failed login counter and the lockout clock.
 func (db *Database) ResetLoginAttempts(userID int64) error {
 	query := `UPDATE users SET
 		login_attempts = 0,
+		login_attempt_at = NULL,
 		updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`
 
@@ -146,11 +162,11 @@ func (db *Database) ResetLoginAttempts(userID int64) error {
 
 // IsUserLockedOut checks if user is temporarily locked out due to failed attempts
 func (db *Database) IsUserLockedOut(username string) (bool, error) {
-	query := `SELECT login_attempts, updated_at FROM users WHERE username = ?`
+	query := `SELECT COALESCE(login_attempts, 0), login_attempt_at FROM users WHERE username = ?`
 
 	var attempts int
-	var updatedAt time.Time
-	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{username}, &attempts, &updatedAt)
+	var attemptAt sql.NullTime
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{username}, &attempts, &attemptAt)
 	if err != nil {
 		return false, err
 	}
@@ -158,13 +174,13 @@ func (db *Database) IsUserLockedOut(username string) (bool, error) {
 	// Check if user has exceeded max attempts
 	if attempts >= MaxLoginAttempts {
 		// Check if lockout period has expired
-		lockoutExpires := updatedAt.Add(LoginLockoutTime)
-		if time.Now().Before(lockoutExpires) {
+		if attemptAt.Valid && time.Now().Before(attemptAt.Time.Add(LoginLockoutTime)) {
 			return true, nil // Still locked out
-		} else {
-			// Lockout period expired, reset attempts
-			resetQuery := `UPDATE users SET login_attempts = 0, updated_at = CURRENT_TIMESTAMP WHERE username = ?`
-			RetryableExec(db.mainDB, resetQuery, username)
+		}
+		// Lockout period expired, reset attempts
+		resetQuery := `UPDATE users SET login_attempts = 0, login_attempt_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE username = ?`
+		if _, err := RetryableExec(db.mainDB, resetQuery, username); err != nil {
+			log.Printf("[DATABASE]: failed to reset login attempts for user %s: %v", username, err)
 		}
 	}
 
@@ -172,10 +188,11 @@ func (db *Database) IsUserLockedOut(username string) (bool, error) {
 }
 
 // IncrementLoginAttemptsByID increases the failed login counter of the user with the given ID.
-// updated_at marks the last failure and starts the lockout window.
+// login_attempt_at marks the last failure and starts the lockout window.
 func (db *Database) IncrementLoginAttemptsByID(userID int64) error {
 	query := `UPDATE users SET
 		login_attempts = login_attempts + 1,
+		login_attempt_at = CURRENT_TIMESTAMP,
 		updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`
 
@@ -186,11 +203,11 @@ func (db *Database) IncrementLoginAttemptsByID(userID int64) error {
 // IsUserLockedOutByID checks if the user with the given ID is temporarily locked out due to
 // failed login attempts. An expired lockout resets the counter.
 func (db *Database) IsUserLockedOutByID(userID int64) (bool, error) {
-	query := `SELECT COALESCE(login_attempts, 0), updated_at FROM users WHERE id = ?`
+	query := `SELECT COALESCE(login_attempts, 0), login_attempt_at FROM users WHERE id = ?`
 
 	var attempts int
-	var updatedAt sql.NullTime
-	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{userID}, &attempts, &updatedAt)
+	var attemptAt sql.NullTime
+	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{userID}, &attempts, &attemptAt)
 	if err != nil {
 		return false, err
 	}
@@ -198,12 +215,12 @@ func (db *Database) IsUserLockedOutByID(userID int64) (bool, error) {
 	if attempts < MaxLoginAttempts {
 		return false, nil
 	}
-	if updatedAt.Valid && time.Now().Before(updatedAt.Time.Add(LoginLockoutTime)) {
+	if attemptAt.Valid && time.Now().Before(attemptAt.Time.Add(LoginLockoutTime)) {
 		return true, nil // Still locked out
 	}
 
 	// Lockout period expired, reset attempts
-	resetQuery := `UPDATE users SET login_attempts = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	resetQuery := `UPDATE users SET login_attempts = 0, login_attempt_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
 	if _, err := RetryableExec(db.mainDB, resetQuery, userID); err != nil {
 		log.Printf("[DATABASE]: failed to reset login attempts for user %d: %v", userID, err)
 	}
@@ -218,10 +235,11 @@ func (db *Database) IsUserLockedOutByID(userID int64) (bool, error) {
 func (db *Database) ReserveLoginAttemptByID(userID int64) (bool, error) {
 	query := `UPDATE users SET
 		login_attempts = CASE WHEN COALESCE(login_attempts, 0) >= ? THEN 1 ELSE COALESCE(login_attempts, 0) + 1 END,
+		login_attempt_at = CURRENT_TIMESTAMP,
 		updated_at = CURRENT_TIMESTAMP
 		WHERE id = ? AND (COALESCE(login_attempts, 0) < ?
-			OR datetime(updated_at) IS NULL
-			OR datetime(updated_at) < datetime('now', ?))`
+			OR datetime(login_attempt_at) IS NULL
+			OR datetime(login_attempt_at) < datetime('now', ?))`
 
 	window := fmt.Sprintf("-%d seconds", int64(LoginLockoutTime/time.Second))
 	res, err := RetryableExec(db.mainDB, query, MaxLoginAttempts, userID, MaxLoginAttempts, window)

@@ -1,14 +1,11 @@
 package database
 
 import (
-	"encoding/json"
 	"fmt"
 	"html"
 	"html/template"
 	"log"
-	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -97,72 +94,6 @@ func (tree *ThreadTree) limitDepthRecursive(node *TreeNode, maxDepth int) {
 	for _, child := range node.Children {
 		tree.limitDepthRecursive(child, maxDepth)
 	}
-}
-
-// Example HTTP handler for testing tree view API
-func (db *Database) HandleThreadTreeAPI(w http.ResponseWriter, r *http.Request) {
-	// Parse parameters
-	groupName := r.URL.Query().Get("group")
-	threadRootStr := r.URL.Query().Get("thread_root")
-
-	if groupName == "" || threadRootStr == "" {
-		http.Error(w, "Missing required parameters: group, thread_root", http.StatusBadRequest)
-		return
-	}
-
-	threadRoot, err := strconv.ParseInt(threadRootStr, 10, 64)
-	if err != nil {
-		http.Error(w, "Invalid thread_root parameter", http.StatusBadRequest)
-		return
-	}
-
-	// Get group database
-	groupDB, err := db.GetGroupDB(groupName)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get group database: %v", err), http.StatusInternalServerError)
-		return
-	}
-	defer groupDB.Return()
-
-	// Parse options
-	options := TreeViewOptions{
-		MaxDepth:        0,    // No limit by default
-		CollapseDepth:   3,    // Auto-collapse after depth 3
-		IncludeOverview: true, // Include full overview data
-		PageSize:        50,   // Standard page size
-		SortBy:          "date",
-	}
-
-	// Override with query parameters if provided
-	if maxDepthStr := r.URL.Query().Get("max_depth"); maxDepthStr != "" {
-		if maxDepth, err := strconv.Atoi(maxDepthStr); err == nil {
-			options.MaxDepth = maxDepth
-		}
-	}
-
-	if includeOverviewStr := r.URL.Query().Get("include_overview"); includeOverviewStr == "false" {
-		options.IncludeOverview = false
-	}
-
-	// Get tree view
-	response, err := db.GetThreadTreeView(groupDB, threadRoot, options)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get tree view: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Return JSON response
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "public, max-age=300") // Cache for 5 minutes
-
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		log.Printf("Failed to encode tree view response: %v", err)
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-		return
-	}
-
-	log.Printf("[TREE:API] Served tree view for thread %d in group %s (nodes: %d, build_time: %s)",
-		threadRoot, groupName, response.Tree.TotalNodes, response.BuildTime)
 }
 
 // Example usage and testing functions
