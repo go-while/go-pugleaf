@@ -100,6 +100,22 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 
 	// Calculate pagination
 	totalCount := len(allGroups)
+
+	// Clamp the requested page to the last existing one before any multiplication:
+	// (page-1)*LIMIT_sectionPage overflows to a negative offset for a huge ?page=,
+	// and slicing with it panics (F15).
+	if LIMIT_sectionPage > 0 {
+		maxPage := (totalCount + LIMIT_sectionPage - 1) / LIMIT_sectionPage
+		if maxPage < 1 {
+			maxPage = 1
+		}
+		if page > maxPage {
+			page = maxPage
+		}
+	} else {
+		page = 1
+	}
+
 	start := (page - 1) * LIMIT_sectionPage
 	end := start + LIMIT_sectionPage
 
@@ -132,7 +148,10 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 	s.renderPage(c, http.StatusOK, data, "section.html", "pagination.html")
 }
 
-// sectionGroupAllowed loads the section and checks that groupName is one of its groups.
+// sectionGroupAllowed loads the section and checks that groupName is one of its groups,
+// and that the group itself is accessible (it exists in newsgroups, and is active unless
+// the request is from an admin) - section_groups rows outlive a deleted newsgroup, and
+// callers open the group DB next, which would create files for any name.
 // On failure it renders the 404 page and returns false. It never opens a group DB.
 func (s *WebServer) sectionGroupAllowed(c *gin.Context, sectionName, groupName string) (*models.Section, bool) {
 	section, err := s.DB.GetSectionByName(sectionName)
@@ -153,6 +172,11 @@ func (s *WebServer) sectionGroupAllowed(c *gin.Context, sectionName, groupName s
 	// Check if this group belongs to the specified section
 	for _, sg := range sectionGroups {
 		if sg.SectionID == section.ID {
+			// Same access rule as /groups/:group: the newsgroup must exist and,
+			// for non-admins, be active. checkGroupAccess renders the 404 itself.
+			if !s.checkGroupAccess(c, groupName) {
+				return nil, false
+			}
 			return section, true
 		}
 	}
