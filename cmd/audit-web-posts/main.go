@@ -144,7 +144,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	mainPath := filepath.Join(*dataDir, "cfg", "pugleaf.sq3")
 	mainDB, fellBack, err := openReadOnly(mainPath, *strict)
 	if fellBack {
-		fmt.Fprintf(stderr, "[AUDIT] %s has a pending -wal: opened without immutable=1, SQLite may create -shm/-wal files next to it\n", mainPath)
+		fmt.Fprintf(stderr, warnFellBack, mainPath)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "[AUDIT] failed to open main database %s: %v\n", mainPath, err)
@@ -234,6 +234,11 @@ func pendingWAL(path string) (bool, int64) {
 
 // openReadOnly opens a SQLite file read-only, immutably unless a pending
 // write-ahead log forces the plain read-only fallback. The DSN is the guarantee
+// warnFellBack is printed when a pending -wal forced a plain read-only open. It names -strict,
+// because that is the only moment the flag matters and nobody knows about it beforehand.
+const warnFellBack = "[AUDIT] %s has a pending -wal: opened without immutable=1, so SQLite may create " +
+	"-shm/-wal files next to it. Stop the writer, or audit a copy, or pass -strict to refuse instead.\n"
+
 // that nothing in this tool can write to the database; immutable=1 additionally
 // keeps SQLite from creating a wal-index next to it. It returns whether the
 // fallback was used, so the caller can say so.
@@ -321,7 +326,7 @@ func loadQueue(db *sql.DB) ([]string, map[string][]queueRow, error) {
 func auditGroup(path string, rows []queueRow, all, strict, verbose bool, stdout, stderr io.Writer) (checked, flagged, missing int, err error) {
 	db, fellBack, err := openReadOnly(path, strict)
 	if fellBack {
-		fmt.Fprintf(stderr, "[AUDIT] %s has a pending -wal: opened without immutable=1, SQLite may create -shm/-wal files next to it\n", path)
+		fmt.Fprintf(stderr, warnFellBack, path)
 	}
 	if err != nil {
 		return 0, 0, len(rows), err

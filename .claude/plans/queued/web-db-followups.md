@@ -47,7 +47,7 @@ Nothing here is a regression introduced by WSL. Two items (D1, D2) are decisions
 | ID | Where | Question |
 |----|----|----|
 | D1 | `internal/web/webgroupPage.go`, `web_sectionsPage.go`, `web/templates/pagination.html` | **DECIDED 2026-09-16: make the clamp honest.** Do *not* wire cursor links. Article listings clamp `?page=` to 101 and the clamp is currently **silent**: the template renders a "Last" link to the real page count, and following it serves page 101's articles under that URL. Cap the rendered links at the real bound instead, so no link promises a page the server will not serve. **Why the cap exists** (traced, so nobody removes it): `webgroupPage.go:73-94` turns `?page=N` into a cursor with `SELECT article_num ... ORDER BY article_num DESC LIMIT 1 OFFSET (page-1)*128 - 1`. The page fetch itself is cursor-based and cheap; that *conversion* is the deep-OFFSET scan, and SQLite discards `skipCount` rows to answer it — ~640k rows at page 5000. `maxOffsetArticles = 12800` fixes the worst case at ~12.8k discarded rows. The constant's own comment says "Deeper pages must use the cursor parameter"; `?cursor=` does work and skips the conversion entirely, it was simply never linked. Note the API already sends `X-Page-Clamped: 1` (`web_apiHandlers.go`), so the HTML side is the inconsistent half. |
-| D2 | `cmd/audit-web-posts` | WSL's gating: `immutable=1` when no pending `-wal`, otherwise warn and fall back to a plain read-only open, which **can** create `-shm`/`-wal` next to the data. `-strict` refuses instead. Refuse-by-default was tried during WSL and **failed the e2e check**, because a pending `-wal` is routinely left behind (`stop_server`, and the fetcher's `log.Fatalf` path exits without checkpointing). Decide whether the default should flip now that operators have the doc, or stay as is. |
+| D2 | `cmd/audit-web-posts` | **DECIDED 2026-09-16: keep `-strict`, keep the fallback default, and make the flag self-announcing.** An unused flag costs nothing and it is the only hard "touch nothing" guarantee the tool can give; flipping the default was tried during WSL and **failed the e2e check**, because a pending `-wal` is routinely left behind (`stop_server`, and the fetcher's `log.Fatalf` path exits without checkpointing). The real problem was discoverability: the refusal message named `-strict`, but you only saw it if you already knew to pass the flag, while the fallback warning — the one you actually hit — did not mention it. Fixed outside this plan (see the note below): the fallback warning now reads "Stop the writer, or audit a copy, or pass `-strict` to refuse instead." **No work left for this plan.** |
 
 **E. Residuals from the WSL reviews**
 | ID | Where | Defect |
@@ -126,8 +126,8 @@ rest are arranged around it. Two atomicity constraints drove the layout:
 ### Wave 0 (inline, orchestrator)
 1. Preflight from the skill; `git merge-base --is-ancestor e52d1a8 HEAD` must succeed.
 2. Baseline: the `## Checks` below, plus both e2e scripts (expect `pass=25 fail=0` and `pass=16 fail=0`).
-3. Confirm **D1** and **D2** with the user. D1 decides whether wave 3 runs at all; D2 may be a one-line
-   default change in `cmd/audit-web-posts` that the orchestrator takes inline.
+3. **D1 and D2 are already decided** (see the table above) — no questions to ask. D1 runs as wave 3;
+   D2 needs no work at all.
 4. **E3** inline: relabel E12 in `scripts/test-web-hardening.sh` (label only — the assertion does not
    change, and `pass=25 fail=0` must still hold). This is the only edit K4 permits to that script.
 
