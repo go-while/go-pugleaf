@@ -126,6 +126,11 @@ func (db *Database) InvalidateUserSession(userID int64) error {
 
 // InvalidateUserSessionBySessionID clears the session of the raw session token.
 func (db *Database) InvalidateUserSessionBySessionID(sessionID string) error {
+	// Mirror ValidateUserSession: refuse the empty token before hashing, so an absent
+	// cookie cannot become a silent no-op against sha256("").
+	if sessionID == "" {
+		return fmt.Errorf("empty session ID")
+	}
 	query := `UPDATE users SET
 		session_id = '',
 		session_expires_at = NULL,
@@ -136,7 +141,8 @@ func (db *Database) InvalidateUserSessionBySessionID(sessionID string) error {
 }
 
 // IncrementLoginAttempts increases the failed login counter.
-// login_attempt_at marks the last failure and starts the lockout window.
+// login_attempt_at marks the last attempt (ReserveLoginAttemptByID stamps it before the
+// password check, so successful logins move it too) and starts the lockout window.
 func (db *Database) IncrementLoginAttempts(username string) error {
 	query := `UPDATE users SET
 		login_attempts = login_attempts + 1,
@@ -188,7 +194,8 @@ func (db *Database) IsUserLockedOut(username string) (bool, error) {
 }
 
 // IncrementLoginAttemptsByID increases the failed login counter of the user with the given ID.
-// login_attempt_at marks the last failure and starts the lockout window.
+// login_attempt_at marks the last attempt (ReserveLoginAttemptByID stamps it before the
+// password check, so successful logins move it too) and starts the lockout window.
 func (db *Database) IncrementLoginAttemptsByID(userID int64) error {
 	query := `UPDATE users SET
 		login_attempts = login_attempts + 1,

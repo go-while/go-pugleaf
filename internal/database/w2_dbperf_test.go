@@ -530,7 +530,7 @@ func TestW2DBPerfGroupDBDropsRedundantIndexes(t *testing.T) {
 		{"UnHideArticle", "UPDATE articles SET hide = 0 WHERE article_num = ?", []interface{}{1}},
 		{"DecrementArticleSpam", "UPDATE articles SET spam = spam - 1 WHERE article_num = ? AND spam > 0", []interface{}{1}},
 		{"spamFixup(cmd/web)", "UPDATE articles SET spam = 1 WHERE spam = 0 AND hide = 1", nil},
-		{"threadCacheChildren", `SELECT article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded FROM articles WHERE article_num IN (?,?,?) AND hide = 0 ORDER BY date_sent ASC`, []interface{}{1, 2, 3}},
+		{"threadCacheChildren", `SELECT article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded FROM articles WHERE article_num IN (?,?,?) AND +hide = 0 ORDER BY date_sent ASC`, []interface{}{1, 2, 3}},
 		{"processOverviewBatch2", query_processOverviewBatch2 + "?,?)", []interface{}{"<a@b>", "<c@d>"}},
 		{"batchUpdateReplyCounts", "UPDATE articles SET reply_count = CASE WHEN message_id = ? THEN reply_count + ? END WHERE message_id IN (?)", []interface{}{"<a@b>", 1, "<a@b>"}},
 		{"threadRootByMessageID", `SELECT root_article FROM threads WHERE root_article = (SELECT article_num FROM articles WHERE message_id = ? LIMIT 1) LIMIT 1`, []interface{}{"<a@b>"}},

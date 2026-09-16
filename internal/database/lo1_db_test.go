@@ -235,6 +235,12 @@ func TestLo1DBLockoutIgnoresSessionWrites(t *testing.T) {
 }
 
 // C3: the retry cap can be changed while Retryable* helpers are retrying.
+// TestLo1DBRetryWaitRace lowers the process-global retry cap to 20-100ms for about
+// 200ms. That is safe only because no test in this package calls t.Parallel and the
+// only contention in that window is on this test's own temp database: the cap is read
+// from retryBackoff, i.e. only after a BUSY/LOCKED error. If this package ever gains
+// t.Parallel, or OpenDatabase gains a periodic writer that contends, a 20ms cap can
+// make that writer give up early and log "[DATABASE] ... giving up".
 func TestLo1DBRetryWaitRace(t *testing.T) {
 	t.Cleanup(func() { SetSQLiteMaxRetryWait(0) })
 	if got := GetSQLiteMaxRetryWait(); got != defaultSQLiteMaxRetryWait {

@@ -94,7 +94,7 @@ type User struct {
 	Email            string     `json:"email" db:"email"`
 	PasswordHash     string     `json:"password_hash" db:"password_hash"`
 	DisplayName      string     `json:"display_name" db:"display_name"`
-	SessionID        string     `json:"session_id" db:"session_id"`                 // Current active session (64 chars)
+	SessionID        string     `json:"session_id" db:"session_id"`                 // hex(sha256) of the active session token - see database.HashSessionToken; never the cookie value
 	LastLoginIP      string     `json:"last_login_ip" db:"last_login_ip"`           // IP of last login (for logging only)
 	SessionExpiresAt *time.Time `json:"session_expires_at" db:"session_expires_at"` // Session expiration (sliding)
 	LoginAttempts    int        `json:"login_attempts" db:"login_attempts"`         // Failed login attempts counter
