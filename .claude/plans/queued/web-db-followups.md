@@ -46,7 +46,7 @@ Nothing here is a regression introduced by WSL. Two items (D1, D2) are decisions
 **D. Decisions, not defects**
 | ID | Where | Question |
 |----|----|----|
-| D1 | `internal/web/webgroupPage.go`, `web_sectionsPage.go`, `web/templates/pagination.html` | **F1 from WSL, deferred by the user.** Article listings clamp `?page=` to 101 (`clampOffsetPage`, `maxOffsetArticles/pageSize + 1`) and the clamp is **silent**: the template renders a "Last" link to the real page count, and following it serves page 101's articles under that URL. `?cursor=<article_num>` **is** implemented server-side in both handlers — `pagination.html` simply never emits a cursor link. So this is a template + `PaginationInfo` change, not new query work. Decide: link cursors, or make the clamp visible (hide "Last", show the real bound). |
+| D1 | `internal/web/webgroupPage.go`, `web_sectionsPage.go`, `web/templates/pagination.html` | **DECIDED 2026-09-16: make the clamp honest.** Do *not* wire cursor links. Article listings clamp `?page=` to 101 and the clamp is currently **silent**: the template renders a "Last" link to the real page count, and following it serves page 101's articles under that URL. Cap the rendered links at the real bound instead, so no link promises a page the server will not serve. **Why the cap exists** (traced, so nobody removes it): `webgroupPage.go:73-94` turns `?page=N` into a cursor with `SELECT article_num ... ORDER BY article_num DESC LIMIT 1 OFFSET (page-1)*128 - 1`. The page fetch itself is cursor-based and cheap; that *conversion* is the deep-OFFSET scan, and SQLite discards `skipCount` rows to answer it — ~640k rows at page 5000. `maxOffsetArticles = 12800` fixes the worst case at ~12.8k discarded rows. The constant's own comment says "Deeper pages must use the cursor parameter"; `?cursor=` does work and skips the conversion entirely, it was simply never linked. Note the API already sends `X-Page-Clamped: 1` (`web_apiHandlers.go`), so the HTML side is the inconsistent half. |
 | D2 | `cmd/audit-web-posts` | WSL's gating: `immutable=1` when no pending `-wal`, otherwise warn and fall back to a plain read-only open, which **can** create `-shm`/`-wal` next to the data. `-strict` refuses instead. Refuse-by-default was tried during WSL and **failed the e2e check**, because a pending `-wal` is routinely left behind (`stop_server`, and the fetcher's `log.Fatalf` path exits without checkpointing). Decide whether the default should flip now that operators have the doc, or stay as is. |
 
 **E. Residuals from the WSL reviews**
@@ -158,11 +158,18 @@ rest are arranged around it. Two atomicity constraints drove the layout:
   `internal/database/db_user_profile.go` (new), `internal/web/fu_forms_test.go` (new).
   Must not touch `queries.go`.
 
-### Wave 3 (only if the user chose to act on D1 in wave 0)
-- slice `fu-pagination` — **D1**. Owns `web/templates/pagination.html`,
+### Wave 3 (D1 — confirmed, runs)
+- slice `fu-pagination` — **D1, "make the clamp honest"**. Owns `web/templates/pagination.html`,
   `internal/models/models.go` (`PaginationInfo` fields only), `internal/web/webgroupPage.go`,
   `internal/web/web_sectionsPage.go` (the pagination block only).
   It shares `web_sectionsPage.go` with `fu-queries`, which is why it cannot run before wave 2.
+  Scope: `PaginationInfo` learns the clamped bound (e.g. `LinkablePages`), `NewPaginationInfo` takes it
+  from the caller's `maxOffset/pageSize + 1`, and `pagination.html` renders "Last" and the page numbers
+  against that bound instead of `TotalPages`. When the real total is larger, say so in the info text
+  rather than linking a page that will be clamped. **Do not** add cursor links and **do not** raise
+  `maxOffsetArticles` — the cap is a real guard on the page→cursor OFFSET scan (see D1).
+  Checks: a group with more than 101 pages renders no link above the bound, `?page=5000` still answers
+  200, and `NewPaginationInfo` is unchanged for every caller that passes no bound.
 
 ---
 
