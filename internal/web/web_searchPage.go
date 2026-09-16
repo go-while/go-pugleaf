@@ -51,8 +51,8 @@ func (s *WebServer) searchPage(c *gin.Context) {
 			offset := (page - 1) * pageSize
 			groups, err := s.DB.SearchNewsgroups(query, pageSize, offset, false)
 			if err != nil {
-				log.Printf("Error searching groups: %v", err)
-				s.renderError(c, http.StatusInternalServerError, "Search Error", err.Error())
+				log.Printf("[WEB]: searchPage: SearchNewsgroups(groups, offset=%d): %v", offset, err)
+				s.renderError(c, http.StatusInternalServerError, "Search Error", publicErrorDetail)
 				return
 			}
 
@@ -90,8 +90,8 @@ func (s *WebServer) searchPage(c *gin.Context) {
 			offset := (page - 1) * pageSize
 			groups, err := s.DB.SearchNewsgroups(query, pageSize, offset, false)
 			if err != nil {
-				log.Printf("Error searching: %v", err)
-				s.renderError(c, http.StatusInternalServerError, "Search Error", err.Error())
+				log.Printf("[WEB]: searchPage: SearchNewsgroups(all, offset=%d): %v", offset, err)
+				s.renderError(c, http.StatusInternalServerError, "Search Error", publicErrorDetail)
 				return
 			}
 

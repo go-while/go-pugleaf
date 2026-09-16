@@ -133,59 +133,6 @@ func (s *SessionData) GetError() string {
 	return err
 }
 
-// WebAuthRequired middleware for web authentication (different from API auth)
-func (s *WebServer) WebAuthRequired() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		session := s.getWebSession(c)
-		if session == nil {
-			c.Redirect(http.StatusSeeOther, "/login?redirect="+url.QueryEscape(c.Request.URL.RequestURI()))
-			c.Abort()
-			return
-		}
-
-		// Store user in context for handlers
-		c.Set("user", session.User)
-		c.Next()
-	}
-}
-
-// WebAdminRequired middleware for admin-only routes
-func (s *WebServer) WebAdminRequired() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		session := s.getWebSession(c)
-		if session == nil {
-			c.Redirect(http.StatusSeeOther, "/login?redirect="+url.QueryEscape(c.Request.URL.RequestURI()))
-			c.Abort()
-			return
-		}
-
-		// Check if user has admin permission
-		permissions, err := s.DB.GetUserPermissions(session.UserID)
-		if err != nil {
-			s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
-			c.Abort()
-			return
-		}
-
-		hasAdminPerm := false
-		for _, perm := range permissions {
-			if perm.Permission == "admin" {
-				hasAdminPerm = true
-				break
-			}
-		}
-
-		if !hasAdminPerm {
-			s.renderError(c, http.StatusForbidden, "Access Denied", "Admin access required")
-			c.Abort()
-			return
-		}
-
-		c.Set("user", session.User)
-		c.Next()
-	}
-}
-
 // Gin context keys of the per-request auth cache.
 const (
 	ctxKeyWebSessionChecked = "pugleaf.webSessionChecked" // bool: getWebSession already ran

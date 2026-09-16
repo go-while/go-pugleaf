@@ -2,6 +2,7 @@
 package web
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 
@@ -35,8 +36,8 @@ func (s *WebServer) sectionsPage(c *gin.Context) {
 	// Get all sections
 	sections, err := s.DB.GetSections()
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error",
-			"Could not retrieve sections: "+err.Error())
+		log.Printf("[WEB]: sectionsPage: GetSections: %v", err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 
@@ -92,7 +93,8 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 	// Get groups for this section with activity data (includes sorting)
 	allGroups, err := s.DB.GetSectionGroupsWithActivity(section.ID, sortBy)
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
+		log.Printf("[WEB]: sectionPage: GetSectionGroupsWithActivity(section=%d sort=%s): %v", section.ID, sortBy, err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 
@@ -216,7 +218,8 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 	// Get articles (overview data) for this group with pagination
 	articles, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_sectionGroupPage)
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
+		log.Printf("[WEB]: sectionGroupPage: GetOverviewsPaginated(last=%d): %v", lastArticleNum, err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 

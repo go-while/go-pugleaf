@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -24,8 +25,12 @@ const htmlContentType = "text/html; charset=utf-8"
 const maxPooledBufferSize = 1 << 20
 
 // tmplCache holds parsed template sets.
-// Key: [funcs marker] + name + "\x00" + strings.Join(files, "\x00").
+// Key: [funcMapKey] + name + "\x00" + strings.Join(files, "\x00").
 var tmplCache sync.Map
+
+// publicErrorDetail is the error detail visitors are shown. Internal text (SQLite errors, file
+// paths, template errors) never reaches the page; it goes to the log instead.
+const publicErrorDetail = "Please try again later."
 
 // bufPool provides the buffers pages are rendered into before they are written.
 var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
@@ -34,13 +39,22 @@ var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 // every request). It is read on every call so it can be toggled without a restart.
 func devTemplates() bool { return os.Getenv("PUGLEAF_DEV_TEMPLATES") == "1" }
 
+// funcMapKey identifies a FuncMap by the address of its map header, so two call sites with
+// different FuncMaps get different cache entries even with the same name and files.
+// Every FuncMap passed to a cached load must therefore be a package-level map (today only
+// adminTemplateFuncs): one built per call would fill the cache, and a later map could land on
+// the address of a collected one and hit its entry.
+func funcMapKey(funcs template.FuncMap) string {
+	return fmt.Sprintf("funcs@%x\x01", reflect.ValueOf(funcs).Pointer())
+}
+
 // tmplCacheKey builds the cache key of a template set. Sets parsed with a FuncMap get a
-// separate key space, so a call site with funcs never shares an entry with one without.
-// Call sites using different FuncMaps must use different names.
+// separate key space per FuncMap, so a call site never shares an entry with one that uses
+// another FuncMap or none.
 func tmplCacheKey(name string, funcs template.FuncMap, files []string) string {
 	var b strings.Builder
 	if funcs != nil {
-		b.WriteString("funcs\x01")
+		b.WriteString(funcMapKey(funcs))
 	}
 	b.WriteString(name)
 	b.WriteByte(0)
@@ -122,7 +136,7 @@ func (s *WebServer) renderPage(c *gin.Context, status int, data any, files ...st
 // names inside web/templates and must include the file that defines exec.
 func (s *WebServer) renderTemplateSet(c *gin.Context, status int, name string, funcs template.FuncMap, exec string, data any, files ...string) {
 	if err := writeTemplateSet(c, status, name, funcs, exec, data, files...); err != nil {
-		log.Printf("[WEB]: template error: %v", err)
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
+		log.Printf("[WEB]: renderTemplateSet: template error: %v", err)
+		s.renderError(c, http.StatusInternalServerError, "Template error", publicErrorDetail)
 	}
 }

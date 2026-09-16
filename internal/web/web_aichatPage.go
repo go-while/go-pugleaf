@@ -18,7 +18,12 @@ import (
 
 const maxChatInputLineLength = 1024
 
-const ollamaProxyURL = "http://ollama-proxy.local:21434/proxy"
+// ollamaProxyURL is the endpoint every chat request is proxied to. It is a var so tests can
+// point it at a fake proxy; nothing but aichatSend reads it.
+var ollamaProxyURL = "http://ollama-proxy.local:21434/proxy"
+
+// chatBusyMessage is returned when the user already has a send waiting for the proxy.
+const chatBusyMessage = "A reply is still being generated"
 
 // chatHTTPClient calls the Ollama proxy; the timeout bounds a hung proxy (the request context
 // additionally ends when the client goes away).
@@ -39,9 +44,12 @@ var (
 )
 
 // chatEntry is the chat history of one user with one model.
+// All fields are guarded by chatCacheMux.
 type chatEntry struct {
 	msgs     []ChatMessage
 	lastUsed time.Time
+	inFlight bool   // a send of this user and model is waiting for the proxy
+	gen      uint64 // bumped by every clear; a reply of an older generation is not stored
 }
 
 // Chat history cache - in-memory storage per user and model (key: chatHistoryKey)
@@ -68,6 +76,14 @@ func getChatHistory(key string, now time.Time) []ChatMessage {
 	return slices.Clone(entry.msgs)
 }
 
+// clearChatEntry empties one history and bumps its generation, so a send that is still waiting
+// for the proxy does not store its exchange afterwards. The caller holds chatCacheMux.
+// The (now empty) entry stays in the map; sweepChatCaches removes it once it is idle.
+func clearChatEntry(entry *chatEntry) {
+	entry.msgs = nil
+	entry.gen++
+}
+
 // getAllChatHistoryCounts gets chat history counts of a user for all models
 func getAllChatHistoryCounts(userID int64, models []*models.AIModel) map[string]int {
 	chatCacheMux.RLock()
@@ -85,18 +101,28 @@ func getAllChatHistoryCounts(userID int64, models []*models.AIModel) map[string]
 
 // sweepChatCaches removes chat histories idle for more than chatHistoryMaxIdle and rate-limiter
 // entries older than 10*chatCooldown, then caps both maps at chatCacheMaxEntries by evicting the
-// oldest entries. It takes chatCacheMux and rateLimiterMux itself.
+// oldest entries. Entries with a send in flight are never removed, so the sender still finds its
+// entry when the proxy answers. It takes chatCacheMux and rateLimiterMux itself.
 func sweepChatCaches(now time.Time) {
 	chatCacheMux.Lock()
 	for key, entry := range chatHistoryCache {
+		if entry.inFlight {
+			continue
+		}
 		if now.Sub(entry.lastUsed) > chatHistoryMaxIdle {
 			delete(chatHistoryCache, key)
 		}
 	}
 	if over := len(chatHistoryCache) - chatCacheMaxEntries; over > 0 {
 		keys := make([]string, 0, len(chatHistoryCache))
-		for key := range chatHistoryCache {
+		for key, entry := range chatHistoryCache {
+			if entry.inFlight {
+				continue
+			}
 			keys = append(keys, key)
+		}
+		if over > len(keys) {
+			over = len(keys)
 		}
 		slices.SortFunc(keys, func(a, b string) int {
 			return chatHistoryCache[a].lastUsed.Compare(chatHistoryCache[b].lastUsed)
@@ -266,11 +292,37 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 		return
 	}
 
-	// Get a copy of the existing chat history of this user and model
+	// Claim the history of this user and model: only one send at a time may wait for the proxy,
+	// so two sends can no longer overwrite each other's exchange. gen is remembered here and
+	// re-checked before storing, so a clear during the send is not undone.
 	modelCacheKey := chatHistoryKey(session.UserID, modelPostKey)
-	history := getChatHistory(modelCacheKey, now)
+	chatCacheMux.Lock()
+	entry, ok := chatHistoryCache[modelCacheKey]
+	if !ok {
+		entry = &chatEntry{}
+		chatHistoryCache[modelCacheKey] = entry
+	}
+	if entry.inFlight {
+		chatCacheMux.Unlock()
+		log.Printf("AI Chat busy: user=%d model=%q", session.UserID, modelPostKey)
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": chatBusyMessage})
+		return
+	}
+	entry.inFlight = true
+	entry.lastUsed = now
+	gen := entry.gen
+	history := slices.Clone(entry.msgs)
+	chatCacheMux.Unlock()
+	// Runs on every return path below, so a failed send never leaves the entry claimed.
+	defer func() {
+		chatCacheMux.Lock()
+		if cur, ok := chatHistoryCache[modelCacheKey]; ok && cur == entry {
+			cur.inFlight = false
+		}
+		chatCacheMux.Unlock()
+	}()
 
-	// Add new user message to history
+	// Add new user message to the copy sent to the proxy
 	history = append(history, ChatMessage{Role: "user", Content: req.Message})
 
 	// Never log message contents: lengths and the model only
@@ -330,17 +382,19 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 		return
 	}
 
-	// Add AI response to history
-	history = append(history, ChatMessage{Role: "assistant", Content: proxyResp.Reply})
-
-	// Trim history if it gets too long (keep last N messages)
-	if len(history) > maxHistoryLength {
-		history = history[len(history)-maxHistoryLength:]
-	}
-
-	// Save updated history to model-specific cache
+	// Append the exchange to the current history, unless it was cleared while the proxy worked:
+	// then the reply is still returned to the client, but no longer stored.
 	chatCacheMux.Lock()
-	chatHistoryCache[modelCacheKey] = &chatEntry{msgs: history, lastUsed: time.Now()}
+	if cur, ok := chatHistoryCache[modelCacheKey]; ok && cur == entry && cur.gen == gen {
+		cur.msgs = append(cur.msgs,
+			ChatMessage{Role: "user", Content: req.Message},
+			ChatMessage{Role: "assistant", Content: proxyResp.Reply})
+		// Trim history if it gets too long (keep last N messages)
+		if len(cur.msgs) > maxHistoryLength {
+			cur.msgs = cur.msgs[len(cur.msgs)-maxHistoryLength:]
+		}
+		cur.lastUsed = time.Now()
+	}
 	chatCacheMux.Unlock()
 
 	log.Printf("AI Chat got reply: user=%d model='%s' reply_len=%d", session.UserID, selectedModel.DisplayName, len(proxyResp.Reply))
@@ -431,15 +485,17 @@ func (s *WebServer) aichatClearHistory(c *gin.Context) {
 	if modelParam == "all" {
 		// Clear all model histories for this user
 		prefix := strconv.FormatInt(session.UserID, 10) + "_"
-		for key := range chatHistoryCache {
+		for key, entry := range chatHistoryCache {
 			if strings.HasPrefix(key, prefix) {
-				delete(chatHistoryCache, key)
+				clearChatEntry(entry)
 			}
 		}
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": "All chats cleared"})
 	} else if modelParam != "" {
 		// Clear specific model history
-		delete(chatHistoryCache, chatHistoryKey(session.UserID, modelParam))
+		if entry, ok := chatHistoryCache[chatHistoryKey(session.UserID, modelParam)]; ok {
+			clearChatEntry(entry)
+		}
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Model chat cleared"})
 	} else {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Model parameter required in URL"})

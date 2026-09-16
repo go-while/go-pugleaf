@@ -79,8 +79,8 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 	// Use cached thread replies with pagination
 	threadReplies, totalReplies, err := s.DB.GetCachedThreadReplies(groupDB, threadRoot, page, ThreadMessages_perPage)
 	if err != nil {
-		log.Printf("Failed to get cached thread replies for %s/%d: %v", groupName, threadRoot, err)
-		s.renderError(c, http.StatusInternalServerError, "Failed to load thread replies", err.Error())
+		log.Printf("[WEB]: singleThreadPage: GetCachedThreadReplies(%s/%d page=%d): %v", groupName, threadRoot, page, err)
+		s.renderError(c, http.StatusInternalServerError, "Failed to load thread replies", publicErrorDetail)
 		return
 	}
 

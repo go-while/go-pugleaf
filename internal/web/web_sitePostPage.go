@@ -390,25 +390,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	if isReply {
 		log.Printf("Setting up References header for reply to message ID: %s", messageID)
 		// Try to find the original article to get its References
-		var originalRefs string
-		for _, newsgroup := range newsgroups {
-			groupDB, err := s.DB.GetGroupDB(newsgroup)
-			if err != nil {
-				log.Printf("Warning: Failed to get group DB for %s: %v", newsgroup, err)
-				continue
-			}
-			defer groupDB.Return()
-
-			originalArticle, err := s.DB.GetArticleByMessageID(groupDB, messageID)
-			if err != nil {
-				log.Printf("Warning: Failed to find original article %s in %s: %v", messageID, newsgroup, err)
-				continue
-			}
-			if originalArticle.References != "" {
-				originalRefs = originalArticle.References
-			}
-			break
-		}
+		originalRefs := s.lookupReplyReferences(newsgroups, messageID)
 
 		// Build new References header: original References + original Message-ID
 		article.References = strings.TrimSpace(originalRefs + " " + messageID)
@@ -427,6 +409,13 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 
 	default:
 		log.Printf("Warning: Post queue channel is full, article is lost.")
+		// The reservation above already charged a post and started the back-off: give it back,
+		// so a busy queue does not block the user for WebPostingBackOff.
+		if released, err := s.DB.ReleaseWebPost(user.ID, now, user.LastPostUnix); err != nil {
+			log.Printf("[WEB]: sitePostSubmit: failed to release post reservation of user %d: %v", user.ID, err)
+		} else if !released {
+			log.Printf("[WEB]: sitePostSubmit: post reservation of user %d not released (lastpost_unix changed)", user.ID)
+		}
 		data := PostPageData{
 			TemplateData:          s.getBaseTemplateData(c, "Posting failed"),
 			PrefilledNewsgroup:    newsgroupsStr,
@@ -458,6 +447,28 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	}
 
 	s.renderPage(c, http.StatusOK, data, "sitepost.html")
+}
+
+// lookupReplyReferences returns the References header of the article messageID in the first
+// newsgroup that has it (empty when none has it). Each group DB is returned before the next one
+// is opened, so a crosspost never holds several group DBs until the handler ends.
+func (s *WebServer) lookupReplyReferences(newsgroups []string, messageID string) string {
+	for _, newsgroup := range newsgroups {
+		groupDB, err := s.DB.GetGroupDB(newsgroup)
+		if err != nil {
+			log.Printf("Warning: Failed to get group DB for %s: %v", newsgroup, err)
+			continue
+		}
+		originalArticle, err := s.DB.GetArticleByMessageID(groupDB, messageID)
+		groupDB.Return()
+		if err != nil {
+			log.Printf("Warning: Failed to find original article %s in %s: %v", messageID, newsgroup, err)
+			continue
+		}
+		// The first group that has the article decides, even when its References are empty.
+		return originalArticle.References
+	}
+	return ""
 }
 
 // postMessageIDRe matches a single message-id as accepted for replies.
