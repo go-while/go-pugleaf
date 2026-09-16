@@ -786,3 +786,81 @@ for 42s over a server-side failure) is preserved.
   wal-index is absent, create `-shm`/`-wal`. `-strict` guarantees zero touch; auditing a copy is the other way.
 - `InvalidateUserSessionBySessionID` still has no in-tree caller (logout goes through `InvalidateUserSession`).
 - `rsyncInactiveGroupsToDir` never checks `rows.Err()` (pre-existing, outside the wave-1 slices).
+
+### Wave 2 — merged, all 5 slices + inline docs
+
+| Slice | Branch | Impl commits | Merge | Review verdict |
+|----|----|----|----|----|
+| `lo2-web-pages` | `worktree-agent-a587de24703d4f43e` | `3cefdc9`, `bc4050b` | `d4efcef` (+ minors `51ac7a6`) | MERGE |
+| `lo2-web-forms` | `worktree-agent-ad2a075c1c0ccb2de` | `3a0095b`, `d577846`, `a31391d` | `30dab58` (+ minors `49d2755`) | MERGE |
+| `lo2-pool` | `worktree-agent-abf4ef7566b16b3ac` | `981aada`, `eab8aff`, `1f4437a` | `72d9277` | measurement only, no review agent |
+| `lo2-db-writer` | `worktree-agent-ae0262a129317988b` | `cf86624`, `85a7ba4`, `39f8387` | `01a544e` | MERGE AFTER FIXES → fixed |
+| `lo2-web-server` | `worktree-agent-a16c71c90604c2787` | `9ae6416`, `24319fc`, `0efaaca` | `a8fad7a` (+ test row `c9d6565`) | MERGE AFTER FIXES → fixed |
+
+Inline: `a50b385` (B12 `internal/web/README.md`, B13 `docs/web-deployment.md`).
+
+**Checks on the fully merged tree (`a50b385`):** gofmt/vet/build clean (two baseline files only);
+`go test -race -count=1` green across all 8 packages, with `./internal/processor/...` and
+`./internal/nntp/...` run twice because the retry clock moved. **`scripts/test-web-leftovers.sh`
+→ `pass=16 fail=0`** (baseline was `pass=1 fail=15`), **`scripts/test-web-hardening.sh` →
+`pass=25 fail=0`**, 0 DATA RACE reports in both scratch logs.
+
+**Review findings that mattered in wave 2** (again, each missed by the slice's own passing tests):
+1. **`lo2-db-writer`, major — shutdown could hang forever.** `updateNewsgroupStatsWithRetry` retried
+   SQLITE_BUSY unbounded (Decision 17) while sitting on the `db.WG.Wait()` path. Every tool runs
+   `close(StopChan)` → `WG.Wait()` → **then** `db.Shutdown()`, so the "it exits when the DB closes"
+   escape could never fire — the close is downstream of the wait it blocks. A foreign write lock on
+   `pugleaf.sq3` during a fetcher shutdown meant SIGKILL. Now bounded once `IsDBshutdown()` is true.
+2. **`lo2-db-writer`, major — `retry2` abandoned a batch mid-write.** After phase 1 committed the
+   articles, a threading failure plus a failed reopen left them with no threading, no history entries
+   and no `message_count`/`last_article`, announced by a single `Failed2` log line. Now retried like
+   `retry1`, with its own "committed without threading/history/stats (rebuild needed)" wording.
+   **Not** recorded as covered by F16.
+3. **`lo2-web-server`, major — F14's fix was unreachable.** `config.UpdateBadBots("")` is correct and
+   unit-tested, but the admin dispatch at `web_admin_settings_unified.go:208` never called the BadBots
+   processor, so `processBadBotsUpdate` was dead code. Clearing the field wrote the row, displayed the
+   new "Bad bots list cleared (no patterns)" message, and left the server blocking those agents until
+   restart — the slice made a pre-existing bug user-visible by asserting a state the server was not in.
+   Now wired, with a test that drives the real admin form and fails without the fix.
+4. **`lo2-web-server`, minor — the fix for F4 could itself flood the log.** `noteUntrustedForwarder`
+   stopped *inserting* at 256 IPs but kept *logging*, i.e. one line per request instead of one per IP.
+   Bounded now by a `full` flag plus one suppression line.
+5. **`lo2-web-pages`, minor — the F15 clamp had a hole.** A non-positive `LIMIT_sectionPage` (a package
+   `var`) makes `end` negative, which neither existing clamp catches — the same panic class the slice
+   closes. Fixed at merge.
+
+**Intended behaviour change that broke an existing test.** F3 reduces `RemoteIPHeaders` to the one
+configured header, so `TestW1ServerTrustedProxies/"valid x-real-ip from trusted peer"` no longer holds:
+with no XFF present, gin returns the trusted peer's own address. Confirmed against the gin source
+(`gin.go:472-475`, `context.go:951-959`); the row now expects `192.168.1.1` and is renamed
+(`c9d6565`). X-Real-IP as the *configured* header is covered by `TestLo2ServerTrustedHeader`.
+
+**C6 outcome (Decision 8): keep `MaxOpenConns 100` / `MaxIdleConns 25`.** `db_init.go` unchanged.
+Across 35 measured cells (7 sweeps × 5 sizes, tmpfs and ZFS) there were **zero** SQLITE_BUSY retries,
+and `MaxOpenConns=100` never opened more than **34** connections — `sql.DB` opens lazily, so the 100
+is a ceiling, not an allocation. Cheap statements improve monotonically with pool size (147 µs p50 at
+100 vs 3.41 ms at 4); the only clearly wrong value is a *small* pool, which costs 30-50% throughput.
+The real memory lever is `CacheSize` (16 MiB per connection), not the pool size. Full report:
+`docs/perf/main-db-pool.md`.
+
+**Honest caveat on the regression suite.** WSH check E12 now passes for a weaker reason: it sends an
+invalid `X-Real-IP` and asserts the peer IP, but X-Real-IP is never consulted now, so it would pass
+with a valid one too. The outcome is strictly safer and the real coverage moved to
+`TestLo2ServerTrustedHeader`; K4 forbids editing the script, so this is a note, not a change.
+
+**New leftovers raised by wave 2:**
+- `processBadIPsUpdate` is dead for the same reason BadBots was: `FORM_FIELD_BADIPS` is still missing
+  from the `web_admin_settings_unified.go:208` dispatch, so saving the blocked-IP list writes the row
+  but does not apply it until restart — while its message claims "applied immediately". One-line fix,
+  deliberately not taken at merge because it is pre-existing and untouched by this plan.
+- `profileUpdate`'s three writes (password, email, display name) are separate un-transacted statements.
+  They now go through `RetryableExec`, but a transient failure on the second still leaves the first
+  committed. The full fix is one `RetryableTransactionExec` around all three.
+- `cronjobs.go`: a job started during shutdown can escape `StopCronManager`'s `jobIDs` snapshot.
+  Pre-existing; the window is now smaller, not larger.
+- `cmd/nntp-analyze/main.go:280` closes `StopChan` without `db.Shutdown()`, so with F20 `cronDBEvery`
+  never returns there. Harmless (outside `db.WG`, process exits), left untouched.
+- The shutdown bounds are time-shaped constants (`batchStatsShutdownRounds` 24,
+  `batchGroupDBShutdownAttempts` 120, both ≈2 min); a loaded box may want more.
+- `getBatchGroupDB`'s shutdown bound has no unit test — reaching it costs the real 60s `GetGroupDB`
+  deadline. It is a plain counter beside the tested `batchGroupDBRetry` table.
