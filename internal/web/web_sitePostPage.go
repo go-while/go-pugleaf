@@ -409,9 +409,13 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 
 	default:
 		log.Printf("Warning: Post queue channel is full, article is lost.")
-		// The reservation above already charged a post and started the back-off: give it back,
-		// so a busy queue does not block the user for WebPostingBackOff.
-		if released, err := s.DB.ReleaseWebPost(user.ID, now, user.LastPostUnix); err != nil {
+		// The reservation above already charged a post and started the back-off: give the post
+		// back, but leave a short retry window instead of the user's previous last post time.
+		// WebPostingBackOff is the only per-user throttle on this route, so restoring it fully
+		// would let a client hammer submits while the queue is full; ~5 seconds is enough to
+		// keep that bounded without punishing the user for a server-side failure.
+		releaseTo := now - int64(WebPostingBackOff.Seconds()) + 5
+		if released, err := s.DB.ReleaseWebPost(user.ID, now, releaseTo); err != nil {
 			log.Printf("[WEB]: sitePostSubmit: failed to release post reservation of user %d: %v", user.ID, err)
 		} else if !released {
 			log.Printf("[WEB]: sitePostSubmit: post reservation of user %d not released (lastpost_unix changed)", user.ID)

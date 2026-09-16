@@ -185,6 +185,56 @@ func TestLo1HandChatClearDuringSend(t *testing.T) {
 	if lo1HandInFlight(user.ID, model) {
 		t.Error("entry still marked inFlight after the send returned")
 	}
+
+	// A cleared entry stays in the map with msgs nil: the history route must still answer with
+	// an empty JSON array, not null.
+	hist := w0Do(t, w0Req{Method: http.MethodPost, Path: "/aichat/history/" + url.PathEscape(model), Cookies: []*http.Cookie{cookie}})
+	if hist.Code != http.StatusOK {
+		t.Fatalf("history: status %d, want 200 (body %q)", hist.Code, hist.Body.String())
+	}
+	if !strings.Contains(hist.Body.String(), `"history":[]`) {
+		t.Errorf("history body %q, want an empty array", hist.Body.String())
+	}
+}
+
+func TestLo1HandChatStaleClaimReleased(t *testing.T) {
+	now := time.Now()
+	stuck := chatHistoryKey(-1, w0Name("lo1hand-stuck"))
+	fresh := chatHistoryKey(-1, w0Name("lo1hand-fresh"))
+	chatCacheMux.Lock()
+	chatHistoryCache[stuck] = &chatEntry{inFlight: true, claimedAt: now.Add(-2 * chatClaimStuckAfter), lastUsed: now}
+	chatHistoryCache[fresh] = &chatEntry{inFlight: true, claimedAt: now, lastUsed: now}
+	chatCacheMux.Unlock()
+	t.Cleanup(func() {
+		chatCacheMux.Lock()
+		delete(chatHistoryCache, stuck)
+		delete(chatHistoryCache, fresh)
+		chatCacheMux.Unlock()
+	})
+
+	sweepChatCaches(now)
+
+	chatCacheMux.RLock()
+	stuckEntry, stuckOK := chatHistoryCache[stuck]
+	freshEntry, freshOK := chatHistoryCache[fresh]
+	var stuckInFlight, freshInFlight bool
+	if stuckOK {
+		stuckInFlight = stuckEntry.inFlight
+	}
+	if freshOK {
+		freshInFlight = freshEntry.inFlight
+	}
+	chatCacheMux.RUnlock()
+
+	if !stuckOK || !freshOK {
+		t.Fatalf("entries removed although both were used just now (stuck=%v fresh=%v)", stuckOK, freshOK)
+	}
+	if stuckInFlight {
+		t.Error("a claim older than chatClaimStuckAfter was not released, so the user stays at 429")
+	}
+	if !freshInFlight {
+		t.Error("a claim made just now was released")
+	}
 }
 
 func TestLo1HandChatSequential(t *testing.T) {
@@ -213,6 +263,12 @@ func TestLo1HandChatSequential(t *testing.T) {
 }
 
 // lo1HandDrainPostQueue empties models.PostQueueChannel.
+//
+// TestLo1HandPostQueueFullReleases owns that channel for its whole duration: it fills it to
+// capacity and drains it again. That is only safe because the channel is a package global with
+// a single consumer (processor.PostQueueWorker, which cmd/web starts but this test binary never
+// does) and because no test in this package runs in parallel. A test that starts a post queue
+// worker, or a t.Parallel anywhere near a submit, breaks this.
 func lo1HandDrainPostQueue() {
 	for {
 		select {
@@ -224,6 +280,8 @@ func lo1HandDrainPostQueue() {
 }
 
 func TestLo1HandPostQueueFullReleases(t *testing.T) {
+	// This test owns models.PostQueueChannel (see lo1HandDrainPostQueue): drain whatever an
+	// earlier test left behind, and leave it empty again.
 	lo1HandDrainPostQueue()
 	t.Cleanup(lo1HandDrainPostQueue)
 
@@ -275,12 +333,23 @@ func TestLo1HandPostQueueFullReleases(t *testing.T) {
 	if after.PostCount != before.PostCount {
 		t.Errorf("post_count = %d, want the unchanged %d", after.PostCount, before.PostCount)
 	}
-	if after.LastPostUnix != before.LastPostUnix {
-		t.Errorf("lastpost_unix = %d, want the unchanged %d", after.LastPostUnix, before.LastPostUnix)
+	// The post is given back, but a short retry window stays, so a full queue cannot be
+	// hammered: the user waits seconds, not the full WebPostingBackOff.
+	backoff := int64(WebPostingBackOff.Seconds())
+	waitLeft := after.LastPostUnix + backoff - time.Now().Unix()
+	if waitLeft > 10 {
+		t.Fatalf("user must wait %ds after a full queue, want at most 10s of %ds", waitLeft, backoff)
+	}
+	if after.LastPostUnix <= before.LastPostUnix {
+		t.Errorf("lastpost_unix = %d, want a short retry window above the previous %d",
+			after.LastPostUnix, before.LastPostUnix)
 	}
 
-	// With the queue drained the very next post is accepted: the user was never backed off.
+	// Once that short window has passed the next post is accepted, with the queue drained.
 	lo1HandDrainPostQueue()
+	if waitLeft > 0 {
+		time.Sleep(time.Duration(waitLeft+1) * time.Second)
+	}
 	rec = w0Do(t, w0Req{Method: http.MethodPost, Path: "/SitePostSubmit", Form: form, Cookies: []*http.Cookie{cookie}})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second submit: status %d, want 200", rec.Code)

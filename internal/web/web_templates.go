@@ -24,8 +24,18 @@ const htmlContentType = "text/html; charset=utf-8"
 // so one huge page does not pin its memory for the lifetime of the process.
 const maxPooledBufferSize = 1 << 20
 
+// tmplEntry is one cached template set together with the FuncMap it was parsed with.
+// Holding the map is what makes funcMapKey sound: the key contains the map's address, and an
+// address becomes reusable as soon as the map is collected. Template.Funcs copies the entries
+// into the template, so without this field nothing would keep the caller's map alive and a
+// later FuncMap could be allocated at the same address and hit this entry.
+type tmplEntry struct {
+	t     *template.Template
+	funcs template.FuncMap // nil for sets parsed without one; never read, only retained
+}
+
 // tmplCache holds parsed template sets.
-// Key: [funcMapKey] + name + "\x00" + strings.Join(files, "\x00").
+// Key: [funcMapKey] + name + "\x00" + strings.Join(files, "\x00"), value: *tmplEntry.
 var tmplCache sync.Map
 
 // publicErrorDetail is the error detail visitors are shown. Internal text (SQLite errors, file
@@ -41,9 +51,8 @@ func devTemplates() bool { return os.Getenv("PUGLEAF_DEV_TEMPLATES") == "1" }
 
 // funcMapKey identifies a FuncMap by the address of its map header, so two call sites with
 // different FuncMaps get different cache entries even with the same name and files.
-// Every FuncMap passed to a cached load must therefore be a package-level map (today only
-// adminTemplateFuncs): one built per call would fill the cache, and a later map could land on
-// the address of a collected one and hit its entry.
+// The address is only unique while the map is alive, so every cached set keeps its FuncMap
+// (see tmplEntry).
 func funcMapKey(funcs template.FuncMap) string {
 	return fmt.Sprintf("funcs@%x\x01", reflect.ValueOf(funcs).Pointer())
 }
@@ -65,6 +74,12 @@ func tmplCacheKey(name string, funcs template.FuncMap, files []string) string {
 // loadTemplates returns the template set parsed from files, parsing it only once unless
 // PUGLEAF_DEV_TEMPLATES=1. name is the name of the (empty) root template and part of the
 // cache key; templates are executed by file base name. Parse errors are returned, never cached.
+//
+// A cached set and its FuncMap are kept for the lifetime of the process, so funcs must be a
+// map that exists anyway (today only the package-level adminTemplateFuncs). A FuncMap built per
+// call - for example one closing over the request - would add a cache entry per call and grow
+// the cache without bound; such a call site belongs in PUGLEAF_DEV_TEMPLATES-style direct
+// parsing, not here.
 func loadTemplates(name string, funcs template.FuncMap, files ...string) (*template.Template, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("loadTemplates %q: no files", name)
@@ -73,7 +88,7 @@ func loadTemplates(name string, funcs template.FuncMap, files ...string) (*templ
 	key := tmplCacheKey(name, funcs, files)
 	if !dev {
 		if v, ok := tmplCache.Load(key); ok {
-			return v.(*template.Template), nil
+			return v.(*tmplEntry).t, nil
 		}
 	}
 	t := template.New(name)
@@ -88,8 +103,8 @@ func loadTemplates(name string, funcs template.FuncMap, files ...string) (*templ
 		return t, nil
 	}
 	// Concurrent first requests may parse the same set; all of them use the stored one.
-	v, _ := tmplCache.LoadOrStore(key, t)
-	return v.(*template.Template), nil
+	v, _ := tmplCache.LoadOrStore(key, &tmplEntry{t: t, funcs: funcs})
+	return v.(*tmplEntry).t, nil
 }
 
 // templatePaths prefixes each template file name with templateDir.

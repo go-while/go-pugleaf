@@ -46,11 +46,18 @@ var (
 // chatEntry is the chat history of one user with one model.
 // All fields are guarded by chatCacheMux.
 type chatEntry struct {
-	msgs     []ChatMessage
-	lastUsed time.Time
-	inFlight bool   // a send of this user and model is waiting for the proxy
-	gen      uint64 // bumped by every clear; a reply of an older generation is not stored
+	msgs      []ChatMessage
+	lastUsed  time.Time
+	inFlight  bool      // a send of this user and model is waiting for the proxy
+	claimedAt time.Time // when inFlight was set; sweepChatCaches releases claims stuck past it
+	gen       uint64    // bumped by every clear; a reply of an older generation is not stored
 }
+
+// chatClaimStuckAfter bounds how long an entry may stay claimed. A send cannot take longer than
+// the proxy timeout plus a little request handling, so a claim older than this leaked (a panic
+// between claiming and the deferred release) and the sweeper takes it back. Without it such an
+// entry would answer 429 for the rest of the process and never be swept.
+var chatClaimStuckAfter = chatHTTPClient.Timeout + 5*time.Minute
 
 // Chat history cache - in-memory storage per user and model (key: chatHistoryKey)
 var (
@@ -73,6 +80,11 @@ func getChatHistory(key string, now time.Time) []ChatMessage {
 		return []ChatMessage{}
 	}
 	entry.lastUsed = now
+	if len(entry.msgs) == 0 {
+		// A cleared entry keeps msgs nil, and slices.Clone(nil) is nil: answer with an empty
+		// slice, so the JSON of every history route stays [] instead of null.
+		return []ChatMessage{}
+	}
 	return slices.Clone(entry.msgs)
 }
 
@@ -107,7 +119,13 @@ func sweepChatCaches(now time.Time) {
 	chatCacheMux.Lock()
 	for key, entry := range chatHistoryCache {
 		if entry.inFlight {
-			continue
+			if now.Sub(entry.claimedAt) <= chatClaimStuckAfter {
+				continue
+			}
+			// No send can still be running: take the claim back instead of refusing this user
+			// and model forever, and let the entry expire by the normal idle rule below.
+			log.Printf("[WEB]: chat cache: releasing stuck in-flight claim %q after %s", key, now.Sub(entry.claimedAt).Truncate(time.Second))
+			entry.inFlight = false
 		}
 		if now.Sub(entry.lastUsed) > chatHistoryMaxIdle {
 			delete(chatHistoryCache, key)
@@ -309,6 +327,7 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 		return
 	}
 	entry.inFlight = true
+	entry.claimedAt = now
 	entry.lastUsed = now
 	gen := entry.gen
 	history := slices.Clone(entry.msgs)
