@@ -50,8 +50,11 @@ import (
 // appVersion is set by build_audit-web-posts.sh via -ldflags.
 var appVersion string
 
-// auditMessageIDRe is the message-id form accepted for web posts
-// (same expression as internal/web/web_sitePostPage.go postMessageIDRe).
+// auditMessageIDRe is the message-id form generateMessageID produces for web posts.
+// It is deliberately NOT the same expression as internal/web/web_sitePostPage.go
+// postMessageIDRe: that one validates the id a user replies TO, and was widened for
+// legacy ids (plan finding F7). This one is only applied to a web post's own
+// message-id, which always has the <local@host> shape.
 var auditMessageIDRe = regexp.MustCompile(`^<[^<>\s@]+@[^<>\s@]+>$`)
 
 // allowedHeaderNames are the header names that sitePostSubmit writes into

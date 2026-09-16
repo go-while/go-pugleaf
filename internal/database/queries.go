@@ -753,7 +753,7 @@ func (db *Database) GetUserByID(id int64) (*models.User, error) {
 const query_UpdateUserEmail = `UPDATE users SET email = ? WHERE id = ?`
 
 func (db *Database) UpdateUserEmail(userID int64, email string) error {
-	_, err := db.mainDB.Exec(query_UpdateUserEmail, email, userID)
+	_, err := RetryableExec(db.mainDB, query_UpdateUserEmail, email, userID)
 	return err
 }
 
@@ -761,7 +761,7 @@ func (db *Database) UpdateUserEmail(userID int64, email string) error {
 const query_UpdateUserPassword = `UPDATE users SET password_hash = ? WHERE id = ?`
 
 func (db *Database) UpdateUserPassword(userID int64, passwordHash string) error {
-	_, err := db.mainDB.Exec(query_UpdateUserPassword, passwordHash, userID)
+	_, err := RetryableExec(db.mainDB, query_UpdateUserPassword, passwordHash, userID)
 	return err
 }
 
@@ -774,7 +774,7 @@ func (db *Database) UpdateUserDisplayName(userID int64, displayName string) erro
 	if utf8.RuneCountInString(displayName) > 64 {
 		return fmt.Errorf("display name is too long")
 	}
-	_, err := db.mainDB.Exec(query_UpdateUserDisplayName, displayName, userID)
+	_, err := RetryableExec(db.mainDB, query_UpdateUserDisplayName, displayName, userID)
 	return err
 }
 
