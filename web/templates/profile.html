@@ -54,10 +54,9 @@
                                 <input type="text" class="form-control" id="display_name" name="display_name"
                                     value="{{.User.DisplayName}}" placeholder="Your display name (optional)">
                                 <div class="form-text small text-light">
-                                    <strong>Display Name Format Options:</strong><br>
-                                    • If you enter only a name (e.g., 'John Doe'):<br>
-                                    &nbsp; the header will be: 'John Doe &lt;noreply@$this.site&gt;'<br>
-                                    • Set custom format: 'My Name &lt;my-name@mail.local&gt;'<br>
+                                    <strong>Display Name:</strong><br>
+                                    • Posts use 'Your Name &lt;noreply@…&gt;'.<br>
+                                    • Up to 64 characters; &lt;, &gt; and " are not allowed.<br>
                                     <span class="text-warning"><u>⚠️ Important:</u><br>
                                         The system adds tracking headers to all posted articles.</span><br>
                                     <em class="text-info">Spam messages are prohibited. Peace be upon you.</em>

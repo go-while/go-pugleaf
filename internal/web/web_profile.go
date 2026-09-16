@@ -134,6 +134,9 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 		return
 	}
 
+	// Validate everything before the first write: a rejection in the middle used to leave
+	// a partial update behind (new password and email stored, display name refused).
+
 	// Validate email
 	if email == "" {
 		session.SetError("Email is required")
@@ -141,11 +144,16 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 		return
 	}
 
-	// Validate display name (it ends up in the From: header of web posts)
-	if err := validateDisplayName(displayName); err != nil {
-		session.SetError(err.Error())
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
+	// Validate the display name only when it changed (it ends up in the From: header of
+	// web posts). A stored legacy name such as "Jane <jane@example.org>" would otherwise
+	// block every email and password change, because the form re-sends it unchanged.
+	displayNameChanged := displayName != user.DisplayName
+	if displayNameChanged {
+		if err := validateDisplayName(displayName); err != nil {
+			session.SetError(err.Error())
+			c.Redirect(http.StatusSeeOther, "/profile")
+			return
+		}
 	}
 
 	// Validate current password
@@ -165,9 +173,10 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 		}
 	}
 
-	// If password change is requested
-	if currentPassword != "" && newPassword != "" && confirmPassword != "" {
-
+	// If a password change is requested, validate and hash it (still no write)
+	changePassword := currentPassword != "" && newPassword != "" && confirmPassword != ""
+	var hashedPassword string
+	if changePassword {
 		// Validate new password
 		if newPassword != confirmPassword {
 			session.SetError("New passwords do not match")
@@ -183,16 +192,19 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 		}
 
 		// Hash new password
-		hashedPassword, err := hashPassword(newPassword)
+		hashedPassword, err = hashPassword(newPassword)
 		if err != nil {
 			session.SetError("Failed to update password")
 			c.Redirect(http.StatusSeeOther, "/profile")
 			return
 		}
+	}
 
-		// Update password
-		err = s.DB.UpdateUserPassword(user.ID, hashedPassword)
-		if err != nil {
+	// Everything is valid: write.
+
+	// Update password
+	if changePassword {
+		if err := s.DB.UpdateUserPassword(user.ID, hashedPassword); err != nil {
 			session.SetError("Failed to update password")
 			c.Redirect(http.StatusSeeOther, "/profile")
 			return
@@ -207,12 +219,13 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 		return
 	}
 
-	// Update display name
-	err = s.DB.UpdateUserDisplayName(user.ID, displayName)
-	if err != nil {
-		session.SetError("Failed to update display name")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
+	// Update display name (only when it changed)
+	if displayNameChanged {
+		if err := s.DB.UpdateUserDisplayName(user.ID, displayName); err != nil {
+			session.SetError("Failed to update display name")
+			c.Redirect(http.StatusSeeOther, "/profile")
+			return
+		}
 	}
 
 	session.SetSuccess("Profile updated successfully")
