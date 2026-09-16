@@ -283,17 +283,9 @@ func (leg *LegacyImporter) importSectionGroups(sectionID int, sectionName string
 
 // insertSection inserts a section record and returns its ID
 func (leg *LegacyImporter) insertSection(section *models.Section) (int, error) {
-	result, err := database.RetryableExec(leg.proc.DB.GetMainDB(),
-		`INSERT OR IGNORE INTO sections (name, display_name, description, show_in_header, enable_local_spool, sort_order)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		section.Name, section.DisplayName, section.Description,
-		section.ShowInHeader, section.EnableLocalSpool, section.SortOrder,
-	)
-	if err != nil {
-		return 0, err
-	}
-
-	id, err := result.LastInsertId()
+	// UpsertSectionID reads the id back by name: after an INSERT OR IGNORE that ignored
+	// an existing section, LastInsertId would still hold the id of an earlier statement.
+	id, err := leg.proc.DB.UpsertSectionID(section)
 	if err != nil {
 		return 0, err
 	}
