@@ -3,7 +3,9 @@ package web
 import (
 	"embed"
 	"io/fs"
+	"mime"
 	"net/http"
+	"path"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -81,47 +83,53 @@ func EmbeddedFileHandler(filePath string) gin.HandlerFunc {
 		}
 
 		// Determine content type based on file extension
-		contentType := getContentType(filePath)
+		contentType := staticContentType(filePath)
 		c.Header("Content-Type", contentType)
 		c.Data(http.StatusOK, contentType, content)
 	}
 }
 
-// getContentType returns the appropriate MIME type for common file extensions
-func getContentType(filePath string) string {
-	if len(filePath) < 4 {
-		return "application/octet-stream"
-	}
-
-	ext := filePath[len(filePath)-4:]
+// staticContentType returns the MIME type for a static file path. The types of the file kinds this
+// project ships are fixed here, so they do not depend on the system MIME database (which maps .ico
+// to text/plain on some hosts); anything else falls back to mime.TypeByExtension and finally to
+// application/octet-stream. The old implementation compared the last 4 bytes of the path, so .js
+// never matched and .json/.map/.webp were unknown.
+func staticContentType(filePath string) string {
+	ext := strings.ToLower(path.Ext(filePath))
 	switch ext {
 	case ".ico":
 		return "image/x-icon"
 	case ".css":
-		return "text/css"
-	case ".js":
-		return "application/javascript"
+		return "text/css; charset=utf-8"
+	case ".js", ".mjs":
+		return "text/javascript; charset=utf-8"
+	case ".json", ".map":
+		return "application/json"
 	case ".png":
 		return "image/png"
-	case ".jpg", "jpeg":
+	case ".jpg", ".jpeg":
 		return "image/jpeg"
 	case ".gif":
 		return "image/gif"
 	case ".svg":
 		return "image/svg+xml"
-	case "woff":
+	case ".webp":
+		return "image/webp"
+	case ".woff":
 		return "font/woff"
-	case "off2":
+	case ".woff2":
 		return "font/woff2"
 	case ".ttf":
 		return "font/ttf"
-	case "html":
-		return "text/html"
+	case ".html", ".htm":
+		return "text/html; charset=utf-8"
 	case ".xml":
 		return "application/xml"
 	case ".txt":
-		return "text/plain"
-	default:
-		return "application/octet-stream"
+		return "text/plain; charset=utf-8"
 	}
+	if ct := mime.TypeByExtension(ext); ct != "" {
+		return ct
+	}
+	return "application/octet-stream"
 }

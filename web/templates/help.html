@@ -202,7 +202,7 @@
 
                 <div class="mb-3">
                     <h6 class="text-success">Public Endpoints (No Auth Required)</h6>
-                    <p class="small mb-2">The following endpoints are publicly accessible without authentication:</p>
+                    <p class="small mb-2">The following endpoints are publicly accessible without authentication, but only while the API is enabled (otherwise they answer 503):</p>
                     <div class="list-group list-group-flush">
                         <div class="list-group-item">
                             <code class="text-success">GET /api/v1/stats</code>
@@ -210,7 +210,7 @@
                         </div>
                         <div class="list-group-item">
                             <code class="text-success">GET /api/v1/groups/:group/articles/:articleNum/preview</code>
-                            <small class="text-muted d-block">Article preview/excerpt without full content</small>
+                            <small class="text-muted d-block">Article preview/excerpt without full content. The same preview is served by the web route <code>GET /groups/:group/articles/:articleNum/preview</code>, which the thread tree view uses and which does not depend on the API setting.</small>
                         </div>
                     </div>
                 </div>                                <div class="alert alert-info py-2">
@@ -314,7 +314,7 @@
                     <div class="bg-dark text-light p-2 rounded">
                         <code>curl https://api.pugleaf.net/api/v1/groups/alt.comp.freeware/articles/123/preview</code>
                     </div>
-                    <small class="text-muted">Returns article preview/excerpt without authentication</small>
+                    <small class="text-muted">Returns article preview/excerpt without authentication (requires the API to be enabled)</small>
                 </div>
 
                 <div class="mb-3">
