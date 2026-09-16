@@ -26,6 +26,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -149,6 +151,41 @@ func (h *lo2PoolHist) mean() time.Duration {
 // lo2PoolUS formats a duration as microseconds for a reported metric.
 func lo2PoolUS(d time.Duration) float64 {
 	return float64(d) / float64(time.Microsecond)
+}
+
+// --- resident memory ---------------------------------------------------------
+
+// lo2PoolRSS returns the process VmRSS and VmHWM (peak RSS) in MiB, or 0 when
+// /proc is not available. Each pooled SQLite connection owns a page cache of
+// cache_size (16 MiB with the current defaults), which lives in C memory, so the
+// Go heap says nothing about it and only the process RSS shows the cost of a pool
+// size. Run one pool size per process to read a meaningful peak.
+func lo2PoolRSS() (rss, peak float64) {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0, 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		var dst *float64
+		switch {
+		case strings.HasPrefix(line, "VmRSS:"):
+			dst = &rss
+		case strings.HasPrefix(line, "VmHWM:"):
+			dst = &peak
+		default:
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		kb, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil {
+			continue
+		}
+		*dst = kb / 1024
+	}
+	return rss, peak
 }
 
 // --- cheap per-goroutine RNG -------------------------------------------------
@@ -327,13 +364,8 @@ func lo2PoolOpen(b *testing.B, maxOpen int) (*sql.DB, []int64, int64) {
 	return pool, userIDs, ngID
 }
 
-func lo2PoolSQLiteVersion(b *testing.B) string {
+func lo2PoolSQLiteVersion(b *testing.B, pool *sql.DB) string {
 	b.Helper()
-	pool, err := sql.Open(driverNameMain, filepath.Join(b.TempDir(), "lo2pool-version.sq3"))
-	if err != nil {
-		b.Fatalf("open version DB: %v", err)
-	}
-	defer func() { _ = pool.Close() }()
 	var v string
 	if err := pool.QueryRow("select sqlite_version()").Scan(&v); err != nil {
 		b.Fatalf("sqlite_version: %v", err)
@@ -344,9 +376,6 @@ func lo2PoolSQLiteVersion(b *testing.B) string {
 // --- the benchmark -----------------------------------------------------------
 
 func BenchmarkLo2PoolMix(b *testing.B) {
-	b.Logf("sqlite_version=%s GOMAXPROCS=%d NumCPU=%d readers=%d writers=%d duration=%v",
-		lo2PoolSQLiteVersion(b), runtime.GOMAXPROCS(0), runtime.NumCPU(),
-		lo2PoolReaders, lo2PoolWriters, lo2PoolDuration())
 	for _, n := range lo2PoolSizes {
 		b.Run(fmt.Sprintf("MaxOpenConns%d", n), func(b *testing.B) {
 			lo2PoolRunMix(b, n)
@@ -363,6 +392,10 @@ func lo2PoolRunMix(b *testing.B, maxOpen int) {
 		b.Fatalf("Lo2Pool benchmarks run for a fixed duration of %v: pass -benchtime <duration <= %v> (or set LO2POOL_DURATION)", d, d)
 	}
 	pool, userIDs, ngID := lo2PoolOpen(b, maxOpen)
+	// Logged per sub-benchmark: a Logf on the parent benchmark is not printed.
+	b.Logf("sqlite=%s GOMAXPROCS=%d NumCPU=%d readers=%d writers=%d duration=%v",
+		lo2PoolSQLiteVersion(b, pool), runtime.GOMAXPROCS(0), runtime.NumCPU(),
+		lo2PoolReaders, lo2PoolWriters, d)
 
 	var busy atomic.Int64
 	var failures atomic.Int64
@@ -371,9 +404,23 @@ func lo2PoolRunMix(b *testing.B, maxOpen int) {
 	writeHists := make([]lo2PoolHist, lo2PoolWriters)
 
 	var wg sync.WaitGroup
+	var peakOpen atomic.Int64
 	b.ResetTimer()
 	start := time.Now()
 	deadline := start.Add(d)
+
+	// Sample how many connections the pool really holds: sql.DB opens them lazily,
+	// so a large MaxOpenConns only costs what the offered concurrency uses.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for time.Now().Before(deadline) {
+			if n := int64(pool.Stats().OpenConnections); n > peakOpen.Load() {
+				peakOpen.Store(n)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
 
 	for i := 0; i < lo2PoolReaders; i++ {
 		wg.Add(1)
@@ -467,10 +514,16 @@ func lo2PoolRunMix(b *testing.B, maxOpen int) {
 	b.ReportMetric(lo2PoolUS(writeAll.quantile(0.50)), "p50write_us")
 	b.ReportMetric(lo2PoolUS(writeAll.quantile(0.99)), "p99write_us")
 	b.ReportMetric(float64(busy.Load()), "busy_retries")
+	rss, peakRSS := lo2PoolRSS()
+	b.ReportMetric(rss, "rss_mb")
 
-	b.Logf("maxOpen=%d maxIdle=%d elapsed=%v reads=%d writes=%d busy=%d errors=%d",
+	// maxIdleClosed counts connections sql.DB threw away because MaxIdleConns was
+	// smaller than the number of connections that fell idle: every one of those has
+	// to be reopened (and re-run the pragma hook) on the next use.
+	b.Logf("maxOpen=%d maxIdle=%d elapsed=%v reads=%d writes=%d busy=%d errors=%d peakOpenConns=%d maxIdleClosed=%d rss=%.0fMiB peakRss=%.0fMiB",
 		maxOpen, min(maxOpen, 25), elapsed.Round(time.Millisecond), reads, writes,
-		busy.Load(), failures.Load())
+		busy.Load(), failures.Load(), peakOpen.Load(), pool.Stats().MaxIdleClosed,
+		rss, peakRSS)
 	b.Logf("  user  read: mean=%v p50=%v p90=%v p99=%v p999=%v n=%d",
 		userAll.mean().Round(time.Microsecond), userAll.quantile(0.50).Round(time.Microsecond),
 		userAll.quantile(0.90).Round(time.Microsecond), userAll.quantile(0.99).Round(time.Microsecond),
