@@ -71,6 +71,19 @@ func retryLogThrottle(n int) bool {
 	return false
 }
 
+// retryClock returns the start of the retry wait clock, starting it on the first call.
+// Every Retryable* helper keeps a zero time.Time and passes its address here only when
+// an attempt failed with a retryable error, so the cap (GetSQLiteMaxRetryWait) measures
+// the time spent waiting for a busy/locked database, not the time the work itself took.
+// Without this a transaction that runs for longer than the cap and only then hits BUSY
+// would not be retried a single time.
+func retryClock(start *time.Time) time.Time {
+	if start.IsZero() {
+		*start = time.Now()
+	}
+	return *start
+}
+
 // retryBackoff decides whether a failed attempt (0-based) is retried. It gives up
 // (and logs) after maxRetries attempts or once the retry cap (GetSQLiteMaxRetryWait)
 // has passed since start; otherwise it sleeps with backoff and jitter and returns true.
@@ -102,14 +115,14 @@ func retryQueryLabel(query string) string {
 
 // retryableExec executes a SQL statement with retry logic for lock conflicts
 func RetryableExec(db *sql.DB, query string, args ...interface{}) (sql.Result, error) {
-	start := time.Now()
+	var start time.Time // wait clock: started by retryClock on the first retryable error
 	atomic.AddUint64(&queryID, 1)
 	for attempt := 0; ; attempt++ {
 		result, err := db.Exec(query, args...)
 		if !isRetryableError(err) {
 			return result, err
 		}
-		if !retryBackoff(start, attempt, retryQueryLabel(query), err) {
+		if !retryBackoff(retryClock(&start), attempt, retryQueryLabel(query), err) {
 			return result, err
 		}
 	}
@@ -117,14 +130,14 @@ func RetryableExec(db *sql.DB, query string, args ...interface{}) (sql.Result, e
 
 // retryableExecPtr executes a SQL statement with retry logic for lock conflicts
 func RetryableExecPtr(db *sql.DB, query *strings.Builder, args ...interface{}) (sql.Result, error) {
-	start := time.Now()
+	var start time.Time // wait clock: started by retryClock on the first retryable error
 	atomic.AddUint64(&queryID, 1)
 	for attempt := 0; ; attempt++ {
 		result, err := db.Exec(query.String(), args...)
 		if !isRetryableError(err) {
 			return result, err
 		}
-		if !retryBackoff(start, attempt, retryQueryLabel(query.String()), err) {
+		if !retryBackoff(retryClock(&start), attempt, retryQueryLabel(query.String()), err) {
 			return result, err
 		}
 	}
@@ -132,14 +145,14 @@ func RetryableExecPtr(db *sql.DB, query *strings.Builder, args ...interface{}) (
 
 // retryableQueryRowScan executes a QueryRow and Scan with retry logic
 func RetryableQueryRowScan(db *sql.DB, query string, args []interface{}, dest ...interface{}) error {
-	start := time.Now()
+	var start time.Time // wait clock: started by retryClock on the first retryable error
 	atomic.AddUint64(&queryID, 1)
 	for attempt := 0; ; attempt++ {
 		err := db.QueryRow(query, args...).Scan(dest...)
 		if !isRetryableError(err) {
 			return err
 		}
-		if !retryBackoff(start, attempt, "QueryRow scan "+retryQueryLabel(query), err) {
+		if !retryBackoff(retryClock(&start), attempt, "QueryRow scan "+retryQueryLabel(query), err) {
 			return err
 		}
 	}
@@ -147,7 +160,7 @@ func RetryableQueryRowScan(db *sql.DB, query string, args []interface{}, dest ..
 
 // retryableQuery executes a query that returns multiple rows with retry logic
 func RetryableQuery(db *sql.DB, query string, args ...interface{}) (*sql.Rows, error) {
-	start := time.Now()
+	var start time.Time // wait clock: started by retryClock on the first retryable error
 	atomic.AddUint64(&queryID, 1)
 	for attempt := 0; ; attempt++ {
 		rows, err := db.Query(query, args...)
@@ -158,7 +171,7 @@ func RetryableQuery(db *sql.DB, query string, args ...interface{}) (*sql.Rows, e
 		if rows != nil {
 			rows.Close()
 		}
-		if !retryBackoff(start, attempt, retryQueryLabel(query), err) {
+		if !retryBackoff(retryClock(&start), attempt, retryQueryLabel(query), err) {
 			return nil, err
 		}
 	}
@@ -167,13 +180,13 @@ func RetryableQuery(db *sql.DB, query string, args ...interface{}) (*sql.Rows, e
 // retryableTransactionExec executes a transaction with retry logic
 func RetryableTransactionExec(db *sql.DB, txFunc func(*sql.Tx) error) error {
 	var err error
-	start := time.Now()
+	var start time.Time // wait clock: started by retryClock on the first retryable error
 	atomic.AddUint64(&queryID, 1)
 	for attempt := 0; ; attempt++ {
 		tx, beginErr := db.Begin()
 		if beginErr != nil {
 			err = beginErr
-			if !isRetryableError(err) || !retryBackoff(start, attempt, "transaction begin", err) {
+			if !isRetryableError(err) || !retryBackoff(retryClock(&start), attempt, "transaction begin", err) {
 				return err
 			}
 			continue
@@ -182,7 +195,7 @@ func RetryableTransactionExec(db *sql.DB, txFunc func(*sql.Tx) error) error {
 		err = txFunc(tx)
 		if err != nil {
 			tx.Rollback()
-			if !isRetryableError(err) || !retryBackoff(start, attempt, "transaction", err) {
+			if !isRetryableError(err) || !retryBackoff(retryClock(&start), attempt, "transaction", err) {
 				return err
 			}
 			continue
@@ -192,7 +205,7 @@ func RetryableTransactionExec(db *sql.DB, txFunc func(*sql.Tx) error) error {
 		if !isRetryableError(err) {
 			return err
 		}
-		if !retryBackoff(start, attempt, "transaction commit", err) {
+		if !retryBackoff(retryClock(&start), attempt, "transaction commit", err) {
 			return err
 		}
 	}
@@ -210,14 +223,14 @@ var queryID uint64
 
 // retryableStmtExec executes a prepared statement with retry logic for lock conflicts
 func RetryableStmtExec(stmt *sql.Stmt, args ...interface{}) (sql.Result, error) {
-	start := time.Now()
+	var start time.Time // wait clock: started by retryClock on the first retryable error
 	atomic.AddUint64(&queryID, 1)
 	for attempt := 0; ; attempt++ {
 		result, err := stmt.Exec(args...)
 		if !isRetryableError(err) {
 			return result, err
 		}
-		if !retryBackoff(start, attempt, "prepared statement exec", err) {
+		if !retryBackoff(retryClock(&start), attempt, "prepared statement exec", err) {
 			return result, err
 		}
 	}
@@ -225,14 +238,14 @@ func RetryableStmtExec(stmt *sql.Stmt, args ...interface{}) (sql.Result, error) 
 
 // retryableStmtQueryRowScan executes a prepared statement QueryRow and Scan with retry logic
 func RetryableStmtQueryRowScan(stmt *sql.Stmt, args []interface{}, dest ...interface{}) error {
-	start := time.Now()
+	var start time.Time // wait clock: started by retryClock on the first retryable error
 	atomic.AddUint64(&queryID, 1)
 	for attempt := 0; ; attempt++ {
 		err := stmt.QueryRow(args...).Scan(dest...)
 		if !isRetryableError(err) {
 			return err
 		}
-		if !retryBackoff(start, attempt, "prepared statement QueryRow scan", err) {
+		if !retryBackoff(retryClock(&start), attempt, "prepared statement QueryRow scan", err) {
 			return err
 		}
 	}

@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -559,6 +560,84 @@ const query_updateNewsgroupsStats = `
 					END,
 					updated_at = excluded.updated_at`
 
+// batchGroupDBAttempts is how often processNewsgroupBatch opens a group database that
+// fails to initialize before it drops the drained articles.
+const batchGroupDBAttempts = 8
+
+// batchStatsRetryEvery is the pause between two rounds of the newsgroup stats update
+// while the main database is busy.
+const batchStatsRetryEvery = 5 * time.Second
+
+// batchGroupDBRetry decides whether processNewsgroupBatch tries GetGroupDB again after
+// err on attempt (0-based), and how long it waits first:
+//   - errGroupDBClosed: never, the group databases are shut down.
+//   - errGroupDBInitTimeout: every second without a limit, the initialization of that
+//     group is still running and the articles are only held in memory.
+//   - anything else: min(2^attempt s, 30 s), for batchGroupDBAttempts attempts.
+func batchGroupDBRetry(err error, attempt int) (retry bool, delay time.Duration) {
+	switch {
+	case err == nil:
+		return false, 0
+	case errors.Is(err, errGroupDBClosed):
+		return false, 0
+	case errors.Is(err, errGroupDBInitTimeout):
+		return true, time.Second
+	}
+	if attempt >= batchGroupDBAttempts-1 {
+		return false, 0
+	}
+	delay = time.Duration(1<<uint(attempt)) * time.Second
+	if delay > 30*time.Second {
+		delay = 30 * time.Second
+	}
+	return true, delay
+}
+
+// getBatchGroupDB opens the group database for a batch that is already drained out of
+// BATCHchan. It returns an error only once batchGroupDBRetry gives up, and then logs
+// how many articles are lost.
+func (sq *SQ3batch) getBatchGroupDB(newsgroup *string, articles int) (*GroupDB, error) {
+	var firstErr error
+	for attempt := 0; ; attempt++ {
+		groupDB, err := sq.db.GetGroupDB(*newsgroup)
+		if err == nil {
+			return groupDB, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		retry, delay := batchGroupDBRetry(err, attempt)
+		if !retry {
+			log.Printf("[BATCH] dropping %d articles for '%s' (first %s): %v", articles, *newsgroup, firstErr, err)
+			return nil, err
+		}
+		switch attempt + 1 {
+		case 1, 10, 100:
+			log.Printf("[BATCH] waiting for group database '%s' holding %d articles (attempt %d, retry in %v): %v",
+				*newsgroup, articles, attempt+1, delay, err)
+		}
+		time.Sleep(delay)
+	}
+}
+
+// updateNewsgroupStatsWithRetry repeats exec while it fails with a busy/locked SQLite
+// error, waiting every between rounds. The articles are already committed to the group
+// database at this point, so giving up would lose the message_count/last_article
+// increment for good (F17). Any other error is returned at once, as before.
+func updateNewsgroupStatsWithRetry(exec func() error, every time.Duration, what string) error {
+	for round := 1; ; round++ {
+		err := exec()
+		if err == nil || !isRetryableSQLiteError(err) {
+			return err
+		}
+		switch round {
+		case 1, 10, 100:
+			log.Printf("[BATCH] newsgroup stats still busy for %s (round %d, retry in %v): %v", what, round, every, err)
+		}
+		time.Sleep(every)
+	}
+}
+
 func (sq *SQ3batch) processNewsgroupBatch(task *BatchTasks) {
 	startTime := time.Now()
 	task.Mux.Lock()
@@ -600,10 +679,11 @@ drainChannel:
 	log.Printf("[BATCH] processNewsgroupBatch: ng: '%s' with %d articles (more queued: %d)", *task.Newsgroup, len(batches), len(task.BATCHchan))
 
 retry1:
-	// Get database connection for this newsgroup
-	groupDB, err := sq.db.GetGroupDB(*task.Newsgroup)
+	// Get database connection for this newsgroup. The articles are already drained out
+	// of BATCHchan, so giving up here loses them: wait while the group database is only
+	// still initializing and drop them only after batchGroupDBRetry gives up (F16).
+	groupDB, err := sq.getBatchGroupDB(task.Newsgroup, len(batches))
 	if err != nil {
-		log.Printf("[BATCH] processNewsgroupBatch Failed to get database for group '%s': %v", *task.Newsgroup, err)
 		return
 	}
 
@@ -744,11 +824,14 @@ retry2:
 			latestDate = time.Now().UTC()
 		}
 		//lastUpdate = time.Now().UTC().Format("2006-01-02 15:04:05")
-		err = RetryableTransactionExec(sq.db.mainDB, func(tx *sql.Tx) error {
-			_, txErr := tx.Exec(query_updateNewsgroupsStats,
-				*task.Newsgroup, len(batches), maxArticleNum, latestDate.UTC().Format("2006-01-02 15:04:05"))
-			return txErr
-		})
+		statsWhat := fmt.Sprintf("'%s' (+%d articles, max_article=%d)", *task.Newsgroup, len(batches), maxArticleNum)
+		err = updateNewsgroupStatsWithRetry(func() error {
+			return RetryableTransactionExec(sq.db.mainDB, func(tx *sql.Tx) error {
+				_, txErr := tx.Exec(query_updateNewsgroupsStats,
+					*task.Newsgroup, len(batches), maxArticleNum, latestDate.UTC().Format("2006-01-02 15:04:05"))
+				return txErr
+			})
+		}, batchStatsRetryEvery, statsWhat)
 
 		if err != nil {
 			log.Printf("[BATCH] processNewsgroupBatch Failed to update newsgroup stats for '%s': %v", *task.Newsgroup, err)
