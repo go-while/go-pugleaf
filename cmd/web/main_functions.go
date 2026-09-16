@@ -342,7 +342,7 @@ func rsyncInactiveGroupsToDir(db *database.Database, newdatadir string) error {
 			return err
 		}
 		groupsHash := database.MD5Hash(newsgroup)
-		baseGroupDBdir := filepath.Join("data", "/db/"+groupsHash)
+		baseGroupDBdir := filepath.Join(db.GetDataDir(), "/db/"+groupsHash)
 		baseGroupDBdirNew := filepath.Join(basedirNew, groupsHash)
 		sanitizedName := database.SanitizeGroupName(newsgroup)
 		groupDBfileOld := filepath.Join(baseGroupDBdir + "/" + sanitizedName + ".db")

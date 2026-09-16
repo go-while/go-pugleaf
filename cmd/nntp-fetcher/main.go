@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -135,7 +136,7 @@ func main() {
 	}
 
 	// Initialize progress database once to avoid opening/closing for each group
-	progressDB, err := database.NewProgressDB("data/progress.db")
+	progressDB, err := database.NewProgressDB(filepath.Join(*dataDir, "progress.db"))
 	if err != nil {
 		log.Fatalf("Failed to initialize progress database: %v", err)
 	}
@@ -270,6 +271,10 @@ func main() {
 		break // Only use the first provider for import
 	}
 
+	if len(pools) == 0 {
+		log.Fatalf("[FETCHER]: No enabled provider backend available (%d providers, none enabled)", len(providers))
+	}
+
 	if *resetProgress > 0 {
 		log.Printf("[FETCHER]: Resetting download progress to %d for all newsgroups on primary provider", *resetProgress)
 		for _, ng := range newsgroups {
@@ -283,7 +288,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	remoteGroups, err := pools[0].FileCachedListNewsgroups()
+	remoteGroups, err := pools[0].FileCachedListNewsgroups(filepath.Join(*dataDir, "cache"))
 	if err != nil || len(remoteGroups) == 0 {
 		log.Fatalf("failed to fetch newsgroup list from remote server: %v", err)
 	}
