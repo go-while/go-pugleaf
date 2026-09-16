@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -2846,6 +2846,19 @@ func (db *Database) DeleteUser(userID int64) error {
 	return nil
 }
 
+// groupDBFileExists reports whether the group database file of newsgroupName is
+// already present below the configured data directory. It uses the same layout as
+// GetGroupDB (<data>/db/<MD5Hash(name)>/<SanitizeGroupName(name)>.db) but never
+// creates anything, so callers can skip groups that have no database yet.
+func (db *Database) groupDBFileExists(newsgroupName string) bool {
+	dataDir := db.dbconfig.DataDir
+	if dataDir == "" {
+		dataDir = "./data"
+	}
+	groupDBfile := filepath.Join(dataDir, "db", MD5Hash(newsgroupName), SanitizeGroupName(newsgroupName)+".db")
+	return FileExists(groupDBfile)
+}
+
 // ResetAllNewsgroupData resets all newsgroup counters and flushes all articles, threads, overview, and cache tables
 // WARNING: This will permanently delete ALL articles, threads, and overview data from ALL newsgroups!
 func (db *Database) ResetAllNewsgroupData() error {
@@ -2866,35 +2879,44 @@ func (db *Database) ResetAllNewsgroupData() error {
 	rowsAffected, _ := result.RowsAffected()
 	log.Printf("ResetAllNewsgroupData: Reset counters for %d newsgroups in main database", rowsAffected)
 
-	// Step 2: Only process actual newsgroup databases that exist
-	// Check data directory for existing newsgroup databases
-	dataDir := db.dbconfig.DataDir
-	if dataDir == "" {
-		dataDir = "./data"
-	}
-
-	groupsDir := dataDir + "/groups"
-	entries, err := os.ReadDir(groupsDir)
+	// Step 2: Only process newsgroups whose group database file already exists.
+	// Group DBs live in <data>/db/<MD5Hash(name)>/<SanitizeGroupName(name)>.db, so the
+	// newsgroup names come from the main DB, not from a directory listing. Calling
+	// ResetNewsgroupData for a name without a file would create an empty database
+	// (GetGroupDB creates one for any name), so the file is checked first.
+	rows, err := RetryableQuery(db.mainDB, `SELECT name FROM newsgroups`)
 	if err != nil {
-		if os.IsNotExist(err) {
-			log.Printf("ResetAllNewsgroupData: No groups directory found at %s, only main database counters reset", groupsDir)
-			return nil
+		return fmt.Errorf("failed to list newsgroups: %w", err)
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan newsgroup name: %w", err)
 		}
-		return fmt.Errorf("failed to read groups directory %s: %w", groupsDir, err)
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("failed to read newsgroup names: %w", err)
+	}
+	rows.Close()
+
+	var existing []string
+	for _, name := range names {
+		if db.groupDBFileExists(name) {
+			existing = append(existing, name)
+		}
 	}
 
 	var resetCount int
 	var errorCount int
 
-	log.Printf("ResetAllNewsgroupData: Found %d newsgroup databases to reset", len(entries))
+	log.Printf("ResetAllNewsgroupData: Found %d newsgroup databases to reset (of %d newsgroups)", len(existing), len(names))
 
 	// Process only existing newsgroup databases
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		newsgroupName := entry.Name()
+	for _, newsgroupName := range existing {
 		log.Printf("ResetAllNewsgroupData: Resetting database for newsgroup '%s'...", newsgroupName)
 
 		// Reset the group database tables
@@ -2913,7 +2935,7 @@ func (db *Database) ResetAllNewsgroupData() error {
 
 	if errorCount > 0 {
 		log.Printf("ResetAllNewsgroupData: Completed with %d successful database resets and %d errors", resetCount, errorCount)
-		return fmt.Errorf("reset completed with %d errors out of %d newsgroup databases", errorCount, len(entries))
+		return fmt.Errorf("reset completed with %d errors out of %d newsgroup databases", errorCount, len(existing))
 	}
 
 	log.Printf("ResetAllNewsgroupData: Successfully reset %d newsgroup databases and %d main database entries", resetCount, rowsAffected)

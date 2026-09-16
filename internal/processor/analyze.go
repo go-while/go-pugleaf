@@ -480,13 +480,24 @@ func sha256hashFromString(s string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// getCacheFilePath returns the cache file path for a provider/group combination
-func (proc *Processor) getCacheFilePath(providerName string, groupName string) string {
+// analyzeCachePath returns the overview cache file path below dataDir.
+// The file name is unchanged: sha256 of the sanitized group name.
+func analyzeCachePath(dataDir string, providerName string, groupName string) string {
 	// Sanitize group name for filesystem
 	safeName := strings.ReplaceAll(groupName, "/", "_")
 	safeName = strings.ReplaceAll(safeName, "\\", "_")
 
-	return filepath.Join("data", "cache", providerName, sha256hashFromString(safeName)+".overview")
+	return filepath.Join(dataDir, "cache", providerName, sha256hashFromString(safeName)+".overview")
+}
+
+// getCacheFilePath returns the cache file path for a provider/group combination,
+// below the configured -data root (proc.DB.GetDataDir()).
+func (proc *Processor) getCacheFilePath(providerName string, groupName string) string {
+	dataDir := "data"
+	if proc.DB != nil {
+		dataDir = proc.DB.GetDataDir()
+	}
+	return analyzeCachePath(dataDir, providerName, groupName)
 }
 
 // cacheFileExists checks if a cache file exists and is not empty
