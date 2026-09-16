@@ -25,6 +25,9 @@ type CronJobManager struct {
 	mutex        sync.RWMutex
 	stopChannel  chan struct{}
 	TotalRunning uint64
+
+	reloadEvery time.Duration                     // how often StartCronManager looks for new jobs
+	loadJobs    func() ([]*models.CronJob, error) // job source (db.GetAllCronJobs); a field so tests can fail it
 }
 
 // CronJob represents a currently running or completed cron job
@@ -58,13 +61,52 @@ func getShellCommand(command string) *exec.Cmd {
 	return exec.Command("sh", "-c", command)
 }
 
+// cronReloadEvery is how often the manager looks for newly enabled cron jobs.
+const cronReloadEvery = time.Minute
+
 // NewCronJobManager creates a new cron job manager
 func NewCronJobManager(db *database.Database) *CronJobManager {
-	return &CronJobManager{
+	cm := &CronJobManager{
 		db:          db,
 		jobs:        make(map[int64]*CronJob),
 		stopChannel: make(chan struct{}),
+		reloadEvery: cronReloadEvery,
 	}
+	cm.loadJobs = db.GetAllCronJobs
+	return cm
+}
+
+// loadAndStartJobs loads the configured cron jobs once and starts those that are not running yet.
+func (cm *CronJobManager) loadAndStartJobs() error {
+	cronJobs, err := cm.loadJobs()
+	if err != nil {
+		return err
+	}
+	created := 0
+	// Start each active cron job
+startJobs:
+	for _, job := range cronJobs {
+		if !job.Enabled {
+			continue startJobs
+		}
+		if err := cm.startJob(job); err != nil {
+			if err == ErrCronExists {
+				continue startJobs
+			}
+			log.Printf("[CRON] Failed to start job %d (%s): %v", job.ID, job.Name, err)
+
+		} else {
+			log.Printf("[CRON] Started job %d (%s) with interval %d minutes", job.ID, job.Name, job.IntervalMinutes)
+			created++
+		}
+
+	}
+	if created > 0 {
+		cm.mutex.Lock()
+		log.Printf("[CRON] started: %d | total: %d", created, len(cm.jobs))
+		cm.mutex.Unlock()
+	}
+	return nil
 }
 
 // Start initializes and starts all active cron jobs
@@ -78,37 +120,16 @@ func (cm *CronJobManager) StartCronManager() {
 			if common.IsClosedChannel(cm.stopChannel) {
 				return
 			}
-			// Load all active cron jobs from database
-			cronJobs, err := cm.db.GetAllCronJobs()
-			if err != nil {
+			// A failed load must not end the loop: nothing else starts jobs, so returning here
+			// left the server without any cron job until the next restart.
+			if err := cm.loadAndStartJobs(); err != nil {
 				log.Printf("[CRON] CronManager: Failed to load cron jobs: %v", err)
+			}
+			select {
+			case <-cm.stopChannel:
 				return
+			case <-time.After(cm.reloadEvery):
 			}
-			created := 0
-			// Start each active cron job
-		startJobs:
-			for _, job := range cronJobs {
-				if !job.Enabled {
-					continue startJobs
-				}
-				if err := cm.startJob(job); err != nil {
-					if err == ErrCronExists {
-						continue startJobs
-					}
-					log.Printf("[CRON] Failed to start job %d (%s): %v", job.ID, job.Name, err)
-
-				} else {
-					log.Printf("[CRON] Started job %d (%s) with interval %d minutes", job.ID, job.Name, job.IntervalMinutes)
-					created++
-				}
-
-			}
-			if created > 0 {
-				cm.mutex.Lock()
-				log.Printf("[CRON] started: %d | total: %d", created, len(cm.jobs))
-				cm.mutex.Unlock()
-			}
-			time.Sleep(time.Minute)
 		}
 	}(cm)
 }

@@ -220,7 +220,9 @@ type SearchPageData struct {
 	Pagination  *models.PaginationInfo
 }
 
-var DefaultReverseProxy = []string{"127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+// DefaultReverseProxy is the trusted-proxy list used when ReverseProxyAddr is empty or has no
+// usable entry: loopback and the private ranges a proxy on the same host or in a container runs in.
+var DefaultReverseProxy = []string{"127.0.0.0/8", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
 
 // NewWebServer creates a new web server instance
 func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *nntp.NNTPServer, cronEdit bool, noCronjobs bool) *WebServer {
@@ -229,12 +231,17 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 
 	router := gin.Default()
 
-	// Client IPs come from X-Forwarded-For/X-Real-IP only when the peer is a trusted proxy
+	// Client IPs come from one configured header, and only when the peer is a trusted proxy
 	ReverseProxyAddr, err := db.GetConfigValue(config.CFG_KEY_REVERSEPROXY)
 	if err != nil {
 		log.Printf("[WEB]: Error getting ReverseProxyAddr: %v", err)
 	}
-	trustedProxyNets := configureTrustedProxies(router, ReverseProxyAddr)
+	ReverseProxyIPHeader, err := db.GetConfigValue(config.CFG_KEY_REVERSEPROXY_IPHEADER)
+	if err != nil {
+		log.Printf("[WEB]: Error getting ReverseProxyIPHeader: %v", err)
+	}
+	trustedProxyNets := configureTrustedProxiesWithHeader(router, ReverseProxyAddr, ReverseProxyIPHeader)
+	log.Printf("[WEB]: Trusted reverse proxies: %v | client IP header: %v", trustedProxyNets, router.RemoteIPHeaders)
 
 	// Don't use ParseGlob - it causes template name conflicts
 	// Instead, we'll load templates individually in each handler
@@ -589,11 +596,23 @@ func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
 	}
 }
 
-// configureTrustedProxies makes gin take the client IP from X-Forwarded-For/X-Real-IP only when the
-// direct peer is a configured reverse proxy (comma or whitespace separated IPs/CIDRs; empty or
-// all-invalid means DefaultReverseProxy). gin evaluates X-Forwarded-For right to left and ignores
-// invalid addresses. It returns the parsed networks for isTrustedPeer.
+// configureTrustedProxies configures the trusted proxies with the default client IP header.
+// It returns the parsed networks for isTrustedPeer.
 func configureTrustedProxies(router *gin.Engine, addrs string) []*net.IPNet {
+	return configureTrustedProxiesWithHeader(router, addrs, "")
+}
+
+// configureTrustedProxiesWithHeader makes gin take the client IP from exactly one forwarded header,
+// and only when the direct peer is a configured reverse proxy (comma or whitespace separated
+// IPs/CIDRs; empty or all-invalid means DefaultReverseProxy).
+//
+// Trusting more than one header is unsafe: behind a proxy that sets only X-Real-IP and passes the
+// client's own X-Forwarded-For through, the client picks its own address. header is the value of
+// CFG_KEY_REVERSEPROXY_IPHEADER: "" or "X-Forwarded-For" selects X-Forwarded-For (gin evaluates it
+// right to left and ignores invalid addresses), "X-Real-IP" selects X-Real-IP, anything else is
+// logged and falls back to X-Forwarded-For.
+// It returns the parsed networks for isTrustedPeer.
+func configureTrustedProxiesWithHeader(router *gin.Engine, addrs, header string) []*net.IPNet {
 	list, nets := parseTrustedProxyList(strings.Fields(strings.ReplaceAll(addrs, ",", " ")))
 	if len(list) == 0 {
 		list, nets = parseTrustedProxyList(DefaultReverseProxy)
@@ -602,7 +621,16 @@ func configureTrustedProxies(router *gin.Engine, addrs string) []*net.IPNet {
 		log.Printf("[WEB]: Error setting trusted proxies %v: %v", list, err)
 	}
 	router.ForwardedByClientIP = true
-	router.RemoteIPHeaders = []string{"X-Forwarded-For", "X-Real-IP"}
+
+	switch want := strings.TrimSpace(header); {
+	case strings.EqualFold(want, "X-Real-IP"):
+		router.RemoteIPHeaders = []string{"X-Real-IP"}
+	case want == "" || strings.EqualFold(want, "X-Forwarded-For"):
+		router.RemoteIPHeaders = []string{"X-Forwarded-For"}
+	default:
+		log.Printf("[WEB]: Unknown %s '%s', using X-Forwarded-For (valid: X-Forwarded-For, X-Real-IP)", config.CFG_KEY_REVERSEPROXY_IPHEADER, header)
+		router.RemoteIPHeaders = []string{"X-Forwarded-For"}
+	}
 	return nets
 }
 
@@ -650,13 +678,46 @@ func (s *WebServer) isTrustedPeer(peer net.IP) bool {
 	return false
 }
 
+// untrustedForwarderSeen remembers peers noteUntrustedForwarder has already logged, so a
+// misconfigured proxy produces one line instead of one per request. It is bounded: beyond
+// maxUntrustedForwarderIPs nothing is added (and those peers are logged again), which keeps a
+// flood of forged headers from untrusted addresses out of memory.
+var untrustedForwarderSeen = struct {
+	sync.Mutex
+	ips map[string]struct{}
+}{ips: make(map[string]struct{})}
+
+const maxUntrustedForwarderIPs = 256
+
+// noteUntrustedForwarder logs once per peer that its forwarded client IP headers are ignored.
+func (s *WebServer) noteUntrustedForwarder(peer net.IP) {
+	key := peer.String()
+	untrustedForwarderSeen.Lock()
+	if _, seen := untrustedForwarderSeen.ips[key]; seen {
+		untrustedForwarderSeen.Unlock()
+		return
+	}
+	if len(untrustedForwarderSeen.ips) < maxUntrustedForwarderIPs {
+		untrustedForwarderSeen.ips[key] = struct{}{}
+	}
+	untrustedForwarderSeen.Unlock()
+	log.Printf("[WEB]: ignoring forwarded client IP headers from untrusted proxy %s: add it to %s", key, config.CFG_KEY_REVERSEPROXY)
+}
+
 // ReverseProxyMiddleware detects HTTPS terminated by a trusted reverse proxy.
-// The client IP is resolved by gin (see configureTrustedProxies); RemoteAddr and Host are never rewritten.
+// The client IP is resolved by gin (see configureTrustedProxiesWithHeader); RemoteAddr and Host are
+// never rewritten. A private or loopback peer that sends forwarded headers but is not trusted is
+// logged once: that is almost always a proxy missing from ReverseProxyAddr.
 func (s *WebServer) ReverseProxyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		peer := net.ParseIP(c.RemoteIP())
+		trusted := s.isTrustedPeer(peer)
+		if !trusted && peer != nil && (peer.IsLoopback() || peer.IsPrivate()) &&
+			(c.GetHeader("X-Forwarded-For") != "" || c.GetHeader("X-Real-IP") != "") {
+			s.noteUntrustedForwarder(peer)
+		}
 		isHTTPS := c.Request.TLS != nil ||
-			(s.isTrustedPeer(peer) && strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https"))
+			(trusted && strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https"))
 		if isHTTPS {
 			c.Request.URL.Scheme = "https"
 		}

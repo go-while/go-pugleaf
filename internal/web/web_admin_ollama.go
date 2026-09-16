@@ -3,16 +3,28 @@ package web
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 const OllamaHostname = "ollama-proxy.local:21434"
-const ProxyURL = "http://" + OllamaHostname + "/models"
+
+// ProxyURL is the ollama-proxy model list endpoint. It is a var so tests can point it elsewhere;
+// only adminSyncOllamaModels reads it.
+var ProxyURL = "http://" + OllamaHostname + "/models"
+
+// ollamaSyncHTTPClient fetches the model list. The timeout bounds a hung proxy, which used to
+// block the admin handler (and Shutdown behind it) forever.
+var ollamaSyncHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+// maxOllamaSyncResponseBytes bounds the model list the proxy may return.
+const maxOllamaSyncResponseBytes = 1 << 20
 
 // ProxyModelResponse represents the response from ollama-proxy /models endpoint
 type ProxyModelResponse struct {
@@ -201,8 +213,15 @@ func (s *WebServer) adminSyncOllamaModels(c *gin.Context) {
 
 	session := s.getWebSession(c)
 
-	// Fetch models from ollama-proxy
-	resp, err := http.Get(ProxyURL)
+	// Fetch models from ollama-proxy (bounded by the client timeout and the request context)
+	httpReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, ProxyURL, nil)
+	if err != nil {
+		log.Printf("Failed to build proxy request: %v", err)
+		session.SetError("Failed to connect to ollama-proxy")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=aimodels")
+		return
+	}
+	resp, err := ollamaSyncHTTPClient.Do(httpReq)
 	if err != nil {
 		log.Printf("Failed to fetch models from proxy: %v", err)
 		session.SetError("Failed to connect to ollama-proxy")
@@ -219,7 +238,7 @@ func (s *WebServer) adminSyncOllamaModels(c *gin.Context) {
 	}
 
 	var proxyResponse ProxyModelResponse
-	if err := json.NewDecoder(resp.Body).Decode(&proxyResponse); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxOllamaSyncResponseBytes)).Decode(&proxyResponse); err != nil {
 		log.Printf("Failed to decode proxy response: %v", err)
 		session.SetError("Failed to parse proxy response")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=aimodels")

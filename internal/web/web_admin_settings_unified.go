@@ -91,6 +91,25 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 			},
 			EmptyAllowed: true,
 		},
+		config.FORM_FIELD_REVERSEPROXY_IPHEADER: {
+			FormField: config.FORM_FIELD_REVERSEPROXY_IPHEADER,
+			ConfigKey: config.CFG_KEY_REVERSEPROXY_IPHEADER,
+			Validator: func(value string) error {
+				switch value {
+				case "", "X-Forwarded-For", "X-Real-IP":
+					return nil
+				}
+				return fmt.Errorf("Invalid client IP header: use X-Forwarded-For or X-Real-IP (empty = X-Forwarded-For)")
+			},
+			Processor: nil, // Uses config key directly
+			SuccessMsg: func(value string) string {
+				if value == "" {
+					return "Ok. Reboot webserver now! Client IP header reset to the default: X-Forwarded-For"
+				}
+				return "Ok. Reboot webserver now! Client IP header set to: " + value
+			},
+			EmptyAllowed: true,
+		},
 		config.FORM_FIELD_REGISTRATION: {
 			FormField:    config.FORM_FIELD_REGISTRATION,
 			ConfigKey:    config.CFG_KEY_REGISTRATION,
@@ -114,7 +133,7 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 			Processor: s.processBadBotsUpdate, // Apply changes immediately
 			SuccessMsg: func(value string) string {
 				if value == "" {
-					return "Bad bots list cleared and applied (using defaults)"
+					return "Bad bots list cleared (no patterns)"
 				}
 				return "Bad bots list updated and applied immediately: " + value
 			},
