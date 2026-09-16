@@ -950,3 +950,97 @@ packages (and `-shuffle=on`/`-count=2` green for web and database during review)
 - `cmd/nntp-analyze/main.go:280` closes `StopChan` without `db.Shutdown()`.
 - `EmbeddedFileHandler`/`staticContentType` are dead in production; `.scss` is shipped but absent from
   the type table.
+
+---
+
+## Outcome
+
+**Merged into `testing-001` as `e52d1a8`** on 2026-09-16 (77 files, +8153/-772). Not pushed — the user pushes.
+
+- **Integration branch:** `plan-web-sqlite-leftovers`, branched from `testing-001` @ `194a8c2`, 51 commits, head `020e311`.
+- **Result:** 22 of 23 findings closed. **F1 (deep pagination) deferred by user decision**; carried into `.claude/plans/queued/web-db-followups.md` as D1.
+
+### Verification at the merge point
+| Check | Baseline | Final |
+|----|----|----|
+| `scripts/test-web-leftovers.sh` | `pass=1 fail=15` | **`pass=16 fail=0`** |
+| `scripts/test-web-hardening.sh` | `pass=25 fail=0` | `pass=25 fail=0` |
+| `go test -race -count=1` (8 packages) | green | green (also `-shuffle=on` / `-count=2` for web and database) |
+| `gofmt -l ./cmd ./internal` | 2 baseline files | 2 baseline files |
+| DATA RACE reports in both scratch logs | 0 | 0 |
+
+An independent verifier also proved migration 0028 against a data directory built by the **pre-plan
+binary** (`03d0178`, built via `git archive` into a scratchpad): before, cookie and `users.session_id`
+were byte-identical; after, 0028 applied, `login_attempt_at` present, `session_id` empty for all users,
+the old cookie 303s to `/login`, and a fresh login stores exactly `sha256(cookie)`. It also exercised
+both `audit-web-posts` code paths (`immutable=1` and the pending-`-wal` fallback) with unchanged
+sha256 and no new sibling files.
+
+### What shipped
+- **Paths (A1-A6):** `-data` honoured by the fetcher progress DB, the pool's newsgroup-list cache, the
+  analyze cache and the web rsync source; `ResetAllNewsgroupData` uses the real group DB layout.
+  Plus **A1b**, found in wave 0: the fetcher panicked with `index out of range` when no provider was
+  *enabled*, because the existing guard only counted rows.
+- **Web (B1-B13, F1-F15):** shutdown drains then cancels in-flight requests; API token usage is
+  buffered and flushed; the stats cache is a singleflight; visitor pages no longer show internal error
+  text; the article preview has a web route and the API one honours `APIEnabled`; chat sends are
+  serialised per user+model; a full post queue no longer charges the user a post; one configured
+  client IP header with widened trusted defaults; section routes apply the same access checks as
+  `/groups/:group`; huge `?page=` no longer panics; profile validation precedes every write; legacy
+  reply message-ids accepted.
+- **Database (C1-C5, F16-F22):** session tokens hashed at rest (migration 0028, one forced re-login);
+  the login lockout has its own clock; the retry budget measures busy time; the batch writer waits for
+  an initializing group DB and is bounded once shutdown starts; NNTP auth honours `disabled`/`is_active`
+  including cache hits.
+- **New:** read-only `cmd/audit-web-posts` + `build_audit-web-posts.sh` (D1); `docs/web-deployment.md`;
+  `docs/perf/main-db-pool.md`; `scripts/test-web-leftovers.sh`; a rewritten `internal/web/README.md`.
+- **C6:** main DB pool measured and **deliberately unchanged** (`MaxOpenConns 100`, `MaxIdleConns 25`).
+
+### Deliberate departures from the plan text
+1. **F1 deferred** (user decision, wave 0). `lo2-web-pages` ran as F6/F9/F10/F15 only.
+2. **Post-reservation undo restores a bounded ~5s back-off**, not the full previous `lastpost_unix` the
+   Design specified: `WebPostingBackOff` is the only per-user throttle on `/SitePostSubmit`, and
+   restoring it fully let a client hammer the route while the queue is full.
+3. **`audit-web-posts` gained `-strict`** (not in the slice text). Refuse-on-pending-`-wal` as the
+   *default* was implemented first and **failed L11**, because a pending `-wal` is routinely left
+   behind — so the default warns and falls back, and `-strict` refuses.
+4. **`uiCacheHeaderSections.invalidate()` removed** from `DeleteNewsgroup` although the spec asked for
+   it: that cache holds `sections` rows only, which a newsgroup delete cannot change.
+
+### Corrections to the plan's own findings
+- **B7 was overstated.** `renderError` only ever put `message` into the template data, so most of the
+  17 sites were never leaking to visitors — only the three `error.html` 200s and a rare `c.String`
+  fallback were. The change is still correct defence-in-depth.
+- **B9's live half was not `getContentType`.** `/static/*` goes through `http.FileServer`; the real
+  defect was `/favicon.ico` registered for GET only, and gin answers HEAD from a separate route tree.
+- **A5 has a live-data consequence:** `rslight-importer -reset-groups` used to be a guaranteed no-op
+  and now really deletes articles, threads and caches in every group DB that has a file.
+
+### Worktrees and branches (left in place; the user cleans up `/tank0/claude/trees`)
+| Slice | Branch | Worktree |
+|----|----|----|
+| `lo-paths` | `worktree-agent-abc86bcd09fd14b0c` | `/tank0/claude/trees/go-pugleaf/agent-abc86bcd09fd14b0c` |
+| `lo-db` | `worktree-agent-a5e5d0ec0bce9dec8` | `.../agent-a5e5d0ec0bce9dec8` |
+| `lo-web-handlers` | `worktree-agent-ad3e4d0aaa02c68e3` | `.../agent-ad3e4d0aaa02c68e3` |
+| `lo-web-core` | `worktree-agent-aab185f8152794720` **and** `lo-web-core-postmerge-fixes` | `.../agent-aab185f8152794720` |
+| `lo-audit-tool` | `worktree-agent-a103990bc940c4fa8` | `.../agent-a103990bc940c4fa8` |
+| `lo2-db-writer` | `worktree-agent-ae0262a129317988b` | `.../agent-ae0262a129317988b` |
+| `lo2-web-pages` | `worktree-agent-a587de24703d4f43e` | `.../agent-a587de24703d4f43e` |
+| `lo2-web-forms` | `worktree-agent-ad2a075c1c0ccb2de` | `.../agent-ad2a075c1c0ccb2de` |
+| `lo2-web-server` | `worktree-agent-a16c71c90604c2787` | `.../agent-a16c71c90604c2787` |
+| `lo2-pool` | `worktree-agent-abf4ef7566b16b3ac` | `.../agent-abf4ef7566b16b3ac` |
+
+Scratch data dirs left in the checkout (gitignored via `/data*`): `data-test-web-sqlite-hardening`,
+`data-test-web-sqlite-leftovers`, `data-test-upgrade-old`, `data-test-upgrade-new`.
+
+### Known issues and leftovers
+All carried into **`.claude/plans/queued/web-db-followups.md`**, verified against the code rather than
+copied from these notes. Headline items: `profileUpdate`'s three writes are still un-transacted;
+`EmbeddedFileHandler`/`staticContentType` are dead in production; the `retry1`/`retry2` loop bounds have
+no unit test; `DeleteNewsgroup` leaves `user_spam_flags` rows; section pages still list groups whose
+route now 404s; and WSH check E12 now passes for a weaker reason (its label is wrong, its outcome is
+strictly safer).
+
+**Relation to `nntp-audit-tests`:** NAT is still queued and untouched. Its seed findings and its
+`audit-web`/`audit-db` scope must be re-anchored on this tree, and its SEC-6 item is now half-closed
+by F22 (the password-change half stays open).
