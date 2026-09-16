@@ -4,10 +4,25 @@
 // still hold such values; this tool finds them so the user can decide what to do.
 //
 // The tool never writes: it opens the main database and every group database
-// with the plain sqlite3 driver and the DSN "file:<path>?mode=ro", it never
-// calls database.OpenDatabase (which migrates and writes) and it never issues
-// CREATE, INSERT, UPDATE or DELETE. A group database that does not exist is
-// counted as missing and skipped, never created.
+// with the plain sqlite3 driver and the DSN "file:<path>?mode=ro&immutable=1",
+// it never calls database.OpenDatabase (which migrates and writes) and it never
+// issues CREATE, INSERT, UPDATE or DELETE. A group database that does not exist
+// is counted as missing and skipped, never created.
+//
+// immutable=1 is what keeps the audit out of the data directory: every pugleaf
+// database runs in WAL mode, and a plain read-only open of a WAL database makes
+// SQLite create the wal-index ("-shm", and an empty "-wal") next to the file,
+// which a read-only connection can never remove again. An immutable open reads
+// the database file alone, so it also works when the data directory is not
+// writable.
+//
+// immutable=1 also ignores a pending write-ahead log, so a database with a
+// non-empty "-wal" sibling (a running server, or a writer that exited without
+// checkpointing) would be read stale. Such a database is opened plainly
+// read-only instead, with a warning that SQLite may create "-shm"/"-wal" files
+// next to it (a wal-index the writer normally left there anyway). -strict
+// refuses those databases instead of falling back, for an audit that may not
+// touch the data directory at all.
 //
 // Output is one TSV line per finding
 // (group, article_num, message_id, posted_to_remote, created, field, reason)
@@ -17,13 +32,16 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/go-while/go-pugleaf/internal/database"
 	_ "github.com/mattn/go-sqlite3" // SQLite3 driver
@@ -61,9 +79,14 @@ var singleHeaderNames = map[string]bool{
 	"message-id": true,
 }
 
+// unknownGroup is the bucket for post_queue rows whose newsgroup row is gone.
+// A NUL byte keeps it apart from every real newsgroup name.
+const unknownGroup = "\x00deleted-newsgroup"
+
 // queueRow is one post_queue entry joined to its newsgroup name.
 type queueRow struct {
 	group          string
+	newsgroupID    string
 	messageID      string
 	created        string
 	postedToRemote string
@@ -77,7 +100,13 @@ type articleRow struct {
 	fromHeader  string
 	references  string
 	headersJSON string
+	path        string
 }
+
+// webPostPath is the Path value that sitePostSubmit sets on a local web post
+// (internal/web/web_sitePostPage.go:383). Peer-fetched articles carry the real
+// Path of their route instead.
+const webPostPath = ".POSTED!not-for-mail"
 
 // finding is one flagged field of one article.
 type finding struct {
@@ -85,7 +114,7 @@ type finding struct {
 	reason string
 }
 
-const selectArticleFields = `SELECT article_num, message_id, subject, from_header, "references", headers_json FROM articles`
+const selectArticleFields = `SELECT article_num, message_id, subject, from_header, "references", headers_json, path FROM articles`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -97,8 +126,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	dataDir := fs.String("data", "./data", "Data directory (read-only)")
 	all := fs.Bool("all", false, "Scan every article of the groups that have post_queue rows, not only the queued message-ids")
+	strict := fs.Bool("strict", false, "Refuse a database that has a pending -wal file instead of opening it plainly read-only (which may create -shm/-wal files next to it)")
 	verbose := fs.Bool("v", false, "Verbose progress on stderr")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if *verbose && appVersion != "" {
@@ -106,7 +139,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	mainPath := filepath.Join(*dataDir, "cfg", "pugleaf.sq3")
-	mainDB, err := openReadOnly(mainPath)
+	mainDB, fellBack, err := openReadOnly(mainPath, *strict)
+	if fellBack {
+		fmt.Fprintf(stderr, "[AUDIT] %s has a pending -wal: opened without immutable=1, SQLite may create -shm/-wal files next to it\n", mainPath)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "[AUDIT] failed to open main database %s: %v\n", mainPath, err)
 		return 2
@@ -129,13 +165,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var checked, flagged, missing, errs int
 	for _, group := range order {
 		rows := queued[group]
+		if group == unknownGroup {
+			// post_queue rows whose newsgroup row is gone: there is no group
+			// database to look them up in, so they cannot be audited.
+			missing += len(rows)
+			fmt.Fprintf(stderr, "[AUDIT] %d post_queue row(s) reference a deleted newsgroup and cannot be checked\n", len(rows))
+			for _, r := range rows {
+				fmt.Fprintf(stderr, "[AUDIT]   newsgroup_id=%s message_id=%s created=%s\n",
+					tsvSafe(r.newsgroupID), tsvSafe(r.messageID), tsvSafe(r.created))
+			}
+			continue
+		}
 		path := groupDBPath(*dataDir, group)
 		if _, serr := os.Stat(path); serr != nil {
 			missing += len(rows)
 			fmt.Fprintf(stderr, "[AUDIT] no group DB for %s (%s): %d queued message-id(s) skipped\n", group, path, len(rows))
 			continue
 		}
-		c, f, m, gerr := auditGroup(path, rows, *all, *verbose, stdout, stderr)
+		c, f, m, gerr := auditGroup(path, rows, *all, *strict, *verbose, stdout, stderr)
 		checked += c
 		flagged += f
 		missing += m
@@ -155,24 +202,66 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// openReadOnly opens a SQLite file read-only. The DSN is the guarantee that
-// nothing in this tool can write to it.
-func openReadOnly(path string) (*sql.DB, error) {
-	if _, err := os.Stat(path); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
+// readOnlyDSN builds the read-only URI of a database file. The path goes
+// through net/url, so a data directory containing "?" or "#" still addresses
+// the file it names.
+func readOnlyDSN(path string, immutable bool) (string, error) {
+	abs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, err
+		return "", err
+	}
+	q := url.Values{}
+	q.Set("mode", "ro")
+	if immutable {
+		q.Set("immutable", "1")
+	}
+	u := url.URL{Scheme: "file", Path: abs, RawQuery: q.Encode()}
+	return u.String(), nil
+}
+
+// pendingWAL reports whether the database has a non-empty write-ahead log,
+// which an immutable open would silently ignore.
+func pendingWAL(path string) (bool, int64) {
+	st, err := os.Stat(path + "-wal")
+	if err != nil || st.Size() == 0 {
+		return false, 0
+	}
+	return true, st.Size()
+}
+
+// openReadOnly opens a SQLite file read-only, immutably unless a pending
+// write-ahead log forces the plain read-only fallback. The DSN is the guarantee
+// that nothing in this tool can write to the database; immutable=1 additionally
+// keeps SQLite from creating a wal-index next to it. It returns whether the
+// fallback was used, so the caller can say so.
+func openReadOnly(path string, strict bool) (db *sql.DB, fellBack bool, err error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, false, err
+	}
+	immutable := true
+	if wal, size := pendingWAL(path); wal {
+		if strict {
+			return nil, false, fmt.Errorf("%s-wal holds %d bytes: a writer is running, or exited without checkpointing. An immutable read would miss those frames, and a plain read-only open may create -shm/-wal files here. Stop the server, audit a copy of the data directory, or drop -strict", path, size)
+		}
+		immutable = false
+		fellBack = true
+	}
+	dsn, err := readOnlyDSN(path, immutable)
+	if err != nil {
+		return nil, fellBack, err
+	}
+	db, err = sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, fellBack, err
 	}
 	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		if cerr := db.Close(); cerr != nil {
-			return nil, fmt.Errorf("ping: %w (close: %v)", err, cerr)
+			return nil, fellBack, fmt.Errorf("ping: %w (close: %v)", err, cerr)
 		}
-		return nil, err
+		return nil, fellBack, err
 	}
-	return db, nil
+	return db, fellBack, nil
 }
 
 // groupDBPath is the on-disk location of a group database
@@ -182,10 +271,12 @@ func groupDBPath(dataDir, group string) string {
 }
 
 // loadQueue reads every post_queue row with its newsgroup name and groups the
-// rows by newsgroup, keeping a stable group order.
+// rows by newsgroup, keeping a stable group order. The join is a LEFT JOIN so
+// that a row whose newsgroup was deleted is still seen; it lands in
+// unknownGroup.
 func loadQueue(db *sql.DB) ([]string, map[string][]queueRow, error) {
-	const query = `SELECT n.name, q.message_id, q.created, q.posted_to_remote
-	               FROM post_queue q JOIN newsgroups n ON n.id = q.newsgroup_id
+	const query = `SELECT n.name, q.newsgroup_id, q.message_id, q.created, q.posted_to_remote
+	               FROM post_queue q LEFT JOIN newsgroups n ON n.id = q.newsgroup_id
 	               ORDER BY n.name, q.id`
 	rows, err := db.Query(query)
 	if err != nil {
@@ -196,16 +287,20 @@ func loadQueue(db *sql.DB) ([]string, map[string][]queueRow, error) {
 	var order []string
 	queued := make(map[string][]queueRow)
 	for rows.Next() {
-		var name string
-		var messageID, created, posted sql.NullString
-		if err := rows.Scan(&name, &messageID, &created, &posted); err != nil {
+		var name, newsgroupID, messageID, created, posted sql.NullString
+		if err := rows.Scan(&name, &newsgroupID, &messageID, &created, &posted); err != nil {
 			return nil, nil, err
 		}
-		if _, ok := queued[name]; !ok {
-			order = append(order, name)
+		group := name.String
+		if !name.Valid {
+			group = unknownGroup
 		}
-		queued[name] = append(queued[name], queueRow{
-			group:          name,
+		if _, ok := queued[group]; !ok {
+			order = append(order, group)
+		}
+		queued[group] = append(queued[group], queueRow{
+			group:          group,
+			newsgroupID:    newsgroupID.String,
 			messageID:      messageID.String,
 			created:        created.String,
 			postedToRemote: posted.String,
@@ -220,8 +315,11 @@ func loadQueue(db *sql.DB) ([]string, map[string][]queueRow, error) {
 // auditGroup inspects one group database read-only and reports its findings.
 // It returns the number of articles checked, the number of flagged articles and
 // the number of queued message-ids that have no article in the group database.
-func auditGroup(path string, rows []queueRow, all, verbose bool, stdout, stderr io.Writer) (checked, flagged, missing int, err error) {
-	db, err := openReadOnly(path)
+func auditGroup(path string, rows []queueRow, all, strict, verbose bool, stdout, stderr io.Writer) (checked, flagged, missing int, err error) {
+	db, fellBack, err := openReadOnly(path, strict)
+	if fellBack {
+		fmt.Fprintf(stderr, "[AUDIT] %s has a pending -wal: opened without immutable=1, SQLite may create -shm/-wal files next to it\n", path)
+	}
 	if err != nil {
 		return 0, 0, len(rows), err
 	}
@@ -236,8 +334,11 @@ func auditGroup(path string, rows []queueRow, all, verbose bool, stdout, stderr 
 		byMessageID[r.messageID] = r
 	}
 
-	report := func(q queueRow, a articleRow) {
-		found := checkArticle(a)
+	// A queued article is a web post by construction; outside the queue only
+	// the local posting marker says so, and a peer article's headers_json holds
+	// its real header block, which the allow-list must not judge.
+	report := func(q queueRow, a articleRow, queuedRow bool) {
+		found := checkArticle(a, queuedRow || a.path == webPostPath)
 		checked++
 		if len(found) == 0 {
 			return
@@ -271,7 +372,7 @@ func auditGroup(path string, rows []queueRow, all, verbose bool, stdout, stderr 
 			if !ok {
 				q = queueRow{group: group, postedToRemote: "-", created: "-"}
 			}
-			report(q, a)
+			report(q, a, ok)
 		}
 		if aerr := artRows.Err(); aerr != nil {
 			return checked, flagged, missing, aerr
@@ -313,7 +414,7 @@ func auditGroup(path string, rows []queueRow, all, verbose bool, stdout, stderr 
 
 // auditQueued reports the article of one queued message-id and says whether the
 // group database holds it at all.
-func auditQueued(stmt *sql.Stmt, r queueRow, report func(queueRow, articleRow)) (bool, error) {
+func auditQueued(stmt *sql.Stmt, r queueRow, report func(queueRow, articleRow, bool)) (bool, error) {
 	rows, err := stmt.Query(r.messageID)
 	if err != nil {
 		return false, err
@@ -326,7 +427,7 @@ func auditQueued(stmt *sql.Stmt, r queueRow, report func(queueRow, articleRow)) 
 			return found, serr
 		}
 		found = true
-		report(r, a)
+		report(r, a, true)
 	}
 	if err := rows.Err(); err != nil {
 		return found, err
@@ -337,8 +438,8 @@ func auditQueued(stmt *sql.Stmt, r queueRow, report func(queueRow, articleRow)) 
 // scanArticle reads one article row; every text column may be NULL.
 func scanArticle(rows *sql.Rows) (articleRow, error) {
 	var a articleRow
-	var messageID, subject, fromHeader, references, headersJSON sql.NullString
-	if err := rows.Scan(&a.articleNum, &messageID, &subject, &fromHeader, &references, &headersJSON); err != nil {
+	var messageID, subject, fromHeader, references, headersJSON, path sql.NullString
+	if err := rows.Scan(&a.articleNum, &messageID, &subject, &fromHeader, &references, &headersJSON, &path); err != nil {
 		return a, err
 	}
 	a.messageID = messageID.String
@@ -346,12 +447,16 @@ func scanArticle(rows *sql.Rows) (articleRow, error) {
 	a.fromHeader = fromHeader.String
 	a.references = references.String
 	a.headersJSON = headersJSON.String
+	a.path = path.String
 	return a, nil
 }
 
 // checkArticle returns every reason the article looks like it carries injected
-// header lines.
-func checkArticle(a articleRow) []finding {
+// header lines. webPost says whether the article is a local web post, whose
+// headers_json may only hold the header lines sitePostSubmit writes; for any
+// other article headers_json is the article's own header block and only the
+// control-character and message-id rules apply.
+func checkArticle(a articleRow, webPost bool) []finding {
 	var out []finding
 	fields := []struct {
 		name  string
@@ -378,7 +483,9 @@ func checkArticle(a articleRow) []finding {
 	if !auditMessageIDRe.MatchString(a.messageID) {
 		out = append(out, finding{"message_id", "does not match ^<[^<>\\s@]+@[^<>\\s@]+>$"})
 	}
-	out = append(out, checkHeaderLines(a.headersJSON)...)
+	if webPost {
+		out = append(out, checkHeaderLines(a.headersJSON)...)
+	}
 	return out
 }
 
@@ -418,14 +525,15 @@ func checkHeaderLines(headersJSON string) []finding {
 	return out
 }
 
-// shorten caps a value so one finding stays one readable line.
+// shorten caps a value so one finding stays one readable line. It truncates on
+// runes before escaping, so it can neither split a rune nor cut an escape in
+// half.
 func shorten(s string) string {
 	const max = 60
-	s = tsvSafe(s)
-	if len(s) > max {
-		return s[:max] + "..."
+	if utf8.RuneCountInString(s) > max {
+		s = string([]rune(s)[:max]) + "..."
 	}
-	return s
+	return tsvSafe(s)
 }
 
 // tsvSafe keeps a value inside its TSV column: the bytes this tool hunts for
