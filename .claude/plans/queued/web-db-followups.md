@@ -1,0 +1,166 @@
+# Plan: web + SQLite follow-ups (transactions, dead code, shutdown test coverage, section residuals)
+
+- **Slug:** `web-db-followups`
+- **Integration branch:** `plan-web-db-followups` (from `testing-001`; it must contain the merge of `web-sqlite-leftovers`)
+- **Run with:** `/run-plan .claude/plans/queued/web-db-followups.md`
+- **Written:** 2026-09-16, at the end of the `web-sqlite-leftovers` (WSL) run. Every item below was
+  re-verified against the code at `plan-web-sqlite-leftovers` @ `2510642` while writing this file —
+  line numbers still drift, so grep before editing.
+- **Size:** small. Two waves of three slices; no migration, no new tool, no config key.
+
+---
+
+## Context
+
+`web-sqlite-leftovers` closed 22 of its 23 findings. Its `## Outcome` and the three progress notes
+record what it deliberately did **not** take, either because the item was pre-existing and out of
+slice, or because taking it at integration time would have meant an untested behaviour change. This
+plan is that list, plus the items the post-merge review wave raised.
+
+Nothing here is a regression introduced by WSL. Two items (D1, D2) are decisions rather than defects.
+
+### Findings
+
+**A. Transactions and error handling**
+| ID | Where (at `2510642`) | Defect |
+|----|----|----|
+| A1 | `internal/web/web_profile.go` (`profileUpdate`, the write block after the validation fence) | The three writes — `UpdateUserPassword`, `UpdateUserEmail`, `UpdateUserDisplayName` — are separate un-transacted statements. WSL routed all three through `RetryableExec`, which shrinks the window, but a transient failure on the second still leaves the first committed: a user changing password **and** email can end up with the password silently changed and the email not, seeing only "Failed to update email". |
+| A2 | `internal/database/queries.go`, `ResetAllNewsgroupData` step 1 | The mass counter `UPDATE newsgroups SET message_count = 0, ...` still uses a bare `db.mainDB.Exec`. WSL tightened the read path directly around it (`listNewsgroupNames`) but left this one, so the function violates the `Retryable*` convention in the very place it was cleaned up. |
+| A3 | `cmd/web/main_functions.go`, `rsyncInactiveGroupsToDir` | Has `defer rows.Close()` and a `for rows.Next()` loop but **never checks `rows.Err()`**, so a truncated result set is silently treated as a complete one — the tool then rsyncs a partial group list and reports success. |
+| A4 | `internal/database/queries.go`, `DeleteNewsgroup` | WSL made it delete the group's `section_groups` rows in the same transaction. It still leaves `user_spam_flags` rows keyed on the deleted `newsgroup_id` (`migrations/0007_main_user_spam_flags.sql` has an FK on `user_id` only; `post_queue` *is* cascaded by 0016). Dead rows only — `newsgroups.id` is `AUTOINCREMENT`, so the id is never reused — but they accumulate. |
+
+**B. Dead code and misleading UI**
+| ID | Where | Defect |
+|----|----|----|
+| B1 | `internal/web/embedded_static.go` | `EmbeddedFileHandler` has **no caller** (verified: only its own definition and doc comment). `staticContentType` is reachable only from it and from `lo1_core_test.go`. `/static/*` is served by `http.FileServer`, which uses Go's own mime table. WSL kept both because its slice text said to. Decide: wire it back, or delete both and the test. Note `internal/web/static/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.scss` **is** shipped and `.scss` is absent from the type table — harmless only because nothing serves it through that function. |
+| B2 | `internal/database/db_sessions.go`, `InvalidateUserSessionBySessionID` | No caller in `internal/` or `cmd/` (logout goes through `InvalidateUserSession(userID)`). Exported API that only tests use. Delete, or wire logout to it — the by-token form is the one that works from a cookie alone. |
+| B3 | `internal/web/web_admin_newsgroups.go`, `adminDeleteNewsgroup` | Flashes "Newsgroup deleted successfully" whenever `DeleteNewsgroup` returns nil — including when nothing was deleted, because the group was still active (`query_DeleteNewsgroup` has an `active = 0` guard, so deleting an active group is a no-op). The admin is told a delete happened that did not. `DeleteNewsgroup` now computes this internally; K1 of WSL pinned its `(name) error` signature, which this plan is free to change. |
+
+**C. Shutdown: test coverage and two loose ends**
+| ID | Where | Defect |
+|----|----|----|
+| C1 | `internal/database/db_batch.go`, the `retry1` / `retry2` labels | The loop bounds added by the WSL post-merge wave have **no unit test**. Exercising them needs a live `SQ3batch` plus a group DB whose insert keeps failing, which no WSL slice could build. `batchShutdownClock` itself is tested (`TestLo2WriterBatchShutdownClock`); the two call sites are not. This is the code that stops a wedged batch pinning `db.WG.Wait()`, so it is worth a real test. |
+| C2 | `internal/web/cronjobs.go`, `loadAndStartJobs` vs `StopCronManager` | `loadAndStartJobs` does not re-check `stopChannel` between jobs, so a job started while `StopCronManager` is taking its `jobIDs` snapshot is never stopped, and `db.WG.Done()` runs while that job's goroutine is still executing. Pre-existing; WSL made the window smaller (one select instead of up to 60s) but did not close it. |
+| C3 | `cmd/nntp-analyze/main.go` (~`:280`) | `defer close(db.StopChan)` with **no** `db.Shutdown()`, so with WSL's F20 change `cronDBEvery` never returns in that tool. Harmless (the goroutine is outside `db.WG` and the process exits), but it is the one tool where the new exit condition is unreachable. |
+
+**D. Decisions, not defects**
+| ID | Where | Question |
+|----|----|----|
+| D1 | `internal/web/webgroupPage.go`, `web_sectionsPage.go`, `web/templates/pagination.html` | **F1 from WSL, deferred by the user.** Article listings clamp `?page=` to 101 (`clampOffsetPage`, `maxOffsetArticles/pageSize + 1`) and the clamp is **silent**: the template renders a "Last" link to the real page count, and following it serves page 101's articles under that URL. `?cursor=<article_num>` **is** implemented server-side in both handlers — `pagination.html` simply never emits a cursor link. So this is a template + `PaginationInfo` change, not new query work. Decide: link cursors, or make the clamp visible (hide "Last", show the real bound). |
+| D2 | `cmd/audit-web-posts` | WSL's gating: `immutable=1` when no pending `-wal`, otherwise warn and fall back to a plain read-only open, which **can** create `-shm`/`-wal` next to the data. `-strict` refuses instead. Refuse-by-default was tried during WSL and **failed the e2e check**, because a pending `-wal` is routinely left behind (`stop_server`, and the fetcher's `log.Fatalf` path exits without checkpointing). Decide whether the default should flip now that operators have the doc, or stay as is. |
+
+**E. Residuals from the WSL reviews**
+| ID | Where | Defect |
+|----|----|----|
+| E1 | `internal/database/queries.go`, `query_GetSectionGroupsWithActivity` | A `LEFT JOIN newsgroups n ON ... AND n.active = 1`, so `sectionPage` still **lists** (a) inactive member groups and (b) `section_groups` rows orphaned by deletes that happened before WSL's F10 fix — both with `message_count 0`. Clicking one now correctly 404s (F10), so the visitor sees a listed group that cannot be opened. No migration cleans the pre-existing orphans either. |
+| E2 | `internal/database/thread_cache.go`, `GetCachedThreadReplies` | Returns `totalReplies = message_count - 1` while paginating over `len(childArticles)`. If `thread_cache.message_count` and `child_articles` ever disagree, the caller's `totalPages` (`web_threadPage.go`) and the page the guard allows disagree too, so a link to the "last" page can render empty. Pre-existing and untouched by WSL's overflow guard. |
+| E3 | `scripts/test-web-hardening.sh`, E12 | Now passes for a weaker reason: it sends an invalid `X-Real-IP` and asserts the peer IP, but since WSL's F3 that header is never consulted, so it would pass with a *valid* one too. The intent holds and the outcome is strictly safer; the label is now wrong. `TestLo2ServerTrustedHeader` is the real coverage. Relabel only — do not weaken the assertion. |
+
+### Out of scope (list in Outcome)
+- `runTokenUsageFlusher` taking no `db.WG` slot. **Deliberate** — a slot would move the block into
+  `db.WG.Wait()`. With WSL's bounded final flush the write-to-a-closing-DB window is short and logged
+  (`[API]: shutdown: usage of token N NOT written`). Do not "fix" this.
+- NNTP server protocol and security work — that is `nntp-audit-tests` (NAT), still queued.
+- Anything requiring a new migration, config key or tool.
+
+---
+
+## Design
+
+### Contracts
+- **K1: signatures that may change** (each has a single caller set, all inside this plan):
+  `DeleteNewsgroup(name string) (bool, error)` — returning whether a row was deleted (B3);
+  `GetCachedThreadReplies` gains no parameter but may change what it returns for `totalReplies` (E2).
+  Everything else keeps its signature, in particular the WSL K1 list (`NewWebServer`, `getWebSession`,
+  `checkGroupAccess*`, `renderError`, `CreateUserSession`, `ValidateUserSession`, `Retryable*`,
+  `GetGroupDB`/`Return`, `AuthenticateNNTPUser`, `configureTrustedProxies`, `setSessionCookie`).
+- **K2: new names, one owner each** — `fu-web-forms`: `(*Database).UpdateUserProfile`;
+  `fu-db-hygiene`: `query_DeleteUserSpamFlagsByNewsgroup`; `fu-batch-tests`: `lo3Batch…` helpers;
+  `fu-sections`: `query_GetSectionGroupsWithActivityStrict`.
+- **K3: tests** are `fu_<slice>_test.go` with identifiers prefixed `fu<Slice>…`. The WSL and WSH
+  helpers are reused and never edited: `internal/database/testmain_test.go` (`w0DB`, `w0Name`) and
+  `internal/web/testmain_test.go` (`w0Srv`, `w0DB`, `w0Do`, `w0NewUser`, `w0NewGroup`, `w0DataDir`).
+  The rules that held through WSL still hold: never `Shutdown` `w0Srv`; no `t.Parallel` in a test that
+  mutates a global; restore every global with `t.Cleanup`; anything that touches every user or group
+  uses an isolated `&Database{...}`.
+- **K4:** nobody changes `go.mod`/`go.sum`, `appVersion.txt`, `FuncStructList.txt`, `BUGS.md`, root
+  `README.md`, `build_ALL.sh`, or the NAT-owned NNTP files. `scripts/test-web-hardening.sh` is
+  editable **only** for E3's relabel. `scripts/test-web-leftovers.sh` must keep passing unchanged.
+- **K5:** no slice calls a helper another slice of the same wave adds.
+
+### Component designs
+- **A1 (`UpdateUserProfile`):** one `RetryableTransactionExec` that writes password hash, email and
+  display name in a single transaction, taking `nil` for any field left unchanged. `profileUpdate`
+  keeps its current validation fence and calls it once. The existing per-field helpers stay for their
+  other callers (`web_admin_userfuncs.go`, `cmd/usermgr`).
+- **B3 (`DeleteNewsgroup`):** return `(deleted bool, err error)`. `adminDeleteNewsgroup` flashes
+  success only on `deleted`, and otherwise says the group must be deactivated first. Grep for every
+  caller before changing the signature.
+- **C1 (batch loop tests):** build an `SQ3batch` against an isolated `&Database{}` with a temp data
+  dir, insert a group DB whose `articles` table has a `BEFORE INSERT ... RAISE(ABORT)` trigger so
+  `batchInsertOverviews` fails deterministically, set the shutdown flag, and assert
+  `processNewsgroupBatch` returns within the grace and logs the drop line. Same shape for `retry2`
+  with a trigger on the threading write.
+
+---
+
+## Waves
+
+### Wave 0 (inline, orchestrator)
+1. Preflight from the skill; `git merge-base --is-ancestor <WSL merge> HEAD` must succeed.
+2. Baseline: the `## Checks` below, plus both e2e scripts (expect `pass=16 fail=0` and `pass=25 fail=0`).
+3. Confirm **D1** and **D2** with the user before wave 1, and adjust or drop the affected slices.
+
+### Wave 1 (3 parallel slices)
+- slice `fu-web-forms` — **A1**, **B3**. Owns `internal/web/web_profile.go`,
+  `internal/web/web_admin_newsgroups.go`, `internal/database/db_user_profile.go` (new),
+  `internal/database/queries.go` (`DeleteNewsgroup` only), `internal/web/fu_forms_test.go` (new).
+  Checks: a profile POST that fails on the second write leaves the first unwritten; deleting an active
+  group no longer flashes success.
+- slice `fu-db-hygiene` — **A2**, **A3**, **A4**, **E2**. Owns `internal/database/queries.go`
+  (`ResetAllNewsgroupData` step 1 and the `user_spam_flags` delete only — coordinate with
+  `fu-web-forms`, which owns `DeleteNewsgroup` in the same file: **wave 1 cannot have both**, so move
+  A4 to wave 2 or give one slice the whole file), `cmd/web/main_functions.go`,
+  `internal/database/thread_cache.go`, `internal/database/fu_hygiene_test.go` (new).
+- slice `fu-deadcode` — **B1**, **B2**, **C3**. Owns `internal/web/embedded_static.go`,
+  `internal/database/db_sessions.go` (the one function only), `cmd/nntp-analyze/main.go`,
+  `internal/web/fu_deadcode_test.go` (new). Grep for callers before every deletion.
+
+### Wave 2 (based on merged wave 1)
+- slice `fu-batch-tests` — **C1**, **C2**. Owns `internal/database/fu_batch_test.go` (new),
+  `internal/web/cronjobs.go`, `internal/web/fu_cron_test.go` (new).
+- slice `fu-sections` — **E1**, **E3**. Owns `internal/database/queries.go`
+  (`query_GetSectionGroupsWithActivity` only), `internal/web/web_sectionsPage.go`,
+  `scripts/test-web-hardening.sh` (the E12 label only), `internal/web/fu_sections_test.go` (new).
+- slice `fu-pagination` — **D1**, only if the user chose to act on it in wave 0. Owns
+  `web/templates/pagination.html`, `internal/models/models.go` (`PaginationInfo` fields),
+  `internal/web/webgroupPage.go`, `internal/web/web_sectionsPage.go` (pagination block only — conflicts
+  with `fu-sections`, so these two cannot share a wave; put `fu-pagination` in wave 3 if both run).
+
+---
+
+## Checks
+On every merged tree:
+```bash
+gofmt -l ./cmd ./internal      # only internal/database/embedded_migrations.go and internal/web/web_admin_provider.go
+go vet ./...
+go build ./...
+go test -race -count=1 ./internal/database/... ./internal/web/... ./internal/history/... ./internal/nntp/... \
+  ./internal/processor/... ./cmd/expire-news/... ./cmd/history-rebuild/... ./cmd/audit-web-posts/...
+./build_webserver.sh && ./build_fetcher.sh && ./build_audit-web-posts.sh
+```
+
+## End-to-end
+Both existing scripts must stay green — this plan adds no new e2e script:
+```bash
+PORT=18981 DATA=./data-test-web-sqlite-hardening scripts/test-web-hardening.sh   # pass=25 fail=0
+PORT=18991 DATA=./data-test-web-sqlite-leftovers scripts/test-web-leftovers.sh   # pass=16 fail=0
+```
+
+## Note for whoever runs this
+Two lessons from the WSL run, both of which cost time there:
+1. **Review the orchestrator's own inline commits.** The run-plan skill reviews implementer branches,
+   not the integration commits the orchestrator writes between merges. Two real defects hid there.
+2. **A claim in a subagent report is not a fact.** Open the file before repeating it to the user or
+   writing it into a plan — one leftover in WSL was recorded wrongly for exactly this reason, and the
+   "one-line fix" it proposed would have panicked.
