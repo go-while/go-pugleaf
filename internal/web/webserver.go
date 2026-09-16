@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -75,20 +76,44 @@ func crossOriginDenied(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "403 cross-origin request rejected", http.StatusForbidden)
 }
 
+// shutdownGrace bounds the extra work Shutdown does after its context ended: waiting for the
+// handlers whose request context it just cancelled, and for the final API token usage flush.
+const shutdownGrace = 5 * time.Second
+
 // Start starts the web server with SSL support if configured.
 // It returns http.ErrServerClosed after Shutdown.
 func (s *WebServer) Start() error {
-	addr := ":" + strconv.Itoa(s.Config.ListenPort)
-	s.StartTime = time.Now() // Set the start time for uptime calculations
 	if s.Config.SSL && (s.Config.CertFile == "" || s.Config.KeyFile == "") {
 		return errors.New("SSL enabled but cert_file or key_file not specified in config")
 	}
+	addr := ":" + strconv.Itoa(s.Config.ListenPort)
+	select {
+	case <-s.stopCh:
+		return http.ErrServerClosed
+	default:
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return s.serveOn(ln)
+}
 
+// serveOn serves HTTP (HTTPS when configured) on ln until Shutdown, and always closes ln.
+// Start uses it; tests serve on a 127.0.0.1:0 listener. It returns http.ErrServerClosed after Shutdown.
+func (s *WebServer) serveOn(ln net.Listener) error {
+	s.StartTime = time.Now() // Set the start time for uptime calculations
+	addr := ln.Addr().String()
 	srv := newHTTPServer(addr, s.rootHandler())
+	// Every request context derives from baseCtx, so Shutdown can cancel handlers (and their
+	// outbound calls) that are still running when its deadline passes.
+	srv.BaseContext = func(net.Listener) context.Context { return s.baseCtx }
+
 	s.httpServerMu.Lock()
 	select {
 	case <-s.stopCh:
 		s.httpServerMu.Unlock()
+		_ = ln.Close()
 		return http.ErrServerClosed
 	default:
 	}
@@ -96,22 +121,49 @@ func (s *WebServer) Start() error {
 	s.httpServerMu.Unlock()
 
 	if s.Config.SSL {
-		log.Printf("Starting HTTPS server on %s", addr)
-		return srv.ListenAndServeTLS(s.Config.CertFile, s.Config.KeyFile)
+		log.Printf("[WEB]: Starting HTTPS server on %s", addr)
+		return srv.ServeTLS(ln, s.Config.CertFile, s.Config.KeyFile)
 	}
-	log.Printf("Starting HTTP server on %s", addr)
-	return srv.ListenAndServe()
+	log.Printf("[WEB]: Starting HTTP server on %s", addr)
+	return srv.Serve(ln)
 }
 
-// Shutdown stops the background goroutines of the web server (session cleanup, chat cache sweeper)
-// and gracefully shuts down the HTTP server started by Start, waiting for active requests until ctx ends.
+// Shutdown stops the background goroutines of the web server (session cleanup, chat cache sweeper,
+// API token usage flusher) and gracefully shuts down the HTTP server started by Start, waiting for
+// active requests until ctx ends. When ctx ends first, it cancels every request context and waits
+// up to shutdownGrace more, then logs the handlers that are still running. The final token usage
+// flush always finishes before Shutdown returns, because the caller closes the database next.
 func (s *WebServer) Shutdown(ctx context.Context) error {
 	s.stopOnce.Do(func() { close(s.stopCh) })
 	s.httpServerMu.Lock()
 	srv := s.httpServer
 	s.httpServerMu.Unlock()
-	if srv == nil {
-		return nil
+
+	var err error
+	if srv != nil {
+		if err = srv.Shutdown(ctx); err != nil {
+			log.Printf("[WEB]: graceful shutdown ended with %d request(s) in flight (%v), cancelling them",
+				s.inFlightRequests.Load(), err)
+			s.cancelBase()
+			deadline := time.Now().Add(shutdownGrace)
+			for s.inFlightRequests.Load() > 0 && time.Now().Before(deadline) {
+				time.Sleep(50 * time.Millisecond)
+			}
+			if n := s.inFlightRequests.Load(); n > 0 {
+				log.Printf("[WEB]: %d request(s) still running after %v, continuing shutdown", n, shutdownGrace)
+			}
+		}
 	}
-	return srv.Shutdown(ctx)
+
+	if s.tokenUsageDone != nil {
+		select {
+		case <-s.tokenUsageDone:
+		case <-time.After(shutdownGrace):
+			log.Printf("[WEB]: API token usage flush did not finish within %v", shutdownGrace)
+		}
+	}
+	if s.cancelBase != nil {
+		s.cancelBase()
+	}
+	return err
 }

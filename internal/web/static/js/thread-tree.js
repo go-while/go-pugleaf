@@ -492,7 +492,8 @@ class ArticlePreview {
         contentDiv.innerHTML = '<div class="preview-loading">Loading article preview...</div>';
 
         try {
-            const response = await fetch(`/api/v1/groups/${groupName}/articles/${articleNum}/preview`);
+            // web route: works regardless of the API setting
+            const response = await fetch(`/groups/${encodeURIComponent(groupName)}/articles/${articleNum}/preview`);
 
             if (response.ok) {
                 const article = await response.json();

@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -35,17 +36,66 @@ func (s *WebServer) APIAuthRequired() gin.HandlerFunc {
 			return
 		}
 
-		// Update usage statistics (non-blocking)
-		tokenID := apiToken.ID
-		go func() {
-			if err := s.DB.UpdateTokenUsage(tokenID); err != nil {
-				log.Printf("[API]: Failed to update token usage: %v", err)
-			}
-		}()
+		// Count the request in memory; runTokenUsageFlusher writes it to the main DB
+		s.recordTokenUsage(apiToken.ID, time.Now())
 
 		// Store token info in context for use by handlers
 		c.Set("api_token", apiToken)
 		c.Next()
+	}
+}
+
+// tokenUsageFlushEvery is how often the buffered API token usage is written to the main DB.
+// A crash loses at most this much usage counting.
+const tokenUsageFlushEvery = 30 * time.Second
+
+// recordTokenUsage counts one request for an API token in memory (see tokenUsageBuffer).
+func (s *WebServer) recordTokenUsage(tokenID int64, now time.Time) {
+	s.tokenUsageBuffer.mu.Lock()
+	s.tokenUsageBuffer.counts[tokenID]++
+	s.tokenUsageBuffer.last[tokenID] = now
+	s.tokenUsageBuffer.mu.Unlock()
+}
+
+// runTokenUsageFlusher writes the buffered API token usage every tokenUsageFlushEvery and once
+// more when the server shuts down. Shutdown waits for tokenUsageDone, so the last flush happens
+// before the caller closes the database.
+func (s *WebServer) runTokenUsageFlusher() {
+	defer close(s.tokenUsageDone)
+	for {
+		select {
+		case <-s.stopCh:
+			s.flushTokenUsage()
+			return
+		case <-time.After(tokenUsageFlushEvery):
+			s.flushTokenUsage()
+		}
+	}
+}
+
+// flushTokenUsage writes the buffered usage counts, one UPDATE per token. Counts that could not
+// be written are added back to the buffer, so the next flush retries them.
+func (s *WebServer) flushTokenUsage() {
+	s.tokenUsageBuffer.mu.Lock()
+	counts, last := s.tokenUsageBuffer.counts, s.tokenUsageBuffer.last
+	if len(counts) == 0 {
+		s.tokenUsageBuffer.mu.Unlock()
+		return
+	}
+	s.tokenUsageBuffer.counts = make(map[int64]int64, len(counts))
+	s.tokenUsageBuffer.last = make(map[int64]time.Time, len(last))
+	s.tokenUsageBuffer.mu.Unlock()
+
+	for tokenID, count := range counts {
+		if err := s.DB.AddTokenUsage(tokenID, count, last[tokenID]); err != nil {
+			log.Printf("[API]: Failed to update usage of token %d (%d request(s)): %v", tokenID, count, err)
+			s.tokenUsageBuffer.mu.Lock()
+			s.tokenUsageBuffer.counts[tokenID] += count
+			if t, ok := s.tokenUsageBuffer.last[tokenID]; !ok || t.Before(last[tokenID]) {
+				s.tokenUsageBuffer.last[tokenID] = last[tokenID]
+			}
+			s.tokenUsageBuffer.mu.Unlock()
+		}
 	}
 }
 
