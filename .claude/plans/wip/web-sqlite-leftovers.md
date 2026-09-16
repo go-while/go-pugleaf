@@ -849,10 +849,20 @@ with a valid one too. The outcome is strictly safer and the real coverage moved 
 `TestLo2ServerTrustedHeader`; K4 forbids editing the script, so this is a note, not a change.
 
 **New leftovers raised by wave 2:**
-- `processBadIPsUpdate` is dead for the same reason BadBots was: `FORM_FIELD_BADIPS` is still missing
-  from the `web_admin_settings_unified.go:208` dispatch, so saving the blocked-IP list writes the row
-  but does not apply it until restart — while its message claims "applied immediately". One-line fix,
-  deliberately not taken at merge because it is pre-existing and untouched by this plan.
+- ~~`processBadIPsUpdate` is dead~~ — **fixed after the wave, in `3995443`.** The note first recorded
+  here was wrong on two counts and is corrected for the record: `FORM_FIELD_BADIPS` did **not** have the
+  same defect as BadBots. Its table entry declared `Processor: nil` *deliberately*
+  (`web_admin_settings_unified.go:154`), and its success message never claimed "applied immediately" —
+  that string is line 138, the BadBots one. So the "one-line fix" first written here (adding the field to
+  the `:208` dispatch alone) would have called `cfg.Processor(s, value)` on a nil func and panicked on
+  every save of the IP list. What was true: `processBadIPsUpdate` had no reference anywhere, and saving
+  the blocked-IP list wrote the config row without calling `config.UpdateBadIPs`, so the running server
+  kept its old ranges until a restart. The real fix needed three edits — set the processor at `:154`, add
+  the field to the `:208` condition, add a `case` at `:224` — plus `TestLo2ServerBadIPsSettingApplied`,
+  verified to fail without the dispatch change. It also makes the existing "Bad IPs list cleared (using
+  defaults)" message true for the first time.
+  *Process note:* this entry originally repeated an implementer's aside without opening the file. Claims
+  that do not gate a merge still reach the reader as assertions and need the same verification.
 - `profileUpdate`'s three writes (password, email, display name) are separate un-transacted statements.
   They now go through `RetryableExec`, but a transient failure on the second still leaves the first
   committed. The full fix is one `RetryableTransactionExec` around all three.

@@ -111,8 +111,8 @@ The fetcher exits with a clear error when no provider is **enabled**, instead of
 
 - Group and section pages link pages by number only up to page 100. Older articles exist but are
   not reachable from the pagination links (cursor navigation is designed but not implemented).
-- Saving the blocked-**IP** list from the admin form writes the row but does not apply it until a
-  restart. The bad-**bots** list does apply immediately.
+- The bad-bots and blocked-IP lists both apply immediately when saved from the admin settings form.
+  The `ReverseProxyIPHeader` and `ReverseProxyAddr` settings need a web server restart.
 
 ## Auditing old web posts
 
