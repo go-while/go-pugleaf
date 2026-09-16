@@ -222,6 +222,86 @@ func TestLo1CoreTokenUsageBuffered(t *testing.T) {
 	}
 }
 
+// TestLo1CoreTokenUsageDuringDrain: the usage of a request that is served while Shutdown drains
+// the in-flight requests still reaches the database. The flusher stops when stopCh closes, which
+// happens before the drain, so Shutdown has to flush once more after it (B6 regression guard).
+func TestLo1CoreTokenUsageDuringDrain(t *testing.T) {
+	lo1CoreSetAPIEnabled(t, "true")
+	db := w0DB(t)
+	token, plain, err := db.CreateAPIToken("lo1core-drain", 0, nil)
+	if err != nil {
+		t.Fatalf("CreateAPIToken: %v", err)
+	}
+	srv := lo1CoreNewServer(t)
+
+	started := make(chan struct{})
+	drainCode := make(chan int, 1)
+	srv.Router.GET("/lo1core/drain", func(c *gin.Context) {
+		close(started)
+		// Stay in flight until Shutdown is draining, then make an authenticated API request
+		// from inside that window: by then the usage flusher has already stopped.
+		time.Sleep(300 * time.Millisecond)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/groups", nil)
+		req.RemoteAddr = "192.0.2.10:1234"
+		req.Header.Set(APIAuthHeader, plain)
+		rec := httptest.NewRecorder()
+		srv.Router.ServeHTTP(rec, req)
+		drainCode <- rec.Code
+		c.String(http.StatusOK, "drained")
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- srv.serveOn(ln) }()
+	url := "http://" + ln.Addr().String() + "/lo1core/drain"
+	go func() {
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return
+		}
+		req.Header.Set("User-Agent", "lo1core-test/1.0")
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the draining handler never ran")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err) // the handler finishes well inside the deadline
+	}
+	select {
+	case code := <-drainCode:
+		if code != http.StatusOK {
+			t.Fatalf("API request during the drain: status %d, want 200", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the API request during the drain never completed")
+	}
+	if count, lastUsed := lo1CoreTokenUsage(t, token.ID); count != 1 || lastUsed == "" {
+		t.Fatalf("usage of the request served during the drain: usage_count=%d last_used_at=%q, want 1 and a timestamp",
+			count, lastUsed)
+	}
+	select {
+	case err := <-errc:
+		if !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("serveOn returned %v, want http.ErrServerClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveOn did not return after Shutdown")
+	}
+}
+
 // TestLo1CoreStatsSingleflight: concurrent requests on a cold cache recompute the statistics once (B4).
 func TestLo1CoreStatsSingleflight(t *testing.T) {
 	lo1CoreSetAPIEnabled(t, "true")

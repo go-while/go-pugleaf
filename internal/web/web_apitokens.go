@@ -74,8 +74,19 @@ func (s *WebServer) runTokenUsageFlusher() {
 }
 
 // flushTokenUsage writes the buffered usage counts, one UPDATE per token. Counts that could not
-// be written are added back to the buffer, so the next flush retries them.
+// be written are added back to the buffer, so a later flush retries them. While the server is
+// shutting down there may be no later flush, so a failed write is retried once after a short
+// pause and, if that fails too, the lost counts are logged per token so they stay recoverable.
+// The UPDATE adds to usage_count, so a concurrent flush (Shutdown flushes after the flusher has
+// stopped) can only write counts twice if they were buffered twice, which the mutex prevents.
 func (s *WebServer) flushTokenUsage() {
+	stopping := false
+	select {
+	case <-s.stopCh:
+		stopping = true
+	default:
+	}
+
 	s.tokenUsageBuffer.mu.Lock()
 	counts, last := s.tokenUsageBuffer.counts, s.tokenUsageBuffer.last
 	if len(counts) == 0 {
@@ -87,15 +98,30 @@ func (s *WebServer) flushTokenUsage() {
 	s.tokenUsageBuffer.mu.Unlock()
 
 	for tokenID, count := range counts {
-		if err := s.DB.AddTokenUsage(tokenID, count, last[tokenID]); err != nil {
-			log.Printf("[API]: Failed to update usage of token %d (%d request(s)): %v", tokenID, count, err)
-			s.tokenUsageBuffer.mu.Lock()
-			s.tokenUsageBuffer.counts[tokenID] += count
-			if t, ok := s.tokenUsageBuffer.last[tokenID]; !ok || t.Before(last[tokenID]) {
-				s.tokenUsageBuffer.last[tokenID] = last[tokenID]
-			}
-			s.tokenUsageBuffer.mu.Unlock()
+		err := s.DB.AddTokenUsage(tokenID, count, last[tokenID])
+		if err != nil && stopping {
+			// No periodic flush follows: give a transient busy error one more chance.
+			time.Sleep(100 * time.Millisecond)
+			err = s.DB.AddTokenUsage(tokenID, count, last[tokenID])
 		}
+		if err == nil {
+			continue
+		}
+		// Put the counts back, so a flush that still follows (Shutdown runs one after the
+		// drain) picks them up, and make the possible loss visible in the log.
+		s.tokenUsageBuffer.mu.Lock()
+		s.tokenUsageBuffer.counts[tokenID] += count
+		if t, ok := s.tokenUsageBuffer.last[tokenID]; !ok || t.Before(last[tokenID]) {
+			s.tokenUsageBuffer.last[tokenID] = last[tokenID]
+		}
+		s.tokenUsageBuffer.mu.Unlock()
+		if stopping {
+			log.Printf("[API]: shutdown: usage of token %d NOT written and may be lost: %d request(s), last used %s: %v",
+				tokenID, count, last[tokenID].UTC().Format("2006-01-02 15:04:05"), err)
+			continue
+		}
+		log.Printf("[API]: Failed to update usage of token %d (%d request(s)), retrying at the next flush: %v",
+			tokenID, count, err)
 	}
 }
 

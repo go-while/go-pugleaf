@@ -131,8 +131,9 @@ func (s *WebServer) serveOn(ln net.Listener) error {
 // Shutdown stops the background goroutines of the web server (session cleanup, chat cache sweeper,
 // API token usage flusher) and gracefully shuts down the HTTP server started by Start, waiting for
 // active requests until ctx ends. When ctx ends first, it cancels every request context and waits
-// up to shutdownGrace more, then logs the handlers that are still running. The final token usage
-// flush always finishes before Shutdown returns, because the caller closes the database next.
+// up to shutdownGrace more, then logs the handlers that are still running. The API token usage of
+// the drained requests is written before Shutdown returns, because the caller closes the database
+// next: it waits for the flusher's own last flush and then flushes once more itself.
 func (s *WebServer) Shutdown(ctx context.Context) error {
 	s.stopOnce.Do(func() { close(s.stopCh) })
 	s.httpServerMu.Lock()
@@ -162,6 +163,11 @@ func (s *WebServer) Shutdown(ctx context.Context) error {
 			log.Printf("[WEB]: API token usage flush did not finish within %v", shutdownGrace)
 		}
 	}
+	// The flusher stops as soon as stopCh closes, which is before the drain above: every API
+	// request served during the drain was counted into a buffer nobody writes any more.
+	// Flush once more here, with the drained requests included.
+	s.flushTokenUsage()
+
 	if s.cancelBase != nil {
 		s.cancelBase()
 	}
