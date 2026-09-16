@@ -150,8 +150,8 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 		config.FORM_FIELD_BADIPS: {
 			FormField: config.FORM_FIELD_BADIPS,
 			ConfigKey: config.CFG_KEY_BADIPS,
-			Validator: s.validateCIDRList, // Validate CIDR ranges
-			Processor: nil,                // Uses config key directly
+			Validator: s.validateCIDRList,    // Validate CIDR ranges
+			Processor: s.processBadIPsUpdate, // Apply changes immediately
 			SuccessMsg: func(value string) string {
 				if value == "" {
 					return "Bad IPs list cleared (using defaults)"
@@ -205,7 +205,7 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 	}
 
 	// Process the setting
-	if settingType == config.FORM_FIELD_HOSTNAME || settingType == config.FORM_FIELD_REGISTRATION || settingType == config.FORM_FIELD_BLOCKBADBOTS || settingType == config.FORM_FIELD_BLOCKBADIPS || settingType == config.FORM_FIELD_API_ENABLED || settingType == config.FORM_FIELD_BADBOTS {
+	if settingType == config.FORM_FIELD_HOSTNAME || settingType == config.FORM_FIELD_REGISTRATION || settingType == config.FORM_FIELD_BLOCKBADBOTS || settingType == config.FORM_FIELD_BLOCKBADIPS || settingType == config.FORM_FIELD_API_ENABLED || settingType == config.FORM_FIELD_BADBOTS || settingType == config.FORM_FIELD_BADIPS {
 		if err := cfg.Processor(s, value); err != nil {
 			switch settingType {
 			case config.FORM_FIELD_HOSTNAME:
@@ -220,6 +220,8 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 				session.SetError("Failed to toggle API: " + err.Error())
 			case config.FORM_FIELD_BADBOTS:
 				session.SetError("Failed to update the bad bots list: " + err.Error())
+			case config.FORM_FIELD_BADIPS:
+				session.SetError("Failed to update the bad IPs list: " + err.Error())
 			}
 			c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 			return

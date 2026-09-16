@@ -452,3 +452,83 @@ func TestLo2ServerBadBotsSettingApplied(t *testing.T) {
 		t.Errorf("stored %s = %q (err %v), want empty", config.CFG_KEY_BADBOTS, v, err)
 	}
 }
+
+// lo2ServerBlockedIPs returns a copy of the live blocked-IP ranges.
+func lo2ServerBlockedIPs() []string {
+	config.BadIPsMutex.RLock()
+	defer config.BadIPsMutex.RUnlock()
+	out := make([]string, 0, len(config.Default_BlockedIPs))
+	for _, n := range config.Default_BlockedIPs {
+		out = append(out, n.String())
+	}
+	return out
+}
+
+// lo2ServerKeepBadIPs restores the BadIPs globals after one test.
+func lo2ServerKeepBadIPs(t *testing.T) {
+	t.Helper()
+	config.BadIPsMutex.RLock()
+	oldIPs, oldBlock := config.Default_BlockedIPs, config.BlockBadIPs
+	config.BadIPsMutex.RUnlock()
+	t.Cleanup(func() {
+		config.BadIPsMutex.Lock()
+		config.Default_BlockedIPs, config.BlockBadIPs = oldIPs, oldBlock
+		config.BadIPsMutex.Unlock()
+	})
+}
+
+// The admin settings form must apply the bad IPs list to the running server, not only
+// write the config row: FORM_FIELD_BADIPS declared no Processor and was missing from the
+// dispatch, so config.UpdateBadIPs was never reached and the list needed a restart.
+func TestLo2ServerBadIPsSettingApplied(t *testing.T) {
+	db := w0DB(t)
+	oldValue, err := db.GetConfigValue(config.CFG_KEY_BADIPS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lo2ServerKeepBadIPs(t)
+	t.Cleanup(func() {
+		if err := db.SetConfigValue(config.CFG_KEY_BADIPS, oldValue); err != nil {
+			t.Errorf("restoring %s: %v", config.CFG_KEY_BADIPS, err)
+		}
+	})
+
+	_, cookie := w0NewUser(t, true)
+	post := func(value string) *httptest.ResponseRecorder {
+		return w0Do(t, w0Req{
+			Method:  http.MethodPost,
+			Path:    "/admin/settings",
+			Form:    url.Values{"setting": {config.FORM_FIELD_BADIPS}, config.FORM_FIELD_BADIPS: {value}},
+			Cookies: []*http.Cookie{cookie},
+		})
+	}
+
+	if rec := post("198.51.100.0/24"); rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST bad IPs list: status %d, want 303 (body %q)", rec.Code, rec.Body.String())
+	}
+	if got := lo2ServerBlockedIPs(); len(got) != 1 || got[0] != "198.51.100.0/24" {
+		t.Fatalf("Default_BlockedIPs = %q after saving one range, want [198.51.100.0/24]: the form does not apply the list", got)
+	}
+	if v, err := db.GetConfigValue(config.CFG_KEY_BADIPS); err != nil || v != "198.51.100.0/24" {
+		t.Errorf("stored %s = %q (err %v), want \"198.51.100.0/24\"", config.CFG_KEY_BADIPS, v, err)
+	}
+
+	// A bare address is widened to /32, so the form accepts single IPs too.
+	if rec := post("203.0.113.7"); rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST single bad IP: status %d, want 303 (body %q)", rec.Code, rec.Body.String())
+	}
+	if got := lo2ServerBlockedIPs(); len(got) != 1 || got[0] != "203.0.113.7/32" {
+		t.Errorf("Default_BlockedIPs = %q after saving a single IP, want [203.0.113.7/32]", got)
+	}
+
+	// Clearing falls back to the built-in ranges, which is what the success message claims.
+	if rec := post(""); rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST empty bad IPs list: status %d, want 303 (body %q)", rec.Code, rec.Body.String())
+	}
+	if got := lo2ServerBlockedIPs(); len(got) == 0 {
+		t.Errorf("Default_BlockedIPs is empty after clearing through the form, want the built-in defaults")
+	}
+	if v, err := db.GetConfigValue(config.CFG_KEY_BADIPS); err != nil || v != "" {
+		t.Errorf("stored %s = %q (err %v), want empty", config.CFG_KEY_BADIPS, v, err)
+	}
+}
