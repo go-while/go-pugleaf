@@ -24,7 +24,7 @@ Deployment and operational behaviour (reverse proxy, sessions, CSRF, `-data`) li
 
 | File | Responsibility |
 |---|---|
-| `web_auth.go` | session cookie and lookup, `isAdmin`/`isAdminRequest`, display-name validation |
+| `web_auth.go` | session cookie and lookup, `isAdminRequest`, display-name validation |
 | `web_login.go` | login and logout, lockout handling |
 | `web_registerPage.go` | registration |
 | `web_profile.go` | profile form: email, password and display name |
@@ -53,10 +53,11 @@ the cookie. The login lockout uses `users.login_attempt_at`, not `updated_at`.
 | `web_apitokens.go` | API token auth and buffered usage accounting |
 | `web_admin.go`, `web_adminPage.go` | admin page data and dashboard |
 | `web_admin_settings_unified.go` | the settings form: one entry per setting, with validator and success message |
-| `web_admin_*.go` | per-area admin handlers (users, sections, newsgroups, providers, spam, cron, post queue, NNTP, Ollama, cache, API tokens, site news) |
+| `web_admin_*.go` | per-area admin handlers (users, sections, newsgroups, providers, spam, cron, post queue, NNTP, Ollama, cache, API tokens, site news); `isAdmin` lives in `web_admin_userfuncs.go` |
 
-Admin flash messages deliberately show real error text; visitor-facing pages show
-`publicErrorDetail` and log the detail with a `[WEB]` prefix.
+The settings form (`web_admin_settings_unified.go`) deliberately shows real error text to the admin;
+most other admin handlers use a generic message. Visitor-facing pages show `publicErrorDetail` and log
+the detail with a `[WEB]` prefix.
 
 ## Tests
 

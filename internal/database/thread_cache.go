@@ -242,6 +242,24 @@ func (db *Database) GetCachedThreads(groupDB *GroupDB, page int64, pageSize int6
 	return nil, 0, fmt.Errorf("no cached threads found for group '%s'", groupDB.Newsgroup)
 }
 
+// threadChildrenQuery builds the child page query of GetCachedThreadReplies for the given
+// "?,?,..." placeholder list. It exists so the query has one definition: w2_dbperf_test.go
+// asserts its plan, and a copy there could drift from the live one.
+//
+// "+hide = 0" keeps hide out of index selection: at most pageSize article numbers are looked
+// up by rowid (INTEGER PRIMARY KEY) and hide is filtered afterwards. Without it SQLite prefers
+// idx_articles_hide_date (hide=?) and walks every visible article of the group when
+// sqlite_stat1 is absent. Same results, different plan.
+func threadChildrenQuery(placeholders string) string {
+	return fmt.Sprintf(`
+		SELECT article_num, subject, from_header, date_sent, date_string,
+			   message_id, "references", bytes, lines, reply_count, downloaded
+		FROM articles
+		WHERE article_num IN (%s) AND +hide = 0
+		ORDER BY date_sent ASC
+	`, placeholders)
+}
+
 // GetCachedThreadReplies retrieves paginated replies for a specific thread
 func (db *Database) GetCachedThreadReplies(groupDB *GroupDB, threadRoot int64, page int, pageSize int) ([]*models.Overview, int, error) {
 	// Get the cached thread entry
@@ -288,17 +306,7 @@ func (db *Database) GetCachedThreadReplies(groupDB *GroupDB, threadRoot int64, p
 	placeholders := strings.Repeat("?,", len(pageChildNums))
 	placeholders = placeholders[:len(placeholders)-1] // Remove trailing comma
 
-	// "+hide = 0" keeps hide out of index selection: at most pageSize article numbers
-	// are looked up by rowid (INTEGER PRIMARY KEY) and hide is filtered afterwards.
-	// Without it SQLite prefers idx_articles_hide_date (hide=?) and walks every
-	// visible article of the group when sqlite_stat1 is absent. Same results.
-	childQuery := fmt.Sprintf(`
-		SELECT article_num, subject, from_header, date_sent, date_string,
-			   message_id, "references", bytes, lines, reply_count, downloaded
-		FROM articles
-		WHERE article_num IN (%s) AND +hide = 0
-		ORDER BY date_sent ASC
-	`, placeholders)
+	childQuery := threadChildrenQuery(placeholders)
 
 	// Convert pageChildNums to interface{} slice for query
 	args := make([]interface{}, len(pageChildNums))

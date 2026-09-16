@@ -329,8 +329,10 @@ func TestLo1DBRetryWaitRace(t *testing.T) {
 	}
 }
 
-// lo1DBChildQuery builds the thread-reply child query with n placeholders.
-// hideTerm is "hide" (the old plan) or "+hide" (the one in thread_cache.go).
+// lo1DBChildQuery builds the OLD spelling of the thread-reply child query with n
+// placeholders, for comparison only. The live query comes from threadChildrenQuery in
+// thread_cache.go - do not add a second copy of it here, or a revert of the "+hide"
+// plan fix would pass against the copy.
 func lo1DBChildQuery(hideTerm string, n int) string {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", n), ",")
 	return fmt.Sprintf(`
@@ -396,7 +398,7 @@ func TestLo1DBChildQueryPlan(t *testing.T) {
 	}
 
 	args := []interface{}{2, 3, 4, 5}
-	newQ := lo1DBChildQuery("+hide", len(args))
+	newQ := threadChildrenQuery(strings.TrimSuffix(strings.Repeat("?,", len(args)), ","))
 	oldQ := lo1DBChildQuery("hide", len(args))
 
 	plan := w2DBPerfPlan(t, gdb.DB, newQ, args...)

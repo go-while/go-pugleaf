@@ -470,7 +470,7 @@ Changes:
 3. **F9:** the header comes from `nextThreadsOffsetHeader(offset, limit, len(threads), apiThreadsMaxOffset) string`, which returns `""` unless `n == limit && offset+limit <= maxOffset`.
 4. **F10:**
    - `sectionGroupAllowed` calls `s.checkGroupAccess(c, groupName)` after the membership match and returns `nil, false` when it fails; that renders the same 404 as `/groups/:group`, and admins keep access to inactive groups.
-   - `DeleteNewsgroup` runs the newsgroup delete and `query_DeleteSectionGroupsByNewsgroup` (`DELETE FROM section_groups WHERE newsgroup_name = ?`) in one `RetryableTransactionExec`, the second only when the first affected 1 row. On success it also calls `uiCacheHeaderSections.invalidate()` and keeps the hierarchy cache invalidation.
+   - `DeleteNewsgroup` runs the newsgroup delete and `query_DeleteSectionGroupsByNewsgroup` (`DELETE FROM section_groups WHERE newsgroup_name = ?`) in one `RetryableTransactionExec`, the second only when the first affected 1 row. On success it keeps the hierarchy cache invalidation. (**Amended during the run:** the spec also asked for `uiCacheHeaderSections.invalidate()`. That call was implemented, then removed again in `51ac7a6` — the cache holds `sections` rows only (`query_GetHeaderSections`), which deleting a newsgroup and its `section_groups` rows cannot change, so it was dead work that also made every concurrent in-flight load discard its result. The removal's justification was independently re-verified in the post-merge review wave; no cache covers section→group membership at all.)
 5. **F6 (DB half):** `UpdateUserDisplayName` rejects `utf8.RuneCountInString(displayName) > 64` instead of a byte length.
 6. Tests:
    - web (`lo2_pages_test.go`):

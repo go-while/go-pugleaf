@@ -410,6 +410,11 @@ type PaginationInfo struct {
 
 // NewPaginationInfo creates pagination info
 func NewPaginationInfo(page, pageSize, totalCount int) *PaginationInfo {
+	// Callers pass a page size from a package var, so guard the division: pageSize 0 would
+	// panic here rather than in the caller's slice, which is easy to miss.
+	if pageSize < 1 {
+		pageSize = 1
+	}
 	totalPages := (totalCount + pageSize - 1) / pageSize
 	if totalPages == 0 {
 		totalPages = 1

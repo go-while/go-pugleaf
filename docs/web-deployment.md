@@ -8,14 +8,16 @@ Operational notes for `cmd/web`. Everything here reflects the `web-sqlite-harden
 `cmd/web` speaks plain HTTP and expects a proxy in front of it.
 
 **Trusted proxies.** `ReverseProxyAddr` (admin settings) lists the peers whose forwarded headers are
-believed. When it is empty the defaults are used:
+believed. When it is empty — or when no entry parses — the defaults are used:
 
 ```
 127.0.0.0/8   ::1   10.0.0.0/8   172.16.0.0/12   192.168.0.0/16   fc00::/7
 ```
 
-A proxy that is not covered makes every visitor appear to come from the proxy's own address. The
-effective list and the header in use are logged once at startup:
+A proxy that is not covered makes every visitor appear to come from the proxy's own address. Each
+rejected entry is logged (`[WEB]: Ignoring invalid reverse proxy address '...'`), and note the
+fallback: a list where *every* entry is malformed silently trusts the whole default range set rather
+than nothing. The effective list and the header in use are logged once at startup:
 
 ```
 [WEB]: Trusted reverse proxies: [127.0.0.0/8 ::1/128 10.0.0.0/8 ...] | client IP header: [X-Forwarded-For]
@@ -42,8 +44,10 @@ proxy_set_header X-Forwarded-Proto $scheme;
 If you prefer `X-Real-IP`, set `ReverseProxyIPHeader=X-Real-IP` and send
 `proxy_set_header X-Real-IP $remote_addr;`. Do not rely on both.
 
-`Host` is passed through as sent (`$http_host`, not `$host`), so canonical URLs and cookies match
-the name the visitor typed.
+**`Host` must be passed through unchanged** (`$http_host`, not `$host`). The CSRF check compares
+`Origin` against `Host` (`internal/web/webserver.go:59-74`), so a proxy that rewrites `Host` makes
+**every browser POST fail with `403 cross-origin request rejected`** — logins, posting and every
+admin form. This is the single most common way to break a working install with a proxy config change.
 
 **Untrusted forwarders.** When a loopback or private peer that is *not* in the trusted list sends
 `X-Forwarded-For` or `X-Real-IP`, its headers are ignored and logged once per IP:
@@ -71,8 +75,10 @@ further notices stop.
 ## CSRF
 
 State-changing requests are rejected when `Sec-Fetch-Site` or `Origin` says the request is
-cross-site; same-origin and direct navigations are allowed. A block is logged with `[WEB]`. Browsers
-that send neither header are not blocked by this check.
+cross-site; same-origin and direct navigations are allowed. Browsers that send neither header are not
+blocked by this check. Rejections are logged with `[WEB]`, but **sampled to at most one line per
+second** — when diagnosing "all forms suddenly 403", the log undercounts, so do not judge the scale
+from the line count. The usual cause is a rewritten `Host` (see above).
 
 ## SQLite
 
@@ -86,8 +92,9 @@ that send neither header are not blocked by this check.
   a long-running batch that hits contention at the end is still retried.
 - The main DB connection pool (`MaxOpenConns 100`, `MaxIdleConns 25`) was measured and left
   unchanged — see [`perf/main-db-pool.md`](perf/main-db-pool.md). The memory ceiling is
-  `open connections × CacheSize` (16 MiB per connection), so `CacheSize` is the lever if that
-  matters, not the pool size.
+  `open connections × CacheSize` (16 MiB per connection), so `CacheSize` is the lever if that matters,
+  not the pool size. Both are hardcoded in `internal/database/db_init.go` (`DefaultDBConfig`): changing
+  either is a code change, not a setting.
 
 ## Templates
 
@@ -109,8 +116,14 @@ The fetcher exits with a clear error when no provider is **enabled**, instead of
 
 ## Known limitations
 
-- Group and section pages link pages by number only up to page 100. Older articles exist but are
-  not reachable from the pagination links (cursor navigation is designed but not implemented).
+- Article listings clamp `?page=` to **101** (`maxOffsetArticles/pageSize + 1` = 12800/128 + 1,
+  `clampOffsetPage` in `internal/web/web_apiHandlers.go`). This affects a group page, a group viewed
+  inside a section, and the `/api/v1` group listings — **not** the section group-list page, which
+  clamps to its real last page. The clamp is silent: on a large group the template still renders a
+  "Last" link to the true page count, and following it serves page 101's articles under that URL.
+  The handlers *do* accept `?cursor=<article_num>` (`webgroupPage.go`, `web_sectionsPage.go`), so
+  deeper articles are reachable by hand; `web/templates/pagination.html` simply never emits a cursor
+  link.
 - The bad-bots and blocked-IP lists both apply immediately when saved from the admin settings form.
   The `ReverseProxyIPHeader` and `ReverseProxyAddr` settings need a web server restart.
 
@@ -122,7 +135,8 @@ accepted before the header validation landed.
 
 ```
 ./build_audit-web-posts.sh
-./build/audit-web-posts -data ./data          # add -all to scan every article of those groups
+./build/audit-web-posts -strict -data ./data   # -strict: refuse rather than risk touching the dir
+./build/audit-web-posts -data ./data           # add -all to scan every article of those groups
 ```
 
 Exit codes: `0` clean, `1` something flagged, `2` error. Output is one TSV line per finding plus a

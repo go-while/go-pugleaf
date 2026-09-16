@@ -15,7 +15,7 @@ and the session-slide write, i.e. what a web request actually does) keeps improv
 the pool grows, in the median *and* at p99; and `sql.DB` never opened more than the
 offered concurrency (34 connections against a ceiling of 100), so the 100 costs
 nothing at normal load. The only value that is clearly wrong is a small one:
-`MaxOpenConns = 4` loses 30-40 % throughput and turns a 150 µs read into a 3.4 ms one.
+`MaxOpenConns = 4` loses 30-55 % throughput and turns a 150 µs read into a 3.4 ms one.
 See [Recommendation](#recommendation).
 
 ## The benchmark

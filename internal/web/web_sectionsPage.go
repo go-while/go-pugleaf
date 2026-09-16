@@ -101,23 +101,24 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 	// Calculate pagination
 	totalCount := len(allGroups)
 
-	// Clamp the requested page to the last existing one before any multiplication:
-	// (page-1)*LIMIT_sectionPage overflows to a negative offset for a huge ?page=,
-	// and slicing with it panics (F15).
-	if LIMIT_sectionPage > 0 {
-		maxPage := (totalCount + LIMIT_sectionPage - 1) / LIMIT_sectionPage
-		if maxPage < 1 {
-			maxPage = 1
-		}
-		if page > maxPage {
-			page = maxPage
-		}
-	} else {
-		page = 1
+	// LIMIT_sectionPage is a package var, so treat a non-positive value as 1 once and use
+	// that size for every calculation below: page math, slicing and NewPaginationInfo (which
+	// divides by the page size). Clamp the page before any multiplication, because
+	// (page-1)*size overflows to a negative offset for a huge ?page= and slicing panics (F15).
+	size := LIMIT_sectionPage
+	if size < 1 {
+		size = 1
+	}
+	maxPage := (totalCount + size - 1) / size
+	if maxPage < 1 {
+		maxPage = 1
+	}
+	if page > maxPage {
+		page = maxPage
 	}
 
-	start := (page - 1) * LIMIT_sectionPage
-	end := start + LIMIT_sectionPage
+	start := (page - 1) * size
+	end := start + size
 
 	if start > totalCount {
 		start = totalCount
@@ -125,14 +126,9 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 	if end > totalCount {
 		end = totalCount
 	}
-	// LIMIT_sectionPage is a var: a non-positive value makes end < start, which the two
-	// clamps above do not catch and which panics in the slice below.
-	if end < start {
-		end = start
-	}
 
 	groups := allGroups[start:end]
-	pagination := models.NewPaginationInfo(page, LIMIT_sectionPage, totalCount)
+	pagination := models.NewPaginationInfo(page, size, totalCount)
 
 	// Get all sections for navigation
 	sections, err := s.DB.GetHeaderSections()
