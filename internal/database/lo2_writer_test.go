@@ -112,7 +112,7 @@ func TestLo2WriterStatsRetry(t *testing.T) {
 			return sqlite3.Error{Code: sqlite3.ErrBusy}
 		}
 		return nil
-	}, time.Millisecond, "'lo2writer.stats' (+3 articles, max_article=7)", running)
+	}, time.Millisecond, "'lo2writer.stats' (+3 articles, max_article=7)", running, batchShutdownGrace)
 	if err != nil || calls != 3 {
 		t.Fatalf("busy twice: err=%v calls=%d; want nil, 3", err, calls)
 	}
@@ -122,26 +122,33 @@ func TestLo2WriterStatsRetry(t *testing.T) {
 	err = updateNewsgroupStatsWithRetry(func() error {
 		calls++
 		return fatal
-	}, time.Millisecond, "'lo2writer.stats'", running)
+	}, time.Millisecond, "'lo2writer.stats'", running, batchShutdownGrace)
 	if !errors.Is(err, fatal) || calls != 1 {
 		t.Fatalf("non-retryable: err=%v calls=%d; want %v, 1", err, calls, fatal)
 	}
 
 	calls = 0
-	if err := updateNewsgroupStatsWithRetry(func() error { calls++; return nil }, time.Millisecond, "ok", running); err != nil || calls != 1 {
+	if err := updateNewsgroupStatsWithRetry(func() error { calls++; return nil }, time.Millisecond, "ok", running, batchShutdownGrace); err != nil || calls != 1 {
 		t.Fatalf("success: err=%v calls=%d; want nil, 1", err, calls)
 	}
 
-	// Shutdown has begun: the loop must stop, because every tool waits for db.WG before
-	// it closes the databases. A permanently busy main DB would otherwise hang the exit.
+	// Shutdown has begun: the loop must stop within the grace, because every tool waits
+	// for db.WG before it closes the databases. A permanently busy main DB would
+	// otherwise hang the exit. The bound is wall-clock, so it holds however long one
+	// round takes inside RetryableTransactionExec.
 	busy := sqlite3.Error{Code: sqlite3.ErrBusy}
 	calls = 0
+	const grace = 50 * time.Millisecond
 	done := make(chan error, 1)
+	started := time.Now()
 	go func() {
 		done <- updateNewsgroupStatsWithRetry(func() error {
 			calls++
+			// A round that itself takes longer than the grace (RetryableTransactionExec
+			// waits for GetSQLiteMaxRetryWait before it reports the busy error).
+			time.Sleep(30 * time.Millisecond)
 			return busy
-		}, time.Millisecond, "'lo2writer.stats'", func() bool { return true })
+		}, time.Millisecond, "'lo2writer.stats'", func() bool { return true }, grace)
 	}()
 	select {
 	case err := <-done:
@@ -151,8 +158,44 @@ func TestLo2WriterStatsRetry(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("updateNewsgroupStatsWithRetry did not stop after shutdown began")
 	}
-	if calls != batchStatsShutdownRounds {
-		t.Fatalf("shutdown bound: calls=%d, want batchStatsShutdownRounds=%d", calls, batchStatsShutdownRounds)
+	if took := time.Since(started); took > 2*time.Second {
+		t.Fatalf("shutdown bound took %v for a %v grace", took, grace)
+	}
+	if calls < 2 {
+		t.Fatalf("shutdown bound: calls=%d, want at least one retry before the grace passed", calls)
+	}
+}
+
+// TestLo2WriterBatchShutdownClock: the retry loops of the batch writer are unbounded
+// while the database is live and get a wall-clock grace once shutdown has begun, so the
+// bound does not depend on how long one attempt takes.
+func TestLo2WriterBatchShutdownClock(t *testing.T) {
+	live := batchShutdownClock{grace: time.Nanosecond}
+	for i := 0; i < 5; i++ {
+		if live.expired(func() bool { return false }) {
+			t.Fatal("clock expired while the database is live")
+		}
+	}
+	var none batchShutdownClock
+	if none.expired(nil) {
+		t.Fatal("clock with no isShutdown must never expire")
+	}
+
+	shutdown := func() bool { return true }
+	c := batchShutdownClock{grace: 30 * time.Millisecond}
+	if c.expired(shutdown) {
+		t.Fatal("the first shutdown check must start the clock, not expire it")
+	}
+	if c.expired(shutdown) {
+		t.Fatal("clock expired before its grace had passed")
+	}
+	started := c.deadline
+	time.Sleep(40 * time.Millisecond)
+	if !c.expired(shutdown) {
+		t.Fatal("clock did not expire after its grace")
+	}
+	if c.deadline != started {
+		t.Fatal("the deadline moved after the clock was started")
 	}
 }
 
