@@ -450,7 +450,19 @@ const query_DeleteNewsgroup = `DELETE FROM newsgroups WHERE name = ? AND active 
 // Without it the section routes keep listing and serving a group that no longer exists (F10).
 const query_DeleteSectionGroupsByNewsgroup = `DELETE FROM section_groups WHERE newsgroup_name = ?`
 
-func (db *Database) DeleteNewsgroup(name string) error {
+// query_DeleteUserSpamFlagsByNewsgroup drops the spam flags of a deleted newsgroup (A4).
+// user_spam_flags (migration 0007) has a foreign key on user_id only, so nothing cascades
+// on the newsgroup_id side the way post_queue does (migration 0016), and the rows would
+// outlive the group forever: newsgroups.id is AUTOINCREMENT, so no later group inherits
+// them, they just accumulate. The subselect repeats the `active = 0` guard of
+// query_DeleteNewsgroup so both statements cover exactly the same groups, which is also
+// why this one has to run while the newsgroups row is still there.
+const query_DeleteUserSpamFlagsByNewsgroup = `DELETE FROM user_spam_flags WHERE newsgroup_id IN (SELECT id FROM newsgroups WHERE name = ? AND active = 0)`
+
+// DeleteNewsgroup removes an inactive newsgroup and the rows keyed on it. It reports
+// whether a row was really deleted: query_DeleteNewsgroup only matches `active = 0`, so
+// deleting an active group is a no-op and the caller must not claim it happened (B3).
+func (db *Database) DeleteNewsgroup(name string) (bool, error) {
 	// Get hierarchy before deletion for cache invalidation
 	newsgroup, err := db.MainDBGetNewsgroup(name)
 	var hierarchy string
@@ -461,9 +473,20 @@ func (db *Database) DeleteNewsgroup(name string) error {
 		hierarchy = ExtractHierarchyFromGroupName(name)
 	}
 
-	// The newsgroup row and its section_groups rows go in one transaction: the group is only
-	// removed from its sections when it was really deleted (the DELETE is a no-op while active).
+	// The newsgroup row, its section_groups rows and its user_spam_flags rows go in one
+	// transaction: the dependent rows are only removed when the group was really deleted
+	// (the DELETE is a no-op while active).
+	var deleted bool
 	err = RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
+		// RetryableTransactionExec re-runs this body after a retryable error, including one
+		// from the commit, so the result of an earlier attempt must not leak out.
+		deleted = false
+		// Before the newsgroups row goes: the flags are keyed on newsgroups.id, which this
+		// statement can only resolve by name while the row still exists. Its `active = 0`
+		// guard matches query_DeleteNewsgroup, so it deletes nothing for a group that stays.
+		if _, err := tx.Exec(query_DeleteUserSpamFlagsByNewsgroup, name); err != nil {
+			return fmt.Errorf("failed to delete user spam flags of %s: %w", name, err)
+		}
 		result, err := tx.Exec(query_DeleteNewsgroup, name)
 		if err != nil {
 			return fmt.Errorf("failed to delete newsgroup %s: %w", name, err)
@@ -478,10 +501,11 @@ func (db *Database) DeleteNewsgroup(name string) error {
 		if _, err := tx.Exec(query_DeleteSectionGroupsByNewsgroup, name); err != nil {
 			return fmt.Errorf("failed to delete section groups of %s: %w", name, err)
 		}
+		deleted = true
 		return nil
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Invalidate hierarchy cache for the affected hierarchy
@@ -493,7 +517,7 @@ func (db *Database) DeleteNewsgroup(name string) error {
 	// section_groups rows cannot change. Invalidating it would be dead work and would
 	// make every concurrent in-flight load discard its result.
 
-	return nil
+	return deleted, nil
 }
 
 const query_GetThreadsCount = `SELECT COUNT(*) FROM threads`
@@ -1288,7 +1312,39 @@ const query_GetSectionGroupsWithActivity = `
 	WHERE sg.section_id = ?
 	ORDER BY %s`
 
+// query_GetSectionGroupsWithActivityStrict is query_GetSectionGroupsWithActivity without the
+// members a visitor cannot open (E1). The LEFT JOIN above keeps a section_groups row whose
+// newsgroup is inactive, or orphaned by a delete that predates the section access fix (F10),
+// and lists it with message_count 0 - but the group routes 404 on both, so the listing
+// promises a group that cannot be opened. `n.name IS NOT NULL` passes only the rows the join
+// matched, and the join condition already requires `active = 1`. Category headers carry no
+// newsgroup of their own and are kept regardless. This does not clean up the orphan rows, it
+// only stops showing them.
+const query_GetSectionGroupsWithActivityStrict = `
+	SELECT
+		sg.id, sg.section_id, sg.newsgroup_name, sg.group_description,
+		sg.sort_order, sg.is_category_header, sg.created_at,
+		COALESCE(n.updated_at, datetime('1970-01-01 00:00:00')) as updated_at,
+		COALESCE(n.message_count, 0) as message_count,
+		COALESCE(n.last_article, 0) as last_article
+	FROM section_groups sg
+	LEFT JOIN newsgroups n ON sg.newsgroup_name = n.name AND n.active = 1
+	WHERE sg.section_id = ? AND (sg.is_category_header = 1 OR n.name IS NOT NULL)
+	ORDER BY %s`
+
 func (db *Database) GetSectionGroupsWithActivity(sectionID int, sortBy string) ([]*models.SectionGroup, error) {
+	return db.sectionGroupsWithActivity(query_GetSectionGroupsWithActivity, sectionID, sortBy)
+}
+
+// GetSectionGroupsWithActivityStrict is GetSectionGroupsWithActivity restricted to the members
+// that exist and are active, for the non-admin section listing (E1).
+func (db *Database) GetSectionGroupsWithActivityStrict(sectionID int, sortBy string) ([]*models.SectionGroup, error) {
+	return db.sectionGroupsWithActivity(query_GetSectionGroupsWithActivityStrict, sectionID, sortBy)
+}
+
+// sectionGroupsWithActivity runs one of the two section listing queries above; they differ
+// only in their WHERE clause and both take the sort order through the same %s.
+func (db *Database) sectionGroupsWithActivity(queryTemplate string, sectionID int, sortBy string) ([]*models.SectionGroup, error) {
 	// Determine sort order based on parameter
 	var orderBy string
 	switch sortBy {
@@ -1300,7 +1356,7 @@ func (db *Database) GetSectionGroupsWithActivity(sectionID int, sortBy string) (
 		orderBy = "sg.sort_order, sg.newsgroup_name"
 	}
 
-	query := fmt.Sprintf(query_GetSectionGroupsWithActivity, orderBy)
+	query := fmt.Sprintf(queryTemplate, orderBy)
 	rows, err := db.mainDB.Query(query, sectionID)
 	if err != nil {
 		return nil, err
@@ -2920,7 +2976,7 @@ func (db *Database) ResetAllNewsgroupData() error {
 
 	// Step 1: Reset all counters in main database with a single efficient UPDATE
 	log.Printf("ResetAllNewsgroupData: Resetting all newsgroup counters in main database...")
-	result, err := db.mainDB.Exec(`UPDATE newsgroups SET
+	result, err := RetryableExec(db.mainDB, `UPDATE newsgroups SET
 		message_count = 0,
 		last_article = 0,
 		high_water = 0,

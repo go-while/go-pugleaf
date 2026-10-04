@@ -267,11 +267,17 @@ func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
 		return
 	}
 
-	// Delete newsgroup
-	err := s.DB.DeleteNewsgroup(name)
+	// Delete newsgroup. DeleteNewsgroup only deletes an inactive group, so a nil error does
+	// not mean a row went away - report success only when one did (B3).
+	deleted, err := s.DB.DeleteNewsgroup(name)
 	if err != nil {
 		session.SetError("Failed to delete newsgroup")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
+		return
+	}
+	if !deleted {
+		session.SetError("Newsgroup '" + name + "' was not deleted: deactivate it first")
+		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
 		return
 	}
 
