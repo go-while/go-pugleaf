@@ -86,12 +86,24 @@ func (cm *CronJobManager) loadAndStartJobs() error {
 	// Start each active cron job
 startJobs:
 	for _, job := range cronJobs {
+		// StopCronManager closes stopChannel before it takes its jobIDs snapshot, so a job
+		// started after that close is never stopped and db.WG.Done() runs while its
+		// goroutine is still executing. Re-check between jobs and leave the rest unstarted.
+		if common.IsClosedChannel(cm.stopChannel) {
+			log.Printf("[CRON] stop requested: not starting the remaining jobs (started: %d)", created)
+			return nil
+		}
 		if !job.Enabled {
 			continue startJobs
 		}
 		if err := cm.startJob(job); err != nil {
 			if err == ErrCronExists {
 				continue startJobs
+			}
+			if errors.Is(err, errCronStopping) {
+				// Lost the race against StopCronManager's lock: the job was not registered.
+				log.Printf("[CRON] stop requested: job %d (%s) and the remaining jobs were not started (started: %d)", job.ID, job.Name, created)
+				return nil
 			}
 			log.Printf("[CRON] Failed to start job %d (%s): %v", job.ID, job.Name, err)
 
@@ -266,6 +278,10 @@ func (cm *CronJobManager) GetJobOutput(jobID int64) []string {
 var ErrCronExists error = fmt.Errorf("cronExists")
 var ErrCronNotFound error = fmt.Errorf("cron404")
 
+// errCronStopping is returned by startJob once StopCronManager has closed stopChannel: the
+// job must not be registered any more, see the comment in startJob.
+var errCronStopping error = errors.New("cron manager is stopping")
+
 func (cm *CronJobManager) StopJob(jobId int64) error {
 	if cm == nil {
 		return errors.New("cron jobs are disabled (-no-cronjobs)")
@@ -319,6 +335,14 @@ func (cm *CronJobManager) StopJob(jobId int64) error {
 func (cm *CronJobManager) startJob(cronJob *models.CronJob) error {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
+
+	// StopCronManager closes stopChannel and only then takes this same lock for its jobIDs
+	// snapshot, so this check closes the window that the one in loadAndStartJobs only
+	// narrows: a caller that acquires the lock after the close refuses here, and one that
+	// acquired it before the close is in the snapshot and gets stopped.
+	if common.IsClosedChannel(cm.stopChannel) {
+		return errCronStopping
+	}
 
 	if _, exists := cm.jobs[cronJob.ID]; exists {
 		return ErrCronExists
