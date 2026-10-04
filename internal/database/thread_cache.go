@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -260,6 +261,37 @@ func threadChildrenQuery(placeholders string) string {
 	`, placeholders)
 }
 
+// threadCacheMismatchInterval is how often the message_count/child_articles warning below
+// may be logged by this process.
+const threadCacheMismatchInterval = time.Minute
+
+var (
+	// threadCacheMismatchLast is the UnixNano of the last logged warning (0: none yet).
+	threadCacheMismatchLast atomic.Int64
+	// threadCacheMismatchDropped counts the warnings suppressed since the last logged one.
+	threadCacheMismatchDropped atomic.Int64
+)
+
+// threadCacheMismatchLogThrottle reports whether this warning is logged, and if so how many
+// were suppressed since the previous one. The condition it reports is permanent -- nothing
+// recomputes message_count outside a rescan -- so an affected thread would otherwise log one
+// line per request, forever, and bury the rest of the group's log. Like retryLogThrottle
+// this keeps no per-thread state: two counters for the whole process, so the memory cost does
+// not grow with the number of inconsistent threads.
+func threadCacheMismatchLogThrottle(now time.Time) (bool, int64) {
+	last := threadCacheMismatchLast.Load()
+	if last != 0 && now.UnixNano()-last < int64(threadCacheMismatchInterval) {
+		threadCacheMismatchDropped.Add(1)
+		return false, 0
+	}
+	if !threadCacheMismatchLast.CompareAndSwap(last, now.UnixNano()) {
+		// Another goroutine logged in the meantime; this one is suppressed.
+		threadCacheMismatchDropped.Add(1)
+		return false, 0
+	}
+	return true, threadCacheMismatchDropped.Swap(0)
+}
+
 // GetCachedThreadReplies retrieves paginated replies for a specific thread
 func (db *Database) GetCachedThreadReplies(groupDB *GroupDB, threadRoot int64, page int, pageSize int) ([]*models.Overview, int, error) {
 	// Get the cached thread entry
@@ -282,8 +314,14 @@ func (db *Database) GetCachedThreadReplies(groupDB *GroupDB, threadRoot int64, p
 	}
 	totalReplies := len(childNums)
 	if messageCount-1 != totalReplies {
-		log.Printf("[CACHE:THREADS] Warning: thread_cache root %d of '%s': message_count %d disagrees with %d child_articles, using child_articles",
-			threadRoot, groupDB.Newsgroup, messageCount, totalReplies)
+		if ok, dropped := threadCacheMismatchLogThrottle(time.Now()); ok {
+			var suppressed string
+			if dropped > 0 {
+				suppressed = fmt.Sprintf(" (%d similar warnings suppressed)", dropped)
+			}
+			log.Printf("[CACHE:THREADS] Warning: thread_cache root %d of '%s': message_count %d disagrees with %d child_articles, using child_articles%s",
+				threadRoot, groupDB.Newsgroup, messageCount, totalReplies, suppressed)
+		}
 	}
 	if totalReplies == 0 {
 		return []*models.Overview{}, 0, nil

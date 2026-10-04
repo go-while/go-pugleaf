@@ -63,7 +63,7 @@ func fuHygieneThread(t *testing.T, nChildren int, messageCount int) (*Database, 
 // TestFuHygieneThreadRepliesCountFromChildArticles: the reply count GetCachedThreadReplies
 // returns must describe the list it actually paginates (child_articles), not thread_cache's
 // message_count. Every page the returned count promises has to carry rows, and the page past
-// it has to be empty — otherwise the caller's totalPages links a page that renders empty (E2).
+// it has to be empty -- otherwise the caller's totalPages links a page that renders empty (E2).
 func TestFuHygieneThreadRepliesCountFromChildArticles(t *testing.T) {
 	const pageSize = 2
 	for _, tc := range []struct {
@@ -124,5 +124,42 @@ func TestFuHygieneThreadRepliesEmptyChildArticles(t *testing.T) {
 	}
 	if len(replies) != 0 || total != 0 {
 		t.Fatalf("%d replies, total %d; want 0 and 0", len(replies), total)
+	}
+}
+
+// TestFuHygieneMismatchLogThrottle: the message_count/child_articles warning is throttled.
+// The inconsistency it reports is permanent (nothing recomputes message_count outside a
+// rescan), so without this every request for an affected thread would log a line, forever.
+// No t.Parallel: it takes over the process-wide throttle counters and restores them.
+func TestFuHygieneMismatchLogThrottle(t *testing.T) {
+	savedLast := threadCacheMismatchLast.Load()
+	savedDropped := threadCacheMismatchDropped.Load()
+	t.Cleanup(func() {
+		threadCacheMismatchLast.Store(savedLast)
+		threadCacheMismatchDropped.Store(savedDropped)
+	})
+	threadCacheMismatchLast.Store(0)
+	threadCacheMismatchDropped.Store(0)
+
+	now := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+	if ok, dropped := threadCacheMismatchLogThrottle(now); !ok || dropped != 0 {
+		t.Fatalf("first warning: logged=%v dropped=%d, want true and 0", ok, dropped)
+	}
+
+	// Every further hit inside the interval is suppressed, however many threads produce it.
+	const hits = 100
+	for i := 0; i < hits; i++ {
+		if ok, dropped := threadCacheMismatchLogThrottle(now.Add(time.Duration(i) * time.Millisecond)); ok || dropped != 0 {
+			t.Fatalf("hit %d inside the interval: logged=%v dropped=%d, want false and 0", i, ok, dropped)
+		}
+	}
+
+	// After the interval one line comes through and reports what it swallowed.
+	if ok, dropped := threadCacheMismatchLogThrottle(now.Add(threadCacheMismatchInterval + time.Second)); !ok || dropped != hits {
+		t.Fatalf("after the interval: logged=%v dropped=%d, want true and %d", ok, dropped, hits)
+	}
+	// The suppressed counter resets with that line.
+	if n := threadCacheMismatchDropped.Load(); n != 0 {
+		t.Errorf("suppressed counter = %d after logging, want 0", n)
 	}
 }
