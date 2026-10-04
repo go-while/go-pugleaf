@@ -264,23 +264,28 @@ func threadChildrenQuery(placeholders string) string {
 func (db *Database) GetCachedThreadReplies(groupDB *GroupDB, threadRoot int64, page int, pageSize int) ([]*models.Overview, int, error) {
 	// Get the cached thread entry
 	var childArticles string
-	var totalReplies int
+	var messageCount int
 
 	query := `SELECT child_articles, message_count FROM thread_cache WHERE thread_root = ?`
-	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{threadRoot}, &childArticles, &totalReplies)
+	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{threadRoot}, &childArticles, &messageCount)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get thread cache for root %d: %w", threadRoot, err)
 	}
 
-	// Subtract 1 from message_count since it includes the root
-	totalReplies = totalReplies - 1
-	if totalReplies <= 0 {
-		return []*models.Overview{}, 0, nil
-	}
-
-	// Parse child article numbers
+	// Parse child article numbers. child_articles is the single source of truth for both the
+	// returned count and the pages: the count used to be message_count - 1 while the pages
+	// were sliced out of childNums, so a thread_cache row whose message_count disagrees with
+	// child_articles made the caller's totalPages promise a page that renders empty (E2).
 	childNums := strings.Split(childArticles, ",")
-	if len(childNums) == 0 || (len(childNums) == 1 && childNums[0] == "") {
+	if len(childNums) == 1 && childNums[0] == "" {
+		childNums = nil
+	}
+	totalReplies := len(childNums)
+	if messageCount-1 != totalReplies {
+		log.Printf("[CACHE:THREADS] Warning: thread_cache root %d of '%s': message_count %d disagrees with %d child_articles, using child_articles",
+			threadRoot, groupDB.Newsgroup, messageCount, totalReplies)
+	}
+	if totalReplies == 0 {
 		return []*models.Overview{}, 0, nil
 	}
 
