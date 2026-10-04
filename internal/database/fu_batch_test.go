@@ -21,10 +21,16 @@ import (
 // process has to be SIGKILLed. batchShutdownClock has its own unit test
 // (TestLo2WriterBatchShutdownClock); these tests cover the two call sites.
 
-// fuBatchSlack is how much longer than batchShutdownGrace a bounded loop may take before the
-// test calls it unbounded. One extra round is a group database reopen plus one insert attempt
-// plus the loop's own one second sleep, so this is generous on purpose.
-const fuBatchSlack = time.Minute
+// fuBatchTestGrace is the grace these tests give the retry loops through SQ3batch.retryGrace,
+// instead of waiting out the two minutes of batchShutdownGrace. The loops sleep one second
+// between rounds, so this is long enough that the loop has to keep retrying over several
+// rounds before it may give up - a bound that fires on the first failure fails the test.
+const fuBatchTestGrace = 3 * time.Second
+
+// fuBatchSlack is how much longer than the grace a bounded loop may take before the test calls
+// it unbounded. One extra round is a group database reopen plus one insert attempt plus the
+// loop's own one second sleep, so this is generous on purpose.
+const fuBatchSlack = 30 * time.Second
 
 // fuBatchLogs is a concurrency-safe log sink: the batch writer logs from the goroutine under
 // test while the shared test database logs from its own background goroutines.
@@ -82,6 +88,7 @@ func fuBatchIsolatedDB(t *testing.T) *Database {
 		StopChan: make(chan struct{}),
 	}
 	db.Batch = NewSQ3batch(db)
+	db.Batch.retryGrace = fuBatchTestGrace
 	t.Cleanup(func() {
 		if err := db.Shutdown(); err != nil {
 			t.Logf("fuBatch: Shutdown: %v", err)
@@ -166,13 +173,30 @@ func fuBatchRun(t *testing.T, db *Database, task *BatchTasks, wait time.Duration
 	return 0
 }
 
+// TestFuBatchDefaultShutdownGrace: production sets no grace, so the loops must keep
+// batchShutdownGrace. nntp-wiring_test.go builds a zero-value SQ3batch, so cover that too.
+func TestFuBatchDefaultShutdownGrace(t *testing.T) {
+	var zero SQ3batch
+	if got := zero.retryShutdownGrace(); got != batchShutdownGrace {
+		t.Errorf("zero SQ3batch grace = %v, want %v", got, batchShutdownGrace)
+	}
+	db := fuBatchIsolatedDB(t)
+	produced := NewSQ3batch(db)
+	if got := produced.retryShutdownGrace(); got != batchShutdownGrace {
+		t.Errorf("NewSQ3batch grace = %v, want %v: production behaviour changed", got, batchShutdownGrace)
+	}
+	produced.retryGrace = time.Millisecond
+	if got := produced.retryShutdownGrace(); got != time.Millisecond {
+		t.Errorf("grace with retryGrace set = %v, want 1ms", got)
+	}
+}
+
 // TestFuBatchRetry1DropsBatchAfterShutdownGrace: with a failing insert and shutdown under way,
-// the retry1 loop drops the batch after batchShutdownGrace instead of retrying for good (C1).
+// the retry1 loop drops the batch after its grace instead of retrying for good (C1).
 //
-// The test needs batchShutdownGrace (2 minutes) of wall-clock time because the bound is
-// wall-clock and neither call site takes the grace as a parameter the way
-// updateNewsgroupStatsWithRetry does. It is almost all sleeping: about 120 rounds of
-// reopen-insert-fail-sleep(1s).
+// The bound is wall-clock, so the test shortens it through SQ3batch.retryGrace
+// (fuBatchTestGrace) rather than waiting out the two minutes of batchShutdownGrace; the
+// default is covered by TestFuBatchDefaultShutdownGrace.
 func TestFuBatchRetry1DropsBatchAfterShutdownGrace(t *testing.T) {
 	logs := fuBatchCaptureLog(t)
 	db := fuBatchIsolatedDB(t)
@@ -185,12 +209,16 @@ func TestFuBatchRetry1DropsBatchAfterShutdownGrace(t *testing.T) {
 		t.Fatal("IsDBshutdown() is false after closing StopChan: the test would hang, not bound anything")
 	}
 
-	took := fuBatchRun(t, db, task, batchShutdownGrace+fuBatchSlack, logs)
+	grace := db.Batch.retryShutdownGrace()
+	took := fuBatchRun(t, db, task, grace+fuBatchSlack, logs)
 
-	if took < batchShutdownGrace {
+	if took < grace {
 		t.Errorf("processNewsgroupBatch returned after %v, before the %v grace had passed: a failing insert must keep retrying until then, the drained articles are only in memory",
-			took, batchShutdownGrace)
+			took, grace)
 	}
+	// fuBatchTestGrace is three times the loop's own sleep, so the check above also says the
+	// insert was retried over several rounds: a bound that gives up on the first failure
+	// fails this test, not only an unbounded one.
 	want := fmt.Sprintf("dropping %d articles for '%s': insert still failing", articles, group)
 	if !strings.Contains(logs.String(), want) {
 		t.Errorf("the drop was not logged as %q. Last log lines:\n%s", want, logs.tail(12))
@@ -216,12 +244,13 @@ func TestFuBatchRetry2ThreadingFailureIsNotRetried(t *testing.T) {
 
 	close(db.StopChan)
 	// Wait as long as the retry1 test does: if batchProcessThreading ever propagates again,
-	// this call retries for batchShutdownGrace instead of returning at once, and the timing
+	// this call retries for the whole grace instead of returning at once, and the timing
 	// below names what changed. Today it returns in milliseconds.
-	took := fuBatchRun(t, db, task, batchShutdownGrace+fuBatchSlack, logs)
-	if took > 30*time.Second {
+	grace := db.Batch.retryShutdownGrace()
+	took := fuBatchRun(t, db, task, grace+fuBatchSlack, logs)
+	if took > grace/2 {
 		t.Fatalf("processNewsgroupBatch retried the blocked threading write for %v: batchProcessThreading no longer swallows the failure, so the error branch of retry2 is live and its bound (threadClock) now needs the same bounded-drop test as retry1 - it held this time, the call returned inside the %v grace",
-			took, batchShutdownGrace)
+			took, grace)
 	}
 
 	if !strings.Contains(logs.String(), "Failed to batch process thread roots") {

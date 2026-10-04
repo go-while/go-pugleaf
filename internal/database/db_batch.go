@@ -94,6 +94,7 @@ type SQ3batch struct {
 	maxDBbatch   int                // limits db batches to avoid mem and sqlite limits
 	maxDBthreads int                // limits number of concurrent db batch threads
 	maxQueued    int                // limits number of queued articles for batch processing
+	retryGrace   time.Duration      // grace of the retry loops of processNewsgroupBatch; 0: batchShutdownGrace
 
 	GMux               sync.RWMutex           // Mutex for TasksMap to ensure thread safety
 	TasksMap           map[string]*BatchTasks // Map which holds newsgroup cron taskspointers
@@ -580,6 +581,18 @@ const batchStatsRetryEvery = 5 * time.Second
 // by default, more when a tool raised it) before it returns.
 const batchShutdownGrace = 2 * time.Minute
 
+// retryShutdownGrace returns how long the retry loops of processNewsgroupBatch may keep going
+// once shutdown has begun. It comes from a field so a test can pass a short grace instead of
+// waiting out batchShutdownGrace, the same reason updateNewsgroupStatsWithRetry takes it as a
+// parameter. The zero value means the default, so every SQ3batch that does not set it - every
+// one in production - keeps batchShutdownGrace.
+func (sq *SQ3batch) retryShutdownGrace() time.Duration {
+	if sq.retryGrace > 0 {
+		return sq.retryGrace
+	}
+	return batchShutdownGrace
+}
+
 // batchShutdownClock bounds one retry loop once shutdown has begun. The zero value has
 // not started; the clock starts on the first check that reports shutdown, so a loop that
 // began while the database was live keeps its full grace.
@@ -758,7 +771,8 @@ drainChannel:
 	// failing, e.g. a full filesystem, must not lose the drained articles), but it runs
 	// inside db.WG: once shutdown has begun it gets batchShutdownGrace and then drops the
 	// batch, so db.WG.Wait() cannot block on it.
-	insertClock := batchShutdownClock{grace: batchShutdownGrace}
+	insertGrace := sq.retryShutdownGrace()
+	insertClock := batchShutdownClock{grace: insertGrace}
 	insertAttempts := 0
 retry1:
 	// Get database connection for this newsgroup. The articles are already drained out
@@ -785,7 +799,7 @@ retry1:
 		insertAttempts++
 		if insertClock.expired(sq.db.IsDBshutdown) {
 			log.Printf("[BATCH] dropping %d articles for '%s': insert still failing %v into shutdown (%d attempts): %v",
-				len(batches), *task.Newsgroup, batchShutdownGrace, insertAttempts, err)
+				len(batches), *task.Newsgroup, insertGrace, insertAttempts, err)
 			return
 		}
 		time.Sleep(time.Second)
@@ -812,7 +826,8 @@ retry1:
 	// Same bounding as retry1: unbounded while the database is live, batchShutdownGrace
 	// once shutdown has begun. The articles are committed at this point, so giving up
 	// leaves them without threading, history and stats instead of losing them.
-	threadClock := batchShutdownClock{grace: batchShutdownGrace}
+	threadGrace := sq.retryShutdownGrace()
+	threadClock := batchShutdownClock{grace: threadGrace}
 	threadAttempts := 0
 retry2:
 	if groupDB == nil {
@@ -836,7 +851,7 @@ retry2:
 		threadAttempts++
 		if threadClock.expired(sq.db.IsDBshutdown) {
 			log.Printf("[BATCH] %d articles for '%s' are committed without threading/history/stats (rebuild needed): threading still failing %v into shutdown (%d attempts): %v",
-				len(batches), *task.Newsgroup, batchShutdownGrace, threadAttempts, err)
+				len(batches), *task.Newsgroup, threadGrace, threadAttempts, err)
 			return
 		}
 		time.Sleep(time.Second)
