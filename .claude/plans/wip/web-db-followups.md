@@ -54,6 +54,8 @@ Nothing here is a regression introduced by WSL. Two items (D1, D2) are decisions
 |----|----|----|
 | E1 | `internal/database/queries.go`, `query_GetSectionGroupsWithActivity` | A `LEFT JOIN newsgroups n ON ... AND n.active = 1`, so `sectionPage` still **lists** (a) inactive member groups and (b) `section_groups` rows orphaned by deletes that happened before WSL's F10 fix — both with `message_count 0`. Clicking one now correctly 404s (F10), so the visitor sees a listed group that cannot be opened. No migration cleans the pre-existing orphans either. |
 | E2 | `internal/database/thread_cache.go`, `GetCachedThreadReplies` | Returns `totalReplies = message_count - 1` while paginating over `len(childArticles)`. If `thread_cache.message_count` and `child_articles` ever disagree, the caller's `totalPages` (`web_threadPage.go`) and the page the guard allows disagree too, so a link to the "last" page can render empty. Pre-existing and untouched by WSL's overflow guard. |
+| E9 | `internal/database/queries.go:387`, `BulkDeleteNewsgroups` | **Found by the wave-2 review of `fu-queries`; it was right to leave it.** A4 closed the dependent-row hole on the single-delete path and left it open on the bulk one. `BulkDeleteNewsgroups` is `DELETE FROM newsgroups WHERE name IN (...) AND active = 0` with no `section_groups` and no `user_spam_flags` cleanup, reachable from `POST /admin/newsgroups/bulk-delete`. So an admin who bulk-deletes an inactive section member leaves an orphan `section_groups` row — still listed in the *admin* view, where it 404s because `checkGroupAccess` needs the `newsgroups` row — and `user_spam_flags` rows that accumulate forever. The slice could not touch it: the plan licensed only three regions of that file and required every other function byte-identical. Fix: route it through the same two dependent DELETEs in an `IN (...)` form, or have it loop `DeleteNewsgroup`. **Assigned to wave 3** (`fu-queries-cleanup`). |
+| E10 | three small items from the wave-2 reviews | (a) `internal/web/web_admin_newsgroups.go:279` — the new `!deleted` flash says "deactivate it first", but that branch has two causes: the group is active, **or** no row with that name exists (the handler only checks `name != ""`). A double-submit or a stale admin page therefore advises deactivating a group that is already gone. It does not mask a real error — the `err != nil` path is separate — and it follows the plan's own B3 wording, so it is cosmetic. Fix: distinguish with `GetNewsgroupID`, or soften to "it must exist and be deactivated first". (b) `internal/database/queries.go:1396` — the section-listing row loop still has no `rows.Err()`, so a truncated result set returns as a complete listing with a nil error and a visitor silently sees a short section page. Pre-existing, but `fu-queries`' shared-body refactor means **one** line now fixes both the normal and the strict path. Same class as A3. (c) `internal/database/fu_queries_test.go:329` — the A2 test's "still retrying after 150ms" assertion is one-sided: it cannot produce a false failure, but on a badly loaded machine it could pass with the fix reverted. Optional hardening: also assert the retry log line fired, the way `fu_hygiene_test.go` does with its throttle counters. **Assigned to wave 3** (`fu-queries-cleanup`). |
 | E8 | `internal/database/queries.go:753,761,769,771` and `internal/database/db_user_profile.go:13-15` | **Found by the wave-2 review of `fu-web-forms`.** Two consequences of A1, neither fixable by the slice that caused them (it does not own `queries.go`). (a) **`UpdateUserDisplayName` now has no production caller at all** — `profileUpdate` was its only one, and its sole remaining reference is two assertions in `lo2_pages_test.go`. That is exactly the dead-exported-API class this plan's own `fu-deadcode` slice deleted for B2, and it leaves a second, unexercised copy of the 64-rune limit that can rot unnoticed. (b) **The same three user columns are now written from two places** with byte-identical SQL — verified column for column, so nothing diverges *today*. The drift is one-sided and silent: a *rename* would fail loudly on both sides, but someone adding `updated_at = CURRENT_TIMESTAMP` or a `WHERE ... AND disabled = 0` guard to `UpdateUserEmail` for the admin path and not here would make the admin-edited email behave differently from the user-edited one, with nothing failing or warning. Fix, in the direction that also removes the dead code: have the per-field helpers delegate (`UpdateUserEmail(id, e) { return db.UpdateUserProfile(id, nil, &e, nil) }`, likewise password), delete `UpdateUserDisplayName` and repoint `lo2_pages_test.go`'s two assertions, and drop the three local `query_UpdateUserProfile*` consts in favour of the `queries.go` ones — one owner for the columns, one for the rune limit. **Assigned to wave 3** (`fu-profile-consolidate`), which needs `queries.go` after `fu-queries` has merged. |
 | E7 | `internal/database/thread_cache.go:69` **and** `internal/database/db_batch.go:1426-1430` | **Found by `fu-threadcount` in wave 2 while fixing E5; it correctly did not touch it. The wave-2 review then found it is in BOTH fallbacks, not just one, and that E5's fix makes it silent.** The fallback fires on **any** error from the `SELECT`, not only `sql.ErrNoRows`. So when the row *does* exist but the read failed — a lock surviving every retry — `InitializeThreadCache`'s `ON CONFLICT` leaves the row's `child_articles` alone and the following `UPDATE` then overwrites it with just the one new child: **the previously listed children are lost.** Worked example from the review: root 10 holds `child_articles = "11,12,13"`, `message_count = 4`; article 14 arrives while another writer holds the write lock past the retry cap; the row ends as `child_articles = "14"`, and articles 11-13 vanish from both the listing and the thread page's pagination. Nothing in `articles` or `threads` is lost — only the derived cache — and `RebuildThreadsFromScratch` restores it. Likelihood is low in the batch path (its SELECT sits inside the transaction, so a lock usually fails `initStmt.Exec` too and the whole thing rolls back and retries) and non-trivial in `UpdateThreadCache`, whose three statements are independent so the lock can clear between them.
 **The part that needed acting on: E5's fix silences the detection.** Before it, the damaged row read `message_count = 1, child_articles = "14"` — invariant broken, so wave 1's throttled mismatch warning fired. After it the row reads `2, "14"` — self-consistent, so that warning can never fire on exactly the rows that lost data. A loud data loss became a silent one. Mitigated at integration (see the progress note): both fallbacks now log a `Warning: ... non-ErrNoRows error, treating the row as missing: previously listed children may be lost until a rescan` line, which names the real cause rather than relying on a downstream symptom. That restores detection **without** deciding the behaviour question.
@@ -185,12 +187,19 @@ rest are arranged around it. Two atomicity constraints drove the layout:
   `fu-web-forms`; it edits `thread_cache.go` only after `fu-misc-hygiene` has merged.
 
 ### Wave 3
-- slice `fu-profile-consolidate` — **E8**, added after the wave-2 review. Owns
-  `internal/database/queries.go` (the three `UpdateUser*` helpers and their query consts only — it
-  runs after `fu-queries` has merged, so no conflict), `internal/database/db_user_profile.go`,
-  `internal/database/lo2_pages_test.go` (the two `UpdateUserDisplayName` assertions only).
-  Collapse the duplication so the three user columns and the 64-rune limit each have one owner, and
-  delete `UpdateUserDisplayName` now that nothing calls it. Disjoint from `fu-pagination` below.
+- slice `fu-queries-cleanup` — **E8**, **E9**, **E10**, all added after the wave-2 reviews and all
+  `queries.go`-adjacent, which is why they share one slice. Owns `internal/database/queries.go`
+  (the three `UpdateUser*` helpers and their consts, `BulkDeleteNewsgroups`, and the `rows.Err()` line
+  in the shared section-listing body — it runs after `fu-queries` has merged, so no conflict),
+  `internal/database/db_user_profile.go`, `internal/web/web_admin_newsgroups.go` (the `!deleted` flash
+  only), `internal/database/lo2_pages_test.go` (the two `UpdateUserDisplayName` assertions only),
+  `internal/database/fu_queries_test.go` (the A2 retry assertion only),
+  `internal/database/fu_queries_cleanup_test.go` (new).
+  **E8**: collapse the duplication so the three user columns and the 64-rune limit each have one owner,
+  and delete `UpdateUserDisplayName` now that nothing calls it. **E9**: give the bulk delete the same
+  dependent cleanups as the single delete. **E10**: the three small items in its row.
+  Disjoint from `fu-pagination` below — it shares `web_admin_newsgroups.go` with nothing, and
+  `fu-pagination` owns no `internal/database` file.
 
 ### Wave 3 (D1 — confirmed, runs)
 - slice `fu-pagination` — **D1, "make the clamp honest"**, plus **E4**. Owns
@@ -291,3 +300,49 @@ genuinely live and that nothing depends on the by-token session invalidation.
 
 **Findings discovered during wave 1 and recorded rather than patched:** **E4** (wave 3), **E5**
 (new wave-2 slice `fu-threadcount`), **E6** (unassigned, needs a user decision).
+
+### Wave 2 — merged, all 3 slices
+
+| Slice | Branch | Impl commits | Merge | Review |
+|----|----|----|----|----|
+| `fu-web-forms` | `worktree-agent-a55802f8e0d55ecf0` | `ac99ed6` | `…` (+ F3 note `8479a2d`) | MERGE |
+| `fu-threadcount` | `worktree-agent-ac01669c49e07394e` | `18c3128`, `e27e221` | `…` (+ diagnostic `2614ebf`) | MERGE |
+| `fu-queries` | `worktree-agent-a2b404638aa9f5d98` | `4272f92`, `c6af305` | `…` | MERGE |
+
+**Checks on the merged tree:** gofmt/vet/build clean; `-race` green across all 8 packages;
+`scripts/test-web-leftovers.sh` **`pass=16 fail=0`**; `scripts/test-web-hardening.sh`
+**`pass=25 fail=0`**; 0 DATA RACE in both logs.
+
+**What the reviews added, again beyond the implementers' green checks:**
+1. **E5's fix silenced the detection of E7's data loss.** Before it, a fallback-damaged row read
+   `message_count = 1, child_articles = "14"` — invariant broken, so wave 1's mismatch warning fired.
+   After it the row is self-consistent, so that warning can never fire on exactly the rows that lost
+   children: a loud data loss became a silent one. Mitigated at integration (`2614ebf`) by logging the
+   real cause in **both** fallbacks when the read fails with something other than `sql.ErrNoRows`.
+   The review also corrected the record — the bug is in both fallbacks, not one — and quantified the
+   likelihood (low in the batch path, whose SELECT sits inside the transaction; non-trivial in
+   `UpdateThreadCache`, whose three statements are independent).
+2. **A1 left a dead export and a duplicated write path (E8), and the plan's own design text was wrong
+   about it** — it claimed all three per-field helpers have other callers; true for `UpdateUserEmail`
+   and `UpdateUserPassword`, not for `UpdateUserDisplayName`, whose only caller was `profileUpdate`.
+   Corrected in place.
+3. **A `RetryableTransactionExec` trap, found independently by two reviews.** It re-runs the whole
+   closure on a retryable *commit* failure, so every statement inside must be idempotent — safe for
+   absolute `SET col = ?`, fatal for the relative `post_count = post_count+1` pattern that lives two
+   functions away. Noted in the code (`8479a2d`); `fu-queries` had already reset its `deleted` flag
+   at the top of its closure for the same reason, which the review confirmed is load-bearing.
+4. **A4 closed the dependent-row hole on the single-delete path and left it open on the bulk one**
+   (E9) — the slice could not touch it under the plan's byte-identical constraint.
+
+**Judgement calls:**
+- **Accepted `fu-queries`' one deviation**: `GetSectionGroupsWithActivity`'s body became a one-line
+  delegation to a helper shared with the strict variant, rather than duplicating ~45 lines of
+  sort/scan/time-parse. The review verified the exported function is a true no-op — same sort mapping
+  including the `default`, same 10-column scan order, same time-parse fallback chain, same nil-on-empty.
+- **Added a diagnostic rather than deciding E7.** Restoring detection needed no behaviour change, so
+  the fault-path question stays open for the user instead of being settled by the integration.
+- **Deferred E8/E9/E10 into one wave-3 slice** (`fu-queries-cleanup`) rather than widening a running
+  slice mid-flight, which is how the previous plan's worst instruction happened.
+
+**Findings discovered during wave 2:** **E7** (user decision, with E6), **E8**, **E9**, **E10**
+(all wave 3).
