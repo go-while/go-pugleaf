@@ -1426,6 +1426,12 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[i
 			row := selectStmt.QueryRow(threadRoot)
 			err := row.Scan(&currentChildren, &currentCount)
 			if err != nil {
+				// Same caveat as UpdateThreadCache: a non-ErrNoRows failure means the row
+				// probably exists and we could not read it, and the initialize-then-update
+				// path below then overwrites child_articles with only these updates (E7).
+				if !errors.Is(err, sql.ErrNoRows) {
+					log.Printf("[BATCH-CACHE] Warning: thread_cache read for root %d failed with a non-ErrNoRows error, treating the row as missing: previously listed children may be lost until a rescan: %v", threadRoot, err)
+				}
 				// Thread cache entry doesn't exist, initialize it with the first update
 				//firstUpdate := updates[0]
 				// Format dates as UTC strings to avoid timezone encoding issues

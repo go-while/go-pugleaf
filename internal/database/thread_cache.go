@@ -1,6 +1,8 @@
 package database
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -68,6 +70,16 @@ func (db *Database) UpdateThreadCache(groupDB *GroupDB, threadRoot int64, childA
 		// If the thread cache entry doesn't exist, queue it for batch initialization
 		// This can happen if the root article was processed without initializing the cache
 		//log.Printf("Thread cache entry for root %d not found, queuing for batch initialization", threadRoot)
+
+		// A non-ErrNoRows failure means the row probably DOES exist and we simply could not
+		// read it (a write lock that outlived the retry budget). The upsert below leaves
+		// child_articles alone, so the UPDATE then overwrites it with just this one child and
+		// the previously listed ones are lost until a rescan (E7). That row is now internally
+		// consistent, so the mismatch warning further down cannot catch it - log it here, or
+		// the loss is silent.
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[CACHE:THREADS] Warning: thread_cache read for root %d failed with a non-ErrNoRows error, treating the row as missing: previously listed children may be lost until a rescan: %v", threadRoot, err)
+		}
 
 		// Create a minimal article object for initialization
 		rootArticle := &models.Article{
