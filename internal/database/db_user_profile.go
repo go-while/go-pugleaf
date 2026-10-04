@@ -34,6 +34,9 @@ func (db *Database) UpdateUserProfile(userID int64, passwordHash *string, email 
 	}
 	return RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
 		// RetryableTransactionExec rolls the transaction back on every error returned here.
+		// Every statement below must stay idempotent: a retryable commit failure re-runs this
+		// whole closure on a fresh transaction. Absolute "SET col = ?" is safe; a relative one
+		// (see query_UpdateUserPostCount, "post_count = post_count+1") would double-apply.
 		if passwordHash != nil {
 			if _, err := tx.Exec(query_UpdateUserProfilePassword, *passwordHash, userID); err != nil {
 				return fmt.Errorf("update password_hash of user %d: %w", userID, err)
