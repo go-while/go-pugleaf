@@ -130,7 +130,7 @@ func TestLo2PagesDeleteNewsgroupRemovesSectionGroups(t *testing.T) {
 		}
 	}
 
-	if err := db.DeleteNewsgroup(gone); err != nil {
+	if _, err := db.DeleteNewsgroup(gone); err != nil {
 		t.Fatalf("DeleteNewsgroup(%s): %v", gone, err)
 	}
 	if lo2PagesNewsgroupExists(t, gone) {
@@ -141,7 +141,7 @@ func TestLo2PagesDeleteNewsgroupRemovesSectionGroups(t *testing.T) {
 	}
 
 	// An active group is refused by the DELETE (active = 0 guard); nothing may change.
-	if err := db.DeleteNewsgroup(kept); err != nil {
+	if _, err := db.DeleteNewsgroup(kept); err != nil {
 		t.Fatalf("DeleteNewsgroup(%s): %v", kept, err)
 	}
 	if !lo2PagesNewsgroupExists(t, kept) {
