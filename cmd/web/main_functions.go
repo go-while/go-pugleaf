@@ -324,7 +324,7 @@ func rsyncInactiveGroupsToDir(db *database.Database, newdatadir string) error {
 		}
 	}
 
-	rows, err := db.GetMainDB().Query(`
+	rows, err := database.RetryableQuery(db.GetMainDB(), `
 		SELECT name
 		FROM newsgroups
 		WHERE active = 0
@@ -367,6 +367,11 @@ func rsyncInactiveGroupsToDir(db *database.Database, newdatadir string) error {
 			return fmt.Errorf("error new group database file not found: %s", groupDBfileNew)
 		}
 		log.Printf("[RSYNC]: OK %s (%v) '%s' to '%s'", newsgroup, time.Since(start), baseGroupDBdir, baseGroupDBdirNew)
+	}
+	// Without this the rows of a result set cut short by an I/O or lock error look exactly
+	// like a complete one, and a partial group list would be reported as a full rsync.
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating newsgroups: %w", err)
 	}
 	return nil
 }
