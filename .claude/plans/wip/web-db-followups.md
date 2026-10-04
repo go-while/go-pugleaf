@@ -54,6 +54,7 @@ Nothing here is a regression introduced by WSL. Two items (D1, D2) are decisions
 |----|----|----|
 | E1 | `internal/database/queries.go`, `query_GetSectionGroupsWithActivity` | A `LEFT JOIN newsgroups n ON ... AND n.active = 1`, so `sectionPage` still **lists** (a) inactive member groups and (b) `section_groups` rows orphaned by deletes that happened before WSL's F10 fix — both with `message_count 0`. Clicking one now correctly 404s (F10), so the visitor sees a listed group that cannot be opened. No migration cleans the pre-existing orphans either. |
 | E2 | `internal/database/thread_cache.go`, `GetCachedThreadReplies` | Returns `totalReplies = message_count - 1` while paginating over `len(childArticles)`. If `thread_cache.message_count` and `child_articles` ever disagree, the caller's `totalPages` (`web_threadPage.go`) and the page the guard allows disagree too, so a link to the "last" page can render empty. Pre-existing and untouched by WSL's overflow guard. |
+| E4 | `internal/web/web_threadPage.go:88-89` | **Found during wave 1 by `fu-misc-hygiene`, which correctly did not fix it** (no slice owned that file). A second, independent cause of E2's symptom, on the caller's side: `totalMessages := totalReplies + 1` then `totalPages := ceil(totalMessages / ThreadMessages_perPage)` with `perPage = 50`. The root article is counted into `totalPages` but is **not** part of what `GetCachedThreadReplies` paginates — it is prepended only when `page == 1`. So a thread whose reply count is an exact multiple of 50 gets one page too many: 50 replies → `totalPages = ceil(51/50) = 2`, and page 2 has no replies and no root. Fixing E2 on the database side alone leaves this reachable, so the two belong together. Fix: `totalPages = max(1, ceil(totalReplies / perPage))`, or pass `perPage - 1` for page 1. **Assigned to wave 3** (`fu-pagination`) — same pagination theme, and no other slice owns that file. |
 | E3 | `scripts/test-web-hardening.sh`, E12 | Now passes for a weaker reason: it sends an invalid `X-Real-IP` and asserts the peer IP, but since WSL's F3 that header is never consulted, so it would pass with a *valid* one too. The intent holds and the outcome is strictly safer; the label is now wrong. `TestLo2ServerTrustedHeader` is the real coverage. Relabel only — do not weaken the assertion. |
 
 ### Out of scope (list in Outcome)
@@ -165,9 +166,14 @@ rest are arranged around it. Two atomicity constraints drove the layout:
   Must not touch `queries.go`.
 
 ### Wave 3 (D1 — confirmed, runs)
-- slice `fu-pagination` — **D1, "make the clamp honest"**. Owns `web/templates/pagination.html`,
-  `internal/models/models.go` (`PaginationInfo` fields only), `internal/web/webgroupPage.go`,
-  `internal/web/web_sectionsPage.go` (the pagination block only).
+- slice `fu-pagination` — **D1, "make the clamp honest"**, plus **E4**. Owns
+  `web/templates/pagination.html`, `internal/models/models.go` (`PaginationInfo` fields only),
+  `internal/web/webgroupPage.go`, `internal/web/web_sectionsPage.go` (the pagination block only),
+  and `internal/web/web_threadPage.go` (the `totalPages` arithmetic only, for E4).
+  **E4** is the thread-page off-by-one wave 1 surfaced: the root article is counted into `totalPages`
+  but is not paginated, so a reply count that is an exact multiple of `ThreadMessages_perPage` links a
+  final empty page. It is the caller-side half of E2 and must land with D1, because both are "a
+  pagination link that promises a page the server will not fill".
   It shares `web_sectionsPage.go` with `fu-queries`, which is why it cannot run before wave 2.
   Scope: `PaginationInfo` learns the clamped bound (e.g. `LinkablePages`), `NewPaginationInfo` takes it
   from the caller's `maxOffset/pageSize + 1`, and `pagination.html` renders "Last" and the page numbers
