@@ -87,9 +87,16 @@ func (db *Database) UpdateThreadCache(groupDB *GroupDB, threadRoot int64, childA
 			db.MemThreadCache.UpdateThreadMetadata(groupDB.Newsgroup, threadRoot, 1, childDate, "")
 		}
 
-		// For now, set defaults so we can continue with the update
+		// Continue against the row InitializeThreadCache just inserted: it has no children
+		// and message_count = 1 for the root article, so currentCount starts at 1 and the
+		// update below writes 1 + 1 child. Seeding 0 here wrote message_count = 1 for a row
+		// that already listed one child, and since nothing recomputes message_count outside a
+		// rescan the row stayed one low forever -- the thread then under-reported by a reply
+		// and, with exactly one reply, reported none at all (E5). The invariant every other
+		// writer keeps is message_count == 1 + len(child_articles) (db_rescan.go:
+		// newMessageCount := 1 + len(finalChildren)).
 		currentChildren = ""
-		currentCount = 0
+		currentCount = 1
 	}
 
 	// Add the new child to the list
@@ -404,6 +411,17 @@ func (db *Database) GetOverviewByArticleNum(groupDB *GroupDB, articleNum int64) 
 	return overview, nil
 }
 
+// threadCacheReplyCount returns how many replies a thread_cache row's child_articles column
+// lists. It is len(strings.Split(childArticles, ",")) for a non-empty list and 0 for an empty
+// one -- the same count GetCachedThreadReplies derives from that column -- so the group
+// listing and the thread page cannot disagree about a thread's reply count.
+func threadCacheReplyCount(childArticles string) int {
+	if childArticles == "" {
+		return 0
+	}
+	return strings.Count(childArticles, ",") + 1
+}
+
 // GetCachedThreadsFromMemory retrieves threads using the two-level memory cache
 func (mem *MemCachedThreads) GetCachedThreadsFromMemory(db *Database, groupDB *GroupDB, group string, page int64, pageSize int64) ([]*models.ForumThread, int64, bool) {
 	startTime := time.Now()
@@ -474,9 +492,14 @@ func (mem *MemCachedThreads) GetCachedThreadsFromMemory(db *Database, groupDB *G
 		}
 
 		forumThread := &models.ForumThread{
-			RootArticle:  rootOverview,
-			Replies:      nil,                   // Will be loaded separately
-			MessageCount: meta.MessageCount - 1, // Convert to reply count (total - root)
+			RootArticle: rootOverview,
+			Replies:     nil, // Will be loaded separately
+			// Reply count from child_articles, the same list GetCachedThreadReplies paginates.
+			// message_count - 1 would disagree with the thread page for every row whose
+			// message_count is stale (E2/E5): the listing promised one reply fewer than the
+			// page serves. Rows already on disk stay stale until a rescan, so both ends have
+			// to read the one column that always describes the replies themselves.
+			MessageCount: threadCacheReplyCount(meta.ChildArticles),
 			LastActivity: meta.LastActivity,
 		}
 
