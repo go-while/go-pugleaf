@@ -1435,8 +1435,14 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[i
 					log.Printf("[BATCH-CACHE] Failed to initialize thread cache for root %d: %v", threadRoot, err)
 					return fmt.Errorf("failed to initialize thread cache for root %d: %w", threadRoot, err)
 				}
+				// initStmt inserted message_count = 1 (the root) with no children, so the
+				// accumulated updates below are counted on top of that 1. Seeding 0 wrote
+				// newCount = len(updates) for a row that listed len(updates) children, one
+				// short of the message_count == 1 + len(child_articles) invariant every other
+				// writer keeps -- permanently, because nothing recomputes message_count
+				// outside a rescan (E5).
 				currentChildren = ""
-				currentCount = 0
+				currentCount = 1
 				initializedCount++
 			}
 
