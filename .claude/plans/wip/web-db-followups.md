@@ -32,8 +32,8 @@ Nothing here is a regression introduced by WSL. Two items (D1, D2) are decisions
 **B. Dead code and misleading UI**
 | ID | Where | Defect |
 |----|----|----|
-| B1 | `internal/web/embedded_static.go` | `EmbeddedFileHandler` has **no caller** (verified: only its own definition and doc comment). `staticContentType` is reachable only from it and from `lo1_core_test.go`. `/static/*` is served by `http.FileServer`, which uses Go's own mime table. WSL kept both because its slice text said to. Decide: wire it back, or delete both and the test. Note `internal/web/static/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.scss` **is** shipped and `.scss` is absent from the type table — harmless only because nothing serves it through that function. |
-| B2 | `internal/database/db_sessions.go`, `InvalidateUserSessionBySessionID` | No caller in `internal/` or `cmd/` (logout goes through `InvalidateUserSession(userID)`). Exported API that only tests use. Delete, or wire logout to it — the by-token form is the one that works from a cookie alone. |
+| B1 | `internal/web/embedded_static.go` | `EmbeddedFileHandler` has **no caller** (verified: only its own definition and doc comment). `staticContentType` is reachable only from it and from `lo1_core_test.go`. `/static/*` is served by `http.FileServer`, which uses Go's own mime table. WSL kept both because its slice text said to. **DECIDED 2026-10-04: delete, do not wire back.** Verified at wave 0: `EmbeddedStaticHandler` (`:38`) **is** live — `webserver_core_routes.go:334` serves `/static/*` through it with `http.FileServer(http.FS(staticFS))`, which uses Go's own mime table and never calls `staticContentType`. So the embed itself stays and three things go: `EmbeddedFileHandler` (`:69`), `staticContentType` (`:97`) and — same dead-export class, found while checking — `ListEmbeddedFiles` (`:23`, "for debugging", no caller anywhere). Keep `EmbeddedStaticFS`, `UseEmbeddedStatic`, `EmbeddedStaticHandler`. Note `internal/web/static/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.scss` **is** shipped and `.scss` is absent from the type table — harmless only because nothing serves it through that function. |
+| B2 | `internal/database/db_sessions.go`, `InvalidateUserSessionBySessionID` | No caller in `internal/` or `cmd/` (logout goes through `InvalidateUserSession(userID)`). Exported API that only tests use. **DECIDED 2026-10-04: delete, do not wire logout to it.** Logout already has the user id from the validated session, so `InvalidateUserSession(userID)` is the natural call and the by-token form buys nothing. No coverage is lost: `TestLo1DBSessionHashedAtRest` proves the hashing with `ValidateUserSession(raw)` succeeding and `ValidateUserSession(hash)` failing; only the assertion specific to the deleted function goes with it. |
 | B3 | `internal/web/web_admin_newsgroups.go`, `adminDeleteNewsgroup` | Flashes "Newsgroup deleted successfully" whenever `DeleteNewsgroup` returns nil — including when nothing was deleted, because the group was still active (`query_DeleteNewsgroup` has an `active = 0` guard, so deleting an active group is a no-op). The admin is told a delete happened that did not. `DeleteNewsgroup` now computes this internally; K1 of WSL pinned its `(name) error` signature, which this plan is free to change. |
 
 **C. Shutdown: test coverage and two loose ends**
@@ -80,7 +80,8 @@ Nothing here is a regression introduced by WSL. Two items (D1, D2) are decisions
   `query_GetSectionGroupsWithActivityStrict` (E1);
   `fu-batch-tests`: `fuBatch…` helpers;
   `fu-misc-hygiene`: `fuHygiene…` helpers;
-  `fu-deadcode`: no new names (deletions only).
+  `fu-deadcode`: no new names (deletions only — removes `EmbeddedFileHandler`, `staticContentType`,
+  `ListEmbeddedFiles`, `InvalidateUserSessionBySessionID`).
   Check each with `grep -rnw '<name>' internal cmd` at the base commit before using it.
 - **K3: tests** are `fu_<slice>_test.go` with identifiers prefixed `fu<Slice>…`. The WSL and WSH
   helpers are reused and never edited: `internal/database/testmain_test.go` (`w0DB`, `w0Name`) and
@@ -132,11 +133,16 @@ rest are arranged around it. Two atomicity constraints drove the layout:
    change, and `pass=25 fail=0` must still hold). This is the only edit K4 permits to that script.
 
 ### Wave 1 (3 parallel slices — no `queries.go`, fully disjoint)
-- slice `fu-deadcode` — **B1**, **B2**, **C3**. Owns `internal/web/embedded_static.go`,
+- slice `fu-deadcode` — **B1**, **B2**, **C3**. Both B1 and B2 are **decided: delete** (see the
+  findings table). Owns `internal/web/embedded_static.go`,
   `internal/database/db_sessions.go` (`InvalidateUserSessionBySessionID` only),
-  `cmd/nntp-analyze/main.go`, `internal/web/fu_deadcode_test.go` (new).
-  Grep for callers before every deletion; if `EmbeddedFileHandler` is deleted, its test in
-  `lo1_core_test.go` goes too — that file is otherwise **not** owned, so touch only those cases.
+  `cmd/nntp-analyze/main.go`, and — **for the dependent assertions only** —
+  `internal/web/lo1_core_test.go` (`TestLo1CoreStaticContentType`, lines ~405-422) and
+  `internal/database/lo1_db_test.go` (the `InvalidateUserSessionBySessionID` block in
+  `TestLo1DBSessionHashedAtRest`). Those two test files are otherwise **not** owned: remove only what
+  references a deleted symbol, change nothing else in them. No `fu_deadcode_test.go` is needed — this
+  slice only deletes; `go build`/`go vet` plus the untouched suite are the proof.
+  Re-grep every symbol before deleting it; if any grows a caller since wave 0, stop and report.
 - slice `fu-batch-tests` — **C1**, **C2**. Owns `internal/database/fu_batch_test.go` (new),
   `internal/web/cronjobs.go`, `internal/web/fu_cron_test.go` (new).
   C1 is the substantial one: it is the first real test of the loop bounds that stop a wedged batch
