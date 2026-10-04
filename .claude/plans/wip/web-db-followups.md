@@ -223,3 +223,57 @@ Two lessons from the WSL run, both of which cost time there:
 2. **A claim in a subagent report is not a fact.** Open the file before repeating it to the user or
    writing it into a plan — one leftover in WSL was recorded wrongly for exactly this reason, and the
    "one-line fix" it proposed would have panicked.
+
+---
+
+## Progress
+
+### Wave 0 — `ed472ef`
+Integration branch `plan-web-db-followups` from `testing-001` @ `60c0b63`. Baseline re-verified after an
+18-day gap: gofmt/vet/build clean, `-race` green across 8 packages, both e2e scripts at
+`pass=16 fail=0` and `pass=25 fail=0`. **E3** done (E12 relabelled, label only). The two questions still
+embedded in **B1** and **B2** were decided **delete**, after verifying that `EmbeddedStaticHandler` is
+genuinely live and that nothing depends on the by-token session invalidation.
+
+### Wave 1 — merged, all 3 slices
+
+| Slice | Branch | Impl commits | Merge | Review |
+|----|----|----|----|----|
+| `fu-deadcode` | `worktree-agent-a9e63f333f38a283b` | `12c2950`, `a16735c` | `005cc4f` (+ README `014b021`) | MERGE |
+| `fu-misc-hygiene` | `worktree-agent-a6cad8ec8717e5ed8` | `d24d9fe`, `ccd2e7d`, `8183b85` | `c08cb33` | MERGE after one minor |
+| `fu-batch-tests` | `worktree-agent-aecdd086682537625` | `57a504a`, `464975c`, `93f2d6a`, `df93e20` | `2d5a978` (+ seam `677c3a2`) | MERGE after three minors |
+
+**Checks on the merged tree (`677c3a2`):** gofmt/vet/build clean; `-race` green across all 8 packages;
+`scripts/test-web-leftovers.sh` **`pass=16 fail=0`**; `scripts/test-web-hardening.sh`
+**`pass=25 fail=0`** with the relabelled E12, E19 and E23 all passing; 0 DATA RACE in both logs.
+
+**What the reviews added that the implementers' own green checks did not:**
+1. **E2 turned out to be a live bug, not a hypothetical.** The review traced two writers that create the
+   `message_count` mismatch *permanently* (E5), so a thread with one such reply reported **zero** replies
+   and served no reply page at all — its articles unreachable from the web. It also showed the fix is
+   bit-identical on healthy rows, since the rebuild path writes `1 + len(children)`.
+2. **C3's justification was wrong while its code was right.** The implementer said the `db.WG.Wait()` is
+   safe because `Shutdown` sets `groupDBsShutdown`; the actual reason is that `IsDBshutdown()` is a
+   non-blocking receive on `StopChan` and so is already true *before* the wait, and `cronDBEvery` was
+   never in `db.WG` at all. Recorded because the stated reason would mislead the next editor.
+3. **The grace seam was partial.** `getBatchGroupDB` and `updateNewsgroupStatsWithRetry` still took the
+   2-minute const, so a 3-second test could hit a 2-minute wait in the nested loop and fail with the
+   wrong diagnosis. Completed inline in `677c3a2`; all four bounded loops now read the seam.
+
+**Judgement calls made during the wave:**
+- **Authorized `fu-batch-tests` to edit `db_batch.go` mid-slice** for the grace seam. Its C1 test cost
+  120s, taking `internal/database` from 27.6s to **146.6s**; the predictable result is people stop
+  running the suite. With the seam: retry1 test **3.02s**, package **~30s**, full 8-package suite
+  **42s** (was 2m29s). Production reads the unchanged const through a zero field, asserted by a test.
+- **Accepted a better fix than the one I proposed.** I suggested a `sync.Map` keyed on
+  `(newsgroup, threadRoot)` for E2's warning throttle; the implementer refused it because that key set
+  grows *with the fault*, and used two atomics instead — O(1) regardless of how many rows are broken.
+- **Confirmed `threadCacheMismatch*` over the `fuHygiene…` prefix** for new production symbols: K2's
+  prefix governs test identifiers, and naming live code after a plan slice reads badly once the plan is
+  filed.
+- **Approved C2's second gate**, beyond the slice text. The loop-top check alone only narrows the
+  window; the check inside `startJob` under `cm.mutex` closes it, because `StopCronManager` closes
+  `stopChannel` before taking that same lock.
+
+**Findings discovered during wave 1 and recorded rather than patched:** **E4** (wave 3), **E5**
+(new wave-2 slice `fu-threadcount`), **E6** (unassigned, needs a user decision).
