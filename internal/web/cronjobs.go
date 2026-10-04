@@ -113,6 +113,8 @@ startJobs:
 		}
 
 	}
+	// The two stop paths above return before this summary on purpose: they report what they
+	// started in their own line, and "total" would be read while the manager is stopping.
 	if created > 0 {
 		cm.mutex.Lock()
 		log.Printf("[CRON] started: %d | total: %d", created, len(cm.jobs))
