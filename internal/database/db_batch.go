@@ -649,7 +649,7 @@ func batchGroupDBRetry(err error, attempt int) (retry bool, delay time.Duration)
 // differently.
 func (sq *SQ3batch) getBatchGroupDB(newsgroup *string, articles int, giveUp func(firstErr, lastErr error)) (*GroupDB, error) {
 	var firstErr error
-	clock := batchShutdownClock{grace: batchShutdownGrace}
+	clock := batchShutdownClock{grace: sq.retryShutdownGrace()}
 	for attempt := 0; ; attempt++ {
 		groupDB, err := sq.db.GetGroupDB(*newsgroup)
 		if err == nil {
@@ -661,7 +661,7 @@ func (sq *SQ3batch) getBatchGroupDB(newsgroup *string, articles int, giveUp func
 		retry, delay := batchGroupDBRetry(err, attempt)
 		if retry && clock.expired(sq.db.IsDBshutdown) {
 			log.Printf("[BATCH] group database '%s' still unavailable %v into shutdown, giving up: %v",
-				*newsgroup, batchShutdownGrace, err)
+				*newsgroup, sq.retryShutdownGrace(), err)
 			retry = false
 		}
 		if !retry {
@@ -769,7 +769,8 @@ drainChannel:
 
 	// The retry1 loop below is unbounded while the database is live (an insert that keeps
 	// failing, e.g. a full filesystem, must not lose the drained articles), but it runs
-	// inside db.WG: once shutdown has begun it gets batchShutdownGrace and then drops the
+	// inside db.WG: once shutdown has begun it gets sq.retryShutdownGrace()
+	// (batchShutdownGrace in production) and then drops the
 	// batch, so db.WG.Wait() cannot block on it.
 	insertGrace := sq.retryShutdownGrace()
 	insertClock := batchShutdownClock{grace: insertGrace}
@@ -823,7 +824,7 @@ retry1:
 	// PHASE 2: Process threading for all articles (reusing the same DB connection)
 	//log.Printf("[BATCH] processNewsgroupBatch Starting threading phase for %d articles in group '%s'", len(batches), *task.Newsgroup)
 	//start := time.Now()
-	// Same bounding as retry1: unbounded while the database is live, batchShutdownGrace
+	// Same bounding as retry1: unbounded while the database is live, sq.retryShutdownGrace()
 	// once shutdown has begun. The articles are committed at this point, so giving up
 	// leaves them without threading, history and stats instead of losing them.
 	threadGrace := sq.retryShutdownGrace()
@@ -956,7 +957,7 @@ retry2:
 					*task.Newsgroup, len(batches), maxArticleNum, latestDate.UTC().Format("2006-01-02 15:04:05"))
 				return txErr
 			})
-		}, batchStatsRetryEvery, statsWhat, sq.db.IsDBshutdown, batchShutdownGrace)
+		}, batchStatsRetryEvery, statsWhat, sq.db.IsDBshutdown, sq.retryShutdownGrace())
 
 		if err != nil {
 			log.Printf("[BATCH] processNewsgroupBatch Failed to update newsgroup stats for '%s': %v", *task.Newsgroup, err)

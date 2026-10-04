@@ -170,7 +170,9 @@ rest are arranged around it. Two atomicity constraints drove the layout:
   `internal/database/thread_cache.go` (the `UpdateThreadCache` fallback at `:91` and
   `GetCachedThreadsFromMemory` at `:441`), `internal/database/db_batch.go`
   (the `batchUpdateThreadCache` fallback at `:1423,1445` **only** — do not touch the `retry1`/`retry2`
-  loops or `batchShutdownClock`, which `fu-batch-tests` now covers with tests),
+  loops, `batchShutdownClock`, `batchShutdownGrace`, `retryGrace` or `retryShutdownGrace`, all of which
+  `fu-batch-tests` now covers with tests; its hunks are at `:97`, `:584`, and the four loop call sites,
+  so there is no textual overlap with the fallback),
   `internal/database/fu_threadcount_test.go` (new).
   It must leave wave 1's `GetCachedThreadReplies` count and its throttled warning intact — this slice
   fixes the *cause*, that one handles rows already on disk. Disjoint from `fu-queries` and
