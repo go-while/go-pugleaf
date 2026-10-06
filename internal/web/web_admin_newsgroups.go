@@ -2,6 +2,7 @@ package web
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -276,7 +277,15 @@ func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
 		return
 	}
 	if !deleted {
-		session.SetError("Newsgroup '" + name + "' was not deleted: deactivate it first")
+		// Two causes reach this branch: the group is still active, or there is no row with
+		// that name at all (a double submit, or a stale admin page). Advising a deactivation
+		// for a group that is already gone is misleading, so name the cause when the id
+		// lookup can tell them apart, and stay vague when it cannot (E10a).
+		msg := "Newsgroup '" + name + "' was not deleted: it must exist and be deactivated first"
+		if _, idErr := s.DB.GetNewsgroupID(name); errors.Is(idErr, sql.ErrNoRows) {
+			msg = "Newsgroup '" + name + "' was not deleted: no newsgroup with that name exists"
+		}
+		session.SetError(msg)
 		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
 		return
 	}

@@ -326,6 +326,9 @@ func TestFuQueriesResetAllWaitsForABusyMainDB(t *testing.T) {
 		t.Fatalf("precondition: bare Exec failed with %v, want a busy/locked error", err)
 	}
 
+	// Capture the log from here on, so only the retries of the call below can match.
+	logs := fuCleanupCaptureLog(t)
+
 	done := make(chan error, 1)
 	go func() { done <- db.ResetAllNewsgroupData() }()
 
@@ -334,6 +337,13 @@ func TestFuQueriesResetAllWaitsForABusyMainDB(t *testing.T) {
 	case err := <-done:
 		t.Fatalf("ResetAllNewsgroupData returned %v while the main DB write lock was held", err)
 	case <-time.After(150 * time.Millisecond):
+	}
+	// "Did not return yet" alone is one-sided: a badly loaded machine could take that long
+	// just to schedule the goroutine, and the assertion would hold with the fix reverted.
+	// retryBackoff logs the first retry (retryLogThrottle(1)), and nothing but a retry of
+	// the step 1 mass UPDATE can write that line here, so require it too (E10c).
+	if !logs.contains("SQLite retry attempt", "UPDATE newsgroups SET") {
+		t.Error("no SQLite retry was logged for the step 1 counter UPDATE: it is not being retried")
 	}
 
 	rolledBack = true
