@@ -225,16 +225,20 @@ func TestFuBatchRetry1DropsBatchAfterShutdownGrace(t *testing.T) {
 	}
 }
 
-// TestFuBatchRetry2ThreadingFailureIsNotRetried pins the premise the retry2 bound rests on.
+// TestFuBatchRetry2ThreadingFailureIsNotRetried pins that a blocked threading write is not
+// retried, with shutdown under way.
 //
 // The plan (C1) asks for the retry1 shape with a trigger on the threading write, but
 // batchProcessThreading logs the failures of batchProcessThreadRoots/batchProcessReplies and
-// returns nil regardless ("Continue processing - don't fail the whole batch"), so the error
-// branch of retry2 - and with it threadClock - is unreachable today: a blocked threading write
-// commits the articles and returns at once instead of retrying.
+// returns nil regardless ("Continue processing - don't fail the whole batch"), so there is no
+// loop at that call site to bound: a blocked threading write commits the articles and returns
+// at once. The retry2 loop that used to sit there - its shutdown clock and attempt counter
+// included - was unreachable for exactly this reason and has been deleted (E6); keeping the
+// swallow was the decision, so this test now pins that decision rather than a premise about
+// dead code.
 //
-// This test keeps that premise honest: it fails the day batchProcessThreading starts
-// propagating errors, which is the day the retry2 bound needs the same test as retry1.
+// It fails the day batchProcessThreading starts propagating errors, which is the day that call
+// site needs a bounded loop like retry1's and the same bounded-drop test.
 func TestFuBatchRetry2ThreadingFailureIsNotRetried(t *testing.T) {
 	logs := fuBatchCaptureLog(t)
 	db := fuBatchIsolatedDB(t)
@@ -249,7 +253,7 @@ func TestFuBatchRetry2ThreadingFailureIsNotRetried(t *testing.T) {
 	grace := db.Batch.retryShutdownGrace()
 	took := fuBatchRun(t, db, task, grace+fuBatchSlack, logs)
 	if took > grace/2 {
-		t.Fatalf("processNewsgroupBatch retried the blocked threading write for %v: batchProcessThreading no longer swallows the failure, so the error branch of retry2 is live and its bound (threadClock) now needs the same bounded-drop test as retry1 - it held this time, the call returned inside the %v grace",
+		t.Fatalf("processNewsgroupBatch retried the blocked threading write for %v: batchProcessThreading no longer swallows the failure, so the PHASE 2 call site now loops and needs the same bounded-drop test as retry1 - the bound held this time, the call returned inside the %v grace",
 			took, grace)
 	}
 
@@ -285,6 +289,6 @@ func TestFuBatchRetry2ThreadingFailureIsNotRetried(t *testing.T) {
 		ArticleNums: map[*string]int64{task.Newsgroup: 1},
 	}}
 	if err := db.Batch.batchProcessThreading(task.Newsgroup, roots, groupDB); err != nil {
-		t.Fatalf("batchProcessThreading returns %v instead of swallowing the failure of the threading write: the error branch of retry2 in processNewsgroupBatch is reachable again and its bound (threadClock) now needs the same bounded-drop test as retry1", err)
+		t.Fatalf("batchProcessThreading returns %v instead of swallowing the failure of the threading write: the PHASE 2 call site in processNewsgroupBatch can now fail, so it needs a bounded loop like retry1's and the same bounded-drop test", err)
 	}
 }

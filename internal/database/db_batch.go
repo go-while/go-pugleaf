@@ -824,39 +824,24 @@ retry1:
 	// PHASE 2: Process threading for all articles (reusing the same DB connection)
 	//log.Printf("[BATCH] processNewsgroupBatch Starting threading phase for %d articles in group '%s'", len(batches), *task.Newsgroup)
 	//start := time.Now()
-	// Same bounding as retry1: unbounded while the database is live, sq.retryShutdownGrace()
-	// once shutdown has begun. The articles are committed at this point, so giving up
-	// leaves them without threading, history and stats instead of losing them.
-	threadGrace := sq.retryShutdownGrace()
-	threadClock := batchShutdownClock{grace: threadGrace}
-	threadAttempts := 0
-retry2:
-	if groupDB == nil {
-		// Phase 1 committed these articles already: returning here leaves them without
-		// threading, history entries and stats, so wait for the group database exactly
-		// as retry1 does and say what is left behind when that fails.
-		groupDB, err = sq.getBatchGroupDB(task.Newsgroup, len(batches), func(_, lastErr error) {
-			log.Printf("[BATCH] %d articles for '%s' are committed without threading/history/stats (rebuild needed): %v",
-				len(batches), *task.Newsgroup, lastErr)
-		})
-		if err != nil {
-			return
-		}
-	}
+	// There is no retry loop here, by decision (E6). batchProcessThreading logs the failures
+	// of batchProcessThreadRoots/batchProcessReplies ("Continue processing - don't fail the
+	// whole batch") and returns nil on every path, so the retry2 loop this line used to carry
+	// - its own shutdown clock, its attempt counter and a group database reacquire - could
+	// never be entered, and the "committed without threading/history/stats (rebuild needed)"
+	// it logged promised a state that cannot occur: control falls straight through into
+	// PHASE 3, so the history adds and the newsgroup stats update below both still run and a
+	// threading failure costs only threading.
+	//
+	// Keeping that swallow is deliberate: threading is derived data a rescan rebuilds, while
+	// propagating the failure would retry and eventually abandon a batch whose articles are
+	// already committed, throwing away the history entries and counters that do succeed. The
+	// error is still checked, so the day batchProcessThreading starts propagating shows up in
+	// the log instead of being dropped on the floor - and that is the day this call site needs
+	// a bounded loop like retry1's, with the test retry1 has.
 	if err := sq.batchProcessThreading(task.Newsgroup, batches, groupDB); err != nil {
-		if groupDB != nil {
-			sq.forceCloseGroupDB(groupDB)
-			log.Printf("[BATCH] processNewsgroupBatch Failed2 to process threading for group '%s': %v groupDB='%#v'", *task.Newsgroup, err, groupDB)
-			groupDB = nil
-		}
-		threadAttempts++
-		if threadClock.expired(sq.db.IsDBshutdown) {
-			log.Printf("[BATCH] %d articles for '%s' are committed without threading/history/stats (rebuild needed): threading still failing %v into shutdown (%d attempts): %v",
-				len(batches), *task.Newsgroup, threadGrace, threadAttempts, err)
-			return
-		}
-		time.Sleep(time.Second)
-		goto retry2
+		log.Printf("[BATCH] threading failed for %d articles in '%s' (threading only: the articles, their history entries and the newsgroup counters are unaffected, a rescan rebuilds threads): %v",
+			len(batches), *task.Newsgroup, err)
 	}
 	defer groupDB.Return()
 	//threadingDuration := time.Since(start)
@@ -1426,11 +1411,17 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[i
 			row := selectStmt.QueryRow(threadRoot)
 			err := row.Scan(&currentChildren, &currentCount)
 			if err != nil {
-				// Same caveat as UpdateThreadCache: a non-ErrNoRows failure means the row
-				// probably exists and we could not read it, and the initialize-then-update
-				// path below then overwrites child_articles with only these updates (E7).
+				// Only sql.ErrNoRows means the row does not exist. Any other failure means
+				// the row probably does exist and could not be read (a write lock that
+				// outlived the retry budget), and taking the fallback below on it loses data:
+				// the upsert leaves child_articles alone and the following UPDATE then
+				// overwrites it with only these updates, so the previously listed children
+				// are gone until a rescan (E7). Return the error instead -- this closure runs
+				// inside RetryableTransactionExec, which rolls back and retries exactly as a
+				// transient lock deserves, and the caller (batchProcessReplies) logs what is
+				// left for the rescan if it still fails.
 				if !errors.Is(err, sql.ErrNoRows) {
-					log.Printf("[BATCH-CACHE] Warning: thread_cache read for root %d failed with a non-ErrNoRows error, treating the row as missing: previously listed children may be lost until a rescan: %v", threadRoot, err)
+					return fmt.Errorf("failed to read thread_cache for root %d: %w", threadRoot, err)
 				}
 				// Thread cache entry doesn't exist, initialize it with the first update
 				//firstUpdate := updates[0]
