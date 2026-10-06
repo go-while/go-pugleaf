@@ -13,9 +13,13 @@
                             (Page <strong>{{.Pagination.CurrentPage}}</strong> of
                             <strong>{{.Pagination.TotalPages}}</strong>)
                             {{if .Pagination.IsClamped}}
+                            {{/* Deliberately does NOT point at ?cursor=: reading by cursor works,
+                                 but a cursor view's own Next/Previous links are not wired yet
+                                 (they emit ?page=0 and bounce back to page 1), so recommending it
+                                 would send the visitor into a dead end. Restore the pointer once
+                                 cursor navigation links through. */}}
                             &mdash; only the first <strong>{{.Pagination.LinkablePages}}</strong>
-                            pages can be reached by page number; use the <code>cursor</code>
-                            parameter for older items
+                            pages can be reached by page number
                             {{end}}
                         </small>
                     </div>

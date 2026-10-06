@@ -96,8 +96,14 @@ func TestFuPaginationBoundedLinks(t *testing.T) {
 	if !strings.Contains(body, fmt.Sprintf(`href="?page=%d"`, wantBound)) {
 		t.Errorf("no Last link to page %d: %s", wantBound, body)
 	}
-	if !strings.Contains(body, "cursor") {
-		t.Errorf("clamped listing does not mention the cursor parameter: %s", body)
+	// The note must state the bound, and must NOT recommend ?cursor=: reading by cursor
+	// works, but a cursor view's own Next/Previous emit ?page=0 and bounce back to page 1
+	// (E12), so pointing a visitor there would trade one dishonest link for another.
+	if !strings.Contains(body, fmt.Sprintf("<strong>%d</strong>", wantBound)) {
+		t.Errorf("clamped listing does not state the %d-page bound: %s", wantBound, body)
+	}
+	if strings.Contains(body, "<code>cursor</code>") {
+		t.Errorf("clamped listing recommends the cursor parameter, whose own paging links are not wired (E12): %s", body)
 	}
 
 	// On the last linkable page there is no next page to offer.
