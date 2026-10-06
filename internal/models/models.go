@@ -402,14 +402,41 @@ type PaginationInfo struct {
 	PageSize    int
 	TotalCount  int
 	TotalPages  int
-	HasNext     bool
-	HasPrev     bool
-	NextPage    int
-	PrevPage    int
+	// LinkablePages is the highest page the server will actually serve, for listings whose
+	// ?page= is clamped to a maximum OFFSET (article listings cap it, because turning a page
+	// number into a cursor is a deep OFFSET scan). Zero means "not clamped": templates then
+	// link up to TotalPages. Templates must use LastLinkablePage()/IsClamped() rather than
+	// TotalPages, or a "Last" link promises a page the handler silently serves as another
+	// one (D1).
+	LinkablePages int
+	HasNext       bool
+	HasPrev       bool
+	NextPage      int
+	PrevPage      int
 }
 
-// NewPaginationInfo creates pagination info
-func NewPaginationInfo(page, pageSize, totalCount int) *PaginationInfo {
+// LastLinkablePage returns the highest page number a template may link to.
+func (p *PaginationInfo) LastLinkablePage() int {
+	if p == nil {
+		return 1
+	}
+	if p.LinkablePages > 0 && p.LinkablePages < p.TotalPages {
+		return p.LinkablePages
+	}
+	return p.TotalPages
+}
+
+// IsClamped reports whether the listing has more pages than the server will serve by page
+// number, so the info text can say so instead of the links promising them.
+func (p *PaginationInfo) IsClamped() bool {
+	return p != nil && p.LinkablePages > 0 && p.TotalPages > p.LinkablePages
+}
+
+// NewPaginationInfo creates pagination info.
+// maxOffset is optional: a caller whose ?page= is clamped to a maximum OFFSET passes that
+// maximum (the same value it gives the clamp), and the pages above maxOffset/pageSize+1 are
+// then not linkable. Callers that pass nothing behave exactly as before.
+func NewPaginationInfo(page, pageSize, totalCount int, maxOffset ...int) *PaginationInfo {
 	// Callers pass a page size from a package var, so guard the division: pageSize 0 would
 	// panic here rather than in the caller's slice, which is easy to miss.
 	if pageSize < 1 {
@@ -420,15 +447,28 @@ func NewPaginationInfo(page, pageSize, totalCount int) *PaginationInfo {
 		totalPages = 1
 	}
 
+	// Mirror internal/web.clampOffsetPage: it allows 1..maxOffset/pageSize+1.
+	linkablePages := 0
+	if len(maxOffset) > 0 && maxOffset[0] > 0 {
+		linkablePages = maxOffset[0]/pageSize + 1
+	}
+	lastLinkable := totalPages
+	if linkablePages > 0 && linkablePages < totalPages {
+		lastLinkable = linkablePages
+	}
+
 	return &PaginationInfo{
-		CurrentPage: page,
-		PageSize:    pageSize,
-		TotalCount:  totalCount,
-		TotalPages:  totalPages,
-		HasNext:     page < totalPages,
-		HasPrev:     page > 1,
-		NextPage:    page + 1,
-		PrevPage:    page - 1,
+		CurrentPage:   page,
+		PageSize:      pageSize,
+		TotalCount:    totalCount,
+		TotalPages:    totalPages,
+		LinkablePages: linkablePages,
+		// Not page < totalPages: beyond the clamp the next page number comes back as the
+		// current one, so there is nothing to link.
+		HasNext:  page < lastLinkable,
+		HasPrev:  page > 1,
+		NextPage: page + 1,
+		PrevPage: page - 1,
 	}
 }
 

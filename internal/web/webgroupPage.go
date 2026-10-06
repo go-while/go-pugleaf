@@ -104,17 +104,19 @@ func (s *WebServer) groupPage(c *gin.Context) {
 		}
 
 		if page > 0 {
-			// Page-based pagination info
-			pagination = models.NewPaginationInfo(page, LIMIT_groupPage, totalCount)
+			// Page-based pagination info. maxOffsetArticles is the same bound the clamp
+			// above applies, so the template links no page the clamp would rewrite (D1).
+			pagination = models.NewPaginationInfo(page, LIMIT_groupPage, totalCount, maxOffsetArticles)
 		} else {
 			// Cursor-based pagination - create a simple pagination info
 			pagination = &models.PaginationInfo{
-				CurrentPage: 1,
-				PageSize:    LIMIT_groupPage,
-				TotalCount:  totalCount,
-				TotalPages:  (totalCount + LIMIT_groupPage - 1) / LIMIT_groupPage,
-				HasNext:     hasMore,
-				HasPrev:     lastArticleNum > 0,
+				CurrentPage:   1,
+				PageSize:      LIMIT_groupPage,
+				TotalCount:    totalCount,
+				TotalPages:    (totalCount + LIMIT_groupPage - 1) / LIMIT_groupPage,
+				LinkablePages: maxOffsetArticles/LIMIT_groupPage + 1,
+				HasNext:       hasMore,
+				HasPrev:       lastArticleNum > 0,
 			}
 		}
 	}
