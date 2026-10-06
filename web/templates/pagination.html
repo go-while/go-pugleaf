@@ -12,6 +12,11 @@
                             <strong>{{.Pagination.TotalCount}}</strong> items
                             (Page <strong>{{.Pagination.CurrentPage}}</strong> of
                             <strong>{{.Pagination.TotalPages}}</strong>)
+                            {{if .Pagination.IsClamped}}
+                            &mdash; only the first <strong>{{.Pagination.LinkablePages}}</strong>
+                            pages can be reached by page number; use the <code>cursor</code>
+                            parameter for older items
+                            {{end}}
                         </small>
                     </div>
 
@@ -49,7 +54,7 @@
                                 </a>
                             </li>
                             <li class="page-item">
-                                <a class="page-link" href="?page={{.Pagination.TotalPages}}" aria-label="Last">
+                                <a class="page-link" href="?page={{.Pagination.LastLinkablePage}}" aria-label="Last">
                                     Last <span aria-hidden="true">&raquo;</span>
                                 </a>
                             </li>
