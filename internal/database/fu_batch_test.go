@@ -12,8 +12,10 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-// fu_batch_test.go covers C1 of the web-db-followups plan: the shutdown bounds of the two
-// retry loops of processNewsgroupBatch (db_batch.go, labels retry1 and retry2).
+// fu_batch_test.go covers C1 of the web-db-followups plan: the shutdown bound of
+// processNewsgroupBatch's retry loop (db_batch.go, label retry1), plus the premise that its
+// PHASE 2 threading call is not retried. The retry2 label and its bound were deleted with E6,
+// once batchProcessThreading was shown to return nil on every path.
 //
 // processNewsgroupBatch runs inside db.WG (StartOrch -> processAllPendingBatches) and every
 // tool closes db.StopChan, waits for db.WG and only then closes the databases. A retry loop
@@ -261,7 +263,7 @@ func TestFuBatchRetry2ThreadingFailureIsNotRetried(t *testing.T) {
 		t.Fatalf("the threads trigger never fired, so this test proves nothing. Last log lines:\n%s", logs.tail(12))
 	}
 
-	// Phase 1 committed the articles: that is why giving up in retry2 only costs threading.
+	// Phase 1 committed the articles: that is why a swallowed PHASE 2 failure only costs threading.
 	groupDB, err := db.GetGroupDB(group)
 	if err != nil {
 		t.Fatalf("GetGroupDB(%s): %v", group, err)

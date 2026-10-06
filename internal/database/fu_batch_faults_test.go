@@ -23,8 +23,10 @@ import (
 
 // fuBatchFaultsUnreadableRow seeds a thread_cache row for threadRoot that exists but cannot be
 // read: message_count holds text, so the fallback's Scan fails with a conversion error instead
-// of sql.ErrNoRows. That is the same classification the real fault produces - a write lock
-// outliving the retry budget - without needing a second writer and a timing window.
+// of sql.ErrNoRows. What it shares with the real fault - a write lock outliving the retry
+// budget - is only that both are non-sql.ErrNoRows and so take the same branch: a lock error
+// IS retryable, which is exactly why this helper's caller asserts the injected one is not.
+// Nothing here covers the retry-then-exhaust-the-cap half of the real fault.
 func fuBatchFaultsUnreadableRow(t *testing.T, gdb *GroupDB, threadRoot int64, children string) {
 	t.Helper()
 	if _, err := RetryableExec(gdb.DB, `INSERT INTO thread_cache

@@ -840,7 +840,11 @@ retry1:
 	// the log instead of being dropped on the floor - and that is the day this call site needs
 	// a bounded loop like retry1's, with the test retry1 has.
 	if err := sq.batchProcessThreading(task.Newsgroup, batches, groupDB); err != nil {
-		log.Printf("[BATCH] threading failed for %d articles in '%s' (threading only: the articles, their history entries and the newsgroup counters are unaffected, a rescan rebuilds threads): %v",
+		// Deliberately promises only what is guaranteed: the article rows, their history
+		// entries and the newsgroup counters do survive, but the threading phase also writes
+		// articles.reply_count (batchUpdateReplyCounts) and NOTHING recomputes that column -
+		// no rescan path touches it - so a parent's reply count can stay stale for good.
+		log.Printf("[BATCH] threading failed for %d articles in '%s' (the article rows, their history entries and the newsgroup counters are unaffected; a rescan rebuilds threads, but parent reply_count is not rebuilt): %v",
 			len(batches), *task.Newsgroup, err)
 	}
 	defer groupDB.Return()
