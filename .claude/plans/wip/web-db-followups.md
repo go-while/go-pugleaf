@@ -364,3 +364,54 @@ genuinely live and that nothing depends on the by-token session invalidation.
 
 **Findings discovered during wave 2:** **E7** (user decision, with E6), **E8**, **E9**, **E10**
 (all wave 3).
+
+### Wave 3 — merged, all 3 slices
+
+| Slice | Branch | Impl commits | Review |
+|----|----|----|----|
+| `fu-pagination` | `worktree-agent-a293296bbde249426` | `3c4a6dc`, `7a38deb`, `f55cb82` (+ note fix `47c8511`) | MERGE |
+| `fu-batch-faults` | `worktree-agent-aaa3e985ce26831b4` | `2962b60`, `77aa7b6` (+ log fix `92c947a`) | MERGE AFTER FIXES → fixed |
+| `fu-queries-cleanup` | `worktree-agent-a1b762c2d2d999195` | `8c098ed` (+ fixes `0cf3841`) | MERGE |
+
+**Checks on the merged tree:** gofmt/vet/build clean; `-race` green across all 8 packages;
+`scripts/test-web-leftovers.sh` **`pass=16 fail=0`**; `scripts/test-web-hardening.sh`
+**`pass=25 fail=0`**; 0 DATA RACE in both logs.
+
+**Two cases where a fix made something else worse, both caught by review and mitigated at integration:**
+1. **D1's clamp note invited visitors into a dead end.** It said "use the `cursor` parameter for older
+   items" — but a cursor view's First, Previous **and** Next all emit `?page=0` and bounce back to page 1
+   (`HasPrev` is unconditionally true there), so the note committed the same dishonest-link sin D1 set
+   out to fix. The note now states the bound only, and the test assertion is **inverted** so re-adding
+   the pointer fails until cursor navigation is wired (`47c8511`). Recorded as E12.
+2. **E6's retained log over-promised.** It claimed "the articles … are unaffected", but the threading
+   phase also writes `articles.reply_count` via `batchUpdateReplyCounts`, and **nothing recomputes that
+   column** — verified, `grep reply_count internal/database/db_rescan.go` is empty. So a parent's reply
+   count can stay stale for good. The message now promises only the article rows, history entries and
+   newsgroup counters, and names `reply_count` as the exception (`92c947a`).
+
+**Judgement calls:**
+- **Accepted `fu-batch-faults`' deviation on E6** — it deleted the dead clock, counter, reacquire block
+  and both misleading logs, but kept the call error-checked with one log rather than dropping
+  `batchProcessThreading`'s `error` return. The review's argument decided it: removing the return would
+  force deleting `fu_batch_test.go:287-291`, the **only mechanical guard** that E6's premise still
+  holds, which trades a tripwire for three unreachable lines. It also keeps a future reversal cheap.
+- **Accepted `fu-pagination`'s variadic widening of `NewPaginationInfo`** — the wave-3 slice text
+  explicitly licenses changing that function, and six of the nine no-bound callers live in files the
+  slice does not own. The review verified byte-identical behaviour for all nine.
+- **Did not convert `BulkDeleteNewsgroups` to `RetryableTransactionExec`** (E13). The slice raised it
+  about its own change and declined; the review quantified the widening as hold time, not failure
+  probability (the lock is still taken at exactly one point, and every main-DB connection carries
+  `busy_timeout = 30000`), so it is an inconsistency with `DeleteNewsgroup` rather than a new failure mode.
+
+**Two tests were strengthened rather than merely added:**
+- E10c's A2 retry test was one-sided. A mutation that reverts the fix **and** delays the goroutine by
+  400 ms — simulating the loaded machine where the old timing assertion goes blind — fails only on the
+  new log assertion. The review reproduced it, then removed just that assertion and watched the mutated
+  test **pass**, which is the proof the old form was blind.
+- The log helper now matches substrings **per line**, so an unrelated background retry line cannot
+  combine with another line to satisfy an assertion by coincidence.
+
+**Findings discovered during wave 3:** **E12** (cursor links, unassigned), **E13** (bulk delete not
+retried, unassigned), **E14** (thread page fetches unclamped then clamps, unassigned), **E15** (the
+main-DB `spam` table has the dangling-row problem `user_spam_flags` had, with a visible symptom —
+unassigned).
