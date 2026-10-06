@@ -84,9 +84,14 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 		return
 	}
 
-	// Total messages = root + replies
+	// Total messages = root + replies (display only).
 	totalMessages := totalReplies + 1
-	totalPages := (totalMessages + ThreadMessages_perPage - 1) / ThreadMessages_perPage
+	// Pages are counted over the replies alone: GetCachedThreadReplies paginates only the
+	// replies, and the root is prepended on page 1. Counting the root into the page total
+	// linked one page too many whenever the reply count was an exact multiple of the page
+	// size - 50 replies gave 2 pages, and page 2 held neither a reply nor the root (E4).
+	// Page 1 therefore holds one item more than the others.
+	totalPages := (totalReplies + ThreadMessages_perPage - 1) / ThreadMessages_perPage
 	if totalPages == 0 {
 		totalPages = 1
 	}
