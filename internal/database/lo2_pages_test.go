@@ -168,8 +168,8 @@ func TestLo2PagesDisplayNameRuneLimit(t *testing.T) {
 	}
 
 	ok := strings.Repeat("ä", 64) // 64 runes, 128 bytes
-	if err := db.UpdateUserDisplayName(u.ID, ok); err != nil {
-		t.Fatalf("UpdateUserDisplayName(64 runes): %v", err)
+	if err := db.UpdateUserProfile(u.ID, nil, nil, &ok); err != nil {
+		t.Fatalf("UpdateUserProfile(64-rune display name): %v", err)
 	}
 	got, err := db.GetUserByID(u.ID)
 	if err != nil {
@@ -180,8 +180,8 @@ func TestLo2PagesDisplayNameRuneLimit(t *testing.T) {
 	}
 
 	tooLong := strings.Repeat("ä", 65)
-	if err := db.UpdateUserDisplayName(u.ID, tooLong); err == nil {
-		t.Fatal("UpdateUserDisplayName(65 runes) = nil, want an error")
+	if err := db.UpdateUserProfile(u.ID, nil, nil, &tooLong); err == nil {
+		t.Fatal("UpdateUserProfile(65-rune display name) = nil, want an error")
 	}
 	got, err = db.GetUserByID(u.ID)
 	if err != nil {

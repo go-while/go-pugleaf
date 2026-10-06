@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -383,7 +382,23 @@ func (db *Database) BulkUpdateNewsgroupActive(names []string, active bool) (int,
 	return int(rowsAffected), nil
 }
 
-// BulkDeleteNewsgroups deletes multiple inactive newsgroups
+// The bulk forms of the two dependent deletes of DeleteNewsgroup (E9). Each %s takes the
+// same `?,?,...` placeholder list as query_BulkDeleteNewsgroupsRows, and each repeats its
+// `active = 0` guard through a subselect on newsgroups, so all three statements cover
+// exactly the same groups - the ones the newsgroups delete really removes. Both therefore
+// have to run while the newsgroups rows are still there: the flags are keyed on
+// newsgroups.id, which only the surviving row resolves, and after the delete nothing says
+// any more which of the named groups was inactive.
+const (
+	query_BulkDeleteUserSpamFlags  = `DELETE FROM user_spam_flags WHERE newsgroup_id IN (SELECT id FROM newsgroups WHERE name IN (%s) AND active = 0)`
+	query_BulkDeleteSectionGroups  = `DELETE FROM section_groups WHERE newsgroup_name IN (SELECT name FROM newsgroups WHERE name IN (%s) AND active = 0)`
+	query_BulkDeleteNewsgroupsRows = `DELETE FROM newsgroups WHERE name IN (%s) AND active = 0`
+)
+
+// BulkDeleteNewsgroups deletes multiple inactive newsgroups and the rows keyed on them.
+// It removes the same dependent rows as DeleteNewsgroup: without that, a bulk-deleted
+// section member left an orphan section_groups row, still listed in the admin section view
+// where it 404s, plus user_spam_flags rows that nothing would ever clean up (E9).
 func (db *Database) BulkDeleteNewsgroups(names []string) (int, error) {
 	if len(names) == 0 {
 		return 0, nil
@@ -404,11 +419,17 @@ func (db *Database) BulkDeleteNewsgroups(names []string) (int, error) {
 		placeholders[i] = "?"
 		args[i] = name
 	}
+	in := strings.Join(placeholders, ",")
 
-	query := fmt.Sprintf(
-		`DELETE FROM newsgroups WHERE name IN (%s) AND active = 0`,
-		strings.Join(placeholders, ","),
-	)
+	// Dependent rows first, while the newsgroups rows they are resolved from still exist.
+	if _, err := tx.Exec(fmt.Sprintf(query_BulkDeleteUserSpamFlags, in), args...); err != nil {
+		return 0, fmt.Errorf("failed to delete user spam flags of %d newsgroups: %w", len(names), err)
+	}
+	if _, err := tx.Exec(fmt.Sprintf(query_BulkDeleteSectionGroups, in), args...); err != nil {
+		return 0, fmt.Errorf("failed to delete section groups of %d newsgroups: %w", len(names), err)
+	}
+
+	query := fmt.Sprintf(query_BulkDeleteNewsgroupsRows, in)
 
 	result, err := tx.Exec(query, args...)
 	if err != nil {
@@ -773,33 +794,27 @@ func (db *Database) GetUserByID(id int64) (*models.User, error) {
 	return &u, nil
 }
 
-// UpdateUserEmail updates a user's email address
-const query_UpdateUserEmail = `UPDATE users SET email = ? WHERE id = ?`
+// The three statements that write an editable column of a users row. They are the only
+// place naming those columns: UpdateUserProfile (db_user_profile.go) executes them inside
+// one transaction and the per-field helpers below delegate to it, so the admin path and the
+// user's own profile form write a column exactly the same way. Before E8 the same three
+// columns were written from two places with duplicated SQL, and an additive change to one
+// side (an updated_at stamp, a `AND disabled = 0` guard) would silently have applied to
+// only one of them. The 64-rune display name limit has one owner too, UpdateUserProfile.
+const (
+	query_UpdateUserEmail       = `UPDATE users SET email = ? WHERE id = ?`
+	query_UpdateUserPassword    = `UPDATE users SET password_hash = ? WHERE id = ?`
+	query_UpdateUserDisplayName = `UPDATE users SET display_name = ? WHERE id = ?`
+)
 
+// UpdateUserEmail updates a user's email address (admin user edit, web_admin_userfuncs.go)
 func (db *Database) UpdateUserEmail(userID int64, email string) error {
-	_, err := RetryableExec(db.mainDB, query_UpdateUserEmail, email, userID)
-	return err
+	return db.UpdateUserProfile(userID, nil, &email, nil)
 }
 
-// UpdateUserPassword updates a user's password hash
-const query_UpdateUserPassword = `UPDATE users SET password_hash = ? WHERE id = ?`
-
+// UpdateUserPassword updates a user's password hash (cmd/usermgr)
 func (db *Database) UpdateUserPassword(userID int64, passwordHash string) error {
-	_, err := RetryableExec(db.mainDB, query_UpdateUserPassword, passwordHash, userID)
-	return err
-}
-
-// UpdateUserDisplayName updates a user's display name
-const query_UpdateUserDisplayName = `UPDATE users SET display_name = ? WHERE id = ?`
-
-func (db *Database) UpdateUserDisplayName(userID int64, displayName string) error {
-	// Count characters, not bytes: the web validation is 64 runes, so a byte limit here
-	// rejected names the form had already accepted, after the other profile writes (F6).
-	if utf8.RuneCountInString(displayName) > 64 {
-		return fmt.Errorf("display name is too long")
-	}
-	_, err := RetryableExec(db.mainDB, query_UpdateUserDisplayName, displayName, userID)
-	return err
+	return db.UpdateUserProfile(userID, &passwordHash, nil, nil)
 }
 
 // UpdateUserStatus updates user status fields (verified, disabled, no_posting)
@@ -1393,7 +1408,10 @@ func (db *Database) sectionGroupsWithActivity(queryTemplate string, sectionID in
 
 		out = append(out, &sg)
 	}
-	return out, nil
+	// Without rows.Err() a truncated result set reads as a complete listing with a nil
+	// error and the visitor silently gets a short section page (E10b). One line covers both
+	// GetSectionGroupsWithActivity and ...Strict, which share this body.
+	return out, rows.Err()
 }
 
 // GetSectionGroupsByName returns all section groups for a newsgroup name
