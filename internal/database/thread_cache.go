@@ -1,11 +1,8 @@
 package database
 
 import (
-	"database/sql"
-	"errors"
 	"fmt"
 	"log"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,100 +54,9 @@ func (db *Database) InitializeThreadCache(groupDB *GroupDB, threadRoot int64, ro
 	return nil
 }
 
-// UpdateThreadCache updates an existing cache entry when a reply is added
-func (db *Database) UpdateThreadCache(groupDB *GroupDB, threadRoot int64, childArticleNum int64, childDate time.Time) error {
-
-	// First, get the current cache entry
-	var currentChildren string
-	var currentCount int
-
-	query := `SELECT child_articles, message_count FROM thread_cache WHERE thread_root = ?`
-	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{threadRoot}, &currentChildren, &currentCount)
-	if err != nil {
-		// If the thread cache entry doesn't exist, queue it for batch initialization
-		// This can happen if the root article was processed without initializing the cache
-		//log.Printf("Thread cache entry for root %d not found, queuing for batch initialization", threadRoot)
-
-		// A non-ErrNoRows failure means the row probably DOES exist and we simply could not
-		// read it (a write lock that outlived the retry budget). The upsert below leaves
-		// child_articles alone, so the UPDATE then overwrites it with just this one child and
-		// the previously listed ones are lost until a rescan (E7). That row is now internally
-		// consistent, so the mismatch warning further down cannot catch it - log it here, or
-		// the loss is silent.
-		if !errors.Is(err, sql.ErrNoRows) {
-			log.Printf("[CACHE:THREADS] Warning: thread_cache read for root %d failed with a non-ErrNoRows error, treating the row as missing: previously listed children may be lost until a rescan: %v", threadRoot, err)
-		}
-
-		// Create a minimal article object for initialization
-		rootArticle := &models.Article{
-			DateSent: childDate, // Use child date as fallback for root date
-		}
-
-		// Initialize directly instead of batch processing
-		err = db.InitializeThreadCache(groupDB, threadRoot, rootArticle)
-		if err != nil {
-			log.Printf("Failed to initialize thread cache for root %d: %v", threadRoot, err)
-			// Continue with defaults to allow the update to proceed
-		}
-
-		// Update memory cache immediately so subsequent operations can use it
-		if db.MemThreadCache != nil {
-			// Initialize with minimal values - batch processing will update the database
-			db.MemThreadCache.UpdateThreadMetadata(groupDB.Newsgroup, threadRoot, 1, childDate, "")
-		}
-
-		// Continue against the row InitializeThreadCache just inserted: it has no children
-		// and message_count = 1 for the root article, so currentCount starts at 1 and the
-		// update below writes 1 + 1 child. Seeding 0 here wrote message_count = 1 for a row
-		// that already listed one child, and since nothing recomputes message_count outside a
-		// rescan the row stayed one low forever -- the thread then under-reported by a reply
-		// and, with exactly one reply, reported none at all (E5). The invariant every other
-		// writer keeps is message_count == 1 + len(child_articles) (db_rescan.go:
-		// newMessageCount := 1 + len(finalChildren)).
-		currentChildren = ""
-		currentCount = 1
-	}
-
-	// Add the new child to the list
-	var newChildren string
-	if currentChildren == "" {
-		newChildren = strconv.FormatInt(childArticleNum, 10)
-	} else {
-		newChildren = currentChildren + "," + strconv.FormatInt(childArticleNum, 10)
-	}
-
-	// Update the cache
-	updateQuery := `
-		UPDATE thread_cache
-		SET child_articles = ?,
-			message_count = ?,
-			last_child_number = ?,
-			last_activity = ?
-		WHERE thread_root = ?
-	`
-
-	// Format childDate as UTC string to avoid timezone encoding issues
-	childDateUTC := childDate.UTC().Format("2006-01-02 15:04:05")
-
-	_, err = RetryableExec(groupDB.DB, updateQuery,
-		newChildren,
-		currentCount+1,
-		childArticleNum,
-		childDateUTC,
-		threadRoot,
-	)
-
-	if err != nil {
-		return fmt.Errorf("failed to update thread cache for root %d: %w", threadRoot, err)
-	}
-
-	// Update memory cache
-	if db.MemThreadCache != nil {
-		db.MemThreadCache.UpdateThreadMetadata(groupDB.Newsgroup, threadRoot, currentCount+1, childDate, newChildren)
-	}
-
-	return nil
-}
+// The per-reply counterpart of InitializeThreadCache, UpdateThreadCache, was deleted: it had
+// no production caller (the live writer is SQ3batch.batchUpdateThreadCache in db_batch.go),
+// so its copy of the select-miss misclassification fixed as E7 was unreachable.
 
 var MemCacheThreadsExpiry = 5 * time.Minute // Default expiry for thread cache entries TODO should match cron cycle
 
