@@ -19,10 +19,13 @@ import (
 //
 //	message_count == 1 + len(child_articles)   // 1 for the root article
 //
-// Both writers have a "cache row missing" fallback that inserts a row with message_count = 1
+// Both writers had a "cache row missing" fallback that inserts a row with message_count = 1
 // and then counted the replies from 0 instead of from that 1, so the row they wrote was one
 // low -- forever, because nothing recomputes message_count outside a rescan. A thread with
 // exactly one such reply reported zero replies and served no reply page at all.
+//
+// One of those two writers, UpdateThreadCache, has since been deleted as dead code (E11), so
+// everything here now drives the surviving live writer, batchUpdateThreadCache.
 
 // fuThreadcountBase is the fixed root date of every thread these tests build.
 var fuThreadcountBase = time.Date(2024, 7, 1, 10, 0, 0, 0, time.UTC)
@@ -41,8 +44,8 @@ func fuThreadcountGroup(t *testing.T) string {
 
 // fuThreadcountArticles opens the group database of a fresh newsgroup and inserts a visible
 // root article 1 plus nChildren visible children numbered 2..nChildren+1. It deliberately
-// writes **no** thread_cache row: that missing row is what sends both writers under test into
-// their initialize-and-continue fallback.
+// writes **no** thread_cache row: that missing row is what sends the writer under test into
+// its initialize-and-continue fallback.
 func fuThreadcountArticles(t *testing.T, nChildren int) (*Database, *GroupDB) {
 	t.Helper()
 	db := w0DB(t)
@@ -91,24 +94,46 @@ func fuThreadcountCheckRow(t *testing.T, gdb *GroupDB, threadRoot int64, wantChi
 	}
 }
 
-// TestFuThreadcountUpdateThreadCacheFallbackCountsFromOne drives UpdateThreadCache's "cache
-// row missing" fallback (thread_cache.go): the first reply of a thread whose root was
-// processed without initializing the cache. The fallback calls InitializeThreadCache, which
-// inserts message_count = 1, so the reply it then adds must make the row read 2 -- it used to
-// read 1, which GetCachedThreadReplies reported as zero replies (no reply page at all, the
-// thread's articles unreachable from the web).
-func TestFuThreadcountUpdateThreadCacheFallbackCountsFromOne(t *testing.T) {
+// fuThreadcountBatchAddChild applies a single reply to threadRoot through
+// batchUpdateThreadCache, which since UpdateThreadCache was deleted (E11, no production
+// caller) is the only remaining production writer of a per-reply thread_cache update. One
+// child per call reproduces exactly the sequence the deleted function was driven on: the
+// first call finds no row and takes the select-miss fallback, every later one takes the
+// select-hit path.
+func fuThreadcountBatchAddChild(t *testing.T, db *Database, gdb *GroupDB, threadRoot, child int64) {
+	t.Helper()
+	sq := db.Batch
+	if sq == nil {
+		t.Fatal("db.Batch is nil")
+	}
+	if err := sq.batchUpdateThreadCache(gdb, map[int64][]threadCacheUpdateData{
+		threadRoot: {{
+			childArticleNum: child,
+			childDate:       fuThreadcountBase.Add(time.Duration(child) * time.Minute),
+		}},
+	}); err != nil {
+		t.Fatalf("batchUpdateThreadCache(root=%d, child=%d): %v", threadRoot, child, err)
+	}
+}
+
+// TestFuThreadcountOneReplyPerBatchCountsFromOne drives the "cache row missing" fallback one
+// reply at a time: the first reply of a thread whose root was processed without initializing
+// the cache, then the select-hit path for every reply after it. The fallback inserts
+// message_count = 1 for the root, so the reply it then adds must make the row read 2 -- it
+// used to read 1, which GetCachedThreadReplies reported as zero replies (no reply page at
+// all, the thread's articles unreachable from the web).
+//
+// This was TestFuThreadcountUpdateThreadCacheFallbackCountsFromOne, which drove the same
+// shape through UpdateThreadCache; that function is gone (E11) and the batch writer is the
+// live path, so the same two assertions are made against it instead -- the invariant after
+// every single reply, and the read path seeing exactly those replies.
+func TestFuThreadcountOneReplyPerBatchCountsFromOne(t *testing.T) {
 	for _, replies := range []int{1, 2, 5} {
 		t.Run(fmt.Sprintf("%d_replies", replies), func(t *testing.T) {
 			db, gdb := fuThreadcountArticles(t, replies)
 
-			// Nothing seeded thread_cache, so the first UpdateThreadCache takes the fallback
-			// and every later one takes the normal select-hit path.
 			for child := int64(2); child <= int64(replies)+1; child++ {
-				childDate := fuThreadcountBase.Add(time.Duration(child) * time.Minute)
-				if err := db.UpdateThreadCache(gdb, 1, child, childDate); err != nil {
-					t.Fatalf("UpdateThreadCache(child=%d): %v", child, err)
-				}
+				fuThreadcountBatchAddChild(t, db, gdb, 1, child)
 				// The invariant has to hold after every single reply, not just at the end.
 				fuThreadcountCheckRow(t, gdb, 1, int(child)-1)
 			}
@@ -209,7 +234,7 @@ func TestFuThreadcountListingAgreesWithThreadPage(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		replies  int
-		seedRow  bool // seed the row directly instead of going through UpdateThreadCache
+		seedRow  bool // seed the row directly instead of going through the batch writer
 		rowCount int  // message_count to seed with (seedRow only)
 	}{
 		{name: "fallback_created_one_reply", replies: 1},
@@ -238,10 +263,7 @@ func TestFuThreadcountListingAgreesWithThreadPage(t *testing.T) {
 				}
 			} else {
 				for child := int64(2); child <= last; child++ {
-					if err := db.UpdateThreadCache(gdb, 1, child,
-						fuThreadcountBase.Add(time.Duration(child)*time.Minute)); err != nil {
-						t.Fatalf("UpdateThreadCache(child=%d): %v", child, err)
-					}
+					fuThreadcountBatchAddChild(t, db, gdb, 1, child)
 				}
 			}
 
