@@ -24,17 +24,25 @@ func (l *fuCleanupLogs) Write(p []byte) (int, error) {
 	return l.buf.Write(p)
 }
 
-// contains reports whether every substring appears in the captured output.
+// contains reports whether some single captured line holds every substring. Matching per
+// line, not across the whole buffer, so an unrelated background goroutine's retry line cannot
+// combine with a different line to satisfy the assertion by coincidence.
 func (l *fuCleanupLogs) contains(subs ...string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	out := l.buf.String()
-	for _, s := range subs {
-		if !strings.Contains(out, s) {
-			return false
+	for _, line := range strings.Split(l.buf.String(), "\n") {
+		all := true
+		for _, s := range subs {
+			if !strings.Contains(line, s) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // fuCleanupCaptureLog sends log output to a buffer for the duration of one test and restores
@@ -184,18 +192,20 @@ func TestFuCleanupBulkDeleteLeavesNoOrphanInTheAdminListing(t *testing.T) {
 // delegate to UpdateUserProfile, which is the single writer of the three user columns (E8).
 // Delegating must not widen what they touch: each still writes its own column only.
 func TestFuCleanupUpdateUserHelpersWriteOneColumn(t *testing.T) {
+	// Unique per run: users.email is UNIQUE, so a fixed literal makes -count=2 fail.
+	fuCleanupEmail := w0Name("fucleanup") + "@test.invalid"
 	db := w0DB(t)
 	user := fuQueriesUser(t)
 	wantName := user.DisplayName
 
-	if err := db.UpdateUserEmail(user.ID, "fucleanup-new@test.invalid"); err != nil {
+	if err := db.UpdateUserEmail(user.ID, fuCleanupEmail); err != nil {
 		t.Fatalf("UpdateUserEmail: %v", err)
 	}
 	got, err := db.GetUserByID(user.ID)
 	if err != nil {
 		t.Fatalf("GetUserByID: %v", err)
 	}
-	if got.Email != "fucleanup-new@test.invalid" {
+	if got.Email != fuCleanupEmail {
 		t.Errorf("email = %q, want the updated one", got.Email)
 	}
 	if got.PasswordHash != user.PasswordHash {
@@ -215,7 +225,7 @@ func TestFuCleanupUpdateUserHelpersWriteOneColumn(t *testing.T) {
 	if got.PasswordHash != "fucleanup-new-hash" {
 		t.Errorf("password_hash = %q, want the updated one", got.PasswordHash)
 	}
-	if got.Email != "fucleanup-new@test.invalid" {
+	if got.Email != fuCleanupEmail {
 		t.Errorf("UpdateUserPassword changed email to %q", got.Email)
 	}
 	if got.DisplayName != wantName {
