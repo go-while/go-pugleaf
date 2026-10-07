@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -383,7 +382,23 @@ func (db *Database) BulkUpdateNewsgroupActive(names []string, active bool) (int,
 	return int(rowsAffected), nil
 }
 
-// BulkDeleteNewsgroups deletes multiple inactive newsgroups
+// The bulk forms of the two dependent deletes of DeleteNewsgroup (E9). Each %s takes the
+// same `?,?,...` placeholder list as query_BulkDeleteNewsgroupsRows, and each repeats its
+// `active = 0` guard through a subselect on newsgroups, so all three statements cover
+// exactly the same groups - the ones the newsgroups delete really removes. Both therefore
+// have to run while the newsgroups rows are still there: the flags are keyed on
+// newsgroups.id, which only the surviving row resolves, and after the delete nothing says
+// any more which of the named groups was inactive.
+const (
+	query_BulkDeleteUserSpamFlags  = `DELETE FROM user_spam_flags WHERE newsgroup_id IN (SELECT id FROM newsgroups WHERE name IN (%s) AND active = 0)`
+	query_BulkDeleteSectionGroups  = `DELETE FROM section_groups WHERE newsgroup_name IN (SELECT name FROM newsgroups WHERE name IN (%s) AND active = 0)`
+	query_BulkDeleteNewsgroupsRows = `DELETE FROM newsgroups WHERE name IN (%s) AND active = 0`
+)
+
+// BulkDeleteNewsgroups deletes multiple inactive newsgroups and the rows keyed on them.
+// It removes the same dependent rows as DeleteNewsgroup: without that, a bulk-deleted
+// section member left an orphan section_groups row, still listed in the admin section view
+// where it 404s, plus user_spam_flags rows that nothing would ever clean up (E9).
 func (db *Database) BulkDeleteNewsgroups(names []string) (int, error) {
 	if len(names) == 0 {
 		return 0, nil
@@ -404,11 +419,17 @@ func (db *Database) BulkDeleteNewsgroups(names []string) (int, error) {
 		placeholders[i] = "?"
 		args[i] = name
 	}
+	in := strings.Join(placeholders, ",")
 
-	query := fmt.Sprintf(
-		`DELETE FROM newsgroups WHERE name IN (%s) AND active = 0`,
-		strings.Join(placeholders, ","),
-	)
+	// Dependent rows first, while the newsgroups rows they are resolved from still exist.
+	if _, err := tx.Exec(fmt.Sprintf(query_BulkDeleteUserSpamFlags, in), args...); err != nil {
+		return 0, fmt.Errorf("failed to delete user spam flags of %d newsgroups: %w", len(names), err)
+	}
+	if _, err := tx.Exec(fmt.Sprintf(query_BulkDeleteSectionGroups, in), args...); err != nil {
+		return 0, fmt.Errorf("failed to delete section groups of %d newsgroups: %w", len(names), err)
+	}
+
+	query := fmt.Sprintf(query_BulkDeleteNewsgroupsRows, in)
 
 	result, err := tx.Exec(query, args...)
 	if err != nil {
@@ -450,7 +471,19 @@ const query_DeleteNewsgroup = `DELETE FROM newsgroups WHERE name = ? AND active 
 // Without it the section routes keep listing and serving a group that no longer exists (F10).
 const query_DeleteSectionGroupsByNewsgroup = `DELETE FROM section_groups WHERE newsgroup_name = ?`
 
-func (db *Database) DeleteNewsgroup(name string) error {
+// query_DeleteUserSpamFlagsByNewsgroup drops the spam flags of a deleted newsgroup (A4).
+// user_spam_flags (migration 0007) has a foreign key on user_id only, so nothing cascades
+// on the newsgroup_id side the way post_queue does (migration 0016), and the rows would
+// outlive the group forever: newsgroups.id is AUTOINCREMENT, so no later group inherits
+// them, they just accumulate. The subselect repeats the `active = 0` guard of
+// query_DeleteNewsgroup so both statements cover exactly the same groups, which is also
+// why this one has to run while the newsgroups row is still there.
+const query_DeleteUserSpamFlagsByNewsgroup = `DELETE FROM user_spam_flags WHERE newsgroup_id IN (SELECT id FROM newsgroups WHERE name = ? AND active = 0)`
+
+// DeleteNewsgroup removes an inactive newsgroup and the rows keyed on it. It reports
+// whether a row was really deleted: query_DeleteNewsgroup only matches `active = 0`, so
+// deleting an active group is a no-op and the caller must not claim it happened (B3).
+func (db *Database) DeleteNewsgroup(name string) (bool, error) {
 	// Get hierarchy before deletion for cache invalidation
 	newsgroup, err := db.MainDBGetNewsgroup(name)
 	var hierarchy string
@@ -461,9 +494,20 @@ func (db *Database) DeleteNewsgroup(name string) error {
 		hierarchy = ExtractHierarchyFromGroupName(name)
 	}
 
-	// The newsgroup row and its section_groups rows go in one transaction: the group is only
-	// removed from its sections when it was really deleted (the DELETE is a no-op while active).
+	// The newsgroup row, its section_groups rows and its user_spam_flags rows go in one
+	// transaction: the dependent rows are only removed when the group was really deleted
+	// (the DELETE is a no-op while active).
+	var deleted bool
 	err = RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
+		// RetryableTransactionExec re-runs this body after a retryable error, including one
+		// from the commit, so the result of an earlier attempt must not leak out.
+		deleted = false
+		// Before the newsgroups row goes: the flags are keyed on newsgroups.id, which this
+		// statement can only resolve by name while the row still exists. Its `active = 0`
+		// guard matches query_DeleteNewsgroup, so it deletes nothing for a group that stays.
+		if _, err := tx.Exec(query_DeleteUserSpamFlagsByNewsgroup, name); err != nil {
+			return fmt.Errorf("failed to delete user spam flags of %s: %w", name, err)
+		}
 		result, err := tx.Exec(query_DeleteNewsgroup, name)
 		if err != nil {
 			return fmt.Errorf("failed to delete newsgroup %s: %w", name, err)
@@ -478,10 +522,11 @@ func (db *Database) DeleteNewsgroup(name string) error {
 		if _, err := tx.Exec(query_DeleteSectionGroupsByNewsgroup, name); err != nil {
 			return fmt.Errorf("failed to delete section groups of %s: %w", name, err)
 		}
+		deleted = true
 		return nil
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Invalidate hierarchy cache for the affected hierarchy
@@ -493,7 +538,7 @@ func (db *Database) DeleteNewsgroup(name string) error {
 	// section_groups rows cannot change. Invalidating it would be dead work and would
 	// make every concurrent in-flight load discard its result.
 
-	return nil
+	return deleted, nil
 }
 
 const query_GetThreadsCount = `SELECT COUNT(*) FROM threads`
@@ -749,33 +794,27 @@ func (db *Database) GetUserByID(id int64) (*models.User, error) {
 	return &u, nil
 }
 
-// UpdateUserEmail updates a user's email address
-const query_UpdateUserEmail = `UPDATE users SET email = ? WHERE id = ?`
+// The three statements that write an editable column of a users row. They are the only
+// place naming those columns: UpdateUserProfile (db_user_profile.go) executes them inside
+// one transaction and the per-field helpers below delegate to it, so the admin path and the
+// user's own profile form write a column exactly the same way. Before E8 the same three
+// columns were written from two places with duplicated SQL, and an additive change to one
+// side (an updated_at stamp, a `AND disabled = 0` guard) would silently have applied to
+// only one of them. The 64-rune display name limit has one owner too, UpdateUserProfile.
+const (
+	query_UpdateUserEmail       = `UPDATE users SET email = ? WHERE id = ?`
+	query_UpdateUserPassword    = `UPDATE users SET password_hash = ? WHERE id = ?`
+	query_UpdateUserDisplayName = `UPDATE users SET display_name = ? WHERE id = ?`
+)
 
+// UpdateUserEmail updates a user's email address (admin user edit, web_admin_userfuncs.go)
 func (db *Database) UpdateUserEmail(userID int64, email string) error {
-	_, err := RetryableExec(db.mainDB, query_UpdateUserEmail, email, userID)
-	return err
+	return db.UpdateUserProfile(userID, nil, &email, nil)
 }
 
-// UpdateUserPassword updates a user's password hash
-const query_UpdateUserPassword = `UPDATE users SET password_hash = ? WHERE id = ?`
-
+// UpdateUserPassword updates a user's password hash (cmd/usermgr)
 func (db *Database) UpdateUserPassword(userID int64, passwordHash string) error {
-	_, err := RetryableExec(db.mainDB, query_UpdateUserPassword, passwordHash, userID)
-	return err
-}
-
-// UpdateUserDisplayName updates a user's display name
-const query_UpdateUserDisplayName = `UPDATE users SET display_name = ? WHERE id = ?`
-
-func (db *Database) UpdateUserDisplayName(userID int64, displayName string) error {
-	// Count characters, not bytes: the web validation is 64 runes, so a byte limit here
-	// rejected names the form had already accepted, after the other profile writes (F6).
-	if utf8.RuneCountInString(displayName) > 64 {
-		return fmt.Errorf("display name is too long")
-	}
-	_, err := RetryableExec(db.mainDB, query_UpdateUserDisplayName, displayName, userID)
-	return err
+	return db.UpdateUserProfile(userID, &passwordHash, nil, nil)
 }
 
 // UpdateUserStatus updates user status fields (verified, disabled, no_posting)
@@ -1288,7 +1327,39 @@ const query_GetSectionGroupsWithActivity = `
 	WHERE sg.section_id = ?
 	ORDER BY %s`
 
+// query_GetSectionGroupsWithActivityStrict is query_GetSectionGroupsWithActivity without the
+// members a visitor cannot open (E1). The LEFT JOIN above keeps a section_groups row whose
+// newsgroup is inactive, or orphaned by a delete that predates the section access fix (F10),
+// and lists it with message_count 0 - but the group routes 404 on both, so the listing
+// promises a group that cannot be opened. `n.name IS NOT NULL` passes only the rows the join
+// matched, and the join condition already requires `active = 1`. Category headers carry no
+// newsgroup of their own and are kept regardless. This does not clean up the orphan rows, it
+// only stops showing them.
+const query_GetSectionGroupsWithActivityStrict = `
+	SELECT
+		sg.id, sg.section_id, sg.newsgroup_name, sg.group_description,
+		sg.sort_order, sg.is_category_header, sg.created_at,
+		COALESCE(n.updated_at, datetime('1970-01-01 00:00:00')) as updated_at,
+		COALESCE(n.message_count, 0) as message_count,
+		COALESCE(n.last_article, 0) as last_article
+	FROM section_groups sg
+	LEFT JOIN newsgroups n ON sg.newsgroup_name = n.name AND n.active = 1
+	WHERE sg.section_id = ? AND (sg.is_category_header = 1 OR n.name IS NOT NULL)
+	ORDER BY %s`
+
 func (db *Database) GetSectionGroupsWithActivity(sectionID int, sortBy string) ([]*models.SectionGroup, error) {
+	return db.sectionGroupsWithActivity(query_GetSectionGroupsWithActivity, sectionID, sortBy)
+}
+
+// GetSectionGroupsWithActivityStrict is GetSectionGroupsWithActivity restricted to the members
+// that exist and are active, for the non-admin section listing (E1).
+func (db *Database) GetSectionGroupsWithActivityStrict(sectionID int, sortBy string) ([]*models.SectionGroup, error) {
+	return db.sectionGroupsWithActivity(query_GetSectionGroupsWithActivityStrict, sectionID, sortBy)
+}
+
+// sectionGroupsWithActivity runs one of the two section listing queries above; they differ
+// only in their WHERE clause and both take the sort order through the same %s.
+func (db *Database) sectionGroupsWithActivity(queryTemplate string, sectionID int, sortBy string) ([]*models.SectionGroup, error) {
 	// Determine sort order based on parameter
 	var orderBy string
 	switch sortBy {
@@ -1300,7 +1371,7 @@ func (db *Database) GetSectionGroupsWithActivity(sectionID int, sortBy string) (
 		orderBy = "sg.sort_order, sg.newsgroup_name"
 	}
 
-	query := fmt.Sprintf(query_GetSectionGroupsWithActivity, orderBy)
+	query := fmt.Sprintf(queryTemplate, orderBy)
 	rows, err := db.mainDB.Query(query, sectionID)
 	if err != nil {
 		return nil, err
@@ -1337,7 +1408,10 @@ func (db *Database) GetSectionGroupsWithActivity(sectionID int, sortBy string) (
 
 		out = append(out, &sg)
 	}
-	return out, nil
+	// Without rows.Err() a truncated result set reads as a complete listing with a nil
+	// error and the visitor silently gets a short section page (E10b). One line covers both
+	// GetSectionGroupsWithActivity and ...Strict, which share this body.
+	return out, rows.Err()
 }
 
 // GetSectionGroupsByName returns all section groups for a newsgroup name
@@ -2920,7 +2994,7 @@ func (db *Database) ResetAllNewsgroupData() error {
 
 	// Step 1: Reset all counters in main database with a single efficient UPDATE
 	log.Printf("ResetAllNewsgroupData: Resetting all newsgroup counters in main database...")
-	result, err := db.mainDB.Exec(`UPDATE newsgroups SET
+	result, err := RetryableExec(db.mainDB, `UPDATE newsgroups SET
 		message_count = 0,
 		last_article = 0,
 		high_water = 0,

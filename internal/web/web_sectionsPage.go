@@ -90,10 +90,19 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 		sortBy = "activity"
 	}
 
-	// Get groups for this section with activity data (includes sorting)
-	allGroups, err := s.DB.GetSectionGroupsWithActivity(section.ID, sortBy)
+	// Get groups for this section with activity data (includes sorting).
+	// Same access rule as sectionGroupAllowed/checkGroupAccess, applied to the listing (E1):
+	// a section_groups row survives both a deactivation and a delete, and the group routes
+	// 404 on either, so for a visitor the strict query drops the members that cannot be
+	// opened. Admins keep the full listing, including inactive groups, which they can open.
+	var allGroups []*models.SectionGroup
+	if s.isAdminRequest(c) {
+		allGroups, err = s.DB.GetSectionGroupsWithActivity(section.ID, sortBy)
+	} else {
+		allGroups, err = s.DB.GetSectionGroupsWithActivityStrict(section.ID, sortBy)
+	}
 	if err != nil {
-		log.Printf("[WEB]: sectionPage: GetSectionGroupsWithActivity(section=%d sort=%s): %v", section.ID, sortBy, err)
+		log.Printf("[WEB]: sectionPage: GetSectionGroupsWithActivity(section=%d sort=%s admin=%v): %v", section.ID, sortBy, s.isAdminRequest(c), err)
 		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
@@ -250,17 +259,19 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 
 	var pagination *models.PaginationInfo
 	if page > 0 {
-		// Page-based pagination
-		pagination = models.NewPaginationInfo(page, LIMIT_sectionGroupPage, totalCount)
+		// Page-based pagination. maxOffsetArticles is the same bound the clamp above
+		// applies, so the template links no page the clamp would rewrite (D1).
+		pagination = models.NewPaginationInfo(page, LIMIT_sectionGroupPage, totalCount, maxOffsetArticles)
 	} else {
 		// Cursor-based pagination
 		pagination = &models.PaginationInfo{
-			CurrentPage: 1,
-			PageSize:    LIMIT_sectionGroupPage,
-			TotalCount:  totalCount,
-			TotalPages:  (totalCount + LIMIT_sectionGroupPage - 1) / LIMIT_sectionGroupPage,
-			HasNext:     hasMore,
-			HasPrev:     lastArticleNum > 0,
+			CurrentPage:   1,
+			PageSize:      LIMIT_sectionGroupPage,
+			TotalCount:    totalCount,
+			TotalPages:    (totalCount + LIMIT_sectionGroupPage - 1) / LIMIT_sectionGroupPage,
+			LinkablePages: maxOffsetArticles/LIMIT_sectionGroupPage + 1,
+			HasNext:       hasMore,
+			HasPrev:       lastArticleNum > 0,
 		}
 	}
 

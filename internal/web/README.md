@@ -16,7 +16,7 @@ Deployment and operational behaviour (reverse proxy, sessions, CSRF, `-data`) li
 | `web_templates.go` | template parsing and the process-wide template cache; `renderPage`, `renderTemplateSet`, `publicErrorDetail` |
 | `web_helpers.go` | `checkGroupAccess` / `checkGroupAccessAPI` — the group existence and active checks every group route funnels through |
 | `web_utils.go` | `renderError`, `getBaseTemplateData` and other shared render helpers |
-| `embedded_static.go` | embedded `static/*` FS and `staticContentType` (`/static/*` itself is served by `http.FileServer`) |
+| `embedded_static.go` | the embedded `static/*` FS and the `/static/*` handler, which serves it through `http.FileServer` (so Go's own mime table decides content types) |
 | `cronjobs.go` | `CronJobManager`: loads jobs from the DB on an interval and starts/stops them |
 | `web_session_cleanup.go` | periodic expiry of stale sessions |
 

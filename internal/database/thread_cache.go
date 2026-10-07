@@ -3,9 +3,9 @@ package database
 import (
 	"fmt"
 	"log"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -54,83 +54,9 @@ func (db *Database) InitializeThreadCache(groupDB *GroupDB, threadRoot int64, ro
 	return nil
 }
 
-// UpdateThreadCache updates an existing cache entry when a reply is added
-func (db *Database) UpdateThreadCache(groupDB *GroupDB, threadRoot int64, childArticleNum int64, childDate time.Time) error {
-
-	// First, get the current cache entry
-	var currentChildren string
-	var currentCount int
-
-	query := `SELECT child_articles, message_count FROM thread_cache WHERE thread_root = ?`
-	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{threadRoot}, &currentChildren, &currentCount)
-	if err != nil {
-		// If the thread cache entry doesn't exist, queue it for batch initialization
-		// This can happen if the root article was processed without initializing the cache
-		//log.Printf("Thread cache entry for root %d not found, queuing for batch initialization", threadRoot)
-
-		// Create a minimal article object for initialization
-		rootArticle := &models.Article{
-			DateSent: childDate, // Use child date as fallback for root date
-		}
-
-		// Initialize directly instead of batch processing
-		err = db.InitializeThreadCache(groupDB, threadRoot, rootArticle)
-		if err != nil {
-			log.Printf("Failed to initialize thread cache for root %d: %v", threadRoot, err)
-			// Continue with defaults to allow the update to proceed
-		}
-
-		// Update memory cache immediately so subsequent operations can use it
-		if db.MemThreadCache != nil {
-			// Initialize with minimal values - batch processing will update the database
-			db.MemThreadCache.UpdateThreadMetadata(groupDB.Newsgroup, threadRoot, 1, childDate, "")
-		}
-
-		// For now, set defaults so we can continue with the update
-		currentChildren = ""
-		currentCount = 0
-	}
-
-	// Add the new child to the list
-	var newChildren string
-	if currentChildren == "" {
-		newChildren = strconv.FormatInt(childArticleNum, 10)
-	} else {
-		newChildren = currentChildren + "," + strconv.FormatInt(childArticleNum, 10)
-	}
-
-	// Update the cache
-	updateQuery := `
-		UPDATE thread_cache
-		SET child_articles = ?,
-			message_count = ?,
-			last_child_number = ?,
-			last_activity = ?
-		WHERE thread_root = ?
-	`
-
-	// Format childDate as UTC string to avoid timezone encoding issues
-	childDateUTC := childDate.UTC().Format("2006-01-02 15:04:05")
-
-	_, err = RetryableExec(groupDB.DB, updateQuery,
-		newChildren,
-		currentCount+1,
-		childArticleNum,
-		childDateUTC,
-		threadRoot,
-	)
-
-	if err != nil {
-		return fmt.Errorf("failed to update thread cache for root %d: %w", threadRoot, err)
-	}
-
-	// Update memory cache
-	if db.MemThreadCache != nil {
-		db.MemThreadCache.UpdateThreadMetadata(groupDB.Newsgroup, threadRoot, currentCount+1, childDate, newChildren)
-	}
-
-	return nil
-}
+// The per-reply counterpart of InitializeThreadCache, UpdateThreadCache, was deleted: it had
+// no production caller (the live writer is SQ3batch.batchUpdateThreadCache in db_batch.go),
+// so its copy of the select-miss misclassification fixed as E7 was unreachable.
 
 var MemCacheThreadsExpiry = 5 * time.Minute // Default expiry for thread cache entries TODO should match cron cycle
 
@@ -260,27 +186,69 @@ func threadChildrenQuery(placeholders string) string {
 	`, placeholders)
 }
 
+// threadCacheMismatchInterval is how often the message_count/child_articles warning below
+// may be logged by this process.
+const threadCacheMismatchInterval = time.Minute
+
+var (
+	// threadCacheMismatchLast is the UnixNano of the last logged warning (0: none yet).
+	threadCacheMismatchLast atomic.Int64
+	// threadCacheMismatchDropped counts the warnings suppressed since the last logged one.
+	threadCacheMismatchDropped atomic.Int64
+)
+
+// threadCacheMismatchLogThrottle reports whether this warning is logged, and if so how many
+// were suppressed since the previous one. The condition it reports is permanent -- nothing
+// recomputes message_count outside a rescan -- so an affected thread would otherwise log one
+// line per request, forever, and bury the rest of the group's log. Like retryLogThrottle
+// this keeps no per-thread state: two counters for the whole process, so the memory cost does
+// not grow with the number of inconsistent threads.
+func threadCacheMismatchLogThrottle(now time.Time) (bool, int64) {
+	last := threadCacheMismatchLast.Load()
+	if last != 0 && now.UnixNano()-last < int64(threadCacheMismatchInterval) {
+		threadCacheMismatchDropped.Add(1)
+		return false, 0
+	}
+	if !threadCacheMismatchLast.CompareAndSwap(last, now.UnixNano()) {
+		// Another goroutine logged in the meantime; this one is suppressed.
+		threadCacheMismatchDropped.Add(1)
+		return false, 0
+	}
+	return true, threadCacheMismatchDropped.Swap(0)
+}
+
 // GetCachedThreadReplies retrieves paginated replies for a specific thread
 func (db *Database) GetCachedThreadReplies(groupDB *GroupDB, threadRoot int64, page int, pageSize int) ([]*models.Overview, int, error) {
 	// Get the cached thread entry
 	var childArticles string
-	var totalReplies int
+	var messageCount int
 
 	query := `SELECT child_articles, message_count FROM thread_cache WHERE thread_root = ?`
-	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{threadRoot}, &childArticles, &totalReplies)
+	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{threadRoot}, &childArticles, &messageCount)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get thread cache for root %d: %w", threadRoot, err)
 	}
 
-	// Subtract 1 from message_count since it includes the root
-	totalReplies = totalReplies - 1
-	if totalReplies <= 0 {
-		return []*models.Overview{}, 0, nil
-	}
-
-	// Parse child article numbers
+	// Parse child article numbers. child_articles is the single source of truth for both the
+	// returned count and the pages: the count used to be message_count - 1 while the pages
+	// were sliced out of childNums, so a thread_cache row whose message_count disagrees with
+	// child_articles made the caller's totalPages promise a page that renders empty (E2).
 	childNums := strings.Split(childArticles, ",")
-	if len(childNums) == 0 || (len(childNums) == 1 && childNums[0] == "") {
+	if len(childNums) == 1 && childNums[0] == "" {
+		childNums = nil
+	}
+	totalReplies := len(childNums)
+	if messageCount-1 != totalReplies {
+		if ok, dropped := threadCacheMismatchLogThrottle(time.Now()); ok {
+			var suppressed string
+			if dropped > 0 {
+				suppressed = fmt.Sprintf(" (%d similar warnings suppressed)", dropped)
+			}
+			log.Printf("[CACHE:THREADS] Warning: thread_cache root %d of '%s': message_count %d disagrees with %d child_articles, using child_articles%s",
+				threadRoot, groupDB.Newsgroup, messageCount, totalReplies, suppressed)
+		}
+	}
+	if totalReplies == 0 {
 		return []*models.Overview{}, 0, nil
 	}
 
@@ -361,6 +329,17 @@ func (db *Database) GetOverviewByArticleNum(groupDB *GroupDB, articleNum int64) 
 	return overview, nil
 }
 
+// threadCacheReplyCount returns how many replies a thread_cache row's child_articles column
+// lists. It is len(strings.Split(childArticles, ",")) for a non-empty list and 0 for an empty
+// one -- the same count GetCachedThreadReplies derives from that column -- so the group
+// listing and the thread page cannot disagree about a thread's reply count.
+func threadCacheReplyCount(childArticles string) int {
+	if childArticles == "" {
+		return 0
+	}
+	return strings.Count(childArticles, ",") + 1
+}
+
 // GetCachedThreadsFromMemory retrieves threads using the two-level memory cache
 func (mem *MemCachedThreads) GetCachedThreadsFromMemory(db *Database, groupDB *GroupDB, group string, page int64, pageSize int64) ([]*models.ForumThread, int64, bool) {
 	startTime := time.Now()
@@ -431,9 +410,14 @@ func (mem *MemCachedThreads) GetCachedThreadsFromMemory(db *Database, groupDB *G
 		}
 
 		forumThread := &models.ForumThread{
-			RootArticle:  rootOverview,
-			Replies:      nil,                   // Will be loaded separately
-			MessageCount: meta.MessageCount - 1, // Convert to reply count (total - root)
+			RootArticle: rootOverview,
+			Replies:     nil, // Will be loaded separately
+			// Reply count from child_articles, the same list GetCachedThreadReplies paginates.
+			// message_count - 1 would disagree with the thread page for every row whose
+			// message_count is stale (E2/E5): the listing promised one reply fewer than the
+			// page serves. Rows already on disk stay stale until a rescan, so both ends have
+			// to read the one column that always describes the replies themselves.
+			MessageCount: threadCacheReplyCount(meta.ChildArticles),
 			LastActivity: meta.LastActivity,
 		}
 

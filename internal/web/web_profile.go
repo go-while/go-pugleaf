@@ -200,32 +200,24 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 		}
 	}
 
-	// Everything is valid: write.
-
-	// Update password
+	// Everything is valid: write all of it at once. Three separate statements meant a
+	// failure on the second left the first committed — a user changing password and email
+	// could end up with the password silently changed and only "Failed to update email"
+	// to show for it (A1). UpdateUserProfile writes every changed field in one
+	// transaction, so either all of them land or none does.
+	var newPasswordHash *string
 	if changePassword {
-		if err := s.DB.UpdateUserPassword(user.ID, hashedPassword); err != nil {
-			session.SetError("Failed to update password")
-			c.Redirect(http.StatusSeeOther, "/profile")
-			return
-		}
+		newPasswordHash = &hashedPassword
 	}
-
-	// Update email
-	err = s.DB.UpdateUserEmail(user.ID, email)
-	if err != nil {
-		session.SetError("Failed to update email")
+	var newDisplayName *string
+	if displayNameChanged {
+		newDisplayName = &displayName
+	}
+	if err := s.DB.UpdateUserProfile(user.ID, newPasswordHash, &email, newDisplayName); err != nil {
+		log.Printf("[WEB]: profileUpdate: user %d: %v", user.ID, err)
+		session.SetError("Failed to update profile")
 		c.Redirect(http.StatusSeeOther, "/profile")
 		return
-	}
-
-	// Update display name (only when it changed)
-	if displayNameChanged {
-		if err := s.DB.UpdateUserDisplayName(user.ID, displayName); err != nil {
-			session.SetError("Failed to update display name")
-			c.Redirect(http.StatusSeeOther, "/profile")
-			return
-		}
 	}
 
 	session.SetSuccess("Profile updated successfully")

@@ -2,6 +2,7 @@ package web
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -267,11 +268,29 @@ func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
 		return
 	}
 
-	// Delete newsgroup
-	err := s.DB.DeleteNewsgroup(name)
+	// Delete newsgroup. DeleteNewsgroup only deletes an inactive group, so a nil error does
+	// not mean a row went away - report success only when one did (B3).
+	deleted, err := s.DB.DeleteNewsgroup(name)
 	if err != nil {
 		session.SetError("Failed to delete newsgroup")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
+		return
+	}
+	if !deleted {
+		// Two causes reach this branch: the group is still active, or there is no row with
+		// that name at all (a double submit, or a stale admin page). Advising a deactivation
+		// for a group that is already gone is misleading, so name the cause when the id
+		// lookup can tell them apart, and stay vague when it cannot (E10a).
+		msg := "Newsgroup '" + name + "' was not deleted: it must exist and be deactivated first"
+		if _, idErr := s.DB.GetNewsgroupID(name); errors.Is(idErr, sql.ErrNoRows) {
+			msg = "Newsgroup '" + name + "' was not deleted: no newsgroup with that name exists"
+		} else if idErr != nil {
+			// Keep the vague wording, but do not swallow the reason: without this an
+			// operator debugging the message has nothing to go on.
+			log.Printf("[WEB]: adminDeleteNewsgroup: GetNewsgroupID(%s): %v", name, idErr)
+		}
+		session.SetError(msg)
+		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
 		return
 	}
 

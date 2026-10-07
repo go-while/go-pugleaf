@@ -135,7 +135,9 @@ ip=$(q "SELECT last_login_ip FROM users WHERE username='smokeuser'")
 [ "$ip" = 198.51.100.7 ] && pass E11 w1-server "XFF right-most untrusted" || fail E11 w1-server "XFF right-most untrusted" "ip=$ip"
 curl -s -o /dev/null -c "$JAR_USER" -b "$JAR_USER" -X POST -H 'X-Real-IP: not-an-ip' --data-urlencode username=smokeuser --data-urlencode "password=$PW" "$BASE/login"
 ip=$(q "SELECT last_login_ip FROM users WHERE username='smokeuser'")
-[ "$ip" = 127.0.0.1 ] && pass E12 w1-server "invalid X-Real-IP ignored" || fail E12 w1-server "invalid X-Real-IP ignored" "ip=$ip"
+# E12's label changed with F3: only the one configured header is consulted, so X-Real-IP is ignored
+# whether or not it parses. The assertion is unchanged; TestLo2ServerTrustedHeader covers the valid case.
+[ "$ip" = 127.0.0.1 ] && pass E12 w1-server "X-Real-IP ignored under the default header" || fail E12 w1-server "X-Real-IP ignored under the default header" "ip=$ip"
 
 # E13/E14 CSRF
 c=$(code -b "$JAR_ADMIN" -H 'Sec-Fetch-Site: cross-site' -H 'Origin: https://evil.example' -X POST --data-urlencode name=csrfsec --data-urlencode display_name=x "$BASE/admin/sections")

@@ -395,33 +395,6 @@ func TestLo1CoreStatsSingleflight(t *testing.T) {
 	}
 }
 
-// TestLo1CoreStaticContentType covers the extensions the old last-4-bytes comparison got wrong (B9).
-func TestLo1CoreStaticContentType(t *testing.T) {
-	for _, tc := range []struct{ path, want string }{
-		{"web/favicon.ico", "image/x-icon"},
-		{"static/js/thread-tree.js", "text/javascript; charset=utf-8"},
-		{"static/js/app.min.map", "application/json"},
-		{"static/data/groups.json", "application/json"},
-		{"static/fonts/x.woff", "font/woff"},
-		{"static/fonts/x.woff2", "font/woff2"},
-		{"static/fonts/x.ttf", "font/ttf"},
-		{"static/img/x.webp", "image/webp"},
-		{"static/img/x.png", "image/png"},
-		{"static/css/style.css", "text/css; charset=utf-8"},
-		{"static/img/logo.svg", "image/svg+xml"},
-		{"static/x.unknown-extension", "application/octet-stream"},
-		{"noextension", "application/octet-stream"},
-	} {
-		if got := staticContentType(tc.path); got != tc.want {
-			t.Errorf("staticContentType(%q) = %q, want %q", tc.path, got, tc.want)
-		}
-	}
-	// Upper case extensions and an extension known only to the system MIME database.
-	if got := staticContentType("static/img/LOGO.PNG"); got != "image/png" {
-		t.Errorf("staticContentType(LOGO.PNG) = %q, want image/png", got)
-	}
-}
-
 // TestLo1CoreFavicon: /favicon.ico is served from disk with an image type (B9).
 func TestLo1CoreFavicon(t *testing.T) {
 	rec := w0Do(t, w0Req{Path: "/favicon.ico"})

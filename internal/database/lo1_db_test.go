@@ -93,16 +93,6 @@ func TestLo1DBSessionHashedAtRest(t *testing.T) {
 	if _, err := db.ValidateUserSession(""); err == nil {
 		t.Fatal("ValidateUserSession(\"\") succeeded, want an error")
 	}
-
-	if err := db.InvalidateUserSessionBySessionID(raw); err != nil {
-		t.Fatalf("InvalidateUserSessionBySessionID: %v", err)
-	}
-	if got := lo1DBSessionID(t, db, u.ID); got != "" {
-		t.Fatalf("session_id = %q after invalidation, want empty", got)
-	}
-	if _, err := db.ValidateUserSession(raw); err == nil {
-		t.Fatal("session still valid after InvalidateUserSessionBySessionID")
-	}
 }
 
 // C1/C2: migration 0028 adds login_attempt_at and clears the stored raw sessions.

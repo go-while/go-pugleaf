@@ -97,7 +97,7 @@ if len(refs) == 0 {
 // When replies arrive - has references
 if len(refs) > 0 {
     // Find thread root, update cache with new child
-    err := db.UpdateThreadCache(groupDBs, threadRoot, article.ArticleNum, article.DateSent)
+    err := sq.batchUpdateThreadCache(groupDB, threadUpdates) // the live writer; UpdateThreadCache was deleted (plan finding E11)
 }
 ```
 
@@ -115,7 +115,7 @@ if len(refs) > 0 {
 - Called when processing new thread (no references)
 - Uses `ON CONFLICT` for upsert behavior
 
-#### `UpdateThreadCache(groupDBs, threadRoot, childArticleNum, childDate)`
+#### `batchUpdateThreadCache(groupDB, threadUpdates)` (was `UpdateThreadCache`, deleted - E11)
 - Updates existing cache entry when reply added
 - Appends to `child_articles` string
 - Increments `message_count`
@@ -307,7 +307,7 @@ CREATE INDEX IF NOT EXISTS idx_thread_cache_count ON thread_cache(message_count 
 
 2. **Article Processing** (`threading.go`)
    - `InitializeThreadCache()` for new threads
-   - `UpdateThreadCache()` for replies
+   - `batchUpdateThreadCache()` for replies
 
 3. **Web Server** (`server.go`)
    - Replace threading logic with `GetCachedThreads()`

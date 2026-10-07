@@ -94,6 +94,7 @@ type SQ3batch struct {
 	maxDBbatch   int                // limits db batches to avoid mem and sqlite limits
 	maxDBthreads int                // limits number of concurrent db batch threads
 	maxQueued    int                // limits number of queued articles for batch processing
+	retryGrace   time.Duration      // grace of the retry loops of processNewsgroupBatch; 0: batchShutdownGrace
 
 	GMux               sync.RWMutex           // Mutex for TasksMap to ensure thread safety
 	TasksMap           map[string]*BatchTasks // Map which holds newsgroup cron taskspointers
@@ -580,6 +581,18 @@ const batchStatsRetryEvery = 5 * time.Second
 // by default, more when a tool raised it) before it returns.
 const batchShutdownGrace = 2 * time.Minute
 
+// retryShutdownGrace returns how long the retry loops of processNewsgroupBatch may keep going
+// once shutdown has begun. It comes from a field so a test can pass a short grace instead of
+// waiting out batchShutdownGrace, the same reason updateNewsgroupStatsWithRetry takes it as a
+// parameter. The zero value means the default, so every SQ3batch that does not set it - every
+// one in production - keeps batchShutdownGrace.
+func (sq *SQ3batch) retryShutdownGrace() time.Duration {
+	if sq.retryGrace > 0 {
+		return sq.retryGrace
+	}
+	return batchShutdownGrace
+}
+
 // batchShutdownClock bounds one retry loop once shutdown has begun. The zero value has
 // not started; the clock starts on the first check that reports shutdown, so a loop that
 // began while the database was live keeps its full grace.
@@ -628,15 +641,15 @@ func batchGroupDBRetry(err error, attempt int) (retry bool, delay time.Duration)
 }
 
 // getBatchGroupDB opens the group database for a batch that is already drained out of
-// BATCHchan. It returns an error only once batchGroupDBRetry gives up, or once
-// batchShutdownGrace has passed since shutdown began: this loop runs inside db.WG,
-// which every tool waits for before it closes the databases, so a wedged initialization
-// must not pin the process. giveUp, when set, is called with the first and the last
-// error before the error is returned; the two call sites word the consequence
+// BATCHchan. It returns an error only once batchGroupDBRetry gives up, or once the grace from
+// sq.retryShutdownGrace() (batchShutdownGrace in production) has passed since shutdown began:
+// this loop runs inside db.WG, which every tool waits for before it closes the databases, so a
+// wedged initialization must not pin the process. giveUp, when set, is called with the first
+// and the last error before the error is returned; the two call sites word the consequence
 // differently.
 func (sq *SQ3batch) getBatchGroupDB(newsgroup *string, articles int, giveUp func(firstErr, lastErr error)) (*GroupDB, error) {
 	var firstErr error
-	clock := batchShutdownClock{grace: batchShutdownGrace}
+	clock := batchShutdownClock{grace: sq.retryShutdownGrace()}
 	for attempt := 0; ; attempt++ {
 		groupDB, err := sq.db.GetGroupDB(*newsgroup)
 		if err == nil {
@@ -648,7 +661,7 @@ func (sq *SQ3batch) getBatchGroupDB(newsgroup *string, articles int, giveUp func
 		retry, delay := batchGroupDBRetry(err, attempt)
 		if retry && clock.expired(sq.db.IsDBshutdown) {
 			log.Printf("[BATCH] group database '%s' still unavailable %v into shutdown, giving up: %v",
-				*newsgroup, batchShutdownGrace, err)
+				*newsgroup, clock.grace, err)
 			retry = false
 		}
 		if !retry {
@@ -694,7 +707,8 @@ func (sq *SQ3batch) forceCloseGroupDB(groupDB *GroupDB) {
 // begun. The caller runs inside db.WG and every tool closes StopChan, waits for db.WG
 // and only then closes the databases, so an unbounded retry here would keep a process
 // that hit a long-held write lock on the main database alive for good. grace is a
-// parameter so the test can use a short one; the caller passes batchShutdownGrace.
+// parameter so the test can use a short one; the caller passes the grace from
+// sq.retryShutdownGrace() (batchShutdownGrace in production).
 func updateNewsgroupStatsWithRetry(exec func() error, every time.Duration, what string, isShutdown func() bool, grace time.Duration) error {
 	clock := batchShutdownClock{grace: grace}
 	for round := 1; ; round++ {
@@ -756,9 +770,11 @@ drainChannel:
 
 	// The retry1 loop below is unbounded while the database is live (an insert that keeps
 	// failing, e.g. a full filesystem, must not lose the drained articles), but it runs
-	// inside db.WG: once shutdown has begun it gets batchShutdownGrace and then drops the
+	// inside db.WG: once shutdown has begun it gets sq.retryShutdownGrace()
+	// (batchShutdownGrace in production) and then drops the
 	// batch, so db.WG.Wait() cannot block on it.
-	insertClock := batchShutdownClock{grace: batchShutdownGrace}
+	insertGrace := sq.retryShutdownGrace()
+	insertClock := batchShutdownClock{grace: insertGrace}
 	insertAttempts := 0
 retry1:
 	// Get database connection for this newsgroup. The articles are already drained out
@@ -785,7 +801,7 @@ retry1:
 		insertAttempts++
 		if insertClock.expired(sq.db.IsDBshutdown) {
 			log.Printf("[BATCH] dropping %d articles for '%s': insert still failing %v into shutdown (%d attempts): %v",
-				len(batches), *task.Newsgroup, batchShutdownGrace, insertAttempts, err)
+				len(batches), *task.Newsgroup, insertGrace, insertAttempts, err)
 			return
 		}
 		time.Sleep(time.Second)
@@ -809,38 +825,28 @@ retry1:
 	// PHASE 2: Process threading for all articles (reusing the same DB connection)
 	//log.Printf("[BATCH] processNewsgroupBatch Starting threading phase for %d articles in group '%s'", len(batches), *task.Newsgroup)
 	//start := time.Now()
-	// Same bounding as retry1: unbounded while the database is live, batchShutdownGrace
-	// once shutdown has begun. The articles are committed at this point, so giving up
-	// leaves them without threading, history and stats instead of losing them.
-	threadClock := batchShutdownClock{grace: batchShutdownGrace}
-	threadAttempts := 0
-retry2:
-	if groupDB == nil {
-		// Phase 1 committed these articles already: returning here leaves them without
-		// threading, history entries and stats, so wait for the group database exactly
-		// as retry1 does and say what is left behind when that fails.
-		groupDB, err = sq.getBatchGroupDB(task.Newsgroup, len(batches), func(_, lastErr error) {
-			log.Printf("[BATCH] %d articles for '%s' are committed without threading/history/stats (rebuild needed): %v",
-				len(batches), *task.Newsgroup, lastErr)
-		})
-		if err != nil {
-			return
-		}
-	}
+	// There is no retry loop here, by decision (E6). batchProcessThreading logs the failures
+	// of batchProcessThreadRoots/batchProcessReplies ("Continue processing - don't fail the
+	// whole batch") and returns nil on every path, so the retry2 loop this line used to carry
+	// - its own shutdown clock, its attempt counter and a group database reacquire - could
+	// never be entered, and the "committed without threading/history/stats (rebuild needed)"
+	// it logged promised a state that cannot occur: control falls straight through into
+	// PHASE 3, so the history adds and the newsgroup stats update below both still run and a
+	// threading failure costs only threading.
+	//
+	// Keeping that swallow is deliberate: threading is derived data a rescan rebuilds, while
+	// propagating the failure would retry and eventually abandon a batch whose articles are
+	// already committed, throwing away the history entries and counters that do succeed. The
+	// error is still checked, so the day batchProcessThreading starts propagating shows up in
+	// the log instead of being dropped on the floor - and that is the day this call site needs
+	// a bounded loop like retry1's, with the test retry1 has.
 	if err := sq.batchProcessThreading(task.Newsgroup, batches, groupDB); err != nil {
-		if groupDB != nil {
-			sq.forceCloseGroupDB(groupDB)
-			log.Printf("[BATCH] processNewsgroupBatch Failed2 to process threading for group '%s': %v groupDB='%#v'", *task.Newsgroup, err, groupDB)
-			groupDB = nil
-		}
-		threadAttempts++
-		if threadClock.expired(sq.db.IsDBshutdown) {
-			log.Printf("[BATCH] %d articles for '%s' are committed without threading/history/stats (rebuild needed): threading still failing %v into shutdown (%d attempts): %v",
-				len(batches), *task.Newsgroup, batchShutdownGrace, threadAttempts, err)
-			return
-		}
-		time.Sleep(time.Second)
-		goto retry2
+		// Deliberately promises only what is guaranteed: the article rows, their history
+		// entries and the newsgroup counters do survive, but the threading phase also writes
+		// articles.reply_count (batchUpdateReplyCounts) and NOTHING recomputes that column -
+		// no rescan path touches it - so a parent's reply count can stay stale for good.
+		log.Printf("[BATCH] threading failed for %d articles in '%s' (the article rows, their history entries and the newsgroup counters are unaffected; a rescan rebuilds threads, but parent reply_count is not rebuilt): %v",
+			len(batches), *task.Newsgroup, err)
 	}
 	defer groupDB.Return()
 	//threadingDuration := time.Since(start)
@@ -941,7 +947,7 @@ retry2:
 					*task.Newsgroup, len(batches), maxArticleNum, latestDate.UTC().Format("2006-01-02 15:04:05"))
 				return txErr
 			})
-		}, batchStatsRetryEvery, statsWhat, sq.db.IsDBshutdown, batchShutdownGrace)
+		}, batchStatsRetryEvery, statsWhat, sq.db.IsDBshutdown, sq.retryShutdownGrace())
 
 		if err != nil {
 			log.Printf("[BATCH] processNewsgroupBatch Failed to update newsgroup stats for '%s': %v", *task.Newsgroup, err)
@@ -1293,10 +1299,17 @@ func (sq *SQ3batch) batchProcessReplies(groupDB *GroupDB, replyBatches []*models
 
 		// Execute ALL thread cache updates in a single transaction
 		if len(threadUpdates) > 0 {
+			// batchUpdateReplyCounts above has already committed on its own connection, so a
+			// failure here leaves articles.reply_count counting these replies while
+			// thread_cache does not list them. Say so: it names what the operator has to
+			// rebuild, and the only other log that mentioned the hazard sat on the
+			// batchProcessThreading error branch, which never fires (E6).
 			if err := sq.batchUpdateThreadCache(groupDB, threadUpdates); err != nil {
-				log.Printf("[P-BATCH] group '%s': Failed to batch update thread cache: %v", groupDB.Newsgroup, err)
+				log.Printf("[P-BATCH] group '%s': Failed to batch update thread cache for %d thread roots, articles.reply_count is already bumped for these replies and is not rebuilt by this path (a rescan repairs both): %v",
+					groupDB.Newsgroup, len(threadUpdates), err)
+			} else {
+				log.Printf("[P-BATCH] group '%s': Updated thread cache for %d thread roots", groupDB.Newsgroup, len(threadUpdates))
 			}
-			log.Printf("[P-BATCH] group '%s': Updated thread cache for %d thread roots", groupDB.Newsgroup, len(threadUpdates))
 		}
 	}
 
@@ -1375,12 +1388,24 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[i
 	}
 	var updatedCount int
 	var initializedCount int
+	// memUpdates holds what the memory thread cache should learn, applied only once the
+	// transaction has committed. Pushing a root into MemThreadCache from inside the closure
+	// published children that a later root's failure then rolled back off the disk, and the
+	// group listing reads exactly that pushed string
+	// (GetCachedThreadsFromMemory -> threadCacheReplyCount(meta.ChildArticles)), so the
+	// listing served more replies than the thread page could paginate off the disk row - the
+	// disagreement E2 was raised to kill, from the writer's side, and invisible to the
+	// message_count mismatch warning because the disk row stays self-consistent.
+	var memUpdates []memThreadCacheUpdate
 
 	// Use RetryableTransactionExec for SQLite lock safety
 	err := RetryableTransactionExec(groupDB.DB, func(tx *sql.Tx) error {
 		// Reset ShutDownCounters for each retry attempt
 		updatedCount = 0
 		initializedCount = 0
+		// ... and the collected memory updates with them: this closure is re-run from the top
+		// on a retryable failure, including one in the commit itself.
+		memUpdates = memUpdates[:0]
 
 		// Prepare statements for batch operations
 		selectStmt, err := tx.Prepare(query_batchUpdateThreadCacheSelect)
@@ -1409,6 +1434,27 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[i
 
 			row := selectStmt.QueryRow(threadRoot)
 			err := row.Scan(&currentChildren, &currentCount)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				// The row exists and could not be read, so the fallback below must not run on
+				// it: its upsert leaves child_articles alone and the UPDATE then overwrites
+				// the column with only this batch's children, losing the ones already listed
+				// until a rescan (E7). What to do instead depends on whether waiting helps.
+				if isRetryableSQLiteError(err) {
+					// A write lock. Returning is exactly right: RetryableTransactionExec rolls
+					// this round back and runs the whole closure again, and if the lock
+					// outlives the retry cap the caller logs a batch that needs a rescan.
+					return fmt.Errorf("failed to read thread_cache for root %d: %w", threadRoot, err)
+				}
+				// No retry can fix this row: the value itself is unreadable (message_count
+				// holding text, or a NULL child_articles that an old manual repair left in a
+				// nullable TEXT column). Returning here would roll back every other thread
+				// root in the batch, and the next batch would do the same, so one corrupt row
+				// would stop the whole group's thread cache from advancing. Skip this root
+				// alone - its children stay as they are, which is what a rescan repairs.
+				log.Printf("[BATCH-CACHE] group '%s': thread_cache row for root %d cannot be read and no retry can fix it, skipping its %d update(s), the other roots of this batch are unaffected (its children stay as they are until a rescan rebuilds the row): %v",
+					groupDB.Newsgroup, threadRoot, len(updates), err)
+				continue
+			}
 			if err != nil {
 				// Thread cache entry doesn't exist, initialize it with the first update
 				//firstUpdate := updates[0]
@@ -1419,8 +1465,14 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[i
 					log.Printf("[BATCH-CACHE] Failed to initialize thread cache for root %d: %v", threadRoot, err)
 					return fmt.Errorf("failed to initialize thread cache for root %d: %w", threadRoot, err)
 				}
+				// initStmt inserted message_count = 1 (the root) with no children, so the
+				// accumulated updates below are counted on top of that 1. Seeding 0 wrote
+				// newCount = len(updates) for a row that listed len(updates) children, one
+				// short of the message_count == 1 + len(child_articles) invariant every other
+				// writer keeps -- permanently, because nothing recomputes message_count
+				// outside a rescan (E5).
 				currentChildren = ""
-				currentCount = 0
+				currentCount = 1
 				initializedCount++
 			}
 
@@ -1455,9 +1507,14 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[i
 			}
 			updatedCount++
 
-			// Update memory cache if available
+			// Collect the memory cache update; it is applied after the commit (see memUpdates).
 			if sq.db.MemThreadCache != nil {
-				sq.db.MemThreadCache.UpdateThreadMetadata(groupDB.Newsgroup, threadRoot, newCount, lastActivity, newChildren)
+				memUpdates = append(memUpdates, memThreadCacheUpdate{
+					threadRoot:   threadRoot,
+					messageCount: newCount,
+					lastActivity: lastActivity,
+					children:     newChildren,
+				})
 			}
 		}
 
@@ -1467,11 +1524,27 @@ func (sq *SQ3batch) batchUpdateThreadCache(groupDB *GroupDB, threadUpdates map[i
 	if err != nil {
 		return fmt.Errorf("failed to execute thread cache batch transaction: %w", err)
 	}
+
+	// Committed: now the memory cache may be told, and only about rows that really are on disk.
+	if sq.db.MemThreadCache != nil {
+		for _, mem := range memUpdates {
+			sq.db.MemThreadCache.UpdateThreadMetadata(groupDB.Newsgroup, mem.threadRoot, mem.messageCount, mem.lastActivity, mem.children)
+		}
+	}
 	/*
 		log.Printf("[BATCH-CACHE] group '%s': Successfully batch updated %d thread cache entries (initialized %d) in single retryable transaction with %d total updates",
 			groupDB.Newsgroup, updatedCount, initializedCount, len(threadUpdates))
 	*/
 	return nil
+}
+
+// memThreadCacheUpdate is one row's worth of memory thread cache state, held back by
+// batchUpdateThreadCache until its transaction has committed.
+type memThreadCacheUpdate struct {
+	threadRoot   int64
+	messageCount int
+	lastActivity time.Time
+	children     string
 }
 
 type threadCacheUpdateData struct {

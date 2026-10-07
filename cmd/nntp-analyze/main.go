@@ -277,7 +277,16 @@ func analyzeAllGroups(group *string, host *string, port *int, username *string, 
 	if err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
-	defer close(db.StopChan)
+	// Same shutdown order as every other tool (cmd/web, cmd/nntp-fetcher):
+	// stop the workers, wait for them, then close the databases. Shutdown is what
+	// marks the group databases closed, which is how CronDB's loop exits.
+	defer func() {
+		close(db.StopChan)
+		db.WG.Wait()
+		if err := db.Shutdown(); err != nil {
+			log.Printf("Failed to shutdown database: %v", err)
+		}
+	}()
 
 	// Get all newsgroups from database using admin function (includes empty groups)
 	newsgroups, err := db.MainDBGetAllNewsgroups()
