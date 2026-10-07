@@ -421,3 +421,64 @@ genuinely live and that nothing depends on the by-token session invalidation.
 retried, unassigned), **E14** (thread page fetches unclamped then clamps, unassigned), **E15** (the
 main-DB `spam` table has the dangling-row problem `user_spam_flags` had, with a visible symptom —
 unassigned).
+
+### Post-merge review wave — 2026-10-07, on the fully merged tree
+
+Three reviewers over what the per-slice reviews structurally could not see: the orchestrator's own
+inline commits, the combined `internal/database` diff, and the combined `internal/web` diff plus this
+plan document. **Two cross-wave majors** came out of it — each half correct and reviewed in isolation,
+only the combination broken — in the same pattern as the previous plan's post-merge wave.
+
+| Target | Verdict | Fixed in |
+|----|----|----|
+| orchestrator inline commits (8) | MERGE, two doc minors | `f7966b9` (folded into the fix below) |
+| `internal/database` combined | **MERGE AFTER FIXES** | `f7966b9` → merge `18812e5` |
+| `internal/web` combined | MERGE, one pre-existing minor (E17) | recorded |
+| this plan document | three majors, several minors | `bf0e8f9` |
+
+**The two majors, both created by wave 3's E7 landing on wave 2's listing change:**
+1. **E7's `return` aborted the whole batch for one corrupt row.** The gate returned on any
+   non-`ErrNoRows` scan error, but `RetryableTransactionExec` only helps with the *retryable* subset.
+   A non-retryable error — `child_articles` NULL, text in `message_count`, as an old manual repair
+   could leave — rolled back **every root in the batch** and was never retried, on every later batch
+   too. Before E7 the damage was one root. The fault test passed exactly one root, so the blast radius
+   was untested. Now split: retryable → return (rollback + retry); non-retryable → log and skip that
+   root only. **Behaviour change to note:** `batchUpdateThreadCache` returns nil after skipping a
+   corrupt row, so the caller logs success for the batch; the skipped root appears only in the
+   `[BATCH-CACHE]` line. Judged adequate — the batch did succeed for every other root.
+2. **The memory cache was written inside the transaction closure.** `UpdateThreadMetadata` ran per
+   root before commit, so a mid-loop abort left `MemThreadCache` holding rolled-back children — the
+   exact string wave 2 made `GetCachedThreadsFromMemory` read. Listing said 4 replies, thread page 3:
+   the E2 symptom re-created on the path E7 introduced, invisible to wave 1's warning because the
+   disk row was self-consistent. Memory is now published only after the transaction returns nil. The
+   new test aborts the **second** `thread_cache` update via a counter-table trigger, so it reaches the
+   one-committed-then-abort state regardless of map iteration order.
+
+**Findings discovered by this wave:** **E16** (`GetCachedThreadReplies` swallows scan errors and
+never checks `rows.Err()`; wave 1's "every promised page carries rows" does not hold for hidden
+children), **E17** (an in-range page past the real end renders page 1 under the requested page
+number — pre-existing, in a file D1 owned and did not reach).
+
+**The plan document was wrong in three places a reader of the filed Outcome would have acted on:**
+E6 and E7 still said "Not assigned" after being decided *and implemented* in wave 3; E8 was assigned
+to `fu-profile-consolidate`, a slice name that never ran; and three wave-2 merge SHAs were still `…`
+placeholders. Corrected in `bf0e8f9`, with the wave-3 table's missing Merge column, the stale header
+("two waves of three slices" — it was three waves, nine), E10b's and E14's present-tense claims, and a
+note that findings-table line numbers point at code this plan deleted.
+
+**Verification on the final tree (`18812e5`):** gofmt/vet/build clean; `-race -count=1` green across
+all 8 packages (`internal/database` **29.8s**, at baseline); `-race -count=2 -shuffle=on` green on
+`internal/database` and `internal/web`; `scripts/test-web-leftovers.sh` **`pass=16 fail=0`**;
+`scripts/test-web-hardening.sh` **`pass=25 fail=0`**; 0 DATA RACE in both logs.
+
+**Count, corrected:** 29 findings (A1-A4, B1-B3, C1-C3, D1-D2, E1-E17). **23 closed. 6 unassigned**
+(E12-E17). An earlier status to the user said "9 fixed / 5 unassigned" — that counted the planned
+list, not the run.
+
+**Small things worth a line:**
+- The inverted D1 assertion matches only the literal `<code>cursor</code>`; re-adding the pointer as
+  plain prose would slip past it. The companion `strings.Contains(smallBody, "cursor")` check is the
+  broader guard.
+- The implementer's post-merge report repeated three "still outstanding" items (README, test header,
+  `FuncStructList.txt`) that `92c947a` had already fixed two commits before its branch base — a stale
+  note, not a gap. Verified by grep at merge; `FuncStructList.txt` stays K4-protected.
