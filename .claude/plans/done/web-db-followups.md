@@ -482,3 +482,117 @@ list, not the run.
 - The implementer's post-merge report repeated three "still outstanding" items (README, test header,
   `FuncStructList.txt`) that `92c947a` had already fixed two commits before its branch base — a stale
   note, not a gap. Verified by grep at merge; `FuncStructList.txt` stays K4-protected.
+
+---
+
+## Outcome
+
+**Merged into `testing-001` as `f819215`** on 2026-10-07 (34 files, +3635/−587). Not pushed — the user pushes.
+
+- **Integration branch:** `plan-web-db-followups`, from `testing-001` @ `60c0b63`, 52 commits, head `5cd39e8`.
+- **Result:** 29 findings (A1-A4, B1-B3, C1-C3, D1-D2, E1-E17). **23 closed, 6 unassigned** (E12-E17).
+  Of the 29, **17 were discovered during the run** — four by implementers reporting on their own work,
+  the rest by reviews — and 11 of those 17 were fixed before the merge.
+
+### Verification at the merge point
+| Check | Result |
+|----|----|
+| `go test -race -count=1`, 8 packages | green; `internal/database` 29.8s (baseline ~28s) |
+| `go test -race -count=2 -shuffle=on`, database + web | green, two runs with fresh seeds |
+| `scripts/test-web-leftovers.sh` | **`pass=16 fail=0`** (unchanged from the start — this plan added no e2e check) |
+| `scripts/test-web-hardening.sh` | **`pass=25 fail=0`**, with E12 relabelled |
+| DATA RACE in any log | 0 |
+| Upgrade from the pre-plan binary (`60c0b63`) | no migration attempted; `schema_migrations` identical before/after; group, thread and admin pages all 200 |
+| `audit-web-posts` read-only | sha256 of every `.db` unchanged, no `-shm`/`-wal` created; `-strict` refuses a pending `-wal` with rc=2 |
+
+An independent verifier also ran six behaviour spot-checks against a live server (D1, E4, E9, E1,
+B3/E10a, A1) and caught two vacuous assertions in its own first attempts — a session rotated out from
+under a profile POST, and a `schema_migrations` comparison on a non-existent column — and re-ran both.
+
+### What shipped
+- **Transactions:** `UpdateUserProfile` writes the three profile columns atomically and is now the
+  single owner of those columns and the 64-rune limit; `UpdateUserEmail`/`UpdateUserPassword`
+  delegate to it. `DeleteNewsgroup` **and** `BulkDeleteNewsgroups` remove `section_groups` and
+  `user_spam_flags` rows in the same transaction, under the same `active = 0` predicate.
+  `ResetAllNewsgroupData`'s mass UPDATE is retryable; `rsyncInactiveGroupsToDir` and the shared
+  section-listing body check `rows.Err()`.
+- **Thread cache:** the reply count derives from `child_articles` on both the thread page and the
+  group listing; the two writers that permanently created the off-by-one seed from the row they just
+  inserted; a row that exists but cannot be read is no longer treated as missing (which overwrote its
+  children); a corrupt row costs only its own thread; memory is published only after commit.
+- **Batch writer:** the shutdown bound of the retry loop is tested for the first time, through a
+  grace seam that keeps the test at ~3s; the unreachable `retry2` branch and `threadClock` are gone,
+  with the decision recorded that threading failures are swallowed on purpose (history and counters
+  still run); the cron manager cannot start a job after `StopCronManager` took its snapshot;
+  `cmd/nntp-analyze` shuts the database down on exit.
+- **Dead code removed:** `EmbeddedFileHandler`, `staticContentType`, `ListEmbeddedFiles`,
+  `InvalidateUserSessionBySessionID`, `UpdateUserDisplayName`, `UpdateThreadCache`.
+- **Pagination:** article listings link only pages the 101 clamp will serve, with the bound stated;
+  the thread page no longer links an empty page at an exact multiple of 50 replies.
+- **Honest admin messages:** deleting an active or nonexistent group says so instead of claiming
+  success; a genuine lookup failure is logged.
+
+### Deliberate departures from the plan text
+1. **`fu-batch-tests` edited `db_batch.go`**, which its slice did not own, to add the grace seam —
+   authorized mid-slice because its test took `internal/database` from 27.6s to 146.6s.
+2. **`fu-batch-faults` kept `batchProcessThreading`'s `error` return** instead of removing it with the
+   dead branch: the review showed removing it would delete the only mechanical guard that the E6
+   premise still holds.
+3. **`fu-pagination` widened `NewPaginationInfo` to variadic** rather than add a required parameter;
+   eight of nine no-bound callers live in files it did not own, and the review verified all nine
+   byte-identical.
+4. **D1's clamp note was softened at integration** to stop recommending `?cursor=`, because a cursor
+   view's own Previous/Next emit `?page=0` (E12).
+5. **`batchUpdateThreadCache` returns nil after skipping a corrupt row**, so the caller logs success
+   for the batch; the skipped root appears only in the `[BATCH-CACHE]` line.
+
+### Corrections to the plan's own text, made during the run
+- A1's design claimed all three per-field helpers had other callers; `UpdateUserDisplayName` had none.
+- E7 was recorded against one fallback; it was in both, and only the batch one was reachable.
+- E6/E7 were left "Not assigned" after being implemented; E8 named a slice that never ran; three
+  wave-2 merge SHAs were placeholders; the header said two waves when it was three.
+
+### Worktrees and branches (left in place; the user cleans up `/tank0/claude/trees`)
+| Slice | Branch | Worktree |
+|----|----|----|
+| `fu-deadcode` | `worktree-agent-a9e63f333f38a283b` | `/tank0/claude/trees/go-pugleaf/agent-a9e63f333f38a283b` |
+| `fu-misc-hygiene` | `worktree-agent-a6cad8ec8717e5ed8` | `.../agent-a6cad8ec8717e5ed8` |
+| `fu-batch-tests` | `worktree-agent-aecdd086682537625` | `.../agent-aecdd086682537625` |
+| `fu-web-forms` | `worktree-agent-a55802f8e0d55ecf0` | `.../agent-a55802f8e0d55ecf0` |
+| `fu-threadcount` | `worktree-agent-ac01669c49e07394e` | `.../agent-ac01669c49e07394e` |
+| `fu-queries` | `worktree-agent-a2b404638aa9f5d98` | `.../agent-a2b404638aa9f5d98` |
+| `fu-pagination` | `worktree-agent-a293296bbde249426` | `.../agent-a293296bbde249426` |
+| `fu-batch-faults` | `worktree-agent-aaa3e985ce26831b4` **and** `fu-batch-faults-postmerge` | `.../agent-aaa3e985ce26831b4` |
+| `fu-queries-cleanup` | `worktree-agent-a1b762c2d2d999195` | `.../agent-a1b762c2d2d999195` |
+
+Scratch data dirs in the checkout (gitignored via `/data*`): `data-test-web-sqlite-hardening`,
+`data-test-web-sqlite-leftovers`, `data-test-spotchecks`, `data-test-upgrade`, `data-test-audit-wal`.
+
+### Known issues and leftovers (all unassigned, all recorded with the fix in their finding rows)
+- **E12** — cursor mode links `?page=0` for Previous and Next; nothing links cursor mode, so it takes
+  a hand-typed `?cursor=`. Fixing it is the cursor wiring D1 declined.
+- **E13** — `BulkDeleteNewsgroups` still uses a bare `Begin`/`Commit`, now with three statements.
+- **E14** — the thread page fetches with an unclamped page, then clamps; a stale `?page=2` bookmark on
+  an exact-multiple-of-50 thread renders the root with no replies and no nav.
+- **E15** — the main-DB `spam` table outlives a deleted group, and the admin spam page counts every
+  row but joins, so it paginates to pages it cannot fill.
+- **E16** — `GetCachedThreadReplies` swallows scan errors and never checks `rows.Err()`.
+- **E17** — an in-range page past the real end renders page 1 under the requested page number.
+- `FuncStructList.txt` lists four deleted symbols; K4 forbids regenerating it here.
+- `thread_cache.README.md`'s `batchUpdateThreadCache` section still describes a per-reply shape.
+- `test_embed.go.bak:16` calls the deleted `ListEmbeddedFiles`; uncompiled, permanently stale.
+
+**Relation to `nntp-audit-tests`:** still queued and untouched. Its `audit-db` scope should be
+re-anchored on this tree — `db_batch.go` and `thread_cache.go` changed shape.
+
+### Process notes for the next run of this skill
+- **The post-merge review wave is not optional.** Both plans so far found cross-wave majors there
+  that no per-slice review could see, because each half was correct alone.
+- **Review the plan document before filing it.** Three of its claims were wrong in ways that would
+  have sent the next run back to settled questions.
+- **A test that passes without the fix is worse than no test.** Three slices were asked to prove
+  load-bearing by reverting; two reviews reproduced that independently; and the verifier caught two
+  vacuous assertions in its own work. Every one of those was worth the time.
+- **Implementers correctly refused two impossible instructions** (work in the main checkout; hit a
+  pass count unreachable in their worktree) and one that would have widened scope silently. Reward
+  that in the brief.
