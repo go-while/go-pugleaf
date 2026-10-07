@@ -64,7 +64,25 @@ func fuHygieneThread(t *testing.T, nChildren int, messageCount int) (*Database, 
 // returns must describe the list it actually paginates (child_articles), not thread_cache's
 // message_count. Every page the returned count promises has to carry rows, and the page past
 // it has to be empty -- otherwise the caller's totalPages links a page that renders empty (E2).
+// fuHygieneResetMismatchThrottle zeroes the process-wide mismatch-warning throttle for one
+// test and restores it afterwards. Every test that calls GetCachedThreadReplies on a
+// deliberately inconsistent row advances threadCacheMismatchLast to a real time.Now() and
+// accumulates threadCacheMismatchDropped, so without this the first test to assert the
+// warning text would pass or fail on shuffle order, inside the one-minute interval.
+func fuHygieneResetMismatchThrottle(t *testing.T) {
+	t.Helper()
+	savedLast := threadCacheMismatchLast.Load()
+	savedDropped := threadCacheMismatchDropped.Load()
+	t.Cleanup(func() {
+		threadCacheMismatchLast.Store(savedLast)
+		threadCacheMismatchDropped.Store(savedDropped)
+	})
+	threadCacheMismatchLast.Store(0)
+	threadCacheMismatchDropped.Store(0)
+}
+
 func TestFuHygieneThreadRepliesCountFromChildArticles(t *testing.T) {
+	fuHygieneResetMismatchThrottle(t)
 	const pageSize = 2
 	for _, tc := range []struct {
 		name         string
@@ -117,6 +135,7 @@ func TestFuHygieneThreadRepliesCountFromChildArticles(t *testing.T) {
 // TestFuHygieneThreadRepliesEmptyChildArticles: a thread_cache row with no children reports
 // no replies even when its message_count claims otherwise, and must not error.
 func TestFuHygieneThreadRepliesEmptyChildArticles(t *testing.T) {
+	fuHygieneResetMismatchThrottle(t)
 	db, gdb := fuHygieneThread(t, 0, 7)
 	replies, total, err := db.GetCachedThreadReplies(gdb, 1, 1, 25)
 	if err != nil {
@@ -132,14 +151,7 @@ func TestFuHygieneThreadRepliesEmptyChildArticles(t *testing.T) {
 // rescan), so without this every request for an affected thread would log a line, forever.
 // No t.Parallel: it takes over the process-wide throttle counters and restores them.
 func TestFuHygieneMismatchLogThrottle(t *testing.T) {
-	savedLast := threadCacheMismatchLast.Load()
-	savedDropped := threadCacheMismatchDropped.Load()
-	t.Cleanup(func() {
-		threadCacheMismatchLast.Store(savedLast)
-		threadCacheMismatchDropped.Store(savedDropped)
-	})
-	threadCacheMismatchLast.Store(0)
-	threadCacheMismatchDropped.Store(0)
+	fuHygieneResetMismatchThrottle(t)
 
 	now := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
 	if ok, dropped := threadCacheMismatchLogThrottle(now); !ok || dropped != 0 {
