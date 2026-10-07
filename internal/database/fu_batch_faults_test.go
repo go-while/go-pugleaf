@@ -63,30 +63,62 @@ func fuBatchFaultsChildren(t *testing.T, gdb *GroupDB, threadRoot int64) string 
 	return children
 }
 
+// fuBatchFaultsHealthyRow seeds a readable, self-consistent thread_cache row
+// (message_count == 1 + len(children)) for threadRoot.
+func fuBatchFaultsHealthyRow(t *testing.T, gdb *GroupDB, threadRoot int64, children string) {
+	t.Helper()
+	if _, err := RetryableExec(gdb.DB, `INSERT INTO thread_cache
+		(thread_root, root_date, message_count, child_articles, last_child_number, last_activity)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		threadRoot, fuThreadcountBase, 1+threadCacheReplyCount(children), children,
+		threadRoot, fuThreadcountBase); err != nil {
+		t.Fatalf("seed thread_cache row %d: %v", threadRoot, err)
+	}
+}
+
 // TestFuBatchFaultsThreadCacheUnreadableRowKeepsChildren: when batchUpdateThreadCache cannot
-// read an existing thread_cache row, it must return the error instead of taking the
-// "row missing" fallback. Returning is right because the whole closure runs inside
-// RetryableTransactionExec, which rolls back and retries a transient lock; taking the fallback
-// overwrote child_articles with only this batch's children (E7).
+// read an existing thread_cache row, it must not take the "row missing" fallback - that
+// fallback's upsert leaves child_articles alone and the following UPDATE then overwrites it
+// with only this batch's children, losing the ones already listed until a rescan (E7).
+//
+// For a read failure no retry can fix - a corrupt value, here message_count holding text - the
+// right answer is to skip that one root and carry on. Returning the error instead aborts the
+// transaction of *every* root in the batch, and because the error is not retryable nothing
+// retries it and every later batch repeats the abort, so a single corrupt row stops the whole
+// group's thread cache from advancing. The batch therefore carries a second, healthy root whose
+// update has to survive, which is the blast radius the first version of this test did not cover.
 func TestFuBatchFaultsThreadCacheUnreadableRowKeepsChildren(t *testing.T) {
-	db, gdb := fuThreadcountArticles(t, 3) // root 1, children 2..4
+	db, gdb := fuThreadcountArticles(t, 12) // articles 1..13
 	sq := db.Batch
 	if sq == nil {
 		t.Fatal("db.Batch is nil")
 	}
-	const listed = "2,3,4"
-	fuBatchFaultsUnreadableRow(t, gdb, 1, listed)
+	logs := fuBatchCaptureLog(t)
 
-	err := sq.batchUpdateThreadCache(gdb, map[int64][]threadCacheUpdateData{
-		1: {{childArticleNum: 5, childDate: fuThreadcountBase.Add(5 * time.Minute)}},
-	})
-	if err == nil {
-		t.Error("batchUpdateThreadCache returned nil for a thread_cache row it could not read: the select-miss fallback still treats an unreadable row as missing (E7)")
+	const corruptListed = "11,12" // root 10, unreadable
+	const healthyListed = "2,3"   // root 1, fine
+	fuBatchFaultsUnreadableRow(t, gdb, 10, corruptListed)
+	fuBatchFaultsHealthyRow(t, gdb, 1, healthyListed)
+
+	if err := sq.batchUpdateThreadCache(gdb, map[int64][]threadCacheUpdateData{
+		10: {{childArticleNum: 13, childDate: fuThreadcountBase.Add(13 * time.Minute)}},
+		1:  {{childArticleNum: 4, childDate: fuThreadcountBase.Add(4 * time.Minute)}},
+	}); err != nil {
+		t.Errorf("batchUpdateThreadCache returned %v: one unreadable row that no retry can fix must cost only its own thread, not the whole batch's transaction", err)
 	}
 
-	if got := fuBatchFaultsChildren(t, gdb, 1); got != listed {
-		t.Errorf("child_articles = %q after the failed update, want %q: the already listed children were overwritten with this batch's child and are lost until a rescan (E7)",
-			got, listed)
+	// The corrupt row keeps its children: the fallback did not run on it (E7).
+	if got := fuBatchFaultsChildren(t, gdb, 10); got != corruptListed {
+		t.Errorf("child_articles of the unreadable root 10 = %q, want %q: the already listed children were overwritten with this batch's child and are lost until a rescan (E7)",
+			got, corruptListed)
+	}
+	// ... and the healthy root in the same batch still got its update: no whole-batch abort.
+	if got, want := fuBatchFaultsChildren(t, gdb, 1), healthyListed+",4"; got != want {
+		t.Errorf("child_articles of the healthy root 1 = %q, want %q: the unreadable root rolled back the whole batch's transaction, so every other thread in it lost its update and - the error not being retryable - nothing retries and every later batch does the same",
+			got, want)
+	}
+	if want := "thread_cache row for root 10 cannot be read"; !strings.Contains(logs.String(), want) {
+		t.Errorf("the skipped root was not logged as %q. Last log lines:\n%s", want, logs.tail(12))
 	}
 }
 
@@ -108,6 +140,134 @@ func TestFuBatchFaultsThreadCacheMissingRowStillInitializes(t *testing.T) {
 	}
 	if got := fuBatchFaultsChildren(t, gdb, 1); got != "2" {
 		t.Errorf("child_articles = %q, want \"2\"", got)
+	}
+}
+
+// fuBatchFaultsMemChildren reads one root's cached child_articles out of a memory thread cache,
+// under its own lock, and reports whether the entry exists at all.
+func fuBatchFaultsMemChildren(mem *MemCachedThreads, group string, threadRoot int64) (string, bool) {
+	mem.mux.RLock()
+	defer mem.mux.RUnlock()
+	groupCache := mem.Groups[group]
+	if groupCache == nil {
+		return "", false
+	}
+	meta := groupCache.ThreadMeta[threadRoot]
+	if meta == nil {
+		return "", false
+	}
+	return meta.ChildArticles, true
+}
+
+// fuBatchFaultsAbortSecondUpdate installs a trigger that lets the first UPDATE on thread_cache
+// through and aborts the second one, whichever roots those turn out to be. A counter table is
+// what makes it independent of Go's random map iteration order: a plain per-root trigger would
+// only reach the "one root already succeeded, then the transaction aborts" state in the runs
+// where the map happened to yield the healthy root first.
+//
+// The abort is not a lock error, so RetryableTransactionExec does not retry it: the closure
+// returns mid-loop exactly as it does when a lock error survives the retry cap, which is the
+// one path that can leave committed-looking state behind in memory.
+func fuBatchFaultsAbortSecondUpdate(t *testing.T, gdb *GroupDB) {
+	t.Helper()
+	for _, stmt := range []string{
+		"CREATE TABLE fu_batch_faults_abort (n INTEGER)",
+		"INSERT INTO fu_batch_faults_abort (n) VALUES (1)",
+		`CREATE TRIGGER fu_batch_faults_abort_2nd AFTER UPDATE ON thread_cache BEGIN
+			UPDATE fu_batch_faults_abort SET n = n - 1;
+			SELECT RAISE(ABORT, 'fu-batch-faults: second thread_cache update blocked')
+				WHERE (SELECT n FROM fu_batch_faults_abort) < 0;
+		END`,
+	} {
+		if _, err := RetryableExec(gdb.DB, stmt); err != nil {
+			t.Fatalf("install the abort-on-second-update trigger (%q): %v", stmt, err)
+		}
+	}
+}
+
+// TestFuBatchFaultsAbortedBatchDoesNotPoisonMemoryCache: batchUpdateThreadCache must not tell
+// MemThreadCache about children its transaction has not committed.
+//
+// The memory copy is authoritative for the group listing - wave 2's GetCachedThreadsFromMemory
+// renders MessageCount as threadCacheReplyCount(meta.ChildArticles) - while the thread page
+// paginates the disk row. So a root pushed into memory inside the transaction and then rolled
+// back by a later root's failure makes the listing promise replies the page cannot serve: the
+// disagreement E2 was raised to kill, re-created from the writer's side, and invisible to
+// wave 1's mismatch warning because the disk row it leaves behind is self-consistent. It lasts
+// until the memory window expires or a refresh runs.
+//
+// The second half of the test is the positive control: once the batch does commit, the memory
+// cache must actually learn the new children, or holding the push back would simply have
+// dropped it.
+func TestFuBatchFaultsAbortedBatchDoesNotPoisonMemoryCache(t *testing.T) {
+	db := fuBatchIsolatedDB(t)
+	// Isolated memory cache on an isolated Database: nothing else reads or writes it, and no
+	// CleanCron goroutine is started (NewMemCachedThreads would start one).
+	mem := &MemCachedThreads{Groups: make(map[string]*MemGroupThreadCache, 4)}
+	db.MemThreadCache = mem
+
+	group := w0Name("fubatchfaults.mem")
+	gdb, err := db.GetGroupDB(group)
+	if err != nil {
+		t.Fatalf("GetGroupDB(%s): %v", group, err)
+	}
+	t.Cleanup(func() { gdb.Return() })
+
+	const rootAChildren = "3,4"
+	const rootBChildren = "5,6"
+	fuBatchFaultsHealthyRow(t, gdb, 1, rootAChildren)
+	fuBatchFaultsHealthyRow(t, gdb, 2, rootBChildren)
+	fuBatchFaultsAbortSecondUpdate(t, gdb)
+
+	disk := map[int64]string{1: rootAChildren, 2: rootBChildren}
+	batch := map[int64][]threadCacheUpdateData{
+		1: {{childArticleNum: 7, childDate: fuThreadcountBase.Add(7 * time.Minute)}},
+		2: {{childArticleNum: 8, childDate: fuThreadcountBase.Add(8 * time.Minute)}},
+	}
+
+	err = db.Batch.batchUpdateThreadCache(gdb, batch)
+	if err == nil {
+		t.Fatal("batchUpdateThreadCache returned nil although the second thread_cache UPDATE was aborted: the trigger did not fire, so this test proves nothing")
+	}
+	if !strings.Contains(err.Error(), "second thread_cache update blocked") {
+		t.Fatalf("batchUpdateThreadCache failed with %v, not the injected abort: the batch never reached a second UPDATE, so it never got into the state this test is about", err)
+	}
+
+	// Nothing committed, so no root may have advanced on disk ...
+	for root, want := range disk {
+		if got := fuBatchFaultsChildren(t, gdb, root); got != want {
+			t.Errorf("child_articles of root %d = %q after the aborted batch, want %q", root, got, want)
+		}
+	}
+	// ... and the memory cache may not claim otherwise for any of them.
+	for root, onDisk := range disk {
+		if got, ok := fuBatchFaultsMemChildren(mem, group, root); ok && got != onDisk {
+			t.Errorf("MemThreadCache lists child_articles %q for root %d while the disk row reads %q: the rolled-back children were published to memory, so the group listing now serves more replies than the thread page can paginate",
+				got, root, onDisk)
+		}
+	}
+
+	// Positive control: with the trigger gone the same batch commits, and now the memory cache
+	// has to learn the new children.
+	if _, err := RetryableExec(gdb.DB, "DROP TRIGGER fu_batch_faults_abort_2nd"); err != nil {
+		t.Fatalf("drop the abort trigger: %v", err)
+	}
+	if err := db.Batch.batchUpdateThreadCache(gdb, batch); err != nil {
+		t.Fatalf("batchUpdateThreadCache after dropping the trigger: %v", err)
+	}
+	for root, before := range disk {
+		want := before + "," + map[int64]string{1: "7", 2: "8"}[root]
+		if got := fuBatchFaultsChildren(t, gdb, root); got != want {
+			t.Errorf("child_articles of root %d = %q after the committed batch, want %q", root, got, want)
+		}
+		got, ok := fuBatchFaultsMemChildren(mem, group, root)
+		if !ok {
+			t.Errorf("MemThreadCache has no entry for root %d after a committed batch: holding the push back until the commit dropped it instead of deferring it", root)
+			continue
+		}
+		if got != want {
+			t.Errorf("MemThreadCache lists child_articles %q for root %d after a committed batch, want %q (the disk row)", got, root, want)
+		}
 	}
 }
 
