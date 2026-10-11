@@ -315,9 +315,10 @@ func (r articleRange) Empty() bool { return r.Last < r.First }
 
 var errRangeSyntax = errors.New("syntax error in range")
 
-// parseRangeArg parses arg. Each number is 1..16 ASCII digits (RFC 3977 §9.8 article-number),
-// 0 allowed; anything else ("", "-", "x-5", "5-y", "1-2-3", "-5", "+1", 17+ digits) returns
-// errRangeSyntax. It sends nothing: the caller answers rateLimitOnError() + 501 "Syntax error in range".
+// parseRangeArg parses arg. Each number is 1..19 ASCII digits whose value fits in int64
+// (RFC 3977 §9.8 requires 1..16; 17-19 digits are accepted because TestOvrHugeRange and the
+// N22 probe send 9223372036854775807), 0 allowed; anything else ("", "-", "x-5", "5-y",
+// "1-2-3", "-5", "+1", 20+ digits, a value above math.MaxInt64) returns errRangeSyntax. It sends nothing: the caller answers rateLimitOnError() + 501 "Syntax error in range".
 func (c *ClientConnection) parseRangeArg(arg string) (articleRange, error)
 
 // requireGroup sends rateLimitOnError() + "412 No newsgroup selected" and returns false when no
@@ -743,7 +744,8 @@ Changes:
      `TestOvrXhdr/{past-high,reversed}` (RFC-6), `:626` `TestOvrXhdr/message-id` (RFC-6), `:668` `TestOvrHugeRange`
      (SEC-1). (`:688`/`:698` RFC-1 stay.)
    - New in `nntp-server-overview_test.go`: `TestOvrRangeParse` (table: `5`, `5-`, `5-9`, `9-5` (Empty), `0-`,
-     16 digits ok, 17 digits / `-` / `x-5` / `1-2-3` / `+1` / `-5` / `` → `errRangeSyntax`), `TestOvrHidden`
+     16 and 19 digits within int64 ok, 20 digits / `9223372036854775808` / `-` / `x-5` / `1-2-3` / `+1` / `-5` / `` →
+     `errRangeSyntax`), `TestOvrHidden`
      (an article set `hide = 1` by raw SQL is absent from `XOVER 1-` and `XHDR subject 1-`, and `XHDR subject <its id>`
      → 430). (Surplus-argument checks are `nntp-session`'s `TestSessCommandArgs`: K5.)
    - New `internal/database/nsh_overview_test.go`: `TestNSHOvrHeaderValueFromJSON` (case, folding, absent, first
@@ -817,7 +819,8 @@ Changes:
      processor returns only the first hit). Misses:
      `430 No article with that message-id` (all three texts). Without a processor only the current group is searched
      (documented in the README by `nntp-session`; A-nntp-rfc-9).
-   - number: `requireGroup` first (412 without a selected group), then more than 16 digits or not a number → 501;
+   - number: `requireGroup` first (412 without a selected group), then more than 19 digits, not a number or above
+     `math.MaxInt64` → 501 (same rule as `parseRangeArg`);
      `n <= 0` → `rateLimitOnError()`, 423; `GetGroupDB` error →
      403; `NNTPArticleByNum`/`NNTPArticleMessageID` miss → 423.
    - The number form sets `currentArticle` from the requested number (BUG-1); the message-id form never changes it.
