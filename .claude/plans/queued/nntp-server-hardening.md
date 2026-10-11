@@ -144,7 +144,10 @@ marks every one of them with `knownBug(t, "<id>", err)`; this plan removes those
   dispatch/CAPABILITIES lines.
 - `nntp-intake-injection` (owns `internal/nntp/nntp-cmd-posting.go`): SEC-2 intake side, SEC-3 article limit wiring
   (`readArticleLines` → `readArticleBlock(c.server.MaxArticleBytes())`), BUG-7 "too large → reply after close" and the
-  drain requirement (§11.9), RFC-5 POST 440 / IHAVE 437 / IHAVE+TAKETHIS without processor, A-nntp-rfc-7 (message-id
+  drain requirement (§11.9), every RFC-5 code in that file (POST not permitted 502 → 440, POST/IHAVE/TAKETHIS without
+  a processor 502 → 500/503 in the `handlePost`/`handleIHave`/`handleTakeThis` gate lines, IHAVE 436 → 437; this
+  plan's RFC-5 part is only the MODE/AUTHINFO unknown variant 500 → 501 in `nntp-cmd-basic.go`/`nntp-cmd-auth.go`),
+  A-nntp-rfc-7 (message-id
   syntax), A-nntp-rfc-8 (TAKETHIS reply details), INT-1…6, A-intake-*. Its markers (`TestE2ESizeLimits/*`,
   `TestE2ERejectUnknownGroup`, `TestE2ERejectMissingNewsgroups/ihave`, `TestAuthPostingGates/no-posting-post`, INT-1,
   INT-2) stay open after this plan.
