@@ -93,8 +93,8 @@ fallback is unreachable (see "Seed items rejected").
 4. **A-ops-5 (medium)**: `recover-db -parsedates -rewritedates` clears `hide` and `spam` on every
    rewritten article and writes the parser's fallback date for unparseable `Date:` strings (the
    `IsZero` branch falls through because its `continue` is commented out).
-5. **A-ops-2 (medium)**: the release workflow can't produce a release. Five of the six matrix targets
-   cross-compile with `CGO_ENABLED=0`, and `internal/history` uses cgo-only `go-sqlite3` symbols, so
+5. **A-ops-2 (medium)**: the release workflow can't produce a release. 4 of the 5 matrix jobs
+   (linux/arm64, darwin/amd64, darwin/arm64, windows/amd64) cross-compile with `CGO_ENABLED=0`, and `internal/history` uses cgo-only `go-sqlite3` symbols, so
    those jobs fail to compile; the default `fail-fast` cancels the rest and the `release` job never runs.
 
 ## Findings
@@ -129,14 +129,15 @@ write mode, print the path actually opened, and ask for confirmation (or require
 
 ---
 
-### A-ops-2: release.yml cross-compiles with CGO disabled; 5 of 6 targets fail and no release is created
+### A-ops-2: release.yml cross-compiles with CGO disabled; 4 of the 5 matrix jobs fail and no release is created
 
 | seed | id | severity | category | location | verdict |
 |----|----|----|----|----|----|
 | new | A-ops-2 | medium | bug | `.github/workflows/release.yml:19-26,58-66,106-116,161-163`; `internal/history/history.go:448,450`, `internal/history/history_config.go:223` | CONFIRMED |
 
-**Scenario:** a `v*` tag or a dispatch starts the matrix (linux/darwin × amd64/arm64, windows/amd64)
-on `ubuntu-latest`. Only `linux/amd64` is a native build. For the others the Go toolchain disables cgo
+**Scenario:** a `v*` tag or a dispatch starts the matrix: 3 OS × 2 arch minus windows/arm64 = 5 jobs on
+`ubuntu-latest`. Only `linux/amd64` is a native build; the other 4 (linux/arm64, darwin/amd64,
+darwin/arm64, windows/amd64) cross-compile. For those the Go toolchain disables cgo
 by default when cross-compiling, so `mattn/go-sqlite3` compiles its `!cgo` stub (`static_mock.go`),
 which lacks `sqlite3.Error`, `ErrBusy`, `ErrLocked` and `SQLiteConn.Exec`. `internal/history` uses all
 of them, so the build step exits 1. No `fail-fast: false` is set, so the remaining jobs are cancelled,
@@ -198,7 +199,9 @@ SIGINT:  "[WEB]: Received shutdown signal, initiating graceful shutdown..."
 download). Every line has fewer than 4 fields, so it is skipped as "malformed" (`:1041-1044`), the keep
 set is empty, and the loop disables every active group (`:1071-1079`). Nothing checks for an empty keep
 set, nothing asks for confirmation, and there is no dry-run. Disabled groups vanish from listings and
-fetching; re-enabling needs SQL or the admin UI per group.
+fetching. They can be re-enabled in bulk (admin `POST /admin/newsgroups/bulk-enable`,
+`internal/web/web_admin_newsgroups.go:429`, `BulkUpdateNewsgroupActive`), but nothing records which
+groups were already inactive before the run, so the previous state can't be restored exactly.
 
 **Evidence** (scratch root with 3 active groups, a 3-line descriptions file):
 ```
@@ -285,7 +288,12 @@ the query to `expiry_days, max_articles`. A test next to `main_test.go` covers b
 
 | seed | id | severity | category | location | verdict |
 |----|----|----|----|----|----|
-| OPS-1 | OPS-1 | medium | robustness | library: see `audit-db` OPS-1, `audit-intake` OPS-1; binaries: `cmd/web/main.go:221,228,240,248-338,344,350,425,509`, `cmd/web/main_functions.go:510-541,545-577,583`, `cmd/recover-db/main.go:86,169,186,197,208,305,671,674`, `cmd/nntpmgr/main.go:79-117`, `cmd/usermgr/main.go:63-101`, `cmd/fix-thread-activity/main.go:30-41`, `cmd/fix-references/main.go:101,111` | CONFIRMED |
+| OPS-1 | OPS-1 | medium | robustness | library: see `audit-db` OPS-1, `audit-intake` OPS-1; binaries: `cmd/web/main.go:228,240,248-338,344,350,425,509`, `cmd/web/main_functions.go:510-541,545-577,583`, `cmd/recover-db/main.go:86,169,186,197,208,305,671,674`, `cmd/nntpmgr/main.go:79-117`, `cmd/usermgr/main.go:63-101`, `cmd/fix-thread-activity/main.go:30-41`, `cmd/fix-references/main.go:101,111` | CONFIRMED |
+
+**Scenario:** library code and the binaries exit the process or skip the documented teardown, and some
+globals and goroutines outlive a `Database`.
+
+**Evidence:**
 
 **Library side (cited, not re-traced):**
 - `audit-db` OPS-1: `log.Fatal` in `db_init.go:141,206,212,224,229`; `INIT` set before anything can
@@ -301,7 +309,7 @@ the query to `expiry_days, max_articles`. A test next to `main_test.go` covers b
 
 **Binary side (new detail in this scope):**
 - `cmd/web` exits with `log.Fatalf`/`os.Exit` after `OpenDatabase` on every startup error
-  (`:221,228,240,344,350,425,509`, `ConnectPools` `main_functions.go:583`) and after every one-shot
+  (`:228,240,344,350,425,509`, `ConnectPools` `main_functions.go:583`) and after every one-shot
   maintenance mode (`:248-338`), always without `close(db.StopChan)`, `db.WG.Wait()` or
   `db.Shutdown()`. The traced maintenance modes write directly (e.g. `IncrementArticleSpam`,
   `database.go:367-400`, uses `RetryableExec`), not through the batch writer, so this loses nothing
@@ -367,6 +375,11 @@ prompt/env/file. Move the peering fixture to `testdata/` and write outputs to `t
 | seed | id | severity | category | location | verdict |
 |----|----|----|----|----|----|
 | OPS-4 | OPS-4 | medium | test-gap | `cmd/history-rebuild/main.go:74,79`; `cmd/web/main.go:102,342-361`, `cmd/web/main_functions.go:656-657`, `internal/database/database.go:296-300`; `cmd/tcp2tor/main.go:102,177,252,503,551`; `run_web.sh:4`, `run_web_ssl.sh:3`, `scripts.sh:6-7,13-15`, `go_run_web.sh:1`, `run_test.sh:1`, `manual_sqlite_migration_0002.sh:6-7`, `manual_sqlite_migration_0008.sh:5`, `build_TestMsgIdItemCache.sh:3`; 11 `build_*.sh`; `.github/workflows/release.yml` | CONFIRMED (one sub-claim rejected) |
+
+**Scenario:** flags that are parsed but have no effect, scripts that call flags or files that don't
+exist, production builds with the race detector, and a CI that never runs the tests.
+
+**Evidence:**
 
 **Ignored flags:**
 - `history-rebuild -useshorthashlen`: documented "No effect" (`:74`), discarded (`:79`). Honest, but
@@ -566,8 +579,9 @@ and before `SetHostname`; better, move them into a separate admin binary.
 - `scripts.sh` is a notes file, but its first line is `rm data/history -r` (`:1`). `sh scripts.sh` or
   `bash scripts.sh` deletes the history index, then runs the A-ops-5 date rewrite on all groups (`:5`).
 - `delete_ALL_users.sh` (no shebang, not executable): `DELETE FROM users` plus a sequence reset on the
-  hardcoded `data/cfg/pugleaf.sq3`, without a prompt. With foreign keys enforced (WSH), it fails or
-  cascades depending on the referencing tables.
+  hardcoded `data/cfg/pugleaf.sq3`, without a prompt. The `sqlite3` CLI starts with
+  `PRAGMA foreign_keys=0` (WSH enables foreign keys per Go connection only), so the `DELETE` succeeds
+  and leaves orphaned `sessions` rows and `nntp_users.web_user_id` values pointing at deleted users.
 - Every script hardcodes `data/` (or `-data data`) relative to the cwd; none accepts a data root.
   `import_sections.sh`/`run_rslight_importer.sh` also hardcode `/var/www/html/rocksolidbbs.com/...`.
 
@@ -582,6 +596,11 @@ explicit `--yes`, and `set -eu`.
 | seed | id | severity | category | location | verdict |
 |----|----|----|----|----|----|
 | new | A-ops-14 | low | robustness | `getUpdate.sh.template:1-11`, `copynew.sh:2-3`, `createUpdate.sh:10-13`, `rsync.sh:2-19`, `bump.sh:10-13`, `cmd/web/main_functions.go:545-577`, `run_web.sh:3` | CONFIRMED (read only), PLAUSIBLE (`sed` URL) |
+
+**Scenario:** an update moves from the build host to a server as described below; the integrity check
+holds, but several steps fail silently or interact with a running web server.
+
+**Evidence:**
 
 **How an update flows** (read only): `createUpdate.sh` tars `build/` into `update.tar.gz` and writes
 `sha256sum update.tar.gz > .update` (`:13`). `rsync.sh` uploads the tarball to the CDN and, per server,
@@ -598,7 +617,7 @@ tarball is never checked (redundant with the tarball hash).
 - `.update` is both the release hash file and the shutdown trigger, relative to the cwd. Running
   `createUpdate.sh`/`bump.sh` in a checkout where a web server runs from the same directory shuts that
   server down within 60 s (the WSH/LO test scripts refuse to run when `./.update` exists for this
-  reason). `.update`/`.update.todo` aren't gitignored.
+  reason). `.update` is gitignored (`.gitignore:44`), but `.update.todo*` isn't.
 - `bash -e` with a `&&` chain (`getUpdate.sh.template:8-10`): a failed checksum or extraction does not
   abort, `rm -v ../.update.todo.downloading` (`:11`) consumes the trigger, and the script exits 0. When
   `wget` fails, `cd tmp` never ran, `:11` fails, and the trigger stays renamed to `.downloading`, so the
@@ -649,6 +668,10 @@ or `stable`.
 |----|----|----|----|----|----|
 | new | A-ops-16 | low | security | `php/debug.php:13,18-19,182-187`, `php/{api-debug,api-test,controller-debug,group-debug,nginx-debug,route-debug,router-debug,ssl-debug,template-debug,threads-debug,url-debug,test}.php`, `php/php_examples/setup-nginx-ssl.sh:54`, `php/php_examples/deploy-setup.sh:58`, `php/config.inc.php:9-13`, `php/.htaccess:4-8,11,14-17` | PLAUSIBLE (deployment-dependent) |
 
+**Scenario:** `php/` is deployed with the setup script, including its unauthenticated debug pages.
+
+**Evidence:**
+
 **Inventory:**
 - **Purpose:** an optional PHP frontend (router, controllers, templates) that renders pages from the
   go-pugleaf JSON API (`PUGLEAF_API_BASE`). `deserialize-rslight-data-db-to-array-to-json.php` is a
@@ -677,6 +700,10 @@ in the deploy script.
 |----|----|----|----|----|----|
 | new | A-ops-17 | info | dead-code | `cmd/test-MsgIdItemCache/{test-cache, test-MsgIdItemCache, main.go.off}`, `cmd/history-demo/main.go.off`, `active_files/hierarchies/organize_by_theme.go:1,91`, `active_files/hierarchies/organize_by_theme.sh:7`, `build_{analyze,expire-news,history-rebuild,usermgr,TestMsgIdItemCache}.sh` | CONFIRMED |
 
+**Scenario:** files in the module and the repo that are stale, never built, or built without the
+version stamp.
+
+**Evidence:**
 - Two 2.9 MB statically linked x86-64 ELF binaries are tracked in `cmd/test-MsgIdItemCache/`; the
   sources of that tool and of `history-demo` are `.off` files, so `go build` reports
   `no Go files` for both packages.
@@ -795,7 +822,11 @@ defaults to `data`; the root scripts hardcode `data/` (A-ops-13).
   `main` always passes `dataDir`, and with `-data ""` `OpenDatabase` fails first, because
   `filepath.Join("", "/cfg/pugleaf.sq3")` is absolute:
   `nntpmgr -data "" -list` → `failed to create data directory: mkdir /cfg/: permission denied`. It is
-  dead code (inventory), not a path to `./data`.
+  dead code (inventory), not a path to `./data`, for a user that can't create `/cfg/`. Root never gets
+  this far (`checkRootUser`, `internal/database/db_init.go:120-128,140-143`, `log.Fatal`s for euid < 1000),
+  but a user with write access to `/` would get `/cfg/` created by `createDirIfNotExists`
+  (`db_init.go:291`), and `-find-orphan-dbs` would then reach the fallback and scan `./data/db` against
+  the `/cfg` main DB.
 - No other seed row in scope is rejected. OPS-1, OPS-2 and the rest of OPS-4 are CONFIRMED; OPS-1's
   shutdown-retry half is confirmed FIXED.
 
