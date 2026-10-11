@@ -1085,3 +1085,15 @@ Checks on bf684b1: gofmt baseline 2 files, vet/build OK, 8 package sets green un
 (A-nntp-rfc-2 BUG-1 BUG-4 BUG-6 BUG-7 BUG-8 INT-1 INT-2 RFC-1 RFC-3 RFC-5 SEC-2 SEC-3 SEC-6 SEC-7 T-nntp-article-1 T-nntp-group-1),
 build scripts OK, e2e `SUMMARY pass=18 fail=2 info=1` (FAIL only N20 [nntp-read], N28 [nntp-auth-db]); no panic / DATA RACE in server.log.
 Deferred: 64 MiB drain cap stays per decision 11 (articles between 64 MiB and a larger MaxArtSize would be refused); RST after the overflow 400 accepted.
+
+### Wave 2 (2026-10-11; 2 implementers, each reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| nntp-auth-db | worktree-agent-a3f655ae27fa16987 (79824e8) | merge; 2 minors fixed inline by the orchestrator (5e8c048: `CreateNNTPUserForWebUser` uniqueness check via the any-state lookup, nil-safe test cleanup); informational: `UpdateNNTPUserWebUserID` returns `sql.ErrNoRows` for an unknown user id (addition to D6; `audit-delta-fixes` may rely on it); deviations accepted (one action flag per nntpmgr run, `-username` required except for -create/-list, `random` username only for -create, DB shutdown before log.Fatalf) | e0089f1 |
+| nntp-read | worktree-agent-a60cbfe3e05e3c51c (0cb70af, ac27e8a) | merge; 3 minors fixed (bare ARTICLE/HEAD/BODY/STAT on a vanished current article → 420, GROUP count floor `high-low+1` when `message_count` is stale, main-DB faults in the group lookup → logged 403 instead of 411); deviations accepted (`selectGroup` returns the groupDB, `resolveArticleArg(args, stat)`, processor article without `NewsgroupsPtr` served unless `Hide > 0`, hidden processor copy not added to local430, STAT by message-id reads the full row, `NNTPListGroupChunk` const) | 017dbdf |
+
+### Wave 3 (inline, cb40c45)
+- `sendLine` deleted (no caller after wave 2). staticcheck 2026.2.1 on nntp/database/nntp-server/nntpmgr: no U1000 in the files this plan touched; two pre-existing U1000 in the read-only harness (`hFakeProcessor.processedArticles`, `hIsErrNotFound`, unused since nntp-audit-tests) and older ones elsewhere (db_batch, hierarchy_cache, progress, queries search consts, nntp-client, nntp-peering, nntp-transfer S1008) left as is.
+- `BUGS.md` nntp-server section rewritten (fixed ids, remaining ids per plan, local430 limitation).
+- Checks on cb40c45: gofmt baseline 2 files, vet/build OK, 8 package sets green under `-race`, known bugs = **BUG-7 BUG-8 INT-1 INT-2 RFC-1 RFC-5 SEC-2 SEC-3 T-nntp-article-1** (9, as expected), build scripts OK,
+  `PORT=21120 DATA=./data-test-nntp-server-hardening scripts/test-nntp-server.sh` → `SUMMARY pass=20 fail=0 info=1`, no panic / DATA RACE in server.log.
