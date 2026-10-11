@@ -1097,3 +1097,40 @@ Deferred: 64 MiB drain cap stays per decision 11 (articles between 64 MiB and a 
 - `BUGS.md` nntp-server section rewritten (fixed ids, remaining ids per plan, local430 limitation).
 - Checks on cb40c45: gofmt baseline 2 files, vet/build OK, 8 package sets green under `-race`, known bugs = **BUG-7 BUG-8 INT-1 INT-2 RFC-1 RFC-5 SEC-2 SEC-3 T-nntp-article-1** (9, as expected), build scripts OK,
   `PORT=21120 DATA=./data-test-nntp-server-hardening scripts/test-nntp-server.sh` → `SUMMARY pass=20 fail=0 info=1`, no panic / DATA RACE in server.log.
+
+## Outcome
+
+- **Integration branch:** `plan-nntp-server-hardening` @ bcb361b (20 commits from `testing-001` @ baea7c0; 45 files, +4,528/−1,391 lines).
+  Not yet merged into `testing-001` (user decision). Nothing pushed.
+- **Worktrees / branches** (left in place for the user to clean up):
+  - `/tank0/claude/trees/go-pugleaf/agent-a1c463190bb3b91a2` — `worktree-agent-a1c463190bb3b91a2` @ 488cc29 (nntp-overview)
+  - `/tank0/claude/trees/go-pugleaf/agent-a812695d2f0f38332` — `worktree-agent-a812695d2f0f38332` @ 5ae9904 (nntp-session)
+  - `/tank0/claude/trees/go-pugleaf/agent-a3f655ae27fa16987` — `worktree-agent-a3f655ae27fa16987` @ 79824e8 (nntp-auth-db)
+  - `/tank0/claude/trees/go-pugleaf/agent-a60cbfe3e05e3c51c` — `worktree-agent-a60cbfe3e05e3c51c` @ ac27e8a (nntp-read)
+- **Verification** (pugleaf-verifier on 670e48e/bcb361b, main checkout): gofmt baseline 2 files; vet (+`-tags e2e`) and build clean;
+  8 package sets green under `-race`; known bugs exactly `BUG-7 BUG-8 INT-1 INT-2 RFC-1 RFC-5 SEC-2 SEC-3 T-nntp-article-1`
+  (no "no longer reproduces", no panic); `./build_nntp-server.sh && ./build_nntpmgr.sh` OK (the server script still builds
+  without `-race`, OPS-4); `PORT=21119 DATA=./data-test-nntp-server-hardening-verify scripts/test-nntp-server.sh` →
+  `SUMMARY pass=20 fail=0 info=1`, 0 panic / DATA RACE lines, SIGINT exits in 3 s in both cycles; `-count=2` rerun of
+  nntp + nntp-server green; manual probes (CAPABILITIES without AUTHINFO/MODE-READER/TAKETHIS on plaintext, GROUP unknown →
+  411 and no file, 600-byte line → 501 then HELP 100, huge XHDR range in 2 ms, pipelined QUIT+HELP → 205 and alive,
+  nntpmgr -list without hashes) all as expected.
+- **Decisions taken during the run:** maxconns default 3 for new users, enforcement opt-in (`-enforce-user-maxconns`);
+  local430 TTL 60 s (BUG-8 and T-nntp-article-1 markers stay open; BUG-8 closes in `nntp-intake-injection`); delays
+  25 ms/25 ms/1 s accepted; range numbers up to 19 digits within int64; XHDR Xref always absent and Path from the `path`
+  column; GROUP count floor `high-low+1` when `message_count` is stale; `UpdateNNTPUserWebUserID` returns `sql.ErrNoRows`
+  for an unknown id (noted in `audit-delta-fixes`).
+- **Behaviour changes to report:** greeting/MODE READER 201 on read-only servers; AUTHINFO USER not advertised on
+  plaintext by default (`-plaintextauth advertise|refuse` to change), no username echo, 502 after login; command lines
+  > 512 octets → 501, 4 KiB without LF → 400 + close; MaxConns → 400 greeting at accept (`MaxConns <= 0` = config default
+  500); `Start()` fails without a port or with a TLS port lacking cert/key; `Stop()` closes clients and waits ≤ 10 s;
+  idle timeout 3 min; GROUP/LISTGROUP numbers from visible articles, LISTGROUP selects and takes a range, unknown or
+  inactive groups → 411; hidden articles invisible over NNTP; HEAD/ARTICLE dot-stuffed; nntpmgr never prints hashes or
+  given passwords, `-update` only changes given flags, new `-activate/-deactivate/-setpassword`, password 10–72 bytes.
+- **Leftovers / known issues:** `build_nntp-server.sh` builds without `-race` (OPS-4, `audit-delta-fixes` D11 question);
+  HELP still lists MODE READER / AUTHINFO / TAKETHIS although CAPABILITIES omits them on plaintext (HELP lists the
+  dispatched commands by design); two pre-existing U1000 helpers in the read-only harness (`hFakeProcessor.processedArticles`,
+  `hIsErrNotFound`); the 64 MiB drain cap refuses articles between 64 MiB and a larger `MaxArtSize` (decision 11);
+  a session keeps its `currentGroup` after an admin deactivates the group; STAT by message-id reads the full row;
+  `-local430ttl` flag not added. Gitignored leftovers: `build/`, `./data-test-nntp-server-hardening`.
+- **Next:** `/run-plan nntp-intake-injection` (its S4 removes the BUG-8 marker after wiring `Local430.Remove`).
