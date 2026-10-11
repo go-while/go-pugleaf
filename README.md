@@ -8,7 +8,7 @@
 
 
 go-pugleaf provides a complete newsgroup platform with:
-- Full NNTP server implementation (RFC 3977 compliant) *TODO*
+- NNTP server (RFC 3977 partial, see docs/audit)
 - Modern web interface for browsing and posting
 - Efficient article fetching and threading
 - SQLite-based storage with per-group databases
@@ -144,7 +144,7 @@ The following binaries are built by `build_ALL.sh`:
 - **expire-news** - Article expiration and cleanup
 - **pugleaf-fetcher** - Article fetcher from NNTP providers
 - **webserver** - Web interface (and embedded NNTP server *TODO*)
-- **nntp-server** - Standalone NNTP server (reading works partially, posting not yet)
+- **nntp-server** - Standalone NNTP server (RFC 3977 partial, see docs/audit)
 - **nntp-transfer** - Transfer newsgroups via NNTP CHECK/TAKETHIS
 - **post-queue** - Process outgoing article post queue
 - **tcp2tor** - TCP to Tor proxy
