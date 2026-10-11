@@ -8,9 +8,11 @@ package nntp
 //
 // Every check states the RFC-correct behavior (RFC 3977). Where the current
 // code differs, the result goes through knownBug with the seed id (BUG-1,
-// BUG-6, BUG-8, RFC-3). The harness servers run with ErrorDelay=0, so
+// BUG-6, BUG-8, RFC-3) or a new id (T-nntp-article-1). The harness servers run with ErrorDelay=0, so
 // rateLimitOnError does not sleep on the error replies below.
-// Identifiers use the art/TestArt prefixes (contract K2).
+// Identifiers use the art/TestArt prefixes (contract K2). Note that
+// `-run TestArt` also matches the pre-existing TestArticleMatching; run these
+// tests with `-run '^TestArt[A-Z]'`.
 
 import (
 	"bytes"
@@ -23,6 +25,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -288,9 +291,11 @@ func TestArtMessageIDOtherGroup(t *testing.T) {
 	gB, artsB := artSeed(t, "othergrp-b", 7, func(i int, a *hArticle) { a.Skip = i < 7 })
 	b7 := artFind(t, artsB, 7)
 
+	// db is taken here: findFn runs on the server goroutine, where hTestDB's
+	// t.Skipf must not be called.
+	db := hTestDB(t)
 	proc := &hFakeProcessor{}
 	proc.findFn = func(messageID, currentGroup string) (*models.Article, error) {
-		db := hTestDB(t)
 		gdb, err := db.GetGroupDB(gB)
 		if err != nil {
 			return nil, err
@@ -340,13 +345,15 @@ func TestArtNoArgument(t *testing.T) {
 	t.Run("current-article", func(t *testing.T) {
 		c := hs.dial(t)
 		artSelect(t, c, g)
-		// STAT n sets the current article (RFC 3977 §6.2.4.2).
-		if err := artCheckRetrieval(t, c, "STAT", "1", 223, 1, a1); err != nil {
-			t.Fatal(err)
-		}
 		// RFC 3977 §6.2.1-§6.2.4: without an argument the current article is used.
 		var errs []error
 		for _, cmd := range artCmds {
+			// STAT n sets the current article (RFC 3977 §6.2.4.2). It is set again
+			// before each bare command, so an RFC-3 fix is not hidden by BUG-1
+			// (a bare ARTICLE/HEAD/BODY resetting the current article to 0).
+			if err := artCheckRetrieval(t, c, "STAT", "1", 223, 1, a1); err != nil {
+				t.Fatal(err)
+			}
 			code, line, lines := artDo(t, c, "%s", cmd.name)
 			err := artCheckStatus(code, line, cmd.code, 1, a1.MessageID)
 			if err == nil && cmd.name != "STAT" {
@@ -501,9 +508,11 @@ func TestArtCurrentArticle(t *testing.T) {
 	a3 := artFind(t, arts, 3)
 
 	// RFC 3977 §6.2.1.2: a successful ARTICLE/HEAD/BODY n sets the current
-	// article number to n, so a following bare STAT reports article n.
-	// Today GetArticleByNum never sets DBArtNum, so the current article becomes
-	// 0 (BUG-1); the bare STAT also hits RFC-3 (501) first.
+	// article number to n. A bare STAT would show it but is masked by RFC-3
+	// (501), so the pointer is read with a bare XOVER, which uses the current
+	// article (RFC 2980 §2.8, RFC 3977 §8.3.2: 224 and the overview line of n;
+	// 420 when the current article is invalid). Today GetArticleByNum never sets
+	// DBArtNum, so the current article becomes 0 and XOVER answers 420 (BUG-1).
 	for _, cmd := range artCmds[:3] { // ARTICLE, HEAD, BODY
 		t.Run("after-"+cmd.name, func(t *testing.T) {
 			c := hs.dial(t)
@@ -511,18 +520,21 @@ func TestArtCurrentArticle(t *testing.T) {
 			if err := artCheckRetrieval(t, c, cmd.name, "2", cmd.code, 2, a2); err != nil {
 				t.Fatal(err)
 			}
-			code, line, _ := artDo(t, c, "STAT")
-			knownBug(t, "BUG-1", artCheckStatus(code, line, 223, 2, a2.MessageID))
+			knownBug(t, "BUG-1", artCheckBareXover(t, c, 2))
 		})
 	}
 	t.Run("after-STAT", func(t *testing.T) {
 		c := hs.dial(t)
 		artSelect(t, c, g)
 		// RFC 3977 §6.2.4.2: STAT n sets the current article as well. The STAT
-		// path does set it today; only the bare form fails (RFC-3).
+		// path does set it today (control for BUG-1: bare XOVER works).
 		if err := artCheckRetrieval(t, c, "STAT", "2", 223, 2, a2); err != nil {
 			t.Fatal(err)
 		}
+		if err := artCheckBareXover(t, c, 2); err != nil {
+			t.Fatal(err)
+		}
+		// RFC 3977 §6.2.4: a bare STAT reports the current article; today 501 (RFC-3).
 		code, line, _ := artDo(t, c, "STAT")
 		knownBug(t, "RFC-3", artCheckStatus(code, line, 223, 2, a2.MessageID))
 	})
@@ -537,11 +549,28 @@ func TestArtCurrentArticle(t *testing.T) {
 		if err := artCheckRetrieval(t, c, "ARTICLE", a3.MessageID, 220, 3, a3); err != nil {
 			t.Fatal(err)
 		}
+		if err := artCheckBareXover(t, c, 2); err != nil {
+			t.Fatal(err)
+		}
+		// The same through a bare STAT, which answers 501 today (RFC-3).
 		code, line, _ := artDo(t, c, "STAT")
-		// The code keeps the pointer (isMessageID check), but the bare STAT that
-		// would show it answers 501 (RFC-3).
 		knownBug(t, "RFC-3", artCheckStatus(code, line, 223, 2, a2.MessageID))
 	})
+}
+
+// artCheckBareXover sends a bare XOVER and checks that it answers 224 with one
+// overview line for article wantNum (RFC 2980 §2.8, RFC 3977 §8.3.2).
+func artCheckBareXover(t *testing.T, c *hClient, wantNum int64) error {
+	t.Helper()
+	code, line := c.cmd(t, "XOVER")
+	if code != 224 {
+		return fmt.Errorf("bare XOVER: got %q, want 224 and the overview of %d", line, wantNum)
+	}
+	lines := c.readDotLines(t)
+	if len(lines) != 1 || strings.SplitN(lines[0], "\t", 2)[0] != strconv.FormatInt(wantNum, 10) {
+		return fmt.Errorf("bare XOVER: got lines %q, want one overview line of %d", lines, wantNum)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -604,7 +633,7 @@ func TestArtByteExact(t *testing.T) {
 	// today (BUG-6).
 	t.Run("header-dot-continuation", func(t *testing.T) {
 		g, arts := artSeed(t, "bytes-hdrdot", 1, func(_ int, a *hArticle) {
-			// Stored as lax intake keeps it: a folded line that starts with ".".
+			// A stored header line starting with "." (lax intake).
 			a.Headers += "\nX-Folded: first\n.second part"
 		})
 		a := arts[0]
@@ -691,20 +720,38 @@ func TestArtByteExact(t *testing.T) {
 // ---------------------------------------------------------------------------
 // local430
 
-func TestArtLocal430(t *testing.T) {
-	// The group the article arrives in later; no group is selected by the
-	// client, so every lookup goes through local430 and the processor.
-	g, _ := artSeed(t, "local430", 0, nil)
+// artLocal430Env is one local430 scenario: a group the article arrives in
+// later, the article, a fake processor whose findFn misses until arrived is
+// set, the server and a reader connection with no group selected (so every
+// lookup goes through local430 and the processor).
+type artLocal430Env struct {
+	g       string
+	a       hArticle
+	proc    *hFakeProcessor
+	arrived *atomic.Bool
+	hs      *hServer
+	c       *hClient
+}
+
+// artLocal430Miss builds the scenario and checks the two misses: the first
+// STAT asks the processor (430), the second is answered from local430 without
+// a second processor call.
+func artLocal430Miss(t *testing.T, test string) *artLocal430Env {
+	t.Helper()
+	g, _ := artSeed(t, test, 0, nil)
 	a := hDefaultArticle(g, 1)
 	a.Headers = strings.Join(artDefaultHeaders(g, a), "\n")
 
-	var arrived atomic.Bool
-	proc := &hFakeProcessor{}
+	// db is taken here: findFn runs on the server goroutine, where hTestDB's
+	// t.Skipf must not be called.
+	db := hTestDB(t)
+	arrived := &atomic.Bool{}
+	// IHAVE wants the article (335) and the transfer is accepted (235).
+	proc := &hFakeProcessor{checkResult: history.CasePass, processResult: history.CasePass}
 	proc.findFn = func(messageID, currentGroup string) (*models.Article, error) {
 		if !arrived.Load() {
 			return nil, fmt.Errorf("artLocal430 %s: %w", messageID, ErrArticleNotFound)
 		}
-		db := hTestDB(t)
 		gdb, err := db.GetGroupDB(g)
 		if err != nil {
 			return nil, err
@@ -724,37 +771,93 @@ func TestArtLocal430(t *testing.T) {
 	if err := hExpectCode(code, line, 430); err != nil {
 		t.Fatalf("first STAT: %v", err)
 	}
-	n1 := proc.findCount()
-	if n1 != 1 {
-		t.Fatalf("first STAT: findCount %d, want 1", n1)
+	if n := proc.findCount(); n != 1 {
+		t.Fatalf("first STAT: findCount %d, want 1", n)
 	}
 	// A definite miss is remembered: the second STAT is answered from local430.
 	code, line = c.cmd(t, "STAT %s", a.MessageID)
 	if err := hExpectCode(code, line, 430); err != nil {
 		t.Fatalf("second STAT: %v", err)
 	}
-	if n := proc.findCount(); n != n1 {
-		t.Fatalf("second STAT: findCount %d, want %d (no second processor call)", n, n1)
+	if n := proc.findCount(); n != 1 {
+		t.Fatalf("second STAT: findCount %d, want 1 (no second processor call)", n)
 	}
+	return &artLocal430Env{g: g, a: a, proc: proc, arrived: arrived, hs: hs, c: c}
+}
 
-	// The article arrives and the processor (history) now finds it. A 430 for an
-	// existing article is wrong (RFC 3977 §6.2.4.2), so the cached miss must not
-	// outlive the arrival by more than a moment: STAT → 223 within 1 s. Today the
-	// entry is only dropped by CronLocal430 after 60-75 s (BUG-8).
-	hArticleSQL(t, g, a)
-	arrived.Store(true)
-	var err error
+// artPollStat223 polls STAT <mid> on c until it answers "223 0 <mid>" or 1 s
+// has passed, and returns the result of the last check.
+func artPollStat223(t *testing.T, c *hClient, a hArticle) error {
+	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
-		code, line = c.cmd(t, "STAT %s", a.MessageID)
-		// RFC 3977 §6.2.1.2: no group selected → number 0.
-		err = artCheckStatus(code, line, 223, 0, a.MessageID)
+		code, line := c.cmd(t, "STAT %s", a.MessageID)
+		// RFC 3977 §6.2.4.2: 223 n message-id; §6.2.1.2: no group selected → n is 0.
+		err := artCheckStatus(code, line, 223, 0, a.MessageID)
 		if err == nil || time.Now().After(deadline) {
-			break
+			return err
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	knownBug(t, "BUG-8", err)
+}
+
+func TestArtLocal430(t *testing.T) {
+	// A 430 for an existing article is wrong (RFC 3977 §6.2.4.2), so a cached
+	// miss must not outlive the article's arrival by more than a moment:
+	// STAT → 223 within 1 s.
+
+	// The article arrives through this server (IHAVE answered 235). The server
+	// knows the message-id was accepted, but local430 is never invalidated: the
+	// entry is only dropped by CronLocal430 after 60-75 s (BUG-8).
+	t.Run("ihave-arrival", func(t *testing.T) {
+		env := artLocal430Miss(t, "local430-ihave")
+
+		// A peer with transfer permission delivers the article.
+		user, pass := hUser(t, true, true)
+		peer := env.hs.dial(t)
+		code, line := peer.cmd(t, "AUTHINFO USER %s", user)
+		if err := hExpectCode(code, line, 381); err != nil {
+			t.Fatalf("AUTHINFO USER: %v", err)
+		}
+		code, line = peer.cmd(t, "AUTHINFO PASS %s", pass)
+		if err := hExpectCode(code, line, 281); err != nil {
+			t.Fatalf("AUTHINFO PASS: %v", err)
+		}
+		// RFC 3977 §6.3.2.2: IHAVE of a wanted article → 335, then 235 after transfer.
+		code, line = peer.cmd(t, "IHAVE %s", env.a.MessageID)
+		if err := hExpectCode(code, line, 335); err != nil {
+			t.Fatalf("IHAVE: %v", err)
+		}
+		raw := string(artCRLF(artHeaderLines(env.a)...)) + CRLF + string(artCRLF(artBodyLines(env.a)...)) + ".\r\n"
+		if err := peer.send(raw); err != nil {
+			t.Fatalf("send article: %v", err)
+		}
+		code, line, err := peer.readStatus()
+		if err != nil {
+			t.Fatalf("IHAVE transfer reply: %v (%q)", err, line)
+		}
+		if err := hExpectCode(code, line, 235); err != nil {
+			t.Fatalf("IHAVE transfer: %v", err)
+		}
+		// What the real processor does on CasePass: the article is stored and the
+		// history finds it.
+		hArticleSQL(t, env.g, env.a)
+		env.arrived.Store(true)
+
+		knownBug(t, "BUG-8", artPollStat223(t, env.c, env.a))
+	})
+
+	// T-nntp-article-1 (low): local430 has no coherence with intake outside
+	// this process. When nntp-fetcher (another process) stores the article in
+	// the shared DB and history, this server is never told, so a message-id that
+	// missed once stays 430 for up to ~75 s after the fetcher stored it. Here the
+	// article "arrives" by raw SQL and the processor finds it right away.
+	t.Run("external-arrival", func(t *testing.T) {
+		env := artLocal430Miss(t, "local430-external")
+		hArticleSQL(t, env.g, env.a)
+		env.arrived.Store(true)
+		knownBug(t, "T-nntp-article-1", artPollStat223(t, env.c, env.a))
+	})
 }
 
 // ---------------------------------------------------------------------------
