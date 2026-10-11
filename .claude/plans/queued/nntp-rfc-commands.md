@@ -888,34 +888,36 @@ Changes:
      §3.3.3 "MUST implement the extension").
 3. **`cmd/nntp-server/e2e_binary_rfc_test.go`** (`//go:build e2e`, package main, prefix `e2eRfc`): `TestE2EBinaryRFC`
    skips without `PUGLEAF_E2E_ADDR`; reuses `e2eDialAddr`, `e2eReport`, `e2eEnv`, `e2eParseCode`, `e2eClient.tryCmd`,
-   `tryDotLines`, `tryAuth` from the existing e2e files; prints `PASS|FAIL|INFO N4x [rfc] <text>`:
-   - **N40** `DATE` → `111` + 14 digits within 5 min of UTC now.
-   - **N41** GROUP `$PUGLEAF_E2E_GROUP` → parse `211 count low high`; `LAST` → 422; `NEXT` repeated until 421 gives
+   `tryDotLines`, `tryAuth` from the existing e2e files; prints `PASS|FAIL|INFO N5x [rfc] <text>`:
+   - **N50** `DATE` → `111` + 14 digits within 5 min of UTC now.
+   - **N51** GROUP `$PUGLEAF_E2E_GROUP` → parse `211 count low high`; `LAST` → 422; `NEXT` repeated until 421 gives
      `count-1` replies `223`, strictly increasing numbers between low and high; then `LAST` → 223.
-   - **N42** `LIST OVERVIEW.FMT` → 215, the 7 fixed lines.
-   - **N43** `OVER 1-` → 224 and ≥ 1 line starting with a number; `OVER 999999999-` → 423.
-   - **N44** `HDR Subject 1` → 225 and one line starting `1 `; `LIST HEADERS` → 215 with `:bytes`.
-   - **N45** `MODE STREAM` → 203; `AUTHINFO` → 281; `CHECK <fresh id>` → `238 <fresh id>`; `HDR Message-ID 1` gives the
+   - **N52** `LIST OVERVIEW.FMT` → 215, the 7 fixed lines.
+   - **N53** `OVER 1-` → 224 and ≥ 1 line starting with a number; `OVER 999999999-` → 423.
+   - **N54** `HDR Subject 1` → 225 and one line starting `1 `; `LIST HEADERS` → 215 with `:bytes`.
+   - **N55** `MODE STREAM` → 203; `AUTHINFO` → 281; `CHECK <fresh id>` → `238 <fresh id>`; `HDR Message-ID 1` gives the
      stored id; `CHECK <that id>` → `438 <that id>`.
-   - **N46** `NEWGROUPS <now-2 days yyyymmdd hhmmss> GMT` → 231 listing the group; `LIST ACTIVE <group>` → exactly one
+   - **N56** `NEWGROUPS <now-2 days yyyymmdd hhmmss> GMT` → 231 listing the group; `LIST ACTIVE <group>` → exactly one
      line equal to the group's NEWGROUPS line; `LIST ACTIVE e2e.*,!*.b` lists `e2e.test.a` but not `e2e.test.b`.
-   - **N47** with `PUGLEAF_E2E_STARTTLS=1`: a new connection; CAPABILITIES lists `STARTTLS`; `STARTTLS` → 382; TLS
+   - **N57** with `PUGLEAF_E2E_STARTTLS=1`: a new connection; CAPABILITIES lists `STARTTLS`; `STARTTLS` → 382; TLS
      handshake (`InsecureSkipVerify`, `MinVersion` TLS 1.2); CAPABILITIES over TLS lacks `STARTTLS`; `STARTTLS` → 502.
-     Without it: CAPABILITIES lacks `STARTTLS` and `STARTTLS` → 502, reported as `INFO N47 [rfc] no certificate
+     Without it: CAPABILITIES lacks `STARTTLS` and `STARTTLS` → 502, reported as `INFO N57 [rfc] no certificate
      configured` plus PASS for the 502.
 4. **`scripts/test-nntp-server.sh`** (additive; keep hardening's checks intact):
-   - Header comment: add "N40-N47 (nntp-rfc-commands) come from `go test -tags e2e -run TestE2EBinaryRFC`".
+   - Check-id ranges in this script: N01–N11 (`nntp-audit-tests`), N20–N28 and N30 (`nntp-server-hardening`),
+     N40–N49 (`nntp-intake-injection`), **N50–N59 (this plan; N58–N59 spare)**. Never reuse another plan's range.
+   - Header comment: add "N50-N57 (nntp-rfc-commands) come from `go test -tags e2e -run TestE2EBinaryRFC`".
    - After `mkdir -p "$DATA/run"` and before the first `start_server`: if `command -v openssl`, generate
      `"$DATA_ABS/run/tls.key"`/`tls.crt` with `openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
      -nodes -days 2 -subj /CN=localhost -keyout … -out … >/dev/null 2>&1` and set `TLSFLAGS=(-nntpcertfile
      "$DATA_ABS/run/tls.crt" -nntpkeyfile "$DATA_ABS/run/tls.key")` and `E2E_STARTTLS=1`; else `TLSFLAGS=()` and
-     `E2E_STARTTLS=0` with `info N47 rfc "openssl missing: STARTTLS checked without a certificate"`.
+     `E2E_STARTTLS=0` with `info N57 rfc "openssl missing: STARTTLS checked without a certificate"`.
    - `start_server`: append `${TLSFLAGS[@]+"${TLSFLAGS[@]}"}` to the server command line (safe under `set -u` with an
      empty array).
    - After the N01-N11 block: run `PUGLEAF_E2E_ADDR=… PUGLEAF_E2E_USER=… PUGLEAF_E2E_PASS=… PUGLEAF_E2E_GROUP=e2e.test.a
      PUGLEAF_E2E_STARTTLS=$E2E_STARTTLS timeout 300 go test -tags e2e -count=1 -v -run '^TestE2EBinaryRFC$'
-     ./cmd/nntp-server/ >"$DATA/e2e-rfc-go-test.log" 2>&1`, count `PASS|FAIL|INFO N4[0-7]` lines into the totals as the
-     N01-N11 block does, and `fail N00 rfc "go test reported $n of 8 rfc steps"` unless exactly 8 `PASS|FAIL N4[0-7]`
+     ./cmd/nntp-server/ >"$DATA/e2e-rfc-go-test.log" 2>&1`, count `PASS|FAIL|INFO N5[0-7]` lines into the totals as the
+     N01-N11 block does, and `fail N00 rfc "go test reported $n of 8 rfc steps"` unless exactly 8 `PASS|FAIL N5[0-7]`
      lines were printed. `alive || setup_fail "server died during the rfc steps"`.
    - `bash -n scripts/test-nntp-server.sh` must pass.
 5. Checks: the common wave-1 list plus `PUGLEAF_KNOWN_BUGS=1 go test -count=1 -timeout 900s ./internal/nntp/...
@@ -945,7 +947,7 @@ whether README was updated (A.4), and the HELP lines still missing.
 | E09 | `TestStls*` and `TestRfcStartTLSWire` pass | rfc-starttls / rfc-wire |
 | E10 | `TestRfcCapabilities` and `TestRfcReaderHonest` pass | rfc-wire |
 | E11 | `PUGLEAF_KNOWN_BUGS=1` id list no longer contains `RFC-1`; `grep -rn '"RFC-1"' internal/nntp cmd/nntp-server` is empty | rfc-wire |
-| E12 | End-to-end: N40–N47 PASS (N47 PASS with a certificate; with openssl missing, PASS for the 502 plus INFO) and no FAIL among the checks hardening left | verifier |
+| E12 | End-to-end: N50–N57 PASS (N57 PASS with a certificate; with openssl missing, PASS for the 502 plus INFO) and no FAIL among the checks hardening left | verifier |
 
 ## Checks
 On every merged tree (after wave 0, after each merge in waves 1 and 2):
@@ -975,11 +977,11 @@ Runner: `pugleaf-verifier` on the main checkout (`plan-nntp-rfc-commands`), afte
 PORT=21129 DATA=./data-test-nntp-rfc-commands scripts/test-nntp-server.sh
 ```
 - Guards and setup are the script's (DATA must match `./data-test-*`, DNS for `-nntphostname example.org`, `sqlite3`,
-  `timeout`, `nc`, `go`; `openssl` optional for N47).
+  `timeout`, `nc`, `go`; `openssl` optional for N57).
 - The server runs with `-data <abs path of ./data-test-nntp-rfc-commands> -nntptcpport 21129 -nntphostname example.org`
   plus `-nntpcertfile/-nntpkeyfile` when openssl generated a certificate (STARTTLS on the plain port; no TLS port).
-- **Expected:** N01–N11 PASS; N40–N47 PASS (N47: STARTTLS 382 + handshake with a certificate; INFO + the 502 PASS
-  without openssl); N20–N22/N30 as hardening's Outcome states (PASS after hardening); `SUMMARY … fail=0`.
+- **Expected:** N01–N11 PASS; N50–N57 PASS (N57: STARTTLS 382 + handshake with a certificate; INFO + the 502 PASS
+  without openssl); N20–N28/N30 as hardening's Outcome states (PASS after hardening); `SUMMARY … fail=0`.
 - Manual spot check (optional, documented in the verifier report):
   ```bash
   printf 'DATE\r\nLIST OVERVIEW.FMT\r\nMODE STREAM\r\nQUIT\r\n' | timeout 5 nc 127.0.0.1 21129
