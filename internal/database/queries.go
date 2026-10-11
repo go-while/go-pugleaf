@@ -904,6 +904,7 @@ func (db *Database) GetArticleByNum(groupDB *GroupDB, articleNum int64) (*models
 	}
 	a.ArticleNums = make(map[*string]int64)
 	a.ArticleNums[groupDB.NewsgroupPtr] = artnum
+	a.DBArtNum = artnum
 	a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDB.NewsgroupPtr)
 
 	// Cache the result
