@@ -2,7 +2,7 @@ package nntp
 
 // Fuzz test of the server's article parsing path (plan nntp-audit-tests, slice
 // test-nntp-intake-e2e). POST, IHAVE and TAKETHIS all go through
-// readArticleLines (wire → dot-unstuffed head and body lines) and then
+// readArticleBlock (wire → dot-unstuffed head and body lines) and then
 // parseIncomingArticleLines; this fuzzes the second step with the line shapes
 // the first one can produce. Plain `go test` runs only the seed corpus.
 //
@@ -11,9 +11,11 @@ package nntp
 import (
 	"strings"
 	"testing"
+
+	"github.com/go-while/go-pugleaf/internal/common"
 )
 
-// e2eFuzzHeadLines splits a fuzzed head into lines the way readArticleLines
+// e2eFuzzHeadLines splits a fuzzed head into lines the way readArticleBlock
 // would deliver them: no CRLF, and no empty line (an empty line ends the head).
 func e2eFuzzHeadLines(head string) []string {
 	var out []string
@@ -51,9 +53,17 @@ func FuzzE2EParseIncomingArticleLines(f *testing.F) {
 		{"\tleading continuation\n: empty name\nNo colon at all\nNewsgroups: t6.fuzz.a", "\r\n\r"},
 		{"", ""},
 		{"Newsgroups: t6.fuzz.a\n References: <a@b>\n\tmore", strings.Repeat("y", 1000)},
+		{"Newsgroups: a.b c.d\nMessage-ID: <t7-fuzz-1@test.invalid>", "space separated"},
+		{"Newsgroups: ai..dots.\nMessage-ID: <t7-fuzz-2@test.invalid>", "empty components"},
 	}
 	for _, s := range seeds {
 		f.Add(s.head, s.body)
+	}
+	// RFC 5536 §3.1.4 (D8): names are comma separated and every component is non-empty
+	for _, head := range []string{"Newsgroups: a.b c.d", "Newsgroups: ai..dots."} {
+		if _, groups, err := parseIncomingArticleLines(e2eFuzzHeadLines(head), nil); err == nil {
+			f.Fatalf("%q parsed to groups %q, want an error", head, groups)
+		}
 	}
 	f.Fuzz(func(t *testing.T, head, body string) {
 		headLines := e2eFuzzHeadLines(head)
@@ -76,7 +86,7 @@ func FuzzE2EParseIncomingArticleLines(f *testing.F) {
 			t.Fatal("no error but no newsgroups")
 		}
 		for _, g := range groups {
-			if g == "" || g != strings.TrimSpace(g) || strings.Contains(g, ",") {
+			if g == "" || g != strings.TrimSpace(g) || strings.Contains(g, ",") || !common.ValidGroupNameSyntax(g) {
 				t.Fatalf("bad newsgroup %q in %q", g, groups)
 			}
 		}

@@ -883,7 +883,9 @@ func TestArtLocal430(t *testing.T) {
 		hArticleSQL(t, env.g, env.a)
 		env.arrived.Store(true)
 
-		knownBug(t, "BUG-8", artPollStat223(t, env.c, env.a))
+		if err := artPollStat223(t, env.c, env.a); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	// T-nntp-article-1 (low): local430 has no coherence with intake outside
