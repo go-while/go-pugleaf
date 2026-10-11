@@ -90,8 +90,8 @@ func (c *ClientConnection) Handle() error {
 
 		// A handler error (usually a failed write) ends the connection without a 500.
 		if err := c.handleCommand(line); err != nil {
-			if errors.Is(err, errQuit) {
-				return nil
+			if errors.Is(err, errQuit) || errors.Is(err, net.ErrClosed) {
+				return nil // QUIT, or the socket was closed by Stop mid-reply
 			}
 			return err
 		}

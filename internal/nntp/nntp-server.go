@@ -97,6 +97,7 @@ type NNTPServer struct {
 	userConns map[int]int // authenticated connections per NNTP user id (EnforceUserMaxConns)
 	stopping  bool        // set by Stop under connsMu; trackConn refuses connections from then on
 	handlers  sync.WaitGroup
+	rejectSem chan struct{} // bounds the goroutines sending the MaxConns 400 greeting
 
 	// Per-server timing. Zero delay means no sleep; IdleTimeout <= 0 falls back
 	// to DefaultNNTPcliconnTimeout. Per-server (not package vars) so tests don't race.
@@ -138,6 +139,7 @@ func NewNNTPServer(db *database.Database, cfg *config.ServerConfig, mainWG *sync
 		local430:    &Local430{cache: make(map[string]time.Time), ttl: DefaultLocal430TTL},
 		conns:       make(map[net.Conn]struct{}),
 		userConns:   make(map[int]int),
+		rejectSem:   make(chan struct{}, 32),
 
 		ArticleCmdDelay: DefaultArticleCmdDelay,
 		GroupCmdDelay:   DefaultGroupCmdDelay,
@@ -293,11 +295,24 @@ func (s *NNTPServer) serve(listener net.Listener, isTLS bool) {
 		}
 		if s.Stats.GetActiveConnections() >= maxConns {
 			log.Printf("[NNTP] Connection limit %d reached, rejecting connection from %s", maxConns, conn.RemoteAddr())
-			// RFC 3977 §5.1.2: a 400 greeting, then close. The deadline covers reads
-			// too: on a TLS listener the first Write runs the handshake.
-			_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-			_, _ = io.WriteString(conn, "400 Too many connections, try again later\r\n")
-			_ = conn.Close()
+			// RFC 3977 §5.1.2: a 400 greeting, then close. It runs in its own
+			// goroutine (at most cap(rejectSem) at once, each bounded by a 2 s
+			// deadline that covers reads too: on a TLS listener the first Write
+			// runs the handshake), so stalled clients can't hold the accept loop.
+			// When all reject slots are busy the connection is closed silently.
+			select {
+			case s.rejectSem <- struct{}{}:
+				s.wg.Add(1)
+				go func(conn net.Conn) {
+					defer s.wg.Done()
+					defer func() { <-s.rejectSem }()
+					_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+					_, _ = io.WriteString(conn, "400 Too many connections, try again later\r\n")
+					_ = conn.Close()
+				}(conn)
+			default:
+				_ = conn.Close()
+			}
 			continue
 		}
 
@@ -434,7 +449,13 @@ func (s *NNTPServer) Stop() error {
 	}
 	s.connsMu.Unlock()
 	for _, c := range open {
-		_ = c.Close()
+		// Close the raw socket of a TLS conn: tls.Conn.Close would first send
+		// close_notify under its own 5 s write deadline, per stalled client.
+		if tc, ok := c.(*tls.Conn); ok {
+			_ = tc.NetConn().Close()
+		} else {
+			_ = c.Close()
+		}
 	}
 
 	done := make(chan struct{})

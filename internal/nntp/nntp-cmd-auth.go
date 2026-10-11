@@ -28,13 +28,13 @@ func authinfoArgument(line string) string {
 // handleAuthInfo handles AUTHINFO USER/PASS (RFC 4643 §2.3). No reply echoes
 // client input.
 func (c *ClientConnection) handleAuthInfo(args []string, line string) error {
-	if len(args) == 0 {
-		c.rateLimitOnError()
-		return c.sendResponse(501, "AUTHINFO requires a subcommand")
-	}
 	// RFC 4643 §2.3.2: any AUTHINFO after a successful login → 502
 	if c.authenticated {
 		return c.sendResponse(502, "Already authenticated")
+	}
+	if len(args) == 0 {
+		c.rateLimitOnError()
+		return c.sendResponse(501, "AUTHINFO requires a subcommand")
 	}
 	if !c.isTLS && c.server.PlaintextAuth == PlaintextAuthRefuse {
 		return c.sendResponse(483, "Encryption required")

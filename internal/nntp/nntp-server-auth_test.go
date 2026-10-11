@@ -176,6 +176,10 @@ func TestAuthSecondAuthinfo(t *testing.T) {
 	if err2 := hExpectCode(code, line, 502); err2 != nil {
 		err = errors.Join(err, fmt.Errorf("AUTHINFO PASS after login: %w", err2))
 	}
+	code, line = c.cmd(t, "AUTHINFO")
+	if err3 := hExpectCode(code, line, 502); err3 != nil {
+		err = errors.Join(err, fmt.Errorf("bare AUTHINFO after login: %w", err3))
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
