@@ -707,7 +707,7 @@ PORT=21119 DATA=./data-test-nntp-audit-tests scripts/test-nntp-server.sh
 
 ## Outcome
 
-- **Integration branch:** `plan-nntp-audit-tests` @ 904ae59 (76 commits from `testing-001` @ eaa24c6; 38 files, +20,398 lines). Not yet merged into `testing-001` (user decision). Nothing pushed.
+- **Integration branch:** `plan-nntp-audit-tests` @ 904ae59 (76 commits from `testing-001` @ eaa24c6; 38 files, +20,398 lines). Merged into `testing-001` with `--no-ff` as 2329e28 on 2026-10-11 (build and vet green after the merge). Nothing pushed.
 - **Built:**
   - Wave-0 hooks in `internal/nntp` (per-server delays/idle timeout, `Serve(listener, isTLS)`), the package test harness, 5 test files in `internal/nntp` plus `cmd/nntp-server/server_e2e_test.go`, `e2e_binary_test.go` (tag `e2e`), the intake parse fuzz target and `scripts/test-nntp-server.sh` (74 new Test/Fuzz functions).
   - 8 audit reports in `docs/audit/` plus `AUDIT-2026-10.md` (152 findings after dedup: critical 2, high 19, medium 59, low 68, info 4; 146 CONFIRMED, 6 PLAUSIBLE) and `docs/audit/tools/*`.
