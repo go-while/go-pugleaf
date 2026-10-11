@@ -8,9 +8,9 @@
   re-checks the anchors listed in K6 and records any drift in `## Progress`.
 - **Depends on:** `nntp-server-hardening`, `nntp-intake-injection` (both merged first). Final run order:
   nntp-server-hardening → nntp-intake-injection → **nntp-client-transfer** → nntp-rfc-commands → audit-delta-fixes.
-  From the intake plan this plan uses `common.ValidMessageID` (all waves) and `common.CheckHeaderBlock` (wave 4), see K1.
+  From the intake plan this plan uses `common.ValidMessageID` (waves 0, 2, 3), see K1.
   Neither earlier plan owns a file of this plan (see Coordination); the K6 anchor check absorbs line drift.
-- **Parallelism:** wave 1 has 2 slices, wave 2 has 2, wave 3 has 1, wave 4 has 1. Within a wave, no two slices own the
+- **Parallelism:** wave 1 has 2 slices, wave 2 has 2, wave 3 has 1. Within a wave, no two slices own the
   same file. A file may be owned by different slices in different waves (the later wave builds on the merged earlier one).
 - **Source:** `docs/audit/AUDIT-2026-10.md` (§3 Top 25, §4 "client" table and every row whose fix-plan column names
   `nntp-client-transfer`, §11 decisions, §12 corrections), `docs/audit/audit-nntp-client.md` (all findings, the client
@@ -48,7 +48,6 @@ audit's "Not covered" candidates (audit-nntp-client.md `## Not covered`), taken 
 | CLI-4 | `nntp/nntp-transfer-demuxer.go:19`,`:185-191` | `LastID` starts at 0 and the demuxer only advances on `LastID+1 == CmdID`; with `-username`, AUTHINFO USER/PASS and MODE STREAM consume textproto ids 0–2, the first CHECK is id 3 and waits in the backlog forever. | cli-conn |
 | OPS-3 | `cmd/nntp-transfer/main.go:12` (`_ "net/http/pprof"`), `:149`,`:165` (`-password`, `-redis-pass`), `:539-541`, `:2935-2944` (`http.ListenAndServe(":%d", nil)`), `:544-552`; `cmd/history-rebuild/main.go:12`,`:75`,`:97-101` | `-web-port` serves the default mux on all interfaces with pprof registered: `GET /debug/pprof/cmdline` returns argv with both passwords; no server timeouts (gosec G108/G114). history-rebuild `-pprof` accepts any address. | cli-transfer |
 | INT-5 (`bytes` half; routed here by the coordinator) | `nntp/nntp-client-commands.go:876-878` | `article.Bytes = len(article.BodyText)`: the LF-joined body length. RFC 3977 §8.1.1 / §8.3.2: `:bytes` is the size of the whole article (headers, separator, body) with CRLF line ends. `ParseLegacyArticleLines` is the shared parser of the fetcher, POST/IHAVE intake (`nntp-cmd-posting.go:274`), `proc_reuse.go:57` and `rslight.go:334`. The article-number-reuse half of INT-5 belongs to `audit-delta-fixes` (cross-reference only). | cli-commands |
-| A-nntp-rfc-2 / A-intake-2 (client half; routed here by the coordinator) | `nntp/nntp-client-commands.go:837-840` (un-stuffing, correct per RFC 3977 §3.1.1), `:905-951` (`ParseHeaders` stores **all** raw header lines: `:950`) | The fetcher stores a header line that was `..` on the wire as `.`, and colon-less/garbage lines, verbatim in `headers_json`; served without stuffing they desync readers. The server half is `nntp-server-hardening`, the intake half (`CheckHeaderBlock`) is `nntp-intake-injection`. | cli-normalize (wave 4) |
 
 **Medium**
 | ID | Where | Defect | Slice |
@@ -82,13 +81,21 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
    identity (intake prefixes it), so it is sent unchanged; otherwise `<host>!` is prepended once. The `!.TX!`
    diagnostic is **dropped**: RFC 5537 §3.2.1 defines `MISMATCH`, `SEEN` and `POSTED` only, and `.TX` repeated the
    identity. The same rule builds POST's `X-Path` (no `.TX`). The line is never folded.
-2. **TAKETHIS relays the stored header block (A-intake-6, RFC 5537 §3.6).** When `headers_json` is non-empty, the
-   header lines are sent as stored, in stored order, except: the Path header (with continuations) is replaced by the
-   line of decision 1, and Xref (with continuations) is dropped. A stored block that fails `common.RelayHeaders`'s
-   checks is **not repaired**: the article is skipped (counted `skipped`, logged with the reason), as RFC 5537 §3.6
-   requires ("rejected rather than modified"). Rows without `headers_json` (legacy imports) keep the
-   `ReconstructHeaders` path. POST upstream (`postmgr`) keeps `ReconstructHeaders`: there the tool acts as a posting
-   agent, not a relay.
+2. **TAKETHIS relays the stored header block where it is complete (A-intake-6, RFC 5537 §3.6) — default, to be
+   confirmed by the user (see "Question for the user" below).** `common.RelayHeaders` returns one of three outcomes:
+   - **relay:** the stored header lines are sent in stored order, unchanged except: the Path header (with
+     continuations) is replaced by the line of decision 1; Xref (with continuations) is dropped; `X-Goo*` fields are
+     dropped when `common.IgnoreGoogleHeaders` is set (`-ignore-google-headers`, as today); a Date value that is not an
+     RFC date is replaced by the value `ReconstructHeaders` computes today (`DateSent`, then `Date-Received`), so the
+     date repair behind `-rewrite-dates` keeps applying.
+   - **incomplete → fallback:** when Date, From, Message-ID, Newsgroups or Subject is missing, or a field line is
+     malformed (no colon, empty or non-printable name, a continuation as first line), the article is serialized with
+     `ReconstructHeaders` as today (it fills the fields from the row's columns). This keeps web posts sendable: their
+     `headers_json` has no Date/Message-ID/Subject/Path (INT-7). Rows without `headers_json` take this path too.
+   - **unsafe → skip:** a CR, LF or NUL inside a line, a mandatory field (the five above or Path) present more than
+     once, or a Message-ID value that differs from `article.MessageID` or fails `common.ValidMessageID`: the article is
+     skipped (counted `skipped`, logged with the reason), never repaired.
+   POST upstream (`postmgr`) keeps `ReconstructHeaders`: there the tool acts as a posting agent, not a relay.
 3. **Header and body lines are dot-stuffed on the wire (CLI-1).** Both writers stuff every line starting with `.`,
    header lines included, and send the body byte-exact: `strings.Split(BodyText, "\n")` reverses the parser's join
    exactly, so a final empty line is sent; an empty `BodyText` sends no body lines.
@@ -141,25 +148,33 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
 17. **INT-5 `bytes`.** `Bytes = Σ(len(header line)+2) + 2 + Σ(len(body line)+2)`, over the parsed (un-stuffed) lines,
     without the terminator; set also when the body is empty. Only newly parsed articles change; existing rows keep
     their value (no migration).
-18. **Fetched header blocks are checked (wave 4, A-nntp-rfc-2/A-intake-2 client half).** `ParseHeaders` stores the
-    output of `common.CheckHeaderBlock(lines, common.HeaderBlockFetch)` (exported by `nntp-intake-injection`: the
-    lenient bulk/fetch mode rejects NUL/CR/LF and duplicate mandatory headers and drops colon-less lines, so a `.`
-    header line is dropped); a block it rejects makes `ParseLegacyArticleLines` return an error, so the article is not
-    stored. `Bytes` is then computed from the checked header lines.
+18. **Fetched header blocks are not changed here.** The intake plan's S3 runs
+    `common.CheckHeaderBlock(…, HeaderBlockFetch)` on every bulk/fetched article in `processArticle` and stores the
+    normalized `HeadersJSON`; calling it again in `ParseHeaders` would be redundant and would also hit the server
+    intake path (`ParseLegacyArticleLines` is called from `nntp-cmd-posting.go:274`). The fetcher's `..`→`.`
+    un-stuffing in `readMultilineResponse` is correct (RFC 3977 §3.1.1) and stays. A-intake-2 and the fetch side of
+    A-nntp-rfc-2 are cross-referenced to `nntp-intake-injection`.
 19. **Removed (CLI-6, A-9):** `PeeringManager` and its types (the `Default*Patterns` vars and `nntp-peering-pattern.go`
     stay), `nntp-peering-struct.go.bak`, `cmd/test-nntp/` (no build script, hardcoded external server, only user of
     `ListGroupsLimited`), the unused progress readers and nntp-transfer helpers. `-batch-db` stays accepted (used by
     `scripts/nntp-transfer-loop.sh`) and its help text says it has no effect.
 
+**Question for the user (decision 2):** relay verbatim where complete, fall back to `ReconstructHeaders` for
+incomplete blocks, skip only unsafe ones (the default above); or relay strictly verbatim and skip every incomplete
+block (RFC 5537 §3.6 to the letter, but every web post and many legacy imports stop being fed); or keep
+`ReconstructHeaders` for everything (today's behaviour minus the CLI-1 bugs). The plan implements the default unless
+the user decides otherwise before wave 2.
+
 ### Out of scope (list them in the Outcome)
 - In-run requeue of CHECK 431 (decision 14 makes the next run pick them up).
 - Passwords for nntp-transfer from environment or file instead of argv (local `ps`/`/proc` exposure remains).
 - Authentication for the transfer UI (it binds loopback by default).
-- INT-5 article-number reuse → `audit-delta-fixes`. A-tools-3 fetcher half (proxy fields, `cmd/nntp-fetcher/main.go:838-845`)
-  → `audit-delta-fixes`. A-tools-14 (`rslight-importer` pprof) → `audit-delta-fixes`. OPS-4 (history-rebuild
+- INT-5 article-number reuse → `audit-delta-fixes`. A-tools-3: `audit-delta-fixes` keeps only the fetcher half (proxy
+  fields and `Provider` in `cmd/nntp-fetcher/main.go:838-845`); the client guard is here (cli-conn). A-tools-14 (`rslight-importer` pprof) → `audit-delta-fixes`. OPS-4 (history-rebuild
   `-useshorthashlen`, `cmd/history-rebuild/main.go:74`) → `audit-delta-fixes`.
 - Server-side dot-stuffing (BUG-6, A-nntp-rfc-2 served half) → `nntp-server-hardening`; intake header validation
-  (A-intake-2) and Xref handling on intake (INT-4, `ParseHeaders` `:936-939` is not changed here) → `nntp-intake-injection`.
+  (A-intake-2, including the fetch side of A-nntp-rfc-2: `CheckHeaderBlock(…, HeaderBlockFetch)` in `processArticle`)
+  and Xref handling on intake (INT-4, `ParseHeaders` `:936-939` is not changed here) → `nntp-intake-injection`.
 - govulncheck findings (toolchain/`x/net`/`quic-go` versions): `go.mod` is frozen (K4).
 - An opt-in `-rewrite-headers` for pushing legacy archives with invalid stored headers.
 - Rewriting `bytes` of existing rows; folding long Path lines.
@@ -190,7 +205,7 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
     `SelectGroup(string) (*GroupInfo, error)` (480 → `ErrAuthRequired`, decision 6), `ListNewsgroups`,
     `FileCachedListNewsgroups(cacheDir)`, `ClosePool`, `Stats`.
   - `ParseLegacyArticleLines(messageID string, lines []string, bulkmode bool) (*models.Article, error)` (`Bytes`
-    changes, decision 17; wave 4 adds normalization, decision 18), `ParseHeaders`, `ParseGroupLine`,
+    changes, decision 17), `ParseHeaders`, `ParseGroupLine`,
     `MultiLineHeaderToMergedString`.
   - Transfer engine: `NewResponseDemuxer(*BackendConn, chan struct{}) *ResponseDemuxer` and its `Start`,
     `RegisterCommand`, `GetCheckResponseChan`, `GetTakeThisResponseChan`, `GetDemuxerStats`; `CHTTJob`, `ReadRequest`,
@@ -206,10 +221,10 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
   - **Dependencies on `nntp-intake-injection` (merged first):**
     - `func ValidMessageID(id string) bool` in `internal/common` (`common/intake.go`): full RFC 5536 grammar, exactly
       one `@`. This plan calls it (waves 0, 2, 3) and does **not** define its own.
-    - `func CheckHeaderBlock(lines []string, mode HeaderBlockMode) ([]string, error)` with mode `HeaderBlockFetch` in
-      `internal/common` (input: raw header lines without the separator; output: the lines to store). Wave 4 calls it.
-    - If either has a different name or signature in the merged tree, the slice that uses it adapts its call sites and
-      records it in `## Progress`.
+    - Optional: if the merged tree has `common.WireArticleSize` (intake plan, whole-article CRLF size), wave 2 uses it
+      instead of defining `articleWireBytes`.
+    - If a name or signature differs in the merged tree, the slice that uses it adapts its call sites and records it in
+      `## Progress`.
 - **K2: reserved names** (checked free at 03d5ef7 with `grep -rnw <name> --include=*.go internal cmd`):
   - wave 0: `cliFakeServer`, `cliFakeOpts`, `cliFakeStep`, `cliFakeConn`, `cliFakeTLSConfig`, `newCliFakeServer`,
     `cliDial`, `cliUnstuff`, `cliPeerOpts`, `cliPeerHandler` and the `TestCliFake*`/`TestCliE2E*`
@@ -225,20 +240,21 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
     `DefaultClientMaxLineBytes`, `DefaultClientMaxArticleBytes`, `DefaultClientMaxListBytes`,
     `BackendConfig.MaxResponseLineBytes`, `BackendConfig.MaxArticleResponseBytes`, `BackendConfig.MaxListResponseBytes`,
     `(*BackendConn).greetingCode`, `(*BackendConn).responseBudget`, `writeArticleLines`, `wireBodyLines`, `dotStuff`,
-    `articleWireBytes`, `common.RelayHeaders`, `common.ErrRelayHeadersInvalid`, `common.EnsureLocalPathPrefix`,
-    `common.firstHeaderLine`.
+    `articleWireBytes` (only if `common.WireArticleSize` does not exist), `common.RelayHeaders`,
+    `common.ErrRelayHeadersInvalid`, `common.ErrRelayHeadersIncomplete`, `common.EnsureLocalPathPrefix`,
+    `common.firstHeaderLine`, `common.outboundDate`, `common.relayHeaders`.
   - **Not** reserved here (owned by the earlier plans; never define them): `DefaultMaxArticleBytes`, `MaxArticleBytes`,
     `ErrArticleTooLarge`, `readArticleBlock` (`nntp-server-hardening`); `common.ValidMessageID`,
     `common.CheckHeaderBlock`, `common.HeaderBlockMode`, `common.HeaderBlockFetch` (`nntp-intake-injection`).
   - `cli-transfer`: `DemuxerQueueDepth`, `StreamQueueDepth`, `responseDataPool`, `ttSetupPool`, `ttResponsePool`,
     `ttResponseChanPool`, `readRequestPool` (the exported chan vars `ResponseDataPool`, `TTSetupPool`, `TTResponsePool`,
     `TTResponseChans`, `ReadRequestsPool` are removed; grep shows no user outside `nntp-transfer.go`), main-package
-    `newUIServer`, `newPprofMux`, `newPprofServer`, `renderIndex`, `redisKey`, `redisKeyPrefix`, `webBind`; in
+    `newUIServer`, `newPprofMux`, `newPprofServer`, `renderIndex`, `redisKey`, `redisKeyPrefix`, `buildRedisKeyPrefix`,
+    `webBind`; in
     `cmd/history-rebuild`: `loopbackPprofAddr`, `newPprofMux`.
   - `cli-hygiene`: `ErrInvalidCommandArg`, `(*BackendConn).sendCmd`, `validGroupArg`, `validTokenArg`,
     `validMessageIDArg`, `maxClientCommandLine` (distinct from any server-side command-line limit of
     `nntp-server-hardening`).
-  - `cli-normalize`: none (calls `common.CheckHeaderBlock`).
 - **K3: tests.**
   - Package `nntp` already has `TestMain` (`nntp-server-harness_test.go:47`, opens a temp DB, discards logs unless
     `PUGLEAF_TEST_LOG=1`). Client tests need no DB and must not call `hTestDB`.
@@ -249,7 +265,7 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
     (`cliCmd`/`TestCliCmd`) and `internal/common/relay_headers_test.go` (`cliHdr`/`TestCliHdr`); `cli-transfer` →
     `nntp-client-transfer_test.go` (`cliTx`/`TestCliTx`), `cmd/nntp-transfer/debugserver_test.go` (`txDbg`/`TestTxDbg`),
     `cmd/history-rebuild/pprof_addr_test.go` (`TestHRPprof`); `cli-hygiene` → `nntp-client-validate_test.go`
-    (`cliVal`/`TestCliVal`); `cli-normalize` → `nntp-client-normalize_test.go` (`cliNorm`/`TestCliNorm`). Wave 0 uses
+    (`cliVal`/`TestCliVal`). Wave 0 uses
     `cliFake`/`cliPeer`/`cliE2E`/`cliDial`/`cliUnstuff`/`TestCliFake`/`TestCliE2E`. Taken in package `nntp`: `h*`, `knownBug`, `runIsolated`,
     `newTestServer`, `sess`, `auth`, `grp`, `art`, `ovr`, `e2e`, `Wiring*`, `NNTPHist*`, `Lo1Paths*`.
   - No `t.Parallel()`. No package global is mutated by tests: everything a test needs to vary is a `BackendConfig`
@@ -275,13 +291,14 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
   `:12`, `:75`, `:97-104`) and the new files listed per slice. None of these is owned by `nntp-server-hardening`,
   `nntp-intake-injection` or `nntp-rfc-commands`.
 - `nntp-client-commands.go` holds the shared parser `ParseLegacyArticleLines`/`ParseHeaders` (`:849-952`). The intake
-  plan must not edit this file: INT-5 `bytes` (wave 2) and the normalizer call (wave 4) are done here; INT-4's Xref
+  plan must not edit this file: INT-5 `bytes` (wave 2) is done here; INT-4's Xref
   handling in `ParseHeaders` (`:936-939`) is left as it is. If the intake plan needs another hunk there, it hands the
   exact change to this plan (or runs after it).
 - `internal/nntp/nntp-history-parse_test.go` is touched only in `TestNNTPHistParseLegacyRoundTripNoBody`'s `Bytes`
-  assertion (wave 2) and, in wave 4, the two `HeadersJSON` equality assertions if normalization changes them.
-- `cmd/nntp-server/server_e2e_test.go` (`e2eKnownBug(t, "A-nntp-rfc-2", …)`) is not ours. If wave 4 flips that marker,
-  the wave-4 slice stops and reports it (the owning plan removes the marker).
+  assertion (wave 2).
+- No slice changes how articles are parsed or stored beyond `Bytes`, so no `knownBug` marker of another plan
+  (`cmd/nntp-server/server_e2e_test.go`, `internal/nntp/nntp-server-*_test.go`) can flip; the known-bug comparison in
+  every check confirms it.
 - `audit-delta-fixes` (written later) must not own the files above; for `cmd/history-rebuild/main.go` it may own the
   `-useshorthashlen` lines (OPS-4) and merges after this plan.
 
@@ -291,23 +308,40 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
   each call, `Write` the same with the write deadline. `Connect` wraps the dialed (TLS) conn with ConnectTimeout for both,
   builds `textproto.NewConn(dc)` on it, and after greeting + auth calls `dc.setTimeouts(read, write)`. `c.conn` (type
   `net.Conn`) is the wrapper, so `bufio.NewWriter(c.conn)` in the TAKETHIS/POST writers gets write deadlines too.
-  Wave 2 adds the line cap: `Read` tracks the bytes since the last `\n` (`bytes.LastIndexByte` on `p[:n]`) and returns
-  `ErrResponseLineTooLong` once it exceeds `maxLine` (set from `BackendConfig.MaxResponseLineBytes`).
+  Wave 2 adds the line cap: `Read` keeps `run` (bytes since the last `\n` seen in earlier reads) and walks **every**
+  `\n` in `p[:n]`: the first segment's length is `run + index`, each following segment is measured between two
+  newlines, and the tail after the last newline becomes the new `run` (no newline: `run += n`). Any segment over
+  `maxLine` (set from `BackendConfig.MaxResponseLineBytes`) returns `ErrResponseLineTooLong`.
 - **Demuxer sync (`syncPipeline`).** Under `conn.Lock()`: `id := conn.TextConn.Next(); StartRequest(id);
   EndRequest(id); StartResponse(id); EndResponse(id); d.LastID = id`. All earlier commands ended their responses
-  (they are synchronous), so nothing blocks; the next `Cmd` gets `id+1`.
+  (they are synchronous), so nothing blocks; the next `Cmd` gets `id+1`. **Precondition:** the connection never had a
+  failed command. textproto consumes an id even when the write fails, and a command whose response was never read
+  leaves the response sequencer behind, so `StartResponse` would block. Every error path in the client therefore
+  force-closes the connection (today's pool wrappers do), and a connection handed to `NewResponseDemuxer` is a fresh
+  one from `Pool.Get(MODE_STREAM_MV)`. Document this on `NewResponseDemuxer`.
 - **Close bookkeeping.** `closeFromPool() bool` closes and returns true only on the connected→closed transition;
   `CloseFromPoolOnly()` wraps it. `Pool.closeConn` decrements `activeConns` and increments `totalClosed` only on true.
   `ForceCloseConn` does `if c.closing.Swap(true) { return }`, sets `forceClose` under `c.mux`, then
-  `go c.Pool.Put(c)` (or `go c.closeFromPool()` when `Pool == nil`).
+  `go c.Pool.Put(c)` (or `go c.closeFromPool()` when `Pool == nil`). `Pool.Put` and `isConnectionValid` treat
+  `c.closing.Load()` like `forceClose`, so a connection being force-closed is never handed out again, even before the
+  goroutine runs.
 - **Relay serializer (`common/relay_headers.go`).** `RelayHeaders(article *models.Article, localHost string)
-  ([]string, error)` splits `HeadersJSON` on `\n` (a trailing `\r` per line is removed), groups lines into fields (a line
-  starting with SP/HT continues the previous field), and returns the lines unchanged except Path/Xref (decision 2).
-  Errors wrap `ErrRelayHeadersInvalid` with the reason: a line with CR, LF or NUL inside; a first line that is a
-  continuation; a field line without `:` or whose name is empty or contains bytes `<= 0x20` or `0x7f`; Date, From,
-  Message-ID, Newsgroups or Subject missing or present more than once (case-insensitive); a Message-ID value (trimmed)
-  that differs from `article.MessageID` or fails `ValidMessageID`; no path at all (`article.Path` empty and no Path
-  header). The Path line stands where the stored Path header stood, or first when there was none.
+  ([]string, error)` splits `HeadersJSON` on `\n` (one trailing `\r` per line is removed), groups lines into fields (a
+  line starting with SP/HT continues the previous field) and applies decision 2:
+  - errors wrapping `ErrRelayHeadersInvalid` (unsafe → the caller skips): a CR, LF or NUL inside a line; Date, From,
+    Message-ID, Newsgroups, Subject or Path present more than once (case-insensitive); a Message-ID value (trimmed) that
+    differs from `article.MessageID` or fails `ValidMessageID`;
+  - errors wrapping `ErrRelayHeadersIncomplete` (→ the caller falls back to `ReconstructHeaders`): any of Date, From,
+    Message-ID, Newsgroups, Subject missing; a first line that is a continuation; a field line without `:`, or whose
+    name is empty or contains bytes `<= 0x20` or `0x7f`;
+  - otherwise the lines unchanged except: Path replaced in place (or inserted first when absent; `article.Path` empty
+    and no Path header → `EnsureLocalPathPrefix("", host)`), Xref dropped, `X-Goo*` dropped when `IgnoreGoogleHeaders`,
+    and a non-RFC Date value replaced by `outboundDate(article)`. Unsafe checks run before completeness checks.
+  - The work is done by the unexported `relayHeaders(article, localHost string, ignoreGoogle bool)`; `RelayHeaders`
+    calls it with the package flag `IgnoreGoogleHeaders`, so tests never mutate that global.
+  - `outboundDate(article *models.Article) (string, error)` is the Date selection of `ReconstructHeaders`
+    (`headers.go:182-241`) moved into a function unchanged (including its `DateSent`/`DateString` updates);
+    `ReconstructHeaders` calls it.
 - **Wire writer (`writeArticleLines`).** `writeArticleLines(w *bufio.Writer, headers []string, body string) (int, error)`
   writes each header line through `dotStuff` + CRLF, an empty line, each of `wireBodyLines(body)` through `dotStuff` +
   CRLF, then `.` CRLF, and returns the bytes written. `wireBodyLines("") = nil`, otherwise
@@ -352,7 +386,9 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
    	Hang       bool          // after the match (and ReadDot), never reply; held until Close
    	CloseAfter bool          // close the connection after the reply
    }
-   // a step whose Expect does not match writes "500 cli-fake: unexpected <line>" and records the mismatch (Mismatches())
+   // a step whose Expect does not match writes "500 cli-fake: unexpected <line>" and records the mismatch (Mismatches());
+   // after the last step the connection keeps reading and recording lines (no replies) until EOF/error, so Open()
+   // drops only when the client closes; Hang steps also keep reading
    func newCliFakeServer(t *testing.T, o cliFakeOpts) *cliFakeServer // listens, serves, t.Cleanup(s.Close)
    func cliFakeTLSConfig(t *testing.T) (server *tls.Config, clientRoots *x509.CertPool)
    func (s *cliFakeServer) Backend() *BackendConfig // Host, Port, MaxConns 2, ConnectTimeout 2s,
@@ -389,7 +425,9 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
    Self-tests: `TestCliFakeScript` (greeting, two scripted steps, `Lines()`), `TestCliFakeOpenCount` (client close
    observed by `WaitOpen(0)`), `TestCliFakePeerStream` (a raw `textproto` client: AUTHINFO, MODE STREAM, CHECK,
    TAKETHIS with a dot-stuffed body, CHECK again → 438).
-3. **Write `nntp-client-e2e_test.go`** (`//go:build e2e`; each test `t.Skip`s unless its env is set):
+3. **Write `nntp-client-e2e_test.go`** (`//go:build e2e`; each test `t.Skip`s unless its env is set). All `PASS|FAIL|INFO`
+   lines are printed with `fmt.Println` to stdout: the package `TestMain` sends `log` to `io.Discard`, and `t.Log`
+   output is indented, so neither matches the script's `^(PASS|FAIL|INFO) ` greps.
    - `TestCliE2EFakePeer`: `PUGLEAF_E2E_PEER_ADDR` (listen), `PUGLEAF_E2E_PEER_DIR`, `PUGLEAF_E2E_PEER_MODE`
      (`peer` | `silent`; silent = `RawStall`), `PUGLEAF_E2E_PEER_USER`/`PASS`, `PUGLEAF_E2E_PEER_431` (comma-separated
      ids), `PUGLEAF_E2E_PEER_STALL` (`time.ParseDuration`). Writes `<dir>/ready` once listening, appends every client
@@ -401,8 +439,9 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
        ` e2e.ct.b`, Subject `ct one`, Date (now, RFC 1123Z), Message-ID, `Organization: E2E`; body `line1`, `.dotline`,
        `` (final empty line).
      - `<ct-2@e2e.invalid>`: plain headers, `Newsgroups: e2e.ct.a`, body `two`.
-     - `<ct-3@e2e.invalid>`: headers in the order Message-ID, Date, Subject, From, `X-Custom: keep`, Newsgroups, Path,
-       `Xref: other.example e2e.ct.a:9`; body `three`.
+     - `<ct-3@e2e.invalid>`: headers in the order Message-ID, Date, Subject, From, `X-Custom: keep`, Newsgroups, Path
+       (no Xref: the intake plan answers 441 to a POST with Xref, A-intake-4; Xref dropping on relay is covered by
+       `TestCliHdrRelayVerbatim`); body `three`.
    - `TestCliE2EVerify` (uses stdlib, `database/sql`, the mattn driver already linked into the package and
      `common.ValidMessageID`; no helper from later waves of this plan): `PUGLEAF_E2E_PEER_DIR`, `PUGLEAF_E2E_GROUPDB` (path of `e2e_ct_a.db`),
      `PUGLEAF_E2E_LOCALHOST`, `PUGLEAF_E2E_PHASE` (`1` or `2`). Opens the group DB read-only with
@@ -414,8 +453,9 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
    `go test -race -count=1 -run 'TestCliFake' ./internal/nntp/`.
 6. **Baseline e2e:** `./build_nntp-server.sh && ./build_nntpmgr.sh && ./build_nntp-transfer.sh && ./build_history-rebuild.sh`,
    then `scripts/test-nntp-client-transfer.sh`. Record the PASS/FAIL list in `## Progress` (expected at baseline:
-   E01 FAIL (CLI-4 stall, transfer killed by its timeout), E02 FAIL (hang), E03–E08 FAIL or not reached, E10/E11 FAIL
-   (cmdline leaks the password), E12 FAIL (bound on all interfaces), E13 FAIL, E09/E14/E15 PASS).
+   E01 FAIL (CLI-4 stall, transfer killed by its timeout), E02 FAIL (hang), E03–E08 FAIL or not reached (E06 depends on
+   E01), E10/E11 FAIL (cmdline leaks the password — only the fake peer's scratch password `peer-secret-0123` is ever
+   exposed, on 127.0.0.1), E12 FAIL (bound on all interfaces), E13 FAIL, E09/E14/E15 PASS).
 7. **Commit** `test(nntp): wave-0 client fake server, e2e peer and script for nntp-client-transfer` together with the
    plan move. Record the base SHA for wave 1.
 
@@ -500,13 +540,18 @@ Changes:
      c.mux.Unlock(); if c.Pool != nil { _ = c.Pool.Put(c) } else { c.closeFromPool() } }()`.
    - `Pool.closeConn` (`nntp-backend-pool.go:378-396`): `closed := client.closeFromPool()`; update `totalClosed`/`activeConns`
      only when `lock && closed`.
+   - `Pool.Put` (`:337-346`) and `isConnectionValid` (`:492`): `conn.forceClose || conn.closing.Load() ||
+     !conn.IsConnected()` means force-close / invalid.
 7. **Pool (A-4, A-tools-3, CLI-3 leftovers) in `nntp-backend-pool.go`.**
    - `NewPool`: `idleTimeout: pickDuration(cfg.IdleExpire, DefaultConnExpire)`.
-   - `func (pool *Pool) GetContext(ctx context.Context, wantMode int) (*BackendConn, error)` takes today's `Get` body;
-     the final wait becomes `t := time.NewTimer(pickDuration(pool.Backend.PoolWaitTimeout, DefaultPoolWaitTimeout));
-     defer t.Stop(); select { case pconn := <-pool.connections: …; case <-t.C: return nil, fmt.Errorf("timeout waiting for
-     connection from pool after %v", d); case <-ctx.Done(): return nil, ctx.Err() }`. Also check `ctx.Err()` once at the
-     top. `Get(wantMode)` = `return pool.GetContext(context.Background(), wantMode)`.
+   - `func (pool *Pool) GetContext(ctx context.Context, wantMode int) (*BackendConn, error)` takes today's `Get` body.
+     At the top: `if err := ctx.Err(); err != nil { return nil, err }`, `wait := pickDuration(pool.Backend.PoolWaitTimeout,
+     DefaultPoolWaitTimeout)`, `deadline := time.Now().Add(wait)` — computed **once**, so the `goto newConn` retries
+     share it. The final wait becomes `t := time.NewTimer(time.Until(deadline)); select { case pconn, ok :=
+     <-pool.connections: t.Stop(); if !ok { return nil, fmt.Errorf("connection pool is closed") } …; case <-t.C: return
+     nil, fmt.Errorf("timeout waiting for connection from pool after %v", wait); case <-ctx.Done(): t.Stop(); return
+     nil, ctx.Err() }` (when `time.Until(deadline) <= 0`, return the timeout error without waiting).
+     `Get(wantMode)` = `return pool.GetContext(context.Background(), wantMode)`.
    - `func (pool *Pool) failSlot()`: under `pool.mux`: `activeConns--; failedConns++`. Use it for the createConnection
      error path (delete the dead `if pconn != nil && pconn.conn != nil { … }` block, `:270-272`). For the SwitchMode
      failure after a new connection (`:280-291`) replace the manual decrement and `pconn.conn.Close()` with
@@ -516,7 +561,8 @@ Changes:
    - Leave `Pool.SelectGroup`, `Pool.GetArticle` and `Pool.XHdrStreamed` bodies unchanged (wave 2/3).
 8. **Demuxer (CLI-4) in `nntp-transfer-demuxer.go`.** Add `syncPipeline()` (Component design) and call it at the end of
    `NewResponseDemuxer` when `conn != nil && conn.TextConn != nil`. Document on `LastID` that it is the id reserved by
-   `syncPipeline`. Leave the channel sizes (A-6, wave 2).
+   `syncPipeline`, and on `NewResponseDemuxer` the precondition from Component design (a connection with a failed
+   command must be force-closed, never given to a demuxer). Leave the channel sizes (A-6, wave 2).
 9. Tests in `nntp-client-conn_test.go` (all against `cliFakeServer`; each with a 5 s outer deadline):
    - `TestCliConnGreetingTimeout` (CLI-3): `NoGreeting`, `ConnectTimeout 300ms` → `Connect` errors within 2 s;
      `WaitOpen(0, 2s)` (the socket was closed).
@@ -534,9 +580,10 @@ Changes:
      `conn.Lock()` send `CHECK <cli4@test.invalid>` with `conn.TextConn.Cmd`, then `RegisterCommand(id, TYPE_CHECK)`;
      a `238` arrives on `GetCheckResponseChan()` within 2 s (at base: stall). Same test without auth as a subtest.
      Cleanup: `common.SignalErrChan(errChan)`, `conn.ForceCloseConn()`.
-   - `TestCliConnForceCloseIdempotent` (A-11): `MaxConns 2`; get one conn; call `ForceCloseConn()` three times; poll
+   - `TestCliConnForceCloseIdempotent` (A-11): `MaxConns 2` and `PoolWaitTimeout 200ms` set on the config **before**
+     `NewPool`; get one conn; call `ForceCloseConn()` three times; poll
      until `pool.Stats().ActiveConnections == 0` and stays 0 for 200 ms (never negative); then `Get` twice succeeds and a
-     third `GetContext` with `PoolWaitTimeout 200ms` times out.
+     third `Get` times out after about 200 ms.
    - `TestCliConnGetContextCancel` (A-4): `MaxConns 1`, hold one conn; `GetContext(ctx with 100ms timeout)` returns
      `context.DeadlineExceeded` within 1 s.
    - `TestCliConnIdleExpire` (A-4): `IdleExpire 100ms`; Get, Put, wait 250 ms, Get → `Stats().TotalCreated == 2`.
@@ -620,6 +667,7 @@ Changes:
    - `func EnsureLocalPathPrefix(path, localHost string) string`: `localHost == ""` → path; `path == ""` →
      `localHost + "!not-for-mail"`; `path == localHost || strings.HasPrefix(path, localHost+"!")` → path; else
      `localHost + "!" + path`.
+   - `var ErrRelayHeadersIncomplete = errors.New("stored header block incomplete")`.
    - `func RelayHeaders(article *models.Article, localHost string) ([]string, error)` as in Component design.
 2. **`ReconstructHeaders` (common/headers.go; CLI-1 parts 1–2, NC-1, decision 1).**
    - Add `func firstHeaderLine(v string) string`: text before the first `\r` or `\n`, `strings.TrimSpace`d.
@@ -634,14 +682,16 @@ Changes:
      strings.TrimSuffix(moreHeaders[i], "\r") …`; the label `checkHeader` stays on the `for`. The `i++` in `getLines`
      (`:403`) now skips the merged continuation lines. Lines containing `\r` or `\x00` after the trim are dropped like
      malformed lines (`ignoreLine = true`).
-   - Leave the Date, References, Newsgroups-filter logic and `X-pugleaf-debug` unchanged (legacy path, decision 2).
+   - Move the Date selection (`:182-241`) unchanged into `outboundDate(article) (string, error)` and call it; leave
+     References, the Newsgroups filter and `X-pugleaf-debug` unchanged (fallback path, decision 2).
 3. **Writers (nntp-client-commands.go; CLI-1 part 3, decision 3).**
    - Add `dotStuff(line string) string` (`"."+line` when it starts with `.`), `wireBodyLines(body string) []string`
      and `writeArticleLines(w *bufio.Writer, headers []string, body string) (int, error)` (Component design).
-   - `SendTakeThisArticleStreaming` (`:1096-1195`): build headers with
-     `if article.HeadersJSON != "" { headers, err = common.RelayHeaders(article, host) } else { headers, err =
-     common.ReconstructHeaders(article, true, nntphostname, newsgroup) }` where `host` is `*nntphostname` or "";
-     on error return `0, 0, err, true` (skipped, as today). Replace the header/separator/body/terminator loops
+   - `SendTakeThisArticleStreaming` (`:1096-1195`): `host` is `*nntphostname` or ""; `headers, err :=
+     common.RelayHeaders(article, host)` when `article.HeadersJSON != ""`; if `HeadersJSON == ""` or
+     `errors.Is(err, common.ErrRelayHeadersIncomplete)`, use `common.ReconstructHeaders(article, true, nntphostname,
+     newsgroup)` instead; any remaining error (including `ErrRelayHeadersInvalid`) returns `0, 0, err, true` (skipped,
+     as today). Replace the header/separator/body/terminator loops
      (`:1131-1176`) with one `writeArticleLines(writer, headers, article.BodyText)` call (add its count to `txBytes`).
      Keep `TAKETHIS` Cmd, `Flush`, `RegisterCommand` and the ReadRequest order exactly as today.
    - `PostArticle` (`:1257-1294`): same `writeArticleLines` call with the `ReconstructHeaders(article, false, nil, "")`
@@ -652,6 +702,9 @@ Changes:
      err=%w", groupName, code, err) }`. Replace `go c.ForceCloseConn()` (`:684`) and the unlocked
      `c.conn.Close(); c.forceClose = true` (`:709-710`) with a plain `return fmt.Errorf("shutdown requested")` (the
      pool wrapper force-closes on any error; `ForceCloseConn` is idempotent since wave 1).
+   - `XHdrStreamedBatch` read loop (`:689-694`): a `ReadLine` error is **not** success any more (today it `break`s
+     and returns nil, so a cut-off stream looks complete): `return fmt.Errorf("XHDR stream ng '%s': %w", groupName, err)`.
+     The pool wrapper (`nntp-backend-pool.go:130-132`) then force-closes the connection; nothing goes back to the pool.
    - `XOver` (`:436-440`) and `XHdr` (`:501-505`): the same 411 → `ErrNewsgroupNotFound` return.
    - `XHdrStreamed` (`:572-625`): named result `(err error)`; first statements `defer close(xhdrChan)` and
      `defer func() { if r := recover(); r != nil { log.Printf("[NNTP-CLIENT] XHdrStreamed panic ng='%s': %v", groupName,
@@ -691,8 +744,9 @@ Changes:
 7. **A-7.** `parseOverviewLine` (`:995`): `articleNum, err := strconv.ParseInt(parts[0], 10, 64); if err != nil ||
    articleNum <= 0 { return OverviewLine{}, fmt.Errorf("invalid article number in XOVER line: %q", parts[0]) }` (bytes and
    lines keep the lenient 0). `XHdrStreamedBatch`: skip `header.ArticleNum <= 0` like `XHdr` does (`:548`).
-8. **INT-5 `bytes` (decision 17).** Add `articleWireBytes(head, body []string) int` (`Σ len+2` over both, `+2` for the
-   separator) and in `ParseLegacyArticleLines` set `article.Bytes = articleWireBytes(lines[:bodyStart-1],
+8. **INT-5 `bytes` (decision 17).** If the merged tree has `common.WireArticleSize` (intake plan), use it; otherwise add
+   `articleWireBytes(head, body []string) int` (`Σ len+2` over both, `+2` for the separator). In
+   `ParseLegacyArticleLines` set `article.Bytes = articleWireBytes(lines[:bodyStart-1],
    lines[bodyStart:])` outside the `if bodyStart < len(lines)` block (delete `:877`). Fix
    `TestNNTPHistParseLegacyRoundTripNoBody` (`nntp-history-parse_test.go:110-111`): keep the `BodyText`/`Lines` checks
    and expect `Bytes == Σ(len(h)+2) + 2` over `nntpHistTestHeadLines()`.
@@ -707,8 +761,13 @@ Changes:
        `From: a <a@b>`, and no element contains `\r` or `\n`.
      - `TestCliHdrRelayVerbatim` (A-intake-6): order kept, `Xref` and its continuation dropped, Path replaced in place,
        `X-Custom` and folded continuations kept byte-exact.
-     - `TestCliHdrRelayInvalid`: table → each wraps `ErrRelayHeadersInvalid`: missing Message-ID, two Subject lines, a
-       colon-less line, a first line that is a continuation, Message-ID ≠ `article.MessageID`, a line with a bare CR.
+     - `TestCliHdrRelayGoogleAndDate`: calls the unexported `relayHeaders(article, host, true)` (no package var is
+       touched, K3): `X-Google-Foo` is dropped; with `false` it is kept; a stored `Date: Tuesday 7pm` with a valid
+       `DateSent` is replaced by `outboundDate`'s value; an RFC date is kept verbatim.
+     - `TestCliHdrRelayInvalid`: table → each wraps `ErrRelayHeadersInvalid`: two Subject lines, two Path lines,
+       Message-ID ≠ `article.MessageID`, an invalid Message-ID, a line with a bare CR, a line with NUL.
+     - `TestCliHdrRelayIncomplete`: table → each wraps `ErrRelayHeadersIncomplete`: a web-post style block (MIME-Version,
+       Content-Type, From, Newsgroups only), missing Date, a colon-less line, a first line that is a continuation.
      - `TestCliHdrEnsureLocalPathPrefix`: table.
    - `internal/nntp/nntp-client-cmds_test.go` (fake server; `AuthFailureBackoff: -1` everywhere):
      - `TestCliCmdXHdrStreamed411` (CLI-2): script `GROUP .*` → `411 no such group`; `XHdrStreamed` returns an error
@@ -727,9 +786,16 @@ Changes:
        `SendTakeThisArticleStreaming` with an article whose `HeadersJSON` has Path, folded Newsgroups, Xref, a header
        line `.X-Dot: y`, and `BodyText "a\n.b\n"`. `Articles()[0]` (raw wire) has exactly one `Path:` line, no `Xref`,
        the continuation once, `..X-Dot: y`, and body lines `a`, `..b`, `` before the end.
-     - `TestCliCmdTakeThisInvalidSkipped` (A-intake-6): `HeadersJSON` without a Message-ID line → the call returns an
+     - `TestCliCmdTakeThisInvalidSkipped` (A-intake-6): `HeadersJSON` with two Subject lines → the call returns an
        error wrapping `common.ErrRelayHeadersInvalid` with `doContinue == true`, and nothing reaches the wire
        (`RelayHeaders` runs before `Cmd`): the fake's `Lines()` has no `TAKETHIS`.
+     - `TestCliCmdTakeThisIncompleteFallback` (A-intake-6, INT-7): a web-post style `HeadersJSON` (no Date/Message-ID/
+       Subject/Path) with the row's columns set → the article is sent; the wire has the `ReconstructHeaders` block
+       (one Path line, Date, Message-ID, Subject).
+     - `TestCliCmdXHdrStreamedReadError` (CLI-2): through `pool.XHdrStreamed`: (a) script `GROUP .*` → `211 3 1 3 g`,
+       `XHDR .*` → `221 ok`, `1 a`, then `Hang`; `ReadTimeout 300ms`; (b) the same with a 4 KiB line and
+       `MaxResponseLineBytes 512`. Each: the result channel closes, the goroutine's error is visible as a closed
+       connection (`WaitOpen(0, 2s)`), and `pool.Stats().IdleConnections == 0` (nothing returned to the pool).
      - `TestCliCmdPostWire` (CLI-1 p2/p3, NC-1): `PostArticle` with folded Newsgroups, Subject `"s\nx"` and
        `BodyText "x\n"` → wire has the continuation once, `Subject: s`, body `x`, `` then `.`.
      - `TestCliCmdArticleBudget` (A-1): `MaxArticleResponseBytes 1024`, ARTICLE reply of 4 KiB → `errors.Is(err,
@@ -780,9 +846,14 @@ Changes:
      `"/debug/pprof/profile"` → `pprof.Profile`, `"/debug/pprof/symbol"` → `pprof.Symbol`, `"/debug/pprof/trace"` →
      `pprof.Trace` (no `Cmdline`; `Index` answers 404 "Unknown profile" for `/debug/pprof/cmdline`);
      `newPprofServer(addr string) *http.Server` (`ReadHeaderTimeout 10s`, `IdleTimeout 120s`, no Write/Read timeout so
-     CPU profiles work); `newUIServer(addr string) *http.Server` with its own mux (`/` → `handleIndex`, `/results` →
+     CPU profiles work); `newUIServer(addr string) *http.Server` with its own mux (`"/{$}"` → `handleIndex` — the Go
+     1.22+ exact-root pattern, so `/debug/pprof/…` and any other path get 404 instead of the index page; `/results` →
      `handleResults`), `ReadHeaderTimeout 10s`, `ReadTimeout 30s`, `WriteTimeout 60s`, `IdleTimeout 120s`,
      `MaxHeaderBytes 1 << 20`.
+   - Note: importing `net/http/pprof` (needed for `pprof.Index` etc.) still registers its handlers on
+     `http.DefaultServeMux` in the package `init`. That is harmless only while nothing serves the default mux: no
+     `http.ListenAndServe(…, nil)`, `http.Handle`/`http.HandleFunc` or `Server{Handler: nil}` may remain in
+     `cmd/nntp-transfer` or `cmd/history-rebuild` (acceptance grep below).
    - Flags: `webBind = flag.String("web-bind", "127.0.0.1", "Address the -web-port UI listens on (use 0.0.0.0 to expose it)")`;
      `-pprof-port` help text: "localhost only; /debug/pprof/cmdline is disabled".
    - Replace `startWebServer` (`:2934-2944`) by starting `uiSrv := newUIServer(net.JoinHostPort(*webBind,
@@ -802,30 +873,36 @@ Changes:
      'localhost:6060'; ':6060' means 127.0.0.1:6060)"; the block at `:97-104` becomes: validate with
      `loopbackPprofAddr` (`log.Fatalf("[HISTORY] %v", err)` on error), then serve `&http.Server{Addr: addr, Handler:
      newPprofMux(), ReadHeaderTimeout: 10 * time.Second}` in a goroutine. No other line of `main.go` changes.
-5. **NC-3 Redis keys.** `var redisKeyPrefix string` set right after flag parsing to
-   `"pugleaf:tx:" + *host + ":" + strconv.Itoa(*port) + ":"`; `func redisKey(msgID string) string { return
-   redisKeyPrefix + msgID }`. Use it at every live EXISTS/SET: `:1629`, `:1733`, `:2508`, `:2648`, `:2657` (the
+5. **NC-3 Redis keys.** `func buildRedisKeyPrefix(host string, port int) string { return "pugleaf:tx:" + host + ":" +
+   strconv.Itoa(port) + ":" }` (pure); `var redisKeyPrefix string` set once right after flag parsing with
+   `buildRedisKeyPrefix(*host, *port)`; `func redisKey(msgID string) string { return redisKeyPrefix + msgID }`. Use it at every live EXISTS/SET: `:1629`, `:1733`, `:2508`, `:2648`, `:2657` (the
    commented block at `:2516-2522` may stay commented; if you touch it, use `redisKey` too). Add a line to
-   `showUsageExamples` / the `-redis-cache` help that keys are scoped per target.
+   `showUsageExamples` / the `-redis-cache` help that keys are scoped per target, and extend the `-redis-flushdb` help:
+   "… flushes ALL keys in the selected Redis DB, including other targets' transfer keys".
 6. Tests:
    - `cmd/nntp-transfer/debugserver_test.go`:
      - `TestTxDbgPprofMuxNoCmdline`: `httptest.NewServer(newPprofMux())`; `/debug/pprof/` → 200; `/debug/pprof/cmdline`
        → 404 and the body does not contain `os.Args[0]`.
-     - `TestTxDbgUIServerNoPprof`: `newUIServer("127.0.0.1:0").Handler` via `httptest`: `/debug/pprof/` → 404,
-       `/results` → 200.
+     - `TestTxDbgUIServerNoPprof`: `newUIServer("127.0.0.1:0").Handler` via `httptest`: `/debug/pprof/`,
+       `/debug/pprof/cmdline` and `/nope` → 404; `/results` → 200; `/` → 200 or 500 (template data may be empty) but
+       never 404.
      - `TestTxDbgUIServerTimeouts`: the five fields set as listed.
-     - `TestTxDbgRedisKey`: `redisKey` prefixes with host and port (set `redisKeyPrefix` in the test via a local
-       helper that builds it the same way; do not depend on flags).
+     - `TestTxDbgRedisKey`: `buildRedisKeyPrefix("peer.example", 119) + "<a@b>"` is
+       `pugleaf:tx:peer.example:119:<a@b>`, and two hosts give different keys (pure function; no global is mutated, K3).
    - `cmd/history-rebuild/pprof_addr_test.go`: `TestHRPprofAddr` table: `:6060` → `127.0.0.1:6060`;
      `localhost:6060`, `127.0.0.1:1`, `[::1]:2` ok; `0.0.0.0:6060`, `192.0.2.1:6060`, `example.org:1`, `6060` → error.
    - `internal/nntp/nntp-client-transfer_test.go`:
      - `TestCliTxStreamQueueDepth`: table (defaults 100/8 → 4224; tiny → 4096; huge → 1<<20).
-     - `TestCliTxPoolsRoundTrip`: Get/Recycle each pool type; a recycled value comes back reset; `RecycleTTResponseChan`
-       rejects a cap-2 chan.
+     - `TestCliTxPoolsRoundTrip`: for each pool type, `Get…` returns a value whose fields equal the arguments, and
+       after `Recycle…` the **recycled value's** fields are zero (assert on the value just recycled; do not expect the
+       next `Get` to return the same pointer: `sync.Pool` may drop Puts, always under `-race`); `RecycleTTResponseChan`
+       rejects a cap-2 chan and drains a cap-1 chan.
      - `TestCliTxDemuxerDepth`: a demuxer built while `DemuxerQueueDepth` has its default has channels of that cap —
        read the package default, do not mutate it (K3).
 
-Acceptance: E09, E10, E11, E12, E13 PASS.
+Acceptance: E09, E10, E11, E12, E13 PASS, and
+`grep -rnE 'ListenAndServe(TLS)?\([^)]*, *nil\)|http\.Handle(Func)?\(' cmd/nntp-transfer cmd/history-rebuild` prints
+nothing (no handler on, and no server for, `http.DefaultServeMux`).
 
 ---
 
@@ -887,47 +964,9 @@ prints nothing).
 
 ---
 
-### Wave 4 (1 slice, based on the merged wave 3; `nntp-intake-injection` is already merged)
-
-Sanity check (orchestrator): `grep -n -e 'func CheckHeaderBlock' -e 'HeaderBlockFetch' internal/common/*.go` finds both.
-If the name or signature differs, hand the slice the merged signature (K1 rule); the wave is not skipped.
-
-#### Slice `cli-normalize`: normalized header blocks on the fetch path
-Ids: A-nntp-rfc-2 / A-intake-2 (client half). E-tag `cli-normalize`.
-
-Owned files:
-- `internal/nntp/nntp-client-commands.go` (only `ParseHeaders`, `ParseLegacyArticleLines`)
-- `internal/nntp/nntp-history-parse_test.go` (only the two `HeadersJSON` equality assertions, `:98-99` and the
-  round-trip comparison, if normalization changes them)
-- `internal/nntp/nntp-client-normalize_test.go` (new)
-
-Changes:
-1. `ParseHeaders` (`:905-951`): `norm, err := common.CheckHeaderBlock(headerLines, common.HeaderBlockFetch); if err != nil { return
-   fmt.Errorf("malformed header block in '%s': %w", article.MessageID, err) }`; parse the header map from `norm` instead of
-   `headerLines`, and `article.HeadersJSON = MultiLineHeaderToMergedString(norm)`. The un-stuffing in
-   `readMultilineResponse` stays (RFC 3977 §3.1.1).
-2. `ParseLegacyArticleLines`: compute `Bytes` (wave 2's `articleWireBytes`) from the normalized header lines; expose them
-   by having `ParseHeaders` leave `HeadersJSON` set and splitting it (`strings.Split(article.HeadersJSON, "\n")`), so no
-   signature changes.
-3. `GetHead` keeps calling `ParseHeaders` (normalized too).
-4. Tests in `nntp-client-normalize_test.go`:
-   - `TestCliNormDotHeaderDropped`: a fetched block with a `.` header line (wire `..`) and a colon-less line through a
-     fake ARTICLE reply → `GetArticle` succeeds and the stored `HeadersJSON` has neither line (`HeaderBlockFetch` drops
-     colon-less lines).
-   - `TestCliNormRejects`: a block with two Subject lines, and one with a NUL byte → `GetArticle` returns an error and
-     the connection stays usable for the next command.
-   - `TestCliNormIdempotent`: `ParseLegacyArticleLines` on lines rebuilt from its own `HeadersJSON` gives the same
-     `HeadersJSON` and `Bytes`.
-5. Run the cmd/nntp-server tests: if `e2eKnownBug(t, "A-nntp-rfc-2", …)` now reports "no longer reproduces", stop and
-   report (that marker belongs to the plan that owns `cmd/nntp-server/server_e2e_test.go`).
-
-Acceptance: `TestNNTPHist*` and `TestCliNorm*` PASS; the known-bug list is unchanged; E03–E05 still PASS.
-
----
-
 ## Checks
 
-On every merged tree (after wave 0 and after each merge in waves 1–4):
+On every merged tree (after wave 0 and after each merge in waves 1–3):
 ```bash
 gofmt -l ./cmd ./internal            # may list only internal/database/embedded_migrations.go and internal/web/web_admin_provider.go
 go vet ./...
@@ -968,7 +1007,7 @@ Everything runs against 127.0.0.1: the nntp-server and the fake peer are local; 
 | E03 | cli-commands | every received article has exactly one `Path:` line, it starts with `Path: $NNTPHOST!`, `$NNTPHOST!` occurs once, no `!.TX!` (CLI-1 p1, decision 1) |
 | E04 | cli-commands | each received header block (CRLF stripped, un-stuffed, Path line removed) equals the stored `headers_json` lines minus Path and Xref fields; ct-1's continuation ` e2e.ct.b` occurs exactly once (CLI-1 p2, A-intake-6) |
 | E05 | cli-commands | ct-1's body on the wire is `line1`, `..dotline`, `` then `.` (CLI-1 p3) |
-| E06 | cli-tools | progress DB: latest row of `e2e.ct.a` after run 1 has `retry = 1` |
+| E06 | cli-tools | progress DB: latest row of `e2e.ct.a` after run 1 has `retry = 1` (meaningful only when E01 passes) |
 | E07 | cli-tools | run 2 log has no `Skipping newsgroup e2e.ct.a` and (E07b, verify phase 2) the peer now holds `<ct-2@e2e.invalid>` (NC-2) |
 | E08 | cli-tools | run 3 log has `Skipping newsgroup e2e.ct.a - already has transfer results` |
 | E09 | cli-transfer | during run 1, `GET http://127.0.0.1:$WEBPORT/` → 200 |
@@ -1051,7 +1090,7 @@ GDB=$(find "$DATA_ABS/db" -name 'e2e_ct_a.db' | head -1); [ -n "$GDB" ] || setup
 start_peer() { # $1 mode, $2 port, $3 dir
   PUGLEAF_E2E_PEER_ADDR="127.0.0.1:$2" PUGLEAF_E2E_PEER_DIR="$3" PUGLEAF_E2E_PEER_MODE="$1" \
   PUGLEAF_E2E_PEER_USER="$PEER_USER" PUGLEAF_E2E_PEER_PASS="$PEER_PASS" \
-  PUGLEAF_E2E_PEER_431='<ct-2@e2e.invalid>' PUGLEAF_E2E_PEER_STALL=6s \
+  PUGLEAF_E2E_PEER_431='<ct-2@e2e.invalid>' PUGLEAF_E2E_PEER_STALL=15s \
     go test -tags e2e -count=1 -timeout 15m -run '^TestCliE2EFakePeer$' ./internal/nntp/ >"$3/peer.log" 2>&1 &
   echo $!
 }
@@ -1062,10 +1101,11 @@ for _ in $(seq 1 120); do [ -e "$PEERDIR/ready" ] && [ -e "$SILENTDIR/ready" ] &
 TXARGS="-data $DATA_ABS -host 127.0.0.1 -port $PEERPORT -username $PEER_USER -password $PEER_PASS -group e2e.ct.a -redis-cache=false -max-threads 1 -batch-check 10 -timeout 5"
 run_tx() { ( cd "$RUN" && exec timeout 180 "$TX_ABS" $TXARGS "${@:2}" ) >"$DATA/transfer-$1.log" 2>&1; }
 
-# ---- run 1 (background: web/pprof checks happen while the peer stalls MODE STREAM for 6 s)
+# ---- run 1 (background: web/pprof checks happen while the peer stalls MODE STREAM for 15 s; the poll below
+#      gives up after 10 s, so all four checks run inside the stall window)
 ( cd "$RUN" && exec timeout 180 "$TX_ABS" $TXARGS -web-port "$WEBPORT" -pprof-port "$PPROFPORT" ) >"$DATA/transfer-1.log" 2>&1 &
 TXPID=$!
-for _ in $(seq 1 50); do curl -fs -o /dev/null "http://127.0.0.1:$WEBPORT/" && break; sleep 0.1; done
+for _ in $(seq 1 100); do curl -fs -o /dev/null "http://127.0.0.1:$WEBPORT/" && break; sleep 0.1; done
 c=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$WEBPORT/")
 [ "$c" = 200 ] && pass E09 cli-transfer "UI answers on loopback" || fail E09 cli-transfer "UI answers on loopback" "status=$c"
 b=$(curl -s -w '|%{http_code}' "http://127.0.0.1:$WEBPORT/debug/pprof/cmdline")
@@ -1124,7 +1164,9 @@ echo "SUMMARY pass=$PASSES fail=$FAILS info=$INFOS data=$DATA"
 [ "$FAILS" -gt 125 ] && FAILS=125
 exit "$FAILS"
 ```
-Script notes for wave 0: the peer writes `commands.log` lines with `%q`, so the greps above match a leading `"`;
+Script notes for wave 0: the 15 s MODE STREAM stall is far below the client's 2 min idle `ReadTimeout`, and run 1's
+`timeout 180` covers it. The baseline run (before any fix) leaks only the fake peer's scratch password, on 127.0.0.1.
+The peer writes `commands.log` lines with `%q`, so the greps above match a leading `"`;
 `-analyze-only` on scratch data has nothing to open before the flag check fails. If a real script bug shows up in a
 later wave, fix the script and note it in `## Progress`.
 
