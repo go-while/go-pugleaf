@@ -88,6 +88,12 @@ func TestIntakeCommonValidMessageID(t *testing.T) {
 		{"<x@[a[b]>", false},
 		{"<x@[a\\b]>", false},
 		{"<x@[abc>", false},
+		{"<a@[a\\]b]>", true},
+		{"<a@[a\\x]>", false},
+		{"<a@[a\\\\]>", true},
+		{"<a@[a\\[b]>", true},
+		{"<a@[a\\]>", false},
+		{"<a@[\\]>", false},
 		{"<abc@ex\x7fample.org>", false},
 		{"<abc@ex\x80ample.org>", false},
 	}
@@ -249,6 +255,11 @@ func TestIntakeCommonCheckHeaderBlock(t *testing.T) {
 		// rule 2
 		{name: "strict-leading-continuation", mode: HeaderBlockStrict, in: append([]string{" lead"}, base...), wantErr: true},
 		{name: "fetch-leading-continuation", mode: HeaderBlockFetch, in: append([]string{" lead", "\tlead2"}, base...), want: base, wantFresh: true},
+		{name: "strict-wsp-only-continuation", mode: HeaderBlockStrict, in: with("X-A: a", "  ", " more"), wantErr: true},
+		{name: "strict-tab-only-continuation", mode: HeaderBlockStrict, in: with("X-A: a", "\t"), wantErr: true},
+		{name: "fetch-wsp-only-continuation", mode: HeaderBlockFetch,
+			in:   []string{"Subject: x", "  ", " more", "\t \t", "From: f"},
+			want: []string{"Subject: x", " more", "From: f"}, wantFresh: true},
 		// rule 3
 		{name: "strict-colonless", mode: HeaderBlockStrict, in: with("no colon here"), wantErr: true},
 		{name: "fetch-colonless", mode: HeaderBlockFetch, in: with("no colon here", " cont of dropped"), want: base, wantFresh: true},
@@ -488,6 +499,8 @@ func FuzzIntakeCommonCheckHeaderBlock(f *testing.F) {
 		"References: <a@b>\r\nReferences: <c@d>\r\nOrganization: o\r\nOrganization: p",
 		"X-Long: " + strings.Repeat("a", 991),
 		": empty\r\nBad Name: v\r\nok: v",
+		"Subject: x\r\n  \r\n",
+		"Subject: x\r\n \t\r\n folded\r\nFrom: f",
 		"",
 	}
 	for _, s := range seeds {
@@ -513,6 +526,11 @@ func FuzzIntakeCommonCheckHeaderBlock(f *testing.F) {
 		}
 		if !icTestDupFree(got, icTestFetchUnique) {
 			t.Fatalf("duplicate core header in %q", got)
+		}
+		for _, l := range got {
+			if l != "" && strings.Trim(l, " \t") == "" {
+				t.Fatalf("success with a whitespace-only line in %q", got)
+			}
 		}
 		if strict {
 			if !reflect.DeepEqual(got, lines) {

@@ -51,14 +51,26 @@ func ValidMessageID(s string) bool {
 	}
 	right := inner[at+1:]
 	if right[0] == '[' {
-		// no-fold-literal = "[" *mdtext "]"; mdtext excludes "[", "\" and "]"
+		// no-fold-literal = "[" *( mdtext / "\[" / "\]" / "\\" ) "]"; mdtext excludes
+		// "[", "\" and "]", which may only appear as these escaped pairs
 		if len(right) < 2 || right[len(right)-1] != ']' {
 			return false
 		}
-		for i := 1; i < len(right)-1; i++ {
+		end := len(right) - 1 // index of the closing "]"
+		for i := 1; i < end; i++ {
 			switch right[i] {
-			case '[', ']', '\\':
+			case '[', ']':
 				return false
+			case '\\':
+				if i+1 >= end {
+					return false
+				}
+				switch right[i+1] {
+				case '[', ']', '\\':
+					i++
+				default:
+					return false
+				}
 			}
 		}
 		return true
@@ -200,7 +212,8 @@ var intakeFetchUniqueHeaders = map[string]struct{}{
 //  1. both modes: a line containing NUL, CR or LF rejects. Strict mode also rejects every
 //     other C0 control except TAB; fetch mode lets them pass (ESC in ISO-2022-JP headers).
 //  2. a line starting with SP/TAB without a preceding field line (first line, or after a
-//     dropped line): strict rejects, fetch drops it.
+//     dropped line), or a continuation line made only of SP/TAB (RFC 5322 §3.2.2):
+//     strict rejects, fetch drops it (a dropped whitespace-only line keeps the field open).
 //  3. a non-continuation line without ":", with an empty field name, or with a name octet
 //     outside %x21-39 / %x3B-7E (this covers a lone "."): strict rejects, fetch drops it
 //     and its continuation lines.
@@ -253,7 +266,7 @@ func CheckHeaderBlock(lines []string, mode HeaderBlockMode) ([]string, error) {
 		}
 		// rule 2
 		if line != "" && (line[0] == ' ' || line[0] == '\t') {
-			if !havePrevField {
+			if !havePrevField || strings.Trim(line, " \t") == "" {
 				if strict {
 					return reject()
 				}
