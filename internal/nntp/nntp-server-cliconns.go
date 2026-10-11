@@ -185,15 +185,6 @@ func (c *ClientConnection) sendResponse(code int, message string) error {
 	return c.textConn.PrintfLine("%d %s", code, message)
 }
 
-// sendLine writes one raw line plus CRLF and flushes.
-func (c *ClientConnection) sendLine(line string) error {
-	c.setWriteDeadline()
-	if _, err := c.textConn.W.WriteString(line + "\r\n"); err != nil {
-		return err
-	}
-	return c.textConn.W.Flush()
-}
-
 // getServerCapabilities returns the capability list for the current connection state
 // (RFC 3977 §5.2: the list may change with state; RFC 4643 §2.1: no AUTHINFO after login).
 func (c *ClientConnection) getServerCapabilities() []string {
