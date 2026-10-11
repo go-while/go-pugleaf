@@ -575,3 +575,10 @@ Q1 the `MaxArtSize` default stays 32 KiB (`config.go` untouched); Q2 TAKETHIS in
 
 Checks on 82278fd: gofmt baseline 2 files, vet/build OK, 9 package sets green under `-race` (incl. `internal/common`), known bugs = base set (9 ids), build scripts OK.
 Noted: `TestAuthFailureDelay` (hardening's auth test) timed out once under heavy host load (3 agents' race suites in parallel) and passed on every rerun; timing-sensitive, outside this plan.
+
+### Wave 2 (2026-10-11; 1 implementer, reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| intake-processor (S3) | worktree-agent-aabb41b2d4b1a88fe (2b13adf) | merge; 2 minors fixed inline by the orchestrator (157d097: rslight comment, `TestE2EGroupDBOpenFailure` deactivates its unopenable row in cleanup); deviations accepted (`defaultCaptureLimiterOnce`, `checkIntakeDates(now)`, `iprHead`, HeadersJSON/BodyText fallbacks, dead `CheckMessageIdFormat`/`containsAtAndDot` deleted). The commit carries an Opus 5.5 trailer (the implementer's own model). Reviewer note for S4: `buildIncomingArticle` still calls `GetNewsgroupPointer` for every header name before the processor runs (TasksMap entries for unknown names until they expire; no row/file) | d62e4e3 |
+
+Checks on 157d097: gofmt baseline 2 files, vet/build OK, 9 package sets green under `-race`, known bugs = **BUG-7 BUG-8 INT-1 RFC-1 RFC-5 SEC-3 T-nntp-article-1** (7; INT-2 and SEC-2 gone), build scripts OK.
