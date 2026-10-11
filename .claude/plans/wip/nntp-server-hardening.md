@@ -1073,3 +1073,15 @@ then fail too), N25, N26, N28 and N30 FAIL (N30 now runs with an idle client, wh
 - Checks: gofmt/vet/build OK, `-race` 8 package sets green, known bugs = baseline minus RFC-2 (28 ids). Build scripts OK.
   `PORT=21120 DATA=./data-test-nntp-server-hardening scripts/test-nntp-server.sh` → `SUMMARY pass=12 fail=8 info=1`:
   PASS N01–N11, N24; FAIL N20, N21, N22, N23, N25, N26, N28, N30 (as expected before the slices).
+
+### Wave 1 (2026-10-11; 2 implementers, each reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| nntp-overview | worktree-agent-a1c463190bb3b91a2 (beeeb50, 488cc29) | 1 major fixed (XHDR Xref/Path served raw upstream headers from headers_json: Xref now always absent, Path from the `path` column), 2 minors fixed (403 on history fault in XHDR by message-id, NULL-safe overview scans); accepted deviation: range numbers up to 19 digits within int64 (D2 amended) | 8a1c79b |
+| nntp-session | worktree-agent-a812695d2f0f38332 (08efe1e, 5ae9904) | merge; 4 minors fixed (Stop closes the raw socket of TLS conns, MaxConns 400 reject in a bounded goroutine with `rejectSem`, net.ErrClosed after handleCommand not logged, bare AUTHINFO after login → 502); deviations accepted (`handlers.Add` inside `trackConn`, Start/Serve error after Stop, accept back-off, `MaxConns <= 0` → config default 500); `-local430ttl` flag skipped | bf684b1 |
+
+Mid-wave decisions: local430 TTL 60 s (user), BUG-8 and T-nntp-article-1 markers stay (f20cb78); new-user maxconns default 3 (97e6c3b, done in wave 2).
+Checks on bf684b1: gofmt baseline 2 files, vet/build OK, 8 package sets green under `-race`, known bugs = the 17 ids expected after wave 1
+(A-nntp-rfc-2 BUG-1 BUG-4 BUG-6 BUG-7 BUG-8 INT-1 INT-2 RFC-1 RFC-3 RFC-5 SEC-2 SEC-3 SEC-6 SEC-7 T-nntp-article-1 T-nntp-group-1),
+build scripts OK, e2e `SUMMARY pass=18 fail=2 info=1` (FAIL only N20 [nntp-read], N28 [nntp-auth-db]); no panic / DATA RACE in server.log.
+Deferred: 64 MiB drain cap stays per decision 11 (articles between 64 MiB and a larger MaxArtSize would be refused); RST after the overflow 400 accepted.
