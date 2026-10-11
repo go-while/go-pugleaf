@@ -3,7 +3,7 @@
 - **Slug:** `nntp-audit-tests`
 - **Integration branch:** `plan-nntp-audit-tests` (from `testing-001`)
 - **Run with:** `/run-plan .claude/plans/queued/nntp-audit-tests.md`
-- **Status:** re-anchored on 2026-10-08 to `testing-001` @ 84c2081 (originally approved 2026-09-14 @ 08c29f5). Nothing has run yet.
+- **Status:** DONE 2026-10-11 on `plan-nntp-audit-tests` @ 904ae59 (see `
 - **Parallelism:** wave 1 has 8 audit slices, wave 2 has 6 test slices, wave 4 has 4 fix-plan slices. Wave 2 doesn't depend on wave 1, so both can go out in one message if the user OKs 14 concurrent agents. Within a wave, no two slices own the same file.
 - **Relation to merged plans:** `web-sqlite-hardening.md` (**WSH**, merge 03d0178), `web-sqlite-leftovers.md` (**LO**, e52d1a8) and `web-db-followups.md` (**FU**, f819215) are all merged into `testing-001` and live in `.claude/plans/done/`. NAT shares no owned production file with them (wave 0 touches only `internal/nntp`). `audit-web` and `audit-db` are a delta over all three; see "Already covered by merged plans". Every harness API in D2 was re-checked at 84c2081 and exists unchanged.
 
@@ -685,3 +685,40 @@ PORT=21119 DATA=./data-test-nntp-audit-tests scripts/test-nntp-server.sh
 - New ids so far: A-nntp-rfc-1…12 (A-1 = A-nntp-sec-1), A-nntp-sec-1…6, T-nntp-auth-1 (password with spaces), T-nntp-group-1 (LISTGROUP ignores active), T-nntp-article-1 (local430 vs external intake). T-nntp-session-1 was folded into A-nntp-rfc-3.
 - Open knownBug ids in package nntp after batch 2: A-nntp-rfc-3, A-nntp-sec-1, BUG-1, BUG-2, BUG-4, BUG-5, BUG-6, BUG-7, BUG-8, BUG-9, RFC-1…6, SEC-1…7 (SEC-2 via group tests, SEC-7), T-nntp-article-1, T-nntp-auth-1, T-nntp-group-1.
 - Wave-3 notes: fix the slice wording "absent header → n (none)" (RFC 3977 §8.5.2 wants an empty value); "empty body gives exactly \r\n.\r\n after the headers' blank line" should read "after the last header line's CRLF"; Appendix B's first SEC-6 option (invalidate inside UpdateNNTPUserPassword) doesn't work across processes, only the re-check-on-hit option does.
+
+### Waves 1+2, batches 3–4; wave 3; wave 4 (2026-10-11)
+| Slice | Branch | Review | Merge |
+|----|----|----|----|
+| audit-db | worktree-agent-af52e6fd87ec963f9 (0ebdf65, b99304d) | merge; 4 minors fixed | d89e274 |
+| audit-intake | worktree-agent-a69c635b79b5030ff (b62f1c8, 66fd52c) | merge; 6 minors fixed | b962f3a |
+| audit-nntp-client | worktree-agent-a916c773cf88dba27 (762673e, 2efc61d) | fix first: 6 majors fixed (CLI-1 References claim wrong, A-5 rejected, OPS-3 credential exposure, A-1 dup of CLI-3, CLI-2 → high, anchors); implementer corrected its first report (repros had not run; reviewer reproduced CLI-1/2/4/5) | ae176eb |
+| audit-ops | worktree-agent-adfbaf5c6d99a2ed5 (d27cc18, 7ae876e) | merge; 7 minors fixed | 0e83996 |
+| audit-web | worktree-agent-ada252956ca3b9e87 (f2ae279, b166ba1) | merge; 5 minors fixed; new A-web-20 | fda5f47 |
+| audit-tools | worktree-agent-a65b1a7236bf47527 (e6a725c, 13422dc) | fix first: A-tools-7 scope + 3 minors | cc49dab |
+| test-nntp-intake-e2e | worktree-agent-a7488629628ccc6d6 (1d554a0, efa51f5) | merge; 6 minors fixed | 119485d |
+| AUDIT-2026-10 (wave 3, delegated) | worktree-agent-a82e4c119757fa9d3 (8a39408, 1dd64b3) | fix first: routing by Appendix B file owner, T-nntp-auth-1 alias | 03d5ef7, 2fb7741 |
+| fixplan nntp-server-hardening | worktree-agent-a1e21b34ed7b6519a (c72e796…8eae65a) | fix first: reader contract kept here, Stop/accept race, TLS reject deadline, maxconns opt-in | 49bae37 |
+| fixplan nntp-intake-injection | worktree-agent-ad56c9ae5f5c72a97 (2b49792, e6052fe, 5efba1d, 138bd8a) | fix first: depends on hardening, RFC-5 gates, rslight/wiring callers, PathIdentityProvider dropped; amendments: A-tools-1 capture limiter before Mux (both modes), A-db-3/4 | 056d38d, 2f4ee60, ab43b60 |
+| fixplan nntp-client-transfer | worktree-agent-a3bbdb22564cad63a (a23116d, ad3f637, 2031bf9, ddd5afb) | fix first: symbol collisions, wave 4 dropped, relay policy, mux, XHDR errors; amendment: SIGTERM (A-ops-3d/f) | 0bcacc2, 83a1161 |
+| fixplan nntp-rfc-commands | worktree-agent-a15b34769526da5df (f925973, d2a14cb, de52bae) | merge after 5 majors (activeLine method, delays, CHECK ids, commandMaxArgs, N51) | da1c11a |
+| fixplan audit-delta-fixes (delegated, not inline) | worktree-agent-ac34f562fb9e142b2 (62c7dbc, e556548) | fix first: A-web-20 scheduler loop (blocker), hide routes, ownership, e2e hostname | 904ae59 |
+- Wave 3 inline: BUGS.md / README.md / .claude/CLAUDE.md (313ded2). The optional `.github/workflows/tests.yml` was NOT added (needs the user's OK; it is Q2 of audit-delta-fixes).
+- Final run order of the queued plans (declared in their headers): nntp-server-hardening → nntp-intake-injection → nntp-client-transfer → nntp-rfc-commands → audit-delta-fixes.
+
+## Outcome
+
+- **Integration branch:** `plan-nntp-audit-tests` @ 904ae59 (76 commits from `testing-001` @ eaa24c6; 38 files, +20,398 lines). Not yet merged into `testing-001` (user decision). Nothing pushed.
+- **Built:**
+  - Wave-0 hooks in `internal/nntp` (per-server delays/idle timeout, `Serve(listener, isTLS)`), the package test harness, 5 test files in `internal/nntp` plus `cmd/nntp-server/server_e2e_test.go`, `e2e_binary_test.go` (tag `e2e`), the intake parse fuzz target and `scripts/test-nntp-server.sh` (74 new Test/Fuzz functions).
+  - 8 audit reports in `docs/audit/` plus `AUDIT-2026-10.md` (152 findings after dedup: critical 2, high 19, medium 59, low 68, info 4; 146 CONFIRMED, 6 PLAUSIBLE) and `docs/audit/tools/*`.
+  - 5 queued fix plans in `.claude/plans/queued/`: `nntp-server-hardening.md`, `nntp-intake-injection.md`, `nntp-client-transfer.md`, `nntp-rfc-commands.md`, `audit-delta-fixes.md` (5,286 lines), each reviewed for feasibility and cross-plan ownership.
+- **Verification** (pugleaf-verifier on 2f4ee60; plan files only changed afterwards): gofmt baseline 2 files; vet/build clean; `go test -race` on the 8 package sets green (nntp 92 s, nntp-server 15 s); `-count=2` rerun of the NNTP packages green, no races; `PUGLEAF_KNOWN_BUGS=1` lists exactly the 29 ids / 82 assertions of AUDIT §10; `./build_nntp-server.sh && ./build_nntpmgr.sh` OK; `PORT=21119 DATA=./data-test-nntp-audit-tests scripts/test-nntp-server.sh` → `SUMMARY pass=12 fail=0 info=4`, exit 0 (N20 creates `zz_no_such.db`, N21 RSS +10 MB, N22 100 % CPU and no exit on SIGINT, N30 PASS). The plan's "info=5" expectation was written when the script still had N99; 4 is correct.
+- **Open knownBug ids (29):** A-nntp-rfc-2, A-nntp-rfc-3, A-nntp-sec-1, BUG-1, BUG-2, BUG-4…9, INT-1, INT-2, RFC-1…6, SEC-1…7, T-nntp-article-1, T-nntp-auth-1, T-nntp-group-1.
+- **Leftovers / user decisions:**
+  - Optional CI workflow `tests.yml` (wave 3 step 4) not added.
+  - Questions recorded in the queued plans: hardening Q1–Q3 (per-user maxconns default, local430 1 s TTL, new default delays 25/25 ms + 3 min idle); intake Q1–Q3 (MaxArtSize default 32 KiB, 439 for in-flight TAKETHIS, reject control messages); client Q1–Q2 (relay policy default, dropping `.TX` from Path); delta Q1–Q10 (first-registered-user-becomes-admin, tests.yml, history fail-stop exits, go.mod vulnerability upgrade, nonce CSP, destructive-script guards, A-tools-1 hand-off check, default cron gating, non-race build scripts, hierarchy 50 % threshold).
+  - `build_nntp-server.sh` builds without `-race` although CLAUDE.md says the build scripts use it (audit-ops OPS-4).
+  - The first `audit-nntp-sec` run (agent-a9287213c5dec787f) was cut off by a safety classifier with nothing committed; the rerun produced the report. The worktree is empty.
+  - Test runs left `/tmp/pugleaf-nntptest-*` and `/tmp/pugleaf-e2etest-*` directories from agents' PUGLEAF_KNOWN_BUGS=1 runs (about 40, created 2026-10-11); nothing in the repo. `./data-test-nntp-audit-tests` and `build/` are gitignored leftovers of the verification.
+  - `~/go/bin/{staticcheck,govulncheck,golangci-lint}` can't load a go1.27.1 module; fresh builds were used from the scratchpad (not installed).
+- **Worktrees and branches** (left in place; user cleans up): /tank0/claude/trees/go-pugleaf/agent-<id> with branch worktree-agent-<id> for ids a938d5757382de879 (test-nntp-auth), a544ed697e5d5cdf5 (test-nntp-session), a9a404b7655832375 (audit-nntp-rfc), a9287213c5dec787f (audit-nntp-sec, aborted, empty), ab13760313981a6c3 (audit-nntp-sec), ac8b7f2f0951c3e73 (test-nntp-group), a4d16aac1914e00d6 (test-nntp-article), ab1e2bd1095928811 (test-nntp-overview), a7488629628ccc6d6 (test-nntp-intake-e2e), a69c635b79b5030ff (audit-intake), af52e6fd87ec963f9 (audit-db), a916c773cf88dba27 (audit-nntp-client), ada252956ca3b9e87 (audit-web), a65b1a7236bf47527 (audit-tools), adfbaf5c6d99a2ed5 (audit-ops), a82e4c119757fa9d3 (AUDIT-2026-10), a1e21b34ed7b6519a (fixplan hardening), ad56c9ae5f5c72a97 (fixplan intake), a3bbdb22564cad63a (fixplan client), a15b34769526da5df (fixplan rfc-commands), ac34f562fb9e142b2 (fixplan delta).
