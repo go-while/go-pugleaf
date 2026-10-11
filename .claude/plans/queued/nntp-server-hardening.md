@@ -9,10 +9,12 @@ Source: `docs/audit/AUDIT-2026-10.md` (§4 "nntp-server" table, fix-plan column 
 `audit-ops.md` (OPS-2 nntpmgr part, A-ops-9) and `audit-web.md` (A-web-1 hide decision, A-web-5 DB part).
 Written at `plan-nntp-audit-tests` @ 03d5ef7; every `file:line` below was checked with `grep -n`/`sed -n` at 03d5ef7.
 
-**Ordering with the other queued plans (all branch from `testing-001` when they start):**
-- Run this plan **before** `nntp-intake-injection` (it wires `readArticleBlock` from this plan into
-  `nntp-cmd-posting.go`) and **before** `nntp-rfc-commands` (`Depends on: nntp-server-hardening`: shared range parser,
-  dispatch/CAPABILITIES layout, `commandMaxArgs`/`knownStatCommands`, `dataBlockWriter`).
+**Ordering with the other queued plans (all branch from `testing-001` when they start):** fixed run order
+`nntp-server-hardening` → `nntp-intake-injection` → `nntp-client-transfer` → `nntp-rfc-commands` → `audit-delta-fixes`.
+- `nntp-intake-injection` wires `readArticleBlock`/`MaxArticleBytes` from this plan into `readArticleLines`
+  (`nntp-cmd-posting.go`) and calls `local430.Remove` after accepted articles.
+- `nntp-rfc-commands` (`Depends on: nntp-server-hardening`) reuses the range parser, the dispatch/CAPABILITIES layout,
+  `commandMaxArgs`/`knownStatCommands` and `dataBlockWriter`.
 - `audit-delta-fixes` uses the A-web-5 DB contract of slice `nntp-auth-db` (Design K1, "Contracts for other plans").
 
 ---
@@ -104,30 +106,43 @@ marks every one of them with `knownBug(t, "<id>", err)`; this plan removes those
    an oversized article up to its terminator within a drain bound, then lets the caller reply; reports when the bound is
    exceeded so the caller sends 400 and closes). Wiring it into POST/IHAVE/TAKETHIS (`nntp-cmd-posting.go`) and the
    441/437/439 replies are `nntp-intake-injection`'s (it owns `nntp-cmd-posting.go`; review routing of 2026-10-11).
-7. **Delays (BUG-3).** Defaults: `ArticleCmdDelay` 25 ms (was 200 ms), `GroupCmdDelay` 100 ms (was 333 ms),
+7. **Delays (BUG-3).** Defaults: `ArticleCmdDelay` 25 ms (was 200 ms), `GroupCmdDelay` 25 ms (was 333 ms; readers
+   GROUP every subscription at start-up),
    `ErrorDelay` 1 s (unchanged); flags `-articledelay`, `-groupdelay`, `-errordelay`. Error-delay rule for all
    handlers: call `rateLimitOnError()` before every 412, 420, 423, 430, 481, 482, 500 and 501 reply; never before
    2xx/3xx, 205, 400, 403, 411, 440, 480, 483 or 502 (411 stays undelayed: newsrc scans of dead groups).
 8. **Idle and write timeouts (BUG-9).** `DefaultNNTPcliconnTimeout` = 3 min (flag `-idletimeout`). The read deadline
    is refreshed per command and per received article line; the write deadline (same duration) is set per flush, not
    once per command.
-9. **local430 (BUG-8, T-nntp-article-1).** TTL 1 s (`DefaultLocal430TTL`, was 60–75 s), enforced in `Check`;
-   `ProcessIncomingArticle` returning `CasePass` removes the message-id at once (processor wrapper, so no
-   `nntp-cmd-posting.go` edit); at most 65 536 entries; message-ids over 250 octets are never cached.
+9. **local430 (BUG-8, T-nntp-article-1).** local430 stays as cross-connection damping of repeated misses, with a TTL
+   of 1 s (`DefaultLocal430TTL`, was 60–75 s) enforced in `Check`, at most 65 536 entries, and message-ids over 250
+   octets never cached. New `func (lc *Local430) Remove(messageID string)`: `nntp-intake-injection` (its slice S4)
+   calls `c.server.local430.Remove(id)` after a 235/239/240 in `nntp-cmd-posting.go`. The TTL alone already makes
+   `artPollStat223` pass for both `TestArtLocal430` subtests (the entry is older than 1 s when the 1 s poll window
+   ends; confirmed by the plan review), so `nntp-session` removes both markers; the `Remove` call only shortens the
+   in-process window further.
 10. **Command line limit (SEC-3).** 512 octets including CRLF (RFC 3977 §3.1): a longer line that ends within
     4096 bytes gets `501 Command line too long` and the session continues; 4096 bytes without LF gets
     `400 Command line too long` and the connection is closed.
 11. **Article byte limit (SEC-3, used by `nntp-intake-injection`).** `(*NNTPServer).MaxArticleBytes()` =
     `Config.NNTP.MaxArtSize` (config default 32 KiB; `cmd/nntp-server` flag `-maxartsize`), or 1 MiB when ≤ 0
-    (harness servers). Drain bound = max(4 × limit, 1 MiB), capped at 64 MiB.
-12. **Per-user `maxconns` (SEC-5).** Counted in memory per server (the `nntp_sessions` table is not used: a crash would
-    leave stale rows). `maxconns <= 0` means unlimited. Over the limit: `481 Too many connections for this user`.
+    (harness servers). Drain bound = max(4 × limit, 1 MiB), capped at 64 MiB. `DefaultMaxArticleBytes`,
+    `maxArticleDrainBytes`, `MaxArticleBytes`, `readArticleBlock`, `ErrArticleTooLarge` and `ErrArticleDrainLimit`
+    are defined here only; `nntp-intake-injection` consumes them (it drops its own copy of the default).
+12. **Per-user `maxconns` (SEC-5) is opt-in.** Existing users default to `maxconns = 1` (nntpmgr `-maxconns` default,
+    `CreateNNTPUserForWebUser`), and nntpmgr's 1–25 range cannot set 0, so enforcing it by default would cut every
+    reader that opens two connections. New `NNTPServer.EnforceUserMaxConns` (flag `-enforce-user-maxconns`, default
+    false). When on: counted in memory per server (the `nntp_sessions` table is not used: a crash would leave stale
+    rows), `maxconns <= 0` means unlimited, over the limit → `481 Too many connections for this user`. Open question 1
+    asks the user whether to turn it on by default later (after raising existing users' values).
 13. **QUIT ignores surplus arguments** (deliberate exception to A-nntp-rfc-5: a client that wants to leave must not be
     kept; `FuzzSessCommandLine` asserts `QUIT now` → 205). TAKETHIS and AUTHINFO are exempt from the argument-count
     table (TAKETHIS must consume its article; AUTHINFO takes the raw rest of the line).
 14. **GROUP numbers (BUG-4).** `211 count low high group` with low/high = MIN/MAX(`article_num`) of the visible
     articles in the group DB, count = `newsgroups.message_count` clamped to `high-low+1`; an empty group gives
-    `211 0 0 0 group` (an RFC 3977 §6.1.1.2 form). The current article becomes `low` (0 = invalid for an empty group).
+    `211 0 0 0 group` (an RFC 3977 §6.1.1.2 form). The count is an estimate: `message_count` includes hidden
+    articles (decision 2 filters only the marks and the listings), and RFC 3977 §6.1.1.2 allows a count at or above
+    the actual number, so tests accept `count >= visible`. The current article becomes `low` (0 = invalid for an empty group).
     LIST ACTIVE reads the main DB only (no group DB opens): `name last_article max(low_water,1) status`, status `y`/`m`
     when posting is allowed for this client and `newsgroups.status` is `y`/`m`, else `n`.
 15. **Faults and stream errors (A-nntp-rfc-4).** DB/internal faults → `403 Internal fault`. A DB error in the middle
@@ -136,6 +151,19 @@ marks every one of them with `knownBug(t, "<id>", err)`; this plan removes those
 16. **nntpmgr (OPS-2, A-ops-9).** `-list` never prints password hashes; `-create` prints the password only when it was
     generated (`-password random`); `-update` changes only flags given on the command line, with the `-create` range
     checks; new `-activate`, `-deactivate`, `-setpassword`; lookups include inactive users.
+17. **Startup validation in `Start()` (BUG-7, A-nntp-rfc-12).** A TLS port without a cert or key, or no port at all,
+    is now an error from `Start()`. Both callers treat it as fatal: `cmd/nntp-server` (`main.go:133`) and the
+    embedded server in `cmd/web` (`main.go:470`, only reachable once `-withnntp` is revived by `audit-delta-fixes`):
+    `cmd/web -nntptlsport` without `-nntpcertfile`/`-nntpkeyfile` used to skip TLS silently and now exits.
+    Behaviour change to report.
+
+### Open questions for the user (asked at the wave-1 boundary; the defaults above apply until answered)
+1. Per-user `maxconns` (decision 12): keep `-enforce-user-maxconns` off by default, or turn it on after raising
+   existing users' values? nntpmgr's 1–25 range cannot set 0 (unlimited), and the default for new users is 1.
+2. The 1 s local430 TTL (decision 9) makes local430 a short burst damper only; acceptable, or prefer a longer TTL
+   with `Remove` (intake) covering in-process arrivals and the test setting a short TTL?
+3. Default delays (decision 7: 25 ms per article command, 25 ms per GROUP, 1 s error delay): acceptable for the
+   public server?
 
 ### Out of scope (owned elsewhere; cross-reference only)
 - `nntp-rfc-commands`: RFC-1 (DATE, NEXT, LAST, NEWGROUPS, NEWNEWS, OVER/HDR, LIST OVERVIEW.FMT/HEADERS, the LIST
@@ -170,8 +198,6 @@ marks every one of them with `knownBug(t, "<id>", err)`; this plan removes those
 - Changed on purpose (all callers are listed and updated by the owning slice):
   - `handleAuthInfo(args []string, line string) error` and `handleQuit(args []string) error` (only caller: the
     dispatch; applied in wave 0).
-  - `NNTPServer.Processor` holds a `*local430Processor` wrapper when a processor is given (no code compares it by
-    identity; checked with grep at 03d5ef7).
   - `(*Database).GetOverviewsRange(groupDB, startNum, endNum int64, limit int)` and
     `(*Database).GetHeaderFieldRange(groupDB, field string, startNum, endNum int64, limit int) ([]HeaderFieldValue, error)`
     (only callers: `nntp-cmd-xover.go:79`, `nntp-cmd-xhdr.go:85`).
@@ -190,7 +216,8 @@ marks every one of them with `knownBug(t, "<id>", err)`; this plan removes those
   `DefaultMaxArticleBytes`, `maxArticleDrainBytes`, `(*NNTPServer).MaxArticleBytes`, `commandMaxArgs`,
   `readerCommands`, `knownStatCommands`, `PlaintextAuthPolicy`, `PlaintextAuthAccept`, `PlaintextAuthAdvertise`,
   `PlaintextAuthRefuse`, `ParsePlaintextAuthPolicy`, fields `PlaintextAuth`, `ReadRequiresAuth`, `ShutdownTimeout`,
-  `DefaultShutdownTimeout`, `DefaultLocal430TTL`, `local430MaxEntries`, `local430CleanupEvery`, `local430Processor`,
+  `DefaultShutdownTimeout`, `DefaultLocal430TTL`, `local430MaxEntries`, `local430CleanupEvery`, fields
+  `EnforceUserMaxConns`, `stopping`,
   `connsMu`, `conns`, `handlers`, `userConns`, `bgOnce`, `(*NNTPServer).startBackgroundLocked`,
   `(*NNTPServer).trackConn`, `(*NNTPServer).untrackConn`, `(*NNTPServer).acquireUserSlot`,
   `(*NNTPServer).releaseUserSlot`, `authinfoArgument`, `(*Local430).Remove`, `(*Local430).run`, field `Local430.ttl`,
@@ -413,7 +440,8 @@ MODE-READER and TAKETHIS are no longer listed (TAKETHIS stays dispatched; `STREA
 arrive only with `nntp-rfc-commands` (RFC-1, open marker).
 
 ### D6 Contracts for other plans
-- **`nntp-intake-injection`** replaces the body of `readArticleLines` (`nntp-cmd-posting.go:221-261`) with
+- **`nntp-intake-injection`** calls `c.server.local430.Remove(messageID)` after each 235/239/240 (decision 9), and
+  replaces the body of `readArticleLines` (`nntp-cmd-posting.go:221-261`) with
   `return c.readArticleBlock(c.server.MaxArticleBytes())` (or a per-group minimum with `newsgroups.max_art_size`)
   and maps `errors.Is(err, ErrArticleTooLarge)` → 441 (POST) / 437 (IHAVE) / `439 <id>` (TAKETHIS) with the
   connection kept, and `errors.Is(err, ErrArticleDrainLimit)` → `400 Article too large, closing connection` + return
@@ -525,16 +553,22 @@ Changes:
 2. **Accept loop and shutdown (BUG-7, A-nntp-rfc-3, A-nntp-sec-5, A-nntp-rfc-12, SEC-5 per-user limit).**
    - New fields: `connsMu sync.Mutex`, `conns map[net.Conn]struct{}`, `handlers sync.WaitGroup`,
      `userConns map[int]int`, `bgOnce sync.Once`, `ShutdownTimeout time.Duration` (seeded from
-     `DefaultShutdownTimeout = 10 * time.Second`), `PlaintextAuth PlaintextAuthPolicy`, `ReadRequiresAuth bool`.
+     `DefaultShutdownTimeout = 10 * time.Second`), `PlaintextAuth PlaintextAuthPolicy`, `ReadRequiresAuth bool`,
+     `EnforceUserMaxConns bool`, `stopping bool`.
      `type PlaintextAuthPolicy int` with `PlaintextAuthAccept` (0), `PlaintextAuthAdvertise`, `PlaintextAuthRefuse`,
      and `ParsePlaintextAuthPolicy(s string) (PlaintextAuthPolicy, error)` for `accept|advertise|refuse`.
    - `serve` (`:168-199`): the MaxConns check counts at accept: if `s.Stats.GetActiveConnections() >= MaxConns`, set a
-     2 s write deadline, write `400 Too many connections, try again later\r\n`, close, continue. Otherwise
-     `s.Stats.ConnectionStarted()` **in the accept loop**, `s.trackConn(conn)`, `s.handlers.Add(1)`, `s.wg.Add(1)`,
-     `go s.handleConnection(conn, isTLS)`; `handleConnection` defers `ConnectionEnded`, `untrackConn`,
-     `handlers.Done`, `client.releaseUserSlot` (via `s.releaseUserSlot(client.user)` when authenticated).
+     2 s deadline with `conn.SetDeadline` (read **and** write: on a TLS listener the first `Write` runs the handshake,
+     which reads), write `400 Too many connections, try again later\r\n`, close, continue. Otherwise
+     `s.Stats.ConnectionStarted()` **in the accept loop**, then `if !s.trackConn(conn) { ConnectionEnded(); continue }`,
+     `s.handlers.Add(1)`, `s.wg.Add(1)`, `go s.handleConnection(conn, isTLS)`; `handleConnection` defers
+     `ConnectionEnded`, `untrackConn`, `handlers.Done`, and `s.releaseUserSlot(client.user)` when a slot was taken.
+   - Stop/accept race: field `stopping bool` (guarded by `connsMu`). `trackConn(conn) bool` takes `connsMu`; when
+     `stopping` is set it closes `conn` and returns false (so `handlers.Add` is skipped); otherwise it adds the conn.
+     `Stop` sets `stopping = true` under `connsMu` **before** it copies the set to close it, so no connection accepted
+     during `Stop` escapes the close or the `handlers` wait.
    - `NewNNTPServer`: no goroutine any more (`:95` removed); seed `ShutdownTimeout`, `local430.ttl =
-     DefaultLocal430TTL`, `conns`, `userConns`; wrap a non-nil processor (change 6). `startBackgroundLocked()`
+     DefaultLocal430TTL`, `conns`, `userConns`. `startBackgroundLocked()`
      (called by `Start` after all listeners are up and by `Serve`) starts once (`bgOnce`) `go s.local430.run(s.shutdown)`
      with `s.wg.Add(1)` and `defer s.wg.Done()` inside.
    - `Start` (`:100-140`): validate first: no plain port and no TLS port → error `no listener configured (set
@@ -545,8 +579,8 @@ Changes:
      the listeners; unlock. Then close every tracked conn (under `connsMu`, copy first) and wait for `s.handlers`
      up to `ShutdownTimeout` (log `[NNTP] %d connection(s) did not end within %s` on timeout). Remove the fake
      "done" goroutine. `s.wg` stays the caller's WaitGroup (`main` waits on it).
-   - `acquireUserSlot(u *models.NNTPUser) bool` / `releaseUserSlot(u)`: under `connsMu`, `u.MaxConns <= 0` →
-     unlimited (decision 12).
+   - `acquireUserSlot(u *models.NNTPUser) bool` / `releaseUserSlot(u)`: always true / no-op unless
+     `s.EnforceUserMaxConns`; then under `connsMu`, `u.MaxConns <= 0` → unlimited (decision 12).
 3. **Line reader (SEC-3 server side, BUG-9; new file `nntp-server-lineio.go`).**
    - `DefaultMaxCommandLineBytes = 512`, `commandLineHardLimit = 4096` (the `bufio.Reader` size of
      `textproto.NewConn`). `readCommandLine()` uses `c.textConn.R.ReadSlice('\n')`; `bufio.ErrBufferFull` →
@@ -555,9 +589,12 @@ Changes:
    - `DefaultMaxArticleBytes = 1 << 20`, `maxArticleDrainBytes(limit int64) int64` = max(4×limit, 1 MiB) capped at
      64 MiB. `(*NNTPServer).MaxArticleBytes() int64` (decision 11). `readArticleBlock(maxBytes int64) (headLines,
      bodyLines []string, err error)` per D6: reads with `ReadSlice`, accumulating `ErrBufferFull` fragments; counts
-     every byte including CRLF; `c.conn.SetReadDeadline(now+ioTimeout())` per line; on exceeding `maxBytes` (or the
-     head/line caps) it stops storing and discards until the `.` line, then returns `ErrArticleTooLarge`; past the
-     drain bound it returns `ErrArticleDrainLimit` at once. Not wired by this plan (D6).
+     every byte including CRLF; refreshes the read deadline with `c.conn.SetReadDeadline(time.Now().Add(c.ioTimeout()))`
+     before **every** article line (BUG-9 upload half: a slow but steady upload is never cut off by a per-command
+     deadline); the byte limit is the primary bound, and the existing 1024-head-line / 16384-line caps stay as a
+     secondary bound. On exceeding `maxBytes` or a cap it stops storing and discards until the `.` line, then returns
+     `ErrArticleTooLarge`; past the drain bound it returns `ErrArticleDrainLimit` at once. Not wired by this plan:
+     `nntp-intake-injection` wires it into `readArticleLines` (D6). `DefaultMaxArticleBytes` is defined here only.
 4. **Statistics (SEC-4).** `knownStatCommands` = the dispatch commands plus `DATE NEXT LAST NEWGROUPS NEWNEWS OVER HDR
    CHECK STARTTLS`; `CommandExecuted` counts any other word under `"UNKNOWN"`. Getters stay (used by
    `TestSessServerStats`).
@@ -580,9 +617,10 @@ Changes:
    = time.Second`); `Check` returns false (and deletes) for entries older than ttl; `Add` refuses ids longer than 250
    octets and stops adding at `local430MaxEntries = 65536` (returns false); `Remove(messageID)`; `run(stop <-chan
    struct{})` cleans every `local430CleanupEvery = 15 * time.Second` until stop; `Cleanup` uses ttl. Delete
-   `CronLocal430` and the commented `CacheMessageIDNumtoGroup` block (`:54-146`). `type local430Processor struct {
-   ArticleProcessor; cache *Local430 }` whose `ProcessIncomingArticle` calls the inner one and on
-   `(history.CasePass, nil)` calls `cache.Remove(article.MessageID)`.
+   `CronLocal430` and the commented `CacheMessageIDNumtoGroup` block (`:54-146`). `func (lc *Local430)
+   Remove(messageID string)` deletes the entry (no-op when absent); it has no caller in this plan:
+   `nntp-intake-injection` calls `c.server.local430.Remove(id)` after 235/239/240 (decision 9). `NNTPServer.Processor`
+   is not wrapped.
 7. **Greeting, MODE, HELP (RFC-4, RFC-5, A-nntp-rfc-6, FN-1).** Greeting: `200` when `postingAllowed()` else `201`,
    hostname `c.server.Config.Hostname` or `go-pugleaf` when empty (`… NNTP server ready` / `… (TLS)`).
    `MODE READER` → the same 200/201 (`Reader mode, posting allowed|prohibited`); other variants →
@@ -590,7 +628,7 @@ Changes:
    commands (`STAT|HEAD|BODY|ARTICLE [<message-id>|<number>]`, `XOVER [<range>]`, `XHDR <header> [<range>|<message-id>]`,
    `LISTGROUP [<group> [<range>]]`, `POST`, `IHAVE <message-id>`, `TAKETHIS <message-id>`, …).
    CAPABILITIES uses `sendDataBlock`; delete `sendMultilineResponse` if unused afterwards (grep).
-8. **Delays (BUG-3).** `DefaultArticleCmdDelay = 25 * time.Millisecond`, `DefaultGroupCmdDelay = 100 *
+8. **Delays (BUG-3).** `DefaultArticleCmdDelay = 25 * time.Millisecond`, `DefaultGroupCmdDelay = 25 *
    time.Millisecond`; `DefaultNNTPcliconnTimeout = 3 * time.Minute` (BUG-9). Apply the decision-7 rule in owned files.
 9. **FN-1.** Delete the five stub files; remove `ClientConnection.capabilities/created/lastCommand` and `RemoteAddr`;
    `AuthManager` keeps only `NewAuthManager`/`AuthenticateUser` (delete `CheckGroupAccess`, `CanPost`, `IsAdmin`,
@@ -600,8 +638,9 @@ Changes:
 10. **`cmd/nntp-server/main.go` (A-nntp-rfc-12, BUG-3, BUG-9, SEC-5, decision 11).** After `processor.SetHostname`,
     set `mainConfig.Server.Hostname = processor.LocalNNTPHostname`. Flag text `-maxconnections`: "maximum number of
     concurrent client connections (all clients)". New flags: `-idletimeout` (3m), `-articledelay` (25ms),
-    `-groupdelay` (100ms), `-errordelay` (1s), `-plaintextauth` (accept), `-readauth` (false), `-maxartsize`
-    (0 = config default 32768). Set them on the server after `NewNNTPServer`. A failing `Start()` stays fatal.
+    `-groupdelay` (25ms), `-errordelay` (1s), `-plaintextauth` (accept), `-readauth` (false),
+    `-enforce-user-maxconns` (false), `-maxartsize` (0 = config default 32768). Set them on the server after
+    `NewNNTPServer`. A failing `Start()` stays fatal.
 11. Tests (`sess`/`auth`/`art` prefixes):
     - Remove markers: `nntp-server-session_test.go:184` `TestSessGreeting/read-only` (RFC-4), `:331`
       `TestSessMode/reader-read-only` (RFC-4), `:346` `TestSessMode/stream` (RFC-5), `:352`
@@ -613,18 +652,31 @@ Changes:
       (SEC-5), `:212` `TestAuthPasswordWithSpace` (T-nntp-auth-1), `:244` `TestAuthFailureDelay` (SEC-5);
       `nntp-server-article_test.go:847` `TestArtLocal430/ihave-arrival` (BUG-8), `:859`
       `TestArtLocal430/external-arrival` (T-nntp-article-1).
+    - The two `TestArtLocal430` markers go because the 1 s TTL alone passes `artPollStat223` (decision 9); keep the
+      subtests' bodies unchanged.
     - Adapt `TestSessLocal430` (`:846-861`): ages relative to `DefaultLocal430TTL` (old = now − 2×TTL, young = now),
       plus `Remove` and the 250-octet rule. Delete `TestAuthManagerUnits` (`auth_test.go:339-398`, helpers removed).
+    - `FuzzSessCommandLine` (`:1071`): change the skip filter `len(line) > 4096` to `len(line) > 4094` (a 4095-byte
+      line plus CRLF overflows the 4096-byte reader and is closed with 400, which is correct but not "one status line
+      per command").
+    - Tests that need non-default server fields (`ReadRequiresAuth`, `PlaintextAuth`, `EnforceUserMaxConns`, TLS) build
+      their own server like `sessFuzzServer` (`NewNNTPServer`, set the fields, then `Serve` on `127.0.0.1:0`, with a
+      cleanup that calls `Stop` and waits for the WaitGroup at most 10 s); the harness stays read-only and setting
+      fields on a running `hs.S` would race.
     - New: `TestSessCommandArgs` (`GROUP a b`, `MODE READER x`, `HELP x` → 501; `QUIT now` → 205),
       `TestSessNoEcho` (`XYZZY` + 400×`A` → 500 whose line does not contain the input; `MODE FOO`, `AUTHINFO USER
       <name>` lines don't echo), `TestSessReadArticleBlock` (net.Pipe `sessPipeConn`: normal article, `..` unstuffing,
       empty body, over-limit → `ErrArticleTooLarge` with the connection still reading the next line, over the drain
       bound → `ErrArticleDrainLimit`, a 6 000-byte line inside the limit), `TestSessStartErrors` (no ports → error;
       TLS port with a missing cert and a free plain port from `sessFreePort` → error, the plain port is not bound
-      afterwards, `IsRunning()` false), `TestSessTLSMinVersion` (client `MaxVersion: tls.VersionTLS11` fails the
-      handshake), `TestSessReadRequiresAuth` (`ReadRequiresAuth=true`: `GROUP` → 480, after AUTHINFO → 211/411),
-      `TestSessPlaintextPolicy` (refuse → 483 and not advertised; advertise → advertised; TLS → advertised, gone after
-      281), `TestAuthUserMaxConns` (user with maxconns 1: second connection's PASS → 481, after the first QUITs → 281).
+      afterwards, `IsRunning()` false), `TestSessTLSMinVersion` (goes through `Start()`: a self-signed cert written to
+      `t.TempDir()` with `sessSelfSignedTLS`-style code, `TLSPort` from `sessFreePort`, `Port` 0; a client with
+      `MaxVersion: tls.VersionTLS11` fails the handshake, a TLS 1.2+ client gets the greeting; `Stop` in cleanup),
+      `TestSessReadRequiresAuth` (own server with `ReadRequiresAuth=true`: `GROUP` → 480, after AUTHINFO → 211/411),
+      `TestSessPlaintextPolicy` (own servers: refuse → 483 and not advertised; advertise → advertised; TLS →
+      advertised, gone after 281), `TestAuthUserMaxConns` (own server with `EnforceUserMaxConns=true`, user with
+      maxconns 1: second connection's PASS → 481, after the first QUITs → 281; and with the default server both
+      connections get 281).
       `TestSessCommandArgs` also checks `XOVER 1-2 x` and `LISTGROUP g 1- x` → 501 (the table rejects them before the
       handler, so no group is needed). No production hook is added just to inject a panic: the `recover` is covered by
       code review and by `TestSessPipelining/quit-then-command` staying green under `runIsolated`.
@@ -637,6 +689,10 @@ T-nntp-auth-1 (BUG-7, SEC-3 and RFC-5 stay because of their intake markers).
 
 #### Slice `nntp-overview`: range parser, XOVER, XHDR, chunked range reads
 Findings: SEC-1, BUG-2, BUG-5, RFC-6, A-nntp-sec-3. E-tag `nntp-overview`, port 21122.
+Also the XOVER/XHDR parts of three ids owned elsewhere: A-nntp-sec-2 (`hide = 0` in the range reads and
+`NNTPHeaderByMessageID`; id owned by `nntp-read`), A-nntp-rfc-4 (403 instead of 411/503 at `nntp-cmd-xover.go:74,82`,
+`nntp-cmd-xhdr.go:80,88`; id owned by `nntp-read`) and A-nntp-rfc-6 (no unbounded echo in the XHDR status line; id
+owned by `nntp-session`). Their markers/acceptance stay with the owning slice.
 
 Owned files:
 - `internal/nntp/nntp-cmd-range.go` (new)
@@ -755,10 +811,14 @@ Changes:
      invalid`, else the current number; never read `args[0]` on this path (`:58`).
    - message-id: current group first (`NNTPArticleByMessageID`), then `local430.Check`, then (processor set)
      `FindArticleByMessageID(id, "")` and `visibleInOtherGroup(article)`: re-read it with `NNTPArticleByMessageID`
-     in `*article.NewsgroupsPtr[0]` (a hidden copy is a miss); replies number 0 outside the current group. Misses:
+     in `*article.NewsgroupsPtr[0]` (a hidden copy is a miss); replies number 0 outside the current group. Known
+     limitation (document it in a code comment): `hide` is per group DB, so for a crosspost hidden in the group the
+     processor returns but visible in another one the lookup answers 430 instead of trying the next group (the
+     processor returns only the first hit). Misses:
      `430 No article with that message-id` (all three texts). Without a processor only the current group is searched
      (documented in the README by `nntp-session`; A-nntp-rfc-9).
-   - number: more than 16 digits or not a number → 501; `n <= 0` → `rateLimitOnError()`, 423; `GetGroupDB` error →
+   - number: `requireGroup` first (412 without a selected group), then more than 16 digits or not a number → 501;
+     `n <= 0` → `rateLimitOnError()`, 423; `GetGroupDB` error →
      403; `NNTPArticleByNum`/`NNTPArticleMessageID` miss → 423.
    - The number form sets `currentArticle` from the requested number (BUG-1); the message-id form never changes it.
 5. **Data blocks (BUG-6, A-nntp-rfc-2, A-nntp-rfc-10).** `articleHeaderLines(a)`: `headers_json` split on `\n`,
@@ -767,7 +827,7 @@ Changes:
    lines; ARTICLE = header lines, one empty line, body lines; all via `dataBlockWriter`. Delete
    `parseArticleHeadersFull`, `parseArticleHeadersShort`, `parseArticleBody`, `formatOverviewLine` (replaced by
    `overviewLine` in wave 1) from `nntp-cmd-helpers.go`; keep `rateLimitOnError`. After this slice no code calls
-   `sendLine` outside `nntp-cmd-posting.go` (grep; the orchestrator decides in wave 3 whether to keep it).
+   `sendLine` (`nntp-cmd-posting.go` never did); wave 3 deletes it.
 6. Tests:
    - Remove markers in `nntp-server-article_test.go`: `:366` `TestArtNoArgument/current-article`, `:380`
      `/invalid-current-article-420`, `:393` `/no-group-412` (RFC-3); set `bug` to `""` in the rows `:406` (`"0"`) and
@@ -784,8 +844,8 @@ Changes:
    - New in `nntp-server-article_test.go`: `TestArtHidden` (an article with `hide = 1`: `ARTICLE 2`/`STAT 2` → 423,
      `STAT <id>` → 430 in the current group and through a fake processor that returns it from another group) and
      `TestArtNotFoundTexts` (430 lines contain none of `Cache says no`, `NotF0`, `NotF1`). New in
-     `nntp-server-group_test.go`: `TestGrpHiddenNotListed` (`LISTGROUP` and `GROUP` skip a hidden article: count and
-     marks), `TestGrpListGroupRangeEmpty` (`LISTGROUP g 9-3` → 211 with an empty list, group selected),
+     `nntp-server-group_test.go`: `TestGrpHiddenNotListed` (`LISTGROUP` skips a hidden article; `GROUP`'s low/high skip
+     it; `GROUP`'s count only has to be `>=` the visible count, decision 14), `TestGrpListGroupRangeEmpty` (`LISTGROUP g 9-3` → 211 with an empty list, group selected),
      `TestGrpListNewsgroupsSanitized` (a description with a TAB/CR is sent with spaces, one line per group).
    - New `internal/database/nsh_reads_test.go`: `TestNSHReadByNumSetsDBArtNum` (also for `GetArticleByNum`),
      `TestNSHReadHideFiltered` (all six functions), `TestNSHReadWatermarks` (empty group 0/0), `TestNSHReadNumbersChunks`,
@@ -829,7 +889,8 @@ Changes:
    `random`; otherwise `Password: (as given)`. `-update`: `GetNNTPUserByUsernameAnyState`; change maxconns only if
    `-maxconns` was given (range 1–25) and posting only if `-posting` was given; error when neither was given. New
    `-activate`/`-deactivate` (`ActivateNNTPUser`/`DeactivateNNTPUser`) and `-setpassword` (uses `-password`, prints
-   it only when generated, length 10–72 bytes). `-delete` uses the any-state lookup. Logs keep `log.Printf` with
+   it only when generated). One password rule for `-create` and `-setpassword`: 10–72 bytes (72 = the bcrypt limit;
+   the old `-create` limit of 20 goes). `-delete` uses the any-state lookup. Logs keep `log.Printf` with
    `[NNTPMGR]`.
 6. Tests:
    - Remove the marker `internal/nntp/nntp-server-auth_test.go:458` `TestAuthCacheOldPassword` (SEC-6).
@@ -846,9 +907,11 @@ Acceptance: E-line N28 PASS; the known-bug list loses SEC-6.
 **BUG-7, INT-1, INT-2, RFC-1, RFC-5, SEC-2, SEC-3** (all owned by `nntp-intake-injection` / `nntp-rfc-commands`).
 
 ### Wave 3 (inline, orchestrator)
-1. `grep -rn 'sendLine(' internal/nntp` — if only `nntp-cmd-posting.go` uses it, keep `sendLine` (intake owns that
-   file); otherwise nothing to do. `~/go/bin/staticcheck ./internal/nntp/ ./internal/database/` (or the build from
-   `docs/audit/tools`) must report no U1000 for the files this plan touched.
+1. `grep -rn 'sendLine(' internal/nntp` must show only its definition (no caller after wave 2; at 03d5ef7
+   `nntp-cmd-posting.go` has none): delete `sendLine` from `nntp-server-cliconns.go`, then run the checks.
+   Run staticcheck: `~/go/bin/staticcheck ./internal/nntp/ ./internal/database/` if that build loads the module,
+   otherwise a fresh `go install honnef.co/go/tools/cmd/staticcheck@latest` into the scratchpad (`GOBIN=<scratchpad>`);
+   it must report no U1000 for the files this plan touched.
 2. Full `## Checks`, build scripts, `## End-to-end`; record results in `## Progress`.
 3. `BUGS.md`, section `# nntp-server`: strike the ids fixed here and point at this plan; leave the intake/rfc ids.
 
@@ -883,7 +946,8 @@ Runner: `pugleaf-verifier` on the main checkout (`plan-nntp-server-hardening`), 
 ./build_nntp-server.sh && ./build_nntpmgr.sh
 PORT=21119 DATA=./data-test-nntp-server-hardening scripts/test-nntp-server.sh
 ```
-Expected: `SUMMARY pass=20 fail=0 info=0` (N01–N11, N20–N26, N28, N30), no `panic:` and no `DATA RACE` in
+Expected: `SUMMARY pass=20 fail=0 info=1` (PASS: N01–N11, N20–N26, N28, N30; the INFO line is N05's commit timing,
+printed on every run), no `panic:` and no `DATA RACE` in
 `$DATA/server.log`, the server exits on SIGINT in both cycles.
 
 ### Changes to `scripts/test-nntp-server.sh` (wave 0 writes them; fix only real script bugs later)
@@ -891,13 +955,13 @@ Expected: `SUMMARY pass=20 fail=0 info=0` (N01–N11, N20–N26, N28, N30), no `
   nntp-read, nntp-auth-db)". Line 87's comment: nntpmgr no longer echoes a given password (N28).
 - Helpers after `q()`:
 ```bash
-nn_open() { exec 3<>"/dev/tcp/127.0.0.1/$PORT" 2>/dev/null || return 1
-  IFS= read -r -t 5 NN_GREETING <&3 || { exec 3>&- 3<&-; return 1; }; NN_GREETING=${NN_GREETING%$'\r'}; }
+nn_open() { { exec 3<>"/dev/tcp/127.0.0.1/$PORT"; } 2>/dev/null || return 1
+  IFS= read -r -t 5 NN_GREETING <&3 || { nn_close; return 1; }; NN_GREETING=${NN_GREETING%$'\r'}; }
 nn_cmd() { printf '%s\r\n' "$1" >&3 2>/dev/null || return 1; NN_LINE=""
   IFS= read -r -t "${2:-5}" NN_LINE <&3 || return 1; NN_LINE=${NN_LINE%$'\r'}; }
 nn_block() { NN_BLOCK="|"; local l; while IFS= read -r -t "${1:-5}" l <&3; do l=${l%$'\r'}
   [ "$l" = . ] && return 0; NN_BLOCK="$NN_BLOCK$l|"; done; return 1; }
-nn_close() { exec 3>&- 3<&- 2>/dev/null; }
+nn_close() { { exec 3>&- 3<&-; } 2>/dev/null; }
 ms_now() { date +%s%3N; }
 ```
 - **N28 [nntp-auth-db]** right after setup step 3 (server stopped):
@@ -922,7 +986,7 @@ case "$post" in *"|AUTHINFO"*) cap_detail="$cap_detail AUTHINFO after 281" ;; es
 if [ -n "$pre" ] && [ -n "$post" ] && [ -z "$cap_detail" ]; then pass N24 nntp-session "CAPABILITIES by state"
 else fail N24 nntp-session "CAPABILITIES by state" "${cap_detail:-no reply} pre='$pre' post='$post'"; fi
 ```
-- **N26 [nntp-session]** 481 delay (default `-errordelay 1s`):
+- **N26 [nntp-session]** 481 delay (default `-errordelay 1s`), placed after N24 and before N20:
 ```bash
 if nn_open && nn_cmd "AUTHINFO USER $E2E_USER"; then
   t0=$(ms_now); nn_cmd "AUTHINFO PASS wrong-password-n26" 5; el=$(( $(ms_now) - t0 )); nn_close
@@ -958,11 +1022,12 @@ if [ "$q205" = yes ] && [ "$greets" = yes ]; then pass N23 nntp-session "pipelin
 else fail N23 nntp-session "pipelined QUIT+HELP" "205=$q205 alive_and_greets=$greets"; fi
 ```
 - **N25 [nntp-session] + N30**: before the existing N30 `kill -INT`, open an idle client
-  (`exec 4<>"/dev/tcp/127.0.0.1/$PORT" 2>/dev/null && idle=yes || idle=no`); after the exit loop:
+  (`idle=no; { exec 4<>"/dev/tcp/127.0.0.1/$PORT"; } 2>/dev/null && idle=yes`). The existing loop sets `t0` before
+  the signal; after it add `el=$(( $(date +%s) - t0 ))`, then
   `[ "$idle" = yes ] && [ "$exited" = yes ] && [ "$el" -le 10 ]` → `pass N25 nntp-session "SIGINT with an idle client
-  exits within 10s (${el}s)"`, else `fail N25 …`; then `exec 4>&- 4<&-`. N30's tag becomes `nntp-session` (was
-  `shutdown`); its limit is unchanged (30 s) but it now runs
-  with that idle client connected.
+  exits within 10s (${el}s)"`, else `fail N25 nntp-session "SIGINT with an idle client exits within 10s"
+  "idle=$idle exited=$exited el=${el}s"`; then `{ exec 4>&- 4<&-; } 2>/dev/null`. N30's tag becomes `nntp-session`
+  (was `shutdown`); its limit is unchanged (30 s) but it now runs with that idle client connected.
 - **N22 [nntp-overview]** replaces the INFO probe (fresh start as today):
 ```bash
 if start_server; then
