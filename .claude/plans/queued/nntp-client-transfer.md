@@ -8,7 +8,11 @@
   re-checks the anchors listed in K6 and records any drift in `## Progress`.
 - **Depends on:** `nntp-server-hardening`, `nntp-intake-injection` (both merged first). Final run order:
   nntp-server-hardening → nntp-intake-injection → **nntp-client-transfer** → nntp-rfc-commands → audit-delta-fixes.
-  From the intake plan this plan uses `common.ValidMessageID` (waves 0, 2, 3), see K1.
+  From the intake plan this plan uses `common.ValidMessageID` (waves 0, 2, 3), see K1. Note from the intake run
+  (2026-10-11): `ValidMessageID` is RFC 5536-strict on the right side (dot-atom-text or a `[...]` literal with `\[`,
+  `\]`, `\\` escapes) but lax on the left: any printable except `<`, `>`, `@` (so `<a..b@x>` passes and a quoted
+  `<"a@b"@c>` fails); ≤ 250 octets. `CheckHeaderBlock(lines, HeaderBlockFetch)` lets DEL (0x7F) pass and drops
+  WSP-only continuation lines.
   Neither earlier plan owns a file of this plan (see Coordination); the K6 anchor check absorbs line drift.
 - **Parallelism:** wave 1 has 2 slices, wave 2 has 2, wave 3 has 1. Within a wave, no two slices own the
   same file. A file may be owned by different slices in different waves (the later wave builds on the merged earlier one).
