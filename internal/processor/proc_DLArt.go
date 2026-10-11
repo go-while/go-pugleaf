@@ -18,10 +18,13 @@ import (
 var LOOPS_PER_GROUPS = 1
 
 type BatchQueue struct {
-	Mutex       sync.RWMutex
-	GetQ        chan *BatchItem        // Channel to get articles for processing
-	Check       chan *string           // Channel to check newsgroups
-	TodoQ       chan *nntp.GroupInfo   // Channel to do newsgroups
+	Mutex sync.RWMutex
+	GetQ  chan *BatchItem      // Channel to get articles for processing
+	Check chan *string         // Channel to check newsgroups
+	TodoQ chan *nntp.GroupInfo // Channel to do newsgroups
+	// GroupQueues holds the per-newsgroup queues of GetOrCreateGroupBatch.
+	//
+	// Deprecated: DownloadArticles uses a per-run queue (A-intake-11)
 	GroupQueues map[string]*GroupBatch // Per-newsgroup queues
 }
 
@@ -43,6 +46,8 @@ var errIsDuplicateError = fmt.Errorf("isDup")
 
 // GetOrCreateGroupBatch returns the GroupBatch for a newsgroup, creating it if necessary
 // This now spawns a dedicated worker goroutine for efficient per-group processing
+//
+// Deprecated: DownloadArticles uses a per-run queue (A-intake-11)
 func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
 	bq.Mutex.Lock()
 	defer bq.Mutex.Unlock()
@@ -65,6 +70,107 @@ func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
 
 //var BatchItemDuplicateError = &BatchItem{Error: errIsDuplicateError}
 
+// newDownloadRun returns the return queue of one DownloadArticles run. Every run gets its own
+// queue (A-intake-11): results that arrive after a run returned (timeout, shutdown) can no longer
+// land in a queue shared with the next run of the same group, and the queue is released with
+// the run instead of staying in Batch.GroupQueues for the life of the process.
+func newDownloadRun() *GroupBatch {
+	return &GroupBatch{ReturnQ: make(chan *BatchItem, MaxBatchSize)}
+}
+
+// feedDownloadRun is the feeder of one DownloadArticles run. For every message-id received from
+// xhdrChan, prepare builds the item: a duplicate (Error set) or an item that already carries its
+// article goes straight to returnQ, any other item goes to getQ (the fetcher's download workers
+// answer on item.ReturnQ). A nil item is skipped. Every successful send increments handed.
+//
+// When runDone is closed or a shutdown is requested, it stops queueing: prepare (which may use
+// the group DB that the run closes after runDone) is not called again, and stopped is closed.
+// stopped is also closed when xhdrChan closes. In both cases it then keeps receiving and
+// discarding from xhdrChan until the channel is closed, because XHdrStreamed blocks on a full
+// channel and has no stop channel of its own.
+//
+// It returns the number of queued items (duplicates not counted) and whether every entry of
+// xhdrChan was handed on (false after runDone or a shutdown).
+func feedDownloadRun(xhdrChan <-chan nntp.HeaderLine, runDone <-chan struct{}, stopped chan<- struct{}, returnQ, getQ chan<- *BatchItem, prepare func(messageID string) *BatchItem, handed *atomic.Int64) (queued int64, complete bool) {
+	defer func() {
+		for range xhdrChan {
+			// discard: the run is gone, only unblock the XHDR reader
+		}
+	}()
+	defer close(stopped) // runs before the discard loop
+	for {
+		var hdr nntp.HeaderLine
+		var ok bool
+		select {
+		case hdr, ok = <-xhdrChan:
+		case <-runDone:
+			return queued, false
+		}
+		if !ok {
+			return queued, true
+		}
+		if common.WantShutdown() {
+			log.Printf("DownloadArticlesFromDate: xhdrChan common.WantShutdown(): stopping")
+			return queued, false
+		}
+		select {
+		case <-runDone:
+			return queued, false // never call prepare (group DB) after runDone
+		default:
+		}
+		item := prepare(hdr.Value)
+		if item == nil {
+			continue
+		}
+		target := getQ
+		if item.Error != nil || item.Article != nil {
+			target = returnQ
+		}
+		select {
+		case target <- item:
+		case <-runDone:
+			return queued, false
+		}
+		handed.Add(1)
+		if item.Error != errIsDuplicateError {
+			queued++
+		}
+	}
+}
+
+// drainLateResults receives and drops the results still owed to a DownloadArticles run that has
+// returned (A-intake-11): fetcher workers answer on the run's ReturnQ after a timeout, and items
+// may still be buffered there. The message-id cache entry of every dropped item is reset to
+// CaseError with a 5 s TTL, as the processing loop does for failed items, so a later run can
+// fetch the article again. It returns after outstanding items or when shutdownChan is closed.
+func drainLateResults(returnQ <-chan *BatchItem, outstanding int64, shutdownChan <-chan struct{}) {
+	for ; outstanding > 0; outstanding-- {
+		var item *BatchItem
+		select {
+		case item = <-returnQ:
+		case <-shutdownChan:
+			return
+		}
+		if item == nil {
+			continue
+		}
+		if item.MessageID != nil {
+			msgIdItem := history.MsgIdCache.GetORCreate(*item.MessageID)
+			if msgIdItem != nil && msgIdItem.MessageId == *item.MessageID {
+				msgIdItem.Mux.Lock()
+				msgIdItem.CachedEntryExpires = time.Now().Add(5 * time.Second)
+				msgIdItem.Response = history.CaseError
+				msgIdItem.Mux.Unlock()
+			}
+		}
+		item.Article = nil
+		item.MessageID = nil
+		item.GroupName = nil
+		item.Error = nil
+		item.ReturnQ = nil
+	}
+}
+
 // DownloadArticles fetches full articles and stores them in the articles DB.
 func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{}, progressDB *database.ProgressDB, start int64, end int64, shutdownChan <-chan struct{}) error {
 	if common.WantShutdown() {
@@ -76,9 +182,8 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 		<-DLParChan // free slot
 	}()
 
-	// Get or create the group-specific batch channels
-	groupBatch := Batch.GetOrCreateGroupBatch(newsgroup)
-	// Note: Don't defer close here - let the main loop manage group batch lifecycle
+	// per-run return queue (A-intake-11): never shared with another run of this group
+	groupBatch := newDownloadRun()
 
 	// Note: We don't shut down the database here as it's shared with the main application
 	// progressDB is now passed as parameter to avoid opening/closing for each group
@@ -100,6 +205,23 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 		return fmt.Errorf("error in DownloadArticles: failed to get group DBs err='%v'", err)
 	}
 	defer proc.DB.ForceCloseGroupDB(groupDB)
+	// runDone is closed when this run returns, before the deferred ForceCloseGroupDB above (LIFO):
+	// the feeder stops queueing and no longer touches groupDB, and the results still owed to this
+	// run (handed - received) are drained in the background (A-intake-11).
+	runDone := make(chan struct{})
+	var feederStopped chan struct{} // closed by the feeder once it stops queueing; nil until it starts
+	var handed atomic.Int64         // items given to Batch.GetQ or groupBatch.ReturnQ by the feeder
+	var received int64              // items taken from groupBatch.ReturnQ by the processing loop
+	defer func() {
+		close(runDone)
+		if feederStopped == nil {
+			return
+		}
+		<-feederStopped // bounded by one in-flight lookup; afterwards handed is final
+		if outstanding := handed.Load() - received; outstanding > 0 {
+			go drainLateResults(groupBatch.ReturnQ, outstanding, shutdownChan)
+		}
+	}()
 	if common.WantShutdown() {
 		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
 	}
@@ -128,33 +250,26 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 	//log.Printf("DownloadArticles: XHDR is fetching %d msgIds ng: '%s' (%d to %d)", len(messageIDs), newsgroup, start, end)
 	releaseChan := make(chan struct{}, 1)
 	notifyChan := make(chan int64, 1)
+	feederStopped = make(chan struct{})
 	go func() {
 		// launch to background and feed queue
 		//log.Printf("DownloadArticles: Fetching %d articles for group '%s' using %d goroutines", toFetch, newsgroup, proc.Pool.Backend.MaxConns)
-		var exists, queued int64
-		for hdr := range xhdrChan {
-			if common.WantShutdown() {
-				log.Printf("DownloadArticlesFromDate: xhdrChan common.WantShutdown(): stopping")
-				return
-			}
+		prepare := func(messageID string) *BatchItem {
 			/*
-				if !CheckMessageIdFormat(hdr.Value) {
-					log.Printf("[FETCHER]: Invalid message ID format: '%s'", hdr.Value)
-					groupBatch.ReturnQ <- &BatchItem{Error: errIsDuplicateError}
-					continue
+				if !CheckMessageIdFormat(messageID) {
+					log.Printf("[FETCHER]: Invalid message ID format: '%s'", messageID)
+					return &BatchItem{Error: errIsDuplicateError}
 				}
 			*/
-			//log.Printf("DownloadArticles: Checking if article '%s' exists in group '%s'", msgID.Value, newsgroup)
-			if groupDB.ExistsMsgIdInArticlesDB(hdr.Value) {
-				exists++
-				groupBatch.ReturnQ <- &BatchItem{Error: errIsDuplicateError}
-				continue
+			//log.Printf("DownloadArticles: Checking if article '%s' exists in group '%s'", messageID, newsgroup)
+			if groupDB.ExistsMsgIdInArticlesDB(messageID) {
+				return &BatchItem{Error: errIsDuplicateError}
 			}
 			var art *models.Article
 			if reuseEnabled {
-				art = proc.reuseStoredArticle(hdr.Value, currentGroupID, newsgroup)
+				art = proc.reuseStoredArticle(messageID, currentGroupID, newsgroup)
 			}
-			msgIdItem := history.MsgIdCache.GetORCreate(hdr.Value)
+			msgIdItem := history.MsgIdCache.GetORCreate(messageID)
 			msgIdItem.Mux.Lock()
 			msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
 			msgIdItem.Response = history.CaseLock
@@ -162,28 +277,21 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 			if art != nil {
 				// crosspost already stored in another group: skip the download.
 				// counts as queued, the consumer counts it as gots or errs like a downloaded article.
-				groupBatch.ReturnQ <- &BatchItem{
-					MessageID: &msgIdItem.MessageId,
-					GroupName: proc.DB.Batch.GetNewsgroupPointer(newsgroup),
-					Article:   art,
-					ReturnQ:   groupBatch.ReturnQ,
-				}
-				queued++
 				reused.Add(1)
-				continue
 			}
-			item := &BatchItem{
+			// without an article the item goes to Batch.GetQ: fetcher/main.go:~L540: for item := range processor.Batch.GetQ
+			return &BatchItem{
 				MessageID: &msgIdItem.MessageId, // Use pointer to avoid copying
 				GroupName: proc.DB.Batch.GetNewsgroupPointer(newsgroup),
+				Article:   art,
+				ReturnQ:   groupBatch.ReturnQ,
 			}
-			item.ReturnQ = groupBatch.ReturnQ
-			Batch.GetQ <- item // send to fetcher/main.go:~L495: for item := range processor.Batch.GetQ
-			queued++
-			//log.Printf("DownloadArticles: Queued article %d (%s) for group '%s'", hdr.ArticleNum, hdr.Value, *item.GroupName)
-			//hdr.Value = ""
-			//hdr.ArticleNum = 0
-		} // end for xhdrChan
-		//log.Printf("DownloadArticles: XHdr closed, finished feeding batch queue %d articles for group '%s' (existing: %d) total=%d", queued, newsgroup, exists, queued+exists)
+		}
+		queued, complete := feedDownloadRun(xhdrChan, runDone, feederStopped, groupBatch.ReturnQ, Batch.GetQ, prepare, &handed)
+		if !complete {
+			return // run returned or shutdown: nobody waits for the counts
+		}
+		//log.Printf("DownloadArticles: XHdr closed, finished feeding batch queue %d articles for group '%s'", queued, newsgroup)
 		if queued == 0 {
 			releaseChan <- struct{}{}
 		} else {
@@ -248,6 +356,7 @@ forProcessing:
 			}
 
 		case item := <-groupBatch.ReturnQ:
+			received++
 			//log.Printf("DEBUG-RETURN: received item: Error=%v, Article=%v", item != nil && item.Error != nil, item != nil && item.Article != nil)
 			if item == nil || item.Error != nil || item.Article == nil {
 				if item != nil {
