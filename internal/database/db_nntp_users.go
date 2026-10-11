@@ -3,6 +3,7 @@ package database
 import (
 	"crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -270,12 +271,16 @@ func (db *Database) CreateNNTPUserForWebUser(webUserID int64) error {
 	nntpUsername := generateRandomString(16)
 	nntpPassword := generateRandomString(16)
 
-	// Ensure username is unique by checking database
+	// Ensure username is unique by checking database (any state: an inactive
+	// user holds its name too, and the column is UNIQUE)
 	for {
-		_, err := db.GetNNTPUserByUsername(nntpUsername)
-		if err != nil {
+		_, err := db.GetNNTPUserByUsernameAnyState(nntpUsername)
+		if errors.Is(err, sql.ErrNoRows) {
 			// Username doesn't exist, we can use it
 			break
+		}
+		if err != nil {
+			return fmt.Errorf("checking NNTP username: %w", err)
 		}
 		// Username exists, generate a new one
 		nntpUsername = generateRandomString(16)

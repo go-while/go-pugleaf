@@ -31,7 +31,7 @@ func nshAuthNewUser(t *testing.T, active bool, webUserID int64) (*models.NNTPUse
 		t.Fatalf("GetNNTPUserByUsernameAnyState(%s): %v", name, err)
 	}
 	t.Cleanup(func() {
-		db.NNTPAuthCache.Remove(name)
+		db.InvalidateNNTPUserAuth(name)
 		if err := db.DeleteNNTPUser(u.ID); err != nil {
 			t.Logf("cleanup DeleteNNTPUser(%d): %v", u.ID, err)
 		}
