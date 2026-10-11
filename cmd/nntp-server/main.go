@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
@@ -25,6 +26,15 @@ var (
 	maxConnections  int
 	dataDir         string
 	useHistory      bool
+
+	idleTimeout         time.Duration
+	articleDelay        time.Duration
+	groupDelay          time.Duration
+	errorDelay          time.Duration
+	plaintextAuth       string
+	readAuth            bool
+	enforceUserMaxConns bool
+	maxArtSize          int
 )
 
 var appVersion = "-unset-"
@@ -40,10 +50,32 @@ func main() {
 	flag.StringVar(&nntpcertFile, "nntpcertfile", "", "NNTP TLS certificate file (/path/to/fullchain.pem)")
 	flag.StringVar(&nntpkeyFile, "nntpkeyfile", "", "NNTP TLS key file (/path/to/privkey.pem)")
 	flag.IntVar(&useShortHashLen, "useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
-	flag.IntVar(&maxConnections, "maxconnections", 500, "allow max of N authenticated connections (default: 500)")
+	flag.IntVar(&maxConnections, "maxconnections", 500, "maximum number of concurrent client connections (all clients)")
 	flag.StringVar(&dataDir, "data", "./data", "Directory to store database files")
+	flag.DurationVar(&idleTimeout, "idletimeout", nntp.DefaultNNTPcliconnTimeout, "close a client connection after this long without a command (RFC 3977: at least 3m)")
+	flag.DurationVar(&articleDelay, "articledelay", nntp.DefaultArticleCmdDelay, "delay before each ARTICLE/HEAD/BODY/STAT reply")
+	flag.DurationVar(&groupDelay, "groupdelay", nntp.DefaultGroupCmdDelay, "delay before each GROUP reply")
+	flag.DurationVar(&errorDelay, "errordelay", nntp.DefaultErrorDelay, "delay before each error reply (412/420/423/430/481/482/500/501)")
+	flag.StringVar(&plaintextAuth, "plaintextauth", "accept", "AUTHINFO on connections without TLS: accept (not advertised), advertise or refuse (483)")
+	flag.BoolVar(&readAuth, "readauth", false, "require AUTHINFO before reader commands (GROUP, ARTICLE, XOVER, ...)")
+	flag.BoolVar(&enforceUserMaxConns, "enforce-user-maxconns", false, "limit authenticated connections per NNTP user to its maxconns value")
+	flag.IntVar(&maxArtSize, "maxartsize", 0, "maximum article size in bytes (0 = config default 32768)")
 	flag.Parse()
 	history.ENABLE_HISTORY = useHistory
+
+	plaintextPolicy, err := nntp.ParsePlaintextAuthPolicy(plaintextAuth)
+	if err != nil {
+		log.Fatalf("[NNTP]: -plaintextauth: %v", err)
+	}
+	if articleDelay < 0 || groupDelay < 0 || errorDelay < 0 {
+		log.Fatalf("[NNTP]: -articledelay, -groupdelay and -errordelay must not be negative")
+	}
+	if idleTimeout <= 0 {
+		log.Fatalf("[NNTP]: -idletimeout must be greater than 0")
+	}
+	if maxArtSize < 0 {
+		log.Fatalf("[NNTP]: -maxartsize must not be negative")
+	}
 
 	mainConfig := config.NewDefaultConfig()
 	mainConfig.Server.NNTP.Enabled = true
@@ -73,8 +105,10 @@ func main() {
 	if maxConnections > 500 { // Default is 500, but allow higher if specified
 		log.Printf("[NNTP]: WARNING! Setting max connections to %d: You may hit filedescriptor limits! rise ulimit -n to maxConnections * 2 !", maxConnections)
 	}
-	mainConfig.Server.Hostname = nntphostname
 	mainConfig.Server.NNTP.MaxConns = maxConnections
+	if maxArtSize > 0 {
+		mainConfig.Server.NNTP.MaxArtSize = maxArtSize
+	}
 	log.Printf("[NNTP]: Using NNTP configuration %#v", mainConfig.Server.NNTP)
 
 	// Initialize database (this would normally come from your main application)
@@ -93,6 +127,8 @@ func main() {
 	if err := processor.SetHostname(nntphostname, db); err != nil {
 		log.Fatalf("[NNTP]: Failed to set NNTP hostname: %v", err)
 	}
+	// the greeting uses the resolved hostname (flag or database fallback)
+	mainConfig.Server.Hostname = processor.LocalNNTPHostname
 
 	// Validate command-line flag
 	if useShortHashLen < 2 || useShortHashLen > 7 {
@@ -127,6 +163,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create NNTP server: %v", err)
 	}
+	nntpServer.IdleTimeout = idleTimeout
+	nntpServer.ArticleCmdDelay = articleDelay
+	nntpServer.GroupCmdDelay = groupDelay
+	nntpServer.ErrorDelay = errorDelay
+	nntpServer.PlaintextAuth = plaintextPolicy
+	nntpServer.ReadRequiresAuth = readAuth
+	nntpServer.EnforceUserMaxConns = enforceUserMaxConns
+	log.Printf("[NNTP]: idletimeout=%s articledelay=%s groupdelay=%s errordelay=%s plaintextauth=%s readauth=%v enforce-user-maxconns=%v maxartsize=%d",
+		idleTimeout, articleDelay, groupDelay, errorDelay, plaintextAuth, readAuth, enforceUserMaxConns, nntpServer.MaxArticleBytes())
 	// Set up the date parser adapter to use processor's ParseNNTPDate
 	database.GlobalDateParser = processor.ParseNNTPDate
 

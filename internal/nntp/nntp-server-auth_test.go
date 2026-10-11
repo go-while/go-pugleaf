@@ -3,8 +3,8 @@ package nntp
 // NNTP server authentication tests (plan nntp-audit-tests, slice test-nntp-auth).
 //
 // Covers AUTHINFO USER/PASS (RFC 4643 §2.3), the posting gates of POST, IHAVE
-// and TAKETHIS (RFC 3977 §3.2.1, §6.3; RFC 4644 §2.5), the AuthManager helpers
-// and the NNTP auth cache (SEC-6). Every assertion states the RFC-correct
+// and TAKETHIS (RFC 3977 §3.2.1, §6.3; RFC 4644 §2.5), the per-user connection
+// limit and the NNTP auth cache (SEC-6). Every assertion states the RFC-correct
 // behavior; where the server differs today the result of that check goes to
 // knownBug with the seed id (SEC-5, SEC-6, RFC-5) or a new T-nntp-auth-<n> id.
 //
@@ -156,7 +156,9 @@ func TestAuthArgErrors(t *testing.T) {
 	t.Run("unknown-subcommand", func(t *testing.T) {
 		c := hs.dial(t)
 		code, line := c.cmd(t, "AUTHINFO FOO x")
-		knownBug(t, "RFC-5", hExpectCode(code, line, 501))
+		if err := hExpectCode(code, line, 501); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -174,7 +176,13 @@ func TestAuthSecondAuthinfo(t *testing.T) {
 	if err2 := hExpectCode(code, line, 502); err2 != nil {
 		err = errors.Join(err, fmt.Errorf("AUTHINFO PASS after login: %w", err2))
 	}
-	knownBug(t, "SEC-5", err)
+	code, line = c.cmd(t, "AUTHINFO")
+	if err3 := hExpectCode(code, line, 502); err3 != nil {
+		err = errors.Join(err, fmt.Errorf("bare AUTHINFO after login: %w", err3))
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestAuthInactiveUser: an inactive account is refused with 481 even with the
@@ -209,7 +217,9 @@ func TestAuthPasswordWithSpace(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 	code, line := authLogin(t, c, user, pass)
-	knownBug(t, "T-nntp-auth-1", hExpectCode(code, line, 281))
+	if err := hExpectCode(code, line, 281); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestAuthFailureDelay: a 481 reply must be delayed by at least ErrorDelay, so
@@ -241,7 +251,9 @@ func TestAuthFailureDelay(t *testing.T) {
 	if minTook < delay {
 		err = fmt.Errorf("481 sent after %s, want at least ErrorDelay %s", minTook, delay)
 	}
-	knownBug(t, "SEC-5", err)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestAuthPostingGates: posting commands need authentication and permission.
@@ -330,68 +342,6 @@ func TestAuthPostingGates(t *testing.T) {
 		}
 		if _, line, err := c.readStatus(); err != nil {
 			t.Fatalf("POST result: %v (%q)", err, line)
-		}
-	})
-}
-
-// TestAuthManagerUnits covers the AuthManager helpers (unused by the server
-// today, FN-1/SEC-5, but they must give the right answers).
-func TestAuthManagerUnits(t *testing.T) {
-	db := hTestDB(t)
-	am := NewAuthManager(db)
-	posterName, _, _ := authNewUser(t, true, true, 10, "")
-	readerName, _, _ := authNewUser(t, false, true, 10, "")
-	poster, err := db.GetNNTPUserByUsername(posterName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reader, err := db.GetNNTPUserByUsername(readerName)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Run("CanPost", func(t *testing.T) {
-		if am.CanPost(nil) {
-			t.Error("CanPost(nil) = true, want false")
-		}
-		if !am.CanPost(poster) {
-			t.Error("CanPost(posting user) = false, want true")
-		}
-		if am.CanPost(reader) {
-			t.Error("CanPost(read-only user) = true, want false")
-		}
-	})
-
-	t.Run("CheckGroupAccess", func(t *testing.T) {
-		if am.CheckGroupAccess(nil, "t2.access.1") {
-			t.Error("CheckGroupAccess(nil) = true, want false")
-		}
-	})
-
-	t.Run("CheckConnectionLimit", func(t *testing.T) {
-		if am.CheckConnectionLimit(nil) {
-			t.Error("CheckConnectionLimit(nil) = true, want false")
-		}
-		name, _, id := authNewUser(t, true, true, 1, "")
-		u, err := db.GetNNTPUserByUsername(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !am.CheckConnectionLimit(u) {
-			t.Fatal("MaxConns=1, no sessions: CheckConnectionLimit = false, want true")
-		}
-		connID := fmt.Sprintf("t2conn-%d", hSeq.Add(1))
-		if err := db.CreateNNTPSession(id, connID, "127.0.0.1:1"); err != nil {
-			t.Fatalf("CreateNNTPSession: %v", err)
-		}
-		if am.CheckConnectionLimit(u) {
-			t.Error("MaxConns=1, 1 active session: CheckConnectionLimit = true, want false")
-		}
-		if err := db.CloseNNTPSession(connID); err != nil {
-			t.Fatalf("CloseNNTPSession: %v", err)
-		}
-		if !am.CheckConnectionLimit(u) {
-			t.Error("MaxConns=1, session closed: CheckConnectionLimit = false, want true")
 		}
 	})
 }
@@ -491,4 +441,51 @@ func TestAuthPlaintextNotOffered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestAuthUserMaxConns (SEC-5, decision 12): with EnforceUserMaxConns a user
+// with maxconns 1 gets one authenticated connection; a second login is refused
+// with 481 until the first connection ends. Without the option (default) both
+// logins succeed.
+func TestAuthUserMaxConns(t *testing.T) {
+	t.Run("enforced", func(t *testing.T) {
+		user, pass, _ := authNewUser(t, true, true, 1, "")
+		hs := sessOwnServer(t, nil, nil, func(s *NNTPServer) { s.EnforceUserMaxConns = true })
+		c1 := hs.dial(t)
+		authMustLogin(t, c1, user, pass)
+		c2 := hs.dial(t)
+		code, line := authLogin(t, c2, user, pass)
+		if err := hExpectCode(code, line, 481); err != nil {
+			t.Fatalf("second connection: %v", err)
+		}
+		code, line = c1.cmd(t, "QUIT")
+		if err := hExpectCode(code, line, 205); err != nil {
+			t.Fatalf("QUIT: %v", err)
+		}
+		// The slot is released when the first handler ends (asynchronously).
+		end := time.Now().Add(3 * time.Second)
+		for {
+			code, line = authLogin(t, c2, user, pass)
+			if code == 281 {
+				break
+			}
+			if time.Now().After(end) {
+				t.Fatalf("no login within 3s after the first connection quit: %q", line)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	t.Run("default-not-enforced", func(t *testing.T) {
+		user, pass, _ := authNewUser(t, true, true, 1, "")
+		hs := newTestServer(t, hServerOpts{})
+		authMustLogin(t, hs.dial(t), user, pass)
+		authMustLogin(t, hs.dial(t), user, pass)
+	})
+	t.Run("unlimited", func(t *testing.T) {
+		user, pass, _ := authNewUser(t, true, true, 0, "")
+		hs := sessOwnServer(t, nil, nil, func(s *NNTPServer) { s.EnforceUserMaxConns = true })
+		for i := 0; i < 3; i++ {
+			authMustLogin(t, hs.dial(t), user, pass)
+		}
+	})
 }

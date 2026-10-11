@@ -1,179 +1,93 @@
-# NNTP Server Implementation
+# internal/nntp
 
-## 🎯 Phase 6: Article Retrieval - **60% COMPLETE!**
+This package holds the NNTP **server** (reader side plus IHAVE/TAKETHIS/POST intake, used by
+`cmd/nntp-server`) and the NNTP **client** side (backend pool, fetching, transfer, peering, used by
+`cmd/nntp-fetcher`, `cmd/nntp-transfer` and others). This README describes the server.
 
-The NNTP server foundation and core article retrieval commands have been successfully implemented with a clean, modular architecture spread across multiple files.
+## Server file map
 
-## 📁 File Structure
+| File | Contents |
+|------|----------|
+| `nntp-server.go` | `NNTPServer`, `NewNNTPServer`, `Start`/`Serve`/`Stop`, accept loop, connection limit, per-user slots, `PlaintextAuthPolicy` |
+| `nntp-server-cliconns.go` | `ClientConnection`, the command loop (`Handle`), greeting, dispatch (`handleCommand`), `getServerCapabilities` |
+| `nntp-server-commands.go` | `commandMaxArgs`, `readerCommands`, the gates `argCountOK`, `readGateOK`, `authinfoAdvertised`, `postingAllowed` |
+| `nntp-server-lineio.go` | bounded command-line reader `readCommandLine`, bounded article reader `readArticleBlock`, `MaxArticleBytes` |
+| `nntp-server-dataio.go` | `dataBlockWriter` (one buffered writer per connection, dot-stuffing, flush every 256 lines), `sendDataBlock` |
+| `nntp-server-statistics.go` | `ServerStats` (connections, per-command counts, auth successes/failures) |
+| `nntp-cache-local.go` | `Local430`, the negative cache of message-ids that answered 430 |
+| `nntp-auth-manager.go` | `AuthManager.AuthenticateUser` (bcrypt check through `database.AuthenticateNNTPUser`) |
+| `nntp-cmd-basic.go` | CAPABILITIES, MODE READER, HELP, QUIT |
+| `nntp-cmd-auth.go` | AUTHINFO USER/PASS |
+| `nntp-cmd-group.go` | GROUP, LISTGROUP |
+| `nntp-cmd-list.go` | LIST [ACTIVE \| NEWSGROUPS] |
+| `nntp-article-common.go` | ARTICLE, HEAD, BODY, STAT (shared lookup by number or message-id) |
+| `nntp-cmd-xover.go`, `nntp-cmd-xhdr.go` | XOVER, XHDR |
+| `nntp-cmd-posting.go` | POST, IHAVE, TAKETHIS |
+| `nntp-cmd-helpers.go` | `rateLimitOnError` and header helpers |
 
-```
-internal/nntp/
-├── nntp-auth-manager.go        # Authentication manager logic
-├── nntp-backend-pool.go        # Backend connection pool
-├── nntp-client-commands.go     # NNTP client command implementations
-├── nntp-client.go              # NNTP client core
-├── nntp-cmd-article.go         # ARTICLE command handler
-├── nntp-cmd-auth.go            # AUTHINFO command handler
-├── nntp-cmd-basic.go           # Basic NNTP commands (HELP, QUIT, etc.)
-├── nntp-cmd-body.go            # BODY command handler
-├── nntp-cmd-group.go           # GROUP command handler
-├── nntp-cmd-head.go            # HEAD command handler
-├── nntp-cmd-helpers.go         # Shared command helpers/utilities
-├── nntp-cmd-list.go            # LIST and LISTGROUP command handlers
-├── nntp-cmd-reader.go          # MODE READER and reader mode logic
-├── nntp-cmd-stat.go            # STAT command handler
-├── nntp-cmd-xhdr.go            # XHDR command handler
-├── nntp-cmd-xover.go           # XOVER command handler
-├── nntp-server-cliconns.go     # Client connection management
-├── nntp-server-statistics.go   # Server statistics and monitoring
-└── nntp-server.go              # Main server struct and startup logic
+Commands outside this list (DATE, NEXT, LAST, NEWGROUPS, NEWNEWS, OVER, HDR, CHECK, STARTTLS)
+answer `500`, MODE STREAM answers `501`. Tests: `nntp-server-*_test.go` (harness in `nntp-server-harness_test.go`),
+end-to-end tests in `cmd/nntp-server/`, and `scripts/test-nntp-server.sh` against a built binary.
 
-examples/nntp-server/
-└── main.go                     # Example server implementation
-```
+## Server options
 
-## ✅ Implemented Features
+Fields on `NNTPServer` (set them after `NewNNTPServer` and before `Start`/`Serve`) and the
+matching `cmd/nntp-server` flags:
 
-### **Core Server Infrastructure**
-- ✅ **NNTPServer struct** with configuration integration
-- ✅ **TCP listener** with TLS/SSL support
-- ✅ **Client connection management** with proper lifecycle handling
-- ✅ **Graceful shutdown** with timeout handling
-- ✅ **Connection limits** and resource management
+| Field / config | Flag | Default | Meaning |
+|----------------|------|---------|---------|
+| `Config.NNTP.Port` | `-nntptcpport` | 0 | plain TCP port |
+| `Config.NNTP.TLSPort`, `TLSCert`, `TLSKey` | `-nntptlsport`, `-nntpcertfile`, `-nntpkeyfile` | 0 | implicit TLS port (TLS 1.2 minimum) |
+| `Config.NNTP.MaxConns` | `-maxconnections` | 500 | concurrent client connections, all clients together |
+| `Config.NNTP.MaxArtSize` | `-maxartsize` | 32768 (0 = config default) | article byte limit (`MaxArticleBytes`; 1 MiB when <= 0) |
+| `Config.Hostname` | `-nntphostname` | database fallback | hostname in the greeting |
+| `IdleTimeout` | `-idletimeout` | 3m | idle timeout per command and write timeout per flush |
+| `ArticleCmdDelay` | `-articledelay` | 25ms | sleep before ARTICLE/HEAD/BODY/STAT |
+| `GroupCmdDelay` | `-groupdelay` | 25ms | sleep before GROUP |
+| `ErrorDelay` | `-errordelay` | 1s | sleep before error replies (see below) |
+| `PlaintextAuth` | `-plaintextauth` | `accept` | AUTHINFO without TLS: `accept`, `advertise` or `refuse` |
+| `ReadRequiresAuth` | `-readauth` | false | reader commands need AUTHINFO first |
+| `EnforceUserMaxConns` | `-enforce-user-maxconns` | false | per-user `maxconns` limit |
+| `ShutdownTimeout` | - | 10s | how long `Stop` waits for client handlers |
 
-### **Essential NNTP Commands**
-- ✅ **CAPABILITIES** - Server capability announcement
-- ✅ **MODE READER** - Reader mode switching
-- ✅ **AUTHINFO USER/PASS** - Basic authentication framework
-- ✅ **QUIT** - Clean connection termination
-- ✅ **HELP** - Command help system
+`Start` fails when no port is configured, or when a TLS port is set without a usable certificate and
+key; nothing is left listening then. `NewNNTPServer` starts no goroutine; `Start`/`Serve` start the
+accept loops and the local430 cleanup, `Stop` ends all of them (the caller's WaitGroup covers them).
 
-### **Group Management Commands**
-- ✅ **LIST [ACTIVE|NEWSGROUPS]** - List newsgroups with database integration
-- ✅ **GROUP** - Newsgroup selection with database lookup
-- ✅ **LISTGROUP** - Article listing with database integration
+## Behaviour
 
-### **Article Retrieval Commands**
-- ✅ **STAT** - Article existence checking with message-ID/number support
-- ✅ **HEAD** - Article headers retrieval with full parsing
-- ✅ **BODY** - Article body retrieval with proper escaping
-- ✅ **ARTICLE** - Complete article retrieval (headers + body)
-- ✅ **XOVER** - Article overview with range support
-- ✅ **XHDR** - Header field retrieval with range support
-
-### **Database Integration**
-- ✅ **GetOverviewsRange()** - Range-based overview queries for XOVER
-- ✅ **GetOverviewByMessageID()** - Message-ID based overview lookup
-- ✅ **GetHeaderFieldRange()** - Header field extraction for XHDR
-- ✅ **Article retrieval** by number and message-ID
-
-### **Support Systems**
-- ✅ **Authentication Manager** with database integration
-- ✅ **Server Statistics** with comprehensive metrics
-- ✅ **Configuration Extension** for NNTP settings
-- ✅ **Error Handling** and logging
-
-## 🔗 Database Integration
-
-The NNTP server seamlessly integrates with the existing database layer:
-
-- **Groups**: Uses `MainDBGetNewsgroups()` and `MainDBGetNewsgroup()`
-- **Authentication**: Leverages `GetUserByUsername()` and `GetUserPermissions()`
-- **Articles**: Fully integrated with per-group databases
-  - **GetArticleByNum()** - Retrieve articles by number
-  - **GetArticleByMessageID()** - Retrieve articles by message-ID
-  - **GetOverviewsRange()** - Range-based overview queries
-  - **GetOverviewByMessageID()** - Overview lookup by message-ID
-  - **GetHeaderFieldRange()** - Header field extraction
-
-## 🧪 Testing
-
-The server can be tested using the example:
-
-```bash
-# Build and run the example
-cd examples/nntp-server
-go build && ./nntp-server
-
-# Test with telnet
-telnet localhost 1119
-
-# Try these commands:
-CAPABILITIES
-MODE READER
-LIST
-LIST NEWSGROUPS
-GROUP comp.programming
-LISTGROUP
-STAT 1
-HEAD 1
-BODY 1
-ARTICLE 1
-XOVER 1-10
-XHDR subject 1-5
-HELP
-QUIT
-```
-
-## ⚡ Next Steps: Remaining Phase 6 Tasks
-
-### **Priority 1: Authentication Enhancement**
-- [ ] Implement proper AUTHINFO USER/PASS sequence
-- [ ] Add real password validation with bcrypt
-- [ ] Implement group access control and permissions
-
-### **Priority 2: Advanced Commands**
-- [ ] `HDR` and `OVER` - RFC 3977 standard commands
-- [ ] `POST` - Article posting (optional)
-- [ ] `DATE` - Server date/time
-- [ ] `NEWGROUPS` - New groups since date
-- [ ] `NEWNEWS` - New articles since date
-
-### **Priority 3: Performance & Security**
-- [ ] Article caching for frequently accessed content
-- [ ] Rate limiting per connection/IP
-- [ ] Connection timeout management
-- [ ] Comprehensive logging of NNTP operations
-
-## 🎉 Current Status
-
-**MAJOR ACHIEVEMENT**: All core article retrieval commands are now functional:
-- **STAT, HEAD, BODY, ARTICLE** - Full article access
-- **XOVER, XHDR** - Efficient overview and header queries
-- **Range support** - Multiple article operations
-- **Message-ID support** - Both number and message-ID addressing
-- [ ] Implement STAT command with database lookups
-- [ ] Add HEAD command for article headers
-- [ ] Add BODY command for article content
-- [ ] Add ARTICLE command for complete articles
-- [ ] Support both message-ID and article number addressing
-
-### **Priority 3: Overview Commands**
-- [ ] Implement XOVER with NOV format generation
-- [ ] Add XHDR for header-specific queries
-- [ ] Add article range parsing (e.g., "100-200", "150-")
-
-## 🏗️ Architecture Highlights
-
-### **Modular Design**
-- Clean separation of concerns across multiple files
-- Easy to extend with new commands
-- Proper error handling and logging
-
-### **Performance Considerations**
-- Connection pooling and resource limits
-- Graceful shutdown with timeout
-- Statistics tracking for monitoring
-
-### **Integration Ready**
-- Uses existing database structures (`models.Article`, `models.Newsgroup`)
-- Leverages current authentication system
-- Extends existing configuration seamlessly
-
-## 📊 Current Status
-
-- **Phase 6a**: ✅ **COMPLETE** (Foundation)
-- **Phase 6b**: ⚡ **READY TO BEGIN** (Core Commands)
-- **Estimated Time**: 2-3 days for full Phase 6b implementation
-
-The NNTP server foundation provides a solid, production-ready base for implementing the complete RFC 3977 protocol!
+- **Reads without auth.** The server is a public reader by default. With `ReadRequiresAuth`, GROUP,
+  LISTGROUP, LIST, STAT, HEAD, BODY, ARTICLE, XOVER, XHDR (and the future NEXT, LAST, OVER, HDR,
+  NEWGROUPS, NEWNEWS) answer `480` until a successful AUTHINFO.
+- **Plaintext AUTHINFO** (RFC 4643). `accept`: accepted on plain TCP but not advertised in
+  CAPABILITIES; `advertise`: accepted and advertised; `refuse`: `483 Encryption required`. TLS
+  connections always advertise `AUTHINFO USER` before login. After `281` AUTHINFO is no longer
+  advertised and any further AUTHINFO answers `502`. The password is the raw rest of the line, so
+  passwords with spaces work. Replies never echo the username or other client input.
+- **Greeting and MODE READER.** `200` when this client may post (server has a processor and the
+  user, if logged in, has posting rights), else `201`. Other MODE variants answer `501`.
+- **Command lines** (RFC 3977 §3.1). At most 512 octets including CRLF: a longer line that ends
+  within 4096 bytes gets `501 Command line too long` and the session continues; 4096 bytes without
+  a line end get `400 Command line too long` and the connection is closed. Surplus arguments get
+  `501` (`commandMaxArgs`); QUIT ignores them, AUTHINFO and TAKETHIS are not checked there.
+- **Article reader.** `readArticleBlock(maxBytes)` counts every byte, keeps the 1024-head-line and
+  16384-line caps, drains an oversized article up to its terminator (`ErrArticleTooLarge`, the
+  connection stays usable) and gives up past max(4 x limit, 1 MiB), at most 64 MiB
+  (`ErrArticleDrainLimit`, the caller closes). The read deadline is refreshed per article line.
+- **Error delay.** `ErrorDelay` is slept before every 412, 420, 423, 430, 481, 482, 500 and 501
+  reply, never before 2xx/3xx, 205, 400, 403, 411, 440, 480, 483 or 502.
+- **Connection limit.** Counted at accept: over `MaxConns` the client gets
+  `400 Too many connections, try again later` and is closed. With `EnforceUserMaxConns` a user with
+  `maxconns > 0` gets at most that many authenticated connections on this server (`maxconns <= 0`:
+  unlimited); over the limit the login answers `481 Too many connections for this user`. The count
+  is kept in memory per server process.
+- **local430.** A negative cache of message-ids that answered 430, so repeated lookups of a missing
+  article by many readers or peers do not hit the processor each time: TTL 60 s (enforced on every
+  check), at most 65536 entries, message-ids over 250 octets are never cached. A just-arrived
+  article can therefore still answer 430 for up to 60 s unless intake calls `local430.Remove`
+  (articles stored by another process, e.g. the fetcher, are not removed).
+- **Statistics.** Only known command words are counted by name; every other word is counted
+  under `UNKNOWN`, so junk input cannot grow the map.
+- **Shutdown and faults.** `Stop` closes the listeners and every open client connection and waits
+  up to `ShutdownTimeout`. A panic in one connection is logged with its stack and ends only that
+  connection. QUIT, client EOF and closes by `Stop` are not logged as connection errors.

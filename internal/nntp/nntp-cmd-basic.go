@@ -1,71 +1,70 @@
 package nntp
 
 import (
-	"fmt"
 	"strings"
 )
 
 // handleCapabilities responds with server capabilities
 func (c *ClientConnection) handleCapabilities() error {
-	capabilities := c.getServerCapabilities()
-	return c.sendMultilineResponse(101, "Capability list:", capabilities)
+	return c.sendDataBlock(101, "Capability list:", c.getServerCapabilities())
 }
 
-// handleMode handles MODE command (typically MODE READER)
+// handleMode handles MODE READER (RFC 3977 §5.3): 200 when this client may
+// post, else 201. Other variants are a syntax error (501).
 func (c *ClientConnection) handleMode(args []string) error {
 	if len(args) == 0 {
-		return c.sendResponse(501, "MODE command requires an argument")
+		c.rateLimitOnError()
+		return c.sendResponse(501, "MODE requires an argument")
 	}
 
-	mode := strings.ToUpper(args[0])
-	switch mode {
+	switch strings.ToUpper(args[0]) {
 	case "READER":
-		return c.sendResponse(200, "Hello, you can post")
+		if c.postingAllowed() {
+			return c.sendResponse(200, "Reader mode, posting allowed")
+		}
+		return c.sendResponse(201, "Reader mode, posting prohibited")
 	default:
-		return c.sendResponse(500, fmt.Sprintf("Unknown MODE: %s", mode))
+		c.rateLimitOnError()
+		return c.sendResponse(501, "Unknown MODE variant")
 	}
 }
 
-// handleHelp handles HELP command
+// handleHelp handles HELP (RFC 3977 §7.2): the commands handleCommand dispatches.
 func (c *ClientConnection) handleHelp() error {
 	helpLines := []string{
-		"Commands supported:",
-		"  CAPABILITIES - List server capabilities",
-		"  MODE READER - Switch to reader mode",
-		"  AUTHINFO USER|PASS - Authenticate",
-		"  LIST [ACTIVE|NEWSGROUPS] - List groups",
-		"  GROUP <group> - Select newsgroup",
-		"  LISTGROUP [<group>] - List articles in group",
-		"  STAT [<msgid>|<num>] - Article status",
-		"  HEAD [<msgid>|<num>] - Article headers",
-		"  BODY [<msgid>|<num>] - Article body",
-		"  ARTICLE [<msgid>|<num>] - Full article",
-		"  XOVER [<range>] - Article overview",
-		"  XHDR <header> [<range>] - Header information",
-		"  QUIT - Close connection",
-		"",
-		"For more information, see RFC 3977.",
+		"CAPABILITIES",
+		"MODE READER",
+		"AUTHINFO USER <name>",
+		"AUTHINFO PASS <password>",
+		"LIST [ACTIVE|NEWSGROUPS]",
+		"GROUP <group>",
+		"LISTGROUP [<group> [<range>]]",
+		"STAT [<message-id>|<number>]",
+		"HEAD [<message-id>|<number>]",
+		"BODY [<message-id>|<number>]",
+		"ARTICLE [<message-id>|<number>]",
+		"XOVER [<range>]",
+		"XHDR <header> [<range>|<message-id>]",
+		"POST",
+		"IHAVE <message-id>",
+		"TAKETHIS <message-id>",
+		"HELP",
+		"QUIT",
 	}
-	return c.sendMultilineResponse(100, "Help text follows", helpLines)
+	return c.sendDataBlock(100, "Help text follows", helpLines)
 }
 
-// handleQuit handles QUIT command
+// handleQuit handles QUIT (RFC 3977 §5.4): 205, then the connection loop ends
+// (errQuit). Surplus arguments are ignored on purpose.
 func (c *ClientConnection) handleQuit(args []string) error {
-	c.sendResponse(205, "Goodbye")
-	c.Close()
-	return nil
+	_ = c.sendResponse(205, "Goodbye") // the session ends either way
+	return errQuit
 }
 
+// Close closes the network connection. c.conn stays set, so pending reads and
+// writes fail with net.ErrClosed instead of dereferencing nil.
 func (c *ClientConnection) Close() {
-	// Close the connection
 	if c.conn != nil {
-		c.conn.Close()
-		c.conn = nil // Close() *ClientConnection
+		_ = c.conn.Close()
 	}
-	// Remove from server connections
-	/*
-		if c.server != nil {
-			c.server.RemoveConnection(c)
-		}
-	*/
 }
