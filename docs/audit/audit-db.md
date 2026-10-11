@@ -2,8 +2,8 @@
 
 Delta audit of `internal/database` after the three merged plans WSH, LO and FU. Their findings are
 cited as `WSH:<id>`, `LO:<id>` and `FU:<id>` and are not reported again. Server-side NNTP findings are
-in `audit-nntp-sec.md` and cited by their ids (`SEC-2` server side, `A-nntp-sec-3`, `A-nntp-sec-4`,
-`A-nntp-sec-6`). The report follows `docs/audit/README.md` (D1, K6). `internal/database` is
+in `audit-nntp-sec.md` and cited by their ids (`SEC-2` server side, `A-nntp-sec-3`, `A-nntp-sec-4`).
+The report follows `docs/audit/README.md` (D1, K6). `internal/database` is
 byte-identical between 84c2081 and 4c08048 (`git diff --stat 84c2081..HEAD -- internal/database` is
 empty), so every `path:line` anchor below holds at both commits. Paths are under `internal/database/`
 unless a path is given.
@@ -55,7 +55,7 @@ Repros:
 ## Summary
 
 Counts by severity: **high 5, medium 10, low 6** (21 findings: 7 seeds, 14 new).
-By category: bug 10, robustness 9, security 2.
+By category: bug 9, robustness 9, security 2, dead-code 1.
 
 | severity | findings |
 |----|----|
@@ -105,8 +105,8 @@ writer. In practice this is non-bulk intake: IHAVE/TAKETHIS/POST via
 - `MainDBGetAllNewsgroups` fails for the whole table. `cmd/nntp-fetcher/main.go:194-198` returns,
   `cmd/history-rebuild/main.go:229-233` returns with an error, `cmd/expire-news/main.go:355-358`
   (`$all`) errors, and so do `recover-db`, `nntp-transfer`, `nntp-analyze`, `fix-references`,
-  `fix-thread-activity`, `cmd/web/main.go:416` (startup listing), `preloader.go:268` and the unused
-  `GetTotalThreadsCount`.
+  `fix-thread-activity`, `preloader.go:268` and the unused `GetTotalThreadsCount`.
+  `cmd/web/main.go:416` (startup listing) only logs a warning (`:417-418`) and continues.
 - `MainDBGetNewsgroup(<that group>)` fails. NNTP `GROUP` answers `411 No such newsgroup`
   (`nntp/nntp-cmd-group.go:20-22`), but `LIST ACTIVE` (`GetActiveNewsgroups`, which does not select
   `hierarchy`) lists it. `DeleteNewsgroup` falls back to the name, and
@@ -122,6 +122,9 @@ button calls (`web/web_hierarchiesPage.go:117`).
 select `hierarchy` and scan it into `&g.Hierarchy` (`queries.go:202`, `:224`, `:248`). Migration 0007
 adds the column without a default. `InsertNewsgroup` fills it (`queries.go:124-126`), but the batch
 upsert (`db_batch.go:553-562`) and `UpsertNewsgroupDescription` (`queries.go:1018-1020`, unused) do not.
+Prior evidence that never became a finding: the WSH test harness already works around this
+(`.claude/plans/done/web-sqlite-hardening.md:820-821`: `w0NewGroup` sets `hierarchy` "because
+`MainDBGetNewsgroup` scans it into a string and fails on NULL").
 `TestZZAuditDBAutoCreatedGroup` (one batch of 3 articles for an unknown name, then one more):
 ```
 ZZ autocreate batch1: row={hierNull:true msgCount:3 lastArt:3 active:true ...} historyAdds=0
@@ -188,7 +191,9 @@ then returns a new pointer, `ArticleNums[newPtr]` is 0, and `removeElement` dele
 but removes the list element. The real map entry stays, pointing at an element no longer in the list.
 - The LRU bound (`maxSize`, default 1000) limits only the list. The map keeps every article ever
   read, with `BodyText` and `HeadersJSON`, for the life of the process. A crawler that walks a spool
-  through ARTICLE/HEAD or the web article pages loads all of it into RAM.
+  through ARTICLE/HEAD or the web article pages loads all of it into RAM. Reading needs no auth on
+  `nntp-server` (SEC-5), so an unauthenticated ARTICLE/HEAD crawl reaches this; the category could
+  be security, the severity stays high.
 - `Get` still finds the orphaned entry and returns it (`MoveToFront` of a detached element is a
   no-op). A later `Put` on that key updates the detached entry, which is never evicted again.
 - Together with INT-5, a reused article number is answered from the stale entry for good.
@@ -295,6 +300,11 @@ default `active BOOLEAN NOT NULL DEFAULT 1` (`migrations/0001_main_schema.sql:36
 | `preloader/preloader.go:278`, `cmd/history-rebuild/main.go:324`, `cmd/recover-db/main.go:718,1036`, `cmd/fix-references/main.go:132`, `cmd/nntp-transfer/main.go:1227` | `MainDBGetAllNewsgroups` rows | row exists; a row without a file gets an empty DB |
 | `cmd/expire-news/main.go:407,687,769`, `cmd/recover-db/main.go:363,1232`, `cmd/fix-thread-activity/main.go:63`, `cmd/history-rebuild/main.go:611`, `cmd/nntp-transfer/main.go:482`, `cmd/web/main_functions.go:62,179,220` | `-group` flags, debug lists, main-DB rows | operator input: a typo creates an empty DB (low) |
 | `database.go:410,426` (`IncrementArticleHide`, `UnHideArticle`), `db_spam_flags.go:23` | web admin/spam handlers | web side (covered by WSH:C4) |
+| `database.go:378,452` (`IncrementArticleSpam`, `DecrementArticleSpam`) | web spam handlers; `GetNewsgroupID` runs first | web side (covered by WSH:C4) |
+| `queries.go:3369` (`GetSpamArticles`) | `spam` JOIN `newsgroups` rows, web admin | row exists |
+| `db_batch.go:654` (`getBatchGroupDB`, batch writer) | the name the intake enqueued | inherits the intake's verdict (first row) |
+| `processor/proc_ImportOV.go:15` (`ImportOverview`) | caller argument | dead (no caller) |
+| `db_groupdbs.go:88,96` (`GetAnyNewsgroupDBfromIDs`, `GetNewsgroupsDBbyID`) | `NewsgroupDBsIDcache` | dead (no caller) |
 | `queries.go:1539` (`GetTotalThreadsCount`) | every newsgroups row | unused; would open or create one DB per row |
 | `db_rescan.go:16,101,400`, `queries.go:3064,3488,3548,3649` | callers above | inherit the caller's verdict |
 
@@ -746,7 +756,6 @@ No SQL injection was found. Every value that reaches SQL text is a placeholder c
 | `HierarchyCache.UpdateNewsgroupStats` |  |  |  |  | x | A-db-7 |
 | `getMigrationFiles` ↔ `getEmbeddedMigrationFiles` |  | x |  |  | x | the filesystem fallback (`./migrations` relative to the cwd) is unreachable while the embed is set (`SetEmbeddedMigrations` is only called with the package's own FS, `cmd/web/main.go:94`); with a zero FS the two recurse until the stack overflows; `sort.Slice` is unstable for equal versions (`0002_main_*`, `0007_main_*`) |
 | `DeleteAIModel` (`db_aimodels.go:180`) |  |  |  | x |  | comment promises "if it's not the last active one", but there is no check |
-| `CreateAIModel` / `UpdateAIModel` with `isDefault=true` |  |  |  |  | x | other defaults are not cleared (unlike `SetDefaultAIModel`) |
 | `GetAllCronJobs` (`db_cron_jobs.go:15`) |  |  |  |  | x | no `rows.Err()` |
 | `ConfigCache.getConfigValueDirect` |  |  |  | x |  | compares `err.Error()` with the `ErrNoRows` text instead of `errors.Is` |
 
