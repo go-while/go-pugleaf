@@ -12,6 +12,7 @@ package nntp
 // t2user<seq> (at least 10 characters), message-ids <t2-<test>-<seq>@test.invalid>.
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -84,7 +85,7 @@ func authReplyText(line string) string {
 // TestAuthUserPass: RFC 4643 §2.3.2, AUTHINFO USER with a known username gives
 // 381 (password required) and AUTHINFO PASS with the right password gives 281.
 func TestAuthUserPass(t *testing.T) {
-	user, pass := hUser(t, true, true)
+	user, pass, _ := authNewUser(t, true, true, 10, "")
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 	code, line := c.cmd(t, "AUTHINFO USER %s", user)
@@ -101,7 +102,7 @@ func TestAuthUserPass(t *testing.T) {
 // for an unknown user must be the same as for a wrong password, so the reply
 // text does not reveal which usernames exist (RFC 4643 §5, Security Considerations).
 func TestAuthFailures(t *testing.T) {
-	user, _ := hUser(t, true, true)
+	user, _, _ := authNewUser(t, true, true, 10, "")
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 
@@ -163,18 +164,23 @@ func TestAuthArgErrors(t *testing.T) {
 // authentication any further AUTHINFO command gives 502. SEC-5: the server
 // accepts a new AUTHINFO USER (381) and lets the session re-authenticate.
 func TestAuthSecondAuthinfo(t *testing.T) {
-	user, pass := hUser(t, true, true)
+	user, pass, _ := authNewUser(t, true, true, 10, "")
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 	authMustLogin(t, c, user, pass)
 	code, line := c.cmd(t, "AUTHINFO USER %s", user)
-	knownBug(t, "SEC-5", hExpectCode(code, line, 502))
+	err := hExpectCode(code, line, 502)
+	code, line = c.cmd(t, "AUTHINFO PASS %s", pass)
+	if err2 := hExpectCode(code, line, 502); err2 != nil {
+		err = errors.Join(err, fmt.Errorf("AUTHINFO PASS after login: %w", err2))
+	}
+	knownBug(t, "SEC-5", err)
 }
 
 // TestAuthInactiveUser: an inactive account is refused with 481 even with the
 // right password (RFC 4643 §2.3.2: 481 for rejected credentials).
 func TestAuthInactiveUser(t *testing.T) {
-	user, pass := hUser(t, true, false)
+	user, pass, _ := authNewUser(t, true, false, 10, "")
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 	code, line := authLogin(t, c, user, pass)
@@ -244,8 +250,8 @@ func TestAuthFailureDelay(t *testing.T) {
 func TestAuthPostingGates(t *testing.T) {
 	proc := &hFakeProcessor{checkFn: func(string) int { return history.CaseDupes }}
 	hs := newTestServer(t, hServerOpts{Proc: proc})
-	reader, readerPass := hUser(t, false, true)
-	poster, posterPass := hUser(t, true, true)
+	reader, readerPass, _ := authNewUser(t, false, true, 10, "")
+	poster, posterPass, _ := authNewUser(t, true, true, 10, "")
 
 	takethis := func(t *testing.T, c *hClient, test string) (int, string) {
 		t.Helper()
