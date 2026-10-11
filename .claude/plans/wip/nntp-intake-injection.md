@@ -582,3 +582,12 @@ Noted: `TestAuthFailureDelay` (hardening's auth test) timed out once under heavy
 | intake-processor (S3) | worktree-agent-aabb41b2d4b1a88fe (2b13adf) | merge; 2 minors fixed inline by the orchestrator (157d097: rslight comment, `TestE2EGroupDBOpenFailure` deactivates its unopenable row in cleanup); deviations accepted (`defaultCaptureLimiterOnce`, `checkIntakeDates(now)`, `iprHead`, HeadersJSON/BodyText fallbacks, dead `CheckMessageIdFormat`/`containsAtAndDot` deleted). The commit carries an Opus 5.5 trailer (the implementer's own model). Reviewer note for S4: `buildIncomingArticle` still calls `GetNewsgroupPointer` for every header name before the processor runs (TasksMap entries for unknown names until they expire; no row/file) | d62e4e3 |
 
 Checks on 157d097: gofmt baseline 2 files, vet/build OK, 9 package sets green under `-race`, known bugs = **BUG-7 BUG-8 INT-1 RFC-1 RFC-5 SEC-3 T-nntp-article-1** (7; INT-2 and SEC-2 gone), build scripts OK.
+
+### Wave 3 (2026-10-11; 1 implementer, reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| intake-nntp (S4) | worktree-agent-a203ab6eea1cb9826 (8808914, 37d7f82) | merge; 3 minors fixed (`e2eOversizeChild` no longer waits 20 s for a log line the fixed server never writes, `TestE2ESizeLimits` 27 s → 8.5 s; the child now requires exactly 441 and a working `MODE READER`; `.POSTED` forged-trace check case-insensitive); duplicate "no path identity" log dropped. Deviations accepted: `NewsgroupsPtr` pre-fill kept for syntactically valid names (`processor.ProcessIncomingArticle` reads `*NewsgroupsPtr[0]`; S3 resets the list; TasksMap entries for unknown names expire after 120 s, no row/file), POST build error → `441 (invalid article)`, old Message-ID-mismatch texts kept, `rateLimitOnError` only before the new rejections. Commits carry an Opus 5.5 trailer | 84a3b51 |
+
+Orchestrator follow-up (c-commit after 84a3b51): two stale comments refreshed in `nntp-server-article_test.go` (BUG-8 now fixed) and `nntp-history-parse_test.go` (`readArticleBlock`).
+Checks on the final tree: gofmt baseline 2 files, vet (+`-tags e2e`) and build OK, 9 package sets green under `-race`, known bugs = **RFC-1 T-nntp-article-1** (2), build scripts OK,
+`PORT=21129 DATA=./data-test-nntp-intake-injection scripts/test-nntp-server.sh` → `SUMMARY pass=30 fail=0 info=1` (N01–N11, N20–N28, N30, N40–N49 all PASS); server.log: 0 panic / DATA RACE / closed-socket writes, 1 `[INTAKE] … dropped` line (N40).
