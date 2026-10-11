@@ -57,6 +57,7 @@ audit's "Not covered" candidates (audit-nntp-client.md `## Not covered`), taken 
 | A-nntp-client-3 (PLAUSIBLE) | `nntp/nntp-client-commands.go:43,88,142,198,246,293,374,450,452,515,517,654,656,736,738,1066,1126,1213,1238,1337,1372`, `nntp/nntp-client.go:245,263` | Every command is `TextConn.Cmd(format, remoteData)`; message-ids and group names from remote XOVER/XHDR (bare CR survives `ReadLine`, spaces split arguments) reach the wire unvalidated. | cli-hygiene |
 | A-nntp-client-6 | `nntp/nntp-transfer.go:27,90,209,241,288`, `nntp/nntp-transfer-demuxer.go:33-35`, `cmd/nntp-transfer/main.go:2185-2186` | Five package-level `make(chan *T, 1024*1024)` pools (~40 MiB in every binary importing `internal/nntp`), ~16.5 MiB per demuxer and 16 MiB per CHTT worker. | cli-transfer |
 | A-intake-6 (sender half) | `common/headers.go:165-537`, `nntp/nntp-client-commands.go:1114` | TAKETHIS sends `ReconstructHeaders(...)`: reorders, drops, renames headers, replaces Date, adds `.TX` and `X-pugleaf-debug`. RFC 5537 §3.6: relaying agents MUST NOT alter, delete or rearrange any part of an article except Path and Xref. The intake half is `nntp-intake-injection`. | cli-commands |
+| A-ops-3 (sub-items d, f only; handed over by `audit-delta-fixes`) | `cmd/history-rebuild/main.go:161`, `cmd/nntp-transfer/main.go:347` | `signal.Notify(sigChan, os.Interrupt)` only: SIGTERM (systemd stop, `kill`) ends both tools without their graceful shutdown (history-rebuild's flush, nntp-transfer's pool/DB shutdown). The other A-ops-3 sub-items stay in `audit-delta-fixes`. | cli-transfer |
 | A-tools-3 (client guard only) | `nntp/nntp-client.go:167`, `nntp/nntp-backend-pool.go:235,277,289,309,565` | Log/error paths dereference `Backend.Provider.Name`/`.Host`; a `BackendConfig` without `Provider` (fetcher list update, `cmd/nntp-fetcher/main.go:838-845`) panics on any connect failure or `.onion` host. The fetcher half (build the list-update backend with proxy fields) stays in `audit-delta-fixes`. | cli-conn |
 
 **Low**
@@ -287,8 +288,8 @@ the user decides otherwise before wave 2.
 - This plan owns, in all of its waves, the client row of Appendix B: `internal/common/headers.go` (ReconstructHeaders),
   `internal/nntp/{nntp-client.go, nntp-client-commands.go, nntp-transfer-demuxer.go, nntp-backend-pool.go, proxy.go}`,
   `cmd/nntp-transfer/main.go`; plus `internal/nntp/{nntp-transfer.go, transfer-progress.go, transfer-progress-utils.go,
-  nntp-peering.go, nntp-peering-struct.go.bak}`, `cmd/test-nntp/`, `cmd/history-rebuild/main.go` (pprof lines only:
-  `:12`, `:75`, `:97-104`) and the new files listed per slice. None of these is owned by `nntp-server-hardening`,
+  nntp-peering.go, nntp-peering-struct.go.bak}`, `cmd/test-nntp/`, `cmd/history-rebuild/main.go` (pprof lines
+  `:12`, `:75`, `:97-104` and the `signal.Notify` at `:161`) and the new files listed per slice. None of these is owned by `nntp-server-hardening`,
   `nntp-intake-injection` or `nntp-rfc-commands`.
 - `nntp-client-commands.go` holds the shared parser `ParseLegacyArticleLines`/`ParseHeaders` (`:849-952`). The intake
   plan must not edit this file: INT-5 `bytes` (wave 2) is done here; INT-4's Xref
@@ -455,7 +456,8 @@ the user decides otherwise before wave 2.
    then `scripts/test-nntp-client-transfer.sh`. Record the PASS/FAIL list in `## Progress` (expected at baseline:
    E01 FAIL (CLI-4 stall, transfer killed by its timeout), E02 FAIL (hang), E03–E08 FAIL or not reached (E06 depends on
    E01), E10/E11 FAIL (cmdline leaks the password — only the fake peer's scratch password `peer-secret-0123` is ever
-   exposed, on 127.0.0.1), E12 FAIL (bound on all interfaces), E13 FAIL, E09/E14/E15 PASS).
+   exposed, on 127.0.0.1), E12 FAIL (bound on all interfaces), E13 FAIL, E16 FAIL (SIGTERM kills without the
+   shutdown log line), E09/E14/E15 PASS).
 7. **Commit** `test(nntp): wave-0 client fake server, e2e peer and script for nntp-client-transfer` together with the
    plan move. Record the base SHA for wave 1.
 
@@ -816,7 +818,7 @@ Acceptance: E03, E04, E05 PASS; E01 still PASS.
 ---
 
 #### Slice `cli-transfer`: pprof and UI exposure, queue sizing, Redis keys
-Ids: OPS-3, A-nntp-client-6, A-nntp-client-10, NC-3. E-tag `cli-transfer`.
+Ids: OPS-3, A-nntp-client-6, A-nntp-client-10, NC-3, A-ops-3 (d, f). E-tag `cli-transfer`.
 
 Owned files:
 - `internal/nntp/nntp-transfer.go`
@@ -824,7 +826,7 @@ Owned files:
 - `cmd/nntp-transfer/main.go`
 - `cmd/nntp-transfer/debugserver.go` (new)
 - `cmd/nntp-transfer/debugserver_test.go` (new)
-- `cmd/history-rebuild/main.go` (only `:12`, `:75`, `:97-104`)
+- `cmd/history-rebuild/main.go` (only `:12`, `:75`, `:97-104` and the `signal.Notify` at `:161` plus its import)
 - `cmd/history-rebuild/pprof_addr.go` (new)
 - `cmd/history-rebuild/pprof_addr_test.go` (new)
 - `internal/nntp/nntp-client-transfer_test.go` (new)
@@ -879,6 +881,11 @@ Changes:
    commented block at `:2516-2522` may stay commented; if you touch it, use `redisKey` too). Add a line to
    `showUsageExamples` / the `-redis-cache` help that keys are scoped per target, and extend the `-redis-flushdb` help:
    "… flushes ALL keys in the selected Redis DB, including other targets' transfer keys".
+5a. **A-ops-3 (d, f): SIGTERM.** `cmd/history-rebuild/main.go:161` and `cmd/nntp-transfer/main.go:347`:
+   `signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)` (add the `syscall` import to both files). The handlers after
+   them stay as they are, so SIGTERM takes exactly the SIGINT shutdown path (history-rebuild: stop after the current
+   range and flush; nntp-transfer: `common.ForceShutdown()`, pool and DB shutdown). Test note: the signal setup lives in
+   `main`, so there is no unit test; acceptance is the grep below plus E16 (nntp-transfer only; history-rebuild is covered by the grep).
 6. Tests:
    - `cmd/nntp-transfer/debugserver_test.go`:
      - `TestTxDbgPprofMuxNoCmdline`: `httptest.NewServer(newPprofMux())`; `/debug/pprof/` → 200; `/debug/pprof/cmdline`
@@ -900,7 +907,8 @@ Changes:
      - `TestCliTxDemuxerDepth`: a demuxer built while `DemuxerQueueDepth` has its default has channels of that cap —
        read the package default, do not mutate it (K3).
 
-Acceptance: E09, E10, E11, E12, E13 PASS, and
+Acceptance: E09, E10, E11, E12, E13, E16 PASS; `grep -n 'syscall.SIGTERM' cmd/history-rebuild/main.go
+cmd/nntp-transfer/main.go` finds one `signal.Notify` line in each; and
 `grep -rnE 'ListenAndServe(TLS)?\([^)]*, *nil\)|http\.Handle(Func)?\(' cmd/nntp-transfer cmd/history-rebuild` prints
 nothing (no handler on, and no server for, `http.DefaultServeMux`).
 
@@ -1016,6 +1024,7 @@ Everything runs against 127.0.0.1: the nntp-server and the fake peer are local; 
 | E12 | cli-transfer | `ss -ltn` shows `$WEBPORT` bound to `127.0.0.1` only (INFO when `ss` is missing) |
 | E13 | cli-transfer | `history-rebuild -pprof 0.0.0.0:$HRPORT -analyze-only` exits non-zero within 20 s and prints `loopback` |
 | E14 | any | no `WARNING: DATA RACE` and no `panic:` in `transfer-*.log` |
+| E16 | cli-transfer | a transfer to the silent peer (kept busy by retried connects) gets SIGTERM 2 s after `Found 1 newsgroups to transfer`: its log shows `Received shutdown signal` (the SIGINT shutdown path), i.e. SIGTERM is handled, not a bare kill (A-ops-3 f). If shutdown then takes over 30 s, INFO E16b (shared SIGINT path) |
 | E15 | cli-hygiene | every `CHECK`/`TAKETHIS` argument in `commands.log` is a valid message-id and no logged line contains `\r` or `\x00` |
 
 ### `scripts/test-nntp-client-transfer.sh` (wave 0 writes this; later waves fix only real script bugs)
@@ -1145,6 +1154,23 @@ PASSES=$((PASSES + $(printf '%s\n' "$lines" | grep -c '^PASS '))); FAILS=$((FAIL
 run_tx 3
 grep -q 'Skipping newsgroup e2e.ct.a - already has transfer results' "$DATA/transfer-3.log" \
   && pass E08 cli-tools "complete group skipped" || fail E08 cli-tools "complete group skipped" "$(tail -2 "$DATA/transfer-3.log" | tr '\n' ' ')"
+
+# ---- E16: SIGTERM takes the graceful path. Target the silent peer so the process stays busy (connects time out
+#      after -timeout 2 and are retried) until it is signalled.
+( cd "$RUN" && exec timeout 120 "$TX_ABS" -data "$DATA_ABS" -host 127.0.0.1 -port "$SILENTPORT" -group e2e.ct.a \
+    -redis-cache=false -use-progress-db=false -max-threads 1 -timeout 2 ) >"$DATA/transfer-term.log" 2>&1 &
+TXPID=$!   # the pid of GNU timeout, which forwards SIGTERM to nntp-transfer
+for _ in $(seq 1 100); do grep -q 'Found [0-9]* newsgroups to transfer' "$DATA/transfer-term.log" && break; alive "$TXPID" || break; sleep 0.1; done
+sleep 2
+kill -TERM "$TXPID" 2>/dev/null
+t0=$(date +%s); exited=no
+for _ in $(seq 1 30); do alive "$TXPID" || { exited=yes; break; }; sleep 1; done
+[ "$exited" = yes ] || kill -KILL "$TXPID" 2>/dev/null
+wait "$TXPID" 2>/dev/null; TXPID=""
+if grep -q 'Received shutdown signal' "$DATA/transfer-term.log"; then
+  pass E16 cli-transfer "SIGTERM handled like SIGINT (exited=$exited after $(( $(date +%s) - t0 ))s)"
+  [ "$exited" = yes ] || info E16b cli-transfer "graceful shutdown did not finish within 30s (same path as SIGINT; not this plan's finding)"
+else fail E16 cli-transfer "SIGTERM handled like SIGINT" "no 'Received shutdown signal' in log; $(tail -2 "$DATA/transfer-term.log" | tr '\n' ' ')"; fi
 
 # ---- E02 silent peer, E13 history-rebuild pprof, E14 logs
 t0=$(date +%s)
