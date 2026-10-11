@@ -1,0 +1,152 @@
+# docs/audit — go-pugleaf audit (plan `nntp-audit-tests`, October 2026)
+
+Base: `testing-001` @ 84c2081 (re-anchored 2026-10-08), integration branch `plan-nntp-audit-tests`.
+Plan: `.claude/plans/wip/nntp-audit-tests.md` (moves to `done/` when finished).
+
+## Files
+
+| File | Content |
+|----|----|
+| `README.md` | this schema, the slice table, the seed finding ids |
+| `<slug>.md` | one report per audit slice (see the slice table) |
+| `AUDIT-2026-10.md` | consolidated report (wave 3) |
+| `tools/go-vet.txt` | `go vet ./...` output (`exit=0` = clean) |
+| `tools/staticcheck.txt` | staticcheck 2026.2.1 built with go1.27.1 |
+| `tools/govulncheck.txt` | govulncheck v1.9.0: 14 reachable vulnerabilities (go1.27.1 stdlib → fixed in go1.27.2; `golang.org/x/net` v0.46.0 → v0.60.0; `quic-go` v0.55.0 → v0.59.1) |
+| `tools/golangci-lint.txt` | golangci-lint 2.14.0 with `--no-config -E gosec` (the repo's `.golangci.yml` is v1 format and does not load in v2): errcheck 50, gosec 50, unused 39, staticcheck 21, ineffassign 6 |
+
+The `~/go/bin` copies of the three tools were built with older Go versions and cannot load a go1.27.1 module
+(staticcheck: "export data version 4 is greater than maximum supported version 2"; govulncheck/golangci-lint:
+Go version mismatch). The outputs above come from fresh `go install …@latest` builds made for this audit.
+
+## Report layout (D1)
+
+1. `# Audit <slug> (base <sha>)`
+2. `## Scope and method`: files read, tools, RFCs fetched from rfc-editor.org, repros run.
+3. `## Summary`: counts by severity and category, plus the 5 most important findings.
+4. `## Findings`, one block per finding:
+   - a table with `seed` (SEC-1 or `new`), `id`, `severity` (critical/high/medium/low/info),
+     `category` (security | bug | missing | wrong-function | rfc | robustness | dead-code | test-gap),
+     `location` (path:line) and `verdict` (CONFIRMED or PLAUSIBLE)
+   - **Scenario:** input/state → wrong result
+   - **Evidence:** an exact code trace, or the repro commands and trimmed output
+   - **RFC:** section plus a 1–2 line quote (rfc category only)
+   - **Fix:** a suggestion plus effort S/M/L
+5. `## Function inventory`: a table of `function/file | stub | dead | unused | misleading | wrong | evidence`.
+6. `## Seed items rejected`: each with the reason.
+7. `## Not covered / follow-ups`
+
+Slice-specific mandatory sections are listed in the plan (wave 1).
+
+### Repros
+
+- Standalone programs go under `./data-test-audit-<slug>/_repro/<name>/main.go` and run with
+  `go run ./data-test-audit-<slug>/_repro/<name>/main.go`. The directory is gitignored via `/data*`, and the
+  `_` prefix keeps it out of `go vet ./...` and `go build ./...`. They are inside the module, so they may import `internal/...`.
+- A repro that needs unexported identifiers may use a temporary `zz_audit_<slug>_test.go`, deleted before the commit.
+- Servers use `-data ./data-test-audit-<slug>`, a port from 21200 + slice index, and are stopped afterwards.
+- Never anything against `./data`, `data_ram` or `data_local`.
+
+## Ids (K6)
+
+- Seed ids (tables below) are canonical and never renumbered.
+- New findings from audit slices are `A-<slug>-<n>` (e.g. `A-nntp-sec-3`).
+- Bugs a test slice finds that aren't in the seed list are `T-<slug>-<n>`; tests mark them with `knownBug(t, id, err)`.
+- Findings of the merged plans are referenced as `WSH:<id>` (`.claude/plans/done/web-sqlite-hardening.md`),
+  `LO:<id>` (`web-sqlite-leftovers.md`) and `FU:<id>` (`web-db-followups.md`) and are not re-reported.
+
+## Slices
+
+| Slice | Report | Scope | Seeds |
+|----|----|----|----|
+| `audit-nntp-rfc` | `audit-nntp-rfc.md` | server command handling vs RFC 3977/4643/4644/4642/2980/6048 | RFC-1…6, BUG-3…6, BUG-9, FN-1 |
+| `audit-nntp-sec` | `audit-nntp-sec.md` | server security, DoS, concurrency, auth cache, TLS, shutdown | SEC-1…7, BUG-1, BUG-2, BUG-7, BUG-8 |
+| `audit-web` | `audit-web.md` | delta web audit after WSH/LO/FU | WEB-1, WEB-2, INT-7 |
+| `audit-db` | `audit-db.md` | delta database audit after WSH/LO/FU | SEC-2, SEC-6, BUG-1, BUG-2, INT-5, INT-6, OPS-1 (DB sides) |
+| `audit-intake` | `audit-intake.md` | article validation, injection, history, header rebuilding (RFC 5536/5537) | INT-1…6, CLI-1 (headers.go), OPS-1 |
+| `audit-nntp-client` | `audit-nntp-client.md` | outbound NNTP client, pool, transfer, demuxer, peering | CLI-1…6, OPS-3 |
+| `audit-tools` | `audit-tools.md` | fetcher, analyze, importers, tcp2tor | CLI-6 |
+| `audit-ops` | `audit-ops.md` | binaries, destructive tools, scripts, CI, php/ | OPS-1, OPS-2, OPS-4 |
+
+Test slices (wave 2): `test-nntp-session`, `test-nntp-auth`, `test-nntp-group`, `test-nntp-article`,
+`test-nntp-overview` (`internal/nntp/nntp-server-*_test.go`) and `test-nntp-intake-e2e`
+(`cmd/nntp-server/server_e2e_test.go`, `scripts/test-nntp-server.sh`).
+
+## Seed findings (from the plan's Context, status as of 2026-10-08)
+
+Paths are under `internal/` unless they start with `cmd/`, `web/static`, `migrations/` or a root file.
+
+**NNTP server: security and DoS**
+| ID | Where (at 84c2081) | Defect | Status |
+|----|----|----|----|
+| SEC-1 | `nntp/nntp-cmd-xhdr.go:85,97`, `database/queries.go:1878-1880` | The DB read is clamped to start+1000 (`endNum = startNum + 1000`), but the send loop at `:97` walks the unclamped client range with no I/O. `XHDR subject 1-9223372036854775807` spins forever (the counter wraps at MaxInt64), pinning a core. No auth is needed. XOVER walks the returned rows, so it truncates (BUG-2) but doesn't spin. | OPEN |
+| SEC-2 | `nntp/nntp-cmd-group.go:49` → `database/db_groupdbs.go:117-190` (creation in `initGroupDB` `:194-270`); intake `processor/threading.go:232` → `database/db_batch.go:553,944-950` | `LISTGROUP <any name>` (no auth) and unknown `Newsgroups:` on intake create a directory, SQLite file and schema. Intake also upserts a `newsgroups` row with `active=1` (`query_updateNewsgroupsStats`). Only `handleGroup` (`nntp-cmd-group.go:18`) checks `MainDBGetNewsgroup` first. | PARTLY: web callers FIXED (WSH:C4, LO:F10 — `checkGroupAccess`/`checkGroupAccessAPI` in `web/web_helpers.go`, `sectionGroupAllowed`). NNTP and intake sides OPEN. |
+| SEC-3 | `nntp/nntp-server-cliconns.go:73`, `nntp/nntp-cmd-posting.go:224-232` | No byte limits. Command and article lines use unbounded `textproto.ReadLine`, and articles are capped only by line counts (`maxLines, maxHead := 16384, 1024 // HARDCODED`). `Server.NNTP.MaxArtSize` (`config/config.go:131`) and `newsgroups.max_art_size` are never read. | OPEN |
+| SEC-4 | `nntp/nntp-server-cliconns.go:112,151` | `Stats.CommandExecuted(command)` stores any word before dispatch, and unknown commands aren't delayed, so the stats map grows without bound. | OPEN |
+| SEC-5 | `nntp/nntp-auth-manager.go:47-90`, `nntp/nntp-cmd-auth.go:34,38` | Reading never requires auth. `CheckGroupAccess`, `CheckConnectionLimit` and the `*NNTPSession` DB functions (`database/db_nntp_users.go:193-222`) are unused. AUTHINFO is accepted in plaintext (no STARTTLS, no 483), 481 has no delay (`:34`), and a second AUTHINFO after success is accepted (`:38`; RFC 4643: 502). | OPEN |
+| SEC-6 | `database/db_nntp_users.go:137,164,178,281-350`, `database/nntp_auth_cache.go:65-90`, `web/web_admin_nntp.go:169,190,233,277`, `web/web_admin_userfuncs.go:217,229`, `cmd/nntpmgr` | The auth cache (15 min, `NNTP_AUTH_CACHE_TIME` in `db_init.go:22`) keys a hit on the sha256 of the password used at login. `UpdateNNTPUserPassword`, `DeactivateNNTPUser` and `DeleteNNTPUser` never call `InvalidateNNTPUserAuth` (only `web/web_profile.go:129` does), so after a password change the old password keeps working until the TTL expires. The web and NNTP binaries are separate processes (OPS-2), so the fix belongs in the DB layer, not in the admin handlers. | PARTLY: the revoked-user half is FIXED by LO:F22 — every cache hit runs `refuseDisabledNNTPUser` (`:293`, `:338-350`: `nntp_users.is_active` and `users.disabled`, invalidates on refusal). The old-password half is OPEN. |
+| SEC-7 | `nntp/nntp-cmd-group.go:57`, `database/queries.go:696-715` | LISTGROUP loads every overview row of the group into memory (unbounded SELECT at `:696`) and logs each call (`:699`). | OPEN |
+
+**NNTP server: bugs and dead code**
+| ID | Where | Defect | Status |
+|----|----|----|----|
+| BUG-1 | `database/queries.go:892-914`, `nntp/nntp-article-common.go:58` | `GetArticleByNum` sets only `ArticleNums[groupDB.NewsgroupPtr]` (`:906`) and never `DBArtNum` (only the message-id path does, `:930`), so ARTICLE/HEAD/BODY `<n>` set `currentArticle=0`. When it happens depends on the article cache. | OPEN |
+| BUG-2 | `database/queries.go:1810-1818` (`GetOverviewsRange`), `:1864-1911` (`GetHeaderFieldRange`) | XOVER and XHDR are silently truncated to 1001 rows (clamp in Go, no SQL LIMIT), so readers see phantom gaps. | OPEN |
+| BUG-3 | `nntp/nntp-article-common.go:46`, `nntp/nntp-cmd-group.go:10`, `nntp/nntp-cmd-helpers.go:15`, `nntp/nntp-cache-local.go:17` | Hardcoded sleeps: 200 ms per article command, 333 ms per GROUP, 1 s per error, 15 s per `CronLocal430` tick. That is about 5 articles/s per connection. | OPEN |
+| BUG-4 | `nntp/nntp-cmd-group.go:29-33,65`, `nntp/nntp-cmd-list.go:36-37` | GROUP reports low=1 and doesn't set the current article. LISTGROUP's 211 line lacks count/low/high/group, doesn't select the group, and ignores the range. LIST ACTIVE reports low=1 and status is always `n`. | OPEN |
+| BUG-5 | `nntp/nntp-cmd-helpers.go:67-79`, `common/headers.go:580-601` | Overview fields aren't sanitized for TAB/CR/LF (repeated headers are joined with LF), there is a trailing TAB, and no Xref. | OPEN |
+| BUG-6 | `nntp/nntp-cmd-helpers.go:19-22,48-64`, `nntp/nntp-article-common.go:229-248,265-269` | Header lines aren't dot-stuffed. Empty `headers_json` puts a blank line inside HEAD, and an empty body adds an extra blank line. | OPEN |
+| BUG-7 | `nntp/nntp-cmd-posting.go:228`, `nntp/nntp-cmd-basic.go:53-57`, `nntp/nntp-server.go:75,96-120,173,202` | "Too large" closes the conn and then still sends 441/436, and QUIT is logged as a connection error (`:173`). `Stop()` neither closes clients nor waits (`:202` says so). `CronLocal430` leaks one goroutine per server, and a TLS cert failure leaves the plain listener running with `running=false`. | OPEN |
+| BUG-8 | `nntp/nntp-article-common.go:129-155`, `nntp/nntp-cache-local.go` | `local430` isn't invalidated when the article arrives (only `Check` and `Add` exist): a 430 is served for up to 75 s after 235/239/240. | OPEN |
+| BUG-9 | `nntp/nntp-server-cliconns.go:15,54-59,77` | The idle timeout is 60 s (`DefaultNNTPcliconnTimeout`; RFC 3977 §3.1 wants at least 3 min), and the write deadline set per command covers the whole response. | OPEN |
+| FN-1 | `nntp/nntp-cmd-{article,head,body,stat,reader}.go`, `nntp/nntp-cmd-helpers.go:24`, `nntp/nntp-server-statistics.go:50-111`, `nntp/nntp-auth-manager.go:47-90`, `nntp/README.md` | Stub files, plus unused functions: `parseArticleHeadersShort`, `ServerStats.{GetTotalConnections,GetCommandCount,GetAllCommandCounts,GetAuthStats,GetUptime,Reset}`, `AuthManager.{CheckGroupAccess,CanPost,IsAdmin,CheckConnectionLimit}`; `ClientConnection.capabilities` is never read. `README.md` points at a non-existent `examples/nntp-server`, names the stub files as the handlers, puts LISTGROUP in `nntp-cmd-list.go`, claims "graceful shutdown with timeout" and auth via `GetUserByUsername`. | OPEN |
+
+**NNTP server: RFC conformity**
+| ID | Where | Defect | Status |
+|----|----|----|----|
+| RFC-1 | `nntp/nntp-server-cliconns.go:115-152` | Missing mandatory READER commands DATE, NEXT, LAST, NEWGROUPS. Also missing: OVER, HDR, LIST OVERVIEW.FMT/HEADERS, LIST wildmat, NEWNEWS, MODE STREAM and CHECK (RFC 4644, although TAKETHIS exists), STARTTLS (RFC 4642). Dispatch today: CAPABILITIES, MODE, AUTHINFO, QUIT, HELP, LIST, GROUP, LISTGROUP, STAT, HEAD, BODY, ARTICLE, XOVER, XHDR, POST, IHAVE, TAKETHIS. | OPEN |
+| RFC-2 | `nntp/nntp-server-cliconns.go:196-213` | CAPABILITIES lists READER together with MODE-READER, plus the XOVER/XHDR/TAKETHIS labels. AUTHINFO USER stays listed after auth and without TLS, and POST is listed regardless of permission. STREAMING, OVER, HDR and IMPLEMENTATION are never listed. | OPEN |
+| RFC-3 | `nntp/nntp-article-common.go:93-97,159,193-194` | ARTICLE/HEAD/BODY/STAT with no argument → 501 (should use the current article, or 420). Number 0 or negative → 502. | OPEN |
+| RFC-4 | `nntp/nntp-server-cliconns.go:93-99`, `nntp/nntp-cmd-basic.go:22-23` | The greeting and MODE READER always say 200 "posting allowed", even without a processor (should be 201). The hostname is hardcoded (`"go-pugleaf"`; `Config.Hostname` is never read here). | OPEN |
+| RFC-5 | `nntp/nntp-cmd-basic.go:25`, `nntp/nntp-cmd-auth.go:45`, `nntp/nntp-cmd-posting.go:27,95,109` | Unknown MODE/AUTHINFO variant → 500 (should be 501). POST not permitted → 502 (should be 440). IHAVE permanent rejects → 436 (should be 437). | OPEN |
+| RFC-6 | `nntp/nntp-cmd-xhdr.go:52-73,92`, `nntp/nntp-cmd-xover.go:86`, `database/queries.go:1864-1911` | XHDR supports only 7 headers (an unknown one gives an empty 221, `:1910`), has no "(none)" and no message-id form (fails `ParseInt` → 501, not rate limited). An empty XOVER range → an empty 224. | OPEN |
+
+**Article intake (RFC 5536/5537)**
+| ID | Where | Defect | Status |
+|----|----|----|----|
+| INT-1 | `processor/threading.go:59-61,155-160,185-192`, `nntp/nntp-cmd-posting.go:42-43`, `nntp/nntp-cmd-helpers.go:19-22` | POST without Message-ID or Date → 441; the injecting agent must add them (RFC 5537 §3.5). No Injection-Date/Info or `.POSTED`. The Path prefix is stored only in the `path` column; HEAD/ARTICLE serve the raw stored headers with the original Path. | OPEN |
+| INT-2 | `processor/threading.go:76-81,270-283`, `processor/processor.go:187-213` | An article already in every target group → CasePass, so IHAVE answers 235 and TAKETHIS 239. An in-flight message-id → CaseDupes instead of Retry (the `CheckMessageID` pre-check returns Retry, but the window between it and `processArticle` answers Dupes). | OPEN |
+| INT-3 | `processor/proc-utils.go:414-454,756-787`, `common/headers.go:24-30,539`, `nntp/nntp-cmd-posting.go:283` | A malformed Date is accepted as 1990-01-01. Newsgroups is split on `[,;:\s]+` with a lax name regex (`validGroupNameRegexLazy`). The POST path splits Newsgroups with a plain `strings.Split(",")`, differently from `processArticle`. | OPEN |
+| INT-4 | `processor/threading.go`, `nntp/nntp-client-commands.go:936-939,950` | No control messages, Supersedes, moderation or Approved check. A foreign Xref is stored and served, and no local Xref is generated (XOVER sends an empty field). | OPEN |
+| INT-5 | `nntp/nntp-client-commands.go:877`, `migrations/0001_single_db_schema.sql:12` | `bytes` is the LF-joined body length (RFC 3977 §8.1.1: the whole article with CRLF). Article numbers are rowids without AUTOINCREMENT, so they can be reused. | OPEN |
+| INT-6 | `database/db_batch.go:855-891` vs `:553,944-950` | The history adds are gated on `MainDBGetNewsgroup` (which returns `sql.ErrNoRows` for a new group), but the row is only created later in the same batch by `query_updateNewsgroupsStats`, so the first batch of an auto-created group skips them. | OPEN |
+| INT-7 | `web/web_sitePostPage.go:358-377`, `processor/PostQueue.go:93` | Web posts are stored with only MIME-Version, Content-Type, CTE, X-pugleaf-Trace, From, Newsgroups, Lines and Bytes in `headers_json` — no Subject, Date, Message-ID, Path or References — and NNTP serves them that way. | OPEN |
+
+**NNTP client, transfer and peering**
+| ID | Where | Defect | Status |
+|----|----|----|----|
+| CLI-1 | `common/headers.go:267-297,393-411,487`, `nntp/nntp-client-commands.go:1149-1153,1271-1275` | `ReconstructHeaders` sends two Path headers on every TAKETHIS (`:291` and `:294`). Folded Newsgroups lines are sent twice (`i++` inside the range at `:403`), and a final empty body line is dropped. | OPEN |
+| CLI-2 | `nntp/nntp-client-commands.go:636-641` | Nil dereference (panic) when GROUP returns 411 in `XHdrStreamedBatch`. | OPEN |
+| CLI-3 | `nntp/nntp-client.go:193-232,345-362`, `nntp/proxy.go:59-60`, `nntp/nntp-client-commands.go:78` | No read/write deadlines (the helpers are dead code, renamed `xSetReadDeadline`/`xSetWriteDeadline`; the one client deadline at `:78` is commented out), no TLS handshake timeout, and the socket leaks on connect errors (`:214,219,232` return after `c.conn = conn`). | OPEN |
+| CLI-4 | `nntp/nntp-transfer-demuxer.go:185-191` | The demuxer expects the first CHECK to be command id 1 (`d.LastID+1 != cmdInfo.CmdID`, `LastID` starts at 0), but AUTHINFO + MODE STREAM use ids 0–2, so `-username` transfers stall. | OPEN |
+| CLI-5 | `nntp/nntp-client.go:211-219,251-259`, `nntp/nntp-backend-pool.go:189-201`, `nntp/nntp-client-commands.go:51-54,150-153,206-209,1231-1232` | A 201 greeting fails `Connect` (`ReadCodeLine(NNTPWelcomeCodeMin)`). A 281 reply to AUTHINFO USER counts as failure. 480 is reported as "group not found". The 430/451 branches are unreachable in `StatArticle`, `GetHead` and `GetBody`. The 401 check never matches. | PARTLY: `GetArticle` (`:97`) does reach its 430/451 branches. The rest is OPEN. |
+| CLI-6 | `nntp/nntp-peering.go:165-173,196-204,248-263,291-305,341-345,413-418`, `cmd/test-nntp` | `PeeringManager` is unused and unfinished: `LoadConfiguration` is a stub, the DNS limiter deadlocks (the 1-slot channel is taken twice), `AddPeer` keeps pointers into a slice that append reallocates and returns the loop copy. `test-nntp` builds, is hardcoded to an external server, and its calls to APIs that no longer exist sit in a comment block. | OPEN |
+
+**Web, not covered by the merged plans**
+| ID | Where | Defect | Status |
+|----|----|----|----|
+| WEB-1 | `web/web_admin_crons.go:18,148,307`, `web/webserver_core_routes.go:471-474` | Create, toggle and stop only check `requireAdminAuth`, not `s.CronEdit` (update `:79` and delete `:183` do), so admins can create and enable `sh -c` jobs without `-edit-cronjobs`. LO put the flag itself out of scope; no merged plan touched these three handlers. | OPEN |
+| WEB-2 | `web/web_apiHandlers.go:448-502`, `web/static/js/thread-tree.js:514-555`, `web/webserver_core_routes.go:502` | `getArticlePreview` returns the body through `models.ConvertToUTF8` (`html.UnescapeString`, `models/sanitizing.go:48`) with no escaping (`:488-498`; subject and from are `PrintSanitized`). thread-tree.js concatenates `article.body` and `article.group` into HTML (`:515`) and inserts it with `innerHTML` (`:539`); `escapeHtml` (`:557`) is never called on it and `formatPreviewText` only normalizes newlines. Since LO:B11 the JS fetches the **web** route `GET /groups/:group/articles/:articleNum/preview`, which is not behind `requireAPIEnabled`. Stored XSS candidate. WSH:S2 did not cover it. | OPEN, severity up (reachable with the API disabled) |
+
+**Process and ops**
+| ID | Where | Defect | Status |
+|----|----|----|----|
+| OPS-1 | `database/db_init.go:141,145,206-229`, `config/config.go:548`, `processor/processor.go:63-88`, `history/history.go:469,498`, `processor/analyze.go:934-962`, `database/db_batch.go:1753-1765`, `database/db_migrate.go:25` | Library code kills the process (`log.Fatal`/`os.Exit`). The DB can't be reopened in one process (`INIT` is never reset, the global `BatchDividerChan` divider loop never exits, `migratedDBsCache` outlives the DB). | PARTLY: "the batch retries forever after `Shutdown`" is FIXED (LO/FU: `batchShutdownGrace`, `batchShutdownClock`, `retryShutdownGrace()`, `IsDBshutdown()` at `db_init.go:270` bound every retry loop). The fatal sites and the re-open globals are OPEN. |
+| OPS-2 | `cmd/web/main.go:105,428`, `cmd/nntpmgr/main.go:153,183-186`, `nntp/nntp-peering-pattern_test.go:409-410,557-558,607-608` | The embedded NNTP server in cmd/web can't start (`-withnntp` is commented out, so `&& withnntp` is always false). `nntpmgr -list` prints bcrypt hashes (`%-16s` pads, doesn't truncate) and `-create` echoes the plaintext. A test writes `active.out` and `analysis_*.txt` into the cwd (only when a hardcoded `/home/fed/...` active file exists). | OPEN |
+| OPS-3 | `cmd/nntp-transfer/main.go:12,544-551,2934-2940`, `cmd/history-rebuild/main.go:12,75,97-101` | `net/http/pprof` is registered on the default mux, which `-web-port` serves on all interfaces (`http.ListenAndServe(":%d", nil)`); the pprof-only listener is localhost. history-rebuild's `-pprof` accepts any address. | OPEN |
+| OPS-4 | `cmd/history-rebuild/main.go:74-79`, `cmd/tcp2tor/main.go:177,252,503,551`, `cmd/web/main_functions.go:826`, `run_web*.sh`, `scripts.sh`, `run_test.sh`, `build_*.sh`, `.github/workflows/release.yml` | Flags that are ignored (`-useshorthashlen` says "No effect"; tcp2tor `-timeout` is stored and never read, the dialers use `proxy.Direct`). Scripts pass flags that don't exist or reference missing files. 11 build scripts use `-race`. The only workflow (`release.yml`, tags/dispatch) runs `go mod download/verify` and builds, with no test or vet step. | PARTLY: web `-data` is FIXED (WSH; `cmd/web/main.go:214`; `findOrphanedDatabases` keeps a `"data"` fallback for an empty argument). The rest is OPEN. |
+
+## Already covered by merged plans
+
+See the plan's Context section "Already covered by merged plans" for the WSH, LO and FU id lists and the
+files those plans changed. Audit slices cite those ids instead of re-reporting.

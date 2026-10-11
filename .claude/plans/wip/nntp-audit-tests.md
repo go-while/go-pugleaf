@@ -653,3 +653,20 @@ PORT=21119 DATA=./data-test-nntp-audit-tests scripts/test-nntp-server.sh
 
 - `queries.go` hunks in different slices touch different functions and are merged in slice order, with checks after each merge.
 - `internal/web/*` and the non-NNTP `internal/database/*` files are only touched in `audit-delta-fixes.md`.
+
+---
+
+## Progress
+
+### Wave 0 (2026-10-11, inline on `plan-nntp-audit-tests`)
+- Preflight: clean tree, branch `plan-nntp-audit-tests` from `testing-001` @ eaa24c6. Baseline checks PASS
+  (gofmt lists only the 2 baseline files; vet, build and the CLAUDE.md test list green).
+- Static analysis: the `~/go/bin` tools don't load a go1.27.1 module; fresh `go install …@latest` builds
+  (scratchpad only) produced `docs/audit/tools/*.txt`. golangci-lint v2 can't read the v1 `.golangci.yml`,
+  so it ran with `--no-config -E gosec`. govulncheck: 14 reachable vulns (stdlib go1.27.1→27.2, x/net, quic-go).
+- Hooks: `NNTPServer.{ArticleCmdDelay,GroupCmdDelay,ErrorDelay,IdleTimeout}` seeded from
+  `Default{ArticleCmd,GroupCmd,Error}Delay`/`DefaultNNTPcliconnTimeout`; `Serve(l, isTLS)`; `Start()` uses `serveLocked`.
+- Harness `internal/nntp/nntp-server-harness_test.go` with 5 self-tests (Smoke, Seed, KnownBug, IsolatedTimeout, IsolatedPass).
+  Extras over D2: `hServer.tryDial`, `hClient.readStatus/close/Deadline`, `hArticle.Skip`, `hFakeProcessor.{checkFn,processFn,findFn}`,
+  `hDataDir(t)`, `hMessageID`, `hGroupName`; `hArticleSQL` also sets `low_water`.
+- Orchestration: the user asked for 4 agents in parallel, so waves 1 and 2 run as batches of 4 slices.

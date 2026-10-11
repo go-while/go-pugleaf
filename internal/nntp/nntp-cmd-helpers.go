@@ -10,9 +10,10 @@ import (
 
 // Helper functions
 func (c *ClientConnection) rateLimitOnError() {
-	// Implement rate limiting logic here if needed
-	// For now, just a placeholder
-	time.Sleep(time.Second)
+	// Delay after an error response; per-server so tests can run without it.
+	if c.server != nil && c.server.ErrorDelay > 0 {
+		time.Sleep(c.server.ErrorDelay)
+	}
 }
 
 // parseArticleHeaders parses headers from an article

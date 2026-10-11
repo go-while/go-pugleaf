@@ -7,7 +7,9 @@ import (
 
 // handleGroup handles GROUP command
 func (c *ClientConnection) handleGroup(args []string) error {
-	time.Sleep(time.Second / 3) // ratelimit
+	if c.server.GroupCmdDelay > 0 {
+		time.Sleep(c.server.GroupCmdDelay) // ratelimit (DefaultGroupCmdDelay)
+	}
 
 	if len(args) == 0 {
 		c.rateLimitOnError()

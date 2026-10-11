@@ -52,10 +52,14 @@ func NewClientConnection(conn net.Conn, server *NNTPServer, isTLS bool) *ClientC
 }
 
 func (c *ClientConnection) UpdateDeadlines() {
+	timeout := DefaultNNTPcliconnTimeout
+	if c.server != nil && c.server.IdleTimeout > 0 {
+		timeout = c.server.IdleTimeout
+	}
 	// Set read deadline for command reading
-	c.conn.SetReadDeadline(time.Now().Add(DefaultNNTPcliconnTimeout))
+	c.conn.SetReadDeadline(time.Now().Add(timeout))
 	// Set write deadline for large responses
-	c.conn.SetWriteDeadline(time.Now().Add(DefaultNNTPcliconnTimeout))
+	c.conn.SetWriteDeadline(time.Now().Add(timeout))
 }
 
 // Handle processes the client connection
