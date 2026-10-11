@@ -113,9 +113,18 @@ func TestWiringProcessArticleIntakeCheck(t *testing.T) {
 	h := wiringTestHistory(t)
 	proc := &Processor{History: h}
 
-	// in progress or already stored: duplicate without touching history
-	for i, state := range []int{history.CaseLock, history.CaseWrite, history.CaseDupes} {
+	// in progress: retry later (INT-2), without touching history
+	for i, state := range []int{history.CaseLock, history.CaseWrite} {
 		id := "<wiring-intake-busy-" + string(rune('a'+i)) + "@example.org>"
+		wiringTestSetState(id, state)
+		got, err := proc.processArticle(&models.Article{MessageID: id}, "", false)
+		if got != history.CaseRetry || err != nil {
+			t.Fatalf("state %#x: got %#x, %v; want CaseRetry, nil", state, got, err)
+		}
+	}
+	// already stored: duplicate without touching history
+	for i, state := range []int{history.CaseDupes} {
+		id := "<wiring-intake-stored-" + string(rune('a'+i)) + "@example.org>"
 		wiringTestSetState(id, state)
 		got, err := proc.processArticle(&models.Article{MessageID: id}, "", false)
 		if got != history.CaseDupes || err != nil {
@@ -136,7 +145,7 @@ func TestWiringProcessArticleIntakeCheck(t *testing.T) {
 	}
 
 	// new article: must NOT be reported as duplicate (it passes the claim and fails later on the
-	// missing Newsgroups header, which needs no database) and must end in a terminal state
+	// missing mandatory headers, which needs no database) and must end in a terminal state
 	for _, state := range []int{0, history.CasePass, history.CaseError, history.CaseRetry} {
 		id := "<wiring-intake-new-" + string(rune('0'+state%10)) + "-" + time.Now().Format("150405.000000000") + "@example.org>"
 		item := wiringTestSetState(id, state)

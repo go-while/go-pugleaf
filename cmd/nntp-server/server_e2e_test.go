@@ -15,7 +15,9 @@ package main
 // in-process tests skip.
 //
 // Identifiers use the prefixes e2e / TestE2E (contract K2); groups are t6.*,
-// users t6user<seq>, message-ids <t6-<test>-<seq>@test.invalid> (K3).
+// users t6user<seq>, message-ids <t6-<test>-<seq>@test.invalid> (K3). Tests
+// added by plan nntp-intake-injection use t7.<test>.<seq> groups and
+// <t7-<test>-<seq>@test.invalid> message-ids.
 
 import (
 	"bufio"
@@ -1001,8 +1003,8 @@ func TestE2EIHave(t *testing.T) {
 
 // TestE2EIHaveDuplicateNotInHistory (INT-2): an article already stored in every
 // target group but unknown to the history index must be refused after the
-// transfer: 335 then 437 (RFC 3977 §6.3.2.2). Today processArticle treats
-// "nothing to queue" as success and the server answers 235.
+// transfer: 335 then 437 (RFC 3977 §6.3.2.2), and history learns the id, so the
+// next offer gets 435.
 func TestE2EIHaveDuplicateNotInHistory(t *testing.T) {
 	e2eNeedDB(t)
 	g := e2eGroup(t, "dup")
@@ -1020,11 +1022,21 @@ func TestE2EIHaveDuplicateNotInHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IHAVE article: %v", err)
 	}
-	var bugErr error
 	if code != 437 {
-		bugErr = fmt.Errorf("IHAVE of an article already in %s: %q, want 437", g, line)
+		t.Fatalf("IHAVE of an article already in %s: %q, want 437", g, line)
 	}
-	e2eKnownBug(t, "INT-2", bugErr)
+	// history self-heal: the id is known from now on
+	if err := e2eWaitFor(e2eCommitWait, func() error {
+		if code, line := c.cmd(t, "IHAVE %s", id); code != 435 {
+			if code == 335 {
+				t.Fatalf("IHAVE %s again: %q, the stored article is wanted again", id, line)
+			}
+			return fmt.Errorf("IHAVE %s again: %q, want 435", id, line)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestE2ETakeThis: a pipelined stream of new, duplicate and mismatched articles
@@ -1157,11 +1169,9 @@ func TestE2ERejectUnknownGroup(t *testing.T) {
 	if _, err := e2eDB.MainDBGetNewsgroup(g); !errors.Is(err, sql.ErrNoRows) {
 		errs = append(errs, fmt.Sprintf("newsgroups row for %s: err=%v, want sql.ErrNoRows", g, err))
 	}
-	var bugErr error
 	if len(errs) > 0 {
-		bugErr = errors.New(strings.Join(errs, "; "))
+		t.Fatal(strings.Join(errs, "; "))
 	}
-	e2eKnownBug(t, "SEC-2", bugErr)
 }
 
 // TestE2ESizeLimits: oversized articles get a clean rejection.
@@ -1298,9 +1308,8 @@ func TestE2EDotStuffingRoundTrip(t *testing.T) {
 	}
 }
 
-// TestE2EDotHeaderLine (A-nntp-rfc-2): a header line ".." (un-stuffed ".") must
-// either be refused or be served dot-stuffed; today it is stored verbatim and
-// HEAD sends a bare "." that ends the block early (stream desync).
+// TestE2EDotHeaderLine (A-nntp-rfc-2, A-intake-2): a header line ".." (un-stuffed
+// ".") is not a header field: intake refuses the article with 441.
 func TestE2EDotHeaderLine(t *testing.T) {
 	e2eNeedDB(t)
 	g := e2eGroup(t, "dothdr")
@@ -1309,25 +1318,23 @@ func TestE2EDotHeaderLine(t *testing.T) {
 	head = append(head[:2], append([]string{"."}, head[2:]...)...) // sent as ".." by e2eWire
 	c := e2ePoster(t)
 	code, line := c.post(t, e2eWire(head, []string{"body"}))
-	var bugErr error
 	switch code {
 	case 441:
-		// refused: RFC-conformant
+		// refused at intake (strict header block check)
 	case 240:
 		e2eWaitStored(t, id, g)
 		if code, line := c.cmd(t, "HEAD %s", id); code != 221 {
-			t.Fatalf("HEAD %s: %q", id, line)
+			t.Fatalf("POST accepted (want 441); HEAD %s: %q", id, line)
 		}
-		raw := c.rawUntilDot(t)
-		if !strings.Contains(string(raw), "Message-ID: "+id) {
-			// the block ended at the stored "." line: the rest arrives as "status lines"
-			bugErr = fmt.Errorf("HEAD ended early at a bare \".\" header line: %q", raw)
-		}
+		t.Fatalf("POST with a \"..\" header line was accepted (want 441); served head: %q", c.rawUntilDot(t))
 	default:
-		t.Fatalf("POST with a \"..\" header line: %q, want 441 or 240", line)
+		t.Fatalf("POST with a \"..\" header line: %q, want 441", line)
 	}
-	if bugErr != nil {
-		t.Fatal(bugErr)
+	if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+		t.Fatalf("MODE READER after the rejection: %q", line)
+	}
+	if _, err := e2eStored(id, g); err == nil {
+		t.Fatalf("the refused article %s was stored", id)
 	}
 }
 
@@ -1415,5 +1422,504 @@ func TestE2EHelpers(t *testing.T) {
 		if (err == nil) != tc.ok || code != tc.code {
 			t.Errorf("e2eParseCode(%q) = %d, %v", tc.line, code, err)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Intake validation and policy (plan nntp-intake-injection, slice S3).
+// Groups t7.<test>.<seq>, message-ids <t7-<test>-<seq>@test.invalid>.
+
+// e2eGroupWith inserts a newsgroup t7.<test>.<seq> with the given active flag,
+// status and max_art_size (0 = no per-group limit) and returns its name.
+func e2eGroupWith(t *testing.T, test string, active bool, status string, maxArtSize int) string {
+	t.Helper()
+	e2eNeedDB(t)
+	name := fmt.Sprintf("t7.%s.%d", test, e2eSeq.Add(1))
+	if err := e2eDB.InsertNewsgroup(&models.Newsgroup{
+		Name: name, Description: "e2e group " + name, Active: active,
+		Status: status, MaxArtSize: maxArtSize, LowWater: 1, Hierarchy: "t7",
+	}); err != nil {
+		t.Fatalf("InsertNewsgroup %s: %v", name, err)
+	}
+	return name
+}
+
+// TestE2EHeaderBlockRejects (A-intake-2): POST and IHAVE refuse a malformed header block.
+func TestE2EHeaderBlockRejects(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "hdrblock", true, "y", 0)
+	c := e2ePoster(t)
+	for _, tc := range []struct {
+		name  string
+		extra string
+	}{
+		{"two-subjects", "Subject: a second subject"},
+		{"colon-less", "this line has no colon"},
+		{"nul-byte", "X-Bad: nul\x00byte"},
+	} {
+		id := fmt.Sprintf("<t7-hdrblock-%d@test.invalid>", e2eSeq.Add(1))
+		head := append(e2eHead(id, g, "E2E header block "+tc.name, e2eNow()), tc.extra)
+		if code, line := c.post(t, e2eWire(head, []string{"body"})); code != 441 {
+			t.Fatalf("%s: POST %q, want 441", tc.name, line)
+		}
+		if _, err := e2eStored(id, g); err == nil {
+			t.Fatalf("%s: the refused article %s was stored", tc.name, id)
+		}
+	}
+	if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+		t.Fatalf("MODE READER after the rejections: %q", line)
+	}
+
+	// IHAVE with two From headers: 335, then a rejection. S4 maps CaseError to 437;
+	// until then the server answers 436.
+	id := fmt.Sprintf("<t7-hdrblock-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+		t.Fatalf("IHAVE %s: %q, want 335", id, line)
+	}
+	head := append(e2eHead(id, g, "E2E header block two from", e2eNow()), "From: Second <second@test.invalid>")
+	if err := c.send(e2eWire(head, []string{"body"})); err != nil {
+		t.Fatal(err)
+	}
+	code, line, err := c.readStatus()
+	if err != nil {
+		t.Fatalf("IHAVE article: %v", err)
+	}
+	if code != 437 && code != 436 {
+		t.Fatalf("IHAVE with two From headers: %q, want 437 (or 436 before S4)", line)
+	}
+	if _, err := e2eStored(id, g); err == nil {
+		t.Fatalf("the refused article %s was stored", id)
+	}
+}
+
+// TestE2EGroupPolicy (SEC-2, A-intake-8, D1/D2/D8): intake never creates groups and
+// honours active, status and moderation.
+func TestE2EGroupPolicy(t *testing.T) {
+	e2eNeedDB(t)
+	c := e2ePoster(t)
+	newID := func() string { return fmt.Sprintf("<t7-policy-%d@test.invalid>", e2eSeq.Add(1)) }
+	post := func(t *testing.T, id, groups string, extra ...string) (int, string) {
+		t.Helper()
+		head := append(e2eHead(id, groups, "E2E group policy", e2eNow()), extra...)
+		return c.post(t, e2eWire(head, []string{"policy body"}))
+	}
+	countFiles := func(name string) int {
+		file := database.SanitizeGroupName(name) + ".db"
+		n := 0
+		_ = filepath.WalkDir(filepath.Join(e2eDataDir, "db"), func(p string, d fs.DirEntry, err error) error {
+			if err == nil && !d.IsDir() && d.Name() == file {
+				n++
+			}
+			return nil
+		})
+		return n
+	}
+	countRows := func(t *testing.T, name string) int {
+		t.Helper()
+		var n int
+		if err := e2eDB.GetMainDB().QueryRow(`SELECT COUNT(*) FROM newsgroups WHERE name = ?`, name).Scan(&n); err != nil {
+			t.Fatalf("count newsgroups rows %s: %v", name, err)
+		}
+		return n
+	}
+
+	t.Run("inactive", func(t *testing.T) {
+		g := e2eGroupWith(t, "policy", false, "y", 0)
+		if code, line := post(t, newID(), g); code != 441 {
+			t.Fatalf("POST to inactive %s: %q, want 441", g, line)
+		}
+	})
+	t.Run("status-x", func(t *testing.T) {
+		g := e2eGroupWith(t, "policy", true, "x", 0)
+		if code, line := post(t, newID(), g); code != 441 {
+			t.Fatalf("POST to status x %s: %q, want 441", g, line)
+		}
+	})
+	t.Run("crosspost-unknown", func(t *testing.T) {
+		g := e2eGroupWith(t, "policy", true, "y", 0)
+		unknown := fmt.Sprintf("t7.nosuch.%d", e2eSeq.Add(1))
+		id := newID()
+		if code, line := post(t, id, g+","+unknown); code != 240 {
+			t.Fatalf("POST to %s,%s: %q, want 240", g, unknown, line)
+		}
+		e2eWaitStored(t, id, g)
+		if n := countFiles(unknown); n != 0 {
+			t.Fatalf("%d group DB file(s) created for the unknown %s", n, unknown)
+		}
+		if n := countRows(t, unknown); n != 0 {
+			t.Fatalf("%d newsgroups row(s) created for the unknown %s", n, unknown)
+		}
+	})
+	t.Run("space-separated", func(t *testing.T) {
+		g1 := e2eGroupWith(t, "policy", true, "y", 0)
+		g2 := e2eGroupWith(t, "policy", true, "y", 0)
+		if code, line := post(t, newID(), g1+" "+g2); code != 441 {
+			t.Fatalf("POST with Newsgroups %q: %q, want 441", g1+" "+g2, line)
+		}
+	})
+	t.Run("reserved-junk", func(t *testing.T) {
+		rows, files := countRows(t, "junk"), countFiles("junk")
+		if code, line := post(t, newID(), "junk"); code != 441 {
+			t.Fatalf("POST to junk: %q, want 441", line)
+		}
+		if n := countRows(t, "junk"); n != rows {
+			t.Fatalf("junk rows %d -> %d", rows, n)
+		}
+		if n := countFiles("junk"); n != files {
+			t.Fatalf("junk group DB files %d -> %d", files, n)
+		}
+	})
+	t.Run("moderated", func(t *testing.T) {
+		g := e2eGroupWith(t, "policy", true, "m", 0)
+		if code, line := post(t, newID(), g); code != 441 {
+			t.Fatalf("POST to moderated %s without Approved: %q, want 441", g, line)
+		}
+		id := newID()
+		if code, line := post(t, id, g, "Approved: x"); code != 240 {
+			t.Fatalf("POST to moderated %s with Approved: %q, want 240", g, line)
+		}
+		e2eWaitStored(t, id, g)
+	})
+	t.Run("ihave-status-n", func(t *testing.T) {
+		g := e2eGroupWith(t, "policy", true, "n", 0)
+		id := newID()
+		if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+			t.Fatalf("IHAVE %s: %q, want 335", id, line)
+		}
+		if err := c.send(e2eWire(e2eHead(id, g, "E2E feed to status n", e2eNow()), []string{"feed body"})); err != nil {
+			t.Fatal(err)
+		}
+		if code, line, err := c.readStatus(); err != nil || code != 235 {
+			t.Fatalf("IHAVE to status n %s: code=%d line=%q err=%v, want 235", g, code, line, err)
+		}
+		e2eWaitStored(t, id, g)
+	})
+	t.Run("group-max-art-size", func(t *testing.T) {
+		small := e2eGroupWith(t, "policy", true, "y", 200)
+		if code, line := post(t, newID(), small); code != 441 {
+			t.Fatalf("POST over max_art_size 200 of %s: %q, want 441", small, line)
+		}
+	})
+}
+
+// TestE2ENoNullHierarchyRow (A-db-1 end to end): intake never writes a newsgroups row
+// without hierarchy, so MainDBGetAllNewsgroups keeps working.
+func TestE2ENoNullHierarchyRow(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "nullhier", true, "y", 0)
+	c := e2ePoster(t)
+	id := fmt.Sprintf("<t7-nullhier-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E null hierarchy", e2eNow()), []string{"body"})); code != 240 {
+		t.Fatalf("POST to %s: %q, want 240", g, line)
+	}
+	unknown := fmt.Sprintf("t7.nullhier.nosuch%d", e2eSeq.Add(1))
+	uid := fmt.Sprintf("<t7-nullhier-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.post(t, e2eWire(e2eHead(uid, unknown, "E2E null hierarchy unknown", e2eNow()), []string{"body"})); code != 441 {
+		t.Fatalf("POST to %s: %q, want 441", unknown, line)
+	}
+	e2eWaitStored(t, id, g)
+	if _, err := e2eDB.MainDBGetAllNewsgroups(); err != nil {
+		t.Fatalf("MainDBGetAllNewsgroups after intake: %v", err)
+	}
+}
+
+// TestE2EHistoryAfterIntake (INT-6): articles stored in a group whose row has a NULL
+// hierarchy reach the history index (two batches), so later offers get 435.
+func TestE2EHistoryAfterIntake(t *testing.T) {
+	e2eNeedDB(t)
+	g := fmt.Sprintf("t7.histnull.%d", e2eSeq.Add(1))
+	if _, err := e2eDB.GetMainDB().Exec(`INSERT INTO newsgroups(name,description,last_article,message_count,active,status,low_water,high_water) VALUES(?, '', 0, 0, 1, 'y', 1, 0)`, g); err != nil {
+		t.Fatalf("insert %s: %v", g, err)
+	}
+	// readers of NULL-hierarchy rows are fixed elsewhere (audit-delta-fixes): give the row
+	// a hierarchy afterwards so later tests reading every row are not affected
+	t.Cleanup(func() {
+		if _, err := e2eDB.GetMainDB().Exec(`UPDATE newsgroups SET hierarchy = 't7' WHERE name = ?`, g); err != nil {
+			t.Errorf("cleanup hierarchy of %s: %v", g, err)
+		}
+	})
+	c := e2ePoster(t)
+	var ids []string
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprintf("<t7-histnull-%d@test.invalid>", e2eSeq.Add(1))
+		if code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E history after intake", e2eNow()), []string{"body"})); code != 240 {
+			t.Fatalf("POST %d to %s: %q, want 240", i+1, g, line)
+		}
+		// wait for the history entry before the next post: two separate batches
+		if err := e2eWaitFor(e2eCommitWait, func() error {
+			ok, err := e2eHist.Exists(id)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("%s not in history", id)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	for _, id := range ids {
+		if code, line := c.cmd(t, "IHAVE %s", id); code != 435 {
+			t.Fatalf("IHAVE %s: %q, want 435", id, line)
+		}
+	}
+}
+
+// TestE2EMessageIDSyntax (A-intake-3): POST with a syntactically invalid Message-ID is refused.
+func TestE2EMessageIDSyntax(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "msgid", true, "y", 0)
+	c := e2ePoster(t)
+	noBrackets := fmt.Sprintf("t7-msgid-%d@test.invalid", e2eSeq.Add(1))
+	prefix := fmt.Sprintf("<t7-msgid-%d-", e2eSeq.Add(1))
+	long := prefix + strings.Repeat("a", 251-len(prefix)-len("@test.invalid>")) + "@test.invalid>"
+	if len(long) != 251 {
+		t.Fatalf("test bug: id length %d", len(long))
+	}
+	for _, id := range []string{noBrackets, long} {
+		if code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E message-id syntax", e2eNow()), []string{"body"})); code != 441 {
+			t.Fatalf("POST with Message-ID %q: %q, want 441", id, line)
+		}
+		if _, err := e2eStored(id, g); err == nil {
+			t.Fatalf("the refused article %q was stored", id)
+		}
+	}
+}
+
+// TestE2EDateChecks (INT-3, A-intake-7): unparseable dates and dates more than 24 h in
+// the future are refused.
+func TestE2EDateChecks(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "date", true, "y", 0)
+	c := e2ePoster(t)
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		date string
+		want int
+	}{
+		{"garbage", 441},
+		{now.Add(24*time.Hour + 30*time.Minute).Format(time.RFC1123Z), 441},
+		{now.Add(23 * time.Hour).Format(time.RFC1123Z), 240},
+	} {
+		id := fmt.Sprintf("<t7-date-%d@test.invalid>", e2eSeq.Add(1))
+		if code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E date check", tc.date), []string{"body"})); code != tc.want {
+			t.Fatalf("POST with Date %q: %q, want %d", tc.date, line, tc.want)
+		}
+		if tc.want == 240 {
+			e2eWaitStored(t, id, g)
+		}
+	}
+}
+
+// TestE2EControlXref (INT-4, A-intake-6, D3): control messages are refused, Supersedes
+// is stored as an ordinary article, a foreign Xref is not stored.
+func TestE2EControlXref(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "ctlxref", true, "y", 0)
+	c := e2ePoster(t)
+
+	ctl := fmt.Sprintf("<t7-ctlxref-%d@test.invalid>", e2eSeq.Add(1))
+	head := append(e2eHead(ctl, g, "cmsg cancel <x@y>", e2eNow()), "Control: cancel <x@y>")
+	if code, line := c.post(t, e2eWire(head, []string{"cancel"})); code != 441 {
+		t.Fatalf("POST with Control: %q, want 441", line)
+	}
+	if n := len(e2eLogs.lines("[INTAKE] control message " + ctl + " (cancel) refused: control messages are not processed")); n == 0 {
+		t.Fatalf("no D3 log line for %s", ctl)
+	}
+
+	sup := fmt.Sprintf("<t7-ctlxref-%d@test.invalid>", e2eSeq.Add(1))
+	head = append(e2eHead(sup, g, "E2E supersedes", e2eNow()), "Supersedes: <x@y>")
+	if code, line := c.post(t, e2eWire(head, []string{"superseding"})); code != 240 {
+		t.Fatalf("POST with Supersedes: %q, want 240", line)
+	}
+	e2eWaitStored(t, sup, g)
+	if n := len(e2eLogs.lines("[INTAKE] Supersedes ignored for " + sup)); n == 0 {
+		t.Fatalf("no D3 Supersedes log line for %s", sup)
+	}
+
+	// a foreign Xref by IHAVE (S4 refuses POST with Xref as a forged trace)
+	xref := fmt.Sprintf("<t7-ctlxref-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.cmd(t, "IHAVE %s", xref); code != 335 {
+		t.Fatalf("IHAVE %s: %q, want 335", xref, line)
+	}
+	head = append(e2eHead(xref, g, "E2E foreign xref", e2eNow()), "Xref: other.example g:1")
+	if err := c.send(e2eWire(head, []string{"xref body"})); err != nil {
+		t.Fatal(err)
+	}
+	if code, line, err := c.readStatus(); err != nil || code != 235 {
+		t.Fatalf("IHAVE with Xref: code=%d line=%q err=%v, want 235", code, line, err)
+	}
+	e2eWaitStored(t, xref, g)
+	gdb, err := e2eDB.GetGroupDB(g)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", g, err)
+	}
+	var stored string
+	err = gdb.DB.QueryRow(`SELECT headers_json FROM articles WHERE message_id = ?`, xref).Scan(&stored)
+	gdb.Return()
+	if err != nil {
+		t.Fatalf("read headers_json of %s: %v", xref, err)
+	}
+	for _, l := range strings.Split(stored, "\n") {
+		if strings.HasPrefix(strings.ToLower(l), "xref:") {
+			t.Fatalf("stored headers_json keeps the foreign Xref: %q", stored)
+		}
+	}
+	if !strings.Contains(stored, "Message-ID: "+xref) {
+		t.Fatalf("stored headers_json %q lacks the Message-ID", stored)
+	}
+}
+
+// TestE2EInFlightRetry (INT-2 in flight): an article whose message-id is claimed by another
+// transfer gets 436 (retry later), and a later offer is accepted.
+func TestE2EInFlightRetry(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "inflight", true, "y", 0)
+	c := e2ePoster(t)
+	id := fmt.Sprintf("<t7-inflight-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+		t.Fatalf("IHAVE %s: %q, want 335", id, line)
+	}
+	// the one allowed global touch (K3): this test's own message-id item
+	item := history.MsgIdCache.GetORCreate(id)
+	item.Mux.Lock()
+	item.Response = history.CaseLock
+	item.Mux.Unlock()
+	if err := c.send(e2eWire(e2eHead(id, g, "E2E in flight", e2eNow()), []string{"body"})); err != nil {
+		t.Fatal(err)
+	}
+	code, line, err := c.readStatus()
+	if err != nil || code != 436 {
+		t.Fatalf("IHAVE of an in-flight id: code=%d line=%q err=%v, want 436", code, line, err)
+	}
+	item.Mux.Lock()
+	item.Response = 0
+	item.Mux.Unlock()
+	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+		t.Fatalf("IHAVE %s again: %q, want 335", id, line)
+	}
+	if err := c.send(e2eWire(e2eHead(id, g, "E2E in flight", e2eNow()), []string{"body"})); err != nil {
+		t.Fatal(err)
+	}
+	if code, line, err := c.readStatus(); err != nil || code != 235 {
+		t.Fatalf("IHAVE retry: code=%d line=%q err=%v, want 235", code, line, err)
+	}
+	e2eWaitStored(t, id, g)
+}
+
+// TestE2EGroupDBOpenFailure (A-intake-9): when no group database can be opened nothing is
+// stored and the sender is told to retry (POST 441, IHAVE 436), not success.
+func TestE2EGroupDBOpenFailure(t *testing.T) {
+	e2eNeedDB(t)
+	// a 255-octet name: valid, but its database file name exceeds NAME_MAX
+	prefix := fmt.Sprintf("t7.dbfail.%d.", e2eSeq.Add(1))
+	g := prefix + strings.Repeat("a", 255-len(prefix))
+	if err := e2eDB.InsertNewsgroup(&models.Newsgroup{
+		Name: g, Description: "e2e group too long for a file name", Active: true,
+		Status: "y", LowWater: 1, Hierarchy: "t7",
+	}); err != nil {
+		t.Fatalf("InsertNewsgroup: %v", err)
+	}
+	c := e2ePoster(t)
+	id := fmt.Sprintf("<t7-dbfail-%d@test.invalid>", e2eSeq.Add(1))
+	wire := e2eWire(e2eHead(id, g, "E2E group DB open failure", e2eNow()), []string{"body"})
+	if code, line := c.post(t, wire); code != 441 {
+		t.Fatalf("POST to %s: %q, want 441", g, line)
+	}
+	// the temporary failure released the claim: the same id is offered again
+	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+		t.Fatalf("IHAVE %s after the temporary failure: %q, want 335", id, line)
+	}
+	if err := c.send(wire); err != nil {
+		t.Fatal(err)
+	}
+	if code, line, err := c.readStatus(); err != nil || code != 436 {
+		t.Fatalf("IHAVE to %s: code=%d line=%q err=%v, want 436", g, code, line, err)
+	}
+	if ok, err := e2eHist.Exists(id); err != nil || ok {
+		t.Fatalf("history Exists(%s) = %v, %v; want false", id, ok, err)
+	}
+	if n := len(e2eLogs.lines("[INTAKE] article " + id + " not stored: no group database could be opened")); n == 0 {
+		t.Fatalf("no [INTAKE] log line for %s", id)
+	}
+}
+
+// TestE2EWebCrosspost (A-intake-5): a web post queued for two groups is stored in both.
+func TestE2EWebCrosspost(t *testing.T) {
+	e2eNeedDB(t)
+	g1 := e2eGroupWith(t, "webxpost", true, "y", 0)
+	g2 := e2eGroupWith(t, "webxpost", true, "y", 0)
+	w := e2eProc.NewPostQueueWorker()
+	w.Start()
+	defer w.Stop()
+	id := fmt.Sprintf("<t7-webxpost-%d@test.invalid>", e2eSeq.Add(1))
+	body := "web crosspost body"
+	from := "E2E Web <noreply@pugleaf.net.invalid>"
+	// header block built like web/web_sitePostPage.go
+	headers := []string{
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=\"UTF-8\"",
+		"Content-Transfer-Encoding: 8bit",
+		"X-pugleaf-Trace: " + e2eHostname + ";",
+		" nonce=\"1\"; mail-complaints-to=\"abuse@test.invalid\";",
+		" posting-account=\"e2e\";",
+		"From: " + from,
+		"Newsgroups: " + g1 + "," + g2,
+		"Lines: 1",
+		"Bytes: " + strconv.Itoa(len(body)-1),
+	}
+	article := &models.Article{
+		MessageID:   id,
+		Subject:     "E2E web crosspost",
+		HeadersJSON: strings.Join(headers, "\n"),
+		FromHeader:  from,
+		DateString:  time.Now().Format(time.RFC1123Z),
+		BodyText:    body,
+		IsThrRoot:   true,
+		Lines:       1,
+		Bytes:       len(body) - 1,
+		Path:        ".POSTED!not-for-mail",
+		ArticleNums: make(map[*string]int64),
+		RefSlice:    []string{},
+		Headers:     map[string][]string{"newsgroups": {g1 + "," + g2}},
+	}
+	select {
+	case models.PostQueueChannel <- article:
+	case <-time.After(10 * time.Second):
+		t.Fatal("post queue full")
+	}
+	e2eWaitStored(t, id, g1, g2)
+}
+
+// TestE2ECaptureSlotReleased (A-tools-1): rejected, duplicate and accepted articles leave
+// every capture slot free again.
+func TestE2ECaptureSlotReleased(t *testing.T) {
+	e2eNeedDB(t)
+	ga := e2eGroupWith(t, "slots", true, "y", 0)
+	gb := e2eGroupWith(t, "slots", true, "y", 0)
+	c := e2ePoster(t)
+	unknown := fmt.Sprintf("t7.slots.nosuch%d", e2eSeq.Add(1))
+	rejected := fmt.Sprintf("<t7-slots-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.post(t, e2eWire(e2eHead(rejected, unknown, "E2E slots rejected", e2eNow()), []string{"body"})); code != 441 {
+		t.Fatalf("POST to %s: %q, want 441", unknown, line)
+	}
+	xpost := fmt.Sprintf("<t7-slots-%d@test.invalid>", e2eSeq.Add(1))
+	wire := e2eWire(e2eHead(xpost, ga+","+gb, "E2E slots crosspost", e2eNow()), []string{"body"})
+	if code, line := c.post(t, wire); code != 240 {
+		t.Fatalf("POST crosspost: %q, want 240", line)
+	}
+	e2eWaitStored(t, xpost, ga, gb)
+	if code, line := c.post(t, wire); code != 441 {
+		t.Fatalf("POST duplicate: %q, want 441", line)
+	}
+	if err := e2eWaitFor(e2eCommitWait, func() error {
+		if n := processor.CaptureInFlight(); n != 0 {
+			return fmt.Errorf("%d capture slots still taken", n)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
