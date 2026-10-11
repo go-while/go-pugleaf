@@ -384,8 +384,7 @@ func (c *ClientConnection) injectProtoArticle(head []string) ([]string, error) {
 	}
 	identity := c.pathIdentity()
 	if identity == "" {
-		log.Printf("[NNTP] POST refused: no path identity")
-		return nil, rejected("no path identity")
+		return nil, rejected("no path identity") // the handler logs "[NNTP] POST refused: ..."
 	}
 	present := func(name string) bool { return len(common.HeaderValues(head, name)) > 0 }
 
@@ -394,7 +393,7 @@ func (c *ClientConnection) injectProtoArticle(head []string) ([]string, error) {
 		return nil, rejected("forged trace")
 	}
 	for _, p := range common.HeaderValues(head, "Path") {
-		if strings.Contains(p, ".POSTED") {
+		if strings.Contains(strings.ToUpper(p), ".POSTED") { // RFC 5537 §3.2.1: keywords are case-insensitive
 			return nil, rejected("forged trace")
 		}
 	}

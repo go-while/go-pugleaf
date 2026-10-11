@@ -266,6 +266,7 @@ func TestIntkInjectProtoArticle(t *testing.T) {
 			{"injection-info", intkHead(id, date(0), "Injection-Info: other.invalid"), "forged trace"},
 			{"xref", intkHead(id, date(0), "Xref: other.invalid g:1"), "forged trace"},
 			{"posted-path", intkHead(id, date(0), "Path: x!.POSTED!y"), "forged trace"},
+			{"posted-path-lower-case", intkHead(id, date(0), "Path: x!.posted!y"), "forged trace"},
 			{"injection-date-without-message-id", intkHead("", date(0), "Injection-Date: "+date(0)), "invalid injection date"},
 			{"injection-date-without-date", intkHead(id, "", "Injection-Date: "+date(0)), "invalid injection date"},
 			{"bad-message-id", intkHead("no-brackets@test.invalid", date(0)), "invalid message-id"},

@@ -1235,9 +1235,9 @@ func TestE2ESizeLimits(t *testing.T) {
 // e2eBug7Marker prefixes the child's BUG-7 failures (see lines-20000).
 const e2eBug7Marker = "BUG-7-OPEN:"
 
-// e2eOversizeChild posts a 20 000-line article and requires a status line
-// (441 or another 4xx/5xx), then either a usable connection or a close after
-// the status, and no server write to a closed socket.
+// e2eOversizeChild posts a 20 000-line article and requires a 441 status, a
+// usable connection afterwards (MODE READER 200/201) and no server write to a
+// closed socket.
 func e2eOversizeChild(t *testing.T) {
 	g := e2eGroup(t, "lines")
 	id := e2eMsgID("lines")
@@ -1252,43 +1252,48 @@ func e2eOversizeChild(t *testing.T) {
 	}
 	wireErr := c.send(e2eWire(e2eHead(id, g, "E2E 20000 lines", e2eNow()), body)) // may fail: server closed
 	code, line, err := c.readStatus()
-	statusOK := err == nil && code >= 400 && code < 600
+	// RFC 3977 §6.3.1.2: 441; the article was drained, so the connection stays usable
+	statusOK := err == nil && code == 441
+	usable, modeDetail := false, "not tried"
 	if statusOK {
-		// a status was sent: the connection is either still usable or closed after it
 		code2, line2, err2 := c.tryCmd("MODE READER")
-		if err2 == nil && code2 != 200 && code2 != 201 {
-			t.Fatalf("after the rejection %q: MODE READER %q", line, line2)
-		}
+		usable = err2 == nil && (code2 == 200 || code2 == 201)
+		modeDetail = fmt.Sprintf("code=%d line=%q err=%v", code2, line2, err2)
 	}
-	// wait for the server side of this connection to end, then look for writes after close
+	// The fixed server ends this session silently on the client's EOF. Give a late
+	// write to the closed socket up to 1.5 s to show up in the log (polled).
 	_ = c.Conn.Close()
-	if werr := e2eWaitFor(e2eCommitWait, func() error {
-		if len(e2eLogs.lines("Connection error from "+local)) == 0 {
-			return fmt.Errorf("handler of %s still running", local)
+	closedWritesOf := func() []string {
+		var out []string
+		for _, l := range e2eLogs.lines(local) {
+			// writes only: a read loop hitting the closed conn after a correct 441+close is fine
+			if strings.Contains(l, "use of closed network connection") && strings.Contains(l, "write tcp") {
+				out = append(out, l)
+			}
 		}
-		return nil
-	}); werr != nil && !statusOK {
-		t.Logf("no handler end logged for %s: %v", local, werr)
+		return out
 	}
+	_ = e2eWaitFor(1500*time.Millisecond, func() error {
+		if len(closedWritesOf()) > 0 {
+			return nil // found one: stop waiting
+		}
+		return fmt.Errorf("no write to a closed socket yet")
+	})
 	// The server reads (and discards) the oversized article up to its terminator
 	// before it answers 441, so no unread input is left in its receive buffer and
 	// the connection stays usable. Only an article past the drain bound
 	// (maxArticleDrainBytes) is answered with 400 and a close, and that close
 	// does CloseWrite and drains under a deadline first (closeAfterReply), so the
 	// kernel never answers unread input with RST before the status arrives.
-	var closedWrites []string
-	for _, l := range e2eLogs.lines(local) {
-		// writes only: a read loop hitting the closed conn after a correct 441+close is fine
-		if strings.Contains(l, "use of closed network connection") && strings.Contains(l, "write tcp") {
-			closedWrites = append(closedWrites, l)
-		}
-	}
+	closedWrites := closedWritesOf()
 	switch {
 	case !statusOK && len(closedWrites) > 0:
-		t.Fatalf(e2eBug7Marker+" 20000-line article: no status line (read: code=%d line=%q err=%v, write err=%v); the server wrote to the closed socket: %q",
+		t.Fatalf(e2eBug7Marker+" 20000-line article: no 441 (read: code=%d line=%q err=%v, write err=%v); the server wrote to the closed socket: %q",
 			code, line, err, wireErr, closedWrites)
 	case !statusOK:
-		t.Fatalf(e2eBug7Marker+" 20000-line article: no status line (read: code=%d line=%q err=%v, write err=%v)", code, line, err, wireErr)
+		t.Fatalf(e2eBug7Marker+" 20000-line article: no 441 (read: code=%d line=%q err=%v, write err=%v)", code, line, err, wireErr)
+	case !usable:
+		t.Fatalf(e2eBug7Marker+" 20000-line article: %q, but the connection is not usable: MODE READER %s", line, modeDetail)
 	case len(closedWrites) > 0:
 		t.Fatalf(e2eBug7Marker+" 20000-line article: %q, but the server wrote to a closed socket: %q", line, closedWrites)
 	}
