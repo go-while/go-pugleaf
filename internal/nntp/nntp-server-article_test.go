@@ -383,6 +383,25 @@ func TestArtNoArgument(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("current-article-hidden-420", func(t *testing.T) {
+		gH, _ := artSeed(t, "noarg-hidden", 2, nil)
+		c := hs.dial(t)
+		artSelect(t, c, gH) // current article = 1
+		artHide(t, gH, 1)
+		for _, cmd := range artCmds {
+			code, line, _ := artDo(t, c, "%s", cmd.name)
+			// RFC 3977 §6.2.1.2: the no-argument form answers only 220-223, 412 or 420;
+			// a current article hidden or expired since GROUP is 420, not 423.
+			if err := hExpectCode(code, line, 420); err != nil {
+				t.Errorf("bare %s after the current article was hidden: %v", cmd.name, err)
+			}
+		}
+		// The number form keeps 423.
+		code, line, _ := artDo(t, c, "STAT 1")
+		if err := hExpectCode(code, line, 423); err != nil {
+			t.Errorf("STAT 1 (hidden): %v", err)
+		}
+	})
 	t.Run("no-group-412", func(t *testing.T) {
 		c := hs.dial(t)
 		var errs []error

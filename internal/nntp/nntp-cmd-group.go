@@ -1,6 +1,8 @@
 package nntp
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -13,16 +15,23 @@ import (
 
 // selectableGroup returns the newsgroups row of name when the server carries the group
 // (it exists in the main DB and is active). It never opens a group DB, so an unknown or
-// inactive name cannot create a group database (SEC-2, A-nntp-sec-4).
-func (c *ClientConnection) selectableGroup(name string) (*models.Newsgroup, bool) {
+// inactive name cannot create a group database (SEC-2, A-nntp-sec-4). found is false for
+// an unknown or inactive group (411); err is a main DB fault (403, decision 15).
+func (c *ClientConnection) selectableGroup(name string) (g *models.Newsgroup, found bool, err error) {
 	if name == "" {
-		return nil, false
+		return nil, false, nil
 	}
-	g, err := c.server.DB.MainDBGetNewsgroup(name)
-	if err != nil || g == nil || !g.Active {
-		return nil, false
+	g, err = c.server.DB.MainDBGetNewsgroup(name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
 	}
-	return g, true
+	if err != nil {
+		return nil, false, err
+	}
+	if g == nil || !g.Active {
+		return nil, false, nil
+	}
+	return g, true, nil
 }
 
 // selectGroup opens the group DB of g (which passed selectableGroup), reads the marks of
@@ -30,7 +39,8 @@ func (c *ClientConnection) selectableGroup(name string) (*models.Newsgroup, bool
 // empty group). It returns the group DB (the caller must Return it) and the numbers of the
 // "211 count low high group" reply (decision 14): low/high are the lowest/highest visible
 // article numbers, count is newsgroups.message_count clamped to high-low+1 (an estimate
-// that may include hidden articles, RFC 3977 §6.1.1.2), and an empty group gives 0 0 0.
+// that may include hidden articles, RFC 3977 §6.1.1.2; a count below 1 for a non-empty
+// group becomes high-low+1), and an empty group gives 0 0 0.
 // On error nothing is changed and no group DB is held.
 func (c *ClientConnection) selectGroup(g *models.Newsgroup) (groupDB *database.GroupDB, count, low, high int64, err error) {
 	groupDB, err = c.server.DB.GetGroupDB(g.Name)
@@ -49,8 +59,10 @@ func (c *ClientConnection) selectGroup(g *models.Newsgroup) (groupDB *database.G
 		if span := high - low + 1; count > span {
 			count = span
 		}
-		if count < 0 {
-			count = 0
+		if count < 1 {
+			// a stale or zero message_count: a non-empty group must not report 0
+			// (RFC 3977 §6.1.1.2: the estimate is at least the actual number)
+			count = high - low + 1
 		}
 	}
 	c.currentGroup = g.Name
@@ -71,7 +83,11 @@ func (c *ClientConnection) handleGroup(args []string) error {
 		return c.sendResponse(501, "GROUP command requires a group name")
 	}
 
-	g, ok := c.selectableGroup(args[0])
+	g, ok, err := c.selectableGroup(args[0])
+	if err != nil {
+		log.Printf("[NNTP] GROUP: newsgroup lookup: %v", err)
+		return c.sendResponse(403, "Internal fault")
+	}
 	if !ok {
 		// unknown or inactive: the current group stays unchanged (§6.1.1.2)
 		return c.sendResponse(411, "No such newsgroup")
@@ -108,7 +124,11 @@ func (c *ClientConnection) handleListGroup(args []string) error {
 		}
 	}
 
-	g, ok := c.selectableGroup(groupName)
+	g, ok, err := c.selectableGroup(groupName)
+	if err != nil {
+		log.Printf("[NNTP] LISTGROUP: newsgroup lookup: %v", err)
+		return c.sendResponse(403, "Internal fault")
+	}
 	if !ok {
 		return c.sendResponse(411, "No such newsgroup")
 	}

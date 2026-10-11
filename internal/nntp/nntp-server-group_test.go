@@ -852,6 +852,20 @@ func TestGrpHiddenNotListed(t *testing.T) {
 	if !strings.HasPrefix(line, fmt.Sprintf("223 2 %s", hMessageID(g, 2))) {
 		t.Fatalf("bare STAT after GROUP: got %q (code %d), want 223 2", line, code)
 	}
+
+	// A stale message_count of 0 must not give "211 0 2 4": a non-empty group reports a
+	// count of at least the visible articles (RFC 3977 §6.1.1.2), here high-low+1 = 3.
+	if _, err := database.RetryableExec(hTestDB(t).GetMainDB(),
+		`UPDATE newsgroups SET message_count = 0 WHERE name = ?`, g); err != nil {
+		t.Fatalf("zero message_count of %s: %v", g, err)
+	}
+	code, line = c.cmd(t, "GROUP %s", g)
+	if err := hExpectCode(code, line, 211); err != nil {
+		t.Fatal(err)
+	}
+	if err := grpExpect211(line, 3, 2, 4, g); err != nil {
+		t.Fatalf("GROUP with message_count 0: %v", err)
+	}
 }
 
 // TestGrpListGroupRangeEmpty: a reversed range is not a syntax error; LISTGROUP answers

@@ -74,7 +74,8 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 // or 0 when the article was found by message-id outside it (§6.2.1.2). For stat, the
 // number forms read only the message-id.
 //
-//   - no argument: the current article; 412 without a group, 420 when it is invalid.
+//   - no argument: the current article; 412 without a group, 420 when it is invalid
+//     (also when it was hidden or expired since it became current).
 //   - "<message-id>": the current group first, then local430, then (with a processor) the
 //     history lookup re-checked by visibleInOtherGroup; a miss is 430. The current article
 //     is never changed. Without a processor only the current group is searched.
@@ -84,8 +85,9 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 // DB faults answer 403 without the error delay (decision 15).
 func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article *models.Article, replyNum int64, ok bool, err error) {
 	var num int64
+	fromCurrent := len(args) == 0
 	switch {
-	case len(args) == 0:
+	case fromCurrent:
 		if !c.requireGroup() {
 			return nil, 0, false, nil
 		}
@@ -185,6 +187,10 @@ func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article 
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		c.rateLimitOnError()
+		if fromCurrent {
+			// hidden or expired since it became current: §6.2.1.2 allows only 420 here
+			return nil, 0, false, c.sendResponse(420, "Current article number is invalid")
+		}
 		return nil, 0, false, c.sendResponse(423, "No article with that number")
 	}
 	if err != nil {
