@@ -84,7 +84,8 @@ func newDownloadRun() *GroupBatch {
 // answer on item.ReturnQ). A nil item is skipped. Every successful send increments handed.
 //
 // When runDone is closed or a shutdown is requested, it stops queueing: prepare (which may use
-// the group DB that the run closes after runDone) is not called again, and stopped is closed.
+// the group DB that the run closes after runDone) is not called again, an item prepared but not
+// sent has its message-id cache entry released (resetLateMsgID), and stopped is closed.
 // stopped is also closed when xhdrChan closes. In both cases it then keeps receiving and
 // discarding from xhdrChan until the channel is closed, because XHdrStreamed blocks on a full
 // channel and has no stop channel of its own.
@@ -126,9 +127,18 @@ func feedDownloadRun(xhdrChan <-chan nntp.HeaderLine, runDone <-chan struct{}, s
 		if item.Error != nil || item.Article != nil {
 			target = returnQ
 		}
+		// a select with a ready send and a closed runDone picks at random: check runDone first,
+		// so no download is queued for a run that is gone
+		select {
+		case <-runDone:
+			resetLateMsgID(item.MessageID)
+			return queued, false
+		default:
+		}
 		select {
 		case target <- item:
 		case <-runDone:
+			resetLateMsgID(item.MessageID)
 			return queued, false
 		}
 		handed.Add(1)
@@ -154,20 +164,28 @@ func drainLateResults(returnQ <-chan *BatchItem, outstanding int64, shutdownChan
 		if item == nil {
 			continue
 		}
-		if item.MessageID != nil {
-			msgIdItem := history.MsgIdCache.GetORCreate(*item.MessageID)
-			if msgIdItem != nil && msgIdItem.MessageId == *item.MessageID {
-				msgIdItem.Mux.Lock()
-				msgIdItem.CachedEntryExpires = time.Now().Add(5 * time.Second)
-				msgIdItem.Response = history.CaseError
-				msgIdItem.Mux.Unlock()
-			}
-		}
+		resetLateMsgID(item.MessageID)
 		item.Article = nil
 		item.MessageID = nil
 		item.GroupName = nil
 		item.Error = nil
 		item.ReturnQ = nil
+	}
+}
+
+// resetLateMsgID sets the message-id cache entry of an item that a DownloadArticles run will not
+// process to CaseError with a 5 s TTL, as the processing loop does for failed items, so the
+// CaseLock taken by the feeder does not block a later run. A nil messageID is ignored.
+func resetLateMsgID(messageID *string) {
+	if messageID == nil {
+		return
+	}
+	msgIdItem := history.MsgIdCache.GetORCreate(*messageID)
+	if msgIdItem != nil && msgIdItem.MessageId == *messageID {
+		msgIdItem.Mux.Lock()
+		msgIdItem.CachedEntryExpires = time.Now().Add(5 * time.Second)
+		msgIdItem.Response = history.CaseError
+		msgIdItem.Mux.Unlock()
 	}
 }
 

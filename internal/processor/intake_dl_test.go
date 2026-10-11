@@ -128,7 +128,15 @@ func TestIntakeDLFeederDrainsAfterDone(t *testing.T) {
 		const xhdrCap = 4
 		returnQ := make(chan *BatchItem, 1)
 		getQ := make(chan *BatchItem) // nobody receives: the feeder blocks on its first send
-		f := h.startFeeder(xhdrCap, returnQ, getQ, func(string) *BatchItem { return &BatchItem{ReturnQ: returnQ} })
+		// the prepared item holds a CaseLock claim like DownloadArticles' prepare: the abandoned send must release it
+		const id = "<t7-intakedl-blocked-claim@test.invalid>"
+		msgIdItem := history.NewMsgIdItemCache().GetORCreate(id)
+		msgIdItem.Mux.Lock()
+		msgIdItem.Response = history.CaseLock
+		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
+		msgID := &msgIdItem.MessageId
+		msgIdItem.Mux.Unlock()
+		f := h.startFeeder(xhdrCap, returnQ, getQ, func(string) *BatchItem { return &BatchItem{MessageID: msgID, ReturnQ: returnQ} })
 		f.xhdr <- nntp.HeaderLine{Value: "<t7-intakedl-blocked-0@test.invalid>"}
 		deadline := time.Now().Add(intakeDLTestWait)
 		for f.prepared.Load() < 1 {
@@ -139,6 +147,15 @@ func TestIntakeDLFeederDrainsAfterDone(t *testing.T) {
 		}
 		close(f.runDone)
 		h.waitClosed(f.stopped, "stopped after runDone")
+		msgIdItem.Mux.RLock()
+		resp, exp := msgIdItem.Response, msgIdItem.CachedEntryExpires
+		msgIdItem.Mux.RUnlock()
+		if resp != history.CaseError {
+			t.Fatalf("abandoned item's msgid state %#x, want CaseError", resp)
+		}
+		if ttl := time.Until(exp); ttl <= 0 || ttl > 5*time.Second {
+			t.Fatalf("abandoned item's msgid TTL %v, want (0, 5s]", ttl)
+		}
 		// after runDone the feeder must keep consuming xhdr (the XHDR reader blocks on a full channel):
 		// 3*cap sends only complete when it does
 		for i := 1; i <= 3*xhdrCap; i++ {
@@ -218,7 +235,12 @@ func TestIntakeDLDrainLateResults(t *testing.T) {
 		for _, it := range late {
 			q <- it
 		}
+		// a result beyond the outstanding count, sent before the drain finished: it must stay queued
+		q <- &BatchItem{Error: errIsDuplicateError}
 		h.waitClosed(done, "drainLateResults with 3 of 3 results")
+		if len(q) != 1 {
+			t.Fatalf("queue len %d, want 1: drain consumed more than outstanding", len(q))
+		}
 		if late[0].MessageID != nil || late[0].Error != nil {
 			t.Fatalf("drained item not cleared: %+v", late[0])
 		}
@@ -230,11 +252,6 @@ func TestIntakeDLDrainLateResults(t *testing.T) {
 		}
 		if ttl := time.Until(exp); ttl <= 0 || ttl > 5*time.Second {
 			t.Fatalf("msgid item TTL %v, want (0, 5s]", ttl)
-		}
-		// a result beyond the outstanding count stays in the queue
-		q <- &BatchItem{Error: errIsDuplicateError}
-		if len(q) != 1 {
-			t.Fatalf("queue len %d, want 1: drain consumed more than outstanding", len(q))
 		}
 	})
 	t.Run("shutdown", func(t *testing.T) {
