@@ -702,7 +702,7 @@ func runIsolated(t *testing.T, timeout time.Duration, child func(t *testing.T)) 
 		return fmt.Errorf("timed out after %s: %s", time.Since(start).Round(time.Millisecond), hTail(out.String(), 20))
 	}
 	if runErr != nil {
-		return fmt.Errorf("child failed: %v: %s", runErr, hTail(out.String(), 40))
+		return fmt.Errorf("child failed: %v: %s", runErr, hChildOutput(out.String(), 40))
 	}
 	return nil
 }
@@ -714,6 +714,23 @@ func hTail(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// hChildOutput returns the last n lines of a child's output, preceded by the
+// lines around the first "panic:" (a Go panic prints at the top, before the
+// goroutine dump, which the tail alone would hide).
+func hChildOutput(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, l := range lines {
+		if strings.HasPrefix(l, "panic:") || strings.Contains(l, "fatal error:") {
+			end := i + 12
+			if end > len(lines) {
+				end = len(lines)
+			}
+			return strings.Join(lines[i:end], "\n") + "\n[...]\n" + hTail(s, n)
+		}
+	}
+	return hTail(s, n)
 }
 
 // hIsErrNotFound reports whether err wraps ErrArticleNotFound.
@@ -800,6 +817,10 @@ func TestHarnessKnownBug(t *testing.T) {
 	}
 	if got := hIsolatedRunPattern("TestA/sub.1/x+y"); got != `^TestA$/^sub\.1$/^x\+y$` {
 		t.Errorf("hIsolatedRunPattern: %q", got)
+	}
+	long := "=== RUN TestX\npanic: runtime error: nil deref\n\ngoroutine 7 [running]:\n" + strings.Repeat("frame\n", 100) + "exit status 2"
+	if got := hChildOutput(long, 5); !strings.HasPrefix(got, "panic: runtime error") || !strings.HasSuffix(got, "exit status 2") {
+		t.Errorf("hChildOutput lost the panic line or the tail: %q", got)
 	}
 }
 
