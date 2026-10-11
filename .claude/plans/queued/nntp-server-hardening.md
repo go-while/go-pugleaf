@@ -417,7 +417,9 @@ arrive only with `nntp-rfc-commands` (RFC-1, open marker).
   `return c.readArticleBlock(c.server.MaxArticleBytes())` (or a per-group minimum with `newsgroups.max_art_size`)
   and maps `errors.Is(err, ErrArticleTooLarge)` → 441 (POST) / 437 (IHAVE) / `439 <id>` (TAKETHIS) with the
   connection kept, and `errors.Is(err, ErrArticleDrainLimit)` → `400 Article too large, closing connection` + return
-  `errQuit` (clean close). `readArticleBlock` already un-stuffs `..`, splits head/body at the first empty line,
+  `errQuit` (clean close; the intake plan wraps this in its own `closeAfterReply` helper and adds
+  `common.WireArticleSize`: this plan defines neither name; E2E ids: this plan uses N20–N39 in
+  `scripts/test-nntp-server.sh`, N40–N49 are reserved for `nntp-intake-injection`). `readArticleBlock` already un-stuffs `..`, splits head/body at the first empty line,
   keeps the 1024-head-line / 16384-line caps (exceeding them is `ErrArticleTooLarge` too) and refreshes the read
   deadline per line. Note for its `TestE2ESizeLimits/lines-20000` child: after this plan a clean client EOF is no
   longer logged as `Connection error from …`, so the child's wait for that line times out harmlessly (it only logs
