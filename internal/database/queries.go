@@ -1801,30 +1801,29 @@ func (db *Database) SearchUsers(searchTerm string, limit int) ([]*models.User, e
 	return users, nil
 }
 
-// GetOverviewsRange returns overview entries from articles table for a specific range of article numbers
+// GetOverviewsRange returns at most limit visible (hide = 0) overview entries with
+// startNum <= article_num <= endNum, in number order. limit <= 0 means OverviewRangeChunk.
+// Callers page through a large range by calling again from the last number + 1.
 const query_GetOverviewsRange = `SELECT article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded
 		 FROM articles
-		 WHERE article_num >= ? AND article_num <= ?
-		 ORDER BY article_num ASC`
+		 WHERE hide = 0 AND article_num >= ? AND article_num <= ?
+		 ORDER BY article_num ASC LIMIT ?`
 
-func (db *Database) GetOverviewsRange(groupDB *GroupDB, startNum, endNum int64) ([]*models.Overview, error) {
+func (db *Database) GetOverviewsRange(groupDB *GroupDB, startNum, endNum int64, limit int) ([]*models.Overview, error) {
 	if startNum > endNum {
 		return nil, fmt.Errorf("start number %d is greater than end number %d", startNum, endNum)
 	}
-
-	// Limit range to prevent excessive queries
-	if endNum-startNum > 1000 {
-		endNum = startNum + 1000
+	if limit <= 0 {
+		limit = OverviewRangeChunk
 	}
 
-	rows, err := groupDB.DB.Query(query_GetOverviewsRange, startNum, endNum)
+	rows, err := RetryableQuery(groupDB.DB, query_GetOverviewsRange, startNum, endNum, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var out []*models.Overview
-
 	for rows.Next() {
 		var o models.Overview
 		if err := rows.Scan(&o.ArticleNum, &o.Subject, &o.FromHeader, &o.DateSent, &o.DateString, &o.MessageID, &o.References, &o.Bytes, &o.Lines, &o.ReplyCount, &o.Downloaded); err != nil {
@@ -1832,7 +1831,9 @@ func (db *Database) GetOverviewsRange(groupDB *GroupDB, startNum, endNum int64) 
 		}
 		out = append(out, &o)
 	}
-
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -1860,81 +1861,75 @@ func (db *Database) GetOverviewByMessageID(groupDB *GroupDB, messageID string) (
 	return overview, nil
 }
 
-// GetHeaderFieldRange returns specific header field values for a range of articles
-const query_GetHeaderFieldRange1 = `SELECT article_num, subject FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
-const query_GetHeaderFieldRange2 = `SELECT article_num, from_header FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
-const query_GetHeaderFieldRange3 = `SELECT article_num, date_string FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
-const query_GetHeaderFieldRange4 = `SELECT article_num, message_id FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
-const query_GetHeaderFieldRange5 = `SELECT article_num, "references" FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
-const query_GetHeaderFieldRange6 = `SELECT article_num, bytes FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
-const query_GetHeaderFieldRange7 = `SELECT article_num, lines FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
+// GetHeaderFieldRange returns the value of one header field for at most limit visible
+// (hide = 0) articles with startNum <= article_num <= endNum, one element per article in
+// number order. The 7 overview fields come from their columns; any other field is read
+// from headers_json (first occurrence, unfolded; empty when absent).
+// limit <= 0 means OverviewRangeChunk.
+const query_GetHeaderFieldRange1 = `SELECT article_num, subject FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+const query_GetHeaderFieldRange2 = `SELECT article_num, from_header FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+const query_GetHeaderFieldRange3 = `SELECT article_num, date_string FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+const query_GetHeaderFieldRange4 = `SELECT article_num, message_id FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+const query_GetHeaderFieldRange5 = `SELECT article_num, "references" FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+const query_GetHeaderFieldRange6 = `SELECT article_num, bytes FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+const query_GetHeaderFieldRange7 = `SELECT article_num, lines FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
 
-func (db *Database) GetHeaderFieldRange(groupDB *GroupDB, field string, startNum, endNum int64) (map[int64]string, error) {
+func (db *Database) GetHeaderFieldRange(groupDB *GroupDB, field string, startNum, endNum int64, limit int) ([]HeaderFieldValue, error) {
 	if startNum > endNum {
 		return nil, fmt.Errorf("start number %d is greater than end number %d", startNum, endNum)
 	}
-
-	// Limit range to prevent excessive queries
-	if endNum-startNum > 1000 {
-		endNum = startNum + 1000
+	if limit <= 0 {
+		limit = OverviewRangeChunk
 	}
 
-	var query string
-	var dbToQuery *sql.DB
+	// headers_json fallback for every field without a column of its own
+	const queryHeadersJSON = `SELECT article_num, headers_json FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
 
+	query := queryHeadersJSON
+	fromJSON := false
 	switch strings.ToLower(field) {
 	case "subject":
 		query = query_GetHeaderFieldRange1
-		dbToQuery = groupDB.DB
 	case "from":
 		query = query_GetHeaderFieldRange2
-		dbToQuery = groupDB.DB
 	case "date":
 		query = query_GetHeaderFieldRange3
-		dbToQuery = groupDB.DB
 	case "message-id":
 		query = query_GetHeaderFieldRange4
-		dbToQuery = groupDB.DB
 	case "references":
 		query = query_GetHeaderFieldRange5
-		dbToQuery = groupDB.DB
 	case "bytes":
 		query = query_GetHeaderFieldRange6
-		dbToQuery = groupDB.DB
 	case "lines":
 		query = query_GetHeaderFieldRange7
-		dbToQuery = groupDB.DB
 	default:
-		// For other headers, try to get from the full article headers
-		// For now, return empty result for unsupported headers
-		return make(map[int64]string), nil
+		fromJSON = true
 	}
 
-	rows, err := dbToQuery.Query(query, startNum, endNum)
-
+	rows, err := RetryableQuery(groupDB.DB, query, startNum, endNum, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	result := make(map[int64]string)
+	var out []HeaderFieldValue
 	for rows.Next() {
-		var articleNum int64
-		if strings.ToLower(field) == "bytes" || strings.ToLower(field) == "lines" {
-			var value int
-			if err := rows.Scan(&articleNum, &value); err != nil {
-				return nil, err
-			}
-			result[articleNum] = fmt.Sprintf("%d", value)
-		} else {
-			var value string
-			if err := rows.Scan(&articleNum, &value); err != nil {
-				return nil, err
-			}
-			result[articleNum] = value
+		var v HeaderFieldValue
+		var value sql.NullString // NULL gives an empty value; integers convert to decimal text
+		if err := rows.Scan(&v.ArticleNum, &value); err != nil {
+			return nil, err
 		}
+		if fromJSON {
+			v.Value = HeaderValueFromJSON(value.String, field)
+		} else {
+			v.Value = value.String
+		}
+		out = append(out, v)
 	}
-	return result, nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // UpdateNewsgroupWatermarks updates the high and low water marks for a newsgroup
