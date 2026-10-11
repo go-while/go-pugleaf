@@ -157,13 +157,15 @@ marks every one of them with `knownBug(t, "<id>", err)`; this plan removes those
     `cmd/web -nntptlsport` without `-nntpcertfile`/`-nntpkeyfile` used to skip TLS silently and now exits.
     Behaviour change to report.
 
-### Open questions for the user (asked at the wave-1 boundary; the defaults above apply until answered)
-1. Per-user `maxconns` (decision 12): keep `-enforce-user-maxconns` off by default, or turn it on after raising
-   existing users' values? nntpmgr's 1–25 range cannot set 0 (unlimited), and the default for new users is 1.
-2. The 1 s local430 TTL (decision 9) makes local430 a short burst damper only; acceptable, or prefer a longer TTL
-   with `Remove` (intake) covering in-process arrivals and the test setting a short TTL?
-3. Default delays (decision 7: 25 ms per article command, 25 ms per GROUP, 1 s error delay): acceptable for the
-   public server?
+### Open questions for the user (answered 2026-10-11 at the wave-1 boundary)
+1. Per-user `maxconns` (decision 12): **answered "default to 3"**. The default for new users becomes 3: nntpmgr's
+   `-maxconns` flag default (`cmd/nntpmgr/main.go:31`) and `CreateNNTPUserForWebUser` (`db_nntp_users.go:270`) both
+   use a new `database.DefaultNNTPUserMaxConns = 3` (defined in `nntp_user_admin.go`, slice `nntp-auth-db`).
+   `-enforce-user-maxconns` stays off by default (existing users keep their stored 1 until raised with
+   `nntpmgr -update -maxconns`); the user can turn it on later.
+2. local430 TTL (decision 9): **default kept (1 s)**. (local430 is a negative cache of message-ids that answered 430,
+   so repeated lookups of a missing article by many readers or peers do not hit the DB/processor each time.)
+3. Default delays (decision 7): **accepted** (25 ms per article command, 25 ms per GROUP, 1 s error delay).
 
 ### Out of scope (owned elsewhere; cross-reference only)
 - `nntp-rfc-commands`: RFC-1 (DATE, NEXT, LAST, NEWGROUPS, NEWNEWS, OVER/HDR, LIST OVERVIEW.FMT/HEADERS, the LIST
@@ -233,7 +235,7 @@ marks every one of them with `knownBug(t, "<id>", err)`; this plan removes those
   test prefixes `nshRead`/`TestNSHRead`.
 - **nntp-auth-db:** `nntpDummyHash`, `nntpDummyOnce`, `(*NNTPAuthCache).GetEntry`, `(*NNTPAuthCache).RemoveUserID`,
   field `AuthCacheEntry.StoredHash`; DB file `internal/database/nntp_user_admin.go`: `GetNNTPUserByUsernameAnyState`,
-  `CountNNTPUsersByWebUserID`, `UpdateNNTPUserWebUserID`; nntpmgr: `flagsSet`, `setNNTPUserActive`,
+  `CountNNTPUsersByWebUserID`, `UpdateNNTPUserWebUserID`, `DefaultNNTPUserMaxConns`; nntpmgr: `flagsSet`, `setNNTPUserActive`,
   `setNNTPUserPassword`; test prefixes `nshAuth`/`TestNSHAuth`.
 
 ### K3 Tests
@@ -884,7 +886,8 @@ Changes:
    `UpdateNNTPUserWebUserID(userID int, webUserID int64) error` (`NULLIF(?, 0)`, `updated_at`). In
    `db_nntp_users.go`: `GetNNTPUserByWebUserID` returns `sql.ErrNoRows` for `webUserID <= 0` and adds
    `ORDER BY id ASC LIMIT 1` (D6 contract).
-5. **nntpmgr (OPS-2, A-ops-9, decision 16).** `flagsSet()` from `flag.Visit`. `-list`: drop the Password column.
+5. **nntpmgr (OPS-2, A-ops-9, decision 16, open question 1).** `flagsSet()` from `flag.Visit`. The `-maxconns`
+   flag default and `CreateNNTPUserForWebUser` use `DefaultNNTPUserMaxConns = 3` (was 1). `-list`: drop the Password column.
    `-create`: existence check with `GetNNTPUserByUsernameAnyState`; print the password only when `-password` was
    `random`; otherwise `Password: (as given)`. `-update`: `GetNNTPUserByUsernameAnyState`; change maxconns only if
    `-maxconns` was given (range 1–25) and posting only if `-posting` was given; error when neither was given. New
