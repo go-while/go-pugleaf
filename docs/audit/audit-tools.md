@@ -62,8 +62,9 @@ OPS-4 seeds). By category: bug 9, robustness 5, security 4, dead-code 3, wrong-f
 Five most important:
 1. **A-tools-1 (high)**: `processArticle` hands every stored article to `go BatchCaptureOverviewForLater(...)`. When
    the batch writer is behind, each call parks a goroutine that holds the full article, and nothing bounds how many
-   park. This is the fetcher memory growth noted in `BUGS.md`. Measured: 20,000 articles of 16 KiB → 19,872 parked
-   goroutines, +377 MiB live heap.
+   park. It is a likely cause of the fetcher memory growth noted in `BUGS.md`, together with A-db-2 and A-tools-4;
+   that causal link is PLAUSIBLE. Measured in isolation: 20,000 articles of 16 KiB → 19,872 parked goroutines,
+   +377 MiB live heap.
 2. **A-tools-2 (high)**: `nntp-fetcher -fetch-newsgroups-from-remote` opens the main DB with `OpenDatabase(nil)`, i.e.
    `./data`, whatever `-data` says. With `-fetch-newsgroups-force` it inserts rows into the production DB.
 3. **A-tools-3 (medium)**: the same path builds its backend without the provider's proxy settings and without
@@ -81,11 +82,16 @@ Five most important:
 
 | seed | id | severity | category | location | verdict |
 |----|----|----|----|----|----|
-| new | A-tools-1 | high | robustness | `internal/processor/threading.go:256,283`, `internal/database/db_batch.go:156-164,1753,1787-1801`, `internal/processor/proc_DLArt.go:282-290`, `cmd/nntp-fetcher/main.go:536-584` | CONFIRMED |
+| new | A-tools-1 | high | robustness | `internal/processor/threading.go:256,283`, `internal/database/db_batch.go:156-164,1753,1787-1801`, `internal/processor/proc_DLArt.go:282-290`, `cmd/nntp-fetcher/main.go:536-584` | CONFIRMED (missing bound); PLAUSIBLE (link to the `BUGS.md` symptom) |
 
 - **Scenario:** `nntp-fetcher` with many connections (`MaxConns` download workers, `main.go:536`) downloads faster
-  than the SQLite batch writer commits. This is the `BUGS.md` case: "eats memory when sucking with few hundreds of
-  connections". The heap grows until the process is OOM-killed.
+  than the SQLite batch writer commits. The heap then grows by one parked goroutine plus one full article per
+  stored article, with no upper bound.
+  - The missing bound is CONFIRMED by code trace and by the measurement below.
+  - That it causes the `BUGS.md` symptom ("eats memory when sucking with few hundreds of connections") is
+    PLAUSIBLE. It is a likely cause, together with A-db-2 and A-tools-4. Missing step: a heap and goroutine profile
+    (`pprof` heap/goroutine) of a live fetch with many connections, showing parked `BatchCaptureOverviewForLater`
+    goroutines dominating.
 - **Evidence:**
   - Code trace:
     - `processArticle` ends every stored group with `go proc.DB.Batch.BatchCaptureOverviewForLater(newsgroupPtr, article)`
@@ -206,10 +212,12 @@ Five most important:
 |----|----|----|----|----|----|
 | new | A-tools-6 | medium | robustness | `internal/database/progress.go:78-88`; callers `cmd/nntp-fetcher/main.go:139`, `cmd/web/main.go:226` | CONFIRMED |
 
-- **Scenario:** `progress.db` cannot be opened or written: permissions, a read-only filesystem, a corrupt file, or a
-  directory with that name. `initSchema` loops `Exec` → `sleep 100ms` → `continue` with no limit and no log line.
+- **Scenario:** the progress DB file cannot be opened or written: permissions, a read-only filesystem, a corrupt
+  file, or a directory with that name. `NewProgressDB` takes a directory and appends `progress.db`
+  (`progress.go:34-41`). Both callers pass `<data>/progress.db`, so the real file is
+  `<data>/progress.db/progress.db` (`cmd/web/main.go:225` comments on this). `initSchema` loops `Exec` → `sleep 100ms` → `continue` with no limit and no log line.
   `nntp-fetcher` and `web` both hang at startup and never say why.
-- **Evidence:** `_repro/progressdb`, with `progress.db` created as a directory:
+- **Evidence:** `_repro/progressdb`, with `<dir>/progress.db` created as a directory:
   ```
   NewProgressDB still blocked after 5.000358195s (no log line, no error)
   ```
@@ -219,17 +227,22 @@ Five most important:
 
 | seed | id | severity | category | location | verdict |
 |----|----|----|----|----|----|
-| new (residual of LO:A3) | A-tools-7 | medium | bug | `internal/processor/analyze.go:495-501`, `internal/processor/analyze.go:908-911`, `cmd/nntp-analyze/main.go:175-181,206-210,479-481` | CONFIRMED |
+| new (residual of LO:A3) | A-tools-7 | medium | bug | `internal/processor/analyze.go:495-501`, `internal/processor/analyze.go:908-911`, `cmd/nntp-analyze/main.go:175-181,206-210,273-276,324-326,479-481` | CONFIRMED |
 
-- **Scenario:** `nntp-analyze -data ./data-test-x -group alt.test` (single group) or `-groups-file f` creates and
-  overwrites `data/cache/<host>/<sha256>.overview` relative to the cwd. In the repo checkout that is the production
-  `./data`. LO:A3 switched `getCacheFilePath` to `proc.DB.GetDataDir()`, but it falls back to `"data"` when
-  `proc.DB == nil` (`analyze.go:496-499`). Two of the three modes build `&processor.Processor{Pool: pool}` without a
-  DB (`analyze.go:909-911`, `main.go:479-481`), and `-data` is passed only to `analyzeAllGroups` (`main.go:186-188`).
+- **Scenario:** in **all three modes** of `nntp-analyze` (single group, `-groups-file`, `$all`/wildcard), the tool
+  creates and overwrites `data/cache/<host>/<sha256>.overview` relative to the cwd, whatever `-data` says. In the
+  repo checkout that is the production `./data`.
+  - LO:A3 switched `getCacheFilePath` to `proc.DB.GetDataDir()`, but it falls back to `"data"` when
+    `proc.DB == nil` (`analyze.go:496-499`).
+  - Every mode builds `&processor.Processor{Pool: pool}` without a DB: `analyze.go:909-911` (single group),
+    `main.go:479-481` (`-groups-file`) and `main.go:324-326` (`$all`/wildcard).
+  - In `$all` mode, `-data` only opens the main DB to read the group list (`main.go:273-276`). That `db` is never
+    handed to `proc`.
+  - LO:A3's fix therefore has no effect anywhere in `nntp-analyze`.
 - **Evidence:** `_repro/analyze`, run from `./data-test-audit-tools`: the cache lookup resolves to
   `data/cache/example.invalid/20ec6135….overview` under the cwd.
-- **Fix:** pass `-data` to every mode. Give `Processor` an explicit cache root, or set a DB-less data dir field, and
-  remove the `"data"` fallback. Effort S.
+- **Fix:** in `$all` mode set `proc.DB = db`. For the other two modes, pass `-data` and give `Processor` an explicit
+  cache root. Remove the `"data"` fallback. Effort S.
 
 ### A-tools-8: analyze cache keyed two ways; `-clear-cache` panics; `-cache-stats`/`-validate-cache` never find the cache
 
@@ -297,7 +310,10 @@ Five most important:
 - **Scenario:** `-groups-file` takes `fields[0]` of each active line unvalidated (`main.go:50-55`). Active files are
   often downloaded from remote servers (the help text names `active.i2pn2.txt`). With `-export json` the name goes
   into `fmt.Sprintf("out/%s.json", GroupName)` (`analyze.go:939`). A line `../../../tmp/x 1 1 y` writes
-  `out/../../../tmp/x.json`. The `.json` suffix is fixed, so the impact is limited to creating or overwriting
+  `out/../../../tmp/x.json`, provided the analysis succeeds.
+  - `printAnalysisResults` runs only after `AnalyzeGroup` returns. That first calls `proc.Pool.SelectGroup`
+    (`analyze.go:134`), so the exploit also needs a server that answers `GROUP` for that name.
+  - With `-cache-stats`, it needs an existing cache file for the name instead. The `.json` suffix is fixed, so the impact is limited to creating or overwriting
   `*.json` files the user can write.
   - The CSV name uses the first label (`:928,953`).
   - All output goes to `./out` in the cwd (`:930-935`, `main.go:529,598`), not under `-data`.
@@ -312,6 +328,9 @@ Five most important:
 | seed | id | severity | category | location | verdict |
 |----|----|----|----|----|----|
 | OPS-4 | OPS-4 | medium | robustness | `cmd/tcp2tor/main.go:102,177,252,503,514,519,532,551,626,628,642` | CONFIRMED |
+
+Note: OPS-4 is owned by `audit-ops`. This block covers only its tcp2tor part and overlaps that report, so the
+consolidated report should merge the two.
 
 - **Scenario:** `-timeout` (`:102`) is copied into `ProxyServer.Timeout` (`:177,252`). That field is never read
   (`:551`), and `testSOCKS5Connection`'s `timeoutSec` parameter (`:503`) is unused. Both dialers are
@@ -409,19 +428,23 @@ Five most important:
 
 | seed | id | severity | category | location | verdict |
 |----|----|----|----|----|----|
-| new | A-tools-16 | low | bug | `internal/processor/rslight.go:374,464,471,482-498`, `internal/processor/rslight_articles.go:105-113,143`, `cmd/rslight-importer/main.go:107-161,163` | CONFIRMED (code trace) |
+| new | A-tools-16 | low | bug | `internal/processor/rslight.go:374,464,471,482-498`, `internal/processor/rslight_articles.go:105-113,139-143`, `cmd/rslight-importer/main.go:107-163` | CONFIRMED (code trace) |
 
 - **Scenario:**
   - The worker goroutines assign the enclosing function's `err` (`rslight.go:374` declared, `:464`
     `err = leg.ImportSQLiteArticles(file)`), a data race with `-threads > 1`.
   - `ImportAllSQLiteDatabases` counts the errors but always returns nil (`:498`), so `main` prints
     "SUCCESS! Import process completed!" (`main.go:163`).
-  - `groupsDone` is incremented twice per file (`rslight_articles.go:143` and `rslight.go:471`).
+  - `groupsDone` is incremented twice per file (`rslight_articles.go:143` and `rslight.go:471`). Both increments
+    hold `leg.mux` (`rslight_articles.go:139-140`, `rslight.go:470-472`), so this is a double count, not a second
+    race. The unlocked `leg.skippedFiles++` at `rslight.go:398,425` runs before the workers start.
   - `skipped`/`skippedEmpty` are swapped: non-empty failures increment `skippedEmpty`
     (`rslight_articles.go:107-110`). Duplicates (`response != CasePass` with nil err, `rslight.go:348-349`) count as
     failures.
-  - Every `log.Fatalf` after the DB is open (`main.go:107-161`) skips `proc.Close()`. The tool's own comment
-    (`:165-186`) says that produces 0-byte history files.
+  - Every `log.Fatalf` after the DB is open (`main.go:107-161`) skips `proc.Close()`. So do the `os.Exit(0)` after
+    `-YESresetallgroupsYES` (`main.go:143`) and the one in the no-`-spool` branch (`main.go:147`). All of them also
+    skip `close(db.StopChan)`/`db.WG.Wait()`/`db.Shutdown()`. The tool's own comment (`:165-186`) says skipping
+    `proc.Close()` produces 0-byte history files.
 - **Evidence:** code trace above.
 - **Fix:** use a local `err` in the goroutine, return an aggregated error, fix the counters, and replace the fatal
   exits with an error return through one shutdown path. Effort S.
@@ -571,7 +594,7 @@ Tool × flag × used? × default touches `./data`? ("cwd" = relative to the work
 | nntp-fetcher | `-max-batch` | yes; unbounded for `MaxBatchSize` (A-tools-4) | no |
 | nntp-fetcher | `-max-batch-threads`, `-max-queue`, `-group`, `-nntphostname`, `-history`, `-useshorthashlen`, `-fetch-active-only`, `-reuse-crossposts`, `-download-start-date` | yes (`-download-start-date` validated late, A-tools-20) | via `-data` |
 | nntp-fetcher | `-download-max-par` | yes for the worker count; the `processor.DownloadMaxPar` write is dead (A-tools-20) | no |
-| nntp-analyze | `-data` | only in `$all`/wildcard mode (`:186-188`) | single-group and `-groups-file` modes write `data/cache` in the cwd (A-tools-7) |
+| nntp-analyze | `-data` | only in `$all`/wildcard mode, and only to read the group list (`:186-188,273-276`); never reaches the cache path | all three modes write `data/cache` in the cwd (A-tools-7) |
 | nntp-analyze | `-export` | yes; writes `out/` in the cwd (A-tools-11) | no |
 | nntp-analyze | `-timeout` | in 2 of 3 modes (A-tools-21) | no |
 | nntp-analyze | `-clear-cache` / `-cache-stats` / `-validate-cache` | broken (panic / wrong key, A-tools-8) | `-clear-cache` would remove under `data/` in the cwd |
