@@ -591,3 +591,56 @@ Checks on 157d097: gofmt baseline 2 files, vet/build OK, 9 package sets green un
 Orchestrator follow-up (c-commit after 84a3b51): two stale comments refreshed in `nntp-server-article_test.go` (BUG-8 now fixed) and `nntp-history-parse_test.go` (`readArticleBlock`).
 Checks on the final tree: gofmt baseline 2 files, vet (+`-tags e2e`) and build OK, 9 package sets green under `-race`, known bugs = **RFC-1 T-nntp-article-1** (2), build scripts OK,
 `PORT=21129 DATA=./data-test-nntp-intake-injection scripts/test-nntp-server.sh` → `SUMMARY pass=30 fail=0 info=1` (N01–N11, N20–N28, N30, N40–N49 all PASS); server.log: 0 panic / DATA RACE / closed-socket writes, 1 `[INTAKE] … dropped` line (N40).
+
+## Outcome
+
+- **Integration branch:** `plan-nntp-intake-injection` @ aa2929b (23 commits from `testing-001` @ 9a7ac3e; 28 files, +5,056/−519 lines).
+  Not yet merged into `testing-001` (user decision). Nothing pushed.
+- **Worktrees / branches** (left in place for the user to clean up):
+  - `/tank0/claude/trees/go-pugleaf/agent-a0bc167187195b985` — `worktree-agent-a0bc167187195b985` @ 0f76132 (intake-db, S2)
+  - `/tank0/claude/trees/go-pugleaf/agent-a3ad4286e2deb3e09` — `worktree-agent-a3ad4286e2deb3e09` @ 5f90357 (intake-common, S1)
+  - `/tank0/claude/trees/go-pugleaf/agent-a27ce2c1d0931f73e` — `worktree-agent-a27ce2c1d0931f73e` @ 55c5230 (intake-dlart, S5)
+  - `/tank0/claude/trees/go-pugleaf/agent-aabb41b2d4b1a88fe` — `worktree-agent-aabb41b2d4b1a88fe` @ 2b13adf (intake-processor, S3)
+  - `/tank0/claude/trees/go-pugleaf/agent-a203ab6eea1cb9826` — `worktree-agent-a203ab6eea1cb9826` @ 37d7f82 (intake-nntp, S4)
+- **Verification** (pugleaf-verifier on afd59be/aa2929b, main checkout): gofmt baseline 2 files; vet (+`-tags e2e`) and build
+  clean; 9 package sets green under `-race` (113 s); known bugs exactly `RFC-1 T-nntp-article-1` (12 assertions: RFC-1 ×11,
+  T-nntp-article-1 ×1; no "no longer reproduces", no panic); build scripts OK (`build_nntp-server.sh` still without `-race`,
+  OPS-4); `PORT=21129 DATA=./data-test-nntp-intake-injection-verify scripts/test-nntp-server.sh` → `SUMMARY pass=30 fail=0
+  info=1` (N01–N11, N20–N26, N28, N30, N40–N49; there is no N27), 0 panic / DATA RACE / closed-socket writes, the N40
+  `[INTAKE] … dropped` line present; `-count=2` rerun of nntp, nntp-server, processor, common green (206 s); manual probes
+  on port 21135 all as expected (generated Message-ID/Date/Injection-Date/Injection-Info without any IP, `!.POSTED!not-for-mail`
+  Path, duplicate → 441, Control → 441 + log, partially unknown crosspost stored only in the known group with no file/row/NULL
+  hierarchy, IHAVE relay Path `example.org!.SEEN.127.0.0.1!…` with Xref stripped, `IHAVE no-brackets` → 501, 41 KiB POST →
+  441 then MODE READER 200).
+- **Decisions taken during the run:** Q1 MaxArtSize default stays 32 KiB; Q2 TAKETHIS in flight → `439 <id> In progress`;
+  Q3 control messages rejected. `ValidMessageID` left part lax (printable except `<>@`), right side RFC 5536-strict with
+  escapes; DEL passes strict mode; `UpdateNNTPUserWebUserID`-style additions none here. `buildIncomingArticle` keeps a
+  `NewsgroupsPtr` pre-fill for syntactically valid names (the processor reads `NewsgroupsPtr[0]`), so an unknown but
+  valid name leaves a 120 s TasksMap entry and nothing else.
+- **Behaviour changes to report:** intake never creates groups (unknown/inactive/reserved/status-x dropped, status n for POST
+  only, moderated needs `Approved:`, partially unknown crossposts stored in the known groups, none left → 441/437/439);
+  strict header-block validation on NNTP intake (duplicate core headers, colon-less or `.` lines, control octets, > 998-octet
+  lines, missing mandatory headers, Message-ID mismatch, invalid or space-separated Newsgroups, > 9 groups, unparseable dates,
+  dates > 24 h ahead, POST dates > 72 h old, forged Injection-Info/Xref/`.POSTED`, Control messages) → 441/437/439 with a
+  fixed reason; POST injection (Message-ID, Date, Injection-Date when generated, Injection-Info with a hashed posting-account,
+  `Path: <host>!.POSTED!…`); feeds get `Path: <host>!.SEEN.<ip>!…`; Xref never stored; the stored Path line equals the `path`
+  column; dedupe/failure codes per K4 (POST 441, IHAVE 435/436/437, TAKETHIS 439 / 400+close); RFC-5 gates (440 for POST
+  without processor/permission, 500 for IHAVE/TAKETHIS without processor, TAKETHIS gate replies carry the id); article size
+  limit enforced on POST/IHAVE/TAKETHIS (default 32 KiB, `-maxartsize`), oversize → reply with the stream in sync, past the
+  drain bound → 400 and a clean close; unauthenticated TAKETHIS never keeps an article; local430 entry removed after accepts
+  (BUG-8); the batch writer never creates a `newsgroups` row, counts only newly inserted rows, never writes `updated_at`
+  backwards or as 0001-01-01, and history/msgid state no longer depends on a readable row; bulk paths (fetcher, web queue,
+  rslight) get fetch-mode header normalization, Xref stripped, `<host>!` Path prefix in the stored line, 24 h future margin,
+  and "no group DB could be opened" is now a temporary error instead of a silent success; web crossposts land in every group;
+  fetcher captures bounded to 2048 in flight (back-pressure on every producer); `DownloadArticles` uses a per-run queue
+  (late results drained, A-tools-4 resolved).
+- **Leftovers / known issues:** `build_nntp-server.sh` without `-race` (OPS-4, audit-delta-fixes D11); `e2eKnownBug` in
+  `server_e2e_test.go` has no callers left (harness helper, `unused` may flag it); the unused `GroupQueues` map init
+  (`processor.go:55`) and deprecated `GetOrCreateGroupBatch` for audit-delta-fixes to delete; `TestAuthFailureDelay` timed out
+  once under heavy load (passes on rerun); the S2 retry path (commit ok, SELECT fails, retry1) is traced but untested;
+  `CreateNNTPUserForWebUser` fixed in hardening already uses the any-state lookup. S3/S4 commits carry an Opus 5.5 trailer.
+  Gitignored leftovers: `build/`, `./data-test-nntp-intake-injection`.
+- **Out of scope (as planned):** cancel/Supersedes processing, `control.*` filing, moderator forwarding, local `Xref:`
+  generation, `bytes` semantics (INT-5), NULL-hierarchy readers and repair migration (A-db-1 readers, audit-delta-fixes),
+  `ReconstructHeaders` (nntp-client-transfer), MaxArtSize default change, `-accept-unknown-groups`, web posting headers (INT-7).
+- **Next:** `/run-plan nntp-client-transfer` (depends on hardening + intake, both now in or awaiting `testing-001`).
