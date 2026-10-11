@@ -831,3 +831,81 @@ func TestOvrHidden(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// XHDR Xref/Path: consistent with HEAD/ARTICLE (common.ReconstructHeaders drops the
+// stored Xref and rebuilds Path from the path column), never the raw upstream lines.
+
+func TestOvrXhdrXrefPath(t *testing.T) {
+	g := hGroup(t, "t5.xrefpath", 2, func(i int, a *hArticle) {
+		a.Headers = strings.Join([]string{
+			"Path: upstream.example!raw-path",
+			"From: " + a.From,
+			"Newsgroups: other.group",
+			"Subject: " + a.Subject,
+			"Date: " + a.DateString,
+			"Message-ID: " + a.MessageID,
+			fmt.Sprintf("Xref: upstream.example other.group:%d", 9000+i),
+		}, "\n")
+	})
+	a1 := hDefaultArticle(g, 1)
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+	ovrSelect(t, c, g)
+
+	for _, field := range []string{"Xref", "XREF"} {
+		code, line, lines := ovrCmd(t, c, "XHDR %s 1-2", field)
+		if err := hExpectCode(code, line, 221); err != nil {
+			t.Fatalf("XHDR %s: %v", field, err)
+		}
+		if err := hExpectLines(lines, []string{"1", "2"}); err != nil {
+			t.Fatalf("XHDR %s 1-2: %v", field, err)
+		}
+	}
+	code, line, lines := ovrCmd(t, c, "XHDR Xref %s", a1.MessageID)
+	if err := hExpectCode(code, line, 221); err != nil {
+		t.Fatalf("XHDR Xref <id>: %v", err)
+	}
+	if err := hExpectLines(lines, []string{a1.MessageID}); err != nil {
+		t.Fatalf("XHDR Xref <id>: %v", err)
+	}
+
+	// Path: the stored path column (a.Path), not the raw upstream line in headers_json.
+	code, line, lines = ovrCmd(t, c, "XHDR path 1-2")
+	if err := hExpectCode(code, line, 221); err != nil {
+		t.Fatalf("XHDR path: %v", err)
+	}
+	if err := hExpectLines(lines, []string{"1 " + a1.Path, "2 " + a1.Path}); err != nil {
+		t.Fatalf("XHDR path 1-2: %v", err)
+	}
+	code, line, lines = ovrCmd(t, c, "XHDR Path %s", a1.MessageID)
+	if err := hExpectCode(code, line, 221); err != nil {
+		t.Fatalf("XHDR Path <id>: %v", err)
+	}
+	if err := hExpectLines(lines, []string{a1.MessageID + " " + a1.Path}); err != nil {
+		t.Fatalf("XHDR Path <id>: %v", err)
+	}
+}
+
+// XHDR <field> <message-id> with a processor: a definite miss is 430, a lookup fault
+// (history DB) is 403 (decision 15).
+func TestOvrXhdrLookupFault(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"miss", fmt.Errorf("message-id: %w", ErrArticleNotFound), 430},
+		{"fault", errors.New("history lookup failed: disk I/O error"), 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{findErr: tc.err}})
+			c := hs.dial(t)
+			defer c.close()
+			code, line, _ := ovrCmd(t, c, "XHDR subject <ovr-fault@test.invalid>")
+			if err := hExpectCode(code, line, tc.want); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

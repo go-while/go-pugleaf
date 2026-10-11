@@ -152,7 +152,9 @@ func (c *ClientConnection) xhdrByMessageID(field, messageID string) error {
 			}
 			value, found = v, ok
 		case err != nil && !errors.Is(err, ErrArticleNotFound):
+			// history/DB fault, not a miss: 403 without the error delay (decision 15)
 			log.Printf("[NNTP] XHDR: lookup of %s failed: %v", messageID, err)
+			return c.sendResponse(403, "Internal fault")
 		}
 	}
 	if !found {

@@ -52,9 +52,9 @@ func HeaderValueFromJSON(headersJSON, field string) string {
 }
 
 // NNTPHeaderByMessageID returns the article number and the value of field for the visible
-// (hide = 0) article with messageID in groupDB. The 7 overview fields come from their
-// columns, any other field from headers_json (see HeaderValueFromJSON). It returns
-// sql.ErrNoRows when the article is absent or hidden.
+// (hide = 0) article with messageID in groupDB. The 7 overview fields and Path come from
+// their columns, Xref is always empty, any other field comes from headers_json (see
+// HeaderValueFromJSON). It returns sql.ErrNoRows when the article is absent or hidden.
 func (db *Database) NNTPHeaderByMessageID(groupDB *GroupDB, field, messageID string) (articleNum int64, value string, err error) {
 	var query string
 	fromJSON := false
@@ -73,6 +73,14 @@ func (db *Database) NNTPHeaderByMessageID(groupDB *GroupDB, field, messageID str
 		query = `SELECT article_num, bytes FROM articles WHERE message_id = ? AND hide = 0 LIMIT 1`
 	case "lines":
 		query = `SELECT article_num, lines FROM articles WHERE message_id = ? AND hide = 0 LIMIT 1`
+	// headers_json keeps the raw upstream Xref and Path lines, which HEAD/ARTICLE never serve
+	// (common.ReconstructHeaders drops both and rebuilds Path from the path column). Xref holds
+	// the other server's article numbers, so it is always served as absent; Path comes from
+	// the stored path column.
+	case "path":
+		query = `SELECT article_num, path FROM articles WHERE message_id = ? AND hide = 0 LIMIT 1`
+	case "xref":
+		query = `SELECT article_num, '' FROM articles WHERE message_id = ? AND hide = 0 LIMIT 1`
 	default:
 		query = `SELECT article_num, headers_json FROM articles WHERE message_id = ? AND hide = 0 LIMIT 1`
 		fromJSON = true

@@ -33,7 +33,8 @@ func nshOvrGroup(t *testing.T, n int, hidden ...int64) (*GroupDB, string) {
 		}
 		defer stmt.Close()
 		for i := 1; i <= n; i++ {
-			headers := fmt.Sprintf("Subject: subject %d\nX-Seq: %d", i, i)
+			// raw upstream Path and Xref lines, as the fetcher stores them
+			headers := fmt.Sprintf("Path: upstream.example!raw\nSubject: subject %d\nX-Seq: %d\nXref: upstream.example %s:%d", i, i, group, 9000+i)
 			if i == 1 {
 				headers += "\nX-Fold: first\n\tsecond\n  third\nX-Seq: duplicate"
 			}
@@ -184,6 +185,41 @@ func TestNSHOvrRangeChunks(t *testing.T) {
 	if chunk, err := db.GetHeaderFieldRange(gdb, "x-fold", 1, 1, 0); err != nil || len(chunk) != 1 || chunk[0].Value != "first second third" {
 		t.Fatalf("x-fold of 1: %+v, %v", chunk, err)
 	}
+
+	// Xref: one empty value per visible row; Path: the path column, not the raw line.
+	for _, tc := range []struct{ field, want string }{{"Xref", ""}, {"XREF", ""}, {"Path", "not-for-mail"}, {"path", "not-for-mail"}} {
+		chunk, err := db.GetHeaderFieldRange(gdb, tc.field, 1, 12, 0)
+		if err != nil || len(chunk) != 11 {
+			t.Fatalf("%s 1-12: %d rows, %v; want 11", tc.field, len(chunk), err)
+		}
+		for _, hv := range chunk {
+			if hv.Value != tc.want {
+				t.Fatalf("%s of %d = %q, want %q", tc.field, hv.ArticleNum, hv.Value, tc.want)
+			}
+		}
+	}
+}
+
+func TestNSHOvrRangeNulls(t *testing.T) {
+	db := w0DB(t)
+	gdb, _ := nshOvrGroup(t, 1)
+	// Every nullable overview column NULL: the row must still be returned.
+	if _, err := RetryableExec(gdb.DB,
+		`INSERT INTO articles (article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, headers_json)
+		 VALUES (2, '<nshovr-null@test.invalid>', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)`); err != nil {
+		t.Fatalf("insert NULL row: %v", err)
+	}
+	chunk, err := db.GetOverviewsRange(gdb, 1, math.MaxInt64, 0)
+	if err != nil {
+		t.Fatalf("GetOverviewsRange with a NULL row: %v", err)
+	}
+	if len(chunk) != 2 || chunk[1].ArticleNum != 2 || chunk[1].Subject != "" || chunk[1].Bytes != 0 || !chunk[1].DateSent.IsZero() {
+		t.Fatalf("NULL row: got %d rows, last %+v", len(chunk), chunk[len(chunk)-1])
+	}
+	hv, err := db.GetHeaderFieldRange(gdb, "X-Seq", 2, 2, 0)
+	if err != nil || len(hv) != 1 || hv[0].Value != "" {
+		t.Fatalf("X-Seq of the NULL row: %+v, %v", hv, err)
+	}
 }
 
 func TestNSHOvrHeaderByMessageID(t *testing.T) {
@@ -201,6 +237,19 @@ func TestNSHOvrHeaderByMessageID(t *testing.T) {
 	num, value, err = db.NNTPHeaderByMessageID(gdb, "Lines", nshOvrMsgID(group, 1))
 	if err != nil || num != 1 || value != "2" {
 		t.Fatalf("Lines of 1: %d %q %v", num, value, err)
+	}
+	// Xref is never served (it holds the upstream numbers), Path comes from the path column.
+	for _, f := range []string{"Xref", "XREF", "xref"} {
+		num, value, err = db.NNTPHeaderByMessageID(gdb, f, nshOvrMsgID(group, 1))
+		if err != nil || num != 1 || value != "" {
+			t.Fatalf("%s of 1: %d %q %v, want empty", f, num, value, err)
+		}
+	}
+	for _, f := range []string{"Path", "PATH"} {
+		num, value, err = db.NNTPHeaderByMessageID(gdb, f, nshOvrMsgID(group, 1))
+		if err != nil || num != 1 || value != "not-for-mail" {
+			t.Fatalf("%s of 1: %d %q %v, want the path column", f, num, value, err)
+		}
 	}
 	num, value, err = db.NNTPHeaderByMessageID(gdb, "X-Absent", nshOvrMsgID(group, 1))
 	if err != nil || num != 1 || value != "" {

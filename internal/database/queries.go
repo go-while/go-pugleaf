@@ -1826,9 +1826,16 @@ func (db *Database) GetOverviewsRange(groupDB *GroupDB, startNum, endNum int64, 
 	var out []*models.Overview
 	for rows.Next() {
 		var o models.Overview
-		if err := rows.Scan(&o.ArticleNum, &o.Subject, &o.FromHeader, &o.DateSent, &o.DateString, &o.MessageID, &o.References, &o.Bytes, &o.Lines, &o.ReplyCount, &o.Downloaded); err != nil {
+		// Nullable columns go through sql.Null*: one NULL row must not fail the whole range.
+		var subject, from, dateString, refs sql.NullString
+		var dateSent sql.NullTime
+		var bytes, lines, replyCount sql.NullInt64
+		if err := rows.Scan(&o.ArticleNum, &subject, &from, &dateSent, &dateString, &o.MessageID, &refs, &bytes, &lines, &replyCount, &o.Downloaded); err != nil {
 			return nil, err
 		}
+		o.Subject, o.FromHeader, o.DateString, o.References = subject.String, from.String, dateString.String, refs.String
+		o.DateSent = dateSent.Time
+		o.Bytes, o.Lines, o.ReplyCount = int(bytes.Int64), int(lines.Int64), int(replyCount.Int64)
 		out = append(out, &o)
 	}
 	if err := rows.Err(); err != nil {
@@ -1863,8 +1870,9 @@ func (db *Database) GetOverviewByMessageID(groupDB *GroupDB, messageID string) (
 
 // GetHeaderFieldRange returns the value of one header field for at most limit visible
 // (hide = 0) articles with startNum <= article_num <= endNum, one element per article in
-// number order. The 7 overview fields come from their columns; any other field is read
-// from headers_json (first occurrence, unfolded; empty when absent).
+// number order. The 7 overview fields and Path come from their columns, Xref is always
+// empty; any other field is read from headers_json (first occurrence, unfolded; empty
+// when absent).
 // limit <= 0 means OverviewRangeChunk.
 const query_GetHeaderFieldRange1 = `SELECT article_num, subject FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
 const query_GetHeaderFieldRange2 = `SELECT article_num, from_header FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
@@ -1884,10 +1892,20 @@ func (db *Database) GetHeaderFieldRange(groupDB *GroupDB, field string, startNum
 
 	// headers_json fallback for every field without a column of its own
 	const queryHeadersJSON = `SELECT article_num, headers_json FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+	// headers_json keeps the raw upstream Xref and Path lines, which HEAD/ARTICLE never serve
+	// (common.ReconstructHeaders drops both and rebuilds Path from the path column). Xref holds
+	// the other server's article numbers, so it is always served as absent; Path comes from
+	// the stored path column.
+	const queryPath = `SELECT article_num, path FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+	const queryXref = `SELECT article_num, '' FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
 
 	query := queryHeadersJSON
 	fromJSON := false
 	switch strings.ToLower(field) {
+	case "path":
+		query = queryPath
+	case "xref":
+		query = queryXref
 	case "subject":
 		query = query_GetHeaderFieldRange1
 	case "from":
