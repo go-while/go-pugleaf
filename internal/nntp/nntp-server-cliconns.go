@@ -18,7 +18,6 @@ var DefaultNNTPcliconnTimeout = time.Duration(60 * time.Second)
 type ClientConnection struct {
 	conn           net.Conn
 	textConn       *textproto.Conn
-	writer         *bufio.Writer
 	server         *NNTPServer
 	isTLS          bool
 	authenticated  bool
@@ -40,7 +39,6 @@ func NewClientConnection(conn net.Conn, server *NNTPServer, isTLS bool) *ClientC
 	client := &ClientConnection{
 		conn:         conn,
 		textConn:     textConn,
-		writer:       bufio.NewWriter(conn),
 		server:       server,
 		isTLS:        isTLS,
 		capabilities: []string{}, // Will be set dynamically via getServerCapabilities()
@@ -106,14 +104,23 @@ func (c *ClientConnection) sendWelcome() error {
 func (c *ClientConnection) handleCommand(line string) error {
 	parts := strings.Fields(line)
 	if len(parts) == 0 {
+		c.rateLimitOnError()
 		return c.sendResponse(500, "Empty command")
 	}
 
 	command := strings.ToUpper(parts[0])
 	args := parts[1:]
 
-	// Track command execution
+	// Track command execution (unknown words are folded into one bucket, SEC-4)
 	c.server.Stats.CommandExecuted(command)
+
+	if !c.argCountOK(command, args) {
+		c.rateLimitOnError()
+		return c.sendResponse(501, "Syntax error: too many arguments")
+	}
+	if !c.readGateOK(command) {
+		return c.sendResponse(480, "Authentication required")
+	}
 
 	// Dispatch to appropriate handler
 	switch command {
@@ -122,9 +129,9 @@ func (c *ClientConnection) handleCommand(line string) error {
 	case "MODE":
 		return c.handleMode(args)
 	case "AUTHINFO":
-		return c.handleAuthInfo(args)
+		return c.handleAuthInfo(args, line)
 	case "QUIT":
-		return c.handleQuit()
+		return c.handleQuit(args)
 	case "HELP":
 		return c.handleHelp()
 	case "LIST":
@@ -152,7 +159,8 @@ func (c *ClientConnection) handleCommand(line string) error {
 	case "TAKETHIS":
 		return c.handleTakeThis(args)
 	default:
-		return c.sendResponse(500, fmt.Sprintf("Command not recognized: %s", command))
+		c.rateLimitOnError()
+		return c.sendResponse(500, "Command not recognized")
 	}
 }
 
@@ -163,13 +171,11 @@ func (c *ClientConnection) sendResponse(code int, message string) error {
 } // sendResponse sends a single-line response
 
 func (c *ClientConnection) sendLine(line string) error {
-	if _, err := c.writer.WriteString(line + "\r\n"); err != nil {
+	c.setWriteDeadline()
+	if _, err := c.textConn.W.WriteString(line + "\r\n"); err != nil {
 		return err
 	}
-	if err := c.writer.Flush(); err != nil {
-		return err
-	}
-	return nil
+	return c.textConn.W.Flush()
 }
 
 // sendMultilineResponse sends a multi-line response
@@ -196,23 +202,17 @@ func (c *ClientConnection) sendMultilineResponse(code int, message string, lines
 	return dw.Close()
 }
 
-// getServerCapabilities returns the list of server capabilities
+// getServerCapabilities returns the capability list for the current connection state
+// (RFC 3977 §5.2: the list may change with state; RFC 4643 §2.1: no AUTHINFO after login).
 func (c *ClientConnection) getServerCapabilities() []string {
-	capabilities := []string{
-		"VERSION 2",
-		"READER",
-		"AUTHINFO USER",
-		"LIST ACTIVE NEWSGROUPS",
-		"XOVER",
-		"XHDR",
-		"MODE-READER",
+	capabilities := []string{"VERSION 2", "READER"}
+	if c.authinfoAdvertised() {
+		capabilities = append(capabilities, "AUTHINFO USER")
 	}
-
-	// Add posting capabilities if processor is available
-	if c.server.Processor != nil {
-		capabilities = append(capabilities, "POST", "IHAVE", "TAKETHIS")
+	capabilities = append(capabilities, "LIST ACTIVE NEWSGROUPS", "XOVER", "XHDR")
+	if c.postingAllowed() {
+		capabilities = append(capabilities, "POST", "IHAVE")
 	}
-
 	return capabilities
 }
 

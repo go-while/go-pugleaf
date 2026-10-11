@@ -1058,3 +1058,13 @@ then fail too), N25, N26, N28 and N30 FAIL (N30 now runs with an idle client, wh
 
 ## Progress
 (filled in by `/run-plan`)
+
+### Wave 0 (2026-10-11, inline on `plan-nntp-server-hardening`, base `testing-001` @ baea7c0)
+- Baseline on 9bfc068: gofmt baseline 2 files, vet/build OK, all 8 package sets green under `-race`, known bugs = the 29 ids of AUDIT §10.
+- Added `nntp-server-dataio.go` (D1) and `nntp-server-commands.go` (D3 stubs); `handleCommand` = D4, `getServerCapabilities` = D5;
+  `sendLine` writes through `textConn.W` with `setWriteDeadline`, the `writer` field is gone; `handleQuit(args)` /
+  `handleAuthInfo(args, line)` signature stubs; markers removed: 4× RFC-2 (`TestSessCapabilities`), SEC-5 in `TestAuthPlaintextNotOffered`.
+- `scripts/test-nntp-server.sh` rewritten per `## End-to-end` (nn_* helpers, N20–N26, N28 PASS/FAIL, N25+N30 with an idle client).
+- Checks: gofmt/vet/build OK, `-race` 8 package sets green, known bugs = baseline minus RFC-2 (28 ids). Build scripts OK.
+  `PORT=21120 DATA=./data-test-nntp-server-hardening scripts/test-nntp-server.sh` → `SUMMARY pass=12 fail=8 info=1`:
+  PASS N01–N11, N24; FAIL N20, N21, N22, N23, N25, N26, N28, N30 (as expected before the slices).

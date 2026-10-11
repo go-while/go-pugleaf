@@ -488,5 +488,7 @@ func TestAuthPlaintextNotOffered(t *testing.T) {
 	if code != 483 && advertised {
 		err = fmt.Errorf("non-TLS: AUTHINFO USER advertised in CAPABILITIES and answered %q, want 483 or not advertised", line)
 	}
-	knownBug(t, "SEC-5", err)
+	if err != nil {
+		t.Fatal(err)
+	}
 }

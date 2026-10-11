@@ -6,7 +6,7 @@ import (
 )
 
 // handleAuthInfo handles AUTHINFO command for authentication
-func (c *ClientConnection) handleAuthInfo(args []string) error {
+func (c *ClientConnection) handleAuthInfo(args []string, line string) error {
 	if len(args) < 2 {
 		return c.sendResponse(501, "AUTHINFO command requires subcommand and argument")
 	}

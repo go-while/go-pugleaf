@@ -210,7 +210,9 @@ func TestSessCapabilities(t *testing.T) {
 		if sessHasCap(caps, "READER") && sessHasCap(caps, "MODE-READER") {
 			err = fmt.Errorf("READER and MODE-READER both advertised: %q", caps)
 		}
-		knownBug(t, "RFC-2", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("no-nonstandard-labels", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
@@ -228,7 +230,9 @@ func TestSessCapabilities(t *testing.T) {
 		if sessHasCap(caps, "TAKETHIS") {
 			err = fmt.Errorf("unregistered label TAKETHIS (no X prefix) in %q", caps)
 		}
-		knownBug(t, "RFC-2", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("read-only-no-post-ihave", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
@@ -294,7 +298,9 @@ func TestSessCapabilities(t *testing.T) {
 		if sessHasCap(caps, "POST") {
 			err = fmt.Errorf("user without posting permission sees POST: %q", caps)
 		}
-		knownBug(t, "RFC-2", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("authinfo-after-auth", func(t *testing.T) {
 		user, pass := sessUser(t, true)
@@ -308,7 +314,9 @@ func TestSessCapabilities(t *testing.T) {
 		if sessHasCap(caps, "AUTHINFO") {
 			err = fmt.Errorf("AUTHINFO still advertised after 281: %q", caps)
 		}
-		knownBug(t, "RFC-2", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 

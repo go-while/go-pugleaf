@@ -50,7 +50,7 @@ func (c *ClientConnection) handleHelp() error {
 }
 
 // handleQuit handles QUIT command
-func (c *ClientConnection) handleQuit() error {
+func (c *ClientConnection) handleQuit(args []string) error {
 	c.sendResponse(205, "Goodbye")
 	c.Close()
 	return nil
