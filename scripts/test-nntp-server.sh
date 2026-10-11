@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# End-to-end checks for plan nntp-audit-tests (## End-to-end). Uses scratch data only.
-# Usage: PORT=21119 DATA=./data-test-nntp-audit-tests scripts/test-nntp-server.sh [--build]
+# End-to-end checks for plan nntp-audit-tests (## End-to-end) and nntp-server-hardening. Scratch data only.
+# Usage: PORT=21119 DATA=./data-test-nntp-server-hardening scripts/test-nntp-server.sh [--build]
 # Env: PORT (21119), DATA (./data-test-nntp-audit-tests), BIN (./build/pugleaf-nntp-server),
 #      MGR (./build/pugleaf-nntpmgr), NNTPHOST (example.org; the server checks it by DNS lookup)
 # Safety: the server and nntpmgr run with their working directory in $DATA/run and an
 # absolute -data, so cwd-relative defaults (./data) can never reach the checkout's ./data.
 # Checks: N01-N11 come from `go test -tags e2e -run TestE2EBinary ./cmd/nntp-server/`;
-# N20-N22 are DoS probes reported as INFO (SEC-2, SEC-3, SEC-1) until nntp-server-hardening
-# turns them into PASS checks; N30 is the SIGINT shutdown check.
+# N20-N28 are PASS/FAIL checks of plan nntp-server-hardening (tags nntp-session, nntp-overview,
+# nntp-read, nntp-auth-db); N30 is the SIGINT shutdown check (with an idle client connected).
+# Ids N40-N49 are reserved for nntp-intake-injection, N50-N59 for nntp-rfc-commands.
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 2
 PORT="${PORT:-21119}"
@@ -73,6 +74,17 @@ DATA_ABS=$(cd "$DATA" && pwd -P)
 RUN="$DATA_ABS/run"
 LOG="$DATA/server.log"; DB="$DATA/cfg/pugleaf.sq3"
 q() { sqlite3 -cmd '.timeout 5000' "$DB" "$1"; }
+# one NNTP client on fd 3: nn_open reads the greeting into NN_GREETING, nn_cmd sends one
+# command and reads one status line into NN_LINE, nn_block reads a data block into
+# NN_BLOCK as "|line|line|" (without the terminating "."), nn_close closes fd 3.
+nn_open() { { exec 3<>"/dev/tcp/127.0.0.1/$PORT"; } 2>/dev/null || return 1
+  IFS= read -r -t 5 NN_GREETING <&3 || { nn_close; return 1; }; NN_GREETING=${NN_GREETING%$'\r'}; }
+nn_cmd() { printf '%s\r\n' "$1" >&3 2>/dev/null || return 1; NN_LINE=""
+  IFS= read -r -t "${2:-5}" NN_LINE <&3 || return 1; NN_LINE=${NN_LINE%$'\r'}; }
+nn_block() { NN_BLOCK="|"; local l; while IFS= read -r -t "${1:-5}" l <&3; do l=${l%$'\r'}
+  [ "$l" = . ] && return 0; NN_BLOCK="$NN_BLOCK$l|"; done; return 1; }
+nn_close() { { exec 3>&- 3<&-; } 2>/dev/null; }
+ms_now() { date +%s%3N; }
 
 # ---------------------------------------------------------------- setup
 # 1. first start creates the schema
@@ -84,9 +96,16 @@ stop_server
 q "INSERT INTO newsgroups(name,description,last_article,message_count,active,hierarchy,status,low_water,high_water)
    VALUES('e2e.test.a','',0,0,1,'e2e','y',1,0),('e2e.test.b','',0,0,1,'e2e','y',1,0)" \
   || setup_fail "seeding $DB failed"
-# 3. the posting user (nntpmgr echoes the password into its log: scratch data only, OPS-2)
+# 3. the posting user (nntpmgr no longer echoes a given password: N28 checks it; scratch data only)
 ( cd "$RUN" && exec "$MGR_ABS" -data "$DATA_ABS" -create -username "$E2E_USER" -password "$E2E_PASS" -posting -maxconns 4 ) \
   >"$DATA/nntpmgr.log" 2>&1 || setup_fail "nntpmgr -create failed: $(tail -3 "$DATA/nntpmgr.log")"
+
+# ---------------------------------------------------------------- N28 [nntp-auth-db] (OPS-2): no secrets from nntpmgr
+lst=$( (cd "$RUN" && exec "$MGR_ABS" -data "$DATA_ABS" -list) 2>&1 )
+if printf %s "$lst" | grep -q "$E2E_USER" && ! printf %s "$lst" | grep -qE '\$2[aby]\$' \
+   && ! grep -qF "$E2E_PASS" "$DATA/nntpmgr.log"; then pass N28 nntp-auth-db "nntpmgr prints no hash or given password"
+else fail N28 nntp-auth-db "nntpmgr prints no hash or given password" "list/create output leaks secrets"; fi
+
 # 4. start again in the background
 start_server || setup_fail "server failed to restart"
 
@@ -106,7 +125,28 @@ if [ "$n" != 11 ]; then
 fi
 alive || setup_fail "server died during the client steps"
 
-# ---------------------------------------------------------------- N20 (SEC-2): LISTGROUP creates a group DB
+# ---------------------------------------------------------------- N24 [nntp-session] (RFC-2): CAPABILITIES by state
+pre=""; post=""; cap_detail=""
+if nn_open; then
+  if nn_cmd CAPABILITIES && nn_block; then pre="$NN_BLOCK"; fi
+  if nn_cmd "AUTHINFO USER $E2E_USER" && nn_cmd "AUTHINFO PASS $E2E_PASS" && [ "${NN_LINE%% *}" = 281 ] \
+     && nn_cmd CAPABILITIES && nn_block; then post="$NN_BLOCK"; else cap_detail="login failed: $NN_LINE"; fi
+  nn_close
+fi
+case "$pre$post" in *"|MODE-READER|"*|*"|TAKETHIS|"*) cap_detail="$cap_detail MODE-READER/TAKETHIS listed" ;; esac
+case "$pre" in *"|AUTHINFO"*) cap_detail="$cap_detail AUTHINFO on plaintext" ;; esac
+case "$post" in *"|AUTHINFO"*) cap_detail="$cap_detail AUTHINFO after 281" ;; esac
+if [ -n "$pre" ] && [ -n "$post" ] && [ -z "$cap_detail" ]; then pass N24 nntp-session "CAPABILITIES by state"
+else fail N24 nntp-session "CAPABILITIES by state" "${cap_detail:-no reply} pre='$pre' post='$post'"; fi
+
+# ---------------------------------------------------------------- N26 [nntp-session] (SEC-5): 481 is delayed
+if nn_open && nn_cmd "AUTHINFO USER $E2E_USER"; then
+  t0=$(ms_now); nn_cmd "AUTHINFO PASS wrong-password-n26" 5; el=$(( $(ms_now) - t0 )); nn_close
+  if [ "${NN_LINE%% *}" = 481 ] && [ "$el" -ge 900 ]; then pass N26 nntp-session "481 delayed (${el}ms)"
+  else fail N26 nntp-session "481 delayed >= 900ms" "reply='$NN_LINE' after ${el}ms"; fi
+else fail N26 nntp-session "481 delayed >= 900ms" "connect failed"; fi
+
+# ---------------------------------------------------------------- N20 [nntp-read] (SEC-2): LISTGROUP of an unknown group
 before=$(find "$DATA/db" -name 'zz_no_such.db' 2>/dev/null | wc -l)
 reply=""
 if exec 3<>"/dev/tcp/127.0.0.1/$PORT"; then
@@ -115,61 +155,72 @@ if exec 3<>"/dev/tcp/127.0.0.1/$PORT"; then
   exec 3>&- 3<&-
 fi
 after=$(find "$DATA/db" -name 'zz_no_such.db' 2>/dev/null | wc -l)
-info N20 sec-2 "LISTGROUP zz.no.such: zz_no_such.db files before=$before after=$after reply='${reply:0:120}'"
+case "$reply" in *"|411 "*) r411=yes ;; *) r411=no ;; esac
+if [ "$r411" = yes ] && [ "$after" = 0 ]; then pass N20 nntp-read "LISTGROUP unknown group: 411, no file"
+else fail N20 nntp-read "LISTGROUP unknown group: 411, no file" "files before=$before after=$after reply='${reply:0:120}'"; fi
 
-# ---------------------------------------------------------------- N21 (SEC-3): 2 MiB command line without LF
-r0=$(rss_kb)
-if exec 3<>"/dev/tcp/127.0.0.1/$PORT"; then
-  timeout 10 bash -c 'head -c 2097152 /dev/zero | tr "\000" A' >&3
-  sleep 2
-  r1=$(rss_kb)
-  exec 3>&- 3<&-
-else
-  r1="?"
+# ---------------------------------------------------------------- N21 [nntp-session] (SEC-3): 2 MiB command line without LF
+r0=$(rss_kb); r1="$r0"; closed=no
+if nn_open; then
+  timeout 10 bash -c 'head -c 2097152 /dev/zero | tr "\000" A' >&3 2>/dev/null
+  for _ in 1 2 3; do IFS= read -r -t 2 _l <&3; rc=$?; [ "$rc" -eq 0 ] && continue; [ "$rc" -le 128 ] && closed=yes; break; done
+  r1=$(rss_kb); nn_close
 fi
-sleep 1
-info N21 sec-3 "2 MiB line without LF: server VmRSS before=${r0:-?}kB after=${r1:-?}kB alive=$(alive && echo yes || echo no)"
+greets=no; if alive && nn_open; then greets=yes; nn_close; fi
+grow=$(( ${r1:-0} - ${r0:-0} ))
+if [ "$closed" = yes ] && [ "$greets" = yes ] && [ "$grow" -lt 16384 ]; then pass N21 nntp-session "2 MiB line: closed, RSS +${grow}kB"
+else fail N21 nntp-session "2 MiB line: closed, bounded" "closed=$closed greets=$greets rss_before=${r0:-?} after=${r1:-?}"; fi
 
-# ---------------------------------------------------------------- N30: SIGINT shutdown within 30 s
+# ---------------------------------------------------------------- N23 [nntp-session] (A-nntp-sec-1): pipelined QUIT
+q205=no
+if nn_open; then printf 'QUIT\r\nHELP\r\n' >&3; IFS= read -r -t 5 l <&3 && case "$l" in 205*) q205=yes ;; esac; nn_close; fi
+sleep 1; greets=no; if alive && nn_open; then greets=yes; nn_close; fi
+if [ "$q205" = yes ] && [ "$greets" = yes ]; then pass N23 nntp-session "pipelined QUIT+HELP: 205, server survives"
+else fail N23 nntp-session "pipelined QUIT+HELP" "205=$q205 alive_and_greets=$greets"; fi
+
+# ---------------------------------------------------------------- N25 + N30 [nntp-session] (BUG-7): SIGINT with an idle client
+idle=no; { exec 4<>"/dev/tcp/127.0.0.1/$PORT"; } 2>/dev/null && idle=yes
+exited=no; el=0
 if alive; then
   kill -INT "$PID" 2>/dev/null
-  t0=$(date +%s); exited=no
+  t0=$(date +%s)
   for _ in $(seq 1 30); do alive || { exited=yes; break; }; sleep 1; done
+  el=$(( $(date +%s) - t0 ))
   if [ "$exited" = yes ]; then
-    pass N30 shutdown "SIGINT exits within 30s ($(( $(date +%s) - t0 ))s)"
+    pass N30 nntp-session "SIGINT exits within 30s (${el}s)"
     PID=""
   else
     kill -KILL "$PID" 2>/dev/null; PID=""
-    fail N30 shutdown "SIGINT exits within 30s" "still running after 30s, killed; log tail: $(tail -5 "$LOG" | tr '\n' ' ')"
+    fail N30 nntp-session "SIGINT exits within 30s" "still running after 30s, killed; log tail: $(tail -5 "$LOG" | tr '\n' ' ')"
   fi
 else
-  fail N30 shutdown "SIGINT exits within 30s" "server not running before the check"
+  fail N30 nntp-session "SIGINT exits within 30s" "server not running before the check"
   PID=""
 fi
+if [ "$idle" = yes ] && [ "$exited" = yes ] && [ "$el" -le 10 ]; then pass N25 nntp-session "SIGINT with an idle client exits within 10s (${el}s)"
+else fail N25 nntp-session "SIGINT with an idle client exits within 10s" "idle=$idle exited=$exited el=${el}s"; fi
+{ exec 4>&- 4<&-; } 2>/dev/null
 
-# ---------------------------------------------------------------- N22 (SEC-1): XHDR spin, last, fresh start
+# ---------------------------------------------------------------- N22 [nntp-overview] (SEC-1): XHDR huge range, fresh start
 if start_server; then
-  if exec 3<>"/dev/tcp/127.0.0.1/$PORT"; then
-    printf 'GROUP e2e.test.a\r\nXHDR subject 1-9223372036854775807\r\n' >&3
-    sleep 1
+  blk=no; el=0; cpu="?"; exited=no
+  if nn_open; then
+    nn_cmd "GROUP e2e.test.a"
+    t0=$(ms_now)
+    if nn_cmd "XHDR subject 1-9223372036854775807" 3 && [ "${NN_LINE%% *}" = 221 ] && nn_block 3; then blk=yes; fi
+    el=$(( $(ms_now) - t0 ))
     hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
     c0=$(cpu_ticks); sleep 5; c1=$(cpu_ticks)
-    pscpu=$(ps -o %cpu= -p "$PID" 2>/dev/null | tr -d ' ')
-    cpu="?"
     [ -n "$c0" ] && [ -n "$c1" ] && cpu=$(( (c1 - c0) * 100 / (hz * 5) ))
-    kill -INT "$PID" 2>/dev/null
-    exited=no
-    for _ in $(seq 1 10); do alive || { exited=yes; break; }; sleep 1; done
-    [ "$exited" = no ] && kill -KILL "$PID" 2>/dev/null
-    PID=""
-    exec 3>&- 3<&-
-    info N22 sec-1 "XHDR subject 1-9223372036854775807: cpu=${cpu}% over 5s (ps %cpu=${pscpu:-?}) exited_on_sigint_within_10s=$exited"
-  else
-    info N22 sec-1 "could not connect for the spin probe"
+    nn_close
   fi
-else
-  fail N22 sec-1 "fresh start for the spin probe" "server failed to start; log tail: $(tail -5 "$LOG" | tr '\n' ' ')"
-fi
+  kill -INT "$PID" 2>/dev/null
+  for _ in $(seq 1 10); do alive || { exited=yes; break; }; sleep 1; done
+  [ "$exited" = no ] && kill -KILL "$PID" 2>/dev/null; PID=""
+  if [ "$blk" = yes ] && [ "$el" -le 3000 ] && [ "$cpu" != "?" ] && [ "$cpu" -lt 50 ] && [ "$exited" = yes ]; then
+    pass N22 nntp-overview "XHDR huge range: block in ${el}ms, cpu ${cpu}%, SIGINT exit"
+  else fail N22 nntp-overview "XHDR huge range bounded" "block=$blk ${el}ms cpu=${cpu}% exited=$exited"; fi
+else fail N22 nntp-overview "fresh start for the spin probe" "server failed to start; log tail: $(tail -5 "$LOG" | tr '\n' ' ')"; fi
 
 echo "SUMMARY pass=$PASSES fail=$FAILS info=$INFOS data=$DATA log=$LOG"
 [ "$FAILS" -gt 125 ] && FAILS=125

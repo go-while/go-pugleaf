@@ -12,7 +12,11 @@ type AuthCacheEntry struct {
 	UserID       int
 	Username     string
 	PasswordHash string // hash of the provided password for verification
-	ExpiresAt    time.Time
+	// StoredHash is the bcrypt hash of nntp_users.password seen at login. A hit is
+	// only honoured while the row still holds this hash (SEC-6: a password change by
+	// another process ends the cached login).
+	StoredHash string
+	ExpiresAt  time.Time
 }
 
 // NNTPAuthCache provides in-memory caching of successful NNTP authentications
@@ -46,8 +50,9 @@ func (c *NNTPAuthCache) generatePasswordHash(password string) string {
 	return fmt.Sprintf("%x", hash)
 }
 
-// Set caches a successful authentication
-func (c *NNTPAuthCache) Set(userID int, username, password string) {
+// Set caches a successful authentication together with the stored bcrypt hash
+// (storedHash) that the password was verified against.
+func (c *NNTPAuthCache) Set(userID int, username, password, storedHash string) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -57,36 +62,61 @@ func (c *NNTPAuthCache) Set(userID int, username, password string) {
 		UserID:       userID,
 		Username:     username,
 		PasswordHash: passwordHash,
+		StoredHash:   storedHash,
 		ExpiresAt:    time.Now().Add(c.ttl),
 	}
 }
 
-// Get checks if authentication is cached and still valid
-func (c *NNTPAuthCache) Get(username, password string) (int, bool) {
+// GetEntry checks if authentication is cached and still valid and returns the
+// cached user ID and the stored bcrypt hash seen at login. The caller must
+// compare storedHash with the current nntp_users.password before trusting a hit.
+func (c *NNTPAuthCache) GetEntry(username, password string) (userID int, storedHash string, ok bool) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
 	entry, exists := c.entries[username]
 	if !exists {
 		c.misses++
-		return 0, false
+		return 0, "", false
 	}
 
 	// Check if expired
 	if time.Now().After(entry.ExpiresAt) {
 		c.misses++
-		return 0, false
+		return 0, "", false
 	}
 
 	// Check if password matches
 	passwordHash := c.generatePasswordHash(password)
 	if entry.PasswordHash != passwordHash {
 		c.misses++
-		return 0, false
+		return 0, "", false
 	}
 
 	c.hits++
-	return entry.UserID, true
+	return entry.UserID, entry.StoredHash, true
+}
+
+// Get checks if authentication is cached and still valid
+func (c *NNTPAuthCache) Get(username, password string) (int, bool) {
+	userID, _, ok := c.GetEntry(username, password)
+	return userID, ok
+}
+
+// RemoveUserID removes every cached entry of the user with this ID (password
+// change, deactivation, deletion). Safe on a nil cache.
+func (c *NNTPAuthCache) RemoveUserID(userID int) {
+	if c == nil {
+		return
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	for username, entry := range c.entries {
+		if entry.UserID == userID {
+			delete(c.entries, username)
+		}
+	}
 }
 
 // Remove removes a user from the cache (useful for password changes)

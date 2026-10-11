@@ -363,7 +363,9 @@ func TestArtNoArgument(t *testing.T) {
 				errs = append(errs, fmt.Errorf("bare %s: %w", cmd.name, err))
 			}
 		}
-		knownBug(t, "RFC-3", errors.Join(errs...))
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("invalid-current-article-420", func(t *testing.T) {
 		c := hs.dial(t)
@@ -377,7 +379,28 @@ func TestArtNoArgument(t *testing.T) {
 				errs = append(errs, fmt.Errorf("bare %s: %w", cmd.name, err))
 			}
 		}
-		knownBug(t, "RFC-3", errors.Join(errs...))
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("current-article-hidden-420", func(t *testing.T) {
+		gH, _ := artSeed(t, "noarg-hidden", 2, nil)
+		c := hs.dial(t)
+		artSelect(t, c, gH) // current article = 1
+		artHide(t, gH, 1)
+		for _, cmd := range artCmds {
+			code, line, _ := artDo(t, c, "%s", cmd.name)
+			// RFC 3977 §6.2.1.2: the no-argument form answers only 220-223, 412 or 420;
+			// a current article hidden or expired since GROUP is 420, not 423.
+			if err := hExpectCode(code, line, 420); err != nil {
+				t.Errorf("bare %s after the current article was hidden: %v", cmd.name, err)
+			}
+		}
+		// The number form keeps 423.
+		code, line, _ := artDo(t, c, "STAT 1")
+		if err := hExpectCode(code, line, 423); err != nil {
+			t.Errorf("STAT 1 (hidden): %v", err)
+		}
 	})
 	t.Run("no-group-412", func(t *testing.T) {
 		c := hs.dial(t)
@@ -390,7 +413,9 @@ func TestArtNoArgument(t *testing.T) {
 				errs = append(errs, fmt.Errorf("bare %s: %w", cmd.name, err))
 			}
 		}
-		knownBug(t, "RFC-3", errors.Join(errs...))
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -403,8 +428,8 @@ func TestArtInvalidNumbers(t *testing.T) {
 	}{
 		// "0" matches article-number (1*16DIGIT) but no article 0 exists: 423.
 		// "-1" is not an article-number: 501. Either reply is accepted for both.
-		{"0", "RFC-3"},
-		{"-1", "RFC-3"},
+		{"0", ""},
+		{"-1", ""},
 		// 20 digits exceeds 1*16DIGIT and int64: 501 (423 accepted).
 		{"99999999999999999999", ""},
 	}
@@ -520,7 +545,9 @@ func TestArtCurrentArticle(t *testing.T) {
 			if err := artCheckRetrieval(t, c, cmd.name, "2", cmd.code, 2, a2); err != nil {
 				t.Fatal(err)
 			}
-			knownBug(t, "BUG-1", artCheckBareXover(t, c, 2))
+			if err := artCheckBareXover(t, c, 2); err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 	t.Run("after-STAT", func(t *testing.T) {
@@ -536,7 +563,9 @@ func TestArtCurrentArticle(t *testing.T) {
 		}
 		// RFC 3977 §6.2.4: a bare STAT reports the current article; today 501 (RFC-3).
 		code, line, _ := artDo(t, c, "STAT")
-		knownBug(t, "RFC-3", artCheckStatus(code, line, 223, 2, a2.MessageID))
+		if err := artCheckStatus(code, line, 223, 2, a2.MessageID); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("message-id-lookup-unchanged", func(t *testing.T) {
 		c := hs.dial(t)
@@ -554,7 +583,9 @@ func TestArtCurrentArticle(t *testing.T) {
 		}
 		// The same through a bare STAT, which answers 501 today (RFC-3).
 		code, line, _ := artDo(t, c, "STAT")
-		knownBug(t, "RFC-3", artCheckStatus(code, line, 223, 2, a2.MessageID))
+		if err := artCheckStatus(code, line, 223, 2, a2.MessageID); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -650,7 +681,9 @@ func TestArtByteExact(t *testing.T) {
 		wantArticle := append(append([]byte{}, wantHead...), CRLF...)
 		wantArticle = append(wantArticle, artCRLF(artBodyLines(a)...)...)
 		errs = append(errs, artExpectRaw("ARTICLE block", block, append(wantArticle, ".\r\n"...)))
-		knownBug(t, "BUG-6", errors.Join(errs...))
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
 	})
 	// A stored header line "." (a dot-stuffed ".." unstuffed on intake) is sent
 	// as "." and ends HEAD/ARTICLE early (audit A-nntp-rfc-2, part of BUG-6).
@@ -677,7 +710,9 @@ func TestArtByteExact(t *testing.T) {
 		wantArticle = append(wantArticle, artCRLF(artBodyLines(a)...)...)
 		errs = append(errs, artExpectRaw("ARTICLE block", block, append(wantArticle, ".\r\n"...)))
 		c.close()
-		knownBug(t, "BUG-6", errors.Join(errs...))
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
 	})
 	// An empty body has zero lines: ARTICLE ends with the headers' blank line
 	// followed directly by ".\r\n", and BODY is just ".\r\n" (RFC 3977 §3.1.1,
@@ -694,7 +729,9 @@ func TestArtByteExact(t *testing.T) {
 		errs = append(errs, artExpectRaw("ARTICLE block", block, want))
 		_, block = artRawResponse(t, c, "BODY 1")
 		errs = append(errs, artExpectRaw("BODY block", block, []byte(".\r\n")))
-		knownBug(t, "BUG-6", errors.Join(errs...))
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
 	})
 	// HEAD carries header lines only; an empty line inside it would read as the
 	// header/body separator (RFC 3977 §6.2.2, RFC 5322 §2.1). An empty
@@ -713,7 +750,9 @@ func TestArtByteExact(t *testing.T) {
 				break
 			}
 		}
-		knownBug(t, "BUG-6", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -886,5 +925,135 @@ func TestArtNoDelay(t *testing.T) {
 	}
 	if took := time.Since(start); took >= time.Second {
 		t.Fatalf("50 STATs took %s with ArticleCmdDelay=0, want < 1s", took)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Hidden articles and 430 texts (plan nntp-server-hardening, slice nntp-read)
+
+// artHide sets hide = 1 on article num of group (decision 2: never served over NNTP).
+func artHide(t *testing.T, group string, num int64) {
+	t.Helper()
+	gdb, err := hTestDB(t).GetGroupDB(group)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", group, err)
+	}
+	defer gdb.Return()
+	if _, err := database.RetryableExec(gdb.DB, `UPDATE articles SET hide = 1 WHERE article_num = ?`, num); err != nil {
+		t.Fatalf("hide article %d in %s: %v", num, group, err)
+	}
+}
+
+func TestArtHidden(t *testing.T) {
+	g, arts := artSeed(t, "hidden", 3, nil)
+	artHide(t, g, 2)
+	a2 := artFind(t, arts, 2)
+	a3 := artFind(t, arts, 3)
+
+	t.Run("number-423", func(t *testing.T) {
+		hs := newTestServer(t, hServerOpts{})
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		for _, cmd := range artCmds {
+			code, line, _ := artDo(t, c, "%s 2", cmd.name)
+			// A hidden article answers as if it did not exist: 423 (RFC 3977 §6.2.1.2).
+			if err := hExpectCode(code, line, 423); err != nil {
+				t.Errorf("%s 2: %v", cmd.name, err)
+			}
+		}
+		// The visible neighbour is still served.
+		if err := artCheckRetrieval(t, c, "ARTICLE", "3", 220, 3, a3); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("message-id-current-group-430", func(t *testing.T) {
+		hs := newTestServer(t, hServerOpts{})
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		for _, cmd := range artCmds {
+			code, line, _ := artDo(t, c, "%s %s", cmd.name, a2.MessageID)
+			if err := hExpectCode(code, line, 430); err != nil {
+				t.Errorf("%s %s: %v", cmd.name, a2.MessageID, err)
+			}
+		}
+	})
+	t.Run("message-id-processor-430", func(t *testing.T) {
+		gA, _ := artSeed(t, "hidden-a", 1, nil)
+		// db is taken here: findFn runs on the server goroutine.
+		db := hTestDB(t)
+		proc := &hFakeProcessor{}
+		proc.findFn = func(messageID, currentGroup string) (*models.Article, error) {
+			gdb, err := db.GetGroupDB(g)
+			if err != nil {
+				return nil, err
+			}
+			defer gdb.Return()
+			// GetArticleByMessageID does not filter hide: the processor finds the hidden copy.
+			a, err := db.GetArticleByMessageID(gdb, messageID)
+			if err != nil {
+				return nil, fmt.Errorf("artHidden %s: %w", messageID, ErrArticleNotFound)
+			}
+			return a, nil
+		}
+		hs := newTestServer(t, hServerOpts{Proc: proc})
+		for _, selected := range []bool{true, false} {
+			c := hs.dial(t)
+			if selected {
+				artSelect(t, c, gA)
+			}
+			before := proc.findCount()
+			code, line := c.cmd(t, "STAT %s", a2.MessageID)
+			if err := hExpectCode(code, line, 430); err != nil {
+				t.Errorf("STAT %s (group %s selected %v): %v", a2.MessageID, gA, selected, err)
+			}
+			if proc.findCount() <= before {
+				t.Errorf("STAT %s (selected %v): processor lookup not called", a2.MessageID, selected)
+			}
+			// The visible article of the same group is found through the processor.
+			if err := artCheckRetrieval(t, c, "STAT", a3.MessageID, 223, 0, a3); err != nil {
+				t.Errorf("selected %v: %v", selected, err)
+			}
+		}
+	})
+}
+
+func TestArtNotFoundTexts(t *testing.T) {
+	g, _ := artSeed(t, "notfoundtexts", 1, nil)
+	missing := hMessageID(g, 99)
+	var lines []string
+
+	// no processor: only the current group is searched
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+	artSelect(t, c, g)
+	for _, cmd := range artCmds {
+		code, line, _ := artDo(t, c, "%s %s", cmd.name, missing)
+		if err := hExpectCode(code, line, 430); err != nil {
+			t.Fatalf("%s %s: %v", cmd.name, missing, err)
+		}
+		lines = append(lines, line)
+	}
+
+	// processor miss, then the same id answered from local430
+	proc := &hFakeProcessor{findErr: fmt.Errorf("artNotFoundTexts: %w", ErrArticleNotFound)}
+	hsP := newTestServer(t, hServerOpts{Proc: proc})
+	cP := hsP.dial(t)
+	for i := 0; i < 2; i++ {
+		code, line := cP.cmd(t, "STAT %s", missing)
+		if err := hExpectCode(code, line, 430); err != nil {
+			t.Fatalf("STAT %s round %d: %v", missing, i, err)
+		}
+		lines = append(lines, line)
+	}
+	if n := proc.findCount(); n != 1 {
+		t.Fatalf("findCount %d, want 1 (second miss from local430)", n)
+	}
+
+	for _, line := range lines {
+		for _, bad := range []string{"Cache says no", "NotF0", "NotF1"} {
+			if strings.Contains(line, bad) {
+				t.Errorf("430 reply %q contains the debug text %q", line, bad)
+			}
+		}
 	}
 }

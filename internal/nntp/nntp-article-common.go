@@ -1,6 +1,7 @@
 package nntp
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -47,32 +48,14 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 		time.Sleep(c.server.ArticleCmdDelay) // ratelimit (DefaultArticleCmdDelay)
 	}
 
-	// Get article data using common logic
-	article, replyNum := c.getArticleData(args, retrievalType)
-	if article == nil {
-		// 430 error handled in getArticleData
-		return nil
-	}
-	// Update the current article only for the article-number form (RFC 3977 6.2.1):
-	// a message-id lookup must not change the current article number
-	isMessageID := strings.HasPrefix(args[0], "<") && strings.HasSuffix(args[0], ">")
-	if c.currentGroup != "" && !isMessageID {
-		c.currentArticle = article.DBArtNum
-		/* disabled
-		task := c.server.DB.Batch.GetOrCreateTasksMapKey(c.currentGroup)
-		if task != nil && result.MsgIdItem != nil {
-			result.MsgIdItem.Mux.Lock()
-			result.MsgIdItem.GroupName = task.Newsgroup
-			result.MsgIdItem.ArtNum = result.ArticleNum
-			result.MsgIdItem.Mux.Unlock()
-		}
-		*/
+	article, replyNum, ok, err := c.resolveArticleArg(args, retrievalType == RetrievalStat)
+	if !ok {
+		return err // the error reply has been sent
 	}
 
 	// Send appropriate response based on retrieval type
 	switch retrievalType {
 	case RetrievalArticle:
-
 		return c.sendArticleContent(article, replyNum)
 	case RetrievalHead:
 		return c.sendHeadContent(article, replyNum)
@@ -81,135 +64,197 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 	case RetrievalStat:
 		return c.sendStatContent(article, replyNum)
 	default:
-		return c.sendResponse(500, "Internal error: unknown retrieval type")
+		return c.sendResponse(403, "Internal fault")
 	}
 }
 
-// getArticleData handles the common article lookup logic.
-// replyNum is the article number for the response line: the number in the
-// current group, or 0 when the article was found by message-id outside it (RFC 3977 6.2.1).
-func (c *ClientConnection) getArticleData(args []string, retrievalType ArticleRetrievalType) (article *models.Article, replyNum int64) {
-	var wantArticleNum int64
-	var messageID string
-	// Parse argument: can be article number or message-id
-	if len(args) == 0 {
-		c.rateLimitOnError()
-		c.sendResponse(501, "No article specified")
-		return
-	}
-
-	if strings.HasPrefix(args[0], "<") && strings.HasSuffix(args[0], ">") {
-		// Message-ID format
-		messageID = args[0]
-
-	} else {
-		if c.currentGroup == "" {
-			c.rateLimitOnError()
-			c.sendResponse(412, "No newsgroup selected")
-			return
+// resolveArticleArg resolves the argument of ARTICLE/HEAD/BODY/STAT (RFC 3977 §6.2).
+// When ok is false the reply has already been sent and err is the send error (if any).
+// replyNum is the article number for the status line: the number in the current group,
+// or 0 when the article was found by message-id outside it (§6.2.1.2). For stat, the
+// number forms read only the message-id.
+//
+//   - no argument: the current article; 412 without a group, 420 when it is invalid
+//     (also when it was hidden or expired since it became current).
+//   - "<message-id>": the current group first, then local430, then (with a processor) the
+//     history lookup re-checked by visibleInOtherGroup; a miss is 430. The current article
+//     is never changed. Without a processor only the current group is searched.
+//   - number: 412 without a group; not 1..19 digits or above math.MaxInt64 → 501; <= 0 or
+//     no visible article → 423. A hit sets the current article to the number (BUG-1).
+//
+// DB faults answer 403 without the error delay (decision 15).
+func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article *models.Article, replyNum int64, ok bool, err error) {
+	var num int64
+	fromCurrent := len(args) == 0
+	switch {
+	case fromCurrent:
+		if !c.requireGroup() {
+			return nil, 0, false, nil
 		}
-		// Article number format
-		awantArticleNum, err := strconv.ParseInt(args[0], 10, 64)
-		if err != nil {
+		if c.currentArticle <= 0 {
 			c.rateLimitOnError()
-			c.sendResponse(501, "Invalid article number")
-			return
+			return nil, 0, false, c.sendResponse(420, "Current article number is invalid")
 		}
-		wantArticleNum = awantArticleNum
-	}
+		num = c.currentArticle
 
-	// Get article
-	if messageID != "" && wantArticleNum == 0 {
-		// Handle message-ID lookup
-		// (a) try the currently selected group first: cheap and needs no history
+	case strings.HasPrefix(args[0], "<") && strings.HasSuffix(args[0], ">"):
+		messageID := args[0]
+		// (a) the currently selected group: cheap and needs no history
 		if c.currentGroup != "" {
-			if article = c.getArticleByMessageIDFromGroup(c.currentGroup, messageID); article != nil {
-				return article, article.DBArtNum
+			groupDB, gerr := c.server.DB.GetGroupDB(c.currentGroup)
+			if gerr != nil {
+				log.Printf("[NNTP] %s: group DB %s: %v", messageID, c.currentGroup, gerr)
+			} else {
+				a, aerr := c.server.DB.NNTPArticleByMessageID(groupDB, messageID)
+				groupDB.Return()
+				if aerr == nil {
+					return a, a.DBArtNum, true, nil
+				}
+				if !errors.Is(aerr, sql.ErrNoRows) {
+					log.Printf("[NNTP] %s in %s: %v", messageID, c.currentGroup, aerr)
+					return nil, 0, false, c.sendResponse(403, "Internal fault")
+				}
 			}
 		}
-
-		if c.server.local430.Check(messageID) {
+		// (b) a recent definite miss, then the history index (other groups)
+		if c.server.local430.Check(messageID) || c.server.Processor == nil {
 			c.rateLimitOnError()
-			c.sendResponse(430, "Cache says no!")
-			return nil, 0
+			return nil, 0, false, c.sendResponse(430, "No article with that message-id")
 		}
-
-		// (b) global lookup via the history index
-		if c.server.Processor == nil {
-			// read-only server without history
-			c.rateLimitOnError()
-			c.sendResponse(430, "NotF0")
-			return nil, 0
+		found, ferr := c.server.Processor.FindArticleByMessageID(messageID, "")
+		if ferr != nil && !errors.Is(ferr, ErrArticleNotFound) {
+			// history/DB fault, not a miss
+			log.Printf("[NNTP] lookup of %s failed: %v", messageID, ferr)
+			return nil, 0, false, c.sendResponse(403, "Internal fault")
 		}
-		// the current group was checked above, so search the other groups only
-		var err error
-		article, err = c.server.Processor.FindArticleByMessageID(messageID, "")
-		if err != nil || article == nil {
-			if errors.Is(err, ErrArticleNotFound) {
-				// definite miss: remember it for a while
-				c.server.local430.Add(messageID)
-			} else if err != nil {
-				log.Printf("getArticleData: lookup of %s failed: %v", messageID, err)
+		if ferr != nil || found == nil {
+			if ferr != nil {
+				c.server.local430.Add(messageID) // definite miss: remember it for a while
 			}
 			c.rateLimitOnError()
-			c.sendResponse(430, "NotF1")
-			return nil, 0
+			return nil, 0, false, c.sendResponse(430, "No article with that message-id")
+		}
+		visible, vok, verr := c.visibleInOtherGroup(found)
+		if verr != nil {
+			log.Printf("[NNTP] re-read of %s failed: %v", messageID, verr)
+			return nil, 0, false, c.sendResponse(403, "Internal fault")
+		}
+		if !vok {
+			c.rateLimitOnError()
+			return nil, 0, false, c.sendResponse(430, "No article with that message-id")
 		}
 		// found in another group: its article number means nothing in the current group
-		return article, 0
+		return visible, 0, true, nil
 
-	} else if wantArticleNum > 0 {
-		// Handle article number lookup
-		groupDB, err := c.server.DB.GetGroupDB(c.currentGroup)
-		if err != nil {
+	default:
+		if !c.requireGroup() {
+			return nil, 0, false, nil
+		}
+		arg := args[0]
+		valid := len(arg) > 0 && len(arg) <= 19
+		for i := 0; valid && i < len(arg); i++ {
+			valid = arg[i] >= '0' && arg[i] <= '9'
+		}
+		var perr error
+		if valid {
+			num, perr = strconv.ParseInt(arg, 10, 64) // fails above math.MaxInt64
+		}
+		if !valid || perr != nil {
 			c.rateLimitOnError()
-			c.sendResponse(411, "No such newsgroup")
-			return
+			return nil, 0, false, c.sendResponse(501, "Invalid article number")
 		}
-		defer groupDB.Return()
-
-		if retrievalType == RetrievalStat {
-			// For STAT command, we can use overview instead of full article
-			overview, err := c.server.DB.GetOverviewByArticleNum(groupDB, wantArticleNum)
-			if err != nil {
-				c.rateLimitOnError()
-				c.sendResponse(423, "No such article number")
-				return
-			}
-			return &models.Article{
-				DBArtNum:  wantArticleNum,
-				MessageID: overview.MessageID,
-			}, wantArticleNum
-		}
-
-		// For other commands, get the full article
-		article, err = c.server.DB.GetArticleByNum(groupDB, wantArticleNum)
-		if err != nil {
+		if num <= 0 {
 			c.rateLimitOnError()
-			c.sendResponse(423, "No such article number")
-			return
+			return nil, 0, false, c.sendResponse(423, "No article with that number")
 		}
-		return article, wantArticleNum
 	}
 
-	c.rateLimitOnError()
-	c.sendResponse(502, "Article not retrieved")
-	return nil, 0
-}
-
-// getArticleByMessageIDFromGroup looks up a message-id in a single newsgroup DB.
-// Returns nil if the group DB is not available or the article is not in it.
-func (c *ClientConnection) getArticleByMessageIDFromGroup(groupName string, messageID string) *models.Article {
-	groupDB, err := c.server.DB.GetGroupDB(groupName)
-	if err != nil || groupDB == nil {
-		return nil
+	// number lookup in the current group (no argument or the number form)
+	groupDB, err := c.server.DB.GetGroupDB(c.currentGroup)
+	if err != nil {
+		log.Printf("[NNTP] article %d: group DB %s: %v", num, c.currentGroup, err)
+		return nil, 0, false, c.sendResponse(403, "Internal fault")
 	}
 	defer groupDB.Return()
-	article, err := c.server.DB.GetArticleByMessageID(groupDB, messageID)
+	if stat {
+		var messageID string
+		messageID, err = c.server.DB.NNTPArticleMessageID(groupDB, num)
+		if err == nil {
+			article = &models.Article{DBArtNum: num, MessageID: messageID}
+		}
+	} else {
+		article, err = c.server.DB.NNTPArticleByNum(groupDB, num)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		c.rateLimitOnError()
+		if fromCurrent {
+			// hidden or expired since it became current: §6.2.1.2 allows only 420 here
+			return nil, 0, false, c.sendResponse(420, "Current article number is invalid")
+		}
+		return nil, 0, false, c.sendResponse(423, "No article with that number")
+	}
 	if err != nil {
+		log.Printf("[NNTP] article %d in %s: %v", num, c.currentGroup, err)
+		return nil, 0, false, c.sendResponse(403, "Internal fault")
+	}
+	c.currentArticle = num // RFC 3977 §6.2.1.2 / §6.2.4.2 (no-op for the current article)
+	return article, num, true, nil
+}
+
+// visibleInOtherGroup re-reads an article that the processor found through the history
+// index with the hide = 0 filter, in its first group (*article.NewsgroupsPtr[0]), and
+// returns that fresh copy; ok is false when it is absent or hidden there. An article
+// without group information (a processor that does not set NewsgroupsPtr) cannot be
+// re-read and is served as found unless its Hide counter is set.
+//
+// Known limitation: hide is per group DB, and the processor returns only the first group
+// that has the message-id, so a crosspost that is hidden in that group but visible in
+// another one answers 430 instead of being served from the other group.
+func (c *ClientConnection) visibleInOtherGroup(article *models.Article) (visible *models.Article, ok bool, err error) {
+	if len(article.NewsgroupsPtr) == 0 || article.NewsgroupsPtr[0] == nil {
+		return article, article.Hide == 0, nil
+	}
+	group := *article.NewsgroupsPtr[0]
+	groupDB, err := c.server.DB.GetGroupDB(group)
+	if err != nil {
+		return nil, false, err
+	}
+	defer groupDB.Return()
+	visible, err = c.server.DB.NNTPArticleByMessageID(groupDB, article.MessageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return visible, true, nil
+}
+
+// articleHeaderLines returns the stored header lines of a (headers_json split on LF);
+// empty lines are dropped, so HEAD never contains the header/body separator and an empty
+// headers_json gives no lines. Dot-stuffing and CR/LF/NUL cleaning are done by
+// dataBlockWriter.Line.
+func articleHeaderLines(a *models.Article) []string {
+	if a.HeadersJSON == "" {
 		return nil
 	}
-	return article
+	lines := strings.Split(a.HeadersJSON, "\n")
+	out := lines[:0]
+	for _, l := range lines {
+		if strings.TrimSuffix(l, "\r") != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// articleBodyLines returns the body lines of a: nil for an empty body, else the body split
+// on LF (a trailing LF gives a last empty line). Dot-stuffing is done by dataBlockWriter.Line.
+func articleBodyLines(a *models.Article) []string {
+	if a.BodyText == "" {
+		return nil
+	}
+	return strings.Split(a.BodyText, "\n")
 }
 
 // sendArticleContent sends full article (headers + body) for ARTICLE command
@@ -217,37 +262,26 @@ func (c *ClientConnection) sendArticleContent(article *models.Article, replyNum 
 	if c == nil || c.textConn == nil {
 		return fmt.Errorf("nil connection in sendArticleContent")
 	}
-	// Parse headers and body from the article
-	//log.Printf("sendArticleContent for result='%#v", result)
-	headers := c.parseArticleHeadersFull(article)
-	bodyLines := c.parseArticleBody(article)
-
-	// Send response: 220 n message-id Article follows
-	if err := c.textConn.PrintfLine("220 %d %s Article follows", replyNum, article.MessageID); err != nil {
+	// 220 n message-id Article follows
+	if err := c.sendResponse(220, fmt.Sprintf("%d %s Article follows", replyNum, article.MessageID)); err != nil {
 		return err
 	}
-
-	// Send headers
-	for _, header := range headers {
-		if err := c.sendLine(header); err != nil {
+	d := c.newDataBlock()
+	for _, line := range articleHeaderLines(article) {
+		if err := d.Line(line); err != nil {
 			return err
 		}
 	}
-
-	// Send blank line separating headers from body
-	if err := c.sendLine(""); err != nil {
+	// blank line separating headers from body
+	if err := d.Line(""); err != nil {
 		return err
 	}
-
-	// Send body
-	for _, line := range bodyLines {
-		if err := c.sendLine(line); err != nil {
+	for _, line := range articleBodyLines(article) {
+		if err := d.Line(line); err != nil {
 			return err
 		}
 	}
-
-	// Send termination line
-	return c.sendLine(DOT)
+	return d.Close()
 }
 
 // sendHeadContent sends only headers for HEAD command
@@ -255,23 +289,17 @@ func (c *ClientConnection) sendHeadContent(article *models.Article, replyNum int
 	if c == nil || c.textConn == nil {
 		return fmt.Errorf("nil connection in sendHeadContent")
 	}
-	// Parse headers from the article
-	headers := c.parseArticleHeadersFull(article)
-
-	// Send response: 221 n message-id Headers follow
+	// 221 n message-id Headers follow
 	if err := c.sendResponse(221, fmt.Sprintf("%d %s Headers follow", replyNum, article.MessageID)); err != nil {
 		return err
 	}
-
-	// Send headers
-	for _, header := range headers {
-		if err := c.sendLine(header); err != nil {
+	d := c.newDataBlock()
+	for _, line := range articleHeaderLines(article) {
+		if err := d.Line(line); err != nil {
 			return err
 		}
 	}
-
-	// Send termination line
-	return c.sendLine(DOT)
+	return d.Close()
 }
 
 // sendBodyContent sends only body for BODY command
@@ -279,23 +307,17 @@ func (c *ClientConnection) sendBodyContent(article *models.Article, replyNum int
 	if c == nil || c.textConn == nil {
 		return fmt.Errorf("nil connection in sendBodyContent")
 	}
-	// Parse body from the article
-	bodyLines := c.parseArticleBody(article)
-
-	// Send response: 222 n message-id Body follows
+	// 222 n message-id Body follows
 	if err := c.sendResponse(222, fmt.Sprintf("%d %s Body follows", replyNum, article.MessageID)); err != nil {
 		return err
 	}
-
-	// Send body
-	for _, line := range bodyLines {
-		if err := c.sendLine(line); err != nil {
+	d := c.newDataBlock()
+	for _, line := range articleBodyLines(article) {
+		if err := d.Line(line); err != nil {
 			return err
 		}
 	}
-
-	// Send termination line
-	return c.sendLine(DOT)
+	return d.Close()
 }
 
 // sendStatContent sends only status for STAT command
@@ -303,6 +325,6 @@ func (c *ClientConnection) sendStatContent(article *models.Article, replyNum int
 	if c == nil || c.textConn == nil {
 		return fmt.Errorf("nil connection in sendStatContent")
 	}
-	// Send response: 223 n message-id status
+	// 223 n message-id status
 	return c.sendResponse(223, fmt.Sprintf("%d %s Article exists", replyNum, article.MessageID))
 }

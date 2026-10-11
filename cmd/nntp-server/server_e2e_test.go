@@ -1326,7 +1326,9 @@ func TestE2EDotHeaderLine(t *testing.T) {
 	default:
 		t.Fatalf("POST with a \"..\" header line: %q, want 441 or 240", line)
 	}
-	e2eKnownBug(t, "A-nntp-rfc-2", bugErr)
+	if bugErr != nil {
+		t.Fatal(bugErr)
+	}
 }
 
 // TestE2ECrosspost: a crosspost gets a number in each group; ARTICLE <id> in a

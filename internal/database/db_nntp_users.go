@@ -2,7 +2,11 @@ package database
 
 import (
 	"crypto/rand"
+	"database/sql"
+	"errors"
 	"fmt"
+	"log"
+	"sync"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -54,10 +58,15 @@ func (db *Database) GetNNTPUserByID(id int) (*models.NNTPUser, error) {
 	return &u, nil
 }
 
-// GetNNTPUserByWebUserID retrieves an NNTP user by web user ID
+// GetNNTPUserByWebUserID retrieves the active NNTP user mapped to a web user ID. Several
+// rows may share one mapping (no UNIQUE constraint): the one with the lowest id wins.
+// webUserID <= 0 means "no web user" and returns sql.ErrNoRows.
 func (db *Database) GetNNTPUserByWebUserID(webUserID int64) (*models.NNTPUser, error) {
+	if webUserID <= 0 {
+		return nil, sql.ErrNoRows
+	}
 	query := `SELECT id, username, password, maxconns, posting, COALESCE(web_user_id, 0), created_at, updated_at, last_login, is_active
-	          FROM nntp_users WHERE web_user_id = ? AND is_active = 1`
+	          FROM nntp_users WHERE web_user_id = ? AND is_active = 1 ORDER BY id ASC LIMIT 1`
 
 	var u models.NNTPUser
 	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{webUserID}, &u.ID, &u.Username, &u.Password, &u.MaxConns, &u.Posting, &u.WebUserID,
@@ -142,8 +151,12 @@ func (db *Database) UpdateNNTPUserPassword(userID int, password string) error {
 	}
 
 	query := `UPDATE nntp_users SET password = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err = RetryableExec(db.mainDB, query, string(hashedPassword), userID)
-	return err
+	if _, err = RetryableExec(db.mainDB, query, string(hashedPassword), userID); err != nil {
+		return err
+	}
+	// Drop cached logins of this process; other processes notice the new hash on their next hit.
+	db.NNTPAuthCache.RemoveUserID(userID)
+	return nil
 }
 
 // UpdateNNTPUserLastLogin updates the last login timestamp
@@ -163,8 +176,11 @@ func (db *Database) UpdateNNTPUserPermissions(userID int, maxConns int, posting 
 // DeactivateNNTPUser deactivates an NNTP user (soft delete)
 func (db *Database) DeactivateNNTPUser(userID int) error {
 	query := `UPDATE nntp_users SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err := RetryableExec(db.mainDB, query, userID)
-	return err
+	if _, err := RetryableExec(db.mainDB, query, userID); err != nil {
+		return err
+	}
+	db.NNTPAuthCache.RemoveUserID(userID)
+	return nil
 }
 
 // ActivateNNTPUser activates an NNTP user (reverses soft delete)
@@ -183,8 +199,11 @@ func (db *Database) DeleteNNTPUser(userID int) error {
 	}
 
 	// Then delete the user
-	_, err = RetryableExec(db.mainDB, `DELETE FROM nntp_users WHERE id = ?`, userID)
-	return err
+	if _, err = RetryableExec(db.mainDB, `DELETE FROM nntp_users WHERE id = ?`, userID); err != nil {
+		return err
+	}
+	db.NNTPAuthCache.RemoveUserID(userID)
+	return nil
 }
 
 // NNTP Session Management Functions
@@ -252,12 +271,16 @@ func (db *Database) CreateNNTPUserForWebUser(webUserID int64) error {
 	nntpUsername := generateRandomString(16)
 	nntpPassword := generateRandomString(16)
 
-	// Ensure username is unique by checking database
+	// Ensure username is unique by checking database (any state: an inactive
+	// user holds its name too, and the column is UNIQUE)
 	for {
-		_, err := db.GetNNTPUserByUsername(nntpUsername)
-		if err != nil {
+		_, err := db.GetNNTPUserByUsernameAnyState(nntpUsername)
+		if errors.Is(err, sql.ErrNoRows) {
 			// Username doesn't exist, we can use it
 			break
+		}
+		if err != nil {
+			return fmt.Errorf("checking NNTP username: %w", err)
 		}
 		// Username exists, generate a new one
 		nntpUsername = generateRandomString(16)
@@ -267,7 +290,7 @@ func (db *Database) CreateNNTPUserForWebUser(webUserID int64) error {
 	nntpUser := &models.NNTPUser{
 		Username:  nntpUsername,
 		Password:  nntpPassword,
-		MaxConns:  1,     // Default 1 connection
+		MaxConns:  DefaultNNTPUserMaxConns,
 		Posting:   false, // Read-only by default
 		WebUserID: webUserID,
 		IsActive:  true,
@@ -276,12 +299,34 @@ func (db *Database) CreateNNTPUserForWebUser(webUserID int64) error {
 	return db.InsertNNTPUser(nntpUser)
 }
 
+// nntpDummyOnce holds a bcrypt hash of a fixed string, generated once on first use.
+var nntpDummyOnce struct {
+	sync.Once
+	hash []byte
+}
+
+// nntpDummyHash returns a bcrypt hash (bcrypt.DefaultCost) that no password is
+// expected to match. Comparing against it for unknown users makes a failed login
+// take about as long as one for an existing user (A-nntp-sec-6: no username
+// enumeration by timing).
+func nntpDummyHash() []byte {
+	nntpDummyOnce.Do(func() {
+		h, err := bcrypt.GenerateFromPassword([]byte("go-pugleaf-nntp-dummy-password"), bcrypt.DefaultCost)
+		if err != nil {
+			log.Printf("[NNTP-AUTH] dummy hash generation failed: %v", err)
+			return
+		}
+		nntpDummyOnce.hash = h
+	})
+	return nntpDummyOnce.hash
+}
+
 // AuthenticateNNTPUser authenticates an NNTP user with caching support
 // This function first checks the authentication cache before doing expensive bcrypt verification
 func (db *Database) AuthenticateNNTPUser(username, password string) (*models.NNTPUser, error) {
 	// First check the authentication cache
 	if db.NNTPAuthCache != nil {
-		if userID, found := db.NNTPAuthCache.Get(username, password); found {
+		if userID, storedHash, found := db.NNTPAuthCache.GetEntry(username, password); found {
 			// Cache hit - get the user details (this is fast)
 			user, err := db.GetNNTPUserByID(userID)
 			if err != nil {
@@ -290,17 +335,25 @@ func (db *Database) AuthenticateNNTPUser(username, password string) (*models.NNT
 				db.InvalidateNNTPUserAuth(username)
 				return nil, err
 			}
-			// A cached login must not outlive the account: re-check on every hit.
-			if err := db.refuseDisabledNNTPUser(username, user.ID); err != nil {
-				return nil, err
+			if user.Password == storedHash {
+				// A cached login must not outlive the account: re-check on every hit.
+				if err := db.refuseDisabledNNTPUser(username, user.ID); err != nil {
+					return nil, err
+				}
+				return user, nil
 			}
-			return user, nil
+			// The password was changed since this login was cached (possibly by
+			// another process, SEC-6): drop the entry and do the full check below,
+			// so an old password fails and a new one is cached again.
+			db.InvalidateNNTPUserAuth(username)
 		}
 	}
 
 	// Cache miss - do full authentication
 	user, err := db.GetNNTPUserByUsername(username)
 	if err != nil {
+		// Spend the same bcrypt time as for an existing user (A-nntp-sec-6).
+		_ = bcrypt.CompareHashAndPassword(nntpDummyHash(), []byte(password))
 		return nil, fmt.Errorf("user not found: %w", err)
 	}
 
@@ -316,13 +369,15 @@ func (db *Database) AuthenticateNNTPUser(username, password string) (*models.NNT
 		return nil, err
 	}
 
-	// Authentication successful - cache it
+	// Authentication successful - cache it with the stored hash it was verified against
 	if db.NNTPAuthCache != nil {
-		db.NNTPAuthCache.Set(user.ID, username, password)
+		db.NNTPAuthCache.Set(user.ID, username, password, user.Password)
 	}
 
 	// Update last login timestamp
-	db.UpdateNNTPUserLastLogin(user.ID)
+	if err := db.UpdateNNTPUserLastLogin(user.ID); err != nil {
+		log.Printf("[NNTP-AUTH] last login update for user %d: %v", user.ID, err)
+	}
 
 	return user, nil
 }

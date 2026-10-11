@@ -221,7 +221,9 @@ func TestGrpGroupSeeded(t *testing.T) {
 		if low != 3 {
 			err = fmt.Errorf("GROUP: got %q, want low mark 3 (\"211 3 3 5 %s\")", line, g)
 		}
-		knownBug(t, "BUG-4", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	// RFC 3977 §6.1.1.2: a successful GROUP sets the current article number to
@@ -243,7 +245,9 @@ func TestGrpGroupSeeded(t *testing.T) {
 		} else {
 			err = fmt.Errorf("bare STAT after GROUP: %w (also needs RFC-3)", err)
 		}
-		knownBug(t, "BUG-4", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	// RFC 3977 §6.1.1.2: 411 for an unknown group, and "the currently selected
@@ -336,7 +340,9 @@ func TestGrpListGroup(t *testing.T) {
 		if nerr != nil {
 			t.Fatalf("LISTGROUP body: %v", nerr)
 		}
-		knownBug(t, "BUG-4", grpExpect211(line, 3, 3, 5, g))
+		if err := grpExpect211(line, 3, 3, 5, g); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	// RFC 3977 §6.1.2.2: with a range only the numbers in that range are
@@ -351,7 +357,9 @@ func TestGrpListGroup(t *testing.T) {
 		if err == nil {
 			err = grpExpectNums(nums, []int64{4, 5})
 		}
-		knownBug(t, "BUG-4", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	// RFC 3977 §6.1.2.2: a successful LISTGROUP selects the group and sets the
@@ -364,7 +372,9 @@ func TestGrpListGroup(t *testing.T) {
 		}
 		c.readDotLines(t)
 		code, line = c.cmd(t, "STAT 3")
-		knownBug(t, "BUG-4", hExpectCode(code, line, 223))
+		if err := hExpectCode(code, line, 223); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	// RFC 3977 §6.1.2.2: LISTGROUP without a group and with no group selected → 412.
@@ -385,7 +395,9 @@ func TestGrpListGroup(t *testing.T) {
 		c := hs.dial(t)
 		code, line := c.cmd(t, "LISTGROUP %s", inactive)
 		grpReadIfMulti(t, c, code, 211)
-		knownBug(t, "T-nntp-group-1", hExpectCode(code, line, 411))
+		if err := hExpectCode(code, line, 411); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -424,7 +436,9 @@ func TestGrpListGroupUnknownNoFile(t *testing.T) {
 	if _, err := db.MainDBGetNewsgroup(unknown); err == nil {
 		t.Fatalf("LISTGROUP %s created a newsgroups row", unknown)
 	}
-	knownBug(t, "SEC-2", errors.Join(errs...))
+	if err := errors.Join(errs...); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // grpListGroupAllocCeiling bounds what one LISTGROUP of grpMemRows rows may
@@ -509,7 +523,9 @@ func TestGrpListGroupMemory(t *testing.T) {
 	if err != nil && !strings.Contains(err.Error(), grpMemMarker) {
 		t.Fatalf("isolated LISTGROUP run failed for another reason: %v", err)
 	}
-	knownBug(t, "SEC-7", err)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestGrpListActive: RFC 3977 §7.6.3, LIST ACTIVE lines are "name high low
@@ -542,7 +558,9 @@ func TestGrpListActive(t *testing.T) {
 	if f[2] != "3" || f[3] != "y" {
 		err = fmt.Errorf("LIST ACTIVE line %q, want %q (low mark and status)", got, want)
 	}
-	knownBug(t, "BUG-4", err)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestGrpListWildmat: RFC 3977 §7.6.3 and §7.6.6, LIST ACTIVE and LIST
@@ -776,5 +794,142 @@ func TestGrpNewNews(t *testing.T) {
 		t.Fatalf("CAPABILITIES lists NEWNEWS but NEWNEWS answered %q", line)
 	case code != 230 && code != 500:
 		t.Fatalf("NEWNEWS: got %q, want 230 or 500", line)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Plan nntp-server-hardening, slice nntp-read
+
+// grpHide sets hide = 1 on the given article numbers of group (decision 2).
+func grpHide(t *testing.T, group string, nums ...int64) {
+	t.Helper()
+	gdb, err := hTestDB(t).GetGroupDB(group)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", group, err)
+	}
+	defer gdb.Return()
+	for _, n := range nums {
+		if _, err := database.RetryableExec(gdb.DB, `UPDATE articles SET hide = 1 WHERE article_num = ?`, n); err != nil {
+			t.Fatalf("hide article %d in %s: %v", n, group, err)
+		}
+	}
+}
+
+// TestGrpHiddenNotListed: hidden articles (hide > 0) are absent from LISTGROUP and from
+// GROUP's marks; GROUP's count is an estimate that only has to cover the visible
+// articles (decision 14, RFC 3977 §6.1.1.2).
+func TestGrpHiddenNotListed(t *testing.T) {
+	g := hGroup(t, "t3.hidden", 5, nil)
+	grpHide(t, g, 1, 3, 5)
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+
+	code, line := c.cmd(t, "LISTGROUP %s", g)
+	if err := hExpectCode(code, line, 211); err != nil {
+		t.Fatal(err)
+	}
+	nums, err := grpNumbers(c.readDotLines(t))
+	if err == nil {
+		err = grpExpectNums(nums, []int64{2, 4})
+	}
+	if err != nil {
+		t.Fatalf("LISTGROUP body: %v", err)
+	}
+
+	code, line = c.cmd(t, "GROUP %s", g)
+	if err := hExpectCode(code, line, 211); err != nil {
+		t.Fatal(err)
+	}
+	count, low, high, name, err := grpParse211(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if low != 2 || high != 4 || name != g || count < 2 || count > high-low+1 {
+		t.Fatalf("GROUP: got %q, want \"211 <2..3> 2 4 %s\"", line, g)
+	}
+	// The current article is the low mark, a visible article.
+	code, line = c.cmd(t, "STAT")
+	if !strings.HasPrefix(line, fmt.Sprintf("223 2 %s", hMessageID(g, 2))) {
+		t.Fatalf("bare STAT after GROUP: got %q (code %d), want 223 2", line, code)
+	}
+
+	// A stale message_count of 0 must not give "211 0 2 4": a non-empty group reports a
+	// count of at least the visible articles (RFC 3977 §6.1.1.2), here high-low+1 = 3.
+	if _, err := database.RetryableExec(hTestDB(t).GetMainDB(),
+		`UPDATE newsgroups SET message_count = 0 WHERE name = ?`, g); err != nil {
+		t.Fatalf("zero message_count of %s: %v", g, err)
+	}
+	code, line = c.cmd(t, "GROUP %s", g)
+	if err := hExpectCode(code, line, 211); err != nil {
+		t.Fatal(err)
+	}
+	if err := grpExpect211(line, 3, 2, 4, g); err != nil {
+		t.Fatalf("GROUP with message_count 0: %v", err)
+	}
+}
+
+// TestGrpListGroupRangeEmpty: a reversed range is not a syntax error; LISTGROUP answers
+// 211 with an empty list and still selects the group (RFC 3977 §6.1.2.2).
+func TestGrpListGroupRangeEmpty(t *testing.T) {
+	g := hGroup(t, "t3.listgrouprangeempty", 5, nil)
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+
+	code, line := c.cmd(t, "LISTGROUP %s 9-3", g)
+	if err := hExpectCode(code, line, 211); err != nil {
+		t.Fatal(err)
+	}
+	if lines := c.readDotLines(t); len(lines) != 0 {
+		t.Fatalf("LISTGROUP %s 9-3: got lines %q, want none", g, lines)
+	}
+	if err := grpExpect211(line, 5, 1, 5, g); err != nil {
+		t.Fatal(err)
+	}
+	// A range beyond the group is empty as well.
+	code, line = c.cmd(t, "LISTGROUP %s 100-", g)
+	if err := hExpectCode(code, line, 211); err != nil {
+		t.Fatal(err)
+	}
+	if lines := c.readDotLines(t); len(lines) != 0 {
+		t.Fatalf("LISTGROUP %s 100-: got lines %q, want none", g, lines)
+	}
+	// A bad range is a syntax error.
+	code, line = c.cmd(t, "LISTGROUP %s x-5", g)
+	grpReadIfMulti(t, c, code, 211)
+	if err := hExpectCode(code, line, 501); err != nil {
+		t.Fatal(err)
+	}
+	code, line = c.cmd(t, "STAT 3")
+	if err := hExpectCode(code, line, 223); err != nil {
+		t.Fatalf("STAT 3 after LISTGROUP with an empty range: %v", err)
+	}
+}
+
+// TestGrpListNewsgroupsSanitized: a description with TAB, CR or LF is sent with spaces,
+// one line per group (RFC 3977 §7.6.6).
+func TestGrpListNewsgroupsSanitized(t *testing.T) {
+	db := hTestDB(t)
+	name := hGroupName("t3.listnewsgroupssan")
+	if err := db.InsertNewsgroup(&models.Newsgroup{
+		Name: name, Description: "one\ttwo\rthree\nfour", Active: true,
+		Status: "y", LowWater: 1, Hierarchy: "t3",
+	}); err != nil {
+		t.Fatalf("InsertNewsgroup %s: %v", name, err)
+	}
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+	code, line := c.cmd(t, "LIST NEWSGROUPS")
+	if err := hExpectCode(code, line, 215); err != nil {
+		t.Fatal(err)
+	}
+	var mine []string
+	for _, l := range c.readDotLines(t) {
+		if l == "four" || l == "three" || strings.HasPrefix(l, name+" ") {
+			mine = append(mine, l)
+		}
+	}
+	want := name + " one two three four"
+	if len(mine) != 1 || mine[0] != want {
+		t.Fatalf("LIST NEWSGROUPS lines for %s: %q, want [%q]", name, mine, want)
 	}
 }

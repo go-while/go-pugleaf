@@ -648,6 +648,8 @@ Changes (D9):
    the checkbox state; verify in the template). Password: when given, `nntpAdminPasswordMin = 10` ≤ len ≤
    `nntpAdminPasswordMax = 72` bytes, else flash. Mapping: when the field is present in the form,
    `resolveNNTPWebMapping(s, raw, id, current)` then `s.DB.UpdateNNTPUserWebUserID(id, w)` (hardening contract).
+   Note from the hardening run (2026-10-11): `UpdateNNTPUserWebUserID` returns `sql.ErrNoRows` when no NNTP user
+   has that id; map it to a "not found" error in the handler.
    Replace the empty branch at `:199-203`.
 4. Template: the create/edit `<select name="web_user_id">` gets a first `<option value="0">— no mapping —</option>`,
    selected by default on create and when `.WebUserID` is 0 on edit.

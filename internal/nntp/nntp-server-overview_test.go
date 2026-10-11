@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -257,7 +258,9 @@ func TestOvrXoverRanges(t *testing.T) {
 			if err != nil {
 				err = fmt.Errorf("XOVER %s: %w (block %q)", tc.arg, err, lines)
 			}
-			knownBug(t, "RFC-6", err)
+			if err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 
@@ -334,7 +337,9 @@ func TestOvrLineFormat(t *testing.T) {
 			err = fmt.Errorf("got %d fields, want %s (Xref listed in OVERVIEW.FMT: %v): %q",
 				len(fields), want, xrefListed, lines[0])
 		}
-		knownBug(t, "BUG-5", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -405,7 +410,9 @@ func TestOvrSanitizing(t *testing.T) {
 				}
 			}
 		}
-		knownBug(t, "BUG-5", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	t.Run("XHDR", func(t *testing.T) {
@@ -471,7 +478,9 @@ func TestOvrSanitizing(t *testing.T) {
 		if len(problems) > 0 {
 			err = errors.New(strings.Join(problems, "; "))
 		}
-		knownBug(t, "BUG-5", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -496,7 +505,9 @@ func TestOvrFullRange(t *testing.T) {
 		if len(lines) != n {
 			err = fmt.Errorf("XOVER 1-%d: got %d lines, want %d (last %q)", n, len(lines), n, ovrLastNum(lines))
 		}
-		knownBug(t, "BUG-2", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	// RFC 2980 §2.6: one line per article in the range.
@@ -509,7 +520,9 @@ func TestOvrFullRange(t *testing.T) {
 		if len(lines) != n {
 			err = fmt.Errorf("XHDR subject 1-%d: got %d lines, want %d (last %q)", n, len(lines), n, ovrLastNum(lines))
 		}
-		knownBug(t, "BUG-2", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -567,7 +580,9 @@ func TestOvrXhdr(t *testing.T) {
 			if err != nil {
 				err = fmt.Errorf("XHDR %s 1-2: %w", tc.header, err)
 			}
-			knownBug(t, "RFC-6", err)
+			if err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 
@@ -593,7 +608,9 @@ func TestOvrXhdr(t *testing.T) {
 		if err != nil {
 			err = fmt.Errorf("XHDR X-Ovr-Absent 1-2: %w", err)
 		}
-		knownBug(t, "RFC-6", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	// RFC 3977 §8.5.2: 423 "No articles in that range" (420 in RFC 2980 terms)
@@ -608,7 +625,9 @@ func TestOvrXhdr(t *testing.T) {
 			if err != nil {
 				err = fmt.Errorf("XHDR subject %s: %w (block %q)", tc.arg, err, lines)
 			}
-			knownBug(t, "RFC-6", err)
+			if err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 
@@ -623,7 +642,9 @@ func TestOvrXhdr(t *testing.T) {
 		if err != nil {
 			err = fmt.Errorf("XHDR subject %s: %w", a2.MessageID, err)
 		}
-		knownBug(t, "RFC-6", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -665,7 +686,9 @@ func TestOvrHugeRange(t *testing.T) {
 	if ovrIsChild(t) {
 		return
 	}
-	knownBug(t, "SEC-1", err)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -697,4 +720,192 @@ func TestOvrOverHdr(t *testing.T) {
 		}
 		knownBug(t, "RFC-1", err)
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Range parser (plan nntp-server-hardening, D2)
+
+func TestOvrRangeParse(t *testing.T) {
+	c := &ClientConnection{}
+	ok := []struct {
+		arg   string
+		want  articleRange
+		empty bool
+	}{
+		{"5", articleRange{First: 5, Last: 5}, false},
+		{"5-", articleRange{First: 5, Last: math.MaxInt64, Open: true}, false},
+		{"5-9", articleRange{First: 5, Last: 9}, false},
+		{"9-5", articleRange{First: 9, Last: 5}, true},
+		{"0-", articleRange{First: 0, Last: math.MaxInt64, Open: true}, false},
+		{"0", articleRange{First: 0, Last: 0}, false},
+		{"9999999999999999", articleRange{First: 9999999999999999, Last: 9999999999999999}, false},
+		{"1-9999999999999999", articleRange{First: 1, Last: 9999999999999999}, false},
+		// 17+ digits up to math.MaxInt64 are accepted (deviation from the 16-digit
+		// RFC 3977 §9.8 limit: TestOvrHugeRange and the N22 probe use this end).
+		{"12345678901234567", articleRange{First: 12345678901234567, Last: 12345678901234567}, false},
+		{"1-9223372036854775807", articleRange{First: 1, Last: math.MaxInt64}, false},
+		{"0009", articleRange{First: 9, Last: 9}, false},
+	}
+	for _, tc := range ok {
+		got, err := c.parseRangeArg(tc.arg)
+		if err != nil {
+			t.Errorf("parseRangeArg(%q): unexpected error %v", tc.arg, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("parseRangeArg(%q) = %+v, want %+v", tc.arg, got, tc.want)
+		}
+		if got.Empty() != tc.empty {
+			t.Errorf("parseRangeArg(%q).Empty() = %v, want %v", tc.arg, got.Empty(), tc.empty)
+		}
+	}
+	for _, arg := range []string{
+		"", "-", "x-5", "5-y", "1-2-3", "+1", "-5", " 5", "5 ", "1--2",
+		"9223372036854775808", "1-9223372036854775808", "12345678901234567890", "00000000000000000001",
+	} {
+		if got, err := c.parseRangeArg(arg); !errors.Is(err, errRangeSyntax) {
+			t.Errorf("parseRangeArg(%q) = %+v, %v; want errRangeSyntax", arg, got, err)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Hidden articles (decision 2: hide > 0 is never served over NNTP)
+
+func TestOvrHidden(t *testing.T) {
+	g := hGroup(t, "t5.hidden", 3, nil)
+	hidden := hDefaultArticle(g, 2)
+	gdb, err := hTestDB(t).GetGroupDB(g)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", g, err)
+	}
+	_, err = database.RetryableExec(gdb.DB, `UPDATE articles SET hide = 1 WHERE article_num = 2`)
+	gdb.Return()
+	if err != nil {
+		t.Fatalf("hide article 2: %v", err)
+	}
+
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+	ovrSelect(t, c, g)
+
+	t.Run("XOVER", func(t *testing.T) {
+		code, line, lines := ovrCmd(t, c, "XOVER 1-")
+		if err := hExpectCode(code, line, 224); err != nil {
+			t.Fatal(err)
+		}
+		if err := hExpectLines(ovrNums(lines), []string{"1", "3"}); err != nil {
+			t.Fatalf("XOVER 1-: %v", err)
+		}
+	})
+	t.Run("XOVER-only-hidden", func(t *testing.T) {
+		code, line, _ := ovrCmd(t, c, "XOVER 2")
+		if err := hExpectCode(code, line, 423); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("XHDR", func(t *testing.T) {
+		code, line, lines := ovrCmd(t, c, "XHDR subject 1-")
+		if err := hExpectCode(code, line, 221); err != nil {
+			t.Fatal(err)
+		}
+		if err := hExpectLines(ovrNums(lines), []string{"1", "3"}); err != nil {
+			t.Fatalf("XHDR subject 1-: %v", err)
+		}
+	})
+	t.Run("XHDR-message-id", func(t *testing.T) {
+		code, line, _ := ovrCmd(t, c, "XHDR subject %s", hidden.MessageID)
+		if err := hExpectCode(code, line, 430); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("XHDR-status-no-echo", func(t *testing.T) {
+		// A-nntp-rfc-6: the status line echoes at most 64 bytes of the field name.
+		long := strings.Repeat("X", 300)
+		code, line, _ := ovrCmd(t, c, "XHDR %s 1-", long)
+		if err := hExpectCode(code, line, 221); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(line, strings.Repeat("X", 65)) {
+			t.Fatalf("status line echoes more than 64 bytes of the field: %q", line)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// XHDR Xref/Path: consistent with HEAD/ARTICLE (common.ReconstructHeaders drops the
+// stored Xref and rebuilds Path from the path column), never the raw upstream lines.
+
+func TestOvrXhdrXrefPath(t *testing.T) {
+	g := hGroup(t, "t5.xrefpath", 2, func(i int, a *hArticle) {
+		a.Headers = strings.Join([]string{
+			"Path: upstream.example!raw-path",
+			"From: " + a.From,
+			"Newsgroups: other.group",
+			"Subject: " + a.Subject,
+			"Date: " + a.DateString,
+			"Message-ID: " + a.MessageID,
+			fmt.Sprintf("Xref: upstream.example other.group:%d", 9000+i),
+		}, "\n")
+	})
+	a1 := hDefaultArticle(g, 1)
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+	ovrSelect(t, c, g)
+
+	for _, field := range []string{"Xref", "XREF"} {
+		code, line, lines := ovrCmd(t, c, "XHDR %s 1-2", field)
+		if err := hExpectCode(code, line, 221); err != nil {
+			t.Fatalf("XHDR %s: %v", field, err)
+		}
+		if err := hExpectLines(lines, []string{"1", "2"}); err != nil {
+			t.Fatalf("XHDR %s 1-2: %v", field, err)
+		}
+	}
+	code, line, lines := ovrCmd(t, c, "XHDR Xref %s", a1.MessageID)
+	if err := hExpectCode(code, line, 221); err != nil {
+		t.Fatalf("XHDR Xref <id>: %v", err)
+	}
+	if err := hExpectLines(lines, []string{a1.MessageID}); err != nil {
+		t.Fatalf("XHDR Xref <id>: %v", err)
+	}
+
+	// Path: the stored path column (a.Path), not the raw upstream line in headers_json.
+	code, line, lines = ovrCmd(t, c, "XHDR path 1-2")
+	if err := hExpectCode(code, line, 221); err != nil {
+		t.Fatalf("XHDR path: %v", err)
+	}
+	if err := hExpectLines(lines, []string{"1 " + a1.Path, "2 " + a1.Path}); err != nil {
+		t.Fatalf("XHDR path 1-2: %v", err)
+	}
+	code, line, lines = ovrCmd(t, c, "XHDR Path %s", a1.MessageID)
+	if err := hExpectCode(code, line, 221); err != nil {
+		t.Fatalf("XHDR Path <id>: %v", err)
+	}
+	if err := hExpectLines(lines, []string{a1.MessageID + " " + a1.Path}); err != nil {
+		t.Fatalf("XHDR Path <id>: %v", err)
+	}
+}
+
+// XHDR <field> <message-id> with a processor: a definite miss is 430, a lookup fault
+// (history DB) is 403 (decision 15).
+func TestOvrXhdrLookupFault(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"miss", fmt.Errorf("message-id: %w", ErrArticleNotFound), 430},
+		{"fault", errors.New("history lookup failed: disk I/O error"), 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{findErr: tc.err}})
+			c := hs.dial(t)
+			defer c.close()
+			code, line, _ := ovrCmd(t, c, "XHDR subject <ovr-fault@test.invalid>")
+			if err := hExpectCode(code, line, tc.want); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }

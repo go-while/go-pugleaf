@@ -12,7 +12,8 @@ Written at `plan-nntp-audit-tests` @ 03d5ef7; every `file:line` below was checke
 **Ordering with the other queued plans (all branch from `testing-001` when they start):** fixed run order
 `nntp-server-hardening` → `nntp-intake-injection` → `nntp-client-transfer` → `nntp-rfc-commands` → `audit-delta-fixes`.
 - `nntp-intake-injection` wires `readArticleBlock`/`MaxArticleBytes` from this plan into `readArticleLines`
-  (`nntp-cmd-posting.go`) and calls `local430.Remove` after accepted articles.
+  (`nntp-cmd-posting.go`) and calls `local430.Remove` after accepted articles (which closes BUG-8: that plan removes
+  the `TestArtLocal430/ihave-arrival` marker; T-nntp-article-1 stays, decision 9).
 - `nntp-rfc-commands` (`Depends on: nntp-server-hardening`) reuses the range parser, the dispatch/CAPABILITIES layout,
   `commandMaxArgs`/`knownStatCommands` and `dataBlockWriter`.
 - `audit-delta-fixes` uses the A-web-5 DB contract of slice `nntp-auth-db` (Design K1, "Contracts for other plans").
@@ -115,12 +116,12 @@ marks every one of them with `knownBug(t, "<id>", err)`; this plan removes those
    is refreshed per command and per received article line; the write deadline (same duration) is set per flush, not
    once per command.
 9. **local430 (BUG-8, T-nntp-article-1).** local430 stays as cross-connection damping of repeated misses, with a TTL
-   of 1 s (`DefaultLocal430TTL`, was 60–75 s) enforced in `Check`, at most 65 536 entries, and message-ids over 250
-   octets never cached. New `func (lc *Local430) Remove(messageID string)`: `nntp-intake-injection` (its slice S4)
-   calls `c.server.local430.Remove(id)` after a 235/239/240 in `nntp-cmd-posting.go`. The TTL alone already makes
-   `artPollStat223` pass for both `TestArtLocal430` subtests (the entry is older than 1 s when the 1 s poll window
-   ends; confirmed by the plan review), so `nntp-session` removes both markers; the `Remove` call only shortens the
-   in-process window further.
+   of **60 s** (`DefaultLocal430TTL`; user decision of 2026-10-11, the plan's draft said 1 s) enforced in `Check`, at
+   most 65 536 entries, and message-ids over 250 octets never cached. New `func (lc *Local430) Remove(messageID string)`:
+   `nntp-intake-injection` (its slice S4) calls `c.server.local430.Remove(id)` after a 235/239/240 in
+   `nntp-cmd-posting.go`, which closes BUG-8 (that plan removes the `TestArtLocal430/ihave-arrival` marker).
+   T-nntp-article-1 (an article stored by another process answers 430 for up to 60 s) is an accepted limitation; its
+   marker stays open and documented. Both `TestArtLocal430` markers therefore stay after this plan.
 10. **Command line limit (SEC-3).** 512 octets including CRLF (RFC 3977 §3.1): a longer line that ends within
     4096 bytes gets `501 Command line too long` and the session continues; 4096 bytes without LF gets
     `400 Command line too long` and the connection is closed.
@@ -157,13 +158,17 @@ marks every one of them with `knownBug(t, "<id>", err)`; this plan removes those
     `cmd/web -nntptlsport` without `-nntpcertfile`/`-nntpkeyfile` used to skip TLS silently and now exits.
     Behaviour change to report.
 
-### Open questions for the user (asked at the wave-1 boundary; the defaults above apply until answered)
-1. Per-user `maxconns` (decision 12): keep `-enforce-user-maxconns` off by default, or turn it on after raising
-   existing users' values? nntpmgr's 1–25 range cannot set 0 (unlimited), and the default for new users is 1.
-2. The 1 s local430 TTL (decision 9) makes local430 a short burst damper only; acceptable, or prefer a longer TTL
-   with `Remove` (intake) covering in-process arrivals and the test setting a short TTL?
-3. Default delays (decision 7: 25 ms per article command, 25 ms per GROUP, 1 s error delay): acceptable for the
-   public server?
+### Open questions for the user (answered 2026-10-11 at the wave-1 boundary)
+1. Per-user `maxconns` (decision 12): **answered "default to 3"**. The default for new users becomes 3: nntpmgr's
+   `-maxconns` flag default (`cmd/nntpmgr/main.go:31`) and `CreateNNTPUserForWebUser` (`db_nntp_users.go:270`) both
+   use a new `database.DefaultNNTPUserMaxConns = 3` (defined in `nntp_user_admin.go`, slice `nntp-auth-db`).
+   `-enforce-user-maxconns` stays off by default (existing users keep their stored 1 until raised with
+   `nntpmgr -update -maxconns`); the user can turn it on later.
+2. local430 TTL (decision 9): **answered "set local430 to 60s"** (first answer "not sure what it was made for";
+   local430 is a negative cache of message-ids that answered 430, so repeated lookups of a missing article by many
+   readers or peers do not hit the DB/processor each time). Consequence: BUG-8 and T-nntp-article-1 markers stay open
+   after this plan (see decision 9).
+3. Default delays (decision 7): **accepted** (25 ms per article command, 25 ms per GROUP, 1 s error delay).
 
 ### Out of scope (owned elsewhere; cross-reference only)
 - `nntp-rfc-commands`: RFC-1 (DATE, NEXT, LAST, NEWGROUPS, NEWNEWS, OVER/HDR, LIST OVERVIEW.FMT/HEADERS, the LIST
@@ -233,7 +238,7 @@ marks every one of them with `knownBug(t, "<id>", err)`; this plan removes those
   test prefixes `nshRead`/`TestNSHRead`.
 - **nntp-auth-db:** `nntpDummyHash`, `nntpDummyOnce`, `(*NNTPAuthCache).GetEntry`, `(*NNTPAuthCache).RemoveUserID`,
   field `AuthCacheEntry.StoredHash`; DB file `internal/database/nntp_user_admin.go`: `GetNNTPUserByUsernameAnyState`,
-  `CountNNTPUsersByWebUserID`, `UpdateNNTPUserWebUserID`; nntpmgr: `flagsSet`, `setNNTPUserActive`,
+  `CountNNTPUsersByWebUserID`, `UpdateNNTPUserWebUserID`, `DefaultNNTPUserMaxConns`; nntpmgr: `flagsSet`, `setNNTPUserActive`,
   `setNNTPUserPassword`; test prefixes `nshAuth`/`TestNSHAuth`.
 
 ### K3 Tests
@@ -310,9 +315,10 @@ func (r articleRange) Empty() bool { return r.Last < r.First }
 
 var errRangeSyntax = errors.New("syntax error in range")
 
-// parseRangeArg parses arg. Each number is 1..16 ASCII digits (RFC 3977 §9.8 article-number),
-// 0 allowed; anything else ("", "-", "x-5", "5-y", "1-2-3", "-5", "+1", 17+ digits) returns
-// errRangeSyntax. It sends nothing: the caller answers rateLimitOnError() + 501 "Syntax error in range".
+// parseRangeArg parses arg. Each number is 1..19 ASCII digits whose value fits in int64
+// (RFC 3977 §9.8 requires 1..16; 17-19 digits are accepted because TestOvrHugeRange and the
+// N22 probe send 9223372036854775807), 0 allowed; anything else ("", "-", "x-5", "5-y",
+// "1-2-3", "-5", "+1", 20+ digits, a value above math.MaxInt64) returns errRangeSyntax. It sends nothing: the caller answers rateLimitOnError() + 501 "Syntax error in range".
 func (c *ClientConnection) parseRangeArg(arg string) (articleRange, error)
 
 // requireGroup sends rateLimitOnError() + "412 No newsgroup selected" and returns false when no
@@ -533,7 +539,6 @@ Owned files:
 - `internal/nntp/README.md`
 - `cmd/nntp-server/main.go`
 - tests: `internal/nntp/nntp-server-session_test.go`, `internal/nntp/nntp-server-auth_test.go`,
-  `internal/nntp/nntp-server-article_test.go` (only the two local430 markers)
 
 Changes:
 1. **Connection loop (A-nntp-sec-1, BUG-7 QUIT, decision 15 for handler errors).**
@@ -642,18 +647,14 @@ Changes:
     `-enforce-user-maxconns` (false), `-maxartsize` (0 = config default 32768). Set them on the server after
     `NewNNTPServer`. A failing `Start()` stays fatal.
 11. Tests (`sess`/`auth`/`art` prefixes):
-    - Remove markers: `nntp-server-session_test.go:184` `TestSessGreeting/read-only` (RFC-4), `:331`
+    - Remove markers (not the two `TestArtLocal430` markers: decision 9, 60 s TTL): `nntp-server-session_test.go:184` `TestSessGreeting/read-only` (RFC-4), `:331`
       `TestSessMode/reader-read-only` (RFC-4), `:346` `TestSessMode/stream` (RFC-5), `:352`
       `TestSessMode/unknown-variant` (RFC-5), `:515` `TestSessPipelining/quit-then-command` (A-nntp-sec-1), `:538`
       `TestSessLineLimit/over-512-octets` (SEC-3), `:585` `TestSessLineLimit/1MiB-without-LF` (SEC-3), `:636`
       `TestSessStatsGrowth` (SEC-4), `:684` `TestSessIdleTimeout/default-at-least-3min` (BUG-9), `:744`
       `TestSessMaxConns/rejection-status` (A-nntp-rfc-3), `:784` `TestSessStop` (BUG-7);
       `nntp-server-auth_test.go:159` `TestAuthArgErrors/unknown-subcommand` (RFC-5), `:177` `TestAuthSecondAuthinfo`
-      (SEC-5), `:212` `TestAuthPasswordWithSpace` (T-nntp-auth-1), `:244` `TestAuthFailureDelay` (SEC-5);
-      `nntp-server-article_test.go:847` `TestArtLocal430/ihave-arrival` (BUG-8), `:859`
-      `TestArtLocal430/external-arrival` (T-nntp-article-1).
-    - The two `TestArtLocal430` markers go because the 1 s TTL alone passes `artPollStat223` (decision 9); keep the
-      subtests' bodies unchanged.
+      (SEC-5), `:212` `TestAuthPasswordWithSpace` (T-nntp-auth-1), `:244` `TestAuthFailureDelay` (SEC-5).
     - Adapt `TestSessLocal430` (`:846-861`): ages relative to `DefaultLocal430TTL` (old = now − 2×TTL, young = now),
       plus `Remove` and the 250-octet rule. Delete `TestAuthManagerUnits` (`auth_test.go:339-398`, helpers removed).
     - `FuzzSessCommandLine` (`:1071`): change the skip filter `len(line) > 4096` to `len(line) > 4094` (a 4095-byte
@@ -682,8 +683,8 @@ Changes:
       code review and by `TestSessPipelining/quit-then-command` staying green under `runIsolated`.
 
 Acceptance: E-lines N21, N23, N24, N25, N26, N30 PASS; the markers above are gone and their tests pass; the known-bug
-list equals wave 0's minus A-nntp-rfc-3, A-nntp-sec-1, BUG-8, BUG-9, RFC-4, SEC-4, SEC-5, T-nntp-article-1,
-T-nntp-auth-1 (BUG-7, SEC-3 and RFC-5 stay because of their intake markers).
+list equals wave 0's minus A-nntp-rfc-3, A-nntp-sec-1, BUG-9, RFC-4, SEC-4, SEC-5, T-nntp-auth-1 (BUG-7, SEC-3 and
+RFC-5 stay because of their intake markers; BUG-8 and T-nntp-article-1 stay because of the 60 s TTL, decision 9).
 
 ---
 
@@ -743,7 +744,8 @@ Changes:
      `TestOvrXhdr/{past-high,reversed}` (RFC-6), `:626` `TestOvrXhdr/message-id` (RFC-6), `:668` `TestOvrHugeRange`
      (SEC-1). (`:688`/`:698` RFC-1 stay.)
    - New in `nntp-server-overview_test.go`: `TestOvrRangeParse` (table: `5`, `5-`, `5-9`, `9-5` (Empty), `0-`,
-     16 digits ok, 17 digits / `-` / `x-5` / `1-2-3` / `+1` / `-5` / `` → `errRangeSyntax`), `TestOvrHidden`
+     16 and 19 digits within int64 ok, 20 digits / `9223372036854775808` / `-` / `x-5` / `1-2-3` / `+1` / `-5` / `` →
+     `errRangeSyntax`), `TestOvrHidden`
      (an article set `hide = 1` by raw SQL is absent from `XOVER 1-` and `XHDR subject 1-`, and `XHDR subject <its id>`
      → 430). (Surplus-argument checks are `nntp-session`'s `TestSessCommandArgs`: K5.)
    - New `internal/database/nsh_overview_test.go`: `TestNSHOvrHeaderValueFromJSON` (case, folding, absent, first
@@ -757,8 +759,8 @@ Acceptance: E-line N22 PASS; markers above gone; the known-bug list loses BUG-2,
 
 ### Merge order wave 1
 `nntp-overview` first (database + leaf handlers), then `nntp-session`; run `## Checks` after each merge. Expected
-known-bug list after wave 1: A-nntp-rfc-2, BUG-1, BUG-4, BUG-6, BUG-7, INT-1, INT-2, RFC-1, RFC-3, RFC-5, SEC-2,
-SEC-3, SEC-6, SEC-7, T-nntp-group-1.
+known-bug list after wave 1: A-nntp-rfc-2, BUG-1, BUG-4, BUG-6, BUG-7, BUG-8, INT-1, INT-2, RFC-1, RFC-3, RFC-5, SEC-2,
+SEC-3, SEC-6, SEC-7, T-nntp-article-1, T-nntp-group-1 (17).
 
 ### Wave 2 (2 parallel slices, from the merged wave 1)
 
@@ -817,7 +819,8 @@ Changes:
      processor returns only the first hit). Misses:
      `430 No article with that message-id` (all three texts). Without a processor only the current group is searched
      (documented in the README by `nntp-session`; A-nntp-rfc-9).
-   - number: `requireGroup` first (412 without a selected group), then more than 16 digits or not a number → 501;
+   - number: `requireGroup` first (412 without a selected group), then more than 19 digits, not a number or above
+     `math.MaxInt64` → 501 (same rule as `parseRangeArg`);
      `n <= 0` → `rateLimitOnError()`, 423; `GetGroupDB` error →
      403; `NNTPArticleByNum`/`NNTPArticleMessageID` miss → 423.
    - The number form sets `currentArticle` from the requested number (BUG-1); the message-id form never changes it.
@@ -884,7 +887,8 @@ Changes:
    `UpdateNNTPUserWebUserID(userID int, webUserID int64) error` (`NULLIF(?, 0)`, `updated_at`). In
    `db_nntp_users.go`: `GetNNTPUserByWebUserID` returns `sql.ErrNoRows` for `webUserID <= 0` and adds
    `ORDER BY id ASC LIMIT 1` (D6 contract).
-5. **nntpmgr (OPS-2, A-ops-9, decision 16).** `flagsSet()` from `flag.Visit`. `-list`: drop the Password column.
+5. **nntpmgr (OPS-2, A-ops-9, decision 16, open question 1).** `flagsSet()` from `flag.Visit`. The `-maxconns`
+   flag default and `CreateNNTPUserForWebUser` use `DefaultNNTPUserMaxConns = 3` (was 1). `-list`: drop the Password column.
    `-create`: existence check with `GetNNTPUserByUsernameAnyState`; print the password only when `-password` was
    `random`; otherwise `Password: (as given)`. `-update`: `GetNNTPUserByUsernameAnyState`; change maxconns only if
    `-maxconns` was given (range 1–25) and posting only if `-posting` was given; error when neither was given. New
@@ -904,7 +908,8 @@ Acceptance: E-line N28 PASS; the known-bug list loses SEC-6.
 
 ### Merge order wave 2
 `nntp-auth-db` first, then `nntp-read`; `## Checks` after each. Expected known-bug list after wave 2:
-**BUG-7, INT-1, INT-2, RFC-1, RFC-5, SEC-2, SEC-3** (all owned by `nntp-intake-injection` / `nntp-rfc-commands`).
+**BUG-7, BUG-8, INT-1, INT-2, RFC-1, RFC-5, SEC-2, SEC-3, T-nntp-article-1** (BUG-8 and T-nntp-article-1 per decision 9,
+the rest owned by `nntp-intake-injection` / `nntp-rfc-commands`).
 
 ### Wave 3 (inline, orchestrator)
 1. `grep -rn 'sendLine(' internal/nntp` must show only its definition (no caller after wave 2; at 03d5ef7
@@ -933,10 +938,10 @@ git status --short                   # no data-test-*, active.out, analysis_*.tx
 Expected known-bug sets (the `sort -u` output, ids only):
 - baseline (03d5ef7 / wave-0 start): the 29 ids of AUDIT §10.
 - after wave 0: baseline minus RFC-2 (28).
-- after wave 1: A-nntp-rfc-2, BUG-1, BUG-4, BUG-6, BUG-7, INT-1, INT-2, RFC-1, RFC-3, RFC-5, SEC-2, SEC-3, SEC-6,
-  SEC-7, T-nntp-group-1 (15).
-- after wave 2 (final): **BUG-7, INT-1, INT-2, RFC-1, RFC-5, SEC-2, SEC-3** (7). Every remaining marker is in a test
-  listed under "Out of scope". `PUGLEAF_KNOWN_BUGS=1` runs fail only with `known bug … still open` lines; plain runs
+- after wave 1: A-nntp-rfc-2, BUG-1, BUG-4, BUG-6, BUG-7, BUG-8, INT-1, INT-2, RFC-1, RFC-3, RFC-5, SEC-2, SEC-3, SEC-6,
+  SEC-7, T-nntp-article-1, T-nntp-group-1 (17).
+- after wave 2 (final): **BUG-7, BUG-8, INT-1, INT-2, RFC-1, RFC-5, SEC-2, SEC-3, T-nntp-article-1** (9). Every remaining
+  marker is in a test listed under "Out of scope" or kept by decision 9 (60 s local430 TTL). `PUGLEAF_KNOWN_BUGS=1` runs fail only with `known bug … still open` lines; plain runs
   pass.
 
 ## End-to-end
@@ -1058,3 +1063,74 @@ then fail too), N25, N26, N28 and N30 FAIL (N30 now runs with an idle client, wh
 
 ## Progress
 (filled in by `/run-plan`)
+
+### Wave 0 (2026-10-11, inline on `plan-nntp-server-hardening`, base `testing-001` @ baea7c0)
+- Baseline on 9bfc068: gofmt baseline 2 files, vet/build OK, all 8 package sets green under `-race`, known bugs = the 29 ids of AUDIT §10.
+- Added `nntp-server-dataio.go` (D1) and `nntp-server-commands.go` (D3 stubs); `handleCommand` = D4, `getServerCapabilities` = D5;
+  `sendLine` writes through `textConn.W` with `setWriteDeadline`, the `writer` field is gone; `handleQuit(args)` /
+  `handleAuthInfo(args, line)` signature stubs; markers removed: 4× RFC-2 (`TestSessCapabilities`), SEC-5 in `TestAuthPlaintextNotOffered`.
+- `scripts/test-nntp-server.sh` rewritten per `## End-to-end` (nn_* helpers, N20–N26, N28 PASS/FAIL, N25+N30 with an idle client).
+- Checks: gofmt/vet/build OK, `-race` 8 package sets green, known bugs = baseline minus RFC-2 (28 ids). Build scripts OK.
+  `PORT=21120 DATA=./data-test-nntp-server-hardening scripts/test-nntp-server.sh` → `SUMMARY pass=12 fail=8 info=1`:
+  PASS N01–N11, N24; FAIL N20, N21, N22, N23, N25, N26, N28, N30 (as expected before the slices).
+
+### Wave 1 (2026-10-11; 2 implementers, each reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| nntp-overview | worktree-agent-a1c463190bb3b91a2 (beeeb50, 488cc29) | 1 major fixed (XHDR Xref/Path served raw upstream headers from headers_json: Xref now always absent, Path from the `path` column), 2 minors fixed (403 on history fault in XHDR by message-id, NULL-safe overview scans); accepted deviation: range numbers up to 19 digits within int64 (D2 amended) | 8a1c79b |
+| nntp-session | worktree-agent-a812695d2f0f38332 (08efe1e, 5ae9904) | merge; 4 minors fixed (Stop closes the raw socket of TLS conns, MaxConns 400 reject in a bounded goroutine with `rejectSem`, net.ErrClosed after handleCommand not logged, bare AUTHINFO after login → 502); deviations accepted (`handlers.Add` inside `trackConn`, Start/Serve error after Stop, accept back-off, `MaxConns <= 0` → config default 500); `-local430ttl` flag skipped | bf684b1 |
+
+Mid-wave decisions: local430 TTL 60 s (user), BUG-8 and T-nntp-article-1 markers stay (f20cb78); new-user maxconns default 3 (97e6c3b, done in wave 2).
+Checks on bf684b1: gofmt baseline 2 files, vet/build OK, 8 package sets green under `-race`, known bugs = the 17 ids expected after wave 1
+(A-nntp-rfc-2 BUG-1 BUG-4 BUG-6 BUG-7 BUG-8 INT-1 INT-2 RFC-1 RFC-3 RFC-5 SEC-2 SEC-3 SEC-6 SEC-7 T-nntp-article-1 T-nntp-group-1),
+build scripts OK, e2e `SUMMARY pass=18 fail=2 info=1` (FAIL only N20 [nntp-read], N28 [nntp-auth-db]); no panic / DATA RACE in server.log.
+Deferred: 64 MiB drain cap stays per decision 11 (articles between 64 MiB and a larger MaxArtSize would be refused); RST after the overflow 400 accepted.
+
+### Wave 2 (2026-10-11; 2 implementers, each reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| nntp-auth-db | worktree-agent-a3f655ae27fa16987 (79824e8) | merge; 2 minors fixed inline by the orchestrator (5e8c048: `CreateNNTPUserForWebUser` uniqueness check via the any-state lookup, nil-safe test cleanup); informational: `UpdateNNTPUserWebUserID` returns `sql.ErrNoRows` for an unknown user id (addition to D6; `audit-delta-fixes` may rely on it); deviations accepted (one action flag per nntpmgr run, `-username` required except for -create/-list, `random` username only for -create, DB shutdown before log.Fatalf) | e0089f1 |
+| nntp-read | worktree-agent-a60cbfe3e05e3c51c (0cb70af, ac27e8a) | merge; 3 minors fixed (bare ARTICLE/HEAD/BODY/STAT on a vanished current article → 420, GROUP count floor `high-low+1` when `message_count` is stale, main-DB faults in the group lookup → logged 403 instead of 411); deviations accepted (`selectGroup` returns the groupDB, `resolveArticleArg(args, stat)`, processor article without `NewsgroupsPtr` served unless `Hide > 0`, hidden processor copy not added to local430, STAT by message-id reads the full row, `NNTPListGroupChunk` const) | 017dbdf |
+
+### Wave 3 (inline, cb40c45)
+- `sendLine` deleted (no caller after wave 2). staticcheck 2026.2.1 on nntp/database/nntp-server/nntpmgr: no U1000 in the files this plan touched; two pre-existing U1000 in the read-only harness (`hFakeProcessor.processedArticles`, `hIsErrNotFound`, unused since nntp-audit-tests) and older ones elsewhere (db_batch, hierarchy_cache, progress, queries search consts, nntp-client, nntp-peering, nntp-transfer S1008) left as is.
+- `BUGS.md` nntp-server section rewritten (fixed ids, remaining ids per plan, local430 limitation).
+- Checks on cb40c45: gofmt baseline 2 files, vet/build OK, 8 package sets green under `-race`, known bugs = **BUG-7 BUG-8 INT-1 INT-2 RFC-1 RFC-5 SEC-2 SEC-3 T-nntp-article-1** (9, as expected), build scripts OK,
+  `PORT=21120 DATA=./data-test-nntp-server-hardening scripts/test-nntp-server.sh` → `SUMMARY pass=20 fail=0 info=1`, no panic / DATA RACE in server.log.
+
+## Outcome
+
+- **Integration branch:** `plan-nntp-server-hardening` @ bcb361b (20 commits from `testing-001` @ baea7c0; 45 files, +4,528/−1,391 lines).
+  Not yet merged into `testing-001` (user decision). Nothing pushed.
+- **Worktrees / branches** (left in place for the user to clean up):
+  - `/tank0/claude/trees/go-pugleaf/agent-a1c463190bb3b91a2` — `worktree-agent-a1c463190bb3b91a2` @ 488cc29 (nntp-overview)
+  - `/tank0/claude/trees/go-pugleaf/agent-a812695d2f0f38332` — `worktree-agent-a812695d2f0f38332` @ 5ae9904 (nntp-session)
+  - `/tank0/claude/trees/go-pugleaf/agent-a3f655ae27fa16987` — `worktree-agent-a3f655ae27fa16987` @ 79824e8 (nntp-auth-db)
+  - `/tank0/claude/trees/go-pugleaf/agent-a60cbfe3e05e3c51c` — `worktree-agent-a60cbfe3e05e3c51c` @ ac27e8a (nntp-read)
+- **Verification** (pugleaf-verifier on 670e48e/bcb361b, main checkout): gofmt baseline 2 files; vet (+`-tags e2e`) and build clean;
+  8 package sets green under `-race`; known bugs exactly `BUG-7 BUG-8 INT-1 INT-2 RFC-1 RFC-5 SEC-2 SEC-3 T-nntp-article-1`
+  (no "no longer reproduces", no panic); `./build_nntp-server.sh && ./build_nntpmgr.sh` OK (the server script still builds
+  without `-race`, OPS-4); `PORT=21119 DATA=./data-test-nntp-server-hardening-verify scripts/test-nntp-server.sh` →
+  `SUMMARY pass=20 fail=0 info=1`, 0 panic / DATA RACE lines, SIGINT exits in 3 s in both cycles; `-count=2` rerun of
+  nntp + nntp-server green; manual probes (CAPABILITIES without AUTHINFO/MODE-READER/TAKETHIS on plaintext, GROUP unknown →
+  411 and no file, 600-byte line → 501 then HELP 100, huge XHDR range in 2 ms, pipelined QUIT+HELP → 205 and alive,
+  nntpmgr -list without hashes) all as expected.
+- **Decisions taken during the run:** maxconns default 3 for new users, enforcement opt-in (`-enforce-user-maxconns`);
+  local430 TTL 60 s (BUG-8 and T-nntp-article-1 markers stay open; BUG-8 closes in `nntp-intake-injection`); delays
+  25 ms/25 ms/1 s accepted; range numbers up to 19 digits within int64; XHDR Xref always absent and Path from the `path`
+  column; GROUP count floor `high-low+1` when `message_count` is stale; `UpdateNNTPUserWebUserID` returns `sql.ErrNoRows`
+  for an unknown id (noted in `audit-delta-fixes`).
+- **Behaviour changes to report:** greeting/MODE READER 201 on read-only servers; AUTHINFO USER not advertised on
+  plaintext by default (`-plaintextauth advertise|refuse` to change), no username echo, 502 after login; command lines
+  > 512 octets → 501, 4 KiB without LF → 400 + close; MaxConns → 400 greeting at accept (`MaxConns <= 0` = config default
+  500); `Start()` fails without a port or with a TLS port lacking cert/key; `Stop()` closes clients and waits ≤ 10 s;
+  idle timeout 3 min; GROUP/LISTGROUP numbers from visible articles, LISTGROUP selects and takes a range, unknown or
+  inactive groups → 411; hidden articles invisible over NNTP; HEAD/ARTICLE dot-stuffed; nntpmgr never prints hashes or
+  given passwords, `-update` only changes given flags, new `-activate/-deactivate/-setpassword`, password 10–72 bytes.
+- **Leftovers / known issues:** `build_nntp-server.sh` builds without `-race` (OPS-4, `audit-delta-fixes` D11 question);
+  HELP still lists MODE READER / AUTHINFO / TAKETHIS although CAPABILITIES omits them on plaintext (HELP lists the
+  dispatched commands by design); two pre-existing U1000 helpers in the read-only harness (`hFakeProcessor.processedArticles`,
+  `hIsErrNotFound`); the 64 MiB drain cap refuses articles between 64 MiB and a larger `MaxArtSize` (decision 11);
+  a session keeps its `currentGroup` after an admin deactivates the group; STAT by message-id reads the full row;
+  `-local430ttl` flag not added. Gitignored leftovers: `build/`, `./data-test-nntp-server-hardening`.
+- **Next:** `/run-plan nntp-intake-injection` (its S4 removes the BUG-8 marker after wiring `Local430.Remove`).
