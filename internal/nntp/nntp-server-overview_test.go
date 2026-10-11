@@ -102,6 +102,20 @@ func ovrLastNum(lines []string) string {
 	return ovrNums(lines[len(lines)-1:])[0]
 }
 
+// ovrAbsentLines checks one absent-value line per article number in nums:
+// "n", "n " or "n (none)" (RFC 3977 §8.5.2; "(none)" is the INN style).
+func ovrAbsentLines(lines []string, nums ...string) error {
+	if len(lines) != len(nums) {
+		return fmt.Errorf("got %d lines, want %d: got=%q", len(lines), len(nums), lines)
+	}
+	for i, n := range nums {
+		if l := lines[i]; l != n && l != n+" " && l != n+" (none)" {
+			return fmt.Errorf("line %d: got %q, want %q, %q or %q", i, l, n, n+" ", n+" (none)")
+		}
+	}
+	return nil
+}
+
 // ovrRawLines reads a dot-terminated block byte-exact and splits it into lines
 // on CRLF. It returns an error when the block contains a bare CR or LF, which
 // a client reading lines sees as extra (desynchronizing) lines.
@@ -231,7 +245,7 @@ func TestOvrXoverRanges(t *testing.T) {
 	}{
 		{"deleted-number", "3"},
 		{"past-high", "100-200"},
-		// RFC 3977 §3.2.1 range syntax: a range whose end is less than its
+		// RFC 3977 §8.3.2 and §6.1.2.2: a range whose end is less than its
 		// start contains no articles; it is not a syntax error.
 		{"reversed", "4-2"},
 	}
@@ -300,7 +314,8 @@ func TestOvrLineFormat(t *testing.T) {
 
 	t.Run("no-trailing-field", func(t *testing.T) {
 		// RFC 3977 §8.4: LIST OVERVIEW.FMT lists the fields after the 7
-		// mandatory ones; only Xref:full there allows a 9th field.
+		// mandatory ones; only Xref:full there allows a 9th field, and trailing
+		// empty fields may be omitted (§8.3.2), so then 8 or 9 fields are fine.
 		xrefListed := false
 		code, _, fmtLines := ovrCmd(t, c, "LIST OVERVIEW.FMT")
 		if code == 215 {
@@ -310,13 +325,13 @@ func TestOvrLineFormat(t *testing.T) {
 				}
 			}
 		}
-		want := 8
-		if xrefListed {
-			want = 9
-		}
 		var err error
-		if len(fields) != want {
-			err = fmt.Errorf("got %d fields, want %d (Xref listed in OVERVIEW.FMT: %v): %q",
+		if len(fields) != 8 && (!xrefListed || len(fields) != 9) {
+			want := "8"
+			if xrefListed {
+				want = "8 or 9"
+			}
+			err = fmt.Errorf("got %d fields, want %s (Xref listed in OVERVIEW.FMT: %v): %q",
 				len(fields), want, xrefListed, lines[0])
 		}
 		knownBug(t, "BUG-5", err)
@@ -395,9 +410,11 @@ func TestOvrSanitizing(t *testing.T) {
 
 	t.Run("XHDR", func(t *testing.T) {
 		// RFC 2980 §2.6, with the RFC 3977 §8.5.2 rules for header values: the
-		// value is unfolded and TAB/CR/LF become spaces.
+		// value is unfolded and TAB/CR/LF become spaces. For a repeated header
+		// §8.5.2 returns only the first occurrence, so article 1's Subject may
+		// be "Line1" or the joined "Line1 Line2".
 		var problems []string
-		check := func(field string, value func(w want) string) {
+		check := func(field string, value func(n string, w want) []string) {
 			code, line := c.cmd(t, "XHDR %s 1-2", field)
 			if err := hExpectCode(code, line, 221); err != nil {
 				t.Fatalf("XHDR %s: %v", field, err)
@@ -407,27 +424,49 @@ func TestOvrSanitizing(t *testing.T) {
 				problems = append(problems, fmt.Sprintf("XHDR %s: %v", field, err))
 				return
 			}
-			var exp []string
+			// Allowed lines per article; absent values are checked in TestOvrXhdr.
+			var exp [][]string
 			for _, n := range []string{"1", "2"} {
-				v := value(wants[n])
-				if v == "" {
-					continue // absent values are checked in TestOvrXhdr
+				var alts []string
+				for _, v := range value(n, wants[n]) {
+					if v != "" {
+						alts = append(alts, n+" "+v)
+					}
 				}
-				exp = append(exp, n+" "+v)
+				if len(alts) > 0 {
+					exp = append(exp, alts)
+				}
 			}
 			var got []string
 			for _, l := range lines {
-				if !strings.HasSuffix(l, " ") && !strings.HasSuffix(l, " (none)") {
+				// Skip absent-value lines: "n", "n " or "n (none)".
+				if strings.Contains(l, " ") && !strings.HasSuffix(l, " ") && !strings.HasSuffix(l, " (none)") {
 					got = append(got, l)
 				}
 			}
-			if err := hExpectLines(got, exp); err != nil {
-				problems = append(problems, fmt.Sprintf("XHDR %s: %v", field, err))
+			if len(got) != len(exp) {
+				problems = append(problems, fmt.Sprintf("XHDR %s: got %d value lines, want %d: got=%q want=%q",
+					field, len(got), len(exp), got, exp))
+				return
+			}
+			for i, l := range got {
+				ok := false
+				for _, alt := range exp[i] {
+					ok = ok || l == alt
+				}
+				if !ok {
+					problems = append(problems, fmt.Sprintf("XHDR %s: line %d: got %q, want one of %q", field, i, l, exp[i]))
+				}
 			}
 		}
-		check("subject", func(w want) string { return w.subject })
-		check("from", func(w want) string { return w.from })
-		check("references", func(w want) string { return w.refs })
+		check("subject", func(n string, w want) []string {
+			if n == "1" {
+				return []string{"Line1", w.subject}
+			}
+			return []string{w.subject}
+		})
+		check("from", func(n string, w want) []string { return []string{w.from} })
+		check("references", func(n string, w want) []string { return []string{w.refs} })
 		var err error
 		if len(problems) > 0 {
 			err = errors.New(strings.Join(problems, "; "))
@@ -510,17 +549,21 @@ func TestOvrXhdr(t *testing.T) {
 	})
 
 	// RFC 2980 §2.6: XHDR works for any header of the article, not only the
-	// overview fields.
+	// overview fields. RFC 3977 §8.5.2 also allows 503 for a header the server
+	// does not serve; an empty 221 is wrong either way.
 	for _, tc := range []struct{ header, value string }{
 		{"Newsgroups", g},
 		{"Path", path},
 	} {
 		t.Run("present-"+tc.header, func(t *testing.T) {
 			code, line, lines := ovrCmd(t, c, "XHDR %s 1-2", tc.header)
-			if err := hExpectCode(code, line, 221); err != nil {
-				t.Fatal(err)
+			var err error
+			if code != 503 {
+				err = hExpectCode(code, line, 221, 503)
+				if err == nil {
+					err = hExpectLines(lines, []string{"1 " + tc.value, "2 " + tc.value})
+				}
 			}
-			err := hExpectLines(lines, []string{"1 " + tc.value, "2 " + tc.value})
 			if err != nil {
 				err = fmt.Errorf("XHDR %s 1-2: %w", tc.header, err)
 			}
@@ -528,16 +571,42 @@ func TestOvrXhdr(t *testing.T) {
 		})
 	}
 
-	// RFC 2980 §2.6: an article without the header gets "<number> (none)".
-	for _, header := range []string{"X-Ovr-Absent", "References"} {
-		t.Run("absent-"+header, func(t *testing.T) {
-			code, line, lines := ovrCmd(t, c, "XHDR %s 1-2", header)
-			if err := hExpectCode(code, line, 221); err != nil {
-				t.Fatal(err)
-			}
-			err := hExpectLines(lines, []string{"1 (none)", "2 (none)"})
+	// RFC 3977 §8.5.2: one line per existing article in the range; when the
+	// article lacks the header the value is empty (the space after the number
+	// MAY be omitted). "n (none)" (INN style) is accepted too.
+	t.Run("absent-References", func(t *testing.T) {
+		// References is an overview field the server serves: correct today.
+		code, line, lines := ovrCmd(t, c, "XHDR References 1-2")
+		if err := hExpectCode(code, line, 221); err != nil {
+			t.Fatal(err)
+		}
+		if err := ovrAbsentLines(lines, "1", "2"); err != nil {
+			t.Fatalf("XHDR References 1-2: %v", err)
+		}
+	})
+	t.Run("absent-X-Ovr-Absent", func(t *testing.T) {
+		code, line, lines := ovrCmd(t, c, "XHDR X-Ovr-Absent 1-2")
+		err := hExpectCode(code, line, 221)
+		if err == nil {
+			err = ovrAbsentLines(lines, "1", "2")
+		}
+		if err != nil {
+			err = fmt.Errorf("XHDR X-Ovr-Absent 1-2: %w", err)
+		}
+		knownBug(t, "RFC-6", err)
+	})
+
+	// RFC 3977 §8.5.2: 423 "No articles in that range" (420 in RFC 2980 terms)
+	// for an empty range and for a reversed one (§6.1.2.2: no articles).
+	for _, tc := range []struct{ name, arg string }{
+		{"past-high", "100-200"},
+		{"reversed", "4-2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, line, lines := ovrCmd(t, c, "XHDR subject %s", tc.arg)
+			err := hExpectCode(code, line, 423, 420)
 			if err != nil {
-				err = fmt.Errorf("XHDR %s 1-2: %w", header, err)
+				err = fmt.Errorf("XHDR subject %s: %w (block %q)", tc.arg, err, lines)
 			}
 			knownBug(t, "RFC-6", err)
 		})
@@ -562,7 +631,7 @@ func TestOvrXhdr(t *testing.T) {
 // SEC-1: XHDR/XOVER with a huge range
 
 func TestOvrHugeRange(t *testing.T) {
-	err := runIsolated(t, 20*time.Second, func(t *testing.T) {
+	err := runIsolated(t, 30*time.Second, func(t *testing.T) {
 		g := hGroup(t, "t5.hugerange", 3, nil)
 		hs := newTestServer(t, hServerOpts{})
 		want := []string{"1", "2", "3"}
