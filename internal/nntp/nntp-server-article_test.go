@@ -845,9 +845,9 @@ func TestArtLocal430(t *testing.T) {
 	// miss must not outlive the article's arrival by more than a moment:
 	// STAT → 223 within 1 s.
 
-	// The article arrives through this server (IHAVE answered 235). The server
-	// knows the message-id was accepted, but local430 is never invalidated: the
-	// entry is only dropped by CronLocal430 after 60-75 s (BUG-8).
+	// The article arrives through this server (IHAVE answered 235). The intake
+	// handler removes the message-id from local430 after the accept (BUG-8 fixed
+	// by nntp-intake-injection; the cache TTL alone is 60 s).
 	t.Run("ihave-arrival", func(t *testing.T) {
 		env := artLocal430Miss(t, "local430-ihave")
 

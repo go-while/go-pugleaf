@@ -115,7 +115,7 @@ func TestNNTPHistParseLegacyRoundTripNoBody(t *testing.T) {
 
 func TestNNTPHistParseIncomingArticleLines(t *testing.T) {
 	head := nntpHistTestHeadLines()
-	body := nntpHistTestBodyLines() // already dot-unstuffed by readArticleLines
+	body := nntpHistTestBodyLines() // already dot-unstuffed by readArticleBlock
 
 	article, newsgroups, err := parseIncomingArticleLines(head, body)
 	if err != nil {
