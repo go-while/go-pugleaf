@@ -36,8 +36,8 @@ the seed table in the plan, which was written at 84c2081. The wave-0 hooks moved
 |----|----|----|
 | critical | 1 | A-nntp-rfc-1 |
 | high | 1 | A-nntp-rfc-2 |
-| medium | 8 | RFC-1, RFC-3, RFC-5, RFC-6, BUG-4, BUG-5, BUG-6, A-nntp-rfc-3 |
-| low | 11 | RFC-2, RFC-4, BUG-3, BUG-9, A-nntp-rfc-4, A-nntp-rfc-5, A-nntp-rfc-6, A-nntp-rfc-7, A-nntp-rfc-8, A-nntp-rfc-10, A-nntp-rfc-12 |
+| medium | 7 | RFC-1, RFC-3, RFC-5, RFC-6, BUG-4, BUG-5, BUG-6 |
+| low | 12 | RFC-2, RFC-4, BUG-3, BUG-9, A-nntp-rfc-3, A-nntp-rfc-4, A-nntp-rfc-5, A-nntp-rfc-6, A-nntp-rfc-7, A-nntp-rfc-8, A-nntp-rfc-10, A-nntp-rfc-12 |
 | info | 3 | FN-1, A-nntp-rfc-9, A-nntp-rfc-11 |
 
 | Category | Count |
@@ -104,8 +104,8 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   exit (this also fixes the "QUIT logged as connection error" half of BUG-7). Don't nil `c.conn` while the loop can
   still run. Also add a `defer recover()` in `handleConnection` that logs and closes only that connection, so no
   handler panic can kill the server. Add a regression test with `runIsolated`. Effort S.
-- **Note for audit-nntp-sec:** this is an unauthenticated remote DoS. It is reported here because it was found via
-  pipelining; the consolidated report should list it once.
+- **Note for consolidation:** same as A-nntp-sec-1 (the same QUIT crash found by audit-nntp-sec). It is an
+  unauthenticated remote DoS; the consolidated report should list it once.
 
 ### A-nntp-rfc-2: multi-line response injection / stream desync via stored header data
 
@@ -160,7 +160,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
 
 | seed | id | severity | category | location | verdict |
 |----|----|----|----|----|----|
-| new | A-nntp-rfc-3 | medium | rfc | `internal/nntp/nntp-server.go:188-192` | CONFIRMED |
+| new | A-nntp-rfc-3 | low | rfc | `internal/nntp/nntp-server.go:188-192` | CONFIRMED |
 
 - **Scenario:** with `MaxConns` connections active, a new client is accepted and closed at once. It reads EOF
   instead of a greeting, so clients can't tell "full, retry later" from a crash.
@@ -182,6 +182,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   failure in ARTICLE-by-number, XOVER or XHDR gives `411 No such newsgroup`, a code those commands don't define and
   that a client reads as "the group is gone". A handler that returns an error (a write failure) makes `Handle` send
   `500 Internal server error` and close.
+- **Evidence:** code trace: the `sendResponse(503|411|500, …)` calls at the listed lines run on DB, `GetGroupDB` or write errors (see `## Response code table`); not triggered in the repro.
 - **RFC:** RFC 3977 §3.2.1: "If the server experiences an internal fault … the response code 403 MUST be returned."
   503 means "recognizes the command but does not provide an optional feature". 500 is reserved for unknown commands,
   and §3.2.1 also says "If the server has to terminate the connection for some reason, it MUST give a 400 response".
@@ -196,6 +197,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
 
 - **Scenario:** `GROUP g extra-arg` → 211, `ARTICLE 5 extra` → 220, `MODE READER extra` → 200, `QUIT now` → 205
   (repro). Handlers read `args[0]` (or `args[1]`) and never check `len(args)`.
+- **Evidence:** Appendix A, "session-noproc" (`MODE READER extra` → 200, `QUIT now` → 205) and "reader" (`GROUP t9.rfc.a.1 extra-arg` → 211, `ARTICLE 5 extra` → 220).
 - **RFC:** RFC 3977 §3.2.1: "If there is a syntax error in the arguments of a recognized command, including the case
   where more arguments are provided than the command specifies …, the response code 501 MUST be returned."
 - **Fix:** check `len(args)` per command in a small dispatch table (min/max args). Effort S.
@@ -209,6 +211,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
 - **Scenario:** `XYZZY` followed by 600×`A` → `500 Command not recognized: XYZZYAAAA…` with a 633-octet status line
   (repro). The same echo happens in `Unknown MODE`, `Unknown LIST type`, `Password required for <username>` and
   `Unknown AUTHINFO subcommand`. Echoing the username also reflects user-controlled data into logs.
+- **Evidence:** Appendix A, "session-noproc": `XYZZYAAAA…` → a status line of 633 octets + CRLF.
 - **RFC:** RFC 3977 §3.1: "The initial line of the response MUST NOT exceed 512 octets, which includes the response
   code and the terminating CRLF pair". The command itself exceeds 512 octets and should get 501 (SEC-3).
 - **Fix:** don't echo arguments, or truncate them to 64 bytes. The line limit itself belongs to SEC-3. Effort S.
@@ -222,6 +225,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
 - **Scenario:** `IHAVE not-a-message-id` → `335 Send me` (repro). The id goes unchecked to `CheckMessageID` and is the
   only key for history. An article whose header has no Message-ID gets the bogus id via `reconcileMessageID`
   (`:115-121`).
+- **Evidence:** Appendix A, "posting": `IHAVE not-a-message-id` → `335 Send me`.
 - **RFC:** RFC 3977 §3.2.1 (501 for argument syntax errors); the message-id syntax is in RFC 3977 §9.8 and RFC 5536 §3.1.3.
 - **Fix:** validate `<…@…>` (printable ASCII, ≤250 octets) before the history check: 501 for IHAVE, and 439 with the
   id for TAKETHIS (the article must still be consumed). Effort S.
@@ -236,6 +240,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   rights → 502. Both lines, plus the 501 and no-processor 502, lack the message-id, so a streaming peer can't
   correlate pipelined replies. A history error (`CaseError` from `CheckMessageID`, temporary) → `439 <id> Retry later
   (history error)` (repro): 439 means "do not retry", so the article is lost for that peer.
+- **Evidence:** Appendix A, "posting": unauthenticated TAKETHIS → `480 Transfer permission denied …` (no id); history error → `439 <tt2@test.invalid> Retry later (history error)`.
 - **RFC:** RFC 4644 §2.5.1: "The first parameter of the 239 and 439 responses MUST be the message-id". §2.5.2: "If the
   server encounters a temporary error that prevents it from processing the article but does not want to reject the
   article, it MUST reply with a 400 response to the client and close the connection."
@@ -253,6 +258,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   an article in another group, → `430 NotF0` although the article exists (repro: `STAT <t9-rfc-b-2-1@…>` while
   `t9.rfc.a.1` is selected → 430). The reply texts `Cache says no!`, `NotF0`, `NotF1` are debugging leftovers.
   `cmd/nntp-server` always passes a processor, so only embedded and test servers are affected.
+- **Evidence:** Appendix A, "reader": `STAT <t9-rfc-b-2-1@test.invalid>` with `t9.rfc.a.1` selected and no processor → `430 NotF0`; code path `nntp-article-common.go:138-142`.
 - **RFC:** RFC 3977 §6.2.1.2: "If the argument is a message-id and no such article exists, a 430 response MUST be
   returned". The article does exist.
 - **Fix:** document that message-id lookups need the history index, or fall back to the history lookup without the
@@ -268,6 +274,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   An article of 2 000 lines costs 2 000 `write(2)` calls, and XOVER over 1 000 rows costs 1 000. Status lines go
   through a second writer (`textConn.W`), which also flushes per call. Ordering is correct only because both flush
   every time, which is fragile.
+- **Evidence:** code trace: `sendLine` calls `c.writer.Flush()` per line (`nntp-server-cliconns.go:165-173`); `sendResponse` uses `textConn.PrintfLine` (`:159-162`), a second buffered writer on the same conn.
 - **Fix:** use one writer per connection (`textConn.W` or `DotWriter`), flush once per response (this also gives
   A-nntp-rfc-2's dot-stuffing). Effort S.
 
@@ -279,6 +286,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
 
 - **Scenario:** `strings.Fields` plus `argument := args[1]` cut `AUTHINFO PASS correct horse` down to the password
   `correct`, so a user whose stored password contains a space can never log in. Surplus arguments are ignored (A-5).
+- **Evidence:** code trace: `handleCommand` splits with `strings.Fields(line)` (`nntp-server-cliconns.go:107,113`) and `handleAuthInfo` takes `argument := args[1]` (`nntp-cmd-auth.go:15`); every password word after the first is dropped.
 - **RFC:** RFC 4643 §2.3.2: "a server MAY (but is not required to) allow white space characters in usernames and
   passwords. A server implementation MAY blindly split command arguments at white space". Allowed, but `nntpmgr`
   and the web admin accept such passwords.
@@ -298,6 +306,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
     unauthenticated ones included (`nntp-server.go:188`).
   - `mainConfig.Server.Hostname` is set (`main.go:76`), but the server never reads it: the greeting hardcodes
     `go-pugleaf` (RFC-4).
+- **Evidence:** code trace: `main.go:51-66` sets both ports to 0 without flags; `Start()` (`nntp-server.go:108-139`) then skips both listeners and still sets `running = true` (`:137`); `MaxConns` is compared with all active connections (`nntp-server.go:188`).
 - **Fix:** fail `Start()` when no listener was started. Fix the flag text. Use `processor.LocalNNTPHostname` (or
   `Config.Hostname`) in the greeting. Effort S.
 
@@ -317,7 +326,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
 - **RFC:** RFC 3977 §3.3.3: "If the server advertises a capability defined by a registered extension, it MUST
   implement the extension so as to fully conform with the specification". DATE (§7.1.1), LAST (§6.1.3.1), NEXT
   (§6.1.4.1) and NEWGROUPS (§7.3.1) are "Indicating capability: READER". §7.6.3: "If no wildmat is specified, the
-  server MUST include every group …" (the wildmat must filter). RFC 4644 §2.3.1: "Servers MUST accept the MODE STREAM
+  server MUST include every group …" (the wildmat must filter). RFC 4644 §2.3: "Servers MUST accept the MODE STREAM
   command for backwards compatibility". RFC 2980 §2.8: "The LIST OVERVIEW.FMT command should be implemented if XOVER
   is implemented."
 - **Fix:** see `nntp-rfc-commands.md` (wave 4): DATE (S), NEXT/LAST (S, need BUG-1/BUG-4 for the current article),
@@ -336,10 +345,19 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   USER`). `POST`/`IHAVE`/`TAKETHIS` are listed whenever a processor exists, even for an authenticated user without
   posting rights. `TAKETHIS` is not a registered label: RFC 4644 defines `STREAMING`. `XOVER`/`XHDR` start with `X`,
   so they are acceptable private labels.
-- **RFC:** RFC 3977 §3.4.2: a non-mode-switching server … "It MUST NOT advertise the MODE-READER capability". RFC 4643
-  §2.1: "this capability MUST NOT be advertised after successful authentication" and "The "USER" argument MUST NOT be
-  advertised … unless a strong encryption layer (e.g., Transport Layer Security (TLS)) is in use". RFC 3977 §3.3.3:
-  a private extension label "MUST begin with "X"".
+- **Evidence:** Appendix A, "session-noproc" (list with `READER`, `MODE-READER` and `AUTHINFO USER` on plaintext) and "posting" (identical list after `281`: still `AUTHINFO USER`, `POST`, `TAKETHIS`).
+- **RFC:** RFC 3977 §3.3.2: "MODE-READER: This capability indicates that the server is mode-switching (Section 3.4.2)
+  and that the MODE READER command needs to be used to enable the READER capability". §3.4.2, transit mode of a
+  mode-switching server: "It MUST advertise the MODE-READER capability. It MUST NOT advertise the READER capability."
+  Listing both is therefore contradictory in every state (the server is not mode-switching: MODE READER changes
+  nothing). RFC 4643 §2.1: "this capability MUST NOT be advertised after successful authentication" and "The "USER"
+  argument MUST NOT be advertised, and the AUTHINFO USER/PASS commands SHOULD NOT be provided, unless a strong
+  encryption layer (e.g., Transport Layer Security (TLS) [NNTP-TLS]) is in use or backward compatibility dictates
+  otherwise" (so plaintext `AUTHINFO USER` is a deployment decision, not a hard violation; after auth it is a MUST).
+  RFC 3977 §3.3.3: private-extension command keywords "SHOULD begin with "X"" (the sentence right before says a
+  listed private extension's "capability label MUST begin with "X""). The `TAKETHIS` label is treated here as a
+  SHOULD-level naming issue: the command keyword itself comes from RFC 4644, and the fix is to advertise the registered
+  label `STREAMING` once MODE STREAM and CHECK exist.
 - **Fix:** build the list from connection state; see `## CAPABILITIES`. Effort S (inline in the dispatch file per
   Appendix B).
 
@@ -352,6 +370,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
 - **Scenario:** `STAT` with no argument → `501 No article specified`, both before and after GROUP (repro).
   `ARTICLE 0` and `ARTICLE -1` → `502 Article not retrieved` (repro). 502 tells the client to reconnect with other
   credentials. `ARTICLE 99999999999999999999` → 501, which is acceptable (more than 16 digits is a syntax error).
+- **Evidence:** Appendix A, "session-noproc" (`STAT` → 501) and "reader" (`STAT` after GROUP → 501, `ARTICLE 0`/`ARTICLE -1` → 502, `ARTICLE 99999999999999999999` → 501).
 - **RFC:** RFC 3977 §6.2.1.1, third form: `220 n message-id`, `412 No newsgroup selected`, `420 Current article number
   is invalid`. HEAD and STAT are mandatory for every server (§6.2.2.1, §6.2.4.1: "This command is mandatory."). §3.2.1
   on 502: "It is necessary to terminate the connection and to start a new one with the appropriate authority".
@@ -368,6 +387,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
 - **Scenario:** a server without a processor greets with `200 go-pugleaf NNTP server ready`, and `MODE READER` →
   `200 Hello, you can post` (repro "session-noproc"), while POST → 502. The hostname is the literal `go-pugleaf`;
   neither `Config.Hostname` nor `processor.LocalNNTPHostname` is used.
+- **Evidence:** Appendix A, "session-noproc": greeting `200 go-pugleaf NNTP server ready`, `MODE READER` → `200 Hello, you can post`, `POST` → 502; hostname literal at `nntp-server-cliconns.go:98`.
 - **RFC:** RFC 3977 §5.1.2: "If the server will accept further commands from the client, but the client is not
   authorized to post articles using the POST command, the server MUST present a 201 greeting code." §5.3.2: MODE READER
   "MUST return a 200 or 201 response with the same meaning as for the initial greeting".
@@ -412,6 +432,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   - `XOVER 5-3` / `XHDR subject 5-3` → `501 Invalid range: start greater than end`.
   - For `n-`, the open end is `currentLast` from the last GROUP, so `XOVER 9-` with `currentLast=5` → 501. LISTGROUP
     doesn't update `currentLast`.
+- **Evidence:** Appendix A, "reader": `XHDR Newsgroups 3-5`, `XOVER 10-20` and `XHDR subject 10-20` → empty blocks; `XOVER 5-3`/`XHDR subject 5-3` → 501; message-id forms → `501 Invalid range format`.
 - **RFC:** RFC 2980 §2.6: "The optional message-id argument indicates a specific article" and "If no articles are in
   the range specified, a 420 error response is returned"; responses `221/412/420/430/502`. RFC 2980 §2.8 (XOVER):
   "If no articles are in the range specified, a 420 error response is returned". RFC 3977 §8.3.2 (OVER, the
@@ -435,6 +456,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   (`nntp-cache-local.go:15-20`; the goroutine leak is BUG-7). The 1 s error delay is applied inconsistently: 481
   (`nntp-cmd-auth.go:34`), GROUP 411 (`nntp-cmd-group.go:22,26`), unknown commands (`cliconns.go:155`), LIST 501, MODE
   500 and the XHDR reversed range (`nntp-cmd-xhdr.go:72-74`) are not delayed.
+- **Evidence:** Appendix A, "session-noproc" (printed defaults); code trace of the sleeps at the listed lines.
 - **RFC:** none violated. RFC 3977 §3.5 pipelining is slowed, not broken.
 - **Fix:** expose the delays in `config.ServerConfig.NNTP` (default 0 for article commands; a token bucket per
   connection instead of a fixed sleep). Apply the error delay in one place (`sendResponse` for 4xx/5xx) or not at all.
@@ -459,6 +481,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   - `LIST` → `t9.rfc.a.1 5 1 n`: low=1 and status `n` for every group (`nntp-cmd-list.go:36-37`), while the
     `newsgroups.status` column (`y` for the seeded groups) and `low_water` are ignored. `GetActiveNewsgroups` doesn't
     even select them.
+- **Evidence:** Appendix A, "reader" (the GROUP, STAT, XOVER, LISTGROUP and LIST lines quoted in the scenario).
 - **RFC:** RFC 3977 §6.1.1.2: "the current article number MUST be set to the first article in the group (this applies
   even if the group is already the currently selected newsgroup)". The reported low water mark is "the article
   numbers of the first and last articles". §6.1.2.2: LISTGROUP's "arguments on the initial response line are the same
@@ -482,6 +505,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   - Subject `first\n.` (from repeated Subject headers) → a bare LF (A-nntp-rfc-2).
   - Every line ends in `\t` (`"%d\t…\t%d\t"`, `:70`): an empty 9th field that LIST OVERVIEW.FMT doesn't announce
     (OVERVIEW.FMT doesn't exist). No `Xref:` field is ever served.
+- **Evidence:** Appendix A, "format": `XOVER 1` (TAB in subject), `XOVER 6` (bare CR), `XHDR subject 4` (bare LF); "reader": `XOVER 3-5` (trailing `\t` on every line).
 - **RFC:** RFC 3977 §8.3.2: "the value is processed by first removing all CRLF pairs … and then replacing each TAB with
   a single space" and "servers SHOULD check for these characters and replace each one by a single space". RFC 2980
   §2.8: "any tab and end-of-line characters in any header data that is returned will be converted to a space character."
@@ -502,6 +526,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   - Empty body → `BODY 1` sends `"\r\n.\r\n"` (a body of one empty line instead of an empty block), and `ARTICLE 1`
     ends with `"\r\n\r\n.\r\n"` (two blank lines) because `parseArticleBody` returns `[]string{""}` (`:50-52`).
   - Body dot-stuffing is correct (`BODY 5` → `..dot`, `..`, `...two`).
+- **Evidence:** Appendix A, "format": `HEAD 3` (unstuffed `.Dotted-Header`), `HEAD 2` (`\r\n.\r\n`), `BODY 1`/`ARTICLE 1` (extra blank line), `BODY 5` (correct body stuffing).
 - **RFC:** RFC 3977 §3.1.1 (quoted in A-nntp-rfc-2). §3.6: an article consists of "the headers, an empty line, and the
   body"; a header block contains no empty line.
 - **Fix:** split `headers_json` with empty-string handling (no lines when empty), stuff header lines through the shared
@@ -518,6 +543,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   once per command and sets **both** deadlines, so a whole response (a large LISTGROUP, XOVER or article to a slow
   client) must be written within 60 s of the command. The read deadline is not refreshed while a POST/IHAVE/TAKETHIS
   article is being received (`readArticleLines`), so a large article on a slow link is cut off after 60 s.
+- **Evidence:** Appendix A, "session-noproc" prints `DefaultNNTPcliconnTimeout=1m0s`; code trace: `UpdateDeadlines` (`nntp-server-cliconns.go:54-63`) runs once per command (`:81`), never inside `readArticleLines` (`nntp-cmd-posting.go:221-260`).
 - **RFC:** RFC 3977 §3.1: "An NNTP server MAY have an inactivity autologout timer. Such a timer SHOULD be of at least
   three minutes' duration".
 - **Fix:** default idle timeout ≥ 3 min (config key). Refresh the read deadline per line while receiving an article
@@ -753,9 +779,10 @@ No seed in scope is rejected as a whole. Two sub-claims are rejected:
   unregistered `TAKETHIS` label, `MODE-READER` next to `READER`, and `AUTHINFO USER` after auth and on plaintext; those
   remain CONFIRMED.
 - **RFC-6, "no message-id form (fails `ParseInt` → 501, not rate limited)":** the 501 is confirmed, but both
-  message-id paths **are** rate limited. A message-id containing `-` hits `rateLimitOnError()` before `501 Invalid
-  range format` (`nntp-cmd-xhdr.go:39-41`), and one without `-` hits it before `501 Invalid article number`
-  (`:63-65`). The only undelayed 501 in XHDR is the reversed range (`:72-74`).
+  message-id paths **are** rate limited. A message-id with two or more `-` hits `rateLimitOnError()` before
+  `501 Invalid range format` (`nntp-cmd-xhdr.go:39-41`), one with exactly one `-` hits it before `501 Invalid start
+  number` (`:44-47`; the part before `-` starts with `<`), and one without `-` hits it before `501 Invalid article
+  number` (`:62-65`). All three branches are rate limited. The only undelayed 501 in XHDR is the reversed range (`:72-74`).
 
 ## Not covered / follow-ups
 
