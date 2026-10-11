@@ -547,3 +547,18 @@ N20–N22 PASS (hardening turned them into PASS checks; this plan must not regre
 ## Progress
 
 (filled in by `/run-plan`)
+
+### Preflight (2026-10-11, orchestrator; base `testing-001` @ 9a7ac3e, hardening merged as d9de34e)
+- Owned-file drift since 03d5ef7: only `cmd/nntp-server/server_e2e_test.go` (A-nntp-rfc-2 marker removed by hardening),
+  `internal/nntp/nntp-server-article_test.go`, `internal/nntp/nntp-server-auth_test.go`, `scripts/test-nntp-server.sh`
+  (all hardening test/script changes the plan anticipates). `internal/nntp/nntp-cmd-posting.go` is unchanged
+  (still has `readArticleData`/`readArticleLines`/`textConn.Close()`: S4 deletes them).
+- Hardening names present at HEAD: `readArticleBlock(maxBytes int64) (headLines, bodyLines []string, err error)`,
+  `ErrArticleTooLarge`, `ErrArticleDrainLimit`, `maxArticleDrainBytes`, `(*NNTPServer).MaxArticleBytes() int64`,
+  `(*Local430).Remove(messageID string)`, `errQuit` (handleQuit returns it; `Handle` treats `errQuit` and `net.ErrClosed`
+  as a clean close), `mainConfig.Server.Hostname = processor.LocalNNTPHostname` in `cmd/nntp-server/main.go:131`.
+- All K2 reserved names free (`grep -rnw` empty for every one).
+- Markers at the base: e2e INT-1 ×3 (`:920,:943,:962`), INT-2 `:1027`, RFC-5 `:1116`, SEC-2 `:1164`, BUG-7 `:1186`,
+  SEC-3 `:1209`; `nntp-server-auth_test.go:318` RFC-5; `nntp-server-article_test.go:886` BUG-8 (S4 removes it), `:898` T-nntp-article-1 (stays).
+- Base known-bug set (code identical to hardening's verified tree bcb361b): **BUG-7 BUG-8 INT-1 INT-2 RFC-1 RFC-5 SEC-2 SEC-3 T-nntp-article-1** (9).
+  Expected after wave 3: **RFC-1, T-nntp-article-1** only (INT-1, INT-2 gone; BUG-7, BUG-8, RFC-5, SEC-2, SEC-3 lose their last markers here).
