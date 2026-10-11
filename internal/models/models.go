@@ -156,6 +156,7 @@ type Article struct {
 	RefSlice      []string            `json:"-" db:"-"` // Parsed references for threading
 	NewsgroupsPtr []*string           `json:"-" db:"-"` // Parsed newsgroup for threading
 	ProcessQueue  chan *string        `json:"-" db:"-"` // newsgroup ptr for batching
+	Posted        bool                `json:"-" db:"-"` // set by the NNTP POST handler: injected here (proto-article)
 }
 
 var ArticlePool = make(chan *Article, 128*1024)
@@ -205,6 +206,7 @@ func RecycleArticle(art *Article) {
 	art.RefSlice = nil
 	art.NewsgroupsPtr = nil
 	art.ProcessQueue = nil
+	art.Posted = false
 
 	select {
 	case ArticlePool <- art:
