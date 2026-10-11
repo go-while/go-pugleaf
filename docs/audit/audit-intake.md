@@ -28,7 +28,7 @@ empty), so the line numbers of the seed table still hold. All `path:line` anchor
   `:bytes` quotes. Quotes below are from those texts.
 - **Tools:** `docs/audit/tools/*.txt` filtered to the scope. Hits: unused `parseReferencesToContinuedLineString`,
   `multiLineStringToSlice` (`common/headers.go:146,626`), `countLines` (`processor/proc-utils.go:575`),
-  `containsAtAndDot` (`processor/threading.go:43`); SA4006 `common/headers.go:533` (dead `validNewsgroups = nil`);
+  `containsAtAndDot` (`processor/threading.go:43`); SA4006 `common/headers.go:534` (dead `validNewsgroups = nil`);
   errcheck on unchecked `tx.Rollback`/`Close` in `history/history.go:496` and `"history sqlite3_sharded.go":79,127,135,210`;
   gosec G401/G501 (md5 for message-id routing in `history/history_config.go:253`, not a security use) and G301
   (`MkdirAll 0755`, `:241`). govulncheck's `fediverse`/`matrix` traces (`SendActivity`, `CreateRoom`) are reachable
@@ -78,14 +78,15 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
    One POST by any posting user, or one TAKETHIS by a peer, is enough.
 2. **SEC-2, intake half (high):** `processArticle` accepts any name that passes a lax regex and creates the group DB
    before the reply. One POST created 7 group DBs and 7 `active=1` rows, including the reserved `control`, `junk`,
-   `example.foo` and the non-conforming `AI.TEST.UPPER`, `ai..dots.`, `c++` (RFC 5537 §3.7: "MUST NOT create new
+   `example.foo`, the non-conforming `AI.TEST.UPPER` and `ai..dots.`, and `c++` (RFC 5537 §3.7: "MUST NOT create new
    newsgroups").
 3. **A-intake-2 (high, root of A-nntp-rfc-2):** the header block is never validated. A posted header line `..` is stored
    as `.`, colon-less lines are stored, and repeated Subject/From are stored LF-joined in the overview columns. Repeated
    Newsgroups headers are unioned, so the article lands in both groups. The same parser handles fetched articles.
 4. **INT-2 (medium):** an article already stored but unknown to history is answered 235/239 instead of 435/437/439. An
    in-flight id is answered 437/439 (permanent) instead of 436/400. Together with INT-6, an article already stored was
-   accepted a second time into another group after the 10-minute cache eviction.
+   accepted a second time into another group after the 10-minute cache eviction
+   (eviction simulated with `MsgIdCache.Delete`, which is what `CleanExpiredEntries` does after `CachedEntryExpires + StuckEntryMaxAge`, `history_MsgIdItemCache.go:194-200`).
 5. **A-intake-9 (medium):** when no group DB can be opened (for example a 303-character group name that passes
    `validGroupNameRegexLazy`), `processArticle` still returns `CasePass`: POST answers `240 Article posted successfully`,
    and nothing is stored anywhere.
@@ -116,6 +117,11 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
     `preloader/preloader.go:268` (`RepairNewsgroupWatermarks`), `cmd/web/main_functions.go:391,1059`. `recover-db`,
     `fix-references` and `fix-thread-activity` `log.Fatalf` on it; the others return the error. `expire-news` fails on its
     all-groups and wildcard paths.
+  - further `MainDBGetNewsgroup` callers that break on the row: the admin UI cannot repair the group
+    (`adminToggleNewsgroup`, `adminMigrateNewsgroupActivity`, `adminFixThreadActivity`, `adminHideFuturePosts` answer
+    "Newsgroup not found", `web/web_admin_newsgroups.go:401,521,580,746`; `adminCreateNewsgroup` `:94` passes its exists
+    check and then hits the UNIQUE constraint); `cmd/nntp-fetcher/main.go:359,636`; `cmd/expire-news/main.go:195`;
+    `processor/proc_DLArt.go:114` (crosspost reuse is turned off for the group).
   - The only code that fills NULL hierarchies is `UpdateHierarchyCounts` (`queries.go:2286-2291`), reached only from
     the admin button `adminUpdateHierarchies` (`web/web_hierarchiesPage.go:117`).
 - **Evidence:** repro, section "SEC-2 (intake)":
@@ -186,7 +192,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 
 | seed | id | severity | category | location | verdict |
 |----|----|----|----|----|----|
-| new (root of A-nntp-rfc-2) | A-intake-2 | high | security | `nntp/nntp-client-commands.go:905-950`, `common/headers.go:580-601`, `nntp/nntp-cmd-posting.go:243-245,266-293`, `nntp/nntp-client-commands.go:117-123,836-838`, `processor/threading.go:108-161` | CONFIRMED |
+| new (root of A-nntp-rfc-2) | A-intake-2 | high | security | `nntp/nntp-client-commands.go:905-950`, `common/headers.go:580-601`, `nntp/nntp-cmd-posting.go:243-245,266-293`, `nntp/nntp-client-commands.go:117-123,837-839`, `processor/threading.go:108-161` | CONFIRMED |
 
 - **Scenario:** `ParseHeaders` puts only six headers into `article.Headers`. It skips lines without a colon
   (`:929`), appends repeated headers (`:948`) and stores **all** raw header lines in `HeadersJSON` (`:950`), which the
@@ -194,13 +200,15 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
   - two `Subject:` → `subject` column `"first\nsecond"` (served by XOVER/XHDR: A-nntp-rfc-2 scenario B);
   - two `From:` → `from_header` `"a <…>\nb <…>"`;
   - two `Newsgroups:` → the value is split on `[,;:\s]+`, so the article goes to the union of both headers;
-  - two `Date:` → `"d1\nd2"` fails every layout and becomes 1990-01-01 (INT-3);
+  - two `Date:` → `date_sent` takes the first Date (`ParseNNTPDate` falls through to `bruteForceDateParse`, which finds
+    the first date's components), while `date_string` stores the LF-joined `"d1\nd2"`, which XOVER then serves (the
+    same desync as Subject);
   - a header line `..` on the wire is un-stuffed to `.` (`nntp-cmd-posting.go:243-245`) and stored (A-nntp-rfc-2
     scenario A: HEAD/ARTICLE end the block there);
   - two `Message-ID:` → the first wins (`extractHeaderValue`, `:297-321`); the second stays in `headers_json`.
   `processArticle` checks only that Newsgroups/Subject/From are non-empty and the Date parses (`threading.go:108-161`).
 - **Fetch path:** `GetArticle` reads with `readMultilineResponse` (`nntp-client-commands.go:117`), which also un-stuffs
-  `..` to `.` (`:836-838`), and parses with the same `ParseLegacyArticleLines` (`:123`). So an upstream server can plant
+  `..` to `.` (`:837-839`), and parses with the same `ParseLegacyArticleLines` (`:123`). So an upstream server can plant
   the same lines. This answers the open question in `audit-nntp-rfc` "Not covered".
 - **Evidence:** repro, section "repeated / malformed headers":
   ```
@@ -268,7 +276,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
   connection's `processArticle` runs. `processArticle` maps `CaseLock`/`CaseWrite` to `CaseDupes` (`:76-81`), which
   IHAVE answers 437 and TAKETHIS 439, both "do not retry". If the first transfer then fails, both copies are lost.
 - **Scenario C (accepted twice):** after the stuck `CaseLock` of A-intake-1 is evicted (10 min 15 s), the same id is
-  "new" again, and an offer or post with a different Newsgroups stores a second copy.
+  "new" again, and an offer or post with a different Newsgroups stores a second copy (eviction simulated with `MsgIdCache.Delete`, which is what `CleanExpiredEntries` does after `CachedEntryExpires + StuckEntryMaxAge`, `history_MsgIdItemCache.go:194-200`).
 - **Evidence:** repro, section "INT-2":
   ```
   IHAVE <int2-seeded> (already stored in ai.test.b, unknown to history): 335 Send me -> 235 Article transferred successfully
@@ -642,7 +650,7 @@ upstream POST).
 
 | Header | Validated on intake | Generated when missing | Rewritten | Served over NNTP | RFC requirement | Ids |
 |----|----|----|----|----|----|----|
-| Date | present + `ParseNNTPDate`; garbage → 1990-01-01 12:00 UTC; future > 25 h rejected; no past limit; repeated → LF-joined → fallback | no (POST 441) | stored line unchanged; `date_sent` normalized UTC; outbound replaced by `DateSent` when not RFC 1123/822 | HEAD/ARTICLE: original line(s); XOVER: `date_string` column | 5536 §3.1, §3.1.1 (exactly one; RFC 5322 date-time, accept GMT); 5537 §3.5(3,5), §3.7(2) | INT-1, INT-3, A-intake-6, A-intake-7 |
+| Date | present + `ParseNNTPDate`; garbage → 1990-01-01 12:00 UTC; future > 25 h rejected; no past limit; repeated → `date_sent` from the first Date, `date_string` LF-joined | no (POST 441) | stored line unchanged; `date_sent` normalized UTC; outbound replaced by `DateSent` when not RFC 1123/822 | HEAD/ARTICLE: original line(s); XOVER: `date_string` column (LF inside for repeated Date) | 5536 §3.1, §3.1.1 (exactly one; RFC 5322 date-time, accept GMT); 5537 §3.5(3,5), §3.7(2) | INT-1, INT-3, A-intake-6, A-intake-7 |
 | From | non-empty only; repeated → LF-joined in `from_header` | no (441) | no (outbound: repeats dropped) | original line(s); XOVER `from_header` with LF | 5536 §3.1, §3.1.2 (exactly one mailbox-list) | A-intake-2 |
 | Message-ID | non-empty (POST); must equal the command id (IHAVE/TAKETHIS, `reconcileMessageID`); no syntax/length check; first of several wins; fetcher uses the requested id | no (441; IHAVE/TAKETHIS copy the command id into a header-less article) | no | original line(s) | 5536 §3.1.3 (`<id-left@id-right>`, ≤ 250 octets); 5537 §3.5(2,5,6) | INT-1, A-intake-3, A-nntp-rfc-7 |
 | Newsgroups | non-empty; split on `[,;:\s]+`; lax names (upper case, `..`, trailing `.`, `&`, no length bound, reserved names); no existence/active/status check; ≤ 9 groups; repeated → union | no (441); bulk mode uses the fetched group | no (outbound: lowercased, filtered, moved last, `X-RW-` for repeats) | original line(s); groups created on the fly | 5536 §3.1.4 (grammar, reserved names); 5537 §3.5(4), §3.7 ("MUST NOT create new newsgroups") | SEC-2, INT-3, A-intake-1, A-intake-8 |
@@ -784,7 +792,7 @@ TAKETHIS <int2-seeded-tt> (already stored in ai.test.b, unknown to history): 239
 after cache eviction (StuckEntryMaxAge=10m0s): CheckMessageID(<sec2-new1>)=0xF1
   POST <sec2-new1> again, now to ai.test.a: 240 Article posted successfully
   second copy stored in ai.test.a=true
-IHAVE <sec2-new1> (stored, history skipped by INT-6, cache item still CaseLock): 435 Not wanted
+IHAVE <sec2-new1> (435 from history: the item was deleted and the re-post put the id in history): 435 Not wanted
 IHAVE <int1-ok> (stored, in history): 435 Not wanted
 in-flight: CheckMessageID before claim=0xF1, ProcessIncomingArticle after concurrent claim=0x1C err=<nil> (IHAVE maps 0x1C to 437, TAKETHIS to 439)
 == INT-4: Control, Supersedes, Approved, Xref
