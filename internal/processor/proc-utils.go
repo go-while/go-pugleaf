@@ -427,8 +427,9 @@ func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []stri
 			continue
 		}
 		if RunRSLIGHTImport {
-			// only the rslight sections check needs the batch pointer; names that fail
-			// validation are never registered in the batch (INT-3)
+			// the rslight sections check needs the batch pointer before validation (this
+			// branch only); the non-rslight path below registers a pointer only for names
+			// that pass validation (INT-3)
 			newsgroupPtr := proc.DB.Batch.GetNewsgroupPointer(group)
 			if proc.IsNewsGroupInSectionsDB(newsgroupPtr) {
 				if DebugProcessorHeaders {

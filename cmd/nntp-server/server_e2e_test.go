@@ -1822,6 +1822,13 @@ func TestE2EGroupDBOpenFailure(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("InsertNewsgroup: %v", err)
 	}
+	t.Cleanup(func() {
+		// the row stays unusable (its DB file can never be opened): deactivate it so a
+		// later test that walks every active group does not trip over it
+		if _, err := e2eDB.GetMainDB().Exec(`UPDATE newsgroups SET active = 0 WHERE name = ?`, g); err != nil {
+			t.Logf("cleanup: deactivating %s: %v", g, err)
+		}
+	})
 	c := e2ePoster(t)
 	id := fmt.Sprintf("<t7-dbfail-%d@test.invalid>", e2eSeq.Add(1))
 	wire := e2eWire(e2eHead(id, g, "E2E group DB open failure", e2eNow()), []string{"body"})
