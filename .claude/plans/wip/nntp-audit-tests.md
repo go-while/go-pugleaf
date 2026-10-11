@@ -670,3 +670,18 @@ PORT=21119 DATA=./data-test-nntp-audit-tests scripts/test-nntp-server.sh
   Extras over D2: `hServer.tryDial`, `hClient.readStatus/close/Deadline`, `hArticle.Skip`, `hFakeProcessor.{checkFn,processFn,findFn}`,
   `hDataDir(t)`, `hMessageID`, `hGroupName`; `hArticleSQL` also sets `low_water`.
 - Orchestration: the user asked for 4 agents in parallel, so waves 1 and 2 run as batches of 4 slices.
+
+### Waves 1+2, batches 1–2 (2026-10-11; 4 agents at a time, each branch reviewed by pugleaf-reviewer before merge)
+| Slice | Branch | Review | Merge |
+|----|----|----|----|
+| test-nntp-auth | worktree-agent-a938d5757382de879 (18326e7) | merge; 3 minors fixed inline (8b35bfb) | 494d10a |
+| test-nntp-session | worktree-agent-a544ed697e5d5cdf5 (4e1a85a, 43d53c7) | 1 major (RFC-2 X-labels) + 9 minors fixed by implementer; adds A-nntp-sec-1 pipelined-QUIT test | e3fb241 |
+| audit-nntp-rfc | worktree-agent-a9a404b7655832375 (037202b, 47286b4) | merge; 7 citation nits fixed | 0441897 |
+| audit-nntp-sec | first run (agent-a9287213c5dec787f) aborted by a classifier with no commit; rerun worktree-agent-ab13760313981a6c3 (823cd1d, 39a6a6f) | 3 majors (stale line anchors, LISTGROUP "selects" claim, SEC-6 cross-process fix) + 9 minors fixed; adds A-nntp-sec-6 timing leak | 5cefa96 |
+| test-nntp-group | worktree-agent-ac8b7f2f0951c3e73 (bc930f9, 80147ab) | merge; 4 minors fixed; new T-nntp-group-1 | 4c08048 |
+| test-nntp-article | worktree-agent-a4d16aac1914e00d6 (c9f92b4, 1d8699a) | 1 major (BUG-8 via IHAVE) + 5 minors fixed; new T-nntp-article-1 | 64a53aa |
+| test-nntp-overview | worktree-agent-ab1e2bd1095928811 (9f9203e, b810ba9) | 1 major (XHDR absent-header semantics: slice text misread RFC 2980) + 6 minors fixed | 3f22d25 |
+- Harness follow-up: `runIsolated` keeps the child's panic line (db43c16).
+- New ids so far: A-nntp-rfc-1…12 (A-1 = A-nntp-sec-1), A-nntp-sec-1…6, T-nntp-auth-1 (password with spaces), T-nntp-group-1 (LISTGROUP ignores active), T-nntp-article-1 (local430 vs external intake). T-nntp-session-1 was folded into A-nntp-rfc-3.
+- Open knownBug ids in package nntp after batch 2: A-nntp-rfc-3, A-nntp-sec-1, BUG-1, BUG-2, BUG-4, BUG-5, BUG-6, BUG-7, BUG-8, BUG-9, RFC-1…6, SEC-1…7 (SEC-2 via group tests, SEC-7), T-nntp-article-1, T-nntp-auth-1, T-nntp-group-1.
+- Wave-3 notes: fix the slice wording "absent header → n (none)" (RFC 3977 §8.5.2 wants an empty value); "empty body gives exactly \r\n.\r\n after the headers' blank line" should read "after the last header line's CRLF"; Appendix B's first SEC-6 option (invalidate inside UpdateNNTPUserPassword) doesn't work across processes, only the re-check-on-hit option does.
