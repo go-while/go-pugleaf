@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# End-to-end checks for plan nntp-audit-tests (## End-to-end) and nntp-server-hardening. Scratch data only.
+# End-to-end checks for plan nntp-audit-tests (## End-to-end), nntp-server-hardening and
+# nntp-intake-injection. Scratch data only.
 # Usage: PORT=21119 DATA=./data-test-nntp-server-hardening scripts/test-nntp-server.sh [--build]
 # Env: PORT (21119), DATA (./data-test-nntp-audit-tests), BIN (./build/pugleaf-nntp-server),
 #      MGR (./build/pugleaf-nntpmgr), NNTPHOST (example.org; the server checks it by DNS lookup)
 # Safety: the server and nntpmgr run with their working directory in $DATA/run and an
 # absolute -data, so cwd-relative defaults (./data) can never reach the checkout's ./data.
 # Checks: N01-N11 come from `go test -tags e2e -run TestE2EBinary ./cmd/nntp-server/`;
+# N40 and N42-N49 (plan nntp-intake-injection, tag nntp) from `go test -tags e2e -run TestE2EBinaryIntake`,
+# N41 [nntp-intake] is a shell check (no group row or file for an unknown group);
 # N20-N28 are PASS/FAIL checks of plan nntp-server-hardening (tags nntp-session, nntp-overview,
 # nntp-read, nntp-auth-db); N30 is the SIGINT shutdown check (with an idle client connected).
-# Ids N40-N49 are reserved for nntp-intake-injection, N50-N59 for nntp-rfc-commands.
+# Ids N50-N59 are reserved for nntp-rfc-commands.
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 2
 PORT="${PORT:-21119}"
@@ -96,6 +99,10 @@ stop_server
 q "INSERT INTO newsgroups(name,description,last_article,message_count,active,hierarchy,status,low_water,high_water)
    VALUES('e2e.test.a','',0,0,1,'e2e','y',1,0),('e2e.test.b','',0,0,1,'e2e','y',1,0)" \
   || setup_fail "seeding $DB failed"
+# N40-N49: a group for generated headers and a moderated one
+q "INSERT INTO newsgroups(name,description,last_article,message_count,active,hierarchy,status,low_water,high_water)
+   VALUES('e2e.intake.gen','',0,0,1,'e2e','y',1,0),('e2e.intake.mod','',0,0,1,'e2e','m',1,0)" \
+  || setup_fail "seeding the intake groups in $DB failed"
 # 3. the posting user (nntpmgr no longer echoes a given password: N28 checks it; scratch data only)
 ( cd "$RUN" && exec "$MGR_ABS" -data "$DATA_ABS" -create -username "$E2E_USER" -password "$E2E_PASS" -posting -maxconns 4 ) \
   >"$DATA/nntpmgr.log" 2>&1 || setup_fail "nntpmgr -create failed: $(tail -3 "$DATA/nntpmgr.log")"
@@ -124,6 +131,28 @@ if [ "$n" != 11 ]; then
   fail N00 nntp "go test reported $n of 11 client steps" "rc=$rc; see $GOLOG: $(tail -5 "$GOLOG" | tr '\n' ' ')"
 fi
 alive || setup_fail "server died during the client steps"
+
+# ---------------------------------------------------------------- N40-N49 (nntp-intake-injection)
+GOLOG40="$DATA/e2e-go-test-intake.log"
+PUGLEAF_E2E_ADDR="127.0.0.1:$PORT" PUGLEAF_E2E_USER="$E2E_USER" PUGLEAF_E2E_PASS="$E2E_PASS" PUGLEAF_E2E_HOST="$NNTPHOST" \
+  timeout 300 go test -tags e2e -count=1 -v -run '^TestE2EBinaryIntake$' ./cmd/nntp-server/ >"$GOLOG40" 2>&1
+rc=$?
+lines=$(grep -E '^(PASS|FAIL|INFO) N[0-9]+ ' "$GOLOG40")
+if [ -n "$lines" ]; then printf '%s\n' "$lines"; fi
+PASSES=$((PASSES + $(printf '%s\n' "$lines" | grep -c '^PASS ')))
+FAILS=$((FAILS + $(printf '%s\n' "$lines" | grep -c '^FAIL ')))
+INFOS=$((INFOS + $(printf '%s\n' "$lines" | grep -c '^INFO ')))
+n=$(printf '%s\n' "$lines" | grep -cE '^(PASS|FAIL) N(40|4[2-9]) ')
+if [ "$n" != 9 ]; then
+  fail N00 nntp "go test reported $n of 9 intake checks" "rc=$rc; see $GOLOG40: $(tail -5 "$GOLOG40" | tr '\n' ' ')"
+fi
+alive || setup_fail "server died during the intake checks"
+# N41 [nntp-intake] (SEC-2): after N40 there is no file or row for the unknown group and no NULL hierarchy
+files=$(find "$DATA/db" -name 'e2e_nosuch_group.db' 2>/dev/null | wc -l)
+rows=$(q "SELECT count(*) FROM newsgroups WHERE name='e2e.nosuch.group'" 2>/dev/null)
+nulls=$(q "SELECT count(*) FROM newsgroups WHERE hierarchy IS NULL" 2>/dev/null)
+if [ "$files" = 0 ] && [ "$rows" = 0 ] && [ "$nulls" = 0 ]; then pass N41 nntp-intake "unknown group: no file, no row, no NULL hierarchy"
+else fail N41 nntp-intake "unknown group: no file, no row, no NULL hierarchy" "files=$files rows=${rows:-?} null_hierarchy=${nulls:-?}"; fi
 
 # ---------------------------------------------------------------- N24 [nntp-session] (RFC-2): CAPABILITIES by state
 pre=""; post=""; cap_detail=""

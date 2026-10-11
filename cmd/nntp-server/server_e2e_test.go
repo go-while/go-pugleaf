@@ -30,6 +30,7 @@ import (
 	"io/fs"
 	"log"
 	"net"
+	"net/mail"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -913,17 +914,32 @@ func TestE2EPost(t *testing.T) {
 	}
 
 	// RFC 5537 §3.2.1: the injecting/relaying agent prepends its path identity;
-	// the served Path header must start with it. Today the prefix is stored only
-	// in the path column and HEAD serves the original header (INT-1).
+	// the served Path header must start with it (INT-1).
 	var pathErr error
 	if p := e2eHeaderValue(hdrs, "Path"); !strings.HasPrefix(p, e2eHostname+"!") {
 		pathErr = fmt.Errorf("served Path %q does not start with %q", p, e2eHostname+"!")
 	}
-	e2eKnownBug(t, "INT-1", pathErr)
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	// RFC 5537 §3.5 (D6/D7): "<identity>!.POSTED!" and an Injection-Info header; no
+	// Injection-Date, because both Message-ID and Date were sent
+	if p := e2eHeaderValue(hdrs, "Path"); !strings.HasPrefix(p, e2eHostname+"!.POSTED!") {
+		t.Fatalf("served Path %q does not start with %q", p, e2eHostname+"!.POSTED!")
+	}
+	if v := e2eHeaderValue(hdrs, "Injection-Info"); !strings.HasPrefix(v, e2eHostname) {
+		t.Fatalf("served Injection-Info %q does not start with %q (headers %q)", v, e2eHostname, hdrs)
+	}
+	for _, l := range hdrs {
+		if strings.HasPrefix(strings.ToLower(l), "injection-date:") {
+			t.Fatalf("Injection-Date %q added although Message-ID and Date were sent", l)
+		}
+	}
 }
 
 // TestE2EPostGeneratedHeaders: POST without Message-ID or Date must be accepted,
-// the injecting agent adds them (RFC 5537 §3.5 steps 5/6; RFC 3977 §6.3.1). Today 441 (INT-1).
+// the injecting agent adds them and an Injection-Date (RFC 5537 §3.5 steps 5/6/10;
+// RFC 3977 §6.3.1; INT-1).
 func TestE2EPostGeneratedHeaders(t *testing.T) {
 	e2eNeedDB(t)
 	t.Run("no-message-id", func(t *testing.T) {
@@ -941,8 +957,12 @@ func TestE2EPostGeneratedHeaders(t *testing.T) {
 			err = rerr
 		} else if v := e2eHeaderValue(hdrs, "Message-ID"); !strings.HasPrefix(v, "<") || !strings.Contains(v, "@") {
 			err = fmt.Errorf("stored article has no generated Message-ID (headers %q)", hdrs)
+		} else if _, perr := mail.ParseDate(e2eHeaderValue(hdrs, "Injection-Date")); perr != nil {
+			err = fmt.Errorf("stored article has no valid Injection-Date: %v (headers %q)", perr, hdrs)
 		}
-		e2eKnownBug(t, "INT-1", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("no-date", func(t *testing.T) {
 		g := e2eGroup(t, "gendate")
@@ -960,8 +980,12 @@ func TestE2EPostGeneratedHeaders(t *testing.T) {
 			err = rerr
 		} else if processor.ParseNNTPDate(e2eHeaderValue(hdrs, "Date")).IsZero() {
 			err = fmt.Errorf("stored article has no valid generated Date (headers %q)", hdrs)
+		} else if _, perr := mail.ParseDate(e2eHeaderValue(hdrs, "Injection-Date")); perr != nil {
+			err = fmt.Errorf("stored article has no valid Injection-Date: %v (headers %q)", perr, hdrs)
 		}
-		e2eKnownBug(t, "INT-1", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -1084,7 +1108,7 @@ func TestE2ETakeThis(t *testing.T) {
 }
 
 // TestE2ERejectMissingNewsgroups: an article without Newsgroups is rejected:
-// POST 441 (RFC 3977 §6.3.1.2), IHAVE 437 (§6.3.2.2; today 436, RFC-5).
+// POST 441 (RFC 3977 §6.3.1.2), IHAVE 437 (§6.3.2.2, RFC-5).
 func TestE2ERejectMissingNewsgroups(t *testing.T) {
 	e2eNeedDB(t)
 	head := []string{
@@ -1118,14 +1142,9 @@ func TestE2ERejectMissingNewsgroups(t *testing.T) {
 		if err != nil {
 			t.Fatalf("IHAVE article: %v", err)
 		}
-		if code != 436 && code != 437 {
-			t.Fatalf("IHAVE without Newsgroups: %q, want a rejection", line)
-		}
-		var bugErr error
 		if code != 437 {
-			bugErr = fmt.Errorf("IHAVE without Newsgroups: %q, want 437 (permanent reject)", line)
+			t.Fatalf("IHAVE without Newsgroups: %q, want 437 (permanent reject)", line)
 		}
-		e2eKnownBug(t, "RFC-5", bugErr)
 	})
 }
 
@@ -1177,26 +1196,21 @@ func TestE2ERejectUnknownGroup(t *testing.T) {
 // TestE2ESizeLimits: oversized articles get a clean rejection.
 func TestE2ESizeLimits(t *testing.T) {
 	e2eNeedDB(t)
-	// 20 000 lines exceed the 16384-line cap of readArticleLines. RFC 3977
-	// §6.3.1.2 wants a 441 status; the server may then close the connection.
-	// Today it closes the connection first and then writes 441 and 500 to the
-	// closed socket, so the client never gets a status (BUG-7; the missing
-	// byte limit is SEC-3). Runs in a child process: an oversized article must
-	// not take down the shared server.
+	// 20 000 lines exceed MaxArtSize and the 16384-line cap of readArticleBlock.
+	// RFC 3977 §6.3.1.2 wants a 441 status; the reader drains the article to its
+	// terminator, so the connection stays usable (BUG-7, SEC-3). Runs in a child
+	// process: an oversized article must not take down the shared server.
 	t.Run("lines-20000", func(t *testing.T) {
 		err := e2eRunIsolated(t, 120*time.Second, e2eOversizeChild)
 		if e2eIsChild(t) {
 			return
 		}
-		// only the child's BUG-7 assertions carry the marker; any other child
-		// failure (setup, auth, a -race report, timeout) is a real failure
-		if err != nil && !strings.Contains(err.Error(), e2eBug7Marker) {
+		if err != nil {
 			t.Fatal(err)
 		}
-		e2eKnownBug(t, "BUG-7", err)
 	})
-	// MaxArtSize (Server.NNTP.MaxArtSize, 32 KiB here) is never read: a 64 KiB
-	// article must be refused with 441 (SEC-3), today it is accepted with 240.
+	// MaxArtSize (Server.NNTP.MaxArtSize, 32 KiB here): a 64 KiB article is refused
+	// with 441 and the connection stays usable (SEC-3).
 	t.Run("bytes-over-MaxArtSize", func(t *testing.T) {
 		g := e2eGroup(t, "size")
 		id := e2eMsgID("size")
@@ -1206,26 +1220,24 @@ func TestE2ESizeLimits(t *testing.T) {
 		}
 		c := e2ePoster(t)
 		code, line := c.post(t, e2eWire(e2eHead(id, g, "E2E big", e2eNow()), body))
-		if code != 240 && code != 441 {
-			t.Fatalf("POST of %d bytes: %q, want 441 (or 240 while SEC-3 is open)", 1000*65, line)
+		if code != 441 {
+			t.Fatalf("POST of a %d-byte article with MaxArtSize %d: %q, want 441", 1000*65, e2eMaxArtSize, line)
 		}
 		if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
 			t.Fatalf("MODE READER after the big article: %q", line)
 		}
-		var bugErr error
-		if code != 441 {
-			bugErr = fmt.Errorf("POST of a %d-byte article with MaxArtSize %d: %q, want 441", 1000*65, e2eMaxArtSize, line)
+		if _, err := e2eStored(id, g); err == nil {
+			t.Fatalf("the oversized article %s was stored", id)
 		}
-		e2eKnownBug(t, "SEC-3", bugErr)
 	})
 }
 
 // e2eBug7Marker prefixes the child's BUG-7 failures (see lines-20000).
 const e2eBug7Marker = "BUG-7-OPEN:"
 
-// e2eOversizeChild posts a 20 000-line article and requires a status line
-// (441 or another 4xx/5xx), then either a usable connection or a close after
-// the status, and no server write to a closed socket.
+// e2eOversizeChild posts a 20 000-line article and requires a 441 status, a
+// usable connection afterwards (MODE READER 200/201) and no server write to a
+// closed socket.
 func e2eOversizeChild(t *testing.T) {
 	g := e2eGroup(t, "lines")
 	id := e2eMsgID("lines")
@@ -1240,42 +1252,48 @@ func e2eOversizeChild(t *testing.T) {
 	}
 	wireErr := c.send(e2eWire(e2eHead(id, g, "E2E 20000 lines", e2eNow()), body)) // may fail: server closed
 	code, line, err := c.readStatus()
-	statusOK := err == nil && code >= 400 && code < 600
+	// RFC 3977 §6.3.1.2: 441; the article was drained, so the connection stays usable
+	statusOK := err == nil && code == 441
+	usable, modeDetail := false, "not tried"
 	if statusOK {
-		// a status was sent: the connection is either still usable or closed after it
 		code2, line2, err2 := c.tryCmd("MODE READER")
-		if err2 == nil && code2 != 200 && code2 != 201 {
-			t.Fatalf("after the rejection %q: MODE READER %q", line, line2)
-		}
+		usable = err2 == nil && (code2 == 200 || code2 == 201)
+		modeDetail = fmt.Sprintf("code=%d line=%q err=%v", code2, line2, err2)
 	}
-	// wait for the server side of this connection to end, then look for writes after close
+	// The fixed server ends this session silently on the client's EOF. Give a late
+	// write to the closed socket up to 1.5 s to show up in the log (polled).
 	_ = c.Conn.Close()
-	if werr := e2eWaitFor(e2eCommitWait, func() error {
-		if len(e2eLogs.lines("Connection error from "+local)) == 0 {
-			return fmt.Errorf("handler of %s still running", local)
+	closedWritesOf := func() []string {
+		var out []string
+		for _, l := range e2eLogs.lines(local) {
+			// writes only: a read loop hitting the closed conn after a correct 441+close is fine
+			if strings.Contains(l, "use of closed network connection") && strings.Contains(l, "write tcp") {
+				out = append(out, l)
+			}
 		}
-		return nil
-	}); werr != nil && !statusOK {
-		t.Logf("no handler end logged for %s: %v", local, werr)
+		return out
 	}
-	// Note for the fix plan: today the client sees "connection reset by peer"
-	// because the server closes with ~3,600 unread article lines in its receive
-	// buffer (the kernel answers them with RST). A fix must drain the rest of
-	// the article (or CloseWrite and drain under a deadline) before closing,
-	// otherwise the 441 is lost even when it is written before the close.
-	var closedWrites []string
-	for _, l := range e2eLogs.lines(local) {
-		// writes only: a read loop hitting the closed conn after a correct 441+close is fine
-		if strings.Contains(l, "use of closed network connection") && strings.Contains(l, "write tcp") {
-			closedWrites = append(closedWrites, l)
+	_ = e2eWaitFor(1500*time.Millisecond, func() error {
+		if len(closedWritesOf()) > 0 {
+			return nil // found one: stop waiting
 		}
-	}
+		return fmt.Errorf("no write to a closed socket yet")
+	})
+	// The server reads (and discards) the oversized article up to its terminator
+	// before it answers 441, so no unread input is left in its receive buffer and
+	// the connection stays usable. Only an article past the drain bound
+	// (maxArticleDrainBytes) is answered with 400 and a close, and that close
+	// does CloseWrite and drains under a deadline first (closeAfterReply), so the
+	// kernel never answers unread input with RST before the status arrives.
+	closedWrites := closedWritesOf()
 	switch {
 	case !statusOK && len(closedWrites) > 0:
-		t.Fatalf(e2eBug7Marker+" 20000-line article: no status line (read: code=%d line=%q err=%v, write err=%v); the server wrote to the closed socket: %q",
+		t.Fatalf(e2eBug7Marker+" 20000-line article: no 441 (read: code=%d line=%q err=%v, write err=%v); the server wrote to the closed socket: %q",
 			code, line, err, wireErr, closedWrites)
 	case !statusOK:
-		t.Fatalf(e2eBug7Marker+" 20000-line article: no status line (read: code=%d line=%q err=%v, write err=%v)", code, line, err, wireErr)
+		t.Fatalf(e2eBug7Marker+" 20000-line article: no 441 (read: code=%d line=%q err=%v, write err=%v)", code, line, err, wireErr)
+	case !usable:
+		t.Fatalf(e2eBug7Marker+" 20000-line article: %q, but the connection is not usable: MODE READER %s", line, modeDetail)
 	case len(closedWrites) > 0:
 		t.Fatalf(e2eBug7Marker+" 20000-line article: %q, but the server wrote to a closed socket: %q", line, closedWrites)
 	}
@@ -1470,8 +1488,7 @@ func TestE2EHeaderBlockRejects(t *testing.T) {
 		t.Fatalf("MODE READER after the rejections: %q", line)
 	}
 
-	// IHAVE with two From headers: 335, then a rejection. S4 maps CaseError to 437;
-	// until then the server answers 436.
+	// IHAVE with two From headers: 335, then 437 (RFC 3977 §6.3.2.2: permanent reject).
 	id := fmt.Sprintf("<t7-hdrblock-%d@test.invalid>", e2eSeq.Add(1))
 	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
 		t.Fatalf("IHAVE %s: %q, want 335", id, line)
@@ -1484,8 +1501,8 @@ func TestE2EHeaderBlockRejects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IHAVE article: %v", err)
 	}
-	if code != 437 && code != 436 {
-		t.Fatalf("IHAVE with two From headers: %q, want 437 (or 436 before S4)", line)
+	if code != 437 {
+		t.Fatalf("IHAVE with two From headers: %q, want 437", line)
 	}
 	if _, err := e2eStored(id, g); err == nil {
 		t.Fatalf("the refused article %s was stored", id)
@@ -1928,5 +1945,286 @@ func TestE2ECaptureSlotReleased(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Injection, relay Path, reply codes and size limits on the wire
+// (plan nntp-intake-injection, slice S4). Groups t7.<test>.<seq>, message-ids
+// <t7-<test>-<seq>@test.invalid>.
+
+// TestE2EInjectionPathColumn (D7): for a POST and for an IHAVE the stored path column
+// equals the stored and the served Path header.
+func TestE2EInjectionPathColumn(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "pathcol", true, "y", 0)
+	c := e2ePoster(t)
+	pid := fmt.Sprintf("<t7-pathcol-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.post(t, e2eWire(e2eHead(pid, g, "E2E path column post", e2eNow()), []string{"post"})); code != 240 {
+		t.Fatalf("POST: %q, want 240", line)
+	}
+	iid := fmt.Sprintf("<t7-pathcol-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.cmd(t, "IHAVE %s", iid); code != 335 {
+		t.Fatalf("IHAVE %s: %q, want 335", iid, line)
+	}
+	if err := c.send(e2eWire(e2eHead(iid, g, "E2E path column ihave", e2eNow()), []string{"ihave"})); err != nil {
+		t.Fatal(err)
+	}
+	if code, line, err := c.readStatus(); err != nil || code != 235 {
+		t.Fatalf("IHAVE article: code=%d line=%q err=%v, want 235", code, line, err)
+	}
+	for _, tc := range []struct{ id, path string }{
+		{pid, e2eHostname + "!.POSTED!e2e.client.invalid!not-for-mail"},
+		{iid, e2eHostname + "!.SEEN.127.0.0.1!e2e.client.invalid!not-for-mail"},
+	} {
+		e2eWaitStored(t, tc.id, g)
+		gdb, err := e2eDB.GetGroupDB(g)
+		if err != nil {
+			t.Fatalf("GetGroupDB %s: %v", g, err)
+		}
+		var column, stored string
+		err = gdb.DB.QueryRow(`SELECT path, headers_json FROM articles WHERE message_id = ?`, tc.id).Scan(&column, &stored)
+		gdb.Return()
+		if err != nil {
+			t.Fatalf("read path of %s: %v", tc.id, err)
+		}
+		if column != tc.path {
+			t.Fatalf("%s: path column %q, want %q", tc.id, column, tc.path)
+		}
+		var lines []string
+		for _, l := range strings.Split(stored, "\n") {
+			if strings.HasPrefix(strings.ToLower(l), "path:") {
+				lines = append(lines, l)
+			}
+		}
+		if len(lines) != 1 || strings.TrimSpace(lines[0][len("path:"):]) != column {
+			t.Fatalf("%s: stored Path lines %q, want one equal to the column %q", tc.id, lines, column)
+		}
+		if code, line := c.cmd(t, "HEAD %s", tc.id); code != 221 {
+			t.Fatalf("HEAD %s: %q, want 221", tc.id, line)
+		}
+		if v := e2eHeaderValue(c.readDotLines(t), "Path"); v != column {
+			t.Fatalf("%s: served Path %q, want the column %q", tc.id, v, column)
+		}
+	}
+}
+
+// TestE2EProtoArticleRejects (A-intake-4, D10): RFC 5537 §3.5 steps 2/3, a POST with
+// forged trace headers or a Date older than PostDateMaxAge (72 h) is refused.
+func TestE2EProtoArticleRejects(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "proto", true, "y", 0)
+	c := e2ePoster(t)
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name   string
+		date   string
+		path   string // replaces the Path line when set
+		extra  string
+		want   int
+		stored bool
+	}{
+		{"injection-info", e2eNow(), "", "Injection-Info: other.invalid", 441, false},
+		{"xref", e2eNow(), "", "Xref: other.invalid " + g + ":1", 441, false},
+		{"posted-path", e2eNow(), "x!.POSTED!y", "", 441, false},
+		{"date-73h-old", now.Add(-73 * time.Hour).Format(time.RFC1123Z), "", "", 441, false},
+		{"date-71h-old", now.Add(-71 * time.Hour).Format(time.RFC1123Z), "", "", 240, true},
+	} {
+		id := fmt.Sprintf("<t7-proto-%d@test.invalid>", e2eSeq.Add(1))
+		head := e2eHead(id, g, "E2E proto "+tc.name, tc.date)
+		if tc.path != "" {
+			head[0] = "Path: " + tc.path
+		}
+		if tc.extra != "" {
+			head = append(head, tc.extra)
+		}
+		if code, line := c.post(t, e2eWire(head, []string{"body"})); code != tc.want {
+			t.Fatalf("%s: POST %q, want %d", tc.name, line, tc.want)
+		}
+		if tc.stored {
+			e2eWaitStored(t, id, g)
+		} else if _, err := e2eStored(id, g); err == nil {
+			t.Fatalf("%s: the refused article %s was stored", tc.name, id)
+		}
+	}
+}
+
+// TestE2ERelayPath (D7): an article received by IHAVE is served with
+// "<identity>!.SEEN.<peer IP>!" in front of the received Path.
+func TestE2ERelayPath(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "relay", true, "y", 0)
+	c := e2ePoster(t)
+	id := fmt.Sprintf("<t7-relay-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+		t.Fatalf("IHAVE %s: %q, want 335", id, line)
+	}
+	if err := c.send(e2eWire(e2eHead(id, g, "E2E relay path", e2eNow()), []string{"relay"})); err != nil {
+		t.Fatal(err)
+	}
+	if code, line, err := c.readStatus(); err != nil || code != 235 {
+		t.Fatalf("IHAVE article: code=%d line=%q err=%v, want 235", code, line, err)
+	}
+	e2eWaitStored(t, id, g)
+	if code, line := c.cmd(t, "HEAD %s", id); code != 221 {
+		t.Fatalf("HEAD %s: %q, want 221", id, line)
+	}
+	if p := e2eHeaderValue(c.readDotLines(t), "Path"); !strings.HasPrefix(p, e2eHostname+"!.SEEN.127.0.0.1!") {
+		t.Fatalf("served Path %q, want the prefix %q", p, e2eHostname+"!.SEEN.127.0.0.1!")
+	}
+}
+
+// TestE2EIHaveInvalidMessageID (A-nntp-rfc-7, A-nntp-rfc-8): IHAVE with a malformed
+// message-id is a syntax error (RFC 3977 §3.2.1: 501); TAKETHIS consumes the article,
+// answers 439 with the argument and the stream stays in sync.
+func TestE2EIHaveInvalidMessageID(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "badid", true, "y", 0)
+	c := e2ePoster(t)
+	if code, line := c.cmd(t, "IHAVE not-a-message-id"); code != 501 {
+		t.Fatalf("IHAVE not-a-message-id: %q, want 501", line)
+	}
+	good := fmt.Sprintf("<t7-badid-%d@test.invalid>", e2eSeq.Add(1))
+	stream := "TAKETHIS not-an-id\r\n" + e2eWire(e2eHead("not-an-id", g, "E2E bad id", e2eNow()), []string{"bad"}) +
+		"TAKETHIS " + good + "\r\n" + e2eWire(e2eHead(good, g, "E2E good id", e2eNow()), []string{"good"})
+	if err := c.send(stream); err != nil {
+		t.Fatal(err)
+	}
+	for i, w := range []struct {
+		code int
+		id   string
+	}{{439, "not-an-id"}, {239, good}} {
+		code, line, err := c.readStatus()
+		if err != nil {
+			t.Fatalf("reply %d: %v (line %q)", i+1, err, line)
+		}
+		if f := strings.Fields(line); code != w.code || len(f) < 2 || f[1] != w.id {
+			t.Fatalf("reply %d: %q, want %d %s", i+1, line, w.code, w.id)
+		}
+	}
+	e2eWaitStored(t, good, g)
+}
+
+// TestE2EMissingMessageIDHeader (A-intake-3, RFC 5537 §3.6 step 1): IHAVE of an article
+// without a Message-ID header is refused (437) and not stored under the command id.
+func TestE2EMissingMessageIDHeader(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "nomid", true, "y", 0)
+	c := e2ePoster(t)
+	id := fmt.Sprintf("<t7-nomid-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+		t.Fatalf("IHAVE %s: %q, want 335", id, line)
+	}
+	if err := c.send(e2eWire(e2eHead("", g, "E2E no message-id header", e2eNow()), []string{"body"})); err != nil {
+		t.Fatal(err)
+	}
+	if code, line, err := c.readStatus(); err != nil || code != 437 {
+		t.Fatalf("IHAVE article without Message-ID: code=%d line=%q err=%v, want 437", code, line, err)
+	}
+	if _, err := e2eStored(id, g); err == nil {
+		t.Fatalf("the refused article was stored under %s", id)
+	}
+}
+
+// TestE2EOversizeFeed (SEC-3): feeds over MaxArtSize (32 KiB) are refused with the
+// stream kept in sync: IHAVE 437, TAKETHIS 439 <id> followed by the next pipelined article.
+func TestE2EOversizeFeed(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "bigfeed", true, "y", 0)
+	c := e2ePoster(t)
+	big := make([]string, 0, 1024)
+	for i := 0; i < 1024; i++ { // 1024 lines of 64 octets + CRLF: about 66 KiB
+		big = append(big, fmt.Sprintf("%04d %s", i, strings.Repeat("y", 59)))
+	}
+	id := fmt.Sprintf("<t7-bigfeed-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.cmd(t, "IHAVE %s", id); code != 335 {
+		t.Fatalf("IHAVE %s: %q, want 335", id, line)
+	}
+	if err := c.send(e2eWire(e2eHead(id, g, "E2E big feed", e2eNow()), big)); err != nil {
+		t.Fatal(err)
+	}
+	if code, line, err := c.readStatus(); err != nil || code != 437 {
+		t.Fatalf("IHAVE of a 64 KiB article: code=%d line=%q err=%v, want 437", code, line, err)
+	}
+	if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+		t.Fatalf("MODE READER after the big article: %q", line)
+	}
+
+	id1 := fmt.Sprintf("<t7-bigfeed-%d@test.invalid>", e2eSeq.Add(1))
+	id2 := fmt.Sprintf("<t7-bigfeed-%d@test.invalid>", e2eSeq.Add(1))
+	stream := "TAKETHIS " + id1 + "\r\n" + e2eWire(e2eHead(id1, g, "E2E big takethis", e2eNow()), big) +
+		"TAKETHIS " + id2 + "\r\n" + e2eWire(e2eHead(id2, g, "E2E small takethis", e2eNow()), []string{"small"})
+	if err := c.send(stream); err != nil {
+		t.Fatal(err)
+	}
+	for i, w := range []struct {
+		code int
+		id   string
+	}{{439, id1}, {239, id2}} {
+		code, line, err := c.readStatus()
+		if err != nil {
+			t.Fatalf("reply %d: %v (line %q)", i+1, err, line)
+		}
+		if f := strings.Fields(line); code != w.code || len(f) < 2 || f[1] != w.id {
+			t.Fatalf("reply %d: %q, want %d %s", i+1, line, w.code, w.id)
+		}
+	}
+	e2eWaitStored(t, id2, g)
+	for _, bigID := range []string{id, id1} {
+		if _, err := e2eStored(bigID, g); err == nil {
+			t.Fatalf("the oversized article %s was stored", bigID)
+		}
+	}
+}
+
+// TestE2EPostNoPostingStatus (D1, RFC 3977 §7.6.3): a group with status n refuses POST
+// (441) but accepts feeds (IHAVE 235).
+func TestE2EPostNoPostingStatus(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "nopost", true, "n", 0)
+	c := e2ePoster(t)
+	pid := fmt.Sprintf("<t7-nopost-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.post(t, e2eWire(e2eHead(pid, g, "E2E post to status n", e2eNow()), []string{"post"})); code != 441 {
+		t.Fatalf("POST to status n %s: %q, want 441", g, line)
+	}
+	iid := fmt.Sprintf("<t7-nopost-%d@test.invalid>", e2eSeq.Add(1))
+	if code, line := c.cmd(t, "IHAVE %s", iid); code != 335 {
+		t.Fatalf("IHAVE %s: %q, want 335", iid, line)
+	}
+	if err := c.send(e2eWire(e2eHead(iid, g, "E2E feed to status n", e2eNow()), []string{"feed"})); err != nil {
+		t.Fatal(err)
+	}
+	if code, line, err := c.readStatus(); err != nil || code != 235 {
+		t.Fatalf("IHAVE to status n %s: code=%d line=%q err=%v, want 235", g, code, line, err)
+	}
+	e2eWaitStored(t, iid, g)
+	if _, err := e2eStored(pid, g); err == nil {
+		t.Fatalf("the refused post %s was stored", pid)
+	}
+}
+
+// TestE2ETakeThisUnauthenticatedCarriesID (A-nntp-rfc-8, RFC 4644 §2.5.2): the 480 reply
+// to an unauthenticated TAKETHIS carries the message-id, and the article is consumed.
+func TestE2ETakeThisUnauthenticatedCarriesID(t *testing.T) {
+	e2eNeedDB(t)
+	g := e2eGroupWith(t, "unauth", true, "y", 0)
+	c := e2eDial(t)
+	id := fmt.Sprintf("<t7-unauth-%d@test.invalid>", e2eSeq.Add(1))
+	if err := c.send("TAKETHIS " + id + "\r\n" + e2eWire(e2eHead(id, g, "E2E unauthenticated", e2eNow()), []string{"body"})); err != nil {
+		t.Fatal(err)
+	}
+	code, line, err := c.readStatus()
+	if err != nil {
+		t.Fatalf("TAKETHIS reply: %v", err)
+	}
+	if f := strings.Fields(line); code != 480 || len(f) < 2 || f[1] != id {
+		t.Fatalf("unauthenticated TAKETHIS: %q, want 480 %s", line, id)
+	}
+	// the article was consumed: the next command is answered
+	if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+		t.Fatalf("MODE READER after the 480: %q", line)
+	}
+	if _, err := e2eStored(id, g); err == nil {
+		t.Fatalf("the unauthenticated article %s was stored", id)
 	}
 }

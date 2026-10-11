@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -185,18 +186,23 @@ func TestWiringIHaveTransfer(t *testing.T) {
 		name          string
 		articleMsgID  string
 		processResult int
+		processErr    error
 		want          int
 		wantProcessed bool
 	}{
-		{"accepted", msgid, history.CasePass, 235, true},
-		{"no-message-id-uses-argument", "", history.CasePass, 235, true},
-		{"message-id-mismatch", "<other@example.org>", history.CasePass, 437, false},
-		{"duplicate-while-processing", msgid, history.CaseDupes, 437, true},
-		{"processing-error", msgid, history.CaseError, 436, true},
+		{"accepted", msgid, history.CasePass, nil, 235, true},
+		// RFC 5537 §3.6 step 1: a relayed article without Message-ID is refused
+		{"no-message-id-rejected", "", history.CasePass, nil, 437, false},
+		{"message-id-mismatch", "<other@example.org>", history.CasePass, nil, 437, false},
+		{"duplicate-while-processing", msgid, history.CaseDupes, nil, 437, true},
+		{"processing-error", msgid, history.CaseError, nil, 436, true},
+		{"rejected", msgid, history.CaseError, fmt.Errorf("%w: no valid newsgroup", common.ErrIntakeRejected), 437, true},
+		{"in-flight", msgid, history.CaseRetry, nil, 436, true},
+		{"temporary", msgid, history.CaseRetry, fmt.Errorf("%w: history: disk error", common.ErrIntakeTemporary), 436, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			proc := &wiringTestProcessor{checkResult: history.CasePass, processResult: tc.processResult}
+			proc := &wiringTestProcessor{checkResult: history.CasePass, processResult: tc.processResult, processErr: tc.processErr}
 			c, client := wiringTestConn(t, proc, true)
 			done := wiringTestRun(t, func() error { return c.handleIHave([]string{msgid}) })
 			if code, line := wiringTestReadCode(t, client); code != 335 {
@@ -221,6 +227,25 @@ func TestWiringIHaveTransfer(t *testing.T) {
 	}
 }
 
+// TestWiringIHaveInvalidMessageID: RFC 3977 §3.2.1 / §3.6, a malformed message-id
+// argument is a syntax error (501) and is never offered to the processor (A-nntp-rfc-7).
+func TestWiringIHaveInvalidMessageID(t *testing.T) {
+	proc := &wiringTestProcessor{checkResult: history.CasePass}
+	c, client := wiringTestConn(t, proc, true)
+	done := wiringTestRun(t, func() error { return c.handleIHave([]string{"not-a-message-id"}) })
+	if code, line := wiringTestReadCode(t, client); code != 501 {
+		t.Fatalf("got %q, want 501", line)
+	}
+	wiringTestWait(t, done, "IHAVE")
+	wiringTestNoExtraReply(t, c, client)
+	proc.mu.Lock()
+	checked := len(proc.checked)
+	proc.mu.Unlock()
+	if checked != 0 {
+		t.Fatalf("CheckMessageID called %d times for an invalid message-id", checked)
+	}
+}
+
 func TestWiringIHaveNotAuthenticated(t *testing.T) {
 	proc := &wiringTestProcessor{checkResult: history.CasePass}
 	c, client := wiringTestConn(t, proc, false)
@@ -236,34 +261,45 @@ func TestWiringIHaveNotAuthenticated(t *testing.T) {
 
 func TestWiringTakeThis(t *testing.T) {
 	const msgid = "<takethis@example.org>"
+	temporary := fmt.Errorf("%w: no group database could be opened", common.ErrIntakeTemporary)
+	rejected := fmt.Errorf("%w: no valid newsgroup", common.ErrIntakeRejected)
 	cases := []struct {
 		name          string
 		noProcessor   bool
+		noAuth        bool
 		args          []string
 		check         int
 		articleMsgID  string
 		processResult int
+		processErr    error
 		want          int
 		wantProcessed bool
+		wantClosed    bool // RFC 4644 §2.5.2: a temporary failure is 400 and a close
 	}{
-		{"accepted", false, []string{msgid}, history.CasePass, msgid, history.CasePass, 239, true},
-		{"no-message-id-uses-argument", false, []string{msgid}, history.CasePass, "", history.CasePass, 239, true},
-		{"message-id-mismatch", false, []string{msgid}, history.CasePass, "<other@example.org>", history.CasePass, 439, false},
-		{"dupes", false, []string{msgid}, history.CaseDupes, msgid, history.CasePass, 439, false},
-		{"retry", false, []string{msgid}, history.CaseRetry, msgid, history.CasePass, 439, false},
-		{"history-error", false, []string{msgid}, history.CaseError, msgid, history.CasePass, 439, false},
-		{"processing-failed", false, []string{msgid}, history.CasePass, msgid, history.CaseDupes, 439, true},
-		{"no-processor", true, []string{msgid}, history.CasePass, msgid, history.CasePass, 502, false},
-		{"missing-argument", false, nil, history.CasePass, msgid, history.CasePass, 501, false},
+		{"accepted", false, false, []string{msgid}, history.CasePass, msgid, history.CasePass, nil, 239, true, false},
+		// RFC 5537 §3.6 step 1: a relayed article without Message-ID is refused
+		{"no-message-id-rejected", false, false, []string{msgid}, history.CasePass, "", history.CasePass, nil, 439, false, false},
+		{"message-id-mismatch", false, false, []string{msgid}, history.CasePass, "<other@example.org>", history.CasePass, nil, 439, false, false},
+		{"dupes", false, false, []string{msgid}, history.CaseDupes, msgid, history.CasePass, nil, 439, false, false},
+		{"retry", false, false, []string{msgid}, history.CaseRetry, msgid, history.CasePass, nil, 439, false, false},
+		{"history-error", false, false, []string{msgid}, history.CaseError, msgid, history.CasePass, nil, 400, false, true},
+		{"processing-failed", false, false, []string{msgid}, history.CasePass, msgid, history.CaseDupes, nil, 439, true, false},
+		{"processing-temporary", false, false, []string{msgid}, history.CasePass, msgid, history.CaseRetry, temporary, 400, true, true},
+		{"processing-rejected", false, false, []string{msgid}, history.CasePass, msgid, history.CaseError, rejected, 439, true, false},
+		{"no-processor", true, false, []string{msgid}, history.CasePass, msgid, history.CasePass, nil, 500, false, false},
+		{"not-authenticated", false, true, []string{msgid}, history.CasePass, msgid, history.CasePass, nil, 480, false, false},
+		{"invalid-message-id", false, false, []string{"not-an-id"}, history.CasePass, msgid, history.CasePass, nil, 439, false, false},
+		{"missing-argument", false, false, nil, history.CasePass, msgid, history.CasePass, nil, 501, false, false},
+		{"two-arguments", false, false, []string{msgid, "extra"}, history.CasePass, msgid, history.CasePass, nil, 501, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			proc := &wiringTestProcessor{checkResult: tc.check, processResult: tc.processResult}
+			proc := &wiringTestProcessor{checkResult: tc.check, processResult: tc.processResult, processErr: tc.processErr}
 			var ap ArticleProcessor = proc
 			if tc.noProcessor {
 				ap = nil
 			}
-			c, client := wiringTestConn(t, ap, true)
+			c, client := wiringTestConn(t, ap, !tc.noAuth)
 			done := wiringTestRun(t, func() error { return c.handleTakeThis(tc.args) })
 			// streaming: the article follows the command without waiting.
 			// net.Pipe is unbuffered, so the write only completes if the server consumes the article.
@@ -274,10 +310,19 @@ func TestWiringTakeThis(t *testing.T) {
 			if code != tc.want {
 				t.Fatalf("got %q, want %d", line, tc.want)
 			}
-			if (code == 239 || code == 439) && !strings.Contains(line, msgid) {
-				t.Fatalf("reply %q does not carry the message-id", line)
+			// RFC 4644 §2.5.2: the replies to TAKETHIS carry the message-id argument
+			if len(tc.args) > 0 && code != 400 {
+				if f := strings.Fields(line); len(f) < 2 || f[1] != tc.args[0] {
+					t.Fatalf("reply %q does not carry the message-id %q", line, tc.args[0])
+				}
 			}
 			wiringTestWait(t, done, "TAKETHIS")
+			if tc.wantClosed {
+				// closeAfterReply closed the server end: the client reads EOF
+				if line, err := client.ReadLine(); err == nil {
+					t.Fatalf("unexpected line %q after the 400 (connection not closed)", line)
+				}
+			}
 			wiringTestNoExtraReply(t, c, client)
 			processed := proc.processedArticles()
 			if tc.wantProcessed != (len(processed) == 1) {
