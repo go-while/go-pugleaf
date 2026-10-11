@@ -546,20 +546,18 @@ func (sq *SQ3batch) getOrCreateInterfaceSlice() []interface{} {
 	return make([]interface{}, 0, sq.maxDBbatch*3) // up to 3x for reply count updates
 }
 
-// processNewsgroupBatch processes a single newsgroup's batch in the correct sequential order:
-// 1. Complete article insertion (unified overview + article data)
-// 2. Threading processing (relationships)
-// 3. Thread cache updates
+// query_updateNewsgroupsStats adds a batch's newly inserted articles to an existing newsgroups
+// row. It never inserts: a row created here would have a NULL hierarchy (A-db-1) and would
+// resurrect deleted or unknown groups (SEC-2). Arguments: inserted count, max article number
+// (twice), the latest article date as "2006-01-02 15:04:05" (three times; "" keeps updated_at,
+// and an older date never moves it backwards, A-db-4), newsgroup name.
 const query_updateNewsgroupsStats = `
-				INSERT INTO newsgroups (name, message_count, last_article, updated_at)
-				VALUES (?, ?, ?, ?)
-				ON CONFLICT(name) DO UPDATE SET
-					message_count = message_count + excluded.message_count,
-					last_article = CASE
-						WHEN excluded.last_article > last_article THEN excluded.last_article
-						ELSE last_article
-					END,
-					updated_at = excluded.updated_at`
+				UPDATE newsgroups SET
+					message_count = COALESCE(message_count, 0) + ?,
+					last_article = CASE WHEN ? > COALESCE(last_article, 0) THEN ? ELSE last_article END,
+					updated_at = CASE WHEN ? = '' THEN updated_at
+					                  WHEN updated_at IS NULL OR ? > updated_at THEN ? ELSE updated_at END
+				WHERE name = ?`
 
 // batchGroupDBAttempts is how often processNewsgroupBatch opens a group database that
 // fails to initialize before it drops the drained articles.
@@ -728,6 +726,10 @@ func updateNewsgroupStatsWithRetry(exec func() error, every time.Duration, what 
 	}
 }
 
+// processNewsgroupBatch processes a single newsgroup's batch in the correct sequential order:
+// 1. Complete article insertion (unified overview + article data)
+// 2. Threading processing (relationships)
+// 3. History, msgid cache and newsgroup stats updates
 func (sq *SQ3batch) processNewsgroupBatch(task *BatchTasks) {
 	startTime := time.Now()
 	task.Mux.Lock()
@@ -776,6 +778,10 @@ drainChannel:
 	insertGrace := sq.retryShutdownGrace()
 	insertClock := batchShutdownClock{grace: insertGrace}
 	insertAttempts := 0
+	// inserted collects the articles whose row PHASE 1 actually inserted (A-db-3). It lives
+	// outside retry1, so a retry after a commit whose follow-up SELECT failed still knows
+	// which rows it inserted: their INSERT OR IGNORE is a no-op the second time.
+	inserted := make(map[*models.Article]struct{}, len(batches))
 retry1:
 	// Get database connection for this newsgroup. The articles are already drained out
 	// of BATCHchan, so giving up here loses them: wait while the group database is only
@@ -792,7 +798,7 @@ retry1:
 	}
 
 	// PHASE 1: Insert complete articles (overview + article data unified) and set article numbers directly on batches
-	if err := sq.batchInsertOverviews(*task.Newsgroup, batches, groupDB, task.Newsgroup); err != nil {
+	if err := sq.batchInsertOverviews(*task.Newsgroup, batches, groupDB, task.Newsgroup, inserted); err != nil {
 		if groupDB != nil {
 			sq.forceCloseGroupDB(groupDB)
 			log.Printf("[BATCH] processNewsgroupBatch Failed1 to process batch for group '%s': %v groupDB='%#v'", *task.Newsgroup, err, groupDB)
@@ -808,18 +814,25 @@ retry1:
 		goto retry1
 	}
 
-	// Update all articles with their assigned numbers for subsequent processing
-	// and compute max article number for newsgroup stats
+	// Compute max article number for newsgroup stats. Only inserted articles got a number;
+	// ignored duplicates (message-id already in the group, or twice in this batch) keep 0.
 	var maxArticleNum int64 = 0
+	duplicates := 0
 	for _, article := range batches {
 		if article == nil {
 			continue
+		}
+		if _, ok := inserted[article]; !ok {
+			duplicates++
 		}
 		article.Mux.RLock()
 		if article.ArticleNums[task.Newsgroup] > maxArticleNum {
 			maxArticleNum = article.ArticleNums[task.Newsgroup]
 		}
 		article.Mux.RUnlock()
+	}
+	if duplicates > 0 {
+		log.Printf("[OVB-BATCH] group '%s': %d duplicate message-ids ignored", *task.Newsgroup, duplicates)
 	}
 
 	// PHASE 2: Process threading for all articles (reusing the same DB connection)
@@ -857,10 +870,11 @@ retry1:
 	//start = time.Now()
 	// The articles are committed and numbered now: record them in the history index.
 	// The group's main-DB ID is resolved once per batch.
+	// GetIntakeGroup scans NULL-safe, so a row with a NULL hierarchy still resolves (INT-6).
 	var historyGroupID int64
 	historyOK := false
 	if sq.proc != nil {
-		if ng, ngErr := sq.db.MainDBGetNewsgroup(*task.Newsgroup); ngErr != nil || ng == nil {
+		if ng, ngErr := sq.db.GetIntakeGroup(*task.Newsgroup); ngErr != nil || ng == nil {
 			log.Printf("[BATCH] processNewsgroupBatch cannot resolve newsgroup ID for '%s', skipping history adds for %d articles: %v", *task.Newsgroup, len(batches), ngErr)
 		} else {
 			historyGroupID = ng.ID
@@ -872,22 +886,33 @@ retry1:
 		if article == nil {
 			continue
 		}
-		if historyOK {
-			// read under the article lock and release it before touching the item or history (AddArticle may block)
-			article.Mux.RLock()
-			messageID := article.MessageID
-			committed := article.ArticleNums[task.Newsgroup] > 0
-			msgIdItem := article.MsgIdItem
-			article.Mux.RUnlock()
-			if committed && messageID != "" {
-				sq.proc.AddArticleToHistory(messageID, historyGroupID)
-				if msgIdItem != nil {
-					msgIdItem.Mux.Lock()
-					msgIdItem.Response = history.CaseDupes
-					msgIdItem.CachedEntryExpires = time.Now().Add(history.CachedEntryTTL)
-					msgIdItem.Mux.Unlock()
-				}
+		// read under the article lock and release it before touching the item or history (AddArticle may block)
+		article.Mux.RLock()
+		messageID := article.MessageID
+		committed := article.ArticleNums[task.Newsgroup] > 0
+		msgIdItem := article.MsgIdItem
+		dateSent := article.DateSent
+		article.Mux.RUnlock()
+		if messageID != "" {
+			// Committed or ignored as a duplicate, the article is stored in this group either
+			// way: the msgid item must leave CaseLock even when the history add cannot run
+			// (INT-6, A-db-3).
+			if msgIdItem != nil {
+				msgIdItem.Mux.Lock()
+				msgIdItem.Response = history.CaseDupes
+				msgIdItem.CachedEntryExpires = time.Now().Add(history.CachedEntryTTL)
+				msgIdItem.Mux.Unlock()
 			}
+			// An ignored duplicate is already in history (or was added by the batch that
+			// stored it): no re-add (A-db-3).
+			if historyOK && committed {
+				sq.proc.AddArticleToHistory(messageID, historyGroupID)
+			}
+		}
+		// Every committed article counts for updated_at, also one still referenced by other
+		// groups (A-db-4: a batch of crossposts used to leave latestDate zero).
+		if committed && dateSent.After(latestDate) {
+			latestDate = dateSent
 		}
 		article.Mux.Lock()
 		if len(article.NewsgroupsPtr) > 0 {
@@ -911,9 +936,6 @@ retry1:
 		article.MessageID = ""
 		article.Subject = ""
 		article.FromHeader = ""
-		if article.DateSent.After(latestDate) {
-			latestDate = article.DateSent
-		}
 		article.DateSent = time.Time{}
 		article.DateString = ""
 		article.References = ""
@@ -939,25 +961,41 @@ retry1:
 		if latestDate.After(time.Now().UTC()) {
 			latestDate = time.Now().UTC()
 		}
-		//lastUpdate = time.Now().UTC().Format("2006-01-02 15:04:05")
-		statsWhat := fmt.Sprintf("'%s' (+%d articles, max_article=%d)", *task.Newsgroup, len(batches), maxArticleNum)
-		err = updateNewsgroupStatsWithRetry(func() error {
-			return RetryableTransactionExec(sq.db.mainDB, func(tx *sql.Tx) error {
-				_, txErr := tx.Exec(query_updateNewsgroupsStats,
-					*task.Newsgroup, len(batches), maxArticleNum, latestDate.UTC().Format("2006-01-02 15:04:05"))
-				return txErr
-			})
-		}, batchStatsRetryEvery, statsWhat, sq.db.IsDBshutdown, sq.retryShutdownGrace())
+		// Only newly inserted rows count (A-db-3). Nothing inserted means nothing changed.
+		if len(inserted) > 0 {
+			// "" keeps updated_at (A-db-4: a zero latestDate must never write 0001-01-01).
+			latestStr := ""
+			if !latestDate.IsZero() {
+				latestStr = latestDate.UTC().Format("2006-01-02 15:04:05")
+			}
+			var statsRows int64
+			statsWhat := fmt.Sprintf("'%s' (+%d articles, max_article=%d)", *task.Newsgroup, len(inserted), maxArticleNum)
+			err = updateNewsgroupStatsWithRetry(func() error {
+				return RetryableTransactionExec(sq.db.mainDB, func(tx *sql.Tx) error {
+					res, txErr := tx.Exec(query_updateNewsgroupsStats,
+						len(inserted), maxArticleNum, maxArticleNum, latestStr, latestStr, latestStr, *task.Newsgroup)
+					if txErr != nil {
+						return txErr
+					}
+					n, raErr := res.RowsAffected()
+					if raErr != nil {
+						return raErr
+					}
+					statsRows = n
+					return nil
+				})
+			}, batchStatsRetryEvery, statsWhat, sq.db.IsDBshutdown, sq.retryShutdownGrace())
 
-		if err != nil {
-			log.Printf("[BATCH] processNewsgroupBatch Failed to update newsgroup stats for '%s': %v", *task.Newsgroup, err)
-			return
-		}
-		//log.Printf("[BATCH] processNewsgroupBatch Updated newsgroup '%s' stats: +%d articles, max_article=%d", *task.Newsgroup, increment, maxArticleNum)
-
-		// Update hierarchy cache with new stats instead of invalidating
-		if sq.db.HierarchyCache != nil {
-			sq.db.HierarchyCache.UpdateNewsgroupStats(*task.Newsgroup, len(batches), maxArticleNum)
+			if err != nil {
+				log.Printf("[BATCH] processNewsgroupBatch Failed to update newsgroup stats for '%s': %v", *task.Newsgroup, err)
+				return
+			}
+			if statsRows == 0 {
+				log.Printf("[BATCH] processNewsgroupBatch newsgroup '%s' has no newsgroups row: %d stored articles not counted (rows are never created by the batch writer)", *task.Newsgroup, len(inserted))
+			} else if sq.db.HierarchyCache != nil {
+				// Update hierarchy cache with new stats instead of invalidating
+				sq.db.HierarchyCache.UpdateNewsgroupStats(*task.Newsgroup, len(inserted), maxArticleNum)
+			}
 		}
 	}
 	if err != nil {
@@ -967,14 +1005,14 @@ retry1:
 }
 
 // batchInsertOverviews - now sets ArticleNum directly on each batch's Article and reuses the GroupDB connection
-func (sq *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Article, groupDB *GroupDB, taskNewsgroup *string) error {
+func (sq *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Article, groupDB *GroupDB, taskNewsgroup *string, inserted map[*models.Article]struct{}) error {
 	if len(batches) == 0 {
 		return fmt.Errorf("no batches to process for group '%s'", newsgroup)
 	}
 
 	if len(batches) <= sq.maxDBbatch {
 		// Small batch - process directly
-		if err := sq.processOverviewBatch(groupDB, batches, taskNewsgroup); err != nil {
+		if err := sq.processOverviewBatch(groupDB, batches, taskNewsgroup, inserted); err != nil {
 			log.Printf("[OVB-BATCH] Failed to process small batch for group '%s': %v", newsgroup, err)
 			return fmt.Errorf("failed to process small batch for group '%s': %w", newsgroup, err)
 		}
@@ -988,7 +1026,7 @@ func (sq *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Art
 			end = len(batches)
 		}
 
-		if err := sq.processOverviewBatch(groupDB, batches[i:end], taskNewsgroup); err != nil {
+		if err := sq.processOverviewBatch(groupDB, batches[i:end], taskNewsgroup, inserted); err != nil {
 			log.Printf("[OVB-BATCH] Failed to process chunk %d-%d for group '%s': %v", i, end, newsgroup, err)
 			return fmt.Errorf("failed to process chunk %d-%d for group '%s': %w", i, end, newsgroup, err)
 		}
@@ -1000,7 +1038,7 @@ const query_processOverviewBatch = `INSERT OR IGNORE INTO articles (message_id, 
 const query_processOverviewBatch2 = `SELECT message_id, article_num FROM articles WHERE message_id IN (`
 
 // processSingleUnifiedArticleBatch handles a single batch that's within SQLite limits
-func (sq *SQ3batch) processOverviewBatch(groupDB *GroupDB, batches []*models.Article, taskNewsgroup *string) error {
+func (sq *SQ3batch) processOverviewBatch(groupDB *GroupDB, batches []*models.Article, taskNewsgroup *string, inserted map[*models.Article]struct{}) error {
 	// Get timestamp once for the entire batch instead of per article
 	importedAt := time.Now()
 
@@ -1018,11 +1056,14 @@ func (sq *SQ3batch) processOverviewBatch(groupDB *GroupDB, batches []*models.Art
 	}
 	defer stmt.Close()
 
-	// Execute the prepared statement for each batch item
+	// Execute the prepared statement for each batch item. INSERT OR IGNORE skips a message-id
+	// that is already stored (or appeared earlier in this batch): only rows that were really
+	// inserted are recorded, and only those get an article number below (A-db-3).
+	newRows := make([]*models.Article, 0, len(batches))
 	for _, article := range batches {
 		// Format DateSent as UTC string to avoid timezone encoding issues
 
-		_, err := stmt.Exec(
+		res, err := stmt.Exec(
 			article.MessageID,  // message_id
 			article.Subject,    // subject
 			article.FromHeader, // from_header
@@ -1041,11 +1082,22 @@ func (sq *SQ3batch) processOverviewBatch(groupDB *GroupDB, batches []*models.Art
 		if err != nil {
 			return fmt.Errorf("failed to execute insert for message_id %s: %w", article.MessageID, err)
 		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to read rows affected for message_id %s: %w", article.MessageID, err)
+		}
+		if affected == 1 {
+			newRows = append(newRows, article)
+		}
 	}
 
 	// Commit the transaction
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	// Recorded only after the commit: a rolled-back insert must not count as inserted.
+	for _, article := range newRows {
+		inserted[article] = struct{}{}
 	}
 
 	// Single batch SELECT query to get all article numbers at once
@@ -1078,7 +1130,12 @@ func (sq *SQ3batch) processOverviewBatch(groupDB *GroupDB, batches []*models.Art
 	forBatches:
 		for _, article := range batches {
 			loops++
-			// Assign article numbers directly to batch Articles
+			// Assign article numbers directly to batch Articles. A matching article that was
+			// not inserted (an ignored duplicate) keeps number 0 and the scan goes on, so a
+			// later inserted copy with the same message-id still gets the number (A-db-3).
+			if _, ok := inserted[article]; !ok {
+				continue
+			}
 			article.Mux.Lock()
 			if article.MessageID == messageID {
 				if article.ArticleNums[taskNewsgroup] == 0 {
