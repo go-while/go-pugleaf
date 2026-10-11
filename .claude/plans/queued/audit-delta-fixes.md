@@ -10,13 +10,18 @@
     arbitrary row; the NNTP hide predicate (its decision 2) would also differ from D2 here. It edits
     `queries.go` functions (`GetOverviewsRange`, `GetHeaderFieldRange`, one line of `GetArticleByNum`) next to the
     functions `adf-db-readers` edits: merged first, the hunks don't collide.
-  - `nntp-intake-injection` (`db_batch.go`). It rewrites `query_updateNewsgroupsStats`, PHASE 3 and the stats block of
-    `db_batch.go`; `adf-db-batch` edits other functions of the same file and would conflict textually, and INT-5's
+  - `nntp-intake-injection` (`db_batch.go`). Its S2 owns `query_updateNewsgroupsStats`, the PHASE 1 number loop
+    (`:794-823`), `batchInsertOverviews` (`:969-1001`, incl. `query_processOverviewBatch` `:999`),
+    `processOverviewBatch` (`:1003-1103`), PHASE 3 and the stats block of `db_batch.go`; `adf-db-batch` changes only
+    the `query_processOverviewBatch` constant on top of intake's version plus functions intake doesn't touch, and
+    would conflict textually if run first, and INT-5's
     numbering assumes the stats statement is already an `UPDATE` that never inserts. It also provides
     `common.FormatNewsDate`, `common.WireArticleSize` and `processor.ParseNNTPDateStrict` (used by `adf-web-post` and
     `adf-ops-recover`: build fails without them), fixes A-intake-5 (web crossposts) and A-tools-4 (per-run queue),
-    and is the receiver of the A-tools-1 hand-off below.
-  - `nntp-client-transfer` (`cmd/history-rebuild/main.go` pprof lines). Its hunk at `:12,:75,:97-104` is adjacent to
+    and implements the agreed A-tools-1 bound (hand-off 1 below). It no longer edits `cmd/web/main.go`
+    (final decision (ii)).
+  - `nntp-client-transfer` (`cmd/history-rebuild/main.go` pprof lines; it also adds SIGTERM to history-rebuild and
+    nntp-transfer, A-ops-3d/f, its step 5a). Its hunk at `:12,:75,:97-104` is adjacent to
     this plan's `-useshorthashlen` hunk (`:74,:79`); applied earlier, one of the two would not apply. Its
     `providerLabel()` nil guard (A-tools-3 client half) is what keeps a `BackendConfig` without `Provider` from
     panicking; this plan adds the fetcher half. Its e2e E14 expects a `-race` transfer binary, which this plan's
@@ -73,7 +78,7 @@ each sub-id is in exactly one slice.
 | A-web-2 | `cache/sanitized_cache.go:33,62-65` (`maxEntries` stored only), `:181,246,302` (inserts), `:420` (`evictOldest`, no caller), `:461` (`cleanup`) | `-maxsanartcache` is never enforced: a crawler keeps 30 min of bodies resident. | medium | adf-web-cache |
 | A-web-3 | `cache/sanitized_cache.go:78-159` vs `:181-243` | `GetField` reads the fields after unlocking `article.mux`; race detector hit. | medium | adf-web-cache |
 | A-web-4 | `models/sanitizing.go:209-211,464-477,634-636` | `StripDangerousHTML` overwrites Subject/From/Body/Date/References of the shared cached `*Article`. | medium | adf-web-cache |
-| A-web-1 | `web/web_articlePage.go:22,94`, `web/web_sectionsPage.go:291,343`, `web/web_apiHandlers.go:448`, `web/web_threadTreePage.go:28,100,174`, `database/tree_view_api.go:152,176` | Hidden (`hide>0`) articles stay readable anonymously by number, message-id, section routes, preview, tree page and `/api/thread-tree`. | medium | adf-web-hide |
+| A-web-1 | `web/web_articlePage.go:22,94`, `web/web_sectionsPage.go:291,343`, `web/web_apiHandlers.go:237,267,448` (token API `getArticle`/`getArticleByMessageId`, preview), `web/web_sitePostPage.go:86-100` (reply prefill), `web/web_threadTreePage.go:28,100,174`, `database/tree_view_api.go:152,176` | Hidden (`hide>0`) articles stay readable anonymously by number, message-id, section routes, preview, tree page, `/api/thread-tree`, the token API and the reply prefill. | medium | adf-web-hide |
 | A-web-11 | `web/webserver_core_routes.go:526`, `web/web_threadTreePage.go:28-96` (`Cache-Control: public` `:95`) | `/api/thread-tree` is outside `requireAPIEnabled`, returns raw From and hidden articles, cacheable publicly even for admin responses. | low | adf-web-hide |
 | A-web-15 | `database/queries.go:890,917` (select lists), `web/templates/article.html:86,92,100` | `Article.Spam`/`Hide` are never loaded on the article page (counters always 0). | low | adf-web-hide |
 
@@ -89,10 +94,10 @@ each sub-id is in exactly one slice.
 | OPS-1a | `database/db_init.go:139-148` (`log.Fatal` euid `:141`; `INIT` set before anything can fail `:148`), `:161-174` (mainDB not closed on error), `:206,212,224,229` (`log.Fatalf`), `:185` (`NewGHmap` → `GHmapCron` re-spawns forever, `groups_hashmap.go:22-27,82-108`), `sections_cache.go:18-24,41-66` (`CronClean` endless), `database.go:139` (`Shutdown` never resets `INIT`), `db_migrate.go:25,384,423` (`migratedDBsCache`) | Library code kills the process; a failed open blocks every later open; background loops never stop; the migration cache outlives the DB. | medium | adf-db-lifecycle |
 | A-db-6 | `database/db_migrate.go:376-389,421-425` | `migratedDBsCache` keyed by group name only: a re-created group DB skips its schema (`no such table: articles`). | medium | adf-db-lifecycle |
 | A-db-12 | `database/groups_hashmap.go:141-151` (`:150`) | `GetGroupFromHash` dereferences nil for an unknown hash (no caller). | low | adf-db-lifecycle |
-| INT-5 (number reuse) | `database/migrations/0001_single_db_schema.sql:11-12` (`article_num INTEGER PRIMARY KEY`, no AUTOINCREMENT); insert `database/db_batch.go:999` (`query_processOverviewBatch`), `:1002-1048`; `cmd/expire-news/main.go:560,603,620`; `database/queries.go:3060` (`ResetNewsgroupData`, `sqlite_sequence` reset `:3122-3123`) | After the top-numbered articles are deleted, new articles reuse their numbers and inherit `thread_cache`, `cached_trees`, `tree_stats`, main-DB `spam`/`user_spam_flags` rows and cached bodies. | high | adf-db-batch |
+| INT-5 (number reuse) | `database/migrations/0001_single_db_schema.sql:11-12` (`article_num INTEGER PRIMARY KEY`, no AUTOINCREMENT); insert `database/db_batch.go:999` (`query_processOverviewBatch`; the surrounding `batchInsertOverviews`/`processOverviewBatch` are intake-owned); `cmd/expire-news/main.go:560,603,620`; `database/queries.go:3060` (`ResetNewsgroupData`, `sqlite_sequence` reset `:3122-3123`) | After the top-numbered articles are deleted, new articles reuse their numbers and inherit `thread_cache`, `cached_trees`, `tree_stats`, main-DB `spam`/`user_spam_flags` rows and cached bodies. | high | adf-db-batch |
 | A-db-9 | `database/db_batch.go:1758-1812` (`BatchDivider` adds in steps of `maxDBbatch` `:1803-1810`), `:766` (subtract per batch) | `queued` drifts negative, so the `MaxQueued` brake (`:1787`) never engages (the brake A-tools-1 relies on). | low | adf-db-batch |
 | A-db-5 | `database/db_batch.go:166-184` (`ExpireCache`), `:187-210` (`GetNewsgroupPointer`) | Tasks still processing are expired; pointers change under readers (root cause of A-db-2). | medium | adf-db-batch |
-| OPS-1d | `database/db_batch.go:1753` (`BatchDividerChan` package global), `:1758` (`BatchDivider` endless), `:166-184` (`ExpireCache` re-spawns itself), `:1570-1573` (`StartOrch` starts the divider) | Process-global channel shared by every `Database`; loops never stop. | (OPS-1) | adf-db-batch |
+| OPS-1d | `database/db_batch.go:1753` (`BatchDividerChan` package global), `:1758` (`BatchDivider` endless), `:166-184` (`ExpireCache` re-spawns itself), `:1570-1573` (`StartOrch` starts the divider), `:273` (`CheckNoMoreWorkInMaps` reads it) | Process-global channel shared by every `Database`; loops never stop. | (OPS-1) | adf-db-batch |
 
 **Tools and processor**
 | ID | Where (2fb7741) | Defect | Sev | Slice |
@@ -110,14 +115,14 @@ each sub-id is in exactly one slice.
 | A-ops-1 | `cmd/recover-db/main.go:36` (`-db`), `:44` (`-data`), `:50-57` (usage), `:69-72` (stat `-db`), `:80` (opens `-data`), `:126` (prints `-db`) | Checks and prints `-db`, opens `-data` (default `./data`); destructive modes ask nothing. | high | adf-ops-recover |
 | A-ops-5 | `cmd/recover-db/main.go:819-845` (ParseFailed branch, `continue` commented out), `:849-858`, `:877` (`hide = 0, spam = 0`) | `-rewritedates` un-hides spam and writes the parser's fallback date. | medium | adf-ops-recover |
 | OPS-1f | `cmd/recover-db/main.go:86` (`defer db.Shutdown()`), `:169,186,197,208,305,671,674` (`os.Exit`) | Every mode exits without the teardown. | (OPS-1) | adf-ops-recover |
-| OPS-4d | `run_web.sh:4`, `run_web_ssl.sh:3` (`-update-descr` undefined), `scripts.sh:1` (`rm data/history -r`), `:6-7` (`-update-newsgroup-activity` undefined), `:13-14` (`fix-references -dry-run`), `go_run_web.sh:1`, `run_test.sh:1`, `build_TestMsgIdItemCache.sh:3` | Scripts call undefined flags, missing files or packages. | (OPS-4) | adf-ops-scripts |
+| OPS-4d | `run_web.sh:4`, `run_web_ssl.sh:3` (`-update-descr` undefined), `scripts.sh:1` (`rm data/history -r`), `:6-7` (`-update-newsgroup-activity` undefined), `:13-14` (`fix-references -dry-run`), `go_run_web.sh:1`, `run_test.sh:1`, `build_TestMsgIdItemCache.sh:3`, `manual_sqlite_migration_0002.sh:6-7` and `manual_sqlite_migration_0008.sh:5` (`migrations/…sql` paths that don't exist at the root; the 0002 script points at the 0008 file) | Scripts call undefined flags, missing files or packages. | (OPS-4) | adf-ops-scripts |
 | OPS-4e | `build_{fix-references,fix-thread-activity,history-rebuild,import_flat-files,merge-active,merge-descriptions,nntp-transfer,nntpmgr,post-queue,tcp2tor,webserver}.sh` (e.g. `build_webserver.sh:3`) | 11 build scripts build with `-race`, including the deployed web server. | (OPS-4) | adf-ops-scripts |
 | OPS-4f, A-ops-2, A-ops-15 | `.github/workflows/release.yml:19-26` (matrix on `ubuntu-latest`), `:33-35` (`go-version: '1.25.3'`), `:46-47,52` (dispatch input interpolated into shell), `:106-109` (cross build with cgo off), `:161-163` (`release` needs all) | No vet/test; 4 of 5 cross builds fail (cgo-only `go-sqlite3` symbols in `internal/history`), so no release is created; injection pattern. | medium | adf-ops-scripts |
 | OPS-4c | `cmd/tcp2tor/main.go:102` (`-timeout`), `:177,252,551` (stored, never read), `:503` (`timeoutSec` unused), `:514,519,626,628` (`proxy.Direct`) | `-timeout` has no effect; dials and SOCKS handshakes have no deadline. | (OPS-4) | adf-ops-tcp2tor |
 | OPS-2b | `nntp/nntp-peering-pattern_test.go:17` (hardcoded `/home/fed/...`), `:409-410` (writes `active.out` in the cwd), `:437,520` (read it), `:557-558,607-608` (write `analysis_*.txt`) | Tests depend on files of earlier runs and write into the source tree. | (OPS-2) | adf-ops-misc |
 | OPS-4a | `cmd/history-rebuild/main.go:74,79` | `-useshorthashlen` is a silent no-op. | (OPS-4) | adf-ops-misc |
 | A-ops-3c, A-ops-3e | `cmd/expire-news/main.go:146`, `cmd/post-queue/main.go:74` | SIGTERM not handled. | (A-ops-3) | adf-ops-misc |
-| OPS-2a | `cmd/web/main.go:31-32` (`withnntp`, `withfetch`), `:28` (`isleep`), `:105-107` (flags commented out), `:113-116,150,154`, `:428-473` (dead NNTP block) | The embedded NNTP server can never start; four NNTP flags are parsed and ignored. | low | adf-web-cmd |
+| OPS-2a | `cmd/web/main.go:31-32` (`withnntp`, `withfetch`), `:28` (`isleep`), `:105-107` (flags commented out), `:113-116,150,154`, `:428-473` (dead NNTP block, incl. `:448`) | The embedded NNTP server can never start; four NNTP flags are parsed and ignored. | low | adf-web-cmd |
 | OPS-4b | `cmd/web/main.go:102,342-361`, `cmd/web/main_functions.go:656-657`, `database/database.go:296-300` | `-useshorthashlen` has no effect but a value outside 2..7 aborts the first start; the processor gets the CLI value. | (OPS-4) | adf-web-cmd |
 | A-ops-3a | `cmd/web/main.go:486-487` | SIGTERM ends the web server without any shutdown (exit 143). | medium | adf-web-cmd |
 | A-ops-4 | `cmd/web/main.go:305-315`, `cmd/web/main_functions.go:1015-1099` (`:1040-1044`, `:1071-1079`) | `-disable-active` disables every group when the file has no 4-field lines. | medium | adf-web-cmd |
@@ -166,8 +171,8 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
   write `updated_at = MAX(updated_at, excluded)` skipping a zero time.
 - **A-tools-5b** (progress stored before commit): `processor/proc_DLArt.go:316-322` is intake-owned; needs a
   commit-acknowledged high-water mark from the batch writer (a design, not a fix).
-- **A-ops-3d** (`cmd/history-rebuild/main.go:161`) and **A-ops-3f** (`cmd/nntp-transfer/main.go:347`): files owned by
-  `nntp-client-transfer` (history-rebuild beyond the `-useshorthashlen` hunk); exact one-line change handed off below.
+- **A-ops-3d** (`cmd/history-rebuild/main.go:161`) and **A-ops-3f** (`cmd/nntp-transfer/main.go:347`): done by
+  `nntp-client-transfer` (step 5a); closed here after the wave-0 grep (hand-off 3).
 - **OPS-1, parts in files other plans own or the code owner froze:** `history/history.go:469` (`beginTx` `log.Fatalf`)
   and `:498` (`os.Exit(1)`, marked "DO NOT TOUCH THIS LINE OF CODE" by the author: a deliberate fail-stop so that a
   failed history write is never acknowledged; changing it is a user decision, Q3); `config/config.go:548`
@@ -183,51 +188,32 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
   (K4 of every plan); user decision (Q4).
 
 ### Cross-plan hand-offs (the orchestrator relays them; this plan does not edit those files)
-1. **A-tools-1 → `nntp-intake-injection` slice S3 (`intake-processor`)**, which owns `internal/processor/threading.go`
-   and the new `internal/processor/intake.go`. Why the bound can't live in a database file: the call site spawns the
+1. **A-tools-1 → `nntp-intake-injection` slice S3 (`intake-processor`)** (final cross-plan decision (i); the intake
+   plan is amended by the orchestrator). Why the bound can't live in a database file: the call site spawns the
    goroutine before `BatchCaptureOverviewForLater` runs, so any wait inside it only parks more goroutines; and the
    call can't simply become synchronous, because `processArticle` holds `article.Mux` for its whole body
    (`threading.go:67-68`) while `BatchCaptureOverviewForLater` and `BatchDivider` lock that same mutex
-   (`db_batch.go:157`, `:1769`): a direct call deadlocks. Exact change:
-   - `intake.go` (new names, add to its K2): 
-     ```go
-     // captureLimiter bounds the goroutines parked in BatchCaptureOverviewForLater (A-tools-1).
-     type captureLimiter struct{ slots chan struct{} }
-     func newCaptureLimiter(n int) *captureLimiter            // n < 1 → 1
-     // acquire returns true when a slot was taken. wait=false never blocks (overflow allowed, counted,
-     // one log line per minute "[INTAKE] capture limiter full: %d overflow"). wait=true blocks until a slot is
-     // free, polling stop() every 100 ms; when stop() reports true it returns false (fall back to unbounded).
-     func (l *captureLimiter) acquire(wait bool, stop func() bool) bool
-     func (l *captureLimiter) release()                          // non-blocking receive
-     var MaxCaptureInFlight = 2048                               // read once, at first use
-     var defaultCaptureLimiter *captureLimiter                   // built with sync.Once from MaxCaptureInFlight
-     ```
-   - `threading.go:256` becomes:
-     ```go
-     acquired := captureLimit().acquire(bulkmode, proc.DB.IsDBshutdown)
-     go func(ptr *string, acquired bool) {
-     	if acquired {
-     		defer captureLimit().release()
-     	}
-     	proc.DB.Batch.BatchCaptureOverviewForLater(ptr, article)
-     }(newsgroupPtr, acquired)
-     ```
-     `wait` is `bulkmode` only: bulk callers (fetcher, rslight, web post queue) store into exactly one group per
-     article (`threading.go:121`), so a producer blocked in `acquire` holds only its own, not yet captured,
-     article's mutex and every slot holder can finish. Non-bulk intake (up to 9 crossposted groups of one article,
-     same mutex held) never blocks: it takes a slot when one is free and overflows otherwise.
-   - Test `TestIntakeProcCaptureLimiter` (no DB): `newCaptureLimiter(2)`: two `acquire(true, …)` succeed, a third
-     with `wait=false` returns false at once, with `wait=true` blocks until `release()`, and returns false within
-     200 ms once `stop` reports true; no goroutine left.
-   - This plan's part: A-db-9 in `adf-db-batch` (the divider's `MaxQueued` brake becomes real), and wave 0 checks
-     `grep -n 'captureLimit()' internal/processor/threading.go`. When the hand-off was not applied, A-tools-1 is
-     reported as still open in the Outcome (this plan never edits `threading.go`).
+   (`db_batch.go:157`, `:1769`). Agreed spec (implemented in intake's `threading.go` and new `intake.go`):
+   - a `captureLimiter` (bounded slot channel, `MaxCaptureInFlight`) in `processor/intake.go`;
+   - `processArticle` takes **one slot per article at the top, before `article.Mux.Lock()`**, in bulk and non-bulk
+     mode alike (no lock is held while waiting, so there is no lock cycle; NNTP intake gets back-pressure too). The
+     wait gives up when `proc.DB.IsDBshutdown()` reports true;
+   - every early return of `processArticle` (dupes, rejects, errors, nothing queued) releases the slot;
+   - the per-group `go … BatchCaptureOverviewForLater` calls become **one goroutine per article** that captures all
+     its groups in order and releases the slot after the last one;
+   - all `article.NewsgroupsPtr` entries are appended while `processArticle` still holds the lock (so the capture
+     goroutine's own append is a no-op).
+   This plan's part: A-db-9 in `adf-db-batch` (the divider's `MaxQueued` brake becomes real). Wave 0 and wave 3 check
+   `grep -n 'captureLimit' internal/processor/intake.go internal/processor/threading.go` (limiter defined and used in
+   `processArticle`) and that `grep -c 'go proc.DB.Batch.BatchCaptureOverviewForLater' internal/processor/threading.go`
+   prints 0 (no per-group goroutine left). When the amendment was not applied, A-tools-1 is reported as still open in
+   the Outcome (this plan never edits `threading.go`).
 2. **A-tools-4 → closed by `nntp-intake-injection` S5** (per-run `ReturnQ`). Wave 0 checks
    `grep -n 'func newDownloadRun' internal/processor/proc_DLArt.go`; if present the id is recorded as closed; if not,
    it is reported as open (the `-max-batch` clamp half moves to the optional `adf-opt-tools-misc`).
-3. **A-ops-3d / A-ops-3f → `nntp-client-transfer`** (or whichever plan next owns those files): in
-   `cmd/history-rebuild/main.go:161` and `cmd/nntp-transfer/main.go:347` change `signal.Notify(sigChan, os.Interrupt)`
-   to `signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)` (add the `syscall` import).
+3. **A-ops-3d / A-ops-3f → done by `nntp-client-transfer`** (its `cli-transfer` step 5a; final decision (iii)).
+   Closed here; wave 0 checks `grep -n 'syscall.SIGTERM' cmd/history-rebuild/main.go cmd/nntp-transfer/main.go`
+   (one hit each) and records them as closed, otherwise as open.
 4. **A-db-3, A-db-4 → `nntp-intake-injection`** (stats block / PHASE 3), notes in "Deferred".
 
 ### Decisions (behaviour changes; report them to the user at the end)
@@ -239,8 +225,11 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
   self). A nonce-based `script-src` is out of scope (Q5). The external hosts are the ones the templates load today
   (`base.html:35-36`, `base_chat.html:13,33-34`).
 - **D2 Hide semantics (A-web-1, AUDIT §11.2; same predicate as `nntp-server-hardening` decision 2).** `hide > 0` =
-  gone for everyone but admins: article by number, by message-id, both section variants and the preview answer
-  **404 "Article not found"** to non-admins; the tree page renders a hidden node as `[hidden article]` without
+  gone for everyone but admins: article by number, by message-id, both section variants, the preview and the token
+  API `GET /api/v1/groups/:group/articles/:articleNum` / `…/message/:messageId` (`getArticle`/`getArticleByMessageId`;
+  a token is not an admin, so token holders don't see hidden articles either) answer **404 "Article not found"** to
+  non-admins; the site-post reply prefill (`web_sitePostPage.go:86-100`) does not quote a hidden article for a
+  non-admin (the form opens without the quote and shows "Article not found"); the tree page renders a hidden node as `[hidden article]` without
   subject, author or link (children stay, the structure is public); `/api/thread-tree` returns hidden nodes without
   `overview`. Admins see everything, with the existing hide counter. `spam` (user flags) is not filtered.
 - **D3 `/api/thread-tree` (A-web-11).** Kept, behind `requireAPIEnabled` (like the other `/api/v1` routes), with
@@ -278,8 +267,10 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
   No second-signal force exit is added. History-rebuild and nntp-transfer are handed off (hand-off 3).
 - **D7 Cron gate (WEB-1, AUDIT §11.10).** `-edit-cronjobs` gates **create** and **enabling** (toggle of a disabled job).
   Disabling, stop and the already gated update/delete keep their behaviour: turning a job off is always allowed. The
-  create form and the "enable" button are hidden when the flag is off. The first-registered-user-becomes-admin rule
-  is not changed here (Q1).
+  create form and the "enable" button are hidden when the flag is off. This also gates enabling the default cron jobs
+  that migration 0021 ships disabled (Q8). Side effect of the A-web-20 fix: a job that was stopped while still
+  enabled is re-registered by the manager's reload within a minute (`cronReloadEvery`) and runs again at its next
+  scheduled time; to keep it off, disable it. The first-registered-user-becomes-admin rule is not changed here (Q1).
 - **D8 Web post headers (INT-7, AUDIT §11.5).** The stored block is, in this order: `Path: .POSTED!not-for-mail`
   (intake's bulk `syncStoredPath` rewrites the value to the prefixed `path` column), `From`, `Newsgroups`,
   `Subject`, `Date` (`common.FormatNewsDate(now)`), `Message-ID`, `References` (replies only), `MIME-Version`,
@@ -288,20 +279,24 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
   logging-data="<nonce>"` plus `; mail-complaints-to="<AbuseMail>"` when AbuseMail is set (same hash function as
   intake D6), `Lines`. **`X-pugleaf-Trace` is replaced by `Injection-Info`** (same data, standard header). No `Bytes:`
   header line; `article.Bytes = common.WireArticleSize(headLines, bodyLines)` (RFC 3977 §8.1.1). `DateString` equals
-  the `Date:` value.
+  the `Date:` value. The Message-ID comes from intake's `common.GenerateMessageID(processor.LocalNNTPHostname)` (D4 of
+  intake) instead of the web's own `generateMessageID` (deleted if it has no other caller).
 - **D9 NNTP user mapping (A-web-5).** Form value `0`/empty = no mapping (stored NULL). A web user may own at most one
   NNTP account: create/update refuse a mapping when `CountNNTPUsersByWebUserID(w) > 0` for another account. Existing
   rows mapped to user 1 are not migrated (an admin unmaps them in the form). Posting is updated independently of
-  maxconns. NNTP passwords set in the admin form: 8–72 bytes.
-- **D10 `cmd/web` NNTP flags (OPS-2a).** The embedded NNTP server is not restored (that is `cmd/nntp-server`). The dead
-  block and the `withnntp`/`withfetch`/`isleep` variables are deleted; `-nntptcpport`, `-nntptlsport`,
+  maxconns. Ranges aligned with `nntp-server-hardening`'s nntpmgr: passwords 10–72 bytes, maxconns 1–25.
+- **D10 `cmd/web` NNTP flags (OPS-2a).** **The embedded NNTP server is removed from `cmd/web`** (it could never start;
+  `cmd/nntp-server` is the NNTP binary). `adf-web-cmd` deletes the dead block `cmd/web/main.go:428-473` (incl. `:448`;
+  intake S4 no longer edits it, final decision (ii)) and the `withnntp`/`withfetch`/`isleep` variables; `-nntptcpport`, `-nntptlsport`,
   `-nntpcertfile`, `-nntpkeyfile` stay parsed (scripts pass them) and log one
   `[WEB]: -nntptcpport/-nntptlsport/-nntpcertfile/-nntpkeyfile are ignored: run cmd/nntp-server` line when set.
-- **D11 Build scripts (OPS-4e).** The 11 scripts build without `-race`; `RACE=1 ./build_<x>.sh` restores it
+- **D11 Build scripts (OPS-4e) — user question at the wave-1 boundary (Q9), asked before `adf-ops-scripts` merges.**
+  Proposed: the 11 scripts build without `-race`; `RACE=1 ./build_<x>.sh` restores it
   (`go build ${RACE:+-race} …`). Production binaries built through `build_ALL.sh` are therefore no longer race
   builds. Verifiers that want race detection (WSH E19, the client plan's E14, this plan's E19) build with `RACE=1`.
   `.claude/CLAUDE.md`'s "(output: `build/`, built with `-race`)" becomes "(output: `build/`; `RACE=1` for a `-race`
-  build)".
+  build)" — only on a yes. On a no, `adf-ops-scripts` leaves the 11 scripts and CLAUDE.md alone and OPS-4e is
+  recorded as declined.
 - **D12 Release workflow (A-ops-2, OPS-4f, A-ops-15).** One native runner per target with `CGO_ENABLED=1`
   (`ubuntu-24.04` linux/amd64, `ubuntu-24.04-arm` linux/arm64, `macos-14` darwin/arm64, `macos-13` darwin/amd64,
   `windows-latest` windows/amd64 with `shell: bash`), `fail-fast: false`, `go-version-file: go.mod`, a `test` job
@@ -311,11 +306,13 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
 - **D13 `recover-db` directories (A-ops-1).** `-db` becomes a deprecated alias of `-data`: given alone it sets the
   data dir; given together with a different `-data` the tool exits 2 before opening anything. "Data Path" prints the
   directory actually opened. The write modes (`-repair`, `-rebuild-threads`, `-rewritedates`,
-  `-reorder-by-datesent`) require an explicit `-data` and `-force`; without them the tool prints what it would do and
+  `-reorder-by-datesent`) require an explicit data directory (`-data`, or the deprecated `-db` alias given on the
+  command line, which counts as explicit) and `-force`; without them the tool prints what it would do and
   exits 2. `-rewritedates` updates only `date_sent` and skips (and reports) strings that `ParseNNTPDateStrict`
   rejects.
 - **D14 `-disable-active` (A-ops-4).** Refuse (exit 1, nothing changed) when the file yields no group names, or when
-  more than 50 % of the active groups would be disabled, unless `-disable-active-force`. `-disable-active-dry-run`
+  more than 50 % of the active groups would be disabled, unless `-disable-active-force` (the 50 % threshold is a
+  user question, Q10). `-disable-active-dry-run`
   prints the groups instead of updating. Lines with one field (a plain group list) are accepted.
 - **D15 Cursor-mode paging (FU:E12).** Cursor mode suppresses Previous and Next (`HasPrev = HasNext = false` in the
   cursor `PaginationInfo` literal); the cursor wiring that D1 of `web-db-followups` declined stays out of scope.
@@ -384,7 +381,7 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
     `w0NewUser`, `w0NewGroup`, `w0DB`, `w0Name`, `lo1CoreSetAPIEnabled`); package `database` tests use `w0DB`/`w0Name`
     and the `fuBatch*` helpers (`fu_batch_test.go`). No new `TestMain` in those two packages.
   - New `TestMain`s only where no test binary opens a DB yet: `cmd/web/adf_web_test.go` (adf-web-cmd),
-    `cmd/nntp-fetcher/adf_fetcher_test.go` (adf-tools-fetcher), `internal/database/adfreopen/reopen_test.go`
+    `internal/database/adfreopen/reopen_test.go`
     (adf-db-lifecycle, its own package so it can open, shut down and re-open). Each checks `os.Geteuid() >= 1000`
     before `OpenDatabase` (skip with a printed reason otherwise), uses `os.MkdirTemp("", "pugleaf-adf-")`, sets
     `database.NO_CACHE_BOOT = true` before the open and never uses `./data`.
@@ -394,6 +391,7 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
     `internal/database/adf_<slice>_test.go` with `adfReaders…`, `adfCache…`, `adfLife…`, `adfBatch…`, `adfFlags…`;
     `internal/processor/adf_proc_test.go` (`TestAdfProc…`); `cmd/<tool>/adf_<tool>_test.go` (`TestAdfFetch…`,
     `TestAdfRecover…`, `TestAdfTor…`, `TestAdfWebCmd…`, `TestAdfExpire…`); optional slices `adfOpt<Slice>…`.
+  - `cmd/nntp-fetcher` gets no `TestMain`: its one DB test opens and tears down the DB itself (adf-tools-fetcher).
   - Groups `w0Name("adf<slice>")`, message-ids `<adf-<slice>-<seq>@test.invalid>`. No `t.Parallel()`. A test that
     changes a shared field (`w0Srv.CronEdit`, `processor.LocalNNTPHostname`) restores it with `t.Cleanup`; no package
     global read by a background goroutine is changed after `TestMain`. No sleep over 100 ms (poll with a deadline).
@@ -408,7 +406,7 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
   | File | Sibling part | This plan's part |
   |----|----|----|
   | `database/queries.go` | hardening: `GetOverviewsRange`, `GetHeaderFieldRange` + constants (`:1804-1937`), one line in `GetArticleByNum` (`:906`) | `MainDBGetAllNewsgroups`, `MainDBGetNewsgroup`, `MainDBGetNewsgroupByID` + constants (`:190-257`), `BulkDeleteNewsgroups` (`:402`), `DeleteNewsgroup` (`:486`), `GetOverviews` (`:698`), `GetActiveNewsgroups*`, `GetNewsgroupsPaginated*` (`:1030-1137`), `getHierarchiesPaginatedDirect` (`:2187`), `GetNewsgroupsByHierarchy` (`:2814`), `GetSpamArticles` count constant (`:3334`) (wave 1); `ResetNewsgroupData` (`:3060`, wave 2) |
-  | `database/db_batch.go` | intake: `query_updateNewsgroupsStats`, PHASE 3 (`:855-891`), stats block (`:935-967`) | `SQ3batch` struct, `NewSQ3batch`, `BatchCaptureOverviewForLater`, `ExpireCache`, `GetNewsgroupPointer`, the `sq.queued -= batched` hunk (`:764-768`), `processOverviewBatch` + `query_processOverviewBatch`, `StartOrch`, `BatchDivider`, `BatchDividerChan` (wave 2) |
+  | `database/db_batch.go` | intake S2: `query_updateNewsgroupsStats`, PHASE 1 number loop (`:794-823`), `batchInsertOverviews` (`:969-1001`), `processOverviewBatch` (`:1003-1103`), PHASE 3 (`:855-891`), stats block (`:935-967`) | `SQ3batch` struct, `NewSQ3batch`, `BatchCaptureOverviewForLater`, `ExpireCache`, `GetNewsgroupPointer`, `CheckNoMoreWorkInMaps` (`:273`), the `sq.queued -= batched` hunk (`:764-768`), the `query_processOverviewBatch` constant only (on top of intake's version), `StartOrch`, `BatchDivider`, `BatchDividerChan` (wave 2) |
   | `cmd/history-rebuild/main.go` | client: `:12`, `:75`, `:97-104` (pprof) | `:74`, `:79` (`-useshorthashlen`) only |
   | `models/models.go` | intake S1: `Article` struct, `RecycleArticle` | optional `adf-opt-web-admin`: `(*Article).GetData` only |
   Files checked and **not** touched because a sibling owns them: `internal/nntp/*` (all but the unowned
@@ -472,8 +470,10 @@ Owned files: `scripts/test-audit-delta-fixes.sh` (new).
    - client: `grep -n 'loopbackPprofAddr' cmd/history-rebuild/*.go` hits;
    - rfc-commands: `ls internal/nntp/nntp-cmd-date.go`.
    Any miss: stop and report (the plan must not run earlier, see header).
-2. **Hand-off checks** (record in the progress note, no edits): `grep -n 'captureLimit()' internal/processor/threading.go`
-   (A-tools-1 applied by intake?) and `grep -n 'func newDownloadRun' internal/processor/proc_DLArt.go` (A-tools-4 closed?).
+2. **Hand-off checks** (record in the progress note, no edits): the two A-tools-1 greps of hand-off 1 (limiter
+   defined and used, no per-group capture goroutine left), `grep -n 'func newDownloadRun' internal/processor/proc_DLArt.go`
+   (A-tools-4 closed?) and `grep -n 'syscall.SIGTERM' cmd/history-rebuild/main.go cmd/nntp-transfer/main.go`
+   (A-ops-3d/f closed?).
 3. **Re-anchor:** for every row of the findings tables, re-run `grep -n` on the cited symbol at HEAD; record moved
    anchors in the progress note (slices read that note).
 4. **Baseline:** run `## Checks`; gofmt may list only the 2 baseline files. Record PASS/FAIL.
@@ -502,17 +502,22 @@ Changes:
    (error → "Cron job not found"); when `!job.Enabled && !s.CronEdit` refuse with `cronEditRefused`; disabling is
    always allowed. Keep the existing success message.
 3. **Stop:** unchanged (D7).
-4. **A-web-20.** In `cronjobs.go` add `func (cm *CronJobManager) forgetJob(job *CronJob)`: under `cm.mutex.Lock()`
-   delete `cm.jobs[job.ID]` only when `cm.jobs[job.ID] == job` (pointer identity, so a newer registration survives).
-   Call it with `defer cm.forgetJob(job)` as the first statement of `runJobScheduler`, so every return path (closed,
-   lookup error, disabled, stop channel) unregisters the job. Check that `StopCronManager` and `StopJob` don't hold
+4. **A-web-20.** `runJobScheduler` restarts itself today with a tail call `go cm.runJobScheduler(job)`
+   (`cronjobs.go:452`), so a deferred cleanup would fire after every run and orphan schedulers (multiplying `sh -c`
+   runs). First turn the body into a loop: `for { …one cycle… }` where each former `return` that ends the scheduler
+   stays a `return` and the tail call `go cm.runJobScheduler(job)` becomes the end of the loop iteration (`continue`).
+   Then add `func (cm *CronJobManager) forgetJob(job *CronJob)`: under `cm.mutex.Lock()` delete `cm.jobs[job.ID]` only
+   when `cm.jobs[job.ID] == job` (pointer identity, so a newer registration survives), and call it with
+   `defer cm.forgetJob(job)` as the first statement of `runJobScheduler`: with the loop, the defer runs only when the
+   scheduler really ends (closed, lookup error, disabled, stop channel). Grep for any other `go cm.runJobScheduler`
+   site; there must be exactly one start per registration (in `startJob`). Check that `StopCronManager` and `StopJob` don't hold
    `cm.mutex` while waiting for schedulers to return (they would now deadlock); if one does, release the lock before
    waiting and say so in the report. `loadAndStartJobs` then re-registers a re-enabled job on the next reload.
 5. **A-web-17.** In `adminViewCronJobLog` apply `limit` to `displayOutput` after filtering:
    `if len(displayOutput) > limit { displayOutput = displayOutput[len(displayOutput)-limit:] }` (replace the
    `totalLines > limit` overwrite; keep the header lines that the existing code prints based on the filtered count).
-6. **Template.** `admin_crons.html`: wrap the create form (`:163-226`) and the "enable" toggle button of disabled jobs
-   in `{{if .CronEdit}}…{{end}}`; when off, show the existing hint text (`:13-14`). Disable buttons stay.
+6. **Template.** `admin_crons.html`: wrap the create form (`:163-226`) in `{{if .CronEdit}}…{{end}}` and the
+   "enable" toggle button of disabled jobs (inside the job `range`, so `{{if $.CronEdit}}`); when off, show the existing hint text (`:13-14`). Disable buttons stay.
 7. **Tests** `adf_cron_test.go` (admin cookie from `w0NewUser(t, true)`; set `w0Srv.CronEdit` per test and restore it
    with `t.Cleanup`; jobs inserted with `w0DB(t).InsertCronJob(&models.CronJob{Name: w0Name("adfcron"), Command: "true", Enabled: false, …})`, deleted in cleanup):
    - `TestAdfCronCreateRefusedWithoutEdit`: POST `/admin/crons/create` with `enabled=on` → 303, flash contains
@@ -523,6 +528,9 @@ Changes:
      `*CronJob` in `cm.jobs` by `startJob` for a disabled job row, wait (poll ≤ 2 s) until the scheduler returned
      and `cm.jobs` no longer has the id; then enable the row and `startJob` again → no `ErrCronExists`. Stop the
      manager in cleanup.
+   - `TestAdfCronSingleScheduler`: (a) source check: `cronjobs.go` (read relative to the package dir) contains
+     exactly one `go cm.runJobScheduler(`, inside `startJob`; (b) after `startJob` of an enabled job, sample
+     `runtime.Stack(all)` every 50 ms for 2 s: never more than one goroutine with a `runJobScheduler` frame for it.
    - `TestAdfCronLogFilterLimit`: unit test on the filter/limit helper if you extract one (`adminViewCronJobLog`
      needs a live job; extracting the slice logic into an unexported function in the owned file is fine).
    - Admin page without `CronEdit`: GET `/admin?tab=crons` does not contain `action="/admin/crons/create"`.
@@ -597,7 +605,8 @@ Changes:
      mail-complaints-to="<abuse>"` when non-empty) — continuation lines start with a space);
    - `Lines:` = `strings.Count(body, "\n") + 1` (as today);
    - `bytes = common.WireArticleSize(lines, strings.Split(in.Body, "\n"))`.
-2. `sitePostSubmit` (`:356-402`): generate `messageID := generateMessageID()` first, call `buildWebPostHeaders`, set
+2. `sitePostSubmit` (`:356-402`): generate `messageID, err := common.GenerateMessageID(processor.LocalNNTPHostname)`
+   first (error → the existing error page path), call `buildWebPostHeaders`, set
    `HeadersJSON = strings.Join(lines, "\n")`, `MessageID = messageID`, `DateString = date`, `Bytes = bytes`,
    `Lines = linesCount`; for replies compute `References` before the helper and pass it in; set
    `article.Headers["references"]` as today, drop `article.Headers["bytes"]` (no `Bytes:` header anywhere) and keep
@@ -634,9 +643,9 @@ Changes (D9):
 2. `adminCreateNNTPUser`: replace `webUserID := int64(1)` (`:91-97`) by `resolveNNTPWebMapping(s, webUserIDStr, 0, 0)`;
    error → flash + redirect. `InsertNNTPUser` already stores `NULLIF(?, 0)`.
 3. `adminUpdateNNTPUser` (`:130-207`): load the user (`GetNNTPUserByID`) first. `maxconns`: when given, validate 1–10
-   as today, else keep the stored value; `posting` is always taken from the form (checkbox semantics: absent = off),
+   → 1–25 (hardening's nntpmgr range), else keep the stored value; `posting` is always taken from the form (checkbox semantics: absent = off),
    so call `UpdateNNTPUserPermissions(id, maxConns, posting)` whenever either was submitted (the form always submits
-   the checkbox state; verify in the template). Password: when given, `nntpAdminPasswordMin = 8` ≤ len ≤
+   the checkbox state; verify in the template). Password: when given, `nntpAdminPasswordMin = 10` ≤ len ≤
    `nntpAdminPasswordMax = 72` bytes, else flash. Mapping: when the field is present in the form,
    `resolveNNTPWebMapping(s, raw, id, current)` then `s.DB.UpdateNNTPUserWebUserID(id, w)` (hardening contract).
    Replace the empty branch at `:199-203`.
@@ -645,7 +654,8 @@ Changes (D9):
 5. **Tests** `adf_nntpusers_test.go` (admin cookie; NNTP users created through the handler; usernames ≥ 10 chars):
    create without mapping → stored `web_user_id` IS NULL (raw SQL); create mapped to web user A → mapped; second
    create mapped to A → refused; update mapping to 0 → NULL; update posting without maxconns → posting changes,
-   maxconns unchanged; password `short` → refused; 72-byte password accepted, 73 refused.
+   maxconns unchanged; maxconns 25 accepted, 26 refused; a 9-byte password refused, 10 and 72 bytes accepted, 73
+   refused.
 
 Acceptance: `TestAdfNNTPUsers*` pass; hardening's `TestNsh*` auth tests stay green.
 
@@ -660,9 +670,10 @@ Owned files:
 - `internal/web/adf_pagination_test.go` (new)
 
 Changes:
-1. **E17.** In the page→cursor fallback (`webgroupPage.go:88-93`, `web_sectionsPage.go:244-248`), when the `OFFSET`
-   lookup returns `sql.ErrNoRows`, set `page = 1` together with `lastArticleNum = 0`, so the `PaginationInfo` built
-   later describes the page actually served. Other errors keep today's handling.
+1. **E17.** In the page→cursor fallback (`webgroupPage.go:88-93`, `web_sectionsPage.go:244-248`), whenever the
+   `OFFSET` lookup fails (`sql.ErrNoRows` or any other error; both fall back to the newest page today), set
+   `page = 1` together with `lastArticleNum = 0`, so the `PaginationInfo` built later describes the page actually
+   served; log a non-`ErrNoRows` error as today.
 2. **E12 (D15).** In both cursor-mode `PaginationInfo` literals (`webgroupPage.go:112-120`, `web_sectionsPage.go:267-275`)
    set `HasPrev: false` and `HasNext: false` with a comment `// cursor mode has no linkable neighbours (FU:E12, D15)`.
    Leave `web/templates/pagination.html` and the D1 clamp note untouched; the existing assertion that the note does
@@ -813,7 +824,8 @@ Changes:
 2. **INIT.** Move `INIT = true` after the last fallible step; `Shutdown()` (database.go) sets `INIT = false` under
    `GlobalDBMutex` as its last step (after the main DB is closed).
 3. **Background stop.** `Database` fields `bgStop chan struct{}`, `bgStopOnce sync.Once`; `OpenDatabase` makes
-   `bgStop`; `(*Database).stopBackground()` closes it once; `(*Database).backgroundStop() <-chan struct{}` returns it;
+   `bgStop`; `(*Database).stopBackground()` closes it once and is a no-op when `bgStop` is nil (seven test files build
+   a bare `&Database{}`; `Shutdown` must keep working on those); `(*Database).backgroundStop() <-chan struct{}` returns it;
    `Shutdown()` calls `stopBackground()` first. `NewGHmapStop(stop)` (old `NewGHmap()` → `NewGHmapStop(nil)`):
    `GHmapCron` becomes a loop with `select { case <-stop: return; case <-time.After(DefaultCronGroupHash): … }`
    (no self re-spawn). `newGroupSectionDBCacheStop(stop)` likewise for `CronClean` (old constructor kept).
@@ -832,11 +844,13 @@ Changes:
      (b) `OpenDatabase` on a temp dir → ok; record `runtime.NumGoroutine()` before (a);
      (c) `close(db.StopChan)`, `db.WG.Wait()` (≤ 30 s), `db.Shutdown()`;
      (d) `OpenDatabase` again on a second temp dir → ok (INIT was reset), then the same teardown;
-     (e) after teardown the goroutine count is within +2 of the start (poll ≤ 3 s; log `runtime.Stack` on failure).
-     Goroutines still started by code other slices fix in wave 2 (`BatchDivider`, `ExpireCache`, `CleanCron`,
-     `NNTPAuthCache.cleanupExpired`) are expected leftovers in wave 1: assert (e) with a tolerance of +6 in this
-     slice and leave a `// tightened by adf-db-batch` comment; `adf-db-batch` lowers it to the hardening-owned
-     `cleanupExpired` only (+1).
+     (e) after teardown, compare goroutine stacks rather than a bare count: poll for up to 12 s (`CronDB` only exits
+     on its next 10 s tick) and then require that no goroutine stack contains `GHmapCron`, `CronClean` or `CronDB`;
+     log `runtime.Stack(all)` on failure. Known leftovers in wave 1 (fixed in wave 2 by `adf-db-batch`): one
+     `BatchDivider`, one `ExpireCache`, one `CleanCron` per open (two opens → up to 6), plus
+     `NNTPAuthCache.cleanupExpired` (hardening-owned, no stop path: one per open → 2), about 7–8 in total. Assert
+     those as a named allow-list with a `// tightened by adf-db-batch` comment; `adf-db-batch` removes its three from
+     the allow-list, leaving only `cleanupExpired` (≤ 2 after two cycles).
 
 Acceptance: both test files pass under `-race`; every existing `internal/database` test unchanged and green.
 
@@ -895,7 +909,9 @@ Changes:
 3. `signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)` (`:147`, D6).
 4. **A-tools-5a.** Parse and validate `-download-start-date` right after `flag.Parse()` (before `OpenDatabase`); the
    worker then uses the parsed `time.Time`; delete the `log.Fatalf` at `:660-663`.
-5. **Tests** (own `TestMain`, K3): `TestAdfFetchBackendConfigCopiesProxy` (a provider with SOCKS5 proxy fields → every
+5. **Tests** (no `TestMain` that opens a DB: the single `OpenDatabase` happens inside
+   `TestAdfFetchOpenFetcherDBHonoursData`, the only DB test in this package; euid check as in K3):
+   `TestAdfFetchBackendConfigCopiesProxy` (a provider with SOCKS5 proxy fields → every
    proxy field and `Provider` set, `MaxConns` as passed); `TestAdfFetchOpenFetcherDBHonoursData` (record whether
    `./data` exists in the package dir before; `openFetcherDB(<tmp>)` → `<tmp>/cfg/pugleaf.sq3` exists; `./data`
    existence unchanged; cleanup). The test never calls `UpdateNewsgroupList` (no network, ever).
@@ -937,12 +953,13 @@ Owned files:
   `build_merge-active.sh`, `build_merge-descriptions.sh`, `build_nntp-transfer.sh`, `build_nntpmgr.sh`,
   `build_post-queue.sh`, `build_tcp2tor.sh`, `build_webserver.sh`
 - `run_web.sh`, `run_web_ssl.sh`, `scripts.sh`, `go_run_web.sh`, `run_test.sh`, `build_TestMsgIdItemCache.sh`
+- `manual_sqlite_migration_0002.sh`, `manual_sqlite_migration_0008.sh` (edit only; never run them, CLAUDE.md)
 - `.github/workflows/release.yml`
 - `.github/workflows/tests.yml` (new; only if the user said yes to Q2 at the wave-1 boundary)
 - `.claude/CLAUDE.md` (only the build-script sentence, D11)
 
 Changes:
-1. **OPS-4e (D11).** In each of the 11 scripts replace `-race` in the `go build` line with `${RACE:+-race}`; nothing
+1. **OPS-4e (D11, only if the user said yes to Q9 at the wave-1 boundary).** In each of the 11 scripts replace `-race` in the `go build` line with `${RACE:+-race}`; nothing
    else changes (keep `GOEXPERIMENT`, ldflags, output paths).
 2. **OPS-4d.**
    - `run_web.sh:4` → `./webserver` (drop `-useshorthashlen 7`, a no-op after OPS-4b, and the undefined
@@ -951,8 +968,12 @@ Changes:
      and a `#!/bin/sh` shebang above it, fix `-update-newsgroup-activity` → `-update-newsgroups-activity 1` on
      lines 6-7 and 9, and `-rebuild-threads` → `-rebuild-threads -dry-run=false` on line 14 (A-ops-7 comment: the
      tool cannot start before the optional A-ops-7 fix; add a `#` note). Do not run it.
-   - `go_run_web.sh` → `go run ${RACE:+-race} ./cmd/web -webport 11980 -data ./data-test-go-run-web "$@"` (whole
-     package, real flag name, scratch data by default).
+   - `go_run_web.sh` → `go run ${RACE:+-race} ./cmd/web -webport 11980 -data ./data-test-go-run-web -nntphostname "${NNTPHOST:?set NNTPHOST to a resolvable FQDN}" "$@"`
+     (whole package, real flag names, scratch data by default; cmd/web validates the hostname by DNS). If Q9 was
+     answered no, keep `-race` there.
+   - `manual_sqlite_migration_0002.sh:6-7` and `manual_sqlite_migration_0008.sh:5`: point at the real files under
+     `internal/database/migrations/` (read both scripts; use the file that matches each script's own skip check, e.g.
+     the 0002 script checks for the `spam` column). `bash -n` only.
    - `run_test.sh` (references a missing `examples/` file) → delete it (`git rm`); `build_TestMsgIdItemCache.sh`
      (the package has only `main.go.off`) → delete it.
 3. **A-ops-2 / OPS-4f / A-ops-15 (D12)** in `release.yml`:
@@ -961,6 +982,10 @@ Changes:
    - `build`: `needs: test`, `strategy: { fail-fast: false, matrix: { include: [...] } }` with the five
      `{os, arch, runner}` entries of D12, `runs-on: ${{ matrix.runner }}`, `defaults: run: shell: bash`,
      `env: CGO_ENABLED: "1"`, `go-version-file: go.mod`; remove the "removing -race for cross-compilation" comment;
+     check the runner-images list for the current macOS labels before writing them (`macos-13` may be retired: use the
+     current Intel label or drop darwin/amd64 and say so); replace the `zip`/`sha256sum` calls, which are not on every
+     runner, with portable steps (archive and checksum with a small `go run` helper kept under `.github/scripts/`, or
+     select `shasum -a 256` / `sha256sum` by `runner.os`);
    - version step: `env: INPUT_VERSION: ${{ github.event.inputs.version }}` and in the script
      `VERSION="$INPUT_VERSION"`, then `[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid version"; exit 1; }`;
      the same pattern for the release job (`:176`).
@@ -969,10 +994,10 @@ Changes:
      skip and list as leftover if unavailable).
 4. **OPS-4g (optional, Q2).** `tests.yml`: on `push` and `pull_request`, the same `test` job as above plus a
    `known-bugs` job with `continue-on-error: true` running `PUGLEAF_KNOWN_BUGS=1 go test -count=1 ./internal/nntp/... ./cmd/nntp-server/...`.
-5. `.claude/CLAUDE.md`: replace "(output: `build/`, built with `-race`)" with "(output: `build/`; `RACE=1` for a
+5. `.claude/CLAUDE.md` (only on a yes to Q9): replace "(output: `build/`, built with `-race`)" with "(output: `build/`; `RACE=1` for a
    `-race` build)".
 6. **Checks (shell):** `bash -n` on every touched `.sh`; `grep -nE 'go build[^$]*-race' build_*.sh` prints nothing;
-   `grep -c 'RACE:+-race' build_*.sh` shows 11 files with 1; `python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' .github/workflows/release.yml`
+   `grep -c 'RACE:+-race' build_*.sh` shows 11 files with 1 (both only after a yes to Q9); `python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' .github/workflows/release.yml`
    (skip with a note when PyYAML is missing; `actionlint` if installed). Never run `build_ALL.sh`/`Build_DEV.sh`.
 
 Acceptance: E16 PASS.
@@ -1030,7 +1055,8 @@ Owned files:
 - `internal/web/web_articlePage.go`
 - `internal/web/web_sectionsPage.go` (only `sectionArticlePage`, `sectionArticleByMessageIdPage`)
 - `internal/web/web_threadTreePage.go`
-- `internal/web/web_apiHandlers.go` (only `getArticlePreview`)
+- `internal/web/web_apiHandlers.go` (only `getArticlePreview`, `getArticle` `:237`, `getArticleByMessageId` `:267`)
+- `internal/web/web_sitePostPage.go` (only the reply prefill block of `sitePostPage`, `:86-110`)
 - `internal/web/webserver_core_routes.go` (only the `ArticlePageData` struct `:86` and the route line `:526`)
 - `web/templates/article.html` (only the counter block `:84-100`)
 - `internal/database/web_article_flags.go` (new)
@@ -1044,12 +1070,17 @@ Changes (D2, D3):
    `sql.ErrNoRows` unwrapped.
 2. `articlePage`, `articleByMessageIdPage`, `sectionArticlePage`, `sectionArticleByMessageIdPage`: after the article is
    found, read the flags; when `articleHiddenFor(c, hide)` render the existing 404 "Article not found" page; else set
-   `ArticleSpam`/`ArticleHide` in `ArticlePageData` (new fields). Never write into the cached `*Article`.
+   `ArticleSpam`/`ArticleHide` in `ArticlePageData` (new fields) in `articlePage`/`articleByMessageIdPage`. The
+   section handlers use `SectionArticlePageData` (`webserver_core_routes.go:201`): there only the 404 gate is added,
+   no counter fields. Never write into the cached `*Article`.
 3. `article.html`: `{{.Article.Spam}}` → `{{.ArticleSpam}}`, `{{.Article.Hide}}` → `{{.ArticleHide}}`,
    `{{if gt .Article.Spam 0}}` → `{{if gt .ArticleSpam 0}}` (A-web-15). Check `section-article.html` for the same
    fields; if it uses them, add it to your report (it is not owned here; the section handlers pass the same data
    type, so it needs no edit if it doesn't reference them).
-4. `getArticlePreview`: before building the response, flags → hidden for non-admin → `404 {"error": "Article not found"}`.
+4. `getArticlePreview`, `getArticle`, `getArticleByMessageId` (token API): before building the response, flags →
+   hidden for non-admin (a token request is never admin) → `404 {"error": "Article not found"}`. Site-post reply
+   prefill: when the replied-to article is hidden for this user, skip the quote and set the form error
+   "Article not found".
 5. `tree_view_api.go`: `func (tree *ThreadTree) RedactedCopy() *ThreadTree` (deep copy of nodes and `NodeMap`;
    `Overview = nil` where `Overview != nil && Overview.Hide > 0`); `func (tree *ThreadTree) GetThreadTreeHTMLFor(groupName
    string, showHidden bool) template.HTML` (`GetThreadTreeHTML` = `GetThreadTreeHTMLFor(groupName, true)`, K1);
@@ -1063,7 +1094,9 @@ Changes (D2, D3):
    (article seeded and `UPDATE articles SET hide = 1`): anonymous GET by number, by message-id, section variants (seed a
    section with the group), preview → 404; admin → 200 and the page shows `👁️ 1`; tree page anonymous → contains
    `[hidden article]`, not the subject; `/api/thread-tree` with the API disabled → not 200, with the API enabled
-   (`lo1CoreSetAPIEnabled(t, "true")`) anonymous → 200, JSON has no `overview` for the hidden node,
+   (`lo1CoreSetAPIEnabled(t, "true")`) anonymous → 200, JSON has no `overview` for the hidden node; token API
+   (`/api/v1/groups/<g>/articles/1` and `/message/<id>` with a seeded token as `TestW1API*` does) → 404; GET
+   `/SitePost?…reply_to=1` (user cookie) → no quoted body;
    `Cache-Control` starts with `private`; a visible article page shows the real spam counter after
    `IncrementArticleSpam`.
 
@@ -1073,14 +1106,16 @@ Acceptance: E06, E07 PASS; `TestW1APIThreadTreeHTMLEscapesGroup` and the other t
 Ids: INT-5 (number reuse), A-db-9, A-db-5, OPS-1d.
 
 Owned files:
-- `internal/database/db_batch.go` (K6 functions only; **not** `query_updateNewsgroupsStats`, PHASE 3, the stats block)
+- `internal/database/db_batch.go` (K6 functions only; **not** `query_updateNewsgroupsStats`, the PHASE 1 number loop,
+  `batchInsertOverviews`, `processOverviewBatch`, PHASE 3, the stats block — intake S2 owns those; only the
+  `query_processOverviewBatch` constant is edited, on top of intake's version)
 - `internal/database/db_init.go` (only the `NewMemCachedThreads()` call → `NewMemCachedThreadsStop(db.bgStop)`)
-- `internal/database/queries.go` (only `ResetNewsgroupData`)
+- `internal/database/queries.go` (only `ResetNewsgroupData`, `InsertOverview` and `query_InsertOverview` `:668-690`)
 - `internal/database/migrations/0010_single_article_num_seq.sql` (new; take the next free `single` number if taken)
 - `internal/database/article_num_cleanup.go` (new)
 - `cmd/expire-news/main.go` (only `deleteArticles` and its two call sites `:466`, `:748`)
 - `internal/database/adf_batch_test.go`, `cmd/expire-news/adf_expire_test.go` (new)
-- `internal/database/adfreopen/reopen_test.go` (only the goroutine tolerance, see `adf-db-lifecycle`)
+- `internal/database/adfreopen/reopen_test.go` (only the goroutine allow-list, see `adf-db-lifecycle`)
 
 Changes:
 1. **Migration (D4):**
@@ -1097,23 +1132,28 @@ Changes:
    Check `stripMigrationPragmas` and the multi-statement execution handle a trigger body (`BEGIN … END;`); if the
    migration runner splits statements, adapt the file (one statement per line is not required by
    `tx.ExecContext`, which runs the whole script — verify with the test).
-2. **Insert (INT-5).** `query_processOverviewBatch` gets `article_num` as the first column with value
-   `(SELECT last_num + 1 FROM article_num_seq WHERE id = 1)`; the `stmt.Exec` argument list is unchanged (the value is
-   a subquery). Within the batch transaction each insert sees the trigger's update, so numbers are consecutive;
+2. **Insert (INT-5).** `query_processOverviewBatch` (constant only; its callers are intake's) gets `article_num` as the
+   first column with value `(SELECT last_num + 1 FROM article_num_seq WHERE id = 1)`; the `stmt.Exec` argument list
+   is unchanged (the value is a subquery). If intake's version changed the column list, add the column to that
+   version. The other number-less insert, `query_InsertOverview` (`queries.go:668`, used by `InsertOverview` `:680`
+   and the dead `proc_ImportOV.go:85`), gets the same subquery; `query_ImportOverview` passes an explicit number and
+   stays. Within the batch transaction each insert sees the trigger's update, so numbers are consecutive;
    `INSERT OR IGNORE` of a duplicate fires no trigger and consumes no number.
 3. **Reset.** `ResetNewsgroupData`: inside its transaction after `DELETE FROM articles`, `UPDATE article_num_seq SET
-   last_num = 0 WHERE id = 1` (ignore "no such table" for a group DB the migration hasn't reached? It always has: the
-   group is opened through `GetGroupDB`). After commit `db.ArticleCache.ClearGroup(newsgroupName)` when the cache is
-   enabled (nil check).
-4. **Derived rows.** `article_num_cleanup.go`: `func (db *Database) DeleteSpamRowsForArticles(newsgroup string, nums []int64) error`
+   last_num = 0 WHERE id = 1` (the group was opened through `GetGroupDB`, so the migration ran). After commit: delete
+   the group's main-DB `spam` and `user_spam_flags` rows (all article numbers of that newsgroup id, via
+   `RetryableTransactionExec`; numbers restart, so the old rows would be inherited) and
+   `db.ArticleCache.ClearGroup(newsgroupName)` when the cache is enabled (nil check).
+4. **Derived rows.** (`deleteDerivedThreadRows` is a function in `cmd/expire-news/main.go` itself, not a new file:
+   keep the tool a one-file package.) `article_num_cleanup.go`: `func (db *Database) DeleteSpamRowsForArticles(newsgroup string, nums []int64) error`
    deleting `spam` and `user_spam_flags` rows `WHERE newsgroup_id = (SELECT id FROM newsgroups WHERE name = ?) AND
    article_num IN (…)` in chunks of 500 via `RetryableTransactionExec`. Expire-news: `deleteArticles` also runs
    `DELETE FROM cached_trees WHERE thread_root IN (…)`, `DELETE FROM tree_stats WHERE thread_root IN (…)`,
    `DELETE FROM thread_cache WHERE thread_root IN (…)` in the same transaction, ignoring a "no such table" error like
    the existing `overview` delete; both call sites then call `db.DeleteSpamRowsForArticles(groupName, batch)` (log
    errors with the tool's prefix, don't abort) and clear the article cache of the group if the tool enabled it.
-5. **A-db-9.** Count per article: in `BatchDivider` after `tasks.BATCHchan <- article`, increment `sq.queued` by 1
-   under `sq.GMux.Lock()` (drop `tmpQueued` stepping); the brake compares the live value (`realQueue = sq.queued`
+5. **A-db-9.** Count per article: in `BatchDivider` increment `sq.queued` by 1 under `sq.GMux.Lock()` **before**
+   `tasks.BATCHchan <- article` (so a fast batch can't subtract it first; drop `tmpQueued` stepping); the brake compares the live value (`realQueue = sq.queued`
    read under `RLock`). `processNewsgroupBatch`'s subtraction (`:764-768`) stays. Add a log-once warning if `queued`
    ever goes negative.
 6. **A-db-5.** `ExpireCache`: skip tasks with `BATCHprocessing == true` or `len(BATCHchan) > 0`;
@@ -1121,10 +1161,11 @@ Changes:
    (`select { case <-sq.db.bgStop: return; case <-time.After(15 * time.Second): … }`, no self re-spawn).
 7. **OPS-1d.** `BatchDividerChan` becomes the field `sq.dividerChan` (made in `NewSQ3batch`, cap 128); keep a
    package-level `var BatchDividerChan` only if something outside `db_batch.go` uses it (grep; tests included) —
-   otherwise delete it. `BatchCaptureOverviewForLater` sends with
+   otherwise delete it. `CheckNoMoreWorkInMaps` (`:273`) reads `len(sq.dividerChan)`. `BatchCaptureOverviewForLater` sends with
    `select { case sq.dividerChan <- article: case <-sq.db.bgStop: log once "[BATCH] capture after Shutdown dropped" }`.
    `BatchDivider` selects on `sq.db.bgStop` and returns. `db_init.go`: `NewMemCachedThreadsStop(db.bgStop)`.
-   `reopen_test.go`: lower the goroutine tolerance to +1 (`NNTPAuthCache.cleanupExpired`, hardening-owned).
+   `reopen_test.go`: remove `BatchDivider`, `ExpireCache`, `CleanCron` from the allow-list (only
+   `NNTPAuthCache.cleanupExpired`, hardening-owned, remains).
 8. **Tests:** `adf_batch_test.go` (use `fuBatchIsolatedDB`/`fuBatchTask`/`fuBatchRun`):
    `TestAdfBatchNumbersNotReused` (batch of 2 → numbers 1, 2; `DELETE FROM articles`; batch of 1 → number 3;
    `article_num_seq.last_num == 3`); `TestAdfBatchSeqSeededFromExisting` (group with rows 1..5 inserted raw, drop the
@@ -1152,8 +1193,8 @@ Changes:
    `fatalAfterDB`. A `webStop` channel closed at the start of the shutdown sequence stops `startHierarchyUpdater`
    (loop with `select`, log text fixed to the real 10-minute period) and `monitorUpdateFile`.
 2. **A-ops-3a (D6).** `signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)` (`:487`).
-3. **OPS-2a (D10).** Delete `withnntp`, `withfetch`, `isleep`, the commented-out flag lines `:105-107`, the dead NNTP
-   block `:428-473` and every import only it used; the startup line `:150` drops `NNTP=`/`Fetch=`; when any of the
+3. **OPS-2a (D10).** Remove the embedded NNTP server: delete `withnntp`, `withfetch`, `isleep`, the commented-out flag
+   lines `:105-107`, the dead NNTP block `:428-473` (incl. `:448`; no other plan edits it) and every import only it used; the startup line `:150` drops `NNTP=`/`Fetch=`; when any of the
    four NNTP flags is set, log the D10 line once.
 4. **OPS-4b.** `-useshorthashlen`: no validation, no fatal: if the stored value is locked, use it; if not locked and
    the CLI value is outside 2..7, log a warning and store/use 7; `NewFetchProcessor` receives `finalUseShortHashLen`,
@@ -1170,8 +1211,8 @@ Changes:
 Acceptance: E01, E10, E11, E12 PASS; tests pass; `./build_webserver.sh` builds.
 
 ### Wave 3 (inline, orchestrator)
-1. Re-run the hand-off greps of wave 0 step 2 on the merged branch; record A-tools-1 and A-tools-4 as closed (with the
-   intake commit) or open.
+1. Re-run the hand-off greps of wave 0 step 2 on the merged branch; record A-tools-1, A-tools-4 and A-ops-3d/f as closed
+   (with the sibling commit) or open.
 2. Run `## Checks` and `## End-to-end`; write the Outcome: ids fixed per slice, the hand-offs and their state, the
    deferred list, the decisions D1–D16 as behaviour changes, open questions answered or not.
 3. Ask the user whether to run wave O1/O2 (optional findings).
@@ -1243,7 +1284,7 @@ Common: same rules and checks; each slice reads its audit blocks (`docs/audit/au
 | U14 | adf-ops-tcp2tor | `TestAdfTor*` pass |
 | U15 | adf-ops-misc | peering tests run without SKIP and leave no files |
 | U16 | adf-web-hide | `TestAdfHide*`, `TestAdfFlags*` pass |
-| U17 | adf-db-batch | `TestAdfBatch*`, `TestAdfExpire*` pass; reopen tolerance +1 |
+| U17 | adf-db-batch | `TestAdfBatch*`, `TestAdfExpire*` pass; reopen allow-list only `cleanupExpired` |
 | U18 | adf-web-cmd | `TestAdfWebCmd*` pass |
 | E01–E19 | all | `scripts/test-audit-delta-fixes.sh` (End-to-end) |
 
@@ -1285,9 +1326,11 @@ Modelled on `scripts/test-web-leftovers.sh` / `scripts/test-web-hardening.sh`:
   `BIN` (`./build/webserver`), `RDB` (`./build/recover-db`), `FET` (the fetcher binary `build_fetcher.sh` writes;
   read the script for the name).
 - Guards: `DATA` must match `./data-test-*` and contain no `..`; refuse when `./.update` exists; refuse when something
-  answers on `$PORT`; tools `curl sqlite3 timeout`; `pass()/fail()/info()` print `PASS|FAIL|INFO <id> [<area>] <text>`;
-  `start_server`/`stop_server` (SIGINT, wait 90 s, KILL) as in the WSH script, `trap stop_server EXIT`; `-nntphostname
-  smoke.invalid` as the WSH script does. Binaries other than the web server run with cwd `$DATA/run` and an absolute
+  answers on `$PORT`; tools `curl sqlite3 timeout getent`; `NNTPHOST` detection copied from
+  `scripts/test-web-leftovers.sh` (first FQDN that `getent hosts` resolves, else exit 2 with the "set NNTPHOST"
+  message), because `cmd/web` checks `-nntphostname` with `net.LookupIP` at start; `pass()/fail()/info()` print `PASS|FAIL|INFO <id> [<area>] <text>`;
+  `start_server`/`stop_server` (SIGINT, wait 90 s, KILL) as in the WSH script, `trap stop_server EXIT`;
+  every web start passes `-nntphostname "$NNTPHOST"`. Binaries other than the web server run with cwd `$DATA/run` and an absolute
   `-data`, so a regression can only write inside `$DATA`.
 - Setup: `rm -rf "$DATA"`; first start creates the schema; stop; seed with `sqlite3` while stopped: config
   `registration_enabled=true`, `AbuseMail`, `APIEnabled=false`; groups `adf.e2e.a` (active), `adf.e2e.b` (active);
@@ -1314,19 +1357,22 @@ Checks:
   `SELECT count(*) FROM newsgroups WHERE hierarchy IS NULL` = 0.
 - **E10** (OPS-2a) a separate short start with `-nntptcpport 21998` on port `$((PORT+1))`: the log has `are ignored`
   and nothing listens on 21998; stop it.
-- **E11** (A-ops-4) `$BIN -data "$DATA" -nntphostname smoke.invalid -disable-active <descriptions-format file>` → exit
+- **E11** (A-ops-4) `$BIN -data "$DATA" -webport $((PORT+2)) -nntphostname "$NNTPHOST" -disable-active <descriptions-format file>` → exit
   ≠ 0, `SELECT count(*) FROM newsgroups WHERE active=1` unchanged (server stopped while it runs).
-- **E12** (OPS-4b) a fresh scratch root `$DATA/fresh`: first start with `-useshorthashlen 9` reaches `/ping`; stop.
-- **E13** (A-tools-2) guard first: `SELECT count(*) FROM providers WHERE enabled=1` must be 0 (else `fail` and skip:
+- **E12** (OPS-4b) a fresh scratch root `$DATA/fresh`: first start on port `$((PORT+3))` with `-useshorthashlen 9`
+  reaches `/ping`; stop.
+- **E13** (A-tools-2) with the web server stopped (it holds the main DB), guard first: `SELECT count(*) FROM providers WHERE enabled=1` must be 0 (else `fail` and skip:
   never contact a real server). Then in `$DATA/run`: `timeout 60 $FET -data "$ABSDATA" -fetch-newsgroups-from-remote '$all'`
   → exit ≠ 0 with `no enabled providers`, `$DATA/run/data` does not exist, `$DATA/cfg/pugleaf.sq3` exists.
 - **E14** (A-ops-1) in `$DATA/run`: `$RDB -db "$ABSDATA" -data "$ABSDATA-other" -group adf.e2e.a` → exit 2 and
   `"$ABSDATA-other"` does not exist; `$RDB -data "$ABSDATA" -group adf.e2e.a -repair` (no `-force`) → exit 2,
   nothing changed (`md5sum` of the `adf_e2e_a.db` file before and after, server stopped).
-- **E15** (A-ops-5) seed two articles in `adf.e2e.b` with `hide=1, spam=1`, one with an unparseable `date_string`; run
-  `$RDB -data "$ABSDATA" -group adf.e2e.b -parsedates -rewritedates -force` → both still `hide=1, spam=1`, the
-  unparseable one keeps its `date_sent`.
-- **E16** (OPS-4d/e) `grep -nE 'go build[^$]*-race' build_*.sh` empty; `bash -n run_web.sh run_web_ssl.sh go_run_web.sh`;
+- **E15** (A-ops-5) server stopped; seed two articles in `adf.e2e.b` with `hide=1, spam=1`: one with a parseable
+  `date_string` (`Wed, 01 Jan 2020 10:00:00 +0000`) but a wrong `date_sent` (`2020-01-01 00:00:00`), one with an
+  unparseable `date_string`; run `$RDB -data "$ABSDATA" -group adf.e2e.b -parsedates -rewritedates -force` → both
+  still `hide=1, spam=1`; the first now has `date_sent = 2020-01-01 10:00:00`; the unparseable one keeps its
+  `date_sent`.
+- **E16** (OPS-4d/e) `grep -nE 'go build[^$]*-race' build_*.sh` empty (INFO instead when Q9 was answered no); `bash -n run_web.sh run_web_ssl.sh go_run_web.sh`;
   the flags of `run_web_ssl.sh` line 3 (minus the binary) followed by `-help` exit 0 when passed to `$BIN`.
 - **E17** INFO: article-number reuse is covered by `TestAdfBatchNumbersNotReused` (posting enough web articles to
   trigger reuse would take minutes because of the posting back-off).
@@ -1348,8 +1394,14 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
 - **Q4** Toolchain/module upgrade for the 14 govulncheck findings (`go.mod`): separate change?
 - **Q5** Nonce-based CSP (moving 9 inline script blocks and 14 inline handlers): a later plan?
 - **Q6** Guards for the destructive root scripts (`history-rebuild.sh`, `delete_ALL_users.sh`, A-ops-13)?
-- **Q7** (at wave 0) Was the A-tools-1 hand-off applied by `nntp-intake-injection`? If not: amend and re-run its S3,
+- **Q7** (at wave 0) Was the agreed A-tools-1 bound applied by `nntp-intake-injection`? If not: amend and re-run its S3,
   or accept A-tools-1 as open.
+- **Q8** D7 gates enabling the default cron jobs that migration 0021 ships disabled: an operator without
+  `-edit-cronjobs` can no longer switch them on from the admin page. Acceptable?
+- **Q9** (wave-1 boundary, before `adf-ops-scripts` merges) D11: build scripts without `-race` by default (`RACE=1`
+  opt-in) and the matching `.claude/CLAUDE.md` sentence? Production binaries from `build_ALL.sh` would stop being race
+  builds. `.claude/CLAUDE.md` is edited only on a yes.
+- **Q10** D14: is 50 % the right threshold for `-disable-active` to refuse without `-disable-active-force`?
 
 ## Progress
 
