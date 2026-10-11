@@ -1,9 +1,9 @@
 package nntp
 
 import (
-	"bufio"
+	"errors"
 	"fmt"
-	"log"
+	"io"
 	"net"
 	"net/textproto"
 	"strings"
@@ -12,7 +12,9 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-var DefaultNNTPcliconnTimeout = time.Duration(60 * time.Second)
+// DefaultNNTPcliconnTimeout is the idle timeout of a client connection and the
+// write timeout per flush (RFC 3977 §3.1: an inactivity timer of at least 3 minutes).
+var DefaultNNTPcliconnTimeout = 3 * time.Minute
 
 // ClientConnection represents a client connection to the NNTP server
 type ClientConnection struct {
@@ -27,77 +29,90 @@ type ClientConnection struct {
 	currentFirst   int64
 	currentLast    int64
 	currentArticle int64
-	capabilities   []string
-	created        time.Time
-	lastCommand    time.Time
 }
 
 // NewClientConnection creates a new client connection
 func NewClientConnection(conn net.Conn, server *NNTPServer, isTLS bool) *ClientConnection {
-	textConn := textproto.NewConn(conn)
-
-	client := &ClientConnection{
-		conn:         conn,
-		textConn:     textConn,
-		server:       server,
-		isTLS:        isTLS,
-		capabilities: []string{}, // Will be set dynamically via getServerCapabilities()
-		created:      time.Now(),
-		lastCommand:  time.Now(),
+	return &ClientConnection{
+		conn:     conn,
+		textConn: textproto.NewConn(conn),
+		server:   server,
+		isTLS:    isTLS,
 	}
-
-	return client
 }
 
+// UpdateDeadlines refreshes the read (idle) deadline before the next command.
+// Write deadlines are set per flush by setWriteDeadline.
 func (c *ClientConnection) UpdateDeadlines() {
-	timeout := DefaultNNTPcliconnTimeout
-	if c.server != nil && c.server.IdleTimeout > 0 {
-		timeout = c.server.IdleTimeout
+	if c.conn == nil {
+		return
 	}
-	// Set read deadline for command reading
-	c.conn.SetReadDeadline(time.Now().Add(timeout))
-	// Set write deadline for large responses
-	c.conn.SetWriteDeadline(time.Now().Add(timeout))
+	_ = c.conn.SetReadDeadline(time.Now().Add(c.ioTimeout()))
 }
 
-// Handle processes the client connection
+// Handle processes the client connection. It returns nil for a normal end
+// (QUIT, client EOF, closed by Stop, overlong line closed with 400) and the
+// error otherwise.
 func (c *ClientConnection) Handle() error {
 	defer c.textConn.Close()
 
 	// Send welcome message
 	if err := c.sendWelcome(); err != nil {
+		if errors.Is(err, net.ErrClosed) {
+			return nil // closed by Stop before the greeting went out
+		}
 		return fmt.Errorf("failed to send welcome: %w", err)
 	}
 
 	// Process commands
 	for {
-		// Read command line
-		line, err := c.textConn.ReadLine()
-		if err != nil {
+		line, err := c.readCommandLine()
+		switch {
+		case errors.Is(err, errCommandTooLong):
+			// RFC 3977 §3.1: 512 octets including CRLF; the session continues
+			c.rateLimitOnError()
+			if err := c.sendResponse(501, "Command line too long"); err != nil {
+				return err
+			}
+			c.UpdateDeadlines()
+			continue
+		case errors.Is(err, errCommandOverflow):
+			// no line end within the read buffer: stop reading this client
+			_ = c.sendResponse(400, "Command line too long")
+			return nil
+		case err != nil:
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+				return nil
+			}
 			return fmt.Errorf("failed to read command: %w", err)
 		}
 		c.UpdateDeadlines()
-		c.lastCommand = time.Now()
 
-		// Parse and handle command
+		// A handler error (usually a failed write) ends the connection without a 500.
 		if err := c.handleCommand(line); err != nil {
-			log.Printf("Command error from %s: %v", c.conn.RemoteAddr(), err)
-			c.rateLimitOnError()
-			// Send error response but continue
-			c.sendResponse(500, "Internal server error")
-			c.Close()
+			if errors.Is(err, errQuit) {
+				return nil
+			}
 			return err
 		}
 	}
 }
 
-// sendWelcome sends the initial welcome message
+// sendWelcome sends the initial greeting: 200 when this client may post, else
+// 201 (RFC 3977 §5.1.1), with the configured hostname.
 func (c *ClientConnection) sendWelcome() error {
 	hostname := "go-pugleaf"
-	if c.isTLS {
-		return c.sendResponse(200, fmt.Sprintf("%s NNTP server ready (TLS)", hostname))
+	if c.server != nil && c.server.Config != nil && c.server.Config.Hostname != "" {
+		hostname = c.server.Config.Hostname
 	}
-	return c.sendResponse(200, fmt.Sprintf("%s NNTP server ready", hostname))
+	code := 201
+	if c.postingAllowed() {
+		code = 200
+	}
+	if c.isTLS {
+		return c.sendResponse(code, fmt.Sprintf("%s NNTP server ready (TLS)", hostname))
+	}
+	return c.sendResponse(code, fmt.Sprintf("%s NNTP server ready", hostname))
 }
 
 // handleCommand parses and dispatches a command
@@ -166,40 +181,17 @@ func (c *ClientConnection) handleCommand(line string) error {
 
 // sendResponse sends a single-line response
 func (c *ClientConnection) sendResponse(code int, message string) error {
-	response := fmt.Sprintf("%d %s", code, message)
-	return c.textConn.PrintfLine("%s", response)
-} // sendResponse sends a single-line response
+	c.setWriteDeadline()
+	return c.textConn.PrintfLine("%d %s", code, message)
+}
 
+// sendLine writes one raw line plus CRLF and flushes.
 func (c *ClientConnection) sendLine(line string) error {
 	c.setWriteDeadline()
 	if _, err := c.textConn.W.WriteString(line + "\r\n"); err != nil {
 		return err
 	}
 	return c.textConn.W.Flush()
-}
-
-// sendMultilineResponse sends a multi-line response
-func (c *ClientConnection) sendMultilineResponse(code int, message string, lines []string) error {
-	// Send status line
-	if err := c.sendResponse(code, message); err != nil {
-		return err
-	}
-
-	// Send data lines
-	dw := c.textConn.DotWriter()
-	writer := bufio.NewWriter(dw)
-
-	for _, line := range lines {
-		if _, err := writer.WriteString(line + "\r\n"); err != nil {
-			return err
-		}
-	}
-
-	if err := writer.Flush(); err != nil {
-		return err
-	}
-
-	return dw.Close()
 }
 
 // getServerCapabilities returns the capability list for the current connection state
@@ -214,9 +206,4 @@ func (c *ClientConnection) getServerCapabilities() []string {
 		capabilities = append(capabilities, "POST", "IHAVE")
 	}
 	return capabilities
-}
-
-// RemoteAddr returns the remote address of the connection
-func (c *ClientConnection) RemoteAddr() net.Addr {
-	return c.conn.RemoteAddr()
 }

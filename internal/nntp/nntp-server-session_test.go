@@ -18,11 +18,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -181,7 +184,9 @@ func TestSessGreeting(t *testing.T) {
 		}
 		// RFC 3977 §5.1.1: without a processor nothing can be posted, so the
 		// greeting is 201 "service available, posting prohibited".
-		knownBug(t, "RFC-4", hExpectCode(code, c.Greeting, 201))
+		if err := hExpectCode(code, c.Greeting, 201); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -336,7 +341,9 @@ func TestSessMode(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
 		code, line := hs.dial(t).cmd(t, "MODE READER")
 		// RFC 3977 §5.3.2: posting is not possible without a processor → 201.
-		knownBug(t, "RFC-4", hExpectCode(code, line, 201))
+		if err := hExpectCode(code, line, 201); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("no-argument", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
@@ -351,13 +358,17 @@ func TestSessMode(t *testing.T) {
 		code, line := hs.dial(t).cmd(t, "MODE STREAM")
 		// RFC 4644 §2.3: 203 streaming permitted; a server without streaming
 		// answers the unknown MODE variant with 501 (RFC 3977 §3.2.1).
-		knownBug(t, "RFC-5", hExpectCode(code, line, 203, 501))
+		if err := hExpectCode(code, line, 203, 501); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("unknown-variant", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
 		code, line := hs.dial(t).cmd(t, "MODE FOO")
 		// RFC 3977 §3.2.1: an unknown variant of a known command is a syntax error → 501.
-		knownBug(t, "RFC-5", hExpectCode(code, line, 501))
+		if err := hExpectCode(code, line, 501); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -489,8 +500,8 @@ func TestSessPipelining(t *testing.T) {
 		}
 	})
 	t.Run("quit-then-command", func(t *testing.T) {
-		// Isolated: today the buffered command after QUIT reaches UpdateDeadlines
-		// with a nil conn and the server goroutine panics, killing the process.
+		// Isolated: before the A-nntp-sec-1 fix the buffered command after QUIT
+		// reached UpdateDeadlines with a nil conn and the panic killed the process.
 		err := runIsolated(t, 60*time.Second, func(t *testing.T) {
 			hs := newTestServer(t, hServerOpts{})
 			c := hs.dial(t)
@@ -520,7 +531,9 @@ func TestSessPipelining(t *testing.T) {
 		if sessIsChild(t) {
 			return
 		}
-		knownBug(t, "A-nntp-sec-1", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -543,7 +556,9 @@ func TestSessLineLimit(t *testing.T) {
 			// no reply but the socket is still open: neither 501 nor a close
 			res = fmt.Errorf("no reply and no close: %v", err)
 		}
-		knownBug(t, "SEC-3", res)
+		if res != nil {
+			t.Fatal(res)
+		}
 	})
 	t.Run("1MiB-without-LF", func(t *testing.T) {
 		err := runIsolated(t, 60*time.Second, func(t *testing.T) {
@@ -590,7 +605,9 @@ func TestSessLineLimit(t *testing.T) {
 		if sessIsChild(t) {
 			return
 		}
-		knownBug(t, "SEC-3", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -641,7 +658,9 @@ func TestSessStatsGrowth(t *testing.T) {
 	if len(counts) > limit {
 		err = fmt.Errorf("stats map has %d entries after %d unique junk commands, want <= %d", len(counts), n, limit)
 	}
-	knownBug(t, "SEC-4", err)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -689,7 +708,9 @@ func TestSessIdleTimeout(t *testing.T) {
 		if DefaultNNTPcliconnTimeout < 3*time.Minute || s.IdleTimeout < 3*time.Minute {
 			res = fmt.Errorf("default idle timeout %s (server %s), want >= 3m", DefaultNNTPcliconnTimeout, s.IdleTimeout)
 		}
-		knownBug(t, "BUG-9", res)
+		if res != nil {
+			t.Fatal(res)
+		}
 	})
 }
 
@@ -749,7 +770,9 @@ func TestSessMaxConns(t *testing.T) {
 				res = hExpectCode(code, c3.Greeting, 400, 502)
 			}
 		}
-		knownBug(t, "A-nntp-rfc-3", res)
+		if res != nil {
+			t.Fatal(res)
+		}
 	})
 }
 
@@ -789,7 +812,9 @@ func TestSessStop(t *testing.T) {
 	}
 
 	// BUG-7: Stop also ends live sessions within 2 s (optionally after a 400).
-	knownBug(t, "BUG-7", sessExpectClosed(c, 2*time.Second))
+	if err := sessExpectClosed(c, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -836,7 +861,7 @@ func TestSessTLS(t *testing.T) {
 // Units: Local430 and ServerStats
 
 func TestSessLocal430(t *testing.T) {
-	lc := &Local430{cache: make(map[string]time.Time)}
+	lc := &Local430{cache: make(map[string]time.Time)} // ttl 0 → DefaultLocal430TTL
 	const id = "<t1-local430-1@test.invalid>"
 	if lc.Check(id) {
 		t.Fatal("empty cache reports a hit")
@@ -852,18 +877,75 @@ func TestSessLocal430(t *testing.T) {
 		t.Fatal("Cleanup removed a fresh entry")
 	}
 
-	// Entries older than one minute are removed, younger ones stay.
+	// Entries older than the TTL are removed by Cleanup, younger ones stay.
 	const oldID, youngID = "<t1-local430-old@test.invalid>", "<t1-local430-young@test.invalid>"
 	lc.mu.Lock()
-	lc.cache[oldID] = time.Now().Add(-2 * time.Minute)
-	lc.cache[youngID] = time.Now().Add(-30 * time.Second)
+	lc.cache[oldID] = time.Now().Add(-2 * DefaultLocal430TTL)
+	lc.cache[youngID] = time.Now()
 	lc.mu.Unlock()
 	lc.Cleanup()
-	if lc.Check(oldID) {
-		t.Error("Cleanup kept an entry older than 1 minute")
+	lc.mu.RLock()
+	_, oldKept := lc.cache[oldID]
+	lc.mu.RUnlock()
+	if oldKept {
+		t.Error("Cleanup kept an entry older than the TTL")
 	}
 	if !lc.Check(youngID) || !lc.Check(id) {
-		t.Error("Cleanup removed entries younger than 1 minute")
+		t.Error("Cleanup removed entries younger than the TTL")
+	}
+
+	// Check itself enforces the TTL (no wait for the cleanup) and drops the entry.
+	const staleID = "<t1-local430-stale@test.invalid>"
+	lc.mu.Lock()
+	lc.cache[staleID] = time.Now().Add(-2 * DefaultLocal430TTL)
+	lc.mu.Unlock()
+	if lc.Check(staleID) {
+		t.Error("Check reports an entry older than the TTL")
+	}
+	lc.mu.RLock()
+	_, staleKept := lc.cache[staleID]
+	lc.mu.RUnlock()
+	if staleKept {
+		t.Error("Check kept an expired entry")
+	}
+
+	// A per-cache ttl is honoured.
+	short := &Local430{cache: make(map[string]time.Time), ttl: time.Millisecond}
+	short.mu.Lock()
+	short.cache[id] = time.Now().Add(-10 * time.Millisecond)
+	short.mu.Unlock()
+	if short.Check(id) {
+		t.Error("ttl 1ms: a 10ms old entry is still a hit")
+	}
+
+	// Remove forgets an id; removing an absent id is a no-op.
+	lc.Remove(id)
+	if lc.Check(id) {
+		t.Error("Check hits a removed id")
+	}
+	lc.Remove("<t1-local430-never@test.invalid>")
+
+	// Message-ids over 250 octets are never cached.
+	long := "<" + strings.Repeat("x", 249) + ">" // 251 octets
+	if lc.Add(long) || lc.Check(long) {
+		t.Error("a 251-octet message-id was cached")
+	}
+	max250 := "<" + strings.Repeat("y", 248) + ">" // 250 octets
+	if !lc.Add(max250) || !lc.Check(max250) {
+		t.Error("a 250-octet message-id was not cached")
+	}
+
+	// The cache stops growing at local430MaxEntries.
+	full := &Local430{cache: make(map[string]time.Time, local430MaxEntries)}
+	now := time.Now()
+	for i := 0; i < local430MaxEntries; i++ {
+		full.cache[fmt.Sprintf("<t1-full-%d@test.invalid>", i)] = now
+	}
+	if full.Add("<t1-full-extra@test.invalid>") {
+		t.Error("Add accepted a new id into a full cache")
+	}
+	if !full.Add("<t1-full-0@test.invalid>") {
+		t.Error("Add refused to refresh an id already in a full cache")
 	}
 
 	// Concurrent use is safe (run with -race).
@@ -1076,7 +1158,7 @@ func FuzzSessCommandLine(f *testing.F) {
 	}
 	hs := sessFuzzServer(f)
 	f.Fuzz(func(t *testing.T, line string) {
-		if strings.ContainsAny(line, "\r\n") || len(line) > 4096 {
+		if strings.ContainsAny(line, "\r\n") || len(line) > 4094 {
 			t.Skip("not a single command line")
 		}
 		verb := ""
@@ -1121,5 +1203,457 @@ func FuzzSessCommandLine(f *testing.F) {
 			t.Fatalf("%q: extra line %q before the HELP reply", line, status)
 		}
 		c.readDotLines(t)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Own servers, pipes and ports (plan nntp-server-hardening, slice nntp-session)
+
+// sessOwnServer builds a server like newTestServer but lets set change fields
+// (ReadRequiresAuth, PlaintextAuth, EnforceUserMaxConns, ...) before Serve, so
+// nothing races with a running server. tlsCfg != nil serves TLS.
+func sessOwnServer(t *testing.T, proc ArticleProcessor, tlsCfg *tls.Config, set func(s *NNTPServer)) *hServer {
+	t.Helper()
+	db := hTestDB(t)
+	cfg := &config.ServerConfig{}
+	cfg.NNTP.MaxConns = 100
+	hs := &hServer{TLS: tlsCfg}
+	s, err := NewNNTPServer(db, cfg, &hs.wg, proc)
+	if err != nil {
+		t.Fatalf("NewNNTPServer: %v", err)
+	}
+	s.ArticleCmdDelay = 0
+	s.GroupCmdDelay = 0
+	s.ErrorDelay = 0
+	if set != nil {
+		set(s)
+	}
+	hs.S = s
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	isTLS := false
+	if tlsCfg != nil {
+		l = tls.NewListener(l, tlsCfg)
+		isTLS = true
+	}
+	hs.Addr = l.Addr().String()
+	if err := s.Serve(l, isTLS); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	t.Cleanup(func() { hs.stop(t) })
+	return hs
+}
+
+// sessPipeConn returns a ClientConnection on one end of a net.Pipe (server with
+// default fields) and the other end for the test to write to.
+func sessPipeConn(t *testing.T) (*ClientConnection, net.Conn) {
+	t.Helper()
+	serverEnd, clientEnd := net.Pipe()
+	c := NewClientConnection(serverEnd, &NNTPServer{}, false)
+	t.Cleanup(func() {
+		_ = serverEnd.Close()
+		_ = clientEnd.Close()
+	})
+	return c, clientEnd
+}
+
+// sessFreePort returns a TCP port that was free a moment ago.
+func sessFreePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	if err := l.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	return port
+}
+
+// sessWaitWG waits at most 10 s for wg (server goroutines after Stop).
+func sessWaitWG(t *testing.T, wg *sync.WaitGroup) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Errorf("server goroutines did not finish within 10s after Stop")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Argument counts and echo (A-nntp-rfc-5, A-nntp-rfc-6)
+
+func TestSessCommandArgs(t *testing.T) {
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+	// RFC 3977 §3.2.1: surplus arguments are a syntax error → 501. The table
+	// rejects them before the handler, so no group is needed for XOVER/LISTGROUP.
+	for _, line := range []string{"GROUP a b", "MODE READER x", "HELP x", "XOVER 1-2 x", "LISTGROUP g 1- x"} {
+		code, reply := c.cmd(t, "%s", line)
+		if err := hExpectCode(code, reply, 501); err != nil {
+			t.Errorf("%q: %v", line, err)
+		}
+	}
+	// Decision 13: QUIT ignores surplus arguments.
+	code, reply := c.cmd(t, "QUIT now")
+	if err := hExpectCode(code, reply, 205); err != nil {
+		t.Fatalf("QUIT now: %v", err)
+	}
+	if err := sessExpectClosed(c, time.Second); err != nil {
+		t.Fatalf("after QUIT now: %v", err)
+	}
+}
+
+func TestSessNoEcho(t *testing.T) {
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+	junk := strings.Repeat("A", 400)
+	code, line := c.cmd(t, "XYZZY%s", junk)
+	if err := hExpectCode(code, line, 500); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(line, "XYZZY") || strings.Contains(line, "AAAAAAAA") {
+		t.Errorf("500 reply echoes the command: %q", line)
+	}
+	code, line = c.cmd(t, "MODE FOO")
+	if err := hExpectCode(code, line, 501); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(line, "FOO") {
+		t.Errorf("MODE reply echoes the variant: %q", line)
+	}
+	code, line = c.cmd(t, "AUTHINFO FOOBAR x")
+	if err := hExpectCode(code, line, 501); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(line, "FOOBAR") {
+		t.Errorf("AUTHINFO reply echoes the subcommand: %q", line)
+	}
+	name := fmt.Sprintf("t1user%04dnoecho", hSeq.Add(1))
+	code, line = c.cmd(t, "AUTHINFO USER %s", name)
+	if err := hExpectCode(code, line, 381); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(line, name) {
+		t.Errorf("381 reply echoes the username: %q", line)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// readArticleBlock (SEC-3 article reader, wired by nntp-intake-injection)
+
+func TestSessReadArticleBlock(t *testing.T) {
+	// write sends data from the client end in the background (net.Pipe is
+	// synchronous); the pipe cleanup unblocks a writer the reader abandoned.
+	write := func(conn net.Conn, data string) {
+		go func() { _, _ = io.WriteString(conn, data) }()
+	}
+
+	t.Run("normal", func(t *testing.T) {
+		c, w := sessPipeConn(t)
+		write(w, "Subject: a\r\nFrom: b\r\n\r\nbody1\r\n..dot\r\n\r\nlast\r\n.\r\nNEXT\r\n")
+		head, body, err := c.readArticleBlock(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := hExpectLines(head, []string{"Subject: a", "From: b"}); err != nil {
+			t.Errorf("head: %v", err)
+		}
+		if err := hExpectLines(body, []string{"body1", ".dot", "", "last"}); err != nil {
+			t.Errorf("body: %v", err)
+		}
+		if line, err := c.readCommandLine(); err != nil || line != "NEXT" {
+			t.Errorf("next line %q, %v; want NEXT", line, err)
+		}
+	})
+	t.Run("empty-body", func(t *testing.T) {
+		c, w := sessPipeConn(t)
+		write(w, "Subject: a\r\n\r\n.\r\n")
+		head, body, err := c.readArticleBlock(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(head) != 1 || len(body) != 0 {
+			t.Errorf("head %q body %q, want 1 head line and no body", head, body)
+		}
+	})
+	t.Run("long-line-inside-limit", func(t *testing.T) {
+		c, w := sessPipeConn(t)
+		long := strings.Repeat("x", 6000)
+		write(w, "Subject: a\r\n\r\n"+long+"\r\n.\r\n")
+		_, body, err := c.readArticleBlock(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(body) != 1 || body[0] != long {
+			t.Errorf("body: %d lines; want one 6000-byte line", len(body))
+		}
+	})
+	t.Run("over-limit", func(t *testing.T) {
+		c, w := sessPipeConn(t)
+		write(w, "Subject: a\r\n\r\n"+strings.Repeat("y", 300)+"\r\n"+strings.Repeat("z", 5000)+"\r\n.\r\nAFTER\r\n")
+		head, body, err := c.readArticleBlock(100)
+		if !errors.Is(err, ErrArticleTooLarge) {
+			t.Fatalf("err %v, want ErrArticleTooLarge", err)
+		}
+		if head != nil || body != nil {
+			t.Errorf("oversized article returned lines: %d head, %d body", len(head), len(body))
+		}
+		// the article was drained: the connection reads the next command
+		if line, err := c.readCommandLine(); err != nil || line != "AFTER" {
+			t.Errorf("next line %q, %v; want AFTER", line, err)
+		}
+	})
+	t.Run("head-line-cap", func(t *testing.T) {
+		c, w := sessPipeConn(t)
+		var b strings.Builder
+		for i := 0; i < 1100; i++ {
+			fmt.Fprintf(&b, "X-H%d: v\r\n", i)
+		}
+		b.WriteString("\r\nbody\r\n.\r\nAFTER\r\n")
+		write(w, b.String())
+		if _, _, err := c.readArticleBlock(0); !errors.Is(err, ErrArticleTooLarge) {
+			t.Fatalf("err %v, want ErrArticleTooLarge for 1100 head lines", err)
+		}
+		if line, err := c.readCommandLine(); err != nil || line != "AFTER" {
+			t.Errorf("next line %q, %v; want AFTER", line, err)
+		}
+	})
+	t.Run("drain-limit", func(t *testing.T) {
+		c, w := sessPipeConn(t)
+		bound := maxArticleDrainBytes(1000)
+		line := strings.Repeat("d", 1000) + "\r\n"
+		write(w, strings.Repeat(line, int(bound)/len(line)+16)) // no terminator
+		if _, _, err := c.readArticleBlock(1000); !errors.Is(err, ErrArticleDrainLimit) {
+			t.Fatalf("err %v, want ErrArticleDrainLimit", err)
+		}
+	})
+	t.Run("drain-bound", func(t *testing.T) {
+		for _, tc := range []struct{ limit, want int64 }{
+			{1000, 1 << 20}, {1 << 20, 4 << 20}, {32 << 20, 64 << 20}, {1 << 40, 64 << 20},
+		} {
+			if got := maxArticleDrainBytes(tc.limit); got != tc.want {
+				t.Errorf("maxArticleDrainBytes(%d) = %d, want %d", tc.limit, got, tc.want)
+			}
+		}
+		if got := (&NNTPServer{}).MaxArticleBytes(); got != DefaultMaxArticleBytes {
+			t.Errorf("MaxArticleBytes without config = %d, want %d", got, DefaultMaxArticleBytes)
+		}
+		cfg := &config.ServerConfig{}
+		cfg.NNTP.MaxArtSize = 32768
+		if got := (&NNTPServer{Config: cfg}).MaxArticleBytes(); got != 32768 {
+			t.Errorf("MaxArticleBytes with MaxArtSize 32768 = %d", got)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Start validation and TLS (BUG-7, A-nntp-rfc-12, A-nntp-sec-5)
+
+func TestSessStartErrors(t *testing.T) {
+	db := hTestDB(t)
+	t.Run("no-ports", func(t *testing.T) {
+		var wg sync.WaitGroup
+		cfg := &config.ServerConfig{}
+		cfg.NNTP.MaxConns = 10
+		s, err := NewNNTPServer(db, cfg, &wg, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Start(); err == nil {
+			_ = s.Stop()
+			t.Fatal("Start without any port succeeded")
+		}
+		if s.IsRunning() {
+			t.Fatal("IsRunning() after a failed Start")
+		}
+	})
+	for _, tc := range []struct{ name, cert, key string }{
+		{"tls-without-cert", "", ""},
+		{"tls-missing-cert-file", "missing-cert.pem", "missing-key.pem"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var wg sync.WaitGroup
+			dir := t.TempDir()
+			cfg := &config.ServerConfig{}
+			cfg.NNTP.MaxConns = 10
+			cfg.NNTP.Port = sessFreePort(t)
+			cfg.NNTP.TLSPort = sessFreePort(t)
+			if tc.cert != "" {
+				cfg.NNTP.TLSCert = filepath.Join(dir, tc.cert)
+				cfg.NNTP.TLSKey = filepath.Join(dir, tc.key)
+			}
+			s, err := NewNNTPServer(db, cfg, &wg, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Start(); err == nil {
+				_ = s.Stop()
+				t.Fatal("Start with a TLS port but no usable certificate succeeded")
+			}
+			if s.IsRunning() {
+				t.Fatal("IsRunning() after a failed Start")
+			}
+			// the plain port was never bound
+			l, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.NNTP.Port))
+			if err != nil {
+				t.Fatalf("plain port %d still bound after a failed Start: %v", cfg.NNTP.Port, err)
+			}
+			_ = l.Close()
+			sessWaitWG(t, &wg)
+		})
+	}
+}
+
+func TestSessTLSMinVersion(t *testing.T) {
+	db := hTestDB(t)
+	srvCfg, der := sessSelfSignedTLS(t)
+	key, ok := srvCfg.Certificates[0].PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		t.Fatalf("private key is %T", srvCfg.Certificates[0].PrivateKey)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	cfg := &config.ServerConfig{}
+	cfg.NNTP.MaxConns = 10
+	cfg.NNTP.TLSPort = sessFreePort(t)
+	cfg.NNTP.TLSCert = certFile
+	cfg.NNTP.TLSKey = keyFile
+	s, err := NewNNTPServer(db, cfg, &wg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = s.Stop()
+		sessWaitWG(t, &wg)
+	})
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.NNTP.TLSPort)
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+
+	// A TLS 1.1 client must fail the handshake (MinVersion TLS 1.2).
+	old := &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS10, MaxVersion: tls.VersionTLS11} //nolint:gosec // test client
+	if conn, err := tls.DialWithDialer(dialer, "tcp", addr, old); err == nil {
+		_ = conn.Close()
+		t.Fatal("TLS 1.1 handshake succeeded, want MinVersion TLS 1.2")
+	}
+
+	// A TLS 1.2+ client gets the greeting.
+	conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // test client
+	if err != nil {
+		t.Fatalf("TLS 1.2+ dial: %v", err)
+	}
+	defer conn.Close()
+	c := &hClient{Conn: conn, R: bufio.NewReader(conn), Deadline: 5 * time.Second}
+	greeting, err := c.readLine()
+	if err != nil {
+		t.Fatalf("greeting: %v", err)
+	}
+	if code, perr := hParseCode(greeting); perr != nil || code != 201 {
+		t.Fatalf("greeting %q, want 201 (read-only server)", greeting)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Access policy (decisions 1 and 4)
+
+func TestSessReadRequiresAuth(t *testing.T) {
+	user, pass := sessUser(t, false)
+	hs := sessOwnServer(t, nil, nil, func(s *NNTPServer) { s.ReadRequiresAuth = true })
+	c := hs.dial(t)
+	missing := hGroupName("t1.readauth.none")
+	// RFC 3977 §3.2.1 / RFC 4643 §2.1: 480 before authentication.
+	for _, line := range []string{"GROUP " + missing, "LIST", "XOVER", "STAT 1"} {
+		code, reply := c.cmd(t, "%s", line)
+		if err := hExpectCode(code, reply, 480); err != nil {
+			t.Errorf("%q before AUTHINFO: %v", line, err)
+		}
+	}
+	// Session commands stay available.
+	sessCaps(t, c)
+	if code, reply := c.cmd(t, "MODE READER"); code != 201 {
+		t.Errorf("MODE READER before AUTHINFO: %q", reply)
+	}
+	sessAuth(t, c, user, pass)
+	code, reply := c.cmd(t, "GROUP %s", missing)
+	if err := hExpectCode(code, reply, 211, 411); err != nil {
+		t.Fatalf("GROUP after AUTHINFO: %v", err)
+	}
+}
+
+func TestSessPlaintextPolicy(t *testing.T) {
+	t.Run("refuse", func(t *testing.T) {
+		hs := sessOwnServer(t, nil, nil, func(s *NNTPServer) { s.PlaintextAuth = PlaintextAuthRefuse })
+		c := hs.dial(t)
+		if caps := sessCaps(t, c); sessHasCap(caps, "AUTHINFO") {
+			t.Errorf("refuse: AUTHINFO advertised on plaintext: %q", caps)
+		}
+		// RFC 4643 §2.3.1 / RFC 3977 §3.2.1: 483 encryption required.
+		code, line := c.cmd(t, "AUTHINFO USER t1user-refuse")
+		if err := hExpectCode(code, line, 483); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("accept", func(t *testing.T) {
+		hs := sessOwnServer(t, nil, nil, nil)
+		c := hs.dial(t)
+		if caps := sessCaps(t, c); sessHasCap(caps, "AUTHINFO") {
+			t.Errorf("accept: AUTHINFO advertised on plaintext: %q", caps)
+		}
+		code, line := c.cmd(t, "AUTHINFO USER t1user-accept")
+		if err := hExpectCode(code, line, 381); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("advertise", func(t *testing.T) {
+		hs := sessOwnServer(t, nil, nil, func(s *NNTPServer) { s.PlaintextAuth = PlaintextAuthAdvertise })
+		if caps := sessCaps(t, hs.dial(t)); !sessHasCap(caps, "AUTHINFO") {
+			t.Errorf("advertise: AUTHINFO missing on plaintext: %q", caps)
+		}
+	})
+	t.Run("tls", func(t *testing.T) {
+		user, pass := sessUser(t, true)
+		cfg, _ := sessSelfSignedTLS(t)
+		hs := sessOwnServer(t, nil, cfg, func(s *NNTPServer) { s.PlaintextAuth = PlaintextAuthRefuse })
+		c := hs.dial(t)
+		if caps := sessCaps(t, c); !sessHasCap(caps, "AUTHINFO") {
+			t.Errorf("TLS: AUTHINFO missing before login: %q", caps)
+		}
+		sessAuth(t, c, user, pass)
+		// RFC 4643 §2.2: not advertised after a successful login.
+		if caps := sessCaps(t, c); sessHasCap(caps, "AUTHINFO") {
+			t.Errorf("TLS: AUTHINFO still advertised after 281: %q", caps)
+		}
+	})
+	t.Run("parse", func(t *testing.T) {
+		for in, want := range map[string]PlaintextAuthPolicy{
+			"accept": PlaintextAuthAccept, "ADVERTISE": PlaintextAuthAdvertise, " refuse ": PlaintextAuthRefuse,
+		} {
+			if got, err := ParsePlaintextAuthPolicy(in); err != nil || got != want {
+				t.Errorf("ParsePlaintextAuthPolicy(%q) = %v, %v; want %v", in, got, err, want)
+			}
+		}
+		if _, err := ParsePlaintextAuthPolicy("maybe"); err == nil {
+			t.Error("ParsePlaintextAuthPolicy(maybe) succeeded")
+		}
 	})
 }

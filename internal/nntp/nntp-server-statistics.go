@@ -53,8 +53,23 @@ func (s *ServerStats) GetTotalConnections() int64 {
 	return s.totalConnections
 }
 
+// knownStatCommands are the command words counted under their own name: the
+// dispatched commands plus the RFC 3977/4644 words other plans add. Every other
+// word is counted under "UNKNOWN", so junk input can't grow the map (SEC-4).
+var knownStatCommands = map[string]bool{
+	"CAPABILITIES": true, "MODE": true, "AUTHINFO": true, "QUIT": true, "HELP": true, "LIST": true,
+	"GROUP": true, "LISTGROUP": true, "STAT": true, "HEAD": true, "BODY": true, "ARTICLE": true,
+	"XOVER": true, "XHDR": true, "POST": true, "IHAVE": true, "TAKETHIS": true,
+	"DATE": true, "NEXT": true, "LAST": true, "NEWGROUPS": true, "NEWNEWS": true, "OVER": true,
+	"HDR": true, "CHECK": true, "STARTTLS": true,
+}
+
 // CommandExecuted increments the counter for a specific command
+// (words not in knownStatCommands are counted as "UNKNOWN").
 func (s *ServerStats) CommandExecuted(command string) {
+	if !knownStatCommands[command] {
+		command = "UNKNOWN"
+	}
 	s.mux.Lock()
 	defer s.mux.Unlock()
 	s.commandCounts[command]++

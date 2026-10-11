@@ -1,47 +1,84 @@
 package nntp
 
 import (
-	"fmt"
+	"log"
 	"strings"
 )
 
-// handleAuthInfo handles AUTHINFO command for authentication
+// authinfoArgument returns the raw rest of an AUTHINFO line after "AUTHINFO",
+// the subcommand and one run of SP/TAB. Spaces inside and at the end are kept
+// (RFC 4643 §4: a password may contain SP).
+func authinfoArgument(line string) string {
+	isWS := func(b byte) bool { return b == ' ' || b == '\t' }
+	i := 0
+	for word := 0; word < 2; word++ {
+		for i < len(line) && isWS(line[i]) {
+			i++
+		}
+		for i < len(line) && !isWS(line[i]) {
+			i++
+		}
+	}
+	for i < len(line) && isWS(line[i]) {
+		i++
+	}
+	return line[i:]
+}
+
+// handleAuthInfo handles AUTHINFO USER/PASS (RFC 4643 §2.3). No reply echoes
+// client input.
 func (c *ClientConnection) handleAuthInfo(args []string, line string) error {
-	if len(args) < 2 {
-		return c.sendResponse(501, "AUTHINFO command requires subcommand and argument")
+	if len(args) == 0 {
+		c.rateLimitOnError()
+		return c.sendResponse(501, "AUTHINFO requires a subcommand")
+	}
+	// RFC 4643 §2.3.2: any AUTHINFO after a successful login → 502
+	if c.authenticated {
+		return c.sendResponse(502, "Already authenticated")
+	}
+	if !c.isTLS && c.server.PlaintextAuth == PlaintextAuthRefuse {
+		return c.sendResponse(483, "Encryption required")
 	}
 
 	subcommand := strings.ToUpper(args[0])
-	argument := args[1]
+	if subcommand != "USER" && subcommand != "PASS" {
+		c.rateLimitOnError()
+		return c.sendResponse(501, "Unknown AUTHINFO subcommand")
+	}
+	argument := authinfoArgument(line)
+	if argument == "" {
+		c.rateLimitOnError()
+		return c.sendResponse(501, "AUTHINFO USER and PASS require an argument")
+	}
 
-	switch subcommand {
-	case "USER":
+	if subcommand == "USER" {
 		// Store username for next password command
 		c.authUsername = argument
-		return c.sendResponse(381, fmt.Sprintf("Password required for %s", argument))
-
-	case "PASS":
-		// Check if we have a username from previous USER command
-		if c.authUsername == "" {
-			return c.sendResponse(482, "AUTHINFO USER required first")
-		}
-
-		// Authenticate the user with the stored username and provided password
-		user, err := c.server.AuthManager.AuthenticateUser(c.authUsername, argument)
-		if err != nil {
-			c.server.Stats.AuthFailure()
-			c.authUsername = "" // Clear stored username
-			return c.sendResponse(481, "Authentication failed")
-		}
-
-		// Authentication successful
-		c.authenticated = true
-		c.user = user
-		c.authUsername = "" // Clear stored username
-		c.server.Stats.AuthSuccess()
-		return c.sendResponse(281, fmt.Sprintf("Authentication accepted for user %s", user.Username))
-
-	default:
-		return c.sendResponse(500, fmt.Sprintf("Unknown AUTHINFO subcommand: %s", subcommand))
+		return c.sendResponse(381, "Password required")
 	}
+
+	// PASS: needs a preceding USER
+	if c.authUsername == "" {
+		c.rateLimitOnError()
+		return c.sendResponse(482, "AUTHINFO USER required first")
+	}
+	username := c.authUsername
+	c.authUsername = ""
+
+	user, err := c.server.AuthManager.AuthenticateUser(username, argument)
+	if err != nil {
+		c.server.Stats.AuthFailure()
+		c.rateLimitOnError()
+		return c.sendResponse(481, "Authentication failed")
+	}
+	if !c.server.acquireUserSlot(user) {
+		log.Printf("[NNTP-AUTH] user %s refused: connection limit %d reached", user.Username, user.MaxConns)
+		c.rateLimitOnError()
+		return c.sendResponse(481, "Too many connections for this user")
+	}
+
+	c.authenticated = true
+	c.user = user
+	c.server.Stats.AuthSuccess()
+	return c.sendResponse(281, "Authentication accepted")
 }
