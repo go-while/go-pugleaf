@@ -120,7 +120,7 @@ info N20 sec-2 "LISTGROUP zz.no.such: zz_no_such.db files before=$before after=$
 # ---------------------------------------------------------------- N21 (SEC-3): 2 MiB command line without LF
 r0=$(rss_kb)
 if exec 3<>"/dev/tcp/127.0.0.1/$PORT"; then
-  head -c 2097152 /dev/zero | tr '\0' 'A' >&3
+  timeout 10 bash -c 'head -c 2097152 /dev/zero | tr "\000" A' >&3
   sleep 2
   r1=$(rss_kb)
   exec 3>&- 3<&-
@@ -171,8 +171,6 @@ else
   fail N22 sec-1 "fresh start for the spin probe" "server failed to start; log tail: $(tail -5 "$LOG" | tr '\n' ' ')"
 fi
 
-races=$(grep -c 'WARNING: DATA RACE' "$LOG" 2>/dev/null)
-info N99 any "DATA RACE reports in server log: ${races:-0}"
 echo "SUMMARY pass=$PASSES fail=$FAILS info=$INFOS data=$DATA log=$LOG"
 [ "$FAILS" -gt 125 ] && FAILS=125
 exit "$FAILS"

@@ -237,10 +237,11 @@ func e2eTeardown(code int, keep bool, srv *nntp.NNTPServer, srvWG *sync.WaitGrou
 		fail("Shutdown: " + err.Error())
 	}
 	if !keep {
-		if code == 0 {
-			_ = os.RemoveAll(e2eDataDir)
-		} else {
+		// kept only on request: every PUGLEAF_KNOWN_BUGS=1 run exits non-zero
+		if os.Getenv("PUGLEAF_TEST_KEEP") == "1" {
 			fmt.Fprintln(os.Stderr, "[E2E] test data kept in", e2eDataDir)
+		} else {
+			_ = os.RemoveAll(e2eDataDir)
 		}
 	}
 	return code
@@ -1145,6 +1146,14 @@ func TestE2ERejectUnknownGroup(t *testing.T) {
 	if n := countFiles(); n != 0 {
 		errs = append(errs, fmt.Sprintf("%d group DB file(s) %s created under <DataDir>/db", n, file))
 	}
+	// the newsgroups row is upserted by the async batch writer: let a sentinel
+	// article in an existing group pass through the batch before checking it
+	sg := e2eGroup(t, "sentinel")
+	sid := e2eMsgID("sentinel")
+	if code, line := c.post(t, e2eWire(e2eHead(sid, sg, "E2E sentinel", e2eNow()), []string{"sentinel"})); code != 240 {
+		t.Fatalf("POST sentinel to %s: %q, want 240", sg, line)
+	}
+	e2eWaitStored(t, sid, sg)
 	if _, err := e2eDB.MainDBGetNewsgroup(g); !errors.Is(err, sql.ErrNoRows) {
 		errs = append(errs, fmt.Sprintf("newsgroups row for %s: err=%v, want sql.ErrNoRows", g, err))
 	}
@@ -1168,6 +1177,11 @@ func TestE2ESizeLimits(t *testing.T) {
 		err := e2eRunIsolated(t, 120*time.Second, e2eOversizeChild)
 		if e2eIsChild(t) {
 			return
+		}
+		// only the child's BUG-7 assertions carry the marker; any other child
+		// failure (setup, auth, a -race report, timeout) is a real failure
+		if err != nil && !strings.Contains(err.Error(), e2eBug7Marker) {
+			t.Fatal(err)
 		}
 		e2eKnownBug(t, "BUG-7", err)
 	})
@@ -1195,6 +1209,9 @@ func TestE2ESizeLimits(t *testing.T) {
 		e2eKnownBug(t, "SEC-3", bugErr)
 	})
 }
+
+// e2eBug7Marker prefixes the child's BUG-7 failures (see lines-20000).
+const e2eBug7Marker = "BUG-7-OPEN:"
 
 // e2eOversizeChild posts a 20 000-line article and requires a status line
 // (441 or another 4xx/5xx), then either a usable connection or a close after
@@ -1231,20 +1248,26 @@ func e2eOversizeChild(t *testing.T) {
 	}); werr != nil && !statusOK {
 		t.Logf("no handler end logged for %s: %v", local, werr)
 	}
+	// Note for the fix plan: today the client sees "connection reset by peer"
+	// because the server closes with ~3,600 unread article lines in its receive
+	// buffer (the kernel answers them with RST). A fix must drain the rest of
+	// the article (or CloseWrite and drain under a deadline) before closing,
+	// otherwise the 441 is lost even when it is written before the close.
 	var closedWrites []string
 	for _, l := range e2eLogs.lines(local) {
-		if strings.Contains(l, "use of closed network connection") {
+		// writes only: a read loop hitting the closed conn after a correct 441+close is fine
+		if strings.Contains(l, "use of closed network connection") && strings.Contains(l, "write tcp") {
 			closedWrites = append(closedWrites, l)
 		}
 	}
 	switch {
 	case !statusOK && len(closedWrites) > 0:
-		t.Fatalf("20000-line article: no status line (read: code=%d line=%q err=%v, write err=%v); the server wrote to the closed socket: %q",
+		t.Fatalf(e2eBug7Marker+" 20000-line article: no status line (read: code=%d line=%q err=%v, write err=%v); the server wrote to the closed socket: %q",
 			code, line, err, wireErr, closedWrites)
 	case !statusOK:
-		t.Fatalf("20000-line article: no status line (read: code=%d line=%q err=%v, write err=%v)", code, line, err, wireErr)
+		t.Fatalf(e2eBug7Marker+" 20000-line article: no status line (read: code=%d line=%q err=%v, write err=%v)", code, line, err, wireErr)
 	case len(closedWrites) > 0:
-		t.Fatalf("20000-line article: %q, but the server wrote to a closed socket: %q", line, closedWrites)
+		t.Fatalf(e2eBug7Marker+" 20000-line article: %q, but the server wrote to a closed socket: %q", line, closedWrites)
 	}
 }
 
