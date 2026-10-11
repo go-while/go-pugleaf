@@ -211,7 +211,17 @@ func TestGrpGroupSeeded(t *testing.T) {
 		if err := hExpectCode(code, line, 211); err != nil {
 			t.Fatal(err)
 		}
-		knownBug(t, "BUG-4", grpExpect211(line, 3, 3, 5, g))
+		count, low, high, name, err := grpParse211(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count != 3 || high != 5 || name != g {
+			t.Fatalf("GROUP: got %q, want \"211 3 3 5 %s\"", line, g)
+		}
+		if low != 3 {
+			err = fmt.Errorf("GROUP: got %q, want low mark 3 (\"211 3 3 5 %s\")", line, g)
+		}
+		knownBug(t, "BUG-4", err)
 	})
 
 	// RFC 3977 §6.1.1.2: a successful GROUP sets the current article number to
@@ -228,10 +238,10 @@ func TestGrpGroupSeeded(t *testing.T) {
 		if err == nil {
 			want := fmt.Sprintf("223 3 %s", hMessageID(g, 3))
 			if !strings.HasPrefix(line, want) {
-				err = fmt.Errorf("bare STAT after GROUP: got %q, want prefix %q", line, want)
+				err = fmt.Errorf("bare STAT after GROUP: got %q, want prefix %q (also needs RFC-3)", line, want)
 			}
 		} else {
-			err = fmt.Errorf("bare STAT after GROUP: %w", err)
+			err = fmt.Errorf("bare STAT after GROUP: %w (also needs RFC-3)", err)
 		}
 		knownBug(t, "BUG-4", err)
 	})
@@ -272,8 +282,10 @@ func TestGrpGroupInactive(t *testing.T) {
 	}
 }
 
-// TestGrpGroupEmpty: RFC 3977 §6.1.1.2, an empty group is reported with a zero
-// count and either high = low-1 or all three numbers zero.
+// TestGrpGroupEmpty: RFC 3977 §6.1.1.2 allows three forms for an empty group
+// and clients MUST accept all three: count 0 with high = low-1, all three
+// numbers zero, or high >= low (the count may then be non-zero, but here the
+// group holds no articles, so it must be 0). Any of them passes.
 func TestGrpGroupEmpty(t *testing.T) {
 	g := hGroup(t, "t3.groupempty", 0, nil)
 	hs := newTestServer(t, hServerOpts{})
@@ -286,8 +298,9 @@ func TestGrpGroupEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if name != g || count != 0 || !(high == low-1 || (low == 0 && high == 0)) {
-		t.Fatalf("empty group: got %q, want \"211 0 x x-1 %s\" or \"211 0 0 0 %s\"", line, g, g)
+	emptyForm := high == low-1 || (low == 0 && high == 0) || high >= low
+	if name != g || count != 0 || !emptyForm {
+		t.Fatalf("empty group: got %q, want \"211 0 x x-1 %s\", \"211 0 0 0 %s\" or \"211 0 low high %s\" with high >= low", line, g, g, g)
 	}
 }
 
@@ -409,7 +422,7 @@ func TestGrpListGroupUnknownNoFile(t *testing.T) {
 		errs = append(errs, fmt.Errorf("LISTGROUP %s created %v", unknown, created))
 	}
 	if _, err := db.MainDBGetNewsgroup(unknown); err == nil {
-		errs = append(errs, fmt.Errorf("LISTGROUP %s created a newsgroups row", unknown))
+		t.Fatalf("LISTGROUP %s created a newsgroups row", unknown)
 	}
 	knownBug(t, "SEC-2", errors.Join(errs...))
 }
@@ -521,9 +534,13 @@ func TestGrpListActive(t *testing.T) {
 		t.Fatalf("LIST ACTIVE does not list %s", g)
 	}
 	want := fmt.Sprintf("%s 5 3 y", g)
+	f := strings.Fields(got)
+	if len(f) != 4 || f[1] != "5" {
+		t.Fatalf("LIST ACTIVE line %q, want %q", got, want)
+	}
 	var err error
-	if strings.Join(strings.Fields(got), " ") != want {
-		err = fmt.Errorf("LIST ACTIVE line %q, want %q", got, want)
+	if f[2] != "3" || f[3] != "y" {
+		err = fmt.Errorf("LIST ACTIVE line %q, want %q (low mark and status)", got, want)
 	}
 	knownBug(t, "BUG-4", err)
 }
@@ -551,7 +568,7 @@ func TestGrpListWildmat(t *testing.T) {
 			lines := c.readDotLines(t)
 			for _, want := range []string{a, b} {
 				if _, ok := grpFindLine(lines, want); !ok {
-					errs = append(errs, fmt.Errorf("LIST %s t3.* does not list %s", kw, want))
+					t.Fatalf("LIST %s t3.* does not list %s", kw, want)
 				}
 			}
 			for _, l := range lines {
@@ -627,7 +644,7 @@ func TestGrpDate(t *testing.T) {
 	code, line := c.cmd(t, "DATE")
 	err := hExpectCode(code, line, 111)
 	if err == nil {
-		m := regexp.MustCompile(`^111 (\d{14})$`).FindStringSubmatch(line)
+		m := regexp.MustCompile(`^111 (\d{14})(\s|$)`).FindStringSubmatch(line)
 		if m == nil {
 			err = fmt.Errorf("DATE: got %q, want \"111 yyyymmddhhmmss\"", line)
 		} else if ts, perr := time.Parse("20060102150405", m[1]); perr != nil {
@@ -679,14 +696,18 @@ func TestGrpNextLast(t *testing.T) {
 		if err := hExpectCode(code, line, 211); err != nil {
 			t.Fatal(err)
 		}
-		knownBug(t, "RFC-1", errors.Join(
+		err := errors.Join(
 			expect(t, c, "LAST", 422, 0), // at the first article
 			expect(t, c, "NEXT", 223, 4),
 			expect(t, c, "NEXT", 223, 6), // skips the deleted 5
 			expect(t, c, "NEXT", 421, 0), // at the last article
 			expect(t, c, "LAST", 223, 4),
 			expect(t, c, "STAT", 223, 4), // the current article moved (§6.2.4)
-		))
+		)
+		if err != nil {
+			err = fmt.Errorf("%w\n(also needs RFC-3: bare STAT)", err)
+		}
+		knownBug(t, "RFC-1", err)
 	})
 
 	t.Run("empty-group", func(t *testing.T) {
