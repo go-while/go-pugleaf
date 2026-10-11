@@ -535,6 +535,9 @@ N20–N22 PASS (hardening turned them into PASS checks; this plan must not regre
 ---
 
 ## Open questions
+
+Answered 2026-10-11 by the user ("1-3 with your defaults"): Q3 control messages are rejected (D3 as written);
+Q1 the `MaxArtSize` default stays 32 KiB (`config.go` untouched); Q2 TAKETHIS in flight answers `439 <id> In progress` (D9 as written).
 - **Q3 Control messages (ask before wave 2; D3 is implemented in S3).** D3 rejects them (peers get 437/439). The
   alternative is accept-and-drop (answer success, record in history, store nothing). Confirm.
 - **Q1 MaxArtSize default (ask before wave 3).** The limit is enforced (hardening's reader, `-maxartsize` flag from
