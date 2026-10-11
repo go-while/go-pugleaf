@@ -55,6 +55,9 @@ Paths are under `internal/` unless they start with `cmd/`. Severity is the conso
 | A-nntp-rfc-7 | `nntp/nntp-cmd-posting.go:56-72,134-137` | `IHAVE not-a-message-id` → 335; TAKETHIS accepts any token as id. RFC 3977 §3.2.1: 501. | low |
 | A-nntp-rfc-8 | `nntp/nntp-cmd-posting.go:131-152,160-165` | TAKETHIS 480/501/502 replies lack the message-id; a history error answers `439 … Retry later` (439 = do not retry). RFC 4644 §2.5.2: temporary error → 400 and close. | low |
 | A-intake-7 | `processor/threading.go:162-168`, `processor/proc-utils.go:778-785` | Future margin 25 h (RFC 5537 §3.7 step 2: 24 h), Injection-Date ignored, no past cutoff for POST (§3.5 step 3: SHOULD, at least 72 h). | low |
+| A-tools-1 (handed over by audit-delta-fixes) | `processor/threading.go:256` | `go proc.DB.Batch.BatchCaptureOverviewForLater(...)` per stored article with no bound: one parked goroutine plus the full article each (19 872 goroutines, +377 MiB for 20 000 fetched articles). It cannot become a plain call: `processArticle` holds `article.Mux` (`:68-69`) and `BatchCaptureOverviewForLater`/`BatchDivider` lock the same mutex (`database/db_batch.go:157`, `:1769`). | high |
+| A-db-3 (handed over by audit-delta-fixes) | `database/db_batch.go:999` (`INSERT OR IGNORE`), `:1063-1094` (number mapping by message-id), `:813-823,947` (`len(batches)` counted), `processor/threading.go:240` / `database/db_groupdbs.go:336-343` (`ExistsMsgIdInArticlesDB` returns false on any error) | A message-id already stored in the group, or twice in one batch, is "committed" with the existing number: `message_count` grows, history is re-added, and `batchProcessThreadRoots` inserts a second `threads` row (no unique constraint). | medium |
+| A-db-4 (handed over by audit-delta-fixes) | `database/db_batch.go:893-916` (`latestDate` taken only after the "still referenced" `continue`), `:946-947` | A batch of crossposts writes `updated_at = '0001-01-01 00:00:00'`; a backfill batch moves `updated_at` backwards. | medium |
 | A-intake-11 | `processor/proc_DLArt.go:44-64,80,124-192,245-248` | A timed-out `DownloadArticles` returns while its XHDR/feeder goroutines keep running; late results land in the per-group global `ReturnQ` and are counted by the next run of that group. PLAUSIBLE (not reproduced). | low |
 
 Cross-references only (not fixed here; owner in brackets):
@@ -64,7 +67,7 @@ Cross-references only (not fixed here; owner in brackets):
 - **CLI-1** `common/headers.go` `ReconstructHeaders` duplicate Path / repeated folded Newsgroups / dropped final empty body line [nntp-client-transfer]. This plan only guarantees what intake stores: one Path line equal to the `path` column, no Xref, no duplicate mandatory headers, no colon-less lines (strict intake).
 - **A-nntp-rfc-2** served side (dot-stuffing and LF sanitizing in HEAD/ARTICLE/XOVER/XHDR) [nntp-server-hardening]. Hardening removes the `e2eKnownBug(t, "A-nntp-rfc-2", …)` marker in `TestE2EDotHeaderLine` (`server_e2e_test.go:1329`, served-side stuffing makes the 240 branch pass). S3 then changes that test's expectation to 441, because intake now refuses the article (A-intake-2).
 - **BUG-8** `local430` not invalidated on arrival [nntp-server-hardening: `(*Local430).Remove` + 1 s TTL]. S4 calls `c.server.local430.Remove(id)` after every 240/235/239 (the call site is in this plan's file).
-- **A-db-3, A-db-4, A-db-5, A-db-9, A-tools-1** live in `db_batch.go`/`threading.go`/`proc_DLArt.go` functions this plan does not touch (see K6) [audit-delta-fixes]. **A-tools-4** (per-group `ReturnQ` never released) is resolved as a side effect of S5 (per-run queue); audit-delta-fixes should re-check and close it rather than re-implement.
+- **A-db-5, A-db-9** live in `db_batch.go` functions this plan does not touch (see K6) [audit-delta-fixes]. A-db-9 (the divider's `MaxQueued` brake) complements A-tools-1's limiter here. A-tools-1, A-db-3 and A-db-4 were handed over by audit-delta-fixes and are fixed here (S3, S2). **A-tools-4** (per-group `ReturnQ` never released) is resolved as a side effect of S5 (per-run queue); audit-delta-fixes should re-check and close it rather than re-implement.
 
 ### Decisions (behaviour changes, report to the user at the end)
 
@@ -131,8 +134,8 @@ Cross-references only (not fixed here; owner in brackets):
   - From hardening (consumed, not changed): `readArticleBlock(maxBytes)` (refreshes the read deadline per line and keeps the 16384-line cap as a secondary bound: not re-implemented here), `ErrArticleTooLarge`, `ErrArticleDrainLimit`, `DefaultMaxArticleBytes`, `(*NNTPServer).MaxArticleBytes()`, `maxArticleDrainBytes`, `(*Local430).Remove(messageID)` (1 s TTL).
 - **K2: new names reserved per slice** (all free at 03d5ef7, checked with `grep -rnw <name> internal cmd`):
   - S1 `intake-common` (package `common`, new files): `ErrIntakeRejected`, `ErrIntakeTemporary`, `ValidMessageID`, `ParseNewsgroups`, `ValidGroupNameSyntax`, `IsReservedGroupName`, `HeaderBlockMode`, `HeaderBlockStrict`, `HeaderBlockFetch`, `CheckHeaderBlock`, `HeaderValue`, `HeaderValues`, `ReplaceHeader`, `RemoveHeaders`, `WireArticleSize`, `GenerateMessageID`, `FormatNewsDate`. Package `models`: field `Article.Posted`.
-  - S2 `intake-db`: `IntakeGroup`, `(*Database).GetIntakeGroup`, `query_GetIntakeGroup`.
-  - S3 `intake-processor`: `resolveIntakeGroups`, `intakeGroupDecision`, `releaseClaim`, `ParseNNTPDateStrict`, `bruteForceDateParseOK`, `MaxFutureDate`, `validateIntakeHeaders`, `syncStoredPath`, `stripXrefLines`.
+  - S2 `intake-db`: `IntakeGroup`, `(*Database).GetIntakeGroup`, `query_GetIntakeGroup`, `(*GroupDB).LookupMsgIdInArticlesDB`.
+  - S3 `intake-processor`: `captureLimiter`, `newCaptureLimiter`, `(*captureLimiter).acquire`, `(*captureLimiter).release`, `captureLimit`, `MaxCaptureInFlight`, `defaultCaptureLimiter`, `resolveIntakeGroups`, `intakeGroupDecision`, `releaseClaim`, `ParseNNTPDateStrict`, `bruteForceDateParseOK`, `MaxFutureDate`, `validateIntakeHeaders`, `syncStoredPath`, `stripXrefLines`.
   - S4 `intake-nntp`: `(*ClientConnection).pathIdentity`, `injectProtoArticle`, `relayPath`, `intakeKind` (+ consts `intakePost`, `intakeIHave`, `intakeTakeThis`), `intakeReply`, `closeAfterReply`, `PostDateMaxAge`, `closeDrainTimeout`. (Re-check at the S4 base that hardening did not take any of them.)
   - S5 `intake-dlart`: `newDownloadRun`, `drainLateResults`.
 - **K3: tests.**
@@ -154,7 +157,7 @@ Cross-references only (not fixed here; owner in brackets):
   `<reason>` is one of a fixed set of short strings (`invalid header block`, `missing mandatory header`, `invalid message-id`, `invalid newsgroups`, `too many newsgroups`, `no valid newsgroup`, `moderated group without Approved`, `control messages not accepted`, `invalid date`, `date in the future`, `date too old`, `invalid injection date`, `forged trace`, `invalid article`, `no path identity`, `article too large`); never client input. Pre-transfer replies (`CheckMessageID` at the offer stage) stay: IHAVE 435/436/436, TAKETHIS 439/439 and for `CaseError` now `400` + close (A-nntp-rfc-8). Gate replies (RFC-5): POST no processor / no permission `440`, IHAVE no processor `500`, TAKETHIS no processor `500 <id>`; 480/501/502 TAKETHIS replies carry the id.
   After every accept (240/235/239) the handler calls `c.server.local430.Remove(<id>)` (BUG-8 audit fix; hardening provides `Remove`).
 - **K5: claim handling in `processArticle`.** A rejection keeps today's `setCaseDupes` (re-offers within `CachedEntryTTL` get 435/439). A temporary failure calls `releaseClaim(item)` (`Response = history.CaseError`, `CachedEntryExpires = now + history.ErrorCaseTTL`), so `CheckMessageID` and the next `processArticle` fall through to the history lookup and the article can be retried. `CasePass` leaves the item to the batch writer (S2 now sets `CaseDupes` for every committed article).
-- **K6: no-touch zones.** S3 does not change `threading.go:256` (`go proc.DB.Batch.BatchCaptureOverviewForLater`, A-tools-1 belongs to audit-delta-fixes) beyond what the surrounding loop restructuring requires (the call stays a goroutine). S2 changes only `query_updateNewsgroupsStats`, its stats block `:935-967` and the PHASE 3 gating `:855-891` of `db_batch.go`. S4 owns every reply code in `nntp-cmd-posting.go` (gate lines included; hardening agreed) but does not touch `nntp-server-cliconns.go` or hardening's reader/`Local430` code.
+- **K6: no-touch zones.** S3 replaces `threading.go:256` only as A-tools-1 specifies (the capture stays in a goroutine; only bulk mode waits for a slot). S2 changes only these parts of `db_batch.go`: `query_updateNewsgroupsStats` `:549-563`, PHASE 1 call and number loop `:794-823`, PHASE 3 `:855-933`, the stats block `:935-967`, `batchInsertOverviews` `:969-1001` and `processOverviewBatch` `:1003-1103`; the divider, orchestrator, `ExpireCache`, threading functions and the queue counter (A-db-5, A-db-9: audit-delta-fixes) stay untouched. S4 owns every reply code in `nntp-cmd-posting.go` (gate lines included; hardening agreed) but does not touch `nntp-server-cliconns.go` or hardening's reader/`Local430` code.
 - **K7:** Nobody changes `go.mod`/`go.sum`, `appVersion.txt`, `FuncStructList.txt`, `internal/config/config.go` or files outside their ownership list. `gofmt` runs only on owned files (baseline: `internal/database/embedded_migrations.go`, `internal/web/web_admin_provider.go`). No slice calls a helper another slice of the same wave adds.
 
 ### Component design
@@ -215,11 +218,11 @@ Changes:
 
 Acceptance: E01 (all `TestIntakeCommon*` and both fuzz seed runs pass under `-race`). Known-bug set after: unchanged (29 ids).
 
-#### Slice `intake-db` (S2): batch stats UPDATE, NULL-safe group lookup, history gating
-Ids: A-db-1 (alias A-intake-1, upsert part), INT-6.
+#### Slice `intake-db` (S2): batch stats UPDATE, NULL-safe group lookup, history gating, duplicate counting
+Ids: A-db-1 (alias A-intake-1, upsert part), INT-6, A-db-3, A-db-4.
 
 Owned files:
-- `internal/database/db_batch.go` (only `query_updateNewsgroupsStats` `:549-563`, PHASE 3 `:855-891`, the stats block `:935-967`)
+- `internal/database/db_batch.go` (only the parts listed in K6: `:549-563`, `:794-823`, `:855-933`, `:935-967`, `:969-1001`, `:1003-1103`)
 - `internal/database/nntp_intake.go` (new)
 - `internal/database/nntp_intake_test.go` (new)
 
@@ -243,23 +246,32 @@ Changes:
    func (db *Database) GetIntakeGroup(name string) (*IntakeGroup, error)
    ```
    via `RetryableQueryRowScan(db.mainDB, query_GetIntakeGroup, []interface{}{name}, …)`; a nil `db.mainDB` returns an error (not a panic).
+   Also `func (db *GroupDB) LookupMsgIdInArticlesDB(messageID string) (bool, error)`: same query as `ExistsMsgIdInArticlesDB` (`db_groupdbs.go:336-343`) through the retry helper, but `sql.ErrNoRows` → `(false, nil)` and any other error is returned (A-db-3). `ExistsMsgIdInArticlesDB` stays unchanged for its other callers (`proc_DLArt.go:148`); S3 switches `processArticle` to the new method.
+1a. **A-db-3, PHASE 1.** `processNewsgroupBatch` creates `inserted := make(map[*models.Article]struct{}, len(batches))` **before** the `retry1:` label (so a retry after a commit whose follow-up SELECT failed still knows what it inserted) and passes it through `batchInsertOverviews` to `processOverviewBatch` (both unexported; add the parameter). In `processOverviewBatch`: after each `stmt.Exec`, read `RowsAffected()` (checked error); 1 → add the article to `inserted`. In the number-mapping loop (`:1078-1094`) assign a number only to an article that is in `inserted` and still has number 0, and keep scanning (no `break`) past a matching article that is not in `inserted`. Ignored rows (message-id already in the group, or a second copy in the batch) therefore keep number 0, which PHASE 2 already skips (`:1117`, `:1185`, `:1257`) and PHASE 3 treats as not committed. Log the ignored count once per batch: `[OVB-BATCH] group '%s': %d duplicate message-ids ignored`.
 2. `query_updateNewsgroupsStats` becomes:
    ```sql
    UPDATE newsgroups SET
    	message_count = COALESCE(message_count, 0) + ?,
    	last_article = CASE WHEN ? > COALESCE(last_article, 0) THEN ? ELSE last_article END,
-   	updated_at = ?
+   	updated_at = CASE WHEN ? = '' THEN updated_at
+   	                  WHEN updated_at IS NULL OR ? > updated_at THEN ? ELSE updated_at END
    WHERE name = ?
    ```
-   The exec at `:946-947` passes `len(batches), maxArticleNum, maxArticleNum, <date>, *task.Newsgroup` and records `res.RowsAffected()` (checked error) in a variable outside the closure. After a successful update: when 0 rows were affected, log `[BATCH] processNewsgroupBatch newsgroup '%s' has no newsgroups row: %d stored articles not counted (rows are never created by the batch writer)` and skip `HierarchyCache.UpdateNewsgroupStats`; otherwise call it as today. Fix the comment above the constant (it describes the function, not the query).
-3. PHASE 3 (`:855-891`): replace `sq.db.MainDBGetNewsgroup` by `sq.db.GetIntakeGroup`; on error log (as today, with the error) and keep `historyOK=false`. Move the `msgIdItem` → `CaseDupes` update out of `if historyOK` so it runs for every committed article (`committed && messageID != ""`), and call `AddArticleToHistory` only when `historyOK`.
+   The exec at `:946-947` passes `len(inserted)` (A-db-3: only newly inserted rows count), `maxArticleNum, maxArticleNum`, then the date string three times (`""` when `latestDate` is zero, A-db-4: never write 0001-01-01; `MAX` semantics, so a backfill never moves `updated_at` backwards), then `*task.Newsgroup`. When `len(inserted) == 0` skip the statement entirely (nothing changed). It records `res.RowsAffected()` (checked error) in a variable outside the closure. After a successful update: when 0 rows were affected, log `[BATCH] processNewsgroupBatch newsgroup '%s' has no newsgroups row: %d stored articles not counted (rows are never created by the batch writer)` and skip `HierarchyCache.UpdateNewsgroupStats`; otherwise call it with `len(inserted)` instead of `len(batches)`. Fix the comment above the constant (it describes the function, not the query). The `statsWhat` text uses `len(inserted)`.
+3. PHASE 3 (`:855-933`): replace `sq.db.MainDBGetNewsgroup` by `sq.db.GetIntakeGroup`; on error log (as today, with the error) and keep `historyOK=false`. In the per-article loop, read `messageID`, `committed` (number > 0), `msgIdItem` and `DateSent` under the read lock first; then:
+   - set the `msgIdItem` to `CaseDupes` for every article with `messageID != ""`, committed or ignored as a duplicate (both are "stored"; INT-6 and A-db-3), outside `if historyOK`;
+   - call `AddArticleToHistory` only when `historyOK && committed` (A-db-3: no re-add for ignored duplicates);
+   - A-db-4: take `latestDate` from every committed article here, **before** the "still referenced by other groups" `continue` (`:904-908`), and delete the old assignment at `:914-916`. Keep the clearing and the clamp to `now` (`:939-941`) as they are.
 4. Tests `nntp_intake_test.go` (no global mutation; an isolated batch like `fuBatchIsolatedDB` whose `mainDB` is set to `w0DB(t).mainDB` and reset to nil in a `t.Cleanup` registered **after** `fuBatchIsolatedDB`, so its `Shutdown` never closes the shared main DB; check `Shutdown` before relying on that), with a fake `ProcessorInterface` `idbProc` that records `AddArticleToHistory` calls:
    - `TestIntakeDBGetIntakeGroup`: row inserted with `hierarchy` NULL, `status` NULL, `last_article` NULL via raw SQL → `GetIntakeGroup` succeeds with `Status=="y"`, zeros; unknown name → `errors.Is(err, sql.ErrNoRows)`.
    - `TestIntakeDBBatchNeverCreatesRow` (A-db-1/SEC-2 DB side): `fuBatchTask` for a fresh name without a row, `fuBatchRun` → no `newsgroups` row afterwards (`SELECT count(*)` = 0), the log line from step 2 present.
    - `TestIntakeDBHistoryForNullHierarchyRow` (INT-6): row with NULL hierarchy, two consecutive batches of 2 articles → `idbProc` saw 4 adds with the row's ID; `message_count` = 4, `last_article` = 4.
    - `TestIntakeDBCaseDupesWithoutRow` (INT-6): batch for a name without a row, articles carry a `history.MessageIdItem` set to `CaseLock` → afterwards every item is `CaseDupes`, `idbProc` saw 0 adds.
+   - `TestIntakeDBDuplicatesNotCounted` (A-db-3): row inserted first; batch `A, A, B` → 2 article rows, `message_count` = 2, 2 history adds, 2 `threads` rows; second batch `A` → `message_count` still 2, still 2 history adds, still 2 `threads` rows, A's item `CaseDupes`.
+   - `TestIntakeDBUpdatedAtCrosspost` (A-db-4): row with `updated_at = '2026-10-11 10:00:00'`; one article dated 2026-10-12 whose `NewsgroupsPtr` holds this group and one more → afterwards `updated_at = '2026-10-12 …'` (never `0001-01-01`); a later batch with an article dated 2020 leaves it unchanged.
+   - `TestIntakeDBLookupMsgId` (A-db-3): `LookupMsgIdInArticlesDB` → `(true, nil)` for a stored id, `(false, nil)` for an unknown one, an error after the group DB was force-closed.
 
-Acceptance: E02 (the four tests pass; `TestFuBatch*`, `TestLo2Writer*` unchanged and green). Known-bug set after: unchanged.
+Acceptance: E02 (the seven tests pass; `TestFuBatch*`, `TestLo2Writer*` unchanged and green). Known-bug set after: unchanged.
 
 #### Slice `intake-dlart` (S5): per-run return queue for DownloadArticles
 Ids: A-intake-11.
@@ -280,7 +292,7 @@ Acceptance: E03 (both tests pass; `go vet` clean). Known-bug set after: unchange
 ### Wave 2 (1 `pugleaf-implementer` slice, from the merged wave 1)
 
 #### Slice `intake-processor` (S3): article-layer validation, group policy, dedupe, Path sync
-Ids: SEC-2 (intake half), A-intake-8, A-intake-2, A-intake-3, INT-2, INT-3, INT-4, A-intake-5, A-intake-6 (intake half), A-intake-7, A-intake-9.
+Ids: SEC-2 (intake half), A-intake-8, A-intake-2, A-intake-3, INT-2, INT-3, INT-4, A-intake-5, A-intake-6 (intake half), A-intake-7, A-intake-9, A-tools-1.
 
 Owned files:
 - `internal/processor/threading.go`
@@ -302,6 +314,21 @@ Changes:
    - `intakeGroupDecision(g database.IntakeGroup, posted bool) (keep bool, moderated bool)`: D1/D2 table (inactive → drop; status `y` keep; `m` keep + moderated; `n` keep unless posted; anything else drop). Pure.
    - `(proc *Processor) resolveIntakeGroups(names []string, posted, approved bool, wireSize int) (keep []*database.IntakeGroup, err error)`: for each name: `IsReservedGroupName` → drop; `GetIntakeGroup` → `sql.ErrNoRows` drop, other error → `fmt.Errorf("%w: newsgroup lookup: %v", common.ErrIntakeTemporary, err)`; decision; per-group `MaxArtSize > 0 && wireSize > MaxArtSize` → drop. Any kept moderated group with `!approved` → `ErrIntakeRejected` "moderated group without Approved". Empty result → `ErrIntakeRejected` "no valid newsgroup". Log each drop once with the `[INTAKE]` prefix (name, reason).
    - `releaseClaim(item *history.MessageIdItem)` (K5).
+   - A-tools-1 limiter (spec from audit-delta-fixes hand-off 1):
+     ```go
+     // captureLimiter bounds the goroutines parked in BatchCaptureOverviewForLater (A-tools-1).
+     type captureLimiter struct{ slots chan struct{} }
+     func newCaptureLimiter(n int) *captureLimiter // n < 1 → 1
+     // acquire returns true when a slot was taken. wait=false never blocks (overflow allowed, counted,
+     // one log line per minute "[INTAKE] capture limiter full: %d overflow"). wait=true blocks until a slot
+     // is free, polling stop() every 100 ms; when stop() reports true it returns false (fall back to unbounded).
+     func (l *captureLimiter) acquire(wait bool, stop func() bool) bool
+     func (l *captureLimiter) release() // non-blocking receive
+     var MaxCaptureInFlight = 2048      // read once, at first use
+     var defaultCaptureLimiter *captureLimiter // built with sync.Once from MaxCaptureInFlight
+     func captureLimit() *captureLimiter        // returns defaultCaptureLimiter
+     ```
+     The overflow counter is an `atomic.Int64`; the once-per-minute log uses an `atomic.Int64` Unix timestamp (no goroutine). Tests use `newCaptureLimiter` directly, never `MaxCaptureInFlight` (no global mutation).
    - `validateIntakeHeaders(lines []string, messageID string) (normalized []string, approved bool, err error)` for strict mode: `common.CheckHeaderBlock(lines, HeaderBlockStrict)`; the six mandatory headers present and non-empty (RFC 5536 §3.1; reason `missing mandatory header`); `common.HeaderValue(lines,"Message-ID") == messageID && common.ValidMessageID(messageID)` (reason `invalid message-id`); a `Control:` header → reject with D3's log line; `Supersedes:` → D3 log line only; `approved = HeaderValue(lines,"Approved") != ""`.
    - `stripXrefLines(lines []string) []string` (= `common.RemoveHeaders(lines, "Xref")`) and `syncStoredPath(lines []string, path string) []string` (replace the existing Path line's value with `path`; return the input unchanged when the block has no Path line).
 3. `threading.go` `processArticle`:
@@ -313,11 +340,23 @@ Changes:
    - Dates (`:155-168`): non-bulk: `t, ok := ParseNNTPDateStrict(article.DateString)`; `!ok` → reject `invalid date`; the future check uses `ParseNNTPDateStrict(HeaderValue(lines,"Injection-Date"))` when ok, else `t`, against `time.Now().Add(MaxFutureDate)`. Bulk keeps `ParseNNTPDate` and the zero check, with `MaxFutureDate`. Remove the `TODO: add article cutoff` comment (D10: the POST past cutoff lives in S4).
    - Path (`:185-192`) keeps its column logic. Then store the block: non-bulk `HeadersJSON = strings.Join(stripXrefLines(lines), "\n")` (the strict-validated block, no Path rewrite: S4's injection/relay step puts the prefixed Path into the lines before the processor sees them, so the column then equals the line); bulk `HeadersJSON = strings.Join(syncStoredPath(stripXrefLines(normalized), article.Path), "\n")`, so the fetcher's stored Path line gains the `<identity>!` prefix (D7). Without a path identity (only test servers) a non-bulk column and line can differ; that is accepted.
    - `:200-205` (A-intake-5): replace the loop that nils every value of the caller's map with `article.Headers = nil` (drop the reference only).
+   - `:240` and the commented block `:248` (A-db-3): use S2's `groupDB.LookupMsgIdInArticlesDB`; an error counts the group like a failed `GetGroupDB` (not opened → may end in the temporary `CaseRetry` below) instead of "not stored".
+   - `:256` (A-tools-1): replace the bare goroutine with
+     ```go
+     acquired := captureLimit().acquire(bulkmode, proc.DB.IsDBshutdown)
+     go func(ptr *string, acquired bool) {
+     	if acquired {
+     		defer captureLimit().release()
+     	}
+     	proc.DB.Batch.BatchCaptureOverviewForLater(ptr, article)
+     }(newsgroupPtr, acquired)
+     ```
+     Only bulk mode waits for a slot: bulk callers (fetcher, rslight, web post queue) store each article into exactly one group (`:121`), so a producer blocked in `acquire` holds only its own, not yet captured article's mutex and every slot holder can finish. Non-bulk (up to 9 groups of one article under the same `article.Mux`) never blocks: it takes a free slot or overflows. The call cannot become synchronous (deadlock on `article.Mux`, see the A-tools-1 row).
    - `:211-283` (INT-2, A-intake-9): non-bulk takes the kept `*IntakeGroup` list (so `GetGroupDB` runs only for resolved names). Track `queued`, `opened` (GetGroupDB ok) and `haveID` (ID of the first group whose `ExistsMsgIdInArticlesDB` is true; bulk uses 0). After the loop: `queued > 0` → `CasePass`; else if a group already had it (`alreadyStored`) → non-bulk: `proc.AddArticleToHistory(article.MessageID, haveID)` when `haveID > 0` (self-heal; history then answers 435 for later offers), `setCaseDupes`, return `CaseDupes, nil`; bulk: `setCaseDupes`, return `CasePass, nil` exactly as today (K1/M3: `rslight.go:347` errors on anything but `CasePass`; the fetcher and PostQueue only test `err`); else (no group DB opened, both modes) → `releaseClaim`, return `CaseRetry, fmt.Errorf("%w: no group database could be opened", common.ErrIntakeTemporary)` (bulk callers then count an error instead of a silent success). No change to `rslight.go`.
    - Delete the dead `CheckMessageIdFormat`/`containsAtAndDot` only if no caller remains outside comments (`proc_DLArt.go:141` is a comment); otherwise leave them.
 4. `PostQueue.go`: `pre_processArticle` gives each copy its own map (`Headers: maps.Clone(article.Headers)`, `:96`). `parseNewsgroups` (`:164-179`) stays a split-only parser (comma + trim), unchanged: the web validated the names, and a strict parser must never drop a web post silently. INT-3's "three splitters" is resolved by the two intake splitters (S3 processor, S4 nntp) both using `common.ParseNewsgroups`; the web queue keeps its documented split. Add a comment saying so.
 4a. `wiring_test.go` `TestWiringProcessArticleIntakeCheck` (`:115-121`): `CaseLock`/`CaseWrite` now expect `CaseRetry, nil`, `CaseDupes` still `CaseDupes, nil` (split the loop into two tables).
-5. `intake_test.go` (no DB): `TestIntakeProcParseNNTPDateStrict` (RFC 5322 date ok; `garbage`, `Tuesday 7pm` → `!ok`; for both `ParseNNTPDate` still returns its old value 1990-01-01 12:00 UTC: regression guard for K1), `TestIntakeProcGroupDecision` (D1/D2 table incl. `posted` × status `n`), `TestIntakeProcSyncPathAndXref`, `TestIntakeProcFutureMargin` (24 h boundary with a fixed `now` passed in: if the date check needs a clock, give the helper a `now time.Time` parameter instead of mutating a global).
+5. `intake_test.go` (no DB): `TestIntakeProcParseNNTPDateStrict` (RFC 5322 date ok; `garbage`, `Tuesday 7pm` → `!ok`; for both `ParseNNTPDate` still returns its old value 1990-01-01 12:00 UTC: regression guard for K1), `TestIntakeProcGroupDecision` (D1/D2 table incl. `posted` × status `n`), `TestIntakeProcSyncPathAndXref`, `TestIntakeProcFutureMargin` (24 h boundary with a fixed `now` passed in: if the date check needs a clock, give the helper a `now time.Time` parameter instead of mutating a global), `TestIntakeProcCaptureLimiter` (A-tools-1: `newCaptureLimiter(2)`: two `acquire(true, …)` succeed; a third with `wait=false` returns false at once; with `wait=true` it blocks until `release()`; it returns false within 200 ms once `stop` reports true; no goroutine left, checked with done channels; `newCaptureLimiter(0)` has one slot).
 6. `cmd/nntp-server/server_e2e_test.go` — remove the markers this slice fixes, keep their assertions:
    - `TestE2EIHaveDuplicateNotInHistory`: drop `e2eKnownBug(t, "INT-2", bugErr)`; `t.Fatal` when `code != 437`; then, within `e2eCommitWait`, `IHAVE <id>` must answer 435 (history self-heal).
    - `TestE2ERejectUnknownGroup`: drop `e2eKnownBug(t, "SEC-2", bugErr)`; `t.Fatal` on any collected error.
@@ -391,9 +430,9 @@ Known-bug set after S4 (= after this plan): see `## Checks`.
 | Check | Slice | What |
 |----|----|----|
 | E01 | S1 | `go test -race ./internal/common/...` passes incl. both fuzz seed corpora |
-| E02 | S2 | `TestIntakeDB*` pass; no batch-created `newsgroups` row; history adds for NULL-hierarchy rows; CaseDupes without a row |
+| E02 | S2 | `TestIntakeDB*` pass; no batch-created `newsgroups` row; history adds for NULL-hierarchy rows; CaseDupes without a row; duplicates not counted (A-db-3); `updated_at` never 0001-01-01 or backwards (A-db-4) |
 | E03 | S5 | `TestIntakeDL*` pass |
-| E04 | S3 | `TestIntakeProc*` pass; `ParseNNTPDate` results unchanged for the table inputs |
+| E04 | S3 | `TestIntakeProc*` pass incl. `TestIntakeProcCaptureLimiter`; `ParseNNTPDate` results unchanged for the table inputs; `grep -n 'captureLimit()' internal/processor/threading.go` finds the call (audit-delta-fixes checks it) |
 | E05 | S3 | new `TestE2E*` of S3 pass; markers INT-2, SEC-2 (e2e) removed; `TestE2EDotHeaderLine` expects 441 |
 | E06 | S3 | pre-existing processor and database tests green |
 | E07 | S4 | `TestIntk*` and updated `TestWiring*` pass |
