@@ -60,12 +60,12 @@ was deleted before the commit. `cmd/web` was not started; no binary touched `./d
 | critical | 0 | |
 | high | 2 | WEB-1, WEB-2 |
 | medium | 6 | INT-7, A-web-1, A-web-2, A-web-3, A-web-4, A-web-5 |
-| low | 14 | A-web-6 … A-web-19 |
+| low | 15 | A-web-6 … A-web-20 |
 
 | Category | Count |
 |----|----|
 | security | 7 (WEB-1, WEB-2, A-web-1, A-web-10, A-web-11, A-web-12, A-web-13) |
-| bug | 10 (A-web-4, A-web-6, A-web-7, A-web-8, A-web-9, A-web-14, A-web-15, A-web-16, A-web-17, A-web-18) |
+| bug | 11 (A-web-4, A-web-6, A-web-7, A-web-8, A-web-9, A-web-14, A-web-15, A-web-16, A-web-17, A-web-18, A-web-20) |
 | robustness | 3 (A-web-2, A-web-3, A-web-19) |
 | rfc | 1 (INT-7) |
 | wrong-function | 1 (A-web-5) |
@@ -77,14 +77,15 @@ Most important:
    whoever clicks a node in the tree view, the API setting does not matter, and there is no CSP.
    Against an admin this chains into WEB-1.
 2. **WEB-1 (high)**: `-edit-cronjobs` does not gate cron create/toggle. An admin session (or a WEB-2
-   payload riding it) creates and enables a `sh -c` job; the cron manager starts it within a minute.
+   payload riding it) creates and enables a `sh -c` job; the cron manager registers it within a minute
+   and runs it after `interval_minutes`.
 3. **A-web-1 (medium)**: articles an admin hid (`hide=1`) stay readable by anonymous users by number,
    message-id, preview route and `/api/thread-tree`. Only the listings filter them.
 4. **A-web-2 (medium)**: the sanitized-article cache never enforces `-maxsanartcache`; every article
    page an unauthenticated crawler requests stays in memory for the full expiry (30 min).
 5. **A-web-4 (medium)**: sanitizing rewrites the shared `*models.Article` held by the article cache, so
-   after one page view the API and the preview return a filtered From and a regex-stripped body, and
-   unlocked readers race with the write.
+   after one page view the JSON API and the reply prefill return a filtered From and a regex-stripped
+   body (the preview gets the stripped body), and unlocked readers race with the write.
 
 ## Findings
 
@@ -96,12 +97,18 @@ Most important:
 
 - **Scenario:** `cmd/web` runs without `-edit-cronjobs` (`cmd/web/main.go:128`, default false, help text
   "Adding/Editing Crons is disabled by default"). An admin POSTs `/admin/crons/create` with
-  `enabled=on` and any `command`, or toggles an existing disabled job. The job row is written enabled;
-  `StartCronManager` reloads every `cronReloadEvery` (1 min, `cronjobs.go:65`, `:145`) and
-  `loadAndStartJobs` starts every enabled job; `runJob` executes `getShellCommand(job.Command)`
-  (`:481`), i.e. `sh -c <command>` (`:61`). So the operator's safety switch protects only update
+  `enabled=on` and any `command` (this holds unconditionally), or toggles on a disabled job that the
+  manager has not registered since startup (created disabled, or disabled at boot; a job disabled
+  later stays dead until restart, A-web-20). The job row is written enabled; `StartCronManager`
+  reloads every `cronReloadEvery` (1 min, `cronjobs.go:65`, `:145`) and `loadAndStartJobs` registers
+  every enabled job; the scheduler's first run is at now + `interval_minutes` (`calculateNextRun`,
+  `:229-233`), where `executeJob` (`:455`) runs `getShellCommand(job.Command)` (`:481`), i.e.
+  `sh -c <command>` (`:61`). So the operator's safety switch protects only update
   (`web_admin_crons.go:79`) and delete (`:183`). Create (`:18`) and toggle (`:148`) check only
-  `requireAdminAuth`. Stop (`:307`) is also ungated but only sends SIGINT to a running job (low impact).
+  `requireAdminAuth`. Stop (`:307`) is also ungated: `StopJob` sends SIGINT to a running job, and its
+  non-blocking send on `job.stopChan` (`cronjobs.go:294-298`) makes an idle job's scheduler return
+  (`:427-430`) while the job stays in `cm.jobs`, so `startJob` answers `ErrCronExists` (`:349-350`) and
+  the job never runs again until restart. Stop can cancel runs but cannot start anything (low impact).
   The create form is rendered regardless of the flag (`web/templates/admin_crons.html:163-226`); the
   only hint is the text at `:13-14`.
 - **Chain:** the admin session is reachable by WEB-2 (same-origin `fetch` passes
@@ -289,9 +296,11 @@ Most important:
   (`sanitizing.go:209-211`, `:634-636`), which overwrites `Subject`, `BodyText`, `DateString`,
   `References` with `sanitizeText` output and `FromHeader` with the display name from
   `filterMailDomainInFromHeader` (`:469-473`). After one article page view, every later reader of the
-  cached object gets the altered data: the JSON API `getArticle` (`web_apiHandlers.go:237-265`), the
-  preview (`:488`), and the reply quote prefill (`web_sitePostPage.go:90-100`). The writes hold `a.Mux`; the preview and the JSON encoder read
-  without it.
+  cached object gets the altered data: the JSON API `getArticle` (`web_apiHandlers.go:237-265`) and the
+  reply quote prefill (`web_sitePostPage.go:90-100`) see both the filtered `FromHeader` and the stripped
+  body. The preview (`:488`) is affected only in its body: its `from` comes from
+  `overview.PrintSanitized("fromheader")`, which filters on its own. The writes hold `a.Mux`; the
+  preview and the JSON encoder read without it.
 - **Evidence:** `TestZZAuditWebArticleCacheRace` (article seeded with From `Alice Example
   <alice@test.invalid>` and body `body <script>x</script> onclick='y()' end`):
   ```
@@ -458,6 +467,7 @@ Most important:
   `:403`). Chat history is keyed by user id (`chatHistoryKey(session.UserID, …)`, `web_aichatPage.go:329`; WSH:H11), so the user's own input is self-XSS. Model output
   (Ollama via the proxy) is inserted as markup; a reply that contains HTML, whether prompted by the user
   or produced by a compromised proxy, executes in the user's session.
+- **Evidence:** code trace, see Scenario (`aichat.html:314-326`).
 - **Missing step:** not run against a real proxy/model.
 - **Fix:** render with `textContent` and convert only the `<think>` markers into elements. Effort S.
 
@@ -487,6 +497,7 @@ Most important:
   `(nil, nil)` for an unknown id, updates zero rows and flashes "Provider updated successfully". The
   update also requires `name` (`:221`) but `query_SetProvider` has no `name` column
   (`queries.go:79-83`, `SetProvider` `:85-96`), so a rename is silently dropped.
+- **Evidence:** code trace, see Scenario (`web_admin_provider.go:143-149,221,327-348`, `queries.go:79-96,1440-1453`).
 - **Fix:** check `res != nil` for existence, treat a nil provider as not found, and either write `name`
   or stop requiring it. Effort S.
 
@@ -501,6 +512,7 @@ Most important:
   the flag button shows `🚩 0`, the hide button `👁️ 0`, and the admin "decrement spam" form
   (`{{if gt .Article.Spam 0}}`, `article.html:92`) never renders there. The thread page reads overviews,
   which do carry the counters (`thread.html:138,172`).
+- **Evidence:** code trace, see Scenario (`queries.go:890,917` select lists; `article.html:86,92,100`).
 - **Fix:** select `spam, hide` in both queries (also needed for A-web-1). Effort S.
 
 ### A-web-16: admin newsgroup handlers accept unknown or invalid names
@@ -524,6 +536,7 @@ Most important:
     `rows.Err()` (`:765-781`), against the CLAUDE.md conventions.
   - Toggle, migrate-activity, fix-thread-activity and hide-future-posts call `MainDBGetNewsgroup` first,
     which fails for batch-created rows with NULL hierarchy (A-db-1): those groups cannot be managed here.
+- **Evidence:** code trace, see Scenario (`web_admin_newsgroups.go:21-23,50-54,206-251,345,357-373,765-781`).
 - **Fix:** validate names with the intake regex (or stricter), check RowsAffected/existence, `url.Values`
   for the redirect, `RetryableQuery` plus `rows.Err()`. Effort S.
 
@@ -537,6 +550,7 @@ Most important:
   when the unfiltered log has more than `limit` lines, overwrites it with the unfiltered tail
   (`:279-281`). With the default `limit=1000` and up to `maxLogLines=25000` lines (`cronjobs.go:48`), the
   filter does nothing on any busy job.
+- **Evidence:** code trace, see Scenario (`web_admin_crons.go:268-281`).
 - **Fix:** apply the limit to the filtered slice. Effort S.
 
 ### A-web-18: parent/reference links do not escape the message-id
@@ -550,6 +564,7 @@ Most important:
   those in a URL attribute, so the link becomes a different path or query and the "Reply to parent"
   button 404s (gin's `:messageId` does not match `/`). The `references_URLs` TODO at `:232` also uses the
   first reference instead of the last.
+- **Evidence:** code trace, see Scenario (`models/models.go:232,246`).
 - **Fix:** `url.PathEscape` both parts. Effort S.
 
 ### A-web-19: cache maintenance goroutines never stop
@@ -563,8 +578,23 @@ Most important:
   methods, but nothing in `internal/web` or `cmd/web` calls them. This is harmless at process exit, but
   it violates the CLAUDE.md rule "Goroutines must stop on shutdown" and keeps test binaries' goroutines
   alive.
+- **Evidence:** code trace, see Scenario (`sections_cache.go:22,41-66`; no caller of `SanitizedCache.Stop`/`NewsgroupCache.Stop` in `internal/web` or `cmd/web`).
 - **Fix:** select on `db.StopChan` in `CronClean`; call the caches' `Stop` from `WebServer.Shutdown`.
   Effort S.
+
+### A-web-20: a cron job disabled at runtime never runs again until restart
+
+| seed | id | severity | category | location | verdict |
+|----|----|----|----|----|----|
+| new | A-web-20 | low | bug | `web/cronjobs.go:345-350,384-388` | CONFIRMED |
+
+- **Scenario:** `runJobScheduler` re-reads the job at the top of each cycle and returns when it is no
+  longer enabled (`:384-388`), but leaves the `*CronJob` in `cm.jobs`. After the admin toggles the job
+  back on, `loadAndStartJobs` calls `startJob`, which answers `ErrCronExists` (`:349-350`) and is
+  skipped silently, so the job stays dead until the web server restarts. The same applies after `stop`
+  on an idle job (see WEB-1).
+- **Evidence:** code trace, see Scenario.
+- **Fix:** delete the job from `cm.jobs` (under `cm.mutex`) whenever its scheduler returns. Effort S.
 
 ## Route guard table
 
@@ -604,9 +634,9 @@ are not checked by it, so the session cookie is the real guard. "rAA" = `require
 | POST /admin/settings (470) | web_admin_settings_unified.go:27 | rAA | – | per-key validators | LO |
 | POST /admin/crons/create (471) | `adminCreateCronJob` web_admin_crons.go:18 | rAA | **missing `CronEdit`** | – | **WEB-1** |
 | POST /admin/crons/update (472) | :72 | rAA | `CronEdit` | – | – |
-| POST /admin/crons/toggle (473) | :148 | rAA | **missing `CronEdit`** | – | **WEB-1** |
+| POST /admin/crons/toggle (473) | :148 | rAA | **missing `CronEdit`** | – | **WEB-1**, A-web-20 |
 | POST /admin/crons/delete (474) | :176 | rAA | `CronEdit` | – | – |
-| POST /admin/crons/stop (475) | :307 | rAA | `CronManager != nil` | – | WEB-1 (low impact: SIGINT only) |
+| POST /admin/crons/stop (475) | :307 | rAA | `CronManager != nil` | – | WEB-1 (low impact: SIGINT to a running job, or cancels an idle job until restart) |
 | GET /admin/cronjobs/viewlog/:id (476) | :210 | own check (session + `isAdmin`) | `CronManager != nil` | – | text/plain; A-web-17 |
 | POST /admin/postqueue/delete (477) | web_admin_postqueue.go:12 | rAA | – | none | – |
 | POST /groups/:g/articles/:n/spam (495) | `incrementSpam` webgroupPage.go:134 | session; non-admins need active group | – | per-user flag (atomic) | WSH:S3 |
@@ -682,8 +712,9 @@ Public API surface (non-admin):
 ## Seed items rejected
 
 None. WEB-1, WEB-2 and INT-7 are CONFIRMED. Corrections to the seed text:
-- WEB-1: stop (`:307`) is ungated as the seed says, but it can only interrupt a running job, so the
-  high rating rests on create and toggle.
+- WEB-1: stop (`:307`) is ungated as the seed says, but it can only interrupt a running job or cancel
+  an idle one's future runs until restart, never start one, so the high rating rests on create and
+  toggle. Toggle starts a job only if the manager has not registered it since startup (A-web-20).
 - WEB-2: the sink lines at b962f3a are `thread-tree.js:515` (concatenation), `:522`/`:539`
   (`innerHTML`) and `:557` (`escapeHtml`, defined, never called). Entity decoding by
   `html.UnescapeString` makes the issue worse than the seed states (encoded payloads become live).
