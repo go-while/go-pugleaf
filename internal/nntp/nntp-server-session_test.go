@@ -6,7 +6,7 @@ package nntp
 // ServerStats units, and a command-line fuzz target.
 //
 // Every check states the RFC-correct behavior. Where the current code differs,
-// the result goes through knownBug with the seed id (or T-nntp-session-<n>).
+// the result goes through knownBug with the seed id or the audit id (A-<slug>-<n>).
 // Identifiers use the sess/TestSess/FuzzSess prefixes (contract K2).
 
 import (
@@ -215,18 +215,18 @@ func TestSessCapabilities(t *testing.T) {
 	t.Run("no-nonstandard-labels", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
 		caps := sessCaps(t, hs.dial(t))
-		// RFC 3977 §3.3.2/§8: overview and header access are the OVER and HDR
-		// capabilities; RFC 4644 §2.1: TAKETHIS is advertised via STREAMING, not as
-		// its own label. XOVER/XHDR/TAKETHIS labels are not part of the registry.
-		var bad []string
-		for _, l := range []string{"XOVER", "XHDR", "TAKETHIS"} {
+		// RFC 3977 §3.3.3: labels beginning with "X" are reserved for private
+		// extensions, so XOVER/XHDR are legal (only logged as a policy note; the
+		// standard capabilities are OVER/HDR, §8). Any other label must be
+		// registered; TAKETHIS is not one: RFC 4644 §2.1 advertises it via STREAMING.
+		for _, l := range []string{"XOVER", "XHDR"} {
 			if sessHasCap(caps, l) {
-				bad = append(bad, l)
+				t.Logf("policy: private label %s advertised", l)
 			}
 		}
 		var err error
-		if len(bad) > 0 {
-			err = fmt.Errorf("non-standard labels %v in %q", bad, caps)
+		if sessHasCap(caps, "TAKETHIS") {
+			err = fmt.Errorf("unregistered label TAKETHIS (no X prefix) in %q", caps)
 		}
 		knownBug(t, "RFC-2", err)
 	})
@@ -249,16 +249,27 @@ func TestSessCapabilities(t *testing.T) {
 			t.Fatalf("server with processor lacks IHAVE: %q", caps)
 		}
 	})
-	t.Run("processor-streaming", func(t *testing.T) {
+	t.Run("processor-streaming-consistent", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
-		caps := sessCaps(t, hs.dial(t))
-		// RFC 4644 §2.1: a server that implements TAKETHIS (dispatched here) advertises
-		// STREAMING (together with MODE STREAM and CHECK).
-		var err error
-		if !sessHasCap(caps, "STREAMING") {
-			err = fmt.Errorf("TAKETHIS is accepted but STREAMING is not advertised: %q", caps)
+		c := hs.dial(t)
+		caps := sessCaps(t, c)
+		code, line := c.cmd(t, "MODE STREAM")
+		// RFC 4644 §2.2: STREAMING may be advertised only when MODE STREAM, CHECK
+		// and TAKETHIS are implemented: STREAMING is listed iff MODE STREAM gives 203.
+		if has := sessHasCap(caps, "STREAMING"); has != (code == 203) {
+			t.Fatalf("STREAMING advertised=%v but MODE STREAM answered %q", has, line)
 		}
-		knownBug(t, "RFC-2", err)
+	})
+	t.Run("processor-streaming-complete", func(t *testing.T) {
+		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
+		code, line := hs.dial(t).cmd(t, "MODE STREAM")
+		// RFC 4644 §2.2/§2.3: TAKETHIS is dispatched, so the rest of streaming is
+		// expected too (MODE STREAM → 203, CHECK, the STREAMING capability).
+		var err error
+		if code != 203 {
+			err = fmt.Errorf("TAKETHIS is accepted but MODE STREAM answered %q (want 203)", line)
+		}
+		knownBug(t, "RFC-1", err)
 	})
 	t.Run("post-allowed-user", func(t *testing.T) {
 		user, pass := sessUser(t, true)
@@ -277,8 +288,8 @@ func TestSessCapabilities(t *testing.T) {
 		c := hs.dial(t)
 		sessAuth(t, c, user, pass)
 		caps := sessCaps(t, c)
-		// RFC 3977 §3.3.2/§6.3.1: POST is not advertised when posting is not
-		// permitted (this user would get a refusal to POST).
+		// RFC 3977 §3.3.1: a capability is listed only in the state where it
+		// applies; this user may not post, so POST is not listed.
 		var err error
 		if sessHasCap(caps, "POST") {
 			err = fmt.Errorf("user without posting permission sees POST: %q", caps)
@@ -469,6 +480,40 @@ func TestSessPipelining(t *testing.T) {
 			}
 		}
 	})
+	t.Run("quit-then-command", func(t *testing.T) {
+		// Isolated: today the buffered command after QUIT reaches UpdateDeadlines
+		// with a nil conn and the server goroutine panics, killing the process.
+		err := runIsolated(t, 60*time.Second, func(t *testing.T) {
+			hs := newTestServer(t, hServerOpts{})
+			c := hs.dial(t)
+			c.Deadline = 2 * time.Second
+			if err := c.send("QUIT" + CRLF + "HELP" + CRLF); err != nil {
+				t.Fatal(err)
+			}
+			// RFC 3977 §5.4: QUIT gets 205 and the server closes the connection;
+			// the pipelined HELP after it is never answered.
+			code, line, err := c.readStatus()
+			if err != nil {
+				t.Fatalf("QUIT reply: %v (%q)", err, line)
+			}
+			if err := hExpectCode(code, line, 205); err != nil {
+				t.Fatal(err)
+			}
+			if err := sessExpectClosed(c, time.Second); err != nil {
+				t.Fatalf("after 205: %v", err)
+			}
+			// The server must survive: a new client still gets a greeting.
+			c2, err := hs.tryDial(2 * time.Second)
+			if err != nil {
+				t.Fatalf("server gone after pipelined QUIT: %v", err)
+			}
+			c2.close()
+		})
+		if sessIsChild(t) {
+			return
+		}
+		knownBug(t, "A-nntp-sec-1", err)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -483,8 +528,12 @@ func TestSessLineLimit(t *testing.T) {
 		// RFC 3977 §3.1: command lines MUST NOT exceed 512 octets including CRLF.
 		// The server rejects a longer line with 501 or closes the connection.
 		var res error
-		if err == nil {
+		switch {
+		case err == nil:
 			res = hExpectCode(code, line, 501)
+		case sessIsTimeout(err):
+			// no reply but the socket is still open: neither 501 nor a close
+			res = fmt.Errorf("no reply and no close: %v", err)
 		}
 		knownBug(t, "SEC-3", res)
 	})
@@ -508,7 +557,9 @@ func TestSessLineLimit(t *testing.T) {
 			t.Logf("heap delta %d bytes, write err %v", delta, werr)
 
 			var problems []string
-			// SEC-3: the server bounds what it buffers for one command line.
+			// The 16 MiB bound only guards against a blow-up: buffering a 1 MiB
+			// line costs about 1 MiB, so this passes today. SEC-3 itself is
+			// detected by the missing close below.
 			if delta >= 16<<20 {
 				problems = append(problems, fmt.Sprintf("heap grew by %d bytes (want < 16 MiB)", delta))
 			}
@@ -603,11 +654,12 @@ func TestSessIdleTimeout(t *testing.T) {
 		}
 	})
 	t.Run("activity-resets-timer", func(t *testing.T) {
-		hs := newTestServer(t, hServerOpts{IdleTimeout: 200 * time.Millisecond})
+		hs := newTestServer(t, hServerOpts{IdleTimeout: 500 * time.Millisecond})
 		c := hs.dial(t)
 		// The timer measures inactivity: commands every 50 ms keep the
-		// connection open well past 200 ms.
-		for i := 0; i < 8; i++ {
+		// connection open past 500 ms (12 × 50 ms plus round trips), with room
+		// for a stall of a few hundred ms on a loaded host.
+		for i := 0; i < 12; i++ {
 			time.Sleep(50 * time.Millisecond)
 			code, line := c.cmd(t, "MODE READER")
 			if err := hExpectCode(code, line, 200, 201); err != nil {
@@ -675,9 +727,9 @@ func TestSessMaxConns(t *testing.T) {
 	})
 
 	t.Run("rejection-status", func(t *testing.T) {
-		// RFC 3977 §5.1.1: a refused connection gets 400 (service temporarily
-		// unavailable) or 502 (service permanently unavailable) before the close,
-		// not a silent close.
+		// RFC 3977 §5.1.2: a server that refuses the client sends a 400 (service
+		// temporarily unavailable) or 502 (service permanently unavailable)
+		// greeting and then closes; not a silent close.
 		var res error
 		if err != nil {
 			res = fmt.Errorf("third connection closed without a status line: %v", err)
@@ -689,7 +741,7 @@ func TestSessMaxConns(t *testing.T) {
 				res = hExpectCode(code, c3.Greeting, 400, 502)
 			}
 		}
-		knownBug(t, "T-nntp-session-1", res)
+		knownBug(t, "A-nntp-rfc-3", res)
 	})
 }
 
@@ -909,7 +961,7 @@ func TestSessServerStats(t *testing.T) {
 		if got := hs.S.Stats.GetCommandCount("CAPABILITIES"); got != 1 {
 			t.Errorf("CAPABILITIES count %d, want 1", got)
 		}
-		code, line := c.cmd(t, "AUTHINFO USER t1nouser%04d", hSeq.Add(1))
+		code, line := c.cmd(t, "AUTHINFO USER t1user9%04d", hSeq.Add(1))
 		if err := hExpectCode(code, line, 381); err != nil {
 			t.Fatal(err)
 		}
@@ -943,8 +995,10 @@ func TestSessServerStats(t *testing.T) {
 // covered by the group tests).
 var sessFuzzSkip = map[string]bool{"TAKETHIS": true, "LISTGROUP": true}
 
-// sessFuzzMulti maps multi-line verbs to the status code that starts their block.
-var sessFuzzMulti = map[string]int{"CAPABILITIES": 101, "HELP": 100, "LIST": 215}
+// sessFuzzMultiCodes are the status codes followed by a dot-terminated block
+// (RFC 3977 §3.4.1: HELP 100, CAPABILITIES 101, LIST 215, ARTICLE 220,
+// HEAD 221, BODY 222, OVER/XOVER 224, HDR/XHDR 225; XHDR uses 221 too).
+var sessFuzzMultiCodes = map[int]bool{100: true, 101: true, 215: true, 220: true, 221: true, 222: true, 224: true, 225: true}
 
 // sessFuzzServer starts a read-only server for a fuzz target (newTestServer
 // needs a *testing.T); the cleanup stops it and waits at most 10 s.
@@ -1036,7 +1090,7 @@ func FuzzSessCommandLine(f *testing.F) {
 		if err != nil {
 			t.Fatalf("%q: no status line: %v (%q)", line, err, status)
 		}
-		if want, ok := sessFuzzMulti[verb]; ok && code == want {
+		if sessFuzzMultiCodes[code] {
 			c.readDotLines(t)
 		}
 		if verb == "QUIT" {
