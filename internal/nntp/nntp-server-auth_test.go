@@ -405,7 +405,9 @@ func TestAuthCacheOldPassword(t *testing.T) {
 	}
 	c2 := hs.dial(t)
 	code, line := authLogin(t, c2, user, oldPass)
-	knownBug(t, "SEC-6", hExpectCode(code, line, 481))
+	if err := hExpectCode(code, line, 481); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestAuthPlaintextNotOffered: RFC 4643 §2.2 says AUTHINFO USER is advertised
