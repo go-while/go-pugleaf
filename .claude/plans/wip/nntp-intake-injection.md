@@ -565,3 +565,13 @@ Q1 the `MaxArtSize` default stays 32 KiB (`config.go` untouched); Q2 TAKETHIS in
   SEC-3 `:1209`; `nntp-server-auth_test.go:318` RFC-5; `nntp-server-article_test.go:886` BUG-8 (S4 removes it), `:898` T-nntp-article-1 (stays).
 - Base known-bug set (code identical to hardening's verified tree bcb361b): **BUG-7 BUG-8 INT-1 INT-2 RFC-1 RFC-5 SEC-2 SEC-3 T-nntp-article-1** (9).
   Expected after wave 3: **RFC-1, T-nntp-article-1** only (INT-1, INT-2 gone; BUG-7, BUG-8, RFC-5, SEC-2, SEC-3 lose their last markers here).
+
+### Wave 1 (2026-10-11; 3 implementers, each reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| intake-db (S2) | worktree-agent-a0bc167187195b985 (d27c46d, 0f76132) | merge; 2 minors fixed (`rows.Err()`/Scan errors in `processOverviewBatch` now return to the retry path; the isolated test batch opens its own main-DB pool so a stuck batch can never close the shared one); untested retry path noted | b7f5e05 |
+| intake-common (S1) | worktree-agent-a3ad4286e2deb3e09 (722278e, 5f90357) | merge; 2 minors fixed (`\[`/`\]`/`\\` escapes in a `[...]` message-id literal; WSP-only continuation lines rejected strict / dropped fetch). Recorded deviations for the client plan: `ValidMessageID`'s left part is lax (any printable except `<>@`, so `<a..b@x>` passes and a quoted `<"a@b"@c>` fails); DEL (0x7F) passes strict mode in field values | ca63b03 |
+| intake-dlart (S5) | worktree-agent-a27ce2c1d0931f73e (057907f, 55c5230) | merge; 3 minors fixed (non-blocking `runDone` check before each send, `resetLateMsgID` on abandoned items, tautological test check); extra unexported names `feedDownloadRun`, `resetLateMsgID` accepted; A-tools-4 resolved (the `GroupQueues` map init in `processor.go:55` is now unused; audit-delta-fixes may delete it) | 82278fd |
+
+Checks on 82278fd: gofmt baseline 2 files, vet/build OK, 9 package sets green under `-race` (incl. `internal/common`), known bugs = base set (9 ids), build scripts OK.
+Noted: `TestAuthFailureDelay` (hardening's auth test) timed out once under heavy host load (3 agents' race suites in parallel) and passed on every rerun; timing-sensitive, outside this plan.
