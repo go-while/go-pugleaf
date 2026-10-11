@@ -33,6 +33,14 @@ const (
 	CRLF = CR + LF
 )
 
+// Default per-command delays of the server. NewNNTPServer seeds the per-server
+// fields from these; tests set the fields to 0 to run without delays.
+var (
+	DefaultArticleCmdDelay = time.Second / 5 // ARTICLE/HEAD/BODY/STAT
+	DefaultGroupCmdDelay   = time.Second / 3 // GROUP
+	DefaultErrorDelay      = time.Second     // after an error response
+)
+
 // NNTPServer represents the main NNTP server
 type NNTPServer struct {
 	Config      *config.ServerConfig
@@ -47,6 +55,13 @@ type NNTPServer struct {
 	mu          sync.RWMutex
 	local430    *Local430 // Cache for 430 responses
 	running     bool
+
+	// Per-server timing. Zero delay means no sleep; IdleTimeout <= 0 falls back
+	// to DefaultNNTPcliconnTimeout. Per-server (not package vars) so tests don't race.
+	ArticleCmdDelay time.Duration
+	GroupCmdDelay   time.Duration
+	ErrorDelay      time.Duration
+	IdleTimeout     time.Duration
 }
 
 // NewNNTPServer creates a new NNTP server instance
@@ -71,6 +86,11 @@ func NewNNTPServer(db *database.Database, cfg *config.ServerConfig, mainWG *sync
 		shutdown:    make(chan struct{}),
 		wg:          mainWG, // Use external waitgroup for coordination
 		local430:    &Local430{cache: make(map[string]time.Time, 65535)},
+
+		ArticleCmdDelay: DefaultArticleCmdDelay,
+		GroupCmdDelay:   DefaultGroupCmdDelay,
+		ErrorDelay:      DefaultErrorDelay,
+		IdleTimeout:     DefaultNNTPcliconnTimeout,
 	}
 	go server.local430.CronLocal430() // Start local 430 cache cleanup goroutine
 	return server, nil
@@ -91,11 +111,8 @@ func (s *NNTPServer) Start() error {
 		if err != nil {
 			return fmt.Errorf("failed to start NNTP listener on port %d: %w", s.Config.NNTP.Port, err)
 		}
-		s.Listener = listener
 		log.Printf("NNTP server listening on port %d", s.Config.NNTP.Port)
-
-		s.wg.Add(1)
-		go s.serve(s.Listener, false)
+		s.serveLocked(listener, false)
 	}
 
 	// Start TLS NNTP listener if configured
@@ -113,16 +130,38 @@ func (s *NNTPServer) Start() error {
 		if err != nil {
 			return fmt.Errorf("failed to start NNTP TLS listener on port %d: %w", s.Config.NNTP.TLSPort, err)
 		}
-		s.TLSListener = listener
 		log.Printf("NNTP TLS server listening on port %d", s.Config.NNTP.TLSPort)
-
-		s.wg.Add(1)
-		go s.serve(s.TLSListener, true)
+		s.serveLocked(listener, true)
 	}
 
 	s.running = true
 	log.Println("NNTP server started successfully")
 	return nil
+}
+
+// Serve accepts connections on an existing listener (for example one bound to
+// 127.0.0.1:0 by a test) and marks the server as running. The listener is stored
+// in Listener, or in TLSListener when isTLS is set, so Stop() closes it.
+func (s *NNTPServer) Serve(l net.Listener, isTLS bool) error {
+	if l == nil {
+		return fmt.Errorf("listener cannot be nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.serveLocked(l, isTLS)
+	s.running = true
+	return nil
+}
+
+// serveLocked stores the listener and starts its accept loop. Caller holds s.mu.
+func (s *NNTPServer) serveLocked(l net.Listener, isTLS bool) {
+	if isTLS {
+		s.TLSListener = l
+	} else {
+		s.Listener = l
+	}
+	s.wg.Add(1)
+	go s.serve(l, isTLS)
 }
 
 // serve handles incoming connections on the given listener
