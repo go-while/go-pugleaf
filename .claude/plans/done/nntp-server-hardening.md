@@ -1101,7 +1101,7 @@ Deferred: 64 MiB drain cap stays per decision 11 (articles between 64 MiB and a 
 ## Outcome
 
 - **Integration branch:** `plan-nntp-server-hardening` @ bcb361b (20 commits from `testing-001` @ baea7c0; 45 files, +4,528/−1,391 lines).
-  Not yet merged into `testing-001` (user decision). Nothing pushed.
+  Merged into `testing-001` with `--no-ff` as d9de34e on 2026-10-11 (build and vet green after the merge). Nothing pushed.
 - **Worktrees / branches** (left in place for the user to clean up):
   - `/tank0/claude/trees/go-pugleaf/agent-a1c463190bb3b91a2` — `worktree-agent-a1c463190bb3b91a2` @ 488cc29 (nntp-overview)
   - `/tank0/claude/trees/go-pugleaf/agent-a812695d2f0f38332` — `worktree-agent-a812695d2f0f38332` @ 5ae9904 (nntp-session)
