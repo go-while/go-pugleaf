@@ -6,9 +6,10 @@
 - **Base:** written against `plan-nntp-audit-tests` @ 03d5ef7 (all `file:line` anchors below were checked there with
   `grep -n`/`sed -n`). The run starts from `testing-001` after `plan-nntp-audit-tests` is merged into it; the preflight
   re-checks the anchors listed in K6 and records any drift in `## Progress`.
-- **Depends on:** nothing for waves 0–3. **Wave 4 only** depends on `nntp-intake-injection` being merged (it calls the
-  header-block normalizer that plan exports, see K1). If that plan is not merged when wave 3 is done, wave 4 is skipped
-  and listed in the Outcome as a leftover; nothing else waits for it.
+- **Depends on:** `nntp-server-hardening`, `nntp-intake-injection` (both merged first). Final run order:
+  nntp-server-hardening → nntp-intake-injection → **nntp-client-transfer** → nntp-rfc-commands → audit-delta-fixes.
+  From the intake plan this plan uses `common.ValidMessageID` (all waves) and `common.CheckHeaderBlock` (wave 4), see K1.
+  Neither earlier plan owns a file of this plan (see Coordination); the K6 anchor check absorbs line drift.
 - **Parallelism:** wave 1 has 2 slices, wave 2 has 2, wave 3 has 1, wave 4 has 1. Within a wave, no two slices own the
   same file. A file may be owned by different slices in different waves (the later wave builds on the merged earlier one).
 - **Source:** `docs/audit/AUDIT-2026-10.md` (§3 Top 25, §4 "client" table and every row whose fix-plan column names
@@ -47,7 +48,7 @@ audit's "Not covered" candidates (audit-nntp-client.md `## Not covered`), taken 
 | CLI-4 | `nntp/nntp-transfer-demuxer.go:19`,`:185-191` | `LastID` starts at 0 and the demuxer only advances on `LastID+1 == CmdID`; with `-username`, AUTHINFO USER/PASS and MODE STREAM consume textproto ids 0–2, the first CHECK is id 3 and waits in the backlog forever. | cli-conn |
 | OPS-3 | `cmd/nntp-transfer/main.go:12` (`_ "net/http/pprof"`), `:149`,`:165` (`-password`, `-redis-pass`), `:539-541`, `:2935-2944` (`http.ListenAndServe(":%d", nil)`), `:544-552`; `cmd/history-rebuild/main.go:12`,`:75`,`:97-101` | `-web-port` serves the default mux on all interfaces with pprof registered: `GET /debug/pprof/cmdline` returns argv with both passwords; no server timeouts (gosec G108/G114). history-rebuild `-pprof` accepts any address. | cli-transfer |
 | INT-5 (`bytes` half; routed here by the coordinator) | `nntp/nntp-client-commands.go:876-878` | `article.Bytes = len(article.BodyText)`: the LF-joined body length. RFC 3977 §8.1.1 / §8.3.2: `:bytes` is the size of the whole article (headers, separator, body) with CRLF line ends. `ParseLegacyArticleLines` is the shared parser of the fetcher, POST/IHAVE intake (`nntp-cmd-posting.go:274`), `proc_reuse.go:57` and `rslight.go:334`. The article-number-reuse half of INT-5 belongs to `audit-delta-fixes` (cross-reference only). | cli-commands |
-| A-nntp-rfc-2 / A-intake-2 (client half; routed here by the coordinator) | `nntp/nntp-client-commands.go:837-840` (un-stuffing, correct per RFC 3977 §3.1.1), `:905-951` (`ParseHeaders` stores **all** raw header lines: `:950`) | The fetcher stores a header line that was `..` on the wire as `.`, and colon-less/garbage lines, verbatim in `headers_json`; served without stuffing they desync readers. The server half is `nntp-server-hardening`, the intake half (`NormalizeHeaderBlock`) is `nntp-intake-injection`. | cli-normalize (wave 4) |
+| A-nntp-rfc-2 / A-intake-2 (client half; routed here by the coordinator) | `nntp/nntp-client-commands.go:837-840` (un-stuffing, correct per RFC 3977 §3.1.1), `:905-951` (`ParseHeaders` stores **all** raw header lines: `:950`) | The fetcher stores a header line that was `..` on the wire as `.`, and colon-less/garbage lines, verbatim in `headers_json`; served without stuffing they desync readers. The server half is `nntp-server-hardening`, the intake half (`CheckHeaderBlock`) is `nntp-intake-injection`. | cli-normalize (wave 4) |
 
 **Medium**
 | ID | Where | Defect | Slice |
@@ -95,8 +96,10 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
    greeting and AUTHINFO. After that `ReadTimeout`/`WriteTimeout` (new fields, default 2 min) are **idle** timeouts:
    each `Read`/`Write` call on the socket must make progress within them. 0 means the default, a negative value
    disables the timeout.
-5. **Client limits (A-1).** One line may be at most `MaxLineBytes` (default 1 MiB); an ARTICLE/HEAD/BODY response at
-   most `MaxArticleBytes` (default 64 MiB); LIST/XOVER/XHDR/LISTGROUP at most `MaxListBytes` (default 512 MiB). An XHDR
+5. **Client limits (A-1).** One line may be at most `MaxResponseLineBytes` (default 1 MiB); an ARTICLE/HEAD/BODY response at
+   most `MaxArticleResponseBytes` (default 64 MiB); LIST/XOVER/XHDR/LISTGROUP at most `MaxListResponseBytes` (default
+   512 MiB). (Client-side names; `MaxArticleBytes`/`DefaultMaxArticleBytes`/`ErrArticleTooLarge` belong to the server's
+   `readArticleBlock` in `nntp-server-hardening`.) An XHDR
    stream may not return more lines than articles requested. Exceeding a limit returns an error and force-closes the
    connection. `Provider.MaxArtSize` is not used as a read limit (it is a fetch policy; a read abort would churn
    connections).
@@ -117,7 +120,9 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
 11. **Pool (A-4).** `BackendConfig.IdleExpire` (default 25 s) and `PoolWaitTimeout` (default 30 s); new
     `Pool.GetContext(ctx, mode)`; `Get(mode)` keeps its signature and calls it with `context.Background()`.
 12. **Invalid command arguments (A-3) are rejected, not sanitized.** Message-ids must pass `common.ValidMessageID`
-    (`<`…`>`, 3–250 octets, no CTL/WSP, no inner `<`/`>`); group names are 1–497 octets without CTL, WSP or `,`; any
+    (owned by `nntp-intake-injection`, `common/intake.go`: full RFC 5536 msg-id grammar, at most 250 octets, exactly
+    one `@`; legacy ids without `@` are therefore skipped by the transfer and rejected by `ReconstructHeaders`/
+    `RelayHeaders`); group names are 1–497 octets without CTL, WSP or `,`; any
     command line containing CR, LF or NUL, or longer than 510 octets, is refused with `ErrInvalidCommandArg` before it
     is written. nntp-transfer drops invalid message-ids when it builds a batch (counted `skipped`).
 13. **pprof and the transfer UI (OPS-3, A-10).** pprof is never on the UI server. It is served only on `-pprof-port`
@@ -136,10 +141,11 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
 17. **INT-5 `bytes`.** `Bytes = Σ(len(header line)+2) + 2 + Σ(len(body line)+2)`, over the parsed (un-stuffed) lines,
     without the terminator; set also when the body is empty. Only newly parsed articles change; existing rows keep
     their value (no migration).
-18. **Fetched header blocks are normalized (wave 4, A-nntp-rfc-2/A-intake-2 client half).** `ParseHeaders` stores the
-    output of `common.NormalizeHeaderBlock` (exported by `nntp-intake-injection`); a block it rejects makes
-    `ParseLegacyArticleLines` return an error, so the article is not stored. `Bytes` is then computed from the
-    normalized header lines.
+18. **Fetched header blocks are checked (wave 4, A-nntp-rfc-2/A-intake-2 client half).** `ParseHeaders` stores the
+    output of `common.CheckHeaderBlock(lines, common.HeaderBlockFetch)` (exported by `nntp-intake-injection`: the
+    lenient bulk/fetch mode rejects NUL/CR/LF and duplicate mandatory headers and drops colon-less lines, so a `.`
+    header line is dropped); a block it rejects makes `ParseLegacyArticleLines` return an error, so the article is not
+    stored. `Bytes` is then computed from the checked header lines.
 19. **Removed (CLI-6, A-9):** `PeeringManager` and its types (the `Default*Patterns` vars and `nntp-peering-pattern.go`
     stay), `nntp-peering-struct.go.bak`, `cmd/test-nntp/` (no build script, hardcoded external server, only user of
     `ListGroupsLimited`), the unused progress readers and nntp-transfer helpers. `-batch-db` stays accepted (used by
@@ -197,13 +203,16 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
     `NewsgroupExists`, `GetRemoteID`, `GetRemoteName`, `Close`.
   - `common.ReconstructHeaders(article, withPath bool, nntphostname *string, newsgroup string) ([]string, error)`.
   - The server-side K1 of `nntp-audit-tests` (D3) is untouched: no file of this plan is a server file.
-  - **Dependency (wave 4 only):** `nntp-intake-injection` exports
-    `func NormalizeHeaderBlock(lines []string) ([]string, error)` from `internal/common` (pure, idempotent: input =
-    raw header lines without the separator, output = the lines to store). If it lands under another name or package,
-    the wave-4 slice adapts the one call site and records it in `## Progress`.
+  - **Dependencies on `nntp-intake-injection` (merged first):**
+    - `func ValidMessageID(id string) bool` in `internal/common` (`common/intake.go`): full RFC 5536 grammar, exactly
+      one `@`. This plan calls it (waves 0, 2, 3) and does **not** define its own.
+    - `func CheckHeaderBlock(lines []string, mode HeaderBlockMode) ([]string, error)` with mode `HeaderBlockFetch` in
+      `internal/common` (input: raw header lines without the separator; output: the lines to store). Wave 4 calls it.
+    - If either has a different name or signature in the merged tree, the slice that uses it adapts its call sites and
+      records it in `## Progress`.
 - **K2: reserved names** (checked free at 03d5ef7 with `grep -rnw <name> --include=*.go internal cmd`):
   - wave 0: `cliFakeServer`, `cliFakeOpts`, `cliFakeStep`, `cliFakeConn`, `cliFakeTLSConfig`, `newCliFakeServer`,
-    `cliDial`, `cliUnstuff`, `cliPeerOpts`, `cliPeerHandler`, `cliE2EValidMessageID` and the `TestCliFake*`/`TestCliE2E*`
+    `cliDial`, `cliUnstuff`, `cliPeerOpts`, `cliPeerHandler` and the `TestCliFake*`/`TestCliE2E*`
     tests.
   - `cli-conn`: `deadlineConn`, `newDeadlineConn`, `(*deadlineConn).setTimeouts`, `DefaultClientReadTimeout`,
     `DefaultClientWriteTimeout`, `DefaultAuthFailureBackoff`, `DefaultPoolWaitTimeout`, `BackendConfig.ReadTimeout`,
@@ -212,20 +221,24 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
     `(*BackendConn).dconn`, `(*BackendConn).closing`, `(*BackendConn).abortConnect`, `(*BackendConn).closeFromPool`,
     `(*Pool).GetContext`, `(*Pool).failSlot`, `(*ResponseDemuxer).syncPipeline`.
   - `cli-tools`: `query_getAllProgressNewsgroupsDone`.
-  - `cli-commands`: `ErrAuthRequired`, `ErrAuthRejected`, `ErrResponseTooLarge`, `ErrLineTooLong`,
-    `DefaultMaxLineBytes`, `DefaultMaxArticleBytes`, `DefaultMaxListBytes`, `BackendConfig.MaxLineBytes`,
-    `BackendConfig.MaxArticleBytes`, `BackendConfig.MaxListBytes`, `(*BackendConn).greetingCode`,
-    `(*BackendConn).responseBudget`, `writeArticleLines`, `wireBodyLines`, `dotStuff`, `articleWireBytes`,
-    `common.RelayHeaders`, `common.ErrRelayHeadersInvalid`, `common.ValidMessageID`, `common.EnsureLocalPathPrefix`,
+  - `cli-commands`: `ErrAuthRequired`, `ErrAuthRejected`, `ErrResponseTooLarge`, `ErrResponseLineTooLong`,
+    `DefaultClientMaxLineBytes`, `DefaultClientMaxArticleBytes`, `DefaultClientMaxListBytes`,
+    `BackendConfig.MaxResponseLineBytes`, `BackendConfig.MaxArticleResponseBytes`, `BackendConfig.MaxListResponseBytes`,
+    `(*BackendConn).greetingCode`, `(*BackendConn).responseBudget`, `writeArticleLines`, `wireBodyLines`, `dotStuff`,
+    `articleWireBytes`, `common.RelayHeaders`, `common.ErrRelayHeadersInvalid`, `common.EnsureLocalPathPrefix`,
     `common.firstHeaderLine`.
+  - **Not** reserved here (owned by the earlier plans; never define them): `DefaultMaxArticleBytes`, `MaxArticleBytes`,
+    `ErrArticleTooLarge`, `readArticleBlock` (`nntp-server-hardening`); `common.ValidMessageID`,
+    `common.CheckHeaderBlock`, `common.HeaderBlockMode`, `common.HeaderBlockFetch` (`nntp-intake-injection`).
   - `cli-transfer`: `DemuxerQueueDepth`, `StreamQueueDepth`, `responseDataPool`, `ttSetupPool`, `ttResponsePool`,
     `ttResponseChanPool`, `readRequestPool` (the exported chan vars `ResponseDataPool`, `TTSetupPool`, `TTResponsePool`,
     `TTResponseChans`, `ReadRequestsPool` are removed; grep shows no user outside `nntp-transfer.go`), main-package
     `newUIServer`, `newPprofMux`, `newPprofServer`, `renderIndex`, `redisKey`, `redisKeyPrefix`, `webBind`; in
     `cmd/history-rebuild`: `loopbackPprofAddr`, `newPprofMux`.
   - `cli-hygiene`: `ErrInvalidCommandArg`, `(*BackendConn).sendCmd`, `validGroupArg`, `validTokenArg`,
-    `validMessageIDArg`, `maxCommandLine`.
-  - `cli-normalize`: none (calls `common.NormalizeHeaderBlock`).
+    `validMessageIDArg`, `maxClientCommandLine` (distinct from any server-side command-line limit of
+    `nntp-server-hardening`).
+  - `cli-normalize`: none (calls `common.CheckHeaderBlock`).
 - **K3: tests.**
   - Package `nntp` already has `TestMain` (`nntp-server-harness_test.go:47`, opens a temp DB, discards logs unless
     `PUGLEAF_TEST_LOG=1`). Client tests need no DB and must not call `hTestDB`.
@@ -279,7 +292,7 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
   builds `textproto.NewConn(dc)` on it, and after greeting + auth calls `dc.setTimeouts(read, write)`. `c.conn` (type
   `net.Conn`) is the wrapper, so `bufio.NewWriter(c.conn)` in the TAKETHIS/POST writers gets write deadlines too.
   Wave 2 adds the line cap: `Read` tracks the bytes since the last `\n` (`bytes.LastIndexByte` on `p[:n]`) and returns
-  `ErrLineTooLong` once it exceeds `maxLine` (set from `BackendConfig.MaxLineBytes`).
+  `ErrResponseLineTooLong` once it exceeds `maxLine` (set from `BackendConfig.MaxResponseLineBytes`).
 - **Demuxer sync (`syncPipeline`).** Under `conn.Lock()`: `id := conn.TextConn.Next(); StartRequest(id);
   EndRequest(id); StartResponse(id); EndResponse(id); d.LastID = id`. All earlier commands ended their responses
   (they are synchronous), so nothing blocks; the next `Cmd` gets `id+1`.
@@ -390,8 +403,8 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
      - `<ct-2@e2e.invalid>`: plain headers, `Newsgroups: e2e.ct.a`, body `two`.
      - `<ct-3@e2e.invalid>`: headers in the order Message-ID, Date, Subject, From, `X-Custom: keep`, Newsgroups, Path,
        `Xref: other.example e2e.ct.a:9`; body `three`.
-   - `TestCliE2EVerify` (uses only stdlib, `database/sql` and the mattn driver already linked into the package; no
-     helper from later waves): `PUGLEAF_E2E_PEER_DIR`, `PUGLEAF_E2E_GROUPDB` (path of `e2e_ct_a.db`),
+   - `TestCliE2EVerify` (uses stdlib, `database/sql`, the mattn driver already linked into the package and
+     `common.ValidMessageID`; no helper from later waves of this plan): `PUGLEAF_E2E_PEER_DIR`, `PUGLEAF_E2E_GROUPDB` (path of `e2e_ct_a.db`),
      `PUGLEAF_E2E_LOCALHOST`, `PUGLEAF_E2E_PHASE` (`1` or `2`). Opens the group DB read-only with
      `sql.Open("sqlite3", "file:"+path+"?mode=ro")` and prints `PASS|FAIL <E-id> [<tag>] <text>` lines:
      - phase 1: **E03**, **E04**, **E05**, **E15** (definitions in `## End-to-end`);
@@ -602,8 +615,8 @@ Owned files:
 Changes:
 1. **`common/relay_headers.go` (new; A-intake-6, decision 1/2).**
    - `var ErrRelayHeadersInvalid = errors.New("stored header block not relayable")`.
-   - `func ValidMessageID(id string) bool`: `3 <= len <= 250`, `id[0]=='<'`, `id[len-1]=='>'`, no byte `<= 0x20` or
-     `0x7f`, no `<`/`>` in between.
+   - Do **not** define a message-id validator here: call `ValidMessageID` (same package, `common/intake.go`, owned by
+     `nntp-intake-injection`).
    - `func EnsureLocalPathPrefix(path, localHost string) string`: `localHost == ""` → path; `path == ""` →
      `localHost + "!not-for-mail"`; `path == localHost || strings.HasPrefix(path, localHost+"!")` → path; else
      `localHost + "!" + path`.
@@ -659,14 +672,15 @@ Changes:
      err }`, then the existing `switch`/`if code != …` handles 430/451/other.
    - `PostArticle` 401 (`:1231-1232`): `if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(line)), "MODE-READER")`.
 6. **A-1.**
-   - nntp-client.go: `BackendConfig` gets `MaxLineBytes int`, `MaxArticleBytes int64`, `MaxListBytes int64` (0 = the
-     defaults `DefaultMaxLineBytes = 1 << 20`, `DefaultMaxArticleBytes = 64 << 20`, `DefaultMaxListBytes = 512 << 20`;
+   - nntp-client.go: `BackendConfig` gets `MaxResponseLineBytes int`, `MaxArticleResponseBytes int64`,
+     `MaxListResponseBytes int64` (0 = the defaults `DefaultClientMaxLineBytes = 1 << 20`,
+     `DefaultClientMaxArticleBytes = 64 << 20`, `DefaultClientMaxListBytes = 512 << 20`;
      negative = unlimited). `Connect` passes the line cap to `newDeadlineConn`/`setTimeouts` (add a `maxLine int`
      parameter or a `setMaxLine` method; your choice, inside `nntp-client-conn.go`).
-   - `nntp-client-conn.go`: line cap in `Read` (Component design), `var ErrLineTooLong = errors.New("nntp: response line
+   - `nntp-client-conn.go`: line cap in `Read` (Component design), `var ErrResponseLineTooLong = errors.New("nntp: response line
      too long")`.
    - `readMultilineResponse` (`:780-847`): `budget := c.responseBudget(src)` (`article`/`headers`/`body` →
-     MaxArticleBytes, others → MaxListBytes); `total += int64(len(line)) + 2` per line; over budget → `c.conn.Close();
+     MaxArticleResponseBytes, others → MaxListResponseBytes); `total += int64(len(line)) + 2` per line; over budget → `c.conn.Close();
      c.forceClose = true` (the existing limit pattern, caller holds `c.mux`) and
      `fmt.Errorf("%w: %s response over %d bytes", ErrResponseTooLarge, src, budget)`.
    - `XHdrStreamedBatch` loop: count lines; more than `end-start+1` (after the 1000 clamp) → return
@@ -695,7 +709,7 @@ Changes:
        `X-Custom` and folded continuations kept byte-exact.
      - `TestCliHdrRelayInvalid`: table → each wraps `ErrRelayHeadersInvalid`: missing Message-ID, two Subject lines, a
        colon-less line, a first line that is a continuation, Message-ID ≠ `article.MessageID`, a line with a bare CR.
-     - `TestCliHdrValidMessageID`, `TestCliHdrEnsureLocalPathPrefix`: tables.
+     - `TestCliHdrEnsureLocalPathPrefix`: table.
    - `internal/nntp/nntp-client-cmds_test.go` (fake server; `AuthFailureBackoff: -1` everywhere):
      - `TestCliCmdXHdrStreamed411` (CLI-2): script `GROUP .*` → `411 no such group`; `XHdrStreamed` returns an error
        with `errors.Is(err, ErrNewsgroupNotFound)`, no panic, the channel is closed.
@@ -718,9 +732,10 @@ Changes:
        (`RelayHeaders` runs before `Cmd`): the fake's `Lines()` has no `TAKETHIS`.
      - `TestCliCmdPostWire` (CLI-1 p2/p3, NC-1): `PostArticle` with folded Newsgroups, Subject `"s\nx"` and
        `BodyText "x\n"` → wire has the continuation once, `Subject: s`, body `x`, `` then `.`.
-     - `TestCliCmdArticleBudget` (A-1): `MaxArticleBytes 1024`, ARTICLE reply of 4 KiB → `errors.Is(err,
+     - `TestCliCmdArticleBudget` (A-1): `MaxArticleResponseBytes 1024`, ARTICLE reply of 4 KiB → `errors.Is(err,
        ErrResponseTooLarge)`.
-     - `TestCliCmdLineCap` (A-1): `MaxLineBytes 512`, XOVER reply with a 4 KiB line → `errors.Is(err, ErrLineTooLong)`.
+     - `TestCliCmdLineCap` (A-1): `MaxResponseLineBytes 512`, XOVER reply with a 4 KiB line → `errors.Is(err,
+       ErrResponseLineTooLong)`.
      - `TestCliCmdXHdrStreamedLineCap` (A-1): request 1-3, fake returns 10 lines → error wrapping
        `ErrResponseTooLarge`.
      - `TestCliCmdSOCKSTimeout` (A-1): a `RawStall` fake used as the SOCKS5 proxy (`ProxyEnabled`, `ProxyType
@@ -833,12 +848,12 @@ Changes:
 1. **`nntp-client-validate.go` (new; A-3, decision 12).**
    ```go
    var ErrInvalidCommandArg = errors.New("nntp: invalid command argument")
-   const maxCommandLine = 510 // RFC 3977 §3.1: 512 octets including CRLF
+   const maxClientCommandLine = 510 // RFC 3977 §3.1: 512 octets including CRLF
    func validMessageIDArg(id string) error // common.ValidMessageID or wrapped ErrInvalidCommandArg
    func validGroupArg(name string) error   // 1..497 octets, no byte <= 0x20, 0x7f or ','
    func validTokenArg(s string, allowSpace bool) error // non-empty, no CR/LF/NUL; no SP/HT unless allowSpace
    func (c *BackendConn) sendCmd(format string, args ...any) (uint, error)
-   	// line := fmt.Sprintf(format, args...); CR/LF/NUL or len > maxCommandLine → ErrInvalidCommandArg (nothing written);
+   	// line := fmt.Sprintf(format, args...); CR/LF/NUL or len > maxClientCommandLine → ErrInvalidCommandArg (nothing written);
    	// else c.TextConn.Cmd("%s", line)
    ```
 2. **Call sites.** Replace every `c.TextConn.Cmd(` in `nntp-client-commands.go` and `authenticate` with
@@ -872,10 +887,10 @@ prints nothing).
 
 ---
 
-### Wave 4 (1 slice; only if `nntp-intake-injection` is merged into the integration base)
+### Wave 4 (1 slice, based on the merged wave 3; `nntp-intake-injection` is already merged)
 
-Precondition (orchestrator): `grep -n 'func NormalizeHeaderBlock' internal/common/*.go` prints one line. Otherwise skip
-the wave, record it in `## Progress`, and list A-nntp-rfc-2/A-intake-2 (client half) as a leftover.
+Sanity check (orchestrator): `grep -n -e 'func CheckHeaderBlock' -e 'HeaderBlockFetch' internal/common/*.go` finds both.
+If the name or signature differs, hand the slice the merged signature (K1 rule); the wave is not skipped.
 
 #### Slice `cli-normalize`: normalized header blocks on the fetch path
 Ids: A-nntp-rfc-2 / A-intake-2 (client half). E-tag `cli-normalize`.
@@ -887,7 +902,7 @@ Owned files:
 - `internal/nntp/nntp-client-normalize_test.go` (new)
 
 Changes:
-1. `ParseHeaders` (`:905-951`): `norm, err := common.NormalizeHeaderBlock(headerLines); if err != nil { return
+1. `ParseHeaders` (`:905-951`): `norm, err := common.CheckHeaderBlock(headerLines, common.HeaderBlockFetch); if err != nil { return
    fmt.Errorf("malformed header block in '%s': %w", article.MessageID, err) }`; parse the header map from `norm` instead of
    `headerLines`, and `article.HeadersJSON = MultiLineHeaderToMergedString(norm)`. The un-stuffing in
    `readMultilineResponse` stays (RFC 3977 §3.1.1).
@@ -896,9 +911,11 @@ Changes:
    signature changes.
 3. `GetHead` keeps calling `ParseHeaders` (normalized too).
 4. Tests in `nntp-client-normalize_test.go`:
-   - `TestCliNormDotHeaderRejectedOrStuffed`: a fetched block with a `.` header line (wire `..`) through a fake ARTICLE
-     reply → `GetArticle` returns an error, or the stored `HeadersJSON` has no line equal to `.` (whichever policy
-     `NormalizeHeaderBlock` documents; assert that policy).
+   - `TestCliNormDotHeaderDropped`: a fetched block with a `.` header line (wire `..`) and a colon-less line through a
+     fake ARTICLE reply → `GetArticle` succeeds and the stored `HeadersJSON` has neither line (`HeaderBlockFetch` drops
+     colon-less lines).
+   - `TestCliNormRejects`: a block with two Subject lines, and one with a NUL byte → `GetArticle` returns an error and
+     the connection stays usable for the next command.
    - `TestCliNormIdempotent`: `ParseLegacyArticleLines` on lines rebuilt from its own `HeadersJSON` gives the same
      `HeadersJSON` and `Bytes`.
 5. Run the cmd/nntp-server tests: if `e2eKnownBug(t, "A-nntp-rfc-2", …)` now reports "no longer reproduces", stop and
@@ -1119,9 +1136,8 @@ later wave, fix the script and note it in `## Progress`.
   line ` e2e.ct.b`.
 - **E05:** ct-1's wire lines after the first empty line are exactly `line1`, `..dotline`, `` (the file holds the block
   without the `.` terminator, which `ReadDotBlock` consumed).
-- **E15:** every `CHECK`/`TAKETHIS` line in `commands.log` has an argument that passes a local
-  `cliE2EValidMessageID` (same rule as decision 12; the e2e file is written in wave 0, before `common.ValidMessageID`
-  exists); no unquoted line contains `\r` or `\x00`.
+- **E15:** every `CHECK`/`TAKETHIS` line in `commands.log` has an argument that passes `common.ValidMessageID`
+  (present because `nntp-intake-injection` is merged first); no unquoted line contains `\r` or `\x00`.
 - **E07b (phase 2):** `<hex("<ct-2@e2e.invalid>")>.wire` exists.
 
 ---
