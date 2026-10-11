@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -48,15 +49,25 @@ func (p *idbProc) seen() []idbAdd {
 	return append([]idbAdd(nil), p.adds...)
 }
 
-// idbBatchDB returns an isolated batch database (own data root and group DB map) that shares
-// the main database of the package test DB, plus its recording processor. The cleanup that
-// detaches the shared main DB is registered after fuBatchIsolatedDB's Shutdown cleanup, so it
-// runs first (LIFO) and Shutdown never closes the shared main database.
+// idbBatchDB returns an isolated batch database (own data root and group DB map) plus its
+// recording processor. Its mainDB is a separate *sql.DB pool on the package test DB's main
+// database file (same driver, so the same per-connection pragmas): the rows it writes are
+// visible through w0DB, but every Shutdown of the isolated database - fuBatchIsolatedDB's
+// cleanup, or fuBatchRun's on a wedged batch - closes only this pool, never the shared one.
 func idbBatchDB(t *testing.T) (*Database, *idbProc) {
 	t.Helper()
 	db := fuBatchIsolatedDB(t)
-	db.mainDB = w0DB(t).mainDB
-	t.Cleanup(func() { db.mainDB = nil })
+	mainDB, err := sql.Open(driverNameMain, filepath.Join(w0DB(t).dbconfig.DataDir, "cfg", "pugleaf.sq3"))
+	if err != nil {
+		t.Fatalf("open a second main DB pool: %v", err)
+	}
+	if err := mainDB.Ping(); err != nil {
+		if cerr := mainDB.Close(); cerr != nil {
+			t.Logf("close the second main DB pool: %v", cerr)
+		}
+		t.Fatalf("ping the second main DB pool: %v", err)
+	}
+	db.mainDB = mainDB
 	proc := &idbProc{db: db}
 	db.Batch.SetProcessor(proc)
 	return db, proc

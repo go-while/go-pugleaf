@@ -1121,8 +1121,10 @@ func (sq *SQ3batch) processOverviewBatch(groupDB *GroupDB, batches []*models.Art
 	// Iterate through the results and map article numbers back to batches
 	for rows.Next() {
 		if err := rows.Scan(&messageID, &articleNum); err != nil {
+			// An unscanned row would leave an inserted article without its number while
+			// it is still counted: fail the batch, retry1 re-runs it (inserted survives).
 			log.Printf("[OVB-BATCH] group '%s': Failed to scan article number: %v", groupDB.Newsgroup, err)
-			continue
+			return fmt.Errorf("failed to scan article number for group '%s': %w", groupDB.Newsgroup, err)
 		}
 		// O(n²) complexity: nested loop through batches for each DB row
 		// Acceptable for small batch sizes (≤100), eliminates map allocation overhead
@@ -1150,6 +1152,10 @@ func (sq *SQ3batch) processOverviewBatch(groupDB *GroupDB, batches []*models.Art
 			article.Mux.Unlock()
 		}
 		idToArticleNum++
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[OVB-BATCH] group '%s': batch select iteration failed: %v", groupDB.Newsgroup, err)
+		return fmt.Errorf("batch select iteration failed for group '%s': %w", groupDB.Newsgroup, err)
 	}
 	took := time.Since(start).Milliseconds()
 	if timeSpent > 1000 {
