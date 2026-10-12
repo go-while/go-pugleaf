@@ -595,7 +595,7 @@ Checks on the final tree: gofmt baseline 2 files, vet (+`-tags e2e`) and build O
 ## Outcome
 
 - **Integration branch:** `plan-nntp-intake-injection` @ aa2929b (23 commits from `testing-001` @ 9a7ac3e; 28 files, +5,056/−519 lines).
-  Not yet merged into `testing-001` (user decision). Nothing pushed.
+  Merged into `testing-001` with `--no-ff` as acb56d5 on 2026-10-12 (build and vet green after the merge). Nothing pushed.
 - **Worktrees / branches** (left in place for the user to clean up):
   - `/tank0/claude/trees/go-pugleaf/agent-a0bc167187195b985` — `worktree-agent-a0bc167187195b985` @ 0f76132 (intake-db, S2)
   - `/tank0/claude/trees/go-pugleaf/agent-a3ad4286e2deb3e09` — `worktree-agent-a3ad4286e2deb3e09` @ 5f90357 (intake-common, S1)
