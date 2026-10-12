@@ -1217,3 +1217,16 @@ later wave, fix the script and note it in `## Progress`.
 ## Progress
 
 (filled in by `/run-plan`)
+
+### Preflight (2026-10-12, orchestrator; base `testing-001` @ fa3a722, hardening d9de34e and intake acb56d5 merged)
+- Owned-file drift since 03d5ef7: only `internal/nntp/nntp-history-parse_test.go` (one comment line). All eight K6
+  anchors match: `nntp-client.go:211` (`ReadCodeLine(NNTPWelcomeCodeMin)`), `:346` (`xSetReadDeadline`),
+  `nntp-transfer-demuxer.go:185`, `nntp-client-commands.go:640` and `:877`, `headers.go:294`, the two
+  `_ "net/http/pprof"` imports (`cmd/nntp-transfer/main.go:12`, `cmd/history-rebuild/main.go:12`), `transfer-progress.go:360`.
+- Every K2 reserved name is free. `common.WireArticleSize` exists (`common/intake.go:434`): wave 2 uses it (no `articleWireBytes`).
+- `.github/copilot-instructions.md` mentions `test-nntp` (doc only; cli-tools may leave it, audit-delta-fixes owns docs).
+- Baseline on 306c1c2: gofmt baseline 2 files, vet (+`-tags e2e`) and build OK, 10 package sets green under `-race`
+  (`cmd/nntp-transfer` has no tests yet), known bugs = **RFC-1 T-nntp-article-1** (this plan must keep exactly that set),
+  `build_nntp-transfer.sh` and `build_history-rebuild.sh` OK (both now build without `-race`, so E14's note about a
+  `-race` transfer binary no longer applies; the race run of the new tests is the `go test -race` step instead).
+- Wave 0 is run as one reviewed implementer slice (`cli-fake`) instead of inline: ~600 lines of test code.
