@@ -3,6 +3,7 @@ package processor
 import (
 	"fmt"
 	"log"
+	"maps"
 	"strings"
 
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -80,7 +81,8 @@ func (w *PostQueueWorker) pre_processArticle(article *models.Article) error {
 	errs := 0
 	// Process the article for each newsgroup
 	for _, newsgroup := range newsgroups {
-		// copy article
+		// copy article; each copy gets its own Headers map: processArticle drops its
+		// reference, and a shared map must stay intact for the next copy (A-intake-5)
 		copiedArticle := &models.Article{
 			MessageID:   article.MessageID,
 			Subject:     article.Subject,
@@ -93,7 +95,7 @@ func (w *PostQueueWorker) pre_processArticle(article *models.Article) error {
 			HeadersJSON: article.HeadersJSON,
 			BodyText:    article.BodyText,
 			Path:        article.Path,
-			Headers:     article.Headers,
+			Headers:     maps.Clone(article.Headers),
 			IsThrRoot:   article.IsThrRoot,
 			IsReply:     article.IsReply,
 			RefSlice:    article.RefSlice,
@@ -160,7 +162,11 @@ func (w *PostQueueWorker) processArticleForNewsgroup(article *models.Article, ne
 	return nil
 }
 
-// parseNewsgroups parses a comma-separated list of newsgroups
+// parseNewsgroups parses a comma-separated list of newsgroups.
+// It stays a split-only parser (comma + trim) on purpose: the web validated the names
+// before queueing, and a strict parser must never drop a web post silently. The NNTP
+// intake splitters (processor non-bulk path and nntp) both use common.ParseNewsgroups
+// (INT-3); this queue keeps its documented split.
 func parseNewsgroups(newsgroupsStr string) []string {
 	if newsgroupsStr == "" {
 		return nil

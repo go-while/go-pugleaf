@@ -15,6 +15,7 @@ package main
 
 import (
 	"fmt"
+	"net/mail"
 	"os"
 	"strings"
 	"testing"
@@ -223,5 +224,193 @@ func TestE2EBinary(t *testing.T) {
 			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
 		}
 		return nil
+	}())
+}
+
+// TestE2EBinaryIntake runs the checks N40 and N42–N49 of plan nntp-intake-injection
+// (`## End-to-end`) against the externally started server; N41 is a shell check of the
+// script. Extra env: PUGLEAF_E2E_HOST (the server's -nntphostname, default example.org).
+// The groups e2e.intake.gen (status y) and e2e.intake.mod (status m) must exist and
+// e2e.intake.gen must be empty; e2e.nosuch.group must not exist.
+//
+//	PUGLEAF_E2E_ADDR=127.0.0.1:21119 PUGLEAF_E2E_HOST=example.org \
+//	  go test -tags e2e -count=1 -v -run '^TestE2EBinaryIntake$' ./cmd/nntp-server/
+func TestE2EBinaryIntake(t *testing.T) {
+	addr := os.Getenv("PUGLEAF_E2E_ADDR")
+	if addr == "" {
+		t.Skip("PUGLEAF_E2E_ADDR not set (run scripts/test-nntp-server.sh)")
+	}
+	user := e2eEnv("PUGLEAF_E2E_USER", "e2euser0001")
+	pass := e2eEnv("PUGLEAF_E2E_PASS", "e2epass0001")
+	host := e2eEnv("PUGLEAF_E2E_HOST", "example.org")
+	const gen, mod, nosuch = "e2e.intake.gen", "e2e.intake.mod", "e2e.nosuch.group"
+	r := e2eReport{t: t}
+	stamp := time.Now().UnixNano()
+	newID := func(n string) string { return fmt.Sprintf("<e2e-%s-%d@test.invalid>", n, stamp) }
+	statusIs := func(code int, line string, err error, want ...int) error {
+		if err != nil {
+			return fmt.Errorf("code=%d line=%q err=%v", code, line, err)
+		}
+		for _, w := range want {
+			if code == w {
+				return nil
+			}
+		}
+		return fmt.Errorf("got %q, want %v", line, want)
+	}
+	modeReader := func(c *e2eClient) error {
+		code, line, err := c.tryCmd("MODE READER")
+		if e := statusIs(code, line, err, 200, 201); e != nil {
+			return fmt.Errorf("MODE READER on the same connection: %v", e)
+		}
+		return nil
+	}
+	big := make([]string, 0, 1024)
+	for i := 0; i < 1024; i++ { // about 66 KiB, over the default MaxArtSize of 32 KiB
+		big = append(big, fmt.Sprintf("%04d %s", i, strings.Repeat("z", 59)))
+	}
+
+	c, err := e2eDialAddr(addr, 15*time.Second)
+	if err != nil {
+		r.fail("N40", "connect", err.Error())
+		t.FailNow()
+	}
+	defer c.close()
+	if code, line, err := c.tryAuth(user, pass); err != nil || code != 281 {
+		r.fail("N40", "AUTHINFO 281", fmt.Sprintf("code=%d line=%q err=%v", code, line, err))
+		t.FailNow()
+	}
+
+	// N40: POST to a group that does not exist → 441 (RFC 5537 §3.5: no group is created)
+	r.check("N40", "POST to "+nosuch+" 441", func() error {
+		code, line, err := c.tryPost(e2eWire(e2eHead(newID("n40"), nosuch, "E2E N40 unknown group", e2eNow()), []string{"n40"}))
+		return statusIs(code, line, err, 441)
+	}())
+
+	// N42: POST without Message-ID and Date → 240; the injecting agent generated both,
+	// plus Injection-Date and Injection-Info (RFC 5537 §3.5 steps 5/6/10/11)
+	var head42 []string
+	r.check("N42", "POST without Message-ID/Date 240, injected headers", func() error {
+		code, line, err := c.tryPost(e2eWire(e2eHead("", gen, "E2E N42 generated headers", ""), []string{"n42"}))
+		if e := statusIs(code, line, err, 240); e != nil {
+			return e
+		}
+		var last string
+		if err := e2eWaitFor(20*time.Second, func() error {
+			code, line, err := c.tryCmd("GROUP %s", gen)
+			if err != nil {
+				return err
+			}
+			last = line
+			if code != 211 || !strings.HasPrefix(line, "211 1 ") {
+				return fmt.Errorf("got %q", line)
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("GROUP %s: %v (last %q)", gen, err, last)
+		}
+		code, line, err = c.tryCmd("HEAD 1")
+		if e := statusIs(code, line, err, 221); e != nil {
+			return fmt.Errorf("HEAD 1: %v", e)
+		}
+		hdrs, err := c.tryDotLines()
+		if err != nil {
+			return err
+		}
+		head42 = hdrs
+		if v := e2eHeaderValue(hdrs, "Message-ID"); !strings.HasPrefix(v, "<") || !strings.HasSuffix(v, "@"+host+">") {
+			return fmt.Errorf("Message-ID %q is not a generated <…@%s>", v, host)
+		}
+		if _, err := mail.ParseDate(e2eHeaderValue(hdrs, "Date")); err != nil {
+			return fmt.Errorf("Date %q: %v", e2eHeaderValue(hdrs, "Date"), err)
+		}
+		if _, err := mail.ParseDate(e2eHeaderValue(hdrs, "Injection-Date")); err != nil {
+			return fmt.Errorf("Injection-Date %q: %v", e2eHeaderValue(hdrs, "Injection-Date"), err)
+		}
+		if v := e2eHeaderValue(hdrs, "Injection-Info"); !strings.HasPrefix(v, host) {
+			return fmt.Errorf("Injection-Info %q does not start with %q", v, host)
+		}
+		return nil
+	}())
+
+	// N43: the served Path starts with "<identity>!.POSTED!" (RFC 5537 §3.5 step 9)
+	r.check("N43", "Path starts with "+host+"!.POSTED!", func() error {
+		if head42 == nil {
+			return fmt.Errorf("no HEAD from N42")
+		}
+		if p := e2eHeaderValue(head42, "Path"); !strings.HasPrefix(p, host+"!.POSTED!") {
+			return fmt.Errorf("Path %q", p)
+		}
+		return nil
+	}())
+
+	// N44: IHAVE of an article with two Subject headers → 335 then 437
+	r.check("N44", "IHAVE two Subject headers 335 then 437", func() error {
+		id := newID("n44")
+		code, line, err := c.tryCmd("IHAVE %s", id)
+		if e := statusIs(code, line, err, 335); e != nil {
+			return fmt.Errorf("IHAVE: %v", e)
+		}
+		head := append(e2eHead(id, gen, "E2E N44 first subject", e2eNow()), "Subject: E2E N44 second subject")
+		if err := c.send(e2eWire(head, []string{"n44"})); err != nil {
+			return err
+		}
+		code, line, err = c.readStatus()
+		return statusIs(code, line, err, 437)
+	}())
+
+	// N45: POST of a 64 KiB article → 441, the connection stays usable
+	r.check("N45", "POST 64 KiB 441, then MODE READER", func() error {
+		code, line, err := c.tryPost(e2eWire(e2eHead(newID("n45"), gen, "E2E N45 big", e2eNow()), big))
+		if e := statusIs(code, line, err, 441); e != nil {
+			return e
+		}
+		return modeReader(c)
+	}())
+
+	// N46: pipelined TAKETHIS of a 64 KiB article and a small one → 439 <id1>, 239 <id2>
+	r.check("N46", "TAKETHIS 64 KiB 439 then small 239", func() error {
+		id1, id2 := newID("n46a"), newID("n46b")
+		stream := "TAKETHIS " + id1 + "\r\n" + e2eWire(e2eHead(id1, gen, "E2E N46 big", e2eNow()), big) +
+			"TAKETHIS " + id2 + "\r\n" + e2eWire(e2eHead(id2, gen, "E2E N46 small", e2eNow()), []string{"n46"})
+		if err := c.send(stream); err != nil {
+			return err
+		}
+		for _, w := range []struct {
+			code int
+			id   string
+		}{{439, id1}, {239, id2}} {
+			code, line, err := c.readStatus()
+			if e := statusIs(code, line, err, w.code); e != nil {
+				return e
+			}
+			if f := strings.Fields(line); len(f) < 2 || f[1] != w.id {
+				return fmt.Errorf("reply %q does not carry %s", line, w.id)
+			}
+		}
+		return nil
+	}())
+
+	// N47: IHAVE with a malformed message-id → 501 (RFC 3977 §3.2.1)
+	r.check("N47", "IHAVE not-a-message-id 501", func() error {
+		code, line, err := c.tryCmd("IHAVE not-a-message-id")
+		return statusIs(code, line, err, 501)
+	}())
+
+	// N48: POST to a moderated group without Approved → 441 (RFC 5537 §3.7 step 5)
+	r.check("N48", "POST to "+mod+" without Approved 441", func() error {
+		code, line, err := c.tryPost(e2eWire(e2eHead(newID("n48"), mod, "E2E N48 moderated", e2eNow()), []string{"n48"}))
+		return statusIs(code, line, err, 441)
+	}())
+
+	// N49: POST with a header line ".." (un-stuffed ".") → 441, the connection stays usable
+	r.check("N49", "POST with a \"..\" header line 441, then MODE READER", func() error {
+		head := e2eHead(newID("n49"), gen, "E2E N49 dot header", e2eNow())
+		head = append(head[:2], append([]string{"."}, head[2:]...)...) // sent as ".." by e2eWire
+		code, line, err := c.tryPost(e2eWire(head, []string{"n49"}))
+		if e := statusIs(code, line, err, 441); e != nil {
+			return e
+		}
+		return modeReader(c)
 	}())
 }

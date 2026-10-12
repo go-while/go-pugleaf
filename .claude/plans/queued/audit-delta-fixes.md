@@ -17,7 +17,9 @@
     would conflict textually if run first, and INT-5's
     numbering assumes the stats statement is already an `UPDATE` that never inserts. It also provides
     `common.FormatNewsDate`, `common.WireArticleSize` and `processor.ParseNNTPDateStrict` (used by `adf-web-post` and
-    `adf-ops-recover`: build fails without them), fixes A-intake-5 (web crossposts) and A-tools-4 (per-run queue),
+    `adf-ops-recover`: build fails without them), fixes A-intake-5 (web crossposts) and A-tools-4 (per-run queue;
+    done 2026-10-11: `DownloadArticles` no longer touches `Batch.GroupQueues`; the map init in `processor.go:55` and
+    the deprecated `GetOrCreateGroupBatch` are now unused and may be deleted here),
     and implements the agreed A-tools-1 bound (hand-off 1 below). It no longer edits `cmd/web/main.go`
     (final decision (ii)).
   - `nntp-client-transfer` (`cmd/history-rebuild/main.go` pprof lines; it also adds SIGTERM to history-rebuild and

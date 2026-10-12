@@ -310,12 +310,14 @@ func TestAuthPostingGates(t *testing.T) {
 	})
 
 	// RFC 3977 §6.3.1.2: POST that is not permitted gives 440 (posting not
-	// permitted). RFC-5: the server sends 502.
+	// permitted).
 	t.Run("no-posting-post", func(t *testing.T) {
 		c := hs.dial(t)
 		authMustLogin(t, c, reader, readerPass)
 		code, line := c.cmd(t, "POST")
-		knownBug(t, "RFC-5", hExpectCode(code, line, 440))
+		if err := hExpectCode(code, line, 440); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	// Control: a user with posting permission gets past every gate.
