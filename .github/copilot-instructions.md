@@ -97,7 +97,7 @@ golangci-lint run
 ### Important Build Notes
 - **Always** run builds from repository root directory
 - The `build/` directory is auto-created and contains all executables
-- Build scripts use `-race` flag for race condition detection
+- Build scripts do not use `-race`; race detection happens in `go test -race` (see .claude/CLAUDE.md)
 - Version injection uses `appVersion.txt` file
 - Clean builds remove `build/*` before building
 - Build failures typically indicate missing dependencies
@@ -181,7 +181,7 @@ golangci-lint run
 - **Spam Filtering** (`internal/spam/`): SpamAssassin integration with fast rule-based filtering
 
 ### Dependencies Not Obvious from Layout
-- **Race Detection**: All builds use `-race` flag for concurrency safety
+- **Race Detection**: `go test -race` on the tested packages; production binaries are built without `-race`
 - **Version Injection**: Build scripts inject version from `appVersion.txt`
 - **Template Dependencies**: Web server requires `web/` directory present
 - **SSL/TLS Support**: Both web and NNTP servers support TLS with cert files

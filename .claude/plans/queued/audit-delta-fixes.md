@@ -290,7 +290,11 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
   intake S4 no longer edits it, final decision (ii)) and the `withnntp`/`withfetch`/`isleep` variables; `-nntptcpport`, `-nntptlsport`,
   `-nntpcertfile`, `-nntpkeyfile` stay parsed (scripts pass them) and log one
   `[WEB]: -nntptcpport/-nntptlsport/-nntpcertfile/-nntpkeyfile are ignored: run cmd/nntp-server` line when set.
-- **D11 Build scripts (OPS-4e) — user question at the wave-1 boundary (Q9), asked before `adf-ops-scripts` merges.**
+- **D11 — DONE 2026-10-12 outside this plan (user decision: "remove all -race from normal build scripts and fix the docs"):**
+  `-race` was removed outright from the 11 build scripts (no `${RACE:+-race}` opt-in), and `.claude/CLAUDE.md` plus
+  `.github/copilot-instructions.md` were corrected, in a commit on `testing-001`. Q9 is answered; `adf-ops-scripts` skips
+  OPS-4e and the CLAUDE.md sentence (E16's `grep -nE 'go build[^$]*-race' build_*.sh` is already empty).
+- **D11 Build scripts (OPS-4e) — original text (superseded):**
   Proposed: the 11 scripts build without `-race`; `RACE=1 ./build_<x>.sh` restores it
   (`go build ${RACE:+-race} …`). Production binaries built through `build_ALL.sh` are therefore no longer race
   builds. Verifiers that want race detection (WSH E19, the client plan's E14, this plan's E19) build with `RACE=1`.

@@ -25,7 +25,7 @@ go test -race ./internal/database/... ./internal/web/... ./internal/history/... 
   a fixed bug makes its `knownBug` marker fail until the marker is removed (see `docs/audit/README.md`).
 - Add or extend `_test.go` files for new logic when practical; most packages have no tests yet.
 - To build a binary use its own script, e.g. `./build_webserver.sh`, `./build_fetcher.sh`,
-  `./build_history-rebuild.sh` (output: `build/`, built with `-race`).
+  `./build_history-rebuild.sh` (output: `build/`; no `-race`: the race detector runs in `go test -race`, not in binaries).
 - Never run `build_ALL.sh` or `Build_DEV.sh`: they `rm build/*` and generate checksums/update tarballs.
 
 ## Data safety (production data lives in this checkout)
