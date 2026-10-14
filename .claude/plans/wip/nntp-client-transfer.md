@@ -1232,3 +1232,11 @@ later wave, fix the script and note it in `## Progress`.
   `build_nntp-transfer.sh` and `build_history-rebuild.sh` OK (both now build without `-race`, so E14's note about a
   `-race` transfer binary no longer applies; the race run of the new tests is the `go test -race` step instead).
 - Wave 0 is run as one reviewed implementer slice (`cli-fake`) instead of inline: ~600 lines of test code.
+
+### Wave 0 (2026-10-14; delegated to one implementer, reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| cli-fake (wave 0) | worktree-agent-a5b20e3f847b64b9f (fc8429d, 7f7e232) | merge after fixes: a `Hang` step now runs ReadDot/Delay/Reply first and only then drains (two later test specs say "reply …, then Hang"); peer self-limit 14 min (was 10; the script's `go test -timeout 15m` bounds it); `NoGreeting`+`Handler` runs the Handler without a greeting; accept loop retries on transient errors. Script byte-identical to the plan listing. Fake-server API otherwise as step 2 (per-connection `tls.Server`, RawStall drains, mismatch does not advance the step, `Lines()` excludes dot-block payload, `Raw()` is the TLS conn when TLS). Extra unexported helpers `cliFakeTextDial`, `cliFakeExpect`, `cliFakeWaitLines`, `cliE2E*` | a0f2617 |
+
+Baseline e2e (fc8429d, ports 21300–21305): `SUMMARY pass=4 fail=13 info=0` — PASS E09, E14, E15, E07 (vacuous: no progress rows because every run was killed by its 180 s timeout); FAIL E01 (CLI-4 stall after three CHECKs), E02 (30 s hang), E03/E04/E05/E06/E07b/E08 (not reached), E10/E11 (cmdline leaks the scratch peer password), E12 (`*:port`), E13 (rc 0), E16 (no shutdown line). Seeding: S01–S03 all 240 (the intake plan accepts the folded Newsgroups continuation).
+Checks on a0f2617: gofmt baseline 2 files, vet (+`-tags e2e`) and build OK, `TestCliFake*` green ×3 under `-race`, script `bash -n` OK; production code unchanged since the baseline run (full suite rerun after wave 1).
