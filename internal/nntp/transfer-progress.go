@@ -47,15 +47,11 @@ func OpenTransferProgressDB(dataDir, remoteName string) (*TransferProgressDB, er
 	}
 
 	dbPath := filepath.Join(progressDir, "transfer-progress.db")
-	db, err := sql.Open("sqlite3", dbPath)
+	// busy_timeout and WAL go into the DSN so that every pooled connection gets both
+	// (a PRAGMA Exec reaches only the one connection it runs on).
+	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=30000&_journal_mode=WAL")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %v", err)
-	}
-
-	// Enable WAL mode for better concurrent performance
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to set WAL mode: %v", err)
 	}
 
 	// Create tables if they don't exist
@@ -337,7 +333,20 @@ func (tpdb *TransferProgressDB) NewsgroupExists(newsgroup string, startDate, end
 	return count > 0, nil
 }
 
-// GetAllProgressNewsgroups fetches all newsgroup names that have progress records for the current remote and date range
+// query_getAllProgressNewsgroupsDone selects the groups whose latest transfer row for a remote and date range
+// is complete: no retries (e.g. CHECK 431), no TX errors and no connection errors.
+const query_getAllProgressNewsgroupsDone = `
+	SELECT t.newsgroup FROM transfers t
+	WHERE t.remote_id = ? AND t.start_date = ? AND t.end_date = ?
+	  AND t.id = (SELECT MAX(id) FROM transfers x
+	              WHERE x.remote_id = t.remote_id AND x.newsgroup = t.newsgroup
+	                AND x.start_date = t.start_date AND x.end_date = t.end_date)
+	  AND t.retry = 0 AND t.tx_errors = 0 AND t.conn_errors = 0
+`
+
+// GetAllProgressNewsgroups fetches the newsgroups whose latest result for the current remote and date range
+// is complete (retry, tx_errors and conn_errors all 0). A group whose latest run had retries or errors is not
+// included, so the next run with the same date range offers it again.
 // Returns a map for O(1) lookup performance
 func (tpdb *TransferProgressDB) GetAllProgressNewsgroups(startDate, endDate *time.Time) (map[string]bool, error) {
 	tpdb.mu.RLock()
@@ -356,16 +365,9 @@ func (tpdb *TransferProgressDB) GetAllProgressNewsgroups(startDate, endDate *tim
 		endDateStr = ""
 	}
 
-	query := `
-		SELECT DISTINCT newsgroup FROM transfers
-		WHERE remote_id = ?
-		AND start_date = ?
-		AND end_date = ?
-	`
-
 	rows, err := database.RetryableQuery(
 		tpdb.db,
-		query,
+		query_getAllProgressNewsgroupsDone,
 		tpdb.remoteID,
 		startDateStr,
 		endDateStr,
