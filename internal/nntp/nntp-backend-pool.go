@@ -187,21 +187,23 @@ func (pool *Pool) SelectGroup(group string) (*GroupInfo, error) {
 	}
 
 	gi, code, err := client.SelectGroup(group)
-	if err != nil && (code != 411 && code != 480) {
-		// Close connection on unexpected any other error than "group not found"
+	switch {
+	case code == 411:
+		// group not found: the connection is healthy, put it back
+		pool.Put(client)
+		return nil, ErrNewsgroupNotFound
+	case code == 480:
+		// authentication required: this connection is no use, close it
+		client.ForceCloseConn()
+		return nil, ErrAuthRequired
+	case err != nil:
+		// Close connection on any other error
 		client.ForceCloseConn()
 		return nil, err
 	}
 
-	// Put back connection (even for code 411 - group not found)
 	pool.Put(client)
-
-	switch code {
-	case 411, 480:
-		err = ErrNewsgroupNotFound // silence error
-	}
-
-	return gi, err
+	return gi, nil
 }
 
 const MODE_READER_MV int = 1

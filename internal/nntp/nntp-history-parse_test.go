@@ -107,8 +107,12 @@ func TestNNTPHistParseLegacyRoundTripNoBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.BodyText != "" || a.Lines != 0 || a.Bytes != 0 {
-		t.Errorf("no-body article: BodyText=%q Lines=%d Bytes=%d", a.BodyText, a.Lines, a.Bytes)
+	wantBytes := 2 // the empty separator line (RFC 3977 :bytes counts CRLF line ends)
+	for _, h := range nntpHistTestHeadLines() {
+		wantBytes += len(h) + 2
+	}
+	if a.BodyText != "" || a.Lines != 0 || a.Bytes != wantBytes {
+		t.Errorf("no-body article: BodyText=%q Lines=%d Bytes=%d (want %d)", a.BodyText, a.Lines, a.Bytes, wantBytes)
 	}
 	nntpHistTestRoundTrip(t, lines)
 }
