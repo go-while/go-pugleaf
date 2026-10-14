@@ -35,11 +35,15 @@ import (
 type cliFakeOpts struct {
 	Addr       string                // listen address, default "127.0.0.1:0"
 	Greeting   string                // default "200 cli-fake ready"
-	NoGreeting bool                  // accept, never write (greeting stall); reads are still recorded
+	NoGreeting bool                  // no greeting; without Handler: never write (greeting stall), reads are still recorded
 	RawStall   bool                  // accept TCP, never write (TLS-handshake / SOCKS stall); bytes read are discarded
 	TLS        *tls.Config           // non-nil: TLS server on every accepted conn (cert from cliFakeTLSConfig)
 	Script     []cliFakeStep         // run sequentially on every connection after the greeting
 	Handler    func(fc *cliFakeConn) // replaces Script when set; the conn is closed when it returns
+	// Precedence: RawStall wins over everything (no TLS, no greeting, no Script/Handler).
+	// Otherwise the greeting is written unless NoGreeting; then Handler runs when set
+	// (with NoGreeting it may write its own, possibly delayed, greeting), else Script
+	// (with NoGreeting and no Handler the Script is not run: lines are only recorded).
 }
 
 // cliFakeStep is one scripted exchange.
@@ -48,13 +52,14 @@ type cliFakeOpts struct {
 // "500 cli-fake: unexpected <line>", is recorded in Mismatches() and the same
 // step waits for the next line. After the last step the connection keeps
 // reading and recording lines (no replies) until EOF/error, so Open() drops
-// only when the client closes. Hang steps also keep reading.
+// only when the client closes. Hang steps also keep reading (after their
+// Delay and Reply, when set).
 type cliFakeStep struct {
 	Expect     string        // regexp, anchored ^…$, matched against the client line; "" matches any line
 	ReadDot    bool          // after the match, read a dot-terminated block (POST/TAKETHIS payload)
 	Delay      time.Duration // before replying
 	Reply      []string      // lines written with CRLF; multi-line replies include their "." line
-	Hang       bool          // after the match (and ReadDot), never reply; held until Close
+	Hang       bool          // after the match (and ReadDot, Delay, Reply), never reply again; held until Close
 	CloseAfter bool          // close the connection after the reply
 }
 
@@ -135,7 +140,13 @@ func (s *cliFakeServer) acceptLoop() {
 	for {
 		c, err := s.ln.Accept()
 		if err != nil {
-			return // listener closed by Close
+			select {
+			case <-s.done:
+				return // listener closed by Close
+			default:
+			}
+			time.Sleep(10 * time.Millisecond) // transient accept error: retry
+			continue
 		}
 		s.mu.Lock()
 		if s.closed {
@@ -168,11 +179,12 @@ func (s *cliFakeServer) serve(raw net.Conn) {
 		fc.conn = tls.Server(raw, s.o.TLS)
 	}
 	fc.r = bufio.NewReader(fc.conn)
-	if s.o.NoGreeting {
+	if !s.o.NoGreeting {
+		if err := fc.WriteLines(s.o.Greeting); err != nil {
+			return
+		}
+	} else if s.o.Handler == nil {
 		fc.drain()
-		return
-	}
-	if err := fc.WriteLines(s.o.Greeting); err != nil {
 		return
 	}
 	if s.o.Handler != nil {
@@ -203,10 +215,6 @@ func (s *cliFakeServer) runScript(fc *cliFakeConn) {
 				return
 			}
 		}
-		if st.Hang {
-			fc.drain()
-			return
-		}
 		if st.Delay > 0 && !fc.sleep(st.Delay) {
 			return
 		}
@@ -214,6 +222,10 @@ func (s *cliFakeServer) runScript(fc *cliFakeConn) {
 			if err := fc.WriteLines(st.Reply...); err != nil {
 				return
 			}
+		}
+		if st.Hang {
+			fc.drain()
+			return
 		}
 		if st.CloseAfter {
 			return
@@ -704,6 +716,45 @@ func TestCliFakeScript(t *testing.T) {
 		t.Errorf("read after CloseAfter: %q, want EOF", l)
 	}
 	c.WaitOpen(t, 0, 2*time.Second)
+
+	// Reply then Hang: the reply arrives, nothing follows, lines are still recorded
+	hs := newCliFakeServer(t, cliFakeOpts{Script: []cliFakeStep{
+		{Expect: "ARTICLE .*", Reply: []string{"220 0 <a@b>", "Path: x"}, Hang: true},
+	}})
+	tch, nch := cliFakeTextDial(t, hs)
+	cliFakeExpect(t, tch, "", 200)
+	if msg := cliFakeExpect(t, tch, "ARTICLE <a@b>", 220); msg != "0 <a@b>" {
+		t.Errorf("220 text %q", msg)
+	}
+	if l, err := tch.ReadLine(); err != nil || l != "Path: x" {
+		t.Fatalf("second reply line %q %v", l, err)
+	}
+	if err := tch.PrintfLine("STAT <a@b>"); err != nil {
+		t.Fatal(err)
+	}
+	cliFakeWaitLines(t, hs, []string{"ARTICLE <a@b>", "STAT <a@b>"})
+	_ = nch.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	if l, err := tch.ReadLine(); err == nil {
+		t.Errorf("Hang step wrote %q after its reply", l)
+	} else if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+		t.Errorf("Hang step: read error %v, want timeout", err)
+	}
+	hs.WaitOpen(t, 1, 2*time.Second)
+
+	// NoGreeting + Handler: the Handler writes its own greeting
+	ng := newCliFakeServer(t, cliFakeOpts{NoGreeting: true, Handler: func(fc *cliFakeConn) {
+		if !fc.sleep(20 * time.Millisecond) {
+			return
+		}
+		if err := fc.WriteLines("201 own greeting"); err != nil {
+			return
+		}
+		fc.drain()
+	}})
+	tcn, _ := cliFakeTextDial(t, ng)
+	if msg := cliFakeExpect(t, tcn, "", 201); msg != "own greeting" {
+		t.Errorf("handler greeting %q", msg)
+	}
 
 	// TLS with the self-signed config; the client trusts clientRoots
 	srvCfg, roots := cliFakeTLSConfig(t)

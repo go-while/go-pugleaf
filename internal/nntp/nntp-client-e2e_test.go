@@ -146,7 +146,7 @@ func TestCliE2EFakePeer(t *testing.T) {
 	}
 	fmt.Println(fmt.Sprintf("INFO peer %s listening on %s:%d", mode, s.Host, s.Port))
 	stop := filepath.Join(dir, "STOP")
-	deadline := time.Now().Add(10 * time.Minute)
+	deadline := time.Now().Add(14 * time.Minute) // below the script's go test -timeout 15m
 	for time.Now().Before(deadline) {
 		if err := lineLog.flush(); err != nil {
 			t.Errorf("commands.log: %v", err)
