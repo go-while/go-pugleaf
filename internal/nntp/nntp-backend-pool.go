@@ -287,6 +287,11 @@ newConn:
 			log.Printf("[NNTP-POOL] Failed to create new connection: provider='%s': %v", pool.Backend.providerLabel(), err)
 			return nil, err
 		}
+		// counted as created now, so a SwitchMode failure (closed below, totalClosed++)
+		// keeps created - closed == active
+		pool.mux.Lock()
+		pool.totalCreated++
+		pool.mux.Unlock()
 		err = pconn.SwitchMode(wantMode)
 		if err != nil {
 			pool.closeConn(pconn, true) // frees the slot
@@ -297,9 +302,6 @@ newConn:
 			return nil, err
 		}
 		pconn.UpdateLastUsed() // Mark as used since we're handing it out
-		pool.mux.Lock()
-		pool.totalCreated++
-		pool.mux.Unlock()
 		return pconn, nil
 	}
 	pool.mux.Unlock()

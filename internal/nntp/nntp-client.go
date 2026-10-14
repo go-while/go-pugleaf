@@ -103,7 +103,8 @@ type BackendConfig struct {
 	AuthFailureBackoff time.Duration
 	// IdleExpire is the idle expiry of pooled connections; 0 = DefaultConnExpire, <0 = never expire.
 	IdleExpire time.Duration
-	// PoolWaitTimeout bounds Pool.Get's wait for a free slot; 0 = DefaultPoolWaitTimeout, <0 = wait for ctx only.
+	// PoolWaitTimeout bounds Pool.Get's wait for a free slot; 0 = DefaultPoolWaitTimeout, <0 = wait for ctx only
+	// (Pool.Get uses context.Background(), so a negative value can block it forever: use GetContext then).
 	PoolWaitTimeout time.Duration
 	MaxConns        int              // maximum number of connections to this backend
 	Provider        *config.Provider // link to provider config
