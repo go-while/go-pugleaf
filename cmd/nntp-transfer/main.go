@@ -1245,11 +1245,15 @@ func processRequeuedJobs(newsgroup string, ttMode *nntp.TakeThisMode, ttResponse
 		// pass articles to CHECK or TAKETHIS queue (async!)
 		responseChan, err := processBatch(ttMode, job.MessageIDs, redisCli, job.OffsetStart, job.OffsetQ, job.NGTProgress)
 		if err != nil {
-			log.Printf("Newsgroup: '%s' | Error processing requeued batch: %v", newsgroup, err)
 			jobRequeueMutex.Lock()
 			// insert remaining jobs back to slot 0
 			jobRequeue[ttMode.Newsgroup] = slices.Insert(jobRequeue[ttMode.Newsgroup], 0, queuedJobs[i:]...)
 			jobRequeueMutex.Unlock()
+			if common.WantShutdown() {
+				log.Printf("WantShutdown while processing requeued jobs for '%s': %v", newsgroup, err)
+				return i, nil
+			}
+			log.Printf("Newsgroup: '%s' | Error processing requeued batch: %v", newsgroup, err)
 			return i, fmt.Errorf("error processing requeued batch for newsgroup '%s': %v", newsgroup, err)
 		}
 		if responseChan != nil {
@@ -1492,8 +1496,11 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		delete(rejectedArticles, ng.Name) // free memory
 		nntp.ResultsMutex.Unlock()
 
-		// Insert result into progress database
-		if transferProgressDB != nil {
+		// Insert result into progress database. Not after a shutdown: jobs may have been answered
+		// without being transferred, and a row without errors marks the group as done (NC-2).
+		if transferProgressDB != nil && common.WantShutdown() {
+			log.Printf("Newsgroup: '%s' | WantShutdown: not recording a progress row for this run", ng.Name)
+		} else if transferProgressDB != nil {
 			if err := transferProgressDB.InsertResult(
 				ng.Name,
 				startTime,
@@ -1618,8 +1625,20 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 
 	//log.Printf("Newsgroup: '%s' | ttResponses channel closed, waiting for collector to finish...", ng.Name)
 
-	// Wait for collector goroutine to finish processing all responses
-	collectorWG.Wait()
+	// Wait for collector goroutine to finish processing all responses. On shutdown, jobs with
+	// outstanding CHECK/TAKETHIS answers may never be answered, so do not wait for them then
+	// (the collector does not record a progress row after a shutdown, see above).
+	collectorDone := make(chan struct{})
+	go func() {
+		collectorWG.Wait()
+		close(collectorDone)
+	}()
+	select {
+	case <-collectorDone:
+	case <-common.ShutdownChan:
+		log.Printf("WantShutdown in newsgroup: '%s' while waiting for outstanding responses", ng.Name)
+		return nil
+	}
 
 	log.Printf("Newsgroup: '%s' | All jobs completed and responses collected", ng.Name)
 	deassignWorker(ng.Name)
@@ -2367,6 +2386,29 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 						return
 					}
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquire connection lock for batch (offset %d: %d-%d) (%d messages)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, len(currentJob.MessageIDs))
+					// Bound the CHECKs in flight. SendCheckMultiple pushes one ReadRequest per message-id
+					// into readCHECKResponsesChan while rs.ConnMux is held. Only this goroutine pushes to
+					// that channel, so its free space can only grow while we wait here. Once the whole
+					// job fits, none of those pushes can block with ConnMux held (which would deadlock:
+					// this sender holding ConnMux, the CHECK reader blocked on a full WorkersTTChannel,
+					// the TAKETHIS worker waiting for ConnMux). It also keeps the CHECKs in flight
+					// <= cap(readCHECKResponsesChan) = nntp.DemuxerQueueDepth, so the demuxer never
+					// blocks on CHECK responses. The wait is interruptible by errChan and shutdown.
+					need := min(len(currentJob.MessageIDs), cap(readCHECKResponsesChan))
+					for cap(readCHECKResponsesChan)-len(readCHECKResponsesChan) < need {
+						select {
+						case <-errChan:
+							common.SignalErrChan(errChan)
+						case <-common.ShutdownChan:
+						case <-time.After(time.Millisecond * 16):
+							continue
+						}
+						rs.Mux.Lock()
+						rs.jobs = append([]*nntp.CHTTJob{currentJob}, rs.jobs...) // requeue at front
+						rs.Mux.Unlock()
+						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d errChan/shutdown while waiting for CHECK queue space, exiting", *currentJob.Newsgroup, workerID, currentJob.JobID)
+						return
+					}
 					rs.ConnMux.Lock()
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquired connection lock for batch (offset %d: %d-%d) -> SendCheckMultiple", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
 					checksSent, err := conn.SendCheckMultiple(currentJob.MessageIDs, readCHECKResponsesChan, currentJob, demuxer)
