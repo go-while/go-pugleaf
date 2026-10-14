@@ -8,7 +8,9 @@ import (
 	"log"
 	"net"
 	"net/textproto"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -42,6 +44,15 @@ const (
 	// DefaultConnExpire is the default connection expiration duration.
 	DefaultConnExpire = 25 * time.Second
 
+	// DefaultClientReadTimeout is the default idle timeout per Read on a connected client socket.
+	DefaultClientReadTimeout = 2 * time.Minute
+	// DefaultClientWriteTimeout is the default idle timeout per Write on a connected client socket.
+	DefaultClientWriteTimeout = 2 * time.Minute
+	// DefaultAuthFailureBackoff is the default sleep after a failed AUTHINFO (the socket is closed first).
+	DefaultAuthFailureBackoff = 15 * time.Second
+	// DefaultPoolWaitTimeout is the default time Pool.Get waits for a free connection slot.
+	DefaultPoolWaitTimeout = 30 * time.Second
+
 	// MaxReadLines is the maximum lines to read per response (allow for large group lists).
 	MaxReadLines = 1024 * 1024
 )
@@ -54,7 +65,9 @@ var DefaultBufferTX int = 16 * 1024
 // It manages the connection state, authentication, and provides methods
 // for interacting with the NNTP server.
 type BackendConn struct {
-	conn     net.Conn
+	conn     net.Conn      // the deadlineConn while connected (same as dconn)
+	dconn    *deadlineConn // socket wrapper with idle deadlines (nil when not connected)
+	closing  atomic.Bool   // set once by ForceCloseConn: the conn is on its way out, never hand it out again
 	TextConn *textproto.Conn
 	Backend  *BackendConfig
 	mux      sync.RWMutex
@@ -81,11 +94,19 @@ type BackendConfig struct {
 	SSL            bool          // whether to use SSL/TLS
 	Username       string        // username for authentication
 	Password       string        // password for authentication
-	ConnectTimeout time.Duration // timeout for establishing a connection
-	//ReadTimeout    time.Duration    // timeout for reading from the connection
-	//WriteTimeout   time.Duration    // timeout for writing to the connection
-	MaxConns int              // maximum number of connections to this backend
-	Provider *config.Provider // link to provider config
+	ConnectTimeout time.Duration // timeout for dial, TLS handshake, greeting and AUTHINFO (each Read/Write)
+	// ReadTimeout is the idle timeout per Read after connect; 0 = DefaultClientReadTimeout, <0 = none.
+	ReadTimeout time.Duration
+	// WriteTimeout is the idle timeout per Write after connect; 0 = DefaultClientWriteTimeout, <0 = none.
+	WriteTimeout time.Duration
+	// AuthFailureBackoff is the sleep after a failed AUTHINFO; 0 = DefaultAuthFailureBackoff, <0 = none.
+	AuthFailureBackoff time.Duration
+	// IdleExpire is the idle expiry of pooled connections; 0 = DefaultConnExpire, <0 = never expire.
+	IdleExpire time.Duration
+	// PoolWaitTimeout bounds Pool.Get's wait for a free slot; 0 = DefaultPoolWaitTimeout, <0 = wait for ctx only.
+	PoolWaitTimeout time.Duration
+	MaxConns        int              // maximum number of connections to this backend
+	Provider        *config.Provider // link to provider config
 	// Proxy configuration fields
 	ProxyEnabled  bool   // whether to use proxy for connections
 	ProxyType     string // proxy type: socks4, socks5
@@ -94,6 +115,36 @@ type BackendConfig struct {
 	ProxyUsername string // proxy authentication username
 	ProxyPassword string // proxy authentication password
 	Mux           sync.Mutex
+}
+
+// pickDuration resolves a duration setting: 0 selects def, a negative value
+// disables (returns 0), anything else is used as is.
+func pickDuration(v, def time.Duration) time.Duration {
+	if v == 0 {
+		return def
+	}
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
+// providerLabel names the backend in logs and errors without dereferencing a
+// nil Provider: the provider name when set, else host:port.
+func (b *BackendConfig) providerLabel() string {
+	if b.Provider != nil && b.Provider.Name != "" {
+		return b.Provider.Name
+	}
+	return net.JoinHostPort(b.Host, strconv.Itoa(b.Port))
+}
+
+// cacheHost is the host used for the newsgroup list cache file name: the
+// provider host when set, else the backend host.
+func (b *BackendConfig) cacheHost() string {
+	if b.Provider != nil && b.Provider.Host != "" {
+		return b.Provider.Host
+	}
+	return b.Host
 }
 
 // Article represents an NNTP article
@@ -164,7 +215,7 @@ func (c *BackendConn) Connect() error {
 	// Check if this is a .onion address and automatically enable Tor if not already configured
 	if IsOnionAddress(c.Backend.Host) && !c.Backend.ProxyEnabled {
 		log.Printf("[NNTP-PROXY] Detected .onion address %s but TOR proxy is not configured!", c.Backend.Host)
-		return fmt.Errorf("error in Connect: TOR proxy is not configured: %s", c.Backend.Provider.Name)
+		return fmt.Errorf("error in Connect: TOR proxy is not configured: %s", c.Backend.providerLabel())
 	}
 
 	// Build server address
@@ -203,19 +254,24 @@ func (c *BackendConn) Connect() error {
 		log.Printf("[NNTP-PROXY] Successfully connected to %s via %s proxy %s:%d", serverAddr, c.Backend.ProxyType, c.Backend.ProxyHost, c.Backend.ProxyPort)
 	}
 
-	c.conn = conn
-	c.TextConn = textproto.NewConn(conn)
-	//c.Writer = bufio.NewWriterSize(conn, DefaultBufferTX) // bufio writer with defined buffer size
+	// Until the connection is ready, every Read/Write (greeting, AUTHINFO) is
+	// bounded by ConnectTimeout; the idle timeouts are set at the end.
+	dc := newDeadlineConn(conn, c.Backend.ConnectTimeout, c.Backend.ConnectTimeout)
+	c.dconn = dc
+	c.conn = dc
+	c.TextConn = textproto.NewConn(dc)
 
 	// Read welcome message
 	code, message, err := c.TextConn.ReadCodeLine(NNTPWelcomeCodeMin)
 	if err != nil {
 		log.Printf("[NNTP-CONN] Error reading welcome from %s:%d: %v", c.Backend.Host, c.Backend.Port, err)
+		c.abortConnect()
 		return err
 	}
 
 	if code < NNTPWelcomeCodeMin || code > NNTPWelcomeCodeMax {
 		log.Printf("[NNTP-CONN] Invalid welcome code %d from %s:%d: %s", code, c.Backend.Host, c.Backend.Port, message)
+		c.abortConnect()
 		return fmt.Errorf("unexpected welcome code %d: %s", code, message)
 	}
 
@@ -227,16 +283,32 @@ func (c *BackendConn) Connect() error {
 	if c.Backend.Username != "" {
 		//log.Printf("[NNTP-AUTH] Attempting authentication for user '%s' on %s:%d", c.Backend.Username, c.Backend.Host, c.Backend.Port)
 		if err := c.authenticate(); err != nil {
-			log.Printf("[NNTP-AUTH] Authentication FAILED for user '%s' on %s:%d err: %v (sleep 15s)", c.Backend.Username, c.Backend.Host, c.Backend.Port, err)
-			time.Sleep(time.Second * 15)
+			backoff := pickDuration(c.Backend.AuthFailureBackoff, DefaultAuthFailureBackoff)
+			log.Printf("[NNTP-AUTH] Authentication FAILED for user '%s' on %s:%d err: %v (sleep %v)", c.Backend.Username, c.Backend.Host, c.Backend.Port, err, backoff)
+			c.abortConnect() // close the socket before sleeping
+			if backoff > 0 {
+				time.Sleep(backoff)
+			}
 			return err
 		}
 		//log.Printf("[NNTP-AUTH] Authentication SUCCESS for user '%s' on %s:%d", c.Backend.Username, c.Backend.Host, c.Backend.Port)
 	} else {
 		//log.Printf("[NNTP-AUTH] No credentials provided, skipping authentication for %s:%d", c.Backend.Host, c.Backend.Port)
 	}
+	dc.setTimeouts(pickDuration(c.Backend.ReadTimeout, DefaultClientReadTimeout), pickDuration(c.Backend.WriteTimeout, DefaultClientWriteTimeout))
 	c.isConnected <- struct{}{}
 	return nil
+}
+
+// abortConnect closes the socket of a half-open connection (dialed, but the
+// greeting or AUTHINFO failed) and forgets it. The caller holds c.mux.
+func (c *BackendConn) abortConnect() {
+	if c.TextConn != nil {
+		_ = c.TextConn.Close() // closes the socket underneath
+	} else if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	c.TextConn, c.conn, c.dconn = nil, nil, nil
 }
 
 // authenticate performs NNTP authentication
@@ -282,42 +354,51 @@ func (c *BackendConn) authenticate() error {
 
 // CloseFromPoolOnly closes a raw NNTP connection
 func (c *BackendConn) CloseFromPoolOnly() error {
+	c.closeFromPool()
+	return nil
+}
+
+// closeFromPool closes the connection and reports whether this call did the
+// connected→closed transition (false when it was not connected). Pool
+// counters must change only on true.
+func (c *BackendConn) closeFromPool() bool {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
 	if !c.IsConnected() {
-		return nil
+		return false
 	}
 
 	if c.TextConn != nil {
-		if err := c.TextConn.Close(); err != nil {
-			//log.Printf("Error closing text connection: %v", err)
-		}
+		_ = c.TextConn.Close() // closes the socket underneath
 	}
-
 	if c.conn != nil {
-		if err := c.conn.Close(); err != nil {
-			//log.Printf("Error closing connection: %v", err)
-		}
+		_ = c.conn.Close() // already closed via TextConn: error ignored
 	}
 
 	close(c.hasClosed)
 	<-c.isConnected
-	//c.TextConn = nil // CloseFromPoolOnly
-	//c.conn = nil     // CloseFromPoolOnly
-	//c.Writer = nil
 	log.Printf("Closed NNTP Connection to %s", c.Backend.Host)
-	return nil
+	return true
 }
 
+// ForceCloseConn marks the connection as unusable and closes it
+// asynchronously (callers may hold c.mux or other locks). It is idempotent:
+// only the first call per connection starts the closing goroutine, which ends
+// after the close. Pool.Get never hands out a conn once this was called.
 func (c *BackendConn) ForceCloseConn() {
+	if c.closing.Swap(true) {
+		return
+	}
 	go func() {
 		c.mux.Lock()
-		if !c.forceClose {
-			c.forceClose = true
-		}
+		c.forceClose = true
 		c.mux.Unlock()
-		c.Pool.Put(c)
+		if c.Pool != nil {
+			_ = c.Pool.Put(c)
+		} else {
+			c.closeFromPool()
+		}
 	}()
 }
 
@@ -342,32 +423,11 @@ func (c *BackendConn) IsConnected() bool {
 	return true
 }
 
-// SetReadDeadline sets the read deadline for the connection
-func (c *BackendConn) xSetReadDeadline(t time.Time) error {
-
-	if c.conn == nil {
-		return fmt.Errorf("connection not established")
-	}
-
-	return c.conn.SetReadDeadline(t)
-}
-
-// SetReadDeadline sets the read deadline for the connection
-func (c *BackendConn) xSetWriteDeadline(t time.Time) error {
-	if c.conn == nil {
-		return fmt.Errorf("connection not established")
-	}
-
-	return c.conn.SetWriteDeadline(t)
-}
-
 // UpdateLastUsed updates the last used timestamp
 func (c *BackendConn) UpdateLastUsed() {
 	c.mux.Lock()
 	c.lastUsed = time.Now()
 	c.mux.Unlock()
-	//c.SetReadDeadline(time.Now().Add(c.Backend.ReadTimeout))
-	//c.SetWriteDeadline(time.Now().Add(c.Backend.WriteTimeout))
 }
 
 func (c *BackendConn) GetBufSize(size int) int {
