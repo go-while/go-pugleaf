@@ -23,26 +23,45 @@ const (
 	TYPE_TAKETHIS
 )
 
+// DemuxerQueueDepth is the buffer size of the channels of every ResponseDemuxer
+// and of the ReadRequest queues of a CHECK/TAKETHIS worker. Tools set it once
+// at startup (before any demuxer is built), e.g. from StreamQueueDepth; the
+// default is the old fixed size.
+var DemuxerQueueDepth = 1 << 20
+
+// StreamQueueDepth returns a queue depth for one streaming connection: an upper
+// bound of the commands it can have outstanding (maxQueuedJobs batches of
+// batchCheck CHECKs plus their TAKETHIS, with headroom), clamped to [4096, 1<<20].
+func StreamQueueDepth(batchCheck int64, maxQueuedJobs int) int {
+	const minDepth, maxDepth = 4096, 1 << 20
+	if batchCheck <= 0 || maxQueuedJobs <= 0 {
+		return minDepth
+	}
+	// a factor above maxDepth always clamps; this also keeps the product below int64 overflow
+	if batchCheck > maxDepth || int64(maxQueuedJobs) > maxDepth {
+		return maxDepth
+	}
+	d := 4*int64(maxQueuedJobs)*batchCheck + 1024
+	if d < minDepth {
+		return minDepth
+	}
+	if d > maxDepth {
+		return maxDepth
+	}
+	return int(d)
+}
+
 // Pool of ResponseData structs to reduce allocations
-var ResponseDataPool = make(chan *ResponseData, 1024*1024)
+var responseDataPool = sync.Pool{New: func() any { return new(ResponseData) }}
 
 // GetResponseData returns a recycled ResponseData struct or makes a new one if none are available
 func GetResponseData(cmdID uint, code int, line string, err error) *ResponseData {
-	select {
-	case rd := <-ResponseDataPool:
-		rd.CmdID = cmdID
-		rd.Code = code
-		rd.Line = line
-		rd.Err = err
-		return rd
-	default:
-		return &ResponseData{
-			CmdID: cmdID,
-			Code:  code,
-			Line:  line,
-			Err:   err,
-		}
-	}
+	rd := responseDataPool.Get().(*ResponseData)
+	rd.CmdID = cmdID
+	rd.Code = code
+	rd.Line = line
+	rd.Err = err
+	return rd
 }
 
 // RecycleResponseData resets a ResponseData struct and recycles it back into the pool
@@ -51,11 +70,7 @@ func RecycleResponseData(rd *ResponseData) {
 	rd.Code = 0
 	rd.Line = ""
 	rd.Err = nil
-	select {
-	case ResponseDataPool <- rd:
-	default:
-		// pool is full, discard
-	}
+	responseDataPool.Put(rd)
 }
 
 // ResponseData holds a read response from the connection
@@ -87,30 +102,20 @@ type TTSetup struct {
 }
 
 // Pool of TTSetup structs to reduce allocations
-var TTSetupPool = make(chan *TTSetup, 1024*1024)
+var ttSetupPool = sync.Pool{New: func() any { return new(TTSetup) }}
 
 // GetTTSetup returns a recycled TTSetup struct or makes a new one if none are available
 // the responseChan parameter is received from processBatch() and is mandatory and will be set on the returned struct
 func GetTTSetup(responseChan chan *TTResponse) *TTSetup {
-	select {
-	case ch := <-TTSetupPool:
-		ch.ResponseChan = responseChan
-		return ch
-	default:
-		return &TTSetup{
-			ResponseChan: responseChan,
-		}
-	}
+	tts := ttSetupPool.Get().(*TTSetup)
+	tts.ResponseChan = responseChan
+	return tts
 }
 
 // RecycleTTSetup recycles a TTSetup struct back into the pool
 func RecycleTTSetup(tts *TTSetup) {
 	tts.ResponseChan = nil
-	select {
-	case TTSetupPool <- tts:
-	default:
-		// pool is full, discard
-	}
+	ttSetupPool.Put(tts)
 }
 
 // OffsetQueue manages the number of concurrent batches being processed for a newsgroup
@@ -206,23 +211,15 @@ type TTResponse struct {
 }
 
 // Pool of TTResponse structs to reduce allocations
-var TTResponsePool = make(chan *TTResponse, 1024*1024)
+var ttResponsePool = sync.Pool{New: func() any { return new(TTResponse) }}
 
 // GetTTResponse returns a recycled TTResponse struct or makes a new one if none are available
 func GetTTResponse(job *CHTTJob, forceCleanup bool, err error) *TTResponse {
-	select {
-	case resp := <-TTResponsePool:
-		resp.Job = job
-		resp.ForceCleanUp = forceCleanup
-		resp.Err = err
-		return resp
-	default:
-		return &TTResponse{
-			Job:          job,
-			ForceCleanUp: forceCleanup,
-			Err:          err,
-		}
-	}
+	resp := ttResponsePool.Get().(*TTResponse)
+	resp.Job = job
+	resp.ForceCleanUp = forceCleanup
+	resp.Err = err
+	return resp
 }
 
 // RecycleTTResponse resets a TTResponse struct and recycles it back into the pool
@@ -230,24 +227,15 @@ func RecycleTTResponse(resp *TTResponse) {
 	resp.Job = nil
 	resp.ForceCleanUp = false
 	resp.Err = nil
-	select {
-	case TTResponsePool <- resp:
-	default:
-		// pool is full, discard
-	}
+	ttResponsePool.Put(resp)
 }
 
 // Pool of TTResponse chans to reduce allocations
-var TTResponseChans = make(chan chan *TTResponse, 1024*1024)
+var ttResponseChanPool = sync.Pool{New: func() any { return make(chan *TTResponse, 1) }}
 
 // GetTTResponseChan returns a recycled chan *TTResponse or makes a new one with capacity of 1 if none are available
 func GetTTResponseChan() chan *TTResponse {
-	select {
-	case ch := <-TTResponseChans:
-		return ch
-	default:
-		return make(chan *TTResponse, 1)
-	}
+	return ttResponseChanPool.Get().(chan *TTResponse)
 }
 
 func RecycleTTResponseChan(ch chan *TTResponse) {
@@ -263,12 +251,7 @@ func RecycleTTResponseChan(ch chan *TTResponse) {
 		// is already empty
 	}
 	// park
-	select {
-	case TTResponseChans <- ch:
-		// successfully recycled
-	default:
-		// channel pool is full, discard
-	}
+	ttResponseChanPool.Put(ch)
 }
 
 type CheckResponse struct { // deprecated
@@ -285,7 +268,7 @@ type ReadRequest struct {
 }
 
 // Pool of ReadRequest structs to reduce allocations
-var ReadRequestsPool = make(chan *ReadRequest, 1024*1024)
+var readRequestPool = sync.Pool{New: func() any { return new(ReadRequest) }}
 
 // ClearReadRequest resets a ReadRequest struct and recycles it back into the pool
 func (rr *ReadRequest) ClearReadRequest(respData *ResponseData) {
@@ -302,31 +285,18 @@ func (rr *ReadRequest) ClearReadRequest(respData *ResponseData) {
 
 // GetReadRequest returns a recycled ReadRequest struct or makes a new one if none are available
 func GetReadRequest(CmdID uint, Job *CHTTJob, MsgID *string, n int, reqs int) *ReadRequest {
-	select {
-	case rr := <-ReadRequestsPool:
-		rr.CmdID = CmdID
-		rr.Job = Job
-		rr.MsgID = MsgID
-		rr.N = n
-		rr.Reqs = reqs
-		return rr
-	default:
-		return &ReadRequest{
-			CmdID: CmdID,
-			Job:   Job,
-			MsgID: MsgID,
-			N:     n,
-			Reqs:  reqs,
-		}
-	}
+	rr := readRequestPool.Get().(*ReadRequest)
+	rr.CmdID = CmdID
+	rr.Job = Job
+	rr.MsgID = MsgID
+	rr.N = n
+	rr.Reqs = reqs
+	return rr
 }
 
+// RecycleReadRequest puts a ReadRequest back into the pool (ClearReadRequest resets it first)
 func RecycleReadRequest(rr *ReadRequest) {
-	select {
-	case ReadRequestsPool <- rr:
-	default:
-		// pool is full, discard
-	}
+	readRequestPool.Put(rr)
 }
 
 // batched CHECK/TAKETHIS Job
