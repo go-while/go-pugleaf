@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
@@ -72,7 +72,7 @@ func main() {
 		restart          = flag.Bool("restart", false, "Rebuild: ignore and remove the rebuild.progress file and start with the first group")
 		verbose          = flag.Bool("verbose", false, "Enable verbose logging")
 		useShortHashLen  = flag.Int("useshorthashlen", 7, "No effect since Nov 2025 (history stores full message-ids), accepted for compatibility")
-		pprofAddr        = flag.String("pprof", "", "Enable pprof HTTP server on specified address (e.g., ':6060')")
+		pprofAddr        = flag.String("pprof", "", "pprof HTTP server address, loopback only (e.g. 'localhost:6060'; ':6060' means 127.0.0.1:6060)")
 		dataDir          = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
@@ -95,10 +95,15 @@ func main() {
 	}
 
 	if *pprofAddr != "" {
+		addr, err := loopbackPprofAddr(*pprofAddr)
+		if err != nil {
+			log.Fatalf("[HISTORY] %v", err)
+		}
+		pprofSrv := &http.Server{Addr: addr, Handler: newPprofMux(), ReadHeaderTimeout: 10 * time.Second}
 		go func() {
-			log.Printf("Starting pprof server on %s", *pprofAddr)
-			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
-				log.Printf("pprof server failed: %v", err)
+			log.Printf("[HISTORY] Starting pprof server on %s", addr)
+			if err := pprofSrv.ListenAndServe(); err != nil {
+				log.Printf("[HISTORY] pprof server failed: %v", err)
 			}
 		}()
 	}
@@ -158,7 +163,7 @@ func main() {
 
 	// Ctrl+C: stop after the current range/chunk, then flush and shut down
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		<-sigChan

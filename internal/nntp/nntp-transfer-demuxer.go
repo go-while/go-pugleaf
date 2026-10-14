@@ -43,9 +43,9 @@ type ResponseDemuxer struct {
 func NewResponseDemuxer(conn *BackendConn, errChan chan struct{}) *ResponseDemuxer {
 	d := &ResponseDemuxer{
 		conn:              conn,
-		cmdIDChan:         make(chan *CmdIDinfo, 64*1024),      // Buffer for command IDs
-		checkResponseChan: make(chan *ResponseData, 1024*1024), // Buffer for CHECK responses
-		ttResponseChan:    make(chan *ResponseData, 1024*1024), // Buffer for TAKETHIS responses
+		cmdIDChan:         make(chan *CmdIDinfo, DemuxerQueueDepth),    // Buffer for command IDs
+		checkResponseChan: make(chan *ResponseData, DemuxerQueueDepth), // Buffer for CHECK responses
+		ttResponseChan:    make(chan *ResponseData, DemuxerQueueDepth), // Buffer for TAKETHIS responses
 		//signalChan:        make(chan struct{}, 64*1024),
 		errChan: errChan,
 		started: false,
