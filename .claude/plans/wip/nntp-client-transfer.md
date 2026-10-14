@@ -164,7 +164,9 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
     `ListGroupsLimited`), the unused progress readers and nntp-transfer helpers. `-batch-db` stays accepted (used by
     `scripts/nntp-transfer-loop.sh`) and its help text says it has no effect.
 
-**Question for the user (decision 2):** relay verbatim where complete, fall back to `ReconstructHeaders` for
+**Question for the user (decision 2) — answered 2026-10-14 ("go"): the default (relay where complete, fallback for incomplete, skip unsafe) stands.**
+
+Original question: relay verbatim where complete, fall back to `ReconstructHeaders` for
 incomplete blocks, skip only unsafe ones (the default above); or relay strictly verbatim and skip every incomplete
 block (RFC 5537 §3.6 to the letter, but every web post and many legacy imports stop being fed); or keep
 `ReconstructHeaders` for everything (today's behaviour minus the CLI-1 bugs). The plan implements the default unless
