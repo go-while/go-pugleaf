@@ -868,6 +868,9 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 
 		line, err := c.TextConn.ReadLine()
 		if err != nil {
+			if errors.Is(err, ErrResponseLineTooLong) {
+				c.forceClose = true // a limit was exceeded: never reuse this connection
+			}
 			return nil, err
 		}
 

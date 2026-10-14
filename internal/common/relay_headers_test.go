@@ -172,6 +172,17 @@ func TestCliHdrRelayVerbatim(t *testing.T) {
 		t.Errorf("block without Path: %q", got)
 	}
 
+	// No local host, no Path header, no path column: "not-for-mail", never an empty Path.
+	a = cliHdrArticle(cliHdrLines("From: A <a@b.invalid>", "Newsgroups: a.b", "Subject: s",
+		"Date: "+cliHdrDate, "Message-ID: "+cliHdrMsgID), "")
+	got, err = relayHeaders(a, "", false)
+	if err != nil {
+		t.Fatalf("relayHeaders without host and path: %v", err)
+	}
+	if len(got) == 0 || got[0] != "Path: not-for-mail" {
+		t.Errorf("block without host and path: %q", got)
+	}
+
 	// A stored path that already starts with the local identity is sent unchanged.
 	a = cliHdrArticle(cliHdrLines("Path: news.test.invalid!.POSTED!poster!not-for-mail", "From: A <a@b.invalid>",
 		"Newsgroups: a.b", "Subject: s", "Date: "+cliHdrDate, "Message-ID: "+cliHdrMsgID),
@@ -237,6 +248,31 @@ func TestCliHdrRelayGoogleAndDate(t *testing.T) {
 	}
 	if g, w := cliHdrWithPrefix(got, "Date:"), []string{"Date: " + cliHdrDate}; !reflect.DeepEqual(g, w) {
 		t.Errorf("RFC Date: got %q, want %q", g, w)
+	}
+
+	// RFC 5322 dates outside isRFCdate's layouts are relayed byte-exact, also
+	// when the columns could not repair them (zero DateSent, no Date-Received).
+	for _, date := range []string{
+		"Thu, 01 Jan 2026 00:00:00 +0000 (UTC)",
+		"01 Jan 2026 00:00:00 GMT",
+		"1 Jan 2026 00:00:00 +0000",
+		"Thu, 01 Jan 2026 00:00 +0000",
+	} {
+		for _, zeroSent := range []bool{false, true} {
+			a = cliHdrArticle(block(date), "p!not-for-mail")
+			a.DateString = date
+			if !zeroSent {
+				a.DateSent = sent
+			}
+			got, err = relayHeaders(a, cliHdrHost, false)
+			if err != nil {
+				t.Errorf("relayHeaders(%q, zeroSent=%v): %v", date, zeroSent, err)
+				continue
+			}
+			if g, w := cliHdrWithPrefix(got, "Date:"), []string{"Date: " + date}; !reflect.DeepEqual(g, w) {
+				t.Errorf("Date %q (zeroSent=%v): got %q, want %q", date, zeroSent, g, w)
+			}
+		}
 	}
 }
 

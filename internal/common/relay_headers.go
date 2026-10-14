@@ -8,6 +8,7 @@ package common
 import (
 	"errors"
 	"fmt"
+	"net/mail"
 	"strings"
 
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -168,14 +169,23 @@ func relayHeaders(article *models.Article, localHost string, ignoreGoogle bool) 
 	if pathValue == "" && pathField != nil {
 		pathValue = value(pathField)
 	}
-	pathLine := "Path: " + EnsureLocalPathPrefix(pathValue, localHost)
+	pathValue = EnsureLocalPathPrefix(pathValue, localHost)
+	if pathValue == "" {
+		pathValue = "not-for-mail" // never an empty Path (RFC 5536 §3.1.5)
+	}
+	pathLine := "Path: " + pathValue
+	// The stored Date is relayed as is unless it is no date at all: isRFCdate
+	// knows only six layouts, net/mail.ParseDate accepts the RFC 5322 forms
+	// (comments, no weekday, no seconds, 2-digit years, obsolete zones).
 	var dateLine string
-	if !isRFCdate(value(dateField)) {
-		d, err := outboundDate(article)
-		if err != nil {
-			return nil, err
+	if dv := value(dateField); !isRFCdate(dv) {
+		if _, perr := mail.ParseDate(dv); perr != nil {
+			d, err := outboundDate(article)
+			if err != nil {
+				return nil, err
+			}
+			dateLine = "Date: " + d
 		}
-		dateLine = "Date: " + d
 	}
 
 	out := make([]string, 0, len(raw)+1)
