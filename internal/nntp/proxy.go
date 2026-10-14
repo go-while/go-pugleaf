@@ -97,6 +97,15 @@ func (pd *ProxyDialer) dialSOCKS4(network, address string) (net.Conn, error) {
 		return nil, fmt.Errorf("failed to create SOCKS4/5 proxy dialer: %w", err)
 	}
 
+	// The SOCKS negotiation is bounded by ConnectTimeout too (none when <= 0).
+	if cd, ok := dialer.(proxy.ContextDialer); ok {
+		ctx, cancel := context.Background(), context.CancelFunc(func() {})
+		if pd.config.ConnectTimeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, pd.config.ConnectTimeout)
+		}
+		defer cancel()
+		return cd.DialContext(ctx, network, address)
+	}
 	return dialer.Dial(network, address)
 }
 
@@ -119,6 +128,15 @@ func (pd *ProxyDialer) dialSOCKS5(network, address string) (net.Conn, error) {
 		return nil, fmt.Errorf("failed to create SOCKS5 proxy dialer: %w", err)
 	}
 
+	// The SOCKS negotiation is bounded by ConnectTimeout too (none when <= 0).
+	if cd, ok := dialer.(proxy.ContextDialer); ok {
+		ctx, cancel := context.Background(), context.CancelFunc(func() {})
+		if pd.config.ConnectTimeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, pd.config.ConnectTimeout)
+		}
+		defer cancel()
+		return cd.DialContext(ctx, network, address)
+	}
 	return dialer.Dial(network, address)
 }
 

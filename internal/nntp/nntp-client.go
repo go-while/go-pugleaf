@@ -4,6 +4,7 @@ package nntp
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -53,9 +54,25 @@ const (
 	// DefaultPoolWaitTimeout is the default time Pool.Get waits for a free connection slot.
 	DefaultPoolWaitTimeout = 30 * time.Second
 
+	// DefaultClientMaxLineBytes is the default cap of one response line (BackendConfig.MaxResponseLineBytes).
+	DefaultClientMaxLineBytes = 1 << 20
+	// DefaultClientMaxArticleBytes is the default budget of one ARTICLE/HEAD/BODY response
+	// (BackendConfig.MaxArticleResponseBytes).
+	DefaultClientMaxArticleBytes = 64 << 20
+	// DefaultClientMaxListBytes is the default budget of one LIST/XOVER/XHDR/LISTGROUP response
+	// (BackendConfig.MaxListResponseBytes).
+	DefaultClientMaxListBytes = 512 << 20
+
 	// MaxReadLines is the maximum lines to read per response (allow for large group lists).
 	MaxReadLines = 1024 * 1024
 )
+
+// ErrAuthRequired is returned when the server answers 480 (authentication required)
+// to a command; the connection is force-closed.
+var ErrAuthRequired = errors.New("authentication required")
+
+// ErrAuthRejected wraps an AUTHINFO USER/PASS reply other than 281/381.
+var ErrAuthRejected = errors.New("authentication rejected")
 
 // DefaultBufferTX is the default buffer size for bufio.Writer
 // when sending articles via POST/TAKETHIS/IHAVE commands.
@@ -85,6 +102,8 @@ type BackendConn struct {
 	// but INN does not allow switching to mode stream when mode reader is active
 	// when using check/takethis and we got a mode reader connection from pool
 	// we must set ForceClose to true and Put the connection back in pool and get a new one...
+
+	greetingCode int // the server's welcome code (200: posting allowed, 201: no posting)
 }
 
 // BackendConfig holds configuration for an NNTP client
@@ -108,6 +127,12 @@ type BackendConfig struct {
 	PoolWaitTimeout time.Duration
 	MaxConns        int              // maximum number of connections to this backend
 	Provider        *config.Provider // link to provider config
+	// MaxResponseLineBytes caps one response line; 0 = DefaultClientMaxLineBytes, <0 = unlimited.
+	MaxResponseLineBytes int
+	// MaxArticleResponseBytes caps one ARTICLE/HEAD/BODY response; 0 = DefaultClientMaxArticleBytes, <0 = unlimited.
+	MaxArticleResponseBytes int64
+	// MaxListResponseBytes caps one LIST/XOVER/XHDR/LISTGROUP response; 0 = DefaultClientMaxListBytes, <0 = unlimited.
+	MaxListResponseBytes int64
 	// Proxy configuration fields
 	ProxyEnabled  bool   // whether to use proxy for connections
 	ProxyType     string // proxy type: socks4, socks5
@@ -258,23 +283,29 @@ func (c *BackendConn) Connect() error {
 	// Until the connection is ready, every Read/Write (greeting, AUTHINFO) is
 	// bounded by ConnectTimeout; the idle timeouts are set at the end.
 	dc := newDeadlineConn(conn, c.Backend.ConnectTimeout, c.Backend.ConnectTimeout)
+	maxLine := c.Backend.MaxResponseLineBytes // < 0: unlimited (setMaxLine treats <= 0 as no cap)
+	if maxLine == 0 {
+		maxLine = DefaultClientMaxLineBytes
+	}
+	dc.setMaxLine(maxLine)
 	c.dconn = dc
 	c.conn = dc
 	c.TextConn = textproto.NewConn(dc)
 
-	// Read welcome message
-	code, message, err := c.TextConn.ReadCodeLine(NNTPWelcomeCodeMin)
-	if err != nil {
+	// Read welcome message: 200 (posting allowed) or 201 (no posting), RFC 3977 §5.1.1
+	code, message, err := c.TextConn.ReadCodeLine(2)
+	if err != nil && code == 0 {
 		log.Printf("[NNTP-CONN] Error reading welcome from %s:%d: %v", c.Backend.Host, c.Backend.Port, err)
 		c.abortConnect()
 		return err
 	}
 
-	if code < NNTPWelcomeCodeMin || code > NNTPWelcomeCodeMax {
+	if code != NNTPWelcomeCodeMin && code != NNTPWelcomeCodeMax {
 		log.Printf("[NNTP-CONN] Invalid welcome code %d from %s:%d: %s", code, c.Backend.Host, c.Backend.Port, message)
 		c.abortConnect()
 		return fmt.Errorf("unexpected welcome code %d: %s", code, message)
 	}
+	c.greetingCode = code
 
 	//log.Printf("[NNTP-CONN] Successfully connected to %s:%d with welcome code %d", c.Backend.Host, c.Backend.Port, code)
 
@@ -312,7 +343,9 @@ func (c *BackendConn) abortConnect() {
 	c.TextConn, c.conn, c.dconn = nil, nil, nil
 }
 
-// authenticate performs NNTP authentication
+// authenticate performs NNTP authentication (RFC 4643 §2.3): 281 directly
+// after AUTHINFO USER is success without a password, 381 asks for AUTHINFO
+// PASS. Other replies wrap ErrAuthRejected; I/O errors are returned as is.
 func (c *BackendConn) authenticate() error {
 	// Send AUTHINFO USER
 	id, err := c.TextConn.Cmd("AUTHINFO USER %s", c.Backend.Username)
@@ -321,15 +354,20 @@ func (c *BackendConn) authenticate() error {
 	}
 
 	c.TextConn.StartResponse(id)
-	code, message, err := c.TextConn.ReadCodeLine(NNTPMoreInfoCode)
+	code, message, err := c.TextConn.ReadCodeLine(0)
 	c.TextConn.EndResponse(id)
 
-	if err != nil {
+	if err != nil && code == 0 {
 		return err
 	}
 
-	if code != NNTPMoreInfoCode {
-		return fmt.Errorf("unexpected response to AUTHINFO USER: %d %s", code, message)
+	switch code {
+	case NNTPAuthSuccess:
+		return nil // accepted without a password
+	case NNTPMoreInfoCode:
+		// send PASS below
+	default:
+		return fmt.Errorf("%w: AUTHINFO USER: %d %s", ErrAuthRejected, code, message)
 	}
 
 	// Send AUTHINFO PASS
@@ -339,15 +377,15 @@ func (c *BackendConn) authenticate() error {
 	}
 
 	c.TextConn.StartResponse(id)
-	code, message, err = c.TextConn.ReadCodeLine(NNTPAuthSuccess)
+	code, message, err = c.TextConn.ReadCodeLine(0)
 	c.TextConn.EndResponse(id)
 
-	if err != nil {
+	if err != nil && code == 0 {
 		return err
 	}
 
 	if code != NNTPAuthSuccess {
-		return fmt.Errorf("authentication failed: %d %s", code, message)
+		return fmt.Errorf("%w: AUTHINFO PASS: %d %s", ErrAuthRejected, code, message)
 	}
 
 	return nil

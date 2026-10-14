@@ -161,24 +161,21 @@ func parseReferencesToContinuedLineString(input string) string {
 	return builder.String()
 }
 
-// ReconstructHeaders reconstructs the header lines from an article for transmission
-func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *string, newsgroup string) ([]string, error) {
-	var headers []string
+// firstHeaderLine returns the text of v before the first CR or LF, trimmed.
+// GetHeaderFirst joins repeated fields with LF; only the first one may reach
+// an outbound header line (NC-1).
+func firstHeaderLine(v string) string {
+	if i := strings.IndexAny(v, "\r\n"); i >= 0 {
+		v = v[:i]
+	}
+	return strings.TrimSpace(v)
+}
 
-	// Add basic headers that we know about
-	if article.MessageID == "" {
-		return nil, fmt.Errorf("article missing Message-ID")
-	}
-	if strings.HasSuffix(article.MessageID, "@msgid-missing>") {
-		return nil, fmt.Errorf("article has placeholder Message-ID")
-	}
-	if article.Subject == "" {
-		return nil, fmt.Errorf("article missing Subject")
-	}
-	if article.FromHeader == "" {
-		return nil, fmt.Errorf("article missing From header")
-	}
-
+// outboundDate selects the Date value sent for article: DateString when it is
+// an RFC date, else DateSent, else the Date-Received header of HeadersJSON
+// (which also updates DateSent/DateString). Shared by ReconstructHeaders and
+// RelayHeaders (a non-RFC stored Date is replaced by this value).
+func outboundDate(article *models.Article) (string, error) {
 	// Check if DateString is RFC Usenet compliant, use DateSent if not
 	var dateHeader string
 	if article.DateString != "" {
@@ -206,12 +203,12 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 						article.DateString = dateHeader // Update DateString with corrected value
 					} else {
 						log.Printf("ERROR common.ReconstructHeaders: Non-compliant DateString '%s', invalid DateSent (year %d), and invalid Date-Received '%s' for article %s", article.DateString, article.DateSent.Year(), dateReceivedStr, article.MessageID)
-						return nil, fmt.Errorf("article has non-compliant DateString, invalid DateSent (year %d), and invalid Date-Received msgId='%s'", article.DateSent.Year(), article.MessageID)
+						return "", fmt.Errorf("article has non-compliant DateString, invalid DateSent (year %d), and invalid Date-Received msgId='%s'", article.DateSent.Year(), article.MessageID)
 					}
 				} else {
 					log.Printf("ERROR common.ReconstructHeaders: Non-compliant DateString '%s', invalid DateSent (year %d), and no Date-Received header for article %s", article.DateString, article.DateSent.Year(), article.MessageID)
 					log.Printf("DEBUG article %s HeadersJSON: %s", article.MessageID, article.HeadersJSON)
-					return nil, fmt.Errorf("article has non-compliant DateString, invalid DateSent (year %d), and no Date-Received header msgId='%s'", article.DateSent.Year(), article.MessageID)
+					return "", fmt.Errorf("article has non-compliant DateString, invalid DateSent (year %d), and no Date-Received header msgId='%s'", article.DateSent.Year(), article.MessageID)
 				}
 			}
 		}
@@ -232,17 +229,47 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 					article.DateSent = parsedTime   // Update article DateSent with corrected time
 					article.DateString = dateHeader // Update DateString with corrected value
 				} else {
-					return nil, fmt.Errorf("article missing Date header (DateString empty, DateSent invalid year %d, and invalid Date-Received '%s') msgId='%s'", article.DateSent.Year(), dateReceivedStr, article.MessageID)
+					return "", fmt.Errorf("article missing Date header (DateString empty, DateSent invalid year %d, and invalid Date-Received '%s') msgId='%s'", article.DateSent.Year(), dateReceivedStr, article.MessageID)
 				}
 			} else {
-				return nil, fmt.Errorf("article missing Date header (DateString empty, DateSent invalid year %d, and no Date-Received header) msgId='%s'", article.DateSent.Year(), article.MessageID)
+				return "", fmt.Errorf("article missing Date header (DateString empty, DateSent invalid year %d, and no Date-Received header) msgId='%s'", article.DateSent.Year(), article.MessageID)
 			}
 		}
 	}
+	return dateHeader, nil
+}
+
+// ReconstructHeaders reconstructs the header lines from an article for transmission
+func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *string, newsgroup string) ([]string, error) {
+	var headers []string
+
+	// Add basic headers that we know about
+	if article.MessageID == "" {
+		return nil, fmt.Errorf("article missing Message-ID")
+	}
+	if strings.HasSuffix(article.MessageID, "@msgid-missing>") {
+		return nil, fmt.Errorf("article has placeholder Message-ID")
+	}
+	if !ValidMessageID(article.MessageID) {
+		return nil, fmt.Errorf("article has invalid Message-ID %q", article.MessageID)
+	}
+	subject := firstHeaderLine(article.Subject)
+	from := firstHeaderLine(article.FromHeader)
+	if subject == "" {
+		return nil, fmt.Errorf("article missing Subject")
+	}
+	if from == "" {
+		return nil, fmt.Errorf("article missing From header")
+	}
+
+	dateHeader, err := outboundDate(article)
+	if err != nil {
+		return nil, err
+	}
 	headers = append(headers, "Date: "+dateHeader)
-	headers = append(headers, "From: "+article.FromHeader)
+	headers = append(headers, "From: "+from)
 	headers = append(headers, "Message-ID: "+article.MessageID)
-	headers = append(headers, "Subject: "+article.Subject)
+	headers = append(headers, "Subject: "+subject)
 	if article.References != "" {
 		var refline string = "References:"
 		refs := strings.Fields(article.References)
@@ -264,47 +291,21 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 			headers = append(headers, refline)
 		}
 	}
-	switch withPath {
-	case true:
+	// One Path (or X-Path) line, never folded, no ".TX" (decision 1): the stored
+	// path with the local identity prepended once when it does not start with it.
+	host := ""
+	if nntphostname != nil {
+		host = *nntphostname
+	}
+	if withPath {
 		if article.Path != "" {
-			var pathline string
-			if nntphostname != nil && *nntphostname != "" {
-				pathline = "Path: " + *nntphostname + "!.TX!" + article.Path
-			} else {
-				pathline = "Path: " + article.Path
-			}
-			paths := strings.Fields(pathline)
-			for i, path := range paths {
-				if i > 0 {
-					if len(pathline)+1+len(path) > 1000 {
-						// line would exceed 1000 chars, start a new line
-						headers = append(headers, pathline)
-						pathline = " " + path // continuation line starts with space
-					} else {
-						pathline += " " + path
-					}
-				} else {
-					pathline += " " + path
-				}
-			}
-			if strings.TrimSpace(pathline) != "" {
-				headers = append(headers, pathline)
-			}
-			if nntphostname != nil && *nntphostname != "" {
-				headers = append(headers, "Path: "+*nntphostname+"!.TX!"+article.Path)
-			} else {
-				headers = append(headers, "Path: "+article.Path)
-			}
+			headers = append(headers, "Path: "+EnsureLocalPathPrefix(article.Path, host))
 		} else {
 			headers = append(headers, pathHeader_inv1)
 		}
-	case false:
+	} else {
 		if article.Path != "" {
-			if nntphostname != nil && *nntphostname != "" {
-				headers = append(headers, "X-Path: "+*nntphostname+"!.TX!"+article.Path)
-			} else {
-				headers = append(headers, "X-Path: "+article.Path)
-			}
+			headers = append(headers, "X-Path: "+EnsureLocalPathPrefix(article.Path, host))
 		} else {
 			headers = append(headers, pathHeader_inv2)
 		}
@@ -317,10 +318,19 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 	badGroups := 0
 	var validNewsgroups []string
 
+	// An index loop (not range): the Newsgroups branch below merges its
+	// continuation lines and advances i past them, so they are not emitted twice.
 checkHeader:
-	for i, headerLine := range moreHeaders {
+	for i := 0; i < len(moreHeaders); i++ {
+		headerLine := strings.TrimSuffix(moreHeaders[i], "\r")
 		if len(headerLine) == 0 {
 			log.Printf("Empty headerline=%d in msgId='%s' (continue)", i, article.MessageID)
+			continue checkHeader
+		}
+		if strings.ContainsAny(headerLine, "\r\x00") {
+			log.Printf("Invalid header (CR or NUL inside): line=%d in msgId='%s' (skip)", i, article.MessageID)
+			ignoreLine = true
+			ignoredLines++
 			continue checkHeader
 		}
 		isSpacedLine = strings.HasPrefix(headerLine, " ") || strings.HasPrefix(headerLine, "\t")
@@ -396,10 +406,14 @@ checkHeader:
 			getLines:
 				for {
 					if i+1 < len(moreHeaders) {
-						if !strings.HasPrefix(moreHeaders[i+1], " ") && !strings.HasPrefix(moreHeaders[i+1], "\t") {
+						next := strings.TrimSuffix(moreHeaders[i+1], "\r")
+						if !strings.HasPrefix(next, " ") && !strings.HasPrefix(next, "\t") {
 							break getLines
 						}
-						headerLine += moreHeaders[i+1]
+						if strings.ContainsAny(next, "\r\x00") {
+							break getLines // left to the loop, which drops it
+						}
+						headerLine += next
 						i++
 					} else {
 						break getLines
