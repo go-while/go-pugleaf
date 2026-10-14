@@ -1564,6 +1564,10 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		*/
 		// pass articles to CHECK or TAKETHIS queue (async!)
 		responseChan, err := processBatch(ttMode, messageIDs, redisCli, dbOffset, OffsetQueue, ngtprogress)
+		if err != nil && common.WantShutdown() {
+			log.Printf("WantShutdown in newsgroup: '%s' (processed %d): %v", ng.Name, processed, err)
+			return nil
+		}
 		if err != nil {
 			log.Printf("Newsgroup: '%s' | Error processing batch offset %d: %v", ng.Name, dbOffset, err)
 			return fmt.Errorf("error processing batch offset %d for newsgroup '%s': %v", dbOffset, ng.Name, err)
@@ -1749,7 +1753,13 @@ func processBatch(ttMode *nntp.TakeThisMode, messageIDs []*string, redisCli *red
 	QueuesMutex.RUnlock()
 
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queueing job #%d with %d msgIDs to worker %d. CheckQ=%d", *ttMode.Newsgroup, workerID, job.JobID, len(job.MessageIDs), workerID, len(CheckQueues[workerID]))
-	WorkersCheckChannel <- job // checkQueue <- job // goto: job := <-WorkersCheckChannel
+	// goto: job := <-WorkersCheckChannel. On shutdown the workers may be gone, so never block forever here.
+	select {
+	case WorkersCheckChannel <- job:
+	case <-common.ShutdownChan:
+		log.Printf("Newsgroup: '%s' | WantShutdown: batch job #%d with %d message IDs not queued", *ttMode.Newsgroup, job.JobID, len(job.MessageIDs))
+		return nil, fmt.Errorf("shutdown: batch job #%d not queued", job.JobID)
+	}
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queued Job #%d", *ttMode.Newsgroup, workerID, job.JobID)
 	return job.GetResponseChan(), nil
 } // end func processBatch
@@ -2590,7 +2600,13 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 					if len(job.WantedIDs) > 0 {
 						// Pass job to TAKETHIS worker via channel
 						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5 job #%d got all %d CHECK responses, passing to TAKETHIS worker (wanted: %d articles) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, queuedCount, len(job.WantedIDs), len(WorkersTTChannel))
-						WorkersTTChannel <- job // local takethis chan sharing the same connection
+						// local takethis chan sharing the same connection; on shutdown the TAKETHIS worker
+						// may be gone, so answer the job instead of blocking forever
+						select {
+						case WorkersTTChannel <- job:
+						case <-common.ShutdownChan:
+							job.Response(true, fmt.Errorf("shutdown: job #%d not passed to TAKETHIS worker", job.JobID))
+						}
 						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5c Sent job #%d to TAKETHIS worker (wanted: %d/%d) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, len(job.WantedIDs), queuedCount, len(WorkersTTChannel))
 
 					} else {

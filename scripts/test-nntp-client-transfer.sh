@@ -33,7 +33,8 @@ fail() { FAILS=$((FAILS+1)); echo "FAIL $1 [$2] $3 :: ${4:-}"; }
 info() { INFOS=$((INFOS+1)); echo "INFO $1 [$2] $3"; }
 alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null; }
 stop_pid() { [ -n "$1" ] || return 0; kill -INT "$1" 2>/dev/null
-  for _ in $(seq 1 60); do alive "$1" || return 0; sleep 1; done; kill -KILL "$1" 2>/dev/null; }
+  for _ in $(seq 1 60); do alive "$1" || return 0; sleep 1; done
+  pkill -KILL -P "$1" 2>/dev/null; kill -KILL "$1" 2>/dev/null; }   # -P: the child of a GNU timeout wrapper
 cleanup() { [ -d "${PEERDIR:-/nonexistent}" ] && touch "$PEERDIR/STOP" "$SILENTDIR/STOP" 2>/dev/null
   stop_pid "$TXPID"; stop_pid "$SPID"; sleep 1; stop_pid "$PPID_PEER"; stop_pid "$PPID_SILENT"; }
 trap cleanup EXIT
@@ -134,7 +135,7 @@ sleep 2
 kill -TERM "$TXPID" 2>/dev/null
 t0=$(date +%s); exited=no
 for _ in $(seq 1 30); do alive "$TXPID" || { exited=yes; break; }; sleep 1; done
-[ "$exited" = yes ] || kill -KILL "$TXPID" 2>/dev/null
+[ "$exited" = yes ] || { pkill -KILL -P "$TXPID" 2>/dev/null; kill -KILL "$TXPID" 2>/dev/null; }   # timeout's child is the transfer
 wait "$TXPID" 2>/dev/null; TXPID=""
 if grep -q 'Received shutdown signal' "$DATA/transfer-term.log"; then
   pass E16 cli-transfer "SIGTERM handled like SIGINT (exited=$exited after $(( $(date +%s) - t0 ))s)"
