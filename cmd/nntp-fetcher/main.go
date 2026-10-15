@@ -63,7 +63,7 @@ func main() {
 	var newsgroups []*models.Newsgroup
 	var (
 		maxBatchThreads    = flag.Int("max-batch-threads", 4, "Limit how many newsgroup batches will be processed concurrently (default: 16) more can eat your memory and disk IO!")
-		maxBatch           = flag.Int("max-batch", 1000, "Maximum number of articles to process in a batch (recommended: 100-10000)")
+		maxBatch           = flag.Int("max-batch", 1000, "Maximum number of articles to process in a batch (10-1000; values above 1000 are clamped to 1000)")
 		maxQueued          = flag.Int("max-queue", 1280, "Limit db_batch to have max N articles queued over all newsgroups")
 		fetchNewsgroup     = flag.String("group", "", "Newsgroup to fetch (default: empty = all groups once up to max-batch) or rocksolid.* with final wildcard to match prefix.*")
 		nntphostname       = flag.String("nntphostname", "", "Your hostname must be set!")
@@ -107,26 +107,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *downloadMaxPar < 1 {
-		*downloadMaxPar = 1
-		processor.DownloadMaxPar = *downloadMaxPar
-	}
-	if *maxBatch < 10 {
-		*maxBatch = 10
-	}
-	if *maxBatchThreads < 1 {
-		*maxBatchThreads = 1
-	}
-	if *maxQueued < 1 {
-		*maxQueued = 1
-	}
-	if *maxBatchThreads > 1024 {
-		*maxBatchThreads = 1024
-		log.Printf("[WARN] max batch threads: %d (should be between 1 and 1024. recommended: 1-16)", *maxBatchThreads)
-	}
-	if *maxBatch > 1000 {
-		log.Printf("[WARN] max batch: %d (should be between 100 and 10000. recommended: 1000-10000)", *maxBatch)
-	}
+	clampFetcherFlags(maxBatch, maxBatchThreads, maxQueued, downloadMaxPar)
 	// Validate command-line flag
 	if *useShortHashLenPtr < 2 || *useShortHashLenPtr > 7 {
 		log.Fatalf("Invalid UseShortHashLen: %d (must be between 2 and 7)", *useShortHashLenPtr)
@@ -150,7 +131,9 @@ func main() {
 	// Initialize progress database once to avoid opening/closing for each group
 	progressDB, err := database.NewProgressDB(filepath.Join(*dataDir, "progress.db"))
 	if err != nil {
-		log.Fatalf("Failed to initialize progress database: %v", err)
+		fetcherShutdown(db) // the main DB is open: shut it down before exiting
+		log.Printf("[FETCHER]: Failed to initialize progress database: %v", err)
+		os.Exit(1)
 	}
 	defer progressDB.Close()
 
@@ -207,7 +190,6 @@ func main() {
 		// cut string by final *
 		wildcardNG = strings.TrimSuffix(*fetchNewsgroup, "*")
 		log.Printf("[FETCHER]: Using wildcard newsgroup prefix: '%s'", wildcardNG)
-		time.Sleep(3 * time.Second) // debug sleep
 	}
 	if fetchNewsgroup == nil || *fetchNewsgroup == "" || *fetchNewsgroup == "$all" || suffixWildcard {
 		ngs, err := db.MainDBGetAllNewsgroups()
@@ -287,7 +269,6 @@ func main() {
 	}
 	newsgroups = validNGs
 	log.Printf("[FETCHER]: Starting fetch for %d newsgroups", len(newsgroups))
-	time.Sleep(time.Second * 2) // debug sleep
 
 	fetchDoneChan := make(chan error, 1)
 
@@ -309,52 +290,15 @@ func main() {
 	// scan group worker
 	go func() {
 		defer close(processor.Batch.Check)
-		var skippedWildcard, skippedInActive, skippedActive uint64
-		for _, ng := range newsgroups {
-			if common.WantShutdown() {
-				//log.Printf("[FETCHER]: Feed Batch.Check common.WantShutdown()")
-				return
-			}
-			/* disabled
-			if db.IsDBshutdown() {
-				log.Printf("[FETCHER]: Feed Batch.Check database shutdown")
-				return
-			}
-			*/
-			if wildcardNG != "" && !strings.HasPrefix(ng.Name, wildcardNG) {
-				//log.Printf("[FETCHER] Skipping newsgroup '%s' as it does not match prefix '%s'", ng.Name, wildcardNG)
-				skippedWildcard++
-				continue
-			}
-			nga, err := db.MainDBGetNewsgroup(ng.Name)
-			if err != nil || nga == nil {
-				log.Printf("[FETCHER]: Failed to get newsgroup '%s' from database: err='%v' nga='%#v'", ng.Name, err, nga)
-				return
-			}
-
-			if *fetchActiveOnly && !nga.Active {
-				//log.Printf("[FETCHER]: ignore inactive newsgroup '%s'", ng.Name)
-				skippedInActive++
-				continue
-			}
-
-			if !*fetchActiveOnly && nga.Active {
-				//log.Printf("[FETCHER]: ignore active newsgroup '%s'", ng.Name)
-				skippedActive++
-				continue
-			}
-
-			processor.Batch.Check <- &ng.Name
-			//log.Printf("Checking ng: %s", ng.Name)
-			mux.Lock()
-			queued++
-			if queued%1000 == 0 {
-				log.Printf("[FETCHER]: Queued %d/%d newsgroups", queued, len(newsgroups))
-			}
-			mux.Unlock()
-		}
-		totalSkipped := skippedWildcard + skippedInActive + skippedActive
-		log.Printf("[FETCHER]: Feeding Queue Done: %d/%d newsgroups (skipped: %d). Wildcard skipped: %d, skippedInActive: %d, skippedActive: %d. fetchActiveOnly=%t", queued, len(newsgroups), totalSkipped, skippedWildcard, skippedInActive, skippedActive, *fetchActiveOnly)
+		feedCheckQueue(newsgroups, wildcardNG, *fetchActiveOnly, db.MainDBGetNewsgroup, processor.Batch.Check, common.WantShutdown,
+			func() {
+				mux.Lock()
+				queued++
+				if queued%1000 == 0 {
+					log.Printf("[FETCHER]: Queued %d/%d newsgroups", queued, len(newsgroups))
+				}
+				mux.Unlock()
+			})
 	}()
 	var wgCheck sync.WaitGroup
 	startDates := make(map[string]time.Time) // per-group date-based download start (UTC midnight)
@@ -559,7 +503,6 @@ func main() {
 	for i := 1; i <= DownloadMaxPar; i++ {
 		go func(waitHere *sync.WaitGroup) {
 			defer waitHere.Done()
-			errChan := make(chan error, len(newsgroups))
 			defer func() {
 				select {
 				case fetchDoneChan <- nil:
@@ -607,7 +550,6 @@ func main() {
 					nga, err := db.MainDBGetNewsgroup(groupInfo.Name)
 					if err != nil {
 						log.Printf("Error in processor.Batch.TodoQ: MainDBGetNewsgroup err='%v'", err)
-						errChan <- err
 						continue
 					}
 					mux.Lock()
@@ -634,15 +576,12 @@ func main() {
 						err := proc.DownloadArticlesFromDate(groupInfo.Name, startDate, DLParChan, progressDB, groupInfo, common.ShutdownChan)
 						if err != nil {
 							if err == processor.ErrIsEmptyGroup {
-								err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0)
-								if err != nil {
-									continue
+								if err := progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0); err != nil {
+									log.Printf("[FETCHER]: UpdateProgress for empty group '%s' failed: %v", groupInfo.Name, err)
 								}
-								errChan <- nil
 								continue
 							}
 							log.Printf("[FETCHER]: DownloadArticlesFromDate5 failed: %v", err)
-							errChan <- err
 							continue
 						}
 					} else if nga.ExpiryDays > 0 {
@@ -651,7 +590,6 @@ func main() {
 						articleCount, err := db.GetArticleCountFromMainDB(groupInfo.Name)
 						if err != nil {
 							log.Printf("[FETCHER]: Failed to get article count from main DB for '%s': %v", groupInfo.Name, err)
-							errChan <- err
 							continue
 						}
 						if articleCount == 0 {
@@ -662,14 +600,11 @@ func main() {
 							err = proc.DownloadArticlesFromDate(groupInfo.Name, startDate, DLParChan, progressDB, groupInfo, common.ShutdownChan)
 							if err != nil {
 								if err == processor.ErrIsEmptyGroup {
-									err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0)
-									if err != nil {
-										continue
+									if err := progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0); err != nil {
+										log.Printf("[FETCHER]: UpdateProgress for empty group '%s' failed: %v", groupInfo.Name, err)
 									}
-									errChan <- nil
 									continue
 								}
-								errChan <- err
 								log.Printf("[FETCHER]: DownloadArticlesFromDate6 failed: %v", err)
 								continue
 							}
@@ -680,7 +615,6 @@ func main() {
 							err = proc.DownloadArticles(groupInfo.Name, DLParChan, progressDB, groupInfo.FetchStart, groupInfo.FetchEnd, common.ShutdownChan)
 							if err != nil {
 								log.Printf("[FETCHER]: DownloadArticles7 failed: %v", err)
-								errChan <- err
 								continue
 							}
 						}
@@ -692,7 +626,6 @@ func main() {
 							if err != processor.ErrUpToDate {
 								log.Printf("[FETCHER]: DownloadArticles8 failed: %v", err)
 							}
-							errChan <- err
 							continue
 						}
 					}
@@ -741,6 +674,94 @@ func main() {
 	mux.Unlock()
 
 	log.Printf("[FETCHER]: Graceful shutdown completed. Exiting here.")
+}
+
+const (
+	fetcherMinBatch = 10
+	// fetcherMaxBatch is the upper bound of -max-batch: the database clamps its
+	// batch size (MaxDBbatch) to 1000 too (internal/database/db_batch.go), and a
+	// larger value only grows the per-group XOVER range and ReturnQ buffers.
+	fetcherMaxBatch = 1000
+)
+
+// clampFetcherFlags brings the numeric fetcher flags into their valid ranges.
+// -max-batch above fetcherMaxBatch is clamped with a warning.
+func clampFetcherFlags(maxBatch, maxBatchThreads, maxQueued, downloadMaxPar *int) {
+	if *downloadMaxPar < 1 {
+		*downloadMaxPar = 1
+	}
+	if *maxBatch < fetcherMinBatch {
+		*maxBatch = fetcherMinBatch
+	}
+	if *maxBatch > fetcherMaxBatch {
+		log.Printf("[WARN] -max-batch %d is above the database batch cap, clamped to %d", *maxBatch, fetcherMaxBatch)
+		*maxBatch = fetcherMaxBatch
+	}
+	if *maxBatchThreads < 1 {
+		*maxBatchThreads = 1
+	}
+	if *maxBatchThreads > 1024 {
+		log.Printf("[WARN] -max-batch-threads %d clamped to 1024 (valid: 1-1024, recommended: 1-16)", *maxBatchThreads)
+		*maxBatchThreads = 1024
+	}
+	if *maxQueued < 1 {
+		*maxQueued = 1
+	}
+}
+
+// feedStats counts what feedCheckQueue queued and skipped.
+type feedStats struct {
+	queued, skippedWildcard, skippedInActive, skippedActive, skippedLookup uint64
+}
+
+// feedCheckQueue sends the name of every newsgroup that matches wildcardNG (empty:
+// all) and the -fetch-active-only selection to out. A group whose lookup fails is
+// logged and skipped; the remaining groups are still queued. It stops early when
+// wantShutdown reports true. onQueued (may be nil) runs after each send.
+// The caller closes out.
+func feedCheckQueue(newsgroups []*models.Newsgroup, wildcardNG string, fetchActiveOnly bool,
+	lookup func(string) (*models.Newsgroup, error), out chan<- *string, wantShutdown func() bool, onQueued func()) feedStats {
+	var st feedStats
+	for _, ng := range newsgroups {
+		if wantShutdown() {
+			//log.Printf("[FETCHER]: Feed Batch.Check common.WantShutdown()")
+			return st
+		}
+		if wildcardNG != "" && !strings.HasPrefix(ng.Name, wildcardNG) {
+			//log.Printf("[FETCHER] Skipping newsgroup '%s' as it does not match prefix '%s'", ng.Name, wildcardNG)
+			st.skippedWildcard++
+			continue
+		}
+		nga, err := lookup(ng.Name)
+		if err != nil || nga == nil {
+			log.Printf("[FETCHER]: Failed to get newsgroup '%s' from database, skipping it: err='%v'", ng.Name, err)
+			st.skippedLookup++
+			continue
+		}
+
+		if fetchActiveOnly && !nga.Active {
+			//log.Printf("[FETCHER]: ignore inactive newsgroup '%s'", ng.Name)
+			st.skippedInActive++
+			continue
+		}
+
+		if !fetchActiveOnly && nga.Active {
+			//log.Printf("[FETCHER]: ignore active newsgroup '%s'", ng.Name)
+			st.skippedActive++
+			continue
+		}
+
+		out <- &ng.Name
+		//log.Printf("Checking ng: %s", ng.Name)
+		st.queued++
+		if onQueued != nil {
+			onQueued()
+		}
+	}
+	totalSkipped := st.skippedWildcard + st.skippedInActive + st.skippedActive + st.skippedLookup
+	log.Printf("[FETCHER]: Feeding Queue Done: %d/%d newsgroups (skipped: %d). Wildcard skipped: %d, skippedInActive: %d, skippedActive: %d, lookup failed: %d. fetchActiveOnly=%t",
+		st.queued, len(newsgroups), totalSkipped, st.skippedWildcard, st.skippedInActive, st.skippedActive, st.skippedLookup, fetchActiveOnly)
+	return st
 }
 
 // getRealMemoryUsage gets actual RSS memory usage from /proc/self/status on Linux
