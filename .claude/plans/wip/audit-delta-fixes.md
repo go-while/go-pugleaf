@@ -1410,6 +1410,7 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
 - **Q1** First registered user becomes admin (user-ID-1 rule, registration on by default; AUDIT §11.10): keep, or
   admin only via `usermgr` / registration off until an admin exists? Not changed by this plan.
 - **Q2** Add `.github/workflows/tests.yml` (push/PR vet + test + known-bugs job)? Optional step of `adf-ops-scripts`.
+  **Answered 2026-10-15: not in this plan; filed in `issues.md` for later.**
 - **Q3** `history/history.go:469,498` fail-stop exits: the author marked them "DO NOT TOUCH"; convert to errors with a
   caller-side fail-stop, or keep? Deferred.
 - **Q4** Toolchain/module upgrade for the 14 govulncheck findings (`go.mod`): separate change?
@@ -1419,6 +1420,7 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
   or accept A-tools-1 as open.
 - **Q8** D7 gates enabling the default cron jobs that migration 0021 ships disabled: an operator without
   `-edit-cronjobs` can no longer switch them on from the admin page. Acceptable?
+  **Answered 2026-10-15: accepted (user's "go" on the defaults).**
 - **Q9** (wave-1 boundary, before `adf-ops-scripts` merges) D11: build scripts without `-race` by default (`RACE=1`
   opt-in) and the matching `.claude/CLAUDE.md` sentence? Production binaries from `build_ALL.sh` would stop being race
   builds. `.claude/CLAUDE.md` is edited only on a yes.
