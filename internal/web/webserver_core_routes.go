@@ -224,6 +224,21 @@ type SearchPageData struct {
 // usable entry: loopback and the private ranges a proxy on the same host or in a container runs in.
 var DefaultReverseProxy = []string{"127.0.0.0/8", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
 
+// contentSecurityPolicy is sent on every response (secure.Config in NewWebServer). Scripts and
+// styles keep 'unsafe-inline' because templates still use inline <script> blocks and on*= handlers;
+// the external hosts are the stylesheet/font CDNs the base templates load. No external script, no
+// fetch/XHR to other origins, no plugins, no framing, forms post only to this site.
+const contentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self' 'unsafe-inline'; " +
+	"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; " +
+	"font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; " +
+	"img-src 'self' data:; " +
+	"connect-src 'self'; " +
+	"object-src 'none'; " +
+	"base-uri 'self'; " +
+	"frame-ancestors 'none'; " +
+	"form-action 'self'"
+
 // NewWebServer creates a new web server instance
 func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *nntp.NNTPServer, cronEdit bool, noCronjobs bool) *WebServer {
 	// Set Gin to release mode for production
@@ -278,10 +293,11 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 
 	// Configure security headers based on SSL setup
 	secureConfig := secure.Config{
-		FrameDeny:          true,
-		ContentTypeNosniff: true,
-		BrowserXssFilter:   true,
-		ReferrerPolicy:     "strict-origin-when-cross-origin",
+		FrameDeny:             true,
+		ContentTypeNosniff:    true,
+		BrowserXssFilter:      true,
+		ReferrerPolicy:        "strict-origin-when-cross-origin",
+		ContentSecurityPolicy: contentSecurityPolicy,
 	}
 
 	// Only add SSL-specific headers if SSL is enabled on the application itself
