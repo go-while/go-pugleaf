@@ -1095,3 +1095,40 @@ P0: both done plans exist, both merges are in `testing-001`, `nntp-cmd-range.go`
 - Baseline at c11feb2 (untouched branch): gofmt = baseline 2 files; `go vet ./...` and `go vet -tags e2e ./cmd/nntp-server/` clean;
   `go build ./...` ok; `bash -n scripts/test-nntp-server.sh` ok; `go test -race` over the 8 package sets PASS (nntp 112 s, database 81 s);
   `PUGLEAF_KNOWN_BUGS=1` id list: **RFC-1, T-nntp-article-1**. K-H3 harness tests pass.
+
+### Wave 1 (2026-10-15): five slices, all reviewed, merged in plan order (reader, stream, overview, starttls, lists: all files new, no conflicts)
+| Slice | Worktree branch (path under /tank0/claude/trees/go-pugleaf/) | Slice commit | Merge | Review |
+|----|----|----|----|----|
+| rfc-reader | `worktree-agent-a45d21d99d9db82ef` (`agent-a45d21d99d9db82ef`) | dd177d3 | 587affb | merge; 3 nits dropped (defer groupDB.Return() across one status line is what K-H8 prescribes) |
+| rfc-stream | `worktree-agent-a95df18f579d1180d` (`agent-a95df18f579d1180d`) | 882acf9 | 4ce535d | merge; 2 nits dropped |
+| rfc-overview | `worktree-agent-aa4b31c655c35ed4c` (`agent-aa4b31c655c35ed4c`) | 721a23b | 68938ef | merge; **T-rfc-commands-1** accepted (see below); 3 nits dropped |
+| rfc-starttls | `worktree-agent-a1710febf780ab401` (`agent-a1710febf780ab401`) | 64b1218 | 3b6a999 | merge; MINOR outside the slice → **T-rfc-commands-2**, fixed in step A |
+| rfc-lists | `worktree-agent-ac08bb0e28ccb9574` (`agent-ac08bb0e28ccb9574`) | a6dae20 | b92a119 | merge; MINOR fixed inline (ab6c79a) |
+
+Deviations recorded:
+- **T-rfc-commands-1** (rfc-overview): the plan's "HDR value sources" for the message-id form would have served the raw
+  upstream `Xref` and `Path` from `headers_json`, which XHDR / `GetHeaderFieldRange` / `NNTPHeaderByMessageID` deliberately
+  never do. `hdrArticleValue` now uses the same sources as the range form (7 overview columns, metadata for bytes/lines
+  with or without the colon, the path column, Xref always empty, `headers_json` otherwise). `HDR Bytes`/`HDR Lines` (no colon)
+  are served from the metadata columns in both forms (D2 note).
+- **T-rfc-commands-2** (found by the rfc-starttls review, fixed in step A, `nntp-server-cliconns.go`): `Handle` deferred
+  `c.textConn.Close()` on the plaintext object, so a STARTTLS-upgraded session never sent close_notify at QUIT; now the
+  textConn current at the end is closed. `rfc-wire` adds the test.
+- rfc-lists: `newsgroupsLine` used a `strings.Replacer` (raw invalid UTF-8 bytes) while plain LIST NEWSGROUPS used
+  `strings.Map` (U+FFFD); fixed inline in ab6c79a by making `handleListNewsgroups` call `newsgroupsLine` (strings.Map).
+  Test exclusion pattern is `…*,!*.b.*` because `hGroup` appends `.<seq>`. `COALESCE(low_water,1)` vs the reader's `0`: same
+  output after the clamp.
+- rfc-stream: CHECK mirrors the merged IHAVE gate order; delays follow D5/D10 (480/502/438 without delay), not IHAVE's.
+- rfc-starttls: `starttlsAvailable()` also guards `c.server != nil`; a failed 382 write returns before the handshake.
+  Out of scope, for the Outcome: `cmd/web/main.go:440-446` still clears TLSCert/TLSKey without a TLS port, so the web
+  tool's embedded NNTP server never offers STARTTLS (D7 names only `cmd/nntp-server`).
+- Implementer notes: full `-race` runs of `./internal/nntp/...` timed out once each in three worktrees (TestAuthFailures,
+  TestArtLocal430/ihave-arrival, TestSessServerStats/server: `AUTHINFO PASS` over the 5 s client deadline) while five
+  slices ran their suites at once (load 17–22 on 12 cores); each passed on re-run. Not reproduced at the base; the verifier's
+  run on an idle machine decides.
+- Some slice commits carry an Opus 5.5 trailer (the implementers' model); accepted.
+
+### Wave 2 step A (2026-10-15): eae3da0 on `plan-nntp-rfc-commands`
+Dispatch, `commandMaxArgs` rows, CAPABILITIES and the 10 RFC-1 marker removals exactly as the hand-over; group test header
+comment and `sessFuzzMultiCodes` (231) updated; HELP lists the new commands (STARTTLS only while `starttlsAvailable()`);
+README file table and command list updated. Step B (`rfc-wire`) spawned on base eae3da0.
