@@ -1,7 +1,9 @@
 ---
 name: Tests
 
-# Manual only (user decision 2026-10-15): run it from the Actions tab or with `gh workflow run tests.yml`.
+# Manual only (user decision 2026-10-15): the "Run workflow" button in the Actions tab, or
+# `gh workflow run tests.yml --ref <branch>`. GitHub shows the button only for workflow files that
+# exist on the default branch.
 "on":
   workflow_dispatch:
 
@@ -46,12 +48,12 @@ jobs:
             ./cmd/merge-descriptions/... ./cmd/nntp-transfer/... ./cmd/usermgr/...
 
   known-bugs:
-    # Lists the open NNTP known bugs (docs/audit/README.md). The run fails on purpose while
-    # any knownBug marker is open, so it never fails the workflow.
+    # Lists the open NNTP known bugs (docs/audit/README.md): with PUGLEAF_KNOWN_BUGS=1 every open
+    # knownBug marker fails its test, so the list is the FAIL lines in this job's log. The step
+    # always exits 0: the job is informational and stays green.
     name: NNTP known bugs (informational)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,4 +66,11 @@ jobs:
       - name: List known bugs
         env:
           PUGLEAF_KNOWN_BUGS: "1"
-        run: go test -count=1 ./internal/nntp/... ./cmd/nntp-server/...
+        run: |
+          go test -count=1 ./internal/nntp/... ./cmd/nntp-server/... 2>&1 | tee known-bugs.log || true
+          echo "## Open NNTP known bugs" >> "$GITHUB_STEP_SUMMARY"
+          if grep -q "known bug" known-bugs.log; then
+            grep "known bug" known-bugs.log | sed 's/^ *//' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "none" >> "$GITHUB_STEP_SUMMARY"
+          fi
