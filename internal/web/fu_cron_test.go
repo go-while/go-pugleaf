@@ -136,8 +136,16 @@ func TestFuCronStartJobLosesRaceToStopSnapshot(t *testing.T) {
 // stop checks must not keep enabled jobs from starting (the -no-cronjobs e2e cases E19/E23 and
 // every real start go through here).
 func TestFuCronLoadAndStartJobsStartsWhileRunning(t *testing.T) {
-	cm := fuCronManager(t, 3)
-	t.Cleanup(func() { close(cm.stopChannel) })
+	cm := fuCronManager(t, 0)
+	// Real enabled rows with a daily interval: their schedulers park in the wait, so the jobs
+	// stay registered. Since A-web-20 a scheduler that ends (as one for a missing row does at
+	// once) forgets its job, which made the counts below racy.
+	jobs := make([]*models.CronJob, 0, 3)
+	for i := 0; i < 3; i++ {
+		jobs = append(jobs, adfCronInsert(t, true, 1440))
+	}
+	cm.loadJobs = func() ([]*models.CronJob, error) { return jobs, nil }
+	t.Cleanup(func() { adfCronStopManager(t, cm) })
 
 	if err := cm.loadAndStartJobs(); err != nil {
 		t.Fatalf("loadAndStartJobs = %v, want nil", err)
