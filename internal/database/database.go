@@ -135,8 +135,20 @@ func (db *Database) cleanupGroupDBsWithLimit(idle time.Duration, maxOpen int) {
 	}
 }
 
-// Close closes all database connections
+// Shutdown stops the cache cron loops and closes all database connections. Callers close
+// StopChan and wait for WG first. A Database from OpenDatabase resets INIT as the last
+// step, so a new OpenDatabase can follow.
 func (db *Database) Shutdown() error {
+	db.stopBackground() // no-op on a bare &Database{} (tests)
+	if db.bgStop != nil {
+		// only a Database created by OpenDatabase owns INIT; deferred: runs after the main DB is closed
+		defer func() {
+			GlobalDBMutex.Lock()
+			INIT = false
+			GlobalDBMutex.Unlock()
+		}()
+	}
+
 	var errs []error
 
 	// Close per-group databases first (thousands of them)
