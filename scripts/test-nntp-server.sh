@@ -11,7 +11,7 @@
 # N41 [nntp-intake] is a shell check (no group row or file for an unknown group);
 # N20-N28 are PASS/FAIL checks of plan nntp-server-hardening (tags nntp-session, nntp-overview,
 # nntp-read, nntp-auth-db); N30 is the SIGINT shutdown check (with an idle client connected).
-# Ids N50-N59 are reserved for nntp-rfc-commands.
+# N50-N57 (nntp-rfc-commands, tag rfc) come from `go test -tags e2e -run TestE2EBinaryRFC`; N58-N59 are spare.
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 2
 PORT="${PORT:-21119}"
@@ -45,7 +45,7 @@ alive() { [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; }
 rss_kb() { awk '/^VmRSS:/{print $2}' "/proc/$PID/status" 2>/dev/null; }
 cpu_ticks() { awk '{print $14+$15}' "/proc/$PID/stat" 2>/dev/null; }
 start_server() {
-  ( cd "$RUN" && exec "$BIN_ABS" -data "$DATA_ABS" -nntptcpport "$PORT" -nntphostname "$NNTPHOST" ) >>"$LOG" 2>&1 &
+  ( cd "$RUN" && exec "$BIN_ABS" -data "$DATA_ABS" -nntptcpport "$PORT" -nntphostname "$NNTPHOST" ${TLSFLAGS[@]+"${TLSFLAGS[@]}"} ) >>"$LOG" 2>&1 &
   PID=$!
   disown "$PID" 2>/dev/null || true # no job notice when a probe has to kill -9 it
   for _ in $(seq 1 90); do
@@ -76,6 +76,16 @@ rm -rf "$DATA"; mkdir -p "$DATA/run" || exit 2
 DATA_ABS=$(cd "$DATA" && pwd -P)
 RUN="$DATA_ABS/run"
 LOG="$DATA/server.log"; DB="$DATA/cfg/pugleaf.sq3"
+# N57 (nntp-rfc-commands): a scratch certificate enables STARTTLS on the plain port (no TLS port)
+TLSFLAGS=(); E2E_STARTTLS=0
+if ! command -v openssl >/dev/null; then
+  info N57 rfc "openssl missing: STARTTLS checked without a certificate"
+elif openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj /CN=localhost \
+     -keyout "$DATA_ABS/run/tls.key" -out "$DATA_ABS/run/tls.crt" >/dev/null 2>&1; then
+  TLSFLAGS=(-nntpcertfile "$DATA_ABS/run/tls.crt" -nntpkeyfile "$DATA_ABS/run/tls.key"); E2E_STARTTLS=1
+else
+  info N57 rfc "openssl could not make a certificate: STARTTLS checked without one"
+fi
 q() { sqlite3 -cmd '.timeout 5000' "$DB" "$1"; }
 # one NNTP client on fd 3: nn_open reads the greeting into NN_GREETING, nn_cmd sends one
 # command and reads one status line into NN_LINE, nn_block reads a data block into
@@ -153,6 +163,23 @@ rows=$(q "SELECT count(*) FROM newsgroups WHERE name='e2e.nosuch.group'" 2>/dev/
 nulls=$(q "SELECT count(*) FROM newsgroups WHERE hierarchy IS NULL" 2>/dev/null)
 if [ "$files" = 0 ] && [ "$rows" = 0 ] && [ "$nulls" = 0 ]; then pass N41 nntp-intake "unknown group: no file, no row, no NULL hierarchy"
 else fail N41 nntp-intake "unknown group: no file, no row, no NULL hierarchy" "files=$files rows=${rows:-?} null_hierarchy=${nulls:-?}"; fi
+
+# ---------------------------------------------------------------- N50-N59 (nntp-rfc-commands, go test, build tag e2e)
+# N51 walks e2e.test.a, which N04 (POST) and N10 (TAKETHIS) filled; N56 also needs e2e.test.b.
+GOLOG50="$DATA/e2e-rfc-go-test.log"
+PUGLEAF_E2E_ADDR="127.0.0.1:$PORT" PUGLEAF_E2E_USER="$E2E_USER" PUGLEAF_E2E_PASS="$E2E_PASS" PUGLEAF_E2E_GROUP=e2e.test.a \
+  PUGLEAF_E2E_STARTTLS="$E2E_STARTTLS" timeout 300 go test -tags e2e -count=1 -v -run '^TestE2EBinaryRFC$' ./cmd/nntp-server/ >"$GOLOG50" 2>&1
+rc=$?
+lines=$(grep -E '^(PASS|FAIL|INFO) N5[0-7] ' "$GOLOG50")
+if [ -n "$lines" ]; then printf '%s\n' "$lines"; fi
+PASSES=$((PASSES + $(printf '%s\n' "$lines" | grep -c '^PASS ')))
+FAILS=$((FAILS + $(printf '%s\n' "$lines" | grep -c '^FAIL ')))
+INFOS=$((INFOS + $(printf '%s\n' "$lines" | grep -c '^INFO ')))
+n=$(printf '%s\n' "$lines" | grep -cE '^(PASS|FAIL) N5[0-7] ')
+if [ "$n" != 8 ]; then
+  fail N00 rfc "go test reported $n of 8 rfc steps" "rc=$rc; see $GOLOG50: $(tail -5 "$GOLOG50" | tr '\n' ' ')"
+fi
+alive || setup_fail "server died during the rfc steps"
 
 # ---------------------------------------------------------------- N24 [nntp-session] (RFC-2): CAPABILITIES by state
 pre=""; post=""; cap_detail=""
