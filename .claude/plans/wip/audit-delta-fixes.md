@@ -1660,6 +1660,39 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
   duration asserts → error-type asserts or 10x margins; the statistical auth-timing test `TestNSHAuthUnknownUserTiming`
   is DELETED, not gated (user: "we are not a bank"); the dummy-compare in the auth code stays, it costs nothing).
 
+### Wave O1 batch B (2026-10-15): adf-opt-ops-tools, adf-opt-rslight, adf-opt-tools-misc, adf-opt-web-maint, adf-opt-tcp2tor
+- adf-opt-ops-tools: `worktree-agent-ab0f79423f0d3259b` (7395ec3), merge 64ee35c; inline 712f747 renamed the local
+  `errors` counter in fix-thread-activity (shadowed the package) and dropped the stale A-ops-7 note in `scripts.sh`.
+  Review MERGE. Behaviour: recover-db refuses the whole run when any name of a comma list is unknown; usermgr
+  argument checks run before OpenDatabase; expire-news names an inactive group explicitly (it was refused before too).
+  Leftovers: resolveNamedGroups/exit helpers copied into 3-4 main packages; fix-references and fix-thread-activity
+  have no signal handler.
+- adf-opt-rslight: `worktree-agent-a05262db368127cbf` (f1da13b, review fix c6cf7e8), merge 902efe6. Review MERGE +
+  minors; fixed: all trailing blank elements after the "." terminator dropped, `-pprof` requires a port. Left:
+  errors.Join verbosity with many failed files; `cmd/history-rebuild/pprof_addr.go` has the same empty-port gap;
+  go.mod still requires the now unused go-cpu-mem-profiler (go mod tidy would drop it plus gorilla/mux); no signal
+  handler during the 15 s start delay. Behaviour: an import where every file was skipped exits 1 instead of SUCCESS.
+- adf-opt-tools-misc: `worktree-agent-a43996ead67b00720` (daafa59, cf3b362, 9c86ebf), merge 0ee6edf. Review MERGE;
+  D-O1 verified (cap lines byte-identical), D-O3 clamp 10..1000. Behaviour: import-flat-files stores file content
+  verbatim (CRLF kept, no trailing newline; old imports were LF-rewritten), duplicates count as existing; merge-active
+  `-overview` requires `-overview-dir`; extract_hierarchies reads the hierarchy list from the embedded migration.
+  For O2: fetcher comment "DownloadMaxPar ... unchangeable (code not working yet)" is misleading; `-max-batch` help
+  says 10-1000; `cmd/import-flat-files/README.md` still says 65,536 tables up front.
+- adf-opt-web-maint: `worktree-agent-ae2bc318afb7dc9cb` (b947ebc, review fix c4d6226), merge 474e447. Review
+  MERGE + minors; fixed: a leftover `<group>.db-wal` after ForceCloseGroupDB refuses the group (another process holds
+  it), conn.Close logged, real-rsync `./-src` test. Behaviour: `-force` flag (not `-rsync-force`); rsync exits 1 when
+  any group was refused; one-shot modes no longer call resolveUseShortHashLen; busy groups wait the connection's 30 s
+  busy_timeout in production.
+- adf-opt-tcp2tor: `worktree-agent-a7586d60096c78752` (1e45e70, review fix af927ed), merge 59988dd. Review
+  MERGE AFTER FIXES: MAJOR drain timer after a half-close cut an active download after one idle period and sent a
+  clean FIN (orchestrator reproduced with the new test against the old code: 10 of 30 bytes); fixed by waiting for
+  the second direction, which copyWithIdle already bounds by idle-without-traffic. Two thin-margin timing tests
+  rewritten (10x margins, `idleRetries` structural counter). Minor: `#` comment cut before the `=` check. Left:
+  `-add` does not check the bind policy; a non-closed Accept error still ends in log.Fatalf (pre-existing).
+  New flags/keys: `-max-conns`/max_conns (64), `-idle-timeout`/idle_timeout (10m), `-allow-public-bind`/allow_public_bind.
+- O1 merged tree 59988dd: gofmt baseline `embedded_migrations.go` only, vet/build ok, race over 26 package sets ok
+  (no flakes), known bugs unchanged (T-nntp-article-1), all shell scripts parse. Wave O2 spawned from 59988dd.
+
 ## Outcome
 
 - **Integration branch:** `plan-audit-delta-fixes` from `testing-001` @ 4eb92da; code tree 7ff04a3 (plus plan/docs
