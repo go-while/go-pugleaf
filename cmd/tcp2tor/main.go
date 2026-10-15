@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -503,6 +504,7 @@ func addEntryToConfigFile(configFile, listenHost string, listenPort int, targetA
 func testSOCKS5Connection(config *ProxyConfig, targetHost, targetPort string, timeoutSec int, verbose bool) error {
 	// Create SOCKS5 dialer
 	proxyAddr := fmt.Sprintf("%s:%d", config.SocksHost, config.SocksPort)
+	timeout := time.Duration(timeoutSec) * time.Second
 
 	var dialer proxy.Dialer
 	var err error
@@ -511,12 +513,12 @@ func testSOCKS5Connection(config *ProxyConfig, targetHost, targetPort string, ti
 		if verbose {
 			log.Printf("Creating SOCKS5 dialer with authentication to %s", proxyAddr)
 		}
-		dialer, err = proxy.SOCKS5("tcp", proxyAddr, config.SocksAuth, proxy.Direct)
+		dialer, err = proxy.SOCKS5("tcp", proxyAddr, config.SocksAuth, socksForwardDialer(timeout))
 	} else {
 		if verbose {
 			log.Printf("Creating SOCKS5 dialer without authentication to %s", proxyAddr)
 		}
-		dialer, err = proxy.SOCKS5("tcp", proxyAddr, nil, proxy.Direct)
+		dialer, err = proxy.SOCKS5("tcp", proxyAddr, nil, socksForwardDialer(timeout))
 	}
 
 	if err != nil {
@@ -529,7 +531,7 @@ func testSOCKS5Connection(config *ProxyConfig, targetHost, targetPort string, ti
 		log.Printf("Testing connection to %s through SOCKS5 proxy...", targetAddr)
 	}
 
-	conn, err := dialer.Dial("tcp", targetAddr)
+	conn, err := dialThroughSOCKS(dialer, targetAddr, timeout)
 	if err != nil {
 		return fmt.Errorf("failed to connect to %s through SOCKS5 proxy: %v", targetAddr, err)
 	}
@@ -540,6 +542,57 @@ func testSOCKS5Connection(config *ProxyConfig, targetHost, targetPort string, ti
 	}
 
 	return nil
+}
+
+// socksForwardDialer returns the dialer used to reach the SOCKS5 proxy itself, so that the TCP
+// connect to the proxy is bounded by the -timeout value. A timeout <= 0 means 30 s (the flag default).
+func socksForwardDialer(timeout time.Duration) proxy.Dialer {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return &net.Dialer{Timeout: timeout}
+}
+
+// dialThroughSOCKS dials addr through the SOCKS5 dialer d and gives up after timeout, covering the
+// proxy connect, the SOCKS5 handshake and the CONNECT reply. A timeout <= 0 means 30 s (the flag default).
+// Dialers that implement proxy.ContextDialer (proxy.SOCKS5 does) get a context deadline; any other
+// dialer runs in a goroutine, and a connection that arrives after the timeout is closed.
+func dialThroughSOCKS(d proxy.Dialer, addr string, timeout time.Duration) (net.Conn, error) {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if cd, ok := d.(proxy.ContextDialer); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		return cd.DialContext(ctx, "tcp", addr)
+	}
+
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	resCh := make(chan dialResult)
+	abandoned := make(chan struct{})
+	go func() {
+		conn, err := d.Dial("tcp", addr)
+		select {
+		case resCh <- dialResult{conn: conn, err: err}:
+		case <-abandoned:
+			if conn != nil {
+				_ = conn.Close()
+			}
+		}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case res := <-resCh:
+		return res.conn, res.err
+	case <-timer.C:
+		close(abandoned)
+		return nil, context.DeadlineExceeded
+	}
 }
 
 // ProxyServer handles the TCP proxy functionality
@@ -623,9 +676,9 @@ func (s *ProxyServer) handleConnection(clientConn net.Conn) {
 	var err error
 
 	if s.ProxyConfig.SocksAuth != nil {
-		dialer, err = proxy.SOCKS5("tcp", proxyAddr, s.ProxyConfig.SocksAuth, proxy.Direct)
+		dialer, err = proxy.SOCKS5("tcp", proxyAddr, s.ProxyConfig.SocksAuth, socksForwardDialer(s.Timeout))
 	} else {
-		dialer, err = proxy.SOCKS5("tcp", proxyAddr, nil, proxy.Direct)
+		dialer, err = proxy.SOCKS5("tcp", proxyAddr, nil, socksForwardDialer(s.Timeout))
 	}
 
 	if err != nil {
@@ -639,7 +692,7 @@ func (s *ProxyServer) handleConnection(clientConn net.Conn) {
 		log.Printf("Connecting to %s through SOCKS5 proxy for client %s", targetAddr, clientAddr)
 	}
 
-	targetConn, err := dialer.Dial("tcp", targetAddr)
+	targetConn, err := dialThroughSOCKS(dialer, targetAddr, s.Timeout)
 	if err != nil {
 		log.Printf("Failed to connect to %s for client %s: %v", targetAddr, clientAddr, err)
 		return
