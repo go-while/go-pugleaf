@@ -63,8 +63,11 @@
    A-tools-1, A-tools-4, A-ops-3d/f were closed by the sibling NNTP plans. The optional waves O1/O2 (run 2026-10-15)
    closed A-web-6…10/12/14/16/18/19, A-db-7/8/10/14, A-tools-6…21, A-ops-6…8/10/11/12/17, A-intake-10 (the
    fetcher's eternal-september/blueworldhosting caps stay by user decision; the 441 attempt counter is in `issues.md`);
-   deferred with a hand-off note: A-db-3, A-db-4, A-tools-5b, history fail-stop exits (Q3), A-ops-13/14/16,
-   govulncheck toolchain upgrade (Q4), nonce-based CSP (Q5).
+   A-db-3 and A-db-4 were closed by `nntp-intake-injection` (d27c46d, 2b13adf; one A-db-3 remnant, the
+   `ExistsMsgIdInArticlesDB` caller in `proc_DLArt.go`, goes with plan `followup-leftovers`). Deferred with a hand-off
+   note and a user decision (2026-10-15: stay deferred): history fail-stop exits (Q3), A-ops-13/14/16, nonce-based CSP
+   (Q5). A-tools-5b (fetch progress before commit) and the govulncheck toolchain upgrade (Q4) are in plan
+   `followup-leftovers`.
  - Plan `test-timing-hardening` (2026-10-15): tests no longer assert on wall-clock upper bounds under 10x; hang guards
    come from `PUGLEAF_TEST_DEADLINE` (default 60 s); the NNTP server counts delay sites (`ErrorDelayCount`,
    `ArticleDelayCount`) for structural checks; the auth timing-enumeration test was removed on purpose. Its stress
@@ -73,7 +76,7 @@
    item with `knownBug`; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` lists them (1 id:
    T-nntp-article-1, an accepted limitation).
  - Leftovers of the optional waves are listed in the Outcome of `.claude/plans/done/audit-delta-fixes.md`; the
-   wall-clock-sensitive tests are the subject of the queued plan `.claude/plans/queued/test-timing-hardening.md`.
+   wall-clock-sensitive tests are the subject of the plan `.claude/plans/done/test-timing-hardening.md`.
  - peering: the unfinished `PeeringManager` was removed (CLI-6); incoming feeds work via IHAVE/TAKETHIS, outgoing
    feeds via `cmd/nntp-transfer` (CHECK/TAKETHIS streaming); there is no automatic peer-to-peer feed configuration.
  - the history index must be (re)built with cmd/history-rebuild for articles imported before it was enabled

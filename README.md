@@ -127,7 +127,7 @@ For backfilling disable cron job before and run `pugleaf-fetcher` directly:
 
 ```bash
 # Initial backfill from specific date
-./pugleaf-fetcher -group "news.*" -download-start-date 1980-01-01 -download-end-date 1981-01-01
+./pugleaf-fetcher -group "news.*" -download-start-date 1980-01-01   # there is no end-date flag; use -max-batch to pace
 
 # Continuous fetching (run after initial fetch)
 ./pugleaf-fetcher -group "news.*"
