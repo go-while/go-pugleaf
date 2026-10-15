@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
+	"github.com/go-while/go-pugleaf/internal/preloader"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
@@ -314,7 +317,77 @@ func writeActiveFileFromDB(db *database.Database, filePath string, activeOnly bo
 	return nil
 }
 
-func rsyncInactiveGroupsToDir(db *database.Database, newdatadir string) error {
+// rsyncFlagsError returns an error when -rsync-remove-source is used without -force
+// (A-ops-11): moving the group databases deletes them from the data directory, so the
+// operator has to confirm it. It returns nil when no rsync is requested.
+func rsyncFlagsError(newdatadir string, removeSource, force bool) error {
+	if newdatadir == "" || !removeSource || force {
+		return nil
+	}
+	return errors.New("-rsync-remove-source deletes the source group databases after the copy: add -force to confirm (stop fetcher, nntp-server and web first)")
+}
+
+// errGroupDBBusy is returned by checkpointGroupForCopy when the WAL checkpoint of a
+// group database is blocked: another connection (normally another process) uses it.
+var errGroupDBBusy = errors.New("group database is busy (open elsewhere?)")
+
+// checkpointGroupForCopy prepares one group database for a file copy (A-ops-11): it
+// opens the group, runs PRAGMA wal_checkpoint(TRUNCATE) so the WAL content is in the
+// .db file, and closes the group again so this process holds no handle on it. A
+// checkpoint that reports busy (a reader or writer on another connection blocked it)
+// returns an error wrapping errGroupDBBusy: the group must not be copied. busyWait > 0
+// bounds how long the checkpoint waits for those locks; 0 keeps the connection's
+// busy_timeout. The checkpoint runs on one pinned connection (busy_timeout is per
+// connection) and not through the Retryable* helpers: busy means refuse, not retry.
+func checkpointGroupForCopy(db *database.Database, newsgroup string, busyWait time.Duration) (err error) {
+	groupDB, err := db.GetGroupDB(newsgroup)
+	if err != nil {
+		return fmt.Errorf("open group database %s: %w", newsgroup, err)
+	}
+	defer func() {
+		if cerr := db.ForceCloseGroupDB(groupDB); cerr != nil && err == nil {
+			err = fmt.Errorf("close group database %s: %w", newsgroup, cerr)
+		}
+	}()
+	ctx := context.Background()
+	conn, err := groupDB.DB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("group database %s: get connection: %w", newsgroup, err)
+	}
+	defer conn.Close()
+	if busyWait > 0 {
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", busyWait.Milliseconds())); err != nil {
+			return fmt.Errorf("group database %s: set busy_timeout: %w", newsgroup, err)
+		}
+		defer func() {
+			// the connection goes back to the pool when another worker still holds the group
+			if _, rerr := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", database.SQLITE_busy_timeout)); rerr != nil {
+				log.Printf("[RSYNC]: Warning: group database %s: restore busy_timeout: %v", newsgroup, rerr)
+			}
+		}()
+	}
+	var busy, walFrames, checkpointed int64
+	if err := conn.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &walFrames, &checkpointed); err != nil {
+		return fmt.Errorf("group database %s: wal_checkpoint: %w", newsgroup, err)
+	}
+	if busy != 0 {
+		return fmt.Errorf("group database %s: wal_checkpoint(TRUNCATE) blocked (wal frames %d, checkpointed %d): %w", newsgroup, walFrames, checkpointed, errGroupDBBusy)
+	}
+	return nil
+}
+
+// rsyncInactiveGroupsToDir copies the databases of all inactive groups to newdatadir/db
+// and, with removeSource (which needs force, see rsyncFlagsError), removes the copied
+// source files. Each group is checkpointed and closed first (checkpointGroupForCopy); a
+// busy group is refused and left in place, the others are still copied, and the run
+// then returns an error with the number of refused groups.
+func rsyncInactiveGroupsToDir(db *database.Database, newdatadir string, removeSource, force bool) error {
+	if newdatadir == "" {
+		return errors.New("empty target directory")
+	}
+	if err := rsyncFlagsError(newdatadir, removeSource, force); err != nil {
+		return err
+	}
 
 	// check if newdatadir exists
 	if _, err := os.Stat(newdatadir); os.IsNotExist(err) {
@@ -335,6 +408,7 @@ func rsyncInactiveGroupsToDir(db *database.Database, newdatadir string) error {
 	}
 	defer rows.Close()
 	basedirNew := filepath.Join(newdatadir, "/db/")
+	refused := 0
 	for rows.Next() {
 		var newsgroup string
 		if err := rows.Scan(&newsgroup); err != nil {
@@ -350,6 +424,15 @@ func rsyncInactiveGroupsToDir(db *database.Database, newdatadir string) error {
 			log.Printf("[RSYNC]: Group database file does not exist: %s", groupDBfileOld)
 			continue
 		}
+		// fold the WAL into the .db file and close the group; a busy group is refused
+		if err := checkpointGroupForCopy(db, newsgroup, 0); err != nil {
+			if errors.Is(err, errGroupDBBusy) {
+				log.Printf("[RSYNC]: REFUSED %s: %v (stop fetcher, nntp-server and web, then run again)", newsgroup, err)
+				refused++
+				continue
+			}
+			return err
+		}
 		if _, err := os.Stat(baseGroupDBdirNew); os.IsNotExist(err) {
 			if err := os.MkdirAll(baseGroupDBdirNew, 0755); err != nil {
 				log.Printf("[WEB]: Warning: Failed to create new data directory '%s': %v", newdatadir, err)
@@ -357,7 +440,7 @@ func rsyncInactiveGroupsToDir(db *database.Database, newdatadir string) error {
 			}
 		}
 		start := time.Now()
-		if err := database.RsyncDIR(baseGroupDBdir, basedirNew, rsyncRemoveSource); err != nil {
+		if err := database.RsyncDIR(baseGroupDBdir, basedirNew, removeSource); err != nil {
 			log.Printf("[RSYNC]: Warning: Failed to rsync group database file baseGroupDBdir='%s' to basedirNew='%s' (baseGroupDBdirNew=%s): %v", baseGroupDBdir, basedirNew, baseGroupDBdirNew, err)
 			return err
 		}
@@ -372,6 +455,9 @@ func rsyncInactiveGroupsToDir(db *database.Database, newdatadir string) error {
 	// like a complete one, and a partial group list would be reported as a full rsync.
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("error iterating newsgroups: %w", err)
+	}
+	if refused > 0 {
+		return fmt.Errorf("%d inactive group(s) refused: database busy (open elsewhere)", refused)
 	}
 	return nil
 }
@@ -566,6 +652,142 @@ func exitAfterDB(db *database.Database, code int) {
 func fatalAfterDB(db *database.Database, format string, args ...any) {
 	log.Printf(format, args...)
 	exitAfterDB(db, 1)
+}
+
+// maintenanceRequested reports whether the flags ask for a one-shot maintenance mode
+// (A-ops-12). Those modes need only the databases: main runs them right after
+// OpenDatabase (with NO_CACHE_BOOT) through runMaintenance and exits, without hostname,
+// processor, progress DB or history. The descriptions-only import
+// (-update-newsgroups-descriptions-file without -import-active) and
+// -update-overwrite-newsgroups-descriptions are not one-shot: they continue into the server.
+func maintenanceRequested() bool {
+	return updateNewsgroupsHideFuture || updateNGAConcurrent > 0 || writeActiveFile != "" ||
+		rsyncInactiveGroups != "" || compareActiveFile != "" || disableActiveFile != "" ||
+		findOrphanDBs || updateNewsgroupsExpiryFile != "" || importActiveFile != "" || repairWatermarks
+}
+
+// runMaintenance runs the one-shot maintenance modes in their historic order and
+// returns the exit code; main ends in exitAfterDB with it. The first mode that runs
+// decides the result, except -update-newsgroups-hide-futureposts, which continues with
+// -update-newsgroups-activity when both are set. Only reached when maintenanceRequested.
+func runMaintenance(db *database.Database) int {
+	// Run future posts hiding migration first if requested
+	if updateNewsgroupsHideFuture {
+		log.Printf("[WEB]: Starting future posts hiding migration...")
+		if err := hideFuturePosts(db); err != nil {
+			log.Printf("[WEB]: Warning: Future posts hiding migration failed: %v", err)
+			return 1
+		}
+		log.Printf("[WEB]: Future posts hiding migration completed successfully")
+		if updateNGAConcurrent == 0 {
+			return 0
+		}
+	}
+
+	// Run newsgroup activity migration after hiding future posts if requested
+	if updateNGAConcurrent > 0 {
+		log.Printf("[WEB]: Starting updateNewsgroupLastActivity")
+		if err := updateNewsgroupLastActivity(db, updateNGAConcurrent); err != nil {
+			log.Printf("[WEB]: Warning: Newsgroup activity migration failed: %v", err)
+			return 1
+		}
+		log.Printf("[WEB]: Newsgroup activity migration completed successfully")
+		return 0
+	}
+
+	// Write active file if requested
+	if writeActiveFile != "" {
+		log.Printf("[WEB]: Writing active file from main database to: %s", writeActiveFile)
+		if err := writeActiveFileFromDB(db, writeActiveFile, writeActiveOnly); err != nil {
+			log.Printf("[WEB]: Error: Failed to write active file: %v", err)
+			return 1
+		}
+		log.Printf("[WEB]: Active file written successfully")
+		return 0
+	}
+
+	// rsyncInactiveGroups
+	if rsyncInactiveGroups != "" {
+		log.Printf("[RSYNC]: inactive groups to: %s", rsyncInactiveGroups)
+		if err := rsyncInactiveGroupsToDir(db, rsyncInactiveGroups, rsyncRemoveSource, rsyncForce); err != nil {
+			log.Printf("[RSYNC]: Error: Failed to rsync inactive groups: %v", err)
+			return 1
+		}
+		log.Printf("[RSYNC]: Inactive groups synced successfully")
+		return 0
+	}
+
+	// compareActiveFile
+	if compareActiveFile != "" {
+		log.Printf("[WEB]: Comparing active file with database: %s (min articles: %d)", compareActiveFile, compareActiveMinArticles)
+		if err := compareActiveFileWithDatabase(db, compareActiveFile, compareActiveMinArticles); err != nil {
+			log.Printf("[WEB]: Error: Failed to compare active file: %v", err)
+			return 1
+		}
+		log.Printf("[WEB]: Active file comparison completed successfully")
+		return 0
+	}
+
+	// disableActiveFile
+	if disableActiveFile != "" {
+		log.Printf("[WEB]: Disabling newsgroups not listed in active file: %s", disableActiveFile)
+		if err := disableNewsgroupsNotInActiveFile(db, disableActiveFile, disableActiveOpts{DryRun: disableActiveDryRun}); err != nil {
+			log.Printf("[WEB]: Error: Failed to disable newsgroups: %v", err)
+			return 1
+		}
+		log.Printf("[WEB]: Newsgroup disabling completed successfully")
+		return 0
+	}
+
+	// findOrphanDBs
+	if findOrphanDBs {
+		log.Printf("[WEB]: Finding orphaned database folders...")
+		if err := findOrphanedDatabases(db, dataDir, verbose); err != nil {
+			log.Printf("[WEB]: Error: Failed to find orphaned databases: %v", err)
+			return 1
+		}
+		log.Printf("[WEB]: Orphaned database scan completed successfully")
+		return 0
+	}
+
+	// updateNewsgroupsExpiryFile
+	if updateNewsgroupsExpiryFile != "" {
+		log.Printf("[WEB]: Updating newsgroup expiry from file: %s", updateNewsgroupsExpiryFile)
+		if err := updateNewsgroupsExpiryFromFile(db, updateNewsgroupsExpiryFile); err != nil {
+			log.Printf("[WEB]: Error: Failed to update newsgroup expiry: %v", err)
+			return 1
+		}
+		log.Printf("[WEB]: Newsgroup expiry update completed successfully")
+		return 0
+	}
+
+	ctx := context.Background()
+
+	// Import from an active file (with an optional descriptions file). A descriptions
+	// file alone only gets here together with -repair-watermarks: it is imported first,
+	// as before, and the repair below ends the run.
+	if importActiveFile != "" || importDescFile != "" {
+		log.Printf("[WEB]: Importing newsgroups from files...")
+		if err := preloader.LoadNewsgroupsFromFiles(ctx, db, importActiveFile, importDescFile, importCreateMissing); err != nil {
+			log.Printf("[WEB]: Warning: Failed to import newsgroups: %v", err)
+			return 1
+		}
+		log.Printf("[WEB]: Newsgroups imported successfully")
+		if importActiveFile != "" {
+			return 0
+		}
+	}
+
+	if repairWatermarks {
+		log.Printf("[WEB]: Repairing corrupted newsgroup watermarks...")
+		if err := preloader.RepairNewsgroupWatermarks(ctx, db); err != nil {
+			log.Printf("[WEB]: Warning: Failed to repair watermarks: %v", err)
+			return 1
+		}
+		log.Printf("[WEB]: Watermarks repaired successfully")
+		return 0
+	}
+	return 0
 }
 
 // resolveUseShortHashLen returns the history UseShortHashLen to use (OPS-4b). The

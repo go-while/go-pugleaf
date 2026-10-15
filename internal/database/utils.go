@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -32,12 +33,35 @@ func MoveFile(oldpath, newpath string) error {
 	return os.Rename(oldpath, newpath)
 }
 
-func RsyncDIR(oldpath, newpath string, removesource bool) error {
-	// Stream rsync output so progress is visible in logs/STDOUT
-	args := []string{"-va", "--progress", oldpath, newpath}
+// rsyncSafePath returns p so that rsync can only read it as a local path: a relative
+// path gets a "./" prefix, which stops a leading "-" from becoming an option and a
+// "host:" before the first "/" from becoming a remote (A-ops-11). Absolute paths and
+// paths that already start with "./" are returned unchanged.
+func rsyncSafePath(p string) string {
+	if filepath.IsAbs(p) || strings.HasPrefix(p, "./") {
+		return p
+	}
+	return "./" + p
+}
+
+// rsyncArgs returns the rsync argument list of RsyncDIR: all options first, then "--"
+// to end the options, then the two paths (each through rsyncSafePath).
+func rsyncArgs(oldpath, newpath string, removesource bool) []string {
+	args := []string{"-va", "--progress"}
 	if removesource {
 		args = append(args, "--remove-source-files")
 	}
+	return append(args, "--", rsyncSafePath(oldpath), rsyncSafePath(newpath))
+}
+
+// RsyncDIR copies oldpath to newpath with rsync (and removes the copied source files
+// when removesource is set). Both paths are always local paths, never options or remotes.
+func RsyncDIR(oldpath, newpath string, removesource bool) error {
+	if oldpath == "" || newpath == "" {
+		return fmt.Errorf("rsync: empty path (old='%s' new='%s')", oldpath, newpath)
+	}
+	// Stream rsync output so progress is visible in logs/STDOUT
+	args := rsyncArgs(oldpath, newpath, removesource)
 	log.Printf("[RSYNC] running: rsync %v", args)
 
 	cmd := exec.Command("rsync", args...)
