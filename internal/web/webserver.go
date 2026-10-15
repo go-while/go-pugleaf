@@ -11,7 +11,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 
+	"github.com/go-while/go-pugleaf/internal/cache"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -137,7 +139,7 @@ func (s *WebServer) serveOn(ln net.Listener) error {
 // up to shutdownGrace more, then logs the handlers that are still running. The API token usage of
 // the drained requests is written before Shutdown returns, because the caller closes the database
 // next: it waits for the flusher's own last flush and then flushes once more itself. Last, it
-// stops the cleanup goroutines of the global sanitized and newsgroup caches (once per process).
+// stops the cleanup goroutines of the global sanitized and newsgroup caches (once per cache instance).
 func (s *WebServer) Shutdown(ctx context.Context) error {
 	s.stopOnce.Do(func() { close(s.stopCh) })
 	s.httpServerMu.Lock()
@@ -199,20 +201,57 @@ func (s *WebServer) Shutdown(ctx context.Context) error {
 	return err
 }
 
-// globalCachesStopOnce guards stopGlobalCaches. The sanitized and newsgroup caches are process
-// globals shared by every WebServer, and their Stop is a bare close that panics on a second call,
-// while Shutdown may run several times (per server, and for several servers in the tests).
-var globalCachesStopOnce sync.Once
+// stoppedCaches remembers which cache instances stopGlobalCaches has stopped. The sanitized and
+// newsgroup caches are process globals shared by every WebServer; NewsgroupCache.Stop is a bare
+// close that panics on a second call, while Shutdown may run several times (per server, and for
+// several servers in the tests). The guard is per instance: a cache re-initialised after a
+// Shutdown (models.InitSanitizedCache / InitNewsgroupCache) is a new instance and is stopped by
+// the next Shutdown, and an instance is never stopped twice. The sets hold weak pointers, so a
+// replaced cache is not kept alive; entries of reclaimed caches are pruned on the next stop.
+var stoppedCaches struct {
+	mu        sync.Mutex
+	sanitized map[weak.Pointer[cache.SanitizedCache]]struct{}
+	newsgroup map[weak.Pointer[cache.NewsgroupCache]]struct{}
+}
 
-// stopGlobalCaches stops the cleanup goroutines of the global sanitized and newsgroup caches,
-// once per process (A-web-19). A stopped cache still serves Get and Set; only expiry sweeping ends.
+// stopGlobalCaches stops the cleanup goroutines of the current global sanitized and newsgroup
+// caches, once per cache instance (A-web-19). A stopped cache still serves Get and Set; only
+// expiry sweeping ends.
 func stopGlobalCaches() {
-	globalCachesStopOnce.Do(func() {
-		if sc := models.GetSanitizedCache(); sc != nil {
-			sc.Stop()
+	stopCaches(models.GetSanitizedCache(), models.GetNewsgroupCache())
+}
+
+// stopCaches stops sc and nc unless that instance was stopped before; nil is skipped.
+func stopCaches(sc *cache.SanitizedCache, nc *cache.NewsgroupCache) {
+	stoppedCaches.mu.Lock()
+	defer stoppedCaches.mu.Unlock()
+	if stopOncePerInstance(&stoppedCaches.sanitized, sc) {
+		sc.Stop()
+	}
+	if stopOncePerInstance(&stoppedCaches.newsgroup, nc) {
+		nc.Stop()
+	}
+}
+
+// stopOncePerInstance records p in *set and reports whether it was not there yet (the caller
+// stops it then). A nil p is never recorded. Entries of reclaimed instances are dropped.
+// Caller holds stoppedCaches.mu.
+func stopOncePerInstance[T any](set *map[weak.Pointer[T]]struct{}, p *T) bool {
+	if p == nil {
+		return false
+	}
+	if *set == nil {
+		*set = make(map[weak.Pointer[T]]struct{})
+	}
+	key := weak.Make(p)
+	if _, done := (*set)[key]; done {
+		return false
+	}
+	for k := range *set {
+		if k.Value() == nil {
+			delete(*set, k)
 		}
-		if nc := models.GetNewsgroupCache(); nc != nil {
-			nc.Stop()
-		}
-	})
+	}
+	(*set)[key] = struct{}{}
+	return true
 }

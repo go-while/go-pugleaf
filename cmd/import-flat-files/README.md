@@ -90,9 +90,9 @@ is added.
 - `-update`: Update mode: check every article in the database first and skip those already
   stored (default: false). Without it, already stored articles are ignored by the insert
   (`INSERT OR IGNORE`), so a plain re-run is safe too; `-update` saves reading their files.
-- `-dry-run`: Scan and read the files without writing articles (default: false). The database files
-  in `-db` are still opened (and created, up to 256 empty `XX.db` plus WAL/SHM files); combined with
-  `-update`, the existence check also creates the tables.
+- `-dry-run`: Scan and read the files without writing articles (default: false). No database file
+  in `-db` is opened or created; combined with `-update`, the existence check is skipped (it would
+  need the databases), so every readable article counts as processed.
 - `-verbose`: Verbose logging (default: false)
 
 ### Examples

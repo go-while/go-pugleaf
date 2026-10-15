@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/database"
@@ -18,12 +21,39 @@ import (
 // ftaExitTimeout bounds the wait for background goroutines in ftaExit.
 const ftaExitTimeout = 60 * time.Second
 
-var ftaStopOnce sync.Once
+var (
+	ftaStopOnce sync.Once
+	// ftaExitMu serializes ftaExit: the first caller tears down and exits, a concurrent
+	// second one (the signal handler vs. main) waits here until the process is gone.
+	ftaExitMu sync.Mutex
+	// ftaStopReq is set by the first SIGINT/SIGTERM: main stops after the current newsgroup.
+	ftaStopReq atomic.Bool
+)
+
+// ftaExitSignaled is the exit code of a run ended by a signal.
+const ftaExitSignaled = 130
 
 // ftaExit tears the database down (close StopChan once, wait for the background
 // goroutines up to ftaExitTimeout, Shutdown) and exits with code. It is the only way
 // out of main once the database is open.
 func ftaExit(db *database.Database, code int) {
+	ftaExitMu.Lock() // never unlocked: os.Exit below ends the process
+	ftaExitLocked(db, code)
+}
+
+// ftaExitNow is the second-signal exit: it tears down like ftaExit unless a teardown
+// already holds ftaExitMu (it may be waiting on db.WG for up to a minute); then it
+// exits at once without waiting for it.
+func ftaExitNow(db *database.Database) {
+	if !ftaExitMu.TryLock() {
+		log.Printf("[FIX-THREAD-ACTIVITY] teardown already running: exiting now")
+		os.Exit(ftaExitSignaled)
+	}
+	ftaExitLocked(db, ftaExitSignaled) // never unlocked: it ends the process
+}
+
+// ftaExitLocked is ftaExit for a caller that holds ftaExitMu.
+func ftaExitLocked(db *database.Database, code int) {
 	if db != nil {
 		ftaStopOnce.Do(func() {
 			if db.StopChan != nil {
@@ -50,6 +80,33 @@ func ftaExit(db *database.Database, code int) {
 		}
 	}
 	os.Exit(code)
+}
+
+// ftaSignalLoop handles the signals of sigChan: the first one calls requestStop (main
+// stops after the current newsgroup), a second one calls exitNow. It returns after the
+// second signal or when sigChan is closed.
+func ftaSignalLoop(sigChan <-chan os.Signal, requestStop, exitNow func()) {
+	sig, ok := <-sigChan
+	if !ok {
+		return
+	}
+	log.Printf("[FIX-THREAD-ACTIVITY] Received %v: stopping after the current newsgroup (send it again to stop now)", sig)
+	requestStop()
+	sig, ok = <-sigChan
+	if !ok {
+		return
+	}
+	log.Printf("[FIX-THREAD-ACTIVITY] Received %v again: stopping now", sig)
+	exitNow()
+}
+
+// ftaHandleSignals registers SIGINT/SIGTERM for the run with the open database db;
+// both ways out go through ftaExit (exit code ftaExitSignaled).
+func ftaHandleSignals(db *database.Database) {
+	sigChan := make(chan os.Signal, 2)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	// ends with the process: every way out of main is ftaExit (os.Exit)
+	go ftaSignalLoop(sigChan, func() { ftaStopReq.Store(true) }, func() { ftaExitNow(db) })
 }
 
 // resolveNamedGroups looks every name up in the main database (A-ops-8): GetGroupDB would
@@ -87,6 +144,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
+	ftaHandleSignals(db)
 
 	if groupName != "" {
 		_, unknown, err := resolveNamedGroups(db, []string{groupName})
@@ -114,6 +172,10 @@ func main() {
 		fixed := 0
 		failed := 0
 		for _, group := range groups {
+			if ftaStopReq.Load() {
+				log.Printf("Stopped by a signal: %d groups fixed, %d errors", fixed, failed)
+				ftaExit(db, ftaExitSignaled)
+			}
 			if group.Name == "" {
 				continue
 			}

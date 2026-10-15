@@ -2,6 +2,8 @@
 package web
 
 import (
+	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -92,13 +94,13 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 		return
 	}
 
-	// Hidden articles (D2): non-admins get the structure without the hidden nodes' overview.
-	// RedactedCopy leaves the built tree untouched.
-	if !s.isAdminRequest(c) {
-		redacted := *response
-		redacted.Tree = response.Tree.RedactedCopy()
-		response = &redacted
-	}
+	// Per-viewer copy (defensive: the built tree is left untouched): nodes whose overview
+	// did not load get one from the group DB (treeOverviewFiller), hidden articles (D2) lose their
+	// overview for non-admins, and every remaining From is the display name the HTML tree shows
+	// (models.DisplayFrom), never the raw header with its address.
+	viewer := *response
+	viewer.Tree = treeForViewer(response.Tree, s.treeOverviewFiller(groupDB, options.IncludeOverview), !s.isAdminRequest(c), true)
+	response = &viewer
 
 	// Return JSON response. private: the body depends on the viewer (admin or not).
 	c.Header("Cache-Control", "private, max-age=60")
@@ -143,6 +145,9 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 		s.renderError(c, http.StatusInternalServerError, "Tree Error", publicErrorDetail)
 		return
 	}
+	// Nodes whose overview did not load are filled from the group DB, so a hidden one renders
+	// as "[hidden article]" for non-admins (the built tree itself is not modified).
+	tree := treeForViewer(treeResponse.Tree, s.treeOverviewFiller(groupDB, true), false, false)
 
 	// Get root article for title
 	rootOverview, err := s.DB.GetOverviewByArticleNum(groupDB, threadRoot)
@@ -153,7 +158,8 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 
 	// A hidden root (D2) shows neither subject nor author to non-admins.
 	showHidden := s.isAdminRequest(c)
-	if !showHidden && rootOverview.Hide > 0 {
+	rootHidden := !showHidden && rootOverview.Hide > 0
+	if rootHidden {
 		rootOverview = &models.Overview{ArticleNum: rootOverview.ArticleNum, Subject: "[hidden article]", Hide: rootOverview.Hide}
 	}
 
@@ -176,8 +182,9 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 		"AvailableAIModels":   baseData.AvailableAIModels,
 		"GroupName":           groupName,
 		"ThreadRoot":          rootOverview,
-		"TreeHTML":            treeResponse.Tree.GetThreadTreeHTMLFor(groupName, showHidden),
-		"TreeStats":           treeResponse.Tree.GetTreeStats(),
+		"RootHidden":          rootHidden, // placeholder root: no Message-ID, author, date or article link
+		"TreeHTML":            tree.GetThreadTreeHTMLFor(groupName, showHidden),
+		"TreeStats":           tree.GetTreeStats(),
 		"BuildTime":           treeResponse.BuildTime,
 		"CacheHit":            treeResponse.CacheHit,
 	}
@@ -226,6 +233,8 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 		s.renderError(c, http.StatusInternalServerError, "Tree Error", publicErrorDetail)
 		return
 	}
+	// Nodes whose overview did not load are filled from the group DB (see threadTreePage).
+	tree := treeForViewer(treeResponse.Tree, s.treeOverviewFiller(groupDB, true), false, false)
 
 	// Get root article for title
 	rootOverview, err := s.DB.GetOverviewByArticleNum(groupDB, threadRoot)
@@ -236,7 +245,8 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 
 	// A hidden root (D2) shows neither subject nor author to non-admins.
 	showHidden := s.isAdminRequest(c)
-	if !showHidden && rootOverview.Hide > 0 {
+	rootHidden := !showHidden && rootOverview.Hide > 0
+	if rootHidden {
 		rootOverview = &models.Overview{ArticleNum: rootOverview.ArticleNum, Subject: "[hidden article]", Hide: rootOverview.Hide}
 	}
 
@@ -261,8 +271,9 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 		"Group":               groupName,
 		"GroupName":           groupName,
 		"ThreadRoot":          rootOverview,
-		"TreeHTML":            treeResponse.Tree.GetThreadTreeHTMLFor(groupName, showHidden),
-		"TreeStats":           treeResponse.Tree.GetTreeStats(),
+		"RootHidden":          rootHidden, // placeholder root: no Message-ID, author, date or article link
+		"TreeHTML":            tree.GetThreadTreeHTMLFor(groupName, showHidden),
+		"TreeStats":           tree.GetTreeStats(),
 		"BuildTime":           treeResponse.BuildTime,
 		"CacheHit":            treeResponse.CacheHit,
 	}
@@ -274,4 +285,96 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 func (s *WebServer) threadTreeDemoPage(c *gin.Context) {
 	// Serve the static demo HTML file
 	c.File("./web/templates/thread-tree-demo.html")
+}
+
+// Subject of the placeholder overview treeOverviewFiller gives a node whose article row exists
+// but whose overview could not be read.
+const treeOverviewUnavailable = "[overview not available]"
+
+// treeOverviewFiller returns the function treeForViewer uses for a node without an overview
+// (GetThreadTreeView logs and skips an overview it cannot load; the HTML tree then shows
+// "Unknown Subject" and cannot tell a hidden article from a visible one). It reads the overview
+// once more; when that fails for another reason than a missing row, it reads the spam and hide
+// counters (GetArticleFlags, as the article routes do) and returns a placeholder that carries
+// them. So a hidden article stays hidden for non-admins even when its overview does not load,
+// and a visible placeholder links to an article page that exists, where an admin can hide it
+// as usual. A missing row (expired or never stored) returns nil: the node keeps "Unknown
+// Subject" and its link answers the article page's "Article #N not found in group" message.
+// With enabled false (the API's include_overview=false) the filler is nil.
+func (s *WebServer) treeOverviewFiller(groupDB *database.GroupDB, enabled bool) func(articleNum int64) *models.Overview {
+	if !enabled || groupDB == nil {
+		return nil
+	}
+	return func(articleNum int64) *models.Overview {
+		ov, err := s.DB.GetOverviewByArticleNum(groupDB, articleNum)
+		if err == nil {
+			return ov
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		spam, hide, ferr := s.DB.GetArticleFlags(groupDB, articleNum)
+		if ferr != nil {
+			if !errors.Is(ferr, sql.ErrNoRows) {
+				log.Printf("[WEB]: thread tree: overview and flags of article %d unavailable: %v / %v", articleNum, err, ferr)
+			}
+			return nil
+		}
+		return &models.Overview{ArticleNum: articleNum, Subject: treeOverviewUnavailable, Spam: spam, Hide: hide}
+	}
+}
+
+// treeForViewer returns a deep copy of tree (nodes and NodeMap) for one response; tree is never
+// modified (defensive: there is no in-memory ThreadTree cache today, but callers need not care). A node without an overview gets
+// fill(articleNum) when fill is set. With redact, a node whose article is hidden (Hide > 0) has
+// no overview (as ThreadTree.RedactedCopy). With displayFrom, every remaining overview is a copy
+// whose FromHeader is models.DisplayFrom of the raw header: the author name the HTML tree shows,
+// without the address.
+func treeForViewer(tree *database.ThreadTree, fill func(articleNum int64) *models.Overview, redact, displayFrom bool) *database.ThreadTree {
+	if tree == nil {
+		return nil
+	}
+	cp := *tree
+	copies := make(map[*database.TreeNode]*database.TreeNode, len(tree.NodeMap)+1)
+	var copyNode func(node *database.TreeNode) *database.TreeNode
+	copyNode = func(node *database.TreeNode) *database.TreeNode {
+		if node == nil {
+			return nil
+		}
+		if done, ok := copies[node]; ok {
+			return done
+		}
+		n := *node
+		copies[node] = &n
+		if node.ParentArticle != nil {
+			parent := *node.ParentArticle
+			n.ParentArticle = &parent
+		}
+		if n.Overview == nil && fill != nil {
+			n.Overview = fill(node.ArticleNum)
+		}
+		if redact && n.Overview != nil && n.Overview.Hide > 0 {
+			n.Overview = nil
+		}
+		if displayFrom && n.Overview != nil {
+			ov := *n.Overview
+			ov.FromHeader = models.DisplayFrom(ov.FromHeader)
+			n.Overview = &ov
+		}
+		if node.Children != nil {
+			n.Children = make([]*database.TreeNode, len(node.Children))
+			for i, child := range node.Children {
+				n.Children[i] = copyNode(child)
+			}
+		}
+		return &n
+	}
+	cp.RootNode = copyNode(tree.RootNode)
+	if tree.NodeMap != nil {
+		cp.NodeMap = make(map[int64]*database.TreeNode, len(tree.NodeMap))
+		for num, node := range tree.NodeMap {
+			cp.NodeMap[num] = copyNode(node)
+		}
+	}
+	return &cp
 }

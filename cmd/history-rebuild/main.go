@@ -615,7 +615,7 @@ func resolveTrimGroup(db *database.Database, dataDir string, groupID int64, cach
 	return info, nil
 }
 
-// articleExistsInGroup is like GroupDB.ExistsMsgIdInArticlesDB, but returns query errors
+// articleExistsInGroup is like GroupDB.LookupMsgIdInArticlesDB (the old ExistsMsgIdInArticlesDB is gone), but returns query errors
 // instead of reporting them as "not found" (trim must not remove entries on a DB error).
 func articleExistsInGroup(db *database.Database, groupName, messageID string) (bool, error) {
 	groupDB, err := db.GetGroupDB(groupName)

@@ -19,7 +19,13 @@ gofmt -l <each touched dir>          # must print nothing
 go vet ./...                          # clean baseline, ~2s
 go build ./...
 go test -race ./internal/database/... ./internal/web/... ./internal/history/... ./internal/nntp/... \
-              ./internal/processor/... ./cmd/expire-news/... ./cmd/history-rebuild/... ./cmd/nntp-server/...
+              ./internal/processor/... ./internal/models/... ./internal/cache/... ./internal/common/... \
+              ./internal/postmgr/... ./cmd/expire-news/... ./cmd/history-rebuild/... ./cmd/nntp-server/... \
+              ./cmd/nntp-fetcher/... ./cmd/nntp-analyze/... ./cmd/recover-db/... ./cmd/tcp2tor/... ./cmd/web/... \
+              ./cmd/post-queue/... ./cmd/import-flat-files/... ./cmd/rslight-importer/... ./cmd/fix-references/... \
+              ./cmd/fix-thread-activity/... ./cmd/audit-web-posts/... ./cmd/extract_hierarchies/... \
+              ./cmd/merge-active/... ./cmd/merge-descriptions/... ./cmd/nntp-transfer/... ./cmd/usermgr/...
+# the same list runs in CI (.github/workflows/tests.yml); PUGLEAF_TEST_DEADLINE (default 60s) bounds the test hang guards
 ```
 - `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` lists the open NNTP known bugs (fails on purpose);
   a fixed bug makes its `knownBug` marker fail until the marker is removed (see `docs/audit/README.md`).

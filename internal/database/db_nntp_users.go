@@ -59,7 +59,7 @@ func (db *Database) GetNNTPUserByID(id int) (*models.NNTPUser, error) {
 }
 
 // GetNNTPUserByWebUserID retrieves the active NNTP user mapped to a web user ID. Several
-// rows may share one mapping (no UNIQUE constraint): the one with the lowest id wins.
+// rows may share one mapping while inactive (migration 0031 allows one ACTIVE account per web user): the one with the lowest id wins.
 // webUserID <= 0 means "no web user" and returns sql.ErrNoRows.
 func (db *Database) GetNNTPUserByWebUserID(webUserID int64) (*models.NNTPUser, error) {
 	if webUserID <= 0 {

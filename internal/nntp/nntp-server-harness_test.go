@@ -754,11 +754,6 @@ func hChildOutput(s string, n int) string {
 	return hTail(s, n)
 }
 
-// hIsErrNotFound reports whether err wraps ErrArticleNotFound.
-func hIsErrNotFound(err error) bool {
-	return errors.Is(err, ErrArticleNotFound)
-}
-
 // ---------------------------------------------------------------------------
 // Self-tests
 

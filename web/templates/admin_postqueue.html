@@ -21,6 +21,7 @@
                               <select name="status_filter" class="form-select me-2">
                                   <option value="">All Status</option>
                                   <option value="pending" {{if eq .StatusFilter "pending"}}selected{{end}}>Pending</option>
+                                  <option value="parked" {{if eq .StatusFilter "parked"}}selected{{end}}>Parked</option>
                                   <option value="processing" {{if eq .StatusFilter "processing"}}selected{{end}}>Processing</option>
                                   <option value="completed" {{if eq .StatusFilter "completed"}}selected{{end}}>Completed</option>
                               </select>
@@ -49,6 +50,8 @@
                                   <th>Newsgroup</th>
                                   <th>Message ID</th>
                                   <th>Status</th>
+                                  <th>Attempts</th>
+                                  <th>Last error</th>
                                   <th>Actions</th>
                               </tr>
                           </thead>
@@ -72,12 +75,27 @@
                                       <span class="badge bg-secondary">Processing</span>
                                       {{else if eq .Status "completed"}}
                                       <span class="badge bg-success">Completed</span>
+                                      {{else if eq .Status "parked"}}
+                                      <span class="badge bg-danger" title="Attempts reached PostQueueMaxAttempts: not posted until retried">Parked</span>
                                       {{else}}
                                       <span class="badge bg-light text-dark">{{.Status}}</span>
                                       {{end}}
                                   </td>
+                                  <td><small>{{.Attempts}}</small></td>
+                                  <td>
+                                      {{if .LastError}}<small class="text-break" title="{{.LastError}}">{{.LastError}}</small>{{else}}<small class="text-muted">-</small>{{end}}
+                                  </td>
                                   <td>
                                       <div class="btn-group" role="group">
+                                          {{if and (ne .Status "processing") (ne .Status "completed") (or (eq .Status "parked") (gt .Attempts 0))}}
+                                          <!-- Retry: reset attempts and last error -->
+                                          <form method="POST" action="/admin/postqueue/retry" class="d-inline">
+                                              <input type="hidden" name="id" value="{{.ID}}">
+                                              <button type="submit" class="btn btn-sm btn-outline-warning" title="Retry">
+                                                  <i class="bi bi-arrow-repeat"></i>
+                                              </button>
+                                          </form>
+                                          {{end}}
                                           {{if ne .Status "processing"}}
                                           <!-- Delete -->
                                           <form method="POST" action="/admin/postqueue/delete" class="d-inline">
@@ -119,25 +137,31 @@
                               <div class="card-body">
                                   <h6 class="card-title">📊 Queue Statistics</h6>
                                   <div class="row">
-                                      <div class="col-md-3">
+                                      <div class="col">
                                           <div class="text-center">
                                               <div class="h5 mb-0 text-primary">{{.QueueStats.total}}</div>
                                               <small class="text-muted">Total</small>
                                           </div>
                                       </div>
-                                      <div class="col-md-3">
+                                      <div class="col">
                                           <div class="text-center">
                                               <div class="h5 mb-0 text-secondary">{{.QueueStats.pending}}</div>
                                               <small class="text-muted">Pending</small>
                                           </div>
                                       </div>
-                                      <div class="col-md-3">
+                                      <div class="col">
+                                          <div class="text-center">
+                                              <div class="h5 mb-0 text-danger">{{.QueueStats.parked}}</div>
+                                              <small class="text-muted">Parked</small>
+                                          </div>
+                                      </div>
+                                      <div class="col">
                                           <div class="text-center">
                                               <div class="h5 mb-0 text-warning">{{.QueueStats.processing}}</div>
                                               <small class="text-muted">Processing</small>
                                           </div>
                                       </div>
-                                      <div class="col-md-3">
+                                      <div class="col">
                                           <div class="text-center">
                                               <div class="h5 mb-0 text-success">{{.QueueStats.completed}}</div>
                                               <small class="text-muted">Completed</small>

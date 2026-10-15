@@ -53,10 +53,9 @@ var (
 
 	// Global Batch Queue (proc_DLArt.go)
 	Batch = &BatchQueue{
-		Check:       make(chan *string, 1),                      // check newsgroups
-		TodoQ:       make(chan *nntp.GroupInfo, DownloadMaxPar), // todo newsgroups
-		GetQ:        make(chan *BatchItem, 128),                 // get articles
-		GroupQueues: make(map[string]*GroupBatch),               // per-newsgroup queues
+		Check: make(chan *string, 1),                      // check newsgroups
+		TodoQ: make(chan *nntp.GroupInfo, DownloadMaxPar), // todo newsgroups
+		GetQ:  make(chan *BatchItem, 128),                 // get articles
 	}
 )
 

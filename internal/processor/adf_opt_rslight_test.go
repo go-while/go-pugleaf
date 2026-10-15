@@ -98,7 +98,7 @@ func TestAdfOptRslightImportFilesErrors(t *testing.T) {
 				files = append(files, fmt.Sprintf("g%02d-articles.db3", i))
 			}
 			var calls, running, maxRunning atomic.Int64
-			failed, err := importLegacyFiles(files, threads, func(file string) error {
+			failed, err := importLegacyFiles(files, threads, nil, func(file string) error {
 				calls.Add(1)
 				n := running.Add(1)
 				defer running.Add(-1)
@@ -126,8 +126,11 @@ func TestAdfOptRslightImportFilesErrors(t *testing.T) {
 			if !errors.Is(err, errBoom) {
 				t.Errorf("err = %v, want it to wrap errBoom", err)
 			}
-			if err != nil && !strings.Contains(err.Error(), "g39-articles.db3") {
-				t.Errorf("err does not name a failed file: %v", err)
+			// the error names the first 5 failed files in file order and counts the rest
+			// (followup-leftovers fl-ops-tools)
+			if err != nil && (!strings.Contains(err.Error(), "g00-articles.db3") || !strings.Contains(err.Error(), "g12-articles.db3") ||
+				strings.Contains(err.Error(), "g15-articles.db3") || !strings.Contains(err.Error(), "and 9 more failed files")) {
+				t.Errorf("err does not name the first 5 failed files plus a count: %v", err)
 			}
 			limit := int64(threads)
 			if limit < 1 {
@@ -138,7 +141,7 @@ func TestAdfOptRslightImportFilesErrors(t *testing.T) {
 			}
 		})
 	}
-	failed, err := importLegacyFiles([]string{"a", "b"}, 2, func(string) error { return nil })
+	failed, err := importLegacyFiles([]string{"a", "b"}, 2, nil, func(string) error { return nil })
 	if failed != 0 || err != nil {
 		t.Errorf("all ok: failed=%d err=%v, want 0 and nil", failed, err)
 	}
@@ -209,7 +212,7 @@ func TestAdfOptRslightImportAllNothingToImport(t *testing.T) {
 	t.Cleanup(func() { LegacyImportStartDelay = saved })
 
 	leg := &LegacyImporter{}
-	if err := leg.ImportAllSQLiteDatabases(t.TempDir(), 2); err == nil {
+	if err := leg.ImportAllSQLiteDatabases(t.TempDir(), 2, nil); err == nil {
 		t.Errorf("empty spool: err = nil, want an error")
 	}
 
@@ -218,7 +221,7 @@ func TestAdfOptRslightImportAllNothingToImport(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "bad name-articles.db3"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := leg.ImportAllSQLiteDatabases(dir, 2)
+	err := leg.ImportAllSQLiteDatabases(dir, 2, nil)
 	if err == nil || !strings.Contains(err.Error(), "skipped") {
 		t.Errorf("all files skipped: err = %v, want a skipped error", err)
 	}

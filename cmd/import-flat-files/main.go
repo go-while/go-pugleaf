@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -33,6 +34,13 @@ const (
 	// Worker count for parallel processing
 	DEFAULT_WORKERS = 32
 )
+
+// appVersion is set by build_import_flat-files.sh (-ldflags "-X main.appVersion=...").
+var appVersion = "-unset-"
+
+// errDryRunNoDB is returned by DBManager.GetDB under -dry-run: a dry run opens no
+// database file.
+var errDryRunNoDB = errors.New("-dry-run: no database is opened")
 
 var (
 	headPath = flag.String("head", "/mnt/xfshead", "Path to head files directory")
@@ -103,6 +111,9 @@ func (dm *DBManager) ensureTable(db *sql.DB, dbName, tableName string) error {
 }
 
 func (dm *DBManager) GetDB(dbName string) (*sql.DB, error) {
+	if *dryRun {
+		return nil, errDryRunNoDB // never create or open a database file in a dry run
+	}
 	dm.mutex.RLock()
 	if db, exists := dm.dbConnections[dbName]; exists {
 		dm.mutex.RUnlock()
@@ -459,8 +470,9 @@ func worker(id int, articles <-chan *Article, dbManager *DBManager, wg *sync.Wai
 
 		dbName := getDBName(article)
 
-		// In update mode, check if article already exists
-		if *update {
+		// In update mode, check if article already exists (not in a dry run: that
+		// would open the database)
+		if *update && !*dryRun {
 			exists, err := dbManager.ArticleExists(article)
 			if err != nil {
 				log.Printf("Worker %d: Error checking if article exists %s: %v", id, article.MessageIDHash, err)
@@ -501,13 +513,14 @@ func worker(id int, articles <-chan *Article, dbManager *DBManager, wg *sync.Wai
 			if err := processBatch(); err != nil { // counts its own errors and empties the batch
 				log.Printf("Worker %d: Error processing batch: %v", id, err)
 			}
-
-			// Get new database connection
-			currentDB, err = dbManager.GetDB(dbName)
-			if err != nil {
-				log.Printf("Worker %d: Error getting database %s: %v", id, dbName, err)
-				atomic.AddInt64(&totalErrors, 1)
-				continue
+			// Get new database connection (a dry run opens none: processBatch only counts)
+			if !*dryRun {
+				currentDB, err = dbManager.GetDB(dbName)
+				if err != nil {
+					log.Printf("Worker %d: Error getting database %s: %v", id, dbName, err)
+					atomic.AddInt64(&totalErrors, 1)
+					continue
+				}
 			}
 			currentDBName = dbName
 		}
@@ -578,7 +591,7 @@ func main() {
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	log.Printf("Starting flat file import tool")
+	log.Printf("Starting flat file import tool (version: %s)", appVersion)
 	log.Printf("Head path: %s", *headPath)
 	log.Printf("Body path: %s", *bodyPath)
 	log.Printf("DB path: %s", *dbPath)
@@ -586,6 +599,9 @@ func main() {
 	log.Printf("Batch size: %d", BATCH_SIZE)
 	log.Printf("Dry run: %t", *dryRun)
 	log.Printf("Update mode: %t", *update)
+	if *dryRun && *update {
+		log.Printf("Dry run: -update does not check existing articles (no database is opened)")
+	}
 
 	// Validate paths
 	if _, err := os.Stat(*headPath); os.IsNotExist(err) {

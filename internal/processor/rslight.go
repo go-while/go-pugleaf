@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/database"
@@ -25,6 +26,15 @@ var error_empty_article = fmt.Errorf("empty article") // error for empty article
 // errLegacyDuplicate is returned by importLegacyArticle when the article is already known.
 // The caller counts it as a skipped duplicate, not as a failure.
 var errLegacyDuplicate = errors.New("duplicate article")
+
+// ErrLegacyImportStopped is returned (wrapped) by ImportAllSQLiteDatabases when its stop
+// channel was closed during the start delay or the import: no new file is started, the
+// files in progress stop after their current article.
+var ErrLegacyImportStopped = errors.New("legacy import stopped")
+
+// legacyErrSummaryMax is the number of failed files the import error names; the
+// rest are only counted (every failure is logged as it happens).
+const legacyErrSummaryMax = 5
 
 // LegacyImportStartDelay is the pause between validating the spool files and starting the
 // article import (time to cancel when only the newsgroups were wanted). Tests set it to 0.
@@ -43,6 +53,9 @@ type LegacyImporter struct {
 	groupsDone   uint64 // number of groups done
 	skippedFiles uint64 // number of skipped files
 	mux          sync.Mutex
+	// stop is the cancellation of the running ImportAllSQLiteDatabases (nil: none);
+	// set before the import goroutines start, read by importSQLiteArticlesWith.
+	stop <-chan struct{}
 }
 
 // MenuConfEntry represents a line from menu.conf
@@ -404,9 +417,12 @@ func (leg *LegacyImporter) importLegacyArticle(legacyArticle *LegacyArticle) err
 	return nil
 }
 
-// ImportAllSQLiteDatabases imports from all SQLite databases in the legacy directory
-func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads int) error {
+// ImportAllSQLiteDatabases imports from all SQLite databases in the legacy directory.
+// Closing stop (nil: never) during the start delay or the import ends it early with an
+// error that wraps ErrLegacyImportStopped.
+func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads int, stop <-chan struct{}) error {
 	log.Printf("[RSLIGHT-IMPORT] Starting from dir: '%s'", sqliteDir)
+	leg.stop = stop
 
 	// Find all .db3 files
 	files, err := filepath.Glob(filepath.Join(sqliteDir, "*-articles.db3"))
@@ -482,13 +498,11 @@ func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads in
 		}
 		return fmt.Errorf("all %d SQLite database files in %s were skipped", len(files), sqliteDir)
 	}
-	if LegacyImportStartDelay > 0 {
-		log.Printf("[RSLIGHT-IMPORT] Sleeping for %v before import. You can cancel here with Ctrl+C if you only wanted to get the newsgroups added.", LegacyImportStartDelay)
-		log.Printf("[RSLIGHT-IMPORT] Import of legacy articles starts in %v!", LegacyImportStartDelay)
-		time.Sleep(LegacyImportStartDelay)
+	if err := waitLegacyStartDelay(LegacyImportStartDelay, stop); err != nil {
+		return err
 	}
 	log.Printf("[RSLIGHT-IMPORT] Starting import of %d SQLite database files with %d threads", len(workFiles), threads)
-	failed, importErr := importLegacyFiles(workFiles, threads, leg.ImportSQLiteArticles)
+	failed, importErr := importLegacyFiles(workFiles, threads, stop, leg.ImportSQLiteArticles)
 	log.Printf("[RSLIGHT-IMPORT] internal wg.Wait() released, %d of %d files failed", failed, len(workFiles))
 	leg.mux.Lock()
 	defer leg.mux.Unlock()
@@ -502,44 +516,112 @@ func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads in
 	log.Printf("[RSLIGHT-IMPORT] Total Imported: %d articles, Failed: %d articles, Empty: %d, Duplicates: %d, GroupsDone: %d, FailedFiles: %d, SkippedFiles: %d  / %d",
 		leg.imported, leg.skipped, leg.skippedEmpty, leg.duplicates, leg.groupsDone, failed, leg.skippedFiles, len(files))
 	if importErr != nil {
+		if failed == 0 { // only stopped
+			return importErr
+		}
 		return fmt.Errorf("%d of %d SQLite database files failed: %w", failed, len(workFiles), importErr)
 	}
 	return nil
 }
 
+// waitLegacyStartDelay waits delay (≤ 0: not at all) before the article import; a
+// closed stop ends the wait with an error that wraps ErrLegacyImportStopped.
+func waitLegacyStartDelay(delay time.Duration, stop <-chan struct{}) error {
+	if delay <= 0 {
+		return nil
+	}
+	log.Printf("[RSLIGHT-IMPORT] Sleeping for %v before import. You can cancel here with Ctrl+C if you only wanted to get the newsgroups added.", delay)
+	log.Printf("[RSLIGHT-IMPORT] Import of legacy articles starts in %v!", delay)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-stop:
+		log.Printf("[RSLIGHT-IMPORT] Stopped during the start delay: no article was imported")
+		return fmt.Errorf("before the article import: %w", ErrLegacyImportStopped)
+	case <-timer.C:
+		return nil
+	}
+}
+
 // importLegacyFiles runs importFn for every file, at most threads files at a time.
-// Every worker keeps its own error; failures are collected under a mutex and returned
-// joined, together with the number of failed files.
-func importLegacyFiles(files []string, threads int, importFn func(file string) error) (int, error) {
+// Every worker keeps its own error; the number of failed files is returned with an
+// error that names the first legacyErrSummaryMax of them in file order
+// (summarizeLegacyErrs). Once stop is closed no new file is started; the error then
+// also wraps ErrLegacyImportStopped (a file that returned it is not counted as failed).
+func importLegacyFiles(files []string, threads int, stop <-chan struct{}, importFn func(file string) error) (int, error) {
 	if threads < 1 {
 		threads = 1
 	}
 	var (
-		wg   sync.WaitGroup
-		mu   sync.Mutex
-		errs []error
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		errs    = make([]error, len(files)) // by file index: the summary keeps file order
+		stopped atomic.Bool
 	)
 	slots := make(chan struct{}, threads) // limits concurrency
-	for _, file := range files {
-		slots <- struct{}{} // get slot
+launch:
+	for i, file := range files {
+		select {
+		case <-stop:
+			stopped.Store(true)
+			break launch
+		case slots <- struct{}{}: // get slot
+		}
+		// both cases of the select above can be ready: check stop again with the slot
+		// held, so no file starts after the stop was seen
+		select {
+		case <-stop:
+			<-slots
+			stopped.Store(true)
+			break launch
+		default:
+		}
 		wg.Add(1)
 		// for every database file we want to import run a dedicated go routine
-		go func(file string) {
+		go func(i int, file string) {
 			defer func() {
 				<-slots // return slot
 				wg.Done()
 			}()
-			if err := importFn(file); err != nil {
+			err := importFn(file)
+			switch {
+			case err == nil:
+			case errors.Is(err, ErrLegacyImportStopped):
+				stopped.Store(true)
+			default:
 				log.Printf("[RSLIGHT-IMPORT] Warning: rslight-import failed file '%s': %v", file, err)
 				mu.Lock()
-				errs = append(errs, fmt.Errorf("file '%s': %w", file, err))
+				errs[i] = fmt.Errorf("file '%s': %w", file, err)
 				mu.Unlock()
 			}
-		}(file)
+		}(i, file)
 	}
 	log.Printf("[RSLIGHT-IMPORT] Importing now! wait on internal wg.Wait()")
 	wg.Wait()
-	return len(errs), errors.Join(errs...)
+	var failed []error
+	for _, err := range errs {
+		if err != nil {
+			failed = append(failed, err)
+		}
+	}
+	err := summarizeLegacyErrs(failed)
+	if stopped.Load() {
+		log.Printf("[RSLIGHT-IMPORT] Import stopped: no further file was started")
+		err = errors.Join(ErrLegacyImportStopped, err)
+	}
+	return len(failed), err
+}
+
+// summarizeLegacyErrs joins at most legacyErrSummaryMax errors and adds a line with
+// the number of the others (nil for none).
+func summarizeLegacyErrs(errs []error) error {
+	if len(errs) <= legacyErrSummaryMax {
+		return errors.Join(errs...)
+	}
+	shown := make([]error, 0, legacyErrSummaryMax+1)
+	shown = append(shown, errs[:legacyErrSummaryMax]...)
+	shown = append(shown, fmt.Errorf("... and %d more failed files (logged above)", len(errs)-legacyErrSummaryMax))
+	return errors.Join(shown...)
 }
 
 // GetSectionsSummary returns a summary of imported sections

@@ -12,8 +12,8 @@ import (
 	"github.com/go-while/go-pugleaf/internal/database"
 )
 
-// adfXSSBody is a body a Usenet poster controls: raw markup plus entity-encoded markup that
-// ConvertToUTF8 decodes into markup.
+// adfXSSBody is a body a Usenet poster controls: raw markup plus entity-encoded markup. Since
+// DecodeBodyText (plan followup-leftovers) a text/plain body keeps its entities as text.
 const adfXSSBody = "hello <img src=x onerror=alert(1)>\n&lt;svg onload=alert(2)&gt;"
 
 // adfXSSWantCSP is the policy of decision D1 (audit-delta-fixes plan).
@@ -82,7 +82,7 @@ func TestAdfXSSPreviewIsPlainJSON(t *testing.T) {
 	if resp.Group != group || resp.ArticleNum != 1 {
 		t.Fatalf("group/article_num = %q/%d, want %q/1", resp.Group, resp.ArticleNum, group)
 	}
-	for _, want := range []string{"<svg onload=alert(2)>", "<img src=x onerror=alert(1)>"} {
+	for _, want := range []string{"&lt;svg onload=alert(2)&gt;", "<img src=x onerror=alert(1)>"} {
 		if !strings.Contains(resp.Body, want) {
 			t.Fatalf("preview body %q does not contain %q as text", resp.Body, want)
 		}

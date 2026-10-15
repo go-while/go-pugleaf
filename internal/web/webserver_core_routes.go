@@ -501,6 +501,7 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/crons/stop", s.adminStopCronJob)
 	s.Router.GET("/admin/cronjobs/viewlog/:id", s.adminViewCronJobLog)
 	s.Router.POST("/admin/postqueue/delete", s.adminDeletePostQueueEntry)
+	s.Router.POST("/admin/postqueue/retry", s.adminRetryPostQueueEntry)
 	// Legacy/admin routes (high priority - must come before dynamic routes)
 	s.Router.GET("/", s.homePage)
 	s.Router.GET("/groups", s.groupsPage)                                                // groups listing

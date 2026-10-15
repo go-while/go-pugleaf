@@ -1,9 +1,15 @@
 package database
 
 import (
+	"database/sql"
+	"errors"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-while/go-pugleaf/internal/config"
 )
 
 // adfOptPostQueueGroup inserts an active newsgroup for the post_queue foreign key and removes
@@ -164,8 +170,8 @@ func TestAdfOptPostQueueLifecycle(t *testing.T) {
 	if stats["total"] < 3 || stats["completed"] < 1 || stats["pending"] < 2 {
 		t.Errorf("GetPostQueueStats = %v, want total >= 3, completed >= 1, pending >= 2", stats)
 	}
-	if stats["total"] != stats["pending"]+stats["processing"]+stats["completed"] {
-		t.Errorf("GetPostQueueStats = %v: total != pending+processing+completed", stats)
+	if stats["total"] != stats["pending"]+stats["parked"]+stats["processing"]+stats["completed"] {
+		t.Errorf("GetPostQueueStats = %v: total != pending+parked+processing+completed", stats)
 	}
 
 	// cleanup of posted rows and the limit
@@ -318,5 +324,294 @@ func TestAdfOptPostQueueSelectRetry(t *testing.T) {
 	}
 	if err := db.ResetAllPostQueueProcessing(); err != nil {
 		t.Fatalf("ResetAllPostQueueProcessing: %v", err)
+	}
+}
+
+// flPqSetMax sets PostQueueMaxAttempts to v and restores "5" (the migration default) when the
+// test ends: the test DB is shared by every test of the package.
+func flPqSetMax(t *testing.T, v string) {
+	t.Helper()
+	db := w0DB(t)
+	if err := db.SetConfigValue(config.CFG_KEY_POSTQUEUE_MAXATTEMPTS, v); err != nil {
+		t.Fatalf("SetConfigValue(%s, %q): %v", config.CFG_KEY_POSTQUEUE_MAXATTEMPTS, v, err)
+	}
+	t.Cleanup(func() {
+		if err := db.SetConfigValue(config.CFG_KEY_POSTQUEUE_MAXATTEMPTS, strconv.Itoa(DefaultPostQueueMaxAttempts)); err != nil {
+			t.Errorf("restore %s: %v", config.CFG_KEY_POSTQUEUE_MAXATTEMPTS, err)
+		}
+	})
+}
+
+// flPqRow returns attempts and last_error ("" for NULL) of post_queue row id.
+func flPqRow(t *testing.T, id int64) (attempts int, lastError string) {
+	t.Helper()
+	if err := RetryableQueryRowScan(w0DB(t).GetMainDB(),
+		"SELECT attempts, COALESCE(last_error, '') FROM post_queue WHERE id = ?", []interface{}{id}, &attempts, &lastError); err != nil {
+		t.Fatalf("attempts of post_queue row %d: %v", id, err)
+	}
+	return attempts, lastError
+}
+
+// flPqSelect runs GetPendingPostQueueEntries and returns the entry with id, or nil when it was
+// not selected. Every other selected entry of groupID is a test failure.
+func flPqSelect(t *testing.T, groupID, id int64) *PostQueueEntry {
+	t.Helper()
+	entries, err := w0DB(t).GetPendingPostQueueEntries(1000)
+	if err != nil {
+		t.Fatalf("GetPendingPostQueueEntries: %v", err)
+	}
+	var found *PostQueueEntry
+	for i := range entries {
+		if entries[i].NewsgroupID != groupID {
+			continue
+		}
+		if entries[i].ID != id {
+			t.Errorf("unexpected entry %d selected", entries[i].ID)
+			continue
+		}
+		found = &entries[i]
+	}
+	return found
+}
+
+// flPqStatus returns the admin status of row id (filter "" = all) or "" when it is not listed.
+func flPqStatus(t *testing.T, id int64, filter, search string) string {
+	t.Helper()
+	list, err := w0DB(t).GetAllPostQueueEntries(0, 0, filter, search)
+	if err != nil {
+		t.Fatalf("GetAllPostQueueEntries(%q): %v", filter, err)
+	}
+	for _, e := range list {
+		if e.ID == id {
+			return e.Status
+		}
+	}
+	return ""
+}
+
+// TestFlPqMigration0030Fresh: migration 0030 applies to an empty main database and adds
+// post_queue.attempts (NOT NULL DEFAULT 0), post_queue.last_error and the config key.
+func TestFlPqMigration0030Fresh(t *testing.T) {
+	shared := w0DB(t)
+	mainDB, err := sql.Open(driverNameMain, filepath.Join(t.TempDir(), "main.sq3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mainDB.Close()
+	fresh := &Database{mainDB: mainDB, dbconfig: shared.dbconfig}
+	if err := fresh.migrateMainDB(); err != nil {
+		t.Fatalf("main migrations: %v", err)
+	}
+
+	rows, err := mainDB.Query("PRAGMA table_info(post_queue)")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info: %v", err)
+	}
+	defer rows.Close()
+	type col struct {
+		typ     string
+		notNull bool
+		dflt    sql.NullString
+	}
+	cols := make(map[string]col)
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			t.Fatalf("scan table_info: %v", err)
+		}
+		cols[name] = col{typ: typ, notNull: notNull == 1, dflt: dflt}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if c, ok := cols["attempts"]; !ok {
+		t.Errorf("post_queue has no attempts column: %v", cols)
+	} else if c.typ != "INTEGER" || !c.notNull || c.dflt.String != "0" {
+		t.Errorf("attempts column = %+v, want INTEGER NOT NULL DEFAULT 0", c)
+	}
+	if c, ok := cols["last_error"]; !ok {
+		t.Errorf("post_queue has no last_error column: %v", cols)
+	} else if c.typ != "TEXT" || c.notNull {
+		t.Errorf("last_error column = %+v, want nullable TEXT", c)
+	}
+
+	var v string
+	if err := mainDB.QueryRow("SELECT value FROM config WHERE key = ?", config.CFG_KEY_POSTQUEUE_MAXATTEMPTS).Scan(&v); err != nil {
+		t.Fatalf("config %s: %v", config.CFG_KEY_POSTQUEUE_MAXATTEMPTS, err)
+	}
+	if v != "5" {
+		t.Errorf("config %s = %q, want \"5\"", config.CFG_KEY_POSTQUEUE_MAXATTEMPTS, v)
+	}
+	if got := fresh.PostQueueMaxAttempts(); got != 5 {
+		t.Errorf("PostQueueMaxAttempts on the fresh DB = %d, want 5", got)
+	}
+}
+
+// TestFlPqMaxAttempts: a missing, non-numeric or <= 0 value reads as the default 5.
+func TestFlPqMaxAttempts(t *testing.T) {
+	db := w0DB(t)
+	for _, c := range []struct {
+		v    string
+		want int
+	}{
+		{"7", 7}, {" 3 ", 3}, {"0", 5}, {"-2", 5}, {"abc", 5}, {"", 5}, {"5", 5},
+	} {
+		flPqSetMax(t, c.v)
+		if got := db.PostQueueMaxAttempts(); got != c.want {
+			t.Errorf("PostQueueMaxAttempts with %q = %d, want %d", c.v, got, c.want)
+		}
+	}
+}
+
+// TestFlPqAttemptsParkRetry: a counted failure increments attempts and returns the row to
+// pending; at PostQueueMaxAttempts the row is parked (not selected, admin status "parked");
+// an uncounted failure only stores last_error; raising the key un-parks; RetryPostQueueEntry
+// resets the counter and refuses posted and in-processing rows.
+func TestFlPqAttemptsParkRetry(t *testing.T) {
+	db := w0DB(t)
+	_, gid := adfOptPostQueueGroup(t)
+	ids := adfOptPostQueueInsert(t, gid, "flpqpark", 1)
+	id := ids[0]
+	defer func() {
+		if err := db.ResetAllPostQueueProcessing(); err != nil {
+			t.Errorf("ResetAllPostQueueProcessing: %v", err)
+		}
+	}()
+	flPqSetMax(t, "3")
+
+	for i := 1; i <= 3; i++ {
+		e := flPqSelect(t, gid, id)
+		if e == nil {
+			t.Fatalf("round %d: entry %d not selected", i, id)
+		}
+		if e.Attempts != i-1 {
+			t.Errorf("round %d: selected entry Attempts = %d, want %d", i, e.Attempts, i-1)
+		}
+		if err := db.RecordPostQueueFailure(id, "441 rejected round "+strconv.Itoa(i), true); err != nil {
+			t.Fatalf("RecordPostQueueFailure: %v", err)
+		}
+		attempts, lastErr := flPqRow(t, id)
+		if attempts != i || lastErr != "441 rejected round "+strconv.Itoa(i) {
+			t.Errorf("round %d: attempts=%d last_error=%q", i, attempts, lastErr)
+		}
+		if posted, inProc := adfOptPostQueueFlags(t, id); posted || inProc {
+			t.Errorf("round %d: posted=%v in_processing=%v, want false, false", i, posted, inProc)
+		}
+	}
+
+	// parked: not selected, status parked, counted in the parked stat
+	if e := flPqSelect(t, gid, id); e != nil {
+		t.Fatalf("parked entry %d selected (attempts %d)", id, e.Attempts)
+	}
+	if st := flPqStatus(t, id, "", "flpqpark."); st != "parked" {
+		t.Errorf("status = %q, want parked", st)
+	}
+	if st := flPqStatus(t, id, "parked", "flpqpark."); st != "parked" {
+		t.Errorf("filter parked: status %q, want parked", st)
+	}
+	if st := flPqStatus(t, id, "pending", "flpqpark."); st != "" {
+		t.Errorf("filter pending lists the parked entry (status %q)", st)
+	}
+	stats, err := db.GetPostQueueStats()
+	if err != nil {
+		t.Fatalf("GetPostQueueStats: %v", err)
+	}
+	if stats["parked"] < 1 || stats["total"] != stats["pending"]+stats["parked"]+stats["processing"]+stats["completed"] {
+		t.Errorf("GetPostQueueStats = %v, want parked >= 1 and total = the sum", stats)
+	}
+
+	// raising the key un-parks: the entry is selected again
+	flPqSetMax(t, "4")
+	if st := flPqStatus(t, id, "", "flpqpark."); st != "pending" {
+		t.Errorf("status after raising the max = %q, want pending", st)
+	}
+	if e := flPqSelect(t, gid, id); e == nil {
+		t.Fatalf("entry %d not selected after raising the max", id)
+	}
+
+	// an uncounted failure (connection error) stores last_error only
+	if err := db.RecordPostQueueFailure(id, "dial tcp: connection refused", false); err != nil {
+		t.Fatalf("RecordPostQueueFailure(uncounted): %v", err)
+	}
+	if attempts, lastErr := flPqRow(t, id); attempts != 3 || lastErr != "dial tcp: connection refused" {
+		t.Errorf("after uncounted failure: attempts=%d last_error=%q, want 3, the connection error", attempts, lastErr)
+	}
+	if _, inProc := adfOptPostQueueFlags(t, id); inProc {
+		t.Errorf("uncounted failure left in_processing set")
+	}
+
+	// a long error text is capped
+	if err := db.RecordPostQueueFailure(id, strings.Repeat("x", 3*postQueueLastErrorMax), false); err != nil {
+		t.Fatalf("RecordPostQueueFailure(long): %v", err)
+	}
+	if _, lastErr := flPqRow(t, id); len(lastErr) != postQueueLastErrorMax {
+		t.Errorf("stored last_error has %d bytes, want %d", len(lastErr), postQueueLastErrorMax)
+	}
+
+	// retry resets attempts and last_error
+	flPqSetMax(t, "3")
+	if err := db.RecordPostQueueFailure(id, "441 again", true); err != nil {
+		t.Fatal(err)
+	}
+	if st := flPqStatus(t, id, "", "flpqpark."); st != "parked" {
+		t.Fatalf("status = %q, want parked before the retry", st)
+	}
+	if err := db.RetryPostQueueEntry(id); err != nil {
+		t.Fatalf("RetryPostQueueEntry: %v", err)
+	}
+	if attempts, lastErr := flPqRow(t, id); attempts != 0 || lastErr != "" {
+		t.Errorf("after retry: attempts=%d last_error=%q, want 0, \"\"", attempts, lastErr)
+	}
+	if st := flPqStatus(t, id, "pending", "flpqpark."); st != "pending" {
+		t.Errorf("status after retry = %q, want pending", st)
+	}
+
+	// retry and delete refuse a row in processing
+	if e := flPqSelect(t, gid, id); e == nil {
+		t.Fatalf("entry %d not selected after retry", id)
+	}
+	if err := db.RetryPostQueueEntry(id); !errors.Is(err, ErrPostQueueEntryUnchanged) {
+		t.Errorf("RetryPostQueueEntry(in processing) = %v, want ErrPostQueueEntryUnchanged", err)
+	}
+	if err := db.DeletePostQueueEntry(id); !errors.Is(err, ErrPostQueueEntryUnchanged) {
+		t.Errorf("DeletePostQueueEntry(in processing) = %v, want ErrPostQueueEntryUnchanged", err)
+	}
+
+	// retry refuses a posted row
+	if err := db.MarkPostQueueAsPostedToRemote(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RetryPostQueueEntry(id); !errors.Is(err, ErrPostQueueEntryUnchanged) {
+		t.Errorf("RetryPostQueueEntry(posted) = %v, want ErrPostQueueEntryUnchanged", err)
+	}
+	if posted, _ := adfOptPostQueueFlags(t, id); !posted {
+		t.Errorf("RetryPostQueueEntry reset posted_to_remote of a posted row")
+	}
+	if err := db.RetryPostQueueEntry(-1); !errors.Is(err, ErrPostQueueEntryUnchanged) {
+		t.Errorf("RetryPostQueueEntry(unknown id) = %v, want ErrPostQueueEntryUnchanged", err)
+	}
+}
+
+// TestFlPqDeletePending: a pending (never posted) row can be deleted now; before, only posted
+// rows could, although the admin page offered the button for every row not in processing.
+func TestFlPqDeletePending(t *testing.T) {
+	db := w0DB(t)
+	_, gid := adfOptPostQueueGroup(t)
+	id := adfOptPostQueueInsert(t, gid, "flpqdelete", 1)[0]
+	if err := db.DeletePostQueueEntry(id); err != nil {
+		t.Fatalf("DeletePostQueueEntry(pending): %v", err)
+	}
+	var n int
+	if err := RetryableQueryRowScan(db.GetMainDB(), "SELECT COUNT(*) FROM post_queue WHERE id = ?", []interface{}{id}, &n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("pending row %d still there after DeletePostQueueEntry", id)
+	}
+	if err := db.DeletePostQueueEntry(id); !errors.Is(err, ErrPostQueueEntryUnchanged) {
+		t.Errorf("second DeletePostQueueEntry = %v, want ErrPostQueueEntryUnchanged", err)
 	}
 }

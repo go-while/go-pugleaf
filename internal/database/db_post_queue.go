@@ -2,11 +2,27 @@ package database
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-while/go-pugleaf/internal/config"
 )
+
+// DefaultPostQueueMaxAttempts is the PostQueueMaxAttempts used when the config key is missing,
+// not a number or <= 0 (migration 0030 inserts the key with this value).
+const DefaultPostQueueMaxAttempts = 5
+
+// postQueueLastErrorMax caps the stored last_error text (bytes).
+const postQueueLastErrorMax = 1024
+
+// ErrPostQueueEntryUnchanged is returned by DeletePostQueueEntry and RetryPostQueueEntry when
+// no row matched: the entry does not exist, is being posted right now (in_processing) or, for
+// a retry, was already posted.
+var ErrPostQueueEntryUnchanged = errors.New("post queue entry not found, in processing or already posted")
 
 // PostQueueEntry represents a record in the post_queue table
 type PostQueueEntry struct {
@@ -16,6 +32,24 @@ type PostQueueEntry struct {
 	Created        time.Time `db:"created"`
 	PostedToRemote bool      `db:"posted_to_remote"`
 	InProcessing   bool      `db:"in_processing"` // Added in migration 0017
+	Attempts       int       `db:"attempts"`      // Added in migration 0030: 441 rejections so far
+	LastError      string    `db:"last_error"`    // Added in migration 0030: last failure ("" = none)
+}
+
+// PostQueueMaxAttempts returns the config key PostQueueMaxAttempts: a row with attempts >= this
+// value is parked (not selected for posting). A missing, invalid or <= 0 value reads as
+// DefaultPostQueueMaxAttempts.
+func (d *Database) PostQueueMaxAttempts() int {
+	v, err := d.GetConfigValue(config.CFG_KEY_POSTQUEUE_MAXATTEMPTS)
+	if err != nil {
+		log.Printf("Database: Failed to read %s, using %d: %v", config.CFG_KEY_POSTQUEUE_MAXATTEMPTS, DefaultPostQueueMaxAttempts, err)
+		return DefaultPostQueueMaxAttempts
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return DefaultPostQueueMaxAttempts
+	}
+	return n
 }
 
 // InsertPostQueueEntry inserts a new entry into the post_queue table
@@ -35,14 +69,15 @@ func (d *Database) InsertPostQueueEntry(newsgroupID int64, messageID string) err
 	return nil
 }
 
-// GetPendingPostQueueEntries retrieves entries that haven't been posted to remote servers and aren't being processed
-// and marks them in_processing in the same transaction.
+// GetPendingPostQueueEntries retrieves entries that haven't been posted to remote servers, aren't being processed
+// and aren't parked (attempts < PostQueueMaxAttempts), and marks them in_processing in the same transaction.
 func (d *Database) GetPendingPostQueueEntries(limit int) ([]PostQueueEntry, error) {
+	maxAttempts := d.PostQueueMaxAttempts()
 	// Select entries that are available for processing
 	query := `
-		SELECT id, newsgroup_id, message_id, created, posted_to_remote, in_processing
+		SELECT id, newsgroup_id, message_id, created, posted_to_remote, in_processing, attempts, COALESCE(last_error, '')
 		FROM post_queue
-		WHERE posted_to_remote = 0 AND in_processing = 0
+		WHERE posted_to_remote = 0 AND in_processing = 0 AND attempts < ?
 		ORDER BY created ASC LIMIT ?
 	`
 
@@ -52,14 +87,15 @@ func (d *Database) GetPendingPostQueueEntries(limit int) ([]PostQueueEntry, erro
 		entries = nil
 		var ids []int64
 
-		rows, err := tx.Query(query, limit)
+		rows, err := tx.Query(query, maxAttempts, limit)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var entry PostQueueEntry
-			if err := rows.Scan(&entry.ID, &entry.NewsgroupID, &entry.MessageID, &entry.Created, &entry.PostedToRemote, &entry.InProcessing); err != nil {
+			if err := rows.Scan(&entry.ID, &entry.NewsgroupID, &entry.MessageID, &entry.Created, &entry.PostedToRemote, &entry.InProcessing,
+				&entry.Attempts, &entry.LastError); err != nil {
 				return err
 			}
 			entries = append(entries, entry)
@@ -113,6 +149,23 @@ func (d *Database) MarkPostQueueAsPostedToRemote(id int64) error {
 	}
 
 	//log.Printf("Database: Marked post_queue entry %d as posted to remote", id)
+	return nil
+}
+
+// RecordPostQueueFailure returns entry id to pending after a failed posting attempt and stores
+// errText as its last_error. countAttempt (every provider rejected the article with 441) also
+// increments attempts; a row reaching PostQueueMaxAttempts is parked. Connection and pool
+// errors pass countAttempt=false: they say nothing about the article.
+func (d *Database) RecordPostQueueFailure(id int64, errText string, countAttempt bool) error {
+	if len(errText) > postQueueLastErrorMax {
+		errText = strings.ToValidUTF8(errText[:postQueueLastErrorMax], "")
+	}
+	query := `UPDATE post_queue SET in_processing = 0, last_error = ?,
+		attempts = attempts + CASE WHEN ? THEN 1 ELSE 0 END WHERE id = ?`
+	if _, err := RetryableExec(d.mainDB, query, errText, countAttempt, id); err != nil {
+		log.Printf("Database: Failed to record failure of post_queue entry %d: %v", id, err)
+		return err
+	}
 	return nil
 }
 
@@ -172,11 +225,13 @@ type PostQueueEntryWithDetails struct {
 	Status    string // Computed status based on flags
 }
 
-// GetAllPostQueueEntries retrieves all post queue entries for admin display with pagination and filtering
+// GetAllPostQueueEntries retrieves all post queue entries for admin display with pagination and filtering.
+// statusFilter is "", "pending", "processing", "completed" or "parked" (pending excludes parked rows).
 func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searchTerm string) ([]*PostQueueEntryWithDetails, error) {
+	maxAttempts := d.PostQueueMaxAttempts()
 	baseQuery := `
 		SELECT pq.id, pq.newsgroup_id, COALESCE(pq.message_id, ''), pq.created, pq.posted_to_remote, pq.in_processing,
-		       ng.name as newsgroup
+		       pq.attempts, COALESCE(pq.last_error, ''), ng.name as newsgroup
 		FROM post_queue pq
 		LEFT JOIN newsgroups ng ON ng.id = pq.newsgroup_id
 	`
@@ -188,7 +243,11 @@ func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searc
 	if statusFilter != "" {
 		switch statusFilter {
 		case "pending":
-			conditions = append(conditions, "pq.posted_to_remote = 0 AND pq.in_processing = 0")
+			conditions = append(conditions, "pq.posted_to_remote = 0 AND pq.in_processing = 0 AND pq.attempts < ?")
+			args = append(args, maxAttempts)
+		case "parked":
+			conditions = append(conditions, "pq.posted_to_remote = 0 AND pq.in_processing = 0 AND pq.attempts >= ?")
+			args = append(args, maxAttempts)
 		case "processing":
 			conditions = append(conditions, "pq.in_processing = 1")
 		case "completed":
@@ -235,7 +294,7 @@ func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searc
 
 		err := rows.Scan(&entry.ID, &entry.NewsgroupID, &entry.MessageID, &entry.Created,
 			&entry.PostedToRemote, &entry.InProcessing,
-			&newsgroup)
+			&entry.Attempts, &entry.LastError, &newsgroup)
 		if err != nil {
 			log.Printf("Database: Failed to scan post queue entry: %v", err)
 			return nil, err
@@ -251,6 +310,8 @@ func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searc
 			entry.Status = "completed"
 		} else if entry.InProcessing {
 			entry.Status = "processing"
+		} else if entry.Attempts >= maxAttempts {
+			entry.Status = "parked"
 		} else {
 			entry.Status = "pending"
 		}
@@ -265,9 +326,11 @@ func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searc
 	return entries, nil
 }
 
-// GetPostQueueStats returns statistics about the post queue for admin display
+// GetPostQueueStats returns statistics about the post queue for admin display: total, pending,
+// parked, processing and completed (pending excludes parked rows).
 func (d *Database) GetPostQueueStats() (map[string]int, error) {
 	stats := make(map[string]int)
+	maxAttempts := d.PostQueueMaxAttempts()
 
 	// Get total count
 	var total int
@@ -279,11 +342,21 @@ func (d *Database) GetPostQueueStats() (map[string]int, error) {
 
 	// Get pending count
 	var pending int
-	err = RetryableQueryRowScan(d.mainDB, "SELECT COUNT(*) FROM post_queue WHERE posted_to_remote = 0 AND in_processing = 0", nil, &pending)
+	err = RetryableQueryRowScan(d.mainDB, "SELECT COUNT(*) FROM post_queue WHERE posted_to_remote = 0 AND in_processing = 0 AND attempts < ?",
+		[]interface{}{maxAttempts}, &pending)
 	if err != nil {
 		return nil, err
 	}
 	stats["pending"] = pending
+
+	// Get parked count (attempts reached PostQueueMaxAttempts)
+	var parked int
+	err = RetryableQueryRowScan(d.mainDB, "SELECT COUNT(*) FROM post_queue WHERE posted_to_remote = 0 AND in_processing = 0 AND attempts >= ?",
+		[]interface{}{maxAttempts}, &parked)
+	if err != nil {
+		return nil, err
+	}
+	stats["parked"] = parked
 
 	// Get processing count
 	var processing int
@@ -304,28 +377,48 @@ func (d *Database) GetPostQueueStats() (map[string]int, error) {
 	return stats, nil
 }
 
-// DeletePostQueueEntry deletes a post queue entry by ID
+// DeletePostQueueEntry deletes a post queue entry by ID unless it is being posted right now
+// (in_processing). It returns ErrPostQueueEntryUnchanged when no row was deleted.
 func (d *Database) DeletePostQueueEntry(id int64) error {
-	query := `DELETE FROM post_queue WHERE posted_to_remote = 1 AND id = ?`
+	query := `DELETE FROM post_queue WHERE id = ? AND in_processing = 0`
 
-	_, err := RetryableExec(d.mainDB, query, id)
+	result, err := RetryableExec(d.mainDB, query, id)
 	if err != nil {
 		log.Printf("Database: Failed to delete post queue entry %d: %v", id, err)
 		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("Database: Failed to get rows affected for delete of post queue entry %d: %v", id, err)
+		return err
+	}
+	if n == 0 {
+		return ErrPostQueueEntryUnchanged
 	}
 
 	log.Printf("Database: Deleted post queue entry %d", id)
 	return nil
 }
 
-// RetryPostQueueEntry resets a failed/completed entry to be processed again
+// RetryPostQueueEntry resets the attempt counter and last error of an entry that is neither
+// posted nor being posted, so a parked entry is selected again. It returns
+// ErrPostQueueEntryUnchanged when no row matched.
 func (d *Database) RetryPostQueueEntry(id int64) error {
-	query := `UPDATE post_queue SET posted_to_remote = 0, in_processing = 0 WHERE id = ?`
+	query := `UPDATE post_queue SET attempts = 0, last_error = NULL
+		WHERE id = ? AND posted_to_remote = 0 AND in_processing = 0`
 
-	_, err := RetryableExec(d.mainDB, query, id)
+	result, err := RetryableExec(d.mainDB, query, id)
 	if err != nil {
 		log.Printf("Database: Failed to retry post queue entry %d: %v", id, err)
 		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("Database: Failed to get rows affected for retry of post queue entry %d: %v", id, err)
+		return err
+	}
+	if n == 0 {
+		return ErrPostQueueEntryUnchanged
 	}
 
 	log.Printf("Database: Reset post queue entry %d for retry", id)

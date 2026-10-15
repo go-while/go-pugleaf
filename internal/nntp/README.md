@@ -90,7 +90,7 @@ accept loops and the local430 cleanup, `Stop` ends all of them (the caller's Wai
   unlimited); over the limit the login answers `481 Too many connections for this user`. The count
   is kept in memory per server process.
 - **local430.** A negative cache of message-ids that answered 430, so repeated lookups of a missing
-  article by many readers or peers do not hit the processor each time: TTL 60 s (enforced on every
+  article by many readers or peers do not hit the processor each time: TTL 60 s by default (`-local430ttl`; enforced on every
   check), at most 65536 entries, message-ids over 250 octets are never cached. A just-arrived
   article can therefore still answer 430 for up to 60 s unless intake calls `local430.Remove`
   (articles stored by another process, e.g. the fetcher, are not removed).

@@ -132,7 +132,9 @@ func (pool *Pool) ListNewsgroups() ([]GroupInfo, error) {
 
 // XHdrStreamed performs XHDR command and streams results through a channel
 // The channel will be closed when all results are sent or an error occurs
-// NOTE: This function takes ownership of the connection and will return it to the pool when done
+// NOTE: This function takes ownership of the connection and will return it to the pool when done.
+// It returns once the connection is taken, before the stream ends: only a failure to get a
+// connection is returned. XHdrStreamedWait returns the error of the stream itself.
 func (pool *Pool) XHdrStreamed(group string, header string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) error {
 	// Get a connection from the pool
 	client, err := pool.Get(MODE_READER_MV)
@@ -142,17 +144,37 @@ func (pool *Pool) XHdrStreamed(group string, header string, start, end int64, xh
 	}
 
 	// Handle connection cleanup in a goroutine so the function can return immediately
-	go func(client *BackendConn, group string, header string, start, end int64, resultChan chan<- HeaderLine, shutdownChan <-chan struct{}) {
-		// Use the streaming XHdr function on the client
-		if err := client.XHdrStreamed(group, header, start, end, resultChan, shutdownChan); err != nil {
-			// If there's an error, close the connection instead of returning it
-			client.ForceCloseConn()
-		} else {
-			pool.Put(client)
-		}
-	}(client, group, header, start, end, xhdrChan, shutdownChan)
+	go func() {
+		_ = pool.streamXHdr(client, group, header, start, end, xhdrChan, shutdownChan)
+	}()
 
-	return err
+	return nil
+}
+
+// XHdrStreamedWait is XHdrStreamed that returns only when the stream has ended, with the
+// stream's error: nil only when every requested range was read up to its terminating dot.
+// A cut-off stream (read error or timeout, over-long line, too many lines, 411, shutdown)
+// returns its error and the connection is closed. xhdrChan is closed in every case, so the
+// caller must read it from another goroutine.
+func (pool *Pool) XHdrStreamedWait(group string, header string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) error {
+	client, err := pool.Get(MODE_READER_MV)
+	if err != nil {
+		close(xhdrChan)
+		return fmt.Errorf("failed to get connection: %w", err)
+	}
+	return pool.streamXHdr(client, group, header, start, end, xhdrChan, shutdownChan)
+}
+
+// streamXHdr runs the XHDR stream on client (which closes xhdrChan) and gives the connection
+// back: to the pool after a complete stream, closed after any error (the response may be
+// unread).
+func (pool *Pool) streamXHdr(client *BackendConn, group string, header string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) error {
+	if err := client.XHdrStreamed(group, header, start, end, xhdrChan, shutdownChan); err != nil {
+		client.ForceCloseConn()
+		return err
+	}
+	pool.Put(client)
+	return nil
 }
 
 func (pool *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
@@ -459,6 +481,14 @@ func (pool *Pool) closeConn(client *BackendConn, lock bool) error {
 	return nil
 }
 
+// closePoolDrainWait bounds how long ClosePool waits for connections that are being closed
+// (ForceCloseConn closes asynchronously and frees the slot from its own goroutine) before it
+// reports the connections that are still counted as active.
+const closePoolDrainWait = time.Second
+
+// closePoolDrainPoll is the poll interval of that wait.
+const closePoolDrainPoll = 5 * time.Millisecond
+
 // Close closes all connections in the pool
 func (pool *Pool) ClosePool() error {
 	pool.mux.Lock()
@@ -477,31 +507,54 @@ func (pool *Pool) ClosePool() error {
 	pool.mux.Unlock()
 
 	if !allClosed {
-		// Close all connections in the pool
-	closeWait:
+		// Close the idle connections. Connections handed back with ForceCloseConn just
+		// before (workers closing their connections on exit) free their slots from their own
+		// goroutine: give them closePoolDrainWait, closing whatever lands in the idle channel
+		// meanwhile, before the remaining count is reported.
+		deadline := time.Now().Add(closePoolDrainWait)
 		for {
-			select {
-			case conn, ok := <-pool.connections:
-				if !ok {
-					break closeWait
-				}
-				if conn != nil {
-					conn.ForceCloseConn()
-				}
-			default:
-				// pass
-				break closeWait
+			pool.closeIdleConns()
+			pool.mux.RLock()
+			active := pool.activeConns
+			pool.mux.RUnlock()
+			if active <= 0 || !time.Now().Before(deadline) {
+				break
 			}
+			time.Sleep(closePoolDrainPoll)
 		}
 	}
 
 	pool.mux.Lock()
+	if !pool.chanClosed && pool.activeConns == 0 {
+		pool.chanClosed = true
+		close(pool.connections)
+	}
 	if pool.activeConns > 0 {
 		log.Printf("[NNTP-POOL] WARNING: Pool closed with positive count %d active connections remaining ?!?!", pool.activeConns)
 	}
 	log.Printf("[NNTP-POOL] Closed (%s:%d) created: %d, closed: %d, active: %d, failed: %d", pool.Backend.Host, pool.Backend.Port, pool.totalCreated, pool.totalClosed, pool.activeConns, pool.failedConns)
 	pool.mux.Unlock()
 	return nil
+}
+
+// closeIdleConns closes every connection waiting in the idle channel, synchronously:
+// ForceCloseConn would free the slot from a goroutine after ClosePool took its count, and every
+// clean run ended with a "positive count" warning for its idle connections.
+func (pool *Pool) closeIdleConns() {
+	for {
+		select {
+		case conn, ok := <-pool.connections:
+			if !ok {
+				return
+			}
+			if conn != nil {
+				conn.closing.Store(true) // never handed out again
+				_ = pool.closeConn(conn, true)
+			}
+		default:
+			return
+		}
+	}
 }
 
 // Stats returns pool statistics

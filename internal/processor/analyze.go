@@ -678,8 +678,11 @@ func (proc *Processor) getCacheFilePath(providerName string, groupName string) (
 }
 
 // analyzeProviderName returns the cache directory name of the backend: the base
-// name of Backend.Host without a ":port" suffix. Every cache function uses it, so
-// AnalyzeGroup, the cache tools and the date-range helpers agree on one key.
+// name of Backend.Host without a ":port" suffix. An IPv6 literal (bracketed, with or
+// without a port, or bare) has its colons replaced by '_' ("[2001:db8::1]:119" →
+// "2001_db8__1"); plain host names keep their historic directory name. Every cache
+// function uses it, so AnalyzeGroup, the cache tools and the date-range helpers agree
+// on one key.
 func (proc *Processor) analyzeProviderName() (string, error) {
 	if proc.Pool == nil {
 		return "", fmt.Errorf("analyze: NNTP pool is nil")
@@ -688,8 +691,21 @@ func (proc *Processor) analyzeProviderName() (string, error) {
 		return "", fmt.Errorf("analyze: NNTP pool backend is nil")
 	}
 	host := proc.Pool.Backend.Host
-	if i := strings.Index(host, ":"); i >= 0 {
-		host = host[:i]
+	switch {
+	case strings.HasPrefix(host, "["):
+		// bracketed IPv6 literal, optionally followed by ":port"
+		host = strings.TrimPrefix(host, "[")
+		if i := strings.Index(host, "]"); i >= 0 {
+			host = host[:i]
+		}
+		host = strings.ReplaceAll(host, ":", "_")
+	case strings.Count(host, ":") > 1:
+		// bare IPv6 literal (a port cannot be told apart, none is cut)
+		host = strings.ReplaceAll(host, ":", "_")
+	default:
+		if i := strings.Index(host, ":"); i >= 0 {
+			host = host[:i]
+		}
 	}
 	name := filepath.Base(host)
 	if host == "" || name == "." || name == ".." || name == string(filepath.Separator) {

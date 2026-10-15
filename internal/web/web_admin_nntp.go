@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -28,34 +29,39 @@ const (
 // web user must exist and, unless it is the account's current mapping (currentWebUserID),
 // must not own an NNTP account yet: a web user owns at most one. currentNNTPUserID is the
 // account being edited (0 on create). The returned error text is shown to the admin.
-func resolveNNTPWebMapping(s *WebServer, raw string, currentNNTPUserID int, currentWebUserID int64) (int64, error) {
+// A current mapping whose web user no longer exists (a legacy row: the user was deleted) is
+// treated as "no mapping" (0) with a notice for the admin instead of blocking the update.
+func resolveNNTPWebMapping(s *WebServer, raw string, currentNNTPUserID int, currentWebUserID int64) (id int64, notice string, err error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "0" {
-		return 0, nil
+		return 0, "", nil
 	}
-	id, err := strconv.ParseInt(raw, 10, 64)
+	id, err = strconv.ParseInt(raw, 10, 64)
 	if err != nil || id <= 0 {
-		return 0, errors.New("invalid web user ID")
+		return 0, "", errors.New("invalid web user ID")
 	}
 	if _, err := s.DB.GetUserByID(id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, errors.New("web user not found")
+			if currentWebUserID > 0 && id == currentWebUserID {
+				return 0, fmt.Sprintf("the mapped web user %d no longer exists, the mapping was removed", id), nil
+			}
+			return 0, "", errors.New("web user not found")
 		}
 		log.Printf("[WEB]: NNTP user %d: looking up web user %d: %v", currentNNTPUserID, id, err)
-		return 0, errors.New("failed to look up web user")
+		return 0, "", errors.New("failed to look up web user")
 	}
 	if id == currentWebUserID {
-		return id, nil
+		return id, "", nil
 	}
 	n, err := s.DB.CountNNTPUsersByWebUserID(id)
 	if err != nil {
 		log.Printf("[WEB]: NNTP user %d: counting NNTP accounts of web user %d: %v", currentNNTPUserID, id, err)
-		return 0, errors.New("failed to check the NNTP accounts of the web user")
+		return 0, "", errors.New("failed to check the NNTP accounts of the web user")
 	}
 	if n > 0 {
-		return 0, errors.New("web user already has an NNTP account")
+		return 0, "", errors.New("web user already has an NNTP account")
 	}
-	return id, nil
+	return id, "", nil
 }
 
 // generateRandomHex generates a random hexadecimal string of the specified length
@@ -133,7 +139,7 @@ func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
 	posting := postingStr == "on" || postingStr == "true"
 
 	// Web user mapping: empty or 0 = none (stored as NULL)
-	webUserID, err := resolveNNTPWebMapping(s, webUserIDStr, 0, 0)
+	webUserID, _, err := resolveNNTPWebMapping(s, webUserIDStr, 0, 0)
 	if err != nil {
 		session.SetError("NNTP user not created: " + err.Error())
 		c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
@@ -161,7 +167,11 @@ func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
 	err = s.DB.InsertNNTPUser(nntpUser)
 	if err != nil {
 		log.Printf("Error creating NNTP user: %v", err)
-		session.SetError("Failed to create NNTP user")
+		if database.IsWebUserMappingConflict(err) {
+			session.SetError(database.ErrWebUserHasNNTPAccount.Error())
+		} else {
+			session.SetError("Failed to create NNTP user")
+		}
 		c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 		return
 	}
@@ -236,8 +246,9 @@ func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
 	}
 
 	webUserID := nntpUser.WebUserID
+	mappingNotice := ""
 	if webUserIDGiven {
-		webUserID, err = resolveNNTPWebMapping(s, webUserIDStr, id, nntpUser.WebUserID)
+		webUserID, mappingNotice, err = resolveNNTPWebMapping(s, webUserIDStr, id, nntpUser.WebUserID)
 		if err != nil {
 			session.SetError("NNTP user not updated: " + err.Error())
 			c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
@@ -273,6 +284,8 @@ func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				session.SetError("NNTP user not found")
+			} else if errors.Is(err, database.ErrWebUserHasNNTPAccount) || database.IsWebUserMappingConflict(err) {
+				session.SetError(database.ErrWebUserHasNNTPAccount.Error())
 			} else {
 				log.Printf("[WEB]: Error updating NNTP user web mapping: %v", err)
 				session.SetError("Failed to update NNTP user web mapping")
@@ -282,7 +295,11 @@ func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
 		}
 	}
 
-	session.SetSuccess("NNTP user updated successfully")
+	if mappingNotice != "" {
+		session.SetSuccess("NNTP user updated successfully (" + mappingNotice + ")")
+	} else {
+		session.SetSuccess("NNTP user updated successfully")
+	}
 	c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 }
 
@@ -367,7 +384,11 @@ func (s *WebServer) adminToggleNNTPUser(c *gin.Context) {
 		err = s.DB.ActivateNNTPUser(id)
 		if err != nil {
 			log.Printf("Error activating NNTP user: %v", err)
-			session.SetError("Failed to activate NNTP user")
+			if database.IsWebUserMappingConflict(err) {
+				session.SetError(database.ErrWebUserHasNNTPAccount.Error())
+			} else {
+				session.SetError("Failed to activate NNTP user")
+			}
 			c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 			return
 		}
@@ -403,7 +424,11 @@ func (s *WebServer) adminEnableNNTPUser(c *gin.Context) {
 	err = s.DB.ActivateNNTPUser(id)
 	if err != nil {
 		log.Printf("Error enabling NNTP user: %v", err)
-		session.SetError("Failed to enable NNTP user")
+		if database.IsWebUserMappingConflict(err) {
+			session.SetError(database.ErrWebUserHasNNTPAccount.Error())
+		} else {
+			session.SetError("Failed to enable NNTP user")
+		}
 		c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 		return
 	}

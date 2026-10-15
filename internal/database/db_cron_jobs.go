@@ -2,6 +2,8 @@ package database
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -83,16 +85,44 @@ func (db *Database) DeleteCronJob(id int64) error {
 	return err
 }
 
-const query_ToggleCronJob = `UPDATE cron_jobs SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+// query_SetCronJobEnabled only writes when the row still has the state the caller read, so two
+// concurrent toggles cannot both flip it (check-then-write race).
+const query_SetCronJobEnabled = `UPDATE cron_jobs SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND enabled = ?`
 
-// ToggleCronJob enables or disables a cron job
+// SetCronJobEnabled sets enabled to the given state when the job is still in state from.
+// It reports false (and no error) when no row matched: the job was changed by someone else
+// in the meantime, or it no longer exists.
+func (db *Database) SetCronJobEnabled(id int64, enabled, from bool) (bool, error) {
+	res, err := RetryableExec(db.mainDB, query_SetCronJobEnabled, enabled, id, from)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
+// ErrCronJobChanged is returned by ToggleCronJob when the job's enabled state changed between
+// reading and writing it.
+var ErrCronJobChanged = errors.New("cron job was already changed")
+
+// ToggleCronJob enables or disables a cron job. The write is conditional on the state it read
+// (SetCronJobEnabled); a concurrent change returns ErrCronJobChanged.
 func (db *Database) ToggleCronJob(id int64) error {
 	cronJob, err := db.GetCronJobByID(id)
 	if err != nil {
 		return err
 	}
-	_, err = RetryableExec(db.mainDB, query_ToggleCronJob, !cronJob.Enabled, id)
-	return err
+	changed, err := db.SetCronJobEnabled(id, !cronJob.Enabled, cronJob.Enabled)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return ErrCronJobChanged
+	}
+	return nil
 }
 
 const query_UpdateCronJobRunStats = `UPDATE cron_jobs SET last_run = ?, run_count = run_count + 1 WHERE id = ?`

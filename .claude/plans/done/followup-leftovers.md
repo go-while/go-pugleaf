@@ -239,6 +239,41 @@ for f in *.sh scripts/*.sh; do bash -n "$f"; done
 5. Stress sanity: `go test -race -count=3 -cpu 1,4 ./internal/nntp/ ./internal/database/ ./internal/postmgr/` with a
    `go test` hog in parallel: zero failures (the timing rules of plan test-timing-hardening still hold).
 
+## Progress
+
+### Wave 0 + wave 1 (2026-10-15)
+- `plan-followup-leftovers` from `testing-001` @ 793d361; wave 0 docs 2f53b2b (BUGS.md deferred list, A-db-3/4 closed,
+  stale test-nntp/-download-end-date, test_embed.go.bak deleted, thread_cache README). govulncheck baseline needed a
+  rebuild of `~/go/bin/govulncheck` with go1.27.1 (user OK): 14 reachable, as the audit said.
+- fl-ci-toolchain: `worktree-agent-a90563af7d1eb79dc` (11f7801, 7ddb9d0, f8ecc3b, review fix 8460bb7), merged FIRST as
+  7c2a245; `go vet` on the merged tree clean. `go 1.26.0` (forced by x/net v0.60.0), `toolchain go1.27.2`, x/net,
+  quic-go, qpack, x/crypto, x/term, x/text, x/sys bumped; tidy dropped go-cpu-mem-profiler, gorilla/mux, x/mod,
+  x/sync, x/tools. govulncheck 14 → 0 reachable (1 module-only GO-2026-5932). tests.yml (push/PR, test + known-bugs
+  jobs, PUGLEAF_TEST_DEADLINE=120s, -timeout 1200s, the full package list incl. the five extra cmd packages),
+  release.yml pinned by SHA (current majors; v7/v8 majors exist, Node 20 retirement: leftover), `fail-fast: false`
+  was already there (D-CI1 no-op). setup-go reads only the `go` line: GOTOOLCHAIN=auto downloads 1.27.2 per job.
+- fl-postqueue: `worktree-agent-a5c80dc73763daa99` (8403f4f, review fix 5ee1a23), merge 14c3e8b. D-A done; bug found
+  on the way: the old `case 441` was unreachable (PostArticle returns the code with an error), so rejected posts
+  force-closed the connection. Review MAJOR fixed: new tests repeatable with -count>1. Behaviour: Retry no longer
+  reopens posted rows; Delete works on pending/parked rows; 440 and connection errors are transient (last_error only).
+- fl-ops-tools: `worktree-agent-afb3e2b9b751439c7` (11 commits 49ed8a8..3d885e9, review fix 062ce05), merge 148fff0.
+  Items (a)-(i) done; signals: boot-time signal → graceful stop before the server binds, second signal → fatal;
+  fix-references/fix-thread-activity second signal exits at once (TryLock); tcp2tor retries only temporary/timeout
+  Accept errors with backoff.
+- fl-web: `worktree-agent-a74c905fed0f4fc98` (141f3d0, review fix a14f770), merge 62155b7; inline c18d8de changed
+  `adf_xss_test.go` (DecodeBodyText keeps entities as text) and made `TestLo2ServerOllamaSyncTimeout` accept either
+  deadline message (it flaked twice under load on the exact net/http text). Items (1)-(11) done; Subject above 989
+  bytes is refused (not folded); interval-0 cron jobs run back to back (guarded division).
+- fl-nntp-db: `worktree-agent-aa10bf1f6429b573b` (7276487, 761fee9, 31dfaca, review fix 8eadfb8), merge bbec4f2;
+  inline c7ef828 applied the cross-file parts (nsh_auth_test creates the second account inactive, web admin and
+  nntpmgr map `ErrWebUserHasNNTPAccount`, stale comments). D-B commit barrier (`db_batch_commit.go`), D-C1 migration
+  0031 on `is_active = 1`, `XHdrStreamedWait` (old XHdrStreamed kept), ClosePool synchronous idle close, lean
+  `NNTPNewsgroupActive` re-check, `-local430ttl`, lean STAT, per-top hierarchy mutex, dead code gone.
+- Wave 2 docs 9bd4706: BUGS.md (Q4 and A-tools-5b closed), audit README govulncheck line, README Go 1.26+,
+  CLAUDE.md test list = tests.yml.
+- Merged tree 9bd4706: gofmt clean, vet (+e2e tag) and build ok, race suite over 28 package sets ok in 246 s wall
+  (no flakes), known bugs unchanged (T-nntp-article-1), govulncheck 0 reachable, all shell scripts parse.
+
 ## Open questions (defaults apply unless the user overrides at the wave-1 boundary)
 - D-CI1: `fail-fast: false` on the release build matrix (one failed platform no longer blocks the release)? default yes.
 - D-B1: on a dropped batch the fetcher holds progress back and the run reports an error (refetch next run)? default yes.
@@ -246,3 +281,46 @@ for f in *.sh scripts/*.sh; do bash -n "$f"; done
 - D-W1: section assign keeps the single-membership behaviour from O1? default yes.
 - D-O1: `-reset-progress` with a wildcard group applies the wildcard filter (instead of refusing)? default yes.
 - D-N1: `-plaintextauth` default stays `allow`? default yes (no behaviour change for existing clients).
+
+## Outcome (2026-10-15)
+- **Integration branch:** `plan-followup-leftovers` from `testing-001` @ 793d361. Not yet merged into `testing-001`
+  (user decision). Nothing pushed.
+- **Waves:** 0 inline (docs), 1 with five parallel slices (all reviewed; fl-ci-toolchain merged first), 2 inline
+  (cross-file follow-ups c7ef828, docs 9bd4706, test fixes c18d8de, acd203f: `GetProviders` NULL-safe, found by the verifier).
+- **Worktrees:** `/tank0/claude/trees/go-pugleaf/agent-{a90563af7d1eb79dc,a5c80dc73763daa99,a74c905fed0f4fc98,
+  afb3e2b9b751439c7,aa10bf1f6429b573b}` (branches `worktree-agent-<id>`); the user cleans them up.
+- **Review findings fixed before merge:** postqueue tests not repeatable with -count>1 (MAJOR); CI package list
+  widened to the full Checks list and -timeout 1200s; cmd/web boot-time signals; tcp2tor retries only temporary
+  Accept errors; web: cleanup/Clear size race, locked quote read; nntp-db: lean group re-check, test waits.
+- **Verification (verifier on 38cfefa, code 9bd4706):** gofmt/vet/build clean; race suite over the 28 CLAUDE.md
+  package patterns in 261 s wall, no flakes; flake pass -count=3 -cpu 1,4 over the new tests green; known bug
+  T-nntp-article-1 only (1.3 s); govulncheck 0 reachable (1 module-only GO-2026-5932); nine binaries built, the
+  webserver carries go1.27.2 / x/net v0.60.0; E2E: post-queue parks after 5 upstream 441s against a stub, raising
+  `PostQueueMaxAttempts` re-selects, a refused connection does not count, admin Retry resets (403 cross-origin,
+  303 same-origin), SIGINT with entries left exits 130; fetcher against a local nntp-server fetched 3 articles and
+  wrote progress only after `[BATCH-END]` (no pool warning); one-shot web modes exit through exitAfterDB with no
+  progress.db, SIGTERM during a mode exits 143, `recover-db -repair -force` prints no "Could not check threading",
+  `fix-references` SIGINT exits 130 after the current group; migrations 0030/0031 applied on a fresh root;
+  workflows parse, 12 action pins verified, the three package lists identical.
+- **Behaviour changes:** `go 1.26.0` + `toolchain go1.27.2` (Go 1.26 is now the minimum; x/net v0.60.0 forced it);
+  post-queue rows park after `PostQueueMaxAttempts` (default 5) all-provider 441s, Retry only resets unposted rows,
+  Delete works on pending/parked rows, a rejected POST no longer force-closes the connection, exit 130 only when
+  entries were left; one ACTIVE NNTP account per web user (migration 0031 repairs duplicates, lowest id wins);
+  fetcher progress is recorded only after the batch committed (dropped batch → error, refetch next run); XHDR
+  cut-off is an error; web Subject above 989 bytes is refused; preview/quote keep HTML entities as text;
+  `-reset-progress` honours a wildcard; `import-flat-files -dry-run` creates no database files; the tcp2tor
+  `-add` mode warns on a non-loopback bind; `-local430ttl` flag; group-relative NNTP commands answer 412 after
+  the group was deactivated.
+- **Leftovers / known issues:** post-queue cannot interrupt an in-flight POST (the stop flag is checked between
+  entries; a hung peer holds the run until its read times out); rows that never count (missing group/article, 440)
+  stay at the head of the queue (operator deletes them); the web server caches `PostQueueMaxAttempts` for 5 min;
+  "Processed N pending posts" counts failures; no test drives `DownloadArticles` through a dropped batch (unit
+  tests cover the barrier itself); the barrier counts per group, not per run (a concurrent crosspost producer can
+  satisfy a waiter early; narrow window); an inactive group that keeps receiving crossposts re-dirties its
+  hierarchy top on every batch; posted articles leave `high_water=0` until `-repair-watermarks` (pre-existing);
+  a range with no message-ids never advances progress (pre-existing, now logged); interval-0 cron jobs run back
+  to back; setup-go installs Go 1.26 and GOTOOLCHAIN downloads 1.27.2 per CI job (pin `go-version` or a newer
+  setup-go major if that is unwanted); newer action majors (checkout v7, setup-go v7, upload v7, download v8,
+  gh-release v3) exist; `cmd/post-queue` has no tests; nntp-server and webserver still bind all interfaces;
+  `-nntphostname` must resolve in DNS; the plan's deferred items stay: Q3, A-ops-13/14/16, Q5 nonce CSP.
+

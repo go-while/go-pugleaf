@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -60,8 +61,8 @@ func showUsageExamples() {
 	fmt.Println()
 	fmt.Println("Progress reset (sets the stored last article number of the primary provider, then exits):")
 	fmt.Println("  ./pugleaf-fetcher -group alt.test -reset-progress 1000   (next run starts at article 1001)")
-	fmt.Println("  Without -group, or with '$all' or a wildcard, it resets EVERY group in the database")
-	fmt.Println("  (the wildcard is not applied in this mode). Values <= 0 do nothing.")
+	fmt.Println("  ./pugleaf-fetcher -group 'alt.*' -reset-progress 1000   (only the groups that start with alt.)")
+	fmt.Println("  Without -group, or with '$all', it resets EVERY group in the database. Values <= 0 do nothing.")
 	fmt.Println()
 	fmt.Println("Tuning (defaults in brackets):")
 	fmt.Println("  -max-batch N           articles per group and run, clamped to 10-1000 [1000]")
@@ -100,7 +101,7 @@ func main() {
 		reuseCrossposts    = flag.Bool("reuse-crossposts", true, "copy crossposted articles already stored in another group (needs history) instead of downloading them again")
 		// Download options with date filtering
 		downloadStartDate = flag.String("download-start-date", "", "Rescan from this date (YYYY-MM-DD), ignoring the stored progress")
-		resetProgress     = flag.Int64("reset-progress", 0, "Set the stored last article number of the primary provider to N for the -group selection (empty/$all/wildcard: every group in the database) and exit; 0 = off")
+		resetProgress     = flag.Int64("reset-progress", 0, "Set the stored last article number of the primary provider to N for the -group selection (a name, 'prefix.*' = the groups in the database with that prefix, empty/$all = every group in the database) and exit; 0 = off")
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
 	)
 	flag.Parse()
@@ -121,6 +122,9 @@ func main() {
 		downloadStart = t
 	}
 	if *updateList != "" {
+		// same signal handling as the fetch path: a signal stops the run between groups,
+		// UpdateNewsgroupList returns and its database is shut down
+		startFetcherSignalHandler()
 		// UpdateNewsgroupList closes its database before it returns
 		if err := UpdateNewsgroupList(*dataDir, updateList, excludePrefix, *updateListForce); err != nil {
 			log.Printf("Newsgroup list update failed: %v", err)
@@ -159,16 +163,10 @@ func main() {
 	}
 	defer progressDB.Close()
 
-	// Set up cross-platform signal handling for graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM) // Ctrl+C and SIGTERM take the same graceful path
-	// Listen at once: a signal during the provider/newsgroup setup (a slow remote LIST)
-	// must not sit in the channel until the fetch loop starts.
-	go func() {
-		<-sigChan
-		log.Printf("[FETCHER]: sigChan received shutdown signal")
-		common.ForceShutdown() // signal all worker goroutines to stop
-	}()
+	// Set up cross-platform signal handling for graceful shutdown. Listen at once: a
+	// signal during the provider/newsgroup setup (a slow remote LIST) must not sit in
+	// the channel until the fetch loop starts.
+	startFetcherSignalHandler()
 
 	// Get UseShortHashLen from database (with safety check)
 	storedUseShortHashLen, isLocked, err := db.GetHistoryUseShortHashLen(*useShortHashLenPtr)
@@ -257,8 +255,14 @@ func main() {
 	}
 
 	if *resetProgress > 0 {
-		log.Printf("[FETCHER]: Resetting download progress to %d for all newsgroups on primary provider", *resetProgress)
-		for _, ng := range newsgroups {
+		// decision D-O1: a wildcard -group resets only the groups with that prefix
+		targets := resetProgressTargets(newsgroups, wildcardNG)
+		if wildcardNG != "" {
+			log.Printf("[FETCHER]: Resetting download progress to %d for %d newsgroups with prefix '%s' on primary provider", *resetProgress, len(targets), wildcardNG)
+		} else {
+			log.Printf("[FETCHER]: Resetting download progress to %d for %d newsgroups on primary provider", *resetProgress, len(targets))
+		}
+		for _, ng := range targets {
 			//last, err = progressDB.GetLastArticle(pools[0].Backend.Provider.Name, ng.Name) // get last article
 			err = progressDB.UpdateProgress(pools[0].Backend.Provider.Name, ng.Name, *resetProgress)
 			if err != nil {
@@ -706,6 +710,34 @@ const (
 	fetcherMaxBatch = 1000
 )
 
+// startFetcherSignalHandler registers SIGINT/SIGTERM and turns the first one into
+// common.ForceShutdown (the workers and UpdateNewsgroupList poll common.WantShutdown).
+func startFetcherSignalHandler() {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM) // Ctrl+C and SIGTERM take the same graceful path
+	go func() {
+		<-sigChan
+		log.Printf("[FETCHER]: sigChan received shutdown signal")
+		common.ForceShutdown() // signal all worker goroutines to stop
+	}()
+}
+
+// resetProgressTargets returns the groups -reset-progress changes: with a wildcard
+// -group (wildcardNG is the prefix before the final *) only the groups with that
+// prefix, otherwise all of them (decision D-O1).
+func resetProgressTargets(newsgroups []*models.Newsgroup, wildcardNG string) []*models.Newsgroup {
+	if wildcardNG == "" {
+		return newsgroups
+	}
+	out := make([]*models.Newsgroup, 0, len(newsgroups))
+	for _, ng := range newsgroups {
+		if strings.HasPrefix(ng.Name, wildcardNG) {
+			out = append(out, ng)
+		}
+	}
+	return out
+}
+
 // clampFetcherFlags brings the numeric fetcher flags into their valid ranges.
 // -max-batch above fetcherMaxBatch is clamped with a warning.
 func clampFetcherFlags(maxBatch, maxBatchThreads, maxQueued, downloadMaxPar *int) {
@@ -856,6 +888,9 @@ func UpdateNewsgroupList(dataDir string, updateList *string, excludePrefix *stri
 	if err != nil {
 		return fmt.Errorf("failed to fetch newsgroup list from remote server: %w", err)
 	}
+	if common.WantShutdown() {
+		return errUpdateListStopped
+	}
 	log.Printf("UpdateNewsgroupList: Fetched %d newsgroups from remote server", len(remoteGroups))
 
 	// Parse the update pattern to determine filtering
@@ -900,15 +935,39 @@ func UpdateNewsgroupList(dataDir string, updateList *string, excludePrefix *stri
 	}
 
 	log.Printf("UpdateNewsgroupList: Found %d newsgroups in local database", len(localGroups))
+
+	newGroupCount, skippedCount, messages, err := addMissingGroups(db, remoteGroups, existingGroups,
+		addAllGroups, groupPrefix, excludePrefixes, updateListForce, common.WantShutdown)
+	if err != nil {
+		log.Printf("Stopped: %d new groups, %d skipped so far, out of %d remote groups", newGroupCount, skippedCount, len(remoteGroups))
+		return err
+	}
+
+	log.Printf("Result: %d new groups, %d skipped, out of %d remote groups with total: %d messages",
+		newGroupCount, skippedCount, len(remoteGroups), messages)
+
+	return nil
+}
+
+// errUpdateListStopped is returned by UpdateNewsgroupList when a signal stopped it.
+var errUpdateListStopped = errors.New("newsgroup list update stopped by a shutdown signal")
+
+// addMissingGroups lists (and with force inserts, as inactive) every remote group that
+// passes the prefix/exclude filters and is not in existingGroups. wantStop is polled
+// before each group: once it reports true the loop returns errUpdateListStopped (the
+// groups inserted so far stay).
+func addMissingGroups(db *database.Database, remoteGroups []nntp.GroupInfo, existingGroups map[string]bool,
+	addAllGroups bool, groupPrefix string, excludePrefixes []string, updateListForce bool,
+	wantStop func() bool) (newGroupCount, skippedCount int, messages int64, err error) {
 	today := time.Now().UTC()
 	//today := time.Now().UTC().Truncate(24 * time.Hour)
 
 	// Add new newsgroups that don't exist locally and match the pattern
-	newGroupCount := 0
-	skippedCount := 0
-	var messages int64
 loopGroups:
 	for _, remoteGroup := range remoteGroups {
+		if wantStop() {
+			return newGroupCount, skippedCount, messages, errUpdateListStopped
+		}
 		// Apply prefix filtering
 		if !addAllGroups {
 			if groupPrefix != "" && !strings.HasPrefix(remoteGroup.Name, groupPrefix) {
@@ -966,8 +1025,5 @@ loopGroups:
 		}
 	}
 
-	log.Printf("Result: %d new groups, %d skipped, out of %d remote groups with total: %d messages",
-		newGroupCount, skippedCount, len(remoteGroups), messages)
-
-	return nil
+	return newGroupCount, skippedCount, messages, nil
 }

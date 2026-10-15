@@ -46,7 +46,7 @@ go mod tidy && go mod verify
 ./build_rslight_importer.sh    # RSLight importer
 
 # Note: Some cmd applications don't have build scripts:
-# benchmark_hash, extract_hierarchies, history-demo, parsedates, test-nntp, usermgr
+# benchmark_hash, extract_hierarchies, history-demo, parsedates, usermgr
 
 # Build output goes to build/ directory
 ls -la build/  # List all built binaries
@@ -122,7 +122,7 @@ golangci-lint run
   ├── rslight-importer/ # RSLight importer
   ├── test-MsgIdItemCache/ # Message ID cache tester
   └── [6 other tools]   # benchmark_hash, extract_hierarchies, history-demo, 
-                        # parsedates, test-nntp, usermgr (no build scripts)
+                        # parsedates, usermgr (no build scripts)
 
 /internal/              # 13 internal packages (core business logic)
   ├── nntp/            # NNTP protocol implementation (60+ files)

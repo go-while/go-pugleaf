@@ -2,7 +2,7 @@
 
 **A modern NNTP server and web gateway for Usenet/NetNews built in Go**
 
-[![Go Version](https://img.shields.io/badge/Go-1.25+-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.26+-blue.svg)](https://golang.org)
 [![Development Status](https://img.shields.io/badge/Status-Testing-green.svg)](#development-status)
 [![License](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
 
@@ -19,7 +19,7 @@ go-pugleaf provides a complete newsgroup platform with:
 Read [BUGS.md](https://github.com/go-while/go-pugleaf/blob/main/BUGS.md) first!
 
 ### Prerequisites
-- Go 1.25.1+ (for building from source)
+- Go 1.26.0+ (for building from source; `go.mod` pins `toolchain go1.27.2`, downloaded automatically with GOTOOLCHAIN=auto)
 - Linux/Unix system (Windows support not tested)
 - At least 1-256GB RAM, 1-10000GB+ disk space
 
@@ -127,7 +127,7 @@ For backfilling disable cron job before and run `pugleaf-fetcher` directly:
 
 ```bash
 # Initial backfill from specific date
-./pugleaf-fetcher -group "news.*" -download-start-date 1980-01-01 -download-end-date 1981-01-01
+./pugleaf-fetcher -group "news.*" -download-start-date 1980-01-01   # there is no end-date flag; use -max-batch to pace
 
 # Continuous fetching (run after initial fetch)
 ./pugleaf-fetcher -group "news.*"

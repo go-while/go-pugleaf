@@ -36,6 +36,7 @@ type SanitizedCache struct {
 	maxAge      time.Duration // Maximum age of entries
 	cleanupTick time.Duration // How often to run cleanup
 	stopCleanup chan bool
+	stopOnce    sync.Once    // Stop closes stopCleanup once per cache instance
 	cachedSize  int64        // Size of the cache in bytes (optional, can be used for memory limits)
 	countermux  sync.RWMutex // Mutex for cachedSize updates
 	hits        int64        // Cache hit counter
@@ -266,7 +267,11 @@ func (sc *SanitizedCache) SetArticle(messageID string, sanitizedFields map[strin
 	sc.mutex.Unlock()
 }
 
-// BatchSetArticles efficiently stores multiple complete sanitized articles
+// BatchSetArticles efficiently stores multiple complete sanitized articles.
+// cachedSize is updated inside the same sc.mutex section as the writes and the
+// eviction (as in SetArticle), so the counter always matches the entries a
+// concurrent eviction or cleanup sees: a write that lands on an entry evicted a
+// moment before re-creates it and is counted once, never subtracted twice.
 func (sc *SanitizedCache) BatchSetArticles(articles map[string]map[string]template.HTML) {
 	if len(articles) == 0 {
 		return
@@ -300,21 +305,23 @@ func (sc *SanitizedCache) BatchSetArticles(articles map[string]map[string]templa
 		article.LastUsed = now
 		article.mux.Unlock()
 	}
+	// Count the writes before the eviction subtracts the sizes of the entries it removes.
+	sc.countermux.Lock()
+	sc.cachedSize += totalSizeDiff
+	sc.countermux.Unlock()
 	if added {
 		sc.enforceLimitLocked()
 	}
 	sc.mutex.Unlock()
-
-	// Update global cache size
-	sc.countermux.Lock()
-	sc.cachedSize += totalSizeDiff
-	sc.countermux.Unlock()
 }
 
-// Clear removes all entries from the cache
+// Clear removes all entries from the cache and resets cachedSize with them.
 func (sc *SanitizedCache) Clear() {
 	sc.mutex.Lock()
 	sc.cache = make(map[string]*SanitizedArticle)
+	sc.countermux.Lock()
+	sc.cachedSize = 0
+	sc.countermux.Unlock()
 	sc.mutex.Unlock()
 }
 
@@ -345,9 +352,10 @@ func (sc *SanitizedCache) Stats() map[string]interface{} {
 	}
 }
 
-// Stop shuts down the cache and cleanup goroutine
+// Stop shuts down the cleanup goroutine of this cache instance. It may be called
+// more than once; only the first call closes stopCleanup.
 func (sc *SanitizedCache) Stop() {
-	close(sc.stopCleanup)
+	sc.stopOnce.Do(func() { close(sc.stopCleanup) })
 }
 
 // hashMessageID creates a consistent hash from a message ID
@@ -474,13 +482,17 @@ func (sc *SanitizedCache) cleanup() {
 		delsize += size
 		removed++
 	}
+	// Subtract inside the sc.mutex section (as evictOldest and BatchSetArticles do): a Clear
+	// between the unlock and the subtraction would otherwise leave cachedSize negative.
+	if removed > 0 {
+		sc.countermux.Lock()
+		sc.cachedSize -= delsize
+		sc.countermux.Unlock()
+	}
 	sc.mutex.Unlock()
 
 	if removed == 0 {
 		return
 	}
-	sc.countermux.Lock()
-	sc.cachedSize -= delsize
-	sc.countermux.Unlock()
 	log.Printf("SanitizedCache: cleanup: removed %d entries (%d bytes) from cache", removed, delsize)
 }

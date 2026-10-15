@@ -315,6 +315,9 @@ func setNNTPUserActive(db *database.Database, username string, active bool) erro
 		err = db.DeactivateNNTPUser(user.ID)
 	}
 	if err != nil {
+		if database.IsWebUserMappingConflict(err) {
+			return fmt.Errorf("%s: %w", user.Username, database.ErrWebUserHasNNTPAccount)
+		}
 		return err
 	}
 	log.Printf("[NNTPMGR] %s NNTP user '%s' (ID: %d)", state, username, user.ID)

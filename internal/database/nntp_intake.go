@@ -41,7 +41,7 @@ func (db *Database) GetIntakeGroup(name string) (*IntakeGroup, error) {
 }
 
 // LookupMsgIdInArticlesDB reports whether the group database stores an article with this
-// message-id. Unlike ExistsMsgIdInArticlesDB it tells "not stored" (false, nil) apart from a
+// message-id. Unlike the former ExistsMsgIdInArticlesDB (removed, plan followup-leftovers) it tells "not stored" (false, nil) apart from a
 // failed lookup (false, err), so callers do not mistake a database error for a missing
 // article (A-db-3).
 func (db *GroupDB) LookupMsgIdInArticlesDB(messageID string) (bool, error) {

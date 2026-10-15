@@ -224,6 +224,13 @@ func main() {
 	dbConfig.ArticleCacheSize = maxArticleCache
 	dbConfig.ArticleCacheExpiry = time.Duration(maxArticleCacheExpiry) * time.Minute
 
+	// Set up cross-platform signal handling for graceful shutdown before the database
+	// opens: a signal during a one-shot mode or the server boot is then handled (the
+	// one-shot handler below, or the select at the end of main) instead of killing the
+	// process with the database open.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM) // Ctrl+C and SIGTERM take the same graceful path
+
 	db, err := database.OpenDatabase(dbConfig) // Pass custom dbConfig with cache settings
 	if err != nil {
 		log.Fatalf("[WEB]: Failed to initialize database: %v", err)
@@ -234,8 +241,20 @@ func main() {
 	//log.Printf("[WEB]: Date parser adapter initialized with processor.ParseNNTPDate")
 
 	if oneShot {
+		// A signal tears the database down (exitAfterDB) and ends the run. The running
+		// mode itself is not cancelled: it may log errors from the closed database until
+		// the process exits (each SQLite transaction stays atomic).
+		go func() {
+			sig := <-sigChan
+			log.Printf("[WEB]: Received %v during a maintenance mode, shutting down...", sig)
+			exitAfterDB(db, signalExitCode(sig))
+		}()
 		exitAfterDB(db, runMaintenance(db))
 	}
+
+	// Server boot: the first signal is remembered and the server is never started (the
+	// check before server.Start), a second one ends a hung boot at once (fatalAfterDB).
+	bootSig, endBootWatch := watchBootSignals(db, sigChan)
 
 	// Initialize progress database once to avoid opening/closing for each group
 	// (NewProgressDB takes a directory: the default stays data/progress.db/progress.db)
@@ -243,7 +262,7 @@ func main() {
 	if err != nil {
 		fatalAfterDB(db, "[WEB]: Failed to initialize progress database: %v", err)
 	}
-	defer progressDB.Close()
+	setWebProgressDB(progressDB) // closed by teardownDB on every exit path
 
 	// Note: Database batch workers are started automatically by OpenDatabase() (which also adds them to db.WG)
 
@@ -319,42 +338,48 @@ func main() {
 		db.WG.Add(1)
 	}
 	server.StartSessionCleanup() // stops on server.Shutdown
-	// Set up cross-platform signal handling for graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM) // Ctrl+C and SIGTERM take the same graceful path
 
-	// Start web server in goroutine to make it non-blocking
-	webServerErrChan := make(chan error, 1)
-	go func() {
-		log.Printf("[WEB]: Starting go-pugleaf web server on %s://localhost:%d", protocol, webConfig.ListenPort)
-		if err := server.Start(); err != nil && err != http.ErrServerClosed {
-			webServerErrChan <- err
-		}
-	}()
-
-	log.Printf("[WEB]: Server started successfully. Press Ctrl+C to gracefully shutdown...")
-
-	// Start update file monitor in a separate goroutine
-	updateFileChan := make(chan bool, 1)
-	go monitorUpdateFile(updateFileChan, webStop)
-	// Start hierarchy last_updated synchronizer in the background; it uses the DB, so
-	// the DB teardown waits for it (db.WG) after webStop made it return
-	db.WG.Add(1)
-	go func() {
-		defer db.WG.Done()
-		startHierarchyUpdater(db, webStop)
-	}()
-	// Wait for either shutdown signal, server error, or update file
+	// The boot is over: from here on sigChan is read by the select below. A signal that
+	// came during the boot goes straight to the shutdown sequence (the server never binds).
+	endBootWatch()
 	exitCode := 0
 	select {
-	case sig := <-sigChan:
-		log.Printf("[WEB]: Received shutdown signal (%v), initiating graceful shutdown...", sig)
-	case err := <-webServerErrChan:
-		// not fatal here: the shutdown below still stops the workers and tears the DB down
-		log.Printf("[WEB]: Failed to start web server: %v", err)
-		exitCode = 1
-	case <-updateFileChan:
-		log.Printf("[WEB]: Update file detected, initiating graceful shutdown for update...")
+	case sig := <-bootSig:
+		// exit code 0 as for a signal while serving
+		log.Printf("[WEB]: Shutdown signal (%v) received during startup: not starting the web server, shutting down...", sig)
+	default:
+		// Start web server in goroutine to make it non-blocking
+		webServerErrChan := make(chan error, 1)
+		go func() {
+			log.Printf("[WEB]: Starting go-pugleaf web server on %s://localhost:%d", protocol, webConfig.ListenPort)
+			if err := server.Start(); err != nil && err != http.ErrServerClosed {
+				webServerErrChan <- err
+			}
+		}()
+
+		log.Printf("[WEB]: Server started successfully. Press Ctrl+C to gracefully shutdown...")
+
+		// Start update file monitor in a separate goroutine
+		updateFileChan := make(chan bool, 1)
+		go monitorUpdateFile(updateFileChan, webStop)
+		// Start hierarchy last_updated synchronizer in the background; it uses the DB, so
+		// the DB teardown waits for it (db.WG) after webStop made it return
+		db.WG.Add(1)
+		go func() {
+			defer db.WG.Done()
+			startHierarchyUpdater(db, webStop)
+		}()
+		// Wait for either shutdown signal, server error, or update file
+		select {
+		case sig := <-sigChan:
+			log.Printf("[WEB]: Received shutdown signal (%v), initiating graceful shutdown...", sig)
+		case err := <-webServerErrChan:
+			// not fatal here: the shutdown below still stops the workers and tears the DB down
+			log.Printf("[WEB]: Failed to start web server: %v", err)
+			exitCode = 1
+		case <-updateFileChan:
+			log.Printf("[WEB]: Update file detected, initiating graceful shutdown for update...")
+		}
 	}
 
 	// Stop the cmd/web background loops (hierarchy updater, update file monitor)
@@ -405,3 +430,45 @@ func main() {
 		os.Exit(exitCode) // the DB is already shut down
 	}
 } // end main
+
+// signalExitCode is the shell convention 128+signal number (SIGINT 130, SIGTERM 143),
+// 1 for a signal without a number.
+func signalExitCode(sig os.Signal) int {
+	if s, ok := sig.(syscall.Signal); ok {
+		return 128 + int(s)
+	}
+	return 1
+}
+
+// watchBootSignals reads sigChan while the server boots. The first signal is passed to
+// the returned channel (main checks it before server.Start and then shuts down without
+// binding); a second one ends the boot at once through fatalAfterDB. endBootWatch stops
+// the watcher and returns once it no longer reads sigChan, so later signals reach the
+// select at the end of main.
+func watchBootSignals(db *database.Database, sigChan <-chan os.Signal) (bootSig <-chan os.Signal, endBootWatch func()) {
+	first := make(chan os.Signal, 1)
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		seen := false
+		for {
+			select {
+			case sig := <-sigChan:
+				if !seen {
+					seen = true
+					first <- sig
+					log.Printf("[WEB]: Received %v during startup: shutting down once the boot step returns (send it again to exit now)", sig)
+					continue
+				}
+				fatalAfterDB(db, "[WEB]: Received %v again during startup: exiting now", sig)
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return first, func() {
+		close(stop)
+		<-stopped
+	}
+}
