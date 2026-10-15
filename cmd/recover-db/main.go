@@ -130,7 +130,7 @@ func main() {
 		dataDir             = flag.String("data", "./data", "Data directory to open (the write modes require it given explicitly)")
 		scanOutOfOrderCheck = flag.Bool("scan-out-of-order-overview", false, "Scan newsgroups for articles with out-of-order date_sent values")
 		reorderByDateSent   = flag.Bool("reorder-by-datesent", false, "Reorder all articles by date_sent and write to new database file with .new extension")
-		force               = flag.Bool("force", false, "Required, together with an explicit -data, by the write modes -repair, -rebuild-threads, -rewritedates, -reorder-by-datesent")
+		force               = flag.Bool("force", false, "Required, together with an explicit -data (or the deprecated -db), by the write modes -repair, -rebuild-threads, -rewritedates, -reorder-by-datesent")
 	)
 	flag.Parse()
 
@@ -170,7 +170,7 @@ func main() {
 	// Write modes need an explicit data directory and -force (D13)
 	if modes := recoverWriteModes(*repair, *rebuildThreads, *rewriteDates, *reorderByDateSent); len(modes) > 0 && (!(dbSet || dataSet) || !*force) {
 		fmt.Fprintf(os.Stderr, "Refusing write modes %s on data directory '%s'\n", strings.Join(modes, " "), resolvedDataDir)
-		fmt.Fprintf(os.Stderr, "The write modes require an explicit -data <dir> and -force; nothing was opened or changed.\n")
+		fmt.Fprintf(os.Stderr, "The write modes require an explicit -data <dir> (or the deprecated -db) and -force; nothing was opened or changed.\n")
 		os.Exit(2)
 	}
 
