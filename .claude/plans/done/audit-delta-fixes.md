@@ -1587,7 +1587,7 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
 ## Outcome
 
 - **Integration branch:** `plan-audit-delta-fixes` from `testing-001` @ 4eb92da; code tree 7ff04a3 (plus plan/docs
-  commits b7d7e30, 04857f4 and this one). Not yet merged into `testing-001` (user decision). Nothing pushed.
+  commits b7d7e30, 04857f4 and this one). Merged into `testing-001` as af235b3 (`git merge --no-ff`, 2026-10-15). Nothing pushed.
 - **Waves run:** 0 (inline), 1 (15 slices in three batches of five), 2 (3 slices), 3 (inline greps + verifier). The
   optional waves O1 (10 slices) and O2 (1 slice) were not run (user asked at the wave-3 boundary).
 - **Ids fixed:** see the "Fixed by plan `audit-delta-fixes`" bullet in `BUGS.md`. Hand-offs: A-tools-1, A-tools-4,
