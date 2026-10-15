@@ -1335,7 +1335,9 @@ from the scripts every later verifier uses (build with `RACE=1`).
 
 Runner: `pugleaf-verifier` on the main checkout (`plan-audit-delta-fixes`), after wave 2.
 ```bash
-RACE=1 ./build_webserver.sh && ./build_recover-db.sh && ./build_fetcher.sh
+./build_webserver.sh && ./build_recover-db.sh && ./build_fetcher.sh
+# E19 needs a race build of the web server (the build scripts no longer add -race, D11); the version ldflag is required
+GOEXPERIMENT=greenteagc go build -race -o build/webserver -ldflags "-X main.appVersion=$(cat appVersion.txt)" ./cmd/web/
 PORT=18998 DATA=./data-test-audit-delta-fixes scripts/test-audit-delta-fixes.sh
 ```
 
@@ -1468,7 +1470,7 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
   (A-db-1 reproduced).
 - Decisions already settled before this run: D11 done 2026-10-12 (no `-race` in the 11 build scripts; `adf-ops-scripts`
   skips OPS-4e and the CLAUDE.md sentence; E16's grep is empty at baseline). `RACE=1` in `## End-to-end` is a no-op:
-  the verifier builds the web server with `go build -race -o build/webserver ./cmd/web` for E19 instead.
+  the verifier builds the web server with `GOEXPERIMENT=greenteagc go build -race -o build/webserver -ldflags "-X main.appVersion=$(cat appVersion.txt)" ./cmd/web/` for E19 instead (without the ldflag the binary refuses to start: `config.AppVersion is unset`).
 
 ### Wave 1, batch A (2026-10-15): adf-db-lifecycle, adf-db-readers, adf-db-cache, adf-proc-fatal, adf-web-cache
 - adf-proc-fatal: worktree `/tank0/claude/trees/go-pugleaf/agent-a0624188eade0125f`, branch
