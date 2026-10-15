@@ -1,9 +1,10 @@
 package database
 
 // Tests of plan nntp-server-hardening, slice nntp-auth-db: the NNTP auth cache
-// re-checks the stored bcrypt hash on a hit (SEC-6), unknown users cost a bcrypt
-// compare (A-nntp-sec-6), same-process invalidation, and the admin lookups used by
-// nntpmgr and the web handlers (A-ops-9, A-web-5 DB part).
+// re-checks the stored bcrypt hash on a hit (SEC-6), same-process invalidation, and the
+// admin lookups used by nntpmgr and the web handlers (A-ops-9, A-web-5 DB part).
+// The unknown-user dummy compare (A-nntp-sec-6) stays in the code but has no timing
+// test (plan test-timing-hardening: no password timing-enumeration tests).
 
 import (
 	"database/sql"
@@ -170,35 +171,6 @@ func TestNSHAuthRemoveUserID(t *testing.T) {
 				t.Fatalf("%s left the cached login in place", tc.name)
 			}
 		})
-	}
-}
-
-// TestNSHAuthUnknownUserTiming (A-nntp-sec-6): a login for an unknown user costs a
-// bcrypt compare like a wrong password for a known user, so the reply time does not
-// tell whether the user exists. Minimum of 3 tries each; unknown >= 0.5 x known.
-func TestNSHAuthUnknownUserTiming(t *testing.T) {
-	db := w0DB(t)
-	u, _ := nshAuthNewUser(t, true, 0)
-	unknown := w0Name("nshauth-unknown")
-
-	measure := func(username string) time.Duration {
-		best := time.Duration(-1)
-		for i := 0; i < 3; i++ {
-			start := time.Now()
-			if _, err := db.AuthenticateNNTPUser(username, "nshauth-wrong-password"); err == nil {
-				t.Fatalf("AuthenticateNNTPUser(%s) with a wrong password succeeded", username)
-			}
-			if d := time.Since(start); best < 0 || d < best {
-				best = d
-			}
-		}
-		return best
-	}
-	known := measure(u.Username)
-	unk := measure(unknown)
-	t.Logf("min known-user wrong password %v, min unknown user %v", known, unk)
-	if unk*2 < known {
-		t.Fatalf("unknown user answered in %v, known user with a wrong password in %v: usernames can be enumerated by timing", unk, known)
 	}
 }
 

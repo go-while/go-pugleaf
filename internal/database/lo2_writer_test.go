@@ -140,7 +140,6 @@ func TestLo2WriterStatsRetry(t *testing.T) {
 	calls = 0
 	const grace = 50 * time.Millisecond
 	done := make(chan error, 1)
-	started := time.Now()
 	go func() {
 		done <- updateNewsgroupStatsWithRetry(func() error {
 			calls++
@@ -155,14 +154,18 @@ func TestLo2WriterStatsRetry(t *testing.T) {
 		if !errors.Is(err, busy) {
 			t.Fatalf("shutdown bound: err=%v, want the busy error", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("updateNewsgroupStatsWithRetry did not stop after shutdown began")
 	}
-	if took := time.Since(started); took > 2*time.Second {
-		t.Fatalf("shutdown bound took %v for a %v grace", took, grace)
-	}
+	// Structural bound instead of a duration: the clock starts after call 1 and every
+	// later call takes at least 30 ms, so call 3 ends at least 60 ms (> grace) after the
+	// clock started and the loop must stop there. A slow machine only makes rounds longer,
+	// i.e. fewer calls, never more.
 	if calls < 2 {
 		t.Fatalf("shutdown bound: calls=%d, want at least one retry before the grace passed", calls)
+	}
+	if calls > 3 {
+		t.Fatalf("shutdown bound: calls=%d, want at most 3: the loop kept retrying after its %v grace", calls, grace)
 	}
 }
 
@@ -181,16 +184,24 @@ func TestLo2WriterBatchShutdownClock(t *testing.T) {
 		t.Fatal("clock with no isShutdown must never expire")
 	}
 
+	// The "not expired yet" checks use a grace far longer than any scheduling delay
+	// between two calls; the "expired" check uses a short grace and sleeps past it
+	// (a lower bound only), so neither depends on how fast the machine is.
 	shutdown := func() bool { return true }
-	c := batchShutdownClock{grace: 30 * time.Millisecond}
+	long := batchShutdownClock{grace: time.Minute}
+	if long.expired(shutdown) {
+		t.Fatal("the first shutdown check must start the clock, not expire it")
+	}
+	if long.expired(shutdown) {
+		t.Fatal("clock expired before its grace had passed")
+	}
+
+	c := batchShutdownClock{grace: time.Millisecond}
 	if c.expired(shutdown) {
 		t.Fatal("the first shutdown check must start the clock, not expire it")
 	}
-	if c.expired(shutdown) {
-		t.Fatal("clock expired before its grace had passed")
-	}
 	started := c.deadline
-	time.Sleep(40 * time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
 	if !c.expired(shutdown) {
 		t.Fatal("clock did not expire after its grace")
 	}
@@ -289,6 +300,8 @@ func TestLo2WriterCronDBRunsUntilShutdown(t *testing.T) {
 	}()
 
 	close(fresh.StopChan)
+	// Deliberately short negative window (5 ticks): cronDBEvery must still be running.
+	// A slow machine can only make this check pass more easily, never fail it.
 	select {
 	case <-done:
 		t.Fatal("cronDBEvery returned on StopChan; it must keep closing idle group DBs during the final drain")
@@ -300,8 +313,8 @@ func TestLo2WriterCronDBRunsUntilShutdown(t *testing.T) {
 	}
 	select {
 	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("cronDBEvery still running 1s after Shutdown")
+	case <-time.After(testWait):
+		t.Fatalf("cronDBEvery still running %v after Shutdown", testWait)
 	}
 }
 

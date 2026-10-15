@@ -253,12 +253,27 @@ func TestAdfOptPostQueueSelectRetry(t *testing.T) {
 		entries []PostQueueEntry
 		err     error
 	}
+	// Commit only after the reader has hit the held lock and retried: retryBackoff logs the
+	// first retry (retryLogThrottle(1)), so wait for that line instead of a fixed sleep that
+	// a loaded machine could outrun without any retry (as fu_queries_test E10c does).
+	logs := fuCleanupCaptureLog(t)
 	resCh := make(chan result, 1)
 	go func() {
 		e, err := db.GetPendingPostQueueEntries(1000)
 		resCh <- result{e, err}
 	}()
-	time.Sleep(300 * time.Millisecond)
+	retried := time.Now().Add(testWait)
+	for !logs.contains("SQLite retry attempt", "for transaction: database is locked") {
+		select {
+		case r := <-resCh:
+			t.Fatalf("GetPendingPostQueueEntries returned (%d entries, err %v) while the write lock was held, without a logged retry", len(r.entries), r.err)
+		default:
+		}
+		if time.Now().After(retried) {
+			t.Fatalf("GetPendingPostQueueEntries logged no SQLite retry within %v while the write lock was held", testWait)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
@@ -267,8 +282,8 @@ func TestAdfOptPostQueueSelectRetry(t *testing.T) {
 	var res result
 	select {
 	case res = <-resCh:
-	case <-time.After(60 * time.Second):
-		t.Fatal("GetPendingPostQueueEntries did not return within 60s")
+	case <-time.After(testWait):
+		t.Fatalf("GetPendingPostQueueEntries did not return within %v", testWait)
 	}
 	if res.err != nil {
 		t.Fatalf("GetPendingPostQueueEntries: %v", res.err)

@@ -271,7 +271,7 @@ func TestW1SQLiteInitFailureWaitersReturn(t *testing.T) {
 		}()
 	}
 	close(start)
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(testWait)
 	for i := 0; i < callers; i++ {
 		select {
 		case err := <-errs:
@@ -279,7 +279,7 @@ func TestW1SQLiteInitFailureWaitersReturn(t *testing.T) {
 				t.Errorf("caller %d: GetGroupDB succeeded, want an error", i)
 			}
 		case <-timeout:
-			t.Fatalf("only %d of %d callers returned within 5s", i, callers)
+			t.Fatalf("only %d of %d callers returned within %v", i, callers, testWait)
 		}
 	}
 	db.MainMutex.RLock()

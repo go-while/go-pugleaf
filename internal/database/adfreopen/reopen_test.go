@@ -19,6 +19,30 @@ import (
 
 var adfReopenRoot string
 
+// testWait is the hang guard of this package's tests (the database package has its own; this
+// package cannot see it). It only stops a hung test; a passing test never waits on it.
+// Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s). Plan test-timing-hardening D3.
+var testWait = testWaitFromEnv(60 * time.Second)
+
+func testWaitFromEnv(def time.Duration) time.Duration {
+	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+// adfReopenCronBudget is how long (e) waits for CronDB to exit: it only notices shutdown on
+// its next 10 s tick, so the budget is 12x the tick (or testWait if that is longer). The pass
+// path still ends at the first tick.
+func adfReopenCronBudget() time.Duration {
+	if b := 2 * time.Minute; b > testWait {
+		return b
+	}
+	return testWait
+}
+
 func TestMain(m *testing.M) {
 	if runtime.GOOS != "windows" && os.Geteuid() < 1000 {
 		fmt.Println("adfreopen: skipped: OpenDatabase refuses to run with euid < 1000")
@@ -60,8 +84,8 @@ func adfReopenTeardown(t *testing.T, db *database.Database) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(30 * time.Second):
-		t.Fatal("db.WG.Wait() did not return within 30s")
+	case <-time.After(testWait):
+		t.Fatalf("db.WG.Wait() did not return within %v", testWait)
 	}
 	if err := db.Shutdown(); err != nil {
 		t.Fatalf("Shutdown: %v", err)
@@ -182,9 +206,14 @@ func adfReopenViolations(baseline map[int]string) ([]string, string) {
 func TestAdfReopenAfterFailureAndShutdown(t *testing.T) {
 	baseline, _ := adfReopenStacks()
 	t.Logf("goroutines before: %d", runtime.NumGoroutine())
+	// a fresh root per run, so -count=N does not find the previous run's databases
+	root, err := os.MkdirTemp(adfReopenRoot, "run-")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// (a) DataDir is a regular file: initMainDB fails; error, no panic, no exit
-	notADir := filepath.Join(adfReopenRoot, "not-a-dir")
+	notADir := filepath.Join(root, "not-a-dir")
 	if err := os.WriteFile(notADir, []byte("not a directory"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -193,10 +222,10 @@ func TestAdfReopenAfterFailureAndShutdown(t *testing.T) {
 	} else {
 		t.Logf("(a) expected error: %v", err)
 	}
-	adfReopenWaitNoStack(t, "database/sql.(*DB).connectionOpener", 5*time.Second)
+	adfReopenWaitNoStack(t, "database/sql.(*DB).connectionOpener", testWait)
 
 	// (a2) a failure after initMainDB (migrations): the main DB is closed again
-	badDir := filepath.Join(adfReopenRoot, "bad-migrations")
+	badDir := filepath.Join(root, "bad-migrations")
 	if err := os.MkdirAll(filepath.Join(badDir, "cfg"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -217,35 +246,36 @@ func TestAdfReopenAfterFailureAndShutdown(t *testing.T) {
 	} else {
 		t.Logf("(a2) expected error: %v", err)
 	}
-	adfReopenWaitNoStack(t, "database/sql.(*DB).connectionOpener", 5*time.Second)
+	adfReopenWaitNoStack(t, "database/sql.(*DB).connectionOpener", testWait)
 
 	// (b)+(c) open (INIT was not left set by the failures), teardown
-	db, err := database.OpenDatabase(adfReopenConfig(filepath.Join(adfReopenRoot, "first")))
+	db, err := database.OpenDatabase(adfReopenConfig(filepath.Join(root, "first")))
 	if err != nil {
 		t.Fatalf("(b) OpenDatabase after failed opens: %v", err)
 	}
-	if _, err := database.OpenDatabase(adfReopenConfig(filepath.Join(adfReopenRoot, "second-too-early"))); err == nil {
+	if _, err := database.OpenDatabase(adfReopenConfig(filepath.Join(root, "second-too-early"))); err == nil {
 		t.Fatal("second OpenDatabase while one is open succeeded, want an error")
 	}
 	adfReopenTeardown(t, db)
 
 	// (d) open again (Shutdown reset INIT), teardown
-	db, err = database.OpenDatabase(adfReopenConfig(filepath.Join(adfReopenRoot, "second")))
+	db, err = database.OpenDatabase(adfReopenConfig(filepath.Join(root, "second")))
 	if err != nil {
 		t.Fatalf("(d) OpenDatabase after Shutdown: %v", err)
 	}
 	adfReopenTeardown(t, db)
 
 	// (e) background goroutines are gone; CronDB only exits on its next 10 s tick
-	deadline := time.Now().Add(12 * time.Second)
+	budget := adfReopenCronBudget()
+	deadline := time.Now().Add(budget)
 	for {
 		violations, all := adfReopenViolations(baseline)
 		if len(violations) == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("goroutines left after two open/shutdown cycles:\n  %s\n\nall goroutines:\n%s",
-				strings.Join(violations, "\n  "), all)
+			t.Fatalf("goroutines left %v after two open/shutdown cycles:\n  %s\n\nall goroutines:\n%s",
+				budget, strings.Join(violations, "\n  "), all)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
