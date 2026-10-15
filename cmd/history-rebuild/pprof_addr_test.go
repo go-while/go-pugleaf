@@ -55,3 +55,16 @@ func TestHRPprofMuxNoCmdline(t *testing.T) {
 		}
 	}
 }
+
+// TestFlOpsHRPprofAddrNeedsPort: followup-leftovers fl-ops-tools, an empty port is
+// refused (as in rslight-importer's copy) instead of listening on a random port.
+func TestFlOpsHRPprofAddrNeedsPort(t *testing.T) {
+	for _, in := range []string{"localhost:", ":", "127.0.0.1:", "[::1]:"} {
+		got, err := loopbackPprofAddr(in)
+		if err == nil {
+			t.Errorf("loopbackPprofAddr(%q) = %q, want error (no port)", in, got)
+		} else if !strings.Contains(err.Error(), "port is required") {
+			t.Errorf("loopbackPprofAddr(%q) error %q does not mention the missing port", in, err)
+		}
+	}
+}
