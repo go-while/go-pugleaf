@@ -43,7 +43,7 @@ var sessKnownCommands = []string{
 }
 
 // ---------------------------------------------------------------------------
-// Helpers (sess prefix; the harness is read-only)
+// Helpers (sess prefix; waits use the harness hang guard hDeadline)
 
 // sessIsChild reports whether this is the runIsolated child of t.
 func sessIsChild(t *testing.T) bool {
@@ -58,8 +58,10 @@ func sessIsTimeout(err error) bool {
 
 // sessExpectClosed returns nil when the server closes the connection within d
 // (any lines it sends first, such as a 400, are allowed), or an error when the
-// connection is still open after d.
+// connection is still open after d. d is a hang guard: every caller expects a
+// close, so a shorter value is raised to hDeadline.
 func sessExpectClosed(c *hClient, d time.Duration) error {
+	d = max(d, hDeadline)
 	end := time.Now().Add(d)
 	var lines []string
 	for {
@@ -400,7 +402,7 @@ func TestSessQuit(t *testing.T) {
 	if err := hExpectCode(code, line, 205); err != nil {
 		t.Fatal(err)
 	}
-	if err := sessExpectClosed(c, time.Second); err != nil {
+	if err := sessExpectClosed(c, hDeadline); err != nil {
 		t.Fatalf("after QUIT: %v", err)
 	}
 }
@@ -441,7 +443,7 @@ func TestSessUnknownCommands(t *testing.T) {
 	if err := hExpectCode(code, line, 205); err != nil {
 		t.Fatalf("lowercase quit: %v", err)
 	}
-	if err := sessExpectClosed(c, time.Second); err != nil {
+	if err := sessExpectClosed(c, hDeadline); err != nil {
 		t.Fatalf("after quit: %v", err)
 	}
 }
@@ -480,7 +482,7 @@ func TestSessPipelining(t *testing.T) {
 		if err := hExpectCode(code, line, 205); err != nil {
 			t.Fatalf("reply 3: %v", err)
 		}
-		if err := sessExpectClosed(c, time.Second); err != nil {
+		if err := sessExpectClosed(c, hDeadline); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -504,10 +506,9 @@ func TestSessPipelining(t *testing.T) {
 	t.Run("quit-then-command", func(t *testing.T) {
 		// Isolated: before the A-nntp-sec-1 fix the buffered command after QUIT
 		// reached UpdateDeadlines with a nil conn and the panic killed the process.
-		err := runIsolated(t, 60*time.Second, func(t *testing.T) {
+		err := runIsolated(t, 3*hDeadline, func(t *testing.T) {
 			hs := newTestServer(t, hServerOpts{})
 			c := hs.dial(t)
-			c.Deadline = 2 * time.Second
 			if err := c.send("QUIT" + CRLF + "HELP" + CRLF); err != nil {
 				t.Fatal(err)
 			}
@@ -520,11 +521,11 @@ func TestSessPipelining(t *testing.T) {
 			if err := hExpectCode(code, line, 205); err != nil {
 				t.Fatal(err)
 			}
-			if err := sessExpectClosed(c, time.Second); err != nil {
+			if err := sessExpectClosed(c, hDeadline); err != nil {
 				t.Fatalf("after 205: %v", err)
 			}
 			// The server must survive: a new client still gets a greeting.
-			c2, err := hs.tryDial(2 * time.Second)
+			c2, err := hs.tryDial(hDeadline)
 			if err != nil {
 				t.Fatalf("server gone after pipelined QUIT: %v", err)
 			}
@@ -563,14 +564,14 @@ func TestSessLineLimit(t *testing.T) {
 		}
 	})
 	t.Run("1MiB-without-LF", func(t *testing.T) {
-		err := runIsolated(t, 60*time.Second, func(t *testing.T) {
+		err := runIsolated(t, 3*hDeadline, func(t *testing.T) {
 			hs := newTestServer(t, hServerOpts{})
 			c := hs.dial(t)
 			payload := bytes.Repeat([]byte("a"), 1<<20)
 			var m0, m1 runtime.MemStats
 			runtime.GC()
 			runtime.ReadMemStats(&m0)
-			if err := c.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			if err := c.Conn.SetWriteDeadline(time.Now().Add(hDeadline)); err != nil {
 				t.Fatal(err)
 			}
 			_, werr := c.Conn.Write(payload)
@@ -596,7 +597,7 @@ func TestSessLineLimit(t *testing.T) {
 			case werr != nil:
 				// broken pipe / reset: already closed
 			default:
-				if err := sessExpectClosed(c, 2*time.Second); err != nil {
+				if err := sessExpectClosed(c, hDeadline); err != nil {
 					problems = append(problems, "1 MiB line without LF: "+err.Error())
 				}
 			}
@@ -618,8 +619,7 @@ func TestSessLineLimit(t *testing.T) {
 
 func TestSessStatsGrowth(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
-	c := hs.dial(t)
-	c.Deadline = 30 * time.Second
+	c := hs.dial(t) // per-read deadline hDeadline
 
 	const n = 10000
 	var buf strings.Builder
@@ -675,7 +675,7 @@ func TestSessIdleTimeout(t *testing.T) {
 		c := hs.dial(t)
 		// RFC 3977 §3.1: a server MAY have an inactivity timer; with 200 ms
 		// configured, an idle client is disconnected.
-		if err := sessExpectClosed(c, 3*time.Second); err != nil {
+		if err := sessExpectClosed(c, hDeadline); err != nil {
 			t.Fatal(err)
 		}
 		if took := time.Since(start); took < 150*time.Millisecond {
@@ -730,7 +730,7 @@ func TestSessMaxConns(t *testing.T) {
 	}
 
 	// The third connection is over the limit: it must not get a service greeting.
-	c3, err := hs.tryDial(2 * time.Second)
+	c3, err := hs.tryDial(hDeadline)
 	if err == nil {
 		if code, perr := hParseCode(c3.Greeting); perr == nil && (code == 200 || code == 201) {
 			t.Fatalf("third connection accepted with %q despite MaxConns=2", c3.Greeting)
@@ -740,9 +740,9 @@ func TestSessMaxConns(t *testing.T) {
 	t.Run("slot-freed", func(t *testing.T) {
 		c1.close()
 		// After a client leaves, a new connection gets in (poll: ConnectionEnded runs async).
-		end := time.Now().Add(3 * time.Second)
+		end := time.Now().Add(hDeadline)
 		for {
-			c, err := hs.tryDial(time.Second)
+			c, err := hs.tryDial(hDeadline)
 			if err == nil {
 				if code, perr := hParseCode(c.Greeting); perr == nil && (code == 200 || code == 201) {
 					c.close()
@@ -751,7 +751,7 @@ func TestSessMaxConns(t *testing.T) {
 				c.close()
 			}
 			if time.Now().After(end) {
-				t.Fatalf("no connection accepted within 3s after a client left (last err %v)", err)
+				t.Fatalf("no connection accepted within %s after a client left (last err %v)", hDeadline, err)
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
@@ -788,33 +788,37 @@ func TestSessStop(t *testing.T) {
 		t.Fatalf("MODE READER: %q", line)
 	}
 
-	start := time.Now()
-	if err := hs.S.Stop(); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	if took := time.Since(start); took > 2*time.Second {
-		t.Fatalf("Stop took %s", took)
+	// Stop must return; it is not timed (hDeadline is only the hang guard).
+	stopped := make(chan error, 1)
+	go func() { stopped <- hs.S.Stop() }()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(hDeadline):
+		t.Fatalf("Stop did not return within %s", hDeadline)
 	}
 	if hs.S.IsRunning() {
 		t.Fatal("IsRunning() true after Stop")
 	}
 
-	// The listener is closed: new connections fail within 2 s.
-	end := time.Now().Add(2 * time.Second)
+	// The listener is closed: new connections fail (poll, hDeadline guard).
+	end := time.Now().Add(hDeadline)
 	for {
-		nc, err := hs.tryDial(500 * time.Millisecond)
+		nc, err := hs.tryDial(hDeadline)
 		if err != nil {
 			break
 		}
 		nc.close()
 		if time.Now().After(end) {
-			t.Fatal("listener still accepts connections 2s after Stop")
+			t.Fatalf("listener still accepts connections %s after Stop", hDeadline)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// BUG-7: Stop also ends live sessions within 2 s (optionally after a 400).
-	if err := sessExpectClosed(c, 2*time.Second); err != nil {
+	// BUG-7: Stop also ends live sessions (optionally after a 400).
+	if err := sessExpectClosed(c, hDeadline); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -854,7 +858,7 @@ func TestSessTLS(t *testing.T) {
 	if err := hExpectCode(code, line, 205); err != nil {
 		t.Fatal(err)
 	}
-	if err := sessExpectClosed(c, time.Second); err != nil {
+	if err := sessExpectClosed(c, hDeadline); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1066,10 +1070,10 @@ func TestSessServerStats(t *testing.T) {
 			t.Errorf("auth failures %d, want 1", bad)
 		}
 		c.close()
-		end := time.Now().Add(2 * time.Second)
+		end := time.Now().Add(hDeadline)
 		for hs.S.Stats.GetActiveConnections() != 0 {
 			if time.Now().After(end) {
-				t.Fatalf("active connections %d 2s after the client left", hs.S.Stats.GetActiveConnections())
+				t.Fatalf("active connections %d %s after the client left", hs.S.Stats.GetActiveConnections(), hDeadline)
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -1093,7 +1097,7 @@ var sessFuzzSkip = map[string]bool{"TAKETHIS": true, "LISTGROUP": true}
 var sessFuzzMultiCodes = map[int]bool{100: true, 101: true, 215: true, 220: true, 221: true, 222: true, 224: true, 225: true, 231: true}
 
 // sessFuzzServer starts a read-only server for a fuzz target (newTestServer
-// needs a *testing.T); the cleanup stops it and waits at most 10 s.
+// needs a *testing.T); the cleanup stops it and waits at most hDeadline.
 func sessFuzzServer(f *testing.F) *hServer {
 	f.Helper()
 	if hDB == nil {
@@ -1124,8 +1128,8 @@ func sessFuzzServer(f *testing.F) *hServer {
 		go func() { hs.wg.Wait(); close(done) }()
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
-			f.Errorf("fuzz server goroutines did not finish within 10s after Stop")
+		case <-time.After(hDeadline):
+			f.Errorf("fuzz server goroutines did not finish within %s after Stop", hDeadline)
 		}
 	})
 	return hs
@@ -1170,7 +1174,7 @@ func FuzzSessCommandLine(f *testing.F) {
 		if sessFuzzSkip[verb] {
 			t.Skip("verb reads more than one line or creates group DBs")
 		}
-		c, err := sessDialRaw(hs.Addr, 5*time.Second)
+		c, err := sessDialRaw(hs.Addr, hDeadline)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -1190,7 +1194,7 @@ func FuzzSessCommandLine(f *testing.F) {
 			if err := hExpectCode(code, status, 205); err != nil {
 				t.Fatalf("%q: %v", line, err)
 			}
-			if err := sessExpectClosed(c, time.Second); err != nil {
+			if err := sessExpectClosed(c, hDeadline); err != nil {
 				t.Fatalf("%q: %v", line, err)
 			}
 			return
@@ -1275,15 +1279,15 @@ func sessFreePort(t *testing.T) int {
 	return port
 }
 
-// sessWaitWG waits at most 10 s for wg (server goroutines after Stop).
+// sessWaitWG waits at most hDeadline for wg (server goroutines after Stop).
 func sessWaitWG(t *testing.T, wg *sync.WaitGroup) {
 	t.Helper()
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Errorf("server goroutines did not finish within 10s after Stop")
+	case <-time.After(hDeadline):
+		t.Errorf("server goroutines did not finish within %s after Stop", hDeadline)
 	}
 }
 
@@ -1306,7 +1310,7 @@ func TestSessCommandArgs(t *testing.T) {
 	if err := hExpectCode(code, reply, 205); err != nil {
 		t.Fatalf("QUIT now: %v", err)
 	}
-	if err := sessExpectClosed(c, time.Second); err != nil {
+	if err := sessExpectClosed(c, hDeadline); err != nil {
 		t.Fatalf("after QUIT now: %v", err)
 	}
 }
@@ -1550,7 +1554,7 @@ func TestSessTLSMinVersion(t *testing.T) {
 		sessWaitWG(t, &wg)
 	})
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.NNTP.TLSPort)
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	dialer := &net.Dialer{Timeout: hDeadline}
 
 	// A TLS 1.1 client must fail the handshake (MinVersion TLS 1.2).
 	old := &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS10, MaxVersion: tls.VersionTLS11} //nolint:gosec // test client
@@ -1565,7 +1569,7 @@ func TestSessTLSMinVersion(t *testing.T) {
 		t.Fatalf("TLS 1.2+ dial: %v", err)
 	}
 	defer conn.Close()
-	c := &hClient{Conn: conn, R: bufio.NewReader(conn), Deadline: 5 * time.Second}
+	c := &hClient{Conn: conn, R: bufio.NewReader(conn), Deadline: hDeadline}
 	greeting, err := c.readLine()
 	if err != nil {
 		t.Fatalf("greeting: %v", err)

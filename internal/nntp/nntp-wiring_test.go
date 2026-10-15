@@ -138,7 +138,7 @@ func wiringTestWait(t *testing.T, ch chan struct{}, what string) {
 	t.Helper()
 	select {
 	case <-ch:
-	case <-time.After(10 * time.Second):
+	case <-time.After(hDeadline):
 		t.Fatalf("timeout waiting for %s", what)
 	}
 }

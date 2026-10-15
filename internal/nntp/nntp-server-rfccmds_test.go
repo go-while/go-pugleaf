@@ -180,7 +180,7 @@ func rfcUpgradeOver(t *testing.T, c *hClient, raw net.Conn, maxVersion uint16) *
 		t.Fatalf("client has %d unread bytes before the handshake", c.R.Buffered())
 	}
 	tc := tls.Client(raw, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12, MaxVersion: maxVersion}) //nolint:gosec // test client
-	_ = tc.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = tc.SetDeadline(time.Now().Add(hDeadline))
 	if err := tc.Handshake(); err != nil {
 		t.Fatalf("TLS handshake: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestRfcStartTLSWire(t *testing.T) {
 		if n := c.R.Buffered(); n != 0 {
 			t.Fatalf("%d unexpected bytes after 205", n)
 		}
-		_ = tc.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = tc.SetReadDeadline(time.Now().Add(hDeadline))
 		buf := make([]byte, 64)
 		if n, err := tc.Read(buf); n != 0 || !errors.Is(err, io.EOF) {
 			t.Fatalf("after QUIT: read %d bytes %q, err %v; want 0 and io.EOF", n, buf[:n], err)

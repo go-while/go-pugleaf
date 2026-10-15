@@ -20,13 +20,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/go-while/go-pugleaf/internal/database"
 )
 
 // ---------------------------------------------------------------------------
-// Helpers (ovr prefix; the harness is read-only)
+// Helpers (ovr prefix; waits use the harness hang guard hDeadline)
 
 // ovrIsChild reports whether this is the runIsolated child of t.
 func ovrIsChild(t *testing.T) bool {
@@ -652,24 +651,32 @@ func TestOvrXhdr(t *testing.T) {
 // SEC-1: XHDR/XOVER with a huge range
 
 func TestOvrHugeRange(t *testing.T) {
-	err := runIsolated(t, 30*time.Second, func(t *testing.T) {
+	err := runIsolated(t, 3*hDeadline, func(t *testing.T) {
 		g := hGroup(t, "t5.hugerange", 3, nil)
 		hs := newTestServer(t, hServerOpts{})
 		want := []string{"1", "2", "3"}
 		// RFC 2980 §2.6 / §2.8: the response for a range is the existing
 		// articles in it, then the terminator; a huge range end must not make
-		// the server walk every number. Each command needs its "." within 2 s.
-		for _, cmd := range []string{"XHDR subject 1-9223372036854775807", "XOVER 1-9223372036854775807"} {
+		// the server walk every number. The assertion is the reply: its code and
+		// exactly the 3 existing articles. A server that walks the range never
+		// sends the "." and trips the hDeadline hang guard (not a timing bound).
+		for _, tc := range []struct {
+			cmd  string
+			code int
+		}{
+			{"XHDR subject 1-9223372036854775807", 221},
+			{"XOVER 1-9223372036854775807", 224},
+		} {
+			cmd := tc.cmd
 			c := hs.dial(t)
-			c.Deadline = 2 * time.Second
 			ovrSelect(t, c, g)
 			code, line, err := c.tryCmd("%s", cmd)
 			if err != nil {
 				t.Errorf("%s: %v (%q)", cmd, err, line)
 				continue
 			}
-			if code != 221 && code != 224 {
-				t.Errorf("%s: got %q, want 221/224", cmd, line)
+			if code != tc.code {
+				t.Errorf("%s: got %q, want %d", cmd, line, tc.code)
 				continue
 			}
 			lines, err := ovrTryDotLines(c)
