@@ -21,6 +21,13 @@ import (
 var appVersion = "-unset-"
 
 func main() {
+	os.Exit(run())
+}
+
+// run returns the process exit code: 0 ok, 1 error, 130 one-shot run stopped by a signal.
+// Nothing after OpenDatabase exits the process: every return goes through the deferred
+// shutdown, which runs after the deferred close of the posting pools.
+func run() (code int) {
 	config.AppVersion = appVersion
 	database.DBidleTimeOut = 15 * time.Second
 	database.NO_CACHE_BOOT = true // prevents booting caches
@@ -39,7 +46,7 @@ func main() {
 
 	if *showHelp {
 		showUsageExamples()
-		os.Exit(0)
+		return 0
 	}
 
 	// Initialize database
@@ -48,9 +55,14 @@ func main() {
 
 	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+		log.Printf("Failed to initialize database: %v", err)
+		return 1
 	}
-	defer db.Shutdown()
+	defer func() {
+		if !shutdown(db) && code == 0 {
+			code = 1
+		}
+	}()
 
 	// Handle cleanup flags
 	if *cleanupPosted || *cleanupOlder > 0 {
@@ -64,32 +76,50 @@ func main() {
 
 		deletedCount, err := db.CleanupPostedEntries(*cleanupPosted, *cleanupOlder)
 		if err != nil {
-			log.Fatalf("Failed to cleanup entries: %v", err)
+			log.Printf("Failed to cleanup entries: %v", err)
+			return 1
 		}
 		log.Printf("Successfully deleted %d entries from post_queue table", deletedCount)
-		os.Exit(0)
+		return 0
 	}
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
 	shutdownChan := make(chan struct{})
+	runDone := make(chan struct{})
+	defer close(runDone)
 
 	go func() {
-		<-sigChan
-		log.Printf("Received shutdown signal, initiating graceful shutdown...")
-		close(shutdownChan)
+		select {
+		case <-sigChan:
+			log.Printf("Received shutdown signal, initiating graceful shutdown...")
+			close(shutdownChan)
+		case <-runDone:
+		}
 	}()
+
+	// Rows left in_processing by a killed or crashed earlier run are never selected again:
+	// return them to pending before this run selects. This assumes only one post-queue runs
+	// at a time: the web cron scheduler runs the executions of a job one after another
+	// (internal/web/cronjobs.go runJobScheduler waits for executeJob). A second post-queue
+	// started at the same time would reset rows the first one is posting (possible repost).
+	if err := db.ResetAllPostQueueProcessing(); err != nil {
+		log.Printf("Failed to reset stale in_processing post_queue entries: %v", err)
+		return 1
+	}
 
 	// Get providers with posting enabled
 	providers, err := getPostingProviders(db)
 	if err != nil {
-		log.Fatalf("Failed to get posting providers: %v", err)
+		log.Printf("Failed to get posting providers: %v", err)
+		return 1
 	}
 
 	if len(providers) == 0 {
 		log.Printf("No providers with posting enabled found")
-		os.Exit(0)
+		return 0
 	}
 
 	//log.Printf("Found %d providers with posting enabled", len(providers))
@@ -97,7 +127,8 @@ func main() {
 	// Create connection pools for posting providers
 	pools, err := createPostingPools(providers)
 	if err != nil {
-		log.Fatalf("Failed to create posting pools: %v", err)
+		log.Printf("Failed to create posting pools: %v", err)
+		return 1
 	}
 	defer func() {
 		for _, pool := range pools {
@@ -112,13 +143,26 @@ func main() {
 	//log.Printf("Starting post queue processing...")
 
 	if !*daemon {
+		// A shutdown signal stops the batch: the rows not posted yet go back to pending.
+		go func() {
+			select {
+			case <-shutdownChan:
+				posterManager.Stop()
+			case <-runDone:
+			}
+		}()
 		done, err := posterManager.ProcessPendingPosts(*limit)
 		if err != nil {
 			log.Printf("Error processing pending posts: %v", err)
-			os.Exit(1)
+			return 1
 		}
 		log.Printf("Processed %d pending posts", done)
-		os.Exit(0)
+		select {
+		case <-shutdownChan:
+			return 130
+		default:
+		}
+		return 0
 	}
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -126,7 +170,19 @@ func main() {
 	wg.Wait()
 
 	log.Printf("Post Queue Tool has shut down gracefully")
+	return 0
+}
 
+// shutdown stops the database. OpenDatabase adds the batch orchestrators to db.WG,
+// so StopChan must be closed and WG waited for before Shutdown.
+func shutdown(db *database.Database) bool {
+	close(db.StopChan)
+	db.WG.Wait()
+	if err := db.Shutdown(); err != nil {
+		log.Printf("Failed to shutdown database: %v", err)
+		return false
+	}
+	return true
 }
 
 // showUsageExamples displays usage examples
