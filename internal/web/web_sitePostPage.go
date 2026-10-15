@@ -24,6 +24,23 @@ import (
 
 var WebPostingBackOff = 42 * time.Second // TODO: make configurable
 
+// maxWebPostSubjectOctets is the longest Subject a web post accepts: the stored header line
+// "Subject: <value>" must stay within the RFC 5322 line limit of 998 octets. A longer Subject
+// is refused (the poster shortens it), not folded: a word longer than the limit cannot be
+// folded, and a silently cut Subject would post something the user did not write.
+const maxWebPostSubjectOctets = 998 - len("Subject: ")
+
+// cutToOctets returns s cut to at most n bytes without splitting a UTF-8 sequence.
+func cutToOctets(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 // PostPageData represents data for posting page
 type PostPageData struct {
 	TemplateData
@@ -104,10 +121,13 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 					} else {
 						article.Subject = models.ConvertToUTF8(reply_article.Subject)
 					}
+					// The submit refuses a longer Subject: start the form within the limit.
+					article.Subject = cutToOctets(article.Subject, maxWebPostSubjectOctets)
 					// Quote the original message body
 					if reply_article.BodyText != "" {
-						// Clean the body text first to remove HTML entities
-						cleanBodyText := models.ConvertToUTF8(reply_article.BodyText)
+						// Decode the body like the article page shows it (its Content-Transfer-Encoding
+						// and charset); encoded words and HTML entities in a body are text.
+						cleanBodyText := models.DecodeBodyText(reply_article.BodyText, reply_article.HeadersJSON)
 						lines := strings.Split(cleanBodyText, "\n")
 						var quotedLines []string
 
@@ -253,8 +273,8 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		if subject == "" {
 			errors = append(errors, "Subject is required")
 		}
-		if len(subject) > 1000 {
-			errors = append(errors, "Subject limited to 1000 characters")
+		if len(subject) > maxWebPostSubjectOctets {
+			errors = append(errors, fmt.Sprintf("Subject limited to %d bytes", maxWebPostSubjectOctets))
 		}
 		if body == "" {
 			errors = append(errors, "Message body is required")
@@ -388,7 +408,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	if isReply {
 		log.Printf("Setting up References header for reply to message ID: %s", messageID)
 		// Try to find the original article to get its References
-		originalRefs := s.lookupReplyReferences(newsgroups, messageID)
+		originalRefs := s.lookupReplyReferences(c, newsgroups, messageID)
 		refSlice = utils.ParseReferences(originalRefs + " " + messageID)
 		references = strings.Join(refSlice, " ")
 	}
@@ -486,7 +506,10 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 // lookupReplyReferences returns the References header of the article messageID in the first
 // newsgroup that has it (empty when none has it). Each group DB is returned before the next one
 // is opened, so a crosspost never holds several group DBs until the handler ends.
-func (s *WebServer) lookupReplyReferences(newsgroups []string, messageID string) string {
+// An article hidden for the requester (D2: hide > 0 and not an admin, flags read from the
+// group DB like the article routes) gives no References: its thread data is not copied into
+// a reply. The reply still names the message-id itself.
+func (s *WebServer) lookupReplyReferences(c *gin.Context, newsgroups []string, messageID string) string {
 	for _, newsgroup := range newsgroups {
 		groupDB, err := s.DB.GetGroupDB(newsgroup)
 		if err != nil {
@@ -494,13 +517,30 @@ func (s *WebServer) lookupReplyReferences(newsgroups []string, messageID string)
 			continue
 		}
 		originalArticle, err := s.DB.GetArticleByMessageID(groupDB, messageID)
+		var hide int
+		var flagErr error
+		if err == nil {
+			_, _, hide, flagErr = s.DB.GetArticleFlagsByMessageID(groupDB, messageID)
+		}
 		groupDB.Return()
 		if err != nil {
 			log.Printf("Warning: Failed to find original article %s in %s: %v", messageID, newsgroup, err)
 			continue
 		}
+		if flagErr != nil {
+			if !errors.Is(flagErr, sql.ErrNoRows) {
+				log.Printf("[WEB]: SitePost references: GetArticleFlagsByMessageID(%s): %v", newsgroup, flagErr)
+			}
+			continue
+		}
+		if s.articleHiddenFor(c, hide) {
+			return ""
+		}
 		// The first group that has the article decides, even when its References are empty.
-		return originalArticle.References
+		originalArticle.Mux.RLock()
+		refs := originalArticle.References
+		originalArticle.Mux.RUnlock()
+		return refs
 	}
 	return ""
 }

@@ -302,9 +302,7 @@ func decodeBodyText(body, headers string) string {
 	if mediaType == "" || strings.HasPrefix(mediaType, "text/") {
 		switch strings.ToLower(rawHeaderValue(headers, "Content-Transfer-Encoding")) {
 		case "quoted-printable":
-			if decoded, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(body))); err == nil {
-				data = decoded
-			}
+			data = decodeQPBody(body)
 		case "base64":
 			compact := strings.Map(func(r rune) rune {
 				if unicode.IsSpace(r) {
@@ -318,6 +316,46 @@ func decodeBodyText(body, headers string) string {
 		}
 	}
 	return bodyBytesToUTF8(data, charset)
+}
+
+// DecodeBodyText decodes a stored (raw) article body for display: the
+// Content-Transfer-Encoding and charset of headers (the raw header block,
+// Article.HeadersJSON) are applied, RFC 2047 encoded words and HTML entities in
+// the body stay text. The result is not HTML-escaped. Use it instead of
+// ConvertToUTF8 for article bodies (preview API, reply quoting).
+func DecodeBodyText(body, headers string) string {
+	return decodeBodyText(body, headers)
+}
+
+// DisplayFrom returns the author name shown for a raw From header: the display
+// name (or the local part of the address), never an address domain. It is the
+// text Overview/Article PrintSanitized("from") shows, before HTML escaping.
+func DisplayFrom(raw string) string {
+	return displayFrom(raw)
+}
+
+// decodeQPBody decodes a quoted-printable body. When the whole body does not
+// decode (a malformed sequence or a control byte somewhere), it decodes line by
+// line and keeps only the lines that fail as they are, so one bad line does not
+// leave the whole body encoded. Each line is decoded with its line end, so a
+// soft line break ("=" at the end of a line) still joins it with the next one.
+func decodeQPBody(body string) []byte {
+	if decoded, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(body))); err == nil {
+		return decoded
+	}
+	out := make([]byte, 0, len(body))
+	for _, line := range strings.SplitAfter(body, "\n") {
+		if line == "" {
+			continue
+		}
+		decoded, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(line)))
+		if err != nil {
+			out = append(out, line...)
+			continue
+		}
+		out = append(out, decoded...)
+	}
+	return out
 }
 
 // bodyBytesToUTF8 converts body bytes from the declared charset to UTF-8. Without a

@@ -511,7 +511,13 @@ func (s *WebServer) getArticlePreview(c *gin.Context) {
 
 	// Create preview response with limited content
 	// Plain text: the browser inserts it with textContent (thread-tree.js renderArticlePreview), never as HTML.
-	fullBodyDecoded := models.ConvertToUTF8(article.BodyText)
+	// Decoded like the article page body (Content-Transfer-Encoding and charset of the stored
+	// headers); encoded words and HTML entities in a body are text and stay as they are.
+	// The article may be shared through the article cache: read it under its lock.
+	article.Mux.RLock()
+	bodyText, headers := article.BodyText, article.HeadersJSON
+	article.Mux.RUnlock()
+	fullBodyDecoded := models.DecodeBodyText(bodyText, headers)
 	bodyPreview := truncateRunes(fullBodyDecoded, 500)
 
 	response := gin.H{

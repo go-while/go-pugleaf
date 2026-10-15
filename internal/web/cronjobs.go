@@ -2,6 +2,7 @@ package web
 
 import (
 	"bufio"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -28,7 +29,15 @@ type CronJobManager struct {
 
 	reloadEvery time.Duration                     // how often StartCronManager looks for new jobs
 	loadJobs    func() ([]*models.CronJob, error) // job source (db.GetAllCronJobs); a field so tests can fail it
+
+	// ended keeps the log of a job whose scheduler ended (disabled, stopped, row gone) until
+	// the job starts again, so the admin can still read why and how it ended. Guarded by
+	// mutex; created on first use; at most maxEndedJobLogs entries of at most maxLogLines lines.
+	ended map[int64][]string
 }
+
+// maxEndedJobLogs bounds how many ended jobs keep their log (see CronJobManager.ended).
+const maxEndedJobLogs = 256
 
 // CronJob represents a currently running or completed cron job
 type CronJob struct {
@@ -225,7 +234,9 @@ func parseStartTime(timeStr string) (hour, minute int, err error) {
 	return hour, minute, nil
 }
 
-// calculateNextRun calculates the next run time for a job considering start_hour_minute
+// calculateNextRun calculates the next run time for a job considering start_hour_minute.
+// The handlers refuse an interval below one minute; a row that has one anyway runs back to back
+// (next run = now), with or without a start time, instead of dividing by zero.
 func calculateNextRun(job *models.CronJob, now time.Time) (time.Time, error) {
 	intervalDuration := time.Duration(job.IntervalMinutes) * time.Minute
 	// If no start time specified, just run based on interval from now
@@ -248,6 +259,9 @@ func calculateNextRun(job *models.CronJob, now time.Time) (time.Time, error) {
 	}
 
 	// We've passed start time - schedule next run based on interval
+	if intervalDuration <= 0 {
+		return now, nil // no interval to step by (and no division by zero)
+	}
 	// Calculate how many intervals have passed since the start time
 	elapsed := now.Sub(jobStartTime)
 	intervalsPassed := int(elapsed / intervalDuration)
@@ -257,13 +271,21 @@ func calculateNextRun(job *models.CronJob, now time.Time) (time.Time, error) {
 	return nextRun, nil
 }
 
-// GetJobOutput returns the last output lines for a specific cron job
+// GetJobOutput returns the last output lines for a specific cron job: of the running
+// registration, else the log the job had when its scheduler last ended (kept until it starts
+// again).
 func (cm *CronJobManager) GetJobOutput(jobID int64) []string {
 	if cm == nil { // cron jobs disabled (-no-cronjobs)
 		return nil
 	}
 	cm.mutex.RLock()
 	job, exists := cm.jobs[jobID]
+	ended, hasEnded := cm.ended[jobID]
+	var endedCopy []string
+	if !exists && hasEnded {
+		endedCopy = make([]string, len(ended))
+		copy(endedCopy, ended)
+	}
 	cm.mutex.RUnlock()
 
 	if exists {
@@ -273,8 +295,40 @@ func (cm *CronJobManager) GetJobOutput(jobID int64) []string {
 		job.mutex.RUnlock()
 		return result
 	}
+	if hasEnded {
+		return endedCopy
+	}
 
 	return []string{"No output available for this job yet."}
+}
+
+// forgetEndedOutput drops the kept log of an ended job (the admin deleted the job).
+func (cm *CronJobManager) forgetEndedOutput(jobID int64) {
+	if cm == nil {
+		return
+	}
+	cm.mutex.Lock()
+	delete(cm.ended, jobID)
+	cm.mutex.Unlock()
+}
+
+// keepEndedOutputLocked stores the log of job, whose registration was just removed, in
+// cm.ended. Caller holds cm.mutex (write lock).
+func (cm *CronJobManager) keepEndedOutputLocked(job *CronJob) {
+	job.mutex.RLock()
+	output := make([]string, len(job.Output)) // right-sized: the live buffer has maxLogLines capacity
+	copy(output, job.Output)
+	job.mutex.RUnlock()
+	if cm.ended == nil {
+		cm.ended = make(map[int64][]string)
+	}
+	if _, ok := cm.ended[job.ID]; !ok && len(cm.ended) >= maxEndedJobLogs {
+		for id := range cm.ended { // drop any one entry to stay within the bound
+			delete(cm.ended, id)
+			break
+		}
+	}
+	cm.ended[job.ID] = output
 }
 
 var ErrCronExists error = fmt.Errorf("cronExists")
@@ -362,6 +416,8 @@ func (cm *CronJobManager) startJob(cronJob *models.CronJob) error {
 	}
 
 	cm.jobs[cronJob.ID] = job
+	// The new run has its own log from here on: drop the one kept from the last run.
+	delete(cm.ended, cronJob.ID)
 
 	// Start goroutine to handle job execution
 	go cm.runJobScheduler(job)
@@ -385,6 +441,11 @@ func (cm *CronJobManager) runJobScheduler(job *CronJob) {
 		cronJob, err := cm.db.GetCronJobByID(job.ID)
 		if err != nil {
 			log.Printf("[CRON] Failed to get cron job %d: %v", job.ID, err)
+			if errors.Is(err, sql.ErrNoRows) {
+				// The job was deleted: it never starts again, so keep no log for it.
+				cm.forgetJob(job)
+				cm.forgetEndedOutput(job.ID)
+			}
 			return
 		}
 		if !cronJob.Enabled {
@@ -456,14 +517,16 @@ func (cm *CronJobManager) runJobScheduler(job *CronJob) {
 	}
 }
 
-// forgetJob removes job from cm.jobs when it is still the registered instance for its ID.
-// The pointer comparison keeps a newer registration of the same ID (started by a reload
-// after this scheduler ended) from being deleted by the old scheduler's deferred call.
+// forgetJob removes job from cm.jobs when it is still the registered instance for its ID,
+// keeping its log in cm.ended until the job starts again. The pointer comparison keeps a newer
+// registration of the same ID (started by a reload after this scheduler ended) from being
+// deleted by the old scheduler's deferred call.
 func (cm *CronJobManager) forgetJob(job *CronJob) {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
 	if cm.jobs[job.ID] == job {
 		delete(cm.jobs, job.ID)
+		cm.keepEndedOutputLocked(job)
 	}
 }
 

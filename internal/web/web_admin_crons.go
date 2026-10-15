@@ -185,9 +185,17 @@ func (s *WebServer) adminToggleCronJob(c *gin.Context) {
 		return
 	}
 
-	err = s.DB.ToggleCronJob(cronID)
+	// Conditional write: flips only from the state checked above, so a concurrent toggle (or an
+	// edit) between the read and this write cannot be undone, and enabling stays tied to the
+	// -edit-cronjobs check of the state it was made for.
+	changed, err := s.DB.SetCronJobEnabled(cronID, !cronJob.Enabled, cronJob.Enabled)
 	if err != nil {
 		session.SetError("Failed to toggle cron job: " + err.Error())
+		c.Redirect(http.StatusSeeOther, "/admin?tab=crons")
+		return
+	}
+	if !changed {
+		session.SetError("Cron job status was already changed (reload the page and try again)")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=crons")
 		return
 	}
@@ -225,6 +233,8 @@ func (s *WebServer) adminDeleteCronJob(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, "/admin?tab=crons")
 		return
 	}
+	// A deleted job never starts again: drop the log kept from its last run (nil-safe).
+	s.CronManager.forgetEndedOutput(cronID)
 
 	session.SetSuccess("Cron job deleted successfully")
 	c.Redirect(http.StatusSeeOther, "/admin?tab=crons")
