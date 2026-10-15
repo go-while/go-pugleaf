@@ -283,8 +283,8 @@ for f in *.sh scripts/*.sh; do bash -n "$f"; done
 - D-N1: `-plaintextauth` default stays `allow`? default yes (no behaviour change for existing clients).
 
 ## Outcome (2026-10-15)
-- **Integration branch:** `plan-followup-leftovers` from `testing-001` @ 793d361. Not yet merged into `testing-001`
-  (user decision). Nothing pushed.
+- **Integration branch:** `plan-followup-leftovers` from `testing-001` @ 793d361, merged into `testing-001` as bb75b52
+  (`git merge --no-ff`, 2026-10-15). Nothing pushed.
 - **Waves:** 0 inline (docs), 1 with five parallel slices (all reviewed; fl-ci-toolchain merged first), 2 inline
   (cross-file follow-ups c7ef828, docs 9bd4706, test fixes c18d8de, acd203f: `GetProviders` NULL-safe, found by the verifier).
 - **Worktrees:** `/tank0/claude/trees/go-pugleaf/agent-{a90563af7d1eb79dc,a5c80dc73763daa99,a74c905fed0f4fc98,
