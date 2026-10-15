@@ -148,8 +148,61 @@ func (tree *ThreadTree) printNodeASCII(node *TreeNode, prefix string, isLast boo
 	}
 }
 
-// GetThreadTreeHTML generates HTML representation of the tree (for web display)
+// RedactedCopy returns a deep copy of the tree (nodes and NodeMap) in which every node whose
+// article is hidden (Overview.Hide > 0) has no Overview. The node itself, its number and its
+// children stay: the thread structure is public, the hidden article's data is not.
+// The receiver is not modified, so cached trees can be redacted per request.
+func (tree *ThreadTree) RedactedCopy() *ThreadTree {
+	if tree == nil {
+		return nil
+	}
+	cp := *tree
+	copies := make(map[*TreeNode]*TreeNode, len(tree.NodeMap)+1)
+	var copyNode func(node *TreeNode) *TreeNode
+	copyNode = func(node *TreeNode) *TreeNode {
+		if node == nil {
+			return nil
+		}
+		if done, ok := copies[node]; ok {
+			return done
+		}
+		n := *node
+		copies[node] = &n
+		if node.ParentArticle != nil {
+			parent := *node.ParentArticle
+			n.ParentArticle = &parent
+		}
+		if node.Overview != nil && node.Overview.Hide > 0 {
+			n.Overview = nil
+		}
+		if node.Children != nil {
+			n.Children = make([]*TreeNode, len(node.Children))
+			for i, child := range node.Children {
+				n.Children[i] = copyNode(child)
+			}
+		}
+		return &n
+	}
+	cp.RootNode = copyNode(tree.RootNode)
+	if tree.NodeMap != nil {
+		cp.NodeMap = make(map[int64]*TreeNode, len(tree.NodeMap))
+		for num, node := range tree.NodeMap {
+			cp.NodeMap[num] = copyNode(node)
+		}
+	}
+	return &cp
+}
+
+// GetThreadTreeHTML generates HTML representation of the tree (for web display).
+// It shows hidden articles like every other article; see GetThreadTreeHTMLFor.
 func (tree *ThreadTree) GetThreadTreeHTML(groupName string) template.HTML {
+	return tree.GetThreadTreeHTMLFor(groupName, true)
+}
+
+// GetThreadTreeHTMLFor generates the HTML of the tree. With showHidden false (non-admin
+// viewers), a hidden article (Overview.Hide > 0) is rendered as "[hidden article]" without
+// subject, author, date or link; its children are rendered as usual.
+func (tree *ThreadTree) GetThreadTreeHTMLFor(groupName string, showHidden bool) template.HTML {
 	if tree.RootNode == nil {
 		return template.HTML("<p>No tree data available</p>")
 	}
@@ -165,7 +218,7 @@ func (tree *ThreadTree) GetThreadTreeHTML(groupName string) template.HTML {
 	<ul class="tree-root">
 `, tree.ThreadRoot, escGroup, tree.TotalNodes, tree.MaxDepth, tree.LeafCount)
 
-	out += tree.getNodeHTML(tree.RootNode, groupName)
+	out += tree.getNodeHTML(tree.RootNode, groupName, showHidden)
 	out += `
 	</ul>
 </div>`
@@ -173,7 +226,39 @@ func (tree *ThreadTree) GetThreadTreeHTML(groupName string) template.HTML {
 	return template.HTML(out)
 }
 
-func (tree *ThreadTree) getNodeHTML(node *TreeNode, groupName string) string {
+func (tree *ThreadTree) getNodeHTML(node *TreeNode, groupName string, showHidden bool) string {
+	if !showHidden && node.Overview != nil && node.Overview.Hide > 0 {
+		// Hidden article for a non-admin viewer: number and depth (the structure is public) and
+		// the literal "[hidden article]"; no subject, author, date, link or preview button.
+		// Not a .node-link, so thread-tree.js does not try to preview it.
+		expandClass := ""
+		toggle := `<span class="node-toggle"></span>`
+		if len(node.Children) > 0 {
+			expandClass = " expandable"
+			toggle = `<details open class="tree-details" style="display: inline;">
+			<summary class="node-toggle" style="display: inline; list-style: none;">
+				<span class="toggle-icon"></span>
+			</summary>
+		</details>`
+		}
+		out := fmt.Sprintf(`
+<li class="tree-node%s tree-node-hidden" data-article-num="%d" data-depth="%d">
+	<div class="node-content">
+		%s
+		<div class="node-hidden">
+			<span class="node-subject">%s</span>
+		</div>
+	</div>`, expandClass, node.ArticleNum, node.Depth, toggle, html.EscapeString("[hidden article]"))
+		if len(node.Children) > 0 {
+			out += `<ul class="tree-children">`
+			for _, child := range node.Children {
+				out += tree.getNodeHTML(child, groupName, showHidden)
+			}
+			out += `</ul>`
+		}
+		return out + `</li>`
+	}
+
 	subject := "Unknown Subject"
 	author := "Unknown Author"
 	dateStr := "Unknown Date"
@@ -224,7 +309,7 @@ func (tree *ThreadTree) getNodeHTML(node *TreeNode, groupName string) string {
 
 		out += `<ul class="tree-children">`
 		for _, child := range node.Children {
-			out += tree.getNodeHTML(child, groupName)
+			out += tree.getNodeHTML(child, groupName, showHidden)
 		}
 		out += `</ul>`
 	} else {
