@@ -103,9 +103,15 @@ type SQ3batch struct {
 	TmpStringSlices    chan []string          // holds temporary string slices for valuesClauses, messageIDs etc
 	TmpStringPtrSlices chan []*string         // holds temporary string slices for valuesClauses, messageIDs etc
 	TmpInterfaceSlices chan []interface{}     // holds temporary interface slices for args in threading operations
-	queued             int                    // number of queued articles for batch processing
+	queued             int                    // articles routed into a BATCHchan and not yet batched (GMux); counted per article by BatchDivider
 	LimitChan          chan struct{}          // limits number of concurrent db batch threads
 	LPending           chan struct{}          // limits number of pending db batch threads
+
+	// dividerChan carries captured articles to BatchDivider. It belongs to this SQ3batch
+	// (it was a package global shared by every Database, OPS-1d).
+	dividerChan     chan *models.Article
+	captureDropOnce sync.Once // logs the first capture dropped after Shutdown
+	negativeOnce    sync.Once // logs the first time queued went negative (A-db-9)
 }
 
 type BatchTasks struct {
@@ -147,6 +153,7 @@ func NewSQ3batch(db *Database) *SQ3batch {
 		TmpInterfaceSlices: make(chan []interface{}, 128),
 		LimitChan:          make(chan struct{}, db.dbconfig.MaxDBthreads),
 		LPending:           make(chan struct{}, 1),
+		dividerChan:        make(chan *models.Article, 128),
 	}
 	batch.orchestrator = NewBatchOrchestrator(batch)
 	return batch
@@ -160,33 +167,63 @@ func (sq *SQ3batch) BatchCaptureOverviewForLater(newsgroupPtr *string, article *
 	}
 	article.Mux.Unlock()
 	article.ProcessQueue <- newsgroupPtr // Add to process queue for later processing
-	BatchDividerChan <- article
+	// After Shutdown nobody reads dividerChan any more (BatchDivider returned): drop the
+	// capture instead of parking this goroutine for good.
+	select {
+	case sq.dividerChan <- article:
+	case <-sq.db.backgroundStop():
+		sq.captureDropOnce.Do(func() {
+			log.Printf("[BATCH] capture after Shutdown dropped")
+		})
+	}
 }
 
+// expireCacheEvery is how often ExpireCache looks for idle per-group batch state.
+const expireCacheEvery = 15 * time.Second
+
+// ExpireCache periodically removes idle per-group batch state from TasksMap (keeps memory
+// bounded during scans). It returns when the Database's background stop channel is closed
+// (Shutdown); a Database without one (tests) keeps it running.
 func (sq *SQ3batch) ExpireCache() {
-	time.Sleep(15 * time.Second)
+	stop := sq.db.backgroundStop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-time.After(expireCacheEvery):
+		}
+		sq.expireIdleTasks(time.Now())
+	}
+}
+
+// expireIdleTasks removes the tasks whose Expires is before now and that have no work: a task
+// still processing or with articles in its BATCHchan is kept (A-db-5), so a writer never ends
+// up with a task (and pointer) that is no longer in the map. It returns how many it removed.
+func (sq *SQ3batch) expireIdleTasks(now time.Time) (expired int) {
 	sq.GMux.Lock()
 	defer sq.GMux.Unlock()
 	for k, task := range sq.TasksMap {
 		task.Mux.Lock()
-		if task.Expires.Before(time.Now()) && len(task.BATCHchan) == 0 {
-			//log.Printf("[BATCH] Expiring cache for newsgroup '%s'", k)
-			// Close the channel to stop further processing
-			// Remove from TasksMap
-			delete(sq.TasksMap, k)
+		if task.BATCHprocessing || len(task.BATCHchan) > 0 || !task.Expires.Before(now) {
 			task.Mux.Unlock()
 			continue
 		}
-		//log.Printf("[BATCH] Keeping cache for newsgroup '%s', expires at %v", k, task.Expires)
+		delete(sq.TasksMap, k)
 		task.Mux.Unlock()
+		expired++
 	}
-	go sq.ExpireCache()
+	return expired
 }
 
-// GetNewsgroupPointer returns a pointer to the newsgroup name in TasksMap
+// GetNewsgroupPointer returns a pointer to the newsgroup name in TasksMap. A hit renews the
+// task's expiry, so ExpireCache does not replace the pointer under a reader that just got it
+// (A-db-5).
 func (sq *SQ3batch) GetNewsgroupPointer(newsgroup string) *string {
 	sq.GMux.RLock() // Lock the mutex to ensure thread safety
 	if ptr, exists := sq.TasksMap[newsgroup]; exists {
+		ptr.Mux.Lock()
+		ptr.Expires = time.Now().Add(120 * time.Second)
+		ptr.Mux.Unlock()
 		sq.GMux.RUnlock()
 		return ptr.Newsgroup
 	}
@@ -270,7 +307,7 @@ func (l *logRateLimiter) allow(key string) bool {
 
 // CheckNoMoreWorkInMaps checks if all batch channels are empty and not processing
 func (sq *SQ3batch) CheckNoMoreWorkInMaps() bool {
-	if len(BatchDividerChan) > 0 {
+	if len(sq.dividerChan) > 0 {
 		return false
 	}
 	if sq.proc == nil {
@@ -766,7 +803,15 @@ drainChannel:
 	defer func(batched int) {
 		sq.GMux.Lock()
 		sq.queued -= batched
+		queued := sq.queued
 		sq.GMux.Unlock()
+		if queued < 0 {
+			// BatchDivider counts every article before it enters a BATCHchan, so this
+			// means something put articles there without counting them (A-db-9).
+			sq.negativeOnce.Do(func() {
+				log.Printf("[BATCH] WARNING: queued counter went negative (%d) after a batch of %d for '%s'", queued, batched, *task.Newsgroup)
+			})
+		}
 	}(len(batches))
 	log.Printf("[BATCH] processNewsgroupBatch: ng: '%s' with %d articles (more queued: %d)", *task.Newsgroup, len(batches), len(task.BATCHchan))
 
@@ -1034,7 +1079,12 @@ func (sq *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Art
 	return nil
 }
 
-const query_processOverviewBatch = `INSERT OR IGNORE INTO articles (message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, downloaded, imported_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+// query_processOverviewBatch assigns article_num from the group's article_num_seq high-water
+// mark (migration 0010, INT-5): numbers of deleted articles are never handed out again. Each
+// insert of the batch transaction sees the trigger's update of the previous one, so numbers stay
+// consecutive; an ignored duplicate fires no trigger and consumes no number. Without the seq row
+// (before the migration ran) the subquery is NULL and SQLite falls back to max(rowid)+1.
+const query_processOverviewBatch = `INSERT OR IGNORE INTO articles (article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, downloaded, imported_at) VALUES ((SELECT last_num + 1 FROM article_num_seq WHERE id = 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 const query_processOverviewBatch2 = `SELECT message_id, article_num FROM articles WHERE message_id IN (`
 
 // processSingleUnifiedArticleBatch handles a single batch that's within SQLite limits
@@ -1813,18 +1863,24 @@ fillQ:
 	return haswork
 }
 
-var BatchDividerChan = make(chan *models.Article, 128)
-
-// BatchDivider reads incoming articles and routes them to the appropriate per-newsgroup channel
-// It also enforces the global MaxQueued limit to prevent overload
-// Each newsgroup channel is created lazily on first use
+// BatchDivider reads incoming articles from dividerChan and routes them to the appropriate
+// per-newsgroup channel. It also enforces the global MaxQueued limit to prevent overload:
+// every article is counted in sq.queued before it enters a BATCHchan (processNewsgroupBatch
+// subtracts what it drained), and above 80 % of MaxQueued it waits until the live count is
+// down to 20 % (A-db-9). Each newsgroup channel is created lazily on first use.
+// It returns when the Database's background stop channel is closed (Shutdown).
 func (sq *SQ3batch) BatchDivider() {
-	var tmpQueued, realQueue int
-	var maxQueue int = sq.maxQueued / 100 * 80
-	var target int = sq.maxQueued / 100 * 20
+	stop := sq.db.backgroundStop()
+	maxQueue := sq.maxQueued * 80 / 100
+	target := sq.maxQueued * 20 / 100
 	for {
 		var newsgroupPtr *string
-		article := <-BatchDividerChan
+		var article *models.Article
+		select {
+		case <-stop:
+			return
+		case article = <-sq.dividerChan:
+		}
 		if article == nil {
 			log.Printf("[BATCH-DIVIDER] Received nil task?!")
 			continue
@@ -1838,38 +1894,63 @@ func (sq *SQ3batch) BatchDivider() {
 			log.Printf("Error in BatchDivider, received task (%#v) but no newsgroupPtr", article)
 			continue
 		}
-		//log.Printf("[BATCH-DIVIDER] Received task for group '%s'", *task.Newsgroup)
-		//if TaskChans[newsgroupPtr] == nil {
-		tasks := sq.GetOrCreateTasksMapKey(*newsgroupPtr)
+		tasks := sq.dividerTasks(*newsgroupPtr)
+
+		sq.GMux.RLock()
+		realQueue := sq.queued
+		sq.GMux.RUnlock()
+		if realQueue >= maxQueue {
+			log.Printf("[BATCH-DIVIDER] MaxQueued reached (%d), waiting to enqueue more (current Queue=%d, target=%d)", sq.maxQueued, realQueue, target)
+		brake:
+			for {
+				select {
+				case <-stop:
+					return
+				case <-time.After(16 * time.Millisecond):
+				}
+				sq.GMux.RLock()
+				realQueue = sq.queued
+				sq.GMux.RUnlock()
+				if realQueue <= target {
+					break brake
+				}
+			}
+		}
+		// Count before the send: a batch that drains the article right away must not
+		// subtract it before it was added.
+		sq.GMux.Lock()
+		sq.queued++
+		sq.GMux.Unlock()
+		select {
+		case tasks.BATCHchan <- article:
+		case <-stop:
+			sq.GMux.Lock()
+			sq.queued--
+			sq.GMux.Unlock()
+			return
+		}
+	}
+}
+
+// dividerTasks returns the task of newsgroup that BatchDivider sends into: it is in TasksMap,
+// its BATCHchan exists and its expiry was renewed under GMux, so ExpireCache cannot remove it
+// between this call and the send (A-db-5).
+func (sq *SQ3batch) dividerTasks(newsgroup string) *BatchTasks {
+	for {
+		tasks := sq.GetOrCreateTasksMapKey(newsgroup)
+		sq.GMux.RLock()
+		if sq.TasksMap[newsgroup] != tasks {
+			// expired between the lookup and here: look it up again
+			sq.GMux.RUnlock()
+			continue
+		}
 		tasks.Mux.Lock()
-		// Lazily create the per-group channel on first enqueue
 		if tasks.BATCHchan == nil {
 			tasks.BATCHchan = make(chan *models.Article, sq.maxDBbatch)
 		}
+		tasks.Expires = time.Now().Add(120 * time.Second)
 		tasks.Mux.Unlock()
-		if realQueue >= maxQueue {
-			log.Printf("[BATCH-DIVIDER] MaxQueued reached (%d), waiting to enqueue more (current Queue=%d, tmpQueued=%d)", sq.maxQueued, realQueue, tmpQueued)
-
-			for {
-				time.Sleep(16 * time.Millisecond)
-				sq.GMux.RLock()
-				if sq.queued <= target {
-					realQueue = sq.queued
-					sq.GMux.RUnlock()
-					break
-				}
-				sq.GMux.RUnlock()
-			}
-		}
-		tasks.BATCHchan <- article
-		tmpQueued++
-		if tmpQueued >= sq.maxDBbatch {
-			sq.GMux.Lock()
-			//log.Printf("[BATCH-DIVIDER] Enqueued %d articles to group '%s' (current Queue=%d, tmpQueued=%d)", tmpQueued, *newsgroupPtr, realQueue, tmpQueued)
-			sq.queued += tmpQueued
-			tmpQueued = 0
-			realQueue = sq.queued
-			sq.GMux.Unlock()
-		}
+		sq.GMux.RUnlock()
+		return tasks
 	}
 }

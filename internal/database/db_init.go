@@ -226,7 +226,7 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 	//log.Printf("pugLeaf DB init config: %+v NO_CACHE_BOOT=%t", dbconfig, NO_CACHE_BOOT)
 	if !NO_CACHE_BOOT {
 		db.SectionsCache = newGroupSectionDBCacheStop(db.backgroundStop())
-		db.MemThreadCache = NewMemCachedThreads()
+		db.MemThreadCache = NewMemCachedThreadsStop(db.backgroundStop())
 		db.HierarchyCache = NewHierarchyCache() // Initialize hierarchy cache for fast browsing
 		// Start hierarchy cache warming in background
 		go db.HierarchyCache.WarmCache(db)
