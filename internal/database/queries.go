@@ -692,8 +692,10 @@ func (db *Database) GetThreads(groupDB *GroupDB) ([]*models.Thread, error) {
 	return out, nil
 }
 
-// InsertOverview inserts an overview entry using the articles table (unified schema)
-const query_InsertOverview = `INSERT INTO articles (subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+// InsertOverview inserts an overview entry using the articles table (unified schema).
+// query_InsertOverview takes the next number from article_num_seq (migration 0010, INT-5), like
+// the batch writer, so numbers of deleted articles are not reused.
+const query_InsertOverview = `INSERT INTO articles (article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES ((SELECT MAX(last_num, COALESCE((SELECT MAX(article_num) FROM articles), 0)) + 1 FROM article_num_seq WHERE id = 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 const query_ImportOverview = `INSERT INTO articles (article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (db *Database) InsertOverview(groupDB *GroupDB, o *models.Overview) (int64, error) {
@@ -704,7 +706,7 @@ func (db *Database) InsertOverview(groupDB *GroupDB, o *models.Overview) (int64,
 	dateSentStr := o.DateSent.UTC().Format("2006-01-02 15:04:05")
 
 	if o.ArticleNum == 0 {
-		// Auto-increment article_num - don't include it in INSERT
+		// Next number from article_num_seq (subquery in the statement, no argument)
 		res, err = RetryableExec(groupDB.DB, query_InsertOverview,
 			o.Subject, o.FromHeader, dateSentStr, o.DateString, o.MessageID, o.References, o.Bytes, o.Lines, o.ReplyCount, o.Downloaded,
 		)
@@ -3189,6 +3191,13 @@ func (db *Database) ResetNewsgroupData(newsgroupName string) error {
 		return fmt.Errorf("failed to delete articles for newsgroup '%s': %w", newsgroupName, err)
 	}
 
+	// 6. Restart the article numbering on purpose (INT-5: article_num_seq, migration 0010;
+	// GetGroupDB ran the migration, so the row exists)
+	_, err = tx.Exec("UPDATE article_num_seq SET last_num = 0 WHERE id = 1")
+	if err != nil {
+		return fmt.Errorf("failed to reset article_num_seq for newsgroup '%s': %w", newsgroupName, err)
+	}
+
 	// Reset auto-increment counters to start fresh
 	_, err = tx.Exec("DELETE FROM sqlite_sequence WHERE name IN ('articles', 'threads', 'cached_trees')")
 	if err != nil {
@@ -3200,6 +3209,15 @@ func (db *Database) ResetNewsgroupData(newsgroupName string) error {
 	err = tx.Commit()
 	if err != nil {
 		return fmt.Errorf("failed to commit reset transaction for newsgroup '%s': %w", newsgroupName, err)
+	}
+
+	// The numbers restart at 1: the main-DB spam/user_spam_flags rows and the cached bodies of the
+	// old numbers would otherwise be inherited by the new articles (INT-5).
+	if db.ArticleCache != nil {
+		db.ArticleCache.ClearGroup(newsgroupName)
+	}
+	if err := db.deleteSpamRowsForGroup(newsgroupName); err != nil {
+		return fmt.Errorf("newsgroup '%s' was reset but its spam flags were not removed: %w", newsgroupName, err)
 	}
 
 	log.Printf("ResetNewsgroupData: Successfully cleared all data for newsgroup '%s'", newsgroupName)

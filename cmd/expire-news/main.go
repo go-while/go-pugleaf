@@ -467,6 +467,7 @@ func expireArticlesInGroup(db *database.Database, groupName string, cutoffDate t
 			if err := deleteArticles(groupDB, articlesToDelete, trim); err != nil {
 				return totalExpired, totalScanned, fmt.Errorf("failed to delete articles: %v", err)
 			}
+			cleanupAfterDelete(db, groupName, articlesToDelete)
 		}
 
 		totalExpired += expiredInBatch
@@ -632,6 +633,12 @@ func deleteArticles(groupDB *database.GroupDB, articleNums []int64, trim history
 			// Don't fail if threads table doesn't exist
 			log.Printf("Warning: failed to delete thread entries (table may not exist): %v", err)
 		}
+
+		// Thread caches of deleted roots (INT-5): otherwise a new article that got the same
+		// number would inherit them.
+		if err := deleteDerivedThreadRows(tx, placeholders, args); err != nil {
+			return err
+		}
 	}
 
 	// Commit transaction
@@ -644,6 +651,39 @@ func deleteArticles(groupDB *database.GroupDB, articleNums []int64, trim history
 		}
 	}
 	return nil
+}
+
+// derivedThreadTables hold per-thread rows keyed by the thread root's article number. Child
+// tables first: tree_stats references thread_cache.
+var derivedThreadTables = []string{"tree_stats", "cached_trees", "thread_cache"}
+
+// deleteDerivedThreadRows deletes the cached_trees, tree_stats and thread_cache rows whose
+// thread_root is one of the deleted article numbers, inside the delete transaction. A missing
+// table is skipped (older or minimal group databases), like the overview delete; any other
+// error fails the delete, so no article goes without its derived rows.
+func deleteDerivedThreadRows(tx *sql.Tx, placeholders string, args []interface{}) error {
+	for _, table := range derivedThreadTables {
+		query := fmt.Sprintf("DELETE FROM %s WHERE thread_root IN (%s)", table, placeholders)
+		if _, err := tx.Exec(query, args...); err != nil {
+			if strings.Contains(err.Error(), "no such table") {
+				continue
+			}
+			return fmt.Errorf("failed to delete %s rows: %v", table, err)
+		}
+	}
+	return nil
+}
+
+// cleanupAfterDelete removes what the main database and the article cache still hold for the
+// deleted article numbers of groupName (INT-5): the main-DB spam/user_spam_flags rows and the
+// cached bodies. Errors are logged, the expiry goes on.
+func cleanupAfterDelete(db *database.Database, groupName string, articleNums []int64) {
+	if err := db.DeleteSpamRowsForArticles(groupName, articleNums); err != nil {
+		log.Printf("Warning: %s: failed to delete spam flags of %d deleted articles: %v", groupName, len(articleNums), err)
+	}
+	if db.ArticleCache != nil {
+		db.ArticleCache.ClearGroup(groupName)
+	}
 }
 
 // selectMessageIDs returns the message-ids of the articles in one delete chunk (inside the delete transaction)
@@ -749,6 +789,7 @@ func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles i
 			if err := deleteArticles(groupDB, batch, trim); err != nil {
 				return totalPruned, totalArticles, fmt.Errorf("failed to delete article batch: %v", err)
 			}
+			cleanupAfterDelete(db, groupName, batch)
 
 			totalPruned += len(batch)
 

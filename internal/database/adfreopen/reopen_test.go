@@ -122,15 +122,12 @@ var adfReopenForbidden = []string{
 }
 
 // Known leftovers without a stop path, at most one per OpenDatabase (two opens here).
-// tightened by adf-db-batch: it gives BatchDivider, ExpireCache and CleanCron a stop path
-// and removes them here; NNTPAuthCache.cleanupExpired (hardening-owned) stays.
+// Tightened by adf-db-batch: BatchDivider, ExpireCache and CleanCron stop on Shutdown now;
+// only NNTPAuthCache.cleanupExpired (hardening-owned) is left.
 var adfReopenAllowed = []struct {
 	needle string
 	max    int
 }{
-	{"database.(*SQ3batch).BatchDivider", 2},
-	{"database.(*SQ3batch).ExpireCache", 2},
-	{"database.(*MemCachedThreads).CleanCron", 2},
 	{"database.(*NNTPAuthCache).cleanupExpired", 2},
 }
 
