@@ -1,6 +1,7 @@
 package database
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"strings"
@@ -24,7 +25,7 @@ func (d *Database) InsertPostQueueEntry(newsgroupID int64, messageID string) err
 		INSERT INTO post_queue (newsgroup_id, message_id, posted_to_remote, in_processing)
 		VALUES (?, ?, 0, 0)
 	`
-	_, err := d.mainDB.Exec(query, newsgroupID, messageID)
+	_, err := RetryableExec(d.mainDB, query, newsgroupID, messageID)
 	if err != nil {
 		log.Printf("Database: Failed to insert post_queue entry: %v", err)
 		return err
@@ -35,14 +36,8 @@ func (d *Database) InsertPostQueueEntry(newsgroupID int64, messageID string) err
 }
 
 // GetPendingPostQueueEntries retrieves entries that haven't been posted to remote servers and aren't being processed
+// and marks them in_processing in the same transaction.
 func (d *Database) GetPendingPostQueueEntries(limit int) ([]PostQueueEntry, error) {
-	// Start a transaction to atomically select and mark as in_processing
-	tx, err := d.mainDB.Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
 	// Select entries that are available for processing
 	query := `
 		SELECT id, newsgroup_id, message_id, created, posted_to_remote, in_processing
@@ -51,53 +46,59 @@ func (d *Database) GetPendingPostQueueEntries(limit int) ([]PostQueueEntry, erro
 		ORDER BY created ASC LIMIT ?
 	`
 
-	rows, err := tx.Query(query, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var entries []PostQueueEntry
-	var ids []int64
-	for rows.Next() {
-		var entry PostQueueEntry
-		err := rows.Scan(&entry.ID, &entry.NewsgroupID, &entry.MessageID, &entry.Created, &entry.PostedToRemote, &entry.InProcessing)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, entry)
-		ids = append(ids, entry.ID)
-	}
+	// RetryableTransactionExec may run the closure again (SQLITE_BUSY): it starts from empty results every time.
+	err := RetryableTransactionExec(d.mainDB, func(tx *sql.Tx) error {
+		entries = nil
+		var ids []int64
 
-	// Mark all selected entries as in_processing
-	if len(ids) > 0 {
-		// Build the placeholders for the IN clause
+		rows, err := tx.Query(query, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var entry PostQueueEntry
+			if err := rows.Scan(&entry.ID, &entry.NewsgroupID, &entry.MessageID, &entry.Created, &entry.PostedToRemote, &entry.InProcessing); err != nil {
+				return err
+			}
+			entries = append(entries, entry)
+			ids = append(ids, entry.ID)
+		}
+		// close the rows before the UPDATE of the same transaction (the deferred Close is then a no-op)
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		if len(ids) == 0 {
+			return nil
+		}
+
+		// Mark all selected entries as in_processing
 		placeholders := make([]string, len(ids))
 		args := make([]interface{}, len(ids))
 		for i, id := range ids {
 			placeholders[i] = "?"
 			args[i] = id
 		}
-
 		updateQuery := fmt.Sprintf(`UPDATE post_queue SET in_processing = 1 WHERE id IN (%s)`,
 			strings.Join(placeholders, ","))
-
-		_, err = tx.Exec(updateQuery, args...)
-		if err != nil {
-			return nil, err
+		if _, err := tx.Exec(updateQuery, args...); err != nil {
+			return err
 		}
-
-		// Update the entries to reflect the new state
-		for i := range entries {
-			entries[i].InProcessing = true
-		}
-	}
-
-	// Commit the transaction
-	if err = tx.Commit(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 
+	// Update the entries to reflect the new state
+	for i := range entries {
+		entries[i].InProcessing = true
+	}
 	return entries, nil
 }
 
@@ -105,7 +106,7 @@ func (d *Database) GetPendingPostQueueEntries(limit int) ([]PostQueueEntry, erro
 func (d *Database) MarkPostQueueAsPostedToRemote(id int64) error {
 	query := `UPDATE post_queue SET posted_to_remote = 1, in_processing = 0 WHERE id = ?`
 
-	_, err := d.mainDB.Exec(query, id)
+	_, err := RetryableExec(d.mainDB, query, id)
 	if err != nil {
 		log.Printf("Database: Failed to mark post_queue entry %d as posted to remote: %v", id, err)
 		return err
@@ -132,7 +133,7 @@ func (d *Database) ResetPostQueueProcessing(ids []int64) error {
 	query := fmt.Sprintf(`UPDATE post_queue SET in_processing = 0 WHERE id IN (%s)`,
 		strings.Join(placeholders, ","))
 
-	_, err := d.mainDB.Exec(query, args...)
+	_, err := RetryableExec(d.mainDB, query, args...)
 	if err != nil {
 		log.Printf("Database: Failed to reset in_processing for post_queue entries: %v", err)
 		return err
@@ -146,7 +147,7 @@ func (d *Database) ResetPostQueueProcessing(ids []int64) error {
 func (d *Database) ResetAllPostQueueProcessing() error {
 	query := `UPDATE post_queue SET in_processing = 0 WHERE in_processing = 1`
 
-	result, err := d.mainDB.Exec(query)
+	result, err := RetryableExec(d.mainDB, query)
 	if err != nil {
 		log.Printf("Database: Failed to reset all in_processing flags: %v", err)
 		return err
@@ -174,7 +175,7 @@ type PostQueueEntryWithDetails struct {
 // GetAllPostQueueEntries retrieves all post queue entries for admin display with pagination and filtering
 func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searchTerm string) ([]*PostQueueEntryWithDetails, error) {
 	baseQuery := `
-		SELECT pq.id, pq.newsgroup_id, pq.message_id, pq.created, pq.posted_to_remote, pq.in_processing,
+		SELECT pq.id, pq.newsgroup_id, COALESCE(pq.message_id, ''), pq.created, pq.posted_to_remote, pq.in_processing,
 		       ng.name as newsgroup
 		FROM post_queue pq
 		LEFT JOIN newsgroups ng ON ng.id = pq.newsgroup_id
@@ -220,7 +221,7 @@ func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searc
 		}
 	}
 
-	rows, err := d.mainDB.Query(query, args...)
+	rows, err := RetryableQuery(d.mainDB, query, args...)
 	if err != nil {
 		log.Printf("Database: Failed to get post queue entries: %v", err)
 		return nil, err
@@ -237,7 +238,7 @@ func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searc
 			&newsgroup)
 		if err != nil {
 			log.Printf("Database: Failed to scan post queue entry: %v", err)
-			continue
+			return nil, err
 		}
 
 		// Set optional fields
@@ -256,6 +257,10 @@ func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searc
 
 		entries = append(entries, entry)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("Database: Failed to read post queue entries: %v", err)
+		return nil, err
+	}
 
 	return entries, nil
 }
@@ -266,7 +271,7 @@ func (d *Database) GetPostQueueStats() (map[string]int, error) {
 
 	// Get total count
 	var total int
-	err := d.mainDB.QueryRow("SELECT COUNT(*) FROM post_queue").Scan(&total)
+	err := RetryableQueryRowScan(d.mainDB, "SELECT COUNT(*) FROM post_queue", nil, &total)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +279,7 @@ func (d *Database) GetPostQueueStats() (map[string]int, error) {
 
 	// Get pending count
 	var pending int
-	err = d.mainDB.QueryRow("SELECT COUNT(*) FROM post_queue WHERE posted_to_remote = 0 AND in_processing = 0").Scan(&pending)
+	err = RetryableQueryRowScan(d.mainDB, "SELECT COUNT(*) FROM post_queue WHERE posted_to_remote = 0 AND in_processing = 0", nil, &pending)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +287,7 @@ func (d *Database) GetPostQueueStats() (map[string]int, error) {
 
 	// Get processing count
 	var processing int
-	err = d.mainDB.QueryRow("SELECT COUNT(*) FROM post_queue WHERE in_processing = 1").Scan(&processing)
+	err = RetryableQueryRowScan(d.mainDB, "SELECT COUNT(*) FROM post_queue WHERE in_processing = 1", nil, &processing)
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +295,7 @@ func (d *Database) GetPostQueueStats() (map[string]int, error) {
 
 	// Get completed count
 	var completed int
-	err = d.mainDB.QueryRow("SELECT COUNT(*) FROM post_queue WHERE posted_to_remote = 1").Scan(&completed)
+	err = RetryableQueryRowScan(d.mainDB, "SELECT COUNT(*) FROM post_queue WHERE posted_to_remote = 1", nil, &completed)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +308,7 @@ func (d *Database) GetPostQueueStats() (map[string]int, error) {
 func (d *Database) DeletePostQueueEntry(id int64) error {
 	query := `DELETE FROM post_queue WHERE posted_to_remote = 1 AND id = ?`
 
-	_, err := d.mainDB.Exec(query, id)
+	_, err := RetryableExec(d.mainDB, query, id)
 	if err != nil {
 		log.Printf("Database: Failed to delete post queue entry %d: %v", id, err)
 		return err
@@ -317,7 +322,7 @@ func (d *Database) DeletePostQueueEntry(id int64) error {
 func (d *Database) RetryPostQueueEntry(id int64) error {
 	query := `UPDATE post_queue SET posted_to_remote = 0, in_processing = 0 WHERE id = ?`
 
-	_, err := d.mainDB.Exec(query, id)
+	_, err := RetryableExec(d.mainDB, query, id)
 	if err != nil {
 		log.Printf("Database: Failed to retry post queue entry %d: %v", id, err)
 		return err
@@ -348,7 +353,7 @@ func (d *Database) CleanupPostedEntries(cleanupPosted bool, cleanupOlder int) (i
 		query = `DELETE FROM post_queue WHERE posted_to_remote = 1`
 	}
 
-	result, err := d.mainDB.Exec(query, args...)
+	result, err := RetryableExec(d.mainDB, query, args...)
 	if err != nil {
 		log.Printf("Database: Failed to cleanup posted entries: %v", err)
 		return 0, err
