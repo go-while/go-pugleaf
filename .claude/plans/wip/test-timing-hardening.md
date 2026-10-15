@@ -98,6 +98,42 @@ PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/   # list unchan
   their margin in the Outcome); no literal client deadline under 30 s outside the deliberate short windows.
 - Scratch data only (`-data ./data-test-test-timing-hardening`); never `./data`, `data_ram`, `data_local`.
 
+## Progress
+
+### Wave 0 + wave A (2026-10-15)
+- `plan-test-timing-hardening` from `testing-001` @ d694e6a; wave 0 inline 7eed92b (P1 counters, `hDeadline`).
+- tth-small: `worktree-agent-a02cf379364c6d82c` (0e0bee8, 717c71c, review fix 250cacd), merge 24cf27f. D2 done
+  (`idlePause`). Review MERGE; minors fixed (comment, acquire(false) under testWait, 1 s/10x latency bound kept
+  beside the structural check, negative-window comments).
+- tth-web: `worktree-agent-ae3b84fafcab33e6e` (0b1bf5c, review fix 5e83b42), merge 2ac6749. `testShutdownWait()`
+  >= 30 s; FinalFlushBounded structural via the grace log line; TokenUsageDuringDrain waits on `tokenUsageDone`;
+  fu_cron stack poll; Ollama test proves the client through a counting transport plus a 10 s / 100x bound.
+- tth-tcp2tor-e2e: `worktree-agent-a81fbc10ac9fe3cb3` (b29f85e, 996784a, review fix bfa567c), merge 6809ae4;
+  inline 852cd25 raised `scripts/test-nntp-server.sh` outer timeout 300 → 900 s. Timeout tests keep a 10x bound
+  beside the error-type check; StopDuringDial structural (dial timeout 10x testWait, proxy conn closed);
+  lines-20000 waits for active connections == 0 instead of a 1.5 s log window; N51 soft window 10 s.
+- tth-nntp-rfc: `worktree-agent-a9d2927cd5154f049` (99d5c1e, review fix 8a77227), merge 6c5aaf5. Seven "no error
+  delay" checks → `ErrorDelayCount()` deltas (== 0 / == 1); the 501/412 lower bounds stay; overview 10 s bounds
+  dropped (per-read hDeadline); wildmat fuzz termination guard with panic recovery.
+- tth-nntp-client: `worktree-agent-ad7fc8f0f71aabdae` (c6f648f, review fix a15328e), merge 4b69355. `cliWait`,
+  WaitOpen clamp, Backend ConnectTimeout 30 s (D5); eight "Connect took" bounds → timeout-error checks plus a
+  15 s (50x) bound against the 30 s default; back-off window 3 s and commented.
+- tth-database: `worktree-agent-a5ffccd8abdb1a025` (4bd70a0, review fix d5f2a9e), merge ef4e204.
+  `TestNSHAuthUnknownUserTiming` deleted; retry2/stats-retry/shutdown-clock/TTL-concurrent structural;
+  adfreopen per-run temp root (was not repeatable with -count>1, a real bug) and 2 min CronDB budget;
+  post-queue retry poll on the "database is locked" log line.
+- tth-nntp-harness: `worktree-agent-a4db13ecf84d5e907` (f09ecab, review fix cfbd3cf), merge cf4ada3. tryDial
+  clamps to hDeadline; TestHarnessIsolatedTimeout / TestSessStop / TestOvrHugeRange / TestArtNoDelay structural;
+  ihave-arrival a single STAT; the known-bug poll keeps its 1 s window on purpose; Stop poll breaks only on a
+  dial error; huge-range child 4x hDeadline.
+- Accepted limits (D1): a bare `time.Sleep` before a no-delay reply would not be seen by the counters; TestArtNoDelay
+  no longer proves that ArticleCmdDelay=0 skips the sleep (D4). Leftovers: `cliWaitFromEnv` duplicates
+  `hDeadlineFromEnv` (fold after merge); `testSOCKS5Connection` wraps with %v (an errors.Is check would need %w);
+  `GetArticle`'s `%v` at nntp-client-commands.go:108 drops the net.Error on a slow 220.
+- Merged tree cf4ada3: gofmt clean, vet (incl. -tags e2e) and build ok, race suite over 13 package sets ok in 188 s
+  wall (run with no other load), known bugs unchanged (T-nntp-article-1). Grep audit of the surviving upper bounds:
+  every one is >= 10x (tcp2tor 10x, client 50x, intake 10x, web busy checkpoint 100x, Ollama 100x) or a lower bound.
+
 ## Open questions (ask at wave 0)
 - Q1: P1 counters on `NNTPServer` (D1): accept the two atomics in production code for test observability?
 - Q2: `PUGLEAF_TEST_DEADLINE` default 60 s, or 30 s?
