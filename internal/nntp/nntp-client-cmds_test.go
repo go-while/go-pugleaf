@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -560,6 +561,11 @@ func TestCliCmdSOCKSTimeout(t *testing.T) {
 	// (x/net/proxy wraps it in a *net.OpError), not a hang (cliCmdOuter)
 	if !cliConnIsTimeout(err) {
 		t.Fatalf("Connect error %v (after %v), want a timeout (ConnectTimeout 300ms)", err, elapsed)
+	}
+	// loose bound, deliberately 50x the 300 ms: catches a fallback to
+	// config.DefaultConnectTimeout (30 s) instead of the configured value
+	if elapsed >= config.DefaultConnectTimeout/2 {
+		t.Fatalf("Connect took %v: ConnectTimeout 300ms ignored (default %v?)", elapsed, config.DefaultConnectTimeout)
 	}
 }
 

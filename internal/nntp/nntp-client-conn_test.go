@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
+	"github.com/go-while/go-pugleaf/internal/config"
 )
 
 // cliConnOuter is the outer deadline of every blocking step in these tests:
@@ -112,6 +113,11 @@ func TestCliConnGreetingTimeout(t *testing.T) {
 	if !cliConnIsTimeout(err) {
 		t.Fatalf("Connect error %v (after %v), want a timeout (ConnectTimeout 300ms)", err, elapsed)
 	}
+	// loose bound, deliberately 50x the 300 ms: catches a fallback to
+	// config.DefaultConnectTimeout (30 s) instead of the configured value
+	if elapsed >= config.DefaultConnectTimeout/2 {
+		t.Fatalf("Connect took %v: ConnectTimeout 300ms ignored (default %v?)", elapsed, config.DefaultConnectTimeout)
+	}
 	s.WaitOpen(t, 0, 2*time.Second)
 }
 
@@ -151,7 +157,7 @@ func TestCliConnAuthFailureClosesSocket(t *testing.T) {
 		s.WaitOpen(t, 0, 2*time.Second)
 	})
 	t.Run("backoff-after-close", func(t *testing.T) {
-		const backoff = time.Second
+		const backoff = 3 * time.Second
 		s := newCliFakeServer(t, cliFakeOpts{Script: script})
 		cfg := s.Backend()
 		cfg.Username, cfg.Password = "u", "wrong"
@@ -163,6 +169,8 @@ func TestCliConnAuthFailureClosesSocket(t *testing.T) {
 		// the socket is gone while Connect still sleeps
 		cliFakeWaitLines(t, s, []string{"AUTHINFO USER u", "AUTHINFO PASS wrong"})
 		s.WaitOpen(t, 0, 2*time.Second)
+		// deliberate short negative window: the socket closed while Connect
+		// still sleeps; the 3 s back-off leaves room for a loaded machine
 		select {
 		case err := <-done:
 			t.Fatalf("Connect returned before the back-off ended (after %v): %v", time.Since(start), err)
@@ -198,6 +206,11 @@ func TestCliConnTLSHandshakeTimeout(t *testing.T) {
 	// the handshake is bounded by ConnectTimeout: a timeout error, not a hang
 	if !cliConnIsTimeout(err) {
 		t.Errorf("Connect error %v (after %v), want a timeout (ConnectTimeout 300ms)", err, elapsed)
+	}
+	// loose bound, deliberately 50x the 300 ms: catches a fallback to
+	// config.DefaultConnectTimeout (30 s) instead of the configured value
+	if elapsed >= config.DefaultConnectTimeout/2 {
+		t.Fatalf("Connect took %v: ConnectTimeout 300ms ignored (default %v?)", elapsed, config.DefaultConnectTimeout)
 	}
 	s.WaitOpen(t, 0, 2*time.Second)
 }
