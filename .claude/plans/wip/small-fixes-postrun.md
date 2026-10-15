@@ -120,6 +120,30 @@ The CLAUDE.md list (same as `.github/workflows/tests.yml`), plus `PUGLEAF_KNOWN_
    article) answers 200 on 20 consecutive requests.
 4. Drop path: `go test -race -count=5 -v -run 'FlDLDrop' ./internal/processor/` green and five tests listed (the -run pattern is case-sensitive).
 
+## Progress
+
+### Wave 0 + wave 1 (2026-10-15)
+- `plan-small-fixes-postrun` from `testing-001` @ b45d053 (e2cf14d plan to wip). Four parallel slices, all reviewed.
+- sfp-dl-drop-test: `worktree-agent-ab022f2e53acb41fc` (46e775b), merge 4c45a72. `commitThenProgress` +
+  `downloadWaitCommitted` seam; an UpdateProgress error is now returned. Review MERGE; it caught a case-sensitive
+  `-run` pattern in this plan's E2E step (fixed in the plan). Note: the not-committed message lost the range start.
+- sfp-tree-order: `worktree-agent-a1ea50c74677a38f9` (8e08248), merge 91dbf16. `buildTreeFromOverviews` with
+  root-first, ascending numbers, cycle guard, depth pass, stable sort; iterative `countDescendants`; extra kept:
+  `GetCachedTree` links children in `sort_order` (cache hits had random sibling order) and skips self-parent rows.
+  Review MERGE (minor: per-node seen-map allocation in countDescendants; performance only).
+- sfp-high-water: `worktree-agent-ab4f66debde03f2f4` (13c2f03), merge 4596254. `high_water` raised in the batch
+  stats UPDATE, never lowered (Q2). Review MERGE, no findings. Note for later: `RepairNewsgroupWatermarks` can still
+  lower it after expiry (preloader, not in scope).
+- sfp-postqueue-stop: `worktree-agent-a3ff11d10a9746df8` (f511886), merge afc66ea; inline 918b752 (a rejection
+  completed just before the stop still counts; `%w` in postToProvider). `PostArticleContext` closes the raw socket
+  through `context.AfterFunc` and calls `ForceCloseConn` (DEVIATION from D1's bare `closing.Store`: the reviewer
+  proved by mutation that D1's version leaks the pool slot); PosterManager ctx; stop checks between pools; a
+  failed-after-stop entry is reset, not counted; "Processed N (P posted, F failed)". Review MERGE. Leftover: a stop
+  during a fresh connect (dial/handshake, `SwitchMode`) still waits for the connect timeout (GetContext watches
+  the ctx only while waiting for a slot).
+- Merged tree 918b752: gofmt clean, vet (+e2e tag) and build ok, race suite over 28 package sets ok in 257 s wall
+  (no flakes), known bugs unchanged (T-nntp-article-1).
+
 ## Open questions (defaults apply unless overridden at the wave-1 boundary)
 - Q1: on stop mid-POST the article may be posted twice if only the 240 was lost; accept (next run gets the 441
   duplicate) rather than tracking "sent" state? default yes.
