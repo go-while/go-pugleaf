@@ -185,6 +185,9 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	// Get form data
 	subject := strings.TrimSpace(c.PostForm("subject"))
 	body := strings.TrimSpace(c.PostForm("body"))
+	// Browsers submit textarea values with CRLF line ends: store LF only, so Lines and the
+	// :bytes size (WireArticleSize adds the CRLF itself) count each line end once.
+	body = strings.ReplaceAll(body, "\r\n", "\n")
 	newsgroupsStr := strings.TrimSpace(c.PostForm("newsgroups"))
 	//log.Printf("User %s is posting to newsgroups: %v, subject: %s", session.User.Username, newsgroupsStr, subject)
 
@@ -540,7 +543,7 @@ type webPostHeaderInput struct {
 
 // buildWebPostHeaders returns the stored header lines (D8 order), the Date value and the RFC 3977 :bytes size.
 //
-// Order: Path, From, Newsgroups, Subject, Date, Message-ID, References (only when set),
+// Order: Path, From, Newsgroups, Subject, Date, Message-ID, References (only when set, folded),
 // MIME-Version, Content-Type, Content-Transfer-Encoding, Injection-Date, Injection-Info
 // (folded; continuation lines start with a space; mail-complaints-to only when AbuseMail is
 // set), Lines. There is no Bytes header: the size is returned instead. Date and
@@ -558,7 +561,18 @@ func buildWebPostHeaders(in webPostHeaderInput) (lines []string, date string, by
 		"Message-ID: "+in.MessageID,
 	)
 	if in.References != "" {
-		lines = append(lines, "References: "+in.References)
+		// Folded like common.ReconstructHeaders (a new continuation line, starting with a
+		// space, when the next id would pass 78 columns), so a deep reply chain never yields
+		// a line over 998 octets. Every line carries at least one id.
+		refline := "References:"
+		for i, ref := range strings.Fields(in.References) {
+			if i > 0 && len(refline)+1+len(ref) > 78 {
+				lines = append(lines, refline)
+				refline = ""
+			}
+			refline += " " + ref
+		}
+		lines = append(lines, refline)
 	}
 	lines = append(lines,
 		"MIME-Version: 1.0",

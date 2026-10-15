@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -36,6 +37,26 @@ func adfPostHeaderValue(lines []string, name string) string {
 		if strings.HasPrefix(strings.ToLower(l), prefix) {
 			return strings.TrimSpace(l[len(prefix):])
 		}
+	}
+	return ""
+}
+
+// adfPostUnfold returns the unfolded value of the first field called name: the field line
+// plus its continuation lines, whitespace runs collapsed to one space.
+func adfPostUnfold(lines []string, name string) string {
+	prefix := strings.ToLower(name) + ":"
+	for i, l := range lines {
+		if !strings.HasPrefix(strings.ToLower(l), prefix) {
+			continue
+		}
+		value := l[len(prefix):]
+		for _, c := range lines[i+1:] {
+			if !strings.HasPrefix(c, " ") && !strings.HasPrefix(c, "\t") {
+				break
+			}
+			value += c
+		}
+		return strings.Join(strings.Fields(value), " ")
 	}
 	return ""
 }
@@ -95,7 +116,7 @@ func TestAdfPostHeaderBuilder(t *testing.T) {
 	if got := adfPostHeaderValue(lines, "Message-ID"); got != in.MessageID {
 		t.Errorf("Message-ID = %q, want %q", got, in.MessageID)
 	}
-	if got := adfPostHeaderValue(lines, "References"); got != in.References {
+	if got := adfPostUnfold(lines, "References"); got != in.References {
 		t.Errorf("References = %q, want %q", got, in.References)
 	}
 	if got := adfPostHeaderValue(lines, "Lines"); got != "4" {
@@ -150,6 +171,35 @@ func TestAdfPostHeaderBuilder(t *testing.T) {
 	}
 	if _, err := common.CheckHeaderBlock(lines, common.HeaderBlockStrict); err != nil {
 		t.Errorf("CheckHeaderBlock(strict): %v", err)
+	}
+
+	// A deep reply chain: References is folded onto continuation lines, no line passes
+	// 998 octets and the unfolded value is the input.
+	var deep []string
+	for i := 0; i < 20; i++ {
+		deep = append(deep, fmt.Sprintf("<adf-adfpost-deep-%02d.%s@test.invalid>", i, strings.Repeat("x", 40)))
+	}
+	in.References = strings.Join(deep, " ")
+	lines, _, size = buildWebPostHeaders(in)
+	for _, l := range lines {
+		if len(l) > 998 {
+			t.Errorf("deep References: line of %d octets: %q", len(l), l)
+		}
+	}
+	if got := adfPostUnfold(lines, "References"); got != in.References {
+		t.Errorf("deep References unfolds to %q, want %q", got, in.References)
+	}
+	if n := adfPostHeaderCounts(lines)["references"]; n != 1 {
+		t.Errorf("deep References: %d field lines, want 1", n)
+	}
+	if want := common.WireArticleSize(lines, strings.Split(in.Body, "\n")); size != want {
+		t.Errorf("deep References: bytes = %d, want %d", size, want)
+	}
+	if _, err := common.CheckHeaderBlock(lines, common.HeaderBlockFetch); err != nil {
+		t.Errorf("deep References CheckHeaderBlock(fetch): %v", err)
+	}
+	if _, err := common.CheckHeaderBlock(lines, common.HeaderBlockStrict); err != nil {
+		t.Errorf("deep References CheckHeaderBlock(strict): %v", err)
 	}
 
 	// A new thread has no References; without AbuseMail there is no mail-complaints-to.
@@ -208,8 +258,13 @@ func TestAdfPostQueuedArticle(t *testing.T) {
 		name    string
 		form    url.Values
 		replyTo string
+		// CRLF body: the stored body has LF only, Lines and Bytes count each line once
+		wantBody      string
+		wantBodyBytes int // body part of a.Bytes: sum of len(line)+2
 	}{
 		{name: "thread", form: url.Values{"subject": {"adfpost thread"}, "body": {"hello\nworld"}}},
+		{name: "crlf", form: url.Values{"subject": {"adfpost crlf"}, "body": {"a\r\nbb\r\n\r\nccc\r\n"}},
+			wantBody: "a\nbb\n\nccc", wantBodyBytes: (1 + 2) + (2 + 2) + (0 + 2) + (3 + 2)},
 		{name: "reply", form: url.Values{"subject": {"Re: adfpost thread"}, "body": {"> hello\n\nreply"},
 			"reply_to": {"1"}, "message_id": {"<adf-adfpost-1@test.invalid>"}}, replyTo: "<adf-adfpost-1@test.invalid>"},
 	}
@@ -264,6 +319,17 @@ func TestAdfPostQueuedArticle(t *testing.T) {
 			if want := strings.Count(a.BodyText, "\n") + 1; a.Lines != want {
 				t.Errorf("Lines = %d, want %d", a.Lines, want)
 			}
+			if tc.wantBody != "" {
+				if a.BodyText != tc.wantBody {
+					t.Errorf("BodyText = %q, want %q", a.BodyText, tc.wantBody)
+				}
+				if want := strings.Count(tc.wantBody, "\n") + 1; a.Lines != want || adfPostHeaderValue(lines, "Lines") != fmt.Sprint(want) {
+					t.Errorf("Lines = %d (header %q), want %d", a.Lines, adfPostHeaderValue(lines, "Lines"), want)
+				}
+				if want := common.WireArticleSize(lines, nil) + tc.wantBodyBytes; a.Bytes != want {
+					t.Errorf("Bytes = %d, want %d", a.Bytes, want)
+				}
+			}
 			if a.Path != ".POSTED!not-for-mail" {
 				t.Errorf("Path = %q", a.Path)
 			}
@@ -274,7 +340,7 @@ func TestAdfPostQueuedArticle(t *testing.T) {
 				t.Errorf("CheckHeaderBlock(fetch): %v", err)
 			}
 
-			refs := adfPostHeaderValue(lines, "References")
+			refs := adfPostUnfold(lines, "References")
 			if tc.replyTo == "" {
 				if counts["references"] != 0 || a.IsReply {
 					t.Errorf("thread: References %q, IsReply %v", refs, a.IsReply)
