@@ -4,6 +4,7 @@ package nntp
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -1218,13 +1219,51 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	return cmdID, txBytes, nil, true
 }
 
-// PostArticle posts an article using the POST command
+// PostArticle posts an article using the POST command. It is
+// PostArticleContext without a way to interrupt it.
 func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
+	return c.PostArticleContext(context.Background(), article)
+}
+
+// PostArticleContext posts an article using the POST command. When ctx is
+// done while the command runs (waiting for the 340, sending the article or
+// waiting for the 240), the connection is force-closed: the raw socket is
+// closed, so the blocked Read or Write returns at once instead of after the
+// idle timeout, and the error wraps the context's cause. A deadline in the past
+// would be re-armed by the next deadlineConn.Read; a Close is sticky. The
+// connection is unusable afterwards: ForceCloseConn hands it back to its pool,
+// which frees the slot (a later ForceCloseConn or Pool.Put by the caller is a
+// no-op or closes it again idempotently).
+//
+// A stop that lands after the article was flushed but before the 240 was read
+// may leave the article posted at the provider while the caller sees an error;
+// posting it again later gets the provider's duplicate answer (441).
+func (c *BackendConn) PostArticleContext(ctx context.Context, article *models.Article) (code int, err error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
 	if !c.IsConnected() {
 		return 0, fmt.Errorf("not connected")
+	}
+	if ctx.Err() != nil {
+		return 0, fmt.Errorf("POST not sent: %w", context.Cause(ctx))
+	}
+	if dc := c.dconn; dc != nil {
+		fired := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() {
+			defer close(fired)
+			c.ForceCloseConn() // closing first: never handed out again; its goroutine waits for c.mux
+			_ = dc.Conn.Close()
+		})
+		defer func() {
+			if stop() {
+				return // ctx was not done during the command
+			}
+			<-fired // the close ran or is running: wait, so the caller sees a closed conn
+			if err != nil {
+				err = fmt.Errorf("POST interrupted: %w: %w", context.Cause(ctx), err)
+			}
+		}()
 	}
 	// Prepare article for posting
 	headers, err := common.ReconstructHeaders(article, false, nil, "")

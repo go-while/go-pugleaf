@@ -3,6 +3,7 @@ package postmgr
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/textproto"
 	"os"
@@ -238,7 +239,9 @@ func TestAdfOptPostmgrRunStopsOnShutdown(t *testing.T) {
 }
 
 // flPqFake is a loopback NNTP server that accepts MODE READER and POST and answers every posted
-// article with code (240 or 441). No external network is used.
+// article with code (240 or 441). No external network is used. In hang mode (flPqFakeHang) it
+// never answers the article: it closes received once the article is read, then blocks until the
+// connection is closed.
 type flPqFake struct {
 	ln    net.Listener
 	code  int
@@ -246,16 +249,33 @@ type flPqFake struct {
 	mu    sync.Mutex
 	conns []net.Conn
 	wg    sync.WaitGroup
+
+	hang         bool
+	received     chan struct{} // hang mode: closed when the first article was read
+	receivedOnce sync.Once
 }
 
 // flPqFakeNNTP starts a flPqFake on 127.0.0.1; it stops when the test ends.
 func flPqFakeNNTP(t *testing.T, code int) *flPqFake {
 	t.Helper()
+	return flPqFakeStart(t, &flPqFake{code: code})
+}
+
+// flPqFakeHang starts a flPqFake in hang mode: it answers 340 to POST, reads the article, closes
+// received and then never answers, until the client closes the connection.
+func flPqFakeHang(t *testing.T) *flPqFake {
+	t.Helper()
+	return flPqFakeStart(t, &flPqFake{hang: true, received: make(chan struct{})})
+}
+
+// flPqFakeStart listens on 127.0.0.1 and serves f; it stops when the test ends.
+func flPqFakeStart(t *testing.T, f *flPqFake) *flPqFake {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	f := &flPqFake{ln: ln, code: code}
+	f.ln = ln
 	f.wg.Add(1)
 	go f.serve()
 	t.Cleanup(func() {
@@ -312,6 +332,12 @@ func (f *flPqFake) handle(c net.Conn) {
 				return
 			}
 			f.posts.Add(1)
+			if f.hang {
+				f.receivedOnce.Do(func() { close(f.received) })
+				// never answer: block until the client (or the test cleanup) closes the conn
+				_, _ = io.Copy(io.Discard, c)
+				return
+			}
 			err = tp.PrintfLine("%d flpq fake answer", f.code)
 		case "QUIT":
 			_ = tp.PrintfLine("205 bye")
@@ -342,11 +368,20 @@ func flPqClosedPort(t *testing.T) int {
 // flPqPool returns a posting pool for 127.0.0.1:port, closed when the test ends.
 func flPqPool(t *testing.T, name string, port int) *nntp.Pool {
 	t.Helper()
+	return flPqPoolTimeouts(t, name, port, 0)
+}
+
+// flPqPoolTimeouts is flPqPool with idle read/write timeouts per Read/Write after connect
+// (BackendConfig.ReadTimeout/WriteTimeout: 0 = default 2 min, < 0 = no deadline at all).
+func flPqPoolTimeouts(t *testing.T, name string, port int, idle time.Duration) *nntp.Pool {
+	t.Helper()
 	pool := nntp.NewPool(&nntp.BackendConfig{
-		Host:     "127.0.0.1",
-		Port:     port,
-		MaxConns: 1,
-		Provider: &config.Provider{Name: name, Host: "127.0.0.1", Port: port, MaxConns: 1, Enabled: true, Posting: true},
+		Host:         "127.0.0.1",
+		Port:         port,
+		MaxConns:     1,
+		ReadTimeout:  idle,
+		WriteTimeout: idle,
+		Provider:     &config.Provider{Name: name, Host: "127.0.0.1", Port: port, MaxConns: 1, Enabled: true, Posting: true},
 	})
 	t.Cleanup(func() {
 		if err := pool.ClosePool(); err != nil {
@@ -512,4 +547,102 @@ func TestFlPqPostmgrPosted(t *testing.T) {
 	if got := fake.posts.Load(); got != 1 {
 		t.Errorf("provider received %d articles, want 1", got)
 	}
+}
+
+// flPqWaitReceived waits until the hang fake has read the whole article; a result on done first
+// (ProcessPendingPosts or Run returned early) fails the test.
+func flPqWaitReceived(t *testing.T, fake *flPqFake, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-fake.received:
+	case <-done:
+		t.Fatal("returned before the provider received the article")
+	case <-time.After(testWait):
+		t.Fatalf("provider did not receive the article within %v", testWait)
+	}
+}
+
+// flPqAssertInterrupted checks that row id is back to pending untouched (not posted, not in
+// processing, no attempt, no last_error) and that the pool freed its slot (the interrupted
+// connection was closed and handed back, not leaked).
+func flPqAssertInterrupted(t *testing.T, id int64, pool *nntp.Pool, fake *flPqFake) {
+	t.Helper()
+	if posted, inProc := adfOptFlags(t, id); posted || inProc {
+		t.Errorf("posted=%v in_processing=%v, want false, false", posted, inProc)
+	}
+	if attempts, lastErr := flPqAttempts(t, id); attempts != 0 || lastErr != "" {
+		t.Errorf("attempts=%d last_error=%q, want 0, \"\"", attempts, lastErr)
+	}
+	if got := fake.posts.Load(); got != 1 {
+		t.Errorf("provider received %d articles, want 1", got)
+	}
+	deadline := time.Now().Add(testWait)
+	for pool.Stats().ActiveConnections != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("pool still has %d active connections %v after the stop", pool.Stats().ActiveConnections, testWait)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestFlPqPostmgrStopInterruptsPost: a Stop while the provider holds back its answer to a posted
+// article interrupts the POST (the connection is closed) instead of waiting for the peer. The
+// pool has no read/write deadline at all, so a return proves the interrupt, not a timeout. The
+// row goes back to pending without an attempt.
+func TestFlPqPostmgrStopInterruptsPost(t *testing.T) {
+	fake := flPqFakeHang(t)
+	id := flPqQueuedArticle(t, "flpq.postmgr.stoppost", "<stoppost@flpq.invalid>")
+	pool := flPqPoolTimeouts(t, "flpq-hang", fake.port(), -1)
+	pm := NewPosterManager(adfOptDB, []*nntp.Pool{pool})
+
+	type result struct {
+		n   int
+		err error
+	}
+	ch := make(chan result, 1)
+	done := make(chan struct{})
+	go func() {
+		n, err := pm.ProcessPendingPosts(10)
+		ch <- result{n, err}
+		close(done)
+	}()
+	flPqWaitReceived(t, fake, done)
+	pm.Stop()
+	select {
+	case r := <-ch:
+		if !errors.Is(r.err, ErrStopped) || r.n != 0 {
+			t.Fatalf("ProcessPendingPosts = %d, %v; want 0, ErrStopped", r.n, r.err)
+		}
+	case <-time.After(testWait):
+		t.Fatalf("ProcessPendingPosts did not return within %v after Stop", testWait)
+	}
+	flPqAssertInterrupted(t, id, pool, fake)
+}
+
+// TestFlPqPostmgrRunShutdownInterruptsPost: the same through Run, stopped by its shutdownChan.
+func TestFlPqPostmgrRunShutdownInterruptsPost(t *testing.T) {
+	fake := flPqFakeHang(t)
+	id := flPqQueuedArticle(t, "flpq.postmgr.runstoppost", "<runstoppost@flpq.invalid>")
+	pool := flPqPoolTimeouts(t, "flpq-hang", fake.port(), -1)
+	pm := NewPosterManager(adfOptDB, []*nntp.Pool{pool})
+	pm.idlePause = max(time.Hour, 2*testWait) // a second batch would only start after the hang guard
+
+	shutdownChan := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go pm.Run(10, shutdownChan, &wg)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	flPqWaitReceived(t, fake, done)
+	close(shutdownChan)
+	select {
+	case <-done:
+	case <-time.After(testWait):
+		t.Fatalf("Run did not return within %v after shutdown", testWait)
+	}
+	pm.Stop() // already stopped by Run: must not panic
+	flPqAssertInterrupted(t, id, pool, fake)
 }
