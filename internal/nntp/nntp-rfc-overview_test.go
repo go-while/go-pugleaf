@@ -432,8 +432,9 @@ func TestOvhListHeaders(t *testing.T) {
 
 // TestOvhLargeRange: OVER/HDR over 2500 rows and open-ended ranges. The line counts and
 // the ordering are the assertion; there is no duration bound. The regression this guards
-// (a walk over the unused numbers up to 2^63) sends no line, so the client's per-read
-// deadline (hDeadline) stops the test.
+// (a walk over the unused numbers up to 2^63) sends no line, so the client's read fails
+// after hDeadline; the helper's cleanup then still waits for the session goroutine, so a
+// server stuck in a loop that never writes holds the test until go test's -timeout.
 func TestOvhLargeRange(t *testing.T) {
 	const n = 2500
 	g := ovhBulkGroup(t, "rc3.large", n, 500, 1500)

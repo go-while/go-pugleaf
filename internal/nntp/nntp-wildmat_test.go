@@ -1,6 +1,7 @@
 package nntp
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -165,9 +166,16 @@ func FuzzLstWildmat(f *testing.F) {
 		// hit means a hang or exponential backtracking (2^200 steps for that seed), not
 		// a loaded machine. On a hang the matcher goroutine is left behind; the test fails.
 		var got, valid bool
+		var panicked string
 		done := make(chan struct{})
 		go func() {
-			defer close(done)
+			defer close(done) // runs after the recover below (LIFO)
+			defer func() {
+				// A panic here would crash the test binary without the input: report it below.
+				if r := recover(); r != nil {
+					panicked = fmt.Sprint(r)
+				}
+			}()
 			got = wildmatMatch(pattern, name)
 			valid = wildmatValid(pattern)
 		}()
@@ -177,6 +185,9 @@ func FuzzLstWildmat(f *testing.F) {
 		case <-done:
 		case <-guard.C:
 			t.Fatalf("wildmatMatch(%d bytes, %d bytes) did not return within %s", len(pattern), len(name), hDeadline)
+		}
+		if panicked != "" {
+			t.Fatalf("wildmatMatch/wildmatValid(%q, %q) panicked: %s", pattern, name, panicked)
 		}
 		if !valid {
 			if got {
