@@ -428,21 +428,8 @@ forProcessing:
 	if common.WantShutdown() {
 		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
 	}
-	if gots > 0 {
-		// Commit barrier (A-tools-5b): the progress may only pass articles that are stored.
-		// On a dropped batch, a stop or a timeout it is held back (D-B1) and the next run
-		// fetches the range again.
-		if werr := proc.DB.Batch.WaitCommitted(commitMark, shutdownChan, CommitWaitTimeout); werr != nil {
-			log.Printf("DownloadArticles: '%s' articles %d-%d not committed, progress not updated: %v", newsgroup, start, end, werr)
-			return fmt.Errorf("DownloadArticles: '%s' articles %d-%d not committed: %w", newsgroup, start, end, werr)
-		}
-	}
-	if gotQueued > 0 || dups > 0 {
-		// only update progress if we actually got something
-		err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, newsgroup, end)
-		if err != nil {
-			log.Printf("Failed to update progress for provider '%s' group '%s': %v", proc.Pool.Backend.Provider.Name, newsgroup, err)
-		}
+	if err := proc.commitThenProgress(newsgroup, proc.Pool.Backend.Provider.Name, commitMark, progressDB, end, gots, gotQueued, dups, shutdownChan); err != nil {
+		return err
 	}
 	// threading.go:296: GroupCounter.Increment(newsgroup) // Increment the group counter
 	groupCnt := GroupCounter.GetReset(newsgroup)
@@ -455,6 +442,40 @@ forProcessing:
 	}
 	return nil
 } // end func DownloadArticles
+
+// downloadWaitCommitted is the commit barrier of commitThenProgress (a seam for tests).
+var downloadWaitCommitted = func(sq *database.SQ3batch, m database.CommitMark, stop <-chan struct{}, d time.Duration) error {
+	return sq.WaitCommitted(m, stop, d)
+}
+
+// commitThenProgress holds the progress of providerName/newsgroup back until the articles
+// queued since mark are committed, then moves it to end.
+//
+// Commit barrier (A-tools-5b): the progress may only pass articles that are stored. On a
+// dropped batch, a stop or a timeout it is held back (D-B1) and the next run fetches the
+// range again. The barrier only runs when articles were queued for storage (gots > 0); the
+// progress only moves when something was queued or found as duplicate. An UpdateProgress
+// error is returned.
+func (proc *Processor) commitThenProgress(newsgroup, providerName string, mark database.CommitMark, progressDB *database.ProgressDB, end, gots, gotQueued, dups int64, stop <-chan struct{}) error {
+	if gots > 0 {
+		var sq *database.SQ3batch
+		if proc.DB != nil {
+			sq = proc.DB.Batch
+		}
+		if werr := downloadWaitCommitted(sq, mark, stop, CommitWaitTimeout); werr != nil {
+			log.Printf("DownloadArticles: '%s' articles up to %d not committed, progress not updated: %v", newsgroup, end, werr)
+			return fmt.Errorf("DownloadArticles: '%s' articles up to %d not committed: %w", newsgroup, end, werr)
+		}
+	}
+	if gotQueued > 0 || dups > 0 {
+		// only update progress if we actually got something
+		if err := progressDB.UpdateProgress(providerName, newsgroup, end); err != nil {
+			log.Printf("Failed to update progress for provider '%s' group '%s': %v", providerName, newsgroup, err)
+			return fmt.Errorf("DownloadArticles: '%s' update progress for provider '%s' to %d: %w", newsgroup, providerName, end, err)
+		}
+	}
+	return nil
+}
 
 // FindStartArticleByDate finds the first article number on or after the given date
 // using a simple binary search approach with XOVER data

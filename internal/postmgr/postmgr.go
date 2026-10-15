@@ -2,6 +2,7 @@
 package postmgr
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -30,7 +31,11 @@ type PosterManager struct {
 	pools    []*nntp.Pool
 	stopCh   chan struct{}
 	stopOnce sync.Once // stopCh is closed by Run (shutdown signal) or Stop, whichever comes first
-	wg       sync.WaitGroup
+	// ctx is cancelled together with the close of stopCh: it interrupts a pool wait and an
+	// in-flight POST (the connection is force-closed, see nntp.PostArticleContext).
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 	// idlePause is Run's pause after a batch that did not fill the limit (default 10 s); a field
 	// so tests can set it before Run starts.
 	idlePause time.Duration
@@ -38,18 +43,22 @@ type PosterManager struct {
 
 // NewPosterManager creates a new poster manager
 func NewPosterManager(db *database.Database, pools []*nntp.Pool) *PosterManager {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &PosterManager{
 		DB:        db,
 		pools:     pools,
 		stopCh:    make(chan struct{}),
+		ctx:       ctx,
+		cancel:    cancel,
 		idlePause: defaultIdlePause,
 	}
 }
 
-// closeStop closes stopCh once.
+// closeStop closes stopCh once and cancels ctx, which interrupts a running POST.
 func (pm *PosterManager) closeStop() {
 	pm.stopOnce.Do(func() {
 		close(pm.stopCh)
+		pm.cancel()
 	})
 }
 
@@ -125,10 +134,14 @@ func (pm *PosterManager) Stop() {
 }
 
 // ProcessPendingPosts processes all pending posts in the queue.
-// It returns the number of entries it worked on. Every failed entry goes back to pending with
-// its last_error; a rejection by every provider (441) also counts an attempt, and an entry that
-// reaches PostQueueMaxAttempts is parked. On stop it returns early with ErrStopped and resets
-// the entries not yet worked on to pending, so the next run picks them up.
+// It returns the number of entries it worked on (posted or failed). Every failed entry goes back
+// to pending with its last_error; a rejection by every provider (441) also counts an attempt, and
+// an entry that reaches PostQueueMaxAttempts is parked. On stop it returns early with ErrStopped
+// and resets the entries not yet worked on to pending, so the next run picks them up. A stop also
+// interrupts the entry being posted: it fails, and because the stop is seen after its failure it
+// goes back to pending without an attempt or last_error (the failure is the stop's own doing).
+// If the provider had already received the whole article, the next run posts it again and gets
+// the provider's duplicate answer (accepted, plan small-fixes-postrun Q1).
 func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 	// Get pending posts from database
 	entries, err := pm.DB.GetPendingPostQueueEntries(limit)
@@ -144,29 +157,50 @@ func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 	log.Printf("Found %d pending posts to process", len(entries))
 
 	var failedEntryIDs []int64
+	posted, failed := 0, 0
+
+	// stopAt resets the entries from index next on, plus failedEntryIDs (failed entries whose
+	// failure could not be recorded, and the entry a stop interrupted), and returns ErrStopped.
+	stopAt := func(next int) (int, error) {
+		log.Printf("PosterManager: Stopping due to shutdown signal, %d of %d entries not processed", len(entries)-posted-failed, len(entries))
+		log.Printf("Processed %d pending posts (%d posted, %d failed)", posted+failed, posted, failed)
+		resetIDs := failedEntryIDs
+		for _, rest := range entries[next:] {
+			resetIDs = append(resetIDs, rest.ID)
+		}
+		if len(resetIDs) > 0 {
+			if err := pm.DB.ResetPostQueueProcessing(resetIDs); err != nil {
+				return posted + failed, fmt.Errorf("failed to reset processing state of %d entries on stop: %v", len(resetIDs), err)
+			}
+		}
+		return posted + failed, ErrStopped
+	}
 
 	// Process each entry
 	for i, entry := range entries {
 		if pm.stopped() {
-			log.Printf("PosterManager: Stopping due to shutdown signal, %d of %d entries not processed", len(entries)-i, len(entries))
-			// Reset processing state for the failed and the not yet processed entries
-			resetIDs := failedEntryIDs
-			for _, rest := range entries[i:] {
-				resetIDs = append(resetIDs, rest.ID)
-			}
-			if err := pm.DB.ResetPostQueueProcessing(resetIDs); err != nil {
-				return i, fmt.Errorf("failed to reset processing state of %d entries on stop: %v", len(resetIDs), err)
-			}
-			return i, ErrStopped
+			return stopAt(i)
 		}
-		if err := pm.processEntry(entry); err != nil {
-			rejected := errors.Is(err, errPostRejected)
-			log.Printf("Failed to process entry %d (message: %s, rejected=%v): %v", entry.ID, entry.MessageID, rejected, err)
-			// RecordPostQueueFailure also clears in_processing; when it fails, reset the flag below.
-			if rerr := pm.DB.RecordPostQueueFailure(entry.ID, err.Error(), rejected); rerr != nil {
-				log.Printf("Failed to record failure of entry %d: %v", entry.ID, rerr)
-				failedEntryIDs = append(failedEntryIDs, entry.ID)
-			}
+		err := pm.processEntry(entry)
+		if err == nil {
+			posted++
+			continue
+		}
+		if pm.stopped() && !errors.Is(err, errPostRejected) {
+			// Interrupted by the stop (pool wait or POST cancelled): back to pending without an
+			// attempt; see the duplicate caveat in the function comment. A rejection by every
+			// provider that completed just before the stop still counts below.
+			log.Printf("Entry %d (message: %s) interrupted by shutdown, back to pending: %v", entry.ID, entry.MessageID, err)
+			failedEntryIDs = append(failedEntryIDs, entry.ID)
+			return stopAt(i + 1)
+		}
+		failed++
+		rejected := errors.Is(err, errPostRejected)
+		log.Printf("Failed to process entry %d (message: %s, rejected=%v): %v", entry.ID, entry.MessageID, rejected, err)
+		// RecordPostQueueFailure also clears in_processing; when it fails, reset the flag below.
+		if rerr := pm.DB.RecordPostQueueFailure(entry.ID, err.Error(), rejected); rerr != nil {
+			log.Printf("Failed to record failure of entry %d: %v", entry.ID, rerr)
+			failedEntryIDs = append(failedEntryIDs, entry.ID)
 		}
 	}
 
@@ -177,6 +211,7 @@ func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 		}
 	}
 
+	log.Printf("Processed %d pending posts (%d posted, %d failed)", posted+failed, posted, failed)
 	return len(entries), nil
 }
 
@@ -207,6 +242,13 @@ func (pm *PosterManager) processEntry(entry database.PostQueueEntry) error {
 	var lastErr error  // last error of any kind
 	var otherErr error // first error that is not a 441: the reason when not every pool rejected
 	for _, pool := range pm.pools {
+		if pm.stopped() {
+			// don't try the next provider after a stop (it may have interrupted the last one)
+			if lastErr != nil {
+				return fmt.Errorf("%w (last provider error: %v)", ErrStopped, lastErr)
+			}
+			return ErrStopped
+		}
 		if err := pm.postToProvider(article, pool); err != nil {
 			log.Printf("Failed to post article %s to provider %s: %v", entry.MessageID, pool.Backend.Provider.Name, err)
 			lastErr = err
@@ -264,12 +306,13 @@ func (pm *PosterManager) postToProvider(article *models.Article, pool *nntp.Pool
 	peering := false // TODO: pool.Backend.Provider.Peering
 
 	if pool.Backend.Provider.Posting {
-		conn, err := pool.Get(nntp.MODE_READER_MV)
+		conn, err := pool.GetContext(pm.ctx, nntp.MODE_READER_MV)
 		if err != nil {
 			return fmt.Errorf("failed to get connection: %v", err)
 		}
-		// Use POST for posting articles (standard NNTP posting)
-		responseCode, err := conn.PostArticle(article)
+		// Use POST for posting articles (standard NNTP posting). A stop (pm.ctx) interrupts it:
+		// PostArticleContext force-closes the connection and err wraps context.Canceled.
+		responseCode, err := conn.PostArticleContext(pm.ctx, article)
 		if responseCode == 441 {
 			// Posting failed: the provider refused this article. PostArticle reports the 441 as an
 			// error (the expected code was 340/240), but the connection is still in sync.
@@ -281,7 +324,7 @@ func (pm *PosterManager) postToProvider(article *models.Article, pool *nntp.Pool
 		}
 		if err != nil {
 			conn.ForceCloseConn()
-			return fmt.Errorf("failed to post article: %v", err)
+			return fmt.Errorf("failed to post article: %w", err)
 		}
 		// Check response code
 		switch responseCode {

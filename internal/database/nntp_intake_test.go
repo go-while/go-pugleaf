@@ -17,8 +17,9 @@ import (
 // nntp_intake_test.go covers slice intake-db (S2) of .claude/plans/wip/nntp-intake-injection.md:
 // the NULL-safe intake group lookup, the batch stats UPDATE that never creates a newsgroups row
 // (A-db-1, SEC-2 DB side), history adds and msgid-cache release for NULL-hierarchy and missing
-// rows (INT-6), duplicate message-ids that are neither counted nor re-added (A-db-3) and an
-// updated_at that never becomes 0001-01-01 or moves backwards (A-db-4).
+// rows (INT-6), duplicate message-ids that are neither counted nor re-added (A-db-3), an
+// updated_at that never becomes 0001-01-01 or moves backwards (A-db-4), and (plan
+// small-fixes-postrun D2) a high_water that the stats UPDATE raises but never lowers.
 
 // idbAdd is one AddArticleToHistory call seen by idbProc.
 type idbAdd struct {
@@ -101,16 +102,16 @@ func idbGroupRowCount(t *testing.T, name string) int {
 }
 
 // idbStats reads the counters of a newsgroups row; updated_at is read as raw text.
-func idbStats(t *testing.T, name string) (messageCount, lastArticle int64, updatedAt string) {
+func idbStats(t *testing.T, name string) (messageCount, lastArticle, highWater int64, updatedAt string) {
 	t.Helper()
-	var mc, la sql.NullInt64
+	var mc, la, hw sql.NullInt64
 	var ua sql.NullString
 	if err := RetryableQueryRowScan(w0DB(t).mainDB,
-		`SELECT message_count, last_article, CAST(updated_at AS TEXT) FROM newsgroups WHERE name = ?`,
-		[]interface{}{name}, &mc, &la, &ua); err != nil {
+		`SELECT message_count, last_article, high_water, CAST(updated_at AS TEXT) FROM newsgroups WHERE name = ?`,
+		[]interface{}{name}, &mc, &la, &hw, &ua); err != nil {
 		t.Fatalf("read newsgroups row %s: %v", name, err)
 	}
-	return mc.Int64, la.Int64, ua.String
+	return mc.Int64, la.Int64, hw.Int64, ua.String
 }
 
 // idbArticle builds an article for task's group as the capture path leaves it. extra groups
@@ -233,7 +234,8 @@ func TestIntakeDBBatchNeverCreatesRow(t *testing.T) {
 }
 
 // TestIntakeDBHistoryForNullHierarchyRow (INT-6): two batches for a row with a NULL hierarchy
-// add every article to history with the row's ID and count them.
+// add every article to history with the row's ID and count them; high_water follows the
+// highest article number (D2).
 func TestIntakeDBHistoryForNullHierarchyRow(t *testing.T) {
 	db, proc := idbBatchDB(t)
 	name := w0Name("idb.nullhier")
@@ -251,9 +253,36 @@ func TestIntakeDBHistoryForNullHierarchyRow(t *testing.T) {
 			t.Errorf("history add %s with group ID %d, want %d", a.messageID, a.groupID, id)
 		}
 	}
-	mc, la, _ := idbStats(t, name)
-	if mc != 4 || la != 4 {
-		t.Errorf("message_count=%d last_article=%d, want 4 and 4", mc, la)
+	mc, la, hw, _ := idbStats(t, name)
+	if mc != 4 || la != 4 || hw != 4 {
+		t.Errorf("message_count=%d last_article=%d high_water=%d, want 4, 4 and 4", mc, la, hw)
+	}
+}
+
+// TestIntakeDBHighWaterNeverLowered (D2, Q2): a high_water stored by hand above the batch's
+// highest article number stays as it is, while a NULL high_water is raised to that number.
+func TestIntakeDBHighWaterNeverLowered(t *testing.T) {
+	db, _ := idbBatchDB(t)
+	high := w0Name("idb.hwhigh")
+	idbInsertGroup(t, high)
+	if _, err := RetryableExec(w0DB(t).mainDB, `UPDATE newsgroups SET high_water = 100 WHERE name = ?`, high); err != nil {
+		t.Fatalf("seed high_water: %v", err)
+	}
+	null := w0Name("idb.hwnull")
+	idbInsertGroup(t, null)
+	if _, err := RetryableExec(w0DB(t).mainDB, `UPDATE newsgroups SET high_water = NULL WHERE name = ?`, null); err != nil {
+		t.Fatalf("seed NULL high_water: %v", err)
+	}
+	for _, name := range []string{high, null} {
+		task := fuBatchTask(t, db.Batch, name, 2)
+		idbRun(t, db, task, nil)
+	}
+
+	if mc, la, hw, _ := idbStats(t, high); mc != 2 || la != 2 || hw != 100 {
+		t.Errorf("%s: message_count=%d last_article=%d high_water=%d, want 2, 2 and 100: a smaller batch lowered high_water", high, mc, la, hw)
+	}
+	if mc, la, hw, _ := idbStats(t, null); mc != 2 || la != 2 || hw != 2 {
+		t.Errorf("%s: message_count=%d last_article=%d high_water=%d, want 2, 2 and 2: a NULL high_water was not raised", null, mc, la, hw)
 	}
 }
 
@@ -308,7 +337,7 @@ func TestIntakeDBDuplicatesNotCounted(t *testing.T) {
 		if n := idbGroupCount(t, db, name, "threads"); n != 2 {
 			t.Errorf("%s: threads rows = %d, want 2: an ignored duplicate got a number and a second threads row", stage, n)
 		}
-		if mc, _, _ := idbStats(t, name); mc != 2 {
+		if mc, _, _, _ := idbStats(t, name); mc != 2 {
 			t.Errorf("%s: message_count = %d, want 2: ignored duplicates were counted", stage, mc)
 		}
 		if adds := proc.seen(); len(adds) != 2 {
@@ -352,16 +381,16 @@ func TestIntakeDBUpdatedAtCrosspost(t *testing.T) {
 	idbRun(t, db, task, nil)
 
 	want := articleDate.Format(layout)
-	if _, _, got := idbStats(t, name); got != want {
+	if _, _, _, got := idbStats(t, name); got != want {
 		t.Errorf("updated_at after the crosspost batch = %q, want %q (A-db-4: a crosspost batch must not leave it unset or write 0001-01-01)", got, want)
 	}
 
 	idbQueue(db.Batch, task, idbArticle(task, idbMsgID("updatedat-old"), time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC), nil))
 	idbRun(t, db, task, nil)
-	if _, _, got := idbStats(t, name); got != want {
+	if _, _, _, got := idbStats(t, name); got != want {
 		t.Errorf("updated_at after a backfill batch = %q, want %q unchanged: it moved backwards", got, want)
 	}
-	if mc, _, _ := idbStats(t, name); mc != 2 {
+	if mc, _, _, _ := idbStats(t, name); mc != 2 {
 		t.Errorf("message_count = %d, want 2", mc)
 	}
 }

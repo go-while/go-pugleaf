@@ -623,12 +623,16 @@ func (sq *SQ3batch) getOrCreateInterfaceSlice() []interface{} {
 // query_updateNewsgroupsStats adds a batch's newly inserted articles to an existing newsgroups
 // row. It never inserts: a row created here would have a NULL hierarchy (A-db-1) and would
 // resurrect deleted or unknown groups (SEC-2). Arguments: inserted count, max article number
-// (twice), the latest article date as "2006-01-02 15:04:05" (three times; "" keeps updated_at,
-// and an older date never moves it backwards, A-db-4), newsgroup name.
+// (twice, for last_article), max article number (twice, for high_water), the latest article
+// date as "2006-01-02 15:04:05" (three times; "" keeps updated_at, and an older date never
+// moves it backwards, A-db-4), newsgroup name. last_article and high_water only ever grow: a
+// smaller batch maximum never lowers them. SQLite evaluates every SET expression against the
+// row as it was before the UPDATE, so the CASEs compare with the stored values.
 const query_updateNewsgroupsStats = `
 				UPDATE newsgroups SET
 					message_count = COALESCE(message_count, 0) + ?,
 					last_article = CASE WHEN ? > COALESCE(last_article, 0) THEN ? ELSE last_article END,
+					high_water = CASE WHEN ? > COALESCE(high_water, 0) THEN ? ELSE high_water END,
 					updated_at = CASE WHEN ? = '' THEN updated_at
 					                  WHEN updated_at IS NULL OR ? > updated_at THEN ? ELSE updated_at END
 				WHERE name = ?`
@@ -1060,7 +1064,8 @@ retry1:
 			err = updateNewsgroupStatsWithRetry(func() error {
 				return RetryableTransactionExec(sq.db.mainDB, func(tx *sql.Tx) error {
 					res, txErr := tx.Exec(query_updateNewsgroupsStats,
-						len(inserted), maxArticleNum, maxArticleNum, latestStr, latestStr, latestStr, *task.Newsgroup)
+						len(inserted), maxArticleNum, maxArticleNum, maxArticleNum, maxArticleNum,
+						latestStr, latestStr, latestStr, *task.Newsgroup)
 					if txErr != nil {
 						return txErr
 					}

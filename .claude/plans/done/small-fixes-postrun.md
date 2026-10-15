@@ -118,10 +118,60 @@ The CLAUDE.md list (same as `.github/workflows/tests.yml`), plus `PUGLEAF_KNOWN_
 3. Tree: `go test -race -count=20 -run FuTree ./internal/database/` green; the web thread-tree page of a scratch
    group whose replies arrive out of order (seed as `flWebSeed` does, but with a reply referencing a later
    article) answers 200 on 20 consecutive requests.
-4. Drop path: `go test -race -count=5 -run 'FlDlDrop' ./internal/processor/` green.
+4. Drop path: `go test -race -count=5 -v -run 'FlDLDrop' ./internal/processor/` green and five tests listed (the -run pattern is case-sensitive).
+
+## Progress
+
+### Wave 0 + wave 1 (2026-10-15)
+- `plan-small-fixes-postrun` from `testing-001` @ b45d053 (e2cf14d plan to wip). Four parallel slices, all reviewed.
+- sfp-dl-drop-test: `worktree-agent-ab022f2e53acb41fc` (46e775b), merge 4c45a72. `commitThenProgress` +
+  `downloadWaitCommitted` seam; an UpdateProgress error is now returned. Review MERGE; it caught a case-sensitive
+  `-run` pattern in this plan's E2E step (fixed in the plan). Note: the not-committed message lost the range start.
+- sfp-tree-order: `worktree-agent-a1ea50c74677a38f9` (8e08248), merge 91dbf16. `buildTreeFromOverviews` with
+  root-first, ascending numbers, cycle guard, depth pass, stable sort; iterative `countDescendants`; extra kept:
+  `GetCachedTree` links children in `sort_order` (cache hits had random sibling order) and skips self-parent rows.
+  Review MERGE (minor: per-node seen-map allocation in countDescendants; performance only).
+- sfp-high-water: `worktree-agent-ab4f66debde03f2f4` (13c2f03), merge 4596254. `high_water` raised in the batch
+  stats UPDATE, never lowered (Q2). Review MERGE, no findings. Note for later: `RepairNewsgroupWatermarks` can still
+  lower it after expiry (preloader, not in scope).
+- sfp-postqueue-stop: `worktree-agent-a3ff11d10a9746df8` (f511886), merge afc66ea; inline 918b752 (a rejection
+  completed just before the stop still counts; `%w` in postToProvider). `PostArticleContext` closes the raw socket
+  through `context.AfterFunc` and calls `ForceCloseConn` (DEVIATION from D1's bare `closing.Store`: the reviewer
+  proved by mutation that D1's version leaks the pool slot); PosterManager ctx; stop checks between pools; a
+  failed-after-stop entry is reset, not counted; "Processed N (P posted, F failed)". Review MERGE. Leftover: a stop
+  during a fresh connect (dial/handshake, `SwitchMode`) still waits for the connect timeout (GetContext watches
+  the ctx only while waiting for a slot).
+- Merged tree 918b752: gofmt clean, vet (+e2e tag) and build ok, race suite over 28 package sets ok in 257 s wall
+  (no flakes), known bugs unchanged (T-nntp-article-1).
 
 ## Open questions (defaults apply unless overridden at the wave-1 boundary)
 - Q1: on stop mid-POST the article may be posted twice if only the 240 was lost; accept (next run gets the 441
   duplicate) rather than tracking "sent" state? default yes.
 - Q2: `high_water` only ever grows (CASE WHEN greater); a shrunk group after expiry keeps its old high water,
   as NNTP semantics expect? default yes.
+
+## Outcome (2026-10-15)
+- **Integration branch:** `plan-small-fixes-postrun` from `testing-001` @ b45d053. Not yet merged into `testing-001`
+  (user decision). Nothing pushed.
+- **Slices (4, one wave):** sfp-dl-drop-test 4c45a72, sfp-tree-order 91dbf16, sfp-high-water 4596254,
+  sfp-postqueue-stop afc66ea (+ inline 918b752). Worktrees `/tank0/claude/trees/go-pugleaf/agent-{ab022f2e53acb41fc,
+  a1ea50c74677a38f9,ab4f66debde03f2f4,a3ff11d10a9746df8}` (branches `worktree-agent-<id>`); the user cleans them up.
+- **Verification (verifier on 0a5e90f, code 918b752):** gofmt/vet/build clean; race suite over 28 package sets in
+  193 s wall, no flakes; flake pass `-count=5 -cpu 1,4` 900 PASS / 0 FAIL; known bug T-nntp-article-1 only; E2E:
+  SIGINT during a POST to a stub that never replies cut the socket within ~10 ms and exited 130 after 2.3 s (the rest
+  is the database teardown), row back to pending with attempts 0; a 441 run logs `Processed 1 pending posts
+  (0 posted, 1 failed)`; three posts through a scratch nntp-server gave `high_water 3` and an active-file line
+  `test.sfp.hw 3 1 y` without `-repair-watermarks`; the thread-tree page of an out-of-order thread with an in-thread
+  orphan answered 200 on 20 cached and 20 fresh builds with identical structure (orphan under the root at depth 1,
+  deepest reply at depth 3); the five FlDLDrop tests listed and green `-count=5`.
+- **Design deviation (correct):** `PostArticleContext` calls `ForceCloseConn` inside the `context.AfterFunc` instead
+  of the bare `closing.Store(true)` the plan wrote; the reviewer's mutation run showed the plan's version leaks the
+  pool slot.
+- **Leftovers:** a stop during a fresh connect (dial/handshake/`SwitchMode`) still waits for the connect timeout
+  (`GetContext` watches the ctx only while waiting for a slot); `RepairNewsgroupWatermarks` can lower `high_water`
+  after expiry (preloader; Q2 says it should only grow on intake, the repair is a deliberate recompute);
+  `countDescendants` allocates a seen-map per node (performance only); the not-committed log lost the range start;
+  an article whose only reference is unknown starts its own thread at intake (threading, not the tree builder), so
+  the "orphan under the root" case only arises for in-thread orphans; the `flWebSeed` comment in
+  `internal/web/fl_web_tree_test.go` about avoiding orphans is stale.
+
