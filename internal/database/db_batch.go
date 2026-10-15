@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/history"
@@ -113,11 +112,11 @@ type SQ3batch struct {
 	dividerChan     chan *models.Article
 	captureDropOnce sync.Once // logs the first capture dropped after Shutdown
 	negativeOnce    sync.Once // logs the first time queued went negative (A-db-9)
-	// captureInFlight counts captures between BatchCaptureOverviewForLater and their send into
-	// a BATCHchan (in dividerChan, blocked on it, or held by a braked BatchDivider). While it is
-	// above 0 expireIdleTasks expires nothing: such an article carries its group's current
-	// *string and must find the same task (A-db-5).
-	captureInFlight atomic.Int64
+	// groupNames interns the newsgroup name pointers (GMux). It is never expired (one string
+	// per group ever seen): a task that ExpireCache removed and that is created again carries
+	// the same *string, so in-flight articles' NewsgroupsPtr, GroupDB.NewsgroupPtr and
+	// ArticleNums keys stay valid across an expiry (A-db-5, A-db-2).
+	groupNames map[string]*string
 }
 
 type BatchTasks struct {
@@ -160,6 +159,7 @@ func NewSQ3batch(db *Database) *SQ3batch {
 		LimitChan:          make(chan struct{}, db.dbconfig.MaxDBthreads),
 		LPending:           make(chan struct{}, 1),
 		dividerChan:        make(chan *models.Article, 128),
+		groupNames:         make(map[string]*string, 128),
 	}
 	batch.orchestrator = NewBatchOrchestrator(batch)
 	return batch
@@ -173,13 +173,11 @@ func (sq *SQ3batch) BatchCaptureOverviewForLater(newsgroupPtr *string, article *
 	}
 	article.Mux.Unlock()
 	article.ProcessQueue <- newsgroupPtr // Add to process queue for later processing
-	sq.captureInFlight.Add(1)
 	// After Shutdown nobody reads dividerChan any more (BatchDivider returned): drop the
 	// capture instead of parking this goroutine for good.
 	select {
 	case sq.dividerChan <- article:
 	case <-sq.db.backgroundStop():
-		sq.captureInFlight.Add(-1)
 		sq.captureDropOnce.Do(func() {
 			log.Printf("[BATCH] capture after Shutdown dropped")
 		})
@@ -205,14 +203,10 @@ func (sq *SQ3batch) ExpireCache() {
 }
 
 // expireIdleTasks removes the tasks whose Expires is before now and that have no work: a task
-// still processing or with articles in its BATCHchan is kept (A-db-5), so a writer never ends
-// up with a task (and pointer) that is no longer in the map. While captures are in flight
-// (in dividerChan, blocked on it or held by a braked BatchDivider) nothing is expired: their
-// articles carry the current pointer of their group. It returns how many it removed.
+// still processing or with articles in its BATCHchan is kept (A-db-5). A removed task that is
+// needed again is created with the same interned name pointer (groupNames). It returns how
+// many it removed.
 func (sq *SQ3batch) expireIdleTasks(now time.Time) (expired int) {
-	if len(sq.dividerChan) > 0 || sq.captureInFlight.Load() > 0 {
-		return 0
-	}
 	sq.GMux.Lock()
 	defer sq.GMux.Unlock()
 	for k, task := range sq.TasksMap {
@@ -228,9 +222,23 @@ func (sq *SQ3batch) expireIdleTasks(now time.Time) (expired int) {
 	return expired
 }
 
-// GetNewsgroupPointer returns a pointer to the newsgroup name in TasksMap. A hit renews the
-// task's expiry, so ExpireCache does not replace the pointer under a reader that just got it
-// (A-db-5).
+// internNewsgroupLocked returns the interned pointer of newsgroup, creating it on first use.
+// The caller holds sq.GMux for writing.
+func (sq *SQ3batch) internNewsgroupLocked(newsgroup string) *string {
+	if ptr, ok := sq.groupNames[newsgroup]; ok {
+		return ptr
+	}
+	if sq.groupNames == nil {
+		sq.groupNames = make(map[string]*string)
+	}
+	ptr := &newsgroup
+	sq.groupNames[newsgroup] = ptr
+	return ptr
+}
+
+// GetNewsgroupPointer returns the interned pointer to the newsgroup name (the Newsgroup of its
+// task in TasksMap): the same *string for the life of this SQ3batch, also after the task
+// expired. A hit renews the task's expiry (A-db-5).
 func (sq *SQ3batch) GetNewsgroupPointer(newsgroup string) *string {
 	sq.GMux.RLock() // Lock the mutex to ensure thread safety
 	if ptr, exists := sq.TasksMap[newsgroup]; exists {
@@ -248,7 +256,7 @@ func (sq *SQ3batch) GetNewsgroupPointer(newsgroup string) *string {
 		return ptr.Newsgroup
 	}
 	batchTasks := &BatchTasks{
-		Newsgroup: &newsgroup,
+		Newsgroup: sq.internNewsgroupLocked(newsgroup),
 		// BATCHchan will be created lazily on first enqueue to reduce memory during scan-only paths
 		BATCHchan: nil,
 		Expires:   time.Now().Add(120 * time.Second), // Set initial expiration time
@@ -269,7 +277,8 @@ func (sq *SQ3batch) GetChan(newsgroup *string) chan *models.Article {
 	return nil
 }
 
-// GetOrCreateTasksMapKey returns a pointer to the BatchTasks for a specific newsgroup
+// GetOrCreateTasksMapKey returns a pointer to the BatchTasks for a specific newsgroup (a new
+// task gets the interned name pointer, see GetNewsgroupPointer)
 func (sq *SQ3batch) GetOrCreateTasksMapKey(newsgroup string) *BatchTasks {
 	// Check if the group already exists in the map
 	sq.GMux.RLock() // Lock the mutex to ensure thread safety
@@ -285,7 +294,7 @@ func (sq *SQ3batch) GetOrCreateTasksMapKey(newsgroup string) *BatchTasks {
 		return batchTasks
 	}
 	batchTasks := &BatchTasks{
-		Newsgroup: &newsgroup,
+		Newsgroup: sq.internNewsgroupLocked(newsgroup),
 		// BATCHchan will be created lazily on first enqueue to reduce memory during scan-only paths
 		BATCHchan: nil,
 		Expires:   time.Now().Add(120 * time.Second), // Set initial expiration time
@@ -1901,7 +1910,6 @@ func (sq *SQ3batch) BatchDivider() {
 		}
 		if article == nil {
 			log.Printf("[BATCH-DIVIDER] Received nil task?!")
-			sq.captureInFlight.Add(-1)
 			continue
 		}
 		article.Mux.Lock()
@@ -1911,7 +1919,6 @@ func (sq *SQ3batch) BatchDivider() {
 		default:
 			article.Mux.Unlock()
 			log.Printf("Error in BatchDivider, received task (%#v) but no newsgroupPtr", article)
-			sq.captureInFlight.Add(-1)
 			continue
 		}
 
@@ -1944,7 +1951,6 @@ func (sq *SQ3batch) BatchDivider() {
 		sq.GMux.Unlock()
 		select {
 		case tasks.BATCHchan <- article:
-			sq.captureInFlight.Add(-1)
 		case <-stop:
 			sq.GMux.Lock()
 			sq.queued--

@@ -119,19 +119,6 @@ func adfBatchMsgID() string {
 	return fmt.Sprintf("<adf-batch-%d@test.invalid>", w0Seq.Add(1))
 }
 
-// adfBatchWaitInFlight polls until captureInFlight equals want: the divider decrements it right
-// after the send, so a test that saw the article in BATCHchan may be a moment early.
-func adfBatchWaitInFlight(t *testing.T, sq *SQ3batch, want int64) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for sq.captureInFlight.Load() != want {
-		if time.Now().After(deadline) {
-			t.Fatalf("captureInFlight = %d, want %d", sq.captureInFlight.Load(), want)
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 func adfBatchQueued(sq *SQ3batch) int {
 	sq.GMux.RLock()
 	defer sq.GMux.RUnlock()
@@ -365,7 +352,6 @@ func TestAdfBatchQueuedNeverNegative(t *testing.T) {
 	if q := adfBatchQueued(sq); q != n {
 		t.Fatalf("queued = %d with %d articles in BATCHchan, want %d (counted per article)", q, n, n)
 	}
-	adfBatchWaitInFlight(t, sq, 0)
 	fuBatchRun(t, s.db, task, adfBatchWait, logs)
 	if q := adfBatchQueued(sq); q != 0 {
 		t.Errorf("queued = %d after the batch, want 0", q)
@@ -433,10 +419,9 @@ func TestAdfBatchDividerBrakeEngages(t *testing.T) {
 	}
 }
 
-// TestAdfBatchBrakeSurvivesExpiry: while the divider is braked with articles in flight,
-// expireIdleTasks expires nothing; and even if the task disappears during the brake, the
-// divider looks it up only afterwards, so the held articles land in the live task instead of an
-// orphaned BATCHchan (A-db-5).
+// TestAdfBatchBrakeSurvivesExpiry: if the task disappears while the divider is braked, the
+// divider looks it up only after the brake, so the held articles land in the live task (with
+// the same interned name pointer) instead of an orphaned BATCHchan (A-db-5).
 func TestAdfBatchBrakeSurvivesExpiry(t *testing.T) {
 	logs := fuBatchCaptureLog(t)
 	s := adfBatchNewStopDB(t)
@@ -466,11 +451,8 @@ func TestAdfBatchBrakeSurvivesExpiry(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	adfBatchWaitInFlight(t, sq, n-12)
-	if got := sq.expireIdleTasks(time.Now().Add(200 * time.Second)); got != 0 {
-		t.Fatalf("expireIdleTasks removed %d tasks with captures in flight, want 0", got)
-	}
-	// an expiry that slipped through anyway: the held articles must find the live task
+	// the task disappears during the brake (as an expiry would remove it): the held articles
+	// must find the live task
 	sq.GMux.Lock()
 	delete(sq.TasksMap, name)
 	sq.GMux.Unlock()
@@ -493,6 +475,9 @@ func TestAdfBatchBrakeSurvivesExpiry(t *testing.T) {
 	if live == old {
 		t.Fatal("the deleted task is back in TasksMap: the test did not simulate an expiry")
 	}
+	if live.Newsgroup != old.Newsgroup {
+		t.Error("the recreated task has a different name pointer: in-flight articles reference the old one")
+	}
 	if got := chanLen(old); got != 0 {
 		t.Errorf("%d articles went into the orphaned task's BATCHchan", got)
 	}
@@ -503,7 +488,80 @@ func TestAdfBatchBrakeSurvivesExpiry(t *testing.T) {
 	if q := adfBatchQueued(sq); q != 0 {
 		t.Errorf("queued = %d, want 0", q)
 	}
-	adfBatchWaitInFlight(t, sq, 0)
+}
+
+// TestAdfBatchPointerStableAcrossExpiry: the name pointer of a group is interned, so a task
+// that expired and is created again carries the same *string; an article captured before the
+// expiry still lands, is stored, and processNewsgroupBatch clears its NewsgroupsPtr entry
+// (A-db-5, A-db-2).
+func TestAdfBatchPointerStableAcrossExpiry(t *testing.T) {
+	s := adfBatchNewStopDB(t)
+	sq := s.db.Batch
+	later := func() time.Time { return time.Now().Add(200 * time.Second) }
+
+	name := w0Name("adfbatch.intern")
+	p1 := sq.GetNewsgroupPointer(name)
+	if got := sq.expireIdleTasks(later()); got < 1 {
+		t.Fatalf("expireIdleTasks removed %d tasks, want the idle task of %s", got, name)
+	}
+	sq.GMux.RLock()
+	_, still := sq.TasksMap[name]
+	sq.GMux.RUnlock()
+	if still {
+		t.Fatal("the idle task was not expired")
+	}
+	if p2 := sq.GetNewsgroupPointer(name); p2 != p1 {
+		t.Fatal("GetNewsgroupPointer after an expiry returned a different *string")
+	}
+	if task := sq.GetOrCreateTasksMapKey(name); task.Newsgroup != p1 {
+		t.Fatal("GetOrCreateTasksMapKey's task does not carry the interned pointer")
+	}
+
+	// a capture in flight while its task expires (the divider is not running yet)
+	a := adfBatchArticle(&BatchTasks{Newsgroup: p1}, adfBatchMsgID())
+	a.NewsgroupsPtr = nil
+	a.ProcessQueue = make(chan *string, 16)
+	sq.BatchCaptureOverviewForLater(p1, a)
+	if got := sq.expireIdleTasks(later()); got < 1 {
+		t.Fatalf("expireIdleTasks removed %d tasks with the capture still in dividerChan, want >= 1", got)
+	}
+	s.start(sq.BatchDivider)
+
+	var live *BatchTasks
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		sq.GMux.RLock()
+		live = sq.TasksMap[name]
+		sq.GMux.RUnlock()
+		if live != nil {
+			live.Mux.RLock()
+			n := len(live.BATCHchan)
+			live.Mux.RUnlock()
+			if n == 1 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the in-flight capture did not land in the recreated task")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if live.Newsgroup != p1 {
+		t.Fatal("the recreated task does not carry the interned pointer")
+	}
+	fuBatchRun(t, s.db, live, adfBatchWait, &fuBatchLogs{})
+	if got := len(adfBatchNums(t, s.db, name)); got != 1 {
+		t.Errorf("%d articles stored, want 1", got)
+	}
+	if q := adfBatchQueued(sq); q != 0 {
+		t.Errorf("queued = %d, want 0", q)
+	}
+	a.Mux.Lock()
+	left, mid := len(a.NewsgroupsPtr), a.MessageID
+	a.Mux.Unlock()
+	if left != 0 || mid != "" {
+		t.Errorf("article not released after the batch: %d NewsgroupsPtr entries left, MessageID %q", left, mid)
+	}
 }
 
 // TestAdfBatchExpireSkipsBusyTask: idle-task expiry removes only expired tasks without work;
