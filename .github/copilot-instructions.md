@@ -44,7 +44,6 @@ go mod tidy && go mod verify
 ./build_import_flat-files.sh   # Import flat files
 ./build_recover-db.sh          # Database recovery
 ./build_rslight_importer.sh    # RSLight importer
-./build_TestMsgIdItemCache.sh  # Message ID cache tester
 
 # Note: Some cmd applications don't have build scripts:
 # benchmark_hash, extract_hierarchies, history-demo, parsedates, test-nntp, usermgr
