@@ -139,8 +139,8 @@ PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/   # list unchan
 - Q2: `PUGLEAF_TEST_DEADLINE` default 60 s, or 30 s?
 
 ## Outcome (2026-10-15)
-- **Integration branch:** `plan-test-timing-hardening` from `testing-001` @ d694e6a. Not yet merged into `testing-001`
-  (user decision). Nothing pushed. Survey: `.claude/plans/done/test-timing-hardening-survey.md`.
+- **Integration branch:** `plan-test-timing-hardening` from `testing-001` @ d694e6a, merged into `testing-001` as 03b63c3
+  (`git merge --no-ff`, 2026-10-15). Nothing pushed. Survey: `.claude/plans/done/test-timing-hardening-survey.md`.
 - **Waves:** 0 inline (7eed92b: P1 counters `ErrorDelayCount`/`ArticleDelayCount`, harness `hDeadline`), A with
   7 parallel slices, all reviewed and merged (see Progress). Production diff versus `testing-001`: the five nntp
   files of P1, `postmgr.go` (`idlePause`), `scripts/test-nntp-server.sh` (timeout 900), and 4956980: `handlePost`
