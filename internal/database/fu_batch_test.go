@@ -30,9 +30,9 @@ import (
 const fuBatchTestGrace = 3 * time.Second
 
 // fuBatchSlack is how much longer than the grace a bounded loop may take before the test calls
-// it unbounded. One extra round is a group database reopen plus one insert attempt plus the
-// loop's own one second sleep, so this is generous on purpose.
-const fuBatchSlack = 30 * time.Second
+// it unbounded (a hang guard, used by fuBatchRun callers in other files). It is the package's
+// central testWait.
+var fuBatchSlack = testWait
 
 // fuBatchLogs is a concurrency-safe log sink: the batch writer logs from the goroutine under
 // test while the shared test database logs from its own background goroutines.
@@ -148,6 +148,8 @@ func fuBatchTask(t *testing.T, sq *SQ3batch, newsgroup string, n int) *BatchTask
 // LimitChan token, which its defer returns) and reports how long it took to return. A loop
 // that lost its bound never returns, so the wait is bounded: db.Shutdown makes the group
 // database reacquire fail fast, which unwedges the leaked goroutine before the test fails.
+// Callers pass the grace plus fuBatchSlack: one extra round is a group database reopen plus one
+// insert attempt plus the loop's own one second sleep, so the hang guard is generous on purpose.
 func fuBatchRun(t *testing.T, db *Database, task *BatchTasks, wait time.Duration, logs *fuBatchLogs) time.Duration {
 	t.Helper()
 	db.Batch.LimitChan <- struct{}{}
@@ -167,7 +169,7 @@ func fuBatchRun(t *testing.T, db *Database, task *BatchTasks, wait time.Duration
 	}
 	select {
 	case <-done:
-	case <-time.After(30 * time.Second):
+	case <-time.After(testWait):
 		t.Log("fuBatch: the batch goroutine is still running and is leaked")
 	}
 	t.Fatalf("processNewsgroupBatch did not return within %v after shutdown began: the retry loop is unbounded and db.WG.Wait() would block for good. Last log lines:\n%s",
@@ -250,17 +252,29 @@ func TestFuBatchRetry2ThreadingFailureIsNotRetried(t *testing.T) {
 
 	close(db.StopChan)
 	// Wait as long as the retry1 test does: if batchProcessThreading ever propagates again,
-	// this call retries for the whole grace instead of returning at once, and the timing
-	// below names what changed. Today it returns in milliseconds.
+	// this call retries for the whole grace instead of returning at once. The check is the
+	// number of attempts (log lines), not the time it took: today the call returns in
+	// milliseconds after exactly one threading attempt.
 	grace := db.Batch.retryShutdownGrace()
 	took := fuBatchRun(t, db, task, grace+fuBatchSlack, logs)
-	if took > grace/2 {
-		t.Fatalf("processNewsgroupBatch retried the blocked threading write for %v: batchProcessThreading no longer swallows the failure, so the PHASE 2 call site now loops and needs the same bounded-drop test as retry1 - the bound held this time, the call returned inside the %v grace",
-			took, grace)
+	threadFails, insertFails := 0, 0
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if !strings.Contains(line, "'"+group+"'") {
+			continue
+		}
+		if strings.Contains(line, "Failed to batch process thread roots") {
+			threadFails++
+		}
+		if strings.Contains(line, "Failed1") || strings.Contains(line, "dropping") {
+			insertFails++
+		}
 	}
-
-	if !strings.Contains(logs.String(), "Failed to batch process thread roots") {
+	if threadFails == 0 {
 		t.Fatalf("the threads trigger never fired, so this test proves nothing. Last log lines:\n%s", logs.tail(12))
+	}
+	if threadFails != 1 || insertFails != 0 {
+		t.Fatalf("processNewsgroupBatch retried the blocked threading write (%d threading failures, %d insert retries/drops logged, returned after %v): batchProcessThreading no longer swallows the failure, so the PHASE 2 call site now loops and needs the same bounded-drop test as retry1. Last log lines:\n%s",
+			threadFails, insertFails, took, logs.tail(12))
 	}
 
 	// Phase 1 committed the articles: that is why a swallowed PHASE 2 failure only costs threading.

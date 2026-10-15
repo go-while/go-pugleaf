@@ -114,6 +114,7 @@ func (c *ClientConnection) handleOver(args []string) error {
 	}
 
 	if len(args) == 1 && isMessageIDArg(args[0]) {
+		c.server.articleDelays.Add(1)
 		if c.server.ArticleCmdDelay > 0 {
 			time.Sleep(c.server.ArticleCmdDelay) // ratelimit as ARTICLE/STAT (D11)
 		}
@@ -237,6 +238,7 @@ func (c *ClientConnection) handleHdr(args []string) error {
 	}
 
 	if len(args) == 2 && isMessageIDArg(args[1]) {
+		c.server.articleDelays.Add(1)
 		if c.server.ArticleCmdDelay > 0 {
 			time.Sleep(c.server.ArticleCmdDelay) // ratelimit as ARTICLE/STAT (D11)
 		}

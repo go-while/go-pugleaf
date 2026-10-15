@@ -50,15 +50,18 @@ anchors against the tree the run starts from).
 
 ## Waves
 
-### Wave 0 (inline, orchestrator)
-- Confirm D1/D2 with the user; re-check survey anchors on the starting tree; baseline checks; `git mv` to wip.
+### Wave 0 (inline, orchestrator) — DONE 2026-10-15
+- User accepted D1 (P1 counters) and D2, Q2 = 60 s. Done inline so every slice can run in one wave: `NNTPServer`
+  got `errorDelays`/`articleDelays` (`atomic.Int64`, incremented at the five delay sites whether or not the delay is
+  > 0; accessors `ErrorDelayCount()`/`ArticleDelayCount()`), and the harness got `hDeadline` (var, from
+  `PUGLEAF_TEST_DEADLINE`, default 60 s) used by `hs.dial`. Slices use these; wave B below collapses into wave A.
 
-### Wave A (6 parallel slices, owned files disjoint)
+### Wave A (7 parallel slices, owned files disjoint; tth-nntp-rfc no longer waits for wave B)
 - slice `tth-nntp-harness`: `internal/nntp/nntp-server-harness_test.go`, `nntp-server-session_test.go`,
   `nntp-server-auth_test.go`, `nntp-server-overview_test.go`, `nntp-server-article_test.go`,
   `nntp-server-rfccmds_test.go`, `nntp-server-group_test.go`, `nntp-intake_test.go`, `nntp-wiring_test.go`.
   `hDeadline` + env override, clamps in `tryDial`/`sessExpectClosed`; TestHarnessIsolatedTimeout, TestSessStop,
-  TestOvrHugeRange, TestArtNoDelay (needs D1: keep a TODO marker if P1 lands in wave B), artPollStat223.
+  TestOvrHugeRange, TestArtNoDelay (structural via ArticleDelayCount), artPollStat223.
 - slice `tth-nntp-client`: `nntp-client-{fake,conn,cmds,validate,progress}_test.go`: `cliWait`, WaitOpen clamp,
   D5; the eight "Connect took < Ns" bounds become timeout-error checks.
 - slice `tth-database`: delete `TestNSHAuthUnknownUserTiming` (`nsh_auth_test.go`, keep the `time` import if still
@@ -75,10 +78,8 @@ anchors against the tree the run starts from).
   (:366 Serve-after-Stop → `testWait`), `cmd/nntp-server/server_e2e_test.go`, `e2e_binary_test.go`,
   `e2e_binary_rfc_test.go` (10 s/20 s guards → `testWait`, 1 s `intakeDLTestWait`).
 
-### Wave B (1 slice, after wave A is merged)
-- slice `tth-nntp-rfc`: P1 (D1) in `internal/nntp/nntp-cmd-helpers.go`, `nntp-server.go`, `nntp-article-common.go`,
-  `nntp-cmd-nextlast.go`, `nntp-cmd-over-hdr.go`; then `nntp-rfc-{stream,starttls,reader,lists,overview}_test.go`
-  and `nntp-wildmat_test.go` rewritten against the counters and `hDeadline`; the TestArtNoDelay TODO from wave A.
+- slice `tth-nntp-rfc` (now in wave A): `nntp-rfc-{stream,starttls,reader,lists,overview}_test.go` and
+  `nntp-wildmat_test.go` rewritten against the P1 counters and `hDeadline` (production files already changed in wave 0).
 
 ## Checks
 ```bash
@@ -97,6 +98,67 @@ PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/   # list unchan
   their margin in the Outcome); no literal client deadline under 30 s outside the deliberate short windows.
 - Scratch data only (`-data ./data-test-test-timing-hardening`); never `./data`, `data_ram`, `data_local`.
 
+## Progress
+
+### Wave 0 + wave A (2026-10-15)
+- `plan-test-timing-hardening` from `testing-001` @ d694e6a; wave 0 inline 7eed92b (P1 counters, `hDeadline`).
+- tth-small: `worktree-agent-a02cf379364c6d82c` (0e0bee8, 717c71c, review fix 250cacd), merge 24cf27f. D2 done
+  (`idlePause`). Review MERGE; minors fixed (comment, acquire(false) under testWait, 1 s/10x latency bound kept
+  beside the structural check, negative-window comments).
+- tth-web: `worktree-agent-ae3b84fafcab33e6e` (0b1bf5c, review fix 5e83b42), merge 2ac6749. `testShutdownWait()`
+  >= 30 s; FinalFlushBounded structural via the grace log line; TokenUsageDuringDrain waits on `tokenUsageDone`;
+  fu_cron stack poll; Ollama test proves the client through a counting transport plus a 10 s / 100x bound.
+- tth-tcp2tor-e2e: `worktree-agent-a81fbc10ac9fe3cb3` (b29f85e, 996784a, review fix bfa567c), merge 6809ae4;
+  inline 852cd25 raised `scripts/test-nntp-server.sh` outer timeout 300 → 900 s. Timeout tests keep a 10x bound
+  beside the error-type check; StopDuringDial structural (dial timeout 10x testWait, proxy conn closed);
+  lines-20000 waits for active connections == 0 instead of a 1.5 s log window; N51 soft window 10 s.
+- tth-nntp-rfc: `worktree-agent-a9d2927cd5154f049` (99d5c1e, review fix 8a77227), merge 6c5aaf5. Seven "no error
+  delay" checks → `ErrorDelayCount()` deltas (== 0 / == 1); the 501/412 lower bounds stay; overview 10 s bounds
+  dropped (per-read hDeadline); wildmat fuzz termination guard with panic recovery.
+- tth-nntp-client: `worktree-agent-ad7fc8f0f71aabdae` (c6f648f, review fix a15328e), merge 4b69355. `cliWait`,
+  WaitOpen clamp, Backend ConnectTimeout 30 s (D5); eight "Connect took" bounds → timeout-error checks plus a
+  15 s (50x) bound against the 30 s default; back-off window 3 s and commented.
+- tth-database: `worktree-agent-a5ffccd8abdb1a025` (4bd70a0, review fix d5f2a9e), merge ef4e204.
+  `TestNSHAuthUnknownUserTiming` deleted; retry2/stats-retry/shutdown-clock/TTL-concurrent structural;
+  adfreopen per-run temp root (was not repeatable with -count>1, a real bug) and 2 min CronDB budget;
+  post-queue retry poll on the "database is locked" log line.
+- tth-nntp-harness: `worktree-agent-a4db13ecf84d5e907` (f09ecab, review fix cfbd3cf), merge cf4ada3. tryDial
+  clamps to hDeadline; TestHarnessIsolatedTimeout / TestSessStop / TestOvrHugeRange / TestArtNoDelay structural;
+  ihave-arrival a single STAT; the known-bug poll keeps its 1 s window on purpose; Stop poll breaks only on a
+  dial error; huge-range child 4x hDeadline.
+- Accepted limits (D1): a bare `time.Sleep` before a no-delay reply would not be seen by the counters; TestArtNoDelay
+  no longer proves that ArticleCmdDelay=0 skips the sleep (D4). Leftovers: `cliWaitFromEnv` duplicates
+  `hDeadlineFromEnv` (fold after merge); `testSOCKS5Connection` wraps with %v (an errors.Is check would need %w);
+  `GetArticle`'s `%v` at nntp-client-commands.go:108 drops the net.Error on a slow 220.
+- Merged tree cf4ada3: gofmt clean, vet (incl. -tags e2e) and build ok, race suite over 13 package sets ok in 188 s
+  wall (run with no other load), known bugs unchanged (T-nntp-article-1). Grep audit of the surviving upper bounds:
+  every one is >= 10x (tcp2tor 10x, client 50x, intake 10x, web busy checkpoint 100x, Ollama 100x) or a lower bound.
+
 ## Open questions (ask at wave 0)
 - Q1: P1 counters on `NNTPServer` (D1): accept the two atomics in production code for test observability?
 - Q2: `PUGLEAF_TEST_DEADLINE` default 60 s, or 30 s?
+
+## Outcome (2026-10-15)
+- **Integration branch:** `plan-test-timing-hardening` from `testing-001` @ d694e6a. Not yet merged into `testing-001`
+  (user decision). Nothing pushed. Survey: `.claude/plans/done/test-timing-hardening-survey.md`.
+- **Waves:** 0 inline (7eed92b: P1 counters `ErrorDelayCount`/`ArticleDelayCount`, harness `hDeadline`), A with
+  7 parallel slices, all reviewed and merged (see Progress). Production diff versus `testing-001`: the five nntp
+  files of P1, `postmgr.go` (`idlePause`), `scripts/test-nntp-server.sh` (timeout 900), and 4956980: `handlePost`
+  copies the message-id before `ProcessIncomingArticle` (pre-existing data race with `processNewsgroupBatch`
+  clearing the struct, found by the stress pass; it could answer 240 with an empty id and remove the wrong
+  local430 key).
+- **Worktrees:** `/tank0/claude/trees/go-pugleaf/agent-{a02cf379364c6d82c,ae3b84fafcab33e6e,a81fbc10ac9fe3cb3,
+  a9d2927cd5154f049,ad7fc8f0f71aabdae,a5ffccd8abdb1a025,a4db13ecf84d5e907}` (branches `worktree-agent-<id>`);
+  the user cleans them up.
+- **Verification (verifier on 5929038, code cf4ada3):** gofmt/vet(+e2e tag)/build clean; race suite alone 174 s
+  wall, `internal/nntp` 170 s (no growth); stress pass `-race -count=5 -cpu 1,4` over 11 packages under a go-test
+  CPU hog (load 12-18, 32 min): zero timing failures, one data race in `cmd/nntp-server` (fixed in 4956980; package
+  then ok with `-count=3 -cpu 1,4`); `PUGLEAF_TEST_DEADLINE=5s` passes nntp/web/database/tcp2tor/postmgr (a
+  passing test never waits on the guard); known bug T-nntp-article-1 still fails in 1.02 s; grep audit: every
+  surviving upper bound >= 10x, no unclamped hang guard under 30 s; `TestNSHAuthUnknownUserTiming` gone,
+  `db_nntp_users.go` untouched; `scripts/test-nntp-server.sh` SUMMARY pass=38 fail=0 info=1.
+- **Leftovers:** `cliWaitFromEnv` duplicates `hDeadlineFromEnv`; `testSOCKS5Connection` wraps with %v;
+  `GetArticle` %v at nntp-client-commands.go:108; `TestSessIdleTimeout/activity-resets-timer` has ~450 ms of
+  absolute slack (10x by rule); `postmgr.idlePause` has no zero fallback (only NewPosterManager constructs it);
+  accepted D1/D4 limits (a bare sleep before a no-delay reply is invisible to the counters).
+

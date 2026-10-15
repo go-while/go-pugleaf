@@ -19,14 +19,18 @@ type PosterManager struct {
 	stopCh   chan struct{}
 	stopOnce sync.Once // stopCh is closed by Run (shutdown signal) or Stop, whichever comes first
 	wg       sync.WaitGroup
+	// idlePause is Run's pause after a batch that did not fill the limit (default 10 s); a field
+	// so tests can set it before Run starts.
+	idlePause time.Duration
 }
 
 // NewPosterManager creates a new poster manager
 func NewPosterManager(db *database.Database, pools []*nntp.Pool) *PosterManager {
 	return &PosterManager{
-		DB:     db,
-		pools:  pools,
-		stopCh: make(chan struct{}),
+		DB:        db,
+		pools:     pools,
+		stopCh:    make(chan struct{}),
+		idlePause: 10 * time.Second,
 	}
 }
 
@@ -88,7 +92,7 @@ func (pm *PosterManager) Run(limit int, shutdownChan <-chan struct{}, wg *sync.W
 		if err != nil {
 			log.Printf("PosterManager: Error processing pending posts: %v", err)
 		}
-		pause := 10 * time.Second
+		pause := pm.idlePause
 		if done == limit {
 			pause = 1 * time.Second
 		}

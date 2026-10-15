@@ -104,7 +104,7 @@ func intkWaitHandle(t *testing.T, errc chan error) {
 		if err != nil {
 			t.Fatalf("Handle returned %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(hDeadline):
 		t.Fatal("Handle did not return")
 	}
 }
@@ -433,7 +433,7 @@ func TestIntkCloseAfterReply(t *testing.T) {
 			if !errors.Is(err, errQuit) {
 				t.Fatalf("closeAfterReply returned %v, want errQuit", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(hDeadline):
 			t.Fatal("closeAfterReply did not return")
 		}
 	})

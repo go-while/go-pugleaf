@@ -144,11 +144,11 @@ func stlsSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConn
 			}
 		}
 	}()
-	conn, err := net.DialTimeout("tcp", l.Addr().String(), 5*time.Second)
+	conn, err := net.DialTimeout("tcp", l.Addr().String(), hDeadline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: 5 * time.Second}
+	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: hDeadline}
 	t.Cleanup(func() { _ = conn.Close(); <-done })
 	if c.Greeting, err = c.readLine(); err != nil {
 		t.Fatalf("greeting: %v", err)
@@ -169,7 +169,7 @@ func stlsUpgrade(t *testing.T, c *hClient) []byte {
 		t.Fatalf("client has %d unread bytes before the handshake", c.R.Buffered())
 	}
 	tc := tls.Client(c.Conn, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // test client
-	_ = tc.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = tc.SetDeadline(time.Now().Add(hDeadline))
 	if err := tc.Handshake(); err != nil {
 		t.Fatalf("TLS handshake: %v", err)
 	}
@@ -254,15 +254,21 @@ func TestStlsRefusals(t *testing.T) {
 	t.Run("error-delay", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{ErrorDelay: 300 * time.Millisecond})
 		c := stlsSession(t, hs, stlsExtra)
-		start := time.Now()
+		// Structural: the error-delay counter (incremented before the reply is sent)
+		// must not move for the 502 and must move once for the 501. The 501 also
+		// keeps its lower bound against the configured delay.
+		delays := hs.S.ErrorDelayCount()
 		stlsExpect(t, c, 502, "STARTTLS")
-		if d := time.Since(start); d >= 150*time.Millisecond {
-			t.Fatalf("502 took %v, want no error delay (< 150ms)", d)
+		if got := hs.S.ErrorDelayCount() - delays; got != 0 {
+			t.Fatalf("502 reached the error delay %d times, want 0 (no error delay)", got)
 		}
-		start = time.Now()
+		start := time.Now()
 		stlsExpect(t, c, 501, "STARTTLS x")
 		if d := time.Since(start); d < 300*time.Millisecond {
 			t.Fatalf("501 took %v, want the error delay (>= 300ms)", d)
+		}
+		if got := hs.S.ErrorDelayCount() - delays; got != 1 {
+			t.Fatalf("502+501 reached the error delay %d times, want 1 (the 501 only)", got)
 		}
 	})
 }
@@ -301,7 +307,7 @@ func TestStlsHandshakeFailure(t *testing.T) {
 	}
 	// The server closes the connection without a reply; a TLS alert record may
 	// arrive first, then EOF or reset.
-	_ = c.Conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = c.Conn.SetReadDeadline(time.Now().Add(hDeadline))
 	buf := make([]byte, 512)
 	for {
 		_, err := c.R.Read(buf)
@@ -310,7 +316,7 @@ func TestStlsHandshakeFailure(t *testing.T) {
 		}
 		var ne net.Error
 		if errors.As(err, &ne) && ne.Timeout() {
-			t.Fatalf("server did not close the connection within 2s")
+			t.Fatalf("server did not close the connection within %s", hDeadline)
 		}
 		break
 	}

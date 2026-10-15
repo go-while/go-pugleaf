@@ -66,7 +66,7 @@ func TestW1ServerBotMiddlewareReleasesLock(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("handler calling UpdateBadBots/UpdateBadIPs deadlocked: middleware holds the lock across c.Next()")
 	}
 }
@@ -255,7 +255,7 @@ func TestW1ServerNilCron(t *testing.T) {
 	cfg.ListenPort = 0
 	srv := NewWebServer(w0DB(t), cfg, nil, true, true)
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), testShutdownWait())
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
 			t.Errorf("Shutdown: %v", err)
@@ -293,7 +293,7 @@ func TestW1ServerStartShutdown(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Start() }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testShutdownWait())
 	defer cancel()
 	// Shutdown may run before or after Start stored its http.Server: both must end Start.
 	time.Sleep(50 * time.Millisecond)
@@ -305,7 +305,7 @@ func TestW1ServerStartShutdown(t *testing.T) {
 		if !errors.Is(err, http.ErrServerClosed) {
 			t.Fatalf("Start returned %v, want http.ErrServerClosed", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("Start did not return after Shutdown")
 	}
 	if err := srv.Shutdown(ctx); err != nil {

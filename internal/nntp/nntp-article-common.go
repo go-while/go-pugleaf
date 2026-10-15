@@ -44,6 +44,7 @@ func (c *ClientConnection) handleStat(args []string) error {
 
 // retrieveArticleCommon handles the common logic for ARTICLE, HEAD, BODY, and STAT commands
 func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType ArticleRetrievalType) error {
+	c.server.articleDelays.Add(1)
 	if c.server.ArticleCmdDelay > 0 {
 		time.Sleep(c.server.ArticleCmdDelay) // ratelimit (DefaultArticleCmdDelay)
 	}

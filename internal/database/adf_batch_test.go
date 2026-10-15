@@ -18,7 +18,8 @@ import (
 const adfBatchSeqMigration = "0010_single_article_num_seq.sql"
 
 // adfBatchWait bounds every fuBatchRun of these tests (a successful batch takes milliseconds).
-const adfBatchWait = 60 * time.Second
+// It is the package's central hang guard.
+var adfBatchWait = testWait
 
 // adfBatchNums returns the article numbers stored in the group database of name, ascending.
 func adfBatchNums(t *testing.T, db *Database, name string) []int64 {
@@ -147,8 +148,8 @@ func adfBatchNewStopDB(t *testing.T) *adfBatchStopDB {
 		}()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("batch loops did not return within 5s after the stop channel was closed")
+		case <-time.After(testWait):
+			t.Errorf("batch loops did not return within %v after the stop channel was closed", testWait)
 		}
 		s.db.bgStop = nil
 	})
@@ -333,7 +334,7 @@ func TestAdfBatchQueuedNeverNegative(t *testing.T) {
 		sq.BatchCaptureOverviewForLater(ptr, a)
 	}
 	task := sq.GetOrCreateTasksMapKey(name)
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(testWait)
 	for {
 		if q := adfBatchQueued(sq); q < 0 {
 			t.Fatalf("queued = %d while capturing", q)
@@ -345,7 +346,7 @@ func TestAdfBatchQueuedNeverNegative(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("BatchDivider routed %d of %d articles within 10s", queuedInChan, n)
+			t.Fatalf("BatchDivider routed %d of %d articles within %v", queuedInChan, n, testWait)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -392,7 +393,7 @@ func TestAdfBatchDividerBrakeEngages(t *testing.T) {
 	}
 	waitFor := func(want int) {
 		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
+		deadline := time.Now().Add(testWait)
 		for inChan() != want {
 			if time.Now().After(deadline) {
 				t.Fatalf("BATCHchan holds %d articles, want %d. Last log lines:\n%s", inChan(), want, logs.tail(12))
@@ -401,7 +402,9 @@ func TestAdfBatchDividerBrakeEngages(t *testing.T) {
 		}
 	}
 	waitFor(12)
-	time.Sleep(80 * time.Millisecond) // the divider polls every 16 ms: it must stay braked
+	// Deliberately short negative window: the divider polls every 16 ms and must stay braked.
+	// A slow machine can only make this check pass more easily, never fail it.
+	time.Sleep(80 * time.Millisecond)
 	if got := inChan(); got != 12 {
 		t.Fatalf("BATCHchan holds %d articles while braked, want 12", got)
 	}
@@ -444,7 +447,7 @@ func TestAdfBatchBrakeSurvivesExpiry(t *testing.T) {
 		defer task.Mux.RUnlock()
 		return len(task.BATCHchan)
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(testWait)
 	for chanLen(old) != 12 {
 		if time.Now().After(deadline) {
 			t.Fatalf("BATCHchan holds %d articles, want 12 (braked). Last log lines:\n%s", chanLen(old), logs.tail(12))
@@ -459,7 +462,7 @@ func TestAdfBatchBrakeSurvivesExpiry(t *testing.T) {
 
 	fuBatchRun(t, s.db, old, adfBatchWait, logs) // drains 12, releases the brake
 	var live *BatchTasks
-	deadline = time.Now().Add(10 * time.Second)
+	deadline = time.Now().Add(testWait)
 	for {
 		sq.GMux.RLock()
 		live = sq.TasksMap[name]
@@ -528,7 +531,7 @@ func TestAdfBatchPointerStableAcrossExpiry(t *testing.T) {
 	s.start(sq.BatchDivider)
 
 	var live *BatchTasks
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(testWait)
 	for {
 		sq.GMux.RLock()
 		live = sq.TasksMap[name]
@@ -625,8 +628,8 @@ func TestAdfBatchLoopsStopOnShutdown(t *testing.T) {
 	for what, done := range map[string]chan struct{}{"BatchDivider": divider, "ExpireCache": expire} {
 		select {
 		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("%s did not return within 2s after the stop channel was closed", what)
+		case <-time.After(testWait):
+			t.Fatalf("%s did not return within %v after the stop channel was closed", what, testWait)
 		}
 	}
 
@@ -641,7 +644,7 @@ func TestAdfBatchLoopsStopOnShutdown(t *testing.T) {
 	}()
 	select {
 	case <-captured:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("BatchCaptureOverviewForLater blocked after Shutdown")
 	}
 	if c := strings.Count(logs.String(), "[BATCH] capture after Shutdown dropped"); c != 1 {

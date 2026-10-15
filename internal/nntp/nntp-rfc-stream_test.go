@@ -61,11 +61,11 @@ func stmSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConne
 			}
 		}
 	}()
-	conn, err := net.DialTimeout("tcp", l.Addr().String(), 5*time.Second)
+	conn, err := net.DialTimeout("tcp", l.Addr().String(), hDeadline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: 5 * time.Second}
+	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: hDeadline}
 	t.Cleanup(func() { _ = conn.Close(); <-done })
 	if c.Greeting, err = c.readLine(); err != nil {
 		t.Fatalf("greeting: %v", err)
@@ -271,7 +271,8 @@ func TestStmCheck(t *testing.T) {
 }
 
 // TestStmPipelined: RFC 4644 §2.1, pipelined CHECKs are answered in order,
-// each reply carrying its id; 438 is not delayed (D10).
+// each reply carrying its id; 438 is not delayed (D10): the error-delay
+// counter must not move across the 50 replies (structural, no wall clock).
 func TestStmPipelined(t *testing.T) {
 	const n = 50
 	proc := &hFakeProcessor{checkFn: func(string) int { return history.CaseDupes }}
@@ -285,7 +286,7 @@ func TestStmPipelined(t *testing.T) {
 		ids[i] = hMessageID(g, int64(i+1))
 		b.WriteString("CHECK " + ids[i] + "\r\n")
 	}
-	start := time.Now()
+	delays := hs.S.ErrorDelayCount()
 	if err := c.send(b.String()); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -298,8 +299,8 @@ func TestStmPipelined(t *testing.T) {
 			t.Fatalf("reply %d: %v", i, err)
 		}
 	}
-	if d := time.Since(start); d > time.Second {
-		t.Errorf("%d pipelined 438 replies took %v, want < 1s (no error delay on 438)", n, d)
+	if got := hs.S.ErrorDelayCount() - delays; got != 0 {
+		t.Errorf("%d pipelined 438 replies reached the error delay %d times, want 0 (no error delay on 438)", n, got)
 	}
 	if got := stmChecked(proc); len(got) != n {
 		t.Errorf("CheckMessageID called %d times, want %d", len(got), n)

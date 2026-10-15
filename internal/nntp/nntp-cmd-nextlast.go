@@ -43,6 +43,7 @@ func (c *ClientConnection) moveCurrentArticle(args []string, next bool) error {
 		c.rateLimitOnError()
 		return c.sendResponse(420, "Current article number is invalid")
 	}
+	c.server.articleDelays.Add(1)
 	if c.server.ArticleCmdDelay > 0 {
 		time.Sleep(c.server.ArticleCmdDelay) // ratelimit (DefaultArticleCmdDelay)
 	}

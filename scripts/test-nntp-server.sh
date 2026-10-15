@@ -129,7 +129,7 @@ start_server || setup_fail "server failed to restart"
 # ---------------------------------------------------------------- N01-N11 (go test, build tag e2e)
 GOLOG="$DATA/e2e-go-test.log"
 PUGLEAF_E2E_ADDR="127.0.0.1:$PORT" PUGLEAF_E2E_USER="$E2E_USER" PUGLEAF_E2E_PASS="$E2E_PASS" PUGLEAF_E2E_GROUP=e2e.test.a \
-  timeout 300 go test -tags e2e -count=1 -v -run '^TestE2EBinary$' ./cmd/nntp-server/ >"$GOLOG" 2>&1
+  timeout 900 go test -tags e2e -count=1 -v -run '^TestE2EBinary$' ./cmd/nntp-server/ >"$GOLOG" 2>&1
 rc=$?
 lines=$(grep -E '^(PASS|FAIL|INFO) N[0-9]+ ' "$GOLOG")
 if [ -n "$lines" ]; then printf '%s\n' "$lines"; fi
@@ -145,7 +145,7 @@ alive || setup_fail "server died during the client steps"
 # ---------------------------------------------------------------- N40-N49 (nntp-intake-injection)
 GOLOG40="$DATA/e2e-go-test-intake.log"
 PUGLEAF_E2E_ADDR="127.0.0.1:$PORT" PUGLEAF_E2E_USER="$E2E_USER" PUGLEAF_E2E_PASS="$E2E_PASS" PUGLEAF_E2E_HOST="$NNTPHOST" \
-  timeout 300 go test -tags e2e -count=1 -v -run '^TestE2EBinaryIntake$' ./cmd/nntp-server/ >"$GOLOG40" 2>&1
+  timeout 900 go test -tags e2e -count=1 -v -run '^TestE2EBinaryIntake$' ./cmd/nntp-server/ >"$GOLOG40" 2>&1
 rc=$?
 lines=$(grep -E '^(PASS|FAIL|INFO) N[0-9]+ ' "$GOLOG40")
 if [ -n "$lines" ]; then printf '%s\n' "$lines"; fi
@@ -168,7 +168,7 @@ else fail N41 nntp-intake "unknown group: no file, no row, no NULL hierarchy" "f
 # N51 walks e2e.test.a, which N04 (POST) and N10 (TAKETHIS) filled; N56 also needs e2e.test.b.
 GOLOG50="$DATA/e2e-rfc-go-test.log"
 PUGLEAF_E2E_ADDR="127.0.0.1:$PORT" PUGLEAF_E2E_USER="$E2E_USER" PUGLEAF_E2E_PASS="$E2E_PASS" PUGLEAF_E2E_GROUP=e2e.test.a \
-  PUGLEAF_E2E_STARTTLS="$E2E_STARTTLS" timeout 300 go test -tags e2e -count=1 -v -run '^TestE2EBinaryRFC$' ./cmd/nntp-server/ >"$GOLOG50" 2>&1
+  PUGLEAF_E2E_STARTTLS="$E2E_STARTTLS" timeout 900 go test -tags e2e -count=1 -v -run '^TestE2EBinaryRFC$' ./cmd/nntp-server/ >"$GOLOG50" 2>&1
 rc=$?
 lines=$(grep -E '^(PASS|FAIL|INFO) N5[0-7] ' "$GOLOG50")
 if [ -n "$lines" ]; then printf '%s\n' "$lines"; fi

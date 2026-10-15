@@ -116,7 +116,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 	r := e2eRfcReport{t: t}
 	freshID := fmt.Sprintf("<e2e-n55-%d@test.invalid>", time.Now().UnixNano())
 
-	c, err := e2eDialAddr(addr, 15*time.Second)
+	c, err := e2eDialAddr(addr, testWait)
 	if err != nil {
 		r.fail("N50", "connect", err.Error())
 		t.FailNow()
@@ -145,10 +145,13 @@ func TestE2EBinaryRFC(t *testing.T) {
 
 	// N51: NEXT/LAST walk the group (RFC 3977 §6.1.3, §6.1.4)
 	r.check("N51", "NEXT/LAST walk "+group, func() error {
-		// N10's TAKETHIS commits asynchronously: wait up to 20 s for count >= 2
+		// N10's TAKETHIS commits asynchronously: wait for count >= 2. Deliberate soft window,
+		// not a hang guard: when it expires with count 1 the check only notes it (INFO) and
+		// walks one article, so it must not take the full testWait.
+		const n51SoftWait = 10 * time.Second
 		var count, low, high int64
 		var last string
-		perr := e2eWaitFor(20*time.Second, func() error {
+		perr := e2eWaitFor(n51SoftWait, func() error {
 			code, line, err := c.tryCmd("GROUP %s", group)
 			if err != nil {
 				return err
@@ -170,7 +173,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 			return fmt.Errorf("no article in %s: %v (last %q)", group, perr, last)
 		}
 		if perr != nil {
-			r.info("N51", fmt.Sprintf("count stayed %d after 20s (%q): walking one article", count, last))
+			r.info("N51", fmt.Sprintf("count stayed %d after %v (%q): walking one article", count, n51SoftWait, last))
 		}
 		code, line, err := c.tryCmd("LAST")
 		if e := e2eRfcStatus(code, line, err, 422); e != nil {
@@ -349,7 +352,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 	// N57: STARTTLS (RFC 4642 §2.2)
 	if withTLS {
 		r.check("N57", "STARTTLS 382, handshake, not listed over TLS, second 502", func() error {
-			s, err := e2eDialAddr(addr, 15*time.Second)
+			s, err := e2eDialAddr(addr, testWait)
 			if err != nil {
 				return err
 			}
@@ -384,7 +387,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 		}())
 	} else {
 		r.check("N57", "STARTTLS not listed and 502 without a certificate", func() error {
-			s, err := e2eDialAddr(addr, 15*time.Second)
+			s, err := e2eDialAddr(addr, testWait)
 			if err != nil {
 				return err
 			}

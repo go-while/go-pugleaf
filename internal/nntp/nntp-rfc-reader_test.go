@@ -60,11 +60,11 @@ func rdrSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConne
 			}
 		}
 	}()
-	conn, err := net.DialTimeout("tcp", l.Addr().String(), 5*time.Second)
+	conn, err := net.DialTimeout("tcp", l.Addr().String(), hDeadline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: 5 * time.Second}
+	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: hDeadline}
 	t.Cleanup(func() { _ = conn.Close(); <-done })
 	if c.Greeting, err = c.readLine(); err != nil {
 		t.Fatalf("greeting: %v", err)
@@ -191,29 +191,39 @@ func TestRdrNextLast(t *testing.T) {
 }
 
 // TestRdrNextLastDelays: D10, 421/422 end a walk without the error delay; 412 has it.
+// Structural: the error-delay counter (incremented before the reply is sent) moves
+// once for the 412 and not at all for 422/223/421; the 412 keeps its lower bound.
 func TestRdrNextLastDelays(t *testing.T) {
 	const delay = 300 * time.Millisecond
 	g := hGroup(t, "rc1.delays", 2, nil)
 	hs := newTestServer(t, hServerOpts{ErrorDelay: delay})
 	c := rdrSession(t, hs, rdrExtra)
 
-	timed := func(cmd string, code int, num int64) time.Duration {
+	// run returns the reply time and how often the reply reached the error delay.
+	run := func(cmd string, code int, num int64) (time.Duration, int64) {
 		t.Helper()
+		before := hs.S.ErrorDelayCount()
 		start := time.Now()
 		rdrExpect(t, c, g, cmd, code, num)
-		return time.Since(start)
+		return time.Since(start), hs.S.ErrorDelayCount() - before
 	}
 
-	if d := timed("NEXT", 412, 0); d < delay {
+	d, n := run("NEXT", 412, 0)
+	if d < delay {
 		t.Errorf("NEXT without a group (412) answered after %s, want at least %s", d, delay)
 	}
-	rdrSelect(t, c, g) // current = 1
-	if d := timed("LAST", 422, 0); d >= 150*time.Millisecond {
-		t.Errorf("LAST at the first article (422) answered after %s, want under 150ms", d)
+	if n != 1 {
+		t.Errorf("NEXT without a group (412) reached the error delay %d times, want 1", n)
 	}
-	timed("NEXT", 223, 2)
-	if d := timed("NEXT", 421, 0); d >= 150*time.Millisecond {
-		t.Errorf("NEXT at the last article (421) answered after %s, want under 150ms", d)
+	rdrSelect(t, c, g) // current = 1
+	if _, n := run("LAST", 422, 0); n != 0 {
+		t.Errorf("LAST at the first article (422) reached the error delay %d times, want 0", n)
+	}
+	if _, n := run("NEXT", 223, 2); n != 0 {
+		t.Errorf("NEXT to article 2 (223) reached the error delay %d times, want 0", n)
+	}
+	if _, n := run("NEXT", 421, 0); n != 0 {
+		t.Errorf("NEXT at the last article (421) reached the error delay %d times, want 0", n)
 	}
 }
 

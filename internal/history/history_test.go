@@ -42,10 +42,24 @@ func histTestNew(t *testing.T, wg *sync.WaitGroup) (*History, string) {
 	return h, dir
 }
 
+// testWait is the hang guard of this package's tests: it only stops a hung test, a passing test
+// never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s); default 60 s.
+// Plan test-timing-hardening D3.
+var testWait = testWaitFromEnv(60 * time.Second)
+
+func testWaitFromEnv(def time.Duration) time.Duration {
+	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
 // histTestWaitIdle waits until all queued ops are committed
 func histTestWaitIdle(t *testing.T, h *History) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(testWait)
 	for !h.CheckNoMoreWorkInHistory() {
 		if time.Now().After(deadline) {
 			t.Fatalf("history still has pending work: %d", h.pending.Load())
@@ -269,22 +283,22 @@ func TestHistoryCloseFlushesAndWaitGroup(t *testing.T) {
 	for i := 0; i < n; i++ {
 		h.AddArticle(fmt.Sprintf("<close-%d@test>", i), int64(i%5)+1)
 	}
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond) // deliberate negative window (cannot fail on a slow machine)
 	if wgDone.Load() {
 		t.Fatal("mainWG returned before Close")
 	}
 
-	// a checker that is busy for a moment must delay the shutdown
-	checker := &histTestChecker{}
-	checker.busyUntil.Store(time.Now().Add(150 * time.Millisecond).UnixNano())
+	// a checker that reports busy for its first calls must delay the shutdown: Close returns only
+	// after the writer polled it past the busy calls (structural, no wall-clock window)
+	const busyCalls = 3
+	checker := &histTestChecker{busyCalls: busyCalls}
 	h.SetDatabaseWorkChecker(checker)
 
-	start := time.Now()
 	if err := h.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if time.Since(start) < 100*time.Millisecond {
-		t.Fatalf("Close did not wait for the database work checker (%v)", time.Since(start))
+	if n := checker.calls.Load(); n <= busyCalls {
+		t.Fatalf("Close returned after %d checker calls, want > %d: it did not wait for the database work checker", n, busyCalls)
 	}
 	if !h.CheckNoMoreWorkInHistory() {
 		t.Fatal("pending work after Close")
@@ -294,7 +308,7 @@ func TestHistoryCloseFlushesAndWaitGroup(t *testing.T) {
 	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("mainWG.Wait did not return after Close")
 	}
 
@@ -330,14 +344,14 @@ func TestHistoryCloseFlushesAndWaitGroup(t *testing.T) {
 	_ = h.GetStats()
 }
 
+// histTestChecker reports busy for its first busyCalls calls, then idle (zero value: always idle).
 type histTestChecker struct {
-	busyUntil atomic.Int64
+	busyCalls int64 // set before SetDatabaseWorkChecker
 	calls     atomic.Int64
 }
 
 func (c *histTestChecker) CheckNoMoreWorkInMaps() bool {
-	c.calls.Add(1)
-	return time.Now().UnixNano() >= c.busyUntil.Load()
+	return c.calls.Add(1) > c.busyCalls
 }
 
 func TestHistoryReopenKeepsData(t *testing.T) {
@@ -408,7 +422,7 @@ func TestHistoryDisabled(t *testing.T) {
 	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("disabled history touched mainWG")
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {

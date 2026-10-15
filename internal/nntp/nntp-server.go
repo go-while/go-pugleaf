@@ -10,6 +10,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
@@ -105,6 +106,11 @@ type NNTPServer struct {
 	GroupCmdDelay   time.Duration
 	ErrorDelay      time.Duration
 	IdleTimeout     time.Duration
+	// Delay-site counters (test observability, plan test-timing-hardening P1): incremented every time a
+	// command reaches an error-delay or article-delay site, whether or not the configured delay is > 0,
+	// so tests can run with zero delays and still assert structurally that a reply did (not) pay a delay.
+	errorDelays   atomic.Int64
+	articleDelays atomic.Int64
 	// ShutdownTimeout bounds the wait for client connections in Stop (<= 0: DefaultShutdownTimeout).
 	ShutdownTimeout time.Duration
 
@@ -481,3 +487,9 @@ func (s *NNTPServer) IsRunning() bool {
 	defer s.mu.RUnlock()
 	return s.running
 }
+
+// ErrorDelayCount returns how many replies reached the error-delay site (rateLimitOnError) so far.
+func (s *NNTPServer) ErrorDelayCount() int64 { return s.errorDelays.Load() }
+
+// ArticleDelayCount returns how many commands reached an ArticleCmdDelay site so far.
+func (s *NNTPServer) ArticleDelayCount() int64 { return s.articleDelays.Load() }

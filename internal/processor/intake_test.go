@@ -245,7 +245,7 @@ func TestIntakeProcCaptureLimiter(t *testing.T) {
 	select {
 	case ok := <-got:
 		t.Fatalf("third acquire returned %v on a full limiter", ok)
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(50 * time.Millisecond): // deliberate negative window (cannot fail on a slow machine)
 	}
 	l.release()
 	select {
@@ -253,17 +253,35 @@ func TestIntakeProcCaptureLimiter(t *testing.T) {
 		if !ok {
 			t.Fatal("third acquire returned false after release")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("third acquire still blocked after release")
 	}
 
-	// full again: once stop reports true, acquire(true) gives up within 200 ms
+	// full again: once stop reports true, acquire(true) gives up on its next ticker poll.
+	// Structural: stopFn counts its calls; no duration is asserted.
 	var stop atomic.Bool
-	go func() { got <- l.acquire(true, stop.Load) }()
+	var pollsBefore, pollsAfter atomic.Int64 // stopFn calls that saw stop false / true
+	stopFn := func() bool {
+		if stop.Load() {
+			pollsAfter.Add(1)
+			return true
+		}
+		pollsBefore.Add(1)
+		return false
+	}
+	go func() { got <- l.acquire(true, stopFn) }()
+	// wait for the first poll, so the poll that sees stop can only come from a ticker tick
+	deadline := time.Now().Add(testWait)
+	for pollsBefore.Load() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("acquire(true) on a full limiter never polled stop")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	select {
 	case ok := <-got:
 		t.Fatalf("acquire returned %v before stop", ok)
-	case <-time.After(30 * time.Millisecond):
+	case <-time.After(30 * time.Millisecond): // deliberate negative window (cannot fail on a slow machine)
 	}
 	stop.Store(true)
 	start := time.Now()
@@ -272,20 +290,31 @@ func TestIntakeProcCaptureLimiter(t *testing.T) {
 		if ok {
 			t.Fatal("acquire returned true on a full limiter after stop")
 		}
-		if d := time.Since(start); d > 200*time.Millisecond {
-			t.Fatalf("acquire took %v after stop, want <= 200ms", d)
-		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("acquire still blocked after stop")
 	}
-
-	// wait=false never blocks and counts the overflow
-	start = time.Now()
-	if l.acquire(false, never) {
-		t.Fatal("acquire(false) took a slot on a full limiter")
+	// 1 s is 10x the 100 ms tick (rule 1): catches a ticker regression the poll count cannot
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("acquire took %v after stop, want <= 1s (10x the 100 ms tick)", d)
 	}
-	if d := time.Since(start); d > 50*time.Millisecond {
-		t.Fatalf("acquire(false) blocked for %v", d)
+	if n := pollsAfter.Load(); n != 1 {
+		t.Fatalf("acquire polled stop %d times after it reported true, want 1 (give up on the first tick)", n)
+	}
+
+	// wait=false never blocks (it never enters the polling loop) and counts the overflow;
+	// run in a goroutine so a regression that blocks fails at testWait instead of hanging
+	var falsePolls atomic.Int64
+	go func() { got <- l.acquire(false, func() bool { falsePolls.Add(1); return false }) }()
+	select {
+	case ok := <-got:
+		if ok {
+			t.Fatal("acquire(false) took a slot on a full limiter")
+		}
+	case <-time.After(testWait):
+		t.Fatal("acquire(false) blocked on a full limiter")
+	}
+	if n := falsePolls.Load(); n != 0 {
+		t.Fatalf("acquire(false) polled stop %d times, want 0 (it must not wait)", n)
 	}
 	if n := l.overflow.Load(); n != 1 {
 		t.Fatalf("overflow = %d, want 1", n)

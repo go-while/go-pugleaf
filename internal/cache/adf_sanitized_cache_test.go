@@ -3,10 +3,25 @@ package cache
 import (
 	"fmt"
 	"html/template"
+	"os"
 	"sync"
 	"testing"
 	"time"
 )
+
+// testWait is the hang guard of this package's tests: it only stops a hung test, a passing test
+// never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s); default 60 s.
+// Plan test-timing-hardening D3.
+var testWait = testWaitFromEnv(60 * time.Second)
+
+func testWaitFromEnv(def time.Duration) time.Duration {
+	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
 
 func adfSanCacheLen(sc *SanitizedCache) int {
 	sc.mutex.RLock()
@@ -67,7 +82,7 @@ func TestAdfSanCacheBounded(t *testing.T) {
 	}
 
 	// Size accounting follows the evictions (SetField updates it asynchronously).
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWait)
 	for {
 		var sum int64
 		sc.mutex.RLock()
