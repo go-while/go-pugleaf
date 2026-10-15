@@ -6,28 +6,48 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-// buildNewsgroupAdminRedirectURL builds a redirect URL preserving search and pagination state
+// buildNewsgroupAdminRedirectURL builds a redirect URL preserving search and pagination state.
+// The values are query-encoded, so '&' or '#' in a search term stay part of it (A-web-16).
 func buildNewsgroupAdminRedirectURL(c *gin.Context) string {
 	redirectURL := "/admin?tab=newsgroups"
+	q := url.Values{}
 	if search := c.PostForm("search"); search != "" {
-		redirectURL += "&search=" + search
+		q.Set("search", search)
 	}
 	if searchDesc := c.PostForm("search_description"); searchDesc == "on" {
-		redirectURL += "&search_description=on"
+		q.Set("search_description", "on")
 	}
 	if page := c.PostForm("ng_page"); page != "" {
-		redirectURL += "&ng_page=" + page
+		q.Set("ng_page", page)
+	}
+	if len(q) > 0 {
+		redirectURL += "&" + q.Encode()
 	}
 	return redirectURL
+}
+
+// adminNewsgroupExists reports whether name has a row in the main newsgroups table.
+// It returns an error only for a failed lookup, not for an unknown name.
+func (s *WebServer) adminNewsgroupExists(name string) (*models.Newsgroup, bool, error) {
+	ng, err := s.DB.MainDBGetNewsgroup(name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return ng, true, nil
 }
 
 // adminCreateNewsgroup handles newsgroup creation
@@ -49,6 +69,11 @@ func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
 	// Validate input
 	if name == "" {
 		session.SetError("Newsgroup name is required")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
+		return
+	}
+	if !common.ValidGroupNameSyntax(name) {
+		session.SetError("Invalid newsgroup name: use dot-separated components of letters, digits, '+', '-' and '_'")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
 		return
 	}
@@ -90,9 +115,15 @@ func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
 	// Parse active status
 	active := activeStr == "on" || activeStr == "true"
 
-	// Check if newsgroup already exists
-	_, err = s.DB.MainDBGetNewsgroup(name)
-	if err == nil {
+	// Check if newsgroup already exists; only "no row" means the name is free.
+	_, exists, err := s.adminNewsgroupExists(name)
+	if err != nil {
+		log.Printf("[WEB]: adminCreateNewsgroup: MainDBGetNewsgroup(%s): %v", name, err)
+		session.SetError("Failed to check newsgroup '" + name + "'")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
+		return
+	}
+	if exists {
 		session.SetError("Newsgroup already exists")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
 		return
@@ -114,6 +145,7 @@ func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
 
 	err = s.DB.InsertNewsgroup(newsgroup)
 	if err != nil {
+		log.Printf("[WEB]: adminCreateNewsgroup: InsertNewsgroup(%s): %v", name, err)
 		session.SetError("Failed to create newsgroup")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
 		return
@@ -201,6 +233,20 @@ func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
 
 	// Parse active status
 	active := activeStr == "on" || activeStr == "true"
+
+	// The UPDATEs below match by name and succeed on zero rows: check the group first.
+	_, exists, err := s.adminNewsgroupExists(name)
+	if err != nil {
+		log.Printf("[WEB]: adminUpdateNewsgroup: MainDBGetNewsgroup(%s): %v", name, err)
+		session.SetError("Failed to look up newsgroup '" + name + "'")
+		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+		return
+	}
+	if !exists {
+		session.SetError("Newsgroup not found: " + name)
+		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+		return
+	}
 
 	// Update newsgroup fields
 	err = s.DB.UpdateNewsgroupDescription(name, description)
@@ -324,6 +370,25 @@ func (s *WebServer) adminAssignNewsgroupSection(c *gin.Context) {
 		return
 	}
 
+	// An assignment needs an existing group (no orphan section_groups rows). Unassigning
+	// (section 0) skips the check, so stale rows of a deleted group can still be removed.
+	var groupDescription string
+	if sectionID != 0 {
+		newsgroup, exists, err := s.adminNewsgroupExists(newsgroupName)
+		if err != nil {
+			log.Printf("[WEB]: adminAssignNewsgroupSection: MainDBGetNewsgroup(%s): %v", newsgroupName, err)
+			session.SetError("Failed to look up newsgroup '" + newsgroupName + "'")
+			c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+			return
+		}
+		if !exists {
+			session.SetError("Newsgroup not found: " + newsgroupName)
+			c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+			return
+		}
+		groupDescription = newsgroup.Description
+	}
+
 	// First, remove any existing assignment for this newsgroup
 	// Find existing section group assignment
 	sectionGroups, err := s.DB.GetAllSectionGroups()
@@ -342,7 +407,7 @@ func (s *WebServer) adminAssignNewsgroupSection(c *gin.Context) {
 				c.Redirect(http.StatusSeeOther, "/admin?tab=newsgroups")
 				return
 			}
-			break
+			// No break: remove every existing assignment of this group.
 		}
 	}
 
@@ -351,13 +416,6 @@ func (s *WebServer) adminAssignNewsgroupSection(c *gin.Context) {
 		session.SetSuccess("Newsgroup unassigned from section")
 		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
 		return
-	}
-
-	// Get newsgroup description for the assignment
-	newsgroup, err := s.DB.GetNewsgroupByName(newsgroupName)
-	var groupDescription string
-	if err == nil && newsgroup != nil {
-		groupDescription = newsgroup.Description
 	}
 
 	// Create new assignment
@@ -762,24 +820,13 @@ func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
 	}
 
 	// Find articles that are posted more than 48 hours in the future and not already hidden
-	articleRows, err := groupDB.DB.Query("SELECT article_num FROM articles WHERE date_sent > ? AND hide = 0", cutoffTime.Format("2006-01-02 15:04:05"))
+	futureArticles, err := adminQueryFutureArticles(groupDB, name, cutoffTime)
+	groupDB.Return()
 	if err != nil {
-		groupDB.Return()
 		session.SetError("Failed to query future articles: " + err.Error())
 		c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
 		return
 	}
-
-	var futureArticles []int64
-	for articleRows.Next() {
-		var articleNum int64
-		if err := articleRows.Scan(&articleNum); err != nil {
-			continue // Skip problematic articles
-		}
-		futureArticles = append(futureArticles, articleNum)
-	}
-	articleRows.Close()
-	groupDB.Return()
 
 	if len(futureArticles) == 0 {
 		session.SetSuccess("No future-dated articles found in newsgroup: " + name)
@@ -820,4 +867,28 @@ func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
 	}
 
 	c.Redirect(http.StatusSeeOther, buildNewsgroupAdminRedirectURL(c))
+}
+
+// adminQueryFutureArticles returns the numbers of the visible articles of groupDB dated after
+// cutoff. The rows are closed before it returns, so the caller can Return groupDB afterwards.
+func adminQueryFutureArticles(groupDB *database.GroupDB, name string, cutoff time.Time) ([]int64, error) {
+	rows, err := database.RetryableQuery(groupDB.DB, "SELECT article_num FROM articles WHERE date_sent > ? AND hide = 0", cutoff.Format("2006-01-02 15:04:05"))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var futureArticles []int64
+	for rows.Next() {
+		var articleNum int64
+		if err := rows.Scan(&articleNum); err != nil {
+			log.Printf("[WEB]: adminHideFuturePosts: scan article_num in %s: %v", name, err)
+			continue // Skip problematic articles
+		}
+		futureArticles = append(futureArticles, articleNum)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return futureArticles, nil
 }
