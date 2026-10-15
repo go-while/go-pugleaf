@@ -483,8 +483,7 @@ func (s *WebServer) getArticlePreview(c *gin.Context) {
 	}
 
 	// Create preview response with limited content
-	// Use ConvertToUTF8 to decode the text properly but without HTML escaping (since JS will handle HTML context)
-	// This is the same decoding used by PrintSanitized but without the html.EscapeString step
+	// Plain text: the browser inserts it with textContent (thread-tree.js renderArticlePreview), never as HTML.
 	fullBodyDecoded := models.ConvertToUTF8(article.BodyText)
 	bodyPreview := truncateRunes(fullBodyDecoded, 500)
 
