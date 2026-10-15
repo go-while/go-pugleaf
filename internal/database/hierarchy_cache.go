@@ -34,23 +34,53 @@ type HierarchyCache struct {
 	warmingError error
 	warmComplete chan struct{}
 
-	// Invalidation throttling (5 minute cooldown)
-	lastInvalidation     time.Time
-	invalidationCooldown time.Duration
+	// Invalidation (A-db-8): InvalidateHierarchy marks a top level dirty instead of
+	// deleting its entries, and the readers rebuild a dirty top level from the database
+	// before they read it. invalSeq counts the marks, markSeq holds the seq of the last
+	// mark per top level, loadSeq the seq at which a top level was last rebuilt and
+	// bulkLoadSeq the seq at which the last full tree build started. A top level is dirty
+	// while its last mark is newer than both loads.
+	lastInvalidation time.Time
+	invalSeq         uint64
+	markSeq          map[string]uint64
+	loadSeq          map[string]uint64
+	bulkLoadSeq      uint64
+
+	// rebuildMu serializes the rebuilds of dirty top levels, so concurrent readers of
+	// one dirty top level run one query.
+	rebuildMu sync.Mutex
+
+	// rebuilding holds the top levels whose rebuild query is running, bulkBuilds the
+	// number of running full builds. A batch whose stats arrive meanwhile may be missing
+	// from the rows read, and its increment lands on a struct the build replaces:
+	// UpdateNewsgroupStats then marks the top level again, so the next reader rebuilds.
+	rebuilding map[string]bool
+	bulkBuilds int
+
+	// testRebuildHook, when set (tests only, per cache), runs before the query of a
+	// rebuild (top level) or a full build ("*"), after the build was registered.
+	testRebuildHook func(top string)
 }
+
+// hierarchySortOrders are the sort orders kept in directGroupsCache ("prefix:sort" keys).
+var hierarchySortOrders = []string{"name", "activity", "groups"}
 
 // NewHierarchyCache creates a new hierarchy cache
 func NewHierarchyCache() *HierarchyCache {
 	return &HierarchyCache{
-		hierarchiesMap:       make(map[string]*models.Hierarchy),
-		subLevelsCache:       make(map[string]map[string]int),
-		subLevelCounts:       make(map[string]int),
-		directGroupsCache:    make(map[string][]*models.Newsgroup),
-		directGroupCounts:    make(map[string]int),
-		warmComplete:         make(chan struct{}),
-		invalidationCooldown: 5 * time.Minute, // 5 minute throttle
+		hierarchiesMap:    make(map[string]*models.Hierarchy),
+		subLevelsCache:    make(map[string]map[string]int),
+		subLevelCounts:    make(map[string]int),
+		directGroupsCache: make(map[string][]*models.Newsgroup),
+		directGroupCounts: make(map[string]int),
+		warmComplete:      make(chan struct{}),
+		markSeq:           make(map[string]uint64),
+		rebuilding:        make(map[string]bool),
+		loadSeq:           make(map[string]uint64),
 	}
-} // WarmCache pre-loads all hierarchy data in background with bulk operations
+}
+
+// WarmCache pre-loads all hierarchy data in background with bulk operations
 func (hc *HierarchyCache) WarmCache(db *Database) {
 	hc.mu.Lock()
 	if hc.isWarming {
@@ -87,13 +117,6 @@ func (hc *HierarchyCache) WarmCache(db *Database) {
 		}
 
 		log.Printf("HierarchyCache: Bulk cache warming completed in %v", time.Since(start))
-
-		// Update last invalidation time to now since cache is fully rebuilt
-		hc.mu.Lock()
-		hc.lastInvalidation = time.Now()
-		hc.mu.Unlock()
-		log.Printf("HierarchyCache: Reset invalidation timer - next invalidation allowed after %v",
-			hc.lastInvalidation.Add(hc.invalidationCooldown).Format("15:04:05"))
 	}()
 }
 
@@ -139,25 +162,53 @@ func (hc *HierarchyCache) GetHierarchiesPaginated(db *Database, page, pageSize i
 	}
 
 	// Apply pagination
-	start := (page - 1) * pageSize
-	end := start + pageSize
-
-	if start >= len(hierarchies) {
-		return []*models.Hierarchy{}, len(hierarchies), nil
-	}
-
-	if end > len(hierarchies) {
-		end = len(hierarchies)
-	}
-
+	start, end := pageWindow(len(hierarchies), page, pageSize)
 	return hierarchies[start:end], len(hierarchies), nil
 }
 
-// GetHierarchySubLevels returns cached sub-level data
+// pageWindow returns the slice bounds of page (1-based) of n items with pageSize items
+// per page (A-db-10). page < 1 is page 1; a page past the end, pageSize <= 0 or n == 0
+// give an empty window. Nothing is multiplied before the page is bounded, so a huge page
+// can neither wrap into a negative index nor panic.
+func pageWindow(n, page, pageSize int) (start, end int) {
+	if n <= 0 || pageSize <= 0 {
+		return 0, 0
+	}
+	if page < 1 {
+		page = 1
+	}
+	pages := n / pageSize
+	if n%pageSize != 0 {
+		pages++
+	}
+	if page > pages {
+		return n, n
+	}
+	start = (page - 1) * pageSize // < n, since page <= pages
+	if pageSize >= n-start {
+		return start, n
+	}
+	return start, start + pageSize
+}
+
+// GetHierarchySubLevels returns cached sub-level data.
+// A top level marked dirty by InvalidateHierarchy is rebuilt from db first (A-db-8).
 func (hc *HierarchyCache) GetHierarchySubLevels(db *Database, prefix string, page, pageSize int) (map[string]int, int, error) {
+	hc.refreshIfDirty(db, prefix)
+
+	// Convert to a slice for sorting and pagination
+	type subLevel struct {
+		name  string
+		count int
+	}
+
 	hc.mu.RLock()
 	subLevels, exists := hc.subLevelsCache[prefix]
 	totalCount := hc.subLevelCounts[prefix]
+	sorted := make([]subLevel, 0, len(subLevels))
+	for name, count := range subLevels {
+		sorted = append(sorted, subLevel{name, count})
+	}
 	hc.mu.RUnlock()
 
 	// If not in cache, return empty (cache should be warmed on startup)
@@ -166,35 +217,14 @@ func (hc *HierarchyCache) GetHierarchySubLevels(db *Database, prefix string, pag
 		return make(map[string]int), 0, nil
 	}
 
-	// Convert to sorted slice for pagination
-	type subLevel struct {
-		name  string
-		count int
-	}
-
-	var sorted []subLevel
-	for name, count := range subLevels {
-		sorted = append(sorted, subLevel{name, count})
-	}
-
 	// Sort alphabetically
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].name < sorted[j].name
 	})
 
 	// Apply pagination
-	start := (page - 1) * pageSize
-	end := start + pageSize
-
-	if start >= len(sorted) {
-		return make(map[string]int), totalCount, nil
-	}
-
-	if end > len(sorted) {
-		end = len(sorted)
-	}
-
-	result := make(map[string]int)
+	start, end := pageWindow(len(sorted), page, pageSize)
+	result := make(map[string]int, end-start)
 	for _, item := range sorted[start:end] {
 		result[item.name] = item.count
 	}
@@ -202,13 +232,28 @@ func (hc *HierarchyCache) GetHierarchySubLevels(db *Database, prefix string, pag
 	return result, totalCount, nil
 }
 
-// GetDirectGroupsAtLevel returns cached direct groups data
+// GetDirectGroupsAtLevel returns cached direct groups data. The page holds copies made
+// under the read lock: UpdateNewsgroupStats and UpdateNewsgroupActiveStatus change the
+// cached structs and re-sort the cached slices in place (A-db-14). A top level marked
+// dirty by InvalidateHierarchy is rebuilt from db first (A-db-8).
 func (hc *HierarchyCache) GetDirectGroupsAtLevel(db *Database, prefix, sortBy string, page, pageSize int) ([]*models.Newsgroup, int, error) {
+	hc.refreshIfDirty(db, prefix)
+
 	cacheKey := prefix + ":" + sortBy
 
 	hc.mu.RLock()
 	groups, exists := hc.directGroupsCache[cacheKey]
 	totalCount := hc.directGroupCounts[prefix]
+	var out []*models.Newsgroup
+	if exists {
+		// Apply pagination
+		start, end := pageWindow(len(groups), page, pageSize)
+		out = make([]*models.Newsgroup, 0, end-start)
+		for _, g := range groups[start:end] {
+			cp := *g
+			out = append(out, &cp)
+		}
+	}
 	hc.mu.RUnlock()
 
 	// If not in cache, return empty (cache should be warmed on startup)
@@ -217,32 +262,60 @@ func (hc *HierarchyCache) GetDirectGroupsAtLevel(db *Database, prefix, sortBy st
 		return []*models.Newsgroup{}, 0, nil
 	}
 
-	// Apply pagination
-	start := (page - 1) * pageSize
-	end := start + pageSize
+	return out, totalCount, nil
+}
 
-	if start >= len(groups) {
-		return []*models.Newsgroup{}, totalCount, nil
+// directParent returns the prefix a newsgroup is stored under in directGroupsCache: its
+// name without the last part (see addGroupToAllPossibleLevels). A name without a dot is
+// not stored at any level.
+func directParent(name string) (string, bool) {
+	i := strings.LastIndex(name, ".")
+	if i < 0 {
+		return "", false
 	}
+	return name[:i], true
+}
 
-	if end > len(groups) {
-		end = len(groups)
+// sortDirectGroups sorts a direct groups list for one sort order: "name" A-Z, "activity"
+// newest UpdatedAt first (like getDirectGroupsAtLevelDirect's updated_at DESC), "groups"
+// most messages first. Ties are ordered by name so the pages stay stable.
+func sortDirectGroups(groups []*models.Newsgroup, sortBy string) {
+	switch sortBy {
+	case "name":
+		sort.Slice(groups, func(i, j int) bool {
+			return groups[i].Name < groups[j].Name
+		})
+	case "activity":
+		sort.Slice(groups, func(i, j int) bool {
+			if !groups[i].UpdatedAt.Equal(groups[j].UpdatedAt) {
+				return groups[i].UpdatedAt.After(groups[j].UpdatedAt)
+			}
+			return groups[i].Name < groups[j].Name
+		})
+	case "groups":
+		sort.Slice(groups, func(i, j int) bool {
+			if groups[i].MessageCount != groups[j].MessageCount {
+				return groups[i].MessageCount > groups[j].MessageCount
+			}
+			return groups[i].Name < groups[j].Name
+		})
 	}
-
-	return groups[start:end], totalCount, nil
 }
 
 // UpdateNewsgroupActiveStatus updates the active status of a newsgroup in cache
 func (hc *HierarchyCache) UpdateNewsgroupActiveStatus(newsgroupName string, active bool) {
-	hierarchy := ExtractHierarchyFromGroupName(newsgroupName)
+	// The group is cached under its direct parent, not under its top level.
+	parent, ok := directParent(newsgroupName)
+	if !ok {
+		return
+	}
 
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
 
 	// Update direct groups cache for all sort orders
-	sortOrders := []string{"name", "activity", "groups"}
-	for _, sortBy := range sortOrders {
-		cacheKey := hierarchy + ":" + sortBy
+	for _, sortBy := range hierarchySortOrders {
+		cacheKey := parent + ":" + sortBy
 		if groups, exists := hc.directGroupsCache[cacheKey]; exists {
 			// Find and update the specific newsgroup in the cached list
 			for _, group := range groups {
@@ -257,46 +330,66 @@ func (hc *HierarchyCache) UpdateNewsgroupActiveStatus(newsgroupName string, acti
 	log.Printf("HierarchyCache: Updated active status for newsgroup '%s': active=%t", newsgroupName, active)
 }
 
-// UpdateNewsgroupStats updates cached newsgroup statistics incrementally
-func (hc *HierarchyCache) UpdateNewsgroupStats(newsgroupName string, messageCountIncrement int, newLastArticle int64) {
+// UpdateNewsgroupStats applies one stored batch to the cached stats of a newsgroup: it adds
+// the newly inserted articles to the group's message count, raises its last article number
+// and moves the group's UpdatedAt and its top level's LastUpdated forward to latest, the
+// batch's newest article date (zero leaves both dates alone). A hierarchy's GroupCount
+// counts groups, not articles, and an article number is never a date (A-db-7).
+func (hc *HierarchyCache) UpdateNewsgroupStats(newsgroupName string, messageCountIncrement int, newLastArticle int64, latest time.Time) {
 	hierarchy := ExtractHierarchyFromGroupName(newsgroupName)
+	parent, hasParent := directParent(newsgroupName)
+	// Cached dates are parsed as UTC from the DB: compare and store in one location.
+	latest = latest.UTC()
 
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
 
-	// Update hierarchy data if cached
-	if h, exists := hc.hierarchiesMap[hierarchy]; exists {
-		h.GroupCount += messageCountIncrement
-		if newLastArticle > h.LastUpdated.Unix() {
-			h.LastUpdated = time.Unix(newLastArticle, 0)
+	// A rebuild of this top level or a full build is reading rows right now: this batch
+	// may be missing from them, and the structs updated below are about to be replaced.
+	// Mark the top level again, so the next reader rebuilds it.
+	if hc.rebuilding[hierarchy] || hc.bulkBuilds > 0 {
+		if hc.markSeq == nil {
+			hc.markSeq = make(map[string]uint64)
 		}
+		hc.invalSeq++
+		hc.markSeq[hierarchy] = hc.invalSeq
 	}
 
-	// Update direct groups cache for all sort orders
-	sortOrders := []string{"name", "activity", "groups"}
-	for _, sortBy := range sortOrders {
-		cacheKey := hierarchy + ":" + sortBy
-		if groups, exists := hc.directGroupsCache[cacheKey]; exists {
-			// Find and update the specific newsgroup in the cached list
+	// Update hierarchy data if cached
+	if h, exists := hc.hierarchiesMap[hierarchy]; exists && !latest.IsZero() && latest.After(h.LastUpdated) {
+		h.LastUpdated = latest
+	}
+
+	// Update the direct groups cache of the group's direct parent for all sort orders.
+	// The lists of one prefix share their *Newsgroup structs: update each struct once.
+	if hasParent {
+		var updated *models.Newsgroup
+		for _, sortBy := range hierarchySortOrders {
+			groups, exists := hc.directGroupsCache[parent+":"+sortBy]
+			if !exists {
+				continue
+			}
 			for _, group := range groups {
-				if group.Name == newsgroupName {
+				if group.Name != newsgroupName {
+					continue
+				}
+				if group != updated {
 					group.MessageCount += int64(messageCountIncrement)
 					if newLastArticle > group.LastArticle {
 						group.LastArticle = newLastArticle
 					}
-					break
+					if !latest.IsZero() && latest.After(group.UpdatedAt) {
+						group.UpdatedAt = latest
+					}
+					updated = group
 				}
+				break
 			}
 
-			// Re-sort if necessary (only for activity and groups sort orders)
-			if sortBy == "activity" {
-				sort.Slice(groups, func(i, j int) bool {
-					return groups[i].LastArticle > groups[j].LastArticle
-				})
-			} else if sortBy == "groups" {
-				sort.Slice(groups, func(i, j int) bool {
-					return groups[i].MessageCount > groups[j].MessageCount
-				})
+			// Re-sort if necessary (only for activity and groups sort orders). The readers
+			// copy under the read lock, so sorting in place is safe (A-db-14).
+			if sortBy != "name" {
+				sortDirectGroups(groups, sortBy)
 			}
 		}
 	}
@@ -305,47 +398,24 @@ func (hc *HierarchyCache) UpdateNewsgroupStats(newsgroupName string, messageCoun
 		newsgroupName, messageCountIncrement, newLastArticle)
 }
 
-// InvalidateHierarchy invalidates cache entries for a specific hierarchy with throttling
+// InvalidateHierarchy marks the top level of hierarchyName dirty after a newsgroup in it
+// was inserted, changed or deleted. The cached entries stay readable, and the next reader
+// of that top level (GetHierarchySubLevels, GetDirectGroupsAtLevel) first rebuilds the
+// top level and all its sub-levels from the database (A-db-8). There is no throttle:
+// every call marks.
 func (hc *HierarchyCache) InvalidateHierarchy(hierarchyName string) {
+	top := ExtractHierarchyFromGroupName(hierarchyName)
+
 	hc.mu.Lock()
-	defer hc.mu.Unlock()
-
-	// Check if we're within the cooldown period
-	timeSinceLastInvalidation := time.Since(hc.lastInvalidation)
-	if timeSinceLastInvalidation < hc.invalidationCooldown {
-		log.Printf("HierarchyCache: Throttling invalidation for hierarchy '%s' - last invalidation was %v ago (cooldown: %v)",
-			hierarchyName, timeSinceLastInvalidation.Round(time.Second), hc.invalidationCooldown)
-		return
+	if hc.markSeq == nil {
+		hc.markSeq = make(map[string]uint64)
 	}
-
-	// Proceed with invalidation
-	log.Printf("HierarchyCache: Starting invalidation for hierarchy '%s' (last invalidation was %v ago)",
-		hierarchyName, timeSinceLastInvalidation.Round(time.Second))
-
-	// Invalidate sub-level caches for this hierarchy and its parents
-	prefixes := []string{hierarchyName}
-	parts := strings.Split(hierarchyName, ".")
-	for i := range parts {
-		prefix := strings.Join(parts[:i+1], ".")
-		prefixes = append(prefixes, prefix)
-	}
-
-	for _, prefix := range prefixes {
-		delete(hc.subLevelsCache, prefix)
-		delete(hc.subLevelCounts, prefix)
-
-		// Invalidate direct groups cache for different sort orders
-		for _, sortBy := range []string{"name", "activity", "groups"} {
-			cacheKey := prefix + ":" + sortBy
-			delete(hc.directGroupsCache, cacheKey)
-		}
-	}
-
-	// Update last invalidation time to now
+	hc.invalSeq++
+	hc.markSeq[top] = hc.invalSeq
 	hc.lastInvalidation = time.Now()
+	hc.mu.Unlock()
 
-	log.Printf("HierarchyCache: Invalidated cache for hierarchy '%s' - next invalidation allowed after %v",
-		hierarchyName, hc.lastInvalidation.Add(hc.invalidationCooldown).Format("15:04:05"))
+	log.Printf("HierarchyCache: Marked hierarchy '%s' for rebuild on next read", top)
 }
 
 // InvalidateAll clears all cached data
@@ -363,59 +433,27 @@ func (hc *HierarchyCache) InvalidateAll() {
 	hc.directGroupsCache = make(map[string][]*models.Newsgroup)
 	hc.directGroupCounts = make(map[string]int)
 
-	// Reset invalidation timer since all cache data is cleared
+	// Nothing is loaded any more: every top level marked so far is dirty again.
+	hc.loadSeq = make(map[string]uint64)
+	hc.bulkLoadSeq = 0
 	hc.lastInvalidation = time.Now()
 
-	log.Printf("HierarchyCache: All cache data invalidated - next invalidation allowed after %v",
-		hc.lastInvalidation.Add(hc.invalidationCooldown).Format("15:04:05"))
+	log.Printf("HierarchyCache: All cache data invalidated")
 }
 
-// ForceInvalidateHierarchy forces invalidation bypassing the throttle (use sparingly)
+// ForceInvalidateHierarchy is InvalidateHierarchy; there is no throttle to bypass any more.
 func (hc *HierarchyCache) ForceInvalidateHierarchy(hierarchyName string) {
-	hc.mu.Lock()
-	defer hc.mu.Unlock()
-
-	log.Printf("HierarchyCache: FORCE invalidation for hierarchy '%s' (bypassing %v cooldown)",
-		hierarchyName, hc.invalidationCooldown)
-
-	// Invalidate sub-level caches for this hierarchy and its parents
-	prefixes := []string{hierarchyName}
-	parts := strings.Split(hierarchyName, ".")
-	for i := range parts {
-		prefix := strings.Join(parts[:i+1], ".")
-		prefixes = append(prefixes, prefix)
-	}
-
-	for _, prefix := range prefixes {
-		delete(hc.subLevelsCache, prefix)
-		delete(hc.subLevelCounts, prefix)
-
-		// Invalidate direct groups cache for different sort orders
-		for _, sortBy := range []string{"name", "activity", "groups"} {
-			cacheKey := prefix + ":" + sortBy
-			delete(hc.directGroupsCache, cacheKey)
-		}
-	}
-
-	// Update last invalidation time to now
-	hc.lastInvalidation = time.Now()
-
-	log.Printf("HierarchyCache: FORCE invalidated cache for hierarchy '%s' - next invalidation allowed after %v",
-		hierarchyName, hc.lastInvalidation.Add(hc.invalidationCooldown).Format("15:04:05"))
+	hc.InvalidateHierarchy(hierarchyName)
 }
 
-// GetInvalidationStatus returns information about the throttling status
+// GetInvalidationStatus returns the time of the last invalidation and the time since then.
+// The last value (time until the next invalidation is allowed) is always 0: invalidations
+// are not throttled (A-db-8).
 func (hc *HierarchyCache) GetInvalidationStatus() (time.Time, time.Duration, time.Duration) {
 	hc.mu.RLock()
 	defer hc.mu.RUnlock()
 
-	timeSinceLastInvalidation := time.Since(hc.lastInvalidation)
-	timeUntilNextAllowed := hc.invalidationCooldown - timeSinceLastInvalidation
-	if timeUntilNextAllowed < 0 {
-		timeUntilNextAllowed = 0
-	}
-
-	return hc.lastInvalidation, timeSinceLastInvalidation, timeUntilNextAllowed
+	return hc.lastInvalidation, time.Since(hc.lastInvalidation), 0
 }
 
 // WaitForWarmup waits for cache warming to complete
@@ -458,9 +496,42 @@ func (hc *HierarchyCache) loadAllHierarchies(db *Database) error {
 	return nil
 }
 
+// hierarchyTree is the cache content built from a list of newsgroups.
+type hierarchyTree struct {
+	subLevels    map[string]map[string]int      // prefix -> {sublevel -> count}
+	directGroups map[string][]*models.Newsgroup // "prefix:sort" -> sorted groups
+	directCounts map[string]int                 // prefix -> number of direct groups
+}
+
+// query_hierarchyTopLevelGroups selects the groups of one top level for a rebuild
+// (A-db-8): the same columns and filter as buildHierarchyTreeBulk, restricted to the
+// names in [top+".", top+"/") ('/' follows '.'), so no LIKE wildcard ('_') applies.
+const query_hierarchyTopLevelGroups = `
+		SELECT name, COALESCE(hierarchy, '') AS hierarchy, COALESCE(message_count, 0), last_article, updated_at
+		FROM newsgroups
+		WHERE active = 1 AND message_count > 0 AND name >= ? AND name < ?
+		ORDER BY hierarchy, name
+	`
+
 // buildHierarchyTreeBulk builds the complete hierarchy tree structure with one query
 func (hc *HierarchyCache) buildHierarchyTreeBulk(db *Database) error {
 	log.Printf("HierarchyCache: Building hierarchy tree from all newsgroups...")
+
+	// Marks after this point are not covered by the tree built here. Stats updates
+	// while the build runs mark their top level (see UpdateNewsgroupStats).
+	hc.mu.Lock()
+	startSeq := hc.invalSeq
+	hc.bulkBuilds++
+	hook := hc.testRebuildHook
+	hc.mu.Unlock()
+	defer func() {
+		hc.mu.Lock()
+		hc.bulkBuilds--
+		hc.mu.Unlock()
+	}()
+	if hook != nil {
+		hook("*")
+	}
 
 	// Get ALL active newsgroups with their hierarchies in one query.
 	// hierarchy and message_count are nullable (A-db-1): COALESCE them, so a row the old
@@ -476,15 +547,160 @@ func (hc *HierarchyCache) buildHierarchyTreeBulk(db *Database) error {
 	}
 	defer rows.Close()
 
-	// Maps to build the hierarchy structure
-	hierarchyGroups := make(map[string][]*models.Newsgroup)
-	subLevelCounts := make(map[string]map[string]int)
-	directGroupCounts := make(map[string]int)
+	allGroups, err := hc.scanHierarchyTreeRows(rows, "buildHierarchyTreeBulk")
+	if err != nil {
+		return fmt.Errorf("failed to read all newsgroups: %w", err)
+	}
+	tree := hc.buildTree(allGroups)
 
+	// Now populate all the caches
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+
+	// Clear existing cache
+	hc.subLevelsCache = make(map[string]map[string]int)
+	hc.subLevelCounts = make(map[string]int)
+	hc.directGroupsCache = make(map[string][]*models.Newsgroup)
+	hc.directGroupCounts = make(map[string]int)
+	hc.installTreeLocked(tree)
+
+	// The whole tree is as of startSeq now: drop the per-top-level loads (a top level
+	// rebuilt after startSeq was just replaced by older rows and is dirty again if it
+	// was marked after startSeq).
+	hc.bulkLoadSeq = startSeq
+	hc.loadSeq = make(map[string]uint64)
+
+	log.Printf("HierarchyCache: Built complete hierarchy tree with %d groups, %d hierarchies, %d sub-levels",
+		len(allGroups), len(tree.directCounts), len(tree.subLevels))
+	return nil
+}
+
+// refreshIfDirty rebuilds the top level of prefix when InvalidateHierarchy marked it dirty
+// (A-db-8). Without a database the cached entries are served as they are. A failed rebuild
+// is logged and the old entries are served; the top level stays dirty, so the next reader
+// tries again.
+func (hc *HierarchyCache) refreshIfDirty(db *Database, prefix string) {
+	if db == nil || db.mainDB == nil {
+		return
+	}
+	top := ExtractHierarchyFromGroupName(prefix)
+
+	hc.mu.RLock()
+	dirty := hc.isDirtyLocked(top)
+	hc.mu.RUnlock()
+	if !dirty {
+		return
+	}
+	if err := hc.rebuildTopLevel(db, top); err != nil {
+		log.Printf("[HIERARCHY] rebuild of top level '%s' failed, serving cached entries: %v", top, err)
+	}
+}
+
+// isDirtyLocked reports whether top was marked after it was last loaded. hc.mu must be held.
+func (hc *HierarchyCache) isDirtyLocked(top string) bool {
+	mark, ok := hc.markSeq[top]
+	if !ok {
+		return false
+	}
+	return mark > hc.bulkLoadSeq && mark > hc.loadSeq[top]
+}
+
+// rebuildTopLevel reloads the groups of one top level with one range query and replaces
+// every cache entry of top and top.* (A-db-8). It never falls back to
+// getDirectGroupsAtLevelDirect: that one returns nothing above one page and does not
+// filter on message_count, so its result cannot be cached.
+func (hc *HierarchyCache) rebuildTopLevel(db *Database, top string) error {
+	hc.rebuildMu.Lock()
+	defer hc.rebuildMu.Unlock()
+
+	hc.mu.Lock()
+	dirty := hc.isDirtyLocked(top)
+	startSeq := hc.invalSeq
+	if dirty {
+		// Stats updates while the query runs mark top again (see UpdateNewsgroupStats).
+		if hc.rebuilding == nil {
+			hc.rebuilding = make(map[string]bool)
+		}
+		hc.rebuilding[top] = true
+	}
+	hook := hc.testRebuildHook
+	hc.mu.Unlock()
+	if !dirty {
+		return nil // another reader rebuilt it while this one waited
+	}
+	// Runs after the deferred Unlock of the install below, so the flag covers the
+	// whole window between the query and the install.
+	defer func() {
+		hc.mu.Lock()
+		delete(hc.rebuilding, top)
+		hc.mu.Unlock()
+	}()
+	if hook != nil {
+		hook(top)
+	}
+
+	rows, err := RetryableQuery(db.mainDB, query_hierarchyTopLevelGroups, top+".", top+"/")
+	if err != nil {
+		return fmt.Errorf("failed to query newsgroups of %s: %w", top, err)
+	}
+	defer rows.Close()
+
+	groups, err := hc.scanHierarchyTreeRows(rows, "rebuildTopLevel")
+	if err != nil {
+		return fmt.Errorf("failed to read newsgroups of %s: %w", top, err)
+	}
+	tree := hc.buildTree(groups)
+
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+
+	if hc.bulkLoadSeq >= startSeq {
+		// A full build that started no earlier than this rebuild replaced the tree.
+		return nil
+	}
+
+	inTop := func(prefix string) bool {
+		return prefix == top || strings.HasPrefix(prefix, top+".")
+	}
+	for prefix := range hc.subLevelsCache {
+		if inTop(prefix) {
+			delete(hc.subLevelsCache, prefix)
+		}
+	}
+	for prefix := range hc.subLevelCounts {
+		if inTop(prefix) {
+			delete(hc.subLevelCounts, prefix)
+		}
+	}
+	for key := range hc.directGroupsCache {
+		if i := strings.LastIndex(key, ":"); i >= 0 && inTop(key[:i]) {
+			delete(hc.directGroupsCache, key)
+		}
+	}
+	for prefix := range hc.directGroupCounts {
+		if inTop(prefix) {
+			delete(hc.directGroupCounts, prefix)
+		}
+	}
+	hc.installTreeLocked(tree)
+
+	if hc.loadSeq == nil {
+		hc.loadSeq = make(map[string]uint64)
+	}
+	hc.loadSeq[top] = startSeq
+
+	log.Printf("HierarchyCache: Rebuilt top level '%s' with %d groups", top, len(groups))
+	return nil
+}
+
+// scanHierarchyTreeRows reads the rows of a tree query (name, hierarchy, message_count,
+// last_article, updated_at). A row that fails to scan is skipped and logged once per call
+// (A-db-11); a read error fails the call, so a truncated read never replaces cache entries.
+func (hc *HierarchyCache) scanHierarchyTreeRows(rows *sql.Rows, who string) ([]*models.Newsgroup, error) {
 	var allGroups []*models.Newsgroup
 	scanErrs := 0
 
-	// Process all newsgroups and build the structure
+	// Process all newsgroups
 	for rows.Next() {
 		group := &models.Newsgroup{}
 		var lastArticle sql.NullInt64
@@ -495,7 +711,7 @@ func (hc *HierarchyCache) buildHierarchyTreeBulk(db *Database) error {
 			// Log the first scan error of this call only; the rest are counted below.
 			scanErrs++
 			if scanErrs == 1 {
-				log.Printf("[HIERARCHY] buildHierarchyTreeBulk: failed to scan newsgroup row: %v", err)
+				log.Printf("[HIERARCHY] %s: failed to scan newsgroup row: %v", who, err)
 			}
 			continue
 		}
@@ -537,70 +753,60 @@ func (hc *HierarchyCache) buildHierarchyTreeBulk(db *Database) error {
 		}
 
 		allGroups = append(allGroups, group)
-
-		// Build sub-level counts by parsing group names
-		hc.buildSubLevelCounts(group.Name, group.Hierarchy, subLevelCounts)
-
-		// Add groups to the correct hierarchy levels for navigation
-		hc.addGroupToAllPossibleLevels(group, hierarchyGroups, directGroupCounts)
 	}
-	// A truncated read must not replace the caches with a partial tree.
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("failed to read all newsgroups: %w", err)
+		return nil, err
 	}
 	if scanErrs > 1 {
-		log.Printf("[HIERARCHY] buildHierarchyTreeBulk: skipped %d newsgroup rows that failed to scan", scanErrs)
+		log.Printf("[HIERARCHY] %s: skipped %d newsgroup rows that failed to scan", who, scanErrs)
+	}
+	return allGroups, nil
+}
+
+// buildTree computes the sub-level counts and the sorted direct groups lists of groups.
+// The sub-levels are counted from the name's top level, so a group whose hierarchy column
+// is NULL or differs gets the same entries as in a top-level rebuild (A-db-8). The three
+// lists of one prefix share the *Newsgroup structs (UpdateNewsgroupStats relies on it).
+func (hc *HierarchyCache) buildTree(groups []*models.Newsgroup) *hierarchyTree {
+	hierarchyGroups := make(map[string][]*models.Newsgroup)
+	tree := &hierarchyTree{
+		subLevels:    make(map[string]map[string]int),
+		directGroups: make(map[string][]*models.Newsgroup),
+		directCounts: make(map[string]int),
 	}
 
-	// Now populate all the caches
-	hc.mu.Lock()
-	defer hc.mu.Unlock()
+	for _, group := range groups {
+		// Build sub-level counts by parsing group names
+		hc.buildSubLevelCounts(group.Name, ExtractHierarchyFromGroupName(group.Name), tree.subLevels)
 
-	// Clear existing cache
-	hc.subLevelsCache = make(map[string]map[string]int)
-	hc.subLevelCounts = make(map[string]int)
-	hc.directGroupsCache = make(map[string][]*models.Newsgroup)
-	hc.directGroupCounts = make(map[string]int)
+		// Add groups to the correct hierarchy levels for navigation
+		hc.addGroupToAllPossibleLevels(group, hierarchyGroups, tree.directCounts)
+	}
 
-	// Populate sub-level caches
-	for prefix, subLevels := range subLevelCounts {
+	// Direct groups lists, pre-sorted by the different criteria
+	for prefix, list := range hierarchyGroups {
+		for _, sortBy := range hierarchySortOrders {
+			sorted := make([]*models.Newsgroup, len(list))
+			copy(sorted, list)
+			sortDirectGroups(sorted, sortBy)
+			tree.directGroups[prefix+":"+sortBy] = sorted
+		}
+	}
+	return tree
+}
+
+// installTreeLocked stores the entries of tree in the caches. hc.mu must be held for writing.
+func (hc *HierarchyCache) installTreeLocked(tree *hierarchyTree) {
+	for prefix, subLevels := range tree.subLevels {
 		hc.subLevelsCache[prefix] = subLevels
 		hc.subLevelCounts[prefix] = len(subLevels)
 	}
-
-	// Populate direct groups caches (pre-sorted by different criteria)
-	for hierarchy, groups := range hierarchyGroups {
-		// Sort by name
-		nameGroups := make([]*models.Newsgroup, len(groups))
-		copy(nameGroups, groups)
-		sort.Slice(nameGroups, func(i, j int) bool {
-			return nameGroups[i].Name < nameGroups[j].Name
-		})
-		hc.directGroupsCache[hierarchy+":name"] = nameGroups
-
-		// Sort by activity (last_article)
-		activityGroups := make([]*models.Newsgroup, len(groups))
-		copy(activityGroups, groups)
-		sort.Slice(activityGroups, func(i, j int) bool {
-			return activityGroups[i].LastArticle > activityGroups[j].LastArticle
-		})
-		hc.directGroupsCache[hierarchy+":activity"] = activityGroups
-
-		// Sort by message count
-		groupsGroups := make([]*models.Newsgroup, len(groups))
-		copy(groupsGroups, groups)
-		sort.Slice(groupsGroups, func(i, j int) bool {
-			return groupsGroups[i].MessageCount > groupsGroups[j].MessageCount
-		})
-		hc.directGroupsCache[hierarchy+":groups"] = groupsGroups
-
-		// Set direct group count
-		hc.directGroupCounts[hierarchy] = len(groups)
+	for key, groups := range tree.directGroups {
+		hc.directGroupsCache[key] = groups
 	}
-
-	log.Printf("HierarchyCache: Built complete hierarchy tree with %d groups, %d hierarchies, %d sub-levels",
-		len(allGroups), len(hierarchyGroups), len(subLevelCounts))
-	return nil
+	for prefix, count := range tree.directCounts {
+		hc.directGroupCounts[prefix] = count
+	}
 }
 
 // buildSubLevelCounts extracts sub-hierarchy levels from group names
