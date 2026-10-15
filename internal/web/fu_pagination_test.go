@@ -248,14 +248,24 @@ func TestFuPaginationThreadExactPage(t *testing.T) {
 		t.Errorf("thread page does not show %d total messages: %.1500s", ThreadMessages_perPage+1, body)
 	}
 	// Page 2 is not linked, and asking for it anyway must not render an empty page of its own:
-	// the handler clamps it back to the only page there is.
+	// the handler clamps it back to the only page there is and fetches that page again, so
+	// the render holds the root and the replies, down to the last one. Before FU:E14 the
+	// replies were fetched for the unclamped page: only the root came back, with no nav.
 	rec2 := w0Do(t, w0Req{Path: "/groups/" + group + "/thread/1?page=2"})
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("GET ?page=2 = %d, want 200", rec2.Code)
 	}
-	if !strings.Contains(rec2.Body.String(), "fuPagination thread root") {
+	body2 := rec2.Body.String()
+	if !strings.Contains(body2, "fuPagination thread root") {
 		t.Errorf("?page=2 of a %d-reply thread rendered without the root article: %.1500s",
-			ThreadMessages_perPage, rec2.Body.String())
+			ThreadMessages_perPage, body2)
+	}
+	// Every reply has the subject "Re: fuPagination thread root"; the last one (article_num
+	// replies+1) is identified by its "#<num>" badge.
+	if !strings.Contains(body2, "Re: fuPagination thread root") ||
+		!strings.Contains(body2, fmt.Sprintf(`<span class="text-light">#%d</span>`, ThreadMessages_perPage+1)) {
+		t.Errorf("?page=2 of a %d-reply thread rendered without the last reply: %.2000s",
+			ThreadMessages_perPage, body2)
 	}
 }
 

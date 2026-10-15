@@ -77,7 +77,8 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 	threadRootArticle.ArticleNums[groupDB.NewsgroupPtr] = threadRoot
 
 	// Use cached thread replies with pagination
-	threadReplies, totalReplies, err := s.DB.GetCachedThreadReplies(groupDB, threadRoot, page, ThreadMessages_perPage)
+	fetchedPage := page
+	threadReplies, totalReplies, err := s.DB.GetCachedThreadReplies(groupDB, threadRoot, fetchedPage, ThreadMessages_perPage)
 	if err != nil {
 		log.Printf("[WEB]: singleThreadPage: GetCachedThreadReplies(%s/%d page=%d): %v", groupName, threadRoot, page, err)
 		s.renderError(c, http.StatusInternalServerError, "Failed to load thread replies", publicErrorDetail)
@@ -97,6 +98,18 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 	}
 	if page > totalPages {
 		page = totalPages
+	}
+	// The replies above were fetched for the requested page; an out-of-range one came back
+	// empty, which rendered the root alone (or nothing at all past page 1). The handler cannot
+	// know totalReplies before the first fetch, so fetch the clamped page once more (FU:E14).
+	// Its count is ignored: totalPages and totalMessages stay built from the first one.
+	if page != fetchedPage {
+		threadReplies, _, err = s.DB.GetCachedThreadReplies(groupDB, threadRoot, page, ThreadMessages_perPage)
+		if err != nil {
+			log.Printf("[WEB]: singleThreadPage: GetCachedThreadReplies(%s/%d page=%d): %v", groupName, threadRoot, page, err)
+			s.renderError(c, http.StatusInternalServerError, "Failed to load thread replies", publicErrorDetail)
+			return
+		}
 	}
 
 	// Prepare overviews for this page (root + current page of replies)
