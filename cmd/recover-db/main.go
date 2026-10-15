@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,12 +29,97 @@ type GroupResult struct {
 
 var appVersion = "-unset-"
 
+// query_rewriteDateSent is the -rewritedates update: it writes only date_sent and never
+// touches the hide/spam flags (A-ops-5).
+const query_rewriteDateSent = "UPDATE articles SET date_sent = ? WHERE article_num = ?"
+
+// recoverExitTimeout bounds the wait for background goroutines in recoverExit.
+const recoverExitTimeout = 60 * time.Second
+
+var recoverStopOnce sync.Once
+
+// resolveRecoverDataDir returns the data directory to open. -db is a deprecated alias of
+// -data: given alone it is used; given together with a different -data it is an error.
+// dbSet/dataSet report whether the flag was given on the command line (flag.Visit).
+func resolveRecoverDataDir(dbFlag, dataFlag string, dbSet, dataSet bool) (string, error) {
+	if dbSet && !dataSet {
+		return dbFlag, nil
+	}
+	if dbSet && dataSet && filepath.Clean(dbFlag) != filepath.Clean(dataFlag) {
+		return "", fmt.Errorf("-db is a deprecated alias of -data; they disagree (-db %q, -data %q)", dbFlag, dataFlag)
+	}
+	return dataFlag, nil
+}
+
+// recoverWriteModes lists the requested modes that write to the databases.
+func recoverWriteModes(repair, rebuildThreads, rewriteDates, reorderByDateSent bool) []string {
+	var modes []string
+	if repair {
+		modes = append(modes, "-repair")
+	}
+	if rebuildThreads {
+		modes = append(modes, "-rebuild-threads")
+	}
+	if rewriteDates {
+		modes = append(modes, "-rewritedates")
+	}
+	if reorderByDateSent {
+		modes = append(modes, "-reorder-by-datesent")
+	}
+	return modes
+}
+
+// recoverExit tears the database down (close StopChan once, wait for the background
+// goroutines up to recoverExitTimeout, Shutdown) and exits with code.
+func recoverExit(db *database.Database, code int) {
+	if db != nil {
+		recoverStopOnce.Do(func() {
+			if db.StopChan != nil {
+				close(db.StopChan)
+			}
+		})
+		if db.WG != nil {
+			done := make(chan struct{})
+			go func() {
+				db.WG.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(recoverExitTimeout):
+				log.Printf("[RECOVER] background goroutines did not stop within %v, shutting down anyway", recoverExitTimeout)
+			}
+		}
+		if err := db.Shutdown(); err != nil {
+			log.Printf("[RECOVER] database shutdown failed: %v", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	os.Exit(code)
+}
+
+// shouldRewrite reports whether a stored date_sent differs from the strictly re-parsed
+// date_string by more than one second. A date_string the strict parser rejects (ok false)
+// is never rewritten.
+func shouldRewrite(ok bool, reparsed, stored time.Time) bool {
+	if !ok {
+		return false
+	}
+	diff := reparsed.UTC().Sub(stored.UTC())
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff > time.Second
+}
+
 func main() {
 	config.AppVersion = appVersion
 	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("go-pugleaf Database Recovery Tool (version: %s)", config.AppVersion)
 	var (
-		dbPath              = flag.String("db", "data", "Data Path to main data directory (required)")
+		dbPath              = flag.String("db", "", "deprecated alias of -data")
 		newsgroup           = flag.String("group", "$all", "Newsgroup name to check (required) (\\$all to check for all or news.* to check for all in that hierarchy)")
 		verbose             = flag.Bool("v", true, "Verbose output")
 		repair              = flag.Bool("repair", false, "Attempt to repair detected inconsistencies")
@@ -41,18 +127,34 @@ func main() {
 		rewriteDates        = flag.Bool("rewritedates", false, "Rewrite incorrect dates (requires -parsedates)")
 		rebuildThreads      = flag.Bool("rebuild-threads", false, "Rebuild all thread relationships from scratch (destructive)")
 		maxPar              = flag.Int("max-par", 1, "use with -rebuild-threads to process N newsgroups")
-		dataDir             = flag.String("data", "./data", "Directory to store database files")
+		dataDir             = flag.String("data", "./data", "Data directory to open (the write modes require it given explicitly)")
 		scanOutOfOrderCheck = flag.Bool("scan-out-of-order-overview", false, "Scan newsgroups for articles with out-of-order date_sent values")
 		reorderByDateSent   = flag.Bool("reorder-by-datesent", false, "Reorder all articles by date_sent and write to new database file with .new extension")
+		force               = flag.Bool("force", false, "Required, together with an explicit -data, by the write modes -repair, -rebuild-threads, -rewritedates, -reorder-by-datesent")
 	)
 	flag.Parse()
 
-	if *dbPath == "" || *newsgroup == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s -db <database-path> -group <newsgroup-name> [options]\n", os.Args[0])
+	dbSet, dataSet := false, false
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "db":
+			dbSet = true
+		case "data":
+			dataSet = true
+		}
+	})
+	resolvedDataDir, err := resolveRecoverDataDir(*dbPath, *dataDir, dbSet, dataSet)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(2)
+	}
+
+	if resolvedDataDir == "" || *newsgroup == "" {
+		fmt.Fprintf(os.Stderr, "Usage: %s -data <data-directory> -group <newsgroup-name> [options]\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExample:\n")
-		fmt.Fprintf(os.Stderr, "  %s -db /path/to/databases -group comp.lang.go\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -data /path/to/data -group comp.lang.go\n", os.Args[0])
 		os.Exit(1)
 	}
 
@@ -65,10 +167,11 @@ func main() {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
 	}
 
-	// Validate database path
-	if _, err := os.Stat(*dbPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: Database path '%s' does not exist\n", *dbPath)
-		os.Exit(1)
+	// Write modes need an explicit data directory and -force (D13)
+	if modes := recoverWriteModes(*repair, *rebuildThreads, *rewriteDates, *reorderByDateSent); len(modes) > 0 && (!(dbSet || dataSet) || !*force) {
+		fmt.Fprintf(os.Stderr, "Refusing write modes %s on data directory '%s'\n", strings.Join(modes, " "), resolvedDataDir)
+		fmt.Fprintf(os.Stderr, "The write modes require an explicit -data <dir> and -force; nothing was opened or changed.\n")
+		os.Exit(2)
 	}
 
 	// Initialize configuration
@@ -77,13 +180,12 @@ func main() {
 
 	// Initialize database connection
 	dbConfig := database.DefaultDBConfig()
-	dbConfig.DataDir = *dataDir
+	dbConfig.DataDir = resolvedDataDir
 
 	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer db.Shutdown()
 	var newsgroups []*models.Newsgroup
 	isWildcard := strings.HasSuffix(*newsgroup, "*")
 	if *newsgroup != "$all" && *newsgroup != "" && !isWildcard {
@@ -108,7 +210,8 @@ func main() {
 		prefix := strings.TrimSuffix(*newsgroup, "*")
 		allGroups, err := db.MainDBGetAllNewsgroups()
 		if err != nil {
-			log.Fatalf("failed to get newsgroups from database: %v", err)
+			log.Printf("failed to get newsgroups from database: %v", err)
+			recoverExit(db, 1)
 		}
 		for _, grp := range allGroups {
 			if strings.HasPrefix(grp.Name, prefix) {
@@ -118,12 +221,13 @@ func main() {
 	} else {
 		newsgroups, err = db.MainDBGetAllNewsgroups()
 		if err != nil {
-			log.Fatalf("failed to get newsgroups from database: %v", err)
+			log.Printf("failed to get newsgroups from database: %v", err)
+			recoverExit(db, 1)
 		}
 	}
 	fmt.Printf("🔍 Starting Database Recovery Tool for go-pugleaf\n")
 	fmt.Printf("=====================================\n")
-	fmt.Printf("📂 Data Path: %s\n", *dbPath)
+	fmt.Printf("📂 Data Path: %s\n", resolvedDataDir)
 	fmt.Printf("📊 Newsgroups:    %d\n", len(newsgroups))
 	fmt.Printf("🔧 Repair Mode:   %v\n", *repair)
 	fmt.Printf("🧵 Rebuild Threads: %v\n", *rebuildThreads)
@@ -166,7 +270,7 @@ func main() {
 		fmt.Printf("   Total articles processed: %d\n", totalArticles)
 		fmt.Printf("   Total threads rebuilt: %d\n", totalThreadsRebuilt)
 		parMux.Unlock()
-		os.Exit(0)
+		recoverExit(db, 0)
 	}
 
 	// If only date parsing is requested, run that and exit
@@ -175,7 +279,8 @@ func main() {
 		fmt.Printf("=====================================\n")
 		totalFixed, totalChecked, err := checkAndFixDates(db, newsgroups, *rewriteDates, *verbose)
 		if err != nil {
-			log.Fatalf("Date parsing analysis failed: %v", err)
+			log.Printf("Date parsing analysis failed: %v", err)
+			recoverExit(db, 1)
 		}
 		fmt.Printf("\n📅 Date parsing analysis completed:\n")
 		fmt.Printf("   Articles checked: %d\n", totalChecked)
@@ -183,7 +288,7 @@ func main() {
 		if *rewriteDates {
 			fmt.Printf("   Dates corrected: %d\n", totalFixed)
 		}
-		os.Exit(0)
+		recoverExit(db, 0)
 	}
 
 	// If only out-of-order scan is requested, run that and exit
@@ -192,9 +297,10 @@ func main() {
 		fmt.Printf("=====================================\n")
 		err := scanOutOfOrderOverview(db, newsgroups, *verbose)
 		if err != nil {
-			log.Fatalf("Out-of-order scan failed: %v", err)
+			log.Printf("Out-of-order scan failed: %v", err)
+			recoverExit(db, 1)
 		}
-		os.Exit(0)
+		recoverExit(db, 0)
 	}
 
 	// If reorder-by-datesent is requested, run that and exit
@@ -203,9 +309,10 @@ func main() {
 		fmt.Printf("=====================================\n")
 		err := reorderArticlesByDateSent(db, newsgroups, *verbose, *maxPar)
 		if err != nil {
-			log.Fatalf("Article reordering failed: %v", err)
+			log.Printf("Article reordering failed: %v", err)
+			recoverExit(db, 1)
 		}
-		os.Exit(0)
+		recoverExit(db, 0)
 	}
 
 	// Initialize tracking variables
@@ -302,7 +409,7 @@ func main() {
 					report.PrintReport()
 				}
 				fmt.Fprintf(os.Stderr, "❌ Failed to re-check consistency for '%s': %v\n\n", newsgroup.Name, err)
-				os.Exit(1) // !!! WE EXIT HERE!!! DO NOT CHANGE !!!
+				recoverExit(db, 1) // !!! WE EXIT HERE!!! DO NOT CHANGE !!!
 			}
 			report.PrintReport()
 			result.FinalInconsistencies = report.HasInconsistencies
@@ -352,7 +459,8 @@ func main() {
 	}
 
 	// Print comprehensive summary
-	printSummary(results, totalGroups, emptyGroups, cleanGroups, inconsistentGroups, repairedGroups, failedGroups, errorGroups, *repair)
+	code := printSummary(results, totalGroups, emptyGroups, cleanGroups, inconsistentGroups, repairedGroups, failedGroups, errorGroups, *repair)
+	recoverExit(db, code)
 }
 
 // repairDatabase attempts to repair detected inconsistencies
@@ -554,8 +662,8 @@ func updateMainDBStats(db *database.Database, newsgroup string, report *database
 }
 */
 
-// printSummary prints a comprehensive summary of all database operations
-func printSummary(results []GroupResult, totalGroups, emptyGroups, cleanGroups, inconsistentGroups, repairedGroups, failedGroups, errorGroups int, repairMode bool) {
+// printSummary prints a comprehensive summary of all database operations and returns the exit code
+func printSummary(results []GroupResult, totalGroups, emptyGroups, cleanGroups, inconsistentGroups, repairedGroups, failedGroups, errorGroups int, repairMode bool) int {
 	fmt.Printf("\n")
 	fmt.Printf("=====================================\n")
 	fmt.Printf("DATABASE RECOVERY SUMMARY\n")
@@ -668,11 +776,10 @@ func printSummary(results []GroupResult, totalGroups, emptyGroups, cleanGroups, 
 	fmt.Printf("\n")
 	if problemGroups > 0 {
 		fmt.Printf("⚠️  Exiting with code 1 due to database problems\n")
-		os.Exit(1)
-	} else {
-		fmt.Printf("✅ Exiting with code 0 - all databases healthy\n")
-		os.Exit(0)
+		return 1
 	}
+	fmt.Printf("✅ Exiting with code 0 - all databases healthy\n")
+	return 0
 }
 
 // getStatusEmoji returns appropriate emoji for each status
@@ -816,9 +923,10 @@ func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDat
 			}
 		}
 
-		// Re-parse the original date string using the fixed parser
-		reparsedDate := processor.ParseNNTPDate(dateString)
-		if reparsedDate.IsZero() {
+		// Re-parse the original date string with the strict parser: a string it rejects is
+		// reported and never rewritten (no fallback date is written)
+		reparsedDate, ok := processor.ParseNNTPDateStrict(dateString)
+		if !ok {
 			problem := DateProblem{
 				Newsgroup:   &newsgroupName,
 				ArticleNum:  articleNum,
@@ -840,20 +948,17 @@ func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDat
 					fmt.Printf("   📊 This indicates a systematic date parsing problem that needs investigation.\n")
 					break
 				}
-				continue
 			*/
+			continue
 		}
 
 		// Compare the re-parsed date with the stored date (both in UTC)
 		// Allow for small differences (within 1 second) due to precision issues
-		dateSentUTC := dateSent.UTC()
-		reparsedDateUTC := reparsedDate.UTC()
-		diff := reparsedDateUTC.Sub(dateSentUTC)
-		if diff < 0 {
-			diff = -diff
-		}
-
-		if diff > time.Second {
+		if shouldRewrite(ok, reparsedDate, dateSent) {
+			diff := reparsedDate.UTC().Sub(dateSent.UTC())
+			if diff < 0 {
+				diff = -diff
+			}
 			fixed++
 			problem := DateProblem{
 				Newsgroup:  &newsgroupName,
@@ -874,7 +979,7 @@ func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDat
 			if rewriteDates {
 				// Format as UTC string to avoid timezone encoding issues
 				reparsedDateStr := reparsedDate.UTC().Format("2006-01-02 15:04:05")
-				_, err := tx.Exec("UPDATE articles SET date_sent = ?, hide = 0, spam = 0 WHERE article_num = ?", reparsedDateStr, articleNum)
+				_, err := tx.Exec(query_rewriteDateSent, reparsedDateStr, articleNum)
 				if err != nil {
 					if verbose {
 						fmt.Printf("   ❌ Failed to update article %d: %v\n", articleNum, err)
