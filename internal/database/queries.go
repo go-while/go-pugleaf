@@ -97,7 +97,9 @@ func (db *Database) SetProvider(provider *models.Provider) error {
 }
 
 // GetProviders returns all providers
-const query_GetProviders = `SELECT id, enabled, priority, name, host, port, ssl, username, password, max_conns, max_art_size, posting, created_at, proxy_enabled, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password FROM providers order by priority ASC`
+// query_GetProviders: the text columns are nullable in the schema; a NULL username in a hand-inserted or
+// legacy row must not break every GetProviders caller (post-queue failed its scan on such a row).
+const query_GetProviders = `SELECT id, enabled, priority, COALESCE(name,''), COALESCE(host,''), port, ssl, COALESCE(username,''), COALESCE(password,''), max_conns, max_art_size, posting, created_at, proxy_enabled, COALESCE(proxy_type,''), COALESCE(proxy_host,''), proxy_port, COALESCE(proxy_username,''), COALESCE(proxy_password,'') FROM providers order by priority ASC`
 
 func (db *Database) GetProviders() ([]*models.Provider, error) {
 	rows, err := RetryableQuery(db.mainDB, query_GetProviders)
