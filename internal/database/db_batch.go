@@ -1061,7 +1061,7 @@ retry1:
 				log.Printf("[BATCH] processNewsgroupBatch newsgroup '%s' has no newsgroups row: %d stored articles not counted (rows are never created by the batch writer)", *task.Newsgroup, len(inserted))
 			} else if sq.db.HierarchyCache != nil {
 				// Update hierarchy cache with new stats instead of invalidating
-				sq.db.HierarchyCache.UpdateNewsgroupStats(*task.Newsgroup, len(inserted), maxArticleNum)
+				sq.db.HierarchyCache.UpdateNewsgroupStats(*task.Newsgroup, len(inserted), maxArticleNum, latestDate)
 			}
 		}
 	}
