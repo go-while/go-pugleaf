@@ -196,14 +196,15 @@ func adfOptTorStart(t *testing.T, s *ProxyServer) (string, <-chan struct{}) {
 			if serveErr != nil {
 				t.Errorf("Serve: %v", serveErr)
 			}
-		case <-time.After(5 * time.Second):
-			t.Errorf("Serve did not return within 5s after Stop")
+		case <-time.After(testWait):
+			t.Errorf("Serve did not return within %v after Stop", testWait)
 		}
 	})
 	return s.Addr().String(), finished
 }
 
-// adfOptTorExpectClosed reads from c and fails unless the peer closes it within limit.
+// adfOptTorExpectClosed reads from c and fails unless the peer closes it within limit. limit is a
+// hang guard (callers pass testWait), except in TestAdfOptTorIdleTimeout.
 func adfOptTorExpectClosed(t *testing.T, c net.Conn, limit time.Duration) {
 	t.Helper()
 	if err := c.SetReadDeadline(time.Now().Add(limit)); err != nil {
@@ -363,8 +364,8 @@ func TestAdfOptTorListenStopServe(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Serve = %v, want nil", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatalf("Serve still running 1s after Stop")
+	case <-time.After(testWait):
+		t.Fatalf("Serve still running %v after Stop", testWait)
 	}
 	s.Stop()
 }
@@ -375,7 +376,8 @@ func TestAdfOptTorMaxConns(t *testing.T) {
 		_ = c.Close()
 	})
 	calls := make(chan struct{}, 4)
-	s := &ProxyServer{MaxConns: 1, IdleTimeout: 10 * time.Second, Timeout: time.Second,
+	// IdleTimeout beyond the guards: c1 must not idle out while the test checks c2.
+	s := &ProxyServer{MaxConns: 1, IdleTimeout: 10 * testWait, Timeout: time.Second,
 		dialTarget: adfOptTorTCPDial(backend, calls)}
 	addr, _ := adfOptTorStart(t, s)
 
@@ -386,8 +388,8 @@ func TestAdfOptTorMaxConns(t *testing.T) {
 	defer func() { _ = c1.Close() }()
 	select {
 	case <-calls:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("first connection was not forwarded")
+	case <-time.After(testWait):
+		t.Fatalf("first connection was not forwarded within %v", testWait)
 	}
 
 	c2, err := net.Dial("tcp", addr)
@@ -395,7 +397,7 @@ func TestAdfOptTorMaxConns(t *testing.T) {
 		t.Fatalf("dial 2: %v", err)
 	}
 	defer func() { _ = c2.Close() }()
-	adfOptTorExpectClosed(t, c2, 2*time.Second)
+	adfOptTorExpectClosed(t, c2, testWait)
 	select {
 	case <-calls:
 		t.Fatalf("second connection was forwarded despite MaxConns=1")
@@ -407,14 +409,15 @@ func TestAdfOptTorMaxConns(t *testing.T) {
 		t.Fatalf("write c1: %v", err)
 	}
 	buf := make([]byte, 4)
-	_ = c1.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = c1.SetReadDeadline(time.Now().Add(testWait))
 	if _, err := io.ReadFull(c1, buf); err != nil || string(buf) != "ping" {
 		t.Fatalf("echo on c1 = %q, %v", buf, err)
 	}
 
-	// Closing it frees the slot.
+	// Closing it frees the slot. Each probe waits 200 ms for its forward (a poll interval: a
+	// late forward is picked up by the next probe), the whole poll is bounded by testWait.
 	_ = c1.Close()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(testWait)
 	for {
 		c3, err := net.Dial("tcp", addr)
 		if err != nil {
@@ -451,14 +454,16 @@ func TestAdfOptTorIdleTimeout(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer func() { _ = c.Close() }()
-	adfOptTorExpectClosed(t, c, 3*time.Second)
+	// 30 s is 100x the idle timeout: an idle connection that is still open then is never
+	// closed. The assertion is the lower bound below (no early close).
+	adfOptTorExpectClosed(t, c, 30*time.Second)
 	if elapsed := time.Since(start); elapsed < 300*time.Millisecond {
 		t.Fatalf("idle connection closed after %v, before the 300ms idle timeout", elapsed)
 	}
 	select {
 	case <-backendClosed:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("target side was not closed after the idle timeout")
+	case <-time.After(testWait):
+		t.Fatalf("target side was not closed within %v after the idle timeout", testWait)
 	}
 }
 
@@ -556,7 +561,7 @@ func adfOptTorHalfCloseCheck(t *testing.T, addr string, reply []byte) {
 	if err := c.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatalf("CloseWrite: %v", err)
 	}
-	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = c.SetReadDeadline(time.Now().Add(testWait))
 	got, err := io.ReadAll(c)
 	if err != nil {
 		t.Fatalf("read reply: %v (got %d bytes)", err, len(got))
@@ -613,13 +618,16 @@ func TestAdfOptTorHalfCloseThroughSOCKS(t *testing.T) {
 	}
 }
 
-// Stop aborts a SOCKS5 dial in progress instead of waiting for -timeout.
+// Stop aborts a SOCKS5 dial in progress instead of waiting for -timeout. The dial timeout is
+// 10x testWait, so a Serve that returns within the testWait guard can only have been ended by
+// Stop; the proxy side of the aborted dial must be closed too.
 func TestAdfOptTorStopDuringDial(t *testing.T) {
+	proxyCfg, proxyConns := adfTorSilentProxyConns(t)
 	s := &ProxyServer{
 		TargetHost:  "adf-opt-tcp2tor.invalid",
 		TargetPort:  "119",
-		ProxyConfig: adfTorSilentProxy(t),
-		Timeout:     30 * time.Second,
+		ProxyConfig: proxyCfg,
+		Timeout:     10 * testWait,
 	}
 	addr, done := adfOptTorStart(t, s)
 
@@ -628,19 +636,27 @@ func TestAdfOptTorStopDuringDial(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer func() { _ = c.Close() }()
-	time.Sleep(200 * time.Millisecond) // let the handler reach the SOCKS5 handshake
+	// The silent proxy accepted the handler's connection: the dial is in the SOCKS5 handshake.
+	var pc net.Conn
+	select {
+	case pc = <-proxyConns:
+	case <-time.After(testWait):
+		t.Fatalf("the handler did not reach the SOCKS5 proxy within %v", testWait)
+	}
+	select {
+	case <-done:
+		t.Fatalf("Serve returned before Stop")
+	default:
+	}
 
-	start := time.Now()
 	s.Stop()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("Serve still running 3s after Stop with a dial in progress")
+	case <-time.After(testWait):
+		t.Fatalf("Serve still running %v after Stop with a dial in progress (dial timeout %v)", testWait, s.Timeout)
 	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Fatalf("Stop took %v", elapsed)
-	}
-	adfOptTorExpectClosed(t, c, 2*time.Second)
+	adfOptTorExpectClosed(t, pc, testWait) // the aborted dial closed its proxy connection
+	adfOptTorExpectClosed(t, c, testWait)
 }
 
 // Stop closes forwarded connections and Serve waits for their handlers.
@@ -648,7 +664,7 @@ func TestAdfOptTorStopClosesLiveConns(t *testing.T) {
 	backend := adfOptTorBackend(t, func(c *net.TCPConn) {
 		_, _ = io.Copy(c, c)
 	})
-	s := &ProxyServer{IdleTimeout: time.Minute, Timeout: time.Second,
+	s := &ProxyServer{IdleTimeout: 10 * testWait, Timeout: time.Second,
 		dialTarget: adfOptTorTCPDial(backend, nil)}
 	addr, done := adfOptTorStart(t, s)
 
@@ -661,16 +677,17 @@ func TestAdfOptTorStopClosesLiveConns(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	buf := make([]byte, 2)
-	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = c.SetReadDeadline(time.Now().Add(testWait))
 	if _, err := io.ReadFull(c, buf); err != nil {
 		t.Fatalf("echo: %v", err)
 	}
 
+	// IdleTimeout is 10x testWait, so the connection can only end through Stop within the guard.
 	s.Stop()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("Serve still running 3s after Stop with a live connection")
+	case <-time.After(testWait):
+		t.Fatalf("Serve still running %v after Stop with a live connection", testWait)
 	}
-	adfOptTorExpectClosed(t, c, 2*time.Second)
+	adfOptTorExpectClosed(t, c, testWait)
 }

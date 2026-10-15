@@ -63,7 +63,7 @@ func TestE2EBinary(t *testing.T) {
 	body := []string{"e2e binary body", ".dotted line", "", "end"}
 
 	// N01: greeting 200 (RFC 3977 §5.1.1, posting allowed)
-	c, err := e2eDialAddr(addr, 15*time.Second)
+	c, err := e2eDialAddr(addr, testWait)
 	if err != nil {
 		r.fail("N01", "greeting 200", err.Error())
 		t.FailNow()
@@ -109,11 +109,11 @@ func TestE2EBinary(t *testing.T) {
 		return nil
 	}())
 
-	// N05: within 20 s GROUP reports the article: 211 1 1 1 (async commit)
+	// N05: GROUP reports the article: 211 1 1 1 (async commit, polled up to testWait)
 	start := time.Now()
-	r.check("N05", "GROUP "+group+" 211 1 1 1 within 20s", func() error {
+	r.check("N05", "GROUP "+group+" 211 1 1 1 after the async commit", func() error {
 		var last string
-		err := e2eWaitFor(20*time.Second, func() error {
+		err := e2eWaitFor(testWait, func() error {
 			code, line, err := c.tryCmd("GROUP %s", group)
 			if err != nil {
 				return err
@@ -174,7 +174,7 @@ func TestE2EBinary(t *testing.T) {
 	r.check("N09", "IHAVE same id 435", func() error {
 		var last string
 		var stop error // a definite wrong answer ends the polling
-		err := e2eWaitFor(20*time.Second, func() error {
+		err := e2eWaitFor(testWait, func() error {
 			code, line, err := c.tryCmd("IHAVE %s", id)
 			if err != nil {
 				stop = err
@@ -270,7 +270,7 @@ func TestE2EBinaryIntake(t *testing.T) {
 		big = append(big, fmt.Sprintf("%04d %s", i, strings.Repeat("z", 59)))
 	}
 
-	c, err := e2eDialAddr(addr, 15*time.Second)
+	c, err := e2eDialAddr(addr, testWait)
 	if err != nil {
 		r.fail("N40", "connect", err.Error())
 		t.FailNow()
@@ -296,7 +296,7 @@ func TestE2EBinaryIntake(t *testing.T) {
 			return e
 		}
 		var last string
-		if err := e2eWaitFor(20*time.Second, func() error {
+		if err := e2eWaitFor(testWait, func() error {
 			code, line, err := c.tryCmd("GROUP %s", gen)
 			if err != nil {
 				return err
