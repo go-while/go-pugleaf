@@ -1469,3 +1469,25 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
 - Decisions already settled before this run: D11 done 2026-10-12 (no `-race` in the 11 build scripts; `adf-ops-scripts`
   skips OPS-4e and the CLAUDE.md sentence; E16's grep is empty at baseline). `RACE=1` in `## End-to-end` is a no-op:
   the verifier builds the web server with `go build -race -o build/webserver ./cmd/web` for E19 instead.
+
+### Wave 1, batch A (2026-10-15): adf-db-lifecycle, adf-db-readers, adf-db-cache, adf-proc-fatal, adf-web-cache
+- adf-proc-fatal: worktree `/tank0/claude/trees/go-pugleaf/agent-a0624188eade0125f`, branch
+  `worktree-agent-a0624188eade0125f`, commit 83fdee3, review "merge" (2 nits dropped: CSV `f.Close()` error ignored,
+  pre-existing; wrap wording), merge 9a591d3.
+- adf-db-cache: `agent-a068bcfa9d7476428`, commit 8326485, review "merge" + MINOR (goroutine-count test could flake),
+  merge 3717ef6; fixed inline in ef3ca64 (`TestAdfCacheCleanCronStops` counts `CleanCron` stack frames).
+- adf-web-cache: `agent-a6dcb6699b233a849`, commits a8e24bf + 9c31f37, review "fix first" (MAJOR: `PrintSanitized`
+  re-sanitized all five fields, body included, per call: ~29 ms per article render at 32 KiB; fixed by per-field
+  helpers, output byte-identical), then merge 15e0b34. Nit dropped: `cachedSize` can drift when a write lands on a
+  just-evicted entry (statistic only, pre-existing class).
+- adf-db-readers: `agent-ae881c05f513c505d`, commit 85741cf, review "merge" (2 test-hygiene nits dropped), merge
+  36a2753. Note: timestamp columns deliberately not COALESCEd (mattn returns text for COALESCE expressions; integers
+  still arrive as int64 by storage class). Migration `0029_main_repair_null_hierarchy.sql` added.
+- adf-db-lifecycle: `agent-a28c5f46d678d866b`, commit 3ba6c0d, review "merge" + MINOR (double `Shutdown` reset INIT
+  twice), merge a4f2d0d; fixed inline in bf63f91 (`initResetOnce`). Second MINOR noted, no change: the reopen test
+  never starts `CronClean` (NO_CACHE_BOOT), covered by `TestAdfLifeCronLoopsStop`. Open order of `OpenDatabase`
+  changed (config cache/UserSalt/AbuseMail before caches and goroutines). The implementer saw one `TestStmCheck`
+  failure under load in its first full run (passed on rerun and 5× in review); not attributed to the change.
+- Checks on bf63f91: gofmt baseline only; vet OK; build OK; race over 12 package sets ok (incl. new
+  `internal/database/adfreopen`, `internal/cache`, `internal/models`); known bugs `T-nntp-article-1` only.
+- Batch B spawned from bf63f91: adf-web-xss, adf-web-cron, adf-web-post, adf-web-nntpusers, adf-web-pagination.
