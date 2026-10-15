@@ -212,82 +212,11 @@ func (tpdb *TransferProgressDB) GetRemoteName() string {
 	return tpdb.remoteName
 }
 
-// GetRecentTransfers returns recent transfer records for the current remote
-func (tpdb *TransferProgressDB) GetRecentTransfers(limit int) ([]TransferResult, error) {
-	tpdb.mu.RLock()
-	defer tpdb.mu.RUnlock()
-
-	query := `
-		SELECT remote_id, newsgroup, timestamp, start_date, end_date, sent, unwanted, checked,
-		       rejected, retry, skipped, tx_errors, conn_errors
-		FROM transfers
-		WHERE remote_id = ?
-		ORDER BY timestamp DESC
-		LIMIT ?
-	`
-
-	rows, err := database.RetryableQuery(tpdb.db, query, tpdb.remoteID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var results []TransferResult
-	for rows.Next() {
-		var r TransferResult
-		var timestampStr string
-		var startDateStr, endDateStr sql.NullString
-		err := rows.Scan(
-			&r.RemoteID,
-			&r.Newsgroup,
-			&timestampStr,
-			&startDateStr,
-			&endDateStr,
-			&r.Sent,
-			&r.Unwanted,
-			&r.Checked,
-			&r.Rejected,
-			&r.Retry,
-			&r.Skipped,
-			&r.TXErrors,
-			&r.ConnErrors,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		// Parse timestamp
-		r.Timestamp, err = time.Parse("2006-01-02 15:04:05", timestampStr)
-		if err != nil {
-			return nil, err
-		}
-
-		// Parse start_date if present
-		if startDateStr.Valid {
-			parsedStart, err := time.Parse("2006-01-02 15:04:05", startDateStr.String)
-			if err != nil {
-				return nil, err
-			}
-			r.StartDate = &parsedStart
-		}
-
-		// Parse end_date if present
-		if endDateStr.Valid {
-			parsedEnd, err := time.Parse("2006-01-02 15:04:05", endDateStr.String)
-			if err != nil {
-				return nil, err
-			}
-			r.EndDate = &parsedEnd
-		}
-
-		results = append(results, r)
-	}
-
-	return results, rows.Err()
-}
-
 // NewsgroupExists checks if a newsgroup already has transfer results for the current remote
-// with exactly the same start_date and end_date (empty string represents no filter)
+// with exactly the same start_date and end_date (empty string represents no filter).
+// It reports whether any such row exists, whatever its retry/error counters: it is not the
+// "done" test of nntp-transfer, which is GetAllProgressNewsgroups (only a latest row with
+// retry = 0, tx_errors = 0 and conn_errors = 0 marks a group as done). No caller in this tree.
 func (tpdb *TransferProgressDB) NewsgroupExists(newsgroup string, startDate, endDate *time.Time) (bool, error) {
 	tpdb.mu.RLock()
 	defer tpdb.mu.RUnlock()

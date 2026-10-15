@@ -3,6 +3,7 @@ package nntp
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -154,6 +155,11 @@ func (pool *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article,
 	}
 
 	article, err := client.GetArticle(messageID, bulkmode)
+	if errors.Is(err, ErrInvalidCommandArg) {
+		// refused before anything was written: the connection is healthy
+		pool.Put(client)
+		return nil, err
+	}
 	if err != nil || article == nil {
 		if err == ErrArticleNotFound || err == ErrArticleRemoved {
 			// <-- internal/nntp/nntp-client-commands.go:105
