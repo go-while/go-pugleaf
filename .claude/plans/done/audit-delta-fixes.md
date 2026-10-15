@@ -326,10 +326,10 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
   command line, which counts as explicit) and `-force`; without them the tool prints what it would do and
   exits 2. `-rewritedates` updates only `date_sent` and skips (and reports) strings that `ParseNNTPDateStrict`
   rejects.
-- **D14 `-disable-active` (A-ops-4).** Refuse (exit 1, nothing changed) when the file yields no group names, or when
-  more than 50 % of the active groups would be disabled, unless `-disable-active-force` (the 50 % threshold is a
-  user question, Q10). `-disable-active-dry-run`
-  prints the groups instead of updating. Lines with one field (a plain group list) are accepted.
+- **D14 `-disable-active` (A-ops-4).** Refuse (exit 1, nothing changed) when the file yields no group names.
+  `-disable-active-dry-run` prints the groups instead of updating. Lines with one field (a plain group list) are
+  accepted. **No percentage threshold and no `-disable-active-force` (user decision 2026-10-15, Q10: "there is no cut
+  off needed. there was none, we need none. the dry-run makes sense.").**
 - **D15 Cursor-mode paging (FU:E12).** Cursor mode suppresses Previous and Next (`HasPrev = HasNext = false` in the
   cursor `PaginationInfo` literal); the cursor wiring that D1 of `web-db-followups` declined stays out of scope.
 - **D16 A-tools-1 routing.** Handed to `nntp-intake-injection` (hand-off 1), not implemented in a database file, for
@@ -390,8 +390,8 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
   - `adf-db-batch`: migration `0010_single_article_num_seq.sql`, `SQ3batch.dividerChan`, `SQ3batch.queuedN`
     (if an atomic is used), `(*Database).DeleteSpamRowsForArticles` (new file `database/article_num_cleanup.go`),
     expire-news `deleteDerivedThreadRows`.
-  - `adf-web-cmd`: `exitAfterDB`, `fatalAfterDB`, `webStop` (channel), `disableActiveOpts`, flags
-    `-disable-active-dry-run`, `-disable-active-force`.
+  - `adf-web-cmd`: `exitAfterDB`, `fatalAfterDB`, `webStop` (channel), `disableActiveOpts`, flag
+    `-disable-active-dry-run`.
 - **K3: tests.**
   - Package `web` tests use the existing w0 harness (`internal/web/testmain_test.go`: `w0Srv`, `w0Do(t, w0Req{…})`,
     `w0NewUser`, `w0NewGroup`, `w0DB`, `w0Name`, `lo1CoreSetAPIEnabled`); package `database` tests use `w0DB`/`w0Name`
@@ -1219,12 +1219,13 @@ Changes:
    never the raw CLI value (`main_functions.go:656-657`). The help text says "legacy, no effect on the message-id
    history schema".
 5. **A-ops-4 (D14).** `disableNewsgroupsNotInActiveFile(db, path string, opts disableActiveOpts)` with
-   `opts.DryRun`, `opts.Force` from the new flags; accept 1-field lines; refuse an empty keep set and > 50 % disables
-   unless `Force`; `DryRun` prints and changes nothing.
+   `opts.DryRun` from the new flag; accept 1-field lines; refuse an empty keep set (error, nothing changed);
+   `DryRun` prints and changes nothing. No percentage threshold, no force flag (Q10 answered).
 6. **Tests** `adf_web_test.go` (`TestMain` per K3; seed 4 active groups with `InsertNewsgroup`):
-   `TestAdfWebCmdDisableActiveEmptyFile` (a descriptions-format file → error, all 4 still active);
-   `TestAdfWebCmdDisableActiveThreshold` (file with 1 of 4 → refused without Force, applied with Force);
-   `TestAdfWebCmdDisableActiveDryRun`; `TestAdfWebCmdPlainList` (1-field lines accepted).
+   `TestAdfWebCmdDisableActiveEmptyFile` (a file with only comments/blank lines → error, all 4 still active);
+   `TestAdfWebCmdDisableActiveOneOfFour` (file with 1 of 4 → applied: 1 active, 3 disabled);
+   `TestAdfWebCmdDisableActiveDryRun` (same file, DryRun → all 4 still active);
+   `TestAdfWebCmdPlainList` (1-field lines accepted).
 
 Acceptance: E01, E10, E11, E12 PASS; tests pass; `./build_webserver.sh` builds.
 
@@ -1334,7 +1335,9 @@ from the scripts every later verifier uses (build with `RACE=1`).
 
 Runner: `pugleaf-verifier` on the main checkout (`plan-audit-delta-fixes`), after wave 2.
 ```bash
-RACE=1 ./build_webserver.sh && ./build_recover-db.sh && ./build_fetcher.sh
+./build_webserver.sh && ./build_recover-db.sh && ./build_fetcher.sh
+# E19 needs a race build of the web server (the build scripts no longer add -race, D11); the version ldflag is required
+GOEXPERIMENT=greenteagc go build -race -o build/webserver -ldflags "-X main.appVersion=$(cat appVersion.txt)" ./cmd/web/
 PORT=18998 DATA=./data-test-audit-delta-fixes scripts/test-audit-delta-fixes.sh
 ```
 
@@ -1375,8 +1378,10 @@ Checks:
   `SELECT count(*) FROM newsgroups WHERE hierarchy IS NULL` = 0.
 - **E10** (OPS-2a) a separate short start with `-nntptcpport 21998` on port `$((PORT+1))`: the log has `are ignored`
   and nothing listens on 21998; stop it.
-- **E11** (A-ops-4) `$BIN -data "$DATA" -webport $((PORT+2)) -nntphostname "$NNTPHOST" -disable-active <descriptions-format file>` → exit
-  ≠ 0, `SELECT count(*) FROM newsgroups WHERE active=1` unchanged (server stopped while it runs).
+- **E11** (A-ops-4, server stopped) `$BIN -data "$DATA" -webport $((PORT+2)) -nntphostname "$NNTPHOST" -disable-active <file>`:
+  a comment-only file → exit ≠ 0, `SELECT count(*) FROM newsgroups WHERE active=1` unchanged; a one-line list
+  `adf.e2e.a` with `-disable-active-dry-run` → exit 0, unchanged; the same list without dry-run → exit 0, only
+  `adf.e2e.a` active (1-field lines accepted). Active flags restored afterwards.
 - **E12** (OPS-4b) a fresh scratch root `$DATA/fresh`: first start on port `$((PORT+3))` with `-useshorthashlen 9`
   reaches `/ping`; stop.
 - **E13** (A-tools-2) with the web server stopped (it holds the main DB), guard first: `SELECT count(*) FROM providers WHERE enabled=1` must be 0 (else `fail` and skip:
@@ -1407,6 +1412,7 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
 - **Q1** First registered user becomes admin (user-ID-1 rule, registration on by default; AUDIT §11.10): keep, or
   admin only via `usermgr` / registration off until an admin exists? Not changed by this plan.
 - **Q2** Add `.github/workflows/tests.yml` (push/PR vet + test + known-bugs job)? Optional step of `adf-ops-scripts`.
+  **Answered 2026-10-15: not in this plan; filed in `issues.md` for later.**
 - **Q3** `history/history.go:469,498` fail-stop exits: the author marked them "DO NOT TOUCH"; convert to errors with a
   caller-side fail-stop, or keep? Deferred.
 - **Q4** Toolchain/module upgrade for the 14 govulncheck findings (`go.mod`): separate change?
@@ -1416,11 +1422,241 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
   or accept A-tools-1 as open.
 - **Q8** D7 gates enabling the default cron jobs that migration 0021 ships disabled: an operator without
   `-edit-cronjobs` can no longer switch them on from the admin page. Acceptable?
+  **Answered 2026-10-15: accepted (user's "go" on the defaults).**
 - **Q9** (wave-1 boundary, before `adf-ops-scripts` merges) D11: build scripts without `-race` by default (`RACE=1`
   opt-in) and the matching `.claude/CLAUDE.md` sentence? Production binaries from `build_ALL.sh` would stop being race
   builds. `.claude/CLAUDE.md` is edited only on a yes.
 - **Q10** D14: is 50 % the right threshold for `-disable-active` to refuse without `-disable-active-force`?
+  **Answered 2026-10-15: no threshold, no force flag; only the empty-keep-set refusal and `-disable-active-dry-run`.**
 
 ## Progress
 
 (filled in by `/run-plan`)
+
+### Wave 0 (2026-10-15, orchestrator, `plan-audit-delta-fixes` from `testing-001` @ 4eb92da)
+- Dependencies verified: `CountNNTPUsersByWebUserID`/`UpdateNNTPUserWebUserID` (`nntp_user_admin.go:33,48`),
+  `FormatNewsDate`/`WireArticleSize` (`common/intake.go:467,434`), `ParseNNTPDateStrict` (`processor/proc-utils.go:532`),
+  stats statement is `UPDATE newsgroups SET` (`db_batch.go:555`), `loopbackPprofAddr` in `cmd/history-rebuild`,
+  `internal/nntp/nntp-cmd-date.go` exists.
+- Hand-offs: **A-tools-1 closed** (`captureLimiter` in `processor/intake.go:178`, used in `threading.go:54,58,349`; no
+  per-group capture goroutine left); **A-tools-4 closed** (`newDownloadRun` at `proc_DLArt.go:77`); **A-ops-3d/f closed**
+  (`syscall.SIGTERM` in `cmd/history-rebuild/main.go:166` and `cmd/nntp-transfer/main.go:371`).
+- Re-anchoring (symbols all present; moved lines): `queries.go` `getHierarchiesPaginatedDirect:2201`,
+  `GetNewsgroupsByHierarchy:2828`, `ResetNewsgroupData:3074`, `query_GetSpamArticles1:3348`, `GetActiveNewsgroups:1031`,
+  `GetNewsgroupsPaginated:1075/1110`; `db_batch.go` `query_processOverviewBatch:1037`, `sq.queued -= batched:768`,
+  `BatchDividerChan:1816`, `BatchDivider:1821`, `ExpireCache:166`, `GetNewsgroupPointer:187`, `CheckNoMoreWorkInMaps:272`;
+  `hierarchy_cache.go` scan `continue` at `:492`; `db_migrate.go` `migratedDBsCache:25,384,423`, `migrateGroupDB:367`;
+  `cmd/web/main.go` `useshorthashlen:102`, NNTP flags `:113-116`, startup line `:150`, `log.Fatalf` after open `:221-240`,
+  `os.Exit` sites `:248-334`, dead NNTP block from `:428`, `disable-active:132`; `cmd/web/main_functions.go`
+  `startHierarchyUpdater:510`, `monitorUpdateFile:545`, `ConnectPools:579`, `NewFetchProcessor:647`,
+  `disableNewsgroupsNotInActiveFile:1015`; `cmd/nntp-fetcher/main.go` `UpdateNewsgroupList:806` (`OpenDatabase(nil):810`),
+  `signal.Notify:147`, backend literal `:248`/`:838`; `cmd/recover-db/main.go` `-db:36`, `-data:44`, `defer db.Shutdown():86`,
+  `os.Exit:169,186,197,208,305,671,674`, rewrite statement `:877`; `cmd/tcp2tor/main.go` `-timeout:102`,
+  `testSOCKS5Connection:503`, `proxy.Direct:514,...`; `cmd/history-rebuild/main.go` `:74,:79` unchanged;
+  `cmd/expire-news/main.go` `signal.Notify:146`, `deleteArticles:560` (callers `:466,:748`); `cmd/post-queue/main.go:74`;
+  `internal/web` anchors unchanged (`web_admin_crons.go:18,148,210,307`, `cronjobs.go:367,373,451`,
+  `web_apiHandlers.go:237,267,448`, `thread-tree.js:514-536`, `webserver_core_routes.go:280,296,391,502,526`,
+  `web_sitePostPage.go:365-384,520`, `web_admin_nntp.go:92,130`, `webgroupPage.go:90,118-119`,
+  `web_sectionsPage.go:246,273-274`, `web_threadPage.go:80,98`, `web_threadTreePage.go:95`).
+  Migration numbers free: main `0029`, single `0010`. `run_web_ssl.sh:3` and `run_web.sh:4` as cited.
+- Baseline checks on 4eb92da: gofmt = 2 baseline files only; vet OK; build OK; race run over the 15 package sets all ok
+  (`internal/cache`, `internal/models`, `cmd/web`, `cmd/nntp-fetcher`, `cmd/recover-db`, `cmd/tcp2tor` have no tests
+  yet); known bugs: `T-nntp-article-1` only.
+- `scripts/test-audit-delta-fixes.sh` written (E01–E19; E11 is three-part: comment-only file, 1-of-3 list dry-run, 1-of-3 list applied;
+  E09 drops the `0029` `schema_migrations` row before the restart so the repair runs on the seeded NULL row, and deletes
+  the row afterwards; a third group `adf.e2e.c` is seeded for the E11 threshold). Baseline run
+  (`PORT=18998 DATA=./data-test-audit-delta-fixes`): `SUMMARY pass=1 fail=16 info=2`; only E19 passes, E17/E18 INFO.
+  Baseline observation: with the NULL-hierarchy row present, `-disable-active` fails in `MainDBGetAllNewsgroups`
+  (A-db-1 reproduced).
+- Decisions already settled before this run: D11 done 2026-10-12 (no `-race` in the 11 build scripts; `adf-ops-scripts`
+  skips OPS-4e and the CLAUDE.md sentence; E16's grep is empty at baseline). `RACE=1` in `## End-to-end` is a no-op:
+  the verifier builds the web server with `GOEXPERIMENT=greenteagc go build -race -o build/webserver -ldflags "-X main.appVersion=$(cat appVersion.txt)" ./cmd/web/` for E19 instead (without the ldflag the binary refuses to start: `config.AppVersion is unset`).
+
+### Wave 1, batch A (2026-10-15): adf-db-lifecycle, adf-db-readers, adf-db-cache, adf-proc-fatal, adf-web-cache
+- adf-proc-fatal: worktree `/tank0/claude/trees/go-pugleaf/agent-a0624188eade0125f`, branch
+  `worktree-agent-a0624188eade0125f`, commit 83fdee3, review "merge" (2 nits dropped: CSV `f.Close()` error ignored,
+  pre-existing; wrap wording), merge 9a591d3.
+- adf-db-cache: `agent-a068bcfa9d7476428`, commit 8326485, review "merge" + MINOR (goroutine-count test could flake),
+  merge 3717ef6; fixed inline in ef3ca64 (`TestAdfCacheCleanCronStops` counts `CleanCron` stack frames).
+- adf-web-cache: `agent-a6dcb6699b233a849`, commits a8e24bf + 9c31f37, review "fix first" (MAJOR: `PrintSanitized`
+  re-sanitized all five fields, body included, per call: ~29 ms per article render at 32 KiB; fixed by per-field
+  helpers, output byte-identical), then merge 15e0b34. Nit dropped: `cachedSize` can drift when a write lands on a
+  just-evicted entry (statistic only, pre-existing class).
+- adf-db-readers: `agent-ae881c05f513c505d`, commit 85741cf, review "merge" (2 test-hygiene nits dropped), merge
+  36a2753. Note: timestamp columns deliberately not COALESCEd (mattn returns text for COALESCE expressions; integers
+  still arrive as int64 by storage class). Migration `0029_main_repair_null_hierarchy.sql` added.
+- adf-db-lifecycle: `agent-a28c5f46d678d866b`, commit 3ba6c0d, review "merge" + MINOR (double `Shutdown` reset INIT
+  twice), merge a4f2d0d; fixed inline in bf63f91 (`initResetOnce`). Second MINOR noted, no change: the reopen test
+  never starts `CronClean` (NO_CACHE_BOOT), covered by `TestAdfLifeCronLoopsStop`. Open order of `OpenDatabase`
+  changed (config cache/UserSalt/AbuseMail before caches and goroutines). The implementer saw one `TestStmCheck`
+  failure under load in its first full run (passed on rerun and 5× in review); not attributed to the change.
+- Checks on bf63f91: gofmt baseline only; vet OK; build OK; race over 12 package sets ok (incl. new
+  `internal/database/adfreopen`, `internal/cache`, `internal/models`); known bugs `T-nntp-article-1` only.
+- Batch B spawned from bf63f91: adf-web-xss, adf-web-cron, adf-web-post, adf-web-nntpusers, adf-web-pagination.
+
+### Wave 1, batch B (2026-10-15): adf-web-xss, adf-web-cron, adf-web-post, adf-web-nntpusers, adf-web-pagination
+- adf-web-pagination: `agent-a720fb7d0a4f828b6`, commit e484d7b, review "merge" + MINOR noted (D15 side effect: with
+  `HasPrev`/`HasNext` false, `pagination.html` also hides First and Last in cursor mode; record for the cursor
+  decision), merge 8eb175c; comment wording fixed inline in b56ce8f.
+- adf-web-xss: `agent-a98e5e7cf72150c95`, commit 60edaec, review "merge" (2 nits dropped), merge 4c7aa4c. CSP equals
+  D1 byte for byte; the hosts cover `base_chat.html`'s jsdelivr CSS/fonts; `escapeHtml`/`getAPIToken` removed.
+- adf-web-post: `agent-a31339ec21e85d5f5`, commits 5239582 + ccf3c04, review "fix first": MAJOR outside the slice
+  (`common.ReconstructHeaders` with `withPath=false`, the cmd/post-queue POST path, would relay the stored
+  `Injection-Info`/`Injection-Date` and an injecting agent answers 441) → fixed inline in **bd2ffe4**
+  (`PostOnlyIgnoreHeadersMap`, test `TestAdfPostHeadersDropInjectionOnPost` in `internal/common`); MINOR
+  cmd/audit-web-posts allow-list → same commit (D8 names + single-header list, legacy X-pugleaf-Trace/Bytes kept,
+  "clean D8 block" test case); MINORs in the slice (CRLF bodies normalized, References folded at 78 columns) fixed
+  in ccf3c04; merge 7dd90b7. Leftover: a 1000-byte Subject gives a 1009-octet stored line (pre-existing form limit);
+  empty UserSalt would write `posting-account=""` (intake omits it; salt is generated at init, so unreachable).
+- adf-web-nntpusers: `agent-a1eab6765d3954fdb`, commit 2996537, review "merge" + MINOR noted (a legacy mapping to
+  a deleted web user blocks the whole update until "no mapping" is chosen), merge f761604. Leftovers: check-then-write
+  race on the one-account rule (needs a partial unique index after a duplicate-unmapping migration); the edit form
+  always submits the posting state via a hidden `posting=off` field (handler reads `GetPostFormArray`).
+- adf-web-cron: `agent-af21f31672fb93ec5`, commits bb1e8a6 + c1e0af3 (ownership extended to
+  `internal/web/fu_cron_test.go`: `TestFuCronLoadAndStartJobsStartsWhileRunning` used rows without a DB row whose
+  schedulers now forget themselves, so it raced; rewritten with parked real rows), review "merge", merge 09799ce;
+  template "create below" sentence gated and the hint assertion fixed inline in 576103d. Leftovers: an ended job's
+  log buffer is dropped with its registration (A-web-20 side effect); toggle check-then-flip race (needs a
+  conditional UPDATE in `db_cron_jobs.go`); `calculateNextRun` divides by zero for interval 0 with a start time
+  (unreachable through the handlers).
+- Load-related nntp test flakes seen by implementers while several suites ran at once (`TestStmCheck` once,
+  `TestAuthFailures` once); both pass alone and in the orchestrator's full runs.
+- Checks on 576103d: gofmt baseline only; vet OK; build OK; race over 13 package sets ok (incl. cmd/audit-web-posts);
+  known bugs `T-nntp-article-1` only.
+- Batch C spawned from 576103d: adf-tools-fetcher, adf-ops-recover, adf-ops-tcp2tor, adf-ops-misc, adf-ops-scripts.
+
+### Wave 1, batch C (2026-10-15): adf-tools-fetcher, adf-ops-recover, adf-ops-tcp2tor, adf-ops-misc, adf-ops-scripts
+- adf-ops-tcp2tor: `agent-a2bdbbf3ff4b9242c`, commit 8164555, review "merge" (nit: no test pins that a forwarded
+  connection keeps no deadline; x/net clears it after CONNECT), merge 6bbebe1.
+- adf-ops-recover: `agent-af81520b9cc8f3bb4`, commit be2bf44, review "merge" + MINOR (help/refusal text omitted the
+  `-db` alias) fixed inline in 81bbc86, merge 0bc9c66. Leftover (pre-existing): repair step 6 queries a non-existent
+  `t.child_articles` column on `threads` (`❌ Could not check threading` on every `-repair`); `fixed++` counts before
+  the UPDATE; parse-failure problems are uncapped.
+- adf-tools-fetcher: `agent-a2e98b7b49517484a`, commit ff22aac, review "merge" + MINOR (SIGTERM caught early but
+  the listener started only after the provider/LIST setup) fixed inline in cf77891 (listener right after Notify),
+  merge dc9beda. Leftover: the `-fetch-newsgroups-from-remote` path installs no signal handler (short run; each row
+  commits on its own).
+- adf-ops-misc: `agent-a9603951559041464`, commits e73a417 + 3ce4b56, review "merge", merge ed88798. Deviation
+  accepted: `parseActiveFile` samples every Nth group of the whole sorted file (≤ 20 000; stride 6) instead of the
+  first 20 000 lines, which hold no `control.*`/`junk`/… group and would fail `TestRealNewsgroupsWithDefaultPatterns`;
+  `PUGLEAF_PEERING_REALDATA=1` uses all 110 980. `TestPerformanceWithRealData` no longer skips. Peering tests ~10 s.
+- adf-ops-scripts: `agent-a7481e793ee995227`, commits 1b67025 + 5c33ccb + 28d8e23, review "fix first": MAJOR (the
+  version regex also ran on tag pushes and rejected the repo's `v0.4.7-1`-style tags) → optional safe suffix
+  `(-[0-9A-Za-z][0-9A-Za-z.-]*)?`; MINORs: the manual migration scripts went from inert to live against `./data`
+  → data dir is a required argument; workflow-level `permissions: contents: read`; nits: `*` stripped from MSYS
+  checksum names, `gcc --version` step on Windows; merge 747cd72. Runner labels: ubuntu-24.04, ubuntu-24.04-arm,
+  macos-15 (macos-14 deprecated), macos-15-intel (macos-13 retired), windows-latest. Leftovers: actions not pinned
+  by SHA; toolchain still `go-version-file: go.mod` (Q4); Windows MinGW/cgo and `GOEXPERIMENT=greenteagc` untested
+  on real runners; `fail-fast: false` still gates the release on all five builds. Stale
+  `.github/copilot-instructions.md` line removed inline in a846e27.
+- Wave-1 tree: a846e27. Wave 2 spawned from it: adf-db-batch, adf-web-hide, adf-web-cmd.
+
+### Wave 2 (2026-10-15): adf-web-cmd, adf-web-hide, adf-db-batch (from a846e27; wave-1 tree + df20c06)
+- Integration fix before wave 2 merges: `TestAuthFailures` timed out once in the wave-1 full run (three implementer
+  suites in parallel, load average 12; passes alone and in a rerun) → `authLogin` gives the AUTHINFO PASS step a 20 s
+  client deadline (bcrypt under `-race`), df20c06; full nntp suite green afterwards under the same load.
+- adf-web-cmd: `agent-ae81d38ee7a451cfa`, commit 06769ad, review "merge" + MINOR noted (progressDB handle not
+  closed on the exit paths, pre-existing; nothing uses it but the dead `FetchRoutine`), merge 8647368; dead
+  `cmd/web/main_adapters.go` removed inline in 792eeff. Implementer's e2e: E01/E10/E11/E12 PASS. Deviation: the
+  pre-open "Error loading default nntpconfig" fatal removed with the NNTP block. Leftovers: one-shot modes run before
+  `signal.Notify`; a failed `UpdateNewsgroupActive` is logged and the run still exits 0; `FetchRoutine` is dead code.
+- adf-web-hide: `agent-a748f81a2302ff1fe`, commits af11262 + 87a5364 (ownership extended to
+  `internal/web/w1_api_test.go` — two thread-tree tests need `w1APIEnable` since D3 — and
+  `web/templates/section-article.html` — pre-existing `.Article.ArticleNum` made every section article page a 500),
+  review "merge" + MINOR noted (`/api/thread-tree` still returns the raw `from_header` of visible nodes; D3 asks only
+  D2 redaction), merge a5fe230; reply prefill now says "Article not found" for a missing article too (09265b0).
+  Deviation: a hidden thread root gets a `[hidden article]` placeholder Overview on the tree pages for non-admins.
+  Leftovers: a node whose Overview failed to load cannot be marked hidden (renders "Unknown Subject", link 404s);
+  `lookupReplyReferences` copies a hidden article's References into a reply; `thread-tree.html` shows an empty
+  Message-ID row and a "View article" button for the placeholder.
+- adf-db-batch: `agent-a3cd2421442729e23`, commits bdf0c03 + 31537bf + 466eab0, review "fix first" twice:
+  MAJOR M1 (the task lookup ran before the MaxQueued brake, so a brake longer than the 120 s expiry could orphan the
+  task and lose the article) → lookup after the brake; m2 defensive `MAX(last_num, COALESCE(MAX(article_num),0)) + 1`
+  in both inserts; **m3 amends D4**: the sequence is seeded with the maximum over `articles.article_num`,
+  `threads.root/parent/child_article`, `thread_cache.thread_root/last_child_number`, `cached_trees.thread_root`,
+  `tree_stats.thread_root`, so numbers whose derived rows survived an old expire-news run are never handed out again;
+  the first m1 fix (a global in-flight capture guard on expiry) was itself a MAJOR (expiry starved under a DB-bound
+  backfill: every touched group's task + BATCHchan retained) and was replaced by **interned newsgroup pointers**
+  (`SQ3batch.groupNames`, never expired; a recreated task carries the same `*string`, closing the A-db-5/A-db-2
+  pointer class); merge 7ff04a3. Brake thresholds are `maxQueued*80/100`/`*20/100` (the old `/100*80` is 0 at the
+  minimum 16). `BatchDividerChan` global deleted (no outside users). Reopen allow-list now only `cleanupExpired`.
+- Wave-3 greps on 7ff04a3: A-tools-1 closed (`captureLimiter` defined and used, 0 per-group capture goroutines),
+  A-tools-4 closed (`newDownloadRun`), A-ops-3d/f closed; SIGTERM in cmd/web, nntp-fetcher, expire-news, post-queue,
+  history-rebuild, nntp-transfer.
+
+## Outcome
+
+- **Integration branch:** `plan-audit-delta-fixes` from `testing-001` @ 4eb92da; code tree 7ff04a3 (plus plan/docs
+  commits b7d7e30, 04857f4 and this one). Not yet merged into `testing-001` (user decision). Nothing pushed.
+- **Waves run:** 0 (inline), 1 (15 slices in three batches of five), 2 (3 slices), 3 (inline greps + verifier). The
+  optional waves O1 (10 slices) and O2 (1 slice) were not run (user asked at the wave-3 boundary).
+- **Ids fixed:** see the "Fixed by plan `audit-delta-fixes`" bullet in `BUGS.md`. Hand-offs: A-tools-1, A-tools-4,
+  A-ops-3d/f confirmed closed by the sibling plans (wave-0 and wave-3 greps).
+- **Decisions applied (behaviour changes):** D1 CSP on every response (`'unsafe-inline'` kept for script/style);
+  D2 hidden articles are 404 for non-admins everywhere, tree nodes render `[hidden article]`, `/api/thread-tree`
+  redacted; D3 `/api/thread-tree` behind `requireAPIEnabled`, `Cache-Control: private`; **D4 amended**: article
+  numbers from `article_num_seq` (migration 0010), seeded from the maximum over articles, threads, thread_cache,
+  cached_trees and tree_stats, insert uses `MAX(last_num, MAX(article_num)) + 1`; `ResetNewsgroupData` restarts at 0
+  and drops the group's spam rows and cache; expire-news deletes derived rows; D5 `OpenDatabase`/`NewProcessorE`/
+  analyze export return errors, `Shutdown` resets `INIT` once, all cache crons and the batch loops stop on
+  `bgStop`, migration cache removed; D6 SIGTERM = SIGINT in web, fetcher, expire-news, post-queue; D7
+  `-edit-cronjobs` gates create and enable (also the shipped-disabled defaults, Q8 accepted); D8 web posts store the
+  full header block (Injection-Info replaces X-pugleaf-Trace, no Bytes header), the POST path to providers drops
+  Injection-Info/Injection-Date, audit-web-posts knows the new block; D9 NNTP user mapping (0 = none, one account per
+  web user, passwords 10–72 bytes, maxconns 1–25, posting independent of maxconns); D10 embedded NNTP server removed
+  from `cmd/web` (flags parsed, logged as ignored); D11 done earlier (no `-race` in build scripts); D12 release
+  workflow: test job first, five native cgo runners (macos-15 / macos-15-intel replace the deprecated/retired
+  labels), validated version input, suffixed tags allowed, `permissions: contents: read`; D13 recover-db `-db` alias,
+  write modes need an explicit dir and `-force`, `-rewritedates` keeps hide/spam and skips unparseable dates;
+  **D14 as decided by the user**: `-disable-active` refuses only an empty keep set, `-disable-active-dry-run`,
+  1-field lines accepted, no threshold, no force flag; D15 cursor mode has no Previous/Next (and, via the template,
+  no First/Last) links.
+- **Questions:** Q2 no (filed in `issues.md`), Q7 yes (A-tools-1 applied), Q8 accepted, Q9 answered earlier,
+  Q10 no cut-off. Q1, Q3, Q4, Q5, Q6 untouched (out of scope).
+- **Verification (verifier on 7ff04a3):** gofmt baseline only; vet (incl. `-tags e2e`); build; race suite over 17
+  package sets ok (211 s, no flake); acceptance U01–U18 all ran and passed (0 skips; 36 web, 30 database, 4 cache,
+  2 models, 1 reopen, 2 processor, 2 fetcher, 4 recover-db, 3 tcp2tor, 6 web-cmd, 2 expire-news, 8 peering, 9
+  common); `-count=3` flake run of the 8 timing-sensitive tests ok; known bugs = `T-nntp-article-1` only; shell/YAML
+  checks ok; five build scripts ok; e2e `PORT=18998 DATA=./data-test-audit-delta-fixes scripts/test-audit-delta-fixes.sh`
+  → `SUMMARY pass=17 fail=0 info=2` (E01–E16, E19 PASS; E17 INFO; E18 INFO `article_num_seq … 1`); manual spot
+  checks on 19002/19003 (CSP header, "are ignored" line, graceful SIGTERM) ok. Note: `./data` does not exist in this
+  checkout (only `data_ram` → /mnt/ramdisk/data and an empty `data_local`); nothing outside scratch was touched.
+- **Review findings fixed before merge (MAJOR):** adf-web-cache per-field sanitizing (29 ms per article render
+  otherwise); adf-web-post POST path relaying Injection-Info (441 upstream); adf-ops-scripts tag regex rejecting the
+  repo's `v0.4.7-1` tags; adf-db-batch task lookup before the brake (lost articles), then its first m1 fix (expiry
+  starved under load) replaced by interned newsgroup pointers.
+- **Worktrees (left in place; user cleans up):** under `/tank0/claude/trees/go-pugleaf/`, branches `worktree-<id>`:
+  agent-a0624188eade0125f (adf-proc-fatal), agent-a068bcfa9d7476428 (adf-db-cache), agent-a6dcb6699b233a849
+  (adf-web-cache), agent-ae881c05f513c505d (adf-db-readers), agent-a28c5f46d678d866b (adf-db-lifecycle),
+  agent-a720fb7d0a4f828b6 (adf-web-pagination), agent-a98e5e7cf72150c95 (adf-web-xss), agent-a31339ec21e85d5f5
+  (adf-web-post), agent-a1eab6765d3954fdb (adf-web-nntpusers), agent-af21f31672fb93ec5 (adf-web-cron),
+  agent-a2bdbbf3ff4b9242c (adf-ops-tcp2tor), agent-af81520b9cc8f3bb4 (adf-ops-recover), agent-a2e98b7b49517484a
+  (adf-tools-fetcher), agent-a9603951559041464 (adf-ops-misc), agent-a7481e793ee995227 (adf-ops-scripts),
+  agent-ae81d38ee7a451cfa (adf-web-cmd), agent-a748f81a2302ff1fe (adf-web-hide), agent-a3cd2421442729e23
+  (adf-db-batch). Some slice commits carry an Opus 5.5 trailer (the implementers' model).
+- **Scratch left on disk:** `./data-test-audit-delta-fixes` (gitignored), `build/` (gitignored; `webserver` is the
+  race build), `/tmp/pugleaf-nntptest-*` dirs.
+- **Leftovers / known issues (from the reviews; none blocks the merge):**
+  - `/api/thread-tree` returns the raw `from_header` of visible nodes (A-web-11 text mentions raw From; D3 asked only
+    D2 redaction); a tree node whose Overview failed to load cannot be marked hidden; `thread-tree.html` shows an empty
+    Message-ID row and a dead "View article" button for a hidden root; `lookupReplyReferences` copies a hidden
+    article's References into a reply.
+  - Cron: an ended job's log buffer is dropped with its registration; toggle check-then-flip race between two admin
+    requests (needs a conditional UPDATE in `db_cron_jobs.go`); `calculateNextRun` divides by zero for interval 0
+    with a start time (unreachable via the handlers).
+  - NNTP users: one-account rule is check-then-write (partial unique index after a duplicate-unmapping migration);
+    a legacy mapping to a deleted web user blocks the whole update until "no mapping" is chosen.
+  - Web posts: a 1000-byte Subject yields a 1009-octet stored line; empty UserSalt would write `posting-account=""`
+    (unreachable: the salt is generated at init). The sanitized cache's `cachedSize` can drift on a write to a
+    just-evicted entry (statistic only).
+  - cmd/web: `progressDB` handle not closed on the exit paths (pre-existing; only the dead `FetchRoutine` uses it);
+    one-shot modes run before `signal.Notify`; a failed `UpdateNewsgroupActive` still exits 0; `FetchRoutine` is dead.
+  - recover-db: repair step 6 queries a non-existent `t.child_articles` column (`❌ Could not check threading` on every
+    `-repair`, pre-existing); `fixed++` counts before the UPDATE; parse-failure problems uncapped.
+  - Fetcher: the list-update path installs no signal handler (short run). Pagination: cursor mode also loses First/Last.
+  - Release workflow: actions not pinned by SHA; toolchain still from go.mod (Q4); Windows MinGW/cgo and
+    `GOEXPERIMENT=greenteagc` untested on real runners; one failed platform still blocks the whole release.
+  - Test harness: `TestAuthFailures`/`TestStmCheck` were load flakes with several suites in parallel; the AUTHINFO PASS
+    client deadline is now 20 s. tcp2tor has no test pinning that a forwarded connection keeps no deadline.
+  - Not done by decision: wave O1/O2 (31 medium/low ids), nonce CSP (Q5), cursor wiring (D15), first-user-admin (Q1),
+    history fail-stop (Q3), toolchain upgrade (Q4), destructive root scripts (Q6), `tests.yml` (issues.md).

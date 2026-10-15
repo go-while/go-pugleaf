@@ -2,6 +2,7 @@
 package web
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/processor"
@@ -72,6 +74,7 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	isReply := replyToArticleNum != "" && replyToMessageID != ""
 
 	article := &models.Article{}
+	replyPrefillError := "" // set when the replied-to article is hidden for this user (D2)
 	if isReply {
 		// Get the original article to extract subject and body for reply
 		// Only open the group DB of an existing, active group: GetGroupDB creates files for unknown names
@@ -87,7 +90,14 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 			// Get group database connection
 			if groupDB, err := s.DB.GetGroupDB(prefilledNewsgroup); err == nil {
 				defer groupDB.Return()
-				if reply_article, err := s.DB.GetArticleByNum(groupDB, articleNum); err == nil {
+				// Hidden articles are not quoted for non-admins (flags from the group DB, not the cached article)
+				_, hide, flagErr := s.DB.GetArticleFlags(groupDB, articleNum)
+				if reply_article, err := s.DB.GetArticleByNum(groupDB, articleNum); err == nil && (flagErr != nil || s.articleHiddenFor(c, hide)) {
+					if flagErr != nil && !errors.Is(flagErr, sql.ErrNoRows) {
+						log.Printf("[WEB]: SitePost reply prefill: GetArticleFlags(%s/%d): %v", prefilledNewsgroup, articleNum, flagErr)
+					}
+					replyPrefillError = "Article not found"
+				} else if err == nil {
 					// Handle subject with "Re: " prefix
 					if !strings.HasPrefix(strings.ToLower(reply_article.Subject), "re:") {
 						article.Subject = "Re: " + models.ConvertToUTF8(reply_article.Subject)
@@ -118,7 +128,10 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 						article.BodyText = strings.Join(quotedLines, "\n")
 					}
 				} else {
+					// A missing article gets the same message as a hidden one, so the
+					// form does not tell "hidden" from "missing" (D2).
 					log.Printf("Warning: Failed to get article for reply: %v", err)
+					replyPrefillError = "Article not found"
 				}
 			} else {
 				log.Printf("Warning: Failed to get group database for reply: %v", err)
@@ -154,7 +167,7 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 		PrefilledNewsgroup:    prefilledNewsgroup,
 		PrefilledSubject:      prefilledSubjectStr,
 		PrefilledBody:         prefilledBodyStr,
-		Error:                 "", // No errors when just displaying the form
+		Error:                 replyPrefillError,
 		Success:               "", // No success message when just displaying the form
 		WebPostMaxArticleSize: maxArticleSizeStr,
 		IsReply:               isReply,
@@ -184,6 +197,9 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	// Get form data
 	subject := strings.TrimSpace(c.PostForm("subject"))
 	body := strings.TrimSpace(c.PostForm("body"))
+	// Browsers submit textarea values with CRLF line ends: store LF only, so Lines and the
+	// :bytes size (WireArticleSize adds the CRLF itself) count each line end once.
+	body = strings.ReplaceAll(body, "\r\n", "\n")
 	newsgroupsStr := strings.TrimSpace(c.PostForm("newsgroups"))
 	//log.Printf("User %s is posting to newsgroups: %v, subject: %s", session.User.Username, newsgroupsStr, subject)
 
@@ -314,11 +330,19 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 			errors = append(errors, "No valid active newsgroups found")
 		}
 	}
-	now := time.Now().Unix()
+	nowTime := time.Now()
+	now := nowTime.Unix()
 	nonce := strconv.FormatInt(now, 10)
 	hashedUser, err := s.DB.ComputeHashedUsername(session.User.Username, nonce)
 	if err != nil {
 		errors = append(errors, "Failed to compute hashed username")
+	}
+	// The server generates the Message-ID (and the Date) before the post is reserved, so a
+	// failure here does not charge the user's back-off.
+	newMessageID, err := common.GenerateMessageID(processor.LocalNNTPHostname)
+	if err != nil {
+		log.Printf("[WEB]: SitePost: %v", err)
+		errors = append(errors, "Failed to generate a message-id")
 	}
 	if len(errors) == 0 {
 		// Atomic back-off check + post count update (concurrent submits can't bypass the back-off)
@@ -355,28 +379,40 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		// Fallback if display name is empty
 		displayName = fmt.Sprintf("Lorem Ipsum <oops@%s.invalid>", processor.LocalNNTPHostname)
 	}
-	var headers []string
 	linesCount := strings.Count(body, "\n") + 1
-	bytesCount := len(body) - linesCount
-	headers = append(headers, "MIME-Version: 1.0")
-	headers = append(headers, "Content-Type: text/plain; charset=\"UTF-8\"")
-	headers = append(headers, "Content-Transfer-Encoding: 8bit")
-	// Injection-Info / X-Trace header for tracking
-	headers = append(headers, "X-pugleaf-Trace: "+processor.LocalNNTPHostname+";")
-	headers = append(headers, " nonce=\""+nonce+"\"; mail-complaints-to=\""+abuseMail+"\";")
-	headers = append(headers, " posting-account=\""+hashedUser+"\";")
-	headers = append(headers, "From: "+displayName)
-	headers = append(headers, "Newsgroups: "+strings.Join(newsgroups, ","))
-	headers = append(headers, "Lines: "+strconv.Itoa(linesCount))
-	headers = append(headers, "Bytes: "+strconv.Itoa(bytesCount))
+	// If this is a reply, build the References header: original References + original
+	// Message-ID. The value is re-joined from its fields, so no stored whitespace (CR/LF,
+	// folding) of the original References reaches the header block.
+	var references string
+	refSlice := []string{}
+	if isReply {
+		log.Printf("Setting up References header for reply to message ID: %s", messageID)
+		// Try to find the original article to get its References
+		originalRefs := s.lookupReplyReferences(newsgroups, messageID)
+		refSlice = utils.ParseReferences(originalRefs + " " + messageID)
+		references = strings.Join(refSlice, " ")
+	}
+	headers, dateString, bytesCount := buildWebPostHeaders(webPostHeaderInput{
+		Host:       processor.LocalNNTPHostname,
+		From:       displayName,
+		Subject:    subject,
+		MessageID:  newMessageID,
+		References: references,
+		AbuseMail:  abuseMail,
+		HashedUser: hashedUser,
+		Nonce:      nonce,
+		Newsgroups: newsgroups,
+		Now:        nowTime,
+		Body:       body,
+	})
 
 	// Create article similar to threading.go
 	article := &models.Article{
-		MessageID:   generateMessageID(),
+		MessageID:   newMessageID,
 		Subject:     subject,
 		HeadersJSON: strings.Join(headers, "\n"),
 		FromHeader:  displayName,
-		DateString:  time.Now().Format(time.RFC1123Z),
+		DateString:  dateString,
 		BodyText:    body,
 		IsThrRoot:   !isReply, // Only new threads are thread roots
 		IsReply:     isReply,
@@ -384,22 +420,14 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		Bytes:       bytesCount,
 		Path:        ".POSTED!not-for-mail",
 		ArticleNums: make(map[*string]int64),
-		RefSlice:    []string{},
+		RefSlice:    refSlice,
 		Headers:     make(map[string][]string, 6),
 	}
 	article.Headers["newsgroups"] = []string{strings.Join(newsgroups, ",")}
-	// If this is a reply, set up References header
 	if isReply {
-		log.Printf("Setting up References header for reply to message ID: %s", messageID)
-		// Try to find the original article to get its References
-		originalRefs := s.lookupReplyReferences(newsgroups, messageID)
-
-		// Build new References header: original References + original Message-ID
-		article.References = strings.TrimSpace(originalRefs + " " + messageID)
-		article.RefSlice = utils.ParseReferences(article.References)
+		article.References = references
 		article.Headers["references"] = []string{article.References}
 		article.Headers["lines"] = []string{strconv.Itoa(article.Lines)}
-		article.Headers["bytes"] = []string{strconv.Itoa(article.Bytes)}
 	}
 	//log.Printf("Web posting: User '%s': article='%#v'", session.User.Username, article)
 
@@ -517,12 +545,64 @@ func sanitizePostDisplayName(s string) string {
 	return name
 }
 
-// generateMessageID creates a unique message ID for web-posted articles
-func generateMessageID() string {
-	random, err := generateRandomHex(8)
-	if err != nil {
-		log.Printf("Error in generateMessageID: generating random hex: %v", err)
-		return fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), processor.LocalNNTPHostname)
+// webPostHeaderInput holds the values of one web post that end up in its header block.
+type webPostHeaderInput struct {
+	Host, From, Subject, MessageID, References, AbuseMail, HashedUser, Nonce string
+	Newsgroups                                                               []string
+	Now                                                                      time.Time
+	Body                                                                     string
+}
+
+// buildWebPostHeaders returns the stored header lines (D8 order), the Date value and the RFC 3977 :bytes size.
+//
+// Order: Path, From, Newsgroups, Subject, Date, Message-ID, References (only when set, folded),
+// MIME-Version, Content-Type, Content-Transfer-Encoding, Injection-Date, Injection-Info
+// (folded; continuation lines start with a space; mail-complaints-to only when AbuseMail is
+// set), Lines. There is no Bytes header: the size is returned instead. Date and
+// Injection-Date are the same instant (the server generated Message-ID and Date, RFC 5537
+// §3.5). The caller has rejected CR/LF/NUL in every value.
+func buildWebPostHeaders(in webPostHeaderInput) (lines []string, date string, bytes int) {
+	date = common.FormatNewsDate(in.Now)
+	lines = make([]string, 0, 16)
+	lines = append(lines,
+		"Path: .POSTED!not-for-mail",
+		"From: "+in.From,
+		"Newsgroups: "+strings.Join(in.Newsgroups, ","),
+		"Subject: "+in.Subject,
+		"Date: "+date,
+		"Message-ID: "+in.MessageID,
+	)
+	if in.References != "" {
+		// Folded like common.ReconstructHeaders (a new continuation line, starting with a
+		// space, when the next id would pass 78 columns), so a deep reply chain never yields
+		// a line over 998 octets. Every line carries at least one id.
+		refline := "References:"
+		for i, ref := range strings.Fields(in.References) {
+			if i > 0 && len(refline)+1+len(ref) > 78 {
+				lines = append(lines, refline)
+				refline = ""
+			}
+			refline += " " + ref
+		}
+		lines = append(lines, refline)
 	}
-	return fmt.Sprintf("<%d$%s@%s>", time.Now().UnixNano(), random, processor.LocalNNTPHostname)
+	lines = append(lines,
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=\"UTF-8\"",
+		"Content-Transfer-Encoding: 8bit",
+		"Injection-Date: "+date,
+		"Injection-Info: "+in.Host+";",
+		" posting-account=\""+in.HashedUser+"\";",
+	)
+	if in.AbuseMail != "" {
+		lines = append(lines,
+			" logging-data=\""+in.Nonce+"\";",
+			" mail-complaints-to=\""+in.AbuseMail+"\"",
+		)
+	} else {
+		lines = append(lines, " logging-data=\""+in.Nonce+"\"")
+	}
+	lines = append(lines, "Lines: "+strconv.Itoa(strings.Count(in.Body, "\n")+1))
+	bytes = common.WireArticleSize(lines, strings.Split(in.Body, "\n"))
+	return lines, date, bytes
 }

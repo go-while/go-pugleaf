@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -88,9 +89,20 @@ func main() {
 		showUsageExamples()
 		os.Exit(0)
 	}
+	// Validate -download-start-date before anything is opened (the workers use the parsed value)
+	var downloadStart time.Time
+	if *downloadStartDate != "" {
+		t, err := time.Parse("2006-01-02", *downloadStartDate)
+		if err != nil {
+			log.Fatalf("[FETCHER]: Invalid -download-start-date '%s': %v (expected YYYY-MM-DD)", *downloadStartDate, err)
+		}
+		downloadStart = t
+	}
 	if *updateList != "" {
-		if err := UpdateNewsgroupList(updateList, excludePrefix, *updateListForce); err != nil {
-			log.Fatalf("Newsgroup list update failed: %v", err)
+		// UpdateNewsgroupList closes its database before it returns
+		if err := UpdateNewsgroupList(*dataDir, updateList, excludePrefix, *updateListForce); err != nil {
+			log.Printf("Newsgroup list update failed: %v", err)
+			os.Exit(1)
 		}
 		os.Exit(0)
 	}
@@ -144,7 +156,14 @@ func main() {
 
 	// Set up cross-platform signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt) // Cross-platform (Ctrl+C on both Windows and Linux)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM) // Ctrl+C and SIGTERM take the same graceful path
+	// Listen at once: a signal during the provider/newsgroup setup (a slow remote LIST)
+	// must not sit in the channel until the fetch loop starts.
+	go func() {
+		<-sigChan
+		log.Printf("[FETCHER]: sigChan received shutdown signal")
+		common.ForceShutdown() // signal all worker goroutines to stop
+	}()
 
 	// Get UseShortHashLen from database (with safety check)
 	storedUseShortHashLen, isLocked, err := db.GetHistoryUseShortHashLen(*useShortHashLenPtr)
@@ -222,49 +241,7 @@ func main() {
 		}
 		*/
 		log.Printf("[FETCHER]: Provider '%s' (ID: %d, Host: %s, Port: %d, SSL: %v, MaxConns: %d)", p.Name, p.ID, p.Host, p.Port, p.SSL, p.MaxConns)
-		// Convert models.Provider to config.Provider for the BackendConfig
-		configProvider := &config.Provider{
-			Grp:        p.Grp,
-			Name:       p.Name,
-			Host:       p.Host,
-			Port:       p.Port,
-			SSL:        p.SSL,
-			Username:   p.Username,
-			Password:   p.Password,
-			MaxConns:   p.MaxConns,
-			Enabled:    p.Enabled,
-			Priority:   p.Priority,
-			MaxArtSize: p.MaxArtSize,
-			Posting:    p.Posting,
-			// Copy proxy configuration from database provider
-			ProxyEnabled:  p.ProxyEnabled,
-			ProxyType:     p.ProxyType,
-			ProxyHost:     p.ProxyHost,
-			ProxyPort:     p.ProxyPort,
-			ProxyUsername: p.ProxyUsername,
-			ProxyPassword: p.ProxyPassword,
-		}
-
-		backendConfig := &nntp.BackendConfig{
-			Host:     p.Host,     // copy values to first level
-			Port:     p.Port,     // copy values to first level
-			SSL:      p.SSL,      // copy values to first level
-			Username: p.Username, // copy values to first level
-			Password: p.Password, // copy values to first level
-			MaxConns: p.MaxConns, // copy values to first level
-			//ConnectTimeout: 30 * time.Second,
-			//ReadTimeout:    60 * time.Second,
-			//WriteTimeout:   30 * time.Second,
-			Provider: configProvider, // Set the Provider field
-			// Copy proxy configuration from database provider
-			ProxyEnabled:  p.ProxyEnabled,
-			ProxyType:     p.ProxyType,
-			ProxyHost:     p.ProxyHost,
-			ProxyPort:     p.ProxyPort,
-			ProxyUsername: p.ProxyUsername,
-			ProxyPassword: p.ProxyPassword,
-		}
-		pool := nntp.NewPool(backendConfig)
+		pool := nntp.NewPool(fetcherBackendConfig(p, p.MaxConns))
 		pools = append(pools, pool)
 		log.Printf("[FETCHER]: Created connection pool for provider '%s' with max %d connections", p.Name, p.MaxConns)
 		defer pool.ClosePool()
@@ -312,14 +289,7 @@ func main() {
 	log.Printf("[FETCHER]: Starting fetch for %d newsgroups", len(newsgroups))
 	time.Sleep(time.Second * 2) // debug sleep
 
-	// Start shutdown listener goroutine
 	fetchDoneChan := make(chan error, 1)
-	go func() {
-		<-sigChan
-		log.Printf("[FETCHER]: sigChan received shutdown signal")
-		// Signal all worker goroutines to stop
-		common.ForceShutdown()
-	}()
 
 	proc := processor.NewProcessor(db, pools[0], useShortHashLen) // Use first pool for import
 	if proc == nil {
@@ -387,7 +357,7 @@ func main() {
 		log.Printf("[FETCHER]: Feeding Queue Done: %d/%d newsgroups (skipped: %d). Wildcard skipped: %d, skippedInActive: %d, skippedActive: %d. fetchActiveOnly=%t", queued, len(newsgroups), totalSkipped, skippedWildcard, skippedInActive, skippedActive, *fetchActiveOnly)
 	}()
 	var wgCheck sync.WaitGroup
-	startDates := make(map[string]string)
+	startDates := make(map[string]time.Time) // per-group date-based download start (UTC midnight)
 	limitCheckWorker := runtime.NumCPU() / 2
 	if limitCheckWorker < 1 {
 		limitCheckWorker = 1
@@ -469,7 +439,8 @@ func main() {
 						log.Printf("[FETCHER]: No progress for provider '%s' but group '%s' has existing articles, switching to date-based download from: %s",
 							proc.Pool.Backend.Provider.Name, *ng, lastArticleDate.Format("2006-01-02"))
 						mux.Lock()
-						startDates[*ng] = lastArticleDate.Format("2006-01-02")
+						y, m, d := lastArticleDate.Date()
+						startDates[*ng] = time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 						mux.Unlock()
 					}
 
@@ -478,7 +449,7 @@ func main() {
 					// Set date-based download from epoch for complete rescan
 					mux.Lock()
 					if *downloadStartDate != "" {
-						startDates[*ng] = *downloadStartDate
+						startDates[*ng] = downloadStart
 					}
 					mux.Unlock()
 					// Reset lastArticle to 0 and fall through to normal range processing
@@ -496,7 +467,7 @@ func main() {
 
 				// For date-based downloads, don't cap end to groupInfo.Last since they use date filtering
 				mux.Lock()
-				isDateBased := startDates[*ng] != ""
+				_, isDateBased := startDates[*ng]
 				mux.Unlock()
 				if !isDateBased && end > groupInfo.Last {
 					end = groupInfo.Last
@@ -648,22 +619,19 @@ func main() {
 					//log.Printf("[FETCHER]: Downloading articles for newsgroup: %s", ng.Name)
 
 					// Check if date-based downloading is requested
-					var useStartDate string
+					var startDate time.Time
+					useStartDate := false
 					mux.Lock()
-					if startDates[groupInfo.Name] != "" {
-						useStartDate = startDates[groupInfo.Name]
+					if sd, ok := startDates[groupInfo.Name]; ok {
+						startDate, useStartDate = sd, true
 					} else if *downloadStartDate != "" {
-						useStartDate = *downloadStartDate
+						startDate, useStartDate = downloadStart, true
 					}
 					mux.Unlock()
-					if useStartDate != "" {
-						startDate, err := time.Parse("2006-01-02", useStartDate)
-						if err != nil {
-							log.Fatalf("[FETCHER]: Invalid start date format '%s': %v (expected YYYY-MM-DD)", useStartDate, err)
-						}
+					if useStartDate {
 						log.Printf("[FETCHER]: Starting ng: '%s' from date: %s", groupInfo.Name, startDate.Format("2006-01-02"))
 						//time.Sleep(3 * time.Second) // debug sleep
-						err = proc.DownloadArticlesFromDate(groupInfo.Name, startDate, DLParChan, progressDB, groupInfo, common.ShutdownChan)
+						err := proc.DownloadArticlesFromDate(groupInfo.Name, startDate, DLParChan, progressDB, groupInfo, common.ShutdownChan)
 						if err != nil {
 							if err == processor.ErrIsEmptyGroup {
 								err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0)
@@ -802,20 +770,22 @@ func getRealMemoryUsage() (uint64, error) {
 }
 
 // UpdateNewsgroupList fetches the remote newsgroup list from the first enabled provider
-// and adds all groups to the database that we don't already have
-func UpdateNewsgroupList(updateList *string, excludePrefix *string, updateListForce bool) error {
+// and adds all groups to the database below dataDir that we don't already have.
+// The database is shut down again before it returns.
+func UpdateNewsgroupList(dataDir string, updateList *string, excludePrefix *string, updateListForce bool) error {
 	log.Printf("UpdateNewsgroupList: Starting newsgroup list update from remote server...")
 
 	// Initialize database
-	db, err := database.OpenDatabase(nil)
+	db, cleanup, err := openFetcherDB(dataDir)
 	if err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
+	defer cleanup()
 
 	// Get providers from database
 	providers, err := db.GetProviders()
-	if err != nil || len(providers) == 0 {
-		return fmt.Errorf("failed to get providers (%d): %v", len(providers), err)
+	if err != nil {
+		return fmt.Errorf("failed to get providers: %w", err)
 	}
 
 	// Find first enabled provider
@@ -834,18 +804,9 @@ func UpdateNewsgroupList(updateList *string, excludePrefix *string, updateListFo
 	log.Printf("UpdateNewsgroupList: Using provider: %s (Host: %s, Port: %d, SSL: %v)",
 		firstProvider.Name, firstProvider.Host, firstProvider.Port, firstProvider.SSL)
 
-	// Create NNTP backend config using the first enabled provider
-	backendConfig := &nntp.BackendConfig{
-		Host:     firstProvider.Host,
-		Port:     firstProvider.Port,
-		SSL:      firstProvider.SSL,
-		Username: firstProvider.Username,
-		Password: firstProvider.Password,
-		MaxConns: 1, // Only need one connection for list retrieval
-	}
-
-	// Create NNTP pool
-	pool := nntp.NewPool(backendConfig)
+	// Create NNTP pool for the first enabled provider (proxy settings included);
+	// only one connection is needed for the list retrieval
+	pool := nntp.NewPool(fetcherBackendConfig(firstProvider, 1))
 	defer pool.ClosePool()
 	// Fetch remote newsgroup list
 	remoteGroups, err := pool.ListNewsgroups()

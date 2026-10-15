@@ -512,33 +512,32 @@ class ArticlePreview {
     }
 
     renderArticlePreview(contentDiv, article) {
-        const preview = article.body ? article.body.substring(0, 2000) + `<a href="/groups/${article.group}/articles/${article.article_num}">...</a>` : 'No content available';
+        // The preview API returns plain text: every article field is inserted with
+        // textContent or as an encoded URL part, never parsed as HTML.
+        contentDiv.textContent = '';
+        contentDiv.appendChild(this.renderPreviewNode(article));
+    }
 
-        // Prepare the preview text with proper formatting
-        const cleanPreview = this.formatPreviewText(preview);
+    renderPreviewNode(article) {
+        const body = document.createElement('div');
+        body.className = 'article-preview-body';
 
-        // Note: Data from API is already sanitized via Go's PrintSanitized() function
-        // No need to re-escape HTML entities that are already properly encoded
-        contentDiv.innerHTML = `
-            <!--
-            <div class="article-preview-actions">
-                <a href="/groups/${article.group}/articles/${article.article_num}" class="btn btn-sm btn-primary">
-                    Read Full Article
-                </a>
-            </div>
-            -->
-            <!--
-            <div class="article-preview-header">
-                <strong>Subject:</strong> ${article.subject || 'No subject'}<br>
-                <strong>From:</strong> ${article.from || 'Unknown'}<br>
-                <strong>Date:</strong> ${article.date || 'Unknown'}<br>
-                <strong>Lines:</strong> ${article.lines || 0}
-            </div>
-            -->
-            <div class="article-preview-body">
-                <div class="preview-text">${cleanPreview}</div>
-            </div>
-        `;
+        const text = document.createElement('div');
+        text.className = 'preview-text';
+        text.style.whiteSpace = 'pre-wrap';
+        const hasBody = typeof article.body === 'string' && article.body.length > 0;
+        text.textContent = this.formatPreviewText(hasBody ? article.body.substring(0, 2000) : 'No content available');
+
+        if (hasBody) {
+            const a = document.createElement('a');
+            a.href = '/groups/' + encodeURIComponent(String(article.group || '')) +
+                '/articles/' + encodeURIComponent(String(Number(article.article_num) || 0));
+            a.textContent = '...';
+            text.appendChild(a);
+        }
+
+        body.appendChild(text);
+        return body;
     }
 
     formatPreviewText(text) {
@@ -552,18 +551,6 @@ class ArticlePreview {
         formatted = formatted.trim();
 
         return formatted;
-    }
-
-    escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
-
-    getAPIToken() {
-        // For now, return empty - you might need to implement API token handling
-        // or make the preview endpoint public
-        return '';
     }
 }
 

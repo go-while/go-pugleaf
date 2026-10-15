@@ -2,6 +2,8 @@
 package web
 
 import (
+	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -243,14 +245,20 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 			ORDER BY article_num DESC
 			LIMIT 1 OFFSET ?`, []interface{}{skipCount - 1}, &cursorArticleNum)
 		if err != nil {
+			// No row at that offset (a page past the real end) or a failed read: serve
+			// the newest page and label it page 1, not the requested number (FU:E17).
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("[WEB]: sectionGroupPage: page %d cursor lookup in %s: %v", page, groupName, err)
+			}
 			lastArticleNum = 0
+			page = 1
 		} else {
 			lastArticleNum = cursorArticleNum
 		}
 	}
 
 	// Get articles (overview data) for this group with pagination
-	articles, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_sectionGroupPage)
+	articles, totalCount, _, err := s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_sectionGroupPage)
 	if err != nil {
 		log.Printf("[WEB]: sectionGroupPage: GetOverviewsPaginated(last=%d): %v", lastArticleNum, err)
 		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
@@ -270,8 +278,9 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 			TotalCount:    totalCount,
 			TotalPages:    (totalCount + LIMIT_sectionGroupPage - 1) / LIMIT_sectionGroupPage,
 			LinkablePages: maxOffsetArticles/LIMIT_sectionGroupPage + 1,
-			HasNext:       hasMore,
-			HasPrev:       lastArticleNum > 0,
+			// cursor mode has no linkable neighbours (FU:E12, D15)
+			HasNext: false,
+			HasPrev: false,
 		}
 	}
 
@@ -322,6 +331,15 @@ func (s *WebServer) sectionArticlePage(c *gin.Context) {
 			"Article "+articleNumStr+" not found in group '"+groupName+"'. It may not have been imported yet.")
 		return
 	}
+	// Hidden articles are not found for non-admins (flags from the group DB, not the cached article).
+	if _, hide, err := s.DB.GetArticleFlags(groupDB, articleNum); err != nil || s.articleHiddenFor(c, hide) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: sectionArticlePage: GetArticleFlags(%s/%d): %v", groupName, articleNum, err)
+		}
+		s.renderError(c, http.StatusNotFound, "Article not found",
+			"Article "+articleNumStr+" not found in group '"+groupName+"'. It may not have been imported yet.")
+		return
+	}
 
 	// Get subject for title without HTML escaping (for proper browser title display)
 	subjectText := article.GetCleanSubject()
@@ -362,6 +380,15 @@ func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
 	// Get the article by message ID
 	article, err := s.DB.GetArticleByMessageID(groupDB, messageId)
 	if err != nil {
+		s.renderError(c, http.StatusNotFound, "Article not found",
+			"Article with message ID '"+messageId+"' not found in group '"+groupName+"'. It may not have been imported yet.")
+		return
+	}
+	// Hidden articles are not found for non-admins (flags from the group DB, not the cached article).
+	if _, _, hide, err := s.DB.GetArticleFlagsByMessageID(groupDB, messageId); err != nil || s.articleHiddenFor(c, hide) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: sectionArticleByMessageIdPage: GetArticleFlagsByMessageID(%s): %v", groupName, err)
+		}
 		s.renderError(c, http.StatusNotFound, "Article not found",
 			"Article with message ID '"+messageId+"' not found in group '"+groupName+"'. It may not have been imported yet.")
 		return

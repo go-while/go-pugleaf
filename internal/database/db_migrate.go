@@ -20,20 +20,7 @@ var (
 	migrationCache     []*MigrationFile
 	migrationCacheMux  sync.RWMutex
 	migrationCacheInit bool
-
-	// Cache for databases that have already been fully migrated
-	migratedDBsCache map[string]bool // key: dbType:filename
-	migratedDBsMux   sync.RWMutex
 )
-
-// initMigratedDBsCache initializes the migrated databases cache
-func initMigratedDBsCache() {
-	migratedDBsMux.Lock()
-	if migratedDBsCache == nil {
-		migratedDBsCache = make(map[string]bool)
-	}
-	migratedDBsMux.Unlock()
-}
 
 // MigrationType represents the type of database that migrations apply to
 type MigrationType string
@@ -363,31 +350,16 @@ func (db *Database) migrateMainDB() error {
 	return nil
 }
 
-// migrateGroupDB applies migrations to a group database
+// migrateGroupDB applies migrations to a group database.
+// useCache is ignored: every open reads schema_migrations of the group database (one
+// small query). A per-process "already migrated" cache keyed by group name skipped the
+// schema of a group database file that was deleted and re-created (AUDIT A-db-6).
 func (db *Database) migrateGroupDB(groupDB *GroupDB, useCache bool) error {
-	// Initialize cache if needed
-	initMigratedDBsCache()
-
 	// Get migration files
 	migrations, err := getMigrationFiles()
 	if err != nil {
 		log.Printf("Failed to get migration files: %v", err)
 		return err
-	}
-	var cacheKey string
-	if useCache {
-		// Create a cache key based on group name
-		cacheKey = fmt.Sprintf("%s:group", groupDB.Newsgroup)
-
-		// Check if this database is already known to be fully migrated
-		migratedDBsMux.RLock()
-		isFullyMigrated := migratedDBsCache[cacheKey]
-		migratedDBsMux.RUnlock()
-
-		if isFullyMigrated {
-			// Skip migration checks for this database
-			return nil
-		}
 	}
 
 	// Ensure migrations table exists
@@ -401,28 +373,6 @@ func (db *Database) migrateGroupDB(groupDB *GroupDB, useCache bool) error {
 	if err != nil {
 		log.Printf("Failed to get applied migrations for group: %v", err)
 		return fmt.Errorf("failed to get applied migrations for group: %w", err)
-	}
-
-	// Check if all migrations for this type are already applied
-	allApplied := true
-	migrationsToApply := 0
-	for _, migration := range migrations {
-		if migration.Type == MigrationTypeGroup {
-			migrationsToApply++
-			if !applied[migration.FileName] {
-				allApplied = false
-				break
-			}
-		}
-	}
-
-	if useCache {
-		// If all migrations are applied, cache this fact
-		if allApplied && migrationsToApply > 0 {
-			migratedDBsMux.Lock()
-			migratedDBsCache[cacheKey] = true
-			migratedDBsMux.Unlock()
-		}
 	}
 
 	// Apply missing migrations for group database

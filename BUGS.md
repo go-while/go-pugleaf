@@ -48,14 +48,26 @@
    half, A-nntp-client-1/2/3/4/6/7/9/10/11, A-intake-6 sender half, A-ops-3d/f (SIGTERM in history-rebuild and
    nntp-transfer), A-tools-3 client guard, NC-1…3 (LF in outbound headers, groups re-offered after 431/errors, Redis
    keys scoped per target). Also fixed on the way: a shutdown hang in nntp-transfer when a peer never answers.
- - Open high elsewhere: A-db-1 readers and the repair migration for existing NULL-hierarchy rows (the writer is
-   fixed), INT-5 article-number reuse, A-db-2 (article cache grows unbounded); WEB-1, WEB-2 (cron create/toggle
-   without `-edit-cronjobs`; stored XSS via the preview); A-tools-2 (`-fetch-newsgroups-from-remote` ignores `-data`),
-   A-tools-3 fetcher half; A-ops-1 (`recover-db` operates on `./data` while its usage text names `-db`).
+ - **Fixed by plan `audit-delta-fixes` (2026-10-15, `.claude/plans/done/audit-delta-fixes.md`):** WEB-1 (`-edit-cronjobs`
+   gates cron create and enable), WEB-2 (preview rendered as text, Content-Security-Policy on every response), A-web-1
+   (hidden articles are 404 for non-admins on every read path, tree nodes redacted), A-web-2/3/4 (sanitized cache
+   bound, race, no write-back), A-web-5 web half (NNTP user mapping in the admin form), A-web-11, A-web-13, A-web-15,
+   A-web-17, A-web-20, INT-7 (web posts store the full RFC 5536 header block with Injection-Info/Injection-Date; the
+   POST path to a provider drops both), FU:E12–E17; A-db-1 (NULL-safe readers + repair migration 0029), A-db-2,
+   A-db-5, A-db-6, A-db-9, A-db-11, A-db-12, A-db-13, INT-5 (monotonic article numbers via `article_num_seq`,
+   migration 0010; expire-news removes derived rows), OPS-1 (library code returns errors, `INIT` reset on Shutdown,
+   every background loop stops, web/recover-db/fetcher tear the DB down on exit), OPS-2a (embedded NNTP server
+   removed from `cmd/web`), OPS-2b, OPS-4a/b/c/d/f, A-tools-2, A-tools-3 fetcher half, A-tools-5a, A-ops-1
+   (`recover-db` `-db` is an alias of `-data`, write modes need `-force`), A-ops-2, A-ops-3a/b/c/e, A-ops-4
+   (`-disable-active` refuses an empty keep set, `-disable-active-dry-run`), A-ops-5, A-ops-15, SEC-7 residual.
+   A-tools-1, A-tools-4, A-ops-3d/f were closed by the sibling NNTP plans. Still open (optional waves O1/O2 of the
+   plan, medium/low): A-web-6…10/12/14/16/18/19, A-db-7/8/10/14, A-tools-6…21, A-ops-6…8/10/11/12/17, A-intake-10;
+   deferred with a hand-off note: A-db-3, A-db-4, A-tools-5b, history fail-stop exits (Q3), A-ops-13/14/16,
+   govulncheck toolchain upgrade (Q4), nonce-based CSP (Q5).
  - The test suite in `internal/nntp/nntp-server-*_test.go` and `cmd/nntp-server/server_e2e_test.go` marks every open
    item with `knownBug`; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` lists them (1 id:
    T-nntp-article-1, an accepted limitation).
- - Fix plan: `.claude/plans/queued/audit-delta-fixes.md`.
+ - Fix plan for the optional findings: waves O1/O2 of `.claude/plans/done/audit-delta-fixes.md` (run on request).
  - peering: the unfinished `PeeringManager` was removed (CLI-6); incoming feeds work via IHAVE/TAKETHIS, outgoing
    feeds via `cmd/nntp-transfer` (CHECK/TAKETHIS streaming); there is no automatic peer-to-peer feed configuration.
  - the history index must be (re)built with cmd/history-rebuild for articles imported before it was enabled

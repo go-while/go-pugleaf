@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -59,6 +60,12 @@ type Database struct {
 
 	WG       *sync.WaitGroup
 	StopChan chan struct{} // Channel to signal shutdown
+
+	// bgStop ends the background loops OpenDatabase starts outside WG (cache crons);
+	// closed once by stopBackground at the start of Shutdown. nil on a bare &Database{}.
+	bgStop        chan struct{}
+	bgStopOnce    sync.Once
+	initResetOnce sync.Once // Shutdown resets INIT at most once per Database
 }
 
 // Config represents database configuration
@@ -114,7 +121,11 @@ func DefaultDBConfig() (dbconfig *DBConfig) {
 }
 
 var GlobalDBMutex sync.Mutex // Mutex to protect database operations
-var INIT bool
+var INIT bool                // true while a Database from OpenDatabase is open (guarded by GlobalDBMutex)
+
+// ErrRunAsRoot is returned (wrapped) by OpenDatabase when the process runs as root or as
+// a system user (UID < 1000).
+var ErrRunAsRoot = errors.New("refusing to run as root")
 
 // checkRootUser verifies we're NOT running as root or system user on Unix-like systems
 func checkRootUser() error {
@@ -131,21 +142,21 @@ func checkRootUser() error {
 	return nil
 }
 
-// New creates a new main Database instance
+// OpenDatabase opens the main database, runs its migrations and starts the background
+// tasks. Only one Database may be open per process; after Shutdown a new one can be
+// opened. On error nothing stays open or running and INIT is unchanged.
 func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 	GlobalDBMutex.Lock()
 	defer GlobalDBMutex.Unlock()
 
 	// Check if running as root
 	if err := checkRootUser(); err != nil {
-		log.Fatal(err)
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrRunAsRoot, err)
 	}
 
 	if INIT {
 		return nil, fmt.Errorf("main database already initialized")
 	}
-	INIT = true
 	if dbconfig == nil {
 		dbconfig = DefaultDBConfig()
 	}
@@ -157,32 +168,70 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 
 	}
 
-	// Initialize main database
+	// Initialize main database (closes it again on its own errors)
 	if err := db.initMainDB(); err != nil {
 		return nil, fmt.Errorf("failed to initialize main database: %w", err)
 	}
 
+	// closeOnErr closes the main database after a failed step and returns err.
+	// Every fallible step runs before any background goroutine or global is set up.
+	closeOnErr := func(err error) (*Database, error) {
+		if cerr := db.mainDB.Close(); cerr != nil {
+			log.Printf("[DATABASE] Failed to close main database after open error: %v", cerr)
+		}
+		db.mainDB = nil
+		return nil, err
+	}
+
 	// Run migrations to ensure all tables exist
 	if err := db.Migrate(); err != nil {
-		return nil, fmt.Errorf("failed to run database migrations: %w", err)
+		return closeOnErr(fmt.Errorf("failed to run database migrations: %w", err))
 	}
 
 	// Load default providers on first boot
 	if err := db.LoadDefaultProviders(); err != nil {
 		log.Printf("Failed to add default providers to database: %v", err)
-		return nil, fmt.Errorf("failed to sync config providers: %w", err)
+		return closeOnErr(fmt.Errorf("failed to sync config providers: %w", err))
 	}
 
+	// Initialize configuration cache
+	db.ConfigCache = NewConfigCache(db)
+	//log.Printf("Configuration cache initialized")
+	usersalt, err := db.GetConfigValue(config.CFG_KEY_USERSALT)
+	if err != nil {
+		return closeOnErr(fmt.Errorf("failed to get UserSalt config: %w", err))
+	}
+	if usersalt == "" {
+		// generate a usersalt, used for injection-info in header for posting
+		usersalt = generateRandomString(42)
+		if err := db.SetConfigValue(config.CFG_KEY_USERSALT, usersalt); err != nil {
+			return closeOnErr(fmt.Errorf("failed to set UserSalt config: %w", err))
+		}
+		log.Printf("Generated new UserSalt for hashing usernames")
+	}
+
+	abuseMail, err := db.GetConfigValue(config.CFG_KEY_ABUSEMAIL)
+	if err != nil {
+		return closeOnErr(fmt.Errorf("failed to get AbuseMail config: %w", err))
+	}
+	if abuseMail == "" {
+		if err := db.SetConfigValue(config.CFG_KEY_ABUSEMAIL, "abuse@invalid.invalid"); err != nil {
+			return closeOnErr(fmt.Errorf("failed to set AbuseMail config: %w", err))
+		}
+	}
+
+	// Nothing below can fail: start caches and background tasks
 	db.StopChan = make(chan struct{}, 1) // Channel to signal shutdown (will get closed)
+	db.bgStop = make(chan struct{})      // closed by Shutdown (stopBackground)
 	//log.Printf("pugLeaf DB init config: %+v NO_CACHE_BOOT=%t", dbconfig, NO_CACHE_BOOT)
 	if !NO_CACHE_BOOT {
-		db.SectionsCache = NewGroupSectionDBCache()
-		db.MemThreadCache = NewMemCachedThreads()
+		db.SectionsCache = newGroupSectionDBCacheStop(db.backgroundStop())
+		db.MemThreadCache = NewMemCachedThreadsStop(db.backgroundStop())
 		db.HierarchyCache = NewHierarchyCache() // Initialize hierarchy cache for fast browsing
 		// Start hierarchy cache warming in background
 		go db.HierarchyCache.WarmCache(db)
 	}
-	GroupHashMap = NewGHmap()
+	GroupHashMap = NewGHmapStop(db.backgroundStop())
 	db.Batch = NewSQ3batch(db) // Initialize SQ3batch for batch operations
 
 	// Start other DB cron tasks
@@ -198,37 +247,11 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 	db.NNTPAuthCache = NewNNTPAuthCache(NNTP_AUTH_CACHE_TIME)
 	//log.Printf("[WEB]: NNTP authentication cache initialized (15 minute TTL)")
 
-	// Initialize configuration cache
-	db.ConfigCache = NewConfigCache(db)
-	//log.Printf("Configuration cache initialized")
-	usersalt, err := db.GetConfigValue(config.CFG_KEY_USERSALT)
-	if err != nil {
-		log.Fatalf("Failed to get UserSalt config: %v", err)
-	}
-	if usersalt == "" {
-		// generate a usersalt, used for injection-info in header for posting
-		usersalt = generateRandomString(42)
-		if err := db.SetConfigValue(config.CFG_KEY_USERSALT, usersalt); err != nil {
-			log.Fatalf("Failed to set UserSalt config: %v", err)
-		}
-		log.Printf("Generated new UserSalt for hashing usernames")
-	}
-
 	// Load IP blocking configuration
 	db.loadIPBlockingConfiguration()
 	// Load bot configuration from database
 	db.loadBotConfiguration()
 
-	abuseMail, err := db.GetConfigValue(config.CFG_KEY_ABUSEMAIL)
-	if err != nil {
-		log.Fatalf("Failed to get AbuseMail config: %v", err)
-	}
-	if abuseMail == "" {
-		err := db.SetConfigValue(config.CFG_KEY_ABUSEMAIL, "abuse@invalid.invalid")
-		if err != nil {
-			log.Fatalf("Failed to set AbuseMail config: %v", err)
-		}
-	}
 	// Start article cache cleanup routine
 	if ENABLE_ARTICLE_CACHE {
 		db.ArticleCache = NewArticleCache(db.dbconfig.ArticleCacheSize, db.dbconfig.ArticleCacheExpiry, db)
@@ -264,7 +287,23 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 		}
 	}()
 	//log.Printf("Database initialized: %+v", db)
+	INIT = true // last step: a failed open leaves INIT false, so a later open can succeed
 	return db, nil
+}
+
+// stopBackground closes bgStop once (ends the cache cron loops). No-op on a Database
+// that was not created by OpenDatabase (bgStop nil).
+func (db *Database) stopBackground() {
+	if db.bgStop == nil {
+		return
+	}
+	db.bgStopOnce.Do(func() { close(db.bgStop) })
+}
+
+// backgroundStop returns the channel closed by stopBackground (nil on a bare Database:
+// a nil channel never fires).
+func (db *Database) backgroundStop() <-chan struct{} {
+	return db.bgStop
 }
 
 func (db *Database) IsDBshutdown() bool {

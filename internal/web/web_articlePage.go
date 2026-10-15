@@ -2,6 +2,9 @@
 package web
 
 import (
+	"database/sql"
+	"errors"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -67,6 +70,15 @@ func (s *WebServer) articlePage(c *gin.Context) {
 		c.String(http.StatusNotFound, "Article #%d not found in group %s. Available articles may have different numbers.", articleNum, groupName)
 		return
 	}
+	// Flags straight from the group DB (never from the cached article): hidden = not found for non-admins.
+	spam, hide, err := s.DB.GetArticleFlags(groupDB, articleNum)
+	if err != nil || s.articleHiddenFor(c, hide) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: articlePage: GetArticleFlags(%s/%d): %v", groupName, articleNum, err)
+		}
+		c.String(http.StatusNotFound, "Article #%d not found in group %s. Available articles may have different numbers.", articleNum, groupName)
+		return
+	}
 	// Batch sanitize the article for better performance
 	models.BatchSanitizeArticles([]*models.Article{article})
 
@@ -86,6 +98,8 @@ func (s *WebServer) articlePage(c *gin.Context) {
 		Thread:       thread,
 		PrevArticle:  articleNum - 1,
 		NextArticle:  articleNum + 1,
+		ArticleSpam:  spam,
+		ArticleHide:  hide,
 	}
 
 	s.renderPage(c, http.StatusOK, data, "article.html")
@@ -112,6 +126,15 @@ func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
 		c.String(http.StatusNotFound, "Article with message ID %s not found in group %s", messageId, groupName)
 		return
 	}
+	// Flags straight from the group DB (never from the cached article): hidden = not found for non-admins.
+	_, spam, hide, err := s.DB.GetArticleFlagsByMessageID(groupDB, messageId)
+	if err != nil || s.articleHiddenFor(c, hide) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: articleByMessageIdPage: GetArticleFlagsByMessageID(%s): %v", groupName, err)
+		}
+		c.String(http.StatusNotFound, "Article with message ID %s not found in group %s", messageId, groupName)
+		return
+	}
 
 	// Get thread context - for now, don't show all articles (too many)
 	// TODO: Implement proper threading based on References/In-Reply-To headers
@@ -134,7 +157,16 @@ func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
 		Thread:       thread,
 		PrevArticle:  article.ArticleNums[groupDB.NewsgroupPtr] - 1,
 		NextArticle:  article.ArticleNums[groupDB.NewsgroupPtr] + 1,
+		ArticleSpam:  spam,
+		ArticleHide:  hide,
 	}
 
 	s.renderPage(c, http.StatusOK, data, "article.html")
+}
+
+// articleHiddenFor reports whether an article with this hide counter is invisible to the
+// requester: hidden articles (hide > 0) exist only for admins (D2). Callers read hide with
+// GetArticleFlags/GetArticleFlagsByMessageID, never from a cached article.
+func (s *WebServer) articleHiddenFor(c *gin.Context, hide int) bool {
+	return hide > 0 && !s.isAdminRequest(c)
 }

@@ -2,6 +2,7 @@
 package web
 
 import (
+	"database/sql"
 	"errors"
 	"log"
 	"net/http"
@@ -67,7 +68,6 @@ func (s *WebServer) groupPage(c *gin.Context) {
 	var articles []*models.Overview
 	var totalCount int
 	var pagination *models.PaginationInfo
-	var hasMore bool
 
 	// Use cursor-based pagination for better performance
 	if page > 1 && lastArticleNum == 0 {
@@ -87,13 +87,20 @@ func (s *WebServer) groupPage(c *gin.Context) {
 			ORDER BY article_num DESC
 			LIMIT 1 OFFSET ?`, []interface{}{skipCount - 1}, &cursorArticleNum)
 		if err != nil {
+			// No row at that offset (a page past the real end) or a failed read: serve
+			// the newest page and label it page 1: PaginationInfo is built from page below,
+			// and keeping the requested number would label page 1 as "Page 50" (FU:E17).
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("[WEB]: groupPage: page %d cursor lookup in %s: %v", page, groupName, err)
+			}
 			lastArticleNum = 0 // Fall back to first page
+			page = 1
 		} else {
 			lastArticleNum = cursorArticleNum
 		}
 	}
 
-	articles, totalCount, hasMore, err = s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_groupPage)
+	articles, totalCount, _, err = s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_groupPage)
 	if err == nil {
 		// Initialize ArticleNums for all articles
 		for _, article := range articles {
@@ -115,8 +122,9 @@ func (s *WebServer) groupPage(c *gin.Context) {
 				TotalCount:    totalCount,
 				TotalPages:    (totalCount + LIMIT_groupPage - 1) / LIMIT_groupPage,
 				LinkablePages: maxOffsetArticles/LIMIT_groupPage + 1,
-				HasNext:       hasMore,
-				HasPrev:       lastArticleNum > 0,
+				// cursor mode has no linkable neighbours (FU:E12, D15)
+				HasNext: false,
+				HasPrev: false,
 			}
 		}
 	}

@@ -41,6 +41,16 @@ var IgnoreHeadersMap = map[string]bool{
 	"xref":       true,
 }
 
+// PostOnlyIgnoreHeadersMap lists the stored trace headers that must not be sent when an
+// article is POSTed to another server (ReconstructHeaders with withPath == false): RFC 5537
+// section 3.5 lets the injecting agent reject a proto-article that already carries
+// Injection-Info (pugleaf answers "441 forged trace"), and Injection-Date is set by the
+// injecting agent. Relays (IHAVE/TAKETHIS, withPath == true) keep both.
+var PostOnlyIgnoreHeadersMap = map[string]bool{
+	"injection-info": true,
+	"injection-date": true,
+}
+
 // refers to
 // https://github.com/InterNetNews/inn/blob/ba39e0ace92aea2f9e59117f1757deaf28416d91/innd/innd.c#L79
 // const ARTHEADER ARTheaders[] ---> HTreq
@@ -384,6 +394,11 @@ checkHeader:
 			}
 			if IgnoreHeadersMap[strings.ToLower(header)] {
 				ignoreLine = true
+				continue checkHeader
+			}
+			if !withPath && PostOnlyIgnoreHeadersMap[strings.ToLower(header)] {
+				ignoreLine = true
+				ignoredLines++
 				continue checkHeader
 			}
 			if IgnoreGoogleHeaders && strings.HasPrefix(strings.ToLower(header), "x-goo") {

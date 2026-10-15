@@ -62,7 +62,16 @@ func authLogin(t *testing.T, c *hClient, user, pass string) (int, string) {
 	if err := hExpectCode(code, line, 381); err != nil {
 		t.Fatalf("AUTHINFO USER %s: %v", user, err)
 	}
-	return c.cmd(t, "AUTHINFO PASS %s", pass)
+	// AUTHINFO PASS runs a bcrypt compare (plus the failure delay) on the server;
+	// under -race and a loaded host that can pass the harness's 5 s per-command
+	// deadline, so this step gets a longer one.
+	saved := c.Deadline
+	if c.Deadline < 20*time.Second {
+		c.Deadline = 20 * time.Second
+	}
+	code, line = c.cmd(t, "AUTHINFO PASS %s", pass)
+	c.Deadline = saved
+	return code, line
 }
 
 // authMustLogin is authLogin that requires 281 (RFC 4643 §2.3.2).

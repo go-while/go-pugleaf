@@ -38,6 +38,23 @@ const (
 		"Lines: 1\n" +
 		"Bytes: 4"
 	lo1AuditDirtyHeader = "From: Evil\r\nControl: cancel <x@y>\nSubject: x\nNewsgroups: smoke.test"
+	// lo1AuditD8Header is the block buildWebPostHeaders stores since audit-delta-fixes D8.
+	lo1AuditD8Header = "Path: .POSTED!not-for-mail\n" +
+		"From: Clean User <noreply@pugleaf.net.invalid>\n" +
+		"Newsgroups: smoke.test\n" +
+		"Subject: Leftovers smoke\n" +
+		"Date: Wed, 15 Oct 2026 10:00:00 +0000\n" +
+		"Message-ID: <clean.1@lo1audit.invalid>\n" +
+		"References: <parent.1@lo1audit.invalid>\n" +
+		"MIME-Version: 1.0\n" +
+		"Content-Type: text/plain; charset=\"UTF-8\"\n" +
+		"Content-Transfer-Encoding: 8bit\n" +
+		"Injection-Date: Wed, 15 Oct 2026 10:00:00 +0000\n" +
+		"Injection-Info: lo1audit.test.invalid;\n" +
+		" posting-account=\"deadbeef\";\n" +
+		" logging-data=\"1760522400\";\n" +
+		" mail-complaints-to=\"abuse@lo1audit.test.invalid\"\n" +
+		"Lines: 1"
 	// lo1AuditPeerHeader is what a peer-fetched article stores in headers_json:
 	// its real header block, which the web-post allow-list must not judge.
 	lo1AuditPeerHeader = "Path: news.example.invalid!not-for-mail\n" +
@@ -583,6 +600,10 @@ func TestLo1AuditCheckArticleReasons(t *testing.T) {
 		want    []string
 	}{
 		{"clean", clean, true, nil},
+		{"clean D8 block", with(func(a *articleRow) { a.headersJSON = lo1AuditD8Header }), true, nil},
+		{"duplicate injection-info", with(func(a *articleRow) {
+			a.headersJSON = lo1AuditD8Header + "\nInjection-Info: other.invalid"
+		}), true, []string{"duplicate header line"}},
 		{"cr in from", with(func(a *articleRow) { a.fromHeader = lo1AuditDirtyFrom }), true,
 			[]string{"contains a carriage return", "contains a line feed"}},
 		{"nul in subject", with(func(a *articleRow) { a.subject = "s\x00b" }), true,

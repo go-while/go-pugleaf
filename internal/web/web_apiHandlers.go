@@ -2,6 +2,8 @@
 package web
 
 import (
+	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"sort"
@@ -260,6 +262,14 @@ func (s *WebServer) getArticle(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
 		return
 	}
+	// Hidden articles do not exist for token holders: a token is never an admin (D2).
+	if _, hide, err := s.DB.GetArticleFlags(groupDB, articleNum); err != nil || hide > 0 {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: API getArticle: GetArticleFlags(%s/%d): %v", groupName, articleNum, err)
+		}
+		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
+		return
+	}
 
 	c.JSON(http.StatusOK, article)
 }
@@ -281,6 +291,14 @@ func (s *WebServer) getArticleByMessageId(c *gin.Context) {
 	defer groupDB.Return()
 	article, err := s.DB.GetArticleByMessageID(groupDB, messageId)
 	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
+		return
+	}
+	// Hidden articles do not exist for token holders: a token is never an admin (D2).
+	if _, _, hide, err := s.DB.GetArticleFlagsByMessageID(groupDB, messageId); err != nil || hide > 0 {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: API getArticleByMessageId: GetArticleFlagsByMessageID(%s): %v", groupName, err)
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
 		return
 	}
@@ -468,6 +486,15 @@ func (s *WebServer) getArticlePreview(c *gin.Context) {
 	}
 	defer groupDB.Return()
 
+	// Hidden articles are not found for non-admins (flags from the group DB, not a cached article).
+	if _, hide, err := s.DB.GetArticleFlags(groupDB, articleNum); err != nil || s.articleHiddenFor(c, hide) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: getArticlePreview: GetArticleFlags(%s/%d): %v", groupName, articleNum, err)
+		}
+		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
+		return
+	}
+
 	// Get article overview for basic info
 	overview, err := s.DB.GetOverviewByArticleNum(groupDB, articleNum)
 	if err != nil {
@@ -483,8 +510,7 @@ func (s *WebServer) getArticlePreview(c *gin.Context) {
 	}
 
 	// Create preview response with limited content
-	// Use ConvertToUTF8 to decode the text properly but without HTML escaping (since JS will handle HTML context)
-	// This is the same decoding used by PrintSanitized but without the html.EscapeString step
+	// Plain text: the browser inserts it with textContent (thread-tree.js renderArticlePreview), never as HTML.
 	fullBodyDecoded := models.ConvertToUTF8(article.BodyText)
 	bodyPreview := truncateRunes(fullBodyDecoded, 500)
 

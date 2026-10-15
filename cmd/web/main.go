@@ -9,13 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
-	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/preloader"
 	"github.com/go-while/go-pugleaf/internal/processor"
 	"github.com/go-while/go-pugleaf/internal/web"
@@ -25,11 +25,8 @@ var (
 
 	// command-line flags
 	nntphostname          string
-	isleep                int64
 	webport               int
 	webssl                bool
-	withnntp              bool
-	withfetch             bool
 	webcertFile           string
 	webkeyFile            string
 	nntptcpport           int
@@ -68,6 +65,7 @@ var (
 	compareActiveFile        string
 	compareActiveMinArticles int64
 	disableActiveFile        string
+	disableActiveDryRun      bool
 
 	// Expiry update flag
 	updateNewsgroupsExpiryFile string
@@ -99,21 +97,18 @@ func main() {
 	flag.IntVar(&maxNGpageCacheExpiry, "maxngpagecacheexpiry", 5, "expiry of cached newsgroup pages in minutes (default: 5 minutes)")
 	flag.IntVar(&maxArticleCache, "maxarticlecache", 10000, "maximum number of cached articles (default: 10000) [~8-12 KB/entry] 10000 = ~128 MB")
 	flag.IntVar(&maxArticleCacheExpiry, "maxarticlecacheexpiry", 60, "expiry of cached articles in minutes (default: 60 minutes)")
-	flag.IntVar(&useShortHashLen, "useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
+	flag.IntVar(&useShortHashLen, "useshorthashlen", 7, "short hash length (2-7, default: 7): legacy, no effect on the message-id history schema; the first stored value stays locked, a value outside 2-7 is stored as 7")
 	flag.IntVar(&webport, "webport", 0, "Web server port (default: 11980 (no ssl) or 19443 (webssl))")
 	flag.BoolVar(&webssl, "webssl", false, "Enable SSL")
-	//flag.BoolVar(&withnntp, "withnntp", false, "Start NNTP server with default ports 1119/1563")
-	//flag.BoolVar(&withfetch, "withfetch", false, "Enable internal Cronjob to fetch new articles")
-	//flag.Int64Var(&isleep, "isleep", 300, "Sleeps in fetch routines. if started with: -withfetch (default: 300 seconds = 5min)")
 	//flag.Int64Var(&ignoreInitialTinyGroups, "ignore-initial-tiny-groups", 0, "If > 0: initial fetch ignores tiny groups with fewer articles than this (default: 0)")
 	flag.StringVar(&nntphostname, "nntphostname", "", "your hostname must be set")
 	flag.BoolVar(&useHistory, "history", true, "maintain and use the message-id history index (data/history)")
 	flag.StringVar(&webcertFile, "websslcert", "", "SSL certificate file (/path/to/fullchain.pem)")
 	flag.StringVar(&webkeyFile, "websslkey", "", "SSL key file (/path/to/privkey.pem)")
-	flag.IntVar(&nntptcpport, "nntptcpport", 0, "NNTP TCP port")
-	flag.IntVar(&nntptlsport, "nntptlsport", 0, "NNTP TLS port")
-	flag.StringVar(&nntpcertFile, "nntpcertfile", "", "NNTP TLS certificate file (/path/to/fullchain.pem)")
-	flag.StringVar(&nntpkeyFile, "nntpkeyfile", "", "NNTP TLS key file (/path/to/privkey.pem)")
+	flag.IntVar(&nntptcpport, "nntptcpport", 0, "ignored (no embedded NNTP server): run cmd/nntp-server")
+	flag.IntVar(&nntptlsport, "nntptlsport", 0, "ignored (no embedded NNTP server): run cmd/nntp-server")
+	flag.StringVar(&nntpcertFile, "nntpcertfile", "", "ignored (no embedded NNTP server): run cmd/nntp-server")
+	flag.StringVar(&nntpkeyFile, "nntpkeyfile", "", "ignored (no embedded NNTP server): run cmd/nntp-server")
 	flag.BoolVar(&forceReloadDesc, "update-overwrite-newsgroups-descriptions", false, "Updates (overwrites existing!) internal newsgroup descriptions from file preload/newsgroups.descriptions (default: false)")
 	flag.StringVar(&importDescFile, "update-newsgroups-descriptions-file", "", "Import newsgroups from descriptions file (format: groupname\\tdescription)")
 	flag.BoolVar(&importCreateMissing, "update-newsgroups-descriptions-import-create-newsgroups", false, "Create missing newsgroups when importing from descriptions file (default: false)")
@@ -129,7 +124,8 @@ func main() {
 	flag.BoolVar(&noCronjobs, "no-cronjobs", false, "use this flag to not run cron jobs")
 	flag.BoolVar(&findOrphanDBs, "find-orphan-dbs", false, "Find orphaned database folders in data/db that don't correspond to any newsgroup in main database")
 	flag.StringVar(&compareActiveFile, "compare-active", "", "Compare active file with database and show missing groups (format: groupname highwater lowwater status)")
-	flag.StringVar(&disableActiveFile, "disable-active", "", "Disable newsgroups not listed in active file (format: groupname highwater lowwater status)")
+	flag.StringVar(&disableActiveFile, "disable-active", "", "Disable newsgroups not listed in active file (format: groupname [highwater lowwater status], one group per line); refused when the file lists no group")
+	flag.BoolVar(&disableActiveDryRun, "disable-active-dry-run", false, "use with -disable-active: print the groups that would be disabled and change nothing")
 	flag.Int64Var(&compareActiveMinArticles, "compare-active-min-articles", 0, "use with -compare-active: only show groups with more than N articles (calculated as high-low)")
 	flag.StringVar(&updateNewsgroupsExpiryFile, "update-newsgroups-expiry-from-file", "", "Update newsgroup expiry_days from file (format: newsgroup:days, one per line)")
 	flag.BoolVar(&verbose, "verbose", false, "print more (debug) output")
@@ -147,21 +143,20 @@ func main() {
 	flag.Parse()
 	history.ENABLE_HISTORY = useHistory
 	mainConfig := config.NewDefaultConfig()
-	log.Printf("Starting go-pugleaf: Web Server NNTP=%t Fetch=%t (version: %s)", withnntp, withfetch, appVersion)
+	log.Printf("Starting go-pugleaf: Web Server (version: %s)", appVersion)
 
 	// Debug: Log parsed flags
 	log.Printf("[WEB]: Web Parsed flags - port: %d, ssl: %t, cert: %s, key: %s", webport, webssl, webcertFile, webkeyFile)
-	log.Printf("[WEB]: NNTP Parsed flags - tcpport: %d, tlsport: %d, cert: %s, key: %s", nntptcpport, nntptlsport, nntpcertFile, nntpkeyFile)
+	// cmd/web has no embedded NNTP server: the NNTP flags stay parsed (scripts pass them) but do nothing
+	if nntptcpport != 0 || nntptlsport != 0 || nntpcertFile != "" || nntpkeyFile != "" {
+		log.Printf("[WEB]: -nntptcpport/-nntptlsport/-nntpcertfile/-nntpkeyfile are ignored: run cmd/nntp-server")
+	}
 
 	// Load configuration from file or use defaults
 	//var webConfig *config.WebConfig
 	webConfig := mainConfig.Server.WEB
-	//nntpConfig := mainConfig.Server.NNTP
 	if webConfig.ListenPort == 0 {
 		log.Printf("[WEB]: Error loading default webconfig..")
-	}
-	if mainConfig.Server.NNTP.Port == 0 || mainConfig.Server.NNTP.TLSPort == 0 {
-		log.Fatalf("[WEB]: Error loading default nntpconfig..")
 	}
 	// Debug: Log default config
 	log.Printf("[WEB]: Default config loaded - port: %d, ssl: %t", webConfig.ListenPort, webConfig.SSL)
@@ -225,7 +220,7 @@ func main() {
 	// (NewProgressDB takes a directory: the default stays data/progress.db/progress.db)
 	progressDB, err := database.NewProgressDB(filepath.Join(dataDir, "progress.db"))
 	if err != nil {
-		log.Fatalf("[WEB]: Failed to initialize progress database: %v", err)
+		fatalAfterDB(db, "[WEB]: Failed to initialize progress database: %v", err)
 	}
 	defer progressDB.Close()
 
@@ -237,7 +232,7 @@ func main() {
 
 	// Set hostname in processor with database fallback support
 	if err := processor.SetHostname(nntphostname, db); err != nil {
-		log.Fatalf("[WEB]: Failed to set NNTP hostname: %v", err)
+		fatalAfterDB(db, "[WEB]: Failed to set NNTP hostname: %v", err)
 	}
 
 	// Run future posts hiding migration first if requested
@@ -245,11 +240,11 @@ func main() {
 		log.Printf("[WEB]: Starting future posts hiding migration...")
 		if err := hideFuturePosts(db); err != nil {
 			log.Printf("[WEB]: Warning: Future posts hiding migration failed: %v", err)
-			os.Exit(1)
+			exitAfterDB(db, 1)
 		} else {
 			log.Printf("[WEB]: Future posts hiding migration completed successfully")
 			if updateNGAConcurrent == 0 {
-				os.Exit(0)
+				exitAfterDB(db, 0)
 			}
 		}
 	}
@@ -259,10 +254,10 @@ func main() {
 		log.Printf("[WEB]: Starting updateNewsgroupLastActivity")
 		if err := updateNewsgroupLastActivity(db, updateNGAConcurrent); err != nil {
 			log.Printf("[WEB]: Warning: Newsgroup activity migration failed: %v", err)
-			os.Exit(1)
+			exitAfterDB(db, 1)
 		} else {
 			log.Printf("[WEB]: Newsgroup activity migration completed successfully")
-			os.Exit(0)
+			exitAfterDB(db, 0)
 		}
 	}
 
@@ -271,10 +266,10 @@ func main() {
 		log.Printf("[WEB]: Writing active file from main database to: %s", writeActiveFile)
 		if err := writeActiveFileFromDB(db, writeActiveFile, writeActiveOnly); err != nil {
 			log.Printf("[WEB]: Error: Failed to write active file: %v", err)
-			os.Exit(1)
+			exitAfterDB(db, 1)
 		} else {
 			log.Printf("[WEB]: Active file written successfully")
-			os.Exit(0)
+			exitAfterDB(db, 0)
 		}
 	}
 
@@ -283,10 +278,10 @@ func main() {
 		log.Printf("[RSYNC]: inactive groups to: %s", rsyncInactiveGroups)
 		if err := rsyncInactiveGroupsToDir(db, rsyncInactiveGroups); err != nil {
 			log.Printf("[RSYNC]: Error: Failed to rsync inactive groups: %v", err)
-			os.Exit(1)
+			exitAfterDB(db, 1)
 		} else {
 			log.Printf("[RSYNC]: Inactive groups synced successfully")
-			os.Exit(0)
+			exitAfterDB(db, 0)
 		}
 	}
 
@@ -295,22 +290,22 @@ func main() {
 		log.Printf("[WEB]: Comparing active file with database: %s (min articles: %d)", compareActiveFile, compareActiveMinArticles)
 		if err := compareActiveFileWithDatabase(db, compareActiveFile, compareActiveMinArticles); err != nil {
 			log.Printf("[WEB]: Error: Failed to compare active file: %v", err)
-			os.Exit(1)
+			exitAfterDB(db, 1)
 		} else {
 			log.Printf("[WEB]: Active file comparison completed successfully")
-			os.Exit(0)
+			exitAfterDB(db, 0)
 		}
 	}
 
 	// disableActiveFile
 	if disableActiveFile != "" {
 		log.Printf("[WEB]: Disabling newsgroups not listed in active file: %s", disableActiveFile)
-		if err := disableNewsgroupsNotInActiveFile(db, disableActiveFile); err != nil {
+		if err := disableNewsgroupsNotInActiveFile(db, disableActiveFile, disableActiveOpts{DryRun: disableActiveDryRun}); err != nil {
 			log.Printf("[WEB]: Error: Failed to disable newsgroups: %v", err)
-			os.Exit(1)
+			exitAfterDB(db, 1)
 		} else {
 			log.Printf("[WEB]: Newsgroup disabling completed successfully")
-			os.Exit(0)
+			exitAfterDB(db, 0)
 		}
 	}
 
@@ -319,10 +314,10 @@ func main() {
 		log.Printf("[WEB]: Finding orphaned database folders...")
 		if err := findOrphanedDatabases(db, dataDir, verbose); err != nil {
 			log.Printf("[WEB]: Error: Failed to find orphaned databases: %v", err)
-			os.Exit(1)
+			exitAfterDB(db, 1)
 		} else {
 			log.Printf("[WEB]: Orphaned database scan completed successfully")
-			os.Exit(0)
+			exitAfterDB(db, 0)
 		}
 	}
 
@@ -331,33 +326,17 @@ func main() {
 		log.Printf("[WEB]: Updating newsgroup expiry from file: %s", updateNewsgroupsExpiryFile)
 		if err := updateNewsgroupsExpiryFromFile(db, updateNewsgroupsExpiryFile); err != nil {
 			log.Printf("[WEB]: Error: Failed to update newsgroup expiry: %v", err)
-			os.Exit(1)
+			exitAfterDB(db, 1)
 		} else {
 			log.Printf("[WEB]: Newsgroup expiry update completed successfully")
-			os.Exit(0)
+			exitAfterDB(db, 0)
 		}
 	}
 
-	// Get or set history UseShortHashLen configuration
-	finalUseShortHashLen, isLocked, err := db.GetHistoryUseShortHashLen(useShortHashLen)
+	// Get or set history UseShortHashLen configuration (legacy setting, OPS-4b: never fatal for its value)
+	finalUseShortHashLen, err := resolveUseShortHashLen(db, useShortHashLen)
 	if err != nil {
-		log.Fatalf("[WEB]: Failed to get history configuration: %v", err)
-	}
-
-	if !isLocked {
-		// First time setup - store the command-line value
-		if err := db.SetHistoryUseShortHashLen(useShortHashLen); err != nil {
-			log.Fatalf("[WEB]: Failed to set history configuration: %v", err)
-		}
-		finalUseShortHashLen = useShortHashLen
-		log.Printf("[WEB]: History UseShortHashLen initialized to %d", finalUseShortHashLen)
-	} else {
-		// Already configured - use stored value and warn if different
-		if useShortHashLen != finalUseShortHashLen {
-			log.Printf("[WEB]: WARNING: Command-line UseShortHashLen (%d) differs from locked database value (%d). Using database value to prevent data corruption.", useShortHashLen, finalUseShortHashLen)
-		} else {
-			log.Printf("[WEB]: Using stored history UseShortHashLen: %d", finalUseShortHashLen)
-		}
+		fatalAfterDB(db, "[WEB]: Failed to resolve history configuration: %v", err)
 	}
 
 	// Initialize sanitized content cache (N entries max, M minute expiry)
@@ -376,12 +355,12 @@ func main() {
 		log.Printf("[WEB]: Importing newsgroups from files...")
 		if err := preloader.LoadNewsgroupsFromFiles(ctx, db, importActiveFile, importDescFile, importCreateMissing); err != nil {
 			log.Printf("[WEB]: Warning: Failed to import newsgroups: %v", err)
-			os.Exit(1)
+			exitAfterDB(db, 1)
 		} else {
 			log.Printf("[WEB]: Newsgroups imported successfully")
 			if importActiveFile != "" {
 				// only quit when importing via active files, not when updateting descriptions
-				os.Exit(0)
+				exitAfterDB(db, 0)
 			}
 		}
 	}
@@ -390,10 +369,10 @@ func main() {
 		log.Printf("[WEB]: Repairing corrupted newsgroup watermarks...")
 		if err := preloader.RepairNewsgroupWatermarks(ctx, db); err != nil {
 			log.Printf("[WEB]: Warning: Failed to repair watermarks: %v", err)
-			os.Exit(1)
+			exitAfterDB(db, 1)
 		} else {
 			log.Printf("[WEB]: Watermarks repaired successfully")
-			os.Exit(0)
+			exitAfterDB(db, 0)
 		}
 	}
 
@@ -420,56 +399,9 @@ func main() {
 		log.Printf("[WEB]: Found %d newsgroups in database", len(groups))
 	}
 
-	proc := NewFetchProcessor(db)
-	if proc == nil {
-		log.Fatalf("[WEB]: Error booting processor")
-	}
-	var nntpServer *nntp.NNTPServer
-	if (nntptcpport > 0 || nntptlsport > 0) && withnntp {
-		// set config from command-line flags
-		if nntptcpport > 0 {
-			mainConfig.Server.NNTP.Port = nntptcpport
-			log.Printf("[WEB]: Local NNTP Server TCP: %d", nntptcpport)
-		} else {
-			log.Printf("[WEB]: No NNTP TCP port flag provided")
-			mainConfig.Server.NNTP.Port = 0
-		}
-		if nntptlsport > 0 {
-			log.Printf("[WEB]: Local NNTP Server TLS: %d", nntptlsport)
-			mainConfig.Server.NNTP.TLSPort = nntptlsport
-			mainConfig.Server.NNTP.TLSCert = nntpcertFile
-			mainConfig.Server.NNTP.TLSKey = nntpkeyFile
-		} else {
-			log.Printf("[WEB]: No NNTP TLS port flag provided")
-			mainConfig.Server.NNTP.TLSPort = 0
-			mainConfig.Server.NNTP.TLSCert = ""
-			mainConfig.Server.NNTP.TLSKey = ""
-		}
-		mainConfig.Server.Hostname = nntphostname
-		// Validate port
-		if mainConfig.Server.NNTP.Port > 0 {
-			if mainConfig.Server.NNTP.Port < 1024 || mainConfig.Server.NNTP.Port > 65535 {
-				log.Fatalf("[WEB]: Invalid NNTP tcp port number: %d (must be between 1024 and 65535)", mainConfig.Server.NNTP.Port)
-			}
-		}
-		// Validate port
-		if mainConfig.Server.NNTP.TLSPort > 0 {
-			if mainConfig.Server.NNTP.TLSPort < 1024 || mainConfig.Server.NNTP.TLSPort > 65535 {
-				log.Fatalf("[WEB]: Invalid NNTP tls port number: %d (must be between 1024 and 65535)", mainConfig.Server.NNTP.TLSPort)
-			}
-		}
-		processorAdapter := NewProcessorAdapter(proc)
-		if processorAdapter == nil {
-			log.Fatalf("[WEB]: Failed to create processor adapter for NNTP server")
-		}
-		log.Printf("[WEB]: Starting NNTP server with TCP port %d, TLS port %d", mainConfig.Server.NNTP.Port, mainConfig.Server.NNTP.TLSPort)
-		nntpServer, err = nntp.NewNNTPServer(db, &mainConfig.Server, db.WG, processorAdapter)
-		if err != nil {
-			log.Fatalf("[WEB]: Failed to create NNTP server: %v", err)
-		}
-		if err := nntpServer.Start(); err != nil {
-			log.Fatalf("[WEB]: Failed to start NNTP server: %v", err)
-		}
+	proc, err := NewFetchProcessor(db, finalUseShortHashLen)
+	if err != nil {
+		fatalAfterDB(db, "[WEB]: Error booting processor: %v", err)
 	}
 
 	postQueueWorker := proc.NewPostQueueWorker()
@@ -477,14 +409,14 @@ func main() {
 	log.Printf("[WEB]: PostQueueWorker started for web posting")
 
 	// Create and start web server in a goroutine for non-blocking startup
-	server := web.NewWebServer(db, webConfig, nntpServer, editCronjobs, noCronjobs)
+	server := web.NewWebServer(db, webConfig, nil, editCronjobs, noCronjobs) // no embedded NNTP server (D10)
 	if !noCronjobs && server.CronManager != nil {
 		db.WG.Add(1)
 	}
 	server.StartSessionCleanup() // stops on server.Shutdown
 	// Set up cross-platform signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt) // Cross-platform (Ctrl+C on both Windows and Linux)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM) // Ctrl+C and SIGTERM take the same graceful path
 
 	// Start web server in goroutine to make it non-blocking
 	webServerErrChan := make(chan error, 1)
@@ -499,17 +431,29 @@ func main() {
 
 	// Start update file monitor in a separate goroutine
 	updateFileChan := make(chan bool, 1)
-	go monitorUpdateFile(updateFileChan)
-	go startHierarchyUpdater(db) // Start hierarchy last_updated synchronizer in the background
+	go monitorUpdateFile(updateFileChan, webStop)
+	// Start hierarchy last_updated synchronizer in the background; it uses the DB, so
+	// the DB teardown waits for it (db.WG) after webStop made it return
+	db.WG.Add(1)
+	go func() {
+		defer db.WG.Done()
+		startHierarchyUpdater(db, webStop)
+	}()
 	// Wait for either shutdown signal, server error, or update file
+	exitCode := 0
 	select {
-	case <-sigChan:
-		log.Printf("[WEB]: Received shutdown signal, initiating graceful shutdown...")
+	case sig := <-sigChan:
+		log.Printf("[WEB]: Received shutdown signal (%v), initiating graceful shutdown...", sig)
 	case err := <-webServerErrChan:
-		log.Fatalf("[WEB]: Failed to start web server: %v", err)
+		// not fatal here: the shutdown below still stops the workers and tears the DB down
+		log.Printf("[WEB]: Failed to start web server: %v", err)
+		exitCode = 1
 	case <-updateFileChan:
 		log.Printf("[WEB]: Update file detected, initiating graceful shutdown for update...")
 	}
+
+	// Stop the cmd/web background loops (hierarchy updater, update file monitor)
+	closeWebStop()
 
 	// Stop accepting web requests and wait (bounded) for active ones
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
@@ -517,16 +461,6 @@ func main() {
 		log.Printf("[WEB]: web server shutdown: %v", err)
 	}
 	cancelShutdown()
-
-	// Stop NNTP server if running
-	if nntpServer != nil {
-		log.Printf("[WEB]: Stopping NNTP server...")
-		if err := nntpServer.Stop(); err != nil {
-			log.Printf("[WEB]: Error stopping NNTP server: %v", err)
-		} else {
-			log.Printf("[WEB]: NNTP server stopped successfully")
-		}
-	}
 
 	// Stop PostQueueWorker if running
 	if postQueueWorker != nil {
@@ -541,7 +475,7 @@ func main() {
 	}
 
 	// Signal background tasks to stop
-	close(db.StopChan)
+	closeDBStopChan(db)
 
 	// Close the proc/processor (flushes history, stops processing)
 	if proc != nil {
@@ -554,16 +488,15 @@ func main() {
 
 	// Notify orchestrator to send shutdown signals to workers
 	//go db.Batch.Shutdown()
-	// Wait for all database operations to complete
-	log.Printf("[WEB]: Waiting for background tasks to finish...")
-	db.WG.Wait()
-	log.Printf("[WEB]: All background tasks completed, shutting down database...")
-
-	if err := db.Shutdown(); err != nil {
-		log.Fatalf("[WEB]: Failed to shutdown database: %v", err)
-	} else {
-		log.Printf("[WEB]: Database shutdown successfully")
+	// Wait (bounded) for all database operations to complete, then shut the DB down
+	if err := teardownDB(db); err != nil {
+		log.Printf("[WEB]: Failed to shutdown database: %v", err)
+		os.Exit(1)
 	}
+	log.Printf("[WEB]: Database shutdown successfully")
 
 	log.Printf("[WEB]: Graceful shutdown completed")
+	if exitCode != 0 {
+		os.Exit(exitCode) // the DB is already shut down
+	}
 } // end main

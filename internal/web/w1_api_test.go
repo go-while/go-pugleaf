@@ -116,6 +116,7 @@ func TestW1APIThreadsPaged(t *testing.T) {
 }
 
 func TestW1APIThreadTreeUnknownGroup(t *testing.T) {
+	w1APIEnable(t) // /api/thread-tree is behind requireAPIEnabled since audit-delta-fixes D3
 	name := w0Name("w1api.unknown")
 	rec := w0Do(t, w0Req{Path: "/api/thread-tree?group=" + url.QueryEscape(name) + "&thread_root=1"})
 	if rec.Code != http.StatusNotFound {
@@ -125,6 +126,7 @@ func TestW1APIThreadTreeUnknownGroup(t *testing.T) {
 }
 
 func TestW1APIThreadTreeInactiveGroup(t *testing.T) {
+	w1APIEnable(t) // /api/thread-tree is behind requireAPIEnabled since audit-delta-fixes D3
 	group := w0NewGroup(t, false)
 	path := "/api/thread-tree?group=" + url.QueryEscape(group) + "&thread_root=1"
 	if rec := w0Do(t, w0Req{Path: path}); rec.Code != http.StatusNotFound {

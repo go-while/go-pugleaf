@@ -72,7 +72,7 @@
                                 <button type="submit" class="btn btn-outline-warning btn-sm" title="Disable">
                                     <i class="bi bi-pause-circle"></i>
                                 </button>
-                                {{else}}
+                                {{else if $.CronEdit}}
                                 <button type="submit" class="btn btn-outline-success btn-sm" title="Enable">
                                     <i class="bi bi-play-circle"></i>
                                 </button>
@@ -144,7 +144,7 @@
                   </div>
                   {{else}}
                   <div class="alert alert-info">
-                      <strong>No cron jobs found.</strong> Create the first cron job below.
+                      <strong>No cron jobs found.</strong>{{if .CronEdit}} Create the first cron job below.{{end}}
                   </div>
                   {{end}}
               </div>
@@ -160,6 +160,7 @@
                   <h5 class="card-title mb-0">➕ Add New Cron Job</h5>
               </div>
               <div class="card-body">
+                  {{if .CronEdit}}
                   <form method="POST" action="/admin/crons/create">
                       <div class="row">
                           <div class="col-md-3">
@@ -225,6 +226,12 @@
                       </div>
                       <button type="submit" class="btn btn-success">Create Cron Job</button>
                   </form>
+                  {{else}}
+                  <div class="alert alert-warning mb-0">
+                      Editing Crons is disabled by default.<br>
+                      Run webserver temporarily with -edit-cronjobs flag!
+                  </div>
+                  {{end}}
               </div>
           </div>
       </div>

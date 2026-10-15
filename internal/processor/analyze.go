@@ -832,7 +832,9 @@ func (proc *Processor) AnalyzeMode(testGrp string, forceRefresh bool, maxAnalyze
 		if err != nil {
 			return nil, fmt.Errorf("failed to get cache stats: %w", err)
 		}
-		printAnalysisResults(stats, exportFormat)
+		if err := printAnalysisResults(stats, exportFormat); err != nil {
+			return nil, fmt.Errorf("failed to print cache stats: %w", err)
+		}
 		return stats, nil
 	}
 
@@ -871,7 +873,9 @@ func (proc *Processor) AnalyzeMode(testGrp string, forceRefresh bool, maxAnalyze
 	}
 
 	// Print results
-	printAnalysisResults(analysis, exportFormat)
+	if err := printAnalysisResults(analysis, exportFormat); err != nil {
+		return nil, fmt.Errorf("failed to print analysis results: %w", err)
+	}
 
 	return analysis, nil
 }
@@ -917,8 +921,9 @@ func AnalyzeModeStandalone(host *string, port *int, username *string, password *
 	return err
 }
 
-// printAnalysisResults formats and displays analysis results
-func printAnalysisResults(analysis *GroupAnalysis, exportFormat string) {
+// printAnalysisResults formats and displays analysis results.
+// It returns an error instead of exiting when the export directory or file cannot be written.
+func printAnalysisResults(analysis *GroupAnalysis, exportFormat string) error {
 	// If export format is specified, write to file instead of stdout
 
 	//GetAnalysisCSVHeader()
@@ -930,8 +935,7 @@ func printAnalysisResults(analysis *GroupAnalysis, exportFormat string) {
 	if _, err := os.Stat("out"); os.IsNotExist(err) {
 		err := os.Mkdir("out", 0755)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to create output directory: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("failed to create output directory: %w", err)
 		}
 	}
 	switch exportFormat {
@@ -939,13 +943,11 @@ func printAnalysisResults(analysis *GroupAnalysis, exportFormat string) {
 		filename := fmt.Sprintf("out/%s.json", analysis.GroupName)
 		jsonData, err := analysis.ExportAnalysisToJSON()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to export JSON: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("failed to export JSON: %w", err)
 		}
 		err = os.WriteFile(filename, jsonData, 0644)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to write JSON file %s: %v\n", filename, err)
-			os.Exit(1)
+			return fmt.Errorf("failed to write JSON file %s: %w", filename, err)
 		}
 		fmt.Printf("JSON exported to: %s\n", filename)
 		//return
@@ -958,8 +960,7 @@ func printAnalysisResults(analysis *GroupAnalysis, exportFormat string) {
 			f.Close()
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to write CSV file %s: %v\n", filename, err)
-			os.Exit(1)
+			return fmt.Errorf("failed to write CSV file %s: %w", filename, err)
 		}
 		fmt.Printf("CSV exported to: %s\n", filename)
 		//return
@@ -1003,6 +1004,7 @@ func printAnalysisResults(analysis *GroupAnalysis, exportFormat string) {
 	if analysis.SizeStats != nil && analysis.SizeStats.TotalCount > 0 {
 		analysis.SizeStats.PrintSizeDistribution()
 	}
+	return nil
 }
 
 // formatNumber formats large numbers with thousand separators

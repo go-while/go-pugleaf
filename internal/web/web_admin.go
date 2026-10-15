@@ -36,6 +36,7 @@ type AdminPageData struct {
 	NNTPUsers                     []*models.NNTPUser
 	NNTPUserSearch                string                 // Added for NNTP user search functionality
 	CronJobs                      []*models.CronJob      // Added for cron job management
+	CronEdit                      bool                   // -edit-cronjobs: show the create form and the enable buttons
 	SiteNews                      []*models.SiteNews     // Added for site news management
 	Sections                      []*models.Section      // Added for section management
 	SectionGroups                 []*models.SectionGroup // Added for section-newsgroup assignments
