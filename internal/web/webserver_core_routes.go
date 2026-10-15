@@ -247,6 +247,9 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.Default()
+	// Route on the escaped path, so a %2F in a message-id stays inside the :messageId segment;
+	// UnescapePathValues (default true) still hands the handlers decoded params (A-web-18).
+	router.UseRawPath = true
 
 	// Client IPs come from one configured header, and only when the peer is a trusted proxy
 	ReverseProxyAddr, err := db.GetConfigValue(config.CFG_KEY_REVERSEPROXY)
