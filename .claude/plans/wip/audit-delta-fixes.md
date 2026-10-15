@@ -1657,7 +1657,8 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
 - Batch-A merged tree 7592ae7: gofmt baseline `embedded_migrations.go` only, vet/build ok, race over 20 package
   sets ok (no flakes), known bugs unchanged (T-nntp-article-1). Batch B spawned from 7592ae7.
 - User request during batch A: queue a plan `test-timing-hardening` after O1 (harness deadlines 5 s → 30 s, upper-bound
-  duration asserts → error-type asserts or 10x margins, statistical auth-timing test behind an env opt-in).
+  duration asserts → error-type asserts or 10x margins; the statistical auth-timing test `TestNSHAuthUnknownUserTiming`
+  is DELETED, not gated (user: "we are not a bank"); the dummy-compare in the auth code stays, it costs nothing).
 
 ## Outcome
 
