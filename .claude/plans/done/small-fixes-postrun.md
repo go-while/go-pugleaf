@@ -151,8 +151,8 @@ The CLAUDE.md list (same as `.github/workflows/tests.yml`), plus `PUGLEAF_KNOWN_
   as NNTP semantics expect? default yes.
 
 ## Outcome (2026-10-15)
-- **Integration branch:** `plan-small-fixes-postrun` from `testing-001` @ b45d053. Not yet merged into `testing-001`
-  (user decision). Nothing pushed.
+- **Integration branch:** `plan-small-fixes-postrun` from `testing-001` @ b45d053, merged into `testing-001` as 03d796e
+  (`git merge --no-ff`, 2026-10-15). Nothing pushed.
 - **Slices (4, one wave):** sfp-dl-drop-test 4c45a72, sfp-tree-order 91dbf16, sfp-high-water 4596254,
   sfp-postqueue-stop afc66ea (+ inline 918b752). Worktrees `/tank0/claude/trees/go-pugleaf/agent-{ab022f2e53acb41fc,
   a1ea50c74677a38f9,ab4f66debde03f2f4,a3ff11d10a9746df8}` (branches `worktree-agent-<id>`); the user cleans them up.
