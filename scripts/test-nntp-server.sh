@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end checks for plan nntp-audit-tests (## End-to-end), nntp-server-hardening and
-# nntp-intake-injection. Scratch data only.
+# End-to-end checks for plan nntp-audit-tests (## End-to-end), nntp-server-hardening,
+# nntp-intake-injection and nntp-rfc-commands. Scratch data only.
 # Usage: PORT=21119 DATA=./data-test-nntp-server-hardening scripts/test-nntp-server.sh [--build]
 # Env: PORT (21119), DATA (./data-test-nntp-audit-tests), BIN (./build/pugleaf-nntp-server),
 #      MGR (./build/pugleaf-nntpmgr), NNTPHOST (example.org; the server checks it by DNS lookup)

@@ -438,7 +438,7 @@ func TestRfcCapabilities(t *testing.T) {
 					t.Errorf("capability %q missing from %q", p, caps)
 				}
 			}
-			for _, n := range append([]string{"NEWNEWS"}, tc.never...) {
+			for _, n := range append([]string{"NEWNEWS", "TAKETHIS"}, tc.never...) {
 				if rfcHasLabel(caps, n) {
 					t.Errorf("capability %q listed in %q", n, caps)
 				}
