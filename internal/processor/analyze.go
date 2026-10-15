@@ -192,6 +192,11 @@ func validateAnalyzeRange(first, last int64) error {
 	return nil
 }
 
+// analyzeXOver fetches one overview batch; a variable so tests can stub the server.
+var analyzeXOver = func(pool *nntp.Pool, group string, start, end int64, enforceLimit bool) ([]nntp.OverviewLine, error) {
+	return pool.XOver(group, start, end, enforceLimit)
+}
+
 // errAnalyzeStop ends forEachAnalyzeBatch early without an error (e.g. -max-analyze reached).
 var errAnalyzeStop = errors.New("analyze: stop")
 
@@ -236,6 +241,20 @@ func newAnalyzeCacheWriter(final string) (*analyzeCacheWriter, error) {
 	dir := filepath.Dir(final)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create cache directory: %w", err)
+	}
+	// Remove temp files a killed run left behind for this cache file. A concurrent
+	// run on the same group loses its temp file and fails its Commit, which is safe.
+	prefix := filepath.Base(final) + "."
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".tmp") {
+				continue
+			}
+			if rmErr := os.Remove(filepath.Join(dir, name)); rmErr != nil && !os.IsNotExist(rmErr) {
+				log.Printf("[ANALYZE] failed to remove stale cache temp file %s: %v", name, rmErr)
+			}
+		}
 	}
 	tmp, err := os.CreateTemp(dir, filepath.Base(final)+".*.tmp")
 	if err != nil {
@@ -354,7 +373,12 @@ func (proc *Processor) analyzeFromRemote(groupInfo *nntp.GroupInfo, cacheFile st
 
 		// Get overview data for this batch
 		enforceLimit := false
-		overviews, err := proc.Pool.XOver(analysis.GroupName, batchStart, batchEnd, enforceLimit)
+		overviews, err := analyzeXOver(proc.Pool, analysis.GroupName, batchStart, batchEnd, enforceLimit)
+		if errors.Is(err, nntp.ErrNoArticlesInRange) {
+			// 423: no articles in this batch (e.g. expired below a stale low-water mark)
+			log.Printf("No articles in batch %d-%d for group '%s'", batchStart, batchEnd, analysis.GroupName)
+			return nil
+		}
 		if err != nil {
 			return fmt.Errorf("failed to get overview for batch %d-%d of group '%s': %w", batchStart, batchEnd, analysis.GroupName, err)
 		}
@@ -1124,15 +1148,18 @@ func AnalyzeModeStandalone(host *string, port *int, username *string, password *
 // With exportFormat "json" or "csv" it also writes <outDir>/<group>.json or appends to
 // <outDir>/<first label>.csv; outDir is created (0750) when needed. A group name that
 // is not a valid newsgroup name (RFC 5536 syntax: no "/", no ".." component) is not
-// used as a file name: the export is refused with an error. It returns an error instead
+// used as a file name: the export is skipped with a warning and the result is still
+// printed. It returns an error instead
 // of exiting when the export directory or file cannot be written.
 func printAnalysisResults(analysis *GroupAnalysis, exportFormat string, outDir string) error {
+	if exportFormat != "" && !common.ValidGroupNameSyntax(analysis.GroupName) {
+		// The name would become a file name: skip the export, keep the printed result.
+		log.Printf("[ANALYZE] Warning: not exporting group %q to %s: not a valid newsgroup name", analysis.GroupName, exportFormat)
+		exportFormat = ""
+	}
 	if exportFormat != "" {
 		if outDir == "" {
 			return fmt.Errorf("no output directory for the %s export", exportFormat)
-		}
-		if !common.ValidGroupNameSyntax(analysis.GroupName) {
-			return fmt.Errorf("refusing to export group %q: not a valid newsgroup name", analysis.GroupName)
 		}
 		if err := os.MkdirAll(outDir, 0o750); err != nil {
 			return fmt.Errorf("failed to create output directory: %w", err)

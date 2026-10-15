@@ -113,7 +113,6 @@ func NewProcessorE(db *database.Database, nntpPool *nntp.Pool, useShortHashLen i
 		MsgIdCache:    history.NewMsgIdItemCache(),
 		BridgeManager: nil, // Initialize as nil (disabled by default)
 	}
-	proc.AnalyzeDataDir = db.GetDataDir() // analyzer cache root = -data
 
 	proc.DB.Batch.SetProcessor(proc) // Set the processor in the database instance for threading checks
 

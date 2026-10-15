@@ -4,7 +4,9 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -402,7 +404,8 @@ func TestAdfOptAnalyzeExports(t *testing.T) {
 	}
 }
 
-// A-tools-11: exports go to outDir only; names that are not newsgroup names are refused.
+// A-tools-11: exports go to outDir only; names that are not newsgroup names are not
+// exported (warning), but the result is still printed without an error.
 func TestAdfOptAnalyzePrintResultsOutDir(t *testing.T) {
 	base := t.TempDir()
 	outDir := filepath.Join(base, "nested", "out")
@@ -410,13 +413,13 @@ func TestAdfOptAnalyzePrintResultsOutDir(t *testing.T) {
 	for _, name := range []string{"../../escape", "a/b", "..", "a..b", ""} {
 		for _, format := range []string{"json", "csv"} {
 			err := printAnalysisResults(&GroupAnalysis{GroupName: name}, format, outDir)
-			if err == nil {
-				t.Errorf("printAnalysisResults(%q, %s): want error", name, format)
+			if err != nil {
+				t.Errorf("printAnalysisResults(%q, %s): want export skipped without error, got %v", name, format, err)
 			}
 		}
 	}
 	if _, err := os.Stat(outDir); !os.IsNotExist(err) {
-		t.Fatalf("outDir was created for refused names: %v", err)
+		t.Fatalf("outDir was created for skipped names: %v", err)
 	}
 	if m, _ := filepath.Glob(filepath.Join(base, "*.json")); len(m) != 0 {
 		t.Fatalf("files written outside outDir: %v", m)
@@ -456,5 +459,97 @@ func TestAdfOptAnalyzePrintResultsOutDir(t *testing.T) {
 	}
 	if _, err := os.Stat(other); !os.IsNotExist(err) {
 		t.Fatalf("outDir created without an export: %v", err)
+	}
+}
+
+// A stale temp file of the same cache file (from a killed run) is removed when a new
+// writer starts; temp files of other cache files stay.
+func TestAdfOptAnalyzeCacheWriterStaleTmp(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "g.overview")
+	stale := final + ".12345.tmp"
+	other := filepath.Join(dir, "h.overview.999.tmp")
+	for _, f := range []string{stale, other} {
+		if err := os.WriteFile(f, []byte("partial\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cw, err := newAnalyzeCacheWriter(final)
+	if err != nil {
+		t.Fatalf("newAnalyzeCacheWriter: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale temp file still there: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("temp file of another cache was removed: %v", err)
+	}
+	if err := cw.WriteLine("x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cw.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if tmp := adfOptListTmp(t, dir); len(tmp) != 1 || tmp[0] != other {
+		t.Fatalf("temp files after Commit = %v, want only %s", tmp, other)
+	}
+}
+
+// A 423 reply (nntp.ErrNoArticlesInRange) for one batch is an empty batch: the analysis
+// goes on and commits the cache. Any other batch error still fails it.
+func TestAdfOptAnalyzeRemoteNoArticlesInRange(t *testing.T) {
+	saved := analyzeXOver
+	t.Cleanup(func() { analyzeXOver = saved })
+
+	first, last := int64(1), int64(AnalyzeBatchSize+3) // two batches
+	var calls [][2]int64
+	analyzeXOver = func(_ *nntp.Pool, group string, start, end int64, _ bool) ([]nntp.OverviewLine, error) {
+		calls = append(calls, [2]int64{start, end})
+		if start == first {
+			// same wrapping as BackendConn.XOver for a 423 reply
+			return nil, fmt.Errorf("failed to read XOVER response: %w: %w",
+				&textproto.Error{Code: 423, Msg: "No articles in that range"}, nntp.ErrNoArticlesInRange)
+		}
+		return []nntp.OverviewLine{
+			{ArticleNum: end - 1, Subject: "s1", From: "f", Date: adfOptDate, MessageID: "<1@x>", Bytes: 100, Lines: 2},
+			{ArticleNum: end, Subject: "s2", From: "f", Date: adfOptDate, MessageID: "<2@x>", References: "<1@x>", Bytes: 200, Lines: 3},
+		}, nil
+	}
+
+	proc, _ := adfOptProc(t, "h.example")
+	_, cacheFile, err := proc.analyzeCacheFile("alt.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis := &GroupAnalysis{GroupName: "alt.test", ProviderName: "h.example", SizeStats: &ArticleSizeStats{}}
+	got, err := proc.analyzeFromRemote(&nntp.GroupInfo{First: first, Last: last}, cacheFile, analysis, &AnalyzeOptions{})
+	if err != nil {
+		t.Fatalf("analyzeFromRemote with a 423 batch: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("XOver calls = %v, want 2 batches", calls)
+	}
+	if got.CachedArticles != 2 || got.TotalBytes != 300 || !got.CacheExists {
+		t.Fatalf("analysis = %d articles, %d bytes, cache=%v", got.CachedArticles, got.TotalBytes, got.CacheExists)
+	}
+	stats, err := proc.GetCacheStats("alt.test")
+	if err != nil || stats.CachedArticles != 2 {
+		t.Fatalf("committed cache: %+v, %v", stats, err)
+	}
+
+	// Any other error still fails the analysis and leaves the committed cache alone.
+	before, err := os.ReadFile(cacheFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analyzeXOver = func(_ *nntp.Pool, _ string, _, _ int64, _ bool) ([]nntp.OverviewLine, error) {
+		return nil, fmt.Errorf("failed to read XOVER response: %w", &textproto.Error{Code: 503, Msg: "timeout"})
+	}
+	analysis = &GroupAnalysis{GroupName: "alt.test", ProviderName: "h.example", SizeStats: &ArticleSizeStats{}}
+	if _, err := proc.analyzeFromRemote(&nntp.GroupInfo{First: first, Last: last}, cacheFile, analysis, &AnalyzeOptions{}); err == nil {
+		t.Fatal("analyzeFromRemote with a 503 batch: want error")
+	}
+	if after, err := os.ReadFile(cacheFile); err != nil || string(after) != string(before) {
+		t.Fatalf("cache changed after a failed run: %v", err)
 	}
 }
