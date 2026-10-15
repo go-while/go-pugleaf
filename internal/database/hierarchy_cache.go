@@ -46,9 +46,11 @@ type HierarchyCache struct {
 	loadSeq          map[string]uint64
 	bulkLoadSeq      uint64
 
-	// rebuildMu serializes the rebuilds of dirty top levels, so concurrent readers of
-	// one dirty top level run one query.
-	rebuildMu sync.Mutex
+	// rebuildMus holds one mutex per top level (under mu): the rebuilds of one dirty top
+	// level are serialized, so concurrent readers of it run one query, while the rebuild
+	// of another top level - and its RetryableQuery, which may wait out a busy main
+	// database - does not wait for it.
+	rebuildMus map[string]*sync.Mutex
 
 	// rebuilding holds the top levels whose rebuild query is running, bulkBuilds the
 	// number of running full builds. A batch whose stats arrive meanwhile may be missing
@@ -335,6 +337,11 @@ func (hc *HierarchyCache) UpdateNewsgroupActiveStatus(newsgroupName string, acti
 // and moves the group's UpdatedAt and its top level's LastUpdated forward to latest, the
 // batch's newest article date (zero leaves both dates alone). A hierarchy's GroupCount
 // counts groups, not articles, and an article number is never a date (A-db-7).
+//
+// A group that is not cached (the tree lists only groups with message_count > 0, so a group
+// gets here without an entry when this batch brought its first articles) cannot be updated in
+// place: with messageCountIncrement > 0 its top level is marked dirty, so the next reader
+// rebuilds it and lists the group.
 func (hc *HierarchyCache) UpdateNewsgroupStats(newsgroupName string, messageCountIncrement int, newLastArticle int64, latest time.Time) {
 	hierarchy := ExtractHierarchyFromGroupName(newsgroupName)
 	parent, hasParent := directParent(newsgroupName)
@@ -344,15 +351,19 @@ func (hc *HierarchyCache) UpdateNewsgroupStats(newsgroupName string, messageCoun
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
 
-	// A rebuild of this top level or a full build is reading rows right now: this batch
-	// may be missing from them, and the structs updated below are about to be replaced.
-	// Mark the top level again, so the next reader rebuilds it.
-	if hc.rebuilding[hierarchy] || hc.bulkBuilds > 0 {
+	markDirty := func() {
 		if hc.markSeq == nil {
 			hc.markSeq = make(map[string]uint64)
 		}
 		hc.invalSeq++
 		hc.markSeq[hierarchy] = hc.invalSeq
+	}
+
+	// A rebuild of this top level or a full build is reading rows right now: this batch
+	// may be missing from them, and the structs updated below are about to be replaced.
+	// Mark the top level again, so the next reader rebuilds it.
+	if hc.rebuilding[hierarchy] || hc.bulkBuilds > 0 {
+		markDirty()
 	}
 
 	// Update hierarchy data if cached
@@ -391,6 +402,10 @@ func (hc *HierarchyCache) UpdateNewsgroupStats(newsgroupName string, messageCoun
 			if sortBy != "name" {
 				sortDirectGroups(groups, sortBy)
 			}
+		}
+		if updated == nil && messageCountIncrement > 0 {
+			// not cached: its first articles, or a list that was never built
+			markDirty()
 		}
 	}
 
@@ -605,13 +620,31 @@ func (hc *HierarchyCache) isDirtyLocked(top string) bool {
 	return mark > hc.bulkLoadSeq && mark > hc.loadSeq[top]
 }
 
+// topRebuildMu returns the rebuild mutex of top, creating it. The map grows by one entry per
+// top level ever rebuilt (a few hundred at most).
+func (hc *HierarchyCache) topRebuildMu(top string) *sync.Mutex {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	if hc.rebuildMus == nil {
+		hc.rebuildMus = make(map[string]*sync.Mutex)
+	}
+	m, ok := hc.rebuildMus[top]
+	if !ok {
+		m = &sync.Mutex{}
+		hc.rebuildMus[top] = m
+	}
+	return m
+}
+
 // rebuildTopLevel reloads the groups of one top level with one range query and replaces
 // every cache entry of top and top.* (A-db-8). It never falls back to
 // getDirectGroupsAtLevelDirect: that one returns nothing above one page and does not
-// filter on message_count, so its result cannot be cached.
+// filter on message_count, so its result cannot be cached. Only the rebuilds of the same
+// top level wait for each other (topRebuildMu).
 func (hc *HierarchyCache) rebuildTopLevel(db *Database, top string) error {
-	hc.rebuildMu.Lock()
-	defer hc.rebuildMu.Unlock()
+	topMu := hc.topRebuildMu(top)
+	topMu.Lock()
+	defer topMu.Unlock()
 
 	hc.mu.Lock()
 	dirty := hc.isDirtyLocked(top)

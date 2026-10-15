@@ -22,10 +22,6 @@ type BatchQueue struct {
 	GetQ  chan *BatchItem      // Channel to get articles for processing
 	Check chan *string         // Channel to check newsgroups
 	TodoQ chan *nntp.GroupInfo // Channel to do newsgroups
-	// GroupQueues holds the per-newsgroup queues of GetOrCreateGroupBatch.
-	//
-	// Deprecated: DownloadArticles uses a per-run queue (A-intake-11)
-	GroupQueues map[string]*GroupBatch // Per-newsgroup queues
 }
 
 type GroupBatch struct {
@@ -44,36 +40,18 @@ type BatchItem struct {
 var ErrUpToDate = fmt.Errorf("up2date")
 var errIsDuplicateError = fmt.Errorf("isDup")
 
-// GetOrCreateGroupBatch returns the GroupBatch for a newsgroup, creating it if necessary
-// This now spawns a dedicated worker goroutine for efficient per-group processing
-//
-// Deprecated: DownloadArticles uses a per-run queue (A-intake-11)
-func (bq *BatchQueue) GetOrCreateGroupBatch(newsgroup string) *GroupBatch {
-	bq.Mutex.Lock()
-	defer bq.Mutex.Unlock()
-
-	if bq.GroupQueues == nil {
-		bq.GroupQueues = make(map[string]*GroupBatch)
-	}
-
-	groupBatch, exists := bq.GroupQueues[newsgroup]
-	if !exists {
-		groupBatch = &GroupBatch{
-			ReturnQ: make(chan *BatchItem, MaxBatchSize),
-		}
-		bq.GroupQueues[newsgroup] = groupBatch
-		//log.Printf("Created new GroupBatch: %s", newsgroup)
-	}
-
-	return groupBatch
-}
+// CommitWaitTimeout bounds how long DownloadArticles waits for the batch writer to commit the
+// articles of a run before it records the progress (commit barrier, A-tools-5b). On a timeout
+// the progress is held back and the next run fetches the range again (stored articles are
+// skipped by the message-id lookup).
+var CommitWaitTimeout = 5 * time.Minute
 
 //var BatchItemDuplicateError = &BatchItem{Error: errIsDuplicateError}
 
 // newDownloadRun returns the return queue of one DownloadArticles run. Every run gets its own
 // queue (A-intake-11): results that arrive after a run returned (timeout, shutdown) can no longer
 // land in a queue shared with the next run of the same group, and the queue is released with
-// the run instead of staying in Batch.GroupQueues for the life of the process.
+// the run.
 func newDownloadRun() *GroupBatch {
 	return &GroupBatch{ReturnQ: make(chan *BatchItem, MaxBatchSize)}
 }
@@ -202,6 +180,8 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 
 	// per-run return queue (A-intake-11): never shared with another run of this group
 	groupBatch := newDownloadRun()
+	// commit barrier (A-tools-5b): drops of this group's batches from now on hold the progress back
+	commitMark := proc.DB.Batch.CommitMark(newsgroup)
 
 	// Note: We don't shut down the database here as it's shared with the main application
 	// progressDB is now passed as parameter to avoid opening/closing for each group
@@ -245,7 +225,6 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 	}
 	//remaining := groupInfo.Last - end
 	//log.Printf("DownloadArticles: Fetching XHDR for %s from %d to %d (last known: %d, remaining: %d)", newsgroup, start, end, groupInfo.Last, remaining)
-	var lastGoodEnd int64 = start
 	//toFetch := end - start + 1 // +1 because ranges are inclusive (start=1, end=3 means articles 1,2,3)
 	// resolve the main-DB ID once: needed to reuse crossposts stored in other groups
 	reuseEnabled := ReuseCrossposts && proc.History.Enabled()
@@ -262,7 +241,8 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 	errChan := make(chan error, 1)
 	//log.Printf("Launch XHdrStreamed: '%s' toFetch=%d start=%d end=%d", newsgroup, toFetch, start, end)
 	go func() {
-		errChan <- proc.Pool.XHdrStreamed(newsgroup, "message-id", start, end, xhdrChan, shutdownChan)
+		// returns once the stream ended: a cut-off stream is an error, not a complete range
+		errChan <- proc.Pool.XHdrStreamedWait(newsgroup, "message-id", start, end, xhdrChan, shutdownChan)
 	}()
 
 	//log.Printf("DownloadArticles: XHDR is fetching %d msgIds ng: '%s' (%d to %d)", len(messageIDs), newsgroup, start, end)
@@ -280,7 +260,12 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 				}
 			*/
 			//log.Printf("DownloadArticles: Checking if article '%s' exists in group '%s'", messageID, newsgroup)
-			if groupDB.ExistsMsgIdInArticlesDB(messageID) {
+			// A-db-3: a failed lookup is not "not stored": the item fails instead of being downloaded
+			stored, err := groupDB.LookupMsgIdInArticlesDB(messageID)
+			if err != nil {
+				return &BatchItem{Error: fmt.Errorf("message-id lookup of '%s' in '%s': %w", messageID, newsgroup, err)}
+			}
+			if stored {
 				return &BatchItem{Error: errIsDuplicateError}
 			}
 			var art *models.Article
@@ -433,12 +418,24 @@ forProcessing:
 	if common.WantShutdown() {
 		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
 	}
-	xerr := <-errChan
-	if xerr != nil {
-		end = lastGoodEnd
+	if xerr := <-errChan; xerr != nil {
+		// The message-id list of start-end is incomplete (cut-off stream, refused range): the
+		// articles after the cut were never seen, so the progress stays where it was and the
+		// next run fetches the range again (stored articles are skipped by the lookup).
+		log.Printf("DownloadArticles: '%s' XHDR %d-%d failed, progress not updated: %v", newsgroup, start, end, xerr)
+		return fmt.Errorf("DownloadArticles: '%s' XHDR %d-%d: %w", newsgroup, start, end, xerr)
 	}
 	if common.WantShutdown() {
 		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
+	}
+	if gots > 0 {
+		// Commit barrier (A-tools-5b): the progress may only pass articles that are stored.
+		// On a dropped batch, a stop or a timeout it is held back (D-B1) and the next run
+		// fetches the range again.
+		if werr := proc.DB.Batch.WaitCommitted(commitMark, shutdownChan, CommitWaitTimeout); werr != nil {
+			log.Printf("DownloadArticles: '%s' articles %d-%d not committed, progress not updated: %v", newsgroup, start, end, werr)
+			return fmt.Errorf("DownloadArticles: '%s' articles %d-%d not committed: %w", newsgroup, start, end, werr)
+		}
 	}
 	if gotQueued > 0 || dups > 0 {
 		// only update progress if we actually got something

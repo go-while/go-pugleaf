@@ -99,15 +99,6 @@ func TestIntakeDLRunQueuesAreFresh(t *testing.T) {
 	if cap(a.ReturnQ) != int(MaxBatchSize) || cap(b.ReturnQ) != int(MaxBatchSize) {
 		t.Fatalf("cap = %d/%d, want MaxBatchSize %d", cap(a.ReturnQ), cap(b.ReturnQ), MaxBatchSize)
 	}
-	// the per-run queue is not registered in the deprecated per-group map
-	Batch.Mutex.RLock()
-	for name, gb := range Batch.GroupQueues {
-		if gb == a || gb == b {
-			Batch.Mutex.RUnlock()
-			t.Fatalf("run queue registered in Batch.GroupQueues[%q]", name)
-		}
-	}
-	Batch.Mutex.RUnlock()
 }
 
 func TestIntakeDLFeederRoutesItems(t *testing.T) {

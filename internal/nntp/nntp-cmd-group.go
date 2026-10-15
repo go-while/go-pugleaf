@@ -130,6 +130,13 @@ func (c *ClientConnection) handleListGroup(args []string) error {
 		return c.sendResponse(403, "Internal fault")
 	}
 	if !ok {
+		if len(args) == 0 {
+			// the selected group was deactivated or deleted since GROUP: no group is
+			// selected any more (requireGroup)
+			c.dropCurrentGroup()
+			c.requireGroup() // 412
+			return nil
+		}
 		return c.sendResponse(411, "No such newsgroup")
 	}
 	groupDB, count, low, high, err := c.selectGroup(g)

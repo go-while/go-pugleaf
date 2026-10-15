@@ -21,23 +21,6 @@ type TransferProgressDB struct {
 	mu         sync.RWMutex
 }
 
-// TransferResult represents a single transfer result record
-type TransferResult struct {
-	RemoteID   int64
-	Newsgroup  string
-	Timestamp  time.Time
-	StartDate  *time.Time // Can be nil for no start date filter
-	EndDate    *time.Time // Can be nil for no end date filter
-	Sent       int64
-	Unwanted   int64
-	Checked    int64
-	Rejected   int64
-	Retry      int64
-	Skipped    int64
-	TXErrors   int64
-	ConnErrors int64
-}
-
 // OpenTransferProgressDB opens or creates the transfer progress database
 func OpenTransferProgressDB(dataDir, remoteName string) (*TransferProgressDB, error) {
 	// Create data directory if it doesn't exist
