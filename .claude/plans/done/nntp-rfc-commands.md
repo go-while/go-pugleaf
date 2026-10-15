@@ -1151,7 +1151,7 @@ README file table and command list updated. Step B (`rfc-wire`) spawned on base 
 
 ## Outcome (2026-10-15)
 - **Integration branch:** `plan-nntp-rfc-commands` from `testing-001` @ c11feb2 (last code commit 00ebfa8; later commits are
-  plan/docs only). Not yet merged into `testing-001` (user decision). Nothing pushed by me.
+  plan/docs only). Merged into `testing-001` as 4b916a1 (`git merge --no-ff`, 2026-10-15). Nothing pushed by me.
 - **Worktrees / branches** (left in place for the user to clean up; paths under `/tank0/claude/trees/go-pugleaf/`):
   `worktree-agent-a45d21d99d9db82ef` (rfc-reader, `agent-a45d21d99d9db82ef`), `worktree-agent-ac08bb0e28ccb9574` (rfc-lists,
   `agent-ac08bb0e28ccb9574`), `worktree-agent-aa4b31c655c35ed4c` (rfc-overview, `agent-aa4b31c655c35ed4c`),
