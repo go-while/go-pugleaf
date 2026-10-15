@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"sort"
 	"sync"
 	"time"
 )
@@ -95,67 +96,38 @@ func (sc *SanitizedCache) GetField(messageID string, field string) (template.HTM
 	sc.hits++
 	sc.countermux.Unlock()
 
-	// Update last used time
+	// Update last used time and read the requested field under the same lock:
+	// SetField/SetArticle/BatchSetArticles write these fields under article.mux.
+	var value template.HTML
 	article.mux.Lock()
 	article.LastUsed = time.Now()
-	article.mux.Unlock()
-
-	// Return the requested field
 	switch field {
 	case "subject":
-		if len(article.Subject) == 0 {
-			//log.Printf("SanitizedCache: GetField EMPTY-HIT->MISS for messageID='%s', field='%s', treating as miss", messageID, field)
-			return "", false
-		}
-		return article.Subject, true
+		value = article.Subject
 	case "author", "fromheader":
-		if len(article.Author) == 0 {
-			//log.Printf("SanitizedCache: GetField EMPTY-HIT->MISS for messageID='%s', field='%s', treating as miss", messageID, field)
-			return "", false
-		}
-		return article.Author, true
+		value = article.Author
 	case "body", "bodytext":
-		if len(article.Body) == 0 {
-			//log.Printf("SanitizedCache: GetField EMPTY-HIT->MISS for messageID='%s', field='%s', treating as miss", messageID, field)
-			return "", false
-		}
-		return article.Body, true
+		value = article.Body
 	case "date", "date_string":
-		if len(article.Date) == 0 {
-			//log.Printf("SanitizedCache: GetField EMPTY-HIT->MISS for messageID='%s', field='%s', treating as miss", messageID, field)
-			return "", false
-		}
-		return article.Date, true
+		value = article.Date
 	case "references":
-		if len(article.References) == 0 {
-			//log.Printf("SanitizedCache: GetField EMPTY-HIT->MISS for messageID='%s', field='%s', key='%s', treating as miss", messageID, field, key)
-			return "", false
-		}
-		//log.Printf("SanitizedCache: GetField HIT for messageID='%s', field='%s', value_len=%d", messageID, field, len(article.References))
-		return article.References, true
+		value = article.References
 	case "messageid":
-		if len(article.MessageID) == 0 {
-			return "", false
-		}
-		return article.MessageID, true
+		value = article.MessageID
 	case "path":
-		if len(article.Path) == 0 {
-			return "", false
-		}
-		return article.Path, true
+		value = article.Path
 	case "headers_json":
-		if len(article.HeadersJSON) == 0 {
-			return "", false
-		}
-		return article.HeadersJSON, true
+		value = article.HeadersJSON
 	case "date_since":
-		if len(article.DateSince) == 0 {
-			return "", false
-		}
-		return article.DateSince, true
-	default:
+		value = article.DateSince
+	}
+	article.mux.Unlock()
+
+	// An empty field (or an unknown field name) is treated as a miss
+	if len(value) == 0 {
 		return "", false
 	}
+	return value, true
 }
 
 // GetArticle retrieves a complete cached sanitized article
@@ -192,6 +164,7 @@ func (sc *SanitizedCache) SetField(messageID string, field string, value templat
 			LastUsed:  now,
 		}
 		sc.cache[messageID] = article
+		sc.enforceLimitLocked()
 	}
 	sc.mutex.Unlock()
 
@@ -255,6 +228,7 @@ func (sc *SanitizedCache) SetArticle(messageID string, sanitizedFields map[strin
 			LastUsed:  now,
 		}
 		sc.cache[messageID] = article
+		sc.enforceLimitLocked()
 	}
 	sc.mutex.Unlock()
 
@@ -308,6 +282,7 @@ func (sc *SanitizedCache) BatchSetArticles(articles map[string]map[string]templa
 	var totalSizeDiff int64
 
 	// Process all articles in one lock cycle
+	added := false
 	sc.mutex.Lock()
 	for messageID, fields := range articles {
 
@@ -319,6 +294,7 @@ func (sc *SanitizedCache) BatchSetArticles(articles map[string]map[string]templa
 				LastUsed:  now,
 			}
 			sc.cache[messageID] = article
+			added = true
 		}
 
 		// Set fields for this article
@@ -355,6 +331,9 @@ func (sc *SanitizedCache) BatchSetArticles(articles map[string]map[string]templa
 		article.Size = newSize
 		totalSizeDiff += sizeDiff
 		article.mux.Unlock()
+	}
+	if added {
+		sc.enforceLimitLocked()
 	}
 	sc.mutex.Unlock()
 
@@ -416,30 +395,52 @@ func (sc *SanitizedCache) xxxhashMessageID(messageID string) string {
 	return messageID
 }
 
-// evictOldest removes the oldest entry
-func (sc *SanitizedCache) evictOldest() {
-	go func() {
-		var oldestKey string
-		var oldestTime time.Time
+// enforceLimitLocked bounds the cache to maxEntries articles (A-web-2).
+// Caller must hold sc.mutex (write lock). When the cache is over its limit,
+// the least recently used entries are evicted down to 90% of maxEntries so the
+// sort is not repeated on every insert. maxEntries <= 0 means unbounded.
+func (sc *SanitizedCache) enforceLimitLocked() {
+	if sc.maxEntries <= 0 || len(sc.cache) <= sc.maxEntries {
+		return
+	}
+	target := sc.maxEntries * 9 / 10
+	if target < 1 {
+		target = 1
+	}
+	sc.evictOldest(len(sc.cache) - target)
+}
 
-		sc.mutex.RLock()
-		for key, article := range sc.cache {
-			article.mux.RLock()
-			lastused := article.LastUsed
-			article.mux.RUnlock()
-			if oldestKey == "" || lastused.Before(oldestTime) {
-				oldestKey = key
-				oldestTime = lastused
-			}
-		}
-		sc.mutex.RUnlock()
-
-		sc.mutex.Lock()
-		if oldestKey != "" {
-			delete(sc.cache, oldestKey)
-		}
-		sc.mutex.Unlock()
-	}()
+// evictOldest removes the n least recently used entries in one pass over a
+// slice sorted by LastUsed. Caller must hold sc.mutex (write lock).
+func (sc *SanitizedCache) evictOldest(n int) {
+	if n <= 0 || len(sc.cache) == 0 {
+		return
+	}
+	type lruEntry struct {
+		key      string
+		lastUsed time.Time
+		size     int64
+	}
+	entries := make([]lruEntry, 0, len(sc.cache))
+	for key, article := range sc.cache {
+		article.mux.RLock()
+		entries = append(entries, lruEntry{key: key, lastUsed: article.LastUsed, size: article.Size})
+		article.mux.RUnlock()
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].lastUsed.Before(entries[j].lastUsed)
+	})
+	if n > len(entries) {
+		n = len(entries)
+	}
+	var delsize int64
+	for _, e := range entries[:n] {
+		delete(sc.cache, e.key)
+		delsize += e.size
+	}
+	sc.countermux.Lock()
+	sc.cachedSize -= delsize
+	sc.countermux.Unlock()
 }
 
 // cleanupLoop runs periodic cleanup of expired entries
@@ -470,32 +471,48 @@ func (sc *SanitizedCache) cleanup() {
 	now := time.Now()
 	keysToDelete := make([]string, 0)
 
-	var delsize int64
-
 	sc.mutex.RLock()
 	for key, article := range sc.cache {
 		article.mux.RLock()
 		if now.Sub(article.CreatedAt) > sc.maxAge {
 			keysToDelete = append(keysToDelete, key)
-			delsize += article.Size // Track size for cleanup
 		}
 		article.mux.RUnlock()
 	}
 	sc.mutex.RUnlock()
 
-	if len(keysToDelete) > 0 {
-		sc.mutex.Lock()
-		for _, key := range keysToDelete {
-			delete(sc.cache, key)
-		}
-		sc.mutex.Unlock()
-		// Could add logging here if needed
-		// log.Printf("Cache cleanup: removed %d expired entries", len(keysToDelete))
+	if len(keysToDelete) == 0 {
+		return // nothing expired: no size update, no log line
 	}
-	go func(sc *SanitizedCache, delsize int64) {
-		sc.countermux.Lock()
-		sc.cachedSize -= delsize
-		sc.countermux.Unlock()
-		log.Printf("SanitizedCache: cleanup: removed %d bytes from cache", delsize)
-	}(sc, delsize)
+
+	// Re-check under the write lock: an entry may have been evicted (and its
+	// size already subtracted) or replaced since the read pass.
+	var delsize int64
+	removed := 0
+	sc.mutex.Lock()
+	for _, key := range keysToDelete {
+		article, ok := sc.cache[key]
+		if !ok {
+			continue
+		}
+		article.mux.RLock()
+		expired := now.Sub(article.CreatedAt) > sc.maxAge
+		size := article.Size
+		article.mux.RUnlock()
+		if !expired {
+			continue
+		}
+		delete(sc.cache, key)
+		delsize += size
+		removed++
+	}
+	sc.mutex.Unlock()
+
+	if removed == 0 {
+		return
+	}
+	sc.countermux.Lock()
+	sc.cachedSize -= delsize
+	sc.countermux.Unlock()
+	log.Printf("SanitizedCache: cleanup: removed %d entries (%d bytes) from cache", removed, delsize)
 }

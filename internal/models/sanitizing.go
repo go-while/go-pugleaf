@@ -203,21 +203,19 @@ func (a *Article) PrintSanitized(field string, groupName ...string) template.HTM
 		}
 	}
 
-	a.Mux.Lock()
-	defer a.Mux.Unlock()
-
-	if !a.Sanitized {
-		a.StripDangerousHTML()
-	}
+	// Read-only: the *Article may be shared (article cache), so the sanitized
+	// values are computed into a local struct and never written back (A-web-4).
+	a.Mux.RLock()
+	defer a.Mux.RUnlock()
 
 	var text string
 	switch field {
 	case "message_id", "messageid":
 		text = a.MessageID
 	case "subject":
-		text = truncateSubject(a.Subject)
+		text = truncateSubject(a.sanitizedFields().Subject)
 	case "from", "fromheader":
-		text = a.FromHeader
+		text = a.sanitizedFields().FromHeader
 	case "date", "date_string":
 		if !a.DateSent.IsZero() {
 			text = a.DateSent.Format("Mon, 02 Jan 2006 15:04")
@@ -231,9 +229,9 @@ func (a *Article) PrintSanitized(field string, groupName ...string) template.HTM
 			text = "-???-"
 		}
 	case "references":
-		text = a.References
+		text = a.sanitizedFields().References
 	case "body", "body_text", "bodytext":
-		text = a.BodyText
+		text = a.sanitizedFields().BodyText
 	case "path":
 		text = a.Path
 	case "headers_json":
@@ -460,7 +458,33 @@ func filterMailDomainInFromHeader(fromHeader string) string {
 	//return newFromHeader
 }
 
-// StripDangerousHTML removes potentially dangerous HTML/script content from all user-facing fields
+// sanitizedArticleFields holds the display values StripDangerousHTML would
+// write into an Article, computed without modifying the Article.
+type sanitizedArticleFields struct {
+	Subject    string
+	FromHeader string
+	BodyText   string
+	DateString string
+	References string
+}
+
+// sanitizedFields returns the same values StripDangerousHTML writes, computed
+// from the unmodified fields. The caller must hold a.Mux (read lock is enough).
+func (a *Article) sanitizedFields() sanitizedArticleFields {
+	return sanitizedArticleFields{
+		Subject:    sanitizeText(a.Subject),
+		FromHeader: sanitizeText(filterMailDomainInFromHeader(a.FromHeader)),
+		BodyText:   sanitizeText(a.BodyText),
+		DateString: sanitizeText(a.DateString),
+		References: sanitizeText(a.References),
+	}
+}
+
+// StripDangerousHTML removes potentially dangerous HTML/script content from all user-facing fields.
+// It MUTATES the Article in place (Subject, FromHeader, BodyText, DateString, References) and sets
+// Sanitized; the caller must hold a.Mux exclusively. The web display path (PrintSanitized,
+// BatchSanitizeArticles) does not use it: articles there may be shared via the article cache, so
+// they use sanitizedFields() instead. Kept exported for compatibility.
 func (a *Article) StripDangerousHTML() {
 	if a == nil {
 		return
@@ -628,27 +652,25 @@ func BatchSanitizeArticles(articles []*Article) {
 		if cached, found := sanitizedCache.GetArticle(article.MessageID); found && cached != nil {
 			continue
 		}
-		article.Mux.Lock()
-
-		// Sanitize the article if not already done
-		if !article.Sanitized {
-			article.StripDangerousHTML()
-		}
+		// Read-only: compute sanitized values locally, never write them back
+		// into the (possibly shared) *Article (A-web-4).
+		article.Mux.RLock()
+		sf := article.sanitizedFields()
 
 		// Prepare sanitized fields for this article
 		fields := make(map[string]template.HTML)
 
 		// Sanitize commonly-used fields - use same order as old PrintSanitized
-		utf8Subject := ConvertToUTF8(truncateSubject(article.Subject))
+		utf8Subject := ConvertToUTF8(truncateSubject(sf.Subject))
 		fields["subject"] = template.HTML(html.EscapeString(utf8Subject))
 
-		utf8FromHeader := ConvertToUTF8(article.FromHeader)
+		utf8FromHeader := ConvertToUTF8(sf.FromHeader)
 		fields["fromheader"] = template.HTML(html.EscapeString(utf8FromHeader))
 
-		utf8BodyText := ConvertToUTF8(article.BodyText)
+		utf8BodyText := ConvertToUTF8(sf.BodyText)
 		fields["bodytext"] = template.HTML(html.EscapeString(utf8BodyText))
 
-		utf8References := ConvertToUTF8(article.References)
+		utf8References := ConvertToUTF8(sf.References)
 		fields["references"] = template.HTML(html.EscapeString(utf8References))
 
 		// Handle date formatting like PrintSanitized does
@@ -670,7 +692,7 @@ func BatchSanitizeArticles(articles []*Article) {
 
 		batch[article.MessageID] = fields
 
-		article.Mux.Unlock()
+		article.Mux.RUnlock()
 	}
 
 	// Store all sanitized articles in one batch operation
