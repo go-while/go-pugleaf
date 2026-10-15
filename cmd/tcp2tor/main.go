@@ -204,7 +204,7 @@ func main() {
 
 	// Handle add mode - add entry to config file and exit
 	if *addToConfig != "" {
-		addEntryToConfigFile(*addToConfig, *listenHost, *listenPort, *targetAddr)
+		addEntryToConfigFile(*addToConfig, *listenHost, *listenPort, *targetAddr, *allowPublicBind)
 		os.Exit(0)
 	}
 
@@ -626,8 +626,11 @@ func parseConfigFile(filename, socksProxy, socksHost string, socksPort int, sock
 	return configs, settings, nil
 }
 
-// addEntryToConfigFile adds a new configuration entry to the specified config file
-func addEntryToConfigFile(configFile, listenHost string, listenPort int, targetAddr string) {
+// addEntryToConfigFile adds a new configuration entry to the specified config file.
+// The listen host is checked against the bind policy (checkListenHost with
+// allowPublic): a non-loopback host is still added, with a warning, because the
+// policy is applied when the file is run (-allow-public-bind or allow_public_bind).
+func addEntryToConfigFile(configFile, listenHost string, listenPort int, targetAddr string, allowPublic bool) {
 	// Validate required parameters
 	if targetAddr == "" {
 		log.Fatalf("Error: -target must be specified when using -add")
@@ -643,6 +646,10 @@ func addEntryToConfigFile(configFile, listenHost string, listenPort int, targetA
 	targetHost, targetPort, err := parseTargetAddress(targetAddr)
 	if err != nil {
 		log.Fatalf("Error: Invalid target address '%s': %v", targetAddr, err)
+	}
+	if err := checkListenHost(listenHost, allowPublic); err != nil {
+		log.Printf("WARNING: %v", err)
+		log.Printf("WARNING: the entry is added anyway; 'tcp2tor -config %s' refuses to start it without the setting above", configFile)
 	}
 
 	// Create the configuration line
@@ -892,9 +899,49 @@ func (s *ProxyServer) Addr() net.Addr {
 	return s.listener.Addr()
 }
 
-// Serve accepts connections on the listener created by Listen until Stop is called or Accept
-// fails. Connections beyond MaxConns are closed right away. Serve returns after every
-// connection handler has finished; it returns nil after Stop.
+// acceptRetryMin and acceptRetryMax bound the pause after a failed Accept (net/http
+// style: it starts at acceptRetryMin and doubles up to acceptRetryMax).
+const (
+	acceptRetryMin = 5 * time.Millisecond
+	acceptRetryMax = 1 * time.Second
+)
+
+// nextAcceptDelay returns the pause after a failed Accept given the previous one (0
+// after a successful Accept).
+func nextAcceptDelay(prev time.Duration) time.Duration {
+	if prev <= 0 {
+		return acceptRetryMin
+	}
+	if next := prev * 2; next < acceptRetryMax {
+		return next
+	}
+	return acceptRetryMax
+}
+
+// retryableAcceptErr reports whether a failed Accept is worth retrying: the net/http
+// rule, a net.Error that is a timeout or temporary (e.g. EMFILE/ENFILE, too many open
+// files). Temporary is checked through an interface because net.Error.Temporary is
+// deprecated, but it is still what syscall.Errno reports for those errors.
+func retryableAcceptErr(err error) bool {
+	var ne net.Error
+	if !errors.As(err, &ne) {
+		return false
+	}
+	if ne.Timeout() {
+		return true
+	}
+	if t, ok := ne.(interface{ Temporary() bool }); ok {
+		return t.Temporary()
+	}
+	return false
+}
+
+// Serve accepts connections on the listener created by Listen until Stop is called or the
+// listener is closed (both return nil). A timeout or temporary Accept error (e.g. too
+// many open files, retryableAcceptErr) is logged and retried after a pause that grows from
+// acceptRetryMin to acceptRetryMax; Stop ends the pause. Any other Accept error ends Serve
+// and is returned. Connections beyond MaxConns are closed right away. Serve returns after
+// every connection handler has finished.
 func (s *ProxyServer) Serve() error {
 	s.mu.Lock()
 	ln := s.listener
@@ -910,14 +957,29 @@ func (s *ProxyServer) Serve() error {
 	}
 
 	var serveErr error
+	ctx := s.serverContext()
+	var retryDelay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			if !s.isStopped() && !errors.Is(err, net.ErrClosed) {
-				serveErr = fmt.Errorf("failed to accept connection: %v", err)
+			if s.isStopped() || errors.Is(err, net.ErrClosed) {
+				break
 			}
-			break
+			if !retryableAcceptErr(err) {
+				serveErr = fmt.Errorf("failed to accept connection: %v", err)
+				break
+			}
+			retryDelay = nextAcceptDelay(retryDelay)
+			log.Printf("Accept error on %s: %v; retrying in %v", s.ListenAddr, err, retryDelay)
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-ctx.Done(): // Stop
+				timer.Stop()
+			case <-timer.C:
+			}
+			continue
 		}
+		retryDelay = 0
 
 		select {
 		case sem <- struct{}{}:

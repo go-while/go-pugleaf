@@ -74,7 +74,7 @@ Server:
   -ssl                 Use SSL/TLS (default true; use -ssl=false for a plain-text port)
   -username string     NNTP username (default "read")
   -password string     NNTP password (default "only")
-  -timeout int         Connect timeout in seconds (default 30); not applied in '$all'/'prefix.*' mode
+  -timeout int         Connect timeout in seconds (default 30), in every mode
 
 Analysis:
   -force-refresh       Ignore the overview cache and fetch from the server again
@@ -167,7 +167,8 @@ statistics and the top 10 groups by article count and by total size.
 ## Caching System
 
 - **Cache Location**: `<data>/cache/<host>/<sha256 of the group name>.overview`, where `<data>` is
-  `-data` (default `./data`) and `<host>` is the `-host` name without a port.
+  `-data` (default `./data`) and `<host>` is the `-host` name without a port (an IPv6 literal such as
+  `[2001:db8::1]` becomes `2001_db8__1`).
 - **Cache Format**: one tab-separated XOVER line per article
   (number, subject, from, date, message-id, references, bytes, lines).
 - **Creation**: the first full analysis of a group fetches the whole group in batches of 10,000

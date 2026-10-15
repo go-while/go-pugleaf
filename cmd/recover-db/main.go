@@ -305,16 +305,17 @@ func main() {
 	if *parseDates {
 		fmt.Printf("📅 Starting date parsing analysis...\n")
 		fmt.Printf("=====================================\n")
-		totalFixed, totalChecked, err := checkAndFixDates(db, newsgroups, *rewriteDates, *verbose)
+		totals, err := checkAndFixDates(db, newsgroups, *rewriteDates, *verbose)
 		if err != nil {
 			log.Printf("Date parsing analysis failed: %v", err)
 			recoverExit(db, 1)
 		}
 		fmt.Printf("\n📅 Date parsing analysis completed:\n")
-		fmt.Printf("   Articles checked: %d\n", totalChecked)
-		fmt.Printf("   Date mismatches found: %d\n", totalFixed)
+		fmt.Printf("   Articles checked: %d\n", totals.Checked)
+		fmt.Printf("   Date mismatches found: %d\n", totals.Mismatches)
+		fmt.Printf("   Unparseable date strings: %d\n", totals.ParseFailures)
 		if *rewriteDates {
-			fmt.Printf("   Dates corrected: %d\n", totalFixed)
+			fmt.Printf("   Dates corrected: %d\n", totals.Fixed)
 		}
 		recoverExit(db, 0)
 	}
@@ -584,16 +585,7 @@ func repairDatabase(db *database.Database, newsgroup string, report *database.Co
 
 	// Repair 6: Check for articles without proper thread association
 	fmt.Printf("🧵 Checking threading consistency...\n")
-	var articlesWithoutThreading int64
-	err = tx.QueryRow(`
-		SELECT COUNT(*) FROM articles a
-		WHERE NOT EXISTS (
-			SELECT 1 FROM threads t
-			WHERE t.root_article = a.article_num
-			   OR (t.child_articles IS NOT NULL AND t.child_articles LIKE '%,' || a.article_num || ',%')
-		)
-	`).Scan(&articlesWithoutThreading)
-
+	articlesWithoutThreading, err := countArticlesWithoutThreading(tx)
 	if err != nil {
 		fmt.Printf("   ❌ Could not check threading: %v\n", err)
 	} else if articlesWithoutThreading > 0 {
@@ -611,6 +603,30 @@ func repairDatabase(db *database.Database, newsgroup string, report *database.Co
 
 	fmt.Printf("🎉 Repair completed: %s (%d fixes applied)\n", newsgroup, repairCount)
 	return nil
+}
+
+// query_articlesWithoutThreading counts the articles that appear in no threads row, neither
+// as a root nor as a child (a root has its own row with child_article = root_article). The
+// threads table of a group database has the column child_article (one row per article);
+// thread_cache.child_articles is the comma list and is not part of this check.
+const query_articlesWithoutThreading = `
+		SELECT COUNT(*) FROM articles a
+		WHERE NOT EXISTS (SELECT 1 FROM threads t WHERE t.child_article = a.article_num)
+		  AND NOT EXISTS (SELECT 1 FROM threads t WHERE t.root_article = a.article_num)
+	`
+
+// rowQuerier is the QueryRow method shared by *sql.DB and *sql.Tx.
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// countArticlesWithoutThreading runs query_articlesWithoutThreading (repair step 6).
+func countArticlesWithoutThreading(q rowQuerier) (int64, error) {
+	var n int64
+	if err := q.QueryRow(query_articlesWithoutThreading).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 /*
@@ -842,10 +858,34 @@ type DateProblem struct {
 	ParseFailed bool
 }
 
+// maxListedParseFailures caps the parse-failure entries one group adds to the problem list;
+// the rest are only counted (dateCheckResult.ParseFailures), so a group full of broken
+// date strings cannot grow the list without bound.
+const maxListedParseFailures = 100
+
+// dateCheckResult is the outcome of checkGroupDates (and the totals of checkAndFixDates).
+type dateCheckResult struct {
+	Checked       int64 // articles whose stored date_sent could be read
+	Mismatches    int64 // re-parsed date differs from the stored one
+	Fixed         int64 // mismatches rewritten by a successful UPDATE (-rewritedates only)
+	ParseFailures int64 // date strings the strict parser rejects (listed or not)
+	Problems      []DateProblem
+}
+
+// omittedParseFailures is the number of parse failures counted but not in Problems.
+func (r *dateCheckResult) omittedParseFailures() int64 {
+	listed := int64(0)
+	for _, p := range r.Problems {
+		if p.ParseFailed {
+			listed++
+		}
+	}
+	return r.ParseFailures - listed
+}
+
 // checkAndFixDates analyzes date_string vs date_sent mismatches and optionally fixes them
-func checkAndFixDates(db *database.Database, newsgroups []*models.Newsgroup, rewriteDates, verbose bool) (int64, int64, error) {
-	var totalFixed, totalChecked int64
-	var allProblems []DateProblem
+func checkAndFixDates(db *database.Database, newsgroups []*models.Newsgroup, rewriteDates, verbose bool) (dateCheckResult, error) {
+	var totals dateCheckResult
 
 	for i, newsgroup := range newsgroups {
 		fmt.Printf("📅 [%d/%d] Checking dates in newsgroup: %s\n", i+1, len(newsgroups), newsgroup.Name)
@@ -856,28 +896,37 @@ func checkAndFixDates(db *database.Database, newsgroups []*models.Newsgroup, rew
 			continue
 		}
 
-		fixed, checked, problems, err := checkGroupDates(groupDB, newsgroup.Name, rewriteDates, verbose)
+		res, err := checkGroupDates(groupDB, newsgroup.Name, rewriteDates, verbose)
 		if err != nil {
 			fmt.Printf("   ❌ Failed to check dates: %v\n", err)
 			groupDB.Return()
 			continue
 		}
 
-		totalFixed += fixed
-		totalChecked += checked
-		allProblems = append(allProblems, problems...)
+		totals.Checked += res.Checked
+		totals.Mismatches += res.Mismatches
+		totals.Fixed += res.Fixed
+		totals.ParseFailures += res.ParseFailures
+		totals.Problems = append(totals.Problems, res.Problems...)
 		groupDB.Return()
 
-		if checked > 0 {
-			if fixed > 0 {
-				fmt.Printf("   📊 Checked: %d articles, Found: %d mismatches", checked, fixed)
+		if res.ParseFailures > 0 {
+			fmt.Printf("   ⚠️  %d unparseable date strings", res.ParseFailures)
+			if omitted := res.omittedParseFailures(); omitted > 0 {
+				fmt.Printf(" (first %d listed, %d more only counted)", maxListedParseFailures, omitted)
+			}
+			fmt.Printf("\n")
+		}
+		if res.Checked > 0 {
+			if res.Mismatches > 0 {
+				fmt.Printf("   📊 Checked: %d articles, Found: %d mismatches", res.Checked, res.Mismatches)
 				if rewriteDates {
-					fmt.Printf(", Fixed: %d\n", fixed)
+					fmt.Printf(", Fixed: %d\n", res.Fixed)
 				} else {
 					fmt.Printf("\n")
 				}
 			} else {
-				fmt.Printf("   ✅ Checked: %d articles, no date mismatches found\n", checked)
+				fmt.Printf("   ✅ Checked: %d articles, no date mismatches found\n", res.Checked)
 			}
 		} else {
 			fmt.Printf("   📭 No articles to check\n")
@@ -885,15 +934,15 @@ func checkAndFixDates(db *database.Database, newsgroups []*models.Newsgroup, rew
 	}
 
 	// Print summary of all problematic dates
-	if len(allProblems) > 0 {
-		printDateProblemsSummary(allProblems, rewriteDates)
+	if len(totals.Problems) > 0 {
+		printDateProblemsSummary(totals.Problems, totals.omittedParseFailures(), rewriteDates)
 	}
 
-	return totalFixed, totalChecked, nil
+	return totals, nil
 }
 
 // checkGroupDates checks and optionally fixes date mismatches in a single newsgroup
-func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDates, verbose bool) (int64, int64, []DateProblem, error) {
+func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDates, verbose bool) (dateCheckResult, error) {
 	// Query all articles with their date information - get date_sent as string to avoid timezone parsing issues
 	rows, err := database.RetryableQuery(groupDB.DB, `
 		SELECT article_num, message_id, date_string, date_sent
@@ -902,18 +951,17 @@ func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDat
 		ORDER BY article_num
 	`)
 	if err != nil {
-		return 0, 0, nil, fmt.Errorf("failed to query articles: %w", err)
+		return dateCheckResult{}, fmt.Errorf("failed to query articles: %w", err)
 	}
 	defer rows.Close()
 
-	var fixed, checked int64
-	var problems []DateProblem
+	var res dateCheckResult
 	var tx *sql.Tx
 
 	if rewriteDates {
 		tx, err = groupDB.DB.Begin()
 		if err != nil {
-			return 0, 0, nil, fmt.Errorf("failed to begin transaction: %w", err)
+			return dateCheckResult{}, fmt.Errorf("failed to begin transaction: %w", err)
 		}
 		defer tx.Rollback()
 	}
@@ -930,11 +978,11 @@ func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDat
 			continue
 		}
 
-		checked++
+		res.Checked++
 
 		// print progress every N
-		if checked%database.RescanBatchSize == 0 {
-			fmt.Printf("   📊 Checked %d articles so far...\n", checked)
+		if res.Checked%database.RescanBatchSize == 0 {
+			fmt.Printf("   📊 Checked %d articles so far...\n", res.Checked)
 		}
 
 		// Parse the stored date string (should be in UTC format)
@@ -955,28 +1003,23 @@ func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDat
 		// reported and never rewritten (no fallback date is written)
 		reparsedDate, ok := processor.ParseNNTPDateStrict(dateString)
 		if !ok {
-			problem := DateProblem{
-				Newsgroup:   &newsgroupName,
-				ArticleNum:  articleNum,
-				MessageID:   &messageID,
-				DateString:  &dateString,
-				StoredDate:  dateSent,
-				ParseFailed: true,
+			res.ParseFailures++
+			// Only the first maxListedParseFailures per group go into the list; the rest
+			// are counted (the scan goes on, mismatches are still found and fixed).
+			if res.ParseFailures <= maxListedParseFailures {
+				res.Problems = append(res.Problems, DateProblem{
+					Newsgroup:   &newsgroupName,
+					ArticleNum:  articleNum,
+					MessageID:   &messageID,
+					DateString:  &dateString,
+					StoredDate:  dateSent,
+					ParseFailed: true,
+				})
 			}
-			problems = append(problems, problem)
 
 			if verbose {
 				fmt.Printf("   ⚠️  Article %d: Could not re-parse date string '%s' stored dateSent='%s'\n", articleNum, dateString, dateSent)
 			}
-
-			// Safety check: stop scanning if we have too many problems
-			/*
-				if len(problems) > 10000 {
-					fmt.Printf("   🚨 WARNING: Found more than 10,000 date problems! Stopping scan to prevent memory issues.\n")
-					fmt.Printf("   📊 This indicates a systematic date parsing problem that needs investigation.\n")
-					break
-				}
-			*/
 			continue
 		}
 
@@ -987,7 +1030,7 @@ func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDat
 			if diff < 0 {
 				diff = -diff
 			}
-			fixed++
+			res.Mismatches++
 			problem := DateProblem{
 				Newsgroup:  &newsgroupName,
 				ArticleNum: articleNum,
@@ -997,7 +1040,7 @@ func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDat
 				ParsedDate: reparsedDate,
 				Difference: diff,
 			}
-			problems = append(problems, problem)
+			res.Problems = append(res.Problems, problem)
 
 			if verbose {
 				fmt.Printf("   🔧 Article %d (%s): '%s' stored as %v, should be %v (diff: %v)\n",
@@ -1014,10 +1057,11 @@ func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDat
 					}
 					continue
 				}
+				res.Fixed++
 			}
 
 			// Safety check: stop scanning if we have too many problems
-			if len(problems) > 10000 {
+			if len(res.Problems) > 10000 {
 				fmt.Printf("   🚨 WARNING: Found more than 10,000 date problems! Stopping scan to prevent memory issues.\n")
 				fmt.Printf("   📊 This indicates a systematic date parsing problem that needs investigation.\n")
 				break
@@ -1026,20 +1070,23 @@ func checkGroupDates(groupDB *database.GroupDB, newsgroupName string, rewriteDat
 	}
 
 	if err = rows.Err(); err != nil {
-		return fixed, checked, problems, fmt.Errorf("error iterating rows: %w", err)
+		return res, fmt.Errorf("error iterating rows: %w", err)
 	}
 
 	if rewriteDates && tx != nil {
 		if err := tx.Commit(); err != nil {
-			return fixed, checked, problems, fmt.Errorf("failed to commit date fixes: %w", err)
+			res.Fixed = 0 // nothing was written
+			return res, fmt.Errorf("failed to commit date fixes: %w", err)
 		}
 	}
 
-	return fixed, checked, problems, nil
+	return res, nil
 }
 
 // printDateProblemsSummary prints a comprehensive summary of all date problems found
-func printDateProblemsSummary(problems []DateProblem, rewriteDates bool) {
+// omittedParseFailures is the number of parse failures that were counted but not listed
+// (maxListedParseFailures per group).
+func printDateProblemsSummary(problems []DateProblem, omittedParseFailures int64, rewriteDates bool) {
 	if len(problems) == 0 {
 		return
 	}
@@ -1048,7 +1095,11 @@ func printDateProblemsSummary(problems []DateProblem, rewriteDates bool) {
 	fmt.Printf("=====================================\n")
 	fmt.Printf("DATE PROBLEMS SUMMARY\n")
 	fmt.Printf("=====================================\n")
-	fmt.Printf("Total problematic dates found: %d\n", len(problems))
+	fmt.Printf("Total problematic dates found: %d\n", int64(len(problems))+omittedParseFailures)
+	if omittedParseFailures > 0 {
+		fmt.Printf("(%d unparseable dates are counted but not listed: at most %d per newsgroup are kept)\n",
+			omittedParseFailures, maxListedParseFailures)
+	}
 
 	// Categorize problems
 	var parseFailures []DateProblem

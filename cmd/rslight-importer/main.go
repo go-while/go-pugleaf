@@ -8,6 +8,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -28,6 +31,48 @@ type importOptions struct {
 	threads         int
 	useShortHashLen int
 	nntphostname    string
+	// stop is closed by the first SIGINT/SIGTERM: the reset countdown and the article
+	// import end early and run returns through shutdown()
+	stop <-chan struct{}
+}
+
+// errResetCancelled is returned by runImport when a signal arrived during the
+// -YESresetallgroupsYES countdown (nothing was reset).
+var errResetCancelled = errors.New("reset cancelled by a signal: nothing was reset")
+
+// stopOnSignal registers SIGINT/SIGTERM and returns a channel that the first signal
+// closes, plus a release function that unregisters the signals and ends the
+// listening goroutine (call it when run returns).
+func stopOnSignal() (<-chan struct{}, func()) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case sig := <-sigChan:
+			log.Printf("[RSLIGHT-IMPORT] Received %v: stopping, then shutting down (processor, database)...", sig)
+			close(stop)
+		case <-done:
+		}
+	}()
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			signal.Stop(sigChan)
+			close(done)
+		})
+	}
+	return stop, release
+}
+
+// importExitCode is the exit code of an import error: 130 when a signal stopped the
+// run (reset countdown or article import), else 1.
+func importExitCode(err error) int {
+	if errors.Is(err, errResetCancelled) || errors.Is(err, processor.ErrLegacyImportStopped) {
+		return 130
+	}
+	return 1
 }
 
 func main() {
@@ -100,7 +145,13 @@ func run() int {
 		}()
 	}
 
+	// Signals are handled from here on: the database is opened next, and every way out
+	// after that goes through shutdown()
+	stop, releaseSignals := stopOnSignal()
+	defer releaseSignals()
+
 	opts := importOptions{
+		stop:            stop,
 		resetGroups:     *resetGroups,
 		dataDir:         *dataDir,
 		legacyPath:      *legacyPath,
@@ -130,7 +181,7 @@ func run() int {
 	code := 0
 	if err != nil {
 		log.Printf("[RSLIGHT-IMPORT] ERROR: %v", err)
-		code = 1
+		code = importExitCode(err)
 	}
 	if !shutdown(proc, db) {
 		code = 1
@@ -200,10 +251,14 @@ func runImport(db *database.Database, opts importOptions) (*processor.LegacyImpo
 		log.Printf("Are you sure you want to continue? This operation cannot be undone!")
 		log.Printf("Starting reset in 5 seconds... Press Ctrl+C to cancel")
 
-		// Give user time to cancel
+		// Give user time to cancel (a signal ends the countdown, nothing is reset)
 		for i := 5; i > 0; i-- {
 			log.Printf("Reset starting in %d seconds...", i)
-			time.Sleep(1 * time.Second)
+			select {
+			case <-opts.stop:
+				return proc, errResetCancelled
+			case <-time.After(1 * time.Second):
+			}
 		}
 
 		log.Printf("Starting newsgroup data reset...")
@@ -231,7 +286,7 @@ func runImport(db *database.Database, opts importOptions) (*processor.LegacyImpo
 	log.Printf("Starting SQLite import from: %s", opts.sqliteDir)
 	log.Printf("Target database directory: %s", opts.dataDir)
 
-	if err := proc.ImportAllSQLiteDatabases(opts.sqliteDir, opts.threads); err != nil {
+	if err := proc.ImportAllSQLiteDatabases(opts.sqliteDir, opts.threads, opts.stop); err != nil {
 		return proc, fmt.Errorf("failed to import SQLite databases: %w", err)
 	}
 	log.Printf("[RSLIGHT-IMPORT] SUCCESS! Import process completed! Shutting down systems...")

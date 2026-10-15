@@ -623,7 +623,39 @@ var (
 	webStop     = make(chan struct{})
 	webStopOnce sync.Once
 	dbStopOnce  sync.Once
+
+	// webProgressDB is the progress database of the server mode (nil before it is
+	// opened and in the one-shot modes); teardownDB closes it, so every exit path
+	// (exitAfterDB, fatalAfterDB, the normal shutdown) closes it once.
+	webProgressDB   *database.ProgressDB
+	webProgressDBMu sync.Mutex
+
+	// webExitMu serializes exitAfterDB: the first caller tears down and exits, a
+	// concurrent second one (the signal handler of a one-shot mode vs. main) blocks
+	// here until the process is gone.
+	webExitMu sync.Mutex
 )
+
+// setWebProgressDB registers the progress database that teardownDB closes.
+func setWebProgressDB(p *database.ProgressDB) {
+	webProgressDBMu.Lock()
+	webProgressDB = p
+	webProgressDBMu.Unlock()
+}
+
+// closeWebProgressDB closes the registered progress database once (nil-safe).
+func closeWebProgressDB() {
+	webProgressDBMu.Lock()
+	p := webProgressDB
+	webProgressDB = nil
+	webProgressDBMu.Unlock()
+	if p == nil {
+		return
+	}
+	if err := p.Close(); err != nil {
+		log.Printf("[WEB]: Failed to close progress database: %v", err)
+	}
+}
 
 // closeWebStop closes webStop once.
 func closeWebStop() {
@@ -637,10 +669,12 @@ func closeDBStopChan(db *database.Database) {
 }
 
 // teardownDB stops the cmd/web loops (webStop) and the database background tasks
-// (db.StopChan), waits for db.WG at most webShutdownWait and shuts the database down.
+// (db.StopChan), closes the progress database (webProgressDB), waits for db.WG at most
+// webShutdownWait and shuts the database down.
 func teardownDB(db *database.Database) error {
 	closeWebStop()
 	closeDBStopChan(db)
+	closeWebProgressDB()
 	log.Printf("[WEB]: Waiting for background tasks to finish...")
 	done := make(chan struct{})
 	go func() {
@@ -661,6 +695,7 @@ func teardownDB(db *database.Database) error {
 // exitAfterDB is the only way out of cmd/web once the database is open (D5): it tears
 // the database down (teardownDB) and then exits with code.
 func exitAfterDB(db *database.Database, code int) {
+	webExitMu.Lock() // never unlocked: os.Exit below ends the process
 	if err := teardownDB(db); err != nil {
 		log.Printf("[WEB]: Failed to shutdown database: %v", err)
 		if code == 0 {
@@ -1014,167 +1049,6 @@ func NewFetchProcessor(db *database.Database, shortHashLen int) (*processor.Proc
 	return proc, nil
 }
 
-func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHashLen int, boot bool, isleep int64, DLParChan chan struct{}, progressDB *database.ProgressDB) {
-	/* DISABLED
-	if isleep < 15 {
-		isleep = 15 // min 15 sec sleep!
-	}
-	startTime := time.Now()
-	log.Printf("[WEB]: FetchRoutine STARTED (boot=%v, useShortHashLen=%d) at %v", boot, useShortHashLen, startTime)
-
-	webmutex.Lock()
-	log.Printf("[WEB]: Acquired webmutex lock")
-	defer func() {
-		webmutex.Unlock()
-		log.Printf("[WEB]: Released webmutex lock")
-	}()
-
-	if boot {
-		log.Printf("[WEB]: Boot mode detected - waiting %v before starting...", isleep)
-		select {
-		case <-db.StopChan:
-			log.Printf("[WEB]: Shutdown detected during boot wait, exiting FetchRoutine")
-			return
-		case <-time.After(time.Duration(isleep) * time.Second):
-			log.Printf("[WEB]: Boot wait completed, starting article fetching")
-		}
-	}
-	log.Printf("[WEB]: Begin article fetching process")
-
-	defer func(isleep int64, progressDB *database.ProgressDB) {
-		duration := time.Since(startTime)
-		log.Printf("[WEB]: FetchRoutine COMPLETED after %v", duration)
-		if isleep > 30 {
-			proc.Pool.ClosePool() // Close the NNTP pool if sleep is more than 30 seconds
-		}
-		// Check if shutdown was requested before scheduling restart
-		select {
-		case <-db.StopChan:
-			log.Printf("[WEB]: Shutdown detected, not restarting FetchRoutine")
-			return
-		default:
-			// pass
-		}
-		// Sleep with shutdown check
-	wait:
-		for {
-			select {
-			case <-db.StopChan:
-				log.Printf("[WEB]: Shutdown detected during sleep, not restarting FetchRoutine")
-				return
-			case <-time.After(time.Duration(isleep) * time.Second):
-				break wait
-			}
-		}
-		pools := ConnectPools(db) // Reconnect pools after sleep
-		if len(pools) == 0 {
-			log.Printf("[WEB]: ERROR: No enabled providers found after sleep! Cannot proceed with article fetching")
-		} else {
-			proc.Pool = pools[0] // Use the first pool
-		}
-		log.Printf("[WEB]: Sleep completed, starting new FetchRoutine goroutine")
-		go FetchRoutine(db, proc, useShortHashLen, false, isleep, DLParChan, progressDB)
-		log.Printf("[WEB]: New FetchRoutine goroutine launched")
-	}(isleep, progressDB)
-
-	log.Printf("[WEB]: Fetching newsgroups from database...")
-	groups, err := db.MainDBGetAllNewsgroups()
-	if err != nil {
-		log.Printf("[WEB]: FATAL: Could not fetch newsgroups: %v", err)
-		log.Printf("[WEB]: Warning: Could not fetch newsgroups: %v", err)
-		return
-	}
-
-	log.Printf("[WEB]: Found %d newsgroups in database", len(groups))
-
-	// Check for data integrity issues
-	emptyNameCount := 0
-	for _, group := range groups {
-		if group.Name == "" {
-			emptyNameCount++
-			log.Printf("[WEB]: WARNING: Found newsgroup with empty name (ID: %d)", group.ID)
-		}
-	}
-	if emptyNameCount > 0 {
-		log.Printf("[WEB]: WARNING: Found %d newsgroups with empty names - this indicates a data integrity issue", emptyNameCount)
-	}
-
-	// Configure bridges if enabled
-	if enableFediverse || enableMatrix {
-		bridgeConfig := &processor.BridgeConfig{
-			FediverseEnabled:  enableFediverse,
-			FediverseDomain:   fediverseDomain,
-			FediverseBaseURL:  fediverseBaseURL,
-			MatrixEnabled:     enableMatrix,
-			MatrixHomeserver:  matrixHomeserver,
-			MatrixAccessToken: matrixAccessToken,
-			MatrixUserID:      matrixUserID,
-		}
-		proc.EnableBridges(bridgeConfig)
-		log.Printf("[WEB]: Bridge configuration applied")
-	} else {
-		log.Printf("[WEB]: No bridges enabled (use --enable-fediverse or --enable-matrix to enable)")
-	}
-
-	log.Printf("[WEB]: Starting to process %d newsgroups...", len(groups))
-	processedCount := 0
-	upToDateCount := 0
-	errorCount := 0
-
-	for i, group := range groups {
-		// Check for shutdown before processing each group
-		select {
-		case <-db.StopChan:
-			log.Printf("[WEB]: Shutdown detected, stopping newsgroup processing at group %d/%d", i+1, len(groups))
-			return
-		default:
-			// Continue processing
-		}
-
-		// Skip groups with empty names
-		if group.Name == "" {
-			log.Printf("[WEB]: [%d/%d] Skipping group with empty name (ID: %d)", i+1, len(groups), group.ID)
-			errorCount++
-			continue
-		}
-
-		log.Printf("[WEB]: [%d/%d] Processing group: %s (ID: %d)", i+1, len(groups), group.Name, group.ID)
-
-		// Register newsgroup with bridges if enabled
-		if proc.BridgeManager != nil {
-			if err := proc.BridgeManager.RegisterNewsgroup(group); err != nil {
-				log.Printf("web.main.go: [%d/%d] Warning: Failed to register group %s with bridges: %v", i+1, len(groups), group.Name, err)
-			}
-		}
-
-		// Check if the group is in sections DB
-		err := proc.DownloadArticles(group.Name, ignoreInitialTinyGroups, DLParChan, progressDB, 0 ,0)
-		if err != nil {
-			if err.Error() == "up2date" {
-				log.Printf("[WEB]: [%d/%d] Group %s is up to date, skipping", i+1, len(groups), group.Name)
-				upToDateCount++
-			} else {
-				log.Printf("[WEB]: [%d/%d] ERROR processing group %s: %v", i+1, len(groups), group.Name, err)
-				errorCount++
-
-				// If we're getting too many consecutive errors, it might be an auth issue
-				if errorCount > 10 && (processedCount+upToDateCount) == 0 {
-					log.Printf("[WEB]: WARNING: Too many consecutive errors (%d), this might indicate authentication or connection issues", errorCount)
-				}
-			}
-		} else {
-			log.Printf("[WEB]: [%d/%d] Successfully processed group %s", i+1, len(groups), group.Name)
-			processedCount++
-		}
-		log.Printf("[WEB]: Progress: processed=%d, up-to-date=%d, errors=%d, remaining=%d",
-			processedCount, upToDateCount, errorCount, len(groups)-(i+1))
-	}
-	log.Printf("[WEB]: Finished processing all %d groups", len(groups))
-	log.Printf("[WEB]: FINAL SUMMARY - Total groups: %d, Successfully processed: %d, Up-to-date: %d, Errors: %d",
-		len(groups), processedCount, upToDateCount, errorCount)
-	*/
-}
-
 // findOrphanedDatabases scans data/db folder for MD5 hashed directories and checks if they correspond to newsgroups in main database
 func findOrphanedDatabases(db *database.Database, dataDir string, verbose bool) error {
 	if dataDir == "" {
@@ -1429,6 +1303,7 @@ func disableNewsgroupsNotInActiveFile(db *database.Database, activeFilePath stri
 	disabledCount := 0
 	alreadyInactiveCount := 0
 	keptActiveCount := 0
+	failedCount := 0
 
 	for _, group := range dbGroups {
 		if _, exists := activeGroups[group.Name]; !exists {
@@ -1441,6 +1316,7 @@ func disableNewsgroupsNotInActiveFile(db *database.Database, activeFilePath stri
 				}
 				if err := db.UpdateNewsgroupActive(group.Name, false); err != nil {
 					log.Printf("[WEB]: Warning: Failed to disable newsgroup '%s': %v", group.Name, err)
+					failedCount++
 					continue
 				}
 				disabledCount++
@@ -1467,5 +1343,10 @@ func disableNewsgroupsNotInActiveFile(db *database.Database, activeFilePath stri
 	log.Printf("[WEB]:   - Groups already inactive (not in active file): %d", alreadyInactiveCount)
 	log.Printf("[WEB]:   - Total groups processed: %d", len(dbGroups))
 
+	if failedCount > 0 {
+		// the other groups were processed; the run still fails (exit 1, not 0)
+		log.Printf("[WEB]:   - Groups that could not be disabled: %d", failedCount)
+		return fmt.Errorf("%d newsgroups could not be disabled (see the warnings above)", failedCount)
+	}
 	return nil
 }
