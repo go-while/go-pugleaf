@@ -115,26 +115,31 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 					}
 					replyPrefillError = "Article not found"
 				} else if err == nil {
+					// The article may be shared through the article cache: read it under its lock.
+					reply_article.Mux.RLock()
+					replySubject, replyBody, replyHeaders := reply_article.Subject, reply_article.BodyText, reply_article.HeadersJSON
+					replyFrom, replyDate := reply_article.FromHeader, reply_article.DateString
+					reply_article.Mux.RUnlock()
 					// Handle subject with "Re: " prefix
-					if !strings.HasPrefix(strings.ToLower(reply_article.Subject), "re:") {
-						article.Subject = "Re: " + models.ConvertToUTF8(reply_article.Subject)
+					if !strings.HasPrefix(strings.ToLower(replySubject), "re:") {
+						article.Subject = "Re: " + models.ConvertToUTF8(replySubject)
 					} else {
-						article.Subject = models.ConvertToUTF8(reply_article.Subject)
+						article.Subject = models.ConvertToUTF8(replySubject)
 					}
 					// The submit refuses a longer Subject: start the form within the limit.
 					article.Subject = cutToOctets(article.Subject, maxWebPostSubjectOctets)
 					// Quote the original message body
-					if reply_article.BodyText != "" {
+					if replyBody != "" {
 						// Decode the body like the article page shows it (its Content-Transfer-Encoding
 						// and charset); encoded words and HTML entities in a body are text.
-						cleanBodyText := models.DecodeBodyText(reply_article.BodyText, reply_article.HeadersJSON)
+						cleanBodyText := models.DecodeBodyText(replyBody, replyHeaders)
 						lines := strings.Split(cleanBodyText, "\n")
 						var quotedLines []string
 
 						// Add header line with properly decoded FromHeader for NNTP posting
-						cleanFromHeader := models.ConvertToUTF8(reply_article.FromHeader)
+						cleanFromHeader := models.ConvertToUTF8(replyFrom)
 						quotedLines = append(quotedLines, fmt.Sprintf("On %s, %s wrote:",
-							reply_article.DateString, cleanFromHeader))
+							replyDate, cleanFromHeader))
 						quotedLines = append(quotedLines, "")
 
 						// Quote each line with "> "

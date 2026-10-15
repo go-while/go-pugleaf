@@ -94,7 +94,7 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 		return
 	}
 
-	// Per-viewer copy (the built tree may be cached and is left untouched): nodes whose overview
+	// Per-viewer copy (defensive: the built tree is left untouched): nodes whose overview
 	// did not load get one from the group DB (treeOverviewFiller), hidden articles (D2) lose their
 	// overview for non-admins, and every remaining From is the display name the HTML tree shows
 	// (models.DisplayFrom), never the raw header with its address.
@@ -324,8 +324,8 @@ func (s *WebServer) treeOverviewFiller(groupDB *database.GroupDB, enabled bool) 
 	}
 }
 
-// treeForViewer returns a deep copy of tree (nodes and NodeMap) for one response; tree may be
-// cached and shared between requests and is never modified. A node without an overview gets
+// treeForViewer returns a deep copy of tree (nodes and NodeMap) for one response; tree is never
+// modified (defensive: there is no in-memory ThreadTree cache today, but callers need not care). A node without an overview gets
 // fill(articleNum) when fill is set. With redact, a node whose article is hidden (Hide > 0) has
 // no overview (as ThreadTree.RedactedCopy). With displayFrom, every remaining overview is a copy
 // whose FromHeader is models.DisplayFrom of the raw header: the author name the HTML tree shows,

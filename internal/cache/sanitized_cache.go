@@ -482,13 +482,17 @@ func (sc *SanitizedCache) cleanup() {
 		delsize += size
 		removed++
 	}
+	// Subtract inside the sc.mutex section (as evictOldest and BatchSetArticles do): a Clear
+	// between the unlock and the subtraction would otherwise leave cachedSize negative.
+	if removed > 0 {
+		sc.countermux.Lock()
+		sc.cachedSize -= delsize
+		sc.countermux.Unlock()
+	}
 	sc.mutex.Unlock()
 
 	if removed == 0 {
 		return
 	}
-	sc.countermux.Lock()
-	sc.cachedSize -= delsize
-	sc.countermux.Unlock()
 	log.Printf("SanitizedCache: cleanup: removed %d entries (%d bytes) from cache", removed, delsize)
 }
