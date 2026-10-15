@@ -64,10 +64,15 @@
    closed A-web-6…10/12/14/16/18/19, A-db-7/8/10/14, A-tools-6…21, A-ops-6…8/10/11/12/17, A-intake-10 (the
    fetcher's eternal-september/blueworldhosting caps stay by user decision; the 441 attempt counter is in `issues.md`);
    A-db-3 and A-db-4 were closed by `nntp-intake-injection` (d27c46d, 2b13adf; one A-db-3 remnant, the
-   `ExistsMsgIdInArticlesDB` caller in `proc_DLArt.go`, goes with plan `followup-leftovers`). Deferred with a hand-off
+   `ExistsMsgIdInArticlesDB` caller in `proc_DLArt.go`, closed by `followup-leftovers`). Deferred with a hand-off
    note and a user decision (2026-10-15: stay deferred): history fail-stop exits (Q3), A-ops-13/14/16, nonce-based CSP
-   (Q5). A-tools-5b (fetch progress before commit) and the govulncheck toolchain upgrade (Q4) are in plan
-   `followup-leftovers`.
+   (Q5).
+ - Plan `followup-leftovers` (2026-10-15): A-tools-5b closed (the fetcher records progress only after the batch writer
+   committed the group's articles: `SQ3batch.WaitCommitted`); Q4 closed (`toolchain go1.27.2`, `go 1.26.0`, x/net
+   v0.60.0, quic-go v0.59.1: govulncheck reports 0 reachable vulnerabilities, 1 module-only finding GO-2026-5932 for
+   the unused x/crypto/openpgp); `tests.yml` runs vet and the race suite on every push/PR; post-queue rows park after
+   `PostQueueMaxAttempts` (default 5) upstream 441 rejections (migration 0030, admin Retry); one ACTIVE NNTP account per
+   web user (migration 0031, partial unique index); plus the small web/ops/nntp leftovers listed in the plan's Outcome.
  - Plan `test-timing-hardening` (2026-10-15): tests no longer assert on wall-clock upper bounds under 10x; hang guards
    come from `PUGLEAF_TEST_DEADLINE` (default 60 s); the NNTP server counts delay sites (`ErrorDelayCount`,
    `ArticleDelayCount`) for structural checks; the auth timing-enumeration test was removed on purpose. Its stress
