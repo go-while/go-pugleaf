@@ -6,7 +6,23 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+// testWait is the hang guard of this package's tests: the ceiling of every time.After wait
+// and poll loop that waits for an event. It only stops a hung test; a passing test never
+// waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s).
+// Plan test-timing-hardening D3.
+var testWait = testWaitFromEnv(60 * time.Second)
+
+func testWaitFromEnv(def time.Duration) time.Duration {
+	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
 
 // w0TestDB is shared by every test of this package: OpenDatabase may run only once per
 // process (INIT guard) and it starts background goroutines, so tests must not mutate

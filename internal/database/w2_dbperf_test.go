@@ -172,16 +172,23 @@ func TestW2DBPerfTTLCacheConcurrent(t *testing.T) {
 	}
 	// invalidate only while every reader is inside its loop, so gets and invalidations overlap
 	running.Wait()
-	deadline := time.Now().Add(200 * time.Millisecond)
-	for time.Now().Before(deadline) {
+	// Count-based, not a time window: keep invalidating until at least 100 invalidations
+	// and 100 gets have overlapped. testWait only stops a hung or starved test.
+	const want = 100
+	deadline := time.Now().Add(testWait)
+	invalidations := 0
+	for (invalidations < want || gets.Load() < want) && !t.Failed() {
+		if time.Now().After(deadline) {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("readers did only %d gets during %d invalidations within %v", gets.Load(), invalidations, testWait)
+		}
 		c.invalidate()
+		invalidations++
 		time.Sleep(50 * time.Microsecond)
 	}
 	close(stop)
 	wg.Wait()
-	if n := gets.Load(); n < 100 {
-		t.Fatalf("readers did only %d gets while invalidating", n)
-	}
 }
 
 func TestW2DBPerfSiteNewsCacheInvalidation(t *testing.T) {

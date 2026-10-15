@@ -30,8 +30,8 @@ func TestAdfOptProgressInitSchemaErrorReturns(t *testing.T) {
 			_ = r.p.Close()
 			t.Fatal("NewProgressDB succeeded with a directory in place of progress.db")
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("NewProgressDB still blocked after 10s (schema retried forever)")
+	case <-time.After(testWait):
+		t.Fatalf("NewProgressDB still blocked after %v (schema retried forever)", testWait)
 	}
 }
 

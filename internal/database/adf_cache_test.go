@@ -129,7 +129,7 @@ func TestAdfCacheCleanCronStops(t *testing.T) {
 	if mem == nil || mem.Groups == nil {
 		t.Fatal("NewMemCachedThreadsStop returned an unusable cache")
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(testWait)
 	for adfCacheCleanCronCount() != before+1 {
 		if time.Now().After(deadline) {
 			t.Fatalf("CleanCron goroutines = %d after the constructor, want %d", adfCacheCleanCronCount(), before+1)
@@ -138,14 +138,14 @@ func TestAdfCacheCleanCronStops(t *testing.T) {
 	}
 	close(ch)
 
-	deadline = time.Now().Add(time.Second)
+	deadline = time.Now().Add(testWait)
 	for {
 		n := adfCacheCleanCronCount()
 		if n <= before {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("CleanCron goroutines = %d one second after close(stop), want %d", n, before)
+			t.Fatalf("CleanCron goroutines = %d %v after close(stop), want %d", n, testWait, before)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

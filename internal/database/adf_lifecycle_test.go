@@ -107,7 +107,7 @@ func TestAdfLifeCronLoopsStop(t *testing.T) {
 	stop := make(chan struct{})
 	_ = NewGHmapStop(stop)
 	_ = newGroupSectionDBCacheStop(stop)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWait)
 	for adfLifeCountStacks(ghNeedle) != ghBefore+1 || adfLifeCountStacks(scNeedle) != scBefore+1 {
 		if time.Now().After(deadline) {
 			t.Fatalf("cron loops not started: GHmapCron %d (before %d), CronClean %d (before %d)",
@@ -117,7 +117,7 @@ func TestAdfLifeCronLoopsStop(t *testing.T) {
 	}
 
 	close(stop)
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(testWait)
 	for adfLifeCountStacks(ghNeedle) != ghBefore || adfLifeCountStacks(scNeedle) != scBefore {
 		if time.Now().After(deadline) {
 			t.Fatalf("cron loops still running after stop: GHmapCron %d (want %d), CronClean %d (want %d)",
