@@ -1,12 +1,9 @@
 ---
 name: Tests
 
+# Manual only (user decision 2026-10-15): run it from the Actions tab or with `gh workflow run tests.yml`.
 "on":
-  push:
-    branches:
-      - testing-001
-      - main
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read

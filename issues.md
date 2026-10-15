@@ -1,6 +1,8 @@
 # Issues (ideas and follow-ups not tied to a plan)
 
 - **CI on push/PR (`.github/workflows/tests.yml`)** — recorded 2026-10-15 during `audit-delta-fixes` (plan Q2, OPS-4g).
+  RESOLVED 2026-10-15: `tests.yml` exists (plan `followup-leftovers`) but runs on `workflow_dispatch` only, by user
+  decision after the first push run; trigger it with `gh workflow run tests.yml` when wanted. The original proposal:
   Today the only workflow, `release.yml`, runs on a `v*` tag or a manual dispatch; pushes to `testing-001` and pull
   requests get no check from GitHub. Proposed: `tests.yml` on `push` (branches `testing-001`, `main`) and
   `pull_request` with the same `test` job the release workflow gets from D12 (`go vet ./...`, `go test -race` over the

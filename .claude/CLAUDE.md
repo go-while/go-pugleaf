@@ -25,7 +25,7 @@ go test -race ./internal/database/... ./internal/web/... ./internal/history/... 
               ./cmd/post-queue/... ./cmd/import-flat-files/... ./cmd/rslight-importer/... ./cmd/fix-references/... \
               ./cmd/fix-thread-activity/... ./cmd/audit-web-posts/... ./cmd/extract_hierarchies/... \
               ./cmd/merge-active/... ./cmd/merge-descriptions/... ./cmd/nntp-transfer/... ./cmd/usermgr/...
-# the same list runs in CI (.github/workflows/tests.yml); PUGLEAF_TEST_DEADLINE (default 60s) bounds the test hang guards
+# the same list runs in .github/workflows/tests.yml (manual: `gh workflow run tests.yml`); PUGLEAF_TEST_DEADLINE (default 60s) bounds the test hang guards
 ```
 - `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` lists the open NNTP known bugs (fails on purpose);
   a fixed bug makes its `knownBug` marker fail until the marker is removed (see `docs/audit/README.md`).

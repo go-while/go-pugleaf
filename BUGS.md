@@ -70,7 +70,7 @@
  - Plan `followup-leftovers` (2026-10-15): A-tools-5b closed (the fetcher records progress only after the batch writer
    committed the group's articles: `SQ3batch.WaitCommitted`); Q4 closed (`toolchain go1.27.2`, `go 1.26.0`, x/net
    v0.60.0, quic-go v0.59.1: govulncheck reports 0 reachable vulnerabilities, 1 module-only finding GO-2026-5932 for
-   the unused x/crypto/openpgp); `tests.yml` runs vet and the race suite on every push/PR; post-queue rows park after
+   the unused x/crypto/openpgp); `tests.yml` runs vet and the race suite on manual dispatch (user decision: not on push/PR); post-queue rows park after
    `PostQueueMaxAttempts` (default 5) upstream 441 rejections (migration 0030, admin Retry); one ACTIVE NNTP account per
    web user (migration 0031, partial unique index); plus the small web/ops/nntp leftovers listed in the plan's Outcome.
  - Plan `test-timing-hardening` (2026-10-15): tests no longer assert on wall-clock upper bounds under 10x; hang guards
