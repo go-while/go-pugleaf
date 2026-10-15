@@ -1,4 +1,4 @@
-// Real NNTP provider test for go-pugleaf
+// Command nntp-fetcher downloads articles from the configured NNTP provider into go-pugleaf.
 package main
 
 import (
@@ -30,25 +30,47 @@ const BW_V4_Prefix = "24.182.239.6"   // news.blueworldhosting.com.
 const ET_V4 = "157.180.91.226"        // news.eternal-september.org.
 const ET_V6 = "2a01:4f9:c012:f55a::1" // news.eternal-september.org.
 
-// showUsageExamples displays usage examples for connection testing
+// showUsageExamples prints the -help text: what the fetcher does and examples
+// that use only the flags defined in main.
 func showUsageExamples() {
-	fmt.Println("\n=== NNTP Fetcher - Connection Testing Examples ===")
-	fmt.Println("The NNTP fetcher is used for testing connections and downloading articles.")
-	fmt.Println("For newsgroup analysis, use the separate nntp-analyze command.")
+	fmt.Println("\n=== NNTP Fetcher (cmd/nntp-fetcher, built as build/pugleaf-fetcher) ===")
+	fmt.Println("Downloads articles from the first enabled provider into the local database, and")
+	fmt.Println("can add groups from the provider's newsgroup list to the database.")
+	fmt.Println("Each run fetches at most -max-batch articles per group and then exits (run it from cron).")
+	fmt.Println("For newsgroup analysis use cmd/nntp-analyze instead.")
 	fmt.Println()
-	fmt.Println("Connection Testing:")
-	fmt.Println("  ./nntp-fetcher -test-conn -group alt.test")
+	fmt.Println("All flags: ./pugleaf-fetcher -h")
+	fmt.Println("Every mode reads and writes the databases below -data (default ./data).")
+	fmt.Println("-nntphostname is needed on the first run; later runs reuse the value stored in the database.")
 	fmt.Println()
-	fmt.Println("Article Downloading:")
-	fmt.Println("  ./nntp-fetcher -group alt.* (downloads all groups with prefix alt.*)")
-	fmt.Println("  ./nntp-fetcher -group alt.test")
-	fmt.Println("  ./nntp-fetcher -group alt.test -download-start-date 2024-12-31")
+	fmt.Println("Article downloading (active groups that exist in the database and on the provider):")
+	fmt.Println("  ./pugleaf-fetcher -data ./data -nntphostname news.example.org   (first run: store the hostname)")
+	fmt.Println("  ./pugleaf-fetcher                     (all active groups; -group '' and -group '$all' do the same)")
+	fmt.Println("  ./pugleaf-fetcher -group alt.test")
+	fmt.Println("  ./pugleaf-fetcher -group 'alt.*'      (every database group with the prefix 'alt.'; quote the '*')")
+	fmt.Println("  ./pugleaf-fetcher -group alt.test -download-start-date 2024-12-31")
+	fmt.Println("                                        (rescan from that date, ignoring the stored progress)")
+	fmt.Println("  ./pugleaf-fetcher -fetch-active-only=false   (download ONLY the inactive groups)")
 	fmt.Println()
-	fmt.Println("Newsgroup List Update:")
-	fmt.Println("  ./nntp-fetcher -update-list (fetch remote newsgroup list and add new groups to database)")
+	fmt.Println("Newsgroup list update (first enabled provider; new groups are added as inactive):")
+	fmt.Println("  ./pugleaf-fetcher -fetch-newsgroups-from-remote '$all'     (dry run: list what would be added)")
+	fmt.Println("  ./pugleaf-fetcher -fetch-newsgroups-from-remote 'comp.*' -fetch-newsgroups-force   (really add them)")
+	fmt.Println("  ./pugleaf-fetcher -fetch-newsgroups-from-remote '$all' -exclude-prefix 'alt.binaries.*,de.test'")
+	fmt.Println("                                        (a trailing '*' excludes a prefix, otherwise the exact name)")
 	fmt.Println()
+	fmt.Println("Progress reset (sets the stored last article number of the primary provider, then exits):")
+	fmt.Println("  ./pugleaf-fetcher -group alt.test -reset-progress 1000   (next run starts at article 1001)")
+	fmt.Println("  Without -group, or with '$all' or a wildcard, it resets EVERY group in the database")
+	fmt.Println("  (the wildcard is not applied in this mode). Values <= 0 do nothing.")
 	fmt.Println()
-	fmt.Println("Note: For newsgroup analysis use cmd/nntp-analyze instead")
+	fmt.Println("Tuning (defaults in brackets):")
+	fmt.Println("  -max-batch N           articles per group and run, clamped to 10-1000 [1000]")
+	fmt.Println("  -max-batch-threads N   newsgroup batches processed concurrently, 1-1024 [4]")
+	fmt.Println("  -max-queue N           articles queued in db_batch over all groups [1280]")
+	fmt.Println("  -download-max-par N    groups downloaded in parallel [1]")
+	fmt.Println("  -history=false         do not use the message-id history index [true]")
+	fmt.Println("  -reuse-crossposts=false  download crossposts again instead of copying them (needs -history) [true]")
+	fmt.Println("  -useshorthashlen N     history short hash length 2-7, fixed after the first run [7]")
 	fmt.Println()
 }
 
@@ -62,23 +84,23 @@ func main() {
 	// Command line flags for NNTP fetcher configuration
 	var newsgroups []*models.Newsgroup
 	var (
-		maxBatchThreads    = flag.Int("max-batch-threads", 4, "Limit how many newsgroup batches will be processed concurrently (default: 16) more can eat your memory and disk IO!")
+		maxBatchThreads    = flag.Int("max-batch-threads", 4, "Limit how many newsgroup batches will be processed concurrently (1-1024); more can eat your memory and disk IO!")
 		maxBatch           = flag.Int("max-batch", 1000, "Maximum number of articles to process in a batch (10-1000; values above 1000 are clamped to 1000)")
 		maxQueued          = flag.Int("max-queue", 1280, "Limit db_batch to have max N articles queued over all newsgroups")
-		fetchNewsgroup     = flag.String("group", "", "Newsgroup to fetch (default: empty = all groups once up to max-batch) or rocksolid.* with final wildcard to match prefix.*")
-		nntphostname       = flag.String("nntphostname", "", "Your hostname must be set!")
-		useHistory         = flag.Bool("history", true, "maintain and use the message-id history index (data/history)")
-		useShortHashLenPtr = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
-		fetchActiveOnly    = flag.Bool("fetch-active-only", true, "Downloads only active newsgroups (default: true) To download only disabled newsgroups set to false!")
-		excludePrefix      = flag.String("exclude-prefix", "", "use with UpdateNewsgroupList to exclude newsgroups with this prefix (default: empty = no exclusion) allows comma separation and wildcards alt.*,comp.*")
-		downloadMaxPar     = flag.Int("download-max-par", 1, "run this many groups in parallel, can eat your memory! (default: 1)")
-		updateList         = flag.String("fetch-newsgroups-from-remote", "", "UpdateNewsgroupList: get remote newsgroup list from first enabled provider (default: empty, nothing. use \"group.*\" or \"\\$all\")")
-		updateListForce    = flag.Bool("fetch-newsgroups-force", false, "use with -fetch-newsgroups-from-remote .. to really add them to database")
+		fetchNewsgroup     = flag.String("group", "", "Newsgroup to fetch: a name, 'prefix.*' (final wildcard) or '$all' (default: empty = all groups once up to -max-batch)")
+		nntphostname       = flag.String("nntphostname", "", "Your NNTP hostname: required on the first run, later runs fall back to the value stored in the database")
+		useHistory         = flag.Bool("history", true, "maintain and use the message-id history index (<data>/history)")
+		useShortHashLenPtr = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7) - NOTE: cannot be changed once set!")
+		fetchActiveOnly    = flag.Bool("fetch-active-only", true, "Download only active newsgroups; set to false to download ONLY the inactive newsgroups")
+		excludePrefix      = flag.String("exclude-prefix", "", "use with -fetch-newsgroups-from-remote: comma-separated names to exclude; a final * excludes a prefix, e.g. alt.*,comp.lang.c (default: empty = no exclusion)")
+		downloadMaxPar     = flag.Int("download-max-par", 1, "download this many groups in parallel, can eat your memory!")
+		updateList         = flag.String("fetch-newsgroups-from-remote", "", "get the newsgroup list from the first enabled provider and list the groups missing in the database ('group.*', a name prefix or '$all'); dry run unless -fetch-newsgroups-force is set; exits afterwards")
+		updateListForce    = flag.Bool("fetch-newsgroups-force", false, "use with -fetch-newsgroups-from-remote to really add the new groups to the database (as inactive)")
 		dataDir            = flag.String("data", "./data", "Directory to store database files")
 		reuseCrossposts    = flag.Bool("reuse-crossposts", true, "copy crossposted articles already stored in another group (needs history) instead of downloading them again")
 		// Download options with date filtering
-		downloadStartDate = flag.String("download-start-date", "", "Start downloading articles from this date (YYYY-MM-DD format)")
-		resetProgress     = flag.Int64("reset-progress", 0, "Reset download progress for all newsgroups on primary provider")
+		downloadStartDate = flag.String("download-start-date", "", "Rescan from this date (YYYY-MM-DD), ignoring the stored progress")
+		resetProgress     = flag.Int64("reset-progress", 0, "Set the stored last article number of the primary provider to N for the -group selection (empty/$all/wildcard: every group in the database) and exit; 0 = off")
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
 	)
 	flag.Parse()
@@ -283,7 +305,7 @@ func main() {
 		log.Fatalf("No provider backend available: '%#v'", proc.Pool.Backend.Provider)
 	}
 	log.Printf("[FETCHER]: Provider: %s @ MaxConns: %d", proc.Pool.Backend.Provider.Name, proc.Pool.Backend.MaxConns)
-	DownloadMaxPar := *downloadMaxPar // unchangeable (code not working yet)
+	DownloadMaxPar := *downloadMaxPar // -download-max-par: number of download workers (groups fetched in parallel); TodoQ capacity stays processor.DownloadMaxPar
 	DLParChan := make(chan struct{}, DownloadMaxPar)
 	var mux sync.Mutex
 	var downloaded, queued, notfound, todo uint64

@@ -83,7 +83,7 @@ golangci-lint run
 # Requires "web" folder with templates to be present
 
 # NNTP fetcher for downloading articles
-./build/pugleaf-fetcher -group alt.test -test-conn
+./build/pugleaf-fetcher -group alt.test
 
 # NNTP server for serving articles
 ./build/pugleaf-nntp-server -port 1119
