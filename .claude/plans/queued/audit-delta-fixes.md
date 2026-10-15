@@ -175,6 +175,12 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
   commit-acknowledged high-water mark from the batch writer (a design, not a fix).
 - **A-ops-3d** (`cmd/history-rebuild/main.go:161`) and **A-ops-3f** (`cmd/nntp-transfer/main.go:347`): done by
   `nntp-client-transfer` (step 5a); closed here after the wave-0 grep (hand-off 3).
+- Notes from the `nntp-client-transfer` run (2026-10-15): A-ops-3d/f and the A-tools-3 client guard are in; A-tools-4 is
+  closed. Follow-up candidates this plan may pick up or record: `Pool.XHdrStreamed` still drops the stream error, so
+  `processor/proc_DLArt.go` sees a cut-off XHDR stream as a normal channel close (unchanged behaviour); `TransferResult`
+  in `internal/nntp/transfer-progress.go` and `Batch.GroupQueues`/`GetOrCreateGroupBatch` are unused; `NewsgroupExists`
+  keeps "any row exists" semantics (no caller); `.github/copilot-instructions.md:50,126` still mention `cmd/test-nntp`
+  (deleted); the `pprof.Index` page lists a `cmdline` link that answers 404.
 - **OPS-1, parts in files other plans own or the code owner froze:** `history/history.go:469` (`beginTx` `log.Fatalf`)
   and `:498` (`os.Exit(1)`, marked "DO NOT TOUCH THIS LINE OF CODE" by the author: a deliberate fail-stop so that a
   failed history write is never acknowledged; changing it is a user decision, Q3); `config/config.go:548`

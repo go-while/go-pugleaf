@@ -34,14 +34,22 @@
    moderator forwarding, local `Xref:` generation.
  - Accepted limitation (user decision 2026-10-11): the local430 negative cache keeps a 60 s TTL, so an article stored
    by another process (fetcher) answers 430 for up to 60 s (T-nntp-article-1); same-process arrivals are removed at once.
+ - **Fixed by plan `nntp-client-transfer` (2026-10-15, `.claude/plans/done/nntp-client-transfer.md`):** CLI-1 (one
+   Path line, headers relayed verbatim, dot-stuffed byte-exact bodies), CLI-2 (411 no longer panics the fetcher),
+   CLI-3 (client socket deadlines, TLS handshake timeout, no leaked sockets), CLI-4 (authenticated streaming
+   transfers no longer stall at the first CHECK), CLI-5, CLI-6 (dead peering manager and `cmd/test-nntp` removed),
+   OPS-3 (pprof only on `-pprof-port`/localhost without `cmdline`; UI on `-web-bind`, default 127.0.0.1), INT-5 `bytes`
+   half, A-nntp-client-1/2/3/4/6/7/9/10/11, A-intake-6 sender half, A-ops-3d/f (SIGTERM in history-rebuild and
+   nntp-transfer), A-tools-3 client guard, NC-1…3 (LF in outbound headers, groups re-offered after 431/errors, Redis
+   keys scoped per target). Also fixed on the way: a shutdown hang in nntp-transfer when a peer never answers.
  - Open high elsewhere: A-db-1 readers and the repair migration for existing NULL-hierarchy rows (the writer is
-   fixed), INT-5, A-db-2 (article cache grows unbounded); CLI-1…4, OPS-3 (client/transfer; pprof
-   exposes `-password`); WEB-1, WEB-2 (cron create/toggle without `-edit-cronjobs`; stored XSS via the preview);
-   A-tools-1, A-tools-2 (fetcher goroutines unbounded; `-fetch-newsgroups-from-remote` ignores `-data`); A-ops-1
-   (`recover-db` operates on `./data` while its usage text names `-db`).
+   fixed), INT-5 article-number reuse, A-db-2 (article cache grows unbounded); WEB-1, WEB-2 (cron create/toggle
+   without `-edit-cronjobs`; stored XSS via the preview); A-tools-2 (`-fetch-newsgroups-from-remote` ignores `-data`),
+   A-tools-3 fetcher half; A-ops-1 (`recover-db` operates on `./data` while its usage text names `-db`).
  - The test suite in `internal/nntp/nntp-server-*_test.go` and `cmd/nntp-server/server_e2e_test.go` marks every open
    item with `knownBug`; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` lists them (2 ids:
    RFC-1, T-nntp-article-1).
- - Fix plans: `.claude/plans/queued/{nntp-client-transfer,nntp-rfc-commands,audit-delta-fixes}.md`.
- - peering does not work: CHECK and outgoing feeds are unfinished code (CLI-6)
+ - Fix plans: `.claude/plans/queued/{nntp-rfc-commands,audit-delta-fixes}.md`.
+ - peering: the unfinished `PeeringManager` was removed (CLI-6); incoming feeds work via IHAVE/TAKETHIS, outgoing
+   feeds via `cmd/nntp-transfer` (CHECK/TAKETHIS streaming); there is no automatic peer-to-peer feed configuration.
  - the history index must be (re)built with cmd/history-rebuild for articles imported before it was enabled
