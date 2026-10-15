@@ -3,6 +3,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -385,18 +386,20 @@ func getNewsgroupsToExpire(db *database.Database, targetGroup string) ([]*models
 		}
 
 	default:
-		// Specific group
-		nga, err := db.GetActiveNewsgroupByName(targetGroup)
+		// Specific group: MainDBGetNewsgroup returns the full row, so ExpiryDays and
+		// MaxArticles are the group's settings (GetActiveNewsgroupByName selects only
+		// id, name, active; A-ops-6).
+		ng, err := db.MainDBGetNewsgroup(targetGroup)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("newsgroup '%s' not found", targetGroup)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to get newsgroup '%s': %v", targetGroup, err)
 		}
-		if nga == nil || !nga.Active {
-			return nil, fmt.Errorf("newsgroup '%s' not found or inactive", targetGroup)
+		if !ng.Active {
+			return nil, fmt.Errorf("newsgroup '%s' is inactive", targetGroup)
 		}
-		newsgroups = append(newsgroups, &models.Newsgroup{
-			Name:       targetGroup,
-			ExpiryDays: nga.ExpiryDays,
-		})
+		newsgroups = append(newsgroups, ng)
 	}
 
 	return newsgroups, nil

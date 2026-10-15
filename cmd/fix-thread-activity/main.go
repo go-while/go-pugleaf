@@ -2,14 +2,73 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/models"
 )
+
+// ftaExitTimeout bounds the wait for background goroutines in ftaExit.
+const ftaExitTimeout = 60 * time.Second
+
+var ftaStopOnce sync.Once
+
+// ftaExit tears the database down (close StopChan once, wait for the background
+// goroutines up to ftaExitTimeout, Shutdown) and exits with code. It is the only way
+// out of main once the database is open.
+func ftaExit(db *database.Database, code int) {
+	if db != nil {
+		ftaStopOnce.Do(func() {
+			if db.StopChan != nil {
+				close(db.StopChan)
+			}
+		})
+		if db.WG != nil {
+			done := make(chan struct{})
+			go func() {
+				db.WG.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(ftaExitTimeout):
+				log.Printf("[FIX-THREAD-ACTIVITY] background goroutines did not stop within %v, shutting down anyway", ftaExitTimeout)
+			}
+		}
+		if err := db.Shutdown(); err != nil {
+			log.Printf("[FIX-THREAD-ACTIVITY] database shutdown failed: %v", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	os.Exit(code)
+}
+
+// resolveNamedGroups looks every name up in the main database (A-ops-8): GetGroupDB would
+// create an empty group database for a name that is not a newsgroup. Unknown names are
+// returned in unknown; any other lookup error is returned as err.
+func resolveNamedGroups(db *database.Database, names []string) (found []*models.Newsgroup, unknown []string, err error) {
+	for _, name := range names {
+		ng, err := db.MainDBGetNewsgroup(name)
+		if errors.Is(err, sql.ErrNoRows) {
+			unknown = append(unknown, name)
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to look up newsgroup '%s': %w", name, err)
+		}
+		found = append(found, ng)
+	}
+	return found, unknown, nil
+}
 
 func main() {
 	var (
@@ -20,6 +79,7 @@ func main() {
 	flag.StringVar(&dataDir, "data", "./data", "Directory to store database files")
 	flag.Parse()
 
+	database.NO_CACHE_BOOT = true // prevents booting caches
 	dbConfig := database.DefaultDBConfig()
 	dbConfig.DataDir = dataDir
 
@@ -27,18 +87,28 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
-	defer db.Shutdown()
 
 	if groupName != "" {
+		_, unknown, err := resolveNamedGroups(db, []string{groupName})
+		if err != nil {
+			log.Printf("[FIX-THREAD-ACTIVITY] %v", err)
+			ftaExit(db, 1)
+		}
+		if len(unknown) > 0 {
+			log.Printf("[FIX-THREAD-ACTIVITY] unknown newsgroup '%s'", groupName)
+			ftaExit(db, 1)
+		}
 		log.Printf("Fixing thread activity for group: %s", groupName)
 		if err := fixGroupThreadActivity(db, groupName); err != nil {
-			log.Fatalf("Failed to fix group %s: %v", groupName, err)
+			log.Printf("Failed to fix group %s: %v", groupName, err)
+			ftaExit(db, 1)
 		}
 	} else {
 		log.Printf("Fixing thread activity for all groups...")
 		groups, err := db.MainDBGetAllNewsgroups()
 		if err != nil {
-			log.Fatalf("Failed to get newsgroups: %v", err)
+			log.Printf("Failed to get newsgroups: %v", err)
+			ftaExit(db, 1)
 		}
 
 		fixed := 0
@@ -57,6 +127,7 @@ func main() {
 		}
 		log.Printf("Completed: %d groups fixed, %d errors", fixed, errors)
 	}
+	ftaExit(db, 0)
 }
 
 func fixGroupThreadActivity(db *database.Database, groupName string) error {
