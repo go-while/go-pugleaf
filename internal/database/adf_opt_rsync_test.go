@@ -99,3 +99,29 @@ func TestAdfOptRsyncDirReal(t *testing.T) {
 		t.Fatalf("source file still present after --remove-source-files (err=%v)", err)
 	}
 }
+
+// TestAdfOptRsyncDirRelative runs the real rsync (skipped when it is not installed) on
+// relative paths that look like an option and a remote: the "./" prefix must keep
+// both local.
+func TestAdfOptRsyncDirRelative(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not installed")
+	}
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.MkdirAll("-src", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("-src", "g.db"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RsyncDIR("-src", "host:dst", true); err != nil {
+		t.Fatalf("RsyncDIR: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "host:dst", "-src", "g.db")); err != nil {
+		t.Fatalf("copied file missing in the local directory 'host:dst': %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "-src", "g.db")); !os.IsNotExist(err) {
+		t.Fatalf("source file still present after --remove-source-files (err=%v)", err)
+	}
+}

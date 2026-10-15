@@ -204,7 +204,7 @@ func TestAdfOptWebCheckpointBusy(t *testing.T) {
 	const group = "adf.optweb.busy"
 	file := adfOptWebGroupFile(t, group)
 
-	if err := checkpointGroupForCopy(adfWebCmdDB, group, 0); err != nil {
+	if err := checkpointGroupForCopy(adfWebCmdDB, group, file, 0); err != nil {
 		t.Fatalf("checkpoint of an idle group: %v", err)
 	}
 	if st, err := os.Stat(file + "-wal"); err == nil && st.Size() != 0 {
@@ -239,10 +239,13 @@ func TestAdfOptWebCheckpointBusy(t *testing.T) {
 	}
 
 	start := time.Now()
-	err = checkpointGroupForCopy(adfWebCmdDB, group, 200*time.Millisecond)
+	err = checkpointGroupForCopy(adfWebCmdDB, group, file, 200*time.Millisecond)
 	if !errors.Is(err, errGroupDBBusy) {
 		_ = tx.Rollback()
 		t.Fatalf("checkpoint with an open reader elsewhere = %v, want errGroupDBBusy", err)
+	}
+	if !strings.Contains(err.Error(), "wal_checkpoint(TRUNCATE) blocked") {
+		t.Errorf("refusal %q does not come from the busy checkpoint", err)
 	}
 	if d := time.Since(start); d > 20*time.Second {
 		t.Errorf("busy checkpoint took %v, want about the 200ms busy wait", d)
@@ -254,7 +257,7 @@ func TestAdfOptWebCheckpointBusy(t *testing.T) {
 	if err := other.Close(); err != nil {
 		t.Fatalf("close other: %v", err)
 	}
-	if err := checkpointGroupForCopy(adfWebCmdDB, group, 200*time.Millisecond); err != nil {
+	if err := checkpointGroupForCopy(adfWebCmdDB, group, file, 200*time.Millisecond); err != nil {
 		t.Fatalf("checkpoint after the reader ended: %v", err)
 	}
 }
@@ -298,5 +301,40 @@ func TestAdfOptWebRsyncInactive(t *testing.T) {
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Fatalf("source database still present after the move (err=%v)", err)
+	}
+}
+
+// TestAdfOptWebCheckpointOpenElsewhere: an idle handle on the group database in
+// another connection (as an idle web or nntp-server would hold) does not block the
+// checkpoint, but the WAL survives the close, so the group is refused; once that
+// handle is closed the group is accepted.
+func TestAdfOptWebCheckpointOpenElsewhere(t *testing.T) {
+	adfOptWebSkipDB(t)
+	const group = "adf.optweb.openelsewhere"
+	file := adfOptWebGroupFile(t, group)
+
+	other, err := sql.Open("sqlite3", file)
+	if err != nil {
+		t.Fatalf("open %s: %v", file, err)
+	}
+	defer other.Close()
+	var n int
+	if err := other.QueryRow("SELECT COUNT(*) FROM sqlite_master").Scan(&n); err != nil {
+		t.Fatalf("read through the second handle: %v", err)
+	}
+
+	err = checkpointGroupForCopy(adfWebCmdDB, group, file, 200*time.Millisecond)
+	if !errors.Is(err, errGroupDBBusy) {
+		t.Fatalf("checkpoint with an idle handle elsewhere = %v, want errGroupDBBusy", err)
+	}
+	if !strings.Contains(err.Error(), "-wal still exists") {
+		t.Errorf("refusal %q does not come from the leftover WAL", err)
+	}
+
+	if err := other.Close(); err != nil {
+		t.Fatalf("close other: %v", err)
+	}
+	if err := checkpointGroupForCopy(adfWebCmdDB, group, file, 200*time.Millisecond); err != nil {
+		t.Fatalf("checkpoint after the second handle was closed: %v", err)
 	}
 }

@@ -327,19 +327,37 @@ func rsyncFlagsError(newdatadir string, removeSource, force bool) error {
 	return errors.New("-rsync-remove-source deletes the source group databases after the copy: add -force to confirm (stop fetcher, nntp-server and web first)")
 }
 
-// errGroupDBBusy is returned by checkpointGroupForCopy when the WAL checkpoint of a
-// group database is blocked: another connection (normally another process) uses it.
+// errGroupDBBusy is returned by checkpointGroupForCopy when a group database is still
+// in use elsewhere: its WAL checkpoint is blocked or its WAL survives the close.
 var errGroupDBBusy = errors.New("group database is busy (open elsewhere?)")
 
-// checkpointGroupForCopy prepares one group database for a file copy (A-ops-11): it
-// opens the group, runs PRAGMA wal_checkpoint(TRUNCATE) so the WAL content is in the
-// .db file, and closes the group again so this process holds no handle on it. A
-// checkpoint that reports busy (a reader or writer on another connection blocked it)
-// returns an error wrapping errGroupDBBusy: the group must not be copied. busyWait > 0
-// bounds how long the checkpoint waits for those locks; 0 keeps the connection's
-// busy_timeout. The checkpoint runs on one pinned connection (busy_timeout is per
-// connection) and not through the Retryable* helpers: busy means refuse, not retry.
-func checkpointGroupForCopy(db *database.Database, newsgroup string, busyWait time.Duration) (err error) {
+// checkpointGroupForCopy prepares one group database (dbFile is its .db file) for a
+// file copy (A-ops-11): it opens the group, runs PRAGMA wal_checkpoint(TRUNCATE) so the
+// WAL content is in the .db file, and closes the group again so this process holds no
+// handle on it. The group must not be copied (error wrapping errGroupDBBusy) when
+//   - the checkpoint reports busy (a reader or writer on another connection blocked it), or
+//   - dbFile-wal still exists after the close: SQLite removes the WAL on the last close
+//     only, so another process (an idle fetcher, nntp-server or web) still has it open.
+//
+// busyWait > 0 bounds how long the checkpoint waits for locks; 0 keeps the
+// connection's busy_timeout.
+func checkpointGroupForCopy(db *database.Database, newsgroup, dbFile string, busyWait time.Duration) error {
+	if err := checkpointAndCloseGroup(db, newsgroup, busyWait); err != nil {
+		return err
+	}
+	walFile := dbFile + "-wal"
+	if _, err := os.Stat(walFile); err == nil {
+		return fmt.Errorf("group database %s: %s still exists after the close (another process has the database open): %w", newsgroup, walFile, errGroupDBBusy)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("group database %s: stat %s: %w", newsgroup, walFile, err)
+	}
+	return nil
+}
+
+// checkpointAndCloseGroup runs the checkpoint of checkpointGroupForCopy and closes the
+// group. The checkpoint runs on one pinned connection (busy_timeout is per connection)
+// and not through the Retryable* helpers: busy means refuse, not retry.
+func checkpointAndCloseGroup(db *database.Database, newsgroup string, busyWait time.Duration) (err error) {
 	groupDB, err := db.GetGroupDB(newsgroup)
 	if err != nil {
 		return fmt.Errorf("open group database %s: %w", newsgroup, err)
@@ -354,7 +372,11 @@ func checkpointGroupForCopy(db *database.Database, newsgroup string, busyWait ti
 	if err != nil {
 		return fmt.Errorf("group database %s: get connection: %w", newsgroup, err)
 	}
-	defer conn.Close()
+	defer func() {
+		if cerr := conn.Close(); cerr != nil {
+			log.Printf("[RSYNC]: Warning: group database %s: close connection: %v", newsgroup, cerr)
+		}
+	}()
 	if busyWait > 0 {
 		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", busyWait.Milliseconds())); err != nil {
 			return fmt.Errorf("group database %s: set busy_timeout: %w", newsgroup, err)
@@ -425,7 +447,7 @@ func rsyncInactiveGroupsToDir(db *database.Database, newdatadir string, removeSo
 			continue
 		}
 		// fold the WAL into the .db file and close the group; a busy group is refused
-		if err := checkpointGroupForCopy(db, newsgroup, 0); err != nil {
+		if err := checkpointGroupForCopy(db, newsgroup, groupDBfileOld, 0); err != nil {
 			if errors.Is(err, errGroupDBBusy) {
 				log.Printf("[RSYNC]: REFUSED %s: %v (stop fetcher, nntp-server and web, then run again)", newsgroup, err)
 				refused++
