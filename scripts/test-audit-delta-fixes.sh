@@ -242,22 +242,26 @@ else
   fail E10 adf-web-cmd "-nntptcpport is logged as ignored and nothing listens" "ignored_line=$(grep -c 'are ignored' "$LOG10") listening=$nntp_listen"
 fi
 
-# ---------------------------------------------------------------- E11 (adf-web-cmd): -disable-active refuses a useless or sweeping file
+# ---------------------------------------------------------------- E11 (adf-web-cmd): -disable-active refuses an empty keep set, honours dry-run, accepts 1-field lines
 active0=$(q "SELECT count(*) FROM newsgroups WHERE active=1")
 printf '# newsgroups.descriptions header only\n\n' > "$DATA/active-empty.txt"
 printf 'adf.e2e.a\n' > "$DATA/active-one.txt"
 ( cd "$RUN" && exec timeout 120 "$BIN_ABS" -data "$DATA_ABS" -webport "$((PORT+2))" -nntphostname "$NNTPHOST" -disable-active "$DATA_ABS/active-empty.txt" ) >"$DATA/disable-active-1.log" 2>&1
 rc1=$?
 active1=$(q "SELECT count(*) FROM newsgroups WHERE active=1")
-q "UPDATE newsgroups SET active=1 WHERE name LIKE 'adf.e2e.%'"   # undo a baseline regression before the second run
-( cd "$RUN" && exec timeout 120 "$BIN_ABS" -data "$DATA_ABS" -webport "$((PORT+2))" -nntphostname "$NNTPHOST" -disable-active "$DATA_ABS/active-one.txt" ) >"$DATA/disable-active-2.log" 2>&1
+q "UPDATE newsgroups SET active=1 WHERE name LIKE 'adf.e2e.%'"   # undo a baseline regression before the next run
+( cd "$RUN" && exec timeout 120 "$BIN_ABS" -data "$DATA_ABS" -webport "$((PORT+2))" -nntphostname "$NNTPHOST" -disable-active "$DATA_ABS/active-one.txt" -disable-active-dry-run ) >"$DATA/disable-active-2.log" 2>&1
 rc2=$?
 active2=$(q "SELECT count(*) FROM newsgroups WHERE active=1")
 q "UPDATE newsgroups SET active=1 WHERE name LIKE 'adf.e2e.%'"
-if [ "$rc1" != 0 ] && [ "$active1" = "$active0" ] && [ "$rc2" != 0 ] && [ "$active2" = "$active0" ]; then
-  pass E11 adf-web-cmd "-disable-active refuses an empty keep set and a >50% sweep without -disable-active-force"
+( cd "$RUN" && exec timeout 120 "$BIN_ABS" -data "$DATA_ABS" -webport "$((PORT+2))" -nntphostname "$NNTPHOST" -disable-active "$DATA_ABS/active-one.txt" ) >"$DATA/disable-active-3.log" 2>&1
+rc3=$?
+kept=$(q "SELECT group_concat(name) FROM newsgroups WHERE active=1 ORDER BY name")
+q "UPDATE newsgroups SET active=1 WHERE name LIKE 'adf.e2e.%'"
+if [ "$rc1" != 0 ] && [ "$active1" = "$active0" ] && [ "$rc2" = 0 ] && [ "$active2" = "$active0" ] && [ "$rc3" = 0 ] && [ "$kept" = adf.e2e.a ]; then
+  pass E11 adf-web-cmd "-disable-active: empty keep set refused, dry-run changes nothing, 1-field list applied"
 else
-  fail E11 adf-web-cmd "-disable-active refuses an empty keep set and a >50% sweep without -disable-active-force" "empty: rc=$rc1 active=$active0->$active1; one-of-three: rc=$rc2 active=$active0->$active2"
+  fail E11 adf-web-cmd "-disable-active: empty keep set refused, dry-run changes nothing, 1-field list applied" "empty: rc=$rc1 active=$active0->$active1; dry-run: rc=$rc2 active=$active0->$active2; applied: rc=$rc3 kept='$kept' (want adf.e2e.a)"
 fi
 
 # ---------------------------------------------------------------- E12 (adf-web-cmd): -useshorthashlen out of range

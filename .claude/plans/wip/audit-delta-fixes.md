@@ -326,10 +326,10 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
   command line, which counts as explicit) and `-force`; without them the tool prints what it would do and
   exits 2. `-rewritedates` updates only `date_sent` and skips (and reports) strings that `ParseNNTPDateStrict`
   rejects.
-- **D14 `-disable-active` (A-ops-4).** Refuse (exit 1, nothing changed) when the file yields no group names, or when
-  more than 50 % of the active groups would be disabled, unless `-disable-active-force` (the 50 % threshold is a
-  user question, Q10). `-disable-active-dry-run`
-  prints the groups instead of updating. Lines with one field (a plain group list) are accepted.
+- **D14 `-disable-active` (A-ops-4).** Refuse (exit 1, nothing changed) when the file yields no group names.
+  `-disable-active-dry-run` prints the groups instead of updating. Lines with one field (a plain group list) are
+  accepted. **No percentage threshold and no `-disable-active-force` (user decision 2026-10-15, Q10: "there is no cut
+  off needed. there was none, we need none. the dry-run makes sense.").**
 - **D15 Cursor-mode paging (FU:E12).** Cursor mode suppresses Previous and Next (`HasPrev = HasNext = false` in the
   cursor `PaginationInfo` literal); the cursor wiring that D1 of `web-db-followups` declined stays out of scope.
 - **D16 A-tools-1 routing.** Handed to `nntp-intake-injection` (hand-off 1), not implemented in a database file, for
@@ -390,8 +390,8 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
   - `adf-db-batch`: migration `0010_single_article_num_seq.sql`, `SQ3batch.dividerChan`, `SQ3batch.queuedN`
     (if an atomic is used), `(*Database).DeleteSpamRowsForArticles` (new file `database/article_num_cleanup.go`),
     expire-news `deleteDerivedThreadRows`.
-  - `adf-web-cmd`: `exitAfterDB`, `fatalAfterDB`, `webStop` (channel), `disableActiveOpts`, flags
-    `-disable-active-dry-run`, `-disable-active-force`.
+  - `adf-web-cmd`: `exitAfterDB`, `fatalAfterDB`, `webStop` (channel), `disableActiveOpts`, flag
+    `-disable-active-dry-run`.
 - **K3: tests.**
   - Package `web` tests use the existing w0 harness (`internal/web/testmain_test.go`: `w0Srv`, `w0Do(t, w0Req{…})`,
     `w0NewUser`, `w0NewGroup`, `w0DB`, `w0Name`, `lo1CoreSetAPIEnabled`); package `database` tests use `w0DB`/`w0Name`
@@ -1219,12 +1219,13 @@ Changes:
    never the raw CLI value (`main_functions.go:656-657`). The help text says "legacy, no effect on the message-id
    history schema".
 5. **A-ops-4 (D14).** `disableNewsgroupsNotInActiveFile(db, path string, opts disableActiveOpts)` with
-   `opts.DryRun`, `opts.Force` from the new flags; accept 1-field lines; refuse an empty keep set and > 50 % disables
-   unless `Force`; `DryRun` prints and changes nothing.
+   `opts.DryRun` from the new flag; accept 1-field lines; refuse an empty keep set (error, nothing changed);
+   `DryRun` prints and changes nothing. No percentage threshold, no force flag (Q10 answered).
 6. **Tests** `adf_web_test.go` (`TestMain` per K3; seed 4 active groups with `InsertNewsgroup`):
-   `TestAdfWebCmdDisableActiveEmptyFile` (a descriptions-format file → error, all 4 still active);
-   `TestAdfWebCmdDisableActiveThreshold` (file with 1 of 4 → refused without Force, applied with Force);
-   `TestAdfWebCmdDisableActiveDryRun`; `TestAdfWebCmdPlainList` (1-field lines accepted).
+   `TestAdfWebCmdDisableActiveEmptyFile` (a file with only comments/blank lines → error, all 4 still active);
+   `TestAdfWebCmdDisableActiveOneOfFour` (file with 1 of 4 → applied: 1 active, 3 disabled);
+   `TestAdfWebCmdDisableActiveDryRun` (same file, DryRun → all 4 still active);
+   `TestAdfWebCmdPlainList` (1-field lines accepted).
 
 Acceptance: E01, E10, E11, E12 PASS; tests pass; `./build_webserver.sh` builds.
 
@@ -1375,8 +1376,10 @@ Checks:
   `SELECT count(*) FROM newsgroups WHERE hierarchy IS NULL` = 0.
 - **E10** (OPS-2a) a separate short start with `-nntptcpport 21998` on port `$((PORT+1))`: the log has `are ignored`
   and nothing listens on 21998; stop it.
-- **E11** (A-ops-4) `$BIN -data "$DATA" -webport $((PORT+2)) -nntphostname "$NNTPHOST" -disable-active <descriptions-format file>` → exit
-  ≠ 0, `SELECT count(*) FROM newsgroups WHERE active=1` unchanged (server stopped while it runs).
+- **E11** (A-ops-4, server stopped) `$BIN -data "$DATA" -webport $((PORT+2)) -nntphostname "$NNTPHOST" -disable-active <file>`:
+  a comment-only file → exit ≠ 0, `SELECT count(*) FROM newsgroups WHERE active=1` unchanged; a one-line list
+  `adf.e2e.a` with `-disable-active-dry-run` → exit 0, unchanged; the same list without dry-run → exit 0, only
+  `adf.e2e.a` active (1-field lines accepted). Active flags restored afterwards.
 - **E12** (OPS-4b) a fresh scratch root `$DATA/fresh`: first start on port `$((PORT+3))` with `-useshorthashlen 9`
   reaches `/ping`; stop.
 - **E13** (A-tools-2) with the web server stopped (it holds the main DB), guard first: `SELECT count(*) FROM providers WHERE enabled=1` must be 0 (else `fail` and skip:
@@ -1420,6 +1423,7 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
   opt-in) and the matching `.claude/CLAUDE.md` sentence? Production binaries from `build_ALL.sh` would stop being race
   builds. `.claude/CLAUDE.md` is edited only on a yes.
 - **Q10** D14: is 50 % the right threshold for `-disable-active` to refuse without `-disable-active-force`?
+  **Answered 2026-10-15: no threshold, no force flag; only the empty-keep-set refusal and `-disable-active-dry-run`.**
 
 ## Progress
 
@@ -1454,7 +1458,7 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
 - Baseline checks on 4eb92da: gofmt = 2 baseline files only; vet OK; build OK; race run over the 15 package sets all ok
   (`internal/cache`, `internal/models`, `cmd/web`, `cmd/nntp-fetcher`, `cmd/recover-db`, `cmd/tcp2tor` have no tests
   yet); known bugs: `T-nntp-article-1` only.
-- `scripts/test-audit-delta-fixes.sh` written (E01–E19; E11 is two-part: comment-only file and a 1-of-3 list;
+- `scripts/test-audit-delta-fixes.sh` written (E01–E19; E11 is three-part: comment-only file, 1-of-3 list dry-run, 1-of-3 list applied;
   E09 drops the `0029` `schema_migrations` row before the restart so the repair runs on the seeded NULL row, and deletes
   the row afterwards; a third group `adf.e2e.c` is seeded for the E11 threshold). Baseline run
   (`PORT=18998 DATA=./data-test-audit-delta-fixes`): `SUMMARY pass=1 fail=16 info=2`; only E19 passes, E17/E18 INFO.
