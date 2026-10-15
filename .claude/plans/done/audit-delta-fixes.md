@@ -1693,6 +1693,18 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
 - O1 merged tree 59988dd: gofmt baseline `embedded_migrations.go` only, vet/build ok, race over 26 package sets ok
   (no flakes), known bugs unchanged (T-nntp-article-1), all shell scripts parse. Wave O2 spawned from 59988dd.
 
+### Wave O2 (2026-10-15): adf-opt-artifacts-docs
+- `worktree-agent-a032dc18f99a76353` (4d2d3cb, 4626963, 66024af, bc4f4e5), merge 6801806; inline 923baab reworded
+  the import-flat-files README dry-run note. Review MERGE (text-only diff verified). Four binaries untracked and
+  ignored, `organize_by_theme.go` behind `//go:build ignore` with the migration path, four build scripts stamp
+  `appVersion`, help texts and READMEs of nntp-fetcher, nntp-analyze, rslight-importer, import-flat-files rewritten
+  from the flag definitions. Documented-not-fixed: fetcher `-reset-progress` with a wildcard resets every group;
+  nntp-analyze `-timeout` ignored in `$all` mode and the 3 s CSV-header sleep; import-flat-files `-dry-run` still
+  creates database files; `README.md:130` mentions a non-existent `-download-end-date`;
+  `build_import_flat-files.sh` sets an `appVersion` the package does not declare; copilot-instructions still names
+  `test-nntp`.
+- Queued by user request: `.claude/plans/queued/test-timing-hardening.md` (+ survey) (1bb4e6b).
+
 ## Outcome
 
 - **Integration branch:** `plan-audit-delta-fixes` from `testing-001` @ 4eb92da; code tree 7ff04a3 (plus plan/docs
@@ -1769,3 +1781,29 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
     client deadline is now 20 s. tcp2tor has no test pinning that a forwarded connection keeps no deadline.
   - Not done by decision: wave O1/O2 (31 medium/low ids), nonce CSP (Q5), cursor wiring (D15), first-user-admin (Q1),
     history fail-stop (Q3), toolchain upgrade (Q4), destructive root scripts (Q6), `tests.yml` (issues.md).
+
+### Outcome addendum: optional waves O1/O2 (2026-10-15)
+- **Integration branch:** `plan-adf-optional` from `testing-001` @ a9357b7. Re-anchor file
+  `.claude/plans/done/audit-delta-fixes-reanchor.md`. Nothing pushed.
+- **Slices (11):** adf-opt-postqueue 6074425, adf-opt-hierarchy 53c9ddb, adf-opt-web-admin a1afbe9, adf-opt-sanitize
+  3263508, adf-opt-analyze 7592ae7, adf-opt-ops-tools 64ee35c (+712f747), adf-opt-rslight 902efe6, adf-opt-tools-misc
+  0ee6edf, adf-opt-web-maint 474e447, adf-opt-tcp2tor 59988dd, adf-opt-artifacts-docs 6801806 (+923baab).
+  Worktrees: `/tank0/claude/trees/go-pugleaf/agent-{aed7002029cf4fd5c,a25a85fd1451f5525,a5c68e72f215bbed4,
+  a7772271acee0fd26,a2684cc09e81b15ce,ab0f79423f0d3259b,a05262db368127cbf,a43996ead67b00720,ae2bc318afb7dc9cb,
+  a7586d60096c78752,a032dc18f99a76353}` (branches `worktree-agent-<id>`); the user cleans them up.
+- **Review MAJORs caught:** gin UseRawPath decoding `+` as space (web-admin); XOVER 423 failing a whole analysis
+  (analyze, plan gap); tcp2tor drain timer truncating an active download with a clean FIN plus two thin-margin
+  timing tests.
+- **User decisions:** D-O1 reversed (fetcher caps stay); D-O2 default host kept; D-O3 clamp 1000; D-O4 12-72 byte
+  passwords in usermgr; D-O5 latestDate into hierarchy stats; D-O6 raw-path routing with a PathUnescape middleware;
+  the auth timing test is to be deleted by the queued plan, not gated.
+- **Verification:** verifier on 923baab: gofmt baseline, vet, build ok; race suite 26 package sets ok (run alone, 3m25s, no flakes); 104 TestAdfOpt* functions all ran (0 skips); known bugs = T-nntp-article-1 only; 56 shell scripts parse; 8 build scripts ok, four stamp appVersion 4.7.5; no tracked ELF; e2e: write-active-file no progress.db (A-ops-12), rsync-remove-source refused without -force (exit 2), fix-references unknown group exit 1 without creating a DB, usermgr -list ok, nntp-analyze help shows -out and the default host, tcp2tor refuses a LAN bind and exits 0.1 s after SIGTERM, post-queue one-shot tears down cleanly, scripts/test-audit-delta-fixes.sh SUMMARY pass=17 fail=0 info=2 with a race-built webserver (0 DATA RACE); D-O1 cap block byte-identical to testing-001. One FAIL fixed inline in 200d3a6: internal/postmgr tests were not repeatable with -count>1 (helper left its newsgroup row; now deleted); two 15 s tcp2tor read deadlines raised to 30 s (10x). Both packages pass -race -count=3 after the fix.
+- **Leftovers (optional findings' residue):** hierarchy `rebuildMu` held across RetryableQuery and groups absent at
+  build time never added incrementally; sanitize: one malformed QP sequence leaves a body raw; preview API and reply
+  quoting still use `ConvertToUTF8`; web: section assign drops every earlier membership, cache stop once-guard spent
+  on first Shutdown; post-queue exit 130 after a completed batch, 441 attempt counter (issues.md); rslight/history-
+  rebuild: errors.Join verbosity, no signal handler, go.mod keeps the unused go-cpu-mem-profiler; ops tools:
+  resolveNamedGroups/exit helpers duplicated in 3-4 mains, fix-references/fix-thread-activity without signal handler;
+  web-maint: busy groups wait the 30 s busy_timeout; tcp2tor: `-add` skips the bind policy, Accept errors still
+  fatal; analyze: IPv6 host literal cache dir name; plus the documented-not-fixed items of the O2 note.
+

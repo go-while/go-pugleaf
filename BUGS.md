@@ -60,14 +60,16 @@
    removed from `cmd/web`), OPS-2b, OPS-4a/b/c/d/f, A-tools-2, A-tools-3 fetcher half, A-tools-5a, A-ops-1
    (`recover-db` `-db` is an alias of `-data`, write modes need `-force`), A-ops-2, A-ops-3a/b/c/e, A-ops-4
    (`-disable-active` refuses an empty keep set, `-disable-active-dry-run`), A-ops-5, A-ops-15, SEC-7 residual.
-   A-tools-1, A-tools-4, A-ops-3d/f were closed by the sibling NNTP plans. Still open (optional waves O1/O2 of the
-   plan, medium/low): A-web-6…10/12/14/16/18/19, A-db-7/8/10/14, A-tools-6…21, A-ops-6…8/10/11/12/17, A-intake-10;
+   A-tools-1, A-tools-4, A-ops-3d/f were closed by the sibling NNTP plans. The optional waves O1/O2 (run 2026-10-15)
+   closed A-web-6…10/12/14/16/18/19, A-db-7/8/10/14, A-tools-6…21, A-ops-6…8/10/11/12/17, A-intake-10 (the
+   fetcher's eternal-september/blueworldhosting caps stay by user decision; the 441 attempt counter is in `issues.md`);
    deferred with a hand-off note: A-db-3, A-db-4, A-tools-5b, history fail-stop exits (Q3), A-ops-13/14/16,
    govulncheck toolchain upgrade (Q4), nonce-based CSP (Q5).
  - The test suite in `internal/nntp/nntp-server-*_test.go` and `cmd/nntp-server/server_e2e_test.go` marks every open
    item with `knownBug`; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` lists them (1 id:
    T-nntp-article-1, an accepted limitation).
- - Fix plan for the optional findings: waves O1/O2 of `.claude/plans/done/audit-delta-fixes.md` (run on request).
+ - Leftovers of the optional waves are listed in the Outcome of `.claude/plans/done/audit-delta-fixes.md`; the
+   wall-clock-sensitive tests are the subject of the queued plan `.claude/plans/queued/test-timing-hardening.md`.
  - peering: the unfinished `PeeringManager` was removed (CLI-6); incoming feeds work via IHAVE/TAKETHIS, outgoing
    feeds via `cmd/nntp-transfer` (CHECK/TAKETHIS streaming); there is no automatic peer-to-peer feed configuration.
  - the history index must be (re)built with cmd/history-rebuild for articles imported before it was enabled
