@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,20 @@ import (
 
 // adfOptDB is the database of this test binary (temp data root, no caches).
 var adfOptDB *database.Database
+
+// testWait is the hang guard of this package's tests: it only stops a hung test, a passing test
+// never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s); default 60 s.
+// Plan test-timing-hardening D3.
+var testWait = testWaitFromEnv(60 * time.Second)
+
+func testWaitFromEnv(def time.Duration) time.Duration {
+	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
 
 func TestMain(m *testing.M) {
 	if runtime.GOOS != "windows" && os.Geteuid() < 1000 {
@@ -153,30 +168,64 @@ func TestAdfOptPostmgrFailedAndInactive(t *testing.T) {
 	}
 }
 
-// TestAdfOptPostmgrRunStopsOnShutdown: Run returns soon after shutdownChan is closed, also
-// while it sleeps between batches (the 10 s pause is interruptible); Stop afterwards is safe.
-func TestAdfOptPostmgrRunStopsOnShutdown(t *testing.T) {
-	pm := NewPosterManager(adfOptDB, nil)
-	shutdownChan := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go pm.Run(10, shutdownChan, &wg)
+// adfOptInSleep reports whether a goroutine is inside PosterManager.sleep (Run's pause between
+// batches). Only TestAdfOptPostmgrRunStopsOnShutdown runs Run, one instance at a time.
+func adfOptInSleep() bool {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Contains(string(buf[:n]), "postmgr.(*PosterManager).sleep(")
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
 
-	time.Sleep(200 * time.Millisecond) // Run is in its 10 s pause by now (empty queue)
-	start := time.Now()
-	close(shutdownChan)
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not return within 5s after shutdown")
+// TestAdfOptPostmgrRunStopsOnShutdown: Run returns after shutdownChan is closed, also while it
+// sleeps between batches (the idle pause is interruptible); Stop afterwards is safe. Structural:
+// the test waits until Run is inside its pause, and with a pause longer than the hang guard a
+// return proves the pause was interrupted. No duration is asserted.
+func TestAdfOptPostmgrRunStopsOnShutdown(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		pause time.Duration
+	}{
+		{"long-pause-interrupted", max(time.Hour, 2*testWait)},
+		{"short-pause-loop", time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pm := NewPosterManager(adfOptDB, nil)
+			pm.idlePause = tc.pause
+			shutdownChan := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go pm.Run(10, shutdownChan, &wg)
+			done := make(chan struct{})
+			go func() {
+				wg.Wait()
+				close(done)
+			}()
+
+			// Run is in its pause (empty queue: done < limit, so the pause is idlePause)
+			deadline := time.Now().Add(testWait)
+			for !adfOptInSleep() {
+				select {
+				case <-done:
+					t.Fatal("Run returned before shutdown")
+				default:
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("Run never reached its pause within %v", testWait)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			close(shutdownChan)
+			select {
+			case <-done:
+			case <-time.After(testWait):
+				t.Fatalf("Run did not return within %v after shutdown (pause %v)", testWait, tc.pause)
+			}
+			pm.Stop() // stopCh already closed by Run: must not panic
+		})
 	}
-	if d := time.Since(start); d > 2*time.Second {
-		t.Errorf("Run returned %v after shutdown, want < 2s", d)
-	}
-	pm.Stop() // stopCh already closed by Run: must not panic
 }
