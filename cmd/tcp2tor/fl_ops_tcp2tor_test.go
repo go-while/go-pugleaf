@@ -1,9 +1,10 @@
 package main
 
-// Tests of the followup-leftovers slice fl-ops-tools (tcp2tor): a failed Accept that is
-// not a closed listener is retried with a growing pause (net/http style, at most 1 s)
-// instead of ending the process; Stop ends the pause; -add warns about a listen host
-// that the bind policy would refuse. The listener is a fake: no socket is opened.
+// Tests of the followup-leftovers slice fl-ops-tools (tcp2tor): a temporary or timeout
+// Accept error is retried with a growing pause (net/http style, at most 1 s) instead of
+// ending the process, any other one ends Serve with an error; Stop ends the pause; -add
+// warns about a listen host that the bind policy would refuse. The listener is a fake:
+// no socket is opened.
 
 import (
 	"bytes"
@@ -18,12 +19,20 @@ import (
 	"time"
 )
 
-// flOpsFakeListener returns transient errors for the first `transient` Accept calls
-// (all of them when transient < 0), then net.ErrClosed. Close makes every later
-// Accept return net.ErrClosed.
+// flOpsTempErr is a temporary net.Error, like EMFILE from accept(2).
+type flOpsTempErr struct{}
+
+func (flOpsTempErr) Error() string   { return "accept: too many open files" }
+func (flOpsTempErr) Timeout() bool   { return false }
+func (flOpsTempErr) Temporary() bool { return true }
+
+// flOpsFakeListener returns failErr (default: a temporary error) for the first
+// `transient` Accept calls (all of them when transient < 0), then net.ErrClosed. Close
+// makes every later Accept return net.ErrClosed.
 type flOpsFakeListener struct {
 	mu        sync.Mutex
 	transient int
+	failErr   error
 	calls     int
 	closed    bool
 	called    chan struct{} // receives once per Accept call (non-blocking)
@@ -40,7 +49,10 @@ func (l *flOpsFakeListener) Accept() (net.Conn, error) {
 	if l.closed || (l.transient >= 0 && l.calls > l.transient) {
 		return nil, net.ErrClosed
 	}
-	return nil, errors.New("accept: too many open files")
+	if l.failErr != nil {
+		return nil, l.failErr
+	}
+	return nil, flOpsTempErr{}
 }
 
 func (l *flOpsFakeListener) Close() error {
@@ -142,5 +154,27 @@ func TestFlOpsTorAddWarnsPublicHost(t *testing.T) {
 	addEntryToConfigFile(cfg, "127.2.3.4", 1120, "example.onion:119", false)
 	if strings.Contains(buf.String(), "WARNING") {
 		t.Fatalf("warning for a loopback host:\n%s", buf.String())
+	}
+}
+
+func TestFlOpsTorAcceptPermanentErrorEndsServe(t *testing.T) {
+	permanent := errors.New("accept: invalid argument")
+	if retryableAcceptErr(permanent) || !retryableAcceptErr(flOpsTempErr{}) || !retryableAcceptErr(os.ErrDeadlineExceeded) {
+		t.Fatal("retryableAcceptErr: want only temporary/timeout net.Errors retried")
+	}
+	ln := &flOpsFakeListener{transient: -1, failErr: permanent, called: make(chan struct{}, 1)}
+	s := &ProxyServer{ListenAddr: "fake"}
+	s.listener = ln
+	done := flOpsServe(t, s)
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "invalid argument") {
+			t.Fatalf("Serve = %v, want the accept error", err)
+		}
+	case <-time.After(testWait):
+		t.Fatalf("Serve did not return within %v after a permanent Accept error", testWait)
+	}
+	if got := ln.acceptCalls(); got != 1 {
+		t.Fatalf("Accept called %d times, want 1 (no retry)", got)
 	}
 }

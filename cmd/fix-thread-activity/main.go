@@ -38,6 +38,22 @@ const ftaExitSignaled = 130
 // out of main once the database is open.
 func ftaExit(db *database.Database, code int) {
 	ftaExitMu.Lock() // never unlocked: os.Exit below ends the process
+	ftaExitLocked(db, code)
+}
+
+// ftaExitNow is the second-signal exit: it tears down like ftaExit unless a teardown
+// already holds ftaExitMu (it may be waiting on db.WG for up to a minute); then it
+// exits at once without waiting for it.
+func ftaExitNow(db *database.Database) {
+	if !ftaExitMu.TryLock() {
+		log.Printf("[FIX-THREAD-ACTIVITY] teardown already running: exiting now")
+		os.Exit(ftaExitSignaled)
+	}
+	ftaExitLocked(db, ftaExitSignaled) // never unlocked: it ends the process
+}
+
+// ftaExitLocked is ftaExit for a caller that holds ftaExitMu.
+func ftaExitLocked(db *database.Database, code int) {
 	if db != nil {
 		ftaStopOnce.Do(func() {
 			if db.StopChan != nil {
@@ -90,7 +106,7 @@ func ftaHandleSignals(db *database.Database) {
 	sigChan := make(chan os.Signal, 2)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	// ends with the process: every way out of main is ftaExit (os.Exit)
-	go ftaSignalLoop(sigChan, func() { ftaStopReq.Store(true) }, func() { ftaExit(db, ftaExitSignaled) })
+	go ftaSignalLoop(sigChan, func() { ftaStopReq.Store(true) }, func() { ftaExitNow(db) })
 }
 
 // resolveNamedGroups looks every name up in the main database (A-ops-8): GetGroupDB would

@@ -918,11 +918,30 @@ func nextAcceptDelay(prev time.Duration) time.Duration {
 	return acceptRetryMax
 }
 
+// retryableAcceptErr reports whether a failed Accept is worth retrying: the net/http
+// rule, a net.Error that is a timeout or temporary (e.g. EMFILE/ENFILE, too many open
+// files). Temporary is checked through an interface because net.Error.Temporary is
+// deprecated, but it is still what syscall.Errno reports for those errors.
+func retryableAcceptErr(err error) bool {
+	var ne net.Error
+	if !errors.As(err, &ne) {
+		return false
+	}
+	if ne.Timeout() {
+		return true
+	}
+	if t, ok := ne.(interface{ Temporary() bool }); ok {
+		return t.Temporary()
+	}
+	return false
+}
+
 // Serve accepts connections on the listener created by Listen until Stop is called or the
-// listener is closed. Any other Accept error (e.g. too many open files) is logged and
-// retried after a pause that grows from acceptRetryMin to acceptRetryMax; Stop ends the
-// pause. Connections beyond MaxConns are closed right away. Serve returns after every
-// connection handler has finished; it returns nil after Stop.
+// listener is closed (both return nil). A timeout or temporary Accept error (e.g. too
+// many open files, retryableAcceptErr) is logged and retried after a pause that grows from
+// acceptRetryMin to acceptRetryMax; Stop ends the pause. Any other Accept error ends Serve
+// and is returned. Connections beyond MaxConns are closed right away. Serve returns after
+// every connection handler has finished.
 func (s *ProxyServer) Serve() error {
 	s.mu.Lock()
 	ln := s.listener
@@ -937,12 +956,17 @@ func (s *ProxyServer) Serve() error {
 		return errors.New("serve called before listen")
 	}
 
+	var serveErr error
 	ctx := s.serverContext()
 	var retryDelay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if s.isStopped() || errors.Is(err, net.ErrClosed) {
+				break
+			}
+			if !retryableAcceptErr(err) {
+				serveErr = fmt.Errorf("failed to accept connection: %v", err)
 				break
 			}
 			retryDelay = nextAcceptDelay(retryDelay)
@@ -976,8 +1000,10 @@ func (s *ProxyServer) Serve() error {
 
 	s.Stop() // closes the listener and all live connections (no-op after an earlier Stop)
 	s.handlers.Wait()
-	log.Printf("Proxy server %s shut down", s.ListenAddr)
-	return nil
+	if serveErr == nil {
+		log.Printf("Proxy server %s shut down", s.ListenAddr)
+	}
+	return serveErr
 }
 
 // isStopped reports whether Stop has been called.

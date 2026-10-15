@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-while/go-pugleaf/internal/database"
 )
@@ -61,5 +62,43 @@ func TestFlOpsWebSignalExitCode(t *testing.T) {
 	}
 	if got := signalExitCode(syscall.SIGTERM); got != 143 {
 		t.Fatalf("signalExitCode(SIGTERM) = %d, want 143", got)
+	}
+}
+
+// TestFlOpsWebBootSignalWatch: a signal during the boot is handed to main (the server
+// is then never started); after endBootWatch the watcher no longer reads sigChan, so a
+// later signal stays there for the select at the end of main. The second-signal path
+// (fatalAfterDB) ends the process and is not run here.
+func TestFlOpsWebBootSignalWatch(t *testing.T) {
+	sigChan := make(chan os.Signal, 1)
+	bootSig, endBootWatch := watchBootSignals(nil, sigChan)
+	sigChan <- os.Interrupt
+	select {
+	case sig := <-bootSig:
+		if sig != os.Interrupt {
+			t.Fatalf("boot signal = %v, want interrupt", sig)
+		}
+	case <-time.After(testWait):
+		t.Fatalf("the boot signal was not passed on within %v", testWait)
+	}
+	endBootWatch()
+	sigChan <- syscall.SIGTERM
+	select {
+	case sig := <-sigChan:
+		if sig != syscall.SIGTERM {
+			t.Fatalf("signal after the boot = %v, want SIGTERM", sig)
+		}
+	default:
+		t.Fatal("the watcher read a signal after endBootWatch")
+	}
+
+	// no signal during the boot: bootSig stays empty
+	quiet := make(chan os.Signal, 1)
+	bootSig, endBootWatch = watchBootSignals(nil, quiet)
+	endBootWatch()
+	select {
+	case sig := <-bootSig:
+		t.Fatalf("boot signal %v without a signal", sig)
+	default:
 	}
 }

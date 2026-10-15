@@ -43,6 +43,22 @@ const fixRefsExitSignaled = 130
 // way out of main once the database is open.
 func fixRefsExit(db *database.Database, code int) {
 	fixRefsExitMu.Lock() // never unlocked: os.Exit below ends the process
+	fixRefsExitLocked(db, code)
+}
+
+// fixRefsExitNow is the second-signal exit: it tears down like fixRefsExit unless a teardown
+// already holds fixRefsExitMu (it may be waiting on db.WG for up to a minute); then it
+// exits at once without waiting for it.
+func fixRefsExitNow(db *database.Database) {
+	if !fixRefsExitMu.TryLock() {
+		log.Printf("[FIX-REFS] teardown already running: exiting now")
+		os.Exit(fixRefsExitSignaled)
+	}
+	fixRefsExitLocked(db, fixRefsExitSignaled) // never unlocked: it ends the process
+}
+
+// fixRefsExitLocked is fixRefsExit for a caller that holds fixRefsExitMu.
+func fixRefsExitLocked(db *database.Database, code int) {
 	if db != nil {
 		fixRefsStopOnce.Do(func() {
 			if db.StopChan != nil {
@@ -95,7 +111,7 @@ func fixRefsHandleSignals(db *database.Database) {
 	sigChan := make(chan os.Signal, 2)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	// ends with the process: every way out of main is fixRefsExit (os.Exit)
-	go fixRefsSignalLoop(sigChan, func() { fixRefsStopReq.Store(true) }, func() { fixRefsExit(db, fixRefsExitSignaled) })
+	go fixRefsSignalLoop(sigChan, func() { fixRefsStopReq.Store(true) }, func() { fixRefsExitNow(db) })
 }
 
 // usageText is the usage line and example printed when -data or -group is empty.
