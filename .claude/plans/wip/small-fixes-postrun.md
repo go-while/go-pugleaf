@@ -118,7 +118,7 @@ The CLAUDE.md list (same as `.github/workflows/tests.yml`), plus `PUGLEAF_KNOWN_
 3. Tree: `go test -race -count=20 -run FuTree ./internal/database/` green; the web thread-tree page of a scratch
    group whose replies arrive out of order (seed as `flWebSeed` does, but with a reply referencing a later
    article) answers 200 on 20 consecutive requests.
-4. Drop path: `go test -race -count=5 -run 'FlDlDrop' ./internal/processor/` green.
+4. Drop path: `go test -race -count=5 -v -run 'FlDLDrop' ./internal/processor/` green and five tests listed (the -run pattern is case-sensitive).
 
 ## Open questions (defaults apply unless overridden at the wave-1 boundary)
 - Q1: on stop mid-POST the article may be posted twice if only the 240 was lost; accept (next run gets the 441
