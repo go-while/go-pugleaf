@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -52,16 +53,7 @@ func main() {
 	// Initialize configuration
 	//mainConfig := config.NewDefaultConfig()
 
-	// Initialize database
-	dbConfig := database.DefaultDBConfig()
-	dbConfig.DataDir = *dataDir
-
-	db, err := database.OpenDatabase(dbConfig)
-	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
-	}
-	defer db.Shutdown()
-
+	// Argument checks run before the database is opened (they need no teardown).
 	switch {
 	case *createUser:
 		if *username == "" {
@@ -70,35 +62,103 @@ func main() {
 		if *email == "" {
 			log.Fatal("Email is required for user creation")
 		}
-		err := createNewUser(db, *username, *email, *display, *admin)
-		if err != nil {
-			log.Fatalf("Failed to create user: %v", err)
-		}
-
 	case *listUsers:
-		err := listAllUsers(db)
-		if err != nil {
-			log.Fatalf("Failed to list users: %v", err)
-		}
-
 	case *deleteUser:
 		if *username == "" {
 			log.Fatal("Username is required for user deletion")
 		}
-		err := deleteExistingUser(db, *username)
-		if err != nil {
-			log.Fatalf("Failed to delete user: %v", err)
-		}
-
 	case *updateUser:
 		if *username == "" {
 			log.Fatal("Username is required for user update")
 		}
-		err := updateUserPassword(db, *username)
-		if err != nil {
-			log.Fatalf("Failed to update user: %v", err)
+	}
+
+	// Initialize database
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
+	if err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+
+	switch {
+	case *createUser:
+		if err := createNewUser(db, *username, *email, *display, *admin); err != nil {
+			log.Printf("Failed to create user: %v", err)
+			usermgrExit(db, 1)
+		}
+
+	case *listUsers:
+		if err := listAllUsers(db); err != nil {
+			log.Printf("Failed to list users: %v", err)
+			usermgrExit(db, 1)
+		}
+
+	case *deleteUser:
+		if err := deleteExistingUser(db, *username); err != nil {
+			log.Printf("Failed to delete user: %v", err)
+			usermgrExit(db, 1)
+		}
+
+	case *updateUser:
+		if err := updateUserPassword(db, *username); err != nil {
+			log.Printf("Failed to update user: %v", err)
+			usermgrExit(db, 1)
 		}
 	}
+	usermgrExit(db, 0)
+}
+
+// usermgrExitTimeout bounds the wait for background goroutines in usermgrExit.
+const usermgrExitTimeout = 60 * time.Second
+
+var usermgrStopOnce sync.Once
+
+// usermgrExit tears the database down (close StopChan once, wait for the background
+// goroutines up to usermgrExitTimeout, Shutdown) and exits with code. It is the only
+// way out of main once the database is open.
+func usermgrExit(db *database.Database, code int) {
+	if db != nil {
+		usermgrStopOnce.Do(func() {
+			if db.StopChan != nil {
+				close(db.StopChan)
+			}
+		})
+		if db.WG != nil {
+			done := make(chan struct{})
+			go func() {
+				db.WG.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(usermgrExitTimeout):
+				log.Printf("[USERMGR] background goroutines did not stop within %v, shutting down anyway", usermgrExitTimeout)
+			}
+		}
+		if err := db.Shutdown(); err != nil {
+			log.Printf("[USERMGR] database shutdown failed: %v", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	os.Exit(code)
+}
+
+// validateCLIPassword mirrors validatePassword in internal/web/web_auth.go (unexported
+// there), so a password set here would also be accepted by web registration: 12 to 72
+// bytes, the upper bound being bcrypt's limit (decision D-O4). Keep the two in sync.
+func validateCLIPassword(password []byte) error {
+	if len(password) < 12 {
+		return fmt.Errorf("password must be at least 12 characters long")
+	}
+	if len(password) > 72 {
+		// bcrypt rejects longer passwords (ErrPasswordTooLong)
+		return fmt.Errorf("password must be at most 72 bytes")
+	}
+	return nil
 }
 
 func createNewUser(db *database.Database, username, email, displayName string, isAdmin bool) error {
@@ -133,8 +193,8 @@ func createNewUser(db *database.Database, username, email, displayName string, i
 		return fmt.Errorf("passwords do not match")
 	}
 
-	if len(password) < 6 {
-		return fmt.Errorf("password must be at least 6 characters long")
+	if err := validateCLIPassword(password); err != nil {
+		return err
 	}
 
 	// Hash password
@@ -276,8 +336,24 @@ func updateUserPassword(db *database.Database, username string) error {
 		return fmt.Errorf("passwords do not match")
 	}
 
-	if len(password) < 6 {
-		return fmt.Errorf("password must be at least 6 characters long")
+	if err := applyPasswordUpdate(db, user, password); err != nil {
+		return err
+	}
+
+	fmt.Printf("✅ Password updated successfully for user '%s'\n", username)
+	fmt.Printf("   The user's web session was ended; NNTP accounts (nntp_users) keep their own password.\n")
+
+	return nil
+}
+
+// applyPasswordUpdate validates and stores a new password for user and ends the user's
+// web session (A-ops-10): the web keeps one session per user in users.session_id, so a
+// session opened with the old password must not survive the reset. NNTP auth is not
+// touched: nntp_users have their own password column, and the NNTP auth cache lives in
+// the nntp-server process, out of reach of this CLI.
+func applyPasswordUpdate(db *database.Database, user *models.User, password []byte) error {
+	if err := validateCLIPassword(password); err != nil {
+		return err
 	}
 
 	// Hash password
@@ -292,16 +368,23 @@ func updateUserPassword(db *database.Database, username string) error {
 		return fmt.Errorf("failed to update password: %v", err)
 	}
 
-	fmt.Printf("✅ Password updated successfully for user '%s'\n", username)
-
+	if err := db.InvalidateUserSession(int64(user.ID)); err != nil {
+		return fmt.Errorf("password updated but failed to end the user's web session: %v", err)
+	}
 	return nil
 }
 
+// truncate shortens s to at most maxLen runes ("..." included), never splitting a
+// UTF-8 sequence.
 func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	r := []rune(s)
+	if len(r) <= maxLen {
 		return s
 	}
-	return s[:maxLen-3] + "..."
+	if maxLen <= 3 {
+		return string(r[:maxLen])
+	}
+	return string(r[:maxLen-3]) + "..."
 }
 
 // isAdminUser checks if a user is admin (ID 1 or has 'admin' permission)
