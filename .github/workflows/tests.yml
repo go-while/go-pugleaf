@@ -1,0 +1,66 @@
+---
+name: Tests
+
+"on":
+  push:
+    branches:
+      - testing-001
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Upper bound for the tests' event waits (plan test-timing-hardening); shared runners are slow under -race.
+  PUGLEAF_TEST_DEADLINE: 120s
+
+jobs:
+  test:
+    name: Vet and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      # Same package list as the test job in .github/workflows/release.yml
+      - name: Test (race detector)
+        run: |
+          go test -race -count=1 -timeout 900s \
+            ./internal/database/... ./internal/web/... ./internal/history/... ./internal/nntp/... \
+            ./internal/processor/... ./cmd/expire-news/... ./cmd/history-rebuild/... ./cmd/nntp-server/... \
+            ./internal/postmgr/... ./internal/cache/... ./cmd/tcp2tor/... ./cmd/web/...
+
+  known-bugs:
+    # Lists the open NNTP known bugs (docs/audit/README.md). The run fails on purpose while
+    # any knownBug marker is open, so it never fails the workflow.
+    name: NNTP known bugs (informational)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - name: List known bugs
+        env:
+          PUGLEAF_KNOWN_BUGS: "1"
+        run: go test -count=1 ./internal/nntp/... ./cmd/nntp-server/...

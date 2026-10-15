@@ -19,23 +19,29 @@ jobs:
   test:
     name: Vet and test
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      # Upper bound for the tests' event waits (plan test-timing-hardening); shared runners are slow under -race.
+      PUGLEAF_TEST_DEADLINE: 120s
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
 
       - name: Vet
         run: go vet ./...
 
+      # Same package list as .github/workflows/tests.yml
       - name: Test (race detector)
         run: |
           go test -race -count=1 -timeout 900s \
             ./internal/database/... ./internal/web/... ./internal/history/... ./internal/nntp/... \
-            ./internal/processor/... ./cmd/expire-news/... ./cmd/history-rebuild/... ./cmd/nntp-server/...
+            ./internal/processor/... ./cmd/expire-news/... ./cmd/history-rebuild/... ./cmd/nntp-server/... \
+            ./internal/postmgr/... ./internal/cache/... ./cmd/tcp2tor/... ./cmd/web/...
 
   build:
     name: Build binaries
@@ -69,10 +75,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
 
@@ -221,7 +227,7 @@ jobs:
         run: Compress-Archive -Path build, README.md, LICENSE -DestinationPath $env:ARCHIVE_FILE
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: go-pugleaf-${{ matrix.os }}-${{ matrix.arch }}
           path: |
@@ -237,7 +243,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Extract version from tag or input
         id: version
@@ -255,7 +261,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
 
@@ -296,7 +302,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', steps.version.outputs.version) || github.ref_name }}
           name: Release v${{ steps.version.outputs.version }}
