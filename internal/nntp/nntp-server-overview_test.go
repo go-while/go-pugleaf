@@ -651,7 +651,9 @@ func TestOvrXhdr(t *testing.T) {
 // SEC-1: XHDR/XOVER with a huge range
 
 func TestOvrHugeRange(t *testing.T) {
-	err := runIsolated(t, 3*hDeadline, func(t *testing.T) {
+	// 4*hDeadline: in the regression case the child's own hDeadline guards add
+	// up to about 3*hDeadline, and its errors must surface instead of "timed out".
+	err := runIsolated(t, 4*hDeadline, func(t *testing.T) {
 		g := hGroup(t, "t5.hugerange", 3, nil)
 		hs := newTestServer(t, hServerOpts{})
 		want := []string{"1", "2", "3"}

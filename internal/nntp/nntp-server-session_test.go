@@ -803,16 +803,21 @@ func TestSessStop(t *testing.T) {
 		t.Fatal("IsRunning() true after Stop")
 	}
 
-	// The listener is closed: new connections fail (poll, hDeadline guard).
+	// The listener is closed: new connections fail to dial (poll, hDeadline
+	// guard). Only a dial error counts: a connection that is accepted but gets
+	// no greeting (read timeout, EOF) means the socket is still listening.
 	end := time.Now().Add(hDeadline)
 	for {
 		nc, err := hs.tryDial(hDeadline)
-		if err != nil {
+		var opErr *net.OpError
+		if err != nil && errors.As(err, &opErr) && opErr.Op == "dial" {
 			break
 		}
-		nc.close()
+		if nc != nil {
+			nc.close()
+		}
 		if time.Now().After(end) {
-			t.Fatalf("listener still accepts connections %s after Stop", hDeadline)
+			t.Fatalf("listener still accepts connections %s after Stop (last err %v)", hDeadline, err)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
