@@ -1622,6 +1622,43 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
   A-tools-4 closed (`newDownloadRun`), A-ops-3d/f closed; SIGTERM in cmd/web, nntp-fetcher, expire-news, post-queue,
   history-rebuild, nntp-transfer.
 
+### Wave O0 + O1 batch A (2026-10-15): re-anchor; adf-opt-web-admin, adf-opt-hierarchy, adf-opt-analyze, adf-opt-postqueue, adf-opt-sanitize
+- O0: `plan-adf-optional` from `testing-001` @ a9357b7 (plan back to wip faec07e); five read-only agents re-anchored
+  all 38 optional ids at faec07e → `audit-delta-fixes-reanchor.md` (0dfa346); 31 OPEN, 5 PARTLY, 1 partly invalid, 0 fixed.
+  User reversed D-O1 (01149d3): the fetcher keeps its eternal-september/blueworldhosting caps. 441 attempt counter
+  filed in `issues.md` (cf788ec). Baseline on faec07e green (race over 17 package sets, known bugs: T-nntp-article-1).
+- adf-opt-postqueue: `worktree-agent-aed7002029cf4fd5c` (e44a0be, f55a845, review fix abd1e72), merge 6074425.
+  Review MERGE + 3 minors; fixed: early-shutdown check before the one-shot batch, admin reader returns scan errors
+  (plus COALESCE on the nullable message_id). Left: exit 130 after a completed batch when a signal arrived (documented).
+- adf-opt-hierarchy: `worktree-agent-a25a85fd1451f5525` (2d2973f, review fix 1a403d0), merge 53c9ddb. Review MERGE +
+  4 minors; fixed: stats increment during a rebuild re-dirties the top (`rebuilding`/`bulkBuilds` flags, test hook),
+  `latest.UTC()`. Left (leftovers): global `rebuildMu` held across RetryableQuery; a group absent at build time is not
+  added by UpdateNewsgroupStats. Deviations accepted: sub-levels counted from the name's top level; name tie-break.
+  Extra bug fixed: 3+-part group lookups and triple-counted batches (three sort lists share the structs).
+- adf-opt-web-admin: `worktree-agent-a5c68e72f215bbed4` (ef6e876, review fix 377761e), merge a1afbe9. Review
+  MAJOR: gin `UseRawPath` decoded `+` as a space in every param of a non-canonical path (comp.lang.c++ broke); fixed
+  with `UnescapePathValues=false` + an `unescapeRawPathParams` middleware (PathUnescape when RawPath is set) and
+  `%2B` in GetData links, gin comparison test. Minors noted: section assign now removes every earlier membership;
+  the cache stop once-guard is spent on the first Shutdown. `web_admin_provider.go` is gofmt-clean now (K4 baseline
+  shrinks to `embedded_migrations.go`).
+- adf-opt-analyze: `worktree-agent-a2684cc09e81b15ce` (1ca748f, review fixes dff8085, 91ef470), merge 7592ae7.
+  Review MAJOR (plan gap): an empty XOVER range answers 423 and failed the whole group; fixed with
+  `nntp.ErrNoArticlesInRange` (ownership extended to `nntp-client-commands.go` and `nntp-backend-pool.go`: the pool
+  keeps the connection on 423). Minors fixed: stale `.tmp` cleanup, invalid group name only skips the file write,
+  processor.go back to the struct field. Reported to the user: default `-out` is `<data>/analyze-out`; caches and
+  exports are 0o600/0o750. Signatures changed: `printAnalysisResults(a, format, outDir)`, `AnalyzeMode(.., outDir)`,
+  `AnalyzeModeStandalone(.., dataDir, outDir)`; O2 docs must describe `-out`, the cache path and the CSV header.
+- adf-opt-sanitize: `worktree-agent-a7772271acee0fd26` (ed33a0e, review fix 55936e1), merge 3263508. Review MERGE +
+  minors; fixed: transfer-encoding decoded only for text/* or no media type, utf-16/32 labels treated as unknown,
+  `SetArticle` sets fields under `sc.mutex`. Left (pre-existing): one malformed QP sequence leaves the body raw.
+  Behaviour changes: bodies get no HTML-entity decoding; empty From shows "Anon"; headers panel no QP decoding;
+  `StripDangerousHTML`/`sanitizeText` removed (html/template escaping is the defence); cache key group+NUL+msgid.
+  Follow-ups: `web_apiHandlers.go` preview and `web_sitePostPage.go` quoting still use `ConvertToUTF8`.
+- Batch-A merged tree 7592ae7: gofmt baseline `embedded_migrations.go` only, vet/build ok, race over 20 package
+  sets ok (no flakes), known bugs unchanged (T-nntp-article-1). Batch B spawned from 7592ae7.
+- User request during batch A: queue a plan `test-timing-hardening` after O1 (harness deadlines 5 s → 30 s, upper-bound
+  duration asserts → error-type asserts or 10x margins, statistical auth-timing test behind an env opt-in).
+
 ## Outcome
 
 - **Integration branch:** `plan-audit-delta-fixes` from `testing-001` @ 4eb92da; code tree 7ff04a3 (plus plan/docs
