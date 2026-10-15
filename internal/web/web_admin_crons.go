@@ -14,12 +14,23 @@ import (
 // cronJobsDisabledMsg is shown when the server runs with -no-cronjobs (CronManager is nil)
 const cronJobsDisabledMsg = "Cron jobs are disabled on this instance"
 
+// cronEditRefused is shown when an admin creates or enables a cron job while the server runs
+// without -edit-cronjobs (WEB-1, D7): a cron job runs its command through sh -c. Disabling and
+// stopping a job stay allowed.
+const cronEditRefused = "Adding or enabling cron jobs is disabled (start with -edit-cronjobs)"
+
 // adminCreateCronJob creates a new cron job
 func (s *WebServer) adminCreateCronJob(c *gin.Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
 	session := s.getWebSession(c)
+
+	if !s.CronEdit {
+		session.SetError(cronEditRefused)
+		c.Redirect(http.StatusSeeOther, "/admin?tab=crons")
+		return
+	}
 
 	// Get form data
 	name := strings.TrimSpace(c.PostForm("name"))
@@ -161,6 +172,19 @@ func (s *WebServer) adminToggleCronJob(c *gin.Context) {
 		return
 	}
 
+	// Enabling a disabled job needs -edit-cronjobs; disabling is always allowed (D7).
+	cronJob, err := s.DB.GetCronJobByID(cronID)
+	if err != nil {
+		session.SetError("Cron job not found")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=crons")
+		return
+	}
+	if !cronJob.Enabled && !s.CronEdit {
+		session.SetError(cronEditRefused)
+		c.Redirect(http.StatusSeeOther, "/admin?tab=crons")
+		return
+	}
+
 	err = s.DB.ToggleCronJob(cronID)
 	if err != nil {
 		session.SetError("Failed to toggle cron job: " + err.Error())
@@ -261,24 +285,9 @@ func (s *WebServer) adminViewCronJobLog(c *gin.Context) {
 	if filterStr := c.Query("filter"); filterStr != "" {
 		filter = filterStr
 	}
-	// Limit the output to the last N lines
-	displayOutput := logOutput
-	totalLines := len(logOutput)
-
-	if filter != "" {
-		var filteredOutput []string
-		filteredOutput = append(filteredOutput, "Filtered log output (filter: '"+filter+"'):")
-		for _, line := range logOutput {
-			if strings.Contains(line, filter) {
-				filteredOutput = append(filteredOutput, line)
-			}
-		}
-		filteredOutput = append(filteredOutput, fmt.Sprintf("--- End of filtered output lines: %d ---", len(filteredOutput)-1))
-		displayOutput = filteredOutput
-	}
-	if totalLines > limit {
-		displayOutput = logOutput[totalLines-limit:]
-	}
+	// Filter first, then limit the output to the last N lines. The header counts the lines the
+	// limit was applied to (the filtered lines when a filter is set).
+	displayOutput, totalLines := filterCronLog(logOutput, filter, limit)
 
 	// Return plain text log for now
 	c.Header("Content-Type", "text/plain; charset=utf-8")
@@ -301,6 +310,30 @@ func (s *WebServer) adminViewCronJobLog(c *gin.Context) {
 			strings.Join(displayOutput, "\n"))
 	}
 	log.Printf("Displayed log for cron job ID %d", cronJob.ID)
+}
+
+// filterCronLog returns the log lines to display: with a filter, the matching lines framed by a
+// header and an end line that counts them; then at most the last limit lines of that result.
+// available is the line count before the limit. The limit is applied after filtering, so a
+// long log no longer replaces the filtered lines with its unfiltered tail (A-web-17).
+func filterCronLog(logOutput []string, filter string, limit int) (displayOutput []string, available int) {
+	displayOutput = logOutput
+	if filter != "" {
+		var filteredOutput []string
+		filteredOutput = append(filteredOutput, "Filtered log output (filter: '"+filter+"'):")
+		for _, line := range logOutput {
+			if strings.Contains(line, filter) {
+				filteredOutput = append(filteredOutput, line)
+			}
+		}
+		filteredOutput = append(filteredOutput, fmt.Sprintf("--- End of filtered output lines: %d ---", len(filteredOutput)-1))
+		displayOutput = filteredOutput
+	}
+	available = len(displayOutput)
+	if limit > 0 && available > limit {
+		displayOutput = displayOutput[available-limit:]
+	}
+	return displayOutput, available
 }
 
 // adminStopCronJob stops a running cron job

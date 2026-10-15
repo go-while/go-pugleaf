@@ -536,6 +536,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		NNTPUserSearch:             nntpUserSearch,
 		SiteNews:                   siteNews,
 		CronJobs:                   cronJobs,
+		CronEdit:                   s.CronEdit,
 		Sections:                   sections,
 		SectionGroups:              sectionGroups,
 		SpamArticles:               spamArticles,

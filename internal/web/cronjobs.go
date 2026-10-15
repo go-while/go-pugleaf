@@ -369,86 +369,102 @@ func (cm *CronJobManager) startJob(cronJob *models.CronJob) error {
 	return nil
 }
 
-// runJobScheduler handles the scheduling and execution of a specific job
+// runJobScheduler handles the scheduling and execution of a specific job. It is started once
+// per registration by startJob and loops until the scheduler ends (manager stopping, job row
+// gone or disabled, stop signal); only then does the deferred forgetJob remove the
+// registration, so loadAndStartJobs can start the job again on its next reload (A-web-20).
 func (cm *CronJobManager) runJobScheduler(job *CronJob) {
-	if common.IsClosedChannel(cm.stopChannel) {
-		log.Printf("[CRON] runJobScheduler: is closed, abort job %d/%s", job.ID, job.Name)
-		return
-	}
-
-	// Get the cron job info to check to update values for job
-	cronJob, err := cm.db.GetCronJobByID(job.ID)
-	if err != nil {
-		log.Printf("[CRON] Failed to get cron job %d: %v", job.ID, err)
-		return
-	}
-	if !cronJob.Enabled {
-		log.Printf("[CRON] runJobScheduler: Job %d/%s is no longer enabled.", job.ID, job.Name)
-		return
-	}
-
-	// Collect changes while holding lock
-	var logMessages []string
-	job.mutex.Lock()
-	if job.Name != cronJob.Name {
-		log.Printf("[CRON] Job %d/%s name has changed from '%s' to '%s'", job.ID, job.Name, job.Name, cronJob.Name)
-		logMessages = append(logMessages, fmt.Sprintf("[%s] Name changed from '%s' to '%s'", time.Now().Format("2006-01-02 15:04:05"), job.Name, cronJob.Name))
-		job.Name = cronJob.Name
-	}
-	if job.Command != cronJob.Command {
-		log.Printf("[CRON] Job %d/%s command has changed from '%s' to '%s'", job.ID, job.Name, job.Command, cronJob.Command)
-		logMessages = append(logMessages, fmt.Sprintf("[%s] Command changed from '%s' to '%s'", time.Now().Format("2006-01-02 15:04:05"), job.Command, cronJob.Command))
-		job.Command = cronJob.Command
-	}
-	if job.IntervalMin != cronJob.IntervalMinutes {
-		log.Printf("[CRON] Job %d/%s interval has changed from %d minutes to %d minutes", job.ID, job.Name, job.IntervalMin, cronJob.IntervalMinutes)
-		logMessages = append(logMessages, fmt.Sprintf("[%s] Interval changed from %d minutes to %d minutes", time.Now().Format("2006-01-02 15:04:05"), job.IntervalMin, cronJob.IntervalMinutes))
-		job.IntervalMin = cronJob.IntervalMinutes
-	}
-	job.mutex.Unlock()
-
-	// Add log messages after releasing lock to avoid holding lock during addLogLine
-	for _, msg := range logMessages {
-		job.addLogLine(msg)
-	}
-
-	// Calculate next run time considering start_hour_minute
-	now := time.Now()
-	nextRun, err := calculateNextRun(cronJob, now)
-	if err != nil {
-		log.Printf("[CRON] Failed to calculate next run for job %d/%s: %v", job.ID, job.Name, err)
-		return
-	}
-
-	if nextRun.After(now) {
-		waitDuration := nextRun.Sub(now)
-		job.addLogLine(fmt.Sprintf("[%s] Waiting until %s (in %v)", now.Format("2006-01-02 15:04:05"), nextRun.Format("2006-01-02 15:04:05"), waitDuration))
-		// Wait
-		select {
-		case <-job.stopChan:
-			log.Printf("[CRON] Job %d/%s signal stopChan", job.ID, job.Name)
-			job.addLogLine(fmt.Sprintf("[%s] Job %d/%s got stop signal... quit now.", time.Now().Format("2006-01-02 15:04:05"), job.ID, job.Name))
+	defer cm.forgetJob(job)
+	for {
+		if common.IsClosedChannel(cm.stopChannel) {
+			log.Printf("[CRON] runJobScheduler: is closed, abort job %d/%s", job.ID, job.Name)
 			return
-		case <-time.After(waitDuration):
-			// Continue
+		}
+
+		// Get the cron job info to check to update values for job
+		cronJob, err := cm.db.GetCronJobByID(job.ID)
+		if err != nil {
+			log.Printf("[CRON] Failed to get cron job %d: %v", job.ID, err)
+			return
+		}
+		if !cronJob.Enabled {
+			log.Printf("[CRON] runJobScheduler: Job %d/%s is no longer enabled.", job.ID, job.Name)
+			return
+		}
+
+		// Collect changes while holding lock
+		var logMessages []string
+		job.mutex.Lock()
+		if job.Name != cronJob.Name {
+			log.Printf("[CRON] Job %d/%s name has changed from '%s' to '%s'", job.ID, job.Name, job.Name, cronJob.Name)
+			logMessages = append(logMessages, fmt.Sprintf("[%s] Name changed from '%s' to '%s'", time.Now().Format("2006-01-02 15:04:05"), job.Name, cronJob.Name))
+			job.Name = cronJob.Name
+		}
+		if job.Command != cronJob.Command {
+			log.Printf("[CRON] Job %d/%s command has changed from '%s' to '%s'", job.ID, job.Name, job.Command, cronJob.Command)
+			logMessages = append(logMessages, fmt.Sprintf("[%s] Command changed from '%s' to '%s'", time.Now().Format("2006-01-02 15:04:05"), job.Command, cronJob.Command))
+			job.Command = cronJob.Command
+		}
+		if job.IntervalMin != cronJob.IntervalMinutes {
+			log.Printf("[CRON] Job %d/%s interval has changed from %d minutes to %d minutes", job.ID, job.Name, job.IntervalMin, cronJob.IntervalMinutes)
+			logMessages = append(logMessages, fmt.Sprintf("[%s] Interval changed from %d minutes to %d minutes", time.Now().Format("2006-01-02 15:04:05"), job.IntervalMin, cronJob.IntervalMinutes))
+			job.IntervalMin = cronJob.IntervalMinutes
+		}
+		job.mutex.Unlock()
+
+		// Add log messages after releasing lock to avoid holding lock during addLogLine
+		for _, msg := range logMessages {
+			job.addLogLine(msg)
+		}
+
+		// Calculate next run time considering start_hour_minute
+		now := time.Now()
+		nextRun, err := calculateNextRun(cronJob, now)
+		if err != nil {
+			log.Printf("[CRON] Failed to calculate next run for job %d/%s: %v", job.ID, job.Name, err)
+			return
+		}
+
+		if nextRun.After(now) {
+			waitDuration := nextRun.Sub(now)
+			job.addLogLine(fmt.Sprintf("[%s] Waiting until %s (in %v)", now.Format("2006-01-02 15:04:05"), nextRun.Format("2006-01-02 15:04:05"), waitDuration))
+			// Wait
+			select {
+			case <-job.stopChan:
+				log.Printf("[CRON] Job %d/%s signal stopChan", job.ID, job.Name)
+				job.addLogLine(fmt.Sprintf("[%s] Job %d/%s got stop signal... quit now.", time.Now().Format("2006-01-02 15:04:05"), job.ID, job.Name))
+				return
+			case <-time.After(waitDuration):
+				// Continue
+			}
+		}
+
+		// Check if job is already running before executing
+		job.mutex.Lock()
+		if job.IsRunning {
+			job.mutex.Unlock()
+			job.addLogLine(fmt.Sprintf("[%s] runJobScheduler: job %d/%s is already running", time.Now().Format("2006-01-02 15:04:05"), job.ID, job.Name))
+			time.Sleep(1 * time.Minute)
+		} else {
+			job.IsRunning = true
+			var execWG sync.WaitGroup
+			execWG.Add(1)
+			go cm.executeJob(job, &execWG)
+			job.mutex.Unlock()
+			execWG.Wait()
 		}
 	}
+}
 
-	// Check if job is already running before executing
-	job.mutex.Lock()
-	if job.IsRunning {
-		job.mutex.Unlock()
-		job.addLogLine(fmt.Sprintf("[%s] runJobScheduler: job %d/%s is already running", time.Now().Format("2006-01-02 15:04:05"), job.ID, job.Name))
-		time.Sleep(1 * time.Minute)
-	} else {
-		job.IsRunning = true
-		var execWG sync.WaitGroup
-		execWG.Add(1)
-		go cm.executeJob(job, &execWG)
-		job.mutex.Unlock()
-		execWG.Wait()
+// forgetJob removes job from cm.jobs when it is still the registered instance for its ID.
+// The pointer comparison keeps a newer registration of the same ID (started by a reload
+// after this scheduler ended) from being deleted by the old scheduler's deferred call.
+func (cm *CronJobManager) forgetJob(job *CronJob) {
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
+	if cm.jobs[job.ID] == job {
+		delete(cm.jobs, job.ID)
 	}
-	go cm.runJobScheduler(job)
 }
 
 // executeJob executes a single job
