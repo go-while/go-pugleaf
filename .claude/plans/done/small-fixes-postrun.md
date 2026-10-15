@@ -149,3 +149,29 @@ The CLAUDE.md list (same as `.github/workflows/tests.yml`), plus `PUGLEAF_KNOWN_
   duplicate) rather than tracking "sent" state? default yes.
 - Q2: `high_water` only ever grows (CASE WHEN greater); a shrunk group after expiry keeps its old high water,
   as NNTP semantics expect? default yes.
+
+## Outcome (2026-10-15)
+- **Integration branch:** `plan-small-fixes-postrun` from `testing-001` @ b45d053. Not yet merged into `testing-001`
+  (user decision). Nothing pushed.
+- **Slices (4, one wave):** sfp-dl-drop-test 4c45a72, sfp-tree-order 91dbf16, sfp-high-water 4596254,
+  sfp-postqueue-stop afc66ea (+ inline 918b752). Worktrees `/tank0/claude/trees/go-pugleaf/agent-{ab022f2e53acb41fc,
+  a1ea50c74677a38f9,ab4f66debde03f2f4,a3ff11d10a9746df8}` (branches `worktree-agent-<id>`); the user cleans them up.
+- **Verification (verifier on 0a5e90f, code 918b752):** gofmt/vet/build clean; race suite over 28 package sets in
+  193 s wall, no flakes; flake pass `-count=5 -cpu 1,4` 900 PASS / 0 FAIL; known bug T-nntp-article-1 only; E2E:
+  SIGINT during a POST to a stub that never replies cut the socket within ~10 ms and exited 130 after 2.3 s (the rest
+  is the database teardown), row back to pending with attempts 0; a 441 run logs `Processed 1 pending posts
+  (0 posted, 1 failed)`; three posts through a scratch nntp-server gave `high_water 3` and an active-file line
+  `test.sfp.hw 3 1 y` without `-repair-watermarks`; the thread-tree page of an out-of-order thread with an in-thread
+  orphan answered 200 on 20 cached and 20 fresh builds with identical structure (orphan under the root at depth 1,
+  deepest reply at depth 3); the five FlDLDrop tests listed and green `-count=5`.
+- **Design deviation (correct):** `PostArticleContext` calls `ForceCloseConn` inside the `context.AfterFunc` instead
+  of the bare `closing.Store(true)` the plan wrote; the reviewer's mutation run showed the plan's version leaks the
+  pool slot.
+- **Leftovers:** a stop during a fresh connect (dial/handshake/`SwitchMode`) still waits for the connect timeout
+  (`GetContext` watches the ctx only while waiting for a slot); `RepairNewsgroupWatermarks` can lower `high_water`
+  after expiry (preloader; Q2 says it should only grow on intake, the repair is a deliberate recompute);
+  `countDescendants` allocates a seen-map per node (performance only); the not-committed log lost the range start;
+  an article whose only reference is unknown starts its own thread at intake (threading, not the tree builder), so
+  the "orphan under the root" case only arises for in-thread orphans; the `flWebSeed` comment in
+  `internal/web/fl_web_tree_test.go` about avoiding orphans is stale.
+
