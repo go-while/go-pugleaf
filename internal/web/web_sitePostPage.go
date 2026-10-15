@@ -128,7 +128,10 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 						article.BodyText = strings.Join(quotedLines, "\n")
 					}
 				} else {
+					// A missing article gets the same message as a hidden one, so the
+					// form does not tell "hidden" from "missing" (D2).
 					log.Printf("Warning: Failed to get article for reply: %v", err)
+					replyPrefillError = "Article not found"
 				}
 			} else {
 				log.Printf("Warning: Failed to get group database for reply: %v", err)
