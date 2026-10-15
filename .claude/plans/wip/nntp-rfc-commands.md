@@ -1052,3 +1052,46 @@ PORT=21129 DATA=./data-test-nntp-rfc-commands scripts/test-nntp-server.sh
   in `Start()`. — verify:
 - K-H12: `sendWelcome`, `UpdateDeadlines` (read deadline only), `commandMaxArgs` (maximum only), `knownStatCommands`
   already holds the new words. — verify:
+
+### Wave 0 verification (2026-10-15, orchestrator; base `testing-001` @ c11feb2 = hardening d9de34e + intake acb56d5 + client-transfer d65c568 merged)
+P0: both done plans exist, both merges are in `testing-001`, `nntp-cmd-range.go` exists, `common.ValidMessageID` is at
+`internal/common/intake.go:37`. All K1 names and all K3 prefixes are free. The 10 RFC-1 markers are at
+`nntp-server-session_test.go:281`, `nntp-server-overview_test.go:711,721`, `nntp-server-group_test.go:614,655,674,708,728,738,769`;
+`sessFuzzMultiCodes` is at `nntp-server-session_test.go:1091`. Line numbers below are at c11feb2.
+- K-H1: **ok** (`nntp-cmd-range.go:13-56`; `Open` field, `Empty()`, `errRangeSyntax`, `parseRangeArg` sends nothing, `n-` → `MaxInt64`).
+- K-H2: **ok** (`nntp-cmd-range.go:63`: delay + `412 No newsgroup selected`, returns false).
+- K-H3: **ok** (harness tests pass, see baseline).
+- K-H4: **ok** (`nntp-server-cliconns.go:190-200`, literally as pre-filled).
+- K-H5: **ok**: `overviewLine` `nntp-cmd-xover.go:87`, `sanitizeOverviewField` `:103`, `database.HeaderValueFromJSON` `nntp_overview.go:24`,
+  `HeaderFieldValue` `:15`, `OverviewRangeChunk = 1000` `:11`, `GetOverviewsRange` `queries.go:1813`, `GetHeaderFieldRange` `:1886`,
+  `newDataBlock() *dataBlockWriter` with `Line`/`Close` (`nntp-server-dataio.go:19`), `sendDataBlock(code, msg, lines)` `:73`. No shared core.
+- K-H6: **ok** (`nntp-article-common.go:47-48`, in `retrieveArticleCommon`, i.e. **before** `resolveArticleArg` is called; OVER/HDR sleep themselves).
+- K-H7: **deviation (benign)**: the signature is
+  `func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article *models.Article, replyNum int64, ok bool, err error)`
+  (`nntp-article-common.go:86`). `stat` only affects the number forms (message-id only); the message-id branch is as pre-filled
+  (current group → `local430` → processor `FindArticleByMessageID` + `visibleInOtherGroup`; sends 430/403 itself; `replyNum` 0 outside
+  the current group; never changes `currentArticle`). OVER/HDR call it with `stat=false` and `args = []string{"<id>"}`; when `ok` is false
+  the reply has been sent and `err` is the send error.
+- K-H8: **ok**. K-H10: **ok** (`nntp_reads.go`, `nntp_overview.go`).
+- K-H9: **ok**, except that `handleListActive` (`nntp-cmd-list.go:32`) formats the line inline (no helper): `rfc-lists` writes `activeLine`
+  with the identical expression; status text is `215 List of newsgroups follows` for both ACTIVE and NEWSGROUPS; `handleList` answers
+  `501 Unknown LIST keyword` (delayed) for other keywords.
+- K-H11: **ok**: no `writer` field (`ClientConnection` = conn, textConn, server, isTLS, authenticated, user, authUsername, currentGroup,
+  currentFirst, currentLast, currentArticle); `errQuit` → `Handle` returns nil; `Stop()` closes the raw conns it tracked (`NetConn()` for a
+  `*tls.Conn`); `handleConnection` defers `conn.Close()` on the raw conn; TLS-port config inline in `Start()` (`nntp-server.go:174-186`).
+- K-H12: **ok** (`UpdateDeadlines` read deadline only; `commandMaxArgs` maximum only, `MODE` 1, `LIST` 2; `readerCommands` and
+  `knownStatCommands` already hold the new words). `handleHelp()` takes no arguments (`nntp-cmd-basic.go:33`).
+- IHAVE gates as merged (`nntp-cmd-posting.go:99`): processor nil → 500 (no delay); args → 501 (no delay); `!authenticated` → delay + 480;
+  non-posting user → delay + 502; `!ValidMessageID` → delay + 501; `CheckMessageID` Pass/Dupes 435/Retry 436/Error delay + 436.
+  **For CHECK this plan's D5/D10 text wins** (480/502 without delay, invalid id → `438 <id>`); only the gate *order* is mirrored.
+- `cmd/nntp-server/main.go`: flag help at `:50-51`, TLS block at `:90-99` (cert/key cleared without a TLS port, as the plan describes).
+- Test harness: `hServerOpts{Proc, MaxConns, IdleTimeout, ErrorDelay, TLS}`, `newTestServer` (`nntp-server-harness_test.go:169`) sets
+  `cfg.NNTP.MaxConns` only, then `NewNNTPServer(db, cfg, &hs.wg, opts.Proc)`; `hFakeProcessor{checkResult, processResult, processErr,
+  findArticle, findErr, checkFn, processFn, findFn, processed, checked, …}`; `hClient{Conn, R, Deadline, Greeting}` with `send`, `readLine`,
+  `tryCmd`, `cmd`, `readDotLines`; `expect` in `TestGrpNextLast` is a closure (`nntp-server-group_test.go:691`); `w0DB(t)`/`w0Name` in
+  `internal/database/testmain_test.go:42,51`; `ovrBulkGroup` `nntp-server-overview_test.go:144`; `sessSelfSignedTLS` `nntp-server-session_test.go:134`.
+- E2E: helpers in `cmd/nntp-server/server_e2e_test.go` (`e2eClient`, `e2eDialAddr`, `tryCmd`, `tryDotLines`, `tryAuth`, `e2eParseCode`) and
+  `e2e_binary_test.go` (`e2eEnv`); script blocks N01–N11 at `scripts/test-nntp-server.sh:119`, N40–N49 at `:135`, `start_server` at `:47`.
+- Baseline at c11feb2 (untouched branch): gofmt = baseline 2 files; `go vet ./...` and `go vet -tags e2e ./cmd/nntp-server/` clean;
+  `go build ./...` ok; `bash -n scripts/test-nntp-server.sh` ok; `go test -race` over the 8 package sets PASS (nntp 112 s, database 81 s);
+  `PUGLEAF_KNOWN_BUGS=1` id list: **RFC-1, T-nntp-article-1**. K-H3 harness tests pass.
