@@ -2,6 +2,7 @@ package processor
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -43,8 +44,38 @@ func (leg *LegacyImporter) QuickOpenToGetNewsgroup(sqlitePath string) (string, e
 	return article.Newsgroup, nil
 }
 
+// legacyArticleOutcome classifies the result of importing one legacy article.
+type legacyArticleOutcome int
+
+const (
+	legacyImported     legacyArticleOutcome = iota
+	legacySkippedEmpty                      // empty article, nothing to import
+	legacyDuplicate                         // already known, not a failure
+	legacyFailed                            // parse or process error
+)
+
+// classifyLegacyImportErr maps the error of importLegacyArticle to its counter.
+func classifyLegacyImportErr(err error) legacyArticleOutcome {
+	switch {
+	case err == nil:
+		return legacyImported
+	case errors.Is(err, error_empty_article):
+		return legacySkippedEmpty
+	case errors.Is(err, errLegacyDuplicate):
+		return legacyDuplicate
+	default:
+		return legacyFailed
+	}
+}
+
 // ImportSQLiteArticles imports articles from legacy SQLite databases
 func (leg *LegacyImporter) ImportSQLiteArticles(sqlitePath string) error {
+	return leg.importSQLiteArticlesWith(sqlitePath, leg.importLegacyArticle)
+}
+
+// importSQLiteArticlesWith reads every article of one legacy SQLite file and passes it to
+// importArticle. Failed, empty and duplicate articles are counted, not returned.
+func (leg *LegacyImporter) importSQLiteArticlesWith(sqlitePath string, importArticle func(*LegacyArticle) error) error {
 	//log.Printf("Starting SQLite articles import from: %s", sqlitePath)
 
 	// Open the legacy SQLite database
@@ -56,7 +87,7 @@ func (leg *LegacyImporter) ImportSQLiteArticles(sqlitePath string) error {
 
 	// Query all articles in a single query - much faster than LIMIT/OFFSET
 	groupsCounter := make(map[string]int64)
-	var imported, skipped, skippedEmpty uint64
+	var imported, failed, skippedEmpty, duplicates uint64
 	lastReportTime := time.Now()
 	lastReportCount := uint64(0)
 	start := time.Now()
@@ -89,7 +120,7 @@ func (leg *LegacyImporter) ImportSQLiteArticles(sqlitePath string) error {
 		)
 		if err != nil {
 			log.Printf("Warning: failed to scan article row: %v", err)
-			skipped++
+			failed++
 			continue
 		}
 
@@ -102,14 +133,17 @@ func (leg *LegacyImporter) ImportSQLiteArticles(sqlitePath string) error {
 			article.Newsgroup = newsgroup // overwrite primary newsgroup so that we surely import that article to that group because it was a crosspost!
 		}
 		// Process the article immediately
-		err = leg.importLegacyArticle(&article)
-		if err != nil {
-			if err != error_empty_article {
-				skippedEmpty++
-				log.Printf("[RSLIGHT-IMPORT] WARN article %s db='%s': %v", article.MsgID, sqlitePath, err)
-				continue
-			}
-			skipped++
+		err = importArticle(&article)
+		switch classifyLegacyImportErr(err) {
+		case legacySkippedEmpty:
+			skippedEmpty++
+			continue
+		case legacyDuplicate:
+			duplicates++
+			continue
+		case legacyFailed:
+			failed++
+			log.Printf("[RSLIGHT-IMPORT] WARN article %s db='%s': %v", article.MsgID, sqlitePath, err)
 			continue
 		}
 
@@ -134,12 +168,14 @@ func (leg *LegacyImporter) ImportSQLiteArticles(sqlitePath string) error {
 		return fmt.Errorf("error during row iteration: %w", err)
 	}
 
-	log.Printf("[RSLIGHT-IMPORT] DONE: %d imported, %d skipped, %d skippedEmpty @db='%s' took %v", imported, skipped, skippedEmpty, sqlitePath, time.Since(start))
-	// update total counters
+	log.Printf("[RSLIGHT-IMPORT] DONE: %d imported, %d failed, %d skippedEmpty, %d duplicates @db='%s' took %v", imported, failed, skippedEmpty, duplicates, sqlitePath, time.Since(start))
+	// update total counters (the only groupsDone increment per file)
 	leg.mux.Lock()
 	defer leg.mux.Unlock()
 	leg.imported += imported
-	leg.skipped += skipped
+	leg.skipped += failed
+	leg.skippedEmpty += skippedEmpty
+	leg.duplicates += duplicates
 	leg.groupsDone++
 	for group, count := range groupsCounter {
 		leg.proc.LegacyCounter.Add("articles:"+group, count)
