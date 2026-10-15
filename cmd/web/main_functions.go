@@ -505,9 +505,102 @@ func compareActiveFileWithDatabase(db *database.Database, activeFilePath string,
 	return nil
 }
 
-// startHierarchyUpdater runs a background job every N minutes to update
-// hierarchy last_updated fields based on their child newsgroups
-func startHierarchyUpdater(db *database.Database) {
+// webShutdownWait bounds how long teardownDB waits for the database background
+// tasks (db.WG) before it shuts the database down anyway.
+const webShutdownWait = 60 * time.Second
+
+var (
+	// webStop is closed at the start of every shutdown (closeWebStop): it stops the
+	// cmd/web background loops startHierarchyUpdater and monitorUpdateFile.
+	webStop     = make(chan struct{})
+	webStopOnce sync.Once
+	dbStopOnce  sync.Once
+)
+
+// closeWebStop closes webStop once.
+func closeWebStop() {
+	webStopOnce.Do(func() { close(webStop) })
+}
+
+// closeDBStopChan closes db.StopChan once (the normal shutdown and the exit helpers
+// both reach it).
+func closeDBStopChan(db *database.Database) {
+	dbStopOnce.Do(func() { close(db.StopChan) })
+}
+
+// teardownDB stops the cmd/web loops (webStop) and the database background tasks
+// (db.StopChan), waits for db.WG at most webShutdownWait and shuts the database down.
+func teardownDB(db *database.Database) error {
+	closeWebStop()
+	closeDBStopChan(db)
+	log.Printf("[WEB]: Waiting for background tasks to finish...")
+	done := make(chan struct{})
+	go func() {
+		db.WG.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(webShutdownWait)
+	defer timer.Stop()
+	select {
+	case <-done:
+		log.Printf("[WEB]: All background tasks completed, shutting down database...")
+	case <-timer.C:
+		log.Printf("[WEB]: Background tasks did not stop within %v, shutting down database anyway", webShutdownWait)
+	}
+	return db.Shutdown()
+}
+
+// exitAfterDB is the only way out of cmd/web once the database is open (D5): it tears
+// the database down (teardownDB) and then exits with code.
+func exitAfterDB(db *database.Database, code int) {
+	if err := teardownDB(db); err != nil {
+		log.Printf("[WEB]: Failed to shutdown database: %v", err)
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
+
+// fatalAfterDB logs like log.Fatalf and exits with code 1 through exitAfterDB.
+func fatalAfterDB(db *database.Database, format string, args ...any) {
+	log.Printf(format, args...)
+	exitAfterDB(db, 1)
+}
+
+// resolveUseShortHashLen returns the history UseShortHashLen to use (OPS-4b). The
+// setting is legacy (no effect on the message-id history schema) and never fatal for
+// its value: a locked stored value wins; otherwise the CLI value is stored (and
+// locked), and a CLI value outside 2..7 is stored as 7 with a warning. Only database
+// errors are returned.
+func resolveUseShortHashLen(db *database.Database, cliValue int) (int, error) {
+	stored, isLocked, err := db.GetHistoryUseShortHashLen(cliValue)
+	if err != nil {
+		return 0, fmt.Errorf("get history configuration: %w", err)
+	}
+	if isLocked {
+		if cliValue != stored {
+			log.Printf("[WEB]: WARNING: Command-line UseShortHashLen (%d) differs from locked database value (%d). Using database value.", cliValue, stored)
+		} else {
+			log.Printf("[WEB]: Using stored history UseShortHashLen: %d", stored)
+		}
+		return stored, nil
+	}
+	value := cliValue
+	if value < 2 || value > 7 {
+		log.Printf("[WEB]: WARNING: -useshorthashlen %d is outside 2..7 (legacy setting, no effect on the message-id history schema): using 7", cliValue)
+		value = 7
+	}
+	if err := db.SetHistoryUseShortHashLen(value); err != nil {
+		return 0, fmt.Errorf("set history configuration: %w", err)
+	}
+	log.Printf("[WEB]: History UseShortHashLen initialized to %d", value)
+	return value, nil
+}
+
+// startHierarchyUpdater runs a background job every 10 minutes to update
+// hierarchy last_updated fields based on their child newsgroups, until stop is closed.
+func startHierarchyUpdater(db *database.Database, stop <-chan struct{}) {
 	// Run immediately on startup
 	if err := db.UpdateHierarchiesLastUpdated(); err != nil {
 		log.Printf("[WEB]: Initial hierarchy update failed: %v", err)
@@ -521,10 +614,17 @@ func startHierarchyUpdater(db *database.Database) {
 			}
 		}
 	}
-	log.Printf("[WEB]: Hierarchy updater started, will sync hierarchy last_updated every 30 minutes")
+	log.Printf("[WEB]: Hierarchy updater started, will sync hierarchy last_updated every 10 minutes")
 
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
 	for {
-		time.Sleep(10 * time.Minute)
+		select {
+		case <-stop:
+			log.Printf("[WEB]: Hierarchy updater stopped")
+			return
+		case <-ticker.C:
+		}
 		if err := db.UpdateHierarchiesLastUpdated(); err != nil {
 			log.Printf("[WEB]: Hierarchy update failed: %v", err)
 		} else {
@@ -540,16 +640,22 @@ func startHierarchyUpdater(db *database.Database) {
 	}
 }
 
-// monitorUpdateFile checks for the existence of an .update file every 30 seconds
-// and signals for shutdown when found, then removes the file
-func monitorUpdateFile(shutdownChan chan<- bool) {
+// monitorUpdateFile checks for the existence of an .update file every 60 seconds
+// and signals for shutdown when found, then renames the file; it returns when stop
+// is closed.
+func monitorUpdateFile(shutdownChan chan<- bool, stop <-chan struct{}) {
 	updateFilePath := ".update"
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
 	log.Printf("[WEB]: Update file monitor started, checking for '%s' every 60 seconds", updateFilePath)
 
-	for range ticker.C {
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+		}
 
 		// Check if .update file exists
 		if _, err := os.Stat(updateFilePath); err == nil {
@@ -580,7 +686,7 @@ func ConnectPools(db *database.Database) []*nntp.Pool {
 	log.Printf("[WEB]: Fetching providers from database...")
 	providers, err := db.GetProviders()
 	if err != nil {
-		log.Fatalf("[WEB]: Failed to fetch providers: %v", err)
+		fatalAfterDB(db, "[WEB]: Failed to fetch providers: %v", err)
 	}
 	log.Printf("[WEB]: Found %d providers in database", len(providers))
 	pools := make([]*nntp.Pool, 0, len(providers))
@@ -644,7 +750,9 @@ func ConnectPools(db *database.Database) []*nntp.Pool {
 	return pools
 }
 
-func NewFetchProcessor(db *database.Database) *processor.Processor {
+// NewFetchProcessor creates the processor with the resolved (stored) history
+// UseShortHashLen; errors of processor.NewProcessorE are returned, not fatal.
+func NewFetchProcessor(db *database.Database, shortHashLen int) (*processor.Processor, error) {
 	var pool *nntp.Pool
 	pools := ConnectPools(db) // Get NNTP pools
 	if len(pools) == 0 {
@@ -653,10 +761,13 @@ func NewFetchProcessor(db *database.Database) *processor.Processor {
 	} else {
 		pool = pools[0]
 	}
-	log.Printf("[WEB]: Creating processor instance with useShortHashLen=%d...", useShortHashLen)
-	proc := processor.NewProcessor(db, pool, useShortHashLen) // Create a new processor instance
+	log.Printf("[WEB]: Creating processor instance with useShortHashLen=%d...", shortHashLen)
+	proc, err := processor.NewProcessorE(db, pool, shortHashLen) // Create a new processor instance
+	if err != nil {
+		return nil, fmt.Errorf("create processor: %w", err)
+	}
 	log.Printf("[WEB]: Processor created successfully")
-	return proc
+	return proc, nil
 }
 
 func FetchRoutine(db *database.Database, proc *processor.Processor, useShortHashLen int, boot bool, isleep int64, DLParChan chan struct{}, progressDB *database.ProgressDB) {
@@ -1011,9 +1122,19 @@ func updateNewsgroupsExpiryFromFile(db *database.Database, filename string) erro
 	return nil
 }
 
-// disableNewsgroupsNotInActiveFile disables newsgroups NOT listed in the active file
-func disableNewsgroupsNotInActiveFile(db *database.Database, activeFilePath string) error {
-	log.Printf("[WEB]: Disabling newsgroups not listed in active file: %s", activeFilePath)
+// disableActiveOpts are the options of disableNewsgroupsNotInActiveFile.
+type disableActiveOpts struct {
+	// DryRun prints the groups that would be disabled and changes nothing (-disable-active-dry-run).
+	DryRun bool
+}
+
+// disableNewsgroupsNotInActiveFile disables newsgroups NOT listed in the active file.
+// Each non-empty, non-comment line names a group in its first field: active file lines
+// (groupname high low status) and plain group lists (one name per line) both work.
+// A file that names no group is refused (error, nothing changed); with opts.DryRun the
+// groups that would be disabled are printed and nothing is changed (D14).
+func disableNewsgroupsNotInActiveFile(db *database.Database, activeFilePath string, opts disableActiveOpts) error {
+	log.Printf("[WEB]: Disabling newsgroups not listed in active file: %s (dry-run: %t)", activeFilePath, opts.DryRun)
 
 	// Open and read the active file
 	file, err := os.Open(activeFilePath)
@@ -1036,17 +1157,10 @@ func disableNewsgroupsNotInActiveFile(db *database.Database, activeFilePath stri
 			continue
 		}
 
-		// Parse active file format: groupname high low status
+		// Active file format "groupname high low status" or a plain "groupname" list:
+		// the group name is the first field either way
 		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			log.Printf("[WEB]: Warning: Skipping malformed line %d in active file: %s", lineNum, line)
-			continue
-		}
-
-		groupName := fields[0]
-		if groupName != "" {
-			activeGroups[groupName] = true
-		}
+		activeGroups[fields[0]] = true
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -1054,6 +1168,10 @@ func disableNewsgroupsNotInActiveFile(db *database.Database, activeFilePath stri
 	}
 
 	log.Printf("[WEB]: Found %d active groups in file", len(activeGroups))
+	if len(activeGroups) == 0 {
+		// disabling every group is never what the caller meant: refuse, change nothing
+		return fmt.Errorf("active file '%s' lists no newsgroup (%d lines read): refusing to disable every newsgroup, nothing changed", activeFilePath, lineNum)
+	}
 
 	// Get all newsgroups from database
 	dbGroups, err := db.MainDBGetAllNewsgroups()
@@ -1072,6 +1190,11 @@ func disableNewsgroupsNotInActiveFile(db *database.Database, activeFilePath stri
 		if _, exists := activeGroups[group.Name]; !exists {
 			// Group not in active file - disable it
 			if group.Active {
+				if opts.DryRun {
+					fmt.Printf("dry-run: would disable %s\n", group.Name)
+					disabledCount++
+					continue
+				}
 				if err := db.UpdateNewsgroupActive(group.Name, false); err != nil {
 					log.Printf("[WEB]: Warning: Failed to disable newsgroup '%s': %v", group.Name, err)
 					continue
@@ -1089,9 +1212,14 @@ func disableNewsgroupsNotInActiveFile(db *database.Database, activeFilePath stri
 		}
 	}
 
-	log.Printf("[WEB]: Disable operation completed:")
+	if opts.DryRun {
+		log.Printf("[WEB]: Disable operation dry-run completed (nothing changed):")
+		log.Printf("[WEB]:   - Groups that would be disabled (not in active file): %d", disabledCount)
+	} else {
+		log.Printf("[WEB]: Disable operation completed:")
+		log.Printf("[WEB]:   - Groups newly disabled (not in active file): %d", disabledCount)
+	}
 	log.Printf("[WEB]:   - Groups kept active (in active file): %d", keptActiveCount)
-	log.Printf("[WEB]:   - Groups newly disabled (not in active file): %d", disabledCount)
 	log.Printf("[WEB]:   - Groups already inactive (not in active file): %d", alreadyInactiveCount)
 	log.Printf("[WEB]:   - Total groups processed: %d", len(dbGroups))
 
