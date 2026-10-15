@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -64,11 +63,11 @@ func ovhSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConne
 			}
 		}
 	}()
-	conn, err := net.DialTimeout("tcp", l.Addr().String(), 5*time.Second)
+	conn, err := net.DialTimeout("tcp", l.Addr().String(), hDeadline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: 5 * time.Second}
+	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: hDeadline}
 	t.Cleanup(func() { _ = conn.Close(); <-done })
 	if c.Greeting, err = c.readLine(); err != nil {
 		t.Fatalf("greeting: %v", err)
@@ -431,6 +430,10 @@ func TestOvhListHeaders(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Large ranges: chunked reads
 
+// TestOvhLargeRange: OVER/HDR over 2500 rows and open-ended ranges. The line counts and
+// the ordering are the assertion; there is no duration bound. The regression this guards
+// (a walk over the unused numbers up to 2^63) sends no line, so the client's per-read
+// deadline (hDeadline) stops the test.
 func TestOvhLargeRange(t *testing.T) {
 	const n = 2500
 	g := ovhBulkGroup(t, "rc3.large", n, 500, 1500)
@@ -455,17 +458,9 @@ func TestOvhLargeRange(t *testing.T) {
 		}
 	}
 
-	start := time.Now()
 	check("OVER 1-", ovhOverNums(t, ovhBlock(t, c, 224, "OVER 1-")))
-	if d := time.Since(start); d > 10*time.Second {
-		t.Fatalf("OVER 1- took %s", d)
-	}
 
-	start = time.Now()
 	lines := ovhBlock(t, c, 225, "HDR Subject 1-")
-	if d := time.Since(start); d > 10*time.Second {
-		t.Fatalf("HDR Subject 1- took %s", d)
-	}
 	nums := make([]int64, 0, len(lines))
 	for i, l := range lines {
 		num, subj, _ := strings.Cut(l, " ")
@@ -478,13 +473,9 @@ func TestOvhLargeRange(t *testing.T) {
 	check("HDR Subject 1-", nums)
 
 	// An open-ended huge range stops at the last row (no walk over unused numbers).
-	start = time.Now()
 	ovhExpectNums(t, "OVER 2499-max", ovhOverNums(t, ovhBlock(t, c, 224, "OVER 2499-9223372036854775807")), 2499, 2500)
 	if err := hExpectLines(ovhBlock(t, c, 225, "HDR Subject 2500-"), []string{"2500 Test article 2500"}); err != nil {
 		t.Fatal(err)
-	}
-	if d := time.Since(start); d > 10*time.Second {
-		t.Fatalf("open ranges took %s", d)
 	}
 	ovhExpect(t, c, 423, "OVER 2501-9223372036854775807")
 }

@@ -59,11 +59,11 @@ func lstSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConne
 			}
 		}
 	}()
-	conn, err := net.DialTimeout("tcp", l.Addr().String(), 5*time.Second)
+	conn, err := net.DialTimeout("tcp", l.Addr().String(), hDeadline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: 5 * time.Second}
+	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: hDeadline}
 	t.Cleanup(func() { _ = conn.Close(); <-done })
 	if c.Greeting, err = c.readLine(); err != nil {
 		t.Fatalf("greeting: %v", err)
@@ -187,22 +187,28 @@ func TestLstListWildmat(t *testing.T) {
 		t.Errorf("LIST ACTIVE %s: %v", b, err)
 	}
 
-	// D10: 501 is delayed, 215 is not.
+	// D10: 501 is delayed, 215 is not. Structural: the error-delay counter
+	// (incremented before the reply is sent) does not move for the 215 and moves
+	// once for the 501; the 501 keeps its lower bound against the configured delay.
 	const delay = 300 * time.Millisecond
 	hd := newTestServer(t, hServerOpts{ErrorDelay: delay})
 	cd := lstSession(t, hd, lstExtra())
-	start := time.Now()
+	delays := hd.S.ErrorDelayCount()
 	lstMustList(t, cd, 215, "LIST ACTIVE rc2.lw.%s.*", tok)
-	if d := time.Since(start); d >= delay {
-		t.Errorf("LIST ACTIVE <wildmat> (215) took %s, want no error delay", d)
+	if n := hd.S.ErrorDelayCount() - delays; n != 0 {
+		t.Errorf("LIST ACTIVE <wildmat> (215) reached the error delay %d times, want 0", n)
 	}
-	start = time.Now()
+	delays = hd.S.ErrorDelayCount()
+	start := time.Now()
 	code, line, _ := lstCmd(t, cd, 215, "LIST ACTIVE a,,b")
 	if err := hExpectCode(code, line, 501); err != nil {
 		t.Error(err)
 	}
 	if d := time.Since(start); d < delay {
 		t.Errorf("LIST ACTIVE a,,b (501) took %s, want at least %s", d, delay)
+	}
+	if n := hd.S.ErrorDelayCount() - delays; n != 1 {
+		t.Errorf("LIST ACTIVE a,,b (501) reached the error delay %d times, want 1", n)
 	}
 }
 
@@ -321,23 +327,29 @@ func TestLstNewGroups(t *testing.T) {
 		})
 	}
 
-	// D10: 501 is delayed, 231 is not.
+	// D10: 501 is delayed, 231 is not. Structural: the error-delay counter
+	// (incremented before the reply is sent) does not move for the 231 and moves
+	// once per 501; the 501s keep their lower bound against the configured delay.
 	const delay = 300 * time.Millisecond
 	hd := newTestServer(t, hServerOpts{ErrorDelay: delay})
 	cd := lstSession(t, hd, lstExtra())
-	start := time.Now()
+	delays := hd.S.ErrorDelayCount()
 	lstMustList(t, cd, 231, "NEWGROUPS 20991231 235959 GMT")
-	if d := time.Since(start); d >= delay {
-		t.Errorf("NEWGROUPS (231) took %s, want no error delay", d)
+	if n := hd.S.ErrorDelayCount() - delays; n != 0 {
+		t.Errorf("NEWGROUPS (231) reached the error delay %d times, want 0", n)
 	}
 	for _, bad := range []string{"NEWGROUPS 20260101", "NEWGROUPS 20261301 000000 GMT"} {
-		start = time.Now()
+		delays = hd.S.ErrorDelayCount()
+		start := time.Now()
 		code, line, _ := lstCmd(t, cd, 231, "%s", bad)
 		if err := hExpectCode(code, line, 501); err != nil {
 			t.Error(err)
 		}
 		if d := time.Since(start); d < delay {
 			t.Errorf("%s (501) took %s, want at least %s", bad, d, delay)
+		}
+		if n := hd.S.ErrorDelayCount() - delays; n != 1 {
+			t.Errorf("%s (501) reached the error delay %d times, want 1", bad, n)
 		}
 	}
 }
