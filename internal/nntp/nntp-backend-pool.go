@@ -66,6 +66,11 @@ func (pool *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]Ov
 	// Perform the XOVER command
 	result, err := client.XOver(group, start, end, enforceLimit)
 	if err != nil {
+		if errors.Is(err, ErrInvalidCommandArg) {
+			// refused before anything was written: the connection is healthy
+			pool.Put(client)
+			return nil, err
+		}
 		// Close connection on error
 		client.ForceCloseConn()
 		return nil, err
@@ -85,6 +90,11 @@ func (pool *Pool) XHdr(group string, header string, start, end int64) ([]HeaderL
 
 	result, err := client.XHdr(group, header, start, end)
 	if err != nil {
+		if errors.Is(err, ErrInvalidCommandArg) {
+			// refused before anything was written: the connection is healthy
+			pool.Put(client)
+			return nil, err
+		}
 		// Close connection on error
 		client.ForceCloseConn()
 		return nil, err
@@ -202,6 +212,10 @@ func (pool *Pool) SelectGroup(group string) (*GroupInfo, error) {
 		// authentication required: this connection is no use, close it
 		client.ForceCloseConn()
 		return nil, ErrAuthRequired
+	case errors.Is(err, ErrInvalidCommandArg):
+		// group name refused before anything was written: the connection is healthy
+		pool.Put(client)
+		return nil, err
 	case err != nil:
 		// Close connection on any other error
 		client.ForceCloseConn()
