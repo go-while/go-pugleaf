@@ -2,8 +2,7 @@
 
 # Apply NNNN_single_*.sql to all group databases
 
-#MIGRATION_FILE="migrations/0002_single_spam_system.sql"
-MIGRATION_FILE="migrations/0008_single_spam_hide_performance_indexes.sql"
+MIGRATION_FILE="internal/database/migrations/0002_single_spam_system.sql.applied"
 DATA_PATH="data/db"
 
 # Check if migration file exists
@@ -45,4 +44,4 @@ find "$DATA_PATH" -name "*.db" -type f | while read db_file; do
     apply_migration "$db_file"
 done
 
-echo "Done. Remove migration file: mv $MIGRATION_FILE ${MIGRATION_FILE}.applied"
+echo "Done. Leave $MIGRATION_FILE in place (tracked in git)."
