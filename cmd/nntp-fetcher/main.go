@@ -157,6 +157,13 @@ func main() {
 	// Set up cross-platform signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM) // Ctrl+C and SIGTERM take the same graceful path
+	// Listen at once: a signal during the provider/newsgroup setup (a slow remote LIST)
+	// must not sit in the channel until the fetch loop starts.
+	go func() {
+		<-sigChan
+		log.Printf("[FETCHER]: sigChan received shutdown signal")
+		common.ForceShutdown() // signal all worker goroutines to stop
+	}()
 
 	// Get UseShortHashLen from database (with safety check)
 	storedUseShortHashLen, isLocked, err := db.GetHistoryUseShortHashLen(*useShortHashLenPtr)
@@ -282,14 +289,7 @@ func main() {
 	log.Printf("[FETCHER]: Starting fetch for %d newsgroups", len(newsgroups))
 	time.Sleep(time.Second * 2) // debug sleep
 
-	// Start shutdown listener goroutine
 	fetchDoneChan := make(chan error, 1)
-	go func() {
-		<-sigChan
-		log.Printf("[FETCHER]: sigChan received shutdown signal")
-		// Signal all worker goroutines to stop
-		common.ForceShutdown()
-	}()
 
 	proc := processor.NewProcessor(db, pools[0], useShortHashLen) // Use first pool for import
 	if proc == nil {
