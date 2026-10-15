@@ -122,7 +122,7 @@ func showUsageExamples() {
 	fmt.Println("  ./nntp-analyze -group alt.test -host news.server.com -port 563")
 	fmt.Println("  ./nntp-analyze -group alt.test -host news.server.com -port 119 -ssl=false")
 	fmt.Println("  ./nntp-analyze -group alt.test -username user -password pass")
-	fmt.Println("  -timeout N sets the connect timeout in seconds (default 30); '$all' and 'prefix.*' runs do not apply it.")
+	fmt.Println("  -timeout N sets the connect timeout in seconds (default 30) for every mode.")
 	fmt.Println()
 	fmt.Println("Files:")
 	fmt.Println("  Overview cache: <-data>/cache/<-host without port>/<sha256 of group>.overview (default -data ./data)")
@@ -184,7 +184,7 @@ func main() {
 		username   = flag.String("username", defaultUsername, "NNTP username; the default is the public read-only account of the default -host")
 		password   = flag.String("password", defaultPassword, "NNTP password; the default is the public read-only account of the default -host")
 		ssl        = flag.Bool("ssl", true, "Use SSL/TLS connection")
-		timeout    = flag.Int("timeout", 30, "Connection timeout in seconds (not applied in '$all'/'prefix.*' mode)")
+		timeout    = flag.Int("timeout", 30, "Connection timeout in seconds")
 		group      = flag.String("group", "", "Newsgroup to analyze: a name, '$all' or 'prefix.*' (the last two read the group list from the databases in -data); -group or -groups-file is required")
 		groupsFile = flag.String("groups-file", "", "Path to an active file with the newsgroups to analyze (format: 'groupname high low status' per line); used instead of -group")
 
@@ -216,8 +216,6 @@ func main() {
 	if *exportFormat == "csv" {
 		log.Printf("Exporting analysis results to CSV format:")
 		fmt.Println(processor.GetAnalysisCSVHeader())
-		processor.GetAnalysisCSVHeader()
-		time.Sleep(3 * time.Second) // Give time to see the header
 	}
 	// Validate required parameters
 	if *group == "" && *groupsFile == "" {
@@ -254,6 +252,22 @@ func main() {
 	}
 }
 
+// analyzeBackendConfig is the shared pool configuration of the '$all'/'prefix.*' and
+// -groups-file modes: 5 connections and -timeout as the connect timeout.
+func analyzeBackendConfig(host string, port int, username, password string, ssl bool, timeoutSec int) *nntp.BackendConfig {
+	return &nntp.BackendConfig{
+		Host:           host,
+		Port:           port,
+		SSL:            ssl,
+		Username:       username,
+		Password:       password,
+		MaxConns:       5,
+		ConnectTimeout: time.Duration(timeoutSec) * time.Second,
+		//ReadTimeout:    60 * time.Second,
+		//WriteTimeout:   30 * time.Second,
+	}
+}
+
 // analyzeAllGroups performs analysis on all newsgroups found in the database using a shared connection pool
 func analyzeAllGroups(group *string, host *string, port *int, username *string, password *string, ssl *bool, timeout *int,
 	forceRefresh *bool, maxAnalyzeArticles *int64, startDate *string, endDate *string,
@@ -266,7 +280,6 @@ func analyzeAllGroups(group *string, host *string, port *int, username *string, 
 		// cut string by final *
 		wildcardNG = strings.TrimSuffix(*group, "*")
 		log.Printf("Using wildcard newsgroup prefix: '%s'", wildcardNG)
-		time.Sleep(3 * time.Second) // debug sleep
 	}
 	// Initialize database to get list of newsgroups
 	dbConfig := database.DefaultDBConfig()
@@ -300,18 +313,8 @@ func analyzeAllGroups(group *string, host *string, port *int, username *string, 
 		return nil
 	}
 
-	// Create NNTP connection configuration
-	backendConfig := &nntp.BackendConfig{
-		Host:     *host,
-		Port:     *port,
-		SSL:      *ssl,
-		Username: *username,
-		Password: *password,
-		MaxConns: 5,
-		//ConnectTimeout: time.Duration(*timeout) * time.Second,
-		//ReadTimeout:    60 * time.Second,
-		//WriteTimeout:   30 * time.Second,
-	}
+	// Create NNTP connection configuration (-timeout applies here too)
+	backendConfig := analyzeBackendConfig(*host, *port, *username, *password, *ssl, *timeout)
 
 	fmt.Printf("Creating shared NNTP connection pool for %s:%d (SSL: %v)\n", *host, *port, *ssl)
 
@@ -459,17 +462,7 @@ func analyzeGroupsFromFile(filePath string, host *string, port *int, username *s
 	}
 
 	// Create NNTP connection configuration
-	backendConfig := &nntp.BackendConfig{
-		Host:           *host,
-		Port:           *port,
-		SSL:            *ssl,
-		Username:       *username,
-		Password:       *password,
-		MaxConns:       5,
-		ConnectTimeout: time.Duration(*timeout) * time.Second,
-		//ReadTimeout:    60 * time.Second,
-		//WriteTimeout:   30 * time.Second,
-	}
+	backendConfig := analyzeBackendConfig(*host, *port, *username, *password, *ssl, *timeout)
 
 	fmt.Printf("Creating shared NNTP connection pool for %s:%d (SSL: %v)\n", *host, *port, *ssl)
 
