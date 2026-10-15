@@ -462,9 +462,11 @@ func (hc *HierarchyCache) loadAllHierarchies(db *Database) error {
 func (hc *HierarchyCache) buildHierarchyTreeBulk(db *Database) error {
 	log.Printf("HierarchyCache: Building hierarchy tree from all newsgroups...")
 
-	// Get ALL active newsgroups with their hierarchies in one query
+	// Get ALL active newsgroups with their hierarchies in one query.
+	// hierarchy and message_count are nullable (A-db-1): COALESCE them, so a row the old
+	// batch upsert left with NULLs is still listed instead of failing the scan (A-db-11).
 	rows, err := RetryableQuery(db.mainDB, `
-		SELECT name, hierarchy, message_count, last_article, updated_at
+		SELECT name, COALESCE(hierarchy, '') AS hierarchy, COALESCE(message_count, 0), last_article, updated_at
 		FROM newsgroups
 		WHERE active = 1 AND message_count > 0
 		ORDER BY hierarchy, name
@@ -480,6 +482,7 @@ func (hc *HierarchyCache) buildHierarchyTreeBulk(db *Database) error {
 	directGroupCounts := make(map[string]int)
 
 	var allGroups []*models.Newsgroup
+	scanErrs := 0
 
 	// Process all newsgroups and build the structure
 	for rows.Next() {
@@ -489,6 +492,11 @@ func (hc *HierarchyCache) buildHierarchyTreeBulk(db *Database) error {
 
 		err := rows.Scan(&group.Name, &group.Hierarchy, &group.MessageCount, &lastArticle, &updatedAt)
 		if err != nil {
+			// Log the first scan error of this call only; the rest are counted below.
+			scanErrs++
+			if scanErrs == 1 {
+				log.Printf("[HIERARCHY] buildHierarchyTreeBulk: failed to scan newsgroup row: %v", err)
+			}
 			continue
 		}
 
@@ -535,6 +543,13 @@ func (hc *HierarchyCache) buildHierarchyTreeBulk(db *Database) error {
 
 		// Add groups to the correct hierarchy levels for navigation
 		hc.addGroupToAllPossibleLevels(group, hierarchyGroups, directGroupCounts)
+	}
+	// A truncated read must not replace the caches with a partial tree.
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to read all newsgroups: %w", err)
+	}
+	if scanErrs > 1 {
+		log.Printf("[HIERARCHY] buildHierarchyTreeBulk: skipped %d newsgroup rows that failed to scan", scanErrs)
 	}
 
 	// Now populate all the caches
