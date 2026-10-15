@@ -245,7 +245,7 @@ func TestIntakeProcCaptureLimiter(t *testing.T) {
 	select {
 	case ok := <-got:
 		t.Fatalf("third acquire returned %v on a full limiter", ok)
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(50 * time.Millisecond): // deliberate negative window (cannot fail on a slow machine)
 	}
 	l.release()
 	select {
@@ -281,9 +281,10 @@ func TestIntakeProcCaptureLimiter(t *testing.T) {
 	select {
 	case ok := <-got:
 		t.Fatalf("acquire returned %v before stop", ok)
-	case <-time.After(30 * time.Millisecond):
+	case <-time.After(30 * time.Millisecond): // deliberate negative window (cannot fail on a slow machine)
 	}
 	stop.Store(true)
+	start := time.Now()
 	select {
 	case ok := <-got:
 		if ok {
@@ -292,14 +293,25 @@ func TestIntakeProcCaptureLimiter(t *testing.T) {
 	case <-time.After(testWait):
 		t.Fatal("acquire still blocked after stop")
 	}
+	// 1 s is 10x the 100 ms tick (rule 1): catches a ticker regression the poll count cannot
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("acquire took %v after stop, want <= 1s (10x the 100 ms tick)", d)
+	}
 	if n := pollsAfter.Load(); n != 1 {
 		t.Fatalf("acquire polled stop %d times after it reported true, want 1 (give up on the first tick)", n)
 	}
 
-	// wait=false never blocks (it never enters the polling loop) and counts the overflow
+	// wait=false never blocks (it never enters the polling loop) and counts the overflow;
+	// run in a goroutine so a regression that blocks fails at testWait instead of hanging
 	var falsePolls atomic.Int64
-	if l.acquire(false, func() bool { falsePolls.Add(1); return false }) {
-		t.Fatal("acquire(false) took a slot on a full limiter")
+	go func() { got <- l.acquire(false, func() bool { falsePolls.Add(1); return false }) }()
+	select {
+	case ok := <-got:
+		if ok {
+			t.Fatal("acquire(false) took a slot on a full limiter")
+		}
+	case <-time.After(testWait):
+		t.Fatal("acquire(false) blocked on a full limiter")
 	}
 	if n := falsePolls.Load(); n != 0 {
 		t.Fatalf("acquire(false) polled stop %d times, want 0 (it must not wait)", n)

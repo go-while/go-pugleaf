@@ -283,7 +283,7 @@ func TestHistoryCloseFlushesAndWaitGroup(t *testing.T) {
 	for i := 0; i < n; i++ {
 		h.AddArticle(fmt.Sprintf("<close-%d@test>", i), int64(i%5)+1)
 	}
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond) // deliberate negative window (cannot fail on a slow machine)
 	if wgDone.Load() {
 		t.Fatal("mainWG returned before Close")
 	}

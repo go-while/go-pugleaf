@@ -46,8 +46,8 @@ func (h TestIntakeDLHelper) waitClosed(ch <-chan struct{}, what string) {
 }
 
 // checkLateTTL fails the test unless exp was set to "now + intakeDLLateTTL" at a moment between
-// before and after. No wall-clock budget: a slow machine cannot make it fail, and the 15 s TTL of
-// the claim it replaces is out of range unless before..after spans 10 s.
+// before and after. No wall-clock budget: a slow machine cannot make it fail. The 15 s expiry of
+// the claim it replaces (set before `before`) is out of range unless after - setup time >= 10 s.
 func (h TestIntakeDLHelper) checkLateTTL(what string, exp, before, after time.Time) {
 	h.t.Helper()
 	lo, hi := before.Add(intakeDLLateTTL), after.Add(intakeDLLateTTL)
