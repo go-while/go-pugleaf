@@ -256,6 +256,7 @@ func TestAdfOptTorParseConfigSettings(t *testing.T) {
 	good := write("good.cfg", strings.Join([]string{
 		"# comment",
 		"127.2.3.4:11119:a.onion:119 # news",
+		"127.2.3.5:11120:c.onion:119 # key=foo is a comment, not a setting",
 		"max_conns = 8",
 		"IDLE_TIMEOUT=90s   # comment",
 		"allow_public_bind = true",
@@ -266,8 +267,8 @@ func TestAdfOptTorParseConfigSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseConfigFile: %v", err)
 	}
-	if len(configs) != 2 {
-		t.Fatalf("got %d entries, want 2", len(configs))
+	if len(configs) != 3 {
+		t.Fatalf("got %d entries, want 3", len(configs))
 	}
 	if fs.MaxConns == nil || *fs.MaxConns != 8 {
 		t.Errorf("max_conns = %v, want 8", fs.MaxConns)
@@ -442,14 +443,16 @@ func TestAdfOptTorIdleTimeout(t *testing.T) {
 		dialTarget: adfOptTorTCPDial(backend, nil)}
 	addr, _ := adfOptTorStart(t, s)
 
+	// start is taken before the dial, so every deadline the handler sets is later than start
+	// and the close cannot come earlier than one idle timeout after it.
+	start := time.Now()
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer func() { _ = c.Close() }()
-	start := time.Now()
 	adfOptTorExpectClosed(t, c, 3*time.Second)
-	if elapsed := time.Since(start); elapsed < 250*time.Millisecond {
+	if elapsed := time.Since(start); elapsed < 300*time.Millisecond {
 		t.Fatalf("idle connection closed after %v, before the 300ms idle timeout", elapsed)
 	}
 	select {
@@ -460,9 +463,11 @@ func TestAdfOptTorIdleTimeout(t *testing.T) {
 }
 
 // One-way traffic keeps the connection alive: the silent direction must not time out while the
-// other one moves data.
+// other one moves data. Chunks come every 100 ms (10x margin to the 1 s idle timeout) for 3 s,
+// so the silent direction's read deadline fires and is retried several times.
 func TestAdfOptTorIdleOneWayTraffic(t *testing.T) {
-	const chunks = 10 // 1s of one-way traffic, more than twice the idle timeout
+	const chunks = 30
+	retriesBefore := idleRetries.Load()
 	backend := adfOptTorBackend(t, func(c *net.TCPConn) {
 		for i := 0; i < chunks; i++ {
 			if _, err := c.Write([]byte("x")); err != nil {
@@ -473,7 +478,7 @@ func TestAdfOptTorIdleOneWayTraffic(t *testing.T) {
 		_ = c.CloseWrite()
 		_, _ = io.Copy(io.Discard, c)
 	})
-	s := &ProxyServer{IdleTimeout: 400 * time.Millisecond, Timeout: time.Second,
+	s := &ProxyServer{IdleTimeout: time.Second, Timeout: time.Second,
 		dialTarget: adfOptTorTCPDial(backend, nil)}
 	addr, _ := adfOptTorStart(t, s)
 
@@ -482,13 +487,57 @@ func TestAdfOptTorIdleOneWayTraffic(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer func() { _ = c.Close() }()
-	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = c.SetReadDeadline(time.Now().Add(15 * time.Second))
 	got, err := io.ReadAll(c)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	if len(got) != chunks {
 		t.Fatalf("got %d bytes, want %d (connection closed while the other direction was active)", len(got), chunks)
+	}
+	if idleRetries.Load()-retriesBefore < 1 {
+		t.Fatalf("the silent direction's idle deadline never fired and was retried")
+	}
+}
+
+// After the client half-closes, a reply that streams for longer than the idle timeout (but
+// never pauses for it) must arrive completely: no total drain limit may cut it off.
+func TestAdfOptTorHalfCloseLongReply(t *testing.T) {
+	const chunks = 30 // 3 s of reply, 100 ms apart, idle timeout 1 s
+	backend := adfOptTorBackend(t, func(c *net.TCPConn) {
+		if _, err := io.ReadAll(c); err != nil { // until the client's half-close arrives
+			return
+		}
+		for i := 0; i < chunks; i++ {
+			if _, err := c.Write([]byte("r")); err != nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		_ = c.CloseWrite()
+	})
+	s := &ProxyServer{IdleTimeout: time.Second, Timeout: time.Second,
+		dialTarget: adfOptTorTCPDial(backend, nil)}
+	addr, _ := adfOptTorStart(t, s)
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	if _, err := c.Write([]byte("ARTICLE 1\r\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := c.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(15 * time.Second))
+	got, err := io.ReadAll(c)
+	if err != nil {
+		t.Fatalf("read reply: %v (got %d bytes)", err, len(got))
+	}
+	if len(got) != chunks {
+		t.Fatalf("got %d of %d reply bytes after half-close", len(got), chunks)
 	}
 }
 

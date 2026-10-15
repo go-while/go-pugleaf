@@ -558,8 +558,9 @@ func parseConfigFile(filename, socksProxy, socksHost string, socksPort int, sock
 			continue
 		}
 
-		// Settings: key = value
-		if strings.Contains(line, "=") {
+		// Settings: key = value (a "=" inside a trailing "# comment" does not count)
+		uncommented, _, _ := strings.Cut(line, "#")
+		if strings.Contains(uncommented, "=") {
 			if err := parseSettingLine(line, &settings); err != nil {
 				return nil, settings, fmt.Errorf("line %d: %v", lineNum, err)
 			}
@@ -1126,8 +1127,8 @@ type copyResult struct {
 
 // forward copies data in both directions until both are done. When one side ends its stream
 // cleanly (EOF), the other side is half-closed (CloseWrite) so its peer sees EOF too, and the
-// remaining direction gets up to one idle timeout to drain. On an error or an idle timeout both
-// connections are closed at once.
+// remaining direction keeps running until it ends or is idle for one idle timeout. On an error
+// or an idle timeout both connections are closed at once.
 func (s *ProxyServer) forward(clientConn, targetConn net.Conn, clientAddr string) {
 	idle := s.idleTimeout()
 	act := &activity{}
@@ -1156,20 +1157,10 @@ func (s *ProxyServer) forward(clientConn, targetConn net.Conn, clientAddr string
 	s.logCopyResult(clientAddr, first)
 	if first.err != nil {
 		closeBoth()
-	} else {
-		drain := time.NewTimer(idle)
-		select {
-		case second := <-results:
-			drain.Stop()
-			s.logCopyResult(clientAddr, second)
-			return
-		case <-drain.C:
-			if s.Verbose {
-				log.Printf("%s: other direction did not finish within %v after half-close, closing", clientAddr, idle)
-			}
-			closeBoth()
-		}
 	}
+	// After a clean half-close the remaining direction needs no extra timer: copyWithIdle bounds
+	// every blocking read and write by idle, and the finished direction no longer touches act,
+	// so the remaining one ends after one idle period without its own traffic.
 	s.logCopyResult(clientAddr, <-results)
 }
 
@@ -1179,6 +1170,10 @@ func (s *ProxyServer) logCopyResult(clientAddr string, r copyResult) {
 		log.Printf("%s copy error for %s: %v (wrote %d bytes)", r.dir, clientAddr, r.err, r.written)
 	}
 }
+
+// idleRetries counts reads that hit their idle deadline but were retried because the other
+// direction moved data within the idle timeout (read by tests).
+var idleRetries atomic.Int64
 
 // activity records the time of the last traffic on a forwarded connection, in either direction.
 type activity struct {
@@ -1226,6 +1221,7 @@ func copyWithIdle(dst, src net.Conn, idle time.Duration, act *activity) (int64, 
 			}
 			if errors.Is(rerr, os.ErrDeadlineExceeded) {
 				if act.since() < idle {
+					idleRetries.Add(1)
 					continue // the other direction is active
 				}
 				return written, fmt.Errorf("idle for %v: %w", idle, rerr)
