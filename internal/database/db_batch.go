@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/history"
@@ -117,6 +118,19 @@ type SQ3batch struct {
 	// the same *string, so in-flight articles' NewsgroupsPtr, GroupDB.NewsgroupPtr and
 	// ArticleNums keys stay valid across an expiry (A-db-5, A-db-2).
 	groupNames map[string]*string
+
+	// Commit barrier (db_batch_commit.go, A-tools-5b): per-group captured/settled/dropped
+	// counters under the leaf lock commitMu, never expired (like groupNames). flushReq asks
+	// StartOrch to flush the pending batches at its next 125 ms tick instead of waiting for
+	// BatchInterval.
+	commitMu sync.Mutex
+	commits  map[string]*commitCounters
+	flushReq atomic.Bool
+
+	// testAfterInsertCommit, when set (tests only), runs in processOverviewBatch after the
+	// insert transaction committed and before the article numbers are selected; an error it
+	// returns takes the path of a failed SELECT (retry1 with the inserted rows remembered).
+	testAfterInsertCommit func() error
 }
 
 type BatchTasks struct {
@@ -181,6 +195,7 @@ func (sq *SQ3batch) BatchCaptureOverviewForLater(newsgroupPtr *string, article *
 		sq.captureDropOnce.Do(func() {
 			log.Printf("[BATCH] capture after Shutdown dropped")
 		})
+		sq.settleArticles(newsgroupPtr, 1, true) // commit barrier: never stored
 	}
 }
 
@@ -861,6 +876,7 @@ retry1:
 		log.Printf("[BATCH] dropping %d articles for '%s': %v", len(batches), *task.Newsgroup, lastErr)
 	})
 	if err != nil {
+		sq.settleArticles(task.Newsgroup, len(batches), true) // commit barrier: dropped
 		return
 	}
 
@@ -875,11 +891,15 @@ retry1:
 		if insertClock.expired(sq.db.IsDBshutdown) {
 			log.Printf("[BATCH] dropping %d articles for '%s': insert still failing %v into shutdown (%d attempts): %v",
 				len(batches), *task.Newsgroup, insertGrace, insertAttempts, err)
+			sq.settleArticles(task.Newsgroup, len(batches), true) // commit barrier: dropped
 			return
 		}
 		time.Sleep(time.Second)
 		goto retry1
 	}
+	// The batch is committed (inserted or ignored as stored duplicates): release the waiters
+	// of the commit barrier before the threading and stats phases.
+	sq.settleArticles(task.Newsgroup, len(batches), false)
 
 	// Compute max article number for newsgroup stats. Only inserted articles got a number;
 	// ignored duplicates (message-id already in the group, or twice in this batch) keep 0.
@@ -1173,6 +1193,11 @@ func (sq *SQ3batch) processOverviewBatch(groupDB *GroupDB, batches []*models.Art
 	// Recorded only after the commit: a rolled-back insert must not count as inserted.
 	for _, article := range newRows {
 		inserted[article] = struct{}{}
+	}
+	if sq.testAfterInsertCommit != nil {
+		if err := sq.testAfterInsertCommit(); err != nil {
+			return fmt.Errorf("failed to execute batch select for group '%s': %w", groupDB.Newsgroup, err)
+		}
 	}
 
 	// Single batch SELECT query to get all article numbers at once
@@ -1740,7 +1765,8 @@ wait:
 			}
 		}
 		if !wantShutdown {
-			if time.Since(lastFlush) > o.BatchInterval {
+			// flushReq: a WaitCommitted caller waits for the pending batches (commit barrier)
+			if time.Since(lastFlush) > o.BatchInterval || o.batch.flushReq.Swap(false) {
 				lastFlush = time.Now()
 				//log.Printf("[ORCHESTRATOR1] Timer triggered - processing all pending batches smaller than sq.maxDBbatch")
 			loop:
@@ -1931,6 +1957,7 @@ func (sq *SQ3batch) BatchDivider() {
 			for {
 				select {
 				case <-stop:
+					sq.settleArticles(newsgroupPtr, 1, true) // commit barrier: never stored
 					return
 				case <-time.After(16 * time.Millisecond):
 				}
@@ -1955,6 +1982,7 @@ func (sq *SQ3batch) BatchDivider() {
 			sq.GMux.Lock()
 			sq.queued--
 			sq.GMux.Unlock()
+			sq.settleArticles(newsgroupPtr, 1, true) // commit barrier: never stored
 			return
 		}
 	}

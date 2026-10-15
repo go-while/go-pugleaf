@@ -344,6 +344,10 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		// ProcessQueue never block, and since every target is already in NewsgroupsPtr no
 		// group's batch can clear the article before the last capture was sent.
 		handedOff = true
+		// Commit barrier (A-tools-5b): counted here, synchronously, before the capture
+		// goroutine can reach the batch writer, so a WaitCommitted that starts after this
+		// call returned always sees the article.
+		proc.DB.Batch.NoteCaptured(capture)
 		go func(ptrs []*string, acquired bool) {
 			if acquired {
 				defer captureLimit().release()

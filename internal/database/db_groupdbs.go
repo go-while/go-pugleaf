@@ -333,13 +333,21 @@ func (dbs *GroupDB) Return() {
 	dbs.mux.Unlock()
 }
 
-func (db *GroupDB) ExistsMsgIdInArticlesDB(messageID string) bool {
-	query := "SELECT 1 FROM articles WHERE message_id = ? LIMIT 1"
-	var exists bool
-	if err := RetryableQueryRowScan(db.DB, query, []interface{}{messageID}, &exists); err != nil {
-		return false
+// NNTPArticleNumByMessageID returns the number of the visible (hide = 0) article with
+// messageID in groupDB, reading only the index row (STAT by message-id needs no headers or
+// body). It returns sql.ErrNoRows when the article is absent or hidden, like
+// NNTPArticleByMessageID.
+func (db *Database) NNTPArticleNumByMessageID(groupDB *GroupDB, messageID string) (int64, error) {
+	if groupDB == nil || groupDB.DB == nil {
+		return 0, fmt.Errorf("NNTPArticleNumByMessageID: group database is not open")
 	}
-	return exists
+	var num int64
+	if err := RetryableQueryRowScan(groupDB.DB,
+		`SELECT article_num FROM articles WHERE message_id = ? AND hide = 0 LIMIT 1`,
+		[]interface{}{messageID}, &num); err != nil {
+		return 0, err
+	}
+	return num, nil
 }
 
 func (dbs *GroupDB) Close(who string) error {

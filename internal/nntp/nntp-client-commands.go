@@ -105,7 +105,7 @@ func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Arti
 	code, message, err := c.TextConn.ReadCodeLine(ArticleFollows)
 	if err != nil && code == 0 {
 		log.Printf("[ERROR] failed to read ARTICLE '%s' code=%d message='%s' err: %v", *messageID, code, message, err)
-		return nil, fmt.Errorf("failed to read ARTICLE '%s' code=%d message='%s' err: %v", *messageID, code, message, err)
+		return nil, fmt.Errorf("failed to read ARTICLE '%s' code=%d message='%s' err: %w", *messageID, code, message, err)
 	}
 
 	if code != ArticleFollows {
