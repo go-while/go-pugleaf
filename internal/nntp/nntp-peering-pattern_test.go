@@ -4,22 +4,24 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
 
-// parseActiveFile reads the active.i2pn2.txt file and extracts newsgroup names
+// parseActiveFile reads the tracked active_files/ninja-nl.active file and extracts newsgroup names.
+// By default it returns at most 20 000 groups, sampled evenly across the whole file: the file is
+// sorted, so its first 20 000 lines end inside alt.* and would hold no control.*, junk or gmane.*
+// group for TestRealNewsgroupsWithDefaultPatterns. Set PUGLEAF_PEERING_REALDATA=1 to use every group.
 func parseActiveFile(t *testing.T) []string {
-	// Use absolute path to active file
-	//activeFile := "/home/fed/WORKSPACES/workspace.go-pugleaf/go-pugleaf/active.i2pn2.txt"
-	//activeFile := "/home/fed/WORKSPACES/workspace.go-pugleaf/go-pugleaf/active.file.test"
-	//activeFile := "/home/fed/WORKSPACES/workspace.go-pugleaf/go-pugleaf/cubenet-nl.active"
-	activeFile := "/home/fed/WORKSPACES/workspace.go-pugleaf/go-pugleaf/ninja-nl.active"
+	t.Helper()
+	const maxGroups = 20000
+	activeFile := filepath.Join("..", "..", "active_files", "ninja-nl.active")
+	realData := os.Getenv("PUGLEAF_PEERING_REALDATA") == "1"
 
 	file, err := os.Open(activeFile)
 	if err != nil {
-		t.Skipf("Skipping test: cannot open active file %s: %v", activeFile, err)
-		return nil
+		t.Fatalf("cannot open active file %s: %v", activeFile, err)
 	}
 	defer file.Close()
 
@@ -46,9 +48,48 @@ func parseActiveFile(t *testing.T) []string {
 	if err := scanner.Err(); err != nil {
 		t.Fatalf("Error reading active file: %v", err)
 	}
+	if len(newsgroups) == 0 {
+		t.Fatalf("no newsgroups found in active file %s", activeFile)
+	}
+
+	total := len(newsgroups)
+	if !realData && total > maxGroups {
+		stride := (total + maxGroups - 1) / maxGroups
+		sampled := make([]string, 0, maxGroups)
+		for i := 0; i < total; i += stride {
+			sampled = append(sampled, newsgroups[i])
+		}
+		t.Logf("Loaded %d of %d newsgroups from active file (every %d., PUGLEAF_PEERING_REALDATA=1 for all)",
+			len(sampled), total, stride)
+		return sampled
+	}
 
 	t.Logf("Loaded %d newsgroups from active file", len(newsgroups))
 	return newsgroups
+}
+
+// peeringUnmatched returns the newsgroups of parseActiveFile that no pattern of
+// DefaultBinaryExcludePatterns rejects, sorted. It is computed in-process for every
+// caller, so no test depends on a file an earlier test wrote.
+func peeringUnmatched(t *testing.T) []string {
+	t.Helper()
+	var unmatched []string
+	for _, group := range parseActiveFile(t) {
+		result := MatchNewsgroupPatterns(group, []string{"*"}, []string{}, DefaultBinaryExcludePatterns)
+		if result.Action != "reject" {
+			unmatched = append(unmatched, group)
+		}
+	}
+	sort.Strings(unmatched)
+	return unmatched
+}
+
+// peeringLines joins groups into newline-terminated lines for the output files.
+func peeringLines(groups []string) string {
+	if len(groups) == 0 {
+		return ""
+	}
+	return strings.Join(groups, "\n") + "\n"
 }
 
 func TestBasicPatternMatching(t *testing.T) {
@@ -354,34 +395,21 @@ func TestAllDefaultBinaryPatterns(t *testing.T) {
 
 	t.Logf("Testing ALL default binary exclude patterns against %d newsgroups:", len(newsgroups))
 
-	// Create a map to track which groups are still unmatched
-	unmatchedGroups := make(map[string]bool)
-	for _, group := range newsgroups {
-		unmatchedGroups[group] = true
-	}
-
 	totalMatches := 0
 
 	// Test each pattern in DefaultBinaryExcludePatterns individually
 	for i, pattern := range DefaultBinaryExcludePatterns {
 		matches := 0
 		samples := []string{}
-		matchedByThisPattern := []string{}
 
 		for _, group := range newsgroups {
 			result := MatchNewsgroupPatterns(group, []string{"*"}, []string{}, []string{pattern})
 			if result.Action == "reject" {
 				matches++
-				matchedByThisPattern = append(matchedByThisPattern, group)
 				if len(samples) < 3 {
 					samples = append(samples, group)
 				}
 			}
-		}
-
-		// Remove matched groups from unmatched map
-		for _, group := range matchedByThisPattern {
-			delete(unmatchedGroups, group)
 		}
 
 		t.Logf("Pattern %d: %s -> %d matches", i+1, pattern, matches)
@@ -394,30 +422,18 @@ func TestAllDefaultBinaryPatterns(t *testing.T) {
 
 	t.Logf("Total pattern matches: %d (with overlaps)", totalMatches)
 
-	// Convert remaining unmatched groups back to slice for writing
-	remainingGroups := make([]string, 0, len(unmatchedGroups))
-	for group := range unmatchedGroups {
-		remainingGroups = append(remainingGroups, group)
-	}
+	// Groups no binary pattern rejects (the same list the unmatched-analysis tests use)
+	remainingGroups := peeringUnmatched(t)
 
 	t.Logf("Groups NOT matched by any binary pattern: %d", len(remainingGroups))
 	t.Logf("Binary patterns coverage: %.2f%% (%d out of %d groups blocked)",
 		float64(len(newsgroups)-len(remainingGroups))/float64(len(newsgroups))*100,
 		len(newsgroups)-len(remainingGroups), len(newsgroups))
 
-	// Write remaining unmatched groups to active.out file
-	outputFile := "active.out"
-	file, err := os.Create(outputFile)
-	if err != nil {
-		t.Fatalf("Failed to create output file: %v", err)
-	}
-	defer file.Close()
-
-	for _, group := range remainingGroups {
-		_, err := file.WriteString(group + "\n")
-		if err != nil {
-			t.Fatalf("Failed to write to output file: %v", err)
-		}
+	// Write remaining unmatched groups to active.out in the test's temp dir
+	outputFile := filepath.Join(t.TempDir(), "active.out")
+	if err := os.WriteFile(outputFile, []byte(peeringLines(remainingGroups)), 0o600); err != nil {
+		t.Fatalf("Failed to write output file: %v", err)
 	}
 
 	t.Logf("Wrote %d unmatched groups to %s", len(remainingGroups), outputFile)
@@ -433,22 +449,8 @@ func TestAllDefaultBinaryPatterns(t *testing.T) {
 }
 
 func TestSearchUnmatchedForBinaryGroups(t *testing.T) {
-	// Read the active.out file to see what we missed
-	file, err := os.Open("active.out")
-	if err != nil {
-		t.Skipf("Cannot open active.out: %v", err)
-		return
-	}
-	defer file.Close()
-
-	var unmatchedGroups []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			unmatchedGroups = append(unmatchedGroups, line)
-		}
-	}
+	// Groups no binary pattern rejects, computed in-process
+	unmatchedGroups := peeringUnmatched(t)
 
 	t.Logf("Searching %d unmatched groups for potential binary groups...", len(unmatchedGroups))
 
@@ -516,24 +518,11 @@ func TestSearchUnmatchedForBinaryGroups(t *testing.T) {
 }
 
 func TestAnalyzeUnmatchedGroupsToFiles(t *testing.T) {
-	// Read the active.out file to see what we missed
-	file, err := os.Open("active.out")
-	if err != nil {
-		t.Skipf("Cannot open active.out: %v", err)
-		return
-	}
-	defer file.Close()
+	// Groups no binary pattern rejects, computed in-process
+	unmatchedGroups := peeringUnmatched(t)
 
-	var unmatchedGroups []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			unmatchedGroups = append(unmatchedGroups, line)
-		}
-	}
-
-	t.Logf("Analyzing %d unmatched groups and saving results to files...", len(unmatchedGroups))
+	outDir := t.TempDir()
+	t.Logf("Analyzing %d unmatched groups and saving results to files in %s...", len(unmatchedGroups), outDir)
 
 	// Search for specific binary-related keywords and save to files
 	binaryKeywords := []string{
@@ -554,17 +543,11 @@ func TestAnalyzeUnmatchedGroupsToFiles(t *testing.T) {
 		}
 
 		if len(matches) > 0 {
-			filename := "analysis_" + keyword + ".txt"
-			outFile, err := os.Create(filename)
-			if err != nil {
-				t.Logf("Error creating %s: %v", filename, err)
+			filename := filepath.Join(outDir, "analysis_"+keyword+".txt")
+			if err := os.WriteFile(filename, []byte(peeringLines(matches)), 0o600); err != nil {
+				t.Errorf("Error writing %s: %v", filename, err)
 				continue
 			}
-
-			for _, match := range matches {
-				outFile.WriteString(match + "\n")
-			}
-			outFile.Close()
 
 			t.Logf("Keyword '%s': %d groups -> %s", keyword, len(matches), filename)
 		}
@@ -604,24 +587,18 @@ func TestAnalyzeUnmatchedGroupsToFiles(t *testing.T) {
 		}
 
 		if len(matches) > 0 {
-			filename := "analysis_pattern_" + name + ".txt"
-			outFile, err := os.Create(filename)
-			if err != nil {
-				t.Logf("Error creating %s: %v", filename, err)
+			filename := filepath.Join(outDir, "analysis_pattern_"+name+".txt")
+			if err := os.WriteFile(filename, []byte(peeringLines(matches)), 0o600); err != nil {
+				t.Errorf("Error writing %s: %v", filename, err)
 				continue
 			}
-
-			for _, match := range matches {
-				outFile.WriteString(match + "\n")
-			}
-			outFile.Close()
 
 			t.Logf("Pattern '%s': %d groups -> %s", pattern, len(matches), filename)
 		}
 	}
 
-	t.Logf("Analysis complete! Check the analysis_*.txt files to see potential binary groups we missed.")
-	t.Logf("You can now manually review these files to see if we need additional patterns.")
+	t.Logf("Analysis complete! The analysis_*.txt files in %s list potential binary groups we missed.", outDir)
+	t.Logf("The directory is removed after the test; the counts above show whether we need additional patterns.")
 }
 
 func min(a, b int) int {

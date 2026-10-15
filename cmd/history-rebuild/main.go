@@ -76,7 +76,12 @@ func main() {
 		dataDir          = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
-	_ = useShortHashLen
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "useshorthashlen" {
+			_ = useShortHashLen // the value is never used
+			log.Printf("[HISTORY-REBUILD] -useshorthashlen is ignored (history stores full message-ids)")
+		}
+	})
 
 	modes := 0
 	for _, m := range []bool{*validateOnly, *analyzeOnly, *trim} {
