@@ -239,6 +239,41 @@ for f in *.sh scripts/*.sh; do bash -n "$f"; done
 5. Stress sanity: `go test -race -count=3 -cpu 1,4 ./internal/nntp/ ./internal/database/ ./internal/postmgr/` with a
    `go test` hog in parallel: zero failures (the timing rules of plan test-timing-hardening still hold).
 
+## Progress
+
+### Wave 0 + wave 1 (2026-10-15)
+- `plan-followup-leftovers` from `testing-001` @ 793d361; wave 0 docs 2f53b2b (BUGS.md deferred list, A-db-3/4 closed,
+  stale test-nntp/-download-end-date, test_embed.go.bak deleted, thread_cache README). govulncheck baseline needed a
+  rebuild of `~/go/bin/govulncheck` with go1.27.1 (user OK): 14 reachable, as the audit said.
+- fl-ci-toolchain: `worktree-agent-a90563af7d1eb79dc` (11f7801, 7ddb9d0, f8ecc3b, review fix 8460bb7), merged FIRST as
+  7c2a245; `go vet` on the merged tree clean. `go 1.26.0` (forced by x/net v0.60.0), `toolchain go1.27.2`, x/net,
+  quic-go, qpack, x/crypto, x/term, x/text, x/sys bumped; tidy dropped go-cpu-mem-profiler, gorilla/mux, x/mod,
+  x/sync, x/tools. govulncheck 14 → 0 reachable (1 module-only GO-2026-5932). tests.yml (push/PR, test + known-bugs
+  jobs, PUGLEAF_TEST_DEADLINE=120s, -timeout 1200s, the full package list incl. the five extra cmd packages),
+  release.yml pinned by SHA (current majors; v7/v8 majors exist, Node 20 retirement: leftover), `fail-fast: false`
+  was already there (D-CI1 no-op). setup-go reads only the `go` line: GOTOOLCHAIN=auto downloads 1.27.2 per job.
+- fl-postqueue: `worktree-agent-a5c80dc73763daa99` (8403f4f, review fix 5ee1a23), merge 14c3e8b. D-A done; bug found
+  on the way: the old `case 441` was unreachable (PostArticle returns the code with an error), so rejected posts
+  force-closed the connection. Review MAJOR fixed: new tests repeatable with -count>1. Behaviour: Retry no longer
+  reopens posted rows; Delete works on pending/parked rows; 440 and connection errors are transient (last_error only).
+- fl-ops-tools: `worktree-agent-afb3e2b9b751439c7` (11 commits 49ed8a8..3d885e9, review fix 062ce05), merge 148fff0.
+  Items (a)-(i) done; signals: boot-time signal → graceful stop before the server binds, second signal → fatal;
+  fix-references/fix-thread-activity second signal exits at once (TryLock); tcp2tor retries only temporary/timeout
+  Accept errors with backoff.
+- fl-web: `worktree-agent-a74c905fed0f4fc98` (141f3d0, review fix a14f770), merge 62155b7; inline c18d8de changed
+  `adf_xss_test.go` (DecodeBodyText keeps entities as text) and made `TestLo2ServerOllamaSyncTimeout` accept either
+  deadline message (it flaked twice under load on the exact net/http text). Items (1)-(11) done; Subject above 989
+  bytes is refused (not folded); interval-0 cron jobs run back to back (guarded division).
+- fl-nntp-db: `worktree-agent-aa10bf1f6429b573b` (7276487, 761fee9, 31dfaca, review fix 8eadfb8), merge bbec4f2;
+  inline c7ef828 applied the cross-file parts (nsh_auth_test creates the second account inactive, web admin and
+  nntpmgr map `ErrWebUserHasNNTPAccount`, stale comments). D-B commit barrier (`db_batch_commit.go`), D-C1 migration
+  0031 on `is_active = 1`, `XHdrStreamedWait` (old XHdrStreamed kept), ClosePool synchronous idle close, lean
+  `NNTPNewsgroupActive` re-check, `-local430ttl`, lean STAT, per-top hierarchy mutex, dead code gone.
+- Wave 2 docs 9bd4706: BUGS.md (Q4 and A-tools-5b closed), audit README govulncheck line, README Go 1.26+,
+  CLAUDE.md test list = tests.yml.
+- Merged tree 9bd4706: gofmt clean, vet (+e2e tag) and build ok, race suite over 28 package sets ok in 246 s wall
+  (no flakes), known bugs unchanged (T-nntp-article-1), govulncheck 0 reachable, all shell scripts parse.
+
 ## Open questions (defaults apply unless the user overrides at the wave-1 boundary)
 - D-CI1: `fail-fast: false` on the release build matrix (one failed platform no longer blocks the release)? default yes.
 - D-B1: on a dropped batch the fetcher holds progress back and the run reports an error (refetch next run)? default yes.
