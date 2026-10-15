@@ -223,6 +223,10 @@ All `audit-delta-fixes*` medium/low rows not listed above. Anchors are the audit
    Closed here; wave 0 checks `grep -n 'syscall.SIGTERM' cmd/history-rebuild/main.go cmd/nntp-transfer/main.go`
    (one hit each) and records them as closed, otherwise as open.
 4. **A-db-3, A-db-4 → `nntp-intake-injection`** (stats block / PHASE 3), notes in "Deferred".
+5. **From `nntp-rfc-commands` (2026-10-15):** `cmd/web/main.go:440-446` still clears `TLSCert`/`TLSKey` when no TLS
+   port is set, so the embedded NNTP server in `cmd/web` could never offer STARTTLS; D10 of this plan removes that
+   dead block, which closes the gap. `cmd/nntp-server` now accepts the certificate flags without `-nntptlsport`
+   (STARTTLS on the plain port) and fails at startup when only one of the two is given or the pair does not load.
 
 ### Decisions (behaviour changes; report them to the user at the end)
 - **D1 CSP (A-web-13, WEB-2).** Every response gets an enforced
