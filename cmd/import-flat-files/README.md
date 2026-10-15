@@ -90,8 +90,9 @@ is added.
 - `-update`: Update mode: check every article in the database first and skip those already
   stored (default: false). Without it, already stored articles are ignored by the insert
   (`INSERT OR IGNORE`), so a plain re-run is safe too; `-update` saves reading their files.
-- `-dry-run`: Scan and read the files without writing articles (default: false). Combined with
-  `-update`, the existence check still opens (and creates) the databases and tables.
+- `-dry-run`: Scan and read the files without writing articles (default: false). The database files
+  in `-db` are still opened (and created, up to 256 empty `XX.db` plus WAL/SHM files); combined with
+  `-update`, the existence check also creates the tables.
 - `-verbose`: Verbose logging (default: false)
 
 ### Examples
@@ -160,8 +161,8 @@ At the end it logs the totals, the total time and the average rate.
 - **Invalid file names**: files whose name or directories do not match the expected layout are skipped and logged
 - **Read errors**: the article is counted as an error and the import continues
 - **Database Errors**: a failed insert counts that article as an error and the rest of the batch
-  is still committed; a failed begin or commit counts the whole batch. Only opening a database and
-  creating a table retry on busy/locked errors.
+  is still committed; a failed begin or commit counts the whole batch. Opening a database, creating
+  a table and the `-update` existence check retry on busy/locked errors; inserts do not.
 - **Duplicates**: articles already stored are counted as existing, not as errors (the `Existing`
   count is only logged in `-update` mode)
 - **Interruption**: there is no signal handler; an interrupted import loses the open batches and
