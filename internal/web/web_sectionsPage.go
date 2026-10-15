@@ -331,6 +331,15 @@ func (s *WebServer) sectionArticlePage(c *gin.Context) {
 			"Article "+articleNumStr+" not found in group '"+groupName+"'. It may not have been imported yet.")
 		return
 	}
+	// Hidden articles are not found for non-admins (flags from the group DB, not the cached article).
+	if _, hide, err := s.DB.GetArticleFlags(groupDB, articleNum); err != nil || s.articleHiddenFor(c, hide) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: sectionArticlePage: GetArticleFlags(%s/%d): %v", groupName, articleNum, err)
+		}
+		s.renderError(c, http.StatusNotFound, "Article not found",
+			"Article "+articleNumStr+" not found in group '"+groupName+"'. It may not have been imported yet.")
+		return
+	}
 
 	// Get subject for title without HTML escaping (for proper browser title display)
 	subjectText := article.GetCleanSubject()
@@ -371,6 +380,15 @@ func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
 	// Get the article by message ID
 	article, err := s.DB.GetArticleByMessageID(groupDB, messageId)
 	if err != nil {
+		s.renderError(c, http.StatusNotFound, "Article not found",
+			"Article with message ID '"+messageId+"' not found in group '"+groupName+"'. It may not have been imported yet.")
+		return
+	}
+	// Hidden articles are not found for non-admins (flags from the group DB, not the cached article).
+	if _, _, hide, err := s.DB.GetArticleFlagsByMessageID(groupDB, messageId); err != nil || s.articleHiddenFor(c, hide) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: sectionArticleByMessageIdPage: GetArticleFlagsByMessageID(%s): %v", groupName, err)
+		}
 		s.renderError(c, http.StatusNotFound, "Article not found",
 			"Article with message ID '"+messageId+"' not found in group '"+groupName+"'. It may not have been imported yet.")
 		return

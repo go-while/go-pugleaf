@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // This file should contain the thread tree view related functions from server.go:
@@ -91,8 +92,16 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 		return
 	}
 
-	// Return JSON response
-	c.Header("Cache-Control", "public, max-age=300") // Cache for 5 minutes
+	// Hidden articles (D2): non-admins get the structure without the hidden nodes' overview.
+	// RedactedCopy leaves the built tree untouched.
+	if !s.isAdminRequest(c) {
+		redacted := *response
+		redacted.Tree = response.Tree.RedactedCopy()
+		response = &redacted
+	}
+
+	// Return JSON response. private: the body depends on the viewer (admin or not).
+	c.Header("Cache-Control", "private, max-age=60")
 	c.JSON(http.StatusOK, response)
 }
 
@@ -142,6 +151,12 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 		return
 	}
 
+	// A hidden root (D2) shows neither subject nor author to non-admins.
+	showHidden := s.isAdminRequest(c)
+	if !showHidden && rootOverview.Hide > 0 {
+		rootOverview = &models.Overview{ArticleNum: rootOverview.ArticleNum, Subject: "[hidden article]", Hide: rootOverview.Hide}
+	}
+
 	// Get base template data with authentication context
 	baseData := s.getBaseTemplateData(c, rootOverview.GetCleanSubject()+" - Thread Tree")
 
@@ -161,7 +176,7 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 		"AvailableAIModels":   baseData.AvailableAIModels,
 		"GroupName":           groupName,
 		"ThreadRoot":          rootOverview,
-		"TreeHTML":            treeResponse.Tree.GetThreadTreeHTML(groupName),
+		"TreeHTML":            treeResponse.Tree.GetThreadTreeHTMLFor(groupName, showHidden),
 		"TreeStats":           treeResponse.Tree.GetTreeStats(),
 		"BuildTime":           treeResponse.BuildTime,
 		"CacheHit":            treeResponse.CacheHit,
@@ -219,6 +234,12 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 		return
 	}
 
+	// A hidden root (D2) shows neither subject nor author to non-admins.
+	showHidden := s.isAdminRequest(c)
+	if !showHidden && rootOverview.Hide > 0 {
+		rootOverview = &models.Overview{ArticleNum: rootOverview.ArticleNum, Subject: "[hidden article]", Hide: rootOverview.Hide}
+	}
+
 	// Get base template data with authentication context
 	baseData := s.getBaseTemplateData(c, rootOverview.GetCleanSubject()+" - Thread Tree")
 
@@ -240,7 +261,7 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 		"Group":               groupName,
 		"GroupName":           groupName,
 		"ThreadRoot":          rootOverview,
-		"TreeHTML":            treeResponse.Tree.GetThreadTreeHTML(groupName),
+		"TreeHTML":            treeResponse.Tree.GetThreadTreeHTMLFor(groupName, showHidden),
 		"TreeStats":           treeResponse.Tree.GetTreeStats(),
 		"BuildTime":           treeResponse.BuildTime,
 		"CacheHit":            treeResponse.CacheHit,

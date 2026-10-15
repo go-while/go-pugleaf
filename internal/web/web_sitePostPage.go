@@ -2,6 +2,7 @@
 package web
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -73,6 +74,7 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	isReply := replyToArticleNum != "" && replyToMessageID != ""
 
 	article := &models.Article{}
+	replyPrefillError := "" // set when the replied-to article is hidden for this user (D2)
 	if isReply {
 		// Get the original article to extract subject and body for reply
 		// Only open the group DB of an existing, active group: GetGroupDB creates files for unknown names
@@ -88,7 +90,14 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 			// Get group database connection
 			if groupDB, err := s.DB.GetGroupDB(prefilledNewsgroup); err == nil {
 				defer groupDB.Return()
-				if reply_article, err := s.DB.GetArticleByNum(groupDB, articleNum); err == nil {
+				// Hidden articles are not quoted for non-admins (flags from the group DB, not the cached article)
+				_, hide, flagErr := s.DB.GetArticleFlags(groupDB, articleNum)
+				if reply_article, err := s.DB.GetArticleByNum(groupDB, articleNum); err == nil && (flagErr != nil || s.articleHiddenFor(c, hide)) {
+					if flagErr != nil && !errors.Is(flagErr, sql.ErrNoRows) {
+						log.Printf("[WEB]: SitePost reply prefill: GetArticleFlags(%s/%d): %v", prefilledNewsgroup, articleNum, flagErr)
+					}
+					replyPrefillError = "Article not found"
+				} else if err == nil {
 					// Handle subject with "Re: " prefix
 					if !strings.HasPrefix(strings.ToLower(reply_article.Subject), "re:") {
 						article.Subject = "Re: " + models.ConvertToUTF8(reply_article.Subject)
@@ -155,7 +164,7 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 		PrefilledNewsgroup:    prefilledNewsgroup,
 		PrefilledSubject:      prefilledSubjectStr,
 		PrefilledBody:         prefilledBodyStr,
-		Error:                 "", // No errors when just displaying the form
+		Error:                 replyPrefillError,
 		Success:               "", // No success message when just displaying the form
 		WebPostMaxArticleSize: maxArticleSizeStr,
 		IsReply:               isReply,

@@ -92,6 +92,8 @@ type ArticlePageData struct {
 	Thread      []*models.Overview
 	PrevArticle int64
 	NextArticle int64
+	ArticleSpam int // spam counter, read from the group DB (not from the cached Article)
+	ArticleHide int // hide counter, read from the group DB (not from the cached Article)
 }
 
 // StatsPageData represents data for stats page
@@ -539,7 +541,7 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/demo/thread-tree/", s.threadTreeDemoPage)
 
 	// Tree view API routes
-	s.Router.GET("/api/thread-tree", s.handleThreadTreeAPI)
+	s.Router.GET("/api/thread-tree", s.requireAPIEnabled(), s.handleThreadTreeAPI)
 
 	// Tree view for specific threads
 
