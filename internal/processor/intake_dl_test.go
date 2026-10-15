@@ -3,6 +3,7 @@ package processor
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,18 +15,44 @@ import (
 
 // Tests for the per-run return queue of DownloadArticles (A-intake-11, plan nntp-intake-injection S5).
 
-const intakeDLTestWait = time.Second
+// testWait is the hang guard of this package's tests: it only stops a hung test, a passing test
+// never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s); default 60 s.
+// Plan test-timing-hardening D3.
+var testWait = testWaitFromEnv(60 * time.Second)
+
+func testWaitFromEnv(def time.Duration) time.Duration {
+	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+// intakeDLLateTTL is the TTL resetLateMsgID gives a dropped item (proc_DLArt.go, 5 s).
+const intakeDLLateTTL = 5 * time.Second
 
 // TestIntakeDLHelper carries the helpers of these tests as methods (vet rejects Test* helper funcs).
 type TestIntakeDLHelper struct{ t *testing.T }
 
-// waitClosed fails the test unless ch is closed within intakeDLTestWait.
+// waitClosed fails the test unless ch is closed within testWait (a hang guard).
 func (h TestIntakeDLHelper) waitClosed(ch <-chan struct{}, what string) {
 	h.t.Helper()
 	select {
 	case <-ch:
-	case <-time.After(intakeDLTestWait):
-		h.t.Fatalf("%s: not done within %v", what, intakeDLTestWait)
+	case <-time.After(testWait):
+		h.t.Fatalf("%s: not done within %v", what, testWait)
+	}
+}
+
+// checkLateTTL fails the test unless exp was set to "now + intakeDLLateTTL" at a moment between
+// before and after. No wall-clock budget: a slow machine cannot make it fail. The 15 s expiry of
+// the claim it replaces (set before `before`) is out of range unless after - setup time >= 10 s.
+func (h TestIntakeDLHelper) checkLateTTL(what string, exp, before, after time.Time) {
+	h.t.Helper()
+	lo, hi := before.Add(intakeDLLateTTL), after.Add(intakeDLLateTTL)
+	if exp.Before(lo) || exp.After(hi) {
+		h.t.Fatalf("%s: msgid expiry %v, want within [%v, %v] (reset with a %v TTL)", what, exp, lo, hi, intakeDLLateTTL)
 	}
 }
 
@@ -138,13 +165,14 @@ func TestIntakeDLFeederDrainsAfterDone(t *testing.T) {
 		msgIdItem.Mux.Unlock()
 		f := h.startFeeder(xhdrCap, returnQ, getQ, func(string) *BatchItem { return &BatchItem{MessageID: msgID, ReturnQ: returnQ} })
 		f.xhdr <- nntp.HeaderLine{Value: "<t7-intakedl-blocked-0@test.invalid>"}
-		deadline := time.Now().Add(intakeDLTestWait)
+		deadline := time.Now().Add(testWait)
 		for f.prepared.Load() < 1 {
 			if time.Now().After(deadline) {
 				t.Fatalf("feeder never called prepare")
 			}
 			time.Sleep(time.Millisecond)
 		}
+		before := time.Now()
 		close(f.runDone)
 		h.waitClosed(f.stopped, "stopped after runDone")
 		msgIdItem.Mux.RLock()
@@ -153,15 +181,13 @@ func TestIntakeDLFeederDrainsAfterDone(t *testing.T) {
 		if resp != history.CaseError {
 			t.Fatalf("abandoned item's msgid state %#x, want CaseError", resp)
 		}
-		if ttl := time.Until(exp); ttl <= 0 || ttl > 5*time.Second {
-			t.Fatalf("abandoned item's msgid TTL %v, want (0, 5s]", ttl)
-		}
+		h.checkLateTTL("abandoned item", exp, before, time.Now())
 		// after runDone the feeder must keep consuming xhdr (the XHDR reader blocks on a full channel):
 		// 3*cap sends only complete when it does
 		for i := 1; i <= 3*xhdrCap; i++ {
 			select {
 			case f.xhdr <- nntp.HeaderLine{Value: fmt.Sprintf("<t7-intakedl-blocked-%d@test.invalid>", i)}:
-			case <-time.After(intakeDLTestWait):
+			case <-time.After(testWait):
 				t.Fatalf("xhdr send %d blocked: feeder stopped consuming after runDone", i)
 			}
 		}
@@ -185,7 +211,7 @@ func TestIntakeDLFeederDrainsAfterDone(t *testing.T) {
 		getQ := make(chan *BatchItem, 4)
 		f := h.startFeeder(4, returnQ, getQ, func(string) *BatchItem { return &BatchItem{ReturnQ: returnQ} })
 		f.xhdr <- nntp.HeaderLine{Value: "<t7-intakedl-idle-0@test.invalid>"}
-		deadline := time.Now().Add(intakeDLTestWait)
+		deadline := time.Now().Add(testWait)
 		for f.handed.Load() < 1 {
 			if time.Now().After(deadline) {
 				t.Fatalf("feeder never handed the first item")
@@ -223,6 +249,7 @@ func TestIntakeDLDrainLateResults(t *testing.T) {
 		shutdown := make(chan struct{})
 		defer close(shutdown)
 		done := make(chan struct{})
+		before := time.Now()
 		go func() {
 			defer close(done)
 			drainLateResults(q, 3, shutdown)
@@ -250,9 +277,7 @@ func TestIntakeDLDrainLateResults(t *testing.T) {
 		if resp != history.CaseError {
 			t.Fatalf("msgid item state %#x, want CaseError", resp)
 		}
-		if ttl := time.Until(exp); ttl <= 0 || ttl > 5*time.Second {
-			t.Fatalf("msgid item TTL %v, want (0, 5s]", ttl)
-		}
+		h.checkLateTTL("drained item", exp, before, time.Now())
 	})
 	t.Run("shutdown", func(t *testing.T) {
 		h := TestIntakeDLHelper{t}
@@ -264,7 +289,7 @@ func TestIntakeDLDrainLateResults(t *testing.T) {
 			drainLateResults(q, 3, shutdown)
 		}()
 		q <- &BatchItem{Error: errIsDuplicateError}
-		deadline := time.Now().Add(intakeDLTestWait)
+		deadline := time.Now().Add(testWait)
 		for len(q) != 0 {
 			if time.Now().After(deadline) {
 				t.Fatalf("drain did not receive the first item")
