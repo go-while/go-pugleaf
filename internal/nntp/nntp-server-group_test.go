@@ -486,7 +486,7 @@ func grpCountListLines(c *hClient, deadline time.Duration) (int, bool, error) {
 // overview row into memory (SEC-7; RFC 3977 §6.1.2 needs only the numbers).
 // It runs in an isolated child so the allocation counter sees nothing else.
 func TestGrpListGroupMemory(t *testing.T) {
-	err := runIsolated(t, 120*time.Second, func(t *testing.T) {
+	err := runIsolated(t, 3*hDeadline, func(t *testing.T) {
 		g := hGroup(t, "t3.listgroupmem", 0, nil)
 		grpSeedBulk(t, g, grpMemRows, grpMemPad)
 		hs := newTestServer(t, hServerOpts{})
@@ -502,7 +502,7 @@ func TestGrpListGroupMemory(t *testing.T) {
 		if code != 211 {
 			t.Fatalf("LISTGROUP: got %q, want 211", line)
 		}
-		n, sorted, err := grpCountListLines(c, 30*time.Second)
+		n, sorted, err := grpCountListLines(c, hDeadline)
 		runtime.ReadMemStats(&after)
 		if err != nil {
 			t.Fatalf("LISTGROUP body: %v", err)

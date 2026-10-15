@@ -63,14 +63,9 @@ func authLogin(t *testing.T, c *hClient, user, pass string) (int, string) {
 		t.Fatalf("AUTHINFO USER %s: %v", user, err)
 	}
 	// AUTHINFO PASS runs a bcrypt compare (plus the failure delay) on the server;
-	// under -race and a loaded host that can pass the harness's 5 s per-command
-	// deadline, so this step gets a longer one.
-	saved := c.Deadline
-	if c.Deadline < 20*time.Second {
-		c.Deadline = 20 * time.Second
-	}
+	// the client's per-command deadline is the harness hang guard hDeadline, which
+	// leaves room for that under -race on a loaded host.
 	code, line = c.cmd(t, "AUTHINFO PASS %s", pass)
-	c.Deadline = saved
 	return code, line
 }
 
@@ -233,8 +228,9 @@ func TestAuthPasswordWithSpace(t *testing.T) {
 
 // TestAuthFailureDelay: a 481 reply must be delayed by at least ErrorDelay, so
 // passwords cannot be guessed at full speed (SEC-5; RFC 4643 §5 recommends
-// limiting failed attempts). An unknown user is used so the measurement is not
-// inflated by bcrypt; the minimum of 3 attempts must reach ErrorDelay.
+// limiting failed attempts). A lower bound only: an unknown user still runs the
+// dummy bcrypt compare, which can only add time; the minimum of 3 attempts must
+// reach ErrorDelay.
 func TestAuthFailureDelay(t *testing.T) {
 	const delay = 50 * time.Millisecond
 	hs := newTestServer(t, hServerOpts{ErrorDelay: delay})
@@ -476,14 +472,14 @@ func TestAuthUserMaxConns(t *testing.T) {
 			t.Fatalf("QUIT: %v", err)
 		}
 		// The slot is released when the first handler ends (asynchronously).
-		end := time.Now().Add(3 * time.Second)
+		end := time.Now().Add(hDeadline)
 		for {
 			code, line = authLogin(t, c2, user, pass)
 			if code == 281 {
 				break
 			}
 			if time.Now().After(end) {
-				t.Fatalf("no login within 3s after the first connection quit: %q", line)
+				t.Fatalf("no login within %s after the first connection quit: %q", hDeadline, line)
 			}
 			time.Sleep(20 * time.Millisecond)
 		}

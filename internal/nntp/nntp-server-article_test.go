@@ -41,7 +41,7 @@ var artCmds = []struct {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers (art prefix; the harness is read-only)
+// Helpers (art prefix; waits use the harness hang guard hDeadline)
 
 // artDefaultHeaders returns the header lines stored for a default article a of group.
 func artDefaultHeaders(group string, a hArticle) []string {
@@ -826,9 +826,14 @@ func artLocal430Miss(t *testing.T, test string) *artLocal430Env {
 
 // artPollStat223 polls STAT <mid> on c until it answers "223 0 <mid>" or 1 s
 // has passed, and returns the result of the last check.
+//
+// The 1 s window is deliberately short and is NOT raised to hDeadline: it serves
+// the T-nntp-article-1 known-bug path, which runs to the end of the window while
+// the bug is open (the cached miss lives for the 60 s local430 TTL), so a long
+// window would only slow every run. 1 s is still 60x under that TTL.
 func artPollStat223(t *testing.T, c *hClient, a hArticle) error {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(time.Second) // deliberate short window, see above
 	for {
 		code, line := c.cmd(t, "STAT %s", a.MessageID)
 		// RFC 3977 §6.2.4.2: 223 n message-id; §6.2.1.2: no group selected → n is 0.
@@ -842,12 +847,12 @@ func artPollStat223(t *testing.T, c *hClient, a hArticle) error {
 
 func TestArtLocal430(t *testing.T) {
 	// A 430 for an existing article is wrong (RFC 3977 §6.2.4.2), so a cached
-	// miss must not outlive the article's arrival by more than a moment:
-	// STAT → 223 within 1 s.
+	// miss must not outlive the article's arrival.
 
 	// The article arrives through this server (IHAVE answered 235). The intake
-	// handler removes the message-id from local430 after the accept (BUG-8 fixed
-	// by nntp-intake-injection; the cache TTL alone is 60 s).
+	// handler removes the message-id from local430 before it sends the 235 (BUG-8
+	// fixed by nntp-intake-injection; the cache TTL alone is 60 s), so the very
+	// next STAT must answer 223: no polling and no time window.
 	t.Run("ihave-arrival", func(t *testing.T) {
 		env := artLocal430Miss(t, "local430-ihave")
 
@@ -883,8 +888,10 @@ func TestArtLocal430(t *testing.T) {
 		hArticleSQL(t, env.g, env.a)
 		env.arrived.Store(true)
 
-		if err := artPollStat223(t, env.c, env.a); err != nil {
-			t.Fatal(err)
+		code, line = env.c.cmd(t, "STAT %s", env.a.MessageID)
+		// RFC 3977 §6.2.4.2: 223 n message-id; §6.2.1.2: no group selected → n is 0.
+		if err := artCheckStatus(code, line, 223, 0, env.a.MessageID); err != nil {
+			t.Fatalf("STAT after IHAVE 235: %v", err)
 		}
 	})
 
@@ -893,6 +900,9 @@ func TestArtLocal430(t *testing.T) {
 	// the shared DB and history, this server is never told, so a message-id that
 	// missed once stays 430 for up to ~75 s after the fetcher stored it. Here the
 	// article "arrives" by raw SQL and the processor finds it right away.
+	// The 1 s poll window of artPollStat223 is deliberately short: while the bug
+	// is open this path always runs to the end of the window, so it must fail
+	// fast; a fix makes the first STAT answer 223 and the marker fail.
 	t.Run("external-arrival", func(t *testing.T) {
 		env := artLocal430Miss(t, "local430-external")
 		hArticleSQL(t, env.g, env.a)
@@ -905,10 +915,13 @@ func TestArtLocal430(t *testing.T) {
 // Delay
 
 func TestArtNoDelay(t *testing.T) {
-	// With the default ArticleCmdDelay (DefaultArticleCmdDelay = 200 ms) every
-	// ARTICLE/HEAD/BODY/STAT sleeps before answering, so these 50 STATs would
-	// take at least 10 s and one connection gets about 5 articles/s (BUG-3).
-	// The harness sets ArticleCmdDelay=0; this checks that zero means no sleep.
+	// With the default ArticleCmdDelay (DefaultArticleCmdDelay, 25 ms) every
+	// ARTICLE/HEAD/BODY/STAT sleeps before answering, which caps one connection
+	// at a few dozen articles/s (BUG-3). The harness sets ArticleCmdDelay=0.
+	// Structural check, no duration (plan test-timing-hardening D4): every STAT
+	// passes the delay site, counted by ArticleDelayCount whether or not the
+	// delay is > 0, and the site only sleeps for ArticleCmdDelay > 0, which is 0
+	// here.
 	g, arts := artSeed(t, "nodelay", 1, nil)
 	hs := newTestServer(t, hServerOpts{})
 	if hs.S.ArticleCmdDelay != 0 {
@@ -917,16 +930,35 @@ func TestArtNoDelay(t *testing.T) {
 	c := hs.dial(t)
 	artSelect(t, c, g)
 	a1 := artFind(t, arts, 1)
-	start := time.Now()
-	for i := 0; i < 50; i++ {
+	before := hs.S.ArticleDelayCount()
+	const n = 50
+	for i := 0; i < n; i++ {
 		code, line := c.cmd(t, "STAT 1")
 		// RFC 3977 §6.2.4.2: 223 n message-id.
 		if err := artCheckStatus(code, line, 223, 1, a1.MessageID); err != nil {
 			t.Fatalf("STAT %d: %v", i, err)
 		}
 	}
-	if took := time.Since(start); took >= time.Second {
-		t.Fatalf("50 STATs took %s with ArticleCmdDelay=0, want < 1s", took)
+	if got := hs.S.ArticleDelayCount() - before; got != n {
+		t.Fatalf("%d STATs passed the ArticleCmdDelay site %d times, want %d", n, got, n)
+	}
+
+	// Both STAT forms go through the same delay site (one count each).
+	for _, tc := range []struct {
+		name, arg string
+		num       int64
+	}{
+		{"number", "1", 1},
+		{"message-id", a1.MessageID, 1},
+	} {
+		before := hs.S.ArticleDelayCount()
+		code, line := c.cmd(t, "STAT %s", tc.arg)
+		if err := artCheckStatus(code, line, 223, tc.num, a1.MessageID); err != nil {
+			t.Fatalf("STAT by %s: %v", tc.name, err)
+		}
+		if got := hs.S.ArticleDelayCount() - before; got != 1 {
+			t.Errorf("STAT by %s passed the ArticleCmdDelay site %d times, want 1", tc.name, got)
+		}
 	}
 }
 

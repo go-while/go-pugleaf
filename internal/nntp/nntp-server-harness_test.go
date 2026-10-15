@@ -6,6 +6,10 @@ package nntp
 // Servers are built with NewNNTPServer and Serve on 127.0.0.1:0 with all
 // delays set to 0. Package globals are never mutated after TestMain.
 //
+// Waits for an expected event (dial, reply, close, Stop) use hDeadline as their
+// hang guard (PUGLEAF_TEST_DEADLINE, default 60 s; plan test-timing-hardening).
+// A passing test never waits on it; only deliberate negative windows stay short.
+//
 // Identifiers: everything here starts with h, newTestServer, knownBug or
 // runIsolated (contract K2).
 
@@ -104,8 +108,8 @@ func hRunMain(m *testing.M) int {
 	go func() { db.WG.Wait(); close(waited) }()
 	select {
 	case <-waited:
-	case <-time.After(30 * time.Second):
-		fmt.Fprintln(os.Stderr, "[HARNESS] db.WG.Wait timed out after 30s")
+	case <-time.After(hDeadline):
+		fmt.Fprintf(os.Stderr, "[HARNESS] db.WG.Wait timed out after %s\n", hDeadline)
 		if code == 0 {
 			code = 1
 		}
@@ -215,8 +219,8 @@ func (hs *hServer) stop(t *testing.T) {
 	go func() { hs.wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Errorf("server goroutines did not finish within 10s after Stop")
+	case <-time.After(hDeadline):
+		t.Errorf("server goroutines did not finish within %s after Stop", hDeadline)
 	}
 }
 
@@ -262,7 +266,10 @@ func (hs *hServer) dial(t *testing.T) *hClient {
 }
 
 // tryDial connects without failing the test; the greeting is read with deadline.
+// The deadline is only a hang guard, so a shorter value is raised to hDeadline:
+// every caller expects the dial (or the refusal) to happen at once.
 func (hs *hServer) tryDial(deadline time.Duration) (*hClient, error) {
+	deadline = max(deadline, hDeadline)
 	var conn net.Conn
 	var err error
 	if hs.TLS != nil {
@@ -842,19 +849,29 @@ func TestHarnessIsolatedTimeout(t *testing.T) {
 	if hDB == nil {
 		t.Skipf("no test database: %s", hDBSkipReason)
 	}
+	const timeout = 3 * time.Second
 	start := time.Now()
-	err := runIsolated(t, 3*time.Second, func(t *testing.T) {
-		time.Sleep(30 * time.Second)
+	err := runIsolated(t, timeout, func(t *testing.T) {
+		// The child never ends on its own (far above every guard below): only the
+		// runIsolated timeout can stop it.
+		time.Sleep(10 * time.Minute)
 	})
 	if os.Getenv("PUGLEAF_ISOLATED") == t.Name() {
 		return // child
 	}
 	took := time.Since(start)
+	// Structural: runIsolated reports the kill by its timeout ("timed out after ...").
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("want timed out error, got %v", err)
 	}
-	if took > 8*time.Second {
-		t.Fatalf("timeout took %s, want about 3s", took)
+	// Lower bound: the child was killed by the timeout, not by an early exit.
+	if took < timeout {
+		t.Fatalf("child ended after %s, before the %s timeout", took, timeout)
+	}
+	// Hang guard only (the kill plus WaitDelay ends near timeout+2s): a kill that
+	// is ignored runs into the 10-minute child sleep.
+	if took > timeout+hDeadline {
+		t.Fatalf("timeout took %s, want the kill soon after %s", took, timeout)
 	}
 }
 
@@ -862,10 +879,9 @@ func TestHarnessIsolatedPass(t *testing.T) {
 	if hDB == nil {
 		t.Skipf("no test database: %s", hDBSkipReason)
 	}
-	err := runIsolated(t, 60*time.Second, func(t *testing.T) {
+	err := runIsolated(t, 3*hDeadline, func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
 		c := hs.dial(t)
-		c.Deadline = 2 * time.Second
 		if code, line := c.cmd(t, "QUIT"); code != 205 {
 			t.Fatalf("QUIT: %q", line)
 		}
