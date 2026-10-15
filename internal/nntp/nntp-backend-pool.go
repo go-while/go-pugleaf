@@ -71,6 +71,11 @@ func (pool *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]Ov
 			pool.Put(client)
 			return nil, err
 		}
+		if errors.Is(err, ErrNoArticlesInRange) {
+			// 423: the status line was read completely, the connection is healthy
+			pool.Put(client)
+			return nil, err
+		}
 		// Close connection on error
 		client.ForceCloseConn()
 		return nil, err

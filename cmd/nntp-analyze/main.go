@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -49,6 +51,12 @@ func readGroupsFromActiveFile(filePath string) ([]string, error) {
 
 		groupName := fields[0]
 		if groupName == "" {
+			continue
+		}
+		// The name ends up in cache and export paths: only RFC 5536 names
+		// (no "/", no empty ".." component) are accepted.
+		if !common.ValidGroupNameSyntax(groupName) {
+			fmt.Printf("Warning: Skipping invalid newsgroup name on line %d in active file: %q\n", lineNum, groupName)
 			continue
 		}
 
@@ -103,8 +111,15 @@ func showUsageExamples() {
 	fmt.Println("  ./nntp-analyze -group alt.test -clear-cache")
 	fmt.Println()
 	fmt.Println("Server Configuration:")
+	fmt.Println("  The default -host " + defaultHost + " is the go-pugleaf project's public server;")
+	fmt.Println("  the default -username/-password (" + defaultUsername + "/" + defaultPassword + ") are its public read-only credentials.")
 	fmt.Println("  ./nntp-analyze -group alt.test -host news.server.com -port 563")
 	fmt.Println("  ./nntp-analyze -group alt.test -username user -password pass")
+	fmt.Println()
+	fmt.Println("Files:")
+	fmt.Println("  Overview cache: <-data>/cache/<host>/<sha256 of group>.overview")
+	fmt.Println("  Exports and the -groups-file summary: -out (default <-data>/" + defaultOutSubdir + ")")
+	fmt.Println("  ./nntp-analyze -group alt.test -data ./data-test -out ./analyze-out -export json")
 	fmt.Println()
 	fmt.Println("Advanced Usage (Groups File):")
 	fmt.Println("  ./nntp-analyze -groups-file active.txt -force-refresh")
@@ -123,6 +138,31 @@ func showUsageExamples() {
 
 var appVersion = "-unset-"
 
+// Defaults of the server flags (decision D-O2: the default stays the project's public
+// server with its public read-only account; the usage text says so).
+const (
+	defaultHost      = "81-171-22-215.pugleaf.net"
+	defaultUsername  = "read"
+	defaultPassword  = "only"
+	defaultOutSubdir = "analyze-out"
+)
+
+// resolveOutDir returns the export directory: -out when set, else <dataDir>/analyze-out.
+func resolveOutDir(out, dataDir string) string {
+	if out != "" {
+		return out
+	}
+	return filepath.Join(dataDir, defaultOutSubdir)
+}
+
+// summaryFileName returns the groups-file summary path inside outDir. The active
+// file path is flattened (separators replaced) so the result never leaves outDir.
+func summaryFileName(outDir, activeFilePath string) string {
+	name := strings.ReplaceAll(activeFilePath, "/", "_")
+	name = strings.ReplaceAll(name, "\\", "_")
+	return filepath.Join(outDir, name+".summary.txt")
+}
+
 func main() {
 	config.AppVersion = appVersion
 	database.NO_CACHE_BOOT = true // prevents booting caches
@@ -130,10 +170,10 @@ func main() {
 
 	// Command line flags for NNTP server connection
 	var (
-		host       = flag.String("host", "81-171-22-215.pugleaf.net", "NNTP hostname")
+		host       = flag.String("host", defaultHost, "NNTP hostname (default: the go-pugleaf project's public server)")
 		port       = flag.Int("port", 563, "NNTP port")
-		username   = flag.String("username", "read", "NNTP username")
-		password   = flag.String("password", "only", "NNTP password")
+		username   = flag.String("username", defaultUsername, "NNTP username (default: the public read-only account of the default -host)")
+		password   = flag.String("password", defaultPassword, "NNTP password (default: the public read-only account of the default -host)")
 		ssl        = flag.Bool("ssl", true, "Use SSL/TLS connection")
 		timeout    = flag.Int("timeout", 30, "Connection timeout in seconds")
 		group      = flag.String("group", "", "Newsgroup to analyze (required) \\$all or alt.*")
@@ -149,9 +189,15 @@ func main() {
 		clearCache         = flag.Bool("clear-cache", false, "Clear cached data for the group")
 		cacheStats         = flag.Bool("cache-stats", false, "Show cache statistics for the group")
 		showHelp           = flag.Bool("help", false, "Show usage examples and exit")
-		dataDir            = flag.String("data", "./data", "Directory to store database files")
+		dataDir            = flag.String("data", "./data", "Data root: overview cache in <data>/cache/<host>/, $all mode reads the group list from the databases here")
+		outDirFlag         = flag.String("out", "", "Directory for -export files and the -groups-file summary (default: <data>/"+defaultOutSubdir+")")
 	)
 	flag.Parse()
+	if *dataDir == "" {
+		fmt.Println("Error: -data must not be empty")
+		os.Exit(1)
+	}
+	outDir := resolveOutDir(*outDirFlag, *dataDir)
 
 	// Show help if requested
 	if *showHelp {
@@ -175,7 +221,7 @@ func main() {
 	if *groupsFile != "" {
 		if err := analyzeGroupsFromFile(*groupsFile, host, port, username, password, ssl, timeout,
 			forceRefresh, maxAnalyzeArticles, startDate, endDate,
-			exportFormat, validateCache, clearCache, cacheStats); err != nil {
+			exportFormat, validateCache, clearCache, cacheStats, dataDir, outDir); err != nil {
 			log.Fatalf("Analysis of groups from file failed: %v", err)
 		}
 		return
@@ -185,19 +231,8 @@ func main() {
 	if *group == "$all" || strings.HasSuffix(*group, "*") {
 		if err := analyzeAllGroups(group, host, port, username, password, ssl, timeout,
 			forceRefresh, maxAnalyzeArticles, startDate, endDate,
-			exportFormat, validateCache, clearCache, cacheStats, dataDir); err != nil {
+			exportFormat, validateCache, clearCache, cacheStats, dataDir, outDir); err != nil {
 			log.Fatalf("Analysis of all groups failed: %v", err)
-		}
-		return
-	}
-
-	// If groups-file is specified, read groups from file
-	if *groupsFile != "" {
-		fmt.Printf("Reading newsgroups from file: %s\n", *groupsFile)
-		if err := readGroupsFromFile(*groupsFile, host, port, username, password, ssl, timeout,
-			forceRefresh, maxAnalyzeArticles, startDate, endDate,
-			exportFormat, validateCache, clearCache, cacheStats); err != nil {
-			log.Fatalf("Analysis of groups from file failed: %v", err)
 		}
 		return
 	}
@@ -205,60 +240,15 @@ func main() {
 	// Run analysis for single group
 	if err := processor.AnalyzeModeStandalone(host, port, username, password, ssl, timeout, group,
 		forceRefresh, maxAnalyzeArticles, startDate, endDate,
-		exportFormat, validateCache, clearCache, cacheStats); err != nil {
+		exportFormat, validateCache, clearCache, cacheStats, dataDir, &outDir); err != nil {
 		log.Fatalf("Analysis failed: %v", err)
 	}
-}
-
-// readGroupsFromFile reads newsgroups from the specified file and performs analysis on each group
-func readGroupsFromFile(filePath string, host *string, port *int, username *string, password *string, ssl *bool, timeout *int,
-	forceRefresh *bool, maxAnalyzeArticles *int64, startDate *string, endDate *string,
-	exportFormat *string, validateCache *bool, clearCache *bool, cacheStats *bool) error {
-
-	// Open the file
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to open groups file: %w", err)
-	}
-	defer file.Close()
-
-	// Read and trim newsgroup names from the file
-	var newsgroups []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" {
-			newsgroups = append(newsgroups, line)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading groups file: %w", err)
-	}
-
-	fmt.Printf("Found %d newsgroups in file\n", len(newsgroups))
-
-	// Analyze each newsgroup
-	for i, ng := range newsgroups {
-		fmt.Printf("\n--- Analyzing %d/%d: %s ---\n", i+1, len(newsgroups), ng)
-
-		// Run analysis for the group
-		if err := processor.AnalyzeModeStandalone(host, port, username, password, ssl, timeout, &ng,
-			forceRefresh, maxAnalyzeArticles, startDate, endDate,
-			exportFormat, validateCache, clearCache, cacheStats); err != nil {
-			fmt.Printf("⚠ Analysis failed for '%s': %v\n", ng, err)
-		} else {
-			fmt.Printf("✓ Analysis completed for '%s'\n", ng)
-		}
-	}
-
-	return nil
 }
 
 // analyzeAllGroups performs analysis on all newsgroups found in the database using a shared connection pool
 func analyzeAllGroups(group *string, host *string, port *int, username *string, password *string, ssl *bool, timeout *int,
 	forceRefresh *bool, maxAnalyzeArticles *int64, startDate *string, endDate *string,
-	exportFormat *string, validateCache *bool, clearCache *bool, cacheStats *bool, dataDir *string) error {
+	exportFormat *string, validateCache *bool, clearCache *bool, cacheStats *bool, dataDir *string, outDir string) error {
 
 	fmt.Printf("=== Analyzing Newsgroups: %s ===", *group)
 	suffixWildcard := strings.HasSuffix(*group, "*")
@@ -320,9 +310,12 @@ func analyzeAllGroups(group *string, host *string, port *int, username *string, 
 	pool := nntp.NewPool(backendConfig)
 	defer pool.ClosePool() // Only close when ALL analysis is done
 
-	// Create processor instance that will be reused for all groups
+	// Create processor instance that will be reused for all groups.
+	// The overview cache lives below -data (A-tools-7).
 	proc := &processor.Processor{
-		Pool: pool,
+		DB:             db,
+		Pool:           pool,
+		AnalyzeDataDir: *dataDir,
 	}
 
 	var successCount, errorCount int
@@ -348,7 +341,7 @@ func analyzeAllGroups(group *string, host *string, port *int, username *string, 
 
 		// Use the processor method - no more pool creation/destruction per group!
 		analysis, err := proc.AnalyzeMode(ng.Name, *forceRefresh, *maxAnalyzeArticles,
-			*startDate, *endDate, *exportFormat, *validateCache, *clearCache, *cacheStats)
+			*startDate, *endDate, *exportFormat, *validateCache, *clearCache, *cacheStats, outDir)
 
 		if err != nil {
 			fmt.Printf("⚠ Analysis failed for '%s': %v\n", ng.Name, err)
@@ -439,7 +432,7 @@ func analyzeAllGroups(group *string, host *string, port *int, username *string, 
 // analyzeGroupsFromFile performs analysis on newsgroups listed in an active file
 func analyzeGroupsFromFile(filePath string, host *string, port *int, username *string, password *string, ssl *bool, timeout *int,
 	forceRefresh *bool, maxAnalyzeArticles *int64, startDate *string, endDate *string,
-	exportFormat *string, validateCache *bool, clearCache *bool, cacheStats *bool) error {
+	exportFormat *string, validateCache *bool, clearCache *bool, cacheStats *bool, dataDir *string, outDir string) error {
 
 	fmt.Printf("=== Analyzing Newsgroups from Active File: %s ===\n", filePath)
 
@@ -475,9 +468,11 @@ func analyzeGroupsFromFile(filePath string, host *string, port *int, username *s
 	pool := nntp.NewPool(backendConfig)
 	defer pool.ClosePool() // Only close when ALL analysis is done
 
-	// Create processor instance that will be reused for all groups
+	// Create processor instance that will be reused for all groups.
+	// The overview cache lives below -data (A-tools-7).
 	proc := &processor.Processor{
-		Pool: pool,
+		Pool:           pool,
+		AnalyzeDataDir: *dataDir,
 	}
 
 	var successCount, errorCount int
@@ -492,7 +487,7 @@ func analyzeGroupsFromFile(filePath string, host *string, port *int, username *s
 
 		// Use the processor method - no more pool creation/destruction per group!
 		analysis, err := proc.AnalyzeMode(groupName, *forceRefresh, *maxAnalyzeArticles,
-			*startDate, *endDate, *exportFormat, *validateCache, *clearCache, *cacheStats)
+			*startDate, *endDate, *exportFormat, *validateCache, *clearCache, *cacheStats, outDir)
 
 		if err != nil {
 			fmt.Printf("⚠ Analysis failed for '%s': %v\n", groupName, err)
@@ -526,7 +521,7 @@ func analyzeGroupsFromFile(filePath string, host *string, port *int, username *s
 	}
 
 	// Write summary to file
-	summaryFile := fmt.Sprintf("out/%s.summary.txt", strings.ReplaceAll(filePath, "/", "_"))
+	summaryFile := summaryFileName(outDir, filePath)
 	if err := writeSummaryToFile(summaryFile, groupNames, successCount, errorCount, totalArticles, totalBytes,
 		overallSizeStats, allGroupsResults, errorDetails); err != nil {
 		fmt.Printf("Warning: Failed to write summary to file '%s': %v\n", summaryFile, err)
@@ -595,7 +590,7 @@ func writeSummaryToFile(filename string, groupNames []string, successCount, erro
 	allGroupsResults []*processor.GroupAnalysis, errorDetails []string) error {
 
 	// Create output directory if it doesn't exist
-	if err := os.MkdirAll("out", 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filename), 0o750); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
@@ -604,7 +599,12 @@ func writeSummaryToFile(filename string, groupNames []string, successCount, erro
 	if err != nil {
 		return fmt.Errorf("failed to create summary file: %w", err)
 	}
-	defer file.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = file.Close()
+		}
+	}()
 
 	// Write summary content to file
 	fmt.Fprintf(file, "=== Analysis Summary ===\n")
@@ -657,6 +657,10 @@ func writeSummaryToFile(filename string, groupNames []string, successCount, erro
 		fmt.Fprintf(file, "\nNo invalid dates found in analyzed groups.\n")
 	}
 
+	closed = true
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close summary file: %w", err)
+	}
 	return nil
 }
 
