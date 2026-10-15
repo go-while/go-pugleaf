@@ -112,7 +112,7 @@ func main() {
 		}
 
 		fixed := 0
-		errors := 0
+		failed := 0
 		for _, group := range groups {
 			if group.Name == "" {
 				continue
@@ -120,12 +120,12 @@ func main() {
 			log.Printf("Fixing group: %s", group.Name)
 			if err := fixGroupThreadActivity(db, group.Name); err != nil {
 				log.Printf("Error fixing group %s: %v", group.Name, err)
-				errors++
+				failed++
 			} else {
 				fixed++
 			}
 		}
-		log.Printf("Completed: %d groups fixed, %d errors", fixed, errors)
+		log.Printf("Completed: %d groups fixed, %d errors", fixed, failed)
 	}
 	ftaExit(db, 0)
 }
