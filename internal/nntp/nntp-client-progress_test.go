@@ -46,7 +46,7 @@ func cliProgDone(t *testing.T, tpdb *TransferProgressDB, start, end *time.Time) 
 // busy_timeout 30000 and journal_mode wal, not only the first one.
 func TestCliProgBusyTimeout(t *testing.T) {
 	tpdb := cliProgOpen(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cliWait) // hang guard
 	defer cancel()
 
 	// Hold all four at once so the pool has to open distinct connections.

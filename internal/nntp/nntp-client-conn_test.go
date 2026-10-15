@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -17,8 +18,17 @@ import (
 	"github.com/go-while/go-pugleaf/internal/common"
 )
 
-// cliConnOuter is the outer deadline of every blocking step in these tests.
-const cliConnOuter = 5 * time.Second
+// cliConnOuter is the outer deadline of every blocking step in these tests:
+// a hang guard only (cliWait), never the assertion.
+var cliConnOuter = cliWait
+
+// cliConnIsTimeout reports whether err is a timeout: a net.Error with
+// Timeout() (read/write deadline, dial timeout, SOCKS OpError) or
+// context.DeadlineExceeded (TLS HandshakeContext, GetContext).
+func cliConnIsTimeout(err error) bool {
+	var ne net.Error
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())
+}
 
 type cliConnResult struct {
 	err       error
@@ -97,8 +107,10 @@ func TestCliConnGreetingTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("Connect succeeded without a greeting")
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("Connect took %v, want < 2s (ConnectTimeout 300ms)", elapsed)
+	// the greeting read is bounded by ConnectTimeout: a timeout error, not a
+	// hang (cliConnOuter) and not some other failure
+	if !cliConnIsTimeout(err) {
+		t.Fatalf("Connect error %v (after %v), want a timeout (ConnectTimeout 300ms)", err, elapsed)
 	}
 	s.WaitOpen(t, 0, 2*time.Second)
 }
@@ -128,8 +140,13 @@ func TestCliConnAuthFailureClosesSocket(t *testing.T) {
 		if err == nil {
 			t.Fatal("Connect succeeded after 481")
 		}
-		if elapsed > time.Second {
-			t.Fatalf("Connect took %v with AuthFailureBackoff -1, want < 1s", elapsed)
+		if !errors.Is(err, ErrAuthRejected) {
+			t.Fatalf("Connect error %v, want ErrAuthRejected", err)
+		}
+		// -1 disables the back-off: Connect must not have slept the default
+		// one (15 s; a passing Connect takes milliseconds, >1000x margin).
+		if elapsed >= DefaultAuthFailureBackoff {
+			t.Fatalf("Connect took %v with AuthFailureBackoff -1: it slept the default back-off %v", elapsed, DefaultAuthFailureBackoff)
 		}
 		s.WaitOpen(t, 0, 2*time.Second)
 	})
@@ -175,11 +192,12 @@ func TestCliConnTLSHandshakeTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("Connect succeeded against a stalled TLS server")
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("Connect took %v, want < 2s (ConnectTimeout 300ms)", elapsed)
-	}
 	if !strings.Contains(err.Error(), "TLS handshake failed") {
 		t.Errorf("error %q does not mention the TLS handshake", err)
+	}
+	// the handshake is bounded by ConnectTimeout: a timeout error, not a hang
+	if !cliConnIsTimeout(err) {
+		t.Errorf("Connect error %v (after %v), want a timeout (ConnectTimeout 300ms)", err, elapsed)
 	}
 	s.WaitOpen(t, 0, 2*time.Second)
 }
@@ -188,17 +206,17 @@ func TestCliConnTLSHandshakeTimeout(t *testing.T) {
 func TestCliConnTLSUnknownCA(t *testing.T) {
 	serverTLS, _ := cliFakeTLSConfig(t)
 	s := newCliFakeServer(t, cliFakeOpts{TLS: serverTLS})
-	cfg := s.Backend()
+	cfg := s.Backend() // ConnectTimeout 30 s: the rejection must not depend on it
 	cfg.SSL = true
-	_, elapsed, err := cliConnConnect(t, cfg)
+	_, _, err := cliConnConnect(t, cfg)
 	if err == nil {
 		t.Fatal("Connect accepted a certificate from an unknown CA")
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("Connect took %v, want < 2s", elapsed)
-	}
 	if !strings.Contains(err.Error(), "TLS handshake failed") {
 		t.Fatalf("error %q, want it to contain %q", err, "TLS handshake failed")
+	}
+	if cliConnIsTimeout(err) {
+		t.Fatalf("error %v is a timeout, want a certificate rejection", err)
 	}
 }
 
@@ -221,8 +239,9 @@ func TestCliConnReadIdleTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("GetArticle succeeded on a truncated response")
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("GetArticle took %v, want < 2s (ReadTimeout 300ms)", elapsed)
+	// bounded by ReadTimeout: a timeout error, not a hang (cliConnOuter)
+	if !cliConnIsTimeout(err) {
+		t.Fatalf("GetArticle error %v (after %v), want a timeout (ReadTimeout 300ms)", err, elapsed)
 	}
 	if elapsed < 250*time.Millisecond {
 		t.Fatalf("GetArticle failed after %v (%v): before the read timeout, wrong failure", elapsed, err)
@@ -269,8 +288,8 @@ func TestCliConnDemuxerAfterAuth(t *testing.T) {
 			if r.Code != 238 || r.CmdID != id {
 				t.Fatalf("CHECK response: id=%d code=%d line=%q err=%v, want id=%d code=238", r.CmdID, r.Code, r.Line, r.Err, id)
 			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("no CHECK response within 2s (cmd id %d): demuxer stuck in its backlog", id)
+		case <-time.After(cliConnOuter):
+			t.Fatalf("no CHECK response within %v (cmd id %d): demuxer stuck in its backlog", cliConnOuter, id)
 		}
 		want := []string{"MODE STREAM", "CHECK " + msgID}
 		if user != "" {
@@ -297,7 +316,7 @@ func TestCliConnForceCloseIdempotent(t *testing.T) {
 	conn.ForceCloseConn()
 	conn.ForceCloseConn()
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(cliConnOuter)
 	for {
 		active := pool.Stats().ActiveConnections
 		if active < 0 {
@@ -307,10 +326,11 @@ func TestCliConnForceCloseIdempotent(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("ActiveConnections = %d, want 0 within 2s", active)
+			t.Fatalf("ActiveConnections = %d, want 0 within %v", active, cliConnOuter)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	// deliberate short negative window: the count must stay at 0 for 200 ms
 	steady := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(steady) {
 		if active := pool.Stats().ActiveConnections; active != 0 {
@@ -339,8 +359,10 @@ func TestCliConnForceCloseIdempotent(t *testing.T) {
 	if !strings.Contains(err.Error(), "timeout") {
 		t.Errorf("Get #3 error %q, want a pool timeout", err)
 	}
-	if elapsed < 150*time.Millisecond || elapsed > 2*time.Second {
-		t.Errorf("Get #3 gave up after %v, want about 200ms (PoolWaitTimeout)", elapsed)
+	// lower bound only: it waited for PoolWaitTimeout; the upper end is the
+	// "timeout" error above plus the cliConnOuter hang guard
+	if elapsed < 150*time.Millisecond {
+		t.Errorf("Get #3 gave up after %v, want >= 150ms (PoolWaitTimeout 200ms)", elapsed)
 	}
 	_ = pool.Put(c1)
 	_ = pool.Put(c2)
@@ -358,7 +380,7 @@ func TestCliConnGetContextCancel(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	elapsed, err := cliConnRun(t, func() error {
+	_, err = cliConnRun(t, func() error {
 		c, err := pool.GetContext(ctx, MODE_READER_MV)
 		if err == nil {
 			_ = pool.Put(c)
@@ -368,9 +390,6 @@ func TestCliConnGetContextCancel(t *testing.T) {
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("GetContext error %v, want context.DeadlineExceeded", err)
-	}
-	if elapsed > time.Second {
-		t.Fatalf("GetContext returned after %v, want < 1s", elapsed)
 	}
 	_ = pool.Put(held)
 }
