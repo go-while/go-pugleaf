@@ -1424,3 +1424,42 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
 ## Progress
 
 (filled in by `/run-plan`)
+
+### Wave 0 (2026-10-15, orchestrator, `plan-audit-delta-fixes` from `testing-001` @ 4eb92da)
+- Dependencies verified: `CountNNTPUsersByWebUserID`/`UpdateNNTPUserWebUserID` (`nntp_user_admin.go:33,48`),
+  `FormatNewsDate`/`WireArticleSize` (`common/intake.go:467,434`), `ParseNNTPDateStrict` (`processor/proc-utils.go:532`),
+  stats statement is `UPDATE newsgroups SET` (`db_batch.go:555`), `loopbackPprofAddr` in `cmd/history-rebuild`,
+  `internal/nntp/nntp-cmd-date.go` exists.
+- Hand-offs: **A-tools-1 closed** (`captureLimiter` in `processor/intake.go:178`, used in `threading.go:54,58,349`; no
+  per-group capture goroutine left); **A-tools-4 closed** (`newDownloadRun` at `proc_DLArt.go:77`); **A-ops-3d/f closed**
+  (`syscall.SIGTERM` in `cmd/history-rebuild/main.go:166` and `cmd/nntp-transfer/main.go:371`).
+- Re-anchoring (symbols all present; moved lines): `queries.go` `getHierarchiesPaginatedDirect:2201`,
+  `GetNewsgroupsByHierarchy:2828`, `ResetNewsgroupData:3074`, `query_GetSpamArticles1:3348`, `GetActiveNewsgroups:1031`,
+  `GetNewsgroupsPaginated:1075/1110`; `db_batch.go` `query_processOverviewBatch:1037`, `sq.queued -= batched:768`,
+  `BatchDividerChan:1816`, `BatchDivider:1821`, `ExpireCache:166`, `GetNewsgroupPointer:187`, `CheckNoMoreWorkInMaps:272`;
+  `hierarchy_cache.go` scan `continue` at `:492`; `db_migrate.go` `migratedDBsCache:25,384,423`, `migrateGroupDB:367`;
+  `cmd/web/main.go` `useshorthashlen:102`, NNTP flags `:113-116`, startup line `:150`, `log.Fatalf` after open `:221-240`,
+  `os.Exit` sites `:248-334`, dead NNTP block from `:428`, `disable-active:132`; `cmd/web/main_functions.go`
+  `startHierarchyUpdater:510`, `monitorUpdateFile:545`, `ConnectPools:579`, `NewFetchProcessor:647`,
+  `disableNewsgroupsNotInActiveFile:1015`; `cmd/nntp-fetcher/main.go` `UpdateNewsgroupList:806` (`OpenDatabase(nil):810`),
+  `signal.Notify:147`, backend literal `:248`/`:838`; `cmd/recover-db/main.go` `-db:36`, `-data:44`, `defer db.Shutdown():86`,
+  `os.Exit:169,186,197,208,305,671,674`, rewrite statement `:877`; `cmd/tcp2tor/main.go` `-timeout:102`,
+  `testSOCKS5Connection:503`, `proxy.Direct:514,...`; `cmd/history-rebuild/main.go` `:74,:79` unchanged;
+  `cmd/expire-news/main.go` `signal.Notify:146`, `deleteArticles:560` (callers `:466,:748`); `cmd/post-queue/main.go:74`;
+  `internal/web` anchors unchanged (`web_admin_crons.go:18,148,210,307`, `cronjobs.go:367,373,451`,
+  `web_apiHandlers.go:237,267,448`, `thread-tree.js:514-536`, `webserver_core_routes.go:280,296,391,502,526`,
+  `web_sitePostPage.go:365-384,520`, `web_admin_nntp.go:92,130`, `webgroupPage.go:90,118-119`,
+  `web_sectionsPage.go:246,273-274`, `web_threadPage.go:80,98`, `web_threadTreePage.go:95`).
+  Migration numbers free: main `0029`, single `0010`. `run_web_ssl.sh:3` and `run_web.sh:4` as cited.
+- Baseline checks on 4eb92da: gofmt = 2 baseline files only; vet OK; build OK; race run over the 15 package sets all ok
+  (`internal/cache`, `internal/models`, `cmd/web`, `cmd/nntp-fetcher`, `cmd/recover-db`, `cmd/tcp2tor` have no tests
+  yet); known bugs: `T-nntp-article-1` only.
+- `scripts/test-audit-delta-fixes.sh` written (E01–E19; E11 is two-part: comment-only file and a 1-of-3 list;
+  E09 drops the `0029` `schema_migrations` row before the restart so the repair runs on the seeded NULL row, and deletes
+  the row afterwards; a third group `adf.e2e.c` is seeded for the E11 threshold). Baseline run
+  (`PORT=18998 DATA=./data-test-audit-delta-fixes`): `SUMMARY pass=1 fail=16 info=2`; only E19 passes, E17/E18 INFO.
+  Baseline observation: with the NULL-hierarchy row present, `-disable-active` fails in `MainDBGetAllNewsgroups`
+  (A-db-1 reproduced).
+- Decisions already settled before this run: D11 done 2026-10-12 (no `-race` in the 11 build scripts; `adf-ops-scripts`
+  skips OPS-4e and the CLAUDE.md sentence; E16's grep is empty at baseline). `RACE=1` in `## End-to-end` is a no-op:
+  the verifier builds the web server with `go build -race -o build/webserver ./cmd/web` for E19 instead.
