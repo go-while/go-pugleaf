@@ -237,10 +237,24 @@ type hClient struct {
 	Deadline time.Duration
 }
 
+// hDeadline is the hang guard of the test client: the per-command read/write deadline and the dial
+// timeout. It only stops a hung test; a passing test never waits on it. Override with
+// PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s). Plan test-timing-hardening D3.
+var hDeadline = hDeadlineFromEnv(60 * time.Second)
+
+func hDeadlineFromEnv(def time.Duration) time.Duration {
+	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
 // dial connects, reads the greeting (c.Greeting) and tracks the connection.
 func (hs *hServer) dial(t *testing.T) *hClient {
 	t.Helper()
-	c, err := hs.tryDial(5 * time.Second)
+	c, err := hs.tryDial(hDeadline)
 	if err != nil {
 		t.Fatalf("dial %s: %v", hs.Addr, err)
 	}
