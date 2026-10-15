@@ -1491,3 +1491,34 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
 - Checks on bf63f91: gofmt baseline only; vet OK; build OK; race over 12 package sets ok (incl. new
   `internal/database/adfreopen`, `internal/cache`, `internal/models`); known bugs `T-nntp-article-1` only.
 - Batch B spawned from bf63f91: adf-web-xss, adf-web-cron, adf-web-post, adf-web-nntpusers, adf-web-pagination.
+
+### Wave 1, batch B (2026-10-15): adf-web-xss, adf-web-cron, adf-web-post, adf-web-nntpusers, adf-web-pagination
+- adf-web-pagination: `agent-a720fb7d0a4f828b6`, commit e484d7b, review "merge" + MINOR noted (D15 side effect: with
+  `HasPrev`/`HasNext` false, `pagination.html` also hides First and Last in cursor mode; record for the cursor
+  decision), merge 8eb175c; comment wording fixed inline in b56ce8f.
+- adf-web-xss: `agent-a98e5e7cf72150c95`, commit 60edaec, review "merge" (2 nits dropped), merge 4c7aa4c. CSP equals
+  D1 byte for byte; the hosts cover `base_chat.html`'s jsdelivr CSS/fonts; `escapeHtml`/`getAPIToken` removed.
+- adf-web-post: `agent-a31339ec21e85d5f5`, commits 5239582 + ccf3c04, review "fix first": MAJOR outside the slice
+  (`common.ReconstructHeaders` with `withPath=false`, the cmd/post-queue POST path, would relay the stored
+  `Injection-Info`/`Injection-Date` and an injecting agent answers 441) → fixed inline in **bd2ffe4**
+  (`PostOnlyIgnoreHeadersMap`, test `TestAdfPostHeadersDropInjectionOnPost` in `internal/common`); MINOR
+  cmd/audit-web-posts allow-list → same commit (D8 names + single-header list, legacy X-pugleaf-Trace/Bytes kept,
+  "clean D8 block" test case); MINORs in the slice (CRLF bodies normalized, References folded at 78 columns) fixed
+  in ccf3c04; merge 7dd90b7. Leftover: a 1000-byte Subject gives a 1009-octet stored line (pre-existing form limit);
+  empty UserSalt would write `posting-account=""` (intake omits it; salt is generated at init, so unreachable).
+- adf-web-nntpusers: `agent-a1eab6765d3954fdb`, commit 2996537, review "merge" + MINOR noted (a legacy mapping to
+  a deleted web user blocks the whole update until "no mapping" is chosen), merge f761604. Leftovers: check-then-write
+  race on the one-account rule (needs a partial unique index after a duplicate-unmapping migration); the edit form
+  always submits the posting state via a hidden `posting=off` field (handler reads `GetPostFormArray`).
+- adf-web-cron: `agent-af21f31672fb93ec5`, commits bb1e8a6 + c1e0af3 (ownership extended to
+  `internal/web/fu_cron_test.go`: `TestFuCronLoadAndStartJobsStartsWhileRunning` used rows without a DB row whose
+  schedulers now forget themselves, so it raced; rewritten with parked real rows), review "merge", merge 09799ce;
+  template "create below" sentence gated and the hint assertion fixed inline in 576103d. Leftovers: an ended job's
+  log buffer is dropped with its registration (A-web-20 side effect); toggle check-then-flip race (needs a
+  conditional UPDATE in `db_cron_jobs.go`); `calculateNextRun` divides by zero for interval 0 with a start time
+  (unreachable through the handlers).
+- Load-related nntp test flakes seen by implementers while several suites ran at once (`TestStmCheck` once,
+  `TestAuthFailures` once); both pass alone and in the orchestrator's full runs.
+- Checks on 576103d: gofmt baseline only; vet OK; build OK; race over 13 package sets ok (incl. cmd/audit-web-posts);
+  known bugs `T-nntp-article-1` only.
+- Batch C spawned from 576103d: adf-tools-fetcher, adf-ops-recover, adf-ops-tcp2tor, adf-ops-misc, adf-ops-scripts.
