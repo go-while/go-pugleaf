@@ -570,8 +570,8 @@ cmd/nntp-fetcher (ff22aac, cf77891, merged as dc9beda) and build_history-rebuild
   1. In the feed loop, log and `continue` (count skipped) instead of `return`.
   2. Delete errChan and its sends: keep the logs, and turn `errChan <- nil` into a plain continue.
   3. Delete the dead DownloadMaxPar assignment and the two debug sleeps.
-  4. Drop the ET/BW caps and their consts, and rely on the provider's `MaxConns` (provider config already exists). That is a behaviour change for DBs that store a
-     higher MaxConns, so a decision is needed or log a hint.
+  4. USER DECISION D-O1 (2026-10-15): the ET/BW caps and their consts STAY. They are limits those servers impose on
+     every client; a stored `MaxConns` must never raise them. Do not touch L29-L31 / L233-L237.
 - `-max-batch` clamp: A-tools-4's memory half is closed (`newDownloadRun`, internal/processor/proc_DLArt.go:L77, commit 057907f, merge 82278fd).
   The clamp does NOT exist: main.go:L114-L129 has only a lower bound of 10 and a warning above 1000. L135-L136 feed it unclamped into nntp.MaxReadLinesXover and
   processor.MaxBatchSize, while db_batch clamps MaxDBbatch to 1000 (internal/database/db_batch.go:L133-L137). Add here: `if *maxBatch > 1000 { warn; *maxBatch = 1000 }`
@@ -692,7 +692,7 @@ Checklist from the current flag definitions. Re-read the flags after O1: adf-opt
 - A-tools-6: OPEN. The initSchema loop is unbounded; use RetryableExec and return the error.
 - A-tools-17: OPEN. No hash validation, a whole-batch drop, eager creation of 65,536 tables and indexes, and the Scanner in readFile.
 - A-tools-18: OPEN. Hardcoded paths in all three tools; unchecked Flush/Close; the oldest year wins.
-- A-tools-20: PARTLY FIXED. Start-date validation moved up front (ff22aac). The feed `return`, dead errChan, dead DownloadMaxPar write, debug sleeps and ET/BW caps remain.
+- A-tools-20: PARTLY FIXED. Start-date validation moved up front (ff22aac). The feed `return`, dead errChan, dead DownloadMaxPar write, debug sleeps remain; the ET/BW caps stay by user decision D-O1.
   The `-max-batch` upper clamp does NOT exist (A-tools-4 closed only for the queue half) → add it in this slice.
 - A-tools-19: OPEN. Both files are still tracked and not ignored.
 - A-ops-17: PARTLY INVALID. build_TestMsgIdItemCache.sh is gone (1b67025). The binaries, the missing build tag and stale SQL path, and the 4 scripts without ldflags (usermgr without shebang) are open.

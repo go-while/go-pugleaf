@@ -1279,8 +1279,8 @@ names. Owned files are disjoint within the wave (the lists below supersede the t
 - **`adf-opt-tools-misc`** (A-tools-6, 17, 18 OPEN; A-tools-20 PARTLY: start-date check done in ff22aac):
   `internal/database/progress.go`, `cmd/import-flat-files/main.go`, `cmd/extract_hierarchies/extract_hierarchies.go`,
   `cmd/merge-active/main.go`, `cmd/merge-descriptions/main.go`, `cmd/nntp-fetcher/main.go` (feed loop `return`,
-  dead `errChan`, dead `DownloadMaxPar` write, debug sleeps, hardcoded per-host connection caps → provider `MaxConns`
-  (decision D-O1), and the `-max-batch` upper clamp at 1000 with a warning (decision D-O3; A-tools-4's clamp half was
+  dead `errChan`, dead `DownloadMaxPar` write, debug sleeps; the hardcoded per-host connection caps STAY (decision D-O1),
+  and the `-max-batch` upper clamp at 1000 with a warning (decision D-O3; A-tools-4's clamp half was
   never done)), new `internal/database/adf_opt_progress_test.go`, `cmd/nntp-fetcher/adf_opt_fetcher_test.go`.
 - **`adf-opt-ops-tools`** (A-ops-6, 7, 8, 10; all OPEN): `cmd/expire-news/main.go` (`MainDBGetNewsgroup` in the
   single-group branch; tests must not call `shutdown()`), `cmd/fix-references/main.go` (`appVersion` var, usage,
@@ -1302,7 +1302,9 @@ names. Owned files are disjoint within the wave (the lists below supersede the t
   (orchestrator), not in this slice. Run `go test -race ./internal/postmgr/` explicitly.
 
 Decisions for this wave (defaults applied unless the user overrides at the wave boundary):
-- D-O1: the fetcher drops its hardcoded per-host connection caps and uses the provider's stored `MaxConns`.
+- D-O1 (user, 2026-10-15): the fetcher KEEPS its hardcoded eternal-september / blueworldhosting connection caps. They
+  are limits those servers impose; a higher stored `MaxConns` must never override them. The cap item of A-tools-20 is
+  closed as "works as intended"; implementers do not touch those lines.
 - D-O2: `nntp-analyze` keeps its default `-host`; usage and README state it (O2 writes the docs).
 - D-O3: `-max-batch` is clamped to 1000 (the database batch cap) with a warning.
 - D-O4: `usermgr` enforces the web's 12-72 byte password rule.
