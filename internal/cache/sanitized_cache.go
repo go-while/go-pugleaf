@@ -246,19 +246,24 @@ func (sc *SanitizedCache) SetArticle(messageID string, sanitizedFields map[strin
 			LastUsed:  now,
 		}
 		sc.cache[messageID] = article
-		sc.enforceLimitLocked()
 	}
-	sc.mutex.Unlock()
 
+	// Set the fields while still holding sc.mutex (as BatchSetArticles does), so an
+	// eviction cannot remove the entry between insert and field set and leave
+	// cachedSize counting an entry that is gone.
 	article.mux.Lock()
 	sizeDiff := article.setFieldsLocked(sanitizedFields)
 	article.LastUsed = now
 	article.mux.Unlock()
 
-	// Update global cache size
 	sc.countermux.Lock()
 	sc.cachedSize += sizeDiff
 	sc.countermux.Unlock()
+
+	if !exists {
+		sc.enforceLimitLocked()
+	}
+	sc.mutex.Unlock()
 }
 
 // BatchSetArticles efficiently stores multiple complete sanitized articles

@@ -297,7 +297,9 @@ func decodeBodyText(body, headers string) string {
 		}
 	}
 	data := []byte(body)
-	if !strings.HasPrefix(mediaType, "multipart/") {
+	// Only text bodies are decoded: a single-part image or application body stays
+	// as its encoded text instead of turning into binary junk.
+	if mediaType == "" || strings.HasPrefix(mediaType, "text/") {
 		switch strings.ToLower(rawHeaderValue(headers, "Content-Transfer-Encoding")) {
 		case "quoted-printable":
 			if decoded, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(body))); err == nil {
@@ -328,6 +330,13 @@ func bodyBytesToUTF8(data []byte, charset string) string {
 	switch cs {
 	case "", "utf-8", "utf8", "us-ascii", "ascii":
 		return repairUTF8(string(data))
+	}
+	// UTF-16/UTF-32 labels on a Usenet body are bogus (the body is line-based 8-bit
+	// text); decoding ASCII as UTF-16 yields CJK garbage. Treat them as unknown.
+	for _, wide := range []string{"utf-16", "utf16", "utf-32", "utf32"} {
+		if strings.HasPrefix(cs, wide) {
+			return repairUTF8(string(data))
+		}
 	}
 	if utf8.Valid(data) && !isASCII(data) {
 		return string(data)

@@ -111,6 +111,10 @@ func TestAdfOptSanitizeBodyDecoding(t *testing.T) {
 		{"mislabelled utf8", "Grüße", "Content-Type: text/plain; charset=iso-8859-1", "Grüße"},
 		{"base64", base64.StdEncoding.EncodeToString([]byte("hello\nwörld"))[:8] + "\n" +
 			base64.StdEncoding.EncodeToString([]byte("hello\nwörld"))[8:], "Content-Transfer-Encoding: base64", "hello\nwörld"},
+		{"image base64 stays encoded", "/9j/4AAQSkZJRgABAQ==", "Content-Type: image/jpeg\nContent-Transfer-Encoding: base64", "/9j/4AAQSkZJRgABAQ=="},
+		{"octet-stream qp stays encoded", "a=00b=FF", "Content-Type: application/octet-stream\nContent-Transfer-Encoding: quoted-printable", "a=00b=FF"},
+		{"utf-16 label ignored", "plain ascii text", "Content-Type: text/plain; charset=UTF-16LE", "plain ascii text"},
+		{"utf-32 label ignored", "Gr\xfc\xdfe", "Content-Type: text/plain; charset=utf-32", "Grüße"},
 		{"multipart keeps qp text", "x =41 y", "Content-Type: multipart/mixed; boundary=b\nContent-Transfer-Encoding: quoted-printable", "x =41 y"},
 	}
 	for _, c := range cases {
