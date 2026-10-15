@@ -36,7 +36,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-var dbBatchSize int64 = 1000 // Load 1000 articles from DB at a time
 var VERBOSE bool
 
 // showUsageExamples displays usage examples for NNTP transfer
@@ -180,7 +179,7 @@ func main() {
 
 		// Transfer configuration
 		batchCheck      = flag.Int64("batch-check", 100, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
-		batchDB         = flag.Int64("batch-db", 1000, "Fetch N articles from DB in a batch")
+		batchDB         = flag.Int64("batch-db", 1000, "No effect (accepted for compatibility)")
 		maxThreads      = flag.Int("max-threads", 1, "Transfer N newsgroups in concurrent threads. Each thread uses 1 connection.")
 		redisCache      = flag.Bool("redis-cache", true, "Use Redis caching for message IDs (keys are scoped per target: pugleaf:tx:<host>:<port>:<message-id>)")
 		redisAddr       = flag.String("redis-addr", "localhost:6379", "Redis server address")
@@ -257,7 +256,7 @@ func main() {
 	if *batchDB < 100 {
 		*batchDB = 100
 	}
-	dbBatchSize = *batchDB
+	_ = batchDB // -batch-db has no effect (kept for scripts/nntp-transfer-loop.sh)
 
 	// Validate thread count
 	if *maxThreads < 1 || *maxThreads > 500 {
@@ -1008,20 +1007,6 @@ func getNewsgroupsToTransfer(db *database.Database, progressDB *nntp.TransferPro
 	return newsgroups, nil
 }
 
-func IgnoreNewsgroupProgress(ng *models.Newsgroup, progressDB *nntp.TransferProgressDB, startTime, endTime *time.Time) bool {
-	if progressDB != nil {
-		exists, err := progressDB.NewsgroupExists(ng.Name, startTime, endTime)
-		if err != nil {
-			log.Printf("Warning: Failed to check if newsgroup %s exists in progress DB: %v", ng.Name, err)
-			return true
-		} else if exists {
-			//log.Printf("Skipping newsgroup %s - already has transfer results for this remote", ng.Name)
-			return true
-		}
-	}
-	return false
-}
-
 // matchesExcludePrefix checks if a newsgroup name matches any of the exclude prefixes
 func matchesExcludePrefix(ngName string, excludePrefixes []string) bool {
 	for _, excludePrefix := range excludePrefixes {
@@ -1124,16 +1109,6 @@ func matchesPattern(newsgroup, pattern string) bool {
 
 	// Exact match
 	return newsgroup == pattern
-}
-
-// matchesAnyPattern checks if a newsgroup name matches any of the given patterns
-func matchesAnyPattern(newsgroup string, patterns []string) bool {
-	for _, pattern := range patterns {
-		if matchesPattern(newsgroup, pattern) {
-			return true
-		}
-	}
-	return false
 }
 
 // matchesAnyWildcardPattern checks if a newsgroup name matches any wildcard patterns (skips exact matches)
@@ -1657,6 +1632,43 @@ func processBatch(ttMode *nntp.TakeThisMode, messageIDs []*string, redisCli *red
 	if len(messageIDs) == 0 {
 		log.Printf("Newsgroup: '%s' | processBatch: no articles in this batch", *ttMode.Newsgroup)
 		return nil, nil
+	}
+
+	// Drop nil and invalid message-ids before the job is built: they never reach
+	// CHECK/TAKETHIS (decision 12). The caller's slice is not modified.
+	invalid := 0
+	for _, id := range messageIDs {
+		if id == nil || !common.ValidMessageID(*id) {
+			invalid++
+		}
+	}
+	if invalid > 0 {
+		valid := make([]*string, 0, len(messageIDs)-invalid)
+		skipped := 0
+		for _, id := range messageIDs {
+			if id == nil {
+				continue
+			}
+			if !common.ValidMessageID(*id) {
+				skipped++
+				continue
+			}
+			valid = append(valid, id)
+		}
+		if skipped > 0 {
+			log.Printf("Newsgroup: '%s' | processBatch: skipped %d invalid message-ids at offset %d", *ttMode.Newsgroup, skipped, dbOffset)
+			if ngtprogress != nil {
+				ngtprogress.Increment(nntp.IncrFLAG_SKIPPED, uint64(skipped))
+			}
+		}
+		messageIDs = valid
+		if len(messageIDs) == 0 {
+			// no job is built: release the slot the caller reserved with OffsetQueue.Add(1)
+			if offsetQ != nil {
+				offsetQ.OffsetBatchDone()
+			}
+			return nil, nil
+		}
 	}
 
 	// Update newsgroup progress with current offset

@@ -347,8 +347,11 @@ func (c *BackendConn) abortConnect() {
 // after AUTHINFO USER is success without a password, 381 asks for AUTHINFO
 // PASS. Other replies wrap ErrAuthRejected; I/O errors are returned as is.
 func (c *BackendConn) authenticate() error {
-	// Send AUTHINFO USER
-	id, err := c.TextConn.Cmd("AUTHINFO USER %s", c.Backend.Username)
+	// Send AUTHINFO USER (RFC 4643: no CR/LF/NUL; spaces are allowed)
+	if err := validTokenArg(c.Backend.Username, true); err != nil {
+		return fmt.Errorf("AUTHINFO USER: %w", err)
+	}
+	id, err := c.sendCmd("AUTHINFO USER %s", c.Backend.Username)
 	if err != nil {
 		return err
 	}
@@ -371,7 +374,10 @@ func (c *BackendConn) authenticate() error {
 	}
 
 	// Send AUTHINFO PASS
-	id, err = c.TextConn.Cmd("AUTHINFO PASS %s", c.Backend.Password)
+	if err := validTokenArg(c.Backend.Password, true); err != nil {
+		return fmt.Errorf("AUTHINFO PASS: %w", err)
+	}
+	id, err = c.sendCmd("AUTHINFO PASS %s", c.Backend.Password)
 	if err != nil {
 		return err
 	}

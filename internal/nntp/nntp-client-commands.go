@@ -38,6 +38,9 @@ var ErrResponseTooLarge = errors.New("nntp: response too large")
 
 // StatArticle checks if an article exists on the server
 func (c *BackendConn) StatArticle(messageID string) (bool, error) {
+	if err := validMessageIDArg(messageID); err != nil {
+		return false, err
+	}
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
@@ -47,7 +50,7 @@ func (c *BackendConn) StatArticle(messageID string) (bool, error) {
 
 	c.lastUsed = time.Now()
 
-	id, err := c.TextConn.Cmd("STAT %s", messageID)
+	id, err := c.sendCmd("STAT %s", messageID)
 	if err != nil {
 		return false, fmt.Errorf("failed to send STAT command: %w", err)
 	}
@@ -72,6 +75,12 @@ func (c *BackendConn) StatArticle(messageID string) (bool, error) {
 
 // GetArticle retrieves a complete article from the server
 func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
+	if messageID == nil {
+		return nil, fmt.Errorf("%w: nil message-id", ErrInvalidCommandArg)
+	}
+	if err := validMessageIDArg(*messageID); err != nil {
+		return nil, err
+	}
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
@@ -80,7 +89,7 @@ func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Arti
 	}
 
 	c.lastUsed = time.Now()
-	id, err := c.TextConn.Cmd("ARTICLE %s", *messageID)
+	id, err := c.sendCmd("ARTICLE %s", *messageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send ARTICLE '%s' command: %w", *messageID, err)
 	}
@@ -125,6 +134,9 @@ func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Arti
 
 // GetHead retrieves only the headers of an article
 func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
+	if err := validMessageIDArg(messageID); err != nil {
+		return nil, err
+	}
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
@@ -134,7 +146,7 @@ func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
 
 	c.lastUsed = time.Now()
 
-	id, err := c.TextConn.Cmd("HEAD %s", messageID)
+	id, err := c.sendCmd("HEAD %s", messageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send HEAD command: %w", err)
 	}
@@ -181,6 +193,9 @@ func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
 
 // GetBody retrieves only the body of an article
 func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
+	if err := validMessageIDArg(messageID); err != nil {
+		return nil, err
+	}
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
@@ -190,7 +205,7 @@ func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
 
 	c.lastUsed = time.Now()
 
-	id, err := c.TextConn.Cmd("BODY %s", messageID)
+	id, err := c.sendCmd("BODY %s", messageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send BODY command: %w", err)
 	}
@@ -238,7 +253,7 @@ func (c *BackendConn) ListGroups() ([]GroupInfo, error) {
 
 	c.lastUsed = time.Now()
 
-	id, err := c.TextConn.Cmd("LIST")
+	id, err := c.sendCmd("LIST")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send LIST command: %w", err)
 	}
@@ -274,89 +289,11 @@ func (c *BackendConn) ListGroups() ([]GroupInfo, error) {
 	return groups, nil
 }
 
-// ListGroupsLimited retrieves a limited number of newsgroups for testing
-func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-
-	if !c.IsConnected() {
-		return nil, fmt.Errorf("not connected")
-	}
-
-	c.lastUsed = time.Now()
-
-	id, err := c.TextConn.Cmd("LIST")
-	if err != nil {
-		return nil, fmt.Errorf("failed to send LIST command: %w", err)
-	}
-
-	c.TextConn.StartResponse(id)
-	defer c.TextConn.EndResponse(id) // Always clean up response state
-
-	code, message, err := c.TextConn.ReadCodeLine(215)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read LIST response: %w", err)
-	}
-
-	if code != 215 {
-		return nil, fmt.Errorf("unexpected LIST response: %d %s", code, message)
-	}
-
-	// Read the group list with limit
-	var groups []GroupInfo
-	lineCount := 0
-
-	for {
-		if lineCount >= maxGroups {
-			c.conn.Close() // Close connection on limit reached
-			c.forceClose = true
-			log.Printf("Connection reached maximum group limit: %d", maxGroups)
-			break
-		}
-
-		line, err := c.TextConn.ReadLine()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read group list: %w", err)
-		}
-
-		// Check for end marker
-		if line == "." {
-			break
-		}
-
-		// Handle dot-stuffing
-		if strings.HasPrefix(line, "..") {
-			line = line[1:]
-		}
-
-		// Parse group information
-		group, err := ParseGroupLine(line)
-		if err != nil {
-			continue // Skip malformed lines
-		}
-
-		groups = append(groups, group)
-		lineCount++
-	}
-
-	// Read remaining lines until end marker if we hit the limit
-	if lineCount >= maxGroups {
-		for {
-			line, err := c.TextConn.ReadLine()
-			if err != nil {
-				break
-			}
-			if line == DOT {
-				break
-			}
-		}
-	}
-
-	return groups, nil
-}
-
 // SelectGroup selects a newsgroup for operation
 func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, int, error) {
+	if err := validGroupArg(groupName); err != nil {
+		return nil, 0, err
+	}
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
@@ -366,7 +303,7 @@ func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, int, error) {
 
 	c.lastUsed = time.Now()
 
-	id, err := c.TextConn.Cmd("GROUP %s", groupName)
+	id, err := c.sendCmd("GROUP %s", groupName)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -424,6 +361,9 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 	if groupName == "" {
 		return nil, fmt.Errorf("error XOver: group name is required")
 	}
+	if err := validGroupArg(groupName); err != nil {
+		return nil, err
+	}
 	//log.Printf("XOver group '%s' start=%d end=%d", groupName, start, end)
 	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
@@ -445,9 +385,9 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 
 	var id uint
 	if end > 0 {
-		id, err = c.TextConn.Cmd("XOVER %d-%d", start, end)
+		id, err = c.sendCmd("XOVER %d-%d", start, end)
 	} else {
-		id, err = c.TextConn.Cmd("XOVER %d", start)
+		id, err = c.sendCmd("XOVER %d", start)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to send XOVER command: %w", err)
@@ -490,6 +430,12 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 // XHdr retrieves specific header field for a range of articles
 // Automatically limits to max 1000 articles to prevent SQLite overload
 func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderLine, error) {
+	if err := validGroupArg(groupName); err != nil {
+		return nil, err
+	}
+	if err := validTokenArg(field, false); err != nil {
+		return nil, fmt.Errorf("XHDR field: %w", err)
+	}
 	c.mux.Lock()
 	if !c.IsConnected() {
 		c.mux.Unlock()
@@ -513,9 +459,9 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderL
 	log.Printf("XHdr group '%s' field '%s' start=%d end=%d", groupName, field, start, end)
 	var id uint
 	if end > 0 {
-		id, err = c.TextConn.Cmd("XHDR %s %d-%d", field, start, end)
+		id, err = c.sendCmd("XHDR %s %d-%d", field, start, end)
 	} else {
-		id, err = c.TextConn.Cmd("XHDR %s %d", field, start)
+		id, err = c.sendCmd("XHDR %s %d", field, start)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to send XHDR command: %w", err)
@@ -629,6 +575,12 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 
 // XHdrStreamedBatch performs XHDR command and streams results line by line through a channel
 func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) error {
+	if err := validGroupArg(groupName); err != nil {
+		return err
+	}
+	if err := validTokenArg(field, false); err != nil {
+		return fmt.Errorf("XHDR field: %w", err)
+	}
 	c.mux.Lock()
 	if !c.IsConnected() {
 		c.mux.Unlock()
@@ -659,12 +611,12 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 	maxLines := int64(1)
 	var id uint
 	if end > 0 {
-		id, err = c.TextConn.Cmd("XHDR %s %d-%d", field, start, end)
+		id, err = c.sendCmd("XHDR %s %d-%d", field, start, end)
 		if end >= start {
 			maxLines = end - start + 1
 		}
 	} else {
-		id, err = c.TextConn.Cmd("XHDR %s %d-%d", field, start, start)
+		id, err = c.sendCmd("XHDR %s %d-%d", field, start, start)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to send XHDR command: %w", err)
@@ -740,6 +692,9 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 
 // ListGroup retrieves article numbers for a specific group
 func (c *BackendConn) ListGroup(groupName string, start, end int64) ([]int64, error) {
+	if err := validGroupArg(groupName); err != nil {
+		return nil, err
+	}
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
@@ -752,9 +707,9 @@ func (c *BackendConn) ListGroup(groupName string, start, end int64) ([]int64, er
 	var id uint
 	var err error
 	if start > 0 && end > 0 {
-		id, err = c.TextConn.Cmd("LISTGROUP %s %d-%d", groupName, start, end)
+		id, err = c.sendCmd("LISTGROUP %s %d-%d", groupName, start, end)
 	} else {
-		id, err = c.TextConn.Cmd("LISTGROUP %s", groupName)
+		id, err = c.sendCmd("LISTGROUP %s", groupName)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to send LISTGROUP command: %w", err)
@@ -1111,6 +1066,17 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponses
 		return 0, fmt.Errorf("no message IDs provided")
 	}
 
+	// Reject an invalid message-id before any CHECK of the batch is written
+	// (nntp-transfer drops them when it builds the batch).
+	for _, msgID := range messageIDs {
+		if msgID == nil || *msgID == "" {
+			continue // skipped below
+		}
+		if err := validMessageIDArg(*msgID); err != nil {
+			return 0, fmt.Errorf("CHECK: %w", err)
+		}
+	}
+
 	//writer := bufio.NewWriter(c.conn)
 	//defer writer.Flush()
 	//log.Printf("Newsgroup: '%s' | SendCheckMultiple commands for %d message IDs", *job.Newsgroup, len(messageIDs))
@@ -1122,7 +1088,7 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponses
 		}
 		//log.Printf("Newsgroup: '%s' | CHECK '%s' acquire c.mux.Lock() (%d/%d)", *job.Newsgroup, *msgID, n+1, len(messageIDs))
 		c.mux.Lock()
-		cmdID, err := c.TextConn.Cmd("CHECK %s", *msgID)
+		cmdID, err := c.sendCmd("CHECK %s", *msgID)
 		c.mux.Unlock()
 		if err != nil {
 			return checksSent, fmt.Errorf("failed to send CHECK '%s': %w", *msgID, err)
@@ -1190,6 +1156,12 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 		}
 		return 0, 0, err, true
 	}
+	// RelayHeaders/ReconstructHeaders reject invalid Message-IDs already; this
+	// guards the command argument itself (skipped, nothing written).
+	if err := validMessageIDArg(article.MessageID); err != nil {
+		log.Printf("[NNTP-CLIENT] Newsgroup: '%s' | skip TAKETHIS: %v", newsgroup, err)
+		return 0, 0, err, true
+	}
 	//writer := bufio.NewWriterSize(c.conn, c.GetBufSize(article.Bytes)) // Slightly larger buffer than article size for headers
 	writer := bufio.NewWriter(c.conn)
 
@@ -1198,7 +1170,10 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 
 	//startSend := time.Now()
 	// Send TAKETHIS command
-	cmdID, err = c.TextConn.Cmd("TAKETHIS %s", article.MessageID)
+	cmdID, err = c.sendCmd("TAKETHIS %s", article.MessageID)
+	if errors.Is(err, ErrInvalidCommandArg) {
+		return 0, 0, err, true // refused before writing: the connection is healthy
+	}
 	if err != nil {
 		c.ForceCloseConn() // the pipeline is broken (async: the caller holds c.mux)
 		return 0, 0, fmt.Errorf("failed SendTakeThisArticleStreaming command: %w", err), false
@@ -1248,7 +1223,7 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 	c.lastUsed = time.Now()
 
 	// Send POST command
-	id, err := c.TextConn.Cmd("POST")
+	id, err := c.sendCmd("POST")
 	if err != nil {
 		return 0, fmt.Errorf("failed to send POST command: %w", err)
 	}
@@ -1272,7 +1247,7 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 			}
 
 			// Send POST command again
-			id, err := c.TextConn.Cmd("POST")
+			id, err := c.sendCmd("POST")
 			if err != nil {
 				return 0, fmt.Errorf("failed to send POST command: %w", err)
 			}
@@ -1395,7 +1370,7 @@ func (c *BackendConn) SwitchToModeReader() error {
 	c.lastUsed = time.Now()
 
 	// Send MODE READER command
-	id, err := c.TextConn.Cmd("MODE READER")
+	id, err := c.sendCmd("MODE READER")
 	if err != nil {
 		return fmt.Errorf("failed to send MODE READER command: %w", err)
 	}
@@ -1430,7 +1405,7 @@ func (c *BackendConn) SwitchToModeStream() error {
 	c.lastUsed = time.Now()
 
 	// Send MODE STREAM command
-	id, err := c.TextConn.Cmd("MODE STREAM")
+	id, err := c.sendCmd("MODE STREAM")
 	if err != nil {
 		return fmt.Errorf("failed to send MODE STREAM command: %w", err)
 	}
