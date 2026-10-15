@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -23,12 +26,23 @@ var appVersion = "-unset-"
 // fixRefsExitTimeout bounds the wait for background goroutines in fixRefsExit.
 const fixRefsExitTimeout = 60 * time.Second
 
-var fixRefsStopOnce sync.Once
+var (
+	fixRefsStopOnce sync.Once
+	// fixRefsExitMu serializes fixRefsExit: the first caller tears down and exits, a
+	// concurrent second one (the signal handler vs. main) waits here until the process is gone.
+	fixRefsExitMu sync.Mutex
+	// fixRefsStopReq is set by the first SIGINT/SIGTERM: main stops after the current newsgroup.
+	fixRefsStopReq atomic.Bool
+)
+
+// fixRefsExitSignaled is the exit code of a run ended by a signal.
+const fixRefsExitSignaled = 130
 
 // fixRefsExit tears the database down (close StopChan once, wait for the background
 // goroutines up to fixRefsExitTimeout, Shutdown) and exits with code. It is the only
 // way out of main once the database is open.
 func fixRefsExit(db *database.Database, code int) {
+	fixRefsExitMu.Lock() // never unlocked: os.Exit below ends the process
 	if db != nil {
 		fixRefsStopOnce.Do(func() {
 			if db.StopChan != nil {
@@ -55,6 +69,33 @@ func fixRefsExit(db *database.Database, code int) {
 		}
 	}
 	os.Exit(code)
+}
+
+// fixRefsSignalLoop handles the signals of sigChan: the first one calls requestStop
+// (main stops after the current newsgroup), a second one calls exitNow. It returns
+// after the second signal or when sigChan is closed.
+func fixRefsSignalLoop(sigChan <-chan os.Signal, requestStop, exitNow func()) {
+	sig, ok := <-sigChan
+	if !ok {
+		return
+	}
+	log.Printf("[FIX-REFS] Received %v: stopping after the current newsgroup (send it again to stop now)", sig)
+	requestStop()
+	sig, ok = <-sigChan
+	if !ok {
+		return
+	}
+	log.Printf("[FIX-REFS] Received %v again: stopping now", sig)
+	exitNow()
+}
+
+// fixRefsHandleSignals registers SIGINT/SIGTERM for the run with the open database db;
+// both ways out go through fixRefsExit (exit code fixRefsExitSignaled).
+func fixRefsHandleSignals(db *database.Database) {
+	sigChan := make(chan os.Signal, 2)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	// ends with the process: every way out of main is fixRefsExit (os.Exit)
+	go fixRefsSignalLoop(sigChan, func() { fixRefsStopReq.Store(true) }, func() { fixRefsExit(db, fixRefsExitSignaled) })
 }
 
 // usageText is the usage line and example printed when -data or -group is empty.
@@ -172,6 +213,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
+	fixRefsHandleSignals(db)
 
 	var newsgroups []*models.Newsgroup
 	if *newsgroup != "$all" && *newsgroup != "" {
@@ -206,8 +248,14 @@ func main() {
 	fmt.Printf("\n")
 
 	var totalProcessed, totalFixed int
+	stopped := false
 
 	for i, newsgroup := range newsgroups {
+		if fixRefsStopReq.Load() {
+			fmt.Printf("🛑 Stopped by a signal after %d of %d newsgroups\n", i, len(newsgroups))
+			stopped = true
+			break
+		}
 		fmt.Printf("🔍 [%d/%d] Processing newsgroup: %s\n", i+1, len(newsgroups), newsgroup.Name)
 
 		groupDB, err := db.GetGroupDB(newsgroup.Name)
@@ -264,6 +312,9 @@ func main() {
 		fmt.Printf("💡 Consider rebuilding thread indexes for better performance\n")
 	} else {
 		fmt.Printf("\n✅ No broken references found - all headers are correct\n")
+	}
+	if stopped {
+		fixRefsExit(db, fixRefsExitSignaled)
 	}
 	fixRefsExit(db, 0)
 }
