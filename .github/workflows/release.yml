@@ -12,6 +12,9 @@ name: Build and Release
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Vet and test
@@ -90,7 +93,8 @@ jobs:
           else
             VERSION="${GITHUB_REF#refs/tags/v}"
           fi
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid version"; exit 1; }
+          # optional suffix for tags like v0.4.7-1; still no shell/filename metacharacters
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || { echo "invalid version"; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "$VERSION" > appVersion.txt
           echo "Version set to: $VERSION"
@@ -110,6 +114,10 @@ jobs:
           else
             echo "BINARY_EXT=" >> "$GITHUB_ENV"
           fi
+
+      - name: Check C compiler (cgo)
+        if: runner.os == 'Windows'
+        run: gcc --version
 
       - name: Build all binaries
         run: |
@@ -242,7 +250,8 @@ jobs:
           else
             VERSION="${GITHUB_REF#refs/tags/v}"
           fi
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid version"; exit 1; }
+          # optional suffix for tags like v0.4.7-1; still no shell/filename metacharacters
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || { echo "invalid version"; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download all artifacts
@@ -273,6 +282,8 @@ jobs:
                   # Extract hash and filename
                   hash=$(echo "$line" | cut -d' ' -f1)
                   filename=$(echo "$line" | cut -d' ' -f2-)
+                  # MSYS sha256sum (Windows) marks binary mode with a leading '*'
+                  filename="${filename#\*}"
                   echo "$hash  $filename ($platform)" >> SHA256SUMS.txt
                 done < "$checksums_file"
               fi

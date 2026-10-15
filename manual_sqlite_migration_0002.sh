@@ -3,7 +3,7 @@
 # Apply NNNN_single_*.sql to all group databases
 
 MIGRATION_FILE="internal/database/migrations/0002_single_spam_system.sql.applied"
-DATA_PATH="data/db"
+DATA_PATH="${1:?usage: $0 <data-dir>/db}"
 
 # Check if migration file exists
 if [ ! -f "$MIGRATION_FILE" ]; then
