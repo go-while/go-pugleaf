@@ -119,6 +119,19 @@ func adfBatchMsgID() string {
 	return fmt.Sprintf("<adf-batch-%d@test.invalid>", w0Seq.Add(1))
 }
 
+// adfBatchWaitInFlight polls until captureInFlight equals want: the divider decrements it right
+// after the send, so a test that saw the article in BATCHchan may be a moment early.
+func adfBatchWaitInFlight(t *testing.T, sq *SQ3batch, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for sq.captureInFlight.Load() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("captureInFlight = %d, want %d", sq.captureInFlight.Load(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func adfBatchQueued(sq *SQ3batch) int {
 	sq.GMux.RLock()
 	defer sq.GMux.RUnlock()
@@ -245,6 +258,54 @@ func TestAdfBatchSeqSeededFromExisting(t *testing.T) {
 	}
 }
 
+// TestAdfBatchSeqSeededFromThreadTables: a group whose top articles were expired before the
+// migration existed still has thread rows of those numbers; the seed covers them, so the
+// numbers are not handed out again (INT-5).
+func TestAdfBatchSeqSeededFromThreadTables(t *testing.T) {
+	db := fuBatchIsolatedDB(t)
+	name := w0Name("adfbatch.seedthreads")
+	adfBatchExec(t, db, name, "DROP TRIGGER articles_num_seq_ai")
+	adfBatchExec(t, db, name, "DROP TABLE article_num_seq")
+	adfBatchExec(t, db, name, "DELETE FROM schema_migrations WHERE filename = ? AND db_type = 'group'", adfBatchSeqMigration)
+	// articles is empty, thread_cache still holds the deleted root 7
+	adfBatchExec(t, db, name, "INSERT INTO thread_cache (thread_root, message_count) VALUES (7, 1)")
+
+	groupDB, err := db.GetGroupDB(name)
+	if err != nil {
+		t.Fatalf("GetGroupDB: %v", err)
+	}
+	err = db.migrateGroupDB(groupDB, false)
+	groupDB.Return()
+	if err != nil {
+		t.Fatalf("migrateGroupDB: %v", err)
+	}
+	if got := adfBatchLastNum(t, db, name); got != 7 {
+		t.Fatalf("seeded last_num = %d with thread_cache root 7 and no articles, want 7", got)
+	}
+	fuBatchRun(t, db, fuBatchTask(t, db.Batch, name, 1), adfBatchWait, &fuBatchLogs{})
+	if got := adfBatchNums(t, db, name); !adfBatchEqual(got, []int64{8}) {
+		t.Errorf("numbers = %v, want [8]", got)
+	}
+}
+
+// TestAdfBatchLaggingSeqNoCollision: a last_num below the highest stored number does not make
+// the batch's INSERT OR IGNORE collide with an existing row and drop the article.
+func TestAdfBatchLaggingSeqNoCollision(t *testing.T) {
+	db := fuBatchIsolatedDB(t)
+	name := w0Name("adfbatch.lagging")
+	for i := 1; i <= 5; i++ {
+		adfBatchExec(t, db, name, "INSERT INTO articles (article_num, message_id) VALUES (?, ?)", i, adfBatchMsgID())
+	}
+	adfBatchExec(t, db, name, "UPDATE article_num_seq SET last_num = 1 WHERE id = 1")
+	fuBatchRun(t, db, fuBatchTask(t, db.Batch, name, 2), adfBatchWait, &fuBatchLogs{})
+	if got := adfBatchNums(t, db, name); !adfBatchEqual(got, []int64{1, 2, 3, 4, 5, 6, 7}) {
+		t.Errorf("numbers = %v, want [1 2 3 4 5 6 7]: an article was dropped on a number collision", got)
+	}
+	if got := adfBatchLastNum(t, db, name); got != 7 {
+		t.Errorf("last_num = %d, want 7", got)
+	}
+}
+
 // TestAdfBatchDuplicateConsumesNoNumber: an ignored duplicate message-id fires no trigger, so
 // the next inserted article gets the next number without a gap.
 func TestAdfBatchDuplicateConsumesNoNumber(t *testing.T) {
@@ -304,6 +365,7 @@ func TestAdfBatchQueuedNeverNegative(t *testing.T) {
 	if q := adfBatchQueued(sq); q != n {
 		t.Fatalf("queued = %d with %d articles in BATCHchan, want %d (counted per article)", q, n, n)
 	}
+	adfBatchWaitInFlight(t, sq, 0)
 	fuBatchRun(t, s.db, task, adfBatchWait, logs)
 	if q := adfBatchQueued(sq); q != 0 {
 		t.Errorf("queued = %d after the batch, want 0", q)
@@ -369,6 +431,79 @@ func TestAdfBatchDividerBrakeEngages(t *testing.T) {
 	if got := len(adfBatchNums(t, s.db, name)); got != n {
 		t.Errorf("%d articles stored, want %d", got, n)
 	}
+}
+
+// TestAdfBatchBrakeSurvivesExpiry: while the divider is braked with articles in flight,
+// expireIdleTasks expires nothing; and even if the task disappears during the brake, the
+// divider looks it up only afterwards, so the held articles land in the live task instead of an
+// orphaned BATCHchan (A-db-5).
+func TestAdfBatchBrakeSurvivesExpiry(t *testing.T) {
+	logs := fuBatchCaptureLog(t)
+	s := adfBatchNewStopDB(t)
+	sq := s.db.Batch
+	sq.maxQueued = 16 // brake at 12
+	s.start(sq.BatchDivider)
+
+	name := w0Name("adfbatch.brakeexpire")
+	ptr := sq.GetNewsgroupPointer(name)
+	const n = 20
+	for i := 0; i < n; i++ {
+		a := adfBatchArticle(&BatchTasks{Newsgroup: ptr}, adfBatchMsgID())
+		a.NewsgroupsPtr = nil
+		a.ProcessQueue = make(chan *string, 16)
+		sq.BatchCaptureOverviewForLater(ptr, a)
+	}
+	old := sq.GetOrCreateTasksMapKey(name)
+	chanLen := func(task *BatchTasks) int {
+		task.Mux.RLock()
+		defer task.Mux.RUnlock()
+		return len(task.BATCHchan)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for chanLen(old) != 12 {
+		if time.Now().After(deadline) {
+			t.Fatalf("BATCHchan holds %d articles, want 12 (braked). Last log lines:\n%s", chanLen(old), logs.tail(12))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	adfBatchWaitInFlight(t, sq, n-12)
+	if got := sq.expireIdleTasks(time.Now().Add(200 * time.Second)); got != 0 {
+		t.Fatalf("expireIdleTasks removed %d tasks with captures in flight, want 0", got)
+	}
+	// an expiry that slipped through anyway: the held articles must find the live task
+	sq.GMux.Lock()
+	delete(sq.TasksMap, name)
+	sq.GMux.Unlock()
+
+	fuBatchRun(t, s.db, old, adfBatchWait, logs) // drains 12, releases the brake
+	var live *BatchTasks
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		sq.GMux.RLock()
+		live = sq.TasksMap[name]
+		sq.GMux.RUnlock()
+		if live != nil && chanLen(live) == n-12 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the %d held articles did not land in the live task. Last log lines:\n%s", n-12, logs.tail(12))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if live == old {
+		t.Fatal("the deleted task is back in TasksMap: the test did not simulate an expiry")
+	}
+	if got := chanLen(old); got != 0 {
+		t.Errorf("%d articles went into the orphaned task's BATCHchan", got)
+	}
+	fuBatchRun(t, s.db, live, adfBatchWait, logs)
+	if got := len(adfBatchNums(t, s.db, name)); got != n {
+		t.Errorf("%d articles stored, want %d", got, n)
+	}
+	if q := adfBatchQueued(sq); q != 0 {
+		t.Errorf("queued = %d, want 0", q)
+	}
+	adfBatchWaitInFlight(t, sq, 0)
 }
 
 // TestAdfBatchExpireSkipsBusyTask: idle-task expiry removes only expired tasks without work;

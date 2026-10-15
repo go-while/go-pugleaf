@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/history"
@@ -112,6 +113,11 @@ type SQ3batch struct {
 	dividerChan     chan *models.Article
 	captureDropOnce sync.Once // logs the first capture dropped after Shutdown
 	negativeOnce    sync.Once // logs the first time queued went negative (A-db-9)
+	// captureInFlight counts captures between BatchCaptureOverviewForLater and their send into
+	// a BATCHchan (in dividerChan, blocked on it, or held by a braked BatchDivider). While it is
+	// above 0 expireIdleTasks expires nothing: such an article carries its group's current
+	// *string and must find the same task (A-db-5).
+	captureInFlight atomic.Int64
 }
 
 type BatchTasks struct {
@@ -167,11 +173,13 @@ func (sq *SQ3batch) BatchCaptureOverviewForLater(newsgroupPtr *string, article *
 	}
 	article.Mux.Unlock()
 	article.ProcessQueue <- newsgroupPtr // Add to process queue for later processing
+	sq.captureInFlight.Add(1)
 	// After Shutdown nobody reads dividerChan any more (BatchDivider returned): drop the
 	// capture instead of parking this goroutine for good.
 	select {
 	case sq.dividerChan <- article:
 	case <-sq.db.backgroundStop():
+		sq.captureInFlight.Add(-1)
 		sq.captureDropOnce.Do(func() {
 			log.Printf("[BATCH] capture after Shutdown dropped")
 		})
@@ -198,8 +206,13 @@ func (sq *SQ3batch) ExpireCache() {
 
 // expireIdleTasks removes the tasks whose Expires is before now and that have no work: a task
 // still processing or with articles in its BATCHchan is kept (A-db-5), so a writer never ends
-// up with a task (and pointer) that is no longer in the map. It returns how many it removed.
+// up with a task (and pointer) that is no longer in the map. While captures are in flight
+// (in dividerChan, blocked on it or held by a braked BatchDivider) nothing is expired: their
+// articles carry the current pointer of their group. It returns how many it removed.
 func (sq *SQ3batch) expireIdleTasks(now time.Time) (expired int) {
+	if len(sq.dividerChan) > 0 || sq.captureInFlight.Load() > 0 {
+		return 0
+	}
 	sq.GMux.Lock()
 	defer sq.GMux.Unlock()
 	for k, task := range sq.TasksMap {
@@ -1082,9 +1095,12 @@ func (sq *SQ3batch) batchInsertOverviews(newsgroup string, batches []*models.Art
 // query_processOverviewBatch assigns article_num from the group's article_num_seq high-water
 // mark (migration 0010, INT-5): numbers of deleted articles are never handed out again. Each
 // insert of the batch transaction sees the trigger's update of the previous one, so numbers stay
-// consecutive; an ignored duplicate fires no trigger and consumes no number. Without the seq row
-// (before the migration ran) the subquery is NULL and SQLite falls back to max(rowid)+1.
-const query_processOverviewBatch = `INSERT OR IGNORE INTO articles (article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, downloaded, imported_at) VALUES ((SELECT last_num + 1 FROM article_num_seq WHERE id = 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+// consecutive; an ignored duplicate fires no trigger and consumes no number. The MAX with the
+// highest stored number (one rowid seek) keeps a lagging last_num from colliding with an
+// existing row, which INSERT OR IGNORE would drop silently; COALESCE keeps an empty table from
+// turning the multi-argument max() into NULL. Without the seq row (before the migration ran)
+// the subquery is NULL and SQLite falls back to max(rowid)+1.
+const query_processOverviewBatch = `INSERT OR IGNORE INTO articles (article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, downloaded, imported_at) VALUES ((SELECT MAX(last_num, COALESCE((SELECT MAX(article_num) FROM articles), 0)) + 1 FROM article_num_seq WHERE id = 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 const query_processOverviewBatch2 = `SELECT message_id, article_num FROM articles WHERE message_id IN (`
 
 // processSingleUnifiedArticleBatch handles a single batch that's within SQLite limits
@@ -1867,7 +1883,9 @@ fillQ:
 // per-newsgroup channel. It also enforces the global MaxQueued limit to prevent overload:
 // every article is counted in sq.queued before it enters a BATCHchan (processNewsgroupBatch
 // subtracts what it drained), and above 80 % of MaxQueued it waits until the live count is
-// down to 20 % (A-db-9). Each newsgroup channel is created lazily on first use.
+// down to 20 % (A-db-9). The target task is looked up (and renewed) only after the brake,
+// right before the send, so a long brake cannot leave it expired (A-db-5). Each newsgroup
+// channel is created lazily on first use.
 // It returns when the Database's background stop channel is closed (Shutdown).
 func (sq *SQ3batch) BatchDivider() {
 	stop := sq.db.backgroundStop()
@@ -1883,6 +1901,7 @@ func (sq *SQ3batch) BatchDivider() {
 		}
 		if article == nil {
 			log.Printf("[BATCH-DIVIDER] Received nil task?!")
+			sq.captureInFlight.Add(-1)
 			continue
 		}
 		article.Mux.Lock()
@@ -1892,9 +1911,9 @@ func (sq *SQ3batch) BatchDivider() {
 		default:
 			article.Mux.Unlock()
 			log.Printf("Error in BatchDivider, received task (%#v) but no newsgroupPtr", article)
+			sq.captureInFlight.Add(-1)
 			continue
 		}
-		tasks := sq.dividerTasks(*newsgroupPtr)
 
 		sq.GMux.RLock()
 		realQueue := sq.queued
@@ -1916,6 +1935,8 @@ func (sq *SQ3batch) BatchDivider() {
 				}
 			}
 		}
+		// Look the task up only now, after the brake: it is in TasksMap with a renewed expiry.
+		tasks := sq.dividerTasks(*newsgroupPtr)
 		// Count before the send: a batch that drains the article right away must not
 		// subtract it before it was added.
 		sq.GMux.Lock()
@@ -1923,6 +1944,7 @@ func (sq *SQ3batch) BatchDivider() {
 		sq.GMux.Unlock()
 		select {
 		case tasks.BATCHchan <- article:
+			sq.captureInFlight.Add(-1)
 		case <-stop:
 			sq.GMux.Lock()
 			sq.queued--

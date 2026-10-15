@@ -695,7 +695,7 @@ func (db *Database) GetThreads(groupDB *GroupDB) ([]*models.Thread, error) {
 // InsertOverview inserts an overview entry using the articles table (unified schema).
 // query_InsertOverview takes the next number from article_num_seq (migration 0010, INT-5), like
 // the batch writer, so numbers of deleted articles are not reused.
-const query_InsertOverview = `INSERT INTO articles (article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES ((SELECT last_num + 1 FROM article_num_seq WHERE id = 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+const query_InsertOverview = `INSERT INTO articles (article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES ((SELECT MAX(last_num, COALESCE((SELECT MAX(article_num) FROM articles), 0)) + 1 FROM article_num_seq WHERE id = 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 const query_ImportOverview = `INSERT INTO articles (article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (db *Database) InsertOverview(groupDB *GroupDB, o *models.Overview) (int64, error) {
