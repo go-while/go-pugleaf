@@ -203,14 +203,17 @@ func (pm *PosterManager) processEntry(entry database.PostQueueEntry) error {
 
 	// Post to all available providers
 	successCount := 0
-	rejected := 0 // pools that answered 441
-	var lastErr error
+	rejected := 0      // pools that answered 441
+	var lastErr error  // last error of any kind
+	var otherErr error // first error that is not a 441: the reason when not every pool rejected
 	for _, pool := range pm.pools {
 		if err := pm.postToProvider(article, pool); err != nil {
 			log.Printf("Failed to post article %s to provider %s: %v", entry.MessageID, pool.Backend.Provider.Name, err)
 			lastErr = err
 			if errors.Is(err, errPostRejected) {
 				rejected++
+			} else if otherErr == nil {
+				otherErr = err
 			}
 		} else {
 			successCount++
@@ -228,10 +231,11 @@ func (pm *PosterManager) processEntry(entry database.PostQueueEntry) error {
 		// every provider refused the article: this counts as an attempt
 		return fmt.Errorf("article %s rejected by all %d providers: %w", entry.MessageID, rejected, lastErr)
 	}
-	if lastErr != nil {
+	if otherErr != nil {
 		// at least one provider failed for another reason (connection, pool, protocol): no attempt
-		// is counted; errPostRejected is not wrapped, so a partial rejection does not count either
-		return fmt.Errorf("failed to post article %s to any provider (%d of %d rejected): %v", entry.MessageID, rejected, len(pm.pools), lastErr)
+		// is counted; errPostRejected is not wrapped, so a partial rejection does not count either.
+		// The first such error is the reason stored in last_error, not a 441 of another pool.
+		return fmt.Errorf("failed to post article %s to any provider (%d of %d rejected): %v", entry.MessageID, rejected, len(pm.pools), otherErr)
 	}
 	return fmt.Errorf("failed to post article %s to any provider: no posting provider", entry.MessageID)
 }

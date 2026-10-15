@@ -374,7 +374,47 @@ func flPqQueuedArticle(t *testing.T, name, msgID string) int64 {
 		msgID, time.Now().UTC().Format("2006-01-02 15:04:05"), "Newsgroups: "+name); err != nil {
 		t.Fatalf("insert article %s: %v", msgID, err)
 	}
+	// The group DB file outlives the newsgroup row: remove the article (and any thread row) so
+	// the test binary can run with -count>1.
+	t.Cleanup(func() {
+		gdb, err := adfOptDB.GetGroupDB(name)
+		if err != nil {
+			t.Errorf("cleanup GetGroupDB %s: %v", name, err)
+			return
+		}
+		defer gdb.Return()
+		for _, q := range []string{
+			"DELETE FROM threads WHERE root_article = 1 OR child_article = 1",
+			"DELETE FROM articles WHERE article_num = 1",
+		} {
+			if _, err := database.RetryableExec(gdb.DB, q); err != nil {
+				t.Errorf("cleanup %s in %s: %v", q, name, err)
+			}
+		}
+	})
 	return adfOptQueue(t, gid, msgID)
+}
+
+// flPqProcess runs pm.ProcessPendingPosts(10) with a hang guard: a hung pool or fake server
+// fails the test after testWait instead of waiting for go test's timeout.
+func flPqProcess(t *testing.T, pm *PosterManager) (int, error) {
+	t.Helper()
+	type result struct {
+		n   int
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		n, err := pm.ProcessPendingPosts(10)
+		ch <- result{n, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.n, r.err
+	case <-time.After(testWait):
+		t.Fatalf("ProcessPendingPosts did not return within %v", testWait)
+		return 0, nil
+	}
 }
 
 // flPqAttempts returns attempts and last_error of post_queue row id.
@@ -399,7 +439,7 @@ func TestFlPqPostmgrRejectedParks(t *testing.T) {
 	pm := NewPosterManager(adfOptDB, []*nntp.Pool{flPqPool(t, "flpq-441", fake.port())})
 
 	for i := 1; i <= 5; i++ {
-		n, err := pm.ProcessPendingPosts(10)
+		n, err := flPqProcess(t, pm)
 		if err != nil || n != 1 {
 			t.Fatalf("run %d: ProcessPendingPosts = %d, %v; want 1, nil", i, n, err)
 		}
@@ -411,7 +451,7 @@ func TestFlPqPostmgrRejectedParks(t *testing.T) {
 			t.Errorf("run %d: posted=%v in_processing=%v, want false, false", i, posted, inProc)
 		}
 	}
-	if n, err := pm.ProcessPendingPosts(10); err != nil || n != 0 {
+	if n, err := flPqProcess(t, pm); err != nil || n != 0 {
 		t.Errorf("run 6 (parked): ProcessPendingPosts = %d, %v; want 0, nil", n, err)
 	}
 	if got := fake.posts.Load(); got != 5 {
@@ -432,13 +472,14 @@ func TestFlPqPostmgrTransientNotCounted(t *testing.T) {
 		}, "failed to get connection"},
 		{"441-and-refused", func(t *testing.T) []*nntp.Pool {
 			fake := flPqFakeNNTP(t, 441)
-			return []*nntp.Pool{flPqPool(t, "flpq-441", fake.port()), flPqPool(t, "flpq-refused", flPqClosedPort(t))}
-		}, "1 of 2 rejected"},
+			// refused first, 441 last: last_error must name the refusal, not the last pool's 441
+			return []*nntp.Pool{flPqPool(t, "flpq-refused", flPqClosedPort(t)), flPqPool(t, "flpq-441", fake.port())}
+		}, "1 of 2 rejected): failed to get connection"}, // the non-441 reason, not the 441 text
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			id := flPqQueuedArticle(t, "flpq.postmgr.transient."+strings.ReplaceAll(tc.name, "-", ""), "<transient."+tc.name+"@flpq.invalid>")
 			pm := NewPosterManager(adfOptDB, tc.pools(t))
-			n, err := pm.ProcessPendingPosts(10)
+			n, err := flPqProcess(t, pm)
 			if err != nil || n != 1 {
 				t.Fatalf("ProcessPendingPosts = %d, %v; want 1, nil", n, err)
 			}
@@ -458,7 +499,7 @@ func TestFlPqPostmgrPosted(t *testing.T) {
 	fake := flPqFakeNNTP(t, 240)
 	id := flPqQueuedArticle(t, "flpq.postmgr.posted", "<posted@flpq.invalid>")
 	pm := NewPosterManager(adfOptDB, []*nntp.Pool{flPqPool(t, "flpq-240", fake.port())})
-	n, err := pm.ProcessPendingPosts(10)
+	n, err := flPqProcess(t, pm)
 	if err != nil || n != 1 {
 		t.Fatalf("ProcessPendingPosts = %d, %v; want 1, nil", n, err)
 	}
