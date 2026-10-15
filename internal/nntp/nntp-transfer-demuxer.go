@@ -16,6 +16,10 @@ type ResponseDemuxer struct {
 	cmdIDChan chan *CmdIDinfo
 	//signalChan chan struct{}
 	//cmdIDQMux         sync.RWMutex
+	// LastID is the textproto id of the last response read. NewResponseDemuxer
+	// sets it to the id reserved by syncPipeline, so the first command
+	// registered afterwards is LastID+1 whatever ran on the connection before.
+	// Precondition: the connection never had a failed command (see NewResponseDemuxer).
 	LastID            uint
 	checkResponseChan chan *ResponseData
 	ttResponseChan    chan *ResponseData
@@ -26,17 +30,47 @@ type ResponseDemuxer struct {
 	lastRequestMux    sync.RWMutex
 }
 
-// NewResponseDemuxer creates a new response demultiplexer
+// NewResponseDemuxer creates a new response demultiplexer and synchronizes it
+// with the connection's textproto pipeline (syncPipeline), so the first
+// command sent after it is read in order even after AUTHINFO and MODE STREAM.
+//
+// Precondition: conn must never have had a failed command. textproto consumes
+// an id even when the write fails, and a command whose response was never
+// read leaves the response sequencer behind, so syncPipeline would block
+// forever. Every client error path therefore force-closes its connection; pass
+// a fresh connection from Pool.Get(MODE_STREAM_MV), never one that saw an error.
+// The caller must not hold conn's lock.
 func NewResponseDemuxer(conn *BackendConn, errChan chan struct{}) *ResponseDemuxer {
-	return &ResponseDemuxer{
+	d := &ResponseDemuxer{
 		conn:              conn,
-		cmdIDChan:         make(chan *CmdIDinfo, 64*1024),      // Buffer for command IDs
-		checkResponseChan: make(chan *ResponseData, 1024*1024), // Buffer for CHECK responses
-		ttResponseChan:    make(chan *ResponseData, 1024*1024), // Buffer for TAKETHIS responses
+		cmdIDChan:         make(chan *CmdIDinfo, DemuxerQueueDepth),    // Buffer for command IDs
+		checkResponseChan: make(chan *ResponseData, DemuxerQueueDepth), // Buffer for CHECK responses
+		ttResponseChan:    make(chan *ResponseData, DemuxerQueueDepth), // Buffer for TAKETHIS responses
 		//signalChan:        make(chan struct{}, 64*1024),
 		errChan: errChan,
 		started: false,
 	}
+	if conn != nil && conn.TextConn != nil {
+		d.syncPipeline()
+	}
+	return d
+}
+
+// syncPipeline reserves the connection's next textproto id as a no-op
+// request/response pair and records it in LastID. All earlier commands on the
+// connection were synchronous and ended their responses, so none of the
+// sequencer calls blocks (see the precondition on NewResponseDemuxer); the next
+// Cmd gets LastID+1.
+func (d *ResponseDemuxer) syncPipeline() {
+	d.conn.Lock()
+	defer d.conn.Unlock()
+	tc := d.conn.TextConn
+	id := tc.Next()
+	tc.StartRequest(id)
+	tc.EndRequest(id)
+	tc.StartResponse(id)
+	tc.EndResponse(id)
+	d.LastID = id
 }
 
 // RegisterCommand registers a command ID with its type (CHECK or TAKETHIS)

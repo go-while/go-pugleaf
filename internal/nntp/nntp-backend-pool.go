@@ -2,6 +2,8 @@ package nntp
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -41,7 +43,7 @@ func NewPool(cfg *BackendConfig) *Pool {
 		Backend:     cfg,
 		connections: make(chan *BackendConn, cfg.MaxConns),
 		maxConns:    cfg.MaxConns,
-		idleTimeout: DefaultConnExpire,
+		idleTimeout: pickDuration(cfg.IdleExpire, DefaultConnExpire), // 0 (IdleExpire < 0): never expire
 	}
 	go pool.startCleanupWorker()
 	return pool
@@ -64,6 +66,11 @@ func (pool *Pool) XOver(group string, start, end int64, enforceLimit bool) ([]Ov
 	// Perform the XOVER command
 	result, err := client.XOver(group, start, end, enforceLimit)
 	if err != nil {
+		if errors.Is(err, ErrInvalidCommandArg) {
+			// refused before anything was written: the connection is healthy
+			pool.Put(client)
+			return nil, err
+		}
 		// Close connection on error
 		client.ForceCloseConn()
 		return nil, err
@@ -83,6 +90,11 @@ func (pool *Pool) XHdr(group string, header string, start, end int64) ([]HeaderL
 
 	result, err := client.XHdr(group, header, start, end)
 	if err != nil {
+		if errors.Is(err, ErrInvalidCommandArg) {
+			// refused before anything was written: the connection is healthy
+			pool.Put(client)
+			return nil, err
+		}
 		// Close connection on error
 		client.ForceCloseConn()
 		return nil, err
@@ -153,6 +165,11 @@ func (pool *Pool) GetArticle(messageID *string, bulkmode bool) (*models.Article,
 	}
 
 	article, err := client.GetArticle(messageID, bulkmode)
+	if errors.Is(err, ErrInvalidCommandArg) {
+		// refused before anything was written: the connection is healthy
+		pool.Put(client)
+		return nil, err
+	}
 	if err != nil || article == nil {
 		if err == ErrArticleNotFound || err == ErrArticleRemoved {
 			// <-- internal/nntp/nntp-client-commands.go:105
@@ -186,28 +203,48 @@ func (pool *Pool) SelectGroup(group string) (*GroupInfo, error) {
 	}
 
 	gi, code, err := client.SelectGroup(group)
-	if err != nil && (code != 411 && code != 480) {
-		// Close connection on unexpected any other error than "group not found"
+	switch {
+	case code == 411:
+		// group not found: the connection is healthy, put it back
+		pool.Put(client)
+		return nil, ErrNewsgroupNotFound
+	case code == 480:
+		// authentication required: this connection is no use, close it
+		client.ForceCloseConn()
+		return nil, ErrAuthRequired
+	case errors.Is(err, ErrInvalidCommandArg):
+		// group name refused before anything was written: the connection is healthy
+		pool.Put(client)
+		return nil, err
+	case err != nil:
+		// Close connection on any other error
 		client.ForceCloseConn()
 		return nil, err
 	}
 
-	// Put back connection (even for code 411 - group not found)
 	pool.Put(client)
-
-	switch code {
-	case 411, 480:
-		err = ErrNewsgroupNotFound // silence error
-	}
-
-	return gi, err
+	return gi, nil
 }
 
 const MODE_READER_MV int = 1
 const MODE_STREAM_MV int = 2
 
-// Get retrieves a connection from the pool or creates a new one
+// Get retrieves a connection from the pool or creates a new one.
 func (pool *Pool) Get(wantMode int) (*BackendConn, error) {
+	return pool.GetContext(context.Background(), wantMode)
+}
+
+// GetContext retrieves a connection from the pool or creates a new one. When
+// all slots are busy it waits for a returned connection until ctx is done or
+// Backend.PoolWaitTimeout (default DefaultPoolWaitTimeout, < 0: ctx only)
+// expires; one deadline covers all retries.
+func (pool *Pool) GetContext(ctx context.Context, wantMode int) (*BackendConn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	wait := pickDuration(pool.Backend.PoolWaitTimeout, DefaultPoolWaitTimeout)
+	deadline := time.Now().Add(wait) // computed once: shared by the goto newConn retries
+
 	pool.mux.RLock()
 	if pool.closed {
 		pool.mux.RUnlock()
@@ -232,7 +269,7 @@ func (pool *Pool) Get(wantMode int) (*BackendConn, error) {
 			if err := pconn.SwitchMode(MODE_READER_MV); err != nil {
 				pconn.mux.Unlock()
 				pool.closeConn(pconn, true)
-				log.Printf("[NNTP-POOL] Failed to switch mode: provider='%s': %v", pool.Backend.Provider.Name, err)
+				log.Printf("[NNTP-POOL] Failed to switch mode: provider='%s': %v", pool.Backend.providerLabel(), err)
 				time.Sleep(time.Second)
 				goto newConn
 			} else {
@@ -267,46 +304,56 @@ newConn:
 		pool.mux.Unlock()
 		pconn, err := pool.createConnection()
 		if err != nil {
-			if pconn != nil && pconn.conn != nil {
-				pconn.conn.Close()
-			}
-			pool.mux.Lock()
-			pool.activeConns--
-			pool.failedConns++
-			pool.mux.Unlock()
-			log.Printf("[NNTP-POOL] Failed to create new connection: provider='%s': %v", pool.Backend.Provider.Name, err)
+			// Connect closed its socket on every error path (abortConnect)
+			pool.failSlot()
+			log.Printf("[NNTP-POOL] Failed to create new connection: provider='%s': %v", pool.Backend.providerLabel(), err)
 			return nil, err
 		}
-		err = pconn.SwitchMode(wantMode)
-		if err != nil {
-			pool.mux.Lock()
-			pool.activeConns--
-			pool.failedConns++
-			pool.mux.Unlock()
-			if pconn.conn != nil {
-				pconn.conn.Close()
-			}
-			log.Printf("[NNTP-POOL] Failed to switch mode: provider='%s': %v", pool.Backend.Provider.Name, err)
-			return nil, err
-		}
-		pconn.UpdateLastUsed() // Mark as used since we're handing it out
+		// counted as created now, so a SwitchMode failure (closed below, totalClosed++)
+		// keeps created - closed == active
 		pool.mux.Lock()
 		pool.totalCreated++
 		pool.mux.Unlock()
+		err = pconn.SwitchMode(wantMode)
+		if err != nil {
+			pool.closeConn(pconn, true) // frees the slot
+			pool.mux.Lock()
+			pool.failedConns++
+			pool.mux.Unlock()
+			log.Printf("[NNTP-POOL] Failed to switch mode: provider='%s': %v", pool.Backend.providerLabel(), err)
+			return nil, err
+		}
+		pconn.UpdateLastUsed() // Mark as used since we're handing it out
 		return pconn, nil
 	}
 	pool.mux.Unlock()
 
 	// Wait for a connection to become available
+	var timeout <-chan time.Time // nil (blocks forever) when wait == 0: ctx only
+	var timer *time.Timer
+	if wait > 0 {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("timeout waiting for connection from pool after %v", wait)
+		}
+		timer = time.NewTimer(remaining)
+		timeout = timer.C
+	}
 	select {
-	case pconn := <-pool.connections:
+	case pconn, ok := <-pool.connections:
+		if timer != nil {
+			timer.Stop()
+		}
+		if !ok {
+			return nil, fmt.Errorf("connection pool is closed")
+		}
 		pconn.mux.Lock()
 		if pconn.ModeStream && wantMode == MODE_READER_MV {
 			if err := pconn.SwitchMode(MODE_READER_MV); err != nil {
 				pconn.mux.Unlock()
 				pool.closeConn(pconn, true)
 				time.Sleep(time.Second)
-				log.Printf("[NNTP-POOL] Failed to switch mode: provider='%s': %v", pool.Backend.Provider.Name, err)
+				log.Printf("[NNTP-POOL] Failed to switch mode: provider='%s': %v", pool.Backend.providerLabel(), err)
 				goto newConn
 			} else {
 				pconn.mux.Unlock()
@@ -327,10 +374,23 @@ newConn:
 		// Connection expired, close and create new one
 		pool.closeConn(pconn, true)
 		goto newConn
-	case <-time.After(30 * time.Second):
+	case <-timeout:
 		// Timeout waiting for a connection
-		return nil, fmt.Errorf("timeout waiting for connection from pool after 30s")
+		return nil, fmt.Errorf("timeout waiting for connection from pool after %v", wait)
+	case <-ctx.Done():
+		if timer != nil {
+			timer.Stop()
+		}
+		return nil, ctx.Err()
 	}
+}
+
+// failSlot releases the slot reserved for a connection that could not be created.
+func (pool *Pool) failSlot() {
+	pool.mux.Lock()
+	pool.activeConns--
+	pool.failedConns++
+	pool.mux.Unlock()
 }
 
 // Put returns a connection to the pool
@@ -339,7 +399,7 @@ func (pool *Pool) Put(conn *BackendConn) error {
 	// Check if connection should be closed
 	if conn != nil {
 		conn.mux.Lock()
-		if conn.forceClose || !conn.IsConnected() {
+		if conn.forceClose || conn.closing.Load() || !conn.IsConnected() {
 			forceClose = true
 		}
 		conn.mux.Unlock()
@@ -381,12 +441,11 @@ func (pool *Pool) closeConn(client *BackendConn, lock bool) error {
 		return nil
 	}
 
-	err := client.CloseFromPoolOnly()
-	if err != nil {
-		return fmt.Errorf("failed to close connection: %w", err)
-	}
+	// Only a real connected→closed transition frees a slot: a connection
+	// closed before (e.g. force-closed twice) must not be counted again.
+	closed := client.closeFromPool()
 	// Remove from active connections
-	if lock {
+	if lock && closed {
 		pool.mux.Lock()
 		pool.totalClosed++
 		pool.activeConns--
@@ -489,12 +548,12 @@ func (pool *Pool) isConnectionValid(client *BackendConn) bool {
 	client.mux.Lock()
 	defer client.mux.Unlock()
 
-	if client.forceClose || !client.IsConnected() {
+	if client.forceClose || client.closing.Load() || !client.IsConnected() {
 		return false
 	}
 
-	// Check if connection has been idle too long
-	if time.Since(client.lastUsed) > pool.idleTimeout {
+	// Check if connection has been idle too long (idleTimeout 0: never expires)
+	if pool.idleTimeout > 0 && time.Since(client.lastUsed) > pool.idleTimeout {
 		return false
 	}
 
@@ -562,7 +621,7 @@ func (pool *Pool) startCleanupWorker() {
 // cacheDir/<provider host>.list. cacheDir comes from the caller's -data root
 // (e.g. filepath.Join(dataDir, "cache")); WriteNewsgroupListToFile creates it.
 func (pool *Pool) FileCachedListNewsgroups(cacheDir string) ([]string, error) {
-	cacheFile := filepath.Join(cacheDir, fmt.Sprintf("%s.list", pool.Backend.Provider.Host))
+	cacheFile := filepath.Join(cacheDir, fmt.Sprintf("%s.list", pool.Backend.cacheHost()))
 	groups, err := LoadNewsgroupListFromFile(cacheFile)
 	if len(groups) > 0 && err == nil {
 		return groups, nil

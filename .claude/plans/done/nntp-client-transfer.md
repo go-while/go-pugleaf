@@ -164,7 +164,9 @@ Retired, not in this plan: A-nntp-client-5 (rejected in review), A-nntp-client-8
     `ListGroupsLimited`), the unused progress readers and nntp-transfer helpers. `-batch-db` stays accepted (used by
     `scripts/nntp-transfer-loop.sh`) and its help text says it has no effect.
 
-**Question for the user (decision 2):** relay verbatim where complete, fall back to `ReconstructHeaders` for
+**Question for the user (decision 2) — answered 2026-10-14 ("go"): the default (relay where complete, fallback for incomplete, skip unsafe) stands.**
+
+Original question: relay verbatim where complete, fall back to `ReconstructHeaders` for
 incomplete blocks, skip only unsafe ones (the default above); or relay strictly verbatim and skip every incomplete
 block (RFC 5537 §3.6 to the letter, but every web post and many legacy imports stop being fed); or keep
 `ReconstructHeaders` for everything (today's behaviour minus the CLI-1 bugs). The plan implements the default unless
@@ -1217,3 +1219,110 @@ later wave, fix the script and note it in `## Progress`.
 ## Progress
 
 (filled in by `/run-plan`)
+
+### Preflight (2026-10-12, orchestrator; base `testing-001` @ fa3a722, hardening d9de34e and intake acb56d5 merged)
+- Owned-file drift since 03d5ef7: only `internal/nntp/nntp-history-parse_test.go` (one comment line). All eight K6
+  anchors match: `nntp-client.go:211` (`ReadCodeLine(NNTPWelcomeCodeMin)`), `:346` (`xSetReadDeadline`),
+  `nntp-transfer-demuxer.go:185`, `nntp-client-commands.go:640` and `:877`, `headers.go:294`, the two
+  `_ "net/http/pprof"` imports (`cmd/nntp-transfer/main.go:12`, `cmd/history-rebuild/main.go:12`), `transfer-progress.go:360`.
+- Every K2 reserved name is free. `common.WireArticleSize` exists (`common/intake.go:434`): wave 2 uses it (no `articleWireBytes`).
+- `.github/copilot-instructions.md` mentions `test-nntp` (doc only; cli-tools may leave it, audit-delta-fixes owns docs).
+- Baseline on 306c1c2: gofmt baseline 2 files, vet (+`-tags e2e`) and build OK, 10 package sets green under `-race`
+  (`cmd/nntp-transfer` has no tests yet), known bugs = **RFC-1 T-nntp-article-1** (this plan must keep exactly that set),
+  `build_nntp-transfer.sh` and `build_history-rebuild.sh` OK (both now build without `-race`, so E14's note about a
+  `-race` transfer binary no longer applies; the race run of the new tests is the `go test -race` step instead).
+- Wave 0 is run as one reviewed implementer slice (`cli-fake`) instead of inline: ~600 lines of test code.
+
+### Wave 0 (2026-10-14; delegated to one implementer, reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| cli-fake (wave 0) | worktree-agent-a5b20e3f847b64b9f (fc8429d, 7f7e232) | merge after fixes: a `Hang` step now runs ReadDot/Delay/Reply first and only then drains (two later test specs say "reply …, then Hang"); peer self-limit 14 min (was 10; the script's `go test -timeout 15m` bounds it); `NoGreeting`+`Handler` runs the Handler without a greeting; accept loop retries on transient errors. Script byte-identical to the plan listing. Fake-server API otherwise as step 2 (per-connection `tls.Server`, RawStall drains, mismatch does not advance the step, `Lines()` excludes dot-block payload, `Raw()` is the TLS conn when TLS). Extra unexported helpers `cliFakeTextDial`, `cliFakeExpect`, `cliFakeWaitLines`, `cliE2E*` | a0f2617 |
+
+Baseline e2e (fc8429d, ports 21300–21305): `SUMMARY pass=4 fail=13 info=0` — PASS E09, E14, E15, E07 (vacuous: no progress rows because every run was killed by its 180 s timeout); FAIL E01 (CLI-4 stall after three CHECKs), E02 (30 s hang), E03/E04/E05/E06/E07b/E08 (not reached), E10/E11 (cmdline leaks the scratch peer password), E12 (`*:port`), E13 (rc 0), E16 (no shutdown line). Seeding: S01–S03 all 240 (the intake plan accepts the folded Newsgroups continuation).
+Checks on a0f2617: gofmt baseline 2 files, vet (+`-tags e2e`) and build OK, `TestCliFake*` green ×3 under `-race`, script `bash -n` OK; production code unchanged since the baseline run (full suite rerun after wave 1).
+
+### Wave 1 (2026-10-14; 2 implementers, each reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| cli-tools | worktree-agent-a38047fcb0b69ce88 (3aa6790) | merge; notes: `NewsgroupExists` keeps "any row exists" semantics (only caller `IgnoreNewsgroupProgress`, deleted in wave 3; cli-hygiene aligns its doc or the Outcome records it); upgrade effect: groups whose latest progress row has retry/tx/conn errors are re-offered once; `.github/copilot-instructions.md` still lists `test-nntp` (docs → audit-delta-fixes) | 2fd18de |
+| cli-conn | worktree-agent-a6190950eeb43f171 (315c618) | merge; 2 minors fixed inline by the orchestrator (`totalCreated++` before `SwitchMode` so created−closed==active; doc line on `PoolWaitTimeout < 0`); deviations accepted (`IdleExpire < 0` never expires, `PoolWaitTimeout < 0` waits on ctx only, timers stopped per branch, extra `backoff-after-close` subtest, `ForceCloseConn` with nil Pool closes directly). Reviewer reverted `abortConnect`, `syncPipeline` and the close guards and saw the right tests fail | a29e53c |
+
+Checks on the merged tree (+ inline fix commit): gofmt baseline 2 files, vet (+`-tags e2e`) and build OK, 10 package sets green under `-race`, `TestCli*` ×3 green, known bugs = RFC-1 T-nntp-article-1, four build scripts OK,
+e2e (ports 21219–21224) `SUMMARY pass=9 fail=8`: PASS E01 E02 E06 E07 E07b E08 E09 E14 E15; FAIL E03 E04 E05 (cli-commands: two Path lines with the identity thrice, reordered headers, final empty body line dropped), E10 E11 E12 E13 E16 (cli-transfer). No leftover processes.
+Note for wave 2 (from cli-conn): the line cap goes into `deadlineConn.Read` after `dc.Conn.Read(p)` (comment marker; add `run`/`maxLine` fields); `c.dconn` is the wrapper while connected; per-call deadlines override any deadline set directly on the socket, so delete the commented 10 s block in `GetArticle`; new command error paths must `ForceCloseConn` (idempotent) because a connection with a failed command must never reach `NewResponseDemuxer`.
+
+### Wave 2 (2026-10-14; 2 implementers, each reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| cli-transfer | worktree-agent-a971c416691eedcd1 (8ec5ca4, 89b0b7a, 830bd08) | merge after fixes. The slice found a pre-existing shutdown hang (SIGTERM now handled, but `processBatch` blocked forever on `WorkersCheckChannel <- job` and the e2e script orphaned the transfer behind GNU `timeout`): 89b0b7a selects on `common.ShutdownChan` at the CHECK-queue send and the CHECK→TAKETHIS hand-off, script kills the wrapper's child. Review MAJOR: with the demuxer/worker queues shrunk from 1 Mi to `StreamQueueDepth` (4224 at defaults) nothing bounded in-flight CHECKs, so a high-RTT peer could deadlock sender (holding `ConnMux`, blocked on a full `readCHECKResponsesChan`) ↔ CHECK reader (full `WorkersTTChannel`) ↔ TT worker (waiting for `ConnMux`); 830bd08 makes the CHECK sender wait, before taking `ConnMux`, until `cap-len(readCHECKResponsesChan) >= min(len(job.MessageIDs), cap)` (interruptible by errChan/shutdown, job requeued at the front), so in-flight CHECKs ≤ `DemuxerQueueDepth` and the demuxer can never block on CHECK responses. **Decision 16's "no new blocking" claim is replaced by this explicit bound.** Also: `transferNewsgroup` no longer waits on the collector during shutdown and writes no progress row once `WantShutdown()` (a row with uncounted shutdown errors would mark the group done under decision 14); `processRequeuedJobs` treats the shutdown error as a clean stop. Re-check of 830bd08: merge. Nits left: `pprof.Index` page still lists a `cmdline` link (404); a collector racing the shutdown may log a failed `InsertResult` | fd4576b |
+| cli-commands | worktree-agent-a68ca478f1c1cf1fc (fde30be, 7bce9c5) | merge after fixes. MAJOR: the relay replaced any stored Date that the strict `isRFCdate` rejected (valid RFC 5322 forms with a trailing comment, no weekday, no seconds, 2-digit year, `UT`), violating RFC 5537 §3.6 and even skipping the article when `DateSent` was zero; now replaced only when both `isRFCdate` and `net/mail.ParseDate` fail. Minors: empty computed Path → `Path: not-for-mail`; `ErrResponseLineTooLong` force-closes. Deviations accepted: TAKETHIS force-closes on write/flush failure; `pathHeader_inv1/2` keep `.TX` for the empty-path fallback (slice text); Opus trailer; `ReconstructHeaders` now rejects Message-IDs failing `ValidMessageID` (legacy ids without `@` are skipped). Note outside the slice: `Pool.XHdrStreamed` still drops the stream error, so `proc_DLArt.go` sees a cut-off stream as a normal channel close (unchanged behaviour; follow-up candidate) | 190fba5 |
+
+Checks on 190fba5: gofmt baseline 2 files, vet (+`-tags e2e`) and build OK, 10 package sets green under `-race`, `TestCli*`/`TestTxDbg*`/`TestHRPprof*` ×3 green, known bugs = RFC-1 T-nntp-article-1, the DefaultServeMux grep empty, four build scripts OK,
+e2e (ports 21219–21224) `SUMMARY pass=17 fail=0 info=0` (every E-check incl. E16 `exited=yes after 6s`), no leftover processes.
+
+### Wave 3 (2026-10-15; 1 implementer, reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| cli-hygiene | worktree-agent-acf5e08afa4b3ce34 (89cd966) | merge; 1 minor fixed inline by the orchestrator (`Pool.SelectGroup`/`XOver`/`XHdr` put a healthy connection back on `ErrInvalidCommandArg` instead of force-closing it, like `Pool.GetArticle`); deviations accepted (`processBatch` releases the offset slot when every id was dropped; nil ids not counted as skipped; extra tests `TestCliValAuthinfo`, `TestCliValPoolGetArticle`; Opus trailer). Notes: the TAKETHIS `validMessageIDArg` guard is redundant with RelayHeaders/ReconstructHeaders (not separately testable); `TransferResult` in transfer-progress.go is now unused; `authenticate`'s doc could mention `ErrInvalidCommandArg`; `grep 'TextConn.Cmd('` keeps two acceptable hits (`sendCmd` itself, a raw CHECK in `nntp-client-conn_test.go`) | 966bc47 |
+
+Checks on the final tree (966bc47 + inline pool fix): gofmt baseline 2 files, vet (+`-tags e2e`) and build OK, 10 package sets green under `-race`, `TestCli*`/`TestTxDbg*`/`TestHRPprof*` ×3 green, known bugs = RFC-1 T-nntp-article-1 (unchanged through the whole plan), dead-code grep empty, four build scripts OK,
+e2e (ports 21219–21224) `SUMMARY pass=17 fail=0 info=0`, no leftover processes.
+
+## Outcome
+
+- **Integration branch:** `plan-nntp-client-transfer` @ 29f6a7c (26 commits from `testing-001` @ fa3a722; 34 files, +5,271/−1,628 lines).
+  Not yet merged into `testing-001` (user decision). Nothing pushed by me (the user had pushed the plan branches as of 2026-10-14).
+- **Worktrees / branches** (left in place for the user to clean up):
+  - `/tank0/claude/trees/go-pugleaf/agent-a5b20e3f847b64b9f` — `worktree-agent-a5b20e3f847b64b9f` @ 7f7e232 (wave 0, cli-fake)
+  - `/tank0/claude/trees/go-pugleaf/agent-a38047fcb0b69ce88` — `worktree-agent-a38047fcb0b69ce88` @ 3aa6790 (cli-tools)
+  - `/tank0/claude/trees/go-pugleaf/agent-a6190950eeb43f171` — `worktree-agent-a6190950eeb43f171` @ 315c618 (cli-conn)
+  - `/tank0/claude/trees/go-pugleaf/agent-a971c416691eedcd1` — `worktree-agent-a971c416691eedcd1` @ 830bd08 (cli-transfer)
+  - `/tank0/claude/trees/go-pugleaf/agent-a68ca478f1c1cf1fc` — `worktree-agent-a68ca478f1c1cf1fc` @ 7bce9c5 (cli-commands)
+  - `/tank0/claude/trees/go-pugleaf/agent-acf5e08afa4b3ce34` — `worktree-agent-acf5e08afa4b3ce34` @ 89cd966 (cli-hygiene)
+- **Verification** (pugleaf-verifier on 0020635/29f6a7c, main checkout): gofmt baseline 2 files; vet (+`-tags e2e`) and build
+  clean; 10 package sets green under `-race` (114 s); `-count=3` flake run of the new client tests green; known bugs exactly
+  `RFC-1 T-nntp-article-1`; acceptance greps (no DefaultServeMux use, SIGTERM in both tools, dead names gone, deleted
+  files absent, old pool vars gone) all as expected; four build scripts OK; `scripts/test-nntp-client-transfer.sh` on
+  ports 21219–21224 → `SUMMARY pass=17 fail=0 info=0` (E01–E16 incl. E07b; `ss` present so E12 was real), no race/panic in
+  the transfer logs, every `.wire` file with one `Path: example.org!.POSTED!…` line and no `!.TX!`; manual probes: a real
+  transfer to a fresh fake peer (3 CHECK, 3 TAKETHIS, exit 0, UI 200 on 127.0.0.1 only, `cmdline` 404 on both ports,
+  pprof index 200 on localhost), `-test-conn` fails at once on a refused port and after 2 s on a silent listener,
+  history-rebuild refuses `-pprof 0.0.0.0:…` and accepts `:N`.
+- **Decisions taken during the run:** decision 2 default confirmed by the user (relay verbatim where complete, fall back to
+  `ReconstructHeaders` for incomplete blocks, skip unsafe ones). Decision 16's "no new blocking" claim is replaced by an
+  explicit bound: the CHECK sender waits for free space in `readCHECKResponsesChan` before taking `ConnMux`, so in-flight
+  CHECKs ≤ `DemuxerQueueDepth` (review found the smaller queues would otherwise deadlock sender/reader/TT worker on a
+  high-RTT peer). The relay replaces a stored Date only when both `isRFCdate` and `net/mail.ParseDate` reject it (RFC 5537
+  §3.6). The e2e peer's self-limit is 14 min. Wave 0 ran as a reviewed implementer slice.
+- **Behaviour changes to report:** client sockets have 2 min idle read/write timeouts (`BackendConfig.ReadTimeout`/
+  `WriteTimeout`, negative disables), connect/greeting/AUTHINFO/TLS handshake bounded by `ConnectTimeout`; auth failure
+  closes the socket before the back-off (`AuthFailureBackoff`); `IdleExpire`, `PoolWaitTimeout`, `Pool.GetContext`;
+  `ForceCloseConn` idempotent and safe without a pool; a 201 greeting and 281-after-USER are accepted, 480 on GROUP gives
+  `ErrAuthRequired`, 430/451 map to not-found/removed; response limits (1 MiB line, 64 MiB article, 512 MiB list; XHDR
+  stream bounded by the request) force-close on breach; invalid message-ids/group names/XHDR fields/AUTHINFO tokens are
+  refused before anything is written (`ErrInvalidCommandArg`), so the fetcher no longer downloads legacy ids without `@`
+  or over 250 octets; TAKETHIS sends one Path line (`<host>!…`, no `.TX`), the stored header block verbatim (Xref dropped,
+  Path replaced, `X-Goo*` dropped with the flag, unparseable Date repaired), dot-stuffed headers and byte-exact bodies
+  (final empty line kept); web posts and legacy rows without a complete block fall back to `ReconstructHeaders`; blocks
+  with duplicate mandatory fields, CR/LF/NUL or a wrong Message-ID are skipped and logged; `bytes` of newly parsed
+  articles is the CRLF wire size; a 411 inside a streamed XHDR is an error instead of a crash; nntp-transfer: pprof only on
+  `localhost:-pprof-port` without `/debug/pprof/cmdline`, UI on `-web-bind` (default 127.0.0.1) with timeouts, Redis keys
+  `pugleaf:tx:<host>:<port>:<id>` (old bare keys expire by TTL: one extra round of CHECKs), queues sized by
+  `StreamQueueDepth` (4224 at defaults, was 1 Mi) and the ~40 MiB chan pools replaced by `sync.Pool`s, a group counts as
+  done only when its latest progress row is clean (groups with 431/errors are re-offered once after the upgrade),
+  SIGTERM takes the SIGINT path in nntp-transfer and history-rebuild, a transfer stuck on a dead peer now shuts down
+  (previously hung forever), no progress row is written during a shutdown; history-rebuild `-pprof` is loopback-only;
+  `PeeringManager`, `cmd/test-nntp`, `ListGroupsLimited`, `GetRecentTransfers`, `transfer-progress-utils.go`,
+  `IgnoreNewsgroupProgress`, `matchesAnyPattern` removed; `-batch-db` accepted with no effect.
+- **Leftovers / known issues:** `[NNTP-POOL] WARNING: Pool closed with positive count 1 active connections remaining` at
+  the end of every nntp-transfer run (pre-existing message; the CHTT worker's connection is closed asynchronously after
+  `ClosePool`, counters `created 1, closed 0, active 1`; cosmetic, candidate for audit-delta-fixes); `Pool.XHdrStreamed`
+  drops the stream error so `proc_DLArt.go` sees a cut-off stream as a normal close; `TransferResult`,
+  `Batch.GroupQueues`/`GetOrCreateGroupBatch` unused; `NewsgroupExists` keeps "any row" semantics (no caller);
+  `pprof.Index` lists a `cmdline` link that 404s; `.github/copilot-instructions.md` mentions `cmd/test-nntp`; the TAKETHIS
+  `validMessageIDArg` guard is redundant with the relay checks; `pathHeader_inv1/2` keep `.TX` for the empty-path
+  fallback; the plan's E14 note about a `-race` transfer binary is void (build scripts no longer use `-race`). Gitignored
+  leftovers: `build/`, `./data-test-nntp-client-transfer`.
+- **Out of scope (as planned):** in-run requeue of 431, passwords from env/file, UI authentication, INT-5 article-number
+  reuse, A-tools-3 fetcher half, OPS-4 `-useshorthashlen`, `-rewrite-headers`, rewriting `bytes` of existing rows.
+- **Next:** `/run-plan nntp-rfc-commands`, then `audit-delta-fixes`.

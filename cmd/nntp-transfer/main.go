@@ -3,13 +3,15 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
-	_ "net/http/pprof" // Memory profiling
 	"os"
 	"os/signal"
 	"runtime"
@@ -20,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
@@ -33,7 +36,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-var dbBatchSize int64 = 1000 // Load 1000 articles from DB at a time
 var VERBOSE bool
 
 // showUsageExamples displays usage examples for NNTP transfer
@@ -80,13 +82,15 @@ func showUsageExamples() {
 	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.test -redis-cache=true -redis-ttl 86400")
 	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.test -redis-clear-cache")
 	fmt.Println("  # Use -redis-clear-cache to start fresh (clears all cached message IDs)")
+	fmt.Println("  # Keys are scoped per target: pugleaf:tx:<host>:<port>:<message-id>, so several targets can share one Redis DB")
 	fmt.Println()
 	fmt.Println("Memory Profiling & Monitoring:")
 	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.* -mem-stats")
 	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.* -pprof-port 6060")
 	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.* -gc-percent 50")
 	fmt.Println("  # -mem-stats: Log memory stats every 30 seconds")
-	fmt.Println("  # -pprof-port: Enable pprof at http://localhost:6060/debug/pprof/")
+	fmt.Println("  # -pprof-port: Enable pprof at http://localhost:6060/debug/pprof/ (localhost only; /debug/pprof/cmdline is disabled)")
+	fmt.Println("  # -web-port 8080 [-web-bind 127.0.0.1]: results UI, loopback by default")
 	fmt.Println("  # -gc-percent: Lower values = more GC, less memory (default 100)")
 	fmt.Println("  # Get heap profile: curl http://localhost:6060/debug/pprof/heap > heap.prof")
 	fmt.Println("  # Analyze: go tool pprof heap.prof")
@@ -100,6 +104,23 @@ func showUsageExamples() {
 var appVersion = "-unset-"
 
 var redisCtx = context.Background()
+
+// redisKeyPrefix scopes every Redis key of this run to the target host and port
+// (see buildRedisKeyPrefix). It is set once in main right after flag parsing.
+var redisKeyPrefix string
+
+// buildRedisKeyPrefix returns the Redis key prefix for transfers to host:port,
+// "pugleaf:tx:<host>:<port>:", so transfers to different peers sharing one
+// Redis DB do not skip each other's articles.
+func buildRedisKeyPrefix(host string, port int) string {
+	return "pugleaf:tx:" + host + ":" + strconv.Itoa(port) + ":"
+}
+
+// redisKey returns the Redis key of a message-id for the current target.
+func redisKey(msgID string) string {
+	return redisKeyPrefix + msgID
+}
+
 var REDIS_TTL time.Duration = 3600 * time.Second // default 1h
 var MaxQueuedJobs int = 8
 var BatchCheck int64
@@ -158,14 +179,14 @@ func main() {
 
 		// Transfer configuration
 		batchCheck      = flag.Int64("batch-check", 100, "Number of message IDs/articles to send in streamed CHECK/TAKETHIS")
-		batchDB         = flag.Int64("batch-db", 1000, "Fetch N articles from DB in a batch")
+		batchDB         = flag.Int64("batch-db", 1000, "No effect (accepted for compatibility)")
 		maxThreads      = flag.Int("max-threads", 1, "Transfer N newsgroups in concurrent threads. Each thread uses 1 connection.")
-		redisCache      = flag.Bool("redis-cache", true, "Use Redis caching for message IDs")
+		redisCache      = flag.Bool("redis-cache", true, "Use Redis caching for message IDs (keys are scoped per target: pugleaf:tx:<host>:<port>:<message-id>)")
 		redisAddr       = flag.String("redis-addr", "localhost:6379", "Redis server address")
 		redisPass       = flag.String("redis-pass", "", "Redis server password")
 		redisTTL        = flag.Uint("redis-ttl", 3600, "Redis cache TTL in seconds (default: 3600 = 1 hour)")
 		redisDB         = flag.Int("redis-db", 0, "Redis database number")
-		redisClearCache = flag.Bool("redis-flushdb", false, " Warning! THIS DELETES ALL CACHED DATA on startup by executing FlushDB which flushes ALL keys in the selected Redis DB!")
+		redisClearCache = flag.Bool("redis-flushdb", false, " Warning! THIS DELETES ALL CACHED DATA on startup by executing FlushDB which flushes ALL keys in the selected Redis DB, including other targets' transfer keys!")
 
 		// Operation options
 		dryRun   = flag.Bool("dry-run", false, "Show what would be transferred without actually sending")
@@ -195,11 +216,13 @@ func main() {
 
 		// Web server and profiling options
 		webPort   = flag.Int("web-port", 0, "Enable web server on this port to view results (e.g. 8080, default: disabled)")
-		pprofPort = flag.Int("pprof-port", 0, "Enable pprof profiling server on this port (e.g., 6060). Access at http://localhost:PORT/debug/pprof/")
+		webBind   = flag.String("web-bind", "127.0.0.1", "Address the -web-port UI listens on (use 0.0.0.0 to expose it)")
+		pprofPort = flag.Int("pprof-port", 0, "Enable pprof profiling server on this port (e.g., 6060), localhost only; /debug/pprof/cmdline is disabled. Access at http://localhost:PORT/debug/pprof/")
 		memStats  = flag.Bool("mem-stats", false, "Log memory statistics every 30 seconds")
 		gcPercent = flag.Int("gc-percent", 50, "Set GOGC percentage (default 100). Lower values = more frequent GC, less memory")
 	)
 	flag.Parse()
+	redisKeyPrefix = buildRedisKeyPrefix(*host, *port)
 	common.IgnoreGoogleHeaders = *ignoreGoogleHeaders
 	CHECK_FIRST = *checkFirst
 	ServerHostName = *host
@@ -227,12 +250,13 @@ func main() {
 		log.Fatalf("Error: batch-check must be between 1 and 100000 (got %d)", *batchCheck)
 	}
 	BatchCheck = *batchCheck
+	nntp.DemuxerQueueDepth = nntp.StreamQueueDepth(BatchCheck, MaxQueuedJobs)
 
 	// Validate batch size
 	if *batchDB < 100 {
 		*batchDB = 100
 	}
-	dbBatchSize = *batchDB
+	_ = batchDB // -batch-db has no effect (kept for scripts/nntp-transfer-loop.sh)
 
 	// Validate thread count
 	if *maxThreads < 1 || *maxThreads > 500 {
@@ -344,7 +368,7 @@ func main() {
 
 	// Set up cross-platform signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt) // Cross-platform (Ctrl+C on both Windows and Linux)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM) // Ctrl+C, and SIGTERM (systemd stop, kill) takes the same path
 
 	// Get UseShortHashLen from database (with safety check)
 	storedUseShortHashLen, isLocked, err := db.GetHistoryUseShortHashLen(*useShortHashLen)
@@ -535,23 +559,32 @@ func main() {
 		transferDoneChan <- result
 	}(&wgP, redisCli)
 
-	// Start web server if port is specified
+	// Start web server if port is specified (private mux, -web-bind, default loopback)
+	var uiSrv *http.Server
 	if *webPort > 0 {
-		go startWebServer(*webPort)
+		uiSrv = newUIServer(net.JoinHostPort(*webBind, strconv.Itoa(*webPort)))
+		go func(srv *http.Server) {
+			log.Printf("[TRANSFER] web UI on http://%s/", srv.Addr)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("[TRANSFER] web UI server error: %v", err)
+			}
+		}(uiSrv)
 	}
 
-	// Start pprof server if port is specified
+	// Start pprof server if port is specified (localhost only, no /debug/pprof/cmdline)
+	var pprofSrv *http.Server
 	if *pprofPort > 0 {
-		go func() {
-			addr := fmt.Sprintf("localhost:%d", *pprofPort)
-			log.Printf("Starting pprof server on http://%s/debug/pprof/", addr)
-			log.Printf("  Heap profile: http://%s/debug/pprof/heap", addr)
-			log.Printf("  Goroutines:   http://%s/debug/pprof/goroutine", addr)
-			log.Printf("  Allocs:       http://%s/debug/pprof/allocs", addr)
-			if err := http.ListenAndServe(addr, nil); err != nil {
-				log.Printf("pprof server error: %v", err)
+		pprofSrv = newPprofServer(fmt.Sprintf("localhost:%d", *pprofPort))
+		go func(srv *http.Server) {
+			addr := srv.Addr
+			log.Printf("[TRANSFER] Starting pprof server on http://%s/debug/pprof/", addr)
+			log.Printf("[TRANSFER]   Heap profile: http://%s/debug/pprof/heap", addr)
+			log.Printf("[TRANSFER]   Goroutines:   http://%s/debug/pprof/goroutine", addr)
+			log.Printf("[TRANSFER]   Allocs:       http://%s/debug/pprof/allocs", addr)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("[TRANSFER] pprof server error: %v", err)
 			}
-		}()
+		}(pprofSrv)
 	}
 
 	// Start memory stats monitoring if enabled
@@ -572,6 +605,16 @@ func main() {
 		}
 	}
 	wgP.Wait()
+	for _, srv := range []*http.Server{uiSrv, pprofSrv} {
+		if srv == nil {
+			continue
+		}
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("[TRANSFER] HTTP server %s shutdown: %v", srv.Addr, err)
+		}
+		cancelShutdown()
+	}
 	pool.ClosePool()
 	// Signal background tasks to stop
 	close(db.StopChan)
@@ -964,20 +1007,6 @@ func getNewsgroupsToTransfer(db *database.Database, progressDB *nntp.TransferPro
 	return newsgroups, nil
 }
 
-func IgnoreNewsgroupProgress(ng *models.Newsgroup, progressDB *nntp.TransferProgressDB, startTime, endTime *time.Time) bool {
-	if progressDB != nil {
-		exists, err := progressDB.NewsgroupExists(ng.Name, startTime, endTime)
-		if err != nil {
-			log.Printf("Warning: Failed to check if newsgroup %s exists in progress DB: %v", ng.Name, err)
-			return true
-		} else if exists {
-			//log.Printf("Skipping newsgroup %s - already has transfer results for this remote", ng.Name)
-			return true
-		}
-	}
-	return false
-}
-
 // matchesExcludePrefix checks if a newsgroup name matches any of the exclude prefixes
 func matchesExcludePrefix(ngName string, excludePrefixes []string) bool {
 	for _, excludePrefix := range excludePrefixes {
@@ -1080,16 +1109,6 @@ func matchesPattern(newsgroup, pattern string) bool {
 
 	// Exact match
 	return newsgroup == pattern
-}
-
-// matchesAnyPattern checks if a newsgroup name matches any of the given patterns
-func matchesAnyPattern(newsgroup string, patterns []string) bool {
-	for _, pattern := range patterns {
-		if matchesPattern(newsgroup, pattern) {
-			return true
-		}
-	}
-	return false
 }
 
 // matchesAnyWildcardPattern checks if a newsgroup name matches any wildcard patterns (skips exact matches)
@@ -1201,11 +1220,15 @@ func processRequeuedJobs(newsgroup string, ttMode *nntp.TakeThisMode, ttResponse
 		// pass articles to CHECK or TAKETHIS queue (async!)
 		responseChan, err := processBatch(ttMode, job.MessageIDs, redisCli, job.OffsetStart, job.OffsetQ, job.NGTProgress)
 		if err != nil {
-			log.Printf("Newsgroup: '%s' | Error processing requeued batch: %v", newsgroup, err)
 			jobRequeueMutex.Lock()
 			// insert remaining jobs back to slot 0
 			jobRequeue[ttMode.Newsgroup] = slices.Insert(jobRequeue[ttMode.Newsgroup], 0, queuedJobs[i:]...)
 			jobRequeueMutex.Unlock()
+			if common.WantShutdown() {
+				log.Printf("WantShutdown while processing requeued jobs for '%s': %v", newsgroup, err)
+				return i, nil
+			}
+			log.Printf("Newsgroup: '%s' | Error processing requeued batch: %v", newsgroup, err)
 			return i, fmt.Errorf("error processing requeued batch for newsgroup '%s': %v", newsgroup, err)
 		}
 		if responseChan != nil {
@@ -1448,8 +1471,11 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		delete(rejectedArticles, ng.Name) // free memory
 		nntp.ResultsMutex.Unlock()
 
-		// Insert result into progress database
-		if transferProgressDB != nil {
+		// Insert result into progress database. Not after a shutdown: jobs may have been answered
+		// without being transferred, and a row without errors marks the group as done (NC-2).
+		if transferProgressDB != nil && common.WantShutdown() {
+			log.Printf("Newsgroup: '%s' | WantShutdown: not recording a progress row for this run", ng.Name)
+		} else if transferProgressDB != nil {
 			if err := transferProgressDB.InsertResult(
 				ng.Name,
 				startTime,
@@ -1520,6 +1546,10 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 		*/
 		// pass articles to CHECK or TAKETHIS queue (async!)
 		responseChan, err := processBatch(ttMode, messageIDs, redisCli, dbOffset, OffsetQueue, ngtprogress)
+		if err != nil && common.WantShutdown() {
+			log.Printf("WantShutdown in newsgroup: '%s' (processed %d): %v", ng.Name, processed, err)
+			return nil
+		}
 		if err != nil {
 			log.Printf("Newsgroup: '%s' | Error processing batch offset %d: %v", ng.Name, dbOffset, err)
 			return fmt.Errorf("error processing batch offset %d for newsgroup '%s': %v", dbOffset, ng.Name, err)
@@ -1570,8 +1600,20 @@ func transferNewsgroup(db *database.Database, ng *models.Newsgroup, batchCheck i
 
 	//log.Printf("Newsgroup: '%s' | ttResponses channel closed, waiting for collector to finish...", ng.Name)
 
-	// Wait for collector goroutine to finish processing all responses
-	collectorWG.Wait()
+	// Wait for collector goroutine to finish processing all responses. On shutdown, jobs with
+	// outstanding CHECK/TAKETHIS answers may never be answered, so do not wait for them then
+	// (the collector does not record a progress row after a shutdown, see above).
+	collectorDone := make(chan struct{})
+	go func() {
+		collectorWG.Wait()
+		close(collectorDone)
+	}()
+	select {
+	case <-collectorDone:
+	case <-common.ShutdownChan:
+		log.Printf("WantShutdown in newsgroup: '%s' while waiting for outstanding responses", ng.Name)
+		return nil
+	}
 
 	log.Printf("Newsgroup: '%s' | All jobs completed and responses collected", ng.Name)
 	deassignWorker(ng.Name)
@@ -1590,6 +1632,43 @@ func processBatch(ttMode *nntp.TakeThisMode, messageIDs []*string, redisCli *red
 	if len(messageIDs) == 0 {
 		log.Printf("Newsgroup: '%s' | processBatch: no articles in this batch", *ttMode.Newsgroup)
 		return nil, nil
+	}
+
+	// Drop nil and invalid message-ids before the job is built: they never reach
+	// CHECK/TAKETHIS (decision 12). The caller's slice is not modified.
+	invalid := 0
+	for _, id := range messageIDs {
+		if id == nil || !common.ValidMessageID(*id) {
+			invalid++
+		}
+	}
+	if invalid > 0 {
+		valid := make([]*string, 0, len(messageIDs)-invalid)
+		skipped := 0
+		for _, id := range messageIDs {
+			if id == nil {
+				continue
+			}
+			if !common.ValidMessageID(*id) {
+				skipped++
+				continue
+			}
+			valid = append(valid, id)
+		}
+		if skipped > 0 {
+			log.Printf("Newsgroup: '%s' | processBatch: skipped %d invalid message-ids at offset %d", *ttMode.Newsgroup, skipped, dbOffset)
+			if ngtprogress != nil {
+				ngtprogress.Increment(nntp.IncrFLAG_SKIPPED, uint64(skipped))
+			}
+		}
+		messageIDs = valid
+		if len(messageIDs) == 0 {
+			// no job is built: release the slot the caller reserved with OffsetQueue.Add(1)
+			if offsetQ != nil {
+				offsetQ.OffsetBatchDone()
+			}
+			return nil, nil
+		}
 	}
 
 	// Update newsgroup progress with current offset
@@ -1626,7 +1705,7 @@ func processBatch(ttMode *nntp.TakeThisMode, messageIDs []*string, redisCli *red
 			if msgid == nil {
 				continue
 			}
-			cmds[i] = pipe.Exists(redisCtx, *msgid)
+			cmds[i] = pipe.Exists(redisCtx, redisKey(*msgid))
 			redis2Check++
 		}
 
@@ -1705,7 +1784,13 @@ func processBatch(ttMode *nntp.TakeThisMode, messageIDs []*string, redisCli *red
 	QueuesMutex.RUnlock()
 
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queueing job #%d with %d msgIDs to worker %d. CheckQ=%d", *ttMode.Newsgroup, workerID, job.JobID, len(job.MessageIDs), workerID, len(CheckQueues[workerID]))
-	WorkersCheckChannel <- job // checkQueue <- job // goto: job := <-WorkersCheckChannel
+	// goto: job := <-WorkersCheckChannel. On shutdown the workers may be gone, so never block forever here.
+	select {
+	case WorkersCheckChannel <- job:
+	case <-common.ShutdownChan:
+		log.Printf("Newsgroup: '%s' | WantShutdown: batch job #%d with %d message IDs not queued", *ttMode.Newsgroup, job.JobID, len(job.MessageIDs))
+		return nil, fmt.Errorf("shutdown: batch job #%d not queued", job.JobID)
+	}
 	//log.Printf("Newsgroup: '%s' | CheckWorker (%d) queued Job #%d", *ttMode.Newsgroup, workerID, job.JobID)
 	return job.GetResponseChan(), nil
 } // end func processBatch
@@ -1730,7 +1815,7 @@ func sendArticlesBatchViaTakeThis(conn *nntp.BackendConn, articles []*models.Art
 			if article == nil {
 				continue
 			}
-			cmds[i] = pipe.Exists(redisCtx, article.MessageID)
+			cmds[i] = pipe.Exists(redisCtx, redisKey(article.MessageID))
 			//redis2Check++
 		}
 
@@ -2182,8 +2267,8 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 	var workerWG sync.WaitGroup
 	TTworkerRequestChan := make(chan struct{}, 1)
 	TTworkerReleaseChan := make(chan struct{}, 1)
-	readCHECKResponsesChan := make(chan *nntp.ReadRequest, 1024*1024)
-	readTAKETHISResponsesChan := make(chan *nntp.ReadRequest, 1024*1024)
+	readCHECKResponsesChan := make(chan *nntp.ReadRequest, nntp.DemuxerQueueDepth)
+	readTAKETHISResponsesChan := make(chan *nntp.ReadRequest, nntp.DemuxerQueueDepth)
 	errChan := make(chan struct{}, 9)
 
 	QueuesMutex.RLock()
@@ -2313,6 +2398,29 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 						return
 					}
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquire connection lock for batch (offset %d: %d-%d) (%d messages)", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd, len(currentJob.MessageIDs))
+					// Bound the CHECKs in flight. SendCheckMultiple pushes one ReadRequest per message-id
+					// into readCHECKResponsesChan while rs.ConnMux is held. Only this goroutine pushes to
+					// that channel, so its free space can only grow while we wait here. Once the whole
+					// job fits, none of those pushes can block with ConnMux held (which would deadlock:
+					// this sender holding ConnMux, the CHECK reader blocked on a full WorkersTTChannel,
+					// the TAKETHIS worker waiting for ConnMux). It also keeps the CHECKs in flight
+					// <= cap(readCHECKResponsesChan) = nntp.DemuxerQueueDepth, so the demuxer never
+					// blocks on CHECK responses. The wait is interruptible by errChan and shutdown.
+					need := min(len(currentJob.MessageIDs), cap(readCHECKResponsesChan))
+					for cap(readCHECKResponsesChan)-len(readCHECKResponsesChan) < need {
+						select {
+						case <-errChan:
+							common.SignalErrChan(errChan)
+						case <-common.ShutdownChan:
+						case <-time.After(time.Millisecond * 16):
+							continue
+						}
+						rs.Mux.Lock()
+						rs.jobs = append([]*nntp.CHTTJob{currentJob}, rs.jobs...) // requeue at front
+						rs.Mux.Unlock()
+						log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d errChan/shutdown while waiting for CHECK queue space, exiting", *currentJob.Newsgroup, workerID, currentJob.JobID)
+						return
+					}
 					rs.ConnMux.Lock()
 					//log.Printf("Newsgroup: '%s' | CheckWorker (%d): job #%d acquired connection lock for batch (offset %d: %d-%d) -> SendCheckMultiple", *currentJob.Newsgroup, workerID, currentJob.JobID, currentJob.OffsetStart, currentJob.BatchStart, currentJob.BatchEnd)
 					checksSent, err := conn.SendCheckMultiple(currentJob.MessageIDs, readCHECKResponsesChan, currentJob, demuxer)
@@ -2505,7 +2613,7 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 					job.NGTProgress.Increment(nntp.IncrFLAG_UNWANTED, 1)
 					// Cache unwanted in Redis if enabled
 					if rs.redisCli != nil {
-						if err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err(); err != nil && VERBOSE {
+						if err := rs.redisCli.Set(redisCtx, redisKey(*rr.MsgID), "1", REDIS_TTL).Err(); err != nil && VERBOSE {
 							log.Printf("Newsgroup: '%s' | Failed to cache rejected message ID in Redis: %v", *rr.Job.Newsgroup, err)
 						}
 					}
@@ -2515,7 +2623,7 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 					job.NGTProgress.Increment(nntp.IncrFLAG_RETRY, 1)
 					/* disabled caching of retries in Redis for now
 					if rs.redisCli != nil {
-						if err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err(); err != nil && VERBOSE {
+						if err := rs.redisCli.Set(redisCtx, redisKey(*rr.MsgID), "1", REDIS_TTL).Err(); err != nil && VERBOSE {
 							log.Printf("Newsgroup: '%s' | Failed to cache retry message ID in Redis: %v", *rr.Job.Newsgroup, err)
 						}
 					}
@@ -2546,7 +2654,13 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 					if len(job.WantedIDs) > 0 {
 						// Pass job to TAKETHIS worker via channel
 						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5 job #%d got all %d CHECK responses, passing to TAKETHIS worker (wanted: %d articles) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, queuedCount, len(job.WantedIDs), len(WorkersTTChannel))
-						WorkersTTChannel <- job // local takethis chan sharing the same connection
+						// local takethis chan sharing the same connection; on shutdown the TAKETHIS worker
+						// may be gone, so answer the job instead of blocking forever
+						select {
+						case WorkersTTChannel <- job:
+						case <-common.ShutdownChan:
+							job.Response(true, fmt.Errorf("shutdown: job #%d not passed to TAKETHIS worker", job.JobID))
+						}
 						//log.Printf("Newsgroup: '%s' | CheckWorker (%d): DEBUG5c Sent job #%d to TAKETHIS worker (wanted: %d/%d) takeThisChan=%d", *job.Newsgroup, workerID, job.JobID, len(job.WantedIDs), queuedCount, len(WorkersTTChannel))
 
 					} else {
@@ -2645,7 +2759,7 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_TRANSFERRED, 1)
 					// Cache transferred in Redis if enabled
 					if rs.redisCli != nil {
-						if err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err(); err != nil && VERBOSE {
+						if err := rs.redisCli.Set(redisCtx, redisKey(*rr.MsgID), "1", REDIS_TTL).Err(); err != nil && VERBOSE {
 							log.Printf("Newsgroup: '%s' | Failed to cache transferred message ID in Redis: %v", *rr.Job.Newsgroup, err)
 						}
 					}
@@ -2654,7 +2768,7 @@ func CHTTWorker(db *database.Database, workerID int, conn *nntp.BackendConn, rs 
 					rr.Job.NGTProgress.Increment(nntp.IncrFLAG_REJECTED, 1)
 					// Cache rejection in Redis if enabled
 					if rs.redisCli != nil {
-						if err := rs.redisCli.Set(redisCtx, *rr.MsgID, "1", REDIS_TTL).Err(); err != nil && VERBOSE {
+						if err := rs.redisCli.Set(redisCtx, redisKey(*rr.MsgID), "1", REDIS_TTL).Err(); err != nil && VERBOSE {
 							log.Printf("Newsgroup: '%s' | Failed to cache rejected message ID in Redis: %v", *rr.Job.Newsgroup, err)
 						}
 					}
@@ -2931,19 +3045,25 @@ func monitorMemoryStats() {
 	}
 }
 
-// startWebServer starts a simple HTTP server to display transfer results
-func startWebServer(port int) {
-	http.HandleFunc("/", handleIndex)
-	http.HandleFunc("/results", handleResults)
-	addr := fmt.Sprintf(":%d", port)
-	log.Printf("Starting web server on http://ANY_ADDR:%s", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Printf("Web server error: %v", err)
+// handleIndex serves the main page with transfer results. The page is rendered
+// into a buffer under ResultsMutex (renderIndex) and written with no lock held,
+// so a slow client cannot stall the transfer's result updates.
+func handleIndex(w http.ResponseWriter, r *http.Request) {
+	page, err := renderIndex()
+	if err != nil {
+		log.Printf("[TRANSFER] web UI: render index: %v", err)
+		http.Error(w, "Template error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if _, err := w.Write(page); err != nil && VERBOSE {
+		log.Printf("[TRANSFER] web UI: write index: %v", err)
 	}
 }
 
-// handleIndex serves the main page with transfer results
-func handleIndex(w http.ResponseWriter, r *http.Request) {
+// renderIndex collects the transfer results and executes the index template into
+// a buffer, holding nntp.ResultsMutex (read) only while doing so.
+func renderIndex() ([]byte, error) {
 	nntp.ResultsMutex.RLock()
 	defer nntp.ResultsMutex.RUnlock()
 
@@ -3254,8 +3374,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		"multiply": func(a float64, b int) int { return int(a * float64(b)) },
 	}).Parse(htmlTemplate)
 	if err != nil {
-		http.Error(w, "Template error", http.StatusInternalServerError)
-		return
+		return nil, err
 	}
 
 	// Calculate started and finished counts and collect progress details
@@ -3407,25 +3526,28 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		LiveTT:                        liveTT,
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := tmpl.Execute(w, data); err != nil {
-		log.Printf("Template execution error: %v", err)
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return nil, fmt.Errorf("template execution: %w", err)
 	}
+	return buf.Bytes(), nil
 }
 
-// handleResults serves the results page as plain text
+// handleResults serves the results page as plain text. The results are copied
+// under nntp.ResultsMutex and written after it is released.
 func handleResults(w http.ResponseWriter, r *http.Request) {
 	nntp.ResultsMutex.RLock()
-	defer nntp.ResultsMutex.RUnlock()
+	snapshot := slices.Clone(results)
+	nntp.ResultsMutex.RUnlock()
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
-	if len(results) == 0 {
+	if len(snapshot) == 0 {
 		fmt.Fprintln(w, "No transfer results yet. Waiting for transfers to complete...")
 		return
 	}
 
-	for _, result := range results {
+	for _, result := range snapshot {
 		fmt.Fprintln(w, result)
 	}
 }
