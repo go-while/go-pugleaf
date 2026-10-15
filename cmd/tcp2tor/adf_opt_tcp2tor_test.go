@@ -487,7 +487,7 @@ func TestAdfOptTorIdleOneWayTraffic(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer func() { _ = c.Close() }()
-	_ = c.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_ = c.SetReadDeadline(time.Now().Add(30 * time.Second)) // hang guard: 10x the ~3 s stream
 	got, err := io.ReadAll(c)
 	if err != nil {
 		t.Fatalf("read: %v", err)
@@ -531,7 +531,7 @@ func TestAdfOptTorHalfCloseLongReply(t *testing.T) {
 	if err := c.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatalf("CloseWrite: %v", err)
 	}
-	_ = c.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_ = c.SetReadDeadline(time.Now().Add(30 * time.Second)) // hang guard: 10x the ~3 s stream
 	got, err := io.ReadAll(c)
 	if err != nil {
 		t.Fatalf("read reply: %v (got %d bytes)", err, len(got))

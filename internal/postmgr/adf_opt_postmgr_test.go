@@ -70,6 +70,10 @@ func adfOptGroup(t *testing.T, name string, active bool) int64 {
 		if _, err := database.RetryableExec(adfOptDB.GetMainDB(), "DELETE FROM post_queue WHERE newsgroup_id = ?", id); err != nil {
 			t.Errorf("cleanup post_queue of %s: %v", name, err)
 		}
+		// Remove the group row too, so the test binary can run with -count>1 (TestMain shares one DB).
+		if _, err := database.RetryableExec(adfOptDB.GetMainDB(), "DELETE FROM newsgroups WHERE id = ?", id); err != nil {
+			t.Errorf("cleanup newsgroup %s: %v", name, err)
+		}
 	})
 	return id
 }
