@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -79,7 +80,8 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 //     (also when it was hidden or expired since it became current).
 //   - "<message-id>": the current group first, then local430, then (with a processor) the
 //     history lookup re-checked by visibleInOtherGroup; a miss is 430. The current article
-//     is never changed. Without a processor only the current group is searched.
+//     is never changed. Without a processor only the current group is searched. For stat
+//     the group databases are read for the article number only (no headers, no body).
 //   - number: 412 without a group; not 1..19 digits or above math.MaxInt64 → 501; <= 0 or
 //     no visible article → 423. A hit sets the current article to the number (BUG-1).
 //
@@ -106,7 +108,7 @@ func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article 
 			if gerr != nil {
 				log.Printf("[NNTP] %s: group DB %s: %v", messageID, c.currentGroup, gerr)
 			} else {
-				a, aerr := c.server.DB.NNTPArticleByMessageID(groupDB, messageID)
+				a, aerr := c.articleByMessageID(groupDB, messageID, stat)
 				groupDB.Return()
 				if aerr == nil {
 					return a, a.DBArtNum, true, nil
@@ -135,7 +137,7 @@ func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article 
 			c.rateLimitOnError()
 			return nil, 0, false, c.sendResponse(430, "No article with that message-id")
 		}
-		visible, vok, verr := c.visibleInOtherGroup(found)
+		visible, vok, verr := c.visibleInOtherGroup(found, stat)
 		if verr != nil {
 			log.Printf("[NNTP] re-read of %s failed: %v", messageID, verr)
 			return nil, 0, false, c.sendResponse(403, "Internal fault")
@@ -202,16 +204,29 @@ func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article 
 	return article, num, true, nil
 }
 
+// articleByMessageID reads the visible article with messageID from groupDB: the whole row,
+// or for stat only its number (the returned article then carries DBArtNum and MessageID).
+func (c *ClientConnection) articleByMessageID(groupDB *database.GroupDB, messageID string, stat bool) (*models.Article, error) {
+	if !stat {
+		return c.server.DB.NNTPArticleByMessageID(groupDB, messageID)
+	}
+	num, err := c.server.DB.NNTPArticleNumByMessageID(groupDB, messageID)
+	if err != nil {
+		return nil, err
+	}
+	return &models.Article{DBArtNum: num, MessageID: messageID}, nil
+}
+
 // visibleInOtherGroup re-reads an article that the processor found through the history
 // index with the hide = 0 filter, in its first group (*article.NewsgroupsPtr[0]), and
-// returns that fresh copy; ok is false when it is absent or hidden there. An article
-// without group information (a processor that does not set NewsgroupsPtr) cannot be
-// re-read and is served as found unless its Hide counter is set.
+// returns that fresh copy (for stat only its number and message-id); ok is false when it is
+// absent or hidden there. An article without group information (a processor that does not
+// set NewsgroupsPtr) cannot be re-read and is served as found unless its Hide counter is set.
 //
 // Known limitation: hide is per group DB, and the processor returns only the first group
 // that has the message-id, so a crosspost that is hidden in that group but visible in
 // another one answers 430 instead of being served from the other group.
-func (c *ClientConnection) visibleInOtherGroup(article *models.Article) (visible *models.Article, ok bool, err error) {
+func (c *ClientConnection) visibleInOtherGroup(article *models.Article, stat bool) (visible *models.Article, ok bool, err error) {
 	if len(article.NewsgroupsPtr) == 0 || article.NewsgroupsPtr[0] == nil {
 		return article, article.Hide == 0, nil
 	}
@@ -221,7 +236,7 @@ func (c *ClientConnection) visibleInOtherGroup(article *models.Article) (visible
 		return nil, false, err
 	}
 	defer groupDB.Return()
-	visible, err = c.server.DB.NNTPArticleByMessageID(groupDB, article.MessageID)
+	visible, err = c.articleByMessageID(groupDB, article.MessageID, stat)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}

@@ -25,15 +25,48 @@ type Local430 struct {
 	ttl   time.Duration
 }
 
+// SetLocal430TTL sets how long a message-id that answered 430 is answered from the
+// local430 cache (cmd/nntp-server -local430ttl); ttl <= 0 means DefaultLocal430TTL. It may be
+// called while serving: entries already cached use the new TTL from then on.
+func (s *NNTPServer) SetLocal430TTL(ttl time.Duration) {
+	if s == nil || s.local430 == nil {
+		return
+	}
+	s.local430.setTTL(ttl)
+}
+
+// Local430TTL returns the TTL of the local430 cache in effect.
+func (s *NNTPServer) Local430TTL() time.Duration {
+	if s == nil || s.local430 == nil {
+		return DefaultLocal430TTL
+	}
+	lc := s.local430
+	lc.mu.RLock()
+	defer lc.mu.RUnlock()
+	return lc.ttlLocked()
+}
+
+// setTTL sets the TTL (<= 0: DefaultLocal430TTL).
+func (lc *Local430) setTTL(ttl time.Duration) {
+	lc.mu.Lock()
+	lc.ttl = ttl
+	lc.mu.Unlock()
+}
+
+// ttlLocked returns the TTL in effect; lc.mu must be held.
+func (lc *Local430) ttlLocked() time.Duration {
+	if lc.ttl <= 0 {
+		return DefaultLocal430TTL
+	}
+	return lc.ttl
+}
+
 // Check reports whether messageID answered 430 less than ttl ago. An expired
 // entry is removed.
 func (lc *Local430) Check(messageID string) bool {
-	ttl := lc.ttl
-	if ttl <= 0 {
-		ttl = DefaultLocal430TTL
-	}
 	lc.mu.RLock()
 	added, ok := lc.cache[messageID]
+	ttl := lc.ttlLocked()
 	lc.mu.RUnlock()
 	if !ok {
 		return false
@@ -76,13 +109,9 @@ func (lc *Local430) Remove(messageID string) {
 
 // Cleanup removes entries older than ttl.
 func (lc *Local430) Cleanup() {
-	ttl := lc.ttl
-	if ttl <= 0 {
-		ttl = DefaultLocal430TTL
-	}
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
-	cutoff := time.Now().Add(-ttl)
+	cutoff := time.Now().Add(-lc.ttlLocked())
 	for messageID, added := range lc.cache {
 		if !added.After(cutoff) {
 			delete(lc.cache, messageID)

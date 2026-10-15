@@ -338,20 +338,6 @@ func e2eKnownBugAction(id string, err error, envSet bool) (action, msg string) {
 	return "skip", fmt.Sprintf("known bug %s: %v", id, err)
 }
 
-// e2eKnownBug takes the result of an RFC-correct check.
-func e2eKnownBug(t *testing.T, id string, err error) {
-	t.Helper()
-	action, msg := e2eKnownBugAction(id, err, os.Getenv("PUGLEAF_KNOWN_BUGS") == "1")
-	switch action {
-	case "fatal":
-		t.Fatal(msg)
-	case "error":
-		t.Error(msg)
-	default:
-		t.Skip(msg)
-	}
-}
-
 // e2eIsolatedPattern builds -test.run=^A$/^B$ for a (sub)test name.
 func e2eIsolatedPattern(name string) string {
 	parts := strings.Split(name, "/")

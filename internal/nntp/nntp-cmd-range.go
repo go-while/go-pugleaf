@@ -2,6 +2,7 @@ package nntp
 
 import (
 	"errors"
+	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -59,12 +60,44 @@ func (c *ClientConnection) parseRangeArg(arg string) (articleRange, error) {
 }
 
 // requireGroup sends rateLimitOnError() + "412 No newsgroup selected" and returns false when no
-// group is selected. A send error is dropped on purpose (the next read on that connection fails).
+// group is selected, also when the selected group was deactivated or deleted since it was
+// selected (currentGroupSelectable). A send error is dropped on purpose (the next read on that
+// connection fails).
 func (c *ClientConnection) requireGroup() bool {
-	if c.currentGroup != "" {
+	if c.currentGroup != "" && c.currentGroupSelectable() {
 		return true
 	}
 	c.rateLimitOnError()
 	_ = c.sendResponse(412, "No newsgroup selected")
 	return false
+}
+
+// currentGroupSelectable re-checks the selected group in the main database before a
+// group-relative command: an admin may have deactivated or deleted it since GROUP (in this
+// process or in another one, e.g. the web server). Then the session drops the selection, as
+// if no group had been selected, and the command answers 412 like on a fresh connection; a
+// GROUP for it answers 411 (selectableGroup). A main database fault keeps the selection: the
+// command's own reads report the fault.
+func (c *ClientConnection) currentGroupSelectable() bool {
+	if c.server == nil || c.server.DB == nil {
+		return true
+	}
+	_, ok, err := c.selectableGroup(c.currentGroup)
+	if err != nil {
+		log.Printf("[NNTP] re-check of the selected group %s: %v", c.currentGroup, err)
+		return true
+	}
+	if !ok {
+		c.dropCurrentGroup()
+		return false
+	}
+	return true
+}
+
+// dropCurrentGroup clears the selected group and its marks (no group selected).
+func (c *ClientConnection) dropCurrentGroup() {
+	c.currentGroup = ""
+	c.currentFirst = 0
+	c.currentLast = 0
+	c.currentArticle = 0
 }

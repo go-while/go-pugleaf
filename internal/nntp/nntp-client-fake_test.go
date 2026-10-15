@@ -20,7 +20,6 @@ import (
 	"math/big"
 	"net"
 	"net/textproto"
-	"os"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -35,18 +34,9 @@ import (
 // cliWait is the hang guard of the client tests: the outer deadline of every
 // blocking step, the WaitOpen/cliFakeWaitLines polls and the raw test
 // connections. It only stops a hung test; a passing test never waits on it.
-// Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s), the same
-// variable as hDeadline in the server harness. Plan test-timing-hardening D3.
-var cliWait = cliWaitFromEnv(60 * time.Second)
-
-func cliWaitFromEnv(def time.Duration) time.Duration {
-	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
-		}
-	}
-	return def
-}
+// It is hDeadline of the server harness (PUGLEAF_TEST_DEADLINE, a Go duration,
+// e.g. 120s). Plan test-timing-hardening D3.
+var cliWait = hDeadline
 
 // cliFakeOpts configures a cliFakeServer.
 type cliFakeOpts struct {
