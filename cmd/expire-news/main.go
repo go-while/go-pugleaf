@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
@@ -143,7 +144,7 @@ func main() {
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	// Get newsgroups to process
 	newsgroups, err := getNewsgroupsToExpire(db, *targetGroup)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
@@ -71,7 +72,7 @@ func main() {
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	shutdownChan := make(chan struct{})
 
 	go func() {
