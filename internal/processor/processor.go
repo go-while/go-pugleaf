@@ -56,17 +56,29 @@ var (
 	}
 )
 
+// Deprecated: use NewProcessorE. Kept for callers that still exit on error.
 func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen int) *Processor {
+	proc, err := NewProcessorE(db, nntpPool, useShortHashLen)
+	if err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+	return proc
+}
+
+// NewProcessorE creates a Processor and returns an error instead of exiting the process
+// when the hostname is missing or invalid or the history system cannot be initialized.
+// The hostname checks run before db is used.
+func NewProcessorE(db *database.Database, nntpPool *nntp.Pool, useShortHashLen int) (*Processor, error) {
 	if LocalNNTPHostname == "" {
 		// Try to get hostname from database if not set
 		if err := SetHostname("", db); err != nil {
-			log.Fatalf("FATAL: LocalNNTPHostname is not set and could not retrieve from database: %v", err)
+			return nil, fmt.Errorf("hostname: LocalNNTPHostname is not set and could not be retrieved from database: %w", err)
 		}
 	}
 
 	// Perform comprehensive hostname validation (similar to INN2)
 	if err := validateHostname(LocalNNTPHostname); err != nil {
-		log.Fatalf("FATAL: Hostname validation failed: %v", err)
+		return nil, fmt.Errorf("hostname validation: %w", err)
 	}
 	// Ensure main database exists and is properly set up before any import operations
 	if err := db.Migrate(); err != nil {
@@ -85,7 +97,7 @@ func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen in
 
 	hist, err := history.NewHistory(historyConfig, db.WG)
 	if err != nil {
-		log.Fatalf("FATAL: Failed to initialize history system: %v", err)
+		return nil, fmt.Errorf("history init: %w", err)
 	}
 
 	proc := &Processor{
@@ -109,7 +121,7 @@ func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen in
 	}
 
 	// DISABLED: threading processor - now handled by SQ3CronProcessThreading in db_batch.go
-	return proc
+	return proc, nil
 }
 
 func (proc *Processor) CheckNoMoreWorkInHistory() bool {
