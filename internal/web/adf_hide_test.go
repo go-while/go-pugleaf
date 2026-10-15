@@ -140,15 +140,6 @@ func TestAdfHideArticleRoutesAdmin(t *testing.T) {
 	_, adminCookie := w0NewUser(t, true)
 	for name, path := range f.articlePaths() {
 		rec := w0Do(t, w0Req{Path: path, Cookies: []*http.Cookie{adminCookie}})
-		if strings.HasPrefix(name, "section") {
-			// section-article.html:32 reads .Article.ArticleNum, which models.Article lacks, so
-			// the section article page answers 500 for every article (pre-existing, not this
-			// slice). The hide gate must still let the admin through: anything but 404.
-			if rec.Code == http.StatusNotFound {
-				t.Errorf("admin %s (%s) = 404, want past the hide gate", name, path)
-			}
-			continue
-		}
 		if rec.Code != http.StatusOK {
 			t.Errorf("admin %s (%s) = %d, want 200", name, path, rec.Code)
 		}
