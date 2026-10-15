@@ -1259,3 +1259,11 @@ Note for wave 2 (from cli-conn): the line cap goes into `deadlineConn.Read` afte
 
 Checks on 190fba5: gofmt baseline 2 files, vet (+`-tags e2e`) and build OK, 10 package sets green under `-race`, `TestCli*`/`TestTxDbg*`/`TestHRPprof*` ×3 green, known bugs = RFC-1 T-nntp-article-1, the DefaultServeMux grep empty, four build scripts OK,
 e2e (ports 21219–21224) `SUMMARY pass=17 fail=0 info=0` (every E-check incl. E16 `exited=yes after 6s`), no leftover processes.
+
+### Wave 3 (2026-10-15; 1 implementer, reviewed before merge)
+| Slice | Branch (commits) | Review | Merge |
+|---|---|---|---|
+| cli-hygiene | worktree-agent-acf5e08afa4b3ce34 (89cd966) | merge; 1 minor fixed inline by the orchestrator (`Pool.SelectGroup`/`XOver`/`XHdr` put a healthy connection back on `ErrInvalidCommandArg` instead of force-closing it, like `Pool.GetArticle`); deviations accepted (`processBatch` releases the offset slot when every id was dropped; nil ids not counted as skipped; extra tests `TestCliValAuthinfo`, `TestCliValPoolGetArticle`; Opus trailer). Notes: the TAKETHIS `validMessageIDArg` guard is redundant with RelayHeaders/ReconstructHeaders (not separately testable); `TransferResult` in transfer-progress.go is now unused; `authenticate`'s doc could mention `ErrInvalidCommandArg`; `grep 'TextConn.Cmd('` keeps two acceptable hits (`sendCmd` itself, a raw CHECK in `nntp-client-conn_test.go`) | 966bc47 |
+
+Checks on the final tree (966bc47 + inline pool fix): gofmt baseline 2 files, vet (+`-tags e2e`) and build OK, 10 package sets green under `-race`, `TestCli*`/`TestTxDbg*`/`TestHRPprof*` ×3 green, known bugs = RFC-1 T-nntp-article-1 (unchanged through the whole plan), dead-code grep empty, four build scripts OK,
+e2e (ports 21219–21224) `SUMMARY pass=17 fail=0 info=0`, no leftover processes.
