@@ -13,11 +13,13 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-// cliCmdOuter is the outer deadline of every blocking step in these tests.
-const cliCmdOuter = 5 * time.Second
+// cliCmdOuter is the outer deadline of every blocking step in these tests:
+// a hang guard only (cliWait), never the assertion.
+var cliCmdOuter = cliWait
 
 const cliCmdDate = "Sat, 12 Sep 2026 10:11:12 +0000"
 
@@ -109,10 +111,10 @@ func cliCmdDrain(t *testing.T, ch <-chan HeaderLine) []HeaderLine {
 	}
 }
 
-// cliCmdWaitArticles polls s.Articles() until it holds n blocks (2 s).
+// cliCmdWaitArticles polls s.Articles() until it holds n blocks (hang guard cliCmdOuter).
 func cliCmdWaitArticles(t *testing.T, s *cliFakeServer, n int) [][]string {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(cliCmdOuter)
 	for {
 		got := s.Articles()
 		if len(got) >= n {
@@ -555,8 +557,15 @@ func TestCliCmdSOCKSTimeout(t *testing.T) {
 		_ = c.CloseFromPoolOnly()
 		t.Fatal("Connect through a stalled SOCKS proxy succeeded")
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("Connect took %v, want < 2s (ConnectTimeout 300ms)", elapsed)
+	// the SOCKS negotiation is bounded by ConnectTimeout: a timeout error
+	// (x/net/proxy wraps it in a *net.OpError), not a hang (cliCmdOuter)
+	if !cliConnIsTimeout(err) {
+		t.Fatalf("Connect error %v (after %v), want a timeout (ConnectTimeout 300ms)", err, elapsed)
+	}
+	// loose bound, deliberately 50x the 300 ms: catches a fallback to
+	// config.DefaultConnectTimeout (30 s) instead of the configured value
+	if elapsed >= config.DefaultConnectTimeout/2 {
+		t.Fatalf("Connect took %v: ConnectTimeout 300ms ignored (default %v?)", elapsed, config.DefaultConnectTimeout)
 	}
 }
 

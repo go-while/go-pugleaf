@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"net"
 	"net/textproto"
+	"os"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -30,6 +31,22 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/config"
 )
+
+// cliWait is the hang guard of the client tests: the outer deadline of every
+// blocking step, the WaitOpen/cliFakeWaitLines polls and the raw test
+// connections. It only stops a hung test; a passing test never waits on it.
+// Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s), the same
+// variable as hDeadline in the server harness. Plan test-timing-hardening D3.
+var cliWait = cliWaitFromEnv(60 * time.Second)
+
+func cliWaitFromEnv(def time.Duration) time.Duration {
+	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
 
 // cliFakeOpts configures a cliFakeServer.
 type cliFakeOpts struct {
@@ -277,13 +294,15 @@ func cliFakeTLSConfig(t *testing.T) (server *tls.Config, clientRoots *x509.CertP
 	return server, clientRoots
 }
 
-// Backend returns a fresh client config for this server.
+// Backend returns a fresh client config for this server. ConnectTimeout is
+// 30 s (config.DefaultConnectTimeout) so a loaded machine never trips it on
+// the happy path; the tests that exercise the timeout set 300 ms themselves.
 func (s *cliFakeServer) Backend() *BackendConfig {
 	return &BackendConfig{
 		Host:           s.Host,
 		Port:           s.Port,
 		MaxConns:       2,
-		ConnectTimeout: 2 * time.Second,
+		ConnectTimeout: 30 * time.Second,
 		Provider:       &config.Provider{Name: "cli-fake", Host: s.Host, Port: s.Port},
 	}
 }
@@ -331,8 +350,11 @@ func (s *cliFakeServer) Open() int {
 }
 
 // WaitOpen polls Open every 10 ms until it equals n; t.Fatalf after d.
+// d is raised to cliWait: every caller waits for an expected state, so d is
+// only a hang guard.
 func (s *cliFakeServer) WaitOpen(t *testing.T, n int, d time.Duration) {
 	t.Helper()
+	d = max(d, cliWait)
 	deadline := time.Now().Add(d)
 	for {
 		got := s.Open()
@@ -346,8 +368,8 @@ func (s *cliFakeServer) WaitOpen(t *testing.T, n int, d time.Duration) {
 	}
 }
 
-// Close closes the listener and every connection and waits up to 5 s for the
-// accept and handler goroutines. Safe to call more than once.
+// Close closes the listener and every connection and waits up to cliWait for
+// the accept and handler goroutines. Safe to call more than once.
 func (s *cliFakeServer) Close() {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
@@ -365,8 +387,8 @@ func (s *cliFakeServer) Close() {
 		}()
 		select {
 		case <-waited:
-		case <-time.After(5 * time.Second):
-			s.t.Errorf("cli-fake: handler goroutines still running 5s after Close")
+		case <-time.After(cliWait):
+			s.t.Errorf("cli-fake: handler goroutines still running %v after Close", cliWait)
 		}
 	})
 }
@@ -624,15 +646,15 @@ func cliPeerHandler(o *cliPeerOpts) func(fc *cliFakeConn) {
 	}
 }
 
-// cliFakeTextDial opens a raw textproto client to s with a 5 s I/O deadline
-// (self-tests only).
+// cliFakeTextDial opens a raw textproto client to s with a cliWait I/O
+// deadline (self-tests only).
 func cliFakeTextDial(t *testing.T, s *cliFakeServer) (*textproto.Conn, net.Conn) {
 	t.Helper()
-	nc, err := net.DialTimeout("tcp", net.JoinHostPort(s.Host, strconv.Itoa(s.Port)), 2*time.Second)
+	nc, err := net.DialTimeout("tcp", net.JoinHostPort(s.Host, strconv.Itoa(s.Port)), cliWait)
 	if err != nil {
 		t.Fatalf("dial cli-fake: %v", err)
 	}
-	_ = nc.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = nc.SetDeadline(time.Now().Add(cliWait))
 	tc := textproto.NewConn(nc)
 	t.Cleanup(func() { _ = tc.Close() })
 	return tc, nc
@@ -653,10 +675,10 @@ func cliFakeExpect(t *testing.T, tc *textproto.Conn, cmd string, want int) strin
 	return msg
 }
 
-// cliFakeWaitLines polls s.Lines() until it equals want (2 s).
+// cliFakeWaitLines polls s.Lines() until it equals want (hang guard cliWait).
 func cliFakeWaitLines(t *testing.T, s *cliFakeServer, want []string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(cliWait)
 	for {
 		got := s.Lines()
 		if reflect.DeepEqual(got, want) {
@@ -733,6 +755,7 @@ func TestCliFakeScript(t *testing.T) {
 		t.Fatal(err)
 	}
 	cliFakeWaitLines(t, hs, []string{"ARTICLE <a@b>", "STAT <a@b>"})
+	// deliberate short negative window: nothing may arrive within 150 ms
 	_ = nch.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
 	if l, err := tch.ReadLine(); err == nil {
 		t.Errorf("Hang step wrote %q after its reply", l)
@@ -759,13 +782,13 @@ func TestCliFakeScript(t *testing.T) {
 	// TLS with the self-signed config; the client trusts clientRoots
 	srvCfg, roots := cliFakeTLSConfig(t)
 	ts := newCliFakeServer(t, cliFakeOpts{TLS: srvCfg, Script: []cliFakeStep{{Expect: "PING", Reply: []string{"200 pong"}}}})
-	d := &net.Dialer{Timeout: 2 * time.Second}
+	d := &net.Dialer{Timeout: cliWait}
 	tlsConn, err := tls.DialWithDialer(d, "tcp", net.JoinHostPort(ts.Host, strconv.Itoa(ts.Port)),
 		&tls.Config{RootCAs: roots, ServerName: ts.Host, MinVersion: tls.VersionTLS12})
 	if err != nil {
 		t.Fatalf("tls dial: %v", err)
 	}
-	_ = tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = tlsConn.SetDeadline(time.Now().Add(cliWait))
 	tc3 := textproto.NewConn(tlsConn)
 	defer tc3.Close()
 	cliFakeExpect(t, tc3, "", 200)
@@ -790,13 +813,14 @@ func TestCliFakeOpenCount(t *testing.T) {
 
 	// RawStall: no greeting, client close still observed
 	r := newCliFakeServer(t, cliFakeOpts{RawStall: true})
-	nc, err := net.DialTimeout("tcp", net.JoinHostPort(r.Host, strconv.Itoa(r.Port)), 2*time.Second)
+	nc, err := net.DialTimeout("tcp", net.JoinHostPort(r.Host, strconv.Itoa(r.Port)), cliWait)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := nc.Write([]byte("hello\r\n")); err != nil {
 		t.Fatal(err)
 	}
+	// deliberate short negative window: RawStall must not write within 100 ms
 	_ = nc.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 	if n, err := nc.Read(make([]byte, 16)); err == nil || n != 0 {
 		t.Errorf("RawStall wrote %d bytes (err %v)", n, err)

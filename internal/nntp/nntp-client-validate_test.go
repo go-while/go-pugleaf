@@ -11,7 +11,8 @@ import (
 )
 
 // cliValRun runs f in a goroutine and fails the test when it does not return
-// within 5 s (a rejected command must never block on the connection).
+// within cliWait (a hang guard: a rejected command must never block on the
+// connection).
 func cliValRun(t *testing.T, name string, f func() error) error {
 	t.Helper()
 	done := make(chan error, 1)
@@ -19,8 +20,8 @@ func cliValRun(t *testing.T, name string, f func() error) error {
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(5 * time.Second):
-		t.Fatalf("%s: no return within 5s", name)
+	case <-time.After(cliWait):
+		t.Fatalf("%s: no return within %v", name, cliWait)
 		return nil
 	}
 }
