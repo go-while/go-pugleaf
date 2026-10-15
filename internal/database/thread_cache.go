@@ -74,11 +74,20 @@ type MemGroupThreadCache struct {
 type MemCachedThreads struct {
 	mux    sync.RWMutex
 	Groups map[string]*MemGroupThreadCache // [group] -> all cache data
+	stop   <-chan struct{}                 // closed: CleanCron returns (nil: runs forever)
 }
 
+// NewMemCachedThreads returns a thread cache whose CleanCron runs for the life of the process.
 func NewMemCachedThreads() *MemCachedThreads {
+	return NewMemCachedThreadsStop(nil)
+}
+
+// NewMemCachedThreadsStop returns a thread cache whose CleanCron goroutine returns once stop
+// is closed. A nil stop never fires (same as NewMemCachedThreads).
+func NewMemCachedThreadsStop(stop <-chan struct{}) *MemCachedThreads {
 	mem := &MemCachedThreads{
 		Groups: make(map[string]*MemGroupThreadCache, 256),
+		stop:   stop,
 	}
 	go mem.CleanCron()
 	return mem
@@ -87,7 +96,11 @@ func NewMemCachedThreads() *MemCachedThreads {
 func (mem *MemCachedThreads) CleanCron() {
 	// Periodically clean expired thread roots and metadata
 	for {
-		time.Sleep(15 * time.Second) // TODO (mem *MemCachedThreads) CleanCron hardcoded run every
+		select {
+		case <-mem.stop:
+			return
+		case <-time.After(15 * time.Second): // TODO (mem *MemCachedThreads) CleanCron hardcoded run every
+		}
 
 		mem.mux.Lock()
 		if len(mem.Groups) == 0 {
@@ -229,10 +242,13 @@ func (db *Database) GetCachedThreadReplies(groupDB *GroupDB, threadRoot int64, p
 		return nil, 0, fmt.Errorf("failed to get thread cache for root %d: %w", threadRoot, err)
 	}
 
-	// Parse child article numbers. child_articles is the single source of truth for both the
-	// returned count and the pages: the count used to be message_count - 1 while the pages
-	// were sliced out of childNums, so a thread_cache row whose message_count disagrees with
+	// Parse child article numbers. child_articles is the source of truth for the returned
+	// count, and the pages are sliced out of the same list: the count used to be
+	// message_count - 1, so a thread_cache row whose message_count disagrees with
 	// child_articles made the caller's totalPages promise a page that renders empty (E2).
+	// It is not a guarantee that every promised page renders rows: child_articles also lists
+	// hidden children, which threadChildrenQuery filters out, and an unreadable row is
+	// skipped (logged below).
 	childNums := strings.Split(childArticles, ",")
 	if len(childNums) == 1 && childNums[0] == "" {
 		childNums = nil
@@ -289,6 +305,7 @@ func (db *Database) GetCachedThreadReplies(groupDB *GroupDB, threadRoot int64, p
 	defer rows.Close()
 
 	var replies []*models.Overview
+	scanLogged := false
 	for rows.Next() {
 		reply := &models.Overview{}
 		err := rows.Scan(
@@ -297,9 +314,18 @@ func (db *Database) GetCachedThreadReplies(groupDB *GroupDB, threadRoot int64, p
 			&reply.References, &reply.Bytes, &reply.Lines,
 			&reply.ReplyCount, &reply.Downloaded,
 		)
-		if err == nil {
-			replies = append(replies, reply)
+		if err != nil {
+			// Skip the unreadable row; log only the first one per call.
+			if !scanLogged {
+				log.Printf("[CACHE:THREADS] GetCachedThreadReplies(%s/%d): scan: %v", groupDB.Newsgroup, threadRoot, err)
+				scanLogged = true
+			}
+			continue
 		}
+		replies = append(replies, reply)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("failed to read thread replies of root %d: %w", threadRoot, err)
 	}
 
 	return replies, totalReplies, nil
