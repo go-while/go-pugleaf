@@ -58,28 +58,42 @@ var appVersion string
 var auditMessageIDRe = regexp.MustCompile(`^<[^<>\s@]+@[^<>\s@]+>$`)
 
 // allowedHeaderNames are the header names that sitePostSubmit writes into
-// Article.HeadersJSON (internal/web/web_sitePostPage.go:356-369 at the base
-// commit of this tool): "MIME-Version", "Content-Type",
-// "Content-Transfer-Encoding", "X-pugleaf-Trace" (followed by two continuation
-// lines that start with a space), "From", "Newsgroups", "Lines" and "Bytes".
+// Article.HeadersJSON. Since audit-delta-fixes D8 (buildWebPostHeaders in
+// internal/web/web_sitePostPage.go) the block is Path, From, Newsgroups, Subject,
+// Date, Message-ID, References (replies), MIME-Version, Content-Type,
+// Content-Transfer-Encoding, Injection-Date, Injection-Info (with continuation
+// lines that start with a space) and Lines. Older posts carry "X-pugleaf-Trace"
+// (two continuation lines) and "Bytes" instead; both stay allowed for them.
 // Anything else in a web post's headers_json was injected.
 var allowedHeaderNames = map[string]bool{
+	"path":                      true,
+	"from":                      true,
+	"newsgroups":                true,
+	"subject":                   true,
+	"date":                      true,
+	"message-id":                true,
+	"references":                true,
 	"mime-version":              true,
 	"content-type":              true,
 	"content-transfer-encoding": true,
-	"x-pugleaf-trace":           true,
-	"from":                      true,
-	"newsgroups":                true,
+	"injection-date":            true,
+	"injection-info":            true,
 	"lines":                     true,
-	"bytes":                     true,
+	"x-pugleaf-trace":           true, // legacy web posts
+	"bytes":                     true, // legacy web posts
 }
 
 // singleHeaderNames must appear at most once in a post's header lines.
 var singleHeaderNames = map[string]bool{
-	"from":       true,
-	"subject":    true,
-	"newsgroups": true,
-	"message-id": true,
+	"from":           true,
+	"subject":        true,
+	"newsgroups":     true,
+	"message-id":     true,
+	"date":           true,
+	"path":           true,
+	"references":     true,
+	"injection-date": true,
+	"injection-info": true,
 }
 
 // unknownGroup is the bucket for post_queue rows whose newsgroup row is gone.
