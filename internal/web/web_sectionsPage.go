@@ -2,6 +2,8 @@
 package web
 
 import (
+	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -243,14 +245,20 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 			ORDER BY article_num DESC
 			LIMIT 1 OFFSET ?`, []interface{}{skipCount - 1}, &cursorArticleNum)
 		if err != nil {
+			// No row at that offset (a page past the real end) or a failed read: serve
+			// the newest page and label it page 1, not the requested number (FU:E17).
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("[WEB]: sectionGroupPage: page %d cursor lookup in %s: %v", page, groupName, err)
+			}
 			lastArticleNum = 0
+			page = 1
 		} else {
 			lastArticleNum = cursorArticleNum
 		}
 	}
 
 	// Get articles (overview data) for this group with pagination
-	articles, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_sectionGroupPage)
+	articles, totalCount, _, err := s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_sectionGroupPage)
 	if err != nil {
 		log.Printf("[WEB]: sectionGroupPage: GetOverviewsPaginated(last=%d): %v", lastArticleNum, err)
 		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
@@ -270,8 +278,9 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 			TotalCount:    totalCount,
 			TotalPages:    (totalCount + LIMIT_sectionGroupPage - 1) / LIMIT_sectionGroupPage,
 			LinkablePages: maxOffsetArticles/LIMIT_sectionGroupPage + 1,
-			HasNext:       hasMore,
-			HasPrev:       lastArticleNum > 0,
+			// cursor mode has no linkable neighbours (FU:E12, D15)
+			HasNext: false,
+			HasPrev: false,
 		}
 	}
 
