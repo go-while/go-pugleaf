@@ -1783,7 +1783,8 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
     history fail-stop (Q3), toolchain upgrade (Q4), destructive root scripts (Q6), `tests.yml` (issues.md).
 
 ### Outcome addendum: optional waves O1/O2 (2026-10-15)
-- **Integration branch:** `plan-adf-optional` from `testing-001` @ a9357b7. Re-anchor file
+- **Integration branch:** `plan-adf-optional` from `testing-001` @ a9357b7, merged into `testing-001` as b499a63
+  (`git merge --no-ff`, 2026-10-15). Re-anchor file
   `.claude/plans/done/audit-delta-fixes-reanchor.md`. Nothing pushed.
 - **Slices (11):** adf-opt-postqueue 6074425, adf-opt-hierarchy 53c9ddb, adf-opt-web-admin a1afbe9, adf-opt-sanitize
   3263508, adf-opt-analyze 7592ae7, adf-opt-ops-tools 64ee35c (+712f747), adf-opt-rslight 902efe6, adf-opt-tools-misc
