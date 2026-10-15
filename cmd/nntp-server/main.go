@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"log"
 	"os"
@@ -47,8 +48,8 @@ func main() {
 	flag.BoolVar(&useHistory, "history", true, "maintain and use the message-id history index (data/history)")
 	flag.IntVar(&nntptcpport, "nntptcpport", 0, "NNTP TCP port")
 	flag.IntVar(&nntptlsport, "nntptlsport", 0, "NNTP TLS port")
-	flag.StringVar(&nntpcertFile, "nntpcertfile", "", "NNTP TLS certificate file (/path/to/fullchain.pem)")
-	flag.StringVar(&nntpkeyFile, "nntpkeyfile", "", "NNTP TLS key file (/path/to/privkey.pem)")
+	flag.StringVar(&nntpcertFile, "nntpcertfile", "", "NNTP TLS certificate file for the TLS port and STARTTLS (/path/to/fullchain.pem)")
+	flag.StringVar(&nntpkeyFile, "nntpkeyfile", "", "NNTP TLS key file for the TLS port and STARTTLS (/path/to/privkey.pem)")
 	flag.IntVar(&useShortHashLen, "useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
 	flag.IntVar(&maxConnections, "maxconnections", 500, "maximum number of concurrent client connections (all clients)")
 	flag.StringVar(&dataDir, "data", "./data", "Directory to store database files")
@@ -89,13 +90,21 @@ func main() {
 	}
 	if nntptlsport > 0 {
 		mainConfig.Server.NNTP.TLSPort = nntptlsport
-		mainConfig.Server.NNTP.TLSCert = nntpcertFile
-		mainConfig.Server.NNTP.TLSKey = nntpkeyFile
 	} else {
 		mainConfig.Server.NNTP.TLSPort = 0
-		mainConfig.Server.NNTP.TLSCert = ""
-		mainConfig.Server.NNTP.TLSKey = ""
 		log.Printf("[NNTP]: No NNTP TLS port flag provided")
+	}
+	// The certificate serves the TLS port and STARTTLS on the plain port (RFC 4642).
+	if (nntpcertFile == "") != (nntpkeyFile == "") {
+		log.Fatalf("[NNTP]: -nntpcertfile and -nntpkeyfile must be given together")
+	}
+	mainConfig.Server.NNTP.TLSCert = nntpcertFile
+	mainConfig.Server.NNTP.TLSKey = nntpkeyFile
+	if nntpcertFile != "" {
+		if _, err := tls.LoadX509KeyPair(nntpcertFile, nntpkeyFile); err != nil {
+			log.Fatalf("[NNTP]: cannot load TLS certificate: %v", err)
+		}
+		log.Printf("[NNTP]: STARTTLS enabled (certificate %s)", nntpcertFile)
 	}
 
 	// Note: hostname can be empty here since SetHostname will check database for fallback
