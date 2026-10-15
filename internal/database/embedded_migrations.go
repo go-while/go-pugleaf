@@ -85,7 +85,7 @@ func getEmbeddedMigrationFiles() ([]*MigrationFile, error) {
 func parseEmbeddedMigrationFileName(fileName string) (*MigrationFile, error) {
 	// Remove .sql extension
 	base := strings.TrimSuffix(fileName, ".sql")
-	
+
 	// Split by underscore
 	parts := strings.Split(base, "_")
 	if len(parts) < 3 {
@@ -117,7 +117,7 @@ func parseEmbeddedMigrationFileName(fileName string) (*MigrationFile, error) {
 		Type:        migrationType,
 		Description: strings.Join(parts[2:], "_"),
 		FilePath:    filepath.Join("migrations", fileName), // Virtual path for embedded files
-		IsEmbedded:  true, // Mark as embedded
+		IsEmbedded:  true,                                  // Mark as embedded
 	}, nil
 }
 
@@ -126,7 +126,7 @@ func readEmbeddedMigrationContent(migration *MigrationFile) (string, error) {
 	if EmbeddedMigrationsFS == (embed.FS{}) {
 		return "", fmt.Errorf("embedded migrations filesystem not initialized")
 	}
-	
+
 	content, err := fs.ReadFile(EmbeddedMigrationsFS, migration.FilePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read embedded migration file %s: %w", migration.FilePath, err)
