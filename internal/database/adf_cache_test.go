@@ -112,24 +112,40 @@ func TestAdfCacheThreadRepliesRowsErr(t *testing.T) {
 	}
 }
 
+// adfCacheCleanCronCount counts the goroutines currently inside (*MemCachedThreads).CleanCron.
+func adfCacheCleanCronCount() int {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), "database.(*MemCachedThreads).CleanCron")
+}
+
 // TestAdfCacheCleanCronStops: closing the stop channel ends the CleanCron goroutine.
+// Counts CleanCron stack frames rather than runtime.NumGoroutine, which other
+// background goroutines of the shared test DB would move in both directions.
 func TestAdfCacheCleanCronStops(t *testing.T) {
-	before := runtime.NumGoroutine()
+	before := adfCacheCleanCronCount()
 	ch := make(chan struct{})
 	mem := NewMemCachedThreadsStop(ch)
 	if mem == nil || mem.Groups == nil {
 		t.Fatal("NewMemCachedThreadsStop returned an unusable cache")
 	}
+	deadline := time.Now().Add(time.Second)
+	for adfCacheCleanCronCount() != before+1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("CleanCron goroutines = %d after the constructor, want %d", adfCacheCleanCronCount(), before+1)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	close(ch)
 
-	deadline := time.Now().Add(time.Second)
+	deadline = time.Now().Add(time.Second)
 	for {
-		n := runtime.NumGoroutine()
+		n := adfCacheCleanCronCount()
 		if n <= before {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("goroutines = %d one second after close(stop), want <= %d (CleanCron still running)", n, before)
+			t.Fatalf("CleanCron goroutines = %d one second after close(stop), want %d", n, before)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
