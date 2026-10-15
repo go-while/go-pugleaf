@@ -4,7 +4,9 @@
 # This script creates themed directories and organizes .active files accordingly
 
 THEMED_DIR="themed"
-SQL_FILE="../../migrations/0003_main_create_hierarchies.sql"
+# Reference only (the category lists below are hardcoded, this variable is not read):
+# the schema moved from ../../migrations/ to internal/database/migrations/.
+SQL_FILE="../../internal/database/migrations/0003_main_create_hierarchies.sql"
 
 echo "Organizing hierarchy files by theme..."
 
