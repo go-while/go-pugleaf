@@ -1583,3 +1583,80 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
 - Wave-3 greps on 7ff04a3: A-tools-1 closed (`captureLimiter` defined and used, 0 per-group capture goroutines),
   A-tools-4 closed (`newDownloadRun`), A-ops-3d/f closed; SIGTERM in cmd/web, nntp-fetcher, expire-news, post-queue,
   history-rebuild, nntp-transfer.
+
+## Outcome
+
+- **Integration branch:** `plan-audit-delta-fixes` from `testing-001` @ 4eb92da; code tree 7ff04a3 (plus plan/docs
+  commits b7d7e30, 04857f4 and this one). Not yet merged into `testing-001` (user decision). Nothing pushed.
+- **Waves run:** 0 (inline), 1 (15 slices in three batches of five), 2 (3 slices), 3 (inline greps + verifier). The
+  optional waves O1 (10 slices) and O2 (1 slice) were not run (user asked at the wave-3 boundary).
+- **Ids fixed:** see the "Fixed by plan `audit-delta-fixes`" bullet in `BUGS.md`. Hand-offs: A-tools-1, A-tools-4,
+  A-ops-3d/f confirmed closed by the sibling plans (wave-0 and wave-3 greps).
+- **Decisions applied (behaviour changes):** D1 CSP on every response (`'unsafe-inline'` kept for script/style);
+  D2 hidden articles are 404 for non-admins everywhere, tree nodes render `[hidden article]`, `/api/thread-tree`
+  redacted; D3 `/api/thread-tree` behind `requireAPIEnabled`, `Cache-Control: private`; **D4 amended**: article
+  numbers from `article_num_seq` (migration 0010), seeded from the maximum over articles, threads, thread_cache,
+  cached_trees and tree_stats, insert uses `MAX(last_num, MAX(article_num)) + 1`; `ResetNewsgroupData` restarts at 0
+  and drops the group's spam rows and cache; expire-news deletes derived rows; D5 `OpenDatabase`/`NewProcessorE`/
+  analyze export return errors, `Shutdown` resets `INIT` once, all cache crons and the batch loops stop on
+  `bgStop`, migration cache removed; D6 SIGTERM = SIGINT in web, fetcher, expire-news, post-queue; D7
+  `-edit-cronjobs` gates create and enable (also the shipped-disabled defaults, Q8 accepted); D8 web posts store the
+  full header block (Injection-Info replaces X-pugleaf-Trace, no Bytes header), the POST path to providers drops
+  Injection-Info/Injection-Date, audit-web-posts knows the new block; D9 NNTP user mapping (0 = none, one account per
+  web user, passwords 10–72 bytes, maxconns 1–25, posting independent of maxconns); D10 embedded NNTP server removed
+  from `cmd/web` (flags parsed, logged as ignored); D11 done earlier (no `-race` in build scripts); D12 release
+  workflow: test job first, five native cgo runners (macos-15 / macos-15-intel replace the deprecated/retired
+  labels), validated version input, suffixed tags allowed, `permissions: contents: read`; D13 recover-db `-db` alias,
+  write modes need an explicit dir and `-force`, `-rewritedates` keeps hide/spam and skips unparseable dates;
+  **D14 as decided by the user**: `-disable-active` refuses only an empty keep set, `-disable-active-dry-run`,
+  1-field lines accepted, no threshold, no force flag; D15 cursor mode has no Previous/Next (and, via the template,
+  no First/Last) links.
+- **Questions:** Q2 no (filed in `issues.md`), Q7 yes (A-tools-1 applied), Q8 accepted, Q9 answered earlier,
+  Q10 no cut-off. Q1, Q3, Q4, Q5, Q6 untouched (out of scope).
+- **Verification (verifier on 7ff04a3):** gofmt baseline only; vet (incl. `-tags e2e`); build; race suite over 17
+  package sets ok (211 s, no flake); acceptance U01–U18 all ran and passed (0 skips; 36 web, 30 database, 4 cache,
+  2 models, 1 reopen, 2 processor, 2 fetcher, 4 recover-db, 3 tcp2tor, 6 web-cmd, 2 expire-news, 8 peering, 9
+  common); `-count=3` flake run of the 8 timing-sensitive tests ok; known bugs = `T-nntp-article-1` only; shell/YAML
+  checks ok; five build scripts ok; e2e `PORT=18998 DATA=./data-test-audit-delta-fixes scripts/test-audit-delta-fixes.sh`
+  → `SUMMARY pass=17 fail=0 info=2` (E01–E16, E19 PASS; E17 INFO; E18 INFO `article_num_seq … 1`); manual spot
+  checks on 19002/19003 (CSP header, "are ignored" line, graceful SIGTERM) ok. Note: `./data` does not exist in this
+  checkout (only `data_ram` → /mnt/ramdisk/data and an empty `data_local`); nothing outside scratch was touched.
+- **Review findings fixed before merge (MAJOR):** adf-web-cache per-field sanitizing (29 ms per article render
+  otherwise); adf-web-post POST path relaying Injection-Info (441 upstream); adf-ops-scripts tag regex rejecting the
+  repo's `v0.4.7-1` tags; adf-db-batch task lookup before the brake (lost articles), then its first m1 fix (expiry
+  starved under load) replaced by interned newsgroup pointers.
+- **Worktrees (left in place; user cleans up):** under `/tank0/claude/trees/go-pugleaf/`, branches `worktree-<id>`:
+  agent-a0624188eade0125f (adf-proc-fatal), agent-a068bcfa9d7476428 (adf-db-cache), agent-a6dcb6699b233a849
+  (adf-web-cache), agent-ae881c05f513c505d (adf-db-readers), agent-a28c5f46d678d866b (adf-db-lifecycle),
+  agent-a720fb7d0a4f828b6 (adf-web-pagination), agent-a98e5e7cf72150c95 (adf-web-xss), agent-a31339ec21e85d5f5
+  (adf-web-post), agent-a1eab6765d3954fdb (adf-web-nntpusers), agent-af21f31672fb93ec5 (adf-web-cron),
+  agent-a2bdbbf3ff4b9242c (adf-ops-tcp2tor), agent-af81520b9cc8f3bb4 (adf-ops-recover), agent-a2e98b7b49517484a
+  (adf-tools-fetcher), agent-a9603951559041464 (adf-ops-misc), agent-a7481e793ee995227 (adf-ops-scripts),
+  agent-ae81d38ee7a451cfa (adf-web-cmd), agent-a748f81a2302ff1fe (adf-web-hide), agent-a3cd2421442729e23
+  (adf-db-batch). Some slice commits carry an Opus 5.5 trailer (the implementers' model).
+- **Scratch left on disk:** `./data-test-audit-delta-fixes` (gitignored), `build/` (gitignored; `webserver` is the
+  race build), `/tmp/pugleaf-nntptest-*` dirs.
+- **Leftovers / known issues (from the reviews; none blocks the merge):**
+  - `/api/thread-tree` returns the raw `from_header` of visible nodes (A-web-11 text mentions raw From; D3 asked only
+    D2 redaction); a tree node whose Overview failed to load cannot be marked hidden; `thread-tree.html` shows an empty
+    Message-ID row and a dead "View article" button for a hidden root; `lookupReplyReferences` copies a hidden
+    article's References into a reply.
+  - Cron: an ended job's log buffer is dropped with its registration; toggle check-then-flip race between two admin
+    requests (needs a conditional UPDATE in `db_cron_jobs.go`); `calculateNextRun` divides by zero for interval 0
+    with a start time (unreachable via the handlers).
+  - NNTP users: one-account rule is check-then-write (partial unique index after a duplicate-unmapping migration);
+    a legacy mapping to a deleted web user blocks the whole update until "no mapping" is chosen.
+  - Web posts: a 1000-byte Subject yields a 1009-octet stored line; empty UserSalt would write `posting-account=""`
+    (unreachable: the salt is generated at init). The sanitized cache's `cachedSize` can drift on a write to a
+    just-evicted entry (statistic only).
+  - cmd/web: `progressDB` handle not closed on the exit paths (pre-existing; only the dead `FetchRoutine` uses it);
+    one-shot modes run before `signal.Notify`; a failed `UpdateNewsgroupActive` still exits 0; `FetchRoutine` is dead.
+  - recover-db: repair step 6 queries a non-existent `t.child_articles` column (`❌ Could not check threading` on every
+    `-repair`, pre-existing); `fixed++` counts before the UPDATE; parse-failure problems uncapped.
+  - Fetcher: the list-update path installs no signal handler (short run). Pagination: cursor mode also loses First/Last.
+  - Release workflow: actions not pinned by SHA; toolchain still from go.mod (Q4); Windows MinGW/cgo and
+    `GOEXPERIMENT=greenteagc` untested on real runners; one failed platform still blocks the whole release.
+  - Test harness: `TestAuthFailures`/`TestStmCheck` were load flakes with several suites in parallel; the AUTHINFO PASS
+    client deadline is now 20 s. tcp2tor has no test pinning that a forwarded connection keeps no deadline.
+  - Not done by decision: wave O1/O2 (31 medium/low ids), nonce CSP (Q5), cursor wiring (D15), first-user-admin (Q1),
+    history fail-stop (Q3), toolchain upgrade (Q4), destructive root scripts (Q6), `tests.yml` (issues.md).
