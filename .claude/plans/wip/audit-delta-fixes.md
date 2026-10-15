@@ -1548,3 +1548,36 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
   on real runners; `fail-fast: false` still gates the release on all five builds. Stale
   `.github/copilot-instructions.md` line removed inline in a846e27.
 - Wave-1 tree: a846e27. Wave 2 spawned from it: adf-db-batch, adf-web-hide, adf-web-cmd.
+
+### Wave 2 (2026-10-15): adf-web-cmd, adf-web-hide, adf-db-batch (from a846e27; wave-1 tree + df20c06)
+- Integration fix before wave 2 merges: `TestAuthFailures` timed out once in the wave-1 full run (three implementer
+  suites in parallel, load average 12; passes alone and in a rerun) → `authLogin` gives the AUTHINFO PASS step a 20 s
+  client deadline (bcrypt under `-race`), df20c06; full nntp suite green afterwards under the same load.
+- adf-web-cmd: `agent-ae81d38ee7a451cfa`, commit 06769ad, review "merge" + MINOR noted (progressDB handle not
+  closed on the exit paths, pre-existing; nothing uses it but the dead `FetchRoutine`), merge 8647368; dead
+  `cmd/web/main_adapters.go` removed inline in 792eeff. Implementer's e2e: E01/E10/E11/E12 PASS. Deviation: the
+  pre-open "Error loading default nntpconfig" fatal removed with the NNTP block. Leftovers: one-shot modes run before
+  `signal.Notify`; a failed `UpdateNewsgroupActive` is logged and the run still exits 0; `FetchRoutine` is dead code.
+- adf-web-hide: `agent-a748f81a2302ff1fe`, commits af11262 + 87a5364 (ownership extended to
+  `internal/web/w1_api_test.go` — two thread-tree tests need `w1APIEnable` since D3 — and
+  `web/templates/section-article.html` — pre-existing `.Article.ArticleNum` made every section article page a 500),
+  review "merge" + MINOR noted (`/api/thread-tree` still returns the raw `from_header` of visible nodes; D3 asks only
+  D2 redaction), merge a5fe230; reply prefill now says "Article not found" for a missing article too (09265b0).
+  Deviation: a hidden thread root gets a `[hidden article]` placeholder Overview on the tree pages for non-admins.
+  Leftovers: a node whose Overview failed to load cannot be marked hidden (renders "Unknown Subject", link 404s);
+  `lookupReplyReferences` copies a hidden article's References into a reply; `thread-tree.html` shows an empty
+  Message-ID row and a "View article" button for the placeholder.
+- adf-db-batch: `agent-a3cd2421442729e23`, commits bdf0c03 + 31537bf + 466eab0, review "fix first" twice:
+  MAJOR M1 (the task lookup ran before the MaxQueued brake, so a brake longer than the 120 s expiry could orphan the
+  task and lose the article) → lookup after the brake; m2 defensive `MAX(last_num, COALESCE(MAX(article_num),0)) + 1`
+  in both inserts; **m3 amends D4**: the sequence is seeded with the maximum over `articles.article_num`,
+  `threads.root/parent/child_article`, `thread_cache.thread_root/last_child_number`, `cached_trees.thread_root`,
+  `tree_stats.thread_root`, so numbers whose derived rows survived an old expire-news run are never handed out again;
+  the first m1 fix (a global in-flight capture guard on expiry) was itself a MAJOR (expiry starved under a DB-bound
+  backfill: every touched group's task + BATCHchan retained) and was replaced by **interned newsgroup pointers**
+  (`SQ3batch.groupNames`, never expired; a recreated task carries the same `*string`, closing the A-db-5/A-db-2
+  pointer class); merge 7ff04a3. Brake thresholds are `maxQueued*80/100`/`*20/100` (the old `/100*80` is 0 at the
+  minimum 16). `BatchDividerChan` global deleted (no outside users). Reopen allow-list now only `cleanupExpired`.
+- Wave-3 greps on 7ff04a3: A-tools-1 closed (`captureLimiter` defined and used, 0 per-group capture goroutines),
+  A-tools-4 closed (`newDownloadRun`), A-ops-3d/f closed; SIGTERM in cmd/web, nntp-fetcher, expire-news, post-queue,
+  history-rebuild, nntp-transfer.
