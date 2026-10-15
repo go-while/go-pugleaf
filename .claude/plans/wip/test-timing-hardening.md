@@ -50,15 +50,18 @@ anchors against the tree the run starts from).
 
 ## Waves
 
-### Wave 0 (inline, orchestrator)
-- Confirm D1/D2 with the user; re-check survey anchors on the starting tree; baseline checks; `git mv` to wip.
+### Wave 0 (inline, orchestrator) — DONE 2026-10-15
+- User accepted D1 (P1 counters) and D2, Q2 = 60 s. Done inline so every slice can run in one wave: `NNTPServer`
+  got `errorDelays`/`articleDelays` (`atomic.Int64`, incremented at the five delay sites whether or not the delay is
+  > 0; accessors `ErrorDelayCount()`/`ArticleDelayCount()`), and the harness got `hDeadline` (var, from
+  `PUGLEAF_TEST_DEADLINE`, default 60 s) used by `hs.dial`. Slices use these; wave B below collapses into wave A.
 
-### Wave A (6 parallel slices, owned files disjoint)
+### Wave A (7 parallel slices, owned files disjoint; tth-nntp-rfc no longer waits for wave B)
 - slice `tth-nntp-harness`: `internal/nntp/nntp-server-harness_test.go`, `nntp-server-session_test.go`,
   `nntp-server-auth_test.go`, `nntp-server-overview_test.go`, `nntp-server-article_test.go`,
   `nntp-server-rfccmds_test.go`, `nntp-server-group_test.go`, `nntp-intake_test.go`, `nntp-wiring_test.go`.
   `hDeadline` + env override, clamps in `tryDial`/`sessExpectClosed`; TestHarnessIsolatedTimeout, TestSessStop,
-  TestOvrHugeRange, TestArtNoDelay (needs D1: keep a TODO marker if P1 lands in wave B), artPollStat223.
+  TestOvrHugeRange, TestArtNoDelay (structural via ArticleDelayCount), artPollStat223.
 - slice `tth-nntp-client`: `nntp-client-{fake,conn,cmds,validate,progress}_test.go`: `cliWait`, WaitOpen clamp,
   D5; the eight "Connect took < Ns" bounds become timeout-error checks.
 - slice `tth-database`: delete `TestNSHAuthUnknownUserTiming` (`nsh_auth_test.go`, keep the `time` import if still
@@ -75,10 +78,8 @@ anchors against the tree the run starts from).
   (:366 Serve-after-Stop → `testWait`), `cmd/nntp-server/server_e2e_test.go`, `e2e_binary_test.go`,
   `e2e_binary_rfc_test.go` (10 s/20 s guards → `testWait`, 1 s `intakeDLTestWait`).
 
-### Wave B (1 slice, after wave A is merged)
-- slice `tth-nntp-rfc`: P1 (D1) in `internal/nntp/nntp-cmd-helpers.go`, `nntp-server.go`, `nntp-article-common.go`,
-  `nntp-cmd-nextlast.go`, `nntp-cmd-over-hdr.go`; then `nntp-rfc-{stream,starttls,reader,lists,overview}_test.go`
-  and `nntp-wildmat_test.go` rewritten against the counters and `hDeadline`; the TestArtNoDelay TODO from wave A.
+- slice `tth-nntp-rfc` (now in wave A): `nntp-rfc-{stream,starttls,reader,lists,overview}_test.go` and
+  `nntp-wildmat_test.go` rewritten against the P1 counters and `hDeadline` (production files already changed in wave 0).
 
 ## Checks
 ```bash
