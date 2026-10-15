@@ -274,8 +274,9 @@ func TestAdfCronAdminPageWithoutEdit(t *testing.T) {
 	if enableBtn.MatchString(body) {
 		t.Errorf("crons tab without -edit-cronjobs shows the enable button of job %d", job.ID)
 	}
-	if !strings.Contains(body, "-edit-cronjobs flag") {
-		t.Errorf("crons tab without -edit-cronjobs does not show the hint")
+	// The card header always mentions the flag; the {{else}} hint is the warning alert.
+	if !strings.Contains(body, `alert alert-warning mb-0`) {
+		t.Errorf("crons tab without -edit-cronjobs does not show the hint alert")
 	}
 
 	// Control: with the flag both are shown, so the assertions above test the gate.

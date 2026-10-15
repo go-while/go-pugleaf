@@ -144,7 +144,7 @@
                   </div>
                   {{else}}
                   <div class="alert alert-info">
-                      <strong>No cron jobs found.</strong> Create the first cron job below.
+                      <strong>No cron jobs found.</strong>{{if .CronEdit}} Create the first cron job below.{{end}}
                   </div>
                   {{end}}
               </div>
