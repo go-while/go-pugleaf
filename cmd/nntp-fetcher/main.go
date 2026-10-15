@@ -710,8 +710,6 @@ const (
 	fetcherMaxBatch = 1000
 )
 
-// clampFetcherFlags brings the numeric fetcher flags into their valid ranges.
-// -max-batch above fetcherMaxBatch is clamped with a warning.
 // startFetcherSignalHandler registers SIGINT/SIGTERM and turns the first one into
 // common.ForceShutdown (the workers and UpdateNewsgroupList poll common.WantShutdown).
 func startFetcherSignalHandler() {
@@ -740,6 +738,8 @@ func resetProgressTargets(newsgroups []*models.Newsgroup, wildcardNG string) []*
 	return out
 }
 
+// clampFetcherFlags brings the numeric fetcher flags into their valid ranges.
+// -max-batch above fetcherMaxBatch is clamped with a warning.
 func clampFetcherFlags(maxBatch, maxBatchThreads, maxQueued, downloadMaxPar *int) {
 	if *downloadMaxPar < 1 {
 		*downloadMaxPar = 1
