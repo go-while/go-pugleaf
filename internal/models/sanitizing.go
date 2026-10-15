@@ -213,9 +213,9 @@ func (a *Article) PrintSanitized(field string, groupName ...string) template.HTM
 	case "message_id", "messageid":
 		text = a.MessageID
 	case "subject":
-		text = truncateSubject(a.sanitizedFields().Subject)
+		text = truncateSubject(a.sanitizedSubject())
 	case "from", "fromheader":
-		text = a.sanitizedFields().FromHeader
+		text = a.sanitizedFromHeader()
 	case "date", "date_string":
 		if !a.DateSent.IsZero() {
 			text = a.DateSent.Format("Mon, 02 Jan 2006 15:04")
@@ -229,9 +229,9 @@ func (a *Article) PrintSanitized(field string, groupName ...string) template.HTM
 			text = "-???-"
 		}
 	case "references":
-		text = a.sanitizedFields().References
+		text = a.sanitizedReferences()
 	case "body", "body_text", "bodytext":
-		text = a.sanitizedFields().BodyText
+		text = a.sanitizedBodyText()
 	case "path":
 		text = a.Path
 	case "headers_json":
@@ -472,13 +472,25 @@ type sanitizedArticleFields struct {
 // from the unmodified fields. The caller must hold a.Mux (read lock is enough).
 func (a *Article) sanitizedFields() sanitizedArticleFields {
 	return sanitizedArticleFields{
-		Subject:    sanitizeText(a.Subject),
-		FromHeader: sanitizeText(filterMailDomainInFromHeader(a.FromHeader)),
-		BodyText:   sanitizeText(a.BodyText),
+		Subject:    a.sanitizedSubject(),
+		FromHeader: a.sanitizedFromHeader(),
+		BodyText:   a.sanitizedBodyText(),
 		DateString: sanitizeText(a.DateString),
-		References: sanitizeText(a.References),
+		References: a.sanitizedReferences(),
 	}
 }
+
+// Per-field variants of sanitizedFields, so PrintSanitized only runs the
+// sanitizing regexes over the field it renders. Caller holds a.Mux.
+func (a *Article) sanitizedSubject() string { return sanitizeText(a.Subject) }
+
+func (a *Article) sanitizedFromHeader() string {
+	return sanitizeText(filterMailDomainInFromHeader(a.FromHeader))
+}
+
+func (a *Article) sanitizedBodyText() string { return sanitizeText(a.BodyText) }
+
+func (a *Article) sanitizedReferences() string { return sanitizeText(a.References) }
 
 // StripDangerousHTML removes potentially dangerous HTML/script content from all user-facing fields.
 // It MUTATES the Article in place (Subject, FromHeader, BodyText, DateString, References) and sets
