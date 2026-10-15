@@ -112,9 +112,10 @@ func adfCronRegistered(cm *CronJobManager, id int64) *CronJob {
 	return cm.jobs[id]
 }
 
-// adfCronWait polls cond every 10 ms for at most 2 s.
+// adfCronWait polls cond every 10 ms for at most testWait (a hang guard: every caller waits for
+// something that does happen in a passing run).
 func adfCronWait(cond func() bool) bool {
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWait)
 	for {
 		if cond() {
 			return true
@@ -391,13 +392,33 @@ func TestAdfCronSingleScheduler(t *testing.T) {
 	}
 	ptr := fmt.Sprintf("%p", job)
 
-	maxSeen, samples := 0, 0
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	countRuns := func() int {
+		job.mutex.RLock()
+		defer job.mutex.RUnlock()
+		runs := 0
+		for _, l := range job.Output {
+			if strings.Contains(l, "Job completed") {
+				runs++
+			}
+		}
+		return runs
+	}
+	// Sample for a 2 s observation window (the sampling window, not a bound) and in any case
+	// until the job has run at least twice, so the samples span several scheduler cycles even
+	// on a loaded machine. testWait only stops a scheduler that never cycles.
+	maxSeen, samples, runs := 0, 0, 0
+	window := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWait)
+	for {
 		n := adfCronSchedulerFrames(ptr)
 		samples++
 		if n > maxSeen {
 			maxSeen = n
+		}
+		runs = countRuns()
+		now := time.Now()
+		if (runs >= 2 && now.After(window)) || now.After(deadline) {
+			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -407,16 +428,8 @@ func TestAdfCronSingleScheduler(t *testing.T) {
 	if maxSeen == 0 {
 		t.Logf("no runJobScheduler frame showed the job pointer in %d samples (traceback arguments not readable)", samples)
 	}
-	job.mutex.RLock()
-	runs := 0
-	for _, l := range job.Output {
-		if strings.Contains(l, "Job completed") {
-			runs++
-		}
-	}
-	job.mutex.RUnlock()
 	if runs < 2 {
-		t.Fatalf("the job ran %d times in 2 s, want several cycles of the scheduler loop", runs)
+		t.Fatalf("the job ran %d times within %v, want several cycles of the scheduler loop", runs, testWait)
 	}
 
 	// Disabled, the scheduler ends at the top of its next cycle and forgets the job.

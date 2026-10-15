@@ -26,7 +26,7 @@ func lo1CoreNewServer(t *testing.T) *WebServer {
 	cfg.SSL = false
 	srv := NewWebServer(w0DB(t), cfg, nil, false, true)
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), testShutdownWait())
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
 			t.Errorf("Shutdown: %v", err)
@@ -128,13 +128,15 @@ func TestLo1CoreShutdownCancelsInFlight(t *testing.T) {
 
 	select {
 	case <-started:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("the blocking handler never ran")
 	}
 	if n := srv.inFlightRequests.Load(); n < 1 {
 		t.Fatalf("inFlightRequests = %d while a handler runs, want >= 1", n)
 	}
 
+	// Deliberately short: this graceful deadline has to expire, because the handler only
+	// returns once Shutdown cancels its request context. It is the input, not a hang guard.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
@@ -146,15 +148,16 @@ func TestLo1CoreShutdownCancelsInFlight(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Shutdown = %v, want nil after the cancelled handler finished", err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Shutdown did not return within 2s")
+	case <-time.After(testWait):
+		t.Fatalf("Shutdown did not return within %v", testWait)
 	}
+	// The structural check: the handler saw its request context end (it blocks on nothing else).
 	select {
 	case <-cancelled:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("the request context of the blocked handler was never cancelled")
 	}
-	if n := lo1CoreWaitInFlight(srv, 2*time.Second); n != 0 {
+	if n := lo1CoreWaitInFlight(srv, testWait); n != 0 {
 		t.Fatalf("inFlightRequests = %d after Shutdown, want 0", n)
 	}
 	select {
@@ -162,7 +165,7 @@ func TestLo1CoreShutdownCancelsInFlight(t *testing.T) {
 		if !errors.Is(err, http.ErrServerClosed) {
 			t.Fatalf("serveOn returned %v, want http.ErrServerClosed", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("serveOn did not return after Shutdown")
 	}
 }
@@ -209,7 +212,7 @@ func TestLo1CoreTokenUsageBuffered(t *testing.T) {
 			t.Fatalf("request %d after flush: status %d", i, rec.Code)
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testShutdownWait())
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		t.Fatalf("Shutdown: %v", err)
@@ -236,10 +239,11 @@ func TestLo1CoreFinalFlushBounded(t *testing.T) {
 		t.Fatalf("CreateAPIToken: %v", err)
 	}
 	srv := lo1CoreNewServer(t)
+	logs := lo2ServerCaptureLog(t)
 
 	// First shutdown: the flusher does its own last flush and stops (tokenUsageDone is closed),
 	// so the second one below runs exactly the final flush this test is about.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testShutdownWait())
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		t.Fatalf("first Shutdown: %v", err)
@@ -260,21 +264,45 @@ func TestLo1CoreFinalFlushBounded(t *testing.T) {
 	release := func() { once.Do(func() { _ = tx.Rollback() }) }
 	defer release()
 
-	done := make(chan time.Duration, 1)
-	go func() {
-		start := time.Now()
-		_ = srv.Shutdown(ctx)
-		done <- time.Since(start)
-	}()
+	// Structural, not timed: Shutdown has to return while the lock is still held (an unbounded
+	// flush blocks for minutes of busy time, far beyond the guard), and it has to have got there
+	// by giving up on the flush after its grace, which it logs. A Shutdown that waited for the
+	// flush to finish could only return after release() below and would log no give-up line.
+	const gaveUp = "[WEB]: API token usage of the drained requests not written within"
+	before := logs.countLines(gaveUp)
+	done := make(chan error, 1)
+	go func() { done <- srv.Shutdown(ctx) }()
 	select {
-	case took := <-done:
-		if took > shutdownGrace+3*time.Second {
-			t.Fatalf("Shutdown took %v with a locked main DB, want at most the %v grace", took, shutdownGrace)
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("second Shutdown = %v, want nil (no HTTP server, only the flush timed out)", err)
 		}
-	case <-time.After(shutdownGrace + 3*time.Second):
-		t.Fatalf("Shutdown did not return within %v although the main DB is locked", shutdownGrace+3*time.Second)
+	case <-time.After(shutdownGrace + testWait):
+		t.Fatalf("Shutdown did not return within %v although only the final flush blocks on the locked main DB",
+			shutdownGrace+testWait)
 	}
-	release() // let the abandoned writer finish instead of retrying into the next test
+	if n := logs.countLines(gaveUp); n != before+1 {
+		t.Fatalf("Shutdown returned without giving up on the blocked final flush (%d %q line(s), want %d):\n%s",
+			n, gaveUp, before+1, logs.String())
+	}
+	if count, _ := lo1CoreTokenUsage(t, token.ID); count != 0 {
+		t.Fatalf("usage_count = %d while the main DB was locked, want 0", count)
+	}
+
+	// Let the abandoned writer finish instead of retrying into the next test: with the lock
+	// gone its pending UPDATE goes through. Only a wait, not part of the assertion.
+	release()
+	deadline := time.Now().Add(testWait)
+	for {
+		if count, _ := lo1CoreTokenUsage(t, token.ID); count == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Logf("the abandoned usage writer did not finish within %v after the lock was released", testWait)
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // TestLo1CoreTokenUsageDuringDrain: the usage of a request that is served while Shutdown drains
@@ -294,8 +322,16 @@ func TestLo1CoreTokenUsageDuringDrain(t *testing.T) {
 	srv.Router.GET("/lo1core/drain", func(c *gin.Context) {
 		close(started)
 		// Stay in flight until Shutdown is draining, then make an authenticated API request
-		// from inside that window: by then the usage flusher has already stopped.
-		time.Sleep(300 * time.Millisecond)
+		// from inside that window. tokenUsageDone closes once the usage flusher has done its
+		// last flush and stopped, which only happens after Shutdown closed stopCh, while this
+		// handler keeps the drain open.
+		select {
+		case <-srv.tokenUsageDone:
+		case <-time.After(testWait):
+			drainCode <- -1 // the flusher never stopped: reported by the test below
+			c.String(http.StatusOK, "flusher still running")
+			return
+		}
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/groups", nil)
 		req.RemoteAddr = "192.0.2.10:1234"
 		req.Header.Set(APIAuthHeader, plain)
@@ -327,20 +363,23 @@ func TestLo1CoreTokenUsageDuringDrain(t *testing.T) {
 
 	select {
 	case <-started:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("the draining handler never ran")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testShutdownWait())
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		t.Fatalf("Shutdown: %v", err) // the handler finishes well inside the deadline
 	}
 	select {
 	case code := <-drainCode:
+		if code == -1 {
+			t.Fatal("the usage flusher did not stop while Shutdown drained the requests")
+		}
 		if code != http.StatusOK {
 			t.Fatalf("API request during the drain: status %d, want 200", code)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(testWait):
 		t.Fatal("the API request during the drain never completed")
 	}
 	if count, lastUsed := lo1CoreTokenUsage(t, token.ID); count != 1 || lastUsed == "" {
@@ -352,7 +391,7 @@ func TestLo1CoreTokenUsageDuringDrain(t *testing.T) {
 		if !errors.Is(err, http.ErrServerClosed) {
 			t.Fatalf("serveOn returned %v, want http.ErrServerClosed", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("serveOn did not return after Shutdown")
 	}
 }

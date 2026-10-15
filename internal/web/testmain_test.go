@@ -34,6 +34,32 @@ var (
 	w0Seq      atomic.Int64
 )
 
+// testWait is the hang guard of this package's tests: every time.After, context and poll
+// deadline that only exists to stop a hung test uses it, so a passing test never waits on it
+// and a loaded machine does not fail one. Deliberately short windows (a deadline a test wants to
+// expire, a sampling window) keep their own values and say so. Override with
+// PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s). Plan test-timing-hardening D3.
+var testWait = testWaitFromEnv(60 * time.Second)
+
+func testWaitFromEnv(def time.Duration) time.Duration {
+	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+// testShutdownWait is the deadline of the contexts passed to WebServer.Shutdown: testWait, but
+// never under 30 s. When that context ends Shutdown takes its cancel path and may report an
+// error, so this deadline decides pass or fail and must not be reachable on a loaded machine.
+func testShutdownWait() time.Duration {
+	if testWait < 30*time.Second {
+		return 30 * time.Second
+	}
+	return testWait
+}
+
 // w0Req describes one request served by w0Do.
 type w0Req struct {
 	Method     string            // default GET

@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,28 @@ func fuCronJobIDs(cm *CronJobManager) []int64 {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// fuCronParkedInStartJob reports whether a goroutine is in startJob, called from
+// loadAndStartJobs, waiting for cm.mutex (the traceback shows the sync.(*RWMutex).Lock frame).
+func fuCronParkedInStartJob() bool {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, "sync.(*RWMutex).Lock(") &&
+			strings.Contains(g, "(*CronJobManager).startJob(") &&
+			strings.Contains(g, "(*CronJobManager).loadAndStartJobs(") {
+			return true
+		}
+	}
+	return false
 }
 
 // TestFuCronLoadAndStartJobsStopsOnStopChannel: once StopCronManager has closed stopChannel,
@@ -115,8 +138,18 @@ func TestFuCronStartJobLosesRaceToStopSnapshot(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- cm.loadAndStartJobs() }()
 	<-loaded
-	time.Sleep(50 * time.Millisecond) // let the goroutine reach startJob and park on the lock
-	close(cm.stopChannel)             // StopCronManager closes stopChannel before it locks
+	// Wait until the goroutine is past loadAndStartJobs' own stop check and parked in startJob
+	// on the lock, so the close below lands exactly in the window this test is about.
+	deadline := time.Now().Add(testWait)
+	for !fuCronParkedInStartJob() {
+		if time.Now().After(deadline) {
+			close(cm.stopChannel)
+			cm.mutex.Unlock()
+			t.Fatalf("loadAndStartJobs never reached startJob's lock within %v", testWait)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(cm.stopChannel) // StopCronManager closes stopChannel before it locks
 	cm.mutex.Unlock()
 
 	select {
@@ -124,7 +157,7 @@ func TestFuCronStartJobLosesRaceToStopSnapshot(t *testing.T) {
 		if err != nil {
 			t.Fatalf("loadAndStartJobs = %v, want nil", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("loadAndStartJobs did not return")
 	}
 	if ids := fuCronJobIDs(cm); len(ids) != 0 {

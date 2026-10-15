@@ -254,6 +254,17 @@ func TestLo2ServerChatBodyLimit(t *testing.T) {
 	}
 }
 
+// lo2ServerCountingRT counts the requests it carries, so a test can tell which client sent them.
+type lo2ServerCountingRT struct {
+	next  http.RoundTripper
+	calls atomic.Int64
+}
+
+func (rt *lo2ServerCountingRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	rt.calls.Add(1)
+	return rt.next.RoundTrip(r)
+}
+
 // F12: a proxy that never answers must not block the sync handler.
 func TestLo2ServerOllamaSyncTimeout(t *testing.T) {
 	// A listener that accepts and then stays silent, so only the client timeout ends the call.
@@ -290,13 +301,16 @@ func TestLo2ServerOllamaSyncTimeout(t *testing.T) {
 
 	oldURL, oldClient := ProxyURL, ollamaSyncHTTPClient
 	ProxyURL = "http://" + ln.Addr().String() + "/models"
-	ollamaSyncHTTPClient = &http.Client{Timeout: 100 * time.Millisecond}
+	rt := &lo2ServerCountingRT{next: http.DefaultTransport}
+	ollamaSyncHTTPClient = &http.Client{Timeout: 100 * time.Millisecond, Transport: rt}
 	t.Cleanup(func() {
 		ProxyURL, ollamaSyncHTTPClient = oldURL, oldClient
 	})
 
+	logs := lo2ServerCaptureLog(t)
 	_, cookie := w0NewUser(t, true)
 	done := make(chan *httptest.ResponseRecorder, 1)
+	start := time.Now()
 	go func() {
 		done <- w0Do(t, w0Req{Method: http.MethodPost, Path: "/admin/aimodels/sync", Cookies: []*http.Cookie{cookie}})
 	}()
@@ -305,8 +319,22 @@ func TestLo2ServerOllamaSyncTimeout(t *testing.T) {
 		if rec.Code != http.StatusSeeOther {
 			t.Fatalf("sync against a dead proxy: status %d, want 303 (body %q)", rec.Code, rec.Body.String())
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("adminSyncOllamaModels did not return within 2s against a proxy that never answers")
+		// Second line of defence, a deliberate margin: 10 s is 100x the 100 ms timeout set
+		// above and still below the 15 s of the production client, so a handler that bypassed
+		// ollamaSyncHTTPClient for a client of its own could not pass here.
+		if took := time.Since(start); took >= 10*time.Second {
+			t.Fatalf("adminSyncOllamaModels took %v against a proxy that never answers, want < 10s (client timeout 100ms)", took)
+		}
+	case <-time.After(testWait):
+		t.Fatalf("adminSyncOllamaModels did not return within %v against a proxy that never answers", testWait)
+	}
+	// Structural: the request went through ollamaSyncHTTPClient (its transport counted it) and
+	// the call ended on that client's timeout (its error says so).
+	if n := rt.calls.Load(); n < 1 {
+		t.Errorf("ollamaSyncHTTPClient carried %d requests, want >= 1: the handler used another client", n)
+	}
+	if !strings.Contains(logs.String(), "Client.Timeout exceeded") {
+		t.Errorf("the sync did not end on the HTTP client timeout:\n%s", logs.String())
 	}
 	select {
 	case <-accepted:
@@ -338,7 +366,7 @@ func TestLo2ServerCronLoopSurvivesLoadError(t *testing.T) {
 	db.WG.Add(1)
 	cm.StartCronManager()
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWait)
 	for calls.Load() < 3 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -353,10 +381,10 @@ func TestLo2ServerCronLoopSurvivesLoadError(t *testing.T) {
 	// every 10ms while it runs. (The MainWG slot is released by StopCronManager's own goroutine;
 	// the shared test DB has other slot holders, so it cannot be observed by waiting on db.WG.)
 	cm.StopCronManager()
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(testWait)
 	for {
 		before := calls.Load()
-		time.Sleep(100 * time.Millisecond) // 10 reload intervals
+		time.Sleep(100 * time.Millisecond) // quiet window: 10 reload intervals without a load
 		if calls.Load() == before {
 			break
 		}
