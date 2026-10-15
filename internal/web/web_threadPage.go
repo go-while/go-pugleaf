@@ -150,7 +150,7 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 	}
 
 	// Batch sanitize all thread articles for better performance
-	models.BatchSanitizeArticles(threadMessages)
+	models.BatchSanitizeArticles(threadMessages, groupName)
 
 	// Get base template data with authentication context
 	baseData := s.getBaseTemplateData(c, threadRootArticle.GetCleanSubject()+" - Thread")

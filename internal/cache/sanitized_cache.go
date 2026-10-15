@@ -5,6 +5,7 @@ import (
 	"html/template"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -75,6 +76,93 @@ func NewSanitizedCache(maxEntries int, maxAge time.Duration) *SanitizedCache {
 	return sc
 }
 
+// sanitizedFieldNames maps every accepted field name (lower case) to its
+// canonical name. It is the only alias table: GetField, SetField, SetArticle
+// and BatchSetArticles all resolve names through it (A-web-10), so an alias
+// such as "from" or "fromheader" always hits the same slot.
+var sanitizedFieldNames = map[string]string{
+	"subject":      "subject",
+	"author":       "from",
+	"from":         "from",
+	"fromheader":   "from",
+	"from_header":  "from",
+	"body":         "body",
+	"bodytext":     "body",
+	"body_text":    "body",
+	"date":         "date",
+	"datestring":   "date",
+	"date_string":  "date",
+	"date_since":   "date_since",
+	"references":   "references",
+	"messageid":    "messageid",
+	"message_id":   "messageid",
+	"path":         "path",
+	"headers_json": "headers_json",
+}
+
+// CanonicalField returns the canonical name of a sanitized field and whether
+// the name is known. Field names are case-insensitive.
+func CanonicalField(field string) (string, bool) {
+	canon, ok := sanitizedFieldNames[strings.ToLower(field)]
+	return canon, ok
+}
+
+// slot returns the struct field that stores the given field name, or nil for
+// an unknown name. Caller must hold article.mux.
+func (article *SanitizedArticle) slot(field string) *template.HTML {
+	canon, ok := CanonicalField(field)
+	if !ok {
+		return nil
+	}
+	switch canon {
+	case "subject":
+		return &article.Subject
+	case "from":
+		return &article.Author
+	case "body":
+		return &article.Body
+	case "date":
+		return &article.Date
+	case "references":
+		return &article.References
+	case "messageid":
+		return &article.MessageID
+	case "path":
+		return &article.Path
+	case "headers_json":
+		return &article.HeadersJSON
+	case "date_since":
+		return &article.DateSince
+	}
+	return nil
+}
+
+// setFieldsLocked stores the known fields and returns the size change.
+// Unknown field names are ignored and not counted. Caller must hold article.mux.
+func (article *SanitizedArticle) setFieldsLocked(fields map[string]template.HTML) int64 {
+	var sizeDiff int64
+	for field, value := range fields {
+		p := article.slot(field)
+		if p == nil {
+			continue
+		}
+		sizeDiff += int64(len(value)) - int64(len(*p))
+		*p = value
+	}
+	article.Size += sizeDiff
+	return sizeDiff
+}
+
+// hasKnownField reports whether at least one field name is known.
+func hasKnownField(fields map[string]template.HTML) bool {
+	for field := range fields {
+		if _, ok := CanonicalField(field); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // GetField retrieves a specific sanitized field from a cached article
 func (sc *SanitizedCache) GetField(messageID string, field string) (template.HTML, bool) {
 
@@ -101,25 +189,8 @@ func (sc *SanitizedCache) GetField(messageID string, field string) (template.HTM
 	var value template.HTML
 	article.mux.Lock()
 	article.LastUsed = time.Now()
-	switch field {
-	case "subject":
-		value = article.Subject
-	case "author", "fromheader":
-		value = article.Author
-	case "body", "bodytext":
-		value = article.Body
-	case "date", "date_string":
-		value = article.Date
-	case "references":
-		value = article.References
-	case "messageid":
-		value = article.MessageID
-	case "path":
-		value = article.Path
-	case "headers_json":
-		value = article.HeadersJSON
-	case "date_since":
-		value = article.DateSince
+	if p := article.slot(field); p != nil {
+		value = *p
 	}
 	article.mux.Unlock()
 
@@ -149,74 +220,21 @@ func (sc *SanitizedCache) GetArticle(messageID string) (*SanitizedArticle, bool)
 	return article, true
 }
 
-// SetField stores a single sanitized field, creating or updating the article entry
+// SetField stores a single sanitized field, creating or updating the article entry.
+// An unknown field name is not stored and creates no entry.
 func (sc *SanitizedCache) SetField(messageID string, field string, value template.HTML) {
-	now := time.Now()
-
-	sc.mutex.Lock()
-	// Get existing article or create new one
-	article, exists := sc.cache[messageID]
-	if !exists {
-		//log.Printf("SanitizedCache: SetField '%s': creating new entry for messageID '%s'", field, messageID)
-
-		article = &SanitizedArticle{
-			CreatedAt: now,
-			LastUsed:  now,
-		}
-		sc.cache[messageID] = article
-		sc.enforceLimitLocked()
+	if _, ok := CanonicalField(field); !ok {
+		return
 	}
-	sc.mutex.Unlock()
-
-	article.mux.Lock()
-	// Calculate old size for this field to avoid double-counting
-	var oldSize int64
-	switch field {
-	case "subject":
-		oldSize = int64(len(article.Subject))
-		article.Subject = value
-	case "author", "fromheader":
-		oldSize = int64(len(article.Author))
-		article.Author = value
-	case "body", "bodytext":
-		oldSize = int64(len(article.Body))
-		article.Body = value
-	case "date", "date_string":
-		oldSize = int64(len(article.Date))
-		article.Date = value
-	case "references":
-		oldSize = int64(len(article.References))
-		//log.Printf("SanitizedCache: SetField 'references' for messageID='%s', key='%s', old_len=%d, new_len=%d", messageID, key, len(article.References), len(value))
-		article.References = value
-	case "messageid":
-		oldSize = int64(len(article.MessageID))
-		article.MessageID = value
-	case "path":
-		oldSize = int64(len(article.Path))
-		article.Path = value
-	case "headers_json":
-		oldSize = int64(len(article.HeadersJSON))
-		article.HeadersJSON = value
-	case "date_since":
-		oldSize = int64(len(article.DateSince))
-		article.DateSince = value
-	}
-	article.LastUsed = now
-	newSize := int64(len(value))
-	sizeDiff := newSize - oldSize
-	article.Size += sizeDiff
-	article.mux.Unlock()
-
-	// Update global cache size
-	go func(sc *SanitizedCache, sizeDiff int64) {
-		sc.countermux.Lock()
-		sc.cachedSize += sizeDiff
-		sc.countermux.Unlock()
-	}(sc, sizeDiff)
+	sc.SetArticle(messageID, map[string]template.HTML{field: value})
 }
 
-// SetArticle stores a complete sanitized article in one operation
+// SetArticle stores sanitized fields of one article in one operation. Fields not
+// in the map keep their cached value; unknown field names are ignored.
 func (sc *SanitizedCache) SetArticle(messageID string, sanitizedFields map[string]template.HTML) {
+	if !hasKnownField(sanitizedFields) {
+		return
+	}
 	now := time.Now()
 
 	sc.mutex.Lock()
@@ -233,37 +251,8 @@ func (sc *SanitizedCache) SetArticle(messageID string, sanitizedFields map[strin
 	sc.mutex.Unlock()
 
 	article.mux.Lock()
-	oldSize := article.Size
-	var newSize int64
-
-	// Set all fields from the map
-	for field, value := range sanitizedFields {
-		switch field {
-		case "subject":
-			article.Subject = value
-		case "author", "fromheader":
-			article.Author = value
-		case "body", "bodytext":
-			article.Body = value
-		case "date", "date_string":
-			article.Date = value
-		case "references":
-			article.References = value
-		case "messageid":
-			article.MessageID = value
-		case "path":
-			article.Path = value
-		case "headers_json":
-			article.HeadersJSON = value
-		case "date_since":
-			article.DateSince = value
-		}
-		newSize += int64(len(value))
-	}
-
+	sizeDiff := article.setFieldsLocked(sanitizedFields)
 	article.LastUsed = now
-	sizeDiff := newSize - oldSize
-	article.Size = newSize
 	article.mux.Unlock()
 
 	// Update global cache size
@@ -285,6 +274,9 @@ func (sc *SanitizedCache) BatchSetArticles(articles map[string]map[string]templa
 	added := false
 	sc.mutex.Lock()
 	for messageID, fields := range articles {
+		if !hasKnownField(fields) {
+			continue
+		}
 
 		// Get existing article or create new one
 		article, exists := sc.cache[messageID]
@@ -299,37 +291,8 @@ func (sc *SanitizedCache) BatchSetArticles(articles map[string]map[string]templa
 
 		// Set fields for this article
 		article.mux.Lock()
-		oldSize := article.Size
-		var newSize int64
-
-		for field, value := range fields {
-			switch field {
-			case "subject":
-				article.Subject = value
-			case "author", "fromheader", "from", "from_header":
-				article.Author = value
-			case "body", "bodytext", "body_text":
-				article.Body = value
-			case "date", "datestring", "date_string":
-				article.Date = value
-			case "references":
-				article.References = value
-			case "messageid":
-				article.MessageID = value
-			case "path":
-				article.Path = value
-			case "headers_json":
-				article.HeadersJSON = value
-			case "date_since":
-				article.DateSince = value
-			}
-			newSize += int64(len(value))
-		}
-
+		totalSizeDiff += article.setFieldsLocked(fields)
 		article.LastUsed = now
-		sizeDiff := newSize - oldSize
-		article.Size = newSize
-		totalSizeDiff += sizeDiff
 		article.mux.Unlock()
 	}
 	if added {

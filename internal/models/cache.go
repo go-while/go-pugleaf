@@ -28,46 +28,42 @@ func GetSanitizedCache() *cache.SanitizedCache {
 	return sanitizedCache
 }
 
-// CacheKey generates a cache key for article fields
-type CacheKey struct {
-	MessageID string
-	Field     string
+// sanitizedCacheKey builds the sanitized-cache key for one article in one
+// group (A-web-10). Message-IDs are only unique per group, so the group is part
+// of the key. It returns "" (do not cache) when either part is empty.
+func sanitizedCacheKey(groupName, messageID string) string {
+	if groupName == "" || messageID == "" {
+		return ""
+	}
+	return groupName + "\x00" + messageID
 }
 
-// GetCachedSanitized retrieves a cached sanitized field value by message ID
-func GetCachedSanitized(messageID string, field string) (template.HTML, bool) {
-	if DisableSanitizedCache || sanitizedCache == nil || messageID == "" {
+// firstGroupName returns the optional group argument of the display functions.
+func firstGroupName(groupName []string) string {
+	if len(groupName) == 0 {
+		return ""
+	}
+	return groupName[0]
+}
+
+// GetCachedSanitized retrieves a cached sanitized field value of an article in a group.
+// Without a group or message ID nothing is cached.
+func GetCachedSanitized(groupName, messageID, field string) (template.HTML, bool) {
+	key := sanitizedCacheKey(groupName, messageID)
+	if DisableSanitizedCache || sanitizedCache == nil || key == "" {
 		return "", false
 	}
-	return sanitizedCache.GetField(messageID, field)
+	return sanitizedCache.GetField(key, field)
 }
 
-// SetCachedSanitized stores a sanitized field value in cache by message ID
-func SetCachedSanitized(messageID string, field string, value template.HTML) {
-	if DisableSanitizedCache {
+// SetCachedSanitized stores a sanitized field value of an article in a group.
+// Without a group or message ID nothing is cached.
+func SetCachedSanitized(groupName, messageID, field string, value template.HTML) {
+	key := sanitizedCacheKey(groupName, messageID)
+	if DisableSanitizedCache || sanitizedCache == nil || key == "" {
 		return
 	}
-	if sanitizedCache != nil && messageID != "" {
-		sanitizedCache.SetField(messageID, field, value)
-	}
-}
-
-// BatchSetCachedSanitized stores multiple complete sanitized articles in cache
-func BatchSetCachedSanitized(articles map[string]map[string]template.HTML) {
-	if DisableSanitizedCache {
-		return
-	}
-	if sanitizedCache != nil && len(articles) > 0 {
-		sanitizedCache.BatchSetArticles(articles)
-	}
-}
-
-// GetCachedSanitizedArticle retrieves a complete cached sanitized article
-func GetCachedSanitizedArticle(messageID string) (*cache.SanitizedArticle, bool) {
-	if DisableSanitizedCache || sanitizedCache == nil || messageID == "" {
-		return nil, false
-	}
-	return sanitizedCache.GetArticle(messageID)
+	sanitizedCache.SetField(key, field, value)
 }
 
 // Global newsgroup cache instance
