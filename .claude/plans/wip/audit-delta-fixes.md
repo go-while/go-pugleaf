@@ -1522,3 +1522,29 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
 - Checks on 576103d: gofmt baseline only; vet OK; build OK; race over 13 package sets ok (incl. cmd/audit-web-posts);
   known bugs `T-nntp-article-1` only.
 - Batch C spawned from 576103d: adf-tools-fetcher, adf-ops-recover, adf-ops-tcp2tor, adf-ops-misc, adf-ops-scripts.
+
+### Wave 1, batch C (2026-10-15): adf-tools-fetcher, adf-ops-recover, adf-ops-tcp2tor, adf-ops-misc, adf-ops-scripts
+- adf-ops-tcp2tor: `agent-a2bdbbf3ff4b9242c`, commit 8164555, review "merge" (nit: no test pins that a forwarded
+  connection keeps no deadline; x/net clears it after CONNECT), merge 6bbebe1.
+- adf-ops-recover: `agent-af81520b9cc8f3bb4`, commit be2bf44, review "merge" + MINOR (help/refusal text omitted the
+  `-db` alias) fixed inline in 81bbc86, merge 0bc9c66. Leftover (pre-existing): repair step 6 queries a non-existent
+  `t.child_articles` column on `threads` (`❌ Could not check threading` on every `-repair`); `fixed++` counts before
+  the UPDATE; parse-failure problems are uncapped.
+- adf-tools-fetcher: `agent-a2e98b7b49517484a`, commit ff22aac, review "merge" + MINOR (SIGTERM caught early but
+  the listener started only after the provider/LIST setup) fixed inline in cf77891 (listener right after Notify),
+  merge dc9beda. Leftover: the `-fetch-newsgroups-from-remote` path installs no signal handler (short run; each row
+  commits on its own).
+- adf-ops-misc: `agent-a9603951559041464`, commits e73a417 + 3ce4b56, review "merge", merge ed88798. Deviation
+  accepted: `parseActiveFile` samples every Nth group of the whole sorted file (≤ 20 000; stride 6) instead of the
+  first 20 000 lines, which hold no `control.*`/`junk`/… group and would fail `TestRealNewsgroupsWithDefaultPatterns`;
+  `PUGLEAF_PEERING_REALDATA=1` uses all 110 980. `TestPerformanceWithRealData` no longer skips. Peering tests ~10 s.
+- adf-ops-scripts: `agent-a7481e793ee995227`, commits 1b67025 + 5c33ccb + 28d8e23, review "fix first": MAJOR (the
+  version regex also ran on tag pushes and rejected the repo's `v0.4.7-1`-style tags) → optional safe suffix
+  `(-[0-9A-Za-z][0-9A-Za-z.-]*)?`; MINORs: the manual migration scripts went from inert to live against `./data`
+  → data dir is a required argument; workflow-level `permissions: contents: read`; nits: `*` stripped from MSYS
+  checksum names, `gcc --version` step on Windows; merge 747cd72. Runner labels: ubuntu-24.04, ubuntu-24.04-arm,
+  macos-15 (macos-14 deprecated), macos-15-intel (macos-13 retired), windows-latest. Leftovers: actions not pinned
+  by SHA; toolchain still `go-version-file: go.mod` (Q4); Windows MinGW/cgo and `GOEXPERIMENT=greenteagc` untested
+  on real runners; `fail-fast: false` still gates the release on all five builds. Stale
+  `.github/copilot-instructions.md` line removed inline in a846e27.
+- Wave-1 tree: a846e27. Wave 2 spawned from it: adf-db-batch, adf-web-hide, adf-web-cmd.
