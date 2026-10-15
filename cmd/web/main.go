@@ -224,6 +224,13 @@ func main() {
 	dbConfig.ArticleCacheSize = maxArticleCache
 	dbConfig.ArticleCacheExpiry = time.Duration(maxArticleCacheExpiry) * time.Minute
 
+	// Set up cross-platform signal handling for graceful shutdown before the database
+	// opens: a signal during a one-shot mode or the server boot is then handled (the
+	// one-shot handler below, or the select at the end of main) instead of killing the
+	// process with the database open.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM) // Ctrl+C and SIGTERM take the same graceful path
+
 	db, err := database.OpenDatabase(dbConfig) // Pass custom dbConfig with cache settings
 	if err != nil {
 		log.Fatalf("[WEB]: Failed to initialize database: %v", err)
@@ -234,6 +241,12 @@ func main() {
 	//log.Printf("[WEB]: Date parser adapter initialized with processor.ParseNNTPDate")
 
 	if oneShot {
+		// a signal tears the database down (exitAfterDB) and ends the run
+		go func() {
+			sig := <-sigChan
+			log.Printf("[WEB]: Received %v during a maintenance mode, shutting down...", sig)
+			exitAfterDB(db, signalExitCode(sig))
+		}()
 		exitAfterDB(db, runMaintenance(db))
 	}
 
@@ -243,7 +256,7 @@ func main() {
 	if err != nil {
 		fatalAfterDB(db, "[WEB]: Failed to initialize progress database: %v", err)
 	}
-	defer progressDB.Close()
+	setWebProgressDB(progressDB) // closed by teardownDB on every exit path
 
 	// Note: Database batch workers are started automatically by OpenDatabase() (which also adds them to db.WG)
 
@@ -319,9 +332,6 @@ func main() {
 		db.WG.Add(1)
 	}
 	server.StartSessionCleanup() // stops on server.Shutdown
-	// Set up cross-platform signal handling for graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM) // Ctrl+C and SIGTERM take the same graceful path
 
 	// Start web server in goroutine to make it non-blocking
 	webServerErrChan := make(chan error, 1)
@@ -405,3 +415,12 @@ func main() {
 		os.Exit(exitCode) // the DB is already shut down
 	}
 } // end main
+
+// signalExitCode is the shell convention 128+signal number (SIGINT 130, SIGTERM 143),
+// 1 for a signal without a number.
+func signalExitCode(sig os.Signal) int {
+	if s, ok := sig.(syscall.Signal); ok {
+		return 128 + int(s)
+	}
+	return 1
+}
