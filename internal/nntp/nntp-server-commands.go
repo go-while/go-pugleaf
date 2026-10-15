@@ -10,6 +10,7 @@ var commandMaxArgs = map[string]int{
 	"CAPABILITIES": 1, "MODE": 1, "AUTHINFO": -1, "QUIT": -1, "HELP": 0, "LIST": 2, "GROUP": 1,
 	"LISTGROUP": 2, "STAT": 1, "HEAD": 1, "BODY": 1, "ARTICLE": 1, "XOVER": 1, "XHDR": 2,
 	"POST": 0, "IHAVE": 1, "TAKETHIS": -1,
+	"DATE": 0, "NEXT": 0, "LAST": 0, "NEWGROUPS": 3, "OVER": 1, "HDR": 2, "CHECK": 1, "STARTTLS": 0,
 }
 
 // readerCommands need authentication when NNTPServer.ReadRequiresAuth is set.

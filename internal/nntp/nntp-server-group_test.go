@@ -3,11 +3,11 @@ package nntp
 // NNTP server group and listing tests (plan nntp-audit-tests, slice test-nntp-group).
 //
 // Covers GROUP (RFC 3977 §6.1.1), LISTGROUP (§6.1.2), LIST ACTIVE / NEWSGROUPS /
-// OVERVIEW.FMT (§7.6, §8.4) and the READER commands the server does not
-// implement yet: DATE (§7.1), NEXT/LAST (§6.1.3, §6.1.4), NEWGROUPS (§7.3) and
-// NEWNEWS (§7.4). Every assertion states the RFC-correct behavior; where the
+// OVERVIEW.FMT (§7.6, §8.4) and the READER commands DATE (§7.1), NEXT/LAST
+// (§6.1.3, §6.1.4), NEWGROUPS (§7.3) and NEWNEWS (§7.4; not implemented, not
+// advertised). Every assertion states the RFC-correct behavior; where the
 // server differs today the result of that check goes to knownBug with the seed
-// id (BUG-4, SEC-2, SEC-7, RFC-1) or a new T-nntp-group-<n> id.
+// id (BUG-4, SEC-2, SEC-7) or a new T-nntp-group-<n> id.
 //
 // Identifiers use the grp/TestGrp prefix (contract K2). Groups are named
 // t3.<test>.<seq> (hGroup appends the sequence number).
@@ -611,7 +611,9 @@ func TestGrpListWildmat(t *testing.T) {
 					errs = append(errs, fmt.Errorf("LIST NEWSGROUPS line %q: description %q", lines[0], desc))
 				}
 			}
-			knownBug(t, "RFC-1", errors.Join(errs...))
+			if err := errors.Join(errs...); err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 }
@@ -652,7 +654,9 @@ func TestGrpListOverviewFmt(t *testing.T) {
 			}
 		}
 	}
-	knownBug(t, "RFC-1", err)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestGrpDate: RFC 3977 §7.1, DATE gives "111 yyyymmddhhmmss" in UTC (RFC-1).
@@ -671,7 +675,9 @@ func TestGrpDate(t *testing.T) {
 			err = fmt.Errorf("DATE: %q is %s away from UTC now", line, d)
 		}
 	}
-	knownBug(t, "RFC-1", err)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestGrpNextLast: RFC 3977 §6.1.3 (LAST) and §6.1.4 (NEXT) move the current
@@ -705,7 +711,9 @@ func TestGrpNextLast(t *testing.T) {
 
 	t.Run("no-group", func(t *testing.T) {
 		c := hs.dial(t)
-		knownBug(t, "RFC-1", errors.Join(expect(t, c, "NEXT", 412, 0), expect(t, c, "LAST", 412, 0)))
+		if err := errors.Join(expect(t, c, "NEXT", 412, 0), expect(t, c, "LAST", 412, 0)); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	t.Run("walk", func(t *testing.T) {
@@ -725,7 +733,9 @@ func TestGrpNextLast(t *testing.T) {
 		if err != nil {
 			err = fmt.Errorf("%w\n(also needs RFC-3: bare STAT)", err)
 		}
-		knownBug(t, "RFC-1", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	t.Run("empty-group", func(t *testing.T) {
@@ -735,7 +745,9 @@ func TestGrpNextLast(t *testing.T) {
 			t.Fatal(err)
 		}
 		// §6.1.1.2: in an empty group the current article number is invalid → 420.
-		knownBug(t, "RFC-1", errors.Join(expect(t, c, "NEXT", 420, 0), expect(t, c, "LAST", 420, 0)))
+		if err := errors.Join(expect(t, c, "NEXT", 420, 0), expect(t, c, "LAST", 420, 0)); err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 
@@ -766,7 +778,9 @@ func TestGrpNewGroups(t *testing.T) {
 	} else if len(lines) != 0 {
 		errs = append(errs, fmt.Errorf("NEWGROUPS (future) lists %q, want nothing", lines))
 	}
-	knownBug(t, "RFC-1", errors.Join(errs...))
+	if err := errors.Join(errs...); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestGrpNewNews: RFC 3977 §7.4 and §3.3.2, NEWNEWS gives 230 plus a list

@@ -54,7 +54,9 @@ func (c *ClientConnection) UpdateDeadlines() {
 // (QUIT, client EOF, closed by Stop, overlong line closed with 400) and the
 // error otherwise.
 func (c *ClientConnection) Handle() error {
-	defer c.textConn.Close()
+	// Evaluated at the end, not now: STARTTLS replaces c.textConn, and closing the
+	// current one sends the TLS close_notify (T-rfc-commands-2).
+	defer func() { _ = c.textConn.Close() }()
 
 	// Send welcome message
 	if err := c.sendWelcome(); err != nil {
@@ -142,6 +144,9 @@ func (c *ClientConnection) handleCommand(line string) error {
 	case "CAPABILITIES":
 		return c.handleCapabilities()
 	case "MODE":
+		if len(args) > 0 && strings.EqualFold(args[0], "STREAM") {
+			return c.handleModeStream(args[1:])
+		}
 		return c.handleMode(args)
 	case "AUTHINFO":
 		return c.handleAuthInfo(args, line)
@@ -150,6 +155,18 @@ func (c *ClientConnection) handleCommand(line string) error {
 	case "HELP":
 		return c.handleHelp()
 	case "LIST":
+		if len(args) > 0 {
+			switch kw := strings.ToUpper(args[0]); kw {
+			case "OVERVIEW.FMT":
+				return c.handleListOverviewFmt(args[1:])
+			case "HEADERS":
+				return c.handleListHeaders(args[1:])
+			case "ACTIVE", "NEWSGROUPS":
+				if len(args) > 1 {
+					return c.handleListWildmat(kw, args[1:])
+				}
+			}
+		}
 		return c.handleList(args)
 	case "GROUP":
 		return c.handleGroup(args)
@@ -173,6 +190,23 @@ func (c *ClientConnection) handleCommand(line string) error {
 		return c.handleIHave(args)
 	case "TAKETHIS":
 		return c.handleTakeThis(args)
+	case "DATE":
+		return c.handleDate(args)
+	case "NEXT":
+		return c.handleNext(args)
+	case "LAST":
+		return c.handleLast(args)
+	case "NEWGROUPS":
+		return c.handleNewGroups(args)
+	case "OVER":
+		return c.handleOver(args)
+	case "HDR":
+		return c.handleHdr(args)
+	case "CHECK":
+		return c.handleCheck(args)
+	case "STARTTLS":
+		return c.handleStartTLS(args)
+	// NEWNEWS stays unknown (500): decision D3 of nntp-rfc-commands.
 	default:
 		c.rateLimitOnError()
 		return c.sendResponse(500, "Command not recognized")
@@ -192,9 +226,16 @@ func (c *ClientConnection) getServerCapabilities() []string {
 	if c.authinfoAdvertised() {
 		capabilities = append(capabilities, "AUTHINFO USER")
 	}
-	capabilities = append(capabilities, "LIST ACTIVE NEWSGROUPS", "XOVER", "XHDR")
+	capabilities = append(capabilities, "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT HEADERS", "XOVER", "XHDR", "OVER MSGID", "HDR")
 	if c.postingAllowed() {
 		capabilities = append(capabilities, "POST", "IHAVE")
 	}
+	if c.streamingAllowed() { // == postingAllowed(): RFC 4644 §2.2
+		capabilities = append(capabilities, "STREAMING")
+	}
+	if c.starttlsAvailable() { // cert configured, plaintext, before AUTHINFO: RFC 4642 §2.2.2
+		capabilities = append(capabilities, "STARTTLS")
+	}
+	// DATE, NEXT, LAST and NEWGROUPS are part of READER. NEWNEWS is not advertised (D3).
 	return capabilities
 }

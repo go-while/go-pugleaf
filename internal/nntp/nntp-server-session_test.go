@@ -278,7 +278,9 @@ func TestSessCapabilities(t *testing.T) {
 		if code != 203 {
 			err = fmt.Errorf("TAKETHIS is accepted but MODE STREAM answered %q (want 203)", line)
 		}
-		knownBug(t, "RFC-1", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("post-allowed-user", func(t *testing.T) {
 		user, pass := sessUser(t, true)
@@ -1087,8 +1089,8 @@ var sessFuzzSkip = map[string]bool{"TAKETHIS": true, "LISTGROUP": true}
 
 // sessFuzzMultiCodes are the status codes followed by a dot-terminated block
 // (RFC 3977 §3.4.1: HELP 100, CAPABILITIES 101, LIST 215, ARTICLE 220,
-// HEAD 221, BODY 222, OVER/XOVER 224, HDR/XHDR 225; XHDR uses 221 too).
-var sessFuzzMultiCodes = map[int]bool{100: true, 101: true, 215: true, 220: true, 221: true, 222: true, 224: true, 225: true}
+// HEAD 221, BODY 222, OVER/XOVER 224, HDR/XHDR 225, NEWGROUPS 231; XHDR uses 221 too).
+var sessFuzzMultiCodes = map[int]bool{100: true, 101: true, 215: true, 220: true, 221: true, 222: true, 224: true, 225: true, 231: true}
 
 // sessFuzzServer starts a read-only server for a fuzz target (newTestServer
 // needs a *testing.T); the cleanup stops it and waits at most 10 s.
