@@ -17,6 +17,9 @@ func loopbackPprofAddr(addr string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("-pprof %q: only loopback addresses are allowed (e.g. localhost:6060): %v", addr, err)
 	}
+	if port == "" {
+		return "", fmt.Errorf("-pprof %q: a port is required (e.g. localhost:6060)", addr)
+	}
 	switch host {
 	case "":
 		return net.JoinHostPort("127.0.0.1", port), nil

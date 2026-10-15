@@ -31,6 +31,9 @@ func TestAdfOptRslightParseArticleText(t *testing.T) {
 		{"trailing empty body line kept", "Subject: s\n\nline1\n\n.\n", "line1\n", 2},
 		{"empty body with terminator", "Subject: s\n\n.\n", "", 0},
 		{"empty body no terminator", "Subject: s\n\n", "", 0},
+		{"extra line ends after terminator LF", "Subject: s\n\nline1\n.\n\n", "line1", 1},
+		{"extra line ends after terminator CRLF", "Subject: s\r\n\r\nline1\r\n.\r\n\r\n\r\n", "line1", 1},
+		{"trailing blank body line without terminator", "Subject: s\n\nline1\n\n", "line1\n", 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

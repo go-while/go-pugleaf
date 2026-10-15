@@ -327,12 +327,17 @@ func parseArticleTextToSlice(articleText string) ([]string, int) {
 	text := strings.ReplaceAll(articleText, "\r\n", "\n")
 	lines := strings.Split(text, "\n")
 	size := 0
-	// The final line end leaves one empty element behind
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
+	// Remove the terminator (a body line "." is stuffed to "..", so a final "." is never content).
+	// If the last non-empty line is ".", it and every empty element after it (line ends stored
+	// after the terminator) are dropped. Without a terminator only the one empty element left
+	// by the final line end is dropped, so a real trailing blank body line is kept.
+	last := len(lines) - 1
+	for last >= 0 && lines[last] == "" {
+		last--
 	}
-	// Remove the terminator (a body line "." is stuffed to "..", so a final "." is never content)
-	if len(lines) > 0 && lines[len(lines)-1] == "." {
+	if last >= 0 && lines[last] == "." {
+		lines = lines[:last]
+	} else if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
 	// Undo dot-stuffing only after the terminator is gone
