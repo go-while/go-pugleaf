@@ -415,3 +415,124 @@ func TestAdfOptHierarchyConcurrentReaders(t *testing.T) {
 		}
 	}
 }
+
+// adfOptHierDirty reports whether top is marked dirty in hc.
+func adfOptHierDirty(hc *HierarchyCache, top string) bool {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	return hc.isDirtyLocked(top)
+}
+
+// TestAdfOptHierarchyStatsDuringRebuild: a batch whose stats arrive while a top-level
+// rebuild or a full build reads its rows marks the top level again, so the next reader
+// rebuilds it instead of serving rows that miss the batch. Outside a build the stats
+// update marks nothing.
+func TestAdfOptHierarchyStatsDuringRebuild(t *testing.T) {
+	adfOptHierSkipLowEUID(t)
+	db := w0DB(t)
+	top := strings.ReplaceAll(w0Name("adfopthierrb"), ".", "")
+	group := top + ".a"
+	adfOptHierInsert(t, db, group, 2)
+
+	hc := NewHierarchyCache()
+	var mu sync.Mutex
+	var calls []string
+	update := false
+	hc.mu.Lock()
+	hc.testRebuildHook = func(what string) {
+		mu.Lock()
+		calls = append(calls, what)
+		doUpdate := update
+		update = false
+		mu.Unlock()
+		if doUpdate {
+			// The batch committed while the build reads its rows.
+			hc.UpdateNewsgroupStats(group, 5, 99, time.Now())
+		}
+	}
+	hc.mu.Unlock()
+	hookCalls := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), calls...)
+	}
+	arm := func() {
+		mu.Lock()
+		update = true
+		mu.Unlock()
+	}
+
+	if err := hc.buildHierarchyTreeBulk(db); err != nil {
+		t.Fatalf("buildHierarchyTreeBulk: %v", err)
+	}
+	// No build running: a stats update marks nothing.
+	hc.UpdateNewsgroupStats(group, 1, 3, time.Now())
+	if adfOptHierDirty(hc, top) {
+		t.Fatalf("%s dirty after a stats update outside a build", top)
+	}
+
+	// Stats update during a top-level rebuild: still dirty afterwards, the next reader
+	// rebuilds again, and then it is clean.
+	hc.InvalidateHierarchy(top)
+	arm()
+	if groups, _, err := hc.GetDirectGroupsAtLevel(db, top, "name", 1, 10); err != nil || len(groups) != 1 {
+		t.Fatalf("first read: %v err %v; want %s", adfOptHierNames(groups), err, group)
+	}
+	if !adfOptHierDirty(hc, top) {
+		t.Errorf("%s clean after a rebuild that a stats update overlapped", top)
+	}
+	before := len(hookCalls())
+	if _, _, err := hc.GetDirectGroupsAtLevel(db, top, "name", 1, 10); err != nil {
+		t.Fatalf("second read: %v", err)
+	}
+	if got := hookCalls(); len(got) != before+1 || got[len(got)-1] != top {
+		t.Errorf("second read did not rebuild %s: hook calls %v", top, got)
+	}
+	if adfOptHierDirty(hc, top) {
+		t.Errorf("%s still dirty after the second rebuild", top)
+	}
+
+	// Stats update during a full build: the top level is dirty after the build.
+	arm()
+	if err := hc.buildHierarchyTreeBulk(db); err != nil {
+		t.Fatalf("buildHierarchyTreeBulk: %v", err)
+	}
+	if got := hookCalls(); got[len(got)-1] != "*" {
+		t.Errorf("full build hook calls %v; want last \"*\"", got)
+	}
+	if !adfOptHierDirty(hc, top) {
+		t.Errorf("%s clean after a full build that a stats update overlapped", top)
+	}
+	hc.mu.RLock()
+	building, rebuilding := hc.bulkBuilds, len(hc.rebuilding)
+	hc.mu.RUnlock()
+	if building != 0 || rebuilding != 0 {
+		t.Errorf("build flags left set: bulkBuilds=%d rebuilding=%d", building, rebuilding)
+	}
+}
+
+// TestAdfOptHierarchyStatsUTC: batch dates are stored in UTC like the dates parsed from
+// the database.
+func TestAdfOptHierarchyStatsUTC(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	hc := adfOptHierFill(adfOptHierGroup("utc.a.one", 1, 1, base))
+	h := &models.Hierarchy{Name: "utc", LastUpdated: base}
+	hc.mu.Lock()
+	hc.hierarchies = []*models.Hierarchy{h}
+	hc.hierarchiesMap["utc"] = h
+	hc.mu.Unlock()
+
+	zone := time.FixedZone("UTC+5", 5*3600)
+	latest := time.Date(2026, 10, 14, 17, 0, 0, 0, zone)
+	hc.UpdateNewsgroupStats("utc.a.one", 1, 2, latest)
+
+	g := adfOptHierDirect(t, hc, "utc.a", "name")[0]
+	if g.UpdatedAt.Location() != time.UTC || !g.UpdatedAt.Equal(latest) {
+		t.Errorf("group UpdatedAt = %v (%v); want %v in UTC", g.UpdatedAt, g.UpdatedAt.Location(), latest.UTC())
+	}
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	if h.LastUpdated.Location() != time.UTC || !h.LastUpdated.Equal(latest) {
+		t.Errorf("hierarchy LastUpdated = %v (%v); want %v in UTC", h.LastUpdated, h.LastUpdated.Location(), latest.UTC())
+	}
+}

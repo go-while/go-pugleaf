@@ -49,6 +49,17 @@ type HierarchyCache struct {
 	// rebuildMu serializes the rebuilds of dirty top levels, so concurrent readers of
 	// one dirty top level run one query.
 	rebuildMu sync.Mutex
+
+	// rebuilding holds the top levels whose rebuild query is running, bulkBuilds the
+	// number of running full builds. A batch whose stats arrive meanwhile may be missing
+	// from the rows read, and its increment lands on a struct the build replaces:
+	// UpdateNewsgroupStats then marks the top level again, so the next reader rebuilds.
+	rebuilding map[string]bool
+	bulkBuilds int
+
+	// testRebuildHook, when set (tests only, per cache), runs before the query of a
+	// rebuild (top level) or a full build ("*"), after the build was registered.
+	testRebuildHook func(top string)
 }
 
 // hierarchySortOrders are the sort orders kept in directGroupsCache ("prefix:sort" keys).
@@ -64,6 +75,7 @@ func NewHierarchyCache() *HierarchyCache {
 		directGroupCounts: make(map[string]int),
 		warmComplete:      make(chan struct{}),
 		markSeq:           make(map[string]uint64),
+		rebuilding:        make(map[string]bool),
 		loadSeq:           make(map[string]uint64),
 	}
 }
@@ -326,9 +338,22 @@ func (hc *HierarchyCache) UpdateNewsgroupActiveStatus(newsgroupName string, acti
 func (hc *HierarchyCache) UpdateNewsgroupStats(newsgroupName string, messageCountIncrement int, newLastArticle int64, latest time.Time) {
 	hierarchy := ExtractHierarchyFromGroupName(newsgroupName)
 	parent, hasParent := directParent(newsgroupName)
+	// Cached dates are parsed as UTC from the DB: compare and store in one location.
+	latest = latest.UTC()
 
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
+
+	// A rebuild of this top level or a full build is reading rows right now: this batch
+	// may be missing from them, and the structs updated below are about to be replaced.
+	// Mark the top level again, so the next reader rebuilds it.
+	if hc.rebuilding[hierarchy] || hc.bulkBuilds > 0 {
+		if hc.markSeq == nil {
+			hc.markSeq = make(map[string]uint64)
+		}
+		hc.invalSeq++
+		hc.markSeq[hierarchy] = hc.invalSeq
+	}
 
 	// Update hierarchy data if cached
 	if h, exists := hc.hierarchiesMap[hierarchy]; exists && !latest.IsZero() && latest.After(h.LastUpdated) {
@@ -492,10 +517,21 @@ const query_hierarchyTopLevelGroups = `
 func (hc *HierarchyCache) buildHierarchyTreeBulk(db *Database) error {
 	log.Printf("HierarchyCache: Building hierarchy tree from all newsgroups...")
 
-	// Marks after this point are not covered by the tree built here.
-	hc.mu.RLock()
+	// Marks after this point are not covered by the tree built here. Stats updates
+	// while the build runs mark their top level (see UpdateNewsgroupStats).
+	hc.mu.Lock()
 	startSeq := hc.invalSeq
-	hc.mu.RUnlock()
+	hc.bulkBuilds++
+	hook := hc.testRebuildHook
+	hc.mu.Unlock()
+	defer func() {
+		hc.mu.Lock()
+		hc.bulkBuilds--
+		hc.mu.Unlock()
+	}()
+	if hook != nil {
+		hook("*")
+	}
 
 	// Get ALL active newsgroups with their hierarchies in one query.
 	// hierarchy and message_count are nullable (A-db-1): COALESCE them, so a row the old
@@ -577,12 +613,30 @@ func (hc *HierarchyCache) rebuildTopLevel(db *Database, top string) error {
 	hc.rebuildMu.Lock()
 	defer hc.rebuildMu.Unlock()
 
-	hc.mu.RLock()
+	hc.mu.Lock()
 	dirty := hc.isDirtyLocked(top)
 	startSeq := hc.invalSeq
-	hc.mu.RUnlock()
+	if dirty {
+		// Stats updates while the query runs mark top again (see UpdateNewsgroupStats).
+		if hc.rebuilding == nil {
+			hc.rebuilding = make(map[string]bool)
+		}
+		hc.rebuilding[top] = true
+	}
+	hook := hc.testRebuildHook
+	hc.mu.Unlock()
 	if !dirty {
 		return nil // another reader rebuilt it while this one waited
+	}
+	// Runs after the deferred Unlock of the install below, so the flag covers the
+	// whole window between the query and the install.
+	defer func() {
+		hc.mu.Lock()
+		delete(hc.rebuilding, top)
+		hc.mu.Unlock()
+	}()
+	if hook != nil {
+		hook(top)
 	}
 
 	rows, err := RetryableQuery(db.mainDB, query_hierarchyTopLevelGroups, top+".", top+"/")
