@@ -175,7 +175,7 @@ func TestNSHAuthRemoveUserID(t *testing.T) {
 }
 
 // TestNSHAuthWebUserIDLookup (A-web-5 DB part, D6 contract): several NNTP users
-// mapped to one web user: GetNNTPUserByWebUserID returns the active one with the
+// mapped to one web user (at most one of them active since migration 0031): GetNNTPUserByWebUserID returns the active one with the
 // lowest id, 0 and negative ids give sql.ErrNoRows, CountNNTPUsersByWebUserID counts
 // every state, UpdateNNTPUserWebUserID(.., 0) stores NULL. CreateNNTPUserForWebUser
 // uses DefaultNNTPUserMaxConns.
@@ -183,7 +183,7 @@ func TestNSHAuthWebUserIDLookup(t *testing.T) {
 	db := w0DB(t)
 	web := w1APIUser(t)
 	u1, _ := nshAuthNewUser(t, true, web.ID)
-	u2, _ := nshAuthNewUser(t, true, web.ID)
+	u2, _ := nshAuthNewUser(t, false, web.ID) // migration 0031: only one ACTIVE account per web user
 	if u1.ID >= u2.ID {
 		t.Fatalf("ids not increasing: %d, %d", u1.ID, u2.ID)
 	}
@@ -211,6 +211,9 @@ func TestNSHAuthWebUserIDLookup(t *testing.T) {
 	// The lowest id inactive: the next active user is returned, the count keeps both.
 	if err := db.DeactivateNNTPUser(u1.ID); err != nil {
 		t.Fatalf("DeactivateNNTPUser: %v", err)
+	}
+	if err := db.ActivateNNTPUser(u2.ID); err != nil {
+		t.Fatalf("ActivateNNTPUser(u2) after u1 was deactivated: %v", err)
 	}
 	if got, err := db.GetNNTPUserByWebUserID(web.ID); err != nil || got.ID != u2.ID {
 		t.Fatalf("GetNNTPUserByWebUserID with the lowest id inactive = (%v, %v), want id %d", got, err, u2.ID)

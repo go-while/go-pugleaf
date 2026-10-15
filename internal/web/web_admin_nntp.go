@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -166,7 +167,11 @@ func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
 	err = s.DB.InsertNNTPUser(nntpUser)
 	if err != nil {
 		log.Printf("Error creating NNTP user: %v", err)
-		session.SetError("Failed to create NNTP user")
+		if database.IsWebUserMappingConflict(err) {
+			session.SetError(database.ErrWebUserHasNNTPAccount.Error())
+		} else {
+			session.SetError("Failed to create NNTP user")
+		}
 		c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 		return
 	}
@@ -279,6 +284,8 @@ func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				session.SetError("NNTP user not found")
+			} else if errors.Is(err, database.ErrWebUserHasNNTPAccount) || database.IsWebUserMappingConflict(err) {
+				session.SetError(database.ErrWebUserHasNNTPAccount.Error())
 			} else {
 				log.Printf("[WEB]: Error updating NNTP user web mapping: %v", err)
 				session.SetError("Failed to update NNTP user web mapping")
@@ -377,7 +384,11 @@ func (s *WebServer) adminToggleNNTPUser(c *gin.Context) {
 		err = s.DB.ActivateNNTPUser(id)
 		if err != nil {
 			log.Printf("Error activating NNTP user: %v", err)
-			session.SetError("Failed to activate NNTP user")
+			if database.IsWebUserMappingConflict(err) {
+				session.SetError(database.ErrWebUserHasNNTPAccount.Error())
+			} else {
+				session.SetError("Failed to activate NNTP user")
+			}
 			c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 			return
 		}
@@ -413,7 +424,11 @@ func (s *WebServer) adminEnableNNTPUser(c *gin.Context) {
 	err = s.DB.ActivateNNTPUser(id)
 	if err != nil {
 		log.Printf("Error enabling NNTP user: %v", err)
-		session.SetError("Failed to enable NNTP user")
+		if database.IsWebUserMappingConflict(err) {
+			session.SetError(database.ErrWebUserHasNNTPAccount.Error())
+		} else {
+			session.SetError("Failed to enable NNTP user")
+		}
 		c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 		return
 	}
