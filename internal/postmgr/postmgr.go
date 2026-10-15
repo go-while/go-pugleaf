@@ -186,9 +186,10 @@ func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 			posted++
 			continue
 		}
-		if pm.stopped() {
-			// Most likely interrupted by the stop (pool wait or POST cancelled): back to pending
-			// without an attempt; see the duplicate caveat in the function comment.
+		if pm.stopped() && !errors.Is(err, errPostRejected) {
+			// Interrupted by the stop (pool wait or POST cancelled): back to pending without an
+			// attempt; see the duplicate caveat in the function comment. A rejection by every
+			// provider that completed just before the stop still counts below.
 			log.Printf("Entry %d (message: %s) interrupted by shutdown, back to pending: %v", entry.ID, entry.MessageID, err)
 			failedEntryIDs = append(failedEntryIDs, entry.ID)
 			return stopAt(i + 1)
@@ -323,7 +324,7 @@ func (pm *PosterManager) postToProvider(article *models.Article, pool *nntp.Pool
 		}
 		if err != nil {
 			conn.ForceCloseConn()
-			return fmt.Errorf("failed to post article: %v", err)
+			return fmt.Errorf("failed to post article: %w", err)
 		}
 		// Check response code
 		switch responseCode {
