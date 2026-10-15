@@ -8,7 +8,7 @@ package main
 // processor.NewProcessor: DNS lookup plus log.Fatal) and one NNTP server on
 // 127.0.0.1:0 with all delays set to 0. Articles are committed asynchronously
 // by the batch writer (BatchInterval 100 ms), so every check that needs a
-// stored article polls with a 20 s deadline.
+// stored article polls with the testWait hang guard (default 60 s).
 //
 // When PUGLEAF_E2E_ADDR is set (scripts/test-nntp-server.sh runs the binary
 // test in e2e_binary_test.go against a real server) nothing is opened and the
@@ -53,8 +53,23 @@ import (
 // e2eHostname is processor.LocalNNTPHostname in the in-process tests.
 const e2eHostname = "news.test.invalid"
 
+// testWait is the hang guard of the e2e tests: client dial and per-operation deadlines, polls for
+// asynchronous commits, server and post-queue waits. It only stops a hung test; a passing test
+// never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s).
+// Plan test-timing-hardening D3.
+var testWait = testWaitFromEnv(60 * time.Second)
+
+func testWaitFromEnv(def time.Duration) time.Duration {
+	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
 // e2eCommitWait bounds every poll for an asynchronously committed article.
-const e2eCommitWait = 20 * time.Second
+var e2eCommitWait = testWait
 
 // e2eMaxArtSize is the server's NNTP.MaxArtSize (the config default, 32 KiB).
 const e2eMaxArtSize = 32768
@@ -215,8 +230,8 @@ func e2eTeardown(code int, keep bool, srv *nntp.NNTPServer, srvWG *sync.WaitGrou
 		}
 		e2eConns = nil
 		e2eConnsMu.Unlock()
-		if !e2eWaitTimeout(srvWG.Wait, 10*time.Second) {
-			fail("server goroutines did not finish within 10s after Stop")
+		if !e2eWaitTimeout(srvWG.Wait, testWait) {
+			fail(fmt.Sprintf("server goroutines did not finish within %v after Stop", testWait))
 		}
 	}
 	db := e2eDB
@@ -433,7 +448,7 @@ func e2eDialAddr(addr string, deadline time.Duration) (*e2eClient, error) {
 func e2eDial(t *testing.T) *e2eClient {
 	t.Helper()
 	e2eNeedDB(t)
-	c, err := e2eDialAddr(e2eAddr, 10*time.Second)
+	c, err := e2eDialAddr(e2eAddr, testWait)
 	if err != nil {
 		t.Fatalf("dial %s: %v", e2eAddr, err)
 	}
@@ -1201,7 +1216,8 @@ func TestE2ESizeLimits(t *testing.T) {
 	// terminator, so the connection stays usable (BUG-7, SEC-3). Runs in a child
 	// process: an oversized article must not take down the shared server.
 	t.Run("lines-20000", func(t *testing.T) {
-		err := e2eRunIsolated(t, 120*time.Second, e2eOversizeChild)
+		// above the child's own testWait guards (dial, reads, session end)
+		err := e2eRunIsolated(t, 3*testWait, e2eOversizeChild)
 		if e2eIsChild(t) {
 			return
 		}
@@ -1260,9 +1276,19 @@ func e2eOversizeChild(t *testing.T) {
 		usable = err2 == nil && (code2 == 200 || code2 == 201)
 		modeDetail = fmt.Sprintf("code=%d line=%q err=%v", code2, line2, err2)
 	}
-	// The fixed server ends this session silently on the client's EOF. Give a late
-	// write to the closed socket up to 1.5 s to show up in the log (polled).
+	// The fixed server ends this session silently on the client's EOF. Wait until
+	// the session handler has returned (this child runs the only connection; the
+	// handler logs before its deferred ConnectionEnded): after that no late write
+	// to the closed socket can still be on its way into the log.
 	_ = c.Conn.Close()
+	if err := e2eWaitFor(testWait, func() error {
+		if n := e2eSrv.Stats.GetActiveConnections(); n > 0 {
+			return fmt.Errorf("%d session(s) still active", n)
+		}
+		return nil
+	}); err != nil {
+		t.Errorf("the server session did not end after the client closed: %v", err)
+	}
 	closedWritesOf := func() []string {
 		var out []string
 		for _, l := range e2eLogs.lines(local) {
@@ -1273,12 +1299,6 @@ func e2eOversizeChild(t *testing.T) {
 		}
 		return out
 	}
-	_ = e2eWaitFor(1500*time.Millisecond, func() error {
-		if len(closedWritesOf()) > 0 {
-			return nil // found one: stop waiting
-		}
-		return fmt.Errorf("no write to a closed socket yet")
-	})
 	// The server reads (and discards) the oversized article up to its terminator
 	// before it answers 441, so no unread input is left in its receive buffer and
 	// the connection stays usable. Only an article past the drain bound
@@ -1911,8 +1931,8 @@ func TestE2EWebCrosspost(t *testing.T) {
 	}
 	select {
 	case models.PostQueueChannel <- article:
-	case <-time.After(10 * time.Second):
-		t.Fatal("post queue full")
+	case <-time.After(testWait):
+		t.Fatalf("post queue still full after %v", testWait)
 	}
 	e2eWaitStored(t, id, g1, g2)
 }
