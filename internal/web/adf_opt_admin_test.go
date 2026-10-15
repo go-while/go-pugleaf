@@ -3,9 +3,11 @@ package web
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"regexp"
 	"runtime"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -53,12 +56,11 @@ func adfOptAssignments(t *testing.T, newsgroup string) []int {
 	return ids
 }
 
-// adfOptGroupWithArticles inserts an active newsgroup and one article per message-id/date
-// pair into its group DB (article numbers 1..n) and returns the group name.
-func adfOptGroupWithArticles(t *testing.T, prefix string, msgIDs []string, dates []time.Time) string {
+// adfOptGroupWithArticles inserts the active newsgroup group and one article per
+// message-id/date pair into its group DB (article numbers 1..n, subject "adf opt subject <n>").
+func adfOptGroupWithArticles(t *testing.T, group string, msgIDs []string, dates []time.Time) string {
 	t.Helper()
 	db := w0DB(t)
-	group := w0Name(prefix)
 	if _, err := database.RetryableExec(db.GetMainDB(),
 		"INSERT INTO newsgroups(name, description, last_article, message_count, active, hierarchy) VALUES (?, '', ?, ?, 1, ?)",
 		group, len(msgIDs), len(msgIDs), database.ExtractHierarchyFromGroupName(group)); err != nil {
@@ -365,7 +367,7 @@ func TestAdfOptNewsgroupAssignSection(t *testing.T) {
 func TestAdfOptHideFuturePosts(t *testing.T) {
 	_, cookie := w0NewUser(t, true)
 	seq := w0Seq.Add(1)
-	group := adfOptGroupWithArticles(t, "adfoptfuture",
+	group := adfOptGroupWithArticles(t, w0Name("adfoptfuture"),
 		[]string{fmt.Sprintf("<adf-opt-past-%d@test.invalid>", seq), fmt.Sprintf("<adf-opt-future-%d@test.invalid>", seq)},
 		[]time.Time{time.Now().Add(-time.Hour), time.Now().Add(96 * time.Hour)})
 
@@ -417,16 +419,111 @@ func TestAdfOptGetDataEscapes(t *testing.T) {
 	}
 }
 
-// TestAdfOptMessageIDRouteRawPath (A-web-18): with UseRawPath an escaped '/' in a message-id
-// stays inside :messageId, and routes with plain params still match.
-func TestAdfOptMessageIDRouteRawPath(t *testing.T) {
-	mid := fmt.Sprintf("<adf/opt?x#y%%z-%d@test.invalid>", w0Seq.Add(1))
-	group := adfOptGroupWithArticles(t, "adfoptraw", []string{mid}, []time.Time{time.Now().Add(-time.Hour)})
+// TestAdfOptRawPathParams (A-web-18): the router's param handling (UseRawPath, gin's
+// UnescapePathValues off, unescapeRawPathParams) gives the same params as gin's defaults for
+// canonical paths, and keeps '+' (which url.QueryUnescape would turn into a space) for paths
+// gin matches on URL.RawPath.
+func TestAdfOptRawPathParams(t *testing.T) {
+	newEngine := func(raw bool) *gin.Engine {
+		e := gin.New()
+		if raw {
+			e.UseRawPath = true
+			e.UnescapePathValues = false
+			e.Use(unescapeRawPathParams())
+		}
+		e.GET("/g/:group/m/:id", func(c *gin.Context) {
+			c.String(http.StatusOK, "%s|%s", c.Param("group"), c.Param("id"))
+		})
+		e.GET("/s/*filepath", func(c *gin.Context) {
+			c.String(http.StatusOK, "%s", c.Param("filepath"))
+		})
+		return e
+	}
+	serve := func(e *gin.Engine, target string) string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if rec.Code != http.StatusOK {
+			return fmt.Sprintf("status %d", rec.Code)
+		}
+		return rec.Body.String()
+	}
+	oldEngine, rawEngine := newEngine(false), newEngine(true)
 
-	link := (&models.Article{References: mid}).GetData("parent_URL", group)
-	rec := w0Do(t, w0Req{Path: link})
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "adf opt subject 1") {
-		t.Fatalf("GET %s = %d, want 200 with the article (body %.300q)", link, rec.Code, rec.Body.String())
+	// Canonical escaping: URL.RawPath stays empty, both routers see identical params.
+	for _, target := range []string{
+		"/g/comp.lang.c++/m/%3Cab+c@x%3E",
+		"/g/a.b/m/%3Cx@y%3E",
+		"/g/a.b/m/%3Ca%20b%25c%3Fd%23e@x%3E",
+		"/g/a_b-c/m/plain",
+		"/s/js/thread-tree.js",
+		"/s/a%20b.css",
+	} {
+		if got, want := serve(rawEngine, target), serve(oldEngine, target); got != want {
+			t.Errorf("GET %s: raw-path router %q, default router %q", target, got, want)
+		}
+	}
+
+	// Non-canonical escaping: gin matches on URL.RawPath, '+' and ',' must survive.
+	for target, want := range map[string]string{
+		"/g/comp.lang.c++/m/%3Ca%2Fb,c+d@x%3E":     "comp.lang.c++|<a/b,c+d@x>",
+		"/g/comp.lang.c%2B%2B/m/%3Ca%2Bb%2Fc@x%3E": "comp.lang.c++|<a+b/c@x>",
+		"/g/comp.lang.c++/m/<ab+c@x>":              "comp.lang.c++|<ab+c@x>",
+		"/g/a.b/m/%3ca%2cb@x%3e":                   "a.b|<a,b@x>",
+		"/g/a.b/m/%3Ca%2Cb+c@x%3E":                 "a.b|<a,b+c@x>",
+		"/s/a%2Fb+c.css":                           "/a/b+c.css",
+	} {
+		if got := serve(rawEngine, target); got != want {
+			t.Errorf("GET %s = %q, want %q", target, got, want)
+		}
+	}
+}
+
+// TestAdfOptMessageIDRouteRawPath (A-web-18): message-ids with '/', '?', '#', '%', ',' and
+// '+' in a group named like comp.lang.c++ resolve through the GetData link, a link with
+// literal '+', and the literal-bracket form, on the web page and on the API route; routes
+// with plain params still match.
+func TestAdfOptMessageIDRouteRawPath(t *testing.T) {
+	w1APIEnable(t)
+	_, token, err := w0DB(t).CreateAPIToken("adfopt-rawpath", 0, nil)
+	if err != nil {
+		t.Fatalf("CreateAPIToken: %v", err)
+	}
+	seq := w0Seq.Add(1)
+	ids := []string{
+		fmt.Sprintf("<adf/opt?x#y%%z-%d@test.invalid>", seq),
+		fmt.Sprintf("<a/b,c+d-%d@test.invalid>", seq),
+		fmt.Sprintf("<ab+c-%d@test.invalid>", seq),
+	}
+	now := time.Now().Add(-time.Hour)
+	group := adfOptGroupWithArticles(t, fmt.Sprintf("adfopt%d.lang.c++", seq), ids, []time.Time{now, now, now})
+
+	for i, mid := range ids {
+		subject := fmt.Sprintf("adf opt subject %d", i+1)
+		segs := map[string]string{
+			// GetData: everything escaped, '+' as %2B.
+			"GetData": strings.TrimPrefix((&models.Article{References: mid}).GetData("parent_URL", group), "/groups/"),
+			// Literal '+' in group and id; an escaped '/' makes the path non-canonical.
+			"literal-plus": group + "/message/" + url.PathEscape(mid),
+		}
+		if !strings.ContainsAny(mid, "/?#%") {
+			segs["literal-brackets"] = group + "/message/" + mid
+		}
+		for form, seg := range segs {
+			rec := w0Do(t, w0Req{Path: "/groups/" + seg})
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), subject) {
+				t.Errorf("%s: GET /groups/%s = %d, want 200 with %q (body %.300q)", form, seg, rec.Code, subject, rec.Body.String())
+			}
+			rec = w0Do(t, w0Req{Path: "/api/v1/groups/" + seg, Header: map[string]string{APIAuthHeader: token}})
+			var art struct {
+				MessageID string `json:"message_id"`
+			}
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s: GET /api/v1/groups/%s = %d %.300q, want 200", form, seg, rec.Code, rec.Body.String())
+			} else if err := json.Unmarshal(rec.Body.Bytes(), &art); err != nil || art.MessageID != mid {
+				t.Errorf("%s: GET /api/v1/groups/%s message_id = %q (%v), want %q", form, seg, art.MessageID, err, mid)
+			}
+		}
 	}
 
 	for _, path := range []string{"/groups/" + group, "/groups/" + group + "/articles/1", "/ping"} {

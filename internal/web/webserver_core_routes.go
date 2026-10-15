@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -247,9 +248,13 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.Default()
-	// Route on the escaped path, so a %2F in a message-id stays inside the :messageId segment;
-	// UnescapePathValues (default true) still hands the handlers decoded params (A-web-18).
+	// Route on the escaped path, so a %2F in a message-id stays inside the :messageId segment
+	// (A-web-18). gin's own UnescapePathValues uses url.QueryUnescape, which turns '+' into a
+	// space (comp.lang.c++, <a+b@x>), so it is off and unescapeRawPathParams path-unescapes the
+	// params instead. It is the first application middleware: nothing reads a param before it.
 	router.UseRawPath = true
+	router.UnescapePathValues = false
+	router.Use(unescapeRawPathParams())
 
 	// Client IPs come from one configured header, and only when the peer is a trusted proxy
 	ReverseProxyAddr, err := db.GetConfigValue(config.CFG_KEY_REVERSEPROXY)
@@ -291,8 +296,8 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	server.tokenUsageBuffer.counts = make(map[int64]int64)
 	server.tokenUsageBuffer.last = make(map[int64]time.Time)
 
-	// Count in-flight requests, so Shutdown knows when the handlers are done. This is the first
-	// of the application middlewares; gin's own Logger and Recovery run in front of it. Every
+	// Count in-flight requests, so Shutdown knows when the handlers are done. Only gin's own
+	// Logger and Recovery and unescapeRawPathParams (which reads no state) run in front of it. Every
 	// route is covered, because this registration precedes setupRoutes.
 	router.Use(server.trackInFlight())
 
@@ -559,6 +564,23 @@ func (s *WebServer) setupRoutes() {
 		sectionRoutes.GET("/:section/:group/articles/:articleNum", s.sectionArticlePage)          // /rocksolid/group.name/articles/123
 		sectionRoutes.GET("/:section/:group/message/:messageId", s.sectionArticleByMessageIdPage) // /rocksolid/group.name/message/msgid
 		sectionRoutes.GET("/:section/:group/tree/:threadRoot", s.sectionThreadTreePage)           // View thread as tree in section
+	}
+}
+
+// unescapeRawPathParams path-unescapes the route params when gin matched on URL.RawPath, which
+// it does whenever the request path is not in canonical escaping (%2F, %2C, literal < >, ...).
+// With an empty RawPath gin matched on URL.Path, whose params Go's URL parsing already decoded.
+// url.PathUnescape keeps '+' as '+'; a value that does not unescape stays raw.
+func unescapeRawPathParams() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if len(c.Request.URL.RawPath) > 0 {
+			for i := range c.Params {
+				if v, err := url.PathUnescape(c.Params[i].Value); err == nil {
+					c.Params[i].Value = v
+				}
+			}
+		}
+		c.Next()
 	}
 }
 
