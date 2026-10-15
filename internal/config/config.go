@@ -57,6 +57,10 @@ const CFG_KEY_BADIPS string = "BadIPs"
 const CFG_KEY_BLOCKBADIPS string = "BlockBadIPs"
 const CFG_KEY_API_ENABLED string = "APIEnabled"
 
+// CFG_KEY_POSTQUEUE_MAXATTEMPTS is the number of 441 rejections after which post-queue parks a
+// post_queue row (invalid or <= 0 reads as 5); raising it un-parks rows below the new value.
+const CFG_KEY_POSTQUEUE_MAXATTEMPTS string = "PostQueueMaxAttempts"
+
 // Admin settings form field names
 const FORM_FIELD_HOSTNAME string = "local_nntp_hostname"
 const FORM_FIELD_WEBPOSTSIZE string = "web_post_size"

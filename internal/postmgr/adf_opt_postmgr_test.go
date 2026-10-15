@@ -1,17 +1,23 @@
 package postmgr
 
 import (
+	"errors"
 	"fmt"
+	"net"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/go-pugleaf/internal/nntp"
 )
 
 // adfOptDB is the database of this test binary (temp data root, no caches).
@@ -118,7 +124,8 @@ func adfOptFlags(t *testing.T, id int64) (posted, inProcessing bool) {
 }
 
 // TestAdfOptPostmgrStopResetsRemainder: with the stop already requested, ProcessPendingPosts
-// selects the batch and returns every selected row to pending (A-intake-10). Stop is idempotent.
+// selects the batch, returns every selected row to pending (A-intake-10) and reports ErrStopped
+// (cmd/post-queue exits 130 only then). Stop is idempotent.
 func TestAdfOptPostmgrStopResetsRemainder(t *testing.T) {
 	gid := adfOptGroup(t, "adfopt.postmgr.stop", true)
 	var ids []int64
@@ -131,8 +138,8 @@ func TestAdfOptPostmgrStopResetsRemainder(t *testing.T) {
 	pm.Stop() // second Stop must not panic (once-guarded close)
 
 	n, err := pm.ProcessPendingPosts(10)
-	if err != nil {
-		t.Fatalf("ProcessPendingPosts: %v", err)
+	if !errors.Is(err, ErrStopped) {
+		t.Fatalf("ProcessPendingPosts after stop: err = %v, want ErrStopped", err)
 	}
 	if n != 0 {
 		t.Errorf("ProcessPendingPosts after stop = %d, want 0", n)
@@ -227,5 +234,241 @@ func TestAdfOptPostmgrRunStopsOnShutdown(t *testing.T) {
 			}
 			pm.Stop() // stopCh already closed by Run: must not panic
 		})
+	}
+}
+
+// flPqFake is a loopback NNTP server that accepts MODE READER and POST and answers every posted
+// article with code (240 or 441). No external network is used.
+type flPqFake struct {
+	ln    net.Listener
+	code  int
+	posts atomic.Int64 // articles received
+	mu    sync.Mutex
+	conns []net.Conn
+	wg    sync.WaitGroup
+}
+
+// flPqFakeNNTP starts a flPqFake on 127.0.0.1; it stops when the test ends.
+func flPqFakeNNTP(t *testing.T, code int) *flPqFake {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	f := &flPqFake{ln: ln, code: code}
+	f.wg.Add(1)
+	go f.serve()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		f.mu.Lock()
+		for _, c := range f.conns {
+			_ = c.Close()
+		}
+		f.mu.Unlock()
+		f.wg.Wait()
+	})
+	return f
+}
+
+func (f *flPqFake) port() int {
+	return f.ln.Addr().(*net.TCPAddr).Port
+}
+
+func (f *flPqFake) serve() {
+	defer f.wg.Done()
+	for {
+		c, err := f.ln.Accept()
+		if err != nil {
+			return
+		}
+		f.mu.Lock()
+		f.conns = append(f.conns, c)
+		f.mu.Unlock()
+		f.wg.Add(1)
+		go f.handle(c)
+	}
+}
+
+func (f *flPqFake) handle(c net.Conn) {
+	defer f.wg.Done()
+	defer c.Close()
+	tp := textproto.NewConn(c)
+	if err := tp.PrintfLine("200 flpq fake ready"); err != nil {
+		return
+	}
+	for {
+		line, err := tp.ReadLine()
+		if err != nil {
+			return
+		}
+		switch strings.ToUpper(strings.TrimSpace(line)) {
+		case "MODE READER":
+			err = tp.PrintfLine("200 reader mode")
+		case "POST":
+			if err = tp.PrintfLine("340 send article"); err != nil {
+				return
+			}
+			if _, err = tp.ReadDotLines(); err != nil {
+				return
+			}
+			f.posts.Add(1)
+			err = tp.PrintfLine("%d flpq fake answer", f.code)
+		case "QUIT":
+			_ = tp.PrintfLine("205 bye")
+			return
+		default:
+			err = tp.PrintfLine("500 unknown command")
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// flPqClosedPort returns a loopback port nothing listens on (connection refused).
+func flPqClosedPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+// flPqPool returns a posting pool for 127.0.0.1:port, closed when the test ends.
+func flPqPool(t *testing.T, name string, port int) *nntp.Pool {
+	t.Helper()
+	pool := nntp.NewPool(&nntp.BackendConfig{
+		Host:     "127.0.0.1",
+		Port:     port,
+		MaxConns: 1,
+		Provider: &config.Provider{Name: name, Host: "127.0.0.1", Port: port, MaxConns: 1, Enabled: true, Posting: true},
+	})
+	t.Cleanup(func() {
+		if err := pool.ClosePool(); err != nil {
+			t.Errorf("ClosePool %s: %v", name, err)
+		}
+	})
+	return pool
+}
+
+// flPqQueuedArticle creates the active group name with one article msgID in its group DB and
+// queues it; it returns the post_queue row id.
+func flPqQueuedArticle(t *testing.T, name, msgID string) int64 {
+	t.Helper()
+	gid := adfOptGroup(t, name, true)
+	groupDB, err := adfOptDB.GetGroupDB(name)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", name, err)
+	}
+	defer groupDB.Return()
+	if _, err := database.RetryableExec(groupDB.DB,
+		`INSERT INTO articles (article_num, message_id, subject, from_header, date_sent, date_string,
+		"references", bytes, lines, reply_count, path, headers_json, body_text, downloaded)
+		VALUES (1, ?, 'flpq subject', 'poster <poster@test.invalid>', ?, 'Thu, 15 Oct 2026 10:00:00 +0000',
+		'', 60, 1, 0, '.POSTED!not-for-mail', ?, 'flpq body', 1)`,
+		msgID, time.Now().UTC().Format("2006-01-02 15:04:05"), "Newsgroups: "+name); err != nil {
+		t.Fatalf("insert article %s: %v", msgID, err)
+	}
+	return adfOptQueue(t, gid, msgID)
+}
+
+// flPqAttempts returns attempts and last_error of post_queue row id.
+func flPqAttempts(t *testing.T, id int64) (attempts int, lastError string) {
+	t.Helper()
+	if err := database.RetryableQueryRowScan(adfOptDB.GetMainDB(),
+		"SELECT attempts, COALESCE(last_error, '') FROM post_queue WHERE id = ?", []interface{}{id}, &attempts, &lastError); err != nil {
+		t.Fatalf("attempts of post_queue row %d: %v", id, err)
+	}
+	return attempts, lastError
+}
+
+// TestFlPqPostmgrRejectedParks: a 441 from the only provider counts one attempt per run and
+// returns the row to pending with last_error; after PostQueueMaxAttempts (5) runs the row is
+// parked and no longer posted.
+func TestFlPqPostmgrRejectedParks(t *testing.T) {
+	if got := adfOptDB.PostQueueMaxAttempts(); got != 5 {
+		t.Fatalf("precondition: PostQueueMaxAttempts = %d, want 5", got)
+	}
+	fake := flPqFakeNNTP(t, 441)
+	id := flPqQueuedArticle(t, "flpq.postmgr.rejected", "<rejected@flpq.invalid>")
+	pm := NewPosterManager(adfOptDB, []*nntp.Pool{flPqPool(t, "flpq-441", fake.port())})
+
+	for i := 1; i <= 5; i++ {
+		n, err := pm.ProcessPendingPosts(10)
+		if err != nil || n != 1 {
+			t.Fatalf("run %d: ProcessPendingPosts = %d, %v; want 1, nil", i, n, err)
+		}
+		attempts, lastErr := flPqAttempts(t, id)
+		if attempts != i || !strings.Contains(lastErr, "441") {
+			t.Errorf("run %d: attempts=%d last_error=%q, want %d and a 441 error", i, attempts, lastErr, i)
+		}
+		if posted, inProc := adfOptFlags(t, id); posted || inProc {
+			t.Errorf("run %d: posted=%v in_processing=%v, want false, false", i, posted, inProc)
+		}
+	}
+	if n, err := pm.ProcessPendingPosts(10); err != nil || n != 0 {
+		t.Errorf("run 6 (parked): ProcessPendingPosts = %d, %v; want 0, nil", n, err)
+	}
+	if got := fake.posts.Load(); got != 5 {
+		t.Errorf("provider received %d articles, want 5", got)
+	}
+}
+
+// TestFlPqPostmgrTransientNotCounted: a connection error stores last_error but counts no
+// attempt, also when another provider answered 441 (not every provider rejected the article).
+func TestFlPqPostmgrTransientNotCounted(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		pools func(t *testing.T) []*nntp.Pool
+		want  string // in last_error
+	}{
+		{"refused", func(t *testing.T) []*nntp.Pool {
+			return []*nntp.Pool{flPqPool(t, "flpq-refused", flPqClosedPort(t))}
+		}, "failed to get connection"},
+		{"441-and-refused", func(t *testing.T) []*nntp.Pool {
+			fake := flPqFakeNNTP(t, 441)
+			return []*nntp.Pool{flPqPool(t, "flpq-441", fake.port()), flPqPool(t, "flpq-refused", flPqClosedPort(t))}
+		}, "1 of 2 rejected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := flPqQueuedArticle(t, "flpq.postmgr.transient."+strings.ReplaceAll(tc.name, "-", ""), "<transient."+tc.name+"@flpq.invalid>")
+			pm := NewPosterManager(adfOptDB, tc.pools(t))
+			n, err := pm.ProcessPendingPosts(10)
+			if err != nil || n != 1 {
+				t.Fatalf("ProcessPendingPosts = %d, %v; want 1, nil", n, err)
+			}
+			attempts, lastErr := flPqAttempts(t, id)
+			if attempts != 0 || !strings.Contains(lastErr, tc.want) {
+				t.Errorf("attempts=%d last_error=%q, want 0 and %q", attempts, lastErr, tc.want)
+			}
+			if posted, inProc := adfOptFlags(t, id); posted || inProc {
+				t.Errorf("posted=%v in_processing=%v, want false, false", posted, inProc)
+			}
+		})
+	}
+}
+
+// TestFlPqPostmgrPosted: a 240 marks the row posted and counts nothing.
+func TestFlPqPostmgrPosted(t *testing.T) {
+	fake := flPqFakeNNTP(t, 240)
+	id := flPqQueuedArticle(t, "flpq.postmgr.posted", "<posted@flpq.invalid>")
+	pm := NewPosterManager(adfOptDB, []*nntp.Pool{flPqPool(t, "flpq-240", fake.port())})
+	n, err := pm.ProcessPendingPosts(10)
+	if err != nil || n != 1 {
+		t.Fatalf("ProcessPendingPosts = %d, %v; want 1, nil", n, err)
+	}
+	if posted, inProc := adfOptFlags(t, id); !posted || inProc {
+		t.Errorf("posted=%v in_processing=%v, want true, false", posted, inProc)
+	}
+	if attempts, lastErr := flPqAttempts(t, id); attempts != 0 || lastErr != "" {
+		t.Errorf("attempts=%d last_error=%q, want 0, \"\"", attempts, lastErr)
+	}
+	if got := fake.posts.Load(); got != 1 {
+		t.Errorf("provider received %d articles, want 1", got)
 	}
 }

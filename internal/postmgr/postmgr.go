@@ -2,6 +2,7 @@
 package postmgr
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -11,6 +12,17 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 )
+
+// ErrStopped is returned by ProcessPendingPosts when a stop (Stop or Run's shutdown signal)
+// ended the batch before every selected entry was worked on; those entries are back to pending.
+var ErrStopped = errors.New("post queue processing stopped")
+
+// errPostRejected marks a provider's 441 answer: the provider refused this article. Only a
+// rejection by every pool counts as a post_queue attempt (see processEntry).
+var errPostRejected = errors.New("article rejected by provider (441)")
+
+// defaultIdlePause is Run's pause after a batch that did not fill the limit.
+const defaultIdlePause = 10 * time.Second
 
 // PosterManager manages the posting of articles to multiple providers
 type PosterManager struct {
@@ -30,7 +42,7 @@ func NewPosterManager(db *database.Database, pools []*nntp.Pool) *PosterManager 
 		DB:        db,
 		pools:     pools,
 		stopCh:    make(chan struct{}),
-		idlePause: 10 * time.Second,
+		idlePause: defaultIdlePause,
 	}
 }
 
@@ -89,10 +101,13 @@ func (pm *PosterManager) Run(limit int, shutdownChan <-chan struct{}, wg *sync.W
 		}
 		// Check for pending posts
 		done, err := pm.ProcessPendingPosts(limit)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrStopped) {
 			log.Printf("PosterManager: Error processing pending posts: %v", err)
 		}
 		pause := pm.idlePause
+		if pause <= 0 {
+			pause = defaultIdlePause
+		}
 		if done == limit {
 			pause = 1 * time.Second
 		}
@@ -110,8 +125,10 @@ func (pm *PosterManager) Stop() {
 }
 
 // ProcessPendingPosts processes all pending posts in the queue.
-// It returns the number of entries it worked on. On stop it returns early and resets the
-// failed entries and the ones not yet worked on to pending, so the next run picks them up.
+// It returns the number of entries it worked on. Every failed entry goes back to pending with
+// its last_error; a rejection by every provider (441) also counts an attempt, and an entry that
+// reaches PostQueueMaxAttempts is parked. On stop it returns early with ErrStopped and resets
+// the entries not yet worked on to pending, so the next run picks them up.
 func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 	// Get pending posts from database
 	entries, err := pm.DB.GetPendingPostQueueEntries(limit)
@@ -140,15 +157,20 @@ func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 			if err := pm.DB.ResetPostQueueProcessing(resetIDs); err != nil {
 				return i, fmt.Errorf("failed to reset processing state of %d entries on stop: %v", len(resetIDs), err)
 			}
-			return i, nil
+			return i, ErrStopped
 		}
 		if err := pm.processEntry(entry); err != nil {
-			log.Printf("Failed to process entry %d (message: %s): %v", entry.ID, entry.MessageID, err)
-			failedEntryIDs = append(failedEntryIDs, entry.ID)
+			rejected := errors.Is(err, errPostRejected)
+			log.Printf("Failed to process entry %d (message: %s, rejected=%v): %v", entry.ID, entry.MessageID, rejected, err)
+			// RecordPostQueueFailure also clears in_processing; when it fails, reset the flag below.
+			if rerr := pm.DB.RecordPostQueueFailure(entry.ID, err.Error(), rejected); rerr != nil {
+				log.Printf("Failed to record failure of entry %d: %v", entry.ID, rerr)
+				failedEntryIDs = append(failedEntryIDs, entry.ID)
+			}
 		}
 	}
 
-	// Reset processing state for failed entries
+	// Reset processing state for failed entries whose failure could not be recorded
 	if len(failedEntryIDs) > 0 {
 		if err := pm.DB.ResetPostQueueProcessing(failedEntryIDs); err != nil {
 			log.Printf("Failed to reset processing state for failed entries: %v", err)
@@ -181,9 +203,15 @@ func (pm *PosterManager) processEntry(entry database.PostQueueEntry) error {
 
 	// Post to all available providers
 	successCount := 0
+	rejected := 0 // pools that answered 441
+	var lastErr error
 	for _, pool := range pm.pools {
 		if err := pm.postToProvider(article, pool); err != nil {
 			log.Printf("Failed to post article %s to provider %s: %v", entry.MessageID, pool.Backend.Provider.Name, err)
+			lastErr = err
+			if errors.Is(err, errPostRejected) {
+				rejected++
+			}
 		} else {
 			successCount++
 			log.Printf("Successfully posted article %s to provider %s", entry.MessageID, pool.Backend.Provider.Name)
@@ -196,7 +224,16 @@ func (pm *PosterManager) processEntry(entry database.PostQueueEntry) error {
 		return pm.DB.MarkPostQueueAsPostedToRemote(entry.ID)
 	}
 
-	return fmt.Errorf("failed to post article %s to any provider", entry.MessageID)
+	if len(pm.pools) > 0 && rejected == len(pm.pools) {
+		// every provider refused the article: this counts as an attempt
+		return fmt.Errorf("article %s rejected by all %d providers: %w", entry.MessageID, rejected, lastErr)
+	}
+	if lastErr != nil {
+		// at least one provider failed for another reason (connection, pool, protocol): no attempt
+		// is counted; errPostRejected is not wrapped, so a partial rejection does not count either
+		return fmt.Errorf("failed to post article %s to any provider (%d of %d rejected): %v", entry.MessageID, rejected, len(pm.pools), lastErr)
+	}
+	return fmt.Errorf("failed to post article %s to any provider: no posting provider", entry.MessageID)
 }
 
 // getArticleByMessageID retrieves an article from the local database
@@ -229,6 +266,15 @@ func (pm *PosterManager) postToProvider(article *models.Article, pool *nntp.Pool
 		}
 		// Use POST for posting articles (standard NNTP posting)
 		responseCode, err := conn.PostArticle(article)
+		if responseCode == 441 {
+			// Posting failed: the provider refused this article. PostArticle reports the 441 as an
+			// error (the expected code was 340/240), but the connection is still in sync.
+			pool.Put(conn)
+			if err != nil {
+				return fmt.Errorf("%w: %v", errPostRejected, err)
+			}
+			return errPostRejected
+		}
 		if err != nil {
 			conn.ForceCloseConn()
 			return fmt.Errorf("failed to post article: %v", err)
@@ -238,9 +284,6 @@ func (pm *PosterManager) postToProvider(article *models.Article, pool *nntp.Pool
 		case 240: // Article posted successfully
 			pool.Put(conn)
 			return nil
-		case 441: // Posting failed
-			pool.Put(conn)
-			return fmt.Errorf("article posting failed (code 441)")
 		default:
 			conn.ForceCloseConn()
 			return fmt.Errorf("unexpected response code: %d", responseCode)
