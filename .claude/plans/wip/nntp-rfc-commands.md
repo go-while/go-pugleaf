@@ -1132,3 +1132,6 @@ Deviations recorded:
 Dispatch, `commandMaxArgs` rows, CAPABILITIES and the 10 RFC-1 marker removals exactly as the hand-over; group test header
 comment and `sessFuzzMultiCodes` (231) updated; HELP lists the new commands (STARTTLS only while `starttlsAvailable()`);
 README file table and command list updated. Step B (`rfc-wire`) spawned on base eae3da0.
+`## Checks` on eae3da0: gofmt baseline 2 files; vet (plain and `-tags e2e`), build, `bash -n` ok; `go test -race` over the
+8 package sets PASS (nntp 139 s); `PUGLEAF_KNOWN_BUGS=1` list = **T-nntp-article-1** only (RFC-1 closed, E11 met);
+`grep '"RFC-1"'` empty.
