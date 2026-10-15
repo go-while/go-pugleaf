@@ -84,10 +84,14 @@ func (c *ClientConnection) handlePost() error {
 	}
 	article.Posted = true // injected here: the processor applies the POST-only group policy
 
+	// Copy the id before the hand-off: once ProcessIncomingArticle returns, the batch
+	// goroutine may already have cleared the struct (db_batch.go processNewsgroupBatch),
+	// so reading article.MessageID afterwards is a data race and can yield "".
+	messageID := article.MessageID
 	code, perr := c.server.Processor.ProcessIncomingArticle(article)
-	reply, text, closeConn := intakeReply(intakePost, code, perr, article.MessageID)
+	reply, text, closeConn := intakeReply(intakePost, code, perr, messageID)
 	if reply == 240 && c.server.local430 != nil {
-		c.server.local430.Remove(article.MessageID) // BUG-8: the article exists now
+		c.server.local430.Remove(messageID) // BUG-8: the article exists now
 	}
 	if closeConn {
 		return c.closeAfterReply(reply, text)
