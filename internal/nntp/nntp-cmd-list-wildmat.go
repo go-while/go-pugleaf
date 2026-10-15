@@ -8,10 +8,6 @@ import (
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-// newsgroupsDescCleaner turns TAB, CR and LF in a description into spaces, so each
-// LIST NEWSGROUPS entry is one line.
-var newsgroupsDescCleaner = strings.NewReplacer("\t", " ", "\r", " ", "\n", " ")
-
 // activeLine formats g as a LIST ACTIVE line "name high low status" (RFC 3977
 // §7.6.3), exactly as handleListActive does: low is max(low_water, 1); the status is
 // the group's "y" or "m" when this client may post, else "n" (decision 14). NEWGROUPS
@@ -31,7 +27,16 @@ func (c *ClientConnection) activeLine(g *models.Newsgroup) string {
 // newsgroupsLine formats g as a LIST NEWSGROUPS line "name description" (RFC 3977
 // §7.6.6), exactly as handleListNewsgroups does.
 func newsgroupsLine(g *models.Newsgroup) string {
-	return g.Name + " " + newsgroupsDescCleaner.Replace(g.Description)
+	// strings.Map (not a Replacer): invalid UTF-8 becomes U+FFFD, the same as plain
+	// LIST NEWSGROUPS, so both forms print one description byte for byte alike.
+	desc := strings.Map(func(r rune) rune {
+		switch r {
+		case '\t', '\r', '\n':
+			return ' '
+		}
+		return r
+	}, g.Description)
+	return g.Name + " " + desc
 }
 
 // handleListWildmat handles LIST ACTIVE <wildmat> and LIST NEWSGROUPS <wildmat>
