@@ -170,7 +170,7 @@ func run() (code int) {
 			log.Printf("Error processing pending posts: %v", err)
 			return 1
 		}
-		log.Printf("Processed %d pending posts", done)
+		log.Printf("Post queue run done: %d pending posts worked on (posted + failed)", done)
 		return 0
 	}
 	var wg sync.WaitGroup
