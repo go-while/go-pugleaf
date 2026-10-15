@@ -263,7 +263,7 @@ func TestAdfOptPostQueueSelectRetry(t *testing.T) {
 		resCh <- result{e, err}
 	}()
 	retried := time.Now().Add(testWait)
-	for !logs.contains("SQLite retry attempt", "for transaction") {
+	for !logs.contains("SQLite retry attempt", "for transaction: database is locked") {
 		select {
 		case r := <-resCh:
 			t.Fatalf("GetPendingPostQueueEntries returned (%d entries, err %v) while the write lock was held, without a logged retry", len(r.entries), r.err)
