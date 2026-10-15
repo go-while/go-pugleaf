@@ -110,7 +110,7 @@ func (db *Database) BuildThreadTree(groupDB *GroupDB, threadRoot int64) (*Thread
 	for _, overview := range overviews {
 		overviewList = append(overviewList, overview)
 	}
-	models.BatchSanitizeOverviews(overviewList)
+	models.BatchSanitizeOverviews(overviewList, groupDB.Newsgroup)
 
 	// Ensure root article exists in overviews
 	if _, ok := overviews[threadRoot]; !ok {

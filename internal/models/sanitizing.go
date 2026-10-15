@@ -9,24 +9,23 @@ import (
 	"log"
 	"mime"
 	"mime/quotedprintable"
+	"net/mail"
 	"regexp"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/go-while/go-pugleaf/internal/cache"
 	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/encoding/htmlindex"
 	"golang.org/x/text/transform"
 )
 
 var (
-	mimeWordRegex = regexp.MustCompile(`=\?([^?]+)\?([QqBb])\?([^?]*)\?=`)
-	spaceRegex    = regexp.MustCompile(`\s+`)
-	scriptRegex   = regexp.MustCompile(`(?i)<script[^>]*>.*?</script>`)
-	iframeRegex   = regexp.MustCompile(`(?i)<iframe[^>]*>.*?</iframe>`)
-	jsRegex       = regexp.MustCompile(`(?i)javascript:[^"'\s>]*`)
-	eventRegex    = regexp.MustCompile(`(?i)on\w+\s*=\s*["'][^"']*["']`)
+	mimeWordRegex  = regexp.MustCompile(`=\?([^?]+)\?([QqBb])\?([^?]*)\?=`)
+	spaceRegex     = regexp.MustCompile(`\s+`)
+	angleAddrRegex = regexp.MustCompile(`<[^<>]*>`)
 )
 
 // Security and sanitization methods
@@ -185,98 +184,247 @@ func normalizeCharsetName(charset string) string {
 	}
 }
 
-// sanitizeText removes dangerous HTML/script content and event handlers from a string
+// headerWordDecoder decodes RFC 2047 encoded words. Charsets other than the three
+// the standard library knows (utf-8, iso-8859-1, us-ascii) go through htmlindex.
+// A mime.WordDecoder holds no state, so the shared instance is safe for concurrent use.
+var headerWordDecoder = &mime.WordDecoder{CharsetReader: charsetReader}
 
-// Article PrintSanitized returns UTF-8 converted and HTML-escaped text safe for web display
-// This method now primarily relies on pre-cached values from BatchSanitizeArticles
-// groupName parameter is optional for caching - if empty, caching is skipped
+// fromAddressParser parses From headers with the extended-charset word decoder.
+var fromAddressParser = &mail.AddressParser{WordDecoder: headerWordDecoder}
+
+// charsetReader converts input from the named charset to UTF-8 (mime.WordDecoder.CharsetReader).
+func charsetReader(charset string, input io.Reader) (io.Reader, error) {
+	cs := normalizeCharsetName(charset)
+	if cs == "utf-8" {
+		return input, nil
+	}
+	enc, err := htmlindex.Get(cs)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported charset: %s", charset)
+	}
+	if enc == nil {
+		return input, nil
+	}
+	return transform.NewReader(input, enc.NewDecoder()), nil
+}
+
+// decodeHeaderText decodes a header value for display (A-web-8): RFC 2047 encoded
+// words, HTML entities (as ConvertToUTF8 always did for headers) and invalid UTF-8
+// repaired per byte sequence. Unlike ConvertToUTF8 it never runs a quoted-printable
+// decoder over the value and never re-decodes the whole string as Latin-1.
+func decodeHeaderText(text string) string {
+	if text == "" {
+		return ""
+	}
+	decoded := text
+	if strings.Contains(text, "=?") {
+		var err error
+		decoded, err = headerWordDecoder.DecodeHeader(text)
+		if err != nil {
+			decoded = decodeUnsupportedMIME(text)
+		}
+	}
+	return repairUTF8(html.UnescapeString(decoded))
+}
+
+// repairUTF8 returns s unchanged when it is valid UTF-8. Otherwise every byte that
+// does not start a valid UTF-8 sequence is read as ISO-8859-1, so the valid UTF-8
+// parts of a mixed string are kept as they are (A-web-8).
+func repairUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			b.WriteRune(rune(s[i]))
+		} else {
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
+}
+
+// rawHeaderValue returns the first value of the named header in a raw header block
+// (the merged header lines stored in Article.HeadersJSON, which is not JSON), with
+// folded continuation lines joined. It returns "" when the header is missing.
+func rawHeaderValue(block, name string) string {
+	var value strings.Builder
+	found := false
+	for _, line := range strings.Split(block, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if found {
+			if line != "" && (line[0] == ' ' || line[0] == '\t') {
+				value.WriteByte(' ')
+				value.WriteString(strings.TrimSpace(line))
+				continue
+			}
+			break
+		}
+		if line == "" {
+			break // end of the header section
+		}
+		colon := strings.IndexByte(line, ':')
+		if colon <= 0 {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(line[:colon]), name) {
+			found = true
+			value.WriteString(strings.TrimSpace(line[colon+1:]))
+		}
+	}
+	return value.String()
+}
+
+// decodeBodyText decodes a stored (raw) article body for display (A-web-8). headers
+// is the raw header block of the article (Article.HeadersJSON). The body is
+// quoted-printable or base64 decoded only when its Content-Transfer-Encoding says
+// so (never for multipart bodies) and converted from the Content-Type charset.
+// RFC 2047 encoded words and HTML entities in a body are text and stay as they are.
+func decodeBodyText(body, headers string) string {
+	if body == "" {
+		return ""
+	}
+	var mediaType, charset string
+	if ct := rawHeaderValue(headers, "Content-Type"); ct != "" {
+		mt, params, err := mime.ParseMediaType(ct)
+		mediaType = mt
+		if err == nil {
+			charset = params["charset"]
+		}
+	}
+	data := []byte(body)
+	// Only text bodies are decoded: a single-part image or application body stays
+	// as its encoded text instead of turning into binary junk.
+	if mediaType == "" || strings.HasPrefix(mediaType, "text/") {
+		switch strings.ToLower(rawHeaderValue(headers, "Content-Transfer-Encoding")) {
+		case "quoted-printable":
+			if decoded, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(body))); err == nil {
+				data = decoded
+			}
+		case "base64":
+			compact := strings.Map(func(r rune) rune {
+				if unicode.IsSpace(r) {
+					return -1
+				}
+				return r
+			}, body)
+			if decoded, err := base64.StdEncoding.DecodeString(compact); err == nil {
+				data = decoded
+			}
+		}
+	}
+	return bodyBytesToUTF8(data, charset)
+}
+
+// bodyBytesToUTF8 converts body bytes from the declared charset to UTF-8. Without a
+// charset, or for UTF-8 and US-ASCII, invalid sequences are repaired per sequence.
+// Bytes that are valid UTF-8 and not plain ASCII stay UTF-8 even when a legacy
+// charset is declared: mislabelled UTF-8 posts are common on Usenet, while legacy
+// 8-bit text is almost never valid UTF-8.
+func bodyBytesToUTF8(data []byte, charset string) string {
+	cs := strings.ToLower(strings.TrimSpace(charset))
+	switch cs {
+	case "", "utf-8", "utf8", "us-ascii", "ascii":
+		return repairUTF8(string(data))
+	}
+	// UTF-16/UTF-32 labels on a Usenet body are bogus (the body is line-based 8-bit
+	// text); decoding ASCII as UTF-16 yields CJK garbage. Treat them as unknown.
+	for _, wide := range []string{"utf-16", "utf16", "utf-32", "utf32"} {
+		if strings.HasPrefix(cs, wide) {
+			return repairUTF8(string(data))
+		}
+	}
+	if utf8.Valid(data) && !isASCII(data) {
+		return string(data)
+	}
+	if s, err := decodeCharsetToUTF8(data, cs); err == nil {
+		return s
+	}
+	return repairUTF8(string(data))
+}
+
+func isASCII(data []byte) bool {
+	for _, c := range data {
+		if c >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// displayDateFormat is the date format of the "date" field, in PrintSanitized and
+// in the batch prefill alike (A-web-10).
+const displayDateFormat = "Mon, 02 Jan 2006 15:04"
+
+// Article PrintSanitized returns UTF-8 decoded and HTML-escaped text safe for web display.
+// The text is not filtered: html.EscapeString (and html/template) is the XSS defence (A-web-9).
+// groupName is optional: the sanitized cache is keyed by group and message-id (A-web-10),
+// so without a group the value is computed but not cached. BatchSanitizeArticles with the
+// same group prefills the cache entries read here.
 func (a *Article) PrintSanitized(field string, groupName ...string) template.HTML {
 	if a == nil {
 		log.Printf("PrintSanitized called on nil Article")
 		return ""
 	}
-
-	// Try to get from cache first if messageID is available
-	if a.MessageID != "" {
-		if cached, found := GetCachedSanitized(a.MessageID, field); found {
-			return cached
-		}
-	}
-
-	// Read-only: the *Article may be shared (article cache), so the sanitized
-	// values are computed into a local struct and never written back (A-web-4).
-	a.Mux.RLock()
-	defer a.Mux.RUnlock()
-
-	var text string
-	switch field {
-	case "message_id", "messageid":
-		text = a.MessageID
-	case "subject":
-		text = truncateSubject(a.sanitizedSubject())
-	case "from", "fromheader":
-		text = a.sanitizedFromHeader()
-	case "date", "date_string":
-		if !a.DateSent.IsZero() {
-			text = a.DateSent.Format("Mon, 02 Jan 2006 15:04")
-		} else {
-			text = "-???-"
-		}
-	case "date_since":
-		if !a.DateSent.IsZero() {
-			text = PrintTimeSinceHumanReadable(a.DateSent)
-		} else {
-			text = "-???-"
-		}
-	case "references":
-		text = a.sanitizedReferences()
-	case "body", "body_text", "bodytext":
-		text = a.sanitizedBodyText()
-	case "path":
-		text = a.Path
-	case "headers_json":
-		text = a.HeadersJSON
-	// HeadersJSON is intentionally excluded - it's JSON data, not user text
-	default:
+	canon, ok := cache.CanonicalField(field)
+	if !ok {
 		return "--sanitizing-F1--missing-field--"
 	}
 
-	utf8Text := ConvertToUTF8(text)
-	// Since ConvertToUTF8 already handles HTML entity decoding,
-	// we need to re-escape for safe HTML output
-	result := template.HTML(html.EscapeString(utf8Text))
+	// Read-only: the *Article may be shared (article cache), so the display
+	// values are computed into locals and never written back (A-web-4).
+	a.Mux.RLock()
+	defer a.Mux.RUnlock()
 
-	// Cache the result if messageID is available
-	if a.MessageID != "" {
-		SetCachedSanitized(a.MessageID, field, result)
+	group := firstGroupName(groupName)
+	if cached, found := GetCachedSanitized(group, a.MessageID, canon); found {
+		return cached
 	}
 
+	text, ok := a.displayText(canon)
+	if !ok {
+		return "--sanitizing-F1--missing-field--"
+	}
+	result := template.HTML(html.EscapeString(text))
+	SetCachedSanitized(group, a.MessageID, canon, result)
 	return result
 }
 
-const replacedMailDomain = "..."
-
-func splitDomainFromEmail(email string) (string, string) {
-	// This function splits an email address into local part and domain
-	if email == "" {
-		return "", ""
+// displayText returns the decoded, not yet escaped display text of a canonical
+// field name (cache.CanonicalField). Caller holds a.Mux (read lock is enough).
+func (a *Article) displayText(field string) (string, bool) {
+	switch field {
+	case "subject":
+		return a.sanitizedSubject(), true
+	case "from":
+		return a.sanitizedFromHeader(), true
+	case "date":
+		if !a.DateSent.IsZero() {
+			return a.DateSent.Format(displayDateFormat), true
+		}
+		return "-???-", true
+	case "date_since":
+		if !a.DateSent.IsZero() {
+			return PrintTimeSinceHumanReadable(a.DateSent), true
+		}
+		return "-???-", true
+	case "references":
+		return a.sanitizedReferences(), true
+	case "body":
+		return a.sanitizedBodyText(), true
+	case "messageid":
+		return decodeHeaderText(a.MessageID), true
+	case "path":
+		return decodeHeaderText(a.Path), true
+	case "headers_json":
+		// The raw header block (not JSON): header decoding only.
+		return decodeHeaderText(a.HeadersJSON), true
 	}
-	parts := strings.SplitN(email, "@", 2)
-	if len(parts) != 2 {
-		return email, "" // return original if no domain found
-	}
-	localPart := parts[0]
-	domain := parts[1]
-	if len(domain) > 4 {
-		domain = domain[:4] + "..." // truncate domain to 4 characters
-	}
-	if localPart == "" {
-		return "anon", "..." // return domain only if local part is empty
-	}
-	if domain == "" {
-		return localPart, domain
-	}
-	return localPart, domain
+	return "", false
 }
 
 func PrintTimeSinceHumanReadable(t time.Time) string {
@@ -405,180 +553,178 @@ func cleanFromHeaderName(name string) string {
 		return "Anon"
 	}
 
-	// Limit to 32 characters for readability
-	if len(result) > 32 {
-		result = result[:32] + "..."
-	}
-
-	return result
+	// Limit to 32 characters (runes) for readability
+	return truncateRunes(result, maxFromRunes)
 }
 
-func filterMailDomainInFromHeader(fromHeader string) string {
-	// This function replaces the domain in the From header with a generic domain
-	if fromHeader == "" {
-		return "Anon <nohdr@" + replacedMailDomain + ">"
+const (
+	maxSubjectRunes = 128 // display length of a subject, in runes
+	maxFromRunes    = 32  // display length of an author name, in runes
+)
+
+// truncateRunes cuts s to at most n runes and appends "..." when it was longer.
+// It never splits a UTF-8 sequence (A-web-6, A-web-7).
+func truncateRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
 	}
-	name, email := SplitStringForLastSpace(strings.TrimSpace(fromHeader))
-	if !strings.Contains(email, "@") {
-		if len(fromHeader) > 16 {
-			fromHeader = fromHeader[:16]
+	count := 0
+	for pos := range s {
+		if count == n {
+			return s[:pos] + "..."
 		}
-		if name != "" {
-			if len(name) > 16 {
-				name = name[:16]
+		count++
+	}
+	return s
+}
+
+// truncateSubject truncates a decoded subject to 128 runes with ellipsis.
+func truncateSubject(subject string) string {
+	return truncateRunes(subject, maxSubjectRunes)
+}
+
+// displaySubject decodes a raw Subject header first and truncates it afterwards (A-web-7).
+func displaySubject(raw string) string {
+	return truncateSubject(decodeHeaderText(raw))
+}
+
+// displayFrom returns the author name shown for a raw From header (A-web-6).
+// Encoded words are decoded before anything is cut, the header is parsed with
+// net/mail (display name, or the comment of the "addr (Name)" form, else the local
+// part of the address), and the result is cut by runes. Address domains are never
+// shown. A header net/mail cannot parse falls back to cleanFromHeaderName.
+func displayFrom(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "Anon"
+	}
+	addr, err := fromAddressParser.Parse(raw)
+	if err != nil {
+		addr, err = fromAddressParser.Parse(decodeHeaderText(raw))
+	}
+	if err == nil {
+		name := tidyFromName(decodeHeaderText(addr.Name))
+		if name == "" {
+			name = tidyFromName(localPart(addr.Address))
+		}
+		if name == "" {
+			return "Anon"
+		}
+		return truncateRunes(name, maxFromRunes)
+	}
+	// Not an RFC 5322 address (e.g. "Last, First <addr>" or a bare name):
+	// drop the <addr> part, hide domains, keep only the safe characters.
+	decoded := decodeHeaderText(raw)
+	rest := angleAddrRegex.ReplaceAllString(decoded, " ")
+	if strings.TrimSpace(rest) == "" {
+		rest = localPart(strings.Trim(angleAddrRegex.FindString(decoded), "<>"))
+	}
+	return cleanFromHeaderName(hideMailDomains(rest))
+}
+
+// localPart returns the part of an address before the "@".
+func localPart(address string) string {
+	local, _, _ := strings.Cut(address, "@")
+	return strings.TrimSpace(local)
+}
+
+// hideMailDomains replaces every whitespace-separated word that contains "@" by
+// the text before the "@", so no address domain is shown.
+func hideMailDomains(s string) string {
+	if !strings.Contains(s, "@") {
+		return s
+	}
+	fields := strings.Fields(s)
+	out := fields[:0]
+	for _, f := range fields {
+		if at := strings.IndexByte(f, '@'); at >= 0 {
+			f = strings.TrimLeft(f[:at], "<(\"'")
+			if f == "" {
+				continue
 			}
-			// Clean up non-alphabetic characters from name
-			name = cleanFromHeaderName(name)
-			return name
 		}
-		return cleanFromHeaderName(fromHeader) // invalid format, clean and return
+		out = append(out, f)
 	}
-	if len(name) > 16 {
-		name = name[:16]
-	}
-	/*
-		localPart, domain := splitDomainFromEmail(strings.Trim(email, "<>"))
-		if domain == replacedMailDomain {
-			return fromHeader // already filtered
+	return strings.Join(out, " ")
+}
+
+// tidyFromName hides address domains, turns control characters into spaces and
+// collapses whitespace.
+func tidyFromName(name string) string {
+	name = hideMailDomains(name)
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
 		}
-
-		if len(localPart) > 16 {
-			localPart = localPart[:16] + ".." // truncate local part to 2 characters
-		}
-
-
-		newFromHeader := name + " <" + localPart + "@" + replacedMailDomain + ">"
-		if len(newFromHeader) > 16 {
-			newFromHeader = newFromHeader[:16] + ".." // truncate to 16 characters
-		}
-	*/
-	//log.Printf("Filtering From header: name='%s' hdr='%s' -> '%s'", name, fromHeader, newFromHeader)
-	// Replace from domain with the generic domain and clean the name
-	return cleanFromHeaderName(name)
-	//return newFromHeader
+		return r
+	}, name)
+	return strings.Join(strings.Fields(name), " ")
 }
 
-// sanitizedArticleFields holds the display values StripDangerousHTML would
-// write into an Article, computed without modifying the Article.
-type sanitizedArticleFields struct {
-	Subject    string
-	FromHeader string
-	BodyText   string
-	DateString string
-	References string
-}
+// Per-field display helpers: the single entry points for the decoded, not yet
+// escaped display text of an Article field. They only read the Article; the
+// caller holds a.Mux (read lock is enough).
+func (a *Article) sanitizedSubject() string { return displaySubject(a.Subject) }
 
-// sanitizedFields returns the same values StripDangerousHTML writes, computed
-// from the unmodified fields. The caller must hold a.Mux (read lock is enough).
-func (a *Article) sanitizedFields() sanitizedArticleFields {
-	return sanitizedArticleFields{
-		Subject:    a.sanitizedSubject(),
-		FromHeader: a.sanitizedFromHeader(),
-		BodyText:   a.sanitizedBodyText(),
-		DateString: sanitizeText(a.DateString),
-		References: a.sanitizedReferences(),
-	}
-}
+func (a *Article) sanitizedFromHeader() string { return displayFrom(a.FromHeader) }
 
-// Per-field variants of sanitizedFields, so PrintSanitized only runs the
-// sanitizing regexes over the field it renders. Caller holds a.Mux.
-func (a *Article) sanitizedSubject() string { return sanitizeText(a.Subject) }
+func (a *Article) sanitizedBodyText() string { return decodeBodyText(a.BodyText, a.HeadersJSON) }
 
-func (a *Article) sanitizedFromHeader() string {
-	return sanitizeText(filterMailDomainInFromHeader(a.FromHeader))
-}
+func (a *Article) sanitizedReferences() string { return decodeHeaderText(a.References) }
 
-func (a *Article) sanitizedBodyText() string { return sanitizeText(a.BodyText) }
-
-func (a *Article) sanitizedReferences() string { return sanitizeText(a.References) }
-
-// StripDangerousHTML removes potentially dangerous HTML/script content from all user-facing fields.
-// It MUTATES the Article in place (Subject, FromHeader, BodyText, DateString, References) and sets
-// Sanitized; the caller must hold a.Mux exclusively. The web display path (PrintSanitized,
-// BatchSanitizeArticles) does not use it: articles there may be shared via the article cache, so
-// they use sanitizedFields() instead. Kept exported for compatibility.
-func (a *Article) StripDangerousHTML() {
-	if a == nil {
-		return
-	}
-
-	a.Subject = sanitizeText(a.Subject)
-	a.FromHeader = sanitizeText(filterMailDomainInFromHeader(a.FromHeader))
-	a.BodyText = sanitizeText(a.BodyText)
-	a.DateString = sanitizeText(a.DateString)
-	a.References = sanitizeText(a.References)
-	// Add more fields if needed
-
-	a.Sanitized = true
-}
-
-// Overview PrintSanitized returns a sanitized version of the specified field for web display
-// groupName parameter is optional for caching - if empty, caching is skipped
+// Overview PrintSanitized returns a decoded and HTML-escaped version of the specified
+// field for web display. It only reads the Overview, which may be shared through the
+// tree cache (A-web-9). groupName is optional: without it the value is not cached.
 func (o *Overview) PrintSanitized(field string, groupName ...string) template.HTML {
 	if o == nil {
 		return ""
 	}
-
-	// Try to get from cache first if messageID is available
-	if o.MessageID != "" {
-		if cached, found := GetCachedSanitized(o.MessageID, field); found {
-			return cached
-		}
-	}
-
-	if !o.Sanitized {
-		o.Subject = sanitizeText(o.Subject)
-		o.FromHeader = sanitizeText(filterMailDomainInFromHeader(o.FromHeader))
-		o.DateString = sanitizeText(o.DateString)
-		o.References = sanitizeText(o.References)
-		o.Sanitized = true
-	}
-
-	var text string
-	switch strings.ToLower(field) {
-	case "subject":
-		text = truncateSubject(o.Subject)
-
-	case "fromheader", "from", "from_header":
-		text = o.FromHeader
-
-	case "date", "datestring", "date_string":
-		if !o.DateSent.IsZero() {
-			text = o.DateSent.Format("Mon, 02 Jan 2006 15:04")
-		} else {
-			text = "--"
-		}
-
-	case "date_since":
-		if !o.DateSent.IsZero() {
-			text = PrintTimeSinceHumanReadable(o.DateSent)
-		} else {
-			text = "--"
-		}
-
-	case "messageid", "message_id":
-		text = o.MessageID
-	case "references":
-		text = o.References
-	default:
+	canon, ok := cache.CanonicalField(field)
+	if !ok {
 		return "--sanitizing-F2--missing-field--"
 	}
 
-	// Convert from Latin-1 to UTF-8 if needed
-	text = ConvertToUTF8(text)
-
-	// HTML escape for web safety
-	result := template.HTML(html.EscapeString(text))
-
-	// Cache the result if messageID is available
-	if o.MessageID != "" {
-		SetCachedSanitized(o.MessageID, field, result)
+	group := firstGroupName(groupName)
+	if cached, found := GetCachedSanitized(group, o.MessageID, canon); found {
+		return cached
 	}
 
+	text, ok := o.displayText(canon)
+	if !ok {
+		return "--sanitizing-F2--missing-field--"
+	}
+	result := template.HTML(html.EscapeString(text))
+	SetCachedSanitized(group, o.MessageID, canon, result)
 	return result
 }
 
-// GetCleanSubject returns the article subject text decoded and cleaned but without HTML escaping
+// displayText returns the decoded, not yet escaped display text of a canonical
+// field name (cache.CanonicalField).
+func (o *Overview) displayText(field string) (string, bool) {
+	switch field {
+	case "subject":
+		return displaySubject(o.Subject), true
+	case "from":
+		return displayFrom(o.FromHeader), true
+	case "date":
+		if !o.DateSent.IsZero() {
+			return o.DateSent.Format(displayDateFormat), true
+		}
+		return "--", true
+	case "date_since":
+		if !o.DateSent.IsZero() {
+			return PrintTimeSinceHumanReadable(o.DateSent), true
+		}
+		return "--", true
+	case "messageid":
+		return decodeHeaderText(o.MessageID), true
+	case "references":
+		return decodeHeaderText(o.References), true
+	}
+	return "", false
+}
+
+// GetCleanSubject returns the article subject text decoded but without HTML escaping
 // This is suitable for use in browser titles where HTML entities should not be displayed literally
 func (a *Article) GetCleanSubject() string {
 	if a == nil {
@@ -589,16 +735,10 @@ func (a *Article) GetCleanSubject() string {
 		return "[No Subject]"
 	}
 
-	// Get the subject text, apply basic sanitization but without HTML escaping
-	text := sanitizeText(truncateSubject(a.Subject))
-
-	// Convert from Latin-1 to UTF-8 and decode entities
-	text = ConvertToUTF8(text)
-
-	return text
+	return displaySubject(a.Subject)
 }
 
-// GetCleanSubject returns the overview subject text decoded and cleaned but without HTML escaping
+// GetCleanSubject returns the overview subject text decoded but without HTML escaping
 // This is suitable for use in browser titles where HTML entities should not be displayed literally
 func (o *Overview) GetCleanSubject() string {
 	if o == nil {
@@ -609,47 +749,22 @@ func (o *Overview) GetCleanSubject() string {
 		return "[No Subject]"
 	}
 
-	// Get the subject text, apply basic sanitization but without HTML escaping
-	text := sanitizeText(truncateSubject(o.Subject))
-
-	// Convert from Latin-1 to UTF-8 and decode entities
-	text = ConvertToUTF8(text)
-
-	return text
+	return displaySubject(o.Subject)
 }
 
-func sanitizeText(input string) string {
-	if input == "" {
-		return ""
-	}
-
-	// Remove script tags and their content
-	output := scriptRegex.ReplaceAllString(input, "")
-
-	// Remove iframe tags
-	output = iframeRegex.ReplaceAllString(output, "")
-
-	// Remove javascript: links
-	output = jsRegex.ReplaceAllString(output, "")
-
-	// Remove onload, onclick, onerror, etc. event handlers
-	output = eventRegex.ReplaceAllString(output, "")
-
-	return output
-}
-
-// truncateSubject truncates subject lines to 128 characters with ellipsis
-func truncateSubject(subject string) string {
-	if len(subject) <= 128 {
-		return subject
-	}
-	return subject[:128] + "..."
-}
+// Fields prefilled by the batch sanitizers, as canonical names (cache.CanonicalField).
+var (
+	batchArticleFields  = []string{"subject", "from", "body", "references", "date", "messageid", "path"}
+	batchOverviewFields = []string{"subject", "from", "references", "date", "messageid"}
+)
 
 // BatchSanitizeArticles pre-sanitizes and caches all commonly-used fields for multiple articles
 // This should be called before rendering templates to avoid lock contention during template execution
-func BatchSanitizeArticles(articles []*Article) {
-	if len(articles) == 0 || sanitizedCache == nil {
+// groupName must be the group the templates pass to PrintSanitized: the cache is keyed by group and
+// message-id (A-web-10). Without a group nothing is cached, since PrintSanitized could not find it.
+func BatchSanitizeArticles(articles []*Article, groupName ...string) {
+	group := firstGroupName(groupName)
+	if len(articles) == 0 || sanitizedCache == nil || group == "" {
 		return
 	}
 
@@ -657,54 +772,30 @@ func BatchSanitizeArticles(articles []*Article) {
 	batch := make(map[string]map[string]template.HTML)
 
 	for _, article := range articles {
-		if article == nil || (article.MessageID == "") {
+		if article == nil {
 			continue
 		}
-		// Skip if already fully cached
-		if cached, found := sanitizedCache.GetArticle(article.MessageID); found && cached != nil {
-			continue
-		}
-		// Read-only: compute sanitized values locally, never write them back
+		// Read-only: compute display values locally, never write them back
 		// into the (possibly shared) *Article (A-web-4).
 		article.Mux.RLock()
-		sf := article.sanitizedFields()
-
-		// Prepare sanitized fields for this article
-		fields := make(map[string]template.HTML)
-
-		// Sanitize commonly-used fields - use same order as old PrintSanitized
-		utf8Subject := ConvertToUTF8(truncateSubject(sf.Subject))
-		fields["subject"] = template.HTML(html.EscapeString(utf8Subject))
-
-		utf8FromHeader := ConvertToUTF8(sf.FromHeader)
-		fields["fromheader"] = template.HTML(html.EscapeString(utf8FromHeader))
-
-		utf8BodyText := ConvertToUTF8(sf.BodyText)
-		fields["bodytext"] = template.HTML(html.EscapeString(utf8BodyText))
-
-		utf8References := ConvertToUTF8(sf.References)
-		fields["references"] = template.HTML(html.EscapeString(utf8References))
-
-		// Handle date formatting like PrintSanitized does
-		var dateText string
-		if !article.DateSent.IsZero() {
-			dateText = article.DateSent.Format("2006-Jan-02 15:04:05")
-		} else {
-			dateText = "invalid-date"
+		key := sanitizedCacheKey(group, article.MessageID)
+		if key == "" {
+			article.Mux.RUnlock()
+			continue
 		}
-		utf8DateText := ConvertToUTF8(dateText)
-		fields["datestring"] = template.HTML(html.EscapeString(utf8DateText))
-
-		// Add other commonly-used fields
-		utf8MessageID := ConvertToUTF8(article.MessageID)
-		fields["messageid"] = template.HTML(html.EscapeString(utf8MessageID))
-
-		utf8Path := ConvertToUTF8(article.Path)
-		fields["path"] = template.HTML(html.EscapeString(utf8Path))
-
-		batch[article.MessageID] = fields
-
+		// Skip if already cached
+		if cached, found := sanitizedCache.GetArticle(key); found && cached != nil {
+			article.Mux.RUnlock()
+			continue
+		}
+		fields := make(map[string]template.HTML, len(batchArticleFields))
+		for _, f := range batchArticleFields {
+			if text, ok := article.displayText(f); ok {
+				fields[f] = template.HTML(html.EscapeString(text))
+			}
+		}
 		article.Mux.RUnlock()
+		batch[key] = fields
 	}
 
 	// Store all sanitized articles in one batch operation
@@ -715,8 +806,11 @@ func BatchSanitizeArticles(articles []*Article) {
 
 // BatchSanitizeOverviews pre-sanitizes and caches all commonly-used fields for multiple overviews
 // This should be called before rendering templates to avoid lock contention during template execution
-func BatchSanitizeOverviews(overviews []*Overview) {
-	if len(overviews) == 0 || sanitizedCache == nil {
+// It only reads the overviews (they may be shared through the tree cache). groupName as for
+// BatchSanitizeArticles: without a group nothing is cached.
+func BatchSanitizeOverviews(overviews []*Overview, groupName ...string) {
+	group := firstGroupName(groupName)
+	if len(overviews) == 0 || sanitizedCache == nil || group == "" {
 		return
 	}
 
@@ -724,51 +818,24 @@ func BatchSanitizeOverviews(overviews []*Overview) {
 	batch := make(map[string]map[string]template.HTML)
 
 	for _, overview := range overviews {
-		if overview == nil || overview.MessageID == "" {
+		if overview == nil {
 			continue
 		}
-
-		// Skip if already fully cached
-		if cached, found := sanitizedCache.GetArticle(overview.MessageID); found && cached != nil {
+		key := sanitizedCacheKey(group, overview.MessageID)
+		if key == "" {
 			continue
 		}
-
-		// Sanitize the overview if not already done
-		if !overview.Sanitized {
-			overview.Subject = sanitizeText(overview.Subject)
-			overview.FromHeader = sanitizeText(filterMailDomainInFromHeader(overview.FromHeader))
-			overview.DateString = sanitizeText(overview.DateString)
-			overview.References = sanitizeText(overview.References)
-			overview.Sanitized = true
+		// Skip if already cached
+		if cached, found := sanitizedCache.GetArticle(key); found && cached != nil {
+			continue
 		}
-
-		// Prepare sanitized fields for this overview
-		fields := make(map[string]template.HTML)
-
-		// Sanitize commonly-used fields - use same order as old PrintSanitized
-		utf8Subject := ConvertToUTF8(truncateSubject(overview.Subject))
-		fields["subject"] = template.HTML(html.EscapeString(utf8Subject))
-
-		utf8FromHeader := ConvertToUTF8(overview.FromHeader)
-		fields["fromheader"] = template.HTML(html.EscapeString(utf8FromHeader))
-
-		utf8References := ConvertToUTF8(overview.References)
-		fields["references"] = template.HTML(html.EscapeString(utf8References))
-
-		utf8MessageID := ConvertToUTF8(overview.MessageID)
-		fields["messageid"] = template.HTML(html.EscapeString(utf8MessageID))
-
-		// Handle date formatting like PrintSanitized does
-		var dateText string
-		if !overview.DateSent.IsZero() {
-			dateText = overview.DateSent.Format("2006-Jan-02 15:04:05")
-		} else {
-			dateText = "invalid-date"
+		fields := make(map[string]template.HTML, len(batchOverviewFields))
+		for _, f := range batchOverviewFields {
+			if text, ok := overview.displayText(f); ok {
+				fields[f] = template.HTML(html.EscapeString(text))
+			}
 		}
-		utf8DateText := ConvertToUTF8(dateText)
-		fields["datestring"] = template.HTML(html.EscapeString(utf8DateText))
-
-		batch[overview.MessageID] = fields
+		batch[key] = fields
 	}
 
 	// Store all sanitized overviews in one batch operation

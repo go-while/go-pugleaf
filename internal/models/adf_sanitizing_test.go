@@ -1,7 +1,6 @@
 package models
 
 import (
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,6 +49,7 @@ func adfSanitizeCheckUnmodified(t *testing.T, a *Article) {
 }
 
 // TestAdfSanitizeNoWriteBack: the display path never writes sanitized values into the Article (A-web-4).
+// The text is escaped, not stripped (A-web-9), and the batch prefill is keyed by group and message-id (A-web-10).
 func TestAdfSanitizeNoWriteBack(t *testing.T) {
 	a := adfSanitizeArticle("nowb-1")
 
@@ -57,13 +57,15 @@ func TestAdfSanitizeNoWriteBack(t *testing.T) {
 	if from != "Alice Example" {
 		t.Errorf("PrintSanitized(fromheader)=%q, want %q", from, "Alice Example")
 	}
+	const wantBody = "body &lt;script&gt;x&lt;/script&gt; end"
 	body := string(a.PrintSanitized("bodytext"))
-	if strings.Contains(body, "script") || body != "body  end" {
-		t.Errorf("PrintSanitized(bodytext)=%q, want %q", body, "body  end")
+	if body != wantBody {
+		t.Errorf("PrintSanitized(bodytext)=%q, want %q", body, wantBody)
 	}
+	const wantSubj = "subj &lt;iframe src=x&gt;&lt;/iframe&gt; tail"
 	subj := string(a.PrintSanitized("subject"))
-	if strings.Contains(subj, "iframe") || subj != "subj  tail" {
-		t.Errorf("PrintSanitized(subject)=%q, want %q", subj, "subj  tail")
+	if subj != wantSubj {
+		t.Errorf("PrintSanitized(subject)=%q, want %q", subj, wantSubj)
 	}
 	refs := string(a.PrintSanitized("references"))
 	if refs != "&lt;adf-web-cache-ref-1@test.invalid&gt;" {
@@ -71,19 +73,7 @@ func TestAdfSanitizeNoWriteBack(t *testing.T) {
 	}
 	adfSanitizeCheckUnmodified(t, a)
 
-	// Same values as the mutating StripDangerousHTML on a separate copy.
-	ref := adfSanitizeArticle("nowb-ref")
-	ref.StripDangerousHTML()
-	a.Mux.RLock()
-	sf := a.sanitizedFields()
-	a.Mux.RUnlock()
-	if sf.Subject != ref.Subject || sf.FromHeader != ref.FromHeader || sf.BodyText != ref.BodyText ||
-		sf.DateString != ref.DateString || sf.References != ref.References {
-		t.Errorf("sanitizedFields()=%+v differs from StripDangerousHTML result %q/%q/%q/%q/%q",
-			sf, ref.Subject, ref.FromHeader, ref.BodyText, ref.DateString, ref.References)
-	}
-
-	// BatchSanitizeArticles with a live cache: values cached, article untouched.
+	// BatchSanitizeArticles with a live cache: values cached under group+message-id, article untouched.
 	sc := cache.NewSanitizedCache(100, time.Hour)
 	prev := sanitizedCache
 	sanitizedCache = sc
@@ -93,18 +83,28 @@ func TestAdfSanitizeNoWriteBack(t *testing.T) {
 	})
 
 	b := adfSanitizeArticle("nowb-2")
+	// Without a group the batch has no key PrintSanitized could read: nothing is cached.
 	BatchSanitizeArticles([]*Article{a, b})
+	if st := sc.Stats(); st["entries"] != 0 {
+		t.Errorf("batch without group cached %v entries", st["entries"])
+	}
+	const group = "adf.test.sanitize"
+	BatchSanitizeArticles([]*Article{a, b}, group)
 	adfSanitizeCheckUnmodified(t, a)
 	adfSanitizeCheckUnmodified(t, b)
 
 	for _, art := range []*Article{a, b} {
-		if v, ok := sc.GetField(art.MessageID, "fromheader"); !ok || string(v) != "Alice Example" {
+		key := sanitizedCacheKey(group, art.MessageID)
+		if _, ok := sc.GetField(art.MessageID, "fromheader"); ok {
+			t.Errorf("%s cached under the bare message-id", art.MessageID)
+		}
+		if v, ok := sc.GetField(key, "fromheader"); !ok || string(v) != "Alice Example" {
 			t.Errorf("%s cached fromheader ok=%v v=%q", art.MessageID, ok, v)
 		}
-		if v, ok := sc.GetField(art.MessageID, "bodytext"); !ok || string(v) != "body  end" {
+		if v, ok := sc.GetField(key, "bodytext"); !ok || string(v) != wantBody {
 			t.Errorf("%s cached bodytext ok=%v v=%q", art.MessageID, ok, v)
 		}
-		if v, ok := sc.GetField(art.MessageID, "subject"); !ok || string(v) != "subj  tail" {
+		if v, ok := sc.GetField(key, "subject"); !ok || string(v) != wantSubj {
 			t.Errorf("%s cached subject ok=%v v=%q", art.MessageID, ok, v)
 		}
 	}
