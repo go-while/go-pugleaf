@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -24,7 +25,9 @@ func main() {
 	os.Exit(run())
 }
 
-// run returns the process exit code: 0 ok, 1 error, 130 one-shot run stopped by a signal.
+// run returns the process exit code: 0 ok, 1 error, 130 one-shot run stopped by a signal
+// (before the batch started, or the batch returned postmgr.ErrStopped). A batch that finished
+// before the signal arrived exits 0.
 // Nothing after OpenDatabase exits the process: every return goes through the deferred
 // shutdown, which runs after the deferred close of the posting pools.
 func run() (code int) {
@@ -159,16 +162,15 @@ func run() (code int) {
 			}
 		}()
 		done, err := posterManager.ProcessPendingPosts(*limit)
+		if errors.Is(err, postmgr.ErrStopped) {
+			log.Printf("Stopped by shutdown signal after %d pending posts, the rest is back to pending", done)
+			return 130
+		}
 		if err != nil {
 			log.Printf("Error processing pending posts: %v", err)
 			return 1
 		}
 		log.Printf("Processed %d pending posts", done)
-		select {
-		case <-shutdownChan:
-			return 130
-		default:
-		}
 		return 0
 	}
 	var wg sync.WaitGroup
@@ -208,14 +210,13 @@ func showUsageExamples() {
 	fmt.Println("  ./post-queue -cleanup-older 7                # Delete posted entries older than 7 days")
 	fmt.Println("  ./post-queue -cleanup-posted-entries -cleanup-older 30  # Delete posted entries older than 30 days")
 	fmt.Println()
-	fmt.Println("Advanced Options:")
-	fmt.Println("  ./post-queue -max-providers 5 -max-concurrent 3")
-	fmt.Println("  ./post-queue -retry-attempts 5 -retry-delay 60s")
-	fmt.Println("  ./post-queue -check-interval 30s")
-	fmt.Println("  ./post-queue -dry-run (test mode without actual posting)")
+	fmt.Println("Data directory:")
+	fmt.Println("  ./post-queue -data ./data-test       # Use another data root (default ./data)")
 	fmt.Println()
-	fmt.Println("Monitoring:")
-	fmt.Println("  ./post-queue -max-concurrent 1 -check-interval 10s")
+	fmt.Println("Attempts:")
+	fmt.Println("  An entry every provider rejects (441) counts one attempt; connection errors do not count.")
+	fmt.Println("  After PostQueueMaxAttempts attempts (config key, default 5) the entry is parked and no")
+	fmt.Println("  longer posted; retry it on the admin page (Post Queue tab) or raise the key.")
 	fmt.Println()
 	fmt.Println("Flags:")
 	fmt.Println("  -help                     Show this help message")
@@ -223,6 +224,7 @@ func showUsageExamples() {
 	fmt.Println("  -max-batch N              Process max N articles per batch (default: 100)")
 	fmt.Println("  -cleanup-posted-entries   Delete all successfully posted entries and exit")
 	fmt.Println("  -cleanup-older N          Delete posted entries older than N days and exit")
+	fmt.Println("  -data DIR                 Directory to store database files (default: ./data)")
 	fmt.Println()
 }
 
