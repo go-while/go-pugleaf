@@ -1135,3 +1135,16 @@ README file table and command list updated. Step B (`rfc-wire`) spawned on base 
 `## Checks` on eae3da0: gofmt baseline 2 files; vet (plain and `-tags e2e`), build, `bash -n` ok; `go test -race` over the
 8 package sets PASS (nntp 139 s); `PUGLEAF_KNOWN_BUGS=1` list = **T-nntp-article-1** only (RFC-1 closed, E11 met);
 `grep '"RFC-1"'` empty.
+
+### Wave 2 step B (2026-10-15): `rfc-wire`
+- Worktree branch `worktree-agent-ac8bb56fba2158e52` (`/tank0/claude/trees/go-pugleaf/agent-ac8bb56fba2158e52`), slice commit
+  e591ca4 on base eae3da0, merged as d61e149; review: merge, MINOR (TAKETHIS in the global never-advertised list) and header
+  nit fixed inline in 00ebfa8, two nits dropped (article 1 hard-coded as the plan says; harmless double close).
+- Deviation: the quit-close-notify subtest parses the raw TLS 1.2 records and requires a final alert (type 21), because
+  crypto/tls returns io.EOF for a bare TCP close at a record boundary too; the implementer showed the test fails against
+  the pre-step-A `Handle` (`record types [... 23], want an alert (21) last`). TLS 1.2 is forced there because 1.3 hides
+  record types.
+- Certificate setup sits after the `DATA_ABS`/`RUN`/`LOG` assignments (needs `$DATA_ABS`), still before the first
+  `start_server`; a second INFO case covers openssl present but failing.
+- Implementer's own e2e run (`PORT=21131 DATA=./data-test-nntp-rfc-wire`, in its worktree): `SUMMARY pass=38 fail=0 info=1`,
+  N50–N57 PASS with a certificate. Verifier spawned on 00ebfa8.
