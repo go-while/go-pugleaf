@@ -8,8 +8,11 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // most code moved into
@@ -133,7 +136,8 @@ func (s *WebServer) serveOn(ln net.Listener) error {
 // active requests until ctx ends. When ctx ends first, it cancels every request context and waits
 // up to shutdownGrace more, then logs the handlers that are still running. The API token usage of
 // the drained requests is written before Shutdown returns, because the caller closes the database
-// next: it waits for the flusher's own last flush and then flushes once more itself.
+// next: it waits for the flusher's own last flush and then flushes once more itself. Last, it
+// stops the cleanup goroutines of the global sanitized and newsgroup caches (once per process).
 func (s *WebServer) Shutdown(ctx context.Context) error {
 	s.stopOnce.Do(func() { close(s.stopCh) })
 	s.httpServerMu.Lock()
@@ -191,5 +195,24 @@ func (s *WebServer) Shutdown(ctx context.Context) error {
 	if s.cancelBase != nil {
 		s.cancelBase()
 	}
+	stopGlobalCaches()
 	return err
+}
+
+// globalCachesStopOnce guards stopGlobalCaches. The sanitized and newsgroup caches are process
+// globals shared by every WebServer, and their Stop is a bare close that panics on a second call,
+// while Shutdown may run several times (per server, and for several servers in the tests).
+var globalCachesStopOnce sync.Once
+
+// stopGlobalCaches stops the cleanup goroutines of the global sanitized and newsgroup caches,
+// once per process (A-web-19). A stopped cache still serves Get and Set; only expiry sweeping ends.
+func stopGlobalCaches() {
+	globalCachesStopOnce.Do(func() {
+		if sc := models.GetSanitizedCache(); sc != nil {
+			sc.Stop()
+		}
+		if nc := models.GetNewsgroupCache(); nc != nil {
+			nc.Stop()
+		}
+	})
 }

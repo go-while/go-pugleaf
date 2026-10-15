@@ -45,12 +45,15 @@ func TestLo1PathsAnalyzeCachePathSeparation(t *testing.T) {
 	}
 }
 
-// With no DB attached the helper falls back to "data", which keeps the old
-// behaviour for a Processor built without a database.
+// With no DB and no AnalyzeDataDir there is no cache root: the helper returns an
+// error instead of falling back to "data" in the cwd (A-tools-7).
 func TestLo1PathsGetCacheFilePathNilDB(t *testing.T) {
 	proc := &Processor{}
-	got := proc.getCacheFilePath("prov", "a.b")
-	if want := analyzeCachePath("data", "prov", "a.b"); got != want {
-		t.Fatalf("getCacheFilePath with nil DB = %q, want %q", got, want)
+	got, err := proc.getCacheFilePath("prov", "a.b")
+	if err == nil {
+		t.Fatalf("getCacheFilePath with nil DB and no AnalyzeDataDir = %q, want error", got)
+	}
+	if got != "" {
+		t.Fatalf("getCacheFilePath returned path %q together with error %v", got, err)
 	}
 }

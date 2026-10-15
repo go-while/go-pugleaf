@@ -2,17 +2,90 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
+
+// appVersion is set at build time (build_fix-references.sh: -X main.appVersion).
+var appVersion = "-unset-"
+
+// fixRefsExitTimeout bounds the wait for background goroutines in fixRefsExit.
+const fixRefsExitTimeout = 60 * time.Second
+
+var fixRefsStopOnce sync.Once
+
+// fixRefsExit tears the database down (close StopChan once, wait for the background
+// goroutines up to fixRefsExitTimeout, Shutdown) and exits with code. It is the only
+// way out of main once the database is open.
+func fixRefsExit(db *database.Database, code int) {
+	if db != nil {
+		fixRefsStopOnce.Do(func() {
+			if db.StopChan != nil {
+				close(db.StopChan)
+			}
+		})
+		if db.WG != nil {
+			done := make(chan struct{})
+			go func() {
+				db.WG.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(fixRefsExitTimeout):
+				log.Printf("[FIX-REFS] background goroutines did not stop within %v, shutting down anyway", fixRefsExitTimeout)
+			}
+		}
+		if err := db.Shutdown(); err != nil {
+			log.Printf("[FIX-REFS] database shutdown failed: %v", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	os.Exit(code)
+}
+
+// usageText is the usage line and example printed when -data or -group is empty.
+func usageText(prog string) (usage, example string) {
+	usage = fmt.Sprintf("Usage: %s -data <data-dir> -group <newsgroup-name> [options]\n", prog)
+	example = fmt.Sprintf("  %s -data /path/to/data -group comp.lang.go\n", prog)
+	return usage, example
+}
+
+// dryRunHint tells how to leave the dry run: -dry-run defaults to true.
+func dryRunHint() string {
+	return "Run with -dry-run=false to apply fixes\n"
+}
+
+// resolveNamedGroups looks every name up in the main database (A-ops-8): GetGroupDB would
+// create an empty group database for a name that is not a newsgroup. Unknown names are
+// returned in unknown; any other lookup error is returned as err.
+func resolveNamedGroups(db *database.Database, names []string) (found []*models.Newsgroup, unknown []string, err error) {
+	for _, name := range names {
+		ng, err := db.MainDBGetNewsgroup(name)
+		if errors.Is(err, sql.ErrNoRows) {
+			unknown = append(unknown, name)
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to look up newsgroup '%s': %w", name, err)
+		}
+		found = append(found, ng)
+	}
+	return found, unknown, nil
+}
 
 // parseRawHeaders parses raw header string (with \n line breaks) into a map
 func parseRawHeaders(rawHeaders string) map[string][]string {
@@ -60,6 +133,8 @@ func parseRawHeaders(rawHeaders string) map[string][]string {
 }
 
 func main() {
+	config.AppVersion = appVersion
+	database.NO_CACHE_BOOT = true // prevents booting caches
 	var (
 		newsgroup      = flag.String("group", "$all", "Newsgroup name to fix (required) (\\$all to fix all)")
 		verbose        = flag.Bool("v", true, "Verbose output")
@@ -72,11 +147,12 @@ func main() {
 	flag.Parse()
 
 	if *dataDir == "" || *newsgroup == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s -db <database-path> -group <newsgroup-name> [options]\n", os.Args[0])
+		usage, example := usageText(os.Args[0])
+		fmt.Fprint(os.Stderr, usage)
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExample:\n")
-		fmt.Fprintf(os.Stderr, "  %s -db /path/to/databases -group comp.lang.go\n", os.Args[0])
+		fmt.Fprint(os.Stderr, example)
 		os.Exit(1)
 	}
 
@@ -86,9 +162,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize configuration
-	mainConfig := config.NewDefaultConfig()
-	log.Printf("go-pugleaf References Header Fix Tool (version: %s)", mainConfig.AppVersion)
+	log.Printf("go-pugleaf References Header Fix Tool (version: %s)", config.AppVersion)
 
 	// Initialize database connection
 	dbConfig := database.DefaultDBConfig()
@@ -98,17 +172,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer db.Shutdown()
 
 	var newsgroups []*models.Newsgroup
 	if *newsgroup != "$all" && *newsgroup != "" {
-		newsgroups = append(newsgroups, &models.Newsgroup{
-			Name: *newsgroup,
-		})
+		found, unknown, err := resolveNamedGroups(db, []string{*newsgroup})
+		if err != nil {
+			log.Printf("[FIX-REFS] %v", err)
+			fixRefsExit(db, 1)
+		}
+		if len(unknown) > 0 {
+			fmt.Fprintf(os.Stderr, "Error: unknown newsgroup '%s'\n", strings.Join(unknown, "', '"))
+			fixRefsExit(db, 1)
+		}
+		newsgroups = found
 	} else {
 		newsgroups, err = db.MainDBGetAllNewsgroups()
 		if err != nil {
-			log.Fatalf("failed to get newsgroups from database: %v", err)
+			log.Printf("[FIX-REFS] failed to get newsgroups from database: %v", err)
+			fixRefsExit(db, 1)
 		}
 	}
 
@@ -177,13 +258,14 @@ func main() {
 	fmt.Printf("Total references fixed: %d\n", totalFixed)
 	if *dryRun {
 		fmt.Printf("\n🔍 DRY RUN - No changes were made\n")
-		fmt.Printf("Run without -dry-run to apply fixes\n")
+		fmt.Print(dryRunHint())
 	} else if totalFixed > 0 {
 		fmt.Printf("\n✅ References headers have been fixed\n")
 		fmt.Printf("💡 Consider rebuilding thread indexes for better performance\n")
 	} else {
 		fmt.Printf("\n✅ No broken references found - all headers are correct\n")
 	}
+	fixRefsExit(db, 0)
 }
 
 func fixReferencesInNewsgroup(groupDB *database.GroupDB, dryRun, verbose bool, limit, batchSize int) (int, int, error) {

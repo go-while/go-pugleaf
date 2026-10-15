@@ -47,6 +47,7 @@ var (
 	useShortHashLen       int
 	rsyncInactiveGroups   string
 	rsyncRemoveSource     bool
+	rsyncForce            bool
 	editCronjobs          bool
 	noCronjobs            bool
 	findOrphanDBs         bool
@@ -119,7 +120,8 @@ func main() {
 	flag.StringVar(&writeActiveFile, "write-active-file", "", "Write NNTP active file from main database newsgroups table to specified path")
 	flag.BoolVar(&writeActiveOnly, "write-active-only", true, "use with -write-active-file (false writes only non active groups!)")
 	flag.StringVar(&rsyncInactiveGroups, "rsync-inactive-groups", "", "path to new data dir, uses rsync to copy all inactive group databases to new data folder.")
-	flag.BoolVar(&rsyncRemoveSource, "rsync-remove-source", false, "use with -rsync-inactive-groups. if set, removes source files after moving inactive groups (default: false)")
+	flag.BoolVar(&rsyncRemoveSource, "rsync-remove-source", false, "use with -rsync-inactive-groups. if set, removes source files after moving inactive groups; needs -force. Stop fetcher, nntp-server and web first: busy groups are refused (default: false)")
+	flag.BoolVar(&rsyncForce, "force", false, "confirm -rsync-remove-source (deletes the moved group databases from the data directory)")
 	flag.BoolVar(&editCronjobs, "edit-cronjobs", false, "Safety Warning / Shell Execution: Adding/Editing Crons is disabled by default. Use this flag only temporarily!")
 	flag.BoolVar(&noCronjobs, "no-cronjobs", false, "use this flag to not run cron jobs")
 	flag.BoolVar(&findOrphanDBs, "find-orphan-dbs", false, "Find orphaned database folders in data/db that don't correspond to any newsgroup in main database")
@@ -142,6 +144,17 @@ func main() {
 	*/
 	flag.Parse()
 	history.ENABLE_HISTORY = useHistory
+	// One-shot maintenance modes (A-ops-12) need only the databases: no caches, no
+	// hostname, no processor, no progress DB, no history. They run right after
+	// OpenDatabase and exit there.
+	oneShot := maintenanceRequested()
+	if err := rsyncFlagsError(rsyncInactiveGroups, rsyncRemoveSource, rsyncForce); err != nil {
+		log.Printf("[RSYNC]: Error: %v", err)
+		os.Exit(2) // the database is not open yet
+	}
+	if oneShot {
+		database.NO_CACHE_BOOT = true
+	}
 	mainConfig := config.NewDefaultConfig()
 	log.Printf("Starting go-pugleaf: Web Server (version: %s)", appVersion)
 
@@ -216,6 +229,14 @@ func main() {
 		log.Fatalf("[WEB]: Failed to initialize database: %v", err)
 	}
 
+	// Set up the date parser adapter to use processor's ParseNNTPDate
+	database.GlobalDateParser = processor.ParseNNTPDate
+	//log.Printf("[WEB]: Date parser adapter initialized with processor.ParseNNTPDate")
+
+	if oneShot {
+		exitAfterDB(db, runMaintenance(db))
+	}
+
 	// Initialize progress database once to avoid opening/closing for each group
 	// (NewProgressDB takes a directory: the default stays data/progress.db/progress.db)
 	progressDB, err := database.NewProgressDB(filepath.Join(dataDir, "progress.db"))
@@ -224,113 +245,11 @@ func main() {
 	}
 	defer progressDB.Close()
 
-	// Set up the date parser adapter to use processor's ParseNNTPDate
-	database.GlobalDateParser = processor.ParseNNTPDate
-	//log.Printf("[WEB]: Date parser adapter initialized with processor.ParseNNTPDate")
-
 	// Note: Database batch workers are started automatically by OpenDatabase() (which also adds them to db.WG)
 
 	// Set hostname in processor with database fallback support
 	if err := processor.SetHostname(nntphostname, db); err != nil {
 		fatalAfterDB(db, "[WEB]: Failed to set NNTP hostname: %v", err)
-	}
-
-	// Run future posts hiding migration first if requested
-	if updateNewsgroupsHideFuture {
-		log.Printf("[WEB]: Starting future posts hiding migration...")
-		if err := hideFuturePosts(db); err != nil {
-			log.Printf("[WEB]: Warning: Future posts hiding migration failed: %v", err)
-			exitAfterDB(db, 1)
-		} else {
-			log.Printf("[WEB]: Future posts hiding migration completed successfully")
-			if updateNGAConcurrent == 0 {
-				exitAfterDB(db, 0)
-			}
-		}
-	}
-
-	// Run newsgroup activity migration after hiding future posts if requested
-	if updateNGAConcurrent > 0 {
-		log.Printf("[WEB]: Starting updateNewsgroupLastActivity")
-		if err := updateNewsgroupLastActivity(db, updateNGAConcurrent); err != nil {
-			log.Printf("[WEB]: Warning: Newsgroup activity migration failed: %v", err)
-			exitAfterDB(db, 1)
-		} else {
-			log.Printf("[WEB]: Newsgroup activity migration completed successfully")
-			exitAfterDB(db, 0)
-		}
-	}
-
-	// Write active file if requested
-	if writeActiveFile != "" {
-		log.Printf("[WEB]: Writing active file from main database to: %s", writeActiveFile)
-		if err := writeActiveFileFromDB(db, writeActiveFile, writeActiveOnly); err != nil {
-			log.Printf("[WEB]: Error: Failed to write active file: %v", err)
-			exitAfterDB(db, 1)
-		} else {
-			log.Printf("[WEB]: Active file written successfully")
-			exitAfterDB(db, 0)
-		}
-	}
-
-	// rsyncInactiveGroups
-	if rsyncInactiveGroups != "" {
-		log.Printf("[RSYNC]: inactive groups to: %s", rsyncInactiveGroups)
-		if err := rsyncInactiveGroupsToDir(db, rsyncInactiveGroups); err != nil {
-			log.Printf("[RSYNC]: Error: Failed to rsync inactive groups: %v", err)
-			exitAfterDB(db, 1)
-		} else {
-			log.Printf("[RSYNC]: Inactive groups synced successfully")
-			exitAfterDB(db, 0)
-		}
-	}
-
-	// compareActiveFile
-	if compareActiveFile != "" {
-		log.Printf("[WEB]: Comparing active file with database: %s (min articles: %d)", compareActiveFile, compareActiveMinArticles)
-		if err := compareActiveFileWithDatabase(db, compareActiveFile, compareActiveMinArticles); err != nil {
-			log.Printf("[WEB]: Error: Failed to compare active file: %v", err)
-			exitAfterDB(db, 1)
-		} else {
-			log.Printf("[WEB]: Active file comparison completed successfully")
-			exitAfterDB(db, 0)
-		}
-	}
-
-	// disableActiveFile
-	if disableActiveFile != "" {
-		log.Printf("[WEB]: Disabling newsgroups not listed in active file: %s", disableActiveFile)
-		if err := disableNewsgroupsNotInActiveFile(db, disableActiveFile, disableActiveOpts{DryRun: disableActiveDryRun}); err != nil {
-			log.Printf("[WEB]: Error: Failed to disable newsgroups: %v", err)
-			exitAfterDB(db, 1)
-		} else {
-			log.Printf("[WEB]: Newsgroup disabling completed successfully")
-			exitAfterDB(db, 0)
-		}
-	}
-
-	// findOrphanDBs
-	if findOrphanDBs {
-		log.Printf("[WEB]: Finding orphaned database folders...")
-		if err := findOrphanedDatabases(db, dataDir, verbose); err != nil {
-			log.Printf("[WEB]: Error: Failed to find orphaned databases: %v", err)
-			exitAfterDB(db, 1)
-		} else {
-			log.Printf("[WEB]: Orphaned database scan completed successfully")
-			exitAfterDB(db, 0)
-		}
-	}
-
-	// updateNewsgroupsExpiryFile
-	if updateNewsgroupsExpiryFile != "" {
-		log.Printf("[WEB]: Updating newsgroup expiry from file: %s", updateNewsgroupsExpiryFile)
-		if err := updateNewsgroupsExpiryFromFile(db, updateNewsgroupsExpiryFile); err != nil {
-			log.Printf("[WEB]: Error: Failed to update newsgroup expiry: %v", err)
-			exitAfterDB(db, 1)
-		} else {
-			log.Printf("[WEB]: Newsgroup expiry update completed successfully")
-			exitAfterDB(db, 0)
-		}
 	}
 
 	// Get or set history UseShortHashLen configuration (legacy setting, OPS-4b: never fatal for its value)
@@ -350,29 +269,15 @@ func main() {
 	// Handle newsgroup import/update operations
 	ctx := context.Background()
 
-	if importActiveFile != "" || importDescFile != "" {
-		// Import newsgroups from files
+	if importDescFile != "" {
+		// Descriptions-only import: it continues into the server (-import-active and
+		// -repair-watermarks are one-shot modes and already ended in runMaintenance)
 		log.Printf("[WEB]: Importing newsgroups from files...")
-		if err := preloader.LoadNewsgroupsFromFiles(ctx, db, importActiveFile, importDescFile, importCreateMissing); err != nil {
+		if err := preloader.LoadNewsgroupsFromFiles(ctx, db, "", importDescFile, importCreateMissing); err != nil {
 			log.Printf("[WEB]: Warning: Failed to import newsgroups: %v", err)
 			exitAfterDB(db, 1)
 		} else {
 			log.Printf("[WEB]: Newsgroups imported successfully")
-			if importActiveFile != "" {
-				// only quit when importing via active files, not when updateting descriptions
-				exitAfterDB(db, 0)
-			}
-		}
-	}
-
-	if repairWatermarks {
-		log.Printf("[WEB]: Repairing corrupted newsgroup watermarks...")
-		if err := preloader.RepairNewsgroupWatermarks(ctx, db); err != nil {
-			log.Printf("[WEB]: Warning: Failed to repair watermarks: %v", err)
-			exitAfterDB(db, 1)
-		} else {
-			log.Printf("[WEB]: Watermarks repaired successfully")
-			exitAfterDB(db, 0)
 		}
 	}
 

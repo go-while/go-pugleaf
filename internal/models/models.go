@@ -3,6 +3,7 @@ package models
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -217,6 +218,11 @@ func RecycleArticle(art *Article) {
 	}
 }
 
+// GetData returns derived article data for templates. "parent_URL" and "references_URLs"
+// link to the message-id page of the last (most immediate) reference; group and message-id
+// are path-escaped, so '?', '#', '%', ' ' and '/' in an RFC 5536 message-id stay inside the
+// :messageId segment (A-web-18; '/' relies on the router's UseRawPath). '+' is escaped as %2B
+// too, so the link does not depend on how the router treats a literal '+'.
 func (a *Article) GetData(what string, group string) string {
 	if a == nil {
 		return ""
@@ -224,33 +230,15 @@ func (a *Article) GetData(what string, group string) string {
 	switch what {
 	case "path":
 		return a.Path
-	case "references_URLs":
-		if a.References == "" {
-			return ""
-		}
-		// Split by whitespace and return the first reference as URL
-		refs := strings.Fields(a.References)
-		if len(refs) > 0 {
-			url := fmt.Sprintf("/groups/%s/message/%s", group, refs[0]) // TODO FIXME<REVIEW, WHY FIRST AND NOT LAST?!
-			return url
-		}
-	case "parent_URL":
-		//log.Printf("DEBUG parent_URL: a.References='%s', len=%d", a.References, len(a.References))
-		if a.References == "" {
-			//log.Printf("DEBUG parent_URL: References is empty!")
-			return ""
-		}
+	case "references_URLs", "parent_URL":
 		// Get the last (most immediate) parent reference
 		refs := strings.Fields(a.References)
-		//log.Printf("DEBUG parent_URL: refs=%v, len(refs)=%d", refs, len(refs))
-		if len(refs) > 0 {
-			parentRef := refs[len(refs)-1]
-			url := fmt.Sprintf("/groups/%s/message/%s", group, parentRef)
-			//log.Printf("DEBUG parent_URL: Generated URL: %s", url)
-			return url
-		} else {
-			//log.Printf("DEBUG parent_URL: No refs found after splitting!")
+		if len(refs) == 0 {
+			return ""
 		}
+		parentRef := refs[len(refs)-1]
+		escapePathSegment := func(s string) string { return strings.ReplaceAll(url.PathEscape(s), "+", "%2B") }
+		return fmt.Sprintf("/groups/%s/message/%s", escapePathSegment(group), escapePathSegment(parentRef))
 	}
 
 	return ""

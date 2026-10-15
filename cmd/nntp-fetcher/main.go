@@ -1,4 +1,4 @@
-// Real NNTP provider test for go-pugleaf
+// Command nntp-fetcher downloads articles from the configured NNTP provider into go-pugleaf.
 package main
 
 import (
@@ -30,25 +30,47 @@ const BW_V4_Prefix = "24.182.239.6"   // news.blueworldhosting.com.
 const ET_V4 = "157.180.91.226"        // news.eternal-september.org.
 const ET_V6 = "2a01:4f9:c012:f55a::1" // news.eternal-september.org.
 
-// showUsageExamples displays usage examples for connection testing
+// showUsageExamples prints the -help text: what the fetcher does and examples
+// that use only the flags defined in main.
 func showUsageExamples() {
-	fmt.Println("\n=== NNTP Fetcher - Connection Testing Examples ===")
-	fmt.Println("The NNTP fetcher is used for testing connections and downloading articles.")
-	fmt.Println("For newsgroup analysis, use the separate nntp-analyze command.")
+	fmt.Println("\n=== NNTP Fetcher (cmd/nntp-fetcher, built as build/pugleaf-fetcher) ===")
+	fmt.Println("Downloads articles from the first enabled provider into the local database, and")
+	fmt.Println("can add groups from the provider's newsgroup list to the database.")
+	fmt.Println("Each run fetches at most -max-batch articles per group and then exits (run it from cron).")
+	fmt.Println("For newsgroup analysis use cmd/nntp-analyze instead.")
 	fmt.Println()
-	fmt.Println("Connection Testing:")
-	fmt.Println("  ./nntp-fetcher -test-conn -group alt.test")
+	fmt.Println("All flags: ./pugleaf-fetcher -h")
+	fmt.Println("Every mode reads and writes the databases below -data (default ./data).")
+	fmt.Println("-nntphostname is needed on the first run; later runs reuse the value stored in the database.")
 	fmt.Println()
-	fmt.Println("Article Downloading:")
-	fmt.Println("  ./nntp-fetcher -group alt.* (downloads all groups with prefix alt.*)")
-	fmt.Println("  ./nntp-fetcher -group alt.test")
-	fmt.Println("  ./nntp-fetcher -group alt.test -download-start-date 2024-12-31")
+	fmt.Println("Article downloading (active groups that exist in the database and on the provider):")
+	fmt.Println("  ./pugleaf-fetcher -data ./data -nntphostname news.example.org   (first run: store the hostname)")
+	fmt.Println("  ./pugleaf-fetcher                     (all active groups; -group '' and -group '$all' do the same)")
+	fmt.Println("  ./pugleaf-fetcher -group alt.test")
+	fmt.Println("  ./pugleaf-fetcher -group 'alt.*'      (every database group with the prefix 'alt.'; quote the '*')")
+	fmt.Println("  ./pugleaf-fetcher -group alt.test -download-start-date 2024-12-31")
+	fmt.Println("                                        (rescan from that date, ignoring the stored progress)")
+	fmt.Println("  ./pugleaf-fetcher -fetch-active-only=false   (download ONLY the inactive groups)")
 	fmt.Println()
-	fmt.Println("Newsgroup List Update:")
-	fmt.Println("  ./nntp-fetcher -update-list (fetch remote newsgroup list and add new groups to database)")
+	fmt.Println("Newsgroup list update (first enabled provider; new groups are added as inactive):")
+	fmt.Println("  ./pugleaf-fetcher -fetch-newsgroups-from-remote '$all'     (dry run: list what would be added)")
+	fmt.Println("  ./pugleaf-fetcher -fetch-newsgroups-from-remote 'comp.*' -fetch-newsgroups-force   (really add them)")
+	fmt.Println("  ./pugleaf-fetcher -fetch-newsgroups-from-remote '$all' -exclude-prefix 'alt.binaries.*,de.test'")
+	fmt.Println("                                        (a trailing '*' excludes a prefix, otherwise the exact name)")
 	fmt.Println()
+	fmt.Println("Progress reset (sets the stored last article number of the primary provider, then exits):")
+	fmt.Println("  ./pugleaf-fetcher -group alt.test -reset-progress 1000   (next run starts at article 1001)")
+	fmt.Println("  Without -group, or with '$all' or a wildcard, it resets EVERY group in the database")
+	fmt.Println("  (the wildcard is not applied in this mode). Values <= 0 do nothing.")
 	fmt.Println()
-	fmt.Println("Note: For newsgroup analysis use cmd/nntp-analyze instead")
+	fmt.Println("Tuning (defaults in brackets):")
+	fmt.Println("  -max-batch N           articles per group and run, clamped to 10-1000 [1000]")
+	fmt.Println("  -max-batch-threads N   newsgroup batches processed concurrently, 1-1024 [4]")
+	fmt.Println("  -max-queue N           articles queued in db_batch over all groups [1280]")
+	fmt.Println("  -download-max-par N    groups downloaded in parallel [1]")
+	fmt.Println("  -history=false         do not use the message-id history index [true]")
+	fmt.Println("  -reuse-crossposts=false  download crossposts again instead of copying them (needs -history) [true]")
+	fmt.Println("  -useshorthashlen N     history short hash length 2-7, fixed after the first run [7]")
 	fmt.Println()
 }
 
@@ -62,23 +84,23 @@ func main() {
 	// Command line flags for NNTP fetcher configuration
 	var newsgroups []*models.Newsgroup
 	var (
-		maxBatchThreads    = flag.Int("max-batch-threads", 4, "Limit how many newsgroup batches will be processed concurrently (default: 16) more can eat your memory and disk IO!")
-		maxBatch           = flag.Int("max-batch", 1000, "Maximum number of articles to process in a batch (recommended: 100-10000)")
+		maxBatchThreads    = flag.Int("max-batch-threads", 4, "Limit how many newsgroup batches will be processed concurrently (1-1024); more can eat your memory and disk IO!")
+		maxBatch           = flag.Int("max-batch", 1000, "Maximum number of articles to process in a batch (10-1000; values above 1000 are clamped to 1000)")
 		maxQueued          = flag.Int("max-queue", 1280, "Limit db_batch to have max N articles queued over all newsgroups")
-		fetchNewsgroup     = flag.String("group", "", "Newsgroup to fetch (default: empty = all groups once up to max-batch) or rocksolid.* with final wildcard to match prefix.*")
-		nntphostname       = flag.String("nntphostname", "", "Your hostname must be set!")
-		useHistory         = flag.Bool("history", true, "maintain and use the message-id history index (data/history)")
-		useShortHashLenPtr = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7, default: 7) - NOTE: cannot be changed once set!")
-		fetchActiveOnly    = flag.Bool("fetch-active-only", true, "Downloads only active newsgroups (default: true) To download only disabled newsgroups set to false!")
-		excludePrefix      = flag.String("exclude-prefix", "", "use with UpdateNewsgroupList to exclude newsgroups with this prefix (default: empty = no exclusion) allows comma separation and wildcards alt.*,comp.*")
-		downloadMaxPar     = flag.Int("download-max-par", 1, "run this many groups in parallel, can eat your memory! (default: 1)")
-		updateList         = flag.String("fetch-newsgroups-from-remote", "", "UpdateNewsgroupList: get remote newsgroup list from first enabled provider (default: empty, nothing. use \"group.*\" or \"\\$all\")")
-		updateListForce    = flag.Bool("fetch-newsgroups-force", false, "use with -fetch-newsgroups-from-remote .. to really add them to database")
+		fetchNewsgroup     = flag.String("group", "", "Newsgroup to fetch: a name, 'prefix.*' (final wildcard) or '$all' (default: empty = all groups once up to -max-batch)")
+		nntphostname       = flag.String("nntphostname", "", "Your NNTP hostname: required on the first run, later runs fall back to the value stored in the database")
+		useHistory         = flag.Bool("history", true, "maintain and use the message-id history index (<data>/history)")
+		useShortHashLenPtr = flag.Int("useshorthashlen", 7, "short hash length for history storage (2-7) - NOTE: cannot be changed once set!")
+		fetchActiveOnly    = flag.Bool("fetch-active-only", true, "Download only active newsgroups; set to false to download ONLY the inactive newsgroups")
+		excludePrefix      = flag.String("exclude-prefix", "", "use with -fetch-newsgroups-from-remote: comma-separated names to exclude; a final * excludes a prefix, e.g. alt.*,comp.lang.c (default: empty = no exclusion)")
+		downloadMaxPar     = flag.Int("download-max-par", 1, "download this many groups in parallel, can eat your memory!")
+		updateList         = flag.String("fetch-newsgroups-from-remote", "", "get the newsgroup list from the first enabled provider and list the groups missing in the database ('group.*', a name prefix or '$all'); dry run unless -fetch-newsgroups-force is set; exits afterwards")
+		updateListForce    = flag.Bool("fetch-newsgroups-force", false, "use with -fetch-newsgroups-from-remote to really add the new groups to the database (as inactive)")
 		dataDir            = flag.String("data", "./data", "Directory to store database files")
 		reuseCrossposts    = flag.Bool("reuse-crossposts", true, "copy crossposted articles already stored in another group (needs history) instead of downloading them again")
 		// Download options with date filtering
-		downloadStartDate = flag.String("download-start-date", "", "Start downloading articles from this date (YYYY-MM-DD format)")
-		resetProgress     = flag.Int64("reset-progress", 0, "Reset download progress for all newsgroups on primary provider")
+		downloadStartDate = flag.String("download-start-date", "", "Rescan from this date (YYYY-MM-DD), ignoring the stored progress")
+		resetProgress     = flag.Int64("reset-progress", 0, "Set the stored last article number of the primary provider to N for the -group selection (empty/$all/wildcard: every group in the database) and exit; 0 = off")
 		showHelp          = flag.Bool("help", false, "Show usage examples and exit")
 	)
 	flag.Parse()
@@ -107,26 +129,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *downloadMaxPar < 1 {
-		*downloadMaxPar = 1
-		processor.DownloadMaxPar = *downloadMaxPar
-	}
-	if *maxBatch < 10 {
-		*maxBatch = 10
-	}
-	if *maxBatchThreads < 1 {
-		*maxBatchThreads = 1
-	}
-	if *maxQueued < 1 {
-		*maxQueued = 1
-	}
-	if *maxBatchThreads > 1024 {
-		*maxBatchThreads = 1024
-		log.Printf("[WARN] max batch threads: %d (should be between 1 and 1024. recommended: 1-16)", *maxBatchThreads)
-	}
-	if *maxBatch > 1000 {
-		log.Printf("[WARN] max batch: %d (should be between 100 and 10000. recommended: 1000-10000)", *maxBatch)
-	}
+	clampFetcherFlags(maxBatch, maxBatchThreads, maxQueued, downloadMaxPar)
 	// Validate command-line flag
 	if *useShortHashLenPtr < 2 || *useShortHashLenPtr > 7 {
 		log.Fatalf("Invalid UseShortHashLen: %d (must be between 2 and 7)", *useShortHashLenPtr)
@@ -150,7 +153,9 @@ func main() {
 	// Initialize progress database once to avoid opening/closing for each group
 	progressDB, err := database.NewProgressDB(filepath.Join(*dataDir, "progress.db"))
 	if err != nil {
-		log.Fatalf("Failed to initialize progress database: %v", err)
+		fetcherShutdown(db) // the main DB is open: shut it down before exiting
+		log.Printf("[FETCHER]: Failed to initialize progress database: %v", err)
+		os.Exit(1)
 	}
 	defer progressDB.Close()
 
@@ -207,7 +212,6 @@ func main() {
 		// cut string by final *
 		wildcardNG = strings.TrimSuffix(*fetchNewsgroup, "*")
 		log.Printf("[FETCHER]: Using wildcard newsgroup prefix: '%s'", wildcardNG)
-		time.Sleep(3 * time.Second) // debug sleep
 	}
 	if fetchNewsgroup == nil || *fetchNewsgroup == "" || *fetchNewsgroup == "$all" || suffixWildcard {
 		ngs, err := db.MainDBGetAllNewsgroups()
@@ -287,7 +291,6 @@ func main() {
 	}
 	newsgroups = validNGs
 	log.Printf("[FETCHER]: Starting fetch for %d newsgroups", len(newsgroups))
-	time.Sleep(time.Second * 2) // debug sleep
 
 	fetchDoneChan := make(chan error, 1)
 
@@ -302,59 +305,22 @@ func main() {
 		log.Fatalf("No provider backend available: '%#v'", proc.Pool.Backend.Provider)
 	}
 	log.Printf("[FETCHER]: Provider: %s @ MaxConns: %d", proc.Pool.Backend.Provider.Name, proc.Pool.Backend.MaxConns)
-	DownloadMaxPar := *downloadMaxPar // unchangeable (code not working yet)
+	DownloadMaxPar := *downloadMaxPar // -download-max-par: number of download workers (groups fetched in parallel); TodoQ capacity stays processor.DownloadMaxPar
 	DLParChan := make(chan struct{}, DownloadMaxPar)
 	var mux sync.Mutex
 	var downloaded, queued, notfound, todo uint64
 	// scan group worker
 	go func() {
 		defer close(processor.Batch.Check)
-		var skippedWildcard, skippedInActive, skippedActive uint64
-		for _, ng := range newsgroups {
-			if common.WantShutdown() {
-				//log.Printf("[FETCHER]: Feed Batch.Check common.WantShutdown()")
-				return
-			}
-			/* disabled
-			if db.IsDBshutdown() {
-				log.Printf("[FETCHER]: Feed Batch.Check database shutdown")
-				return
-			}
-			*/
-			if wildcardNG != "" && !strings.HasPrefix(ng.Name, wildcardNG) {
-				//log.Printf("[FETCHER] Skipping newsgroup '%s' as it does not match prefix '%s'", ng.Name, wildcardNG)
-				skippedWildcard++
-				continue
-			}
-			nga, err := db.MainDBGetNewsgroup(ng.Name)
-			if err != nil || nga == nil {
-				log.Printf("[FETCHER]: Failed to get newsgroup '%s' from database: err='%v' nga='%#v'", ng.Name, err, nga)
-				return
-			}
-
-			if *fetchActiveOnly && !nga.Active {
-				//log.Printf("[FETCHER]: ignore inactive newsgroup '%s'", ng.Name)
-				skippedInActive++
-				continue
-			}
-
-			if !*fetchActiveOnly && nga.Active {
-				//log.Printf("[FETCHER]: ignore active newsgroup '%s'", ng.Name)
-				skippedActive++
-				continue
-			}
-
-			processor.Batch.Check <- &ng.Name
-			//log.Printf("Checking ng: %s", ng.Name)
-			mux.Lock()
-			queued++
-			if queued%1000 == 0 {
-				log.Printf("[FETCHER]: Queued %d/%d newsgroups", queued, len(newsgroups))
-			}
-			mux.Unlock()
-		}
-		totalSkipped := skippedWildcard + skippedInActive + skippedActive
-		log.Printf("[FETCHER]: Feeding Queue Done: %d/%d newsgroups (skipped: %d). Wildcard skipped: %d, skippedInActive: %d, skippedActive: %d. fetchActiveOnly=%t", queued, len(newsgroups), totalSkipped, skippedWildcard, skippedInActive, skippedActive, *fetchActiveOnly)
+		feedCheckQueue(newsgroups, wildcardNG, *fetchActiveOnly, db.MainDBGetNewsgroup, processor.Batch.Check, common.WantShutdown,
+			func() {
+				mux.Lock()
+				queued++
+				if queued%1000 == 0 {
+					log.Printf("[FETCHER]: Queued %d/%d newsgroups", queued, len(newsgroups))
+				}
+				mux.Unlock()
+			})
 	}()
 	var wgCheck sync.WaitGroup
 	startDates := make(map[string]time.Time) // per-group date-based download start (UTC midnight)
@@ -559,7 +525,6 @@ func main() {
 	for i := 1; i <= DownloadMaxPar; i++ {
 		go func(waitHere *sync.WaitGroup) {
 			defer waitHere.Done()
-			errChan := make(chan error, len(newsgroups))
 			defer func() {
 				select {
 				case fetchDoneChan <- nil:
@@ -607,7 +572,6 @@ func main() {
 					nga, err := db.MainDBGetNewsgroup(groupInfo.Name)
 					if err != nil {
 						log.Printf("Error in processor.Batch.TodoQ: MainDBGetNewsgroup err='%v'", err)
-						errChan <- err
 						continue
 					}
 					mux.Lock()
@@ -634,15 +598,12 @@ func main() {
 						err := proc.DownloadArticlesFromDate(groupInfo.Name, startDate, DLParChan, progressDB, groupInfo, common.ShutdownChan)
 						if err != nil {
 							if err == processor.ErrIsEmptyGroup {
-								err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0)
-								if err != nil {
-									continue
+								if err := progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0); err != nil {
+									log.Printf("[FETCHER]: UpdateProgress for empty group '%s' failed: %v", groupInfo.Name, err)
 								}
-								errChan <- nil
 								continue
 							}
 							log.Printf("[FETCHER]: DownloadArticlesFromDate5 failed: %v", err)
-							errChan <- err
 							continue
 						}
 					} else if nga.ExpiryDays > 0 {
@@ -651,7 +612,6 @@ func main() {
 						articleCount, err := db.GetArticleCountFromMainDB(groupInfo.Name)
 						if err != nil {
 							log.Printf("[FETCHER]: Failed to get article count from main DB for '%s': %v", groupInfo.Name, err)
-							errChan <- err
 							continue
 						}
 						if articleCount == 0 {
@@ -662,14 +622,11 @@ func main() {
 							err = proc.DownloadArticlesFromDate(groupInfo.Name, startDate, DLParChan, progressDB, groupInfo, common.ShutdownChan)
 							if err != nil {
 								if err == processor.ErrIsEmptyGroup {
-									err = progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0)
-									if err != nil {
-										continue
+									if err := progressDB.UpdateProgress(proc.Pool.Backend.Provider.Name, groupInfo.Name, 0); err != nil {
+										log.Printf("[FETCHER]: UpdateProgress for empty group '%s' failed: %v", groupInfo.Name, err)
 									}
-									errChan <- nil
 									continue
 								}
-								errChan <- err
 								log.Printf("[FETCHER]: DownloadArticlesFromDate6 failed: %v", err)
 								continue
 							}
@@ -680,7 +637,6 @@ func main() {
 							err = proc.DownloadArticles(groupInfo.Name, DLParChan, progressDB, groupInfo.FetchStart, groupInfo.FetchEnd, common.ShutdownChan)
 							if err != nil {
 								log.Printf("[FETCHER]: DownloadArticles7 failed: %v", err)
-								errChan <- err
 								continue
 							}
 						}
@@ -692,7 +648,6 @@ func main() {
 							if err != processor.ErrUpToDate {
 								log.Printf("[FETCHER]: DownloadArticles8 failed: %v", err)
 							}
-							errChan <- err
 							continue
 						}
 					}
@@ -741,6 +696,94 @@ func main() {
 	mux.Unlock()
 
 	log.Printf("[FETCHER]: Graceful shutdown completed. Exiting here.")
+}
+
+const (
+	fetcherMinBatch = 10
+	// fetcherMaxBatch is the upper bound of -max-batch: the database clamps its
+	// batch size (MaxDBbatch) to 1000 too (internal/database/db_batch.go), and a
+	// larger value only grows the per-group XOVER range and ReturnQ buffers.
+	fetcherMaxBatch = 1000
+)
+
+// clampFetcherFlags brings the numeric fetcher flags into their valid ranges.
+// -max-batch above fetcherMaxBatch is clamped with a warning.
+func clampFetcherFlags(maxBatch, maxBatchThreads, maxQueued, downloadMaxPar *int) {
+	if *downloadMaxPar < 1 {
+		*downloadMaxPar = 1
+	}
+	if *maxBatch < fetcherMinBatch {
+		*maxBatch = fetcherMinBatch
+	}
+	if *maxBatch > fetcherMaxBatch {
+		log.Printf("[WARN] -max-batch %d is above the database batch cap, clamped to %d", *maxBatch, fetcherMaxBatch)
+		*maxBatch = fetcherMaxBatch
+	}
+	if *maxBatchThreads < 1 {
+		*maxBatchThreads = 1
+	}
+	if *maxBatchThreads > 1024 {
+		log.Printf("[WARN] -max-batch-threads %d clamped to 1024 (valid: 1-1024, recommended: 1-16)", *maxBatchThreads)
+		*maxBatchThreads = 1024
+	}
+	if *maxQueued < 1 {
+		*maxQueued = 1
+	}
+}
+
+// feedStats counts what feedCheckQueue queued and skipped.
+type feedStats struct {
+	queued, skippedWildcard, skippedInActive, skippedActive, skippedLookup uint64
+}
+
+// feedCheckQueue sends the name of every newsgroup that matches wildcardNG (empty:
+// all) and the -fetch-active-only selection to out. A group whose lookup fails is
+// logged and skipped; the remaining groups are still queued. It stops early when
+// wantShutdown reports true. onQueued (may be nil) runs after each send.
+// The caller closes out.
+func feedCheckQueue(newsgroups []*models.Newsgroup, wildcardNG string, fetchActiveOnly bool,
+	lookup func(string) (*models.Newsgroup, error), out chan<- *string, wantShutdown func() bool, onQueued func()) feedStats {
+	var st feedStats
+	for _, ng := range newsgroups {
+		if wantShutdown() {
+			//log.Printf("[FETCHER]: Feed Batch.Check common.WantShutdown()")
+			return st
+		}
+		if wildcardNG != "" && !strings.HasPrefix(ng.Name, wildcardNG) {
+			//log.Printf("[FETCHER] Skipping newsgroup '%s' as it does not match prefix '%s'", ng.Name, wildcardNG)
+			st.skippedWildcard++
+			continue
+		}
+		nga, err := lookup(ng.Name)
+		if err != nil || nga == nil {
+			log.Printf("[FETCHER]: Failed to get newsgroup '%s' from database, skipping it: err='%v'", ng.Name, err)
+			st.skippedLookup++
+			continue
+		}
+
+		if fetchActiveOnly && !nga.Active {
+			//log.Printf("[FETCHER]: ignore inactive newsgroup '%s'", ng.Name)
+			st.skippedInActive++
+			continue
+		}
+
+		if !fetchActiveOnly && nga.Active {
+			//log.Printf("[FETCHER]: ignore active newsgroup '%s'", ng.Name)
+			st.skippedActive++
+			continue
+		}
+
+		out <- &ng.Name
+		//log.Printf("Checking ng: %s", ng.Name)
+		st.queued++
+		if onQueued != nil {
+			onQueued()
+		}
+	}
+	totalSkipped := st.skippedWildcard + st.skippedInActive + st.skippedActive + st.skippedLookup
+	log.Printf("[FETCHER]: Feeding Queue Done: %d/%d newsgroups (skipped: %d). Wildcard skipped: %d, skippedInActive: %d, skippedActive: %d, lookup failed: %d. fetchActiveOnly=%t",
+		st.queued, len(newsgroups), totalSkipped, st.skippedWildcard, st.skippedInActive, st.skippedActive, st.skippedLookup, fetchActiveOnly)
+	return st
 }
 
 // getRealMemoryUsage gets actual RSS memory usage from /proc/self/status on Linux

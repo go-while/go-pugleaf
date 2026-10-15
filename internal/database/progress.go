@@ -75,16 +75,14 @@ ON progress(last_fetched);
 `
 
 // initSchema creates the progress tracking table
-func (p *ProgressDB) initSchema() (err error) {
-	for {
-		_, err = p.db.Exec(query_progressDB_initSchema)
-		if err != nil {
-			time.Sleep(100 * time.Millisecond) // Retry on transient errors
-			continue
-		}
-		break // Exit loop on success
+// RetryableExec retries only busy/locked errors and is bounded by the SQLite
+// retry wait, so a permanent error (permissions, read-only filesystem, a
+// directory in place of the file) is returned instead of looping forever.
+func (p *ProgressDB) initSchema() error {
+	if _, err := RetryableExec(p.db, query_progressDB_initSchema); err != nil {
+		return fmt.Errorf("progress schema: %w", err)
 	}
-	return err
+	return nil
 }
 
 const query_GetLastArticle = `SELECT last_article FROM progress WHERE backend_name = ? AND newsgroup_name = ?`

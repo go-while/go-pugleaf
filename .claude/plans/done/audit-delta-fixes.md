@@ -1236,53 +1236,91 @@ Acceptance: E01, E10, E11, E12 PASS; tests pass; `./build_webserver.sh` builds.
    deferred list, the decisions D1–D16 as behaviour changes, open questions answered or not.
 3. Ask the user whether to run wave O1/O2 (optional findings).
 
-### Wave O1 (optional; 10 parallel slices after wave 3, only when the user says so)
-Common: same rules and checks; each slice reads its audit blocks (`docs/audit/audit-*.md`) for the exact fix
-("Fix:" lines) and implements that fix plus one test per id where a test is practical; shell/doc-only items get a
-`bash -n` or grep check. Owned files are disjoint within the wave.
+### Wave O1 (optional; 10 parallel slices after wave 3; re-anchored 2026-10-15)
+Run from `plan-adf-optional` (= `testing-001` after af235b3). Per-id anchors, "done already" notes, fixes and
+test ideas are in `.claude/plans/wip/audit-delta-fixes-reanchor.md`; each implementer reads its slice there
+FIRST, then the audit block (`docs/audit/audit-*.md`) for the scenario. Same rules and checks as waves 1-2.
+Existing `adf_*_test.go` files keep passing; new tests go into `adf_opt_*_test.go` files with `TestAdfOpt*`
+names. Owned files are disjoint within the wave (the lists below supersede the table in Context).
 
-- **`adf-opt-sanitize`** (A-web-6, A-web-7, A-web-8, A-web-9, A-web-10): `internal/models/sanitizing.go`,
-  `internal/models/cache.go`, `internal/cache/sanitized_cache.go`, `internal/models/adf_opt_sanitize_test.go`.
-  Decode before truncating (`truncateRunes`), From via `net/mail.ParseAddress` after RFC 2047 decoding, body decoding
-  by stored CTE only, drop `sanitizeText` from the display path, cache key group+message-id with one field-name map.
-- **`adf-opt-web-admin`** (A-web-12, A-web-14, A-web-16, A-web-18, A-web-19): `web/templates/aichat.html`,
+- **`adf-opt-sanitize`** (A-web-6, 7, 8, 9, 10; all OPEN): `internal/models/sanitizing.go`, `internal/models/cache.go`,
+  `internal/cache/sanitized_cache.go`, `internal/models/adf_sanitizing_test.go` (update `TestAdfSanitizeNoWriteBack`:
+  it asserts the stripped output and the bare message-id key), new `internal/models/adf_opt_sanitize_test.go`,
+  plus one-line caller edits for the group argument of the batch sanitizers: `internal/web/web_threadPage.go`,
+  `internal/web/web_articlePage.go`, `internal/web/web_groupThreadsPage.go`, `internal/database/tree_cache.go`.
+  Keep `ConvertToUTF8` for its two outside callers (`web_apiHandlers.go`, `web_sitePostPage.go`; `adf_xss_test.go`
+  depends on it) and add separate header/body decoders. Cache stays string-keyed (group+message-id built in models).
+- **`adf-opt-web-admin`** (A-web-12, 14, 18 OPEN; A-web-16, 19 PARTLY): `web/templates/aichat.html`,
   `internal/web/web_admin_provider.go` (baseline gofmt file, K4), `internal/web/web_admin_newsgroups.go`,
-  `internal/models/models.go` (only `(*Article).GetData`), `internal/web/webserver.go` (only `Shutdown`),
-  `internal/web/adf_opt_admin_test.go`.
-- **`adf-opt-hierarchy`** (A-db-7, A-db-8, A-db-10, A-db-14): `internal/database/hierarchy_cache.go`,
-  `internal/database/adf_opt_hierarchy_test.go`. A-db-7 is fixed inside `UpdateNewsgroupStats` only (don't add to
-  `GroupCount`, don't compare an article number with a Unix time); its caller sits in intake's stats block and is not
-  edited.
-- **`adf-opt-analyze`** (A-tools-7, A-tools-8, A-tools-9, A-tools-10, A-tools-11): `internal/processor/analyze.go`,
-  `cmd/nntp-analyze/main.go`, `internal/processor/adf_opt_analyze_test.go`.
-- **`adf-opt-tcp2tor`** (A-tools-12, A-tools-13): `cmd/tcp2tor/main.go`, `cmd/tcp2tor/example.cfg`,
-  `cmd/tcp2tor/adf_opt_tcp2tor_test.go`.
-- **`adf-opt-rslight`** (A-tools-14, A-tools-15, A-tools-16): `cmd/rslight-importer/main.go`,
-  `internal/processor/rslight.go`, `internal/processor/rslight_articles.go`, `internal/processor/adf_opt_rslight_test.go`.
-  pprof only behind `-pprof 127.0.0.1:port` (empty = off).
-- **`adf-opt-tools-misc`** (A-tools-6, A-tools-17, A-tools-18, A-tools-20): `internal/database/progress.go`,
-  `cmd/import-flat-files/main.go`, `cmd/extract_hierarchies/extract_hierarchies.go`, `cmd/merge-active/main.go`,
-  `cmd/merge-descriptions/main.go`, `cmd/nntp-fetcher/main.go`, tests next to them. Also the `-max-batch` clamp if
-  A-tools-4 was not closed by intake.
-- **`adf-opt-ops-tools`** (A-ops-6, A-ops-7, A-ops-8, A-ops-10): `cmd/expire-news/main.go`, `cmd/fix-references/main.go`,
-  `cmd/fix-thread-activity/main.go`, `cmd/recover-db/main.go`, `cmd/usermgr/main.go`, tests. Includes their
-  `NO_CACHE_BOOT` and teardown (OPS-1 deferred part for these tools).
-- **`adf-opt-web-maint`** (A-ops-11, A-ops-12): `cmd/web/main.go`, `cmd/web/main_functions.go`,
-  `internal/database/utils.go` (only `RsyncDIR`), tests.
-- **`adf-opt-postqueue`** (A-intake-10): `internal/database/db_post_queue.go`, `cmd/post-queue/main.go` (wave 1
-  touched only its signal line), `internal/database/adf_opt_postqueue_test.go`. Reset stale `in_processing` rows at
-  worker start, `Retryable*` helpers for every queue statement, error return instead of `os.Exit` after the DB open.
+  `internal/models/models.go` (`GetData` + import block), `internal/web/webserver.go` (`Shutdown`: stop the
+  sanitized and newsgroup caches behind a package-level `sync.Once`; tests call `Shutdown` repeatedly),
+  `internal/web/webserver_core_routes.go` (only `router.UseRawPath = true` for `/` in message-ids),
+  new `internal/web/adf_opt_admin_test.go`. `queries.go` is not needed.
+- **`adf-opt-hierarchy`** (A-db-7, 8, 10, 14; all OPEN): `internal/database/hierarchy_cache.go`, new
+  `internal/database/adf_opt_hierarchy_test.go`, and one line in `internal/database/db_batch.go` (pass `latestDate`
+  into `UpdateNewsgroupStats`). Also fix the 3+-part group lookup (`UpdateNewsgroupStats`,
+  `UpdateNewsgroupActiveStatus` look up under the top level, the cache stores under the direct parent). A-db-8:
+  dirty-mark + rebuild inside hierarchy_cache.go, no fallback to `getDirectGroupsAtLevelDirect`. Keep
+  `buildHierarchyTreeBulk(db)`, `directGroupsCache` and the `top:name` key format (`TestAdfReadersHierarchyReaders`).
+- **`adf-opt-analyze`** (A-tools-7, 8, 9, 10, 11; all OPEN): `internal/processor/analyze.go`,
+  `internal/processor/processor.go` (only a cache-root field on `Processor`), `cmd/nntp-analyze/main.go`,
+  `internal/processor/lo1_paths_test.go` (`TestLo1PathsGetCacheFilePathNilDB` asserts the `"data"` fallback the
+  fix removes), `internal/processor/adf_proc_test.go` (`TestAdfProcPrintAnalysisResultsError`), new
+  `internal/processor/adf_opt_analyze_test.go` and `cmd/nntp-analyze/adf_opt_analyze_test.go`. A-tools-9 also
+  covers the partial caches written under `-max-analyze` and `-start-date`/`-end-date` (don't save a cache when a
+  limit or date filter is set). Keep the default `-host` but say so in usage (decision D-O2).
+- **`adf-opt-tcp2tor`** (A-tools-12 PARTLY: dial/handshake timeout done in 8164555; A-tools-13 OPEN):
+  `cmd/tcp2tor/main.go`, `cmd/tcp2tor/example.cfg`, new `cmd/tcp2tor/adf_opt_tcp2tor_test.go`. Keep the signatures
+  of `testSOCKS5Connection`, `socksForwardDialer`, `dialThroughSOCKS`; `adfTor*` helper names are taken.
+- **`adf-opt-rslight`** (A-tools-14, 15, 16; all OPEN): `cmd/rslight-importer/main.go`, new
+  `cmd/rslight-importer/pprof_addr.go` (loopback-only `-pprof` helper copied from `cmd/history-rebuild/pprof_addr.go`;
+  empty = off), `internal/processor/rslight.go` (use `NewProcessorE`; make the 15 s sleep a package variable),
+  `internal/processor/rslight_articles.go`, new `internal/processor/adf_opt_rslight_test.go`. Leave `go.mod` alone.
+- **`adf-opt-tools-misc`** (A-tools-6, 17, 18 OPEN; A-tools-20 PARTLY: start-date check done in ff22aac):
+  `internal/database/progress.go`, `cmd/import-flat-files/main.go`, `cmd/extract_hierarchies/extract_hierarchies.go`,
+  `cmd/merge-active/main.go`, `cmd/merge-descriptions/main.go`, `cmd/nntp-fetcher/main.go` (feed loop `return`,
+  dead `errChan`, dead `DownloadMaxPar` write, debug sleeps; the hardcoded per-host connection caps STAY (decision D-O1),
+  and the `-max-batch` upper clamp at 1000 with a warning (decision D-O3; A-tools-4's clamp half was
+  never done)), new `internal/database/adf_opt_progress_test.go`, `cmd/nntp-fetcher/adf_opt_fetcher_test.go`.
+- **`adf-opt-ops-tools`** (A-ops-6, 7, 8, 10; all OPEN): `cmd/expire-news/main.go` (`MainDBGetNewsgroup` in the
+  single-group branch; tests must not call `shutdown()`), `cmd/fix-references/main.go` (`appVersion` var, usage,
+  NO_CACHE_BOOT + teardown), `cmd/fix-thread-activity/main.go` (same), `cmd/recover-db/main.go` (unknown `-group`
+  names via `MainDBGetNewsgroup`, exit through `recoverExit`), `cmd/usermgr/main.go` (`InvalidateUserSession` on
+  password change, 12-72 byte password rule mirroring the web (decision D-O4), rune-safe `truncate`, teardown),
+  tests next to them (`adf_opt_*_test.go`; DB tests skip at euid < 1000).
+- **`adf-opt-web-maint`** (A-ops-11, 12; all OPEN): `cmd/web/main.go`, `cmd/web/main_functions.go` (one-shot modes
+  decided after flag parsing: NO_CACHE_BOOT before `OpenDatabase`, no `SetHostname`/processor/progress DB, end in
+  `exitAfterDB`; descriptions-only import stays on the server path; `-rsync-remove-source` needs `-force`, WAL
+  checkpoint per group before copying, busy → refuse), `internal/database/utils.go` (only `RsyncDIR`: `--` and `./`
+  prefix), new `internal/database/adf_opt_rsync_test.go`, new `cmd/web/adf_opt_web_test.go` (no TestMain; own
+  group names; restore flag variables).
+- **`adf-opt-postqueue`** (A-intake-10 OPEN; SIGTERM done in 3ce4b56): `internal/database/db_post_queue.go`
+  (`Retryable*` everywhere, `rows.Err`), `internal/postmgr/postmgr.go` (once-guarded `stopCh`, interruptible sleep,
+  one-shot path wired to stop, reset of unprocessed rows on stop, errcheck), `cmd/post-queue/main.go`
+  (`ResetAllPostQueueProcessing` at start, `os.Exit(run())` with expire-news-style teardown), new
+  `internal/database/adf_opt_postqueue_test.go`. The 441 attempt counter needs a migration: file it in `issues.md`
+  (orchestrator), not in this slice. Run `go test -race ./internal/postmgr/` explicitly.
 
-### Wave O2 (optional; 1 slice after O1)
-- **`adf-opt-artifacts-docs`** (A-tools-19, A-ops-17, A-tools-21): `git rm --cached` the tracked binaries
-  (`cmd/benchmark_hash/benchmark_hash`, `cmd/benchmark_hash/debug.log`, `cmd/test-MsgIdItemCache/test-cache`,
+Decisions for this wave (defaults applied unless the user overrides at the wave boundary):
+- D-O1 (user, 2026-10-15): the fetcher KEEPS its hardcoded eternal-september / blueworldhosting connection caps. They
+  are limits those servers impose; a higher stored `MaxConns` must never override them. The cap item of A-tools-20 is
+  closed as "works as intended"; implementers do not touch those lines.
+- D-O2: `nntp-analyze` keeps its default `-host`; usage and README state it (O2 writes the docs).
+- D-O3: `-max-batch` is clamped to 1000 (the database batch cap) with a warning.
+- D-O4: `usermgr` enforces the web's 12-72 byte password rule.
+- D-O5: A-db-7 passes `latestDate` from the batch into `UpdateNewsgroupStats` (one line in db_batch.go).
+- D-O6: gin `UseRawPath = true` so `/` in message-ids survives routing (A-web-18); `UnescapePathValues` stays on.
+
+### Wave O2 (optional; 1 slice after O1; re-anchored 2026-10-15)
+- **`adf-opt-artifacts-docs`** (A-tools-19 OPEN, A-ops-17 PARTLY, A-tools-21 OPEN): `git rm --cached` the tracked
+  binaries (`cmd/benchmark_hash/benchmark_hash`, `cmd/benchmark_hash/debug.log`, `cmd/test-MsgIdItemCache/test-cache`,
   `cmd/test-MsgIdItemCache/test-MsgIdItemCache`) plus `.gitignore` lines; `//go:build ignore` on
-  `active_files/hierarchies/organize_by_theme.go`; `-X main.appVersion` in `build_{analyze,expire-news,history-rebuild,usermgr}.sh`;
-  help texts and READMEs of `cmd/nntp-fetcher`, `cmd/nntp-analyze`, `cmd/rslight-importer` rewritten from the flag
-  definitions (owned: those files plus `cmd/nntp-fetcher/main.go` `showUsageExamples`, `cmd/nntp-analyze/main.go`
-  usage/defaults, `cmd/rslight-importer/main.go` usage).
-
----
+  `active_files/hierarchies/organize_by_theme.go` and the stale SQL path note; `active_files/hierarchies/organize_by_theme.sh`;
+  `-X main.appVersion` in `build_{analyze,expire-news,history-rebuild,usermgr}.sh` (`build_expire-news.sh` builds
+  `./cmd/expire-news`, `build_usermgr.sh` gets a shebang; `build_TestMsgIdItemCache.sh` is already gone); help texts
+  and READMEs of `cmd/nntp-fetcher` (`showUsageExamples`), `cmd/nntp-analyze`, `cmd/rslight-importer` rewritten
+  from the flag definitions AS THEY ARE AFTER O1 (the re-anchor file has the per-line checklist); the stale
+  `-test-conn` mention in `.github/copilot-instructions.md`.
 
 ## Acceptance checks (summary)
 | Check | Slice | What |
@@ -1584,6 +1622,89 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
   A-tools-4 closed (`newDownloadRun`), A-ops-3d/f closed; SIGTERM in cmd/web, nntp-fetcher, expire-news, post-queue,
   history-rebuild, nntp-transfer.
 
+### Wave O0 + O1 batch A (2026-10-15): re-anchor; adf-opt-web-admin, adf-opt-hierarchy, adf-opt-analyze, adf-opt-postqueue, adf-opt-sanitize
+- O0: `plan-adf-optional` from `testing-001` @ a9357b7 (plan back to wip faec07e); five read-only agents re-anchored
+  all 38 optional ids at faec07e → `audit-delta-fixes-reanchor.md` (0dfa346); 31 OPEN, 5 PARTLY, 1 partly invalid, 0 fixed.
+  User reversed D-O1 (01149d3): the fetcher keeps its eternal-september/blueworldhosting caps. 441 attempt counter
+  filed in `issues.md` (cf788ec). Baseline on faec07e green (race over 17 package sets, known bugs: T-nntp-article-1).
+- adf-opt-postqueue: `worktree-agent-aed7002029cf4fd5c` (e44a0be, f55a845, review fix abd1e72), merge 6074425.
+  Review MERGE + 3 minors; fixed: early-shutdown check before the one-shot batch, admin reader returns scan errors
+  (plus COALESCE on the nullable message_id). Left: exit 130 after a completed batch when a signal arrived (documented).
+- adf-opt-hierarchy: `worktree-agent-a25a85fd1451f5525` (2d2973f, review fix 1a403d0), merge 53c9ddb. Review MERGE +
+  4 minors; fixed: stats increment during a rebuild re-dirties the top (`rebuilding`/`bulkBuilds` flags, test hook),
+  `latest.UTC()`. Left (leftovers): global `rebuildMu` held across RetryableQuery; a group absent at build time is not
+  added by UpdateNewsgroupStats. Deviations accepted: sub-levels counted from the name's top level; name tie-break.
+  Extra bug fixed: 3+-part group lookups and triple-counted batches (three sort lists share the structs).
+- adf-opt-web-admin: `worktree-agent-a5c68e72f215bbed4` (ef6e876, review fix 377761e), merge a1afbe9. Review
+  MAJOR: gin `UseRawPath` decoded `+` as a space in every param of a non-canonical path (comp.lang.c++ broke); fixed
+  with `UnescapePathValues=false` + an `unescapeRawPathParams` middleware (PathUnescape when RawPath is set) and
+  `%2B` in GetData links, gin comparison test. Minors noted: section assign now removes every earlier membership;
+  the cache stop once-guard is spent on the first Shutdown. `web_admin_provider.go` is gofmt-clean now (K4 baseline
+  shrinks to `embedded_migrations.go`).
+- adf-opt-analyze: `worktree-agent-a2684cc09e81b15ce` (1ca748f, review fixes dff8085, 91ef470), merge 7592ae7.
+  Review MAJOR (plan gap): an empty XOVER range answers 423 and failed the whole group; fixed with
+  `nntp.ErrNoArticlesInRange` (ownership extended to `nntp-client-commands.go` and `nntp-backend-pool.go`: the pool
+  keeps the connection on 423). Minors fixed: stale `.tmp` cleanup, invalid group name only skips the file write,
+  processor.go back to the struct field. Reported to the user: default `-out` is `<data>/analyze-out`; caches and
+  exports are 0o600/0o750. Signatures changed: `printAnalysisResults(a, format, outDir)`, `AnalyzeMode(.., outDir)`,
+  `AnalyzeModeStandalone(.., dataDir, outDir)`; O2 docs must describe `-out`, the cache path and the CSV header.
+- adf-opt-sanitize: `worktree-agent-a7772271acee0fd26` (ed33a0e, review fix 55936e1), merge 3263508. Review MERGE +
+  minors; fixed: transfer-encoding decoded only for text/* or no media type, utf-16/32 labels treated as unknown,
+  `SetArticle` sets fields under `sc.mutex`. Left (pre-existing): one malformed QP sequence leaves the body raw.
+  Behaviour changes: bodies get no HTML-entity decoding; empty From shows "Anon"; headers panel no QP decoding;
+  `StripDangerousHTML`/`sanitizeText` removed (html/template escaping is the defence); cache key group+NUL+msgid.
+  Follow-ups: `web_apiHandlers.go` preview and `web_sitePostPage.go` quoting still use `ConvertToUTF8`.
+- Batch-A merged tree 7592ae7: gofmt baseline `embedded_migrations.go` only, vet/build ok, race over 20 package
+  sets ok (no flakes), known bugs unchanged (T-nntp-article-1). Batch B spawned from 7592ae7.
+- User request during batch A: queue a plan `test-timing-hardening` after O1 (harness deadlines 5 s → 30 s, upper-bound
+  duration asserts → error-type asserts or 10x margins; the statistical auth-timing test `TestNSHAuthUnknownUserTiming`
+  is DELETED, not gated (user: "we are not a bank"); the dummy-compare in the auth code stays, it costs nothing).
+
+### Wave O1 batch B (2026-10-15): adf-opt-ops-tools, adf-opt-rslight, adf-opt-tools-misc, adf-opt-web-maint, adf-opt-tcp2tor
+- adf-opt-ops-tools: `worktree-agent-ab0f79423f0d3259b` (7395ec3), merge 64ee35c; inline 712f747 renamed the local
+  `errors` counter in fix-thread-activity (shadowed the package) and dropped the stale A-ops-7 note in `scripts.sh`.
+  Review MERGE. Behaviour: recover-db refuses the whole run when any name of a comma list is unknown; usermgr
+  argument checks run before OpenDatabase; expire-news names an inactive group explicitly (it was refused before too).
+  Leftovers: resolveNamedGroups/exit helpers copied into 3-4 main packages; fix-references and fix-thread-activity
+  have no signal handler.
+- adf-opt-rslight: `worktree-agent-a05262db368127cbf` (f1da13b, review fix c6cf7e8), merge 902efe6. Review MERGE +
+  minors; fixed: all trailing blank elements after the "." terminator dropped, `-pprof` requires a port. Left:
+  errors.Join verbosity with many failed files; `cmd/history-rebuild/pprof_addr.go` has the same empty-port gap;
+  go.mod still requires the now unused go-cpu-mem-profiler (go mod tidy would drop it plus gorilla/mux); no signal
+  handler during the 15 s start delay. Behaviour: an import where every file was skipped exits 1 instead of SUCCESS.
+- adf-opt-tools-misc: `worktree-agent-a43996ead67b00720` (daafa59, cf3b362, 9c86ebf), merge 0ee6edf. Review MERGE;
+  D-O1 verified (cap lines byte-identical), D-O3 clamp 10..1000. Behaviour: import-flat-files stores file content
+  verbatim (CRLF kept, no trailing newline; old imports were LF-rewritten), duplicates count as existing; merge-active
+  `-overview` requires `-overview-dir`; extract_hierarchies reads the hierarchy list from the embedded migration.
+  For O2: fetcher comment "DownloadMaxPar ... unchangeable (code not working yet)" is misleading; `-max-batch` help
+  says 10-1000; `cmd/import-flat-files/README.md` still says 65,536 tables up front.
+- adf-opt-web-maint: `worktree-agent-ae2bc318afb7dc9cb` (b947ebc, review fix c4d6226), merge 474e447. Review
+  MERGE + minors; fixed: a leftover `<group>.db-wal` after ForceCloseGroupDB refuses the group (another process holds
+  it), conn.Close logged, real-rsync `./-src` test. Behaviour: `-force` flag (not `-rsync-force`); rsync exits 1 when
+  any group was refused; one-shot modes no longer call resolveUseShortHashLen; busy groups wait the connection's 30 s
+  busy_timeout in production.
+- adf-opt-tcp2tor: `worktree-agent-a7586d60096c78752` (1e45e70, review fix af927ed), merge 59988dd. Review
+  MERGE AFTER FIXES: MAJOR drain timer after a half-close cut an active download after one idle period and sent a
+  clean FIN (orchestrator reproduced with the new test against the old code: 10 of 30 bytes); fixed by waiting for
+  the second direction, which copyWithIdle already bounds by idle-without-traffic. Two thin-margin timing tests
+  rewritten (10x margins, `idleRetries` structural counter). Minor: `#` comment cut before the `=` check. Left:
+  `-add` does not check the bind policy; a non-closed Accept error still ends in log.Fatalf (pre-existing).
+  New flags/keys: `-max-conns`/max_conns (64), `-idle-timeout`/idle_timeout (10m), `-allow-public-bind`/allow_public_bind.
+- O1 merged tree 59988dd: gofmt baseline `embedded_migrations.go` only, vet/build ok, race over 26 package sets ok
+  (no flakes), known bugs unchanged (T-nntp-article-1), all shell scripts parse. Wave O2 spawned from 59988dd.
+
+### Wave O2 (2026-10-15): adf-opt-artifacts-docs
+- `worktree-agent-a032dc18f99a76353` (4d2d3cb, 4626963, 66024af, bc4f4e5), merge 6801806; inline 923baab reworded
+  the import-flat-files README dry-run note. Review MERGE (text-only diff verified). Four binaries untracked and
+  ignored, `organize_by_theme.go` behind `//go:build ignore` with the migration path, four build scripts stamp
+  `appVersion`, help texts and READMEs of nntp-fetcher, nntp-analyze, rslight-importer, import-flat-files rewritten
+  from the flag definitions. Documented-not-fixed: fetcher `-reset-progress` with a wildcard resets every group;
+  nntp-analyze `-timeout` ignored in `$all` mode and the 3 s CSV-header sleep; import-flat-files `-dry-run` still
+  creates database files; `README.md:130` mentions a non-existent `-download-end-date`;
+  `build_import_flat-files.sh` sets an `appVersion` the package does not declare; copilot-instructions still names
+  `test-nntp`.
+- Queued by user request: `.claude/plans/queued/test-timing-hardening.md` (+ survey) (1bb4e6b).
+
 ## Outcome
 
 - **Integration branch:** `plan-audit-delta-fixes` from `testing-001` @ 4eb92da; code tree 7ff04a3 (plus plan/docs
@@ -1660,3 +1781,29 @@ Expected after wave 2: E01–E16, E18, E19 PASS, E17 INFO, `SUMMARY … fail=0`.
     client deadline is now 20 s. tcp2tor has no test pinning that a forwarded connection keeps no deadline.
   - Not done by decision: wave O1/O2 (31 medium/low ids), nonce CSP (Q5), cursor wiring (D15), first-user-admin (Q1),
     history fail-stop (Q3), toolchain upgrade (Q4), destructive root scripts (Q6), `tests.yml` (issues.md).
+
+### Outcome addendum: optional waves O1/O2 (2026-10-15)
+- **Integration branch:** `plan-adf-optional` from `testing-001` @ a9357b7. Re-anchor file
+  `.claude/plans/done/audit-delta-fixes-reanchor.md`. Nothing pushed.
+- **Slices (11):** adf-opt-postqueue 6074425, adf-opt-hierarchy 53c9ddb, adf-opt-web-admin a1afbe9, adf-opt-sanitize
+  3263508, adf-opt-analyze 7592ae7, adf-opt-ops-tools 64ee35c (+712f747), adf-opt-rslight 902efe6, adf-opt-tools-misc
+  0ee6edf, adf-opt-web-maint 474e447, adf-opt-tcp2tor 59988dd, adf-opt-artifacts-docs 6801806 (+923baab).
+  Worktrees: `/tank0/claude/trees/go-pugleaf/agent-{aed7002029cf4fd5c,a25a85fd1451f5525,a5c68e72f215bbed4,
+  a7772271acee0fd26,a2684cc09e81b15ce,ab0f79423f0d3259b,a05262db368127cbf,a43996ead67b00720,ae2bc318afb7dc9cb,
+  a7586d60096c78752,a032dc18f99a76353}` (branches `worktree-agent-<id>`); the user cleans them up.
+- **Review MAJORs caught:** gin UseRawPath decoding `+` as space (web-admin); XOVER 423 failing a whole analysis
+  (analyze, plan gap); tcp2tor drain timer truncating an active download with a clean FIN plus two thin-margin
+  timing tests.
+- **User decisions:** D-O1 reversed (fetcher caps stay); D-O2 default host kept; D-O3 clamp 1000; D-O4 12-72 byte
+  passwords in usermgr; D-O5 latestDate into hierarchy stats; D-O6 raw-path routing with a PathUnescape middleware;
+  the auth timing test is to be deleted by the queued plan, not gated.
+- **Verification:** verifier on 923baab: gofmt baseline, vet, build ok; race suite 26 package sets ok (run alone, 3m25s, no flakes); 104 TestAdfOpt* functions all ran (0 skips); known bugs = T-nntp-article-1 only; 56 shell scripts parse; 8 build scripts ok, four stamp appVersion 4.7.5; no tracked ELF; e2e: write-active-file no progress.db (A-ops-12), rsync-remove-source refused without -force (exit 2), fix-references unknown group exit 1 without creating a DB, usermgr -list ok, nntp-analyze help shows -out and the default host, tcp2tor refuses a LAN bind and exits 0.1 s after SIGTERM, post-queue one-shot tears down cleanly, scripts/test-audit-delta-fixes.sh SUMMARY pass=17 fail=0 info=2 with a race-built webserver (0 DATA RACE); D-O1 cap block byte-identical to testing-001. One FAIL fixed inline in 200d3a6: internal/postmgr tests were not repeatable with -count>1 (helper left its newsgroup row; now deleted); two 15 s tcp2tor read deadlines raised to 30 s (10x). Both packages pass -race -count=3 after the fix.
+- **Leftovers (optional findings' residue):** hierarchy `rebuildMu` held across RetryableQuery and groups absent at
+  build time never added incrementally; sanitize: one malformed QP sequence leaves a body raw; preview API and reply
+  quoting still use `ConvertToUTF8`; web: section assign drops every earlier membership, cache stop once-guard spent
+  on first Shutdown; post-queue exit 130 after a completed batch, 441 attempt counter (issues.md); rslight/history-
+  rebuild: errors.Join verbosity, no signal handler, go.mod keeps the unused go-cpu-mem-profiler; ops tools:
+  resolveNamedGroups/exit helpers duplicated in 3-4 mains, fix-references/fix-thread-activity without signal handler;
+  web-maint: busy groups wait the 30 s busy_timeout; tcp2tor: `-add` skips the bind policy, Accept errors still
+  fatal; analyze: IPv6 host literal cache dir name; plus the documented-not-fixed items of the O2 note.
+

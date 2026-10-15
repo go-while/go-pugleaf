@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -100,6 +101,37 @@ func recoverExit(db *database.Database, code int) {
 	os.Exit(code)
 }
 
+// splitGroupNames splits the -group value (one name or a comma separated list) into
+// trimmed, non-empty names.
+func splitGroupNames(arg string) []string {
+	var names []string
+	for _, name := range strings.Split(arg, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// resolveNamedGroups looks every name up in the main database (A-ops-8): GetGroupDB would
+// create an empty group database for a name that is not a newsgroup. Unknown names are
+// returned in unknown; any other lookup error is returned as err.
+func resolveNamedGroups(db *database.Database, names []string) (found []*models.Newsgroup, unknown []string, err error) {
+	for _, name := range names {
+		ng, err := db.MainDBGetNewsgroup(name)
+		if errors.Is(err, sql.ErrNoRows) {
+			unknown = append(unknown, name)
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to look up newsgroup '%s': %w", name, err)
+		}
+		found = append(found, ng)
+	}
+	return found, unknown, nil
+}
+
 // shouldRewrite reports whether a stored date_sent differs from the strictly re-parsed
 // date_string by more than one second. A date_string the strict parser rejects (ok false)
 // is never rewritten.
@@ -189,22 +221,18 @@ func main() {
 	var newsgroups []*models.Newsgroup
 	isWildcard := strings.HasSuffix(*newsgroup, "*")
 	if *newsgroup != "$all" && *newsgroup != "" && !isWildcard {
-		// if is comma separated check for multiple newsgroups
-		if strings.Contains(*newsgroup, ",") {
-			for _, grpName := range strings.Split(*newsgroup, ",") {
-				if grpName == "" {
-					continue
-				}
-				newsgroups = append(newsgroups, &models.Newsgroup{
-					Name: strings.TrimSpace(grpName),
-				})
-			}
-
-		} else {
-			newsgroups = append(newsgroups, &models.Newsgroup{
-				Name: *newsgroup,
-			})
+		// a single name or a comma separated list; every name must be a known newsgroup
+		// (A-ops-8: GetGroupDB would create an empty database for an unknown name)
+		found, unknown, err := resolveNamedGroups(db, splitGroupNames(*newsgroup))
+		if err != nil {
+			log.Printf("%v", err)
+			recoverExit(db, 1)
 		}
+		if len(unknown) > 0 {
+			fmt.Fprintf(os.Stderr, "Error: unknown newsgroup(s): %s\n", strings.Join(unknown, ", "))
+			recoverExit(db, 1)
+		}
+		newsgroups = found
 	} else if isWildcard {
 		// strip * from newsgroup and add only newsgroups matching the strings prefix
 		prefix := strings.TrimSuffix(*newsgroup, "*")

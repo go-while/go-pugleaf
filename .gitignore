@@ -40,6 +40,10 @@ active_files/local-mode.active
 /old_overview
 cmd/tcp2tor/tcp2tor
 cmd/tcp2tor/tcp2tor.sha256
+cmd/benchmark_hash/benchmark_hash
+cmd/benchmark_hash/debug.log
+cmd/test-MsgIdItemCache/test-cache
+cmd/test-MsgIdItemCache/test-MsgIdItemCache
 /legacy-sqlite3
 .update
 

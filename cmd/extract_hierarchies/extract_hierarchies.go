@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"database/sql"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -14,32 +16,30 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// hierarchiesMigration is the embedded migration that holds the hierarchy list.
+const hierarchiesMigration = "migrations/0003_main_create_hierarchies.sql"
+
 func main() {
-	var err error
+	activeFile := flag.String("active", "active_files/active.2025-06", "Active file to split (groupname low high status per line)")
+	outputDir := flag.String("out", "active_files/hierarchies", "Output directory for the <hierarchy>.active files")
+	flag.Parse()
+
 	supportedHierarchies, err := createDatabaseAndReadHierarchies()
 	if err != nil {
 		log.Fatalf("Error initializing hierarchies: %v", err)
 	}
 
-	activeFile := "active_files/active.2025-06"
-	outputDir := "active_files/hierarchies"
-
 	// Create output directory
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+	if err := os.MkdirAll(*outputDir, 0755); err != nil {
 		log.Fatalf("Failed to create output directory: %v", err)
 	}
 
 	// Open the active file
-	file, err := os.Open(activeFile)
+	file, err := os.Open(*activeFile)
 	if err != nil {
-		log.Fatalf("Failed to open active file: %v", err)
+		log.Fatalf("Failed to open active file (set -active): %v", err)
 	}
 	defer file.Close()
-
-	// Maps to store groups by hierarchy
-	hierarchyGroups := make(map[string][]string)
-	unknownGroups := []string{}
-	totalGroups := 0
 
 	// Sort hierarchies by length (longest first) to match most specific hierarchy first
 	sort.Slice(supportedHierarchies, func(i, j int) bool {
@@ -48,44 +48,14 @@ func main() {
 
 	fmt.Printf("Loaded %d hierarchies, sorted by specificity (longest first)\n", len(supportedHierarchies))
 
-	// Read the active file line by line
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		// Parse the line: groupname low high status
-		parts := strings.Fields(line)
-		if len(parts) < 4 {
-			continue
-		}
-
-		groupName := parts[0]
-		totalGroups++
-
-		// Find which hierarchy this group belongs to (most specific first)
-		matched := false
-		for _, hierarchy := range supportedHierarchies {
-			if strings.HasPrefix(groupName, hierarchy+".") || groupName == hierarchy {
-				hierarchyGroups[hierarchy] = append(hierarchyGroups[hierarchy], line)
-				matched = true
-				break // Stop at first (most specific) match
-			}
-		}
-
-		if !matched {
-			unknownGroups = append(unknownGroups, line)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
+	hierarchyGroups, unknownGroups, totalGroups, err := groupActiveLines(file, supportedHierarchies)
+	if err != nil {
 		log.Fatalf("Error reading active file: %v", err)
 	}
 
 	// Write each hierarchy to its own file
 	processedGroups := 0
+	writeErrors := 0
 	for hierarchy, groups := range hierarchyGroups {
 		if len(groups) == 0 {
 			continue
@@ -94,17 +64,12 @@ func main() {
 		// Sort groups alphabetically
 		sort.Strings(groups)
 
-		filename := filepath.Join(outputDir, hierarchy+".active")
-		outFile, err := os.Create(filename)
-		if err != nil {
-			log.Printf("Failed to create file %s: %v", filename, err)
+		filename := filepath.Join(*outputDir, hierarchy+".active")
+		if err := writeLines(filename, groups); err != nil {
+			log.Printf("Failed to write file %s: %v", filename, err)
+			writeErrors++
 			continue
 		}
-
-		for _, group := range groups {
-			fmt.Fprintln(outFile, group)
-		}
-		outFile.Close()
 
 		processedGroups += len(groups)
 		fmt.Printf("Created %s with %d groups\n", filename, len(groups))
@@ -113,15 +78,11 @@ func main() {
 	// Write unknown/unmatched groups to a separate file
 	if len(unknownGroups) > 0 {
 		sort.Strings(unknownGroups)
-		filename := filepath.Join(outputDir, "unknown.active")
-		outFile, err := os.Create(filename)
-		if err != nil {
-			log.Printf("Failed to create unknown groups file: %v", err)
+		filename := filepath.Join(*outputDir, "unknown.active")
+		if err := writeLines(filename, unknownGroups); err != nil {
+			log.Printf("Failed to write unknown groups file: %v", err)
+			writeErrors++
 		} else {
-			for _, group := range unknownGroups {
-				fmt.Fprintln(outFile, group)
-			}
-			outFile.Close()
 			fmt.Printf("Created %s with %d unmatched groups\n", filename, len(unknownGroups))
 		}
 	}
@@ -159,28 +120,95 @@ func main() {
 		}
 	}
 
-	fmt.Printf("\nFiles created in: %s/\n", outputDir)
+	fmt.Printf("\nFiles created in: %s/\n", *outputDir)
+	if writeErrors > 0 {
+		log.Printf("%d output file(s) could not be written", writeErrors)
+		os.Exit(1)
+	}
 }
 
-// createDatabaseAndReadHierarchies creates a SQLite database from the SQL file and returns hierarchy names
+// groupActiveLines reads an active file and sorts its lines into hierarchies.
+// hierarchies must be sorted longest first so the most specific one matches.
+func groupActiveLines(r io.Reader, hierarchies []string) (map[string][]string, []string, int, error) {
+	hierarchyGroups := make(map[string][]string)
+	unknownGroups := []string{}
+	totalGroups := 0
+
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		// Parse the line: groupname low high status
+		parts := strings.Fields(line)
+		if len(parts) < 4 {
+			continue
+		}
+
+		groupName := parts[0]
+		totalGroups++
+
+		// Find which hierarchy this group belongs to (most specific first)
+		matched := false
+		for _, hierarchy := range hierarchies {
+			if strings.HasPrefix(groupName, hierarchy+".") || groupName == hierarchy {
+				hierarchyGroups[hierarchy] = append(hierarchyGroups[hierarchy], line)
+				matched = true
+				break // Stop at first (most specific) match
+			}
+		}
+
+		if !matched {
+			unknownGroups = append(unknownGroups, line)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, nil, 0, err
+	}
+	return hierarchyGroups, unknownGroups, totalGroups, nil
+}
+
+// writeLines writes one line per entry and reports write, flush and close errors.
+func writeLines(filename string, lines []string) error {
+	outFile, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	w := bufio.NewWriter(outFile)
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			_ = outFile.Close()
+			return err
+		}
+	}
+	if err := w.Flush(); err != nil {
+		_ = outFile.Close()
+		return err
+	}
+	return outFile.Close()
+}
+
+// createDatabaseAndReadHierarchies loads the hierarchy list from the embedded
+// migration into an in-memory SQLite database and returns the hierarchy names.
+// It reads no file from the cwd and writes no database file.
 func createDatabaseAndReadHierarchies() ([]string, error) {
-	// Create sample.db
-	db, err := sql.Open("sqlite3", "sample.db")
+	sqlBytes, err := database.EmbeddedMigrationsFS.ReadFile(hierarchiesMigration)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read embedded %s: %v", hierarchiesMigration, err)
+	}
+
+	db, err := sql.Open("sqlite3", "file::memory:")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database: %v", err)
 	}
 	defer db.Close()
-
-	// Read and execute the SQL schema file
-	sqlFile := "migrations/0003_main_create_hierarchies.sql"
-	sqlBytes, err := os.ReadFile(sqlFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read SQL file %s: %v", sqlFile, err)
-	}
+	// Every pool connection would get its own empty in-memory database.
+	db.SetMaxOpenConns(1)
 
 	// Execute the SQL commands
-	_, err = db.Exec(string(sqlBytes))
-	if err != nil {
+	if _, err := database.RetryableExec(db, string(sqlBytes)); err != nil {
 		return nil, fmt.Errorf("failed to execute SQL: %v", err)
 	}
 
@@ -204,6 +232,6 @@ func createDatabaseAndReadHierarchies() ([]string, error) {
 		return nil, fmt.Errorf("error iterating rows: %v", err)
 	}
 
-	log.Printf("Loaded %d hierarchies from database", len(hierarchies))
+	log.Printf("Loaded %d hierarchies from the embedded migration", len(hierarchies))
 	return hierarchies, nil
 }

@@ -13,6 +13,6 @@ sqlite3 data/cfg/pugleaf.sq3 "update config set value = 7 WHERE key = 'history_u
 
 
 ./fix-references -dry-run -group de.alt.talk.unmut
-# fix-references cannot start until A-ops-7 is fixed (AppVersion unset); -dry-run defaults to true, so writes need -dry-run=false
+# -dry-run defaults to true, so writes need -dry-run=false
 ./fix-references -rebuild-threads -dry-run=false -group de.alt.talk.unmut
 ./fix-thread-activity

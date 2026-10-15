@@ -14,10 +14,11 @@ import (
 
 // PosterManager manages the posting of articles to multiple providers
 type PosterManager struct {
-	DB     *database.Database
-	pools  []*nntp.Pool
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	DB       *database.Database
+	pools    []*nntp.Pool
+	stopCh   chan struct{}
+	stopOnce sync.Once // stopCh is closed by Run (shutdown signal) or Stop, whichever comes first
+	wg       sync.WaitGroup
 }
 
 // NewPosterManager creates a new poster manager
@@ -29,42 +30,84 @@ func NewPosterManager(db *database.Database, pools []*nntp.Pool) *PosterManager 
 	}
 }
 
-// Run starts the poster manager
+// closeStop closes stopCh once.
+func (pm *PosterManager) closeStop() {
+	pm.stopOnce.Do(func() {
+		close(pm.stopCh)
+	})
+}
+
+// stopped reports whether a stop was requested.
+func (pm *PosterManager) stopped() bool {
+	select {
+	case <-pm.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// sleep waits for d or until a stop is requested; it returns false on stop.
+func (pm *PosterManager) sleep(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-pm.stopCh:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// Run starts the poster manager. A close of shutdownChan stops it, also in the middle of a batch:
+// the rows of the batch not yet posted are reset to pending (see ProcessPendingPosts).
 func (pm *PosterManager) Run(limit int, shutdownChan <-chan struct{}, wg *sync.WaitGroup) {
 	log.Printf("PosterManager: Starting with %d pools", len(pm.pools))
 	defer wg.Done()
-	for {
+
+	// Forward the shutdown signal to stopCh so that a running batch and the sleep see it.
+	runDone := make(chan struct{})
+	defer close(runDone)
+	go func() {
 		select {
 		case <-shutdownChan:
 			log.Printf("PosterManager: Received shutdown signal")
-			close(pm.stopCh)
-			pm.wg.Wait()
-			return
+			pm.closeStop()
 		case <-pm.stopCh:
+		case <-runDone:
+		}
+	}()
+
+	for {
+		if pm.stopped() {
 			pm.wg.Wait()
 			return
-		default:
-			// Check for pending posts
-			done, err := pm.ProcessPendingPosts(limit)
-			if err != nil {
-				log.Printf("PosterManager: Error processing pending posts: %v", err)
-			}
-			if done == limit {
-				time.Sleep(1 * time.Second)
-			} else {
-				time.Sleep(10 * time.Second)
-			}
+		}
+		// Check for pending posts
+		done, err := pm.ProcessPendingPosts(limit)
+		if err != nil {
+			log.Printf("PosterManager: Error processing pending posts: %v", err)
+		}
+		pause := 10 * time.Second
+		if done == limit {
+			pause = 1 * time.Second
+		}
+		if !pm.sleep(pause) {
+			pm.wg.Wait()
+			return
 		}
 	}
 }
 
-// Stop stops the poster manager
+// Stop stops the poster manager. It is safe to call more than once and together with Run.
 func (pm *PosterManager) Stop() {
-	close(pm.stopCh)
+	pm.closeStop()
 	pm.wg.Wait()
 }
 
-// ProcessPendingPosts processes all pending posts in the queue
+// ProcessPendingPosts processes all pending posts in the queue.
+// It returns the number of entries it worked on. On stop it returns early and resets the
+// failed entries and the ones not yet worked on to pending, so the next run picks them up.
 func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 	// Get pending posts from database
 	entries, err := pm.DB.GetPendingPostQueueEntries(limit)
@@ -82,20 +125,22 @@ func (pm *PosterManager) ProcessPendingPosts(limit int) (int, error) {
 	var failedEntryIDs []int64
 
 	// Process each entry
-	for _, entry := range entries {
-		select {
-		case <-pm.stopCh:
-			log.Printf("PosterManager: Stopping due to shutdown signal")
-			// Reset processing state for any remaining entries
-			if len(failedEntryIDs) > 0 {
-				pm.DB.ResetPostQueueProcessing(failedEntryIDs)
+	for i, entry := range entries {
+		if pm.stopped() {
+			log.Printf("PosterManager: Stopping due to shutdown signal, %d of %d entries not processed", len(entries)-i, len(entries))
+			// Reset processing state for the failed and the not yet processed entries
+			resetIDs := failedEntryIDs
+			for _, rest := range entries[i:] {
+				resetIDs = append(resetIDs, rest.ID)
 			}
-			return 0, nil
-		default:
-			if err := pm.processEntry(entry); err != nil {
-				log.Printf("Failed to process entry %d (message: %s): %v", entry.ID, entry.MessageID, err)
-				failedEntryIDs = append(failedEntryIDs, entry.ID)
+			if err := pm.DB.ResetPostQueueProcessing(resetIDs); err != nil {
+				return i, fmt.Errorf("failed to reset processing state of %d entries on stop: %v", len(resetIDs), err)
 			}
+			return i, nil
+		}
+		if err := pm.processEntry(entry); err != nil {
+			log.Printf("Failed to process entry %d (message: %s): %v", entry.ID, entry.MessageID, err)
+			failedEntryIDs = append(failedEntryIDs, entry.ID)
 		}
 	}
 

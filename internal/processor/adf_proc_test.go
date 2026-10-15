@@ -28,23 +28,23 @@ func TestAdfProcNewProcessorEInvalidHost(t *testing.T) {
 }
 
 // OPS-1b: printAnalysisResults returns the export error instead of exiting.
-// A regular file named "out" in the cwd makes out/<group>.json unwritable.
+// A directory named <group>.json in the output directory makes the JSON file unwritable.
 func TestAdfProcPrintAnalysisResultsError(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "out"), []byte("not a directory\n"), 0o600); err != nil {
-		t.Fatalf("create out file: %v", err)
+	outDir := filepath.Join(t.TempDir(), "out")
+	blocker := filepath.Join(outDir, "adf.proc.fatal.json")
+	if err := os.MkdirAll(blocker, 0o750); err != nil {
+		t.Fatalf("create blocking directory: %v", err)
 	}
-	t.Chdir(dir) // restored automatically when the test ends
 
 	analysis := &GroupAnalysis{GroupName: "adf.proc.fatal", ProviderName: "test"}
-	err := printAnalysisResults(analysis, "json")
+	err := printAnalysisResults(analysis, "json", outDir)
 	if err == nil {
-		t.Fatal("printAnalysisResults with a file named out: want error, got nil")
+		t.Fatal("printAnalysisResults with a directory in place of the JSON file: want error, got nil")
 	}
 	if !strings.Contains(err.Error(), "failed to write JSON file") {
 		t.Fatalf("error %q does not mention the JSON write", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "out", "adf.proc.fatal.json")); statErr == nil {
-		t.Fatal("JSON file was written below the out file")
+	if info, statErr := os.Stat(blocker); statErr != nil || !info.IsDir() {
+		t.Fatalf("blocking directory was replaced: info=%v err=%v", info, statErr)
 	}
 }

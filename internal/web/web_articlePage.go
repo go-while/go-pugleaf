@@ -80,7 +80,7 @@ func (s *WebServer) articlePage(c *gin.Context) {
 		return
 	}
 	// Batch sanitize the article for better performance
-	models.BatchSanitizeArticles([]*models.Article{article})
+	models.BatchSanitizeArticles([]*models.Article{article}, groupName)
 
 	// Get thread context - for now, don't show all articles (too many)
 	// TODO: Implement proper threading based on References/In-Reply-To headers
@@ -142,7 +142,7 @@ func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
 
 	// Batch sanitize the article for better performance
 	if article != nil {
-		models.BatchSanitizeArticles([]*models.Article{article})
+		models.BatchSanitizeArticles([]*models.Article{article}, groupName)
 	}
 
 	// Get subject for title without HTML escaping (for proper browser title display)

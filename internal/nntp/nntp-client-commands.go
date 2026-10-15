@@ -36,6 +36,11 @@ const MaxReadLinesBody = MaxReadLinesArticle - MaxReadLinesHeaders
 // is unusable afterwards and is force-closed.
 var ErrResponseTooLarge = errors.New("nntp: response too large")
 
+// ErrNoArticlesInRange is wrapped into the XOver error when the server answers
+// 423 (RFC 3977 §8.3.2: no articles in that range). The response line was read
+// completely; callers may treat the range as empty.
+var ErrNoArticlesInRange = errors.New("no articles in range")
+
 // StatArticle checks if an article exists on the server
 func (c *BackendConn) StatArticle(messageID string) (bool, error) {
 	if err := validMessageIDArg(messageID); err != nil {
@@ -398,10 +403,16 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 
 	code, message, err := c.TextConn.ReadCodeLine(224)
 	if err != nil {
+		if code == 423 {
+			return nil, fmt.Errorf("failed to read XOVER response: %w: %w", err, ErrNoArticlesInRange)
+		}
 		return nil, fmt.Errorf("failed to read XOVER response: %w", err)
 	}
 
 	if code != 224 {
+		if code == 423 {
+			return nil, fmt.Errorf("XOVER failed: %d %s: %w", code, message, ErrNoArticlesInRange)
+		}
 		return nil, fmt.Errorf("XOVER failed: %d %s", code, message)
 	}
 

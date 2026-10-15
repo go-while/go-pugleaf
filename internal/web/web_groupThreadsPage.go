@@ -56,7 +56,7 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 			rootOverviews = append(rootOverviews, ft.RootArticle)
 		}
 	}
-	models.BatchSanitizeOverviews(rootOverviews)
+	models.BatchSanitizeOverviews(rootOverviews, groupName)
 
 	// Calculate pagination info
 	totalPages := (totalThreads + Threads_perPage - 1) / Threads_perPage
