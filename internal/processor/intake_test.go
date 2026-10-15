@@ -253,39 +253,56 @@ func TestIntakeProcCaptureLimiter(t *testing.T) {
 		if !ok {
 			t.Fatal("third acquire returned false after release")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("third acquire still blocked after release")
 	}
 
-	// full again: once stop reports true, acquire(true) gives up within 200 ms
+	// full again: once stop reports true, acquire(true) gives up on its next ticker poll.
+	// Structural: stopFn counts its calls; no duration is asserted.
 	var stop atomic.Bool
-	go func() { got <- l.acquire(true, stop.Load) }()
+	var pollsBefore, pollsAfter atomic.Int64 // stopFn calls that saw stop false / true
+	stopFn := func() bool {
+		if stop.Load() {
+			pollsAfter.Add(1)
+			return true
+		}
+		pollsBefore.Add(1)
+		return false
+	}
+	go func() { got <- l.acquire(true, stopFn) }()
+	// wait for the first poll, so the poll that sees stop can only come from a ticker tick
+	deadline := time.Now().Add(testWait)
+	for pollsBefore.Load() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("acquire(true) on a full limiter never polled stop")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	select {
 	case ok := <-got:
 		t.Fatalf("acquire returned %v before stop", ok)
 	case <-time.After(30 * time.Millisecond):
 	}
 	stop.Store(true)
-	start := time.Now()
 	select {
 	case ok := <-got:
 		if ok {
 			t.Fatal("acquire returned true on a full limiter after stop")
 		}
-		if d := time.Since(start); d > 200*time.Millisecond {
-			t.Fatalf("acquire took %v after stop, want <= 200ms", d)
-		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWait):
 		t.Fatal("acquire still blocked after stop")
 	}
+	if n := pollsAfter.Load(); n != 1 {
+		t.Fatalf("acquire polled stop %d times after it reported true, want 1 (give up on the first tick)", n)
+	}
 
-	// wait=false never blocks and counts the overflow
-	start = time.Now()
-	if l.acquire(false, never) {
+	// wait=false never blocks (it never enters the polling loop) and counts the overflow
+	var falsePolls atomic.Int64
+	if l.acquire(false, func() bool { falsePolls.Add(1); return false }) {
 		t.Fatal("acquire(false) took a slot on a full limiter")
 	}
-	if d := time.Since(start); d > 50*time.Millisecond {
-		t.Fatalf("acquire(false) blocked for %v", d)
+	if n := falsePolls.Load(); n != 0 {
+		t.Fatalf("acquire(false) polled stop %d times, want 0 (it must not wait)", n)
 	}
 	if n := l.overflow.Load(); n != 1 {
 		t.Fatalf("overflow = %d, want 1", n)

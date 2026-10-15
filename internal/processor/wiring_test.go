@@ -37,7 +37,7 @@ func wiringTestHistory(t *testing.T) *history.History {
 func wiringTestAddAndWait(t *testing.T, h *history.History, messageID string, groupID int64) {
 	t.Helper()
 	h.AddArticle(messageID, groupID)
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(testWait)
 	for {
 		exists, err := h.Exists(messageID)
 		if err != nil {

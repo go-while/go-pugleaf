@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,6 +11,20 @@ import (
 	"github.com/go-while/go-pugleaf/internal/history"
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// testWait is the hang guard of this package's tests: it only stops a hung test, a passing test
+// never waits on it. Override with PUGLEAF_TEST_DEADLINE (a Go duration, e.g. 120s); default 60 s.
+// Plan test-timing-hardening D3.
+var testWait = testWaitFromEnv(60 * time.Second)
+
+func testWaitFromEnv(def time.Duration) time.Duration {
+	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
 
 // toolsTestGroupDB creates a minimal group database with articles 1..5
 func toolsTestGroupDB(t *testing.T) *database.GroupDB {
@@ -141,7 +156,7 @@ func TestToolsTestDeleteArticlesTrimHistory(t *testing.T) {
 
 func toolsTestWaitPending(t *testing.T, h *history.History) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(testWait)
 	for h.GetStats().Pending != 0 {
 		if time.Now().After(deadline) {
 			t.Fatalf("history ops not committed in time: %+v", h.GetStats())
