@@ -21,16 +21,6 @@ import (
 	"github.com/go-while/go-pugleaf/internal/nntp"
 )
 
-// flNntpdbTestWait is the hang guard of this file (PUGLEAF_TEST_DEADLINE, default 60 s).
-var flNntpdbTestWait = func() time.Duration {
-	if v := os.Getenv("PUGLEAF_TEST_DEADLINE"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
-		}
-	}
-	return 60 * time.Second
-}()
-
 // flNntpdbOpenDB opens a database in a temp dir; the cleanup stops its background work and
 // shuts it down.
 func flNntpdbOpenDB(t *testing.T) *database.Database {
@@ -57,8 +47,8 @@ func flNntpdbOpenDB(t *testing.T) *database.Database {
 		}()
 		select {
 		case <-done:
-		case <-time.After(flNntpdbTestWait):
-			t.Errorf("db.WG.Wait did not return within %v", flNntpdbTestWait)
+		case <-time.After(testWait):
+			t.Errorf("db.WG.Wait did not return within %v", testWait)
 		}
 		if err := db.Shutdown(); err != nil {
 			t.Errorf("Shutdown: %v", err)
@@ -99,7 +89,7 @@ func TestFlNntpdbBulkProcessThenWaitCommitted(t *testing.T) {
 			t.Fatalf("processArticle %d: %v", i, err)
 		}
 	}
-	if err := db.Batch.WaitCommitted(mark, nil, flNntpdbTestWait); err != nil {
+	if err := db.Batch.WaitCommitted(mark, nil, testWait); err != nil {
 		t.Fatalf("WaitCommitted after %d bulk articles: %v", n, err)
 	}
 
@@ -118,7 +108,7 @@ func TestFlNntpdbBulkProcessThenWaitCommitted(t *testing.T) {
 	}
 
 	// a second run of the same articles stores nothing new and has nothing to wait for
-	if err := db.Batch.WaitCommitted(db.Batch.CommitMark(group), nil, flNntpdbTestWait); err != nil {
+	if err := db.Batch.WaitCommitted(db.Batch.CommitMark(group), nil, testWait); err != nil {
 		t.Errorf("WaitCommitted with nothing captured: %v", err)
 	}
 }

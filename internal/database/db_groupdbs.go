@@ -333,6 +333,23 @@ func (dbs *GroupDB) Return() {
 	dbs.mux.Unlock()
 }
 
+// NNTPNewsgroupActive reads only the active flag of a newsgroup from the main database (the
+// NNTP server re-checks the selected group before every group-relative command). found is
+// false when no row has this name; err is a main database fault.
+func (db *Database) NNTPNewsgroupActive(name string) (active, found bool, err error) {
+	if db == nil || db.mainDB == nil {
+		return false, false, fmt.Errorf("NNTPNewsgroupActive: main database is not open")
+	}
+	if err := RetryableQueryRowScan(db.mainDB, `SELECT active FROM newsgroups WHERE name = ?`,
+		[]interface{}{name}, &active); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	return active, true, nil
+}
+
 // NNTPArticleNumByMessageID returns the number of the visible (hide = 0) article with
 // messageID in groupDB, reading only the index row (STAT by message-id needs no headers or
 // body). It returns sql.ErrNoRows when the article is absent or hidden, like

@@ -76,18 +76,19 @@ func (c *ClientConnection) requireGroup() bool {
 // group-relative command: an admin may have deactivated or deleted it since GROUP (in this
 // process or in another one, e.g. the web server). Then the session drops the selection, as
 // if no group had been selected, and the command answers 412 like on a fresh connection; a
-// GROUP for it answers 411 (selectableGroup). A main database fault keeps the selection: the
-// command's own reads report the fault.
+// GROUP for it answers 411 (selectableGroup). The check reads only the active flag
+// (NNTPNewsgroupActive), not the whole newsgroups row. A main database fault keeps the
+// selection: the command's own reads report the fault.
 func (c *ClientConnection) currentGroupSelectable() bool {
 	if c.server == nil || c.server.DB == nil {
 		return true
 	}
-	_, ok, err := c.selectableGroup(c.currentGroup)
+	active, found, err := c.server.DB.NNTPNewsgroupActive(c.currentGroup)
 	if err != nil {
 		log.Printf("[NNTP] re-check of the selected group %s: %v", c.currentGroup, err)
 		return true
 	}
-	if !ok {
+	if !found || !active {
 		c.dropCurrentGroup()
 		return false
 	}

@@ -75,10 +75,15 @@ func TestFlNntpdbCommitBarrierCommitted(t *testing.T) {
 	flNntpdbNote(sq, task, n)
 
 	done := flNntpdbWaitAsync(sq, mark, nil, testWait)
-	flNntpdbNotReturned(t, done, "before the batch ran")
-	if !sq.flushReq.Load() {
-		t.Error("a waiting WaitCommitted did not request a flush (flushReq)")
+	// the waiter requests a flush (flushReq) while it waits; polled, hang guard testWait
+	deadline := time.Now().Add(testWait)
+	for !sq.flushReq.Load() {
+		if time.Now().After(deadline) {
+			t.Fatalf("a waiting WaitCommitted did not request a flush (flushReq) within %v", testWait)
+		}
+		time.Sleep(time.Millisecond)
 	}
+	flNntpdbNotReturned(t, done, "before the batch ran")
 
 	fuBatchRun(t, db, task, adfBatchWait, &fuBatchLogs{})
 	if err := flNntpdbResult(t, done); err != nil {
