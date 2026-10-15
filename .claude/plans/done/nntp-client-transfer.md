@@ -1271,7 +1271,7 @@ e2e (ports 21219–21224) `SUMMARY pass=17 fail=0 info=0`, no leftover processes
 ## Outcome
 
 - **Integration branch:** `plan-nntp-client-transfer` @ 29f6a7c (26 commits from `testing-001` @ fa3a722; 34 files, +5,271/−1,628 lines).
-  Not yet merged into `testing-001` (user decision). Nothing pushed by me (the user had pushed the plan branches as of 2026-10-14).
+  Merged into `testing-001` as d65c568 (`--no-ff`, 2026-10-15). Nothing pushed by me (the user had pushed the plan branches as of 2026-10-14).
 - **Worktrees / branches** (left in place for the user to clean up):
   - `/tank0/claude/trees/go-pugleaf/agent-a5b20e3f847b64b9f` — `worktree-agent-a5b20e3f847b64b9f` @ 7f7e232 (wave 0, cli-fake)
   - `/tank0/claude/trees/go-pugleaf/agent-a38047fcb0b69ce88` — `worktree-agent-a38047fcb0b69ce88` @ 3aa6790 (cli-tools)
