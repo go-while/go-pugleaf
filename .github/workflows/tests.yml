@@ -39,10 +39,14 @@ jobs:
       # Same package list as the test job in .github/workflows/release.yml
       - name: Test (race detector)
         run: |
-          go test -race -count=1 -timeout 900s \
+          go test -race -count=1 -timeout 1200s \
             ./internal/database/... ./internal/web/... ./internal/history/... ./internal/nntp/... \
             ./internal/processor/... ./cmd/expire-news/... ./cmd/history-rebuild/... ./cmd/nntp-server/... \
-            ./internal/postmgr/... ./internal/cache/... ./cmd/tcp2tor/... ./cmd/web/...
+            ./internal/postmgr/... ./internal/cache/... ./internal/models/... ./internal/common/... \
+            ./cmd/tcp2tor/... ./cmd/web/... ./cmd/nntp-fetcher/... ./cmd/nntp-analyze/... ./cmd/recover-db/... \
+            ./cmd/post-queue/... ./cmd/import-flat-files/... ./cmd/rslight-importer/... ./cmd/fix-references/... \
+            ./cmd/fix-thread-activity/... ./cmd/audit-web-posts/... ./cmd/extract_hierarchies/... ./cmd/merge-active/... \
+            ./cmd/merge-descriptions/... ./cmd/nntp-transfer/... ./cmd/usermgr/...
 
   known-bugs:
     # Lists the open NNTP known bugs (docs/audit/README.md). The run fails on purpose while
