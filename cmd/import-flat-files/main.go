@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -69,12 +68,38 @@ type Article struct {
 type DBManager struct {
 	dbConnections map[string]*sql.DB
 	mutex         sync.RWMutex
+	// createdTables holds "<dbName>/<tableName>" keys of tables known to exist.
+	// Tables are created on first use instead of all 65,536 up front.
+	createdTables sync.Map
 }
 
 func NewDBManager() *DBManager {
 	return &DBManager{
 		dbConnections: make(map[string]*sql.DB),
 	}
+}
+
+// ensureTable creates the article table on first use (CREATE TABLE IF NOT EXISTS).
+// The primary key already indexes messageid_hash, so no extra index is created.
+// It runs outside any transaction: callers create every table of a batch before Begin.
+func (dm *DBManager) ensureTable(db *sql.DB, dbName, tableName string) error {
+	key := dbName + "/" + tableName
+	if _, ok := dm.createdTables.Load(key); ok {
+		return nil
+	}
+	if !validTableName(tableName) {
+		return fmt.Errorf("invalid table name %q", tableName)
+	}
+	createTableSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+			messageid_hash CHAR(58) PRIMARY KEY,
+			head TEXT NOT NULL,
+			body TEXT NOT NULL
+		)`, tableName)
+	if _, err := database.RetryableExec(db, createTableSQL); err != nil {
+		return fmt.Errorf("failed to create table %s: %w", tableName, err)
+	}
+	dm.createdTables.Store(key, struct{}{})
+	return nil
 }
 
 func (dm *DBManager) GetDB(dbName string) (*sql.DB, error) {
@@ -111,23 +136,7 @@ func (dm *DBManager) GetDB(dbName string) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to set PRAGMA settings: %w", err)
 	}
 
-	// Create all 65536 tables (0000-ffff) if they don't exist
-	for i := 0; i < 65536; i++ {
-		tableName := fmt.Sprintf("articles_%04x", i)
-		createTableSQL := fmt.Sprintf(`
-			CREATE TABLE IF NOT EXISTS %s (
-				messageid_hash CHAR(58) PRIMARY KEY,
-				head TEXT NOT NULL,
-				body TEXT NOT NULL
-			);
-			CREATE INDEX IF NOT EXISTS idx_%s_hash ON %s(messageid_hash);
-		`, tableName, tableName, tableName)
-
-		if _, err := database.RetryableExec(db, createTableSQL); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("failed to create table %s: %w", tableName, err)
-		}
-	}
+	// Tables (articles_0000-ffff) are created on first use by ensureTable.
 
 	dm.dbConnections[dbName] = db
 	log.Printf("Opened database: %s", dbFile)
@@ -142,11 +151,50 @@ func getDBName(article *Article) string {
 
 // getTableName returns the table name for a given article
 // Uses dir3 + first 3 chars of hash to determine table (0000-ffff)
+// The result is lower-cased (SQLite table names are case-insensitive anyway).
 func getTableName(article *Article) string {
 	if len(article.MessageIDHash) < 3 {
-		return "articles_" + article.Dir3 + "000" // fallback
+		return "articles_" + strings.ToLower(article.Dir3) + "000" // fallback
 	}
-	return fmt.Sprintf("articles_%s%s", article.Dir3, article.MessageIDHash[0:3])
+	return strings.ToLower(fmt.Sprintf("articles_%s%s", article.Dir3, article.MessageIDHash[0:3]))
+}
+
+// minHashLen is the shortest accepted file name hash (md5 hex or longer).
+const minHashLen = 32
+
+func isHexString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+// validTableName reports whether name is "articles_" followed by exactly 4 lower-case hex digits.
+func validTableName(name string) bool {
+	rest, ok := strings.CutPrefix(name, "articles_")
+	return ok && len(rest) == 4 && isHexString(rest) && rest == strings.ToLower(rest)
+}
+
+// validateArticle checks the routing parts before an article is read or batched:
+// Dir1-Dir3 must be one hex digit each, and the hash must be at least minHashLen
+// characters long and start with 3 hex digits (the table routing part). A file that
+// fails this is skipped on its own and never reaches a batch.
+func validateArticle(article *Article) error {
+	if len(article.MessageIDHash) < minHashLen { // should be at least md5 or longer
+		return fmt.Errorf("invalid hash length %d (< %d)", len(article.MessageIDHash), minHashLen)
+	}
+	if !isHexString(article.MessageIDHash[:3]) {
+		return fmt.Errorf("hash does not start with 3 hex digits")
+	}
+	for _, d := range []string{article.Dir1, article.Dir2, article.Dir3} {
+		if len(d) != 1 || !isHexString(d) {
+			return fmt.Errorf("invalid directory component %q (want one hex digit)", d)
+		}
+	}
+	return nil
 }
 
 // getStoredHash returns the hash to store in database (without routing chars)
@@ -167,6 +215,9 @@ func (dm *DBManager) ArticleExists(article *Article) (bool, error) {
 	}
 
 	tableName := getTableName(article)
+	if err := dm.ensureTable(db, dbName, tableName); err != nil {
+		return false, err
+	}
 	storedHash := getStoredHash(article)
 	var exists bool
 	query := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM %s WHERE messageid_hash = ? LIMIT 1)", tableName)
@@ -316,22 +367,20 @@ func worker(id int, articles <-chan *Article, dbManager *DBManager, wg *sync.Wai
 	var currentDB *sql.DB
 	var currentDBName string
 
+	// processBatch writes the batch to currentDB and always empties it. It updates the
+	// counters itself: a row that fails (or a table whose statement cannot be prepared)
+	// only counts that row/table as errors; the rest of the batch is still committed.
+	// A failed Begin or Commit counts the whole batch as errors.
 	processBatch := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
+		defer func() { batch = batch[:0] }()
 
 		if *dryRun {
 			atomic.AddInt64(&totalProcessed, int64(len(batch)))
-			batch = batch[:0]
 			return nil
 		}
-
-		tx, err := currentDB.Begin()
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction: %w", err)
-		}
-		defer tx.Rollback()
 
 		// Group articles by table for more efficient batching
 		articlesByTable := make(map[string][]*Article)
@@ -340,39 +389,71 @@ func worker(id int, articles <-chan *Article, dbManager *DBManager, wg *sync.Wai
 			articlesByTable[tableName] = append(articlesByTable[tableName], article)
 		}
 
+		var inserted, duplicates, rowErrors int64
+
+		// Create missing tables before the transaction: a CREATE on the pool while
+		// this transaction holds the write lock would wait for itself.
+		for tableName, tableArticles := range articlesByTable {
+			if err := dbManager.ensureTable(currentDB, currentDBName, tableName); err != nil {
+				log.Printf("Worker %d: %v (skipping %d articles)", id, err, len(tableArticles))
+				rowErrors += int64(len(tableArticles))
+				delete(articlesByTable, tableName)
+			}
+		}
+
+		tx, err := currentDB.Begin()
+		if err != nil {
+			atomic.AddInt64(&totalErrors, int64(len(batch)))
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
+
 		// Process each table separately
 		for tableName, tableArticles := range articlesByTable {
-			query := fmt.Sprintf("INSERT INTO %s (messageid_hash, head, body) VALUES (?, ?, ?)", tableName)
+			query := fmt.Sprintf("INSERT OR IGNORE INTO %s (messageid_hash, head, body) VALUES (?, ?, ?)", tableName)
 			stmt, err := tx.Prepare(query)
 			if err != nil {
-				return fmt.Errorf("failed to prepare statement for table %s: %w", tableName, err)
+				log.Printf("Worker %d: failed to prepare statement for table %s: %v (skipping %d articles)", id, tableName, err, len(tableArticles))
+				rowErrors += int64(len(tableArticles))
+				continue
 			}
 
 			for _, article := range tableArticles {
 				storedHash := getStoredHash(article)
-				if _, err := stmt.Exec(storedHash, article.Head, article.Body); err != nil {
+				res, err := stmt.Exec(storedHash, article.Head, article.Body)
+				if err != nil {
 					log.Printf("Worker %d: Error inserting article %s into table %s: %v", id, storedHash, tableName, err)
-					atomic.AddInt64(&totalErrors, 1)
+					rowErrors++
 					continue
 				}
+				if n, err := res.RowsAffected(); err == nil && n == 0 {
+					duplicates++ // already stored (INSERT OR IGNORE)
+					continue
+				}
+				inserted++
 			}
-			stmt.Close()
+			if err := stmt.Close(); err != nil {
+				log.Printf("Worker %d: failed to close statement for table %s: %v", id, tableName, err)
+			}
 		}
 
 		if err := tx.Commit(); err != nil {
+			atomic.AddInt64(&totalErrors, int64(len(batch)))
 			return fmt.Errorf("failed to commit transaction: %w", err)
 		}
 
-		atomic.AddInt64(&totalProcessed, int64(len(batch)))
-		batch = batch[:0]
+		atomic.AddInt64(&totalProcessed, inserted)
+		atomic.AddInt64(&totalExisting, duplicates)
+		atomic.AddInt64(&totalErrors, rowErrors)
 		return nil
 	}
 
 	for article := range articles {
-		// Determine which database this article belongs to from directory structure
-		if len(article.MessageIDHash) < 32 { // should be at least md5 or longer
-			log.Printf("Worker %d: Invalid hash length for %s", id, article.MessageIDHash)
-			atomic.AddInt64(&totalErrors, 1)
+		// Validate the routing parts first: a bad file name is skipped on its own and
+		// must never reach (and fail) a batch.
+		if err := validateArticle(article); err != nil {
+			log.Printf("Worker %d: skipping %s: %v", id, article.HeadFile, err)
+			atomic.AddInt64(&totalSkipped, 1)
 			continue
 		}
 
@@ -417,10 +498,8 @@ func worker(id int, articles <-chan *Article, dbManager *DBManager, wg *sync.Wai
 		// Switch database if needed
 		if dbName != currentDBName {
 			// Process any pending batch for the previous database
-			if err := processBatch(); err != nil {
+			if err := processBatch(); err != nil { // counts its own errors and empties the batch
 				log.Printf("Worker %d: Error processing batch: %v", id, err)
-				atomic.AddInt64(&totalErrors, int64(len(batch)))
-				batch = batch[:0]
 			}
 
 			// Get new database connection
@@ -438,43 +517,29 @@ func worker(id int, articles <-chan *Article, dbManager *DBManager, wg *sync.Wai
 
 		// Process batch if full
 		if len(batch) >= BATCH_SIZE {
-			if err := processBatch(); err != nil {
+			if err := processBatch(); err != nil { // counts its own errors and empties the batch
 				log.Printf("Worker %d: Error processing batch: %v", id, err)
-				atomic.AddInt64(&totalErrors, int64(len(batch)))
-				batch = batch[:0]
 			}
 		}
 	}
 
 	// Process final batch
-	if err := processBatch(); err != nil {
+	if err := processBatch(); err != nil { // counts its own errors
 		log.Printf("Worker %d: Error processing final batch: %v", id, err)
-		atomic.AddInt64(&totalErrors, int64(len(batch)))
 	}
 
 	log.Printf("Worker %d finished", id)
 }
 
+// readFile returns the file content verbatim. It does not use a line scanner, so
+// lines longer than bufio's 64 KiB default no longer fail the article, and line
+// endings are stored as they are in the file.
 func readFile(filename string) (string, error) {
-	file, err := os.Open(filename)
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
-
-	var builder strings.Builder
-	scanner := bufio.NewScanner(file)
-
-	for scanner.Scan() {
-		builder.WriteString(scanner.Text())
-		builder.WriteByte('\n')
-	}
-
-	if err := scanner.Err(); err != nil {
-		return "", err
-	}
-
-	return builder.String(), nil
+	return string(data), nil
 }
 
 // Stats reporter
