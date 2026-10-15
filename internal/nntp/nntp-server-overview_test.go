@@ -708,7 +708,9 @@ func TestOvrOverHdr(t *testing.T) {
 		if err == nil {
 			err = hExpectLines(ovrNums(lines), []string{"1", "2"})
 		}
-		knownBug(t, "RFC-1", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	t.Run("HDR", func(t *testing.T) {
@@ -718,7 +720,9 @@ func TestOvrOverHdr(t *testing.T) {
 		if err == nil {
 			err = hExpectLines(lines, []string{"1 " + a1.Subject})
 		}
-		knownBug(t, "RFC-1", err)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 }
 

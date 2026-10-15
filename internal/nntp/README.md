@@ -17,16 +17,24 @@ This package holds the NNTP **server** (reader side plus IHAVE/TAKETHIS/POST int
 | `nntp-cache-local.go` | `Local430`, the negative cache of message-ids that answered 430 |
 | `nntp-auth-manager.go` | `AuthManager.AuthenticateUser` (bcrypt check through `database.AuthenticateNNTPUser`) |
 | `nntp-cmd-basic.go` | CAPABILITIES, MODE READER, HELP, QUIT |
+| `nntp-cmd-date.go`, `nntp-cmd-nextlast.go` | DATE, NEXT, LAST |
+| `nntp-cmd-newgroups.go`, `nntp-cmd-list-wildmat.go`, `nntp-wildmat.go` | NEWGROUPS, LIST ACTIVE/NEWSGROUPS with a wildmat (RFC 3977 §4) |
+| `nntp-cmd-over-hdr.go` | OVER, HDR, LIST OVERVIEW.FMT, LIST HEADERS |
+| `nntp-cmd-stream.go` | MODE STREAM, CHECK (RFC 4644) |
+| `nntp-cmd-starttls.go` | STARTTLS (RFC 4642) |
 | `nntp-cmd-auth.go` | AUTHINFO USER/PASS |
 | `nntp-cmd-group.go` | GROUP, LISTGROUP |
-| `nntp-cmd-list.go` | LIST [ACTIVE \| NEWSGROUPS] |
+| `nntp-cmd-list.go` | LIST [ACTIVE \| NEWSGROUPS] without a wildmat |
 | `nntp-article-common.go` | ARTICLE, HEAD, BODY, STAT (shared lookup by number or message-id) |
 | `nntp-cmd-xover.go`, `nntp-cmd-xhdr.go` | XOVER, XHDR |
 | `nntp-cmd-posting.go` | POST, IHAVE, TAKETHIS |
 | `nntp-cmd-helpers.go` | `rateLimitOnError` and header helpers |
 
-Commands outside this list (DATE, NEXT, LAST, NEWGROUPS, NEWNEWS, OVER, HDR, CHECK, STARTTLS)
-answer `500`, MODE STREAM answers `501`. Tests: `nntp-server-*_test.go` (harness in `nntp-server-harness_test.go`),
+Command list: CAPABILITIES, MODE READER, MODE STREAM, STARTTLS (only with a certificate), AUTHINFO
+USER/PASS, DATE, LIST ACTIVE|NEWSGROUPS [wildmat], LIST OVERVIEW.FMT, LIST HEADERS, NEWGROUPS date time
+[GMT], GROUP, LISTGROUP, NEXT, LAST, STAT, HEAD, BODY, ARTICLE, OVER [range|<message-id>], HDR field
+[range|<message-id>], XOVER, XHDR, POST, IHAVE, CHECK <message-id>, TAKETHIS, HELP, QUIT. NEWNEWS is not
+implemented and not advertised (plan nntp-rfc-commands, decision D3): it answers `500`. Tests: `nntp-server-*_test.go` (harness in `nntp-server-harness_test.go`),
 end-to-end tests in `cmd/nntp-server/`, and `scripts/test-nntp-server.sh` against a built binary.
 
 ## Server options
@@ -57,8 +65,8 @@ accept loops and the local430 cleanup, `Stop` ends all of them (the caller's Wai
 ## Behaviour
 
 - **Reads without auth.** The server is a public reader by default. With `ReadRequiresAuth`, GROUP,
-  LISTGROUP, LIST, STAT, HEAD, BODY, ARTICLE, XOVER, XHDR (and the future NEXT, LAST, OVER, HDR,
-  NEWGROUPS, NEWNEWS) answer `480` until a successful AUTHINFO.
+  LISTGROUP, LIST, STAT, HEAD, BODY, ARTICLE, XOVER, XHDR, NEXT, LAST, OVER, HDR, NEWGROUPS and
+  NEWNEWS answer `480` until a successful AUTHINFO.
 - **Plaintext AUTHINFO** (RFC 4643). `accept`: accepted on plain TCP but not advertised in
   CAPABILITIES; `advertise`: accepted and advertised; `refuse`: `483 Encryption required`. TLS
   connections always advertise `AUTHINFO USER` before login. After `281` AUTHINFO is no longer

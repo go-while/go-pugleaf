@@ -1052,3 +1052,137 @@ PORT=21129 DATA=./data-test-nntp-rfc-commands scripts/test-nntp-server.sh
   in `Start()`. — verify:
 - K-H12: `sendWelcome`, `UpdateDeadlines` (read deadline only), `commandMaxArgs` (maximum only), `knownStatCommands`
   already holds the new words. — verify:
+
+### Wave 0 verification (2026-10-15, orchestrator; base `testing-001` @ c11feb2 = hardening d9de34e + intake acb56d5 + client-transfer d65c568 merged)
+P0: both done plans exist, both merges are in `testing-001`, `nntp-cmd-range.go` exists, `common.ValidMessageID` is at
+`internal/common/intake.go:37`. All K1 names and all K3 prefixes are free. The 10 RFC-1 markers are at
+`nntp-server-session_test.go:281`, `nntp-server-overview_test.go:711,721`, `nntp-server-group_test.go:614,655,674,708,728,738,769`;
+`sessFuzzMultiCodes` is at `nntp-server-session_test.go:1091`. Line numbers below are at c11feb2.
+- K-H1: **ok** (`nntp-cmd-range.go:13-56`; `Open` field, `Empty()`, `errRangeSyntax`, `parseRangeArg` sends nothing, `n-` → `MaxInt64`).
+- K-H2: **ok** (`nntp-cmd-range.go:63`: delay + `412 No newsgroup selected`, returns false).
+- K-H3: **ok** (harness tests pass, see baseline).
+- K-H4: **ok** (`nntp-server-cliconns.go:190-200`, literally as pre-filled).
+- K-H5: **ok**: `overviewLine` `nntp-cmd-xover.go:87`, `sanitizeOverviewField` `:103`, `database.HeaderValueFromJSON` `nntp_overview.go:24`,
+  `HeaderFieldValue` `:15`, `OverviewRangeChunk = 1000` `:11`, `GetOverviewsRange` `queries.go:1813`, `GetHeaderFieldRange` `:1886`,
+  `newDataBlock() *dataBlockWriter` with `Line`/`Close` (`nntp-server-dataio.go:19`), `sendDataBlock(code, msg, lines)` `:73`. No shared core.
+- K-H6: **ok** (`nntp-article-common.go:47-48`, in `retrieveArticleCommon`, i.e. **before** `resolveArticleArg` is called; OVER/HDR sleep themselves).
+- K-H7: **deviation (benign)**: the signature is
+  `func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article *models.Article, replyNum int64, ok bool, err error)`
+  (`nntp-article-common.go:86`). `stat` only affects the number forms (message-id only); the message-id branch is as pre-filled
+  (current group → `local430` → processor `FindArticleByMessageID` + `visibleInOtherGroup`; sends 430/403 itself; `replyNum` 0 outside
+  the current group; never changes `currentArticle`). OVER/HDR call it with `stat=false` and `args = []string{"<id>"}`; when `ok` is false
+  the reply has been sent and `err` is the send error.
+- K-H8: **ok**. K-H10: **ok** (`nntp_reads.go`, `nntp_overview.go`).
+- K-H9: **ok**, except that `handleListActive` (`nntp-cmd-list.go:32`) formats the line inline (no helper): `rfc-lists` writes `activeLine`
+  with the identical expression; status text is `215 List of newsgroups follows` for both ACTIVE and NEWSGROUPS; `handleList` answers
+  `501 Unknown LIST keyword` (delayed) for other keywords.
+- K-H11: **ok**: no `writer` field (`ClientConnection` = conn, textConn, server, isTLS, authenticated, user, authUsername, currentGroup,
+  currentFirst, currentLast, currentArticle); `errQuit` → `Handle` returns nil; `Stop()` closes the raw conns it tracked (`NetConn()` for a
+  `*tls.Conn`); `handleConnection` defers `conn.Close()` on the raw conn; TLS-port config inline in `Start()` (`nntp-server.go:174-186`).
+- K-H12: **ok** (`UpdateDeadlines` read deadline only; `commandMaxArgs` maximum only, `MODE` 1, `LIST` 2; `readerCommands` and
+  `knownStatCommands` already hold the new words). `handleHelp()` takes no arguments (`nntp-cmd-basic.go:33`).
+- IHAVE gates as merged (`nntp-cmd-posting.go:99`): processor nil → 500 (no delay); args → 501 (no delay); `!authenticated` → delay + 480;
+  non-posting user → delay + 502; `!ValidMessageID` → delay + 501; `CheckMessageID` Pass/Dupes 435/Retry 436/Error delay + 436.
+  **For CHECK this plan's D5/D10 text wins** (480/502 without delay, invalid id → `438 <id>`); only the gate *order* is mirrored.
+- `cmd/nntp-server/main.go`: flag help at `:50-51`, TLS block at `:90-99` (cert/key cleared without a TLS port, as the plan describes).
+- Test harness: `hServerOpts{Proc, MaxConns, IdleTimeout, ErrorDelay, TLS}`, `newTestServer` (`nntp-server-harness_test.go:169`) sets
+  `cfg.NNTP.MaxConns` only, then `NewNNTPServer(db, cfg, &hs.wg, opts.Proc)`; `hFakeProcessor{checkResult, processResult, processErr,
+  findArticle, findErr, checkFn, processFn, findFn, processed, checked, …}`; `hClient{Conn, R, Deadline, Greeting}` with `send`, `readLine`,
+  `tryCmd`, `cmd`, `readDotLines`; `expect` in `TestGrpNextLast` is a closure (`nntp-server-group_test.go:691`); `w0DB(t)`/`w0Name` in
+  `internal/database/testmain_test.go:42,51`; `ovrBulkGroup` `nntp-server-overview_test.go:144`; `sessSelfSignedTLS` `nntp-server-session_test.go:134`.
+- E2E: helpers in `cmd/nntp-server/server_e2e_test.go` (`e2eClient`, `e2eDialAddr`, `tryCmd`, `tryDotLines`, `tryAuth`, `e2eParseCode`) and
+  `e2e_binary_test.go` (`e2eEnv`); script blocks N01–N11 at `scripts/test-nntp-server.sh:119`, N40–N49 at `:135`, `start_server` at `:47`.
+- Baseline at c11feb2 (untouched branch): gofmt = baseline 2 files; `go vet ./...` and `go vet -tags e2e ./cmd/nntp-server/` clean;
+  `go build ./...` ok; `bash -n scripts/test-nntp-server.sh` ok; `go test -race` over the 8 package sets PASS (nntp 112 s, database 81 s);
+  `PUGLEAF_KNOWN_BUGS=1` id list: **RFC-1, T-nntp-article-1**. K-H3 harness tests pass.
+
+### Wave 1 (2026-10-15): five slices, all reviewed, merged in plan order (reader, stream, overview, starttls, lists: all files new, no conflicts)
+| Slice | Worktree branch (path under /tank0/claude/trees/go-pugleaf/) | Slice commit | Merge | Review |
+|----|----|----|----|----|
+| rfc-reader | `worktree-agent-a45d21d99d9db82ef` (`agent-a45d21d99d9db82ef`) | dd177d3 | 587affb | merge; 3 nits dropped (defer groupDB.Return() across one status line is what K-H8 prescribes) |
+| rfc-stream | `worktree-agent-a95df18f579d1180d` (`agent-a95df18f579d1180d`) | 882acf9 | 4ce535d | merge; 2 nits dropped |
+| rfc-overview | `worktree-agent-aa4b31c655c35ed4c` (`agent-aa4b31c655c35ed4c`) | 721a23b | 68938ef | merge; **T-rfc-commands-1** accepted (see below); 3 nits dropped |
+| rfc-starttls | `worktree-agent-a1710febf780ab401` (`agent-a1710febf780ab401`) | 64b1218 | 3b6a999 | merge; MINOR outside the slice → **T-rfc-commands-2**, fixed in step A |
+| rfc-lists | `worktree-agent-ac08bb0e28ccb9574` (`agent-ac08bb0e28ccb9574`) | a6dae20 | b92a119 | merge; MINOR fixed inline (ab6c79a) |
+
+Deviations recorded:
+- **T-rfc-commands-1** (rfc-overview): the plan's "HDR value sources" for the message-id form would have served the raw
+  upstream `Xref` and `Path` from `headers_json`, which XHDR / `GetHeaderFieldRange` / `NNTPHeaderByMessageID` deliberately
+  never do. `hdrArticleValue` now uses the same sources as the range form (7 overview columns, metadata for bytes/lines
+  with or without the colon, the path column, Xref always empty, `headers_json` otherwise). `HDR Bytes`/`HDR Lines` (no colon)
+  are served from the metadata columns in both forms (D2 note).
+- **T-rfc-commands-2** (found by the rfc-starttls review, fixed in step A, `nntp-server-cliconns.go`): `Handle` deferred
+  `c.textConn.Close()` on the plaintext object, so a STARTTLS-upgraded session never sent close_notify at QUIT; now the
+  textConn current at the end is closed. `rfc-wire` adds the test.
+- rfc-lists: `newsgroupsLine` used a `strings.Replacer` (raw invalid UTF-8 bytes) while plain LIST NEWSGROUPS used
+  `strings.Map` (U+FFFD); fixed inline in ab6c79a by making `handleListNewsgroups` call `newsgroupsLine` (strings.Map).
+  Test exclusion pattern is `…*,!*.b.*` because `hGroup` appends `.<seq>`. `COALESCE(low_water,1)` vs the reader's `0`: same
+  output after the clamp.
+- rfc-stream: CHECK mirrors the merged IHAVE gate order; delays follow D5/D10 (480/502/438 without delay), not IHAVE's.
+- rfc-starttls: `starttlsAvailable()` also guards `c.server != nil`; a failed 382 write returns before the handshake.
+  Out of scope, for the Outcome: `cmd/web/main.go:440-446` still clears TLSCert/TLSKey without a TLS port, so the web
+  tool's embedded NNTP server never offers STARTTLS (D7 names only `cmd/nntp-server`).
+- Implementer notes: full `-race` runs of `./internal/nntp/...` timed out once each in three worktrees (TestAuthFailures,
+  TestArtLocal430/ihave-arrival, TestSessServerStats/server: `AUTHINFO PASS` over the 5 s client deadline) while five
+  slices ran their suites at once (load 17–22 on 12 cores); each passed on re-run. Not reproduced at the base; the verifier's
+  run on an idle machine decides.
+- Some slice commits carry an Opus 5.5 trailer (the implementers' model); accepted.
+
+### Wave 2 step A (2026-10-15): eae3da0 on `plan-nntp-rfc-commands`
+Dispatch, `commandMaxArgs` rows, CAPABILITIES and the 10 RFC-1 marker removals exactly as the hand-over; group test header
+comment and `sessFuzzMultiCodes` (231) updated; HELP lists the new commands (STARTTLS only while `starttlsAvailable()`);
+README file table and command list updated. Step B (`rfc-wire`) spawned on base eae3da0.
+`## Checks` on eae3da0: gofmt baseline 2 files; vet (plain and `-tags e2e`), build, `bash -n` ok; `go test -race` over the
+8 package sets PASS (nntp 139 s); `PUGLEAF_KNOWN_BUGS=1` list = **T-nntp-article-1** only (RFC-1 closed, E11 met);
+`grep '"RFC-1"'` empty.
+
+### Wave 2 step B (2026-10-15): `rfc-wire`
+- Worktree branch `worktree-agent-ac8bb56fba2158e52` (`/tank0/claude/trees/go-pugleaf/agent-ac8bb56fba2158e52`), slice commit
+  e591ca4 on base eae3da0, merged as d61e149; review: merge, MINOR (TAKETHIS in the global never-advertised list) and header
+  nit fixed inline in 00ebfa8, two nits dropped (article 1 hard-coded as the plan says; harmless double close).
+- Deviation: the quit-close-notify subtest parses the raw TLS 1.2 records and requires a final alert (type 21), because
+  crypto/tls returns io.EOF for a bare TCP close at a record boundary too; the implementer showed the test fails against
+  the pre-step-A `Handle` (`record types [... 23], want an alert (21) last`). TLS 1.2 is forced there because 1.3 hides
+  record types.
+- Certificate setup sits after the `DATA_ABS`/`RUN`/`LOG` assignments (needs `$DATA_ABS`), still before the first
+  `start_server`; a second INFO case covers openssl present but failing.
+- Implementer's own e2e run (`PORT=21131 DATA=./data-test-nntp-rfc-wire`, in its worktree): `SUMMARY pass=38 fail=0 info=1`,
+  N50–N57 PASS with a certificate. Verifier spawned on 00ebfa8.
+
+## Outcome (2026-10-15)
+- **Integration branch:** `plan-nntp-rfc-commands` from `testing-001` @ c11feb2 (last code commit 00ebfa8; later commits are
+  plan/docs only). Not yet merged into `testing-001` (user decision). Nothing pushed by me.
+- **Worktrees / branches** (left in place for the user to clean up; paths under `/tank0/claude/trees/go-pugleaf/`):
+  `worktree-agent-a45d21d99d9db82ef` (rfc-reader, `agent-a45d21d99d9db82ef`), `worktree-agent-ac08bb0e28ccb9574` (rfc-lists,
+  `agent-ac08bb0e28ccb9574`), `worktree-agent-aa4b31c655c35ed4c` (rfc-overview, `agent-aa4b31c655c35ed4c`),
+  `worktree-agent-a95df18f579d1180d` (rfc-stream, `agent-a95df18f579d1180d`), `worktree-agent-a1710febf780ab401`
+  (rfc-starttls, `agent-a1710febf780ab401`), `worktree-agent-ac8bb56fba2158e52` (rfc-wire, `agent-ac8bb56fba2158e52`; holds a
+  gitignored `build/` and `./data-test-nntp-rfc-wire`).
+- **Merges on the plan branch:** 587affb reader, 4ce535d stream, 68938ef overview, 3b6a999 starttls, b92a119 lists, d61e149 wire;
+  inline: ab6c79a (LIST NEWSGROUPS formatter), eae3da0 (step A), 00ebfa8 (review fix), docs ff78d66.
+- **Decisions D1–D12 as planned.** Behaviour changes: READER is now honest (DATE/NEXT/LAST/NEWGROUPS); LIST ACTIVE/NEWSGROUPS
+  honour an RFC 3977 §4 wildmat (D8 validity → 501); OVER/HDR/LIST OVERVIEW.FMT/LIST HEADERS exist (HDR serves any header,
+  `:bytes`/`:lines` only as metadata, 503 for other `:x`); MODE STREAM/CHECK exist and STREAMING is advertised iff
+  `postingAllowed()`; STARTTLS exists and is advertised only on a plaintext, unauthenticated connection with a certificate;
+  `cmd/nntp-server -nntpcertfile/-nntpkeyfile` now work without `-nntptlsport` (only one of the two, or an unloadable pair,
+  is a startup error); NEWNEWS stays 500 and unadvertised (D3); delays per D10; no new flags, keys or migrations (D12).
+- **K-H record:** verified in wave 0; one benign deviation (K-H7 `resolveArticleArg(args, stat bool)`, sleep in the caller).
+- **T-rfc-commands ids:** T-rfc-commands-1 (HDR message-id form value sources aligned with the range form; Xref never served)
+  and T-rfc-commands-2 (close_notify after STARTTLS at QUIT), both fixed in this plan and tested.
+- **Verification (pugleaf-verifier on 00ebfa8, machine load ~8):** gofmt baseline only; vet (plain and `-tags e2e`), build,
+  `bash -n` ok; `go test -race` over the 8 package sets PASS (nntp 159 s); `-count=3` flake run over the new and touched test
+  prefixes PASS (240 s); known-bug list = **T-nntp-article-1** only; `"RFC-1"` grep empty; E01–E11: all 41 named tests ran and
+  passed, no skips (fuzz seed corpora 18 + 40); `build_nntp-server.sh`, `build_nntpmgr.sh` ok; E12
+  `PORT=21129 DATA=./data-test-nntp-rfc-commands scripts/test-nntp-server.sh` → `SUMMARY pass=38 fail=0 info=1`, N50–N57 PASS
+  with an openssl certificate, every other plan's check PASS; manual spot check on 21130: CAPABILITIES lists `LIST ACTIVE
+  NEWSGROUPS OVERVIEW.FMT HEADERS`, `OVER MSGID`, `HDR`, `STREAMING`, `STARTTLS`; DATE 111; LIST OVERVIEW.FMT 215 + 7 lines;
+  MODE STREAM 203; NEWNEWS 500; STARTTLS 382 + TLS 1.3 handshake via `openssl s_client -starttls nntp`, no STARTTLS listed
+  over TLS, second STARTTLS 502; clean SIGINT shutdown.
+- **Out of scope / leftovers:** NEWNEWS (D3 alternative: opt-in flag + `idx_articles_imported_at`), LIST ACTIVE.TIMES /
+  DISTRIB.PATS, RFC 6048 LIST variants, AUTHINFO SASL, XPAT/XGTITLE, making `-plaintextauth refuse` the default, an index on
+  `newsgroups.created_at`, IMPLEMENTATION capability; `cmd/web/main.go:440-446` clears TLSCert/TLSKey without a TLS port
+  (hand-off noted in `audit-delta-fixes.md`, whose D10 removes that dead block); `TestRfcStartTLSWire/plaintext-upgrade`
+  takes ~3.4 s (bcrypt AUTHINFO under `-race`); port flags still bind all interfaces (pre-existing); implementers saw
+  load-related `AUTHINFO PASS` client timeouts in three tests while five suites ran at once (not reproduced by the verifier).
+- **Scratch left on disk (gitignored):** `./data-test-nntp-rfc-commands` (incl. `run/tls.crt|key`, logs), `build/`,
+  `/tmp/pugleaf-nntptest-296757577` and the `/tmp/pugleaf-nntptest-*` dirs of the slice runs.

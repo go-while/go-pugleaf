@@ -34,22 +34,35 @@ func (c *ClientConnection) handleHelp() error {
 	helpLines := []string{
 		"CAPABILITIES",
 		"MODE READER",
+		"MODE STREAM",
 		"AUTHINFO USER <name>",
 		"AUTHINFO PASS <password>",
-		"LIST [ACTIVE|NEWSGROUPS]",
+		"DATE",
+		"LIST [ACTIVE|NEWSGROUPS [<wildmat>]]",
+		"LIST OVERVIEW.FMT",
+		"LIST HEADERS",
+		"NEWGROUPS <date> <time> [GMT]",
 		"GROUP <group>",
 		"LISTGROUP [<group> [<range>]]",
+		"NEXT",
+		"LAST",
 		"STAT [<message-id>|<number>]",
 		"HEAD [<message-id>|<number>]",
 		"BODY [<message-id>|<number>]",
 		"ARTICLE [<message-id>|<number>]",
+		"OVER [<range>|<message-id>]",
+		"HDR <field> [<range>|<message-id>]",
 		"XOVER [<range>]",
 		"XHDR <header> [<range>|<message-id>]",
 		"POST",
 		"IHAVE <message-id>",
+		"CHECK <message-id>",
 		"TAKETHIS <message-id>",
 		"HELP",
 		"QUIT",
+	}
+	if c.starttlsAvailable() { // listed only while STARTTLS can be used (RFC 4642 §2.2.2)
+		helpLines = append(helpLines, "STARTTLS")
 	}
 	return c.sendDataBlock(100, "Help text follows", helpLines)
 }

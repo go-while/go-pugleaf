@@ -29,9 +29,15 @@
    Xref stripped), A-intake-4, A-intake-5, A-intake-6 intake half, A-intake-7, A-intake-9, A-intake-11, RFC-5
    (POST/IHAVE/TAKETHIS codes), A-nntp-rfc-7, BUG-8, A-db-1 upsert part (the batch writer never creates a
    `newsgroups` row), INT-6, A-db-3, A-db-4, A-tools-1 (capture limiter, 2048 in flight), A-tools-4.
- - Still open on the server: RFC-1 (DATE/NEXT/LAST/NEWGROUPS/NEWNEWS/OVER/HDR/LIST OVERVIEW.FMT/MODE STREAM/CHECK/
-   STARTTLS, `nntp-rfc-commands`). Not implemented by design: cancel/Supersedes processing, `control.*` filing,
-   moderator forwarding, local `Xref:` generation.
+ - **Fixed by plan `nntp-rfc-commands` (2026-10-15, `.claude/plans/done/nntp-rfc-commands.md`):** RFC-1: DATE, NEXT,
+   LAST, NEWGROUPS (from `newsgroups.created_at`, LIST ACTIVE format), LIST ACTIVE/NEWSGROUPS with an RFC 3977 §4
+   wildmat, LIST OVERVIEW.FMT, LIST HEADERS, OVER and HDR (any header; same value sources as XHDR), MODE STREAM and
+   CHECK (RFC 4644; STREAMING advertised iff MODE STREAM gives 203), STARTTLS (RFC 4642; advertised only on a
+   plaintext, unauthenticated connection when `-nntpcertfile/-nntpkeyfile` are set, which now works without
+   `-nntptlsport`). NEWNEWS stays unimplemented and unadvertised by decision (no index on `articles.imported_at`;
+   a `NEWNEWS *` would open every group DB). Also fixed on the way: a STARTTLS-upgraded session now sends TLS
+   close_notify at QUIT (T-rfc-commands-2). Not implemented by design: cancel/Supersedes processing, `control.*`
+   filing, moderator forwarding, local `Xref:` generation, NEWNEWS, LIST ACTIVE.TIMES/DISTRIB.PATS, AUTHINFO SASL.
  - Accepted limitation (user decision 2026-10-11): the local430 negative cache keeps a 60 s TTL, so an article stored
    by another process (fetcher) answers 430 for up to 60 s (T-nntp-article-1); same-process arrivals are removed at once.
  - **Fixed by plan `nntp-client-transfer` (2026-10-15, `.claude/plans/done/nntp-client-transfer.md`):** CLI-1 (one
@@ -47,9 +53,9 @@
    without `-edit-cronjobs`; stored XSS via the preview); A-tools-2 (`-fetch-newsgroups-from-remote` ignores `-data`),
    A-tools-3 fetcher half; A-ops-1 (`recover-db` operates on `./data` while its usage text names `-db`).
  - The test suite in `internal/nntp/nntp-server-*_test.go` and `cmd/nntp-server/server_e2e_test.go` marks every open
-   item with `knownBug`; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` lists them (2 ids:
-   RFC-1, T-nntp-article-1).
- - Fix plans: `.claude/plans/queued/{nntp-rfc-commands,audit-delta-fixes}.md`.
+   item with `knownBug`; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` lists them (1 id:
+   T-nntp-article-1, an accepted limitation).
+ - Fix plan: `.claude/plans/queued/audit-delta-fixes.md`.
  - peering: the unfinished `PeeringManager` was removed (CLI-6); incoming feeds work via IHAVE/TAKETHIS, outgoing
    feeds via `cmd/nntp-transfer` (CHECK/TAKETHIS streaming); there is no automatic peer-to-peer feed configuration.
  - the history index must be (re)built with cmd/history-rebuild for articles imported before it was enabled

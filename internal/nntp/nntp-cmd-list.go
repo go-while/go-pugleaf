@@ -71,14 +71,7 @@ func (c *ClientConnection) handleListNewsgroups() error {
 	}
 	d := c.newDataBlock()
 	for _, g := range groups {
-		desc := strings.Map(func(r rune) rune {
-			switch r {
-			case '\t', '\r', '\n':
-				return ' '
-			}
-			return r
-		}, g.Description)
-		if err := d.Line(g.Name + " " + desc); err != nil {
+		if err := d.Line(newsgroupsLine(g)); err != nil {
 			return err
 		}
 	}
