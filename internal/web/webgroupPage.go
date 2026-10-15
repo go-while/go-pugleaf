@@ -89,7 +89,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 		if err != nil {
 			// No row at that offset (a page past the real end) or a failed read: serve
 			// the newest page and label it page 1: PaginationInfo is built from page below,
-			// and keeping the requested number labelled page 1 as "Page 50" (FU:E17).
+			// and keeping the requested number would label page 1 as "Page 50" (FU:E17).
 			if !errors.Is(err, sql.ErrNoRows) {
 				log.Printf("[WEB]: groupPage: page %d cursor lookup in %s: %v", page, groupName, err)
 			}
