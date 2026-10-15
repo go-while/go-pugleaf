@@ -31,6 +31,10 @@ type Processor struct {
 	History       *history.History        // History system for duplicate detection
 	MsgIdCache    *history.MsgIdItemCache // Cache for message ID items
 	BridgeManager *BridgeManager          // Bridge manager for Fediverse/Matrix (optional)
+	// AnalyzeDataDir is the -data root below which the analyzer keeps its overview
+	// cache (<AnalyzeDataDir>/cache/<host>/). Empty: DB.GetDataDir() is used; with
+	// neither set the cache functions return an error (no cwd-relative fallback).
+	AnalyzeDataDir string
 }
 
 var (
@@ -109,6 +113,7 @@ func NewProcessorE(db *database.Database, nntpPool *nntp.Pool, useShortHashLen i
 		MsgIdCache:    history.NewMsgIdItemCache(),
 		BridgeManager: nil, // Initialize as nil (disabled by default)
 	}
+	proc.AnalyzeDataDir = db.GetDataDir() // analyzer cache root = -data
 
 	proc.DB.Batch.SetProcessor(proc) // Set the processor in the database instance for threading checks
 
