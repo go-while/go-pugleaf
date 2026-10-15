@@ -559,14 +559,14 @@ func TestAdfOptShutdownStopsCaches(t *testing.T) {
 	}
 	srv1 := lo1CoreNewServer(t)
 	srv2 := lo1CoreNewServer(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testShutdownWait())
 	defer cancel()
 	for i, srv := range []*WebServer{srv1, srv1, srv2} {
 		if err := srv.Shutdown(ctx); err != nil {
 			t.Fatalf("Shutdown #%d: %v", i+1, err)
 		}
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWait)
 	for adfOptCacheGoroutines() > 0 {
 		if time.Now().After(deadline) {
 			t.Fatalf("%d cache cleanup goroutine(s) still running after Shutdown", adfOptCacheGoroutines())

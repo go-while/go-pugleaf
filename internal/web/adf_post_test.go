@@ -221,7 +221,7 @@ func TestAdfPostHeaderBuilder(t *testing.T) {
 	}
 }
 
-// adfPostReceive reads one article from models.PostQueueChannel or fails after 2 s.
+// adfPostReceive reads one article from models.PostQueueChannel or fails after testWait.
 // Nothing else consumes that channel in this test binary: NewWebServer starts no
 // processor.PostQueueWorker (only cmd/web does), see lo1HandDrainPostQueue.
 func adfPostReceive(t *testing.T) *models.Article {
@@ -229,8 +229,8 @@ func adfPostReceive(t *testing.T) *models.Article {
 	select {
 	case a := <-models.PostQueueChannel:
 		return a
-	case <-time.After(2 * time.Second):
-		t.Fatal("no article in models.PostQueueChannel within 2 s")
+	case <-time.After(testWait):
+		t.Fatalf("no article in models.PostQueueChannel within %v", testWait)
 		return nil
 	}
 }

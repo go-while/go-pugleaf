@@ -101,7 +101,7 @@ func TestLo1HandChatConcurrentSend(t *testing.T) {
 
 	select {
 	case <-atProxy:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWait):
 		close(release)
 		t.Fatal("first send never reached the proxy")
 	}
@@ -159,7 +159,7 @@ func TestLo1HandChatClearDuringSend(t *testing.T) {
 	go func() { done <- lo1HandChatSend(cookie, model, "hello") }()
 	select {
 	case <-atProxy:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testWait):
 		close(release)
 		t.Fatal("send never reached the proxy")
 	}
