@@ -65,6 +65,10 @@
    fetcher's eternal-september/blueworldhosting caps stay by user decision; the 441 attempt counter is in `issues.md`);
    deferred with a hand-off note: A-db-3, A-db-4, A-tools-5b, history fail-stop exits (Q3), A-ops-13/14/16,
    govulncheck toolchain upgrade (Q4), nonce-based CSP (Q5).
+ - Plan `test-timing-hardening` (2026-10-15): tests no longer assert on wall-clock upper bounds under 10x; hang guards
+   come from `PUGLEAF_TEST_DEADLINE` (default 60 s); the NNTP server counts delay sites (`ErrorDelayCount`,
+   `ArticleDelayCount`) for structural checks; the auth timing-enumeration test was removed on purpose. Its stress
+   pass found and fixed a POST data race (message-id read after the batch hand-off, 4956980).
  - The test suite in `internal/nntp/nntp-server-*_test.go` and `cmd/nntp-server/server_e2e_test.go` marks every open
    item with `knownBug`; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` lists them (1 id:
    T-nntp-article-1, an accepted limitation).

@@ -137,3 +137,28 @@ PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/   # list unchan
 ## Open questions (ask at wave 0)
 - Q1: P1 counters on `NNTPServer` (D1): accept the two atomics in production code for test observability?
 - Q2: `PUGLEAF_TEST_DEADLINE` default 60 s, or 30 s?
+
+## Outcome (2026-10-15)
+- **Integration branch:** `plan-test-timing-hardening` from `testing-001` @ d694e6a. Not yet merged into `testing-001`
+  (user decision). Nothing pushed. Survey: `.claude/plans/done/test-timing-hardening-survey.md`.
+- **Waves:** 0 inline (7eed92b: P1 counters `ErrorDelayCount`/`ArticleDelayCount`, harness `hDeadline`), A with
+  7 parallel slices, all reviewed and merged (see Progress). Production diff versus `testing-001`: the five nntp
+  files of P1, `postmgr.go` (`idlePause`), `scripts/test-nntp-server.sh` (timeout 900), and 4956980: `handlePost`
+  copies the message-id before `ProcessIncomingArticle` (pre-existing data race with `processNewsgroupBatch`
+  clearing the struct, found by the stress pass; it could answer 240 with an empty id and remove the wrong
+  local430 key).
+- **Worktrees:** `/tank0/claude/trees/go-pugleaf/agent-{a02cf379364c6d82c,ae3b84fafcab33e6e,a81fbc10ac9fe3cb3,
+  a9d2927cd5154f049,ad7fc8f0f71aabdae,a5ffccd8abdb1a025,a4db13ecf84d5e907}` (branches `worktree-agent-<id>`);
+  the user cleans them up.
+- **Verification (verifier on 5929038, code cf4ada3):** gofmt/vet(+e2e tag)/build clean; race suite alone 174 s
+  wall, `internal/nntp` 170 s (no growth); stress pass `-race -count=5 -cpu 1,4` over 11 packages under a go-test
+  CPU hog (load 12-18, 32 min): zero timing failures, one data race in `cmd/nntp-server` (fixed in 4956980; package
+  then ok with `-count=3 -cpu 1,4`); `PUGLEAF_TEST_DEADLINE=5s` passes nntp/web/database/tcp2tor/postmgr (a
+  passing test never waits on the guard); known bug T-nntp-article-1 still fails in 1.02 s; grep audit: every
+  surviving upper bound >= 10x, no unclamped hang guard under 30 s; `TestNSHAuthUnknownUserTiming` gone,
+  `db_nntp_users.go` untouched; `scripts/test-nntp-server.sh` SUMMARY pass=38 fail=0 info=1.
+- **Leftovers:** `cliWaitFromEnv` duplicates `hDeadlineFromEnv`; `testSOCKS5Connection` wraps with %v;
+  `GetArticle` %v at nntp-client-commands.go:108; `TestSessIdleTimeout/activity-resets-timer` has ~450 ms of
+  absolute slack (10x by rule); `postmgr.idlePause` has no zero fallback (only NewPosterManager constructs it);
+  accepted D1/D4 limits (a bare sleep before a no-delay reply is invisible to the counters).
+
