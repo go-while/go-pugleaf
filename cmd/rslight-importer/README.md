@@ -41,7 +41,10 @@ go build -o build/rslight-importer ./cmd/rslight-importer
 ```
 
 Before the articles are imported the tool waits 15 seconds: press Ctrl+C then if you only wanted
-the sections and newsgroups.
+the sections and newsgroups. Ctrl+C (or SIGTERM) during the wait or the import stops it: no new
+file is started, running files stop after their current article, the processor (history) and the
+database are shut down cleanly and the tool exits with code 130. A failed import names the first
+five failed files and counts the rest (every failure is also logged as it happens).
 
 ### Reset All Newsgroup Data
 
@@ -51,7 +54,7 @@ the sections and newsgroups.
 
 ⚠️ This permanently deletes ALL articles, threads, overview and cache data of ALL newsgroups and
 resets all message counters to 0. It runs after the sections import, after a 5 second countdown
-(Ctrl+C cancels), and the run then exits without importing `-spool`. Delete the `<data>/history`
+(Ctrl+C cancels: nothing is reset, exit code 130), and the run then exits without importing `-spool`. Delete the `<data>/history`
 folder manually.
 
 ## Command Line Options

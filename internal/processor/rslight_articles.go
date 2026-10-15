@@ -111,7 +111,17 @@ func (leg *LegacyImporter) importSQLiteArticlesWith(sqlitePath string, importArt
 	const reportInterval = 1000 // Report progress every 1000 articles
 	var articlesRead uint64
 
+	stopped := false
 	for rows.Next() {
+		// a closed leg.stop ends the file after the current article (counters are kept)
+		select {
+		case <-leg.stop: // nil: never
+			stopped = true
+		default:
+		}
+		if stopped {
+			break
+		}
 		var article LegacyArticle
 		err := rows.Scan(
 			&article.Newsgroup,
@@ -164,21 +174,32 @@ func (leg *LegacyImporter) importSQLiteArticlesWith(sqlitePath string, importArt
 	}
 
 	// Check for iteration errors
-	if err = rows.Err(); err != nil {
-		return fmt.Errorf("error during row iteration: %w", err)
+	if !stopped {
+		if err = rows.Err(); err != nil {
+			return fmt.Errorf("error during row iteration: %w", err)
+		}
 	}
 
-	log.Printf("[RSLIGHT-IMPORT] DONE: %d imported, %d failed, %d skippedEmpty, %d duplicates @db='%s' took %v", imported, failed, skippedEmpty, duplicates, sqlitePath, time.Since(start))
-	// update total counters (the only groupsDone increment per file)
+	state := "DONE"
+	if stopped {
+		state = "STOPPED"
+	}
+	log.Printf("[RSLIGHT-IMPORT] %s: %d imported, %d failed, %d skippedEmpty, %d duplicates @db='%s' took %v", state, imported, failed, skippedEmpty, duplicates, sqlitePath, time.Since(start))
+	// update total counters (the only groupsDone increment per file; a stopped file is not done)
 	leg.mux.Lock()
 	defer leg.mux.Unlock()
 	leg.imported += imported
 	leg.skipped += failed
 	leg.skippedEmpty += skippedEmpty
 	leg.duplicates += duplicates
-	leg.groupsDone++
+	if !stopped {
+		leg.groupsDone++
+	}
 	for group, count := range groupsCounter {
 		leg.proc.LegacyCounter.Add("articles:"+group, count)
+	}
+	if stopped {
+		return fmt.Errorf("file '%s' not finished: %w", sqlitePath, ErrLegacyImportStopped)
 	}
 	return nil
 }
