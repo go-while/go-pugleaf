@@ -111,14 +111,21 @@ func adfTorSilentProxyConns(t *testing.T) (*ProxyConfig, <-chan net.Conn) {
 // check is on the message: "i/o timeout" (os.ErrDeadlineExceeded) or "context deadline exceeded".
 func TestAdfTorSelfTestTimeout(t *testing.T) {
 	cfg := adfTorSilentProxy(t)
+	start := time.Now()
 	err := adfTorWithin(t, "testSOCKS5Connection (timeoutSec=1)", func() error {
 		return testSOCKS5Connection(cfg, "adf-tcp2tor.invalid", "119", 1, false)
 	})
+	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatalf("testSOCKS5Connection against a silent proxy returned nil error")
 	}
 	if msg := err.Error(); !strings.Contains(msg, "i/o timeout") && !strings.Contains(msg, "deadline exceeded") {
 		t.Fatalf("testSOCKS5Connection error = %v, want a timeout", err)
+	}
+	// Deliberate 10x bound: a regression that ignores timeoutSec and falls back to the 30 s
+	// default would still pass the error check and the testWait guard.
+	if elapsed > 10*time.Second {
+		t.Fatalf("testSOCKS5Connection took %v, want <= 10s (10x timeoutSec=1)", elapsed)
 	}
 }
 
@@ -131,11 +138,13 @@ func TestAdfTorDialTimeout(t *testing.T) {
 		t.Fatalf("proxy.SOCKS5: %v", err)
 	}
 	var conn net.Conn
+	start := time.Now()
 	err = adfTorWithin(t, "dialThroughSOCKS (timeout 500ms)", func() error {
 		var derr error
 		conn, derr = dialThroughSOCKS(d, "adf-tcp2tor.invalid:119", timeout)
 		return derr
 	})
+	elapsed := time.Since(start)
 	if conn != nil {
 		_ = conn.Close()
 	}
@@ -144,6 +153,11 @@ func TestAdfTorDialTimeout(t *testing.T) {
 	}
 	if !adfTorIsTimeout(err) {
 		t.Fatalf("dialThroughSOCKS error = %v, want a timeout (context.DeadlineExceeded or net.Error.Timeout)", err)
+	}
+	// Deliberate 10x bound: a regression that ignores the 500ms timeout and falls back to the
+	// 30 s default would still pass the error check and the testWait guard.
+	if elapsed > 10*timeout {
+		t.Fatalf("dialThroughSOCKS took %v, want <= %v (10x timeout %v)", elapsed, 10*timeout, timeout)
 	}
 }
 

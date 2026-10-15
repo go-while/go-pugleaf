@@ -145,10 +145,13 @@ func TestE2EBinaryRFC(t *testing.T) {
 
 	// N51: NEXT/LAST walk the group (RFC 3977 §6.1.3, §6.1.4)
 	r.check("N51", "NEXT/LAST walk "+group, func() error {
-		// N10's TAKETHIS commits asynchronously: wait up to testWait for count >= 2
+		// N10's TAKETHIS commits asynchronously: wait for count >= 2. Deliberate soft window,
+		// not a hang guard: when it expires with count 1 the check only notes it (INFO) and
+		// walks one article, so it must not take the full testWait.
+		const n51SoftWait = 10 * time.Second
 		var count, low, high int64
 		var last string
-		perr := e2eWaitFor(testWait, func() error {
+		perr := e2eWaitFor(n51SoftWait, func() error {
 			code, line, err := c.tryCmd("GROUP %s", group)
 			if err != nil {
 				return err
@@ -170,7 +173,7 @@ func TestE2EBinaryRFC(t *testing.T) {
 			return fmt.Errorf("no article in %s: %v (last %q)", group, perr, last)
 		}
 		if perr != nil {
-			r.info("N51", fmt.Sprintf("count stayed %d after %v (%q): walking one article", count, testWait, last))
+			r.info("N51", fmt.Sprintf("count stayed %d after %v (%q): walking one article", count, n51SoftWait, last))
 		}
 		code, line, err := c.tryCmd("LAST")
 		if e := e2eRfcStatus(code, line, err, 422); e != nil {
