@@ -63,8 +63,9 @@ type Database struct {
 
 	// bgStop ends the background loops OpenDatabase starts outside WG (cache crons);
 	// closed once by stopBackground at the start of Shutdown. nil on a bare &Database{}.
-	bgStop     chan struct{}
-	bgStopOnce sync.Once
+	bgStop        chan struct{}
+	bgStopOnce    sync.Once
+	initResetOnce sync.Once // Shutdown resets INIT at most once per Database
 }
 
 // Config represents database configuration

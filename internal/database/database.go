@@ -141,12 +141,14 @@ func (db *Database) cleanupGroupDBsWithLimit(idle time.Duration, maxOpen int) {
 func (db *Database) Shutdown() error {
 	db.stopBackground() // no-op on a bare &Database{} (tests)
 	if db.bgStop != nil {
-		// only a Database created by OpenDatabase owns INIT; deferred: runs after the main DB is closed
-		defer func() {
+		// only a Database created by OpenDatabase owns INIT, and it gives it up once: a second
+		// Shutdown of the same Database must not reset INIT for a Database opened after it.
+		// Deferred: runs after the main DB is closed.
+		defer db.initResetOnce.Do(func() {
 			GlobalDBMutex.Lock()
 			INIT = false
 			GlobalDBMutex.Unlock()
-		}()
+		})
 	}
 
 	var errs []error
