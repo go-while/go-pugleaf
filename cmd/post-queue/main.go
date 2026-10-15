@@ -143,6 +143,13 @@ func run() (code int) {
 	//log.Printf("Starting post queue processing...")
 
 	if !*daemon {
+		// A signal during startup (reset, providers, pools): don't start the batch at all.
+		select {
+		case <-shutdownChan:
+			log.Printf("Shutdown requested before processing, no posts sent")
+			return 130
+		default:
+		}
 		// A shutdown signal stops the batch: the rows not posted yet go back to pending.
 		go func() {
 			select {

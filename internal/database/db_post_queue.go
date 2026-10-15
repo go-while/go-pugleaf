@@ -175,7 +175,7 @@ type PostQueueEntryWithDetails struct {
 // GetAllPostQueueEntries retrieves all post queue entries for admin display with pagination and filtering
 func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searchTerm string) ([]*PostQueueEntryWithDetails, error) {
 	baseQuery := `
-		SELECT pq.id, pq.newsgroup_id, pq.message_id, pq.created, pq.posted_to_remote, pq.in_processing,
+		SELECT pq.id, pq.newsgroup_id, COALESCE(pq.message_id, ''), pq.created, pq.posted_to_remote, pq.in_processing,
 		       ng.name as newsgroup
 		FROM post_queue pq
 		LEFT JOIN newsgroups ng ON ng.id = pq.newsgroup_id
@@ -238,7 +238,7 @@ func (d *Database) GetAllPostQueueEntries(limit, offset int, statusFilter, searc
 			&newsgroup)
 		if err != nil {
 			log.Printf("Database: Failed to scan post queue entry: %v", err)
-			continue
+			return nil, err
 		}
 
 		// Set optional fields

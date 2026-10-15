@@ -191,6 +191,39 @@ func TestAdfOptPostQueueLifecycle(t *testing.T) {
 	}
 }
 
+// TestAdfOptPostQueueAdminNullMessageID: GetAllPostQueueEntries returns scan errors instead of
+// skipping rows, so a row with a NULL message_id (the column is nullable) must still scan.
+func TestAdfOptPostQueueAdminNullMessageID(t *testing.T) {
+	db := w0DB(t)
+	_, gid := adfOptPostQueueGroup(t)
+	// posted_to_remote = 1: the row is never selected for posting by other tests
+	res, err := RetryableExec(db.GetMainDB(),
+		`INSERT INTO post_queue (newsgroup_id, message_id, posted_to_remote, in_processing) VALUES (?, NULL, 1, 0)`, gid)
+	if err != nil {
+		t.Fatalf("insert NULL message_id row: %v", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := db.GetAllPostQueueEntries(0, 0, "completed", "")
+	if err != nil {
+		t.Fatalf("GetAllPostQueueEntries: %v", err)
+	}
+	found := false
+	for _, e := range list {
+		if e.ID == id {
+			found = true
+			if e.MessageID != "" || e.Status != "completed" {
+				t.Errorf("entry %d: message_id %q status %q, want \"\", \"completed\"", id, e.MessageID, e.Status)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("entry %d with NULL message_id not listed", id)
+	}
+}
+
 // TestAdfOptPostQueueSelectRetry: the select-and-mark transaction runs while another connection
 // holds the write lock and commits a new row. The UPDATE then fails with SQLITE_BUSY (stale
 // snapshot) and RetryableTransactionExec runs the closure again: the result must hold every row
