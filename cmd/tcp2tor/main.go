@@ -204,7 +204,7 @@ func main() {
 
 	// Handle add mode - add entry to config file and exit
 	if *addToConfig != "" {
-		addEntryToConfigFile(*addToConfig, *listenHost, *listenPort, *targetAddr)
+		addEntryToConfigFile(*addToConfig, *listenHost, *listenPort, *targetAddr, *allowPublicBind)
 		os.Exit(0)
 	}
 
@@ -626,8 +626,11 @@ func parseConfigFile(filename, socksProxy, socksHost string, socksPort int, sock
 	return configs, settings, nil
 }
 
-// addEntryToConfigFile adds a new configuration entry to the specified config file
-func addEntryToConfigFile(configFile, listenHost string, listenPort int, targetAddr string) {
+// addEntryToConfigFile adds a new configuration entry to the specified config file.
+// The listen host is checked against the bind policy (checkListenHost with
+// allowPublic): a non-loopback host is still added, with a warning, because the
+// policy is applied when the file is run (-allow-public-bind or allow_public_bind).
+func addEntryToConfigFile(configFile, listenHost string, listenPort int, targetAddr string, allowPublic bool) {
 	// Validate required parameters
 	if targetAddr == "" {
 		log.Fatalf("Error: -target must be specified when using -add")
@@ -643,6 +646,10 @@ func addEntryToConfigFile(configFile, listenHost string, listenPort int, targetA
 	targetHost, targetPort, err := parseTargetAddress(targetAddr)
 	if err != nil {
 		log.Fatalf("Error: Invalid target address '%s': %v", targetAddr, err)
+	}
+	if err := checkListenHost(listenHost, allowPublic); err != nil {
+		log.Printf("WARNING: %v", err)
+		log.Printf("WARNING: the entry is added anyway; 'tcp2tor -config %s' refuses to start it without the setting above", configFile)
 	}
 
 	// Create the configuration line
@@ -892,8 +899,29 @@ func (s *ProxyServer) Addr() net.Addr {
 	return s.listener.Addr()
 }
 
-// Serve accepts connections on the listener created by Listen until Stop is called or Accept
-// fails. Connections beyond MaxConns are closed right away. Serve returns after every
+// acceptRetryMin and acceptRetryMax bound the pause after a failed Accept (net/http
+// style: it starts at acceptRetryMin and doubles up to acceptRetryMax).
+const (
+	acceptRetryMin = 5 * time.Millisecond
+	acceptRetryMax = 1 * time.Second
+)
+
+// nextAcceptDelay returns the pause after a failed Accept given the previous one (0
+// after a successful Accept).
+func nextAcceptDelay(prev time.Duration) time.Duration {
+	if prev <= 0 {
+		return acceptRetryMin
+	}
+	if next := prev * 2; next < acceptRetryMax {
+		return next
+	}
+	return acceptRetryMax
+}
+
+// Serve accepts connections on the listener created by Listen until Stop is called or the
+// listener is closed. Any other Accept error (e.g. too many open files) is logged and
+// retried after a pause that grows from acceptRetryMin to acceptRetryMax; Stop ends the
+// pause. Connections beyond MaxConns are closed right away. Serve returns after every
 // connection handler has finished; it returns nil after Stop.
 func (s *ProxyServer) Serve() error {
 	s.mu.Lock()
@@ -909,15 +937,25 @@ func (s *ProxyServer) Serve() error {
 		return errors.New("serve called before listen")
 	}
 
-	var serveErr error
+	ctx := s.serverContext()
+	var retryDelay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			if !s.isStopped() && !errors.Is(err, net.ErrClosed) {
-				serveErr = fmt.Errorf("failed to accept connection: %v", err)
+			if s.isStopped() || errors.Is(err, net.ErrClosed) {
+				break
 			}
-			break
+			retryDelay = nextAcceptDelay(retryDelay)
+			log.Printf("Accept error on %s: %v; retrying in %v", s.ListenAddr, err, retryDelay)
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-ctx.Done(): // Stop
+				timer.Stop()
+			case <-timer.C:
+			}
+			continue
 		}
+		retryDelay = 0
 
 		select {
 		case sem <- struct{}{}:
@@ -938,10 +976,8 @@ func (s *ProxyServer) Serve() error {
 
 	s.Stop() // closes the listener and all live connections (no-op after an earlier Stop)
 	s.handlers.Wait()
-	if serveErr == nil {
-		log.Printf("Proxy server %s shut down", s.ListenAddr)
-	}
-	return serveErr
+	log.Printf("Proxy server %s shut down", s.ListenAddr)
+	return nil
 }
 
 // isStopped reports whether Stop has been called.
