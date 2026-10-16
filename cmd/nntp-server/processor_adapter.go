@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/processor"
@@ -21,6 +23,11 @@ func (pa *ProcessorAdapter) ProcessIncomingArticle(article *models.Article) (int
 	// Forward the Article directly to the processor
 	// No conversions needed since both use models.Article
 	return pa.processor.ProcessIncomingArticle(article)
+}
+
+// ProcessPostedArticle processes a POSTed article and waits for its commit (see nntp.ArticleProcessor)
+func (pa *ProcessorAdapter) ProcessPostedArticle(article *models.Article, stop <-chan struct{}, timeout time.Duration) (int, error) {
+	return pa.processor.ProcessPostedArticle(article, stop, timeout)
 }
 
 // CheckMessageID checks if an offered message-ID is wanted (IHAVE/TAKETHIS)

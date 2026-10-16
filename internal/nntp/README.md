@@ -116,6 +116,13 @@ accept loops and the local430 cleanup, `Stop` ends all of them (the caller's Wai
   check), at most 65536 entries, message-ids over 250 octets are never cached. A just-arrived
   article can therefore still answer 430 for up to 60 s unless intake calls `local430.Remove`
   (articles stored by another process, e.g. the fetcher, are not removed).
+- **Arrival grace** (plan `post-430-window`). POST/IHAVE/TAKETHIS remember an accepted article in
+  `recentArrivals` (message-id → Newsgroups names, same bounds as local430) for `ArrivalGrace` (10 s):
+  ARTICLE/HEAD/BODY/STAT/OVER/HDR/XHDR by message-id read those groups' DBs directly first (only names
+  that are known and active; the history index learns the article only after the group DB commit and its
+  own flush) and neither check nor fill local430 for it. POST also waits up to `-post-commit-wait`
+  (`SetPostCommitWait`, default 5 s; 0 = no wait) for the commit before its 240 (`ProcessPostedArticle`;
+  a timeout still answers 240).
 - **Xref** (RFC 5536 §3.2.14). `Xref: <host> <group>:<num> <g2>:<n2> ...` with `Config.Hostname`, the
   serving group first. `off`: no Xref line, overview lines have 8 fields, no `Xref:full` in
   LIST OVERVIEW.FMT, HDR/XHDR Xref answer an empty value (the pre-Xref output). `partial` (default):

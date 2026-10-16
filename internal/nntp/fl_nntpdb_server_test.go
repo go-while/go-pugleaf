@@ -7,6 +7,7 @@ package nntp
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -166,4 +167,125 @@ func TestFlNntpdbLocal430TTL(t *testing.T) {
 	if got := s.Local430TTL(); got != DefaultLocal430TTL {
 		t.Errorf("TTL after SetLocal430TTL(0) = %v, want the default %v", got, DefaultLocal430TTL)
 	}
+}
+
+// ageForTest moves the arrival time of messageID back by d (as if it arrived d earlier) and
+// reports whether the entry exists (plan post-430-window tests).
+func (ra *RecentArrivals) ageForTest(messageID string, d time.Duration) bool {
+	ra.mu.Lock()
+	defer ra.mu.Unlock()
+	e, ok := ra.cache[messageID]
+	if ok {
+		e.at = e.at.Add(-d)
+		ra.cache[messageID] = e
+	}
+	return ok
+}
+
+// recentArrivalsLen returns the number of entries.
+func (ra *RecentArrivals) recentArrivalsLen() int {
+	ra.mu.Lock()
+	defer ra.mu.Unlock()
+	return len(ra.cache)
+}
+
+// TestFlNntpdbRecentArrivals: the recentArrivals table of plan post-430-window keeps the
+// bounds of local430 (250-octet ids, max entries), forgets entries after ArrivalGrace (on
+// lookup and in Cleanup), copies the groups and is safe on a nil table.
+func TestFlNntpdbRecentArrivals(t *testing.T) {
+	s, err := NewNNTPServer(&database.Database{}, &config.ServerConfig{}, new(sync.WaitGroup), nil)
+	if err != nil {
+		t.Fatalf("NewNNTPServer: %v", err)
+	}
+	ra := s.recentArrivals
+	if ra == nil || s.local430.arrivals != ra {
+		t.Fatal("NewNNTPServer: recentArrivals missing or not cleaned by local430.run")
+	}
+
+	t.Run("bounds", func(t *testing.T) {
+		long := "<" + strings.Repeat("a", 251-len("<@x>")) + "@x>" // 251 octets
+		if len(long) != 251 {
+			t.Fatalf("test id has %d octets", len(long))
+		}
+		if ra.NoteArrival(long, []string{"g"}) {
+			t.Error("a 251-octet id was stored")
+		}
+		if _, ok := ra.RecentArrival(long); ok {
+			t.Error("a 251-octet id is a recent arrival")
+		}
+		maxID := long[:249] + ">" // 250 octets
+		groups := []string{"fl.a", "fl.b"}
+		if !ra.NoteArrival(maxID, groups) {
+			t.Fatal("a 250-octet id was not stored")
+		}
+		groups[0] = "changed" // the table keeps its own copy
+		if got, ok := ra.RecentArrival(maxID); !ok || len(got) != 2 || got[0] != "fl.a" || got[1] != "fl.b" {
+			t.Errorf("RecentArrival(250-octet id) = %q, %v; want [fl.a fl.b]", got, ok)
+		}
+	})
+
+	t.Run("expiry", func(t *testing.T) {
+		const id = "<fl-nntpdb-arrival-expiry@test.invalid>"
+		ra.NoteArrival(id, nil)
+		if _, ok := ra.RecentArrival(id); !ok {
+			t.Fatal("a fresh arrival without groups is not a recent arrival")
+		}
+		ra.ageForTest(id, ArrivalGrace)
+		if _, ok := ra.RecentArrival(id); ok {
+			t.Error("an arrival older than ArrivalGrace is still recent")
+		}
+		if ra.ageForTest(id, 0) {
+			t.Error("the expired entry was not removed by the lookup")
+		}
+	})
+
+	t.Run("cleanup", func(t *testing.T) {
+		c := newRecentArrivals()
+		const oldID, youngID = "<fl-nntpdb-arrival-old@test.invalid>", "<fl-nntpdb-arrival-young@test.invalid>"
+		c.NoteArrival(oldID, []string{"g"})
+		c.NoteArrival(youngID, []string{"g"})
+		c.ageForTest(oldID, ArrivalGrace+time.Second)
+		c.Cleanup()
+		if c.ageForTest(oldID, 0) {
+			t.Error("Cleanup kept an entry older than ArrivalGrace")
+		}
+		if _, ok := c.RecentArrival(youngID); !ok {
+			t.Error("Cleanup removed a young entry")
+		}
+	})
+
+	t.Run("cap", func(t *testing.T) {
+		c := newRecentArrivals()
+		for i := 0; i < recentArrivalsMaxEntries; i++ {
+			if !c.NoteArrival(fmt.Sprintf("<fl-cap-%d@test.invalid>", i), nil) {
+				t.Fatalf("entry %d refused below the cap", i)
+			}
+		}
+		const extra = "<fl-cap-extra@test.invalid>"
+		if c.NoteArrival(extra, nil) {
+			t.Error("a new id was stored in a full table of young entries")
+		}
+		if !c.NoteArrival("<fl-cap-0@test.invalid>", []string{"g"}) {
+			t.Error("an id already in the full table could not be refreshed")
+		}
+		// expired entries make room
+		c.ageForTest("<fl-cap-1@test.invalid>", ArrivalGrace)
+		if !c.NoteArrival(extra, nil) {
+			t.Error("a new id was refused although an entry had expired")
+		}
+		if n := c.recentArrivalsLen(); n != recentArrivalsMaxEntries {
+			t.Errorf("table holds %d entries, want the cap %d", n, recentArrivalsMaxEntries)
+		}
+	})
+
+	t.Run("nil", func(t *testing.T) {
+		var n *RecentArrivals
+		if n.NoteArrival("<fl-nil@test.invalid>", nil) {
+			t.Error("a nil table stored an id")
+		}
+		if _, ok := n.RecentArrival("<fl-nil@test.invalid>"); ok {
+			t.Error("a nil table found an id")
+		}
+		n.Cleanup()
+	})
 }

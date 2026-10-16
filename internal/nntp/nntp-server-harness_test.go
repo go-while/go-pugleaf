@@ -606,6 +606,16 @@ type hFakeProcessor struct {
 	xrefBatchCalls int                       // number of XrefLocationsBatch calls
 	xrefBatchIDs   int                       // number of ids passed to XrefLocationsBatch in total
 	xrefCalls      int
+	postWaits      []time.Duration // timeouts ProcessPostedArticle was called with
+}
+
+// ProcessPostedArticle implements ArticleProcessor: ProcessIncomingArticle plus a record of
+// the commit-wait timeout the server passed (postWaits); the fake never waits.
+func (p *hFakeProcessor) ProcessPostedArticle(article *models.Article, stop <-chan struct{}, timeout time.Duration) (int, error) {
+	p.mu.Lock()
+	p.postWaits = append(p.postWaits, timeout)
+	p.mu.Unlock()
+	return p.ProcessIncomingArticle(article)
 }
 
 func (p *hFakeProcessor) ProcessIncomingArticle(article *models.Article) (int, error) {

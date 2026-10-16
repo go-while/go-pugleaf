@@ -111,8 +111,9 @@ func (c *ClientConnection) handleXHdr(args []string) error {
 	return d.Close()
 }
 
-// xhdrByMessageID answers XHDR <field> <message-id>: the current group first, then (with a
-// processor) the article's group found through the history index. The value is always
+// xhdrByMessageID answers XHDR <field> <message-id>: the current group first, then the groups
+// of a recent same-process arrival (recentArrivalArticle), then (with a processor) the
+// article's group found through the history index. The value is always
 // re-read with the hide = 0 filter, so a hidden article stays hidden.
 // Xref is the local value (xrefFor): the current group and the article's number there when
 // it was found in the current group, else no serving group (as HEAD by message-id).
@@ -145,6 +146,22 @@ func (c *ClientConnection) xhdrByMessageID(field, messageID string) error {
 		value, found = v, ok
 		if ok {
 			currentNum = n
+		}
+	}
+	if !found {
+		// a same-process arrival of the last ArrivalGrace: its groups (plan post-430-window)
+		_, group, _, err := c.recentArrivalArticle(messageID, true)
+		if err != nil {
+			log.Printf("[NNTP] XHDR: lookup of recent arrival %s failed: %v", messageID, err)
+			return c.sendResponse(403, "Internal fault")
+		}
+		if group != "" {
+			_, v, ok, err := lookup(group)
+			if err != nil {
+				log.Printf("[NNTP] XHDR %s in %s: %v", messageID, group, err)
+				return c.sendResponse(403, "Internal fault")
+			}
+			value, found = v, ok
 		}
 	}
 	if !found && c.server.Processor != nil {

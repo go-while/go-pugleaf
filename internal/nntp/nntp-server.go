@@ -23,6 +23,12 @@ import (
 // Processor interface for article processing
 type ArticleProcessor interface {
 	ProcessIncomingArticle(article *models.Article) (int, error)
+	// ProcessPostedArticle is ProcessIncomingArticle for POST: when the article was accepted
+	// (history.CasePass) it also waits until the batch writer committed it to its groups, at
+	// most timeout (<= 0: no wait) or until stop is closed; a timeout or stop still returns
+	// CasePass (the article is queued), a dropped batch returns CaseError with
+	// common.ErrIntakeRejected.
+	ProcessPostedArticle(article *models.Article, stop <-chan struct{}, timeout time.Duration) (int, error)
 	// CheckMessageID returns history.CasePass (wanted), history.CaseDupes (have it),
 	// history.CaseRetry (in progress) or history.CaseError for an offered message-id
 	CheckMessageID(messageID string) int
@@ -99,9 +105,14 @@ type NNTPServer struct {
 	wg          *sync.WaitGroup // Use external waitgroup for coordination
 	mu          sync.RWMutex
 	local430    *Local430     // Cache for 430 responses
+	postWait    atomic.Int64  // PostCommitWait in nanoseconds (SetPostCommitWait)
 	xref        xrefModeStore // Xref: header mode (SetXrefMode)
 	running     bool
 	bgOnce      sync.Once // starts the background goroutines once
+
+	// Same-process arrivals (POST/IHAVE/TAKETHIS) of the last ArrivalGrace: the by-message-id
+	// lookup tries their groups and caches no miss for them (plan post-430-window).
+	recentArrivals *RecentArrivals
 
 	// Open client connections: Stop closes them and waits for their handlers.
 	connsMu   sync.Mutex
@@ -163,8 +174,11 @@ func NewNNTPServer(db *database.Database, cfg *config.ServerConfig, mainWG *sync
 		ErrorDelay:      DefaultErrorDelay,
 		IdleTimeout:     DefaultNNTPcliconnTimeout,
 		ShutdownTimeout: DefaultShutdownTimeout,
+		recentArrivals:  newRecentArrivals(),
 	}
+	server.local430.arrivals = server.recentArrivals // cleaned by local430.run
 	server.SetXrefMode(XrefPartial)
+	server.SetPostCommitWait(DefaultPostCommitWait)
 	server.SetXrefBatchedLookup(true)
 	return server, nil
 }
