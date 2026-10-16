@@ -312,13 +312,20 @@ func RepairNewsgroupWatermarks(ctx context.Context, db *database.Database) error
 			continue
 		}
 
-		groupDB.Return()
-
-		// If no articles, set defaults
+		// No articles: keep the group's place like expire-news does (low = high+1, next =
+		// the number the next article gets from article_num_seq); a never-used group gives 0/1.
 		if articleCount == 0 {
-			maxArticle = 0
-			minArticle = 1
+			next, err := db.NNTPGroupNextArticleNum(groupDB)
+			if err != nil {
+				log.Printf("PreLoader: Failed to get next article number for %s: %v", newsgroup.Name, err)
+				groupDB.Return()
+				errorCount++
+				continue
+			}
+			maxArticle = next - 1
+			minArticle = next
 		}
+		groupDB.Return()
 
 		// Update newsgroup with correct values - preserve existing settings but fix watermarks
 		newsgroup.LastArticle = maxArticle

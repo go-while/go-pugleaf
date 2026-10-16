@@ -307,6 +307,35 @@ func TestGrpGroupEmpty(t *testing.T) {
 	grpExpectEmptyListGroup(t, c, g, 0, 1, 0)
 }
 
+// TestGrpGroupEmptyNextNumFails: when the next-number query of an empty group fails
+// (no article_num_seq table), GROUP answers 403, nothing is selected (a bare LISTGROUP
+// answers 412) and no group DB stays held (the server stops cleanly).
+func TestGrpGroupEmptyNextNumFails(t *testing.T) {
+	g := hGroup(t, "t3.groupemptyfail", 0, nil)
+	db := hTestDB(t)
+	gdb, err := db.GetGroupDB(g)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", g, err)
+	}
+	if _, err := database.RetryableExec(gdb.DB, `DROP TABLE article_num_seq`); err != nil {
+		gdb.Return()
+		t.Fatalf("drop article_num_seq of %s: %v", g, err)
+	}
+	gdb.Return()
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+	code, line := c.cmd(t, "GROUP %s", g)
+	if err := hExpectCode(code, line, 403); err != nil {
+		t.Fatal(err)
+	}
+	code, line = c.cmd(t, "LISTGROUP")
+	if err := hExpectCode(code, line, 412); err != nil {
+		t.Fatalf("after the failed GROUP: %v", err)
+	}
+	c.close()
+	hs.stop(t)
+}
+
 // grpExpectNoCurrent checks that STAT, NEXT and LAST without an argument answer 420
 // (no current article, RFC 3977 §6.1.1.2, §6.1.3, §6.1.4, §6.2.4).
 func grpExpectNoCurrent(t *testing.T, c *hClient) {

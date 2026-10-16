@@ -149,7 +149,8 @@ CREATE TABLE newsgroups (
    deleted articles in the main database are removed afterwards
 5. **Counter Updates**: Automatically updates the newsgroup's `message_count`, `last_article` and the
    water marks `LIST ACTIVE` prints (`high_water` = `last_article`, `low_water` = lowest remaining
-   article; an emptied group keeps its place: `low_water` = next article number = `last_article` + 1)
+   article; an emptied group keeps its place: `low_water` = next article number = `last_article` + 1).
+   The count and the marks include hidden articles; `LIST ACTIVE` prints `last_article` and `low_water`
 6. **Progress Logging**: Detailed logging of operations and progress
 
 ## Performance Considerations

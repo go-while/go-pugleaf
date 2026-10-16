@@ -183,6 +183,7 @@ func TestToolsTestDeleteArticlesNoOverviewWarning(t *testing.T) {
 	var buf bytes.Buffer
 	prev := log.Writer()
 	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
 	err := deleteArticles(g, []int64{1, 2, 3}, historyTrim{})
 	log.SetOutput(prev)
 	if err != nil {
@@ -271,8 +272,14 @@ func TestToolsTestUpdateNewsgroupCountersWatermarks(t *testing.T) {
 			ng.MessageCount, ng.LastArticle, ng.HighWater, ng.LowWater)
 	}
 
-	// never used: no article ever, next number 1
+	// never used: no article ever, next number 1. The row starts with stale values so the
+	// test proves the write (the defaults of a new row are already 0, 0, 0, 1).
 	toolsTestCountersGroup(t, db, "tools.test.counters.never", 0)
+	if _, err := database.RetryableExec(db.GetMainDB(),
+		`UPDATE newsgroups SET message_count = 7, last_article = 9, high_water = 9, low_water = 3 WHERE name = ?`,
+		"tools.test.counters.never"); err != nil {
+		t.Fatalf("stale counters: %v", err)
+	}
 	if err := updateNewsgroupCounters(db, "tools.test.counters.never"); err != nil {
 		t.Fatalf("updateNewsgroupCounters: %v", err)
 	}

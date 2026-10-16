@@ -821,7 +821,10 @@ func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles i
 // With articles left: last_article = high_water = the highest remaining number, low_water = the
 // lowest one. An emptied group keeps its place: last_article = high_water = next-1 and
 // low_water = next, where next is the number the next article gets (article_num_seq), so LIST
-// ACTIVE shows low = high+1 like GROUP does; a never-used group gives 0 and 1.
+// ACTIVE shows low = high+1 like GROUP does; a never-used group gives 0 and 1. The count and
+// the marks include hidden articles (as last_article did before); GROUP counts visible ones
+// only. LIST ACTIVE prints last_article as the high mark and low_water as the low mark;
+// high_water is kept equal to last_article.
 func updateNewsgroupCounters(db *database.Database, groupName string) error {
 	// Get group database to count current articles
 	groupDB, err := db.GetGroupDB(groupName)

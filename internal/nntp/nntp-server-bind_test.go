@@ -30,12 +30,16 @@ func TestBindListenAddr(t *testing.T) {
 }
 
 // bindFreePort returns a port that was free on ip a moment ago (listener closed
-// again); ok is false when ip cannot be bound at all (no IPv6 loopback).
+// again); ok is false only when the IPv6 loopback cannot be bound (no ::1 on this
+// host); a failure on 127.0.0.1 fails the test instead of skipping it.
 func bindFreePort(t *testing.T, ip string) (port int, ok bool) {
 	t.Helper()
 	l, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
 	if err != nil {
-		return 0, false
+		if ip == "::1" {
+			return 0, false
+		}
+		t.Fatalf("listen %s:0: %v", ip, err)
 	}
 	port = l.Addr().(*net.TCPAddr).Port
 	if err := l.Close(); err != nil {
