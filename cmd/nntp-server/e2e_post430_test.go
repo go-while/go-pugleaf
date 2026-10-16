@@ -35,6 +35,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/database"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -339,12 +340,17 @@ func TestE2EPost430Binary(t *testing.T) {
 	}())
 	r.check("P13", "no group DB for "+nonexistent+" under db/ (the "+ga+" DB is there)", func() error {
 		dbDir := filepath.Join(e.data, "db")
-		bad, err := p430GroupDBFiles(dbDir, "t5.nonexistent", "t5_nonexistent")
+		bad, err := p430GroupDBFiles(dbDir, "t5_nonexistent")
 		if err != nil {
 			return err
 		}
 		if len(bad) != 0 {
 			return fmt.Errorf("unexpected files %q", bad)
+		}
+		// the group DB path is db/<md5(name)>/<sanitized>.db: the hash directory must not
+		// exist either (a regression that only creates the directory would pass the file walk)
+		if _, serr := os.Stat(filepath.Join(dbDir, database.MD5Hash(nonexistent))); !errors.Is(serr, fs.ErrNotExist) {
+			return fmt.Errorf("hash directory of %s exists or cannot be checked: %v", nonexistent, serr)
 		}
 		good, err := p430GroupDBFiles(dbDir, "post430_test_a.db")
 		if err != nil {
