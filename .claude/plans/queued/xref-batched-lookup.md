@@ -78,3 +78,14 @@ Reuse the xref-history scenario (`cmd/nntp-server/e2e_xref_test.go`, or the veri
 3. `-xref partial`/`off` with and without the flag: unchanged output, no history lookups.
 4. Startup log line contains `xref=full xref-batched-lookup=true|false`.
 Expected: all identical outputs; no new warnings in the server log.
+
+## Benchmark
+- `internal/history/xref_bench_test.go`: `BenchmarkLookupLocations` vs `BenchmarkLookupLocationsBatch` on a
+  scratch index (`t.TempDir`) filled with e.g. 100k numbered rows, measuring 1000-id lookups per op
+  (`go test -run xxx -bench 'LookupLocations' -benchmem ./internal/history/`). A benchmark, not an assert:
+  no wall-clock expectations in tests (see memory `no-timing-tests`).
+- On real data (user only, never an agent: `./data` is production): start `pugleaf-nntp-server` on a spare port
+  with `-xref full` once with and once with `-xref-batched-lookup=false`, and time `OVER 1-1000` style ranges
+  in a big crossposted group, e.g. with `time (printf 'GROUP <g>\r\nOVER <lo>-<hi>\r\nQUIT\r\n' | nc 127.0.0.1 <port> | wc -l)`.
+  Record the two timings in the Outcome. Only when the batched path wins on this comparison does it stay
+  the default; otherwise flip the default to false before merging.
