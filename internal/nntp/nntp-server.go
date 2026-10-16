@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -168,8 +169,15 @@ func NewNNTPServer(db *database.Database, cfg *config.ServerConfig, mainWG *sync
 	return server, nil
 }
 
-// Start validates the configuration, opens the configured listeners and starts
-// serving. When it returns an error nothing is left listening.
+// listenAddr is the listen address for port on the IP addr ("" = all interfaces).
+// net.JoinHostPort brackets IPv6 literals: "::1" gives "[::1]:port".
+func listenAddr(addr string, port int) string {
+	return net.JoinHostPort(addr, strconv.Itoa(port))
+}
+
+// Start validates the configuration, opens the configured listeners (on
+// Config.NNTP.Addr, all interfaces when empty) and starts serving. When it
+// returns an error nothing is left listening.
 func (s *NNTPServer) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -183,7 +191,7 @@ func (s *NNTPServer) Start() error {
 	default:
 	}
 
-	port, tlsPort := s.Config.NNTP.Port, s.Config.NNTP.TLSPort
+	addr, port, tlsPort := s.Config.NNTP.Addr, s.Config.NNTP.Port, s.Config.NNTP.TLSPort
 	if port <= 0 && tlsPort <= 0 {
 		return fmt.Errorf("no listener configured (set -nntptcpport and/or -nntptlsport)")
 	}
@@ -206,29 +214,37 @@ func (s *NNTPServer) Start() error {
 
 	var plainListener, tlsListener net.Listener
 	if port > 0 {
-		l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		l, err := net.Listen("tcp", listenAddr(addr, port))
 		if err != nil {
-			return fmt.Errorf("failed to start NNTP listener on port %d: %w", port, err)
+			return fmt.Errorf("failed to start NNTP listener on %s: %w", listenAddr(addr, port), err)
 		}
 		plainListener = l
 	}
 	if tlsConfig != nil {
-		l, err := tls.Listen("tcp", fmt.Sprintf(":%d", tlsPort), tlsConfig)
+		l, err := tls.Listen("tcp", listenAddr(addr, tlsPort), tlsConfig)
 		if err != nil {
 			if plainListener != nil {
 				_ = plainListener.Close()
 			}
-			return fmt.Errorf("failed to start NNTP TLS listener on port %d: %w", tlsPort, err)
+			return fmt.Errorf("failed to start NNTP TLS listener on %s: %w", listenAddr(addr, tlsPort), err)
 		}
 		tlsListener = l
 	}
 
 	if plainListener != nil {
-		log.Printf("[NNTP] NNTP server listening on port %d", port)
+		if addr == "" {
+			log.Printf("[NNTP] NNTP server listening on port %d", port)
+		} else {
+			log.Printf("[NNTP] NNTP server listening on %s", listenAddr(addr, port))
+		}
 		s.serveLocked(plainListener, false)
 	}
 	if tlsListener != nil {
-		log.Printf("[NNTP] NNTP TLS server listening on port %d", tlsPort)
+		if addr == "" {
+			log.Printf("[NNTP] NNTP TLS server listening on port %d", tlsPort)
+		} else {
+			log.Printf("[NNTP] NNTP TLS server listening on %s", listenAddr(addr, tlsPort))
+		}
 		s.serveLocked(tlsListener, true)
 	}
 	s.startBackgroundLocked()
