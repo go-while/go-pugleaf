@@ -147,3 +147,14 @@ race list; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` li
   `-post-commit-wait 0` run not poisoned, `-1s` exits 1, SIGINT exit 0. Measured POST latency with the wait:
   68-121 ms (1 ms without). Review MERGE, minor 1 fixed inline (a2a18e3), minor 2 (misleading failure text if a
   commit took longer than the grace) left.
+
+### Verification (a2a18e3)
+- Verifier: gofmt/vet/build green, full race list green with -count=1 (nntp 170 s, processor 12 s, nntp-server 48 s),
+  known bugs only T-nntp-article-1, three builds ok.
+- End-to-end on ./data-test-post430 (example.org, 127.0.0.1:11193, -xref full): POST dot→240 in 42.5 ms and 123 ms
+  (1.7 ms with -post-commit-wait 0); on the same connection without GROUP STAT/HEAD/OVER/HDR/XHDR by message-id
+  answer 2xx at once, the Xref line in HEAD appears ~0.5 s after the 240 (history flush); IHAVE: 3 × 430 (each
+  ~1 s apart because of the default 1 s errordelay) then 223 at 3.4 s (BatchInterval) and never 430 again;
+  crosspost to t5.nonexistent.verify: 240, 223, no file and no md5 hash directory for the unknown group;
+  -post-commit-wait 0: immediate STAT 430 then 223 at 2.3 s on a new connection, stays 223; -1s exits 1;
+  SIGINT exit 0 for every run; no "commit not confirmed" line in the logs.
