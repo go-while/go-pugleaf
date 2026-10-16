@@ -187,3 +187,24 @@ go vet ./...; go build ./...; the full CLAUDE.md race list; `PUGLEAF_KNOWN_BUGS=
   (`internal/nntp/nntp-article-common.go:127-135`). BUGS.md says same-process arrivals are removed at once, which is
   not true in that window. Left as a follow-up.
 - Fixed after verification: `-cleanup-older` help text said "all post_queue entries", the code deletes posted ones only.
+
+## Outcome
+- Integration branch `plan-xref-leftovers` (HEAD b3ddcf1, 13 commits) merged into `testing-001` with `--no-ff`
+  on 2026-10-16: merge commit a1ffc20 (not pushed). `go build ./...` and `go vet ./...` re-run on the merged tree: ok.
+- Worktree branches and paths (left for the user to clean up, under `/tank0/claude/trees/go-pugleaf/`):
+  - `worktree-agent-a7aa8a603c8216e96` (`agent-a7aa8a603c8216e96`): slice expire-overview-marks
+  - `worktree-agent-a0d81df3278dc61fa` (`agent-a0d81df3278dc61fa`): slice group-empty
+  - `worktree-agent-aefa9f58554f35bac` (`agent-aefa9f58554f35bac`): slice nntp-bind
+  - `worktree-agent-a03f4cab717a702e3` (`agent-a03f4cab717a702e3`): slice post-queue-tests
+- Verification: see the Verification note above (6405d1a); after it only the `-cleanup-older` help text and the
+  plan notes changed. Scratch root `./data-test-leftovers/` left in place.
+- Decisions: an emptied group keeps its place everywhere (GROUP/LISTGROUP `211 0 next next-1`, expire-news and
+  web `-repair-watermarks` write last_article = high_water = next-1, low_water = next); `-nntpbind` accepts plain
+  IP literals only (no zoned link-local); post-queue cleanup flags delete posted rows only (as always, now documented).
+- Leftovers / known issues:
+  - pre-existing: `STAT <msgid>` without a selected group right after a same-process POST answers 430 for up to the
+    local430 TTL (history batch not flushed yet; `internal/nntp/nntp-article-common.go:127-135` re-adds the miss);
+    BUGS.md's "same-process arrivals are removed at once" is wrong in that window. Candidate for a small plan.
+  - recover-db's consistency report flags an emptied group ("Main DB Last Article: N / Articles Max Num: 0"); report only.
+  - `database.Shutdown` costs ~2.4 s, which dominates the post-queue package tests (~45 s).
+  - the webserver has no bind-address flag (out of scope here).
