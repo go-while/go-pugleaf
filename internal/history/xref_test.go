@@ -100,17 +100,19 @@ func TestHistoryXref(t *testing.T) {
 				h.AddArticleAt(m, 4, 5)
 				h.AddArticle(m, 4)
 			}, "4:5"},
-			{"plain then numbered stays plain", "<xref-idem-4@test>", nil, func(m string) {
+			{"plain then numbered upgrades", "<xref-idem-4@test>", nil, func(m string) {
 				h.AddArticle(m, 4)
 				h.AddArticleAt(m, 4, 5)
-			}, "4"},
-			{"mixed row: known groups untouched, new group appended", "<xref-idem-5@test>", "1,2:20,3", func(m string) {
+				h.AddArticle(m, 4)
+				h.AddArticleAt(m, 4, 6)
+			}, "4:5"},
+			{"mixed row: plain upgraded in place, numbered untouched, new group appended", "<xref-idem-5@test>", "1,2:20,3", func(m string) {
 				h.AddArticleAt(m, 1, 10)
 				h.AddArticleAt(m, 2, 21)
 				h.AddArticle(m, 3)
 				h.AddArticle(m, 2)
 				h.AddArticleAt(m, 4, 40)
-			}, "1,2:20,3,4:40"},
+			}, "1:10,2:20,3,4:40"},
 			{"prefix of a numbered token is another group", "<xref-idem-6@test>", "12:5", func(m string) {
 				h.AddArticleAt(m, 1, 7)
 				h.AddArticleAt(m, 2, 8)
@@ -119,6 +121,18 @@ func TestHistoryXref(t *testing.T) {
 				h.AddArticleAt(m, 1, 7)
 				h.AddArticleAt(m, 2, 8)
 			}, "12,21,1:7,2:8"},
+			{"upgrade replaces only the exact plain token", "<xref-idem-7b@test>", "12,1,21,11,112", func(m string) {
+				h.AddArticleAt(m, 1, 7)
+				h.AddArticleAt(m, 11, 3)
+				h.AddArticleAt(m, 2, 8)
+			}, "12,1:7,21,11:3,112,2:8"},
+			{"upgrade of the first and the last token", "<xref-idem-7c@test>", "1,5,11", func(m string) {
+				h.AddArticleAt(m, 11, 4)
+				h.AddArticleAt(m, 1, 9)
+			}, "1:9,5,11:4"},
+			{"upgrade of a single plain token", "<xref-idem-7d@test>", "1", func(m string) {
+				h.AddArticleAt(m, 1, 1)
+			}, "1:1"},
 			{"longer id than a known one", "<xref-idem-8@test>", "1:7,2", func(m string) {
 				h.AddArticleAt(m, 11, 3)
 				h.AddArticleAt(m, 22, 4)
@@ -153,20 +167,26 @@ func TestHistoryXref(t *testing.T) {
 		}
 	})
 
-	// A group stored before the numbers were recorded keeps its plain token: a later add with a
-	// number neither appends a second token for the group nor fills in the number. Only a full
-	// history-rebuild (which writes the rows from scratch) records the number.
-	t.Run("PlainTokenStaysPlainUntilRebuild", func(t *testing.T) {
-		m := "<xref-plain-stays@test>"
+	// A group stored before the numbers were recorded has a plain token: the first add with a
+	// number (e.g. a history-rebuild over the existing index) upgrades it in place; later adds
+	// with another number or without a number leave the known number alone.
+	t.Run("PlainTokenUpgradedByNumberedAdd", func(t *testing.T) {
+		m := "<xref-plain-upgrade@test>"
 		histXrefInsertRaw(t, h, m, "7,9:90")
-		h.AddArticleAt(m, 7, 70)
-		histTestWaitIdle(t, h)
-		h.AddArticleAt(m, 7, 71) // next flush
+		h.AddArticle(m, 7) // without a number: stays plain, no duplicate
 		histTestWaitIdle(t, h)
 		if raw := histXrefRaw(t, dir, m); raw != "7,9:90" {
-			t.Fatalf("raw = %q, want \"7,9:90\"", raw)
+			t.Fatalf("after plain add: raw = %q, want \"7,9:90\"", raw)
 		}
-		want := []Location{{GroupID: 7, ArticleNum: 0}, {GroupID: 9, ArticleNum: 90}}
+		h.AddArticleAt(m, 7, 70)
+		histTestWaitIdle(t, h)
+		h.AddArticleAt(m, 7, 71) // next flush: known number is not changed
+		h.AddArticle(m, 7)       // never downgraded
+		histTestWaitIdle(t, h)
+		if raw := histXrefRaw(t, dir, m); raw != "7:70,9:90" {
+			t.Fatalf("raw = %q, want \"7:70,9:90\"", raw)
+		}
+		want := []Location{{GroupID: 7, ArticleNum: 70}, {GroupID: 9, ArticleNum: 90}}
 		if got := histXrefLocations(t, h, m); !reflect.DeepEqual(got, want) {
 			t.Fatalf("locations = %+v, want %+v", got, want)
 		}

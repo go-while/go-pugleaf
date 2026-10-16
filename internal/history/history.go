@@ -83,14 +83,23 @@ type routedOp struct {
 // "groupID" of rows written before the numbers were recorded (number unknown). Both formats may
 // appear in one row; readers accept both (parseLocations).
 //
-// A group is never stored twice: an add for a group that already has a token in either format
-// is a no-op, so a re-add neither updates the number nor turns a plain token into "id:num".
-// Renumbered groups (recover-db) and old plain rows get their numbers from a full
-// history-rebuild, which writes every row from scratch.
+// A group is never stored twice. An add with a number upgrades a plain "id" token of the group
+// in place to "id:num" (token order kept), so a history-rebuild over an existing index fills in
+// the numbers of old rows. A group that already has "id:<num>" is left as it is: an add never
+// changes a known number (a renumbered group, e.g. after recover-db, needs a rebuild into an
+// empty history index). An add without a number never appends a plain token next to an existing
+// token of the group and never downgrades "id:num".
 const (
-	// add a token ("id:num" or plain "id") if the row has no token for this group in either format.
-	// args: messageID, token, groupID (prefix probe ",id:"), groupID (exact probe ",id,")
-	sqlAddArticle = `INSERT INTO %s(message_id,newsgroups) VALUES(?,?) ON CONFLICT(message_id) DO UPDATE SET newsgroups = CASE WHEN coalesce(newsgroups,'')='' THEN excluded.newsgroups ELSE newsgroups||','||excluded.newsgroups END WHERE instr(','||coalesce(newsgroups,'')||',', ','||?||':') = 0 AND instr(','||coalesce(newsgroups,'')||',', ','||?||',') = 0`
+	// add a token ("id:num" or plain "id"): skip if the row holds "id:<anything>" (prefix probe
+	// ",id:") or the plain "id" while the token has no number (exact probe ",id,"); upgrade a
+	// plain "id" in place to the numbered token; otherwise append.
+	// args: ?1 messageID, ?2 token, ?3 groupID
+	sqlAddArticle = `INSERT INTO %s(message_id,newsgroups) VALUES(?1,?2) ON CONFLICT(message_id) DO UPDATE SET newsgroups = CASE` +
+		` WHEN coalesce(newsgroups,'')='' THEN excluded.newsgroups` +
+		` WHEN instr(','||newsgroups||',', ','||?3||',') > 0 THEN trim(replace(','||newsgroups||',', ','||?3||',', ','||excluded.newsgroups||','), ',')` +
+		` ELSE newsgroups||','||excluded.newsgroups END` +
+		` WHERE instr(','||coalesce(newsgroups,'')||',', ','||?3||':') = 0` +
+		` AND (instr(','||coalesce(newsgroups,'')||',', ','||?3||',') = 0 OR excluded.newsgroups <> ?3)`
 	// remove the exact token "id:num" and a plain "id" token of the same group (number unknown).
 	// args: "id:num", "id", messageID
 	sqlRemoveArticle = `UPDATE %s SET newsgroups = trim(replace(replace(','||newsgroups||',', ','||?||',', ','), ','||?||',', ','), ',') WHERE message_id=?`
@@ -188,8 +197,8 @@ func (h *History) AddArticle(messageID string, groupID int64) {
 }
 
 // AddArticleAt is AddArticle with the article number of messageID in groupID (0 = unknown).
-// The row then holds the token "groupID:articleNum". A group that already has a token (either
-// format) is left as it is: a re-add does not change its number (a history-rebuild does).
+// The row then holds the token "groupID:articleNum": a plain "groupID" token (number unknown) is
+// upgraded in place; a token that already has a number is left as it is (never changed by an add).
 func (h *History) AddArticleAt(messageID string, groupID, articleNum int64) {
 	h.enqueue(opAdd, messageID, groupID, articleNum)
 }
@@ -640,7 +649,7 @@ func (h *History) executeDBTransaction(dbIndex int, ops []routedOp) error {
 				err = fmt.Errorf("prepare add %s: %v", rop.tableName, err)
 				return err
 			}
-			if _, err = stmt.Exec(rop.messageID, token, groupID, groupID); err != nil {
+			if _, err = stmt.Exec(rop.messageID, token, groupID); err != nil {
 				err = fmt.Errorf("add messageID='%s' token=%s table=%s: %v", rop.messageID, token, rop.tableName, err)
 				return err
 			}
