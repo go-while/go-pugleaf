@@ -141,3 +141,9 @@ race list; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` li
   - Open (accepted): hints follow the GROUP rule (an admin-activated reserved name would be read); a POST whose
     article is dropped before a repeat round's fresh mark still gets 240 + log; in the first round a drop of
     another article in the same group can 441 a still-queued post.
+- Wave 2 (merged): `post-430-e2e` (worktree-agent-abe57bbb12ef47273, ba5c917, merge a891f6c): `TestE2EPost430Binary`
+  (~13 s warm): POST → STAT/HEAD/OVER/HDR/XHDR by message-id on the same and a new connection at once, IHAVE polled
+  to 223 and never 430 again, crosspost to an unknown group creates no DB file (and, after a2a18e3, no hash dir),
+  `-post-commit-wait 0` run not poisoned, `-1s` exits 1, SIGINT exit 0. Measured POST latency with the wait:
+  68-121 ms (1 ms without). Review MERGE, minor 1 fixed inline (a2a18e3), minor 2 (misleading failure text if a
+  commit took longer than the grace) left.
