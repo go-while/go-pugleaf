@@ -119,3 +119,25 @@ race list; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` li
 3. Restart with `-post-commit-wait 0`: POST then immediate `STAT <id>` may be 430; on a new connection within
    5 s it is 223 (not poisoned).
 4. `-post-commit-wait -1s` → exit 1 with a message. SIGINT → exit 0 for every run.
+
+### Progress
+- Wave 1 (merged into plan-post-430-window):
+  - `post-commit-wait` (worktree-agent-a9f483327cd5b42df, 8bb1261 + fe75ca0, merge 395e236): `ProcessPostedArticle`
+    takes marks before the hand-off, waits only on the groups the article was captured for (snapshot of
+    article.NewsgroupsPtr under article.Mux), and is authoritative by the row: after each WaitCommitted (nil or
+    dropped) it looks the row up in the group DB (`postArticleStored` seam); absent+nil → fresh mark and wait again
+    until the deadline (50 ms recheck pause); absent+dropped → CaseError "not stored" (441); timeout/stop → CasePass
+    + one log line. `-post-commit-wait` flag (default 5 s). Review MERGE; the two minors (per-group counter can
+    return early under a concurrent feed; a drop of another article could 441 a stored post) fixed by the row check.
+  - `arrival-grace` (worktree-agent-a4d7ee94769267805, 51c0fa5 + 6f051b7, merge b0e0862): `RecentArrivals`
+    (10 s grace, bounds, cleaned on the local430 ticker), `noteArrival` after 240/235/239 (NoteArrival before
+    Remove), `recentArrivalArticle` helper: hints resolved with `selectableGroup` and read directly from the group
+    DB (no processor/history call, hidden copies skip to the next hint), used by step (b) and by XHDR by message-id;
+    during the grace local430.Check/Add are skipped and a late Add is undone; docs. Review MERGE AFTER FIXES:
+    MAJOR (a hint for an unknown group created its group DB on disk, SEC-2 pattern) fixed + test
+    `unknown-group-hint`; minors 4-7 fixed (ordering race, BUG-8 test proves Remove again, docs wording, XHDR,
+    test runtime 19 s → 3 s).
+  - Merged tree (b0e0862): gofmt empty, vet, build, full race list green, known bugs only T-nntp-article-1.
+  - Open (accepted): hints follow the GROUP rule (an admin-activated reserved name would be read); a POST whose
+    article is dropped before a repeat round's fresh mark still gets 240 + log; in the first round a drop of
+    another article in the same group can 441 a still-queued post.
