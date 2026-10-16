@@ -208,3 +208,16 @@ Checks: gofmt empty, vet, build, race tests of history/database/nntp/processor/n
   tests expect the partial values. Review: MERGE after the four minors.
 - Deviation from the plan: `internal/database` xref branches untouched (the range query already returns the number).
 - Merged tree: gofmt empty, vet, build, full race list green, known bugs: only T-nntp-article-1.
+
+### Wave 2 (merged) and verification
+- `xref-e2e-docs` (worktree-agent-adb0a28ddbd6becea, f58fac7): `TestE2EXrefBinary` (untagged, builds nntp-server,
+  nntpmgr and history-rebuild into t.TempDir, ~15 s warm, ~100 s on a cold build cache), README/BUGS/docs-audit.
+  Review: MERGE; three minors fixed inline (d08020d): bounded DNS lookup, empty-header guard, HDR/XHDR in the cost note.
+- Verifier (d08020d): gofmt/vet/build/full race list green, known bugs only T-nntp-article-1, five builds ok,
+  end-to-end on ./data-test-xref all steps PASS: full `Xref: example.org xref.test.a:1 xref.test.b:1` in HEAD/ARTICLE/
+  OVER 9th field/HDR/XHDR (b first when serving b or without a group: history arrival order), partial serving group
+  only, off exactly the old output (8 OVER fields, no Xref:full, HDR `1`), `-xref maybe` exit 1, validate-only
+  0 missing / 0 without number / 0 wrong number, expire `-days 1 -force -trim-history` of a backdated copy in b turned
+  the row `2:1,1:1` into `1:1` and HEAD in a then showed only a; SIGINT exits 0.
+- Pre-existing, not from this plan: expire-news logs "failed to delete overview batch ... no such table: overview";
+  an emptied group answers `211 0 0 0` while the main DB keeps low/high water 1.
