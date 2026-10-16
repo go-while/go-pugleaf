@@ -49,7 +49,11 @@
    `-validate-only`); new articles get them on arrival. Foreign Xref headers are still stripped on intake and
    dropped on relay. Binary e2e test: `TestE2EXrefBinary` in `cmd/nntp-server/e2e_xref_test.go`.
  - Accepted limitation (user decision 2026-10-11): the local430 negative cache keeps a 60 s TTL, so an article stored
-   by another process (fetcher) answers 430 for up to 60 s (T-nntp-article-1); same-process arrivals are removed at once.
+   by another process (fetcher) answers 430 for up to 60 s (T-nntp-article-1). Same-process arrivals (plan
+   `post-430-window`): POST waits up to `-post-commit-wait` (default 5 s; 0 = no wait) for the group DB commit
+   before its 240 (a timeout still answers 240), and every same-process arrival (POST/IHAVE/TAKETHIS) gets a 10 s
+   grace in which ARTICLE/HEAD/BODY/STAT/OVER/HDR/XHDR by message-id read the arrival's groups (known, active ones)
+   directly and a miss is not cached in local430.
  - **Fixed by plan `nntp-client-transfer` (2026-10-15, `.claude/plans/done/nntp-client-transfer.md`):** CLI-1 (one
    Path line, headers relayed verbatim, dot-stuffed byte-exact bodies), CLI-2 (411 no longer panics the fetcher),
    CLI-3 (client socket deadlines, TLS handshake timeout, no leaked sockets), CLI-4 (authenticated streaming

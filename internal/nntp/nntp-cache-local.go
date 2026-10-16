@@ -23,6 +23,9 @@ type Local430 struct {
 	mu    sync.RWMutex
 	cache map[string]time.Time // message-id -> time of the 430
 	ttl   time.Duration
+	// arrivals is the server's recentArrivals table; run cleans it with the same ticker
+	// (nil: nothing to clean).
+	arrivals *RecentArrivals
 }
 
 // SetLocal430TTL sets how long a message-id that answered 430 is answered from the
@@ -153,6 +156,101 @@ func (lc *Local430) run(stop <-chan struct{}) {
 			return
 		case <-ticker.C:
 			lc.Cleanup()
+			lc.arrivals.Cleanup()
+		}
+	}
+}
+
+const (
+	// ArrivalGrace is how long a same-process arrival (POST/IHAVE/TAKETHIS) is remembered in
+	// recentArrivals: the by-message-id lookup tries the arrival's groups directly and never
+	// caches a miss for it in local430 (plan post-430-window). It covers the batch writer
+	// (database.BatchInterval, 3 s) plus the history flush (BatchTimeout, 1 s) with margin.
+	ArrivalGrace = 10 * time.Second
+	// recentArrivalsMaxEntries bounds recentArrivals; NoteArrival refuses new ids when it is
+	// full of entries younger than ArrivalGrace.
+	recentArrivalsMaxEntries = local430MaxEntries
+)
+
+// arrival is one recentArrivals entry.
+type arrival struct {
+	groups []string  // Newsgroups names as received (never modified after NoteArrival)
+	at     time.Time // time of the 240/235/239
+}
+
+// RecentArrivals remembers the articles this process accepted in the last ArrivalGrace,
+// with the groups they were sent to, so a by-message-id lookup does not depend on the
+// history index (flushed after the group DB commit) and does not poison local430 with a
+// miss while the article is still on its way to the databases. All methods are safe on a
+// nil table (they do nothing / find nothing).
+type RecentArrivals struct {
+	mu    sync.Mutex
+	cache map[string]arrival // message-id -> arrival
+}
+
+// newRecentArrivals returns an empty table.
+func newRecentArrivals() *RecentArrivals {
+	return &RecentArrivals{cache: make(map[string]arrival)}
+}
+
+// NoteArrival remembers that messageID was accepted now for groups (copied). It returns
+// false (and stores nothing) for ids over 250 octets and for new ids when the table holds
+// recentArrivalsMaxEntries entries younger than ArrivalGrace.
+func (ra *RecentArrivals) NoteArrival(messageID string, groups []string) bool {
+	if ra == nil || len(messageID) > 250 { // RFC 5536 §3.1.3: message-ids are at most 250 octets
+		return false
+	}
+	entry := arrival{groups: append([]string(nil), groups...), at: time.Now()}
+	ra.mu.Lock()
+	defer ra.mu.Unlock()
+	if ra.cache == nil {
+		ra.cache = make(map[string]arrival)
+	}
+	if _, exists := ra.cache[messageID]; !exists && len(ra.cache) >= recentArrivalsMaxEntries {
+		ra.cleanupLocked()
+		if len(ra.cache) >= recentArrivalsMaxEntries {
+			return false
+		}
+	}
+	ra.cache[messageID] = entry
+	return true
+}
+
+// RecentArrival returns the groups of messageID when it arrived less than ArrivalGrace ago.
+// An expired entry is removed. The returned slice must not be modified.
+func (ra *RecentArrivals) RecentArrival(messageID string) (groups []string, ok bool) {
+	if ra == nil {
+		return nil, false
+	}
+	ra.mu.Lock()
+	defer ra.mu.Unlock()
+	e, found := ra.cache[messageID]
+	if !found {
+		return nil, false
+	}
+	if time.Since(e.at) >= ArrivalGrace {
+		delete(ra.cache, messageID)
+		return nil, false
+	}
+	return e.groups, true
+}
+
+// Cleanup removes entries older than ArrivalGrace (called by Local430.run).
+func (ra *RecentArrivals) Cleanup() {
+	if ra == nil {
+		return
+	}
+	ra.mu.Lock()
+	ra.cleanupLocked()
+	ra.mu.Unlock()
+}
+
+// cleanupLocked removes expired entries; ra.mu must be held.
+func (ra *RecentArrivals) cleanupLocked() {
+	cutoff := time.Now().Add(-ArrivalGrace)
+	for messageID, e := range ra.cache {
+		if !e.at.After(cutoff) {
+			delete(ra.cache, messageID)
 		}
 	}
 }

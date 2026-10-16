@@ -84,14 +84,17 @@ func (c *ClientConnection) handlePost() error {
 	}
 	article.Posted = true // injected here: the processor applies the POST-only group policy
 
-	// Copy the id before the hand-off: once ProcessIncomingArticle returns, the batch
+	// Copy the id and the groups before the hand-off: once the processor returns, the batch
 	// goroutine may already have cleared the struct (db_batch.go processNewsgroupBatch),
 	// so reading article.MessageID afterwards is a data race and can yield "".
 	messageID := article.MessageID
-	code, perr := c.server.Processor.ProcessIncomingArticle(article)
+	groups := articleGroupNames(article)
+	// 240 only once the batch writer committed the article (at most PostCommitWait), so the
+	// poster can read it back at once (plan post-430-window)
+	code, perr := c.server.Processor.ProcessPostedArticle(article, c.server.shutdown, c.server.PostCommitWait())
 	reply, text, closeConn := intakeReply(intakePost, code, perr, messageID)
-	if reply == 240 && c.server.local430 != nil {
-		c.server.local430.Remove(messageID) // BUG-8: the article exists now
+	if reply == 240 {
+		c.server.noteArrival(messageID, groups)
 	}
 	if closeConn {
 		return c.closeAfterReply(reply, text)
@@ -170,15 +173,40 @@ func (c *ClientConnection) handleIHave(args []string) error {
 		return c.sendResponse(437, "Rejected (Message-ID mismatch)")
 	}
 
+	groups := articleGroupNames(article) // before the hand-off, see handlePost
 	code, perr := c.server.Processor.ProcessIncomingArticle(article)
 	reply, text, closeConn := intakeReply(intakeIHave, code, perr, messageID)
-	if reply == 235 && c.server.local430 != nil {
-		c.server.local430.Remove(messageID) // BUG-8: the article exists now
+	if reply == 235 {
+		c.server.noteArrival(messageID, groups)
 	}
 	if closeConn {
 		return c.closeAfterReply(reply, text)
 	}
 	return c.sendResponse(reply, text)
+}
+
+// articleGroupNames returns the names behind article.NewsgroupsPtr (the Newsgroups header as
+// received, syntactically valid names only) as a new slice; nil pointers are skipped.
+func articleGroupNames(article *models.Article) []string {
+	names := make([]string, 0, len(article.NewsgroupsPtr))
+	for _, p := range article.NewsgroupsPtr {
+		if p != nil && *p != "" {
+			names = append(names, *p)
+		}
+	}
+	return names
+}
+
+// noteArrival records an article this process accepted (240/235/239): the id leaves
+// local430 (BUG-8: the article exists now) and enters recentArrivals with its groups, so
+// lookups during ArrivalGrace try those groups and cache no miss (plan post-430-window).
+// NoteArrival comes first: a reader that misses between the two calls either sees the arrival
+// (and caches nothing) or re-checks recentArrivals after its local430.Add.
+func (s *NNTPServer) noteArrival(messageID string, groups []string) {
+	s.recentArrivals.NoteArrival(messageID, groups)
+	if s.local430 != nil {
+		s.local430.Remove(messageID)
+	}
 }
 
 // reconcileMessageID reports whether the article's Message-ID header equals the
@@ -268,10 +296,11 @@ func (c *ClientConnection) handleTakeThis(args []string) error {
 		return reply(439, "Transfer failed (Message-ID mismatch)")
 	}
 
+	groups := articleGroupNames(article) // before the hand-off, see handlePost
 	code, perr := c.server.Processor.ProcessIncomingArticle(article)
 	r, text, closeConn := intakeReply(intakeTakeThis, code, perr, id)
-	if r == 239 && c.server.local430 != nil {
-		c.server.local430.Remove(id) // BUG-8: the article exists now
+	if r == 239 {
+		c.server.noteArrival(id, groups)
 	}
 	if closeConn {
 		return c.closeAfterReply(r, text)
