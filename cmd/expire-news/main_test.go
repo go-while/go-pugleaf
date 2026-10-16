@@ -1,14 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
+	"github.com/go-while/go-pugleaf/internal/models"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -162,5 +167,121 @@ func toolsTestWaitPending(t *testing.T, h *history.History) {
 			t.Fatalf("history ops not committed in time: %+v", h.GetStats())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestToolsTestDeleteArticlesNoOverviewWarning: a delete batch no longer touches the legacy
+// overview table (gone since the unified schema), so nothing about it is logged, and the articles
+// and their thread rows are deleted.
+func TestToolsTestDeleteArticlesNoOverviewWarning(t *testing.T) {
+	g := toolsTestGroupDB(t)
+	if _, err := g.DB.Exec(`INSERT INTO threads (root_article, parent_article, child_article) VALUES
+		(1, NULL, 1), (1, 1, 2), (4, NULL, 4), (4, 4, 5)`); err != nil {
+		t.Fatalf("insert threads: %v", err)
+	}
+
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	err := deleteArticles(g, []int64{1, 2, 3}, historyTrim{})
+	log.SetOutput(prev)
+	if err != nil {
+		t.Fatalf("deleteArticles: %v", err)
+	}
+	if strings.Contains(strings.ToLower(buf.String()), "overview") {
+		t.Fatalf("log mentions overview:\n%s", buf.String())
+	}
+
+	var left int
+	if err := g.DB.QueryRow("SELECT COUNT(*) FROM articles WHERE article_num IN (1, 2, 3)").Scan(&left); err != nil || left != 0 {
+		t.Fatalf("deleted articles left = %d (%v), want 0", left, err)
+	}
+	if err := g.DB.QueryRow("SELECT COUNT(*) FROM articles").Scan(&left); err != nil || left != 2 {
+		t.Fatalf("articles left = %d (%v), want 2", left, err)
+	}
+	if err := g.DB.QueryRow("SELECT COUNT(*) FROM threads WHERE root_article = 1 OR child_article IN (1, 2, 3)").Scan(&left); err != nil || left != 0 {
+		t.Fatalf("thread rows of deleted articles left = %d (%v), want 0", left, err)
+	}
+	if err := g.DB.QueryRow("SELECT COUNT(*) FROM threads").Scan(&left); err != nil || left != 2 {
+		t.Fatalf("thread rows left = %d (%v), want 2", left, err)
+	}
+}
+
+// toolsTestCountersGroup creates newsgroup name in the main database with articles 1..n in its
+// group database (created through GetGroupDB, so it has the current schema and article_num_seq).
+func toolsTestCountersGroup(t *testing.T, db *database.Database, name string, n int) {
+	t.Helper()
+	if err := db.InsertNewsgroup(&models.Newsgroup{Name: name, Active: true, LastArticle: int64(n), MessageCount: int64(n), HighWater: n, LowWater: 1}); err != nil {
+		t.Fatalf("InsertNewsgroup %s: %v", name, err)
+	}
+	g, err := db.GetGroupDB(name)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", name, err)
+	}
+	defer g.Return()
+	for i := 1; i <= n; i++ {
+		if _, err := g.DB.Exec("INSERT INTO articles (article_num, message_id) VALUES (?, ?)", i, fmt.Sprintf("<%d@%s>", i, name)); err != nil {
+			t.Fatalf("insert article %d: %v", i, err)
+		}
+	}
+}
+
+// toolsTestDeleteAndCount deletes nums from the group and runs updateNewsgroupCounters.
+func toolsTestDeleteAndCount(t *testing.T, db *database.Database, name string, nums []int64) *models.Newsgroup {
+	t.Helper()
+	g, err := db.GetGroupDB(name)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", name, err)
+	}
+	err = deleteArticles(g, nums, historyTrim{})
+	g.Return()
+	if err != nil {
+		t.Fatalf("deleteArticles: %v", err)
+	}
+	if err := updateNewsgroupCounters(db, name); err != nil {
+		t.Fatalf("updateNewsgroupCounters: %v", err)
+	}
+	ng, err := db.MainDBGetNewsgroup(name)
+	if err != nil {
+		t.Fatalf("MainDBGetNewsgroup %s: %v", name, err)
+	}
+	return ng
+}
+
+// TestToolsTestUpdateNewsgroupCountersWatermarks: after an expiry the main database row carries
+// the marks LIST ACTIVE prints: high_water = last_article, low_water = first survivor. An emptied
+// group keeps its place (article_num_seq): last_article = high_water = old max, low_water = old
+// max + 1, so LIST ACTIVE shows low = high+1 like GROUP.
+func TestToolsTestUpdateNewsgroupCountersWatermarks(t *testing.T) {
+	db := adfOptExpireDB(t)
+
+	// survivors: 1..6, delete 1, 2 and the top article 6
+	toolsTestCountersGroup(t, db, "tools.test.counters.some", 6)
+	ng := toolsTestDeleteAndCount(t, db, "tools.test.counters.some", []int64{1, 2, 6})
+	if ng.MessageCount != 3 || ng.LastArticle != 5 || ng.HighWater != 5 || ng.LowWater != 3 {
+		t.Fatalf("survivors: message_count %d, last_article %d, high_water %d, low_water %d; want 3, 5, 5, 3",
+			ng.MessageCount, ng.LastArticle, ng.HighWater, ng.LowWater)
+	}
+
+	// emptied: all of 1..4 deleted, article_num_seq.last_num stays 4
+	toolsTestCountersGroup(t, db, "tools.test.counters.empty", 4)
+	ng = toolsTestDeleteAndCount(t, db, "tools.test.counters.empty", []int64{1, 2, 3, 4})
+	if ng.MessageCount != 0 || ng.LastArticle != 4 || ng.HighWater != 4 || ng.LowWater != 5 {
+		t.Fatalf("emptied: message_count %d, last_article %d, high_water %d, low_water %d; want 0, 4, 4, 5",
+			ng.MessageCount, ng.LastArticle, ng.HighWater, ng.LowWater)
+	}
+
+	// never used: no article ever, next number 1
+	toolsTestCountersGroup(t, db, "tools.test.counters.never", 0)
+	if err := updateNewsgroupCounters(db, "tools.test.counters.never"); err != nil {
+		t.Fatalf("updateNewsgroupCounters: %v", err)
+	}
+	ng, err := db.MainDBGetNewsgroup("tools.test.counters.never")
+	if err != nil {
+		t.Fatalf("MainDBGetNewsgroup: %v", err)
+	}
+	if ng.MessageCount != 0 || ng.LastArticle != 0 || ng.HighWater != 0 || ng.LowWater != 1 {
+		t.Fatalf("never used: message_count %d, last_article %d, high_water %d, low_water %d; want 0, 0, 0, 1",
+			ng.MessageCount, ng.LastArticle, ng.HighWater, ng.LowWater)
 	}
 }

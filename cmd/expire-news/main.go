@@ -623,13 +623,7 @@ func deleteArticles(groupDB *database.GroupDB, articleNums []int64, trim history
 			return fmt.Errorf("failed to batch delete articles: %v", err)
 		}
 
-		// Delete from overview table if it exists (might not exist in unified schema)
-		query = fmt.Sprintf("DELETE FROM overview WHERE article_num IN (%s)", placeholders)
-		_, err = tx.Exec(query, args...)
-		if err != nil {
-			// Don't fail if overview table doesn't exist
-			log.Printf("Warning: failed to delete overview batch (table may not exist): %v", err)
-		}
+		// No overview delete: the legacy overview table is gone since the unified schema (migrations/old/).
 
 		// Delete related thread entries using OR conditions for all relationships
 		// This is more complex as we need to check multiple columns
@@ -675,8 +669,8 @@ var derivedThreadTables = []string{"tree_stats", "cached_trees", "thread_cache"}
 
 // deleteDerivedThreadRows deletes the cached_trees, tree_stats and thread_cache rows whose
 // thread_root is one of the deleted article numbers, inside the delete transaction. A missing
-// table is skipped (older or minimal group databases), like the overview delete; any other
-// error fails the delete, so no article goes without its derived rows.
+// table is skipped (older or minimal group databases); any other error fails the delete, so no
+// article goes without its derived rows.
 func deleteDerivedThreadRows(tx *sql.Tx, placeholders string, args []interface{}) error {
 	for _, table := range derivedThreadTables {
 		query := fmt.Sprintf("DELETE FROM %s WHERE thread_root IN (%s)", table, placeholders)
@@ -822,7 +816,12 @@ func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles i
 	return totalPruned, totalArticles, nil
 }
 
-// updateNewsgroupCounters updates the message count and last article number for a newsgroup
+// updateNewsgroupCounters updates the message count, the last article number and the water marks
+// (high_water, low_water: the marks LIST ACTIVE prints) of a newsgroup in the main database.
+// With articles left: last_article = high_water = the highest remaining number, low_water = the
+// lowest one. An emptied group keeps its place: last_article = high_water = next-1 and
+// low_water = next, where next is the number the next article gets (article_num_seq), so LIST
+// ACTIVE shows low = high+1 like GROUP does; a never-used group gives 0 and 1.
 func updateNewsgroupCounters(db *database.Database, groupName string) error {
 	// Get group database to count current articles
 	groupDB, err := db.GetGroupDB(groupName)
@@ -831,28 +830,33 @@ func updateNewsgroupCounters(db *database.Database, groupName string) error {
 	}
 	defer groupDB.Return()
 
-	// Count current articles
-	var messageCount int64
-	err = database.RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", nil, &messageCount)
+	// Count current articles, lowest and highest article number
+	var messageCount, lowWater, lastArticle int64
+	err = database.RetryableQueryRowScan(groupDB.DB,
+		"SELECT COUNT(*), COALESCE(MIN(article_num), 0), COALESCE(MAX(article_num), 0) FROM articles",
+		nil, &messageCount, &lowWater, &lastArticle)
 	if err != nil {
 		return fmt.Errorf("failed to count articles: %v", err)
 	}
-
-	// Get the highest article number
-	var lastArticle int64
-	err = database.RetryableQueryRowScan(groupDB.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", nil, &lastArticle)
-	if err != nil {
-		return fmt.Errorf("failed to get last article: %v", err)
+	if messageCount == 0 {
+		next, err := db.NNTPGroupNextArticleNum(groupDB)
+		if err != nil {
+			return fmt.Errorf("failed to get next article number: %v", err)
+		}
+		lastArticle = next - 1
+		lowWater = next
 	}
+	highWater := lastArticle
 
-	// Update the main newsgroups table
-	_, err = db.GetMainDB().Exec(`
-		UPDATE newsgroups SET message_count = ?, last_article = ? WHERE name = ?`,
-		messageCount, lastArticle, groupName)
+	// Update the main newsgroups table (high_water/low_water as in query_UpdateNewsgroupWatermarks)
+	_, err = database.RetryableExec(db.GetMainDB(), `
+		UPDATE newsgroups SET message_count = ?, last_article = ?, high_water = ?, low_water = ? WHERE name = ?`,
+		messageCount, lastArticle, highWater, lowWater, groupName)
 	if err != nil {
 		return fmt.Errorf("failed to update newsgroup counters: %v", err)
 	}
 
-	log.Printf("Updated %s counters: %d articles, last article %d", groupName, messageCount, lastArticle)
+	log.Printf("Updated %s counters: %d articles, last article %d, high water %d, low water %d",
+		groupName, messageCount, lastArticle, highWater, lowWater)
 	return nil
 }
