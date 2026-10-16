@@ -191,3 +191,19 @@ call sites did not change):
 - `cmd/nntp-server/main.go`: `-xref` flag (default `partial`), fatal on an invalid value, mode in the startup log line.
 - `cmd/history-rebuild`: `processGroup` calls `AddArticleAt` with `article_num`.
 Checks: gofmt empty, vet, build, race tests of history/database/nntp/processor/nntp-server/history-rebuild/expire-news green.
+
+### Wave 1 (merged into plan-xref-history)
+- `xref-history` (worktree-agent-aff41c046e80a66ae, 5b0a0ce + 48fa25b + dfbf028): `id:num` tokens; the UPSERT appends,
+  upgrades a plain token in place and (RowsAffected 0 + different number) rewrites a stale number, so a plain
+  `history-rebuild` over the existing index fills and corrects numbers; a numbered remove strips the exact token, a
+  plain token and (fallback read-modify-write) any token of that group. Review: MERGE after the two change requests.
+- `xref-rebuild-trim` (worktree-agent-a63f7f1ec9b0599c0, 7fc00fd + 17eea67): `historyIndex`/`historyRemover`
+  interfaces, validate counts "Without number" and "Wrong number", trim passes the token's number, expire-news passes
+  the deleted row's article_num; READMEs. Review: MERGE; its three probe-gated tests run for real after the merge.
+- `xref-serve` (worktree-agent-ac4ca6125a79c2b7d, e9c85b0 + 4343ba5): `xrefLine`/`xrefValue`, HEAD/ARTICLE append the
+  line last and drop stored Xref lines (non-off), OVER/XOVER 9th field + `Xref:full`, HDR/XHDR range via
+  `headerFieldRange` (message-id range query instead of the '' query, same filter/order), processor `XrefLocations`
+  with a negative cache for unknown group IDs (5 min, 4096). Nine byte-exact article tests pin `XrefOff`; overview
+  tests expect the partial values. Review: MERGE after the four minors.
+- Deviation from the plan: `internal/database` xref branches untouched (the range query already returns the number).
+- Merged tree: gofmt empty, vet, build, full race list green, known bugs: only T-nntp-article-1.
