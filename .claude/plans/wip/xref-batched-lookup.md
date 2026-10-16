@@ -45,10 +45,14 @@ roughly 3-5× on large ranges, not 1000×. Nothing changes in the stored format 
 - Byte-exact output: the served lines must be identical with the flag on and off (tests assert it).
 
 ## Waves
-### Wave 0 (inline)
-- `internal/nntp/nntp-server.go`: interface method `XrefLocationsBatch`, `xrefBatched` switch; stub
-  implementations in both test fakes and `cmd/nntp-server/processor_adapter.go` (adapter forwards to the
-  processor; processor stub returns per-id results via `XrefLocations` until wave 1 lands).
+### Wave 0 (inline, done on plan-xref-batched-lookup)
+- `internal/nntp/nntp-server.go`: interface method `XrefLocationsBatch(messageIDs []string) (map[string][]XrefLocation, error)`;
+  `NewNNTPServer` calls `SetXrefBatchedLookup(true)`. `internal/nntp/nntp-xref.go`: `xrefModeStore.batched`
+  (atomic.Bool), `SetXrefBatchedLookup`/`XrefBatchedLookup`. `internal/processor/processor.go`: `XrefLocationsBatch`
+  stub (one `XrefLocations` per id; slice serve-batch replaces it with the history batch). `cmd/nntp-server/processor_adapter.go`
+  forwards. Fakes: `wiringTestProcessor` returns nil; `hFakeProcessor` serves `xrefLocs` for the given ids, fails with
+  `xrefBatchErr`, counts `xrefBatchCalls`/`xrefBatchIDs` (`xrefBatchCount()`).
+  Checks: gofmt empty, vet, build, race tests of nntp/processor/nntp-server green.
 ### Wave 1
 - slice `history-batch`: `internal/history/history.go` (`LookupLocationsBatch`, chunking, stats),
   `internal/history/xref_test.go` (batch == per-id results for mixed plain/numbered rows, absent ids,

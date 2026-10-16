@@ -317,6 +317,29 @@ func (proc *Processor) XrefLocations(messageID string) ([]nntp.XrefLocation, err
 	}, time.Now()), nil
 }
 
+// XrefLocationsBatch is XrefLocations for many message-ids: the result holds an entry for
+// every id the history index knows (an empty slice when none of its locations resolve).
+// Until the batched history lookup lands this is one XrefLocations per id.
+func (proc *Processor) XrefLocationsBatch(messageIDs []string) (map[string][]nntp.XrefLocation, error) {
+	if proc == nil || proc.History == nil || len(messageIDs) == 0 {
+		return nil, nil
+	}
+	out := make(map[string][]nntp.XrefLocation, len(messageIDs))
+	for _, id := range messageIDs {
+		if id == "" {
+			continue
+		}
+		locs, err := proc.XrefLocations(id)
+		if err != nil {
+			return nil, err
+		}
+		if locs != nil {
+			out[id] = locs
+		}
+	}
+	return out, nil
+}
+
 // xrefResolve maps history locations to group names with groupName (the ID cache in
 // XrefLocations), skipping numbers <= 0, unknown IDs and IDs in the negative cache at now.
 func (proc *Processor) xrefResolve(locs []history.Location, groupName func(id int64) (string, bool), now time.Time) []nntp.XrefLocation {

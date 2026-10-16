@@ -59,6 +59,27 @@ type xrefModeStore struct {
 	// errLogged is set after the first failed XrefLocations lookup was logged: later
 	// failures fall back to partial silently (one log line per server, not per article).
 	errLogged atomic.Bool
+	// batched: in XrefFull the range commands (OVER/XOVER, HDR/XHDR) look up the locations of
+	// a chunk with one Processor.XrefLocationsBatch call instead of one XrefLocations per line.
+	batched atomic.Bool
+}
+
+// SetXrefBatchedLookup enables (the default of a new server) or disables the batched history
+// lookup of XrefFull ranges (-xref-batched-lookup). It may be called while serving; the served
+// output is the same either way.
+func (s *NNTPServer) SetXrefBatchedLookup(on bool) {
+	if s == nil {
+		return
+	}
+	s.xref.batched.Store(on)
+}
+
+// XrefBatchedLookup reports whether XrefFull ranges use the batched lookup.
+func (s *NNTPServer) XrefBatchedLookup() bool {
+	if s == nil {
+		return false
+	}
+	return s.xref.batched.Load()
 }
 
 // SetXrefMode sets how Xref: headers are built. The default of a new server is XrefPartial.
