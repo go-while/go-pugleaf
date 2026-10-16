@@ -76,6 +76,23 @@ func (db *Database) NNTPGroupWatermarks(groupDB *GroupDB) (low, high int64, err 
 	return low, high, nil
 }
 
+// NNTPGroupNextArticleNum returns the number the next article stored in groupDB gets: the
+// expression the inserts use (migration 0010: max(article_num_seq.last_num, MAX(article_num)) + 1),
+// so it stays above every number ever handed out, also after all articles were expired. A group
+// DB without the sequence row (not migrated) falls back to MAX(article_num) + 1; an unused group
+// gives 1.
+func (db *Database) NNTPGroupNextArticleNum(groupDB *GroupDB) (int64, error) {
+	var next int64
+	err := RetryableQueryRowScan(groupDB.DB,
+		`SELECT MAX(COALESCE((SELECT last_num FROM article_num_seq WHERE id = 1), 0),
+		            COALESCE((SELECT MAX(article_num) FROM articles), 0)) + 1`,
+		nil, &next)
+	if err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
 // NNTPArticleNumbers returns up to limit numbers of visible (hide = 0) articles in
 // first..last (inclusive), ascending. limit <= 0 means NNTPListGroupChunk.
 func (db *Database) NNTPArticleNumbers(groupDB *GroupDB, first, last int64, limit int) ([]int64, error) {
