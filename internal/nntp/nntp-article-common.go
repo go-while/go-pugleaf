@@ -78,10 +78,10 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 //
 //   - no argument: the current article; 412 without a group, 420 when it is invalid
 //     (also when it was hidden or expired since it became current).
-//   - "<message-id>": the current group first, then (with a processor) the groups of a
-//     recentArrivals entry younger than ArrivalGrace, then local430, then the history lookup;
-//     a hit outside the current group is re-checked by visibleInOtherGroup; a miss is 430.
-//     For a recent arrival local430 is neither checked nor filled (plan post-430-window). The current article
+//   - "<message-id>": the current group first, then the groups of a recentArrivals entry
+//     younger than ArrivalGrace (recentArrivalArticle), then local430, then (with a processor)
+//     the history lookup re-checked by visibleInOtherGroup; a miss is 430. For a recent
+//     arrival local430 is neither checked nor filled (plan post-430-window). The current article
 //     is never changed. Without a processor only the current group is searched. For stat
 //     the group databases are read for the article number only (no headers, no body).
 //   - number: 412 without a group; not 1..19 digits or above math.MaxInt64 → 501; <= 0 or
@@ -121,44 +121,36 @@ func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article 
 				}
 			}
 		}
-		// (b) a same-process arrival of the last ArrivalGrace: its groups first (the history
-		// may not know it yet), and no local430 for it in either direction
-		var found *models.Article
-		hintGroups, recent := c.server.recentArrivals.RecentArrival(messageID)
-		if recent && c.server.Processor != nil {
-			for _, group := range hintGroups {
-				a, ferr := c.server.Processor.FindArticleByMessageID(messageID, group)
-				if ferr != nil && !errors.Is(ferr, ErrArticleNotFound) {
-					log.Printf("[NNTP] lookup of %s in %s failed: %v", messageID, group, ferr)
-					return nil, 0, false, c.sendResponse(403, "Internal fault")
-				}
-				if ferr == nil && a != nil {
-					found = a
-					break
-				}
-			}
+		// (b) a same-process arrival of the last ArrivalGrace: its groups, read directly (the
+		// history may not know it yet), and no local430 for it in either direction
+		ra, _, recent, rerr := c.recentArrivalArticle(messageID, stat)
+		if rerr != nil {
+			log.Printf("[NNTP] lookup of recent arrival %s failed: %v", messageID, rerr)
+			return nil, 0, false, c.sendResponse(403, "Internal fault")
+		}
+		if ra != nil {
+			// found outside the current group: its article number means nothing there
+			return ra, 0, true, nil
 		}
 		// (c) a recent definite miss, then the history index (other groups)
-		if found == nil {
-			if (!recent && c.server.local430.Check(messageID)) || c.server.Processor == nil {
-				c.rateLimitOnError()
-				return nil, 0, false, c.sendResponse(430, "No article with that message-id")
-			}
-			var ferr error
-			found, ferr = c.server.Processor.FindArticleByMessageID(messageID, "")
-			if ferr != nil && !errors.Is(ferr, ErrArticleNotFound) {
-				// history/DB fault, not a miss
-				log.Printf("[NNTP] lookup of %s failed: %v", messageID, ferr)
-				return nil, 0, false, c.sendResponse(403, "Internal fault")
-			}
-			if ferr != nil {
-				found = nil
-				if !recent {
-					c.server.local430.Add(messageID) // definite miss: remember it for a while
+		if (!recent && c.server.local430.Check(messageID)) || c.server.Processor == nil {
+			c.rateLimitOnError()
+			return nil, 0, false, c.sendResponse(430, "No article with that message-id")
+		}
+		found, ferr := c.server.Processor.FindArticleByMessageID(messageID, "")
+		if ferr != nil && !errors.Is(ferr, ErrArticleNotFound) {
+			// history/DB fault, not a miss
+			log.Printf("[NNTP] lookup of %s failed: %v", messageID, ferr)
+			return nil, 0, false, c.sendResponse(403, "Internal fault")
+		}
+		if ferr != nil || found == nil {
+			if ferr != nil && !recent {
+				c.server.local430.Add(messageID) // definite miss: remember it for a while
+				// an arrival noted since the check above must not be shadowed by this miss
+				if _, now := c.server.recentArrivals.RecentArrival(messageID); now {
+					c.server.local430.Remove(messageID)
 				}
 			}
-		}
-		if found == nil {
 			c.rateLimitOnError()
 			return nil, 0, false, c.sendResponse(430, "No article with that message-id")
 		}
@@ -227,6 +219,47 @@ func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article 
 	}
 	c.currentArticle = num // RFC 3977 §6.2.1.2 / §6.2.4.2 (no-op for the current article)
 	return article, num, true, nil
+}
+
+// recentArrivalArticle looks for messageID when it is a same-process arrival of the last
+// ArrivalGrace (recentArrivals): in the groups it was sent to, read directly from their group
+// DBs with the hide = 0 filter (for stat only the number), since the history index may not
+// know it yet. Only names that pass selectableGroup (known and active) are opened, so a
+// Newsgroups name the server does not carry never creates a group DB; the current group is
+// skipped (the caller searched it). article is the visible copy and group the group it was
+// read from (nil, "" when no hint has it); recent reports whether messageID is a recent
+// arrival at all; err is a DB fault (not a miss). Used by ARTICLE/HEAD/BODY/STAT/OVER/HDR
+// (resolveArticleArg) and XHDR by message-id (plan post-430-window).
+func (c *ClientConnection) recentArrivalArticle(messageID string, stat bool) (article *models.Article, group string, recent bool, err error) {
+	groups, recent := c.server.recentArrivals.RecentArrival(messageID)
+	if !recent {
+		return nil, "", false, nil
+	}
+	for _, name := range groups {
+		if name == c.currentGroup {
+			continue
+		}
+		g, ok, serr := c.selectableGroup(name)
+		if serr != nil {
+			return nil, "", true, fmt.Errorf("group %s: %w", name, serr)
+		}
+		if !ok {
+			continue
+		}
+		groupDB, gerr := c.server.DB.GetGroupDB(g.Name)
+		if gerr != nil {
+			return nil, "", true, fmt.Errorf("group DB %s: %w", g.Name, gerr)
+		}
+		a, aerr := c.articleByMessageID(groupDB, messageID, stat)
+		groupDB.Return()
+		if aerr == nil {
+			return a, g.Name, true, nil
+		}
+		if !errors.Is(aerr, sql.ErrNoRows) { // ErrNoRows: absent or hidden there, try the next hint
+			return nil, "", true, fmt.Errorf("%s in %s: %w", messageID, g.Name, aerr)
+		}
+	}
+	return nil, "", true, nil
 }
 
 // articleByMessageID reads the visible article with messageID from groupDB: the whole row,

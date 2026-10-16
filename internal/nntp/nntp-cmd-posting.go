@@ -200,11 +200,13 @@ func articleGroupNames(article *models.Article) []string {
 // noteArrival records an article this process accepted (240/235/239): the id leaves
 // local430 (BUG-8: the article exists now) and enters recentArrivals with its groups, so
 // lookups during ArrivalGrace try those groups and cache no miss (plan post-430-window).
+// NoteArrival comes first: a reader that misses between the two calls either sees the arrival
+// (and caches nothing) or re-checks recentArrivals after its local430.Add.
 func (s *NNTPServer) noteArrival(messageID string, groups []string) {
+	s.recentArrivals.NoteArrival(messageID, groups)
 	if s.local430 != nil {
 		s.local430.Remove(messageID)
 	}
-	s.recentArrivals.NoteArrival(messageID, groups)
 }
 
 // reconcileMessageID reports whether the article's Message-ID header equals the
