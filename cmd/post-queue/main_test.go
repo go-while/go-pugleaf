@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	_ "github.com/mattn/go-sqlite3" // raw read-back of post_queue (pqStateOf)
 )
 
 // testWait is the hang guard of this package's tests: it only stops a hung test, a passing test
@@ -139,11 +141,21 @@ type pqRow struct {
 	lastError            string
 }
 
-// pqState returns the rows of post_queue by id.
-func pqState(t *testing.T, db *database.Database) map[int64]pqRow {
+// pqStateOf returns the rows of post_queue by id, read through a raw handle on the main DB
+// file of dir: a third OpenDatabase would cost one more slow Shutdown per test. The tool must
+// have returned (its Database is shut down) before this is called.
+func pqStateOf(t *testing.T, dir string) map[int64]pqRow {
 	t.Helper()
-	rows, err := database.RetryableQuery(db.GetMainDB(),
-		"SELECT id, posted_to_remote, in_processing, attempts, COALESCE(last_error, '') FROM post_queue")
+	raw, err := sql.Open("sqlite3", filepath.Join(dir, "cfg", "pugleaf.sq3"))
+	if err != nil {
+		t.Fatalf("open main DB of %s: %v", dir, err)
+	}
+	defer func() {
+		if err := raw.Close(); err != nil {
+			t.Errorf("close main DB of %s: %v", dir, err)
+		}
+	}()
+	rows, err := raw.Query("SELECT id, posted_to_remote, in_processing, attempts, COALESCE(last_error, '') FROM post_queue")
 	if err != nil {
 		t.Fatalf("query post_queue: %v", err)
 	}
@@ -161,14 +173,6 @@ func pqState(t *testing.T, db *database.Database) map[int64]pqRow {
 		t.Fatalf("rows post_queue: %v", err)
 	}
 	return out
-}
-
-// pqStateOf reopens the database of dir and returns pqState.
-func pqStateOf(t *testing.T, dir string) map[int64]pqRow {
-	t.Helper()
-	var st map[int64]pqRow
-	pqWith(t, dir, func(db *database.Database) { st = pqState(t, db) })
-	return st
 }
 
 // pqStart runs runWith(args, stop) in a goroutine; the exit code arrives on the returned channel.
@@ -231,59 +235,57 @@ func TestPostQueueBadFlag(t *testing.T) {
 	}
 }
 
-// TestPostQueueCleanup: the cleanup flags delete rows and exit 0 without posting.
-// CleanupPostedEntries only ever deletes posted rows: -cleanup-older N deletes posted rows older
-// than N days (a pending old row stays), and together with -cleanup-posted-entries the age limit
-// applies too (the help text: "Delete posted entries older than 30 days").
+// TestPostQueueCleanup: the cleanup flags delete rows and exit 0 without posting. One seeded data
+// root, three runs in a row. CleanupPostedEntries only ever deletes posted rows: -cleanup-older N
+// deletes posted rows older than N days (a pending old row stays), and together with
+// -cleanup-posted-entries the age limit applies too (the help text: "Delete posted entries older
+// than 30 days"), so that run deletes nothing more; -cleanup-posted-entries alone then deletes
+// the remaining posted row.
 func TestPostQueueCleanup(t *testing.T) {
-	for _, tc := range []struct {
-		name string
+	dir := t.TempDir()
+	ids := make(map[string]int64)
+	pqWith(t, dir, func(db *database.Database) {
+		gid := pqGroup(t, db, "pq.cleanup")
+		for _, n := range []string{"newPending", "newPosted", "oldPending", "oldPosted"} {
+			ids[n] = pqQueue(t, db, gid, "<"+n+"@pq.invalid>")
+		}
+		for _, n := range []string{"newPosted", "oldPosted"} {
+			if err := db.MarkPostQueueAsPostedToRemote(ids[n]); err != nil {
+				t.Fatalf("MarkPostQueueAsPostedToRemote %s: %v", n, err)
+			}
+		}
+		for _, n := range []string{"oldPending", "oldPosted"} {
+			if _, err := database.RetryableExec(db.GetMainDB(),
+				"UPDATE post_queue SET created = datetime('now', '-30 days') WHERE id = ?", ids[n]); err != nil {
+				t.Fatalf("backdate %s: %v", n, err)
+			}
+		}
+	})
+
+	gone := make(map[string]bool)
+	for _, step := range []struct {
 		args []string
-		gone []string // rows deleted, of: newPending, newPosted, oldPending, oldPosted
+		gone []string // rows this run deletes
 	}{
-		{"posted", []string{"-cleanup-posted-entries"}, []string{"newPosted", "oldPosted"}},
-		{"older", []string{"-cleanup-older", "7"}, []string{"oldPosted"}},
-		{"both", []string{"-cleanup-posted-entries", "-cleanup-older", "7"}, []string{"oldPosted"}},
+		{[]string{"-cleanup-older", "7"}, []string{"oldPosted"}},
+		{[]string{"-cleanup-posted-entries", "-cleanup-older", "7"}, nil},
+		{[]string{"-cleanup-posted-entries"}, []string{"newPosted"}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			ids := make(map[string]int64)
-			pqWith(t, dir, func(db *database.Database) {
-				gid := pqGroup(t, db, "pq.cleanup")
-				for _, n := range []string{"newPending", "newPosted", "oldPending", "oldPosted"} {
-					ids[n] = pqQueue(t, db, gid, "<"+n+"@pq.invalid>")
-				}
-				for _, n := range []string{"newPosted", "oldPosted"} {
-					if err := db.MarkPostQueueAsPostedToRemote(ids[n]); err != nil {
-						t.Fatalf("MarkPostQueueAsPostedToRemote %s: %v", n, err)
-					}
-				}
-				for _, n := range []string{"oldPending", "oldPosted"} {
-					if _, err := database.RetryableExec(db.GetMainDB(),
-						"UPDATE post_queue SET created = datetime('now', '-30 days') WHERE id = ?", ids[n]); err != nil {
-						t.Fatalf("backdate %s: %v", n, err)
-					}
-				}
-			})
-
-			if code := pqRun(t, append(tc.args, "-data", dir)...); code != 0 {
-				t.Fatalf("exit = %d, want 0", code)
+		if code := pqRun(t, append(step.args, "-data", dir)...); code != 0 {
+			t.Fatalf("%v: exit = %d, want 0", step.args, code)
+		}
+		for _, n := range step.gone {
+			gone[n] = true
+		}
+		st := pqStateOf(t, dir)
+		for n, id := range ids {
+			if _, ok := st[id]; ok == gone[n] {
+				t.Errorf("%v: row %s present=%v, want %v", step.args, n, ok, !gone[n])
 			}
-
-			st := pqStateOf(t, dir)
-			gone := make(map[string]bool)
-			for _, n := range tc.gone {
-				gone[n] = true
-			}
-			for n, id := range ids {
-				if _, ok := st[id]; ok == gone[n] {
-					t.Errorf("row %s: present=%v, want %v", n, ok, !gone[n])
-				}
-			}
-			if len(st) != len(ids)-len(tc.gone) {
-				t.Errorf("%d rows left, want %d", len(st), len(ids)-len(tc.gone))
-			}
-		})
+		}
+		if len(st) != len(ids)-len(gone) {
+			t.Errorf("%v: %d rows left, want %d", step.args, len(st), len(ids)-len(gone))
+		}
 	}
 }
 
