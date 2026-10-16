@@ -362,6 +362,129 @@ func (h *History) LookupLocations(messageID string) ([]Location, error) {
 	return parseLocations(newsgroups.String), nil
 }
 
+// lookupBatchChunk bounds the ids of one query of LookupLocationsBatch: below SQLite's host
+// parameter limit (999 on old builds) and its compound SELECT limit (500 terms, at most one
+// term per id) on every supported build.
+const lookupBatchChunk = 500
+
+// historyShardTable is one table in one shard database (routeHash result)
+type historyShardTable struct {
+	dbIndex   int
+	tableName string
+}
+
+// historyBatchItem is one id of a batch lookup with the table it routes to
+type historyBatchItem struct {
+	tableName string
+	messageID string
+}
+
+// LookupLocationsBatch is LookupLocations for many message-ids: the result maps every id the
+// index knows to its locations (a non-nil, maybe empty slice); ids it does not know are
+// absent. The ids are grouped per shard database and per table and looked up with one query
+// per shard database (one UNION ALL term per table, in chunks of lookupBatchChunk ids): the
+// ids of an OVER range spread over thousands of tables, but only over 16 databases.
+// Duplicate and empty ids in the input are skipped, every distinct id counts as one lookup in
+// the stats. nil, nil = history disabled or no ids. One failing query fails the whole call.
+func (h *History) LookupLocationsBatch(messageIDs []string) (map[string][]Location, error) {
+	if h == nil || !h.enabled || len(messageIDs) == 0 {
+		return nil, nil
+	}
+	if h.dbClosed.Load() {
+		return nil, ErrHistoryClosed
+	}
+	groups := make(map[historyShardTable][]string)
+	var shardTables [historyNumDBs][]historyShardTable // per database, tables in first appearance order
+	seen := make(map[string]struct{}, len(messageIDs))
+	for _, id := range messageIDs {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		dbIndex, tableName, err := h.routeHash(id)
+		if err != nil {
+			return nil, fmt.Errorf("failed to route hash: %v", err)
+		}
+		key := historyShardTable{dbIndex: dbIndex, tableName: tableName}
+		if _, ok := groups[key]; !ok {
+			shardTables[dbIndex] = append(shardTables[dbIndex], key)
+		}
+		groups[key] = append(groups[key], id)
+	}
+	if len(seen) == 0 {
+		return nil, nil
+	}
+	h.stats.lookups.Add(int64(len(seen)))
+	out := make(map[string][]Location, len(seen))
+	var items []historyBatchItem
+	for dbIndex, tables := range shardTables {
+		if len(tables) == 0 {
+			continue
+		}
+		db, err := h.db.GetShardedDB(dbIndex, false)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get database connection: %v", err)
+		}
+		items = items[:0]
+		for _, key := range tables {
+			for _, id := range groups[key] {
+				items = append(items, historyBatchItem{tableName: key.tableName, messageID: id})
+			}
+		}
+		for rest := items; len(rest) > 0; {
+			n := min(len(rest), lookupBatchChunk)
+			if err := lookupLocationsChunk(db, rest[:n], out); err != nil {
+				h.stats.errors.Add(1)
+				return nil, err
+			}
+			rest = rest[n:]
+		}
+	}
+	h.stats.duplicates.Add(int64(len(out)))
+	return out, nil
+}
+
+// lookupLocationsChunk runs one query for items (all in db, the ids of one table next to each
+// other): one "SELECT ... WHERE message_id IN (...)" per table, joined with UNION ALL. Every
+// row found is added to out.
+func lookupLocationsChunk(db *sql.DB, items []historyBatchItem, out map[string][]Location) error {
+	args := make([]any, len(items))
+	var query strings.Builder
+	query.Grow(len(items) * 16)
+	for i, it := range items {
+		args[i] = it.messageID
+		switch {
+		case i == 0:
+			query.WriteString("SELECT message_id, newsgroups FROM " + it.tableName + " WHERE message_id IN (?")
+		case it.tableName != items[i-1].tableName:
+			query.WriteString(") UNION ALL SELECT message_id, newsgroups FROM " + it.tableName + " WHERE message_id IN (?")
+		default:
+			query.WriteString(",?")
+		}
+	}
+	query.WriteString(")")
+	rows, err := db.Query(query.String(), args...)
+	if err != nil {
+		return fmt.Errorf("history batch lookup query failed: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var messageID string
+		var newsgroups sql.NullString
+		if err := rows.Scan(&messageID, &newsgroups); err != nil {
+			return fmt.Errorf("history batch lookup scan failed: %w", err)
+		}
+		out[messageID] = parseLocations(newsgroups.String)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("history batch lookup rows failed: %w", err)
+	}
+	return nil
+}
+
 // parseLocations parses a CSV of "groupID" or "groupID:articleNum" tokens, skipping
 // empty/invalid parts. A token without a number (or with an invalid one) gives ArticleNum 0.
 // Never returns nil.

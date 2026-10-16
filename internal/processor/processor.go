@@ -317,27 +317,39 @@ func (proc *Processor) XrefLocations(messageID string) ([]nntp.XrefLocation, err
 	}, time.Now()), nil
 }
 
-// XrefLocationsBatch is XrefLocations for many message-ids: the result holds an entry for
-// every id the history index knows (an empty slice when none of its locations resolve).
-// Until the batched history lookup lands this is one XrefLocations per id.
+// XrefLocationsBatch is XrefLocations for many message-ids with one batched history lookup
+// (History.LookupLocationsBatch): the result holds an entry for every id the history index
+// knows, with the same locations XrefLocations gives for it, or an empty non-nil slice when
+// none of its locations resolve ("known, nothing to add"); ids the index does not know are
+// absent. nil, nil = no ids or history disabled.
 func (proc *Processor) XrefLocationsBatch(messageIDs []string) (map[string][]nntp.XrefLocation, error) {
 	if proc == nil || proc.History == nil || len(messageIDs) == 0 {
 		return nil, nil
 	}
-	out := make(map[string][]nntp.XrefLocation, len(messageIDs))
-	for _, id := range messageIDs {
-		if id == "" {
-			continue
-		}
-		locs, err := proc.XrefLocations(id)
-		if err != nil {
-			return nil, err
-		}
-		if locs != nil {
-			out[id] = locs
-		}
+	found, err := proc.History.LookupLocationsBatch(messageIDs)
+	if err != nil {
+		return nil, fmt.Errorf("history batch lookup for %d message-ids failed: %w", len(messageIDs), err)
 	}
-	return out, nil
+	if found == nil {
+		return nil, nil
+	}
+	return proc.xrefResolveBatch(found, func(id int64) (string, bool) {
+		return database.NewsgroupDBsIDcache.GetNewsgroupNameByID(id, proc.DB)
+	}, time.Now()), nil
+}
+
+// xrefResolveBatch runs xrefResolve for every id of a batched history lookup; an id whose
+// locations all resolve to nothing gets an empty non-nil slice.
+func (proc *Processor) xrefResolveBatch(found map[string][]history.Location, groupName func(id int64) (string, bool), now time.Time) map[string][]nntp.XrefLocation {
+	out := make(map[string][]nntp.XrefLocation, len(found))
+	for id, locs := range found {
+		resolved := proc.xrefResolve(locs, groupName, now)
+		if resolved == nil {
+			resolved = []nntp.XrefLocation{}
+		}
+		out[id] = resolved
+	}
+	return out
 }
 
 // xrefResolve maps history locations to group names with groupName (the ID cache in

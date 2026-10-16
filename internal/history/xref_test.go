@@ -1,7 +1,12 @@
 package history
 
 import (
+	"crypto/md5"
+	"errors"
+	"fmt"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -471,6 +476,270 @@ func TestHistoryParseLocations(t *testing.T) {
 		got := parseLocations(in)
 		if got == nil || !reflect.DeepEqual(got, want) {
 			t.Errorf("parseLocations(%q) = %#v, want %#v", in, got, want)
+		}
+	}
+}
+
+// Plan xref-batched-lookup: LookupLocationsBatch gives the same answers as one
+// LookupLocations per id, with one query per shard table (chunked).
+
+func histXrefBatch(t *testing.T, h *History, ids []string) map[string][]Location {
+	t.Helper()
+	got, err := h.LookupLocationsBatch(ids)
+	if err != nil {
+		t.Fatalf("LookupLocationsBatch(%d ids): %v", len(ids), err)
+	}
+	return got
+}
+
+// histXrefCheckBatch compares the batch result for ids with one LookupLocations per id:
+// a found id has the same locations, an absent id is missing from the map.
+func histXrefCheckBatch(t *testing.T, h *History, ids []string, got map[string][]Location) {
+	t.Helper()
+	unique := map[string]bool{}
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		unique[id] = true
+		want := histXrefLocations(t, h, id)
+		locs, found := got[id]
+		switch {
+		case want == nil && found:
+			t.Errorf("%s: absent per id, batch = %+v", id, locs)
+		case want != nil && !found:
+			t.Errorf("%s: per id = %+v, missing from the batch", id, want)
+		case want != nil && (locs == nil || !reflect.DeepEqual(locs, want)):
+			t.Errorf("%s: batch = %#v, per id = %#v", id, locs, want)
+		}
+	}
+	for id := range got {
+		if !unique[id] {
+			t.Errorf("batch holds %s, not asked for", id)
+		}
+	}
+}
+
+// histXrefRoutedIDs returns n message-ids that all route to shard database hashdb_1, and with
+// sameTable all to its table _23, so one shard (or one table) gets more ids than one query of
+// lookupBatchChunk holds.
+func histXrefRoutedIDs(prefix string, n int, sameTable bool) []string {
+	ids := make([]string, 0, n)
+	buf := make([]byte, 0, 64)
+	for i := 0; len(ids) < n; i++ {
+		buf = append(buf[:0], prefix...)
+		buf = strconv.AppendInt(buf, int64(i), 10)
+		buf = append(buf, "@test>"...)
+		sum := md5.Sum(buf)
+		if sum[0]>>4 == 0x1 && (!sameTable || (sum[0]&0xf == 0x2 && sum[1]>>4 == 0x3)) {
+			ids = append(ids, string(buf))
+		}
+	}
+	return ids
+}
+
+func TestHistoryXrefBatch(t *testing.T) {
+	h, _ := histTestNew(t, nil)
+
+	// mixed rows: numbered, plain, mixed/invalid tokens, legacy empty and NULL rows
+	histXrefInsertRaw(t, h, "<xb-plain@test>", "4,5")
+	histXrefInsertRaw(t, h, "<xb-mixed@test>", "4,5:50,x,6:bad,7:0,,8:80")
+	histXrefInsertRaw(t, h, "<xb-empty@test>", "")
+	histXrefInsertRaw(t, h, "<xb-null@test>", nil)
+	h.AddArticleAt("<xb-num@test>", 12, 4711)
+	h.AddArticleAt("<xb-num@test>", 57, 88)
+	const numbered = 1200 // > lookupBatchChunk in total, spread over many tables
+	var many []string
+	for i := 0; i < numbered; i++ {
+		id := fmt.Sprintf("<xb-many-%d@test>", i)
+		many = append(many, id)
+		h.AddArticleAt(id, int64(i%7+1), int64(i+1))
+		if i%3 == 0 {
+			h.AddArticle(id, 100) // plain token next to the numbered one
+		}
+	}
+	// > lookupBatchChunk ids in one shard table: two queries for one table group
+	sameTable := histXrefRoutedIDs("<xb-same-", 530, true)
+	for i, id := range sameTable[:510] {
+		h.AddArticleAt(id, 9, int64(i+1))
+	}
+	// > lookupBatchChunk ids in one shard database over most of its tables: a chunk boundary
+	// in the middle of the UNION ALL terms
+	sameShard := histXrefRoutedIDs("<xb-shard-", 1100, false)
+	for i, id := range sameShard[:1050] {
+		h.AddArticleAt(id, int64(i%5+20), int64(i+1))
+	}
+	histTestWaitIdle(t, h)
+
+	t.Run("EqualsPerID", func(t *testing.T) {
+		ids := []string{"<xb-plain@test>", "<xb-mixed@test>", "<xb-empty@test>", "<xb-null@test>",
+			"<xb-num@test>", "<xb-absent-1@test>", "", "<xb-absent-2@test>"}
+		ids = append(ids, many...)
+		got := histXrefBatch(t, h, ids)
+		if len(got) != 5+numbered {
+			t.Errorf("batch found %d ids, want %d", len(got), 5+numbered)
+		}
+		histXrefCheckBatch(t, h, ids, got)
+		if locs, ok := got["<xb-empty@test>"]; !ok || locs == nil || len(locs) != 0 {
+			t.Errorf("empty row: batch = %#v, %v; want empty non-nil slice", locs, ok)
+		}
+		want := []Location{{GroupID: 12, ArticleNum: 4711}, {GroupID: 57, ArticleNum: 88}}
+		if !reflect.DeepEqual(got["<xb-num@test>"], want) {
+			t.Errorf("numbered row: batch = %+v, want %+v", got["<xb-num@test>"], want)
+		}
+	})
+
+	t.Run("AbsentIDs", func(t *testing.T) {
+		got := histXrefBatch(t, h, []string{"<xb-absent-3@test>", "<xb-absent-4@test>"})
+		if got == nil || len(got) != 0 {
+			t.Fatalf("absent ids: batch = %#v, want empty map", got)
+		}
+	})
+
+	t.Run("OneTableOverChunk", func(t *testing.T) {
+		if len(sameTable) <= lookupBatchChunk+1 {
+			t.Fatalf("test needs more than %d ids in one table", lookupBatchChunk)
+		}
+		got := histXrefBatch(t, h, sameTable)
+		if len(got) != 510 {
+			t.Fatalf("one table: batch found %d ids, want 510", len(got))
+		}
+		for i, id := range sameTable {
+			locs, found := got[id]
+			if i >= 510 {
+				if found {
+					t.Errorf("%s: never added, batch = %+v", id, locs)
+				}
+				continue
+			}
+			if want := []Location{{GroupID: 9, ArticleNum: int64(i + 1)}}; !reflect.DeepEqual(locs, want) {
+				t.Errorf("%s: batch = %+v, want %+v", id, locs, want)
+			}
+		}
+	})
+
+	t.Run("OneShardOverChunk", func(t *testing.T) {
+		got := histXrefBatch(t, h, sameShard)
+		if len(got) != 1050 {
+			t.Fatalf("one shard: batch found %d ids, want 1050", len(got))
+		}
+		for i, id := range sameShard {
+			locs, found := got[id]
+			if i >= 1050 {
+				if found {
+					t.Errorf("%s: never added, batch = %+v", id, locs)
+				}
+				continue
+			}
+			if want := []Location{{GroupID: int64(i%5 + 20), ArticleNum: int64(i + 1)}}; !reflect.DeepEqual(locs, want) {
+				t.Errorf("%s: batch = %+v, want %+v", id, locs, want)
+			}
+		}
+	})
+
+	t.Run("DuplicateIDs", func(t *testing.T) {
+		before := h.GetStats()
+		ids := []string{"<xb-num@test>", "<xb-plain@test>", "<xb-num@test>", "<xb-absent-5@test>", "<xb-absent-5@test>", "<xb-num@test>"}
+		got := histXrefBatch(t, h, ids)
+		if len(got) != 2 {
+			t.Fatalf("duplicates: batch = %+v, want 2 ids", got)
+		}
+		after := h.GetStats()
+		// each distinct id is one lookup; hits count like LookupLocations' duplicates
+		if d := after.TotalLookups - before.TotalLookups; d != 3 {
+			t.Errorf("lookups grew by %d, want 3", d)
+		}
+		if d := after.Duplicates - before.Duplicates; d != 2 {
+			t.Errorf("duplicates grew by %d, want 2", d)
+		}
+		histXrefCheckBatch(t, h, ids, got)
+	})
+
+	t.Run("StatsLikePerID", func(t *testing.T) {
+		ids := []string{"<xb-num@test>", "<xb-mixed@test>", "<xb-absent-6@test>"}
+		s0 := h.GetStats()
+		for _, id := range ids {
+			histXrefLocations(t, h, id)
+		}
+		s1 := h.GetStats()
+		histXrefBatch(t, h, ids)
+		s2 := h.GetStats()
+		if s1.TotalLookups-s0.TotalLookups != s2.TotalLookups-s1.TotalLookups ||
+			s1.Duplicates-s0.Duplicates != s2.Duplicates-s1.Duplicates {
+			t.Errorf("per id: lookups +%d duplicates +%d; batch: lookups +%d duplicates +%d",
+				s1.TotalLookups-s0.TotalLookups, s1.Duplicates-s0.Duplicates,
+				s2.TotalLookups-s1.TotalLookups, s2.Duplicates-s1.Duplicates)
+		}
+		if s2.Errors != 0 {
+			t.Errorf("errors = %d", s2.Errors)
+		}
+	})
+
+	t.Run("EmptyInput", func(t *testing.T) {
+		before := h.GetStats().TotalLookups
+		for _, ids := range [][]string{nil, {}, {""}, {"", ""}} {
+			if got, err := h.LookupLocationsBatch(ids); got != nil || err != nil {
+				t.Errorf("LookupLocationsBatch(%q) = %v, %v; want nil, nil", ids, got, err)
+			}
+		}
+		if after := h.GetStats().TotalLookups; after != before {
+			t.Errorf("empty input counted %d lookups", after-before)
+		}
+	})
+}
+
+// TestHistoryXrefBatchQueryError: a failing table query fails the whole call and counts an error
+func TestHistoryXrefBatchQueryError(t *testing.T) {
+	h, _ := histTestNew(t, nil)
+	ok := "<xb-err-ok@test>"
+	h.AddArticleAt(ok, 1, 1)
+	histTestWaitIdle(t, h)
+	bad := "<xb-err-bad@test>"
+	dbIndex, tableName, err := h.routeHash(bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if okIdx, okTable, _ := h.routeHash(ok); okIdx == dbIndex && okTable == tableName {
+		t.Fatal("test ids route to the same table")
+	}
+	db, err := h.db.GetShardedDB(dbIndex, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("DROP TABLE " + tableName); err != nil {
+		t.Fatalf("drop %s: %v", tableName, err)
+	}
+	before := h.GetStats().Errors
+	got, err := h.LookupLocationsBatch([]string{ok, bad})
+	if err == nil || got != nil {
+		t.Fatalf("batch over a missing table = %v, %v; want nil, error", got, err)
+	}
+	if d := h.GetStats().Errors - before; d != 1 {
+		t.Errorf("errors grew by %d, want 1", d)
+	}
+}
+
+func TestHistoryXrefBatchClosed(t *testing.T) {
+	h, _ := histTestNew(t, nil)
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := h.LookupLocationsBatch([]string{"<xb-closed@test>"}); got != nil || !errors.Is(err, ErrHistoryClosed) {
+		t.Fatalf("closed: batch = %v, %v; want nil, ErrHistoryClosed", got, err)
+	}
+}
+
+func TestHistoryXrefBatchDisabled(t *testing.T) {
+	histTestEnable(t, false)
+	h, err := NewHistory(histTestConfig(filepath.Join(t.TempDir(), "history-disabled")), nil)
+	if err != nil {
+		t.Fatalf("NewHistory: %v", err)
+	}
+	t.Cleanup(func() { h.Close() })
+	var hn *History
+	for name, hist := range map[string]*History{"disabled": h, "nil": hn} {
+		if got, err := hist.LookupLocationsBatch([]string{"<xb-disabled@test>"}); got != nil || err != nil {
+			t.Errorf("%s: batch = %v, %v; want nil, nil", name, got, err)
 		}
 	}
 }
