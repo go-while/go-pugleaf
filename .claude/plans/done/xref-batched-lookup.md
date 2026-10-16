@@ -122,3 +122,21 @@ Expected: all identical outputs; no new warnings in the server log.
   and message-id show the full line, all 9 server runs exit 0 on SIGINT, no "[NNTP] Xref" log lines.
 - Left for the user: the real-data timing comparison (plan Benchmark section); flip the default to false before
   merging if the batched path does not win there.
+
+## Outcome
+- Integration branch `plan-xref-batched-lookup` (HEAD 06b0796, 12 commits) merged into `testing-001` with `--no-ff`
+  on 2026-10-16: merge commit 7029b1c (not pushed). `go build ./...` and `go vet ./...` re-run on the merged tree: ok.
+- Worktree branches and paths (left for the user to clean up, under `/tank0/claude/trees/go-pugleaf/`):
+  - `worktree-agent-ab6436044701c58dd` (`agent-ab6436044701c58dd`): slice serve-batch
+  - `worktree-agent-ac4a7b77f48ca158d` (`agent-ac4a7b77f48ca158d`): slice history-batch
+- Verification: see the Verification note above (9299002); nothing but the plan note changed after it.
+- Decisions: one `UNION ALL` statement per shard DB instead of one query per table (benchmarked; the per-table
+  shape was slower than per-id); `-xref-batched-lookup` defaults to true on the strength of the 1.7× benchmark.
+- Leftovers / known issues:
+  - the real-data timing comparison (Benchmark section) is still to be run by the user; flip the default to false
+    if the batched path does not win there;
+  - the server logs no lookup statistics, so the end-to-end run cannot show which path served a range (the
+    startup line and the harness call counts cover it);
+  - `TestXrefLocationsBatchHistory` leaves group IDs 990001/990002 in the global newsgroup ID cache (harmless);
+  - pre-existing from xref-history: expire-news "no such table: overview" warning, `211 0 0 0` for an emptied
+    group, no bind-address flag on nntp-server, no tests in `cmd/post-queue`.
