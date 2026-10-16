@@ -56,17 +56,18 @@ roughly 3-5× on large ranges, not 1000×. Nothing changes in the stored format 
 ### Wave 1
 - slice `history-batch`: `internal/history/history.go` (`LookupLocationsBatch`, chunking, stats),
   `internal/history/xref_test.go` (batch == per-id results for mixed plain/numbered rows, absent ids,
-  >500 ids chunking, disabled/closed). Checks: gofmt, vet, build, `go test -race ./internal/history/...`.
-- slice `serve-batch`: `internal/processor/processor.go` (`XrefLocationsBatch`, reuse `xrefResolve`),
-  `internal/processor/proc_reuse_test.go` (resolution + negative cache in batch), `internal/nntp/nntp-xref.go`
+  >500 ids chunking, disabled/closed), `internal/history/xref_bench_test.go` (see Benchmark),
+  `internal/processor/processor.go` (replace the wave 0 `XrefLocationsBatch` stub with the history batch +
+  `xrefResolve`), `internal/processor/proc_reuse_test.go` (resolution + negative cache in batch).
+  Checks: gofmt, vet, build, `go test -race ./internal/history/... ./internal/processor/...`.
+- slice `serve-batch`: `internal/nntp/nntp-xref.go`
   (`xrefOthersBatch`, error fallback), `internal/nntp/nntp-cmd-xover.go`, `internal/nntp/nntp-cmd-over-hdr.go`,
   `internal/nntp/nntp-cmd-xhdr.go` (range sites), `internal/nntp/nntp-xref_test.go` (flag on: one batch
   call per chunk and zero per-id calls; flag off: unchanged counts; output byte-identical both ways; batch
   error falls back to per-id), `cmd/nntp-server/main.go` (flag + log line), `cmd/nntp-server/processor_adapter.go`,
   `README.md` (-xref paragraph: one sentence on the flag), `cmd/nntp-server` e2e test extended with one
   `-xref full -xref-batched-lookup=false` run comparing OVER output to the batched run.
-  Depends only on the wave 0 interface, not on the history slice (the processor calls
-  `history.LookupLocationsBatch`, so build order: merge `history-batch` first).
+  Depends only on the wave 0 interface (`ArticleProcessor.XrefLocationsBatch`), not on the history slice.
 
 ## Checks
 gofmt -l internal/history internal/processor internal/nntp cmd/nntp-server; go vet ./...; go build ./...;
