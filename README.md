@@ -187,7 +187,9 @@ databases below `-data` (default `./data`). `./pugleaf-fetcher -help` prints usa
 `off` sends none (and LIST OVERVIEW.FMT has no `Xref:full`); `partial` (default) lists only the
 group the article is read from, without lookups (none when it is read by message-id with no
 group selected); `full` adds the other groups and numbers from the history index, one history
-lookup per served article (one per line for OVER/XOVER and HDR/XHDR ranges). The numbers come from the history
+lookup per served article. `-xref-batched-lookup` (default true) makes `full` fetch the locations
+of an OVER/XOVER or HDR/XHDR range with one history query per shard table instead of one per line;
+`=false` restores the per-line lookup for comparison. The numbers come from the history
 index: existing data shows them in `full` only after a full `history-rebuild` run (see
 cmd/history-rebuild/README.md); new articles get them on arrival.
 

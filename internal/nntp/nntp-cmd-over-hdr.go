@@ -172,8 +172,9 @@ func (c *ClientConnection) handleOver(args []string) error {
 	mode := c.server.XrefMode() // one mode for every line of the reply
 	d := c.newDataBlock()
 	for {
+		batch := c.xrefBatchOverviews(mode, chunk) // nil: one lookup per line (or none)
 		for _, o := range chunk {
-			if err := d.Line(c.overviewLineIn(o, mode)); err != nil {
+			if err := d.Line(c.overviewLineBatch(o, mode, batch)); err != nil {
 				return err
 			}
 		}
@@ -234,7 +235,9 @@ func hdrArticleValue(a *models.Article, field string) string {
 // database.OverviewRangeChunk rows) in the current group. For Xref in a mode other than
 // XrefOff it reads the message-ids of the same rows (same hide filter and order) and builds
 // the local value of each row with xrefFor from its article number: the DB layer never
-// knows the hostname. In XrefOff the DB's Xref answer (always empty) is returned.
+// knows the hostname. In XrefOff the DB's Xref answer (always empty) is returned. In XrefFull
+// with the batched lookup the other locations of the chunk come from one xrefOthersBatch
+// call (one per chunk, never the whole range); without it, or when it fails, one per row.
 func (c *ClientConnection) headerFieldRange(groupDB *database.GroupDB, field string, mode XrefMode, first, last int64) ([]database.HeaderFieldValue, error) {
 	if !isXrefField(field) || mode == XrefOff {
 		return c.server.DB.GetHeaderFieldRange(groupDB, field, first, last, database.OverviewRangeChunk)
@@ -243,8 +246,18 @@ func (c *ClientConnection) headerFieldRange(groupDB *database.GroupDB, field str
 	if err != nil {
 		return nil, err
 	}
+	var batch map[string][]XrefLocation
+	if c.xrefBatchWanted(mode) {
+		ids := make([]string, 0, len(chunk))
+		for i := range chunk {
+			if chunk[i].Value != "" {
+				ids = append(ids, chunk[i].Value)
+			}
+		}
+		batch = c.xrefOthersBatch(mode, ids)
+	}
 	for i := range chunk {
-		chunk[i].Value = c.xrefFor(mode, chunk[i].Value, c.currentGroup, chunk[i].ArticleNum)
+		chunk[i].Value = c.xrefForBatch(mode, chunk[i].Value, c.currentGroup, chunk[i].ArticleNum, batch)
 	}
 	return chunk, nil
 }

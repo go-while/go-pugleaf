@@ -5,7 +5,9 @@ package main
 // history-rebuild into t.TempDir() (without -race), seeds a scratch data root there (one
 // posting user, two active groups), POSTs one crosspost and checks HEAD/ARTICLE/OVER/HDR and
 // LIST OVERVIEW.FMT with -xref full, partial and off on the same data, an invalid -xref value,
-// and history-rebuild -validate-only on the result.
+// and history-rebuild -validate-only on the result. A second full run with
+// -xref-batched-lookup=false (plan xref-batched-lookup) must serve the OVER/XOVER/HDR/XHDR
+// ranges byte-identical to the batched default.
 //
 // Every binary runs with its working directory in the scratch root and an absolute -data, so
 // the default ./data is never reached. Ports come from the OS. Waits are polls bounded by
@@ -162,20 +164,21 @@ func xrefOutput(b *e2eLogBuffer, n int) string {
 	return e2eTail(s, n)
 }
 
-// start launches the server with -xref mode and waits until it sends a greeting.
-// The process is killed at test end if it still runs.
-func (e *xrefEnv) start(mode string) *xrefServer {
+// start launches the server with -xref mode (and the extra flags) and waits until it sends a
+// greeting. The process is killed at test end if it still runs.
+func (e *xrefEnv) start(mode string, extra ...string) *xrefServer {
 	e.t.Helper()
 	port, err := xrefFreePort()
 	if err != nil {
 		e.t.Fatalf("free port: %v", err)
 	}
 	s := &xrefServer{out: &e2eLogBuffer{}, addr: fmt.Sprintf("127.0.0.1:%d", port), done: make(chan struct{})}
-	s.cmd = exec.Command(e.server,
+	args := []string{
 		"-data", e.data, "-nntphostname", e.host, "-nntptcpport", strconv.Itoa(port),
 		"-xref", mode, "-articledelay", "0", "-groupdelay", "0", "-errordelay", "0",
 		// polls by message-id may answer 430 before the commit: do not cache that miss
-		"-local430ttl", "1ms")
+		"-local430ttl", "1ms"}
+	s.cmd = exec.Command(e.server, append(args, extra...)...)
 	s.cmd.Dir = e.run
 	s.cmd.Stdout = s.out
 	s.cmd.Stderr = s.out
@@ -340,6 +343,37 @@ func xrefHdr(c *e2eClient) (string, error) {
 		return "", fmt.Errorf("HDR Xref 1: %d lines %q, want 1", len(lines), lines)
 	}
 	return lines[0], nil
+}
+
+// xrefRanges runs the range forms OVER 1-, XOVER 1-, HDR Xref 1- and XHDR Xref 1- in each of
+// groups and returns every reply line, prefixed with the group and the command.
+func xrefRanges(c *e2eClient, groups ...string) ([]string, error) {
+	var out []string
+	for _, g := range groups {
+		if err := xrefSelect(c, g); err != nil {
+			return nil, err
+		}
+		for _, cc := range []struct {
+			code int
+			cmd  string
+		}{{224, "OVER 1-"}, {224, "XOVER 1-"}, {225, "HDR Xref 1-"}, {221, "XHDR Xref 1-"}} {
+			lines, err := xrefBlock(c, cc.code, "%s", cc.cmd)
+			if err != nil {
+				return nil, err
+			}
+			for _, l := range lines {
+				out = append(out, g+" "+cc.cmd+": "+l)
+			}
+		}
+	}
+	return out, nil
+}
+
+// xrefLogHas reports whether the server output holds s.
+func xrefLogHas(b *e2eLogBuffer, s string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.Contains(b.buf.String(), s)
 }
 
 // xrefFmt runs LIST OVERVIEW.FMT.
@@ -533,8 +567,68 @@ func TestE2EXrefBinary(t *testing.T) {
 		fmt.Printf("INFO X07 [nntp] HDR: %q\n", line)
 		return nil
 	}())
+
+	// ranges with the batched lookup (the default): kept for the -xref-batched-lookup=false run
+	var batchedRanges []string
+	r.check("X09", "full (batched lookup): OVER/XOVER/HDR/XHDR ranges in both groups, startup log xref-batched-lookup=true", func() error {
+		if !xrefLogHas(srv.out, "xref=full xref-batched-lookup=true") {
+			return fmt.Errorf("startup log has no %q:\n%s", "xref=full xref-batched-lookup=true", xrefOutput(srv.out, 20))
+		}
+		lines, err := xrefRanges(c, ga, gb)
+		if err != nil {
+			return err
+		}
+		if len(lines) != 8 { // 4 commands × 1 article × 2 groups
+			return fmt.Errorf("%d lines %q, want 8", len(lines), lines)
+		}
+		for i, l := range lines {
+			g := []string{ga, gb}[i/4]
+			prefix := g + " " + []string{"OVER 1-", "XOVER 1-", "HDR Xref 1-", "XHDR Xref 1-"}[i%4] + ": "
+			if !strings.HasPrefix(l, prefix) {
+				return fmt.Errorf("line %d %q, want the prefix %q", i, l, prefix)
+			}
+			if i%4 < 2 { // overview: only the 9th field here (X05 checks the others)
+				if f := strings.Split(strings.TrimPrefix(l, prefix), "\t"); len(f) != 9 || f[0] != "1" || f[8] != full[g] {
+					return fmt.Errorf("line %d %q, want 9 fields, the 9th %q", i, l, full[g])
+				}
+				continue
+			}
+			if want := prefix + "1 " + strings.TrimPrefix(full[g], "Xref: "); l != want {
+				return fmt.Errorf("line %d %q, want %q", i, l, want)
+			}
+		}
+		batchedRanges = lines
+		return nil
+	}())
 	c.close()
 	r.check("X08", "full: SIGINT, exit 0", srv.stop())
+
+	// ---------------------------------------------------------------- -xref full -xref-batched-lookup=false
+	srv = e.start("full", "-xref-batched-lookup=false")
+	c = srv.dial(t)
+	r.check("X14", "full -xref-batched-lookup=false: ranges byte-identical to the batched run, startup log xref-batched-lookup=false", func() error {
+		if !xrefLogHas(srv.out, "xref=full xref-batched-lookup=false") {
+			return fmt.Errorf("startup log has no %q:\n%s", "xref=full xref-batched-lookup=false", xrefOutput(srv.out, 20))
+		}
+		if batchedRanges == nil {
+			return errors.New("no batched output to compare (X09 failed)")
+		}
+		lines, err := xrefRanges(c, ga, gb)
+		if err != nil {
+			return err
+		}
+		if len(lines) != len(batchedRanges) {
+			return fmt.Errorf("%d lines %q, batched run %d lines %q", len(lines), lines, len(batchedRanges), batchedRanges)
+		}
+		for i := range lines {
+			if lines[i] != batchedRanges[i] {
+				return fmt.Errorf("line %d: per-line lookup %q, batched %q", i, lines[i], batchedRanges[i])
+			}
+		}
+		return nil
+	}())
+	c.close()
+	r.check("X15", "full -xref-batched-lookup=false: SIGINT, exit 0", srv.stop())
 
 	// ---------------------------------------------------------------- -xref partial
 	srv = e.start("partial")
