@@ -145,3 +145,45 @@ go vet ./...; go build ./...; the full CLAUDE.md race list; `PUGLEAF_KNOWN_BUGS=
 4. `post-queue -data ./data-test-leftovers -help` → 0; `-cleanup-older 30` on the empty queue → 0, "deleted 0".
    (A real posting run needs a provider: covered by the package tests with the fake server, not here.)
 5. Every server exits 0 on SIGINT.
+
+### Progress
+- Wave 0 (df1c7d2): `config.ServerConfig.NNTP.Addr`; `Database.NNTPGroupNextArticleNum` (+ test in nsh_reads_test.go).
+- Wave 1 (all merged into plan-xref-leftovers):
+  - `expire-overview-marks` (worktree-agent-a7aa8a603c8216e96, 64bc68a, merge 1073b81): overview delete + warning gone;
+    `updateNewsgroupCounters` writes message_count/last_article/high_water/low_water in one UPDATE; emptied group keeps
+    its place (last_article = high_water = next-1, low_water = next; deviation accepted: last_article no longer reset
+    to 0). Review MERGE, 3 minors.
+  - `nntp-bind` (worktree-agent-aefa9f58554f35bac, 31f53b6, merge 51b4f88): `listenAddr`, both listeners on
+    Config.NNTP.Addr, `-nntpbind` with net.ParseIP check, `bind=%q` in the startup line, e2e X24/X32. Review MERGE, 2 minors.
+  - `group-empty` (worktree-agent-a0d81df3278dc61fa, 93036e5, merge 991319c): `211 0 next next-1`, LISTGROUP lists
+    only when count > 0, tests for empty/emptied/all-hidden. Review MERGE, 2 minors. docs/audit/README.md has no
+    decision-14 text (it lives in .claude/plans/done/nntp-server-hardening.md), left alone.
+  - `post-queue-tests` (worktree-agent-a03f4cab717a702e3, eb726ee + c0924c5, merge 9934297): `run(args)`/`runWith(args,
+    stopChan)` with a FlagSet, signal watcher installed at the old point only when stopChan is nil; 9 tests with a fake
+    NNTP server; ~45 s package time (2 OpenDatabase/Shutdown cycles per scenario at ~2.4 s each). Deviations accepted:
+    CleanupPostedEntries only deletes posted rows (test asserts that), usage header "Usage of post-queue:", closed
+    provider port exits 0 (transient failure). Review MERGE, 2 minors.
+  - Minors fixed inline (63235c7): expire test seeds stale values for the never-used group so the write is proven,
+    log capture restored via t.Cleanup, hidden-rows/LIST ACTIVE note in comment + README; bind test only skips ::1;
+    `TestGrpGroupEmptyNextNumFails` (403, nothing selected, clean stop); `preloader.RepairNewsgroupWatermarks`
+    (web `-repair-watermarks`) now keeps an emptied group's place with the same next-number rule instead of 0/0/0/1.
+  - Dropped/deferred: zoned link-local `-nntpbind` values (ParseIP rejects them; documented limit); recover-db
+    consistency report flags an emptied group ("Main DB Last Article: N / Articles Max Num: 0"), report only;
+    the closed-port test releases its port before use (negligible race on loopback); 2.4 s DB shutdown cost.
+- Merged tree (63235c7): gofmt empty, vet, build, full race list green, known bugs only T-nntp-article-1.
+
+### Verification (6405d1a)
+- Verifier: gofmt/vet/build green, full race list green (uncached: post-queue 45 s, nntp 170 s, expire-news 8 s),
+  known bugs only T-nntp-article-1, five builds ok.
+- End-to-end on ./data-test-leftovers (example.org, 127.0.0.1:11192): `GROUP xref.test.b` → `211 0 1 0`, LISTGROUP
+  same + empty list, STAT/NEXT/LAST → 420; after expire-news of all three articles (no "overview" line; counters line
+  "0 articles, last article 3, high water 3, low water 4") `GROUP xref.test.a` → `211 0 4 3`, `ARTICLE 1` → 423,
+  `LIST ACTIVE` → `xref.test.a 3 4 y`, the next post gets number 4 and `GROUP` → `211 1 4 4`; `-nntpbind 999.1.1.1`
+  exits 1 with the message, `-nntpbind ::1` listens on [::1]:11192 only; post-queue -help 0, -cleanup-older 30 → 0
+  ("deleted 0"), -bogus → 2 with "Usage of post-queue:"; all server runs exit 0 on SIGINT.
+- Found by the verifier, pre-existing (not from this plan): `STAT <msgid>` without a selected group right after a
+  POST in the same process answers 430 for up to the local430 TTL (60 s): the POST handler removes the id from the
+  negative cache, but the history batch (1 s flush) has not indexed it yet, the lookup misses and re-adds it
+  (`internal/nntp/nntp-article-common.go:127-135`). BUGS.md says same-process arrivals are removed at once, which is
+  not true in that window. Left as a follow-up.
+- Fixed after verification: `-cleanup-older` help text said "all post_queue entries", the code deletes posted ones only.

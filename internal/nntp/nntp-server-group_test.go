@@ -287,9 +287,11 @@ func TestGrpGroupInactive(t *testing.T) {
 }
 
 // TestGrpGroupEmpty: RFC 3977 §6.1.1.2 allows three forms for an empty group
-// and clients MUST accept all three: count 0 with high = low-1, all three
-// numbers zero, or high >= low (the count may then be non-zero, but here the
-// group holds no articles, so it must be 0). Any of them passes.
+// (count 0 with high = low-1, all three numbers zero, or high >= low) and
+// recommends the first, with low = the number the next article gets. The server
+// uses that form: a never-used group gives "211 0 1 0". There is no current
+// article (420 for STAT/NEXT/LAST without a number), and LISTGROUP gives the same
+// status line and an empty list.
 func TestGrpGroupEmpty(t *testing.T) {
 	g := hGroup(t, "t3.groupempty", 0, nil)
 	hs := newTestServer(t, hServerOpts{})
@@ -298,14 +300,166 @@ func TestGrpGroupEmpty(t *testing.T) {
 	if err := hExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
-	count, low, high, name, err := grpParse211(line)
+	if err := grpExpect211(line, 0, 1, 0, g); err != nil {
+		t.Fatalf("empty group: %v", err)
+	}
+	grpExpectNoCurrent(t, c)
+	grpExpectEmptyListGroup(t, c, g, 0, 1, 0)
+}
+
+// TestGrpGroupEmptyNextNumFails: when the next-number query of an empty group fails
+// (no article_num_seq table), GROUP answers 403, nothing is selected (a bare LISTGROUP
+// answers 412) and no group DB stays held (the server stops cleanly).
+func TestGrpGroupEmptyNextNumFails(t *testing.T) {
+	g := hGroup(t, "t3.groupemptyfail", 0, nil)
+	db := hTestDB(t)
+	gdb, err := db.GetGroupDB(g)
 	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", g, err)
+	}
+	if _, err := database.RetryableExec(gdb.DB, `DROP TABLE article_num_seq`); err != nil {
+		gdb.Return()
+		t.Fatalf("drop article_num_seq of %s: %v", g, err)
+	}
+	gdb.Return()
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+	code, line := c.cmd(t, "GROUP %s", g)
+	if err := hExpectCode(code, line, 403); err != nil {
 		t.Fatal(err)
 	}
-	emptyForm := high == low-1 || (low == 0 && high == 0) || high >= low
-	if name != g || count != 0 || !emptyForm {
-		t.Fatalf("empty group: got %q, want \"211 0 x x-1 %s\", \"211 0 0 0 %s\" or \"211 0 low high %s\" with high >= low", line, g, g, g)
+	code, line = c.cmd(t, "LISTGROUP")
+	if err := hExpectCode(code, line, 412); err != nil {
+		t.Fatalf("after the failed GROUP: %v", err)
 	}
+	c.close()
+	hs.stop(t)
+}
+
+// grpExpectNoCurrent checks that STAT, NEXT and LAST without an argument answer 420
+// (no current article, RFC 3977 §6.1.1.2, §6.1.3, §6.1.4, §6.2.4).
+func grpExpectNoCurrent(t *testing.T, c *hClient) {
+	t.Helper()
+	for _, cmd := range []string{"STAT", "NEXT", "LAST"} {
+		code, line := c.cmd(t, "%s", cmd)
+		if err := hExpectCode(code, line, 420); err != nil {
+			t.Fatalf("%s without a current article: %v", cmd, err)
+		}
+	}
+}
+
+// grpExpectEmptyListGroup checks that "LISTGROUP group" answers exactly
+// "211 count low high group" followed by an empty list.
+func grpExpectEmptyListGroup(t *testing.T, c *hClient, group string, count, low, high int64) {
+	t.Helper()
+	code, line := c.cmd(t, "LISTGROUP %s", group)
+	if err := hExpectCode(code, line, 211); err != nil {
+		t.Fatal(err)
+	}
+	lines := c.readDotLines(t)
+	if err := grpExpect211(line, count, low, high, group); err != nil {
+		t.Fatalf("LISTGROUP %s: %v", group, err)
+	}
+	if len(lines) != 0 {
+		t.Fatalf("LISTGROUP %s: got lines %q, want none", group, lines)
+	}
+}
+
+// grpEmptyOut deletes every article of group (an expiry of all of them) and sets the
+// newsgroups row's message_count to 0; article_num_seq keeps the highest number used.
+func grpEmptyOut(t *testing.T, group string) {
+	t.Helper()
+	db := hTestDB(t)
+	gdb, err := db.GetGroupDB(group)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", group, err)
+	}
+	defer gdb.Return()
+	if _, err := database.RetryableExec(gdb.DB, `DELETE FROM articles`); err != nil {
+		t.Fatalf("delete articles of %s: %v", group, err)
+	}
+	if _, err := database.RetryableExec(db.GetMainDB(),
+		`UPDATE newsgroups SET message_count = 0 WHERE name = ?`, group); err != nil {
+		t.Fatalf("zero message_count of %s: %v", group, err)
+	}
+}
+
+// TestGrpGroupEmptied: a group whose articles 1..5 were all deleted answers
+// "211 0 6 5" (RFC 3977 §6.1.1.2: low = high+1, so a reader keeps its place);
+// the old numbers are gone (423), and the next stored article gets number 6.
+func TestGrpGroupEmptied(t *testing.T) {
+	g := hGroup(t, "t3.groupemptied", 5, nil)
+	grpEmptyOut(t, g)
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+
+	code, line := c.cmd(t, "GROUP %s", g)
+	if err := hExpectCode(code, line, 211); err != nil {
+		t.Fatal(err)
+	}
+	if err := grpExpect211(line, 0, 6, 5, g); err != nil {
+		t.Fatalf("emptied group: %v", err)
+	}
+	grpExpectNoCurrent(t, c)
+	code, line = c.cmd(t, "ARTICLE 1")
+	if err := hExpectCode(code, line, 423); err != nil {
+		t.Fatalf("ARTICLE 1 in the emptied group: %v", err)
+	}
+	grpExpectEmptyListGroup(t, c, g, 0, 6, 5)
+
+	// A range over the old numbers lists nothing either.
+	code, line = c.cmd(t, "LISTGROUP %s 1-10", g)
+	if err := hExpectCode(code, line, 211); err != nil {
+		t.Fatal(err)
+	}
+	if lines := c.readDotLines(t); len(lines) != 0 {
+		t.Fatalf("LISTGROUP %s 1-10: got lines %q, want none", g, lines)
+	}
+
+	// The next stored article gets the announced low mark.
+	gdb, err := hTestDB(t).GetGroupDB(g)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", g, err)
+	}
+	next, err := hTestDB(t).NNTPGroupNextArticleNum(gdb)
+	gdb.Return()
+	if err != nil {
+		t.Fatalf("NNTPGroupNextArticleNum %s: %v", g, err)
+	}
+	if next != 6 {
+		t.Fatalf("next article number of %s: got %d, want 6", g, next)
+	}
+	hArticleSQL(t, g, hDefaultArticle(g, next))
+	code, line = c.cmd(t, "GROUP %s", g)
+	if err := hExpectCode(code, line, 211); err != nil {
+		t.Fatal(err)
+	}
+	if err := grpExpect211(line, 1, 6, 6, g); err != nil {
+		t.Fatalf("GROUP after a new article: %v", err)
+	}
+	code, line = c.cmd(t, "STAT")
+	if !strings.HasPrefix(line, fmt.Sprintf("223 6 %s", hMessageID(g, 6))) {
+		t.Fatalf("bare STAT after GROUP: got %q (code %d), want 223 6", line, code)
+	}
+}
+
+// TestGrpGroupAllHidden: a group whose articles 1..5 are all hidden has no visible
+// article and answers like an emptied group, "211 0 6 5", with an empty LISTGROUP.
+func TestGrpGroupAllHidden(t *testing.T) {
+	g := hGroup(t, "t3.groupallhidden", 5, nil)
+	grpHide(t, g, 1, 2, 3, 4, 5)
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+
+	code, line := c.cmd(t, "GROUP %s", g)
+	if err := hExpectCode(code, line, 211); err != nil {
+		t.Fatal(err)
+	}
+	if err := grpExpect211(line, 0, 6, 5, g); err != nil {
+		t.Fatalf("all-hidden group: %v", err)
+	}
+	grpExpectNoCurrent(t, c)
+	grpExpectEmptyListGroup(t, c, g, 0, 6, 5)
 }
 
 // TestGrpGroupNoArg: GROUP without a group name is a syntax error, 501

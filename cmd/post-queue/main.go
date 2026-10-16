@@ -22,30 +22,47 @@ import (
 var appVersion = "-unset-"
 
 func main() {
-	os.Exit(run())
+	os.Exit(run(os.Args[1:]))
 }
 
-// run returns the process exit code: 0 ok, 1 error, 130 one-shot run stopped by a signal
-// (before the batch started, or the batch returned postmgr.ErrStopped). A batch that finished
-// before the signal arrived exits 0.
+// run returns the process exit code for the command line args (without the program name):
+// 0 ok, 1 error, 2 bad flags, 130 one-shot run stopped by a signal (before the batch started,
+// or the batch returned postmgr.ErrStopped). A batch that finished before the signal arrived
+// exits 0. SIGINT/SIGTERM are handled from the same point as before (after the cleanup flags),
+// see runWith.
+func run(args []string) int {
+	return runWith(args, nil)
+}
+
+// runWith is run with an optional shutdown channel. stopChan == nil installs the SIGINT/SIGTERM
+// handler (notifyShutdown) after the cleanup flags are handled, as the tool always did; tests pass
+// their own channel and close it instead of sending a signal.
 // Nothing after OpenDatabase exits the process: every return goes through the deferred
 // shutdown, which runs after the deferred close of the posting pools.
-func run() (code int) {
+func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	config.AppVersion = appVersion
 	database.DBidleTimeOut = 15 * time.Second
 	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("Starting go-pugleaf Post Queue Tool (version %s)", config.AppVersion)
 
 	// Command line flags
+	fs := flag.NewFlagSet("post-queue", flag.ContinueOnError)
 	var (
-		showHelp      = flag.Bool("help", false, "Show usage examples and exit")
-		daemon        = flag.Bool("daemon", false, "Run as a daemon")
-		limit         = flag.Int("max-batch", 100, "Post max N articles in a batch")
-		cleanupPosted = flag.Bool("cleanup-posted-entries", false, "Delete all successfully posted entries from post_queue table and exit")
-		cleanupOlder  = flag.Int("cleanup-older", 0, "Delete all post_queue entries older than N days and exit (0 = disabled)")
-		dataDir       = flag.String("data", "./data", "Directory to store database files")
+		showHelp      = fs.Bool("help", false, "Show usage examples and exit")
+		daemon        = fs.Bool("daemon", false, "Run as a daemon")
+		limit         = fs.Int("max-batch", 100, "Post max N articles in a batch")
+		cleanupPosted = fs.Bool("cleanup-posted-entries", false, "Delete all successfully posted entries from post_queue table and exit")
+		cleanupOlder  = fs.Int("cleanup-older", 0, "Delete successfully posted post_queue entries older than N days and exit (0 = disabled)")
+		dataDir       = fs.String("data", "./data", "Directory to store database files")
 	)
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		// Parse already printed the error and the usage, like flag.ExitOnError, which exits 0
+		// for -h/-help requests it does not define (flag.ErrHelp) and 2 otherwise.
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
 
 	if *showHelp {
 		showUsageExamples()
@@ -87,21 +104,14 @@ func run() (code int) {
 	}
 
 	// Set up signal handling for graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigChan)
-	shutdownChan := make(chan struct{})
+	shutdownChan := stopChan
+	if shutdownChan == nil {
+		sigShutdown, stopSignals := notifyShutdown()
+		defer stopSignals()
+		shutdownChan = sigShutdown
+	}
 	runDone := make(chan struct{})
 	defer close(runDone)
-
-	go func() {
-		select {
-		case <-sigChan:
-			log.Printf("Received shutdown signal, initiating graceful shutdown...")
-			close(shutdownChan)
-		case <-runDone:
-		}
-	}()
 
 	// Rows left in_processing by a killed or crashed earlier run are never selected again:
 	// return them to pending before this run selects. This assumes only one post-queue runs
@@ -180,6 +190,28 @@ func run() (code int) {
 
 	log.Printf("Post Queue Tool has shut down gracefully")
 	return 0
+}
+
+// notifyShutdown returns a channel that is closed on SIGINT or SIGTERM, and stop, which ends the
+// watcher goroutine and the signal notification (call it once, when the run returns).
+func notifyShutdown() (shutdownChan <-chan struct{}, stop func()) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	closeChan := make(chan struct{})
+	runDone := make(chan struct{})
+
+	go func() {
+		select {
+		case <-sigChan:
+			log.Printf("Received shutdown signal, initiating graceful shutdown...")
+			close(closeChan)
+		case <-runDone:
+		}
+	}()
+	return closeChan, func() {
+		close(runDone)
+		signal.Stop(sigChan)
+	}
 }
 
 // shutdown stops the database. OpenDatabase adds the batch orchestrators to db.WG,

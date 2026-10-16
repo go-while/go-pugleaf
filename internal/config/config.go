@@ -127,6 +127,7 @@ type ServerConfig struct {
 	// NNTP server-specific configuration
 	NNTP struct {
 		Enabled    bool   `json:"enabled"`
+		Addr       string `json:"addr"` // IP address the NNTP listeners bind to ("" = all interfaces)
 		Port       int    `json:"port"`
 		TLSPort    int    `json:"tls_port"`
 		MaxConns   int    `json:"max_connections"`
@@ -562,6 +563,7 @@ func NewDefaultConfig() *MainConfig {
 			},
 			NNTP: struct {
 				Enabled    bool   `json:"enabled"`
+				Addr       string `json:"addr"`
 				Port       int    `json:"port"`
 				TLSPort    int    `json:"tls_port"`
 				MaxConns   int    `json:"max_connections"`

@@ -133,6 +133,8 @@ CREATE TABLE newsgroups (
     max_articles INTEGER DEFAULT 0,    -- 0 = no limit
     message_count INTEGER,
     last_article INTEGER,
+    high_water INTEGER,
+    low_water INTEGER,
     -- ... other fields
 );
 ```
@@ -142,10 +144,13 @@ CREATE TABLE newsgroups (
 1. **Dry-Run First**: Always test with `-dry-run` before using `-force`
 2. **Force Required**: Actual deletions require explicit `-force` flag
 3. **Batch Processing**: Handles large datasets without memory issues
-4. **Transaction Safety**: Each batch is deleted in one group database transaction (articles, overview,
+4. **Transaction Safety**: Each batch is deleted in one group database transaction (articles,
    threads and the thread caches `tree_stats`, `cached_trees`, `thread_cache`); the spam flags of the
    deleted articles in the main database are removed afterwards
-5. **Counter Updates**: Automatically updates newsgroup message counts
+5. **Counter Updates**: Automatically updates the newsgroup's `message_count`, `last_article` and the
+   water marks `LIST ACTIVE` prints (`high_water` = `last_article`, `low_water` = lowest remaining
+   article; an emptied group keeps its place: `low_water` = next article number = `last_article` + 1).
+   The count and the marks include hidden articles; `LIST ACTIVE` prints `last_article` and `low_water`
 6. **Progress Logging**: Detailed logging of operations and progress
 
 ## Performance Considerations

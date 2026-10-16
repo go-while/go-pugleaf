@@ -141,9 +141,22 @@ func TestNSHReadWatermarks(t *testing.T) {
 	if low, high, err := db.NNTPGroupWatermarks(gdb); err != nil || low != 0 || high != 0 {
 		t.Fatalf("empty group: NNTPGroupWatermarks = %d, %d, %v; want 0, 0", low, high, err)
 	}
+	if next, err := db.NNTPGroupNextArticleNum(gdb); err != nil || next != 1 {
+		t.Fatalf("empty group: NNTPGroupNextArticleNum = %d, %v; want 1", next, err)
+	}
 	gdb, _ = nshReadGroup(t, 5, 1, 2, 3, 4, 5)
 	if low, high, err := db.NNTPGroupWatermarks(gdb); err != nil || low != 0 || high != 0 {
 		t.Fatalf("all hidden: NNTPGroupWatermarks = %d, %d, %v; want 0, 0", low, high, err)
+	}
+	if next, err := db.NNTPGroupNextArticleNum(gdb); err != nil || next != 6 {
+		t.Fatalf("all hidden: NNTPGroupNextArticleNum = %d, %v; want 6", next, err)
+	}
+	// deleting every article keeps the sequence: the next number stays 6 (migration 0010)
+	if _, err := gdb.DB.Exec("DELETE FROM articles"); err != nil {
+		t.Fatalf("delete all: %v", err)
+	}
+	if next, err := db.NNTPGroupNextArticleNum(gdb); err != nil || next != 6 {
+		t.Fatalf("emptied group: NNTPGroupNextArticleNum = %d, %v; want 6", next, err)
 	}
 	gdb, _ = nshReadGroup(t, 5, 1)
 	if low, high, err := db.NNTPGroupWatermarks(gdb); err != nil || low != 2 || high != 5 {
