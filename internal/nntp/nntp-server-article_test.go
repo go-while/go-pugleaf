@@ -245,6 +245,7 @@ func artSelect(t *testing.T, c *hClient, g string) {
 func TestArtByNumber(t *testing.T) {
 	g, arts := artSeed(t, "bynumber", 3, nil)
 	hs := newTestServer(t, hServerOpts{})
+	hs.S.SetXrefMode(XrefOff) // stored-header passthrough (Xref: lines are tested in nntp-xref_test.go)
 	a2 := artFind(t, arts, 2)
 
 	for _, cmd := range artCmds {
@@ -269,6 +270,7 @@ func TestArtByMessageIDCurrentGroup(t *testing.T) {
 	// Articles 5..7 only, so the reported number cannot be a list index.
 	g, arts := artSeed(t, "bymsgid", 7, func(i int, a *hArticle) { a.Skip = i < 5 })
 	hs := newTestServer(t, hServerOpts{})
+	hs.S.SetXrefMode(XrefOff) // stored-header passthrough (Xref: lines are tested in nntp-xref_test.go)
 	a6 := artFind(t, arts, 6)
 
 	for _, cmd := range artCmds {
@@ -340,6 +342,7 @@ func TestArtNoArgument(t *testing.T) {
 	g, arts := artSeed(t, "noarg", 2, nil)
 	gEmpty, _ := artSeed(t, "noarg-empty", 0, nil)
 	hs := newTestServer(t, hServerOpts{})
+	hs.S.SetXrefMode(XrefOff) // stored-header passthrough (Xref: lines are tested in nntp-xref_test.go)
 	a1 := artFind(t, arts, 1)
 
 	t.Run("current-article", func(t *testing.T) {
@@ -529,6 +532,7 @@ func TestArtNotFound(t *testing.T) {
 func TestArtCurrentArticle(t *testing.T) {
 	g, arts := artSeed(t, "current", 3, nil)
 	hs := newTestServer(t, hServerOpts{})
+	hs.S.SetXrefMode(XrefOff) // stored-header passthrough (Xref: lines are tested in nntp-xref_test.go)
 	a2 := artFind(t, arts, 2)
 	a3 := artFind(t, arts, 3)
 
@@ -614,6 +618,7 @@ func TestArtByteExact(t *testing.T) {
 		})
 		a := arts[0]
 		hs := newTestServer(t, hServerOpts{})
+		hs.S.SetXrefMode(XrefOff) // byte-exact stored headers (Xref: lines are tested in nntp-xref_test.go)
 		c := hs.dial(t)
 		artSelect(t, c, g)
 
@@ -669,6 +674,7 @@ func TestArtByteExact(t *testing.T) {
 		})
 		a := arts[0]
 		hs := newTestServer(t, hServerOpts{})
+		hs.S.SetXrefMode(XrefOff) // byte-exact stored headers (Xref: lines are tested in nntp-xref_test.go)
 		wantHead := artCRLF(append(artDefaultHeaders(g, a), "X-Folded: first", "..second part")...)
 		var errs []error
 
@@ -693,6 +699,7 @@ func TestArtByteExact(t *testing.T) {
 		})
 		a := arts[0]
 		hs := newTestServer(t, hServerOpts{})
+		hs.S.SetXrefMode(XrefOff) // byte-exact stored headers (Xref: lines are tested in nntp-xref_test.go)
 		wantHead := artCRLF(append(artDefaultHeaders(g, a), "X-Folded: first", "..")...)
 		var errs []error
 
@@ -721,6 +728,7 @@ func TestArtByteExact(t *testing.T) {
 		g, arts := artSeed(t, "bytes-emptybody", 1, func(_ int, a *hArticle) { a.Body = "" })
 		a := arts[0]
 		hs := newTestServer(t, hServerOpts{})
+		hs.S.SetXrefMode(XrefOff) // byte-exact stored headers (Xref: lines are tested in nntp-xref_test.go)
 		c := hs.dial(t)
 		artSelect(t, c, g)
 		var errs []error
@@ -986,6 +994,7 @@ func TestArtHidden(t *testing.T) {
 
 	t.Run("number-423", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
+		hs.S.SetXrefMode(XrefOff) // stored-header passthrough (Xref: lines are tested in nntp-xref_test.go)
 		c := hs.dial(t)
 		artSelect(t, c, g)
 		for _, cmd := range artCmds {

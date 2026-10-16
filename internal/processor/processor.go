@@ -257,10 +257,29 @@ func (proc *Processor) FindArticleByMessageID(messageID, currentGroup string) (*
 }
 
 // XrefLocations returns the groups and article numbers the history index holds for
-// messageID, for the server's Xref: header (plan xref-history, slice xref-serve fills it in).
-// nil, nil = nothing known.
+// messageID, for the server's Xref: header (-xref full), in the order of the history row.
+// Locations without a number (old rows, 0 = unknown until a history-rebuild) and group IDs
+// the main DB does not know are skipped. nil, nil = nothing known or history disabled.
 func (proc *Processor) XrefLocations(messageID string) ([]nntp.XrefLocation, error) {
-	return nil, nil
+	if proc == nil || proc.History == nil || messageID == "" {
+		return nil, nil
+	}
+	locs, err := proc.History.LookupLocations(messageID)
+	if err != nil {
+		return nil, fmt.Errorf("history lookup for '%s' failed: %w", messageID, err)
+	}
+	var out []nntp.XrefLocation
+	for _, l := range locs {
+		if l.ArticleNum <= 0 {
+			continue
+		}
+		groupName, exists := database.NewsgroupDBsIDcache.GetNewsgroupNameByID(l.GroupID, proc.DB)
+		if !exists || groupName == "" {
+			continue
+		}
+		out = append(out, nntp.XrefLocation{Group: groupName, ArticleNum: l.ArticleNum})
+	}
+	return out, nil
 }
 
 // findArticleInGroup returns the article from one newsgroup DB or nil
