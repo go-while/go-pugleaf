@@ -167,6 +167,8 @@ At the end it logs the totals, the total time and the average rate.
   count is only logged in `-update` mode)
 - **Interruption**: there is no signal handler; an interrupted import loses the open batches and
   can be resumed by running it again (with or without `-update`)
+- **Exit status**: 1 only when `-head` or `-body` does not exist or `-db` cannot be created;
+  article errors are counted and logged, the exit status stays 0
 
 ## Building
 

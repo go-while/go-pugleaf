@@ -42,14 +42,15 @@ The `expire-news` tool manages article lifecycle in newsgroups by providing two 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `-group` | Newsgroup pattern (`$all`, `alt.*`, or specific group) | Required |
-| `-days` | Delete articles older than N days | 0 (disabled) |
+| `-days` | Delete articles older than N days (one of `-days`, `-respect-expiry` or `-prune` is required) | 0 (no age expiry) |
 | `-prune` | Remove oldest articles to respect max_articles limit | false |
 | `-respect-expiry` | Use per-group expiry_days from database | false |
 | `-dry-run` | Preview mode - show what would be deleted | false |
 | `-force` | Required for actual deletions | false |
-| `-batch-size` | Articles to process per batch | 1000 |
+| `-batch-size` | Articles to process per batch (1-10000) | 1000 |
 | `-trim-history` | Also remove deleted articles from the message-id history index | false |
 | `-data` | Data directory | `./data` |
+| `-help` | Show usage examples and exit | false |
 
 ### Group Selection Patterns
 
@@ -57,6 +58,9 @@ The `expire-news` tool manages article lifecycle in newsgroups by providing two 
 - `alt.*` - Process all groups starting with "alt."
 - `comp.lang.go` - Process specific newsgroup
 - `news.*` - Process all groups starting with "news."
+
+`$all` and wildcards (a name prefix followed by `*`) select only active groups. A single group
+that does not exist or is inactive is an error (exit code 1).
 
 ## Operation Modes
 
@@ -73,6 +77,8 @@ Removes articles older than specified days using the article's `date_sent` field
 ```
 
 **Default Behavior**: Groups with `expiry_days = 0` are considered to have infinite retention (no expiry).
+With `-respect-expiry` a group's `expiry_days` overrides `-days`, and groups with `expiry_days = 0`
+are not expired by age even when `-days` is set.
 
 ### Count-Based Pruning
 
@@ -133,7 +139,9 @@ CREATE TABLE newsgroups (
 1. **Dry-Run First**: Always test with `-dry-run` before using `-force`
 2. **Force Required**: Actual deletions require explicit `-force` flag
 3. **Batch Processing**: Handles large datasets without memory issues
-4. **Transaction Safety**: All deletions wrapped in database transactions
+4. **Transaction Safety**: Each batch is deleted in one group database transaction (articles, overview,
+   threads and the thread caches `tree_stats`, `cached_trees`, `thread_cache`); the spam flags of the
+   deleted articles in the main database are removed afterwards
 5. **Counter Updates**: Automatically updates newsgroup message counts
 6. **Progress Logging**: Detailed logging of operations and progress
 
@@ -154,7 +162,7 @@ CREATE TABLE newsgroups (
 
 ### Specific Group Management
 ```bash
-# Clean up alt.* groups - expire after 7 days, max 1000 articles each
+# Clean up alt.* groups - expire after 7 days, prune each group to its max_articles
 ./expire-news -group 'alt.*' -days 7 -prune -force
 ```
 
@@ -195,11 +203,14 @@ EXPIRY MODE: Will remove old articles
 
 [1/150] Processing alt.binaries.test expiry (using command line: 30 days)
 Expiring articles older than: 2025-07-05 03:39:04
-Would process alt.binaries.test: expired 450 (age), pruned 0 (count) (scanned 1200)
+Skipping alt.binaries.test pruning (no max_articles limit set)
+Would process alt.binaries.test: expired 450 (age) (scanned 1200)
 
-[2/150] Processing comp.lang.go expiry (using group setting: 90 days)
+[2/150] Processing comp.lang.go expiry (using command line: 30 days)
+Expiring articles older than: 2025-07-05 03:39:04
 Pruning comp.lang.go to max 1000 articles
-Would process comp.lang.go: expired 12 (age), pruned 250 (count) (scanned 1262)
+Group comp.lang.go has 1250 articles, need to remove 250 to stay under limit of 1000
+Would process comp.lang.go: expired 12 (age), pruned 250 (count) (scanned 2500)
 
 === Expiration Summary ===
 Would process 15420 articles total (scanned 125000 articles)
@@ -209,7 +220,8 @@ Use -force to actually perform deletions
 ## Error Handling
 
 The tool handles various error conditions gracefully:
-- Missing newsgroups or inactive groups are skipped
+- With `$all` or a wildcard, inactive groups are not selected; a single `-group` that is missing
+  or inactive stops the run (exit code 1)
 - Database connection issues are logged and processing continues with other groups
 - Invalid article data is logged but doesn't stop the process
 - Transaction failures cause rollback and error reporting

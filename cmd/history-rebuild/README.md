@@ -34,10 +34,15 @@ accepted but has no effect since Nov 2025.
 | `history-rebuild -analyze-only [-verbose]` | Open the 16 files read-only: rows per file (per table with `-verbose`), total, histogram of groups per message-id | no |
 | `history-rebuild -trim` | Full sweep over all history rows: remove group IDs whose group is gone from the main DB, has no group DB file, or no longer has the article | yes |
 
-Other flags: `-data <dir>` (default `./data`), `-progress N` (progress line every N articles),
-`-batch-size N` (article_num range per query, default 10000), `-verbose`, `-pprof :6060`.
+Only one of `-validate-only`, `-analyze-only`, `-trim` can be used per run.
 
-Exit code: 0 ok, 1 errors, 130 interrupted.
+Other flags: `-data <dir>` (default `./data`), `-progress N` (progress line every N articles,
+default 100000), `-batch-size N` (article_num range per query, default 10000), `-verbose`,
+`-pprof localhost:6060` (loopback addresses only; `:6060` means `127.0.0.1:6060`).
+
+Exit code: 0 ok, 1 errors, 130 interrupted. Validation misses are reported but are not errors.
+`-analyze-only` exits 1 when one of the 16 files is missing; `-validate-only` and `-trim` exit 1
+when `<data>/history` does not exist.
 
 ## Resuming and idempotency
 
@@ -64,5 +69,7 @@ group DB write is still queued can be trimmed (a rebuild fixes that).
 ## Building
 
 ```bash
+./build_history-rebuild.sh        # writes build/history-rebuild, with the version from appVersion.txt
+# or
 go build -o build/history-rebuild ./cmd/history-rebuild
 ```

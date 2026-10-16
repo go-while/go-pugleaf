@@ -1,13 +1,13 @@
 # docs/audit — go-pugleaf audit (plan `nntp-audit-tests`, October 2026)
 
 Base: `testing-001` @ 84c2081 (re-anchored 2026-10-08), integration branch `plan-nntp-audit-tests`.
-Plan: `.claude/plans/wip/nntp-audit-tests.md` (moves to `done/` when finished).
+Plan: `.claude/plans/done/nntp-audit-tests.md` (merged into `testing-001` on 2026-10-11).
 
 ## Files
 
 | File | Content |
 |----|----|
-| `README.md` | this schema, the slice table, the seed finding ids |
+| `README.md` | this schema, the slice table, the known-bug mechanism, the seed finding ids |
 | `<slug>.md` | one report per audit slice (see the slice table) |
 | `AUDIT-2026-10.md` | consolidated report (wave 3) |
 | `tools/go-vet.txt` | `go vet ./...` output (`exit=0` = clean) |
@@ -72,7 +72,37 @@ Test slices (wave 2): `test-nntp-session`, `test-nntp-auth`, `test-nntp-group`, 
 `test-nntp-overview` (`internal/nntp/nntp-server-*_test.go`) and `test-nntp-intake-e2e`
 (`cmd/nntp-server/server_e2e_test.go`, `scripts/test-nntp-server.sh`).
 
+## Known bugs (`knownBug`)
+
+The NNTP tests assert the RFC-correct behavior. Where the code still differs, the test passes the result of the
+check to `knownBug(t, id, err)` (`internal/nntp/nntp-server-harness_test.go`; `cmd/nntp-server/server_e2e_test.go`
+has the same semantics in `e2eKnownBugAction`):
+
+- `err != nil`, `PUGLEAF_KNOWN_BUGS` unset: the test is skipped with `known bug <id>: …` (normal runs stay green).
+- `err != nil`, `PUGLEAF_KNOWN_BUGS=1`: `t.Error` with `known bug <id> still open: …`, so the run fails on purpose.
+- `err == nil`: `t.Fatal` with `known bug <id> no longer reproduces: remove knownBug, keep the assertion`, so a fixed
+  bug fails the normal run until the marker is removed.
+
+List the open ones with:
+
+```
+PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/
+```
+
+Open as of 2026-10-15: one id, **T-nntp-article-1** (`TestArtLocal430/external-arrival` in
+`internal/nntp/nntp-server-article_test.go`): an article stored by another process (fetcher) is answered 430 until
+the local430 negative-cache entry expires (default TTL 60 s, `cmd/nntp-server -local430ttl`). This is an accepted
+limitation (user decision 2026-10-11, see `BUGS.md`). `cmd/nntp-server` has no open marker. The audit-time list (29 ids) is in `AUDIT-2026-10.md`
+("Known-bug list"); the plans in `.claude/plans/done/` closed the others.
+
+CI: the `known-bugs` job in `.github/workflows/tests.yml` (manual `workflow_dispatch`, informational) runs
+`go test -count=1 ./internal/nntp/... ./cmd/nntp-server/...` with `PUGLEAF_KNOWN_BUGS=1` and `|| true`, and writes
+every `known bug` line (or `none`) under "Open NNTP known bugs" to the step summary.
+
 ## Seed findings (from the plan's Context, status as of 2026-10-08)
+
+The Status column is the audit-time snapshot and is not updated; most items were fixed by later plans. For the
+current state see `BUGS.md` (the "Fixed by plan …" entries) and the Outcome sections in `.claude/plans/done/`.
 
 Paths are under `internal/` unless they start with `cmd/`, `web/static`, `migrations/` or a root file.
 

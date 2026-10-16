@@ -254,6 +254,9 @@ group_name,provider_name,total_articles,total_bytes,first_article,last_article,o
 - **Missing Articles**: a batch without articles (NNTP 423) is skipped.
 - **Cache Corruption**: there is no automatic rebuild; check with `-validate-cache`, then use
   `-force-refresh` or `-clear-cache`.
+- **Exit status**: a single-group run exits with 1 when the analysis fails; `$all`, `prefix.*` and
+  `-groups-file` runs exit with 0 and list the failed groups at the end. A failed `-validate-cache`
+  check is printed but does not count as a failure.
 
 ## Troubleshooting
 

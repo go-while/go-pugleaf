@@ -26,9 +26,10 @@ This package holds the NNTP **server** (reader side plus IHAVE/TAKETHIS/POST int
 | `nntp-cmd-group.go` | GROUP, LISTGROUP |
 | `nntp-cmd-list.go` | LIST [ACTIVE \| NEWSGROUPS] without a wildmat |
 | `nntp-article-common.go` | ARTICLE, HEAD, BODY, STAT (shared lookup by number or message-id) |
-| `nntp-cmd-xover.go`, `nntp-cmd-xhdr.go` | XOVER, XHDR |
-| `nntp-cmd-posting.go` | POST, IHAVE, TAKETHIS |
-| `nntp-cmd-helpers.go` | `rateLimitOnError` and header helpers |
+| `nntp-cmd-xover.go`, `nntp-cmd-xhdr.go` | XOVER, XHDR (`overviewLine`, `sanitizeOverviewField`) |
+| `nntp-cmd-range.go` | `parseRangeArg`, `requireGroup` (412 without a selected group), current-group helpers |
+| `nntp-cmd-posting.go` | POST, IHAVE, TAKETHIS, POST injection (`injectProtoArticle`), feed Path (`relayPath`), reply mapping (`intakeReply`) |
+| `nntp-cmd-helpers.go` | `rateLimitOnError` (the error delay) |
 
 Command list: CAPABILITIES, MODE READER, MODE STREAM, STARTTLS (only with a certificate), AUTHINFO
 USER/PASS, DATE, LIST ACTIVE|NEWSGROUPS [wildmat], LIST OVERVIEW.FMT, LIST HEADERS, NEWGROUPS date time
@@ -47,7 +48,7 @@ matching `cmd/nntp-server` flags:
 | `Config.NNTP.Port` | `-nntptcpport` | 0 | plain TCP port |
 | `Config.NNTP.TLSPort`, `TLSCert`, `TLSKey` | `-nntptlsport`, `-nntpcertfile`, `-nntpkeyfile` | 0 | implicit TLS port (TLS 1.2 minimum) |
 | `Config.NNTP.MaxConns` | `-maxconnections` | 500 | concurrent client connections, all clients together |
-| `Config.NNTP.MaxArtSize` | `-maxartsize` | 32768 (0 = config default) | article byte limit (`MaxArticleBytes`; 1 MiB when <= 0) |
+| `Config.NNTP.MaxArtSize` | `-maxartsize` | 0 = config default 32768 | article byte limit (`MaxArticleBytes`; 1 MiB when the config value is <= 0) |
 | `Config.Hostname` | `-nntphostname` | database fallback | hostname in the greeting |
 | `IdleTimeout` | `-idletimeout` | 3m | idle timeout per command and write timeout per flush |
 | `ArticleCmdDelay` | `-articledelay` | 25ms | sleep before ARTICLE/HEAD/BODY/STAT |
@@ -56,6 +57,7 @@ matching `cmd/nntp-server` flags:
 | `PlaintextAuth` | `-plaintextauth` | `accept` | AUTHINFO without TLS: `accept`, `advertise` or `refuse` |
 | `ReadRequiresAuth` | `-readauth` | false | reader commands need AUTHINFO first |
 | `EnforceUserMaxConns` | `-enforce-user-maxconns` | false | per-user `maxconns` limit |
+| `SetLocal430TTL` | `-local430ttl` | 60s | TTL of the local430 negative cache (see below) |
 | `ShutdownTimeout` | - | 10s | how long `Stop` waits for client handlers |
 
 `Start` fails when no port is configured, or when a TLS port is set without a usable certificate and
@@ -82,8 +84,21 @@ accept loops and the local430 cleanup, `Stop` ends all of them (the caller's Wai
   16384-line caps, drains an oversized article up to its terminator (`ErrArticleTooLarge`, the
   connection stays usable) and gives up past max(4 x limit, 1 MiB), at most 64 MiB
   (`ErrArticleDrainLimit`, the caller closes). The read deadline is refreshed per article line.
-- **Error delay.** `ErrorDelay` is slept before every 412, 420, 423, 430, 481, 482, 500 and 501
-  reply, never before 2xx/3xx, 205, 400, 403, 411, 440, 480, 483 or 502.
+- **Error delay.** `ErrorDelay` is slept before every 412, 420, 423, 430, 481 and 482 reply, before
+  most 501 replies (not the IHAVE/TAKETHIS argument checks), before 500 for unknown and empty
+  commands, before the intake rejections for "too large" and "invalid" (441, IHAVE 437, TAKETHIS
+  439 for too large or a bad message-id) and the IHAVE 436 history error, and before the 480/502 of
+  IHAVE and TAKETHIS without login or rights. Never before 2xx/3xx, 205, 400, 403, 411, 435, 440,
+  483, or the 480 of the read gate and POST.
+- **Intake.** POST, IHAVE and TAKETHIS need a processor (else POST `440`, IHAVE/TAKETHIS `500`), a
+  successful AUTHINFO (`480`) and posting rights. Articles go through `readArticleBlock` with
+  `MaxArticleBytes`: too large gives 441/437/439 with the stream in sync, past the drain bound
+  `400` and close. POST is injected (`injectProtoArticle`, RFC 5537 §3.5): Message-ID and Date are
+  generated when missing (then also Injection-Date), Injection-Info is always added, the Path gets
+  `<hostname>!.POSTED!`; a proto-article with Injection-Info, Xref or `.POSTED` in its Path is refused,
+  and so is a Date older than `PostDateMaxAge` (72 h) or more than 24 h in the future.
+  IHAVE/TAKETHIS prepend `<hostname>!.SEEN.<ip>!` (`relayPath`) and need a Message-ID header equal
+  to the command argument.
 - **Connection limit.** Counted at accept: over `MaxConns` the client gets
   `400 Too many connections, try again later` and is closed. With `EnforceUserMaxConns` a user with
   `maxconns > 0` gets at most that many authenticated connections on this server (`maxconns <= 0`:

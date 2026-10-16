@@ -66,8 +66,9 @@ folder manually.
 - `-threads`: Number of `*-articles.db3` files imported in parallel (default: 1)
 - `-nntphostname`: Your NNTP hostname; required on the first run, later runs fall back to the
   value stored in the database
-- `-useshorthashlen`: Short hash length for the message-id history (2-7, default: 7). The value of
-  the first run is stored in the database; later runs use the stored value and warn if it differs
+- `-useshorthashlen`: Legacy short hash length (2-7, default: 7). The value of the first run is
+  stored in the database; later runs use the stored value and warn if it differs. It has no effect
+  on the history index, which stores full message-ids since Nov 2025
 - `-history`: Maintain and use the message-id history index in `<data>/history` (default: true)
 - `-pprof`: Serve net/http/pprof on a loopback address with a port, e.g. `localhost:6060` (default: off)
 - `-YESresetallgroupsYES`: Reset all newsgroup data (see above)

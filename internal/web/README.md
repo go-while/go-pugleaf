@@ -39,18 +39,18 @@ the cookie. The login lockout uses `users.login_attempt_at`, not `updated_at`.
 | `web_homePage.go`, `web_newsPage.go`, `web_statsPage.go`, `web_helpPage.go`, `web_ircPage.go` | site pages |
 | `web_groupsPage.go`, `webgroupPage.go` | group index and one group's article list |
 | `web_groupThreadsPage.go`, `web_threadPage.go`, `web_threadTreePage.go` | thread list, single thread, tree view |
-| `web_articlePage.go` | single article and article preview |
+| `web_articlePage.go` | single article by number or message-id, `articleHiddenFor` (hidden articles are 404 for non-admins) |
 | `web_hierarchiesPage.go`, `web_sectionsPage.go` | hierarchy and section browsing |
 | `web_searchPage.go` | search |
-| `web_sitePostPage.go` | web posting: validation, reservation and the post queue |
+| `web_sitePostPage.go` | web posting: validation, the RFC 5536 header block (`buildWebPostHeaders`), reservation and the post queue |
 | `web_aichatPage.go` | AI chat proxy and its per-user/model history |
 
 ## API and admin
 
 | File | Responsibility |
 |---|---|
-| `web_apiHandlers.go` | `/api/v1` handlers (groups, overview, threads, stats, article preview) |
-| `web_apitokens.go` | API token auth and buffered usage accounting |
+| `web_apiHandlers.go` | `/api/v1` handlers (groups, overview, article by number or message-id, threads, stats, article preview) and `requireAPIEnabled`; `getArticlePreview` also serves the web route `/groups/:group/articles/:articleNum/preview` (tree view), which works with the API disabled |
+| `web_apitokens.go` | API token auth (`APIAuthRequired`) and buffered usage accounting |
 | `web_admin.go`, `web_adminPage.go` | admin page data and dashboard |
 | `web_admin_settings_unified.go` | the settings form: one entry per setting, with validator and success message |
 | `web_admin_*.go` | per-area admin handlers (users, sections, newsgroups, providers, spam, cron, post queue, NNTP, Ollama, cache, API tokens, site news); `isAdmin` lives in `web_admin_userfuncs.go` |

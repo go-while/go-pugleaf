@@ -8,25 +8,34 @@ The NNTP date parsing system in go-pugleaf is a multi-layered implementation des
 
 ### Core Components
 
-1. **`ParseNNTPDate`** - Main entry point function in `internal/processor/proc-utils.go`
-2. **`NNTPDateLayouts`** - Comprehensive array of date format patterns
-3. **`bruteForceDateParse`** - Fallback parser for malformed dates
-4. **`GlobalDateParser`** - Adapter pattern for system-wide integration
+All parser code is in `internal/processor/proc-utils.go`:
+
+1. **`ParseNNTPDate`** - Main (lenient) entry point; returns `time.Time`
+2. **`ParseNNTPDateStrict`** - Same pipeline without the rslight epoch fallback; returns `(time.Time, bool)`,
+   `ok` only for a layout match or a brute-force result whose year and month were both found in the string
+3. **`NNTPDateLayouts`** - Comprehensive array of date format patterns
+4. **`bruteForceDateParse`** / **`bruteForceDateParseOK`** - Fallback parser for malformed dates (the `OK` variant
+   also reports whether year and month were found)
+5. **`parseUnixEpochToRFC1123`** - Last resort for the rslight import (Unix epoch strings)
+6. **`database.GlobalDateParser`** - Adapter (`internal/database/queries.go`) for system-wide integration
 
 ### Integration Pattern
 
 The date parser uses a global adapter pattern to integrate with the database layer:
 
 ```go
-// In cmd/*/main.go files
+// In cmd/web, cmd/nntp-server, cmd/nntp-fetcher and cmd/rslight-importer main.go
 database.GlobalDateParser = processor.ParseNNTPDate
 
 // In internal/database/queries.go
 func parseDateString(dateStr string) time.Time {
     if GlobalDateParser != nil {
-        return GlobalDateParser(dateStr)
+        if parsed := GlobalDateParser(dateStr); !parsed.IsZero() {
+            return parsed
+        }
+        // Fall through to basic parsing if adapter fails
     }
-    // Fallback to basic parsing
+    // Basic fallback parsing: testLayouts (RFC3339 and SQLite-style timestamps)
 }
 ```
 
@@ -38,21 +47,30 @@ Located in `internal/processor/proc-utils.go`:
 
 ```go
 func ParseNNTPDate(dateStr string) time.Time {
-    // Try standard Go layouts first
-    for _, layout := range NNTPDateLayouts {
-        if t, err := time.Parse(layout, dateStr); err == nil {
-            return t
-        }
+    t, ok := ParseNNTPDateStrict(dateStr)
+    if ok || !t.IsZero() {
+        return t
     }
-
-    // Fallback to brute force parsing
-    return bruteForceDateParse(dateStr)
+    // Last resort for RSLIGHT import: Unix epoch strings
+    if RunRSLIGHTImport && dateStr != "" {
+        return parseUnixEpochToRFC1123(strings.TrimSpace(parenRe.ReplaceAllString(dateStr, "")))
+    }
+    return time.Time{}
 }
 ```
 
+`ParseNNTPDateStrict` does the actual work, in this order:
+
+1. Empty string → `time.Time{}, false`
+2. Normalization: strip a trailing parenthesized zone (`" (NZDT)"`), trim, fix the rslight `"Sum, "` typo (only
+   with `RunRSLIGHTImport`), replace US zone abbreviations EDT/EST/CDT/CST/MDT/MST/PDT/PST with numeric offsets,
+   and widen 3-digit offsets (`+200` → `+0200`)
+3. Try every layout in `NNTPDateLayouts` with `time.Parse` (first match wins, `ok=true`)
+4. Otherwise return `bruteForceDateParseOK(dateStr)`
+
 ### 2. Date Layout Array
 
-The `NNTPDateLayouts` array contains over 100 different date format patterns:
+The `NNTPDateLayouts` array contains over 300 different date format patterns:
 
 - **Standard RFC formats**: RFC822, RFC822Z, RFC850, RFC1123, etc.
 - **ISO 8601 variants**: Various timezone and precision formats
@@ -66,13 +84,21 @@ The `NNTPDateLayouts` array contains over 100 different date format patterns:
 When standard layouts fail, `bruteForceDateParse` uses regex patterns to extract:
 
 - **Year**: 4-digit (1970-2099) or 2-digit with century heuristic
-- **Month**: Name-based parsing (case insensitive)
+- **Month**: Name-based parsing (case insensitive, `jan`/`january` … `dec`/`december`)
 - **Day**: Flexible day detection (1-31)
-- **Time**: HH:MM:SS or HH:MM formats
+- **Time**: HH:MM:SS or HH:MM formats (default 12:00:00 when none is found)
+- **Numeric dates**: `YYYY/MM/DD`, `DD/MM/YYYY`, `MM/DD/YYYY`, `DD/MM/YY`, `MM/DD/YY` (separators `/`, `-`, `.`)
+  when year, month or day is still missing
+
+Missing parts are defaulted: year 1990, month January, day 1 (a day past the end of a 30-day month or February
+is clamped). The result is always UTC. A result more than 25 hours in the future returns `time.Time{}`. `ok` is true only when
+year and month were both found in the string.
 
 #### 2-Digit Year Heuristic
 
-**Fixed in August 2025**: The century detection now matches Go's standard behavior:
+**Fixed in August 2025**: The century detection now matches Go's standard behavior. Two-digit candidates are
+tried in three passes: values 60-99 first, then 32-59 (always 20xx), then 00-31 (skipping numbers that are the day,
+the month or part of the time). The century rule used in the first and third pass and for numeric dates is:
 
 ```go
 // Heuristic: match Go's behavior - 69-99 = 1969-1999, 00-68 = 2000-2068
@@ -89,17 +115,26 @@ This ensures dates like `"Wed, 30 Jun 93 21:04:13 MESZ"` parse correctly as `199
 
 ### Where ParseNNTPDate is Used
 
-The date parser is integrated throughout the codebase via the `GlobalDateParser` adapter:
+The date parser is integrated throughout the codebase via the `GlobalDateParser` adapter and direct calls:
 
 #### 1. Main Applications
+These set `database.GlobalDateParser = processor.ParseNNTPDate` after opening the database:
 - **`cmd/web/main.go`** - Web server for article display
 - **`cmd/nntp-server/main.go`** - NNTP server for incoming articles
 - **`cmd/nntp-fetcher/main.go`** - Article fetching from remote servers
-- **`cmd/history-rebuild/main.go`** - History database rebuilding
-- **`cmd/recover-db/main.go`** - Database recovery and validation
+- **`cmd/rslight-importer/main.go`** - RockSolid Light import
+
+Direct callers (no adapter):
+- **`cmd/recover-db/main.go`** - Date re-check uses `processor.ParseNNTPDateStrict`; a string it rejects is
+  reported and never rewritten
+- **`cmd/parsedates/main.go`** - CLI that prints the `ParseNNTPDate` result for one date string
 
 #### 2. Core Processing
-- **`internal/processor/threading.go`** - Article processing pipeline
+- **`internal/processor/threading.go`** - Article processing pipeline, bulk mode (fetcher/importers): lenient
+  `ParseNNTPDate`
+- **`internal/processor/intake.go`** - Non-bulk intake (POST/IHAVE/TAKETHIS): `checkIntakeDates` parses Date (and
+  Injection-Date) with `ParseNNTPDateStrict` and rejects `!ok` dates and dates more than `MaxFutureDate` (24 h)
+  in the future
 - **`internal/processor/proc_ImportOV.go`** - Overview import
 - **`internal/processor/proc_DLArt.go`** - Article downloading
 - **`internal/processor/analyze.go`** - Newsgroup analysis
@@ -113,16 +148,14 @@ Each application follows this pattern:
 
 ```go
 func main() {
-    // Initialize database
-    db, err := database.OpenDatabase(nil)
+    // ... flags, dbConfig ...
+    db, err := database.OpenDatabase(dbConfig)
     if err != nil {
-        log.Fatalf("Failed to initialize database: %v", err)
+        log.Fatalf("[WEB]: Failed to initialize database: %v", err)
     }
-    defer db.Shutdown()
 
-    // Set up the date parser adapter
+    // Set up the date parser adapter to use processor's ParseNNTPDate
     database.GlobalDateParser = processor.ParseNNTPDate
-    log.Printf("Date parser adapter initialized")
 
     // Continue with application-specific logic...
 }
@@ -135,12 +168,14 @@ func main() {
 When processing incoming NNTP articles:
 
 ```go
-// In threading.go
-dateSent := ParseNNTPDate(getHeaderFirst(art.Headers, "date"))
-dateString := getHeaderFirst(art.Headers, "date")
-if dateSent.IsZero() {
-    log.Printf("[WARN:OLD] Article '%s' no valid date... dateString='%s'",
-               art.MessageID, dateString)
+// In threading.go (bulk mode; non-bulk intake uses checkIntakeDates in intake.go)
+article.DateSent = ParseNNTPDate(article.DateString)
+if article.DateSent.IsZero() {
+    log.Printf("[ERROR-HDR] Article '%s' no valid date... headerDate='%v' dateString='%s'", ...)
+    return history.CaseError, rejected("invalid date")
+}
+if article.DateSent.After(time.Now().Add(MaxFutureDate)) {
+    return history.CaseError, rejected("date in the future")
 }
 ```
 
@@ -150,7 +185,10 @@ When importing article overviews:
 
 ```go
 // In proc_ImportOV.go
-date := ParseNNTPDate(ov.Date)
+var date time.Time
+if ov.Date != "" {
+    date = ParseNNTPDate(ov.Date)
+}
 o := &models.Overview{
     DateSent:   date,
     DateString: ov.Date, // Keep original for debugging
@@ -163,7 +201,7 @@ o := &models.Overview{
 For database analysis and recovery operations:
 
 ```go
-// In analyze.go and recover-db
+// In analyze.go (recover-db uses ParseNNTPDateStrict instead)
 date := ParseNNTPDate(ov.Date)
 if date.IsZero() {
     InvalidMutex.Lock()
@@ -208,9 +246,12 @@ All boundary cases now work correctly:
 
 ### Graceful Degradation
 1. **Standard layouts tried first** - Fast path for common formats
-2. **Brute force parsing** - Handles malformed dates
-3. **Zero time fallback** - Returns `time.Time{}` for unparseable dates
-4. **Original string preservation** - Stores `date_string` alongside parsed `date_sent`
+2. **Brute force parsing** - Handles malformed dates; missing year/month/day are defaulted, so even garbage
+   gives a non-zero date (`"garbage"` → 1990-01-01 12:00 UTC) with `ok=false` from `ParseNNTPDateStrict`
+3. **Zero time** - `ParseNNTPDate` returns `time.Time{}` only for an empty string or a brute-force result more
+   than 25 h in the future (after the rslight epoch fallback, when enabled)
+4. **Strict callers** - Non-bulk intake and `recover-db` reject `!ok` dates instead of storing the default
+5. **Original string preservation** - Stores `date_string` alongside parsed `date_sent`
 
 ### Logging and Debugging
 - Invalid dates are logged with message ID and newsgroup context
@@ -245,14 +286,16 @@ All boundary cases now work correctly:
 
 ## Testing
 
-The implementation includes comprehensive testing for:
-- Standard RFC formats
-- 2-digit year boundary cases
-- European timezone handling
-- Malformed date recovery
-- Century detection accuracy
+Tests in `internal/processor/intake_test.go`:
+- `TestIntakeProcParseNNTPDateStrict` - RFC formats with numeric offsets, a trailing `(CEST)` comment, `EST`
+  normalization, a brute-force match (`"sometime 7 March 1999 at 10:20"`), the 1990-01-01 fallback for
+  `"garbage"`, `"Tuesday 7pm"` and `"March"` (`ok=false`), the empty string, and the 25 h future bound of
+  `bruteForceDateParseOK`; it also checks that `ParseNNTPDate` results stay unchanged (K1)
+- `TestIntakeProcFutureMargin` - `checkIntakeDates`: the 24 h `MaxFutureDate` boundary, invalid dates and the
+  Injection-Date rules
 
-Example test cases verify the fix:
+There is no automated test for the 2-digit year boundary cases; this example shows the expected results (the
+`MESZ` layouts match them, so `time.Parse`'s `06` rule applies):
 ```go
 testCases := []struct {
     date string
@@ -265,4 +308,4 @@ testCases := []struct {
 }
 ```
 
-All test cases pass with the current implementation.
+To check a single string by hand, build and run `cmd/parsedates` (`parsedates "27 May 09 1:01:53 PM"`).
