@@ -92,10 +92,10 @@ func TestHistoryXref(t *testing.T) {
 				h.AddArticleAt(m, 3, 9)
 				h.AddArticleAt(m, 3, 9)
 			}, "3:9"},
-			{"different number keeps the first", "<xref-idem-2@test>", nil, func(m string) {
+			{"different number: the latest numbered add wins", "<xref-idem-2@test>", nil, func(m string) {
 				h.AddArticleAt(m, 3, 9)
 				h.AddArticleAt(m, 3, 10)
-			}, "3:9"},
+			}, "3:10"},
 			{"numbered then plain", "<xref-idem-3@test>", nil, func(m string) {
 				h.AddArticleAt(m, 4, 5)
 				h.AddArticle(m, 4)
@@ -105,14 +105,14 @@ func TestHistoryXref(t *testing.T) {
 				h.AddArticleAt(m, 4, 5)
 				h.AddArticle(m, 4)
 				h.AddArticleAt(m, 4, 6)
-			}, "4:5"},
-			{"mixed row: plain upgraded in place, numbered untouched, new group appended", "<xref-idem-5@test>", "1,2:20,3", func(m string) {
+			}, "4:6"},
+			{"mixed row: plain upgraded in place, numbered renumbered, new group appended", "<xref-idem-5@test>", "1,2:20,3", func(m string) {
 				h.AddArticleAt(m, 1, 10)
 				h.AddArticleAt(m, 2, 21)
 				h.AddArticle(m, 3)
 				h.AddArticle(m, 2)
 				h.AddArticleAt(m, 4, 40)
-			}, "1:10,2:20,3,4:40"},
+			}, "1:10,2:21,3,4:40"},
 			{"prefix of a numbered token is another group", "<xref-idem-6@test>", "12:5", func(m string) {
 				h.AddArticleAt(m, 1, 7)
 				h.AddArticleAt(m, 2, 8)
@@ -140,7 +140,7 @@ func TestHistoryXref(t *testing.T) {
 			{"legacy empty row", "<xref-idem-9@test>", "", func(m string) {
 				h.AddArticleAt(m, 8, 80)
 				h.AddArticleAt(m, 8, 81)
-			}, "8:80"},
+			}, "8:81"},
 			{"new row", "<xref-idem-10@test>", nil, func(m string) {
 				h.AddArticleAt(m, 8, 80)
 			}, "8:80"},
@@ -168,8 +168,8 @@ func TestHistoryXref(t *testing.T) {
 	})
 
 	// A group stored before the numbers were recorded has a plain token: the first add with a
-	// number (e.g. a history-rebuild over the existing index) upgrades it in place; later adds
-	// with another number or without a number leave the known number alone.
+	// number (e.g. a history-rebuild over the existing index) upgrades it in place; a later add
+	// without a number leaves the known number alone.
 	t.Run("PlainTokenUpgradedByNumberedAdd", func(t *testing.T) {
 		m := "<xref-plain-upgrade@test>"
 		histXrefInsertRaw(t, h, m, "7,9:90")
@@ -180,8 +180,7 @@ func TestHistoryXref(t *testing.T) {
 		}
 		h.AddArticleAt(m, 7, 70)
 		histTestWaitIdle(t, h)
-		h.AddArticleAt(m, 7, 71) // next flush: known number is not changed
-		h.AddArticle(m, 7)       // never downgraded
+		h.AddArticle(m, 7) // next flush: never downgraded
 		histTestWaitIdle(t, h)
 		if raw := histXrefRaw(t, dir, m); raw != "7:70,9:90" {
 			t.Fatalf("raw = %q, want \"7:70,9:90\"", raw)
@@ -189,6 +188,47 @@ func TestHistoryXref(t *testing.T) {
 		want := []Location{{GroupID: 7, ArticleNum: 70}, {GroupID: 9, ArticleNum: 90}}
 		if got := histXrefLocations(t, h, m); !reflect.DeepEqual(got, want) {
 			t.Fatalf("locations = %+v, want %+v", got, want)
+		}
+	})
+
+	// A numbered add is authoritative: a history-rebuild over an existing index fixes a group
+	// whose numbers changed (recover-db renumbering). Plain adds never touch a known number.
+	t.Run("NumberedAddIsAuthoritative", func(t *testing.T) {
+		m := "<xref-renumber@test>"
+		h.AddArticleAt(m, 3, 9)
+		h.AddArticleAt(m, 12, 6)
+		histTestWaitIdle(t, h)
+		h.AddArticleAt(m, 3, 10) // different number: new number wins, order kept
+		histTestWaitIdle(t, h)
+		if raw := histXrefRaw(t, dir, m); raw != "3:10,12:6" {
+			t.Fatalf("after renumber: raw = %q, want \"3:10,12:6\"", raw)
+		}
+		h.AddArticleAt(m, 3, 10) // same number: unchanged
+		h.AddArticle(m, 3)       // plain add after numbered: unchanged
+		h.AddArticle(m, 12)
+		histTestWaitIdle(t, h)
+		if raw := histXrefRaw(t, dir, m); raw != "3:10,12:6" {
+			t.Fatalf("after same/plain adds: raw = %q, want \"3:10,12:6\"", raw)
+		}
+		want := []Location{{GroupID: 3, ArticleNum: 10}, {GroupID: 12, ArticleNum: 6}}
+		if got := histXrefLocations(t, h, m); !reflect.DeepEqual(got, want) {
+			t.Fatalf("locations = %+v, want %+v", got, want)
+		}
+
+		// prefix collisions: renumbering group 1 touches neither 12 nor 21 nor 11
+		mPrefix := "<xref-renumber-prefix@test>"
+		histXrefInsertRaw(t, h, mPrefix, "12:5,1:7,21:8,11")
+		h.AddArticleAt(mPrefix, 1, 70)
+		// a duplicate group in a foreign row: the first token is rewritten, the others dropped
+		mDup := "<xref-renumber-dup@test>"
+		histXrefInsertRaw(t, h, mDup, "3:1,4,3:2")
+		h.AddArticleAt(mDup, 3, 7)
+		histTestWaitIdle(t, h)
+		if raw := histXrefRaw(t, dir, mPrefix); raw != "12:5,1:70,21:8,11" {
+			t.Errorf("prefix row: raw = %q, want \"12:5,1:70,21:8,11\"", raw)
+		}
+		if raw := histXrefRaw(t, dir, mDup); raw != "3:7,4" {
+			t.Errorf("dup row: raw = %q, want \"3:7,4\"", raw)
 		}
 	})
 
@@ -204,16 +244,38 @@ func TestHistoryXref(t *testing.T) {
 		if raw := histXrefRaw(t, dir, m); raw != "1:10,3:30,12:20" {
 			t.Fatalf("after remove 2:20: raw = %q, want \"1:10,3:30,12:20\"", raw)
 		}
-		// a different number is not the stored token: left alone
-		h.RemoveArticleAt(m, 1, 99)
-		histTestWaitIdle(t, h)
-		if raw := histXrefRaw(t, dir, m); raw != "1:10,3:30,12:20" {
-			t.Fatalf("after remove 1:99: raw = %q, want unchanged", raw)
-		}
 		h.RemoveArticleAt(m, 1, 10)
 		histTestWaitIdle(t, h)
 		if raw := histXrefRaw(t, dir, m); raw != "3:30,12:20" {
 			t.Fatalf("after remove 1:10: raw = %q, want \"3:30,12:20\"", raw)
+		}
+	})
+
+	// one article per (message-id, group): a stored token with another number is stale and goes
+	t.Run("RemoveWithDifferentNumberStripsStaleToken", func(t *testing.T) {
+		m := "<xref-rm-stale@test>"
+		histXrefInsertRaw(t, h, m, "12:4711,1:10,21:7")
+		h.RemoveArticleAt(m, 12, 5000)
+		histTestWaitIdle(t, h)
+		if raw := histXrefRaw(t, dir, m); raw != "1:10,21:7" {
+			t.Fatalf("after remove 12:5000: raw = %q, want \"1:10,21:7\"", raw)
+		}
+		h.RemoveArticleAt(m, 1, 99)
+		histTestWaitIdle(t, h)
+		if raw := histXrefRaw(t, dir, m); raw != "21:7" {
+			t.Fatalf("after remove 1:99: raw = %q, want \"21:7\"", raw)
+		}
+		// a group the row does not hold: other groups intact, row not deleted
+		h.RemoveArticleAt(m, 2, 7)
+		h.RemoveArticleAt(m, 7, 21)
+		histTestWaitIdle(t, h)
+		if raw := histXrefRaw(t, dir, m); raw != "21:7" {
+			t.Fatalf("after remove of absent groups: raw = %q, want \"21:7\"", raw)
+		}
+		h.RemoveArticleAt(m, 21, 8)
+		histTestWaitIdle(t, h)
+		if raw := histXrefRaw(t, dir, m); raw != "<none>" {
+			t.Fatalf("after remove 21:8: raw = %q, want row deleted", raw)
 		}
 	})
 
@@ -295,7 +357,7 @@ func TestHistoryXref(t *testing.T) {
 		m := "<xref-order@test>"
 		h.AddArticleAt(m, 1, 1)
 		h.AddArticleAt(m, 2, 2)
-		h.RemoveArticle(m, 1) // read-modify-write sees the adds of the same transaction
+		h.RemoveArticle(m, 1) // ops apply in queue order (in one transaction, the read sees earlier writes)
 		h.AddArticleAt(m, 3, 3)
 		h.RemoveArticleAt(m, 2, 2)
 		h.AddArticleAt(m, 1, 11)
@@ -344,6 +406,30 @@ func TestHistoryToken(t *testing.T) {
 	}{{12, 4711, "12:4711"}, {12, 0, "12"}, {12, -1, "12"}, {1, 1, "1:1"}} {
 		if got := historyToken(c.id, c.num); got != c.want {
 			t.Errorf("historyToken(%d, %d) = %q, want %q", c.id, c.num, got, c.want)
+		}
+	}
+}
+
+func TestHistorySetGroupToken(t *testing.T) {
+	for _, c := range []struct {
+		in      string
+		group   int64
+		token   string
+		want    string
+		changed bool
+	}{
+		{"", 1, "1:5", "", false},
+		{"2:3", 1, "1:5", "2:3", false}, // no token of the group: unchanged
+		{"1:5", 1, "1:5", "1:5", false}, // same number: no write
+		{"1:4", 1, "1:5", "1:5", true},
+		{"1", 1, "1:5", "1:5", true},
+		{"12:1,1:2,21:3,11", 1, "1:9", "12:1,1:9,21:3,11", true},
+		{"1:2,3,1:4", 1, "1:9", "1:9,3", true},
+		{"1:9,3,1", 1, "1:9", "1:9,3", true}, // right token first, duplicate dropped
+	} {
+		got, changed := setGroupToken(c.in, c.group, c.token)
+		if got != c.want || changed != c.changed {
+			t.Errorf("setGroupToken(%q, %d, %q) = %q, %v; want %q, %v", c.in, c.group, c.token, got, changed, c.want, c.changed)
 		}
 	}
 }

@@ -83,16 +83,17 @@ type routedOp struct {
 // "groupID" of rows written before the numbers were recorded (number unknown). Both formats may
 // appear in one row; readers accept both (parseLocations).
 //
-// A group is never stored twice. An add with a number upgrades a plain "id" token of the group
-// in place to "id:num" (token order kept), so a history-rebuild over an existing index fills in
-// the numbers of old rows. A group that already has "id:<num>" is left as it is: an add never
-// changes a known number (a renumbered group, e.g. after recover-db, needs a rebuild into an
-// empty history index). An add without a number never appends a plain token next to an existing
-// token of the group and never downgrades "id:num".
+// A group is never stored twice. An add with a number is authoritative: it upgrades a plain "id"
+// token of the group in place to "id:num" (token order kept) and rewrites "id:<other>" to
+// "id:num" (setGroupToken, only when the UPSERT changed nothing), so a history-rebuild over an
+// existing index fills in the numbers of old rows and fixes renumbered groups (recover-db).
+// An add without a number never appends a plain token next to an existing token of the group
+// and never downgrades "id:num".
 const (
 	// add a token ("id:num" or plain "id"): skip if the row holds "id:<anything>" (prefix probe
 	// ",id:") or the plain "id" while the token has no number (exact probe ",id,"); upgrade a
-	// plain "id" in place to the numbered token; otherwise append.
+	// plain "id" in place to the numbered token; otherwise append. A skipped numbered add is
+	// followed by the renumber check in Go (executeDBTransaction, renumberGroupToken).
 	// args: ?1 messageID, ?2 token, ?3 groupID
 	sqlAddArticle = `INSERT INTO %s(message_id,newsgroups) VALUES(?1,?2) ON CONFLICT(message_id) DO UPDATE SET newsgroups = CASE` +
 		` WHEN coalesce(newsgroups,'')='' THEN excluded.newsgroups` +
@@ -101,8 +102,11 @@ const (
 		` WHERE instr(','||coalesce(newsgroups,'')||',', ','||?3||':') = 0` +
 		` AND (instr(','||coalesce(newsgroups,'')||',', ','||?3||',') = 0 OR excluded.newsgroups <> ?3)`
 	// remove the exact token "id:num" and a plain "id" token of the same group (number unknown).
-	// args: "id:num", "id", messageID
-	sqlRemoveArticle = `UPDATE %s SET newsgroups = trim(replace(replace(','||newsgroups||',', ','||?||',', ','), ','||?||',', ','), ',') WHERE message_id=?`
+	// Changes the row only when one of them is present, so RowsAffected()==0 means "not removed":
+	// the caller then strips every token of the group (a stale number, see RemoveArticleAt).
+	// args: ?1 "id:num", ?2 "id", ?3 messageID
+	sqlRemoveArticle = `UPDATE %s SET newsgroups = trim(replace(replace(','||newsgroups||',', ','||?1||',', ','), ','||?2||',', ','), ',')` +
+		` WHERE message_id=?3 AND (instr(','||newsgroups||',', ','||?1||',') > 0 OR instr(','||newsgroups||',', ','||?2||',') > 0)`
 	// remove with an unknown number: read-modify-write in Go (stripGroupTokens)
 	sqlSelectNewsgroups = `SELECT newsgroups FROM %s WHERE message_id=?`
 	sqlSetNewsgroups    = `UPDATE %s SET newsgroups=? WHERE message_id=?`
@@ -117,6 +121,37 @@ func historyToken(groupID, articleNum int64) string {
 		return id
 	}
 	return id + ":" + strconv.FormatInt(articleNum, 10)
+}
+
+// setGroupToken rewrites the first token of groupID (plain "id" or "id:<any>") to token and drops
+// further tokens of groupID. Other tokens are kept verbatim and in order. A csv without a token of
+// groupID is returned unchanged. changed reports whether the result differs from csv.
+func setGroupToken(csv string, groupID int64, token string) (out string, changed bool) {
+	id := strconv.FormatInt(groupID, 10)
+	parts := strings.Split(csv, ",")
+	kept := make([]string, 0, len(parts))
+	found := false
+	for _, part := range parts {
+		tok := strings.TrimSpace(part)
+		if tok == id || strings.HasPrefix(tok, id+":") {
+			if found {
+				continue
+			}
+			found = true
+			if tok == token {
+				kept = append(kept, part) // already right: keep verbatim
+			} else {
+				kept = append(kept, token)
+			}
+			continue
+		}
+		kept = append(kept, part)
+	}
+	if !found {
+		return csv, false
+	}
+	out = strings.Join(kept, ",")
+	return out, out != csv
 }
 
 // stripGroupTokens drops every token of groupID (plain "id" or "id:num") and empty parts from csv.
@@ -198,7 +233,7 @@ func (h *History) AddArticle(messageID string, groupID int64) {
 
 // AddArticleAt is AddArticle with the article number of messageID in groupID (0 = unknown).
 // The row then holds the token "groupID:articleNum": a plain "groupID" token (number unknown) is
-// upgraded in place; a token that already has a number is left as it is (never changed by an add).
+// upgraded in place and a token with a different number is rewritten (the latest numbered add wins).
 func (h *History) AddArticleAt(messageID string, groupID, articleNum int64) {
 	h.enqueue(opAdd, messageID, groupID, articleNum)
 }
@@ -210,8 +245,9 @@ func (h *History) RemoveArticle(messageID string, groupID int64) {
 }
 
 // RemoveArticleAt is RemoveArticle with the article number the row holds for groupID (0 = unknown).
-// It removes the exact token "groupID:articleNum" and a plain "groupID" token; a token of groupID
-// with a different number stays (use RemoveArticle to strip by group ID).
+// It removes the exact token "groupID:articleNum" or a plain "groupID" token in one statement. A
+// group DB holds a message-id at most once, so a token of groupID with a different number can only
+// be a stale number (renumbering): when neither token matched, every token of groupID is removed.
 func (h *History) RemoveArticleAt(messageID string, groupID, articleNum int64) {
 	h.enqueue(opRemove, messageID, groupID, articleNum)
 }
@@ -649,9 +685,23 @@ func (h *History) executeDBTransaction(dbIndex int, ops []routedOp) error {
 				err = fmt.Errorf("prepare add %s: %v", rop.tableName, err)
 				return err
 			}
-			if _, err = stmt.Exec(rop.messageID, token, groupID); err != nil {
+			var res sql.Result
+			if res, err = stmt.Exec(rop.messageID, token, groupID); err != nil {
 				err = fmt.Errorf("add messageID='%s' token=%s table=%s: %v", rop.messageID, token, rop.tableName, err)
 				return err
+			}
+			if rop.articleNum > 0 {
+				// UPSERT skipped: the row holds "id:<num>" for this group, maybe with another number
+				var affected int64
+				if affected, err = res.RowsAffected(); err != nil {
+					err = fmt.Errorf("add messageID='%s' token=%s table=%s: rows affected: %v", rop.messageID, token, rop.tableName, err)
+					return err
+				}
+				if affected == 0 {
+					if err = h.renumberGroupToken(getStmt, rop, token); err != nil {
+						return err
+					}
+				}
 			}
 
 		case opRemove:
@@ -660,9 +710,21 @@ func (h *History) executeDBTransaction(dbIndex int, ops []routedOp) error {
 					err = fmt.Errorf("prepare remove %s: %v", rop.tableName, err)
 					return err
 				}
-				if _, err = stmt.Exec(token, groupID, rop.messageID); err != nil {
+				var res sql.Result
+				if res, err = stmt.Exec(token, groupID, rop.messageID); err != nil {
 					err = fmt.Errorf("remove messageID='%s' token=%s table=%s: %v", rop.messageID, token, rop.tableName, err)
 					return err
+				}
+				var affected int64
+				if affected, err = res.RowsAffected(); err != nil {
+					err = fmt.Errorf("remove messageID='%s' token=%s table=%s: rows affected: %v", rop.messageID, token, rop.tableName, err)
+					return err
+				}
+				if affected == 0 {
+					// no exact or plain token: strip a stale-numbered token of the group
+					if err = h.removeGroupTokens(getStmt, rop); err != nil {
+						return err
+					}
 				}
 			} else if err = h.removeGroupTokens(getStmt, rop); err != nil {
 				return err
@@ -693,7 +755,8 @@ func (h *History) executeDBTransaction(dbIndex int, ops []routedOp) error {
 	return nil
 }
 
-// removeGroupTokens is the remove with an unknown article number: it reads the row's CSV,
+// removeGroupTokens is the remove with an unknown article number (or with a number that matched
+// no token, see RemoveArticleAt): it reads the row's CSV,
 // drops every token of rop.groupID in either format and writes it back, inside the caller's
 // transaction (statements from its getStmt cache). A missing row is a no-op.
 func (h *History) removeGroupTokens(getStmt func(query, tableName string) (*sql.Stmt, error), rop routedOp) error {
@@ -718,6 +781,35 @@ func (h *History) removeGroupTokens(getStmt func(query, tableName string) (*sql.
 	}
 	if _, err = stmt.Exec(out, rop.messageID); err != nil {
 		return fmt.Errorf("remove messageID='%s' group=%d table=%s: %v", rop.messageID, rop.groupID, rop.tableName, err)
+	}
+	return nil
+}
+
+// renumberGroupToken makes a numbered add authoritative when the UPSERT changed nothing: it reads
+// the row's CSV and rewrites the group's token to token if it holds another number, inside the
+// caller's transaction (statements from its getStmt cache). An equal number writes nothing.
+func (h *History) renumberGroupToken(getStmt func(query, tableName string) (*sql.Stmt, error), rop routedOp, token string) error {
+	stmt, err := getStmt(sqlSelectNewsgroups, rop.tableName)
+	if err != nil {
+		return fmt.Errorf("prepare select %s: %v", rop.tableName, err)
+	}
+	var newsgroups sql.NullString
+	err = stmt.QueryRow(rop.messageID).Scan(&newsgroups)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("select messageID='%s' table=%s: %v", rop.messageID, rop.tableName, err)
+	}
+	out, changed := setGroupToken(newsgroups.String, rop.groupID, token)
+	if !changed {
+		return nil
+	}
+	if stmt, err = getStmt(sqlSetNewsgroups, rop.tableName); err != nil {
+		return fmt.Errorf("prepare set %s: %v", rop.tableName, err)
+	}
+	if _, err = stmt.Exec(out, rop.messageID); err != nil {
+		return fmt.Errorf("renumber messageID='%s' token=%s table=%s: %v", rop.messageID, token, rop.tableName, err)
 	}
 	return nil
 }
