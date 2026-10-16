@@ -173,6 +173,7 @@ databases below `-data` (default `./data`). `./pugleaf-fetcher -help` prints usa
 ./pugleaf-nntp-server -nntphostname your.domain.com -nntptcpport 1119 \
     -nntptlsport 1563 -nntpcertfile /path/to/fullchain.pem -nntpkeyfile /path/to/privkey.pem
 # -data string          database directory (default: ./data)
+# -nntpbind string      IP address to bind the listeners to (default: all interfaces)
 # -nntptcpport int      NNTP TCP port (0 = no plain listener; at least one of the two ports is required)
 # -nntptlsport int      NNTP TLS port (0 = no TLS listener); the cert/key also serve STARTTLS on the TCP port
 # -maxconnections int   maximum concurrent client connections (default: 500)

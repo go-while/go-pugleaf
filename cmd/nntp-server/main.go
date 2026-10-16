@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -19,6 +20,7 @@ import (
 
 var (
 	nntphostname    string
+	nntpbind        string
 	nntptcpport     int
 	nntptlsport     int
 	nntpcertFile    string
@@ -49,6 +51,7 @@ func main() {
 
 	flag.StringVar(&nntphostname, "nntphostname", "", "Your hostname must be set!")
 	flag.BoolVar(&useHistory, "history", true, "maintain and use the message-id history index (data/history)")
+	flag.StringVar(&nntpbind, "nntpbind", "", "IP address to bind the NNTP listeners to (default: all interfaces; e.g. 127.0.0.1 or ::1)")
 	flag.IntVar(&nntptcpport, "nntptcpport", 0, "NNTP TCP port")
 	flag.IntVar(&nntptlsport, "nntptlsport", 0, "NNTP TLS port")
 	flag.StringVar(&nntpcertFile, "nntpcertfile", "", "NNTP TLS certificate file for the TLS port and STARTTLS (/path/to/fullchain.pem)")
@@ -90,9 +93,13 @@ func main() {
 	if local430TTL <= 0 {
 		log.Fatalf("[NNTP]: -local430ttl must be greater than 0")
 	}
+	if nntpbind != "" && net.ParseIP(nntpbind) == nil {
+		log.Fatalf("[NNTP]: invalid -nntpbind value %q (an IP address is required)", nntpbind)
+	}
 
 	mainConfig := config.NewDefaultConfig()
 	mainConfig.Server.NNTP.Enabled = true
+	mainConfig.Server.NNTP.Addr = nntpbind
 	// Override config with command-line flags if provided
 	if nntptcpport > 0 {
 		mainConfig.Server.NNTP.Port = nntptcpport
@@ -195,8 +202,8 @@ func main() {
 	nntpServer.SetLocal430TTL(local430TTL)
 	nntpServer.SetXrefMode(xref)
 	nntpServer.SetXrefBatchedLookup(xrefBatchedLookup)
-	log.Printf("[NNTP]: idletimeout=%s articledelay=%s groupdelay=%s errordelay=%s plaintextauth=%s readauth=%v enforce-user-maxconns=%v maxartsize=%d local430ttl=%s xref=%s xref-batched-lookup=%v",
-		idleTimeout, articleDelay, groupDelay, errorDelay, plaintextAuth, readAuth, enforceUserMaxConns, nntpServer.MaxArticleBytes(), nntpServer.Local430TTL(), nntpServer.XrefMode(), nntpServer.XrefBatchedLookup())
+	log.Printf("[NNTP]: idletimeout=%s articledelay=%s groupdelay=%s errordelay=%s plaintextauth=%s readauth=%v enforce-user-maxconns=%v maxartsize=%d local430ttl=%s xref=%s xref-batched-lookup=%v bind=%q",
+		idleTimeout, articleDelay, groupDelay, errorDelay, plaintextAuth, readAuth, enforceUserMaxConns, nntpServer.MaxArticleBytes(), nntpServer.Local430TTL(), nntpServer.XrefMode(), nntpServer.XrefBatchedLookup(), mainConfig.Server.NNTP.Addr)
 	// Set up the date parser adapter to use processor's ParseNNTPDate
 	database.GlobalDateParser = processor.ParseNNTPDate
 

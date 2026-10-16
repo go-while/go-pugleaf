@@ -7,7 +7,8 @@ package main
 // LIST OVERVIEW.FMT with -xref full, partial and off on the same data, an invalid -xref value,
 // and history-rebuild -validate-only on the result. A second full run with
 // -xref-batched-lookup=false (plan xref-batched-lookup) must serve the OVER/XOVER/HDR/XHDR
-// ranges byte-identical to the batched default.
+// ranges byte-identical to the batched default. The -xref off run binds with -nntpbind
+// 127.0.0.1 (plan xref-leftovers), and an invalid -nntpbind value must exit 1.
 //
 // Every binary runs with its working directory in the scratch root and an absolute -data, so
 // the default ./data is never reached. Ports come from the OS. Waits are polls bounded by
@@ -693,9 +694,21 @@ func TestE2EXrefBinary(t *testing.T) {
 	c.close()
 	r.check("X13", "partial: SIGINT, exit 0", srv.stop())
 
-	// ---------------------------------------------------------------- -xref off
-	srv = e.start("off")
+	// ---------------------------------------------------------------- -xref off -nntpbind 127.0.0.1
+	srv = e.start("off", "-nntpbind", "127.0.0.1")
 	c = srv.dial(t)
+	// start() already read a greeting from srv.addr (127.0.0.1:port)
+	r.check("X24", "off -nntpbind 127.0.0.1: greeting 200 on "+srv.addr+", log listening on "+srv.addr, func() error {
+		if !strings.HasPrefix(c.Greeting, "200") {
+			return fmt.Errorf("greeting %q, want 200", c.Greeting)
+		}
+		for _, want := range []string{"NNTP server listening on " + srv.addr, `bind="127.0.0.1"`} {
+			if !xrefLogHas(srv.out, want) {
+				return fmt.Errorf("startup log has no %q:\n%s", want, xrefOutput(srv.out, 20))
+			}
+		}
+		return nil
+	}())
 	r.check("X20", "off: HEAD 1, ARTICLE 1 in "+ga+" and HEAD <id> without GROUP have no Xref line", func() error {
 		c0 := srv.dial(t)
 		defer c0.close()
@@ -767,6 +780,19 @@ func TestE2EXrefBinary(t *testing.T) {
 			return fmt.Errorf("err=%v, want a non-zero exit; output:\n%s", err, e2eTail(out, 10))
 		}
 		if !strings.Contains(out, `invalid -xref value "maybe"`) {
+			return fmt.Errorf("output has no usage error:\n%s", e2eTail(out, 10))
+		}
+		return nil
+	}())
+
+	// ---------------------------------------------------------------- invalid bind address
+	r.check("X32", "-nntpbind 999.1.1.1 exits 1", func() error {
+		out, err := e.tool(e.server, "-data", e.data, "-nntphostname", host, "-nntptcpport", "0", "-nntpbind", "999.1.1.1")
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+			return fmt.Errorf("err=%v, want exit 1; output:\n%s", err, e2eTail(out, 10))
+		}
+		if !strings.Contains(out, `invalid -nntpbind value "999.1.1.1"`) {
 			return fmt.Errorf("output has no usage error:\n%s", e2eTail(out, 10))
 		}
 		return nil
