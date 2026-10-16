@@ -175,15 +175,71 @@ func TestPostCommitWaitStored(t *testing.T) {
 	}
 }
 
-// TestPostCommitWaitBarrier covers the error mapping and the timeout sharing with a fake
-// barrier; the articles themselves are accepted by the real processArticle.
+// postCommitRows replaces postArticleStored: answer(group, n) gives the result of the n-th
+// lookup (0-based) of group; the lookups are recorded.
+type postCommitRows struct {
+	mu      sync.Mutex
+	lookups map[string]int
+	answer  func(group string, n int) (bool, error)
+}
+
+func postCommitInstallRows(t *testing.T, answer func(group string, n int) (bool, error)) *postCommitRows {
+	t.Helper()
+	r := &postCommitRows{lookups: make(map[string]int), answer: answer}
+	orig := postArticleStored
+	t.Cleanup(func() { postArticleStored = orig })
+	postArticleStored = func(proc *Processor, group, messageID string) (bool, error) {
+		r.mu.Lock()
+		n := r.lookups[group]
+		r.lookups[group] = n + 1
+		r.mu.Unlock()
+		return r.answer(group, n)
+	}
+	return r
+}
+
+func (r *postCommitRows) count(group string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lookups[group]
+}
+
+// postCommitCallsFor counts the barrier calls whose mark is the current mark of group
+// (nothing is dropped in these tests, so a mark equals a fresh mark of its group).
+func postCommitCallsFor(proc *Processor, calls []postCommitWaitCall, group string) int {
+	want := proc.DB.Batch.CommitMark(group)
+	n := 0
+	for _, c := range calls {
+		if c.mark == want {
+			n++
+		}
+	}
+	return n
+}
+
+// postCommitSkipIfCommitted skips when the batch writer committed the article to group
+// before ProcessPostedArticle took its snapshot of the captured groups (the periodic flush
+// can land in that window; the group then needs no wait and the barrier is not called).
+func postCommitSkipIfCommitted(t *testing.T, proc *Processor, calls []postCommitWaitCall, group, msgid string) {
+	t.Helper()
+	if len(calls) == 0 && postCommitStored(t, proc, group, msgid) {
+		t.Skipf("'%s' committed before the snapshot: no barrier call to check", group)
+	}
+}
+
+// TestPostCommitWaitBarrier covers the error mapping, the row check and the timeout sharing
+// with a fake barrier (and a fake row lookup where the row state must be forced); the
+// articles themselves are accepted by the real processArticle.
 func TestPostCommitWaitBarrier(t *testing.T) {
 	proc := postCommitSetup(t)
 
-	t.Run("dropped", func(t *testing.T) {
+	t.Run("dropped, row absent", func(t *testing.T) {
 		fake := postCommitInstallFake(t, fmt.Errorf("%w: 1 articles of '%s' dropped since the mark", database.ErrBatchDropped, postCommitGroupA))
-		art := postCommitArticle(t, proc, postCommitMsgID("dropped"), []string{postCommitGroupA}, true)
+		rows := postCommitInstallRows(t, func(string, int) (bool, error) { return false, nil })
+		msgid := postCommitMsgID("dropped")
+		art := postCommitArticle(t, proc, msgid, []string{postCommitGroupA}, true)
 		code, err := proc.ProcessPostedArticle(art, nil, 5*time.Second)
+		postCommitSkipIfCommitted(t, proc, fake.snapshot(), postCommitGroupA, msgid)
 		if code != history.CaseError || !errors.Is(err, common.ErrIntakeRejected) {
 			t.Fatalf("ProcessPostedArticle = %d, %v; want CaseError wrapping ErrIntakeRejected", code, err)
 		}
@@ -193,6 +249,80 @@ func TestPostCommitWaitBarrier(t *testing.T) {
 		if n := len(fake.snapshot()); n != 1 {
 			t.Errorf("barrier called %d times, want 1", n)
 		}
+		if n := rows.count(postCommitGroupA); n != 1 {
+			t.Errorf("row looked up %d times, want 1", n)
+		}
+	})
+
+	t.Run("dropped, row present", func(t *testing.T) {
+		// another article of the group was dropped; this one is committed (real barrier,
+		// real row lookup): the row wins, no 441
+		var calls int
+		orig := postWaitCommitted
+		t.Cleanup(func() { postWaitCommitted = orig })
+		postWaitCommitted = func(sq *database.SQ3batch, m database.CommitMark, stop <-chan struct{}, d time.Duration) error {
+			calls++ // only the caller's goroutine calls the seam
+			if err := sq.WaitCommitted(m, stop, d); err != nil {
+				return err
+			}
+			return fmt.Errorf("%w: 1 articles of '%s' dropped since the mark", database.ErrBatchDropped, postCommitGroupA)
+		}
+		msgid := postCommitMsgID("dropped-present")
+		art := postCommitArticle(t, proc, msgid, []string{postCommitGroupA}, true)
+		code, err := proc.ProcessPostedArticle(art, nil, testWait)
+		if code != history.CasePass || err != nil {
+			t.Fatalf("ProcessPostedArticle = %d, %v; want CasePass, nil (the row is stored)", code, err)
+		}
+		if !postCommitStored(t, proc, postCommitGroupA, msgid) {
+			t.Errorf("%s not in '%s' after CasePass", msgid, postCommitGroupA)
+		}
+		if calls > 1 {
+			t.Errorf("barrier called %d times, want at most 1", calls)
+		}
+	})
+
+	t.Run("committed count, row absent then present", func(t *testing.T) {
+		// the per-group count was satisfied by another article: wait again until the row is there
+		fake := postCommitInstallFake(t, nil)
+		rows := postCommitInstallRows(t, func(_ string, n int) (bool, error) { return n > 0, nil })
+		msgid := postCommitMsgID("again")
+		art := postCommitArticle(t, proc, msgid, []string{postCommitGroupA}, true)
+		code, err := proc.ProcessPostedArticle(art, nil, 5*time.Second)
+		calls := fake.snapshot()
+		postCommitSkipIfCommitted(t, proc, calls, postCommitGroupA, msgid)
+		if code != history.CasePass || err != nil {
+			t.Fatalf("ProcessPostedArticle = %d, %v; want CasePass, nil", code, err)
+		}
+		if len(calls) != 2 || rows.count(postCommitGroupA) != 2 {
+			t.Fatalf("barrier called %d times, row looked up %d times; want 2 and 2", len(calls), rows.count(postCommitGroupA))
+		}
+		if calls[1].d > calls[0].d {
+			t.Errorf("second round got %v, more than the first %v (the deadline is shared)", calls[1].d, calls[0].d)
+		}
+	})
+
+	t.Run("lookup error", func(t *testing.T) {
+		fake := postCommitInstallFake(t, nil)
+		rows := postCommitInstallRows(t, func(_ string, n int) (bool, error) {
+			if n == 0 {
+				return false, errors.New("lookup failed")
+			}
+			return true, nil
+		})
+		logs := postCommitCaptureLog(t)
+		msgid := postCommitMsgID("lookuperr")
+		art := postCommitArticle(t, proc, msgid, []string{postCommitGroupA}, true)
+		code, err := proc.ProcessPostedArticle(art, nil, 5*time.Second)
+		postCommitSkipIfCommitted(t, proc, fake.snapshot(), postCommitGroupA, msgid)
+		if code != history.CasePass || err != nil {
+			t.Fatalf("ProcessPostedArticle = %d, %v; want CasePass, nil", code, err)
+		}
+		if n := rows.count(postCommitGroupA); n != 2 {
+			t.Errorf("row looked up %d times, want 2 (an error counts as absent)", n)
+		}
+		if n := strings.Count(logs.String(), "[INTAKE] POST "+msgid+": row lookup in"); n != 1 {
+			t.Errorf("log has %d lookup error lines, want 1", n)
+		}
 	})
 
 	for name, ret := range map[string]error{
@@ -201,20 +331,25 @@ func TestPostCommitWaitBarrier(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			fake := postCommitInstallFake(t, ret)
+			rows := postCommitInstallRows(t, func(string, int) (bool, error) { return false, nil })
 			logs := postCommitCaptureLog(t)
 			msgid := postCommitMsgID(name)
 			art := postCommitArticle(t, proc, msgid, []string{postCommitGroupA}, true)
 			stop := make(chan struct{})
 			code, err := proc.ProcessPostedArticle(art, stop, 5*time.Second)
+			calls := fake.snapshot()
+			postCommitSkipIfCommitted(t, proc, calls, postCommitGroupA, msgid)
 			if code != history.CasePass || err != nil {
 				t.Fatalf("ProcessPostedArticle = %d, %v; want CasePass, nil", code, err)
 			}
-			calls := fake.snapshot()
 			if len(calls) != 1 {
 				t.Fatalf("barrier called %d times, want 1", len(calls))
 			}
 			if calls[0].stop != (<-chan struct{})(stop) {
 				t.Errorf("barrier got another stop channel than the caller's")
+			}
+			if n := rows.count(postCommitGroupA); n != 0 {
+				t.Errorf("row looked up %d times after %s, want 0", n, name)
 			}
 			want := fmt.Sprintf("[INTAKE] POST %s: commit not confirmed within 5s: %v", msgid, ret)
 			if n := strings.Count(logs.String(), want); n != 1 {
@@ -228,6 +363,7 @@ func TestPostCommitWaitBarrier(t *testing.T) {
 
 	t.Run("no wait", func(t *testing.T) {
 		fake := postCommitInstallFake(t, errors.New("barrier must not be called"))
+		rows := postCommitInstallRows(t, func(string, int) (bool, error) { return false, errors.New("lookup must not be called") })
 		for _, d := range []time.Duration{0, -time.Second} {
 			art := postCommitArticle(t, proc, postCommitMsgID("nowait"), []string{postCommitGroupA}, true)
 			code, err := proc.ProcessPostedArticle(art, nil, d)
@@ -237,6 +373,9 @@ func TestPostCommitWaitBarrier(t *testing.T) {
 		}
 		if n := len(fake.snapshot()); n != 0 {
 			t.Errorf("barrier called %d times with timeout <= 0, want 0", n)
+		}
+		if n := rows.count(postCommitGroupA); n != 0 {
+			t.Errorf("row looked up %d times with timeout <= 0, want 0", n)
 		}
 	})
 
@@ -256,25 +395,35 @@ func TestPostCommitWaitBarrier(t *testing.T) {
 		}
 	})
 
-	t.Run("marks per name", func(t *testing.T) {
+	t.Run("captured groups only", func(t *testing.T) {
+		// the remote name has no row in the main DB: processArticle does not capture it, so
+		// it is not waited for; each captured group once, with a non-increasing remaining time
 		fake := postCommitInstallFake(t, nil)
+		rows := postCommitInstallRows(t, func(string, int) (bool, error) { return true, nil })
 		groups := []string{postCommitGroupA, postCommitRemote, postCommitGroupB}
 		const timeout = 7 * time.Second
-		art := postCommitArticle(t, proc, postCommitMsgID("marks"), groups, true)
+		msgid := postCommitMsgID("captured")
+		art := postCommitArticle(t, proc, msgid, groups, true)
 		code, err := proc.ProcessPostedArticle(art, nil, timeout)
 		if code != history.CasePass || err != nil {
 			t.Fatalf("ProcessPostedArticle = %d, %v; want CasePass, nil", code, err)
 		}
 		calls := fake.snapshot()
-		if len(calls) != len(groups) {
-			t.Fatalf("barrier called %d times, want %d (one per Newsgroups name)", len(calls), len(groups))
+		if n := postCommitCallsFor(proc, calls, postCommitRemote) + rows.count(postCommitRemote); n != 0 {
+			t.Errorf("remote group waited for or looked up %d times, want 0", n)
+		}
+		for _, g := range []string{postCommitGroupA, postCommitGroupB} {
+			n := postCommitCallsFor(proc, calls, g)
+			// a group the batch writer committed before the snapshot is not waited for
+			if n == 0 && !postCommitStored(t, proc, g, msgid) {
+				t.Errorf("captured group '%s' not waited for and not stored", g)
+			}
+			if n > 1 || rows.count(g) != n {
+				t.Errorf("'%s': %d barrier calls and %d row lookups, want at most 1 and equal", g, n, rows.count(g))
+			}
 		}
 		prev := timeout
 		for i, c := range calls {
-			// nothing was dropped: the mark of a name equals a fresh mark of that name
-			if want := proc.DB.Batch.CommitMark(groups[i]); c.mark != want {
-				t.Errorf("call %d: mark %+v, want the mark of '%s' %+v", i, c.mark, groups[i], want)
-			}
 			if c.d <= 0 || c.d > prev {
 				t.Errorf("call %d: remaining timeout %v, want in (0, %v]", i, c.d, prev)
 			}

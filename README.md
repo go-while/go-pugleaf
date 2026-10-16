@@ -181,7 +181,7 @@ databases below `-data` (default `./data`). `./pugleaf-fetcher -help` prints usa
 # -plaintextauth string AUTHINFO without TLS: accept (default), advertise or refuse
 # -maxartsize int       maximum article size in bytes (0 = config default 32768)
 # -xref string          Xref: header: off, partial (default) or full
-# -post-commit-wait duration  wait for the commit of a POSTed article before 240 (default 5s, 0 = no wait)
+# -post-commit-wait d   wait for the commit of a POSTed article before 240 (default 5s, 0 = no wait)
 # -idletimeout, -articledelay, -groupdelay, -errordelay, -local430ttl: see -h
 ```
 
