@@ -4,6 +4,7 @@ package processor
 // into a local database, handling both overview and article imports.
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -404,11 +406,76 @@ func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, err
 	return proc.processArticle(article, *article.NewsgroupsPtr[0], bulkmode)
 }
 
-// ProcessPostedArticle is ProcessIncomingArticle for POST (plan post-430-window): it will
-// wait for the batch writer to commit the accepted article to its groups (slice
-// post-commit-wait); until then it is ProcessIncomingArticle.
+// postWaitCommitted is the commit barrier of ProcessPostedArticle (a seam for tests).
+var postWaitCommitted = func(sq *database.SQ3batch, m database.CommitMark, stop <-chan struct{}, d time.Duration) error {
+	return sq.WaitCommitted(m, stop, d)
+}
+
+// ProcessPostedArticle is ProcessIncomingArticle for POST (plan post-430-window): when the
+// article was accepted (CasePass) it waits until the batch writer committed it to every
+// target group, at most timeout in total (<= 0: no wait, the article is still stored).
+//
+// A commit mark is taken for every name in article.NewsgroupsPtr before processArticle,
+// which counts the capture synchronously (NoteCaptured); a name the processor drops captured
+// nothing, so its WaitCommitted returns at once. Results: every group committed → CasePass;
+// a dropped batch → CaseError wrapping common.ErrIntakeRejected ("not stored"); a timeout or
+// a stop → CasePass (the article is queued and will be stored) plus one [INTAKE] log line.
 func (proc *Processor) ProcessPostedArticle(article *models.Article, stop <-chan struct{}, timeout time.Duration) (int, error) {
-	return proc.ProcessIncomingArticle(article)
+	if article == nil {
+		return history.CaseError, fmt.Errorf("null article")
+	}
+	if len(article.NewsgroupsPtr) == 0 {
+		return history.CaseError, fmt.Errorf("no newsgroups specified in article")
+	}
+
+	// Copy what is needed after processArticle: once it returns, the batch goroutine may
+	// already have cleared the struct (db_batch.go processNewsgroupBatch).
+	messageID := article.MessageID
+	var sq *database.SQ3batch
+	if proc.DB != nil {
+		sq = proc.DB.Batch
+	}
+	var marks []database.CommitMark
+	if timeout > 0 {
+		marks = make([]database.CommitMark, 0, len(article.NewsgroupsPtr))
+		for _, ng := range article.NewsgroupsPtr {
+			if ng != nil {
+				marks = append(marks, sq.CommitMark(*ng))
+			}
+		}
+	}
+
+	log.Printf("Processing incoming article with Message-ID: %s for primary newsgroup %s (cross-posted to %d groups)",
+		messageID, *article.NewsgroupsPtr[0], len(article.NewsgroupsPtr))
+
+	bulkmode := false
+	code, err := proc.processArticle(article, *article.NewsgroupsPtr[0], bulkmode)
+	if code != history.CasePass || err != nil || timeout <= 0 {
+		return code, err
+	}
+
+	// the marks share one deadline: the whole wait never exceeds timeout
+	deadline := time.Now().Add(timeout)
+	for _, m := range marks {
+		var werr error
+		if remaining := time.Until(deadline); remaining > 0 {
+			werr = postWaitCommitted(sq, m, stop, remaining)
+		} else {
+			werr = fmt.Errorf("%w: no time left", database.ErrBatchWaitTimeout)
+		}
+		switch {
+		case werr == nil:
+			continue
+		case errors.Is(werr, database.ErrBatchDropped):
+			log.Printf("[INTAKE] POST %s: not stored: %v", messageID, werr)
+			return history.CaseError, fmt.Errorf("%w: not stored", common.ErrIntakeRejected)
+		default:
+			// ErrBatchWaitTimeout or ErrBatchWaitStopped: the article is queued and will be stored
+			log.Printf("[INTAKE] POST %s: commit not confirmed within %s: %v", messageID, timeout, werr)
+			return history.CasePass, nil
+		}
+	}
+	return history.CasePass, nil
 }
 
 // EnableBridges enables Fediverse and/or Matrix bridges with the given configuration
