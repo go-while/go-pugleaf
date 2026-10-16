@@ -131,10 +131,11 @@ func (proc *Processor) CheckNoMoreWorkInHistory() bool {
 	return proc.History.CheckNoMoreWorkInHistory()
 }
 
-// AddArticleToHistory records a committed article (message-id -> main-DB newsgroup ID) in the history index.
+// AddArticleToHistory records a committed article (message-id -> main-DB newsgroup ID and its
+// article number there, 0 = unknown) in the history index.
 // Called by the database batch system after the article was stored and numbered. No-op if history is disabled.
-func (proc *Processor) AddArticleToHistory(messageID string, groupID int64) {
-	proc.History.AddArticle(messageID, groupID)
+func (proc *Processor) AddArticleToHistory(messageID string, groupID, articleNum int64) {
+	proc.History.AddArticleAt(messageID, groupID, articleNum)
 }
 
 // GetHistoryStats returns current history statistics
@@ -253,6 +254,13 @@ func (proc *Processor) FindArticleByMessageID(messageID, currentGroup string) (*
 		}
 	}
 	return nil, fmt.Errorf("message-id '%s': %w", messageID, nntp.ErrArticleNotFound)
+}
+
+// XrefLocations returns the groups and article numbers the history index holds for
+// messageID, for the server's Xref: header (plan xref-history, slice xref-serve fills it in).
+// nil, nil = nothing known.
+func (proc *Processor) XrefLocations(messageID string) ([]nntp.XrefLocation, error) {
+	return nil, nil
 }
 
 // findArticleInGroup returns the article from one newsgroup DB or nil

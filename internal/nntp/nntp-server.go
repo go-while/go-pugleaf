@@ -28,6 +28,10 @@ type ArticleProcessor interface {
 	// FindArticleByMessageID looks in currentGroup first, then in the groups from the history index.
 	// A definite miss returns an error wrapping ErrArticleNotFound (nntp-backend-pool.go).
 	FindArticleByMessageID(messageID, currentGroup string) (*models.Article, error)
+	// XrefLocations returns every group (name) and article number the history index holds for
+	// messageID, for the Xref: header in XrefFull mode. nil, nil = nothing known; an error makes
+	// the server fall back to XrefPartial for that reply.
+	XrefLocations(messageID string) ([]XrefLocation, error)
 }
 
 const (
@@ -88,7 +92,8 @@ type NNTPServer struct {
 	shutdown    chan struct{}
 	wg          *sync.WaitGroup // Use external waitgroup for coordination
 	mu          sync.RWMutex
-	local430    *Local430 // Cache for 430 responses
+	local430    *Local430     // Cache for 430 responses
+	xref        xrefModeStore // Xref: header mode (SetXrefMode)
 	running     bool
 	bgOnce      sync.Once // starts the background goroutines once
 
@@ -153,6 +158,7 @@ func NewNNTPServer(db *database.Database, cfg *config.ServerConfig, mainWG *sync
 		IdleTimeout:     DefaultNNTPcliconnTimeout,
 		ShutdownTimeout: DefaultShutdownTimeout,
 	}
+	server.SetXrefMode(XrefPartial)
 	return server, nil
 }
 

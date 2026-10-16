@@ -367,7 +367,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		}
 		// INT-2: stored but unknown to history: teach history (later offers get 435) and refuse
 		if haveID > 0 {
-			proc.AddArticleToHistory(article.MessageID, haveID)
+			proc.AddArticleToHistory(article.MessageID, haveID, 0) // number of the stored copy unknown here
 		}
 		return history.CaseDupes, nil
 

@@ -379,3 +379,8 @@ func TestWiringMessageIDLookupKeepsCurrentArticle(t *testing.T) {
 		t.Fatalf("FindArticleByMessageID currentGroup = %q, want \"\" (current group already checked)", proc.lastFindGroup)
 	}
 }
+
+// XrefLocations implements ArticleProcessor (no locations).
+func (p *wiringTestProcessor) XrefLocations(messageID string) ([]XrefLocation, error) {
+	return nil, nil
+}

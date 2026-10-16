@@ -885,3 +885,7 @@ func TestHarnessIsolatedPass(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// XrefLocations implements ArticleProcessor: the fake knows no other locations (slice xref-serve
+// extends it).
+func (p *hFakeProcessor) XrefLocations(messageID string) ([]XrefLocation, error) { return nil, nil }

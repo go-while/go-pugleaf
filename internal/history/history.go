@@ -59,9 +59,17 @@ const (
 
 // historyOp is one queued write: add or remove groupID for messageID
 type historyOp struct {
-	op        uint8
-	messageID string
-	groupID   int64
+	op         uint8
+	messageID  string
+	groupID    int64
+	articleNum int64 // article number in groupID; 0 = unknown (plan xref-history)
+}
+
+// Location is one place an article is stored: a main-DB newsgroup ID and the article
+// number in that group's database (0 when the index row predates the numbers).
+type Location struct {
+	GroupID    int64
+	ArticleNum int64
 }
 
 // routedOp is a historyOp with its target table in the routed database file
@@ -130,17 +138,28 @@ func (h *History) Enabled() bool {
 }
 
 // AddArticle queues "messageID is stored in groupID". Idempotent. Blocks when the queue is full (backpressure).
+// The article number stays unknown; use AddArticleAt when it is known.
 func (h *History) AddArticle(messageID string, groupID int64) {
-	h.enqueue(opAdd, messageID, groupID)
+	h.enqueue(opAdd, messageID, groupID, 0)
+}
+
+// AddArticleAt is AddArticle with the article number of messageID in groupID (0 = unknown).
+func (h *History) AddArticleAt(messageID string, groupID, articleNum int64) {
+	h.enqueue(opAdd, messageID, groupID, articleNum)
 }
 
 // RemoveArticle queues "messageID is no longer stored in groupID" (trimming).
 func (h *History) RemoveArticle(messageID string, groupID int64) {
-	h.enqueue(opRemove, messageID, groupID)
+	h.enqueue(opRemove, messageID, groupID, 0)
+}
+
+// RemoveArticleAt is RemoveArticle with the article number the row holds for groupID (0 = unknown).
+func (h *History) RemoveArticleAt(messageID string, groupID, articleNum int64) {
+	h.enqueue(opRemove, messageID, groupID, articleNum)
 }
 
 // enqueue returns true if the op was queued
-func (h *History) enqueue(kind uint8, messageID string, groupID int64) bool {
+func (h *History) enqueue(kind uint8, messageID string, groupID, articleNum int64) bool {
 	if h == nil || !h.enabled {
 		return false
 	}
@@ -159,7 +178,7 @@ func (h *History) enqueue(kind uint8, messageID string, groupID int64) bool {
 		}
 		return false
 	}
-	h.opChan <- historyOp{op: kind, messageID: messageID, groupID: groupID}
+	h.opChan <- historyOp{op: kind, messageID: messageID, groupID: groupID, articleNum: articleNum}
 	if kind == opAdd {
 		h.stats.adds.Add(1)
 	} else {
@@ -221,22 +240,70 @@ func (h *History) LookupGroups(messageID string) ([]int64, error) {
 	return parseGroupIDs(newsgroups.String), nil
 }
 
-// parseGroupIDs parses a CSV of group IDs, skipping empty/invalid parts. Never returns nil.
-func parseGroupIDs(csv string) []int64 {
-	ids := make([]int64, 0, strings.Count(csv, ",")+1)
+// LookupLocations returns the stored locations (group ID and article number) of messageID.
+// nil, nil = not found; a non-nil (maybe empty) slice = row exists. Rows written before the
+// numbers were recorded give ArticleNum 0.
+func (h *History) LookupLocations(messageID string) ([]Location, error) {
+	if h == nil || !h.enabled || messageID == "" {
+		return nil, nil
+	}
+	if h.dbClosed.Load() {
+		return nil, ErrHistoryClosed
+	}
+	db, tableName, err := h.readDB(messageID)
+	if err != nil {
+		return nil, err
+	}
+	h.stats.lookups.Add(1)
+	var newsgroups sql.NullString
+	err = db.QueryRow("SELECT newsgroups FROM "+tableName+" WHERE message_id = ?", messageID).Scan(&newsgroups)
+	switch {
+	case err == sql.ErrNoRows:
+		return nil, nil
+	case err != nil:
+		h.stats.errors.Add(1)
+		return nil, fmt.Errorf("history lookup query failed: %w", err)
+	}
+	h.stats.duplicates.Add(1)
+	return parseLocations(newsgroups.String), nil
+}
+
+// parseLocations parses a CSV of "groupID" or "groupID:articleNum" tokens, skipping
+// empty/invalid parts. A token without a number (or with an invalid one) gives ArticleNum 0.
+// Never returns nil.
+func parseLocations(csv string) []Location {
+	locs := make([]Location, 0, strings.Count(csv, ",")+1)
 	for _, part := range strings.Split(csv, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-		id, err := strconv.ParseInt(part, 10, 64)
+		idStr, numStr, hasNum := strings.Cut(part, ":")
+		id, err := strconv.ParseInt(idStr, 10, 64)
 		if err != nil || id <= 0 {
 			if HistoryDEBUG {
 				log.Printf("[HISTORY] WARN: invalid group id '%s' in newsgroups '%s'", part, csv)
 			}
 			continue
 		}
-		ids = append(ids, id)
+		var num int64
+		if hasNum {
+			if n, err := strconv.ParseInt(numStr, 10, 64); err == nil && n > 0 {
+				num = n
+			}
+		}
+		locs = append(locs, Location{GroupID: id, ArticleNum: num})
+	}
+	return locs
+}
+
+// parseGroupIDs parses a CSV of group IDs, skipping empty/invalid parts. Never returns nil.
+// A "groupID:articleNum" token counts for its group ID.
+func parseGroupIDs(csv string) []int64 {
+	locs := parseLocations(csv)
+	ids := make([]int64, 0, len(locs))
+	for _, l := range locs {
+		ids = append(ids, l.GroupID)
 	}
 	return ids
 }

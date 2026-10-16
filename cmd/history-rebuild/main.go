@@ -416,7 +416,7 @@ func processRange(groupDB *database.GroupDB, h *history.History, group *models.N
 		stats.ArticlesProcessed++
 
 		if !validateOnly {
-			h.AddArticle(messageID, group.ID)
+			h.AddArticleAt(messageID, group.ID, articleNum)
 			stats.HistoryQueued++
 			continue
 		}

@@ -171,3 +171,23 @@ Data root `./data-test-xref` (create fresh; never `./data`). Ports 11190 (TCP). 
 - `full` cost on OVER: one history lookup per line. A small locations cache keyed by message-id is a possible
   follow-up; not in this plan.
 - Numbers for existing data appear only after a full `history-rebuild` run on the real data (user-run; never by agents).
+
+## Progress
+
+### Wave 0 (inline, plan-xref-history)
+API as built (differs slightly from the Design section: the two-argument methods stay, so the 45 existing test
+call sites did not change):
+- `internal/history`: `Location{GroupID, ArticleNum}`, `historyOp.articleNum`, `AddArticleAt(messageID, groupID,
+  articleNum)`, `RemoveArticleAt(...)` (the old `AddArticle`/`RemoveArticle` pass 0 = unknown), `LookupLocations`,
+  `parseLocations` (both token formats), `parseGroupIDs` now derives from it. SQL statements unchanged: the writer
+  still ignores `articleNum` (slice xref-history).
+- `internal/database/db_batch.go`: `ProcessorInterface.AddArticleToHistory(messageID, groupID, articleNum)`; PHASE 3
+  passes `article.ArticleNums[task.Newsgroup]`. `internal/processor`: passes it to `AddArticleAt`; `threading.go`
+  alreadyStored path passes 0; `XrefLocations` stub returns nil, nil (slice xref-serve fills it).
+- `internal/nntp`: `ArticleProcessor.XrefLocations(messageID) ([]XrefLocation, error)`; new `nntp-xref.go` with
+  `XrefLocation`, `XrefMode` (`XrefOff`/`XrefPartial`/`XrefFull`, `String`, `ParseXrefMode`), `SetXrefMode`/`XrefMode()`
+  (atomic, default `XrefPartial` set in `NewNNTPServer`). Test fakes (`hFakeProcessor`, `wiringTestProcessor`) and
+  `cmd/nntp-server/processor_adapter.go` implement it.
+- `cmd/nntp-server/main.go`: `-xref` flag (default `partial`), fatal on an invalid value, mode in the startup log line.
+- `cmd/history-rebuild`: `processGroup` calls `AddArticleAt` with `article_num`.
+Checks: gofmt empty, vet, build, race tests of history/database/nntp/processor/nntp-server/history-rebuild/expire-news green.

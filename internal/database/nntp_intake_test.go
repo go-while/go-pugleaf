@@ -36,7 +36,7 @@ type idbProc struct {
 
 func (p *idbProc) CheckNoMoreWorkInHistory() bool { return true }
 
-func (p *idbProc) AddArticleToHistory(messageID string, groupID int64) {
+func (p *idbProc) AddArticleToHistory(messageID string, groupID, articleNum int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.adds = append(p.adds, idbAdd{messageID: messageID, groupID: groupID})
