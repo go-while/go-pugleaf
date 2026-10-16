@@ -40,9 +40,13 @@ func hdrMetadata(field string) (column string, ok bool) {
 }
 
 // overviewFmtLines returns the LIST OVERVIEW.FMT lines (RFC 3977 §8.4.2). overviewLine
-// writes no Xref field, so there is no "Xref:full" line.
-func overviewFmtLines() []string {
-	return []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines"}
+// writes the Xref field in every mode but XrefOff, so "Xref:full" is listed then.
+func overviewFmtLines(mode XrefMode) []string {
+	lines := []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines"}
+	if mode != XrefOff {
+		lines = append(lines, "Xref:full")
+	}
+	return lines
 }
 
 // listHeadersLines returns the LIST HEADERS lines (RFC 3977 §8.6.2): HDR serves any header
@@ -57,7 +61,7 @@ func (c *ClientConnection) handleListOverviewFmt(args []string) error {
 		c.rateLimitOnError()
 		return c.sendResponse(501, "Syntax error")
 	}
-	return c.sendDataBlock(215, "Order of fields in overview database", overviewFmtLines())
+	return c.sendDataBlock(215, "Order of fields in overview database", overviewFmtLines(c.server.XrefMode()))
 }
 
 // handleListHeaders handles LIST HEADERS [MSGID|RANGE]; args are the words after the keyword.
@@ -132,7 +136,8 @@ func (c *ClientConnection) handleOver(args []string) error {
 			Bytes:      a.Bytes,
 			Lines:      a.Lines,
 		}
-		return c.sendDataBlock(224, "Overview information follows", []string{overviewLine(o)})
+		// num is 0 outside the current group: no serving group for the Xref field
+		return c.sendDataBlock(224, "Overview information follows", []string{c.overviewLineIn(o, c.server.XrefMode())})
 	}
 
 	var arg *string
@@ -164,10 +169,11 @@ func (c *ClientConnection) handleOver(args []string) error {
 	if err := c.sendResponse(224, "Overview information follows"); err != nil {
 		return err
 	}
+	mode := c.server.XrefMode() // one mode for every line of the reply
 	d := c.newDataBlock()
 	for {
 		for _, o := range chunk {
-			if err := d.Line(overviewLine(o)); err != nil {
+			if err := d.Line(c.overviewLineIn(o, mode)); err != nil {
 				return err
 			}
 		}
@@ -199,7 +205,7 @@ func hdrLine(num int64, value string) string {
 // hdrArticleValue returns the value of field for the article a found by message-id, from
 // the same sources GetHeaderFieldRange uses for the range form: the overview columns for the
 // 7 overview fields (and the metadata items), the path column for Path, never the upstream
-// Xref, headers_json for every other header.
+// Xref (the local value is built by xrefFor in handleHdr), headers_json for every other header.
 func hdrArticleValue(a *models.Article, field string) string {
 	switch strings.ToLower(field) {
 	case ":bytes", "bytes":
@@ -224,6 +230,25 @@ func hdrArticleValue(a *models.Article, field string) string {
 	return database.HeaderValueFromJSON(a.HeadersJSON, field)
 }
 
+// headerFieldRange reads one chunk of the range form of HDR/XHDR (DB.GetHeaderFieldRange,
+// database.OverviewRangeChunk rows) in the current group. For Xref in a mode other than
+// XrefOff it reads the message-ids of the same rows (same hide filter and order) and builds
+// the local value of each row with xrefFor from its article number: the DB layer never
+// knows the hostname. In XrefOff the DB's Xref answer (always empty) is returned.
+func (c *ClientConnection) headerFieldRange(groupDB *database.GroupDB, field string, mode XrefMode, first, last int64) ([]database.HeaderFieldValue, error) {
+	if !isXrefField(field) || mode == XrefOff {
+		return c.server.DB.GetHeaderFieldRange(groupDB, field, first, last, database.OverviewRangeChunk)
+	}
+	chunk, err := c.server.DB.GetHeaderFieldRange(groupDB, "message-id", first, last, database.OverviewRangeChunk)
+	if err != nil {
+		return nil, err
+	}
+	for i := range chunk {
+		chunk[i].Value = c.xrefFor(mode, chunk[i].Value, c.currentGroup, chunk[i].ArticleNum)
+	}
+	return chunk, nil
+}
+
 // handleHdr handles HDR field [range|<message-id>] (RFC 3977 §8.5). Any header is served
 // (D2); of the metadata items only :bytes and :lines (else 503).
 func (c *ClientConnection) handleHdr(args []string) error {
@@ -246,7 +271,12 @@ func (c *ClientConnection) handleHdr(args []string) error {
 		if !ok {
 			return err // 430/403 sent
 		}
-		return c.sendDataBlock(225, "Headers follow", []string{hdrLine(num, hdrArticleValue(a, args[0]))})
+		value := hdrArticleValue(a, args[0])
+		if isXrefField(args[0]) {
+			// local Xref value; num is 0 outside the current group (no serving group)
+			value = c.xrefFor(c.server.XrefMode(), a.MessageID, c.currentGroup, num)
+		}
+		return c.sendDataBlock(225, "Headers follow", []string{hdrLine(num, value)})
 	}
 
 	var arg *string
@@ -266,7 +296,8 @@ func (c *ClientConnection) handleHdr(args []string) error {
 	defer groupDB.Return()
 
 	// First chunk before the status line: an empty range gets 423/420, a DB fault 403.
-	chunk, err := c.server.DB.GetHeaderFieldRange(groupDB, field, r.First, r.Last, database.OverviewRangeChunk)
+	mode := c.server.XrefMode() // one mode for every line of the reply
+	chunk, err := c.headerFieldRange(groupDB, field, mode, r.First, r.Last)
 	if err != nil {
 		log.Printf("[NNTP] HDR %s %d-%d: %v", c.currentGroup, r.First, r.Last, err)
 		return c.sendResponse(403, "Internal fault")
@@ -289,7 +320,7 @@ func (c *ClientConnection) handleHdr(args []string) error {
 		if len(chunk) < database.OverviewRangeChunk || last == math.MaxInt64 || last >= r.Last {
 			break
 		}
-		if chunk, err = c.server.DB.GetHeaderFieldRange(groupDB, field, last+1, r.Last, database.OverviewRangeChunk); err != nil {
+		if chunk, err = c.headerFieldRange(groupDB, field, mode, last+1, r.Last); err != nil {
 			// The status line is out: no silent truncation, the connection closes.
 			log.Printf("[NNTP] HDR %s %d-%d: %v", c.currentGroup, last+1, r.Last, err)
 			return fmt.Errorf("HDR %s: %w", c.currentGroup, err)

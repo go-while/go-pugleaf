@@ -152,12 +152,13 @@ Data root `./data-test-xref` (create fresh; never `./data`). Ports 11190 (TCP). 
 3. `./build/pugleaf-nntpmgr -data ./data-test-xref -create -username xreftest01 -password xreftestpass01 -posting`.
 4. `./build/pugleaf-nntp-server -data ./data-test-xref -nntphostname xref.test -nntptcpport 11190 -xref full &`
    AUTHINFO, POST one article with `Newsgroups: xref.test.a,xref.test.b`, wait for the batch commit (poll
-   `HEAD <msgid>` until 221). Expect `Xref: xref.test xref.test.a:1 xref.test.b:1` (order by group id) in HEAD and
-   ARTICLE from both groups and by message-id without GROUP; `OVER 1` in xref.test.a has 9 fields, the 9th
+   `HEAD <msgid>` until 221). Expect `Xref: xref.test xref.test.a:1 xref.test.b:1` in HEAD and ARTICLE from group a
+   (serving group first; in b `xref.test.b:1 xref.test.a:1`); by message-id without GROUP both tokens in history
+   token order (arrival order, not sorted: compare the set); `OVER 1` in xref.test.a has 9 fields, the 9th
    `Xref: xref.test xref.test.a:1 xref.test.b:1`; `LIST OVERVIEW.FMT` ends with `Xref:full`; `HDR Xref 1` gives
    `1 xref.test xref.test.a:1 xref.test.b:1`.
 5. Restart with `-xref partial`: HEAD in xref.test.a gives `Xref: xref.test xref.test.a:1` only; by message-id without
-   GROUP gives no Xref line. Restart with `-xref off`: no Xref line, no `Xref:full`, `HDR Xref 1` gives `1 ` (empty).
+   GROUP gives no Xref line. Restart with `-xref off`: no Xref line, no `Xref:full`, `HDR Xref 1` gives `1` (empty value, no trailing space; RFC 3977 §8.5.2 allows it).
    Invalid `-xref maybe` exits non-zero with a usage error.
 6. `./build/history-rebuild -data ./data-test-xref -validate-only` reports 0 misses and 0 tokens without a number;
    `sqlite3 ./data-test-xref/history/hashdb_*.sqlite3` shows the row as `<gid-a>:1,<gid-b>:1`.
@@ -171,3 +172,52 @@ Data root `./data-test-xref` (create fresh; never `./data`). Ports 11190 (TCP). 
 - `full` cost on OVER: one history lookup per line. A small locations cache keyed by message-id is a possible
   follow-up; not in this plan.
 - Numbers for existing data appear only after a full `history-rebuild` run on the real data (user-run; never by agents).
+
+## Progress
+
+### Wave 0 (inline, plan-xref-history)
+API as built (differs slightly from the Design section: the two-argument methods stay, so the 45 existing test
+call sites did not change):
+- `internal/history`: `Location{GroupID, ArticleNum}`, `historyOp.articleNum`, `AddArticleAt(messageID, groupID,
+  articleNum)`, `RemoveArticleAt(...)` (the old `AddArticle`/`RemoveArticle` pass 0 = unknown), `LookupLocations`,
+  `parseLocations` (both token formats), `parseGroupIDs` now derives from it. SQL statements unchanged: the writer
+  still ignores `articleNum` (slice xref-history).
+- `internal/database/db_batch.go`: `ProcessorInterface.AddArticleToHistory(messageID, groupID, articleNum)`; PHASE 3
+  passes `article.ArticleNums[task.Newsgroup]`. `internal/processor`: passes it to `AddArticleAt`; `threading.go`
+  alreadyStored path passes 0; `XrefLocations` stub returns nil, nil (slice xref-serve fills it).
+- `internal/nntp`: `ArticleProcessor.XrefLocations(messageID) ([]XrefLocation, error)`; new `nntp-xref.go` with
+  `XrefLocation`, `XrefMode` (`XrefOff`/`XrefPartial`/`XrefFull`, `String`, `ParseXrefMode`), `SetXrefMode`/`XrefMode()`
+  (atomic, default `XrefPartial` set in `NewNNTPServer`). Test fakes (`hFakeProcessor`, `wiringTestProcessor`) and
+  `cmd/nntp-server/processor_adapter.go` implement it.
+- `cmd/nntp-server/main.go`: `-xref` flag (default `partial`), fatal on an invalid value, mode in the startup log line.
+- `cmd/history-rebuild`: `processGroup` calls `AddArticleAt` with `article_num`.
+Checks: gofmt empty, vet, build, race tests of history/database/nntp/processor/nntp-server/history-rebuild/expire-news green.
+
+### Wave 1 (merged into plan-xref-history)
+- `xref-history` (worktree-agent-aff41c046e80a66ae, 5b0a0ce + 48fa25b + dfbf028): `id:num` tokens; the UPSERT appends,
+  upgrades a plain token in place and (RowsAffected 0 + different number) rewrites a stale number, so a plain
+  `history-rebuild` over the existing index fills and corrects numbers; a numbered remove strips the exact token, a
+  plain token and (fallback read-modify-write) any token of that group. Review: MERGE after the two change requests.
+- `xref-rebuild-trim` (worktree-agent-a63f7f1ec9b0599c0, 7fc00fd + 17eea67): `historyIndex`/`historyRemover`
+  interfaces, validate counts "Without number" and "Wrong number", trim passes the token's number, expire-news passes
+  the deleted row's article_num; READMEs. Review: MERGE; its three probe-gated tests run for real after the merge.
+- `xref-serve` (worktree-agent-ac4ca6125a79c2b7d, e9c85b0 + 4343ba5): `xrefLine`/`xrefValue`, HEAD/ARTICLE append the
+  line last and drop stored Xref lines (non-off), OVER/XOVER 9th field + `Xref:full`, HDR/XHDR range via
+  `headerFieldRange` (message-id range query instead of the '' query, same filter/order), processor `XrefLocations`
+  with a negative cache for unknown group IDs (5 min, 4096). Nine byte-exact article tests pin `XrefOff`; overview
+  tests expect the partial values. Review: MERGE after the four minors.
+- Deviation from the plan: `internal/database` xref branches untouched (the range query already returns the number).
+- Merged tree: gofmt empty, vet, build, full race list green, known bugs: only T-nntp-article-1.
+
+### Wave 2 (merged) and verification
+- `xref-e2e-docs` (worktree-agent-adb0a28ddbd6becea, f58fac7): `TestE2EXrefBinary` (untagged, builds nntp-server,
+  nntpmgr and history-rebuild into t.TempDir, ~15 s warm, ~100 s on a cold build cache), README/BUGS/docs-audit.
+  Review: MERGE; three minors fixed inline (d08020d): bounded DNS lookup, empty-header guard, HDR/XHDR in the cost note.
+- Verifier (d08020d): gofmt/vet/build/full race list green, known bugs only T-nntp-article-1, five builds ok,
+  end-to-end on ./data-test-xref all steps PASS: full `Xref: example.org xref.test.a:1 xref.test.b:1` in HEAD/ARTICLE/
+  OVER 9th field/HDR/XHDR (b first when serving b or without a group: history arrival order), partial serving group
+  only, off exactly the old output (8 OVER fields, no Xref:full, HDR `1`), `-xref maybe` exit 1, validate-only
+  0 missing / 0 without number / 0 wrong number, expire `-days 1 -force -trim-history` of a backdated copy in b turned
+  the row `2:1,1:1` into `1:1` and HEAD in a then showed only a; SIGINT exits 0.
+- Pre-existing, not from this plan: expire-news logs "failed to delete overview batch ... no such table: overview";
+  an emptied group answers `211 0 0 0` while the main DB keeps low/high water 1.

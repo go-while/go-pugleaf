@@ -16,9 +16,16 @@ mirrors them, so it can always be rebuilt from the group databases.
 ```
 <data>/history/hashdb_0.sqlite3 ... hashdb_f.sqlite3   16 SQLite files
     tables _00 ... _ff                                 256 tables per file
-        message_id TEXT PRIMARY KEY, newsgroups TEXT   newsgroups = "12,345,6789"
+        message_id TEXT PRIMARY KEY, newsgroups TEXT   newsgroups = "12:4711,345:88"
 <data>/history/rebuild.progress                        last fully rebuilt group (resume)
 ```
+
+Each token is `groupID:articleNum` (the article number in that group's database, used for the
+local `Xref:` header). Rows written before the numbers were recorded hold a plain `groupID`
+(number unknown). A full rebuild over the existing index records the missing numbers and
+corrects wrong ones (a numbered add replaces any token of that group), so the history directory
+does not have to be moved away after a renumbering (e.g. `recover-db`). `-validate-only` counts
+both cases.
 
 Routing: `md5(message-id)` as hex; the 1st char selects the file, chars 2-3 select the table.
 Full message-ids are stored, so there are no hash collisions. `-useshorthashlen` is still
@@ -28,11 +35,11 @@ accepted but has no effect since Nov 2025.
 
 | Command | What it does | Writes |
 |---------|--------------|--------|
-| `history-rebuild` | Rebuild: scan all groups (sorted by name) and add every article | yes |
+| `history-rebuild` | Rebuild: scan all groups (sorted by name) and add every article with its article number | yes |
 | `history-rebuild -restart` | Rebuild from the first group, ignore/remove `rebuild.progress` | yes |
-| `history-rebuild -validate-only [-verbose]` | Check every article: missing message-id, or entry without this group. `-verbose` prints the first 100 misses | no |
+| `history-rebuild -validate-only [-verbose]` | Check every article: missing message-id, or entry without this group. The summary also counts found entries whose token has no article number (`Without number`) or another number than the group DB (`Wrong number`); a full rebuild records or corrects them. `-verbose` prints the first 100 misses | no |
 | `history-rebuild -analyze-only [-verbose]` | Open the 16 files read-only: rows per file (per table with `-verbose`), total, histogram of groups per message-id | no |
-| `history-rebuild -trim` | Full sweep over all history rows: remove group IDs whose group is gone from the main DB, has no group DB file, or no longer has the article | yes |
+| `history-rebuild -trim` | Full sweep over all history rows: remove group IDs whose group is gone from the main DB, has no group DB file, or no longer has the article (the group's token is removed whatever number it holds) | yes |
 
 Only one of `-validate-only`, `-analyze-only`, `-trim` can be used per run.
 
@@ -51,8 +58,9 @@ when `<data>/history` does not exist.
   When the run reaches the end, the file is removed.
 - Ctrl+C stops after the current range. Queued history writes are flushed before exit;
   the interrupted group is not marked done and is scanned again on the next run.
-- Adding is idempotent (a group ID is only appended once), so re-running a rebuild
-  or rebuilding while the index already has entries is safe.
+- Adding is idempotent (a group ID is stored once; a numbered add replaces a plain or
+  wrong-numbered token of that group), so re-running a rebuild or rebuilding while the
+  index already has entries is safe.
 - Groups without a group DB file are skipped.
 
 ## When to use -trim

@@ -37,6 +37,7 @@ var (
 	enforceUserMaxConns bool
 	maxArtSize          int
 	local430TTL         time.Duration
+	xrefMode            string
 )
 
 var appVersion = "-unset-"
@@ -63,9 +64,14 @@ func main() {
 	flag.BoolVar(&enforceUserMaxConns, "enforce-user-maxconns", false, "limit authenticated connections per NNTP user to its maxconns value")
 	flag.IntVar(&maxArtSize, "maxartsize", 0, "maximum article size in bytes (0 = config default 32768)")
 	flag.DurationVar(&local430TTL, "local430ttl", nntp.DefaultLocal430TTL, "how long a message-id that answered 430 is answered from the negative cache without a new lookup")
+	flag.StringVar(&xrefMode, "xref", "partial", "Xref: header: off (none), partial (serving group only, no lookups) or full (all groups from the history index, one lookup per served article)")
 	flag.Parse()
 	history.ENABLE_HISTORY = useHistory
 
+	xref, err := nntp.ParseXrefMode(xrefMode)
+	if err != nil {
+		log.Fatalf("[NNTP]: %v", err)
+	}
 	plaintextPolicy, err := nntp.ParsePlaintextAuthPolicy(plaintextAuth)
 	if err != nil {
 		log.Fatalf("[NNTP]: -plaintextauth: %v", err)
@@ -185,8 +191,9 @@ func main() {
 	nntpServer.ReadRequiresAuth = readAuth
 	nntpServer.EnforceUserMaxConns = enforceUserMaxConns
 	nntpServer.SetLocal430TTL(local430TTL)
-	log.Printf("[NNTP]: idletimeout=%s articledelay=%s groupdelay=%s errordelay=%s plaintextauth=%s readauth=%v enforce-user-maxconns=%v maxartsize=%d local430ttl=%s",
-		idleTimeout, articleDelay, groupDelay, errorDelay, plaintextAuth, readAuth, enforceUserMaxConns, nntpServer.MaxArticleBytes(), nntpServer.Local430TTL())
+	nntpServer.SetXrefMode(xref)
+	log.Printf("[NNTP]: idletimeout=%s articledelay=%s groupdelay=%s errordelay=%s plaintextauth=%s readauth=%v enforce-user-maxconns=%v maxartsize=%d local430ttl=%s xref=%s",
+		idleTimeout, articleDelay, groupDelay, errorDelay, plaintextAuth, readAuth, enforceUserMaxConns, nntpServer.MaxArticleBytes(), nntpServer.Local430TTL(), nntpServer.XrefMode())
 	// Set up the date parser adapter to use processor's ParseNNTPDate
 	database.GlobalDateParser = processor.ParseNNTPDate
 

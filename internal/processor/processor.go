@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/database"
@@ -35,6 +36,47 @@ type Processor struct {
 	// cache (<AnalyzeDataDir>/cache/<host>/). Empty: DB.GetDataDir() is used; with
 	// neither set the cache functions return an error (no cwd-relative fallback).
 	AnalyzeDataDir string
+
+	// xrefMiss remembers group IDs of history tokens that the main DB does not know (a
+	// deleted group), so XrefLocations does not query and log them on every served article.
+	xrefMiss xrefMissCache
+}
+
+// xrefMissTTL is how long XrefLocations skips a group ID the main DB did not know.
+const xrefMissTTL = 5 * time.Minute
+
+// xrefMissMax bounds the negative cache: past it all entries are dropped.
+const xrefMissMax = 4096
+
+// xrefMissCache is the negative cache of unknown group IDs used by XrefLocations.
+type xrefMissCache struct {
+	mu sync.Mutex
+	m  map[int64]time.Time // group ID -> expiry
+}
+
+// known reports whether id is a remembered miss that has not expired at now.
+func (c *xrefMissCache) known(id int64, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	exp, ok := c.m[id]
+	if !ok {
+		return false
+	}
+	if now.After(exp) {
+		delete(c.m, id)
+		return false
+	}
+	return true
+}
+
+// add remembers id as unknown until now + xrefMissTTL; past xrefMissMax entries the map is reset.
+func (c *xrefMissCache) add(id int64, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil || len(c.m) >= xrefMissMax {
+		c.m = make(map[int64]time.Time)
+	}
+	c.m[id] = now.Add(xrefMissTTL)
 }
 
 var (
@@ -131,10 +173,11 @@ func (proc *Processor) CheckNoMoreWorkInHistory() bool {
 	return proc.History.CheckNoMoreWorkInHistory()
 }
 
-// AddArticleToHistory records a committed article (message-id -> main-DB newsgroup ID) in the history index.
+// AddArticleToHistory records a committed article (message-id -> main-DB newsgroup ID and its
+// article number there, 0 = unknown) in the history index.
 // Called by the database batch system after the article was stored and numbered. No-op if history is disabled.
-func (proc *Processor) AddArticleToHistory(messageID string, groupID int64) {
-	proc.History.AddArticle(messageID, groupID)
+func (proc *Processor) AddArticleToHistory(messageID string, groupID, articleNum int64) {
+	proc.History.AddArticleAt(messageID, groupID, articleNum)
 }
 
 // GetHistoryStats returns current history statistics
@@ -253,6 +296,43 @@ func (proc *Processor) FindArticleByMessageID(messageID, currentGroup string) (*
 		}
 	}
 	return nil, fmt.Errorf("message-id '%s': %w", messageID, nntp.ErrArticleNotFound)
+}
+
+// XrefLocations returns the groups and article numbers the history index holds for
+// messageID, for the server's Xref: header (-xref full), in the order of the history row.
+// Locations without a number (old rows, 0 = unknown until a history-rebuild) and group IDs
+// the main DB does not know are skipped; an unknown ID is remembered for xrefMissTTL, so it
+// is not queried (and logged) again per served article. nil, nil = nothing known or history
+// disabled.
+func (proc *Processor) XrefLocations(messageID string) ([]nntp.XrefLocation, error) {
+	if proc == nil || proc.History == nil || messageID == "" {
+		return nil, nil
+	}
+	locs, err := proc.History.LookupLocations(messageID)
+	if err != nil {
+		return nil, fmt.Errorf("history lookup for '%s' failed: %w", messageID, err)
+	}
+	return proc.xrefResolve(locs, func(id int64) (string, bool) {
+		return database.NewsgroupDBsIDcache.GetNewsgroupNameByID(id, proc.DB)
+	}, time.Now()), nil
+}
+
+// xrefResolve maps history locations to group names with groupName (the ID cache in
+// XrefLocations), skipping numbers <= 0, unknown IDs and IDs in the negative cache at now.
+func (proc *Processor) xrefResolve(locs []history.Location, groupName func(id int64) (string, bool), now time.Time) []nntp.XrefLocation {
+	var out []nntp.XrefLocation
+	for _, l := range locs {
+		if l.ArticleNum <= 0 || proc.xrefMiss.known(l.GroupID, now) {
+			continue
+		}
+		name, exists := groupName(l.GroupID)
+		if !exists || name == "" {
+			proc.xrefMiss.add(l.GroupID, now)
+			continue
+		}
+		out = append(out, nntp.XrefLocation{Group: name, ArticleNum: l.ArticleNum})
+	}
+	return out
 }
 
 // findArticleInGroup returns the article from one newsgroup DB or nil

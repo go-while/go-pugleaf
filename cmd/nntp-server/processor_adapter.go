@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
@@ -30,6 +31,11 @@ func (pa *ProcessorAdapter) CheckMessageID(messageID string) int {
 // FindArticleByMessageID finds an article by message-ID (current group first, then history)
 func (pa *ProcessorAdapter) FindArticleByMessageID(messageID, currentGroup string) (*models.Article, error) {
 	return pa.processor.FindArticleByMessageID(messageID, currentGroup)
+}
+
+// XrefLocations returns the groups and article numbers known for messageID (Xref: header)
+func (pa *ProcessorAdapter) XrefLocations(messageID string) ([]nntp.XrefLocation, error) {
+	return pa.processor.XrefLocations(messageID)
 }
 
 // CheckNoMoreWorkInHistory checks if there's no more work in history

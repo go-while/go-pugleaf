@@ -192,8 +192,9 @@ groupLoop:
 		}
 
 		// history trimming needs the main DB newsgroup ID
-		trim := historyTrim{hist: hist}
+		var trim historyTrim // hist stays a nil interface without -trim-history
 		if hist != nil {
+			trim.hist = hist
 			mng, err := db.MainDBGetNewsgroup(ng.Name)
 			if err != nil || mng.ID <= 0 {
 				log.Printf("Error: can not resolve newsgroup ID of %s for -trim-history, skipping group: %v", ng.Name, err)
@@ -338,11 +339,22 @@ func shutdown(db *database.Database, hist *history.History) (ok bool) {
 	return ok
 }
 
+// historyRemover is the part of *history.History the history trim uses (tests record the calls)
+type historyRemover interface {
+	RemoveArticleAt(messageID string, groupID, articleNum int64)
+}
+
 // historyTrim carries what deleteArticles needs to remove deleted articles from the history index.
 // hist == nil: history entries are kept (default).
 type historyTrim struct {
-	hist    *history.History
+	hist    historyRemover
 	groupID int64
+}
+
+// trimEntry is one deleted article whose history token is removed after the commit
+type trimEntry struct {
+	articleNum int64
+	messageID  string
 }
 
 // getNewsgroupsToExpire returns newsgroups matching the target pattern
@@ -574,7 +586,7 @@ func deleteArticles(groupDB *database.GroupDB, articleNums []int64, trim history
 	}
 	defer tx.Rollback()
 
-	var messageIDs []string // only collected with trim.hist
+	var trimEntries []trimEntry // only collected with trim.hist
 
 	// Process in chunks to avoid SQLite parameter limits (max ~32k parameters)
 	const maxChunkSize = 5000 // Stay well under SQLite limits
@@ -597,11 +609,11 @@ func deleteArticles(groupDB *database.GroupDB, articleNums []int64, trim history
 		}
 
 		if trim.hist != nil {
-			ids, err := selectMessageIDs(tx, placeholders, args)
+			entries, err := selectTrimEntries(tx, placeholders, args)
 			if err != nil {
 				return err
 			}
-			messageIDs = append(messageIDs, ids...)
+			trimEntries = append(trimEntries, entries...)
 		}
 
 		// Delete from articles table (main table)
@@ -649,8 +661,9 @@ func deleteArticles(groupDB *database.GroupDB, articleNums []int64, trim history
 		return err
 	}
 	if trim.hist != nil {
-		for _, messageID := range messageIDs {
-			trim.hist.RemoveArticle(messageID, trim.groupID)
+		// with the article number the exact "groupID:articleNum" token is removed
+		for _, e := range trimEntries {
+			trim.hist.RemoveArticleAt(e.messageID, trim.groupID, e.articleNum)
 		}
 	}
 	return nil
@@ -689,14 +702,15 @@ func cleanupAfterDelete(db *database.Database, groupName string, articleNums []i
 	}
 }
 
-// selectMessageIDs returns the message-ids of the articles in one delete chunk (inside the delete transaction)
-func selectMessageIDs(tx *sql.Tx, placeholders string, args []interface{}) ([]string, error) {
+// selectTrimEntries returns the article numbers and message-ids of the articles in one delete chunk
+// (inside the delete transaction)
+func selectTrimEntries(tx *sql.Tx, placeholders string, args []interface{}) ([]trimEntry, error) {
 	rows, err := tx.Query(fmt.Sprintf("SELECT article_num, message_id FROM articles WHERE article_num IN (%s)", placeholders), args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to select message-ids: %v", err)
 	}
 	defer rows.Close()
-	var ids []string
+	var entries []trimEntry
 	for rows.Next() {
 		var num int64
 		var messageID sql.NullString
@@ -704,13 +718,13 @@ func selectMessageIDs(tx *sql.Tx, placeholders string, args []interface{}) ([]st
 			return nil, fmt.Errorf("failed to scan message-id: %v", err)
 		}
 		if messageID.Valid && messageID.String != "" {
-			ids = append(ids, messageID.String)
+			entries = append(entries, trimEntry{articleNum: num, messageID: messageID.String})
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("failed to read message-ids: %v", err)
 	}
-	return ids, nil
+	return entries, nil
 }
 
 // getPlaceholders returns a comma-separated string of SQL placeholders (?) for the given count

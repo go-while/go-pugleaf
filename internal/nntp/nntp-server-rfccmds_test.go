@@ -223,8 +223,9 @@ func rfcTLSRecordTypes(b []byte) ([]byte, error) {
 // rfcDateRe is the DATE reply of RFC 3977 §7.1.2: "111 yyyymmddhhmmss".
 var rfcDateRe = regexp.MustCompile(`^111 [0-9]{14}$`)
 
-// rfcListOverviewFmt is the LIST OVERVIEW.FMT block (plan D2).
-var rfcListOverviewFmt = []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines"}
+// rfcListOverviewFmt is the LIST OVERVIEW.FMT block (plan D2) in the default -xref partial
+// mode, which adds the Xref field (plan xref-history).
+var rfcListOverviewFmt = []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines", "Xref:full"}
 
 // rfcListHeaders is the LIST HEADERS block (plan D2).
 var rfcListHeaders = []string{":", ":bytes", ":lines"}

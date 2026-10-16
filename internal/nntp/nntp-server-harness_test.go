@@ -599,6 +599,9 @@ type hFakeProcessor struct {
 	findCalls     int
 	lastFindGroup string
 	lastFindID    string
+	xrefLocs      map[string][]XrefLocation // XrefLocations result per message-id (nil: none known)
+	xrefErr       error                     // XrefLocations error (takes precedence over xrefLocs)
+	xrefCalls     int
 }
 
 func (p *hFakeProcessor) ProcessIncomingArticle(article *models.Article) (int, error) {
@@ -884,4 +887,23 @@ func TestHarnessIsolatedPass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// XrefLocations implements ArticleProcessor: xrefErr when set, else the configured
+// xrefLocs[messageID] (nil, nil when none are configured).
+func (p *hFakeProcessor) XrefLocations(messageID string) ([]XrefLocation, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.xrefCalls++
+	if p.xrefErr != nil {
+		return nil, p.xrefErr
+	}
+	return p.xrefLocs[messageID], nil
+}
+
+// xrefCount returns the number of XrefLocations calls.
+func (p *hFakeProcessor) xrefCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.xrefCalls
 }

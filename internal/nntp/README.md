@@ -28,6 +28,7 @@ This package holds the NNTP **server** (reader side plus IHAVE/TAKETHIS/POST int
 | `nntp-article-common.go` | ARTICLE, HEAD, BODY, STAT (shared lookup by number or message-id) |
 | `nntp-cmd-xover.go`, `nntp-cmd-xhdr.go` | XOVER, XHDR (`overviewLine`, `sanitizeOverviewField`) |
 | `nntp-cmd-range.go` | `parseRangeArg`, `requireGroup` (412 without a selected group), current-group helpers |
+| `nntp-xref.go` | `XrefMode` (`SetXrefMode`), `XrefLocation`, `xrefLine`/`xrefFor`: the local Xref: header |
 | `nntp-cmd-posting.go` | POST, IHAVE, TAKETHIS, POST injection (`injectProtoArticle`), feed Path (`relayPath`), reply mapping (`intakeReply`) |
 | `nntp-cmd-helpers.go` | `rateLimitOnError` (the error delay) |
 
@@ -49,7 +50,7 @@ matching `cmd/nntp-server` flags:
 | `Config.NNTP.TLSPort`, `TLSCert`, `TLSKey` | `-nntptlsport`, `-nntpcertfile`, `-nntpkeyfile` | 0 | implicit TLS port (TLS 1.2 minimum) |
 | `Config.NNTP.MaxConns` | `-maxconnections` | 500 | concurrent client connections, all clients together |
 | `Config.NNTP.MaxArtSize` | `-maxartsize` | 0 = config default 32768 | article byte limit (`MaxArticleBytes`; 1 MiB when the config value is <= 0) |
-| `Config.Hostname` | `-nntphostname` | database fallback | hostname in the greeting |
+| `Config.Hostname` | `-nntphostname` | database fallback | hostname in the greeting and the Xref: header (`go-pugleaf` when empty) |
 | `IdleTimeout` | `-idletimeout` | 3m | idle timeout per command and write timeout per flush |
 | `ArticleCmdDelay` | `-articledelay` | 25ms | sleep before ARTICLE/HEAD/BODY/STAT |
 | `GroupCmdDelay` | `-groupdelay` | 25ms | sleep before GROUP |
@@ -58,6 +59,7 @@ matching `cmd/nntp-server` flags:
 | `ReadRequiresAuth` | `-readauth` | false | reader commands need AUTHINFO first |
 | `EnforceUserMaxConns` | `-enforce-user-maxconns` | false | per-user `maxconns` limit |
 | `SetLocal430TTL` | `-local430ttl` | 60s | TTL of the local430 negative cache (see below) |
+| `SetXrefMode` | `-xref` | `partial` | local Xref: header: `off`, `partial` or `full` (see below); may be changed while serving |
 | `ShutdownTimeout` | - | 10s | how long `Stop` waits for client handlers |
 
 `Start` fails when no port is configured, or when a TLS port is set without a usable certificate and
@@ -109,6 +111,17 @@ accept loops and the local430 cleanup, `Stop` ends all of them (the caller's Wai
   check), at most 65536 entries, message-ids over 250 octets are never cached. A just-arrived
   article can therefore still answer 430 for up to 60 s unless intake calls `local430.Remove`
   (articles stored by another process, e.g. the fetcher, are not removed).
+- **Xref** (RFC 5536 §3.2.14). `Xref: <host> <group>:<num> <g2>:<n2> ...` with `Config.Hostname`, the
+  serving group first. `off`: no Xref line, overview lines have 8 fields, no `Xref:full` in
+  LIST OVERVIEW.FMT, HDR/XHDR Xref answer an empty value (the pre-Xref output). `partial` (default):
+  the serving group only, no lookups. `full`: `partial` plus the other groups from
+  `Processor.XrefLocations` (the history index; one lookup per served article or overview line);
+  without a processor or on a lookup error it behaves like `partial` (the first error is logged once
+  per server). HEAD/ARTICLE append the line as the last header line and drop any stored `Xref:`
+  line; OVER/XOVER carry it as the 9th field (`Xref: ...`, empty when there is no value) and
+  LIST OVERVIEW.FMT lists `Xref:full`; HDR/XHDR Xref give the value without the `Xref: ` prefix.
+  An article found by message-id outside the current group (number 0) has no serving group:
+  `partial` sends no Xref line (empty field/value), `full` lists all known locations.
 - **Statistics.** Only known command words are counted by name; every other word is counted
   under `UNKNOWN`, so junk input cannot grow the map.
 - **Shutdown and faults.** `Stop` closes the listeners and every open client connection and waits

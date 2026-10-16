@@ -73,8 +73,9 @@ type ProcessorInterface interface {
 	//FindThreadRootInCache(groupName *string, refs []string) *MsgIdTmpCacheItem
 	// Add method for checking if there is no more work in history
 	CheckNoMoreWorkInHistory() bool
-	// AddArticleToHistory records a committed article (message-id -> main-DB newsgroup ID) in the history index
-	AddArticleToHistory(messageID string, groupID int64)
+	// AddArticleToHistory records a committed article (message-id -> main-DB newsgroup ID and the
+	// article number in that group; 0 = unknown) in the history index
+	AddArticleToHistory(messageID string, groupID, articleNum int64)
 	// Add method for force closing group databases
 	ForceCloseGroupDB(groupsDB *GroupDB) error
 }
@@ -980,7 +981,8 @@ retry1:
 		// read under the article lock and release it before touching the item or history (AddArticle may block)
 		article.Mux.RLock()
 		messageID := article.MessageID
-		committed := article.ArticleNums[task.Newsgroup] > 0
+		articleNum := article.ArticleNums[task.Newsgroup]
+		committed := articleNum > 0
 		msgIdItem := article.MsgIdItem
 		dateSent := article.DateSent
 		article.Mux.RUnlock()
@@ -997,7 +999,7 @@ retry1:
 			// An ignored duplicate is already in history (or was added by the batch that
 			// stored it): no re-add (A-db-3).
 			if historyOK && committed {
-				sq.proc.AddArticleToHistory(messageID, historyGroupID)
+				sq.proc.AddArticleToHistory(messageID, historyGroupID, articleNum)
 			}
 		}
 		// Every committed article counts for updated_at, also one still referenced by other

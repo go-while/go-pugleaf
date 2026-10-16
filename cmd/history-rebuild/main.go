@@ -32,18 +32,20 @@ const maxPrintedMisses = 100
 const trimChunkSize = 10000
 
 type RebuildStats struct {
-	GroupsTotal       int64
-	GroupsProcessed   int64
-	GroupsSkipped     int64 // resumed or without group DB file
-	ArticlesProcessed int64
-	HistoryQueued     int64 // AddArticle calls (rebuild)
-	HistoryFound      int64 // validate: message-id found with this group
-	HistoryMissing    int64 // validate: message-id not in history
-	HistoryWrongGroup int64 // validate: message-id in history, but without this group
-	Errors            int64
-	StartTime         time.Time
-	EndTime           time.Time // set when scanning is done (before flush/shutdown)
-	lastProgress      int64
+	GroupsTotal        int64
+	GroupsProcessed    int64
+	GroupsSkipped      int64 // resumed or without group DB file
+	ArticlesProcessed  int64
+	HistoryQueued      int64 // AddArticle calls (rebuild)
+	HistoryFound       int64 // validate: message-id found with this group
+	HistoryMissing     int64 // validate: message-id not in history
+	HistoryWrongGroup  int64 // validate: message-id in history, but without this group
+	HistoryNoNumber    int64 // validate: found with this group, but its token has no article number (old row format)
+	HistoryWrongNumber int64 // validate: found with this group, but its token holds another article number
+	Errors             int64
+	StartTime          time.Time
+	EndTime            time.Time // set when scanning is done (before flush/shutdown)
+	lastProgress       int64
 }
 
 type TrimStats struct {
@@ -58,6 +60,15 @@ type TrimStats struct {
 }
 
 var appVersion = "-unset-"
+
+// historyIndex is the part of *history.History used by the rebuild, validate and trim code
+// (tests pass a recording implementation)
+type historyIndex interface {
+	AddArticleAt(messageID string, groupID, articleNum int64)
+	RemoveArticleAt(messageID string, groupID, articleNum int64)
+	LookupLocations(messageID string) ([]history.Location, error)
+	GetStats() history.HistoryStats
+}
 
 func main() {
 	config.AppVersion = appVersion
@@ -231,7 +242,7 @@ func shutdownDatabase(db *database.Database) bool {
 }
 
 // runGroups rebuilds (default) or validates the history index from all group databases
-func runGroups(ctx context.Context, db *database.Database, h *history.History, dataDir, historyDir string,
+func runGroups(ctx context.Context, db *database.Database, h historyIndex, dataDir, historyDir string,
 	batchSize, progressInterval int, validateOnly, restart, verbose bool) *RebuildStats {
 
 	stats := &RebuildStats{StartTime: time.Now()}
@@ -325,7 +336,7 @@ const query_processGroup = `SELECT message_id, article_num FROM articles
 const query_processGroupNext = `SELECT MIN(article_num) FROM articles WHERE message_id IS NOT NULL AND message_id != '' AND article_num > ?`
 
 // processGroup scans one group DB by article_num ranges. completed=false if ctx was cancelled.
-func processGroup(ctx context.Context, db *database.Database, h *history.History, group *models.Newsgroup,
+func processGroup(ctx context.Context, db *database.Database, h historyIndex, group *models.Newsgroup,
 	batchSize, progressInterval int, validateOnly, verbose bool, stats *RebuildStats) (completed bool, err error) {
 
 	if group.ID <= 0 {
@@ -394,7 +405,7 @@ func processGroup(ctx context.Context, db *database.Database, h *history.History
 }
 
 // processRange handles the articles of one article_num range, returns the number of articles seen
-func processRange(groupDB *database.GroupDB, h *history.History, group *models.Newsgroup, from, to int64,
+func processRange(groupDB *database.GroupDB, h historyIndex, group *models.Newsgroup, from, to int64,
 	validateOnly, verbose bool, stats *RebuildStats) (int64, error) {
 
 	rows, err := database.RetryableQuery(groupDB.DB, query_processGroup, from, to)
@@ -416,28 +427,40 @@ func processRange(groupDB *database.GroupDB, h *history.History, group *models.N
 		stats.ArticlesProcessed++
 
 		if !validateOnly {
-			h.AddArticle(messageID, group.ID)
+			h.AddArticleAt(messageID, group.ID, articleNum)
 			stats.HistoryQueued++
 			continue
 		}
 
-		groupIDs, err := h.LookupGroups(messageID)
-		switch {
-		case err != nil:
+		locs, err := h.LookupLocations(messageID)
+		if err != nil {
 			log.Printf("[VALIDATE] lookup failed for '%s' in '%s': %v", messageID, group.Name, err)
 			stats.Errors++
-		case groupIDs == nil:
+			continue
+		}
+		loc, found := findLocation(locs, group.ID)
+		switch {
+		case locs == nil:
 			stats.HistoryMissing++
 			if verbose && stats.HistoryMissing+stats.HistoryWrongGroup <= maxPrintedMisses {
 				log.Printf("[VALIDATE] miss: '%s' (group '%s' article %d)", messageID, group.Name, articleNum)
 			}
-		case !containsID(groupIDs, group.ID):
+		case !found:
 			stats.HistoryWrongGroup++
 			if verbose && stats.HistoryMissing+stats.HistoryWrongGroup <= maxPrintedMisses {
-				log.Printf("[VALIDATE] group missing: '%s' (group '%s' id=%d article %d, history has %v)", messageID, group.Name, group.ID, articleNum, groupIDs)
+				log.Printf("[VALIDATE] group missing: '%s' (group '%s' id=%d article %d, history has %v)", messageID, group.Name, group.ID, articleNum, locs)
 			}
 		default:
 			stats.HistoryFound++
+			switch {
+			case loc.ArticleNum == 0:
+				stats.HistoryNoNumber++
+			case loc.ArticleNum != articleNum:
+				stats.HistoryWrongNumber++
+				if verbose && stats.HistoryWrongNumber <= maxPrintedMisses {
+					log.Printf("[VALIDATE] wrong number: '%s' (group '%s' id=%d article %d, history has %d)", messageID, group.Name, group.ID, articleNum, loc.ArticleNum)
+				}
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -446,13 +469,31 @@ func processRange(groupDB *database.GroupDB, h *history.History, group *models.N
 	return n, nil
 }
 
-func containsID(ids []int64, id int64) bool {
-	for _, v := range ids {
-		if v == id {
-			return true
+// findLocation returns the first location of groupID in locs
+func findLocation(locs []history.Location, groupID int64) (history.Location, bool) {
+	for _, l := range locs {
+		if l.GroupID == groupID {
+			return l, true
 		}
 	}
-	return false
+	return history.Location{}, false
+}
+
+// parseTrimToken parses one token of a history newsgroups CSV: "groupID" (old rows, number 0)
+// or "groupID:articleNum". An invalid or non-positive article number gives 0 (unknown), like the
+// history reader does; an invalid group ID is an error.
+func parseTrimToken(token string) (groupID, articleNum int64, err error) {
+	idStr, numStr, hasNum := strings.Cut(token, ":")
+	groupID, err = strconv.ParseInt(idStr, 10, 64)
+	if err != nil || groupID <= 0 {
+		return 0, 0, fmt.Errorf("invalid group id in token '%s'", token)
+	}
+	if hasNum {
+		if n, err := strconv.ParseInt(numStr, 10, 64); err == nil && n > 0 {
+			articleNum = n
+		}
+	}
+	return groupID, articleNum, nil
 }
 
 // trimGroupInfo caches the result of resolving a group ID during -trim
@@ -462,7 +503,7 @@ type trimGroupInfo struct {
 }
 
 // runTrim sweeps every history row and removes group IDs whose article is gone from the group DB
-func runTrim(ctx context.Context, db *database.Database, h *history.History, dataDir, historyDir string, verbose bool) *TrimStats {
+func runTrim(ctx context.Context, db *database.Database, h historyIndex, dataDir, historyDir string, verbose bool) *TrimStats {
 	ts := &TrimStats{StartTime: time.Now()}
 	fmt.Println("NOTE: -trim is a slow full sweep: every history row is checked against the group databases.")
 
@@ -506,7 +547,7 @@ type trimRow struct {
 }
 
 // trimTable scans one history table in message_id order (keyset chunks)
-func trimTable(ctx context.Context, db *database.Database, h *history.History, rodb *sql.DB, tableName, dataDir string,
+func trimTable(ctx context.Context, db *database.Database, h historyIndex, rodb *sql.DB, tableName, dataDir string,
 	groupCache map[int64]*trimGroupInfo, verbose bool, ts *TrimStats) error {
 
 	query := "SELECT message_id, newsgroups FROM " + tableName + " WHERE message_id > ? ORDER BY message_id LIMIT ?"
@@ -547,8 +588,9 @@ func trimTable(ctx context.Context, db *database.Database, h *history.History, r
 				if part == "" {
 					continue
 				}
-				groupID, err := strconv.ParseInt(part, 10, 64)
-				if err != nil || groupID <= 0 {
+				// the exact token is removed: "id:num" with its number, an old plain "id" with 0
+				groupID, articleNum, err := parseTrimToken(part)
+				if err != nil {
 					log.Printf("[TRIM] invalid group id '%s' for '%s'", part, r.messageID)
 					ts.Errors++
 					continue
@@ -562,7 +604,7 @@ func trimTable(ctx context.Context, db *database.Database, h *history.History, r
 				}
 				if !info.usable {
 					ts.GroupsMissing++
-					h.RemoveArticle(r.messageID, groupID)
+					h.RemoveArticleAt(r.messageID, groupID, articleNum)
 					ts.Removed++
 					continue
 				}
@@ -575,9 +617,9 @@ func trimTable(ctx context.Context, db *database.Database, h *history.History, r
 				if !exists {
 					ts.ArticleMissing++
 					if verbose {
-						log.Printf("[TRIM] remove '%s' from group '%s' (id=%d)", r.messageID, info.name, groupID)
+						log.Printf("[TRIM] remove '%s' from group '%s' (id=%d article %d)", r.messageID, info.name, groupID, articleNum)
 					}
-					h.RemoveArticle(r.messageID, groupID)
+					h.RemoveArticleAt(r.messageID, groupID, articleNum)
 					ts.Removed++
 				}
 			}
@@ -634,7 +676,7 @@ func articleExistsInGroup(db *database.Database, groupName, messageID string) (b
 	return true, nil
 }
 
-func (s *RebuildStats) PrintProgress(h *history.History, validateOnly bool) {
+func (s *RebuildStats) PrintProgress(h historyIndex, validateOnly bool) {
 	elapsed := time.Since(s.StartTime)
 	rate := float64(s.ArticlesProcessed) / elapsed.Seconds()
 	realMem, _ := getRealMemoryUsage()
@@ -661,6 +703,11 @@ func (s *RebuildStats) PrintFinal(validateOnly, interrupted bool) {
 		fmt.Printf("Found in History:    %d\n", s.HistoryFound)
 		fmt.Printf("Missing:             %d\n", s.HistoryMissing)
 		fmt.Printf("Group not in entry:  %d\n", s.HistoryWrongGroup)
+		fmt.Printf("Without number:      %d (found, but no article number in the index)\n", s.HistoryNoNumber)
+		fmt.Printf("Wrong number:        %d (found, but the index holds another article number)\n", s.HistoryWrongNumber)
+		if s.HistoryNoNumber > 0 || s.HistoryWrongNumber > 0 {
+			fmt.Printf("                     a full rebuild over the existing index records missing and corrects wrong numbers\n")
+		}
 		if s.ArticlesProcessed > 0 {
 			fmt.Printf("Coverage:            %.2f%%\n", float64(s.HistoryFound)/float64(s.ArticlesProcessed)*100)
 		}

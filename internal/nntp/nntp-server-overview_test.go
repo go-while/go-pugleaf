@@ -871,7 +871,8 @@ func TestOvrXhdrXrefPath(t *testing.T) {
 		if err := hExpectCode(code, line, 221); err != nil {
 			t.Fatalf("XHDR %s: %v", field, err)
 		}
-		if err := hExpectLines(lines, []string{"1", "2"}); err != nil {
+		// the local value of the default -xref partial mode, never the upstream numbers
+		if err := hExpectLines(lines, []string{"1 go-pugleaf " + g + ":1", "2 go-pugleaf " + g + ":2"}); err != nil {
 			t.Fatalf("XHDR %s 1-2: %v", field, err)
 		}
 	}
@@ -879,7 +880,7 @@ func TestOvrXhdrXrefPath(t *testing.T) {
 	if err := hExpectCode(code, line, 221); err != nil {
 		t.Fatalf("XHDR Xref <id>: %v", err)
 	}
-	if err := hExpectLines(lines, []string{a1.MessageID}); err != nil {
+	if err := hExpectLines(lines, []string{a1.MessageID + " go-pugleaf " + g + ":1"}); err != nil {
 		t.Fatalf("XHDR Xref <id>: %v", err)
 	}
 

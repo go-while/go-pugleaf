@@ -250,16 +250,39 @@ func (c *ClientConnection) visibleInOtherGroup(article *models.Article, stat boo
 // empty lines are dropped, so HEAD never contains the header/body separator and an empty
 // headers_json gives no lines. Dot-stuffing and CR/LF/NUL cleaning are done by
 // dataBlockWriter.Line.
-func articleHeaderLines(a *models.Article) []string {
-	if a.HeadersJSON == "" {
-		return nil
-	}
-	lines := strings.Split(a.HeadersJSON, "\n")
-	out := lines[:0]
-	for _, l := range lines {
-		if strings.TrimSuffix(l, "\r") != "" {
+//
+// In XrefOff the stored lines are returned unchanged. In the other modes any stored Xref:
+// line (and its continuation lines) is dropped, as it would carry another server's numbers,
+// and xref (the local "Xref: ..." line, see xrefHeaderLine) is appended as the last header
+// line when it is not empty.
+func articleHeaderLines(a *models.Article, mode XrefMode, xref string) []string {
+	var out []string
+	if a.HeadersJSON != "" {
+		lines := strings.Split(a.HeadersJSON, "\n")
+		out = lines[:0]
+		inXref := false
+		for _, l := range lines {
+			t := strings.TrimSuffix(l, "\r")
+			if t == "" {
+				continue
+			}
+			if mode != XrefOff {
+				if t[0] == ' ' || t[0] == '\t' {
+					if inXref {
+						continue // continuation of a dropped Xref: line
+					}
+				} else {
+					inXref = len(t) >= 5 && strings.EqualFold(t[:5], "xref:")
+					if inXref {
+						continue
+					}
+				}
+			}
 			out = append(out, l)
 		}
+	}
+	if mode != XrefOff && xref != "" {
+		out = append(out, xref)
 	}
 	return out
 }
@@ -283,7 +306,7 @@ func (c *ClientConnection) sendArticleContent(article *models.Article, replyNum 
 		return err
 	}
 	d := c.newDataBlock()
-	for _, line := range articleHeaderLines(article) {
+	for _, line := range c.servedHeaderLines(article, replyNum) {
 		if err := d.Line(line); err != nil {
 			return err
 		}
@@ -310,12 +333,21 @@ func (c *ClientConnection) sendHeadContent(article *models.Article, replyNum int
 		return err
 	}
 	d := c.newDataBlock()
-	for _, line := range articleHeaderLines(article) {
+	for _, line := range c.servedHeaderLines(article, replyNum) {
 		if err := d.Line(line); err != nil {
 			return err
 		}
 	}
 	return d.Close()
+}
+
+// servedHeaderLines returns the header lines HEAD/ARTICLE send for article: the stored
+// lines plus the local Xref: line of the server's mode. replyNum > 0 is the article's
+// number in the current group (by number, or by message-id inside it); 0 means it was found
+// by message-id outside the current group, so there is no serving group.
+func (c *ClientConnection) servedHeaderLines(article *models.Article, replyNum int64) []string {
+	mode := c.server.XrefMode()
+	return articleHeaderLines(article, mode, c.xrefHeaderLine(mode, article.MessageID, c.currentGroup, replyNum))
 }
 
 // sendBodyContent sends only body for BODY command
