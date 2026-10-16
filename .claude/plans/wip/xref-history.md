@@ -152,12 +152,13 @@ Data root `./data-test-xref` (create fresh; never `./data`). Ports 11190 (TCP). 
 3. `./build/pugleaf-nntpmgr -data ./data-test-xref -create -username xreftest01 -password xreftestpass01 -posting`.
 4. `./build/pugleaf-nntp-server -data ./data-test-xref -nntphostname xref.test -nntptcpport 11190 -xref full &`
    AUTHINFO, POST one article with `Newsgroups: xref.test.a,xref.test.b`, wait for the batch commit (poll
-   `HEAD <msgid>` until 221). Expect `Xref: xref.test xref.test.a:1 xref.test.b:1` (order by group id) in HEAD and
-   ARTICLE from both groups and by message-id without GROUP; `OVER 1` in xref.test.a has 9 fields, the 9th
+   `HEAD <msgid>` until 221). Expect `Xref: xref.test xref.test.a:1 xref.test.b:1` in HEAD and ARTICLE from group a
+   (serving group first; in b `xref.test.b:1 xref.test.a:1`); by message-id without GROUP both tokens in history
+   token order (arrival order, not sorted: compare the set); `OVER 1` in xref.test.a has 9 fields, the 9th
    `Xref: xref.test xref.test.a:1 xref.test.b:1`; `LIST OVERVIEW.FMT` ends with `Xref:full`; `HDR Xref 1` gives
    `1 xref.test xref.test.a:1 xref.test.b:1`.
 5. Restart with `-xref partial`: HEAD in xref.test.a gives `Xref: xref.test xref.test.a:1` only; by message-id without
-   GROUP gives no Xref line. Restart with `-xref off`: no Xref line, no `Xref:full`, `HDR Xref 1` gives `1 ` (empty).
+   GROUP gives no Xref line. Restart with `-xref off`: no Xref line, no `Xref:full`, `HDR Xref 1` gives `1` (empty value, no trailing space; RFC 3977 §8.5.2 allows it).
    Invalid `-xref maybe` exits non-zero with a usage error.
 6. `./build/history-rebuild -data ./data-test-xref -validate-only` reports 0 misses and 0 tokens without a number;
    `sqlite3 ./data-test-xref/history/hashdb_*.sqlite3` shows the row as `<gid-a>:1,<gid-b>:1`.

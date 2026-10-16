@@ -44,7 +44,7 @@
    last header line of HEAD/ARTICLE, as the 9th OVER/XOVER field (LIST OVERVIEW.FMT then ends with `Xref:full`) and
    in HDR/XHDR. `partial` lists only the serving group (no lookups; no line for a message-id read with no group
    selected); `full` adds the other groups from the history index, which now stores `groupID:articleNum` tokens:
-   one history lookup per served article (one per line for OVER/XOVER). `off` is the old output. Numbers for existing
+   one history lookup per served article (one per line for OVER/XOVER and HDR/XHDR ranges). `off` is the old output. Numbers for existing
    data appear only after a full `history-rebuild` run (plain `groupID` tokens count as "Without number" in
    `-validate-only`); new articles get them on arrival. Foreign Xref headers are still stripped on intake and
    dropped on relay. Binary e2e test: `TestE2EXrefBinary` in `cmd/nntp-server/e2e_xref_test.go`.

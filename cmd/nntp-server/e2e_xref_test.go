@@ -84,7 +84,10 @@ func xrefHostname() (string, error) {
 			why = append(why, h+": not usable as -nntphostname")
 			continue
 		}
-		ips, err := net.LookupIP(h)
+		// bounded by the test deadline: a broken resolver must not hang the suite
+		ctx, cancel := context.WithTimeout(context.Background(), testWait)
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", h)
+		cancel()
 		if err != nil || len(ips) == 0 {
 			why = append(why, fmt.Sprintf("%s: does not resolve (%v)", h, err))
 			continue
@@ -476,6 +479,9 @@ func TestE2EXrefBinary(t *testing.T) {
 			return err
 		}
 		x := xrefHeaderLines(hdrs)
+		if len(hdrs) == 0 {
+			return errors.New("empty header block")
+		}
 		if len(x) != 1 || hdrs[len(hdrs)-1] != x[0] {
 			return fmt.Errorf("Xref lines %q (last header %q)", x, hdrs[len(hdrs)-1])
 		}
