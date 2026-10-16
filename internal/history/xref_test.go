@@ -520,16 +520,18 @@ func histXrefCheckBatch(t *testing.T, h *History, ids []string, got map[string][
 	}
 }
 
-// histXrefSameTableIDs returns n message-ids that all route to the same shard table (_23 in
-// hashdb_1), so one table group exceeds the lookupBatchChunk of one query.
-func histXrefSameTableIDs(prefix string, n int) []string {
+// histXrefRoutedIDs returns n message-ids that all route to shard database hashdb_1, and with
+// sameTable all to its table _23, so one shard (or one table) gets more ids than one query of
+// lookupBatchChunk holds.
+func histXrefRoutedIDs(prefix string, n int, sameTable bool) []string {
 	ids := make([]string, 0, n)
 	buf := make([]byte, 0, 64)
 	for i := 0; len(ids) < n; i++ {
 		buf = append(buf[:0], prefix...)
 		buf = strconv.AppendInt(buf, int64(i), 10)
 		buf = append(buf, "@test>"...)
-		if sum := md5.Sum(buf); sum[0] == 0x12 && sum[1]>>4 == 0x3 {
+		sum := md5.Sum(buf)
+		if sum[0]>>4 == 0x1 && (!sameTable || (sum[0]&0xf == 0x2 && sum[1]>>4 == 0x3)) {
 			ids = append(ids, string(buf))
 		}
 	}
@@ -557,9 +559,15 @@ func TestHistoryXrefBatch(t *testing.T) {
 		}
 	}
 	// > lookupBatchChunk ids in one shard table: two queries for one table group
-	sameTable := histXrefSameTableIDs("<xb-same-", 530)
+	sameTable := histXrefRoutedIDs("<xb-same-", 530, true)
 	for i, id := range sameTable[:510] {
 		h.AddArticleAt(id, 9, int64(i+1))
+	}
+	// > lookupBatchChunk ids in one shard database over most of its tables: a chunk boundary
+	// in the middle of the UNION ALL terms
+	sameShard := histXrefRoutedIDs("<xb-shard-", 1100, false)
+	for i, id := range sameShard[:1050] {
+		h.AddArticleAt(id, int64(i%5+20), int64(i+1))
 	}
 	histTestWaitIdle(t, h)
 
@@ -605,6 +613,25 @@ func TestHistoryXrefBatch(t *testing.T) {
 				continue
 			}
 			if want := []Location{{GroupID: 9, ArticleNum: int64(i + 1)}}; !reflect.DeepEqual(locs, want) {
+				t.Errorf("%s: batch = %+v, want %+v", id, locs, want)
+			}
+		}
+	})
+
+	t.Run("OneShardOverChunk", func(t *testing.T) {
+		got := histXrefBatch(t, h, sameShard)
+		if len(got) != 1050 {
+			t.Fatalf("one shard: batch found %d ids, want 1050", len(got))
+		}
+		for i, id := range sameShard {
+			locs, found := got[id]
+			if i >= 1050 {
+				if found {
+					t.Errorf("%s: never added, batch = %+v", id, locs)
+				}
+				continue
+			}
+			if want := []Location{{GroupID: int64(i%5 + 20), ArticleNum: int64(i + 1)}}; !reflect.DeepEqual(locs, want) {
 				t.Errorf("%s: batch = %+v, want %+v", id, locs, want)
 			}
 		}
