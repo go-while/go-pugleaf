@@ -59,10 +59,11 @@ func (c *ClientConnection) handleXOver(args []string) error {
 	if err := c.sendResponse(224, "Overview information follows"); err != nil {
 		return err
 	}
+	mode := c.server.XrefMode() // one mode for every line of the reply
 	d := c.newDataBlock()
 	for {
 		for _, o := range chunk {
-			if err := d.Line(overviewLine(o)); err != nil {
+			if err := d.Line(c.overviewLineIn(o, mode)); err != nil {
 				return err
 			}
 		}
@@ -83,8 +84,10 @@ func (c *ClientConnection) handleXOver(args []string) error {
 }
 
 // overviewLine formats one overview line (RFC 3977 §8.3.2): number, Subject, From, Date,
-// Message-ID, References, :bytes, :lines, TAB-separated, without a trailing field.
-func overviewLine(o *models.Overview) string {
+// Message-ID, References, :bytes, :lines, TAB-separated. In XrefOff there is no further
+// field; in the other modes (LIST OVERVIEW.FMT lists "Xref:full") a 9th field
+// "Xref: <value>" follows, empty when xref (the value, see xrefFor) is empty.
+func overviewLine(o *models.Overview, mode XrefMode, xref string) string {
 	var b strings.Builder
 	b.WriteString(strconv.FormatInt(o.ArticleNum, 10))
 	for _, f := range []string{o.Subject, o.FromHeader, o.DateString, o.MessageID, o.References} {
@@ -95,7 +98,19 @@ func overviewLine(o *models.Overview) string {
 	b.WriteString(strconv.Itoa(o.Bytes))
 	b.WriteByte('\t')
 	b.WriteString(strconv.Itoa(o.Lines))
+	if mode != XrefOff {
+		b.WriteByte('\t')
+		if xref != "" {
+			b.WriteString("Xref: ")
+			b.WriteString(sanitizeOverviewField(xref))
+		}
+	}
 	return b.String()
+}
+
+// overviewLineIn is overviewLine for the row o of the current group in mode.
+func (c *ClientConnection) overviewLineIn(o *models.Overview, mode XrefMode) string {
+	return overviewLine(o, mode, c.xrefFor(mode, o.MessageID, c.currentGroup, o.ArticleNum))
 }
 
 // sanitizeOverviewField prepares a header value for an overview or XHDR line

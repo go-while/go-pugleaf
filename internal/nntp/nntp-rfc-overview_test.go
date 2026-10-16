@@ -125,14 +125,16 @@ func ovhBlock(t *testing.T, c *hClient, want int, format string, args ...interfa
 	return c.readDotLines(t)
 }
 
-// ovhOverNums checks that every line is an 8-field overview line and returns field 1 of each.
+// ovhOverNums checks that every line is a 9-field overview line (the default -xref partial
+// mode adds the Xref field listed as "Xref:full": empty or "Xref: ...") and returns field 1
+// of each.
 func ovhOverNums(t *testing.T, lines []string) []int64 {
 	t.Helper()
 	nums := make([]int64, 0, len(lines))
 	for i, l := range lines {
 		f := strings.Split(l, "\t")
-		if len(f) != 8 {
-			t.Fatalf("overview line %d has %d fields, want 8: %q", i, len(f), l)
+		if len(f) != 9 || (f[8] != "" && !strings.HasPrefix(f[8], "Xref: ")) {
+			t.Fatalf("overview line %d has %d fields, want 9 (the 9th empty or \"Xref: ...\"): %q", i, len(f), l)
 		}
 		n, err := strconv.ParseInt(f[0], 10, 64)
 		if err != nil {
@@ -379,9 +381,15 @@ func TestOvhHdrAnyHeader(t *testing.T) {
 	}
 	absent(ovhBlock(t, c, 225, "HDR X-Ovh-Test 2"), "2")
 	absent(ovhBlock(t, c, 225, "HDR X-Ovh-Test %s", id2), "2")
-	// The upstream Xref line in headers_json is never served, in either form (as XHDR).
-	absent(ovhBlock(t, c, 225, "HDR Xref 1"), "1")
-	absent(ovhBlock(t, c, 225, "HDR Xref %s", id1), "1")
+	// The upstream Xref line in headers_json is never served, in either form (as XHDR):
+	// the default -xref partial mode answers the local value of the serving group.
+	local := fmt.Sprintf("1 go-pugleaf %s:1", g)
+	if err := hExpectLines(ovhBlock(t, c, 225, "HDR Xref 1"), []string{local}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hExpectLines(ovhBlock(t, c, 225, "HDR Xref %s", id1), []string{local}); err != nil {
+		t.Fatal(err)
+	}
 	if err := hExpectLines(ovhBlock(t, c, 225, "HDR X-Ovh-Test 1-2"), []string{"1 v1", "2"}); err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +401,9 @@ func TestOvhHdrAnyHeader(t *testing.T) {
 func TestOvhOverviewFmt(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := ovhDial(t, hs)
-	want := []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines"}
+	// "Xref:full": the default -xref partial mode writes the Xref field (nntp-xref_test.go
+	// covers off/full).
+	want := []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines", "Xref:full"}
 	if err := hExpectLines(ovhBlock(t, c, 215, "LIST OVERVIEW.FMT"), want); err != nil {
 		t.Fatal(err)
 	}

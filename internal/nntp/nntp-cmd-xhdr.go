@@ -59,7 +59,8 @@ func (c *ClientConnection) handleXHdr(args []string) error {
 	defer groupDB.Return()
 
 	// First chunk before the status line: an empty range gets 423, a DB fault 403.
-	chunk, err := c.server.DB.GetHeaderFieldRange(groupDB, field, r.First, r.Last, database.OverviewRangeChunk)
+	mode := c.server.XrefMode() // one mode for every line of the reply
+	chunk, err := c.headerFieldRange(groupDB, field, mode, r.First, r.Last)
 	if err != nil {
 		log.Printf("[NNTP] XHDR %s %d-%d: %v", c.currentGroup, r.First, r.Last, err)
 		return c.sendResponse(403, "Internal fault")
@@ -98,7 +99,7 @@ func (c *ClientConnection) handleXHdr(args []string) error {
 		if len(chunk) < database.OverviewRangeChunk || last >= r.Last || last == math.MaxInt64 {
 			break
 		}
-		if chunk, err = c.server.DB.GetHeaderFieldRange(groupDB, field, last+1, r.Last, database.OverviewRangeChunk); err != nil {
+		if chunk, err = c.headerFieldRange(groupDB, field, mode, last+1, r.Last); err != nil {
 			// The status line is out: no silent truncation, the connection closes (decision 15).
 			log.Printf("[NNTP] XHDR %s %d-%d: %v", c.currentGroup, last+1, r.Last, err)
 			return fmt.Errorf("XHDR %s: %w", c.currentGroup, err)
@@ -113,39 +114,45 @@ func (c *ClientConnection) handleXHdr(args []string) error {
 // xhdrByMessageID answers XHDR <field> <message-id>: the current group first, then (with a
 // processor) the article's group found through the history index. The value is always
 // re-read with the hide = 0 filter, so a hidden article stays hidden.
+// Xref is the local value (xrefFor): the current group and the article's number there when
+// it was found in the current group, else no serving group (as HEAD by message-id).
 func (c *ClientConnection) xhdrByMessageID(field, messageID string) error {
-	lookup := func(group string) (string, bool, error) {
+	lookup := func(group string) (int64, string, bool, error) {
 		groupDB, err := c.server.DB.GetGroupDB(group)
 		if err != nil {
-			return "", false, err
+			return 0, "", false, err
 		}
 		defer groupDB.Return()
-		_, value, err := c.server.DB.NNTPHeaderByMessageID(groupDB, field, messageID)
+		num, value, err := c.server.DB.NNTPHeaderByMessageID(groupDB, field, messageID)
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", false, nil
+			return 0, "", false, nil
 		}
 		if err != nil {
-			return "", false, err
+			return 0, "", false, err
 		}
-		return value, true, nil
+		return num, value, true, nil
 	}
 
 	var value string
+	var currentNum int64 // the article's number in the current group, 0 when found elsewhere
 	found := false
 	if c.currentGroup != "" {
-		v, ok, err := lookup(c.currentGroup)
+		n, v, ok, err := lookup(c.currentGroup)
 		if err != nil {
 			log.Printf("[NNTP] XHDR %s in %s: %v", messageID, c.currentGroup, err)
 			return c.sendResponse(403, "Internal fault")
 		}
 		value, found = v, ok
+		if ok {
+			currentNum = n
+		}
 	}
 	if !found && c.server.Processor != nil {
 		article, err := c.server.Processor.FindArticleByMessageID(messageID, "")
 		switch {
 		case err == nil && article != nil && len(article.NewsgroupsPtr) > 0 && article.NewsgroupsPtr[0] != nil:
 			group := *article.NewsgroupsPtr[0]
-			v, ok, err := lookup(group)
+			_, v, ok, err := lookup(group)
 			if err != nil {
 				log.Printf("[NNTP] XHDR %s in %s: %v", messageID, group, err)
 				return c.sendResponse(403, "Internal fault")
@@ -160,6 +167,9 @@ func (c *ClientConnection) xhdrByMessageID(field, messageID string) error {
 	if !found {
 		c.rateLimitOnError()
 		return c.sendResponse(430, "No article with that message-id")
+	}
+	if isXrefField(field) {
+		value = c.xrefFor(c.server.XrefMode(), messageID, c.currentGroup, currentNum)
 	}
 
 	if err := c.sendResponse(221, "Header follows"); err != nil {
