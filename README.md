@@ -16,10 +16,11 @@ go-pugleaf provides a complete newsgroup platform with:
 
 ## 🚀 Quick Start
 
-Read [BUGS.md](https://github.com/go-while/go-pugleaf/blob/main/BUGS.md) first!
+Read [BUGS.md](BUGS.md) first!
 
 ### Prerequisites
 - Go 1.26.0+ (for building from source; `go.mod` pins `toolchain go1.27.2`, downloaded automatically with GOTOOLCHAIN=auto)
+- A C compiler (gcc): the SQLite driver uses cgo
 - Linux/Unix system (Windows support not tested)
 - At least 1-256GB RAM, 1-10000GB+ disk space
 
@@ -29,6 +30,7 @@ Read [BUGS.md](https://github.com/go-while/go-pugleaf/blob/main/BUGS.md) first!
 
 Choose one option:
 - **Download release**: Get pre-built binaries from [releases page](https://github.com/go-while/go-pugleaf/releases)
+  (the archive holds `build/`, `README.md` and `LICENSE`)
 - **Build from source**:
 ```bash
 git clone https://github.com/go-while/go-pugleaf.git
@@ -36,15 +38,20 @@ cd go-pugleaf
 ./build_ALL.sh && cp build/* .
 ```
 
+Run the binaries from the repository checkout: the webserver loads its page templates from
+`web/templates/` below the working directory (static files are embedded), and the default cron
+jobs start `./pugleaf-fetcher` and `./post-queue` from that same directory. With a release
+archive, unpack it into a clone of the repository (or copy `web/templates/` next to the binaries).
+
 **Step 2: Initial configuration**
 
 ```bash
 # First run - store the hostname in the database (only needed once)
 ./webserver -nntphostname my.host.name
-
-# Stop server (Ctrl+C), then start normally
-./webserver
 ```
+The data directory (`-data`, default `./data`) is created on the first run. Later runs reuse the
+stored hostname, so `./webserver` is enough. All tools share the same `-data` directory.
+
 #### `webserver` (cmd/web)
 **Main web interface**
 ```bash
@@ -59,8 +66,8 @@ cd go-pugleaf
 -websslcert string - SSL certificate file (/path/to/fullchain.pem)
 -websslkey string - SSL key file (/path/to/privkey.pem)
 
-# Maintenance (run once, then exit): -import-active, -update-newsgroups-descriptions-file,
-# -write-active-file, -compare-active, -disable-active, -repair-watermarks, -find-orphan-dbs, ...
+# One-shot maintenance (runs, then exits): -import-active, -write-active-file, -compare-active,
+# -disable-active, -repair-watermarks, -find-orphan-dbs, -update-newsgroups-expiry-from-file, ...
 # Cron jobs: -no-cronjobs disables them; -edit-cronjobs temporarily allows editing them in the admin UI.
 ```
 The webserver has no embedded NNTP server: its `-nntptcpport`, `-nntptlsport`, `-nntpcertfile` and
@@ -69,8 +76,8 @@ The webserver has no embedded NNTP server: its `-nntptcpport`, `-nntptlsport`, `
 **Step 3: Create admin account**
 
 - Open browser: http://localhost:11980
-- Register first user account (automatically becomes admin)
-- Login → Admin → CFG → Disable registrations (secure your instance)
+- Register the first user account: user ID 1 is the admin (`usermgr -create ... -admin` works too)
+- Login → 🛠️ Admin → ⚙️ CFG → User Registration → disable (secure your instance)
 
 ### Command Line Tool (usermgr)
 The `usermgr` tool manages web users from the command line. It is not part of `build_ALL.sh`:
@@ -101,12 +108,15 @@ NNTP users (for `pugleaf-nntp-server`) are managed with `pugleaf-nntpmgr` (`./bu
 **Step 4: Add newsgroups**
 
 Choose one method:
-- **Web interface**: Admin → Add groups manually
-- **Command line**: Import from active file or descriptions file
-- Files are in `preload/` or `active_files/` directory.
-- The defaults may contain a large number of binary groups; modify as needed.
+- **Web interface**: Admin → 📰 Groups → add groups manually
+- **Command line**: import an active file or a descriptions file; sample files are in
+  `preload/` and `active_files/`. They may contain a large number of binary groups; modify as needed.
+- **From a provider**: `./pugleaf-fetcher -fetch-newsgroups-from-remote 'comp.*' -fetch-newsgroups-force`
+  (see Manual Fetching below; needs an enabled provider, Step 5)
 ```bash
+# one-shot: imports the groups and exits
 ./webserver -import-active preload/active.2025-06
+# imports the descriptions and then keeps running as the webserver
 ./webserver -update-newsgroups-descriptions-file preload/newsgroups.descriptions \
  -update-overwrite-newsgroups-descriptions=false \
  -update-newsgroups-descriptions-import-create-newsgroups=false
@@ -121,12 +131,17 @@ Choose one method:
 - Add a `groups.txt` per folder in `etc/$section/` (e.g., `etc/rocksolid/groups.txt`)
 - Spool folder can be empty if you don't want to import db backups
 
-**Step 5: Start fetching news**
+**Step 5: Configure a provider and start fetching**
 
-- Web interface:
-- Admin → Server → Configure
-- Admin → Cron Jobs
-- Click play button ▶ next to `pugleaf-fetcher`
+- Admin → 📡 Server: the default providers are created disabled. Enable one (or add your own)
+  and set its credentials. Keep the connection limits your provider allows.
+- The cron jobs run inside the webserver (`-no-cronjobs` turns them off). All default jobs are
+  disabled; enabling one is refused unless the webserver was started with `-edit-cronjobs`:
+```bash
+./webserver -edit-cronjobs      # temporarily; restart without the flag afterwards
+```
+- Admin → 🕒 Crons → click the play button ▶ next to `pugleaf-fetcher` (runs every 5 minutes:
+  `./pugleaf-fetcher -group "" -max-batch 1000 ...`). Enable `post-queue` too if users may post.
 - News should arrive within 5 minutes
 
 ### Advanced: Manual Fetching
