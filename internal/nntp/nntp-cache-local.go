@@ -35,6 +35,30 @@ func (s *NNTPServer) SetLocal430TTL(ttl time.Duration) {
 	s.local430.setTTL(ttl)
 }
 
+// DefaultPostCommitWait is how long handlePost waits for the batch writer to commit a posted
+// article before it answers 240 (cmd/nntp-server -post-commit-wait); 0 disables the wait.
+const DefaultPostCommitWait = 5 * time.Second
+
+// SetPostCommitWait sets the POST commit wait (plan post-430-window); d <= 0 means no wait.
+// It may be called while serving.
+func (s *NNTPServer) SetPostCommitWait(d time.Duration) {
+	if s == nil {
+		return
+	}
+	if d < 0 {
+		d = 0
+	}
+	s.postWait.Store(int64(d))
+}
+
+// PostCommitWait returns the POST commit wait in effect (0 = none).
+func (s *NNTPServer) PostCommitWait() time.Duration {
+	if s == nil {
+		return 0
+	}
+	return time.Duration(s.postWait.Load())
+}
+
 // Local430TTL returns the TTL of the local430 cache in effect.
 func (s *NNTPServer) Local430TTL() time.Duration {
 	if s == nil || s.local430 == nil {

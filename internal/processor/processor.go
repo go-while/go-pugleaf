@@ -404,6 +404,13 @@ func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, err
 	return proc.processArticle(article, *article.NewsgroupsPtr[0], bulkmode)
 }
 
+// ProcessPostedArticle is ProcessIncomingArticle for POST (plan post-430-window): it will
+// wait for the batch writer to commit the accepted article to its groups (slice
+// post-commit-wait); until then it is ProcessIncomingArticle.
+func (proc *Processor) ProcessPostedArticle(article *models.Article, stop <-chan struct{}, timeout time.Duration) (int, error) {
+	return proc.ProcessIncomingArticle(article)
+}
+
 // EnableBridges enables Fediverse and/or Matrix bridges with the given configuration
 func (proc *Processor) EnableBridges(config *BridgeConfig) {
 	if config == nil {

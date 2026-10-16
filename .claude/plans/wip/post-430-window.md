@@ -71,11 +71,13 @@ nothing returns at once, so marks may be taken for every candidate group name be
 - docs/audit/README.md BUG-8 row: note the window fix. internal/nntp/README.md: one bullet.
 
 ## Waves
-### Wave 0 (inline)
-- `internal/nntp/nntp-server.go`: interface method `ProcessPostedArticle`; `postCommitWait` atomic +
-  `SetPostCommitWait`/`PostCommitWait` (default 5 s). Stub implementations: `internal/processor/processor.go`
-  (calls `ProcessIncomingArticle`, no wait yet), `cmd/nntp-server/processor_adapter.go` (forwards), both test
-  fakes (delegate to ProcessIncomingArticle, record the timeout).
+### Wave 0 (inline, done on plan-post-430-window)
+- Decision (user, 2026-10-16): option 2, POST waits for the commit; IHAVE/TAKETHIS do not wait.
+- `internal/nntp/nntp-server.go`: interface method `ProcessPostedArticle(article, stop, timeout)`; `postWait`
+  atomic; `NewNNTPServer` calls `SetPostCommitWait(DefaultPostCommitWait)`. `internal/nntp/nntp-cache-local.go`:
+  `DefaultPostCommitWait` (5 s), `SetPostCommitWait`/`PostCommitWait` (d <= 0 → 0 = no wait). Stubs:
+  `internal/processor/processor.go` (calls ProcessIncomingArticle), `cmd/nntp-server/processor_adapter.go`
+  (forwards), `wiringTestProcessor` (delegates), `hFakeProcessor` (delegates, records the timeouts in `postWaits`).
 ### Wave 1
 - slice `post-commit-wait`: `internal/processor/processor.go` (real `ProcessPostedArticle` with marks +
   WaitCommitted, timeout sharing, error mapping), `internal/processor/intake_test.go` or a new
