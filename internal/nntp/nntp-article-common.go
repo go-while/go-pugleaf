@@ -78,8 +78,10 @@ func (c *ClientConnection) retrieveArticleCommon(args []string, retrievalType Ar
 //
 //   - no argument: the current article; 412 without a group, 420 when it is invalid
 //     (also when it was hidden or expired since it became current).
-//   - "<message-id>": the current group first, then local430, then (with a processor) the
-//     history lookup re-checked by visibleInOtherGroup; a miss is 430. The current article
+//   - "<message-id>": the current group first, then (with a processor) the groups of a
+//     recentArrivals entry younger than ArrivalGrace, then local430, then the history lookup;
+//     a hit outside the current group is re-checked by visibleInOtherGroup; a miss is 430.
+//     For a recent arrival local430 is neither checked nor filled (plan post-430-window). The current article
 //     is never changed. Without a processor only the current group is searched. For stat
 //     the group databases are read for the article number only (no headers, no body).
 //   - number: 412 without a group; not 1..19 digits or above math.MaxInt64 → 501; <= 0 or
@@ -119,21 +121,44 @@ func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article 
 				}
 			}
 		}
-		// (b) a recent definite miss, then the history index (other groups)
-		if c.server.local430.Check(messageID) || c.server.Processor == nil {
-			c.rateLimitOnError()
-			return nil, 0, false, c.sendResponse(430, "No article with that message-id")
-		}
-		found, ferr := c.server.Processor.FindArticleByMessageID(messageID, "")
-		if ferr != nil && !errors.Is(ferr, ErrArticleNotFound) {
-			// history/DB fault, not a miss
-			log.Printf("[NNTP] lookup of %s failed: %v", messageID, ferr)
-			return nil, 0, false, c.sendResponse(403, "Internal fault")
-		}
-		if ferr != nil || found == nil {
-			if ferr != nil {
-				c.server.local430.Add(messageID) // definite miss: remember it for a while
+		// (b) a same-process arrival of the last ArrivalGrace: its groups first (the history
+		// may not know it yet), and no local430 for it in either direction
+		var found *models.Article
+		hintGroups, recent := c.server.recentArrivals.RecentArrival(messageID)
+		if recent && c.server.Processor != nil {
+			for _, group := range hintGroups {
+				a, ferr := c.server.Processor.FindArticleByMessageID(messageID, group)
+				if ferr != nil && !errors.Is(ferr, ErrArticleNotFound) {
+					log.Printf("[NNTP] lookup of %s in %s failed: %v", messageID, group, ferr)
+					return nil, 0, false, c.sendResponse(403, "Internal fault")
+				}
+				if ferr == nil && a != nil {
+					found = a
+					break
+				}
 			}
+		}
+		// (c) a recent definite miss, then the history index (other groups)
+		if found == nil {
+			if (!recent && c.server.local430.Check(messageID)) || c.server.Processor == nil {
+				c.rateLimitOnError()
+				return nil, 0, false, c.sendResponse(430, "No article with that message-id")
+			}
+			var ferr error
+			found, ferr = c.server.Processor.FindArticleByMessageID(messageID, "")
+			if ferr != nil && !errors.Is(ferr, ErrArticleNotFound) {
+				// history/DB fault, not a miss
+				log.Printf("[NNTP] lookup of %s failed: %v", messageID, ferr)
+				return nil, 0, false, c.sendResponse(403, "Internal fault")
+			}
+			if ferr != nil {
+				found = nil
+				if !recent {
+					c.server.local430.Add(messageID) // definite miss: remember it for a while
+				}
+			}
+		}
+		if found == nil {
 			c.rateLimitOnError()
 			return nil, 0, false, c.sendResponse(430, "No article with that message-id")
 		}

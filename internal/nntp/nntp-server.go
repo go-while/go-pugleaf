@@ -110,6 +110,10 @@ type NNTPServer struct {
 	running     bool
 	bgOnce      sync.Once // starts the background goroutines once
 
+	// Same-process arrivals (POST/IHAVE/TAKETHIS) of the last ArrivalGrace: the by-message-id
+	// lookup tries their groups and caches no miss for them (plan post-430-window).
+	recentArrivals *RecentArrivals
+
 	// Open client connections: Stop closes them and waits for their handlers.
 	connsMu   sync.Mutex
 	conns     map[net.Conn]struct{}
@@ -170,7 +174,9 @@ func NewNNTPServer(db *database.Database, cfg *config.ServerConfig, mainWG *sync
 		ErrorDelay:      DefaultErrorDelay,
 		IdleTimeout:     DefaultNNTPcliconnTimeout,
 		ShutdownTimeout: DefaultShutdownTimeout,
+		recentArrivals:  newRecentArrivals(),
 	}
+	server.local430.arrivals = server.recentArrivals // cleaned by local430.run
 	server.SetXrefMode(XrefPartial)
 	server.SetPostCommitWait(DefaultPostCommitWait)
 	server.SetXrefBatchedLookup(true)

@@ -18,12 +18,14 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -1099,4 +1101,289 @@ func TestArtNotFoundTexts(t *testing.T) {
 			}
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Arrival grace (plan post-430-window, slice arrival-grace): an article this process
+// accepted (POST 240, IHAVE 235, TAKETHIS 239) is found by message-id without a selected
+// group although the history index does not know it yet, and a miss in the first
+// ArrivalGrace is never cached in local430.
+
+// artGraceEnv is one arrival-grace scenario: group g, article a (its row is already in the
+// group DB: what the batch writer committed), a fake processor whose lookup without a group
+// (history only) always misses while the lookup in a group reads that group's DB (when
+// answer is set), the server (Config.Hostname set, POST needs a path identity) and an
+// authenticated poster connection.
+type artGraceEnv struct {
+	g      string
+	a      hArticle
+	proc   *hFakeProcessor
+	answer *atomic.Bool
+	hs     *hServer
+	poster *hClient
+}
+
+// artGraceServer is newTestServer with Config.Hostname set before Serve, so no connection
+// goroutine can see the write.
+func artGraceServer(t *testing.T, proc ArticleProcessor) *hServer {
+	t.Helper()
+	db := hTestDB(t)
+	cfg := &config.ServerConfig{}
+	cfg.NNTP.MaxConns = 100
+	cfg.Hostname = "example.org"
+	hs := &hServer{}
+	s, err := NewNNTPServer(db, cfg, &hs.wg, proc)
+	if err != nil {
+		t.Fatalf("NewNNTPServer: %v", err)
+	}
+	s.ArticleCmdDelay = 0
+	s.GroupCmdDelay = 0
+	s.ErrorDelay = 0
+	hs.S = s
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	hs.Addr = l.Addr().String()
+	if err := s.Serve(l, false); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	t.Cleanup(func() { hs.stop(t) })
+	return hs
+}
+
+// artGraceSetup builds the scenario for group "t4.<test>.<seq>".
+func artGraceSetup(t *testing.T, test string) *artGraceEnv {
+	t.Helper()
+	g, _ := artSeed(t, test, 0, nil)
+	a := artGraceArticle(t, g, 1)
+	// db is taken here: findFn runs on the server goroutine, where hTestDB's
+	// t.Skipf must not be called.
+	db := hTestDB(t)
+	answer := &atomic.Bool{}
+	answer.Store(true)
+	proc := &hFakeProcessor{checkResult: history.CasePass, processResult: history.CasePass}
+	proc.findFn = func(messageID, currentGroup string) (*models.Article, error) {
+		// "": only the history index, which has not been flushed yet
+		if currentGroup == "" || !answer.Load() {
+			return nil, fmt.Errorf("artGrace %s: %w", messageID, ErrArticleNotFound)
+		}
+		gdb, err := db.GetGroupDB(currentGroup)
+		if err != nil {
+			return nil, err
+		}
+		defer gdb.Return()
+		art, err := db.GetArticleByMessageID(gdb, messageID)
+		if err != nil {
+			return nil, fmt.Errorf("artGrace %s: %v: %w", messageID, err, ErrArticleNotFound)
+		}
+		return art, nil
+	}
+	hs := artGraceServer(t, proc)
+	user, pass := hUser(t, true, true)
+	poster := hs.dial(t)
+	authMustLogin(t, poster, user, pass)
+	return &artGraceEnv{g: g, a: a, proc: proc, answer: answer, hs: hs, poster: poster}
+}
+
+// artGraceArticle inserts article n of g into the group DB (what the batch writer committed
+// by the time the intake reply is sent) and returns it.
+func artGraceArticle(t *testing.T, g string, n int64) hArticle {
+	t.Helper()
+	a := hDefaultArticle(g, n)
+	a.Headers = strings.Join(artDefaultHeaders(g, a), "\n")
+	hArticleSQL(t, g, a)
+	return a
+}
+
+// artGraceRaw is the article as the client sends it (no Date, no Path: POST adds them).
+func artGraceRaw(g string, a hArticle) string {
+	return string(artCRLF("Message-ID: "+a.MessageID, "Newsgroups: "+g, "From: "+a.From, "Subject: "+a.Subject)) +
+		CRLF + string(artCRLF(artBodyLines(a)...)) + ".\r\n"
+}
+
+// artGraceTransfer delivers a to g with cmd (POST, IHAVE or TAKETHIS) on c and expects the
+// success reply (RFC 3977 §6.3.1.2: 240, §6.3.2.2: 235; RFC 4644 §2.5.2: 239).
+func artGraceTransfer(t *testing.T, c *hClient, cmd, g string, a hArticle) {
+	t.Helper()
+	raw := artGraceRaw(g, a)
+	want := 0
+	switch cmd {
+	case "POST":
+		code, line := c.cmd(t, "POST")
+		if err := hExpectCode(code, line, 340); err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		want = 240
+	case "IHAVE":
+		code, line := c.cmd(t, "IHAVE %s", a.MessageID)
+		if err := hExpectCode(code, line, 335); err != nil {
+			t.Fatalf("IHAVE: %v", err)
+		}
+		want = 235
+	case "TAKETHIS":
+		raw = "TAKETHIS " + a.MessageID + CRLF + raw
+		want = 239
+	default:
+		t.Fatalf("unknown transfer command %s", cmd)
+	}
+	if err := c.send(raw); err != nil {
+		t.Fatalf("%s: send article: %v", cmd, err)
+	}
+	code, line, err := c.readStatus()
+	if err != nil {
+		t.Fatalf("%s reply: %v (%q)", cmd, err, line)
+	}
+	if err := hExpectCode(code, line, want); err != nil {
+		t.Fatalf("%s transfer: %v", cmd, err)
+	}
+}
+
+// artGraceCached reports whether local430 holds messageID.
+func artGraceCached(hs *hServer, messageID string) bool {
+	hs.S.local430.mu.RLock()
+	defer hs.S.local430.mu.RUnlock()
+	_, ok := hs.S.local430.cache[messageID]
+	return ok
+}
+
+// artGraceReads checks every by-message-id read on c (no group selected): STAT/HEAD/BODY/
+// ARTICLE answer with number 0 (RFC 3977 §6.2.1.2), OVER 224 (§8.3.2), HDR 225 (§8.5.2).
+func artGraceReads(t *testing.T, c *hClient, a hArticle) {
+	t.Helper()
+	for _, cmd := range artCmds {
+		code, line, _ := artDo(t, c, "%s %s", cmd.name, a.MessageID)
+		if err := artCheckStatus(code, line, cmd.code, 0, a.MessageID); err != nil {
+			t.Errorf("%s %s: %v", cmd.name, a.MessageID, err)
+		}
+	}
+	code, line := c.cmd(t, "OVER %s", a.MessageID)
+	if err := hExpectCode(code, line, 224); err != nil {
+		t.Errorf("OVER %s: %v", a.MessageID, err)
+	} else if lines := c.readDotLines(t); len(lines) != 1 || !strings.HasPrefix(lines[0], "0\t"+a.Subject+"\t") {
+		t.Errorf("OVER %s: %q, want one line for article 0", a.MessageID, lines)
+	}
+	code, line = c.cmd(t, "HDR Subject %s", a.MessageID)
+	if err := hExpectCode(code, line, 225); err != nil {
+		t.Errorf("HDR Subject %s: %v", a.MessageID, err)
+	} else if lines := c.readDotLines(t); len(lines) != 1 || lines[0] != "0 "+a.Subject {
+		t.Errorf("HDR Subject %s: %q, want [%q]", a.MessageID, lines, "0 "+a.Subject)
+	}
+}
+
+// artGracePostWaits returns the commit-wait timeouts the server passed to ProcessPostedArticle.
+func artGracePostWaits(p *hFakeProcessor) []time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]time.Duration(nil), p.postWaits...)
+}
+
+func TestArtArrivalGrace(t *testing.T) {
+	// The history index learns an article only after the group DB commit and its own flush,
+	// so a lookup without a group right after the intake reply missed and cached the miss
+	// for the local430 TTL (60 s). Now every same-process arrival is found through its
+	// groups at once and is never cached as a miss during ArrivalGrace.
+	for _, cmd := range []string{"POST", "IHAVE", "TAKETHIS"} {
+		t.Run(strings.ToLower(cmd), func(t *testing.T) {
+			env := artGraceSetup(t, "grace-"+strings.ToLower(cmd))
+			artGraceTransfer(t, env.poster, cmd, env.g, env.a)
+			if groups, ok := env.hs.S.recentArrivals.RecentArrival(env.a.MessageID); !ok || len(groups) != 1 || groups[0] != env.g {
+				t.Fatalf("recentArrivals after %s: %q %v, want [%s]", cmd, groups, ok, env.g)
+			}
+			// the same connection, no GROUP
+			artGraceReads(t, env.poster, env.a)
+			if artGraceCached(env.hs, env.a.MessageID) {
+				t.Errorf("local430 holds %s after %s", env.a.MessageID, cmd)
+			}
+			// a new connection
+			code, line := env.hs.dial(t).cmd(t, "STAT %s", env.a.MessageID)
+			if err := artCheckStatus(code, line, 223, 0, env.a.MessageID); err != nil {
+				t.Errorf("STAT on a new connection: %v", err)
+			}
+			waits := artGracePostWaits(env.proc)
+			if cmd != "POST" {
+				// feeds keep ProcessIncomingArticle: no commit wait
+				if len(waits) != 0 {
+					t.Errorf("%s called ProcessPostedArticle: %v", cmd, waits)
+				}
+				if n := len(env.proc.processedArticles()); n != 1 {
+					t.Errorf("%s: %d articles processed, want 1", cmd, n)
+				}
+				return
+			}
+			// POST waits for the commit with the server's setting (default 5 s), 0 = no wait
+			if want := env.hs.S.PostCommitWait(); len(waits) != 1 || waits[0] != want || want != DefaultPostCommitWait {
+				t.Fatalf("POST commit waits %v, want [%v] (default %v)", waits, want, DefaultPostCommitWait)
+			}
+			env.hs.S.SetPostCommitWait(0)
+			a2 := artGraceArticle(t, env.g, 2)
+			artGraceTransfer(t, env.poster, "POST", env.g, a2)
+			if waits := artGracePostWaits(env.proc); len(waits) != 2 || waits[1] != 0 {
+				t.Fatalf("POST commit waits %v after SetPostCommitWait(0), want [.. 0]", waits)
+			}
+			artGraceReads(t, env.poster, a2)
+		})
+	}
+
+	// A miss during the grace (the article is not committed yet: the IHAVE/TAKETHIS case, or
+	// a POST whose commit wait ran out) answers 430 but is not cached: as soon as the
+	// article is there the next STAT answers 223, without any TTL wait.
+	t.Run("miss-not-cached", func(t *testing.T) {
+		env := artGraceSetup(t, "grace-miss")
+		env.answer.Store(false)
+		artGraceTransfer(t, env.poster, "POST", env.g, env.a)
+		reader := env.hs.dial(t)
+		for i := 0; i < 2; i++ {
+			before := env.proc.findCount()
+			code, line := reader.cmd(t, "STAT %s", env.a.MessageID)
+			if err := hExpectCode(code, line, 430); err != nil {
+				t.Fatalf("STAT %d before the commit: %v", i, err)
+			}
+			// the processor is asked every time (hint group, then history), not local430
+			if n := env.proc.findCount() - before; n != 2 {
+				t.Errorf("STAT %d before the commit: %d processor lookups, want 2", i, n)
+			}
+			if artGraceCached(env.hs, env.a.MessageID) {
+				t.Fatalf("local430 holds %s during the arrival grace", env.a.MessageID)
+			}
+		}
+		env.answer.Store(true)
+		code, line := reader.cmd(t, "STAT %s", env.a.MessageID)
+		if err := artCheckStatus(code, line, 223, 0, env.a.MessageID); err != nil {
+			t.Fatalf("STAT after the commit: %v", err)
+		}
+		if artGraceCached(env.hs, env.a.MessageID) {
+			t.Errorf("local430 holds %s", env.a.MessageID)
+		}
+	})
+
+	// After the grace the old rules apply: a miss is cached for the local430 TTL.
+	t.Run("after-grace", func(t *testing.T) {
+		env := artGraceSetup(t, "grace-after")
+		artGraceTransfer(t, env.poster, "POST", env.g, env.a)
+		if !env.hs.S.recentArrivals.ageForTest(env.a.MessageID, ArrivalGrace) {
+			t.Fatalf("no recentArrivals entry for %s", env.a.MessageID)
+		}
+		if _, ok := env.hs.S.recentArrivals.RecentArrival(env.a.MessageID); ok {
+			t.Fatalf("%s is still a recent arrival after ArrivalGrace", env.a.MessageID)
+		}
+		env.answer.Store(false)
+		reader := env.hs.dial(t)
+		code, line := reader.cmd(t, "STAT %s", env.a.MessageID)
+		if err := hExpectCode(code, line, 430); err != nil {
+			t.Fatalf("STAT after the grace: %v", err)
+		}
+		if !artGraceCached(env.hs, env.a.MessageID) {
+			t.Fatalf("a miss after the grace is not cached in local430")
+		}
+		env.answer.Store(true)
+		before := env.proc.findCount()
+		code, line = reader.cmd(t, "STAT %s", env.a.MessageID)
+		if err := hExpectCode(code, line, 430); err != nil {
+			t.Fatalf("second STAT after the grace: %v", err)
+		}
+		if n := env.proc.findCount(); n != before {
+			t.Errorf("second STAT asked the processor (%d lookups), want the local430 answer", n-before)
+		}
+	})
 }
