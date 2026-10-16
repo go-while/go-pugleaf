@@ -585,23 +585,27 @@ func hUser(t *testing.T, posting, active bool) (user, pass string) {
 // hFakeProcessor is a scriptable ArticleProcessor. The *Fn hooks, when set,
 // take precedence over the fixed results.
 type hFakeProcessor struct {
-	mu            sync.Mutex
-	checkResult   int
-	processResult int
-	processErr    error
-	findArticle   *models.Article
-	findErr       error
-	checkFn       func(messageID string) int
-	processFn     func(article *models.Article) (int, error)
-	findFn        func(messageID, currentGroup string) (*models.Article, error)
-	processed     []*models.Article
-	checked       []string
-	findCalls     int
-	lastFindGroup string
-	lastFindID    string
-	xrefLocs      map[string][]XrefLocation // XrefLocations result per message-id (nil: none known)
-	xrefErr       error                     // XrefLocations error (takes precedence over xrefLocs)
-	xrefCalls     int
+	mu             sync.Mutex
+	checkResult    int
+	processResult  int
+	processErr     error
+	findArticle    *models.Article
+	findErr        error
+	checkFn        func(messageID string) int
+	processFn      func(article *models.Article) (int, error)
+	findFn         func(messageID, currentGroup string) (*models.Article, error)
+	processed      []*models.Article
+	checked        []string
+	findCalls      int
+	lastFindGroup  string
+	lastFindID     string
+	xrefLocs       map[string][]XrefLocation // XrefLocations result per message-id (nil: none known)
+	xrefErr        error                     // XrefLocations error (takes precedence over xrefLocs)
+	xrefBatchErr   error                     // XrefLocationsBatch error (takes precedence over xrefLocs)
+	xrefBatchNil   bool                      // XrefLocationsBatch answers nil, nil (nothing known) instead of xrefLocs
+	xrefBatchCalls int                       // number of XrefLocationsBatch calls
+	xrefBatchIDs   int                       // number of ids passed to XrefLocationsBatch in total
+	xrefCalls      int
 }
 
 func (p *hFakeProcessor) ProcessIncomingArticle(article *models.Article) (int, error) {
@@ -899,6 +903,35 @@ func (p *hFakeProcessor) XrefLocations(messageID string) ([]XrefLocation, error)
 		return nil, p.xrefErr
 	}
 	return p.xrefLocs[messageID], nil
+}
+
+// XrefLocationsBatch implements ArticleProcessor: xrefBatchErr when set, else the configured
+// xrefLocs entries of the given ids (ids without an entry are absent from the result).
+func (p *hFakeProcessor) XrefLocationsBatch(messageIDs []string) (map[string][]XrefLocation, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.xrefBatchCalls++
+	p.xrefBatchIDs += len(messageIDs)
+	if p.xrefBatchErr != nil {
+		return nil, p.xrefBatchErr
+	}
+	if p.xrefBatchNil {
+		return nil, nil
+	}
+	out := make(map[string][]XrefLocation, len(messageIDs))
+	for _, id := range messageIDs {
+		if locs, ok := p.xrefLocs[id]; ok {
+			out[id] = locs
+		}
+	}
+	return out, nil
+}
+
+// xrefBatchCount returns the number of XrefLocationsBatch calls and the ids passed in total.
+func (p *hFakeProcessor) xrefBatchCount() (calls, ids int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.xrefBatchCalls, p.xrefBatchIDs
 }
 
 // xrefCount returns the number of XrefLocations calls.

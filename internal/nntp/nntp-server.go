@@ -32,6 +32,11 @@ type ArticleProcessor interface {
 	// messageID, for the Xref: header in XrefFull mode. nil, nil = nothing known; an error makes
 	// the server fall back to XrefPartial for that reply.
 	XrefLocations(messageID string) ([]XrefLocation, error)
+	// XrefLocationsBatch is XrefLocations for many message-ids at once (OVER/XOVER and
+	// HDR/XHDR ranges in XrefFull mode with the batched lookup enabled): one history query per
+	// shard table instead of one per id. Ids the index does not know are absent from the map.
+	// An error makes the server fall back to per-id XrefLocations for that range.
+	XrefLocationsBatch(messageIDs []string) (map[string][]XrefLocation, error)
 }
 
 const (
@@ -159,6 +164,7 @@ func NewNNTPServer(db *database.Database, cfg *config.ServerConfig, mainWG *sync
 		ShutdownTimeout: DefaultShutdownTimeout,
 	}
 	server.SetXrefMode(XrefPartial)
+	server.SetXrefBatchedLookup(true)
 	return server, nil
 }
 

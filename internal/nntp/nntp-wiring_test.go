@@ -384,3 +384,8 @@ func TestWiringMessageIDLookupKeepsCurrentArticle(t *testing.T) {
 func (p *wiringTestProcessor) XrefLocations(messageID string) ([]XrefLocation, error) {
 	return nil, nil
 }
+
+// XrefLocationsBatch implements ArticleProcessor (no locations).
+func (p *wiringTestProcessor) XrefLocationsBatch(messageIDs []string) (map[string][]XrefLocation, error) {
+	return nil, nil
+}

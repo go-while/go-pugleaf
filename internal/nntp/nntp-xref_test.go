@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/go-while/go-pugleaf/internal/config"
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -179,10 +180,21 @@ func TestXrefModes(t *testing.T) {
 			if m.mode != XrefOff {
 				partial3 = host + " " + g + ":3"
 			}
+			// a range in full (batched lookup, the default): one XrefLocationsBatch call with
+			// every id of the chunk and no XrefLocations call; none of either in off/partial
 			before = proc.xrefCount()
+			beforeCalls, beforeIDs := proc.xrefBatchCount()
 			overLines := xrfBlock(t, c, 224, "OVER 1-3")
-			if d := proc.xrefCount() - before; d != wantCalls(len(overLines)) {
-				t.Errorf("OVER 1-3: %d XrefLocations calls for %d lines, want %d", d, len(overLines), wantCalls(len(overLines)))
+			if d := proc.xrefCount() - before; d != 0 {
+				t.Errorf("OVER 1-3: %d XrefLocations calls for %d lines, want 0", d, len(overLines))
+			}
+			calls, ids := proc.xrefBatchCount()
+			wantBatch := 0
+			if m.mode == XrefFull {
+				wantBatch = 1
+			}
+			if calls-beforeCalls != wantBatch || ids-beforeIDs != wantBatch*len(overLines) {
+				t.Errorf("OVER 1-3: %d XrefLocationsBatch calls with %d ids, want %d with %d", calls-beforeCalls, ids-beforeIDs, wantBatch, wantBatch*len(overLines))
 			}
 			xrfCheckOver(t, m.mode, overLines, []string{w.in1, w.in2, partial3})
 			xrfCheckOver(t, m.mode, xrfBlock(t, c, 224, "OVER %s", id2), []string{w.in2})
@@ -212,8 +224,8 @@ func TestXrefModes(t *testing.T) {
 				t.Errorf("LIST OVERVIEW.FMT in %s: %q", m.mode, fmtLines)
 			}
 			// off and partial never look up locations (subtests run in order off, partial, full)
-			if m.mode != XrefFull && proc.xrefCount() != 0 {
-				t.Errorf("%s: %d XrefLocations calls, want 0", m.mode, proc.xrefCount())
+			if bc, _ := proc.xrefBatchCount(); m.mode != XrefFull && (proc.xrefCount() != 0 || bc != 0) {
+				t.Errorf("%s: %d XrefLocations and %d XrefLocationsBatch calls, want 0", m.mode, proc.xrefCount(), bc)
 			}
 		})
 	}
@@ -239,10 +251,11 @@ func TestXrefNoProcessor(t *testing.T) {
 	}
 }
 
-// TestXrefLookupError: a failing XrefLocations falls back to partial, logged once per server.
+// TestXrefLookupError: a failing XrefLocations falls back to partial, logged once per server
+// (the batched range lookup fails too and falls back to the failing per-id lookup).
 func TestXrefLookupError(t *testing.T) {
 	g := hGroup(t, "xrf.lookuperr", 2, nil)
-	proc := &hFakeProcessor{xrefErr: errors.New("history closed")}
+	proc := &hFakeProcessor{xrefErr: errors.New("history closed"), xrefBatchErr: errors.New("history closed")}
 	proc.xrefLocs = map[string][]XrefLocation{hMessageID(g, 2): {{Group: "never.served", ArticleNum: 1}}}
 	hs := newTestServer(t, hServerOpts{Proc: proc})
 	hs.S.SetXrefMode(XrefFull)
@@ -256,6 +269,190 @@ func TestXrefLookupError(t *testing.T) {
 	}
 	if !hs.S.xref.errLogged.Load() {
 		t.Error("lookup failure not recorded as logged")
+	}
+}
+
+// TestXrefBatchedRanges (plan xref-batched-lookup): in full with the batched lookup,
+// OVER/XOVER/HDR/XHDR ranges make one XrefLocationsBatch call per chunk of
+// database.OverviewRangeChunk rows, with every id of that chunk, and no XrefLocations call;
+// with the batched lookup off one XrefLocations call per line and no batch call. The served
+// lines are byte-identical either way. off and partial call neither; HEAD and ARTICLE keep the
+// per-id lookup.
+func TestXrefBatchedRanges(t *testing.T) {
+	n := database.OverviewRangeChunk + 1 // two chunks: OverviewRangeChunk rows, then 1
+	const wantChunks = 2
+	g := hGroup(t, "xrf.batched", n, nil)
+	other := hGroupName("xrf.batchother") // only named in the history locations
+	proc := &hFakeProcessor{xrefLocs: map[string][]XrefLocation{}}
+	for i := int64(1); i <= int64(n); i += 3 {
+		// as the processor returns them: the serving group too (skipped by xrefValue)
+		proc.xrefLocs[hMessageID(g, i)] = []XrefLocation{{Group: g, ArticleNum: i}, {Group: other, ArticleNum: i + 10}}
+	}
+	hs := newTestServer(t, hServerOpts{Proc: proc})
+	if !hs.S.XrefBatchedLookup() {
+		t.Fatal("a new server must default to the batched lookup")
+	}
+	const host = "go-pugleaf"
+	c := hs.dial(t)
+	defer c.close()
+	xrfSelect(t, c, g)
+
+	type counts struct{ perID, batchCalls, batchIDs int }
+	run := func(t *testing.T, mode XrefMode, batched bool, code int, cmd string) ([]string, counts) {
+		t.Helper()
+		hs.S.SetXrefMode(mode)
+		hs.S.SetXrefBatchedLookup(batched)
+		per0 := proc.xrefCount()
+		bc0, bi0 := proc.xrefBatchCount()
+		lines := xrfBlock(t, c, code, "%s", cmd) // fully read: the handler has returned
+		bc, bi := proc.xrefBatchCount()
+		return lines, counts{proc.xrefCount() - per0, bc - bc0, bi - bi0}
+	}
+	cmds := []struct {
+		code int
+		cmd  string
+	}{
+		{224, "OVER 1-"},
+		{224, fmt.Sprintf("XOVER 1-%d", n)},
+		{225, "HDR Xref 1-"},
+		{221, fmt.Sprintf("XHDR xref 1-%d", n)},
+	}
+	for _, mode := range []XrefMode{XrefOff, XrefPartial, XrefFull} {
+		for _, cc := range cmds {
+			t.Run(mode.String()+"/"+cc.cmd, func(t *testing.T) {
+				on, cOn := run(t, mode, true, cc.code, cc.cmd)
+				off, cOff := run(t, mode, false, cc.code, cc.cmd)
+				if len(on) != n || len(off) != n {
+					t.Fatalf("%d lines batched, %d per-id, want %d", len(on), len(off), n)
+				}
+				for i := range on {
+					if on[i] != off[i] {
+						t.Fatalf("line %d differs:\nbatched %q\nper-id  %q", i, on[i], off[i])
+					}
+				}
+				wantOn, wantOff := counts{}, counts{}
+				if mode == XrefFull {
+					wantOn = counts{perID: 0, batchCalls: wantChunks, batchIDs: n}
+					wantOff = counts{perID: n}
+				}
+				if cOn != wantOn {
+					t.Errorf("batched lookup: %+v, want %+v", cOn, wantOn)
+				}
+				if cOff != wantOff {
+					t.Errorf("per-id lookup: %+v, want %+v", cOff, wantOff)
+				}
+				// the served values themselves (not only equal both ways): article 1 has another
+				// location, article 2 none, the last row (the second chunk) per its index
+				want1, want2 := "", ""
+				switch mode {
+				case XrefPartial:
+					want1, want2 = host+" "+g+":1", host+" "+g+":2"
+				case XrefFull:
+					want1, want2 = host+" "+g+":1 "+other+":11", host+" "+g+":2"
+				}
+				lastNum := int64(n)
+				wantLast := ""
+				if mode != XrefOff {
+					wantLast = host + " " + g + ":" + fmt.Sprint(lastNum)
+					if mode == XrefFull && (lastNum-1)%3 == 0 {
+						wantLast += " " + other + ":" + fmt.Sprint(lastNum+10)
+					}
+				}
+				if cc.code == 224 {
+					xrfCheckOver(t, mode, []string{on[0], on[1], on[n-1]}, []string{want1, want2, wantLast})
+				} else {
+					got := []string{on[0], on[1], on[n-1]}
+					want := []string{xrfHdr("1", want1), xrfHdr("2", want2), xrfHdr(fmt.Sprint(lastNum), wantLast)}
+					if err := hExpectLines(got, want); err != nil {
+						t.Error(err)
+					}
+				}
+			})
+		}
+	}
+
+	// HEAD/ARTICLE (by number and by message-id) keep the per-id lookup with batching on
+	hs.S.SetXrefMode(XrefFull)
+	hs.S.SetXrefBatchedLookup(true)
+	per0 := proc.xrefCount()
+	bc0, _ := proc.xrefBatchCount()
+	want1 := host + " " + g + ":1 " + other + ":11"
+	xrfCheckHead(t, c, "HEAD 1", want1)
+	xrfCheckArticle(t, c, "ARTICLE 1", want1)
+	xrfCheckHead(t, c, "HEAD "+hMessageID(g, 1), want1)
+	xrfCheckOver(t, XrefFull, xrfBlock(t, c, 224, "OVER %s", hMessageID(g, 1)), []string{want1})
+	if bc, _ := proc.xrefBatchCount(); proc.xrefCount()-per0 != 4 || bc != bc0 {
+		t.Errorf("single-article commands: %d XrefLocations and %d XrefLocationsBatch calls, want 4 and 0", proc.xrefCount()-per0, bc-bc0)
+	}
+}
+
+// TestXrefBatchedLookupError: a failing XrefLocationsBatch is logged once per server and the
+// range falls back to one XrefLocations call per line: the output is still the full value.
+func TestXrefBatchedLookupError(t *testing.T) {
+	g := hGroup(t, "xrf.batcherr", 3, nil)
+	other := hGroupName("xrf.batcherrother")
+	id2 := hMessageID(g, 2)
+	proc := &hFakeProcessor{xrefBatchErr: errors.New("shard table locked")}
+	proc.xrefLocs = map[string][]XrefLocation{id2: {{Group: other, ArticleNum: 7}}}
+	hs := newTestServer(t, hServerOpts{Proc: proc})
+	hs.S.SetXrefMode(XrefFull)
+	c := hs.dial(t)
+	defer c.close()
+	xrfSelect(t, c, g)
+	const host = "go-pugleaf"
+	values := []string{host + " " + g + ":1", host + " " + g + ":2 " + other + ":7", host + " " + g + ":3"}
+	hdr := []string{xrfHdr("1", values[0]), xrfHdr("2", values[1]), xrfHdr("3", values[2])}
+
+	check := func(what string, serve func()) {
+		t.Helper()
+		per0 := proc.xrefCount()
+		bc0, _ := proc.xrefBatchCount()
+		serve()
+		bc, _ := proc.xrefBatchCount()
+		if proc.xrefCount()-per0 != 3 || bc-bc0 != 1 {
+			t.Errorf("%s: %d XrefLocations and %d XrefLocationsBatch calls, want 3 and 1", what, proc.xrefCount()-per0, bc-bc0)
+		}
+	}
+	check("OVER 1-3", func() { xrfCheckOver(t, XrefFull, xrfBlock(t, c, 224, "OVER 1-3"), values) })
+	check("XOVER 1-3", func() { xrfCheckOver(t, XrefFull, xrfBlock(t, c, 224, "XOVER 1-3"), values) })
+	check("HDR Xref 1-3", func() {
+		if err := hExpectLines(xrfBlock(t, c, 225, "HDR Xref 1-3"), hdr); err != nil {
+			t.Errorf("HDR Xref 1-3: %v", err)
+		}
+	})
+	check("XHDR Xref 1-3", func() {
+		if err := hExpectLines(xrfBlock(t, c, 221, "XHDR Xref 1-3"), hdr); err != nil {
+			t.Errorf("XHDR Xref 1-3: %v", err)
+		}
+	})
+	if !hs.S.xref.batchErrLogged.Load() {
+		t.Error("batch lookup failure not recorded as logged")
+	}
+	if hs.S.xref.errLogged.Load() {
+		t.Error("per-id lookups succeeded but the per-id failure flag is set")
+	}
+}
+
+// TestXrefBatchedNilResult: a batch lookup that returns nil, nil (nothing known) is
+// authoritative: the partial values are served and no per-id lookup runs.
+func TestXrefBatchedNilResult(t *testing.T) {
+	g := hGroup(t, "xrf.batchnil", 3, nil)
+	proc := &hFakeProcessor{xrefBatchNil: true}
+	proc.xrefLocs = map[string][]XrefLocation{hMessageID(g, 2): {{Group: hGroupName("xrf.batchnilother"), ArticleNum: 7}}}
+	hs := newTestServer(t, hServerOpts{Proc: proc})
+	hs.S.SetXrefMode(XrefFull)
+	c := hs.dial(t)
+	defer c.close()
+	xrfSelect(t, c, g)
+	const host = "go-pugleaf"
+	values := []string{host + " " + g + ":1", host + " " + g + ":2", host + " " + g + ":3"}
+	xrfCheckOver(t, XrefFull, xrfBlock(t, c, 224, "OVER 1-3"), values)
+	hdr := []string{xrfHdr("1", values[0]), xrfHdr("2", values[1]), xrfHdr("3", values[2])}
+	if err := hExpectLines(xrfBlock(t, c, 225, "HDR Xref 1-3"), hdr); err != nil {
+		t.Errorf("HDR Xref 1-3: %v", err)
+	}
+	if bc, ids := proc.xrefBatchCount(); bc != 2 || ids != 6 || proc.xrefCount() != 0 {
+		t.Errorf("batch calls %d (ids %d), per-id calls %d; want 2 (6) and 0", bc, ids, proc.xrefCount())
 	}
 }
 

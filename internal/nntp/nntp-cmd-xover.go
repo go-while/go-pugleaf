@@ -62,8 +62,9 @@ func (c *ClientConnection) handleXOver(args []string) error {
 	mode := c.server.XrefMode() // one mode for every line of the reply
 	d := c.newDataBlock()
 	for {
+		batch := c.xrefBatchOverviews(mode, chunk) // nil: one lookup per line (or none)
 		for _, o := range chunk {
-			if err := d.Line(c.overviewLineIn(o, mode)); err != nil {
+			if err := d.Line(c.overviewLineBatch(o, mode, batch)); err != nil {
 				return err
 			}
 		}
@@ -111,6 +112,28 @@ func overviewLine(o *models.Overview, mode XrefMode, xref string) string {
 // overviewLineIn is overviewLine for the row o of the current group in mode.
 func (c *ClientConnection) overviewLineIn(o *models.Overview, mode XrefMode) string {
 	return overviewLine(o, mode, c.xrefFor(mode, o.MessageID, c.currentGroup, o.ArticleNum))
+}
+
+// overviewLineBatch is overviewLineIn with the other Xref locations taken from batch (an
+// xrefBatchOverviews result of o's chunk); a nil batch looks them up per line.
+func (c *ClientConnection) overviewLineBatch(o *models.Overview, mode XrefMode, batch map[string][]XrefLocation) string {
+	return overviewLine(o, mode, c.xrefForBatch(mode, o.MessageID, c.currentGroup, o.ArticleNum, batch))
+}
+
+// xrefBatchOverviews looks up the Xref locations of the rows of one OVER/XOVER range chunk
+// with one xrefOthersBatch call; nil when the batched lookup does not apply (not XrefFull,
+// switched off, no processor) or failed, so the lines fall back to one lookup each.
+func (c *ClientConnection) xrefBatchOverviews(mode XrefMode, chunk []*models.Overview) map[string][]XrefLocation {
+	if !c.xrefBatchWanted(mode) {
+		return nil
+	}
+	ids := make([]string, 0, len(chunk))
+	for _, o := range chunk {
+		if o != nil && o.MessageID != "" {
+			ids = append(ids, o.MessageID)
+		}
+	}
+	return c.xrefOthersBatch(mode, ids)
 }
 
 // sanitizeOverviewField prepares a header value for an overview or XHDR line

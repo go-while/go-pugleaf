@@ -38,6 +38,11 @@ func (pa *ProcessorAdapter) XrefLocations(messageID string) ([]nntp.XrefLocation
 	return pa.processor.XrefLocations(messageID)
 }
 
+// XrefLocationsBatch is XrefLocations for many message-ids (Xref: header of ranges)
+func (pa *ProcessorAdapter) XrefLocationsBatch(messageIDs []string) (map[string][]nntp.XrefLocation, error) {
+	return pa.processor.XrefLocationsBatch(messageIDs)
+}
+
 // CheckNoMoreWorkInHistory checks if there's no more work in history
 func (pa *ProcessorAdapter) CheckNoMoreWorkInHistory() bool {
 	return pa.processor.CheckNoMoreWorkInHistory()

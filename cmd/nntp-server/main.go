@@ -38,6 +38,7 @@ var (
 	maxArtSize          int
 	local430TTL         time.Duration
 	xrefMode            string
+	xrefBatchedLookup   bool
 )
 
 var appVersion = "-unset-"
@@ -64,7 +65,8 @@ func main() {
 	flag.BoolVar(&enforceUserMaxConns, "enforce-user-maxconns", false, "limit authenticated connections per NNTP user to its maxconns value")
 	flag.IntVar(&maxArtSize, "maxartsize", 0, "maximum article size in bytes (0 = config default 32768)")
 	flag.DurationVar(&local430TTL, "local430ttl", nntp.DefaultLocal430TTL, "how long a message-id that answered 430 is answered from the negative cache without a new lookup")
-	flag.StringVar(&xrefMode, "xref", "partial", "Xref: header: off (none), partial (serving group only, no lookups) or full (all groups from the history index, one lookup per served article)")
+	flag.StringVar(&xrefMode, "xref", "partial", "Xref: header: off (none), partial (serving group only, no lookups) or full (all groups from the history index, one lookup per served article or per range chunk, see -xref-batched-lookup)")
+	flag.BoolVar(&xrefBatchedLookup, "xref-batched-lookup", true, "in -xref full, look up the Xref locations of each OVER/XOVER/HDR/XHDR range chunk (up to 1000 lines) with one history statement per shard database instead of one lookup per line")
 	flag.Parse()
 	history.ENABLE_HISTORY = useHistory
 
@@ -192,8 +194,9 @@ func main() {
 	nntpServer.EnforceUserMaxConns = enforceUserMaxConns
 	nntpServer.SetLocal430TTL(local430TTL)
 	nntpServer.SetXrefMode(xref)
-	log.Printf("[NNTP]: idletimeout=%s articledelay=%s groupdelay=%s errordelay=%s plaintextauth=%s readauth=%v enforce-user-maxconns=%v maxartsize=%d local430ttl=%s xref=%s",
-		idleTimeout, articleDelay, groupDelay, errorDelay, plaintextAuth, readAuth, enforceUserMaxConns, nntpServer.MaxArticleBytes(), nntpServer.Local430TTL(), nntpServer.XrefMode())
+	nntpServer.SetXrefBatchedLookup(xrefBatchedLookup)
+	log.Printf("[NNTP]: idletimeout=%s articledelay=%s groupdelay=%s errordelay=%s plaintextauth=%s readauth=%v enforce-user-maxconns=%v maxartsize=%d local430ttl=%s xref=%s xref-batched-lookup=%v",
+		idleTimeout, articleDelay, groupDelay, errorDelay, plaintextAuth, readAuth, enforceUserMaxConns, nntpServer.MaxArticleBytes(), nntpServer.Local430TTL(), nntpServer.XrefMode(), nntpServer.XrefBatchedLookup())
 	// Set up the date parser adapter to use processor's ParseNNTPDate
 	database.GlobalDateParser = processor.ParseNNTPDate
 

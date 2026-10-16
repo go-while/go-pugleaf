@@ -59,6 +59,30 @@ type xrefModeStore struct {
 	// errLogged is set after the first failed XrefLocations lookup was logged: later
 	// failures fall back to partial silently (one log line per server, not per article).
 	errLogged atomic.Bool
+	// batched: in XrefFull the range commands (OVER/XOVER, HDR/XHDR) look up the locations of
+	// a chunk with one Processor.XrefLocationsBatch call instead of one XrefLocations per line.
+	batched atomic.Bool
+	// batchErrLogged is errLogged for the batched lookup: a failed XrefLocationsBatch is logged
+	// once per server, separately from the per-id failures it falls back to.
+	batchErrLogged atomic.Bool
+}
+
+// SetXrefBatchedLookup enables (the default of a new server) or disables the batched history
+// lookup of XrefFull ranges (-xref-batched-lookup). It may be called while serving; the served
+// output is the same either way.
+func (s *NNTPServer) SetXrefBatchedLookup(on bool) {
+	if s == nil {
+		return
+	}
+	s.xref.batched.Store(on)
+}
+
+// XrefBatchedLookup reports whether XrefFull ranges use the batched lookup.
+func (s *NNTPServer) XrefBatchedLookup() bool {
+	if s == nil {
+		return false
+	}
+	return s.xref.batched.Load()
 }
 
 // SetXrefMode sets how Xref: headers are built. The default of a new server is XrefPartial.
@@ -186,4 +210,49 @@ func (c *ClientConnection) xrefOthers(mode XrefMode, messageID string) []XrefLoc
 		return nil
 	}
 	return locs
+}
+
+// xrefBatchWanted reports whether the range commands look up the locations of a chunk with
+// one xrefOthersBatch call in mode: XrefFull, the batched lookup on (-xref-batched-lookup)
+// and a processor set. Callers check it before they collect the message-ids of a chunk.
+func (c *ClientConnection) xrefBatchWanted(mode XrefMode) bool {
+	return mode == XrefFull && c != nil && c.server != nil && c.server.XrefBatchedLookup() && c.server.Processor != nil
+}
+
+// xrefOthersBatch returns the other locations of messageIDs (the rows of one range chunk) for
+// XrefFull with one Processor.XrefLocationsBatch call. It returns nil, meaning "use
+// xrefOthers per id", unless xrefBatchWanted(mode) and messageIDs is not empty, and when the
+// batch lookup fails (the first failure per server is logged, with its own flag so a failing
+// per-id fallback still gets its own line in xrefOthers). A non-nil
+// map is authoritative: an id absent from it has no other location (no per-id lookup).
+func (c *ClientConnection) xrefOthersBatch(mode XrefMode, messageIDs []string) map[string][]XrefLocation {
+	if !c.xrefBatchWanted(mode) || len(messageIDs) == 0 {
+		return nil
+	}
+	locs, err := c.server.Processor.XrefLocationsBatch(messageIDs)
+	if err != nil {
+		if c.server.xref.batchErrLogged.CompareAndSwap(false, true) {
+			log.Printf("[NNTP] Xref: batched location lookup of %d message-ids failed, falling back to one lookup per article (logged once): %v", len(messageIDs), err)
+		}
+		return nil
+	}
+	if locs == nil {
+		locs = map[string][]XrefLocation{} // a successful lookup without hits: no per-id fallback
+	}
+	return locs
+}
+
+// xrefForBatch is xrefFor with the other locations taken from batch (an xrefOthersBatch
+// result) when batch is non-nil; with a nil batch it is xrefFor (one lookup per article).
+func (c *ClientConnection) xrefForBatch(mode XrefMode, messageID, group string, num int64, batch map[string][]XrefLocation) string {
+	if batch == nil {
+		return c.xrefFor(mode, messageID, group, num)
+	}
+	if mode == XrefOff || c == nil || c.server == nil {
+		return ""
+	}
+	if num <= 0 {
+		group = ""
+	}
+	return xrefValue(c.server.xrefHostname(), group, num, batch[messageID])
 }
