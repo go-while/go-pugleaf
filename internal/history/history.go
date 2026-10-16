@@ -78,13 +78,57 @@ type routedOp struct {
 	tableName string
 }
 
+// History row encoding (plan xref-history): newsgroups is a CSV of tokens, one per group the
+// article is stored in. A token is "groupID:articleNum" when the number is known, or the plain
+// "groupID" of rows written before the numbers were recorded (number unknown). Both formats may
+// appear in one row; readers accept both (parseLocations).
+//
+// A group is never stored twice: an add for a group that already has a token in either format
+// is a no-op, so a re-add neither updates the number nor turns a plain token into "id:num".
+// Renumbered groups (recover-db) and old plain rows get their numbers from a full
+// history-rebuild, which writes every row from scratch.
 const (
-	// add groupID to the CSV if it is not already in it
-	sqlAddArticle = `INSERT INTO %s(message_id,newsgroups) VALUES(?,?) ON CONFLICT(message_id) DO UPDATE SET newsgroups = CASE WHEN coalesce(newsgroups,'')='' THEN excluded.newsgroups ELSE newsgroups||','||excluded.newsgroups END WHERE instr(','||coalesce(newsgroups,'')||',', ','||excluded.newsgroups||',') = 0`
-	// remove groupID from the CSV, then drop the row if no group is left
-	sqlRemoveArticle = `UPDATE %s SET newsgroups = trim(replace(','||newsgroups||',', ','||?||',', ','), ',') WHERE message_id=?`
-	sqlDeleteEmpty   = `DELETE FROM %s WHERE message_id=? AND coalesce(newsgroups,'')=''`
+	// add a token ("id:num" or plain "id") if the row has no token for this group in either format.
+	// args: messageID, token, groupID (prefix probe ",id:"), groupID (exact probe ",id,")
+	sqlAddArticle = `INSERT INTO %s(message_id,newsgroups) VALUES(?,?) ON CONFLICT(message_id) DO UPDATE SET newsgroups = CASE WHEN coalesce(newsgroups,'')='' THEN excluded.newsgroups ELSE newsgroups||','||excluded.newsgroups END WHERE instr(','||coalesce(newsgroups,'')||',', ','||?||':') = 0 AND instr(','||coalesce(newsgroups,'')||',', ','||?||',') = 0`
+	// remove the exact token "id:num" and a plain "id" token of the same group (number unknown).
+	// args: "id:num", "id", messageID
+	sqlRemoveArticle = `UPDATE %s SET newsgroups = trim(replace(replace(','||newsgroups||',', ','||?||',', ','), ','||?||',', ','), ',') WHERE message_id=?`
+	// remove with an unknown number: read-modify-write in Go (stripGroupTokens)
+	sqlSelectNewsgroups = `SELECT newsgroups FROM %s WHERE message_id=?`
+	sqlSetNewsgroups    = `UPDATE %s SET newsgroups=? WHERE message_id=?`
+	// drop the row if no group is left
+	sqlDeleteEmpty = `DELETE FROM %s WHERE message_id=? AND coalesce(newsgroups,'')=''`
 )
+
+// historyToken returns the CSV token for groupID: "id:num", or the plain "id" when num is unknown (<= 0)
+func historyToken(groupID, articleNum int64) string {
+	id := strconv.FormatInt(groupID, 10)
+	if articleNum <= 0 {
+		return id
+	}
+	return id + ":" + strconv.FormatInt(articleNum, 10)
+}
+
+// stripGroupTokens drops every token of groupID (plain "id" or "id:num") and empty parts from csv.
+// Other tokens are kept verbatim and in order. changed reports whether the result differs from csv.
+func stripGroupTokens(csv string, groupID int64) (out string, changed bool) {
+	id := strconv.FormatInt(groupID, 10)
+	parts := strings.Split(csv, ",")
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		tok := strings.TrimSpace(part)
+		if tok == "" {
+			continue
+		}
+		if tok == id || strings.HasPrefix(tok, id+":") {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	out = strings.Join(kept, ",")
+	return out, out != csv
+}
 
 // NewHistory creates a new history manager.
 // The mainWG parameter (may be nil) is the main application's waitgroup: when enabled
@@ -144,16 +188,21 @@ func (h *History) AddArticle(messageID string, groupID int64) {
 }
 
 // AddArticleAt is AddArticle with the article number of messageID in groupID (0 = unknown).
+// The row then holds the token "groupID:articleNum". A group that already has a token (either
+// format) is left as it is: a re-add does not change its number (a history-rebuild does).
 func (h *History) AddArticleAt(messageID string, groupID, articleNum int64) {
 	h.enqueue(opAdd, messageID, groupID, articleNum)
 }
 
-// RemoveArticle queues "messageID is no longer stored in groupID" (trimming).
+// RemoveArticle queues "messageID is no longer stored in groupID" (trimming). The number is
+// unknown, so every token of groupID (plain or with a number) is removed.
 func (h *History) RemoveArticle(messageID string, groupID int64) {
 	h.enqueue(opRemove, messageID, groupID, 0)
 }
 
 // RemoveArticleAt is RemoveArticle with the article number the row holds for groupID (0 = unknown).
+// It removes the exact token "groupID:articleNum" and a plain "groupID" token; a token of groupID
+// with a different number stays (use RemoveArticle to strip by group ID).
 func (h *History) RemoveArticleAt(messageID string, groupID, articleNum int64) {
 	h.enqueue(opRemove, messageID, groupID, articleNum)
 }
@@ -584,24 +633,29 @@ func (h *History) executeDBTransaction(dbIndex int, ops []routedOp) error {
 	var stmt *sql.Stmt
 	for _, rop := range ops {
 		groupID := strconv.FormatInt(rop.groupID, 10)
+		token := historyToken(rop.groupID, rop.articleNum)
 		switch rop.op {
 		case opAdd:
 			if stmt, err = getStmt(sqlAddArticle, rop.tableName); err != nil {
 				err = fmt.Errorf("prepare add %s: %v", rop.tableName, err)
 				return err
 			}
-			if _, err = stmt.Exec(rop.messageID, groupID); err != nil {
-				err = fmt.Errorf("add messageID='%s' group=%s table=%s: %v", rop.messageID, groupID, rop.tableName, err)
+			if _, err = stmt.Exec(rop.messageID, token, groupID, groupID); err != nil {
+				err = fmt.Errorf("add messageID='%s' token=%s table=%s: %v", rop.messageID, token, rop.tableName, err)
 				return err
 			}
 
 		case opRemove:
-			if stmt, err = getStmt(sqlRemoveArticle, rop.tableName); err != nil {
-				err = fmt.Errorf("prepare remove %s: %v", rop.tableName, err)
-				return err
-			}
-			if _, err = stmt.Exec(groupID, rop.messageID); err != nil {
-				err = fmt.Errorf("remove messageID='%s' group=%s table=%s: %v", rop.messageID, groupID, rop.tableName, err)
+			if rop.articleNum > 0 {
+				if stmt, err = getStmt(sqlRemoveArticle, rop.tableName); err != nil {
+					err = fmt.Errorf("prepare remove %s: %v", rop.tableName, err)
+					return err
+				}
+				if _, err = stmt.Exec(token, groupID, rop.messageID); err != nil {
+					err = fmt.Errorf("remove messageID='%s' token=%s table=%s: %v", rop.messageID, token, rop.tableName, err)
+					return err
+				}
+			} else if err = h.removeGroupTokens(getStmt, rop); err != nil {
 				return err
 			}
 			if stmt, err = getStmt(sqlDeleteEmpty, rop.tableName); err != nil {
@@ -626,6 +680,35 @@ func (h *History) executeDBTransaction(dbIndex int, ops []routedOp) error {
 	}
 	if HistoryDEBUG {
 		log.Printf("[HISTORY] executeDBTransaction: dbIndex=%d, committed %d ops in %v", dbIndex, len(ops), time.Since(start))
+	}
+	return nil
+}
+
+// removeGroupTokens is the remove with an unknown article number: it reads the row's CSV,
+// drops every token of rop.groupID in either format and writes it back, inside the caller's
+// transaction (statements from its getStmt cache). A missing row is a no-op.
+func (h *History) removeGroupTokens(getStmt func(query, tableName string) (*sql.Stmt, error), rop routedOp) error {
+	stmt, err := getStmt(sqlSelectNewsgroups, rop.tableName)
+	if err != nil {
+		return fmt.Errorf("prepare select %s: %v", rop.tableName, err)
+	}
+	var newsgroups sql.NullString
+	err = stmt.QueryRow(rop.messageID).Scan(&newsgroups)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("select messageID='%s' table=%s: %v", rop.messageID, rop.tableName, err)
+	}
+	out, changed := stripGroupTokens(newsgroups.String, rop.groupID)
+	if !changed {
+		return nil
+	}
+	if stmt, err = getStmt(sqlSetNewsgroups, rop.tableName); err != nil {
+		return fmt.Errorf("prepare set %s: %v", rop.tableName, err)
+	}
+	if _, err = stmt.Exec(out, rop.messageID); err != nil {
+		return fmt.Errorf("remove messageID='%s' group=%d table=%s: %v", rop.messageID, rop.groupID, rop.tableName, err)
 	}
 	return nil
 }
