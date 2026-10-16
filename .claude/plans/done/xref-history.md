@@ -240,7 +240,8 @@ Checks: gofmt empty, vet, build, race tests of history/database/nntp/processor/n
 - Deviations from the plan text (accepted): HDR with an empty value answers `1` without a trailing space (RFC 3977
   allows it); without a selected group the Xref lists groups in history arrival order, not sorted.
 - Leftovers / follow-ups (not from this plan):
-  - a locations cache for `full` mode OVER/XOVER and HDR ranges (one history lookup per line today);
+  - a locations cache for `full` mode was rejected (ranges are rarely re-requested); instead a batched
+    history lookup behind `-xref-batched-lookup` is queued as plan `xref-batched-lookup`;
   - expire-news logs "failed to delete overview batch ... no such table: overview" on every run
     (`cmd/expire-news/main.go`, pre-existing);
   - an emptied group answers `211 0 0 0` while the main DB keeps its water marks (pre-existing);
