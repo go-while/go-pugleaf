@@ -171,3 +171,19 @@ go vet ./...; go build ./...; the full CLAUDE.md race list; `PUGLEAF_KNOWN_BUGS=
     consistency report flags an emptied group ("Main DB Last Article: N / Articles Max Num: 0"), report only;
     the closed-port test releases its port before use (negligible race on loopback); 2.4 s DB shutdown cost.
 - Merged tree (63235c7): gofmt empty, vet, build, full race list green, known bugs only T-nntp-article-1.
+
+### Verification (6405d1a)
+- Verifier: gofmt/vet/build green, full race list green (uncached: post-queue 45 s, nntp 170 s, expire-news 8 s),
+  known bugs only T-nntp-article-1, five builds ok.
+- End-to-end on ./data-test-leftovers (example.org, 127.0.0.1:11192): `GROUP xref.test.b` → `211 0 1 0`, LISTGROUP
+  same + empty list, STAT/NEXT/LAST → 420; after expire-news of all three articles (no "overview" line; counters line
+  "0 articles, last article 3, high water 3, low water 4") `GROUP xref.test.a` → `211 0 4 3`, `ARTICLE 1` → 423,
+  `LIST ACTIVE` → `xref.test.a 3 4 y`, the next post gets number 4 and `GROUP` → `211 1 4 4`; `-nntpbind 999.1.1.1`
+  exits 1 with the message, `-nntpbind ::1` listens on [::1]:11192 only; post-queue -help 0, -cleanup-older 30 → 0
+  ("deleted 0"), -bogus → 2 with "Usage of post-queue:"; all server runs exit 0 on SIGINT.
+- Found by the verifier, pre-existing (not from this plan): `STAT <msgid>` without a selected group right after a
+  POST in the same process answers 430 for up to the local430 TTL (60 s): the POST handler removes the id from the
+  negative cache, but the history batch (1 s flush) has not indexed it yet, the lookup misses and re-adds it
+  (`internal/nntp/nntp-article-common.go:127-135`). BUGS.md says same-process arrivals are removed at once, which is
+  not true in that window. Left as a follow-up.
+- Fixed after verification: `-cleanup-older` help text said "all post_queue entries", the code deletes posted ones only.

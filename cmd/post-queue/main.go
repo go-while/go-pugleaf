@@ -52,7 +52,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		daemon        = fs.Bool("daemon", false, "Run as a daemon")
 		limit         = fs.Int("max-batch", 100, "Post max N articles in a batch")
 		cleanupPosted = fs.Bool("cleanup-posted-entries", false, "Delete all successfully posted entries from post_queue table and exit")
-		cleanupOlder  = fs.Int("cleanup-older", 0, "Delete all post_queue entries older than N days and exit (0 = disabled)")
+		cleanupOlder  = fs.Int("cleanup-older", 0, "Delete successfully posted post_queue entries older than N days and exit (0 = disabled)")
 		dataDir       = fs.String("data", "./data", "Directory to store database files")
 	)
 	if err := fs.Parse(args); err != nil {
