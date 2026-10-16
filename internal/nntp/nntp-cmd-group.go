@@ -40,7 +40,10 @@ func (c *ClientConnection) selectableGroup(name string) (g *models.Newsgroup, fo
 // "211 count low high group" reply (decision 14): low/high are the lowest/highest visible
 // article numbers, count is newsgroups.message_count clamped to high-low+1 (an estimate
 // that may include hidden articles, RFC 3977 §6.1.1.2; a count below 1 for a non-empty
-// group becomes high-low+1), and an empty group gives 0 0 0.
+// group becomes high-low+1). A group without visible articles gives "0 next next-1", the
+// form RFC 3977 §6.1.1.2 recommends, with next = the number the next stored article gets
+// (NNTPGroupNextArticleNum): "0 1 0" for a never-used group, "0 6 5" after articles 1..5
+// were all expired or hidden; there is no current article then.
 // On error nothing is changed and no group DB is held.
 func (c *ClientConnection) selectGroup(g *models.Newsgroup) (groupDB *database.GroupDB, count, low, high int64, err error) {
 	groupDB, err = c.server.DB.GetGroupDB(g.Name)
@@ -53,7 +56,12 @@ func (c *ClientConnection) selectGroup(g *models.Newsgroup) (groupDB *database.G
 		return nil, 0, 0, 0, err
 	}
 	if high <= 0 {
-		low, high, count = 0, 0, 0
+		next, nerr := c.server.DB.NNTPGroupNextArticleNum(groupDB)
+		if nerr != nil {
+			groupDB.Return()
+			return nil, 0, 0, 0, nerr
+		}
+		low, high, count = next, next-1, 0
 	} else {
 		count = g.MessageCount
 		if span := high - low + 1; count > span {
@@ -69,6 +77,9 @@ func (c *ClientConnection) selectGroup(g *models.Newsgroup) (groupDB *database.G
 	c.currentFirst = low
 	c.currentLast = high
 	c.currentArticle = low
+	if count == 0 {
+		c.currentArticle = 0 // empty group: the current article number is invalid (§6.1.1.2)
+	}
 	return groupDB, count, low, high, nil
 }
 
@@ -155,8 +166,8 @@ func (c *ClientConnection) handleListGroup(args []string) error {
 		return err
 	}
 	d := c.newDataBlock()
-	// An empty group, an Empty() range or a range outside the group gives an empty list.
-	if high > 0 && first <= last {
+	// An empty group (count 0), an Empty() range or a range outside the group gives an empty list.
+	if count > 0 && first <= last {
 		for {
 			nums, err := c.server.DB.NNTPArticleNumbers(groupDB, first, last, database.NNTPListGroupChunk)
 			if err != nil {
