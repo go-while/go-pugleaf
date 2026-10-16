@@ -11,15 +11,18 @@ A locations cache was rejected (2026-10-16): a normal reader never asks for the 
 cache would need invalidation on expire trims. The user asked instead for a batched lookup behind a flag
 `-xref-batched-lookup`, so both paths can be compared on real data.
 
-Expected gain: the ids of a range spread over up to 4096 tables, so a 1000-line range still becomes a
-few hundred queries; the saving is per-query overhead (one prepare/scan per table instead of per id),
-roughly 3-5× on large ranges, not 1000×. Nothing changes in the stored format or in the served output.
+Expected gain (measured in wave 1): a 1000-id lookup becomes at most 16 statements (one per shard DB, chunked
+at 500 ids), about 1.7× faster than 1000 point lookups in the history benchmark (21 ms → 13 ms per 1000 ids on
+a laptop); the saving is statement preparation. Nothing changes in the stored format or in the served output.
 
 ## Design
 - `internal/history`: `LookupLocationsBatch(messageIDs []string) (map[string][]Location, error)`.
-  Routes every id with `routeHash`, groups by `(dbIndex, tableName)`, and runs per group
-  `SELECT message_id, newsgroups FROM <table> WHERE message_id IN (?, ...)` in chunks of at most 500 ids
-  (stays below SQLite's variable limit on every supported build). Absent ids are simply missing from
+  Routes every id with `routeHash`, groups by shard DB and table, and runs per shard DB one compound
+  statement `SELECT message_id, newsgroups FROM _xx WHERE message_id IN (?, ...) UNION ALL SELECT ... FROM _yy ...`
+  with at most 500 bound ids per statement (below SQLite's variable limit on every supported build; at most 256
+  UNION terms, below the 500 compound-select limit). Implementation note: the first version ran one query per
+  table as planned, but 1000 random ids land in ~900 of the 4096 tables, so that was per-id with extra prepare
+  cost and benchmarked 1.2× slower than per-id; one statement per shard DB benchmarked 1.7× faster. Absent ids are simply missing from
   the map (same meaning as `nil, nil` today). `stats.lookups` grows by the number of ids, `duplicates`
   by the number of hits. Disabled/closed/empty input behave like `LookupLocations`. One failing table
   query fails the whole call (the caller falls back to per-id or to partial, see below).
@@ -68,6 +71,21 @@ roughly 3-5× on large ranges, not 1000×. Nothing changes in the stored format 
   `README.md` (-xref paragraph: one sentence on the flag), `cmd/nntp-server` e2e test extended with one
   `-xref full -xref-batched-lookup=false` run comparing OVER output to the batched run.
   Depends only on the wave 0 interface (`ArticleProcessor.XrefLocationsBatch`), not on the history slice.
+
+### Wave 1 (merged into plan-xref-batched-lookup)
+- `serve-batch` (worktree-agent-ab6436044701c58dd, 05f10d8, merge 0949365): `xrefBatchWanted`/`xrefOthersBatch`/
+  `xrefForBatch`; OVER/XOVER and `headerFieldRange` (HDR/XHDR) batch once per DB chunk; `-xref-batched-lookup`
+  flag + startup log; `TestXrefBatchedRanges` (two chunks, byte-identity on/off, call counts), `TestXrefBatchedLookupError`;
+  e2e X09/X14/X15 compare the batched and unbatched full runs. Review: MERGE, 3 minors.
+- `history-batch` (worktree-agent-ac4a7b77f48ca158d, d5a5bdb..d237b01, merge d8b56b9): `LookupLocationsBatch`
+  (one UNION ALL statement per shard DB, 500 ids per statement, deviation accepted), `xref_bench_test.go`
+  (per-id 21 ms vs batch 13 ms per 1000 ids), processor `XrefLocationsBatch`/`xrefResolveBatch` with tests.
+  Review: MERGE, 3 minors.
+- Minors fixed inline (cfeead9): own `batchErrLogged` once-flag so a failing per-id fallback still logs its own
+  line; `TestXrefBatchedNilResult` (nil, nil batch is authoritative, `hFakeProcessor.xrefBatchNil`); closed-mid-call
+  returns `ErrHistoryClosed` without counting an error; README/flag help say "per chunk, one statement per shard DB";
+  stale test comment. Dropped: lookups counted before the handle fetch (cannot fail, index < 16).
+- Merged tree: gofmt empty, vet, build, full race list green, known bugs only T-nntp-article-1.
 
 ## Checks
 gofmt -l internal/history internal/processor internal/nntp cmd/nntp-server; go vet ./...; go build ./...;
