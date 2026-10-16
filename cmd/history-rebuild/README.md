@@ -16,9 +16,13 @@ mirrors them, so it can always be rebuilt from the group databases.
 ```
 <data>/history/hashdb_0.sqlite3 ... hashdb_f.sqlite3   16 SQLite files
     tables _00 ... _ff                                 256 tables per file
-        message_id TEXT PRIMARY KEY, newsgroups TEXT   newsgroups = "12,345,6789"
+        message_id TEXT PRIMARY KEY, newsgroups TEXT   newsgroups = "12:4711,345:88"
 <data>/history/rebuild.progress                        last fully rebuilt group (resume)
 ```
+
+Each token is `groupID:articleNum` (the article number in that group's database, used for the
+local `Xref:` header). Rows written before the numbers were recorded hold a plain `groupID`
+(number unknown); a full rebuild rewrites them with numbers, `-validate-only` counts them.
 
 Routing: `md5(message-id)` as hex; the 1st char selects the file, chars 2-3 select the table.
 Full message-ids are stored, so there are no hash collisions. `-useshorthashlen` is still
@@ -28,11 +32,11 @@ accepted but has no effect since Nov 2025.
 
 | Command | What it does | Writes |
 |---------|--------------|--------|
-| `history-rebuild` | Rebuild: scan all groups (sorted by name) and add every article | yes |
+| `history-rebuild` | Rebuild: scan all groups (sorted by name) and add every article with its article number | yes |
 | `history-rebuild -restart` | Rebuild from the first group, ignore/remove `rebuild.progress` | yes |
-| `history-rebuild -validate-only [-verbose]` | Check every article: missing message-id, or entry without this group. `-verbose` prints the first 100 misses | no |
+| `history-rebuild -validate-only [-verbose]` | Check every article: missing message-id, or entry without this group. The summary also counts found entries whose token has no article number (`Without number`; a full rebuild records them). `-verbose` prints the first 100 misses | no |
 | `history-rebuild -analyze-only [-verbose]` | Open the 16 files read-only: rows per file (per table with `-verbose`), total, histogram of groups per message-id | no |
-| `history-rebuild -trim` | Full sweep over all history rows: remove group IDs whose group is gone from the main DB, has no group DB file, or no longer has the article | yes |
+| `history-rebuild -trim` | Full sweep over all history rows: remove group IDs whose group is gone from the main DB, has no group DB file, or no longer has the article (the exact token of the row, with its number) | yes |
 
 Only one of `-validate-only`, `-analyze-only`, `-trim` can be used per run.
 

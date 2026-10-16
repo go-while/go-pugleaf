@@ -112,10 +112,10 @@ func TestToolsTestDeleteArticlesTrimHistory(t *testing.T) {
 	defer h.Close()
 
 	const groupID, otherGroupID = 7, 9
-	for _, mid := range []string{"<1@test>", "<2@test>", "<3@test>", "<4@test>", "<5@test>"} {
-		h.AddArticle(mid, groupID)
+	for i, mid := range []string{"<1@test>", "<2@test>", "<3@test>", "<4@test>", "<5@test>"} {
+		h.AddArticleAt(mid, groupID, int64(i+1)) // article numbers 1..5 of toolsTestGroupDB
 	}
-	h.AddArticle("<1@test>", otherGroupID) // crossposted
+	h.AddArticleAt("<1@test>", otherGroupID, 42) // crossposted
 	toolsTestWaitPending(t, h)
 
 	// without trim: history is kept

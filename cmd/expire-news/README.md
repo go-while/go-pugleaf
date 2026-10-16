@@ -106,6 +106,8 @@ With `-trim-history` (live mode only, ignored with `-dry-run`) the message-ids o
 deleted articles are read inside the delete transaction and, after the commit, this
 group's ID is removed from their history entries. An entry without any group left is
 deleted. Crossposts stay in the index for their other groups.
+The article numbers of the deleted rows are read too, so the exact `groupID:articleNum`
+token is removed and the numbers of the other groups (local `Xref:`) stay exact.
 
 ```bash
 ./expire-news -group '$all' -days 30 -force -trim-history
