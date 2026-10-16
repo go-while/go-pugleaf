@@ -37,7 +37,17 @@
    `-nntptlsport`). NEWNEWS stays unimplemented and unadvertised by decision (no index on `articles.imported_at`;
    a `NEWNEWS *` would open every group DB). Also fixed on the way: a STARTTLS-upgraded session now sends TLS
    close_notify at QUIT (T-rfc-commands-2). Not implemented by design: cancel/Supersedes processing, `control.*`
-   filing, moderator forwarding, local `Xref:` generation, NEWNEWS, LIST ACTIVE.TIMES/DISTRIB.PATS, AUTHINFO SASL.
+   filing, moderator forwarding, NEWNEWS, LIST ACTIVE.TIMES/DISTRIB.PATS, AUTHINFO SASL (local `Xref:` generation
+   was on this list until plan `xref-history`, see below).
+ - **Fixed by plan `xref-history` (2026-10-16, `.claude/plans/done/xref-history.md`):** local `Xref:` generation
+   (BUG-5, INT-4 Xref part). `pugleaf-nntp-server -xref off|partial|full` (default `partial`) serves `Xref:` as the
+   last header line of HEAD/ARTICLE, as the 9th OVER/XOVER field (LIST OVERVIEW.FMT then ends with `Xref:full`) and
+   in HDR/XHDR. `partial` lists only the serving group (no lookups; no line for a message-id read with no group
+   selected); `full` adds the other groups from the history index, which now stores `groupID:articleNum` tokens:
+   one history lookup per served article (one per line for OVER/XOVER). `off` is the old output. Numbers for existing
+   data appear only after a full `history-rebuild` run (plain `groupID` tokens count as "Without number" in
+   `-validate-only`); new articles get them on arrival. Foreign Xref headers are still stripped on intake and
+   dropped on relay. Binary e2e test: `TestE2EXrefBinary` in `cmd/nntp-server/e2e_xref_test.go`.
  - Accepted limitation (user decision 2026-10-11): the local430 negative cache keeps a 60 s TTL, so an article stored
    by another process (fetcher) answers 430 for up to 60 s (T-nntp-article-1); same-process arrivals are removed at once.
  - **Fixed by plan `nntp-client-transfer` (2026-10-15, `.claude/plans/done/nntp-client-transfer.md`):** CLI-1 (one

@@ -179,8 +179,17 @@ databases below `-data` (default `./data`). `./pugleaf-fetcher -help` prints usa
 # -readauth             require AUTHINFO before reader commands
 # -plaintextauth string AUTHINFO without TLS: accept (default), advertise or refuse
 # -maxartsize int       maximum article size in bytes (0 = config default 32768)
+# -xref string          Xref: header: off, partial (default) or full
 # -idletimeout, -articledelay, -groupdelay, -errordelay, -local430ttl: see -h
 ```
+
+`-xref` sets the local `Xref:` header in HEAD/ARTICLE, OVER/XOVER (9th field) and HDR/XHDR:
+`off` sends none (and LIST OVERVIEW.FMT has no `Xref:full`); `partial` (default) lists only the
+group the article is read from, without lookups (none when it is read by message-id with no
+group selected); `full` adds the other groups and numbers from the history index, one history
+lookup per served article (one per line for OVER/XOVER). The numbers come from the history
+index: existing data shows them in `full` only after a full `history-rebuild` run (see
+cmd/history-rebuild/README.md); new articles get them on arrival.
 
 ### Available Tools
 

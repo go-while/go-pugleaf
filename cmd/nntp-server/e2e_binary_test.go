@@ -22,24 +22,7 @@ import (
 	"time"
 )
 
-// e2eReport prints the step lines and fails t on FAIL.
-type e2eReport struct{ t *testing.T }
-
-func (r e2eReport) pass(id, text string) { fmt.Printf("PASS %s [nntp] %s\n", id, text) }
-
-func (r e2eReport) fail(id, text, detail string) {
-	fmt.Printf("FAIL %s [nntp] %s :: %s\n", id, text, detail)
-	r.t.Errorf("%s %s: %s", id, text, detail)
-}
-
-func (r e2eReport) check(id, text string, err error) bool {
-	if err != nil {
-		r.fail(id, text, err.Error())
-		return false
-	}
-	r.pass(id, text)
-	return true
-}
+// e2eReport (the step lines) is defined in e2e_xref_test.go, which builds without the e2e tag.
 
 func e2eEnv(name, def string) string {
 	if v := os.Getenv(name); v != "" {
