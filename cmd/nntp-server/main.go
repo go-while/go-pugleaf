@@ -41,6 +41,7 @@ var (
 	local430TTL         time.Duration
 	xrefMode            string
 	xrefBatchedLookup   bool
+	postCommitWait      time.Duration
 )
 
 var appVersion = "-unset-"
@@ -70,6 +71,7 @@ func main() {
 	flag.DurationVar(&local430TTL, "local430ttl", nntp.DefaultLocal430TTL, "how long a message-id that answered 430 is answered from the negative cache without a new lookup")
 	flag.StringVar(&xrefMode, "xref", "partial", "Xref: header: off (none), partial (serving group only, no lookups) or full (all groups from the history index, one lookup per served article or per range chunk, see -xref-batched-lookup)")
 	flag.BoolVar(&xrefBatchedLookup, "xref-batched-lookup", true, "in -xref full, look up the Xref locations of each OVER/XOVER/HDR/XHDR range chunk (up to 1000 lines) with one history statement per shard database instead of one lookup per line")
+	flag.DurationVar(&postCommitWait, "post-commit-wait", nntp.DefaultPostCommitWait, "wait for the batch writer to commit a POSTed article before answering 240 (0 = answer at once, the article is still stored)")
 	flag.Parse()
 	history.ENABLE_HISTORY = useHistory
 
@@ -92,6 +94,9 @@ func main() {
 	}
 	if local430TTL <= 0 {
 		log.Fatalf("[NNTP]: -local430ttl must be greater than 0")
+	}
+	if postCommitWait < 0 {
+		log.Fatalf("[NNTP]: -post-commit-wait must not be negative")
 	}
 	if nntpbind != "" && net.ParseIP(nntpbind) == nil {
 		log.Fatalf("[NNTP]: invalid -nntpbind value %q (an IP address is required)", nntpbind)
@@ -202,8 +207,9 @@ func main() {
 	nntpServer.SetLocal430TTL(local430TTL)
 	nntpServer.SetXrefMode(xref)
 	nntpServer.SetXrefBatchedLookup(xrefBatchedLookup)
-	log.Printf("[NNTP]: idletimeout=%s articledelay=%s groupdelay=%s errordelay=%s plaintextauth=%s readauth=%v enforce-user-maxconns=%v maxartsize=%d local430ttl=%s xref=%s xref-batched-lookup=%v bind=%q",
-		idleTimeout, articleDelay, groupDelay, errorDelay, plaintextAuth, readAuth, enforceUserMaxConns, nntpServer.MaxArticleBytes(), nntpServer.Local430TTL(), nntpServer.XrefMode(), nntpServer.XrefBatchedLookup(), mainConfig.Server.NNTP.Addr)
+	nntpServer.SetPostCommitWait(postCommitWait)
+	log.Printf("[NNTP]: idletimeout=%s articledelay=%s groupdelay=%s errordelay=%s plaintextauth=%s readauth=%v enforce-user-maxconns=%v maxartsize=%d local430ttl=%s xref=%s xref-batched-lookup=%v bind=%q post-commit-wait=%s",
+		idleTimeout, articleDelay, groupDelay, errorDelay, plaintextAuth, readAuth, enforceUserMaxConns, nntpServer.MaxArticleBytes(), nntpServer.Local430TTL(), nntpServer.XrefMode(), nntpServer.XrefBatchedLookup(), mainConfig.Server.NNTP.Addr, nntpServer.PostCommitWait())
 	// Set up the date parser adapter to use processor's ParseNNTPDate
 	database.GlobalDateParser = processor.ParseNNTPDate
 

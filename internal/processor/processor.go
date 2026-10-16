@@ -4,6 +4,7 @@ package processor
 // into a local database, handling both overview and article imports.
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -404,11 +406,160 @@ func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, err
 	return proc.processArticle(article, *article.NewsgroupsPtr[0], bulkmode)
 }
 
-// ProcessPostedArticle is ProcessIncomingArticle for POST (plan post-430-window): it will
-// wait for the batch writer to commit the accepted article to its groups (slice
-// post-commit-wait); until then it is ProcessIncomingArticle.
+// postWaitCommitted is the commit barrier of ProcessPostedArticle (a seam for tests).
+var postWaitCommitted = func(sq *database.SQ3batch, m database.CommitMark, stop <-chan struct{}, d time.Duration) error {
+	return sq.WaitCommitted(m, stop, d)
+}
+
+// postArticleStored reports whether the group database of group stores messageID; it is
+// the authoritative check of ProcessPostedArticle (a seam for tests).
+var postArticleStored = func(proc *Processor, group, messageID string) (bool, error) {
+	groupDB, err := proc.DB.GetGroupDB(group)
+	if err != nil {
+		if groupDB != nil {
+			groupDB.Return()
+		}
+		return false, err
+	}
+	defer groupDB.Return()
+	return groupDB.LookupMsgIdInArticlesDB(messageID)
+}
+
+// postRecheckDelay is the pause before ProcessPostedArticle waits again for a group whose
+// barrier was satisfied while the row is still absent, so such a round cannot spin.
+const postRecheckDelay = 50 * time.Millisecond
+
+// ProcessPostedArticle is ProcessIncomingArticle for POST (plan post-430-window): when the
+// article was accepted (CasePass) it waits until the article's row is in every group
+// database it was captured for, at most timeout in total (<= 0: no wait and no lookups;
+// the article is still stored).
+//
+// A commit mark is taken for every name in article.NewsgroupsPtr before processArticle,
+// which counts the capture synchronously (NoteCaptured). After it returned, NewsgroupsPtr
+// holds exactly the groups the article was captured for minus those whose batch already
+// committed it (the batch writer removes a group only on commit, never on a drop), so only
+// those groups are waited for. The barrier counts per group, not per article (other
+// articles of the group can satisfy or fail it), so after every WaitCommitted that returns
+// nil or ErrBatchDropped the row decides: present → the group is done; absent after nil →
+// wait again with a fresh mark until the shared deadline; absent after ErrBatchDropped →
+// CaseError wrapping common.ErrIntakeRejected ("not stored"). A timeout or a stop with rows
+// still absent → CasePass (the article is queued and will be stored) plus one [INTAKE] log
+// line. A failed row lookup counts as absent for that round.
 func (proc *Processor) ProcessPostedArticle(article *models.Article, stop <-chan struct{}, timeout time.Duration) (int, error) {
-	return proc.ProcessIncomingArticle(article)
+	if article == nil {
+		return history.CaseError, fmt.Errorf("null article")
+	}
+	if len(article.NewsgroupsPtr) == 0 {
+		return history.CaseError, fmt.Errorf("no newsgroups specified in article")
+	}
+
+	// Copy what is needed after processArticle: once it returns, the batch goroutine may
+	// already have cleared the struct (db_batch.go processNewsgroupBatch).
+	messageID := article.MessageID
+	var sq *database.SQ3batch
+	if proc.DB != nil {
+		sq = proc.DB.Batch
+	}
+	var marks map[string]database.CommitMark
+	if timeout > 0 {
+		marks = make(map[string]database.CommitMark, len(article.NewsgroupsPtr))
+		for _, ng := range article.NewsgroupsPtr {
+			if ng != nil {
+				marks[*ng] = sq.CommitMark(*ng)
+			}
+		}
+	}
+
+	log.Printf("Processing incoming article with Message-ID: %s for primary newsgroup %s (cross-posted to %d groups)",
+		messageID, *article.NewsgroupsPtr[0], len(article.NewsgroupsPtr))
+
+	bulkmode := false
+	code, err := proc.processArticle(article, *article.NewsgroupsPtr[0], bulkmode)
+	if code != history.CasePass || err != nil || timeout <= 0 {
+		return code, err
+	}
+
+	// the groups still waiting for their commit (see above); the batch writer edits
+	// NewsgroupsPtr under article.Mux
+	article.Mux.Lock()
+	captured := make([]string, 0, len(article.NewsgroupsPtr))
+	for _, ng := range article.NewsgroupsPtr {
+		if ng != nil {
+			captured = append(captured, *ng)
+		}
+	}
+	article.Mux.Unlock()
+
+	// all groups share one deadline: the whole wait never exceeds timeout
+	deadline := time.Now().Add(timeout)
+	notConfirmed := func(werr error) (int, error) {
+		log.Printf("[INTAKE] POST %s: commit not confirmed within %s: %v", messageID, timeout, werr)
+		return history.CasePass, nil
+	}
+	lookupLogged := false
+	for _, group := range captured {
+		m, ok := marks[group]
+		if !ok {
+			m = sq.CommitMark(group)
+		}
+		for round := 0; ; round++ {
+			if round > 0 {
+				if werr := postRecheckPause(stop, deadline); werr != nil {
+					return notConfirmed(fmt.Errorf("'%s': %w", group, werr))
+				}
+				m = sq.CommitMark(group)
+			}
+			var werr error
+			if remaining := time.Until(deadline); remaining > 0 {
+				werr = postWaitCommitted(sq, m, stop, remaining)
+			} else {
+				werr = fmt.Errorf("%w: '%s': no time left", database.ErrBatchWaitTimeout, group)
+			}
+			dropped := errors.Is(werr, database.ErrBatchDropped)
+			if werr != nil && !dropped {
+				// ErrBatchWaitTimeout or ErrBatchWaitStopped
+				return notConfirmed(werr)
+			}
+			stored, lerr := postArticleStored(proc, group, messageID)
+			if lerr != nil {
+				if !lookupLogged {
+					log.Printf("[INTAKE] POST %s: row lookup in '%s' failed (counted as not stored yet): %v", messageID, group, lerr)
+					lookupLogged = true
+				}
+				stored = false
+			}
+			if stored {
+				break
+			}
+			if dropped {
+				log.Printf("[INTAKE] POST %s: not stored in '%s': %v", messageID, group, werr)
+				return history.CaseError, fmt.Errorf("%w: not stored", common.ErrIntakeRejected)
+			}
+		}
+	}
+	return history.CasePass, nil
+}
+
+// postRecheckPause waits postRecheckDelay (at most until deadline) before another round of
+// ProcessPostedArticle. It returns an error wrapping ErrBatchWaitTimeout when the deadline
+// passed and ErrBatchWaitStopped when stop was closed.
+func postRecheckPause(stop <-chan struct{}, deadline time.Time) error {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return fmt.Errorf("%w: no time left", database.ErrBatchWaitTimeout)
+	}
+	pause := min(postRecheckDelay, remaining)
+	timer := time.NewTimer(pause)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		if pause < postRecheckDelay {
+			return fmt.Errorf("%w: no time left", database.ErrBatchWaitTimeout)
+		}
+		return nil
+	case <-stop:
+		return database.ErrBatchWaitStopped
+	}
 }
 
 // EnableBridges enables Fediverse and/or Matrix bridges with the given configuration
