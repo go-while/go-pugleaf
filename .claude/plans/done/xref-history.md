@@ -221,3 +221,29 @@ Checks: gofmt empty, vet, build, race tests of history/database/nntp/processor/n
   the row `2:1,1:1` into `1:1` and HEAD in a then showed only a; SIGINT exits 0.
 - Pre-existing, not from this plan: expire-news logs "failed to delete overview batch ... no such table: overview";
   an emptied group answers `211 0 0 0` while the main DB keeps low/high water 1.
+
+## Outcome
+- Integration branch `plan-xref-history` (HEAD 915e774, 16 commits) merged into `testing-001` with `--no-ff`
+  on 2026-10-16: merge commit 9c03e85 (not pushed).
+- Worktree branches and paths (left for the user to clean up, all under `/tank0/claude/trees/go-pugleaf/`):
+  - `worktree-agent-aff41c046e80a66ae` (`agent-aff41c046e80a66ae`): slice xref-history
+  - `worktree-agent-a63f7f1ec9b0599c0` (`agent-a63f7f1ec9b0599c0`): slice xref-rebuild-trim
+  - `worktree-agent-ac4ca6125a79c2b7d` (`agent-ac4ca6125a79c2b7d`): slice xref-serve
+  - `worktree-agent-adb0a28ddbd6becea` (`agent-adb0a28ddbd6becea`): slice xref-e2e-docs
+- Verification (verifier on d08020d, see the Wave 2 note above): gofmt/vet/build/full race list green, known bugs
+  only T-nntp-article-1, five builds ok, end-to-end on `./data-test-xref` all steps PASS (all three `-xref` modes,
+  invalid value exit 1, validate-only counters, expire trim renumbering the history row). The scratch root
+  `./data-test-xref/` was left in place for inspection. `go build ./...` and `go vet ./...` re-run on the merged
+  `testing-001` tree: ok.
+- Decisions: default mode is `partial`; numbers for existing data appear in `full` only after a full
+  `history-rebuild` run by the user (a plain rebuild fills and corrects numbers, no migration needed).
+- Deviations from the plan text (accepted): HDR with an empty value answers `1` without a trailing space (RFC 3977
+  allows it); without a selected group the Xref lists groups in history arrival order, not sorted.
+- Leftovers / follow-ups (not from this plan):
+  - a locations cache for `full` mode OVER/XOVER and HDR ranges (one history lookup per line today);
+  - expire-news logs "failed to delete overview batch ... no such table: overview" on every run
+    (`cmd/expire-news/main.go`, pre-existing);
+  - an emptied group answers `211 0 0 0` while the main DB keeps its water marks (pre-existing);
+  - nntp-server has no bind-address flag (pre-existing);
+  - `cmd/post-queue` still has no tests;
+  - `TestE2EXrefBinary` adds ~15 s warm / ~100 s cold-cache to `go test ./cmd/nntp-server/`.
