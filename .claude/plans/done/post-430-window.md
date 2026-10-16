@@ -158,3 +158,20 @@ race list; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` li
   crosspost to t5.nonexistent.verify: 240, 223, no file and no md5 hash directory for the unknown group;
   -post-commit-wait 0: immediate STAT 430 then 223 at 2.3 s on a new connection, stays 223; -1s exits 1;
   SIGINT exit 0 for every run; no "commit not confirmed" line in the logs.
+
+## Outcome
+- Integration branch `plan-post-430-window` (HEAD b02c97e, code a2a18e3), merged into `testing-001` with
+  `--no-ff` on 2026-10-16 as **33c9537** (not pushed). `go build ./... && go vet ./...` on the merged tree: green.
+- Worktree branches (left for the user to clean up, all under `/tank0/claude/trees/go-pugleaf/`):
+  - `worktree-agent-a9f483327cd5b42df` → `agent-a9f483327cd5b42df` (post-commit-wait, 8bb1261 + fe75ca0, merge 395e236)
+  - `worktree-agent-a4d7ee94769267805` → `agent-a4d7ee94769267805` (arrival-grace, 51c0fa5 + 6f051b7, merge b0e0862)
+  - `worktree-agent-abe57bbb12ef47273` → `agent-abe57bbb12ef47273` (post-430-e2e, ba5c917, merge a891f6c; a2a18e3 inline)
+- Verification (a2a18e3): see "Verification" above; all checks green, known bugs only T-nntp-article-1, three
+  builds, end-to-end on `./data-test-post430` as planned (POST 240 after 42-123 ms, by-message-id reads 2xx at
+  once, IHAVE 430 → 223 never 430 again, unknown-group hint creates no file/dir, `-post-commit-wait 0` not
+  poisoned, `-1s` exits 1, SIGINT exit 0).
+- Leftovers / known issues (accepted): hints follow the GROUP rule (an admin-activated reserved name is readable);
+  a POST whose article is dropped before a repeat round's fresh mark still gets 240 + one log line; in the first
+  round a drop of another article in the same group can 441 a still-queued post; e2e failure text is misleading
+  when a commit takes longer than the 10 s grace; `xrefEnv.start` sets no `cmd.WaitDelay`. Scratch root
+  `./data-test-post430` left for the user.
