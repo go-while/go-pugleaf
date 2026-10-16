@@ -99,7 +99,7 @@ func main() {
 	flag.IntVar(&maxArticleCache, "maxarticlecache", 10000, "maximum number of cached articles (default: 10000) [~8-12 KB/entry] 10000 = ~128 MB")
 	flag.IntVar(&maxArticleCacheExpiry, "maxarticlecacheexpiry", 60, "expiry of cached articles in minutes (default: 60 minutes)")
 	flag.IntVar(&useShortHashLen, "useshorthashlen", 7, "short hash length (2-7, default: 7): legacy, no effect on the message-id history schema; the first stored value stays locked, a value outside 2-7 is stored as 7")
-	flag.IntVar(&webport, "webport", 0, "Web server port (default: 11980 (no ssl) or 19443 (webssl))")
+	flag.IntVar(&webport, "webport", 0, "Web server port (default: 11980, also with -webssl)")
 	flag.BoolVar(&webssl, "webssl", false, "Enable SSL")
 	//flag.Int64Var(&ignoreInitialTinyGroups, "ignore-initial-tiny-groups", 0, "If > 0: initial fetch ignores tiny groups with fewer articles than this (default: 0)")
 	flag.StringVar(&nntphostname, "nntphostname", "", "your hostname must be set")

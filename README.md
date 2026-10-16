@@ -39,7 +39,7 @@ cd go-pugleaf
 **Step 2: Initial configuration**
 
 ```bash
-# First run - configure hostname (only needed once)
+# First run - store the hostname in the database (only needed once)
 ./webserver -nntphostname my.host.name
 
 # Stop server (Ctrl+C), then start normally
@@ -49,20 +49,22 @@ cd go-pugleaf
 **Main web interface**
 ```bash
 ./webserver -nntphostname your.domain.com
-# Required Flags
--nntphostname string - Your hostname must be set first time
--webport int - Web server port (default: 11980 (no ssl) or 19443 (ssl))
+# Flags (run ./webserver -h for the full list)
+-nntphostname string - your hostname; required on the first run, later runs reuse the stored value
+-data string - path to the database and config directory (default: ./data)
+-webport int - web server port, 1024-65535 (default: 11980, also with -webssl)
 
 # SSL/TLS Configuration
--webssl - Enable SSL for web interface
+-webssl - enable SSL for the web interface
 -websslcert string - SSL certificate file (/path/to/fullchain.pem)
 -websslkey string - SSL key file (/path/to/privkey.pem)
-# integrated NNTP server not availabled yet
-#-nntptcpport int - NNTP TCP port
-#-nntptlsport int - NNTP TLS port
-#-nntpcertfile string - NNTP TLS certificate file (/path/to/fullchain.pem)
-#-nntpkeyfile string - NNTP TLS key file (/path/to/privkey.pem)
+
+# Maintenance (run once, then exit): -import-active, -update-newsgroups-descriptions-file,
+# -write-active-file, -compare-active, -disable-active, -repair-watermarks, -find-orphan-dbs, ...
+# Cron jobs: -no-cronjobs disables them; -edit-cronjobs temporarily allows editing them in the admin UI.
 ```
+The webserver has no embedded NNTP server: its `-nntptcpport`, `-nntptlsport`, `-nntpcertfile` and
+`-nntpkeyfile` flags are accepted but ignored. Run `pugleaf-nntp-server` instead (see below).
 
 **Step 3: Create admin account**
 
@@ -71,7 +73,9 @@ cd go-pugleaf
 - Login → Admin → CFG → Disable registrations (secure your instance)
 
 ### Command Line Tool (usermgr)
-The `usermgr` tool provides user management via the command-line:
+The `usermgr` tool manages web users from the command line. It is not part of `build_ALL.sh`:
+build it with `./build_usermgr.sh` (output: `build/usermgr`). It uses the same `-data` directory
+as the webserver (default: `./data`). Passwords are asked for on the terminal (12-72 characters).
 
 ```bash
 # List all users (shows admin status)
@@ -90,6 +94,10 @@ usermgr -create -username john -email john@example.com -display "John Doe"
 usermgr -create -username admin -email admin@example.com -display "Administrator" -admin
 ```
 
+NNTP users (for `pugleaf-nntp-server`) are managed with `pugleaf-nntpmgr` (`./build_nntpmgr.sh`):
+`-create`, `-list`, `-update`, `-delete`, `-activate`, `-deactivate`, `-setpassword`, with
+`-username`, `-password`, `-maxconns` and `-posting`; see `pugleaf-nntpmgr -h`.
+
 **Step 4: Add newsgroups**
 
 Choose one method:
@@ -98,12 +106,12 @@ Choose one method:
 - Files are in `preload/` or `active_files/` directory.
 - The defaults may contain a large number of binary groups; modify as needed.
 ```bash
-./webserver -import-active preload/active.txt
-./webserver -update-newsgroups-descriptions "preload/newsgroups.descriptions" \
+./webserver -import-active preload/active.2025-06
+./webserver -update-newsgroups-descriptions-file preload/newsgroups.descriptions \
  -update-overwrite-newsgroups-descriptions=false \
  -update-newsgroups-descriptions-import-create-newsgroups=false
 
-# import rocksolid light backups
+# import rocksolid light backups (-etc is required, -spool is optional)
 ./rslight-importer -data data/ -etc etc/ -spool spool/
 ```
 
@@ -123,7 +131,10 @@ Choose one method:
 
 ### Advanced: Manual Fetching
 
-For backfilling disable cron job before and run `pugleaf-fetcher` directly:
+For backfilling disable the cron job first and run `pugleaf-fetcher` directly. Each run fetches
+at most `-max-batch` articles (10-1000, default 1000) per group and then exits, so repeat it until
+the backfill is done. Like the webserver it needs `-nntphostname` on its first run and reads the
+databases below `-data` (default `./data`). `./pugleaf-fetcher -help` prints usage examples.
 
 ```bash
 # Initial backfill from specific date
@@ -131,23 +142,52 @@ For backfilling disable cron job before and run `pugleaf-fetcher` directly:
 
 # Continuous fetching (run after initial fetch)
 ./pugleaf-fetcher -group "news.*"
+
+# All active groups (same as -group '$all'); -fetch-active-only=false fetches ONLY the inactive groups
+./pugleaf-fetcher
+
+# Add groups from the provider's list (dry run without -fetch-newsgroups-force; new groups are inactive)
+./pugleaf-fetcher -fetch-newsgroups-from-remote 'comp.*' -exclude-prefix 'alt.binaries.*' -fetch-newsgroups-force
 ```
 
 ⚠️ **Important**: Stop the fetcher before adding new groups, or it will download all from scratch.
 
+### NNTP server (`pugleaf-nntp-server`, cmd/nntp-server)
+
+```bash
+./pugleaf-nntp-server -nntphostname your.domain.com -nntptcpport 1119 \
+    -nntptlsport 1563 -nntpcertfile /path/to/fullchain.pem -nntpkeyfile /path/to/privkey.pem
+# -data string          database directory (default: ./data)
+# -nntptcpport int      NNTP TCP port (0 = no plain listener; at least one of the two ports is required)
+# -nntptlsport int      NNTP TLS port (0 = no TLS listener); the cert/key also serve STARTTLS on the TCP port
+# -maxconnections int   maximum concurrent client connections (default: 500)
+# -readauth             require AUTHINFO before reader commands
+# -plaintextauth string AUTHINFO without TLS: accept (default), advertise or refuse
+# -maxartsize int       maximum article size in bytes (0 = config default 32768)
+# -idletimeout, -articledelay, -groupdelay, -errordelay, -local430ttl: see -h
+```
+
 ### Available Tools
 
-The following binaries are built by `build_ALL.sh`:
+The following binaries are built by `build_ALL.sh` (names as in `build/`):
 
 - **rslight-importer** - Import from legacy RockSolid Light
 - **nntp-analyze** - Analyze newsgroup content and storage requirements
 - **expire-news** - Article expiration and cleanup
 - **pugleaf-fetcher** - Article fetcher from NNTP providers
-- **webserver** - Web interface (and embedded NNTP server *TODO*)
-- **nntp-server** - Standalone NNTP server (RFC 3977 partial, see docs/audit)
+- **webserver** - Web interface (no embedded NNTP server)
+- **pugleaf-nntp-server** - Standalone NNTP server (RFC 3977 partial, see docs/audit)
 - **nntp-transfer** - Transfer newsgroups via NNTP CHECK/TAKETHIS
 - **post-queue** - Process outgoing article post queue
 - **tcp2tor** - TCP to Tor proxy
+
+Built with their own `build_<tool>.sh` script only:
+
+- **usermgr** - Web user management
+- **pugleaf-nntpmgr** - NNTP user management
+- **history-rebuild** - Rebuild the message-id history index from the group databases
+- **recover-db**, **fix-references**, **fix-thread-activity**, **merge-active**, **merge-descriptions**,
+  **audit-web-posts**, **import-flat-files** - repair, merge and import tools (see `cmd/<tool>`)
 
 📖 **For command-line options, run any binary with the `-h` flag to see available arguments and usage examples.**
 
