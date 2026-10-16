@@ -112,3 +112,13 @@ Expected: all identical outputs; no new warnings in the server log.
   in a big crossposted group, e.g. with `time (printf 'GROUP <g>\r\nOVER <lo>-<hi>\r\nQUIT\r\n' | nc 127.0.0.1 <port> | wc -l)`.
   Record the two timings in the Outcome. Only when the batched path wins on this comparison does it stay
   the default; otherwise flip the default to false before merging.
+
+### Verification (9299002)
+- Verifier: gofmt/vet/build green, full race list green (also with -count=1), known bugs only T-nntp-article-1,
+  benchmark per-id 21.3 ms vs batch 12.5 ms per 1000 ids (1.7×), builds of nntp-server/nntpmgr/webserver ok.
+- End-to-end on ./data-test-xref-batch (example.org, port 11191, 4 posts incl. two crossposts, history rows across
+  3 shard DBs): full batched = full unbatched byte-for-byte (3578-byte raw capture of OVER/XOVER/HDR/XHDR/LIST
+  OVERVIEW.FMT in both groups, serving group first), partial and off unchanged by the flag, HEAD/ARTICLE by number
+  and message-id show the full line, all 9 server runs exit 0 on SIGINT, no "[NNTP] Xref" log lines.
+- Left for the user: the real-data timing comparison (plan Benchmark section); flip the default to false before
+  merging if the batched path does not win there.
