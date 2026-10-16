@@ -32,19 +32,20 @@ const maxPrintedMisses = 100
 const trimChunkSize = 10000
 
 type RebuildStats struct {
-	GroupsTotal       int64
-	GroupsProcessed   int64
-	GroupsSkipped     int64 // resumed or without group DB file
-	ArticlesProcessed int64
-	HistoryQueued     int64 // AddArticle calls (rebuild)
-	HistoryFound      int64 // validate: message-id found with this group
-	HistoryMissing    int64 // validate: message-id not in history
-	HistoryWrongGroup int64 // validate: message-id in history, but without this group
-	HistoryNoNumber   int64 // validate: found with this group, but its token has no article number (old row format)
-	Errors            int64
-	StartTime         time.Time
-	EndTime           time.Time // set when scanning is done (before flush/shutdown)
-	lastProgress      int64
+	GroupsTotal        int64
+	GroupsProcessed    int64
+	GroupsSkipped      int64 // resumed or without group DB file
+	ArticlesProcessed  int64
+	HistoryQueued      int64 // AddArticle calls (rebuild)
+	HistoryFound       int64 // validate: message-id found with this group
+	HistoryMissing     int64 // validate: message-id not in history
+	HistoryWrongGroup  int64 // validate: message-id in history, but without this group
+	HistoryNoNumber    int64 // validate: found with this group, but its token has no article number (old row format)
+	HistoryWrongNumber int64 // validate: found with this group, but its token holds another article number
+	Errors             int64
+	StartTime          time.Time
+	EndTime            time.Time // set when scanning is done (before flush/shutdown)
+	lastProgress       int64
 }
 
 type TrimStats struct {
@@ -451,8 +452,14 @@ func processRange(groupDB *database.GroupDB, h historyIndex, group *models.Newsg
 			}
 		default:
 			stats.HistoryFound++
-			if loc.ArticleNum == 0 {
+			switch {
+			case loc.ArticleNum == 0:
 				stats.HistoryNoNumber++
+			case loc.ArticleNum != articleNum:
+				stats.HistoryWrongNumber++
+				if verbose && stats.HistoryWrongNumber <= maxPrintedMisses {
+					log.Printf("[VALIDATE] wrong number: '%s' (group '%s' id=%d article %d, history has %d)", messageID, group.Name, group.ID, articleNum, loc.ArticleNum)
+				}
 			}
 		}
 	}
@@ -696,11 +703,11 @@ func (s *RebuildStats) PrintFinal(validateOnly, interrupted bool) {
 		fmt.Printf("Found in History:    %d\n", s.HistoryFound)
 		fmt.Printf("Missing:             %d\n", s.HistoryMissing)
 		fmt.Printf("Group not in entry:  %d\n", s.HistoryWrongGroup)
-		fmt.Printf("Without number:      %d (found, but no article number in the index", s.HistoryNoNumber)
-		if s.HistoryNoNumber > 0 {
-			fmt.Printf("; a full rebuild records the numbers")
+		fmt.Printf("Without number:      %d (found, but no article number in the index)\n", s.HistoryNoNumber)
+		fmt.Printf("Wrong number:        %d (found, but the index holds another article number)\n", s.HistoryWrongNumber)
+		if s.HistoryNoNumber > 0 || s.HistoryWrongNumber > 0 {
+			fmt.Printf("                     a full rebuild over the existing index records missing and corrects wrong numbers\n")
 		}
-		fmt.Printf(")\n")
 		if s.ArticlesProcessed > 0 {
 			fmt.Printf("Coverage:            %.2f%%\n", float64(s.HistoryFound)/float64(s.ArticlesProcessed)*100)
 		}

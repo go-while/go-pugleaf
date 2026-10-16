@@ -227,17 +227,23 @@ func TestXrefRebuildPassesArticleNumbers(t *testing.T) {
 		t.Fatalf("rebuild removed %v", rec.removes)
 	}
 
-	// the same run against the real index
+	// the same run against the real index, over existing rows: an old plain token is upgraded
+	// in place, a wrong stored number is corrected (needs xref-history writer: a numbered add
+	// replaces any token of the group; without it the wrong-number row is not written)
 	h := xrefTestHistory(t, historyDir)
+	numbers := historyStoresNumbers(t, h)
+	if !numbers {
+		t.Logf("history writer stores no article numbers yet: number checks skipped (needs xref-history writer)")
+	}
+	writeHistoryRow(t, historyDir, "<x@test>", strconv.FormatInt(idA, 10))
+	if numbers {
+		writeHistoryRow(t, historyDir, "<a7@test>", strconv.FormatInt(idA, 10)+":999")
+	}
 	stats = runGroups(context.Background(), db, h, db.GetDataDir(), historyDir, 2, 100000, false, true, false)
 	if stats.Errors != 0 {
 		t.Fatalf("runGroups (real history): errors=%d", stats.Errors)
 	}
 	xrefWaitPending(t, h)
-	numbers := historyStoresNumbers(t, h)
-	if !numbers {
-		t.Logf("history writer stores no article numbers yet: number checks skipped (needs xref-history writer)")
-	}
 	for mid, wantLocs := range map[string][]history.Location{
 		"<x@test>":   {{GroupID: idA, ArticleNum: 3}, {GroupID: idB, ArticleNum: 1}},
 		"<a7@test>":  {{GroupID: idA, ArticleNum: 7}},
@@ -261,11 +267,12 @@ func TestXrefRebuildPassesArticleNumbers(t *testing.T) {
 }
 
 // TestXrefValidateCountsTokensWithoutNumber: -validate-only counts the found tokens without an
-// article number; misses and wrong-group entries are counted as before.
+// article number and those with another number; misses and wrong-group entries are counted as before.
 func TestXrefValidateCountsTokensWithoutNumber(t *testing.T) {
 	db := xrefTestDB(t)
 	idA := xrefTestGroup(t, db, "xref.test.a", map[int64]string{
 		1: "<plain@test>", 2: "<num@test>", 3: "<missing@test>", 4: "<wrong@test>", 5: "<mixed@test>",
+		6: "<wrongnum@test>",
 	})
 	historyDir := filepath.Join(db.GetDataDir(), "history")
 	h := xrefTestHistory(t, historyDir)
@@ -273,17 +280,21 @@ func TestXrefValidateCountsTokensWithoutNumber(t *testing.T) {
 	writeHistoryRow(t, historyDir, "<num@test>", strconv.FormatInt(idA, 10)+":2")
 	writeHistoryRow(t, historyDir, "<wrong@test>", strconv.FormatInt(idA+100, 10)+":4")
 	writeHistoryRow(t, historyDir, "<mixed@test>", strconv.FormatInt(idA+100, 10)+":9,"+strconv.FormatInt(idA, 10))
+	writeHistoryRow(t, historyDir, "<wrongnum@test>", strconv.FormatInt(idA, 10)+":999")
 
 	stats := runGroups(context.Background(), db, h, db.GetDataDir(), historyDir, 10, 100000, true, false, false)
 	if stats.Errors != 0 {
 		t.Fatalf("validate: errors=%d", stats.Errors)
 	}
-	if stats.ArticlesProcessed != 5 || stats.HistoryFound != 3 || stats.HistoryMissing != 1 || stats.HistoryWrongGroup != 1 {
-		t.Fatalf("validate: processed=%d found=%d missing=%d wrong=%d, want 5/3/1/1",
+	if stats.ArticlesProcessed != 6 || stats.HistoryFound != 4 || stats.HistoryMissing != 1 || stats.HistoryWrongGroup != 1 {
+		t.Fatalf("validate: processed=%d found=%d missing=%d wrong=%d, want 6/4/1/1",
 			stats.ArticlesProcessed, stats.HistoryFound, stats.HistoryMissing, stats.HistoryWrongGroup)
 	}
 	if stats.HistoryNoNumber != 2 {
 		t.Fatalf("validate: without number = %d, want 2 (<plain@test>, <mixed@test>)", stats.HistoryNoNumber)
+	}
+	if stats.HistoryWrongNumber != 1 {
+		t.Fatalf("validate: wrong number = %d, want 1 (<wrongnum@test>)", stats.HistoryWrongNumber)
 	}
 	if h.GetStats().TotalAdds != 0 || h.GetStats().TotalRemoves != 0 {
 		t.Fatalf("validate wrote to the index: %+v", h.GetStats())
