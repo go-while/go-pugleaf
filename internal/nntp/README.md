@@ -82,6 +82,11 @@ accept loops and the local430 cleanup, `Stop` ends all of them (the caller's Wai
   within 4096 bytes gets `501 Command line too long` and the session continues; 4096 bytes without
   a line end get `400 Command line too long` and the connection is closed. Surplus arguments get
   `501` (`commandMaxArgs`); QUIT ignores them, AUTHINFO and TAKETHIS are not checked there.
+- **GROUP / LISTGROUP numbers** (RFC 3977 §6.1.1.2). `211 count low high group` with low/high the
+  lowest/highest visible article. A group without visible articles answers `211 0 next next-1`, next
+  being the number the next stored article gets (`NNTPGroupNextArticleNum`): `211 0 1 0` for a
+  never-used group, `211 0 6 5` after articles 1..5 were all expired or hidden. It has no current
+  article (STAT/NEXT/LAST without a number give 420); LISTGROUP sends the same line and an empty list.
 - **Article reader.** `readArticleBlock(maxBytes)` counts every byte, keeps the 1024-head-line and
   16384-line caps, drains an oversized article up to its terminator (`ErrArticleTooLarge`, the
   connection stays usable) and gives up past max(4 x limit, 1 MiB), at most 64 MiB
