@@ -103,6 +103,10 @@ every `known bug` line (or `none`) under "Open NNTP known bugs" to the step summ
 
 The Status column is the audit-time snapshot and is not updated; most items were fixed by later plans. For the
 current state see `BUGS.md` (the "Fixed by plan …" entries) and the Outcome sections in `.claude/plans/done/`.
+The "no Xref" part of BUG-5 and the "no local Xref is generated" part of INT-4 are implemented by plan `xref-history`
+(2026-10-16): `cmd/nntp-server -xref off|partial|full` (default `partial`) serves a local `Xref:` header in
+HEAD/ARTICLE, OVER/XOVER and HDR/XHDR, with the article numbers from the history index; the binary end-to-end check
+is `TestE2EXrefBinary` (`cmd/nntp-server/e2e_xref_test.go`). It adds no `knownBug` marker.
 
 Paths are under `internal/` unless they start with `cmd/`, `web/static`, `migrations/` or a root file.
 
