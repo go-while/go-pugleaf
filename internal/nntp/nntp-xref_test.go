@@ -40,6 +40,12 @@ func TestXrefLine(t *testing.T) {
 		{"serving-number-0", "news.test", "a.serving", 0, nil, ""},
 		{"nothing", "news.test", "", 0, nil, ""},
 		{"only-skipped", "news.test", "", 0, []XrefLocation{{Group: "", ArticleNum: 1}, {Group: "x.y", ArticleNum: 0}}, ""},
+		{"duplicates-first-wins", "news.test", "a.serving", 4,
+			[]XrefLocation{{Group: "b.other", ArticleNum: 7}, {Group: "a.serving", ArticleNum: 9}, {Group: "b.other", ArticleNum: 8}, {Group: "e.last", ArticleNum: 12}, {Group: "e.last", ArticleNum: 13}},
+			"Xref: news.test a.serving:4 b.other:7 e.last:12"},
+		{"duplicates-no-serving-group", "news.test", "", 0,
+			[]XrefLocation{{Group: "b.other", ArticleNum: 0}, {Group: "b.other", ArticleNum: 7}, {Group: "b.other", ArticleNum: 8}},
+			"Xref: news.test b.other:7"},
 	}
 	for _, tc := range cases {
 		if got := xrefLine(tc.host, tc.group, tc.num, tc.others); got != tc.want {
@@ -151,7 +157,19 @@ func TestXrefModes(t *testing.T) {
 
 			// --- in the group
 			xrfSelect(t, c, g)
+			// lookups: exactly one per served article in full, none in off/partial (the
+			// command's reply is fully read before the count, so the handler has returned)
+			wantCalls := func(n int) int {
+				if m.mode == XrefFull {
+					return n
+				}
+				return 0
+			}
+			before := proc.xrefCount()
 			xrfCheckHead(t, c, "HEAD 2", w.in2)
+			if d := proc.xrefCount() - before; d != wantCalls(1) {
+				t.Errorf("HEAD 2: %d XrefLocations calls, want %d", d, wantCalls(1))
+			}
 			xrfCheckArticle(t, c, "ARTICLE 2", w.in2)
 			xrfCheckHead(t, c, "HEAD "+id2, w.in2)
 			xrfCheckArticle(t, c, "ARTICLE "+id2, w.in2)
@@ -161,7 +179,12 @@ func TestXrefModes(t *testing.T) {
 			if m.mode != XrefOff {
 				partial3 = host + " " + g + ":3"
 			}
-			xrfCheckOver(t, m.mode, xrfBlock(t, c, 224, "OVER 1-3"), []string{w.in1, w.in2, partial3})
+			before = proc.xrefCount()
+			overLines := xrfBlock(t, c, 224, "OVER 1-3")
+			if d := proc.xrefCount() - before; d != wantCalls(len(overLines)) {
+				t.Errorf("OVER 1-3: %d XrefLocations calls for %d lines, want %d", d, len(overLines), wantCalls(len(overLines)))
+			}
+			xrfCheckOver(t, m.mode, overLines, []string{w.in1, w.in2, partial3})
 			xrfCheckOver(t, m.mode, xrfBlock(t, c, 224, "OVER %s", id2), []string{w.in2})
 			xrfCheckOver(t, m.mode, xrfBlock(t, c, 224, "XOVER 1-3"), []string{w.in1, w.in2, partial3})
 			xrfCheckOver(t, m.mode, xrfBlock(t, c, 224, "XOVER 2"), []string{w.in2})
@@ -187,6 +210,10 @@ func TestXrefModes(t *testing.T) {
 			hasFull := len(fmtLines) > 0 && fmtLines[len(fmtLines)-1] == "Xref:full"
 			if hasFull != (m.mode != XrefOff) || len(fmtLines) != len(overviewFmtLines(m.mode)) {
 				t.Errorf("LIST OVERVIEW.FMT in %s: %q", m.mode, fmtLines)
+			}
+			// off and partial never look up locations (subtests run in order off, partial, full)
+			if m.mode != XrefFull && proc.xrefCount() != 0 {
+				t.Errorf("%s: %d XrefLocations calls, want 0", m.mode, proc.xrefCount())
 			}
 		})
 	}

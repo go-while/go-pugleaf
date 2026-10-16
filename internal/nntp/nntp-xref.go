@@ -92,7 +92,8 @@ func (s *NNTPServer) xrefHostname() string {
 // xrefValue returns the Xref: value without the "Xref: " prefix (RFC 5536 §3.2.14):
 // "<host> <group>:<num> <g2>:<n2> ...". The serving group comes first when group is set and
 // num > 0; others follow in their order, skipping entries with an empty group, a number
-// <= 0 or the serving group itself. With no location at all it returns "".
+// <= 0, the serving group itself and a group already listed (the first entry wins). With no
+// location at all it returns "".
 func xrefValue(hostname, group string, num int64, others []XrefLocation) string {
 	var b strings.Builder
 	n := 0
@@ -103,14 +104,22 @@ func xrefValue(hostname, group string, num int64, others []XrefLocation) string 
 		b.WriteString(strconv.FormatInt(a, 10))
 		n++
 	}
-	serving := group != "" && num > 0
-	if serving {
+	var seen map[string]struct{}
+	if serving := group != "" && num > 0; serving {
 		add(group, num)
+		seen = map[string]struct{}{group: {}}
 	}
 	for _, o := range others {
-		if o.Group == "" || o.ArticleNum <= 0 || (serving && o.Group == group) {
+		if o.Group == "" || o.ArticleNum <= 0 {
 			continue
 		}
+		if _, dup := seen[o.Group]; dup {
+			continue // the serving group, or a group listed before (first wins)
+		}
+		if seen == nil {
+			seen = make(map[string]struct{}, len(others))
+		}
+		seen[o.Group] = struct{}{}
 		add(o.Group, o.ArticleNum)
 	}
 	if n == 0 {
