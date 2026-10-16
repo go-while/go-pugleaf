@@ -425,8 +425,34 @@ func TestXrefBatchedLookupError(t *testing.T) {
 			t.Errorf("XHDR Xref 1-3: %v", err)
 		}
 	})
-	if !hs.S.xref.errLogged.Load() {
+	if !hs.S.xref.batchErrLogged.Load() {
 		t.Error("batch lookup failure not recorded as logged")
+	}
+	if hs.S.xref.errLogged.Load() {
+		t.Error("per-id lookups succeeded but the per-id failure flag is set")
+	}
+}
+
+// TestXrefBatchedNilResult: a batch lookup that returns nil, nil (nothing known) is
+// authoritative: the partial values are served and no per-id lookup runs.
+func TestXrefBatchedNilResult(t *testing.T) {
+	g := hGroup(t, "xrf.batchnil", 3, nil)
+	proc := &hFakeProcessor{xrefBatchNil: true}
+	proc.xrefLocs = map[string][]XrefLocation{hMessageID(g, 2): {{Group: hGroupName("xrf.batchnilother"), ArticleNum: 7}}}
+	hs := newTestServer(t, hServerOpts{Proc: proc})
+	hs.S.SetXrefMode(XrefFull)
+	c := hs.dial(t)
+	defer c.close()
+	xrfSelect(t, c, g)
+	const host = "go-pugleaf"
+	values := []string{host + " " + g + ":1", host + " " + g + ":2", host + " " + g + ":3"}
+	xrfCheckOver(t, XrefFull, xrfBlock(t, c, 224, "OVER 1-3"), values)
+	hdr := []string{xrfHdr("1", values[0]), xrfHdr("2", values[1]), xrfHdr("3", values[2])}
+	if err := hExpectLines(xrfBlock(t, c, 225, "HDR Xref 1-3"), hdr); err != nil {
+		t.Errorf("HDR Xref 1-3: %v", err)
+	}
+	if bc, ids := proc.xrefBatchCount(); bc != 2 || ids != 6 || proc.xrefCount() != 0 {
+		t.Errorf("batch calls %d (ids %d), per-id calls %d; want 2 (6) and 0", bc, ids, proc.xrefCount())
 	}
 }
 

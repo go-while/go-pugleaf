@@ -437,6 +437,9 @@ func (h *History) LookupLocationsBatch(messageIDs []string) (map[string][]Locati
 		for rest := items; len(rest) > 0; {
 			n := min(len(rest), lookupBatchChunk)
 			if err := lookupLocationsChunk(db, rest[:n], out); err != nil {
+				if h.dbClosed.Load() { // Close() landed during the call
+					return nil, ErrHistoryClosed
+				}
 				h.stats.errors.Add(1)
 				return nil, err
 			}

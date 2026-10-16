@@ -65,8 +65,8 @@ func main() {
 	flag.BoolVar(&enforceUserMaxConns, "enforce-user-maxconns", false, "limit authenticated connections per NNTP user to its maxconns value")
 	flag.IntVar(&maxArtSize, "maxartsize", 0, "maximum article size in bytes (0 = config default 32768)")
 	flag.DurationVar(&local430TTL, "local430ttl", nntp.DefaultLocal430TTL, "how long a message-id that answered 430 is answered from the negative cache without a new lookup")
-	flag.StringVar(&xrefMode, "xref", "partial", "Xref: header: off (none), partial (serving group only, no lookups) or full (all groups from the history index, one lookup per served article)")
-	flag.BoolVar(&xrefBatchedLookup, "xref-batched-lookup", true, "in -xref full, look up the Xref locations of an OVER/XOVER/HDR/XHDR range with one history query per shard table instead of one per line")
+	flag.StringVar(&xrefMode, "xref", "partial", "Xref: header: off (none), partial (serving group only, no lookups) or full (all groups from the history index, one lookup per served article or per range chunk, see -xref-batched-lookup)")
+	flag.BoolVar(&xrefBatchedLookup, "xref-batched-lookup", true, "in -xref full, look up the Xref locations of each OVER/XOVER/HDR/XHDR range chunk (up to 1000 lines) with one history statement per shard database instead of one lookup per line")
 	flag.Parse()
 	history.ENABLE_HISTORY = useHistory
 

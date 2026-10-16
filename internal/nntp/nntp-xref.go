@@ -62,6 +62,9 @@ type xrefModeStore struct {
 	// batched: in XrefFull the range commands (OVER/XOVER, HDR/XHDR) look up the locations of
 	// a chunk with one Processor.XrefLocationsBatch call instead of one XrefLocations per line.
 	batched atomic.Bool
+	// batchErrLogged is errLogged for the batched lookup: a failed XrefLocationsBatch is logged
+	// once per server, separately from the per-id failures it falls back to.
+	batchErrLogged atomic.Bool
 }
 
 // SetXrefBatchedLookup enables (the default of a new server) or disables the batched history
@@ -219,7 +222,8 @@ func (c *ClientConnection) xrefBatchWanted(mode XrefMode) bool {
 // xrefOthersBatch returns the other locations of messageIDs (the rows of one range chunk) for
 // XrefFull with one Processor.XrefLocationsBatch call. It returns nil, meaning "use
 // xrefOthers per id", unless xrefBatchWanted(mode) and messageIDs is not empty, and when the
-// batch lookup fails (the first failure per server is logged, as in xrefOthers). A non-nil
+// batch lookup fails (the first failure per server is logged, with its own flag so a failing
+// per-id fallback still gets its own line in xrefOthers). A non-nil
 // map is authoritative: an id absent from it has no other location (no per-id lookup).
 func (c *ClientConnection) xrefOthersBatch(mode XrefMode, messageIDs []string) map[string][]XrefLocation {
 	if !c.xrefBatchWanted(mode) || len(messageIDs) == 0 {
@@ -227,8 +231,8 @@ func (c *ClientConnection) xrefOthersBatch(mode XrefMode, messageIDs []string) m
 	}
 	locs, err := c.server.Processor.XrefLocationsBatch(messageIDs)
 	if err != nil {
-		if c.server.xref.errLogged.CompareAndSwap(false, true) {
-			log.Printf("[NNTP] Xref: batched location lookup of %d message-ids failed, looking up each article (logged once): %v", len(messageIDs), err)
+		if c.server.xref.batchErrLogged.CompareAndSwap(false, true) {
+			log.Printf("[NNTP] Xref: batched location lookup of %d message-ids failed, falling back to one lookup per article (logged once): %v", len(messageIDs), err)
 		}
 		return nil
 	}

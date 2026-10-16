@@ -602,6 +602,7 @@ type hFakeProcessor struct {
 	xrefLocs       map[string][]XrefLocation // XrefLocations result per message-id (nil: none known)
 	xrefErr        error                     // XrefLocations error (takes precedence over xrefLocs)
 	xrefBatchErr   error                     // XrefLocationsBatch error (takes precedence over xrefLocs)
+	xrefBatchNil   bool                      // XrefLocationsBatch answers nil, nil (nothing known) instead of xrefLocs
 	xrefBatchCalls int                       // number of XrefLocationsBatch calls
 	xrefBatchIDs   int                       // number of ids passed to XrefLocationsBatch in total
 	xrefCalls      int
@@ -913,6 +914,9 @@ func (p *hFakeProcessor) XrefLocationsBatch(messageIDs []string) (map[string][]X
 	p.xrefBatchIDs += len(messageIDs)
 	if p.xrefBatchErr != nil {
 		return nil, p.xrefBatchErr
+	}
+	if p.xrefBatchNil {
+		return nil, nil
 	}
 	out := make(map[string][]XrefLocation, len(messageIDs))
 	for _, id := range messageIDs {

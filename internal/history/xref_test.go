@@ -481,7 +481,7 @@ func TestHistoryParseLocations(t *testing.T) {
 }
 
 // Plan xref-batched-lookup: LookupLocationsBatch gives the same answers as one
-// LookupLocations per id, with one query per shard table (chunked).
+// LookupLocations per id, with one UNION ALL statement per shard database (chunked).
 
 func histXrefBatch(t *testing.T, h *History, ids []string) map[string][]Location {
 	t.Helper()
