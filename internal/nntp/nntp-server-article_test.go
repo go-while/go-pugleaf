@@ -1200,13 +1200,13 @@ func artGraceTransfer(t *testing.T, c *client.Conn, cmd, newsgroups string, a hA
 	want := 0
 	switch cmd {
 	case "POST":
-		code, line := c.Cmd("POST")
+		code, line := c.For(t).Cmd("POST")
 		if err := client.ExpectCode(code, line, 340); err != nil {
 			t.Fatalf("POST: %v", err)
 		}
 		want = 240
 	case "IHAVE":
-		code, line := c.Cmd("IHAVE %s", a.MessageID)
+		code, line := c.For(t).Cmd("IHAVE %s", a.MessageID)
 		if err := client.ExpectCode(code, line, 335); err != nil {
 			t.Fatalf("IHAVE: %v", err)
 		}
@@ -1248,16 +1248,16 @@ func artGraceReads(t *testing.T, c *client.Conn, a hArticle) {
 			t.Errorf("%s %s: %v", cmd.name, a.MessageID, err)
 		}
 	}
-	code, line := c.Cmd("OVER %s", a.MessageID)
+	code, line := c.For(t).Cmd("OVER %s", a.MessageID)
 	if err := client.ExpectCode(code, line, 224); err != nil {
 		t.Errorf("OVER %s: %v", a.MessageID, err)
-	} else if lines := c.ReadDotLines(); len(lines) != 1 || !strings.HasPrefix(lines[0], "0\t"+a.Subject+"\t") {
+	} else if lines := c.For(t).ReadDotLines(); len(lines) != 1 || !strings.HasPrefix(lines[0], "0\t"+a.Subject+"\t") {
 		t.Errorf("OVER %s: %q, want one line for article 0", a.MessageID, lines)
 	}
-	code, line = c.Cmd("HDR Subject %s", a.MessageID)
+	code, line = c.For(t).Cmd("HDR Subject %s", a.MessageID)
 	if err := client.ExpectCode(code, line, 225); err != nil {
 		t.Errorf("HDR Subject %s: %v", a.MessageID, err)
-	} else if lines := c.ReadDotLines(); len(lines) != 1 || lines[0] != "0 "+a.Subject {
+	} else if lines := c.For(t).ReadDotLines(); len(lines) != 1 || lines[0] != "0 "+a.Subject {
 		t.Errorf("HDR Subject %s: %q, want [%q]", a.MessageID, lines, "0 "+a.Subject)
 	}
 	code, line = c.Cmd("XHDR Subject %s", a.MessageID)

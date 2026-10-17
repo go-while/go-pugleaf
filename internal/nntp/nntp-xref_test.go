@@ -558,11 +558,11 @@ func xrfSelect(t *testing.T, c *client.Conn, g string) {
 // xrfBlock sends a command, expects the multi-line status want and returns the block.
 func xrfBlock(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) []string {
 	t.Helper()
-	code, line := c.Cmd(format, args...)
+	code, line := c.For(t).Cmd(format, args...)
 	if err := client.ExpectCode(code, line, want); err != nil {
 		t.Fatalf("%s: %v", fmt.Sprintf(format, args...), err)
 	}
-	return c.ReadDotLines()
+	return c.For(t).ReadDotLines()
 }
 
 // xrfHdr is the HDR/XHDR line for key and the Xref value (just key when it is empty).

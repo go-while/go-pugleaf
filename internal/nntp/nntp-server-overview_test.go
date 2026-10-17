@@ -48,11 +48,11 @@ func ovrMultiLine(code int) bool {
 // sync whatever the code is.
 func ovrCmd(t *testing.T, c *client.Conn, format string, args ...interface{}) (int, string, []string) {
 	t.Helper()
-	code, line := c.Cmd(format, args...)
+	code, line := c.For(t).Cmd(format, args...)
 	if !ovrMultiLine(code) {
 		return code, line, nil
 	}
-	return code, line, c.ReadDotLines()
+	return code, line, c.For(t).ReadDotLines()
 }
 
 // ovrTryDotLines reads a dot-terminated block without failing the test.
@@ -122,7 +122,7 @@ func ovrAbsentLines(lines []string, nums ...string) error {
 // a client reading lines sees as extra (desynchronizing) lines.
 func ovrRawLines(t *testing.T, c *client.Conn) ([]string, error) {
 	t.Helper()
-	raw := c.RawUntilDot()
+	raw := c.For(t).RawUntilDot()
 	body := bytes.TrimSuffix(raw, []byte(".\r\n"))
 	if len(body) == 0 {
 		return nil, nil
@@ -383,7 +383,7 @@ func TestOvrSanitizing(t *testing.T) {
 	// A bare LF in a value (A-nntp-rfc-2) splits one overview or header line
 	// into two, so a client reading lines is desynchronized.
 	t.Run("XOVER", func(t *testing.T) {
-		code, line := c.Cmd("XOVER 1-2")
+		code, line := c.For(t).Cmd("XOVER 1-2")
 		if err := client.ExpectCode(code, line, 224); err != nil {
 			t.Fatal(err)
 		}
@@ -422,7 +422,7 @@ func TestOvrSanitizing(t *testing.T) {
 		// be "Line1" or the joined "Line1 Line2".
 		var problems []string
 		check := func(field string, value func(n string, w want) []string) {
-			code, line := c.Cmd("XHDR %s 1-2", field)
+			code, line := c.For(t).Cmd("XHDR %s 1-2", field)
 			if err := client.ExpectCode(code, line, 221); err != nil {
 				t.Fatalf("XHDR %s: %v", field, err)
 			}
