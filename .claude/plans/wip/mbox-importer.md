@@ -335,3 +335,14 @@ Leave `./data-test-mbox` for the user to delete.
     10 s) fixed. Deferred to leftovers: a `.gz` with trailing zero padding ends in a read error and is never marked
     done (multistream reads the padding as a broken header).
   - Merged tree: gofmt empty, vet, build, `go test -race ./cmd/mbox-importer/... ./internal/processor/...` green.
+- Wave 2 (merged, tree bd7f79c): `mbox-cmd` (worktree-agent-a3f02e4fb9171718a, a44da4d + 8c0ac21, merge aa4be65):
+  main.go (flags, exit codes, lifecycle, notifyShutdown with signal.Stop after the first signal), import.go (readMbox,
+  handleMessage, importInputs/importInput, countingSink/processorSink, runSummary/lastRun), 13 TestMboxCmd* tests
+  (~36 s, DB open/close bound), README consistency. Dry run of the real sample with the binary: read=2336 stored=2333
+  skipped=3, 41 groups, exit 0, no data dir. Review MERGE AFTER FIXES: MAJOR (a directory with nothing left to
+  import exited 1; now 0 with "no inputs to import") fixed; decision change vs the plan's "Decisions taken": article
+  errors (errors > 0) and commit-wait failures now exit 1 (`commit-errors` in the totals line; the input stays
+  unrenamed), rejected/skipped articles still exit 0; minors (second SIGINT falls back to the default action, test
+  hygiene) fixed. Inline after the merge: unused stub error removed (9d7ee22), disabled spam example follows the
+  rename (bd7f79c). Implementer decisions: an input already named `.done` is never renamed; ErrExist from markDone
+  is logged, other rename errors are input errors; with -group a missing Newsgroups header still skips.
