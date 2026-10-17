@@ -6,7 +6,7 @@ NNTP server, article fetcher and Gin web gateway for Usenet, in Go (see `go.mod`
 Storage is SQLite: one main DB (`data/cfg/pugleaf.sq3`) plus one DB per newsgroup (`data/db/`),
 and a message-id history index (`internal/history`, rebuilt with `cmd/history-rebuild`).
 
-- Entry points: `cmd/<tool>/main.go` (24 tools; `cmd/web`, `cmd/nntp-fetcher`, `cmd/nntp-server` are the main ones).
+- Entry points: `cmd/<tool>/main.go` (25 tools; `cmd/web`, `cmd/nntp-fetcher`, `cmd/nntp-server` are the main ones).
 - Core code: `internal/` (`nntp`, `database`, `processor`, `history`, `web`, `models`, `config`, `postmgr`, ...).
 - Web templates: `web/templates/`. DB migrations: `internal/database/migrations/`.
 - Longer layout notes: `.github/copilot-instructions.md` (partly stale: tool/package counts and "no tests" are outdated).
@@ -24,7 +24,8 @@ go test -race ./internal/database/... ./internal/web/... ./internal/history/... 
               ./cmd/nntp-fetcher/... ./cmd/nntp-analyze/... ./cmd/recover-db/... ./cmd/tcp2tor/... ./cmd/web/... \
               ./cmd/post-queue/... ./cmd/import-flat-files/... ./cmd/rslight-importer/... ./cmd/fix-references/... \
               ./cmd/fix-thread-activity/... ./cmd/audit-web-posts/... ./cmd/extract_hierarchies/... \
-              ./cmd/merge-active/... ./cmd/merge-descriptions/... ./cmd/nntp-transfer/... ./cmd/usermgr/...
+              ./cmd/merge-active/... ./cmd/merge-descriptions/... ./cmd/nntp-transfer/... ./cmd/usermgr/... \
+              ./cmd/mbox-importer/...
 # the same list runs in .github/workflows/tests.yml (manual: `gh workflow run tests.yml`); PUGLEAF_TEST_DEADLINE (default 60s) bounds the test hang guards
 ```
 - `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` lists the open NNTP known bugs (fails on purpose);
