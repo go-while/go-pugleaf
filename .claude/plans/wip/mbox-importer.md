@@ -310,3 +310,11 @@ Leave `./data-test-mbox` for the user to delete.
   the input is then not marked done, nothing else is undone.
 - `ENABLE_HISTORY` is read once; `-history=false` runs write no history tokens (a later `history-rebuild` backfills).
 - Out-of-order replies get thread root 0; documented, not fixed.
+
+### Progress
+- Wave 0 (5d6d007 on `plan-mbox-importer`, branched from testing-001 ac73462): `processArticle` → `ProcessArticle`
+  in every Go file and in docs/ + internal/spam/README.md (archived plans under .claude/plans/done keep the old
+  name); `EnsureNewsgroup(db, name, description)` exported in rslight.go; `cmd/mbox-importer` stubs with the
+  shared signatures; go.mod: `github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017083307-028f55355c84` and,
+  pulled in by its go directive, `go 1.26.0` → `go 1.27.1` (toolchain go1.27.2 unchanged; README version text is
+  the docs slice's job). Checks: gofmt empty, vet, build, `go test -race ./internal/processor/...` green.
