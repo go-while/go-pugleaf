@@ -32,6 +32,11 @@ func (s *WebServer) CreateSectionHandler(c *Context) {
 		c.Redirect(http.StatusSeeOther, "/admin?tab=sections")
 		return
 	}
+	if knownNonSectionPaths[name] {
+		session.SetError(fmt.Sprintf("'%s' is a reserved path and cannot be a section name", name))
+		c.Redirect(http.StatusSeeOther, "/admin?tab=sections")
+		return
+	}
 
 	// Parse sort order
 	sortOrder := 0
@@ -109,6 +114,11 @@ func (s *WebServer) UpdateSectionHandler(c *Context) {
 	// Validate required fields
 	if name == "" || displayName == "" {
 		session.SetError("Section name and display name are required")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=sections")
+		return
+	}
+	if knownNonSectionPaths[name] {
+		session.SetError(fmt.Sprintf("'%s' is a reserved path and cannot be a section name", name))
 		c.Redirect(http.StatusSeeOther, "/admin?tab=sections")
 		return
 	}

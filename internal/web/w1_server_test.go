@@ -536,6 +536,15 @@ func TestW1ServerReservedSectionNames(t *testing.T) {
 	if rec := w0Do(t, w0Req{Path: "/SiteHelp"}); rec.Code != http.StatusOK {
 		t.Errorf("GET /SiteHelp = %d", rec.Code)
 	}
+
+	// An admin cannot create or rename a section to a reserved name.
+	_, cookie := w0NewUser(t, true)
+	form := url.Values{"name": {"static"}, "display_name": {"Static"}}
+	rec := w0Do(t, w0Req{Method: http.MethodPost, Path: "/admin/sections", Form: form, Cookies: []*http.Cookie{cookie}})
+	exists, err := w0DB(t).SectionNameExists("static")
+	if err != nil || exists || rec.Code != http.StatusSeeOther {
+		t.Errorf("create section 'static' = %d, exists %v, %v", rec.Code, exists, err)
+	}
 }
 
 // TestW1ServerAdminAPITokensTab: the API tokens tab renders with a token present and shows the

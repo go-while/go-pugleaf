@@ -9,7 +9,7 @@ import (
 //
 // Functions to be moved from server.go:
 //   - func (s *WebServer) helpPage(c *Context) (line ~880)
-//     Handles "/help" route to display help information
+//     Handles "/SiteHelp" route to display help information
 //
 // This file will handle the help page functionality, providing user documentation and API information.
 func (s *WebServer) helpPage(c *Context) {
