@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -258,6 +259,15 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	}
 	trustedProxyNets := configureTrustedProxiesWithHeader(router, ReverseProxyAddr, ReverseProxyIPHeader)
 	log.Printf("[WEB]: Trusted reverse proxies: %v | client IP header: %v", trustedProxyNets, router.RemoteIPHeader())
+
+	// Request bodies are capped: 1 MiB, or more when the configured site-post article size needs
+	// it (the admin settings page updates the cap when the size changes).
+	if sizeStr, err := db.GetConfigValue(config.CFG_KEY_WEBPOSTSIZE); err != nil {
+		log.Printf("[WEB]: Error getting WebPostMaxArticleSize: %v", err)
+	} else if size, err := strconv.ParseInt(sizeStr, 10, 64); err == nil {
+		router.SetMaxBodyBytes(httpxBodyLimitForPost(size))
+	}
+	log.Printf("[WEB]: Request body cap: %d bytes", router.MaxBodyBytes())
 
 	// Don't use ParseGlob - it causes template name conflicts
 	// Instead, we'll load templates individually in each handler

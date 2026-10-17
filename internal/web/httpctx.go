@@ -30,9 +30,23 @@ const (
 	abortIndex = math.MaxInt >> 1
 	// httpxNoWritten is the size of a ResponseWriter whose header was not written yet.
 	httpxNoWritten = -1
-	// httpxMaxMultipartMemory is the memory limit of ParseMultipartForm (gin's default).
-	httpxMaxMultipartMemory = 32 << 20
+	// httpxDefaultMaxBodyBytes is the request body cap of a new Router. The largest legitimate
+	// body is a site post, whose cap is derived from the configured article size with
+	// httpxBodyLimitForPost; everything else is a small form or a short JSON document.
+	httpxDefaultMaxBodyBytes = 1 << 20
+	// httpxFormHeadroom is what a form adds around the article of a site post: the other fields
+	// and the urlencoded overhead of the largest field.
+	httpxFormHeadroom = 64 << 10
 )
+
+// httpxBodyLimitForPost returns the router's body cap for a configured maximum article size: at
+// least the default, else the urlencoded article (every byte may take three) plus headroom.
+func httpxBodyLimitForPost(maxArticleSize int64) int64 {
+	if maxArticleSize <= 0 {
+		return httpxDefaultMaxBodyBytes
+	}
+	return max(httpxDefaultMaxBodyBytes, 3*maxArticleSize+httpxFormHeadroom)
+}
 
 // ResponseWriter wraps the http.ResponseWriter of a request. Like gin's writer it defers the
 // status line: WriteHeader only records the code, the header goes out with the first Write, with
@@ -133,6 +147,7 @@ type Context struct {
 	queryCache url.Values
 	formParsed bool
 	formCache  url.Values
+	formErr    error // the ParseForm error of the body, kept for the route handler's 413
 }
 
 // NewTestContext returns a Context for calling a handler directly in a test. It has no router:
@@ -228,15 +243,15 @@ func (c *Context) getQuery(key string) (string, bool) {
 	return "", false
 }
 
-// initFormCache parses the urlencoded or multipart body once. The URL query is never merged in.
+// initFormCache parses the urlencoded body once. The URL query is never merged in. Multipart
+// bodies are not parsed (the server has no upload feature; the route handler answers them with
+// 415 before the handlers run): they leave the form empty, like any other parse error.
 func (c *Context) initFormCache() {
 	if c.formParsed {
 		return
 	}
 	c.formParsed = true
-	// A body that is not multipart is parsed as urlencoded; any other parse error leaves the
-	// form empty or partial, like gin (which only logged it in debug mode).
-	_ = c.Request.ParseMultipartForm(httpxMaxMultipartMemory)
+	c.formErr = c.Request.ParseForm()
 	c.formCache = c.Request.PostForm
 }
 

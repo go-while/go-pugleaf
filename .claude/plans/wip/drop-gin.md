@@ -263,6 +263,11 @@ Leave `./data-test-dropgin` for the user to delete.
 - 405 where gin answered 404; TSR redirects now run inside the global chain (secure headers, bot block, access
   line); `/static` without slash is no longer special-cased beyond the mux; unclean paths (`//x`, `/a/../b`) get the
   mux's 307 to the cleaned path (were 404).
+- Request bodies are capped (user, 2026-10-17, after the 32 MiB multipart finding): `Router.SetMaxBodyBytes`,
+  default 1 MiB, set at startup and from the admin settings page to `max(1 MiB, 3 × WebPostMaxArticleSize + 64 KiB)`;
+  a urlencoded form past the cap is 413 and any multipart body 415 before the route runs (no upload feature;
+  nothing is spooled to disk any more, the multipart cleanup of wave 1 is gone); the 10 MiB urlencoded cap of
+  net/http no longer applies (MaxBytesReader replaces it); JSON past the cap fails in `ShouldBindJSON`.
 - HSTS spelled `includeSubDomains`; 404 body gains a trailing newline; the catch-all value has no leading slash
   (only the rewritten test sees it); Recovery logs a stack also for broken-pipe panics.
 - The Context travels in the request context; route handlers must keep using `c.Request` (the pointer the mux

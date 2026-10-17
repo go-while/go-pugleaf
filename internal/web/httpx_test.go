@@ -276,22 +276,25 @@ func TestHttpxPostForm(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	httpxCheckForm(t, "urlencoded", NewTestContext(httptest.NewRecorder(), req))
 
+	// A multipart body is not parsed: the form stays empty (the router answers 415 before a
+	// handler sees it, see TestHttpxBodyLimits).
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
-	for _, kv := range [][2]string{{"a", "1"}, {"a", "2"}, {"e", ""}} {
-		if err := mw.WriteField(kv[0], kv[1]); err != nil {
-			t.Fatal(err)
-		}
+	if err := mw.WriteField("a", "1"); err != nil {
+		t.Fatal(err)
 	}
 	if err := mw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	req = httptest.NewRequest(http.MethodPost, "/f?q=fromquery&a=query", &body)
+	req = httptest.NewRequest(http.MethodPost, "/f?a=query", &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	httpxCheckForm(t, "multipart", NewTestContext(httptest.NewRecorder(), req))
+	c := NewTestContext(httptest.NewRecorder(), req)
+	if v, ok := c.GetPostForm("a"); ok || v != "" {
+		t.Errorf("multipart post form a = %q, %v", v, ok)
+	}
 
 	// A GET has no post form, whatever the query holds.
-	c, _ := httpxTestCtx(http.MethodGet, "/f?a=1")
+	c, _ = httpxTestCtx(http.MethodGet, "/f?a=1")
 	if v, ok := c.GetPostForm("a"); ok || v != "" {
 		t.Errorf("GET post form a = %q, %v", v, ok)
 	}
@@ -1110,48 +1113,118 @@ func TestHttpxProductionRouteTable(t *testing.T) {
 	}
 }
 
-// TestHttpxMultipartTempCleanup: the temporary file of a large multipart part, parsed on the
-// router's request copy, is removed when the request ends.
-func TestHttpxMultipartTempCleanup(t *testing.T) {
+// TestHttpxBodyLimits: a multipart body is answered 415 before the route runs and leaves no
+// temporary file; a urlencoded form past the router's cap is answered 413 with the cap, one
+// within it reaches the handler; a JSON body past the cap fails in ShouldBindJSON; the cap
+// follows SetMaxBodyBytes and httpxBodyLimitForPost.
+func TestHttpxBodyLimits(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
 
+	r := NewRouter()
+	r.SetMaxBodyBytes(4 << 10)
+	var ran int
+	r.POST("/login", func(c *Context) {
+		ran++
+		c.String(http.StatusOK, "%s", c.PostForm("username"))
+	})
+	r.POST("/api/send", func(c *Context) {
+		ran++
+		var req struct{ Message string }
+		var tooLarge *http.MaxBytesError
+		if err := c.ShouldBindJSON(&req); errors.As(err, &tooLarge) {
+			c.String(http.StatusRequestEntityTooLarge, "json too large")
+			return
+		} else if err != nil {
+			c.String(http.StatusBadRequest, "%v", err)
+			return
+		}
+		c.String(http.StatusOK, "%d", len(req.Message))
+	})
+
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
-	if err := mw.WriteField("username", "u1"); err != nil {
-		t.Fatal(err)
-	}
 	fw, err := mw.CreateFormFile("upload", "big.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fw.Write(bytes.Repeat([]byte("x"), httpxMaxMultipartMemory+64<<10)); err != nil {
+	if _, err := fw.Write(bytes.Repeat([]byte("x"), 64<<10)); err != nil {
 		t.Fatal(err)
 	}
 	if err := mw.Close(); err != nil {
 		t.Fatal(err)
 	}
-
-	r := NewRouter()
-	var sawFile bool
-	r.POST("/login", func(c *Context) {
-		user := c.PostForm("username")
-		sawFile = c.Request.MultipartForm != nil && len(c.Request.MultipartForm.File["upload"]) == 1
-		c.String(http.StatusOK, "%s", user)
-	})
 	rec := httpxServe(r, http.MethodPost, "/login", func(req *http.Request) {
 		req.Body = io.NopCloser(&body)
 		req.Header.Set("Content-Type", mw.FormDataContentType())
 	})
-	if rec.Code != http.StatusOK || rec.Body.String() != "u1" || !sawFile {
-		t.Fatalf("POST = %d %q, file part parsed %v", rec.Code, rec.Body.String(), sawFile)
+	if rec.Code != http.StatusUnsupportedMediaType || ran != 0 {
+		t.Fatalf("multipart POST = %d %q, handler ran %d times", rec.Code, rec.Body.String(), ran)
 	}
-	entries, err := os.ReadDir(tmp)
-	if err != nil {
-		t.Fatal(err)
+	if entries, err := os.ReadDir(tmp); err != nil || len(entries) != 0 {
+		t.Errorf("temporary files after the multipart request: %v, %v", entries, err)
 	}
-	if len(entries) != 0 {
-		t.Errorf("temporary files left after the request: %v", entries)
+
+	form := func(n int) func(*http.Request) {
+		return func(req *http.Request) {
+			req.Body = io.NopCloser(strings.NewReader("username=u1&pad=" + strings.Repeat("x", n)))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+	}
+	rec = httpxServe(r, http.MethodPost, "/login", form(8<<10))
+	if rec.Code != http.StatusRequestEntityTooLarge || ran != 0 || !strings.Contains(rec.Body.String(), "4096 bytes") {
+		t.Fatalf("oversized form = %d %q, handler ran %d times", rec.Code, rec.Body.String(), ran)
+	}
+	rec = httpxServe(r, http.MethodPost, "/login", form(1<<10))
+	if rec.Code != http.StatusOK || rec.Body.String() != "u1" || ran != 1 {
+		t.Fatalf("form within the cap = %d %q, handler ran %d times", rec.Code, rec.Body.String(), ran)
+	}
+	// The cap can be raised at run time.
+	r.SetMaxBodyBytes(16 << 10)
+	rec = httpxServe(r, http.MethodPost, "/login", form(8<<10))
+	if rec.Code != http.StatusOK || rec.Body.String() != "u1" || ran != 2 {
+		t.Fatalf("form within the raised cap = %d %q, handler ran %d times", rec.Code, rec.Body.String(), ran)
+	}
+	r.SetMaxBodyBytes(0)
+	if got := r.MaxBodyBytes(); got != 16<<10 {
+		t.Errorf("SetMaxBodyBytes(0) changed the cap to %d", got)
+	}
+
+	jsonBody := func(n int) func(*http.Request) {
+		return func(req *http.Request) {
+			req.Body = io.NopCloser(strings.NewReader(`{"Message":"` + strings.Repeat("x", n) + `"}`))
+			req.Header.Set("Content-Type", "application/json")
+		}
+	}
+	rec = httpxServe(r, http.MethodPost, "/api/send", jsonBody(32<<10))
+	if rec.Code != http.StatusRequestEntityTooLarge || ran != 3 {
+		t.Fatalf("oversized JSON = %d %q, handler ran %d times", rec.Code, rec.Body.String(), ran)
+	}
+	rec = httpxServe(r, http.MethodPost, "/api/send", jsonBody(1<<10))
+	if rec.Code != http.StatusOK || rec.Body.String() != "1024" || ran != 4 {
+		t.Fatalf("JSON within the cap = %d %q, handler ran %d times", rec.Code, rec.Body.String(), ran)
+	}
+
+	// A GET with a form content type and no body is not touched.
+	rec = httpxServe(r, http.MethodGet, "/login", func(req *http.Request) {
+		req.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+	})
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /login with a multipart content type = %d, want 405", rec.Code)
+	}
+
+	for _, tc := range []struct{ size, want int64 }{
+		{0, httpxDefaultMaxBodyBytes},
+		{32 << 10, httpxDefaultMaxBodyBytes},
+		{400 << 10, 3*(400<<10) + httpxFormHeadroom},
+		{16 << 20, 48<<20 + httpxFormHeadroom},
+	} {
+		if got := httpxBodyLimitForPost(tc.size); got != tc.want {
+			t.Errorf("httpxBodyLimitForPost(%d) = %d, want %d", tc.size, got, tc.want)
+		}
+	}
+	if NewRouter().MaxBodyBytes() != httpxDefaultMaxBodyBytes {
+		t.Errorf("NewRouter cap = %d", NewRouter().MaxBodyBytes())
 	}
 }
 

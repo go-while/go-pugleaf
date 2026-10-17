@@ -4,7 +4,10 @@ net/http web gateway for go-pugleaf: the public site, the JSON API under `/api/v
 Started from `cmd/web`, which owns the process lifecycle; this package owns the HTTP surface.
 Routing, the request context and client-IP handling come from three in-package adapter files that replaced
 the former third-party web framework: `httprouter.go` (router on `net/http` ServeMux, middleware chain),
-`httpctx.go` (request/response context) and `httpclientip.go` (trusted-proxy client IP).
+`httpctx.go` (request/response context) and `httpclientip.go` (trusted-proxy client IP). The router caps every
+request body (`Router.SetMaxBodyBytes`; 1 MiB, raised with the configured `WebPostMaxArticleSize`), answers a
+urlencoded form past the cap with 413 and any multipart body with 415 before the route runs: there is no upload
+feature, so nothing is ever spooled to disk.
 
 For signatures and details use `go doc ./internal/web` — this file is a map, not an API reference.
 Deployment and operational behaviour (reverse proxy, sessions, CSRF, `-data`) live in

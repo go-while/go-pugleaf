@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +33,7 @@ type Router struct {
 
 	main     *http.ServeMux
 	fallback *http.ServeMux
+	maxBody  atomic.Int64 // request body cap in bytes, see SetMaxBodyBytes
 
 	mu         sync.RWMutex
 	middleware []HandlerFunc
@@ -57,12 +59,27 @@ type httpxCtxKey struct{}
 
 // NewRouter returns a router without middleware, routes or trusted proxies.
 func NewRouter() *Router {
-	return &Router{
+	r := &Router{
 		RedirectTrailingSlash: true,
 		main:                  http.NewServeMux(),
 		fallback:              http.NewServeMux(),
 	}
+	r.maxBody.Store(httpxDefaultMaxBodyBytes)
+	return r
 }
+
+// SetMaxBodyBytes caps the body of every request at n bytes (http.MaxBytesReader; the default
+// is httpxDefaultMaxBodyBytes). A urlencoded form past the cap is answered 413 before the route
+// runs; a JSON body past it fails in ShouldBindJSON with *http.MaxBytesError. n <= 0 keeps the
+// current cap. Takes effect for requests that start afterwards.
+func (r *Router) SetMaxBodyBytes(n int64) {
+	if n > 0 {
+		r.maxBody.Store(n)
+	}
+}
+
+// MaxBodyBytes returns the request body cap.
+func (r *Router) MaxBodyBytes() int64 { return r.maxBody.Load() }
 
 // Use appends middleware to the global chain, which runs for every request (also for redirects,
 // 405 and 404). The chain is read when a request starts.
@@ -167,13 +184,11 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// One request pointer for the whole request: the mux stamps the pattern and the path values
 	// on it, and the route handler finds the Context through its context.
 	c.Request = req.WithContext(context.WithValue(req.Context(), httpxCtxKey{}, c))
-	// net/http removes the temporary files of a parsed multipart form only for the request it
-	// passed in; the form parsed on the copy is removed here (deferred, so also on a panic).
-	defer func() {
-		if f := c.Request.MultipartForm; f != nil && f != req.MultipartForm {
-			_ = f.RemoveAll() // best effort, like net/http's own cleanup
-		}
-	}()
+	// The body cap goes on the copy; w (not the wrapper) lets net/http close the connection
+	// after a response to an oversized request instead of reading the rest.
+	if req.Body != nil && req.Body != http.NoBody {
+		c.Request.Body = http.MaxBytesReader(w, req.Body, r.maxBody.Load())
+	}
 
 	r.mu.RLock()
 	chain := make([]HandlerFunc, 0, len(r.middleware)+1)
@@ -198,7 +213,41 @@ func (h *routeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		defer c.Writer.WriteHeaderNow()
 	}
 	c.Request = req
+	if !httpxAcceptBody(c) {
+		return
+	}
 	c.runChain(h.chain)
+}
+
+// httpxAcceptBody answers a request whose form body the handlers must not see: a multipart body
+// (415: nothing here takes uploads, and net/http would spool large parts to disk) or a
+// urlencoded one past the router's cap (413). It parses the urlencoded form, so the handlers
+// never see a partial form. Other bodies (JSON, none) are left to the handlers.
+func httpxAcceptBody(c *Context) bool {
+	switch c.Request.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+	default:
+		return true
+	}
+	ct := c.Request.Header.Get("Content-Type")
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	switch strings.ToLower(strings.TrimSpace(ct)) {
+	case "multipart/form-data", "multipart/mixed":
+		c.Abort()
+		c.String(http.StatusUnsupportedMediaType, "415 unsupported media type: multipart bodies are not accepted\n")
+		return false
+	case "application/x-www-form-urlencoded":
+		c.initFormCache()
+		var tooLarge *http.MaxBytesError
+		if errors.As(c.formErr, &tooLarge) {
+			c.Abort()
+			c.String(http.StatusRequestEntityTooLarge, "413 request body too large: at most %d bytes\n", tooLarge.Limit)
+			return false
+		}
+	}
+	return true
 }
 
 // httpxMatch is the result of looking a request up in one mux.

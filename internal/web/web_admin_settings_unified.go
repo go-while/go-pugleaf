@@ -243,6 +243,12 @@ func (s *WebServer) adminUpdateSettings(c *Context) {
 			c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 			return
 		}
+		if settingType == config.FORM_FIELD_WEBPOSTSIZE {
+			// Validated above: a number within 1 KiB..16 MiB. Move the request body cap with it.
+			if size, err := strconv.ParseInt(value, 10, 64); err == nil {
+				s.Router.SetMaxBodyBytes(httpxBodyLimitForPost(size))
+			}
+		}
 	}
 
 	// Set success message
