@@ -77,11 +77,11 @@ func cliCmdDial(t *testing.T, s *cliFakeServer, mutate func(*BackendConfig)) *Ba
 	return c
 }
 
-// cliCmdPool builds a pool on s.Backend() (AuthFailureBackoff disabled, then
+// cliCmdPool builds a pool on cliBackend(s) (AuthFailureBackoff disabled, then
 // mutate) that is closed by t.Cleanup.
 func cliCmdPool(t *testing.T, s *cliFakeServer, mutate func(*BackendConfig)) *Pool {
 	t.Helper()
-	cfg := s.Backend()
+	cfg := cliBackend(s)
 	cfg.AuthFailureBackoff = -1
 	if mutate != nil {
 		mutate(cfg)
@@ -548,8 +548,8 @@ func TestCliCmdSOCKSTimeout(t *testing.T) {
 		AuthFailureBackoff: -1,
 		ProxyEnabled:       true,
 		ProxyType:          "socks5",
-		ProxyHost:          proxy.Host,
-		ProxyPort:          proxy.Port,
+		ProxyHost:          proxy.Host(),
+		ProxyPort:          proxy.Port(),
 	}
 	c := NewConn(cfg)
 	elapsed, err := cliCmdRun(t, c.Connect)

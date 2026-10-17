@@ -31,6 +31,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // artCmds maps each retrieval command to its RFC 3977 §6.2 success code.
@@ -126,12 +127,12 @@ func artExpectedLines(cmd string, a hArticle) []string {
 
 // artDo sends one command and reads the multi-line block when the reply is
 // 220, 221 or 222, so the connection stays in sync whatever the server answers.
-func artDo(t *testing.T, c *hClient, format string, args ...interface{}) (int, string, []string) {
+func artDo(t *testing.T, c *client.Conn, format string, args ...interface{}) (int, string, []string) {
 	t.Helper()
-	code, line := c.cmd(t, format, args...)
+	code, line := c.Cmd(format, args...)
 	var lines []string
 	if code >= 220 && code <= 222 {
-		lines = c.readDotLines(t)
+		lines = c.ReadDotLines()
 	}
 	return code, line, lines
 }
@@ -148,7 +149,7 @@ func artCheckStatus(code int, line string, wantCode int, wantNum int64, wantMID 
 
 // artCheckRetrieval runs "<cmd> <arg>" and checks the status line and the
 // block against article a reported as number wantNum.
-func artCheckRetrieval(t *testing.T, c *hClient, cmd, arg string, wantCode int, wantNum int64, a hArticle) error {
+func artCheckRetrieval(t *testing.T, c *client.Conn, cmd, arg string, wantCode int, wantNum int64, a hArticle) error {
 	t.Helper()
 	code, line, lines := artDo(t, c, "%s %s", cmd, arg)
 	if err := artCheckStatus(code, line, wantCode, wantNum, a.MessageID); err != nil {
@@ -157,7 +158,7 @@ func artCheckRetrieval(t *testing.T, c *hClient, cmd, arg string, wantCode int, 
 	if cmd == "STAT" {
 		return nil
 	}
-	if err := hExpectLines(lines, artExpectedLines(cmd, a)); err != nil {
+	if err := client.ExpectLines(lines, artExpectedLines(cmd, a)); err != nil {
 		return fmt.Errorf("%s %s block: %w", cmd, arg, err)
 	}
 	return nil
@@ -165,22 +166,22 @@ func artCheckRetrieval(t *testing.T, c *hClient, cmd, arg string, wantCode int, 
 
 // artRawResponse sends one command and returns the raw status line and, for
 // 220/221/222, the raw block up to and including the terminator.
-func artRawResponse(t *testing.T, c *hClient, cmd string) (status, block []byte) {
+func artRawResponse(t *testing.T, c *client.Conn, cmd string) (status, block []byte) {
 	t.Helper()
-	if err := c.send(cmd + CRLF); err != nil {
+	if err := c.Send(cmd + CRLF); err != nil {
 		t.Fatalf("send %q: %v", cmd, err)
 	}
-	c.bump()
+	_ = c.Conn.SetDeadline(time.Now().Add(c.Deadline))
 	status, err := c.R.ReadBytes('\n')
 	if err != nil {
 		t.Fatalf("%s: status line: %v (%q)", cmd, err, status)
 	}
-	code, err := hParseCode(strings.TrimRight(string(status), "\r\n"))
+	code, err := client.ParseCode(strings.TrimRight(string(status), "\r\n"))
 	if err != nil {
 		t.Fatalf("%s: %v", cmd, err)
 	}
 	if code >= 220 && code <= 222 {
-		block = c.rawUntilDot(t)
+		block = c.RawUntilDot()
 	}
 	return status, block
 }
@@ -235,10 +236,10 @@ func artSetHeadersJSON(t *testing.T, group string, num int64, headers string) {
 }
 
 // artSelect sends GROUP g and fails unless it answers 211 (RFC 3977 §6.1.1).
-func artSelect(t *testing.T, c *hClient, g string) {
+func artSelect(t *testing.T, c *client.Conn, g string) {
 	t.Helper()
-	code, line := c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line := c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatalf("GROUP %s: %v", g, err)
 	}
 }
@@ -364,7 +365,7 @@ func TestArtNoArgument(t *testing.T) {
 			code, line, lines := artDo(t, c, "%s", cmd.name)
 			err := artCheckStatus(code, line, cmd.code, 1, a1.MessageID)
 			if err == nil && cmd.name != "STAT" {
-				err = hExpectLines(lines, artExpectedLines(cmd.name, a1))
+				err = client.ExpectLines(lines, artExpectedLines(cmd.name, a1))
 			}
 			if err != nil {
 				errs = append(errs, fmt.Errorf("bare %s: %w", cmd.name, err))
@@ -382,7 +383,7 @@ func TestArtNoArgument(t *testing.T) {
 		for _, cmd := range artCmds {
 			code, line, _ := artDo(t, c, "%s", cmd.name)
 			// RFC 3977 §6.2.1.2: 420 current article number is invalid.
-			if err := hExpectCode(code, line, 420); err != nil {
+			if err := client.ExpectCode(code, line, 420); err != nil {
 				errs = append(errs, fmt.Errorf("bare %s: %w", cmd.name, err))
 			}
 		}
@@ -399,13 +400,13 @@ func TestArtNoArgument(t *testing.T) {
 			code, line, _ := artDo(t, c, "%s", cmd.name)
 			// RFC 3977 §6.2.1.2: the no-argument form answers only 220-223, 412 or 420;
 			// a current article hidden or expired since GROUP is 420, not 423.
-			if err := hExpectCode(code, line, 420); err != nil {
+			if err := client.ExpectCode(code, line, 420); err != nil {
 				t.Errorf("bare %s after the current article was hidden: %v", cmd.name, err)
 			}
 		}
 		// The number form keeps 423.
 		code, line, _ := artDo(t, c, "STAT 1")
-		if err := hExpectCode(code, line, 423); err != nil {
+		if err := client.ExpectCode(code, line, 423); err != nil {
 			t.Errorf("STAT 1 (hidden): %v", err)
 		}
 	})
@@ -416,7 +417,7 @@ func TestArtNoArgument(t *testing.T) {
 			code, line, _ := artDo(t, c, "%s", cmd.name)
 			// RFC 3977 §6.2.1.2: 412 no newsgroup selected (the current-article
 			// form needs a group).
-			if err := hExpectCode(code, line, 412); err != nil {
+			if err := client.ExpectCode(code, line, 412); err != nil {
 				errs = append(errs, fmt.Errorf("bare %s: %w", cmd.name, err))
 			}
 		}
@@ -449,7 +450,7 @@ func TestArtInvalidNumbers(t *testing.T) {
 				code, line, _ := artDo(t, c, "%s %s", cmd.name, tc.arg)
 				// RFC 3977 §6.2.1.2 (423 no article with that number) and §3.2.1
 				// (501 syntax error in arguments).
-				if err := hExpectCode(code, line, 423, 501); err != nil {
+				if err := client.ExpectCode(code, line, 423, 501); err != nil {
 					errs = append(errs, fmt.Errorf("%s %s: %w", cmd.name, tc.arg, err))
 				}
 			}
@@ -482,7 +483,7 @@ func TestArtNotFound(t *testing.T) {
 			for _, cmd := range artCmds {
 				code, line, _ := artDo(t, c, "%s %s", cmd.name, arg)
 				// RFC 3977 §6.2.1.2: 423 no article with that number.
-				if err := hExpectCode(code, line, 423); err != nil {
+				if err := client.ExpectCode(code, line, 423); err != nil {
 					t.Errorf("%s %s: %v", cmd.name, arg, err)
 				}
 			}
@@ -498,7 +499,7 @@ func TestArtNotFound(t *testing.T) {
 			for _, cmd := range artCmds {
 				code, line, _ := artDo(t, c, "%s %s", cmd.name, missingMID)
 				// RFC 3977 §6.2.1.2: 430 no article with that message-id.
-				if err := hExpectCode(code, line, 430); err != nil {
+				if err := client.ExpectCode(code, line, 430); err != nil {
 					t.Errorf("%s %s (group selected %v): %v", cmd.name, missingMID, selected, err)
 				}
 			}
@@ -512,7 +513,7 @@ func TestArtNotFound(t *testing.T) {
 		for _, cmd := range artCmds {
 			code, line, _ := artDo(t, c, "%s %s", cmd.name, missingMID)
 			// RFC 3977 §6.2.1.2: 430 no article with that message-id.
-			if err := hExpectCode(code, line, 430); err != nil {
+			if err := client.ExpectCode(code, line, 430); err != nil {
 				t.Errorf("%s %s: %v", cmd.name, missingMID, err)
 			}
 		}
@@ -523,7 +524,7 @@ func TestArtNotFound(t *testing.T) {
 		for _, cmd := range artCmds {
 			code, line, _ := artDo(t, c, "%s 1", cmd.name)
 			// RFC 3977 §6.2.1.2: the number form without a selected group → 412.
-			if err := hExpectCode(code, line, 412); err != nil {
+			if err := client.ExpectCode(code, line, 412); err != nil {
 				t.Errorf("%s 1: %v", cmd.name, err)
 			}
 		}
@@ -599,13 +600,13 @@ func TestArtCurrentArticle(t *testing.T) {
 
 // artCheckBareXover sends a bare XOVER and checks that it answers 224 with one
 // overview line for article wantNum (RFC 2980 §2.8, RFC 3977 §8.3.2).
-func artCheckBareXover(t *testing.T, c *hClient, wantNum int64) error {
+func artCheckBareXover(t *testing.T, c *client.Conn, wantNum int64) error {
 	t.Helper()
-	code, line := c.cmd(t, "XOVER")
+	code, line := c.Cmd("XOVER")
 	if code != 224 {
 		return fmt.Errorf("bare XOVER: got %q, want 224 and the overview of %d", line, wantNum)
 	}
-	lines := c.readDotLines(t)
+	lines := c.ReadDotLines()
 	if len(lines) != 1 || strings.SplitN(lines[0], "\t", 2)[0] != strconv.FormatInt(wantNum, 10) {
 		return fmt.Errorf("bare XOVER: got lines %q, want one overview line of %d", lines, wantNum)
 	}
@@ -712,7 +713,7 @@ func TestArtByteExact(t *testing.T) {
 		artSelect(t, c, g)
 		_, block := artRawResponse(t, c, "HEAD 1")
 		errs = append(errs, artExpectRaw("HEAD block", block, append(append([]byte{}, wantHead...), ".\r\n"...)))
-		c.close()
+		c.Close()
 
 		c = hs.dial(t)
 		artSelect(t, c, g)
@@ -720,7 +721,7 @@ func TestArtByteExact(t *testing.T) {
 		wantArticle := append(append([]byte{}, wantHead...), CRLF...)
 		wantArticle = append(wantArticle, artCRLF(artBodyLines(a)...)...)
 		errs = append(errs, artExpectRaw("ARTICLE block", block, append(wantArticle, ".\r\n"...)))
-		c.close()
+		c.Close()
 		if err := errors.Join(errs...); err != nil {
 			t.Fatal(err)
 		}
@@ -781,7 +782,7 @@ type artLocal430Env struct {
 	proc    *hFakeProcessor
 	arrived *atomic.Bool
 	hs      *hServer
-	c       *hClient
+	c       *client.Conn
 }
 
 // artLocal430Miss builds the scenario and checks the two misses: the first
@@ -818,16 +819,16 @@ func artLocal430Miss(t *testing.T, test string) *artLocal430Env {
 	c := hs.dial(t)
 
 	// RFC 3977 §6.2.4.2: 430 no article with that message-id.
-	code, line := c.cmd(t, "STAT %s", a.MessageID)
-	if err := hExpectCode(code, line, 430); err != nil {
+	code, line := c.Cmd("STAT %s", a.MessageID)
+	if err := client.ExpectCode(code, line, 430); err != nil {
 		t.Fatalf("first STAT: %v", err)
 	}
 	if n := proc.findCount(); n != 1 {
 		t.Fatalf("first STAT: findCount %d, want 1", n)
 	}
 	// A definite miss is remembered: the second STAT is answered from local430.
-	code, line = c.cmd(t, "STAT %s", a.MessageID)
-	if err := hExpectCode(code, line, 430); err != nil {
+	code, line = c.Cmd("STAT %s", a.MessageID)
+	if err := client.ExpectCode(code, line, 430); err != nil {
 		t.Fatalf("second STAT: %v", err)
 	}
 	if n := proc.findCount(); n != 1 {
@@ -843,11 +844,11 @@ func artLocal430Miss(t *testing.T, test string) *artLocal430Env {
 // the T-nntp-article-1 known-bug path, which runs to the end of the window while
 // the bug is open (the cached miss lives for the 60 s local430 TTL), so a long
 // window would only slow every run. 1 s is still 60x under that TTL.
-func artPollStat223(t *testing.T, c *hClient, a hArticle) error {
+func artPollStat223(t *testing.T, c *client.Conn, a hArticle) error {
 	t.Helper()
 	deadline := time.Now().Add(time.Second) // deliberate short window, see above
 	for {
-		code, line := c.cmd(t, "STAT %s", a.MessageID)
+		code, line := c.Cmd("STAT %s", a.MessageID)
 		// RFC 3977 §6.2.4.2: 223 n message-id; §6.2.1.2: no group selected → n is 0.
 		err := artCheckStatus(code, line, 223, 0, a.MessageID)
 		if err == nil || time.Now().After(deadline) {
@@ -871,28 +872,28 @@ func TestArtLocal430(t *testing.T) {
 		// A peer with transfer permission delivers the article.
 		user, pass := hUser(t, true, true)
 		peer := env.hs.dial(t)
-		code, line := peer.cmd(t, "AUTHINFO USER %s", user)
-		if err := hExpectCode(code, line, 381); err != nil {
+		code, line := peer.Cmd("AUTHINFO USER %s", user)
+		if err := client.ExpectCode(code, line, 381); err != nil {
 			t.Fatalf("AUTHINFO USER: %v", err)
 		}
-		code, line = peer.cmd(t, "AUTHINFO PASS %s", pass)
-		if err := hExpectCode(code, line, 281); err != nil {
+		code, line = peer.Cmd("AUTHINFO PASS %s", pass)
+		if err := client.ExpectCode(code, line, 281); err != nil {
 			t.Fatalf("AUTHINFO PASS: %v", err)
 		}
 		// RFC 3977 §6.3.2.2: IHAVE of a wanted article → 335, then 235 after transfer.
-		code, line = peer.cmd(t, "IHAVE %s", env.a.MessageID)
-		if err := hExpectCode(code, line, 335); err != nil {
+		code, line = peer.Cmd("IHAVE %s", env.a.MessageID)
+		if err := client.ExpectCode(code, line, 335); err != nil {
 			t.Fatalf("IHAVE: %v", err)
 		}
 		raw := string(artCRLF(artHeaderLines(env.a)...)) + CRLF + string(artCRLF(artBodyLines(env.a)...)) + ".\r\n"
-		if err := peer.send(raw); err != nil {
+		if err := peer.Send(raw); err != nil {
 			t.Fatalf("send article: %v", err)
 		}
-		code, line, err := peer.readStatus()
+		code, line, err := peer.ReadStatus()
 		if err != nil {
 			t.Fatalf("IHAVE transfer reply: %v (%q)", err, line)
 		}
-		if err := hExpectCode(code, line, 235); err != nil {
+		if err := client.ExpectCode(code, line, 235); err != nil {
 			t.Fatalf("IHAVE transfer: %v", err)
 		}
 		// BUG-8: the 235 removed the cached miss (checked on the table: the arrival grace of
@@ -905,7 +906,7 @@ func TestArtLocal430(t *testing.T) {
 		hArticleSQL(t, env.g, env.a)
 		env.arrived.Store(true)
 
-		code, line = env.c.cmd(t, "STAT %s", env.a.MessageID)
+		code, line = env.c.Cmd("STAT %s", env.a.MessageID)
 		// RFC 3977 §6.2.4.2: 223 n message-id; §6.2.1.2: no group selected → n is 0.
 		if err := artCheckStatus(code, line, 223, 0, env.a.MessageID); err != nil {
 			t.Fatalf("STAT after IHAVE 235: %v", err)
@@ -950,7 +951,7 @@ func TestArtNoDelay(t *testing.T) {
 	before := hs.S.ArticleDelayCount()
 	const n = 50
 	for i := 0; i < n; i++ {
-		code, line := c.cmd(t, "STAT 1")
+		code, line := c.Cmd("STAT 1")
 		// RFC 3977 §6.2.4.2: 223 n message-id.
 		if err := artCheckStatus(code, line, 223, 1, a1.MessageID); err != nil {
 			t.Fatalf("STAT %d: %v", i, err)
@@ -969,7 +970,7 @@ func TestArtNoDelay(t *testing.T) {
 		{"message-id", a1.MessageID, 1},
 	} {
 		before := hs.S.ArticleDelayCount()
-		code, line := c.cmd(t, "STAT %s", tc.arg)
+		code, line := c.Cmd("STAT %s", tc.arg)
 		if err := artCheckStatus(code, line, 223, tc.num, a1.MessageID); err != nil {
 			t.Fatalf("STAT by %s: %v", tc.name, err)
 		}
@@ -1009,7 +1010,7 @@ func TestArtHidden(t *testing.T) {
 		for _, cmd := range artCmds {
 			code, line, _ := artDo(t, c, "%s 2", cmd.name)
 			// A hidden article answers as if it did not exist: 423 (RFC 3977 §6.2.1.2).
-			if err := hExpectCode(code, line, 423); err != nil {
+			if err := client.ExpectCode(code, line, 423); err != nil {
 				t.Errorf("%s 2: %v", cmd.name, err)
 			}
 		}
@@ -1024,7 +1025,7 @@ func TestArtHidden(t *testing.T) {
 		artSelect(t, c, g)
 		for _, cmd := range artCmds {
 			code, line, _ := artDo(t, c, "%s %s", cmd.name, a2.MessageID)
-			if err := hExpectCode(code, line, 430); err != nil {
+			if err := client.ExpectCode(code, line, 430); err != nil {
 				t.Errorf("%s %s: %v", cmd.name, a2.MessageID, err)
 			}
 		}
@@ -1054,8 +1055,8 @@ func TestArtHidden(t *testing.T) {
 				artSelect(t, c, gA)
 			}
 			before := proc.findCount()
-			code, line := c.cmd(t, "STAT %s", a2.MessageID)
-			if err := hExpectCode(code, line, 430); err != nil {
+			code, line := c.Cmd("STAT %s", a2.MessageID)
+			if err := client.ExpectCode(code, line, 430); err != nil {
 				t.Errorf("STAT %s (group %s selected %v): %v", a2.MessageID, gA, selected, err)
 			}
 			if proc.findCount() <= before {
@@ -1080,7 +1081,7 @@ func TestArtNotFoundTexts(t *testing.T) {
 	artSelect(t, c, g)
 	for _, cmd := range artCmds {
 		code, line, _ := artDo(t, c, "%s %s", cmd.name, missing)
-		if err := hExpectCode(code, line, 430); err != nil {
+		if err := client.ExpectCode(code, line, 430); err != nil {
 			t.Fatalf("%s %s: %v", cmd.name, missing, err)
 		}
 		lines = append(lines, line)
@@ -1091,8 +1092,8 @@ func TestArtNotFoundTexts(t *testing.T) {
 	hsP := newTestServer(t, hServerOpts{Proc: proc})
 	cP := hsP.dial(t)
 	for i := 0; i < 2; i++ {
-		code, line := cP.cmd(t, "STAT %s", missing)
-		if err := hExpectCode(code, line, 430); err != nil {
+		code, line := cP.Cmd("STAT %s", missing)
+		if err := client.ExpectCode(code, line, 430); err != nil {
 			t.Fatalf("STAT %s round %d: %v", missing, i, err)
 		}
 		lines = append(lines, line)
@@ -1125,7 +1126,7 @@ func TestArtNotFoundTexts(t *testing.T) {
 type artGraceEnv struct {
 	proc   *hFakeProcessor
 	hs     *hServer
-	poster *hClient
+	poster *client.Conn
 }
 
 // artGraceServer is newTestServer with Config.Hostname set before Serve, so no connection
@@ -1193,20 +1194,20 @@ func artGraceRaw(newsgroups string, a hArticle) string {
 // artGraceTransfer delivers a with the Newsgroups header newsgroups by cmd (POST, IHAVE or
 // TAKETHIS) on c and expects the success reply (RFC 3977 §6.3.1.2: 240, §6.3.2.2: 235;
 // RFC 4644 §2.5.2: 239).
-func artGraceTransfer(t *testing.T, c *hClient, cmd, newsgroups string, a hArticle) {
+func artGraceTransfer(t *testing.T, c *client.Conn, cmd, newsgroups string, a hArticle) {
 	t.Helper()
 	raw := artGraceRaw(newsgroups, a)
 	want := 0
 	switch cmd {
 	case "POST":
-		code, line := c.cmd(t, "POST")
-		if err := hExpectCode(code, line, 340); err != nil {
+		code, line := c.For(t).Cmd("POST")
+		if err := client.ExpectCode(code, line, 340); err != nil {
 			t.Fatalf("POST: %v", err)
 		}
 		want = 240
 	case "IHAVE":
-		code, line := c.cmd(t, "IHAVE %s", a.MessageID)
-		if err := hExpectCode(code, line, 335); err != nil {
+		code, line := c.For(t).Cmd("IHAVE %s", a.MessageID)
+		if err := client.ExpectCode(code, line, 335); err != nil {
 			t.Fatalf("IHAVE: %v", err)
 		}
 		want = 235
@@ -1216,14 +1217,14 @@ func artGraceTransfer(t *testing.T, c *hClient, cmd, newsgroups string, a hArtic
 	default:
 		t.Fatalf("unknown transfer command %s", cmd)
 	}
-	if err := c.send(raw); err != nil {
+	if err := c.Send(raw); err != nil {
 		t.Fatalf("%s: send article: %v", cmd, err)
 	}
-	code, line, err := c.readStatus()
+	code, line, err := c.ReadStatus()
 	if err != nil {
 		t.Fatalf("%s reply: %v (%q)", cmd, err, line)
 	}
-	if err := hExpectCode(code, line, want); err != nil {
+	if err := client.ExpectCode(code, line, want); err != nil {
 		t.Fatalf("%s transfer: %v", cmd, err)
 	}
 }
@@ -1239,7 +1240,7 @@ func artLocal430Has(hs *hServer, messageID string) bool {
 // artGraceReads checks every by-message-id read on c (no group selected): STAT/HEAD/BODY/
 // ARTICLE answer with number 0 (RFC 3977 §6.2.1.2), OVER 224 (§8.3.2), HDR 225 (§8.5.2),
 // XHDR 221 with "<message-id> <value>".
-func artGraceReads(t *testing.T, c *hClient, a hArticle) {
+func artGraceReads(t *testing.T, c *client.Conn, a hArticle) {
 	t.Helper()
 	for _, cmd := range artCmds {
 		code, line, _ := artDo(t, c, "%s %s", cmd.name, a.MessageID)
@@ -1247,22 +1248,22 @@ func artGraceReads(t *testing.T, c *hClient, a hArticle) {
 			t.Errorf("%s %s: %v", cmd.name, a.MessageID, err)
 		}
 	}
-	code, line := c.cmd(t, "OVER %s", a.MessageID)
-	if err := hExpectCode(code, line, 224); err != nil {
+	code, line := c.For(t).Cmd("OVER %s", a.MessageID)
+	if err := client.ExpectCode(code, line, 224); err != nil {
 		t.Errorf("OVER %s: %v", a.MessageID, err)
-	} else if lines := c.readDotLines(t); len(lines) != 1 || !strings.HasPrefix(lines[0], "0\t"+a.Subject+"\t") {
+	} else if lines := c.For(t).ReadDotLines(); len(lines) != 1 || !strings.HasPrefix(lines[0], "0\t"+a.Subject+"\t") {
 		t.Errorf("OVER %s: %q, want one line for article 0", a.MessageID, lines)
 	}
-	code, line = c.cmd(t, "HDR Subject %s", a.MessageID)
-	if err := hExpectCode(code, line, 225); err != nil {
+	code, line = c.For(t).Cmd("HDR Subject %s", a.MessageID)
+	if err := client.ExpectCode(code, line, 225); err != nil {
 		t.Errorf("HDR Subject %s: %v", a.MessageID, err)
-	} else if lines := c.readDotLines(t); len(lines) != 1 || lines[0] != "0 "+a.Subject {
+	} else if lines := c.For(t).ReadDotLines(); len(lines) != 1 || lines[0] != "0 "+a.Subject {
 		t.Errorf("HDR Subject %s: %q, want [%q]", a.MessageID, lines, "0 "+a.Subject)
 	}
-	code, line = c.cmd(t, "XHDR Subject %s", a.MessageID)
-	if err := hExpectCode(code, line, 221); err != nil {
+	code, line = c.Cmd("XHDR Subject %s", a.MessageID)
+	if err := client.ExpectCode(code, line, 221); err != nil {
 		t.Errorf("XHDR Subject %s: %v", a.MessageID, err)
-	} else if lines := c.readDotLines(t); len(lines) != 1 || lines[0] != a.MessageID+" "+a.Subject {
+	} else if lines := c.ReadDotLines(); len(lines) != 1 || lines[0] != a.MessageID+" "+a.Subject {
 		t.Errorf("XHDR Subject %s: %q, want [%q]", a.MessageID, lines, a.MessageID+" "+a.Subject)
 	}
 }
@@ -1316,7 +1317,7 @@ func TestArtArrivalGrace(t *testing.T) {
 				t.Errorf("local430 holds %s after %s", a.MessageID, cmd)
 			}
 			// a new connection
-			code, line := env.hs.dial(t).cmd(t, "STAT %s", a.MessageID)
+			code, line := env.hs.dial(t).Cmd("STAT %s", a.MessageID)
 			if err := artCheckStatus(code, line, 223, 0, a.MessageID); err != nil {
 				t.Errorf("STAT on a new connection: %v", err)
 			}
@@ -1356,7 +1357,7 @@ func TestArtArrivalGrace(t *testing.T) {
 		if groups, ok := env.hs.S.recentArrivals.RecentArrival(a.MessageID); !ok || len(groups) != 2 || groups[0] != ghost {
 			t.Fatalf("recentArrivals: %q %v, want [%s %s]", groups, ok, ghost, g)
 		}
-		code, line := env.hs.dial(t).cmd(t, "STAT %s", a.MessageID)
+		code, line := env.hs.dial(t).Cmd("STAT %s", a.MessageID)
 		if err := artCheckStatus(code, line, 223, 0, a.MessageID); err != nil {
 			t.Fatalf("STAT with an unknown first hint: %v", err)
 		}
@@ -1379,8 +1380,8 @@ func TestArtArrivalGrace(t *testing.T) {
 		reader := env.hs.dial(t)
 		for i := 0; i < 2; i++ {
 			before := env.proc.findCount()
-			code, line := reader.cmd(t, "STAT %s", a.MessageID)
-			if err := hExpectCode(code, line, 430); err != nil {
+			code, line := reader.Cmd("STAT %s", a.MessageID)
+			if err := client.ExpectCode(code, line, 430); err != nil {
 				t.Fatalf("STAT %d before the commit: %v", i, err)
 			}
 			// the history is asked every time: not answered from local430
@@ -1392,7 +1393,7 @@ func TestArtArrivalGrace(t *testing.T) {
 			}
 		}
 		hArticleSQL(t, g, a) // the batch writer commits
-		code, line := reader.cmd(t, "STAT %s", a.MessageID)
+		code, line := reader.Cmd("STAT %s", a.MessageID)
 		if err := artCheckStatus(code, line, 223, 0, a.MessageID); err != nil {
 			t.Fatalf("STAT after the commit: %v", err)
 		}
@@ -1420,16 +1421,16 @@ func TestArtArrivalGrace(t *testing.T) {
 			t.Fatalf("%s is still a recent arrival after ArrivalGrace", a.MessageID)
 		}
 		reader := env.hs.dial(t)
-		code, line := reader.cmd(t, "STAT %s", a.MessageID)
-		if err := hExpectCode(code, line, 430); err != nil {
+		code, line := reader.Cmd("STAT %s", a.MessageID)
+		if err := client.ExpectCode(code, line, 430); err != nil {
 			t.Fatalf("STAT after the grace: %v", err)
 		}
 		if !artLocal430Has(env.hs, a.MessageID) {
 			t.Fatalf("a miss after the grace is not cached in local430")
 		}
 		before := env.proc.findCount()
-		code, line = reader.cmd(t, "STAT %s", a.MessageID)
-		if err := hExpectCode(code, line, 430); err != nil {
+		code, line = reader.Cmd("STAT %s", a.MessageID)
+		if err := client.ExpectCode(code, line, 430); err != nil {
 			t.Fatalf("second STAT after the grace: %v", err)
 		}
 		if n := env.proc.findCount(); n != before {

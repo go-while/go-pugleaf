@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // authNewUser inserts an active-or-inactive NNTP user named t2user<seq> with
@@ -56,24 +57,24 @@ func authMessageID(test string) string {
 // authLogin sends AUTHINFO USER (asserting 381, RFC 4643 §2.3.2) and then
 // AUTHINFO PASS, and returns the reply to PASS. pass is sent verbatim, so it
 // may contain spaces.
-func authLogin(t *testing.T, c *hClient, user, pass string) (int, string) {
+func authLogin(t *testing.T, c *client.Conn, user, pass string) (int, string) {
 	t.Helper()
-	code, line := c.cmd(t, "AUTHINFO USER %s", user)
-	if err := hExpectCode(code, line, 381); err != nil {
+	code, line := c.Cmd("AUTHINFO USER %s", user)
+	if err := client.ExpectCode(code, line, 381); err != nil {
 		t.Fatalf("AUTHINFO USER %s: %v", user, err)
 	}
 	// AUTHINFO PASS runs a bcrypt compare (plus the failure delay) on the server;
 	// the client's per-command deadline is the harness hang guard hDeadline, which
 	// leaves room for that under -race on a loaded host.
-	code, line = c.cmd(t, "AUTHINFO PASS %s", pass)
+	code, line = c.Cmd("AUTHINFO PASS %s", pass)
 	return code, line
 }
 
 // authMustLogin is authLogin that requires 281 (RFC 4643 §2.3.2).
-func authMustLogin(t *testing.T, c *hClient, user, pass string) {
+func authMustLogin(t *testing.T, c *client.Conn, user, pass string) {
 	t.Helper()
 	code, line := authLogin(t, c, user, pass)
-	if err := hExpectCode(code, line, 281); err != nil {
+	if err := client.ExpectCode(code, line, 281); err != nil {
 		t.Fatalf("login %s: %v", user, err)
 	}
 }
@@ -92,12 +93,12 @@ func TestAuthUserPass(t *testing.T) {
 	user, pass, _ := authNewUser(t, true, true, 10, "")
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "AUTHINFO USER %s", user)
-	if err := hExpectCode(code, line, 381); err != nil {
+	code, line := c.Cmd("AUTHINFO USER %s", user)
+	if err := client.ExpectCode(code, line, 381); err != nil {
 		t.Fatalf("AUTHINFO USER: %v", err)
 	}
-	code, line = c.cmd(t, "AUTHINFO PASS %s", pass)
-	if err := hExpectCode(code, line, 281); err != nil {
+	code, line = c.Cmd("AUTHINFO PASS %s", pass)
+	if err := client.ExpectCode(code, line, 281); err != nil {
 		t.Fatalf("AUTHINFO PASS: %v", err)
 	}
 }
@@ -111,13 +112,13 @@ func TestAuthFailures(t *testing.T) {
 	c := hs.dial(t)
 
 	code, wrongLine := authLogin(t, c, user, "definitely-not-the-password")
-	if err := hExpectCode(code, wrongLine, 481); err != nil {
+	if err := client.ExpectCode(code, wrongLine, 481); err != nil {
 		t.Fatalf("wrong password: %v", err)
 	}
 
 	unknown := fmt.Sprintf("t2user%04d-unknown", hSeq.Add(1))
 	code, unknownLine := authLogin(t, c, unknown, "whatever-password")
-	if err := hExpectCode(code, unknownLine, 481); err != nil {
+	if err := client.ExpectCode(code, unknownLine, 481); err != nil {
 		t.Fatalf("unknown user: %v", err)
 	}
 	if authReplyText(wrongLine) != authReplyText(unknownLine) {
@@ -133,8 +134,8 @@ func TestAuthArgErrors(t *testing.T) {
 	// 482 (authentication commands issued out of sequence).
 	t.Run("pass-before-user", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "AUTHINFO PASS some-password")
-		if err := hExpectCode(code, line, 482); err != nil {
+		code, line := c.Cmd("AUTHINFO PASS some-password")
+		if err := client.ExpectCode(code, line, 482); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -142,15 +143,15 @@ func TestAuthArgErrors(t *testing.T) {
 	// RFC 3977 §3.2.1 / RFC 4643 §2.3.2: a missing argument is a syntax error, 501.
 	t.Run("no-subcommand", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "AUTHINFO")
-		if err := hExpectCode(code, line, 501); err != nil {
+		code, line := c.Cmd("AUTHINFO")
+		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("user-without-name", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "AUTHINFO USER")
-		if err := hExpectCode(code, line, 501); err != nil {
+		code, line := c.Cmd("AUTHINFO USER")
+		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -159,8 +160,8 @@ func TestAuthArgErrors(t *testing.T) {
 	// syntax error, 501, not 500 (unknown command). RFC-5: the server sends 500.
 	t.Run("unknown-subcommand", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "AUTHINFO FOO x")
-		if err := hExpectCode(code, line, 501); err != nil {
+		code, line := c.Cmd("AUTHINFO FOO x")
+		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -174,14 +175,14 @@ func TestAuthSecondAuthinfo(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 	authMustLogin(t, c, user, pass)
-	code, line := c.cmd(t, "AUTHINFO USER %s", user)
-	err := hExpectCode(code, line, 502)
-	code, line = c.cmd(t, "AUTHINFO PASS %s", pass)
-	if err2 := hExpectCode(code, line, 502); err2 != nil {
+	code, line := c.Cmd("AUTHINFO USER %s", user)
+	err := client.ExpectCode(code, line, 502)
+	code, line = c.Cmd("AUTHINFO PASS %s", pass)
+	if err2 := client.ExpectCode(code, line, 502); err2 != nil {
 		err = errors.Join(err, fmt.Errorf("AUTHINFO PASS after login: %w", err2))
 	}
-	code, line = c.cmd(t, "AUTHINFO")
-	if err3 := hExpectCode(code, line, 502); err3 != nil {
+	code, line = c.Cmd("AUTHINFO")
+	if err3 := client.ExpectCode(code, line, 502); err3 != nil {
 		err = errors.Join(err, fmt.Errorf("bare AUTHINFO after login: %w", err3))
 	}
 	if err != nil {
@@ -196,7 +197,7 @@ func TestAuthInactiveUser(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 	code, line := authLogin(t, c, user, pass)
-	if err := hExpectCode(code, line, 481); err != nil {
+	if err := client.ExpectCode(code, line, 481); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -221,7 +222,7 @@ func TestAuthPasswordWithSpace(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 	code, line := authLogin(t, c, user, pass)
-	if err := hExpectCode(code, line, 281); err != nil {
+	if err := client.ExpectCode(code, line, 281); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -238,14 +239,14 @@ func TestAuthFailureDelay(t *testing.T) {
 	unknown := fmt.Sprintf("t2user%04d-nodelay", hSeq.Add(1))
 	minTook := time.Duration(1<<63 - 1)
 	for i := 0; i < 3; i++ {
-		code, line := c.cmd(t, "AUTHINFO USER %s", unknown)
-		if err := hExpectCode(code, line, 381); err != nil {
+		code, line := c.Cmd("AUTHINFO USER %s", unknown)
+		if err := client.ExpectCode(code, line, 381); err != nil {
 			t.Fatalf("AUTHINFO USER: %v", err)
 		}
 		start := time.Now()
-		code, line = c.cmd(t, "AUTHINFO PASS wrong-password-%d", i)
+		code, line = c.Cmd("AUTHINFO PASS wrong-password-%d", i)
 		took := time.Since(start)
-		if err := hExpectCode(code, line, 481); err != nil {
+		if err := client.ExpectCode(code, line, 481); err != nil {
 			t.Fatalf("AUTHINFO PASS: %v", err)
 		}
 		if took < minTook {
@@ -270,15 +271,15 @@ func TestAuthPostingGates(t *testing.T) {
 	reader, readerPass, _ := authNewUser(t, false, true, 10, "")
 	poster, posterPass, _ := authNewUser(t, true, true, 10, "")
 
-	takethis := func(t *testing.T, c *hClient, test string) (int, string) {
+	takethis := func(t *testing.T, c *client.Conn, test string) (int, string) {
 		t.Helper()
 		id := authMessageID(test)
 		article := "Message-ID: " + id + "\r\nNewsgroups: t2.gates.1\r\nFrom: t2 <t2@test.invalid>\r\n" +
 			"Subject: gate\r\n\r\nbody\r\n.\r\n"
-		if err := c.send("TAKETHIS " + id + "\r\n" + article); err != nil {
+		if err := c.Send("TAKETHIS " + id + "\r\n" + article); err != nil {
 			t.Fatalf("send TAKETHIS: %v", err)
 		}
-		code, line, err := c.readStatus()
+		code, line, err := c.ReadStatus()
 		if err != nil {
 			t.Fatalf("TAKETHIS reply: %v (%q)", err, line)
 		}
@@ -289,16 +290,16 @@ func TestAuthPostingGates(t *testing.T) {
 	// gives 480 before the client has authenticated.
 	t.Run("unauthenticated", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "POST")
-		if err := hExpectCode(code, line, 480); err != nil {
+		code, line := c.Cmd("POST")
+		if err := client.ExpectCode(code, line, 480); err != nil {
 			t.Errorf("POST: %v", err)
 		}
-		code, line = c.cmd(t, "IHAVE %s", authMessageID("gates"))
-		if err := hExpectCode(code, line, 480); err != nil {
+		code, line = c.Cmd("IHAVE %s", authMessageID("gates"))
+		if err := client.ExpectCode(code, line, 480); err != nil {
 			t.Errorf("IHAVE: %v", err)
 		}
 		code, line = takethis(t, c, "gates")
-		if err := hExpectCode(code, line, 480); err != nil {
+		if err := client.ExpectCode(code, line, 480); err != nil {
 			t.Errorf("TAKETHIS: %v", err)
 		}
 	})
@@ -308,8 +309,8 @@ func TestAuthPostingGates(t *testing.T) {
 	t.Run("no-posting-ihave", func(t *testing.T) {
 		c := hs.dial(t)
 		authMustLogin(t, c, reader, readerPass)
-		code, line := c.cmd(t, "IHAVE %s", authMessageID("gates"))
-		if err := hExpectCode(code, line, 502); err != nil {
+		code, line := c.Cmd("IHAVE %s", authMessageID("gates"))
+		if err := client.ExpectCode(code, line, 502); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -319,8 +320,8 @@ func TestAuthPostingGates(t *testing.T) {
 	t.Run("no-posting-post", func(t *testing.T) {
 		c := hs.dial(t)
 		authMustLogin(t, c, reader, readerPass)
-		code, line := c.cmd(t, "POST")
-		if err := hExpectCode(code, line, 440); err != nil {
+		code, line := c.Cmd("POST")
+		if err := client.ExpectCode(code, line, 440); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -331,23 +332,23 @@ func TestAuthPostingGates(t *testing.T) {
 	t.Run("posting-allowed", func(t *testing.T) {
 		c := hs.dial(t)
 		authMustLogin(t, c, poster, posterPass)
-		code, line := c.cmd(t, "IHAVE %s", authMessageID("gates"))
-		if err := hExpectCode(code, line, 435); err != nil {
+		code, line := c.Cmd("IHAVE %s", authMessageID("gates"))
+		if err := client.ExpectCode(code, line, 435); err != nil {
 			t.Errorf("IHAVE: %v", err)
 		}
 		code, line = takethis(t, c, "gates")
-		if err := hExpectCode(code, line, 439); err != nil {
+		if err := client.ExpectCode(code, line, 439); err != nil {
 			t.Errorf("TAKETHIS: %v", err)
 		}
-		code, line = c.cmd(t, "POST")
-		if err := hExpectCode(code, line, 340); err != nil {
+		code, line = c.Cmd("POST")
+		if err := client.ExpectCode(code, line, 340); err != nil {
 			t.Fatalf("POST: %v", err)
 		}
 		// An empty article: any status line keeps the session in sync.
-		if err := c.send(".\r\n"); err != nil {
+		if err := c.Send(".\r\n"); err != nil {
 			t.Fatalf("send article: %v", err)
 		}
-		if _, line, err := c.readStatus(); err != nil {
+		if _, line, err := c.ReadStatus(); err != nil {
 			t.Fatalf("POST result: %v (%q)", err, line)
 		}
 	})
@@ -382,7 +383,7 @@ func TestAuthCacheDeactivated(t *testing.T) {
 	}
 	c2 := hs.dial(t)
 	code, line := authLogin(t, c2, user, pass)
-	if err := hExpectCode(code, line, 481); err != nil {
+	if err := client.ExpectCode(code, line, 481); err != nil {
 		t.Fatalf("login after DeactivateNNTPUser: %v", err)
 	}
 }
@@ -412,7 +413,7 @@ func TestAuthCacheOldPassword(t *testing.T) {
 	}
 	c2 := hs.dial(t)
 	code, line := authLogin(t, c2, user, oldPass)
-	if err := hExpectCode(code, line, 481); err != nil {
+	if err := client.ExpectCode(code, line, 481); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -426,12 +427,12 @@ func TestAuthCacheOldPassword(t *testing.T) {
 func TestAuthPlaintextNotOffered(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "CAPABILITIES")
-	if err := hExpectCode(code, line, 101); err != nil {
+	code, line := c.Cmd("CAPABILITIES")
+	if err := client.ExpectCode(code, line, 101); err != nil {
 		t.Fatal(err)
 	}
 	advertised := false
-	for _, capLine := range c.readDotLines(t) {
+	for _, capLine := range c.ReadDotLines() {
 		f := strings.Fields(strings.ToUpper(capLine))
 		if len(f) > 0 && f[0] == "AUTHINFO" {
 			for _, arg := range f[1:] {
@@ -442,7 +443,7 @@ func TestAuthPlaintextNotOffered(t *testing.T) {
 		}
 	}
 	user := fmt.Sprintf("t2user%04d", hSeq.Add(1))
-	code, line = c.cmd(t, "AUTHINFO USER %s", user)
+	code, line = c.Cmd("AUTHINFO USER %s", user)
 	var err error
 	if code != 483 && advertised {
 		err = fmt.Errorf("non-TLS: AUTHINFO USER advertised in CAPABILITIES and answered %q, want 483 or not advertised", line)
@@ -464,11 +465,11 @@ func TestAuthUserMaxConns(t *testing.T) {
 		authMustLogin(t, c1, user, pass)
 		c2 := hs.dial(t)
 		code, line := authLogin(t, c2, user, pass)
-		if err := hExpectCode(code, line, 481); err != nil {
+		if err := client.ExpectCode(code, line, 481); err != nil {
 			t.Fatalf("second connection: %v", err)
 		}
-		code, line = c1.cmd(t, "QUIT")
-		if err := hExpectCode(code, line, 205); err != nil {
+		code, line = c1.Cmd("QUIT")
+		if err := client.ExpectCode(code, line, 205); err != nil {
 			t.Fatalf("QUIT: %v", err)
 		}
 		// The slot is released when the first handler ends (asynchronously).

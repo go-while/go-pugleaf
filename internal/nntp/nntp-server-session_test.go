@@ -34,6 +34,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // sessKnownCommands is the dispatch table of handleCommand (nntp-server-cliconns.go).
@@ -60,7 +61,7 @@ func sessIsTimeout(err error) bool {
 // (any lines it sends first, such as a 400, are allowed), or an error when the
 // connection is still open after d. d is a hang guard: every caller expects a
 // close, so a shorter value is raised to hDeadline.
-func sessExpectClosed(c *hClient, d time.Duration) error {
+func sessExpectClosed(c *client.Conn, d time.Duration) error {
 	d = max(d, hDeadline)
 	end := time.Now().Add(d)
 	var lines []string
@@ -70,7 +71,7 @@ func sessExpectClosed(c *hClient, d time.Duration) error {
 			return fmt.Errorf("connection still open after %s (lines %q)", d, lines)
 		}
 		c.Deadline = left
-		line, err := c.readLine()
+		line, err := c.ReadLine()
 		if err != nil {
 			if sessIsTimeout(err) {
 				return fmt.Errorf("connection still open after %s (lines %q)", d, lines)
@@ -99,26 +100,26 @@ func sessUser(t *testing.T, posting bool) (user, pass string) {
 }
 
 // sessAuth runs AUTHINFO USER/PASS and requires 381 then 281 (RFC 4643 §2.3).
-func sessAuth(t *testing.T, c *hClient, user, pass string) {
+func sessAuth(t *testing.T, c *client.Conn, user, pass string) {
 	t.Helper()
-	code, line := c.cmd(t, "AUTHINFO USER %s", user)
-	if err := hExpectCode(code, line, 381); err != nil {
+	code, line := c.Cmd("AUTHINFO USER %s", user)
+	if err := client.ExpectCode(code, line, 381); err != nil {
 		t.Fatalf("AUTHINFO USER: %v", err)
 	}
-	code, line = c.cmd(t, "AUTHINFO PASS %s", pass)
-	if err := hExpectCode(code, line, 281); err != nil {
+	code, line = c.Cmd("AUTHINFO PASS %s", pass)
+	if err := client.ExpectCode(code, line, 281); err != nil {
 		t.Fatalf("AUTHINFO PASS: %v", err)
 	}
 }
 
 // sessCaps runs CAPABILITIES and returns the capability lines (RFC 3977 §5.2.2: 101 + list).
-func sessCaps(t *testing.T, c *hClient) []string {
+func sessCaps(t *testing.T, c *client.Conn) []string {
 	t.Helper()
-	code, line := c.cmd(t, "CAPABILITIES")
-	if err := hExpectCode(code, line, 101); err != nil {
+	code, line := c.Cmd("CAPABILITIES")
+	if err := client.ExpectCode(code, line, 101); err != nil {
 		t.Fatalf("CAPABILITIES: %v", err)
 	}
-	return c.readDotLines(t)
+	return c.ReadDotLines()
 }
 
 // sessHasCap reports whether a capability line starts with label (case-insensitive).
@@ -168,25 +169,25 @@ func TestSessGreeting(t *testing.T) {
 	t.Run("with-processor", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
 		c := hs.dial(t)
-		code, err := hParseCode(c.Greeting)
+		code, err := client.ParseCode(c.Greeting)
 		if err != nil {
 			t.Fatal(err)
 		}
 		// RFC 3977 §5.1.1: 200 "service available, posting allowed".
-		if err := hExpectCode(code, c.Greeting, 200); err != nil {
+		if err := client.ExpectCode(code, c.Greeting, 200); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("read-only", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
 		c := hs.dial(t)
-		code, err := hParseCode(c.Greeting)
+		code, err := client.ParseCode(c.Greeting)
 		if err != nil {
 			t.Fatal(err)
 		}
 		// RFC 3977 §5.1.1: without a processor nothing can be posted, so the
 		// greeting is 201 "service available, posting prohibited".
-		if err := hExpectCode(code, c.Greeting, 201); err != nil {
+		if err := client.ExpectCode(code, c.Greeting, 201); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -264,7 +265,7 @@ func TestSessCapabilities(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
 		c := hs.dial(t)
 		caps := sessCaps(t, c)
-		code, line := c.cmd(t, "MODE STREAM")
+		code, line := c.Cmd("MODE STREAM")
 		// RFC 4644 §2.2: STREAMING may be advertised only when MODE STREAM, CHECK
 		// and TAKETHIS are implemented: STREAMING is listed iff MODE STREAM gives 203.
 		if has := sessHasCap(caps, "STREAMING"); has != (code == 203) {
@@ -273,7 +274,7 @@ func TestSessCapabilities(t *testing.T) {
 	})
 	t.Run("processor-streaming-complete", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
-		code, line := hs.dial(t).cmd(t, "MODE STREAM")
+		code, line := hs.dial(t).Cmd("MODE STREAM")
 		// RFC 4644 §2.2/§2.3: TAKETHIS is dispatched, so the rest of streaming is
 		// expected too (MODE STREAM → 203, CHECK, the STREAMING capability).
 		var err error
@@ -335,42 +336,42 @@ func TestSessCapabilities(t *testing.T) {
 func TestSessMode(t *testing.T) {
 	t.Run("reader-with-processor", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
-		code, line := hs.dial(t).cmd(t, "MODE READER")
+		code, line := hs.dial(t).Cmd("MODE READER")
 		// RFC 3977 §5.3.2: 200 (posting allowed) or 201 (posting prohibited).
-		if err := hExpectCode(code, line, 200, 201); err != nil {
+		if err := client.ExpectCode(code, line, 200, 201); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("reader-read-only", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
-		code, line := hs.dial(t).cmd(t, "MODE READER")
+		code, line := hs.dial(t).Cmd("MODE READER")
 		// RFC 3977 §5.3.2: posting is not possible without a processor → 201.
-		if err := hExpectCode(code, line, 201); err != nil {
+		if err := client.ExpectCode(code, line, 201); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("no-argument", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
-		code, line := hs.dial(t).cmd(t, "MODE")
+		code, line := hs.dial(t).Cmd("MODE")
 		// RFC 3977 §3.2.1: 501 syntax error in the arguments.
-		if err := hExpectCode(code, line, 501); err != nil {
+		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("stream", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
-		code, line := hs.dial(t).cmd(t, "MODE STREAM")
+		code, line := hs.dial(t).Cmd("MODE STREAM")
 		// RFC 4644 §2.3: 203 streaming permitted; a server without streaming
 		// answers the unknown MODE variant with 501 (RFC 3977 §3.2.1).
-		if err := hExpectCode(code, line, 203, 501); err != nil {
+		if err := client.ExpectCode(code, line, 203, 501); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("unknown-variant", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
-		code, line := hs.dial(t).cmd(t, "MODE FOO")
+		code, line := hs.dial(t).Cmd("MODE FOO")
 		// RFC 3977 §3.2.1: an unknown variant of a known command is a syntax error → 501.
-		if err := hExpectCode(code, line, 501); err != nil {
+		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -379,17 +380,17 @@ func TestSessMode(t *testing.T) {
 func TestSessHelp(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "HELP")
+	code, line := c.Cmd("HELP")
 	// RFC 3977 §7.2: 100 followed by a dot-terminated multi-line help text.
-	if err := hExpectCode(code, line, 100); err != nil {
+	if err := client.ExpectCode(code, line, 100); err != nil {
 		t.Fatal(err)
 	}
-	if body := c.readDotLines(t); len(body) == 0 {
+	if body := c.ReadDotLines(); len(body) == 0 {
 		t.Fatal("HELP: empty help text")
 	}
 	// The connection stays usable after the block.
-	code, line = c.cmd(t, "MODE READER")
-	if err := hExpectCode(code, line, 200, 201); err != nil {
+	code, line = c.Cmd("MODE READER")
+	if err := client.ExpectCode(code, line, 200, 201); err != nil {
 		t.Fatalf("after HELP: %v", err)
 	}
 }
@@ -397,9 +398,9 @@ func TestSessHelp(t *testing.T) {
 func TestSessQuit(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "QUIT")
+	code, line := c.Cmd("QUIT")
 	// RFC 3977 §5.4: 205 and the server closes the connection.
-	if err := hExpectCode(code, line, 205); err != nil {
+	if err := client.ExpectCode(code, line, 205); err != nil {
 		t.Fatal(err)
 	}
 	if err := sessExpectClosed(c, hDeadline); err != nil {
@@ -415,32 +416,32 @@ func TestSessUnknownCommands(t *testing.T) {
 	c := hs.dial(t)
 
 	// RFC 3977 §3.2.1: an unknown command gets 500.
-	code, line := c.cmd(t, "foo")
-	if err := hExpectCode(code, line, 500); err != nil {
+	code, line := c.Cmd("foo")
+	if err := client.ExpectCode(code, line, 500); err != nil {
 		t.Errorf("unknown command: %v", err)
 	}
 	// RFC 3977 §3.1/§3.2.1: an empty line is no command; 500 or 501.
-	code, line = c.cmd(t, "")
-	if err := hExpectCode(code, line, 500, 501); err != nil {
+	code, line = c.Cmd("")
+	if err := client.ExpectCode(code, line, 500, 501); err != nil {
 		t.Errorf("empty line: %v", err)
 	}
-	code, line = c.cmd(t, "   \t ")
-	if err := hExpectCode(code, line, 500, 501); err != nil {
+	code, line = c.Cmd("   \t ")
+	if err := client.ExpectCode(code, line, 500, 501); err != nil {
 		t.Errorf("whitespace-only line: %v", err)
 	}
 	// RFC 3977 §3.1: commands are case-insensitive.
-	code, line = c.cmd(t, "capabilities")
-	if err := hExpectCode(code, line, 101); err != nil {
+	code, line = c.Cmd("capabilities")
+	if err := client.ExpectCode(code, line, 101); err != nil {
 		t.Errorf("lowercase capabilities: %v", err)
 	} else {
-		c.readDotLines(t)
+		c.ReadDotLines()
 	}
-	code, line = c.cmd(t, "mOdE rEaDeR")
-	if err := hExpectCode(code, line, 200, 201); err != nil {
+	code, line = c.Cmd("mOdE rEaDeR")
+	if err := client.ExpectCode(code, line, 200, 201); err != nil {
 		t.Errorf("mixed-case MODE READER: %v", err)
 	}
-	code, line = c.cmd(t, "quit")
-	if err := hExpectCode(code, line, 205); err != nil {
+	code, line = c.Cmd("quit")
+	if err := client.ExpectCode(code, line, 205); err != nil {
 		t.Fatalf("lowercase quit: %v", err)
 	}
 	if err := sessExpectClosed(c, hDeadline); err != nil {
@@ -456,10 +457,10 @@ func TestSessPipelining(t *testing.T) {
 		c := hs.dial(t)
 		// RFC 3977 §3.5: a client may send several commands without waiting; the
 		// server answers them in order.
-		if err := c.send("GROUP " + g + CRLF + "STAT 1" + CRLF + "QUIT" + CRLF); err != nil {
+		if err := c.Send("GROUP " + g + CRLF + "STAT 1" + CRLF + "QUIT" + CRLF); err != nil {
 			t.Fatal(err)
 		}
-		code, line, err := c.readStatus()
+		code, line, err := c.ReadStatus()
 		if err != nil {
 			t.Fatalf("reply 1: %v (%q)", err, line)
 		}
@@ -467,7 +468,7 @@ func TestSessPipelining(t *testing.T) {
 		if f := strings.Fields(line); code != 211 || len(f) < 5 || f[1] != "2" || f[4] != g {
 			t.Fatalf("reply 1 %q: want 211 2 <low> <high> %s", line, g)
 		}
-		code, line, err = c.readStatus()
+		code, line, err = c.ReadStatus()
 		if err != nil {
 			t.Fatalf("reply 2: %v (%q)", err, line)
 		}
@@ -475,11 +476,11 @@ func TestSessPipelining(t *testing.T) {
 		if f := strings.Fields(line); code != 223 || len(f) < 3 || f[1] != "1" || f[2] != hMessageID(g, 1) {
 			t.Fatalf("reply 2 %q: want 223 1 %s", line, hMessageID(g, 1))
 		}
-		code, line, err = c.readStatus()
+		code, line, err = c.ReadStatus()
 		if err != nil {
 			t.Fatalf("reply 3: %v (%q)", err, line)
 		}
-		if err := hExpectCode(code, line, 205); err != nil {
+		if err := client.ExpectCode(code, line, 205); err != nil {
 			t.Fatalf("reply 3: %v", err)
 		}
 		if err := sessExpectClosed(c, hDeadline); err != nil {
@@ -489,16 +490,16 @@ func TestSessPipelining(t *testing.T) {
 	t.Run("missing-group", func(t *testing.T) {
 		c := hs.dial(t)
 		missing := hGroupName("t1.pipelining.missing")
-		if err := c.send("GROUP " + missing + CRLF + "STAT 1" + CRLF + "QUIT" + CRLF); err != nil {
+		if err := c.Send("GROUP " + missing + CRLF + "STAT 1" + CRLF + "QUIT" + CRLF); err != nil {
 			t.Fatal(err)
 		}
 		// RFC 3977 §6.1.1: 411 no such group; §6.2.4: 412 no group selected; §5.4: 205.
 		for i, want := range []int{411, 412, 205} {
-			code, line, err := c.readStatus()
+			code, line, err := c.ReadStatus()
 			if err != nil {
 				t.Fatalf("reply %d: %v (%q)", i+1, err, line)
 			}
-			if err := hExpectCode(code, line, want); err != nil {
+			if err := client.ExpectCode(code, line, want); err != nil {
 				t.Fatalf("reply %d: %v", i+1, err)
 			}
 		}
@@ -509,16 +510,16 @@ func TestSessPipelining(t *testing.T) {
 		err := runIsolated(t, 3*hDeadline, func(t *testing.T) {
 			hs := newTestServer(t, hServerOpts{})
 			c := hs.dial(t)
-			if err := c.send("QUIT" + CRLF + "HELP" + CRLF); err != nil {
+			if err := c.Send("QUIT" + CRLF + "HELP" + CRLF); err != nil {
 				t.Fatal(err)
 			}
 			// RFC 3977 §5.4: QUIT gets 205 and the server closes the connection;
 			// the pipelined HELP after it is never answered.
-			code, line, err := c.readStatus()
+			code, line, err := c.ReadStatus()
 			if err != nil {
 				t.Fatalf("QUIT reply: %v (%q)", err, line)
 			}
-			if err := hExpectCode(code, line, 205); err != nil {
+			if err := client.ExpectCode(code, line, 205); err != nil {
 				t.Fatal(err)
 			}
 			if err := sessExpectClosed(c, hDeadline); err != nil {
@@ -529,7 +530,7 @@ func TestSessPipelining(t *testing.T) {
 			if err != nil {
 				t.Fatalf("server gone after pipelined QUIT: %v", err)
 			}
-			c2.close()
+			c2.Close()
 		})
 		if sessIsChild(t) {
 			return
@@ -548,13 +549,13 @@ func TestSessLineLimit(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
 		c := hs.dial(t)
 		long := "GROUP " + strings.Repeat("a", 600) // 608 octets with CRLF
-		code, line, err := c.tryCmd("%s", long)
+		code, line, err := c.TryCmd("%s", long)
 		// RFC 3977 §3.1: command lines MUST NOT exceed 512 octets including CRLF.
 		// The server rejects a longer line with 501 or closes the connection.
 		var res error
 		switch {
 		case err == nil:
-			res = hExpectCode(code, line, 501)
+			res = client.ExpectCode(code, line, 501)
 		case sessIsTimeout(err):
 			// no reply but the socket is still open: neither 501 nor a close
 			res = fmt.Errorf("no reply and no close: %v", err)
@@ -630,7 +631,7 @@ func TestSessStatsGrowth(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		for i := 0; i < n; i++ {
-			code, line, err := c.readStatus()
+			code, line, err := c.ReadStatus()
 			if err != nil {
 				done <- fmt.Errorf("reply %d: %v (%q)", i, err, line)
 				return
@@ -643,8 +644,8 @@ func TestSessStatsGrowth(t *testing.T) {
 		}
 		done <- nil
 	}()
-	if err := c.send(buf.String()); err != nil {
-		c.close()
+	if err := c.Send(buf.String()); err != nil {
+		c.Close()
 		<-done
 		t.Fatalf("send: %v", err)
 	}
@@ -690,8 +691,8 @@ func TestSessIdleTimeout(t *testing.T) {
 		// for a stall of a few hundred ms on a loaded host.
 		for i := 0; i < 12; i++ {
 			time.Sleep(50 * time.Millisecond)
-			code, line := c.cmd(t, "MODE READER")
-			if err := hExpectCode(code, line, 200, 201); err != nil {
+			code, line := c.Cmd("MODE READER")
+			if err := client.ExpectCode(code, line, 200, 201); err != nil {
 				t.Fatalf("command %d: %v", i, err)
 			}
 		}
@@ -723,8 +724,8 @@ func TestSessMaxConns(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{MaxConns: 2})
 	c1 := hs.dial(t)
 	c2 := hs.dial(t)
-	for i, c := range []*hClient{c1, c2} {
-		if code, err := hParseCode(c.Greeting); err != nil || (code != 200 && code != 201) {
+	for i, c := range []*client.Conn{c1, c2} {
+		if code, err := client.ParseCode(c.Greeting); err != nil || (code != 200 && code != 201) {
 			t.Fatalf("client %d greeting %q", i+1, c.Greeting)
 		}
 	}
@@ -732,23 +733,23 @@ func TestSessMaxConns(t *testing.T) {
 	// The third connection is over the limit: it must not get a service greeting.
 	c3, err := hs.tryDial(hDeadline)
 	if err == nil {
-		if code, perr := hParseCode(c3.Greeting); perr == nil && (code == 200 || code == 201) {
+		if code, perr := client.ParseCode(c3.Greeting); perr == nil && (code == 200 || code == 201) {
 			t.Fatalf("third connection accepted with %q despite MaxConns=2", c3.Greeting)
 		}
 	}
 
 	t.Run("slot-freed", func(t *testing.T) {
-		c1.close()
+		c1.Close()
 		// After a client leaves, a new connection gets in (poll: ConnectionEnded runs async).
 		end := time.Now().Add(hDeadline)
 		for {
 			c, err := hs.tryDial(hDeadline)
 			if err == nil {
-				if code, perr := hParseCode(c.Greeting); perr == nil && (code == 200 || code == 201) {
-					c.close()
+				if code, perr := client.ParseCode(c.Greeting); perr == nil && (code == 200 || code == 201) {
+					c.Close()
 					return
 				}
-				c.close()
+				c.Close()
 			}
 			if time.Now().After(end) {
 				t.Fatalf("no connection accepted within %s after a client left (last err %v)", hDeadline, err)
@@ -765,11 +766,11 @@ func TestSessMaxConns(t *testing.T) {
 		if err != nil {
 			res = fmt.Errorf("third connection closed without a status line: %v", err)
 		} else {
-			code, perr := hParseCode(c3.Greeting)
+			code, perr := client.ParseCode(c3.Greeting)
 			if perr != nil {
 				res = perr
 			} else {
-				res = hExpectCode(code, c3.Greeting, 400, 502)
+				res = client.ExpectCode(code, c3.Greeting, 400, 502)
 			}
 		}
 		if res != nil {
@@ -784,7 +785,7 @@ func TestSessMaxConns(t *testing.T) {
 func TestSessStop(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	if code, line := c.cmd(t, "MODE READER"); code != 200 && code != 201 {
+	if code, line := c.Cmd("MODE READER"); code != 200 && code != 201 {
 		t.Fatalf("MODE READER: %q", line)
 	}
 
@@ -814,7 +815,7 @@ func TestSessStop(t *testing.T) {
 			break
 		}
 		if nc != nil {
-			nc.close()
+			nc.Close()
 		}
 		if time.Now().After(end) {
 			t.Fatalf("listener still accepts connections %s after Stop (last err %v)", hDeadline, err)
@@ -848,19 +849,19 @@ func TestSessTLS(t *testing.T) {
 		t.Fatal("server did not present the in-memory certificate")
 	}
 	// RFC 3977 §5.1.1 (and RFC 4642 for implicit TLS): the same 200/201 greeting.
-	code, err := hParseCode(c.Greeting)
+	code, err := client.ParseCode(c.Greeting)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := hExpectCode(code, c.Greeting, 200, 201); err != nil {
+	if err := client.ExpectCode(code, c.Greeting, 200, 201); err != nil {
 		t.Fatal(err)
 	}
 	caps := sessCaps(t, c)
 	if len(caps) == 0 || caps[0] != "VERSION 2" {
 		t.Fatalf("CAPABILITIES over TLS: %q", caps)
 	}
-	code, line := c.cmd(t, "QUIT")
-	if err := hExpectCode(code, line, 205); err != nil {
+	code, line := c.Cmd("QUIT")
+	if err := client.ExpectCode(code, line, 205); err != nil {
 		t.Fatal(err)
 	}
 	if err := sessExpectClosed(c, hDeadline); err != nil {
@@ -1062,19 +1063,19 @@ func TestSessServerStats(t *testing.T) {
 		if got := hs.S.Stats.GetCommandCount("CAPABILITIES"); got != 1 {
 			t.Errorf("CAPABILITIES count %d, want 1", got)
 		}
-		code, line := c.cmd(t, "AUTHINFO USER t1user9%04d", hSeq.Add(1))
-		if err := hExpectCode(code, line, 381); err != nil {
+		code, line := c.Cmd("AUTHINFO USER t1user9%04d", hSeq.Add(1))
+		if err := client.ExpectCode(code, line, 381); err != nil {
 			t.Fatal(err)
 		}
-		code, line = c.cmd(t, "AUTHINFO PASS wrong")
+		code, line = c.Cmd("AUTHINFO PASS wrong")
 		// RFC 4643 §2.3.2: 481 for rejected credentials.
-		if err := hExpectCode(code, line, 481); err != nil {
+		if err := client.ExpectCode(code, line, 481); err != nil {
 			t.Fatal(err)
 		}
 		if _, bad := hs.S.Stats.GetAuthStats(); bad != 1 {
 			t.Errorf("auth failures %d, want 1", bad)
 		}
-		c.close()
+		c.Close()
 		end := time.Now().Add(hDeadline)
 		for hs.S.Stats.GetActiveConnections() != 0 {
 			if time.Now().After(end) {
@@ -1141,13 +1142,13 @@ func sessFuzzServer(f *testing.F) *hServer {
 }
 
 // sessDialRaw connects without tracking (fuzz inputs close their own conns).
-func sessDialRaw(addr string, d time.Duration) (*hClient, error) {
+func sessDialRaw(addr string, d time.Duration) (*client.Conn, error) {
 	conn, err := net.DialTimeout("tcp", addr, d)
 	if err != nil {
 		return nil, err
 	}
-	c := &hClient{Conn: conn, R: bufio.NewReader(conn), Deadline: d}
-	g, err := c.readLine()
+	c := &client.Conn{Conn: conn, R: bufio.NewReader(conn), Deadline: d}
+	g, err := c.ReadLine()
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("greeting: %w", err)
@@ -1183,20 +1184,21 @@ func FuzzSessCommandLine(f *testing.F) {
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
-		defer c.close()
+		c.WithTB(t) // ReadDotLines fails t
+		defer c.Close()
 
 		// RFC 3977 §3.1/§3.2: every command line gets exactly one status line
 		// (plus a dot-terminated block for multi-line responses).
-		code, status, err := c.tryCmd("%s", line)
+		code, status, err := c.TryCmd("%s", line)
 		if err != nil {
 			t.Fatalf("%q: no status line: %v (%q)", line, err, status)
 		}
 		if sessFuzzMultiCodes[code] {
-			c.readDotLines(t)
+			c.ReadDotLines()
 		}
 		if verb == "QUIT" {
 			// RFC 3977 §5.4: 205, then the connection closes.
-			if err := hExpectCode(code, status, 205); err != nil {
+			if err := client.ExpectCode(code, status, 205); err != nil {
 				t.Fatalf("%q: %v", line, err)
 			}
 			if err := sessExpectClosed(c, hDeadline); err != nil {
@@ -1206,14 +1208,14 @@ func FuzzSessCommandLine(f *testing.F) {
 		}
 		// HELP's 100 can't be an extra line of a single-line reply, so if the next
 		// status line is 100 the fuzzed command produced exactly one reply.
-		code, status, err = c.tryCmd("HELP")
+		code, status, err = c.TryCmd("HELP")
 		if err != nil {
 			t.Fatalf("%q: connection unusable afterwards: %v (%q)", line, err, status)
 		}
 		if code != 100 {
 			t.Fatalf("%q: extra line %q before the HELP reply", line, status)
 		}
-		c.readDotLines(t)
+		c.ReadDotLines()
 	})
 }
 
@@ -1305,14 +1307,14 @@ func TestSessCommandArgs(t *testing.T) {
 	// RFC 3977 §3.2.1: surplus arguments are a syntax error → 501. The table
 	// rejects them before the handler, so no group is needed for XOVER/LISTGROUP.
 	for _, line := range []string{"GROUP a b", "MODE READER x", "HELP x", "XOVER 1-2 x", "LISTGROUP g 1- x"} {
-		code, reply := c.cmd(t, "%s", line)
-		if err := hExpectCode(code, reply, 501); err != nil {
+		code, reply := c.Cmd("%s", line)
+		if err := client.ExpectCode(code, reply, 501); err != nil {
 			t.Errorf("%q: %v", line, err)
 		}
 	}
 	// Decision 13: QUIT ignores surplus arguments.
-	code, reply := c.cmd(t, "QUIT now")
-	if err := hExpectCode(code, reply, 205); err != nil {
+	code, reply := c.Cmd("QUIT now")
+	if err := client.ExpectCode(code, reply, 205); err != nil {
 		t.Fatalf("QUIT now: %v", err)
 	}
 	if err := sessExpectClosed(c, hDeadline); err != nil {
@@ -1324,30 +1326,30 @@ func TestSessNoEcho(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 	junk := strings.Repeat("A", 400)
-	code, line := c.cmd(t, "XYZZY%s", junk)
-	if err := hExpectCode(code, line, 500); err != nil {
+	code, line := c.Cmd("XYZZY%s", junk)
+	if err := client.ExpectCode(code, line, 500); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(line, "XYZZY") || strings.Contains(line, "AAAAAAAA") {
 		t.Errorf("500 reply echoes the command: %q", line)
 	}
-	code, line = c.cmd(t, "MODE FOO")
-	if err := hExpectCode(code, line, 501); err != nil {
+	code, line = c.Cmd("MODE FOO")
+	if err := client.ExpectCode(code, line, 501); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(line, "FOO") {
 		t.Errorf("MODE reply echoes the variant: %q", line)
 	}
-	code, line = c.cmd(t, "AUTHINFO FOOBAR x")
-	if err := hExpectCode(code, line, 501); err != nil {
+	code, line = c.Cmd("AUTHINFO FOOBAR x")
+	if err := client.ExpectCode(code, line, 501); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(line, "FOOBAR") {
 		t.Errorf("AUTHINFO reply echoes the subcommand: %q", line)
 	}
 	name := fmt.Sprintf("t1user%04dnoecho", hSeq.Add(1))
-	code, line = c.cmd(t, "AUTHINFO USER %s", name)
-	if err := hExpectCode(code, line, 381); err != nil {
+	code, line = c.Cmd("AUTHINFO USER %s", name)
+	if err := client.ExpectCode(code, line, 381); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(line, name) {
@@ -1372,10 +1374,10 @@ func TestSessReadArticleBlock(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := hExpectLines(head, []string{"Subject: a", "From: b"}); err != nil {
+		if err := client.ExpectLines(head, []string{"Subject: a", "From: b"}); err != nil {
 			t.Errorf("head: %v", err)
 		}
-		if err := hExpectLines(body, []string{"body1", ".dot", "", "last"}); err != nil {
+		if err := client.ExpectLines(body, []string{"body1", ".dot", "", "last"}); err != nil {
 			t.Errorf("body: %v", err)
 		}
 		if line, err := c.readCommandLine(); err != nil || line != "NEXT" {
@@ -1574,12 +1576,12 @@ func TestSessTLSMinVersion(t *testing.T) {
 		t.Fatalf("TLS 1.2+ dial: %v", err)
 	}
 	defer conn.Close()
-	c := &hClient{Conn: conn, R: bufio.NewReader(conn), Deadline: hDeadline}
-	greeting, err := c.readLine()
+	c := hNewClient(t, conn, hDeadline)
+	greeting, err := c.ReadLine()
 	if err != nil {
 		t.Fatalf("greeting: %v", err)
 	}
-	if code, perr := hParseCode(greeting); perr != nil || code != 201 {
+	if code, perr := client.ParseCode(greeting); perr != nil || code != 201 {
 		t.Fatalf("greeting %q, want 201 (read-only server)", greeting)
 	}
 }
@@ -1594,19 +1596,19 @@ func TestSessReadRequiresAuth(t *testing.T) {
 	missing := hGroupName("t1.readauth.none")
 	// RFC 3977 §3.2.1 / RFC 4643 §2.1: 480 before authentication.
 	for _, line := range []string{"GROUP " + missing, "LIST", "XOVER", "STAT 1"} {
-		code, reply := c.cmd(t, "%s", line)
-		if err := hExpectCode(code, reply, 480); err != nil {
+		code, reply := c.Cmd("%s", line)
+		if err := client.ExpectCode(code, reply, 480); err != nil {
 			t.Errorf("%q before AUTHINFO: %v", line, err)
 		}
 	}
 	// Session commands stay available.
 	sessCaps(t, c)
-	if code, reply := c.cmd(t, "MODE READER"); code != 201 {
+	if code, reply := c.Cmd("MODE READER"); code != 201 {
 		t.Errorf("MODE READER before AUTHINFO: %q", reply)
 	}
 	sessAuth(t, c, user, pass)
-	code, reply := c.cmd(t, "GROUP %s", missing)
-	if err := hExpectCode(code, reply, 211, 411); err != nil {
+	code, reply := c.Cmd("GROUP %s", missing)
+	if err := client.ExpectCode(code, reply, 211, 411); err != nil {
 		t.Fatalf("GROUP after AUTHINFO: %v", err)
 	}
 }
@@ -1619,8 +1621,8 @@ func TestSessPlaintextPolicy(t *testing.T) {
 			t.Errorf("refuse: AUTHINFO advertised on plaintext: %q", caps)
 		}
 		// RFC 4643 §2.3.1 / RFC 3977 §3.2.1: 483 encryption required.
-		code, line := c.cmd(t, "AUTHINFO USER t1user-refuse")
-		if err := hExpectCode(code, line, 483); err != nil {
+		code, line := c.Cmd("AUTHINFO USER t1user-refuse")
+		if err := client.ExpectCode(code, line, 483); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -1630,8 +1632,8 @@ func TestSessPlaintextPolicy(t *testing.T) {
 		if caps := sessCaps(t, c); sessHasCap(caps, "AUTHINFO") {
 			t.Errorf("accept: AUTHINFO advertised on plaintext: %q", caps)
 		}
-		code, line := c.cmd(t, "AUTHINFO USER t1user-accept")
-		if err := hExpectCode(code, line, 381); err != nil {
+		code, line := c.Cmd("AUTHINFO USER t1user-accept")
+		if err := client.ExpectCode(code, line, 381); err != nil {
 			t.Fatal(err)
 		}
 	})

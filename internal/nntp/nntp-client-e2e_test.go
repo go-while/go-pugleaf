@@ -141,10 +141,10 @@ func TestCliE2EFakePeer(t *testing.T) {
 	}
 	s := newCliFakeServer(t, o)
 	lineLog.setServer(s)
-	if err := os.WriteFile(filepath.Join(dir, "ready"), []byte(net.JoinHostPort(s.Host, strconv.Itoa(s.Port))+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ready"), []byte(net.JoinHostPort(s.Host(), strconv.Itoa(s.Port()))+"\n"), 0o644); err != nil {
 		t.Fatalf("write ready: %v", err)
 	}
-	fmt.Println(fmt.Sprintf("INFO peer %s listening on %s:%d", mode, s.Host, s.Port))
+	fmt.Println(fmt.Sprintf("INFO peer %s listening on %s:%d", mode, s.Host(), s.Port()))
 	stop := filepath.Join(dir, "STOP")
 	deadline := time.Now().Add(14 * time.Minute) // below the script's go test -timeout 15m
 	for time.Now().Before(deadline) {
