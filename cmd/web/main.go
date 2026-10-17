@@ -5,10 +5,12 @@ import (
 	"context"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -26,6 +28,7 @@ var (
 	// command-line flags
 	nntphostname          string
 	webport               int
+	webhost               string
 	webssl                bool
 	webcertFile           string
 	webkeyFile            string
@@ -100,6 +103,7 @@ func main() {
 	flag.IntVar(&maxArticleCacheExpiry, "maxarticlecacheexpiry", 60, "expiry of cached articles in minutes (default: 60 minutes)")
 	flag.IntVar(&useShortHashLen, "useshorthashlen", 7, "short hash length (2-7, default: 7): legacy, no effect on the message-id history schema; the first stored value stays locked, a value outside 2-7 is stored as 7")
 	flag.IntVar(&webport, "webport", 0, "Web server port (default: 11980, also with -webssl)")
+	flag.StringVar(&webhost, "webhost", "", "Web server bind address (default: every interface; behind a reverse proxy use 127.0.0.1)")
 	flag.BoolVar(&webssl, "webssl", false, "Enable SSL")
 	//flag.Int64Var(&ignoreInitialTinyGroups, "ignore-initial-tiny-groups", 0, "If > 0: initial fetch ignores tiny groups with fewer articles than this (default: 0)")
 	flag.StringVar(&nntphostname, "nntphostname", "", "your hostname must be set")
@@ -180,6 +184,10 @@ func main() {
 		log.Printf("[WEB]: Overriding listen port with command-line flag: %d", webConfig.ListenPort)
 	} else {
 		log.Printf("[WEB]: No port flag provided, using default: %d", webConfig.ListenPort)
+	}
+	if webhost != "" {
+		webConfig.ListenAddr = webhost
+		log.Printf("[WEB]: Binding to address from command-line flag: %s", webConfig.ListenAddr)
 	}
 	if webssl {
 		webConfig.SSL = true
@@ -351,7 +359,11 @@ func main() {
 		// Start web server in goroutine to make it non-blocking
 		webServerErrChan := make(chan error, 1)
 		go func() {
-			log.Printf("[WEB]: Starting go-pugleaf web server on %s://localhost:%d", protocol, webConfig.ListenPort)
+			host := webConfig.ListenAddr
+			if host == "" {
+				host = "localhost"
+			}
+			log.Printf("[WEB]: Starting go-pugleaf web server on %s://%s", protocol, net.JoinHostPort(host, strconv.Itoa(webConfig.ListenPort)))
 			if err := server.Start(); err != nil && err != http.ErrServerClosed {
 				webServerErrChan <- err
 			}

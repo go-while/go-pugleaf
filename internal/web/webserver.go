@@ -91,7 +91,7 @@ func (s *WebServer) Start() error {
 	if s.Config.SSL && (s.Config.CertFile == "" || s.Config.KeyFile == "") {
 		return errors.New("SSL enabled but cert_file or key_file not specified in config")
 	}
-	addr := ":" + strconv.Itoa(s.Config.ListenPort)
+	addr := s.listenAddr()
 	select {
 	case <-s.stopCh:
 		return http.ErrServerClosed
@@ -102,6 +102,12 @@ func (s *WebServer) Start() error {
 		return err
 	}
 	return s.serveOn(ln)
+}
+
+// listenAddr is the address Start listens on: Config.ListenAddr (every interface when empty)
+// joined with Config.ListenPort, so an IPv6 address gets its brackets.
+func (s *WebServer) listenAddr() string {
+	return net.JoinHostPort(s.Config.ListenAddr, strconv.Itoa(s.Config.ListenPort))
 }
 
 // serveOn serves HTTP (HTTPS when configured) on ln until Shutdown, and always closes ln.

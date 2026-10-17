@@ -316,6 +316,30 @@ func TestW1ServerStartShutdown(t *testing.T) {
 	}
 }
 
+// TestW1ServerListenAddr: the bind address joins ListenAddr and ListenPort (brackets for IPv6,
+// every interface when empty); an address that cannot be bound makes Start return its error.
+func TestW1ServerListenAddr(t *testing.T) {
+	cfg := config.NewDefaultConfig().Server.WEB
+	for _, tc := range []struct{ host, want string }{
+		{"", ":11980"},
+		{"127.0.0.1", "127.0.0.1:11980"},
+		{"::1", "[::1]:11980"},
+	} {
+		cfg.ListenAddr = tc.host
+		if got := (&WebServer{Config: cfg}).listenAddr(); got != tc.want {
+			t.Errorf("listenAddr(%q) = %q, want %q", tc.host, got, tc.want)
+		}
+	}
+	cfg.ListenPort = 0
+	cfg.SSL = false
+	cfg.ListenAddr = "256.1.1.1"
+	srv := NewWebServer(w0DB(t), cfg, nil, false, true)
+	err := srv.Start()
+	if err == nil || errors.Is(err, http.ErrServerClosed) || !strings.Contains(err.Error(), "256.1.1.1") {
+		t.Fatalf("Start on an unbindable address = %v, want a listen error naming it", err)
+	}
+}
+
 func TestW1ServerChatNoSessionIDInPage(t *testing.T) {
 	postKey := strings.ReplaceAll(w0Name("w1srvai"), ".", "_")
 	display := "W1 Server Model " + postKey

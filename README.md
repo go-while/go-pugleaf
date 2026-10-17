@@ -60,6 +60,7 @@ stored hostname, so `./webserver` is enough. All tools share the same `-data` di
 -nntphostname string - your hostname; required on the first run, later runs reuse the stored value
 -data string - path to the database and config directory (default: ./data)
 -webport int - web server port, 1024-65535 (default: 11980, also with -webssl)
+-webhost string - bind address (default: every interface; behind a reverse proxy use -webhost 127.0.0.1)
 
 # SSL/TLS Configuration
 -webssl - enable SSL for the web interface

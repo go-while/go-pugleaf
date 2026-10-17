@@ -147,6 +147,7 @@ type DatabaseConfig struct {
 // WebConfig holds web interface configuration
 type WebConfig struct {
 	ListenPort int    `json:"listen_port"`
+	ListenAddr string `json:"listen_addr,omitempty"` // bind address; "" = every interface (behind a reverse proxy use 127.0.0.1)
 	SSL        bool   `json:"ssl"`
 	CertFile   string `json:"cert_file,omitempty"`
 	KeyFile    string `json:"key_file,omitempty"`
