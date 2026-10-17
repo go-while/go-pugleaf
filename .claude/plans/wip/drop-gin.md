@@ -272,3 +272,17 @@ Leave `./data-test-dropgin` for the user to delete.
 
 ### Progress
 - Wave 0 (461b5b2 on `plan-drop-gin`, branched from testing-001 at the wip commit): preflight build + vet green; no code change.
+- Wave 1 (merged, tree deefc83):
+  - `web-docs` (worktree-agent-a6ee302c268b2956c, ecc461b, merge a3c0df4; + inline 2192cd0 README route syntax):
+    CLAUDE.md, internal/web/README.md, copilot-instructions, audit-web/audit-db wording, leftovers script greps
+    `(gin\.)?H\{`. Review MERGE.
+  - `web-adapter` (worktree-agent-a53b76b27657aba0b, 780ffcf + 6229e06, merge deefc83): httpctx.go (408),
+    httprouter.go (418), httpclientip.go (70), httpx_test.go (1194; 30 TestHttpx*). Deviations accepted: status
+    line written late like gin (WriteHeaderNow), Redirect writes the header at once, the mux's own clean-path
+    slash redirect counts as a miss so the router's TSR step answers 301/307 and a fallback exact match wins,
+    SecureHeaders redirect uses URL.RequestURI(), RouteGroup.Use added, 137 live routes (the plan's 138 counted
+    a commented-out line). Review MERGE AFTER FIXES: MAJOR (security) multipart temp files were never deleted
+    because the request copy carried the parsed form → RemoveAll in a defer + test; minors: Hijack on the writer
+    wrapper, AccessLog line in a defer so panics get their line. Notes for wave 2: register
+    `router.Use(AccessLog(), Recovery())`; vet now checks `c.String` like Printf (three calls need "%s");
+    a bare NewRouter trusts no proxy; GET on a two-segment POST-only path 301s to the slash form (as gin did).
