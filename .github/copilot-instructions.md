@@ -62,6 +62,7 @@ go test ./internal/nntp/... -v
 
 # Note: Most packages have no test files - this is expected
 # Some nntp tests skip due to missing test data files - this is normal
+# The nntp tests' fake server and test client come from github.com/go-while/nntp-testkit (see go.mod)
 ```
 
 ### Linting (if golangci-lint is available)
