@@ -185,8 +185,21 @@ func TestMboxArtSkipReasons(t *testing.T) {
 	if _, r := rewriteHead("<x@example.invalid>", append(without("Subject"), "Subject:")); r != skipNoSubject {
 		t.Errorf("empty Subject: %v", r)
 	}
+	if _, r := rewriteHead("<x@example.invalid>", append(without("Subject"), "Subject:", " ")); r != skipNoSubject {
+		t.Errorf("Subject with a blank continuation: %v", r)
+	}
+	if _, r := rewriteHead("<x@example.invalid>", append(without("Subject"), "Subject:", "\t", " \x00")); r != skipNoSubject {
+		t.Errorf("Subject with blank continuations: %v", r)
+	}
 	if _, r := rewriteHead("<x@example.invalid>", without("Date")); r != skipNoDate {
 		t.Errorf("no Date: %v", r)
+	}
+	if _, r := rewriteHead("<x@example.invalid>", append(without("Date"), "Date:", " ")); r != skipNoDate {
+		t.Errorf("Date with a blank continuation: %v", r)
+	}
+	if got, r := rewriteHead("<x@example.invalid>", append(without("Subject"), "Subject:", " ", " real")); r != skipNone ||
+		!reflect.DeepEqual(got[len(got)-2:], []string{"Subject:", " real"}) {
+		t.Errorf("Subject with a blank and a real continuation: %q %v", got, r)
 	}
 	many := base()
 	for len(many) <= maxHeaderLines {
@@ -389,6 +402,22 @@ func TestMboxArtRewriteRules(t *testing.T) {
 	}
 	if _, err := common.CheckHeaderBlock(got, common.HeaderBlockFetch); err != nil {
 		t.Errorf("CheckHeaderBlock: %v", err)
+	}
+
+	// a continuation starting with another control byte is folded with a space, so the
+	// processor's header check and ParseHeaders see the same lines
+	got, r = rewriteHead(msgid, []string{"From: a", "\fSubject: evil", "Subject: real", "Date: d", "\vx"})
+	want = []string{"From: a", " Subject: evil", "Subject: real", "Date: d", " x", "Message-ID: " + msgid}
+	if r != skipNone || !reflect.DeepEqual(got, want) {
+		t.Fatalf("control-byte continuation:\n got %q %v\nwant %q", got, r, want)
+	}
+	normalized, err := common.CheckHeaderBlock(got, common.HeaderBlockFetch)
+	if err != nil || !reflect.DeepEqual(normalized, got) {
+		t.Errorf("CheckHeaderBlock: %q %v", normalized, err)
+	}
+	art, err := buildArticle(msgid, got, []string{"body"})
+	if err != nil || art.Subject != "real" {
+		t.Errorf("buildArticle: Subject %q %v", art.Subject, err)
 	}
 
 	// a lost Message-ID header is appended; Path is kept as stored

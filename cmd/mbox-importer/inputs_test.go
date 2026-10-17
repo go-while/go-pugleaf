@@ -313,6 +313,24 @@ func TestMboxInMarkDone(t *testing.T) {
 	if err := markDone(path); err == nil {
 		t.Error("markDone of a missing file: no error")
 	}
+
+	// an existing .done file is never replaced
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.mbox")
+	if err := os.WriteFile(src, []byte("NEW"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src+".done", []byte("OLD"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := markDone(src); !errors.Is(err, os.ErrExist) {
+		t.Errorf("markDone over an existing .done: %v, want ErrExist", err)
+	}
+	for p, want := range map[string]string{src: "NEW", src + ".done": "OLD"} {
+		if b, err := os.ReadFile(p); err != nil || string(b) != want {
+			t.Errorf("%s: %q %v, want %q", p, b, err, want)
+		}
+	}
 }
 
 func TestMboxIn7zMissingProgram(t *testing.T) {
@@ -393,6 +411,28 @@ func TestMboxIn7z(t *testing.T) {
 	}
 	if src.cmd.ProcessState == nil {
 		t.Error("7z process not waited for")
+	}
+
+	// members in a subdirectory and with an upper-case suffix are found too
+	for _, member := range []string{"sub/g.mbox", "G.MBOX"} {
+		mdir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(mdir, filepath.Dir(member)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(mdir, member), []byte(fixtureMbox), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		archive := make7z(t, prog, mdir, "member.mbox.7z", member)
+		src, err := openSource(archive, "7z")
+		if err != nil {
+			t.Fatalf("%s: %v", member, err)
+		}
+		if got := messageIDs(t, src); !reflect.DeepEqual(got, fixtureIDs) {
+			t.Errorf("%s: ids %q", member, got)
+		}
+		if err := src.Close(); err != nil {
+			t.Errorf("%s: Close: %v", member, err)
+		}
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	mbox "github.com/go-while/go-lib-mbox2nntp"
 )
@@ -268,14 +269,18 @@ func pickZipMember(zr *zip.Reader) (*zip.File, error) {
 	return nil, fmt.Errorf("zip: %d members and none named *.mbox or *.bag", len(files))
 }
 
-// start7z starts `sevenZip x -so -bd -- archive *.mbox *.bag`, sets s.cmd and s.stderr
+// start7z starts `sevenZip x -so -bd -r -- archive *.mbox *.bag *.MBOX *.BAG` (members in
+// subdirectories too, concatenated in archive order), sets s.cmd and s.stderr
 // and returns the process's stdout.
 func (s *source) start7z(archive, sevenZip string) (io.Reader, error) {
 	prog, err := exec.LookPath(sevenZip)
 	if err != nil {
 		return nil, fmt.Errorf("%s: 7z program: %w", archive, err)
 	}
-	cmd := exec.Command(prog, "x", "-so", "-bd", "--", archive, "*.mbox", "*.bag")
+	// 7z patterns are case-sensitive and match top-level members only without -r
+	cmd := exec.Command(prog, "x", "-so", "-bd", "-r", "--", archive, "*.mbox", "*.bag", "*.MBOX", "*.BAG")
+	// Close must not hang on a wrapper whose children keep the pipes open
+	cmd.WaitDelay = 10 * time.Second
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("%s: 7z: %w", archive, err)
@@ -338,7 +343,14 @@ func (s *source) Close() error {
 	return errors.Join(errs...)
 }
 
-// markDone renames path to path+".done".
+// markDone renames path to path+".done"; an existing path+".done" is never replaced.
+// (Check-then-rename: a target created in between by another process is not caught.)
 func markDone(path string) error {
-	return os.Rename(path, path+".done")
+	dst := path + ".done"
+	if _, err := os.Lstat(dst); err == nil {
+		return fmt.Errorf("mark done %q: %q already exists: %w", path, dst, os.ErrExist)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("mark done %q: %w", path, err)
+	}
+	return os.Rename(path, dst)
 }

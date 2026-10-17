@@ -228,6 +228,20 @@ func validFieldName(name string) bool {
 	return true
 }
 
+// hasNonBlankContinuation reports whether the header line head[i] has a continuation
+// line that is not blank once cleaned.
+func hasNonBlankContinuation(head []string, i int) bool {
+	for _, cont := range head[i+1:] {
+		if cont == "" || !isspace(cont[0]) {
+			return false
+		}
+		if strings.TrimSpace(cleanHeadline(cont)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // rewriteHead turns the stored header lines into the ones handed to the processor
 // (mbox2nntp's rewriteHead without the Path prefix: the processor prefixes the local
 // hostname). Per line: NUL, backspace, tab and CR become spaces; Xref, Expires and stray
@@ -266,6 +280,10 @@ func rewriteHead(msgid string, head []string) (newhead []string, reason skipReas
 			if dropping || !haveField || strings.TrimSpace(line) == "" {
 				continue
 			}
+			if line[0] != ' ' {
+				// another control byte: the processor only folds lines starting with SP/TAB
+				line = " " + line[1:]
+			}
 			newhead = append(newhead, line)
 			continue
 		}
@@ -284,7 +302,7 @@ func rewriteHead(msgid string, head []string) (newhead []string, reason skipReas
 			continue
 		}
 		dat := strings.TrimSpace(line[colon+1:])
-		if dat == "" && !spacedNext {
+		if dat == "" && !hasNonBlankContinuation(head, i) {
 			continue
 		}
 		switch strings.ToLower(key) {
