@@ -286,3 +286,17 @@ Leave `./data-test-dropgin` for the user to delete.
     wrapper, AccessLog line in a defer so panics get their line. Notes for wave 2: register
     `router.Use(AccessLog(), Recovery())`; vet now checks `c.String` like Printf (three calls need "%s");
     a bare NewRouter trusts no proxy; GET on a two-segment POST-only path 301s to the slash form (as gin did).
+- Wave 2 (merged, tree 6570e9d): `web-port` (worktree-agent-ac34f24f6834e5ae1, 4e724dc + 2775814 + 05d9aba +
+  a482b90, merge 9963851): 50 files, +484/−918; all 41 handler files converted by type substitution (the reviewer
+  diffed each against a mechanically converted base copy: no semantic change beyond the listed dead-code removals,
+  three "%s" vet fixes and comment rewording); route table in ServeMux syntax identical to the adapter's test
+  table (131 main + 6 fallback); chain AccessLog → Recovery → trackInFlight → SecureHeaders → ReverseProxy →
+  Bot; TestAdfOptRawPathParams deleted (TestHttpxPathValues covers the same 12 targets); go.mod requires 38 → 11,
+  go.sum 105 → 26 lines; cmd/web third-party deps now only go-sqlite3 and x/*. Review MERGE AFTER FIXES: MAJOR
+  (`GET /login/` and 14 other slashed main-mux paths landed in the section fallback instead of the 301 to the
+  slashless route gin gave) fixed in the adapter (a482b90: slash-removal redirect probes the main mux before the
+  fallback; tests in httpx_test.go and w1_server_test.go, failing without the fix). Inline after the merge: stale
+  comment in internal/models/models.go (6570e9d). Unlisted behaviour differences named in the merge message:
+  unknown one-segment paths answer 405 to non-GET methods (the fallback `/{section}` matches them); 404
+  Content-Type now carries charset=utf-8. scripts/test-web-leftovers.sh ran green (16/0) in the worktree with
+  its own scratch root.
