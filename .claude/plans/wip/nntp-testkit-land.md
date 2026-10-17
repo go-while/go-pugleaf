@@ -28,3 +28,13 @@ Prerequisites that only the user can do: create github.com/go-while/nntp-testkit
 CLAUDE.md list; baseline comparison as in the done plan's Outcome.
 ## End-to-end
 `go test -race -count=1 -v ./internal/nntp/` → 207 PASS; `PUGLEAF_KNOWN_BUGS=1 …` → only T-nntp-article-1.
+
+## Progress
+### Wave 0 (inline, plan-nntp-testkit-land)
+- 63a383b merge of plan-nntp-testkit; 71417ad go.mod `require github.com/go-while/nntp-testkit v0.1.0` (tag pushed
+  2026-10-17, resolves via proxy), replace dropped, go.sum has the kit hashes; bc01d3a docs. Baseline comparison on
+  71417ad: 207 PASS = baseline minus the three moved TestCliFake*; known bugs only T-nntp-article-1; nntp cmds ok.
+### Wave 1
+- `harness-strict` (worktree /tank0/claude/trees/go-pugleaf/agent-a09482663b07e7637, worktree-agent-a09482663b07e7637,
+  383a8c4): Strict true in tryDial, hNewClient, sessDialRaw; 207 results unchanged, 0 strict failures; known bugs
+  unchanged; PUGLEAF_TEST_DEADLINE=5s run ok. Merged without a separate review (4-line change, fully re-run).
