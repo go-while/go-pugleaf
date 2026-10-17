@@ -202,3 +202,29 @@ all `--- PASS`, 0 FAIL, 0 SKIP; package ok in 164.8 s (under race, machine loade
   paths). Review MERGE + minor (parent-dialed conns in subtests fail the parent) → follow-up with For pending.
   The relative `replace` resolves only from the main checkout layout; worktree runs need a go.work with an
   absolute replace (the implementer's: scratchpad/migwork/go.work).
+
+## Outcome
+- Kit: /tank0/efs/GO/src/github.com/go-while/nntp-testkit, branch `main` at **7af5a9d** (25 commits, not pushed, no
+  GitHub repo yet). Packages: `testkit` (Deadline), `client`, `fakeserver` (Script/Handler/Store modes, Faults,
+  Count, TLSConfig, PeerHandler, StoreHandler), `proc`, `conformance` (doc.go stub). `go vet ./... && go test -race
+  -count=1 ./...` green. Kit worktrees under /tank0/claude/trees/nntp-testkit/ (left for the user): client, proc,
+  store, fakeserver-core, store-handler, readme (branches worktree-<name>).
+- go-pugleaf: integration branch `plan-nntp-testkit` (migration merged **14352fb**; go.mod `require
+  github.com/go-while/nntp-testkit v0.0.0-00010101000000-000000000000` + `replace => ../nntp-testkit`). NOT merged
+  into testing-001: wait until the kit is on GitHub and tagged v0.1.0, then replace the directive by the tagged
+  require and merge. Worktree /tank0/claude/trees/go-pugleaf/agent-af8031e986478fd0b (worktree-agent-af8031e986478fd0b,
+  a30e7d8, 3ab0e02, 8fbc283, 161f047) plus the implementers' unused go-pugleaf worktrees agent-a406c766d4066f20a,
+  agent-ab7c4e3fd3b0d6fb0, agent-aea9667379f9a332c, agent-ae7995549a841117b, agent-a10eee5c477a6a211,
+  agent-a894a8d17cff89778 (all created by the hook, left clean).
+- Verification (main checkout, plan-nntp-testkit 14352fb, no go.work): `go test -race -count=1 -v ./internal/nntp/`
+  207 results all PASS; diff against the 210-line baseline = only TestCliFakeOpenCount/PeerStream/Script missing
+  (moved into the kit as TestOpenCount/TestPeerStream/TestScript); PUGLEAF_KNOWN_BUGS=1 lists only T-nntp-article-1;
+  PUGLEAF_TEST_DEADLINE=5s run of TestHarness|TestCli ok; cmd/nntp-server, nntp-fetcher, nntp-transfer ok under
+  race; gofmt empty, vet and build clean.
+- Could not move cleanly / notes: `Backend()`/`cliDial` stay in go-pugleaf as `cliBackend(s)`/`cliDial` (type alias
+  cannot carry methods); `hClient.bump()` became an explicit SetDeadline at one site; connections dialed in a parent
+  test and used in subtests use `c.For(t)` (kit addition) so failures stay in the subtest; the worktree layout needs
+  a go.work with an absolute replace. Strict mode is off in the harness, but a probe with it on passed all 207
+  tests (go-pugleaf's server is wire-clean on these paths): switching the harness to strict is a possible follow-up.
+- Leftovers: conformance package (planned, stub only); the kit's `Faults` on POST apply to the 340 only; a Store
+  shared by two Servers is not covered by the POST mutex; Pass-only StoreOptions is a misconfiguration (documented).
