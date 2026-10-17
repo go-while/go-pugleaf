@@ -221,3 +221,18 @@ Leave `./data-test-mbox-uat` for the user.
 - Notes: a SIGINT after the last message is handed over exits 0; with `-group` an article known in history under
   other groups is stored again in the forced group (per-target-group "present" rule, as for mbox inputs); the
   reverse-DNS warning for the hostname appears twice per run (pre-existing).
+
+## Outcome
+- Integration branch `plan-mbox-importer-uat` (HEAD 3d7e9e1; code tree 4dfbc00), merged into `testing-001` with
+  `--no-ff` on 2026-10-17 as **bee30ca** (not pushed). `go build ./... && go vet ./...` on the merged tree: green.
+- Worktree branches (left for the user to clean up, all under `/tank0/claude/trees/go-pugleaf/`):
+  - `worktree-agent-aee45042addcb010c` → `agent-aee45042addcb010c` (uat-docs, 70c820a + 2bf3da1, merge badf037)
+  - `worktree-agent-a7161834b55ba6d88` → `agent-a7161834b55ba6d88` (uat-import, 97f8706 + 5d71ef2, merge 4dfbc00)
+- Verification: see "Verification (8c08854)" above; PASS on every step incl. two real archives from
+  usenet.nereid.pl; full CLAUDE.md checks green on 4dfbc00, known bugs only T-nntp-article-1.
+- Leftovers / known issues: the stop signal is not checked while xz/7z/zstd unpack (a huge archive keeps
+  unpacking after one Ctrl-C; a second signal skips the temp-dir cleanup); `-xz` falls back to 7-Zip even when
+  given explicitly; `uatSuffix` is case-insensitive so `X.USENET.XZ` in a directory is picked up while `.MBOX`
+  is not; with `-group` an article known in history under other groups is stored again in the forced group;
+  the hostname reverse-DNS warning appears twice per run. Scratch root `./data-test-mbox-uat` (19 MB, incl. the
+  two downloaded archives) left for the user.
