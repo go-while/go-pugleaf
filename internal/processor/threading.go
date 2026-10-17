@@ -29,7 +29,7 @@ func (proc *Processor) setCaseDupes(msgIdItem *history.MessageIdItem, bulkmode b
 	}
 }
 
-// processArticle processes a fetched article and generates overview data.
+// ProcessArticle processes a fetched article and generates overview data.
 //
 // Return codes for non-bulk intake (contract K4 of plan nntp-intake-injection):
 //   - CasePass, nil: queued for at least one group
@@ -39,7 +39,7 @@ func (proc *Processor) setCaseDupes(msgIdItem *history.MessageIdItem, bulkmode b
 //   - CaseError, err wrapping common.ErrIntakeRejected: validation or policy rejection (fixed reason)
 //
 // Bulk mode keeps returning CasePass, nil when every target group already stores the article.
-func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup string, bulkmode bool) (int, error) {
+func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup string, bulkmode bool) (int, error) {
 	// external caller supplies ONLY art *models.Article!
 	if article == nil || article.MessageID == "" {
 		return history.CaseError, fmt.Errorf("%w: invalid message-id", common.ErrIntakeRejected)
@@ -61,7 +61,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 
 	msgIdItem := history.MsgIdCache.GetORCreate(article.MessageID)
 	if msgIdItem == nil {
-		return history.CaseError, fmt.Errorf("error in processArticle: msgIdItem is nil")
+		return history.CaseError, fmt.Errorf("error in ProcessArticle: msgIdItem is nil")
 	}
 	var newsgroups []string
 	var intakeGroups []*database.IntakeGroup // non-bulk: resolved groups, same order as newsgroups
@@ -197,7 +197,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 			newsgroups = append(newsgroups, g.Name)
 		}
 	} else {
-		log.Printf("ERROR in processArticle: invalid bulk import flags")
+		log.Printf("ERROR in ProcessArticle: invalid bulk import flags")
 		proc.setCaseDupes(msgIdItem, bulkmode)
 		return history.CaseError, rejected("invalid article")
 	}
@@ -292,7 +292,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		// Get the newsgroup pointer once from batch system for memory efficiency
 		newsgroupPtr := proc.DB.Batch.GetNewsgroupPointer(newsgroup)
 		if newsgroupPtr == nil {
-			log.Printf("error processArticle: GetNewsgroupPointer nil exception! msgId='%s' newsgroup '%s' skipping crosspost", article.MessageID, newsgroup)
+			log.Printf("error ProcessArticle: GetNewsgroupPointer nil exception! msgId='%s' newsgroup '%s' skipping crosspost", article.MessageID, newsgroup)
 			continue // Skip this group if not found
 		}
 
@@ -309,7 +309,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		stored, err := groupDB.LookupMsgIdInArticlesDB(article.MessageID)
 		groupDB.Return() // Return connection immediately after the lookup
 		if err != nil {
-			log.Printf("processArticle: message-id lookup of '%s' in '%s' failed: %v", article.MessageID, newsgroup, err)
+			log.Printf("ProcessArticle: message-id lookup of '%s' in '%s' failed: %v", article.MessageID, newsgroup, err)
 			continue
 		}
 		opened++
@@ -339,7 +339,7 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 	switch {
 	case len(capture) > 0:
 		// One goroutine per article captures every target group (A-tools-1). It runs once
-		// processArticle has returned and unlocked article.Mux (BatchCaptureOverviewForLater
+		// ProcessArticle has returned and unlocked article.Mux (BatchCaptureOverviewForLater
 		// locks it). len(capture) <= MaxCrossPosts < cap(ProcessQueue), so the sends to
 		// ProcessQueue never block, and since every target is already in NewsgroupsPtr no
 		// group's batch can clear the article before the last capture was sent.
@@ -377,4 +377,4 @@ func (proc *Processor) processArticle(article *models.Article, legacyNewsgroup s
 		releaseClaim(msgIdItem)
 		return history.CaseRetry, fmt.Errorf("%w: no group database could be opened", common.ErrIntakeTemporary)
 	}
-} // end func processArticle
+} // end func ProcessArticle

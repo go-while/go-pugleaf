@@ -403,7 +403,7 @@ func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, err
 		article.MessageID, *article.NewsgroupsPtr[0], len(article.NewsgroupsPtr))
 
 	bulkmode := false
-	return proc.processArticle(article, *article.NewsgroupsPtr[0], bulkmode)
+	return proc.ProcessArticle(article, *article.NewsgroupsPtr[0], bulkmode)
 }
 
 // postWaitCommitted is the commit barrier of ProcessPostedArticle (a seam for tests).
@@ -434,7 +434,7 @@ const postRecheckDelay = 50 * time.Millisecond
 // database it was captured for, at most timeout in total (<= 0: no wait and no lookups;
 // the article is still stored).
 //
-// A commit mark is taken for every name in article.NewsgroupsPtr before processArticle,
+// A commit mark is taken for every name in article.NewsgroupsPtr before ProcessArticle,
 // which counts the capture synchronously (NoteCaptured). After it returned, NewsgroupsPtr
 // holds exactly the groups the article was captured for minus those whose batch already
 // committed it (the batch writer removes a group only on commit, never on a drop), so only
@@ -453,7 +453,7 @@ func (proc *Processor) ProcessPostedArticle(article *models.Article, stop <-chan
 		return history.CaseError, fmt.Errorf("no newsgroups specified in article")
 	}
 
-	// Copy what is needed after processArticle: once it returns, the batch goroutine may
+	// Copy what is needed after ProcessArticle: once it returns, the batch goroutine may
 	// already have cleared the struct (db_batch.go processNewsgroupBatch).
 	messageID := article.MessageID
 	var sq *database.SQ3batch
@@ -474,7 +474,7 @@ func (proc *Processor) ProcessPostedArticle(article *models.Article, stop <-chan
 		messageID, *article.NewsgroupsPtr[0], len(article.NewsgroupsPtr))
 
 	bulkmode := false
-	code, err := proc.processArticle(article, *article.NewsgroupsPtr[0], bulkmode)
+	code, err := proc.ProcessArticle(article, *article.NewsgroupsPtr[0], bulkmode)
 	if code != history.CasePass || err != nil || timeout <= 0 {
 		return code, err
 	}

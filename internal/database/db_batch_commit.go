@@ -14,7 +14,7 @@ import (
 // wait until every article it handed over has been committed or dropped:
 //
 //   - NoteCaptured counts an article per target group when it is handed to the batch writer
-//     (processArticle calls it synchronously, before the capture goroutine starts).
+//     (ProcessArticle calls it synchronously, before the capture goroutine starts).
 //   - settle counts the articles of a batch once it was committed (batchInsertOverviews
 //     succeeded) or dropped (every drop path of the batch writer).
 //   - CommitMark takes the dropped baseline of a group at the start of a run, WaitCommitted

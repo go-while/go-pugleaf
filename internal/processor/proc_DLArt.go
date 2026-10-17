@@ -392,8 +392,8 @@ forProcessing:
 					errs++
 				}
 			} else if item.Error == nil && item.Article != nil {
-				//log.Printf("DownloadArticles --> proc.processArticle '%s' in group '%s'", *item.MessageID, newsgroup)
-				response, err := proc.processArticle(item.Article, newsgroup, bulkmode)
+				//log.Printf("DownloadArticles --> proc.ProcessArticle '%s' in group '%s'", *item.MessageID, newsgroup)
+				response, err := proc.ProcessArticle(item.Article, newsgroup, bulkmode)
 				if err != nil {
 					log.Printf("DownloadArticles: '%s' Failed to process article (%s): response=%d err='%v'", newsgroup, *item.MessageID, response, err)
 					errs++

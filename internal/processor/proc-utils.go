@@ -502,7 +502,7 @@ func multiLineHeaderToStringHTML(vals []string) string {
 */
 
 // MaxFutureDate is how far a Date (or Injection-Date) may lie in the future before
-// processArticle refuses the article (RFC 5537 §3.7 step 2: 24 hours; A-intake-7).
+// ProcessArticle refuses the article (RFC 5537 §3.7 step 2: 24 hours; A-intake-7).
 // bruteForceDateParse keeps its own internal 25 h sanity bound.
 var MaxFutureDate = 24 * time.Hour
 

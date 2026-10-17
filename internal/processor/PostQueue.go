@@ -61,7 +61,7 @@ func (w *PostQueueWorker) processLoop() {
 	}
 }
 
-// processArticle processes a single article from the queue
+// ProcessArticle processes a single article from the queue
 func (w *PostQueueWorker) pre_processArticle(article *models.Article) error {
 	// Get newsgroups from the article's headers
 	newsgroupsHeader, exists := article.Headers["newsgroups"]
@@ -81,7 +81,7 @@ func (w *PostQueueWorker) pre_processArticle(article *models.Article) error {
 	errs := 0
 	// Process the article for each newsgroup
 	for _, newsgroup := range newsgroups {
-		// copy article; each copy gets its own Headers map: processArticle drops its
+		// copy article; each copy gets its own Headers map: ProcessArticle drops its
 		// reference, and a shared map must stay intact for the next copy (A-intake-5)
 		copiedArticle := &models.Article{
 			MessageID:   article.MessageID,
@@ -153,12 +153,12 @@ func (w *PostQueueWorker) processArticleForNewsgroup(article *models.Article, ne
 	//log.Printf("PostQueueWorker: Threading article %s in newsgroup %s", article.MessageID, newsgroup)
 
 	// Process through the threading system using the processor's method
-	_, err = w.processor.processArticle(article, newsgroup, true)
+	_, err = w.processor.ProcessArticle(article, newsgroup, true)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("PostQueueWorker: sent article %s in newsgroup %s to processArticle", article.MessageID, newsgroup)
+	log.Printf("PostQueueWorker: sent article %s in newsgroup %s to ProcessArticle", article.MessageID, newsgroup)
 	return nil
 }
 

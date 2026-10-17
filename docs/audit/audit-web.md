@@ -192,7 +192,7 @@ Most important:
   Bytes (`:361-371`) and stores `strings.Join(headers, "\n")` as `HeadersJSON` (`:377`). Subject,
   Message-ID, Date, References and Path exist only as struct fields (`:374-389`, `:398`).
   `pre_processArticle` copies `HeadersJSON` unchanged per group (`PostQueue.go:93`) and
-  `processArticle` never rewrites it. The NNTP server serves HEAD/ARTICLE from
+  `ProcessArticle` never rewrites it. The NNTP server serves HEAD/ARTICLE from
   `strings.Split(article.HeadersJSON, "\n")` (`nntp-cmd-helpers.go:20-22`), so a web post is served
   without Subject, Message-ID, Date, Path and References.
 - **Also:** `Bytes` is `len(body) - linesCount` (`:360`), which is neither the body octet count nor the

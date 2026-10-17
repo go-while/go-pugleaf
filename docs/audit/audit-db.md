@@ -21,7 +21,7 @@ date-filter functions, every dynamic-SQL site), `thread_cache.go` (the parts FU 
 `InitializeThreadCache`, `MemCachedThreads.CleanCron`, `UpdateThreadMetadata`), `db_rescan.go`
 (entry points, `GetLatestArticleNumber*`, the table-clearing `Sprintf`), `db_aimodels.go`,
 `db_nntp_users.go` (auth path only). I also read the callers needed to rate reachability:
-`internal/processor/threading.go` (`processArticle`), `proc_DLArt.go`, `processor.go`,
+`internal/processor/threading.go` (`ProcessArticle`), `proc_DLArt.go`, `processor.go`,
 `proc-utils.go` (`extractGroupsFromHeaders`), the `GetGroupDB` callers in `cmd/*` and
 `internal/{processor,postmgr,preloader,nntp}`, `cmd/expire-news/main.go` (delete set),
 `internal/web/web_hierarchiesPage.go` (page parsing).
@@ -268,7 +268,7 @@ delete/reset. The RFC side (`bytes` semantics) belongs to `audit-intake`.
    string (`initGroupDB` `:218-247`). The server-side measurement is SEC-2/A-nntp-sec-4 in
    `audit-nntp-sec.md` (4 files from 4 `LISTGROUP` names, plus map entries and open handles).
 2. The batch upsert creates a newsgroups row for any name the intake accepted, with `active` defaulting
-   to 1 and `hierarchy` NULL (A-db-1). Non-bulk intake (`processArticle`) runs `GetGroupDB` and
+   to 1 and `hierarchy` NULL (A-db-1). Non-bulk intake (`ProcessArticle`) runs `GetGroupDB` and
    enqueues for every group in `Newsgroups:` that passes the lax `IsValidGroupName`
    (`processor/proc-utils.go:414-454`, `threading.go:209-256`), and never checks the main DB. So an
    authenticated poster or a peering feed that crossposts to groups not carried locally creates them
@@ -288,7 +288,7 @@ default `active BOOLEAN NOT NULL DEFAULT 1` (`migrations/0001_main_schema.sql:36
 
 | caller | name source | verdict |
 |----|----|----|
-| `processor/threading.go:232` (`processArticle`, non-bulk) | `Newsgroups:` header, lax regex only | **unvalidated**: creates DB + active row (this finding) |
+| `processor/threading.go:232` (`ProcessArticle`, non-bulk) | `Newsgroups:` header, lax regex only | **unvalidated**: creates DB + active row (this finding) |
 | `nntp/nntp-cmd-group.go:51` (`LISTGROUP`) | client argument | **unvalidated**: SEC-2 server side (audit-nntp-sec) |
 | `nntp/nntp-cmd-xover.go:71`, `nntp-cmd-xhdr.go:77`, `nntp-article-common.go:163` | `c.currentGroup`, set only by `GROUP` after `MainDBGetNewsgroup` | validated |
 | `nntp/nntp-article-common.go:203` | message-id path group list | see audit-nntp-sec |
@@ -308,7 +308,7 @@ default `active BOOLEAN NOT NULL DEFAULT 1` (`migrations/0001_main_schema.sql:36
 | `queries.go:1539` (`GetTotalThreadsCount`) | every newsgroups row | unused; would open or create one DB per row |
 | `db_rescan.go:16,101,400`, `queries.go:3064,3488,3548,3649` | callers above | inherit the caller's verdict |
 
-**Fix (M):** keep `GetGroupDB` as it is (D4 Appendix B). In `processArticle`, drop groups that have
+**Fix (M):** keep `GetGroupDB` as it is (D4 Appendix B). In `ProcessArticle`, drop groups that have
 no newsgroups row, or that are inactive, before `GetGroupDB`/enqueue (one `MainDBGetNewsgroup` per
 group, cacheable). The batch upsert must never INSERT: turn it into an `UPDATE ... WHERE name = ?` and
 log when 0 rows are affected. `DeleteNewsgroup` should also move or delete the group file, or keep a
@@ -455,7 +455,7 @@ an error as "unknown, retry later".
 | new | A-db-4 | medium | bug | `db_batch.go:870-932` (`:904-908`, `:914-916`), `:939-947`; `processor/threading.go:220` | CONFIRMED |
 
 **Scenario:** `latestDate` is taken only from articles that PHASE 3 clears, that is, articles no
-longer referenced by another group (`:904-908` `continue` before `:914`). `processArticle` appends
+longer referenced by another group (`:904-908` `continue` before `:914`). `ProcessArticle` appends
 every target group to `NewsgroupsPtr` before it checks whether that group already holds the article
 (`threading.go:220` vs `:240`), so skipped groups stay in the list for good. A batch made of
 crossposts, or of articles with a skipped group, therefore writes

@@ -76,7 +76,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
    (every batch, not just the first), `GROUP` answers 411 while `LIST ACTIVE` lists the group, and the fetcher (`$all`),
    `history-rebuild`, `expire-news`, `recover-db`, `nntp-transfer`, `nntp-analyze` and the preloader repair abort.
    One POST by any posting user, or one TAKETHIS by a peer, is enough.
-2. **SEC-2, intake half (high):** `processArticle` accepts any name that passes a lax regex and creates the group DB
+2. **SEC-2, intake half (high):** `ProcessArticle` accepts any name that passes a lax regex and creates the group DB
    before the reply. One POST created 7 group DBs and 7 `active=1` rows, including the reserved `control`, `junk`,
    `example.foo`, the non-conforming `AI.TEST.UPPER` and `ai..dots.`, and `c++` (RFC 5537 §3.7: "MUST NOT create new
    newsgroups").
@@ -88,7 +88,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
    accepted a second time into another group after the 10-minute cache eviction
    (eviction simulated with `MsgIdCache.Delete`, which is what `CleanExpiredEntries` does after `CachedEntryExpires + StuckEntryMaxAge`, `history_MsgIdItemCache.go:194-200`).
 5. **A-intake-9 (medium):** when no group DB can be opened (for example a 303-character group name that passes
-   `validGroupNameRegexLazy`), `processArticle` still returns `CasePass`: POST answers `240 Article posted successfully`,
+   `validGroupNameRegexLazy`), `ProcessArticle` still returns `CasePass`: POST answers `240 Article posted successfully`,
    and nothing is stored anywhere.
 
 ## Findings
@@ -153,7 +153,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 | SEC-2 | SEC-2 | high | security | `processor/threading.go:125-137,208-243`, `processor/proc-utils.go:414-454`, `common/headers.go:26-30,539-578`, `database/db_groupdbs.go:117-247`, `database/db_batch.go:553-563,940-950` | CONFIRMED (intake half; the NNTP half is in `audit-nntp-sec`) |
 
 - **Scenario:** `extractGroupsFromHeaders` keeps every token that passes `IsValidGroupName` (no lookup in
-  `newsgroups`). `processArticle` then calls `proc.DB.GetGroupDB(newsgroup)` (`threading.go:232`), which creates
+  `newsgroups`). `ProcessArticle` then calls `proc.DB.GetGroupDB(newsgroup)` (`threading.go:232`), which creates
   `<DataDir>/db/<md5>/<sanitized>.db` with schema before the reply. The batch writer's upsert creates the
   `newsgroups` row with `active=1`. Only an authenticated posting user or peer can do this, but any of them can, and the
   web posting path checks existence (`web/web_sitePostPage.go:287-308`) while NNTP does not.
@@ -168,7 +168,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 - **RFC:** RFC 5537 §3.7: "Serving agents MUST NOT create new newsgroups simply because an unrecognized
   <newsgroup-name> occurs in a Newsgroups header field." §3.5 step 4: an injecting agent "SHOULD reject any proto-article
   whose Newsgroups header field does not contain at least one <newsgroup-name> for a valid group".
-- **Fix:** in `processArticle`, resolve each name with `MainDBGetNewsgroup` (or a cached active set) and drop unknown
+- **Fix:** in `ProcessArticle`, resolve each name with `MainDBGetNewsgroup` (or a cached active set) and drop unknown
   names. Reject when none is left: 441 for POST, 437 for IHAVE, 439 for TAKETHIS. For a peer feed, keep the current
   behavior only behind an explicit `-accept-unknown-groups` policy. `GetGroupDB`'s auto-create stays (Appendix B of the
   plan); the existence check belongs in the caller. Effort S.
@@ -179,14 +179,14 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 |----|----|----|----|----|----|
 | SEC-3 | SEC-3 | high | security | `processor/threading.go:57-283`, `nntp/nntp-cmd-posting.go:221-260`, `config/config.go:131,574`, `models/models.go:58` | CONFIRMED (intake side; the server side is in `audit-nntp-sec`) |
 
-- **Scenario:** `processArticle` checks presence of headers, a date and a group count, never a size. Neither
+- **Scenario:** `ProcessArticle` checks presence of headers, a date and a group count, never a size. Neither
   `Server.NNTP.MaxArtSize` (default 32768, `config.go:574`, commented "128 KB") nor `newsgroups.max_art_size`
   (`models.Newsgroup.MaxArtSize`, scanned in `MainDBGetNewsgroup` but never compared) is read on any intake path
   (`grep -rn MaxArtSize` outside `config` and CRUD: no hit).
 - **Evidence:** repro: `POST with one 4 MiB body line ... 240 Article posted successfully, stored=true`. The whole body
   is held in `bodyLines`, `article.BodyText` (joined) and `NNTPbody`, and then written to `articles.body_text`.
 - **Fix:** enforce the server limit while reading (`audit-nntp-sec` SEC-3), and the per-group `max_art_size` in
-  `processArticle` once the groups are resolved (SEC-2 fix), answering 441/437/439. Effort S.
+  `ProcessArticle` once the groups are resolved (SEC-2 fix), answering 441/437/439. Effort S.
 
 ### A-intake-2: the header block is never validated; repeated and malformed headers are stored verbatim (root of A-nntp-rfc-2)
 
@@ -206,7 +206,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
   - a header line `..` on the wire is un-stuffed to `.` (`nntp-cmd-posting.go:243-245`) and stored (A-nntp-rfc-2
     scenario A: HEAD/ARTICLE end the block there);
   - two `Message-ID:` → the first wins (`extractHeaderValue`, `:297-321`); the second stays in `headers_json`.
-  `processArticle` checks only that Newsgroups/Subject/From are non-empty and the Date parses (`threading.go:108-161`).
+  `ProcessArticle` checks only that Newsgroups/Subject/From are non-empty and the Date parses (`threading.go:108-161`).
 - **Fetch path:** `GetArticle` reads with `readMultilineResponse` (`nntp-client-commands.go:117`), which also un-stuffs
   `..` to `.` (`:837-839`), and parses with the same `ParseLegacyArticleLines` (`:123`). So an upstream server can plant
   the same lines. This answers the open question in `audit-nntp-rfc` "Not covered".
@@ -222,7 +222,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
   Newsgroups, Path, and Subject." RFC 5537 §3.7 step 1: a serving agent "MUST reject any article that does not include
   all the mandatory header fields or any article that contains header fields that do not have valid contents."
 - **Fix:** add a `validateHeaderBlock(headLines)` used by POST, IHAVE, TAKETHIS and the fetcher before
-  `processArticle`. It rejects a line that is neither `name:value` (name = printable ASCII without `:`; RFC 5536 §2.2
+  `ProcessArticle`. It rejects a line that is neither `name:value` (name = printable ASCII without `:`; RFC 5536 §2.2
   requires generating a space after the colon and allows accepting it without) nor a continuation, a line `.`, a NUL/CR/LF byte inside a line, and a second copy of any of
   the six mandatory headers (and of Injection-Date/Injection-Info/Xref/Control/Supersedes/Approved). Reply 441/437/439;
   the fetcher counts the article as an error. Effort M.
@@ -234,7 +234,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 | INT-1 | INT-1 | medium | rfc | `processor/threading.go:59-61,155-161,185-192`, `nntp/nntp-cmd-posting.go:42-46`, `nntp/nntp-cmd-helpers.go:20-23` | CONFIRMED (one sub-claim rejected) |
 
 - **Scenario:**
-  - POST without Message-ID: `extractHeaderValue` returns "" → `processArticle` returns `CaseError` ("article is nil",
+  - POST without Message-ID: `extractHeaderValue` returns "" → `ProcessArticle` returns `CaseError` ("article is nil",
     `:59-61`) → 441.
   - POST without Date: `ParseNNTPDate("")` → zero → `CaseError` (`:155-161`) → 441.
   - The Path is prefixed with `LocalNNTPHostname + "!"` only in `article.Path` (`:185-192`), which goes to the `path`
@@ -270,10 +270,10 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 
 - **Scenario A (already stored, unknown to history):** history says "new" (INT-6/A-intake-1 groups, a history write
   error, `-history=false`, or articles seeded or imported without history). `CheckMessageID` → `CasePass` → 335.
-  `processArticle` finds the id in each target group (`ExistsMsgIdInArticlesDB`, `:240`), queues nothing, sets
+  `ProcessArticle` finds the id in each target group (`ExistsMsgIdInArticlesDB`, `:240`), queues nothing, sets
   `CaseDupes` and still returns `CasePass` (`:270-283`) → 235/239.
 - **Scenario B (in flight):** `CheckMessageID` passes, then a concurrent transfer claims the id (`CaseLock`) before this
-  connection's `processArticle` runs. `processArticle` maps `CaseLock`/`CaseWrite` to `CaseDupes` (`:76-81`), which
+  connection's `ProcessArticle` runs. `ProcessArticle` maps `CaseLock`/`CaseWrite` to `CaseDupes` (`:76-81`), which
   IHAVE answers 437 and TAKETHIS 439, both "do not retry". If the first transfer then fails, both copies are lost.
 - **Scenario C (accepted twice):** after the stuck `CaseLock` of A-intake-1 is evicted (10 min 15 s), the same id is
   "new" again, and an offer or post with a different Newsgroups stores a second copy (eviction simulated with `MsgIdCache.Delete`, which is what `CleanExpiredEntries` does after `CachedEntryExpires + StuckEntryMaxAge`, `history_MsgIdItemCache.go:194-200`).
@@ -287,14 +287,14 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
   in-flight: CheckMessageID before claim=0xF1, ProcessIncomingArticle after concurrent claim=0x1C err=<nil>
   ```
   (The in-flight case is reproduced deterministically: the program sets the cache item to `CaseLock` between
-  `CheckMessageID` and `ProcessIncomingArticle`, which is what the first transfer's `processArticle:82` does.) An
+  `CheckMessageID` and `ProcessIncomingArticle`, which is what the first transfer's `ProcessArticle:82` does.) An
   earlier run of the same program printed `IHAVE <sec2-new1> ...: 436 Retry later` while the item was still stuck.
 - **RFC:** RFC 3977 §6.3.2.2: "If the server does not want the article (if, for example, the server already has a copy
   of it), a 435 response MUST be returned ... if ... another client is in the process of sending the same article to the
   server), a 436 response MUST be returned." After the transfer, 235 means "successfully transferred". RFC 4644 §2.5.2:
   for a temporary failure the server "MUST reply with a 400 response to the client and close the connection." RFC 5537
   §3.7 step 3: a serving agent "MUST reject any article that has already been accepted."
-- **Fix:** have `processArticle` return a distinct `CaseDupes` when nothing was queued because every group has the
+- **Fix:** have `ProcessArticle` return a distinct `CaseDupes` when nothing was queued because every group has the
   article (IHAVE 437, TAKETHIS 439, POST 441 "duplicate"), and `CaseRetry` for `CaseLock`/`CaseWrite` (IHAVE 436,
   TAKETHIS 400 + close or 431 after CHECK). Record the history entry when a group already has the article but history
   doesn't (self-healing). Effort S.
@@ -306,7 +306,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 | INT-3 | INT-3 | medium | rfc | `processor/proc-utils.go:414-454,502-559,587-791` (fallback `:756-772`), `common/headers.go:24-30,539-578`, `nntp/nntp-cmd-posting.go:283-291`, `processor/PostQueue.go:164-179` | CONFIRMED |
 
 - **Scenario (Date):** `ParseNNTPDate` tries ~370 layouts, then `bruteForceDateParse`. When nothing matches, that
-  function defaults year 1990, month 1, day 1, 12:00 UTC (`:757-765`) and returns it as a valid date. `processArticle`
+  function defaults year 1990, month 1, day 1, 12:00 UTC (`:757-765`) and returns it as a valid date. `ProcessArticle`
   accepts it. `Date: garbage` and `Date: Tuesday 7pm` are both stored as `1990-01-01 12:00:00`. The fabricated date is
   later sent to peers by `ReconstructHeaders` (A-intake-6).
 - **Scenario (Newsgroups):** `common.SeparatorRegex` `[,;:\s]+` splits on space, `;` and `:` as well as `,`, so
@@ -315,9 +315,9 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
   (`validGroupNameRegexLazy` `^[a-zA-Z0-9][a-zA-Z0-9._+&-]*$` matches `ai..dots.`), `&`, and has no length bound. The
   reserved names of RFC 5536 §3.1.4 are not checked. The strict branch is dead: `UseStrictGroupValidation` is never set
   to true (`cmd/merge-active/main.go:55` and `cmd/rslight-importer/main.go:100` set it to false).
-- **Scenario (three splitters):** POST/IHAVE/TAKETHIS split on `,` only (`nntp-cmd-posting.go:283`), `processArticle`
+- **Scenario (three splitters):** POST/IHAVE/TAKETHIS split on `,` only (`nntp-cmd-posting.go:283`), `ProcessArticle`
   on the regex, `PostQueueWorker` on `,` (`PostQueue.go:164-179`). The POST split only feeds `NewsgroupsPtr[0]`
-  (logged) and the "no Newsgroups" check, because `processArticle` re-derives the groups and replaces `ArticleNums`
+  (logged) and the "no Newsgroups" check, because `ProcessArticle` re-derives the groups and replaces `ArticleNums`
   (`threading.go:174`). The inconsistency is real, its effect today is a wrong log line and a stale pointer in
   `NewsgroupsPtr`.
 - **Evidence:** repro, section "INT-3": `POST Date 'garbage': 240 ... stored date_sent=1990-01-01 12:00:00`;
@@ -340,7 +340,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 |----|----|----|----|----|----|
 | INT-4 | INT-4 | medium | missing | `processor/threading.go:57-283` (no handling), `nntp/nntp-client-commands.go:936-939,950`, `nntp/nntp-cmd-helpers.go:20-23` | CONFIRMED |
 
-- **Scenario:** `processArticle` has no branch for `Control:`, `Supersedes:` or `Approved:`, and never reads
+- **Scenario:** `ProcessArticle` has no branch for `Control:`, `Supersedes:` or `Approved:`, and never reads
   `newsgroups.status`. A cancel is stored as an ordinary article in the listed group and the target stays. A
   `Supersedes:` article doesn't remove the old one. A post to a group with `status='m'` without `Approved:` is accepted
   (the web path refuses it, `web/web_sitePostPage.go:300-303`). `ParseHeaders` drops `Xref` only from the map
@@ -409,7 +409,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 - **Scenario (Path):** `pathline` starts as `"Path: <host>!.TX!<path>"`, then the loop over `strings.Fields(pathline)`
   appends every field again, `"Path:"` included (`:276-289`). The result is one header line with two copies of the
   path, followed by a second `Path:` header (`:293-297`): three copies in two lines. `article.Path` already holds the
-  local prefix from `processArticle:185-192`, so the local identity appears twice in each copy.
+  local prefix from `ProcessArticle:185-192`, so the local identity appears twice in each copy.
 - **Scenario (folded Newsgroups):** the `getLines` loop appends the continuation lines and increments `i` (`:402-403`),
   but `i` is the `range` variable, so the next iterations process the same continuation lines again. They are
   `isSpacedLine` with `ignoreLine == false` and are emitted again after the unfolded line.
@@ -464,7 +464,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 |----|----|----|----|----|----|
 | new | A-intake-3 | medium | rfc | `nntp/nntp-cmd-posting.go:267`, `processor/threading.go:21-41,59-66`, `processor/proc_DLArt.go:140-146`, `nntp/nntp-client-commands.go:123,850-853` | CONFIRMED |
 
-- **Scenario:** POST takes the Message-ID header value as is. `processArticle` checks only that it is non-empty.
+- **Scenario:** POST takes the Message-ID header value as is. `ProcessArticle` checks only that it is non-empty.
   `CheckMessageIdFormat` exists (`threading.go:21`), but its only caller is commented out (`proc_DLArt.go:140-146`),
   and it would allow 255 octets. A bracket-less id, an id with spaces, or a 316-octet id is accepted, keyed in history,
   and stored. Such ids cannot be retrieved with `ARTICLE <id>` by RFC-conformant clients and are rejected by peers. On
@@ -489,7 +489,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 |----|----|----|----|----|----|
 | new | A-intake-4 | medium | rfc | `nntp/nntp-cmd-posting.go:14-47`, `processor/threading.go:185-192` | CONFIRMED |
 
-- **Scenario:** POST runs the same `processArticle` as IHAVE/TAKETHIS. It does not reject a proto-article that already
+- **Scenario:** POST runs the same `ProcessArticle` as IHAVE/TAKETHIS. It does not reject a proto-article that already
   has `Injection-Info:`, `Injection-Date:` or `Xref:`, or whose `Path:` contains `.POSTED`. Such articles carry forged
   trace data (a fake injecting host and posting account) to every reader and peer.
 - **Evidence:** repro:
@@ -511,13 +511,13 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 | new | A-intake-5 | medium | bug | `processor/PostQueue.go:64-126,130-160`, `processor/threading.go:108-113,200-205` | CONFIRMED |
 
 - **Scenario:** `pre_processArticle` copies the article per group, but every copy shares the original `Headers` map
-  (`PostQueue.go:96`). The first `processArticle` (bulk mode) frees memory by setting every value of that shared map to
+  (`PostQueue.go:96`). The first `ProcessArticle` (bulk mode) frees memory by setting every value of that shared map to
   nil (`threading.go:200-205`). For the second group `GetHeaderFirst(article.Headers, "newsgroups")` returns "", so
-  `processArticle` fails with "no 'newsgroups' header" (`:108-113`). The error is only logged. The `post_queue` row is
+  `ProcessArticle` fails with "no 'newsgroups' header" (`:108-113`). The error is only logged. The `post_queue` row is
   written for `newsgroups[0]` only (`PostQueue.go:114-125`).
 - **Evidence:** repro, section "web crosspost": `stored in ai.test.web1=true ai.test.web2=false`.
 - **Fix:** deep-copy `Headers` per copy (or pass the group list explicitly and stop reading the header in bulk mode),
-  and don't mutate maps the caller owns in `processArticle`. Effort S.
+  and don't mutate maps the caller owns in `ProcessArticle`. Effort S.
 
 ### A-intake-6: ReconstructHeaders rewrites relayed and posted articles
 
@@ -578,7 +578,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 |----|----|----|----|----|----|
 | new | A-intake-8 | medium | bug | `processor/threading.go:208-268`, `processor/proc-utils.go:414-454` | CONFIRMED |
 
-- **Scenario:** `processArticle` never reads `newsgroups.active` or `status`. A group the admin deactivated
+- **Scenario:** `ProcessArticle` never reads `newsgroups.active` or `status`. A group the admin deactivated
   (`active=0`) or set to `n`/`x` keeps receiving NNTP posts and feeds. The web path refuses both
   (`web/web_sitePostPage.go:295-307`), `PostQueueWorker` skips inactive groups (`PostQueue.go:137-140`).
 - **Evidence:** repro: `POST to inactive ai.test.off: 240 ... stored in inactive group=true; row: id=4 active=false`.
@@ -643,7 +643,7 @@ CLI-1 are worse than the seed text. One sub-claim of INT-1 is rejected (see `## 
 
 ## Header handling matrix
 
-"Intake" covers POST, IHAVE and TAKETHIS (`nntp-cmd-posting.go` → `ParseLegacyArticleLines` → `processArticle`) and the
+"Intake" covers POST, IHAVE and TAKETHIS (`nntp-cmd-posting.go` → `ParseLegacyArticleLines` → `ProcessArticle`) and the
 fetcher (`GetArticle` → same parser, bulk mode). "Served" is HEAD/ARTICLE, which send `headers_json` verbatim
 (`nntp-cmd-helpers.go:20-23`), and XOVER/XHDR, which use the columns. "Outbound" is `ReconstructHeaders` (TAKETHIS feed,
 upstream POST).
@@ -672,7 +672,7 @@ upstream POST).
 |----|----|----|----|----|----|----|
 | `processor.CheckMessageIdFormat` (`threading.go:21`) | | yes | | yes | | only caller commented out (`proc_DLArt.go:140-146`); allows 255 octets (RFC 250) |
 | `processor.containsAtAndDot` (`threading.go:43`), `ComputeMessageIDHash` (`:16`), `countLines` (`proc-utils.go:575`) | | | yes | | | staticcheck U1000 / no callers; `ComputeMessageIDHash` duplicates `history.ComputeMessageIDHash` |
-| `processor.processArticle` (`threading.go:57`) | | | | | yes | `CasePass` with nothing queued (INT-2, A-intake-9); nils the caller's `Headers` map (A-intake-5) |
+| `processor.ProcessArticle` (`threading.go:57`) | | | | | yes | `CasePass` with nothing queued (INT-2, A-intake-9); nils the caller's `Headers` map (A-intake-5) |
 | `(*Processor).ProcessIncomingArticle` (`processor.go:258`) | | | | yes | | "Use the primary newsgroup for processing": the argument is ignored outside bulk mode |
 | `(*Processor).ImportOverview` (`proc_ImportOV.go:14`) | | yes | | | yes | no caller; compares remote numbers with local `MAX(article_num)` (`:42-49`); unchecked `tx.Commit()` (`:95`); `PRAGMA synchronous=FULL` reaches one pooled connection (`:108`) |
 | `(*Processor).GetXHDR` (`proc_DLXHDR.go:6`), `GetHistoryStats` (`processor.go:126`) | | | yes | | | no callers |
@@ -716,7 +716,7 @@ Seed text corrected, not rejected:
 - **CLI-1** says two Path headers. There are two Path header lines with three copies of the path, each containing the
   local identity twice.
 - **INT-3**, "the POST path splits Newsgroups with a plain `strings.Split(",")`": confirmed, but the split result is used
-  only for logging and the empty check; `processArticle` re-derives the groups.
+  only for logging and the empty check; `ProcessArticle` re-derives the groups.
 - **INT-5**, "article numbers can be reused": only when the highest-numbered row is deleted; plain oldest-first expiry
   doesn't trigger it.
 
@@ -822,7 +822,7 @@ POST for bytes check: 240 Article posted successfully
 POST body 'line1' + final empty line: 240 Article posted successfully
   body_text="line1\n" lines=2
   article <int5-n2> had number 2, was deleted; next article <int5-n3> got number 2
-== web crosspost through PostQueueWorker (bulkmode processArticle)
+== web crosspost through PostQueueWorker (bulkmode ProcessArticle)
   stored in ai.test.web1=true ai.test.web2=false
   web1 path="news.test.invalid!.POSTED!not-for-mail"
 == nothing stored, still 240

@@ -2,7 +2,7 @@ package processor
 
 // ProcessPostedArticle (plan post-430-window, slice post-commit-wait): POST answers 240 only
 // after the batch writer committed the article to its groups. The tests open a database in a
-// temp dir (flNntpdbOpenDB) and run the real non-bulk processArticle; the commit barrier is
+// temp dir (flNntpdbOpenDB) and run the real non-bulk ProcessArticle; the commit barrier is
 // either the real WaitCommitted or a fake through the postWaitCommitted seam.
 
 import (
@@ -99,7 +99,7 @@ func postCommitSetup(t *testing.T) *Processor {
 			t.Fatalf("InsertNewsgroup %s: %v", name, err)
 		}
 	}
-	// processArticle uses the global history.MsgIdCache: NewMsgIdItemCache creates it once
+	// ProcessArticle uses the global history.MsgIdCache: NewMsgIdItemCache creates it once
 	return &Processor{DB: db, MsgIdCache: history.NewMsgIdItemCache()}
 }
 
@@ -229,7 +229,7 @@ func postCommitSkipIfCommitted(t *testing.T, proc *Processor, calls []postCommit
 
 // TestPostCommitWaitBarrier covers the error mapping, the row check and the timeout sharing
 // with a fake barrier (and a fake row lookup where the row state must be forced); the
-// articles themselves are accepted by the real processArticle.
+// articles themselves are accepted by the real ProcessArticle.
 func TestPostCommitWaitBarrier(t *testing.T) {
 	proc := postCommitSetup(t)
 
@@ -396,7 +396,7 @@ func TestPostCommitWaitBarrier(t *testing.T) {
 	})
 
 	t.Run("captured groups only", func(t *testing.T) {
-		// the remote name has no row in the main DB: processArticle does not capture it, so
+		// the remote name has no row in the main DB: ProcessArticle does not capture it, so
 		// it is not waited for; each captured group once, with a non-increasing remaining time
 		fake := postCommitInstallFake(t, nil)
 		rows := postCommitInstallRows(t, func(string, int) (bool, error) { return true, nil })

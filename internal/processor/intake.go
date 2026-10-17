@@ -1,6 +1,6 @@
 package processor
 
-// Article-layer intake checks and policy for processArticle (plan nntp-intake-injection, S3):
+// Article-layer intake checks and policy for ProcessArticle (plan nntp-intake-injection, S3):
 // strict header validation for NNTP intake, newsgroup resolution against the newsgroups
 // table (D1/D2/D8), the Path/Xref helpers for the stored header block (D7, A-intake-6),
 // claim release on temporary failures (K5) and the capture limiter (A-tools-1).
@@ -87,7 +87,7 @@ func (proc *Processor) resolveIntakeGroups(names []string, posted, approved bool
 }
 
 // releaseClaim gives up the CaseLock claim on a message-id after a temporary failure (K5):
-// CheckMessageID and the next processArticle fall through to the history lookup again,
+// CheckMessageID and the next ProcessArticle fall through to the history lookup again,
 // so the article can be retried.
 func releaseClaim(item *history.MessageIdItem) {
 	if item == nil {

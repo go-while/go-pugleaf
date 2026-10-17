@@ -17,7 +17,7 @@ Files read in full:
 
 Callers and callees read for reachability and the memory analysis:
 - `internal/processor/proc_DLArt.go` (`DownloadArticles`, `GetOrCreateGroupBatch`, `DownloadArticlesFromDate`)
-- `internal/processor/threading.go:57-283` (`processArticle`), `internal/processor/processor.go:36-113`
+- `internal/processor/threading.go:57-283` (`ProcessArticle`), `internal/processor/processor.go:36-113`
 - `internal/database/db_batch.go:120-164,1753-1810` (`NewSQ3batch`, `BatchCaptureOverviewForLater`, `BatchDivider`)
 - `internal/database/db_init.go:95-151`, `internal/database/db_groupdbs.go:218-227`, `internal/database/utils.go:108-127`
 - `internal/nntp/nntp-client.go:150-235`, `internal/nntp/nntp-backend-pool.go:39-48,97-114,210-292`,
@@ -60,7 +60,7 @@ OPS-4 seeds). By category: bug 9, robustness 5, security 4, dead-code 3, wrong-f
 | low | A-tools-10, A-tools-11, A-tools-13, A-tools-16, A-tools-18, A-tools-19, A-tools-20, A-tools-21, CLI-6 (test-nntp part) |
 
 Five most important:
-1. **A-tools-1 (high)**: `processArticle` hands every stored article to `go BatchCaptureOverviewForLater(...)`. When
+1. **A-tools-1 (high)**: `ProcessArticle` hands every stored article to `go BatchCaptureOverviewForLater(...)`. When
    the batch writer is behind, each call parks a goroutine that holds the full article, and nothing bounds how many
    park. It is a likely cause of the fetcher memory growth noted in `BUGS.md`, together with A-db-2 and A-tools-4;
    that causal link is PLAUSIBLE. Measured in isolation: 20,000 articles of 16 KiB → 19,872 parked goroutines,
@@ -94,7 +94,7 @@ Five most important:
     goroutines dominating.
 - **Evidence:**
   - Code trace:
-    - `processArticle` ends every stored group with `go proc.DB.Batch.BatchCaptureOverviewForLater(newsgroupPtr, article)`
+    - `ProcessArticle` ends every stored group with `go proc.DB.Batch.BatchCaptureOverviewForLater(newsgroupPtr, article)`
       (`threading.go:256`) and returns `CasePass` right away (`:283`).
     - `BatchCaptureOverviewForLater` blocks on `BatchDividerChan <- article` (`db_batch.go:163`; capacity 128, `:1753`).
     - The single `BatchDivider` blocks on a full per-group channel (`:1801`, capacity `maxDBbatch` ≤ 1000) and is

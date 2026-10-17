@@ -26,7 +26,7 @@ func flNntpdbCounts(sq *SQ3batch, group string) (captured, settled, dropped uint
 	return c.captured, c.settled, c.dropped
 }
 
-// flNntpdbNote counts n captures of the task's group, as processArticle does per article.
+// flNntpdbNote counts n captures of the task's group, as ProcessArticle does per article.
 func flNntpdbNote(sq *SQ3batch, task *BatchTasks, n int) {
 	for i := 0; i < n; i++ {
 		sq.NoteCaptured([]*string{task.Newsgroup})
@@ -308,7 +308,7 @@ func TestFlNntpdbCommitBarrierSharedDB(t *testing.T) {
 	const n = 3
 	mark := sq.CommitMark(name)
 	ptr := sq.GetNewsgroupPointer(name)
-	// the capture path of processArticle: count first, then hand over (BatchDivider runs)
+	// the capture path of ProcessArticle: count first, then hand over (BatchDivider runs)
 	for i := 0; i < n; i++ {
 		a := adfBatchArticle(&BatchTasks{Newsgroup: ptr}, adfBatchMsgID())
 		a.NewsgroupsPtr = []*string{ptr}

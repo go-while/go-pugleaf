@@ -173,7 +173,7 @@ func e2eMain(m *testing.M) int {
 	proc := &processor.Processor{
 		DB:            db,
 		History:       hist,
-		MsgIdCache:    history.NewMsgIdItemCache(), // processArticle uses the global history.MsgIdCache
+		MsgIdCache:    history.NewMsgIdItemCache(), // ProcessArticle uses the global history.MsgIdCache
 		ThreadCounter: processor.NewCounter(),
 		LegacyCounter: processor.NewCounter(),
 	}
