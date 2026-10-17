@@ -1205,19 +1205,55 @@ func TestHttpxBodyLimits(t *testing.T) {
 		t.Fatalf("JSON within the cap = %d %q, handler ran %d times", rec.Code, rec.Body.String(), ran)
 	}
 
-	// A GET with a form content type and no body is not touched.
-	rec = httpxServe(r, http.MethodGet, "/login", func(req *http.Request) {
+	// A GET is not checked, whatever its content type and body say.
+	r.GET("/ping", func(c *Context) { ran++; c.String(http.StatusOK, "pong") })
+	rec = httpxServe(r, http.MethodGet, "/ping", func(req *http.Request) {
+		req.Body = io.NopCloser(strings.NewReader("--x\r\n"))
 		req.Header.Set("Content-Type", "multipart/form-data; boundary=x")
 	})
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("GET /login with a multipart content type = %d, want 405", rec.Code)
+	if rec.Code != http.StatusOK || ran != 5 {
+		t.Errorf("GET /ping with a multipart content type = %d, handler ran %d times", rec.Code, ran)
 	}
+
+	// One route may have its own cap; the others keep the router's. The route cap is not applied
+	// when global middleware already read the form within the router's cap.
+	r.POST("/post", func(c *Context) { ran++; c.String(http.StatusOK, "%d", len(c.PostForm("pad"))) })
+	r.SetRouteMaxBodyBytes(http.MethodPost, "/post", 64<<10)
+	rec = httpxServe(r, http.MethodPost, "/post", form(40<<10))
+	if rec.Code != http.StatusOK || rec.Body.String() != "40960" || ran != 6 {
+		t.Fatalf("form within the route cap = %d %q, handler ran %d times", rec.Code, rec.Body.String(), ran)
+	}
+	rec = httpxServe(r, http.MethodPost, "/post", form(70<<10))
+	if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), "65536 bytes") || ran != 6 {
+		t.Fatalf("form past the route cap = %d %q, handler ran %d times", rec.Code, rec.Body.String(), ran)
+	}
+	rec = httpxServe(r, http.MethodPost, "/login", form(40<<10))
+	if rec.Code != http.StatusRequestEntityTooLarge || ran != 6 {
+		t.Fatalf("other route with the route cap's body = %d, handler ran %d times", rec.Code, ran)
+	}
+	r.Use(func(c *Context) { _ = c.PostForm("username") })
+	rec = httpxServe(r, http.MethodPost, "/post", form(40<<10))
+	if rec.Code != http.StatusRequestEntityTooLarge || ran != 6 {
+		t.Fatalf("form read by middleware before the route cap = %d, handler ran %d times", rec.Code, ran)
+	}
+	r.SetRouteMaxBodyBytes(http.MethodPost, "/post", 0)
+	if r.routes["POST /post"].maxBody.Load() != 0 {
+		t.Error("SetRouteMaxBodyBytes(0) did not clear the route cap")
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("SetRouteMaxBodyBytes on an unknown route did not panic")
+			}
+		}()
+		r.SetRouteMaxBodyBytes(http.MethodPost, "/nope", 1)
+	}()
 
 	for _, tc := range []struct{ size, want int64 }{
 		{0, httpxDefaultMaxBodyBytes},
 		{32 << 10, httpxDefaultMaxBodyBytes},
-		{400 << 10, 3*(400<<10) + httpxFormHeadroom},
-		{16 << 20, 48<<20 + httpxFormHeadroom},
+		{200 << 10, 6*(200<<10) + httpxFormHeadroom},
+		{16 << 20, 96<<20 + httpxFormHeadroom},
 	} {
 		if got := httpxBodyLimitForPost(tc.size); got != tc.want {
 			t.Errorf("httpxBodyLimitForPost(%d) = %d, want %d", tc.size, got, tc.want)

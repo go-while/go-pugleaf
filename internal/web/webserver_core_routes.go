@@ -260,15 +260,6 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	trustedProxyNets := configureTrustedProxiesWithHeader(router, ReverseProxyAddr, ReverseProxyIPHeader)
 	log.Printf("[WEB]: Trusted reverse proxies: %v | client IP header: %v", trustedProxyNets, router.RemoteIPHeader())
 
-	// Request bodies are capped: 1 MiB, or more when the configured site-post article size needs
-	// it (the admin settings page updates the cap when the size changes).
-	if sizeStr, err := db.GetConfigValue(config.CFG_KEY_WEBPOSTSIZE); err != nil {
-		log.Printf("[WEB]: Error getting WebPostMaxArticleSize: %v", err)
-	} else if size, err := strconv.ParseInt(sizeStr, 10, 64); err == nil {
-		router.SetMaxBodyBytes(httpxBodyLimitForPost(size))
-	}
-	log.Printf("[WEB]: Request body cap: %d bytes", router.MaxBodyBytes())
-
 	// Don't use ParseGlob - it causes template name conflicts
 	// Instead, we'll load templates individually in each handler
 	// router.SetHTMLTemplate(templates)
@@ -333,7 +324,29 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	router.Use(server.ReverseProxyMiddleware())
 
 	server.setupRoutes()
+	// Every body is capped at 1 MiB except the site post, whose cap follows the configured article
+	// size (the admin settings page moves it with the size).
+	if sizeStr, err := db.GetConfigValue(config.CFG_KEY_WEBPOSTSIZE); err != nil {
+		log.Printf("[WEB]: Error getting WebPostMaxArticleSize: %v", err)
+	} else {
+		server.setPostBodyCap(sizeStr)
+	}
 	return server
+}
+
+// routeSitePostSubmit is the one route whose body cap follows WebPostMaxArticleSize.
+const routeSitePostSubmit = "/SitePostSubmit"
+
+// setPostBodyCap sets the body cap of the site-post route from a WebPostMaxArticleSize value;
+// a value outside the range sitePostSubmit accepts (1000..16 MiB) leaves the route at the
+// router's cap, since such a post is refused anyway.
+func (s *WebServer) setPostBodyCap(sizeStr string) {
+	size, err := strconv.ParseInt(sizeStr, 10, 64)
+	if err != nil || size < 1000 || size > 16<<20 {
+		size = 0
+	}
+	s.Router.SetRouteMaxBodyBytes(http.MethodPost, routeSitePostSubmit, httpxBodyLimitForPost(size))
+	log.Printf("[WEB]: Request body cap: %d bytes (%s: %d bytes)", s.Router.MaxBodyBytes(), routeSitePostSubmit, httpxBodyLimitForPost(size))
 }
 
 // setupRoutes configures all HTTP routes
@@ -520,7 +533,7 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/SiteIRC/{$}", s.ircPage)
 	s.Router.GET("/SitePost", s.sitePostPage)
 	s.Router.POST("/SitePost", s.sitePostPage)
-	s.Router.POST("/SitePostSubmit", s.sitePostSubmit) // Handle form submission
+	s.Router.POST(routeSitePostSubmit, s.sitePostSubmit) // Handle form submission
 	s.Router.GET("/sections", s.sectionsPage)
 	s.Router.GET("/sections/{$}", s.sectionsPage)
 

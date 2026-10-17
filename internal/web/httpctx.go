@@ -30,22 +30,23 @@ const (
 	abortIndex = math.MaxInt >> 1
 	// httpxNoWritten is the size of a ResponseWriter whose header was not written yet.
 	httpxNoWritten = -1
-	// httpxDefaultMaxBodyBytes is the request body cap of a new Router. The largest legitimate
-	// body is a site post, whose cap is derived from the configured article size with
-	// httpxBodyLimitForPost; everything else is a small form or a short JSON document.
+	// httpxDefaultMaxBodyBytes is the request body cap of a new Router and of every route
+	// without its own (SetRouteMaxBodyBytes). The only body that may legitimately exceed it is a
+	// site post, whose route cap comes from httpxBodyLimitForPost.
 	httpxDefaultMaxBodyBytes = 1 << 20
-	// httpxFormHeadroom is what a form adds around the article of a site post: the other fields
-	// and the urlencoded overhead of the largest field.
+	// httpxFormHeadroom is what the site-post form adds around the article: the other fields.
 	httpxFormHeadroom = 64 << 10
 )
 
-// httpxBodyLimitForPost returns the router's body cap for a configured maximum article size: at
-// least the default, else the urlencoded article (every byte may take three) plus headroom.
+// httpxBodyLimitForPost returns the site-post route's body cap for a configured maximum article
+// size: at least the default, else the urlencoded article plus headroom. The server measures the
+// article after CRLF → LF, so a line end counts 1 byte but arrives as %0D%0A (6 bytes); every
+// other byte takes at most 3.
 func httpxBodyLimitForPost(maxArticleSize int64) int64 {
 	if maxArticleSize <= 0 {
 		return httpxDefaultMaxBodyBytes
 	}
-	return max(httpxDefaultMaxBodyBytes, 3*maxArticleSize+httpxFormHeadroom)
+	return max(httpxDefaultMaxBodyBytes, 6*maxArticleSize+httpxFormHeadroom)
 }
 
 // ResponseWriter wraps the http.ResponseWriter of a request. Like gin's writer it defers the
@@ -147,7 +148,8 @@ type Context struct {
 	queryCache url.Values
 	formParsed bool
 	formCache  url.Values
-	formErr    error // the ParseForm error of the body, kept for the route handler's 413
+	formErr    error         // the ParseForm error of the body, kept for the route handler's 413
+	rawBody    io.ReadCloser // the body before the router's cap, for a route's own cap
 }
 
 // NewTestContext returns a Context for calling a handler directly in a test. It has no router:

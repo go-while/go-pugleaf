@@ -264,7 +264,9 @@ Leave `./data-test-dropgin` for the user to delete.
   line); `/static` without slash is no longer special-cased beyond the mux; unclean paths (`//x`, `/a/../b`) get the
   mux's 307 to the cleaned path (were 404).
 - Request bodies are capped (user, 2026-10-17, after the 32 MiB multipart finding): `Router.SetMaxBodyBytes`,
-  default 1 MiB, set at startup and from the admin settings page to `max(1 MiB, 3 × WebPostMaxArticleSize + 64 KiB)`;
+  1 MiB for every route; only `POST /SitePostSubmit` gets `SetRouteMaxBodyBytes` =
+  `max(1 MiB, 6 × WebPostMaxArticleSize + 64 KiB)` (CRLF arrives as 6 bytes), set at startup and from the admin
+  settings page (review of 7bc21b1: a global raise would have reopened big anonymous bodies on /login);
   a urlencoded form past the cap is 413 and any multipart body 415 before the route runs (no upload feature;
   nothing is spooled to disk any more, the multipart cleanup of wave 1 is gone); the 10 MiB urlencoded cap of
   net/http no longer applies (MaxBytesReader replaces it); JSON past the cap fails in `ShouldBindJSON`.

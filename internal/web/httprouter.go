@@ -36,6 +36,7 @@ type Router struct {
 	maxBody  atomic.Int64 // request body cap in bytes, see SetMaxBodyBytes
 
 	mu         sync.RWMutex
+	routes     map[string]*routeHandler // method + " " + pattern, for SetRouteMaxBodyBytes
 	middleware []HandlerFunc
 	proxies    []*net.IPNet
 	ipHeader   string
@@ -51,7 +52,8 @@ type RouteGroup struct {
 
 // routeHandler is what the muxes hold for a route: the route's chain.
 type routeHandler struct {
-	chain []HandlerFunc
+	chain   []HandlerFunc
+	maxBody atomic.Int64 // this route's body cap; 0 = the router's
 }
 
 // httpxCtxKey keys the request's *Context in the request context.
@@ -63,6 +65,7 @@ func NewRouter() *Router {
 		RedirectTrailingSlash: true,
 		main:                  http.NewServeMux(),
 		fallback:              http.NewServeMux(),
+		routes:                map[string]*routeHandler{},
 	}
 	r.maxBody.Store(httpxDefaultMaxBodyBytes)
 	return r
@@ -80,6 +83,19 @@ func (r *Router) SetMaxBodyBytes(n int64) {
 
 // MaxBodyBytes returns the request body cap.
 func (r *Router) MaxBodyBytes() int64 { return r.maxBody.Load() }
+
+// SetRouteMaxBodyBytes gives one registered route (method and pattern as registered, prefix
+// included) its own body cap instead of the router's; n <= 0 returns it to the router's. The route
+// may raise the cap only while nothing read the body yet. Panics for an unknown route.
+func (r *Router) SetRouteMaxBodyBytes(method, pattern string, n int64) {
+	r.mu.RLock()
+	h := r.routes[method+" "+pattern]
+	r.mu.RUnlock()
+	if h == nil {
+		panic("web: SetRouteMaxBodyBytes: no route " + method + " " + pattern)
+	}
+	h.maxBody.Store(max(n, 0))
+}
 
 // Use appends middleware to the global chain, which runs for every request (also for redirects,
 // 405 and 404). The chain is read when a request starts.
@@ -100,7 +116,7 @@ func (r *Router) HEAD(path string, h ...HandlerFunc) { r.Handle(http.MethodHead,
 
 // Handle registers a route in the main mux; the pattern is method + " " + path.
 func (r *Router) Handle(method, path string, h ...HandlerFunc) {
-	httpxRegister(r.main, method, path, nil, h)
+	r.register(r.main, method, path, nil, h)
 }
 
 // Group returns a group in the main mux: its routes get prefix + path and run mw first.
@@ -130,19 +146,23 @@ func (g *RouteGroup) HEAD(path string, h ...HandlerFunc) { g.Handle(http.MethodH
 
 // Handle registers a route in the group.
 func (g *RouteGroup) Handle(method, path string, h ...HandlerFunc) {
-	httpxRegister(g.mux, method, httpxJoinPath(g.prefix, path), g.middleware, h)
+	g.router.register(g.mux, method, httpxJoinPath(g.prefix, path), g.middleware, h)
 }
 
-// httpxRegister adds method + " " + path with the chain mw + h to mux. The mux panics on a duplicate
+// register adds method + " " + path with the chain mw + h to mux. The mux panics on a duplicate
 // or conflicting pattern.
-func httpxRegister(mux *http.ServeMux, method, path string, mw, h []HandlerFunc) {
+func (r *Router) register(mux *http.ServeMux, method, path string, mw, h []HandlerFunc) {
 	if len(h) == 0 {
 		panic("web: route " + method + " " + path + " has no handler")
 	}
 	chain := make([]HandlerFunc, 0, len(mw)+len(h))
 	chain = append(chain, mw...)
 	chain = append(chain, h...)
-	mux.Handle(method+" "+path, &routeHandler{chain: chain})
+	rh := &routeHandler{chain: chain}
+	mux.Handle(method+" "+path, rh)
+	r.mu.Lock()
+	r.routes[method+" "+path] = rh
+	r.mu.Unlock()
 }
 
 // httpxJoinPath joins a group prefix and a route path with exactly one slash between them.
@@ -187,6 +207,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// The body cap goes on the copy; w (not the wrapper) lets net/http close the connection
 	// after a response to an oversized request instead of reading the rest.
 	if req.Body != nil && req.Body != http.NoBody {
+		c.rawBody = req.Body
 		c.Request.Body = http.MaxBytesReader(w, req.Body, r.maxBody.Load())
 	}
 
@@ -213,6 +234,11 @@ func (h *routeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		defer c.Writer.WriteHeaderNow()
 	}
 	c.Request = req
+	// The route's own cap replaces the router's, on the untouched body only: a form read by
+	// global middleware stays within the router's cap.
+	if n := h.maxBody.Load(); n > 0 && c.rawBody != nil && !c.formParsed {
+		c.Request.Body = http.MaxBytesReader(c.Writer.Unwrap(), c.rawBody, n)
+	}
 	if !httpxAcceptBody(c) {
 		return
 	}
@@ -221,7 +247,7 @@ func (h *routeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 // httpxAcceptBody answers a request whose form body the handlers must not see: a multipart body
 // (415: nothing here takes uploads, and net/http would spool large parts to disk) or a
-// urlencoded one past the router's cap (413). It parses the urlencoded form, so the handlers
+// urlencoded one past the cap (413). It parses the urlencoded form, so the handlers
 // never see a partial form. Other bodies (JSON, none) are left to the handlers.
 func httpxAcceptBody(c *Context) bool {
 	switch c.Request.Method {
@@ -233,12 +259,13 @@ func httpxAcceptBody(c *Context) bool {
 	if i := strings.IndexByte(ct, ';'); i >= 0 {
 		ct = ct[:i]
 	}
-	switch strings.ToLower(strings.TrimSpace(ct)) {
-	case "multipart/form-data", "multipart/mixed":
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	switch {
+	case strings.HasPrefix(ct, "multipart/"):
 		c.Abort()
 		c.String(http.StatusUnsupportedMediaType, "415 unsupported media type: multipart bodies are not accepted\n")
 		return false
-	case "application/x-www-form-urlencoded":
+	case ct == "application/x-www-form-urlencoded":
 		c.initFormCache()
 		var tooLarge *http.MaxBytesError
 		if errors.As(c.formErr, &tooLarge) {

@@ -49,10 +49,11 @@ If you prefer `X-Real-IP`, set `ReverseProxyIPHeader=X-Real-IP` and send
 **every browser POST fail with `403 cross-origin request rejected`** — logins, posting and every
 admin form. This is the single most common way to break a working install with a proxy config change.
 
-**Request body size.** The web server caps every request body at 1 MiB, or at three times the
-configured `WebPostMaxArticleSize` plus 64 KiB when that is larger (the admin settings page moves the cap
-with the size). A form past the cap gets `413`, a multipart body `415`: there is no upload feature. A proxy's
-own limit (`client_max_body_size`) only needs to allow that much.
+**Request body size.** The web server caps every request body at 1 MiB. Only the site-post form
+(`POST /SitePostSubmit`) may be larger: six times the configured `WebPostMaxArticleSize` plus 64 KiB when
+that exceeds 1 MiB (the admin settings page moves the cap with the size). A form past the cap gets `413`,
+a multipart body `415`: there is no upload feature. A proxy's own limit (`client_max_body_size`) only
+needs to allow that much.
 
 **Untrusted forwarders.** When a loopback or private peer that is *not* in the trusted list sends
 `X-Forwarded-For` or `X-Real-IP`, its headers are ignored and logged once per IP:
