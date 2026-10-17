@@ -7,7 +7,7 @@ toolchain go1.27.2
 require (
 	github.com/gin-contrib/secure v1.1.2
 	github.com/gin-gonic/gin v1.11.0
-	github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017083307-028f55355c84
+	github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017122104-f0412ef9498e
 	github.com/go-while/mbox2nntp v0.0.0-20261017113153-823cac0bb507
 	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/redis/go-redis/v9 v9.14.0

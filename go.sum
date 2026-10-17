@@ -33,8 +33,8 @@ github.com/go-playground/universal-translator v0.18.1 h1:Bcnm0ZwsGyWbCzImXv+pAJn
 github.com/go-playground/universal-translator v0.18.1/go.mod h1:xekY+UJKNuX9WP91TpwSH2VMlDf28Uj24BCp08ZFTUY=
 github.com/go-playground/validator/v10 v10.28.0 h1:Q7ibns33JjyW48gHkuFT91qX48KG0ktULL6FgHdG688=
 github.com/go-playground/validator/v10 v10.28.0/go.mod h1:GoI6I1SjPBh9p7ykNE/yj3fFYbyDOpwMn5KXd+m2hUU=
-github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017083307-028f55355c84 h1:yQzXJ/O27HKj8ft2erWuErDnG5EtW9Vkx1BnenUPDSk=
-github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017083307-028f55355c84/go.mod h1:C/4BQE5gxV6BeHycS1wJ5iugN/nWFApPE/pa3mkkB6s=
+github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017122104-f0412ef9498e h1:RWQ2HTKF6ECX/EExSouZmfZRheH6bp4/ZqI9/iAitd4=
+github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017122104-f0412ef9498e/go.mod h1:C/4BQE5gxV6BeHycS1wJ5iugN/nWFApPE/pa3mkkB6s=
 github.com/go-while/mbox2nntp v0.0.0-20261017113153-823cac0bb507 h1:vAbJVNIIx0OHUMIJ2xYxAzft6/Zs5pYSc/WQ60eTC9Y=
 github.com/go-while/mbox2nntp v0.0.0-20261017113153-823cac0bb507/go.mod h1:dr8HQGk2x0/Vkgs85z2rGhpZ3E9qaJeQehIVUpIw6Sw=
 github.com/goccy/go-json v0.10.5 h1:Fq85nIqj+gXn/S5ahsiTlK3TmC85qgirsdTP/+DeaC4=
