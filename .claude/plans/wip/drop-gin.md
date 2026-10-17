@@ -338,3 +338,12 @@ Leave `./data-test-dropgin` for the user to delete.
   (/SitePostSubmit: 1048576 bytes)`, multipart → 415, 2 MiB form → 413 on /login and /SitePostSubmit, normal
   forms unchanged, 0 temp files, SIGINT exit 0.
 
+### Pre-existing web bugs (user request 2026-10-17, "fix these")
+- b788b2c: sectionPage answers 404 for a reserved first segment (knownNonSectionPaths) instead of a 301 to itself
+  (GET /static looped); the four /api base paths redirect to /SiteHelp (/help never had a route);
+  admin_apitokens.html reads `.APIToken` (the stored hash) instead of the missing `.TokenHash`, so the tokens tab
+  renders again. Tests TestW1ServerReservedSectionNames, TestW1ServerAdminAPITokensTab. Review (opus): MERGE, 3 minor
+  → 4d299a2: create/update section refuse reserved names, stale /help mentions. Full checks green on b788b2c
+  (31 packages, known bugs only T-nntp-article-1); web + cmd/web rerun on 4d299a2. Live: /static 404, /api* 301
+  /SiteHelp, /SiteHelp 200.
+
