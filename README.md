@@ -2,7 +2,7 @@
 
 **A modern NNTP server and web gateway for Usenet/NetNews built in Go**
 
-[![Go Version](https://img.shields.io/badge/Go-1.26+-blue.svg)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.27.1+-blue.svg)](https://golang.org)
 [![Development Status](https://img.shields.io/badge/Status-Testing-green.svg)](#development-status)
 [![License](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
 
@@ -19,7 +19,7 @@ go-pugleaf provides a complete newsgroup platform with:
 Read [BUGS.md](BUGS.md) first!
 
 ### Prerequisites
-- Go 1.26.0+ (for building from source; `go.mod` pins `toolchain go1.27.2`, downloaded automatically with GOTOOLCHAIN=auto)
+- Go 1.27.1+ (for building from source; `go.mod` pins `toolchain go1.27.2`, downloaded automatically with GOTOOLCHAIN=auto)
 - A C compiler (gcc): the SQLite driver uses cgo
 - Linux/Unix system (Windows support not tested)
 - At least 1-256GB RAM, 1-10000GB+ disk space
@@ -123,6 +123,11 @@ Choose one method:
 
 # import rocksolid light backups (-etc is required, -spool is optional)
 ./rslight-importer -data data/ -etc etc/ -spool spool/
+
+# import Usenet mbox archives (archive.org collections), see cmd/mbox-importer/README.md
+./build_mbox-importer.sh
+./build/mbox-importer -dry-run de.comm.internet.commerce.mbox.gz    # counts only, opens no database
+./build/mbox-importer -data data/ -nntphostname news.example.org de.comm.internet.commerce.mbox.gz
 ```
 
 **Optional: Import RockSolid Light backups**
@@ -212,6 +217,7 @@ The following binaries are built by `build_ALL.sh` (names as in `build/`):
 Built with their own `build_<tool>.sh` script only:
 
 - **usermgr** - Web user management
+- **mbox-importer** - Import Usenet mbox archives (archive.org collections) directly into the databases, bulk mode (see cmd/mbox-importer/README.md)
 - **pugleaf-nntpmgr** - NNTP user management
 - **history-rebuild** - Rebuild the message-id history index from the group databases
 - **recover-db**, **fix-references**, **fix-thread-activity**, **merge-active**, **merge-descriptions**,

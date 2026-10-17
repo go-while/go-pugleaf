@@ -107,7 +107,7 @@ The post-queue tool is run separately to process articles and forward them to re
 1. **User posts article** via web interface (`/SitePost`)
 2. **Web handler validates** the article and newsgroups
 3. **Article is queued** into `models.PostQueueChannel`
-4. **Web worker processes** the article using `processor.processArticle()`
+4. **Web worker processes** the article using `processor.ProcessArticle()`
 5. **Article is threaded** and stored in appropriate newsgroup databases
 6. **Database entry created** in `post_queue` table for NNTP posting
 

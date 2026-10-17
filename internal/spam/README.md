@@ -79,7 +79,7 @@ spamFilter := spam.NewSpamFilter(
 )
 
 // In your article processing function
-func processArticle(art *nntp.Article, newsgroups []string) error {
+func ProcessArticle(art *nntp.Article, newsgroups []string) error {
     // Quick pre-filter
     shouldSkip, reason := spamFilter.PreFilterCheck(article, newsgroups)
     if shouldSkip && reason != "WHITELISTED" {
@@ -164,7 +164,7 @@ All Go files are disabled (`.go.off`, not compiled):
 
 ## Next Steps
 
-1. **Test Integration**: Rename the `.go.off` files back to `.go`, make them build, and add spam filtering to your `processArticle` function
+1. **Test Integration**: Rename the `.go.off` files back to `.go`, make them build, and add spam filtering to your `ProcessArticle` function
 2. **Monitor Performance**: Watch for any slowdowns during bulk imports
 3. **Tune Thresholds**: Adjust rejection thresholds based on results
 4. **Add Statistics**: Track spam detection rates and false positives

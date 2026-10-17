@@ -1,7 +1,7 @@
 package processor
 
 // Tests for the article-layer intake helpers (plan nntp-intake-injection, S3). No database:
-// processArticle itself is covered end to end in cmd/nntp-server (TestE2E*).
+// ProcessArticle itself is covered end to end in cmd/nntp-server (TestE2E*).
 
 import (
 	"errors"

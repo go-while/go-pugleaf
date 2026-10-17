@@ -45,7 +45,7 @@ jobs:
             ./cmd/tcp2tor/... ./cmd/web/... ./cmd/nntp-fetcher/... ./cmd/nntp-analyze/... ./cmd/recover-db/... \
             ./cmd/post-queue/... ./cmd/import-flat-files/... ./cmd/rslight-importer/... ./cmd/fix-references/... \
             ./cmd/fix-thread-activity/... ./cmd/audit-web-posts/... ./cmd/extract_hierarchies/... ./cmd/merge-active/... \
-            ./cmd/merge-descriptions/... ./cmd/nntp-transfer/... ./cmd/usermgr/...
+            ./cmd/merge-descriptions/... ./cmd/nntp-transfer/... ./cmd/usermgr/... ./cmd/mbox-importer/...
 
   known-bugs:
     # Lists the open NNTP known bugs (docs/audit/README.md): with PUGLEAF_KNOWN_BUGS=1 every open

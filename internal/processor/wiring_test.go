@@ -117,7 +117,7 @@ func TestWiringProcessArticleIntakeCheck(t *testing.T) {
 	for i, state := range []int{history.CaseLock, history.CaseWrite} {
 		id := "<wiring-intake-busy-" + string(rune('a'+i)) + "@example.org>"
 		wiringTestSetState(id, state)
-		got, err := proc.processArticle(&models.Article{MessageID: id}, "", false)
+		got, err := proc.ProcessArticle(&models.Article{MessageID: id}, "", false)
 		if got != history.CaseRetry || err != nil {
 			t.Fatalf("state %#x: got %#x, %v; want CaseRetry, nil", state, got, err)
 		}
@@ -126,7 +126,7 @@ func TestWiringProcessArticleIntakeCheck(t *testing.T) {
 	for i, state := range []int{history.CaseDupes} {
 		id := "<wiring-intake-stored-" + string(rune('a'+i)) + "@example.org>"
 		wiringTestSetState(id, state)
-		got, err := proc.processArticle(&models.Article{MessageID: id}, "", false)
+		got, err := proc.ProcessArticle(&models.Article{MessageID: id}, "", false)
 		if got != history.CaseDupes || err != nil {
 			t.Fatalf("state %#x: got %#x, %v; want CaseDupes", state, got, err)
 		}
@@ -136,7 +136,7 @@ func TestWiringProcessArticleIntakeCheck(t *testing.T) {
 	const known = "<wiring-intake-known@example.org>"
 	wiringTestAddAndWait(t, h, known, 7)
 	item := history.MsgIdCache.GetORCreate(known)
-	got, err := proc.processArticle(&models.Article{MessageID: known}, "", false)
+	got, err := proc.ProcessArticle(&models.Article{MessageID: known}, "", false)
 	if got != history.CaseDupes || err != nil {
 		t.Fatalf("known: got %#x, %v; want CaseDupes", got, err)
 	}
@@ -149,7 +149,7 @@ func TestWiringProcessArticleIntakeCheck(t *testing.T) {
 	for _, state := range []int{0, history.CasePass, history.CaseError, history.CaseRetry} {
 		id := "<wiring-intake-new-" + string(rune('0'+state%10)) + "-" + time.Now().Format("150405.000000000") + "@example.org>"
 		item := wiringTestSetState(id, state)
-		got, err := proc.processArticle(&models.Article{MessageID: id, Headers: map[string][]string{}}, "", false)
+		got, err := proc.ProcessArticle(&models.Article{MessageID: id, Headers: map[string][]string{}}, "", false)
 		if got != history.CaseError || err == nil {
 			t.Fatalf("new (state %#x): got %#x, %v; want CaseError from header check", state, got, err)
 		}

@@ -310,3 +310,61 @@ Leave `./data-test-mbox` for the user to delete.
   the input is then not marked done, nothing else is undone.
 - `ENABLE_HISTORY` is read once; `-history=false` runs write no history tokens (a later `history-rebuild` backfills).
 - Out-of-order replies get thread root 0; documented, not fixed.
+
+### Progress
+- Wave 0 (5d6d007 on `plan-mbox-importer`, branched from testing-001 ac73462): `processArticle` → `ProcessArticle`
+  in every Go file and in docs/ + internal/spam/README.md (archived plans under .claude/plans/done keep the old
+  name); `EnsureNewsgroup(db, name, description)` exported in rslight.go; `cmd/mbox-importer` stubs with the
+  shared signatures; go.mod: `github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017083307-028f55355c84` and,
+  pulled in by its go directive, `go 1.26.0` → `go 1.27.1` (toolchain go1.27.2 unchanged; README version text is
+  the docs slice's job). Checks: gofmt empty, vet, build, `go test -race ./internal/processor/...` green.
+- Wave 1 (merged into plan-mbox-importer, tree 5d41f06):
+  - `mbox-docs-ci` (worktree-agent-aacb8d5c6b71c3b3e, ad37dbb + 6791fe0, merge 090ebe7): cmd README, build script,
+    top-level README (Go 1.27.1+, usage block, tool bullet), CLAUDE.md (25 tools, Checks list), both workflow
+    package lists (the workflows take Go from go.mod). Review MERGE AFTER FIXES: MAJOR (README named
+    fix-thread-activity as the repair for orphaned replies; now `recover-db -group NAME -rebuild-threads -force`),
+    minors (-group vs skips, .done rule wording, isBadDateLine bullet, input-error cases) fixed; cosmetic bullet
+    wording dropped.
+  - `mbox-inputs-rewrite` (worktree-agent-a2239281a94011e79, 4a3c2d6 + f4737c8, merge 5d41f06): inputs.go
+    (expandInputs, openSource plain/gz/zip/7z, eofReader/Unread, Close, markDone), article.go (readBody,
+    messageIDFromHeaders lax/strict, cleanHeadline, isBadDateLine, rewriteHead, firstNewsgroup, buildArticle),
+    47 KB of tests (~1.3 s). Dry read of the real sample: 2336 messages, 41 first groups, skips 2 no-msgid + 1
+    no-body, 0 near-misses. Review MERGE AFTER FIXES: MAJOR (markDone overwrote an existing .done; now refuses
+    with os.ErrExist) + minors (blank continuation counted as Subject/Date value; control-byte continuation
+    normalised to a space; 7z member matching now `-r` + upper-case patterns like the zip path; `cmd.WaitDelay`
+    10 s) fixed. Deferred to leftovers: a `.gz` with trailing zero padding ends in a read error and is never marked
+    done (multistream reads the padding as a broken header).
+  - Merged tree: gofmt empty, vet, build, `go test -race ./cmd/mbox-importer/... ./internal/processor/...` green.
+- Wave 2 (merged, tree bd7f79c): `mbox-cmd` (worktree-agent-a3f02e4fb9171718a, a44da4d + 8c0ac21, merge aa4be65):
+  main.go (flags, exit codes, lifecycle, notifyShutdown with signal.Stop after the first signal), import.go (readMbox,
+  handleMessage, importInputs/importInput, countingSink/processorSink, runSummary/lastRun), 13 TestMboxCmd* tests
+  (~36 s, DB open/close bound), README consistency. Dry run of the real sample with the binary: read=2336 stored=2333
+  skipped=3, 41 groups, exit 0, no data dir. Review MERGE AFTER FIXES: MAJOR (a directory with nothing left to
+  import exited 1; now 0 with "no inputs to import") fixed; decision change vs the plan's "Decisions taken": article
+  errors (errors > 0) and commit-wait failures now exit 1 (`commit-errors` in the totals line; the input stays
+  unrenamed), rejected/skipped articles still exit 0; minors (second SIGINT falls back to the default action, test
+  hygiene) fixed. Inline after the merge: unused stub error removed (9d7ee22), disabled spam example follows the
+  rename (bd7f79c). Implementer decisions: an input already named `.done` is never renamed; ErrExist from markDone
+  is logged, other rename errors are input errors; with -group a missing Newsgroups header still skips.
+
+### Verification (c7ee948)
+- Verifier PASS on all 8 steps. Checks re-run green; known bugs only T-nntp-article-1; three builds ok.
+- End-to-end on ./data-test-mbox (host i2pn2.pugleaf.net): dry run exit 0, no DB created, read=2336 stored=2333
+  skipped=3 (no-msgid=2, no-body=1), 41 target groups. Real run exit 0, 7.05 s wall / ~3 s import (~780 articles/s),
+  93 MB RSS: stored=2320 rejected=13 ("too many newsgroups": each has 10 groups, 8 of them toster.Te.NeT.UA spam)
+  errors=0 marked-done=true; 41 groups, sum(message_count)=sum(high_water)=sum(rows)=2320; history-rebuild
+  -validate-only: 2320 found, 0 missing, 0 without number. Reruns on .gz/.zip/.7z: present=2320 stored=0, each
+  renamed .done; `-7z /nonexistent/7z` → exit 1. Directory + `-group test.mbox.forced -mark-done=false`: inputs=1
+  (the .done files skipped), 2320 rows, not renamed. SIGINT after 0.3 s → exit 130, 968 rows flushed, clean
+  shutdown; follow-up run present=968 stored=1352, 2320 distinct rows, no loss or duplicate. nntp-server read-back
+  on 127.0.0.1:11194: GROUP 211 1936, ARTICLE by id 220 with Path prefixed by the host and the giganews Xref gone,
+  server SIGINT exit 0. Empty directory → exit 0 "no inputs to import"; missing path → exit 1. Hand-written mbox:
+  stored=1 skipped=2 (bad-group, no-subject), no DB/row for the crosspost's second group.
+- Corrections to the plan text: group DB files use underscores (`test_mbox_forced.db`, the plan's find pattern
+  with dots matches nothing); the dry run cannot see processor rejections (2333 vs 2320).
+- Noted, not blocking: EnsureNewsgroup runs before ProcessArticle, so a group whose every article is rejected is
+  left behind empty (5 such groups in the sample); go-lib-mbox2nntp prints unprefixed debug lines
+  (`parseHeaders m.prefetch[0] == newline, break`, `MboxStream nextline error: err='EOF'`) on every run (library
+  side); hostname validation (and its reverse-DNS warning) runs twice per run; the totals line after a missing
+  input says inputs=1 input-errors=1 under "no inputs to import"; the 13 rejected articles are re-processed and
+  re-rejected on every rerun (never "present").

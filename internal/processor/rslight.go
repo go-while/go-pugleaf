@@ -381,13 +381,13 @@ func (leg *LegacyImporter) importLegacyArticle(legacyArticle *LegacyArticle) err
 	}
 	legacyArticle.Article = ""
 
-	//log.Printf("importLegacyArticle: Parsed article '%s' (%d bytes) to %d lines, size %d (ng: '%s') ==> processArticle", legacyArticle.MsgID, len(legacyArticle.Article), len(lines), size, legacyArticle.Newsgroup)
+	//log.Printf("importLegacyArticle: Parsed article '%s' (%d bytes) to %d lines, size %d (ng: '%s') ==> ProcessArticle", legacyArticle.MsgID, len(legacyArticle.Article), len(lines), size, legacyArticle.Newsgroup)
 	//log.Printf("legacyArticle.Newsgroup: '%s' %s", legacyArticle.MsgID, legacyArticle.Newsgroup)
 	bulkmode := true // we are importing legacy articles in bulkmode
 
-	// Time the processArticle call
+	// Time the ProcessArticle call
 	//processStart := time.Now()
-	response, err := leg.proc.processArticle(art, legacyArticle.Newsgroup, bulkmode)
+	response, err := leg.proc.ProcessArticle(art, legacyArticle.Newsgroup, bulkmode)
 	//processElapsed := time.Since(processStart)
 	if err != nil {
 		return fmt.Errorf("failed to process article '%s': %w", legacyArticle.MsgID, err)
@@ -701,11 +701,18 @@ func isValidDatabaseFilename(filename string) bool {
 
 // insertNewsgroupIfNotExists inserts a newsgroup into the main newsgroups table if it doesn't already exist
 func (leg *LegacyImporter) insertNewsgroupIfNotExists(name, description string) error {
+	return EnsureNewsgroup(leg.proc.DB, name, description)
+}
+
+// EnsureNewsgroup creates the newsgroups row for name when it does not exist yet: active,
+// posting allowed, no expiry, low_water 1 and no articles. An existing row is left as it is.
+// Offline importers (rslight, mbox) use it for the groups they meet in their input.
+func EnsureNewsgroup(db *database.Database, name, description string) error {
 	if name == "" {
-		return fmt.Errorf("error in insertNewsgroupIfNotExists: newsgroup name cannot be empty.. supplied description: '%s'", description)
+		return fmt.Errorf("error in EnsureNewsgroup: newsgroup name cannot be empty.. supplied description: '%s'", description)
 	}
 	// Check if newsgroup already exists
-	_, err := leg.proc.DB.MainDBGetNewsgroup(name)
+	_, err := db.MainDBGetNewsgroup(name)
 	if err == nil {
 		// Newsgroup already exists, skip insertion
 		return nil
@@ -727,5 +734,5 @@ func (leg *LegacyImporter) insertNewsgroupIfNotExists(name, description string) 
 		// Note: UpdatedAt will be set only when articles are processed via batch
 	}
 
-	return leg.proc.DB.InsertNewsgroup(newsgroup)
+	return db.InsertNewsgroup(newsgroup)
 }

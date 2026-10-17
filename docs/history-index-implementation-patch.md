@@ -36,7 +36,7 @@ Reconstructed from git:
 | 2025-08-03 | 61312d3 v0.4.3.3 | INN2-style design: append-only `history.dat` (`msgid \t 0x1 \t group:artnum \t time`) plus 16 SQLite files × 256 tables mapping a short hash to file offsets. Written **after** the batch insert (db_batch.go called `AddProcessedArticleToHistory(item, group, artnum)`). `const ENABLE_HISTORY = false`. |
 | 2025-08-04 | cc2875e | BUGS.md: "requesting articles via message-id does not work", "posting does not work because history and hashdb is disabled", "history + hashdb eats memory and has IO issues". |
 | 2025-10-02 | 1d29f62 | Writer returns early on shutdown when disabled. |
-| 2025-11-06 | fb0c9a7 "prepare nntp-server history" | Dropped `history.dat` and short hashes. Rows became `message_id TEXT PK, newsgroups TEXT`. Writing moved **before** the insert (`processArticle`). Turned on (`const ENABLE_HISTORY = true`). |
+| 2025-11-06 | fb0c9a7 "prepare nntp-server history" | Dropped `history.dat` and short hashes. Rows became `message_id TEXT PK, newsgroups TEXT`. Writing moved **before** the insert (`ProcessArticle`). Turned on (`const ENABLE_HISTORY = true`). |
 | 2025-11-17 | 0ea7c09 "testing" | Turned off again: `var ENABLE_HISTORY = false` as package default, plus explicit `false` in web, nntp-fetcher and post-queue. The writer was only started when enabled, but nntp-transfer, rslight-importer and nntp-server still added a WaitGroup count for it, so they hung on exit. |
 
 The UseShortHashLen setting (flags, value locked in the main DB) has had no effect since fb0c9a7.
@@ -54,7 +54,7 @@ Items marked *(repro)* were reproduced with standalone tests on a copy of the pa
 - The `err` variable in `executeDBTransaction` was shadowed, so its critical rollback + `os.Exit` defer never saw errors.
 
 ### Intake / NNTP
-- **E.** Non-bulk `processArticle` rejected every new article, because nothing ever set `Response = CasePass`. So POST/IHAVE/TAKETHIS never worked, with history on or off.
+- **E.** Non-bulk `ProcessArticle` rejected every new article, because nothing ever set `Response = CasePass`. So POST/IHAVE/TAKETHIS never worked, with history on or off.
 - **F.** IHAVE/TAKETHIS sent 435/439 on duplicates but didn't return, so a second reply desynced the stream.
 - `readArticleData` checked `currentHeader == ""`, which is true for the first header, so every header line was dropped. Every incoming article failed with "no Newsgroups header". It also never set `HeadersJSON`/`RefSlice`.
 - No NNTP command except POST checked authentication. Once intake worked, anyone could have injected articles via IHAVE/TAKETHIS.
@@ -124,7 +124,7 @@ func (h *History) Close() error                                   // idempotent;
 
 ### Pipeline
 - **Write after commit:** `db_batch.go` PHASE 3 resolves the group ID once per batch. For each committed article it calls `ProcessorInterface.AddArticleToHistory(messageID, groupID)` and sets the cache item to `CaseDupes`.
-- **Intake (non-bulk `processArticle`), claim then check:**
+- **Intake (non-bulk `ProcessArticle`), claim then check:**
   - item already `CaseLock`/`CaseWrite`/`CaseDupes` → duplicate;
   - otherwise set `CaseLock`, then `History.Exists`: error → `CaseError`; found → `CaseDupes`; else process.
   - The bulk path (fetcher, importer, PostQueue) has no history read; the per-group `ExistsMsgIdInArticlesDB` check stays.
@@ -246,7 +246,7 @@ func (h *History) Close() error                                   // idempotent;
 - Admin page cache stats reworked (shards, occupied, largest, items per shard, skew); the old template keys are still filled.
 - Tests: `nntp-wiring_test.go` (fake processor over `net.Pipe`, all IHAVE/TAKETHIS reply sequences) and `processor/wiring_test.go`.
 - Reported:
-  1. `processArticle` duplicates entries in `NewsgroupsPtr` for NNTP articles, so their fields are never cleared (open);
+  1. `ProcessArticle` duplicates entries in `NewsgroupsPtr` for NNTP articles, so their fields are never cleared (open);
   2. message-id replies showed another group's article number (fixed in §9);
   3. the current group was queried twice (fixed in §9);
   4. with history off, a duplicate IHAVE is answered 235/239;
@@ -350,7 +350,7 @@ Commit `3307dcb`:
 
 ## 11. Known open issues
 
-- `processArticle` duplicates `NewsgroupsPtr` entries for NNTP articles, so their fields are never cleared in PHASE 3.
+- `ProcessArticle` duplicates `NewsgroupsPtr` entries for NNTP articles, so their fields are never cleared in PHASE 3.
 - With `-history=false`, a duplicate IHAVE/TAKETHIS is answered 235/239 (the group DB still prevents a second copy).
 - An article POSTed moments ago can be cached as a 430 miss in local430 for ~15s until its batch commits.
 - History writes are relatively slow (~3s for 30,000 ops in one flush).

@@ -1,8 +1,8 @@
 package processor
 
 // Commit barrier of plan followup-leftovers (D-B, A-tools-5b) through the processor: bulk
-// processArticle (the fetcher's path) counts every capture before the capture goroutine runs,
-// so a WaitCommitted after the last processArticle returned waits for exactly those articles
+// ProcessArticle (the fetcher's path) counts every capture before the capture goroutine runs,
+// so a WaitCommitted after the last ProcessArticle returned waits for exactly those articles
 // and returns nil once the batch writer committed them.
 //
 // The test opens its own database (OpenDatabase may run once per process at a time; nothing
@@ -57,7 +57,7 @@ func flNntpdbOpenDB(t *testing.T) *database.Database {
 	return db
 }
 
-// flNntpdbArticleLines is a fetched article as the NNTP client hands it to processArticle.
+// flNntpdbArticleLines is a fetched article as the NNTP client hands it to ProcessArticle.
 func flNntpdbArticleLines(group, msgid string, i int) []string {
 	return []string{
 		"Path: peer.test.invalid!not-for-mail",
@@ -73,7 +73,7 @@ func flNntpdbArticleLines(group, msgid string, i int) []string {
 
 func TestFlNntpdbBulkProcessThenWaitCommitted(t *testing.T) {
 	db := flNntpdbOpenDB(t)
-	// processArticle uses the global history.MsgIdCache: NewMsgIdItemCache creates it once
+	// ProcessArticle uses the global history.MsgIdCache: NewMsgIdItemCache creates it once
 	proc := &Processor{DB: db, MsgIdCache: history.NewMsgIdItemCache()}
 	group := fmt.Sprintf("flnntpdb.bulk.t%d", time.Now().UnixNano())
 	mark := db.Batch.CommitMark(group)
@@ -85,8 +85,8 @@ func TestFlNntpdbBulkProcessThenWaitCommitted(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseLegacyArticleLines %d: %v", i, err)
 		}
-		if _, err := proc.processArticle(art, group, true); err != nil {
-			t.Fatalf("processArticle %d: %v", i, err)
+		if _, err := proc.ProcessArticle(art, group, true); err != nil {
+			t.Fatalf("ProcessArticle %d: %v", i, err)
 		}
 	}
 	if err := db.Batch.WaitCommitted(mark, nil, testWait); err != nil {

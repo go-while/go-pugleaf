@@ -16,7 +16,7 @@ the seed table in the plan, which was written at 84c2081. The wave-0 hooks moved
   `GetArticleByMessageID` :919, `GetActiveNewsgroups` :1030, `GetOverviewsRange` :1810, `GetHeaderFieldRange` :1872),
   `database/thread_cache.go:309` (`GetOverviewByArticleNum`), `database/db_batch.go:999,1036` (`headers_json` insert),
   `nntp/nntp-client-commands.go:850-952` (`ParseLegacyArticleLines`, `ParseHeaders`), `common/headers.go:580-601`,
-  `processor/threading.go:56-283` (return codes of `processArticle`), `history/history_config.go:19-25`,
+  `processor/threading.go:56-283` (return codes of `ProcessArticle`), `history/history_config.go:19-25`,
   `migrations/0001_single_db_schema.sql:11-29`.
 - **RFCs fetched from rfc-editor.org (2026-10-11):** RFC 3977, 4643, 4644, 4642, 2980, 6048, 5536 (section 3 only, for
   served headers). The quotes below are taken from those texts.
@@ -116,7 +116,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
 - **Scenario A (`.` header line):** a poster (POST) or peer (IHAVE/TAKETHIS) sends an article with a header line `..`.
   `readArticleLines` un-stuffs it to `.` (`nntp-cmd-posting.go:243-245`). `ParseHeaders` skips the line as malformed
   but stores **all** header lines in `HeadersJSON` (`nntp-client-commands.go:950`), and the batch writes that verbatim
-  to `articles.headers_json` (`db_batch.go:999,1036`). `processArticle` checks only that Newsgroups, Subject, From and
+  to `articles.headers_json` (`db_batch.go:999,1036`). `ProcessArticle` checks only that Newsgroups, Subject, From and
   Date are present (`processor/threading.go:122-166`). HEAD and ARTICLE send header lines with `sendLine` and no
   dot-stuffing (`nntp-article-common.go:231-235,266-271`). Every reader of the article then sees `.` as the end of
   the block, and the remaining header lines (attacker-chosen) as the status lines of its next commands.
@@ -408,7 +408,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   - IHAVE with an article the processor rejects permanently (`CaseError`: no Date, no Newsgroups, bad From…, see
     `processor/threading.go:109-166`) → `436 Transfer failed (processing error)`. A garbled article (no Newsgroups) →
     `436 Bad`. Both should be 437.
-- **Evidence:** `processArticle` returns `history.CaseError` for every validation failure; `handleIHave` maps
+- **Evidence:** `ProcessArticle` returns `history.CaseError` for every validation failure; `handleIHave` maps
   everything except Pass/Dupes to 436 (`:103-110`). A peer such as INN or another pugleaf retries 436 forever.
 - **RFC:** RFC 3977 §3.2.1: "501 MUST be used when the base command is implemented but the requested variant is not,
   and 500 MUST be used only when the base command itself is not implemented." §6.3.1.2: "If posting is prohibited for
@@ -416,7 +416,7 @@ Every seed in scope (RFC-1…6, BUG-3…6, BUG-9, FN-1) is **CONFIRMED**. Two su
   article was rejected".
 - **Fix:** variant → 501. POST: no processor or no permission → 440. IHAVE: no processor → 500. After the transfer,
   `CaseError` with a validation error → 437, I/O or DB trouble → 436. This needs a distinguishable error from
-  `processArticle` (intake plan). Effort S (codes) / M (error classes).
+  `ProcessArticle` (intake plan). Effort S (codes) / M (error classes).
 
 ### RFC-6: XOVER/XHDR range and variant handling
 
@@ -794,7 +794,7 @@ No seed in scope is rejected as a whole. Two sub-claims are rejected:
   text). The real `processor.Processor` (the repro used `hFakeProcessor`; the IHAVE 436 mapping is traced in
   `processor/threading.go`). The idle timeout at its 60 s default (code trace plus printed value). Large-range
   behavior of XOVER/XHDR (BUG-2/SEC-1).
-- **Intake-side follow-ups (audit-intake):** whether `processArticle` should reject header lines without a colon and
+- **Intake-side follow-ups (audit-intake):** whether `ProcessArticle` should reject header lines without a colon and
   repeated mandatory headers (the root of A-nntp-rfc-2 scenario B), and whether the fetcher path
   (`nntp-client-commands.go`) can also store a bare `.` header line from an upstream server.
 - **Tests:** wave 2 should add a byte-exact test for the `.` header line and the LF subject (A-nntp-rfc-2), and a
