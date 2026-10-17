@@ -327,3 +327,14 @@ Leave `./data-test-dropgin` for the user to delete.
   reserved-name redirect in sectionPage, web_sectionsPage.go:60-67, loops); `GET /admin?tab=apitokens` returns
   500 once a token exists (`admin_apitokens.html:96` uses `.TokenHash`, which `database.APIToken` lacks; since
   ab3a497). The default BadBots list blocks the curl User-Agent (expected).
+
+### Body cap (after the verification, user request 2026-10-17)
+- 7bc21b1 caps request bodies (1 MiB, ParseForm instead of ParseMultipartForm, 413/415 before the route runs,
+  multipart temp cleanup gone); review (opus): no blocker, 1 major-ish (the raise applied to every route) + 3 minor
+  → c453c36 (per-route cap `SetRouteMaxBodyBytes` for POST /SitePostSubmit only, factor 6, every multipart/*,
+  GET test) and 9086a5b (duplicate pattern across muxes panics, rawBody comment); re-review: MERGE. Full checks
+  green on c453c36 (31 packages under race, known bugs only T-nntp-article-1); web + cmd/web rerun on 9086a5b.
+  Live on 127.0.0.1:18994 against ./data-test-dropgin: startup line `Request body cap: 1048576 bytes
+  (/SitePostSubmit: 1048576 bytes)`, multipart → 415, 2 MiB form → 413 on /login and /SitePostSubmit, normal
+  forms unchanged, 0 temp files, SIGINT exit 0.
+
