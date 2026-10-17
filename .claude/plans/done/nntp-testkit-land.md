@@ -38,3 +38,13 @@ CLAUDE.md list; baseline comparison as in the done plan's Outcome.
 - `harness-strict` (worktree /tank0/claude/trees/go-pugleaf/agent-a09482663b07e7637, worktree-agent-a09482663b07e7637,
   383a8c4): Strict true in tryDial, hNewClient, sessDialRaw; 207 results unchanged, 0 strict failures; known bugs
   unchanged; PUGLEAF_TEST_DEADLINE=5s run ok. Merged without a separate review (4-line change, fully re-run).
+
+## Outcome
+- Integration branch `plan-nntp-testkit-land`, merged into `testing-001` as **2ba422f** on 2026-10-17 (unpushed).
+  Includes the migration branch `plan-nntp-testkit` (14352fb).
+- Worktrees (left for the user): /tank0/claude/trees/go-pugleaf/agent-a09482663b07e7637 (worktree-agent-a09482663b07e7637,
+  383a8c4, harness-strict); the migration worktree agent-af8031e986478fd0b from plan nntp-testkit.
+- Verification: full CLAUDE.md checks on 5d07bb9 green (gofmt empty, vet, build, 31 packages under race, known bugs
+  only T-nntp-article-1); internal/nntp 207 results = baseline minus the three TestCliFake* now in the kit; strict
+  harness client: 0 failures.
+- Leftovers: none. The kit's conformance package is plan nntp-testkit-conformance (queued).
