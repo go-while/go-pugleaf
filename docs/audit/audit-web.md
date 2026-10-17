@@ -172,7 +172,7 @@ Most important:
   ```
   The seeded body was `hello <img src=x onerror=…>\n&lt;svg onload=alert(2)&gt;\n<a href="javascript:alert(3)">x</a>`:
   the `&lt;svg…&gt;` line comes back as live `<svg onload=alert(2)>`. The one `escapeHtml(` match is
-  the method definition. The `body:` line is shown JSON-decoded: on the wire gin writes `<`, `>` and
+  the method definition. The `body:` line is shown JSON-decoded: on the wire encoding/json writes `<`, `>` and
   `&` as backslash-u escapes (`u003c`, `u003e`, `u0026`), which `response.json()` in `thread-tree.js:498`
   turns back into the characters shown. The browser step (execution on click) follows from the
   `innerHTML` assignment; it was not run in a browser.
@@ -562,7 +562,7 @@ Most important:
 - **Scenario:** `GetData("parent_URL"|"references_URLs")` formats `/groups/%s/message/%s` with the raw
   group and message-id. RFC 5536 message-ids may contain `/`, `?`, `#` and `%`; `html/template` keeps
   those in a URL attribute, so the link becomes a different path or query and the "Reply to parent"
-  button 404s (gin's `:messageId` does not match `/`). The `references_URLs` TODO at `:232` also uses the
+  button 404s (the `{messageId}` path segment does not match `/`). The `references_URLs` TODO at `:232` also uses the
   first reference instead of the last.
 - **Evidence:** code trace, see Scenario (`models/models.go:232,246`).
 - **Fix:** `url.PathEscape` both parts. Effort S.
