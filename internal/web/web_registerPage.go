@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -20,7 +19,7 @@ type RegisterPageData struct {
 }
 
 // registerPage displays the registration form
-func (s *WebServer) registerPage(c *gin.Context) {
+func (s *WebServer) registerPage(c *Context) {
 	// Check if registration is enabled
 	registrationEnabled, err := s.DB.IsRegistrationEnabled()
 	if err != nil {
@@ -47,7 +46,7 @@ func (s *WebServer) registerPage(c *gin.Context) {
 }
 
 // registerSubmit processes registration form submission
-func (s *WebServer) registerSubmit(c *gin.Context) {
+func (s *WebServer) registerSubmit(c *Context) {
 	// Check if registration is enabled
 	registrationEnabled, err := s.DB.IsRegistrationEnabled()
 	if err != nil {
@@ -177,7 +176,7 @@ func (s *WebServer) createUser(username, email, passwordHash, displayName string
 }
 
 // renderRegisterError renders register page with error
-func (s *WebServer) renderRegisterError(c *gin.Context, errorMsg, username, email string) {
+func (s *WebServer) renderRegisterError(c *Context, errorMsg, username, email string) {
 	data := RegisterPageData{
 		TemplateData: s.getBaseTemplateData(c, "Register"),
 		Error:        errorMsg,

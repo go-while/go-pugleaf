@@ -8,8 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/gin-gonic/gin"
 )
 
 var w2TmplTitleRe = regexp.MustCompile(`(?s)<title>(.*?)</title>`)
@@ -76,10 +74,8 @@ func TestW2TmplMissingTemplate(t *testing.T) {
 	}
 
 	// writeTemplateSet writes nothing on error.
-	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	c := NewTestContext(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if err := writeTemplateSet(c, http.StatusOK, "page", nil, "base.html", nil, "base.html", "w2tmpl-does-not-exist.html"); err == nil {
 		t.Fatal("writeTemplateSet with a missing file returned no error")
 	}
@@ -89,8 +85,7 @@ func TestW2TmplMissingTemplate(t *testing.T) {
 
 	// renderPage answers a missing template with the 500 error page, not a panic.
 	rec = httptest.NewRecorder()
-	c, _ = gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	c = NewTestContext(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	w0Srv.renderPage(c, http.StatusOK, w0Srv.getBaseTemplateData(c, "x"), "w2tmpl-does-not-exist.html")
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("renderPage with a missing template: status %d, want 500", rec.Code)

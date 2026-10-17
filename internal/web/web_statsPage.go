@@ -4,18 +4,17 @@ package web
 import (
 	"net/http"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
 )
 
 // This file should contain the statistics page related functions from server.go:
 //
 // Functions to be moved from server.go:
-//   - func (s *WebServer) statsPage(c *gin.Context) (line ~857)
+//   - func (s *WebServer) statsPage(c *Context) (line ~857)
 //     Handles "/stats" route to display server statistics
 //
 // This file will handle the statistics page functionality, showing server and NNTP statistics.
-func (s *WebServer) statsPage(c *gin.Context) {
+func (s *WebServer) statsPage(c *Context) {
 	// Get total count without loading all groups
 	totalCount := int(s.DB.MainDBGetNewsgroupsActiveCount())
 

@@ -7,13 +7,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-
-	"github.com/gin-gonic/gin"
 )
 
 // Admin-only functions for managing spam and hidden articles
 
-func (s *WebServer) decrementSpam(c *gin.Context) {
+func (s *WebServer) decrementSpam(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -80,7 +78,7 @@ func (s *WebServer) decrementSpam(c *gin.Context) {
 	c.Redirect(http.StatusSeeOther, redirectURL)
 }
 
-func (s *WebServer) unhideArticle(c *gin.Context) {
+func (s *WebServer) unhideArticle(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}

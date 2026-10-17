@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -94,7 +93,7 @@ func (s *WebServer) countPostingNNTPUsers(nntpUsers []*models.NNTPUser) (count i
 }
 
 // adminCreateNNTPUser handles NNTP user creation
-func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
+func (s *WebServer) adminCreateNNTPUser(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -181,7 +180,7 @@ func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
 }
 
 // adminUpdateNNTPUser handles NNTP user updates
-func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
+func (s *WebServer) adminUpdateNNTPUser(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -304,7 +303,7 @@ func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
 }
 
 // adminDeleteNNTPUser handles NNTP user deletion
-func (s *WebServer) adminDeleteNNTPUser(c *gin.Context) {
+func (s *WebServer) adminDeleteNNTPUser(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -340,7 +339,7 @@ func (s *WebServer) adminDeleteNNTPUser(c *gin.Context) {
 }
 
 // adminToggleNNTPUser handles activating/deactivating NNTP users
-func (s *WebServer) adminToggleNNTPUser(c *gin.Context) {
+func (s *WebServer) adminToggleNNTPUser(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -398,7 +397,7 @@ func (s *WebServer) adminToggleNNTPUser(c *gin.Context) {
 }
 
 // adminEnableNNTPUser handles activating NNTP users
-func (s *WebServer) adminEnableNNTPUser(c *gin.Context) {
+func (s *WebServer) adminEnableNNTPUser(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}

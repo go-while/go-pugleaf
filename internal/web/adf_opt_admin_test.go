@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"regexp"
 	"runtime"
@@ -15,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -416,66 +414,6 @@ func TestAdfOptGetDataEscapes(t *testing.T) {
 	var nilArt *models.Article
 	if got := nilArt.GetData("parent_URL", "g"); got != "" {
 		t.Errorf("nil GetData = %q, want empty", got)
-	}
-}
-
-// TestAdfOptRawPathParams (A-web-18): the router's param handling (UseRawPath, gin's
-// UnescapePathValues off, unescapeRawPathParams) gives the same params as gin's defaults for
-// canonical paths, and keeps '+' (which url.QueryUnescape would turn into a space) for paths
-// gin matches on URL.RawPath.
-func TestAdfOptRawPathParams(t *testing.T) {
-	newEngine := func(raw bool) *gin.Engine {
-		e := gin.New()
-		if raw {
-			e.UseRawPath = true
-			e.UnescapePathValues = false
-			e.Use(unescapeRawPathParams())
-		}
-		e.GET("/g/:group/m/:id", func(c *gin.Context) {
-			c.String(http.StatusOK, "%s|%s", c.Param("group"), c.Param("id"))
-		})
-		e.GET("/s/*filepath", func(c *gin.Context) {
-			c.String(http.StatusOK, "%s", c.Param("filepath"))
-		})
-		return e
-	}
-	serve := func(e *gin.Engine, target string) string {
-		t.Helper()
-		rec := httptest.NewRecorder()
-		e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
-		if rec.Code != http.StatusOK {
-			return fmt.Sprintf("status %d", rec.Code)
-		}
-		return rec.Body.String()
-	}
-	oldEngine, rawEngine := newEngine(false), newEngine(true)
-
-	// Canonical escaping: URL.RawPath stays empty, both routers see identical params.
-	for _, target := range []string{
-		"/g/comp.lang.c++/m/%3Cab+c@x%3E",
-		"/g/a.b/m/%3Cx@y%3E",
-		"/g/a.b/m/%3Ca%20b%25c%3Fd%23e@x%3E",
-		"/g/a_b-c/m/plain",
-		"/s/js/thread-tree.js",
-		"/s/a%20b.css",
-	} {
-		if got, want := serve(rawEngine, target), serve(oldEngine, target); got != want {
-			t.Errorf("GET %s: raw-path router %q, default router %q", target, got, want)
-		}
-	}
-
-	// Non-canonical escaping: gin matches on URL.RawPath, '+' and ',' must survive.
-	for target, want := range map[string]string{
-		"/g/comp.lang.c++/m/%3Ca%2Fb,c+d@x%3E":     "comp.lang.c++|<a/b,c+d@x>",
-		"/g/comp.lang.c%2B%2B/m/%3Ca%2Bb%2Fc@x%3E": "comp.lang.c++|<a+b/c@x>",
-		"/g/comp.lang.c++/m/<ab+c@x>":              "comp.lang.c++|<ab+c@x>",
-		"/g/a.b/m/%3ca%2cb@x%3e":                   "a.b|<a,b@x>",
-		"/g/a.b/m/%3Ca%2Cb+c@x%3E":                 "a.b|<a,b+c@x>",
-		"/s/a%2Fb+c.css":                           "/a/b+c.css",
-	} {
-		if got := serve(rawEngine, target); got != want {
-			t.Errorf("GET %s = %q, want %q", target, got, want)
-		}
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -16,24 +15,24 @@ import (
 // This file should contain the thread tree view related functions from server.go:
 //
 // Functions to be moved from server.go:
-//   - func (s *WebServer) threadTreePage(c *gin.Context) (line ~1596)
+//   - func (s *WebServer) threadTreePage(c *Context) (line ~1596)
 //     Handles "/groups/:group/tree/:threadRoot" route for thread tree view
-//   - func (s *WebServer) sectionThreadTreePage(c *gin.Context) (line ~1670)
+//   - func (s *WebServer) sectionThreadTreePage(c *Context) (line ~1670)
 //     Handles "/:section/:group/tree/:threadRoot" route for section thread tree view
-//   - func (s *WebServer) threadTreeDemoPage(c *gin.Context) (line ~1526)
+//   - func (s *WebServer) threadTreeDemoPage(c *Context) (line ~1526)
 //     Handles "/demo/thread-tree" route for thread tree demo functionality
-//   - func (s *WebServer) handleThreadTreeAPI(c *gin.Context) (line ~1532)
+//   - func (s *WebServer) handleThreadTreeAPI(c *Context) (line ~1532)
 //     Handles "/api/thread-tree" API endpoint for thread tree data
 //
 // This file will handle all thread tree view functionality, including tree rendering,
 // tree API endpoints, and tree demo pages.
 // handleThreadTreeAPI handles the tree view API endpoint
-func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
+func (s *WebServer) handleThreadTreeAPI(c *Context) {
 	groupName := c.Query("group")
 	threadRootStr := c.Query("thread_root")
 
 	if groupName == "" || threadRootStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
+		c.JSON(http.StatusBadRequest, H{
 			"error": "Missing required parameters: group, thread_root",
 		})
 		return
@@ -41,7 +40,7 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 
 	threadRoot, err := strconv.ParseInt(threadRootStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
+		c.JSON(http.StatusBadRequest, H{
 			"error": "Invalid thread_root parameter",
 		})
 		return
@@ -57,7 +56,7 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		log.Printf("[WEB]: thread-tree API: GetGroupDB(%q) failed: %v", groupName, err)
-		c.JSON(http.StatusInternalServerError, gin.H{
+		c.JSON(http.StatusInternalServerError, H{
 			"error": "Failed to build thread tree",
 		})
 		return
@@ -88,7 +87,7 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 	response, err := s.DB.GetThreadTreeView(groupDB, threadRoot, options)
 	if err != nil {
 		log.Printf("[WEB]: thread-tree API: group %q root %d: %v", groupName, threadRoot, err)
-		c.JSON(http.StatusInternalServerError, gin.H{
+		c.JSON(http.StatusInternalServerError, H{
 			"error": "Failed to build thread tree",
 		})
 		return
@@ -108,7 +107,7 @@ func (s *WebServer) handleThreadTreeAPI(c *gin.Context) {
 }
 
 // threadTreePage displays a thread in tree view format
-func (s *WebServer) threadTreePage(c *gin.Context) {
+func (s *WebServer) threadTreePage(c *Context) {
 	groupName := c.Param("group")
 	threadRootStr := c.Param("threadRoot")
 
@@ -166,7 +165,7 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 	// Get base template data with authentication context
 	baseData := s.getBaseTemplateData(c, rootOverview.GetCleanSubject()+" - Thread Tree")
 
-	data := gin.H{
+	data := H{
 		"Title":               baseData.Title,
 		"CurrentTime":         baseData.CurrentTime,
 		"Port":                baseData.Port,
@@ -193,7 +192,7 @@ func (s *WebServer) threadTreePage(c *gin.Context) {
 }
 
 // sectionThreadTreePage displays a thread in tree view format within a section
-func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
+func (s *WebServer) sectionThreadTreePage(c *Context) {
 	section := c.Param("section")
 	// The group parameter is the full group name, like in the other section routes
 	groupName := c.Param("group")
@@ -253,7 +252,7 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 	// Get base template data with authentication context
 	baseData := s.getBaseTemplateData(c, rootOverview.GetCleanSubject()+" - Thread Tree")
 
-	data := gin.H{
+	data := H{
 		"Title":               baseData.Title,
 		"CurrentTime":         baseData.CurrentTime,
 		"Port":                baseData.Port,
@@ -282,7 +281,7 @@ func (s *WebServer) sectionThreadTreePage(c *gin.Context) {
 }
 
 // threadTreeDemoPage serves the tree view demo page
-func (s *WebServer) threadTreeDemoPage(c *gin.Context) {
+func (s *WebServer) threadTreeDemoPage(c *Context) {
 	// Serve the static demo HTML file
 	c.File("./web/templates/thread-tree-demo.html")
 }

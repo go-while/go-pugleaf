@@ -5,20 +5,13 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
-
-	"github.com/gin-gonic/gin"
 )
 
 //go:embed static/*
 var EmbeddedStaticFS embed.FS
 
-// UseEmbeddedStatic returns true if embedded static files are available
-func UseEmbeddedStatic() bool {
-	return EmbeddedStaticFS != (embed.FS{})
-}
-
-// EmbeddedStaticHandler returns a Gin handler for serving embedded static files
-func EmbeddedStaticHandler(prefix string) gin.HandlerFunc {
+// EmbeddedStaticHandler returns a handler for serving embedded static files
+func EmbeddedStaticHandler(prefix string) HandlerFunc {
 	// Create a sub-filesystem for the static files
 	staticFS, err := fs.Sub(EmbeddedStaticFS, "static")
 	if err != nil {
@@ -28,7 +21,7 @@ func EmbeddedStaticHandler(prefix string) gin.HandlerFunc {
 	// Create an HTTP filesystem handler
 	fileServer := http.FileServer(http.FS(staticFS))
 
-	return func(c *gin.Context) {
+	return func(c *Context) {
 		// Strip the URL path prefix to get the file path
 		path := strings.TrimPrefix(c.Request.URL.Path, prefix)
 		if path == "" || path == "/" {

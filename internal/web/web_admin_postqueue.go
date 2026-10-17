@@ -6,12 +6,11 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
 )
 
 // adminDeletePostQueue handles the delete request for a specific post queue entry
-func (s *WebServer) adminDeletePostQueueEntry(c *gin.Context) {
+func (s *WebServer) adminDeletePostQueueEntry(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -55,7 +54,7 @@ func (s *WebServer) adminDeletePostQueueEntry(c *gin.Context) {
 // adminRetryPostQueueEntry resets the attempt counter and last error of a post queue entry, so a
 // parked entry is posted again by the next post-queue run. Posted entries and entries being
 // posted right now are left alone.
-func (s *WebServer) adminRetryPostQueueEntry(c *gin.Context) {
+func (s *WebServer) adminRetryPostQueueEntry(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}

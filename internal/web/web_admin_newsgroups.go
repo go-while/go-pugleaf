@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -19,7 +18,7 @@ import (
 
 // buildNewsgroupAdminRedirectURL builds a redirect URL preserving search and pagination state.
 // The values are query-encoded, so '&' or '#' in a search term stay part of it (A-web-16).
-func buildNewsgroupAdminRedirectURL(c *gin.Context) string {
+func buildNewsgroupAdminRedirectURL(c *Context) string {
 	redirectURL := "/admin?tab=newsgroups"
 	q := url.Values{}
 	if search := c.PostForm("search"); search != "" {
@@ -51,7 +50,7 @@ func (s *WebServer) adminNewsgroupExists(name string) (*models.Newsgroup, bool, 
 }
 
 // adminCreateNewsgroup handles newsgroup creation
-func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
+func (s *WebServer) adminCreateNewsgroup(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -156,7 +155,7 @@ func (s *WebServer) adminCreateNewsgroup(c *gin.Context) {
 }
 
 // adminUpdateNewsgroup handles newsgroup updates
-func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
+func (s *WebServer) adminUpdateNewsgroup(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -299,7 +298,7 @@ func (s *WebServer) adminUpdateNewsgroup(c *gin.Context) {
 }
 
 // adminDeleteNewsgroup handles newsgroup deletion
-func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
+func (s *WebServer) adminDeleteNewsgroup(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -345,7 +344,7 @@ func (s *WebServer) adminDeleteNewsgroup(c *gin.Context) {
 }
 
 // adminAssignNewsgroupSection handles section assignment for newsgroups
-func (s *WebServer) adminAssignNewsgroupSection(c *gin.Context) {
+func (s *WebServer) adminAssignNewsgroupSection(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -440,7 +439,7 @@ func (s *WebServer) adminAssignNewsgroupSection(c *gin.Context) {
 }
 
 // adminToggleNewsgroup handles toggling the active status of a newsgroup
-func (s *WebServer) adminToggleNewsgroup(c *gin.Context) {
+func (s *WebServer) adminToggleNewsgroup(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -484,17 +483,17 @@ func (s *WebServer) adminToggleNewsgroup(c *gin.Context) {
 }
 
 // adminBulkEnableNewsgroups handles bulk enabling of newsgroups
-func (s *WebServer) adminBulkEnableNewsgroups(c *gin.Context) {
+func (s *WebServer) adminBulkEnableNewsgroups(c *Context) {
 	s.handleBulkNewsgroupAction(c, true, "enable")
 }
 
 // adminBulkDisableNewsgroups handles bulk disabling of newsgroups
-func (s *WebServer) adminBulkDisableNewsgroups(c *gin.Context) {
+func (s *WebServer) adminBulkDisableNewsgroups(c *Context) {
 	s.handleBulkNewsgroupAction(c, false, "disable")
 }
 
 // adminBulkDeleteNewsgroups handles bulk deletion of inactive newsgroups
-func (s *WebServer) adminBulkDeleteNewsgroups(c *gin.Context) {
+func (s *WebServer) adminBulkDeleteNewsgroups(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -527,7 +526,7 @@ func (s *WebServer) adminBulkDeleteNewsgroups(c *gin.Context) {
 }
 
 // handleBulkNewsgroupAction is a helper function for bulk enable/disable operations
-func (s *WebServer) handleBulkNewsgroupAction(c *gin.Context, activeStatus bool, actionName string) {
+func (s *WebServer) handleBulkNewsgroupAction(c *Context, activeStatus bool, actionName string) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -560,7 +559,7 @@ func (s *WebServer) handleBulkNewsgroupAction(c *gin.Context, activeStatus bool,
 }
 
 // adminMigrateNewsgroupActivity handles migrating activity timestamp for a specific newsgroup
-func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
+func (s *WebServer) adminMigrateNewsgroupActivity(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -619,7 +618,7 @@ func (s *WebServer) adminMigrateNewsgroupActivity(c *gin.Context) {
 }
 
 // adminFixThreadActivity handles fixing thread activity timestamps for a specific newsgroup
-func (s *WebServer) adminFixThreadActivity(c *gin.Context) {
+func (s *WebServer) adminFixThreadActivity(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -785,7 +784,7 @@ func (s *WebServer) fixGroupThreadActivity(groupName string) error {
 }
 
 // adminHideFuturePosts handles hiding future-dated posts for a specific newsgroup using the spam system
-func (s *WebServer) adminHideFuturePosts(c *gin.Context) {
+func (s *WebServer) adminHideFuturePosts(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
