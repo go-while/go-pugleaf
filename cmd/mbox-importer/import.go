@@ -238,7 +238,13 @@ func importInputs(files []string, opts *runOptions, sink articleSink, stop <-cha
 		default:
 		}
 		res.Inputs++
-		c, inputErr, stopped := importInput(path, opts, sink, stop)
+		var c *counters
+		var inputErr, stopped bool
+		if uatSuffix(path) != "" {
+			c, inputErr, stopped = importUAT(path, opts, sink, stop)
+		} else {
+			c, inputErr, stopped = importInput(path, opts, sink, stop)
+		}
 		if inputErr {
 			res.InputErrors++
 		}
