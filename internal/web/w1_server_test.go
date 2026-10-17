@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 )
@@ -43,13 +43,13 @@ func TestW1ServerBotMiddlewareReleasesLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := gin.New()
+	r := NewRouter()
 	r.Use(w0Srv.BotDetectionMiddleware())
-	r.GET("/update", func(c *gin.Context) {
+	r.GET("/update", func(c *Context) {
 		// Takes BadBotsMutex.Lock and BadIPsMutex.Lock while the middleware is still on the stack
 		config.UpdateBadBots("x", false)
 		if err := config.UpdateBadIPs("", false); err != nil {
-			c.String(http.StatusInternalServerError, err.Error())
+			c.String(http.StatusInternalServerError, "%s", err.Error())
 			return
 		}
 		c.String(http.StatusOK, "ok")
@@ -81,9 +81,9 @@ func TestW1ServerBotPatternsLowercase(t *testing.T) {
 		t.Fatalf("Default_BadBots = %q, want [evilcrawler]", got)
 	}
 
-	r := gin.New()
+	r := NewRouter()
 	r.Use(w0Srv.BotDetectionMiddleware())
-	r.GET("/", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+	r.GET("/", func(c *Context) { c.String(http.StatusOK, "ok") })
 	for ua, want := range map[string]int{
 		"Mozilla/5.0 (compatible; EVILCRAWLER/2.1)": http.StatusForbidden,
 		"Mozilla/5.0 Firefox/130":                   http.StatusOK,
@@ -142,18 +142,18 @@ func TestW1ServerTrustedProxies(t *testing.T) {
 		RemoteAddr string
 		Host       string
 	}
-	newEngine := func(addrs string) *gin.Engine {
-		r := gin.New()
+	newEngine := func(addrs string) *Router {
+		r := NewRouter()
 		s := &WebServer{trustedProxyNets: configureTrustedProxies(r, addrs)}
 		r.Use(s.ReverseProxyMiddleware())
-		r.GET("/", func(c *gin.Context) {
+		r.GET("/", func(c *Context) {
 			v, _ := c.Get("is_https")
 			isHTTPS, _ := v.(bool)
 			c.JSON(http.StatusOK, result{c.ClientIP(), isHTTPS, c.Request.RemoteAddr, c.Request.Host})
 		})
 		return r
 	}
-	engines := map[string]*gin.Engine{
+	engines := map[string]*Router{
 		"":                                newEngine(""),
 		"10.9.9.9, 2001:db8::/32 bad/x ?": newEngine("10.9.9.9, 2001:db8::/32 bad/x ?"),
 	}
@@ -473,5 +473,97 @@ func TestW1ServerHTTPServerTimeouts(t *testing.T) {
 		srv.WriteTimeout != 120*time.Second || srv.IdleTimeout != 120*time.Second || srv.MaxHeaderBytes != 1<<20 {
 		t.Errorf("timeouts: rh=%v r=%v w=%v idle=%v maxHeader=%d",
 			srv.ReadHeaderTimeout, srv.ReadTimeout, srv.WriteTimeout, srv.IdleTimeout, srv.MaxHeaderBytes)
+	}
+}
+
+// TestW1ServerSlashRemovalBeforeSections: on the production table a main route asked with a
+// trailing slash is redirected to the slash-less path (as gin did) instead of landing in the
+// fallback's /{section}/{$}; a one-segment path with a slash that has no main route still
+// reaches the section routes.
+func TestW1ServerSlashRemovalBeforeSections(t *testing.T) {
+	for _, tc := range []struct {
+		method, path string
+		code         int
+		location     string
+	}{
+		{http.MethodGet, "/admin/", http.StatusMovedPermanently, "/admin"},
+		{http.MethodGet, "/login/", http.StatusMovedPermanently, "/login"},
+		{http.MethodGet, "/SitePost/", http.StatusMovedPermanently, "/SitePost"},
+		{http.MethodGet, "/aichat/models/", http.StatusMovedPermanently, "/aichat/models"},
+		{http.MethodGet, "/hierarchy-groups/comp/", http.StatusMovedPermanently, "/hierarchy-groups/comp"},
+		{http.MethodPost, "/login/", http.StatusTemporaryRedirect, "/login"},
+	} {
+		rec := w0Do(t, w0Req{Method: tc.method, Path: tc.path})
+		if rec.Code != tc.code || rec.Header().Get("Location") != tc.location {
+			t.Errorf("%s %s = %d %q, want %d %q", tc.method, tc.path, rec.Code, rec.Header().Get("Location"), tc.code, tc.location)
+		}
+	}
+
+	// An unknown section: the section middleware of the fallback route answers.
+	unknown := strings.ReplaceAll(w0Name("w1srvnosec"), ".", "")
+	rec := w0Do(t, w0Req{Path: "/" + unknown + "/"})
+	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "youtube.com") {
+		t.Errorf("GET /%s/ = %d %q, want the section middleware's 303", unknown, rec.Code, rec.Header().Get("Location"))
+	}
+
+	// A valid section: sectionPage answers.
+	name := strings.ReplaceAll(w0Name("w1srvslash"), ".", "")
+	if _, err := database.RetryableExec(w0DB(t).GetMainDB(), "INSERT INTO sections(name, display_name) VALUES (?, ?)", name, "w1"); err != nil {
+		t.Fatal(err)
+	}
+	w0Srv.loadSectionsCache()
+	if rec := w0Do(t, w0Req{Path: "/" + name + "/"}); rec.Code != http.StatusOK {
+		t.Errorf("GET /%s/ = %d, want 200 from sectionPage", name, rec.Code)
+	}
+}
+
+// TestW1ServerReservedSectionNames: a reserved first segment without a route of its own
+// (/static needs a file path) is a 404, not a 301 to itself; the API base paths redirect to
+// the help page that exists.
+func TestW1ServerReservedSectionNames(t *testing.T) {
+	for _, path := range []string{"/static", "/static/"} {
+		rec := w0Do(t, w0Req{Path: path})
+		if rec.Code != http.StatusNotFound || rec.Header().Get("Location") != "" {
+			t.Errorf("GET %s = %d Location %q, want 404 without Location", path, rec.Code, rec.Header().Get("Location"))
+		}
+	}
+	for _, path := range []string{"/api", "/api/", "/api/v1", "/api/v1/"} {
+		rec := w0Do(t, w0Req{Path: path})
+		if rec.Code != http.StatusMovedPermanently || rec.Header().Get("Location") != "/SiteHelp" {
+			t.Errorf("GET %s = %d Location %q, want 301 /SiteHelp", path, rec.Code, rec.Header().Get("Location"))
+		}
+	}
+	if rec := w0Do(t, w0Req{Path: "/SiteHelp"}); rec.Code != http.StatusOK {
+		t.Errorf("GET /SiteHelp = %d", rec.Code)
+	}
+
+	// An admin cannot create or rename a section to a reserved name.
+	_, cookie := w0NewUser(t, true)
+	form := url.Values{"name": {"static"}, "display_name": {"Static"}}
+	rec := w0Do(t, w0Req{Method: http.MethodPost, Path: "/admin/sections", Form: form, Cookies: []*http.Cookie{cookie}})
+	exists, err := w0DB(t).SectionNameExists("static")
+	if err != nil || exists || rec.Code != http.StatusSeeOther {
+		t.Errorf("create section 'static' = %d, exists %v, %v", rec.Code, exists, err)
+	}
+}
+
+// TestW1ServerAdminAPITokensTab: the API tokens tab renders with a token present and shows the
+// first characters of the stored hash, never the plain token.
+func TestW1ServerAdminAPITokensTab(t *testing.T) {
+	_, cookie := w0NewUser(t, true)
+	token, plain, err := w0DB(t).CreateAPIToken("w1srv-apitokens-tab", 0, nil)
+	if err != nil {
+		t.Fatalf("CreateAPIToken: %v", err)
+	}
+	rec := w0Do(t, w0Req{Path: "/admin", Form: url.Values{"tab": {"apitokens"}}, Cookies: []*http.Cookie{cookie}})
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin?tab=apitokens = %d", rec.Code)
+	}
+	if !strings.Contains(body, "w1srv-apitokens-tab") || !strings.Contains(body, token.APIToken[:12]+"...") {
+		t.Errorf("tokens tab lacks the owner or the hash prefix %q", token.APIToken[:12])
+	}
+	if strings.Contains(body, plain) {
+		t.Error("tokens tab shows the plain token")
 	}
 }

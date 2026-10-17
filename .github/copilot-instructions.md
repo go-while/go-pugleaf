@@ -8,9 +8,9 @@
 - **Type**: Production newsgroup server system (medium-to-large codebase)
 - **Size**: 149 Go files across 13 internal packages, 21 command applications
 - **Languages**: Go 1.25.0+ (primary), HTML/CSS/JavaScript (web frontend), Shell scripts (build system)
-- **Frameworks**: Gin web framework, custom NNTP protocol implementation, SQLite3 database
+- **Frameworks**: net/http ServeMux + html/template (standard library), custom NNTP protocol implementation, SQLite3 database
 - **Target Runtime**: Linux/Unix systems (Windows support not tested)
-- **Dependencies**: Minimal external dependencies - SQLite3, Gin, Go crypto libraries
+- **Dependencies**: Minimal external dependencies - SQLite3, Go crypto libraries (web: standard library net/http)
 
 ## Build, Test, and Development Commands
 
@@ -140,7 +140,7 @@ golangci-lint run
   └── matrix/          # Matrix protocol support
 
 /web/                   # Frontend assets
-  ├── templates/       # HTML templates (Gin templating)
+  ├── templates/       # HTML templates (html/template)
   └── static files     # CSS, JS, favicon
 
 /configs/               # Configuration samples and documentation
@@ -163,7 +163,7 @@ golangci-lint run
 - Pattern matching for newsgroup filtering
 
 **Web Interface** (`internal/web/`):
-- Gin-based REST API and web pages
+- net/http ServeMux-based REST API and web pages
 - User authentication and session management  
 - Admin interface for newsgroup/provider management
 - Multiple theme support (modern, classic, amber)

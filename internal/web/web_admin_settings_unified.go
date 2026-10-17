@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
@@ -24,7 +23,7 @@ type SettingConfig struct {
 }
 
 // adminUpdateSettings handles all admin settings updates in a unified way
-func (s *WebServer) adminUpdateSettings(c *gin.Context) {
+func (s *WebServer) adminUpdateSettings(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -243,6 +242,9 @@ func (s *WebServer) adminUpdateSettings(c *gin.Context) {
 			}
 			c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 			return
+		}
+		if settingType == config.FORM_FIELD_WEBPOSTSIZE {
+			s.setPostBodyCap(value) // validated above: 1 KiB..16 MiB
 		}
 	}
 

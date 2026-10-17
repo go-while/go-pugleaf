@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -20,11 +19,11 @@ var LIMIT_groupPage = 128
 // This file should contain the individual group page related functions from server.go:
 //
 // Functions to be moved from server.go:
-//   - func (s *WebServer) groupPage(c *gin.Context) (line ~598)
+//   - func (s *WebServer) groupPage(c *Context) (line ~598)
 //     Handles "/groups/:group" route to display articles in a specific newsgroup
 //
 // This file will handle the individual group view functionality, showing articles in a specific newsgroup.
-func (s *WebServer) groupPage(c *gin.Context) {
+func (s *WebServer) groupPage(c *Context) {
 	groupName := c.Param("group")
 
 	// Check if user can access this group (active status + admin bypass)
@@ -139,7 +138,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 	s.renderPage(c, http.StatusOK, data, "group.html", "pagination.html")
 }
 
-func (s *WebServer) incrementSpam(c *gin.Context) {
+func (s *WebServer) incrementSpam(c *Context) {
 	// Check authentication - any logged-in user can flag spam
 	session := s.getWebSession(c)
 	if session == nil {
@@ -230,7 +229,7 @@ func (s *WebServer) incrementSpam(c *gin.Context) {
 	c.Redirect(http.StatusSeeOther, redirectURL)
 }
 
-func (s *WebServer) incrementHide(c *gin.Context) {
+func (s *WebServer) incrementHide(c *Context) {
 	// Check authentication and admin permissions
 	session := s.getWebSession(c)
 	if session == nil {

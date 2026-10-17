@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -23,13 +22,7 @@ type LoginPageData struct {
 }
 
 // loginPage displays the login form
-func (s *WebServer) loginPage(c *gin.Context) {
-	// Check if user is already logged in
-	if user, exists := c.Get("user"); exists && user != nil {
-		c.Redirect(http.StatusSeeOther, safeRedirect(c.Query("redirect")))
-		return
-	}
-
+func (s *WebServer) loginPage(c *Context) {
 	// Handle different message types
 	var errorMsg string
 	message := c.Query("message")
@@ -54,7 +47,7 @@ func (s *WebServer) loginPage(c *gin.Context) {
 }
 
 // loginSubmit processes login form submission
-func (s *WebServer) loginSubmit(c *gin.Context) {
+func (s *WebServer) loginSubmit(c *Context) {
 	username := strings.TrimSpace(c.PostForm("username"))
 	password := c.PostForm("password")
 	redirectURL := safeRedirect(c.PostForm("redirect"))
@@ -139,7 +132,7 @@ func dummyPasswordCompare(password string) {
 }
 
 // logout handles user logout
-func (s *WebServer) logout(c *gin.Context) {
+func (s *WebServer) logout(c *Context) {
 	// GET /logout must not be triggerable by other sites (CSRF): ignore cross-site requests
 	switch strings.ToLower(c.GetHeader("Sec-Fetch-Site")) {
 	case "cross-site", "same-site":
@@ -163,7 +156,7 @@ func (s *WebServer) logout(c *gin.Context) {
 }
 
 // renderLoginError renders login page with error
-func (s *WebServer) renderLoginError(c *gin.Context, errorMsg, redirectURL string) {
+func (s *WebServer) renderLoginError(c *Context, errorMsg, redirectURL string) {
 	data := LoginPageData{
 		TemplateData: s.getBaseTemplateData(c, "Login"),
 		Error:        errorMsg,

@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -210,7 +209,7 @@ type AIChatPageData struct {
 }
 
 // aichatPage renders the AI chat page
-func (s *WebServer) aichatPage(c *gin.Context) {
+func (s *WebServer) aichatPage(c *Context) {
 	session := s.getWebSession(c)
 	if session == nil {
 		c.Redirect(http.StatusSeeOther, "/login?redirect=/aichat")
@@ -258,10 +257,10 @@ func (s *WebServer) aichatPage(c *gin.Context) {
 }
 
 // aichatSend handles chat message POSTs and proxies to Ollama
-func (s *WebServer) aichatSend(c *gin.Context) {
+func (s *WebServer) aichatSend(c *Context) {
 	session := s.getWebSession(c)
 	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
+		c.JSON(http.StatusUnauthorized, H{"error": "Not authenticated"})
 		return
 	}
 
@@ -271,7 +270,7 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 	lastRequestTime, ok := chatRateLimiter[session.UserID]
 	if ok && now.Sub(lastRequestTime) < chatCooldown {
 		rateLimiterMux.Unlock()
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many requests. Please wait before sending another message."})
+		c.JSON(http.StatusTooManyRequests, H{"error": "Too many requests. Please wait before sending another message."})
 		return
 	}
 	chatRateLimiter[session.UserID] = now
@@ -288,11 +287,11 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil || req.Message == "" {
 		if errors.As(err, new(*http.MaxBytesError)) {
 			log.Printf("AI Chat request body too large (user %d, limit %d bytes)", session.UserID, maxChatRequestBytes)
-			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "Request too large"})
+			c.JSON(http.StatusRequestEntityTooLarge, H{"error": "Request too large"})
 			return
 		}
 		log.Printf("AI Chat Invalid request: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: message required"})
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid request: message required"})
 		return
 	}
 
@@ -302,7 +301,7 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 		defaultModel, err := s.DB.GetDefaultAIModel()
 		if err != nil {
 			log.Printf("AI Chat no default model: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "No default AI model configured"})
+			c.JSON(http.StatusInternalServerError, H{"error": "No default AI model configured"})
 			return
 		}
 		modelPostKey = defaultModel.PostKey
@@ -312,14 +311,14 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 	selectedModel, err := s.DB.GetAIModelByPostKey(modelPostKey)
 	if err != nil || !selectedModel.IsActive {
 		log.Printf("AI Chat invalid model: %q, err: %v", modelPostKey, err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid or inactive AI model selected"})
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid or inactive AI model selected"})
 		return
 	}
 
 	// Validate message length (N character limit)
 	if len(req.Message) > maxChatInputLineLength {
 		log.Printf("AI Chat message too long: %d chars", len(req.Message))
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Message too long..."})
+		c.JSON(http.StatusBadRequest, H{"error": "Message too long..."})
 		return
 	}
 
@@ -336,7 +335,7 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 	if entry.inFlight {
 		chatCacheMux.Unlock()
 		log.Printf("AI Chat busy: user=%d model=%q", session.UserID, modelPostKey)
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": chatBusyMessage})
+		c.JSON(http.StatusTooManyRequests, H{"error": chatBusyMessage})
 		return
 	}
 	entry.inFlight = true
@@ -372,14 +371,14 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 	proxyBody, err := json.Marshal(proxyReq)
 	if err != nil {
 		log.Printf("AI Chat Proxy encode error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encode request"})
+		c.JSON(http.StatusInternalServerError, H{"error": "Failed to encode request"})
 		return
 	}
 
 	httpReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, ollamaProxyURL, bytes.NewReader(proxyBody))
 	if err != nil {
 		log.Printf("AI Chat Proxy request build error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to build proxy request"})
+		c.JSON(http.StatusInternalServerError, H{"error": "Failed to build proxy request"})
 		return
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -387,14 +386,14 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 	resp, err := chatHTTPClient.Do(httpReq)
 	if err != nil {
 		log.Printf("AI Chat Proxy request error: %v", err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Ollama proxy error"})
+		c.JSON(http.StatusBadGateway, H{"error": "Ollama proxy error"})
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("AI Chat Proxy returned status %d", resp.StatusCode)
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Ollama proxy error"})
+		c.JSON(http.StatusBadGateway, H{"error": "Ollama proxy error"})
 		return
 	}
 
@@ -404,13 +403,13 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxChatProxyResponseBytes)).Decode(&proxyResp); err != nil {
 		log.Printf("AI Chat Proxy decode error: %v", err)
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to decode proxy response"})
+		c.JSON(http.StatusBadGateway, H{"error": "Failed to decode proxy response"})
 		return
 	}
 
 	if proxyResp.Reply == "" {
 		log.Printf("AI Chat Proxy no reply from AI")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "No reply from AI"})
+		c.JSON(http.StatusBadGateway, H{"error": "No reply from AI"})
 		return
 	}
 
@@ -430,14 +429,14 @@ func (s *WebServer) aichatSend(c *gin.Context) {
 	chatCacheMux.Unlock()
 
 	log.Printf("AI Chat got reply: user=%d model='%s' reply_len=%d", session.UserID, selectedModel.DisplayName, len(proxyResp.Reply))
-	c.JSON(http.StatusOK, gin.H{"reply": proxyResp.Reply})
+	c.JSON(http.StatusOK, H{"reply": proxyResp.Reply})
 }
 
 // aichatModels returns available AI models for frontend selection
-func (s *WebServer) aichatModels(c *gin.Context) {
+func (s *WebServer) aichatModels(c *Context) {
 	session := s.getWebSession(c)
 	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
+		c.JSON(http.StatusUnauthorized, H{"error": "Not authenticated"})
 		return
 	}
 
@@ -445,7 +444,7 @@ func (s *WebServer) aichatModels(c *gin.Context) {
 	models, err := s.DB.GetActiveAIModels()
 	if err != nil {
 		log.Printf("Error loading AI models: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load AI models"})
+		c.JSON(http.StatusInternalServerError, H{"error": "Failed to load AI models"})
 		return
 	}
 
@@ -456,7 +455,7 @@ func (s *WebServer) aichatModels(c *gin.Context) {
 		// Continue without default if none found
 	}
 
-	response := gin.H{
+	response := H{
 		"models":  models,
 		"default": defaultModel,
 	}
@@ -465,31 +464,31 @@ func (s *WebServer) aichatModels(c *gin.Context) {
 }
 
 // aichatLoadHistory loads the chat history of the logged-in user for a specific model
-func (s *WebServer) aichatLoadHistory(c *gin.Context) {
+func (s *WebServer) aichatLoadHistory(c *Context) {
 	session := s.getWebSession(c)
 	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
+		c.JSON(http.StatusUnauthorized, H{"error": "Not authenticated"})
 		return
 	}
 
 	// Get model from URL parameter
 	modelPostKey := c.Param("model")
 	if modelPostKey == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "model parameter required in URL"})
+		c.JSON(http.StatusBadRequest, H{"error": "model parameter required in URL"})
 		return
 	}
 
 	// Validate model
 	selectedModel, err := s.DB.GetAIModelByPostKey(modelPostKey)
 	if err != nil || !selectedModel.IsActive {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid model"})
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid model"})
 		return
 	}
 
 	// Get model-specific history
 	history := getChatHistory(chatHistoryKey(session.UserID, modelPostKey), time.Now())
 
-	c.JSON(http.StatusOK, gin.H{
+	c.JSON(http.StatusOK, H{
 		"history": history,
 		"model":   selectedModel.DisplayName,
 		"count":   len(history),
@@ -497,10 +496,10 @@ func (s *WebServer) aichatLoadHistory(c *gin.Context) {
 }
 
 // aichatClearHistory clears the chat history of the logged-in user for a specific model or all models
-func (s *WebServer) aichatClearHistory(c *gin.Context) {
+func (s *WebServer) aichatClearHistory(c *Context) {
 	session := s.getWebSession(c)
 	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
+		c.JSON(http.StatusUnauthorized, H{"error": "Not authenticated"})
 		return
 	}
 
@@ -522,43 +521,43 @@ func (s *WebServer) aichatClearHistory(c *gin.Context) {
 				clearChatEntry(entry)
 			}
 		}
-		c.JSON(http.StatusOK, gin.H{"success": true, "message": "All chats cleared"})
+		c.JSON(http.StatusOK, H{"success": true, "message": "All chats cleared"})
 	} else if modelParam != "" {
 		// Clear specific model history
 		if entry, ok := chatHistoryCache[chatHistoryKey(session.UserID, modelParam)]; ok {
 			clearChatEntry(entry)
 		}
-		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Model chat cleared"})
+		c.JSON(http.StatusOK, H{"success": true, "message": "Model chat cleared"})
 	} else {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Model parameter required in URL"})
+		c.JSON(http.StatusBadRequest, H{"error": "Model parameter required in URL"})
 	}
 }
 
 // aichatGetCounts returns chat message counts of the logged-in user for all models
-func (s *WebServer) aichatGetCounts(c *gin.Context) {
+func (s *WebServer) aichatGetCounts(c *Context) {
 	session := s.getWebSession(c)
 	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
+		c.JSON(http.StatusUnauthorized, H{"error": "Not authenticated"})
 		return
 	}
 
 	availableModels, err := s.DB.GetActiveAIModels()
 	if err != nil {
 		log.Printf("Error loading AI models: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load AI models"})
+		c.JSON(http.StatusInternalServerError, H{"error": "Failed to load AI models"})
 		return
 	}
 
 	// Get chat counts for all models
 	chatCounts := getAllChatHistoryCounts(session.UserID, availableModels)
 
-	c.JSON(http.StatusOK, gin.H{
+	c.JSON(http.StatusOK, H{
 		"counts": chatCounts,
 	})
 }
 
 // renderChatError renders an error within the chat interface instead of using the main site error page
-func (s *WebServer) renderChatError(c *gin.Context, title, message string) {
+func (s *WebServer) renderChatError(c *Context, title, message string) {
 	// Create a minimal error template that matches the chat interface style
 	errorHTML := `<!DOCTYPE html>
 <html lang="en">
@@ -634,5 +633,5 @@ func (s *WebServer) renderChatError(c *gin.Context, title, message string) {
 </html>`
 
 	c.Header("Content-Type", "text/html")
-	c.String(http.StatusInternalServerError, errorHTML)
+	c.String(http.StatusInternalServerError, "%s", errorHTML)
 }

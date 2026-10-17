@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -18,15 +17,15 @@ var LIMIT_sectionPage = 128
 var LIMIT_sectionGroupPage = 128
 
 // Functions to be moved from server.go:
-//   - func (s *WebServer) sectionsPage(c *gin.Context) (line ~893)
+//   - func (s *WebServer) sectionsPage(c *Context) (line ~893)
 //     Handles "/sections" route to display all available sections
-//   - func (s *WebServer) sectionPage(c *gin.Context) (line ~932)
+//   - func (s *WebServer) sectionPage(c *Context) (line ~932)
 //     Handles "/:section" route to display groups in a specific section
-//   - func (s *WebServer) sectionGroupPage(c *gin.Context) (line ~1027)
+//   - func (s *WebServer) sectionGroupPage(c *Context) (line ~1027)
 //     Handles "/:section/:group/" route to display articles in a section's group
-//   - func (s *WebServer) sectionArticlePage(c *gin.Context) (line ~1123)
+//   - func (s *WebServer) sectionArticlePage(c *Context) (line ~1123)
 //     Handles "/:section/:group/articles/:articleNum" route for section articles
-//   - func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) (line ~1204)
+//   - func (s *WebServer) sectionArticleByMessageIdPage(c *Context) (line ~1204)
 //     Handles "/:section/:group/message/:messageId" route for section articles by message ID
 //
 // This file will handle all section-related functionality, including section listing,
@@ -34,7 +33,7 @@ var LIMIT_sectionGroupPage = 128
 
 // Section-based handlers (legacy compatibility)
 
-func (s *WebServer) sectionsPage(c *gin.Context) {
+func (s *WebServer) sectionsPage(c *Context) {
 	// Get all sections
 	sections, err := s.DB.GetSections()
 	if err != nil {
@@ -55,18 +54,16 @@ func (s *WebServer) sectionsPage(c *gin.Context) {
 }
 
 // sectionPage handles /:section/ - shows groups in a section
-func (s *WebServer) sectionPage(c *gin.Context) {
+func (s *WebServer) sectionPage(c *Context) {
 	sectionName := c.Param("section")
 
-	// Check for reserved paths that should not be treated as sections
-	reservedPaths := []string{"groups", "search", "stats", "help", "api", "static", "sections"}
-	for _, reserved := range reservedPaths {
-		if sectionName == reserved {
-			// This should have been handled by a more specific route
-			// If we got here, it means the route order is wrong
-			c.Redirect(http.StatusMovedPermanently, "/"+reserved)
-			return
-		}
+	// Reserved first segments are never sections. Most have their own route and never get here;
+	// one without (e.g. /static, whose route needs a file path) is a 404, not a redirect to the
+	// same path, which looped.
+	if knownNonSectionPaths[sectionName] {
+		s.renderError(c, http.StatusNotFound, "Section not found",
+			"The section '"+sectionName+"' does not exist.")
+		return
 	}
 
 	// Get section info
@@ -165,7 +162,7 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 // the request is from an admin) - section_groups rows outlive a deleted newsgroup, and
 // callers open the group DB next, which would create files for any name.
 // On failure it renders the 404 page and returns false. It never opens a group DB.
-func (s *WebServer) sectionGroupAllowed(c *gin.Context, sectionName, groupName string) (*models.Section, bool) {
+func (s *WebServer) sectionGroupAllowed(c *Context, sectionName, groupName string) (*models.Section, bool) {
 	section, err := s.DB.GetSectionByName(sectionName)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Section not found",
@@ -199,7 +196,7 @@ func (s *WebServer) sectionGroupAllowed(c *gin.Context, sectionName, groupName s
 }
 
 // sectionGroupPage handles /:section/:group/ - shows articles in a group within a section
-func (s *WebServer) sectionGroupPage(c *gin.Context) {
+func (s *WebServer) sectionGroupPage(c *Context) {
 	sectionName := c.Param("section")
 	groupName := c.Param("group")
 
@@ -297,7 +294,7 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 }
 
 // sectionArticlePage handles /:section/:group/articles/:articleNum - shows a specific article
-func (s *WebServer) sectionArticlePage(c *gin.Context) {
+func (s *WebServer) sectionArticlePage(c *Context) {
 	sectionName := c.Param("section")
 	groupName := c.Param("group")
 	articleNumStr := c.Param("articleNum")
@@ -358,7 +355,7 @@ func (s *WebServer) sectionArticlePage(c *gin.Context) {
 	s.renderTemplate(c, "section-article.html", data)
 }
 
-func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
+func (s *WebServer) sectionArticleByMessageIdPage(c *Context) {
 	sectionName := c.Param("section")
 	groupName := c.Param("group")
 	messageId := c.Param("messageId")

@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -465,11 +464,10 @@ func TestLo1HandTemplateKeyFuncMaps(t *testing.T) {
 func TestLo1HandTemplateErrorHidesDetail(t *testing.T) {
 	missing := "lo1hand-missing-template.html"
 	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/lo1hand", nil)
+	c := NewTestContext(rec, httptest.NewRequest(http.MethodGet, "/lo1hand", nil))
 	c.Request.RemoteAddr = "192.0.2.10:1234"
 
-	w0Srv.renderPage(c, http.StatusOK, gin.H{}, missing)
+	w0Srv.renderPage(c, http.StatusOK, H{}, missing)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status %d, want 500", rec.Code)

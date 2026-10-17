@@ -263,9 +263,87 @@ Leave `./data-test-dropgin` for the user to delete.
 - 405 where gin answered 404; TSR redirects now run inside the global chain (secure headers, bot block, access
   line); `/static` without slash is no longer special-cased beyond the mux; unclean paths (`//x`, `/a/../b`) get the
   mux's 307 to the cleaned path (were 404).
+- Request bodies are capped (user, 2026-10-17, after the 32 MiB multipart finding): `Router.SetMaxBodyBytes`,
+  1 MiB for every route; only `POST /SitePostSubmit` gets `SetRouteMaxBodyBytes` =
+  `max(1 MiB, 6 × WebPostMaxArticleSize + 64 KiB)` (CRLF arrives as 6 bytes), set at startup and from the admin
+  settings page (review of 7bc21b1: a global raise would have reopened big anonymous bodies on /login);
+  a urlencoded form past the cap is 413 and any multipart body 415 before the route runs (no upload feature;
+  nothing is spooled to disk any more, the multipart cleanup of wave 1 is gone); the 10 MiB urlencoded cap of
+  net/http no longer applies (MaxBytesReader replaces it); JSON past the cap fails in `ShouldBindJSON`.
 - HSTS spelled `includeSubDomains`; 404 body gains a trailing newline; the catch-all value has no leading slash
   (only the rewritten test sees it); Recovery logs a stack also for broken-pipe panics.
 - The Context travels in the request context; route handlers must keep using `c.Request` (the pointer the mux
   stamped) for `PathValue`. Late `Router.GET` after serving is allowed; duplicate patterns panic like gin.
 - Pattern conflicts: the conflict test in wave 1 guards the converted table; any new route with a literal first
   segment and a wildcard second one must stay out of the fallback mux's shape.
+
+### Progress
+- Wave 0 (461b5b2 on `plan-drop-gin`, branched from testing-001 at the wip commit): preflight build + vet green; no code change.
+- Wave 1 (merged, tree deefc83):
+  - `web-docs` (worktree-agent-a6ee302c268b2956c, ecc461b, merge a3c0df4; + inline 2192cd0 README route syntax):
+    CLAUDE.md, internal/web/README.md, copilot-instructions, audit-web/audit-db wording, leftovers script greps
+    `(gin\.)?H\{`. Review MERGE.
+  - `web-adapter` (worktree-agent-a53b76b27657aba0b, 780ffcf + 6229e06, merge deefc83): httpctx.go (408),
+    httprouter.go (418), httpclientip.go (70), httpx_test.go (1194; 30 TestHttpx*). Deviations accepted: status
+    line written late like gin (WriteHeaderNow), Redirect writes the header at once, the mux's own clean-path
+    slash redirect counts as a miss so the router's TSR step answers 301/307 and a fallback exact match wins,
+    SecureHeaders redirect uses URL.RequestURI(), RouteGroup.Use added, 137 live routes (the plan's 138 counted
+    a commented-out line). Review MERGE AFTER FIXES: MAJOR (security) multipart temp files were never deleted
+    because the request copy carried the parsed form → RemoveAll in a defer + test; minors: Hijack on the writer
+    wrapper, AccessLog line in a defer so panics get their line. Notes for wave 2: register
+    `router.Use(AccessLog(), Recovery())`; vet now checks `c.String` like Printf (three calls need "%s");
+    a bare NewRouter trusts no proxy; GET on a two-segment POST-only path 301s to the slash form (as gin did).
+- Wave 2 (merged, tree 6570e9d): `web-port` (worktree-agent-ac34f24f6834e5ae1, 4e724dc + 2775814 + 05d9aba +
+  a482b90, merge 9963851): 50 files, +484/−918; all 41 handler files converted by type substitution (the reviewer
+  diffed each against a mechanically converted base copy: no semantic change beyond the listed dead-code removals,
+  three "%s" vet fixes and comment rewording); route table in ServeMux syntax identical to the adapter's test
+  table (131 main + 6 fallback); chain AccessLog → Recovery → trackInFlight → SecureHeaders → ReverseProxy →
+  Bot; TestAdfOptRawPathParams deleted (TestHttpxPathValues covers the same 12 targets); go.mod requires 38 → 11,
+  go.sum 105 → 26 lines; cmd/web third-party deps now only go-sqlite3 and x/*. Review MERGE AFTER FIXES: MAJOR
+  (`GET /login/` and 14 other slashed main-mux paths landed in the section fallback instead of the 301 to the
+  slashless route gin gave) fixed in the adapter (a482b90: slash-removal redirect probes the main mux before the
+  fallback; tests in httpx_test.go and w1_server_test.go, failing without the fix). Inline after the merge: stale
+  comment in internal/models/models.go (6570e9d). Unlisted behaviour differences named in the merge message:
+  unknown one-segment paths answer 405 to non-GET methods (the fallback `/{section}` matches them); 404
+  Content-Type now carries charset=utf-8. scripts/test-web-leftovers.sh ran green (16/0) in the worktree with
+  its own scratch root.
+
+### Verification (0588d9d)
+- Verifier PASS. Full checks green on 6570e9d (31 packages under race, 0 gin references, go.mod 11 requires);
+  web + cmd/web race tests 61.5 s / 3.5 s; cmd/web third-party deps only go-sqlite3, x/crypto, x/net, x/text;
+  build/webserver 33.1 MB (gin base: 48.9 MB).
+- End-to-end on ./data-test-dropgin (rslight sample, 536 groups / 24 with messages) on 127.0.0.1:18991 and, for
+  comparison, a build of the pre-port base dcdee8f on 18992 (worktree /tank0/claude/trees/go-pugleaf/verify-dropgin-base):
+  37 anonymous URLs compared on status, Location and security headers; the only differences are the intended
+  ones (405+Allow for POST /groups and POST /nonexistent; HEAD on GET routes 200; redirects carry the security
+  headers; 404 body newline + charset; `//groups` and `/a/../groups` 307 to the cleaned path instead of gin's
+  protocol-relative 301 / 404). HTML page lengths identical; API JSON bodies byte-identical. Register (first user =
+  admin), login (2.1 s loginDelay), logout Sec-Fetch-Site rules, admin pages, group/article/thread-tree/section
+  pages, API 401/200/405, /aichat/clear/all (FullPath) all as expected; CrossOriginProtection still 403s a
+  cross-site POST. Access log: one `[WEB]:` line per routed request, 0 panics; gin had not logged its slash
+  redirects. SIGINT → exit 0 with "Graceful shutdown completed" on both servers. scripts/test-web-leftovers.sh on
+  18993: 16/0, 0 races. No leftover processes.
+- Pre-existing, identical on the gin base, not part of this plan: `GET /static` answers 301 to itself (the
+  reserved-name redirect in sectionPage, web_sectionsPage.go:60-67, loops); `GET /admin?tab=apitokens` returns
+  500 once a token exists (`admin_apitokens.html:96` uses `.TokenHash`, which `database.APIToken` lacks; since
+  ab3a497). The default BadBots list blocks the curl User-Agent (expected).
+
+### Body cap (after the verification, user request 2026-10-17)
+- 7bc21b1 caps request bodies (1 MiB, ParseForm instead of ParseMultipartForm, 413/415 before the route runs,
+  multipart temp cleanup gone); review (opus): no blocker, 1 major-ish (the raise applied to every route) + 3 minor
+  → c453c36 (per-route cap `SetRouteMaxBodyBytes` for POST /SitePostSubmit only, factor 6, every multipart/*,
+  GET test) and 9086a5b (duplicate pattern across muxes panics, rawBody comment); re-review: MERGE. Full checks
+  green on c453c36 (31 packages under race, known bugs only T-nntp-article-1); web + cmd/web rerun on 9086a5b.
+  Live on 127.0.0.1:18994 against ./data-test-dropgin: startup line `Request body cap: 1048576 bytes
+  (/SitePostSubmit: 1048576 bytes)`, multipart → 415, 2 MiB form → 413 on /login and /SitePostSubmit, normal
+  forms unchanged, 0 temp files, SIGINT exit 0.
+
+### Pre-existing web bugs (user request 2026-10-17, "fix these")
+- b788b2c: sectionPage answers 404 for a reserved first segment (knownNonSectionPaths) instead of a 301 to itself
+  (GET /static looped); the four /api base paths redirect to /SiteHelp (/help never had a route);
+  admin_apitokens.html reads `.APIToken` (the stored hash) instead of the missing `.TokenHash`, so the tokens tab
+  renders again. Tests TestW1ServerReservedSectionNames, TestW1ServerAdminAPITokensTab. Review (opus): MERGE, 3 minor
+  → 4d299a2: create/update section refuse reserved names, stale /help mentions. Full checks green on b788b2c
+  (31 packages, known bugs only T-nntp-article-1); web + cmd/web rerun on 4d299a2. Live: /static 404, /api* 301
+  /SiteHelp, /SiteHelp 200.
+

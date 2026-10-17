@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -67,16 +66,16 @@ func lo2ServerCaptureLog(t *testing.T) *lo2ServerLogBuf {
 }
 
 // lo2ServerClientIPEngine builds an engine whose only route reports the resolved client IP.
-func lo2ServerClientIPEngine(addrs, header string) *gin.Engine {
-	r := gin.New()
+func lo2ServerClientIPEngine(addrs, header string) *Router {
+	r := NewRouter()
 	s := &WebServer{trustedProxyNets: configureTrustedProxiesWithHeader(r, addrs, header)}
 	r.Use(s.ReverseProxyMiddleware())
-	r.GET("/", func(c *gin.Context) { c.String(http.StatusOK, c.ClientIP()) })
+	r.GET("/", func(c *Context) { c.String(http.StatusOK, "%s", c.ClientIP()) })
 	return r
 }
 
 // lo2ServerClientIP serves one request and returns the client IP the engine resolved.
-func lo2ServerClientIP(engine *gin.Engine, peer string, header map[string]string) string {
+func lo2ServerClientIP(engine *Router, peer string, header map[string]string) string {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = peer
 	for k, v := range header {
@@ -93,7 +92,7 @@ func TestLo2ServerTrustedHeader(t *testing.T) {
 	realOnly := map[string]string{"X-Real-IP": "203.0.113.7"}
 	xffOnly := map[string]string{"X-Forwarded-For": "198.51.100.7"}
 
-	engines := map[string]*gin.Engine{
+	engines := map[string]*Router{
 		"":                lo2ServerClientIPEngine("", ""),
 		"X-Forwarded-For": lo2ServerClientIPEngine("", "X-Forwarded-For"),
 		"X-Real-IP":       lo2ServerClientIPEngine("", "X-Real-IP"),

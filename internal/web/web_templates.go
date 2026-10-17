@@ -10,8 +10,6 @@ import (
 	"reflect"
 	"strings"
 	"sync"
-
-	"github.com/gin-gonic/gin"
 )
 
 // templateDir is the cwd-relative directory all page templates are loaded from.
@@ -119,7 +117,7 @@ func templatePaths(names []string) []string {
 // writeTemplateSet loads the set (name, funcs, files under web/templates), executes exec into a
 // pooled buffer and, only when that succeeded, writes the page with status. On error nothing has
 // been written to the response.
-func writeTemplateSet(c *gin.Context, status int, name string, funcs template.FuncMap, exec string, data any, files ...string) error {
+func writeTemplateSet(c *Context, status int, name string, funcs template.FuncMap, exec string, data any, files ...string) error {
 	tmpl, err := loadTemplates(name, funcs, templatePaths(files)...)
 	if err != nil {
 		return fmt.Errorf("load templates %v: %w", files, err)
@@ -143,13 +141,13 @@ func writeTemplateSet(c *gin.Context, status int, name string, funcs template.Fu
 // renderPage renders "base.html" with the given template files (names inside web/templates,
 // base.html is added first) and writes it with status. A load or execute error is logged and
 // answered with the 500 error page; no partial page is ever written.
-func (s *WebServer) renderPage(c *gin.Context, status int, data any, files ...string) {
+func (s *WebServer) renderPage(c *Context, status int, data any, files ...string) {
 	s.renderTemplateSet(c, status, "page", nil, "base.html", data, append([]string{"base.html"}, files...)...)
 }
 
 // renderTemplateSet is renderPage for sets with another root template or a FuncMap. files are
 // names inside web/templates and must include the file that defines exec.
-func (s *WebServer) renderTemplateSet(c *gin.Context, status int, name string, funcs template.FuncMap, exec string, data any, files ...string) {
+func (s *WebServer) renderTemplateSet(c *Context, status int, name string, funcs template.FuncMap, exec string, data any, files ...string) {
 	if err := writeTemplateSet(c, status, name, funcs, exec, data, files...); err != nil {
 		log.Printf("[WEB]: renderTemplateSet: template error: %v", err)
 		s.renderError(c, http.StatusInternalServerError, "Template error", publicErrorDetail)

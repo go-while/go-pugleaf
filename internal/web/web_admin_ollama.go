@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/gin-gonic/gin"
 )
 
 const OllamaHostname = "ollama-proxy.local:21434"
@@ -42,7 +40,7 @@ type ProxyModel struct {
 // AI Model Management Functions
 
 // adminCreateAIModel handles AI model creation
-func (s *WebServer) adminCreateAIModel(c *gin.Context) {
+func (s *WebServer) adminCreateAIModel(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -103,7 +101,7 @@ func (s *WebServer) adminCreateAIModel(c *gin.Context) {
 }
 
 // adminUpdateAIModel handles AI model updates
-func (s *WebServer) adminUpdateAIModel(c *gin.Context) {
+func (s *WebServer) adminUpdateAIModel(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -170,7 +168,7 @@ func (s *WebServer) adminUpdateAIModel(c *gin.Context) {
 }
 
 // adminDeleteAIModel handles AI model deletion
-func (s *WebServer) adminDeleteAIModel(c *gin.Context) {
+func (s *WebServer) adminDeleteAIModel(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -205,7 +203,7 @@ func (s *WebServer) adminDeleteAIModel(c *gin.Context) {
 }
 
 // adminSyncOllamaModels handles the sync new models request
-func (s *WebServer) adminSyncOllamaModels(c *gin.Context) {
+func (s *WebServer) adminSyncOllamaModels(c *Context) {
 	log.Printf("DEBUG: adminSyncOllamaModels handler called")
 	if !s.requireAdminAuth(c) {
 		return

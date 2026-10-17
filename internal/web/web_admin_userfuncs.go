@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -29,7 +28,7 @@ func (s *WebServer) countActiveSessions() int64 {
 }
 
 // adminCreateUser handles user creation
-func (s *WebServer) adminCreateUser(c *gin.Context) {
+func (s *WebServer) adminCreateUser(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -142,7 +141,7 @@ func (s *WebServer) adminCreateUser(c *gin.Context) {
 }
 
 // adminUpdateUser handles user updates
-func (s *WebServer) adminUpdateUser(c *gin.Context) {
+func (s *WebServer) adminUpdateUser(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -242,7 +241,7 @@ func (s *WebServer) adminUpdateUser(c *gin.Context) {
 }
 
 // adminDeleteUser handles user deletion
-func (s *WebServer) adminDeleteUser(c *gin.Context) {
+func (s *WebServer) adminDeleteUser(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}

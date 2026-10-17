@@ -8,18 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-// SectionsHandler handles the main sections admin page
-func (s *WebServer) SectionsHandler(c *gin.Context) {
-	// This is handled by adminPage which includes sections data
-	s.adminPage(c)
-}
-
 // CreateSectionHandler handles creating a new section
-func (s *WebServer) CreateSectionHandler(c *gin.Context) {
+func (s *WebServer) CreateSectionHandler(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -36,6 +29,11 @@ func (s *WebServer) CreateSectionHandler(c *gin.Context) {
 	// Validate required fields
 	if name == "" || displayName == "" {
 		session.SetError("Section name and display name are required")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=sections")
+		return
+	}
+	if knownNonSectionPaths[name] {
+		session.SetError(fmt.Sprintf("'%s' is a reserved path and cannot be a section name", name))
 		c.Redirect(http.StatusSeeOther, "/admin?tab=sections")
 		return
 	}
@@ -90,7 +88,7 @@ func (s *WebServer) CreateSectionHandler(c *gin.Context) {
 }
 
 // UpdateSectionHandler handles updating an existing section
-func (s *WebServer) UpdateSectionHandler(c *gin.Context) {
+func (s *WebServer) UpdateSectionHandler(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -116,6 +114,11 @@ func (s *WebServer) UpdateSectionHandler(c *gin.Context) {
 	// Validate required fields
 	if name == "" || displayName == "" {
 		session.SetError("Section name and display name are required")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=sections")
+		return
+	}
+	if knownNonSectionPaths[name] {
+		session.SetError(fmt.Sprintf("'%s' is a reserved path and cannot be a section name", name))
 		c.Redirect(http.StatusSeeOther, "/admin?tab=sections")
 		return
 	}
@@ -170,7 +173,7 @@ func (s *WebServer) UpdateSectionHandler(c *gin.Context) {
 }
 
 // DeleteSectionHandler handles deleting a section
-func (s *WebServer) DeleteSectionHandler(c *gin.Context) {
+func (s *WebServer) DeleteSectionHandler(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -213,7 +216,7 @@ func (s *WebServer) DeleteSectionHandler(c *gin.Context) {
 }
 
 // AssignNewsgroupHandler handles assigning newsgroups to a section using pattern matching
-func (s *WebServer) AssignNewsgroupHandler(c *gin.Context) {
+func (s *WebServer) AssignNewsgroupHandler(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -346,7 +349,7 @@ func (s *WebServer) AssignNewsgroupHandler(c *gin.Context) {
 }
 
 // UnassignNewsgroupHandler handles removing a newsgroup from a section
-func (s *WebServer) UnassignNewsgroupHandler(c *gin.Context) {
+func (s *WebServer) UnassignNewsgroupHandler(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}

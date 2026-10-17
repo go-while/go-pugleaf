@@ -606,7 +606,7 @@ the live value.
 
 **Scenario:** `start := (page - 1) * pageSize` with no bound. The web handlers accept any `page > 1`
 (`web/web_hierarchiesPage.go:27-31`, `:67-71`). A page that makes the product wrap negative
-(`4611686018427387905` with page size 10) slices with a negative index and panics. gin Recovery
+(`4611686018427387905` with page size 10) slices with a negative index and panics. The router's Recovery middleware
 answers 500. This is the same class as LO:F15, in a file LO did not touch.
 
 **Evidence:** `TestZZAuditDBHierarchyCache`:

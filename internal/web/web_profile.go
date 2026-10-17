@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
@@ -24,7 +23,7 @@ type ProfilePageData struct {
 }
 
 // profilePage displays the user profile
-func (s *WebServer) profilePage(c *gin.Context) {
+func (s *WebServer) profilePage(c *Context) {
 	// Check authentication
 	session := s.getWebSession(c)
 	if session == nil {
@@ -75,7 +74,7 @@ func (s *WebServer) profilePage(c *gin.Context) {
 }
 
 // profileUpdate handles profile updates
-func (s *WebServer) profileUpdate(c *gin.Context) {
+func (s *WebServer) profileUpdate(c *Context) {
 	// Check authentication
 	session := s.getWebSession(c)
 	if session == nil {

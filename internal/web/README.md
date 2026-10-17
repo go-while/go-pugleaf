@@ -1,7 +1,13 @@
 # internal/web
 
-Gin web gateway for go-pugleaf: the public site, the JSON API under `/api/v1`, and the admin UI.
+net/http web gateway for go-pugleaf: the public site, the JSON API under `/api/v1`, and the admin UI.
 Started from `cmd/web`, which owns the process lifecycle; this package owns the HTTP surface.
+Routing, the request context and client-IP handling come from three in-package adapter files that replaced
+the former third-party web framework: `httprouter.go` (router on `net/http` ServeMux, middleware chain),
+`httpctx.go` (request/response context) and `httpclientip.go` (trusted-proxy client IP). The router caps every
+request body at 1 MiB (`Router.SetMaxBodyBytes`); only `POST /SitePostSubmit` gets its own cap, derived from
+`WebPostMaxArticleSize` (`SetRouteMaxBodyBytes`). A urlencoded form past the cap is answered 413 and any
+multipart body 415 before the route runs: there is no upload feature, so nothing is ever spooled to disk.
 
 For signatures and details use `go doc ./internal/web` — this file is a map, not an API reference.
 Deployment and operational behaviour (reverse proxy, sessions, CSRF, `-data`) live in
@@ -49,7 +55,7 @@ the cookie. The login lockout uses `users.login_attempt_at`, not `updated_at`.
 
 | File | Responsibility |
 |---|---|
-| `web_apiHandlers.go` | `/api/v1` handlers (groups, overview, article by number or message-id, threads, stats, article preview) and `requireAPIEnabled`; `getArticlePreview` also serves the web route `/groups/:group/articles/:articleNum/preview` (tree view), which works with the API disabled |
+| `web_apiHandlers.go` | `/api/v1` handlers (groups, overview, article by number or message-id, threads, stats, article preview) and `requireAPIEnabled`; `getArticlePreview` also serves the web route `/groups/{group}/articles/{articleNum}/preview` (tree view), which works with the API disabled |
 | `web_apitokens.go` | API token auth (`APIAuthRequired`) and buffered usage accounting |
 | `web_admin.go`, `web_adminPage.go` | admin page data and dashboard |
 | `web_admin_settings_unified.go` | the settings form: one entry per setting, with validator and success message |
