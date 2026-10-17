@@ -318,3 +318,20 @@ Leave `./data-test-mbox` for the user to delete.
   shared signatures; go.mod: `github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017083307-028f55355c84` and,
   pulled in by its go directive, `go 1.26.0` → `go 1.27.1` (toolchain go1.27.2 unchanged; README version text is
   the docs slice's job). Checks: gofmt empty, vet, build, `go test -race ./internal/processor/...` green.
+- Wave 1 (merged into plan-mbox-importer, tree 5d41f06):
+  - `mbox-docs-ci` (worktree-agent-aacb8d5c6b71c3b3e, ad37dbb + 6791fe0, merge 090ebe7): cmd README, build script,
+    top-level README (Go 1.27.1+, usage block, tool bullet), CLAUDE.md (25 tools, Checks list), both workflow
+    package lists (the workflows take Go from go.mod). Review MERGE AFTER FIXES: MAJOR (README named
+    fix-thread-activity as the repair for orphaned replies; now `recover-db -group NAME -rebuild-threads -force`),
+    minors (-group vs skips, .done rule wording, isBadDateLine bullet, input-error cases) fixed; cosmetic bullet
+    wording dropped.
+  - `mbox-inputs-rewrite` (worktree-agent-a2239281a94011e79, 4a3c2d6 + f4737c8, merge 5d41f06): inputs.go
+    (expandInputs, openSource plain/gz/zip/7z, eofReader/Unread, Close, markDone), article.go (readBody,
+    messageIDFromHeaders lax/strict, cleanHeadline, isBadDateLine, rewriteHead, firstNewsgroup, buildArticle),
+    47 KB of tests (~1.3 s). Dry read of the real sample: 2336 messages, 41 first groups, skips 2 no-msgid + 1
+    no-body, 0 near-misses. Review MERGE AFTER FIXES: MAJOR (markDone overwrote an existing .done; now refuses
+    with os.ErrExist) + minors (blank continuation counted as Subject/Date value; control-byte continuation
+    normalised to a space; 7z member matching now `-r` + upper-case patterns like the zip path; `cmd.WaitDelay`
+    10 s) fixed. Deferred to leftovers: a `.gz` with trailing zero padding ends in a read error and is never marked
+    done (multistream reads the padding as a broken header).
+  - Merged tree: gofmt empty, vet, build, `go test -race ./cmd/mbox-importer/... ./internal/processor/...` green.
