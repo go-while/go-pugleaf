@@ -160,3 +160,20 @@ Exported API list, test results for both repos, what could not move cleanly, eve
 all `--- PASS`, 0 FAIL, 0 SKIP; package ok in 164.8 s (under race, machine loaded). Full sorted list kept at
 `/tank0/efs/claude/tmp/claude-1000/-tank0-efs-GO-src-github-com-go-while-go-pugleaf/698bff14-0ada-4301-9aa4-caddf76f2a5b/scratchpad/nntp-baseline-keep.txt` for the migration comparison (also reproducible with the same command).
 
+
+### Wave 0 (kit main 9531e47)
+- Repo /tank0/efs/GO/src/github.com/go-while/nntp-testkit initialised on `main`: go.mod (go 1.22), LICENSE, root
+  package `testkit` (Deadline/NNTP_TEST_DEADLINE), doc.go contracts, conformance stub, README skeleton.
+- go-pugleaf: integration branch `plan-nntp-testkit` from testing-001 (plan moved to wip, 1ae9c51).
+
+### Wave 1 (kit main 464c1e8)
+- `store` (worktree /tank0/claude/trees/nntp-testkit/store, branch worktree-store, e2c2c7f + dfeb72a; review MERGE
+  with minors → generated ids indexed, empty-group id form, field/header mismatch panics, Group.Created/AddGroupAt,
+  SetPosting): merged a5d6ed4, doc.go 3ebf533.
+- `proc` (worktree .../nntp-testkit/proc, worktree-proc, 73b76c2 + 79dfe21; review MERGE with minors → relative Path
+  made absolute, bounded Wait, probe within the limit + QUIT, test cleanup): merged d953582, doc.go 6331411.
+- `client` (worktree .../nntp-testkit/client, worktree-client, fbf13eb + 4202a8f; review MERGE AFTER FIXES →
+  ExpectNoPending never consumes and restores the deadline, partial last line → NoTerminator, DialWith/WithTB,
+  2 MiB line test): merged, doc.go 464c1e8.
+- Kit checks on 464c1e8: gofmt empty, vet, `go test -race -count=1 ./...` all ok. Wave 2 runs fakeserver-core
+  alone (the store handler needs its Conn to compile tests); the handler and the README follow as wave 3.
