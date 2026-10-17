@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
 )
 
@@ -313,9 +312,8 @@ func TestW1AuthRequestCache(t *testing.T) {
 	_, userCookie := w0NewUser(t, false)
 	_ = admin
 
-	newCtx := func(cookie *http.Cookie) *gin.Context {
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	newCtx := func(cookie *http.Cookie) *Context {
+		c := NewTestContext(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 		if cookie != nil {
 			c.Request.AddCookie(cookie)
 		}
@@ -426,22 +424,22 @@ func TestW1AuthFlashPrune(t *testing.T) {
 
 // w1AuthGroupAccessEngine serves the two access helpers like the handlers that call them:
 // check access, then open the group DB.
-func w1AuthGroupAccessEngine() *gin.Engine {
-	r := gin.New()
-	r.GET("/api/:group", func(c *gin.Context) {
+func w1AuthGroupAccessEngine() *Router {
+	r := NewRouter()
+	r.GET("/api/{group}", func(c *Context) {
 		group := c.Param("group")
 		if !w0Srv.checkGroupAccessAPI(c, group) {
 			return
 		}
 		groupDB, err := w0Srv.DB.GetGroupDB(group)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
 			return
 		}
 		groupDB.Return()
 		c.String(http.StatusOK, "ok")
 	})
-	r.GET("/html/:group", func(c *gin.Context) {
+	r.GET("/html/{group}", func(c *Context) {
 		if !w0Srv.checkGroupAccess(c, c.Param("group")) {
 			return
 		}

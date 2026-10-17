@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 )
@@ -43,13 +42,13 @@ func TestW1ServerBotMiddlewareReleasesLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := gin.New()
+	r := NewRouter()
 	r.Use(w0Srv.BotDetectionMiddleware())
-	r.GET("/update", func(c *gin.Context) {
+	r.GET("/update", func(c *Context) {
 		// Takes BadBotsMutex.Lock and BadIPsMutex.Lock while the middleware is still on the stack
 		config.UpdateBadBots("x", false)
 		if err := config.UpdateBadIPs("", false); err != nil {
-			c.String(http.StatusInternalServerError, err.Error())
+			c.String(http.StatusInternalServerError, "%s", err.Error())
 			return
 		}
 		c.String(http.StatusOK, "ok")
@@ -81,9 +80,9 @@ func TestW1ServerBotPatternsLowercase(t *testing.T) {
 		t.Fatalf("Default_BadBots = %q, want [evilcrawler]", got)
 	}
 
-	r := gin.New()
+	r := NewRouter()
 	r.Use(w0Srv.BotDetectionMiddleware())
-	r.GET("/", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+	r.GET("/", func(c *Context) { c.String(http.StatusOK, "ok") })
 	for ua, want := range map[string]int{
 		"Mozilla/5.0 (compatible; EVILCRAWLER/2.1)": http.StatusForbidden,
 		"Mozilla/5.0 Firefox/130":                   http.StatusOK,
@@ -142,18 +141,18 @@ func TestW1ServerTrustedProxies(t *testing.T) {
 		RemoteAddr string
 		Host       string
 	}
-	newEngine := func(addrs string) *gin.Engine {
-		r := gin.New()
+	newEngine := func(addrs string) *Router {
+		r := NewRouter()
 		s := &WebServer{trustedProxyNets: configureTrustedProxies(r, addrs)}
 		r.Use(s.ReverseProxyMiddleware())
-		r.GET("/", func(c *gin.Context) {
+		r.GET("/", func(c *Context) {
 			v, _ := c.Get("is_https")
 			isHTTPS, _ := v.(bool)
 			c.JSON(http.StatusOK, result{c.ClientIP(), isHTTPS, c.Request.RemoteAddr, c.Request.Host})
 		})
 		return r
 	}
-	engines := map[string]*gin.Engine{
+	engines := map[string]*Router{
 		"":                                newEngine(""),
 		"10.9.9.9, 2001:db8::/32 bad/x ?": newEngine("10.9.9.9, 2001:db8::/32 bad/x ?"),
 	}

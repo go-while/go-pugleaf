@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 )
@@ -98,7 +97,7 @@ func TestLo1CoreShutdownCancelsInFlight(t *testing.T) {
 	srv := lo1CoreNewServer(t)
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
-	srv.Router.GET("/lo1core/block", func(c *gin.Context) {
+	srv.Router.GET("/lo1core/block", func(c *Context) {
 		close(started)
 		<-c.Request.Context().Done()
 		close(cancelled)
@@ -319,7 +318,7 @@ func TestLo1CoreTokenUsageDuringDrain(t *testing.T) {
 
 	started := make(chan struct{})
 	drainCode := make(chan int, 1)
-	srv.Router.GET("/lo1core/drain", func(c *gin.Context) {
+	srv.Router.GET("/lo1core/drain", func(c *Context) {
 		close(started)
 		// Stay in flight until Shutdown is draining, then make an authenticated API request
 		// from inside that window. tokenUsageDone closes once the usage flusher has done its
@@ -446,7 +445,7 @@ func TestLo1CoreFavicon(t *testing.T) {
 	if rec.Body.Len() == 0 {
 		t.Fatal("empty favicon body")
 	}
-	// Browsers and proxies probe the icon with HEAD, which gin does not answer from a GET route.
+	// Browsers and proxies probe the icon with HEAD; the explicit HEAD route must answer it.
 	req := httptest.NewRequest(http.MethodHead, "/favicon.ico", nil)
 	req.RemoteAddr = "192.0.2.10:1234"
 	head := httptest.NewRecorder()
