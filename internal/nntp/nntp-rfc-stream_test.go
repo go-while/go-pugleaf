@@ -5,7 +5,6 @@ package nntp
 // so the tests run through stmSession.
 
 import (
-	"bufio"
 	"fmt"
 	"net"
 	"strings"
@@ -13,11 +12,12 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/history"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // stmSession serves one connection of hs.S: commands in extra go to the new
 // handlers, everything else to the hardened dispatch (handleCommand).
-func stmSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConnection, args []string) error) *hClient {
+func stmSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConnection, args []string) error) *client.Conn {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -65,9 +65,9 @@ func stmSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConne
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: hDeadline}
+	c := hNewClient(t, conn, hDeadline)
 	t.Cleanup(func() { _ = conn.Close(); <-done })
-	if c.Greeting, err = c.readLine(); err != nil {
+	if c.Greeting, err = c.ReadLine(); err != nil {
 		t.Fatalf("greeting: %v", err)
 	}
 	return c
@@ -91,19 +91,19 @@ func stmExtra() map[string]func(cc *ClientConnection, args []string) error {
 
 // stmDial opens an stmSession and, when login is true, authenticates a fresh
 // active hUser with the given posting right (RFC 4643 §2.3: 381, then 281).
-func stmDial(t *testing.T, hs *hServer, login, posting bool) *hClient {
+func stmDial(t *testing.T, hs *hServer, login, posting bool) *client.Conn {
 	t.Helper()
 	c := stmSession(t, hs, stmExtra())
 	if !login {
 		return c
 	}
 	user, pass := hUser(t, posting, true)
-	code, line := c.cmd(t, "AUTHINFO USER %s", user)
-	if err := hExpectCode(code, line, 381); err != nil {
+	code, line := c.Cmd("AUTHINFO USER %s", user)
+	if err := client.ExpectCode(code, line, 381); err != nil {
 		t.Fatalf("AUTHINFO USER: %v", err)
 	}
-	code, line = c.cmd(t, "AUTHINFO PASS %s", pass)
-	if err := hExpectCode(code, line, 281); err != nil {
+	code, line = c.Cmd("AUTHINFO PASS %s", pass)
+	if err := client.ExpectCode(code, line, 281); err != nil {
 		t.Fatalf("AUTHINFO PASS: %v", err)
 	}
 	return c
@@ -112,7 +112,7 @@ func stmDial(t *testing.T, hs *hServer, login, posting bool) *hClient {
 // stmExpectID checks the code and that the reply's second word is id
 // (RFC 4644 §2.4.2: every CHECK reply carries the message-id).
 func stmExpectID(code int, line string, want int, id string) error {
-	if err := hExpectCode(code, line, want); err != nil {
+	if err := client.ExpectCode(code, line, want); err != nil {
 		return err
 	}
 	if f := strings.Fields(line); len(f) < 2 || f[1] != id {
@@ -135,53 +135,53 @@ func TestStmModeStream(t *testing.T) {
 	t.Run("processor", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
 		c := stmDial(t, hs, false, false)
-		code, line := c.cmd(t, "MODE STREAM")
-		if err := hExpectCode(code, line, 203); err != nil {
+		code, line := c.Cmd("MODE STREAM")
+		if err := client.ExpectCode(code, line, 203); err != nil {
 			t.Fatalf("MODE STREAM: %v", err)
 		}
-		code, line = c.cmd(t, "mode stream")
-		if err := hExpectCode(code, line, 203); err != nil {
+		code, line = c.Cmd("mode stream")
+		if err := client.ExpectCode(code, line, 203); err != nil {
 			t.Errorf("mode stream (lower case): %v", err)
 		}
-		code, line = c.cmd(t, "MODE STREAM extra")
-		if err := hExpectCode(code, line, 501); err != nil {
+		code, line = c.Cmd("MODE STREAM extra")
+		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Errorf("MODE STREAM extra: %v", err)
 		}
 		// MODE STREAM changes no state (§2.3.2): MODE READER answers as before.
-		code, line = c.cmd(t, "MODE READER")
-		if err := hExpectCode(code, line, 200); err != nil {
+		code, line = c.Cmd("MODE READER")
+		if err := client.ExpectCode(code, line, 200); err != nil {
 			t.Errorf("MODE READER: %v", err)
 		}
-		code, line = c.cmd(t, "MODE")
-		if err := hExpectCode(code, line, 501); err != nil {
+		code, line = c.Cmd("MODE")
+		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Errorf("MODE without argument: %v", err)
 		}
 	})
 	t.Run("no-processor", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
 		c := stmDial(t, hs, false, false)
-		code, line := c.cmd(t, "MODE STREAM")
-		if err := hExpectCode(code, line, 501); err != nil {
+		code, line := c.Cmd("MODE STREAM")
+		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Fatalf("MODE STREAM: %v", err)
 		}
-		code, line = c.cmd(t, "MODE READER")
-		if err := hExpectCode(code, line, 201); err != nil {
+		code, line = c.Cmd("MODE READER")
+		if err := client.ExpectCode(code, line, 201); err != nil {
 			t.Errorf("MODE READER: %v", err)
 		}
 	})
 	t.Run("non-posting-user", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
 		c := stmDial(t, hs, true, false)
-		code, line := c.cmd(t, "MODE STREAM")
-		if err := hExpectCode(code, line, 502); err != nil {
+		code, line := c.Cmd("MODE STREAM")
+		if err := client.ExpectCode(code, line, 502); err != nil {
 			t.Fatalf("MODE STREAM: %v", err)
 		}
 	})
 	t.Run("posting-user", func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
 		c := stmDial(t, hs, true, true)
-		code, line := c.cmd(t, "MODE STREAM")
-		if err := hExpectCode(code, line, 203); err != nil {
+		code, line := c.Cmd("MODE STREAM")
+		if err := client.ExpectCode(code, line, 203); err != nil {
 			t.Fatalf("MODE STREAM: %v", err)
 		}
 	})
@@ -206,14 +206,14 @@ func TestStmCheck(t *testing.T) {
 
 	t.Run("unauthenticated", func(t *testing.T) {
 		c := stmDial(t, hs, false, false)
-		code, line := c.cmd(t, "CHECK %s", idUnauth)
+		code, line := c.Cmd("CHECK %s", idUnauth)
 		if err := stmExpectID(code, line, 480, idUnauth); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("non-posting", func(t *testing.T) {
 		c := stmDial(t, hs, true, false)
-		code, line := c.cmd(t, "CHECK %s", idReader)
+		code, line := c.Cmd("CHECK %s", idReader)
 		if err := stmExpectID(code, line, 502, idReader); err != nil {
 			t.Fatal(err)
 		}
@@ -226,26 +226,26 @@ func TestStmCheck(t *testing.T) {
 		}{
 			{idPass, 238}, {idDupes, 438}, {idRetry, 431}, {idError, 431},
 		} {
-			code, line := c.cmd(t, "CHECK %s", tc.id)
+			code, line := c.Cmd("CHECK %s", tc.id)
 			if err := stmExpectID(code, line, tc.want, tc.id); err != nil {
 				t.Errorf("CHECK %s: %v", tc.id, err)
 			}
 		}
 		// invalid message-id: 438 <arg>, no history lookup
-		code, line := c.cmd(t, "CHECK not-an-id")
+		code, line := c.Cmd("CHECK not-an-id")
 		if err := stmExpectID(code, line, 438, "not-an-id"); err != nil {
 			t.Errorf("CHECK not-an-id: %v", err)
 		}
-		code, line = c.cmd(t, "CHECK")
-		if err := hExpectCode(code, line, 501); err != nil {
+		code, line = c.Cmd("CHECK")
+		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Errorf("CHECK without argument: %v", err)
 		}
-		code, line = c.cmd(t, "CHECK %s %s", idPass, idDupes)
-		if err := hExpectCode(code, line, 501); err != nil {
+		code, line = c.Cmd("CHECK %s %s", idPass, idDupes)
+		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Errorf("CHECK with two arguments: %v", err)
 		}
 		// the connection is still in sync
-		code, line = c.cmd(t, "CHECK %s", idPass)
+		code, line = c.Cmd("CHECK %s", idPass)
 		if err := stmExpectID(code, line, 238, idPass); err != nil {
 			t.Errorf("CHECK after the errors: %v", err)
 		}
@@ -254,12 +254,12 @@ func TestStmCheck(t *testing.T) {
 		hs0 := newTestServer(t, hServerOpts{})
 		c := stmDial(t, hs0, false, false)
 		id := hMessageID(g, 7)
-		code, line := c.cmd(t, "CHECK %s", id)
+		code, line := c.Cmd("CHECK %s", id)
 		if err := stmExpectID(code, line, 500, id); err != nil {
 			t.Errorf("CHECK: %v", err)
 		}
-		code, line = c.cmd(t, "CHECK")
-		if err := hExpectCode(code, line, 500); err != nil {
+		code, line = c.Cmd("CHECK")
+		if err := client.ExpectCode(code, line, 500); err != nil {
 			t.Errorf("CHECK without argument: %v", err)
 		}
 	})
@@ -287,11 +287,11 @@ func TestStmPipelined(t *testing.T) {
 		b.WriteString("CHECK " + ids[i] + "\r\n")
 	}
 	delays := hs.S.ErrorDelayCount()
-	if err := c.send(b.String()); err != nil {
+	if err := c.Send(b.String()); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	for i, id := range ids {
-		code, line, err := c.readStatus()
+		code, line, err := c.ReadStatus()
 		if err != nil {
 			t.Fatalf("reply %d: %v (%q)", i, err, line)
 		}
@@ -316,7 +316,7 @@ func TestStmCheckThenTakethis(t *testing.T) {
 
 	g := hGroupName("rc4.take")
 	id := hMessageID(g, 1)
-	code, line := c.cmd(t, "CHECK %s", id)
+	code, line := c.Cmd("CHECK %s", id)
 	if err := stmExpectID(code, line, 238, id); err != nil {
 		t.Fatalf("CHECK: %v", err)
 	}
@@ -329,10 +329,10 @@ func TestStmCheckThenTakethis(t *testing.T) {
 		"\r\n" +
 		"body\r\n" +
 		".\r\n"
-	if err := c.send("TAKETHIS " + id + "\r\n" + article); err != nil {
+	if err := c.Send("TAKETHIS " + id + "\r\n" + article); err != nil {
 		t.Fatalf("send TAKETHIS: %v", err)
 	}
-	code, line, err := c.readStatus()
+	code, line, err := c.ReadStatus()
 	if err != nil {
 		t.Fatalf("TAKETHIS reply: %v (%q)", err, line)
 	}

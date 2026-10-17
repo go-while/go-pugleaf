@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // stlsWriteCert writes a self-signed ECDSA P-256 certificate for
@@ -100,7 +101,7 @@ func stlsNewServer(t *testing.T, certFile, keyFile string, proc ArticleProcessor
 
 // stlsSession serves one connection of hs.S: commands in extra go to the new
 // handlers, everything else to the hardened dispatch (handleCommand).
-func stlsSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConnection, args []string) error) *hClient {
+func stlsSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConnection, args []string) error) *client.Conn {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -148,9 +149,9 @@ func stlsSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConn
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: hDeadline}
+	c := hNewClient(t, conn, hDeadline)
 	t.Cleanup(func() { _ = conn.Close(); <-done })
-	if c.Greeting, err = c.readLine(); err != nil {
+	if c.Greeting, err = c.ReadLine(); err != nil {
 		t.Fatalf("greeting: %v", err)
 	}
 	return c
@@ -163,7 +164,7 @@ var stlsExtra = map[string]func(cc *ClientConnection, args []string) error{
 
 // stlsUpgrade runs the client side of the TLS handshake on c and switches c to
 // the TLS connection. It returns the peer's leaf certificate (DER).
-func stlsUpgrade(t *testing.T, c *hClient) []byte {
+func stlsUpgrade(t *testing.T, c *client.Conn) []byte {
 	t.Helper()
 	if c.R.Buffered() != 0 {
 		t.Fatalf("client has %d unread bytes before the handshake", c.R.Buffered())
@@ -183,10 +184,10 @@ func stlsUpgrade(t *testing.T, c *hClient) []byte {
 }
 
 // stlsExpect fails the test unless the command answers with want.
-func stlsExpect(t *testing.T, c *hClient, want int, format string, args ...interface{}) string {
+func stlsExpect(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) string {
 	t.Helper()
-	code, line := c.cmd(t, format, args...)
-	if err := hExpectCode(code, line, want); err != nil {
+	code, line := c.Cmd(format, args...)
+	if err := client.ExpectCode(code, line, want); err != nil {
 		t.Fatalf("%q: %v", format, err)
 	}
 	return line
@@ -279,20 +280,20 @@ func TestStlsPipelinedDiscarded(t *testing.T) {
 	g := hGroup(t, "rc5.pipe", 1, nil)
 	c := stlsSession(t, hs, stlsExtra)
 
-	if err := c.send("STARTTLS\r\nGROUP " + g + "\r\n"); err != nil {
+	if err := c.Send("STARTTLS\r\nGROUP " + g + "\r\n"); err != nil {
 		t.Fatal(err)
 	}
-	code, line, err := c.readStatus()
+	code, line, err := c.ReadStatus()
 	if err != nil {
 		t.Fatalf("STARTTLS reply: %v (%q)", err, line)
 	}
-	if err := hExpectCode(code, line, 382); err != nil {
+	if err := client.ExpectCode(code, line, 382); err != nil {
 		t.Fatal(err)
 	}
 	stlsUpgrade(t, c)
 	// The pipelined GROUP must not have run: the first reply over TLS is 101.
 	stlsExpect(t, c, 101, "CAPABILITIES")
-	_ = c.readDotLines(t)
+	_ = c.ReadDotLines()
 	stlsExpect(t, c, 412, "STAT") // and no group was selected
 }
 
@@ -302,7 +303,7 @@ func TestStlsHandshakeFailure(t *testing.T) {
 	c := stlsSession(t, hs, stlsExtra)
 
 	stlsExpect(t, c, 382, "STARTTLS")
-	if err := c.send("GARBAGE\r\n"); err != nil {
+	if err := c.Send("GARBAGE\r\n"); err != nil {
 		t.Fatal(err)
 	}
 	// The server closes the connection without a reply; a TLS alert record may
@@ -322,7 +323,7 @@ func TestStlsHandshakeFailure(t *testing.T) {
 	}
 	// The server still accepts new connections.
 	nc := hs.dial(t)
-	if code, err := hParseCode(nc.Greeting); err != nil || (code != 200 && code != 201) {
+	if code, err := client.ParseCode(nc.Greeting); err != nil || (code != 200 && code != 201) {
 		t.Fatalf("greeting after a failed handshake: %q (%v)", nc.Greeting, err)
 	}
 }

@@ -1,12 +1,13 @@
 package nntp
 
 import (
-	"bufio"
 	"fmt"
 	"net"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // Tests for slice rfc-lists of plan nntp-rfc-commands (prefix lst): LIST ACTIVE /
@@ -15,7 +16,7 @@ import (
 
 // lstSession serves one connection of hs.S: commands in extra go to the new
 // handlers, everything else to the hardened dispatch (handleCommand).
-func lstSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConnection, args []string) error) *hClient {
+func lstSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConnection, args []string) error) *client.Conn {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -63,9 +64,9 @@ func lstSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConne
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: hDeadline}
+	c := hNewClient(t, conn, hDeadline)
 	t.Cleanup(func() { _ = conn.Close(); <-done })
-	if c.Greeting, err = c.readLine(); err != nil {
+	if c.Greeting, err = c.ReadLine(); err != nil {
 		t.Fatalf("greeting: %v", err)
 	}
 	return c
@@ -89,17 +90,17 @@ func lstExtra() map[string]func(cc *ClientConnection, args []string) error {
 
 // lstCmd sends a command and returns the status code, the status line and, when the
 // code is want (a multi-line reply), the data block.
-func lstCmd(t *testing.T, c *hClient, want int, format string, args ...interface{}) (int, string, []string) {
+func lstCmd(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) (int, string, []string) {
 	t.Helper()
-	code, line := c.cmd(t, format, args...)
+	code, line := c.Cmd(format, args...)
 	if code != want {
 		return code, line, nil
 	}
-	return code, line, c.readDotLines(t)
+	return code, line, c.ReadDotLines()
 }
 
 // lstMustList runs a command that must answer want with a data block.
-func lstMustList(t *testing.T, c *hClient, want int, format string, args ...interface{}) []string {
+func lstMustList(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) []string {
 	t.Helper()
 	code, line, lines := lstCmd(t, c, want, format, args...)
 	if code != want {
@@ -142,7 +143,7 @@ func TestLstListWildmat(t *testing.T) {
 	c := lstSession(t, hs, lstExtra())
 
 	lines := lstMustList(t, c, 215, "LIST ACTIVE rc2.lw.%s.*", tok)
-	if err := hExpectLines(lstNames(lines), []string{a, b}); err != nil {
+	if err := client.ExpectLines(lstNames(lines), []string{a, b}); err != nil {
 		t.Errorf("LIST ACTIVE rc2.lw.%s.*: %v", tok, err)
 	}
 	if lstLineOf(lines, o) != "" {
@@ -150,22 +151,22 @@ func TestLstListWildmat(t *testing.T) {
 	}
 
 	lines = lstMustList(t, c, 215, "list active rc2.lw.%s.*", tok)
-	if err := hExpectLines(lstNames(lines), []string{a, b}); err != nil {
+	if err := client.ExpectLines(lstNames(lines), []string{a, b}); err != nil {
 		t.Errorf("lower-case keyword: %v", err)
 	}
 
 	lines = lstMustList(t, c, 215, "LIST NEWSGROUPS %s", a)
-	if err := hExpectLines(lines, []string{a + " harness group " + a}); err != nil {
+	if err := client.ExpectLines(lines, []string{a + " harness group " + a}); err != nil {
 		t.Errorf("LIST NEWSGROUPS %s: %v", a, err)
 	}
 
 	lines = lstMustList(t, c, 215, "LIST ACTIVE rc2.lw.%s.*,!*.b.*", tok)
-	if err := hExpectLines(lstNames(lines), []string{a}); err != nil {
+	if err := client.ExpectLines(lstNames(lines), []string{a}); err != nil {
 		t.Errorf("LIST ACTIVE rc2.lw.%s.*,!*.b.*: %v", tok, err)
 	}
 
 	lines = lstMustList(t, c, 215, "LIST NEWSGROUPS rc2.*.%s*,!rc2.lw.*", tok)
-	if err := hExpectLines(lstNames(lines), []string{o}); err != nil {
+	if err := client.ExpectLines(lstNames(lines), []string{o}); err != nil {
 		t.Errorf("LIST NEWSGROUPS rc2.*.%s*,!rc2.lw.*: %v", tok, err)
 	}
 
@@ -176,14 +177,14 @@ func TestLstListWildmat(t *testing.T) {
 
 	for _, bad := range []string{"LIST ACTIVE a,,b", "LIST NEWSGROUPS [ab]", "LIST ACTIVE a,", "LIST NEWSGROUPS !"} {
 		code, line, _ := lstCmd(t, c, 215, "%s", bad)
-		if err := hExpectCode(code, line, 501); err != nil {
+		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Errorf("%s: %v", bad, err)
 		}
 	}
 
 	// The session still works after the errors.
 	lines = lstMustList(t, c, 215, "LIST ACTIVE %s", b)
-	if err := hExpectLines(lstNames(lines), []string{b}); err != nil {
+	if err := client.ExpectLines(lstNames(lines), []string{b}); err != nil {
 		t.Errorf("LIST ACTIVE %s: %v", b, err)
 	}
 
@@ -201,7 +202,7 @@ func TestLstListWildmat(t *testing.T) {
 	delays = hd.S.ErrorDelayCount()
 	start := time.Now()
 	code, line, _ := lstCmd(t, cd, 215, "LIST ACTIVE a,,b")
-	if err := hExpectCode(code, line, 501); err != nil {
+	if err := client.ExpectCode(code, line, 501); err != nil {
 		t.Error(err)
 	}
 	if d := time.Since(start); d < delay {
@@ -241,18 +242,18 @@ func TestLstMatchesList(t *testing.T) {
 				t.Errorf("plain LIST ACTIVE line of %s: %q, want %q", g, got, want)
 			}
 			one := lstMustList(t, c, 215, "LIST ACTIVE %s", g)
-			if err := hExpectLines(one, []string{lstLineOf(plain, g)}); err != nil {
+			if err := client.ExpectLines(one, []string{lstLineOf(plain, g)}); err != nil {
 				t.Errorf("LIST ACTIVE %s: %v", g, err)
 			}
 			star := lstMustList(t, c, 215, "LIST ACTIVE *")
-			if err := hExpectLines(star, plain); err != nil {
+			if err := client.ExpectLines(star, plain); err != nil {
 				t.Errorf("LIST ACTIVE * vs LIST ACTIVE: %v", err)
 			}
 
 			plainNG := lstMustList(t, c, 215, "LIST NEWSGROUPS")
 			for _, name := range []string{g, gt} {
 				one := lstMustList(t, c, 215, "LIST NEWSGROUPS %s", name)
-				if err := hExpectLines(one, []string{lstLineOf(plainNG, name)}); err != nil {
+				if err := client.ExpectLines(one, []string{lstLineOf(plainNG, name)}); err != nil {
 					t.Errorf("LIST NEWSGROUPS %s: %v", name, err)
 				}
 			}
@@ -260,7 +261,7 @@ func TestLstMatchesList(t *testing.T) {
 				t.Errorf("LIST NEWSGROUPS line of %s: %q, want %q", gt, got, want)
 			}
 			starNG := lstMustList(t, c, 215, "LIST NEWSGROUPS *")
-			if err := hExpectLines(starNG, plainNG); err != nil {
+			if err := client.ExpectLines(starNG, plainNG); err != nil {
 				t.Errorf("LIST NEWSGROUPS * vs LIST NEWSGROUPS: %v", err)
 			}
 		})
@@ -320,7 +321,7 @@ func TestLstNewGroups(t *testing.T) {
 				"NEWGROUPS 20260101 240000 GMT",
 			} {
 				code, line, _ := lstCmd(t, c, 231, "%s", bad)
-				if err := hExpectCode(code, line, 501); err != nil {
+				if err := client.ExpectCode(code, line, 501); err != nil {
 					t.Errorf("%s: %v", bad, err)
 				}
 			}
@@ -342,7 +343,7 @@ func TestLstNewGroups(t *testing.T) {
 		delays = hd.S.ErrorDelayCount()
 		start := time.Now()
 		code, line, _ := lstCmd(t, cd, 231, "%s", bad)
-		if err := hExpectCode(code, line, 501); err != nil {
+		if err := client.ExpectCode(code, line, 501); err != nil {
 			t.Error(err)
 		}
 		if d := time.Since(start); d < delay {

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // rfcWriteCert writes a self-signed ECDSA P-256 certificate for
@@ -121,20 +122,20 @@ func rfcNewCertServer(t *testing.T, certFile, keyFile string, tlsCfg *tls.Config
 }
 
 // rfcExpect fails the test unless the command answers with want; it returns the status line.
-func rfcExpect(t *testing.T, c *hClient, want int, format string, args ...interface{}) string {
+func rfcExpect(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) string {
 	t.Helper()
-	code, line := c.cmd(t, format, args...)
-	if err := hExpectCode(code, line, want); err != nil {
+	code, line := c.Cmd(format, args...)
+	if err := client.ExpectCode(code, line, want); err != nil {
 		t.Fatalf("%q: %v", format, err)
 	}
 	return line
 }
 
 // rfcCaps runs CAPABILITIES (101 + list) and returns the capability lines.
-func rfcCaps(t *testing.T, c *hClient) []string {
+func rfcCaps(t *testing.T, c *client.Conn) []string {
 	t.Helper()
 	rfcExpect(t, c, 101, "CAPABILITIES")
-	return c.readDotLines(t)
+	return c.ReadDotLines()
 }
 
 // rfcHasLine reports whether caps contains exactly line.
@@ -159,7 +160,7 @@ func rfcHasLabel(caps []string, label string) bool {
 }
 
 // rfcAuth runs AUTHINFO USER/PASS and requires 381 then 281 (RFC 4643 §2.3).
-func rfcAuth(t *testing.T, c *hClient, user, pass string) {
+func rfcAuth(t *testing.T, c *client.Conn, user, pass string) {
 	t.Helper()
 	rfcExpect(t, c, 381, "AUTHINFO USER %s", user)
 	rfcExpect(t, c, 281, "AUTHINFO PASS %s", pass)
@@ -167,14 +168,14 @@ func rfcAuth(t *testing.T, c *hClient, user, pass string) {
 
 // rfcUpgrade runs the client side of the TLS handshake after a 382 and switches
 // c to the TLS connection. It returns the *tls.Conn.
-func rfcUpgrade(t *testing.T, c *hClient) *tls.Conn {
+func rfcUpgrade(t *testing.T, c *client.Conn) *tls.Conn {
 	t.Helper()
 	return rfcUpgradeOver(t, c, c.Conn, 0)
 }
 
 // rfcUpgradeOver is rfcUpgrade with the TLS layer on raw (c.Conn or a wrapper of
 // it) and an optional maximum TLS version (0: the default).
-func rfcUpgradeOver(t *testing.T, c *hClient, raw net.Conn, maxVersion uint16) *tls.Conn {
+func rfcUpgradeOver(t *testing.T, c *client.Conn, raw net.Conn, maxVersion uint16) *tls.Conn {
 	t.Helper()
 	if c.R.Buffered() != 0 {
 		t.Fatalf("client has %d unread bytes before the handshake", c.R.Buffered())
@@ -257,18 +258,18 @@ func TestRfcDispatch(t *testing.T) {
 	t.Run("NEWGROUPS", func(t *testing.T) {
 		c := plain.dial(t)
 		rfcExpect(t, c, 231, "NEWGROUPS 20991231 235959 GMT")
-		if lines := c.readDotLines(t); len(lines) != 0 {
+		if lines := c.ReadDotLines(); len(lines) != 0 {
 			t.Fatalf("NEWGROUPS in the future listed %q, want an empty block", lines)
 		}
 	})
 	t.Run("LIST-ACTIVE-wildmat", func(t *testing.T) {
 		c := plain.dial(t)
 		rfcExpect(t, c, 215, "LIST ACTIVE rc6.none.*")
-		if lines := c.readDotLines(t); len(lines) != 0 {
+		if lines := c.ReadDotLines(); len(lines) != 0 {
 			t.Fatalf("LIST ACTIVE rc6.none.* listed %q, want an empty block", lines)
 		}
 		rfcExpect(t, c, 215, "LIST ACTIVE %s", g)
-		if lines := c.readDotLines(t); len(lines) != 1 || !strings.HasPrefix(lines[0], g+" ") {
+		if lines := c.ReadDotLines(); len(lines) != 1 || !strings.HasPrefix(lines[0], g+" ") {
 			t.Fatalf("LIST ACTIVE %s listed %q, want exactly that group", g, lines)
 		}
 	})
@@ -276,7 +277,7 @@ func TestRfcDispatch(t *testing.T) {
 		// without a wildmat the hardened handleList answers with every active group
 		c := plain.dial(t)
 		rfcExpect(t, c, 215, "LIST ACTIVE")
-		lines := c.readDotLines(t)
+		lines := c.ReadDotLines()
 		found := false
 		for _, l := range lines {
 			found = found || strings.HasPrefix(l, g+" ")
@@ -288,14 +289,14 @@ func TestRfcDispatch(t *testing.T) {
 	t.Run("LIST-OVERVIEW.FMT", func(t *testing.T) {
 		c := plain.dial(t)
 		rfcExpect(t, c, 215, "LIST OVERVIEW.FMT")
-		if err := hExpectLines(c.readDotLines(t), rfcListOverviewFmt); err != nil {
+		if err := client.ExpectLines(c.ReadDotLines(), rfcListOverviewFmt); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("LIST-HEADERS", func(t *testing.T) {
 		c := plain.dial(t)
 		rfcExpect(t, c, 215, "LIST HEADERS")
-		if err := hExpectLines(c.readDotLines(t), rfcListHeaders); err != nil {
+		if err := client.ExpectLines(c.ReadDotLines(), rfcListHeaders); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -359,13 +360,13 @@ func TestRfcCapabilities(t *testing.T) {
 	base := []string{rfcCapLIST, "OVER MSGID", "HDR"}
 	cases := []struct {
 		name    string
-		session func(t *testing.T) *hClient // returns the client in the state of the row
+		session func(t *testing.T) *client.Conn // returns the client in the state of the row
 		present []string
 		never   []string
 	}{
 		{
 			name: "plaintext-before-auth-processor-cert",
-			session: func(t *testing.T) *hClient {
+			session: func(t *testing.T) *client.Conn {
 				return rfcNewCertServer(t, certFile, keyFile, nil, &hFakeProcessor{}).dial(t)
 			},
 			present: append(append([]string{}, base...), "STREAMING", "STARTTLS"),
@@ -373,7 +374,7 @@ func TestRfcCapabilities(t *testing.T) {
 		},
 		{
 			name: "plaintext-before-auth-no-cert",
-			session: func(t *testing.T) *hClient {
+			session: func(t *testing.T) *client.Conn {
 				return newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}}).dial(t)
 			},
 			present: append(append([]string{}, base...), "STREAMING"),
@@ -381,7 +382,7 @@ func TestRfcCapabilities(t *testing.T) {
 		},
 		{
 			name: "after-auth-posting-user",
-			session: func(t *testing.T) *hClient {
+			session: func(t *testing.T) *client.Conn {
 				c := rfcNewCertServer(t, certFile, keyFile, nil, &hFakeProcessor{}).dial(t)
 				rfcAuth(t, c, postUser, postPass)
 				return c
@@ -391,7 +392,7 @@ func TestRfcCapabilities(t *testing.T) {
 		},
 		{
 			name: "after-auth-user-without-posting",
-			session: func(t *testing.T) *hClient {
+			session: func(t *testing.T) *client.Conn {
 				c := rfcNewCertServer(t, certFile, keyFile, nil, &hFakeProcessor{}).dial(t)
 				rfcAuth(t, c, readUser, readPass)
 				return c
@@ -401,7 +402,7 @@ func TestRfcCapabilities(t *testing.T) {
 		},
 		{
 			name: "no-processor",
-			session: func(t *testing.T) *hClient {
+			session: func(t *testing.T) *client.Conn {
 				return rfcNewCertServer(t, certFile, keyFile, nil, nil).dial(t)
 			},
 			present: append(append([]string{}, base...), "STARTTLS"),
@@ -409,7 +410,7 @@ func TestRfcCapabilities(t *testing.T) {
 		},
 		{
 			name: "tls-port",
-			session: func(t *testing.T) *hClient {
+			session: func(t *testing.T) *client.Conn {
 				return rfcNewCertServer(t, certFile, keyFile, tlsCfg, &hFakeProcessor{}).dial(t)
 			},
 			present: append(append([]string{}, base...), "STREAMING"),
@@ -417,7 +418,7 @@ func TestRfcCapabilities(t *testing.T) {
 		},
 		{
 			name: "after-starttls",
-			session: func(t *testing.T) *hClient {
+			session: func(t *testing.T) *client.Conn {
 				c := rfcNewCertServer(t, certFile, keyFile, nil, &hFakeProcessor{}).dial(t)
 				rfcExpect(t, c, 382, "STARTTLS")
 				rfcUpgrade(t, c)
@@ -473,7 +474,7 @@ func TestRfcStreamingConsistent(t *testing.T) {
 				rfcAuth(t, c, tc.user, tc.pass)
 			}
 			caps := rfcCaps(t, c)
-			code, line := c.cmd(t, "MODE STREAM")
+			code, line := c.Cmd("MODE STREAM")
 			// RFC 4644 §2.2 / plan D5: STREAMING listed iff MODE STREAM gives 203
 			has := rfcHasLine(caps, "STREAMING")
 			if has != (code == 203) {
@@ -561,7 +562,7 @@ func TestRfcReaderHonest(t *testing.T) {
 	// and NEWGROUPS. None of them may answer 500 (not recognized).
 	nonUnknown := func(cmd string) (int, string) {
 		t.Helper()
-		code, line := c.cmd(t, "%s", cmd)
+		code, line := c.Cmd("%s", cmd)
 		if code == 500 {
 			t.Fatalf("%s answered %q although READER is listed", strings.Fields(cmd)[0], line)
 		}
@@ -586,7 +587,7 @@ func TestRfcReaderHonest(t *testing.T) {
 	if code, line := nonUnknown("NEWGROUPS 20000101 000000 GMT"); code != 231 {
 		t.Fatalf("NEWGROUPS: %q, want 231", line)
 	}
-	lines := c.readDotLines(t)
+	lines := c.ReadDotLines()
 	found := false
 	for _, l := range lines {
 		found = found || strings.HasPrefix(l, g+" ")

@@ -27,7 +27,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +36,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // hDB is the shared test database; nil when the DB could not be opened (root).
@@ -233,13 +233,9 @@ func (hs *hServer) track(c net.Conn) {
 // ---------------------------------------------------------------------------
 // Client
 
-// hClient is a raw NNTP client with a per-connection deadline.
-type hClient struct {
-	Conn     net.Conn
-	R        *bufio.Reader
-	Greeting string
-	Deadline time.Duration
-}
+// The raw test client is client.Conn of github.com/go-while/nntp-testkit
+// (plan nntp-testkit), always in lenient mode (Strict false): bare-LF line ends
+// are accepted, as the former hClient did, so the results match the baseline.
 
 // hDeadline is the hang guard of the test client: the per-command read/write deadline and the dial
 // timeout. It only stops a hung test; a passing test never waits on it. Override with
@@ -255,20 +251,31 @@ func hDeadlineFromEnv(def time.Duration) time.Duration {
 	return def
 }
 
+// hNewClient wraps an open connection as a lenient test client with the hang
+// guard deadline; it does not read a greeting and closes the conn at cleanup.
+func hNewClient(t testing.TB, conn net.Conn, deadline time.Duration) *client.Conn {
+	t.Helper()
+	c := client.New(t, conn)
+	c.Strict = false
+	c.Deadline = deadline
+	return c
+}
+
 // dial connects, reads the greeting (c.Greeting) and tracks the connection.
-func (hs *hServer) dial(t *testing.T) *hClient {
+func (hs *hServer) dial(t *testing.T) *client.Conn {
 	t.Helper()
 	c, err := hs.tryDial(hDeadline)
 	if err != nil {
 		t.Fatalf("dial %s: %v", hs.Addr, err)
 	}
-	return c
+	return c.WithTB(t)
 }
 
 // tryDial connects without failing the test; the greeting is read with deadline.
 // The deadline is only a hang guard, so a shorter value is raised to hDeadline:
-// every caller expects the dial (or the refusal) to happen at once.
-func (hs *hServer) tryDial(deadline time.Duration) (*hClient, error) {
+// every caller expects the dial (or the refusal) to happen at once. The client
+// has no tb: use the Try forms, or attach one with WithTB.
+func (hs *hServer) tryDial(deadline time.Duration) (*client.Conn, error) {
 	deadline = max(deadline, hDeadline)
 	var conn net.Conn
 	var err error
@@ -282,146 +289,12 @@ func (hs *hServer) tryDial(deadline time.Duration) (*hClient, error) {
 		return nil, err
 	}
 	hs.track(conn)
-	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: deadline}
-	line, err := c.readLine()
-	if err != nil {
+	c := &client.Conn{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: deadline}
+	if _, err := c.ReadGreeting(); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("greeting: %w", err)
 	}
-	c.Greeting = line
 	return c, nil
-}
-
-func (c *hClient) bump() {
-	_ = c.Conn.SetDeadline(time.Now().Add(c.Deadline))
-}
-
-// readLine reads one line and strips the CRLF (or LF).
-func (c *hClient) readLine() (string, error) {
-	c.bump()
-	line, err := c.R.ReadString('\n')
-	if err != nil {
-		return line, err
-	}
-	return strings.TrimRight(line, "\r\n"), nil
-}
-
-// send writes raw bytes (no CRLF appended): use it for pipelining.
-func (c *hClient) send(raw string) error {
-	c.bump()
-	_, err := io.WriteString(c.Conn, raw)
-	return err
-}
-
-// tryCmd sends one command line and returns the status code and full line.
-func (c *hClient) tryCmd(format string, args ...interface{}) (int, string, error) {
-	if err := c.send(fmt.Sprintf(format, args...) + CRLF); err != nil {
-		return 0, "", err
-	}
-	return c.readStatus()
-}
-
-// readStatus reads the next status line.
-func (c *hClient) readStatus() (int, string, error) {
-	line, err := c.readLine()
-	if err != nil {
-		return 0, line, err
-	}
-	code, perr := hParseCode(line)
-	if perr != nil {
-		return 0, line, perr
-	}
-	return code, line, nil
-}
-
-// cmd is tryCmd that fails the test on I/O errors.
-func (c *hClient) cmd(t *testing.T, format string, args ...interface{}) (int, string) {
-	t.Helper()
-	code, line, err := c.tryCmd(format, args...)
-	if err != nil {
-		t.Fatalf("cmd %q: %v (line %q)", fmt.Sprintf(format, args...), err, line)
-	}
-	return code, line
-}
-
-// readDotLines reads a dot-terminated block, un-stuffs leading dots and strips CRLF.
-func (c *hClient) readDotLines(t *testing.T) []string {
-	t.Helper()
-	var out []string
-	for {
-		line, err := c.readLine()
-		if err != nil {
-			t.Fatalf("readDotLines: %v after %d lines", err, len(out))
-		}
-		if line == "." {
-			return out
-		}
-		if strings.HasPrefix(line, "..") {
-			line = line[1:]
-		}
-		out = append(out, line)
-	}
-}
-
-// rawUntilDot returns the exact bytes up to and including the "\r\n.\r\n"
-// terminator (or ".\r\n" when the block is empty). No un-stuffing.
-func (c *hClient) rawUntilDot(t *testing.T) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	for {
-		c.bump()
-		line, err := c.R.ReadBytes('\n')
-		buf.Write(line)
-		if err != nil {
-			t.Fatalf("rawUntilDot: %v after %d bytes", err, buf.Len())
-		}
-		if bytes.Equal(line, []byte(".\r\n")) || bytes.Equal(line, []byte(".\n")) {
-			return buf.Bytes()
-		}
-	}
-}
-
-// close closes the client connection.
-func (c *hClient) close() {
-	_ = c.Conn.Close()
-}
-
-// hParseCode extracts the 3-digit status code at the start of line.
-func hParseCode(line string) (int, error) {
-	if len(line) < 3 {
-		return 0, fmt.Errorf("short status line %q", line)
-	}
-	code, err := strconv.Atoi(line[:3])
-	if err != nil || code < 100 || code > 599 {
-		return 0, fmt.Errorf("bad status line %q", line)
-	}
-	if len(line) > 3 && line[3] != ' ' {
-		return 0, fmt.Errorf("bad status line %q", line)
-	}
-	return code, nil
-}
-
-// hExpectCode returns an error unless code is one of want.
-func hExpectCode(code int, line string, want ...int) error {
-	for _, w := range want {
-		if code == w {
-			return nil
-		}
-	}
-	return fmt.Errorf("got %d (%q), want %v", code, line, want)
-}
-
-// hExpectLines compares two line slices.
-func hExpectLines(got, want []string) error {
-	if len(got) != len(want) {
-		return fmt.Errorf("got %d lines, want %d: got=%q want=%q", len(got), len(want), got, want)
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			return fmt.Errorf("line %d: got %q, want %q", i, got[i], want[i])
-		}
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -777,22 +650,22 @@ func hChildOutput(s string, n int) string {
 func TestHarnessSmoke(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	if code, err := hParseCode(c.Greeting); err != nil || (code != 200 && code != 201) {
+	if code, err := client.ParseCode(c.Greeting); err != nil || (code != 200 && code != 201) {
 		t.Fatalf("greeting %q: code=%d err=%v", c.Greeting, code, err)
 	}
-	code, line := c.cmd(t, "CAPABILITIES")
-	if err := hExpectCode(code, line, 101); err != nil {
+	code, line := c.Cmd("CAPABILITIES")
+	if err := client.ExpectCode(code, line, 101); err != nil {
 		t.Fatal(err)
 	}
-	caps := c.readDotLines(t)
+	caps := c.ReadDotLines()
 	if len(caps) == 0 || caps[0] != "VERSION 2" {
 		t.Fatalf("CAPABILITIES lines %q: want first line VERSION 2", caps)
 	}
-	code, line = c.cmd(t, "QUIT")
-	if err := hExpectCode(code, line, 205); err != nil {
+	code, line = c.Cmd("QUIT")
+	if err := client.ExpectCode(code, line, 205); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.readLine(); err == nil {
+	if _, err := c.ReadLine(); err == nil {
 		t.Fatal("expected EOF after QUIT")
 	}
 }
@@ -801,8 +674,8 @@ func TestHarnessSeed(t *testing.T) {
 	g := hGroup(t, "t0.seed", 3, nil)
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line := c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
 	fields := strings.Fields(line)
@@ -894,7 +767,7 @@ func TestHarnessIsolatedPass(t *testing.T) {
 	err := runIsolated(t, 3*hDeadline, func(t *testing.T) {
 		hs := newTestServer(t, hServerOpts{})
 		c := hs.dial(t)
-		if code, line := c.cmd(t, "QUIT"); code != 205 {
+		if code, line := c.Cmd("QUIT"); code != 205 {
 			t.Fatalf("QUIT: %q", line)
 		}
 	})

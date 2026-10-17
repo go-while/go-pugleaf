@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // ---------------------------------------------------------------------------
@@ -45,20 +46,20 @@ func ovrMultiLine(code int) bool {
 // ovrCmd sends one command, fails the test on I/O errors and returns the status
 // and, for a multi-line status, the un-stuffed block. The connection stays in
 // sync whatever the code is.
-func ovrCmd(t *testing.T, c *hClient, format string, args ...interface{}) (int, string, []string) {
+func ovrCmd(t *testing.T, c *client.Conn, format string, args ...interface{}) (int, string, []string) {
 	t.Helper()
-	code, line := c.cmd(t, format, args...)
+	code, line := c.Cmd(format, args...)
 	if !ovrMultiLine(code) {
 		return code, line, nil
 	}
-	return code, line, c.readDotLines(t)
+	return code, line, c.ReadDotLines()
 }
 
 // ovrTryDotLines reads a dot-terminated block without failing the test.
-func ovrTryDotLines(c *hClient) ([]string, error) {
+func ovrTryDotLines(c *client.Conn) ([]string, error) {
 	var out []string
 	for {
-		line, err := c.readLine()
+		line, err := c.ReadLine()
 		if err != nil {
 			return out, fmt.Errorf("no dot terminator: %v after %d lines", err, len(out))
 		}
@@ -73,10 +74,10 @@ func ovrTryDotLines(c *hClient) ([]string, error) {
 }
 
 // ovrSelect sends GROUP g and fails unless the server answers 211.
-func ovrSelect(t *testing.T, c *hClient, g string) {
+func ovrSelect(t *testing.T, c *client.Conn, g string) {
 	t.Helper()
-	code, line := c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line := c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatalf("GROUP %s: %v", g, err)
 	}
 }
@@ -119,9 +120,9 @@ func ovrAbsentLines(lines []string, nums ...string) error {
 // ovrRawLines reads a dot-terminated block byte-exact and splits it into lines
 // on CRLF. It returns an error when the block contains a bare CR or LF, which
 // a client reading lines sees as extra (desynchronizing) lines.
-func ovrRawLines(t *testing.T, c *hClient) ([]string, error) {
+func ovrRawLines(t *testing.T, c *client.Conn) ([]string, error) {
 	t.Helper()
-	raw := c.rawUntilDot(t)
+	raw := c.RawUntilDot()
 	body := bytes.TrimSuffix(raw, []byte(".\r\n"))
 	if len(body) == 0 {
 		return nil, nil
@@ -194,22 +195,22 @@ func TestOvrXoverRanges(t *testing.T) {
 
 	t.Run("no-group", func(t *testing.T) {
 		c := hs.dial(t)
-		defer c.close()
+		defer c.Close()
 		// RFC 3977 §8.3.2 / RFC 2980 §2.8: 412 when no newsgroup is selected.
 		code, line, _ := ovrCmd(t, c, "XOVER 1-5")
-		if err := hExpectCode(code, line, 412); err != nil {
+		if err := client.ExpectCode(code, line, 412); err != nil {
 			t.Fatal(err)
 		}
 	})
 
 	t.Run("no-current-article", func(t *testing.T) {
 		c := hs.dial(t)
-		defer c.close()
+		defer c.Close()
 		// GROUP on an empty group leaves the current article number invalid
 		// (RFC 3977 §6.1.1.2); a bare XOVER then gets 420 (RFC 3977 §8.3.2).
 		ovrSelect(t, c, empty)
 		code, line, _ := ovrCmd(t, c, "XOVER")
-		if err := hExpectCode(code, line, 420); err != nil {
+		if err := client.ExpectCode(code, line, 420); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -231,10 +232,10 @@ func TestOvrXoverRanges(t *testing.T) {
 	for _, tc := range matching {
 		t.Run(tc.name, func(t *testing.T) {
 			code, line, lines := ovrCmd(t, c, "XOVER %s", tc.arg)
-			if err := hExpectCode(code, line, 224); err != nil {
+			if err := client.ExpectCode(code, line, 224); err != nil {
 				t.Fatalf("XOVER %s: %v", tc.arg, err)
 			}
-			if err := hExpectLines(ovrNums(lines), tc.want); err != nil {
+			if err := client.ExpectLines(ovrNums(lines), tc.want); err != nil {
 				t.Fatalf("XOVER %s article numbers: %v", tc.arg, err)
 			}
 		})
@@ -253,7 +254,7 @@ func TestOvrXoverRanges(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// RFC 3977 §8.3.2: 423 "No articles in that range"; RFC 2980 §2.8: 420.
 			code, line, lines := ovrCmd(t, c, "XOVER %s", tc.arg)
-			err := hExpectCode(code, line, 423, 420)
+			err := client.ExpectCode(code, line, 423, 420)
 			if err != nil {
 				err = fmt.Errorf("XOVER %s: %w (block %q)", tc.arg, err, lines)
 			}
@@ -267,7 +268,7 @@ func TestOvrXoverRanges(t *testing.T) {
 		// RFC 3977 §3.2.1: a syntactically invalid argument gets 501.
 		for _, arg := range []string{"abc", "1-2-3", "x-5", "5-y", "-"} {
 			code, line, _ := ovrCmd(t, c, "XOVER %s", arg)
-			if err := hExpectCode(code, line, 501); err != nil {
+			if err := client.ExpectCode(code, line, 501); err != nil {
 				t.Errorf("XOVER %s: %v", arg, err)
 			}
 		}
@@ -286,7 +287,7 @@ func TestOvrLineFormat(t *testing.T) {
 	ovrSelect(t, c, g)
 
 	code, line, lines := ovrCmd(t, c, "XOVER 1")
-	if err := hExpectCode(code, line, 224); err != nil {
+	if err := client.ExpectCode(code, line, 224); err != nil {
 		t.Fatal(err)
 	}
 	if len(lines) != 1 {
@@ -301,7 +302,7 @@ func TestOvrLineFormat(t *testing.T) {
 			t.Fatalf("got %d fields, want at least 8: %q", len(fields), lines[0])
 		}
 		want := []string{"1", art.Subject, art.From, art.DateString, art.MessageID, refs}
-		if err := hExpectLines(fields[:6], want); err != nil {
+		if err := client.ExpectLines(fields[:6], want); err != nil {
 			t.Fatalf("fields 1-6: %v", err)
 		}
 		// :bytes is a decimal count (its value, the whole article size, is INT-5).
@@ -382,8 +383,8 @@ func TestOvrSanitizing(t *testing.T) {
 	// A bare LF in a value (A-nntp-rfc-2) splits one overview or header line
 	// into two, so a client reading lines is desynchronized.
 	t.Run("XOVER", func(t *testing.T) {
-		code, line := c.cmd(t, "XOVER 1-2")
-		if err := hExpectCode(code, line, 224); err != nil {
+		code, line := c.Cmd("XOVER 1-2")
+		if err := client.ExpectCode(code, line, 224); err != nil {
 			t.Fatal(err)
 		}
 		lines, err := ovrRawLines(t, c)
@@ -421,8 +422,8 @@ func TestOvrSanitizing(t *testing.T) {
 		// be "Line1" or the joined "Line1 Line2".
 		var problems []string
 		check := func(field string, value func(n string, w want) []string) {
-			code, line := c.cmd(t, "XHDR %s 1-2", field)
-			if err := hExpectCode(code, line, 221); err != nil {
+			code, line := c.Cmd("XHDR %s 1-2", field)
+			if err := client.ExpectCode(code, line, 221); err != nil {
 				t.Fatalf("XHDR %s: %v", field, err)
 			}
 			lines, err := ovrRawLines(t, c)
@@ -497,7 +498,7 @@ func TestOvrFullRange(t *testing.T) {
 	// server may not silently drop part of it.
 	t.Run("XOVER", func(t *testing.T) {
 		code, line, lines := ovrCmd(t, c, "XOVER 1-%d", n)
-		if err := hExpectCode(code, line, 224); err != nil {
+		if err := client.ExpectCode(code, line, 224); err != nil {
 			t.Fatal(err)
 		}
 		var err error
@@ -512,7 +513,7 @@ func TestOvrFullRange(t *testing.T) {
 	// RFC 2980 §2.6: one line per article in the range.
 	t.Run("XHDR", func(t *testing.T) {
 		code, line, lines := ovrCmd(t, c, "XHDR subject 1-%d", n)
-		if err := hExpectCode(code, line, 221); err != nil {
+		if err := client.ExpectCode(code, line, 221); err != nil {
 			t.Fatal(err)
 		}
 		var err error
@@ -537,10 +538,10 @@ func TestOvrXhdr(t *testing.T) {
 
 	t.Run("no-group", func(t *testing.T) {
 		cc := hs.dial(t)
-		defer cc.close()
+		defer cc.Close()
 		// RFC 2980 §2.6: 412 when no newsgroup is selected (range form).
 		code, line, _ := ovrCmd(t, cc, "XHDR subject 1-4")
-		if err := hExpectCode(code, line, 412); err != nil {
+		if err := client.ExpectCode(code, line, 412); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -551,11 +552,11 @@ func TestOvrXhdr(t *testing.T) {
 	t.Run("range", func(t *testing.T) {
 		// RFC 2980 §2.6: 221, then "<number> <value>" for each article in the range.
 		code, line, lines := ovrCmd(t, c, "XHDR subject 1-4")
-		if err := hExpectCode(code, line, 221); err != nil {
+		if err := client.ExpectCode(code, line, 221); err != nil {
 			t.Fatal(err)
 		}
 		want := []string{"1 Test article 1", "2 Test article 2", "4 Test article 4"}
-		if err := hExpectLines(lines, want); err != nil {
+		if err := client.ExpectLines(lines, want); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -571,9 +572,9 @@ func TestOvrXhdr(t *testing.T) {
 			code, line, lines := ovrCmd(t, c, "XHDR %s 1-2", tc.header)
 			var err error
 			if code != 503 {
-				err = hExpectCode(code, line, 221, 503)
+				err = client.ExpectCode(code, line, 221, 503)
 				if err == nil {
-					err = hExpectLines(lines, []string{"1 " + tc.value, "2 " + tc.value})
+					err = client.ExpectLines(lines, []string{"1 " + tc.value, "2 " + tc.value})
 				}
 			}
 			if err != nil {
@@ -591,7 +592,7 @@ func TestOvrXhdr(t *testing.T) {
 	t.Run("absent-References", func(t *testing.T) {
 		// References is an overview field the server serves: correct today.
 		code, line, lines := ovrCmd(t, c, "XHDR References 1-2")
-		if err := hExpectCode(code, line, 221); err != nil {
+		if err := client.ExpectCode(code, line, 221); err != nil {
 			t.Fatal(err)
 		}
 		if err := ovrAbsentLines(lines, "1", "2"); err != nil {
@@ -600,7 +601,7 @@ func TestOvrXhdr(t *testing.T) {
 	})
 	t.Run("absent-X-Ovr-Absent", func(t *testing.T) {
 		code, line, lines := ovrCmd(t, c, "XHDR X-Ovr-Absent 1-2")
-		err := hExpectCode(code, line, 221)
+		err := client.ExpectCode(code, line, 221)
 		if err == nil {
 			err = ovrAbsentLines(lines, "1", "2")
 		}
@@ -620,7 +621,7 @@ func TestOvrXhdr(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, line, lines := ovrCmd(t, c, "XHDR subject %s", tc.arg)
-			err := hExpectCode(code, line, 423, 420)
+			err := client.ExpectCode(code, line, 423, 420)
 			if err != nil {
 				err = fmt.Errorf("XHDR subject %s: %w (block %q)", tc.arg, err, lines)
 			}
@@ -634,9 +635,9 @@ func TestOvrXhdr(t *testing.T) {
 		// RFC 2980 §2.6: with a message-id argument the line starts with that
 		// message-id instead of an article number.
 		code, line, lines := ovrCmd(t, c, "XHDR subject %s", a2.MessageID)
-		err := hExpectCode(code, line, 221)
+		err := client.ExpectCode(code, line, 221)
 		if err == nil {
-			err = hExpectLines(lines, []string{a2.MessageID + " " + a2.Subject})
+			err = client.ExpectLines(lines, []string{a2.MessageID + " " + a2.Subject})
 		}
 		if err != nil {
 			err = fmt.Errorf("XHDR subject %s: %w", a2.MessageID, err)
@@ -672,7 +673,7 @@ func TestOvrHugeRange(t *testing.T) {
 			cmd := tc.cmd
 			c := hs.dial(t)
 			ovrSelect(t, c, g)
-			code, line, err := c.tryCmd("%s", cmd)
+			code, line, err := c.TryCmd("%s", cmd)
 			if err != nil {
 				t.Errorf("%s: %v (%q)", cmd, err, line)
 				continue
@@ -686,10 +687,10 @@ func TestOvrHugeRange(t *testing.T) {
 				t.Errorf("%s: %v", cmd, err)
 				continue
 			}
-			if err := hExpectLines(ovrNums(lines), want); err != nil {
+			if err := client.ExpectLines(ovrNums(lines), want); err != nil {
 				t.Errorf("%s: %v", cmd, err)
 			}
-			c.close()
+			c.Close()
 		}
 	})
 	if ovrIsChild(t) {
@@ -713,9 +714,9 @@ func TestOvrOverHdr(t *testing.T) {
 	t.Run("OVER", func(t *testing.T) {
 		// RFC 3977 §8.3: OVER <range> → 224 and one overview line per article.
 		code, line, lines := ovrCmd(t, c, "OVER 1-2")
-		err := hExpectCode(code, line, 224)
+		err := client.ExpectCode(code, line, 224)
 		if err == nil {
-			err = hExpectLines(ovrNums(lines), []string{"1", "2"})
+			err = client.ExpectLines(ovrNums(lines), []string{"1", "2"})
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -725,9 +726,9 @@ func TestOvrOverHdr(t *testing.T) {
 	t.Run("HDR", func(t *testing.T) {
 		// RFC 3977 §8.5: HDR <field> <range> → 225 and "<number> <value>" lines.
 		code, line, lines := ovrCmd(t, c, "HDR Subject 1")
-		err := hExpectCode(code, line, 225)
+		err := client.ExpectCode(code, line, 225)
 		if err == nil {
-			err = hExpectLines(lines, []string{"1 " + a1.Subject})
+			err = client.ExpectLines(lines, []string{"1 " + a1.Subject})
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -804,31 +805,31 @@ func TestOvrHidden(t *testing.T) {
 
 	t.Run("XOVER", func(t *testing.T) {
 		code, line, lines := ovrCmd(t, c, "XOVER 1-")
-		if err := hExpectCode(code, line, 224); err != nil {
+		if err := client.ExpectCode(code, line, 224); err != nil {
 			t.Fatal(err)
 		}
-		if err := hExpectLines(ovrNums(lines), []string{"1", "3"}); err != nil {
+		if err := client.ExpectLines(ovrNums(lines), []string{"1", "3"}); err != nil {
 			t.Fatalf("XOVER 1-: %v", err)
 		}
 	})
 	t.Run("XOVER-only-hidden", func(t *testing.T) {
 		code, line, _ := ovrCmd(t, c, "XOVER 2")
-		if err := hExpectCode(code, line, 423); err != nil {
+		if err := client.ExpectCode(code, line, 423); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("XHDR", func(t *testing.T) {
 		code, line, lines := ovrCmd(t, c, "XHDR subject 1-")
-		if err := hExpectCode(code, line, 221); err != nil {
+		if err := client.ExpectCode(code, line, 221); err != nil {
 			t.Fatal(err)
 		}
-		if err := hExpectLines(ovrNums(lines), []string{"1", "3"}); err != nil {
+		if err := client.ExpectLines(ovrNums(lines), []string{"1", "3"}); err != nil {
 			t.Fatalf("XHDR subject 1-: %v", err)
 		}
 	})
 	t.Run("XHDR-message-id", func(t *testing.T) {
 		code, line, _ := ovrCmd(t, c, "XHDR subject %s", hidden.MessageID)
-		if err := hExpectCode(code, line, 430); err != nil {
+		if err := client.ExpectCode(code, line, 430); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -836,7 +837,7 @@ func TestOvrHidden(t *testing.T) {
 		// A-nntp-rfc-6: the status line echoes at most 64 bytes of the field name.
 		long := strings.Repeat("X", 300)
 		code, line, _ := ovrCmd(t, c, "XHDR %s 1-", long)
-		if err := hExpectCode(code, line, 221); err != nil {
+		if err := client.ExpectCode(code, line, 221); err != nil {
 			t.Fatal(err)
 		}
 		if strings.Contains(line, strings.Repeat("X", 65)) {
@@ -868,35 +869,35 @@ func TestOvrXhdrXrefPath(t *testing.T) {
 
 	for _, field := range []string{"Xref", "XREF"} {
 		code, line, lines := ovrCmd(t, c, "XHDR %s 1-2", field)
-		if err := hExpectCode(code, line, 221); err != nil {
+		if err := client.ExpectCode(code, line, 221); err != nil {
 			t.Fatalf("XHDR %s: %v", field, err)
 		}
 		// the local value of the default -xref partial mode, never the upstream numbers
-		if err := hExpectLines(lines, []string{"1 go-pugleaf " + g + ":1", "2 go-pugleaf " + g + ":2"}); err != nil {
+		if err := client.ExpectLines(lines, []string{"1 go-pugleaf " + g + ":1", "2 go-pugleaf " + g + ":2"}); err != nil {
 			t.Fatalf("XHDR %s 1-2: %v", field, err)
 		}
 	}
 	code, line, lines := ovrCmd(t, c, "XHDR Xref %s", a1.MessageID)
-	if err := hExpectCode(code, line, 221); err != nil {
+	if err := client.ExpectCode(code, line, 221); err != nil {
 		t.Fatalf("XHDR Xref <id>: %v", err)
 	}
-	if err := hExpectLines(lines, []string{a1.MessageID + " go-pugleaf " + g + ":1"}); err != nil {
+	if err := client.ExpectLines(lines, []string{a1.MessageID + " go-pugleaf " + g + ":1"}); err != nil {
 		t.Fatalf("XHDR Xref <id>: %v", err)
 	}
 
 	// Path: the stored path column (a.Path), not the raw upstream line in headers_json.
 	code, line, lines = ovrCmd(t, c, "XHDR path 1-2")
-	if err := hExpectCode(code, line, 221); err != nil {
+	if err := client.ExpectCode(code, line, 221); err != nil {
 		t.Fatalf("XHDR path: %v", err)
 	}
-	if err := hExpectLines(lines, []string{"1 " + a1.Path, "2 " + a1.Path}); err != nil {
+	if err := client.ExpectLines(lines, []string{"1 " + a1.Path, "2 " + a1.Path}); err != nil {
 		t.Fatalf("XHDR path 1-2: %v", err)
 	}
 	code, line, lines = ovrCmd(t, c, "XHDR Path %s", a1.MessageID)
-	if err := hExpectCode(code, line, 221); err != nil {
+	if err := client.ExpectCode(code, line, 221); err != nil {
 		t.Fatalf("XHDR Path <id>: %v", err)
 	}
-	if err := hExpectLines(lines, []string{a1.MessageID + " " + a1.Path}); err != nil {
+	if err := client.ExpectLines(lines, []string{a1.MessageID + " " + a1.Path}); err != nil {
 		t.Fatalf("XHDR Path <id>: %v", err)
 	}
 }
@@ -915,9 +916,9 @@ func TestOvrXhdrLookupFault(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{findErr: tc.err}})
 			c := hs.dial(t)
-			defer c.close()
+			defer c.Close()
 			code, line, _ := ovrCmd(t, c, "XHDR subject <ovr-fault@test.invalid>")
-			if err := hExpectCode(code, line, tc.want); err != nil {
+			if err := client.ExpectCode(code, line, tc.want); err != nil {
 				t.Fatal(err)
 			}
 		})

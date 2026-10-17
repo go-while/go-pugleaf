@@ -16,6 +16,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 func TestXrefLine(t *testing.T) {
@@ -65,24 +66,24 @@ func TestXrefArticleHeaderLines(t *testing.T) {
 	// off: the stored lines unchanged (today's output), no local line
 	off := articleHeaderLines(a, XrefOff, "Xref: ignored g:1")
 	wantOff := strings.Split(stored.headers, "\n")
-	if err := hExpectLines(off, wantOff); err != nil {
+	if err := client.ExpectLines(off, wantOff); err != nil {
 		t.Errorf("off: %v", err)
 	}
 	a = stored.article()
 	got := articleHeaderLines(a, XrefPartial, "Xref: local.test g.local:3")
 	want := []string{"Path: p!not-for-mail", "Subject: s", "X-After: kept", "Xref: local.test g.local:3"}
-	if err := hExpectLines(got, want); err != nil {
+	if err := client.ExpectLines(got, want); err != nil {
 		t.Errorf("partial: %v", err)
 	}
 	// no local value (by message-id outside the group, partial): the stored line is still dropped
 	a = stored.article()
 	got = articleHeaderLines(a, XrefPartial, "")
-	if err := hExpectLines(got, want[:3]); err != nil {
+	if err := client.ExpectLines(got, want[:3]); err != nil {
 		t.Errorf("partial without a value: %v", err)
 	}
 	// empty headers_json: just the local line
 	got = articleHeaderLines((&xrfArticle{}).article(), XrefFull, "Xref: h g:1")
-	if err := hExpectLines(got, []string{"Xref: h g:1"}); err != nil {
+	if err := client.ExpectLines(got, []string{"Xref: h g:1"}); err != nil {
 		t.Errorf("empty headers: %v", err)
 	}
 	if got := articleHeaderLines((&xrfArticle{}).article(), XrefOff, ""); len(got) != 0 {
@@ -97,7 +98,7 @@ func TestXrefOverviewFmt(t *testing.T) {
 		if mode != XrefOff {
 			want = append(append([]string{}, base...), "Xref:full")
 		}
-		if err := hExpectLines(overviewFmtLines(mode), want); err != nil {
+		if err := client.ExpectLines(overviewFmtLines(mode), want); err != nil {
 			t.Errorf("%s: %v", mode, err)
 		}
 	}
@@ -143,16 +144,16 @@ func TestXrefModes(t *testing.T) {
 			hs.S.SetXrefMode(m.mode)
 			w := m.want
 			c := hs.dial(t)
-			defer c.close()
+			defer c.Close()
 
 			// --- without a selected group (RFC 3977 §6.2.1.2: number 0)
 			xrfCheckHead(t, c, "HEAD "+id2, w.outside)
 			xrfCheckArticle(t, c, "ARTICLE "+id2, w.outside)
 			xrfCheckOver(t, m.mode, xrfBlock(t, c, 224, "OVER %s", id2), []string{w.outside})
-			if err := hExpectLines(xrfBlock(t, c, 225, "HDR Xref %s", id2), []string{xrfHdr("0", w.outside)}); err != nil {
+			if err := client.ExpectLines(xrfBlock(t, c, 225, "HDR Xref %s", id2), []string{xrfHdr("0", w.outside)}); err != nil {
 				t.Errorf("HDR Xref <id> outside: %v", err)
 			}
-			if err := hExpectLines(xrfBlock(t, c, 221, "XHDR Xref %s", id2), []string{xrfHdr(id2, w.outside)}); err != nil {
+			if err := client.ExpectLines(xrfBlock(t, c, 221, "XHDR Xref %s", id2), []string{xrfHdr(id2, w.outside)}); err != nil {
 				t.Errorf("XHDR Xref <id> outside: %v", err)
 			}
 
@@ -202,19 +203,19 @@ func TestXrefModes(t *testing.T) {
 			xrfCheckOver(t, m.mode, xrfBlock(t, c, 224, "XOVER 2"), []string{w.in2})
 
 			wantRange := []string{xrfHdr("1", w.in1), xrfHdr("2", w.in2), xrfHdr("3", partial3)}
-			if err := hExpectLines(xrfBlock(t, c, 225, "HDR Xref 1-3"), wantRange); err != nil {
+			if err := client.ExpectLines(xrfBlock(t, c, 225, "HDR Xref 1-3"), wantRange); err != nil {
 				t.Errorf("HDR Xref 1-3: %v", err)
 			}
-			if err := hExpectLines(xrfBlock(t, c, 225, "HDR XREF 2-"), wantRange[1:]); err != nil {
+			if err := client.ExpectLines(xrfBlock(t, c, 225, "HDR XREF 2-"), wantRange[1:]); err != nil {
 				t.Errorf("HDR XREF 2-: %v", err)
 			}
-			if err := hExpectLines(xrfBlock(t, c, 225, "HDR Xref %s", id2), []string{xrfHdr("2", w.in2)}); err != nil {
+			if err := client.ExpectLines(xrfBlock(t, c, 225, "HDR Xref %s", id2), []string{xrfHdr("2", w.in2)}); err != nil {
 				t.Errorf("HDR Xref <id>: %v", err)
 			}
-			if err := hExpectLines(xrfBlock(t, c, 221, "XHDR Xref 1-3"), wantRange); err != nil {
+			if err := client.ExpectLines(xrfBlock(t, c, 221, "XHDR Xref 1-3"), wantRange); err != nil {
 				t.Errorf("XHDR Xref 1-3: %v", err)
 			}
-			if err := hExpectLines(xrfBlock(t, c, 221, "XHDR xref %s", id2), []string{xrfHdr(id2, w.in2)}); err != nil {
+			if err := client.ExpectLines(xrfBlock(t, c, 221, "XHDR xref %s", id2), []string{xrfHdr(id2, w.in2)}); err != nil {
 				t.Errorf("XHDR Xref <id>: %v", err)
 			}
 
@@ -240,13 +241,13 @@ func TestXrefNoProcessor(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	hs.S.SetXrefMode(XrefFull)
 	c := hs.dial(t)
-	defer c.close()
+	defer c.Close()
 	xrfSelect(t, c, g)
 	want := "go-pugleaf " + g + ":2"
 	xrfCheckHead(t, c, "HEAD 2", want)
 	xrfCheckHead(t, c, "HEAD "+hMessageID(g, 2), want)
 	xrfCheckOver(t, XrefFull, xrfBlock(t, c, 224, "OVER 2"), []string{want})
-	if err := hExpectLines(xrfBlock(t, c, 225, "HDR Xref 2"), []string{"2 " + want}); err != nil {
+	if err := client.ExpectLines(xrfBlock(t, c, 225, "HDR Xref 2"), []string{"2 " + want}); err != nil {
 		t.Error(err)
 	}
 }
@@ -260,7 +261,7 @@ func TestXrefLookupError(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{Proc: proc})
 	hs.S.SetXrefMode(XrefFull)
 	c := hs.dial(t)
-	defer c.close()
+	defer c.Close()
 	xrfSelect(t, c, g)
 	xrfCheckHead(t, c, "HEAD 2", "go-pugleaf "+g+":2")
 	xrfCheckOver(t, XrefFull, xrfBlock(t, c, 224, "OVER 1-2"), []string{"go-pugleaf " + g + ":1", "go-pugleaf " + g + ":2"})
@@ -294,7 +295,7 @@ func TestXrefBatchedRanges(t *testing.T) {
 	}
 	const host = "go-pugleaf"
 	c := hs.dial(t)
-	defer c.close()
+	defer c.Close()
 	xrfSelect(t, c, g)
 
 	type counts struct{ perID, batchCalls, batchIDs int }
@@ -363,7 +364,7 @@ func TestXrefBatchedRanges(t *testing.T) {
 				} else {
 					got := []string{on[0], on[1], on[n-1]}
 					want := []string{xrfHdr("1", want1), xrfHdr("2", want2), xrfHdr(fmt.Sprint(lastNum), wantLast)}
-					if err := hExpectLines(got, want); err != nil {
+					if err := client.ExpectLines(got, want); err != nil {
 						t.Error(err)
 					}
 				}
@@ -397,7 +398,7 @@ func TestXrefBatchedLookupError(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{Proc: proc})
 	hs.S.SetXrefMode(XrefFull)
 	c := hs.dial(t)
-	defer c.close()
+	defer c.Close()
 	xrfSelect(t, c, g)
 	const host = "go-pugleaf"
 	values := []string{host + " " + g + ":1", host + " " + g + ":2 " + other + ":7", host + " " + g + ":3"}
@@ -416,12 +417,12 @@ func TestXrefBatchedLookupError(t *testing.T) {
 	check("OVER 1-3", func() { xrfCheckOver(t, XrefFull, xrfBlock(t, c, 224, "OVER 1-3"), values) })
 	check("XOVER 1-3", func() { xrfCheckOver(t, XrefFull, xrfBlock(t, c, 224, "XOVER 1-3"), values) })
 	check("HDR Xref 1-3", func() {
-		if err := hExpectLines(xrfBlock(t, c, 225, "HDR Xref 1-3"), hdr); err != nil {
+		if err := client.ExpectLines(xrfBlock(t, c, 225, "HDR Xref 1-3"), hdr); err != nil {
 			t.Errorf("HDR Xref 1-3: %v", err)
 		}
 	})
 	check("XHDR Xref 1-3", func() {
-		if err := hExpectLines(xrfBlock(t, c, 221, "XHDR Xref 1-3"), hdr); err != nil {
+		if err := client.ExpectLines(xrfBlock(t, c, 221, "XHDR Xref 1-3"), hdr); err != nil {
 			t.Errorf("XHDR Xref 1-3: %v", err)
 		}
 	})
@@ -442,13 +443,13 @@ func TestXrefBatchedNilResult(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{Proc: proc})
 	hs.S.SetXrefMode(XrefFull)
 	c := hs.dial(t)
-	defer c.close()
+	defer c.Close()
 	xrfSelect(t, c, g)
 	const host = "go-pugleaf"
 	values := []string{host + " " + g + ":1", host + " " + g + ":2", host + " " + g + ":3"}
 	xrfCheckOver(t, XrefFull, xrfBlock(t, c, 224, "OVER 1-3"), values)
 	hdr := []string{xrfHdr("1", values[0]), xrfHdr("2", values[1]), xrfHdr("3", values[2])}
-	if err := hExpectLines(xrfBlock(t, c, 225, "HDR Xref 1-3"), hdr); err != nil {
+	if err := client.ExpectLines(xrfBlock(t, c, 225, "HDR Xref 1-3"), hdr); err != nil {
 		t.Errorf("HDR Xref 1-3: %v", err)
 	}
 	if bc, ids := proc.xrefBatchCount(); bc != 2 || ids != 6 || proc.xrefCount() != 0 {
@@ -472,17 +473,17 @@ func TestXrefStoredLineDropped(t *testing.T) {
 	a := hDefaultArticle(g, 1)
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	defer c.close()
+	defer c.Close()
 	xrfSelect(t, c, g)
 
 	hs.S.SetXrefMode(XrefPartial)
 	want := []string{"Path: " + a.Path, "From: " + a.From, "Subject: " + a.Subject, "Message-ID: " + a.MessageID, "Xref: go-pugleaf " + g + ":1"}
-	if err := hExpectLines(xrfBlock(t, c, 221, "HEAD 1"), want); err != nil {
+	if err := client.ExpectLines(xrfBlock(t, c, 221, "HEAD 1"), want); err != nil {
 		t.Errorf("partial: %v", err)
 	}
 	hs.S.SetXrefMode(XrefOff)
 	wantOff := []string{"Path: " + a.Path, "From: " + a.From, "Xref: upstream.invalid other.group:99", "\tother.two:5", "Subject: " + a.Subject, "Message-ID: " + a.MessageID}
-	if err := hExpectLines(xrfBlock(t, c, 221, "HEAD 1"), wantOff); err != nil {
+	if err := client.ExpectLines(xrfBlock(t, c, 221, "HEAD 1"), wantOff); err != nil {
 		t.Errorf("off: %v", err)
 	}
 }
@@ -495,10 +496,10 @@ func TestXrefHostname(t *testing.T) {
 		t.Fatalf("default mode %s, want partial", got)
 	}
 	c := hs.dial(t)
-	defer c.close()
+	defer c.Close()
 	xrfSelect(t, c, g)
 	xrfCheckHead(t, c, "HEAD 1", "news.xref.test "+g+":1")
-	if err := hExpectLines(xrfBlock(t, c, 225, "HDR Xref 1"), []string{"1 news.xref.test " + g + ":1"}); err != nil {
+	if err := client.ExpectLines(xrfBlock(t, c, 225, "HDR Xref 1"), []string{"1 news.xref.test " + g + ":1"}); err != nil {
 		t.Error(err)
 	}
 	if got := (&NNTPServer{Config: &config.ServerConfig{}}).xrefHostname(); got != "go-pugleaf" {
@@ -546,22 +547,22 @@ func xrfServerWithHostname(t *testing.T, hostname string) *hServer {
 }
 
 // xrfSelect sends GROUP g and expects 211.
-func xrfSelect(t *testing.T, c *hClient, g string) {
+func xrfSelect(t *testing.T, c *client.Conn, g string) {
 	t.Helper()
-	code, line := c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line := c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
 }
 
 // xrfBlock sends a command, expects the multi-line status want and returns the block.
-func xrfBlock(t *testing.T, c *hClient, want int, format string, args ...interface{}) []string {
+func xrfBlock(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) []string {
 	t.Helper()
-	code, line := c.cmd(t, format, args...)
-	if err := hExpectCode(code, line, want); err != nil {
+	code, line := c.Cmd(format, args...)
+	if err := client.ExpectCode(code, line, want); err != nil {
 		t.Fatalf("%s: %v", fmt.Sprintf(format, args...), err)
 	}
-	return c.readDotLines(t)
+	return c.ReadDotLines()
 }
 
 // xrfHdr is the HDR/XHDR line for key and the Xref value (just key when it is empty).
@@ -601,13 +602,13 @@ func xrfCheckHeaders(t *testing.T, what string, head []string, value string) {
 }
 
 // xrfCheckHead sends a HEAD command and checks its Xref line.
-func xrfCheckHead(t *testing.T, c *hClient, cmd, value string) {
+func xrfCheckHead(t *testing.T, c *client.Conn, cmd, value string) {
 	t.Helper()
 	xrfCheckHeaders(t, cmd, xrfBlock(t, c, 221, "%s", cmd), value)
 }
 
 // xrfCheckArticle sends an ARTICLE command and checks the Xref line of its header part.
-func xrfCheckArticle(t *testing.T, c *hClient, cmd, value string) {
+func xrfCheckArticle(t *testing.T, c *client.Conn, cmd, value string) {
 	t.Helper()
 	block := xrfBlock(t, c, 220, "%s", cmd)
 	head := block
