@@ -152,3 +152,11 @@ CLAUDE.md checks; `go test -race -count=1 -v ./internal/nntp/` PASS/FAIL/SKIP li
 
 ## Report back (brief)
 Exported API list, test results for both repos, what could not move cleanly, every commit hash. No push.
+
+## Progress
+
+### Baseline (2026-10-17, before any change)
+`go test -race -count=1 -v ./internal/nntp/` on testing-001 c1a10ca (+ this plan file): 210 top-level results,
+all `--- PASS`, 0 FAIL, 0 SKIP; package ok in 164.8 s (under race, machine loaded). Full sorted list kept at
+`/tank0/efs/claude/tmp/claude-1000/-tank0-efs-GO-src-github-com-go-while-go-pugleaf/698bff14-0ada-4301-9aa4-caddf76f2a5b/scratchpad/nntp-baseline-keep.txt` for the migration comparison (also reproducible with the same command).
+
