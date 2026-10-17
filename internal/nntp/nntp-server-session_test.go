@@ -1147,7 +1147,7 @@ func sessDialRaw(addr string, d time.Duration) (*client.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &client.Conn{Conn: conn, R: bufio.NewReader(conn), Deadline: d}
+	c := &client.Conn{Conn: conn, R: bufio.NewReader(conn), Deadline: d, Strict: true}
 	g, err := c.ReadLine()
 	if err != nil {
 		_ = conn.Close()

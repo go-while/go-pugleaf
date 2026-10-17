@@ -234,8 +234,9 @@ func (hs *hServer) track(c net.Conn) {
 // Client
 
 // The raw test client is client.Conn of github.com/go-while/nntp-testkit
-// (plan nntp-testkit), always in lenient mode (Strict false): bare-LF line ends
-// are accepted, as the former hClient did, so the results match the baseline.
+// (plan nntp-testkit), always in strict mode (Strict true, plan nntp-testkit-land):
+// a bare LF, a bare CR, bad dot-stuffing or a missing terminator from the server
+// fails the test, so the tests also catch wire mistakes of go-pugleaf's server.
 
 // hDeadline is the hang guard of the test client: the per-command read/write deadline and the dial
 // timeout. It only stops a hung test; a passing test never waits on it. Override with
@@ -251,12 +252,12 @@ func hDeadlineFromEnv(def time.Duration) time.Duration {
 	return def
 }
 
-// hNewClient wraps an open connection as a lenient test client with the hang
+// hNewClient wraps an open connection as a strict test client with the hang
 // guard deadline; it does not read a greeting and closes the conn at cleanup.
 func hNewClient(t testing.TB, conn net.Conn, deadline time.Duration) *client.Conn {
 	t.Helper()
 	c := client.New(t, conn)
-	c.Strict = false
+	c.Strict = true
 	c.Deadline = deadline
 	return c
 }
@@ -289,7 +290,7 @@ func (hs *hServer) tryDial(deadline time.Duration) (*client.Conn, error) {
 		return nil, err
 	}
 	hs.track(conn)
-	c := &client.Conn{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: deadline}
+	c := &client.Conn{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: deadline, Strict: true}
 	if _, err := c.ReadGreeting(); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("greeting: %w", err)
