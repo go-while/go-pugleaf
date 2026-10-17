@@ -7,19 +7,18 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // This file should contain the search page related functions from server.go:
 //
 // Functions to be moved from server.go:
-//   - func (s *WebServer) searchPage(c *gin.Context) (line ~784)
+//   - func (s *WebServer) searchPage(c *Context) (line ~784)
 //     Handles "/search" route for searching articles and groups
 //
 // This file will handle the search functionality, allowing users to search for articles
 // and groups across the NNTP server.
-func (s *WebServer) searchPage(c *gin.Context) {
+func (s *WebServer) searchPage(c *Context) {
 	query := strings.TrimSpace(c.Query("q"))
 	searchType := c.DefaultQuery("searchType", "all")
 

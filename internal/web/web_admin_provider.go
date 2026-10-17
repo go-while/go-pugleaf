@@ -8,12 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // adminCreateProvider handles provider creation
-func (s *WebServer) adminCreateProvider(c *gin.Context) {
+func (s *WebServer) adminCreateProvider(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -190,7 +189,7 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 }
 
 // adminUpdateProvider handles provider updates
-func (s *WebServer) adminUpdateProvider(c *gin.Context) {
+func (s *WebServer) adminUpdateProvider(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -446,7 +445,7 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 }
 
 // adminDeleteProvider handles provider deletion
-func (s *WebServer) adminDeleteProvider(c *gin.Context) {
+func (s *WebServer) adminDeleteProvider(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}

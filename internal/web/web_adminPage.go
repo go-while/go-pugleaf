@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
@@ -16,7 +15,7 @@ import (
 )
 
 // adminPage displays the admin interface
-func (s *WebServer) adminPage(c *gin.Context) {
+func (s *WebServer) adminPage(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}

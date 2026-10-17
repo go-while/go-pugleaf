@@ -10,7 +10,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -133,7 +132,7 @@ func (s *SessionData) GetError() string {
 	return err
 }
 
-// Gin context keys of the per-request auth cache.
+// Context keys of the per-request auth cache.
 const (
 	ctxKeyWebSessionChecked = "pugleaf.webSessionChecked" // bool: getWebSession already ran
 	ctxKeyWebSession        = "pugleaf.webSession"        // *SessionData or nil
@@ -141,9 +140,9 @@ const (
 )
 
 // getWebSession retrieves session from cookie and returns full session data.
-// The result (including "not logged in") is memoized in the gin context, so helpers
+// The result (including "not logged in") is memoized in the request Context, so helpers
 // called several times per request validate the session only once.
-func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
+func (s *WebServer) getWebSession(c *Context) *SessionData {
 	if v, ok := c.Get(ctxKeyWebSessionChecked); ok {
 		if checked, _ := v.(bool); checked {
 			sd, _ := c.MustGet(ctxKeyWebSession).(*SessionData)
@@ -157,7 +156,7 @@ func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
 }
 
 // lookupWebSession validates the session cookie against the database.
-func (s *WebServer) lookupWebSession(c *gin.Context) *SessionData {
+func (s *WebServer) lookupWebSession(c *Context) *SessionData {
 	sessionID, err := c.Cookie("session_id")
 	if err != nil {
 		return nil
@@ -191,15 +190,15 @@ func (s *WebServer) lookupWebSession(c *gin.Context) *SessionData {
 
 // clearRequestSession drops the memoized session and admin flag of this request
 // (after login or logout changed the session).
-func (s *WebServer) clearRequestSession(c *gin.Context) {
+func (s *WebServer) clearRequestSession(c *Context) {
 	c.Set(ctxKeyWebSessionChecked, false)
 	c.Set(ctxKeyWebSession, (*SessionData)(nil))
 	c.Set(ctxKeyIsAdmin, nil)
 }
 
 // isAdminRequest reports whether the logged-in user of this request is an admin.
-// The result is memoized in the gin context.
-func (s *WebServer) isAdminRequest(c *gin.Context) bool {
+// The result is memoized in the request Context.
+func (s *WebServer) isAdminRequest(c *Context) bool {
 	if v, ok := c.Get(ctxKeyIsAdmin); ok {
 		if b, ok := v.(bool); ok {
 			return b
@@ -305,7 +304,7 @@ func validatePassword(password string) error {
 // setSessionCookie sets the session cookie of a freshly created session, which lasts a
 // full SessionTimeout. Requests on an existing session use setSessionCookieMaxAge with
 // sessionCookieMaxAge, so the cookie follows the server-side expiry.
-func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
+func (s *WebServer) setSessionCookie(c *Context, sessionID string) {
 	s.setSessionCookieMaxAge(c, sessionID, int(database.SessionTimeout.Seconds()))
 }
 
@@ -326,10 +325,10 @@ func sessionCookieMaxAge(expiresAt time.Time) int {
 }
 
 // setSessionCookieMaxAge writes the session cookie with an explicit Max-Age.
-func (s *WebServer) setSessionCookieMaxAge(c *gin.Context, sessionID string, maxAge int) {
+func (s *WebServer) setSessionCookieMaxAge(c *Context, sessionID string, maxAge int) {
 	// Detect HTTPS from the current request perspective only
 	// Prefer actual TLS on the request or trusted reverse proxy header
-	// Gin guarantees c.Request is non-nil for handlers
+	// The router guarantees c.Request is non-nil for handlers
 	isHTTPS := c.Request.TLS != nil
 	if v, exists := c.Get("is_https"); exists {
 		if b, ok := v.(bool); ok {
@@ -352,9 +351,9 @@ func (s *WebServer) setSessionCookieMaxAge(c *gin.Context, sessionID string, max
 }
 
 // Helper function to clear session cookie
-func (s *WebServer) clearSessionCookie(c *gin.Context) {
+func (s *WebServer) clearSessionCookie(c *Context) {
 	// Detect HTTPS from the current request perspective only
-	// Gin guarantees c.Request is non-nil for handlers
+	// The router guarantees c.Request is non-nil for handlers
 	isHTTPS := c.Request.TLS != nil
 	if v, exists := c.Get("is_https"); exists {
 		if b, ok := v.(bool); ok {

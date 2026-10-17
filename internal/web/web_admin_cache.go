@@ -3,12 +3,11 @@ package web
 import (
 	"net/http"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // adminClearCache clears the sanitized content cache, newsgroup cache, and article cache
-func (s *WebServer) adminClearCache(c *gin.Context) {
+func (s *WebServer) adminClearCache(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}

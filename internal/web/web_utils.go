@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/utils"
@@ -21,11 +20,11 @@ import (
 //   Returns the NNTP TCP port
 // - func (s *WebServer) NNTPGetTLSPort() int (line ~247)
 //   Returns the NNTP TLS port
-// - func (s *WebServer) getBaseTemplateData(c *gin.Context, title string) TemplateData (line ~255)
+// - func (s *WebServer) getBaseTemplateData(c *Context, title string) TemplateData (line ~255)
 //   Creates base template data used by all page handlers
-// - func (s *WebServer) renderError(c *gin.Context, statusCode int, message string, errstring string) (line ~1280)
+// - func (s *WebServer) renderError(c *Context, statusCode int, message string, errstring string) (line ~1280)
 //   Renders error pages with consistent formatting
-// - func (s *WebServer) renderTemplate(c *gin.Context, templateName string, data interface{}) (line ~1308)
+// - func (s *WebServer) renderTemplate(c *Context, templateName string, data interface{}) (line ~1308)
 //   Renders templates with base template data
 // - func (s *WebServer) GetGroupCount() int (line ~1320)
 //   Returns the total number of active newsgroups
@@ -59,7 +58,7 @@ func (s *WebServer) NNTPGetTLSPort() int {
 }
 
 // getBaseTemplateData creates a TemplateData struct with common information including user auth
-func (s *WebServer) getBaseTemplateData(c *gin.Context, title string) TemplateData {
+func (s *WebServer) getBaseTemplateData(c *Context, title string) TemplateData {
 	// Check registration status (default to true if error)
 	registrationEnabled := true
 	if enabled, err := s.DB.IsRegistrationEnabled(); err == nil {
@@ -109,7 +108,7 @@ func (s *WebServer) getBaseTemplateData(c *gin.Context, title string) TemplateDa
 
 // requireAdminAuth checks authentication and admin permissions for admin handlers
 // Returns true if authorized, false if not (and handles the redirect)
-func (s *WebServer) requireAdminAuth(c *gin.Context) bool {
+func (s *WebServer) requireAdminAuth(c *Context) bool {
 	// Check authentication
 	session := s.getWebSession(c)
 	if session == nil {
@@ -127,27 +126,8 @@ func (s *WebServer) requireAdminAuth(c *gin.Context) bool {
 	return true
 }
 
-// requireAdminAuthJSON checks authentication and admin permissions for JSON API handlers
-// Returns true if authorized, false if not (and handles the JSON error response)
-func (s *WebServer) requireAdminAuthJSON(c *gin.Context) bool {
-	// Check authentication
-	session := s.getWebSession(c)
-	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
-		return false
-	}
-
-	// Check admin permissions
-	if !s.isAdminRequest(c) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
-		return false
-	}
-
-	return true
-}
-
 // renderError renders an error page
-func (s *WebServer) renderError(c *gin.Context, statusCode int, message string, errstring string) {
+func (s *WebServer) renderError(c *Context, statusCode int, message string, errstring string) {
 	errorData := struct {
 		TemplateData
 		Error      string
@@ -168,7 +148,7 @@ func (s *WebServer) renderError(c *gin.Context, statusCode int, message string, 
 }
 
 // renderTemplate renders a template with base template data
-func (s *WebServer) renderTemplate(c *gin.Context, templateName string, data interface{}) {
+func (s *WebServer) renderTemplate(c *Context, templateName string, data interface{}) {
 	s.renderPage(c, http.StatusOK, data, templateName)
 }
 

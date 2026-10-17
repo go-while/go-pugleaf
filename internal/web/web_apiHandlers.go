@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -69,7 +68,7 @@ func truncateRunes(s string, n int) string {
 var apiStatsCache struct {
 	mu      sync.Mutex
 	at      time.Time
-	stats   gin.H
+	stats   H
 	loading chan struct{}
 }
 
@@ -77,11 +76,11 @@ var apiStatsCache struct {
 var statsComputeCount atomic.Int64
 
 // requireAPIEnabled is a middleware that checks if API is enabled
-func (s *WebServer) requireAPIEnabled() gin.HandlerFunc {
-	return func(c *gin.Context) {
+func (s *WebServer) requireAPIEnabled() HandlerFunc {
+	return func(c *Context) {
 		apiEnabledStr, err := s.DB.GetConfigValue(config.CFG_KEY_API_ENABLED)
 		if err != nil || apiEnabledStr != "true" {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
+			c.JSON(http.StatusServiceUnavailable, H{
 				"error":   "API services are currently disabled",
 				"message": "The API is not available at this time. Please contact the administrator.",
 			})
@@ -93,22 +92,22 @@ func (s *WebServer) requireAPIEnabled() gin.HandlerFunc {
 }
 
 // Functions to be moved from server.go:
-// - func (s *WebServer) listGroups(c *gin.Context) (line ~313)
+// - func (s *WebServer) listGroups(c *Context) (line ~313)
 //   API endpoint for "/api/v1/groups" to return JSON list of groups
-// - func (s *WebServer) getGroupOverview(c *gin.Context) (line ~354)
+// - func (s *WebServer) getGroupOverview(c *Context) (line ~354)
 //   API endpoint for "/api/v1/groups/:group/overview" to return group overview JSON
-// - func (s *WebServer) getArticle(c *gin.Context) (line ~403)
+// - func (s *WebServer) getArticle(c *Context) (line ~403)
 //   API endpoint for "/api/v1/groups/:group/articles/:articleNum" to return article JSON
-// - func (s *WebServer) getArticleByMessageId(c *gin.Context) (line ~428)
+// - func (s *WebServer) getArticleByMessageId(c *Context) (line ~428)
 //   API endpoint for "/api/v1/groups/:group/message/:messageId" to return article JSON
-// - func (s *WebServer) getGroupThreads(c *gin.Context) (line ~447)
+// - func (s *WebServer) getGroupThreads(c *Context) (line ~447)
 //   API endpoint for "/api/v1/groups/:group/threads" to return group threads JSON
-// - func (s *WebServer) getStats(c *gin.Context) (line ~466)
+// - func (s *WebServer) getStats(c *Context) (line ~466)
 //   API endpoint for "/api/v1/stats" to return server statistics JSON
 //
 // Note: Thread tree API function (handleThreadTreeAPI) is in threadTreePage.go
 
-func (s *WebServer) listGroups(c *gin.Context) {
+func (s *WebServer) listGroups(c *Context) {
 	// Get pagination parameters
 	page := 1
 	//pageSize := 50 // Default page size
@@ -122,7 +121,7 @@ func (s *WebServer) listGroups(c *gin.Context) {
 	groups, totalCount, err := s.DB.GetNewsgroupsPaginated(page, LIMIT_listGroups)
 	if err != nil {
 		log.Printf("[API]: listGroups page=%d: %v", page, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		c.JSON(http.StatusInternalServerError, H{"error": "Internal server error"})
 		return
 	}
 
@@ -144,7 +143,7 @@ func (s *WebServer) listGroups(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-func (s *WebServer) getGroupOverview(c *gin.Context) {
+func (s *WebServer) getGroupOverview(c *Context) {
 	groupName := c.Param("group")
 
 	// Check if user can access this group (active status + admin bypass)
@@ -176,7 +175,7 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 
 	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
+		c.JSON(http.StatusNotFound, H{"error": "Group not found"})
 		return
 	}
 	defer groupDB.Return()
@@ -200,7 +199,7 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 	overviews, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_listGroups)
 	if err != nil {
 		log.Printf("[API]: getGroupOverview group='%s': %v", groupName, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		c.JSON(http.StatusInternalServerError, H{"error": "Internal server error"})
 		return
 	}
 
@@ -236,7 +235,7 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-func (s *WebServer) getArticle(c *gin.Context) {
+func (s *WebServer) getArticle(c *Context) {
 	groupName := c.Param("group")
 	articleNumStr := c.Param("articleNum")
 
@@ -247,19 +246,19 @@ func (s *WebServer) getArticle(c *gin.Context) {
 
 	articleNum, err := strconv.ParseInt(articleNumStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid article number"})
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid article number"})
 		return
 	}
 
 	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
+		c.JSON(http.StatusNotFound, H{"error": "Group not found"})
 		return
 	}
 	defer groupDB.Return()
 	article, err := s.DB.GetArticleByNum(groupDB, articleNum)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
+		c.JSON(http.StatusNotFound, H{"error": "Article not found"})
 		return
 	}
 	// Hidden articles do not exist for token holders: a token is never an admin (D2).
@@ -267,14 +266,14 @@ func (s *WebServer) getArticle(c *gin.Context) {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			log.Printf("[WEB]: API getArticle: GetArticleFlags(%s/%d): %v", groupName, articleNum, err)
 		}
-		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
+		c.JSON(http.StatusNotFound, H{"error": "Article not found"})
 		return
 	}
 
 	c.JSON(http.StatusOK, article)
 }
 
-func (s *WebServer) getArticleByMessageId(c *gin.Context) {
+func (s *WebServer) getArticleByMessageId(c *Context) {
 	groupName := c.Param("group")
 	messageId := c.Param("messageId")
 
@@ -285,13 +284,13 @@ func (s *WebServer) getArticleByMessageId(c *gin.Context) {
 
 	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
+		c.JSON(http.StatusNotFound, H{"error": "Group not found"})
 		return
 	}
 	defer groupDB.Return()
 	article, err := s.DB.GetArticleByMessageID(groupDB, messageId)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
+		c.JSON(http.StatusNotFound, H{"error": "Article not found"})
 		return
 	}
 	// Hidden articles do not exist for token holders: a token is never an admin (D2).
@@ -299,14 +298,14 @@ func (s *WebServer) getArticleByMessageId(c *gin.Context) {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			log.Printf("[WEB]: API getArticleByMessageId: GetArticleFlagsByMessageID(%s): %v", groupName, err)
 		}
-		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
+		c.JSON(http.StatusNotFound, H{"error": "Article not found"})
 		return
 	}
 
 	c.JSON(http.StatusOK, article)
 }
 
-func (s *WebServer) getGroupThreads(c *gin.Context) {
+func (s *WebServer) getGroupThreads(c *Context) {
 	groupName := c.Param("group")
 
 	// Check if user can access this group (active status + admin bypass)
@@ -329,14 +328,14 @@ func (s *WebServer) getGroupThreads(c *gin.Context) {
 
 	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
+		c.JSON(http.StatusNotFound, H{"error": "Group not found"})
 		return
 	}
 	defer groupDB.Return()
 	threads, err := s.DB.GetThreadsPaged(groupDB, limit, offset)
 	if err != nil {
 		log.Printf("[API]: getGroupThreads group='%s' limit=%d offset=%d: %v", groupName, limit, offset, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		c.JSON(http.StatusInternalServerError, H{"error": "Internal server error"})
 		return
 	}
 
@@ -358,7 +357,7 @@ func nextThreadsOffsetHeader(offset, limit, n, maxOffset int) string {
 
 // getStats returns JSON statistics data for the API (cached for apiStatsTTL).
 // When the cache is cold or expired, only one request recomputes; the others wait for it.
-func (s *WebServer) getStats(c *gin.Context) {
+func (s *WebServer) getStats(c *Context) {
 	// The cached map is never modified after it is stored, so it can be served without the lock.
 	var mine chan struct{}
 	for {
@@ -391,7 +390,7 @@ func (s *WebServer) getStats(c *gin.Context) {
 
 	groups, err := s.DB.GetActiveNewsgroups()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get statistics"})
+		c.JSON(http.StatusInternalServerError, H{"error": "Failed to get statistics"})
 		return
 	}
 
@@ -400,7 +399,7 @@ func (s *WebServer) getStats(c *gin.Context) {
 	totalThreads := 0
 	activeGroups := 0
 	var oldestArticle, newestArticle time.Time
-	topGroups := make([]gin.H, 0)
+	topGroups := make([]H, 0)
 
 	for _, group := range groups {
 		if group.MessageCount > 0 {
@@ -408,7 +407,7 @@ func (s *WebServer) getStats(c *gin.Context) {
 			totalArticles += group.MessageCount
 
 			// Add to top groups (for now, all groups - could be limited/sorted later)
-			topGroups = append(topGroups, gin.H{
+			topGroups = append(topGroups, H{
 				"name":          group.Name,
 				"article_count": int(group.MessageCount), // Convert to int for consistency
 				"total_size":    0,                       // Could calculate actual size if needed
@@ -436,7 +435,7 @@ func (s *WebServer) getStats(c *gin.Context) {
 		topGroups = topGroups[:10]
 	}
 
-	stats := gin.H{
+	stats := H{
 		"total_groups":    len(groups),
 		"active_groups":   activeGroups,
 		"total_articles":  int(totalArticles), // Convert to int for JSON
@@ -463,7 +462,7 @@ func (s *WebServer) getStats(c *gin.Context) {
 }
 
 // getArticlePreview handles public article preview requests (no auth required)
-func (s *WebServer) getArticlePreview(c *gin.Context) {
+func (s *WebServer) getArticlePreview(c *Context) {
 	groupName := c.Param("group")
 	articleNumStr := c.Param("articleNum")
 
@@ -474,14 +473,14 @@ func (s *WebServer) getArticlePreview(c *gin.Context) {
 
 	articleNum, err := strconv.ParseInt(articleNumStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid article number"})
+		c.JSON(http.StatusBadRequest, H{"error": "Invalid article number"})
 		return
 	}
 
 	// Get group database
 	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
+		c.JSON(http.StatusNotFound, H{"error": "Group not found"})
 		return
 	}
 	defer groupDB.Return()
@@ -491,21 +490,21 @@ func (s *WebServer) getArticlePreview(c *gin.Context) {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			log.Printf("[WEB]: getArticlePreview: GetArticleFlags(%s/%d): %v", groupName, articleNum, err)
 		}
-		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
+		c.JSON(http.StatusNotFound, H{"error": "Article not found"})
 		return
 	}
 
 	// Get article overview for basic info
 	overview, err := s.DB.GetOverviewByArticleNum(groupDB, articleNum)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
+		c.JSON(http.StatusNotFound, H{"error": "Article not found"})
 		return
 	}
 
 	// Get article content (limited for preview)
 	article, err := s.DB.GetArticleByNum(groupDB, articleNum)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Article content not found"})
+		c.JSON(http.StatusNotFound, H{"error": "Article content not found"})
 		return
 	}
 
@@ -520,7 +519,7 @@ func (s *WebServer) getArticlePreview(c *gin.Context) {
 	fullBodyDecoded := models.DecodeBodyText(bodyText, headers)
 	bodyPreview := truncateRunes(fullBodyDecoded, 500)
 
-	response := gin.H{
+	response := H{
 		"article_num": articleNum,
 		"group":       groupName,
 		"subject":     string(overview.PrintSanitized("subject", groupName)),

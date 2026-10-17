@@ -8,21 +8,20 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // This file should contain the article page related functions from server.go:
 //
 // Functions to be moved from server.go:
-//   - func (s *WebServer) articlePage(c *gin.Context) (line ~671)
+//   - func (s *WebServer) articlePage(c *Context) (line ~671)
 //     Handles "/groups/:group/articles/:articleNum" route to display a specific article
-//   - func (s *WebServer) articleByMessageIdPage(c *gin.Context) (line ~739)
+//   - func (s *WebServer) articleByMessageIdPage(c *Context) (line ~739)
 //     Handles "/groups/:group/message/:messageId" route to display article by message ID
 //
 // This file will handle the individual article view functionality, displaying specific articles
 // either by article number or message ID.
-func (s *WebServer) articlePage(c *gin.Context) {
+func (s *WebServer) articlePage(c *Context) {
 	groupName := c.Param("group")
 	articleNumStr := c.Param("articleNum")
 
@@ -105,7 +104,7 @@ func (s *WebServer) articlePage(c *gin.Context) {
 	s.renderPage(c, http.StatusOK, data, "article.html")
 }
 
-func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
+func (s *WebServer) articleByMessageIdPage(c *Context) {
 	groupName := c.Param("group")
 	messageId := c.Param("messageId")
 
@@ -167,6 +166,6 @@ func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
 // articleHiddenFor reports whether an article with this hide counter is invisible to the
 // requester: hidden articles (hide > 0) exist only for admins (D2). Callers read hide with
 // GetArticleFlags/GetArticleFlagsByMessageID, never from a cached article.
-func (s *WebServer) articleHiddenFor(c *gin.Context, hide int) bool {
+func (s *WebServer) articleHiddenFor(c *Context, hide int) bool {
 	return hide > 0 && !s.isAdminRequest(c)
 }

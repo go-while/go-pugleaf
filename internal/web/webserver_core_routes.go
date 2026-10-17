@@ -3,20 +3,16 @@ package web
 
 import (
 	"context"
-	"fmt"
 	"html/template"
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/gin-contrib/secure"
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -26,7 +22,7 @@ import (
 // Server represents the web server
 type WebServer struct {
 	DB            *database.Database
-	Router        *gin.Engine
+	Router        *Router
 	Config        *config.WebConfig
 	NNTP          *nntp.NNTPServer
 	templates     *template.Template
@@ -227,7 +223,7 @@ type SearchPageData struct {
 // usable entry: loopback and the private ranges a proxy on the same host or in a container runs in.
 var DefaultReverseProxy = []string{"127.0.0.0/8", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
 
-// contentSecurityPolicy is sent on every response (secure.Config in NewWebServer). Scripts and
+// contentSecurityPolicy is sent on every response (SecureHeaders in NewWebServer). Scripts and
 // styles keep 'unsafe-inline' because templates still use inline <script> blocks and on*= handlers;
 // the external hosts are the stylesheet/font CDNs the base templates load. No external script, no
 // fetch/XHR to other origins, no plugins, no framing, forms post only to this site.
@@ -244,17 +240,12 @@ const contentSecurityPolicy = "default-src 'self'; " +
 
 // NewWebServer creates a new web server instance
 func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *nntp.NNTPServer, cronEdit bool, noCronjobs bool) *WebServer {
-	// Set Gin to release mode for production
-	gin.SetMode(gin.ReleaseMode)
-
-	router := gin.Default()
-	// Route on the escaped path, so a %2F in a message-id stays inside the :messageId segment
-	// (A-web-18). gin's own UnescapePathValues uses url.QueryUnescape, which turns '+' into a
-	// space (comp.lang.c++, <a+b@x>), so it is off and unescapeRawPathParams path-unescapes the
-	// params instead. It is the first application middleware: nothing reads a param before it.
-	router.UseRawPath = true
-	router.UnescapePathValues = false
-	router.Use(unescapeRawPathParams())
+	// The access log comes first, so a request that panics still gets its line with the 500
+	// Recovery answered. ServeMux matches on the escaped path and path-unescapes each wildcard
+	// segment, so a %2F in a message-id stays inside the {messageId} segment and '+' stays '+'
+	// (A-web-18).
+	router := NewRouter()
+	router.Use(AccessLog(), Recovery())
 
 	// Client IPs come from one configured header, and only when the peer is a trusted proxy
 	ReverseProxyAddr, err := db.GetConfigValue(config.CFG_KEY_REVERSEPROXY)
@@ -266,7 +257,7 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 		log.Printf("[WEB]: Error getting ReverseProxyIPHeader: %v", err)
 	}
 	trustedProxyNets := configureTrustedProxiesWithHeader(router, ReverseProxyAddr, ReverseProxyIPHeader)
-	log.Printf("[WEB]: Trusted reverse proxies: %v | client IP header: %v", trustedProxyNets, router.RemoteIPHeaders)
+	log.Printf("[WEB]: Trusted reverse proxies: %v | client IP header: %v", trustedProxyNets, router.RemoteIPHeader())
 
 	// Don't use ParseGlob - it causes template name conflicts
 	// Instead, we'll load templates individually in each handler
@@ -296,30 +287,14 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	server.tokenUsageBuffer.counts = make(map[int64]int64)
 	server.tokenUsageBuffer.last = make(map[int64]time.Time)
 
-	// Count in-flight requests, so Shutdown knows when the handlers are done. Only gin's own
-	// Logger and Recovery and unescapeRawPathParams (which reads no state) run in front of it. Every
-	// route is covered, because this registration precedes setupRoutes.
+	// Count in-flight requests, so Shutdown knows when the handlers are done. Only the access log
+	// and Recovery (which read no server state) run in front of it. Every route is covered, because
+	// this registration precedes setupRoutes.
 	router.Use(server.trackInFlight())
 
-	// Configure security headers based on SSL setup
-	secureConfig := secure.Config{
-		FrameDeny:             true,
-		ContentTypeNosniff:    true,
-		BrowserXssFilter:      true,
-		ReferrerPolicy:        "strict-origin-when-cross-origin",
-		ContentSecurityPolicy: contentSecurityPolicy,
-	}
-
-	// Only add SSL-specific headers if SSL is enabled on the application itself
-	// (not when running behind a reverse proxy like nginx with SSL)
-	if webconfig.SSL {
-		secureConfig.SSLRedirect = true
-		secureConfig.STSSeconds = 31536000
-		secureConfig.STSIncludeSubdomains = true
-	}
-
-	// Apply security middleware
-	router.Use(secure.New(secureConfig))
+	// Security headers on every response. The SSL redirect and HSTS only when SSL is enabled on
+	// the application itself (not when running behind a reverse proxy like nginx with SSL).
+	router.Use(SecureHeaders(SecureConfig{SSLRedirect: webconfig.SSL, STS: webconfig.SSL}))
 
 	// Check if robots.txt file exists
 	robotsPath := "./web/robots.txt"
@@ -356,31 +331,26 @@ func (s *WebServer) setupRoutes() {
 	// Static files first (highest priority)
 	s.Router.Use(s.BotDetectionMiddleware())
 
-	// Use embedded static files if available, otherwise fall back to filesystem
-	if UseEmbeddedStatic() {
-		s.Router.GET("/static/*filepath", EmbeddedStaticHandler("/static"))
-		log.Printf("[WEB]: Using embedded static files")
-	} else {
-		s.Router.Static("/static", "./web/static")
-		log.Printf("[WEB]: Using filesystem static files from ./web/static")
-	}
+	// Static files come from the FS embedded at build time
+	s.Router.GET("/static/{filepath...}", EmbeddedStaticHandler("/static"))
+	log.Printf("[WEB]: Using embedded static files")
 
 	// Handle favicon to prevent it from being caught by section routes.
 	// web/favicon.ico is not part of the embedded static/* FS, so it always comes from disk;
 	// the type is set explicitly because .ico is mapped to text/plain on some systems.
 	// A missing file still answers 404 (http.ServeFile overwrites the header then).
-	// HEAD is registered too: browsers and proxies probe the icon that way, and gin does not
-	// answer HEAD from a GET route (it used to reply 404 with text/plain).
-	faviconHandler := func(c *gin.Context) {
+	// HEAD is registered explicitly too: browsers and proxies probe the icon that way (the mux
+	// would also serve HEAD from the GET route).
+	faviconHandler := func(c *Context) {
 		c.Header("Content-Type", "image/x-icon")
 		c.File("web/favicon.ico")
 	}
 	s.Router.GET("/favicon.ico", faviconHandler)
 	s.Router.HEAD("/favicon.ico", faviconHandler)
-	s.Router.GET("/sitemap.xml", func(c *gin.Context) {
+	s.Router.GET("/sitemap.xml", func(c *Context) {
 		c.Status(http.StatusNotFound)
 	})
-	s.Router.GET("/robots.txt", func(c *gin.Context) {
+	s.Router.GET("/robots.txt", func(c *Context) {
 		// Check if we have a physical robots.txt file
 		if s.robotsTxtPath != "" {
 			c.File(s.robotsTxtPath)
@@ -389,46 +359,45 @@ func (s *WebServer) setupRoutes() {
 			c.String(http.StatusOK, "User-agent: *\nDisallow:\n")
 		}
 	})
-	s.Router.GET("/ping", func(c *gin.Context) {
+	s.Router.GET("/ping", func(c *Context) {
 		c.String(200, "pong")
 	})
 
 	// Handle API base routes to prevent them from being caught by section routes
-	s.Router.GET("/api", func(c *gin.Context) {
+	s.Router.GET("/api", func(c *Context) {
 		c.Redirect(http.StatusMovedPermanently, "/help")
 	})
-	s.Router.GET("/api/", func(c *gin.Context) {
+	s.Router.GET("/api/{$}", func(c *Context) {
 		c.Redirect(http.StatusMovedPermanently, "/help")
 	})
-	s.Router.GET("/api/v1", func(c *gin.Context) {
+	s.Router.GET("/api/v1", func(c *Context) {
 		c.Redirect(http.StatusMovedPermanently, "/help")
 	})
-	s.Router.GET("/api/v1/", func(c *gin.Context) {
+	s.Router.GET("/api/v1/{$}", func(c *Context) {
 		c.Redirect(http.StatusMovedPermanently, "/help")
 	})
 
 	// API routes (high priority - before dynamic section routes)
 	// stats are public
-	s.Router.GET("/api/v1/stats", s.requireAPIEnabled(), s.getStats)  // API endpoint for stats
-	s.Router.GET("/api/v1/stats/", s.requireAPIEnabled(), s.getStats) // API endpoint for stats
+	s.Router.GET("/api/v1/stats", s.requireAPIEnabled(), s.getStats)     // API endpoint for stats
+	s.Router.GET("/api/v1/stats/{$}", s.requireAPIEnabled(), s.getStats) // API endpoint for stats
 
 	// Public article preview endpoint (no token required, but it follows the API setting).
 	// The web route below serves the tree view, which must keep working with the API disabled.
-	s.Router.GET("/api/v1/groups/:group/articles/:articleNum/preview", s.requireAPIEnabled(), s.getArticlePreview)
+	s.Router.GET("/api/v1/groups/{group}/articles/{articleNum}/preview", s.requireAPIEnabled(), s.getArticlePreview)
 
-	api := s.Router.Group("/api/v1")
-	api.Use(s.requireAPIEnabled()) // Check if API is enabled
-	api.Use(s.APIAuthRequired())   // Then check authentication
+	// Check if API is enabled, then check authentication
+	api := s.Router.Group("/api/v1", s.requireAPIEnabled(), s.APIAuthRequired())
 	{
-		//api.GET("/stats/", s.getStats) // not public, needs auth
+		//api.GET("/stats/{$}", s.getStats) // not public, needs auth
 		api.GET("/groups", s.listGroups)
-		api.GET("/groups/", s.listGroups)
-		api.GET("/groups/:group/overview", s.getGroupOverview)
-		api.GET("/groups/:group/overview/", s.getGroupOverview)
-		api.GET("/groups/:group/articles/:articleNum", s.getArticle)
-		api.GET("/groups/:group/message/:messageId", s.getArticleByMessageId)
-		api.GET("/groups/:group/threads", s.getGroupThreads)
-		api.GET("/groups/:group/threads/", s.getGroupThreads)
+		api.GET("/groups/{$}", s.listGroups)
+		api.GET("/groups/{group}/overview", s.getGroupOverview)
+		api.GET("/groups/{group}/overview/{$}", s.getGroupOverview)
+		api.GET("/groups/{group}/articles/{articleNum}", s.getArticle)
+		api.GET("/groups/{group}/message/{messageId}", s.getArticleByMessageId)
+		api.GET("/groups/{group}/threads", s.getGroupThreads)
+		api.GET("/groups/{group}/threads/{$}", s.getGroupThreads)
 	}
 
 	// Authentication routes (high priority)
@@ -444,8 +413,8 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/aichat", s.aichatPage)
 	s.Router.POST("/aichat/send", s.aichatSend)
 	s.Router.GET("/aichat/models", s.aichatModels)
-	s.Router.POST("/aichat/history/:model", s.aichatLoadHistory)
-	s.Router.POST("/aichat/clear/:model", s.aichatClearHistory)
+	s.Router.POST("/aichat/history/{model}", s.aichatLoadHistory)
+	s.Router.POST("/aichat/clear/{model}", s.aichatClearHistory)
 	s.Router.POST("/aichat/clear/all", s.aichatClearHistory)
 	s.Router.GET("/aichat/counts", s.aichatGetCounts)
 
@@ -499,96 +468,80 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/crons/toggle", s.adminToggleCronJob)
 	s.Router.POST("/admin/crons/delete", s.adminDeleteCronJob)
 	s.Router.POST("/admin/crons/stop", s.adminStopCronJob)
-	s.Router.GET("/admin/cronjobs/viewlog/:id", s.adminViewCronJobLog)
+	s.Router.GET("/admin/cronjobs/viewlog/{id}", s.adminViewCronJobLog)
 	s.Router.POST("/admin/postqueue/delete", s.adminDeletePostQueueEntry)
 	s.Router.POST("/admin/postqueue/retry", s.adminRetryPostQueueEntry)
 	// Legacy/admin routes (high priority - must come before dynamic routes)
-	s.Router.GET("/", s.homePage)
-	s.Router.GET("/groups", s.groupsPage)                                                // groups listing
-	s.Router.GET("/groups/", s.groupsPage)                                               // Handle trailing slash
-	s.Router.GET("/hierarchies", s.hierarchiesPage)                                      // Hierarchies listing
-	s.Router.GET("/hierarchies/", s.hierarchiesPage)                                     // Handle trailing slash
-	s.Router.GET("/hierarchy-groups/:hierarchy", s.hierarchyGroupsPage)                  // Flat groups listing (legacy)
-	s.Router.GET("/hierarchy/:hierarchy", s.hierarchyTreePage)                           // Hierarchical tree view
-	s.Router.GET("/hierarchy/:hierarchy/", s.hierarchyTreePage)                          // Handle trailing slash
-	s.Router.GET("/hierarchy/:hierarchy/:level1", s.hierarchyTreePage)                   // Level 1: hierarchy.level1
-	s.Router.GET("/hierarchy/:hierarchy/:level1/", s.hierarchyTreePage)                  // Level 1 with slash
-	s.Router.GET("/hierarchy/:hierarchy/:level1/:level2", s.hierarchyTreePage)           // Level 2: hierarchy.level1.level2
-	s.Router.GET("/hierarchy/:hierarchy/:level1/:level2/", s.hierarchyTreePage)          // Level 2 with slash
-	s.Router.GET("/hierarchy/:hierarchy/:level1/:level2/:level3", s.hierarchyTreePage)   // Level 3: hierarchy.level1.level2.level3
-	s.Router.GET("/hierarchy/:hierarchy/:level1/:level2/:level3/", s.hierarchyTreePage)  // Level 3 with slash
-	s.Router.GET("/groups/:group", s.groupPage)                                          // Legacy group access
-	s.Router.GET("/groups/:group/", s.groupPage)                                         // Legacy group access with slash
-	s.Router.POST("/groups/:group/articles/:articleNum/spam", s.incrementSpam)           // Spam button
-	s.Router.POST("/groups/:group/articles/:articleNum/hide", s.incrementHide)           // Hide button
-	s.Router.POST("/groups/:group/articles/:articleNum/decrement-spam", s.decrementSpam) // Admin: Decrement spam
-	s.Router.POST("/groups/:group/articles/:articleNum/unhide", s.unhideArticle)         // Admin: Unhide article
-	s.Router.GET("/groups/:group/threads", s.groupThreadsPage)                           // Legacy threads access
-	s.Router.GET("/groups/:group/thread/:threadRoot", s.singleThreadPage)                // View single thread flat
-	s.Router.GET("/groups/:group/articles/:articleNum", s.articlePage)                   // Legacy article access
-	s.Router.GET("/groups/:group/articles/:articleNum/preview", s.getArticlePreview)     // Article preview (tree view hover)
-	s.Router.GET("/groups/:group/message/:messageId", s.articleByMessageIdPage)          // Article by message ID
-	s.Router.GET("/groups/:group/tree/:threadRoot", s.threadTreePage)                    // View thread as tree
+	s.Router.GET("/{$}", s.homePage)
+	s.Router.GET("/groups", s.groupsPage)                                                      // groups listing
+	s.Router.GET("/groups/{$}", s.groupsPage)                                                  // Handle trailing slash
+	s.Router.GET("/hierarchies", s.hierarchiesPage)                                            // Hierarchies listing
+	s.Router.GET("/hierarchies/{$}", s.hierarchiesPage)                                        // Handle trailing slash
+	s.Router.GET("/hierarchy-groups/{hierarchy}", s.hierarchyGroupsPage)                       // Flat groups listing (legacy)
+	s.Router.GET("/hierarchy/{hierarchy}", s.hierarchyTreePage)                                // Hierarchical tree view
+	s.Router.GET("/hierarchy/{hierarchy}/{$}", s.hierarchyTreePage)                            // Handle trailing slash
+	s.Router.GET("/hierarchy/{hierarchy}/{level1}", s.hierarchyTreePage)                       // Level 1: hierarchy.level1
+	s.Router.GET("/hierarchy/{hierarchy}/{level1}/{$}", s.hierarchyTreePage)                   // Level 1 with slash
+	s.Router.GET("/hierarchy/{hierarchy}/{level1}/{level2}", s.hierarchyTreePage)              // Level 2: hierarchy.level1.level2
+	s.Router.GET("/hierarchy/{hierarchy}/{level1}/{level2}/{$}", s.hierarchyTreePage)          // Level 2 with slash
+	s.Router.GET("/hierarchy/{hierarchy}/{level1}/{level2}/{level3}", s.hierarchyTreePage)     // Level 3: hierarchy.level1.level2.level3
+	s.Router.GET("/hierarchy/{hierarchy}/{level1}/{level2}/{level3}/{$}", s.hierarchyTreePage) // Level 3 with slash
+	s.Router.GET("/groups/{group}", s.groupPage)                                               // Legacy group access
+	s.Router.GET("/groups/{group}/{$}", s.groupPage)                                           // Legacy group access with slash
+	s.Router.POST("/groups/{group}/articles/{articleNum}/spam", s.incrementSpam)               // Spam button
+	s.Router.POST("/groups/{group}/articles/{articleNum}/hide", s.incrementHide)               // Hide button
+	s.Router.POST("/groups/{group}/articles/{articleNum}/decrement-spam", s.decrementSpam)     // Admin: Decrement spam
+	s.Router.POST("/groups/{group}/articles/{articleNum}/unhide", s.unhideArticle)             // Admin: Unhide article
+	s.Router.GET("/groups/{group}/threads", s.groupThreadsPage)                                // Legacy threads access
+	s.Router.GET("/groups/{group}/thread/{threadRoot}", s.singleThreadPage)                    // View single thread flat
+	s.Router.GET("/groups/{group}/articles/{articleNum}", s.articlePage)                       // Legacy article access
+	s.Router.GET("/groups/{group}/articles/{articleNum}/preview", s.getArticlePreview)         // Article preview (tree view hover)
+	s.Router.GET("/groups/{group}/message/{messageId}", s.articleByMessageIdPage)              // Article by message ID
+	s.Router.GET("/groups/{group}/tree/{threadRoot}", s.threadTreePage)                        // View thread as tree
 	s.Router.GET("/search", s.searchPage)
-	s.Router.GET("/search/", s.searchPage)
+	s.Router.GET("/search/{$}", s.searchPage)
 	s.Router.GET("/stats", s.statsPage)
-	s.Router.GET("/stats/", s.statsPage)
+	s.Router.GET("/stats/{$}", s.statsPage)
 	s.Router.GET("/SiteHelp", s.helpPage)
-	s.Router.GET("/SiteHelp/", s.helpPage)
+	s.Router.GET("/SiteHelp/{$}", s.helpPage)
 	s.Router.GET("/SiteNews", s.newsPage)
-	s.Router.GET("/SiteNews/", s.newsPage)
+	s.Router.GET("/SiteNews/{$}", s.newsPage)
 	s.Router.GET("/SiteIRC", s.ircPage)
-	s.Router.GET("/SiteIRC/", s.ircPage)
+	s.Router.GET("/SiteIRC/{$}", s.ircPage)
 	s.Router.GET("/SitePost", s.sitePostPage)
 	s.Router.POST("/SitePost", s.sitePostPage)
 	s.Router.POST("/SitePostSubmit", s.sitePostSubmit) // Handle form submission
 	s.Router.GET("/sections", s.sectionsPage)
-	s.Router.GET("/sections/", s.sectionsPage)
+	s.Router.GET("/sections/{$}", s.sectionsPage)
 
 	// Demo and testing routes
 	s.Router.GET("/demo/thread-tree", s.threadTreeDemoPage)
-	s.Router.GET("/demo/thread-tree/", s.threadTreeDemoPage)
+	s.Router.GET("/demo/thread-tree/{$}", s.threadTreeDemoPage)
 
 	// Tree view API routes
 	s.Router.GET("/api/thread-tree", s.requireAPIEnabled(), s.handleThreadTreeAPI)
 
 	// Tree view for specific threads
 
-	// Apply section validation middleware for dynamic section routes
-	sectionRoutes := s.Router.Group("/")
-	sectionRoutes.Use(s.sectionValidationMiddleware())
+	// Dynamic section routes behind the section validation middleware. Their patterns conflict
+	// with the literal-first ones above (/hierarchy/{hierarchy}/..., /static/{filepath...}), so
+	// they live in the fallback mux, which is consulted only when no route above matches.
+	sectionRoutes := s.Router.Fallback(s.sectionValidationMiddleware())
 	{
 		// Dynamic section routes with validation (lower priority)
-		sectionRoutes.GET("/:section", s.sectionPage)                                             // /rocksolid - list groups in section
-		sectionRoutes.GET("/:section/", s.sectionPage)                                            // /rocksolid/ - list groups in section
-		sectionRoutes.GET("/:section/:group/", s.sectionGroupPage)                                // /rocksolid/group.name/ - list articles
-		sectionRoutes.GET("/:section/:group/articles/:articleNum", s.sectionArticlePage)          // /rocksolid/group.name/articles/123
-		sectionRoutes.GET("/:section/:group/message/:messageId", s.sectionArticleByMessageIdPage) // /rocksolid/group.name/message/msgid
-		sectionRoutes.GET("/:section/:group/tree/:threadRoot", s.sectionThreadTreePage)           // View thread as tree in section
-	}
-}
-
-// unescapeRawPathParams path-unescapes the route params when gin matched on URL.RawPath, which
-// it does whenever the request path is not in canonical escaping (%2F, %2C, literal < >, ...).
-// With an empty RawPath gin matched on URL.Path, whose params Go's URL parsing already decoded.
-// url.PathUnescape keeps '+' as '+'; a value that does not unescape stays raw.
-func unescapeRawPathParams() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if len(c.Request.URL.RawPath) > 0 {
-			for i := range c.Params {
-				if v, err := url.PathUnescape(c.Params[i].Value); err == nil {
-					c.Params[i].Value = v
-				}
-			}
-		}
-		c.Next()
+		sectionRoutes.GET("/{section}", s.sectionPage)                                               // /rocksolid - list groups in section
+		sectionRoutes.GET("/{section}/{$}", s.sectionPage)                                           // /rocksolid/ - list groups in section
+		sectionRoutes.GET("/{section}/{group}/{$}", s.sectionGroupPage)                              // /rocksolid/group.name/ - list articles
+		sectionRoutes.GET("/{section}/{group}/articles/{articleNum}", s.sectionArticlePage)          // /rocksolid/group.name/articles/123
+		sectionRoutes.GET("/{section}/{group}/message/{messageId}", s.sectionArticleByMessageIdPage) // /rocksolid/group.name/message/msgid
+		sectionRoutes.GET("/{section}/{group}/tree/{threadRoot}", s.sectionThreadTreePage)           // View thread as tree in section
 	}
 }
 
 // trackInFlight counts the requests that are inside a handler. Shutdown waits for the counter to
 // reach zero after it cancelled the request contexts, so it can report handlers that keep running.
-func (s *WebServer) trackInFlight() gin.HandlerFunc {
-	return func(c *gin.Context) {
+func (s *WebServer) trackInFlight() HandlerFunc {
+	return func(c *Context) {
 		s.inFlightRequests.Add(1)
 		defer s.inFlightRequests.Add(-1)
 		c.Next()
@@ -596,8 +549,8 @@ func (s *WebServer) trackInFlight() gin.HandlerFunc {
 }
 
 // Custom bot detection middleware
-func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
+func (s *WebServer) BotDetectionMiddleware() HandlerFunc {
+	return func(c *Context) {
 		// Copy the settings under the read locks and never hold them across c.Next():
 		// UpdateBadBots/UpdateBadIPs would wait for the slowest request and block every new one.
 		// The update functions replace the slices instead of mutating them, so the copies stay valid.
@@ -644,39 +597,35 @@ func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
 
 // configureTrustedProxies configures the trusted proxies with the default client IP header.
 // It returns the parsed networks for isTrustedPeer.
-func configureTrustedProxies(router *gin.Engine, addrs string) []*net.IPNet {
+func configureTrustedProxies(router *Router, addrs string) []*net.IPNet {
 	return configureTrustedProxiesWithHeader(router, addrs, "")
 }
 
-// configureTrustedProxiesWithHeader makes gin take the client IP from exactly one forwarded header,
+// configureTrustedProxiesWithHeader makes the router take the client IP from exactly one forwarded header,
 // and only when the direct peer is a configured reverse proxy (comma or whitespace separated
 // IPs/CIDRs; empty or all-invalid means DefaultReverseProxy).
 //
 // Trusting more than one header is unsafe: behind a proxy that sets only X-Real-IP and passes the
 // client's own X-Forwarded-For through, the client picks its own address. header is the value of
-// CFG_KEY_REVERSEPROXY_IPHEADER: "" or "X-Forwarded-For" selects X-Forwarded-For (gin evaluates it
-// right to left and ignores invalid addresses), "X-Real-IP" selects X-Real-IP, anything else is
+// CFG_KEY_REVERSEPROXY_IPHEADER: "" or "X-Forwarded-For" selects X-Forwarded-For (Context.ClientIP
+// evaluates it right to left and ignores it when an entry is not an address), "X-Real-IP" selects X-Real-IP, anything else is
 // logged and falls back to X-Forwarded-For.
 // It returns the parsed networks for isTrustedPeer.
-func configureTrustedProxiesWithHeader(router *gin.Engine, addrs, header string) []*net.IPNet {
+func configureTrustedProxiesWithHeader(router *Router, addrs, header string) []*net.IPNet {
 	list, nets := parseTrustedProxyList(strings.Fields(strings.ReplaceAll(addrs, ",", " ")))
 	if len(list) == 0 {
-		list, nets = parseTrustedProxyList(DefaultReverseProxy)
+		_, nets = parseTrustedProxyList(DefaultReverseProxy)
 	}
-	if err := router.SetTrustedProxies(list); err != nil {
-		log.Printf("[WEB]: Error setting trusted proxies %v: %v", list, err)
-	}
-	router.ForwardedByClientIP = true
 
+	ipHeader := "X-Forwarded-For"
 	switch want := strings.TrimSpace(header); {
 	case strings.EqualFold(want, "X-Real-IP"):
-		router.RemoteIPHeaders = []string{"X-Real-IP"}
+		ipHeader = "X-Real-IP"
 	case want == "" || strings.EqualFold(want, "X-Forwarded-For"):
-		router.RemoteIPHeaders = []string{"X-Forwarded-For"}
 	default:
 		log.Printf("[WEB]: Unknown %s '%s', using X-Forwarded-For (valid: X-Forwarded-For, X-Real-IP)", config.CFG_KEY_REVERSEPROXY_IPHEADER, header)
-		router.RemoteIPHeaders = []string{"X-Forwarded-For"}
 	}
+	router.SetTrustedProxies(nets, ipHeader)
 	return nets
 }
 
@@ -760,11 +709,11 @@ func (s *WebServer) noteUntrustedForwarder(peer net.IP) {
 }
 
 // ReverseProxyMiddleware detects HTTPS terminated by a trusted reverse proxy.
-// The client IP is resolved by gin (see configureTrustedProxiesWithHeader); RemoteAddr and Host are
+// The client IP is resolved by Context.ClientIP (see configureTrustedProxiesWithHeader); RemoteAddr and Host are
 // never rewritten. A private or loopback peer that sends forwarded headers but is not trusted is
 // logged once: that is almost always a proxy missing from ReverseProxyAddr.
-func (s *WebServer) ReverseProxyMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
+func (s *WebServer) ReverseProxyMiddleware() HandlerFunc {
+	return func(c *Context) {
 		peer := net.ParseIP(c.RemoteIP())
 		trusted := s.isTrustedPeer(peer)
 		if !trusted && peer != nil && (peer.IsLoopback() || peer.IsPrivate()) &&
@@ -780,22 +729,6 @@ func (s *WebServer) ReverseProxyMiddleware() gin.HandlerFunc {
 		c.Set("is_https", isHTTPS)
 		c.Next()
 	}
-}
-
-func (s *WebServer) ApacheLogFormat() gin.HandlerFunc {
-	return gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
-		return fmt.Sprintf(`%s - - [%s] "%s %s %s" %d %d "%s" "%s"`+"\n",
-			param.ClientIP,
-			param.TimeStamp.Format("02/Jan/2006:15:04:05 -0700"),
-			param.Method,
-			param.Path,
-			param.Request.Proto,
-			param.StatusCode,
-			param.BodySize,
-			param.Request.Referer(),
-			param.Request.UserAgent(),
-		)
-	})
 }
 
 // loadSectionsCache populates the sections cache with valid section names from database
@@ -853,8 +786,8 @@ var knownNonSectionPaths = map[string]bool{
 }
 
 // sectionValidationMiddleware validates section names against the cache before routing
-func (s *WebServer) sectionValidationMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
+func (s *WebServer) sectionValidationMiddleware() HandlerFunc {
+	return func(c *Context) {
 		// Get the first path segment which should be the section name
 		path := c.Request.URL.Path
 		if path == "/" {
@@ -880,7 +813,7 @@ func (s *WebServer) sectionValidationMiddleware() gin.HandlerFunc {
 		// Check if this is a valid section
 		if !s.isValidSection(potentialSection) {
 			// Invalid section
-			//c.JSON(http.StatusNotFound, gin.H{"error": "501 wannaplay?"})
+			//c.JSON(http.StatusNotFound, H{"error": "501 wannaplay?"})
 			c.Redirect(http.StatusSeeOther, "https://www.youtube.com/watch?v=e--fDKBAkZA")
 			c.Abort()
 			return

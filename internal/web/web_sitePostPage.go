@@ -14,7 +14,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -59,7 +58,7 @@ type PostPageData struct {
 }
 
 // sitePostPage handles the "/SitePost" route to display the posting form
-func (s *WebServer) sitePostPage(c *gin.Context) {
+func (s *WebServer) sitePostPage(c *Context) {
 	// Check if user is authenticated
 	session := s.getWebSession(c)
 	if session == nil {
@@ -206,7 +205,7 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 }
 
 // sitePostSubmit handles the POST submission of new articles from web interface
-func (s *WebServer) sitePostSubmit(c *gin.Context) {
+func (s *WebServer) sitePostSubmit(c *Context) {
 	// Check if user is authenticated
 	session := s.getWebSession(c)
 	if session == nil {
@@ -514,7 +513,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 // An article hidden for the requester (D2: hide > 0 and not an admin, flags read from the
 // group DB like the article routes) gives no References: its thread data is not copied into
 // a reply. The reply still names the message-id itself.
-func (s *WebServer) lookupReplyReferences(c *gin.Context, newsgroups []string, messageID string) string {
+func (s *WebServer) lookupReplyReferences(c *Context, newsgroups []string, messageID string) string {
 	for _, newsgroup := range newsgroups {
 		groupDB, err := s.DB.GetGroupDB(newsgroup)
 		if err != nil {

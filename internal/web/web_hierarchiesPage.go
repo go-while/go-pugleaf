@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -20,7 +19,7 @@ var LIMIT_hierarchyTreePage = 384
 var LIMIT_hierarchiesPage = 512
 
 // Shows all available hierarchies with group counts and navigation
-func (s *WebServer) hierarchiesPage(c *gin.Context) {
+func (s *WebServer) hierarchiesPage(c *Context) {
 	// Get pagination parameters
 	page := 1
 
@@ -56,7 +55,7 @@ func (s *WebServer) hierarchiesPage(c *gin.Context) {
 }
 
 // hierarchyGroupsPage displays all newsgroups within a specific hierarchy
-func (s *WebServer) hierarchyGroupsPage(c *gin.Context) {
+func (s *WebServer) hierarchyGroupsPage(c *Context) {
 	hierarchyName := c.Param("hierarchy")
 	if hierarchyName == "" {
 		s.renderError(c, http.StatusBadRequest, "Missing hierarchy", "Hierarchy name is required")
@@ -99,17 +98,17 @@ func (s *WebServer) hierarchyGroupsPage(c *gin.Context) {
 }
 
 // adminUpdateHierarchies updates the hierarchy counts and structure
-func (s *WebServer) adminUpdateHierarchies(c *gin.Context) {
+func (s *WebServer) adminUpdateHierarchies(c *Context) {
 	// Check authentication and admin permissions
 	session := s.getWebSession(c)
 	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
+		c.JSON(http.StatusUnauthorized, H{"error": "Not authenticated"})
 		return
 	}
 
 	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
 	if err != nil || !s.isAdmin(currentUser) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		c.JSON(http.StatusForbidden, H{"error": "Access denied"})
 		return
 	}
 
@@ -133,7 +132,7 @@ func (s *WebServer) adminUpdateHierarchies(c *gin.Context) {
 }
 
 // hierarchyTreePage displays a hierarchical tree view for browsing newsgroups
-func (s *WebServer) hierarchyTreePage(c *gin.Context) {
+func (s *WebServer) hierarchyTreePage(c *Context) {
 	hierarchyName := c.Param("hierarchy")
 
 	// Build path from individual level parameters
@@ -293,7 +292,7 @@ func (s *WebServer) getHierarchyLevel(currentPath string, sortBy string, page in
 }
 
 // adminRestoreHierarchyDescriptions handles restoring all hierarchy descriptions from migration
-func (s *WebServer) adminRestoreHierarchyDescriptions(c *gin.Context) {
+func (s *WebServer) adminRestoreHierarchyDescriptions(c *Context) {
 	// Check authentication and admin permissions
 	if !s.requireAdminAuth(c) {
 		return

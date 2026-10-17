@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
 )
 
@@ -21,7 +20,7 @@ func (s *WebServer) countEnabledAPITokens(tokens []*database.APIToken) (count in
 }
 
 // adminCreateAPIToken handles API token creation from admin form
-func (s *WebServer) adminCreateAPIToken(c *gin.Context) {
+func (s *WebServer) adminCreateAPIToken(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -78,7 +77,7 @@ func (s *WebServer) adminCreateAPIToken(c *gin.Context) {
 }
 
 // adminToggleAPIToken handles enabling/disabling API tokens
-func (s *WebServer) adminToggleAPIToken(c *gin.Context) {
+func (s *WebServer) adminToggleAPIToken(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -121,7 +120,7 @@ func (s *WebServer) adminToggleAPIToken(c *gin.Context) {
 }
 
 // adminDeleteAPIToken handles API token deletion
-func (s *WebServer) adminDeleteAPIToken(c *gin.Context) {
+func (s *WebServer) adminDeleteAPIToken(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -152,29 +151,5 @@ func (s *WebServer) adminDeleteAPIToken(c *gin.Context) {
 	}
 
 	session.SetSuccess("API token deleted successfully")
-	c.Redirect(http.StatusSeeOther, "/admin?tab=apitokens")
-}
-
-// adminCleanupExpiredTokens handles cleanup of expired tokens
-func (s *WebServer) adminCleanupExpiredTokens(c *gin.Context) {
-	if !s.requireAdminAuth(c) {
-		return
-	}
-
-	session := s.getWebSession(c)
-
-	// Cleanup expired tokens
-	count, err := s.DB.CleanupExpiredTokens()
-	if err != nil {
-		session.SetError("Failed to cleanup expired tokens")
-		c.Redirect(http.StatusSeeOther, "/admin?tab=apitokens")
-		return
-	}
-
-	if count > 0 {
-		session.SetSuccess(strconv.Itoa(count) + " expired tokens cleaned up successfully")
-	} else {
-		session.SetSuccess("No expired tokens found to cleanup")
-	}
 	c.Redirect(http.StatusSeeOther, "/admin?tab=apitokens")
 }

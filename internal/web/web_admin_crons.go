@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -20,7 +19,7 @@ const cronJobsDisabledMsg = "Cron jobs are disabled on this instance"
 const cronEditRefused = "Adding or enabling cron jobs is disabled (start with -edit-cronjobs)"
 
 // adminCreateCronJob creates a new cron job
-func (s *WebServer) adminCreateCronJob(c *gin.Context) {
+func (s *WebServer) adminCreateCronJob(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -80,7 +79,7 @@ func (s *WebServer) adminCreateCronJob(c *gin.Context) {
 }
 
 // adminUpdateCronJob updates an existing cron job
-func (s *WebServer) adminUpdateCronJob(c *gin.Context) {
+func (s *WebServer) adminUpdateCronJob(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -156,7 +155,7 @@ func (s *WebServer) adminUpdateCronJob(c *gin.Context) {
 }
 
 // adminToggleCronJob toggles a cron job's enabled status
-func (s *WebServer) adminToggleCronJob(c *gin.Context) {
+func (s *WebServer) adminToggleCronJob(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -205,7 +204,7 @@ func (s *WebServer) adminToggleCronJob(c *gin.Context) {
 }
 
 // adminDeleteCronJob deletes a cron job
-func (s *WebServer) adminDeleteCronJob(c *gin.Context) {
+func (s *WebServer) adminDeleteCronJob(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}
@@ -241,7 +240,7 @@ func (s *WebServer) adminDeleteCronJob(c *gin.Context) {
 }
 
 // adminViewCronJobLog displays the log output for a specific cron job
-func (s *WebServer) adminViewCronJobLog(c *gin.Context) {
+func (s *WebServer) adminViewCronJobLog(c *Context) {
 	// Check authentication and admin permissions
 	session := s.getWebSession(c)
 	if session == nil {
@@ -347,7 +346,7 @@ func filterCronLog(logOutput []string, filter string, limit int) (displayOutput 
 }
 
 // adminStopCronJob stops a running cron job
-func (s *WebServer) adminStopCronJob(c *gin.Context) {
+func (s *WebServer) adminStopCronJob(c *Context) {
 	if !s.requireAdminAuth(c) {
 		return
 	}

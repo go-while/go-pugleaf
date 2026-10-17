@@ -6,14 +6,13 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // This file should contain the thread-related page functions from server.go:
 //
 // Functions to be moved from server.go:
-//   - func (s *WebServer) singleThreadPage(c *gin.Context) (line ~1394)
+//   - func (s *WebServer) singleThreadPage(c *Context) (line ~1394)
 //     Handles "/groups/:group/thread/:threadRoot" route to display a single thread flat view
 //
 // This file will handle thread-specific page functionality for single thread flat views.
@@ -21,7 +20,7 @@ import (
 const ThreadMessages_perPage int = 50 // Static page size for optimal caching
 
 // singleThreadPage displays all messages in a single thread as a flat list with pagination
-func (s *WebServer) singleThreadPage(c *gin.Context) {
+func (s *WebServer) singleThreadPage(c *Context) {
 	groupName := c.Param("group")
 	threadRootStr := c.Param("threadRoot")
 
@@ -155,7 +154,7 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 	// Get base template data with authentication context
 	baseData := s.getBaseTemplateData(c, threadRootArticle.GetCleanSubject()+" - Thread")
 
-	data := gin.H{
+	data := H{
 		"Title":               baseData.Title,
 		"CurrentTime":         baseData.CurrentTime,
 		"Port":                baseData.Port,

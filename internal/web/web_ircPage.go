@@ -3,8 +3,6 @@ package web
 
 import (
 	"net/http"
-
-	"github.com/gin-gonic/gin"
 )
 
 // NewsPageData represents data for news page
@@ -13,7 +11,7 @@ type IRCPageData struct {
 }
 
 // ircPage handles the "/SiteIRC" route to display IRC server information
-func (s *WebServer) ircPage(c *gin.Context) {
+func (s *WebServer) ircPage(c *Context) {
 	data := IRCPageData{
 		TemplateData: s.getBaseTemplateData(c, "IRC Server"),
 	}

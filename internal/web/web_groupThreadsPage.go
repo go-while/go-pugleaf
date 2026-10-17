@@ -5,13 +5,12 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 const Threads_perPage int64 = 50 // Static page size for optimal caching
 
-func (s *WebServer) groupThreadsPage(c *gin.Context) {
+func (s *WebServer) groupThreadsPage(c *Context) {
 	groupName := c.Param("group")
 
 	// Check if user can access this group (active status + admin bypass)
@@ -73,7 +72,7 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 	// Get base template data with authentication context
 	baseData := s.getBaseTemplateData(c, groupName+" - Threads")
 
-	data := gin.H{
+	data := H{
 		"Title":               baseData.Title,
 		"CurrentTime":         baseData.CurrentTime,
 		"Port":                baseData.Port,
