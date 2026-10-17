@@ -187,3 +187,17 @@ Leave `./data-test-mbox-uat` for the user.
   `handleLines(c, rawHead, body, isBinary, opts, sink)` (deviation from the plan's signature: the `isBinary`
   flag is needed because readBody drops a yEnc body, so an empty body alone cannot tell "binary" from "no-body").
   Checks: gofmt empty, vet, build, `go test -race ./cmd/mbox-importer/...` green (36 s).
+- Wave 1 (merged, tree 4dfbc00):
+  - `uat-docs` (worktree-agent-aee45042addcb010c, 70c820a + 2bf3da1, merge badf037): cmd README (inputs, flags
+    `-zstd`/`-xz`/`-tmpdir`, programs, "UAT archives" section, log lines, import-order advice), top-level README
+    line + bullet. Review MERGE AFTER FIXES (wording, checked against the code branch): MAJOR (a 0-byte UAT input
+    is an input error, not "fully imported"), minors (empty message = no-msgid, log order, raw-fields meaning,
+    toolkit claims, free-space sentence, missing xz+7z case, Debian package names) fixed.
+  - `uat-import` (worktree-agent-a7161834b55ba6d88, 97f8706 + 5d71ef2, merge 4dfbc00): uat.go (uatSuffix,
+    uatUnpackedName, importUAT, unpackXz/unpack7z/has7zEntry/runTo ported from mbox2nntp, hasYEnc,
+    rawFieldsDetail), flags wired, importInputs dispatch, isInputName accepts only real UAT suffixes, 664 lines of
+    tests (+18 s, 4 DB runs). Review MERGE; follow-ups done: a helper killed by the terminal's SIGINT counts as
+    stopped (exit 130) instead of an input error, also for the mbox `.7z` Close path; expandInputs comment.
+    Known: the stop signal is not checked while xz/7z/zstd unpack (latency only; a second signal kills the
+    process before the temp dir cleanup); `-xz` falls back to 7-Zip even when given explicitly; `uatSuffix` is
+    case-insensitive so `X.USENET.XZ` in a directory is picked up while `.MBOX` is not.
