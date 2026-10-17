@@ -166,6 +166,13 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// One request pointer for the whole request: the mux stamps the pattern and the path values
 	// on it, and the route handler finds the Context through its context.
 	c.Request = req.WithContext(context.WithValue(req.Context(), httpxCtxKey{}, c))
+	// net/http removes the temporary files of a parsed multipart form only for the request it
+	// passed in; the form parsed on the copy is removed here (deferred, so also on a panic).
+	defer func() {
+		if f := c.Request.MultipartForm; f != nil && f != req.MultipartForm {
+			_ = f.RemoveAll() // best effort, like net/http's own cleanup
+		}
+	}()
 
 	r.mu.RLock()
 	chain := make([]HandlerFunc, 0, len(r.middleware)+1)
@@ -359,7 +366,9 @@ func Recovery() HandlerFunc {
 
 // AccessLog writes one line per request after the chain:
 // [WEB]: <client IP> "<method> <request URI>" <status> <size>B <latency>.
-// The request URI is taken before the handlers run, as some rewrite the request URL.
+// The request URI is taken before the handlers run, as some rewrite the request URL. The line is
+// written in a defer, so a panicking request is logged too. Register it before Recovery,
+// router.Use(AccessLog(), Recovery()), so that line shows the 500 Recovery answered.
 func AccessLog() HandlerFunc {
 	return func(c *Context) {
 		start := time.Now()
@@ -368,9 +377,11 @@ func AccessLog() HandlerFunc {
 			uri = c.Request.URL.RequestURI()
 		}
 		method := c.Request.Method
+		defer func() {
+			log.Printf("[WEB]: %s \"%s %s\" %d %dB %s", c.ClientIP(), method, uri,
+				c.Writer.Status(), max(c.Writer.Size(), 0), time.Since(start))
+		}()
 		c.Next()
-		log.Printf("[WEB]: %s \"%s %s\" %d %dB %s", c.ClientIP(), method, uri,
-			c.Writer.Status(), max(c.Writer.Size(), 0), time.Since(start))
 	}
 }
 

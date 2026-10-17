@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"errors"
+	"io"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // httpxLogBuf collects log output; other tests of the package may log concurrently.
@@ -1072,5 +1074,121 @@ func TestHttpxProductionRouteTable(t *testing.T) {
 		if rec.Header().Get("Content-Security-Policy") != contentSecurityPolicy {
 			t.Errorf("%s %s: no CSP header", tc.method, tc.target)
 		}
+	}
+}
+
+// TestHttpxMultipartTempCleanup: the temporary file of a large multipart part, parsed on the
+// router's request copy, is removed when the request ends.
+func TestHttpxMultipartTempCleanup(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	if err := mw.WriteField("username", "u1"); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := mw.CreateFormFile("upload", "big.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(bytes.Repeat([]byte("x"), httpxMaxMultipartMemory+64<<10)); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRouter()
+	var sawFile bool
+	r.POST("/login", func(c *Context) {
+		user := c.PostForm("username")
+		sawFile = c.Request.MultipartForm != nil && len(c.Request.MultipartForm.File["upload"]) == 1
+		c.String(http.StatusOK, "%s", user)
+	})
+	rec := httpxServe(r, http.MethodPost, "/login", func(req *http.Request) {
+		req.Body = io.NopCloser(&body)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+	})
+	if rec.Code != http.StatusOK || rec.Body.String() != "u1" || !sawFile {
+		t.Fatalf("POST = %d %q, file part parsed %v", rec.Code, rec.Body.String(), sawFile)
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("temporary files left after the request: %v", entries)
+	}
+}
+
+// TestHttpxHijack: a hijacked connection gets no status line from the router; Hijack after a
+// write fails.
+func TestHttpxHijack(t *testing.T) {
+	logs := httpxCaptureLog(t)
+	crlf := string([]byte{13, 10})
+	raw := strings.Join([]string{"HTTP/1.1 200 OK", "Content-Length: 2", "Connection: close", "", "ok"}, crlf)
+	r := NewRouter()
+	r.GET("/h", func(c *Context) {
+		c.Status(http.StatusAccepted) // recorded only; must not be written after the hijack
+		conn, brw, err := c.Writer.Hijack()
+		if err != nil {
+			t.Errorf("Hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		_, _ = brw.WriteString(raw)
+		_ = brw.Flush()
+	})
+	done := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		defer close(done)
+		r.ServeHTTP(w, req)
+	}))
+	defer ts.Close()
+
+	client := &http.Client{Timeout: testWait}
+	resp, err := client.Get(ts.URL + "/h")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK || string(got) != "ok" {
+		t.Errorf("hijacked answer = %d %q, %v", resp.StatusCode, got, err)
+	}
+	select {
+	case <-done:
+	case <-time.After(testWait):
+		t.Fatal("handler did not return")
+	}
+	if out := logs.String(); strings.Contains(out, "hijacked") {
+		t.Errorf("router wrote on the hijacked connection: %q", out)
+	}
+
+	c, _ := httpxTestCtx(http.MethodGet, "/")
+	c.String(http.StatusOK, "x")
+	if _, _, err := c.Writer.Hijack(); !errors.Is(err, errHttpxHijackWritten) {
+		t.Errorf("Hijack after a write: err = %v", err)
+	}
+}
+
+// TestHttpxAccessLogPanic: with AccessLog before Recovery a panicking request gets the
+// recovery line and an access line with the 500.
+func TestHttpxAccessLogPanic(t *testing.T) {
+	logs := httpxCaptureLog(t)
+	r := NewRouter()
+	r.Use(AccessLog(), Recovery())
+	r.GET("/httpx-accpanic", func(c *Context) { panic("httpx-accpanic-boom") })
+	rec := httpxServe(r, http.MethodGet, "/httpx-accpanic", func(req *http.Request) { req.RemoteAddr = "192.0.2.8:1" })
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status %d, want 500", rec.Code)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "[WEB]: panic serving GET /httpx-accpanic: httpx-accpanic-boom") {
+		t.Errorf("no recovery line: %q", out)
+	}
+	if !strings.Contains(out, `[WEB]: 192.0.2.8 "GET /httpx-accpanic" 500 0B `) {
+		t.Errorf("no access line with 500: %q", out)
 	}
 }

@@ -5,12 +5,14 @@ package web
 // text substitution. See httprouter.go for the router and httpclientip.go for ClientIP.
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -37,9 +39,13 @@ const (
 // WriteHeaderNow, or when the router finishes the request. It records the status and the body size.
 type ResponseWriter struct {
 	http.ResponseWriter
-	status int
-	size   int
+	status   int
+	size     int
+	hijacked bool
 }
+
+// errHttpxHijackWritten is Hijack's error once the header was written.
+var errHttpxHijackWritten = errors.New("web: response already written, cannot hijack")
 
 func newResponseWriter(w http.ResponseWriter) *ResponseWriter {
 	return &ResponseWriter{ResponseWriter: w, status: http.StatusOK, size: httpxNoWritten}
@@ -55,9 +61,9 @@ func (w *ResponseWriter) WriteHeader(code int) {
 	}
 }
 
-// WriteHeaderNow writes the recorded status code, once.
+// WriteHeaderNow writes the recorded status code, once; never on a hijacked connection.
 func (w *ResponseWriter) WriteHeaderNow() {
-	if !w.Written() {
+	if !w.Written() && !w.hijacked {
 		w.size = 0
 		w.ResponseWriter.WriteHeader(w.status)
 	}
@@ -95,6 +101,21 @@ func (w *ResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 func (w *ResponseWriter) Flush() {
 	w.WriteHeaderNow()
 	_ = http.NewResponseController(w.ResponseWriter).Flush() // not every writer can flush
+}
+
+// Hijack takes over the connection (like gin: an error once the header was written). After a
+// successful Hijack the writer counts as written and the router writes no status line.
+func (w *ResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if w.Written() {
+		return nil, nil, errHttpxHijackWritten
+	}
+	conn, rw, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	w.size = 0
+	w.hijacked = true
+	return conn, rw, nil
 }
 
 // Context carries one request through the middleware and handler chain.
