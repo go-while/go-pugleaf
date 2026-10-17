@@ -96,7 +96,7 @@ Positional arguments are the inputs; at least one is required.
 | `NAME.mbox`, `NAME.bag` | the file itself |
 | `NAME.mbox.gz` | gzip, streamed (concatenated gzip members are read as one stream) |
 | `NAME.mbox.zip` | zip: the first member named `*.mbox` or `*.bag`, else the only member, streamed |
-| `NAME.mbox.7z` | the installed 7z program (`-7z`): `7z x -so -bd -- ARCHIVE '*.mbox' '*.bag'`, streamed from its standard output |
+| `NAME.mbox.7z` | the installed 7z program (`-7z`): `7z x -so -bd -r -- ARCHIVE '*.mbox' '*.bag' '*.MBOX' '*.BAG'` (members in subdirectories too, concatenated in archive order), streamed from its standard output |
 | `DIR` | its files whose names contain `.mbox` or `.bag` and do not end in `.done`, sorted by name; subdirectories are not entered |
 
 A missing path, an archive that cannot be opened or unpacked, a 7z program that cannot be found and
@@ -122,15 +122,18 @@ The input is renamed to `INPUT.done` when all of these hold:
 
 Skipped and rejected articles do not block the rename: they are counted and logged, and a second
 run would skip them again. Nothing is ever renamed in a dry run or with `-mark-done=false`. An input
-that is not marked done is logged with its counters; it is not an error by itself.
+whose name already ends in `.done` (a re-run of a renamed input) keeps its name, and an existing
+`INPUT.done` is never replaced (the input is then logged as not marked done). An input
+that is not marked done is logged with its counters; an unread rest or a stuck parser is not an
+error by itself, article errors and a failed commit wait are (exit code 1).
 
 Exit codes:
 
 | Code | Meaning |
 |------|---------|
-| `0` | every input was read (marked done or not, see the log) |
-| `1` | an input could not be opened, unpacked or started, or a database/processor error |
-| `2` | bad command line (unknown flag, no input) |
+| `0` | every input was read without an article error (marked done or not, see the log; also when there was nothing to import) |
+| `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error |
+| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-useshorthashlen` outside 2-7, negative `-commit-timeout`) |
 | `130` | stopped by SIGINT/SIGTERM |
 
 ## What is stored
@@ -198,13 +201,19 @@ Every line has the prefix `[MBOX-IMPORT]`. A progress line is logged every 10000
 line after every input, then a totals line:
 
 ```
-[MBOX-IMPORT] file=… read=… stored=… present=… skipped=… rejected=… errors=… parser-skipped=… near-misses=… stopped-early=… unread=… marked-done=…
+[MBOX-IMPORT] file="…" read=… stored=… present=… skipped=… (no-subject=…,bad-group=…) rejected=… errors=… parser-skipped=… near-misses=… stopped-early=… unread=… marked-done=…
+[MBOX-IMPORT]   near-miss file="…" line=… "…"
+[MBOX-IMPORT] done inputs=… marked-done=… input-errors=… read=… stored=… present=… skipped=… rejected=… errors=… commit-errors=…
 ```
+
+A dry run also logs one `[MBOX-IMPORT] dry-run group="…" articles=…` line per target group (largest
+first); there `stored` counts the articles that would be handed to the processor.
 
 - `read`: messages the parser returned; `stored`: handed to the processor and accepted;
   `present`: already in the target group; `skipped`: see [Skip reasons](#skip-reasons) (followed by
-  the count per reason); `rejected`: refused by the processor's bulk checks; `errors`: temporary or
-  database errors
+  the non-zero counts per reason in parentheses, `-` when none); `rejected`: refused by the
+  processor's bulk checks (each logged as `rejected msgid=… group=…: error`); `errors`: temporary or
+  database errors (each logged as `error msgid=… group=…: error`)
 - `parser-skipped`: malformed messages the parser stepped over (the rest of the file is still read)
 - `near-misses`: see [Near-misses](#near-misses)
 - `stopped-early=true`: the parser lost its place before the end of the file
