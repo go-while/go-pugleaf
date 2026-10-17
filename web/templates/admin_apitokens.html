@@ -93,7 +93,7 @@
                                       <strong>{{.OwnerName}}</strong>
                                       {{if .OwnerID}}<br><small class="text-muted">ID: {{.OwnerID}}</small>{{end}}
                                   </td>
-                                  <td><code>{{printf "%.12s" .TokenHash}}...</code></td>
+                                  <td><code>{{printf "%.12s" .APIToken}}...</code></td>
                                   <td>
                                       {{if .ExpiresAt}}
                                       {{.ExpiresAt.Format "2006-01-02 15:04"}}

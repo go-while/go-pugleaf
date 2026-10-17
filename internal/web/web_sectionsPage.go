@@ -57,15 +57,13 @@ func (s *WebServer) sectionsPage(c *Context) {
 func (s *WebServer) sectionPage(c *Context) {
 	sectionName := c.Param("section")
 
-	// Check for reserved paths that should not be treated as sections
-	reservedPaths := []string{"groups", "search", "stats", "help", "api", "static", "sections"}
-	for _, reserved := range reservedPaths {
-		if sectionName == reserved {
-			// This should have been handled by a more specific route
-			// If we got here, it means the route order is wrong
-			c.Redirect(http.StatusMovedPermanently, "/"+reserved)
-			return
-		}
+	// Reserved first segments are never sections. Most have their own route and never get here;
+	// one without (e.g. /static, whose route needs a file path) is a 404, not a redirect to the
+	// same path, which looped.
+	if knownNonSectionPaths[sectionName] {
+		s.renderError(c, http.StatusNotFound, "Section not found",
+			"The section '"+sectionName+"' does not exist.")
+		return
 	}
 
 	// Get section info

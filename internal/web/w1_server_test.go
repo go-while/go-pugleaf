@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -513,5 +514,47 @@ func TestW1ServerSlashRemovalBeforeSections(t *testing.T) {
 	w0Srv.loadSectionsCache()
 	if rec := w0Do(t, w0Req{Path: "/" + name + "/"}); rec.Code != http.StatusOK {
 		t.Errorf("GET /%s/ = %d, want 200 from sectionPage", name, rec.Code)
+	}
+}
+
+// TestW1ServerReservedSectionNames: a reserved first segment without a route of its own
+// (/static needs a file path) is a 404, not a 301 to itself; the API base paths redirect to
+// the help page that exists.
+func TestW1ServerReservedSectionNames(t *testing.T) {
+	for _, path := range []string{"/static", "/static/"} {
+		rec := w0Do(t, w0Req{Path: path})
+		if rec.Code != http.StatusNotFound || rec.Header().Get("Location") != "" {
+			t.Errorf("GET %s = %d Location %q, want 404 without Location", path, rec.Code, rec.Header().Get("Location"))
+		}
+	}
+	for _, path := range []string{"/api", "/api/", "/api/v1", "/api/v1/"} {
+		rec := w0Do(t, w0Req{Path: path})
+		if rec.Code != http.StatusMovedPermanently || rec.Header().Get("Location") != "/SiteHelp" {
+			t.Errorf("GET %s = %d Location %q, want 301 /SiteHelp", path, rec.Code, rec.Header().Get("Location"))
+		}
+	}
+	if rec := w0Do(t, w0Req{Path: "/SiteHelp"}); rec.Code != http.StatusOK {
+		t.Errorf("GET /SiteHelp = %d", rec.Code)
+	}
+}
+
+// TestW1ServerAdminAPITokensTab: the API tokens tab renders with a token present and shows the
+// first characters of the stored hash, never the plain token.
+func TestW1ServerAdminAPITokensTab(t *testing.T) {
+	_, cookie := w0NewUser(t, true)
+	token, plain, err := w0DB(t).CreateAPIToken("w1srv-apitokens-tab", 0, nil)
+	if err != nil {
+		t.Fatalf("CreateAPIToken: %v", err)
+	}
+	rec := w0Do(t, w0Req{Path: "/admin", Form: url.Values{"tab": {"apitokens"}}, Cookies: []*http.Cookie{cookie}})
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin?tab=apitokens = %d", rec.Code)
+	}
+	if !strings.Contains(body, "w1srv-apitokens-tab") || !strings.Contains(body, token.APIToken[:12]+"...") {
+		t.Errorf("tokens tab lacks the owner or the hash prefix %q", token.APIToken[:12])
+	}
+	if strings.Contains(body, plain) {
+		t.Error("tokens tab shows the plain token")
 	}
 }

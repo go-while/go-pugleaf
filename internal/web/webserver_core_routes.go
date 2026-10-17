@@ -386,19 +386,12 @@ func (s *WebServer) setupRoutes() {
 		c.String(200, "pong")
 	})
 
-	// Handle API base routes to prevent them from being caught by section routes
-	s.Router.GET("/api", func(c *Context) {
-		c.Redirect(http.StatusMovedPermanently, "/help")
-	})
-	s.Router.GET("/api/{$}", func(c *Context) {
-		c.Redirect(http.StatusMovedPermanently, "/help")
-	})
-	s.Router.GET("/api/v1", func(c *Context) {
-		c.Redirect(http.StatusMovedPermanently, "/help")
-	})
-	s.Router.GET("/api/v1/{$}", func(c *Context) {
-		c.Redirect(http.StatusMovedPermanently, "/help")
-	})
+	// The API base paths point at the help page (/SiteHelp; /help has no route).
+	for _, p := range []string{"/api", "/api/{$}", "/api/v1", "/api/v1/{$}"} {
+		s.Router.GET(p, func(c *Context) {
+			c.Redirect(http.StatusMovedPermanently, "/SiteHelp")
+		})
+	}
 
 	// API routes (high priority - before dynamic section routes)
 	// stats are public
