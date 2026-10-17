@@ -160,3 +160,71 @@ Exported API list, test results for both repos, what could not move cleanly, eve
 all `--- PASS`, 0 FAIL, 0 SKIP; package ok in 164.8 s (under race, machine loaded). Full sorted list kept at
 `/tank0/efs/claude/tmp/claude-1000/-tank0-efs-GO-src-github-com-go-while-go-pugleaf/698bff14-0ada-4301-9aa4-caddf76f2a5b/scratchpad/nntp-baseline-keep.txt` for the migration comparison (also reproducible with the same command).
 
+
+### Wave 0 (kit main 9531e47)
+- Repo /tank0/efs/GO/src/github.com/go-while/nntp-testkit initialised on `main`: go.mod (go 1.22), LICENSE, root
+  package `testkit` (Deadline/NNTP_TEST_DEADLINE), doc.go contracts, conformance stub, README skeleton.
+- go-pugleaf: integration branch `plan-nntp-testkit` from testing-001 (plan moved to wip, 1ae9c51).
+
+### Wave 1 (kit main 464c1e8)
+- `store` (worktree /tank0/claude/trees/nntp-testkit/store, branch worktree-store, e2c2c7f + dfeb72a; review MERGE
+  with minors → generated ids indexed, empty-group id form, field/header mismatch panics, Group.Created/AddGroupAt,
+  SetPosting): merged a5d6ed4, doc.go 3ebf533.
+- `proc` (worktree .../nntp-testkit/proc, worktree-proc, 73b76c2 + 79dfe21; review MERGE with minors → relative Path
+  made absolute, bounded Wait, probe within the limit + QUIT, test cleanup): merged d953582, doc.go 6331411.
+- `client` (worktree .../nntp-testkit/client, worktree-client, fbf13eb + 4202a8f; review MERGE AFTER FIXES →
+  ExpectNoPending never consumes and restores the deadline, partial last line → NoTerminator, DialWith/WithTB,
+  2 MiB line test): merged, doc.go 464c1e8.
+- Kit checks on 464c1e8: gofmt empty, vet, `go test -race -count=1 ./...` all ok. Wave 2 runs fakeserver-core
+  alone (the store handler needs its Conn to compile tests); the handler and the README follow as wave 3.
+
+### Wave 2 (kit main 6fc1ea4)
+- `fakeserver-core` (worktree .../nntp-testkit/fakeserver-core, worktree-fakeserver-core, 4439cad + 07a01ba; review
+  MERGE with minors → server-side idle read deadline removed again (a caching proxy may hold upstream idle; reads are
+  bounded by Close only, as in go-pugleaf), hook signature without Faults, Faults copied at start, docs): merged,
+  doc.go 6fc1ea4. The three TestCliFake* tests live here as TestScript/TestOpenCount/TestPeerStream, run through
+  the strict client (no wire mistake found).
+
+### Wave 3 (kit main 7af5a9d)
+- `fakeserver-store-handler` (worktree .../nntp-testkit/store-handler, worktree-store-handler, 45cbe5a + 3b7ca8f;
+  RFC-focused review MERGE AFTER FIXES → CAPABILITIES advertises OVER MSGID, POST filing under a mutex (concurrent
+  duplicate → one 240/one 441), user-only AUTHINFO 281/481, NUL cleaned in overview, Message-ID form checked):
+  merged, doc.go 5edf6be. Inline on main: read-only Store server greets 201 (b1a3fe7).
+- `kit-readme` (worktree .../nntp-testkit/readme, worktree-readme, e54de05): README (261 lines, API tables, modes,
+  faults, strict kinds, proc) + example_test.go (Example, Example_scriptCloseAfter, Example_dropInMultiline,
+  verified by go test): merged 72214af.
+- Inline on main 7af5a9d: client.Conn.For (view bound to another tb, no cleanup) and TryRawUntilDot, for the
+  go-pugleaf subtest pattern found by the migration review.
+- `pugleaf-migration` (go-pugleaf worktree /tank0/claude/trees/go-pugleaf/agent-af8031e986478fd0b, branch
+  worktree-agent-af8031e986478fd0b, a30e7d8 go.mod + 3ab0e02 fake/peer + 8fbc283 harness client; 21 files):
+  207 results all PASS = baseline minus the three moved TestCliFake*; known bugs unchanged; PUGLEAF_TEST_DEADLINE=5s
+  honoured; strict-mode probe of the harness: all 207 still pass (go-pugleaf's server is wire-clean on these
+  paths). Review MERGE + minor (parent-dialed conns in subtests fail the parent) → follow-up with For pending.
+  The relative `replace` resolves only from the main checkout layout; worktree runs need a go.work with an
+  absolute replace (the implementer's: scratchpad/migwork/go.work).
+
+## Outcome
+- Kit: /tank0/efs/GO/src/github.com/go-while/nntp-testkit, branch `main` at **7af5a9d** (25 commits, not pushed, no
+  GitHub repo yet). Packages: `testkit` (Deadline), `client`, `fakeserver` (Script/Handler/Store modes, Faults,
+  Count, TLSConfig, PeerHandler, StoreHandler), `proc`, `conformance` (doc.go stub). `go vet ./... && go test -race
+  -count=1 ./...` green. Kit worktrees under /tank0/claude/trees/nntp-testkit/ (left for the user): client, proc,
+  store, fakeserver-core, store-handler, readme (branches worktree-<name>).
+- go-pugleaf: integration branch `plan-nntp-testkit` (migration merged **14352fb**; go.mod `require
+  github.com/go-while/nntp-testkit v0.0.0-00010101000000-000000000000` + `replace => ../nntp-testkit`). NOT merged
+  into testing-001: wait until the kit is on GitHub and tagged v0.1.0, then replace the directive by the tagged
+  require and merge. Worktree /tank0/claude/trees/go-pugleaf/agent-af8031e986478fd0b (worktree-agent-af8031e986478fd0b,
+  a30e7d8, 3ab0e02, 8fbc283, 161f047) plus the implementers' unused go-pugleaf worktrees agent-a406c766d4066f20a,
+  agent-ab7c4e3fd3b0d6fb0, agent-aea9667379f9a332c, agent-ae7995549a841117b, agent-a10eee5c477a6a211,
+  agent-a894a8d17cff89778 (all created by the hook, left clean).
+- Verification (main checkout, plan-nntp-testkit 14352fb, no go.work): `go test -race -count=1 -v ./internal/nntp/`
+  207 results all PASS; diff against the 210-line baseline = only TestCliFakeOpenCount/PeerStream/Script missing
+  (moved into the kit as TestOpenCount/TestPeerStream/TestScript); PUGLEAF_KNOWN_BUGS=1 lists only T-nntp-article-1;
+  PUGLEAF_TEST_DEADLINE=5s run of TestHarness|TestCli ok; cmd/nntp-server, nntp-fetcher, nntp-transfer ok under
+  race; gofmt empty, vet and build clean.
+- Could not move cleanly / notes: `Backend()`/`cliDial` stay in go-pugleaf as `cliBackend(s)`/`cliDial` (type alias
+  cannot carry methods); `hClient.bump()` became an explicit SetDeadline at one site; connections dialed in a parent
+  test and used in subtests use `c.For(t)` (kit addition) so failures stay in the subtest; the worktree layout needs
+  a go.work with an absolute replace. Strict mode is off in the harness, but a probe with it on passed all 207
+  tests (go-pugleaf's server is wire-clean on these paths): switching the harness to strict is a possible follow-up.
+- Leftovers: conformance package (planned, stub only); the kit's `Faults` on POST apply to the 340 only; a Store
+  shared by two Servers is not covered by the POST mutex; Pass-only StoreOptions is a misconfiguration (documented).
