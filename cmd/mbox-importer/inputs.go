@@ -19,9 +19,6 @@ import (
 	mbox "github.com/go-while/go-lib-mbox2nntp"
 )
 
-// errNotImplemented is still used by the import.go stub (wave 2 replaces it).
-var errNotImplemented = errors.New("not implemented")
-
 // inputBufferSize is the read buffer between the decompressor (or file) and the parser.
 const inputBufferSize = 1024 * 1024
 
