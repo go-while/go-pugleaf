@@ -179,3 +179,11 @@ Leave `./data-test-mbox-uat` for the user.
 - Large `.usenet.xz` (GBs) need that much temp space: document `-tmpdir`.
 - `zstd` output for an archive with millions of messages is streamed; memory stays one message (plus Fix copies).
 - go.mod gains the mbox2nntp module (a main package module; only its `uat` and `uat/uattest` packages are imported).
+
+### Progress
+- Wave 0 (4a653dc on `plan-mbox-importer-uat`, branched from testing-001 at the wip commit): go.mod gains
+  `github.com/go-while/mbox2nntp v0.0.0-20261017113153-823cac0bb507` (go.sum +2 lines, nothing else);
+  `cmd/mbox-importer/uat.go` stubs; `runOptions{zstd, xz, tmpDir}`; `handleMessage` now calls
+  `handleLines(c, rawHead, body, isBinary, opts, sink)` (deviation from the plan's signature: the `isBinary`
+  flag is needed because readBody drops a yEnc body, so an empty body alone cannot tell "binary" from "no-body").
+  Checks: gofmt empty, vet, build, `go test -race ./cmd/mbox-importer/...` green (36 s).
