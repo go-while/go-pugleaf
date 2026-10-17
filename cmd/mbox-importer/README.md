@@ -96,7 +96,7 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 | `-7z` | `7z` | Program used to unpack `.7z` and `.usenet.7z` inputs (name in `PATH` or a full path); also unpacks `.usenet.xz` when `-xz` is not found |
 | `-zstd` | `zstd` | The zstd program (name in `PATH` or a full path), needed for every UAT input (`.usenet`, `.usenet.xz`, `.usenet.7z`) |
 | `-xz` | `xz` | Program used to unpack `.usenet.xz` inputs; when it is not found, 7-Zip (`-7z`) is used with `-txz` |
-| `-tmpdir` | (system temp dir) | Where `.usenet.xz` and `.usenet.7z` inputs are unpacked, into a private subdirectory that is removed afterwards, and where the zstd dictionary is written. A large `.usenet.xz` needs that much free space there |
+| `-tmpdir` | (system temp dir) | Where `.usenet.xz` and `.usenet.7z` inputs are unpacked, into a private subdirectory that is removed afterwards, and where the zstd dictionary is written. A `.usenet.xz` or `.usenet.7z` needs free space there for its whole unpacked `.usenet` file |
 | `-dry-run` | `false` | Parse and count only: no database is opened, no input is renamed |
 | `-keep-binary` | `false` | Import yEnc binary articles (`=ybegin`) instead of skipping them |
 | `-mark-done` | `true` | Rename a fully imported input to `INPUT.done` (see below) |
@@ -121,15 +121,16 @@ Positional arguments are the inputs; at least one is required.
 
 A missing path, an archive that cannot be opened or unpacked, a 7z program that cannot be found and
 an archive without an mbox member are input errors: the input is reported, the other inputs are
-still imported, and the run exits with code 1. An empty (0-byte) input counts as fully imported.
+still imported, and the run exits with code 1. An empty (0-byte) mbox input counts as fully imported.
 A non-empty input that is not an mbox is an input error too. A 7z that fails only at the end (for
 example a CRC error) leaves the articles already imported in place and the input is not marked done.
 
 For UAT inputs these are input errors as well: a zstd program that cannot be found (checked before
-anything is unpacked), an xz or 7z that fails or writes nothing, a `.usenet.7z` without the entry
-`NAME.usenet`, a file that is not a UAT archive, and a zstd failure or size mismatch while the
-messages are read. An archive that fails mid-way is not marked done; the articles already handed to
-the processor stay stored.
+anything is unpacked), an xz or 7z that cannot be found (for `.usenet.xz`: neither of them), fails
+or writes nothing, a `.usenet.7z` without the entry `NAME.usenet`, a file that is not a UAT archive
+(an empty, 0-byte UAT input included), and a zstd failure or size mismatch while the messages are
+read. An archive that fails mid-way is not marked done; the articles already handed to the
+processor stay stored.
 
 ### Programs needed
 
@@ -142,7 +143,7 @@ the processor stay stored.
 | `.usenet.7z` | zstd and 7-Zip (`-7z`) |
 
 On Linux: the `zstd` package; the `xz-utils` package (Debian, Ubuntu) or `xz`; the `7zip` package
-(Debian, Ubuntu) or `p7zip`.
+(Debian 13+, recent Ubuntu; on older releases `p7zip-full`, or pass `-7z 7zz`).
 
 ## What happens to an input
 
@@ -248,28 +249,30 @@ The [Usenet Archive Toolkit](https://github.com/wolfpld/usenetarchive) (UAT) kee
 published:
 
 - [usenet.nereid.pl](https://usenet.nereid.pl/): 333 Polish groups as `.usenet.xz`, 41 GB;
-- archive.org [`usenet-uat-pc-games`](https://archive.org/details/usenet-uat-pc-games): 39 groups,
-  games and `alt.folklore.computers`, as `.usenet.7z`.
+- archive.org [`usenet-uat-pc-games`](https://archive.org/details/usenet-uat-pc-games): 39 groups
+  as `.usenet.7z`.
 
 The reader is the package `github.com/go-while/mbox2nntp/uat`; the zstd program decompresses the
 messages (see [Programs needed](#programs-needed)).
 
 **The articles are not the originals.** The toolkit rewrote every message when it built the
-archive: it decoded the headers to UTF-8, kept only the text part of the body (attachments and HTML
-are gone) and converted it to UTF-8, and dropped `Content-Type` and `Content-Transfer-Encoding`. It
-also removed spam and duplicates. Before the usual [header rewrite](#what-is-stored), the importer
-makes every message a valid article again (`uat.Fix`):
+archive: it decoded the headers to UTF-8, kept only the first text/plain part of the body (an HTML
+part when there is none; other parts and attachments are gone) and converted it to UTF-8, and
+dropped `Content-Type` and `Content-Transfer-Encoding`. The toolkit can also filter spam and
+duplicates when an archive is built. Before the usual [header rewrite](#what-is-stored), the
+importer makes every message a valid article again (`uat.Fix`):
 
 - `Content-Type: text/plain; charset=UTF-8` and `Content-Transfer-Encoding: 8bit` (`7bit` for a
   plain ASCII body) are added, and `MIME-Version: 1.0` where it is missing;
-- non-ASCII header text goes back into RFC 2047 encoded-words: in `Subject:`, `Organization:` and
-  the other free-text fields, and in the display names of `From:`, `Reply-To:` and the other address
-  fields;
+- non-ASCII header text goes back into RFC 2047 encoded-words where it can be parsed: in
+  `Subject:`, `Organization:` and the other free-text fields, and in the display names of `From:`,
+  `Reply-To:` and the other address fields;
 - `Message-ID`, `References`, `Newsgroups`, `Path`, `Date` and the other structured fields are never
   changed.
 
-The Message-IDs are the originals. The skip reasons apply as for mbox inputs: an empty message is
-`no-body`, a body with a line starting with `=ybegin` is `binary` (unless `-keep-binary`).
+The Message-IDs are the originals. The skip reasons apply as for mbox inputs: a message with an
+empty body is `no-body` (an empty message, without headers, is `no-msgid`), a body with a line
+starting with `=ybegin` is `binary` (unless `-keep-binary`).
 
 **Import UAT archives after the mbox collections.** An article whose Message-ID is already in its
 target group counts as `present` and the UAT copy is not stored, so the original from an mbox
@@ -279,19 +282,23 @@ article counts it as `present`.
 The target group follows the same rule as for mbox inputs: the first group of the article's
 `Newsgroups:` header, or `-group NAME`. The archive's own group name is only logged.
 
-Each UAT input logs one line before the import and one after it, followed by the usual summary line
-(with `near-misses=0`):
+Each UAT input logs one `uat` line before the import and a second one right after its usual summary
+line (with `near-misses=0`):
 
 ```
 [MBOX-IMPORT] uat file="…" group="…" version=… messages=…
+[MBOX-IMPORT] file="…" read=… stored=… … near-misses=0 … marked-done=…
 [MBOX-IMPORT] uat file="…" re-encoded-fields=… added-mime-version=… raw-fields=…
 ```
 
 - `group`, `version`, `messages`: the archive's group name, its UAT format version and its number
   of messages;
 - `re-encoded-fields`: header fields written back as RFC 2047 encoded-words;
-  `added-mime-version`: articles that got a `MIME-Version: 1.0` header;
-- `raw-fields`: structured fields left with non-ASCII in them, as `name=count` pairs, `-` when none.
+  `added-mime-version`: articles that got a `MIME-Version: 1.0` header; both are summed over every
+  message read, including skipped and present ones;
+- `raw-fields`: header fields left with non-ASCII in them (structured fields, and fields that could
+  not be encoded, such as an address field that does not parse), as `name=count` pairs sorted by
+  name, `-` when none.
 
 The `.done` rule applies to the archive given on the command line (see
 [What happens to an input](#what-happens-to-an-input)). A dry run works for UAT inputs too: it
