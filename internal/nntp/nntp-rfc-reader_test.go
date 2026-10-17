@@ -5,18 +5,19 @@ package nntp
 // Identifiers use the rdr/TestRdr prefixes; groups are named rc1.<test>.
 
 import (
-	"bufio"
 	"fmt"
 	"net"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // rdrSession serves one connection of hs.S: commands in extra go to the new
 // handlers, everything else to the hardened dispatch (handleCommand).
-func rdrSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConnection, args []string) error) *hClient {
+func rdrSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConnection, args []string) error) *client.Conn {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -64,9 +65,9 @@ func rdrSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConne
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: hDeadline}
+	c := hNewClient(t, conn, hDeadline)
 	t.Cleanup(func() { _ = conn.Close(); <-done })
-	if c.Greeting, err = c.readLine(); err != nil {
+	if c.Greeting, err = c.ReadLine(); err != nil {
 		t.Fatalf("greeting: %v", err)
 	}
 	return c
@@ -81,9 +82,9 @@ var rdrExtra = map[string]func(cc *ClientConnection, args []string) error{
 
 // rdrExpect sends cmd and checks the reply code; for 223 the line must start with
 // "223 <num> <message-id of num in group>".
-func rdrExpect(t *testing.T, c *hClient, group, cmd string, code int, num int64) {
+func rdrExpect(t *testing.T, c *client.Conn, group, cmd string, code int, num int64) {
 	t.Helper()
-	got, line := c.cmd(t, "%s", cmd)
+	got, line := c.Cmd("%s", cmd)
 	if got != code {
 		t.Errorf("%s: got %q, want %d", cmd, line, code)
 		return
@@ -107,10 +108,10 @@ func rdrGroupSkip(t *testing.T, name string) string {
 }
 
 // rdrSelect sends GROUP and requires 211.
-func rdrSelect(t *testing.T, c *hClient, group string) {
+func rdrSelect(t *testing.T, c *client.Conn, group string) {
 	t.Helper()
-	code, line := c.cmd(t, "GROUP %s", group)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line := c.Cmd("GROUP %s", group)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -120,8 +121,8 @@ func TestRdrDate(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := rdrSession(t, hs, rdrExtra)
 
-	code, line := c.cmd(t, "DATE")
-	if err := hExpectCode(code, line, 111); err != nil {
+	code, line := c.Cmd("DATE")
+	if err := client.ExpectCode(code, line, 111); err != nil {
 		t.Fatal(err)
 	}
 	m := regexp.MustCompile(`^111 (\d{14})$`).FindStringSubmatch(line)
@@ -136,8 +137,8 @@ func TestRdrDate(t *testing.T) {
 		t.Fatalf("DATE: %q is %s away from UTC now", line, d)
 	}
 
-	code, line = c.cmd(t, "DATE x")
-	if err := hExpectCode(code, line, 501); err != nil {
+	code, line = c.Cmd("DATE x")
+	if err := client.ExpectCode(code, line, 501); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -181,11 +182,11 @@ func TestRdrNextLast(t *testing.T) {
 		c := rdrSession(t, hs, rdrExtra)
 		rdrSelect(t, c, g)
 		rdrExpect(t, c, g, "STAT 3", 223, 3)
-		code, line := c.cmd(t, "ARTICLE %s", hMessageID(g, 6))
-		if err := hExpectCode(code, line, 220); err != nil {
+		code, line := c.Cmd("ARTICLE %s", hMessageID(g, 6))
+		if err := client.ExpectCode(code, line, 220); err != nil {
 			t.Fatal(err)
 		}
-		_ = c.readDotLines(t)
+		_ = c.ReadDotLines()
 		rdrExpect(t, c, g, "NEXT", 223, 4) // §6.2.1.2: the message-id form does not move it
 	})
 }

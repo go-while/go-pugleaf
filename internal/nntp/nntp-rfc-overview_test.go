@@ -5,7 +5,6 @@ package nntp
 // new handlers through ovhSession (contract K3). Identifiers start with ovh/TestOvh.
 
 import (
-	"bufio"
 	"database/sql"
 	"fmt"
 	"net"
@@ -15,11 +14,12 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // ovhSession serves one connection of hs.S: commands in extra go to the new
 // handlers, everything else to the hardened dispatch (handleCommand).
-func ovhSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConnection, args []string) error) *hClient {
+func ovhSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConnection, args []string) error) *client.Conn {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -67,9 +67,9 @@ func ovhSession(t *testing.T, hs *hServer, extra map[string]func(cc *ClientConne
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &hClient{Conn: conn, R: bufio.NewReaderSize(conn, 1<<20), Deadline: hDeadline}
+	c := hNewClient(t, conn, hDeadline)
 	t.Cleanup(func() { _ = conn.Close(); <-done })
-	if c.Greeting, err = c.readLine(); err != nil {
+	if c.Greeting, err = c.ReadLine(); err != nil {
 		t.Fatalf("greeting: %v", err)
 	}
 	return c
@@ -94,35 +94,35 @@ var ovhExtra = map[string]func(cc *ClientConnection, args []string) error{
 }
 
 // ovhDial opens an ovhSession with ovhExtra.
-func ovhDial(t *testing.T, hs *hServer) *hClient {
+func ovhDial(t *testing.T, hs *hServer) *client.Conn {
 	t.Helper()
 	return ovhSession(t, hs, ovhExtra)
 }
 
 // ovhSelect sends GROUP g and expects 211.
-func ovhSelect(t *testing.T, c *hClient, g string) {
+func ovhSelect(t *testing.T, c *client.Conn, g string) {
 	t.Helper()
-	code, line := c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line := c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
 }
 
 // ovhExpect sends a command and fails unless the reply code is want.
-func ovhExpect(t *testing.T, c *hClient, want int, format string, args ...interface{}) string {
+func ovhExpect(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) string {
 	t.Helper()
-	code, line := c.cmd(t, format, args...)
-	if err := hExpectCode(code, line, want); err != nil {
+	code, line := c.Cmd(format, args...)
+	if err := client.ExpectCode(code, line, want); err != nil {
 		t.Fatalf("%s: %v", fmt.Sprintf(format, args...), err)
 	}
 	return line
 }
 
 // ovhBlock sends a command, expects the multi-line status want and returns the block.
-func ovhBlock(t *testing.T, c *hClient, want int, format string, args ...interface{}) []string {
+func ovhBlock(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) []string {
 	t.Helper()
 	ovhExpect(t, c, want, format, args...)
-	return c.readDotLines(t)
+	return c.ReadDotLines()
 }
 
 // ovhOverNums checks that every line is a 9-field overview line (the default -xref partial
@@ -311,7 +311,7 @@ func TestOvhHdr(t *testing.T) {
 	ovhExpect(t, c, 503, "HDR :foo 3") // metadata check comes first
 
 	// No group: the message-id form goes through the history lookup (number 0).
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR Subject %s", id4), []string{"0 Test article 4"}); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR Subject %s", id4), []string{"0 Test article 4"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -319,18 +319,18 @@ func TestOvhHdr(t *testing.T) {
 	ovhExpect(t, c, 420, "HDR Subject")
 
 	ovhSelect(t, c, g)
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR Subject 1-5"),
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR Subject 1-5"),
 		[]string{"1 Test article 1", "3 Test article 3", "4 Test article 4", "5 Test article 5"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR subject"), []string{"1 Test article 1"}); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR subject"), []string{"1 Test article 1"}); err != nil {
 		t.Fatal(err)
 	}
 	// Default body "body of article 3\nline two": 2 lines, 26 bytes.
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR :lines 3"), []string{"3 2"}); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR :lines 3"), []string{"3 2"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR :BYTES 3-3"), []string{"3 26"}); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR :BYTES 3-3"), []string{"3 26"}); err != nil {
 		t.Fatal(err)
 	}
 	ovhExpect(t, c, 503, "HDR :foo 3")
@@ -338,10 +338,10 @@ func TestOvhHdr(t *testing.T) {
 	ovhExpect(t, c, 423, "HDR Subject 50-60")
 	ovhExpect(t, c, 423, "HDR Subject 2")
 	ovhExpect(t, c, 501, "HDR Subject x")
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR Subject %s", id4), []string{"4 Test article 4"}); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR Subject %s", id4), []string{"4 Test article 4"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR :lines %s", id4), []string{"4 2"}); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR :lines %s", id4), []string{"4 2"}); err != nil {
 		t.Fatal(err)
 	}
 	ovhExpect(t, c, 430, "HDR Subject <ovh-unknown-%d@test.invalid>", hSeq.Add(1))
@@ -366,10 +366,10 @@ func TestOvhHdrAnyHeader(t *testing.T) {
 	c := ovhDial(t, hs)
 	ovhSelect(t, c, g)
 
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR X-Ovh-Test 1"), []string{"1 v1"}); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR X-Ovh-Test 1"), []string{"1 v1"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR x-ovh-test %s", id1), []string{"1 v1"}); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR x-ovh-test %s", id1), []string{"1 v1"}); err != nil {
 		t.Fatal(err)
 	}
 	// Absent header: "n" (or "n ", both allowed by RFC 3977 §8.5.2).
@@ -384,13 +384,13 @@ func TestOvhHdrAnyHeader(t *testing.T) {
 	// The upstream Xref line in headers_json is never served, in either form (as XHDR):
 	// the default -xref partial mode answers the local value of the serving group.
 	local := fmt.Sprintf("1 go-pugleaf %s:1", g)
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR Xref 1"), []string{local}); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR Xref 1"), []string{local}); err != nil {
 		t.Fatal(err)
 	}
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR Xref %s", id1), []string{local}); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR Xref %s", id1), []string{local}); err != nil {
 		t.Fatal(err)
 	}
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR X-Ovh-Test 1-2"), []string{"1 v1", "2"}); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR X-Ovh-Test 1-2"), []string{"1 v1", "2"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -404,10 +404,10 @@ func TestOvhOverviewFmt(t *testing.T) {
 	// "Xref:full": the default -xref partial mode writes the Xref field (nntp-xref_test.go
 	// covers off/full).
 	want := []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines", "Xref:full"}
-	if err := hExpectLines(ovhBlock(t, c, 215, "LIST OVERVIEW.FMT"), want); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 215, "LIST OVERVIEW.FMT"), want); err != nil {
 		t.Fatal(err)
 	}
-	if err := hExpectLines(ovhBlock(t, c, 215, "list overview.fmt"), want); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 215, "list overview.fmt"), want); err != nil {
 		t.Fatal(err)
 	}
 	ovhExpect(t, c, 501, "LIST OVERVIEW.FMT x")
@@ -485,7 +485,7 @@ func TestOvhLargeRange(t *testing.T) {
 
 	// An open-ended huge range stops at the last row (no walk over unused numbers).
 	ovhExpectNums(t, "OVER 2499-max", ovhOverNums(t, ovhBlock(t, c, 224, "OVER 2499-9223372036854775807")), 2499, 2500)
-	if err := hExpectLines(ovhBlock(t, c, 225, "HDR Subject 2500-"), []string{"2500 Test article 2500"}); err != nil {
+	if err := client.ExpectLines(ovhBlock(t, c, 225, "HDR Subject 2500-"), []string{"2500 Test article 2500"}); err != nil {
 		t.Fatal(err)
 	}
 	ovhExpect(t, c, 423, "OVER 2501-9223372036854775807")
