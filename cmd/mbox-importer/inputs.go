@@ -86,17 +86,17 @@ func (t *tailBuffer) String() string {
 	return strings.TrimSpace(string(t.buf))
 }
 
-// isInputName reports whether a directory entry is an input: its name contains ".mbox",
-// ".bag" or ".usenet" (UAT archives) and does not end in ".done".
+// isInputName reports whether a directory entry is an input: it does not end in ".done",
+// and its name contains ".mbox" or ".bag", or ends in a UAT suffix (uatSuffix).
 func isInputName(name string) bool {
 	if strings.HasSuffix(name, ".done") {
 		return false
 	}
-	return strings.Contains(name, ".mbox") || strings.Contains(name, ".bag") || strings.Contains(name, ".usenet")
+	return strings.Contains(name, ".mbox") || strings.Contains(name, ".bag") || uatSuffix(name) != ""
 }
 
 // expandInputs turns the positional arguments into the list of files to import:
-// a file is itself, a directory contributes its *.mbox* / *.bag* entries (not *.done),
+// a file is itself, a directory contributes its *.mbox* / *.bag* / *.usenet* entries (not *.done),
 // sorted by name, without recursion. Missing paths are reported in errs.
 func expandInputs(args []string) (files []string, errs []error) {
 	for _, arg := range args {

@@ -285,8 +285,15 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 	c.Unread = src.Unread() // before Close: Close kills a 7z that was not read to its end
 	closeErr := src.Close()
 	if closeErr != nil {
-		log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, closeErr)
-		inputErr = true
+		// Ctrl-C at a terminal also kills the 7z process (same process group): a stop
+		select {
+		case <-stop:
+			stopped = true
+			log.Printf("[MBOX-IMPORT] file=%q: input ended by the shutdown signal: %v", path, closeErr)
+		default:
+			log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, closeErr)
+			inputErr = true
+		}
 	}
 	var samples []nearMiss
 	if src.Stream != nil {

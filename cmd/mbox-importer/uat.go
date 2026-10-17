@@ -76,6 +76,13 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 			err = unpack7z(path, file, opts.sevenZip)
 		}
 		if err != nil {
+			// Ctrl-C at a terminal also kills the unpack program (same process group)
+			select {
+			case <-stop:
+				log.Printf("[MBOX-IMPORT] file=%q: unpack ended by the shutdown signal: %v", path, err)
+				return nil, false, true
+			default:
+			}
 			log.Printf("[MBOX-IMPORT] input error: file=%q: unpack: %v", path, err)
 			return nil, true, false
 		}
@@ -124,9 +131,16 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 	case errors.Is(eachErr, errStopped):
 		stopped = true
 	case eachErr != nil:
-		c.StoppedEarly = true
-		inputErr = true
-		log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, eachErr)
+		// Ctrl-C at a terminal also kills zstd (same process group): a stop, not an input error
+		select {
+		case <-stop:
+			stopped = true
+			log.Printf("[MBOX-IMPORT] file=%q: read ended by the shutdown signal: %v", path, eachErr)
+		default:
+			c.StoppedEarly = true
+			inputErr = true
+			log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, eachErr)
+		}
 	}
 	closeErr := p.Close()
 	if closeErr != nil {

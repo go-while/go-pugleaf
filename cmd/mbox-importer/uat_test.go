@@ -178,6 +178,8 @@ func TestMboxUatInputName(t *testing.T) {
 		"pl.comp.usenet.xz":      true,
 		"pl.comp.usenet.7z":      true,
 		"pl.comp.usenet.xz.done": false,
+		"pl.comp.usenet.xz.part": false,
+		"pl.comp.usenet.gz":      false,
 		"pl.comp.txt":            false,
 	} {
 		if got := isInputName(name); got != want {
@@ -577,6 +579,46 @@ func TestMboxUatStopped(t *testing.T) {
 		}
 		if !miExists(in) || miExists(in+".done") {
 			t.Error("input renamed after the stop")
+		}
+		if n := uaEntries(t, tmp); n != 0 {
+			t.Errorf("tmpdir has %d entries", n)
+		}
+	})
+}
+
+// TestMboxUatKilledBySignal: an unpack program or zstd failing while stop is closed (Ctrl-C at
+// a terminal kills them too, same process group) ends the input as stopped, not as an input error.
+func TestMboxUatKilledBySignal(t *testing.T) {
+	stop := make(chan struct{})
+	close(stop)
+	failing := uaScript(t, "prog", "cat >/dev/null; echo uat-killed >&2; exit 1")
+	t.Run("zstd", func(t *testing.T) {
+		in := uaWrite(t, t.TempDir(), uaGroup, uaMessages())
+		c, inputErr, stopped := importUAT(in, &runOptions{zstd: failing, tmpDir: t.TempDir(), markDone: true}, newCountingSink(), stop)
+		res := &runSummary{Stopped: stopped, Total: newCounters("")}
+		if inputErr {
+			res.InputErrors++
+		}
+		if c == nil || !stopped || inputErr || c.StoppedEarly || res.exitCode() != 130 {
+			t.Fatalf("counters %+v input-error=%t stopped=%t exit=%d", c, inputErr, stopped, res.exitCode())
+		}
+		if !miExists(in) || miExists(in+".done") {
+			t.Error("input renamed")
+		}
+	})
+	t.Run("unpack", func(t *testing.T) {
+		in := uaWrite(t, t.TempDir(), uaGroup, uaMessages())
+		xzIn := in + ".xz" // the content does not matter: the fake xz fails
+		if err := os.Rename(in, xzIn); err != nil {
+			t.Fatal(err)
+		}
+		tmp := t.TempDir()
+		c, inputErr, stopped := importUAT(xzIn, &runOptions{zstd: "zstd", xz: failing, sevenZip: "/nonexistent/7z", tmpDir: tmp, markDone: true}, newCountingSink(), stop)
+		if c != nil || !stopped || inputErr {
+			t.Fatalf("counters %+v input-error=%t stopped=%t", c, inputErr, stopped)
+		}
+		if !miExists(xzIn) || miExists(xzIn+".done") {
+			t.Error("input renamed")
 		}
 		if n := uaEntries(t, tmp); n != 0 {
 			t.Errorf("tmpdir has %d entries", n)
