@@ -1,12 +1,12 @@
 package nntp
 
 import (
-	"bufio"
 	"net"
 	"sync"
 	"testing"
 
 	"github.com/go-while/go-pugleaf/internal/config"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // Plan xref-leftovers item 3: Config.NNTP.Addr ("" = all interfaces) selects the IP
@@ -88,13 +88,13 @@ func TestBindStartOnAddr(t *testing.T) {
 			if err != nil {
 				t.Fatalf("dial %s: %v", addr, err)
 			}
-			c := &hClient{Conn: conn, R: bufio.NewReader(conn), Deadline: hDeadline}
-			greeting, err := c.readLine()
-			c.close()
+			c := hNewClient(t, conn, hDeadline)
+			greeting, err := c.ReadLine()
+			c.Close()
 			if err != nil {
 				t.Fatalf("greeting: %v", err)
 			}
-			if code, perr := hParseCode(greeting); perr != nil || code != 201 {
+			if code, perr := client.ParseCode(greeting); perr != nil || code != 201 {
 				t.Fatalf("greeting %q, want 201 (read-only server)", greeting)
 			}
 

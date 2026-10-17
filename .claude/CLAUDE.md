@@ -31,6 +31,8 @@ go test -race ./internal/database/... ./internal/web/... ./internal/history/... 
 - `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` lists the open NNTP known bugs (fails on purpose);
   a fixed bug makes its `knownBug` marker fail until the marker is removed (see `docs/audit/README.md`).
 - Add or extend `_test.go` files for new logic when practical; most packages have no tests yet.
+- The `internal/nntp` tests use `github.com/go-while/nntp-testkit` (fake NNTP server, strict test client, process
+  runner; a pinned release in `go.mod`); the DB-backed harness (`newTestServer`, seeding, `knownBug`) stays here.
 - To build a binary use its own script, e.g. `./build_webserver.sh`, `./build_fetcher.sh`,
   `./build_history-rebuild.sh` (output: `build/`; no `-race`: the race detector runs in `go test -race`, not in binaries).
 - Never run `build_ALL.sh` or `Build_DEV.sh`: they `rm build/*` and generate checksums/update tarballs.

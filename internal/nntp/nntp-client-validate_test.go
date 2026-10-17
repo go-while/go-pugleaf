@@ -302,7 +302,7 @@ func TestCliValPoolGetArticle(t *testing.T) {
 	s := newCliFakeServer(t, cliFakeOpts{Script: []cliFakeStep{
 		{Expect: "MODE READER", Reply: []string{"200 reader"}},
 	}})
-	cfg := s.Backend()
+	cfg := cliBackend(s)
 	cfg.AuthFailureBackoff = -1
 	pool := NewPool(cfg)
 	t.Cleanup(func() { _ = pool.ClosePool() })

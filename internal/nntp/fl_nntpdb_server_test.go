@@ -15,12 +15,13 @@ import (
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // flNntpdbExpect runs one command and fails unless it answers want.
-func flNntpdbExpect(t *testing.T, c *hClient, want int, format string, args ...interface{}) string {
+func flNntpdbExpect(t *testing.T, c *client.Conn, want int, format string, args ...interface{}) string {
 	t.Helper()
-	code, line := c.cmd(t, format, args...)
+	code, line := c.Cmd(format, args...)
 	if code != want {
 		t.Fatalf("%s: got %q, want %d", fmt.Sprintf(format, args...), line, want)
 	}
@@ -46,7 +47,7 @@ func TestFlNntpdbDeactivatedGroupDropsSelection(t *testing.T) {
 	flNntpdbExpect(t, c, 211, "GROUP %s", g)
 	flNntpdbExpect(t, c, 223, "STAT 2")
 	flNntpdbExpect(t, c, 224, "XOVER 1-3")
-	if lines := c.readDotLines(t); len(lines) != 3 {
+	if lines := c.ReadDotLines(); len(lines) != 3 {
 		t.Fatalf("XOVER before the deactivation: %d lines, want 3", len(lines))
 	}
 

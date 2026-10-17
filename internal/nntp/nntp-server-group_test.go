@@ -26,6 +26,7 @@ import (
 
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/nntp-testkit/client"
 )
 
 // grpSkip12 leaves articles 1 and 2 out ("deleted"), so 1..5 gives 3, 4, 5.
@@ -66,11 +67,11 @@ func grpExpect211(line string, count, low, high int64, group string) error {
 
 // grpReadIfMulti reads the dot-terminated block when code is one of the
 // multi-line codes, so the connection stays in sync whatever the server sent.
-func grpReadIfMulti(t *testing.T, c *hClient, code int, multi ...int) []string {
+func grpReadIfMulti(t *testing.T, c *client.Conn, code int, multi ...int) []string {
 	t.Helper()
 	for _, m := range multi {
 		if code == m {
-			return c.readDotLines(t)
+			return c.ReadDotLines()
 		}
 	}
 	return nil
@@ -207,8 +208,8 @@ func TestGrpGroupSeeded(t *testing.T) {
 	// the lowest and highest article numbers in the group, here 3 and 5.
 	t.Run("reply", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "GROUP %s", g)
-		if err := hExpectCode(code, line, 211); err != nil {
+		code, line := c.Cmd("GROUP %s", g)
+		if err := client.ExpectCode(code, line, 211); err != nil {
 			t.Fatal(err)
 		}
 		count, low, high, name, err := grpParse211(line)
@@ -231,12 +232,12 @@ func TestGrpGroupSeeded(t *testing.T) {
 	// "223 3 <id>". Also depends on RFC-3 (STAT without argument → 501 today).
 	t.Run("current-article", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "GROUP %s", g)
-		if err := hExpectCode(code, line, 211); err != nil {
+		code, line := c.Cmd("GROUP %s", g)
+		if err := client.ExpectCode(code, line, 211); err != nil {
 			t.Fatal(err)
 		}
-		code, line = c.cmd(t, "STAT")
-		err := hExpectCode(code, line, 223)
+		code, line = c.Cmd("STAT")
+		err := client.ExpectCode(code, line, 223)
 		if err == nil {
 			want := fmt.Sprintf("223 3 %s", hMessageID(g, 3))
 			if !strings.HasPrefix(line, want) {
@@ -255,17 +256,17 @@ func TestGrpGroupSeeded(t *testing.T) {
 	// works in the old group.
 	t.Run("unknown-keeps-current", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "GROUP %s", g)
-		if err := hExpectCode(code, line, 211); err != nil {
+		code, line := c.Cmd("GROUP %s", g)
+		if err := client.ExpectCode(code, line, 211); err != nil {
 			t.Fatal(err)
 		}
 		unknown := hGroupName("t3.groupunknown")
-		code, line = c.cmd(t, "GROUP %s", unknown)
-		if err := hExpectCode(code, line, 411); err != nil {
+		code, line = c.Cmd("GROUP %s", unknown)
+		if err := client.ExpectCode(code, line, 411); err != nil {
 			t.Fatalf("GROUP %s: %v", unknown, err)
 		}
-		code, line = c.cmd(t, "STAT 3")
-		if err := hExpectCode(code, line, 223); err != nil {
+		code, line = c.Cmd("STAT 3")
+		if err := client.ExpectCode(code, line, 223); err != nil {
 			t.Fatalf("STAT 3 after a failed GROUP: %v", err)
 		}
 		if f := strings.Fields(line); len(f) < 3 || f[1] != "3" || f[2] != hMessageID(g, 3) {
@@ -280,8 +281,8 @@ func TestGrpGroupInactive(t *testing.T) {
 	g := grpNewGroup(t, "t3.groupinactive", false)
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 411); err != nil {
+	code, line := c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 411); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -296,8 +297,8 @@ func TestGrpGroupEmpty(t *testing.T) {
 	g := hGroup(t, "t3.groupempty", 0, nil)
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line := c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
 	if err := grpExpect211(line, 0, 1, 0, g); err != nil {
@@ -324,25 +325,25 @@ func TestGrpGroupEmptyNextNumFails(t *testing.T) {
 	gdb.Return()
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 403); err != nil {
+	code, line := c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 403); err != nil {
 		t.Fatal(err)
 	}
-	code, line = c.cmd(t, "LISTGROUP")
-	if err := hExpectCode(code, line, 412); err != nil {
+	code, line = c.Cmd("LISTGROUP")
+	if err := client.ExpectCode(code, line, 412); err != nil {
 		t.Fatalf("after the failed GROUP: %v", err)
 	}
-	c.close()
+	c.Close()
 	hs.stop(t)
 }
 
 // grpExpectNoCurrent checks that STAT, NEXT and LAST without an argument answer 420
 // (no current article, RFC 3977 §6.1.1.2, §6.1.3, §6.1.4, §6.2.4).
-func grpExpectNoCurrent(t *testing.T, c *hClient) {
+func grpExpectNoCurrent(t *testing.T, c *client.Conn) {
 	t.Helper()
 	for _, cmd := range []string{"STAT", "NEXT", "LAST"} {
-		code, line := c.cmd(t, "%s", cmd)
-		if err := hExpectCode(code, line, 420); err != nil {
+		code, line := c.Cmd("%s", cmd)
+		if err := client.ExpectCode(code, line, 420); err != nil {
 			t.Fatalf("%s without a current article: %v", cmd, err)
 		}
 	}
@@ -350,13 +351,13 @@ func grpExpectNoCurrent(t *testing.T, c *hClient) {
 
 // grpExpectEmptyListGroup checks that "LISTGROUP group" answers exactly
 // "211 count low high group" followed by an empty list.
-func grpExpectEmptyListGroup(t *testing.T, c *hClient, group string, count, low, high int64) {
+func grpExpectEmptyListGroup(t *testing.T, c *client.Conn, group string, count, low, high int64) {
 	t.Helper()
-	code, line := c.cmd(t, "LISTGROUP %s", group)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line := c.Cmd("LISTGROUP %s", group)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
-	lines := c.readDotLines(t)
+	lines := c.ReadDotLines()
 	if err := grpExpect211(line, count, low, high, group); err != nil {
 		t.Fatalf("LISTGROUP %s: %v", group, err)
 	}
@@ -393,26 +394,26 @@ func TestGrpGroupEmptied(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 
-	code, line := c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line := c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
 	if err := grpExpect211(line, 0, 6, 5, g); err != nil {
 		t.Fatalf("emptied group: %v", err)
 	}
 	grpExpectNoCurrent(t, c)
-	code, line = c.cmd(t, "ARTICLE 1")
-	if err := hExpectCode(code, line, 423); err != nil {
+	code, line = c.Cmd("ARTICLE 1")
+	if err := client.ExpectCode(code, line, 423); err != nil {
 		t.Fatalf("ARTICLE 1 in the emptied group: %v", err)
 	}
 	grpExpectEmptyListGroup(t, c, g, 0, 6, 5)
 
 	// A range over the old numbers lists nothing either.
-	code, line = c.cmd(t, "LISTGROUP %s 1-10", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line = c.Cmd("LISTGROUP %s 1-10", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
-	if lines := c.readDotLines(t); len(lines) != 0 {
+	if lines := c.ReadDotLines(); len(lines) != 0 {
 		t.Fatalf("LISTGROUP %s 1-10: got lines %q, want none", g, lines)
 	}
 
@@ -430,14 +431,14 @@ func TestGrpGroupEmptied(t *testing.T) {
 		t.Fatalf("next article number of %s: got %d, want 6", g, next)
 	}
 	hArticleSQL(t, g, hDefaultArticle(g, next))
-	code, line = c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line = c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
 	if err := grpExpect211(line, 1, 6, 6, g); err != nil {
 		t.Fatalf("GROUP after a new article: %v", err)
 	}
-	code, line = c.cmd(t, "STAT")
+	code, line = c.Cmd("STAT")
 	if !strings.HasPrefix(line, fmt.Sprintf("223 6 %s", hMessageID(g, 6))) {
 		t.Fatalf("bare STAT after GROUP: got %q (code %d), want 223 6", line, code)
 	}
@@ -451,8 +452,8 @@ func TestGrpGroupAllHidden(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 
-	code, line := c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line := c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
 	if err := grpExpect211(line, 0, 6, 5, g); err != nil {
@@ -467,8 +468,8 @@ func TestGrpGroupAllHidden(t *testing.T) {
 func TestGrpGroupNoArg(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "GROUP")
-	if err := hExpectCode(code, line, 501); err != nil {
+	code, line := c.Cmd("GROUP")
+	if err := client.ExpectCode(code, line, 501); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -482,11 +483,11 @@ func TestGrpListGroup(t *testing.T) {
 	// the article numbers in the group in ascending order.
 	t.Run("reply-and-numbers", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "LISTGROUP %s", g)
-		if err := hExpectCode(code, line, 211); err != nil {
+		code, line := c.Cmd("LISTGROUP %s", g)
+		if err := client.ExpectCode(code, line, 211); err != nil {
 			t.Fatal(err)
 		}
-		lines := c.readDotLines(t)
+		lines := c.ReadDotLines()
 		nums, nerr := grpNumbers(lines)
 		if nerr == nil {
 			nerr = grpExpectNums(nums, []int64{3, 4, 5})
@@ -503,11 +504,11 @@ func TestGrpListGroup(t *testing.T) {
 	// listed; "4-" means 4 to the end, here 4 and 5.
 	t.Run("range", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "LISTGROUP %s 4-", g)
-		if err := hExpectCode(code, line, 211); err != nil {
+		code, line := c.Cmd("LISTGROUP %s 4-", g)
+		if err := client.ExpectCode(code, line, 211); err != nil {
 			t.Fatal(err)
 		}
-		nums, err := grpNumbers(c.readDotLines(t))
+		nums, err := grpNumbers(c.ReadDotLines())
 		if err == nil {
 			err = grpExpectNums(nums, []int64{4, 5})
 		}
@@ -520,13 +521,13 @@ func TestGrpListGroup(t *testing.T) {
 	// current article like GROUP, so a following STAT 3 gives 223 (not 412).
 	t.Run("selects-group", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "LISTGROUP %s", g)
-		if err := hExpectCode(code, line, 211); err != nil {
+		code, line := c.Cmd("LISTGROUP %s", g)
+		if err := client.ExpectCode(code, line, 211); err != nil {
 			t.Fatal(err)
 		}
-		c.readDotLines(t)
-		code, line = c.cmd(t, "STAT 3")
-		if err := hExpectCode(code, line, 223); err != nil {
+		c.ReadDotLines()
+		code, line = c.Cmd("STAT 3")
+		if err := client.ExpectCode(code, line, 223); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -534,9 +535,9 @@ func TestGrpListGroup(t *testing.T) {
 	// RFC 3977 §6.1.2.2: LISTGROUP without a group and with no group selected → 412.
 	t.Run("no-group", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "LISTGROUP")
+		code, line := c.Cmd("LISTGROUP")
 		grpReadIfMulti(t, c, code, 211)
-		if err := hExpectCode(code, line, 412); err != nil {
+		if err := client.ExpectCode(code, line, 412); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -547,9 +548,9 @@ func TestGrpListGroup(t *testing.T) {
 	t.Run("inactive", func(t *testing.T) {
 		inactive := grpNewGroup(t, "t3.listgroupinactive", false)
 		c := hs.dial(t)
-		code, line := c.cmd(t, "LISTGROUP %s", inactive)
+		code, line := c.Cmd("LISTGROUP %s", inactive)
 		grpReadIfMulti(t, c, code, 211)
-		if err := hExpectCode(code, line, 411); err != nil {
+		if err := client.ExpectCode(code, line, 411); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -566,12 +567,12 @@ func TestGrpListGroupUnknownNoFile(t *testing.T) {
 	sanitized := database.SanitizeGroupName(unknown)
 
 	before := grpDBEntries(t)
-	code, line := c.cmd(t, "LISTGROUP %s", unknown)
+	code, line := c.Cmd("LISTGROUP %s", unknown)
 	grpReadIfMulti(t, c, code, 211)
 	after := grpDBEntries(t)
 
 	var errs []error
-	if err := hExpectCode(code, line, 411); err != nil {
+	if err := client.ExpectCode(code, line, 411); err != nil {
 		errs = append(errs, fmt.Errorf("LISTGROUP %s: %w", unknown, err))
 	}
 	var created []string
@@ -608,7 +609,7 @@ const (
 
 // grpCountListLines reads a LISTGROUP body without allocating per line and
 // returns the number of lines and whether they were strictly ascending.
-func grpCountListLines(c *hClient, deadline time.Duration) (int, bool, error) {
+func grpCountListLines(c *client.Conn, deadline time.Duration) (int, bool, error) {
 	if err := c.Conn.SetDeadline(time.Now().Add(deadline)); err != nil {
 		return 0, false, err
 	}
@@ -649,7 +650,7 @@ func TestGrpListGroupMemory(t *testing.T) {
 		runtime.GC()
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
-		code, line, err := c.tryCmd("LISTGROUP %s", g)
+		code, line, err := c.TryCmd("LISTGROUP %s", g)
 		if err != nil {
 			t.Fatalf("LISTGROUP: %v", err)
 		}
@@ -691,11 +692,11 @@ func TestGrpListActive(t *testing.T) {
 	inactive := grpNewGroup(t, "t3.listactiveoff", false)
 	hs := newTestServer(t, hServerOpts{Proc: &hFakeProcessor{}})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "LIST ACTIVE")
-	if err := hExpectCode(code, line, 215); err != nil {
+	code, line := c.Cmd("LIST ACTIVE")
+	if err := client.ExpectCode(code, line, 215); err != nil {
 		t.Fatal(err)
 	}
-	lines := c.readDotLines(t)
+	lines := c.ReadDotLines()
 	if l, ok := grpFindLine(lines, inactive); ok {
 		t.Fatalf("LIST ACTIVE lists the inactive group: %q", l)
 	}
@@ -733,11 +734,11 @@ func TestGrpListWildmat(t *testing.T) {
 			var errs []error
 
 			// "t3.*" lists a and b and only t3.* groups.
-			code, line := c.cmd(t, "LIST %s t3.*", kw)
-			if err := hExpectCode(code, line, 215); err != nil {
+			code, line := c.Cmd("LIST %s t3.*", kw)
+			if err := client.ExpectCode(code, line, 215); err != nil {
 				t.Fatal(err)
 			}
-			lines := c.readDotLines(t)
+			lines := c.ReadDotLines()
 			for _, want := range []string{a, b} {
 				if _, ok := grpFindLine(lines, want); !ok {
 					t.Fatalf("LIST %s t3.* does not list %s", kw, want)
@@ -751,11 +752,11 @@ func TestGrpListWildmat(t *testing.T) {
 			}
 
 			// The narrower pattern lists exactly a.
-			code, line = c.cmd(t, "LIST %s %s", kw, pattern)
-			if err := hExpectCode(code, line, 215); err != nil {
+			code, line = c.Cmd("LIST %s %s", kw, pattern)
+			if err := client.ExpectCode(code, line, 215); err != nil {
 				t.Fatal(err)
 			}
-			lines = c.readDotLines(t)
+			lines = c.ReadDotLines()
 			if len(lines) != 1 || !strings.HasPrefix(lines[0], a+" ") {
 				errs = append(errs, fmt.Errorf("LIST %s %s: got %q, want only %s", kw, pattern, lines, a))
 			}
@@ -777,9 +778,9 @@ func TestGrpListWildmat(t *testing.T) {
 func TestGrpListUnknownKeyword(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "LIST FOO")
+	code, line := c.Cmd("LIST FOO")
 	grpReadIfMulti(t, c, code, 215)
-	if err := hExpectCode(code, line, 501); err != nil {
+	if err := client.ExpectCode(code, line, 501); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -790,9 +791,9 @@ func TestGrpListUnknownKeyword(t *testing.T) {
 func TestGrpListOverviewFmt(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "LIST OVERVIEW.FMT")
+	code, line := c.Cmd("LIST OVERVIEW.FMT")
 	lines := grpReadIfMulti(t, c, code, 215)
-	err := hExpectCode(code, line, 215)
+	err := client.ExpectCode(code, line, 215)
 	if err == nil {
 		want := []string{"subject:", "from:", "date:", "message-id:", "references:", ":bytes", ":lines"}
 		alt := map[string]string{":bytes": "bytes:", ":lines": "lines:"}
@@ -817,8 +818,8 @@ func TestGrpListOverviewFmt(t *testing.T) {
 func TestGrpDate(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "DATE")
-	err := hExpectCode(code, line, 111)
+	code, line := c.Cmd("DATE")
+	err := client.ExpectCode(code, line, 111)
 	if err == nil {
 		m := regexp.MustCompile(`^111 (\d{14})(\s|$)`).FindStringSubmatch(line)
 		if m == nil {
@@ -848,9 +849,9 @@ func TestGrpNextLast(t *testing.T) {
 	empty := hGroup(t, "t3.nextlastempty", 0, nil)
 	hs := newTestServer(t, hServerOpts{})
 
-	expect := func(t *testing.T, c *hClient, cmd string, code int, num int64) error {
+	expect := func(t *testing.T, c *client.Conn, cmd string, code int, num int64) error {
 		t.Helper()
-		got, line := c.cmd(t, "%s", cmd)
+		got, line := c.Cmd("%s", cmd)
 		if got != code {
 			return fmt.Errorf("%s: got %q, want %d", cmd, line, code)
 		}
@@ -872,8 +873,8 @@ func TestGrpNextLast(t *testing.T) {
 
 	t.Run("walk", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "GROUP %s", g)
-		if err := hExpectCode(code, line, 211); err != nil {
+		code, line := c.Cmd("GROUP %s", g)
+		if err := client.ExpectCode(code, line, 211); err != nil {
 			t.Fatal(err)
 		}
 		err := errors.Join(
@@ -894,8 +895,8 @@ func TestGrpNextLast(t *testing.T) {
 
 	t.Run("empty-group", func(t *testing.T) {
 		c := hs.dial(t)
-		code, line := c.cmd(t, "GROUP %s", empty)
-		if err := hExpectCode(code, line, 211); err != nil {
+		code, line := c.Cmd("GROUP %s", empty)
+		if err := client.ExpectCode(code, line, 211); err != nil {
 			t.Fatal(err)
 		}
 		// §6.1.1.2: in an empty group the current article number is invalid → 420.
@@ -915,9 +916,9 @@ func TestGrpNewGroups(t *testing.T) {
 	var errs []error
 
 	since := time.Now().UTC().Add(-48 * time.Hour)
-	code, line := c.cmd(t, "NEWGROUPS %s GMT", since.Format("20060102 150405"))
+	code, line := c.Cmd("NEWGROUPS %s GMT", since.Format("20060102 150405"))
 	lines := grpReadIfMulti(t, c, code, 231)
-	if err := hExpectCode(code, line, 231); err != nil {
+	if err := client.ExpectCode(code, line, 231); err != nil {
 		errs = append(errs, fmt.Errorf("NEWGROUPS (2 days ago): %w", err))
 	} else if l, ok := grpFindLine(lines, g); !ok {
 		errs = append(errs, fmt.Errorf("NEWGROUPS (2 days ago) does not list %s", g))
@@ -925,9 +926,9 @@ func TestGrpNewGroups(t *testing.T) {
 		errs = append(errs, fmt.Errorf("NEWGROUPS line %q, want \"%s 2 1 <status>\"", l, g))
 	}
 
-	code, line = c.cmd(t, "NEWGROUPS 20991231 235959 GMT")
+	code, line = c.Cmd("NEWGROUPS 20991231 235959 GMT")
 	lines = grpReadIfMulti(t, c, code, 231)
-	if err := hExpectCode(code, line, 231); err != nil {
+	if err := client.ExpectCode(code, line, 231); err != nil {
 		errs = append(errs, fmt.Errorf("NEWGROUPS (future): %w", err))
 	} else if len(lines) != 0 {
 		errs = append(errs, fmt.Errorf("NEWGROUPS (future) lists %q, want nothing", lines))
@@ -943,17 +944,17 @@ func TestGrpNewGroups(t *testing.T) {
 func TestGrpNewNews(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "CAPABILITIES")
-	if err := hExpectCode(code, line, 101); err != nil {
+	code, line := c.Cmd("CAPABILITIES")
+	if err := client.ExpectCode(code, line, 101); err != nil {
 		t.Fatal(err)
 	}
 	advertised := false
-	for _, l := range c.readDotLines(t) {
+	for _, l := range c.ReadDotLines() {
 		if f := strings.Fields(l); len(f) > 0 && strings.EqualFold(f[0], "NEWNEWS") {
 			advertised = true
 		}
 	}
-	code, line = c.cmd(t, "NEWNEWS t3.* 20000101 000000 GMT")
+	code, line = c.Cmd("NEWNEWS t3.* 20000101 000000 GMT")
 	grpReadIfMulti(t, c, code, 230)
 	switch {
 	case code == 230 && !advertised:
@@ -992,11 +993,11 @@ func TestGrpHiddenNotListed(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 
-	code, line := c.cmd(t, "LISTGROUP %s", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line := c.Cmd("LISTGROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
-	nums, err := grpNumbers(c.readDotLines(t))
+	nums, err := grpNumbers(c.ReadDotLines())
 	if err == nil {
 		err = grpExpectNums(nums, []int64{2, 4})
 	}
@@ -1004,8 +1005,8 @@ func TestGrpHiddenNotListed(t *testing.T) {
 		t.Fatalf("LISTGROUP body: %v", err)
 	}
 
-	code, line = c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line = c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
 	count, low, high, name, err := grpParse211(line)
@@ -1016,7 +1017,7 @@ func TestGrpHiddenNotListed(t *testing.T) {
 		t.Fatalf("GROUP: got %q, want \"211 <2..3> 2 4 %s\"", line, g)
 	}
 	// The current article is the low mark, a visible article.
-	code, line = c.cmd(t, "STAT")
+	code, line = c.Cmd("STAT")
 	if !strings.HasPrefix(line, fmt.Sprintf("223 2 %s", hMessageID(g, 2))) {
 		t.Fatalf("bare STAT after GROUP: got %q (code %d), want 223 2", line, code)
 	}
@@ -1027,8 +1028,8 @@ func TestGrpHiddenNotListed(t *testing.T) {
 		`UPDATE newsgroups SET message_count = 0 WHERE name = ?`, g); err != nil {
 		t.Fatalf("zero message_count of %s: %v", g, err)
 	}
-	code, line = c.cmd(t, "GROUP %s", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line = c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
 	if err := grpExpect211(line, 3, 2, 4, g); err != nil {
@@ -1043,32 +1044,32 @@ func TestGrpListGroupRangeEmpty(t *testing.T) {
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
 
-	code, line := c.cmd(t, "LISTGROUP %s 9-3", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line := c.Cmd("LISTGROUP %s 9-3", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
-	if lines := c.readDotLines(t); len(lines) != 0 {
+	if lines := c.ReadDotLines(); len(lines) != 0 {
 		t.Fatalf("LISTGROUP %s 9-3: got lines %q, want none", g, lines)
 	}
 	if err := grpExpect211(line, 5, 1, 5, g); err != nil {
 		t.Fatal(err)
 	}
 	// A range beyond the group is empty as well.
-	code, line = c.cmd(t, "LISTGROUP %s 100-", g)
-	if err := hExpectCode(code, line, 211); err != nil {
+	code, line = c.Cmd("LISTGROUP %s 100-", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
 		t.Fatal(err)
 	}
-	if lines := c.readDotLines(t); len(lines) != 0 {
+	if lines := c.ReadDotLines(); len(lines) != 0 {
 		t.Fatalf("LISTGROUP %s 100-: got lines %q, want none", g, lines)
 	}
 	// A bad range is a syntax error.
-	code, line = c.cmd(t, "LISTGROUP %s x-5", g)
+	code, line = c.Cmd("LISTGROUP %s x-5", g)
 	grpReadIfMulti(t, c, code, 211)
-	if err := hExpectCode(code, line, 501); err != nil {
+	if err := client.ExpectCode(code, line, 501); err != nil {
 		t.Fatal(err)
 	}
-	code, line = c.cmd(t, "STAT 3")
-	if err := hExpectCode(code, line, 223); err != nil {
+	code, line = c.Cmd("STAT 3")
+	if err := client.ExpectCode(code, line, 223); err != nil {
 		t.Fatalf("STAT 3 after LISTGROUP with an empty range: %v", err)
 	}
 }
@@ -1086,12 +1087,12 @@ func TestGrpListNewsgroupsSanitized(t *testing.T) {
 	}
 	hs := newTestServer(t, hServerOpts{})
 	c := hs.dial(t)
-	code, line := c.cmd(t, "LIST NEWSGROUPS")
-	if err := hExpectCode(code, line, 215); err != nil {
+	code, line := c.Cmd("LIST NEWSGROUPS")
+	if err := client.ExpectCode(code, line, 215); err != nil {
 		t.Fatal(err)
 	}
 	var mine []string
-	for _, l := range c.readDotLines(t) {
+	for _, l := range c.ReadDotLines() {
 		if l == "four" || l == "three" || strings.HasPrefix(l, name+" ") {
 			mine = append(mine, l)
 		}

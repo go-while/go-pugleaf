@@ -102,7 +102,7 @@ func cliConnGet(t *testing.T, pool *Pool, mode int) (*BackendConn, time.Duration
 // socket must be closed.
 func TestCliConnGreetingTimeout(t *testing.T) {
 	s := newCliFakeServer(t, cliFakeOpts{NoGreeting: true})
-	cfg := s.Backend()
+	cfg := cliBackend(s)
 	cfg.ConnectTimeout = 300 * time.Millisecond
 	_, elapsed, err := cliConnConnect(t, cfg)
 	if err == nil {
@@ -124,7 +124,7 @@ func TestCliConnGreetingTimeout(t *testing.T) {
 // CLI-3: a non-2xx greeting returns an error and closes the socket.
 func TestCliConnBadGreetingClosesSocket(t *testing.T) {
 	s := newCliFakeServer(t, cliFakeOpts{Greeting: "400 go away"})
-	_, _, err := cliConnConnect(t, s.Backend())
+	_, _, err := cliConnConnect(t, cliBackend(s))
 	if err == nil {
 		t.Fatal("Connect accepted a 400 greeting")
 	}
@@ -139,7 +139,7 @@ func TestCliConnAuthFailureClosesSocket(t *testing.T) {
 	}
 	t.Run("no-backoff", func(t *testing.T) {
 		s := newCliFakeServer(t, cliFakeOpts{Script: script})
-		cfg := s.Backend()
+		cfg := cliBackend(s)
 		cfg.Username, cfg.Password = "u", "wrong"
 		cfg.AuthFailureBackoff = -1
 		_, elapsed, err := cliConnConnect(t, cfg)
@@ -159,7 +159,7 @@ func TestCliConnAuthFailureClosesSocket(t *testing.T) {
 	t.Run("backoff-after-close", func(t *testing.T) {
 		const backoff = 3 * time.Second
 		s := newCliFakeServer(t, cliFakeOpts{Script: script})
-		cfg := s.Backend()
+		cfg := cliBackend(s)
 		cfg.Username, cfg.Password = "u", "wrong"
 		cfg.AuthFailureBackoff = backoff
 		c := NewConn(cfg)
@@ -167,7 +167,7 @@ func TestCliConnAuthFailureClosesSocket(t *testing.T) {
 		start := time.Now()
 		go func() { done <- c.Connect() }()
 		// the socket is gone while Connect still sleeps
-		cliFakeWaitLines(t, s, []string{"AUTHINFO USER u", "AUTHINFO PASS wrong"})
+		s.WaitLines(t, []string{"AUTHINFO USER u", "AUTHINFO PASS wrong"})
 		s.WaitOpen(t, 0, 2*time.Second)
 		// deliberate short negative window: the socket closed while Connect
 		// still sleeps; the 3 s back-off leaves room for a loaded machine
@@ -193,7 +193,7 @@ func TestCliConnAuthFailureClosesSocket(t *testing.T) {
 // CLI-3: the TLS handshake is bounded by ConnectTimeout.
 func TestCliConnTLSHandshakeTimeout(t *testing.T) {
 	s := newCliFakeServer(t, cliFakeOpts{RawStall: true})
-	cfg := s.Backend()
+	cfg := cliBackend(s)
 	cfg.SSL = true
 	cfg.ConnectTimeout = 300 * time.Millisecond
 	_, elapsed, err := cliConnConnect(t, cfg)
@@ -219,7 +219,7 @@ func TestCliConnTLSHandshakeTimeout(t *testing.T) {
 func TestCliConnTLSUnknownCA(t *testing.T) {
 	serverTLS, _ := cliFakeTLSConfig(t)
 	s := newCliFakeServer(t, cliFakeOpts{TLS: serverTLS})
-	cfg := s.Backend() // ConnectTimeout 30 s: the rejection must not depend on it
+	cfg := cliBackend(s) // ConnectTimeout 30 s: the rejection must not depend on it
 	cfg.SSL = true
 	_, _, err := cliConnConnect(t, cfg)
 	if err == nil {
@@ -238,7 +238,7 @@ func TestCliConnReadIdleTimeout(t *testing.T) {
 	s := newCliFakeServer(t, cliFakeOpts{Script: []cliFakeStep{
 		{Expect: "ARTICLE .*", Reply: []string{"220 0 <a@b>", "Path: x"}, Hang: true},
 	}})
-	cfg := s.Backend()
+	cfg := cliBackend(s)
 	cfg.ReadTimeout = 300 * time.Millisecond
 	c, _, err := cliConnConnect(t, cfg)
 	if err != nil {
@@ -267,7 +267,7 @@ func TestCliConnReadIdleTimeout(t *testing.T) {
 func TestCliConnDemuxerAfterAuth(t *testing.T) {
 	run := func(t *testing.T, user, pass string) {
 		s := newCliFakeServer(t, cliFakeOpts{Handler: cliPeerHandler(&cliPeerOpts{User: user, Pass: pass})})
-		cfg := s.Backend()
+		cfg := cliBackend(s)
 		cfg.Username, cfg.Password = user, pass
 		cfg.AuthFailureBackoff = -1
 		pool := cliConnPool(t, cfg)
@@ -308,7 +308,7 @@ func TestCliConnDemuxerAfterAuth(t *testing.T) {
 		if user != "" {
 			want = append([]string{"AUTHINFO USER " + user, "AUTHINFO PASS " + pass}, want...)
 		}
-		cliFakeWaitLines(t, s, want)
+		s.WaitLines(t, want)
 	}
 	t.Run("authenticated", func(t *testing.T) { run(t, "u", "p") })
 	t.Run("unauthenticated", func(t *testing.T) { run(t, "", "") })
@@ -317,7 +317,7 @@ func TestCliConnDemuxerAfterAuth(t *testing.T) {
 // A-nntp-client-11: ForceCloseConn three times closes once and frees exactly one slot.
 func TestCliConnForceCloseIdempotent(t *testing.T) {
 	s := newCliFakeServer(t, cliFakeOpts{Handler: cliPeerHandler(&cliPeerOpts{})})
-	cfg := s.Backend()
+	cfg := cliBackend(s)
 	cfg.MaxConns = 2
 	cfg.PoolWaitTimeout = 200 * time.Millisecond
 	pool := cliConnPool(t, cfg)
@@ -384,7 +384,7 @@ func TestCliConnForceCloseIdempotent(t *testing.T) {
 // A-nntp-client-4: GetContext stops waiting for a slot when its context ends.
 func TestCliConnGetContextCancel(t *testing.T) {
 	s := newCliFakeServer(t, cliFakeOpts{Handler: cliPeerHandler(&cliPeerOpts{})})
-	cfg := s.Backend()
+	cfg := cliBackend(s)
 	cfg.MaxConns = 1
 	pool := cliConnPool(t, cfg)
 	held, _, err := cliConnGet(t, pool, MODE_READER_MV)
@@ -410,7 +410,7 @@ func TestCliConnGetContextCancel(t *testing.T) {
 // A-nntp-client-4: an idle pooled connection older than IdleExpire is replaced.
 func TestCliConnIdleExpire(t *testing.T) {
 	s := newCliFakeServer(t, cliFakeOpts{Handler: cliPeerHandler(&cliPeerOpts{})})
-	cfg := s.Backend()
+	cfg := cliBackend(s)
 	cfg.IdleExpire = 100 * time.Millisecond
 	pool := cliConnPool(t, cfg)
 	c, _, err := cliConnGet(t, pool, MODE_READER_MV)
@@ -435,7 +435,7 @@ func TestCliConnIdleExpire(t *testing.T) {
 // A-tools-3: a BackendConfig without Provider must not panic on error paths.
 func TestCliConnNilProvider(t *testing.T) {
 	dead := newCliFakeServer(t, cliFakeOpts{})
-	port := dead.Port
+	port := dead.Port()
 	dead.Close() // the port is now closed: connects are refused
 
 	cfg := &BackendConfig{Host: "127.0.0.1", Port: port, ConnectTimeout: 300 * time.Millisecond, MaxConns: 1}
