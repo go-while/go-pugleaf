@@ -474,3 +474,44 @@ func TestW1ServerHTTPServerTimeouts(t *testing.T) {
 			srv.ReadHeaderTimeout, srv.ReadTimeout, srv.WriteTimeout, srv.IdleTimeout, srv.MaxHeaderBytes)
 	}
 }
+
+// TestW1ServerSlashRemovalBeforeSections: on the production table a main route asked with a
+// trailing slash is redirected to the slash-less path (as gin did) instead of landing in the
+// fallback's /{section}/{$}; a one-segment path with a slash that has no main route still
+// reaches the section routes.
+func TestW1ServerSlashRemovalBeforeSections(t *testing.T) {
+	for _, tc := range []struct {
+		method, path string
+		code         int
+		location     string
+	}{
+		{http.MethodGet, "/admin/", http.StatusMovedPermanently, "/admin"},
+		{http.MethodGet, "/login/", http.StatusMovedPermanently, "/login"},
+		{http.MethodGet, "/SitePost/", http.StatusMovedPermanently, "/SitePost"},
+		{http.MethodGet, "/aichat/models/", http.StatusMovedPermanently, "/aichat/models"},
+		{http.MethodGet, "/hierarchy-groups/comp/", http.StatusMovedPermanently, "/hierarchy-groups/comp"},
+		{http.MethodPost, "/login/", http.StatusTemporaryRedirect, "/login"},
+	} {
+		rec := w0Do(t, w0Req{Method: tc.method, Path: tc.path})
+		if rec.Code != tc.code || rec.Header().Get("Location") != tc.location {
+			t.Errorf("%s %s = %d %q, want %d %q", tc.method, tc.path, rec.Code, rec.Header().Get("Location"), tc.code, tc.location)
+		}
+	}
+
+	// An unknown section: the section middleware of the fallback route answers.
+	unknown := strings.ReplaceAll(w0Name("w1srvnosec"), ".", "")
+	rec := w0Do(t, w0Req{Path: "/" + unknown + "/"})
+	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "youtube.com") {
+		t.Errorf("GET /%s/ = %d %q, want the section middleware's 303", unknown, rec.Code, rec.Header().Get("Location"))
+	}
+
+	// A valid section: sectionPage answers.
+	name := strings.ReplaceAll(w0Name("w1srvslash"), ".", "")
+	if _, err := database.RetryableExec(w0DB(t).GetMainDB(), "INSERT INTO sections(name, display_name) VALUES (?, ?)", name, "w1"); err != nil {
+		t.Fatal(err)
+	}
+	w0Srv.loadSectionsCache()
+	if rec := w0Do(t, w0Req{Path: "/" + name + "/"}); rec.Code != http.StatusOK {
+		t.Errorf("GET /%s/ = %d, want 200 from sectionPage", name, rec.Code)
+	}
+}

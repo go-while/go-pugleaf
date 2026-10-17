@@ -463,6 +463,39 @@ func TestHttpxFallback(t *testing.T) {
 	}
 }
 
+// TestHttpxSlashRemovalBeforeFallback: a path with a trailing slash whose slash-less form has a
+// main route is redirected there, not taken by the fallback's /{section}/{$}; other paths with a
+// slash still reach the fallback.
+func TestHttpxSlashRemovalBeforeFallback(t *testing.T) {
+	r := NewRouter()
+	r.GET("/login", httpxPattern)
+	r.POST("/login", httpxPattern)
+	fb := r.Fallback()
+	fb.GET("/{section}", httpxPattern)
+	fb.GET("/{section}/{$}", httpxPattern)
+
+	for _, tc := range []struct {
+		method, target string
+		code           int
+		location       string
+	}{
+		{http.MethodGet, "/login/", http.StatusMovedPermanently, "/login"},
+		{http.MethodGet, "/login/?redirect=%2Fx", http.StatusMovedPermanently, "/login?redirect=%2Fx"},
+		{http.MethodPost, "/login/", http.StatusTemporaryRedirect, "/login"},
+	} {
+		rec := httpxServe(r, tc.method, tc.target)
+		if rec.Code != tc.code || rec.Header().Get("Location") != tc.location {
+			t.Errorf("%s %s = %d %q, want %d %q", tc.method, tc.target, rec.Code, rec.Header().Get("Location"), tc.code, tc.location)
+		}
+	}
+	if rec := httpxServe(r, http.MethodGet, "/rocksolid/"); rec.Code != http.StatusOK || rec.Body.String() != "GET /{section}/{$}" {
+		t.Errorf("GET /rocksolid/ = %d %q, want the fallback route", rec.Code, rec.Body.String())
+	}
+	if rec := httpxServe(r, http.MethodGet, "/login"); rec.Body.String() != "GET /login" {
+		t.Errorf("GET /login = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHttpxLateRegistration(t *testing.T) {
 	r := NewRouter()
 	r.GET("/early", httpxPattern)

@@ -3,8 +3,9 @@ package web
 // The router of the web server: two net/http ServeMuxes (main and fallback) behind a global
 // middleware chain. A request runs the global chain; its last step looks the request up in the
 // main mux, then in the fallback mux, and runs the matched route's chain (group middleware and
-// handlers). On a miss, inside the global chain: trailing-slash redirect, then 405 with Allow,
-// then 404.
+// handlers). A path whose slash-less form has a main route is redirected there before the
+// fallback mux is tried. On a miss, inside the global chain: trailing-slash redirect, then 405
+// with Allow, then 404.
 
 import (
 	"context"
@@ -228,13 +229,21 @@ func httpxLookup(mux *http.ServeMux, req *http.Request) httpxMatch {
 }
 
 // dispatch is the last step of the global chain: run the matching route, or answer the miss.
+// A main miss whose path minus its trailing slash has a main route is redirected before the
+// fallback mux is consulted: the fallback's catch-all section patterns (/{section}/{$}) would
+// otherwise take /login/, /admin/, ... which gin redirected to /login, /admin.
 func (r *Router) dispatch(c *Context) {
 	req := c.Request
-	for _, mux := range [...]*http.ServeMux{r.main, r.fallback} {
-		if httpxLookup(mux, req) != httpxMatchNone {
-			mux.ServeHTTP(c.Writer, req)
-			return
-		}
+	if httpxLookup(r.main, req) != httpxMatchNone {
+		r.main.ServeHTTP(c.Writer, req)
+		return
+	}
+	if r.RedirectTrailingSlash && r.redirectSlashRemoval(c) {
+		return
+	}
+	if httpxLookup(r.fallback, req) != httpxMatchNone {
+		r.fallback.ServeHTTP(c.Writer, req)
+		return
 	}
 	if r.RedirectTrailingSlash && r.redirectTrailingSlash(c) {
 		return
@@ -267,16 +276,41 @@ func (r *Router) redirectTrailingSlash(c *Context) bool {
 	if !ok || !r.matches(probe) {
 		return false
 	}
+	httpxSlashRedirect(c, toggled)
+	return true
+}
+
+// redirectSlashRemoval answers a clean path ending in "/" (other than "/") with a redirect to the
+// path without the slash, when that one has a route in the main mux for the same method. It runs
+// before the fallback mux is consulted (see dispatch).
+func (r *Router) redirectSlashRemoval(c *Context) bool {
+	req := c.Request
+	esc := req.URL.EscapedPath()
+	if esc == "/" || !strings.HasSuffix(esc, "/") || httpxCleanPath(esc) != esc {
+		return false
+	}
+	trimmed := esc[:len(esc)-1]
+	probe, ok := httpxProbe(req, req.Method, trimmed)
+	if !ok || httpxLookup(r.main, probe) != httpxMatchRoute {
+		return false
+	}
+	httpxSlashRedirect(c, trimmed)
+	return true
+}
+
+// httpxSlashRedirect redirects to the escaped path target, keeping the query: 301 for GET, 307
+// for the other methods (they keep their body).
+func httpxSlashRedirect(c *Context, target string) {
+	req := c.Request
 	code := http.StatusTemporaryRedirect
 	if req.Method == http.MethodGet {
 		code = http.StatusMovedPermanently
 	}
-	location := toggled
+	location := target
 	if req.URL.RawQuery != "" {
 		location += "?" + req.URL.RawQuery
 	}
 	http.Redirect(c.Writer, req, location, code)
-	return true
 }
 
 // httpxProbeMethods are the methods the 405 check tries.
