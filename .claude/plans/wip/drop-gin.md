@@ -269,3 +269,6 @@ Leave `./data-test-dropgin` for the user to delete.
   stamped) for `PathValue`. Late `Router.GET` after serving is allowed; duplicate patterns panic like gin.
 - Pattern conflicts: the conflict test in wave 1 guards the converted table; any new route with a literal first
   segment and a wildcard second one must stay out of the fallback mux's shape.
+
+### Progress
+- Wave 0 (461b5b2 on `plan-drop-gin`, branched from testing-001 at the wip commit): preflight build + vet green; no code change.
