@@ -346,3 +346,25 @@ Leave `./data-test-mbox` for the user to delete.
   hygiene) fixed. Inline after the merge: unused stub error removed (9d7ee22), disabled spam example follows the
   rename (bd7f79c). Implementer decisions: an input already named `.done` is never renamed; ErrExist from markDone
   is logged, other rename errors are input errors; with -group a missing Newsgroups header still skips.
+
+### Verification (c7ee948)
+- Verifier PASS on all 8 steps. Checks re-run green; known bugs only T-nntp-article-1; three builds ok.
+- End-to-end on ./data-test-mbox (host i2pn2.pugleaf.net): dry run exit 0, no DB created, read=2336 stored=2333
+  skipped=3 (no-msgid=2, no-body=1), 41 target groups. Real run exit 0, 7.05 s wall / ~3 s import (~780 articles/s),
+  93 MB RSS: stored=2320 rejected=13 ("too many newsgroups": each has 10 groups, 8 of them toster.Te.NeT.UA spam)
+  errors=0 marked-done=true; 41 groups, sum(message_count)=sum(high_water)=sum(rows)=2320; history-rebuild
+  -validate-only: 2320 found, 0 missing, 0 without number. Reruns on .gz/.zip/.7z: present=2320 stored=0, each
+  renamed .done; `-7z /nonexistent/7z` → exit 1. Directory + `-group test.mbox.forced -mark-done=false`: inputs=1
+  (the .done files skipped), 2320 rows, not renamed. SIGINT after 0.3 s → exit 130, 968 rows flushed, clean
+  shutdown; follow-up run present=968 stored=1352, 2320 distinct rows, no loss or duplicate. nntp-server read-back
+  on 127.0.0.1:11194: GROUP 211 1936, ARTICLE by id 220 with Path prefixed by the host and the giganews Xref gone,
+  server SIGINT exit 0. Empty directory → exit 0 "no inputs to import"; missing path → exit 1. Hand-written mbox:
+  stored=1 skipped=2 (bad-group, no-subject), no DB/row for the crosspost's second group.
+- Corrections to the plan text: group DB files use underscores (`test_mbox_forced.db`, the plan's find pattern
+  with dots matches nothing); the dry run cannot see processor rejections (2333 vs 2320).
+- Noted, not blocking: EnsureNewsgroup runs before ProcessArticle, so a group whose every article is rejected is
+  left behind empty (5 such groups in the sample); go-lib-mbox2nntp prints unprefixed debug lines
+  (`parseHeaders m.prefetch[0] == newline, break`, `MboxStream nextline error: err='EOF'`) on every run (library
+  side); hostname validation (and its reverse-DNS warning) runs twice per run; the totals line after a missing
+  input says inputs=1 input-errors=1 under "no inputs to import"; the 13 rejected articles are re-processed and
+  re-rejected on every rerun (never "present").
