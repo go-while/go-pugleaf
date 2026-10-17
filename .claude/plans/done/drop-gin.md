@@ -347,3 +347,18 @@ Leave `./data-test-dropgin` for the user to delete.
   (31 packages, known bugs only T-nntp-article-1); web + cmd/web rerun on 4d299a2. Live: /static 404, /api* 301
   /SiteHelp, /SiteHelp 200.
 
+
+## Outcome
+- Integration branch `plan-drop-gin` (23 commits), merged into `testing-001` as **8b9dfcb** on 2026-10-17 (unpushed).
+- Worktrees under /tank0/claude/trees/go-pugleaf/ (left for the user): `agent-a6ee302c268b2956c`
+  (worktree-agent-a6ee302c268b2956c, web-docs), `agent-a53b76b27657aba0b` (worktree-agent-a53b76b27657aba0b,
+  web-adapter), `agent-ac34f24f6834e5ae1` (worktree-agent-ac34f24f6834e5ae1, web-port), `verify-dropgin-base`
+  (detached at the pre-port base dcdee8f, used for the header diff).
+- Verification: PASS (see the Verification note above); after it, the body cap (7bc21b1, c453c36, 9086a5b) and the
+  two pre-existing web bugs (b788b2c, 4d299a2) were added on request, each reviewed and re-checked; full checks
+  green on b788b2c, web + cmd/web rerun on 4d299a2.
+- Behaviour changes are listed in the merge commit message and under "Risks / behaviour changes".
+- Leftovers: none from this plan. Scratch roots to delete when convenient: `./data-test-dropgin`,
+  `./data-test-dropgin-base`. Reviewer minors deferred: a global middleware that reads the body other than through
+  the form helpers would make a route cap restart counting (documented at Context.rawBody); adminUpdateSettings
+  panics (→ Recovery 500) on a hand-built WebServer without the /SitePostSubmit route.
