@@ -368,3 +368,20 @@ Leave `./data-test-mbox` for the user to delete.
   side); hostname validation (and its reverse-DNS warning) runs twice per run; the totals line after a missing
   input says inputs=1 input-errors=1 under "no inputs to import"; the 13 rejected articles are re-processed and
   re-rejected on every rerun (never "present").
+
+## Outcome
+- Integration branch `plan-mbox-importer` (HEAD 0663b74; code tree bd7f79c), merged into `testing-001` with
+  `--no-ff` on 2026-10-17 as **0db3dcf** (not pushed). `go build ./... && go vet ./...` on the merged tree: green.
+- Worktree branches (left for the user to clean up, all under `/tank0/claude/trees/go-pugleaf/`):
+  - `worktree-agent-aacb8d5c6b71c3b3e` → `agent-aacb8d5c6b71c3b3e` (mbox-docs-ci, ad37dbb + 6791fe0, merge 090ebe7)
+  - `worktree-agent-a2239281a94011e79` → `agent-a2239281a94011e79` (mbox-inputs-rewrite, 4a3c2d6 + f4737c8, merge 5d41f06)
+  - `worktree-agent-a3f02e4fb9171718a` → `agent-a3f02e4fb9171718a` (mbox-cmd, a44da4d + 8c0ac21, merge aa4be65)
+- Verification: see "Verification (c7ee948)" above; PASS on all 8 steps, full CLAUDE.md checks green on bd7f79c,
+  known bugs only T-nntp-article-1.
+- Leftovers / known issues: go-lib-mbox2nntp prints two unprefixed debug lines per run (library fix + re-pin);
+  a group whose every article is rejected stays behind empty; a `.gz` with trailing zero padding is read but
+  never marked done; hostname validation runs twice with `-nntphostname`; the 13 ten-group spam articles of the
+  sample are re-rejected on every rerun; the totals line after a missing input reads inputs=1 under "no inputs
+  to import". Follow-up decided by the user on 2026-10-17: UAT archives (`.usenet`, `.usenet.xz`, `.usenet.7z`)
+  as plan `mbox-importer-uat` (import `github.com/go-while/mbox2nntp/uat`, same first-group rule). Scratch root
+  `./data-test-mbox` left for the user.
