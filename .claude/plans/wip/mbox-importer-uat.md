@@ -201,3 +201,23 @@ Leave `./data-test-mbox-uat` for the user.
     Known: the stop signal is not checked while xz/7z/zstd unpack (latency only; a second signal kills the
     process before the temp dir cleanup); `-xz` falls back to 7-Zip even when given explicitly; `uatSuffix` is
     case-insensitive so `X.USENET.XZ` in a directory is picked up while `.MBOX` is not.
+
+### Verification (8c08854)
+- Verifier PASS on all steps. Full checks on 4dfbc00 green (31 packages under race), known bugs only T-nntp-article-1;
+  package race tests 54 s; three builds ok.
+- Fixture (3 messages, written by TestMboxUatWriteFixture): dry run read=3 stored=3, groups t.uat.fixture=2 /
+  t.uat.other=1, re-encoded-fields=1, nothing renamed, tmp empty; real run stored=3, both groups and rows,
+  `.usenet.done`, history 3/3; `.xz` + `.7z` in one run present=3 each, both renamed, no `mbox-importer-*` dir
+  left under -tmpdir or /tmp; `-zstd /nonexistent` exit 1 before any unpack; directory of `.done` files → exit 0
+  "no inputs to import"; `-group test.uat.forced` on a copy → 3 rows; SIGINT at 0.03-0.05 s → 130, at ≥ 0.08 s the
+  3 messages were already handed over → exit 0 (intended: 130 only when work was cut off); nntp-server read-back:
+  Subject as RFC 2047 encoded-word, MIME-Version/Content-Type UTF-8/CTE 8bit present, Path prefixed, UTF-8 body
+  intact, server exit 0.
+- Real data from usenet.nereid.pl: `pl.soc.uroczystosci.usenet.xz` (266 KiB, 361 messages): stored=359 skipped=2
+  no-body, 7 target groups (340 in the archive's own group), ~1 s import, counts per group DB match; interrupt
+  test on `alt.fan.holy-mother-megan.usenet.xz` (8 MiB, 15827 messages): SIGINT after ~1 s → 130, 3861 stored,
+  resume run stored=11963 present=3861 skipped=3, ~1200 read/s, raw-fields=Sender=1; history validate 16198
+  found, 0 missing. No helper warnings, no leftover processes or temp dirs.
+- Notes: a SIGINT after the last message is handed over exits 0; with `-group` an article known in history under
+  other groups is stored again in the forced group (per-target-group "present" rule, as for mbox inputs); the
+  reverse-DNS warning for the hostname appears twice per run (pre-existing).
