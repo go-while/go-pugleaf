@@ -52,7 +52,7 @@ the cookie. The login lockout uses `users.login_attempt_at`, not `updated_at`.
 
 | File | Responsibility |
 |---|---|
-| `web_apiHandlers.go` | `/api/v1` handlers (groups, overview, article by number or message-id, threads, stats, article preview) and `requireAPIEnabled`; `getArticlePreview` also serves the web route `/groups/:group/articles/:articleNum/preview` (tree view), which works with the API disabled |
+| `web_apiHandlers.go` | `/api/v1` handlers (groups, overview, article by number or message-id, threads, stats, article preview) and `requireAPIEnabled`; `getArticlePreview` also serves the web route `/groups/{group}/articles/{articleNum}/preview` (tree view), which works with the API disabled |
 | `web_apitokens.go` | API token auth (`APIAuthRequired`) and buffered usage accounting |
 | `web_admin.go`, `web_adminPage.go` | admin page data and dashboard |
 | `web_admin_settings_unified.go` | the settings form: one entry per setting, with validator and success message |
