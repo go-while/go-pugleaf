@@ -119,6 +119,7 @@ type articleSink interface {
 // runOptions are the parsed flags of one run.
 type runOptions struct {
 	dataDir, hostname, group, sevenZip string
+	zstd, xz, tmpDir                   string // UAT archives: programs and the unpack directory ("" = system temp)
 	useShortHashLen                    int
 	history, dryRun, keepBinary        bool
 	markDone, strictMsgID              bool
@@ -168,6 +169,13 @@ func readMbox(src *source, opts *runOptions, sink articleSink, stop <-chan struc
 // The body is always drained.
 func handleMessage(c *counters, rawHead []string, bodyReader io.Reader, opts *runOptions, sink articleSink) {
 	body, isBinary := readBody(bodyReader, opts.keepBinary)
+	handleLines(c, rawHead, body, isBinary, opts, sink)
+}
+
+// handleLines runs one article (header lines and body lines, no line endings) through the
+// skip rules, the header rewrite, the target-group rule and the sink. isBinary says the body
+// was yEnc and left out (readBody), so the article counts as "binary", not "no-body".
+func handleLines(c *counters, rawHead, body []string, isBinary bool, opts *runOptions, sink articleSink) {
 	msgid, reason := messageIDFromHeaders(rawHead, opts.strictMsgID)
 	if reason != skipNone {
 		c.Skipped[reason]++
@@ -230,7 +238,13 @@ func importInputs(files []string, opts *runOptions, sink articleSink, stop <-cha
 		default:
 		}
 		res.Inputs++
-		c, inputErr, stopped := importInput(path, opts, sink, stop)
+		var c *counters
+		var inputErr, stopped bool
+		if uatSuffix(path) != "" {
+			c, inputErr, stopped = importUAT(path, opts, sink, stop)
+		} else {
+			c, inputErr, stopped = importInput(path, opts, sink, stop)
+		}
 		if inputErr {
 			res.InputErrors++
 		}
@@ -271,8 +285,15 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 	c.Unread = src.Unread() // before Close: Close kills a 7z that was not read to its end
 	closeErr := src.Close()
 	if closeErr != nil {
-		log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, closeErr)
-		inputErr = true
+		// Ctrl-C at a terminal also kills the 7z process (same process group): a stop
+		select {
+		case <-stop:
+			stopped = true
+			log.Printf("[MBOX-IMPORT] file=%q: input ended by the shutdown signal: %v", path, closeErr)
+		default:
+			log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, closeErr)
+			inputErr = true
+		}
 	}
 	var samples []nearMiss
 	if src.Stream != nil {

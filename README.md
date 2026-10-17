@@ -128,6 +128,7 @@ Choose one method:
 ./build_mbox-importer.sh
 ./build/mbox-importer -dry-run de.comm.internet.commerce.mbox.gz    # counts only, opens no database
 ./build/mbox-importer -data data/ -nntphostname news.example.org de.comm.internet.commerce.mbox.gz
+./build/mbox-importer -data data/ -tmpdir /var/tmp pl.rec.gory.usenet.xz    # a UAT archive, after the mbox collections
 ```
 
 **Optional: Import RockSolid Light backups**
@@ -217,7 +218,7 @@ The following binaries are built by `build_ALL.sh` (names as in `build/`):
 Built with their own `build_<tool>.sh` script only:
 
 - **usermgr** - Web user management
-- **mbox-importer** - Import Usenet mbox archives (archive.org collections) directly into the databases, bulk mode (see cmd/mbox-importer/README.md)
+- **mbox-importer** - Import Usenet mbox archives (archive.org collections) and Usenet Archive Toolkit (UAT) archives directly into the databases, bulk mode (UAT archives need the zstd program; see cmd/mbox-importer/README.md)
 - **pugleaf-nntpmgr** - NNTP user management
 - **history-rebuild** - Rebuild the message-id history index from the group databases
 - **recover-db**, **fix-references**, **fix-thread-activity**, **merge-active**, **merge-descriptions**,

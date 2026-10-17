@@ -51,6 +51,9 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		useHistory      = fs.Bool("history", true, "maintain and use the message-id history index (<data>/history)")
 		forceGroup      = fs.String("group", "", "file every article into this group instead of the first group of its Newsgroups header")
 		sevenZip        = fs.String("7z", "7z", "program used to unpack .7z inputs (name in PATH or a full path)")
+		zstdProg        = fs.String("zstd", "zstd", "program used to read UAT archives (.usenet, .usenet.xz, .usenet.7z; name in PATH or a full path)")
+		xzProg          = fs.String("xz", "xz", "program used to unpack .usenet.xz inputs; when it is not found, -7z is used (7z e -txz)")
+		tmpDir          = fs.String("tmpdir", "", "directory for the unpacked copy of a .usenet.xz / .usenet.7z input (as large as the package) and the zstd dictionary (\"\" = system temp dir)")
 		dryRun          = fs.Bool("dry-run", false, "parse and count only: no database is opened, no input is renamed")
 		keepBinary      = fs.Bool("keep-binary", false, "import yEnc binary articles (=ybegin) instead of skipping them")
 		markDoneFlag    = fs.Bool("mark-done", true, "rename a fully imported input to INPUT.done")
@@ -92,6 +95,9 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		hostname:        *nntpHostname,
 		group:           *forceGroup,
 		sevenZip:        *sevenZip,
+		zstd:            *zstdProg,
+		xz:              *xzProg,
+		tmpDir:          *tmpDir,
 		useShortHashLen: *useShortHashLen,
 		history:         *useHistory,
 		dryRun:          *dryRun,
@@ -246,11 +252,13 @@ func usage(fs *flag.FlagSet) {
 	out := fs.Output()
 	fmt.Fprintln(out, "Usage: mbox-importer [flags] INPUT...")
 	fmt.Fprintln(out, "  INPUT: NAME.mbox, NAME.bag, NAME.mbox.gz, NAME.mbox.zip, NAME.mbox.7z (via -7z),")
-	fmt.Fprintln(out, "         or a directory (its *.mbox* / *.bag* files not ending in .done, sorted by name)")
+	fmt.Fprintln(out, "         UAT archives NAME.usenet, NAME.usenet.xz (via -xz), NAME.usenet.7z (via -7z), all via -zstd,")
+	fmt.Fprintln(out, "         or a directory (its *.mbox* / *.bag* / *.usenet* files not ending in .done, sorted by name)")
 	fmt.Fprintln(out, "Examples:")
 	fmt.Fprintln(out, "  mbox-importer -dry-run de.comm.internet.commerce.mbox")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -nntphostname news.example.org de.comm.internet.commerce.mbox")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -group local.archive /archive/usenet/de.comm/")
+	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -tmpdir /big/tmp pl.comp.lang.c.usenet.xz")
 	fmt.Fprintln(out, "Exit codes: 0 ok, 1 input, article, commit or database error, 2 bad command line, 130 stopped by a signal")
 	fmt.Fprintln(out, "Flags:")
 	fs.PrintDefaults()

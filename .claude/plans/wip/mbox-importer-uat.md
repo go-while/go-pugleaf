@@ -179,3 +179,45 @@ Leave `./data-test-mbox-uat` for the user.
 - Large `.usenet.xz` (GBs) need that much temp space: document `-tmpdir`.
 - `zstd` output for an archive with millions of messages is streamed; memory stays one message (plus Fix copies).
 - go.mod gains the mbox2nntp module (a main package module; only its `uat` and `uat/uattest` packages are imported).
+
+### Progress
+- Wave 0 (4a653dc on `plan-mbox-importer-uat`, branched from testing-001 at the wip commit): go.mod gains
+  `github.com/go-while/mbox2nntp v0.0.0-20261017113153-823cac0bb507` (go.sum +2 lines, nothing else);
+  `cmd/mbox-importer/uat.go` stubs; `runOptions{zstd, xz, tmpDir}`; `handleMessage` now calls
+  `handleLines(c, rawHead, body, isBinary, opts, sink)` (deviation from the plan's signature: the `isBinary`
+  flag is needed because readBody drops a yEnc body, so an empty body alone cannot tell "binary" from "no-body").
+  Checks: gofmt empty, vet, build, `go test -race ./cmd/mbox-importer/...` green (36 s).
+- Wave 1 (merged, tree 4dfbc00):
+  - `uat-docs` (worktree-agent-aee45042addcb010c, 70c820a + 2bf3da1, merge badf037): cmd README (inputs, flags
+    `-zstd`/`-xz`/`-tmpdir`, programs, "UAT archives" section, log lines, import-order advice), top-level README
+    line + bullet. Review MERGE AFTER FIXES (wording, checked against the code branch): MAJOR (a 0-byte UAT input
+    is an input error, not "fully imported"), minors (empty message = no-msgid, log order, raw-fields meaning,
+    toolkit claims, free-space sentence, missing xz+7z case, Debian package names) fixed.
+  - `uat-import` (worktree-agent-a7161834b55ba6d88, 97f8706 + 5d71ef2, merge 4dfbc00): uat.go (uatSuffix,
+    uatUnpackedName, importUAT, unpackXz/unpack7z/has7zEntry/runTo ported from mbox2nntp, hasYEnc,
+    rawFieldsDetail), flags wired, importInputs dispatch, isInputName accepts only real UAT suffixes, 664 lines of
+    tests (+18 s, 4 DB runs). Review MERGE; follow-ups done: a helper killed by the terminal's SIGINT counts as
+    stopped (exit 130) instead of an input error, also for the mbox `.7z` Close path; expandInputs comment.
+    Known: the stop signal is not checked while xz/7z/zstd unpack (latency only; a second signal kills the
+    process before the temp dir cleanup); `-xz` falls back to 7-Zip even when given explicitly; `uatSuffix` is
+    case-insensitive so `X.USENET.XZ` in a directory is picked up while `.MBOX` is not.
+
+### Verification (8c08854)
+- Verifier PASS on all steps. Full checks on 4dfbc00 green (31 packages under race), known bugs only T-nntp-article-1;
+  package race tests 54 s; three builds ok.
+- Fixture (3 messages, written by TestMboxUatWriteFixture): dry run read=3 stored=3, groups t.uat.fixture=2 /
+  t.uat.other=1, re-encoded-fields=1, nothing renamed, tmp empty; real run stored=3, both groups and rows,
+  `.usenet.done`, history 3/3; `.xz` + `.7z` in one run present=3 each, both renamed, no `mbox-importer-*` dir
+  left under -tmpdir or /tmp; `-zstd /nonexistent` exit 1 before any unpack; directory of `.done` files → exit 0
+  "no inputs to import"; `-group test.uat.forced` on a copy → 3 rows; SIGINT at 0.03-0.05 s → 130, at ≥ 0.08 s the
+  3 messages were already handed over → exit 0 (intended: 130 only when work was cut off); nntp-server read-back:
+  Subject as RFC 2047 encoded-word, MIME-Version/Content-Type UTF-8/CTE 8bit present, Path prefixed, UTF-8 body
+  intact, server exit 0.
+- Real data from usenet.nereid.pl: `pl.soc.uroczystosci.usenet.xz` (266 KiB, 361 messages): stored=359 skipped=2
+  no-body, 7 target groups (340 in the archive's own group), ~1 s import, counts per group DB match; interrupt
+  test on `alt.fan.holy-mother-megan.usenet.xz` (8 MiB, 15827 messages): SIGINT after ~1 s → 130, 3861 stored,
+  resume run stored=11963 present=3861 skipped=3, ~1200 read/s, raw-fields=Sender=1; history validate 16198
+  found, 0 missing. No helper warnings, no leftover processes or temp dirs.
+- Notes: a SIGINT after the last message is handed over exits 0; with `-group` an article known in history under
+  other groups is stored again in the forced group (per-target-group "present" rule, as for mbox inputs); the
+  reverse-DNS warning for the hostname appears twice per run (pre-existing).
