@@ -300,3 +300,23 @@ Leave `./data-test-dropgin` for the user to delete.
   unknown one-segment paths answer 405 to non-GET methods (the fallback `/{section}` matches them); 404
   Content-Type now carries charset=utf-8. scripts/test-web-leftovers.sh ran green (16/0) in the worktree with
   its own scratch root.
+
+### Verification (0588d9d)
+- Verifier PASS. Full checks green on 6570e9d (31 packages under race, 0 gin references, go.mod 11 requires);
+  web + cmd/web race tests 61.5 s / 3.5 s; cmd/web third-party deps only go-sqlite3, x/crypto, x/net, x/text;
+  build/webserver 33.1 MB (gin base: 48.9 MB).
+- End-to-end on ./data-test-dropgin (rslight sample, 536 groups / 24 with messages) on 127.0.0.1:18991 and, for
+  comparison, a build of the pre-port base dcdee8f on 18992 (worktree /tank0/claude/trees/go-pugleaf/verify-dropgin-base):
+  37 anonymous URLs compared on status, Location and security headers; the only differences are the intended
+  ones (405+Allow for POST /groups and POST /nonexistent; HEAD on GET routes 200; redirects carry the security
+  headers; 404 body newline + charset; `//groups` and `/a/../groups` 307 to the cleaned path instead of gin's
+  protocol-relative 301 / 404). HTML page lengths identical; API JSON bodies byte-identical. Register (first user =
+  admin), login (2.1 s loginDelay), logout Sec-Fetch-Site rules, admin pages, group/article/thread-tree/section
+  pages, API 401/200/405, /aichat/clear/all (FullPath) all as expected; CrossOriginProtection still 403s a
+  cross-site POST. Access log: one `[WEB]:` line per routed request, 0 panics; gin had not logged its slash
+  redirects. SIGINT → exit 0 with "Graceful shutdown completed" on both servers. scripts/test-web-leftovers.sh on
+  18993: 16/0, 0 races. No leftover processes.
+- Pre-existing, identical on the gin base, not part of this plan: `GET /static` answers 301 to itself (the
+  reserved-name redirect in sectionPage, web_sectionsPage.go:60-67, loops); `GET /admin?tab=apitokens` returns
+  500 once a token exists (`admin_apitokens.html:96` uses `.TokenHash`, which `database.APIToken` lacks; since
+  ab3a497). The default BadBots list blocks the curl User-Agent (expected).
