@@ -221,7 +221,7 @@ func RecycleArticle(art *Article) {
 // GetData returns derived article data for templates. "parent_URL" and "references_URLs"
 // link to the message-id page of the last (most immediate) reference; group and message-id
 // are path-escaped, so '?', '#', '%', ' ' and '/' in an RFC 5536 message-id stay inside the
-// :messageId segment (A-web-18; '/' relies on the router's UseRawPath). '+' is escaped as %2B
+// {messageId} segment (A-web-18; '/' stays inside the segment because ServeMux unescapes path values). '+' is escaped as %2B
 // too, so the link does not depend on how the router treats a literal '+'.
 func (a *Article) GetData(what string, group string) string {
 	if a == nil {
