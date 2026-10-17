@@ -102,6 +102,8 @@ Positional arguments are the inputs; at least one is required.
 A missing path, an archive that cannot be opened or unpacked, a 7z program that cannot be found and
 an archive without an mbox member are input errors: the input is reported, the other inputs are
 still imported, and the run exits with code 1. An empty (0-byte) input counts as fully imported.
+A non-empty input that is not an mbox is an input error too. A 7z that fails only at the end (for
+example a CRC error) leaves the articles already imported in place and the input is not marked done.
 
 ## What happens to an input
 
@@ -112,7 +114,8 @@ summary line.
 
 The input is renamed to `INPUT.done` when all of these hold:
 
-- every article was stored or was already present in its target group,
+- every article that was not skipped or rejected was stored or was already present in its target
+  group,
 - the parser reached the end of the file (it did not stop early and nothing was left unread),
 - no article failed with an error, the archive unpacked cleanly (7z exit status) and the commit
   wait finished.
@@ -141,6 +144,8 @@ Exit codes:
   - lines without a colon (that are not continuations) and empty headers without a continuation
     are dropped; `Key:value` and `Key :value` are repaired to `Key: value`;
   - the `Message-ID:` header is reduced to one line `Message-ID: <msgid>` (added if it was lost);
+  - a broken `Date:` line from some Google Groups headers is dropped (`isBadDateLine`, as in
+    mbox2nntp);
   - `Path:` is kept as in the file; the processor prefixes it with the local hostname
     (`-nntphostname`).
 - **Bodies are stored as in the file.** `>From ` lines are left untouched, line endings are
@@ -149,7 +154,8 @@ Exit codes:
   `present` and not processed again.
 - **Threading uses `References:` only.** A reply that is imported before its parent gets no thread
   root. Import the files of a group in chronological order (archive mbox files usually are);
-  `fix-thread-activity` can repair the thread counts later.
+  `recover-db -data <dir> -group NAME -rebuild-threads -force` rebuilds the thread relationships
+  later.
 
 ## Skip reasons
 
@@ -167,8 +173,12 @@ Skipped articles are counted per reason in the summary line.
 | `no-newsgroups` | has no `Newsgroups:` header |
 | `bad-group` | has a first group in `Newsgroups:` that is not a valid group name (no fallback to a later group) |
 
+With `-group`, the first group is not looked up, so `bad-group` does not apply. `no-newsgroups`
+still applies, because the processor requires the header.
+
 **Rejected** articles passed the importer's checks but failed the processor's bulk checks: more than
-9 groups in `Newsgroups:`, an empty `From:`, a `Date:` that cannot be parsed or lies more than 24 h
+9 groups in `Newsgroups:`, no valid group name at all in `Newsgroups:` (only possible with
+`-group`), an empty `From:`, a `Date:` that cannot be parsed or lies more than 24 h
 in the future, or a duplicate core header (`Date`, `From`, `Message-ID`, `Newsgroups`, `Path`,
 `Subject`). Each rejection is logged with the processor's error.
 
