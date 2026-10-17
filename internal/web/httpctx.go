@@ -148,8 +148,11 @@ type Context struct {
 	queryCache url.Values
 	formParsed bool
 	formCache  url.Values
-	formErr    error         // the ParseForm error of the body, kept for the route handler's 413
-	rawBody    io.ReadCloser // the body before the router's cap, for a route's own cap
+	formErr    error // the ParseForm error of the body, kept for the route handler's 413
+	// rawBody is the body before the router's cap, re-wrapped for a route's own cap. The re-wrap
+	// is skipped once the form was parsed; global middleware must not read the body any other
+	// way, or a route cap would restart counting from the current position.
+	rawBody io.ReadCloser
 }
 
 // NewTestContext returns a Context for calling a handler directly in a test. It has no router:

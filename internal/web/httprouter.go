@@ -161,8 +161,12 @@ func (r *Router) register(mux *http.ServeMux, method, path string, mw, h []Handl
 	rh := &routeHandler{chain: chain}
 	mux.Handle(method+" "+path, rh)
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, dup := r.routes[method+" "+path]; dup {
+		// The same pattern in the other mux would be shadowed by the main mux anyway.
+		panic("web: route " + method + " " + path + " registered twice")
+	}
 	r.routes[method+" "+path] = rh
-	r.mu.Unlock()
 }
 
 // httpxJoinPath joins a group prefix and a route path with exactly one slash between them.
