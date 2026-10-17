@@ -1,7 +1,10 @@
 # internal/web
 
-Gin web gateway for go-pugleaf: the public site, the JSON API under `/api/v1`, and the admin UI.
+net/http web gateway for go-pugleaf: the public site, the JSON API under `/api/v1`, and the admin UI.
 Started from `cmd/web`, which owns the process lifecycle; this package owns the HTTP surface.
+Routing, the request context and client-IP handling come from three in-package adapter files that replaced
+the former third-party web framework: `httprouter.go` (router on `net/http` ServeMux, middleware chain),
+`httpctx.go` (request/response context) and `httpclientip.go` (trusted-proxy client IP).
 
 For signatures and details use `go doc ./internal/web` — this file is a map, not an API reference.
 Deployment and operational behaviour (reverse proxy, sessions, CSRF, `-data`) live in

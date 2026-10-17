@@ -176,10 +176,10 @@ ct=$(curl -sI "$BASE/favicon.ico" | tr -d '\r' | grep -i '^content-type:' | head
 printf %s "$ct" | grep -qi 'image/' && pass L07 lo-web-core "favicon content type" || fail L07 lo-web-core "favicon content type" "$ct"
 
 # ---------------------------------------------------------------- L08 / L09 (source checks)
-n=$(grep -nE 'renderError\([^)]*err\.Error\(\)|gin\.H\{"Error": err\.Error\(\)\}' "$TOP"/internal/web/*.go 2>/dev/null \
+n=$(grep -nE 'renderError\([^)]*err\.Error\(\)|(gin\.)?H\{"Error": err\.Error\(\)\}' "$TOP"/internal/web/*.go 2>/dev/null \
   | grep -v '_test.go' | grep -v 'web_admin' | wc -l)
 [ "$n" = 0 ] && pass L08 lo-web-handlers "no internal error text in visitor pages" || fail L08 lo-web-handlers "no internal error text in visitor pages" "sites=$n"
-n=$(grep -c 'gin.H{"error": err.Error()}' "$TOP/internal/web/web_apiHandlers.go" 2>/dev/null || true)
+n=$(grep -cE '(gin\.)?H\{"error": err\.Error\(\)\}' "$TOP/internal/web/web_apiHandlers.go" 2>/dev/null || true)
 [ "${n:-0}" = 0 ] && pass L09 lo-web-core "no internal error text in API JSON" || fail L09 lo-web-core "no internal error text in API JSON" "sites=$n"
 
 # ---------------------------------------------------------------- L12 (lo2-web-server)

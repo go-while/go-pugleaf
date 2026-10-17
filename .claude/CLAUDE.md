@@ -2,7 +2,7 @@
 
 @AGENTS.md
 
-NNTP server, article fetcher and Gin web gateway for Usenet, in Go (see `go.mod` for the version).
+NNTP server, article fetcher and net/http web gateway for Usenet, in Go (see `go.mod` for the version).
 Storage is SQLite: one main DB (`data/cfg/pugleaf.sq3`) plus one DB per newsgroup (`data/db/`),
 and a message-id history index (`internal/history`, rebuilt with `cmd/history-rebuild`).
 
