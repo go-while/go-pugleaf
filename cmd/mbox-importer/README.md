@@ -124,14 +124,15 @@ Skipped and rejected articles do not block the rename: they are counted and logg
 run would skip them again. Nothing is ever renamed in a dry run or with `-mark-done=false`. An input
 whose name already ends in `.done` (a re-run of a renamed input) keeps its name, and an existing
 `INPUT.done` is never replaced (the input is then logged as not marked done). An input
-that is not marked done is logged with its counters; it is not an error by itself.
+that is not marked done is logged with its counters; an unread rest or a stuck parser is not an
+error by itself, article errors and a failed commit wait are (exit code 1).
 
 Exit codes:
 
 | Code | Meaning |
 |------|---------|
-| `0` | every input was read (marked done or not, see the log) |
-| `1` | an input could not be opened, unpacked or started, failed while it was read or closed (for example a 7z exit status), could not be renamed, or a database/processor/hostname error |
+| `0` | every input was read without an article error (marked done or not, see the log; also when there was nothing to import) |
+| `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error |
 | `2` | bad command line (unknown flag, no input, invalid `-group` name, `-useshorthashlen` outside 2-7, negative `-commit-timeout`) |
 | `130` | stopped by SIGINT/SIGTERM |
 
@@ -202,7 +203,7 @@ line after every input, then a totals line:
 ```
 [MBOX-IMPORT] file="…" read=… stored=… present=… skipped=… (no-subject=…,bad-group=…) rejected=… errors=… parser-skipped=… near-misses=… stopped-early=… unread=… marked-done=…
 [MBOX-IMPORT]   near-miss file="…" line=… "…"
-[MBOX-IMPORT] done inputs=… marked-done=… input-errors=… read=… stored=… present=… skipped=… rejected=… errors=…
+[MBOX-IMPORT] done inputs=… marked-done=… input-errors=… read=… stored=… present=… skipped=… rejected=… errors=… commit-errors=…
 ```
 
 A dry run also logs one `[MBOX-IMPORT] dry-run group="…" articles=…` line per target group (largest

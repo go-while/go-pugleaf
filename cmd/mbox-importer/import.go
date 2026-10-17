@@ -35,6 +35,7 @@ type counters struct {
 	Read, Stored, Present, Rejected, Errors, ParserSkipped, NearMisses int
 	Skipped                                                            map[skipReason]int
 	StoppedEarly, Unread, MarkedDone                                   bool
+	CommitFailed                                                       bool // the commit wait of the input failed
 }
 
 func newCounters(file string) *counters {
@@ -81,17 +82,21 @@ func (c *counters) add(o *counters) {
 // runSummary is the result of one run (all inputs).
 type runSummary struct {
 	Inputs, InputErrors, MarkedDone int
+	CommitErrors                    int // inputs whose commit wait failed
 	Stopped                         bool
 	Total                           *counters
 	PerInput                        []*counters
 }
 
-// exitCode is the exit code of a run that got past the database and processor setup.
+// exitCode is the exit code of a run that got past the database and processor setup:
+// 130 when stopped, 1 on an input error, an article error or a failed commit wait, else 0.
 func (r *runSummary) exitCode() int {
 	switch {
 	case r.Stopped:
 		return 130
-	case r.InputErrors > 0:
+	case r.InputErrors > 0, r.CommitErrors > 0:
+		return 1
+	case r.Total != nil && r.Total.Errors > 0:
 		return 1
 	}
 	return 0
@@ -235,6 +240,9 @@ func importInputs(files []string, opts *runOptions, sink articleSink, stop <-cha
 			if c.MarkedDone {
 				res.MarkedDone++
 			}
+			if c.CommitFailed {
+				res.CommitErrors++
+			}
 		}
 		if stopped {
 			res.Stopped = true
@@ -280,6 +288,7 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 	waitErr := sink.endInput(opts.commitTimeout)
 	if waitErr != nil {
 		log.Printf("[MBOX-IMPORT] file=%q commit wait: %v", path, waitErr)
+		c.CommitFailed = true
 	}
 
 	switch {
@@ -321,8 +330,8 @@ func logTotals(r *runSummary) {
 	if t == nil {
 		t = newCounters("")
 	}
-	log.Printf("[MBOX-IMPORT] done inputs=%d marked-done=%d input-errors=%d read=%d stored=%d present=%d skipped=%d rejected=%d errors=%d",
-		r.Inputs, r.MarkedDone, r.InputErrors, t.Read, t.Stored, t.Present, t.skippedTotal(), t.Rejected, t.Errors)
+	log.Printf("[MBOX-IMPORT] done inputs=%d marked-done=%d input-errors=%d read=%d stored=%d present=%d skipped=%d rejected=%d errors=%d commit-errors=%d",
+		r.Inputs, r.MarkedDone, r.InputErrors, t.Read, t.Stored, t.Present, t.skippedTotal(), t.Rejected, t.Errors, r.CommitErrors)
 }
 
 // logDryRunGroups logs the article count per target group, largest first.

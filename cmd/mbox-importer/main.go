@@ -129,10 +129,12 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	}
 
 	if len(files) == 0 {
+		// nothing to import (empty directory, every input already .done, or only missing paths)
+		log.Printf("[MBOX-IMPORT] no inputs to import")
 		res := &runSummary{Inputs: len(expandErrs), InputErrors: len(expandErrs)}
 		logTotals(res)
 		lastRun = res
-		return 1
+		return res.exitCode()
 	}
 
 	cfg := database.DefaultDBConfig()
@@ -208,6 +210,8 @@ func notifyShutdown() (shutdownChan <-chan struct{}, stop func()) {
 		case sig := <-sigChan:
 			log.Printf("[MBOX-IMPORT] Received %v: finishing the current article, then shutting down...", sig)
 			close(closeChan)
+			// a second signal gets the default action (terminates the process)
+			signal.Stop(sigChan)
 		case <-runDone:
 		}
 	}()
@@ -247,7 +251,7 @@ func usage(fs *flag.FlagSet) {
 	fmt.Fprintln(out, "  mbox-importer -dry-run de.comm.internet.commerce.mbox")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -nntphostname news.example.org de.comm.internet.commerce.mbox")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -group local.archive /archive/usenet/de.comm/")
-	fmt.Fprintln(out, "Exit codes: 0 ok, 1 input or database error, 2 bad command line, 130 stopped by a signal")
+	fmt.Fprintln(out, "Exit codes: 0 ok, 1 input, article, commit or database error, 2 bad command line, 130 stopped by a signal")
 	fmt.Fprintln(out, "Flags:")
 	fs.PrintDefaults()
 }

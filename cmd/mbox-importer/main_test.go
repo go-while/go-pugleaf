@@ -233,10 +233,13 @@ func miCheckGroups(t *testing.T, dir string, want map[string][]string, ids []str
 // miCheckHistory checks that the history index under dir knows every id.
 func miCheckHistory(t *testing.T, dir string, ids ...string) {
 	t.Helper()
+	oldEnable := history.ENABLE_HISTORY
 	history.ENABLE_HISTORY = true
+	defer func() { history.ENABLE_HISTORY = oldEnable }() // read once by NewHistory
 	cfg := history.DefaultConfig()
 	cfg.HistoryDir = filepath.Join(dir, "history")
 	cfg.BatchTimeout = 50
+	cfg.UseShortHashLen = 7 // the value the runs lock (-useshorthashlen default)
 	h, err := history.NewHistory(cfg, nil)
 	if err != nil {
 		t.Fatalf("NewHistory: %v", err)
@@ -294,6 +297,7 @@ func TestMboxCmdDryRun(t *testing.T) {
 
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	code, sum := miRun(t, "-data", data, "-dry-run", in)
 	log.SetOutput(os.Stderr) // the buffer is read only after the logger stopped writing to it
 
@@ -312,7 +316,7 @@ func TestMboxCmdDryRun(t *testing.T) {
 		fmt.Sprintf("[MBOX-IMPORT] dry-run group=%q articles=1", miAlpha),
 		fmt.Sprintf("[MBOX-IMPORT] dry-run group=%q articles=1", miBeta),
 		fmt.Sprintf("[MBOX-IMPORT] file=%q read=3 stored=2 present=0 skipped=1 (no-subject=1) rejected=0 errors=0 parser-skipped=0 near-misses=0 stopped-early=false unread=false marked-done=false", in),
-		"[MBOX-IMPORT] done inputs=1 marked-done=0 input-errors=0 read=3 stored=2 present=0 skipped=1 rejected=0 errors=0",
+		"[MBOX-IMPORT] done inputs=1 marked-done=0 input-errors=0 read=3 stored=2 present=0 skipped=1 rejected=0 errors=0 commit-errors=0",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %q\n%s", want, out)
@@ -459,29 +463,82 @@ func TestMboxCmdOnlyMissingInput(t *testing.T) {
 	}
 }
 
-// TestMboxCmdSinkCases covers the per-article outcomes of readMbox with a fake sink.
+// TestMboxCmdSinkCases covers the per-article outcomes, the mark-done rule and the exit code
+// with a fake sink: an article error or a failed commit wait blocks the rename and exits 1,
+// skipped and rejected articles do not.
 func TestMboxCmdSinkCases(t *testing.T) {
-	in := miWrite(t, t.TempDir(), "g.mbox", miArticle(miID1, miAlpha, "a")+miArticle(miID2, miAlpha, "b")+
-		miArticle(miID3, miAlpha, "c")+miArticle("<four@mbox.test.invalid>", miAlpha, "d"))
-	src, err := openSource(in, "7z")
-	if err != nil {
-		t.Fatal(err)
+	const id4 = "<four@mbox.test.invalid>"
+	fixture := miArticle(miID1, miAlpha, "a") + miArticle(miID2, miAlpha, "b") +
+		miArticle(miID3, miAlpha, "c") + miArticle(id4, miAlpha, "d")
+	rejected := fakeResult{err: fmt.Errorf("%w: refused", errRejected)}
+	for _, tc := range []struct {
+		name                                      string
+		four                                      fakeResult
+		waitErr                                   error
+		wantRejected, wantErrors, wantCommitError int
+		wantDone                                  bool
+		wantCode                                  int
+	}{
+		{"rejected", rejected, nil, 2, 0, 0, true, 0},
+		{"article error", fakeResult{err: errors.New("database down")}, nil, 1, 1, 0, false, 1},
+		{"commit wait", rejected, errors.New("wait timeout"), 2, 0, 1, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := miWrite(t, t.TempDir(), "g.mbox", fixture)
+			sink := &fakeSink{waitErr: tc.waitErr, results: map[string]fakeResult{
+				miID1: {stored: true},
+				miID2: {present: true},
+				miID3: rejected,
+				id4:   tc.four,
+			}}
+			res := importInputs([]string{in}, &runOptions{markDone: true}, sink, nil)
+			c := res.Total
+			if c.Read != 4 || c.Stored != 1 || c.Present != 1 || c.Rejected != tc.wantRejected || c.Errors != tc.wantErrors {
+				t.Errorf("counters %+v", c)
+			}
+			if res.CommitErrors != tc.wantCommitError || res.InputErrors != 0 {
+				t.Errorf("commit-errors=%d input-errors=%d", res.CommitErrors, res.InputErrors)
+			}
+			if got := miExists(in + ".done"); got != tc.wantDone {
+				t.Errorf("renamed=%t, want %t", got, tc.wantDone)
+			}
+			if code := res.exitCode(); code != tc.wantCode {
+				t.Errorf("exit %d, want %d", code, tc.wantCode)
+			}
+		})
 	}
-	sink := &fakeSink{results: map[string]fakeResult{
-		miID1:                      {stored: true},
-		miID2:                      {present: true},
-		miID3:                      {err: fmt.Errorf("%w: refused", errRejected)},
-		"<four@mbox.test.invalid>": {err: errors.New("database down")},
-	}}
-	c, err := readMbox(src, &runOptions{}, sink, nil)
-	if err != nil {
-		t.Fatal(err)
+}
+
+func TestMboxCmdExitCode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    runSummary
+		want int
+	}{
+		{"ok", runSummary{Total: newCounters("")}, 0},
+		{"no totals", runSummary{}, 0},
+		{"input error", runSummary{InputErrors: 1, Total: newCounters("")}, 1},
+		{"commit error", runSummary{CommitErrors: 1, Total: newCounters("")}, 1},
+		{"article error", runSummary{Total: &counters{Errors: 1}}, 1},
+		{"stopped wins", runSummary{Stopped: true, InputErrors: 1, CommitErrors: 1, Total: &counters{Errors: 1}}, 130},
+	} {
+		if got := tc.r.exitCode(); got != tc.want {
+			t.Errorf("%s: exit %d, want %d", tc.name, got, tc.want)
+		}
 	}
-	if cerr := src.Close(); cerr != nil {
-		t.Fatal(cerr)
+}
+
+// TestMboxCmdEmptyDirectory: a real run without anything to import exits 0 and opens no database.
+func TestMboxCmdEmptyDirectory(t *testing.T) {
+	data := filepath.Join(t.TempDir(), "data")
+	dir := t.TempDir()
+	miWrite(t, dir, "old.mbox.done", miFixture()) // already imported: not an input
+	code, sum := miRun(t, "-data", data, dir)
+	if code != 0 || sum == nil || sum.Inputs != 0 || sum.InputErrors != 0 {
+		t.Fatalf("exit %d summary %+v", code, sum)
 	}
-	if c.Read != 4 || c.Stored != 1 || c.Present != 1 || c.Rejected != 1 || c.Errors != 1 {
-		t.Errorf("counters %+v", c)
+	if miExists(data) {
+		t.Error("data directory created without an input")
 	}
 }
 
@@ -492,6 +549,7 @@ type fakeResult struct {
 
 type fakeSink struct {
 	results map[string]fakeResult
+	waitErr error
 }
 
 func (f *fakeSink) Handle(msgid string, _ func() (*models.Article, error), _ string) (bool, bool, error) {
@@ -501,7 +559,7 @@ func (f *fakeSink) Handle(msgid string, _ func() (*models.Article, error), _ str
 
 func (f *fakeSink) beginInput() {}
 
-func (f *fakeSink) endInput(time.Duration) error { return nil }
+func (f *fakeSink) endInput(time.Duration) error { return f.waitErr }
 
 // stopSink closes stop when it sees its first article.
 type stopSink struct {
