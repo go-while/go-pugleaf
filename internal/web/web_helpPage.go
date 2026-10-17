@@ -2,7 +2,6 @@
 package web
 
 import (
-	"html/template"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -18,12 +17,5 @@ import (
 func (s *WebServer) helpPage(c *gin.Context) {
 	data := s.getBaseTemplateData(c, "Help & Commands")
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/help.html"))
-	c.Header("Content-Type", "text/html")
-	err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "help.html")
 }

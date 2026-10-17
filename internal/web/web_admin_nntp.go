@@ -2,17 +2,67 @@ package web
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // NNTP User Management Functions
+
+// Limits of the admin NNTP user form, aligned with cmd/nntpmgr (D9 of audit-delta-fixes).
+const (
+	nntpAdminPasswordMin = 10 // bytes
+	nntpAdminPasswordMax = 72 // bytes; bcrypt ignores everything after byte 72
+)
+
+// resolveNNTPWebMapping turns the web_user_id form value into the web user an NNTP account
+// is mapped to. Empty or "0" means no mapping and returns 0 (stored as NULL). Otherwise the
+// web user must exist and, unless it is the account's current mapping (currentWebUserID),
+// must not own an NNTP account yet: a web user owns at most one. currentNNTPUserID is the
+// account being edited (0 on create). The returned error text is shown to the admin.
+// A current mapping whose web user no longer exists (a legacy row: the user was deleted) is
+// treated as "no mapping" (0) with a notice for the admin instead of blocking the update.
+func resolveNNTPWebMapping(s *WebServer, raw string, currentNNTPUserID int, currentWebUserID int64) (id int64, notice string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "0" {
+		return 0, "", nil
+	}
+	id, err = strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, "", errors.New("invalid web user ID")
+	}
+	if _, err := s.DB.GetUserByID(id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			if currentWebUserID > 0 && id == currentWebUserID {
+				return 0, fmt.Sprintf("the mapped web user %d no longer exists, the mapping was removed", id), nil
+			}
+			return 0, "", errors.New("web user not found")
+		}
+		log.Printf("[WEB]: NNTP user %d: looking up web user %d: %v", currentNNTPUserID, id, err)
+		return 0, "", errors.New("failed to look up web user")
+	}
+	if id == currentWebUserID {
+		return id, "", nil
+	}
+	n, err := s.DB.CountNNTPUsersByWebUserID(id)
+	if err != nil {
+		log.Printf("[WEB]: NNTP user %d: counting NNTP accounts of web user %d: %v", currentNNTPUserID, id, err)
+		return 0, "", errors.New("failed to check the NNTP accounts of the web user")
+	}
+	if n > 0 {
+		return 0, "", errors.New("web user already has an NNTP account")
+	}
+	return id, "", nil
+}
 
 // generateRandomHex generates a random hexadecimal string of the specified length
 func generateRandomHex(length int) (string, error) {
@@ -24,42 +74,32 @@ func generateRandomHex(length int) (string, error) {
 }
 
 // countActiveNNTPUsers counts the number of active NNTP users
-func (s *WebServer) countActiveNNTPUsers(nntpUsers []*models.NNTPUser) int {
-	count := 0
+func (s *WebServer) countActiveNNTPUsers(nntpUsers []*models.NNTPUser) (count int64) {
 	for _, user := range nntpUsers {
 		if user.IsActive {
 			count++
 		}
 	}
-	return count
+	return
 }
 
 // countPostingNNTPUsers counts the number of NNTP users who can post
-func (s *WebServer) countPostingNNTPUsers(nntpUsers []*models.NNTPUser) int {
-	count := 0
+func (s *WebServer) countPostingNNTPUsers(nntpUsers []*models.NNTPUser) (count int64) {
 	for _, user := range nntpUsers {
 		if user.IsActive && user.Posting {
 			count++
 		}
 	}
-	return count
+	return
 }
 
 // adminCreateNNTPUser handles NNTP user creation
 func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Generate random credentials
 	username, err := generateRandomHex(16)
@@ -86,10 +126,10 @@ func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
 	// Parse max connections
 	maxConns := 1
 	if maxConnsStr != "" {
-		if parsed, err := strconv.Atoi(maxConnsStr); err == nil && parsed >= 1 && parsed <= 10 {
+		if parsed, err := strconv.Atoi(maxConnsStr); err == nil && parsed >= 1 && parsed <= 25 {
 			maxConns = parsed
 		} else {
-			session.SetError("Max connections must be between 1 and 10")
+			session.SetError("Max connections must be between 1 and 25")
 			c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 			return
 		}
@@ -98,12 +138,12 @@ func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
 	// Parse posting permission
 	posting := postingStr == "on" || postingStr == "true"
 
-	// Parse web user ID (default to admin user ID 1 if no mapping selected)
-	webUserID := int64(1) // Default to admin user
-	if webUserIDStr != "" && webUserIDStr != "0" {
-		if parsed, err := strconv.ParseInt(webUserIDStr, 10, 64); err == nil {
-			webUserID = parsed
-		}
+	// Web user mapping: empty or 0 = none (stored as NULL)
+	webUserID, _, err := resolveNNTPWebMapping(s, webUserIDStr, 0, 0)
+	if err != nil {
+		session.SetError("NNTP user not created: " + err.Error())
+		c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
+		return
 	}
 
 	// Check if NNTP username already exists
@@ -127,7 +167,11 @@ func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
 	err = s.DB.InsertNNTPUser(nntpUser)
 	if err != nil {
 		log.Printf("Error creating NNTP user: %v", err)
-		session.SetError("Failed to create NNTP user")
+		if database.IsWebUserMappingConflict(err) {
+			session.SetError(database.ErrWebUserHasNNTPAccount.Error())
+		} else {
+			session.SetError("Failed to create NNTP user")
+		}
 		c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 		return
 	}
@@ -138,19 +182,11 @@ func (s *WebServer) adminCreateNNTPUser(c *gin.Context) {
 
 // adminUpdateNNTPUser handles NNTP user updates
 func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get NNTP user ID
 	idStr := strings.TrimSpace(c.PostForm("id"))
@@ -167,32 +203,65 @@ func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
 		return
 	}
 
-	// Verify NNTP user exists
-	_, err = s.DB.GetNNTPUserByID(id)
+	// Load the NNTP user first: fields that are not submitted keep their stored values
+	nntpUser, err := s.DB.GetNNTPUserByID(id)
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: Error loading NNTP user %d: %v", id, err)
+		}
 		session.SetError("NNTP user not found")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 		return
 	}
 
-	// Get form data
+	// Get form data. The edit form always submits maxconns and the posting state (a hidden
+	// "off" in front of the checkbox), so posting is updated even when maxconns is absent.
 	maxConnsStr := strings.TrimSpace(c.PostForm("maxconns"))
-	postingStr := c.PostForm("posting")
-	webUserIDStr := strings.TrimSpace(c.PostForm("web_user_id"))
+	postingVals, postingGiven := c.GetPostFormArray("posting")
+	webUserIDStr, webUserIDGiven := c.GetPostForm("web_user_id")
 	password := strings.TrimSpace(c.PostForm("password"))
 
-	// Parse max connections
+	// Validate every field before writing anything
+	maxConns := nntpUser.MaxConns
 	if maxConnsStr != "" {
-		if parsed, err := strconv.Atoi(maxConnsStr); err == nil && parsed >= 1 && parsed <= 10 {
-			err = s.DB.UpdateNNTPUserPermissions(id, parsed, postingStr == "on" || postingStr == "true")
-			if err != nil {
-				log.Printf("Error updating NNTP user permissions: %v", err)
-				session.SetError("Failed to update NNTP user permissions")
-				c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
-				return
-			}
-		} else {
-			session.SetError("Max connections must be between 1 and 10")
+		parsed, err := strconv.Atoi(maxConnsStr)
+		if err != nil || parsed < 1 || parsed > 25 {
+			session.SetError("Max connections must be between 1 and 25")
+			c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
+			return
+		}
+		maxConns = parsed
+	}
+	posting := false // checkbox semantics: absent = off
+	for _, v := range postingVals {
+		if v == "on" || v == "true" {
+			posting = true
+		}
+	}
+
+	if password != "" && (len(password) < nntpAdminPasswordMin || len(password) > nntpAdminPasswordMax) {
+		session.SetError(fmt.Sprintf("Password must be between %d and %d bytes", nntpAdminPasswordMin, nntpAdminPasswordMax))
+		c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
+		return
+	}
+
+	webUserID := nntpUser.WebUserID
+	mappingNotice := ""
+	if webUserIDGiven {
+		webUserID, mappingNotice, err = resolveNNTPWebMapping(s, webUserIDStr, id, nntpUser.WebUserID)
+		if err != nil {
+			session.SetError("NNTP user not updated: " + err.Error())
+			c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
+			return
+		}
+	}
+
+	// Update max connections and posting permission
+	if maxConnsStr != "" || postingGiven {
+		err = s.DB.UpdateNNTPUserPermissions(id, maxConns, posting)
+		if err != nil {
+			log.Printf("[WEB]: Error updating NNTP user permissions: %v", err)
+			session.SetError("Failed to update NNTP user permissions")
 			c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 			return
 		}
@@ -200,45 +269,47 @@ func (s *WebServer) adminUpdateNNTPUser(c *gin.Context) {
 
 	// Update password if provided
 	if password != "" {
-		if len(password) > 16 {
-			session.SetError("Password must be 16 characters or less")
-			c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
-			return
-		}
 		err = s.DB.UpdateNNTPUserPassword(id, password)
 		if err != nil {
-			log.Printf("Error updating NNTP user password: %v", err)
+			log.Printf("[WEB]: Error updating NNTP user password: %v", err)
 			session.SetError("Failed to update NNTP user password")
 			c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 			return
 		}
 	}
 
-	// Update web user mapping if provided
-	if webUserIDStr != "" {
-		// This would require adding a new function to update web user mapping
-		// For now, we'll skip this as it requires extending the database layer
+	// Update the web user mapping (0 = none, stored as NULL)
+	if webUserIDGiven && webUserID != nntpUser.WebUserID {
+		err = s.DB.UpdateNNTPUserWebUserID(id, webUserID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				session.SetError("NNTP user not found")
+			} else if errors.Is(err, database.ErrWebUserHasNNTPAccount) || database.IsWebUserMappingConflict(err) {
+				session.SetError(database.ErrWebUserHasNNTPAccount.Error())
+			} else {
+				log.Printf("[WEB]: Error updating NNTP user web mapping: %v", err)
+				session.SetError("Failed to update NNTP user web mapping")
+			}
+			c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
+			return
+		}
 	}
 
-	session.SetSuccess("NNTP user updated successfully")
+	if mappingNotice != "" {
+		session.SetSuccess("NNTP user updated successfully (" + mappingNotice + ")")
+	} else {
+		session.SetSuccess("NNTP user updated successfully")
+	}
 	c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 }
 
 // adminDeleteNNTPUser handles NNTP user deletion
 func (s *WebServer) adminDeleteNNTPUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get NNTP user ID
 	idStr := strings.TrimSpace(c.PostForm("id"))
@@ -270,19 +341,11 @@ func (s *WebServer) adminDeleteNNTPUser(c *gin.Context) {
 
 // adminToggleNNTPUser handles activating/deactivating NNTP users
 func (s *WebServer) adminToggleNNTPUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get NNTP user ID
 	idStr := strings.TrimSpace(c.PostForm("id"))
@@ -321,7 +384,11 @@ func (s *WebServer) adminToggleNNTPUser(c *gin.Context) {
 		err = s.DB.ActivateNNTPUser(id)
 		if err != nil {
 			log.Printf("Error activating NNTP user: %v", err)
-			session.SetError("Failed to activate NNTP user")
+			if database.IsWebUserMappingConflict(err) {
+				session.SetError(database.ErrWebUserHasNNTPAccount.Error())
+			} else {
+				session.SetError("Failed to activate NNTP user")
+			}
 			c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 			return
 		}
@@ -332,19 +399,11 @@ func (s *WebServer) adminToggleNNTPUser(c *gin.Context) {
 
 // adminEnableNNTPUser handles activating NNTP users
 func (s *WebServer) adminEnableNNTPUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get NNTP user ID
 	idStr := strings.TrimSpace(c.PostForm("id"))
@@ -365,7 +424,11 @@ func (s *WebServer) adminEnableNNTPUser(c *gin.Context) {
 	err = s.DB.ActivateNNTPUser(id)
 	if err != nil {
 		log.Printf("Error enabling NNTP user: %v", err)
-		session.SetError("Failed to enable NNTP user")
+		if database.IsWebUserMappingConflict(err) {
+			session.SetError(database.ErrWebUserHasNNTPAccount.Error())
+		} else {
+			session.SetError("Failed to enable NNTP user")
+		}
 		c.Redirect(http.StatusSeeOther, "/admin?tab=nntpusers")
 		return
 	}

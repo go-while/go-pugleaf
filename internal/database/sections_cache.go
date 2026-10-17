@@ -13,11 +13,21 @@ var CronGroupSectionsCache = 15 * time.Second
 type GroupSectionDBCache struct {
 	mux           sync.RWMutex
 	SectionsCache map[string]time.Time // (key: group name, value: expiry time)
+	stop          <-chan struct{}      // closed to end CronClean (nil: never)
 }
 
+// NewGroupSectionDBCache returns a cache whose cleanup loop never stops
+// (see newGroupSectionDBCacheStop).
 func NewGroupSectionDBCache() *GroupSectionDBCache {
+	return newGroupSectionDBCacheStop(nil)
+}
+
+// newGroupSectionDBCacheStop returns a cache whose cleanup loop (CronClean) returns
+// when stop is closed. A nil stop channel never fires.
+func newGroupSectionDBCacheStop(stop <-chan struct{}) *GroupSectionDBCache {
 	cache := &GroupSectionDBCache{
 		SectionsCache: make(map[string]time.Time, 256),
+		stop:          stop,
 	}
 	go cache.CronClean() // Start the cleanup goroutine
 	return cache
@@ -38,9 +48,14 @@ func (g *GroupSectionDBCache) IsInSections(group string) bool {
 	return false
 }
 
+// CronClean removes expired entries every CronGroupSectionsCache until g.stop is closed.
 func (g *GroupSectionDBCache) CronClean() {
 	for {
-		time.Sleep(CronGroupSectionsCache)
+		select {
+		case <-g.stop:
+			return
+		case <-time.After(CronGroupSectionsCache):
+		}
 
 		g.mux.RLock()
 		if g.SectionsCache == nil {

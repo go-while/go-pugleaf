@@ -1,0 +1,76 @@
+---
+name: Tests
+
+# Manual only (user decision 2026-10-15): the "Run workflow" button in the Actions tab, or
+# `gh workflow run tests.yml --ref <branch>`. GitHub shows the button only for workflow files that
+# exist on the default branch.
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Upper bound for the tests' event waits (plan test-timing-hardening); shared runners are slow under -race.
+  PUGLEAF_TEST_DEADLINE: 120s
+
+jobs:
+  test:
+    name: Vet and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      # Same package list as the test job in .github/workflows/release.yml
+      - name: Test (race detector)
+        run: |
+          go test -race -count=1 -timeout 1200s \
+            ./internal/database/... ./internal/web/... ./internal/history/... ./internal/nntp/... \
+            ./internal/processor/... ./cmd/expire-news/... ./cmd/history-rebuild/... ./cmd/nntp-server/... \
+            ./internal/postmgr/... ./internal/cache/... ./internal/models/... ./internal/common/... \
+            ./cmd/tcp2tor/... ./cmd/web/... ./cmd/nntp-fetcher/... ./cmd/nntp-analyze/... ./cmd/recover-db/... \
+            ./cmd/post-queue/... ./cmd/import-flat-files/... ./cmd/rslight-importer/... ./cmd/fix-references/... \
+            ./cmd/fix-thread-activity/... ./cmd/audit-web-posts/... ./cmd/extract_hierarchies/... ./cmd/merge-active/... \
+            ./cmd/merge-descriptions/... ./cmd/nntp-transfer/... ./cmd/usermgr/... ./cmd/mbox-importer/...
+
+  known-bugs:
+    # Lists the open NNTP known bugs (docs/audit/README.md): with PUGLEAF_KNOWN_BUGS=1 every open
+    # knownBug marker fails its test, so the list is the FAIL lines in this job's log. The step
+    # always exits 0: the job is informational and stays green.
+    name: NNTP known bugs (informational)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: List known bugs
+        env:
+          PUGLEAF_KNOWN_BUGS: "1"
+        run: |
+          go test -count=1 ./internal/nntp/... ./cmd/nntp-server/... 2>&1 | tee known-bugs.log || true
+          echo "## Open NNTP known bugs" >> "$GITHUB_STEP_SUMMARY"
+          if grep -q "known bug" known-bugs.log; then
+            grep "known bug" known-bugs.log | sed 's/^ *//' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "none" >> "$GITHUB_STEP_SUMMARY"
+          fi

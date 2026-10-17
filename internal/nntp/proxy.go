@@ -1,6 +1,7 @@
 package nntp
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -56,9 +57,15 @@ func (pd *ProxyDialer) DialTLS(network, address string, tlsConfig *tls.Config) (
 	}
 
 	// Now wrap the connection (whether direct or proxied) with TLS
+	// The handshake is bounded by ConnectTimeout (none when <= 0).
+	ctx, cancel := context.Background(), context.CancelFunc(func() {})
+	if pd.config.ConnectTimeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, pd.config.ConnectTimeout)
+	}
+	defer cancel()
 	tlsConn := tls.Client(conn, tlsConfig)
-	if err := tlsConn.Handshake(); err != nil {
-		conn.Close()
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		_ = conn.Close()
 		if pd.config.ProxyEnabled {
 			return nil, fmt.Errorf("TLS handshake failed through %s proxy: %w", pd.config.ProxyType, err)
 		}
@@ -90,6 +97,15 @@ func (pd *ProxyDialer) dialSOCKS4(network, address string) (net.Conn, error) {
 		return nil, fmt.Errorf("failed to create SOCKS4/5 proxy dialer: %w", err)
 	}
 
+	// The SOCKS negotiation is bounded by ConnectTimeout too (none when <= 0).
+	if cd, ok := dialer.(proxy.ContextDialer); ok {
+		ctx, cancel := context.Background(), context.CancelFunc(func() {})
+		if pd.config.ConnectTimeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, pd.config.ConnectTimeout)
+		}
+		defer cancel()
+		return cd.DialContext(ctx, network, address)
+	}
 	return dialer.Dial(network, address)
 }
 
@@ -112,6 +128,15 @@ func (pd *ProxyDialer) dialSOCKS5(network, address string) (net.Conn, error) {
 		return nil, fmt.Errorf("failed to create SOCKS5 proxy dialer: %w", err)
 	}
 
+	// The SOCKS negotiation is bounded by ConnectTimeout too (none when <= 0).
+	if cd, ok := dialer.(proxy.ContextDialer); ok {
+		ctx, cancel := context.Background(), context.CancelFunc(func() {})
+		if pd.config.ConnectTimeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, pd.config.ConnectTimeout)
+		}
+		defer cancel()
+		return cd.DialContext(ctx, network, address)
+	}
 	return dialer.Dial(network, address)
 }
 

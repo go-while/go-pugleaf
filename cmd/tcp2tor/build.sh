@@ -6,11 +6,7 @@ set -e
 echo "Building tcp2tor..."
 
 # Get version info
-if [ -f "../../VERSION" ]; then
-    VERSION=$(cat ../../VERSION)
-else
-    VERSION="dev-$(date +%Y%m%d)"
-fi
+VERSION="dev-$(date +%Y%m%d)"
 
 # Build for current platform
 go build -trimpath -ldflags "-w -s -X main.appVersion=$VERSION" -o tcp2tor . || exit 1

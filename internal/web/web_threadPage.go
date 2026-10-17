@@ -2,7 +2,6 @@
 package web
 
 import (
-	"html/template"
 	"log"
 	"net/http"
 	"strconv"
@@ -44,15 +43,15 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 		page = 1
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.String(http.StatusNotFound, "Group not found: %v", err)
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 
 	// Get the thread root overview first
-	rootOverview, err := s.DB.GetOverviewByArticleNum(groupDBs, threadRoot)
+	rootOverview, err := s.DB.GetOverviewByArticleNum(groupDB, threadRoot)
 	if err != nil {
 		c.String(http.StatusNotFound, "Thread root article %d not found: %v", threadRoot, err)
 		return
@@ -65,7 +64,7 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 	}
 
 	// Load the full ThreadRoot article to get ArticleNums populated
-	threadRootArticle, err := s.DB.GetArticleByNum(groupDBs, threadRoot)
+	threadRootArticle, err := s.DB.GetArticleByNum(groupDB, threadRoot)
 	if err != nil {
 		c.String(http.StatusNotFound, "Thread root article %d not found: %v", threadRoot, err)
 		return
@@ -75,24 +74,42 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 	if threadRootArticle.ArticleNums == nil {
 		threadRootArticle.ArticleNums = make(map[*string]int64)
 	}
-	threadRootArticle.ArticleNums[groupDBs.NewsgroupPtr] = threadRoot
+	threadRootArticle.ArticleNums[groupDB.NewsgroupPtr] = threadRoot
 
 	// Use cached thread replies with pagination
-	threadReplies, totalReplies, err := s.DB.GetCachedThreadReplies(groupDBs, threadRoot, page, ThreadMessages_perPage)
+	fetchedPage := page
+	threadReplies, totalReplies, err := s.DB.GetCachedThreadReplies(groupDB, threadRoot, fetchedPage, ThreadMessages_perPage)
 	if err != nil {
-		log.Printf("Failed to get cached thread replies for %s/%d: %v", groupName, threadRoot, err)
-		s.renderError(c, http.StatusInternalServerError, "Failed to load thread replies", err.Error())
+		log.Printf("[WEB]: singleThreadPage: GetCachedThreadReplies(%s/%d page=%d): %v", groupName, threadRoot, page, err)
+		s.renderError(c, http.StatusInternalServerError, "Failed to load thread replies", publicErrorDetail)
 		return
 	}
 
-	// Total messages = root + replies
+	// Total messages = root + replies (display only).
 	totalMessages := totalReplies + 1
-	totalPages := (totalMessages + ThreadMessages_perPage - 1) / ThreadMessages_perPage
+	// Pages are counted over the replies alone: GetCachedThreadReplies paginates only the
+	// replies, and the root is prepended on page 1. Counting the root into the page total
+	// linked one page too many whenever the reply count was an exact multiple of the page
+	// size - 50 replies gave 2 pages, and page 2 held neither a reply nor the root (E4).
+	// Page 1 therefore holds one item more than the others.
+	totalPages := (totalReplies + ThreadMessages_perPage - 1) / ThreadMessages_perPage
 	if totalPages == 0 {
 		totalPages = 1
 	}
 	if page > totalPages {
 		page = totalPages
+	}
+	// The replies above were fetched for the requested page; an out-of-range one came back
+	// empty, which rendered the root alone (or nothing at all past page 1). The handler cannot
+	// know totalReplies before the first fetch, so fetch the clamped page once more (FU:E14).
+	// Its count is ignored: totalPages and totalMessages stay built from the first one.
+	if page != fetchedPage {
+		threadReplies, _, err = s.DB.GetCachedThreadReplies(groupDB, threadRoot, page, ThreadMessages_perPage)
+		if err != nil {
+			log.Printf("[WEB]: singleThreadPage: GetCachedThreadReplies(%s/%d page=%d): %v", groupName, threadRoot, page, err)
+			s.renderError(c, http.StatusInternalServerError, "Failed to load thread replies", publicErrorDetail)
+			return
+		}
 	}
 
 	// Prepare overviews for this page (root + current page of replies)
@@ -115,25 +132,25 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 			continue
 		}
 
-		article, err := s.DB.GetArticleByNum(groupDBs, overview.ArticleNum)
+		article, err := s.DB.GetArticleByNum(groupDB, overview.ArticleNum)
 		if err != nil {
 			log.Printf("Warning: Could not load article %d: %v", overview.ArticleNum, err)
 			// If we can't load the full article, we could fall back to overview data
 			// but for now let's skip missing articles
 			continue
 		}
-
+		article.Mux.Lock()
 		// Initialize ArticleNums map if nil and set the article number for this group
 		if article.ArticleNums == nil {
 			article.ArticleNums = make(map[*string]int64)
 		}
-		article.ArticleNums[groupDBs.NewsgroupPtr] = overview.ArticleNum
-
+		article.ArticleNums[groupDB.NewsgroupPtr] = overview.ArticleNum
+		article.Mux.Unlock()
 		threadMessages = append(threadMessages, article)
 	}
 
 	// Batch sanitize all thread articles for better performance
-	models.BatchSanitizeArticles(threadMessages)
+	models.BatchSanitizeArticles(threadMessages, groupName)
 
 	// Get base template data with authentication context
 	baseData := s.getBaseTemplateData(c, threadRootArticle.GetCleanSubject()+" - Thread")
@@ -153,7 +170,7 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 		"AvailableSections":   baseData.AvailableSections,
 		"AvailableAIModels":   baseData.AvailableAIModels,
 		"GroupName":           groupName,
-		"GroupPtr":            groupDBs.NewsgroupPtr,
+		"GroupPtr":            groupDB.NewsgroupPtr,
 		"ThreadRoot":          threadRootArticle,
 		"ThreadMessages":      threadMessages,
 		"MessageCount":        totalMessages,
@@ -167,12 +184,5 @@ func (s *WebServer) singleThreadPage(c *gin.Context) {
 		"ThreadRootNum":       threadRoot, // For pagination URLs
 	}
 
-	// Load template
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/thread.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "thread.html")
 }

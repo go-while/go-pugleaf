@@ -1,12 +1,11 @@
 package database
 
 import (
-	"encoding/json"
 	"fmt"
+	"html"
 	"html/template"
 	"log"
-	"net/http"
-	"strconv"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -31,11 +30,11 @@ type TreeViewResponse struct {
 }
 
 // GetThreadTreeView returns a hierarchical tree view for a thread
-func (db *Database) GetThreadTreeView(groupDBs *GroupDBs, threadRoot int64, options TreeViewOptions) (*TreeViewResponse, error) {
+func (db *Database) GetThreadTreeView(groupDB *GroupDB, threadRoot int64, options TreeViewOptions) (*TreeViewResponse, error) {
 	startTime := time.Now()
 
 	// Build or retrieve the thread tree
-	tree, err := db.BuildThreadTree(groupDBs, threadRoot)
+	tree, err := db.BuildThreadTree(groupDB, threadRoot)
 	if err != nil {
 		return &TreeViewResponse{
 			ThreadRoot: threadRoot,
@@ -45,7 +44,7 @@ func (db *Database) GetThreadTreeView(groupDBs *GroupDBs, threadRoot int64, opti
 
 	// Apply view options
 	if options.IncludeOverview {
-		if err := db.loadOverviewDataForTree(groupDBs, tree); err != nil {
+		if err := db.loadOverviewDataForTree(groupDB, tree); err != nil {
 			log.Printf("Failed to load overview data for tree: %v", err)
 			// Continue without overview data
 		}
@@ -67,10 +66,10 @@ func (db *Database) GetThreadTreeView(groupDBs *GroupDBs, threadRoot int64, opti
 }
 
 // loadOverviewDataForTree populates Overview data for all nodes in the tree
-func (db *Database) loadOverviewDataForTree(groupDBs *GroupDBs, tree *ThreadTree) error {
+func (db *Database) loadOverviewDataForTree(groupDB *GroupDB, tree *ThreadTree) error {
 	for articleNum, node := range tree.NodeMap {
 		if node.Overview == nil {
-			overview, err := db.GetOverviewByArticleNum(groupDBs, articleNum)
+			overview, err := db.GetOverviewByArticleNum(groupDB, articleNum)
 			if err != nil {
 				log.Printf("Failed to load overview for article %d: %v", articleNum, err)
 				continue
@@ -95,72 +94,6 @@ func (tree *ThreadTree) limitDepthRecursive(node *TreeNode, maxDepth int) {
 	for _, child := range node.Children {
 		tree.limitDepthRecursive(child, maxDepth)
 	}
-}
-
-// Example HTTP handler for testing tree view API
-func (db *Database) HandleThreadTreeAPI(w http.ResponseWriter, r *http.Request) {
-	// Parse parameters
-	groupName := r.URL.Query().Get("group")
-	threadRootStr := r.URL.Query().Get("thread_root")
-
-	if groupName == "" || threadRootStr == "" {
-		http.Error(w, "Missing required parameters: group, thread_root", http.StatusBadRequest)
-		return
-	}
-
-	threadRoot, err := strconv.ParseInt(threadRootStr, 10, 64)
-	if err != nil {
-		http.Error(w, "Invalid thread_root parameter", http.StatusBadRequest)
-		return
-	}
-
-	// Get group database
-	groupDBs, err := db.GetGroupDBs(groupName)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get group database: %v", err), http.StatusInternalServerError)
-		return
-	}
-	defer groupDBs.Return(db)
-
-	// Parse options
-	options := TreeViewOptions{
-		MaxDepth:        0,    // No limit by default
-		CollapseDepth:   3,    // Auto-collapse after depth 3
-		IncludeOverview: true, // Include full overview data
-		PageSize:        50,   // Standard page size
-		SortBy:          "date",
-	}
-
-	// Override with query parameters if provided
-	if maxDepthStr := r.URL.Query().Get("max_depth"); maxDepthStr != "" {
-		if maxDepth, err := strconv.Atoi(maxDepthStr); err == nil {
-			options.MaxDepth = maxDepth
-		}
-	}
-
-	if includeOverviewStr := r.URL.Query().Get("include_overview"); includeOverviewStr == "false" {
-		options.IncludeOverview = false
-	}
-
-	// Get tree view
-	response, err := db.GetThreadTreeView(groupDBs, threadRoot, options)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get tree view: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Return JSON response
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "public, max-age=300") // Cache for 5 minutes
-
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		log.Printf("Failed to encode tree view response: %v", err)
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-		return
-	}
-
-	log.Printf("[TREE:API] Served tree view for thread %d in group %s (nodes: %d, build_time: %s)",
-		threadRoot, groupName, response.Tree.TotalNodes, response.BuildTime)
 }
 
 // Example usage and testing functions
@@ -215,13 +148,67 @@ func (tree *ThreadTree) printNodeASCII(node *TreeNode, prefix string, isLast boo
 	}
 }
 
-// GetThreadTreeHTML generates HTML representation of the tree (for web display)
+// RedactedCopy returns a deep copy of the tree (nodes and NodeMap) in which every node whose
+// article is hidden (Overview.Hide > 0) has no Overview. The node itself, its number and its
+// children stay: the thread structure is public, the hidden article's data is not.
+// The receiver is not modified, so cached trees can be redacted per request.
+func (tree *ThreadTree) RedactedCopy() *ThreadTree {
+	if tree == nil {
+		return nil
+	}
+	cp := *tree
+	copies := make(map[*TreeNode]*TreeNode, len(tree.NodeMap)+1)
+	var copyNode func(node *TreeNode) *TreeNode
+	copyNode = func(node *TreeNode) *TreeNode {
+		if node == nil {
+			return nil
+		}
+		if done, ok := copies[node]; ok {
+			return done
+		}
+		n := *node
+		copies[node] = &n
+		if node.ParentArticle != nil {
+			parent := *node.ParentArticle
+			n.ParentArticle = &parent
+		}
+		if node.Overview != nil && node.Overview.Hide > 0 {
+			n.Overview = nil
+		}
+		if node.Children != nil {
+			n.Children = make([]*TreeNode, len(node.Children))
+			for i, child := range node.Children {
+				n.Children[i] = copyNode(child)
+			}
+		}
+		return &n
+	}
+	cp.RootNode = copyNode(tree.RootNode)
+	if tree.NodeMap != nil {
+		cp.NodeMap = make(map[int64]*TreeNode, len(tree.NodeMap))
+		for num, node := range tree.NodeMap {
+			cp.NodeMap[num] = copyNode(node)
+		}
+	}
+	return &cp
+}
+
+// GetThreadTreeHTML generates HTML representation of the tree (for web display).
+// It shows hidden articles like every other article; see GetThreadTreeHTMLFor.
 func (tree *ThreadTree) GetThreadTreeHTML(groupName string) template.HTML {
+	return tree.GetThreadTreeHTMLFor(groupName, true)
+}
+
+// GetThreadTreeHTMLFor generates the HTML of the tree. With showHidden false (non-admin
+// viewers), a hidden article (Overview.Hide > 0) is rendered as "[hidden article]" without
+// subject, author, date or link; its children are rendered as usual.
+func (tree *ThreadTree) GetThreadTreeHTMLFor(groupName string, showHidden bool) template.HTML {
 	if tree.RootNode == nil {
 		return template.HTML("<p>No tree data available</p>")
 	}
 
-	html := fmt.Sprintf(`
+	escGroup := html.EscapeString(groupName)
+	out := fmt.Sprintf(`
 <div class="thread-tree" data-thread-root="%d" data-group-name="%s">
 	<div class="tree-stats">
 		<span class="node-count">%d nodes</span>
@@ -229,17 +216,49 @@ func (tree *ThreadTree) GetThreadTreeHTML(groupName string) template.HTML {
 		<span class="leaf-count">%d leaves</span>
 	</div>
 	<ul class="tree-root">
-`, tree.ThreadRoot, groupName, tree.TotalNodes, tree.MaxDepth, tree.LeafCount)
+`, tree.ThreadRoot, escGroup, tree.TotalNodes, tree.MaxDepth, tree.LeafCount)
 
-	html += tree.getNodeHTML(tree.RootNode, groupName)
-	html += `
+	out += tree.getNodeHTML(tree.RootNode, groupName, showHidden)
+	out += `
 	</ul>
 </div>`
 
-	return template.HTML(html)
+	return template.HTML(out)
 }
 
-func (tree *ThreadTree) getNodeHTML(node *TreeNode, groupName string) string {
+func (tree *ThreadTree) getNodeHTML(node *TreeNode, groupName string, showHidden bool) string {
+	if !showHidden && node.Overview != nil && node.Overview.Hide > 0 {
+		// Hidden article for a non-admin viewer: number and depth (the structure is public) and
+		// the literal "[hidden article]"; no subject, author, date, link or preview button.
+		// Not a .node-link, so thread-tree.js does not try to preview it.
+		expandClass := ""
+		toggle := `<span class="node-toggle"></span>`
+		if len(node.Children) > 0 {
+			expandClass = " expandable"
+			toggle = `<details open class="tree-details" style="display: inline;">
+			<summary class="node-toggle" style="display: inline; list-style: none;">
+				<span class="toggle-icon"></span>
+			</summary>
+		</details>`
+		}
+		out := fmt.Sprintf(`
+<li class="tree-node%s tree-node-hidden" data-article-num="%d" data-depth="%d">
+	<div class="node-content">
+		%s
+		<div class="node-hidden">
+			<span class="node-subject">%s</span>
+		</div>
+	</div>`, expandClass, node.ArticleNum, node.Depth, toggle, html.EscapeString("[hidden article]"))
+		if len(node.Children) > 0 {
+			out += `<ul class="tree-children">`
+			for _, child := range node.Children {
+				out += tree.getNodeHTML(child, groupName, showHidden)
+			}
+			out += `</ul>`
+		}
+		return out + `</li>`
+	}
+
 	subject := "Unknown Subject"
 	author := "Unknown Author"
 	dateStr := "Unknown Date"
@@ -256,11 +275,14 @@ func (tree *ThreadTree) getNodeHTML(node *TreeNode, groupName string) string {
 		expandClass = " expandable"
 	}
 
-	var html string
+	escGroup := html.EscapeString(groupName)
+	hrefGroup := html.EscapeString(url.PathEscape(groupName))
+
+	var out string
 
 	// Use details/summary for graceful degradation without JavaScript
 	if hasChildren {
-		html = fmt.Sprintf(`
+		out = fmt.Sprintf(`
 <li class="tree-node%s" data-article-num="%d" data-depth="%d">
 	<div class="node-content">
 		<details open class="tree-details" style="display: inline;">
@@ -283,15 +305,15 @@ func (tree *ThreadTree) getNodeHTML(node *TreeNode, groupName string) string {
 			<div class="preview-loading">Loading...</div>
 		</div>
 	</div>`,
-			expandClass, node.ArticleNum, node.Depth, node.ArticleNum, groupName, subject, author, dateStr, groupName, node.ArticleNum, node.ArticleNum, node.ArticleNum)
+			expandClass, node.ArticleNum, node.Depth, node.ArticleNum, escGroup, subject, author, dateStr, hrefGroup, node.ArticleNum, node.ArticleNum, node.ArticleNum)
 
-		html += `<ul class="tree-children">`
+		out += `<ul class="tree-children">`
 		for _, child := range node.Children {
-			html += tree.getNodeHTML(child, groupName)
+			out += tree.getNodeHTML(child, groupName, showHidden)
 		}
-		html += `</ul>`
+		out += `</ul>`
 	} else {
-		html = fmt.Sprintf(`
+		out = fmt.Sprintf(`
 <li class="tree-node%s" data-article-num="%d" data-depth="%d">
 	<div class="node-content">
 		<span class="node-toggle"></span>
@@ -310,9 +332,9 @@ func (tree *ThreadTree) getNodeHTML(node *TreeNode, groupName string) string {
 			<div class="preview-loading">Loading...</div>
 		</div>
 	</div>`,
-			expandClass, node.ArticleNum, node.Depth, node.ArticleNum, groupName, subject, author, dateStr, groupName, node.ArticleNum, node.ArticleNum, node.ArticleNum)
+			expandClass, node.ArticleNum, node.Depth, node.ArticleNum, escGroup, subject, author, dateStr, hrefGroup, node.ArticleNum, node.ArticleNum, node.ArticleNum)
 	}
 
-	html += `</li>`
-	return html
+	out += `</li>`
+	return out
 }

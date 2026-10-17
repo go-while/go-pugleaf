@@ -4,14 +4,18 @@ package processor
 // into a local database, handling both overview and article imports.
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -30,53 +34,98 @@ type Processor struct {
 	History       *history.History        // History system for duplicate detection
 	MsgIdCache    *history.MsgIdItemCache // Cache for message ID items
 	BridgeManager *BridgeManager          // Bridge manager for Fediverse/Matrix (optional)
+	// AnalyzeDataDir is the -data root below which the analyzer keeps its overview
+	// cache (<AnalyzeDataDir>/cache/<host>/). Empty: DB.GetDataDir() is used; with
+	// neither set the cache functions return an error (no cwd-relative fallback).
+	AnalyzeDataDir string
+
+	// xrefMiss remembers group IDs of history tokens that the main DB does not know (a
+	// deleted group), so XrefLocations does not query and log them on every served article.
+	xrefMiss xrefMissCache
+}
+
+// xrefMissTTL is how long XrefLocations skips a group ID the main DB did not know.
+const xrefMissTTL = 5 * time.Minute
+
+// xrefMissMax bounds the negative cache: past it all entries are dropped.
+const xrefMissMax = 4096
+
+// xrefMissCache is the negative cache of unknown group IDs used by XrefLocations.
+type xrefMissCache struct {
+	mu sync.Mutex
+	m  map[int64]time.Time // group ID -> expiry
+}
+
+// known reports whether id is a remembered miss that has not expired at now.
+func (c *xrefMissCache) known(id int64, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	exp, ok := c.m[id]
+	if !ok {
+		return false
+	}
+	if now.After(exp) {
+		delete(c.m, id)
+		return false
+	}
+	return true
+}
+
+// add remembers id as unknown until now + xrefMissTTL; past xrefMissMax entries the map is reset.
+func (c *xrefMissCache) add(id int64, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil || len(c.m) >= xrefMissMax {
+		c.m = make(map[int64]time.Time)
+	}
+	c.m[id] = now.Add(xrefMissTTL)
 }
 
 var (
+	DownloadMaxPar int = 10 // HARDCODED Maximum number of parallel newsgroups downloads
+
 	// these list of ' var ' can be set after importing the lib before starting!!
-	MaxCrossPosts int = 15 // HARDCODED Maximum number of crossposts to allow per article
+	MaxCrossPosts int = 9 // HARDCODED Maximum number of crossposts to allow per article
 
 	LocalNNTPHostname string = "" // Hostname must be set before processing articles
 
 	// MaxBatch defines the maximum number of articles to fetch in a single batch
-	MaxBatchSize int64 = 128
-
-	// UseStrictGroupValidation for group names, false allows upper-case in group names
-	UseStrictGroupValidation = true
+	MaxBatchSize int64 = 1000
 
 	// RunRSLIGHTImport is used to indicate if the importer should run the legacy RockSolid Light importer
 	RunRSLIGHTImport = false
 
 	// Global Batch Queue (proc_DLArt.go)
 	Batch = &BatchQueue{
-		Check:       make(chan *string),           // check newsgroups
-		TodoQ:       make(chan *nntp.GroupInfo),   // todo newsgroups
-		GetQ:        make(chan *BatchItem),        // get articles, blocking channel
-		GroupQueues: make(map[string]*GroupBatch), // per-newsgroup queues
+		Check: make(chan *string, 1),                      // check newsgroups
+		TodoQ: make(chan *nntp.GroupInfo, DownloadMaxPar), // todo newsgroups
+		GetQ:  make(chan *BatchItem, 128),                 // get articles
 	}
-
-	// Do NOT change this here! these are needed for runtime !
-	// validGroupNameRegex validates newsgroup names according to RFC standards
-	// Pattern: lowercase alphanumeric start, components separated by dots, no trailing dots/hyphens
-	validGroupNameRegexStrict = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$`)
-	validGroupNameRegexchar   = regexp.MustCompile(`^[a-zA-Z0-9]{1,255}$`)
-	validGroupNameRegexLazy   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+&-]*$`)
-	validGroupNameRegexSingle = regexp.MustCompile(`^[A-Za-z0-9-_+&][A-Za-z0-9-_+&]{1,64}$`)
-	validGroupNameRegexCaps   = regexp.MustCompile(`^[A-Za-z0-9-_+&][A-Za-z0-9-_+&]*(?:\.[A-Za-z0-9-_+&][A-Za-z0-9-_+&]*)+$`)
-	//errorUp2date              = fmt.Errorf("up2date")
 )
 
+// Deprecated: use NewProcessorE. Kept for callers that still exit on error.
 func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen int) *Processor {
+	proc, err := NewProcessorE(db, nntpPool, useShortHashLen)
+	if err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+	return proc
+}
+
+// NewProcessorE creates a Processor and returns an error instead of exiting the process
+// when the hostname is missing or invalid or the history system cannot be initialized.
+// The hostname checks run before db is used.
+func NewProcessorE(db *database.Database, nntpPool *nntp.Pool, useShortHashLen int) (*Processor, error) {
 	if LocalNNTPHostname == "" {
 		// Try to get hostname from database if not set
 		if err := SetHostname("", db); err != nil {
-			log.Fatalf("FATAL: LocalNNTPHostname is not set and could not retrieve from database: %v", err)
+			return nil, fmt.Errorf("hostname: LocalNNTPHostname is not set and could not be retrieved from database: %w", err)
 		}
 	}
 
 	// Perform comprehensive hostname validation (similar to INN2)
 	if err := validateHostname(LocalNNTPHostname); err != nil {
-		log.Fatalf("FATAL: Hostname validation failed: %v", err)
+		return nil, fmt.Errorf("hostname validation: %w", err)
 	}
 	// Ensure main database exists and is properly set up before any import operations
 	if err := db.Migrate(); err != nil {
@@ -85,7 +134,7 @@ func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen in
 
 	// Initialize history system with 16-DB sharding
 	historyConfig := &history.HistoryConfig{
-		HistoryDir:      "data/history",
+		HistoryDir:      filepath.Join(db.GetDataDir(), "history"),
 		CacheExpires:    60,                   // HARDCODED
 		CachePurge:      15,                   // HARDCODED
 		ShardMode:       history.SHARD_16_256, // CAN NOT BE CHANGED ! ! 16 databases with 256 tables each
@@ -95,7 +144,7 @@ func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen in
 
 	hist, err := history.NewHistory(historyConfig, db.WG)
 	if err != nil {
-		log.Fatalf("FATAL: Failed to initialize history system: %v", err)
+		return nil, fmt.Errorf("history init: %w", err)
 	}
 
 	proc := &Processor{
@@ -119,74 +168,18 @@ func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen in
 	}
 
 	// DISABLED: threading processor - now handled by SQ3CronProcessThreading in db_batch.go
-	return proc
+	return proc, nil
 }
 
 func (proc *Processor) CheckNoMoreWorkInHistory() bool {
 	return proc.History.CheckNoMoreWorkInHistory()
 }
 
-// AddProcessedArticleToHistory adds a successfully processed article to history with correct group and article number
-func (proc *Processor) AddProcessedArticleToHistory(msgIdItem *history.MessageIdItem, newsgroupPtr *string, articleNumber int64) {
-	if msgIdItem == nil || newsgroupPtr == nil {
-		//log.Print("ERROR: addProcessedArticleToHistory called with nil MessageIdItem or newsgroupPtr")
-		return
-	}
-	if *newsgroupPtr == "" || articleNumber <= 0 {
-		//log.Printf("ERROR: addProcessedArticleToHistory called with invalid parameters: newsgroupPtr='%s', articleNumber=%d msgIdItem='%#v'", *newsgroupPtr, articleNumber, msgIdItem)
-		return
-	}
-
-	msgIdItem.Mux.Lock()
-	if msgIdItem.FileOffset > 0 || msgIdItem.ArtNum > 0 || msgIdItem.GroupName != nil {
-		msgIdItem.Response = history.CaseDupes
-		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
-		//log.Printf("ERROR: addProcessedArticleToHistory called with existing FileOffset %d or ArtNum %d or GroupName '%v', ignoring new values for msgIdItem='%#v'", msgIdItem.FileOffset, msgIdItem.ArtNum, *msgIdItem.GroupName, msgIdItem)
-		msgIdItem.Mux.Unlock()
-		return
-	}
-	if msgIdItem.GroupName == nil && msgIdItem.ArtNum <= 0 {
-		msgIdItem.GroupName = newsgroupPtr
-		msgIdItem.ArtNum = articleNumber // Set article number if not already set
-		//msgIdItem.StorageToken = fmt.Sprintf("%s:%d", *newsgroupPtr, articleNumber) // Set the storage token in the item
-	} else {
-		msgIdItem.Response = history.CaseDupes
-		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
-		//log.Printf("WARNING: addProcessedArticleToHistory called with existing GroupName '%s' or ArtNum %d, ignoring new values for msgIdItem='%#v'", *msgIdItem.GroupName, msgIdItem.ArtNum, msgIdItem)
-		msgIdItem.Mux.Unlock()
-		return
-	}
-	msgIdItem.Mux.Unlock()
-
-	// Add to history channel
-	proc.History.Add(msgIdItem)
-}
-
-// FindThreadRootInCache - public wrapper for the interface
-func (proc *Processor) FindThreadRootInCache(newsgroupPtr *string, refs []string) *database.MsgIdTmpCacheItem {
-	item := proc.MsgIdCache.FindThreadRootInCache(newsgroupPtr, refs)
-	if item == nil {
-		return nil
-	}
-
-	// Convert from history.MessageIdItem to database.MsgIdTmpCacheItem for interface compatibility
-	item.Mux.RLock()
-	defer item.Mux.RUnlock()
-
-	// Get group-specific threading information
-	threadingInfo, exists := item.GroupThreading[newsgroupPtr]
-	if !exists {
-		return nil // No threading info for this group
-	}
-
-	result := &database.MsgIdTmpCacheItem{
-		MessageId:    item.MessageId,
-		ArtNum:       threadingInfo.ArtNum,
-		RootArticle:  threadingInfo.RootArticle,
-		IsThreadRoot: threadingInfo.IsThreadRoot,
-	}
-
-	return result
+// AddArticleToHistory records a committed article (message-id -> main-DB newsgroup ID and its
+// article number there, 0 = unknown) in the history index.
+// Called by the database batch system after the article was stored and numbered. No-op if history is disabled.
+func (proc *Processor) AddArticleToHistory(messageID string, groupID, articleNum int64) {
+	proc.History.AddArticleAt(messageID, groupID, articleNum)
 }
 
 // GetHistoryStats returns current history statistics
@@ -218,10 +211,10 @@ func (proc *Processor) WaitForBatchCompletion() {
 	if proc.DB == nil || proc.DB.Batch == nil {
 		return
 	}
+	log.Printf("[PROCESSOR] WaitForBatchCompletion")
+	defer log.Printf("[PROCESSOR] Quit WaitForBatchCompletion")
 
-	log.Printf("[PROCESSOR] Waiting for all batch processing to complete...")
-
-	maxWaitTime := 60 * time.Second // Maximum wait time
+	//maxWaitTime := 60 * time.Second // Maximum wait time
 	checkInterval := 1 * time.Second
 	startTime := time.Now()
 
@@ -230,35 +223,169 @@ func (proc *Processor) WaitForBatchCompletion() {
 			log.Printf("[PROCESSOR] All batch processing completed")
 			return
 		}
-
 		elapsed := time.Since(startTime)
+		/* disabled: we want to wait indefinitely
 		if elapsed > maxWaitTime {
 			log.Printf("[PROCESSOR] Warning: Timeout waiting for batch completion after %v", elapsed)
 			return
 		}
-
-		// Show progress every 5 seconds
-		if int(elapsed.Seconds())%5 == 0 {
+		*/
+		// Show progress every N seconds
+		if int(elapsed.Seconds())%10 == 0 {
 			log.Printf("[PROCESSOR] Still waiting for batch processing... (elapsed: %v)", elapsed)
 		}
-
 		time.Sleep(checkInterval)
 	}
 }
 
 // Public methods for NNTP server integration
 
-// Lookup looks up a message-ID in history and returns the storage token in the item
-func (proc *Processor) Lookup(msgIdItem *history.MessageIdItem) (int, error) {
-	return proc.History.Lookup(msgIdItem)
+// CheckMessageID reports whether an offered message-id is wanted (IHAVE/TAKETHIS pre-check).
+// Returns history.CaseRetry while another goroutine is processing it (CaseLock/CaseWrite),
+// history.CaseDupes if it is known, history.CaseError on a history error and history.CasePass if it is new.
+// It never changes the state of the cache item.
+func (proc *Processor) CheckMessageID(messageID string) int {
+	if messageID == "" {
+		return history.CaseError
+	}
+	if history.MsgIdCache != nil {
+		if item := history.MsgIdCache.GetORCreate(messageID); item != nil {
+			item.Mux.RLock()
+			response := item.Response
+			item.Mux.RUnlock()
+			switch response {
+			case history.CaseLock, history.CaseWrite:
+				return history.CaseRetry
+			case history.CaseDupes:
+				return history.CaseDupes
+			}
+		}
+	}
+	exists, err := proc.History.Exists(messageID)
+	if err != nil {
+		log.Printf("[PROCESSOR] CheckMessageID: history error for '%s': %v", messageID, err)
+		return history.CaseError
+	}
+	if exists {
+		return history.CaseDupes
+	}
+	return history.CasePass
 }
 
-/*
-// AddArticleToHistory adds an article to history (public wrapper)
-func (proc *Processor) AddArticleToHistory(article *nntp.Article, newsgroup string) {
-	proc.addArticleToHistory(article, newsgroup)
+// FindArticleByMessageID finds an article by message-id: the current group first,
+// then the groups listed in the history index. The first hit wins.
+// Returns an error wrapping nntp.ErrArticleNotFound if no group has the article.
+func (proc *Processor) FindArticleByMessageID(messageID, currentGroup string) (*models.Article, error) {
+	if messageID == "" {
+		return nil, fmt.Errorf("empty message-id: %w", nntp.ErrArticleNotFound)
+	}
+	if currentGroup != "" {
+		if article := proc.findArticleInGroup(messageID, currentGroup); article != nil {
+			return article, nil
+		}
+	}
+	groupIDs, err := proc.History.LookupGroups(messageID)
+	if err != nil {
+		return nil, fmt.Errorf("history lookup for '%s' failed: %w", messageID, err)
+	}
+	for _, groupID := range groupIDs {
+		groupName, exists := database.NewsgroupDBsIDcache.GetNewsgroupNameByID(groupID, proc.DB)
+		if !exists || groupName == "" || groupName == currentGroup {
+			continue
+		}
+		if article := proc.findArticleInGroup(messageID, groupName); article != nil {
+			return article, nil
+		}
+	}
+	return nil, fmt.Errorf("message-id '%s': %w", messageID, nntp.ErrArticleNotFound)
 }
-*/
+
+// XrefLocations returns the groups and article numbers the history index holds for
+// messageID, for the server's Xref: header (-xref full), in the order of the history row.
+// Locations without a number (old rows, 0 = unknown until a history-rebuild) and group IDs
+// the main DB does not know are skipped; an unknown ID is remembered for xrefMissTTL, so it
+// is not queried (and logged) again per served article. nil, nil = nothing known or history
+// disabled.
+func (proc *Processor) XrefLocations(messageID string) ([]nntp.XrefLocation, error) {
+	if proc == nil || proc.History == nil || messageID == "" {
+		return nil, nil
+	}
+	locs, err := proc.History.LookupLocations(messageID)
+	if err != nil {
+		return nil, fmt.Errorf("history lookup for '%s' failed: %w", messageID, err)
+	}
+	return proc.xrefResolve(locs, func(id int64) (string, bool) {
+		return database.NewsgroupDBsIDcache.GetNewsgroupNameByID(id, proc.DB)
+	}, time.Now()), nil
+}
+
+// XrefLocationsBatch is XrefLocations for many message-ids with one batched history lookup
+// (History.LookupLocationsBatch): the result holds an entry for every id the history index
+// knows, with the same locations XrefLocations gives for it, or an empty non-nil slice when
+// none of its locations resolve ("known, nothing to add"); ids the index does not know are
+// absent. nil, nil = no ids or history disabled.
+func (proc *Processor) XrefLocationsBatch(messageIDs []string) (map[string][]nntp.XrefLocation, error) {
+	if proc == nil || proc.History == nil || len(messageIDs) == 0 {
+		return nil, nil
+	}
+	found, err := proc.History.LookupLocationsBatch(messageIDs)
+	if err != nil {
+		return nil, fmt.Errorf("history batch lookup for %d message-ids failed: %w", len(messageIDs), err)
+	}
+	if found == nil {
+		return nil, nil
+	}
+	return proc.xrefResolveBatch(found, func(id int64) (string, bool) {
+		return database.NewsgroupDBsIDcache.GetNewsgroupNameByID(id, proc.DB)
+	}, time.Now()), nil
+}
+
+// xrefResolveBatch runs xrefResolve for every id of a batched history lookup; an id whose
+// locations all resolve to nothing gets an empty non-nil slice.
+func (proc *Processor) xrefResolveBatch(found map[string][]history.Location, groupName func(id int64) (string, bool), now time.Time) map[string][]nntp.XrefLocation {
+	out := make(map[string][]nntp.XrefLocation, len(found))
+	for id, locs := range found {
+		resolved := proc.xrefResolve(locs, groupName, now)
+		if resolved == nil {
+			resolved = []nntp.XrefLocation{}
+		}
+		out[id] = resolved
+	}
+	return out
+}
+
+// xrefResolve maps history locations to group names with groupName (the ID cache in
+// XrefLocations), skipping numbers <= 0, unknown IDs and IDs in the negative cache at now.
+func (proc *Processor) xrefResolve(locs []history.Location, groupName func(id int64) (string, bool), now time.Time) []nntp.XrefLocation {
+	var out []nntp.XrefLocation
+	for _, l := range locs {
+		if l.ArticleNum <= 0 || proc.xrefMiss.known(l.GroupID, now) {
+			continue
+		}
+		name, exists := groupName(l.GroupID)
+		if !exists || name == "" {
+			proc.xrefMiss.add(l.GroupID, now)
+			continue
+		}
+		out = append(out, nntp.XrefLocation{Group: name, ArticleNum: l.ArticleNum})
+	}
+	return out
+}
+
+// findArticleInGroup returns the article from one newsgroup DB or nil
+func (proc *Processor) findArticleInGroup(messageID, groupName string) *models.Article {
+	groupDB, err := proc.DB.GetGroupDB(groupName)
+	if err != nil || groupDB == nil {
+		return nil
+	}
+	defer groupDB.Return()
+	article, err := proc.DB.GetArticleByMessageID(groupDB, messageID)
+	if err != nil {
+		return nil
+	}
+	return article
+}
+
 // ProcessIncomingArticle processes an incoming article and stores it in the database
 func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, error) {
 	if article == nil {
@@ -276,7 +403,163 @@ func (proc *Processor) ProcessIncomingArticle(article *models.Article) (int, err
 		article.MessageID, *article.NewsgroupsPtr[0], len(article.NewsgroupsPtr))
 
 	bulkmode := false
-	return proc.processArticle(article, *article.NewsgroupsPtr[0], bulkmode)
+	return proc.ProcessArticle(article, *article.NewsgroupsPtr[0], bulkmode)
+}
+
+// postWaitCommitted is the commit barrier of ProcessPostedArticle (a seam for tests).
+var postWaitCommitted = func(sq *database.SQ3batch, m database.CommitMark, stop <-chan struct{}, d time.Duration) error {
+	return sq.WaitCommitted(m, stop, d)
+}
+
+// postArticleStored reports whether the group database of group stores messageID; it is
+// the authoritative check of ProcessPostedArticle (a seam for tests).
+var postArticleStored = func(proc *Processor, group, messageID string) (bool, error) {
+	groupDB, err := proc.DB.GetGroupDB(group)
+	if err != nil {
+		if groupDB != nil {
+			groupDB.Return()
+		}
+		return false, err
+	}
+	defer groupDB.Return()
+	return groupDB.LookupMsgIdInArticlesDB(messageID)
+}
+
+// postRecheckDelay is the pause before ProcessPostedArticle waits again for a group whose
+// barrier was satisfied while the row is still absent, so such a round cannot spin.
+const postRecheckDelay = 50 * time.Millisecond
+
+// ProcessPostedArticle is ProcessIncomingArticle for POST (plan post-430-window): when the
+// article was accepted (CasePass) it waits until the article's row is in every group
+// database it was captured for, at most timeout in total (<= 0: no wait and no lookups;
+// the article is still stored).
+//
+// A commit mark is taken for every name in article.NewsgroupsPtr before ProcessArticle,
+// which counts the capture synchronously (NoteCaptured). After it returned, NewsgroupsPtr
+// holds exactly the groups the article was captured for minus those whose batch already
+// committed it (the batch writer removes a group only on commit, never on a drop), so only
+// those groups are waited for. The barrier counts per group, not per article (other
+// articles of the group can satisfy or fail it), so after every WaitCommitted that returns
+// nil or ErrBatchDropped the row decides: present → the group is done; absent after nil →
+// wait again with a fresh mark until the shared deadline; absent after ErrBatchDropped →
+// CaseError wrapping common.ErrIntakeRejected ("not stored"). A timeout or a stop with rows
+// still absent → CasePass (the article is queued and will be stored) plus one [INTAKE] log
+// line. A failed row lookup counts as absent for that round.
+func (proc *Processor) ProcessPostedArticle(article *models.Article, stop <-chan struct{}, timeout time.Duration) (int, error) {
+	if article == nil {
+		return history.CaseError, fmt.Errorf("null article")
+	}
+	if len(article.NewsgroupsPtr) == 0 {
+		return history.CaseError, fmt.Errorf("no newsgroups specified in article")
+	}
+
+	// Copy what is needed after ProcessArticle: once it returns, the batch goroutine may
+	// already have cleared the struct (db_batch.go processNewsgroupBatch).
+	messageID := article.MessageID
+	var sq *database.SQ3batch
+	if proc.DB != nil {
+		sq = proc.DB.Batch
+	}
+	var marks map[string]database.CommitMark
+	if timeout > 0 {
+		marks = make(map[string]database.CommitMark, len(article.NewsgroupsPtr))
+		for _, ng := range article.NewsgroupsPtr {
+			if ng != nil {
+				marks[*ng] = sq.CommitMark(*ng)
+			}
+		}
+	}
+
+	log.Printf("Processing incoming article with Message-ID: %s for primary newsgroup %s (cross-posted to %d groups)",
+		messageID, *article.NewsgroupsPtr[0], len(article.NewsgroupsPtr))
+
+	bulkmode := false
+	code, err := proc.ProcessArticle(article, *article.NewsgroupsPtr[0], bulkmode)
+	if code != history.CasePass || err != nil || timeout <= 0 {
+		return code, err
+	}
+
+	// the groups still waiting for their commit (see above); the batch writer edits
+	// NewsgroupsPtr under article.Mux
+	article.Mux.Lock()
+	captured := make([]string, 0, len(article.NewsgroupsPtr))
+	for _, ng := range article.NewsgroupsPtr {
+		if ng != nil {
+			captured = append(captured, *ng)
+		}
+	}
+	article.Mux.Unlock()
+
+	// all groups share one deadline: the whole wait never exceeds timeout
+	deadline := time.Now().Add(timeout)
+	notConfirmed := func(werr error) (int, error) {
+		log.Printf("[INTAKE] POST %s: commit not confirmed within %s: %v", messageID, timeout, werr)
+		return history.CasePass, nil
+	}
+	lookupLogged := false
+	for _, group := range captured {
+		m, ok := marks[group]
+		if !ok {
+			m = sq.CommitMark(group)
+		}
+		for round := 0; ; round++ {
+			if round > 0 {
+				if werr := postRecheckPause(stop, deadline); werr != nil {
+					return notConfirmed(fmt.Errorf("'%s': %w", group, werr))
+				}
+				m = sq.CommitMark(group)
+			}
+			var werr error
+			if remaining := time.Until(deadline); remaining > 0 {
+				werr = postWaitCommitted(sq, m, stop, remaining)
+			} else {
+				werr = fmt.Errorf("%w: '%s': no time left", database.ErrBatchWaitTimeout, group)
+			}
+			dropped := errors.Is(werr, database.ErrBatchDropped)
+			if werr != nil && !dropped {
+				// ErrBatchWaitTimeout or ErrBatchWaitStopped
+				return notConfirmed(werr)
+			}
+			stored, lerr := postArticleStored(proc, group, messageID)
+			if lerr != nil {
+				if !lookupLogged {
+					log.Printf("[INTAKE] POST %s: row lookup in '%s' failed (counted as not stored yet): %v", messageID, group, lerr)
+					lookupLogged = true
+				}
+				stored = false
+			}
+			if stored {
+				break
+			}
+			if dropped {
+				log.Printf("[INTAKE] POST %s: not stored in '%s': %v", messageID, group, werr)
+				return history.CaseError, fmt.Errorf("%w: not stored", common.ErrIntakeRejected)
+			}
+		}
+	}
+	return history.CasePass, nil
+}
+
+// postRecheckPause waits postRecheckDelay (at most until deadline) before another round of
+// ProcessPostedArticle. It returns an error wrapping ErrBatchWaitTimeout when the deadline
+// passed and ErrBatchWaitStopped when stop was closed.
+func postRecheckPause(stop <-chan struct{}, deadline time.Time) error {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return fmt.Errorf("%w: no time left", database.ErrBatchWaitTimeout)
+	}
+	pause := min(postRecheckDelay, remaining)
+	timer := time.NewTimer(pause)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		if pause < postRecheckDelay {
+			return fmt.Errorf("%w: no time left", database.ErrBatchWaitTimeout)
+		}
+		return nil
+	case <-stop:
+		return database.ErrBatchWaitStopped
+	}
 }
 
 // EnableBridges enables Fediverse and/or Matrix bridges with the given configuration

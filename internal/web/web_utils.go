@@ -2,7 +2,6 @@
 package web
 
 import (
-	"html/template"
 	"log"
 	"net/http"
 	"time"
@@ -24,8 +23,6 @@ import (
 //   Returns the NNTP TLS port
 // - func (s *WebServer) getBaseTemplateData(c *gin.Context, title string) TemplateData (line ~255)
 //   Creates base template data used by all page handlers
-// - func (s *WebServer) isAdminUser(user *models.User) bool (line ~279)
-//   Checks if a user has admin privileges
 // - func (s *WebServer) renderError(c *gin.Context, statusCode int, message string, errstring string) (line ~1280)
 //   Renders error pages with consistent formatting
 // - func (s *WebServer) renderTemplate(c *gin.Context, templateName string, data interface{}) (line ~1308)
@@ -88,7 +85,7 @@ func (s *WebServer) getBaseTemplateData(c *gin.Context, title string) TemplateDa
 	}
 
 	data := TemplateData{
-		Title:               template.HTML(title),
+		Title:               title,
 		CurrentTime:         time.Now().Format("2006-01-02 15:04:05"),
 		Port:                s.GetPort(),
 		NNTPtcpPort:         s.NNTPGetTCPPort(),
@@ -104,30 +101,49 @@ func (s *WebServer) getBaseTemplateData(c *gin.Context, title string) TemplateDa
 	// Add user information if logged in
 	if session := s.getWebSession(c); session != nil {
 		data.User = session.User
-		// Check if user is admin
-		if userModel, err := s.DB.GetUserByID(session.UserID); err == nil {
-			data.IsAdmin = s.isAdminUser(userModel)
-		}
+		data.IsAdmin = s.isAdminRequest(c)
 	}
 
 	return data
 }
 
-// isAdminUser checks if a user has admin permissions (helper for base template)
-func (s *WebServer) isAdminUser(user *models.User) bool {
-	if user.ID == 1 {
-		return true
-	}
-	permissions, err := s.DB.GetUserPermissions(user.ID)
-	if err != nil {
+// requireAdminAuth checks authentication and admin permissions for admin handlers
+// Returns true if authorized, false if not (and handles the redirect)
+func (s *WebServer) requireAdminAuth(c *gin.Context) bool {
+	// Check authentication
+	session := s.getWebSession(c)
+	if session == nil {
+		c.Redirect(http.StatusSeeOther, "/login")
 		return false
 	}
-	for _, perm := range permissions {
-		if perm.Permission == "admin" {
-			return true
-		}
+
+	// Check admin permissions
+	if !s.isAdminRequest(c) {
+		session.SetError("Access denied")
+		c.Redirect(http.StatusSeeOther, "/profile")
+		return false
 	}
-	return false
+
+	return true
+}
+
+// requireAdminAuthJSON checks authentication and admin permissions for JSON API handlers
+// Returns true if authorized, false if not (and handles the JSON error response)
+func (s *WebServer) requireAdminAuthJSON(c *gin.Context) bool {
+	// Check authentication
+	session := s.getWebSession(c)
+	if session == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
+		return false
+	}
+
+	// Check admin permissions
+	if !s.isAdminRequest(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Admin access required"})
+		return false
+	}
+
+	return true
 }
 
 // renderError renders an error page
@@ -143,27 +159,17 @@ func (s *WebServer) renderError(c *gin.Context, statusCode int, message string, 
 	}
 	log.Printf("[ERROR]:internal/web/server.go: Error %d: %s - %s", statusCode, message, errstring)
 
-	// Load template individually to avoid engine setup issues
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/error.html"))
-	c.Header("Content-Type", "text/html")
-	c.Status(statusCode)
-	err := tmpl.ExecuteTemplate(c.Writer, "base.html", errorData)
-	if err != nil {
-		log.Printf("Error rendering error template: %v", err)
+	// Render the error page directly (not via renderPage): if its own template set fails,
+	// fall back to plain text instead of recursing into renderError.
+	if err := writeTemplateSet(c, statusCode, "page", nil, "base.html", errorData, "base.html", "error.html"); err != nil {
+		log.Printf("[WEB]: Error rendering error template: %v", err)
 		c.String(statusCode, "Error: %s - %s", message, errstring)
 	}
 }
 
 // renderTemplate renders a template with base template data
 func (s *WebServer) renderTemplate(c *gin.Context, templateName string, data interface{}) {
-	// Load template individually to avoid engine setup issues
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/"+templateName))
-	c.Header("Content-Type", "text/html")
-	err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		log.Printf("Error rendering template %s: %v", templateName, err)
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, templateName)
 }
 
 // GetGroupCount returns the total number of active newsgroups

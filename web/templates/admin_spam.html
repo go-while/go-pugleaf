@@ -20,7 +20,7 @@
             <table class="table table-hover table-sm">
                 <thead class="table-dark">
                     <tr>
-                        <th scope="col" style="width: 10%">Article #</th>
+                        <th scope="col" style="width: 10%">Newsgroup</th>
                         <th scope="col" style="width: 40%">Subject</th>
                         <th scope="col" style="width: 20%">From</th>
                         <th scope="col" style="width: 10%">Date</th>
@@ -32,7 +32,7 @@
                     {{range .SpamArticles}}
                     <tr id="spam-article-{{.ArticleNum}}">
                         <td class="align-middle">
-                            <span class="badge bg-primary">#{{.ArticleNum}}</span>
+                            <span class="badge bg-primary">{{.GroupName}}#{{.ArticleNum}}</span>
                         </td>
                         <td class="align-middle">
                             <div class="text-truncate" style="max-width: 400px;" title="{{.PrintSanitized "subject" .GroupName}}">

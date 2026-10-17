@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,43 +13,49 @@ import (
 )
 
 // countAdminUsers counts how many users have admin permissions
-func (s *WebServer) countAdminUsers(users []*models.User) int {
-	count := 0
+func (s *WebServer) countAdminUsers(users []*models.User) (count int64) {
 	for _, user := range users {
 		if s.isAdmin(user) {
 			count++
 		}
 	}
-	return count
+	return
 }
 
 // countActiveSessions returns the number of active sessions (placeholder)
-func (s *WebServer) countActiveSessions() int {
+func (s *WebServer) countActiveSessions() int64 {
 	// TODO: Implement actual session counting
 	return 0
 }
 
 // adminCreateUser handles user creation
 func (s *WebServer) adminCreateUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get form data
+	var err error
 	username := strings.TrimSpace(c.PostForm("username"))
 	email := strings.TrimSpace(c.PostForm("email"))
 	displayName := strings.TrimSpace(c.PostForm("displayName"))
 	password := c.PostForm("password")
+
+	// Get checkbox values (checkboxes not present = 0, present = 1)
+	verified := 0
+	if c.PostForm("verified") == "on" {
+		verified = 1
+	}
+	disabled := 0
+	if c.PostForm("disabled") == "on" {
+		disabled = 1
+	}
+	noPosting := 0
+	if c.PostForm("no_posting") == "on" {
+		noPosting = 1
+	}
 
 	// Validate input
 	if username == "" || email == "" || password == "" {
@@ -57,8 +64,14 @@ func (s *WebServer) adminCreateUser(c *gin.Context) {
 		return
 	}
 
-	if len(password) < 6 {
-		session.SetError("Password must be at least 6 characters")
+	if err := validatePassword(password); err != nil {
+		session.SetError(err.Error())
+		c.Redirect(http.StatusSeeOther, "/admin?tab=users")
+		return
+	}
+
+	if err := validateDisplayName(displayName); err != nil {
+		session.SetError(err.Error())
 		c.Redirect(http.StatusSeeOther, "/admin?tab=users")
 		return
 	}
@@ -93,6 +106,10 @@ func (s *WebServer) adminCreateUser(c *gin.Context) {
 		Email:        email,
 		DisplayName:  displayName,
 		PasswordHash: hashedPassword,
+		Verified:     verified,
+		Disabled:     disabled,
+		NoPosting:    noPosting,
+		PostCount:    0,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -126,19 +143,11 @@ func (s *WebServer) adminCreateUser(c *gin.Context) {
 
 // adminUpdateUser handles user updates
 func (s *WebServer) adminUpdateUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get user ID
 	userIDStr := c.PostForm("user_id")
@@ -152,6 +161,20 @@ func (s *WebServer) adminUpdateUser(c *gin.Context) {
 	// Get form data
 	email := strings.TrimSpace(c.PostForm("email"))
 
+	// Get checkbox values (checkboxes not present = 0, present = 1)
+	verified := 0
+	if c.PostForm("verified") == "1" {
+		verified = 1
+	}
+	disabled := 0
+	if c.PostForm("disabled") == "1" {
+		disabled = 1
+	}
+	noPosting := 0
+	if c.PostForm("no_posting") == "1" {
+		noPosting = 1
+	}
+
 	// Validate input
 	if email == "" {
 		session.SetError("Email is required")
@@ -162,29 +185,72 @@ func (s *WebServer) adminUpdateUser(c *gin.Context) {
 	// Update email
 	err = s.DB.UpdateUserEmail(userID, email)
 	if err != nil {
-		session.SetError("Failed to update user")
+		session.SetError("Failed to update user email")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=users")
+		return
+	}
+
+	// Update user status fields
+	err = s.DB.UpdateUserStatus(userID, verified, disabled, noPosting)
+	if err != nil {
+		session.SetError("Failed to update user status")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=users")
 		return
 	}
 
 	// Update display name (we need to add this method)
 	// For now, just update email
+
+	// Handle NNTP user updates if NNTP ID is provided
+	nntpIDStr := strings.TrimSpace(c.PostForm("nntp_id"))
+	if nntpIDStr != "" {
+		nntpID, err := strconv.Atoi(nntpIDStr)
+		if err == nil {
+			// Update NNTP user permissions
+			nntpMaxConnsStr := strings.TrimSpace(c.PostForm("nntp_maxconns"))
+			nntpPosting := c.PostForm("nntp_posting") == "on"
+			nntpPassword := strings.TrimSpace(c.PostForm("nntp_password"))
+
+			// Update NNTP permissions
+			if nntpMaxConnsStr != "" {
+				if parsed, err := strconv.Atoi(nntpMaxConnsStr); err == nil && parsed >= 1 && parsed <= 10 {
+					err = s.DB.UpdateNNTPUserPermissions(nntpID, parsed, nntpPosting)
+					if err != nil {
+						log.Printf("Error updating NNTP user permissions: %v", err)
+						session.SetError("Failed to update NNTP user permissions")
+						c.Redirect(http.StatusSeeOther, "/admin?tab=users")
+						return
+					}
+				}
+			}
+
+			// Update NNTP password if provided
+			if nntpPassword != "" {
+				err = s.DB.UpdateNNTPUserPassword(nntpID, nntpPassword)
+				if err != nil {
+					log.Printf("Error updating NNTP user password: %v", err)
+					session.SetError("Failed to update NNTP user password")
+					c.Redirect(http.StatusSeeOther, "/admin?tab=users")
+					return
+				}
+			}
+		}
+	}
+
 	session.SetSuccess("User updated successfully")
 	c.Redirect(http.StatusSeeOther, "/admin?tab=users")
 }
 
 // adminDeleteUser handles user deletion
 func (s *WebServer) adminDeleteUser(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
+	session := s.getWebSession(c)
 	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
+	if err != nil {
+		session.SetError("Failed to load user")
 		c.Redirect(http.StatusSeeOther, "/profile")
 		return
 	}

@@ -1,3 +1,25 @@
+# active_files/hierarchies
+
+One `<hierarchy>.active` file per Usenet hierarchy (active-file lines: `group high low status`), split from
+`active_files/active.2025-06` (not in the repo). 278 files: 277 hierarchies with groups plus `unknown.active`
+(groups that match no hierarchy). The hierarchy names (450) come from
+`internal/database/migrations/0003_main_create_hierarchies.sql`; a group goes to the longest matching name, so
+`alt.binaries.*` lands in `alt.binaries.active`, not in `alt.active`.
+
+Regenerate from the repo root with the Go tool (defaults shown):
+
+```
+go run ./cmd/extract_hierarchies -active active_files/active.2025-06 -out active_files/hierarchies
+```
+
+It overwrites the files it writes but does not delete stale ones, and it does not update this list.
+`active_files/extract_hierarchies.sh` is an older, hardcoded variant (88 names, run inside `active_files/`); it
+does not produce this layout. `themed/` holds copies grouped by category, made by `organize_by_theme.sh`
+(`themed/INDEX.md`, one `README.md` per category).
+
+Group counts per file (`wc -l *.active | sort -n`):
+
+```
       1 bbc.active
       1 boston.active
       1 c.active
@@ -277,3 +299,4 @@
   24153 alt.active
   35416 unknown.active
  117336 total
+```

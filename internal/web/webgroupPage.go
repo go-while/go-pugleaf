@@ -2,7 +2,8 @@
 package web
 
 import (
-	"html/template"
+	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"net/url"
@@ -37,7 +38,7 @@ func (s *WebServer) groupPage(c *gin.Context) {
 
 	if p := c.Query("page"); p != "" && p != "1" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 1 {
-			page = parsed
+			page = clampOffsetPage(parsed, LIMIT_groupPage, maxOffsetArticles)
 		}
 	}
 	// Check for cursor parameter (more efficient than page-based)
@@ -49,9 +50,9 @@ func (s *WebServer) groupPage(c *gin.Context) {
 	}
 
 	// Try to get group overview with pagination
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
-		// Handle error case - groupDBs is nil, so don't try to return it
+		// Handle error case - groupDB is nil, so don't try to return it
 		data := GroupPageData{
 			TemplateData: s.getBaseTemplateData(c, groupName),
 			GroupName:    groupName,
@@ -59,21 +60,14 @@ func (s *WebServer) groupPage(c *gin.Context) {
 			Articles:     nil,
 			Pagination:   nil,
 		}
-		// Load template individually to avoid conflicts
-		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/group.html", "web/templates/pagination.html"))
-		c.Header("Content-Type", "text/html")
-		err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-		if err != nil {
-			s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		}
+		s.renderPage(c, http.StatusOK, data, "group.html", "pagination.html")
 		return
 	}
-	defer groupDBs.Return(s.DB) // Only defer if groupDBs is not nil
+	defer groupDB.Return() // Only defer if groupDB is not nil
 
 	var articles []*models.Overview
 	var totalCount int
 	var pagination *models.PaginationInfo
-	var hasMore bool
 
 	// Use cursor-based pagination for better performance
 	if page > 1 && lastArticleNum == 0 {
@@ -87,59 +81,62 @@ func (s *WebServer) groupPage(c *gin.Context) {
 
 		// Get the article_num at the skip position by querying with OFFSET once
 		var cursorArticleNum int64
-		err = database.RetryableQueryRowScan(groupDBs.DB, `
+		err = database.RetryableQueryRowScan(groupDB.DB, `
 			SELECT article_num FROM articles
 			WHERE hide = 0
 			ORDER BY article_num DESC
 			LIMIT 1 OFFSET ?`, []interface{}{skipCount - 1}, &cursorArticleNum)
 		if err != nil {
+			// No row at that offset (a page past the real end) or a failed read: serve
+			// the newest page and label it page 1: PaginationInfo is built from page below,
+			// and keeping the requested number would label page 1 as "Page 50" (FU:E17).
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("[WEB]: groupPage: page %d cursor lookup in %s: %v", page, groupName, err)
+			}
 			lastArticleNum = 0 // Fall back to first page
+			page = 1
 		} else {
 			lastArticleNum = cursorArticleNum
 		}
 	}
 
-	articles, totalCount, hasMore, err = s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, LIMIT_groupPage)
+	articles, totalCount, _, err = s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_groupPage)
 	if err == nil {
 		// Initialize ArticleNums for all articles
 		for _, article := range articles {
 			if article.ArticleNums == nil {
 				article.ArticleNums = make(map[*string]int64)
 			}
-			article.ArticleNums[groupDBs.NewsgroupPtr] = article.ArticleNum
+			article.ArticleNums[groupDB.NewsgroupPtr] = article.ArticleNum
 		}
 
 		if page > 0 {
-			// Page-based pagination info
-			pagination = models.NewPaginationInfo(page, LIMIT_groupPage, totalCount)
+			// Page-based pagination info. maxOffsetArticles is the same bound the clamp
+			// above applies, so the template links no page the clamp would rewrite (D1).
+			pagination = models.NewPaginationInfo(page, LIMIT_groupPage, totalCount, maxOffsetArticles)
 		} else {
 			// Cursor-based pagination - create a simple pagination info
 			pagination = &models.PaginationInfo{
-				CurrentPage: 1,
-				PageSize:    LIMIT_groupPage,
-				TotalCount:  totalCount,
-				TotalPages:  (totalCount + LIMIT_groupPage - 1) / LIMIT_groupPage,
-				HasNext:     hasMore,
-				HasPrev:     lastArticleNum > 0,
+				CurrentPage:   1,
+				PageSize:      LIMIT_groupPage,
+				TotalCount:    totalCount,
+				TotalPages:    (totalCount + LIMIT_groupPage - 1) / LIMIT_groupPage,
+				LinkablePages: maxOffsetArticles/LIMIT_groupPage + 1,
+				// cursor mode has no linkable neighbours (FU:E12, D15)
+				HasNext: false,
+				HasPrev: false,
 			}
 		}
 	}
 	data := GroupPageData{
 		TemplateData: s.getBaseTemplateData(c, groupName),
 		GroupName:    groupName,
-		GroupPtr:     groupDBs.NewsgroupPtr,
+		GroupPtr:     groupDB.NewsgroupPtr,
 		Articles:     articles,
 		Pagination:   pagination,
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/group.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "group.html", "pagination.html")
 }
 
 func (s *WebServer) incrementSpam(c *gin.Context) {
@@ -166,13 +163,27 @@ func (s *WebServer) incrementSpam(c *gin.Context) {
 		return
 	}
 
-	// Check if user has already flagged this article
-	alreadyFlagged, err := s.DB.HasUserFlaggedSpam(user.ID, group, articleNum)
+	// Non-admins may only flag articles in existing, active groups
+	// (FlagArticleSpamByUser opens the group DB, which creates it for unknown names).
+	if !s.isAdmin(user) {
+		if ng, err := s.DB.GetActiveNewsgroupByName(group); err != nil || ng == nil {
+			session.SetError("The requested newsgroup does not exist or is not active")
+			c.Redirect(http.StatusSeeOther, "/groups")
+			return
+		}
+	}
+
+	// Record the flag and increment the spam counter once per user (atomic)
+	flagged, err := s.DB.FlagArticleSpamByUser(user.ID, group, articleNum)
 	if err != nil {
-		log.Printf("Error checking user spam flag: %v", err)
-		// Continue anyway - don't block the user
-	} else if alreadyFlagged {
-		log.Printf("DEBUG: User %d already flagged article %d in group %s", user.ID, articleNum, group)
+		log.Printf("[WEB]: Error flagging spam group=%s article=%d user=%d: %v", group, articleNum, user.ID, err)
+		if errors.Is(err, database.ErrArticleNotFound) {
+			session.SetError("Article not found")
+		} else {
+			session.SetError("Could not flag article")
+		}
+	} else if !flagged {
+		log.Printf("[WEB]: User %d already flagged article %d in group %s", user.ID, articleNum, group)
 		// Redirect without incrementing
 		referer := c.GetHeader("Referer")
 		if strings.Contains(referer, "/admin") {
@@ -183,22 +194,6 @@ func (s *WebServer) incrementSpam(c *gin.Context) {
 			c.Redirect(http.StatusSeeOther, "/groups/"+group)
 		}
 		return
-	}
-
-	// Update spam counter in database
-	log.Printf("DEBUG: Incrementing spam for group=%s, articleNum=%d", group, articleNum)
-	err = s.DB.IncrementArticleSpam(group, articleNum)
-	if err != nil {
-		log.Printf("Error incrementing spam count: %v", err)
-	} else {
-		log.Printf("DEBUG: Successfully incremented spam count for article %d", articleNum)
-
-		// Record that this user has flagged this article
-		err = s.DB.RecordUserSpamFlag(user.ID, group, articleNum)
-		if err != nil {
-			log.Printf("Error recording user spam flag: %v", err)
-			// Don't fail the operation if we can't record the flag
-		}
 	}
 
 	// Check referer to determine redirect location and preserve pagination

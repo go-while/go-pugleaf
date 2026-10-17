@@ -2,16 +2,22 @@
 package main
 
 import (
+	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -35,6 +41,9 @@ func showUsageExamples() {
 	fmt.Println("  -batch-size: Number of articles to process per batch (default: 1000)")
 	fmt.Println("  -respect-expiry: Honor per-group expiry_days settings from database")
 	fmt.Println("  -prune: Remove oldest articles to respect max_articles limit per group")
+	fmt.Println("  -trim-history: Also remove deleted articles from the message-id history index")
+	fmt.Println("                 (default: history entries are kept, so expired articles are still")
+	fmt.Println("                 rejected as duplicates when offered again)")
 	fmt.Println()
 	fmt.Println("Safety Features:")
 	fmt.Println("  - Always runs in dry-run mode first unless -force is specified")
@@ -59,6 +68,9 @@ func showUsageExamples() {
 	fmt.Println("  # Combine expiry and pruning")
 	fmt.Println("  ./expire-news -group '$all' -days 30 -prune -force")
 	fmt.Println()
+	fmt.Println("  # Expire and forget the message-ids of deleted articles in the history index")
+	fmt.Println("  ./expire-news -group '$all' -days 30 -force -trim-history")
+	fmt.Println()
 }
 
 func main() {
@@ -74,7 +86,9 @@ func main() {
 		batchSize     = flag.Int("batch-size", 1000, "Number of articles to process per batch")
 		respectExpiry = flag.Bool("respect-expiry", false, "Use per-group expiry_days settings from database")
 		prune         = flag.Bool("prune", false, "Remove oldest articles to respect max_articles limit per group")
+		trimHistory   = flag.Bool("trim-history", false, "Remove deleted articles from the history index (default: keep history entries)")
 		showHelp      = flag.Bool("help", false, "Show usage examples and exit")
+		dataDir       = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
 
@@ -103,28 +117,47 @@ func main() {
 	}
 
 	// Initialize database
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer func() {
-		if err := db.Shutdown(); err != nil {
-			log.Printf("Failed to shutdown database: %v", err)
+
+	// History index: only opened for -trim-history in live mode
+	var hist *history.History
+	if *trimHistory && *dryRun {
+		log.Printf("DRY RUN MODE: -trim-history has no effect")
+	}
+	if *trimHistory && !*dryRun {
+		history.ENABLE_HISTORY = true
+		hcfg := history.DefaultConfig()
+		hcfg.HistoryDir = filepath.Join(*dataDir, "history")
+		hist, err = history.NewHistory(hcfg, db.WG)
+		if err != nil {
+			log.Printf("Failed to open history: %v", err)
+			shutdown(db, nil)
+			os.Exit(1)
 		}
-	}()
+		log.Printf("TRIM HISTORY: deleted articles will be removed from the history index")
+	}
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	// Get newsgroups to process
 	newsgroups, err := getNewsgroupsToExpire(db, *targetGroup)
 	if err != nil {
-		log.Fatalf("Failed to get newsgroups: %v", err)
+		log.Printf("Failed to get newsgroups: %v", err)
+		shutdown(db, hist)
+		os.Exit(1)
 	}
 
 	if len(newsgroups) == 0 {
 		log.Printf("No newsgroups found matching pattern: %s", *targetGroup)
+		shutdown(db, hist)
 		return
 	}
 
@@ -145,13 +178,30 @@ func main() {
 	// Process each newsgroup
 	totalExpired := 0
 	totalScanned := 0
+	errorCount := 0
+	interrupted := false
 
+groupLoop:
 	for i, ng := range newsgroups {
 		select {
 		case <-sigChan:
 			log.Printf("Received shutdown signal, stopping...")
-			return
+			interrupted = true
+			break groupLoop
 		default:
+		}
+
+		// history trimming needs the main DB newsgroup ID
+		var trim historyTrim // hist stays a nil interface without -trim-history
+		if hist != nil {
+			trim.hist = hist
+			mng, err := db.MainDBGetNewsgroup(ng.Name)
+			if err != nil || mng.ID <= 0 {
+				log.Printf("Error: can not resolve newsgroup ID of %s for -trim-history, skipping group: %v", ng.Name, err)
+				errorCount++
+				continue
+			}
+			trim.groupID = mng.ID
 		}
 
 		// Determine what operations to perform
@@ -181,9 +231,10 @@ func main() {
 				log.Printf("Expiring articles older than: %s", cutoffDate.Format("2006-01-02 15:04:05"))
 
 				// Expire articles in this group
-				expired, scanned, err := expireArticlesInGroup(db, ng.Name, cutoffDate, *batchSize, *dryRun)
+				expired, scanned, err := expireArticlesInGroup(db, ng.Name, cutoffDate, *batchSize, *dryRun, trim)
 				if err != nil {
 					log.Printf("Error expiring articles in %s: %v", ng.Name, err)
+					errorCount++
 					continue
 				}
 
@@ -197,9 +248,10 @@ func main() {
 		if *prune && ng.MaxArticles > 0 {
 			log.Printf("Pruning %s to max %d articles", ng.Name, ng.MaxArticles)
 
-			pruned, scanned, err := pruneArticlesInGroup(db, ng.Name, ng.MaxArticles, *batchSize, *dryRun)
+			pruned, scanned, err := pruneArticlesInGroup(db, ng.Name, ng.MaxArticles, *batchSize, *dryRun, trim)
 			if err != nil {
 				log.Printf("Error pruning articles in %s: %v", ng.Name, err)
+				errorCount++
 				continue
 			}
 
@@ -243,6 +295,66 @@ func main() {
 		log.Printf("Processed %d articles total (scanned %d articles)", totalExpired, totalScanned)
 		log.Printf("Database counters have been updated for affected newsgroups")
 	}
+	if interrupted {
+		log.Printf("Interrupted by shutdown signal")
+	}
+
+	if !shutdown(db, hist) {
+		errorCount++
+	}
+	if errorCount > 0 {
+		log.Printf("Completed with %d errors", errorCount)
+		os.Exit(1)
+	}
+	if interrupted {
+		os.Exit(130)
+	}
+}
+
+var shutdownOnce sync.Once
+
+// shutdown closes the history index (flushes queued removals) and then the database.
+// OpenDatabase adds the batch orchestrators to db.WG, so StopChan must be closed and WG waited for.
+func shutdown(db *database.Database, hist *history.History) (ok bool) {
+	ok = true
+	shutdownOnce.Do(func() {
+		if hist != nil {
+			if err := hist.Close(); err != nil {
+				log.Printf("Failed to close history: %v", err)
+				ok = false
+			}
+			hs := hist.GetStats()
+			log.Printf("History closed: removes=%d committed=%d errors=%d", hs.TotalRemoves, hs.TotalCommitted, hs.Errors)
+			if hs.Errors > 0 {
+				ok = false
+			}
+		}
+		close(db.StopChan)
+		db.WG.Wait()
+		if err := db.Shutdown(); err != nil {
+			log.Printf("Failed to shutdown database: %v", err)
+			ok = false
+		}
+	})
+	return ok
+}
+
+// historyRemover is the part of *history.History the history trim uses (tests record the calls)
+type historyRemover interface {
+	RemoveArticleAt(messageID string, groupID, articleNum int64)
+}
+
+// historyTrim carries what deleteArticles needs to remove deleted articles from the history index.
+// hist == nil: history entries are kept (default).
+type historyTrim struct {
+	hist    historyRemover
+	groupID int64
+}
+
+// trimEntry is one deleted article whose history token is removed after the commit
+type trimEntry struct {
+	articleNum int64
+	messageID  string
 }
 
 // getNewsgroupsToExpire returns newsgroups matching the target pattern
@@ -286,41 +398,49 @@ func getNewsgroupsToExpire(db *database.Database, targetGroup string) ([]*models
 		}
 
 	default:
-		// Specific group
-		nga, err := db.GetActiveNewsgroupByName(targetGroup)
+		// Specific group: MainDBGetNewsgroup returns the full row, so ExpiryDays and
+		// MaxArticles are the group's settings (GetActiveNewsgroupByName selects only
+		// id, name, active; A-ops-6).
+		ng, err := db.MainDBGetNewsgroup(targetGroup)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("newsgroup '%s' not found", targetGroup)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to get newsgroup '%s': %v", targetGroup, err)
 		}
-		if nga == nil || !nga.Active {
-			return nil, fmt.Errorf("newsgroup '%s' not found or inactive", targetGroup)
+		if !ng.Active {
+			return nil, fmt.Errorf("newsgroup '%s' is inactive", targetGroup)
 		}
-		newsgroups = append(newsgroups, &models.Newsgroup{
-			Name:       targetGroup,
-			ExpiryDays: nga.ExpiryDays,
-		})
+		newsgroups = append(newsgroups, ng)
 	}
 
 	return newsgroups, nil
 }
 
 // expireArticlesInGroup expires articles older than cutoffDate in the specified group
-func expireArticlesInGroup(db *database.Database, groupName string, cutoffDate time.Time, batchSize int, dryRun bool) (int, int, error) {
+func expireArticlesInGroup(db *database.Database, groupName string, cutoffDate time.Time, batchSize int, dryRun bool, trim historyTrim) (int, int, error) {
 	// Get group database
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get group database: %v", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDB.Return()
 
 	totalExpired := 0
 	totalScanned := 0
+	noDate := 0 // articles without a valid date_sent are never expired by age
 	cutoffTimestamp := cutoffDate.Unix()
-	newsgroupPtr := db.Batch.GetNewsgroupPointer(groupName)
-	// Process articles in batches
-	offset := 0
+	defer func() {
+		if noDate > 0 {
+			log.Printf("  %s: skipped %d articles without a valid date_sent", groupName, noDate)
+		}
+	}()
+	// Process articles in batches using keyset paging on article_num
+	// (OFFSET paging would skip rows because we delete between pages)
+	var lastArticleNum int64 = 0
 	for {
-		// Get batch of articles
-		articles, err := getArticleBatch(groupDBs, offset, batchSize)
+		// Get batch of articles with article_num > lastArticleNum
+		articles, err := getArticleBatch(groupDB, lastArticleNum, batchSize)
 		if err != nil {
 			return totalExpired, totalScanned, fmt.Errorf("failed to get article batch: %v", err)
 		}
@@ -336,30 +456,36 @@ func expireArticlesInGroup(db *database.Database, groupName string, cutoffDate t
 		for _, article := range articles {
 			totalScanned++
 
+			if !article.DateSent.Valid {
+				noDate++
+				continue
+			}
 			// Check if article is older than cutoff (using DateSent instead of PostedAt)
-			if article.DateSent.Unix() < cutoffTimestamp {
+			if article.DateSent.Time.Unix() < cutoffTimestamp {
 				expiredInBatch++
-				articlesToDelete = append(articlesToDelete, article.ArticleNums[newsgroupPtr])
+				articlesToDelete = append(articlesToDelete, article.Num)
 
-				if len(articlesToDelete) > 100 { // Log every 100 deletions
+				if len(articlesToDelete)%100 == 0 { // Log every 100 deletions
 					if dryRun {
-						log.Printf("  Would delete articles up to ID %d...", article.ArticleNums[newsgroupPtr])
+						log.Printf("  Would delete articles up to ID %d...", article.Num)
 					} else {
-						log.Printf("  Deleting articles up to ID %d...", article.ArticleNums[newsgroupPtr])
+						log.Printf("  Deleting articles up to ID %d...", article.Num)
 					}
 				}
 			}
 		}
+		// Rows are ordered by article_num, so the last one is the highest seen
+		lastArticleNum = articles[len(articles)-1].Num
 
 		// Delete articles in this batch if not dry run
 		if !dryRun && len(articlesToDelete) > 0 {
-			if err := deleteArticles(groupDBs, articlesToDelete); err != nil {
+			if err := deleteArticles(groupDB, articlesToDelete, trim); err != nil {
 				return totalExpired, totalScanned, fmt.Errorf("failed to delete articles: %v", err)
 			}
+			cleanupAfterDelete(db, groupName, articlesToDelete)
 		}
 
 		totalExpired += expiredInBatch
-		offset += len(articles)
 
 		// Progress update
 		if totalScanned%10000 == 0 {
@@ -375,48 +501,92 @@ func expireArticlesInGroup(db *database.Database, groupName string, cutoffDate t
 	return totalExpired, totalScanned, nil
 }
 
-// getArticleBatch retrieves a batch of articles from the group database
-func getArticleBatch(groupDBs *database.GroupDBs, offset, limit int) ([]*models.Article, error) {
+// expireCandidate is an article number with its date_sent, used by the age-based expiry scan
+type expireCandidate struct {
+	Num      int64
+	DateSent sql.NullTime // NULL date_sent: Valid == false
+}
+
+// getArticleBatch retrieves up to limit articles with article_num > afterNum from the group database
+func getArticleBatch(groupDB *database.GroupDB, afterNum int64, limit int) ([]expireCandidate, error) {
 	query := `
 		SELECT article_num, date_sent
 		FROM articles
+		WHERE article_num > ?
 		ORDER BY article_num
-		LIMIT ? OFFSET ?
+		LIMIT ?
 	`
 
-	rows, err := database.RetryableQuery(groupDBs.DB, query, limit, offset)
+	rows, err := database.RetryableQuery(groupDB.DB, query, afterNum, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var articles []*models.Article
+	var articles []expireCandidate
 	for rows.Next() {
-		article := &models.Article{}
-		article.ArticleNums = make(map[*string]int64)
-		article.ArticleNums[groupDBs.NewsgroupPtr] = -1 // Initialize with group name
-		err := rows.Scan(article.ArticleNums[groupDBs.NewsgroupPtr], &article.DateSent)
-		if err != nil {
+		var c expireCandidate
+		var dateSent interface{}
+		if err := rows.Scan(&c.Num, &dateSent); err != nil {
 			return nil, err
 		}
-		articles = append(articles, article)
+		c.DateSent = toNullTime(dateSent)
+		articles = append(articles, c)
 	}
 
 	return articles, rows.Err()
 }
 
-// deleteArticles removes articles from the database using proper batch operations
-func deleteArticles(groupDBs *database.GroupDBs, articleNums []int64) error {
+// dateSentLayouts are tried for date_sent values the sqlite driver did not convert to time.Time
+var dateSentLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05",
+	"2006-01-02",
+}
+
+// toNullTime converts a scanned date_sent value. NULL, empty or unparseable values are not Valid.
+func toNullTime(v interface{}) sql.NullTime {
+	var s string
+	switch t := v.(type) {
+	case time.Time:
+		return sql.NullTime{Time: t, Valid: !t.IsZero()}
+	case string:
+		s = t
+	case []byte:
+		s = string(t)
+	case int64:
+		return sql.NullTime{Time: time.Unix(t, 0), Valid: t > 0}
+	default:
+		return sql.NullTime{}
+	}
+	s = strings.TrimSpace(s)
+	for _, layout := range dateSentLayouts {
+		if tm, err := time.Parse(layout, s); err == nil {
+			return sql.NullTime{Time: tm, Valid: !tm.IsZero()}
+		}
+	}
+	return sql.NullTime{}
+}
+
+// deleteArticles removes articles from the database using proper batch operations.
+// With trim.hist set, the message-ids of the deleted articles are removed from the history index
+// after the transaction has been committed.
+func deleteArticles(groupDB *database.GroupDB, articleNums []int64, trim historyTrim) error {
 	if len(articleNums) == 0 {
 		return nil
 	}
 
 	// Begin transaction
-	tx, err := groupDBs.DB.Begin()
+	tx, err := groupDB.DB.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+
+	var trimEntries []trimEntry // only collected with trim.hist
 
 	// Process in chunks to avoid SQLite parameter limits (max ~32k parameters)
 	const maxChunkSize = 5000 // Stay well under SQLite limits
@@ -438,6 +608,14 @@ func deleteArticles(groupDBs *database.GroupDBs, articleNums []int64) error {
 			args[j] = num
 		}
 
+		if trim.hist != nil {
+			entries, err := selectTrimEntries(tx, placeholders, args)
+			if err != nil {
+				return err
+			}
+			trimEntries = append(trimEntries, entries...)
+		}
+
 		// Delete from articles table (main table)
 		query := fmt.Sprintf("DELETE FROM articles WHERE article_num IN (%s)", placeholders)
 		_, err = tx.Exec(query, args...)
@@ -445,13 +623,7 @@ func deleteArticles(groupDBs *database.GroupDBs, articleNums []int64) error {
 			return fmt.Errorf("failed to batch delete articles: %v", err)
 		}
 
-		// Delete from overview table if it exists (might not exist in unified schema)
-		query = fmt.Sprintf("DELETE FROM overview WHERE article_num IN (%s)", placeholders)
-		_, err = tx.Exec(query, args...)
-		if err != nil {
-			// Don't fail if overview table doesn't exist
-			log.Printf("Warning: failed to delete overview batch (table may not exist): %v", err)
-		}
+		// No overview delete: the legacy overview table is gone since the unified schema (migrations/old/).
 
 		// Delete related thread entries using OR conditions for all relationships
 		// This is more complex as we need to check multiple columns
@@ -470,10 +642,83 @@ func deleteArticles(groupDBs *database.GroupDBs, articleNums []int64) error {
 			// Don't fail if threads table doesn't exist
 			log.Printf("Warning: failed to delete thread entries (table may not exist): %v", err)
 		}
+
+		// Thread caches of deleted roots (INT-5): otherwise a new article that got the same
+		// number would inherit them.
+		if err := deleteDerivedThreadRows(tx, placeholders, args); err != nil {
+			return err
+		}
 	}
 
 	// Commit transaction
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if trim.hist != nil {
+		// with the article number the exact "groupID:articleNum" token is removed
+		for _, e := range trimEntries {
+			trim.hist.RemoveArticleAt(e.messageID, trim.groupID, e.articleNum)
+		}
+	}
+	return nil
+}
+
+// derivedThreadTables hold per-thread rows keyed by the thread root's article number. Child
+// tables first: tree_stats references thread_cache.
+var derivedThreadTables = []string{"tree_stats", "cached_trees", "thread_cache"}
+
+// deleteDerivedThreadRows deletes the cached_trees, tree_stats and thread_cache rows whose
+// thread_root is one of the deleted article numbers, inside the delete transaction. A missing
+// table is skipped (older or minimal group databases); any other error fails the delete, so no
+// article goes without its derived rows.
+func deleteDerivedThreadRows(tx *sql.Tx, placeholders string, args []interface{}) error {
+	for _, table := range derivedThreadTables {
+		query := fmt.Sprintf("DELETE FROM %s WHERE thread_root IN (%s)", table, placeholders)
+		if _, err := tx.Exec(query, args...); err != nil {
+			if strings.Contains(err.Error(), "no such table") {
+				continue
+			}
+			return fmt.Errorf("failed to delete %s rows: %v", table, err)
+		}
+	}
+	return nil
+}
+
+// cleanupAfterDelete removes what the main database and the article cache still hold for the
+// deleted article numbers of groupName (INT-5): the main-DB spam/user_spam_flags rows and the
+// cached bodies. Errors are logged, the expiry goes on.
+func cleanupAfterDelete(db *database.Database, groupName string, articleNums []int64) {
+	if err := db.DeleteSpamRowsForArticles(groupName, articleNums); err != nil {
+		log.Printf("Warning: %s: failed to delete spam flags of %d deleted articles: %v", groupName, len(articleNums), err)
+	}
+	if db.ArticleCache != nil {
+		db.ArticleCache.ClearGroup(groupName)
+	}
+}
+
+// selectTrimEntries returns the article numbers and message-ids of the articles in one delete chunk
+// (inside the delete transaction)
+func selectTrimEntries(tx *sql.Tx, placeholders string, args []interface{}) ([]trimEntry, error) {
+	rows, err := tx.Query(fmt.Sprintf("SELECT article_num, message_id FROM articles WHERE article_num IN (%s)", placeholders), args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to select message-ids: %v", err)
+	}
+	defer rows.Close()
+	var entries []trimEntry
+	for rows.Next() {
+		var num int64
+		var messageID sql.NullString
+		if err := rows.Scan(&num, &messageID); err != nil {
+			return nil, fmt.Errorf("failed to scan message-id: %v", err)
+		}
+		if messageID.Valid && messageID.String != "" {
+			entries = append(entries, trimEntry{articleNum: num, messageID: messageID.String})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read message-ids: %v", err)
+	}
+	return entries, nil
 }
 
 // getPlaceholders returns a comma-separated string of SQL placeholders (?) for the given count
@@ -489,17 +734,17 @@ func getPlaceholders(count int) string {
 }
 
 // pruneArticlesInGroup removes oldest articles to keep the group under maxArticles limit
-func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles int, batchSize int, dryRun bool) (int, int, error) {
+func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles int, batchSize int, dryRun bool, trim historyTrim) (int, int, error) {
 	// Get group database
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get group database: %v", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDB.Return()
 
 	// First count total articles
 	var totalArticles int
-	err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COUNT(*) FROM articles", nil, &totalArticles)
+	err = database.RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", nil, &totalArticles)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to count articles: %v", err)
 	}
@@ -521,7 +766,7 @@ func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles i
 		LIMIT ?
 	`
 
-	rows, err := database.RetryableQuery(groupDBs.DB, query, articlesToRemove)
+	rows, err := database.RetryableQuery(groupDB.DB, query, articlesToRemove)
 	if err != nil {
 		return 0, totalArticles, fmt.Errorf("failed to query oldest articles: %v", err)
 	}
@@ -552,9 +797,10 @@ func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles i
 			}
 
 			batch := articlesToDelete[i:end]
-			if err := deleteArticles(groupDBs, batch); err != nil {
+			if err := deleteArticles(groupDB, batch, trim); err != nil {
 				return totalPruned, totalArticles, fmt.Errorf("failed to delete article batch: %v", err)
 			}
+			cleanupAfterDelete(db, groupName, batch)
 
 			totalPruned += len(batch)
 
@@ -570,37 +816,50 @@ func pruneArticlesInGroup(db *database.Database, groupName string, maxArticles i
 	return totalPruned, totalArticles, nil
 }
 
-// updateNewsgroupCounters updates the message count and last article number for a newsgroup
+// updateNewsgroupCounters updates the message count, the last article number and the water marks
+// (high_water, low_water: the marks LIST ACTIVE prints) of a newsgroup in the main database.
+// With articles left: last_article = high_water = the highest remaining number, low_water = the
+// lowest one. An emptied group keeps its place: last_article = high_water = next-1 and
+// low_water = next, where next is the number the next article gets (article_num_seq), so LIST
+// ACTIVE shows low = high+1 like GROUP does; a never-used group gives 0 and 1. The count and
+// the marks include hidden articles (as last_article did before); GROUP counts visible ones
+// only. LIST ACTIVE prints last_article as the high mark and low_water as the low mark;
+// high_water is kept equal to last_article.
 func updateNewsgroupCounters(db *database.Database, groupName string) error {
 	// Get group database to count current articles
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return fmt.Errorf("failed to get group database: %v", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDB.Return()
 
-	// Count current articles
-	var messageCount int64
-	err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COUNT(*) FROM articles", nil, &messageCount)
+	// Count current articles, lowest and highest article number
+	var messageCount, lowWater, lastArticle int64
+	err = database.RetryableQueryRowScan(groupDB.DB,
+		"SELECT COUNT(*), COALESCE(MIN(article_num), 0), COALESCE(MAX(article_num), 0) FROM articles",
+		nil, &messageCount, &lowWater, &lastArticle)
 	if err != nil {
 		return fmt.Errorf("failed to count articles: %v", err)
 	}
-
-	// Get the highest article number
-	var lastArticle int64
-	err = database.RetryableQueryRowScan(groupDBs.DB, "SELECT COALESCE(MAX(article_num), 0) FROM articles", nil, &lastArticle)
-	if err != nil {
-		return fmt.Errorf("failed to get last article: %v", err)
+	if messageCount == 0 {
+		next, err := db.NNTPGroupNextArticleNum(groupDB)
+		if err != nil {
+			return fmt.Errorf("failed to get next article number: %v", err)
+		}
+		lastArticle = next - 1
+		lowWater = next
 	}
+	highWater := lastArticle
 
-	// Update the main newsgroups table
-	_, err = db.GetMainDB().Exec(`
-		UPDATE newsgroups SET message_count = ?, last_article = ? WHERE name = ?`,
-		messageCount, lastArticle, groupName)
+	// Update the main newsgroups table (high_water/low_water as in query_UpdateNewsgroupWatermarks)
+	_, err = database.RetryableExec(db.GetMainDB(), `
+		UPDATE newsgroups SET message_count = ?, last_article = ?, high_water = ?, low_water = ? WHERE name = ?`,
+		messageCount, lastArticle, highWater, lowWater, groupName)
 	if err != nil {
 		return fmt.Errorf("failed to update newsgroup counters: %v", err)
 	}
 
-	log.Printf("Updated %s counters: %d articles, last article %d", groupName, messageCount, lastArticle)
+	log.Printf("Updated %s counters: %d articles, last article %d, high water %d, low water %d",
+		groupName, messageCount, lastArticle, highWater, lowWater)
 	return nil
 }

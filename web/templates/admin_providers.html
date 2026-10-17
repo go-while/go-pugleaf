@@ -21,7 +21,9 @@
                         • Enable a pugleaf Server instead<br>
                         All 'news-*.pugleaf.net' servers begin retention in September 2025.<br>
                         Enable only your nearest pugleaf server for best performance!<br>
-                        pugleaf-fetcher will only fetch from first enabled provider!
+                        <br>
+                        pugleaf-fetcher will only fetch from first enabled provider!<br>
+                        post-queue will try to post articles to all providers where posting is enabled.
                         </p>
                     </div>
                   </div>
@@ -127,7 +129,7 @@
                                                     <div class="col-md-2">
                                                         <div class="mb-3">
                                                             <label class="form-label">Name</label>
-                                                            <input type="text" class="form-control" name="name" value="{{.Name}}" required>
+                                                            <input readonly type="text" class="form-control" name="name" value="{{.Name}}" required>
                                                         </div>
                                                     </div>
                                                 <!-- disabled for now. no support for grouping provider accounts into one...
@@ -195,13 +197,13 @@
                                                     <div class="col-md-2">
                                                         <div class="mb-3">
                                                             <label class="form-label">Priority</label>
-                                                            <input type="number" class="form-control" name="priority" value="{{.Priority}}" min="1" max="100">
+                                                            <input type="number" class="form-control" name="priority" value="{{.Priority}}" min="1" max="1000">
                                                         </div>
                                                     </div>
                                                     <div class="col-md-2">
                                                         <div class="mb-3">
                                                             <label class="form-label">Max Article Size</label>
-                                                            <input type="number" class="form-control" name="max_art_size" value="{{.MaxArtSize}}" min="4096" max="16777216"><small>bytes</small>
+                                                            <input type="number" class="form-control" name="max_art_size" value="{{.MaxArtSize}}" min="1024" max="16777216"><small>bytes</small>
                                                         </div>
                                                     </div>
                                                 </div>
@@ -403,7 +405,7 @@
                           <div class="col-md-2">
                               <div class="mb-3">
                                   <label for="provider_priority" class="form-label">Priority</label>
-                                  <input type="number" class="form-control" id="provider_priority" name="priority" value="50" min="1" max="100">
+                                  <input type="number" class="form-control" id="provider_priority" name="priority" value="50" min="1" max="1000">
                               </div>
                           </div>
                           <div class="col-md-2">

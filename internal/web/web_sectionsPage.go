@@ -2,7 +2,8 @@
 package web
 
 import (
-	"html/template"
+	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -37,8 +38,8 @@ func (s *WebServer) sectionsPage(c *gin.Context) {
 	// Get all sections
 	sections, err := s.DB.GetSections()
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error",
-			"Could not retrieve sections: "+err.Error())
+		log.Printf("[WEB]: sectionsPage: GetSections: %v", err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 
@@ -50,15 +51,7 @@ func (s *WebServer) sectionsPage(c *gin.Context) {
 		Sections:     sections,
 	}
 
-	// Load template individually
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sections.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		log.Printf("Error rendering sections template: %v", err)
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "sections.html")
 }
 
 // sectionPage handles /:section/ - shows groups in a section
@@ -87,24 +80,56 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 
 	// Get pagination parameters
 	page := 1
-
 	if p := c.Query("page"); p != "" && p != "1" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 1 {
 			page = parsed
 		}
 	}
 
-	// Get groups for this section (paginated)
-	allGroups, err := s.DB.GetSectionGroups(section.ID)
+	// Get sort parameter - default to activity since sort_order is meaningless (all newsgroups have sort_order=0)
+	sortBy := c.DefaultQuery("sort", "activity")
+	if sortBy != "activity" && sortBy != "name" {
+		sortBy = "activity"
+	}
+
+	// Get groups for this section with activity data (includes sorting).
+	// Same access rule as sectionGroupAllowed/checkGroupAccess, applied to the listing (E1):
+	// a section_groups row survives both a deactivation and a delete, and the group routes
+	// 404 on either, so for a visitor the strict query drops the members that cannot be
+	// opened. Admins keep the full listing, including inactive groups, which they can open.
+	var allGroups []*models.SectionGroup
+	if s.isAdminRequest(c) {
+		allGroups, err = s.DB.GetSectionGroupsWithActivity(section.ID, sortBy)
+	} else {
+		allGroups, err = s.DB.GetSectionGroupsWithActivityStrict(section.ID, sortBy)
+	}
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
+		log.Printf("[WEB]: sectionPage: GetSectionGroupsWithActivity(section=%d sort=%s admin=%v): %v", section.ID, sortBy, s.isAdminRequest(c), err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 
 	// Calculate pagination
 	totalCount := len(allGroups)
-	start := (page - 1) * LIMIT_sectionPage
-	end := start + LIMIT_sectionPage
+
+	// LIMIT_sectionPage is a package var, so treat a non-positive value as 1 once and use
+	// that size for every calculation below: page math, slicing and NewPaginationInfo (which
+	// divides by the page size). Clamp the page before any multiplication, because
+	// (page-1)*size overflows to a negative offset for a huge ?page= and slicing panics (F15).
+	size := LIMIT_sectionPage
+	if size < 1 {
+		size = 1
+	}
+	maxPage := (totalCount + size - 1) / size
+	if maxPage < 1 {
+		maxPage = 1
+	}
+	if page > maxPage {
+		page = maxPage
+	}
+
+	start := (page - 1) * size
+	end := start + size
 
 	if start > totalCount {
 		start = totalCount
@@ -114,7 +139,7 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 	}
 
 	groups := allGroups[start:end]
-	pagination := models.NewPaginationInfo(page, LIMIT_sectionPage, totalCount)
+	pagination := models.NewPaginationInfo(page, size, totalCount)
 
 	// Get all sections for navigation
 	sections, err := s.DB.GetHeaderSections()
@@ -129,29 +154,23 @@ func (s *WebServer) sectionPage(c *gin.Context) {
 		Pagination:        pagination,
 		TotalGroups:       totalCount,
 		AvailableSections: sections,
+		SortBy:            sortBy,
 	}
 
-	// Load template individually to include pagination support
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/section.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		log.Printf("Error rendering section template: %v", err)
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, "section.html", "pagination.html")
 }
 
-// sectionGroupPage handles /:section/:group/ - shows articles in a group within a section
-func (s *WebServer) sectionGroupPage(c *gin.Context) {
-	sectionName := c.Param("section")
-	groupName := c.Param("group")
-
-	// Get section info
+// sectionGroupAllowed loads the section and checks that groupName is one of its groups,
+// and that the group itself is accessible (it exists in newsgroups, and is active unless
+// the request is from an admin) - section_groups rows outlive a deleted newsgroup, and
+// callers open the group DB next, which would create files for any name.
+// On failure it renders the 404 page and returns false. It never opens a group DB.
+func (s *WebServer) sectionGroupAllowed(c *gin.Context, sectionName, groupName string) (*models.Section, bool) {
 	section, err := s.DB.GetSectionByName(sectionName)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Section not found",
 			"The section '"+sectionName+"' does not exist.")
-		return
+		return nil, false
 	}
 
 	// Verify group exists in this section
@@ -159,39 +178,52 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 	if err != nil || len(sectionGroups) == 0 {
 		s.renderError(c, http.StatusNotFound, "Group not found",
 			"The group '"+groupName+"' does not exist or is not in section '"+sectionName+"'.")
-		return
+		return nil, false
 	}
 
 	// Check if this group belongs to the specified section
-	groupInSection := false
 	for _, sg := range sectionGroups {
 		if sg.SectionID == section.ID {
-			groupInSection = true
-			break
+			// Same access rule as /groups/:group: the newsgroup must exist and,
+			// for non-admins, be active. checkGroupAccess renders the 404 itself.
+			if !s.checkGroupAccess(c, groupName) {
+				return nil, false
+			}
+			return section, true
 		}
 	}
 
-	if !groupInSection {
-		s.renderError(c, http.StatusNotFound, "Group not in section",
-			"The group '"+groupName+"' is not in section '"+sectionName+"'.")
-		return
+	s.renderError(c, http.StatusNotFound, "Group not in section",
+		"The group '"+groupName+"' is not in section '"+sectionName+"'.")
+	return nil, false
+}
+
+// sectionGroupPage handles /:section/:group/ - shows articles in a group within a section
+func (s *WebServer) sectionGroupPage(c *gin.Context) {
+	sectionName := c.Param("section")
+	groupName := c.Param("group")
+
+	// Get section info and verify the group belongs to it
+	section, ok := s.sectionGroupAllowed(c, sectionName, groupName)
+	if !ok {
+		return // Error response already sent by sectionGroupAllowed
 	}
 
 	// Get group database
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Group database not found",
 			"The group '"+groupName+"' database does not exist. Try importing data first.")
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 	// Get pagination parameters
 	page := 1
 	var lastArticleNum int64
 
 	if p := c.Query("page"); p != "" && p != "1" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 1 {
-			page = parsed
+			page = clampOffsetPage(parsed, LIMIT_sectionGroupPage, maxOffsetArticles)
 		}
 	}
 
@@ -207,38 +239,48 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 	if page > 1 && lastArticleNum == 0 {
 		skipCount := (page - 1) * LIMIT_sectionGroupPage
 		var cursorArticleNum int64
-		err = database.RetryableQueryRowScan(groupDBs.DB, `
+		err = database.RetryableQueryRowScan(groupDB.DB, `
 			SELECT article_num FROM articles
 			WHERE hide = 0
 			ORDER BY article_num DESC
 			LIMIT 1 OFFSET ?`, []interface{}{skipCount - 1}, &cursorArticleNum)
 		if err != nil {
+			// No row at that offset (a page past the real end) or a failed read: serve
+			// the newest page and label it page 1, not the requested number (FU:E17).
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("[WEB]: sectionGroupPage: page %d cursor lookup in %s: %v", page, groupName, err)
+			}
 			lastArticleNum = 0
+			page = 1
 		} else {
 			lastArticleNum = cursorArticleNum
 		}
 	}
 
 	// Get articles (overview data) for this group with pagination
-	articles, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, LIMIT_sectionGroupPage)
+	articles, totalCount, _, err := s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_sectionGroupPage)
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
+		log.Printf("[WEB]: sectionGroupPage: GetOverviewsPaginated(last=%d): %v", lastArticleNum, err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 
 	var pagination *models.PaginationInfo
 	if page > 0 {
-		// Page-based pagination
-		pagination = models.NewPaginationInfo(page, LIMIT_sectionGroupPage, totalCount)
+		// Page-based pagination. maxOffsetArticles is the same bound the clamp above
+		// applies, so the template links no page the clamp would rewrite (D1).
+		pagination = models.NewPaginationInfo(page, LIMIT_sectionGroupPage, totalCount, maxOffsetArticles)
 	} else {
 		// Cursor-based pagination
 		pagination = &models.PaginationInfo{
-			CurrentPage: 1,
-			PageSize:    LIMIT_sectionGroupPage,
-			TotalCount:  totalCount,
-			TotalPages:  (totalCount + LIMIT_sectionGroupPage - 1) / LIMIT_sectionGroupPage,
-			HasNext:     hasMore,
-			HasPrev:     lastArticleNum > 0,
+			CurrentPage:   1,
+			PageSize:      LIMIT_sectionGroupPage,
+			TotalCount:    totalCount,
+			TotalPages:    (totalCount + LIMIT_sectionGroupPage - 1) / LIMIT_sectionGroupPage,
+			LinkablePages: maxOffsetArticles/LIMIT_sectionGroupPage + 1,
+			// cursor mode has no linkable neighbours (FU:E12, D15)
+			HasNext: false,
+			HasPrev: false,
 		}
 	}
 
@@ -251,14 +293,7 @@ func (s *WebServer) sectionGroupPage(c *gin.Context) {
 		GroupExists:  true,
 	}
 
-	// Load template individually to include pagination support
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/section-group.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		log.Printf("Error rendering section-group template: %v", err)
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, "section-group.html", "pagination.html")
 }
 
 // sectionArticlePage handles /:section/:group/articles/:articleNum - shows a specific article
@@ -275,47 +310,32 @@ func (s *WebServer) sectionArticlePage(c *gin.Context) {
 		return
 	}
 
-	// Get section info
-	section, err := s.DB.GetSectionByName(sectionName)
-	if err != nil {
-		s.renderError(c, http.StatusNotFound, "Section not found",
-			"The section '"+sectionName+"' does not exist.")
-		return
-	}
-
-	// Verify group exists in this section (same as sectionGroupPage)
-	sectionGroups, err := s.DB.GetSectionGroupsByName(groupName)
-	if err != nil || len(sectionGroups) == 0 {
-		s.renderError(c, http.StatusNotFound, "Group not found",
-			"The group '"+groupName+"' does not exist or is not in section '"+sectionName+"'.")
-		return
-	}
-
-	groupInSection := false
-	for _, sg := range sectionGroups {
-		if sg.SectionID == section.ID {
-			groupInSection = true
-			break
-		}
-	}
-
-	if !groupInSection {
-		s.renderError(c, http.StatusNotFound, "Group not in section",
-			"The group '"+groupName+"' is not in section '"+sectionName+"'.")
-		return
+	// Get section info and verify the group belongs to it
+	section, ok := s.sectionGroupAllowed(c, sectionName, groupName)
+	if !ok {
+		return // Error response already sent by sectionGroupAllowed
 	}
 
 	// Get group database
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Group database not found",
 			"The group '"+groupName+"' database does not exist.")
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 	// Get the article
-	article, err := s.DB.GetArticleByNum(groupDBs, articleNum)
+	article, err := s.DB.GetArticleByNum(groupDB, articleNum)
 	if err != nil {
+		s.renderError(c, http.StatusNotFound, "Article not found",
+			"Article "+articleNumStr+" not found in group '"+groupName+"'. It may not have been imported yet.")
+		return
+	}
+	// Hidden articles are not found for non-admins (flags from the group DB, not the cached article).
+	if _, hide, err := s.DB.GetArticleFlags(groupDB, articleNum); err != nil || s.articleHiddenFor(c, hide) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: sectionArticlePage: GetArticleFlags(%s/%d): %v", groupName, articleNum, err)
+		}
 		s.renderError(c, http.StatusNotFound, "Article not found",
 			"Article "+articleNumStr+" not found in group '"+groupName+"'. It may not have been imported yet.")
 		return
@@ -343,47 +363,32 @@ func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
 	groupName := c.Param("group")
 	messageId := c.Param("messageId")
 
-	// Get section info
-	section, err := s.DB.GetSectionByName(sectionName)
-	if err != nil {
-		s.renderError(c, http.StatusNotFound, "Section not found",
-			"The section '"+sectionName+"' does not exist.")
-		return
-	}
-
-	// Verify group exists in this section (same as sectionGroupPage)
-	sectionGroups, err := s.DB.GetSectionGroupsByName(groupName)
-	if err != nil || len(sectionGroups) == 0 {
-		s.renderError(c, http.StatusNotFound, "Group not found",
-			"The group '"+groupName+"' does not exist or is not in section '"+sectionName+"'.")
-		return
-	}
-
-	groupInSection := false
-	for _, sg := range sectionGroups {
-		if sg.SectionID == section.ID {
-			groupInSection = true
-			break
-		}
-	}
-
-	if !groupInSection {
-		s.renderError(c, http.StatusNotFound, "Group not in section",
-			"The group '"+groupName+"' is not in section '"+sectionName+"'.")
-		return
+	// Get section info and verify the group belongs to it
+	section, ok := s.sectionGroupAllowed(c, sectionName, groupName)
+	if !ok {
+		return // Error response already sent by sectionGroupAllowed
 	}
 
 	// Get group database
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		s.renderError(c, http.StatusNotFound, "Group database not found",
 			"The group '"+groupName+"' database does not exist.")
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 	// Get the article by message ID
-	article, err := s.DB.GetArticleByMessageID(groupDBs, messageId)
+	article, err := s.DB.GetArticleByMessageID(groupDB, messageId)
 	if err != nil {
+		s.renderError(c, http.StatusNotFound, "Article not found",
+			"Article with message ID '"+messageId+"' not found in group '"+groupName+"'. It may not have been imported yet.")
+		return
+	}
+	// Hidden articles are not found for non-admins (flags from the group DB, not the cached article).
+	if _, _, hide, err := s.DB.GetArticleFlagsByMessageID(groupDB, messageId); err != nil || s.articleHiddenFor(c, hide) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: sectionArticleByMessageIdPage: GetArticleFlagsByMessageID(%s): %v", groupName, err)
+		}
 		s.renderError(c, http.StatusNotFound, "Article not found",
 			"Article with message ID '"+messageId+"' not found in group '"+groupName+"'. It may not have been imported yet.")
 		return
@@ -395,7 +400,7 @@ func (s *WebServer) sectionArticleByMessageIdPage(c *gin.Context) {
 		TemplateData: s.getBaseTemplateData(c, section.DisplayName+" - "+groupName+" - "+subjectText),
 		Section:      section,
 		GroupName:    groupName,
-		ArticleNum:   article.ArticleNums[groupDBs.NewsgroupPtr],
+		ArticleNum:   article.ArticleNums[groupDB.NewsgroupPtr],
 		Article:      article,
 		Thread:       []*models.Overview{}, // TODO: Implement threading
 		PrevArticle:  0,                    // TODO: Implement navigation

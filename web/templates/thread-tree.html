@@ -126,7 +126,10 @@
             </div>
             <div class="card-body">
                 <h5 class="mb-2">{{.ThreadRoot.PrintSanitized "subject" .GroupName}}</h5>
+                {{/* RootHidden: placeholder of a hidden root for a non-admin (D2): no author, date,
+                     Message-ID or article link (the article page answers 404 for them). */}}
                 <div class="row">
+                    {{if not .RootHidden}}
                     <div class="col-md-6">
                         <p class="text-muted mb-1">
                             <strong>From:</strong> {{.ThreadRoot.PrintSanitized "fromheader" .GroupName}}
@@ -135,20 +138,25 @@
                             <strong>Date:</strong> {{.ThreadRoot.PrintSanitized "date_string" .GroupName}}
                         </p>
                     </div>
+                    {{end}}
                     <div class="col-md-6">
                         <p class="text-muted mb-1">
                             <strong>Article:</strong> {{.ThreadRoot.ArticleNum}}
                         </p>
+                        {{if and (not .RootHidden) .ThreadRoot.MessageID}}
                         <p class="text-muted mb-1">
                             <strong>Message-ID:</strong> <code class="small">{{.ThreadRoot.MessageID}}</code>
                         </p>
+                        {{end}}
                     </div>
                 </div>
+                {{if not .RootHidden}}
                 <div class="mt-2">
                     <a href="/groups/{{.GroupName}}/articles/{{.ThreadRoot.ArticleNum}}" class="btn btn-sm btn-outline-primary">
                         <i class="bi bi-eye me-1"></i>View Article
                     </a>
                 </div>
+                {{end}}
             </div>
         </div>
     </div>
@@ -182,8 +190,10 @@
                         {{if .ThreadRoot}}
                         <ul class="list-unstyled">
                             <li><strong>Subject:</strong> {{.ThreadRoot.PrintSanitized "subject" .GroupName}}</li>
+                            {{if not .RootHidden}}
                             <li><strong>From:</strong> {{.ThreadRoot.PrintSanitized "fromheader" .GroupName}}</li>
                             <li><strong>Date:</strong> {{.ThreadRoot.PrintSanitized "date_string" .GroupName}}</li>
+                            {{end}}
                             <li><strong>Article:</strong> {{.ThreadRoot.ArticleNum}}</li>
                         </ul>
                         {{end}}

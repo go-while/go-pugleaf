@@ -16,6 +16,14 @@ type ArticleCacheEntry struct {
 	AccessCount int64           `json:"access_count"`
 	LastAccess  time.Time       `json:"last_access"`
 	GroupName   string          `json:"group_name"`
+
+	// key is the map key this entry was inserted under. removeElement deletes by it instead
+	// of recomputing it from the article: the recomputation went through the TasksMap
+	// pointer, which ExpireCache replaces, so evicted entries stayed in the map (A-db-2).
+	key string
+	// size is what this entry added to ArticleCache.totalSize; removing the entry subtracts
+	// exactly this amount.
+	size int64
 }
 
 // ArticleCache provides LRU caching for articles
@@ -75,6 +83,14 @@ func (ac *ArticleCache) Get(groupName string, articleNum int64) (*models.Article
 	return nil, false
 }
 
+// articleCacheSize is the approximate memory an article adds to ArticleCache.totalSize.
+func articleCacheSize(article *models.Article) int64 {
+	if article == nil {
+		return 0
+	}
+	return int64(len(article.BodyText) + len(article.HeadersJSON))
+}
+
 // Put adds an article to cache
 func (ac *ArticleCache) Put(groupName string, articleNum int64, article *models.Article) {
 	ac.mutex.Lock()
@@ -85,6 +101,9 @@ func (ac *ArticleCache) Put(groupName string, articleNum int64, article *models.
 	// If already exists, update it
 	if elem, exists := ac.cache[key]; exists {
 		entry := elem.Value.(*ArticleCacheEntry)
+		size := articleCacheSize(article)
+		ac.totalSize += size - entry.size
+		entry.size = size
 		entry.Article = article
 		entry.CachedAt = time.Now()
 		entry.LastAccess = time.Now()
@@ -99,6 +118,8 @@ func (ac *ArticleCache) Put(groupName string, articleNum int64, article *models.
 		AccessCount: 0,
 		LastAccess:  time.Now(),
 		GroupName:   groupName,
+		key:         key,
+		size:        articleCacheSize(article),
 	}
 
 	// Add to front of LRU list
@@ -106,7 +127,7 @@ func (ac *ArticleCache) Put(groupName string, articleNum int64, article *models.
 	ac.cache[key] = elem
 
 	// Estimate memory usage (rough approximation)
-	ac.totalSize += int64(len(article.BodyText) + len(article.Subject) + len(article.FromHeader) + 200)
+	ac.totalSize += entry.size
 
 	// Evict if necessary
 	ac.evictIfNeeded()
@@ -126,16 +147,14 @@ func (ac *ArticleCache) evictIfNeeded() {
 // removeElement removes an element from cache
 func (ac *ArticleCache) removeElement(elem *list.Element) {
 	entry := elem.Value.(*ArticleCacheEntry)
-	newsgroupPtr := ac.DB.Batch.GetNewsgroupPointer(entry.GroupName)
-	key := ac.makeKey(entry.GroupName, entry.Article.ArticleNums[newsgroupPtr])
 
-	// Estimate memory freed
-	ac.totalSize -= int64(entry.Article.Bytes)
+	// Memory freed: exactly what this entry added in Put
+	ac.totalSize -= entry.size
 	if ac.totalSize < 0 {
 		ac.totalSize = 0
 	}
 
-	delete(ac.cache, key)
+	delete(ac.cache, entry.key)
 	ac.lruList.Remove(elem)
 }
 
@@ -165,19 +184,17 @@ func (ac *ArticleCache) ClearGroup(groupName string) {
 	ac.mutex.Lock()
 	defer ac.mutex.Unlock()
 
-	// Find all keys for this group
-	keysToRemove := make([]string, 0)
-	for key := range ac.cache {
-		if len(key) > len(groupName) && key[:len(groupName)+1] == groupName+":" {
-			keysToRemove = append(keysToRemove, key)
+	// Find all entries of this group
+	var toRemove []*list.Element
+	for elem := ac.lruList.Front(); elem != nil; elem = elem.Next() {
+		if elem.Value.(*ArticleCacheEntry).GroupName == groupName {
+			toRemove = append(toRemove, elem)
 		}
 	}
 
-	// Remove them
-	for _, key := range keysToRemove {
-		if elem, exists := ac.cache[key]; exists {
-			ac.removeElement(elem)
-		}
+	// Remove them (removeElement deletes the map entry by entry.key)
+	for _, elem := range toRemove {
+		ac.removeElement(elem)
 	}
 }
 

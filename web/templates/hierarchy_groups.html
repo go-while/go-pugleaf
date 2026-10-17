@@ -44,7 +44,7 @@
         <div class="card">
             <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
                 <h5 class="card-title mb-0">
-                    <i class="bi bi-list me-2"></i>Groups in {{.HierarchyName}} Hierarchy
+                    <i class="bi bi-list me-2"></i>Groups in {{.HierarchyName}} Hierarchy</a>
                 </h5>
                 <div class="d-flex align-items-center gap-3">
                     <div class="dropdown">
@@ -56,6 +56,8 @@
                             <li><a class="dropdown-item{{if eq .SortBy "name"}} active{{end}}" href="?sort=name">Name A-Z</a></li>
                         </ul>
                     </div>
+                    <li><a class="btn btn-secondary" href="/hierarchy/{{.HierarchyName}}">Card View</a></li>
+
                     {{if .Pagination}}
                     <span class="badge bg-light text-dark">{{.Pagination.TotalCount}} total</span>
                     {{end}}
@@ -74,31 +76,15 @@
                                     </a>
                                 </h6>
                                 <p class="mb-1 text-muted">{{.Description}}</p>
-                                <div class="d-flex gap-3">
-                                    <small class="text-muted">
-                                        <!-- ARTICLES -->
-                                        <i class="bi bi-file-text me-1"></i><span class="badge bg-secondary">{{.MessageCount}} | Last: #{{.LastArticle}}</span>
-                                    </small>
-                                    <!-- LAST ART NUM -->
-                                    <!--
-                                    <small class="text-muted">
-                                        <i class="bi bi-hash me-1"></i>Last: #{{.LastArticle}}
-                                    </small>
-                                    -->
-                                    <!-- LAST ACTIVITY -->
-                                    <!--
-                                    <small class="text-muted">
-                                        <i class="bi bi-clock me-1"></i>Activity: {{.PrintLastActivity}}
-                                    </small>
-                                    -->
-                                    <!--
-                                    <small class="text-muted">
-                                        <i class="bi bi-calendar me-1"></i>Created: {{.CreatedAt.Format "2006-01-02"}}
-                                    </small>
-                                    -->
+                            </div>
+                            <div class="d-flex flex-column align-items-end text-end">
+                                <small class="text-muted mb-1">
+                                    <i class="bi bi-file-text me-1"></i><span class="badge bg-secondary">{{.MessageCount}} | Last: #{{.LastArticle}}</span>
+                                </small>
+                                <div class="text-muted">
+                                    {{.PrintLastActivity}}
                                 </div>
                             </div>
-                            <div class="ms-3">{{.PrintLastActivity}}</div>
                         </div>
                     </div>
                     {{end}}

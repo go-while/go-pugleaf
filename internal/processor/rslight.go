@@ -3,6 +3,7 @@ package processor
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/database"
@@ -21,6 +23,23 @@ import (
 
 var error_empty_article = fmt.Errorf("empty article") // error for empty articles
 
+// errLegacyDuplicate is returned by importLegacyArticle when the article is already known.
+// The caller counts it as a skipped duplicate, not as a failure.
+var errLegacyDuplicate = errors.New("duplicate article")
+
+// ErrLegacyImportStopped is returned (wrapped) by ImportAllSQLiteDatabases when its stop
+// channel was closed during the start delay or the import: no new file is started, the
+// files in progress stop after their current article.
+var ErrLegacyImportStopped = errors.New("legacy import stopped")
+
+// legacyErrSummaryMax is the number of failed files the import error names; the
+// rest are only counted (every failure is logged as it happens).
+const legacyErrSummaryMax = 5
+
+// LegacyImportStartDelay is the pause between validating the spool files and starting the
+// article import (time to cancel when only the newsgroups were wanted). Tests set it to 0.
+var LegacyImportStartDelay = 15 * time.Second
+
 // LegacyImporter handles importing RockSolid Light legacy configurations
 type LegacyImporter struct {
 	//db        *database.Database
@@ -28,10 +47,15 @@ type LegacyImporter struct {
 	etcPath      string
 	proc         *Processor
 	imported     uint64
-	skipped      uint64
+	skipped      uint64 // articles that failed to import (scan or process error)
+	skippedEmpty uint64 // empty articles
+	duplicates   uint64 // articles that were already known
 	groupsDone   uint64 // number of groups done
 	skippedFiles uint64 // number of skipped files
 	mux          sync.Mutex
+	// stop is the cancellation of the running ImportAllSQLiteDatabases (nil: none);
+	// set before the import goroutines start, read by importSQLiteArticlesWith.
+	stop <-chan struct{}
 }
 
 // MenuConfEntry represents a line from menu.conf
@@ -67,27 +91,34 @@ type LegacyThread struct {
 	Headers string `json:"headers"`
 }
 
-// NewLegacyImporter creates a new legacy importer
-func NewLegacyImporter(db *database.Database, etcPath, spoolPath string, useShortHashLen int) *LegacyImporter {
-	//defaultConfig := config.DefaultProviders[0]
-	// we dont need a specific provider here, just empty config pointer..
-	//  to have access to the functions
+// NewLegacyImporter creates a new legacy importer. It returns an error instead of exiting
+// when the processor (hostname, history) cannot be initialized.
+func NewLegacyImporter(db *database.Database, etcPath, spoolPath string, useShortHashLen int) (*LegacyImporter, error) {
+	// we dont need a specific provider here, just an empty backend config
+	// to have access to the processor functions
+	proc, err := NewProcessorE(db, nntp.NewPool(&nntp.BackendConfig{}), useShortHashLen)
+	if err != nil {
+		return nil, fmt.Errorf("legacy importer: %w", err)
+	}
 	importer := &LegacyImporter{
 		spoolPath: spoolPath,
 		etcPath:   etcPath,
-		proc:      NewProcessor(db, nntp.NewPool(&nntp.BackendConfig{}), useShortHashLen), // Create a new processor with an empty backend config
+		proc:      proc,
 	}
 
-	return importer
+	return importer, nil
 }
 
-// Close properly shuts down the legacy importer
-// Note: We don't close the processor as it may share database connections with the main application
+// Close properly shuts down the legacy importer.
+// Processor.Close waits for pending batches and closes the history writer;
+// it does not close the shared database (main does that after db.WG.Wait()).
 func (leg *LegacyImporter) Close() error {
-	// Don't close the processor as it shares database resources with the main application
-	// The processor will be closed when the main application shuts down
-	leg.proc = nil // Just clear the reference
-	return nil
+	if leg.proc == nil {
+		return nil
+	}
+	err := leg.proc.Close()
+	leg.proc = nil
+	return err
 }
 
 // ImportSections imports all sections from the legacy RockSolid Light installation
@@ -280,17 +311,9 @@ func (leg *LegacyImporter) importSectionGroups(sectionID int, sectionName string
 
 // insertSection inserts a section record and returns its ID
 func (leg *LegacyImporter) insertSection(section *models.Section) (int, error) {
-	result, err := database.RetryableExec(leg.proc.DB.GetMainDB(),
-		`INSERT OR IGNORE INTO sections (name, display_name, description, show_in_header, enable_local_spool, sort_order)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		section.Name, section.DisplayName, section.Description,
-		section.ShowInHeader, section.EnableLocalSpool, section.SortOrder,
-	)
-	if err != nil {
-		return 0, err
-	}
-
-	id, err := result.LastInsertId()
+	// UpsertSectionID reads the id back by name: after an INSERT OR IGNORE that ignored
+	// an existing section, LastInsertId would still hold the id of an earlier statement.
+	id, err := leg.proc.DB.UpsertSectionID(section)
 	if err != nil {
 		return 0, err
 	}
@@ -309,16 +332,32 @@ func (leg *LegacyImporter) insertSectionGroup(sectionGroup *models.SectionGroup)
 	return err
 }
 
+// parseArticleTextToSlice splits a wireformat article (CRLF or LF line ends) into lines.
+// The final "." terminator line is removed and dot-stuffed lines ("..x") are unstuffed.
+// The returned size counts one byte per line end (log only).
 func parseArticleTextToSlice(articleText string) ([]string, int) {
-	// Split the article text into lines
-	lines := strings.Split(articleText, "\n")
+	// Accept CRLF and LF: a "\r" left on the blank separator line would hide the body
+	text := strings.ReplaceAll(articleText, "\r\n", "\n")
+	lines := strings.Split(text, "\n")
 	size := 0
-	// Remove the last line if it's just a dot (.)
-	if len(lines) > 0 && lines[len(lines)-1] == "." {
+	// Remove the terminator (a body line "." is stuffed to "..", so a final "." is never content).
+	// If the last non-empty line is ".", it and every empty element after it (line ends stored
+	// after the terminator) are dropped. Without a terminator only the one empty element left
+	// by the final line end is dropped, so a real trailing blank body line is kept.
+	last := len(lines) - 1
+	for last >= 0 && lines[last] == "" {
+		last--
+	}
+	if last >= 0 && lines[last] == "." {
+		lines = lines[:last]
+	} else if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
-	if len(lines) > 0 && lines[len(lines)-1] == "." {
-		lines = lines[:len(lines)-1]
+	// Undo dot-stuffing only after the terminator is gone
+	for i, line := range lines {
+		if strings.HasPrefix(line, "..") {
+			lines[i] = line[1:]
+		}
 	}
 	for _, line := range lines {
 		size += len(line) + 1 // +1 for the newline character
@@ -342,16 +381,23 @@ func (leg *LegacyImporter) importLegacyArticle(legacyArticle *LegacyArticle) err
 	}
 	legacyArticle.Article = ""
 
-	//log.Printf("importLegacyArticle: Parsed article '%s' (%d bytes) to %d lines, size %d (ng: '%s') ==> processArticle", legacyArticle.MsgID, len(legacyArticle.Article), len(lines), size, legacyArticle.Newsgroup)
+	//log.Printf("importLegacyArticle: Parsed article '%s' (%d bytes) to %d lines, size %d (ng: '%s') ==> ProcessArticle", legacyArticle.MsgID, len(legacyArticle.Article), len(lines), size, legacyArticle.Newsgroup)
 	//log.Printf("legacyArticle.Newsgroup: '%s' %s", legacyArticle.MsgID, legacyArticle.Newsgroup)
 	bulkmode := true // we are importing legacy articles in bulkmode
 
-	// Time the processArticle call
+	// Time the ProcessArticle call
 	//processStart := time.Now()
-	response, err := leg.proc.processArticle(art, legacyArticle.Newsgroup, bulkmode)
+	response, err := leg.proc.ProcessArticle(art, legacyArticle.Newsgroup, bulkmode)
 	//processElapsed := time.Since(processStart)
-	if err != nil || response != history.CasePass {
+	if err != nil {
 		return fmt.Errorf("failed to process article '%s': %w", legacyArticle.MsgID, err)
+	}
+	switch response {
+	case history.CasePass:
+	case history.CaseDupes:
+		return fmt.Errorf("article '%s': %w", legacyArticle.MsgID, errLegacyDuplicate)
+	default:
+		return fmt.Errorf("failed to process article '%s': response 0x%X", legacyArticle.MsgID, response)
 	}
 
 	// Log slow articles (taking more than 100ms)
@@ -371,9 +417,12 @@ func (leg *LegacyImporter) importLegacyArticle(legacyArticle *LegacyArticle) err
 	return nil
 }
 
-// ImportAllSQLiteDatabases imports from all SQLite databases in the legacy directory
-func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads int) error {
+// ImportAllSQLiteDatabases imports from all SQLite databases in the legacy directory.
+// Closing stop (nil: never) during the start delay or the import ends it early with an
+// error that wraps ErrLegacyImportStopped.
+func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads int, stop <-chan struct{}) error {
 	log.Printf("[RSLIGHT-IMPORT] Starting from dir: '%s'", sqliteDir)
+	leg.stop = stop
 
 	// Find all .db3 files
 	files, err := filepath.Glob(filepath.Join(sqliteDir, "*-articles.db3"))
@@ -387,12 +436,6 @@ func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads in
 
 	log.Printf("[RSLIGHT-IMPORT] Found %d SQLite database files", len(files))
 	skipList := []string{}
-	wg := &sync.WaitGroup{}
-	parChan := make(chan struct{}, threads) // Limit concurrency HARDCODED
-	errChan := make(chan error, len(files)) // Channel to capture errors
-	for i := 0; i < cap(parChan); i++ {
-		parChan <- struct{}{}
-	}
 	workFiles := []string{}
 	for _, file := range files {
 		filename := filepath.Base(file)
@@ -434,12 +477,12 @@ func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads in
 		if newsgroup != anewsgroup {
 			log.Printf("[RSLIGHT-IMPORT] Info: newsgroup '%s' from file '%s' does not match expected newsgroup '%s'", anewsgroup, file, newsgroup)
 		}
-		if groupDBs, err := leg.proc.DB.GetGroupDBs(newsgroup); err != nil {
+		if groupDB, err := leg.proc.DB.GetGroupDB(newsgroup); err != nil {
 			log.Printf("[RSLIGHT-IMPORT] Warning: failed to get group DBs for newsgroup '%s': %v", newsgroup, err)
 			// Don't close on error, this is a different type of error
 		} else {
-			// Return the groupDBs connection immediately - we were just testing if the group exists
-			groupDBs.Return(leg.proc.DB)
+			// Return the groupDB connection immediately - we were just testing if the group exists
+			groupDB.Return()
 			err = leg.insertNewsgroupIfNotExists(newsgroup, "") // Insert newsgroup if it doesn't exist
 			if err != nil {
 				log.Printf("internal/legacy/main.go: Warning: failed to insert newsgroup %s: %v", newsgroup, err)
@@ -449,47 +492,18 @@ func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads in
 		workFiles = append(workFiles, file)
 	}
 	log.Printf("[RSLIGHT-IMPORT] Validated %d SQLite database files for import", len(workFiles))
-	log.Printf("[RSLIGHT-IMPORT] Sleeping for 15s before import. You can cancel here with Ctrl+C if you only wanted to get the newsgroups added.")
-	log.Printf("[RSLIGHT-IMPORT] Import of legacy articles starts in 15s!")
-	time.Sleep(15 * time.Second)
-	log.Printf("[RSLIGHT-IMPORT] Starting import of %d SQLite database files with %d threads", len(workFiles), threads)
-	for _, file := range workFiles {
-		//filename := filepath.Base(file)
-		// Determine the type of database based on filename
-		<-parChan // get slot
-		wg.Add(1)
-		// for every database file we want to import run a dedicated go routine
-		go func(file string) {
-			//log.Printf("[RSLIGHT-IMPORT] work: '%s'", filename)
-			//start := time.Now()
-			defer func() {
-				parChan <- struct{}{} // return slot
-				wg.Done()
-			}()
-			err = leg.ImportSQLiteArticles(file)
-			if err != nil {
-				errChan <- err
-				log.Printf("Warning: rslight-import failed file '%s': %v", file, err)
-				return
-			}
-			leg.mux.Lock()
-			leg.groupsDone++
-			leg.mux.Unlock()
-			errChan <- nil // No error
-			//log.Printf("[RSLIGHT-IMPORT] done file '%s' (took %v) len(parChan)=%d/%d", file, time.Since(start), len(parChan), cap(parChan))
-		}(file)
-	}
-	log.Printf("[RSLIGHT-IMPORT] Importing now! wait on internal wg.Wait()")
-	wg.Wait()
-	log.Printf("[RSLIGHT-IMPORT] internal wg.Wait() released, checking errors")
-	close(errChan)
-	errs := 0
-	for err := range errChan {
-		if err != nil {
-			log.Printf("Error (#%d) during import: %v", errs, err)
-			errs++
+	if len(workFiles) == 0 {
+		for _, skip := range skipList {
+			log.Printf("[RSLIGHT-IMPORT] Skipped file: %s", skip)
 		}
+		return fmt.Errorf("all %d SQLite database files in %s were skipped", len(files), sqliteDir)
 	}
+	if err := waitLegacyStartDelay(LegacyImportStartDelay, stop); err != nil {
+		return err
+	}
+	log.Printf("[RSLIGHT-IMPORT] Starting import of %d SQLite database files with %d threads", len(workFiles), threads)
+	failed, importErr := importLegacyFiles(workFiles, threads, stop, leg.ImportSQLiteArticles)
+	log.Printf("[RSLIGHT-IMPORT] internal wg.Wait() released, %d of %d files failed", failed, len(workFiles))
 	leg.mux.Lock()
 	defer leg.mux.Unlock()
 	for _, skip := range skipList {
@@ -499,8 +513,115 @@ func (leg *LegacyImporter) ImportAllSQLiteDatabases(sqliteDir string, threads in
 	log.Printf("[RSLIGHT-IMPORT] Group Thread counters: %v", thread_counters)
 	legacy_counter := leg.proc.LegacyCounter.GetResetAll() // Reset legacy counter after import
 	log.Printf("[RSLIGHT-IMPORT] Legacy counters: %v", legacy_counter)
-	log.Printf("[RSLIGHT-IMPORT] Total Imported: %d articles, Skipped: %d articles, GroupsDone: %d, SkippedFiles: %d  / %d", leg.imported, leg.skipped, leg.groupsDone, leg.skippedFiles, len(files))
+	log.Printf("[RSLIGHT-IMPORT] Total Imported: %d articles, Failed: %d articles, Empty: %d, Duplicates: %d, GroupsDone: %d, FailedFiles: %d, SkippedFiles: %d  / %d",
+		leg.imported, leg.skipped, leg.skippedEmpty, leg.duplicates, leg.groupsDone, failed, leg.skippedFiles, len(files))
+	if importErr != nil {
+		if failed == 0 { // only stopped
+			return importErr
+		}
+		return fmt.Errorf("%d of %d SQLite database files failed: %w", failed, len(workFiles), importErr)
+	}
 	return nil
+}
+
+// waitLegacyStartDelay waits delay (≤ 0: not at all) before the article import; a
+// closed stop ends the wait with an error that wraps ErrLegacyImportStopped.
+func waitLegacyStartDelay(delay time.Duration, stop <-chan struct{}) error {
+	if delay <= 0 {
+		return nil
+	}
+	log.Printf("[RSLIGHT-IMPORT] Sleeping for %v before import. You can cancel here with Ctrl+C if you only wanted to get the newsgroups added.", delay)
+	log.Printf("[RSLIGHT-IMPORT] Import of legacy articles starts in %v!", delay)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-stop:
+		log.Printf("[RSLIGHT-IMPORT] Stopped during the start delay: no article was imported")
+		return fmt.Errorf("before the article import: %w", ErrLegacyImportStopped)
+	case <-timer.C:
+		return nil
+	}
+}
+
+// importLegacyFiles runs importFn for every file, at most threads files at a time.
+// Every worker keeps its own error; the number of failed files is returned with an
+// error that names the first legacyErrSummaryMax of them in file order
+// (summarizeLegacyErrs). Once stop is closed no new file is started; the error then
+// also wraps ErrLegacyImportStopped (a file that returned it is not counted as failed).
+func importLegacyFiles(files []string, threads int, stop <-chan struct{}, importFn func(file string) error) (int, error) {
+	if threads < 1 {
+		threads = 1
+	}
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		errs    = make([]error, len(files)) // by file index: the summary keeps file order
+		stopped atomic.Bool
+	)
+	slots := make(chan struct{}, threads) // limits concurrency
+launch:
+	for i, file := range files {
+		select {
+		case <-stop:
+			stopped.Store(true)
+			break launch
+		case slots <- struct{}{}: // get slot
+		}
+		// both cases of the select above can be ready: check stop again with the slot
+		// held, so no file starts after the stop was seen
+		select {
+		case <-stop:
+			<-slots
+			stopped.Store(true)
+			break launch
+		default:
+		}
+		wg.Add(1)
+		// for every database file we want to import run a dedicated go routine
+		go func(i int, file string) {
+			defer func() {
+				<-slots // return slot
+				wg.Done()
+			}()
+			err := importFn(file)
+			switch {
+			case err == nil:
+			case errors.Is(err, ErrLegacyImportStopped):
+				stopped.Store(true)
+			default:
+				log.Printf("[RSLIGHT-IMPORT] Warning: rslight-import failed file '%s': %v", file, err)
+				mu.Lock()
+				errs[i] = fmt.Errorf("file '%s': %w", file, err)
+				mu.Unlock()
+			}
+		}(i, file)
+	}
+	log.Printf("[RSLIGHT-IMPORT] Importing now! wait on internal wg.Wait()")
+	wg.Wait()
+	var failed []error
+	for _, err := range errs {
+		if err != nil {
+			failed = append(failed, err)
+		}
+	}
+	err := summarizeLegacyErrs(failed)
+	if stopped.Load() {
+		log.Printf("[RSLIGHT-IMPORT] Import stopped: no further file was started")
+		err = errors.Join(ErrLegacyImportStopped, err)
+	}
+	return len(failed), err
+}
+
+// summarizeLegacyErrs joins at most legacyErrSummaryMax errors and adds a line with
+// the number of the others (nil for none).
+func summarizeLegacyErrs(errs []error) error {
+	if len(errs) <= legacyErrSummaryMax {
+		return errors.Join(errs...)
+	}
+	shown := make([]error, 0, legacyErrSummaryMax+1)
+	shown = append(shown, errs[:legacyErrSummaryMax]...)
+	shown = append(shown, fmt.Errorf("... and %d more failed files (logged above)", len(errs)-legacyErrSummaryMax))
+	return errors.Join(shown...)
 }
 
 // GetSectionsSummary returns a summary of imported sections
@@ -580,11 +701,18 @@ func isValidDatabaseFilename(filename string) bool {
 
 // insertNewsgroupIfNotExists inserts a newsgroup into the main newsgroups table if it doesn't already exist
 func (leg *LegacyImporter) insertNewsgroupIfNotExists(name, description string) error {
+	return EnsureNewsgroup(leg.proc.DB, name, description)
+}
+
+// EnsureNewsgroup creates the newsgroups row for name when it does not exist yet: active,
+// posting allowed, no expiry, low_water 1 and no articles. An existing row is left as it is.
+// Offline importers (rslight, mbox) use it for the groups they meet in their input.
+func EnsureNewsgroup(db *database.Database, name, description string) error {
 	if name == "" {
-		return fmt.Errorf("error in insertNewsgroupIfNotExists: newsgroup name cannot be empty.. supplied description: '%s'", description)
+		return fmt.Errorf("error in EnsureNewsgroup: newsgroup name cannot be empty.. supplied description: '%s'", description)
 	}
 	// Check if newsgroup already exists
-	_, err := leg.proc.DB.MainDBGetNewsgroup(name)
+	_, err := db.MainDBGetNewsgroup(name)
 	if err == nil {
 		// Newsgroup already exists, skip insertion
 		return nil
@@ -606,5 +734,5 @@ func (leg *LegacyImporter) insertNewsgroupIfNotExists(name, description string) 
 		// Note: UpdatedAt will be set only when articles are processed via batch
 	}
 
-	return leg.proc.DB.InsertNewsgroup(newsgroup)
+	return db.InsertNewsgroup(newsgroup)
 }

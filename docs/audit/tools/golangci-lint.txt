@@ -1,0 +1,508 @@
+golangci-lint has version 2.14.0 built with go1.27.1 from (unknown, modified: ?, mod sum: "h1:ot8QffRa4LzAAEgtvNYrVs9esxQ7xoTwoAv6uhp4ngA=") on (unknown)
+note: repo .golangci.yml is v1 format and cannot be loaded by v2 (output.formats); run with --no-config -E gosec
+active_files/hierarchies/organize_by_theme.go:27:18: Error return value of `file.Close` is not checked (errcheck)
+	defer file.Close()
+	                ^
+active_files/hierarchies/organize_by_theme.go:128:15: Error return value of `fmt.Fprintf` is not checked (errcheck)
+			fmt.Fprintf(readme, "# %s\n\n", category.Description)
+			           ^
+active_files/hierarchies/organize_by_theme.go:129:15: Error return value of `fmt.Fprintf` is not checked (errcheck)
+			fmt.Fprintf(readme, "This directory contains newsgroup hierarchies for: %s\n\n", category.Description)
+			           ^
+active_files/hierarchies/organize_by_theme.go:130:15: Error return value of `fmt.Fprintf` is not checked (errcheck)
+			fmt.Fprintf(readme, "## Hierarchies in this category:\n\n")
+			           ^
+active_files/hierarchies/organize_by_theme.go:151:16: Error return value of `readme.Close` is not checked (errcheck)
+			readme.Close()
+			            ^
+active_files/hierarchies/organize_by_theme.go:158:17: Error return value of `os.RemoveAll` is not checked (errcheck)
+				os.RemoveAll(categoryDir)
+				            ^
+active_files/hierarchies/organize_by_theme.go:196:14: Error return value of `index.Close` is not checked (errcheck)
+		index.Close()
+		           ^
+active_files/hierarchies/organize_by_theme.go:212:20: Error return value of `source.Close` is not checked (errcheck)
+	defer source.Close()
+	                  ^
+active_files/hierarchies/organize_by_theme.go:218:25: Error return value of `destination.Close` is not checked (errcheck)
+	defer destination.Close()
+	                       ^
+active_files/hierarchies/organize_by_theme.go:230:18: Error return value of `file.Close` is not checked (errcheck)
+	defer file.Close()
+	                ^
+cmd/merge-descriptions/main.go:66:18: Error return value of `file.Close` is not checked (errcheck)
+	defer file.Close()
+	                ^
+cmd/merge-descriptions/main.go:140:20: Error return value of `writer.Flush` is not checked (errcheck)
+	defer writer.Flush()
+	                  ^
+cmd/tcp2tor/main.go:536:18: Error return value of `conn.Close` is not checked (errcheck)
+	defer conn.Close()
+	                ^
+cmd/tcp2tor/main.go:564:24: Error return value of `s.listener.Close` is not checked (errcheck)
+	defer s.listener.Close()
+	                      ^
+cmd/tcp2tor/main.go:581:27: Error return value of `tcpListener.SetDeadline` is not checked (errcheck)
+			tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
+			                       ^
+cmd/tcp2tor/main.go:606:19: Error return value of `s.listener.Close` is not checked (errcheck)
+		s.listener.Close()
+		                ^
+cmd/tcp2tor/main.go:612:24: Error return value of `clientConn.Close` is not checked (errcheck)
+	defer clientConn.Close()
+	                      ^
+cmd/tcp2tor/main.go:647:24: Error return value of `targetConn.Close` is not checked (errcheck)
+	defer targetConn.Close()
+	                      ^
+internal/database/config_cache.go:79:18: Error return value of `rows.Close` is not checked (errcheck)
+	defer rows.Close()
+	                ^
+internal/database/db_aimodels.go:32:18: Error return value of `rows.Close` is not checked (errcheck)
+	defer rows.Close()
+	                ^
+internal/database/db_aimodels.go:198:18: Error return value of `rows.Close` is not checked (errcheck)
+	defer rows.Close()
+	                ^
+internal/database/db_batch.go:1012:19: Error return value of `tx.Rollback` is not checked (errcheck)
+	defer tx.Rollback()
+	                 ^
+internal/database/db_batch.go:1019:18: Error return value of `stmt.Close` is not checked (errcheck)
+	defer stmt.Close()
+	                ^
+internal/database/db_batch.go:1170:18: Error return value of `stmt.Close` is not checked (errcheck)
+	defer stmt.Close()
+	                ^
+internal/database/db_batch.go:1415:25: Error return value of `selectStmt.Close` is not checked (errcheck)
+		defer selectStmt.Close()
+		                      ^
+internal/database/db_batch.go:1421:25: Error return value of `updateStmt.Close` is not checked (errcheck)
+		defer updateStmt.Close()
+		                      ^
+internal/database/db_batch.go:1427:23: Error return value of `initStmt.Close` is not checked (errcheck)
+		defer initStmt.Close()
+		                    ^
+internal/database/db_nntp_users.go:325:28: Error return value of `db.UpdateNNTPUserLastLogin` is not checked (errcheck)
+	db.UpdateNNTPUserLastLogin(user.ID)
+	                          ^
+internal/database/db_rescan.go:455:52: Error return value of `(*database/sql.Row).Scan` is not checked (errcheck)
+	tx.QueryRow(query_RebuildThreadsFromScratch2).Scan(&existingThreads)
+	                                                  ^
+internal/database/db_rescan.go:719:25: Error return value of `threadStmt.Close` is not checked (errcheck)
+		defer threadStmt.Close()
+		                      ^
+internal/database/db_rescan.go:766:24: Error return value of `replyStmt.Close` is not checked (errcheck)
+		defer replyStmt.Close()
+		                     ^
+internal/database/db_rescan.go:846:19: Error return value of `stmt.Close` is not checked (errcheck)
+		defer stmt.Close()
+		                ^
+internal/database/fu_queries_test.go:274:31: Error return value of `pool.Close` is not checked (errcheck)
+	t.Cleanup(func() { pool.Close() })
+	                             ^
+internal/database/fu_queries_test.go:288:34: Error return value of `blocker.Close` is not checked (errcheck)
+	t.Cleanup(func() { blocker.Close() })
+	                                ^
+internal/database/lo1_db_test.go:39:33: Error return value of `mainDB.Close` is not checked (errcheck)
+	t.Cleanup(func() { mainDB.Close() })
+	                               ^
+internal/database/lo1_db_test.go:125:20: Error return value of `mainDB.Close` is not checked (errcheck)
+	defer mainDB.Close()
+	                  ^
+internal/database/lo1_db_test.go:250:17: Error return value of `tdb.Close` is not checked (errcheck)
+	defer tdb.Close()
+	               ^
+internal/database/lo1_db_test.go:260:13: Error return value of `conn.Close` is not checked (errcheck)
+		conn.Close()
+		          ^
+internal/database/lo2_writer_test.go:72:17: Error return value of `tdb.Close` is not checked (errcheck)
+	defer tdb.Close()
+	               ^
+internal/database/progress.go:50:11: Error return value of `db.Close` is not checked (errcheck)
+		db.Close()
+		        ^
+internal/database/progress.go:100:19: Error return value of `p.UpdateProgress` is not checked (errcheck)
+		p.UpdateProgress(backendName, newsgroupName, 0) // Initialize progress
+		                ^
+internal/history/history sqlite3_sharded.go:79:11: Error return value of `db.Close` is not checked (errcheck)
+		db.Close()
+		        ^
+internal/history/history sqlite3_sharded.go:127:11: Error return value of `s.Close` is not checked (errcheck)
+			s.Close()
+			       ^
+internal/history/history sqlite3_sharded.go:135:11: Error return value of `s.Close` is not checked (errcheck)
+			s.Close()
+			       ^
+internal/history/history sqlite3_sharded.go:210:15: Error return value of `tx.Rollback` is not checked (errcheck)
+			tx.Rollback()
+			           ^
+internal/history/history.go:496:15: Error return value of `tx.Rollback` is not checked (errcheck)
+			tx.Rollback()
+			           ^
+internal/history/history_test.go:41:28: Error return value of `h.Close` is not checked (errcheck)
+	t.Cleanup(func() { h.Close() })
+	                          ^
+internal/history/history_test.go:75:16: Error return value of `db.Close` is not checked (errcheck)
+	defer db.Close()
+	              ^
+internal/history/history_test.go:359:16: Error return value of `h2.Close` is not checked (errcheck)
+	defer h2.Close()
+	              ^
+internal/history/history_test.go:379:20: Error return value of `conn.Close` is not checked (errcheck)
+			defer conn.Close()
+			                ^
+active_files/hierarchies/organize_by_theme.go:23:15: G304: Potential file inclusion via variable (gosec)
+	file, err := os.Open(sqlFile)
+	             ^
+active_files/hierarchies/organize_by_theme.go:105:12: G301: Expect directory permissions to be 0750 or less (gosec)
+	if err := os.MkdirAll(themedDir, 0755); err != nil {
+	          ^
+active_files/hierarchies/organize_by_theme.go:119:13: G301: Expect directory permissions to be 0750 or less (gosec)
+		if err := os.MkdirAll(categoryDir, 0755); err != nil {
+		          ^
+cmd/audit-web-posts/main_test.go:370:13: G302: Expect file permissions to be 0600 or less (gosec)
+		if err := os.Chmod(d, 0555); err != nil {
+		          ^
+cmd/audit-web-posts/main_test.go:376:14: G302: Expect file permissions to be 0600 or less (gosec)
+			if err := os.Chmod(d, 0755); err != nil {
+			          ^
+cmd/benchmark_hash/main.go:4:2: G501: Blocklisted import crypto/md5: weak cryptographic primitive (gosec)
+	"crypto/md5"
+	^
+cmd/benchmark_hash/main.go:5:2: G505: Blocklisted import crypto/sha1: weak cryptographic primitive (gosec)
+	"crypto/sha1"
+	^
+cmd/benchmark_hash/main.go:20:9: G404: Use of weak random number generator (math/rand or math/rand/v2 instead of crypto/rand) (gosec)
+	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+	       ^
+cmd/benchmark_hash/main.go:25:18: G115: integer overflow conversion int -> byte (gosec)
+			guid[j] = byte(33 + rnd.Intn(94)) // printable ASCII
+			              ^
+cmd/benchmark_hash/main.go:40:8: G401: Use of weak cryptographic primitive (gosec)
+		h := md5.Sum([]byte(s))
+		     ^
+cmd/benchmark_hash/main.go:48:8: G401: Use of weak cryptographic primitive (gosec)
+		h := sha1.Sum([]byte(s))
+		     ^
+cmd/expire-news/main.go:603:12: G201: SQL string formatting (gosec)
+		query := fmt.Sprintf("DELETE FROM articles WHERE article_num IN (%s)", placeholders)
+		         ^
+cmd/expire-news/main.go:619:18: G201: SQL string formatting (gosec)
+		threadQuery := fmt.Sprintf(
+			"DELETE FROM threads WHERE root_article IN (%s) OR child_article IN (%s) OR parent_article IN (%s)",
+			placeholders, placeholders, placeholders)
+cmd/history-rebuild/helpers.go:187:24: G202: SQL string concatenation (gosec)
+	rows, err := db.Query("SELECT newsgroups FROM " + tableName)
+	                      ^
+cmd/history-rebuild/main.go:12:2: G108: Profiling endpoint is automatically exposed on /debug/pprof (gosec)
+	_ "net/http/pprof"
+	^
+cmd/history-rebuild/main.go:100:14: G114: Use of net/http serve function that has no support for setting timeouts (gosec)
+			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+			          ^
+cmd/history-rebuild/main.go:502:11: G202: SQL string concatenation (gosec)
+	query := "SELECT message_id, newsgroups FROM " + tableName + " WHERE message_id > ? ORDER BY message_id LIMIT ?"
+	         ^
+cmd/import-flat-files/main.go:345:13: G201: SQL string formatting (gosec)
+			query := fmt.Sprintf("INSERT INTO %s (messageid_hash, head, body) VALUES (?, ?, ?)", tableName)
+			         ^
+cmd/merge-descriptions/main.go:28:13: G706: Log injection via taint analysis (gosec)
+		log.Printf("Warning: Could not read %s: %v", latestFile, err)
+		          ^
+cmd/merge-descriptions/main.go:30:13: G706: Log injection via taint analysis (gosec)
+		log.Printf("Read %d descriptions from %s", len(descriptions), latestFile)
+		          ^
+cmd/merge-descriptions/main.go:42:14: G706: Log injection via taint analysis (gosec)
+			log.Printf("Warning: Could not read %s: %v", yearFile, err)
+			          ^
+cmd/merge-descriptions/main.go:62:15: G304: Potential file inclusion via variable (gosec)
+	file, err := os.Open(filename)
+	             ^
+cmd/merge-descriptions/main.go:126:15: G304: Potential file inclusion via variable (gosec)
+	file, err := os.Create(filename)
+	             ^
+cmd/nntp-transfer/main.go:12:2: G108: Profiling endpoint is automatically exposed on /debug/pprof (gosec)
+	_ "net/http/pprof" // Memory profiling
+	^
+cmd/nntp-transfer/main.go:311:27: G115: integer overflow conversion uint -> int64 (gosec)
+	REDIS_TTL = time.Duration(*redisTTL) * time.Second
+	                         ^
+cmd/nntp-transfer/main.go:551:14: G114: Use of net/http serve function that has no support for setting timeouts (gosec)
+			if err := http.ListenAndServe(addr, nil); err != nil {
+			          ^
+cmd/nntp-transfer/main.go:1404:35: G115: integer overflow conversion int64 -> uint64 (gosec)
+		tmpglobalTotalArticles += uint64(totalNGArticles)
+		                                ^
+cmd/nntp-transfer/main.go:2940:12: G114: Use of net/http serve function that has no support for setting timeouts (gosec)
+	if err := http.ListenAndServe(addr, nil); err != nil {
+	          ^
+internal/database/db_apitokens.go:42:7: G101: Potential hardcoded credentials (gosec)
+const query_CreateAPIToken = `INSERT INTO api_tokens (apitoken, ownername, ownerid, expires_at, is_enabled)
+	          VALUES (?, ?, ?, ?, 1)`
+internal/database/lo2_pool_bench_test.go:205:30: G115: integer overflow conversion int -> uint64 (gosec)
+	return int(r.next() % uint64(n))
+	                            ^
+internal/database/lo2_pool_bench_test.go:429:50: G115: integer overflow conversion int -> uint64 (gosec)
+			rnd := lo2PoolRand(0x9e3779b97f4a7c15 ^ uint64(i+1))
+			                                              ^
+internal/database/lo2_pool_bench_test.go:455:50: G115: integer overflow conversion int -> uint64 (gosec)
+			rnd := lo2PoolRand(0xda3e39cb94b95bdb ^ uint64(j+1))
+			                                              ^
+internal/database/lo2_writer_test.go:360:8: G101: Potential hardcoded credentials (gosec)
+	const password = "lo2writer-nntp-pw"
+	      ^
+internal/database/queries.go:806:2: G101: Potential hardcoded credentials (gosec)
+	query_UpdateUserPassword    = `UPDATE users SET password_hash = ? WHERE id = ?`
+	^
+internal/database/sqlite_retry.go:103:26: G404: Use of weak random number generator (math/rand or math/rand/v2 instead of crypto/rand) (gosec)
+	jitter := time.Duration(rand.Int63n(int64(delay) / 2))
+	                        ^
+internal/database/utils.go:6:2: G501: Blocklisted import crypto/md5: weak cryptographic primitive (gosec)
+	"crypto/md5"
+	^
+internal/database/utils.go:43:9: G204: Subprocess launched with variable (gosec)
+	cmd := exec.Command("rsync", args...)
+	       ^
+internal/database/w1_sqlite_test.go:255:12: G306: Expect WriteFile permissions to be 0600 or less (gosec)
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+	          ^
+internal/database/w1_sqlite_test.go:305:12: G306: Expect WriteFile permissions to be 0600 or less (gosec)
+	if err := os.WriteFile(path, []byte("PRAGMA foreign_keys = ON;\nCREATE TABLE w1a(x);\nCREATE TABLE w1a(x);\n"), 0o644); err != nil {
+	          ^
+internal/history/history_config.go:4:2: G501: Blocklisted import crypto/md5: weak cryptographic primitive (gosec)
+	"crypto/md5"
+	^
+internal/history/history_config.go:241:9: G301: Expect directory permissions to be 0750 or less (gosec)
+	err := os.MkdirAll(path, 0755)
+	       ^
+internal/history/history_config.go:253:10: G401: Use of weak cryptographic primitive (gosec)
+	hash := md5.Sum([]byte(messageID))
+	        ^
+internal/history/history_test.go:173:25: G202: SQL string concatenation (gosec)
+			if _, err := db.Exec("INSERT INTO "+tableName+"(message_id,newsgroups) VALUES(?,?)", legacy.id, legacy.val); err != nil {
+			                     ^
+internal/models/sanitizing.go:249:12: G203: The used method does not auto-escape HTML. This can potentially lead to 'Cross-site Scripting' vulnerabilities, in case the attacker controls the input. (gosec)
+	result := template.HTML(html.EscapeString(utf8Text))
+	          ^
+internal/models/sanitizing.go:535:12: G203: The used method does not auto-escape HTML. This can potentially lead to 'Cross-site Scripting' vulnerabilities, in case the attacker controls the input. (gosec)
+	result := template.HTML(html.EscapeString(text))
+	          ^
+internal/models/sanitizing.go:643:23: G203: The used method does not auto-escape HTML. This can potentially lead to 'Cross-site Scripting' vulnerabilities, in case the attacker controls the input. (gosec)
+		fields["subject"] = template.HTML(html.EscapeString(utf8Subject))
+		                    ^
+internal/nntp/lo1_paths_test.go:26:12: G306: Expect WriteFile permissions to be 0600 or less (gosec)
+	if err := os.WriteFile(filepath.Join(cacheDir, host+".list"), []byte(body), 0644); err != nil {
+	          ^
+internal/nntp/nntp-server-harness_test.go:117:19: G703: Path traversal via taint analysis (gosec)
+		_ = os.RemoveAll(absDir)
+		                ^
+internal/nntp/nntp-server-harness_test.go:690:9: G204: Subprocess launched with variable (gosec)
+	cmd := exec.CommandContext(ctx, exe, "-test.run="+hIsolatedRunPattern(t.Name()), "-test.count=1", "-test.v")
+	       ^
+internal/processor/analyze.go:955:13: G302: Expect file permissions to be 0600 or less (gosec)
+		f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		          ^
+cmd/nntp-transfer/main.go:1785:2: ineffectual assignment to astart (ineffassign)
+	astart := start
+	^
+cmd/nntp-transfer/main.go:1786:2: ineffectual assignment to astart2 (ineffassign)
+	astart2 := start
+	^
+cmd/nntp-transfer/main.go:1877:4: ineffectual assignment to minLoad (ineffassign)
+			minLoad = WorkerQueueLength[wid]
+			^
+cmd/nntp-transfer/main.go:2732:4: ineffectual assignment to wantedArticles (ineffassign)
+			wantedArticles := make([]*models.Article, 0, len(job.WantedIDs))
+			^
+internal/database/db_batch.go:1627:2: ineffectual assignment to newSleep (ineffassign)
+	newSleep := sleep
+	^
+internal/database/db_rescan.go:590:2: ineffectual assignment to msgIDToArticleNum (ineffassign)
+	msgIDToArticleNum = nil
+	^
+cmd/nntp-fetcher/main.go:303:10: SA9003: empty branch (staticcheck)
+		} else {
+		       ^
+cmd/nntp-fetcher/main.go:605:6: SA9003: empty branch (staticcheck)
+					if !ok {
+					^
+cmd/recover-db/main.go:300:5: SA4006: this value of errorGroups is never used (staticcheck)
+				errorGroups++
+				^
+cmd/recover-db/main.go:1108:21: SA4010: this result of append is never used, except maybe in other appends (staticcheck)
+						allProblems = append(allProblems, problem)
+						              ^
+internal/common/headers.go:247:15: ST1023: should omit type string from declaration; it will be inferred from the right-hand side (staticcheck)
+		var refline string = "References:"
+		            ^
+internal/common/headers.go:510:19: ST1023: should omit type string from declaration; it will be inferred from the right-hand side (staticcheck)
+		var currentLine string = "Newsgroups: "
+		                ^
+internal/common/headers.go:533:3: SA4006: this value of validNewsgroups is never used (staticcheck)
+		validNewsgroups = validNewsgroups[:0] // free memory
+		^
+internal/database/db_batch.go:1760:15: ST1023: should omit type int from declaration; it will be inferred from the right-hand side (staticcheck)
+	var maxQueue int = sq.maxQueued / 100 * 80
+	             ^
+internal/database/db_batch.go:1761:13: ST1023: should omit type int from declaration; it will be inferred from the right-hand side (staticcheck)
+	var target int = sq.maxQueued / 100 * 20
+	           ^
+internal/database/hierarchy_cache.go:292:4: QF1003: could use tagged switch on sortBy (staticcheck)
+			if sortBy == "activity" {
+			^
+internal/models/models.go:249:10: SA9003: empty branch (staticcheck)
+		} else {
+		       ^
+internal/nntp/nntp-transfer.go:570:2: S1008: should use 'return ttMode.CheckMode' instead of 'if ttMode.CheckMode { return true }; return false' (staticcheck)
+	if ttMode.CheckMode {
+	^
+internal/processor/proc-utils.go:618:21: ST1023: should omit type int from declaration; it will be inferred from the right-hand side (staticcheck)
+	var hour, min, sec int = 12, 0, 0 // Default to noon if no time found
+	                   ^
+internal/processor/proc_DLArt.go:108:18: ST1023: should omit type int64 from declaration; it will be inferred from the right-hand side (staticcheck)
+	var lastGoodEnd int64 = start
+	                ^
+internal/web/w1_auth_test.go:356:5: SA4000: identical expressions on the left and right side of the '||' operator (staticcheck)
+	if w0Srv.getWebSession(c) != nil || w0Srv.getWebSession(c) != nil || w0Srv.isAdminRequest(c) {
+	   ^
+internal/web/web_admin_settings_unified.go:250:2: QF1003: could use tagged switch on settingType (staticcheck)
+	if settingType == config.FORM_FIELD_REGISTRATION {
+	^
+internal/web/web_admin_settings_unified.go:291:10: ST1005: error strings should not end with punctuation or newlines (staticcheck)
+		return fmt.Errorf("NNTP hostname can not be empty!")
+		       ^
+internal/web/web_admin_settings_unified.go:300:10: ST1005: error strings should not be capitalized (staticcheck)
+		return fmt.Errorf("Invalid size format: must be a number")
+		       ^
+internal/web/web_admin_settings_unified.go:304:10: ST1005: error strings should not be capitalized (staticcheck)
+		return fmt.Errorf("Size must be at least 1024 bytes (1KB)")
+		       ^
+internal/web/web_admin_settings_unified.go:308:10: ST1005: error strings should not be capitalized (staticcheck)
+		return fmt.Errorf("Size must not exceed 16777216 bytes (16MB)")
+		       ^
+internal/web/web_auth.go:285:6: QF1001: could apply De Morgan's law (staticcheck)
+		if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+		   ^
+cmd/nntp-fetcher/main.go:779:6: func getRealMemoryUsage is unused (unused)
+func getRealMemoryUsage() (uint64, error) {
+     ^
+cmd/nntp-transfer/main.go:36:5: var dbBatchSize is unused (unused)
+var dbBatchSize int64 = 1000 // Load 1000 articles from DB at a time
+    ^
+cmd/nntp-transfer/main.go:1086:6: func matchesAnyPattern is unused (unused)
+func matchesAnyPattern(newsgroup string, patterns []string) bool {
+     ^
+cmd/web/main.go:28:2: var isleep is unused (unused)
+	isleep                int64
+	^
+internal/cache/sanitized_cache.go:407:27: func (*SanitizedCache).xxxhashMessageID is unused (unused)
+func (sc *SanitizedCache) xxxhashMessageID(messageID string) string {
+                          ^
+internal/cache/sanitized_cache.go:420:27: func (*SanitizedCache).evictOldest is unused (unused)
+func (sc *SanitizedCache) evictOldest() {
+                          ^
+internal/common/headers.go:146:6: func parseReferencesToContinuedLineString is unused (unused)
+func parseReferencesToContinuedLineString(input string) string {
+     ^
+internal/common/headers.go:626:6: func multiLineStringToSlice is unused (unused)
+func multiLineStringToSlice(input string) []string {
+     ^
+internal/database/db_batch.go:483:21: func (*SQ3batch).getOrCreateStringSlice is unused (unused)
+func (sq *SQ3batch) getOrCreateStringSlice() []string {
+                    ^
+internal/database/db_batch.go:492:21: func (*SQ3batch).returnStringSlice is unused (unused)
+func (sq *SQ3batch) returnStringSlice(slice []string) {
+                    ^
+internal/database/db_batch.go:1558:2: field mux is unused (unused)
+	mux           sync.RWMutex
+	^
+internal/database/hierarchy_cache.go:618:27: func (*HierarchyCache).isDirectChild is unused (unused)
+func (hc *HierarchyCache) isDirectChild(groupName, hierarchy string) bool {
+                          ^
+internal/database/progress.go:19:2: field mux is unused (unused)
+	mux sync.RWMutex
+	^
+internal/database/queries.go:1559:7: const query_SearchNewsgroups is unused (unused)
+const query_SearchNewsgroups = `
+      ^
+internal/database/queries.go:1605:7: const query_SearchNewsgroupsAdmin is unused (unused)
+const query_SearchNewsgroupsAdmin = `
+      ^
+internal/database/queries.go:1670:7: const query_CountSearchNewsgroups is unused (unused)
+const query_CountSearchNewsgroups = `
+      ^
+internal/models/sanitizing.go:261:6: func splitDomainFromEmail is unused (unused)
+func splitDomainFromEmail(email string) (string, string) {
+     ^
+internal/nntp/nntp-client.go:346:23: func (*BackendConn).xSetReadDeadline is unused (unused)
+func (c *BackendConn) xSetReadDeadline(t time.Time) error {
+                      ^
+internal/nntp/nntp-client.go:356:23: func (*BackendConn).xSetWriteDeadline is unused (unused)
+func (c *BackendConn) xSetWriteDeadline(t time.Time) error {
+                      ^
+internal/nntp/nntp-cmd-helpers.go:25:28: func (*ClientConnection).parseArticleHeadersShort is unused (unused)
+func (c *ClientConnection) parseArticleHeadersShort(article *models.Article) []string {
+                           ^
+internal/nntp/nntp-peering.go:389:27: func (*PeeringManager).enhancedReverseDNSLookup is unused (unused)
+func (pm *PeeringManager) enhancedReverseDNSLookup(remoteAddr string) (string, bool) {
+                          ^
+internal/nntp/nntp-server-harness_test.go:134:6: func hDataDir is unused (unused)
+func hDataDir(t *testing.T) string {
+     ^
+internal/nntp/nntp-server-harness_test.go:347:19: func (*hClient).rawUntilDot is unused (unused)
+func (c *hClient) rawUntilDot(t *testing.T) []byte {
+                  ^
+internal/nntp/nntp-server-harness_test.go:364:19: func (*hClient).close is unused (unused)
+func (c *hClient) close() {
+                  ^
+internal/nntp/nntp-server-harness_test.go:394:6: func hExpectLines is unused (unused)
+func hExpectLines(got, want []string) error {
+     ^
+internal/nntp/nntp-server-harness_test.go:566:6: type hFakeProcessor is unused (unused)
+type hFakeProcessor struct {
+     ^
+internal/nntp/nntp-server-harness_test.go:583:26: func (*hFakeProcessor).ProcessIncomingArticle is unused (unused)
+func (p *hFakeProcessor) ProcessIncomingArticle(article *models.Article) (int, error) {
+                         ^
+internal/nntp/nntp-server-harness_test.go:593:26: func (*hFakeProcessor).CheckMessageID is unused (unused)
+func (p *hFakeProcessor) CheckMessageID(messageID string) int {
+                         ^
+internal/nntp/nntp-server-harness_test.go:603:26: func (*hFakeProcessor).FindArticleByMessageID is unused (unused)
+func (p *hFakeProcessor) FindArticleByMessageID(messageID, currentGroup string) (*models.Article, error) {
+                         ^
+internal/nntp/nntp-server-harness_test.go:615:26: func (*hFakeProcessor).processedArticles is unused (unused)
+func (p *hFakeProcessor) processedArticles() []*models.Article {
+                         ^
+internal/nntp/nntp-server-harness_test.go:621:26: func (*hFakeProcessor).findCount is unused (unused)
+func (p *hFakeProcessor) findCount() int {
+                         ^
+internal/nntp/nntp-server-harness_test.go:646:6: func knownBug is unused (unused)
+func knownBug(t *testing.T, id string, err error) {
+     ^
+internal/nntp/nntp-server-harness_test.go:720:6: func hIsErrNotFound is unused (unused)
+func hIsErrNotFound(err error) bool {
+     ^
+internal/processor/analyze.go:1009:6: func formatNumber is unused (unused)
+func formatNumber(n int64) string {
+     ^
+internal/processor/proc-utils.go:575:6: func countLines is unused (unused)
+func countLines(b []byte) int {
+     ^
+internal/processor/threading.go:43:6: func containsAtAndDot is unused (unused)
+func containsAtAndDot(messageID string) bool {
+     ^
+internal/web/web_admin_apitokens.go:159:21: func (*WebServer).adminCleanupExpiredTokens is unused (unused)
+func (s *WebServer) adminCleanupExpiredTokens(c *gin.Context) {
+                    ^
+internal/web/web_utils.go:132:21: func (*WebServer).requireAdminAuthJSON is unused (unused)
+func (s *WebServer) requireAdminAuthJSON(c *gin.Context) bool {
+                    ^
+internal/web/web_utils.go:185:6: func referencesAnyInThread is unused (unused)
+func referencesAnyInThread(references string, threadMessageIDs map[string]bool) bool {
+     ^
+166 issues:
+* errcheck: 50
+* gosec: 50
+* ineffassign: 6
+* staticcheck: 21
+* unused: 39
+exit=1

@@ -9,7 +9,7 @@
 
 {{define "content"}}
 <div class="row">
-    <div class="col-md-8">
+    <div class="col-md-6">
         <div class="card">
             <div class="card-header">
                 <h4 class="card-title mb-0">👤 User Profile</h4>
@@ -28,6 +28,7 @@
                 {{end}}
 
                 <form method="POST" action="/profile">
+                <!--
                     <div class="row">
                         <div class="col-md-6">
                             <div class="mb-3">
@@ -37,53 +38,62 @@
                                 <div class="form-text">Username cannot be changed</div>
                             </div>
                         </div>
-                        <div class="col-md-6">
+                    </div>
+                -->
+                    <div class="row">
                             <div class="mb-3">
                                 <label for="email" class="form-label">Email Address</label>
                                 <input type="email" class="form-control" id="email" name="email" required
                                     value="{{.User.Email}}">
                             </div>
-                        </div>
                     </div>
 
-                    <div class="mb-3">
-                        <label for="display_name" class="form-label">Display Name</label>
-                        <input type="text" class="form-control" id="display_name" name="display_name"
-                            value="{{.User.DisplayName}}" placeholder="Your display name (optional)">
-                        <div class="form-text">How your name appears in posts</div>
+                    <div class="row">
+                            <div class="mb-3">
+                                <label for="display_name" class="form-label">From Name</label>
+                                <input type="text" class="form-control" id="display_name" name="display_name"
+                                    value="{{.User.DisplayName}}" placeholder="Your display name (optional)">
+                                <div class="form-text small text-light">
+                                    <strong>Display Name:</strong><br>
+                                    • Posts use 'Your Name &lt;noreply@…&gt;'.<br>
+                                    • Up to 64 characters; &lt;, &gt; and " are not allowed.<br>
+                                    <span class="text-warning"><u>⚠️ Important:</u><br>
+                                        The system adds tracking headers to all posted articles.</span><br>
+                                    <em class="text-info">Spam messages are prohibited. Peace be upon you.</em>
+                                </div>
+                            </div>
                     </div>
 
                     <hr>
 
                     <h5>Change Password</h5>
                     <div class="row">
-                        <div class="col-md-4">
                             <div class="mb-3">
                                 <label for="current_password" class="form-label">Current Password</label>
                                 <input autocomplete="new-password" type="password" class="form-control"
                                     id="current_password" name="current_password" placeholder="Enter current password">
                             </div>
-                        </div>
-                        <div class="col-md-4">
+                    </div>
+                    <div class="row">
                             <div class="mb-3">
                                 <label for="new_password" class="form-label">New Password</label>
                                 <input autocomplete="new-password" type="password" class="form-control"
                                     id="new_password" name="new_password" placeholder="Enter new password">
                             </div>
-                        </div>
-                        <div class="col-md-4">
+                    </div>
+                    <div class="row">
                             <div class="mb-3">
                                 <label for="confirm_password" class="form-label">Confirm New Password</label>
                                 <input autocomplete="new-password" type="password" class="form-control"
                                     id="confirm_password" name="confirm_password" placeholder="Confirm new password">
                             </div>
-                        </div>
                     </div>
-
-                    <div class="d-grid d-md-flex justify-content-md-end">
-                        <button type="submit" class="btn btn-primary">
-                            💾 Update Profile
-                        </button>
+                    <div class="row">
+                            <div class="mb-3">
+                                <button type="submit" class="btn btn-primary">
+                                    💾 Update Profile
+                                </button>
+                            </div>
                     </div>
                 </form>
             </div>
@@ -114,36 +124,9 @@
         </div>
     </div>
     -->
-    <div class="col-md-4">
-        <div class="card">
-            <div class="card-header">
-                <h5 class="card-title mb-0">Account Information</h5>
-            </div>
-            <div class="card-body">
-                <dl class="row">
-                    <dt class="col-sm-4">User ID:</dt>
-                    <dd class="col-sm-8">{{.User.ID}}</dd>
+    <div class="col-md-6">
 
-                    <dt class="col-sm-4">Username:</dt>
-                    <dd class="col-sm-8">{{.User.Username}}</dd>
-
-                    <dt class="col-sm-4">Email:</dt>
-                    <dd class="col-sm-8">{{.User.Email}}</dd>
-
-                    <dt class="col-sm-4">Joined:</dt>
-                    <dd class="col-sm-8">{{.User.CreatedAt}}</dd>
-                </dl>
-
-                <hr>
-
-                <div class="d-grid">
-                    <a href="/logout" class="btn btn-outline-danger">
-                        🚪 Logout
-                    </a>
-                </div>
-            </div>
-        </div>
-
+    <!--
         {{if .IsAdmin}}
         <div class="card mt-3">
             <div class="card-header">
@@ -155,6 +138,132 @@
                         🛠️ Admin Panel
                     </a>
                 </div>
+            </div>
+        </div>
+        {{end}}
+    -->
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Account Information</h5>
+            </div>
+            <div class="card-body">
+                <dl class="row">
+                    <!--
+                    <dt class="col-sm-4">User ID:</dt>
+                    <dd class="col-sm-8">{{.User.ID}}</dd>
+                    -->
+                    <dt class="col-sm-4">Username:</dt>
+                    <dd class="col-sm-8">{{.User.Username}}</dd>
+                    <!--
+                    <dt class="col-sm-4">Email:</dt>
+                    <dd class="col-sm-8">{{.User.Email}}</dd>
+                    -->
+                    <dt class="col-sm-4">Status:</dt>
+                    <dd class="col-sm-8">
+                        {{if .User.Verified}}
+                            <span class="badge bg-success">Verified</span>
+                        {{else}}
+                            <span class="badge bg-secondary">Unverified</span>
+                        {{end}}
+                        {{if .User.Disabled}}
+                            <span class="badge bg-danger">Disabled</span>
+                        {{else}}
+                            <span class="badge bg-success">Active</span>
+                        {{end}}
+                    </dd>
+
+                    <dt class="col-sm-4">Web Post:</dt>
+                    <dd class="col-sm-8">
+                        {{if .User.NoPosting}}
+                            <span class="badge bg-secondary">Read-Only</span>
+                        {{else}}
+                            <span class="badge bg-success">Allowed</span>
+                        {{end}}
+                    </dd>
+
+                    <dt class="col-sm-4">Post Count:</dt>
+                    <dd class="col-sm-8">
+                        <strong>{{.User.PostCount}}</strong> articles
+                        {{if .User.LastPostUnix}}
+                            <br><small class="text-muted">Last post: {{.User.LastPostUnix}}</small>
+                        {{end}}
+                    </dd>
+
+                    <dt class="col-sm-4">Joined:</dt>
+                    <dd class="col-sm-8">{{.Joined}}</dd>
+                </dl>
+                <!--
+                <hr>
+
+                <div class="d-grid">
+                    <a href="/logout" class="btn btn-outline-danger">
+                        🚪 Logout
+                    </a>
+                </div>
+                -->
+            </div>
+        </div>
+
+        {{if .NNTPUser}}
+        <div class="card mt-3">
+            <div class="card-header">
+                <h5 class="card-title mb-0">📰 NNTP Account</h5>
+                <p>
+                    <li>Local NNTP Server Address:</li>
+                    {{.LocalNNTPServerAddr}}
+                </p>
+            </div>
+            <div class="card-body">
+                <dl class="row">
+                    <dt class="col-sm-4">Username:</dt>
+                    <dd class="col-sm-8"><code>{{.NNTPUser.Username}}</code></dd>
+
+                    <dt class="col-sm-4">Status:</dt>
+                    <dd class="col-sm-8">
+                        {{if .NNTPUser.IsActive}}
+                            <span class="badge bg-success">Active</span>
+                        {{else}}
+                            <span class="badge bg-danger">Inactive</span>
+                        {{end}}
+                    </dd>
+
+                    <dt class="col-sm-4">Posting:</dt>
+                    <dd class="col-sm-8">
+                        {{if .NNTPUser.Posting}}
+                            <span class="badge bg-success">Allowed</span>
+                        {{else}}
+                            <span class="badge bg-secondary">Read-Only</span>
+                        {{end}}
+                    </dd>
+
+                    <dt class="col-sm-4">Max Conns:</dt>
+                    <dd class="col-sm-8">{{.NNTPUser.MaxConns}}</dd>
+
+                    {{if .NNTPUser.LastLogin}}
+                    <dt class="col-sm-4">Last Login:</dt>
+                    <dd class="col-sm-8">{{.NNTPUser.LastLogin.Format "2006-01-02 15:04"}}</dd>
+                    {{end}}
+                </dl>
+
+                <hr>
+
+                <form method="POST" action="/profile">
+                    <input type="hidden" name="reset_nntp_password" value="true">
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-outline-warning">
+                            🔄 Reset NNTP Password
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        {{else}}
+        <div class="card mt-3">
+            <div class="card-header">
+                <h5 class="card-title mb-0">📰 NNTP Account</h5>
+            </div>
+            <div class="card-body">
+                <p class="text-muted">No NNTP account found. Contact an administrator to create an NNTP account for newsreader access.</p>
             </div>
         </div>
         {{end}}

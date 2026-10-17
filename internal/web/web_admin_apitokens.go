@@ -11,31 +11,22 @@ import (
 )
 
 // countEnabledAPITokens counts how many API tokens are enabled
-func (s *WebServer) countEnabledAPITokens(tokens []*database.APIToken) int {
-	count := 0
+func (s *WebServer) countEnabledAPITokens(tokens []*database.APIToken) (count int64) {
 	for _, token := range tokens {
 		if token.IsEnabled {
 			count++
 		}
 	}
-	return count
+	return
 }
 
 // adminCreateAPIToken handles API token creation from admin form
 func (s *WebServer) adminCreateAPIToken(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get form data
 	ownerName := strings.TrimSpace(c.PostForm("owner_name"))
@@ -50,9 +41,10 @@ func (s *WebServer) adminCreateAPIToken(c *gin.Context) {
 	}
 
 	// Parse owner ID (optional)
-	ownerID := 0
+	var ownerID int64
 	if ownerIDStr != "" {
-		ownerID, err = strconv.Atoi(ownerIDStr)
+		var err error
+		ownerID, err = strconv.ParseInt(ownerIDStr, 10, 64)
 		if err != nil {
 			session.SetError("Invalid owner ID")
 			c.Redirect(http.StatusSeeOther, "/admin?tab=apitokens")
@@ -87,19 +79,11 @@ func (s *WebServer) adminCreateAPIToken(c *gin.Context) {
 
 // adminToggleAPIToken handles enabling/disabling API tokens
 func (s *WebServer) adminToggleAPIToken(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get form data
 	idStr := strings.TrimSpace(c.PostForm("id"))
@@ -138,19 +122,11 @@ func (s *WebServer) adminToggleAPIToken(c *gin.Context) {
 
 // adminDeleteAPIToken handles API token deletion
 func (s *WebServer) adminDeleteAPIToken(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get token ID
 	idStr := strings.TrimSpace(c.PostForm("id"))
@@ -181,19 +157,11 @@ func (s *WebServer) adminDeleteAPIToken(c *gin.Context) {
 
 // adminCleanupExpiredTokens handles cleanup of expired tokens
 func (s *WebServer) adminCleanupExpiredTokens(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Cleanup expired tokens
 	count, err := s.DB.CleanupExpiredTokens()

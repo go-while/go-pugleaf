@@ -2,9 +2,14 @@
 package web
 
 import (
+	"database/sql"
+	"errors"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +20,77 @@ import (
 
 // This file should contain the API endpoint functions from server.go:
 var LIMIT_listGroups = 128
+
+// maxOffsetArticles caps the OFFSET used by page-based article listings (deep OFFSET scans are slow).
+// Deeper pages must use the cursor parameter.
+const maxOffsetArticles = 12800
+
+// Limits of /api/v1/groups/:group/threads
+const (
+	apiThreadsDefaultLimit = 500
+	apiThreadsMaxLimit     = 2000
+	apiThreadsMaxOffset    = 1_000_000
+	apiStatsTTL            = 60 * time.Second
+)
+
+// clampOffsetPage returns page limited to 1..N so that (page-1)*pageSize <= maxOffset.
+func clampOffsetPage(page, pageSize, maxOffset int) int {
+	if page < 1 {
+		return 1
+	}
+	if pageSize < 1 {
+		return page
+	}
+	maxPage := maxOffset/pageSize + 1
+	if page > maxPage {
+		return maxPage
+	}
+	return page
+}
+
+// truncateRunes cuts s to at most n runes and appends "..." when it was cut.
+func truncateRunes(s string, n int) string {
+	if n < 0 {
+		n = 0
+	}
+	count := 0
+	for i := range s {
+		if count == n {
+			return s[:i] + "..."
+		}
+		count++
+	}
+	return s
+}
+
+// apiStatsCache holds the last /api/v1/stats response for apiStatsTTL. loading is set while one
+// request recomputes the statistics and is closed when it is done, so concurrent requests wait
+// for that one instead of loading every group themselves.
+var apiStatsCache struct {
+	mu      sync.Mutex
+	at      time.Time
+	stats   gin.H
+	loading chan struct{}
+}
+
+// statsComputeCount counts how often getStats recomputed the statistics.
+var statsComputeCount atomic.Int64
+
+// requireAPIEnabled is a middleware that checks if API is enabled
+func (s *WebServer) requireAPIEnabled() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiEnabledStr, err := s.DB.GetConfigValue(config.CFG_KEY_API_ENABLED)
+		if err != nil || apiEnabledStr != "true" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":   "API services are currently disabled",
+				"message": "The API is not available at this time. Please contact the administrator.",
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
 
 // Functions to be moved from server.go:
 // - func (s *WebServer) listGroups(c *gin.Context) (line ~313)
@@ -45,7 +121,8 @@ func (s *WebServer) listGroups(c *gin.Context) {
 
 	groups, totalCount, err := s.DB.GetNewsgroupsPaginated(page, LIMIT_listGroups)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API]: listGroups page=%d: %v", page, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
 
@@ -82,7 +159,10 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 
 	if p := c.Query("page"); p != "" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
-			page = parsed
+			page = clampOffsetPage(parsed, LIMIT_listGroups, maxOffsetArticles)
+			if page != parsed {
+				c.Header("X-Page-Clamped", "1")
+			}
 		}
 	}
 
@@ -94,18 +174,18 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 		}
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 
 	// Handle page-based to cursor conversion for compatibility
 	if page > 1 && lastArticleNum == 0 {
 		skipCount := (page - 1) * LIMIT_listGroups
 		var cursorArticleNum int64
-		err = database.RetryableQueryRowScan(groupDBs.DB, `
+		err = database.RetryableQueryRowScan(groupDB.DB, `
 			SELECT article_num FROM articles
 			WHERE hide = 0
 			ORDER BY article_num DESC
@@ -117,9 +197,10 @@ func (s *WebServer) getGroupOverview(c *gin.Context) {
 		}
 	}
 
-	overviews, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDBs, lastArticleNum, LIMIT_listGroups)
+	overviews, totalCount, hasMore, err := s.DB.GetOverviewsPaginated(groupDB, lastArticleNum, LIMIT_listGroups)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API]: getGroupOverview group='%s': %v", groupName, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
 
@@ -170,14 +251,22 @@ func (s *WebServer) getArticle(c *gin.Context) {
 		return
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
 		return
 	}
-	defer groupDBs.Return(s.DB)
-	article, err := s.DB.GetArticleByNum(groupDBs, articleNum)
+	defer groupDB.Return()
+	article, err := s.DB.GetArticleByNum(groupDB, articleNum)
 	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
+		return
+	}
+	// Hidden articles do not exist for token holders: a token is never an admin (D2).
+	if _, hide, err := s.DB.GetArticleFlags(groupDB, articleNum); err != nil || hide > 0 {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: API getArticle: GetArticleFlags(%s/%d): %v", groupName, articleNum, err)
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
 		return
 	}
@@ -194,14 +283,22 @@ func (s *WebServer) getArticleByMessageId(c *gin.Context) {
 		return // Error response already sent by checkGroupAccessAPI
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
 		return
 	}
-	defer groupDBs.Return(s.DB)
-	article, err := s.DB.GetArticleByMessageID(groupDBs, messageId)
+	defer groupDB.Return()
+	article, err := s.DB.GetArticleByMessageID(groupDB, messageId)
 	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
+		return
+	}
+	// Hidden articles do not exist for token holders: a token is never an admin (D2).
+	if _, _, hide, err := s.DB.GetArticleFlagsByMessageID(groupDB, messageId); err != nil || hide > 0 {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: API getArticleByMessageId: GetArticleFlagsByMessageID(%s): %v", groupName, err)
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
 		return
 	}
@@ -217,23 +314,81 @@ func (s *WebServer) getGroupThreads(c *gin.Context) {
 		return // Error response already sent by checkGroupAccessAPI
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	limit := apiThreadsDefaultLimit
+	if v := c.Query("limit"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			limit = min(max(parsed, 1), apiThreadsMaxLimit)
+		}
+	}
+	offset := 0
+	if v := c.Query("offset"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			offset = min(max(parsed, 0), apiThreadsMaxOffset)
+		}
+	}
+
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
 		return
 	}
-	defer groupDBs.Return(s.DB)
-	threads, err := s.DB.GetThreads(groupDBs)
+	defer groupDB.Return()
+	threads, err := s.DB.GetThreadsPaged(groupDB, limit, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[API]: getGroupThreads group='%s' limit=%d offset=%d: %v", groupName, limit, offset, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
 
+	if next := nextThreadsOffsetHeader(offset, limit, len(threads), apiThreadsMaxOffset); next != "" {
+		c.Header("X-Next-Offset", next)
+	}
 	c.JSON(http.StatusOK, threads)
 }
 
-// getStats returns JSON statistics data for the API
+// nextThreadsOffsetHeader returns the X-Next-Offset value for a threads page, or "" when
+// there is no next page to advertise: either the page was short, or the next offset would
+// be beyond maxOffset, where getGroupThreads clamps and would serve this page again (F9).
+func nextThreadsOffsetHeader(offset, limit, n, maxOffset int) string {
+	if n != limit || offset+limit > maxOffset {
+		return ""
+	}
+	return strconv.Itoa(offset + limit)
+}
+
+// getStats returns JSON statistics data for the API (cached for apiStatsTTL).
+// When the cache is cold or expired, only one request recomputes; the others wait for it.
 func (s *WebServer) getStats(c *gin.Context) {
+	// The cached map is never modified after it is stored, so it can be served without the lock.
+	var mine chan struct{}
+	for {
+		apiStatsCache.mu.Lock()
+		if cached := apiStatsCache.stats; cached != nil && time.Since(apiStatsCache.at) < apiStatsTTL {
+			apiStatsCache.mu.Unlock()
+			c.JSON(http.StatusOK, cached)
+			return
+		}
+		if loading := apiStatsCache.loading; loading != nil {
+			apiStatsCache.mu.Unlock()
+			<-loading // another request is computing: serve its result (or compute if it failed)
+			continue
+		}
+		mine = make(chan struct{})
+		apiStatsCache.loading = mine
+		apiStatsCache.mu.Unlock()
+		break
+	}
+	// This request computes; every other one waits on mine until this returns.
+	defer func() {
+		apiStatsCache.mu.Lock()
+		if apiStatsCache.loading == mine {
+			apiStatsCache.loading = nil
+		}
+		apiStatsCache.mu.Unlock()
+		close(mine)
+	}()
+	statsComputeCount.Add(1)
+
 	groups, err := s.DB.GetActiveNewsgroups()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get statistics"})
@@ -300,6 +455,10 @@ func (s *WebServer) getStats(c *gin.Context) {
 		stats["newest_article"] = newestArticle.Format(time.RFC3339)
 	}
 
+	apiStatsCache.mu.Lock()
+	apiStatsCache.stats = stats
+	apiStatsCache.at = time.Now()
+	apiStatsCache.mu.Unlock()
 	c.JSON(http.StatusOK, stats)
 }
 
@@ -320,37 +479,46 @@ func (s *WebServer) getArticlePreview(c *gin.Context) {
 	}
 
 	// Get group database
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Group not found"})
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
+
+	// Hidden articles are not found for non-admins (flags from the group DB, not a cached article).
+	if _, hide, err := s.DB.GetArticleFlags(groupDB, articleNum); err != nil || s.articleHiddenFor(c, hide) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: getArticlePreview: GetArticleFlags(%s/%d): %v", groupName, articleNum, err)
+		}
+		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
+		return
+	}
 
 	// Get article overview for basic info
-	overview, err := s.DB.GetOverviewByArticleNum(groupDBs, articleNum)
+	overview, err := s.DB.GetOverviewByArticleNum(groupDB, articleNum)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
 		return
 	}
 
 	// Get article content (limited for preview)
-	article, err := s.DB.GetArticleByNum(groupDBs, articleNum)
+	article, err := s.DB.GetArticleByNum(groupDB, articleNum)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Article content not found"})
 		return
 	}
 
 	// Create preview response with limited content
-	// Use ConvertToUTF8 to decode the text properly but without HTML escaping (since JS will handle HTML context)
-	// This is the same decoding used by PrintSanitized but without the html.EscapeString step
-	fullBodyDecoded := models.ConvertToUTF8(article.BodyText)
-	bodyPreview := ""
-	if len(fullBodyDecoded) > 500 {
-		bodyPreview = fullBodyDecoded[:500] + "..."
-	} else {
-		bodyPreview = fullBodyDecoded
-	}
+	// Plain text: the browser inserts it with textContent (thread-tree.js renderArticlePreview), never as HTML.
+	// Decoded like the article page body (Content-Transfer-Encoding and charset of the stored
+	// headers); encoded words and HTML entities in a body are text and stay as they are.
+	// The article may be shared through the article cache: read it under its lock.
+	article.Mux.RLock()
+	bodyText, headers := article.BodyText, article.HeadersJSON
+	article.Mux.RUnlock()
+	fullBodyDecoded := models.DecodeBodyText(bodyText, headers)
+	bodyPreview := truncateRunes(fullBodyDecoded, 500)
 
 	response := gin.H{
 		"article_num": articleNum,

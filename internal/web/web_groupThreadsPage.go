@@ -1,7 +1,6 @@
 package web
 
 import (
-	"html/template"
 	"log"
 	"net/http"
 	"strconv"
@@ -28,19 +27,19 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 	}
 
 	// Get group database connections
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
-		log.Printf("Failed to get group databases for %s: %v", groupName, err)
-		s.renderError(c, http.StatusInternalServerError, "Database error", err.Error())
+		log.Printf("[WEB]: groupThreadsPage: GetGroupDB(%s): %v", groupName, err)
+		s.renderError(c, http.StatusInternalServerError, "Database error", publicErrorDetail)
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 
 	// Use cached thread data for fast performance
-	forumThreads, totalThreads, err := s.DB.GetCachedThreads(groupDBs, page, Threads_perPage)
+	forumThreads, totalThreads, err := s.DB.GetCachedThreads(groupDB, page, Threads_perPage)
 	if err != nil {
-		log.Printf("Failed to get cached threads for %s: %v", groupName, err)
-		s.renderError(c, http.StatusInternalServerError, "Failed to load threads", err.Error())
+		log.Printf("[WEB]: groupThreadsPage: GetCachedThreads(%s page=%d): %v", groupName, page, err)
+		s.renderError(c, http.StatusInternalServerError, "Failed to load threads", publicErrorDetail)
 		return
 	}
 
@@ -53,11 +52,11 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 				ft.RootArticle.ArticleNums = make(map[*string]int64)
 			}
 			// Store the article number for this newsgroup
-			ft.RootArticle.ArticleNums[groupDBs.NewsgroupPtr] = ft.RootArticle.ArticleNum
+			ft.RootArticle.ArticleNums[groupDB.NewsgroupPtr] = ft.RootArticle.ArticleNum
 			rootOverviews = append(rootOverviews, ft.RootArticle)
 		}
 	}
-	models.BatchSanitizeOverviews(rootOverviews)
+	models.BatchSanitizeOverviews(rootOverviews, groupName)
 
 	// Calculate pagination info
 	totalPages := (totalThreads + Threads_perPage - 1) / Threads_perPage
@@ -89,7 +88,7 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 		"AvailableSections":   baseData.AvailableSections,
 		"AvailableAIModels":   baseData.AvailableAIModels,
 		"GroupName":           groupName,
-		"GroupPtr":            groupDBs.NewsgroupPtr,
+		"GroupPtr":            groupDB.NewsgroupPtr,
 		"ForumThreads":        forumThreads,
 		"TotalThreads":        totalThreads,
 		"TotalMessages":       totalMessages,
@@ -102,12 +101,5 @@ func (s *WebServer) groupThreadsPage(c *gin.Context) {
 		"NextPage":            page + 1,
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/threads.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "threads.html")
 }

@@ -97,7 +97,7 @@ if len(refs) == 0 {
 // When replies arrive - has references
 if len(refs) > 0 {
     // Find thread root, update cache with new child
-    err := db.UpdateThreadCache(groupDBs, threadRoot, article.ArticleNum, article.DateSent)
+    err := sq.batchUpdateThreadCache(groupDB, threadUpdates) // the live writer; UpdateThreadCache was deleted (plan finding E11)
 }
 ```
 
@@ -115,12 +115,14 @@ if len(refs) > 0 {
 - Called when processing new thread (no references)
 - Uses `ON CONFLICT` for upsert behavior
 
-#### `UpdateThreadCache(groupDBs, threadRoot, childArticleNum, childDate)`
-- Updates existing cache entry when reply added
-- Appends to `child_articles` string
-- Increments `message_count`
-- Updates `last_activity` and `last_child_number`
-- Triggers memory cache update
+#### `batchUpdateThreadCache(groupDB, threadUpdates map[int64][]threadCacheUpdateData) error`
+- Called once per batch with every root's new replies grouped by root (`threadUpdates[rootArticle]`)
+- One transaction: per root it appends the reply numbers to `child_articles`, bumps `message_count`,
+  moves `last_activity` / `last_child_number` forward, and initialises a missing `thread_cache` row
+- Memory cache (`MemThreadCache`) learns the new children only after the transaction committed, so
+  the group listing can never show more replies than the disk row holds
+- A corrupt root row is skipped and logged; the function still returns nil for the batch (deliberate,
+  see plan web-db-followups)
 
 #### `GetCachedThreads(groupDBs, page, pageSize)`
 - Primary method for thread listing
@@ -307,7 +309,7 @@ CREATE INDEX IF NOT EXISTS idx_thread_cache_count ON thread_cache(message_count 
 
 2. **Article Processing** (`threading.go`)
    - `InitializeThreadCache()` for new threads
-   - `UpdateThreadCache()` for replies
+   - `batchUpdateThreadCache()` for replies
 
 3. **Web Server** (`server.go`)
    - Replace threading logic with `GetCachedThreads()`

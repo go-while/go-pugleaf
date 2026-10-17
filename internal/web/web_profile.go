@@ -1,20 +1,26 @@
 package web
 
 import (
-	"html/template"
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // ProfilePageData represents data for profile page
 type ProfilePageData struct {
 	TemplateData
-	User    *models.User
-	Error   string
-	Success string
+	User                *models.User
+	NNTPUser            *models.NNTPUser
+	LocalNNTPServerAddr string
+	Joined              string
+	Error               string
+	Success             string
 }
 
 // profilePage displays the user profile
@@ -27,26 +33,45 @@ func (s *WebServer) profilePage(c *gin.Context) {
 	}
 
 	// Get user details
-	user, err := s.DB.GetUserByID(int64(session.UserID))
+	user, err := s.DB.GetUserByID(session.UserID)
 	if err != nil {
 		s.renderError(c, http.StatusInternalServerError, "User Error", "Failed to load user profile")
 		return
 	}
-
-	data := ProfilePageData{
-		TemplateData: s.getBaseTemplateData(c, "Profile"),
-		User:         user,
-		Error:        c.Query("error"),
-		Success:      c.Query("success"),
-	}
-
-	// Load template
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/profile.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
+	// Get NNTP user details if available
+	nntpUser, err := s.DB.GetNNTPUserByWebUserID(session.UserID)
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template Error", err.Error())
+		// NNTP user doesn't exist - this is okay, not all users have NNTP accounts
+		nntpUser = nil
 	}
+
+	// days since User.CreatedAt
+	timereg := int(time.Since(user.CreatedAt).Hours() / 24)
+	joined := ""
+	switch timereg {
+	case 0:
+		joined = "today"
+	case 1:
+		joined = "1 day ago"
+	default:
+		joined = fmt.Sprintf("%d days ago", timereg)
+	}
+	localNNTPaddr, err := s.DB.GetConfigValue(config.CFG_KEY_WEBLOCALNNTP)
+	if err != nil {
+		s.renderError(c, http.StatusInternalServerError, "Config Error", "Failed to load NNTP server address")
+		return
+	}
+	data := ProfilePageData{
+		TemplateData:        s.getBaseTemplateData(c, "Profile"),
+		User:                user,
+		Joined:              joined,
+		NNTPUser:            nntpUser,
+		LocalNNTPServerAddr: localNNTPaddr,
+		Error:               session.GetError(),
+		Success:             session.GetSuccess(),
+	}
+
+	s.renderPage(c, http.StatusOK, data, "profile.html")
 }
 
 // profileUpdate handles profile updates
@@ -62,19 +87,78 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 	user, err := s.DB.GetUserByID(int64(session.UserID))
 	if err != nil {
 		session.SetError("Failed to load user")
-		c.Redirect(http.StatusSeeOther, "/profile")
+		c.Redirect(http.StatusSeeOther, "/logout")
 		return
 	}
 
 	// Get form data
 	email := strings.TrimSpace(c.PostForm("email"))
+	displayName := strings.TrimSpace(c.PostForm("display_name"))
 	currentPassword := c.PostForm("current_password")
 	newPassword := c.PostForm("new_password")
 	confirmPassword := c.PostForm("confirm_password")
+	resetNNTPPassword := c.PostForm("reset_nntp_password")
+
+	// Handle NNTP password reset
+	if resetNNTPPassword == "true" {
+		// Check if user has an NNTP account
+		nntpUser, err := s.DB.GetNNTPUserByWebUserID(int64(session.UserID))
+		if err != nil {
+			session.SetError("No NNTP account found")
+			c.Redirect(http.StatusSeeOther, "/profile")
+			return
+		}
+
+		// Generate new random 12-character password
+		newNNTPPassword, err := generateRandomHex(12)
+		if err != nil {
+			session.SetError("Failed to generate new NNTP password")
+			c.Redirect(http.StatusSeeOther, "/profile")
+			return
+		}
+
+		// Update NNTP password
+		err = s.DB.UpdateNNTPUserPassword(nntpUser.ID, newNNTPPassword)
+		if err != nil {
+			session.SetError("Failed to reset NNTP password")
+			c.Redirect(http.StatusSeeOther, "/profile")
+			return
+		}
+
+		// Invalidate auth cache for this user
+		s.DB.InvalidateNNTPUserAuth(nntpUser.Username)
+
+		session.SetSuccess(fmt.Sprintf("NNTP password reset successfully. New password: %s", newNNTPPassword))
+		log.Printf("User %d reseted NNTP password", user.ID)
+		c.Redirect(http.StatusSeeOther, "/profile")
+		return
+	}
+
+	// Validate everything before the first write: a rejection in the middle used to leave
+	// a partial update behind (new password and email stored, display name refused).
 
 	// Validate email
 	if email == "" {
 		session.SetError("Email is required")
+		c.Redirect(http.StatusSeeOther, "/profile")
+		return
+	}
+
+	// Validate the display name only when it changed (it ends up in the From: header of
+	// web posts). A stored legacy name such as "Jane <jane@example.org>" would otherwise
+	// block every email and password change, because the form re-sends it unchanged.
+	displayNameChanged := displayName != user.DisplayName
+	if displayNameChanged {
+		if err := validateDisplayName(displayName); err != nil {
+			session.SetError(err.Error())
+			c.Redirect(http.StatusSeeOther, "/profile")
+			return
+		}
+	}
+
+	// Validate current password
+	if !checkPassword(currentPassword, user.PasswordHash) {
+		session.SetError("Current password is incorrect")
 		c.Redirect(http.StatusSeeOther, "/profile")
 		return
 	}
@@ -89,15 +173,10 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 		}
 	}
 
-	// If password change is requested
-	if currentPassword != "" || newPassword != "" || confirmPassword != "" {
-		// Validate current password
-		if !checkPassword(currentPassword, user.PasswordHash) {
-			session.SetError("Current password is incorrect")
-			c.Redirect(http.StatusSeeOther, "/profile")
-			return
-		}
-
+	// If a password change is requested, validate and hash it (still no write)
+	changePassword := currentPassword != "" && newPassword != "" && confirmPassword != ""
+	var hashedPassword string
+	if changePassword {
 		// Validate new password
 		if newPassword != confirmPassword {
 			session.SetError("New passwords do not match")
@@ -105,22 +184,15 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 			return
 		}
 
-		if len(newPassword) < 6 {
-			session.SetError("Password must be at least 6 characters")
+		// Validate password
+		if err := validatePassword(newPassword); err != nil {
+			session.SetError(err.Error())
 			c.Redirect(http.StatusSeeOther, "/profile")
 			return
 		}
 
 		// Hash new password
-		hashedPassword, err := hashPassword(newPassword)
-		if err != nil {
-			session.SetError("Failed to update password")
-			c.Redirect(http.StatusSeeOther, "/profile")
-			return
-		}
-
-		// Update password
-		err = s.DB.UpdateUserPassword(int64(user.ID), hashedPassword)
+		hashedPassword, err = hashPassword(newPassword)
 		if err != nil {
 			session.SetError("Failed to update password")
 			c.Redirect(http.StatusSeeOther, "/profile")
@@ -128,10 +200,22 @@ func (s *WebServer) profileUpdate(c *gin.Context) {
 		}
 	}
 
-	// Update email
-	err = s.DB.UpdateUserEmail(int64(user.ID), email)
-	if err != nil {
-		session.SetError("Failed to update email")
+	// Everything is valid: write all of it at once. Three separate statements meant a
+	// failure on the second left the first committed — a user changing password and email
+	// could end up with the password silently changed and only "Failed to update email"
+	// to show for it (A1). UpdateUserProfile writes every changed field in one
+	// transaction, so either all of them land or none does.
+	var newPasswordHash *string
+	if changePassword {
+		newPasswordHash = &hashedPassword
+	}
+	var newDisplayName *string
+	if displayNameChanged {
+		newDisplayName = &displayName
+	}
+	if err := s.DB.UpdateUserProfile(user.ID, newPasswordHash, &email, newDisplayName); err != nil {
+		log.Printf("[WEB]: profileUpdate: user %d: %v", user.ID, err)
+		session.SetError("Failed to update profile")
 		c.Redirect(http.StatusSeeOther, "/profile")
 		return
 	}

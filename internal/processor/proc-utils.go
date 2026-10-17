@@ -7,10 +7,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-while/go-pugleaf/internal/common"
 )
 
 var (
-	separatorRegex       = regexp.MustCompile(`[,;:\s]+`)
+	//separatorRegex       = regexp.MustCompile(`[,;:\s]+`)
 	parenRe              = regexp.MustCompile(`\s*\([^)]*\)$`)
 	threeDigitTimezoneRe = regexp.MustCompile(`\s([+-])(\d{3})\s*$`)
 	yearRegex            = regexp.MustCompile(`\b(19[7-9]\d|20[0-9]\d)\b`)
@@ -406,56 +408,18 @@ var NNTPDateLayouts = []string{
 // IsValidGroupName validates a newsgroup name according to RFC standards
 // Returns true if the group name is valid (lowercase, alphanumeric components separated by dots)
 func IsValidGroupName(name string) bool {
-	if validGroupNameRegexchar.MatchString(name) {
-		return true
-	}
-
-	if !UseStrictGroupValidation {
-
-		if validGroupNameRegexLazy.MatchString(name) {
-			return true
-		}
-		if validGroupNameRegexSingle.MatchString(name) {
-			return true
-		}
-		// Allow both lowercase and mixed case group names
-		if validGroupNameRegexCaps.MatchString(name) {
-			return true
-		}
-		return false
-	}
-	if len(name) < 1 {
-		log.Printf("IsValidGroupName: Group name '%s' is too short (%d characters)", name, len(name))
-		return false
-	}
-	if len(name) > 255 {
-		log.Printf("IsValidGroupName: Group name '%s' is too long (%d characters)", name, len(name))
-		return false
-	}
-	name = strings.ToLower(name)
-	// Special case for programming language groups ending with ++
-	if strings.HasSuffix(name, "++") || strings.HasSuffix(name, "+") {
-		// Allow C++, C+, etc. in programming contexts
-		if validGroupNameRegexLazy.MatchString(strings.ReplaceAll(name, "+", "")) {
-			return true
-		}
-	}
-	if validGroupNameRegexStrict.MatchString(name) {
-		return true
-	}
-	return false
+	return common.IsValidGroupName(name)
 }
 
 func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []string {
 	// Use a single regex to split on any combination of separators
-	rawGroups := separatorRegex.Split(groupsline, -1)
+	rawGroups := common.SeparatorRegex.Split(groupsline, -1)
 
 	var validGroups []string
-	seen := make(map[string]bool) // For deduplication
+	seen := make(map[string]bool, len(rawGroups)) // For deduplication
 
 	for _, group := range rawGroups {
 		group = strings.TrimSpace(group)
-		newsgroupPtr := proc.DB.Batch.GetNewsgroupPointer(group) // Ensure group is registered in the batch
 		if group == "" {
 			continue
 		}
@@ -463,6 +427,10 @@ func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []stri
 			continue
 		}
 		if RunRSLIGHTImport {
+			// the rslight sections check needs the batch pointer before validation (this
+			// branch only); the non-rslight path below registers a pointer only for names
+			// that pass validation (INT-3)
+			newsgroupPtr := proc.DB.Batch.GetNewsgroupPointer(group)
 			if proc.IsNewsGroupInSectionsDB(newsgroupPtr) {
 				if DebugProcessorHeaders {
 					log.Printf("[RSLIGHT] extractGroupsFromHeaders Article '%s' newsgroup '%s' IS IN sections DB", msgID, group)
@@ -481,29 +449,11 @@ func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []stri
 		}
 
 		// Deduplicate using map (faster than slices.Contains)
-		if !seen[group] {
-			seen[group] = true
-			validGroups = append(validGroups, group)
-		}
+		seen[group] = true
+		validGroups = append(validGroups, group)
 	}
 
 	return validGroups
-}
-
-func multiLineHeaderToMergedString(vals []string) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	if len(vals) == 1 {
-		return vals[0] // Fast path for single-line headers (most common case)
-	}
-	return strings.Join(vals, "\n") // Ultra fast for multi-line
-}
-
-func multiLineStringToSlice(input string) []string {
-	// Replace newlines with spaces, trim leading/trailing spaces
-	result := strings.Split(input, "\n")
-	return result
 }
 
 /* UNUSED KEEP FOR REFERENCE
@@ -551,61 +501,37 @@ func multiLineHeaderToStringHTML(vals []string) string {
 }
 */
 
-/* UNUSED KEEP FOR REFERENCE
-func multiLineHeaderToStringSpaced(vals []string) string {
-	var sb strings.Builder
-	for i, line := range vals {
-		if i > 0 {
-			sb.WriteString(" ")
-		}
-		sb.WriteString(line)
-	}
-	result := sb.String()
-	result = strings.TrimSuffix(result, " ")
-	return result
-}
-*/
+// MaxFutureDate is how far a Date (or Injection-Date) may lie in the future before
+// ProcessArticle refuses the article (RFC 5537 §3.7 step 2: 24 hours; A-intake-7).
+// bruteForceDateParse keeps its own internal 25 h sanity bound.
+var MaxFutureDate = 24 * time.Hour
 
-// getHeaderFirst returns the first value for a header, or "" if not present
-func getHeaderFirst(headers map[string][]string, key string) string {
-	if vals, ok := headers[key]; ok && len(vals) > 0 {
-		// For headers that can be folded across multiple lines (like References),
-		// we need to join with spaces instead of newlines to properly unfold them
-		if key == "references" || key == "References" || key == "in-reply-to" || key == "In-Reply-To" {
-			return multiLineHeaderToStringSpaced(vals)
-		}
-		return multiLineHeaderToMergedString(vals)
-	}
-	return ""
-}
-
-// multiLineHeaderToStringSpaced joins multi-line headers with spaces (for RFC-compliant header unfolding)
-func multiLineHeaderToStringSpaced(vals []string) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	if len(vals) == 1 {
-		return vals[0] // Fast path for single-line headers
-	}
-	var sb strings.Builder
-	for i, line := range vals {
-		// Trim each line and add spaces between them
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue // Skip empty lines
-		}
-		if i > 0 {
-			sb.WriteString(" ")
-		}
-		sb.WriteString(line)
-	}
-	return sb.String()
-}
-
-// parseNNTPDate parses an NNTP date string to time.Time, handling common NNTP quirks.
+// ParseNNTPDate parses an NNTP date string to time.Time, handling common NNTP quirks.
+// It is lenient: a date the brute-force parser cannot fully read gets its missing parts
+// defaulted (1990-01-01 12:00 UTC at worst), and the rslight import falls back to Unix
+// epoch strings. Its results are unchanged by ParseNNTPDateStrict (K1).
 func ParseNNTPDate(dateStr string) time.Time {
+	t, ok := ParseNNTPDateStrict(dateStr)
+	if ok || !t.IsZero() {
+		return t
+	}
+	// Last resort for RSLIGHT import. The normalization in ParseNNTPDateStrict only
+	// changes strings that contain whitespace or letters, which never parse as an
+	// integer, so the epoch parser sees the same digits as before.
+	if RunRSLIGHTImport && dateStr != "" {
+		return parseUnixEpochToRFC1123(strings.TrimSpace(parenRe.ReplaceAllString(dateStr, "")))
+	}
+	return time.Time{}
+}
+
+// ParseNNTPDateStrict runs the ParseNNTPDate pipeline (normalization, NNTP layouts,
+// brute-force extraction) without the rslight epoch fallback. ok is true for a layout
+// match or a brute-force result whose year and month were both found in the string;
+// otherwise the returned time is the lenient result (possibly zero) and ok is false.
+// Non-bulk intake rejects dates with !ok (D10).
+func ParseNNTPDateStrict(dateStr string) (time.Time, bool) {
 	if dateStr == "" {
-		return time.Time{}
+		return time.Time{}, false
 	}
 	// Remove trailing parenthesized timezone, e.g., " (NZDT)"
 	dateStr = parenRe.ReplaceAllString(dateStr, "")
@@ -613,6 +539,24 @@ func ParseNNTPDate(dateStr string) time.Time {
 
 	if RunRSLIGHTImport && strings.HasPrefix(dateStr, "Sum, ") {
 		dateStr = strings.ReplaceAll(dateStr, "Sum, ", "Sun, ")
+	}
+
+	// Convert common timezone abbreviations to numeric offsets
+	// This handles the issue where Go's time.Parse() doesn't recognize abbreviations like EDT
+	timezoneMap := map[string]string{
+		"EDT": "-0400", // Eastern Daylight Time (UTC-4)
+		"EST": "-0500", // Eastern Standard Time (UTC-5)
+		"CDT": "-0500", // Central Daylight Time (UTC-5)
+		"CST": "-0600", // Central Standard Time (UTC-6)
+		"MDT": "-0600", // Mountain Daylight Time (UTC-6)
+		"MST": "-0700", // Mountain Standard Time (UTC-7)
+		"PDT": "-0700", // Pacific Daylight Time (UTC-7)
+		"PST": "-0800", // Pacific Standard Time (UTC-8)
+	}
+
+	// Replace timezone abbreviations with numeric offsets
+	for abbr, offset := range timezoneMap {
+		dateStr = strings.Replace(dateStr, " "+abbr, " "+offset, 1)
 	}
 
 	// Fix 3-digit timezone formats like +200 -> +0200
@@ -628,20 +572,12 @@ func ParseNNTPDate(dateStr string) time.Time {
 	for _, layout := range NNTPDateLayouts {
 		t, err := time.Parse(layout, dateStr)
 		if err == nil {
-			return t
+			return t, true
 		}
 	}
 
 	// If standard parsing failed, try bruteforce extraction
-	if t := bruteForceDateParse(dateStr); !t.IsZero() {
-		return t
-	}
-
-	// Last resort for RSLIGHT import
-	if RunRSLIGHTImport {
-		return parseUnixEpochToRFC1123(dateStr)
-	}
-	return time.Time{}
+	return bruteForceDateParseOK(dateStr)
 }
 
 func parseUnixEpochToRFC1123(epochStr string) time.Time {
@@ -671,8 +607,16 @@ func countLines(b []byte) int {
 // bruteForceDateParse attempts to extract date components from malformed date strings
 // This function tries to parse human-readable but non-standard date formats
 func bruteForceDateParse(dateStr string) time.Time {
+	t, _ := bruteForceDateParseOK(dateStr)
+	return t
+}
+
+// bruteForceDateParseOK is bruteForceDateParse that also reports whether the year and
+// the month were actually found in the string (ok is false when either was defaulted,
+// or when the result is zero).
+func bruteForceDateParseOK(dateStr string) (time.Time, bool) {
 	if dateStr == "" {
-		return time.Time{}
+		return time.Time{}, false
 	}
 
 	// Clean up common issues
@@ -839,6 +783,10 @@ func bruteForceDateParse(dateStr string) time.Time {
 		}
 	}
 
+	// year and month found in the string (before the fallbacks below default them)
+	yearFound := year >= 1970 && year <= 2099
+	monthFound := month >= 1 && month <= 12
+
 	// Final validation and fallbacks
 	if year < 1970 || year > 2099 {
 		year = 1990 // Default fallback year
@@ -867,11 +815,11 @@ func bruteForceDateParse(dateStr string) time.Time {
 
 		if parsedDate.After(maxFutureTime) {
 			// Date is too far in the future, likely a parsing error
-			return time.Time{}
+			return time.Time{}, false
 		}
 
-		return parsedDate
+		return parsedDate, yearFound && monthFound
 	}
 
-	return time.Time{}
+	return time.Time{}, false
 }

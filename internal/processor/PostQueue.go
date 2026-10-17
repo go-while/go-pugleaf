@@ -3,6 +3,7 @@ package processor
 import (
 	"fmt"
 	"log"
+	"maps"
 	"strings"
 
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -60,7 +61,7 @@ func (w *PostQueueWorker) processLoop() {
 	}
 }
 
-// processArticle processes a single article from the queue
+// ProcessArticle processes a single article from the queue
 func (w *PostQueueWorker) pre_processArticle(article *models.Article) error {
 	// Get newsgroups from the article's headers
 	newsgroupsHeader, exists := article.Headers["newsgroups"]
@@ -80,7 +81,26 @@ func (w *PostQueueWorker) pre_processArticle(article *models.Article) error {
 	errs := 0
 	// Process the article for each newsgroup
 	for _, newsgroup := range newsgroups {
-		err := w.processArticleForNewsgroup(article, newsgroup)
+		// copy article; each copy gets its own Headers map: ProcessArticle drops its
+		// reference, and a shared map must stay intact for the next copy (A-intake-5)
+		copiedArticle := &models.Article{
+			MessageID:   article.MessageID,
+			Subject:     article.Subject,
+			FromHeader:  article.FromHeader,
+			DateSent:    article.DateSent,
+			DateString:  article.DateString,
+			References:  article.References,
+			Bytes:       article.Bytes,
+			Lines:       article.Lines,
+			HeadersJSON: article.HeadersJSON,
+			BodyText:    article.BodyText,
+			Path:        article.Path,
+			Headers:     maps.Clone(article.Headers),
+			IsThrRoot:   article.IsThrRoot,
+			IsReply:     article.IsReply,
+			RefSlice:    article.RefSlice,
+		}
+		err := w.processArticleForNewsgroup(copiedArticle, newsgroup)
 		if err != nil {
 			errs++
 			log.Printf("PostQueueWorker: Error processing article %s for newsgroup %s: %v",
@@ -122,27 +142,31 @@ func (w *PostQueueWorker) processArticleForNewsgroup(article *models.Article, ne
 	}
 
 	// Get group database connection
-	groupDBs, err := w.processor.DB.GetGroupDBs(newsgroup)
+	groupDB, err := w.processor.DB.GetGroupDB(newsgroup)
 	if err != nil {
 		return err
 	}
-	defer groupDBs.Return(w.processor.DB)
+	defer groupDB.Return()
 
 	// Use the existing threading function to process the article
 	// This will handle all the threading logic, database insertion, etc.
 	//log.Printf("PostQueueWorker: Threading article %s in newsgroup %s", article.MessageID, newsgroup)
 
 	// Process through the threading system using the processor's method
-	_, err = w.processor.processArticle(article, newsgroup, true)
+	_, err = w.processor.ProcessArticle(article, newsgroup, true)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("PostQueueWorker: sent article %s in newsgroup %s to processArticle", article.MessageID, newsgroup)
+	log.Printf("PostQueueWorker: sent article %s in newsgroup %s to ProcessArticle", article.MessageID, newsgroup)
 	return nil
 }
 
-// parseNewsgroups parses a comma-separated list of newsgroups
+// parseNewsgroups parses a comma-separated list of newsgroups.
+// It stays a split-only parser (comma + trim) on purpose: the web validated the names
+// before queueing, and a strict parser must never drop a web post silently. The NNTP
+// intake splitters (processor non-bulk path and nntp) both use common.ParseNewsgroups
+// (INT-3); this queue keeps its documented split.
 func parseNewsgroups(newsgroupsStr string) []string {
 	if newsgroupsStr == "" {
 		return nil

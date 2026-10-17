@@ -2,15 +2,17 @@
 package web
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"html/template"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
-	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-contrib/secure"
@@ -28,14 +30,36 @@ type WebServer struct {
 	Config        *config.WebConfig
 	NNTP          *nntp.NNTPServer
 	templates     *template.Template
-	StartTime     time.Time       // Track server start time for uptime calculations
-	SectionsCache map[string]bool // In-memory cache of valid section names for route filtering
-	robotsTxtPath string          // Path to robots.txt file if it exists
+	StartTime     time.Time                       // Track server start time for uptime calculations
+	sectionsCache atomic.Pointer[map[string]bool] // Valid section names for route filtering (replaced as a whole, never mutated)
+	robotsTxtPath string                          // Path to robots.txt file if it exists
+	CronManager   *CronJobManager                 // Background cron job manager (nil with -no-cronjobs)
+	CronEdit      bool
+
+	trustedProxyNets []*net.IPNet // reverse proxies whose X-Forwarded-* headers are trusted
+
+	httpServerMu sync.Mutex
+	httpServer   *http.Server  // set by Start/serveOn, stopped by Shutdown
+	stopCh       chan struct{} // closed by Shutdown; background goroutines of the server stop on it
+	stopOnce     sync.Once
+
+	inFlightRequests atomic.Int64       // requests currently inside a handler (trackInFlight)
+	baseCtx          context.Context    // parent of every request context (http.Server.BaseContext)
+	cancelBase       context.CancelFunc // cancels baseCtx, so Shutdown can stop handlers that outlive its deadline
+
+	// tokenUsageBuffer collects API token usage between flushes: counts per token id and the
+	// time of the last request. runTokenUsageFlusher writes and empties it.
+	tokenUsageBuffer struct {
+		mu     sync.Mutex
+		counts map[int64]int64
+		last   map[int64]time.Time
+	}
+	tokenUsageDone chan struct{} // closed by runTokenUsageFlusher after its final flush
 }
 
 // TemplateData represents common template data
 type TemplateData struct {
-	Title               template.HTML
+	Title               string
 	CurrentTime         string
 	Port                int
 	NNTPtcpPort         int
@@ -69,6 +93,8 @@ type ArticlePageData struct {
 	Thread      []*models.Overview
 	PrevArticle int64
 	NextArticle int64
+	ArticleSpam int // spam counter, read from the group DB (not from the cached Article)
+	ArticleHide int // hide counter, read from the group DB (not from the cached Article)
 }
 
 // StatsPageData represents data for stats page
@@ -76,6 +102,7 @@ type StatsPageData struct {
 	TemplateData
 	Groups        []*models.Newsgroup
 	TotalArticles int64
+	APIEnabled    bool
 }
 
 // GroupsPageData represents data for groups page
@@ -160,6 +187,7 @@ type SectionPageData struct {
 	Pagination        *models.PaginationInfo
 	TotalGroups       int
 	AvailableSections []*models.Section
+	SortBy            string
 }
 
 // SectionGroupPageData represents data for group page within a section
@@ -195,23 +223,91 @@ type SearchPageData struct {
 	Pagination  *models.PaginationInfo
 }
 
-// NewServer creates a new web server instance
-func NewServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *nntp.NNTPServer) *WebServer {
+// DefaultReverseProxy is the trusted-proxy list used when ReverseProxyAddr is empty or has no
+// usable entry: loopback and the private ranges a proxy on the same host or in a container runs in.
+var DefaultReverseProxy = []string{"127.0.0.0/8", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
+
+// contentSecurityPolicy is sent on every response (secure.Config in NewWebServer). Scripts and
+// styles keep 'unsafe-inline' because templates still use inline <script> blocks and on*= handlers;
+// the external hosts are the stylesheet/font CDNs the base templates load. No external script, no
+// fetch/XHR to other origins, no plugins, no framing, forms post only to this site.
+const contentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self' 'unsafe-inline'; " +
+	"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; " +
+	"font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; " +
+	"img-src 'self' data:; " +
+	"connect-src 'self'; " +
+	"object-src 'none'; " +
+	"base-uri 'self'; " +
+	"frame-ancestors 'none'; " +
+	"form-action 'self'"
+
+// NewWebServer creates a new web server instance
+func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *nntp.NNTPServer, cronEdit bool, noCronjobs bool) *WebServer {
 	// Set Gin to release mode for production
 	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.Default()
+	// Route on the escaped path, so a %2F in a message-id stays inside the :messageId segment
+	// (A-web-18). gin's own UnescapePathValues uses url.QueryUnescape, which turns '+' into a
+	// space (comp.lang.c++, <a+b@x>), so it is off and unescapeRawPathParams path-unescapes the
+	// params instead. It is the first application middleware: nothing reads a param before it.
+	router.UseRawPath = true
+	router.UnescapePathValues = false
+	router.Use(unescapeRawPathParams())
 
-	// Configure Gin to trust reverse proxy headers
-	// Set trusted proxies for common reverse proxy setups (nginx, etc.)
-	router.SetTrustedProxies([]string{"127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"})
+	// Client IPs come from one configured header, and only when the peer is a trusted proxy
+	ReverseProxyAddr, err := db.GetConfigValue(config.CFG_KEY_REVERSEPROXY)
+	if err != nil {
+		log.Printf("[WEB]: Error getting ReverseProxyAddr: %v", err)
+	}
+	ReverseProxyIPHeader, err := db.GetConfigValue(config.CFG_KEY_REVERSEPROXY_IPHEADER)
+	if err != nil {
+		log.Printf("[WEB]: Error getting ReverseProxyIPHeader: %v", err)
+	}
+	trustedProxyNets := configureTrustedProxiesWithHeader(router, ReverseProxyAddr, ReverseProxyIPHeader)
+	log.Printf("[WEB]: Trusted reverse proxies: %v | client IP header: %v", trustedProxyNets, router.RemoteIPHeaders)
+
+	// Don't use ParseGlob - it causes template name conflicts
+	// Instead, we'll load templates individually in each handler
+	// router.SetHTMLTemplate(templates)
+	var cronmgr *CronJobManager
+	if !noCronjobs {
+		cronmgr = NewCronJobManager(db)
+	} else {
+		cronEdit = false
+	}
+
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	server := &WebServer{
+		DB:               db,
+		Router:           router,
+		Config:           webconfig,
+		NNTP:             nntpconfig,
+		templates:        nil, // We'll handle templates individually
+		CronManager:      cronmgr,
+		CronEdit:         cronEdit,
+		trustedProxyNets: trustedProxyNets,
+		stopCh:           make(chan struct{}),
+		baseCtx:          baseCtx,
+		cancelBase:       cancelBase,
+		tokenUsageDone:   make(chan struct{}),
+	}
+	server.tokenUsageBuffer.counts = make(map[int64]int64)
+	server.tokenUsageBuffer.last = make(map[int64]time.Time)
+
+	// Count in-flight requests, so Shutdown knows when the handlers are done. Only gin's own
+	// Logger and Recovery and unescapeRawPathParams (which reads no state) run in front of it. Every
+	// route is covered, because this registration precedes setupRoutes.
+	router.Use(server.trackInFlight())
 
 	// Configure security headers based on SSL setup
 	secureConfig := secure.Config{
-		FrameDeny:          true,
-		ContentTypeNosniff: true,
-		BrowserXssFilter:   true,
-		ReferrerPolicy:     "strict-origin-when-cross-origin",
+		FrameDeny:             true,
+		ContentTypeNosniff:    true,
+		BrowserXssFilter:      true,
+		ReferrerPolicy:        "strict-origin-when-cross-origin",
+		ContentSecurityPolicy: contentSecurityPolicy,
 	}
 
 	// Only add SSL-specific headers if SSL is enabled on the application itself
@@ -225,19 +321,6 @@ func NewServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *n
 	// Apply security middleware
 	router.Use(secure.New(secureConfig))
 
-	// Don't use ParseGlob - it causes template name conflicts
-	// Instead, we'll load templates individually in each handler
-	// router.SetHTMLTemplate(templates)
-
-	server := &WebServer{
-		DB:            db,
-		Router:        router,
-		Config:        webconfig,
-		NNTP:          nntpconfig,
-		templates:     nil, // We'll handle templates individually
-		SectionsCache: make(map[string]bool),
-	}
-
 	// Check if robots.txt file exists
 	robotsPath := "./web/robots.txt"
 	if _, err := os.Stat(robotsPath); err == nil {
@@ -249,6 +332,17 @@ func NewServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *n
 
 	// Initialize sections cache
 	server.loadSectionsCache()
+
+	// Start the cron job manager (nil with -no-cronjobs)
+	if server.CronManager != nil {
+		server.CronManager.StartCronManager()
+	}
+
+	// Expire idle AI chat histories and rate-limiter entries until Shutdown
+	go server.runChatCacheSweeper()
+
+	// Write the buffered API token usage every tokenUsageFlushEvery and once more on Shutdown
+	go server.runTokenUsageFlusher()
 
 	// Add reverse proxy middleware for handling X-Forwarded headers
 	router.Use(server.ReverseProxyMiddleware())
@@ -271,14 +365,18 @@ func (s *WebServer) setupRoutes() {
 		log.Printf("[WEB]: Using filesystem static files from ./web/static")
 	}
 
-	// Handle favicon to prevent it from being caught by section routes
-	if UseEmbeddedStatic() {
-		s.Router.GET("/favicon.ico", EmbeddedFileHandler("web/favicon.ico"))
-	} else {
-		s.Router.GET("/favicon.ico", func(c *gin.Context) {
-			c.File("web/favicon.ico")
-		})
+	// Handle favicon to prevent it from being caught by section routes.
+	// web/favicon.ico is not part of the embedded static/* FS, so it always comes from disk;
+	// the type is set explicitly because .ico is mapped to text/plain on some systems.
+	// A missing file still answers 404 (http.ServeFile overwrites the header then).
+	// HEAD is registered too: browsers and proxies probe the icon that way, and gin does not
+	// answer HEAD from a GET route (it used to reply 404 with text/plain).
+	faviconHandler := func(c *gin.Context) {
+		c.Header("Content-Type", "image/x-icon")
+		c.File("web/favicon.ico")
 	}
+	s.Router.GET("/favicon.ico", faviconHandler)
+	s.Router.HEAD("/favicon.ico", faviconHandler)
 	s.Router.GET("/sitemap.xml", func(c *gin.Context) {
 		c.Status(http.StatusNotFound)
 	})
@@ -311,14 +409,16 @@ func (s *WebServer) setupRoutes() {
 
 	// API routes (high priority - before dynamic section routes)
 	// stats are public
-	s.Router.GET("/api/v1/stats", s.getStats)  // API endpoint for stats
-	s.Router.GET("/api/v1/stats/", s.getStats) // API endpoint for stats
+	s.Router.GET("/api/v1/stats", s.requireAPIEnabled(), s.getStats)  // API endpoint for stats
+	s.Router.GET("/api/v1/stats/", s.requireAPIEnabled(), s.getStats) // API endpoint for stats
 
-	// Public article preview endpoint (no auth required)
-	s.Router.GET("/api/v1/groups/:group/articles/:articleNum/preview", s.getArticlePreview)
+	// Public article preview endpoint (no token required, but it follows the API setting).
+	// The web route below serves the tree view, which must keep working with the API disabled.
+	s.Router.GET("/api/v1/groups/:group/articles/:articleNum/preview", s.requireAPIEnabled(), s.getArticlePreview)
 
 	api := s.Router.Group("/api/v1")
-	api.Use(s.APIAuthRequired())
+	api.Use(s.requireAPIEnabled()) // Check if API is enabled
+	api.Use(s.APIAuthRequired())   // Then check authentication
 	{
 		//api.GET("/stats/", s.getStats) // not public, needs auth
 		api.GET("/groups", s.listGroups)
@@ -365,6 +465,8 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/newsgroups/assign-section", s.adminAssignNewsgroupSection)
 	s.Router.POST("/admin/newsgroups/toggle", s.adminToggleNewsgroup)
 	s.Router.POST("/admin/newsgroups/migrate-activity", s.adminMigrateNewsgroupActivity)
+	s.Router.POST("/admin/newsgroups/hide-future-posts", s.adminHideFuturePosts)
+	s.Router.POST("/admin/newsgroups/fix-thread-activity", s.adminFixThreadActivity)
 	s.Router.POST("/admin/newsgroups/bulk-enable", s.adminBulkEnableNewsgroups)
 	s.Router.POST("/admin/newsgroups/bulk-disable", s.adminBulkDisableNewsgroups)
 	s.Router.POST("/admin/newsgroups/bulk-delete", s.adminBulkDeleteNewsgroups)
@@ -390,10 +492,16 @@ func (s *WebServer) setupRoutes() {
 	s.Router.POST("/admin/sections/unassign", s.UnassignNewsgroupHandler)
 	s.Router.POST("/admin/cache/clear", s.adminClearCache)
 	s.Router.POST("/admin/hierarchies/update", s.adminUpdateHierarchies)
-	s.Router.POST("/admin/registration/enable", s.adminEnableRegistration)
-	s.Router.POST("/admin/registration/disable", s.adminDisableRegistration)
-	s.Router.POST("/admin/hostname/set", s.adminSetHostname)
-	s.Router.POST("/admin/webpostsize/set", s.adminSetWebPostSize)
+	s.Router.POST("/admin/hierarchies/restore-descriptions", s.adminRestoreHierarchyDescriptions)
+	s.Router.POST("/admin/settings", s.adminUpdateSettings)
+	s.Router.POST("/admin/crons/create", s.adminCreateCronJob)
+	s.Router.POST("/admin/crons/update", s.adminUpdateCronJob)
+	s.Router.POST("/admin/crons/toggle", s.adminToggleCronJob)
+	s.Router.POST("/admin/crons/delete", s.adminDeleteCronJob)
+	s.Router.POST("/admin/crons/stop", s.adminStopCronJob)
+	s.Router.GET("/admin/cronjobs/viewlog/:id", s.adminViewCronJobLog)
+	s.Router.POST("/admin/postqueue/delete", s.adminDeletePostQueueEntry)
+	s.Router.POST("/admin/postqueue/retry", s.adminRetryPostQueueEntry)
 	// Legacy/admin routes (high priority - must come before dynamic routes)
 	s.Router.GET("/", s.homePage)
 	s.Router.GET("/groups", s.groupsPage)                                                // groups listing
@@ -418,6 +526,7 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/groups/:group/threads", s.groupThreadsPage)                           // Legacy threads access
 	s.Router.GET("/groups/:group/thread/:threadRoot", s.singleThreadPage)                // View single thread flat
 	s.Router.GET("/groups/:group/articles/:articleNum", s.articlePage)                   // Legacy article access
+	s.Router.GET("/groups/:group/articles/:articleNum/preview", s.getArticlePreview)     // Article preview (tree view hover)
 	s.Router.GET("/groups/:group/message/:messageId", s.articleByMessageIdPage)          // Article by message ID
 	s.Router.GET("/groups/:group/tree/:threadRoot", s.threadTreePage)                    // View thread as tree
 	s.Router.GET("/search", s.searchPage)
@@ -441,7 +550,7 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/demo/thread-tree/", s.threadTreeDemoPage)
 
 	// Tree view API routes
-	s.Router.GET("/api/thread-tree", s.handleThreadTreeAPI)
+	s.Router.GET("/api/thread-tree", s.requireAPIEnabled(), s.handleThreadTreeAPI)
 
 	// Tree view for specific threads
 
@@ -459,120 +568,218 @@ func (s *WebServer) setupRoutes() {
 	}
 }
 
-// Start starts the web server with SSL support if configured
-func (s *WebServer) Start() error {
-	addr := ":" + strconv.Itoa(s.Config.ListenPort)
-	s.StartTime = time.Now() // Set the start time for uptime calculations
-	if s.Config.SSL {
-		if s.Config.CertFile == "" || s.Config.KeyFile == "" {
-			return errors.New("SSL enabled but cert_file or key_file not specified in config")
+// unescapeRawPathParams path-unescapes the route params when gin matched on URL.RawPath, which
+// it does whenever the request path is not in canonical escaping (%2F, %2C, literal < >, ...).
+// With an empty RawPath gin matched on URL.Path, whose params Go's URL parsing already decoded.
+// url.PathUnescape keeps '+' as '+'; a value that does not unescape stays raw.
+func unescapeRawPathParams() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if len(c.Request.URL.RawPath) > 0 {
+			for i := range c.Params {
+				if v, err := url.PathUnescape(c.Params[i].Value); err == nil {
+					c.Params[i].Value = v
+				}
+			}
 		}
-		log.Printf("Starting HTTPS server on %s", addr)
-		return s.Router.RunTLS(addr, s.Config.CertFile, s.Config.KeyFile)
-	} else {
-		log.Printf("Starting HTTP server on %s", addr)
-		return s.Router.Run(addr)
+		c.Next()
+	}
+}
+
+// trackInFlight counts the requests that are inside a handler. Shutdown waits for the counter to
+// reach zero after it cancelled the request contexts, so it can report handlers that keep running.
+func (s *WebServer) trackInFlight() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		s.inFlightRequests.Add(1)
+		defer s.inFlightRequests.Add(-1)
+		c.Next()
 	}
 }
 
 // Custom bot detection middleware
 func (s *WebServer) BotDetectionMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		userAgent := c.GetHeader("User-Agent")
+		// Copy the settings under the read locks and never hold them across c.Next():
+		// UpdateBadBots/UpdateBadIPs would wait for the slowest request and block every new one.
+		// The update functions replace the slices instead of mutating them, so the copies stay valid.
+		config.BadIPsMutex.RLock()
+		blockBadIPs := config.BlockBadIPs
+		blockedIPs := config.Default_BlockedIPs
+		config.BadIPsMutex.RUnlock()
 
-		// Simple bot patterns
-		badBots := []string{"acunetix", "agent", "ahref", "amazon", "census", "chatgpt", "claude", "crawler",
-			"curl", "deepseek", "go-http", "httrack", "meta", "mj12", "paloalto", "python", "semrush", "wget"}
-		//goodBots := []string{}
-		for _, pattern := range badBots {
-			if strings.Contains(strings.ToLower(userAgent), pattern) {
-				// Log bot request
-				log.Printf("Bot blocked: '%s' IP: %s", userAgent, c.ClientIP())
-				c.String(403, "403")
-				c.Abort()
-				return
+		config.BadBotsMutex.RLock()
+		blockBadBots := config.BlockBadBots
+		badBots := config.Default_BadBots
+		config.BadBotsMutex.RUnlock()
+
+		// Check IP blocking first
+		if blockBadIPs && len(blockedIPs) > 0 {
+			clientIP := c.ClientIP()
+			if ip := net.ParseIP(clientIP); ip != nil {
+				for _, ipNet := range blockedIPs {
+					if ipNet.Contains(ip) {
+						log.Printf("IP blocked: %s (matches %s)", clientIP, ipNet.String())
+						c.String(403, "403")
+						c.Abort()
+						return
+					}
+				}
+			}
+		}
+
+		// Check user agent against bad bot patterns (UpdateBadBots stores them lowercase)
+		if blockBadBots && len(badBots) > 0 {
+			ua := strings.ToLower(c.GetHeader("User-Agent"))
+			for _, pattern := range badBots {
+				if pattern != "" && strings.Contains(ua, pattern) {
+					log.Printf("Bot blocked: '%s' IP: '%s'", c.GetHeader("User-Agent"), c.ClientIP())
+					c.String(403, "403")
+					c.Abort()
+					return
+				}
 			}
 		}
 		c.Next()
 	}
 }
 
-// ReverseProxyMiddleware handles X-Forwarded headers when running behind a reverse proxy
+// configureTrustedProxies configures the trusted proxies with the default client IP header.
+// It returns the parsed networks for isTrustedPeer.
+func configureTrustedProxies(router *gin.Engine, addrs string) []*net.IPNet {
+	return configureTrustedProxiesWithHeader(router, addrs, "")
+}
+
+// configureTrustedProxiesWithHeader makes gin take the client IP from exactly one forwarded header,
+// and only when the direct peer is a configured reverse proxy (comma or whitespace separated
+// IPs/CIDRs; empty or all-invalid means DefaultReverseProxy).
+//
+// Trusting more than one header is unsafe: behind a proxy that sets only X-Real-IP and passes the
+// client's own X-Forwarded-For through, the client picks its own address. header is the value of
+// CFG_KEY_REVERSEPROXY_IPHEADER: "" or "X-Forwarded-For" selects X-Forwarded-For (gin evaluates it
+// right to left and ignores invalid addresses), "X-Real-IP" selects X-Real-IP, anything else is
+// logged and falls back to X-Forwarded-For.
+// It returns the parsed networks for isTrustedPeer.
+func configureTrustedProxiesWithHeader(router *gin.Engine, addrs, header string) []*net.IPNet {
+	list, nets := parseTrustedProxyList(strings.Fields(strings.ReplaceAll(addrs, ",", " ")))
+	if len(list) == 0 {
+		list, nets = parseTrustedProxyList(DefaultReverseProxy)
+	}
+	if err := router.SetTrustedProxies(list); err != nil {
+		log.Printf("[WEB]: Error setting trusted proxies %v: %v", list, err)
+	}
+	router.ForwardedByClientIP = true
+
+	switch want := strings.TrimSpace(header); {
+	case strings.EqualFold(want, "X-Real-IP"):
+		router.RemoteIPHeaders = []string{"X-Real-IP"}
+	case want == "" || strings.EqualFold(want, "X-Forwarded-For"):
+		router.RemoteIPHeaders = []string{"X-Forwarded-For"}
+	default:
+		log.Printf("[WEB]: Unknown %s '%s', using X-Forwarded-For (valid: X-Forwarded-For, X-Real-IP)", config.CFG_KEY_REVERSEPROXY_IPHEADER, header)
+		router.RemoteIPHeaders = []string{"X-Forwarded-For"}
+	}
+	return nets
+}
+
+// parseTrustedProxyList parses IPs (as /32 or /128) and CIDRs, skipping invalid entries.
+func parseTrustedProxyList(entries []string) ([]string, []*net.IPNet) {
+	list := make([]string, 0, len(entries))
+	nets := make([]*net.IPNet, 0, len(entries))
+	for _, entry := range entries {
+		var ipNet *net.IPNet
+		if strings.Contains(entry, "/") {
+			_, n, err := net.ParseCIDR(entry)
+			if err != nil {
+				log.Printf("[WEB]: Ignoring invalid reverse proxy address '%s': %v", entry, err)
+				continue
+			}
+			ipNet = n
+		} else {
+			ip := net.ParseIP(entry)
+			if ip == nil {
+				log.Printf("[WEB]: Ignoring invalid reverse proxy address '%s'", entry)
+				continue
+			}
+			if ip4 := ip.To4(); ip4 != nil {
+				ipNet = &net.IPNet{IP: ip4, Mask: net.CIDRMask(32, 32)}
+			} else {
+				ipNet = &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}
+			}
+		}
+		list = append(list, entry)
+		nets = append(nets, ipNet)
+	}
+	return list, nets
+}
+
+// isTrustedPeer reports whether the direct peer is a configured reverse proxy.
+func (s *WebServer) isTrustedPeer(peer net.IP) bool {
+	if peer == nil {
+		return false
+	}
+	for _, ipNet := range s.trustedProxyNets {
+		if ipNet.Contains(peer) {
+			return true
+		}
+	}
+	return false
+}
+
+// untrustedForwarderSeen remembers peers noteUntrustedForwarder has already logged, so a
+// misconfigured proxy produces one line instead of one per request. Both the map and the logging
+// are bounded: after maxUntrustedForwarderIPs distinct peers the set is closed (full) and further
+// peers are neither remembered nor logged, so neither memory nor the log can grow without end.
+var untrustedForwarderSeen = struct {
+	sync.Mutex
+	ips  map[string]struct{}
+	full bool // cap reached: the suppression notice was logged and nothing more is said
+}{ips: make(map[string]struct{})}
+
+const maxUntrustedForwarderIPs = 256
+
+// noteUntrustedForwarder logs once per peer that its forwarded client IP headers are ignored.
+func (s *WebServer) noteUntrustedForwarder(peer net.IP) {
+	key := peer.String()
+	untrustedForwarderSeen.Lock()
+	if untrustedForwarderSeen.full {
+		untrustedForwarderSeen.Unlock()
+		return
+	}
+	if _, seen := untrustedForwarderSeen.ips[key]; seen {
+		untrustedForwarderSeen.Unlock()
+		return
+	}
+	untrustedForwarderSeen.ips[key] = struct{}{}
+	full := len(untrustedForwarderSeen.ips) >= maxUntrustedForwarderIPs
+	untrustedForwarderSeen.full = full
+	untrustedForwarderSeen.Unlock()
+
+	log.Printf("[WEB]: ignoring forwarded client IP headers from untrusted proxy %s: add it to %s", key, config.CFG_KEY_REVERSEPROXY)
+	if full {
+		log.Printf("[WEB]: %d untrusted forwarders seen, suppressing further notices: check %s", maxUntrustedForwarderIPs, config.CFG_KEY_REVERSEPROXY)
+	}
+}
+
+// ReverseProxyMiddleware detects HTTPS terminated by a trusted reverse proxy.
+// The client IP is resolved by gin (see configureTrustedProxiesWithHeader); RemoteAddr and Host are
+// never rewritten. A private or loopback peer that sends forwarded headers but is not trusted is
+// logged once: that is almost always a proxy missing from ReverseProxyAddr.
 func (s *WebServer) ReverseProxyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Capture the immediate peer before any overrides
-		remoteHost, _, err := net.SplitHostPort(c.Request.RemoteAddr)
-		if err != nil {
-			remoteHost = c.Request.RemoteAddr // Fallback if no port
+		peer := net.ParseIP(c.RemoteIP())
+		trusted := s.isTrustedPeer(peer)
+		if !trusted && peer != nil && (peer.IsLoopback() || peer.IsPrivate()) &&
+			(c.GetHeader("X-Forwarded-For") != "" || c.GetHeader("X-Real-IP") != "") {
+			s.noteUntrustedForwarder(peer)
 		}
-
-		// Determine if the request came from a trusted proxy (private/loopback)
-		trustedProxy := isPrivateOrLoopbackIP(remoteHost)
-
-		// Determine HTTPS: direct TLS or forwarded by trusted proxy
-		isHTTPS := c.Request.TLS != nil
-		if !isHTTPS && trustedProxy && strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https") {
-			isHTTPS = true
+		isHTTPS := c.Request.TLS != nil ||
+			(trusted && strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https"))
+		if isHTTPS {
 			c.Request.URL.Scheme = "https"
 		}
 		// Expose scheme result to handlers
 		c.Set("is_https", isHTTPS)
-
-		if trustedProxy {
-			// Handle X-Forwarded-For to get the real client IP
-			if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
-				// Take the first IP from the list (original client)
-				ips := strings.Split(xff, ",")
-				if len(ips) > 0 {
-					clientIP := strings.TrimSpace(ips[0])
-					c.Request.RemoteAddr = clientIP + ":0"
-				}
-			}
-
-			// Handle X-Real-IP as an alternative
-			if realIP := c.GetHeader("X-Real-IP"); realIP != "" {
-				c.Request.RemoteAddr = realIP + ":0"
-			}
-
-			// Handle X-Forwarded-Host to get the original host
-			if host := c.GetHeader("X-Forwarded-Host"); host != "" {
-				c.Request.Host = host
-			}
-		}
-
 		c.Next()
 	}
-}
-
-// isPrivateOrLoopbackIP returns true if the given host string is loopback or RFC1918/private
-func isPrivateOrLoopbackIP(host string) bool {
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	if ip.IsLoopback() {
-		return true
-	}
-	// RFC1918 IPv4 ranges
-	if ip4 := ip.To4(); ip4 != nil {
-		// 10.0.0.0/8
-		if ip4[0] == 10 {
-			return true
-		}
-		// 172.16.0.0/12
-		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
-			return true
-		}
-		// 192.168.0.0/16
-		if ip4[0] == 192 && ip4[1] == 168 {
-			return true
-		}
-	}
-	// IPv6 unique local addresses (fc00::/7)
-	if ip.To16() != nil && (ip[0]&0xfe) == 0xfc {
-		return true
-	}
-	return false
 }
 
 func (s *WebServer) ApacheLogFormat() gin.HandlerFunc {
@@ -599,13 +806,14 @@ func (s *WebServer) loadSectionsCache() {
 		return
 	}
 
-	// Clear and rebuild cache
-	s.SectionsCache = make(map[string]bool)
+	// Build a new map and publish it atomically; readers keep the old map until then
+	m := make(map[string]bool, len(sections))
 	for _, section := range sections {
-		s.SectionsCache[section.Name] = true
+		m[section.Name] = true
 	}
+	s.sectionsCache.Store(&m)
 
-	log.Printf("Loaded %d sections into cache", len(s.SectionsCache))
+	log.Printf("Loaded %d sections into cache", len(m))
 }
 
 // refreshSectionsCache reloads the sections cache
@@ -615,10 +823,33 @@ func (s *WebServer) refreshSectionsCache() {
 
 // isValidSection checks if a section name exists in the cache
 func (s *WebServer) isValidSection(sectionName string) bool {
-	if s.SectionsCache == nil {
-		return false
-	}
-	return s.SectionsCache[sectionName]
+	p := s.sectionsCache.Load()
+	return p != nil && (*p)[sectionName]
+}
+
+// knownNonSectionPaths are first path segments that are never section names
+var knownNonSectionPaths = map[string]bool{
+	"favicon.ico":      true,
+	"robots.txt":       true,
+	"static":           true,
+	"admin":            true,
+	"api":              true,
+	"login":            true,
+	"logout":           true,
+	"register":         true,
+	"profile":          true,
+	"groups":           true,
+	"hierarchies":      true,
+	"hierarchy":        true,
+	"search":           true,
+	"stats":            true,
+	"SiteHelp":         true,
+	"SiteNews":         true,
+	"sections":         true,
+	"demo":             true,
+	"ping":             true,
+	"aichat":           true,
+	"hierarchy-groups": true,
 }
 
 // sectionValidationMiddleware validates section names against the cache before routing
@@ -641,31 +872,7 @@ func (s *WebServer) sectionValidationMiddleware() gin.HandlerFunc {
 		potentialSection := pathSegments[0]
 
 		// Skip validation for known non-section paths
-		knownPaths := map[string]bool{
-			"favicon.ico":      true,
-			"robots.txt":       true,
-			"static":           true,
-			"admin":            true,
-			"api":              true,
-			"login":            true,
-			"logout":           true,
-			"register":         true,
-			"profile":          true,
-			"groups":           true,
-			"hierarchies":      true,
-			"hierarchy":        true,
-			"search":           true,
-			"stats":            true,
-			"SiteHelp":         true,
-			"SiteNews":         true,
-			"sections":         true,
-			"demo":             true,
-			"ping":             true,
-			"aichat":           true,
-			"hierarchy-groups": true,
-		}
-
-		if knownPaths[potentialSection] {
+		if knownNonSectionPaths[potentialSection] {
 			c.Next()
 			return
 		}
