@@ -68,7 +68,11 @@ func lo2ServerCaptureLog(t *testing.T) *lo2ServerLogBuf {
 // lo2ServerClientIPEngine builds an engine whose only route reports the resolved client IP.
 func lo2ServerClientIPEngine(addrs, header string) *Router {
 	r := NewRouter()
-	s := &WebServer{trustedProxyNets: configureTrustedProxiesWithHeader(r, addrs, header)}
+	nets, err := configureTrustedProxiesWithHeader(r, addrs, header)
+	if err != nil {
+		panic(fmt.Sprintf("configureTrustedProxiesWithHeader(%q, %q): %v", addrs, header, err))
+	}
+	s := &WebServer{trustedProxyNets: nets}
 	r.Use(s.ReverseProxyMiddleware())
 	r.GET("/", func(c *Context) { c.String(http.StatusOK, "%s", c.ClientIP()) })
 	return r

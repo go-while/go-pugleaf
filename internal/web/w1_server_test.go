@@ -144,7 +144,11 @@ func TestW1ServerTrustedProxies(t *testing.T) {
 	}
 	newEngine := func(addrs string) *Router {
 		r := NewRouter()
-		s := &WebServer{trustedProxyNets: configureTrustedProxies(r, addrs)}
+		nets, err := configureTrustedProxies(r, addrs)
+		if err != nil {
+			t.Fatalf("configureTrustedProxies(%q): %v", addrs, err)
+		}
+		s := &WebServer{trustedProxyNets: nets}
 		r.Use(s.ReverseProxyMiddleware())
 		r.GET("/", func(c *Context) {
 			v, _ := c.Get("is_https")
@@ -154,8 +158,8 @@ func TestW1ServerTrustedProxies(t *testing.T) {
 		return r
 	}
 	engines := map[string]*Router{
-		"":                                newEngine(""),
-		"10.9.9.9, 2001:db8::/32 bad/x ?": newEngine("10.9.9.9, 2001:db8::/32 bad/x ?"),
+		"":                        newEngine(""),
+		"10.9.9.9; 2001:db8::/32": newEngine("10.9.9.9; 2001:db8::/32"),
 	}
 
 	tests := []struct {
@@ -178,9 +182,9 @@ func TestW1ServerTrustedProxies(t *testing.T) {
 		{"trusted peer proto https", "", "127.0.0.1:1", map[string]string{"X-Forwarded-Proto": "HTTPS"}, "127.0.0.1", true},
 		{"trusted peer proto http", "", "127.0.0.1:1", map[string]string{"X-Forwarded-Proto": "http"}, "127.0.0.1", false},
 		{"forwarded host not applied", "", "127.0.0.1:1", map[string]string{"X-Forwarded-Host": "evil.example"}, "127.0.0.1", false},
-		{"configured proxy trusted", "10.9.9.9, 2001:db8::/32 bad/x ?", "10.9.9.9:1", map[string]string{"X-Forwarded-For": "198.51.100.9", "X-Forwarded-Proto": "https"}, "198.51.100.9", true},
-		{"configured v6 proxy trusted", "10.9.9.9, 2001:db8::/32 bad/x ?", "[2001:db8::1]:1", map[string]string{"X-Forwarded-For": "198.51.100.10"}, "198.51.100.10", false},
-		{"default list not used when configured", "10.9.9.9, 2001:db8::/32 bad/x ?", "127.0.0.1:1", map[string]string{"X-Forwarded-For": "198.51.100.11", "X-Forwarded-Proto": "https"}, "127.0.0.1", false},
+		{"configured proxy trusted", "10.9.9.9; 2001:db8::/32", "10.9.9.9:1", map[string]string{"X-Forwarded-For": "198.51.100.9", "X-Forwarded-Proto": "https"}, "198.51.100.9", true},
+		{"configured v6 proxy trusted", "10.9.9.9; 2001:db8::/32", "[2001:db8::1]:1", map[string]string{"X-Forwarded-For": "198.51.100.10"}, "198.51.100.10", false},
+		{"default list not used when configured", "10.9.9.9; 2001:db8::/32", "127.0.0.1:1", map[string]string{"X-Forwarded-For": "198.51.100.11", "X-Forwarded-Proto": "https"}, "127.0.0.1", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

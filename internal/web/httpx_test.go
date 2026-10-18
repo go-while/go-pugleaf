@@ -758,9 +758,12 @@ func TestHttpxSecureHeaders(t *testing.T) {
 // httpxTrustRouter is a router whose only route answers the client IP, with the trusted proxies
 // and the header chosen the way configureTrustedProxiesWithHeader does.
 func httpxTrustRouter(addrs, header string) *Router {
-	_, nets := parseTrustedProxyList(strings.Fields(strings.ReplaceAll(addrs, ",", " ")))
+	_, nets, err := parseTrustedProxyList(splitProxyList(addrs))
+	if err != nil {
+		panic(err)
+	}
 	if len(nets) == 0 {
-		_, nets = parseTrustedProxyList(DefaultReverseProxy)
+		_, nets, _ = parseTrustedProxyList(DefaultReverseProxy)
 	}
 	h := "X-Forwarded-For"
 	if strings.EqualFold(strings.TrimSpace(header), "X-Real-IP") {
@@ -783,10 +786,10 @@ func httpxClientIP(r *Router, peer string, header map[string]string) string {
 
 // The cases of TestW1ServerReverseProxy (wantHTTPS belongs to ReverseProxyMiddleware, not here).
 func TestHttpxClientIPReverseProxy(t *testing.T) {
-	httpxCaptureLog(t) // parseTrustedProxyList logs the invalid entries
+	httpxCaptureLog(t)
 	routers := map[string]*Router{
-		"":                                httpxTrustRouter("", ""),
-		"10.9.9.9, 2001:db8::/32 bad/x ?": httpxTrustRouter("10.9.9.9, 2001:db8::/32 bad/x ?", ""),
+		"":                        httpxTrustRouter("", ""),
+		"10.9.9.9; 2001:db8::/32": httpxTrustRouter("10.9.9.9; 2001:db8::/32", ""),
 	}
 	tests := []struct {
 		name      string
@@ -805,9 +808,9 @@ func TestHttpxClientIPReverseProxy(t *testing.T) {
 		{"trusted peer proto https", "", "127.0.0.1:1", map[string]string{"X-Forwarded-Proto": "HTTPS"}, "127.0.0.1", true},
 		{"trusted peer proto http", "", "127.0.0.1:1", map[string]string{"X-Forwarded-Proto": "http"}, "127.0.0.1", false},
 		{"forwarded host not applied", "", "127.0.0.1:1", map[string]string{"X-Forwarded-Host": "evil.example"}, "127.0.0.1", false},
-		{"configured proxy trusted", "10.9.9.9, 2001:db8::/32 bad/x ?", "10.9.9.9:1", map[string]string{"X-Forwarded-For": "198.51.100.9", "X-Forwarded-Proto": "https"}, "198.51.100.9", true},
-		{"configured v6 proxy trusted", "10.9.9.9, 2001:db8::/32 bad/x ?", "[2001:db8::1]:1", map[string]string{"X-Forwarded-For": "198.51.100.10"}, "198.51.100.10", false},
-		{"default list not used when configured", "10.9.9.9, 2001:db8::/32 bad/x ?", "127.0.0.1:1", map[string]string{"X-Forwarded-For": "198.51.100.11", "X-Forwarded-Proto": "https"}, "127.0.0.1", false},
+		{"configured proxy trusted", "10.9.9.9; 2001:db8::/32", "10.9.9.9:1", map[string]string{"X-Forwarded-For": "198.51.100.9", "X-Forwarded-Proto": "https"}, "198.51.100.9", true},
+		{"configured v6 proxy trusted", "10.9.9.9; 2001:db8::/32", "[2001:db8::1]:1", map[string]string{"X-Forwarded-For": "198.51.100.10"}, "198.51.100.10", false},
+		{"default list not used when configured", "10.9.9.9; 2001:db8::/32", "127.0.0.1:1", map[string]string{"X-Forwarded-For": "198.51.100.11", "X-Forwarded-Proto": "https"}, "127.0.0.1", false},
 		// Beyond the original table.
 		{"peer without port", "", "127.0.0.1", map[string]string{"X-Forwarded-For": "198.51.100.7"}, "", false},
 		{"invalid xff entry falls back to the peer", "", "127.0.0.1:1", map[string]string{"X-Forwarded-For": "198.51.100.7, garbage"}, "127.0.0.1", false},

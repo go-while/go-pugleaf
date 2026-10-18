@@ -27,7 +27,7 @@ func TestMxpMaxCrossPosts(t *testing.T) {
 		v    string
 		want int
 	}{
-		{"7", 7}, {" 3 ", 3}, {"1", 1}, {"15", 15}, {"16", 9}, {"0", 9}, {"-2", 9}, {"abc", 9}, {"", 9}, {"9", 9},
+		{"7", 7}, {" 3 ", 3}, {"1", 1}, {"32", 32}, {"33", 9}, {"0", 9}, {"-2", 9}, {"abc", 9}, {"", 9}, {"9", 9},
 	} {
 		if err := db.SetConfigValue(config.CFG_KEY_MAXCROSSPOSTS, c.v); err != nil {
 			t.Fatal(err)

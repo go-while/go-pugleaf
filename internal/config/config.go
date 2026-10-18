@@ -71,9 +71,9 @@ const CFG_KEY_MAXCROSSPOSTS string = "MaxCrossPosts"
 // DefaultMaxCrossPosts is the MaxCrossPosts used when the key is missing or invalid.
 const DefaultMaxCrossPosts = 9
 
-// MaxCrossPostsLimit is the largest MaxCrossPosts the admin page accepts: the processor's
-// per-article ProcessQueue holds 16 entries and its capture sends must never block.
-const MaxCrossPostsLimit = 15
+// MaxCrossPostsLimit is the largest MaxCrossPosts the admin page accepts. The processor sizes
+// each article's ProcessQueue from the configured value, so this is only a sanity bound.
+const MaxCrossPostsLimit = 32
 
 // Admin settings form field names
 const FORM_FIELD_HOSTNAME string = "local_nntp_hostname"

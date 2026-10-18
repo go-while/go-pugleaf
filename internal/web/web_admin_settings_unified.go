@@ -16,6 +16,7 @@ import (
 type SettingConfig struct {
 	FormField    string
 	ConfigKey    string
+	Normalize    func(string) string // rewrites common typing slips before validation and storage
 	Validator    func(string) error
 	Processor    func(*WebServer, string) error
 	SuccessMsg   func(string) string
@@ -90,7 +91,8 @@ func (s *WebServer) adminUpdateSettings(c *Context) {
 		config.FORM_FIELD_REVERSEPROXY: {
 			FormField: config.FORM_FIELD_REVERSEPROXY,
 			ConfigKey: config.CFG_KEY_REVERSEPROXY,
-			Validator: nil, // No validation needed
+			Normalize: normalizeProxyList, // "127.0.0.1; ::1" is stored as "127.0.0.1, ::1"
+			Validator: s.validateReverseProxyList,
 			Processor: nil, // Uses config key directly
 			SuccessMsg: func(value string) string {
 				if value == "" {
@@ -159,6 +161,7 @@ func (s *WebServer) adminUpdateSettings(c *Context) {
 		config.FORM_FIELD_BADIPS: {
 			FormField: config.FORM_FIELD_BADIPS,
 			ConfigKey: config.CFG_KEY_BADIPS,
+			Normalize: func(v string) string { return strings.ReplaceAll(v, ";", ",") },
 			Validator: s.validateCIDRList,    // Validate CIDR ranges
 			Processor: s.processBadIPsUpdate, // Apply changes immediately
 			SuccessMsg: func(value string) string {
@@ -189,6 +192,9 @@ func (s *WebServer) adminUpdateSettings(c *Context) {
 
 	// Get the value from form
 	value := strings.TrimSpace(c.PostForm(cfg.FormField))
+	if cfg.Normalize != nil {
+		value = cfg.Normalize(value)
+	}
 
 	// Validate empty values
 	if value == "" && !cfg.EmptyAllowed {
@@ -334,6 +340,15 @@ func (s *WebServer) validateMaxCrossPosts(value string) error {
 	}
 	if n < 1 || n > config.MaxCrossPostsLimit {
 		return fmt.Errorf("Maximum crossposts must be between 1 and %d", config.MaxCrossPostsLimit)
+	}
+	return nil
+}
+
+// validateReverseProxyList refuses a trusted-proxy list with any entry that is not an IP or
+// CIDR (the value is already normalized). Empty means the default private ranges.
+func (s *WebServer) validateReverseProxyList(value string) error {
+	if _, _, err := parseTrustedProxyList(splitProxyList(value)); err != nil {
+		return fmt.Errorf("Reverse proxy list not saved: %v (use comma-separated IPs or CIDRs)", err)
 	}
 	return nil
 }

@@ -8,16 +8,17 @@ Operational notes for `cmd/web`. Everything here reflects the `web-sqlite-harden
 `cmd/web` speaks plain HTTP and expects a proxy in front of it.
 
 **Trusted proxies.** `ReverseProxyAddr` (admin settings) lists the peers whose forwarded headers are
-believed. When it is empty — or when no entry parses — the defaults are used:
+believed, as IPs or CIDRs separated by commas (semicolons and whitespace are accepted and stored as
+commas). When it is empty the defaults are used:
 
 ```
 127.0.0.0/8   ::1   10.0.0.0/8   172.16.0.0/12   192.168.0.0/16   fc00::/7
 ```
 
-A proxy that is not covered makes every visitor appear to come from the proxy's own address. Each
-rejected entry is logged (`[WEB]: Ignoring invalid reverse proxy address '...'`), and note the
-fallback: a list where *every* entry is malformed silently trusts the whole default range set rather
-than nothing. The effective list and the header in use are logged once at startup:
+A proxy that is not covered makes every visitor appear to come from the proxy's own address. An
+entry that is not an IP or CIDR is never skipped: the admin form refuses to save the list, and a bad
+value already in the config table stops the webserver at startup with a `FATAL` line naming the
+entry (fix the row and restart). The effective list and the header in use are logged once at startup:
 
 ```
 [WEB]: Trusted reverse proxies: [127.0.0.0/8 ::1/128 10.0.0.0/8 ...] | client IP header: [X-Forwarded-For]
@@ -131,7 +132,7 @@ The fetcher exits with a clear error when no provider is **enabled**, instead of
   deeper articles are reachable by hand; `web/templates/pagination.html` simply never emits a cursor
   link.
 - The bad-bots and blocked-IP lists both apply immediately when saved from the admin settings form.
-- `MaxCrossPosts` (admin settings, default 9, range 1-15) is the most newsgroups one article may list;
+- `MaxCrossPosts` (admin settings, default 9, range 1-32) is the most newsgroups one article may list;
   the web post form, the NNTP intake and the fetcher reject articles above it. The webserver applies a
   change at once, the other processes within the config cache refresh interval (5 minutes), no restart.
   The `ReverseProxyIPHeader` and `ReverseProxyAddr` settings need a web server restart.

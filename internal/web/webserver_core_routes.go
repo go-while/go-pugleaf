@@ -3,6 +3,7 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"html/template"
 	"log"
 	"net"
@@ -257,7 +258,11 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	if err != nil {
 		log.Printf("[WEB]: Error getting ReverseProxyIPHeader: %v", err)
 	}
-	trustedProxyNets := configureTrustedProxiesWithHeader(router, ReverseProxyAddr, ReverseProxyIPHeader)
+	trustedProxyNets, err := configureTrustedProxiesWithHeader(router, ReverseProxyAddr, ReverseProxyIPHeader)
+	if err != nil {
+		// A half-parsed list would trust the wrong peers, so a bad entry stops the server.
+		log.Fatalf("[WEB]: FATAL: %v: fix the value (comma-separated IPs or CIDRs) in the config table, key %s in cfg/pugleaf.sq3, and restart", err, config.CFG_KEY_REVERSEPROXY)
+	}
 	log.Printf("[WEB]: Trusted reverse proxies: %v | client IP header: %v", trustedProxyNets, router.RemoteIPHeader())
 
 	// Don't use ParseGlob - it causes template name conflicts
@@ -611,15 +616,27 @@ func (s *WebServer) BotDetectionMiddleware() HandlerFunc {
 	}
 }
 
+// splitProxyList splits a ReverseProxyAddr value on commas, semicolons and whitespace.
+func splitProxyList(addrs string) []string {
+	return strings.Fields(strings.NewReplacer(",", " ", ";", " ").Replace(addrs))
+}
+
+// normalizeProxyList rewrites a ReverseProxyAddr value typed by a human (semicolons, stray
+// whitespace) into the stored form: entries separated by ", ".
+func normalizeProxyList(addrs string) string {
+	return strings.Join(splitProxyList(addrs), ", ")
+}
+
 // configureTrustedProxies configures the trusted proxies with the default client IP header.
 // It returns the parsed networks for isTrustedPeer.
-func configureTrustedProxies(router *Router, addrs string) []*net.IPNet {
+func configureTrustedProxies(router *Router, addrs string) ([]*net.IPNet, error) {
 	return configureTrustedProxiesWithHeader(router, addrs, "")
 }
 
 // configureTrustedProxiesWithHeader makes the router take the client IP from exactly one forwarded header,
-// and only when the direct peer is a configured reverse proxy (comma or whitespace separated
-// IPs/CIDRs; empty or all-invalid means DefaultReverseProxy).
+// and only when the direct peer is a configured reverse proxy (comma, semicolon or whitespace
+// separated IPs/CIDRs; empty means DefaultReverseProxy). An entry that does not parse is an
+// error, never skipped: a half-applied list would trust the wrong peers.
 //
 // Trusting more than one header is unsafe: behind a proxy that sets only X-Real-IP and passes the
 // client's own X-Forwarded-For through, the client picks its own address. header is the value of
@@ -627,10 +644,13 @@ func configureTrustedProxies(router *Router, addrs string) []*net.IPNet {
 // evaluates it right to left and ignores it when an entry is not an address), "X-Real-IP" selects X-Real-IP, anything else is
 // logged and falls back to X-Forwarded-For.
 // It returns the parsed networks for isTrustedPeer.
-func configureTrustedProxiesWithHeader(router *Router, addrs, header string) []*net.IPNet {
-	list, nets := parseTrustedProxyList(strings.Fields(strings.ReplaceAll(addrs, ",", " ")))
+func configureTrustedProxiesWithHeader(router *Router, addrs, header string) ([]*net.IPNet, error) {
+	list, nets, err := parseTrustedProxyList(splitProxyList(addrs))
+	if err != nil {
+		return nil, fmt.Errorf("%s %q: %w", config.CFG_KEY_REVERSEPROXY, addrs, err)
+	}
 	if len(list) == 0 {
-		_, nets = parseTrustedProxyList(DefaultReverseProxy)
+		_, nets, _ = parseTrustedProxyList(DefaultReverseProxy)
 	}
 
 	ipHeader := "X-Forwarded-For"
@@ -642,11 +662,12 @@ func configureTrustedProxiesWithHeader(router *Router, addrs, header string) []*
 		log.Printf("[WEB]: Unknown %s '%s', using X-Forwarded-For (valid: X-Forwarded-For, X-Real-IP)", config.CFG_KEY_REVERSEPROXY_IPHEADER, header)
 	}
 	router.SetTrustedProxies(nets, ipHeader)
-	return nets
+	return nets, nil
 }
 
-// parseTrustedProxyList parses IPs (as /32 or /128) and CIDRs, skipping invalid entries.
-func parseTrustedProxyList(entries []string) ([]string, []*net.IPNet) {
+// parseTrustedProxyList parses IPs (as /32 or /128) and CIDRs; the first entry that does not
+// parse is returned as an error.
+func parseTrustedProxyList(entries []string) ([]string, []*net.IPNet, error) {
 	list := make([]string, 0, len(entries))
 	nets := make([]*net.IPNet, 0, len(entries))
 	for _, entry := range entries {
@@ -654,15 +675,13 @@ func parseTrustedProxyList(entries []string) ([]string, []*net.IPNet) {
 		if strings.Contains(entry, "/") {
 			_, n, err := net.ParseCIDR(entry)
 			if err != nil {
-				log.Printf("[WEB]: Ignoring invalid reverse proxy address '%s': %v", entry, err)
-				continue
+				return nil, nil, fmt.Errorf("invalid reverse proxy address '%s': %v", entry, err)
 			}
 			ipNet = n
 		} else {
 			ip := net.ParseIP(entry)
 			if ip == nil {
-				log.Printf("[WEB]: Ignoring invalid reverse proxy address '%s'", entry)
-				continue
+				return nil, nil, fmt.Errorf("invalid reverse proxy address '%s': not an IP address or CIDR", entry)
 			}
 			if ip4 := ip.To4(); ip4 != nil {
 				ipNet = &net.IPNet{IP: ip4, Mask: net.CIDRMask(32, 32)}
@@ -673,7 +692,7 @@ func parseTrustedProxyList(entries []string) ([]string, []*net.IPNet) {
 		list = append(list, entry)
 		nets = append(nets, ipNet)
 	}
-	return list, nets
+	return list, nets, nil
 }
 
 // isTrustedPeer reports whether the direct peer is a configured reverse proxy.
