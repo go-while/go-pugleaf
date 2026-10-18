@@ -5,7 +5,8 @@ import (
 	"testing"
 )
 
-// TestMboxCmdParallelFlags: -parallel and -max-batch outside their ranges are command-line errors.
+// TestMboxCmdParallelFlags: -parallel, -max-batch and -max-queue outside their ranges are
+// command-line errors.
 func TestMboxCmdParallelFlags(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -15,12 +16,36 @@ func TestMboxCmdParallelFlags(t *testing.T) {
 		{"parallel 33", []string{"-parallel", "33", "x.mbox"}},
 		{"max-batch 99", []string{"-max-batch", "99", "x.mbox"}},
 		{"max-batch 1001", []string{"-max-batch", "1001", "x.mbox"}},
+		{"max-queue 15", []string{"-max-queue", "15", "x.mbox"}},
+		{"max-queue 100001", []string{"-max-queue", "100001", "x.mbox"}},
+		{"max-queue -1", []string{"-max-queue", "-1", "x.mbox"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if code, _ := miRun(t, tc.args...); code != 2 {
 				t.Errorf("exit %d, want 2", code)
 			}
 		})
+	}
+}
+
+// TestMboxCmdBatchQueueSize: an explicit -max-queue is taken as is; 0 gives twice
+// parallel*max-batch, at least the database default (1280) and at most the batch writer's limit.
+func TestMboxCmdBatchQueueSize(t *testing.T) {
+	for _, tc := range []struct {
+		parallel, maxBatch, maxQueue, want int
+	}{
+		{1, 1000, 0, 2000},
+		{1, 100, 0, 1280},
+		{4, 1000, 0, 8000},
+		{4, 200, 0, 1600},
+		{32, 1000, 0, 64000},
+		{32, 1000, 16, 16},
+		{1, 100, 100000, 100000},
+		{4, 1000, 1280, 1280},
+	} {
+		if got := batchQueueSize(tc.parallel, tc.maxBatch, tc.maxQueue); got != tc.want {
+			t.Errorf("batchQueueSize(%d, %d, %d) = %d, want %d", tc.parallel, tc.maxBatch, tc.maxQueue, got, tc.want)
+		}
 	}
 }
 

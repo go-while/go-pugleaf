@@ -106,6 +106,7 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 | `-commit-timeout` | `30m` | How long to wait, per input, until the batch writer has committed its articles; `0` = no limit |
 | `-parallel` | `1` | Inputs imported at the same time (1-32). Each worker takes the next input in the given order; the summary keeps that order. Every worker still hands its articles to the one batch writer, so more workers mostly help with many small inputs or slow unpacking |
 | `-max-batch` | `1000` | Articles the batch writer commits per group database transaction (100-1000). Smaller batches commit sooner and hold less in memory; larger ones are faster on big inputs |
+| `-max-queue` | `0` | Articles the batch writer may hold queued over all groups (16-100000) before it stops taking more. `0` sizes it from the other two flags: twice `-parallel` × `-max-batch`, at least 1280 (so `-parallel 4` gives 8000). See [Throughput](#throughput) |
 | `-help` | | Print the usage and exit |
 
 Positional arguments are the inputs; at least one is required.
@@ -158,6 +159,17 @@ input's articles (bounded by `-commit-timeout`; with parallel inputs the per-gro
 articles other inputs handed to the same group, which only makes the wait longer) and logs the
 summary line. The log lines of parallel inputs interleave; each carries its `file=`.
 
+### Throughput
+
+The batch writer commits a group's articles as soon as `-max-batch` of them are queued for that
+group, otherwise every 3 seconds. It stops taking articles from the readers when 80 % of
+`-max-queue` are queued over all groups and resumes at 20 %. The two limits have to fit together:
+with N inputs in flight the N groups share the queue, so N × `-max-batch` must stay below 80 % of
+`-max-queue`, or no group ever fills a batch and the import crawls along at the 3-second timer
+(about `-max-queue` articles per 3 seconds, whatever `-parallel` is). The default `-max-queue 0`
+keeps that invariant by itself; set it explicitly only to bound memory (each queued article is
+held in full) or when `-group` funnels all inputs into one group.
+
 The input is renamed to `INPUT.done` when all of these hold:
 
 - every article that was not skipped or rejected was stored or was already present in its target
@@ -184,7 +196,7 @@ Exit codes:
 |------|---------|
 | `0` | every input was read without an article error (marked done or not, see the log; also when there was nothing to import) |
 | `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error |
-| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000) |
+| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000) |
 | `130` | stopped by SIGINT/SIGTERM |
 
 ## What is stored

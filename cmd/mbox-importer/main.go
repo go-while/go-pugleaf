@@ -62,6 +62,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		commitTimeout   = fs.Duration("commit-timeout", 30*time.Minute, "per input: how long to wait until the batch writer committed its articles (0 = no limit)")
 		parallel        = fs.Int("parallel", 1, "inputs imported at the same time (1-32; each worker takes the next input in order)")
 		maxBatch        = fs.Int("max-batch", 1000, "articles the batch writer commits per group database transaction (100-1000)")
+		maxQueue        = fs.Int("max-queue", 0, "articles the batch writer may hold queued over all groups (16-100000; 0 = 2 x parallel x max-batch, at least 1280)")
 	)
 	fs.Usage = func() { usage(fs) }
 	if err := fs.Parse(args); err != nil {
@@ -104,6 +105,11 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		fmt.Fprintf(fs.Output(), "mbox-importer: -max-batch %d is not in 100-1000\n", *maxBatch)
 		return 2
 	}
+	if *maxQueue != 0 && (*maxQueue < minBatchQueue || *maxQueue > maxBatchQueue) {
+		fmt.Fprintf(fs.Output(), "mbox-importer: -max-queue %d is not 0 or in %d-%d\n", *maxQueue, minBatchQueue, maxBatchQueue)
+		return 2
+	}
+	queueSize := batchQueueSize(*parallel, *maxBatch, *maxQueue)
 
 	opts := &runOptions{
 		dataDir:         *dataDir,
@@ -126,7 +132,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 
 	history.ENABLE_HISTORY = opts.history // read once by NewHistory
 	database.GlobalDateParser = processor.ParseNNTPDate
-	log.Printf("[MBOX-IMPORT] Starting go-pugleaf mbox-importer (version %s) parallel=%d max-batch=%d", config.AppVersion, *parallel, *maxBatch)
+	log.Printf("[MBOX-IMPORT] Starting go-pugleaf mbox-importer (version %s) parallel=%d max-batch=%d max-queue=%d", config.AppVersion, *parallel, *maxBatch, queueSize)
 
 	stop := stopChan
 	if stop == nil {
@@ -164,6 +170,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	cfg.DataDir = opts.dataDir
 	cfg.BackupDir = filepath.Join(opts.dataDir, "backups")
 	cfg.MaxDBbatch = *maxBatch // articles per group database transaction (db_batch.go)
+	cfg.MaxQueued = queueSize  // queued over all groups before the batch divider brakes (db_batch.go)
 	db, err := database.OpenDatabase(cfg)
 	if err != nil {
 		log.Printf("[MBOX-IMPORT] Failed to initialize database: %v", err)
@@ -263,6 +270,33 @@ func shutdown(proc *processor.Processor, db *database.Database) bool {
 	}
 	log.Printf("[MBOX-IMPORT] Database shutdown successfully")
 	return ok
+}
+
+// Bounds of -max-queue: the hardcoded limits of the batch writer (database.NewSQ3batch).
+const (
+	minBatchQueue = 16
+	maxBatchQueue = 100000
+)
+
+// batchQueueSize is the MaxQueued value for the batch writer. maxQueue != 0 is taken as given.
+// Otherwise it is twice parallel*maxBatch, at least the database default: the batch divider
+// stops accepting articles at 80 % of MaxQueued and resumes at 20 %, and a group's batch is
+// committed early only once that group has maxBatch articles queued. With the default (1280)
+// and several inputs none of the groups ever fills a batch, so every article waits for the
+// 3-second fallback timer. Twice the sum leaves room for the batches that are being
+// committed: their articles stay counted until the commit is done.
+func batchQueueSize(parallel, maxBatch, maxQueue int) int {
+	if maxQueue != 0 {
+		return maxQueue
+	}
+	n := 2 * parallel * maxBatch
+	if floor := database.DefaultDBConfig().MaxQueued; n < floor {
+		n = floor
+	}
+	if n > maxBatchQueue {
+		n = maxBatchQueue
+	}
+	return n
 }
 
 // usage prints the command line help.
