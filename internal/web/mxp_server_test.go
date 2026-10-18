@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -66,7 +67,7 @@ func TestMxpServerMaxCrosspostsSetting(t *testing.T) {
 		t.Fatalf("MaxCrossPosts() = %d after saving 2, want 2: the form does not reach the accessor", got)
 	}
 
-	for _, bad := range []string{"0", "33", "x", ""} {
+	for _, bad := range []string{"0", strconv.Itoa(config.MaxCrossPostsLimit + 1), "x", ""} {
 		if rec := post(bad); rec.Code != http.StatusSeeOther {
 			t.Errorf("POST max crossposts %q: status %d, want 303 redirect with an error", bad, rec.Code)
 		}

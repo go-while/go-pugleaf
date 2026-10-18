@@ -134,7 +134,7 @@ The fetcher exits with a clear error when no provider is **enabled**, instead of
   deeper articles are reachable by hand; `web/templates/pagination.html` simply never emits a cursor
   link.
 - The bad-bots and blocked-IP lists both apply immediately when saved from the admin settings form.
-- `MaxCrossPosts` (admin settings, default 9, range 1-32) is the most newsgroups one article may list;
+- `MaxCrossPosts` (admin settings, default 9, range 1-99) is the most newsgroups one article may list;
   the web post form, the NNTP intake and the fetcher reject articles above it. The webserver applies a
   change at once, the other processes within the config cache refresh interval (5 minutes), no restart.
   The `ReverseProxyIPHeader` and `ReverseProxyAddr` settings need a web server restart.

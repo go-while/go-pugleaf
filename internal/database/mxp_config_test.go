@@ -1,6 +1,7 @@
 package database
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/go-while/go-pugleaf/internal/config"
@@ -27,7 +28,7 @@ func TestMxpMaxCrossPosts(t *testing.T) {
 		v    string
 		want int
 	}{
-		{"7", 7}, {" 3 ", 3}, {"1", 1}, {"32", 32}, {"33", 9}, {"0", 9}, {"-2", 9}, {"abc", 9}, {"", 9}, {"9", 9},
+		{"7", 7}, {" 3 ", 3}, {"1", 1}, {"32", 32}, {strconv.Itoa(config.MaxCrossPostsLimit), config.MaxCrossPostsLimit}, {strconv.Itoa(config.MaxCrossPostsLimit + 1), 9}, {"0", 9}, {"-2", 9}, {"abc", 9}, {"", 9}, {"9", 9},
 	} {
 		if err := db.SetConfigValue(config.CFG_KEY_MAXCROSSPOSTS, c.v); err != nil {
 			t.Fatal(err)

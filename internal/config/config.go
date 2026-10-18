@@ -73,7 +73,7 @@ const DefaultMaxCrossPosts = 9
 
 // MaxCrossPostsLimit is the largest MaxCrossPosts the admin page accepts. The processor sizes
 // each article's ProcessQueue from the configured value, so this is only a sanity bound.
-const MaxCrossPostsLimit = 32
+const MaxCrossPostsLimit = 99
 
 // Admin settings form field names
 const FORM_FIELD_HOSTNAME string = "local_nntp_hostname"
