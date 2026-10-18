@@ -158,6 +158,28 @@
             </div>
             <div class="card-body">
                 <!-- START NEWS ENTRY -->
+                <div class="news-entry mb-4 pb-3 border-bottom">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <h6 class="fw-bold mb-1 text-warning">
+                            <i class="bi bi-clipboard-check me-2"></i>📋 Status check: the checklists below match the code again
+                        </h6>
+                        <small class="text-muted">October 18, 2026</small>
+                    </div>
+                    <p class="mb-0">
+                    <pre>
+Landed since the entries below were written:
+- [x] NNTP server: HDR, OVER, DATE, NEWGROUPS; STARTTLS; intake validation; idle timeouts; per-user connection caps; RFC audit test suites
+- [x] Message-id history index (16 shard databases) with Xref support
+- [x] Web: gin replaced by net/http; CSRF (cross-origin) protection; request body caps; templates, static files and favicon embedded in the binary
+- [x] Admin settings: article size limit, maximum crossposts per article, trusted reverse proxies (strict, comma separated), bad bots and blocked IPs applied live
+- [x] Tools: mbox importer, nntp-transfer, post-queue parking, expire-news; NNTP tests on the shared nntp-testkit module
+Still open: per-IP limits and IP access control for NNTP, full-text search, email (reset, verification, SMTP), backup/restore, alerting. See the boxes below.
+                    </pre>
+                    </p>
+                </div>
+                <!-- END NEWS ENTRY -->
+
+                <!-- START NEWS ENTRY -->
                 <!--
                 <div class="news-entry mb-4 pb-3 border-bottom">
                     <div class="d-flex justify-content-between align-items-start mb-2">
@@ -281,16 +303,16 @@ Stay tuned for NNTP access announcements and peering updates!
 - [x] **Overview Commands**:
 - [x] `XOVER` - Article overview data (NOV format)
 - [x] `XHDR` - Specific header retrieval
-- [ ] `HDR` - RFC 3977 header command
-- [ ] `OVER` - RFC 3977 overview command
+- [x] `HDR` - RFC 3977 header command
+- [x] `OVER` - RFC 3977 overview command
 
-- [ ] **Advanced Commands (Priority 2)**:
+- [x] **Advanced Commands (Priority 2)**:
 - [x] `POST` - Article posting (optional)
 - [x] `IHAVE` - Article transfer (server-to-server)
 - [x] `CHECK/TAKETHIS` - Streaming commands
-- [ ] `DATE` - Server date/time
-- [ ] `NEWGROUPS` - New groups since date
-- [ ] `NEWNEWS` - New articles since date
+- [x] `DATE` - Server date/time
+- [x] `NEWGROUPS` - New groups since date
+- [ ] `NEWNEWS` - decided against (answers 500, not advertised)
 
 ### Database Integration
 - [x] **Data Access Layer**:
@@ -310,10 +332,11 @@ Stay tuned for NNTP access announcements and peering updates!
 - [x] Permission-based group access control
 
 - [ ] **Security Features**:
-- [ ] Rate limiting per connection/IP
-- [ ] Command validation and sanitization
+- [x] Rate limiting per connection (error/article/group delays, global and per-user connection caps)
+- [ ] Rate limiting per IP
+- [x] Command validation and sanitization (intake rejects malformed headers, control messages, oversize articles)
 - [ ] Logging of all NNTP operations
-- [ ] Connection timeout management
+- [x] Connection timeout management (idle timeout on every read)
 - [ ] IP-based access control (optional)
 
 ### Configuration & Management
@@ -321,11 +344,11 @@ Stay tuned for NNTP access announcements and peering updates!
 - [x] NNTP server port and binding configuration
 - [x] TLS/SSL certificate management
 - [x] Maximum connections and resource limits
-- [ ] Command-specific feature toggles
+- [x] Command-specific feature toggles (-readauth, -plaintextauth, -xref, -maxartsize)
 - [x] Integration with existing `config.ServerConfig`
 
 - [ ] **Administration Integration**:
-- [ ] NNTP server status in admin dashboard
+- [x] NNTP user counts and cache statistics in the admin dashboard
 - [ ] Real-time connection monitoring
 - [ ] Command usage statistics
 - [ ] Server performance metrics
@@ -333,10 +356,10 @@ Stay tuned for NNTP access announcements and peering updates!
 
 ### Testing & Validation
 - [ ] **Protocol Compliance**:
-- [ ] RFC 3977 compliance testing
+- [x] RFC 3977 compliance testing (docs/audit, internal/nntp test suites; 3 known bugs tracked)
 - [ ] Test with standard NNTP clients (tin, slrn, Thunderbird)
-- [ ] Multi-line response handling
-- [ ] Error code consistency
+- [x] Multi-line response handling
+- [x] Error code consistency
 - [ ] Character encoding support (UTF-8)
 
 ---
@@ -358,7 +381,7 @@ Stay tuned for NNTP access announcements and peering updates!
 ### Admin Interface
 - [x] Create admin dashboard
 - [x] API Tokens Management
-- [ ] Add server status monitoring
+- [x] Add server status monitoring (admin statistics, /stats)
 - [x] Implement newsgroup management:
 - [x] Add new groups
 - [x] Delete groups
@@ -372,7 +395,7 @@ Stay tuned for NNTP access announcements and peering updates!
 - [ ] Implement backup automation
 
 ### Monitoring & Logging
-- [ ] Create health check endpoints
+- [x] Create health check endpoint (/ping; no deep checks yet)
 - [ ] Create log rotation
 - [ ] Add alerting system
 
@@ -402,7 +425,7 @@ Stay tuned for NNTP access announcements and peering updates!
 - [x] Add password hashing (bcrypt)
 - [x] Create login/logout system
 - [x] Implement session management
-- [x] Add JWT token support
+- [ ] Add JWT token support (not used: cookie sessions and hashed API tokens instead)
 - [x] Create user profile system
 - [x] Profile: password change functionality
 - [ ] Add password reset functionality via email
@@ -420,7 +443,7 @@ Stay tuned for NNTP access announcements and peering updates!
 - [x] **Search API endpoints (newsgroup search working)**
 - [x] Create search API endpoints
 - [x] **Newsgroup name search functionality**
-- [ ] Implement full-text search for articles (FTS5 schema ready)
+- [ ] Implement full-text search for articles (no FTS5 schema yet)
 - [x] Add search page template
 - [x] Add advanced search filters (author, date, group)
 - [x] Implement search result pagination
@@ -434,10 +457,9 @@ Stay tuned for NNTP access announcements and peering updates!
 - [x] **SQL injection prevention (parameterized queries)**
 - [x] **XSS protection via template HTML escaping**
 - [x] Implement SQL injection prevention (already in place with parameterized queries)
-- [ ] Add CSRF protection
-- [ ] Implement rate limiting middleware
-- [ ] Add comprehensive input validation framework
-- [ ] Add file upload security
+- [x] Add CSRF protection (cross-origin protection around the router)
+- [ ] Implement rate limiting middleware (today: login attempts capped at 5, AI chat limiter)
+- [x] File uploads refused (multipart answered 415, request bodies capped)
 - [ ] Create audit logging
 
 ### Theme & UI Enhancements ✅ COMPLETE
@@ -464,8 +486,8 @@ Stay tuned for NNTP access announcements and peering updates!
                     </div>
                     <p class="mb-0">
                     <pre>
-### Gin Web Framework Setup
-- [x] Set up Gin web server (internal/web/)
+### Web Framework Setup (net/http)
+- [x] Set up web server (internal/web/; gin replaced by net/http in October 2026)
 - [x] Create router configuration
 - [x] Add paginated API endpoints:
 - [x] GET /api/v1/groups (list newsgroups)
@@ -476,7 +498,7 @@ Stay tuned for NNTP access announcements and peering updates!
 - [x] Add middleware:
 - [x] Logging middleware
 - [x] Static file serving
-- [x] CORS middleware
+- [ ] CORS middleware (none; same-origin pages and token-authenticated API)
 - [x] Error handling middleware
 - [x] Create comprehensive error handling system
 - [x] Add request validation
@@ -508,9 +530,8 @@ Stay tuned for NNTP access announcements and peering updates!
 ### Static Assets & Frontend
 - [x] Create modern CSS framework (responsive design)
 - [x] Implement multiple theme system:
-- [x] Modern theme (gradient design with animations)
-- [x] Classic theme (retro terminal green-on-black)
-- [x] Amber theme (vintage amber terminal)
+- [x] Bootstrap dark/light theme
+- [x] RockSolid theme
 - [x] Add JavaScript functionality:
 - [x] Theme switching with localStorage persistence
 - [x] Responsive navigation
@@ -556,7 +577,7 @@ Stay tuned for NNTP access announcements and peering updates!
 - [x] Design per-group database schemas
 - [x] articles table (full article storage)
 - [x] **threads table (revolutionary forum-style threading)**
-- [x] overview table (XOVER data for performance)
+- [x] overview columns in the articles table (XOVER data; no separate table)
 - [x] Create database migration system
 - [x] Implement database connection pooling
 
@@ -624,7 +645,7 @@ Stay tuned for NNTP access announcements and peering updates!
 - [x] Initialize go.mod with proper module name
 - [x] Configure VS Code for Go module mode (removed GOPATH)
 - [x] Add required dependencies:
-- [x] Gin web framework
+- [x] Gin web framework (removed October 2026, replaced by net/http)
 - [x] SQLite3 driver
 - [x] Password hashing (bcrypt)
 - [x] Set up go.sum for dependency management
