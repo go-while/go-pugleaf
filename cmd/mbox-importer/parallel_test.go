@@ -125,3 +125,60 @@ func TestMboxCmdParallelDirectory(t *testing.T) {
 		t.Errorf("re-run: exit %d inputs=%d, want 0 and 0 (all inputs are .done)", code, sum.Inputs)
 	}
 }
+
+// TestMboxCmdGroupFromFileName: the file-name rule of -group-from-name.
+func TestMboxCmdGroupFromFileName(t *testing.T) {
+	for _, tc := range []struct {
+		path, want string
+	}{
+		{"de.comm.internet.commerce.mbox.gz", "de.comm.internet.commerce"},
+		{"/x/y/alt.test.mbox", "alt.test"},
+		{"alt.test.mbox.done", "alt.test"},
+		{"alt.test.bag", "alt.test"},
+		{"pl.comp.lang.c.usenet.xz", "pl.comp.lang.c"},
+		{"pl.comp.lang.c.usenet.7z.done", "pl.comp.lang.c"},
+		{"alt.test.MBOX.ZIP", "alt.test"},
+		{".mbox", ""},
+		{"bad name!.mbox", ""},
+		{"nosuffix", ""},
+	} {
+		got, err := groupFromFileName(tc.path)
+		if tc.want == "" {
+			if err == nil {
+				t.Errorf("%q: got %q, want an error", tc.path, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("%q: got %q, %v; want %q", tc.path, got, err, tc.want)
+		}
+	}
+}
+
+// TestMboxCmdGroupFromName: -group-from-name files each input into the group named by its
+// file, whatever the Newsgroups header says; a file with an invalid name is an input error
+// and stays unrenamed; -group and -group-from-name together are a command-line error.
+func TestMboxCmdGroupFromName(t *testing.T) {
+	miNeedDB(t)
+	miSetup(t)
+	data := filepath.Join(t.TempDir(), "data")
+	dir := t.TempDir()
+	const one, two = "t.fromname.one", "t.fromname.two"
+	a := miWrite(t, dir, one+".mbox", miArticle(miID1, miAlpha, "a"))
+	b := miWrite(t, dir, two+".bag", miArticle(miID2, miAlpha, "b"))
+	bad := miWrite(t, dir, "bad name!.mbox", miArticle(miID3, miAlpha, "c"))
+
+	if code, _ := miRun(t, "-data", data, "-group", one, "-group-from-name", a); code != 2 {
+		t.Errorf("-group with -group-from-name: exit %d, want 2", code)
+	}
+
+	code, sum := miRun(t, "-data", data, "-group-from-name", "-parallel", "2", dir)
+	if code != 1 || sum.InputErrors != 1 || sum.Inputs != 3 || sum.MarkedDone != 2 {
+		t.Fatalf("exit %d inputs=%d input-errors=%d marked=%d; want 1, 3, 1, 2", code, sum.Inputs, sum.InputErrors, sum.MarkedDone)
+	}
+	miCheck(t, sum, 2, 2, 0, 0, 0, "-")
+	if !miExists(a+".done") || !miExists(b+".done") || miExists(bad+".done") {
+		t.Errorf("renamed: a=%t b=%t bad=%t", miExists(a+".done"), miExists(b+".done"), miExists(bad+".done"))
+	}
+	miCheckGroups(t, data, map[string][]string{one: {miID1}, two: {miID2}}, []string{miID1, miID2}, miAlpha)
+}

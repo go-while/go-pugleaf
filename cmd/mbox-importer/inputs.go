@@ -17,6 +17,7 @@ import (
 	"time"
 
 	mbox "github.com/go-while/go-lib-mbox2nntp"
+	"github.com/go-while/go-pugleaf/internal/common"
 )
 
 // inputBufferSize is the read buffer between the decompressor (or file) and the parser.
@@ -350,4 +351,30 @@ func markDone(path string) error {
 		return fmt.Errorf("mark done %q: %w", path, err)
 	}
 	return os.Rename(path, dst)
+}
+
+// groupFromFileName derives the target group of an input from its file name
+// (-group-from-name): the base name without a trailing ".done", cut before the first
+// ".mbox", ".bag" or ".usenet" (de.comm.internet.commerce.mbox.gz -> de.comm.internet.commerce,
+// pl.comp.lang.c.usenet.xz -> pl.comp.lang.c). The result must be a valid newsgroup name.
+func groupFromFileName(path string) (string, error) {
+	name := filepath.Base(path)
+	if strings.HasSuffix(strings.ToLower(name), ".done") {
+		name = name[:len(name)-len(".done")]
+	}
+	cut := len(name)
+	lower := strings.ToLower(name)
+	for _, marker := range []string{".mbox", ".bag", ".usenet"} {
+		if i := strings.Index(lower, marker); i >= 0 && i < cut {
+			cut = i
+		}
+	}
+	if cut == len(name) {
+		return "", fmt.Errorf("file %q: no .mbox, .bag or .usenet in the name, no group to derive (-group-from-name)", path)
+	}
+	group := name[:cut]
+	if group == "" || !common.IsValidGroupName(group) {
+		return "", fmt.Errorf("file %q: %q is not a valid newsgroup name (-group-from-name)", path, group)
+	}
+	return group, nil
 }

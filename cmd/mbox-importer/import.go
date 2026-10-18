@@ -129,7 +129,8 @@ type runOptions struct {
 	dataDir, hostname, group, sevenZip string
 	zstd, xz, tmpDir                   string // UAT archives: programs and the unpack directory ("" = system temp)
 	useShortHashLen                    int
-	parallel                           int // inputs imported at the same time (<= 1: one after the other)
+	parallel                           int  // inputs imported at the same time (<= 1: one after the other)
+	groupFromName                      bool // -group-from-name: the target group of an input is its file name (inputOptions)
 	history, dryRun, keepBinary        bool
 	markDone, strictMsgID              bool
 	commitTimeout                      time.Duration // 0: no limit
@@ -326,10 +327,32 @@ feed:
 	return res
 }
 
+// inputOptions returns the options of one input: opts itself, or with -group-from-name a copy
+// whose group is derived from the file name (an input whose name gives no valid group is an
+// input error and is not opened).
+func inputOptions(path string, opts *runOptions) (*runOptions, error) {
+	if !opts.groupFromName {
+		return opts, nil
+	}
+	group, err := groupFromFileName(path)
+	if err != nil {
+		return nil, err
+	}
+	in := *opts
+	in.group = group
+	log.Printf("[MBOX-IMPORT] file=%q group=%q (from the file name)", path, group)
+	return &in, nil
+}
+
 // importInput opens, reads and closes one input, waits for its commits and marks it done.
 // c is nil when the input could not be opened; inputErr reports an open, read or close error
 // (or a failed rename); stopped reports that the stop channel ended the read.
 func importInput(path string, opts *runOptions, sink articleSink, stop <-chan struct{}) (c *counters, inputErr, stopped bool) {
+	opts, err := inputOptions(path, opts)
+	if err != nil {
+		log.Printf("[MBOX-IMPORT] input error: %v", err)
+		return nil, true, false
+	}
 	src, err := openSource(path, opts.sevenZip)
 	if err != nil {
 		log.Printf("[MBOX-IMPORT] input error: %v", err)

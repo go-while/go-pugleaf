@@ -48,6 +48,11 @@ func uatUnpackedName(path string) string {
 // c is nil when the archive could not be unpacked or opened.
 func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan struct{}) (c *counters, inputErr, stopped bool) {
 	suffix := uatSuffix(path)
+	opts, err := inputOptions(path, opts)
+	if err != nil {
+		log.Printf("[MBOX-IMPORT] input error: %v", err)
+		return nil, true, false
+	}
 	zstd, err := exec.LookPath(opts.zstd) // before anything is unpacked
 	if err != nil {
 		log.Printf("[MBOX-IMPORT] input error: file=%q: zstd program: %v", path, err)

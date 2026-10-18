@@ -50,6 +50,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		useShortHashLen = fs.Int("useshorthashlen", 7, "legacy short hash length (2-7); fixed after the first run, later runs use the stored value")
 		useHistory      = fs.Bool("history", true, "maintain and use the message-id history index (<data>/history)")
 		forceGroup      = fs.String("group", "", "file every article into this group instead of the first group of its Newsgroups header")
+		groupFromName   = fs.Bool("group-from-name", false, "file every article of an input into the group named by its file name (de.comm.foo.mbox.gz -> de.comm.foo); not with -group")
 		sevenZip        = fs.String("7z", "7z", "program used to unpack .7z inputs (name in PATH or a full path)")
 		zstdProg        = fs.String("zstd", "zstd", "program used to read UAT archives (.usenet, .usenet.xz, .usenet.7z; name in PATH or a full path)")
 		xzProg          = fs.String("xz", "xz", "program used to unpack .usenet.xz inputs; when it is not found, -7z is used (7z e -txz)")
@@ -83,6 +84,10 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		fmt.Fprintf(fs.Output(), "mbox-importer: -group %q is not a valid newsgroup name\n", *forceGroup)
 		return 2
 	}
+	if *forceGroup != "" && *groupFromName {
+		fmt.Fprintln(fs.Output(), "mbox-importer: -group and -group-from-name exclude each other")
+		return 2
+	}
 	if *useShortHashLen < 2 || *useShortHashLen > 7 {
 		fmt.Fprintf(fs.Output(), "mbox-importer: -useshorthashlen %d is not in 2-7\n", *useShortHashLen)
 		return 2
@@ -110,6 +115,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		tmpDir:          *tmpDir,
 		useShortHashLen: *useShortHashLen,
 		parallel:        *parallel,
+		groupFromName:   *groupFromName,
 		history:         *useHistory,
 		dryRun:          *dryRun,
 		keepBinary:      *keepBinary,
@@ -272,6 +278,7 @@ func usage(fs *flag.FlagSet) {
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -group local.archive /archive/usenet/de.comm/")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -tmpdir /big/tmp pl.comp.lang.c.usenet.xz")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -parallel 4 -max-batch 500 /archive/usenet/")
+	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -group-from-name -parallel 4 /archive/uat-mbox/   # de.comm.foo.mbox.gz -> de.comm.foo")
 	fmt.Fprintln(out, "Exit codes: 0 ok, 1 input, article, commit or database error, 2 bad command line, 130 stopped by a signal")
 	fmt.Fprintln(out, "Flags:")
 	fs.PrintDefaults()

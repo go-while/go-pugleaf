@@ -94,6 +94,7 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 | `-useshorthashlen` | `7` | Legacy short hash length (2-7). The value of the first run is stored in the database; later runs use the stored value and warn if it differs. No effect on the history index |
 | `-history` | `true` | Maintain and use the message-id history index in `<data>/history` |
 | `-group` | (none) | File every article of the run into this group instead of the first group of its `Newsgroups:` header |
+| `-group-from-name` | `false` | File every article of an input into the group named by the input's file name: the base name cut before the first `.mbox`, `.bag` or `.usenet` (`de.comm.foo.mbox.gz` becomes `de.comm.foo`, `pl.comp.lang.c.usenet.xz` becomes `pl.comp.lang.c`). A file whose name gives no valid group is an input error. Not together with `-group`. This is what `mbox-import.sh` in the repository root uses for a directory of per-group archives |
 | `-7z` | `7z` | Program used to unpack `.7z` and `.usenet.7z` inputs (name in `PATH` or a full path); also unpacks `.usenet.xz` when `-xz` is not found |
 | `-zstd` | `zstd` | The zstd program (name in `PATH` or a full path), needed for every UAT input (`.usenet`, `.usenet.xz`, `.usenet.7z`) |
 | `-xz` | `xz` | Program used to unpack `.usenet.xz` inputs; when it is not found, 7-Zip (`-7z`) is used with `-txz` |
@@ -183,7 +184,7 @@ Exit codes:
 |------|---------|
 | `0` | every input was read without an article error (marked done or not, see the log; also when there was nothing to import) |
 | `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error |
-| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-useshorthashlen` outside 2-7, negative `-commit-timeout`) |
+| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000) |
 | `130` | stopped by SIGINT/SIGTERM |
 
 ## What is stored
