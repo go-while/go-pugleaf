@@ -53,3 +53,4 @@ cmd/test-MsgIdItemCache/test-MsgIdItemCache
 .claude/agent-memory-local/
 CLAUDE.local.md
 post-queue
+mbox-importer
