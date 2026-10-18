@@ -4,15 +4,29 @@ import (
 	"bytes"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"reflect"
 	"strings"
 	"sync"
+
+	webassets "github.com/go-while/go-pugleaf/web"
 )
 
-// templateDir is the cwd-relative directory all page templates are loaded from.
+// templateFS is the embedded web/templates directory every page template is parsed from, so a
+// binary always renders the templates it was built with, whatever its working directory.
+var templateFS = func() fs.FS {
+	sub, err := fs.Sub(webassets.FS, "templates")
+	if err != nil {
+		panic("web/templates is not embedded: " + err.Error())
+	}
+	return sub
+}()
+
+// templateDir is the cwd-relative directory the templates are re-parsed from under
+// PUGLEAF_DEV_TEMPLATES=1 (the embedded copy is not used then).
 const templateDir = "web/templates/"
 
 // htmlContentType is the Content-Type of every rendered page.
@@ -43,8 +57,9 @@ const publicErrorDetail = "Please try again later."
 // bufPool provides the buffers pages are rendered into before they are written.
 var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
-// devTemplates reports whether the template cache is disabled (templates are re-parsed on
-// every request). It is read on every call so it can be toggled without a restart.
+// devTemplates reports whether the template cache is disabled: templates are then re-parsed
+// from web/templates on disk on every request, so edits show up without a rebuild or restart.
+// It is read on every call so it can be toggled without a restart.
 func devTemplates() bool { return os.Getenv("PUGLEAF_DEV_TEMPLATES") == "1" }
 
 // funcMapKey identifies a FuncMap by the address of its map header, so two call sites with
@@ -69,9 +84,10 @@ func tmplCacheKey(name string, funcs template.FuncMap, files []string) string {
 	return b.String()
 }
 
-// loadTemplates returns the template set parsed from files, parsing it only once unless
-// PUGLEAF_DEV_TEMPLATES=1. name is the name of the (empty) root template and part of the
-// cache key; templates are executed by file base name. Parse errors are returned, never cached.
+// loadTemplates returns the template set parsed from files (names inside web/templates, read
+// from the embedded copy), parsing it only once unless PUGLEAF_DEV_TEMPLATES=1 (then from
+// disk, on every call). name is the name of the (empty) root template and part of the cache
+// key; templates are executed by file base name. Parse errors are returned, never cached.
 //
 // A cached set and its FuncMap are kept for the lifetime of the process, so funcs must be a
 // map that exists anyway (today only the package-level adminTemplateFuncs). A FuncMap built per
@@ -93,7 +109,12 @@ func loadTemplates(name string, funcs template.FuncMap, files ...string) (*templ
 	if funcs != nil {
 		t = t.Funcs(funcs)
 	}
-	t, err := t.ParseFiles(files...)
+	var err error
+	if dev {
+		t, err = t.ParseFiles(templatePaths(files)...)
+	} else {
+		t, err = t.ParseFS(templateFS, files...)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +126,8 @@ func loadTemplates(name string, funcs template.FuncMap, files ...string) (*templ
 	return v.(*tmplEntry).t, nil
 }
 
-// templatePaths prefixes each template file name with templateDir.
+// templatePaths prefixes each template file name with templateDir (the on-disk copy used
+// under PUGLEAF_DEV_TEMPLATES=1).
 func templatePaths(names []string) []string {
 	paths := make([]string, len(names))
 	for i, n := range names {
@@ -114,11 +136,20 @@ func templatePaths(names []string) []string {
 	return paths
 }
 
+// readTemplateFile returns one file of web/templates as served verbatim (not executed as a
+// template): the embedded copy, or the on-disk one under PUGLEAF_DEV_TEMPLATES=1.
+func readTemplateFile(name string) ([]byte, error) {
+	if devTemplates() {
+		return os.ReadFile(templateDir + name)
+	}
+	return fs.ReadFile(templateFS, name)
+}
+
 // writeTemplateSet loads the set (name, funcs, files under web/templates), executes exec into a
 // pooled buffer and, only when that succeeded, writes the page with status. On error nothing has
 // been written to the response.
 func writeTemplateSet(c *Context, status int, name string, funcs template.FuncMap, exec string, data any, files ...string) error {
-	tmpl, err := loadTemplates(name, funcs, templatePaths(files)...)
+	tmpl, err := loadTemplates(name, funcs, files...)
 	if err != nil {
 		return fmt.Errorf("load templates %v: %w", files, err)
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/nntp"
+	webassets "github.com/go-while/go-pugleaf/web"
 )
 
 // Server represents the web server
@@ -363,15 +364,17 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/static/{filepath...}", EmbeddedStaticHandler("/static"))
 	log.Printf("[WEB]: Using embedded static files")
 
-	// Handle favicon to prevent it from being caught by section routes.
-	// web/favicon.ico is not part of the embedded static/* FS, so it always comes from disk;
-	// the type is set explicitly because .ico is mapped to text/plain on some systems.
-	// A missing file still answers 404 (http.ServeFile overwrites the header then).
-	// HEAD is registered explicitly too: browsers and proxies probe the icon that way (the mux
-	// would also serve HEAD from the GET route).
+	// Handle favicon to prevent it from being caught by section routes. web/favicon.ico is
+	// embedded next to the templates; the type is set explicitly because .ico is mapped to
+	// text/plain on some systems. HEAD is registered explicitly too: browsers and proxies probe
+	// the icon that way (the mux would also serve HEAD from the GET route).
 	faviconHandler := func(c *Context) {
-		c.Header("Content-Type", "image/x-icon")
-		c.File("web/favicon.ico")
+		icon, err := webassets.FS.ReadFile("favicon.ico")
+		if err != nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.Data(http.StatusOK, "image/x-icon", icon)
 	}
 	s.Router.GET("/favicon.ico", faviconHandler)
 	s.Router.HEAD("/favicon.ico", faviconHandler)

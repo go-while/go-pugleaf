@@ -427,7 +427,7 @@ func TestLo1HandTemplateKeyFuncMaps(t *testing.T) {
 	if devTemplates() {
 		t.Skip("PUGLEAF_DEV_TEMPLATES=1 disables the template cache")
 	}
-	files := templatePaths([]string{"base.html", "error.html"})
+	files := []string{"base.html", "error.html"}
 	fm1 := template.FuncMap{"lo1HandMark": func() string { return "one" }}
 	fm2 := template.FuncMap{"lo1HandMark": func() string { return "two" }}
 

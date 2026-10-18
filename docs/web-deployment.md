@@ -105,8 +105,10 @@ from the line count. The usual cause is a rewritten `Host` (see above).
 
 ## Templates
 
-Templates are parsed once and cached for the process lifetime. Set `PUGLEAF_DEV_TEMPLATES=1` to
-re-parse on every request while editing `web/templates/`.
+Templates, static files and the favicon are embedded in the binary, parsed once and cached for the
+process lifetime; no `web/` directory is needed next to the binary (an optional `web/robots.txt` is
+still read from disk). Set `PUGLEAF_DEV_TEMPLATES=1` to re-parse `web/templates/` from disk on every
+request while editing templates.
 
 ## Data directory
 

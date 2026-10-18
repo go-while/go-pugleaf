@@ -280,10 +280,15 @@ func (s *WebServer) sectionThreadTreePage(c *Context) {
 	s.renderPage(c, http.StatusOK, data, "thread-tree.html")
 }
 
-// threadTreeDemoPage serves the tree view demo page
+// threadTreeDemoPage serves the tree view demo page verbatim from the embedded templates.
 func (s *WebServer) threadTreeDemoPage(c *Context) {
-	// Serve the static demo HTML file
-	c.File("./web/templates/thread-tree-demo.html")
+	page, err := readTemplateFile("thread-tree-demo.html")
+	if err != nil {
+		log.Printf("[WEB]: thread-tree-demo.html: %v", err)
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Data(http.StatusOK, htmlContentType, page)
 }
 
 // Subject of the placeholder overview treeOverviewFiller gives a node whose article row exists

@@ -91,8 +91,9 @@ func w0Main(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	// Handlers load web/templates relative to the working directory. Run from a temp dir that
-	// only links web/, so cwd-relative paths (./data, cron job commands) never reach the checkout.
+	// Templates are embedded, but PUGLEAF_DEV_TEMPLATES=1 re-parses web/templates relative to
+	// the working directory. Run from a temp dir that only links web/, so cwd-relative paths
+	// (./data, cron job commands) never reach the checkout.
 	cwd := filepath.Join(tmp, "cwd")
 	if err := os.Mkdir(cwd, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, err)

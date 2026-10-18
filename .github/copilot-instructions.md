@@ -81,7 +81,7 @@ golangci-lint run
 # Web server (main application)
 ./build/webserver -nntphostname your.domain.com
 # Opens web interface on http://localhost:11980
-# Requires "web" folder with templates to be present
+# Templates, static files and favicon are embedded; no "web" folder needed
 
 # NNTP fetcher for downloading articles
 ./build/pugleaf-fetcher -group alt.test

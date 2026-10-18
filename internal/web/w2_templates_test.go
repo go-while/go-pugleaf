@@ -23,7 +23,7 @@ func w2TmplTitle(t *testing.T, body string) string {
 }
 
 func TestW2TmplLoadTemplatesCached(t *testing.T) {
-	files := []string{templateDir + "base.html", templateDir + "help.html"}
+	files := []string{"base.html", "help.html"}
 	a, err := loadTemplates("w2tmpl-cache", nil, files...)
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +64,7 @@ func TestW2TmplLoadTemplatesCached(t *testing.T) {
 
 func TestW2TmplMissingTemplate(t *testing.T) {
 	for i := 0; i < 2; i++ { // the error must not be cached either
-		tmpl, err := loadTemplates("w2tmpl-missing", nil, templateDir+"base.html", templateDir+"w2tmpl-does-not-exist.html")
+		tmpl, err := loadTemplates("w2tmpl-missing", nil, "base.html", "w2tmpl-does-not-exist.html")
 		if err == nil || tmpl != nil {
 			t.Fatalf("missing template: got tmpl=%v err=%v, want an error", tmpl, err)
 		}

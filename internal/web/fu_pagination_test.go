@@ -15,7 +15,7 @@ import (
 // fuPaginationRender executes the "pagination" template with p and returns the HTML.
 func fuPaginationRender(t *testing.T, p *models.PaginationInfo) string {
 	t.Helper()
-	tmpl, err := loadTemplates("fu-pagination", nil, templateDir+"pagination.html")
+	tmpl, err := loadTemplates("fu-pagination", nil, "pagination.html")
 	if err != nil {
 		t.Fatalf("loadTemplates: %v", err)
 	}

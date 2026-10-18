@@ -38,10 +38,11 @@ cd go-pugleaf
 ./build_ALL.sh && cp build/* .
 ```
 
-Run the binaries from the repository checkout: the webserver loads its page templates from
-`web/templates/` below the working directory (static files are embedded), and the default cron
-jobs start `./pugleaf-fetcher` and `./post-queue` from that same directory. With a release
-archive, unpack it into a clone of the repository (or copy `web/templates/` next to the binaries).
+The webserver embeds its page templates, static files and favicon, so a binary renders the
+templates it was built with from any working directory. The default cron jobs start
+`./pugleaf-fetcher` and `./post-queue` from the working directory, and an optional
+`./web/robots.txt` is read from there. `PUGLEAF_DEV_TEMPLATES=1` re-parses `web/templates/`
+from disk on every request while editing templates.
 
 **Step 2: Initial configuration**
 
