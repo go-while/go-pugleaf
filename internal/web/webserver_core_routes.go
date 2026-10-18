@@ -528,6 +528,8 @@ func (s *WebServer) setupRoutes() {
 	s.Router.GET("/stats/{$}", s.statsPage)
 	s.Router.GET("/SiteHelp", s.helpPage)
 	s.Router.GET("/SiteHelp/{$}", s.helpPage)
+	s.Router.GET("/SiteMemory", s.memorialPage)
+	s.Router.GET("/SiteMemory/{$}", s.memorialPage)
 	s.Router.GET("/SiteNews", s.newsPage)
 	s.Router.GET("/SiteNews/{$}", s.newsPage)
 	s.Router.GET("/SiteIRC", s.ircPage)
@@ -815,6 +817,7 @@ var knownNonSectionPaths = map[string]bool{
 	"search":           true,
 	"stats":            true,
 	"SiteHelp":         true,
+	"SiteMemory":       true,
 	"SiteNews":         true,
 	"sections":         true,
 	"demo":             true,

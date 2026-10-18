@@ -1,0 +1,44 @@
+{{template "base.html" .}}
+
+{{define "breadcrumb"}}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/" class="text-decoration-none">Home</a></li>
+        <li class="breadcrumb-item active" aria-current="page">In Memory</li>
+    </ol>
+</nav>
+{{end}}
+
+{{define "content"}}
+<div class="row justify-content-center">
+    <div class="col-lg-8 col-md-10 mb-4">
+        <div class="card">
+            <div class="card-header bg-dark text-light">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-heart me-2"></i>In memory of Retro Guy
+                </h5>
+            </div>
+            <div class="card-body">
+                <p class="lead">
+                    go-pugleaf carries forward the legacy of <strong>Retro Guy</strong> of novabbs.com,
+                    the visionary lead developer of <strong>rslight</strong>, the RockSolid Light web
+                    gateway to Usenet.
+                </p>
+                <p>
+                    He sadly cannot see this evolution of his work. Rest in peace.
+                </p>
+                <p>
+                    The first go-pugleaf node went online on July 15, 2025, taking over the
+                    <code>rocksolid.*</code> hierarchy and the communities he built around it. We are
+                    committed to keeping the rocksolid.* community alive and thriving, and this fresh
+                    interface and Go-based architecture are our way of honoring his contributions while
+                    building for the future.
+                </p>
+                <p class="text-muted mb-0">
+                    Built with ❤️ by RockSolid fans.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
