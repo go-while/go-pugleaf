@@ -59,6 +59,8 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		markDoneFlag    = fs.Bool("mark-done", true, "rename a fully imported input to INPUT.done")
 		strictMsgID     = fs.Bool("strict-msgid", false, "require Message-IDs that pass go-pugleaf's validator instead of the lax mbox2nntp rules")
 		commitTimeout   = fs.Duration("commit-timeout", 30*time.Minute, "per input: how long to wait until the batch writer committed its articles (0 = no limit)")
+		parallel        = fs.Int("parallel", 1, "inputs imported at the same time (1-32; each worker takes the next input in order)")
+		maxBatch        = fs.Int("max-batch", 1000, "articles the batch writer commits per group database transaction (100-1000)")
 	)
 	fs.Usage = func() { usage(fs) }
 	if err := fs.Parse(args); err != nil {
@@ -89,6 +91,14 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		fmt.Fprintf(fs.Output(), "mbox-importer: -commit-timeout %v is negative\n", *commitTimeout)
 		return 2
 	}
+	if *parallel < 1 || *parallel > maxParallel {
+		fmt.Fprintf(fs.Output(), "mbox-importer: -parallel %d is not in 1-%d\n", *parallel, maxParallel)
+		return 2
+	}
+	if *maxBatch < 100 || *maxBatch > 1000 {
+		fmt.Fprintf(fs.Output(), "mbox-importer: -max-batch %d is not in 100-1000\n", *maxBatch)
+		return 2
+	}
 
 	opts := &runOptions{
 		dataDir:         *dataDir,
@@ -99,6 +109,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		xz:              *xzProg,
 		tmpDir:          *tmpDir,
 		useShortHashLen: *useShortHashLen,
+		parallel:        *parallel,
 		history:         *useHistory,
 		dryRun:          *dryRun,
 		keepBinary:      *keepBinary,
@@ -109,7 +120,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 
 	history.ENABLE_HISTORY = opts.history // read once by NewHistory
 	database.GlobalDateParser = processor.ParseNNTPDate
-	log.Printf("[MBOX-IMPORT] Starting go-pugleaf mbox-importer (version %s)", config.AppVersion)
+	log.Printf("[MBOX-IMPORT] Starting go-pugleaf mbox-importer (version %s) parallel=%d max-batch=%d", config.AppVersion, *parallel, *maxBatch)
 
 	stop := stopChan
 	if stop == nil {
@@ -146,6 +157,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	cfg := database.DefaultDBConfig()
 	cfg.DataDir = opts.dataDir
 	cfg.BackupDir = filepath.Join(opts.dataDir, "backups")
+	cfg.MaxDBbatch = *maxBatch // articles per group database transaction (db_batch.go)
 	db, err := database.OpenDatabase(cfg)
 	if err != nil {
 		log.Printf("[MBOX-IMPORT] Failed to initialize database: %v", err)
@@ -259,6 +271,7 @@ func usage(fs *flag.FlagSet) {
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -nntphostname news.example.org de.comm.internet.commerce.mbox")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -group local.archive /archive/usenet/de.comm/")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -tmpdir /big/tmp pl.comp.lang.c.usenet.xz")
+	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -parallel 4 -max-batch 500 /archive/usenet/")
 	fmt.Fprintln(out, "Exit codes: 0 ok, 1 input, article, commit or database error, 2 bad command line, 130 stopped by a signal")
 	fmt.Fprintln(out, "Flags:")
 	fs.PrintDefaults()

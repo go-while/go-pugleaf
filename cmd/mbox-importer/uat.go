@@ -99,7 +99,7 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 	c = newCounters(path)
 	var encoded, addedMIME int
 	raw := make(map[string]int)
-	sink.beginInput()
+	in := sink.beginInput()
 	eachErr := p.Each(zstd, workDir, func(i int, msg []byte) error {
 		select {
 		case <-stop:
@@ -120,7 +120,7 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 		if isBinary {
 			body = nil
 		}
-		handleLines(c, head, body, isBinary, opts, sink)
+		handleLines(c, head, body, isBinary, opts, in)
 		if c.Read%progressEvery == 0 {
 			log.Printf("[MBOX-IMPORT] progress file=%q read=%d of %d stored=%d present=%d skipped=%d rejected=%d errors=%d",
 				path, c.Read, p.Count(), c.Stored, c.Present, c.skippedTotal(), c.Rejected, c.Errors)
@@ -147,7 +147,7 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 		log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, closeErr)
 		inputErr = true
 	}
-	waitErr := sink.endInput(opts.commitTimeout)
+	waitErr := in.endInput(opts.commitTimeout)
 	if waitErr != nil {
 		log.Printf("[MBOX-IMPORT] file=%q commit wait: %v", path, waitErr)
 		c.CommitFailed = true

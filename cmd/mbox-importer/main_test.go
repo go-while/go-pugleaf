@@ -557,7 +557,7 @@ func (f *fakeSink) Handle(msgid string, _ func() (*models.Article, error), _ str
 	return r.stored, r.present, r.err
 }
 
-func (f *fakeSink) beginInput() {}
+func (f *fakeSink) beginInput() inputSink { return f }
 
 func (f *fakeSink) endInput(time.Duration) error { return f.waitErr }
 
@@ -575,6 +575,8 @@ func (s *stopSink) Handle(msgid string, art func() (*models.Article, error), gro
 	}
 	return s.countingSink.Handle(msgid, art, group)
 }
+
+func (s *stopSink) beginInput() inputSink { return s }
 
 // TestMboxCmdStopBetweenArticles: a stop during an input finishes the current article, reads
 // no further one, does not rename the input and starts no further input.

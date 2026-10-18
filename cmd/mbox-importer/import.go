@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/database"
@@ -105,13 +106,20 @@ func (r *runSummary) exitCode() int {
 // lastRun is the summary of the last runWith that imported (tests read it after runWith returned).
 var lastRun *runSummary
 
-// articleSink receives every importable article of an input: the dry run counts, the
-// real run looks the id up, creates the group, takes the commit mark and calls ProcessArticle.
-// A Handle error wrapping errRejected counts as rejected, any other error as an error.
+// articleSink receives every importable article of a run. beginInput opens the state of one
+// input; with -parallel several inputs are open at once, so a sink must allow concurrent
+// beginInput calls and concurrent use of the inputSinks it returned.
 type articleSink interface {
+	// beginInput is called before the first article of an input and returns the sink the
+	// articles of that input are handed to.
+	beginInput() inputSink
+}
+
+// inputSink is the sink of one input: the dry run counts, the real run looks the id up,
+// creates the group, takes the commit mark and calls ProcessArticle.
+// A Handle error wrapping errRejected counts as rejected, any other error as an error.
+type inputSink interface {
 	Handle(msgid string, art func() (*models.Article, error), group string) (stored, present bool, err error)
-	// beginInput is called before the first article of an input.
-	beginInput()
 	// endInput waits until the articles handed over for the input are committed.
 	endInput(timeout time.Duration) error
 }
@@ -121,6 +129,7 @@ type runOptions struct {
 	dataDir, hostname, group, sevenZip string
 	zstd, xz, tmpDir                   string // UAT archives: programs and the unpack directory ("" = system temp)
 	useShortHashLen                    int
+	parallel                           int // inputs imported at the same time (<= 1: one after the other)
 	history, dryRun, keepBinary        bool
 	markDone, strictMsgID              bool
 	commitTimeout                      time.Duration // 0: no limit
@@ -128,7 +137,7 @@ type runOptions struct {
 
 // readMbox reads one input and feeds the sink. It returns errStopped (with the counters
 // so far) when stop was closed between two articles; the current article is finished first.
-func readMbox(src *source, opts *runOptions, sink articleSink, stop <-chan struct{}) (*counters, error) {
+func readMbox(src *source, opts *runOptions, sink inputSink, stop <-chan struct{}) (*counters, error) {
 	c := newCounters(src.Path)
 	if src.Stream == nil {
 		return c, nil // empty input
@@ -167,7 +176,7 @@ func readMbox(src *source, opts *runOptions, sink articleSink, stop <-chan struc
 
 // handleMessage checks one message, hands it to the sink and counts the outcome.
 // The body is always drained.
-func handleMessage(c *counters, rawHead []string, bodyReader io.Reader, opts *runOptions, sink articleSink) {
+func handleMessage(c *counters, rawHead []string, bodyReader io.Reader, opts *runOptions, sink inputSink) {
 	body, isBinary := readBody(bodyReader, opts.keepBinary)
 	handleLines(c, rawHead, body, isBinary, opts, sink)
 }
@@ -175,7 +184,7 @@ func handleMessage(c *counters, rawHead []string, bodyReader io.Reader, opts *ru
 // handleLines runs one article (header lines and body lines, no line endings) through the
 // skip rules, the header rewrite, the target-group rule and the sink. isBinary says the body
 // was yEnc and left out (readBody), so the article counts as "binary", not "no-body".
-func handleLines(c *counters, rawHead, body []string, isBinary bool, opts *runOptions, sink articleSink) {
+func handleLines(c *counters, rawHead, body []string, isBinary bool, opts *runOptions, sink inputSink) {
 	msgid, reason := messageIDFromHeaders(rawHead, opts.strictMsgID)
 	if reason != skipNone {
 		c.Skipped[reason]++
@@ -226,45 +235,93 @@ func handleLines(c *counters, rawHead, body []string, isBinary bool, opts *runOp
 	}
 }
 
-// importInputs imports files one after the other until stop is closed.
+// maxParallel is the upper bound of -parallel.
+const maxParallel = 32
+
+// importInputs imports files until stop is closed: one after the other, or opts.parallel at
+// a time, each worker taking the next file in the given order. Once stop is closed no further
+// input is started. The summary lists the inputs in the given order, whatever order they
+// finished in.
 func importInputs(files []string, opts *runOptions, sink articleSink, stop <-chan struct{}) *runSummary {
 	res := &runSummary{Total: newCounters("")}
-	for i, path := range files {
+	type outcome struct {
+		c                          *counters
+		started, inputErr, stopped bool
+	}
+	outcomes := make([]outcome, len(files))
+
+	workers := opts.parallel
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(files) {
+		workers = len(files)
+	}
+	next := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				select {
+				case <-stop:
+					continue // drained, never started
+				default:
+				}
+				o := &outcomes[i]
+				o.started = true
+				if uatSuffix(files[i]) != "" {
+					o.c, o.inputErr, o.stopped = importUAT(files[i], opts, sink, stop)
+				} else {
+					o.c, o.inputErr, o.stopped = importInput(files[i], opts, sink, stop)
+				}
+			}
+		}()
+	}
+feed:
+	for i := range files {
 		select {
 		case <-stop:
-			res.Stopped = true
-			log.Printf("[MBOX-IMPORT] stopped by shutdown signal: %d inputs not started", len(files)-i)
-			return res
+			break feed
 		default:
 		}
-		res.Inputs++
-		var c *counters
-		var inputErr, stopped bool
-		if uatSuffix(path) != "" {
-			c, inputErr, stopped = importUAT(path, opts, sink, stop)
-		} else {
-			c, inputErr, stopped = importInput(path, opts, sink, stop)
+		select {
+		case <-stop:
+			break feed
+		case next <- i:
 		}
-		if inputErr {
+	}
+	close(next)
+	wg.Wait()
+
+	notStarted := 0
+	for _, o := range outcomes {
+		if !o.started {
+			notStarted++
+			continue
+		}
+		res.Inputs++
+		if o.inputErr {
 			res.InputErrors++
 		}
-		if c != nil {
-			res.PerInput = append(res.PerInput, c)
-			res.Total.add(c)
-			if c.MarkedDone {
+		if o.c != nil {
+			res.PerInput = append(res.PerInput, o.c)
+			res.Total.add(o.c)
+			if o.c.MarkedDone {
 				res.MarkedDone++
 			}
-			if c.CommitFailed {
+			if o.c.CommitFailed {
 				res.CommitErrors++
 			}
 		}
-		if stopped {
+		if o.stopped {
 			res.Stopped = true
-			if left := len(files) - i - 1; left > 0 {
-				log.Printf("[MBOX-IMPORT] stopped by shutdown signal: %d inputs not started", left)
-			}
-			return res
 		}
+	}
+	if notStarted > 0 {
+		res.Stopped = true
+		log.Printf("[MBOX-IMPORT] stopped by shutdown signal: %d inputs not started", notStarted)
 	}
 	return res
 }
@@ -279,8 +336,8 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 		return nil, true, false
 	}
 	log.Printf("[MBOX-IMPORT] importing file=%q", path)
-	sink.beginInput()
-	c, readErr := readMbox(src, opts, sink, stop)
+	in := sink.beginInput()
+	c, readErr := readMbox(src, opts, in, stop)
 	stopped = errors.Is(readErr, errStopped)
 	c.Unread = src.Unread() // before Close: Close kills a 7z that was not read to its end
 	closeErr := src.Close()
@@ -306,7 +363,7 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 			samples = append(samples, nearMiss{line: nm.Line, text: nm.Text})
 		}
 	}
-	waitErr := sink.endInput(opts.commitTimeout)
+	waitErr := in.endInput(opts.commitTimeout)
 	if waitErr != nil {
 		log.Printf("[MBOX-IMPORT] file=%q commit wait: %v", path, waitErr)
 		c.CommitFailed = true
@@ -374,8 +431,10 @@ func logDryRunGroups(groups map[string]int) {
 }
 
 // countingSink is the dry run's sink: it builds every article (a build error is a
-// rejection) and counts it for its target group as stored.
+// rejection) and counts it for its target group as stored. One countingSink serves every
+// input of the run (the counts are per run), so the map is locked.
 type countingSink struct {
+	mu     sync.Mutex
 	groups map[string]int
 }
 
@@ -387,44 +446,66 @@ func (s *countingSink) Handle(msgid string, art func() (*models.Article, error),
 	if _, err := art(); err != nil {
 		return false, false, fmt.Errorf("%w: %v", errRejected, err)
 	}
+	s.mu.Lock()
 	s.groups[group]++
+	s.mu.Unlock()
 	return true, false, nil
 }
 
-func (s *countingSink) beginInput() {}
+func (s *countingSink) beginInput() inputSink { return s }
 
 func (s *countingSink) endInput(time.Duration) error { return nil }
 
-// processorSink is the real run's sink: it creates each group once per run, takes a
-// commit mark per (input, group), skips articles already in the group and hands the
-// rest to ProcessArticle in bulk mode.
+// processorSink is the real run's sink: it creates each group once per run and hands out
+// one processorInput per input, which takes a commit mark per group, skips articles already
+// in the group and passes the rest to ProcessArticle in bulk mode. Inputs may run at the
+// same time (-parallel): ProcessArticle and the batch writer are built for concurrent callers,
+// the per-run group set is locked here.
 type processorSink struct {
 	db      *database.Database
 	proc    *processor.Processor
-	ensured map[string]bool                // groups created or found this run
-	marks   map[string]database.CommitMark // commit marks of the current input
-	order   []string                       // groups of the current input, first sight order
+	mu      sync.Mutex      // ensured
+	ensured map[string]bool // groups created or found this run
 }
 
 func newProcessorSink(db *database.Database, proc *processor.Processor) *processorSink {
 	return &processorSink{db: db, proc: proc, ensured: make(map[string]bool)}
 }
 
-func (s *processorSink) beginInput() {
-	s.marks = make(map[string]database.CommitMark)
-	s.order = nil
+func (s *processorSink) beginInput() inputSink {
+	return &processorInput{sink: s, marks: make(map[string]database.CommitMark)}
 }
 
-func (s *processorSink) Handle(msgid string, art func() (*models.Article, error), group string) (bool, bool, error) {
-	if !s.ensured[group] {
-		if err := processor.EnsureNewsgroup(s.db, group, ""); err != nil {
-			return false, false, fmt.Errorf("create newsgroup: %w", err)
-		}
-		s.ensured[group] = true
+// ensure creates group once per run; concurrent inputs that meet the same new group wait
+// for the first creation instead of racing EnsureNewsgroup.
+func (s *processorSink) ensure(group string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ensured[group] {
+		return nil
 	}
-	if _, ok := s.marks[group]; !ok {
-		s.marks[group] = s.db.Batch.CommitMark(group)
-		s.order = append(s.order, group)
+	if err := processor.EnsureNewsgroup(s.db, group, ""); err != nil {
+		return err
+	}
+	s.ensured[group] = true
+	return nil
+}
+
+// processorInput is the processorSink state of one input: its commit marks per group.
+type processorInput struct {
+	sink  *processorSink
+	marks map[string]database.CommitMark // commit marks of this input
+	order []string                       // groups of this input, first sight order
+}
+
+func (p *processorInput) Handle(msgid string, art func() (*models.Article, error), group string) (bool, bool, error) {
+	s := p.sink
+	if err := s.ensure(group); err != nil {
+		return false, false, fmt.Errorf("create newsgroup: %w", err)
+	}
+	if _, ok := p.marks[group]; !ok {
+		p.marks[group] = s.db.Batch.CommitMark(group)
+		p.order = append(p.order, group)
 	}
 
 	groupDB, err := s.db.GetGroupDB(group)
@@ -461,11 +542,13 @@ func (s *processorSink) Handle(msgid string, art func() (*models.Article, error)
 }
 
 // endInput waits for every commit mark of the input. stop is nil on purpose: a shutdown
-// signal still lets the committed count settle, bounded by timeout (0: no limit).
-func (s *processorSink) endInput(timeout time.Duration) error {
+// signal still lets the committed count settle, bounded by timeout (0: no limit). The count
+// is per group, so with -parallel the wait also covers articles other inputs handed to the
+// same group before this call: a longer wait, never a shorter one.
+func (p *processorInput) endInput(timeout time.Duration) error {
 	var errs []error
-	for _, group := range s.order {
-		if err := s.db.Batch.WaitCommitted(s.marks[group], nil, timeout); err != nil {
+	for _, group := range p.order {
+		if err := p.sink.db.Batch.WaitCommitted(p.marks[group], nil, timeout); err != nil {
 			errs = append(errs, err)
 		}
 	}

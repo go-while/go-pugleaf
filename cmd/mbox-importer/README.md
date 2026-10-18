@@ -11,7 +11,8 @@ with IHAVE.
   program) archives, streamed: nothing beyond one article is held in memory
 - Reads Usenet Archive Toolkit archives (`.usenet`, `.usenet.xz`, `.usenet.7z`; via the installed
   `zstd` program, plus `xz` or `7z`), see [UAT archives](#uat-archives)
-- Several inputs per run; a directory argument imports its mbox files and UAT archives in name order
+- Several inputs per run; a directory argument imports its mbox files and UAT archives in name order,
+  one after the other or `-parallel N` at a time
 - Files every article like a fetched one, through the processor in bulk mode (message-id history,
   overview, threading): into the first group of its `Newsgroups:` header, or into `-group NAME`
 - Creates missing newsgroups on the fly
@@ -102,6 +103,8 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 | `-mark-done` | `true` | Rename a fully imported input to `INPUT.done` (see below) |
 | `-strict-msgid` | `false` | Require Message-IDs that pass go-pugleaf's own validator instead of the lax mbox2nntp rules |
 | `-commit-timeout` | `30m` | How long to wait, per input, until the batch writer has committed its articles; `0` = no limit |
+| `-parallel` | `1` | Inputs imported at the same time (1-32). Each worker takes the next input in the given order; the summary keeps that order. Every worker still hands its articles to the one batch writer, so more workers mostly help with many small inputs or slow unpacking |
+| `-max-batch` | `1000` | Articles the batch writer commits per group database transaction (100-1000). Smaller batches commit sooner and hold less in memory; larger ones are faster on big inputs |
 | `-help` | | Print the usage and exit |
 
 Positional arguments are the inputs; at least one is required.
@@ -147,10 +150,12 @@ On Linux: the `zstd` package; the `xz-utils` package (Debian, Ubuntu) or `xz`; t
 
 ## What happens to an input
 
-The inputs are imported one after the other, in the order given (a directory in name order), by one
-reader that hands each article to the processor. At the end of an input the importer waits until
-the batch writer has committed that input's articles (bounded by `-commit-timeout`) and logs the
-summary line.
+The inputs are imported in the order given (a directory in name order): one after the other, or
+with `-parallel N` by N readers that each take the next input, every reader handing its articles to
+the processor. At the end of an input the importer waits until the batch writer has committed that
+input's articles (bounded by `-commit-timeout`; with parallel inputs the per-group count also covers
+articles other inputs handed to the same group, which only makes the wait longer) and logs the
+summary line. The log lines of parallel inputs interleave; each carries its `file=`.
 
 The input is renamed to `INPUT.done` when all of these hold:
 
