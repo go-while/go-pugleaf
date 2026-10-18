@@ -320,8 +320,8 @@ func (s *WebServer) sitePostSubmit(c *Context) {
 			errors = append(errors, "No valid newsgroups specified")
 		}
 	}
-	if len(newsgroups) > processor.MaxCrossPosts {
-		errors = append(errors, fmt.Sprintf("You can post to a maximum of %d newsgroups at once", processor.MaxCrossPosts))
+	if maxCross := s.DB.MaxCrossPosts(); len(newsgroups) > maxCross {
+		errors = append(errors, fmt.Sprintf("You can post to a maximum of %d newsgroups at once", maxCross))
 	}
 
 	if len(errors) == 0 {

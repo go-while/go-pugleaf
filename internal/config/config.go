@@ -61,9 +61,24 @@ const CFG_KEY_API_ENABLED string = "APIEnabled"
 // post_queue row (invalid or <= 0 reads as 5); raising it un-parks rows below the new value.
 const CFG_KEY_POSTQUEUE_MAXATTEMPTS string = "PostQueueMaxAttempts"
 
+// CFG_KEY_MAXCROSSPOSTS is the most newsgroups one article may be filed into; the fetcher,
+// the NNTP intake and the web post form all reject an article listing more. Every process
+// reads it through the config cache, so a change made on the admin settings page reaches the
+// fetcher and the NNTP server within the cache refresh interval without a restart. A missing,
+// invalid or out-of-range value reads as DefaultMaxCrossPosts.
+const CFG_KEY_MAXCROSSPOSTS string = "MaxCrossPosts"
+
+// DefaultMaxCrossPosts is the MaxCrossPosts used when the key is missing or invalid.
+const DefaultMaxCrossPosts = 9
+
+// MaxCrossPostsLimit is the largest MaxCrossPosts the admin page accepts: the processor's
+// per-article ProcessQueue holds 16 entries and its capture sends must never block.
+const MaxCrossPostsLimit = 15
+
 // Admin settings form field names
 const FORM_FIELD_HOSTNAME string = "local_nntp_hostname"
 const FORM_FIELD_WEBPOSTSIZE string = "web_post_size"
+const FORM_FIELD_MAXCROSSPOSTS string = "max_crossposts"
 const FORM_FIELD_ABUSEMAIL string = "abuse_mail"
 const FORM_FIELD_WEBLOCALNNTP string = "web_local_nntp_server_addr_info"
 const FORM_FIELD_REVERSEPROXY string = "reverse_proxy_addr"

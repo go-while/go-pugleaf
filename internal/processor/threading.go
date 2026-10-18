@@ -132,7 +132,7 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		}
 
 		ngs := proc.extractGroupsFromHeaders(article.MessageID, newsgroupsStr)
-		if len(ngs) == 0 || len(ngs) > MaxCrossPosts {
+		if len(ngs) == 0 || len(ngs) > proc.DB.MaxCrossPosts() {
 			log.Printf("[SPAM:EMP] Article '%s' newsgroups=%d", article.MessageID, len(ngs))
 			proc.setCaseDupes(msgIdItem, bulkmode)
 			if len(ngs) == 0 {
@@ -162,8 +162,8 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, err
 		}
-		if len(names) > MaxCrossPosts {
-			log.Printf("[INTAKE] article %s rejected: %d newsgroups (max %d)", article.MessageID, len(names), MaxCrossPosts)
+		if maxCross := proc.DB.MaxCrossPosts(); len(names) > maxCross {
+			log.Printf("[INTAKE] article %s rejected: %d newsgroups (max %d)", article.MessageID, len(names), maxCross)
 			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, rejected("too many newsgroups")
 		}
@@ -340,7 +340,7 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 	case len(capture) > 0:
 		// One goroutine per article captures every target group (A-tools-1). It runs once
 		// ProcessArticle has returned and unlocked article.Mux (BatchCaptureOverviewForLater
-		// locks it). len(capture) <= MaxCrossPosts < cap(ProcessQueue), so the sends to
+		// locks it). len(capture) <= MaxCrossPosts <= config.MaxCrossPostsLimit < cap(ProcessQueue), so the sends to
 		// ProcessQueue never block, and since every target is already in NewsgroupsPtr no
 		// group's batch can clear the article before the last capture was sent.
 		handedOff = true

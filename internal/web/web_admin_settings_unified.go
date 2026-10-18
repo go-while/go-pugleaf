@@ -56,6 +56,16 @@ func (s *WebServer) adminUpdateSettings(c *Context) {
 			SuccessMsg:   func(value string) string { return "Web post article size limit set to: " + value + " bytes" },
 			EmptyAllowed: false,
 		},
+		config.FORM_FIELD_MAXCROSSPOSTS: {
+			FormField: config.FORM_FIELD_MAXCROSSPOSTS,
+			ConfigKey: config.CFG_KEY_MAXCROSSPOSTS,
+			Validator: s.validateMaxCrossPosts,
+			Processor: nil, // Uses config key directly; every process reads it through the config cache
+			SuccessMsg: func(value string) string {
+				return "Maximum crossposts set to: " + value + " newsgroups per article (fetcher and NNTP server pick it up within 5 minutes)"
+			},
+			EmptyAllowed: false,
+		},
 		config.FORM_FIELD_ABUSEMAIL: {
 			FormField:    config.FORM_FIELD_ABUSEMAIL,
 			ConfigKey:    config.CFG_KEY_ABUSEMAIL,
@@ -185,6 +195,8 @@ func (s *WebServer) adminUpdateSettings(c *Context) {
 		switch settingType {
 		case config.FORM_FIELD_WEBPOSTSIZE:
 			session.SetError("Size cannot be empty")
+		case config.FORM_FIELD_MAXCROSSPOSTS:
+			session.SetError("Maximum crossposts cannot be empty")
 		case config.FORM_FIELD_ABUSEMAIL:
 			session.SetError("Abuse email cannot be empty")
 		default:
@@ -310,6 +322,19 @@ func (s *WebServer) validateWebPostSize(sizeStr string) error {
 		return fmt.Errorf("Size must not exceed 16777216 bytes (16MB)")
 	}
 
+	return nil
+}
+
+// validateMaxCrossPosts accepts 1..config.MaxCrossPostsLimit (the stored value is
+// normalized by strings.TrimSpace in adminUpdateSettings).
+func (s *WebServer) validateMaxCrossPosts(value string) error {
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return fmt.Errorf("Invalid maximum crossposts: must be a number")
+	}
+	if n < 1 || n > config.MaxCrossPostsLimit {
+		return fmt.Errorf("Maximum crossposts must be between 1 and %d", config.MaxCrossPostsLimit)
+	}
 	return nil
 }
 

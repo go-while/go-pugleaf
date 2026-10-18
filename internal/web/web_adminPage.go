@@ -557,6 +557,8 @@ func (s *WebServer) adminPage(c *Context) {
 		RegistrationEnabled:        registrationEnabled,
 		CurrentHostname:            currentHostname,
 		WebPostMaxArticleSize:      webPostMaxSize,
+		MaxCrossPosts:              s.DB.MaxCrossPosts(),
+		MaxCrossPostsLimit:         config.MaxCrossPostsLimit,
 		AbuseMail:                  abuseMail,
 		WebLocalNNTPServerAddrInfo: webLocalNNTPServerAddrInfo,
 		ReverseProxyAddr:           reverseProxyAddr,
@@ -569,6 +571,7 @@ func (s *WebServer) adminPage(c *Context) {
 		// Form field constants for admin settings
 		FormFieldHostname:             config.FORM_FIELD_HOSTNAME,
 		FormFieldWebPostSize:          config.FORM_FIELD_WEBPOSTSIZE,
+		FormFieldMaxCrossPosts:        config.FORM_FIELD_MAXCROSSPOSTS,
 		FormFieldAbuseMail:            config.FORM_FIELD_ABUSEMAIL,
 		FormFieldWebLocalNNTP:         config.FORM_FIELD_WEBLOCALNNTP,
 		FormFieldReverseProxy:         config.FORM_FIELD_REVERSEPROXY,

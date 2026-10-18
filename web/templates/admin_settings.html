@@ -143,6 +143,27 @@
                         </td>
                     </tr>
 
+                    <!-- Max Crossposts Setting -->
+                    <tr>
+                        <td>
+                            <strong>📰 Maximum Crossposts:</strong>
+                            <code>{{.MaxCrossPosts}} newsgroups</code>
+                            <br>
+                            <span class="text-muted">Articles listing more newsgroups are rejected by the fetcher, the NNTP server and the web post form (1-{{.MaxCrossPostsLimit}}; fetcher and NNTP server pick a change up within 5 minutes)</span>
+                        </td>
+                        <td>
+                            <form action="/admin/settings" method="post" class="d-flex gap-1">
+                                <input type="hidden" name="setting" value="{{.FormFieldMaxCrossPosts}}">
+                                <input type="number" class="form-control form-control-sm" name="{{.FormFieldMaxCrossPosts}}"
+                                        placeholder="9"
+                                        value="{{.MaxCrossPosts}}" min="1" max="{{.MaxCrossPostsLimit}}" style="min-width: 100px;">
+                                <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-gear"></i>
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+
                     <!-- Reverse Proxy Setting -->
                     <tr>
                         <td>

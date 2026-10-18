@@ -84,9 +84,10 @@ func (c *xrefMissCache) add(id int64, now time.Time) {
 var (
 	DownloadMaxPar int = 10 // HARDCODED Maximum number of parallel newsgroups downloads
 
-	// these list of ' var ' can be set after importing the lib before starting!!
-	MaxCrossPosts int = 9 // HARDCODED Maximum number of crossposts to allow per article
+	// The maximum number of crossposts per article is the config key MaxCrossPosts
+	// (Database.MaxCrossPosts, set on the admin settings page).
 
+	// these list of ' var ' can be set after importing the lib before starting!!
 	LocalNNTPHostname string = "" // Hostname must be set before processing articles
 
 	// MaxBatch defines the maximum number of articles to fetch in a single batch

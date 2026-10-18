@@ -2,6 +2,11 @@ package database
 
 import (
 	"database/sql"
+	"log"
+	"strconv"
+	"strings"
+
+	"github.com/go-while/go-pugleaf/internal/config"
 )
 
 // GetConfigValue retrieves a configuration value using the cache layer
@@ -75,4 +80,21 @@ func (db *Database) IsRegistrationEnabled() (bool, error) {
 		return true, nil // Default to enabled
 	}
 	return value == "true", nil
+}
+
+// MaxCrossPosts returns the config key MaxCrossPosts: the most newsgroups one article may be
+// filed into (1..config.MaxCrossPostsLimit). A missing, invalid or out-of-range value reads as
+// config.DefaultMaxCrossPosts. The read goes through the config cache, so it is cheap enough
+// for every article.
+func (db *Database) MaxCrossPosts() int {
+	v, err := db.GetConfigValue(config.CFG_KEY_MAXCROSSPOSTS)
+	if err != nil {
+		log.Printf("Database: Failed to read %s, using %d: %v", config.CFG_KEY_MAXCROSSPOSTS, config.DefaultMaxCrossPosts, err)
+		return config.DefaultMaxCrossPosts
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 1 || n > config.MaxCrossPostsLimit {
+		return config.DefaultMaxCrossPosts
+	}
+	return n
 }
