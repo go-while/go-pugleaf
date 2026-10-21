@@ -542,11 +542,11 @@ func TestArtCurrentArticle(t *testing.T) {
 	a3 := artFind(t, arts, 3)
 
 	// RFC 3977 §6.2.1.2: a successful ARTICLE/HEAD/BODY n sets the current
-	// article number to n. A bare STAT would show it but is masked by RFC-3
-	// (501), so the pointer is read with a bare XOVER, which uses the current
-	// article (RFC 2980 §2.8, RFC 3977 §8.3.2: 224 and the overview line of n;
-	// 420 when the current article is invalid). Today GetArticleByNum never sets
-	// DBArtNum, so the current article becomes 0 and XOVER answers 420 (BUG-1).
+	// article number to n. The pointer is read with a bare XOVER, which uses the
+	// current article (RFC 2980 §2.8, RFC 3977 §8.3.2: 224 and the overview line
+	// of n; 420 when the current article is invalid), and again with a bare STAT
+	// below. GetArticleByNum used to leave DBArtNum at 0, so the current article
+	// became 0 and XOVER answered 420 (was BUG-1).
 	for _, cmd := range artCmds[:3] { // ARTICLE, HEAD, BODY
 		t.Run("after-"+cmd.name, func(t *testing.T) {
 			c := hs.dial(t)
@@ -570,7 +570,7 @@ func TestArtCurrentArticle(t *testing.T) {
 		if err := artCheckBareXover(t, c, 2); err != nil {
 			t.Fatal(err)
 		}
-		// RFC 3977 §6.2.4: a bare STAT reports the current article; today 501 (RFC-3).
+		// RFC 3977 §6.2.4: a bare STAT reports the current article (was 501, RFC-3).
 		code, line, _ := artDo(t, c, "STAT")
 		if err := artCheckStatus(code, line, 223, 2, a2.MessageID); err != nil {
 			t.Fatal(err)

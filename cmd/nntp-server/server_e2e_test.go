@@ -223,7 +223,8 @@ func e2eTeardown(code int, keep bool, srv *nntp.NNTPServer, srvWG *sync.WaitGrou
 		if err := srv.Stop(); err != nil {
 			fail("Stop: " + err.Error())
 		}
-		// Stop() does not close live clients (BUG-7): close ours so the handlers return
+		// Stop() closes live clients since BUG-7 was fixed; close ours anyway so the
+		// test does not depend on it
 		e2eConnsMu.Lock()
 		for _, c := range e2eConns {
 			_ = c.Close()
