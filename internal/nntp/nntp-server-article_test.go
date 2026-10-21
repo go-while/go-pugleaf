@@ -669,9 +669,8 @@ func TestArtByteExact(t *testing.T) {
 		}
 	})
 
-	// A header line starting with "." must be dot-stuffed like any other line
-	// of a multi-line block (RFC 3977 §3.1.1). Header lines are sent unstuffed
-	// today (BUG-6).
+	// A header line starting with "." is dot-stuffed like any other line of a
+	// multi-line block (RFC 3977 §3.1.1; was BUG-6, fixed by the data-block writer).
 	t.Run("header-dot-continuation", func(t *testing.T) {
 		g, arts := artSeed(t, "bytes-hdrdot", 1, func(_ int, a *hArticle) {
 			// A stored header line starting with "." (lax intake).
@@ -696,8 +695,9 @@ func TestArtByteExact(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	// A stored header line "." (a dot-stuffed ".." unstuffed on intake) is sent
-	// as "." and ends HEAD/ARTICLE early (audit A-nntp-rfc-2, part of BUG-6).
+	// A stored header line "." (a dot-stuffed ".." unstuffed by a lax intake) is
+	// sent as ".." and does not end HEAD/ARTICLE early (audit A-nntp-rfc-2, was
+	// part of BUG-6; intake itself refuses such a header with 441 today).
 	t.Run("header-lone-dot", func(t *testing.T) {
 		g, arts := artSeed(t, "bytes-hdrlone", 1, func(_ int, a *hArticle) {
 			a.Headers += "\nX-Folded: first\n."
@@ -728,7 +728,7 @@ func TestArtByteExact(t *testing.T) {
 	})
 	// An empty body has zero lines: ARTICLE ends with the headers' blank line
 	// followed directly by ".\r\n", and BODY is just ".\r\n" (RFC 3977 §3.1.1,
-	// §6.2.1). Today an extra empty line is sent (BUG-6).
+	// §6.2.1; was BUG-6).
 	t.Run("empty-body", func(t *testing.T) {
 		g, arts := artSeed(t, "bytes-emptybody", 1, func(_ int, a *hArticle) { a.Body = "" })
 		a := arts[0]
@@ -748,7 +748,7 @@ func TestArtByteExact(t *testing.T) {
 	})
 	// HEAD carries header lines only; an empty line inside it would read as the
 	// header/body separator (RFC 3977 §6.2.2, RFC 5322 §2.1). An empty
-	// headers_json is sent as one empty line today (BUG-6).
+	// headers_json must not be sent as one empty line (was BUG-6).
 	t.Run("empty-headers", func(t *testing.T) {
 		g, _ := artSeed(t, "bytes-emptyhdr", 1, nil)
 		artSetHeadersJSON(t, g, 1, "")
