@@ -2,7 +2,7 @@ module github.com/go-while/go-pugleaf
 
 go 1.27.1
 
-toolchain go1.27.2
+toolchain go1.27.3
 
 require (
 	github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017122104-f0412ef9498e
