@@ -520,6 +520,7 @@ func (s *NNTPServer) Stop() error {
 		s.connsMu.Unlock()
 		log.Printf("[NNTP] %d connection(s) did not end within %s", left, timeout)
 	}
+	log.Printf("[NNTP] stats: %s", s.Stats.Summary())
 	return nil
 }
 

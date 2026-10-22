@@ -84,8 +84,15 @@ func isRFCdate(dateStr string) bool {
 	return false
 }
 
-const pathHeader_inv1 string = "Path: pugleaf.invalid!.TX!not-for-mail"
-const pathHeader_inv2 string = "X-Path: pugleaf.invalid!.TX!not-for-mail"
+// fallbackPath is the Path value for a stored article that has none: the local
+// identity (a placeholder when no hostname is configured) and the "not-for-mail"
+// tail entry (RFC 5537 §3.2.1). No ".TX" diagnostic (CLI-1, decision 1).
+func fallbackPath(localHost string) string {
+	if localHost == "" {
+		localHost = "pugleaf.invalid"
+	}
+	return localHost + "!not-for-mail"
+}
 
 // extractDateReceivedHeader extracts the Date-Received header value from HeadersJSON
 func extractDateReceivedHeader(headersJSON string) string {
@@ -311,13 +318,13 @@ func ReconstructHeaders(article *models.Article, withPath bool, nntphostname *st
 		if article.Path != "" {
 			headers = append(headers, "Path: "+EnsureLocalPathPrefix(article.Path, host))
 		} else {
-			headers = append(headers, pathHeader_inv1)
+			headers = append(headers, "Path: "+fallbackPath(host))
 		}
 	} else {
 		if article.Path != "" {
 			headers = append(headers, "X-Path: "+EnsureLocalPathPrefix(article.Path, host))
 		} else {
-			headers = append(headers, pathHeader_inv2)
+			headers = append(headers, "X-Path: "+fallbackPath(host))
 		}
 	}
 	moreHeaders := strings.Split(article.HeadersJSON, "\n")

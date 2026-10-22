@@ -242,7 +242,10 @@ const contentSecurityPolicy = "default-src 'self'; " +
 	"form-action 'self'"
 
 // NewWebServer creates a new web server instance
-func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *nntp.NNTPServer, cronEdit bool, noCronjobs bool) *WebServer {
+// NewWebServer builds the router, the cron manager and the server state. It returns an
+// error for an invalid trusted-proxy list: a half-parsed list would trust the wrong peers,
+// so the caller must not start without it (OPS-1: no exits in library code).
+func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig *nntp.NNTPServer, cronEdit bool, noCronjobs bool) (*WebServer, error) {
 	// The access log comes first, so a request that panics still gets its line with the 500
 	// Recovery answered. ServeMux matches on the escaped path and path-unescapes each wildcard
 	// segment, so a %2F in a message-id stays inside the {messageId} segment and '+' stays '+'
@@ -261,8 +264,7 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	}
 	trustedProxyNets, err := configureTrustedProxiesWithHeader(router, ReverseProxyAddr, ReverseProxyIPHeader)
 	if err != nil {
-		// A half-parsed list would trust the wrong peers, so a bad entry stops the server.
-		log.Fatalf("[WEB]: FATAL: %v: fix the value (comma-separated IPs or CIDRs) in the config table, key %s in cfg/pugleaf.sq3, and restart", err, config.CFG_KEY_REVERSEPROXY)
+		return nil, fmt.Errorf("trusted reverse proxies: %w: fix the value (comma-separated IPs or CIDRs) of config key %s in cfg/pugleaf.sq3", err, config.CFG_KEY_REVERSEPROXY)
 	}
 	log.Printf("[WEB]: Trusted reverse proxies: %v | client IP header: %v", trustedProxyNets, router.RemoteIPHeader())
 
@@ -337,7 +339,7 @@ func NewWebServer(db *database.Database, webconfig *config.WebConfig, nntpconfig
 	} else {
 		server.setPostBodyCap(sizeStr)
 	}
-	return server
+	return server, nil
 }
 
 // routeSitePostSubmit is the one route whose body cap follows WebPostMaxArticleSize.

@@ -459,9 +459,9 @@ func main() {
 
 	// Initialize processor for article handling
 	history.ENABLE_HISTORY = false // nntp-transfer never uses the history index
-	proc := processor.NewProcessor(db, pool, finalUseShortHashLen)
-	if proc == nil {
-		log.Fatalf("Failed to create processor")
+	proc, err := processor.NewProcessorE(db, pool, finalUseShortHashLen)
+	if err != nil {
+		log.Fatalf("Failed to create processor: %v", err)
 	}
 	// Set up shutdown handling
 	transferDoneChan := make(chan error, 1)

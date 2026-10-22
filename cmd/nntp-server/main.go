@@ -189,7 +189,10 @@ func main() {
 	// Initialize processor for article handling (needed for POST/IHAVE/TAKETHIS)
 	// For dedicated NNTP server, we don't need NNTP backend pools for fetching,
 	// but we do need a processor for handling incoming articles
-	proc := processor.NewProcessor(db, nil, finalUseShortHashLen) // nil NNTP pool since we're receiving, not fetching
+	proc, err := processor.NewProcessorE(db, nil, finalUseShortHashLen) // nil NNTP pool since we're receiving, not fetching
+	if err != nil {
+		log.Fatalf("Failed to create processor: %v", err)
+	}
 
 	// Create and start NNTP server with processor support
 	processorAdapter := NewProcessorAdapter(proc)

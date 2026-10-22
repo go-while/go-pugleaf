@@ -23,7 +23,10 @@ func lo1CoreNewServer(t *testing.T) *WebServer {
 	cfg := config.NewDefaultConfig().Server.WEB
 	cfg.ListenPort = 0
 	cfg.SSL = false
-	srv := NewWebServer(w0DB(t), cfg, nil, false, true)
+	srv, err := NewWebServer(w0DB(t), cfg, nil, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), testShutdownWait())
 		defer cancel()

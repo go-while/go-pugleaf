@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -221,8 +222,17 @@ func (c *ClientConnection) sendResponse(code int, message string) error {
 
 // getServerCapabilities returns the capability list for the current connection state
 // (RFC 3977 §5.2: the list may change with state; RFC 4643 §2.1: no AUTHINFO after login).
+// implementationCapability is the optional IMPLEMENTATION line (RFC 3977 §3.3.2):
+// free text for humans, never for programmatic use by clients.
+func implementationCapability() string {
+	if v := config.AppVersion; v != "" && v != "-unset-" {
+		return "IMPLEMENTATION go-pugleaf " + v
+	}
+	return "IMPLEMENTATION go-pugleaf"
+}
+
 func (c *ClientConnection) getServerCapabilities() []string {
-	capabilities := []string{"VERSION 2", "READER"}
+	capabilities := []string{"VERSION 2", "READER", implementationCapability()}
 	if c.authinfoAdvertised() {
 		capabilities = append(capabilities, "AUTHINFO USER")
 	}

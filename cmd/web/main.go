@@ -341,7 +341,11 @@ func main() {
 	log.Printf("[WEB]: PostQueueWorker started for web posting")
 
 	// Create and start web server in a goroutine for non-blocking startup
-	server := web.NewWebServer(db, webConfig, nil, editCronjobs, noCronjobs) // no embedded NNTP server (D10)
+	server, err := web.NewWebServer(db, webConfig, nil, editCronjobs, noCronjobs) // no embedded NNTP server (D10)
+	if err != nil {
+		log.Printf("[WEB]: %v", err)
+		exitAfterDB(db, 1)
+	}
 	if !noCronjobs && server.CronManager != nil {
 		db.WG.Add(1)
 	}

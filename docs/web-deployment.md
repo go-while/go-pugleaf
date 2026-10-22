@@ -17,7 +17,7 @@ commas). When it is empty the defaults are used:
 
 A proxy that is not covered makes every visitor appear to come from the proxy's own address. An
 entry that is not an IP or CIDR is never skipped: the admin form refuses to save the list, and a bad
-value already in the config table stops the webserver at startup with a `FATAL` line naming the
+value already in the config table makes the webserver refuse to start, with a log line naming the
 entry (fix the row and restart). The effective list and the header in use are logged once at startup:
 
 ```

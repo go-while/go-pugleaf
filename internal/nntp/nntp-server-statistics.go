@@ -1,6 +1,7 @@
 package nntp
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -120,6 +121,13 @@ func (s *ServerStats) GetUptime() time.Duration {
 	s.mux.RLock()
 	defer s.mux.RUnlock()
 	return time.Since(s.startTime)
+}
+
+// Summary is one log line with the counters since startup (logged at Stop).
+func (s *ServerStats) Summary() string {
+	ok, failed := s.GetAuthStats()
+	return fmt.Sprintf("uptime=%s connections=%d active=%d auth ok=%d failed=%d commands=%v",
+		s.GetUptime().Round(time.Second), s.GetTotalConnections(), s.GetActiveConnections(), ok, failed, s.GetAllCommandCounts())
 }
 
 // Reset resets all statistics (except start time)

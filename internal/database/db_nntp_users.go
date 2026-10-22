@@ -206,45 +206,6 @@ func (db *Database) DeleteNNTPUser(userID int) error {
 	return nil
 }
 
-// NNTP Session Management Functions
-
-// CreateNNTPSession creates a new NNTP session
-func (db *Database) CreateNNTPSession(userID int, connectionID, remoteAddr string) error {
-	query := `INSERT INTO nntp_sessions (user_id, connection_id, remote_addr) VALUES (?, ?, ?)`
-	_, err := RetryableExec(db.mainDB, query, userID, connectionID, remoteAddr)
-	return err
-}
-
-// UpdateNNTPSessionActivity updates the last activity timestamp
-func (db *Database) UpdateNNTPSessionActivity(connectionID string) error {
-	query := `UPDATE nntp_sessions SET last_activity = CURRENT_TIMESTAMP WHERE connection_id = ? AND is_active = 1`
-	_, err := RetryableExec(db.mainDB, query, connectionID)
-	return err
-}
-
-// CloseNNTPSession marks a session as inactive
-func (db *Database) CloseNNTPSession(connectionID string) error {
-	query := `UPDATE nntp_sessions SET is_active = 0 WHERE connection_id = ?`
-	_, err := RetryableExec(db.mainDB, query, connectionID)
-	return err
-}
-
-// GetActiveNNTPSessionsForUser counts active sessions for a user
-func (db *Database) GetActiveNNTPSessionsForUser(userID int) (int, error) {
-	query := `SELECT COUNT(*) FROM nntp_sessions WHERE user_id = ? AND is_active = 1`
-	var count int
-	err := RetryableQueryRowScan(db.mainDB, query, []interface{}{userID}, &count)
-	return count, err
-}
-
-// CleanupOldNNTPSessions removes inactive sessions older than specified duration
-func (db *Database) CleanupOldNNTPSessions(olderThan time.Duration) error {
-	cutoff := time.Now().Add(-olderThan)
-	query := `DELETE FROM nntp_sessions WHERE is_active = 0 AND last_activity < ?`
-	_, err := RetryableExec(db.mainDB, query, cutoff)
-	return err
-}
-
 // Helper function to generate random 16-character alphanumeric string
 func generateRandomString(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"

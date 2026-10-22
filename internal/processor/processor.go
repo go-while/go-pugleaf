@@ -104,15 +104,6 @@ var (
 	}
 )
 
-// Deprecated: use NewProcessorE. Kept for callers that still exit on error.
-func NewProcessor(db *database.Database, nntpPool *nntp.Pool, useShortHashLen int) *Processor {
-	proc, err := NewProcessorE(db, nntpPool, useShortHashLen)
-	if err != nil {
-		log.Fatalf("FATAL: %v", err)
-	}
-	return proc
-}
-
 // NewProcessorE creates a Processor and returns an error instead of exiting the process
 // when the hostname is missing or invalid or the history system cannot be initialized.
 // The hostname checks run before db is used.

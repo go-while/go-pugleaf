@@ -133,7 +133,12 @@ func w0Main(m *testing.M) int {
 		return 2
 	}
 
-	w0Srv = NewWebServer(db, config.NewDefaultConfig().Server.WEB, nil, false, false)
+	srv, err := NewWebServer(db, config.NewDefaultConfig().Server.WEB, nil, false, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	w0Srv = srv
 
 	code := m.Run()
 	if code == 0 {

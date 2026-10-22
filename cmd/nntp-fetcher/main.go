@@ -298,8 +298,8 @@ func main() {
 
 	fetchDoneChan := make(chan error, 1)
 
-	proc := processor.NewProcessor(db, pools[0], useShortHashLen) // Use first pool for import
-	if proc == nil {
+	proc, err := processor.NewProcessorE(db, pools[0], useShortHashLen) // Use first pool for import
+	if err != nil {
 		log.Fatalf("[FETCHER]: Failed to create processor: %v", err)
 	}
 	// Set up the date parser adapter to use processor's ParseNNTPDate

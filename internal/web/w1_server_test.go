@@ -257,7 +257,10 @@ func TestW1ServerNilCron(t *testing.T) {
 	// A server built like cmd/web -no-cronjobs: startup and the admin cron handlers must not panic.
 	cfg := config.NewDefaultConfig().Server.WEB
 	cfg.ListenPort = 0
-	srv := NewWebServer(w0DB(t), cfg, nil, true, true)
+	srv, err := NewWebServer(w0DB(t), cfg, nil, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), testShutdownWait())
 		defer cancel()
@@ -292,7 +295,10 @@ func TestW1ServerStartShutdown(t *testing.T) {
 	cfg := config.NewDefaultConfig().Server.WEB
 	cfg.ListenPort = 0
 	cfg.SSL = false
-	srv := NewWebServer(w0DB(t), cfg, nil, false, true)
+	srv, err := NewWebServer(w0DB(t), cfg, nil, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv.StartSessionCleanup()
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Start() }()
@@ -337,8 +343,11 @@ func TestW1ServerListenAddr(t *testing.T) {
 	cfg.ListenPort = 0
 	cfg.SSL = false
 	cfg.ListenAddr = "256.1.1.1"
-	srv := NewWebServer(w0DB(t), cfg, nil, false, true)
-	err := srv.Start()
+	srv, err := NewWebServer(w0DB(t), cfg, nil, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = srv.Start()
 	if err == nil || errors.Is(err, http.ErrServerClosed) || !strings.Contains(err.Error(), "256.1.1.1") {
 		t.Fatalf("Start on an unbindable address = %v, want a listen error naming it", err)
 	}
