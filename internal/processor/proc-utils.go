@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,10 +18,23 @@ var (
 	threeDigitTimezoneRe = regexp.MustCompile(`\s([+-])(\d{3})\s*$`)
 	yearRegex            = regexp.MustCompile(`\b(19[7-9]\d|20[0-9]\d)\b`)
 	monthRegex           = regexp.MustCompile(`\b(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b`)
-	dayRegex             = regexp.MustCompile(`\b([1-9]|[12]\d|3[01])\b`)
+	dayRegex             = regexp.MustCompile(`\b(0?[1-9]|[12]\d|3[01])\b`)
 	timeRegex            = regexp.MustCompile(`\b(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?\b`)
-	twoDigitYearRegex    = regexp.MustCompile(`\b([0-9]\d)\b`)
-	numericRegex         = regexp.MustCompile(`\b(\d{1,4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,4})\b`)
+	// day next to a month name: "3 Mar", "03-Mar", "Mar 3", "Nov10", "May 19th", "February 11,"
+	dayBeforeMonthRe = regexp.MustCompile(`(?i)\b(0?[1-9]|[12]\d|3[01])(?:\s?(?:st|nd|rd|th))?[-\s/.,]*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b`)
+	dayAfterMonthRe  = regexp.MustCompile(`(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?[-\s/.,]*(0?[1-9]|[12]\d|3[01])(?:\s?(?:st|nd|rd|th))?\b`)
+	ampmRe           = regexp.MustCompile(`(?i)\d\s*([ap])\.?m\b`)
+	numOffsetRe      = regexp.MustCompile(`(?:^|\s)([+-])(\d{2}):?(\d{2})\b`)
+	gmtOffsetRe      = regexp.MustCompile(`(?i)\b(?:GMT|UTC)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?\b`)
+	// "91May07 11:07 pm": YYMonDD as written by some BBS gateways
+	yyMonDDRe     = regexp.MustCompile(`^(\d{2})([A-Za-z]{3})(\d{2})\b`)
+	letterDigitRe = regexp.MustCompile(`([A-Za-z])(\d)|(\d)([A-Za-z])`)
+	// everything up to the time and an optional zone/offset: what remains of a date line
+	// that carries trailing junk ("<br>", " ,", "From: ...", a JIS escape)
+	dateCoreRe        = regexp.MustCompile(`^(.*?\d{1,2}:\d{2}(?::\d{2})?(?:\s*[ap]\.?m\.?)?(?:\s*(?:[+-]\d{4}|[+-]\d{2}:\d{2}|GMT\s*[+-]\d{1,2}|[A-Za-z]{1,5}))?)`)
+	zoneAbbrRe        = regexp.MustCompile(`(?i)\b(` + zoneAbbrAlternation() + `)\b`)
+	twoDigitYearRegex = regexp.MustCompile(`\b([0-9]\d)\b`)
+	numericRegex      = regexp.MustCompile(`\b(\d{1,4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,4})\b`)
 )
 
 var NNTPDateLayouts = []string{
@@ -541,32 +555,7 @@ func ParseNNTPDateStrict(dateStr string) (time.Time, bool) {
 		dateStr = strings.ReplaceAll(dateStr, "Sum, ", "Sun, ")
 	}
 
-	// Convert common timezone abbreviations to numeric offsets
-	// This handles the issue where Go's time.Parse() doesn't recognize abbreviations like EDT
-	timezoneMap := map[string]string{
-		"EDT": "-0400", // Eastern Daylight Time (UTC-4)
-		"EST": "-0500", // Eastern Standard Time (UTC-5)
-		"CDT": "-0500", // Central Daylight Time (UTC-5)
-		"CST": "-0600", // Central Standard Time (UTC-6)
-		"MDT": "-0600", // Mountain Daylight Time (UTC-6)
-		"MST": "-0700", // Mountain Standard Time (UTC-7)
-		"PDT": "-0700", // Pacific Daylight Time (UTC-7)
-		"PST": "-0800", // Pacific Standard Time (UTC-8)
-	}
-
-	// Replace timezone abbreviations with numeric offsets
-	for abbr, offset := range timezoneMap {
-		dateStr = strings.Replace(dateStr, " "+abbr, " "+offset, 1)
-	}
-
-	// Fix 3-digit timezone formats like +200 -> +0200
-	if match := threeDigitTimezoneRe.FindStringSubmatch(dateStr); len(match) == 3 {
-		sign := match[1]
-		digits := match[2]
-		// Convert 3-digit to 4-digit by adding leading zero
-		normalizedTz := fmt.Sprintf("%s0%s", sign, digits)
-		dateStr = threeDigitTimezoneRe.ReplaceAllString(dateStr, " "+normalizedTz)
-	}
+	dateStr = normalizeDateString(dateStr)
 
 	// Try a list of common NNTP date layouts
 	for _, layout := range NNTPDateLayouts {
@@ -576,8 +565,102 @@ func ParseNNTPDateStrict(dateStr string) (time.Time, bool) {
 		}
 	}
 
-	// If standard parsing failed, try bruteforce extraction
-	return bruteForceDateParseOK(dateStr)
+	// Trailing junk ("<br>", " ,", a glued "From:", an escape sequence) keeps an otherwise
+	// regular date from matching a layout: retry with the part up to the time and zone.
+	core := strings.TrimSpace(dateCoreRe.FindString(dateStr))
+	if core != "" && core != dateStr {
+		for _, layout := range NNTPDateLayouts {
+			t, err := time.Parse(layout, core)
+			if err == nil {
+				return t, true
+			}
+		}
+	}
+
+	// If standard parsing failed, try bruteforce extraction: the whole string first (a
+	// ctime-style year comes after the time and would be cut off), then the cut one.
+	t, ok := bruteForceDateParseOK(dateStr)
+	if !ok && core != "" && core != dateStr {
+		if tc, okc := bruteForceDateParseOK(core); okc {
+			return tc, true
+		}
+	}
+	return t, ok
+}
+
+// zoneOffsets maps time zone abbreviations (and the spelled-out US names) to the numeric
+// offset Go's layouts understand. time.Parse accepts any letters where a layout says MST
+// but silently treats an abbreviation it does not know as UTC, so every abbreviation that
+// shows up in archived Date headers must be listed here. Ambiguous ones (IST, AST in
+// Asia, BST in Bangladesh, ...) use the Usenet-dominant reading.
+var zoneOffsets = map[string]string{
+	// North America
+	"EST": "-0500", "EDT": "-0400", "CST": "-0600", "CDT": "-0500", "MST": "-0700", "MDT": "-0600",
+	"PST": "-0800", "PDT": "-0700", "AKST": "-0900", "AKDT": "-0800", "HST": "-1000", "HDT": "-0900",
+	"AST": "-0400", "ADT": "-0300", "NST": "-0330", "NDT": "-0230",
+	// Europe
+	"GMT": "+0000", "UTC": "+0000", "UT": "+0000", "WET": "+0000", "WEST": "+0100", "BST": "+0100",
+	"IST": "+0100", "CET": "+0100", "CEST": "+0200", "MET": "+0100", "MEST": "+0200", "MESZ": "+0200",
+	"MEZ": "+0100", "MES": "+0100", "MEZT": "+0200", "MDST": "+0200", "EET": "+0200", "EEST": "+0300",
+	"MSK": "+0300", "MSD": "+0400",
+	// Asia, Pacific
+	"JST": "+0900", "KST": "+0900", "HKT": "+0800", "SGT": "+0800", "AWST": "+0800", "ACST": "+0930",
+	"AEST": "+1000", "AEDT": "+1100", "NZST": "+1200", "NZDT": "+1300",
+}
+
+// zoneLongNames are the spelled-out zone names some Windows mailers wrote.
+var zoneLongNames = []struct{ name, offset string }{
+	{"Eastern Daylight Time", "-0400"}, {"Eastern Standard Time", "-0500"},
+	{"Central Daylight Time", "-0500"}, {"Central Standard Time", "-0600"},
+	{"Mountain Daylight Time", "-0600"}, {"Mountain Standard Time", "-0700"},
+	{"Pacific Daylight Time", "-0700"}, {"Pacific Standard Time", "-0800"},
+}
+
+func zoneAbbrAlternation() string {
+	names := make([]string, 0, len(zoneOffsets))
+	for n := range zoneOffsets {
+		names = append(names, n)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		return len(names[i]) > len(names[j]) || (len(names[i]) == len(names[j]) && names[i] < names[j])
+	})
+	return strings.Join(names, "|")
+}
+
+// normalizeDateString rewrites the spellings the layouts cannot express: runs of
+// whitespace, "91May07", spelled-out and abbreviated zone names (any case), "GMT+1" and
+// three-digit offsets all become the plain RFC 5322 forms.
+func normalizeDateString(dateStr string) string {
+	dateStr = strings.Join(strings.Fields(dateStr), " ")
+	if m := yyMonDDRe.FindStringSubmatch(dateStr); m != nil {
+		dateStr = m[3] + " " + m[2] + " " + m[1] + dateStr[len(m[0]):]
+	}
+	for _, z := range zoneLongNames {
+		if i := strings.Index(strings.ToLower(dateStr), strings.ToLower(z.name)); i >= 0 {
+			dateStr = dateStr[:i] + z.offset + dateStr[i+len(z.name):]
+			break
+		}
+	}
+	if m := gmtOffsetRe.FindStringSubmatchIndex(dateStr); m != nil {
+		sign := dateStr[m[2]:m[3]]
+		h := dateStr[m[4]:m[5]]
+		if len(h) == 1 {
+			h = "0" + h
+		}
+		mm := "00"
+		if m[6] >= 0 {
+			mm = dateStr[m[6]:m[7]]
+		}
+		dateStr = dateStr[:m[0]] + sign + h + mm + dateStr[m[1]:]
+	}
+	dateStr = zoneAbbrRe.ReplaceAllStringFunc(dateStr, func(abbr string) string {
+		return zoneOffsets[strings.ToUpper(abbr)]
+	})
+	// Fix 3-digit timezone formats like +200 -> +0200
+	if match := threeDigitTimezoneRe.FindStringSubmatch(dateStr); len(match) == 3 {
+		dateStr = threeDigitTimezoneRe.ReplaceAllString(dateStr, " "+match[1]+"0"+match[2])
+	}
+	return dateStr
 }
 
 func parseUnixEpochToRFC1123(epochStr string) time.Time {
@@ -626,6 +709,8 @@ func bruteForceDateParseOK(dateStr string) (time.Time, bool) {
 	// Remove common prefixes that might interfere
 	dateStr = strings.TrimPrefix(dateStr, "Date:")
 	dateStr = strings.TrimSpace(dateStr)
+	// "Nov10", "8pm", "2011Sr": letters glued to a number
+	dateStr = letterDigitRe.ReplaceAllString(dateStr, "$1$3 $2$4")
 
 	// Month name mappings for fuzzy matching
 	monthMap := map[string]time.Month{
@@ -661,12 +746,19 @@ func bruteForceDateParseOK(dateStr string) (time.Time, bool) {
 		}
 	}
 
-	// Pattern 3: Find day (1-31, but be flexible)
-	dayMatches := dayRegex.FindAllString(dateStr, -1)
-	for _, dayMatch := range dayMatches {
-		if d, err := strconv.Atoi(dayMatch); err == nil && d >= 1 && d <= 31 {
-			// Make sure this isn't the year we already found
-			if d != year && d != month {
+	// Pattern 3: the day. A number next to the month name wins ("3 Mar", "Mar 3", "Nov10");
+	// otherwise the first 1..31 that is not part of a time (next to a colon). A leading
+	// zero is allowed ("09-Jan-2007"), and a day may equal the month number ("3 Mar").
+	if m := dayBeforeMonthRe.FindStringSubmatch(dateStr); m != nil {
+		day, _ = strconv.Atoi(m[1])
+	} else if m := dayAfterMonthRe.FindStringSubmatchIndex(dateStr); m != nil && (m[3] >= len(dateStr) || dateStr[m[3]] != ':') {
+		day, _ = strconv.Atoi(dateStr[m[2]:m[3]])
+	} else {
+		for _, loc := range dayRegex.FindAllStringIndex(dateStr, -1) {
+			if (loc[0] > 0 && dateStr[loc[0]-1] == ':') || (loc[1] < len(dateStr) && dateStr[loc[1]] == ':') {
+				continue // hour, minute or second
+			}
+			if d, err := strconv.Atoi(dateStr[loc[0]:loc[1]]); err == nil && d >= 1 && d <= 31 {
 				day = d
 				break
 			}
@@ -684,6 +776,14 @@ func bruteForceDateParseOK(dateStr string) (time.Time, bool) {
 		if len(timeMatch) > 3 && timeMatch[3] != "" {
 			if s, err := strconv.Atoi(timeMatch[3]); err == nil && s >= 0 && s <= 59 {
 				sec = s
+			}
+		}
+		// "8:17 pm", "12:56 am"
+		if m := ampmRe.FindStringSubmatch(dateStr); m != nil && hour <= 12 {
+			if strings.EqualFold(m[1], "p") && hour < 12 {
+				hour += 12
+			} else if strings.EqualFold(m[1], "a") && hour == 12 {
+				hour = 0
 			}
 		}
 	}
@@ -808,6 +908,19 @@ func bruteForceDateParseOK(dateStr string) (time.Time, bool) {
 	// If we have at least year and month, create a date
 	if year >= 1970 && month >= 1 && month <= 12 {
 		parsedDate := time.Date(year, time.Month(month), day, hour, min, sec, 0, time.UTC)
+		// "31 Jan 1995 02:37 -0500": the wall clock is local, the offset makes it UTC
+		if m := numOffsetRe.FindStringSubmatch(dateStr); m != nil {
+			oh, _ := strconv.Atoi(m[2])
+			om, _ := strconv.Atoi(m[3])
+			if oh <= 14 && om < 60 {
+				off := time.Duration(oh)*time.Hour + time.Duration(om)*time.Minute
+				if m[1] == "+" {
+					parsedDate = parsedDate.Add(-off)
+				} else {
+					parsedDate = parsedDate.Add(off)
+				}
+			}
+		}
 
 		// Sanity check: parsed date cannot be more than 25 hours in the future
 		now := time.Now().UTC()
