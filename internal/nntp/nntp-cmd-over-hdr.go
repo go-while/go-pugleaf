@@ -149,10 +149,9 @@ func (c *ClientConnection) handleOver(args []string) error {
 		return err
 	}
 
-	groupDB, err := c.server.DB.GetGroupDB(c.currentGroup)
-	if err != nil {
-		log.Printf("[NNTP] OVER: group DB %s: %v", c.currentGroup, err)
-		return c.sendResponse(403, "Internal fault")
+	groupDB, ok, err := c.openCurrentGroupDB("OVER")
+	if !ok {
+		return err
 	}
 	defer groupDB.Return()
 
@@ -301,10 +300,9 @@ func (c *ClientConnection) handleHdr(args []string) error {
 		return err
 	}
 
-	groupDB, err := c.server.DB.GetGroupDB(c.currentGroup)
-	if err != nil {
-		log.Printf("[NNTP] HDR: group DB %s: %v", c.currentGroup, err)
-		return c.sendResponse(403, "Internal fault")
+	groupDB, ok, err := c.openCurrentGroupDB("HDR")
+	if !ok {
+		return err
 	}
 	defer groupDB.Return()
 

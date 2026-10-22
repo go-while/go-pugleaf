@@ -23,7 +23,8 @@ func (c *ClientConnection) handleLast(args []string) error {
 // moveCurrentArticle implements NEXT (next = true) and LAST (next = false).
 //
 // Replies in check order: arguments → 501 (delayed); no group → 412 (delayed, requireGroup);
-// current article invalid → 420 (delayed); then the ArticleCmdDelay throttle; group DB
+// current article invalid → 420 (delayed); then the ArticleCmdDelay throttle; a group the
+// server does not carry any more → 412 (openCurrentGroupDB); group DB
 // fault → 403; no next/previous visible article → 421/422 (no delay: the normal end of a
 // walk); other DB error → 403; else 223 n <message-id>. The current group and article
 // stay unchanged on every reply but 223 (§6.1.3.2, §6.1.4.2).
@@ -48,10 +49,9 @@ func (c *ClientConnection) moveCurrentArticle(args []string, next bool) error {
 		time.Sleep(c.server.ArticleCmdDelay) // ratelimit (DefaultArticleCmdDelay)
 	}
 
-	groupDB, err := c.server.DB.GetGroupDB(c.currentGroup)
-	if err != nil {
-		log.Printf("[NNTP] %s: group DB %s: %v", cmd, c.currentGroup, err)
-		return c.sendResponse(403, "Internal fault")
+	groupDB, ok, err := c.openCurrentGroupDB(cmd)
+	if !ok {
+		return err
 	}
 	defer groupDB.Return()
 

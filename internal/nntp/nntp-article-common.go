@@ -104,21 +104,20 @@ func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article 
 
 	case strings.HasPrefix(args[0], "<") && strings.HasSuffix(args[0], ">"):
 		messageID := args[0]
-		// (a) the currently selected group: cheap and needs no history
-		if c.currentGroup != "" {
-			groupDB, gerr := c.server.DB.GetGroupDB(c.currentGroup)
-			if gerr != nil {
-				log.Printf("[NNTP] %s: group DB %s: %v", messageID, c.currentGroup, gerr)
-			} else {
-				a, aerr := c.articleByMessageID(groupDB, messageID, stat)
-				groupDB.Return()
-				if aerr == nil {
-					return a, a.DBArtNum, true, nil
-				}
-				if !errors.Is(aerr, sql.ErrNoRows) {
-					log.Printf("[NNTP] %s in %s: %v", messageID, c.currentGroup, aerr)
-					return nil, 0, false, c.sendResponse(403, "Internal fault")
-				}
+		// (a) the currently selected group: cheap and needs no history. A group the server
+		// does not carry any more is skipped and the selection dropped (SEC-2 residual).
+		groupDB, inGroup, gerr := c.currentGroupDBForMsgID()
+		if gerr != nil {
+			log.Printf("[NNTP] %s: group DB %s: %v", messageID, c.currentGroup, gerr)
+		} else if inGroup {
+			a, aerr := c.articleByMessageID(groupDB, messageID, stat)
+			groupDB.Return()
+			if aerr == nil {
+				return a, a.DBArtNum, true, nil
+			}
+			if !errors.Is(aerr, sql.ErrNoRows) {
+				log.Printf("[NNTP] %s in %s: %v", messageID, c.currentGroup, aerr)
+				return nil, 0, false, c.sendResponse(403, "Internal fault")
 			}
 		}
 		// (b) a same-process arrival of the last ArrivalGrace: its groups, read directly (the
@@ -189,11 +188,11 @@ func (c *ClientConnection) resolveArticleArg(args []string, stat bool) (article 
 		}
 	}
 
-	// number lookup in the current group (no argument or the number form)
-	groupDB, err := c.server.DB.GetGroupDB(c.currentGroup)
-	if err != nil {
-		log.Printf("[NNTP] article %d: group DB %s: %v", num, c.currentGroup, err)
-		return nil, 0, false, c.sendResponse(403, "Internal fault")
+	// number lookup in the current group (no argument or the number form); the group is
+	// re-checked in the main DB before it is opened (openCurrentGroupDB: 412 when it is gone)
+	groupDB, ok, err := c.openCurrentGroupDB(fmt.Sprintf("article %d", num))
+	if !ok {
+		return nil, 0, false, err
 	}
 	defer groupDB.Return()
 	if stat {
@@ -284,14 +283,21 @@ func (c *ClientConnection) articleByMessageID(groupDB *database.GroupDB, message
 // Known limitation: hide is per group DB, and the processor returns only the first group
 // that has the message-id, so a crosspost that is hidden in that group but visible in
 // another one answers 430 instead of being served from the other group.
+//
+// Only a group the server still carries is opened (openSelectableGroupDB), so a history
+// entry naming a group that has been deactivated or deleted is a miss (ok false, 430) and
+// never re-creates its group database file (SEC-2 residual).
 func (c *ClientConnection) visibleInOtherGroup(article *models.Article, stat bool) (visible *models.Article, ok bool, err error) {
 	if len(article.NewsgroupsPtr) == 0 || article.NewsgroupsPtr[0] == nil {
 		return article, article.Hide == 0, nil
 	}
 	group := *article.NewsgroupsPtr[0]
-	groupDB, err := c.server.DB.GetGroupDB(group)
+	groupDB, found, err := c.openSelectableGroupDB(group)
 	if err != nil {
 		return nil, false, err
+	}
+	if !found {
+		return nil, false, nil
 	}
 	defer groupDB.Return()
 	visible, err = c.articleByMessageID(groupDB, article.MessageID, stat)
