@@ -180,6 +180,62 @@ Paths are under `internal/` unless they start with `cmd/`, `web/static`, `migrat
 | OPS-3 | `cmd/nntp-transfer/main.go:12,544-551,2934-2940`, `cmd/history-rebuild/main.go:12,75,97-101` | `net/http/pprof` is registered on the default mux, which `-web-port` serves on all interfaces (`http.ListenAndServe(":%d", nil)`); the pprof-only listener is localhost. history-rebuild's `-pprof` accepts any address. | OPEN |
 | OPS-4 | `cmd/history-rebuild/main.go:74-79`, `cmd/tcp2tor/main.go:177,252,503,551`, `cmd/web/main_functions.go:826`, `run_web*.sh`, `scripts.sh`, `run_test.sh`, `build_*.sh`, `.github/workflows/release.yml` | Flags that are ignored (`-useshorthashlen` says "No effect"; tcp2tor `-timeout` is stored and never read, the dialers use `proxy.Direct`). Scripts pass flags that don't exist or reference missing files. 11 build scripts use `-race`. The only workflow (`release.yml`, tags/dispatch) runs `go mod download/verify` and builds, with no test or vet step. | PARTLY: web `-data` is FIXED (WSH; `cmd/web/main.go:214`; `findOrphanedDatabases` keeps a `"data"` fallback for an empty argument). The rest is OPEN. |
 
+## Current state of the seed findings (checked against the code on 2026-10-22)
+
+Five independent read-throughs of the code at testing-001 152b4d4 verified each row above against the current
+sources and tests (the Status column above stays the 2026-10-08 snapshot). Nothing is open as originally written;
+what remains are residues and recorded decisions. "Test" names the test that pins the fix. Line numbers in the
+"Where" cells above are stale throughout; the pointers here name the function or file that holds the fix today.
+
+| Id | State | Where it lives now | Test |
+|----|----|----|----|
+| SEC-1 | fixed | XHDR/XOVER/OVER/HDR walk the DB rows in `OverviewRangeChunk` chunks, never the client range (`nntp-cmd-xhdr.go`, `nntp-cmd-xover.go`, `nntp-cmd-over-hdr.go`) | `TestOvrHugeRange` |
+| SEC-2 | fixed; residual closed 2026-10-22 | `selectableGroup` gates GROUP/LISTGROUP; intake drops unknown/inactive/reserved groups (`processor/intake.go`); the batch writer only UPDATEs `newsgroups`. Since 2026-10-22 every later command re-validates the selected or history-derived group before opening its database (merge dbfd74a: `openSelectableGroupDB` in `nntp-cmd-group.go`; the message-id paths answer 430 for a group that is gone). `GetGroupDB` itself still creates a file for any name; the guard is in the callers by design (~80 call sites, tests rely on it) | `TestGrpListGroupUnknownNoFile`, `TestE2ERejectUnknownGroup`, `TestIntakeProcGroupDecision`, `TestGrv*` |
+| SEC-3 | fixed | 512-octet command lines, 4 KiB hard cap, bounded article reader with drain bound (`nntp-server-lineio.go`); `MaxArtSize` and `newsgroups.max_art_size` are read. Accepted: a limit above 64 MiB is capped by the drain ceiling | `TestSessLineLimit`, `TestSessReadArticleBlock`, `TestE2EOversizeFeed` |
+| SEC-4 | fixed | `knownStatCommands` whitelist, unknown words counted as UNKNOWN and delayed (`nntp-server-statistics.go`, `nntp-server-cliconns.go`) | `TestSessStatsGrowth`, `TestSessUnknownCommands` |
+| SEC-5 | fixed as mechanisms; defaults by decision | second AUTHINFO 502, 483 with `-plaintextauth refuse`, delayed 481, `-readauth`, STARTTLS, per-user `-enforce-user-maxconns`. Anonymous reading and plaintext AUTHINFO stay the shipped defaults. The unused `nntp_sessions` helpers were removed 2026-10-22 | `TestAuthSecondAuthinfo`, `TestAuthFailureDelay`, `TestSessReadRequiresAuth`, `TestSessPlaintextPolicy` |
+| SEC-6 | fixed | password/deactivate/delete call `NNTPAuthCache.RemoveUserID`; every cache hit is bound to the stored bcrypt hash, so the old password dies in any process (`db_nntp_users.go`, `nntp_auth_cache.go`) | `TestAuthCacheOldPassword`, `TestNSHAuthOldPasswordRejected` |
+| SEC-7 | fixed | LISTGROUP streams numbers via `NNTPArticleNumbers` in chunks, no per-call log. `GetOverviews` (unbounded) has no live caller | `TestGrpListGroupMemory` |
+| BUG-1 | fixed | `GetArticleByNum` sets `DBArtNum`; ARTICLE/HEAD/BODY/STAT n set the current article | `TestNSHReadByNumSetsDBArtNum`, `TestArtCurrentArticle` |
+| BUG-2 | fixed | range reads page with `LIMIT` and loop until the range ends; a DB fault closes the connection instead of truncating | `TestOvrFullRange`, `TestOvhLargeRange` |
+| BUG-3 | fixed by configuration | `-articledelay`/`-groupdelay` default 25 ms, `-errordelay` 1 s, each sleep guarded; the 15 s tick is the local430 cleanup cadence only | `TestArtNoDelay` |
+| BUG-4 | fixed | GROUP reports real watermarks and sets the current article; LISTGROUP full 211 line, selects, honours the range; LIST ACTIVE low = low_water, status y/m, or n when this client may not post (decision 14) | `TestGrpGroupSeeded`, `TestGrpListGroup`, `TestGrpListActive` |
+| BUG-5 | fixed | `sanitizeOverviewField` on every field, no trailing TAB; local `Xref:` via `-xref off|partial|full` | `TestOvrSanitizing`, `TestOvrLineFormat`, `TestE2EXrefBinary` |
+| BUG-6 | fixed | `dataBlockWriter` dot-stuffs header and body lines alike; empty body and empty headers_json handled | `TestArtByteExact` |
+| BUG-7 | fixed | too-large replies in sync, 400 + close only past the drain bound; QUIT not logged as error; `Stop` closes clients and waits; one local430 goroutine with a stop path; TLS cert loaded before any listener | `TestIntkTooLargeReplies`, `TestSessQuit`, `TestSessStop`, `TestSessStartErrors` |
+| BUG-8 | fixed for same-process arrivals; cross-process = T-nntp-article-1 | `Local430.Remove` on every accepted article, 10 s arrival grace, `-post-commit-wait`; TTL 60 s. An article stored by another process (fetcher) can still answer 430 for up to 60 s: accepted limitation (user decision 2026-10-11) | `TestArtLocal430`, `TestArtArrivalGrace`; marker `T-nntp-article-1` |
+| BUG-9 | fixed | idle timeout 3 min (`-idletimeout`), deadlines refreshed per command and per flush | `TestSessIdleTimeout` |
+| FN-1 | fixed | stub files, dead `AuthManager` methods, `capabilities` field and the stale README are gone; the `ServerStats` getters feed the `[NNTP] stats:` line at Stop since 2026-10-22 | `TestSessServerStats` |
+| RFC-1 | fixed; NEWNEWS by decision | DATE, NEXT, LAST, NEWGROUPS, LIST wildmat/OVERVIEW.FMT/HEADERS, OVER, HDR, MODE STREAM, CHECK, STARTTLS exist. NEWNEWS answers 500 and is not advertised (decision D3 of `nntp-rfc-commands`: no `imported_at` index, `NEWNEWS *` would open every group DB) | `TestRfcDispatch`, `TestGrpNewNews` |
+| RFC-2 | fixed | CAPABILITIES: VERSION 2, READER, IMPLEMENTATION (added 2026-10-22), AUTHINFO USER only when allowed, OVER MSGID, HDR, LIST ..., POST/IHAVE/STREAMING only when posting is allowed, STARTTLS conditional; TAKETHIS not listed | `TestSessCapabilities`, `TestRfcCapabilities` |
+| RFC-3 | fixed | `resolveArticleArg`: 412/420/423/501 per RFC 3977 §6.2; a hit sets the current article | `TestArtCurrentArticle`, `TestArtInvalidNumbers` |
+| RFC-4 | fixed | 201 greeting when posting is not allowed, hostname from the config; MODE READER 200/201 | `TestSessGreeting`, `TestSessMode` |
+| RFC-5 | fixed | unknown MODE/AUTHINFO 501, POST not permitted 440, IHAVE permanent rejects 437 (436 only temporary) | `TestSessMode`, `TestAuthArgErrors`, `TestAuthPostingGates`, `TestE2ERejectMissingNewsgroups` |
+| RFC-6 | fixed; one detail by decision | XHDR: 501 without header, message-id form, bad range 501 (rate limited), empty range 423, any header served. An absent header is sent as the bare article number, not `(none)` (hardening decision 3) | `TestOvrXhdr` |
+| INT-1 | fixed | `injectProtoArticle`: Message-ID/Date/Injection-Date/Injection-Info, `!.POSTED!` Path; feeds get `!.SEEN.<ip>!` | `TestE2EInjectionPathColumn`, `TestIntkInjectProtoArticle` |
+| INT-2 | fixed | dedupe and failure codes per RFC 3977/4644; in-flight TAKETHIS answers 439 | `TestE2EIHaveDuplicateNotInHistory`, `TestE2EInFlightRetry` |
+| INT-3 | partly, by decision D10 | NNTP intake is strict (`ParseNewsgroups`, `ParseNNTPDateStrict`). Bulk mode (fetcher, mbox-importer, rslight importer, web post queue) keeps `ParseNNTPDate` (1990-01-01 fallback) and the `[,;:\s]+` group split with the lax name regex | `TestIntakeProcParseNNTPDateStrict`, `TestE2EDateChecks` |
+| INT-4 | partly, by decision | Control refused, moderated groups need `Approved:`, foreign Xref stripped on intake and dropped on relay, local Xref via `-xref`. Supersedes/cancel processing and `control.*` filing are not implemented (not planned) | `TestE2EControlXref`, `TestXrefModes`, `TestXrefStoredLineDropped` |
+| INT-5 | fixed | `bytes` = wire size with CRLF (`WireArticleSize`); monotonic article numbers via `article_num_seq` (migration 0010) | `TestCliCmdBytesCRLF`, `TestAdfBatchNumbersNotReused` |
+| INT-6 | fixed | history add gated on a NULL-safe `GetIntakeGroup` lookup; the batch writer never inserts `newsgroups` rows | `TestIntakeDBHistoryForNullHierarchyRow`, `TestE2EHistoryAfterIntake` |
+| INT-7 | fixed | `buildWebPostHeaders`: full RFC 5536 block with Injection-Info/Injection-Date, dropped again on the provider POST path | `TestAdfPostHeaderBuilder`, `TestAdfPostHeadersDropInjectionOnPost` |
+| CLI-1 | fixed | one Path line via `EnsureLocalPathPrefix`, headers relayed verbatim (`RelayHeaders`), byte-exact dot-stuffed bodies; the `.TX` fallback for a stored article without Path was removed 2026-10-22 | `TestCliHdrRelayVerbatim`, `TestCliCmdTakeThisWire` |
+| CLI-2 | fixed | 411 on GROUP returns `ErrNewsgroupNotFound` before any use of the group info | `TestCliCmdXHdrStreamed411` |
+| CLI-3 | fixed | `deadlineConn` idle deadlines (2 min default), `ConnectTimeout` on connect/greeting/AUTHINFO/TLS/SOCKS, `abortConnect` closes on failure | `TestCliConn*` |
+| CLI-4 | fixed | `syncPipeline` seeds the demuxer's `LastID` after AUTHINFO/MODE STREAM | `TestCliConnDemuxerAfterAuth` |
+| CLI-5 | fixed | 201 greeting, 281 after USER, 480 → `ErrAuthRequired`, 430/451 reachable, 401 MODE-READER retry | `TestCliCmdGreeting201`, `TestCliCmdAuth281AfterUser`, `TestCliCmdSelectGroup480`, `TestCliCmdNotFoundCodes`, `TestCliCmdPost401ModeReader` |
+| CLI-6 | fixed by removal | `PeeringManager` and `cmd/test-nntp` deleted (3aa6790); the wildmat matcher stays in `nntp-peering-pattern.go` | `nntp-peering-pattern_test.go` |
+| WEB-1 | fixed; stop by decision | cron create and enable need `-edit-cronjobs`; disabling and stopping a job stay admin-only by decision D7 of `audit-delta-fixes` | `TestAdfCron*` |
+| WEB-2 | fixed | preview is plain JSON text rendered with `textContent`; CSP on every response. The web preview route is outside `requireAPIEnabled` because the thread tree on normal pages uses it | `TestAdfXSSPreviewIsPlainJSON`, `TestAdfXSSThreadTreeJSUsesTextContent`, `TestAdfXSSCSPHeader` |
+| OPS-1 | mostly fixed | re-open globals, divider stop path, background loops: fixed. Library code no longer exits except `history/history.go` (frozen by the author, Q3) and `config/config.go` (exempt, runs before anything is open); the web trusted-proxy check returns an error and the deprecated `processor.NewProcessor` wrapper is gone since 2026-10-22 | `TestAdfReopenAfterFailureAndShutdown`, `TestAdfBatchLoopsStopOnShutdown` |
+| OPS-2 | fixed | no embedded NNTP server in `cmd/web`; nntpmgr prints no hashes; tests use `t.TempDir()` | `cmd/web/adf_web_test.go` |
+| OPS-3 | fixed | pprof only on loopback without `cmdline`; nntp-transfer UI on `-web-bind` (default 127.0.0.1) | `TestTxDbgPprofMuxNoCmdline`, `TestHRPprofAddr` |
+| OPS-4 | fixed | `-useshorthashlen` honoured or warned, tcp2tor `-timeout` bounds the SOCKS dial, scripts repaired or removed, no `-race` in build scripts, `release.yml` vets and tests before building | `TestAdfWebCmdShortHashLen`, `TestAdfTorDialTimeout` |
+
+Not in the table (new findings of the slices, `A-*`): closed by the plans listed in `BUGS.md`, except the deferred
+ones there (history fail-stop exits Q3, destructive root scripts A-ops-13, update pipeline A-ops-14, `php/` pages
+A-ops-16, nonce-based CSP Q5), all user decisions. The one open `knownBug` marker is `T-nntp-article-1`.
+
 ## Already covered by merged plans
 
 See the plan's Context section "Already covered by merged plans" for the WSH, LO and FU id lists and the

@@ -220,6 +220,9 @@ func (db *Database) MainDBGetAllNewsgroups() ([]*models.Newsgroup, error) {
 const query_MainDBGetNewsgroup = `SELECT id, name, description, COALESCE(last_article, 0), COALESCE(message_count, 0), active, expiry_days, max_articles, max_art_size, COALESCE(high_water, 0), COALESCE(low_water, 1), COALESCE(status, 'y'), COALESCE(hierarchy, ''), created_at FROM newsgroups WHERE name = ?`
 
 func (db *Database) MainDBGetNewsgroup(newsgroup string) (*models.Newsgroup, error) {
+	if db == nil || db.mainDB == nil {
+		return nil, fmt.Errorf("MainDBGetNewsgroup %s: main database is not open", newsgroup)
+	}
 	rows, err := RetryableQuery(db.mainDB, query_MainDBGetNewsgroup, newsgroup)
 	if err != nil {
 		log.Printf("MainDBGetNewsgroup: Failed to query newsgroup '%s': %v", newsgroup, err)
