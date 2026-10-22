@@ -51,10 +51,9 @@ func (c *ClientConnection) handleXHdr(args []string) error {
 		return c.sendResponse(423, "No articles in that range")
 	}
 
-	groupDB, err := c.server.DB.GetGroupDB(c.currentGroup)
-	if err != nil {
-		log.Printf("[NNTP] XHDR: group DB %s: %v", c.currentGroup, err)
-		return c.sendResponse(403, "Internal fault")
+	groupDB, ok, err := c.openCurrentGroupDB("XHDR")
+	if !ok {
+		return err
 	}
 	defer groupDB.Return()
 
@@ -118,12 +117,7 @@ func (c *ClientConnection) handleXHdr(args []string) error {
 // Xref is the local value (xrefFor): the current group and the article's number there when
 // it was found in the current group, else no serving group (as HEAD by message-id).
 func (c *ClientConnection) xhdrByMessageID(field, messageID string) error {
-	lookup := func(group string) (int64, string, bool, error) {
-		groupDB, err := c.server.DB.GetGroupDB(group)
-		if err != nil {
-			return 0, "", false, err
-		}
-		defer groupDB.Return()
+	lookupIn := func(groupDB *database.GroupDB) (int64, string, bool, error) {
 		num, value, err := c.server.DB.NNTPHeaderByMessageID(groupDB, field, messageID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, "", false, nil
@@ -133,14 +127,32 @@ func (c *ClientConnection) xhdrByMessageID(field, messageID string) error {
 		}
 		return num, value, true, nil
 	}
+	// A group the server does not carry any more is a miss, not a new group database file
+	// (openSelectableGroupDB, SEC-2 residual).
+	lookup := func(group string) (int64, string, bool, error) {
+		groupDB, found, err := c.openSelectableGroupDB(group)
+		if err != nil || !found {
+			return 0, "", false, err
+		}
+		defer groupDB.Return()
+		return lookupIn(groupDB)
+	}
 
 	var value string
 	var currentNum int64 // the article's number in the current group, 0 when found elsewhere
 	found := false
-	if c.currentGroup != "" {
-		n, v, ok, err := lookup(c.currentGroup)
-		if err != nil {
-			log.Printf("[NNTP] XHDR %s in %s: %v", messageID, c.currentGroup, err)
+	// the selected group first; a selection the server does not carry any more is dropped
+	// and the lookup goes on with its other sources (currentGroupDBForMsgID)
+	groupDB, inGroup, err := c.currentGroupDBForMsgID()
+	if err != nil {
+		log.Printf("[NNTP] XHDR %s in %s: %v", messageID, c.currentGroup, err)
+		return c.sendResponse(403, "Internal fault")
+	}
+	if inGroup {
+		n, v, ok, lerr := lookupIn(groupDB)
+		groupDB.Return()
+		if lerr != nil {
+			log.Printf("[NNTP] XHDR %s in %s: %v", messageID, c.currentGroup, lerr)
 			return c.sendResponse(403, "Internal fault")
 		}
 		value, found = v, ok

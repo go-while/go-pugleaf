@@ -38,10 +38,9 @@ func (c *ClientConnection) handleXOver(args []string) error {
 		return c.sendResponse(423, "No articles in that range")
 	}
 
-	groupDB, err := c.server.DB.GetGroupDB(c.currentGroup)
-	if err != nil {
-		log.Printf("[NNTP] XOVER: group DB %s: %v", c.currentGroup, err)
-		return c.sendResponse(403, "Internal fault")
+	groupDB, ok, err := c.openCurrentGroupDB("XOVER")
+	if !ok {
+		return err
 	}
 	defer groupDB.Return()
 
