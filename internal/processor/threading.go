@@ -220,14 +220,12 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 	}
 
 	if bulkmode {
-		// the bulk paths keep the lenient parser (archives, D10)
-		article.DateSent = ParseNNTPDate(article.DateString)
-		if article.DateSent.IsZero() {
-			// archives: a secondary date header (Posted, Date-Received, ...) stands in
-			if t, name := fallbackDate(article.Headers); !t.IsZero() {
-				log.Printf("[HDR-DATE] Article '%s': Date '%s' unreadable, using %s '%s'", article.MessageID, article.DateString, name, common.GetHeaderFirst(article.Headers, name))
-				article.DateSent = t
-			}
+		// the bulk paths keep the lenient parser (archives, D10); an unreadable or
+		// pre-Usenet Date is taken from Posted, Date-Received, ... when one is usable
+		var dateFrom string
+		article.DateSent, dateFrom = bulkArticleDate(article.DateString, article.Headers)
+		if dateFrom != "" {
+			log.Printf("[HDR-DATE] Article '%s': Date '%s' unusable, using %s '%s'", article.MessageID, article.DateString, dateFrom, common.GetHeaderFirst(article.Headers, dateFrom))
 		}
 		if article.DateSent.IsZero() {
 			log.Printf("[ERROR-HDR] Article '%s' no valid date... headerDate='%v' dateString='%s'", article.MessageID, article.DateSent, article.DateString)

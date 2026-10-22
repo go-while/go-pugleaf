@@ -669,17 +669,43 @@ func normalizeDateString(dateStr string) string {
 // era, then the trace dates of later software. Each value goes through the same parser.
 var fallbackDateHeaders = []string{"posted", "date-received", "nntp-posting-date", "injection-date", "x-original-date"}
 
-// fallbackDate returns the first readable secondary date header and its name, or the zero
-// time and "" when none of fallbackDateHeaders parses.
+// minArchiveDate is the earliest date an archive article can really carry: Usenet started
+// in 1980. Earlier values come from broken clocks, typically ctime(-1) written by utzoo-era
+// B-news sites as "Wed, 31-Dec-69 18:59:59 EDT" into Date and Posted, so bulk intake treats
+// them like an unreadable Date and prefers a fallback header (Date-Received is usually sane).
+var minArchiveDate = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// archiveDateUsable reports whether t is a parsed date from the Usenet era.
+func archiveDateUsable(t time.Time) bool {
+	return !t.IsZero() && !t.Before(minArchiveDate)
+}
+
+// fallbackDate returns the first usable secondary date header and its name, or the zero
+// time and "" when none of fallbackDateHeaders parses to a date from the Usenet era.
 func fallbackDate(headers map[string][]string) (time.Time, string) {
 	for _, name := range fallbackDateHeaders {
 		if v := common.GetHeaderFirst(headers, name); v != "" {
-			if t, ok := ParseNNTPDateStrict(v); ok {
+			if t, ok := ParseNNTPDateStrict(v); ok && archiveDateUsable(t) {
 				return t, name
 			}
 		}
 	}
 	return time.Time{}, ""
+}
+
+// bulkArticleDate picks the date of a bulk-mode (archive) article: the lenient reading of
+// the Date header when it is usable, else the first usable fallback header (its name is
+// returned). A pre-Usenet Date with no fallback is kept as parsed (name ""), so the article
+// is still filed; only an unreadable Date without any fallback yields the zero time.
+func bulkArticleDate(dateString string, headers map[string][]string) (time.Time, string) {
+	t := ParseNNTPDate(dateString)
+	if archiveDateUsable(t) {
+		return t, ""
+	}
+	if ft, name := fallbackDate(headers); !ft.IsZero() {
+		return ft, name
+	}
+	return t, ""
 }
 
 func parseUnixEpochToRFC1123(epochStr string) time.Time {

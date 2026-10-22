@@ -1,6 +1,9 @@
 package processor
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestDateParseArchiveShapes pins ParseNNTPDateStrict on Date header shapes taken from
 // real archives (1986-2016: archive.org Atari groups, UAT exports, Japanese and European
@@ -107,10 +110,45 @@ func TestDateParseFallbackHeaders(t *testing.T) {
 		{map[string][]string{"injection-date": {"Sat, 11 Oct 2026 12:00:00 +0000"}, "x-original-date": {"Mon Oct 27 11:22:58 1986"}}, "2026-10-11 12:00:00", "injection-date"},
 		{map[string][]string{"date": {"garbage"}}, "0001-01-01 00:00:00", ""},
 		{nil, "0001-01-01 00:00:00", ""},
+		// utzoo-era ctime(-1) in Posted is skipped like garbage; Date-Received is real
+		{map[string][]string{"posted": {"Wed Dec 31 18:59:59 1969"}, "date-received": {"Sat, 8-Aug-87 11:47:19 EDT"}}, "1987-08-08 15:47:19", "date-received"},
+		{map[string][]string{"posted": {"Wed Dec 31 18:59:59 1969"}}, "0001-01-01 00:00:00", ""},
 	} {
 		got, name := fallbackDate(tc.headers)
 		if g := got.UTC().Format("2006-01-02 15:04:05"); g != tc.want || name != tc.wantName {
 			t.Errorf("fallbackDate(%v) = %s via %q, want %s via %q", tc.headers, g, name, tc.want, tc.wantName)
 		}
+	}
+}
+
+// TestDateParseBulkArticleDate: the bulk-mode date choice. A Date from the Usenet era wins;
+// a pre-1980 Date (ctime(-1) from a 1987 B-news site, as found in comp.lang.c articles 1-18
+// of the utzoo archive) or an unreadable one yields to the first usable fallback header; a
+// pre-1980 Date without a fallback is kept so the article is still filed.
+func TestDateParseBulkArticleDate(t *testing.T) {
+	epochMinusOne := "Wed, 31-Dec-69 18:59:59 EDT"
+	for _, tc := range []struct {
+		date     string
+		headers  map[string][]string
+		want     string
+		wantName string
+	}{
+		{"Tue, 28 Oct 1986 19:22:41 -0500", map[string][]string{"date-received": {"Sat, 8-Aug-87 11:47:19 EDT"}}, "1986-10-29 00:22:41", ""},
+		{"Tue, 28 Oct 1986 19:22:41 -0500", nil, "1986-10-29 00:22:41", ""},
+		{"Tue, 1 Jan 1980 00:00:00 +0000", map[string][]string{"date-received": {"Sat, 8-Aug-87 11:47:19 EDT"}}, "1980-01-01 00:00:00", ""},
+		{epochMinusOne, map[string][]string{"posted": {"Wed Dec 31 18:59:59 1969"}, "date-received": {"Sat, 8-Aug-87 11:47:19 EDT"}}, "1987-08-08 15:47:19", "date-received"},
+		{"Mon, 31 Dec 1979 23:59:59 +0000", map[string][]string{"nntp-posting-date": {"Sat, 11 Oct 2026 12:00:00 +0000"}}, "2026-10-11 12:00:00", "nntp-posting-date"},
+		{epochMinusOne, nil, "1969-12-31 22:59:59", ""},
+		{"garbage", map[string][]string{"posted": {"Mon Oct 27 11:22:58 1986"}}, "1986-10-27 11:22:58", "posted"},
+		{"garbage", nil, "0001-01-01 00:00:00", ""},
+		{"", map[string][]string{"date-received": {"Sat, 8-Aug-87 11:47:19 EDT"}}, "1987-08-08 15:47:19", "date-received"},
+	} {
+		got, name := bulkArticleDate(tc.date, tc.headers)
+		if g := got.UTC().Format("2006-01-02 15:04:05"); g != tc.want || name != tc.wantName {
+			t.Errorf("bulkArticleDate(%q, %v) = %s via %q, want %s via %q", tc.date, tc.headers, g, name, tc.want, tc.wantName)
+		}
+	}
+	if !minArchiveDate.Equal(time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("minArchiveDate = %v, want 1980-01-01 UTC", minArchiveDate)
 	}
 }
