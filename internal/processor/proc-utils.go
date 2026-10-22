@@ -16,7 +16,7 @@ var (
 	//separatorRegex       = regexp.MustCompile(`[,;:\s]+`)
 	parenRe              = regexp.MustCompile(`\s*\([^)]*\)$`)
 	threeDigitTimezoneRe = regexp.MustCompile(`\s([+-])(\d{3})\s*$`)
-	yearRegex            = regexp.MustCompile(`\b(19[7-9]\d|20[0-9]\d)\b`)
+	yearRegex            = regexp.MustCompile(`\b(19\d\d|20\d\d)\b`)
 	monthRegex           = regexp.MustCompile(`\b(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b`)
 	dayRegex             = regexp.MustCompile(`\b(0?[1-9]|[12]\d|3[01])\b`)
 	timeRegex            = regexp.MustCompile(`\b(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?\b`)
@@ -521,9 +521,10 @@ func multiLineHeaderToStringHTML(vals []string) string {
 var MaxFutureDate = 24 * time.Hour
 
 // ParseNNTPDate parses an NNTP date string to time.Time, handling common NNTP quirks.
-// It is lenient: a date the brute-force parser cannot fully read gets its missing parts
-// defaulted (1990-01-01 12:00 UTC at worst), and the rslight import falls back to Unix
-// epoch strings. Its results are unchanged by ParseNNTPDateStrict (K1).
+// It is lenient about the shape (330 layouts, then brute force on any string that holds
+// a year and a month; a missing day or time defaults to the 1st and noon) but invents
+// nothing: without a readable year and month it returns the zero time. The rslight
+// import falls back to Unix epoch strings.
 func ParseNNTPDate(dateStr string) time.Time {
 	t, ok := ParseNNTPDateStrict(dateStr)
 	if ok || !t.IsZero() {
@@ -663,6 +664,24 @@ func normalizeDateString(dateStr string) string {
 	return dateStr
 }
 
+// fallbackDateHeaders are tried, in order, when the Date header is missing or unreadable
+// on a bulk-mode (archive) article: the B-news "Posted:" and "Date-Received:" of the utzoo
+// era, then the trace dates of later software. Each value goes through the same parser.
+var fallbackDateHeaders = []string{"posted", "date-received", "nntp-posting-date", "injection-date", "x-original-date"}
+
+// fallbackDate returns the first readable secondary date header and its name, or the zero
+// time and "" when none of fallbackDateHeaders parses.
+func fallbackDate(headers map[string][]string) (time.Time, string) {
+	for _, name := range fallbackDateHeaders {
+		if v := common.GetHeaderFirst(headers, name); v != "" {
+			if t, ok := ParseNNTPDateStrict(v); ok {
+				return t, name
+			}
+		}
+	}
+	return time.Time{}, ""
+}
+
 func parseUnixEpochToRFC1123(epochStr string) time.Time {
 	// Parse the epoch string to int64
 	epoch, err := strconv.ParseInt(epochStr, 10, 64)
@@ -694,9 +713,8 @@ func bruteForceDateParse(dateStr string) time.Time {
 	return t
 }
 
-// bruteForceDateParseOK is bruteForceDateParse that also reports whether the year and
-// the month were actually found in the string (ok is false when either was defaulted,
-// or when the result is zero).
+// bruteForceDateParseOK is bruteForceDateParse that also reports success: ok is false,
+// with the zero time, when the string holds no year (1900-2099) or no month.
 func bruteForceDateParseOK(dateStr string) (time.Time, bool) {
 	if dateStr == "" {
 		return time.Time{}, false
@@ -883,19 +901,14 @@ func bruteForceDateParseOK(dateStr string) (time.Time, bool) {
 		}
 	}
 
-	// year and month found in the string (before the fallbacks below default them)
-	yearFound := year >= 1970 && year <= 2099
-	monthFound := month >= 1 && month <= 12
-
-	// Final validation and fallbacks
-	if year < 1970 || year > 2099 {
-		year = 1990 // Default fallback year
-	}
-	if month < 1 || month > 12 {
-		month = 1 // Default to January
+	// No year or no month in the string means no date: nothing is invented (the old
+	// "1990-01-01 12:00" default filed unreadable archive dates on a day nobody chose;
+	// the bulk intake tries the secondary date headers instead, see fallbackDate).
+	if year < 1900 || year > 2099 || month < 1 || month > 12 {
+		return time.Time{}, false
 	}
 	if day < 1 || day > 31 {
-		day = 1 // Default to 1st
+		day = 1 // month precision ("Oct 86")
 	}
 
 	// Validate day against month
@@ -905,8 +918,7 @@ func bruteForceDateParseOK(dateStr string) (time.Time, bool) {
 		day = 30
 	}
 
-	// If we have at least year and month, create a date
-	if year >= 1970 && month >= 1 && month <= 12 {
+	{
 		parsedDate := time.Date(year, time.Month(month), day, hour, min, sec, 0, time.UTC)
 		// "31 Jan 1995 02:37 -0500": the wall clock is local, the offset makes it UTC
 		if m := numOffsetRe.FindStringSubmatch(dateStr); m != nil {
@@ -931,8 +943,6 @@ func bruteForceDateParseOK(dateStr string) (time.Time, bool) {
 			return time.Time{}, false
 		}
 
-		return parsedDate, yearFound && monthFound
+		return parsedDate, true
 	}
-
-	return time.Time{}, false
 }

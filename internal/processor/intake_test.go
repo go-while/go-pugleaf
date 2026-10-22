@@ -39,7 +39,6 @@ func iprHead(msgid string, extra ...string) []string {
 }
 
 func TestIntakeProcParseNNTPDateStrict(t *testing.T) {
-	fallback := time.Date(1990, 1, 1, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		in     string
 		ok     bool
@@ -51,11 +50,10 @@ func TestIntakeProcParseNNTPDateStrict(t *testing.T) {
 		{"Mon, 2 Jan 2006 15:04:05 EST", true, time.Date(2006, 1, 2, 20, 4, 5, 0, time.UTC), time.Date(2006, 1, 2, 20, 4, 5, 0, time.UTC)},
 		// brute force with year and month found: ok
 		{"sometime 7 March 1999 at 10:20", true, time.Date(1999, 3, 7, 10, 20, 0, 0, time.UTC), time.Date(1999, 3, 7, 10, 20, 0, 0, time.UTC)},
-		// defaulted year/month: !ok, the lenient parser keeps its old fallback
-		{"garbage", false, time.Time{}, fallback},
-		// "7pm" is split into "7 pm" since the archive-corpus fixes, so the 7 is read as a day
-		{"Tuesday 7pm", false, time.Time{}, time.Date(1990, 1, 7, 12, 0, 0, 0, time.UTC)},
-		{"March", false, time.Time{}, time.Date(1990, 3, 1, 12, 0, 0, 0, time.UTC)},
+		// no year or no month: !ok, and the lenient parser invents nothing either
+		{"garbage", false, time.Time{}, time.Time{}},
+		{"Tuesday 7pm", false, time.Time{}, time.Time{}},
+		{"March", false, time.Time{}, time.Time{}},
 		{"", false, time.Time{}, time.Time{}},
 	} {
 		got, ok := ParseNNTPDateStrict(tc.in)

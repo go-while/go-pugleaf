@@ -50,7 +50,7 @@ func TestDateParseArchiveShapes(t *testing.T) {
 		// am/pm
 		{"3/22/2005 1:04:26 PM", "2005-03-22 13:04:26", true},
 		{"6/12/2005 10:23:25 PM", "2005-06-12 22:23:25", true},
-		{"Apr 1, 8:17 pm", "1990-04-01 20:17:00", false},
+		{"Apr 1, 8:17 pm", "0001-01-01 00:00:00", false}, // no year: no date
 		{"91May07 12:56 am", "1991-05-07 00:56:00", true},
 		{"91Apr30 8:58 pm EST", "1991-05-01 01:58:00", true},
 		// trailing junk
@@ -69,7 +69,9 @@ func TestDateParseArchiveShapes(t *testing.T) {
 		{"Mon Oct 27 11:22:58 1986", "1986-10-27 11:22:58", true},
 		{"10 Mar 86 1:36:00 EST", "1986-03-10 06:36:00", true},
 		{"Sat, 1 Jan 1983", "1983-01-01 00:00:00", true},
-		{"Date: unknown", "1990-01-01 12:00:00", false},
+		{"Date: unknown", "0001-01-01 00:00:00", false},
+		{"Fri, 13 Feb 1969 23:59:59 GMT", "1969-02-13 23:59:59", true},
+		{"26 Mar 1962 12:00:00 GMT (sic)", "1962-03-26 12:00:00", true},
 		{"08-Nov-2011Sr. Biology Professional", "2011-11-08 12:00:00", true},
 		{"18th August 2009", "2009-08-18 12:00:00", true},
 	} {
@@ -88,5 +90,27 @@ func TestDateParseArchiveShapes(t *testing.T) {
 	// the strict flag stays false for a date without a readable year and month
 	if _, ok := ParseNNTPDateStrict("14th century"); ok {
 		t.Error("\"14th century\" reported as a good parse")
+	}
+}
+
+// TestDateParseFallbackHeaders: an archive article whose Date is unreadable takes its
+// date from Posted (B-news), Date-Received or the trace headers, in that order.
+func TestDateParseFallbackHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		headers  map[string][]string
+		want     string
+		wantName string
+	}{
+		{map[string][]string{"date": {"garbage"}, "posted": {"Mon Oct 27 11:22:58 1986"}, "date-received": {"Tue, 28-Oct-86 19:22:41 EST"}}, "1986-10-27 11:22:58", "posted"},
+		{map[string][]string{"date-received": {"Tue, 28-Oct-86 19:22:41 EST"}}, "1986-10-29 00:22:41", "date-received"},
+		{map[string][]string{"posted": {"no date"}, "nntp-posting-date": {"Sat, 11 Oct 2026 12:00:00 +0000"}}, "2026-10-11 12:00:00", "nntp-posting-date"},
+		{map[string][]string{"injection-date": {"Sat, 11 Oct 2026 12:00:00 +0000"}, "x-original-date": {"Mon Oct 27 11:22:58 1986"}}, "2026-10-11 12:00:00", "injection-date"},
+		{map[string][]string{"date": {"garbage"}}, "0001-01-01 00:00:00", ""},
+		{nil, "0001-01-01 00:00:00", ""},
+	} {
+		got, name := fallbackDate(tc.headers)
+		if g := got.UTC().Format("2006-01-02 15:04:05"); g != tc.want || name != tc.wantName {
+			t.Errorf("fallbackDate(%v) = %s via %q, want %s via %q", tc.headers, g, name, tc.want, tc.wantName)
+		}
 	}
 }

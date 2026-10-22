@@ -223,6 +223,13 @@ func (proc *Processor) ProcessArticle(article *models.Article, legacyNewsgroup s
 		// the bulk paths keep the lenient parser (archives, D10)
 		article.DateSent = ParseNNTPDate(article.DateString)
 		if article.DateSent.IsZero() {
+			// archives: a secondary date header (Posted, Date-Received, ...) stands in
+			if t, name := fallbackDate(article.Headers); !t.IsZero() {
+				log.Printf("[HDR-DATE] Article '%s': Date '%s' unreadable, using %s '%s'", article.MessageID, article.DateString, name, common.GetHeaderFirst(article.Headers, name))
+				article.DateSent = t
+			}
+		}
+		if article.DateSent.IsZero() {
 			log.Printf("[ERROR-HDR] Article '%s' no valid date... headerDate='%v' dateString='%s'", article.MessageID, article.DateSent, article.DateString)
 			proc.setCaseDupes(msgIdItem, bulkmode)
 			return history.CaseError, rejected("invalid date")
