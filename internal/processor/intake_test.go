@@ -53,7 +53,8 @@ func TestIntakeProcParseNNTPDateStrict(t *testing.T) {
 		{"sometime 7 March 1999 at 10:20", true, time.Date(1999, 3, 7, 10, 20, 0, 0, time.UTC), time.Date(1999, 3, 7, 10, 20, 0, 0, time.UTC)},
 		// defaulted year/month: !ok, the lenient parser keeps its old fallback
 		{"garbage", false, time.Time{}, fallback},
-		{"Tuesday 7pm", false, time.Time{}, fallback},
+		// "7pm" is split into "7 pm" since the archive-corpus fixes, so the 7 is read as a day
+		{"Tuesday 7pm", false, time.Time{}, time.Date(1990, 1, 7, 12, 0, 0, 0, time.UTC)},
 		{"March", false, time.Time{}, time.Date(1990, 3, 1, 12, 0, 0, 0, time.UTC)},
 		{"", false, time.Time{}, time.Time{}},
 	} {
