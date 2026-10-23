@@ -1,9 +1,11 @@
 package processor
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,6 +103,10 @@ func feedDownloadRun(xhdrChan <-chan nntp.HeaderLine, runDone <-chan struct{}, s
 		if item == nil {
 			continue
 		}
+		// Everything this loop still needs from the item is read before the send: once the
+		// item is in a queue it belongs to the consumer, which overwrites its fields when
+		// it is done (data race otherwise).
+		isDup := item.Error == errIsDuplicateError
 		target := getQ
 		if item.Error != nil || item.Article != nil {
 			target = returnQ
@@ -120,7 +126,7 @@ func feedDownloadRun(xhdrChan <-chan nntp.HeaderLine, runDone <-chan struct{}, s
 			return queued, false
 		}
 		handed.Add(1)
-		if item.Error != errIsDuplicateError {
+		if !isDup {
 			queued++
 		}
 	}
@@ -149,6 +155,22 @@ func drainLateResults(returnQ <-chan *BatchItem, outstanding int64, shutdownChan
 		item.Error = nil
 		item.ReturnQ = nil
 	}
+}
+
+// fetchedMsgIDHeader returns the Message-ID header of a fetched article's raw header
+// block (models.Article.HeadersJSON, the header lines joined by "\n"), or "" when the
+// block has none. It scans the block instead of splitting it: DownloadArticles calls it
+// for every downloaded article.
+func fetchedMsgIDHeader(headersJSON string) string {
+	const field = "message-id:"
+	for rest := headersJSON; rest != ""; {
+		var line string
+		line, rest, _ = strings.Cut(rest, "\n")
+		if len(line) >= len(field) && strings.EqualFold(line[:len(field)], field) {
+			return strings.TrimSpace(line[len(field):])
+		}
+	}
+	return ""
 }
 
 // resetLateMsgID sets the message-id cache entry of an item that a DownloadArticles run will not
@@ -302,6 +324,8 @@ func (proc *Processor) DownloadArticles(newsgroup string, DLParChan chan struct{
 		}
 	}()
 	var dups, lastDups, gots, lastGots, notf, lastNotf, errs, lastErrs int64
+	var mismatch int64   // articles the provider served under a foreign Message-ID
+	var authFailed error // set when the provider's login expired: stops this group's run
 	aliveCheck := 5 * time.Second
 	maxDeathCounter := 12 // Maximum number of allowed "stuck" checks done every aliveCheck interval
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -380,6 +404,18 @@ forProcessing:
 					case nntp.ErrArticleRemoved:
 						notf++
 					default:
+						// An expired login (480) hits every following article the same
+						// way: retrying the rest of the group only burns a re-dial and a
+						// re-login per article and would move the progress past articles
+						// that were never fetched. Stop the group run once, keep the
+						// progress and let the next run fetch the range again
+						// (plan fetcher-hostile-peer, design point 2).
+						if errors.Is(item.Error, nntp.ErrAuthRequired) {
+							errs++
+							authFailed = item.Error
+							log.Printf("DownloadArticles: '%s' provider authentication expired, stopping group run: %v", newsgroup, item.Error)
+							break forProcessing
+						}
 						if item.MessageID != nil {
 							log.Printf("DownloadArticles: '%s' Error fetching article %s: %v .. continue", newsgroup, *item.MessageID, item.Error)
 						} else {
@@ -392,13 +428,26 @@ forProcessing:
 					errs++
 				}
 			} else if item.Error == nil && item.Article != nil {
-				//log.Printf("DownloadArticles --> proc.ProcessArticle '%s' in group '%s'", *item.MessageID, newsgroup)
-				response, err := proc.ProcessArticle(item.Article, newsgroup, bulkmode)
-				if err != nil {
-					log.Printf("DownloadArticles: '%s' Failed to process article (%s): response=%d err='%v'", newsgroup, *item.MessageID, response, err)
+				// A provider whose overview is out of step with its articles answers
+				// ARTICLE <id> with another article. ProcessArticle rejects that too
+				// (A-intake-3), but once per article; a provider out of step does it for
+				// the whole group, so the fetcher drops it here and logs once per run.
+				if mid := fetchedMsgIDHeader(item.Article.HeadersJSON); mid != "" && mid != item.Article.MessageID {
+					mismatch++
+					resetLateMsgID(item.MessageID) // a later run may fetch it again
+					if mismatch == 1 {
+						log.Printf("DownloadArticles: '%s' provider out of step: ARTICLE %s answered with Message-ID %s (logged once per run)", newsgroup, item.Article.MessageID, mid)
+					}
 					errs++
 				} else {
-					gots++
+					//log.Printf("DownloadArticles --> proc.ProcessArticle '%s' in group '%s'", *item.MessageID, newsgroup)
+					response, err := proc.ProcessArticle(item.Article, newsgroup, bulkmode)
+					if err != nil {
+						log.Printf("DownloadArticles: '%s' Failed to process article (%s): response=%d err='%v'", newsgroup, *item.MessageID, response, err)
+						errs++
+					} else {
+						gots++
+					}
 				}
 			} else {
 				log.Printf("LOST CASE IN DownloadArticles item='%#v'", item)
@@ -415,6 +464,10 @@ forProcessing:
 			}
 		}
 	} // end for processing routine (counts only)
+	if authFailed != nil {
+		// the progress stays where it was: the rest of the range was never fetched
+		return fmt.Errorf("DownloadArticles: '%s' %d-%d stopped: %w", newsgroup, start, end, authFailed)
+	}
 	if common.WantShutdown() {
 		return fmt.Errorf("DownloadArticles: common.WantShutdown() group '%s'", newsgroup)
 	}
@@ -433,7 +486,7 @@ forProcessing:
 	}
 	// threading.go:296: GroupCounter.Increment(newsgroup) // Increment the group counter
 	groupCnt := GroupCounter.GetReset(newsgroup)
-	log.Printf("DownloadArticles: '%s' processed %d articles [gotQueued=%d] (dups: %d, gots: %d, errs: %d, adds: %d, reused: %d) in %v end=%d", newsgroup, gots+errs+dups, gotQueued, dups, gots, errs, groupCnt, reused.Load(), time.Since(startTime), end)
+	log.Printf("DownloadArticles: '%s' processed %d articles [gotQueued=%d] (dups: %d, gots: %d, errs: %d, mismatch: %d, adds: %d, reused: %d) in %v end=%d", newsgroup, gots+errs+dups, gotQueued, dups, gots, errs, mismatch, groupCnt, reused.Load(), time.Since(startTime), end)
 	// do another one if we haven't run enough times
 	runtime.GC()
 
