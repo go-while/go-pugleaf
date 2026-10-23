@@ -146,3 +146,28 @@ plus the full CLAUDE.md list on the merged tree. No wall-clock assertions anywhe
   greeting (the test uses `Options.Greeting`).
 - Wave 2 must know: overview values come back unrepaired; `OverrideFrom`/`OverrideTimes` are per connection (use
   OverrideFrom >= 2 where the pool re-dials); `Pool.Stats` settles asynchronously after `ForceCloseConn` (poll it).
+### Wave 2 (2026-10-23)
+- `worktree-agent-aa1e5a192d81b5044` (server-ulimit, c806733 + 4de6430) merged e52fd9b; `worktree-agent-a7fd731beba22a4b7`
+  (fetcher-download-fake, c7caf41) merged 368e1ea. Inline: 9241f24 (recovery line only after a real burst; probe sockets
+  cleaned on Fatalf), 7ae38c1 (**cmd/nntp-fetcher worker read `*item.MessageID`/`*item.GroupName` after `item.ReturnQ <- item`:
+  nil dereference on a failed article**, review major; `fetchedMsgIDHeader` via `common.HeaderValue`).
+- Production changes of the wave: `nntp-server.go` accept loop: exponential backoff 5 ms..1 s with a rate-limited error line
+  and a recovery line (before: flat 50 ms, 20 log lines/s during an fd outage). `proc_DLArt.go`: data race in
+  `feedDownloadRun` (`item.Error` read after the send; a duplicate could leave `gotQueued` too high and the run end only by
+  the death counter), `ErrAuthRequired` stops the group run before the progress is touched (before: nil return, every
+  remaining article re-dialled + re-authenticated, progress moved past articles never fetched), Message-ID mismatch
+  pre-check (one log line per run, article dropped, cache entry released).
+- Pinned decisions: an ARTICLE whose Message-ID header differs from the requested id is **dropped**, not re-filed under its
+  own id (A-intake-3: the claim/dedup was taken on the requested id; re-filing would let a provider inject articles under
+  ids never asked for) — the design-point-3 wording "filed under its own Message-ID header" is superseded. Blank-subject
+  articles are rejected per article by `ProcessArticle` (unchanged). `DownloadArticles` uses GROUP + XHDR Message-ID +
+  ARTICLE, never XOVER, so the wave-1 `MaxReadLinesXover` cap is irrelevant to it; XHDR streams in batches of 1000.
+- Kit leftover (new tag needed): `fakeserver.StoreHandler` has no XHDR (answers 500), so no fetcher run can use Store mode;
+  the slice wrote a Handler-mode fake (`proc_DLArt_fake_srv_test.go`) with its own hooks. An `XhdrFields` hook mirroring
+  `OverviewFields` would be the natural addition.
+- Leftovers (decisions, not this plan's fixes): `commitThenProgress` moves the progress to `end` whenever anything was
+  queued, so skipped/errored/mismatched articles are never fetched again (a provider out of step silently loses a range;
+  the mismatch drop adds a new way to do this); after an auth abort up to ~queue depth (128) more ARTICLEs are still sent
+  and the XHDR stream for the rest of the span keeps one connection until it ends; `cmd/nntp-fetcher` does not inspect
+  `ErrAuthRequired`, so a dead login still walks every group once per run (bounded, noisy); the ulimit test has a fixed
+  budget (`-n 24`, 14 served here) and fails rather than skips on an odd fd layout.
