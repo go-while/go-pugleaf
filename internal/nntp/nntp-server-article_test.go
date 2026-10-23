@@ -8,7 +8,7 @@ package nntp
 //
 // Every check states the RFC-correct behavior (RFC 3977). Where the current
 // code differs, the result goes through knownBug with the seed id (BUG-1,
-// BUG-6, BUG-8, RFC-3) or a new id (T-nntp-article-1). The harness servers run with ErrorDelay=0, so
+// BUG-6, BUG-8, RFC-3) or a new id (nntp-article-430-cache-delay). The harness servers run with ErrorDelay=0, so
 // rateLimitOnError does not sleep on the error replies below.
 // Identifiers use the art/TestArt prefixes (contract K2). Note that
 // `-run TestArt` also matches the pre-existing TestArticleMatching; run these
@@ -841,7 +841,7 @@ func artLocal430Miss(t *testing.T, test string) *artLocal430Env {
 // has passed, and returns the result of the last check.
 //
 // The 1 s window is deliberately short and is NOT raised to hDeadline: it serves
-// the T-nntp-article-1 known-bug path, which runs to the end of the window while
+// the nntp-article-430-cache-delay known-bug path, which runs to the end of the window while
 // the bug is open (the cached miss lives for the 60 s local430 TTL), so a long
 // window would only slow every run. 1 s is still 60x under that TTL.
 func artPollStat223(t *testing.T, c *client.Conn, a hArticle) error {
@@ -913,7 +913,7 @@ func TestArtLocal430(t *testing.T) {
 		}
 	})
 
-	// T-nntp-article-1 (low): local430 has no coherence with intake outside
+	// nntp-article-430-cache-delay (low): local430 has no coherence with intake outside
 	// this process. When nntp-fetcher (another process) stores the article in
 	// the shared DB and history, this server is never told, so a message-id that
 	// missed once stays 430 for up to ~75 s after the fetcher stored it. Here the
@@ -925,7 +925,7 @@ func TestArtLocal430(t *testing.T) {
 		env := artLocal430Miss(t, "local430-external")
 		hArticleSQL(t, env.g, env.a)
 		env.arrived.Store(true)
-		knownBug(t, "T-nntp-article-1", artPollStat223(t, env.c, env.a))
+		knownBug(t, "nntp-article-430-cache-delay", artPollStat223(t, env.c, env.a))
 	})
 }
 

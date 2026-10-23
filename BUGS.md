@@ -49,7 +49,7 @@
    `-validate-only`); new articles get them on arrival. Foreign Xref headers are still stripped on intake and
    dropped on relay. Binary e2e test: `TestE2EXrefBinary` in `cmd/nntp-server/e2e_xref_test.go`.
  - Accepted limitation (user decision 2026-10-11): the local430 negative cache keeps a 60 s TTL, so an article stored
-   by another process (fetcher) answers 430 for up to 60 s (T-nntp-article-1). Same-process arrivals (plan
+   by another process (fetcher) answers 430 for up to 60 s (`nntp-article-430-cache-delay`, formerly T-nntp-article-1). Same-process arrivals (plan
    `post-430-window`): POST waits up to `-post-commit-wait` (default 5 s; 0 = no wait) for the group DB commit
    before its 240 (a timeout still answers 240), and every same-process arrival (POST/IHAVE/TAKETHIS) gets a 10 s
    grace in which ARTICLE/HEAD/BODY/STAT/OVER/HDR/XHDR by message-id read the arrival's groups (known, active ones)
@@ -93,7 +93,7 @@
    pass found and fixed a POST data race (message-id read after the batch hand-off, 4956980).
  - The test suite in `internal/nntp/nntp-server-*_test.go` and `cmd/nntp-server/server_e2e_test.go` marks every open
    item with `knownBug`; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/` lists them (1 id:
-   T-nntp-article-1, an accepted limitation).
+   nntp-article-430-cache-delay, an accepted limitation).
  - Leftovers of the optional waves are listed in the Outcome of `.claude/plans/done/audit-delta-fixes.md`; the
    wall-clock-sensitive tests are the subject of the plan `.claude/plans/done/test-timing-hardening.md`.
  - peering: the unfinished `PeeringManager` was removed (CLI-6); incoming feeds work via IHAVE/TAKETHIS, outgoing

@@ -89,7 +89,7 @@ List the open ones with:
 PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server/
 ```
 
-Open as of 2026-10-15: one id, **T-nntp-article-1** (`TestArtLocal430/external-arrival` in
+Open as of 2026-10-23: one id, **nntp-article-430-cache-delay** (formerly T-nntp-article-1 in `AUDIT-2026-10.md`; `TestArtLocal430/external-arrival` in
 `internal/nntp/nntp-server-article_test.go`): an article stored by another process (fetcher) is answered 430 until
 the local430 negative-cache entry expires (default TTL 60 s, `cmd/nntp-server -local430ttl`). This is an accepted
 limitation (user decision 2026-10-11, see `BUGS.md`). `cmd/nntp-server` has no open marker. The audit-time list (29 ids) is in `AUDIT-2026-10.md`
@@ -203,7 +203,7 @@ what remains are residues and recorded decisions. "Test" names the test that pin
 | BUG-5 | fixed | `sanitizeOverviewField` on every field, no trailing TAB; local `Xref:` via `-xref off|partial|full` | `TestOvrSanitizing`, `TestOvrLineFormat`, `TestE2EXrefBinary` |
 | BUG-6 | fixed | `dataBlockWriter` dot-stuffs header and body lines alike; empty body and empty headers_json handled | `TestArtByteExact` |
 | BUG-7 | fixed | too-large replies in sync, 400 + close only past the drain bound; QUIT not logged as error; `Stop` closes clients and waits; one local430 goroutine with a stop path; TLS cert loaded before any listener | `TestIntkTooLargeReplies`, `TestSessQuit`, `TestSessStop`, `TestSessStartErrors` |
-| BUG-8 | fixed for same-process arrivals; cross-process = T-nntp-article-1 | `Local430.Remove` on every accepted article, 10 s arrival grace, `-post-commit-wait`; TTL 60 s. An article stored by another process (fetcher) can still answer 430 for up to 60 s: accepted limitation (user decision 2026-10-11) | `TestArtLocal430`, `TestArtArrivalGrace`; marker `T-nntp-article-1` |
+| BUG-8 | fixed for same-process arrivals; cross-process = nntp-article-430-cache-delay | `Local430.Remove` on every accepted article, 10 s arrival grace, `-post-commit-wait`; TTL 60 s. An article stored by another process (fetcher) can still answer 430 for up to 60 s: accepted limitation (user decision 2026-10-11) | `TestArtLocal430`, `TestArtArrivalGrace`; marker `nntp-article-430-cache-delay` |
 | BUG-9 | fixed | idle timeout 3 min (`-idletimeout`), deadlines refreshed per command and per flush | `TestSessIdleTimeout` |
 | FN-1 | fixed | stub files, dead `AuthManager` methods, `capabilities` field and the stale README are gone; the `ServerStats` getters feed the `[NNTP] stats:` line at Stop since 2026-10-22 | `TestSessServerStats` |
 | RFC-1 | fixed; NEWNEWS by decision | DATE, NEXT, LAST, NEWGROUPS, LIST wildmat/OVERVIEW.FMT/HEADERS, OVER, HDR, MODE STREAM, CHECK, STARTTLS exist. NEWNEWS answers 500 and is not advertised (decision D3 of `nntp-rfc-commands`: no `imported_at` index, `NEWNEWS *` would open every group DB) | `TestRfcDispatch`, `TestGrpNewNews` |
@@ -234,7 +234,7 @@ what remains are residues and recorded decisions. "Test" names the test that pin
 
 Not in the table (new findings of the slices, `A-*`): closed by the plans listed in `BUGS.md`, except the deferred
 ones there (history fail-stop exits Q3, destructive root scripts A-ops-13, update pipeline A-ops-14, `php/` pages
-A-ops-16, nonce-based CSP Q5), all user decisions. The one open `knownBug` marker is `T-nntp-article-1`.
+A-ops-16, nonce-based CSP Q5), all user decisions. The one open `knownBug` marker is `nntp-article-430-cache-delay`.
 
 ## Already covered by merged plans
 
