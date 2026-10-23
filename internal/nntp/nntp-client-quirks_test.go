@@ -161,6 +161,10 @@ func TestCliQuirkGeneratedSpans(t *testing.T) {
 		if got := cliQuirkCmdLines(s, "XOVER"); len(got) != 1 || got[0] != want {
 			t.Fatalf("XOVER lines on the wire = %q, want [%q] (the over-limit span must never reach the server)", got, want)
 		}
+		// the capped call is a normal success: the connection stays in the pool
+		if got := s.Accepted(); got != 1 {
+			t.Fatalf("server accepted %d connections after the capped XOver, want 1 (no reconnect)", got)
+		}
 	})
 
 	// Without enforceLimit the span reaches the server and the kit answers
