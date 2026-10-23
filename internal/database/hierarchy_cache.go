@@ -104,6 +104,13 @@ func (hc *HierarchyCache) WarmCache(db *Database) {
 		log.Printf("HierarchyCache: Starting bulk cache warming...")
 		start := time.Now()
 
+		// 0. An empty hierarchies table (fresh install, restored main DB) is filled once
+		if seeded, err := db.seedHierarchiesIfEmpty(); err != nil {
+			log.Printf("HierarchyCache: hierarchy seed check failed: %v", err)
+		} else if seeded {
+			log.Printf("HierarchyCache: hierarchies table seeded from newsgroups")
+		}
+
 		// 1. Bulk load all hierarchies at once
 		if err := hc.loadAllHierarchies(db); err != nil {
 			log.Printf("HierarchyCache: Failed to load hierarchies: %v", err)
@@ -509,6 +516,70 @@ func (hc *HierarchyCache) loadAllHierarchies(db *Database) error {
 
 	log.Printf("HierarchyCache: Loaded %d hierarchies", len(hierarchies))
 	return nil
+}
+
+// query_hierarchyListedRow is one row of the Usenet page's hierarchy list (same filter as
+// query_getHierarchiesPaginatedDirect1): the hierarchy counts groups and has an active group
+// with articles. No row means the hierarchy is not listed.
+const query_hierarchyListedRow = `SELECT h.id, h.name, h.description, h.group_count, h.last_updated, h.created_at
+		FROM hierarchies h
+		WHERE h.name = ? AND h.group_count > 0
+		  AND EXISTS (SELECT 1 FROM newsgroups n WHERE n.hierarchy = h.name AND n.message_count > 0 AND n.active = 1)`
+
+// hasHierarchy reports whether the cached top-level list holds name.
+func (hc *HierarchyCache) hasHierarchy(name string) bool {
+	hc.mu.RLock()
+	defer hc.mu.RUnlock()
+	_, ok := hc.hierarchiesMap[name]
+	return ok
+}
+
+// refreshHierarchyRow brings one entry of the cached top-level list in line with the
+// database after a group of that hierarchy was inserted, (de)activated or got its first
+// articles: the entry is added or updated when the hierarchy is listed, removed when it
+// is not. One indexed point query; the rest of the cache is untouched. Before this the
+// list was only loaded at warm-up or after the admin's full update.
+func (hc *HierarchyCache) refreshHierarchyRow(db *Database, name string) {
+	if name == "" || db == nil || db.mainDB == nil {
+		return
+	}
+	var h models.Hierarchy
+	var description sql.NullString
+	err := RetryableQueryRowScan(db.mainDB, query_hierarchyListedRow, []interface{}{name},
+		&h.ID, &h.Name, &description, &h.GroupCount, &h.LastUpdated, &h.CreatedAt)
+	listed := err == nil
+	if err != nil && err != sql.ErrNoRows {
+		log.Printf("HierarchyCache: refresh of hierarchy '%s' failed: %v", name, err)
+		return
+	}
+	h.Description = description.String
+
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	if hc.hierarchiesMap == nil {
+		hc.hierarchiesMap = make(map[string]*models.Hierarchy)
+	}
+	cur, ok := hc.hierarchiesMap[name]
+	switch {
+	case listed && ok:
+		cur.ID, cur.Description, cur.GroupCount, cur.CreatedAt = h.ID, h.Description, h.GroupCount, h.CreatedAt
+		if h.LastUpdated.After(cur.LastUpdated) {
+			cur.LastUpdated = h.LastUpdated
+		}
+	case listed && !ok:
+		hc.hierarchiesMap[name] = &h
+		hc.hierarchies = append(hc.hierarchies, &h)
+		hc.totalCount = len(hc.hierarchies)
+	case !listed && ok:
+		delete(hc.hierarchiesMap, name)
+		for i, x := range hc.hierarchies {
+			if x.Name == name {
+				hc.hierarchies = append(hc.hierarchies[:i], hc.hierarchies[i+1:]...)
+				break
+			}
+		}
+		hc.totalCount = len(hc.hierarchies)
+	}
 }
 
 // hierarchyTree is the cache content built from a list of newsgroups.

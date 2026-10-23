@@ -121,19 +121,95 @@ func (db *Database) GetProviders() ([]*models.Provider, error) {
 // InsertNewsgroup inserts a new newsgroup
 const query_InsertNewsgroup = `INSERT INTO newsgroups (name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
+// query_HierarchyAddGroup counts one new active group into its hierarchies row, creating the
+// row when the hierarchy is new. One O(1) statement per insert: the preloader inserts
+// 100k+ groups, so a recount per insert is out of the question. The admin's "update
+// hierarchies" (UpdateHierarchyCounts) remains the full resync.
+const query_HierarchyAddGroup = `INSERT INTO hierarchies (name, description, group_count, last_updated, created_at)
+		VALUES (?, '', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(name) DO UPDATE SET group_count = COALESCE(group_count, 0) + 1, last_updated = CURRENT_TIMESTAMP`
+
+// query_HierarchyRecount sets one hierarchies row to its real number of active groups
+// (idx_newsgroups_hierarchy makes this one index range), creating the row when missing.
+// Used when a group's active flag changes; cheap enough for that admin-driven path.
+const query_HierarchyRecount = `INSERT INTO hierarchies (name, description, group_count, last_updated, created_at)
+		VALUES (?, '', (SELECT COUNT(*) FROM newsgroups WHERE hierarchy = ? AND active = 1), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(name) DO UPDATE SET group_count = excluded.group_count, last_updated = CURRENT_TIMESTAMP`
+
 func (db *Database) InsertNewsgroup(g *models.Newsgroup) error {
 	// Auto-populate hierarchy from newsgroup name if not set
 	if g.Hierarchy == "" {
 		g.Hierarchy = ExtractHierarchyFromGroupName(g.Name)
 	}
-	_, err := RetryableExec(db.mainDB, query_InsertNewsgroup, g.Name, g.Description, g.LastArticle, g.MessageCount, g.Active, g.ExpiryDays, g.MaxArticles, g.MaxArtSize, g.HighWater, g.LowWater, g.Status, g.Hierarchy)
+	// The group and its hierarchy count go in one transaction: the hierarchies table is
+	// what the Usenet page lists, and until 2026-10-23 only the admin button filled it.
+	err := RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(query_InsertNewsgroup, g.Name, g.Description, g.LastArticle, g.MessageCount, g.Active, g.ExpiryDays, g.MaxArticles, g.MaxArtSize, g.HighWater, g.LowWater, g.Status, g.Hierarchy); err != nil {
+			return err
+		}
+		if g.Active && g.Hierarchy != "" {
+			if _, err := tx.Exec(query_HierarchyAddGroup, g.Hierarchy); err != nil {
+				return fmt.Errorf("hierarchies row %s: %w", g.Hierarchy, err)
+			}
+		}
+		return nil
+	})
 
 	// Invalidate hierarchy cache for the affected hierarchy
 	if err == nil && db.HierarchyCache != nil {
 		db.HierarchyCache.InvalidateHierarchy(g.Hierarchy)
+		db.HierarchyCache.refreshHierarchyRow(db, g.Hierarchy)
 	}
 
 	return err
+}
+
+// recountHierarchies sets the hierarchies rows of the given group names to their real
+// active group counts (one statement per distinct top level) and refreshes the cached
+// top-level list. Errors are logged: the groups' own change already succeeded.
+func (db *Database) recountHierarchies(names ...string) {
+	done := make(map[string]bool, len(names))
+	for _, name := range names {
+		top := ExtractHierarchyFromGroupName(name)
+		if top == "" || done[top] {
+			continue
+		}
+		done[top] = true
+		if _, err := RetryableExec(db.mainDB, query_HierarchyRecount, top, top); err != nil {
+			log.Printf("[DB] recountHierarchies: hierarchy '%s': %v", top, err)
+			continue
+		}
+		if db.HierarchyCache != nil {
+			db.HierarchyCache.refreshHierarchyRow(db, top)
+		}
+	}
+}
+
+// query_HierarchiesListed counts the hierarchies the Usenet page would list; query_ActiveGroups
+// the active groups. Both empty-table checks run once, when the cache warms.
+const query_HierarchiesListed = `SELECT COUNT(*) FROM hierarchies WHERE group_count > 0`
+const query_ActiveGroupsCount = `SELECT COUNT(*) FROM newsgroups WHERE active = 1`
+
+// seedHierarchiesIfEmpty runs the full hierarchy sync (UpdateHierarchyCounts) once when
+// the hierarchies table lists nothing although active groups exist: a fresh install, a
+// restored main DB or a database from before the incremental maintenance. It reports
+// whether it ran. Normal starts cost two COUNT queries, never the full sync.
+func (db *Database) seedHierarchiesIfEmpty() (bool, error) {
+	var listed, groups int64
+	if err := RetryableQueryRowScan(db.mainDB, query_HierarchiesListed, nil, &listed); err != nil {
+		return false, err
+	}
+	if listed > 0 {
+		return false, nil
+	}
+	if err := RetryableQueryRowScan(db.mainDB, query_ActiveGroupsCount, nil, &groups); err != nil {
+		return false, err
+	}
+	if groups == 0 {
+		return false, nil
+	}
+	log.Printf("[DB] hierarchies table lists nothing for %d active groups: running the full hierarchy sync once", groups)
+	return true, db.UpdateHierarchyCounts()
 }
 
 const query_MainDBGetAllNewsgroupsCount = `SELECT COUNT(*) FROM newsgroups`
@@ -344,6 +420,9 @@ func (db *Database) UpdateNewsgroupActive(name string, active bool) error {
 	if err == nil && db.HierarchyCache != nil {
 		db.HierarchyCache.UpdateNewsgroupActiveStatus(name, active)
 	}
+	if err == nil {
+		db.recountHierarchies(name)
+	}
 
 	return err
 }
@@ -396,6 +475,7 @@ func (db *Database) BulkUpdateNewsgroupActive(names []string, active bool) (int,
 			db.HierarchyCache.UpdateNewsgroupActiveStatus(name, active)
 		}
 	}
+	db.recountHierarchies(names...)
 
 	return int(rowsAffected), nil
 }

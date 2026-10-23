@@ -1089,6 +1089,11 @@ retry1:
 			} else if sq.db.HierarchyCache != nil {
 				// Update hierarchy cache with new stats instead of invalidating
 				sq.db.HierarchyCache.UpdateNewsgroupStats(*task.Newsgroup, len(inserted), maxArticleNum, latestDate)
+				// A top level missing from the Usenet page's list (new hierarchy whose
+				// groups had no articles yet) is listed once its first batch is stored.
+				if top := ExtractHierarchyFromGroupName(*task.Newsgroup); !sq.db.HierarchyCache.hasHierarchy(top) {
+					sq.db.HierarchyCache.refreshHierarchyRow(sq.db, top)
+				}
 			}
 		}
 	}
