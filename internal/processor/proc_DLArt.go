@@ -159,18 +159,15 @@ func drainLateResults(returnQ <-chan *BatchItem, outstanding int64, shutdownChan
 
 // fetchedMsgIDHeader returns the Message-ID header of a fetched article's raw header
 // block (models.Article.HeadersJSON, the header lines joined by "\n"), or "" when the
-// block has none. It scans the block instead of splitting it: DownloadArticles calls it
-// for every downloaded article.
+// block has none. DownloadArticles calls it for every downloaded article.
 func fetchedMsgIDHeader(headersJSON string) string {
-	const field = "message-id:"
-	for rest := headersJSON; rest != ""; {
-		var line string
-		line, rest, _ = strings.Cut(rest, "\n")
-		if len(line) >= len(field) && strings.EqualFold(line[:len(field)], field) {
-			return strings.TrimSpace(line[len(field):])
-		}
+	// The same matcher as the A-intake-3 check (common.HeaderValue): whitespace before
+	// the colon and folded continuation lines are handled, so every shape the intake
+	// would reject is caught here, once per run, instead of once per article there.
+	if headersJSON == "" {
+		return ""
 	}
-	return ""
+	return strings.TrimSpace(common.HeaderValue(strings.Split(headersJSON, "\n"), "Message-ID"))
 }
 
 // resetLateMsgID sets the message-id cache entry of an item that a DownloadArticles run will not

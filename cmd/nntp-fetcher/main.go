@@ -489,6 +489,11 @@ func main() {
 				//log.Printf("DownloadArticles: Worker %d GetArticle group '%s' article (%s)", worker, *item.GroupName, *item.MessageID)
 				art, err := proc.Pool.GetArticle(item.MessageID, true)
 				if err != nil || art == nil {
+					// Copy what the log lines need before the item is handed back: the
+					// consumer (DownloadArticles' processing loop or drainLateResults)
+					// nils item.MessageID/GroupName as soon as it takes the item, so a
+					// read after the send is a race and a nil dereference.
+					msgID, groupName := *item.MessageID, *item.GroupName
 					item.Error = err     // Set error on item
 					item.ReturnQ <- item // Send failed item back
 					switch err {
@@ -499,12 +504,12 @@ func main() {
 						mux.Unlock()
 						continue
 					case io.EOF:
-						log.Printf("ERROR DownloadArticles: pool.GetArticle failed. connection EOF ... continue! ng: '%s'", *item.GroupName)
+						log.Printf("ERROR DownloadArticles: pool.GetArticle failed. connection EOF ... continue! ng: '%s'", groupName)
 						//common.ForceShutdown()
 						//return
 						continue
 					default:
-						log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle '%s' err='%v' ... continue! ng: '%s'", *item.MessageID, err, *item.GroupName)
+						log.Printf("ERROR DownloadArticles: proc.Pool.GetArticle '%s' err='%v' ... continue! ng: '%s'", msgID, err, groupName)
 						//common.ForceShutdown()
 						//return
 						continue
