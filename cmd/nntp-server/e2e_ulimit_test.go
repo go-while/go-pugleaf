@@ -245,9 +245,7 @@ func TestE2EUlimitBinary(t *testing.T) {
 			t.Fatalf("connection %d greeting %q", len(held), c.Greeting)
 		}
 		held = append(held, c)
-	}
-	for _, c := range held {
-		defer c.close()
+		t.Cleanup(c.close) // also on a Fatalf inside this loop: no sockets left open in the package
 	}
 	if blocked == nil {
 		t.Fatalf("the fd limit of %d never stopped accept: %d connections served", ulFDLimit, len(held))

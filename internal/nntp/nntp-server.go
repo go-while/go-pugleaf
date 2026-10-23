@@ -363,7 +363,12 @@ func (s *NNTPServer) serve(listener net.Listener, isTLS bool) {
 			continue
 		}
 		if acceptErrs > 0 {
-			log.Printf("[NNTP] listener %s accepting again after %d accept errors", listener.Addr(), acceptErrs)
+			// A real outage (fd limit) is a burst; a single error between two accepts
+			// (a peer churning at the ceiling) gets no recovery line of its own.
+			if acceptErrs > 1 || time.Since(lastAcceptLog) >= acceptLogEvery {
+				log.Printf("[NNTP] listener %s accepting again after %d accept errors", listener.Addr(), acceptErrs)
+				lastAcceptLog = time.Now()
+			}
 			acceptErrs, acceptBackoff = 0, 0
 		}
 
