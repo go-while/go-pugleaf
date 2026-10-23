@@ -125,3 +125,24 @@ plus the full CLAUDE.md list on the merged tree. No wall-clock assertions anywhe
 4. Report: which design points held without a fix, which fixes were needed (file, behaviour before/after), and
    leftovers (e.g. an `ErrAuthRequired` strategy for the fetcher beyond "stop the group run" if the slice found
    more is needed).
+
+## Progress
+### Wave 0 (2026-10-23)
+- 2bc45a4 aliases + `cliStoreServer` in `nntp-client-fake_test.go`.
+### Wave 1 (2026-10-23)
+- `worktree-agent-adde089f8f273c94e` (client-provider-quirks, 1a694aa) merged 7bf42ca; `worktree-agent-a4b7ff0de42898ef7`
+  (client-session-faults, 8950264) merged 22d0627; `worktree-agent-af94cd37b92ea42f2` (client-read-bounds, f85737a) merged 00ee7c8.
+  All three tests-only; every design-point behaviour held except the 480 mapping.
+- Inline on the plan branch: 236f2ae (capped XOver keeps its connection), a5f9f82 (**480 on any reader command is
+  `ErrAuthRequired`**: `authRequiredErr`, `AuthRequired` constant; the session test asserts it), 2b469e4 (line-limit error
+  wraps `ErrResponseTooLarge`; pool variant of the endless reply; smaller drip).
+- Pinned current behaviour, not changed: `Pool.XOver` with enforceLimit caps the span to `MaxReadLinesXover` (100) and never
+  splits; a 503 on XOVER force-closes the connection although the session is clean; `parseOverviewLine`/`ListGroup` drop
+  unusable lines silently (XOver returns 0 lines, nil error); a 423 on ARTICLE drops the connection (only 430/451 keep it);
+  `BackendConn.ListGroup` has no production caller; `Pool.XHdr` force-closes on a 423 (no `ErrNoArticlesInRange` wrapping).
+- Leftovers (not this plan's fixes): duplicated `cli*Run`/`cli*Pool` helpers per test file; a plain read timeout on a bare
+  `BackendConn` closes nothing (unreachable in production, every pool helper force-closes); `TestCliConnReadIdleTimeout`
+  keeps a lower-bound elapsed check (`< 250 ms` → fatal) from test-timing-hardening; the kit applies no Faults to the
+  greeting (the test uses `Options.Greeting`).
+- Wave 2 must know: overview values come back unrepaired; `OverrideFrom`/`OverrideTimes` are per connection (use
+  OverrideFrom >= 2 where the pool re-dials); `Pool.Stats` settles asynchronously after `ForceCloseConn` (poll it).
