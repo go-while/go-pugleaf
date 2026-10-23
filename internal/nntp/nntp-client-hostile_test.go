@@ -193,17 +193,16 @@ func TestCliHostileLongLinePool(t *testing.T) {
 }
 
 // cliHostileBounded accepts the two error classes design point 1 allows for an
-// endless reply: the octet budget (ErrResponseTooLarge) and the MaxReadLines*
-// line limit of readMultilineResponse.
+// endless reply: the octet budget and the MaxReadLines* line limit of
+// readMultilineResponse both wrap ErrResponseTooLarge.
 func cliHostileBounded(t *testing.T, what string, err error) {
 	t.Helper()
 	if err == nil {
 		t.Fatalf("%s: no error on an endless reply", what)
 	}
-	if errors.Is(err, ErrResponseTooLarge) || strings.Contains(err.Error(), "too many lines in response") {
-		return
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("%s: err = %v, want ErrResponseTooLarge", what, err)
 	}
-	t.Fatalf("%s: err = %v, want ErrResponseTooLarge or the MaxReadLines* limit", what, err)
 }
 
 // An endless multi-line reply ends in an error, not in a hang: cliCmdRun's
@@ -232,14 +231,47 @@ func TestCliHostileEndless(t *testing.T) {
 	}
 }
 
+// Through the pool the budget path closes the socket and the pool dials anew:
+// the connection that read an endless reply is never handed out again.
+func TestCliHostileEndlessPool(t *testing.T) {
+	msgID := cliHostileMsgID(1)
+	s := cliStoreServer(t, cliHostileStore(3, nil), cliFakeStoreOpts{},
+		cliFakeFaults{Endless: map[string]bool{"ARTICLE": true}})
+	pool := cliCmdPool(t, s, func(cfg *BackendConfig) {
+		cfg.MaxArticleResponseBytes = cliHostileBudget
+	})
+	_, err := cliCmdRun(t, func() error { _, e := pool.GetArticle(&msgID, true); return e })
+	cliHostileBounded(t, "pool.GetArticle", err)
+	s.WaitOpen(t, 0, cliWait) // the poisoned connection is closed
+	accepted := s.Accepted()
+	var conn *BackendConn
+	if _, err := cliCmdRun(t, func() error {
+		var e error
+		conn, e = pool.Get(MODE_READER_MV)
+		return e
+	}); err != nil {
+		t.Fatalf("pool.Get after the endless reply: %v", err)
+	}
+	defer func() { _ = pool.Put(conn) }()
+	if got := s.Accepted(); got <= accepted {
+		t.Fatalf("Accepted() = %d after pool.Get, was %d: the poisoned connection was handed out again", got, accepted)
+	}
+	if _, err := cliCmdRun(t, func() error { _, _, e := conn.SelectGroup(cliHostileGroup); return e }); err != nil {
+		t.Fatalf("GROUP on the connection from pool.Get: %v", err)
+	}
+}
+
 // A reply dripped one byte at a time completes and parses unchanged: the idle
 // timeout is per Read, not per reply. The drip pause is far below ReadTimeout
 // while the whole reply takes longer than one ReadTimeout to arrive.
 func TestCliHostileDrip(t *testing.T) {
+	// ~1 KB of reply at 1 ms/byte: the whole ARTICLE takes about twice ReadTimeout
+	// while each byte gap is 500x below it. Kept small so the kit's Deadline (a
+	// hang guard, PUGLEAF_TEST_DEADLINE) stays far above the drip time.
 	const (
 		dripPause   = time.Millisecond
-		readTimeout = 2 * time.Second
-		bodyLines   = 50
+		readTimeout = 500 * time.Millisecond
+		bodyLines   = 12
 	)
 	body := make([]string, bodyLines)
 	for i := range body {

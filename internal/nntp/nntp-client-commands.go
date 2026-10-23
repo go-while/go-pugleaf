@@ -864,7 +864,7 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 		if lineCount >= maxReadLines {
 			c.conn.Close() // Close connection on limit reached
 			c.forceClose = true
-			return nil, fmt.Errorf("too many lines in response (limit: %d)", maxReadLines)
+			return nil, fmt.Errorf("%w: too many lines in response (limit: %d)", ErrResponseTooLarge, maxReadLines)
 		}
 
 		line, err := c.TextConn.ReadLine()
