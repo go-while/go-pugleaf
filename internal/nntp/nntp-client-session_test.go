@@ -38,7 +38,14 @@ const cliSessGroup = "misc.test"
 func cliSessRun(t *testing.T, name string, f func() error) error {
 	t.Helper()
 	done := make(chan error, 1)
-	go func() { done <- f() }()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("%s: panic: %v", name, r)
+			}
+		}()
+		done <- f()
+	}()
 	select {
 	case err := <-done:
 		return err
@@ -138,8 +145,9 @@ func TestCliSessArticleFaults(t *testing.T) {
 	t.Run("Override503", func(t *testing.T) {
 		st, ids := cliSessStore(t, 6)
 		s := cliStoreServer(t, st, cliFakeStoreOpts{}, cliFakeFaults{
-			Override:     map[string][]string{"ARTICLE": {"503 fault"}},
-			OverrideFrom: map[string]int{"ARTICLE": 3},
+			Override:      map[string][]string{"ARTICLE": {"503 fault"}},
+			OverrideFrom:  map[string]int{"ARTICLE": 3},
+			OverrideTimes: map[string]int{"ARTICLE": 1}, // the redialled connection must not fault again
 		})
 		pool := cliSessPool(t, s, nil)
 
@@ -211,7 +219,7 @@ func TestCliSessArticleFaults(t *testing.T) {
 		if got := s.Accepted(); got != 2 {
 			t.Fatalf("Accepted() = %d after the EOF, want 2 (connection dropped, one redial)", got)
 		}
-		cliSessWaitStats(t, pool, "no more than 1 active, 1 closed", func(ps PoolStats) bool {
+		cliSessWaitStats(t, pool, "1 active, 1 closed", func(ps PoolStats) bool {
 			return ps.ActiveConnections == 1 && ps.TotalClosed == 1
 		})
 	})
@@ -333,14 +341,11 @@ func TestCliSessAuthExpired(t *testing.T) {
 		if !strings.Contains(err.Error(), "480") {
 			t.Fatalf("GetArticle %s: err = %v, want it to carry the 480", ids[1], err)
 		}
-		// Finding (reported, not fixed here): only Pool.SelectGroup turns a 480
-		// into ErrAuthRequired. BackendConn.GetArticle reports an "unexpected
-		// ARTICLE code=480" error, so a caller cannot errors.Is it; the mapping
-		// belongs in nntp-client-commands.go, outside this slice.
-		if errors.Is(err, ErrAuthRequired) {
-			t.Logf("ARTICLE 480 surfaces ErrAuthRequired")
-		} else {
-			t.Logf("known gap: ARTICLE 480 surfaces %v, not ErrAuthRequired", err)
+		// Every reader command maps a 480 to ErrAuthRequired (authRequiredErr in
+		// nntp-client-commands.go), not only GROUP, so the fetcher can tell an
+		// expired login from any other failure through the pool's wrapping.
+		if !errors.Is(err, ErrAuthRequired) {
+			t.Fatalf("GetArticle %s after the 480: err = %v, want ErrAuthRequired", ids[1], err)
 		}
 
 		cliSessWant(t, pool, ids[2])

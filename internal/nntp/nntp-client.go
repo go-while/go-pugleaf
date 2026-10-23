@@ -41,6 +41,9 @@ const (
 	NoSuchArticle int = 430
 	// DMCA indicates a DMCA takedown.
 	DMCA int = 451
+	// AuthRequired is the server's 480: authentication required (RFC 4643), also sent
+	// when a login expired mid-session. The client maps it to ErrAuthRequired.
+	AuthRequired int = 480
 
 	// DefaultConnExpire is the default connection expiration duration.
 	DefaultConnExpire = 25 * time.Second

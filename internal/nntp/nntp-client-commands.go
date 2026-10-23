@@ -37,6 +37,17 @@ const MaxReadLinesBody = MaxReadLinesArticle - MaxReadLinesHeaders
 // is unusable afterwards and is force-closed.
 var ErrResponseTooLarge = errors.New("nntp: response too large")
 
+// authRequiredErr is the client's error for a 480 on a reader command: it wraps
+// ErrAuthRequired (errors.Is works through the pool's %w wrapping) and keeps the
+// command and the server's line. A 480 after a successful login means the server
+// dropped the login (timed out, or the account changed); the pool closes that
+// connection and the next Get dials and authenticates again. Before this every
+// command but GROUP returned a plain error, so a caller could not tell an expired
+// login from any other failure (plan fetcher-hostile-peer).
+func authRequiredErr(cmd string, code int, message string) error {
+	return fmt.Errorf("%w: %s: %d %s", ErrAuthRequired, cmd, code, strings.TrimSpace(message))
+}
+
 // ErrNoArticlesInRange is wrapped into the XOver error when the server answers
 // 423 (RFC 3977 §8.3.2: no articles in that range). The response line was read
 // completely; callers may treat the range as empty.
@@ -74,6 +85,8 @@ func (c *BackendConn) StatArticle(messageID string) (bool, error) {
 		return true, nil
 	case NoSuchArticle, DMCA:
 		return false, nil
+	case AuthRequired:
+		return false, authRequiredErr("STAT "+messageID, code, "")
 	default:
 		return false, fmt.Errorf("unexpected STAT response: %d", code)
 	}
@@ -118,6 +131,8 @@ func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Arti
 		case DMCA:
 			log.Printf("[BECONN] GetArticle: removed (DMCA): '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
 			return nil, ErrArticleRemoved
+		case AuthRequired:
+			return nil, authRequiredErr("ARTICLE "+*messageID, code, message)
 		default:
 			return nil, fmt.Errorf("unexpected ARTICLE '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
 		}
@@ -173,6 +188,8 @@ func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
 		case DMCA:
 			log.Printf("[INFO] head removed (DMCA): %s", messageID)
 			return nil, ErrArticleRemoved
+		case AuthRequired:
+			return nil, authRequiredErr("HEAD "+messageID, code, message)
 		default:
 			return nil, fmt.Errorf("unexpected HEAD response: %d %s", code, message)
 		}
@@ -232,6 +249,8 @@ func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
 		case DMCA:
 			log.Printf("[INFO] body removed (DMCA): %s", messageID)
 			return nil, ErrArticleRemoved
+		case AuthRequired:
+			return nil, authRequiredErr("BODY "+messageID, code, message)
 		default:
 			return nil, fmt.Errorf("unexpected BODY response: %d %s", code, message)
 		}
@@ -269,6 +288,9 @@ func (c *BackendConn) ListGroups() ([]GroupInfo, error) {
 
 	code, message, err := c.TextConn.ReadCodeLine(215)
 	if err != nil {
+		if code == AuthRequired {
+			return nil, authRequiredErr("LIST", code, message)
+		}
 		return nil, fmt.Errorf("failed to read LIST response: %w", err)
 	}
 
@@ -407,6 +429,9 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 		if code == 423 {
 			return nil, fmt.Errorf("failed to read XOVER response: %w: %w", err, ErrNoArticlesInRange)
 		}
+		if code == AuthRequired {
+			return nil, authRequiredErr("XOVER", code, message)
+		}
 		return nil, fmt.Errorf("failed to read XOVER response: %w", err)
 	}
 
@@ -484,6 +509,9 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderL
 
 	code, message, err := c.TextConn.ReadCodeLine(221)
 	if err != nil {
+		if code == AuthRequired {
+			return nil, authRequiredErr("XHDR", code, message)
+		}
 		return nil, fmt.Errorf("failed to read XHDR response: %w", err)
 	}
 
@@ -645,6 +673,9 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 
 	code, message, err := c.TextConn.ReadCodeLine(221)
 	if err != nil {
+		if code == AuthRequired {
+			return authRequiredErr("XHDR", code, message)
+		}
 		return fmt.Errorf("failed to read XHDR response: %w", err)
 	}
 
@@ -732,6 +763,9 @@ func (c *BackendConn) ListGroup(groupName string, start, end int64) ([]int64, er
 
 	code, message, err := c.TextConn.ReadCodeLine(211)
 	if err != nil {
+		if code == AuthRequired {
+			return nil, authRequiredErr("LISTGROUP", code, message)
+		}
 		return nil, fmt.Errorf("failed to read LISTGROUP response: %w", err)
 	}
 
