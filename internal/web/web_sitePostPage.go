@@ -2,19 +2,43 @@
 package web
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
-	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/common"
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 	"github.com/go-while/go-pugleaf/internal/processor"
 	"github.com/go-while/go-pugleaf/internal/utils"
 )
+
+var WebPostingBackOff = 42 * time.Second // TODO: make configurable
+
+// maxWebPostSubjectOctets is the longest Subject a web post accepts: the stored header line
+// "Subject: <value>" must stay within the RFC 5322 line limit of 998 octets. A longer Subject
+// is refused (the poster shortens it), not folded: a word longer than the limit cannot be
+// folded, and a silently cut Subject would post something the user did not write.
+const maxWebPostSubjectOctets = 998 - len("Subject: ")
+
+// cutToOctets returns s cut to at most n bytes without splitting a UTF-8 sequence.
+func cutToOctets(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
 
 // PostPageData represents data for posting page
 type PostPageData struct {
@@ -34,14 +58,29 @@ type PostPageData struct {
 }
 
 // sitePostPage handles the "/SitePost" route to display the posting form
-func (s *WebServer) sitePostPage(c *gin.Context) {
+func (s *WebServer) sitePostPage(c *Context) {
 	// Check if user is authenticated
 	session := s.getWebSession(c)
 	if session == nil {
 		c.Redirect(http.StatusFound, "/login?redirect=/SitePost")
 		return
 	}
-
+	user, err := s.DB.GetUserByID(session.User.ID)
+	if err != nil {
+		log.Printf("Failed to get user by ID: %v", err)
+		c.Redirect(http.StatusFound, "/login")
+		return
+	}
+	if user.NoPosting > 0 || user.Disabled > 0 {
+		session.SetError("Your account is not permitted to post")
+		c.Redirect(http.StatusFound, "/profile")
+		return
+	}
+	if user.LastPostUnix > time.Now().Add(-WebPostingBackOff).Unix() {
+		session.SetError(fmt.Sprintf("You can only post once every %d seconds", int(WebPostingBackOff.Seconds())))
+		c.Redirect(http.StatusFound, "/profile")
+		return
+	}
 	// Get prefilled newsgroup from POST form data (from "New Thread" button)
 	prefilledNewsgroup := c.PostForm("newsgroup")
 
@@ -50,30 +89,56 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	replyToMessageID := c.PostForm("message_id")
 	isReply := replyToArticleNum != "" && replyToMessageID != ""
 
-	var err error
 	article := &models.Article{}
+	replyPrefillError := "" // set when the replied-to article is hidden for this user (D2)
 	if isReply {
 		// Get the original article to extract subject and body for reply
-		if articleNum, err := strconv.ParseInt(replyToArticleNum, 10, 64); err == nil {
+		// Only open the group DB of an existing, active group: GetGroupDB creates files for unknown names
+		groupOK := processor.IsValidGroupName(prefilledNewsgroup)
+		if groupOK {
+			if ng, err := s.DB.GetActiveNewsgroupByName(prefilledNewsgroup); err != nil || ng == nil {
+				groupOK = false
+			}
+		}
+		if !groupOK {
+			log.Printf("[WEB]: SitePost reply prefill: newsgroup %q is not a valid active group", prefilledNewsgroup)
+		} else if articleNum, err := strconv.ParseInt(replyToArticleNum, 10, 64); err == nil {
 			// Get group database connection
-			if groupDBs, err := s.DB.GetGroupDBs(prefilledNewsgroup); err == nil {
-				defer groupDBs.Return(s.DB)
-				if reply_article, err := s.DB.GetArticleByNum(groupDBs, articleNum); err == nil {
-					// Handle subject with "Re: " prefix
-					if !strings.HasPrefix(strings.ToLower(reply_article.Subject), "re:") {
-						article.Subject = "Re: " + models.ConvertToUTF8(reply_article.Subject)
+			if groupDB, err := s.DB.GetGroupDB(prefilledNewsgroup); err == nil {
+				defer groupDB.Return()
+				// Hidden articles are not quoted for non-admins (flags from the group DB, not the cached article)
+				_, hide, flagErr := s.DB.GetArticleFlags(groupDB, articleNum)
+				if reply_article, err := s.DB.GetArticleByNum(groupDB, articleNum); err == nil && (flagErr != nil || s.articleHiddenFor(c, hide)) {
+					if flagErr != nil && !errors.Is(flagErr, sql.ErrNoRows) {
+						log.Printf("[WEB]: SitePost reply prefill: GetArticleFlags(%s/%d): %v", prefilledNewsgroup, articleNum, flagErr)
 					}
+					replyPrefillError = "Article not found"
+				} else if err == nil {
+					// The article may be shared through the article cache: read it under its lock.
+					reply_article.Mux.RLock()
+					replySubject, replyBody, replyHeaders := reply_article.Subject, reply_article.BodyText, reply_article.HeadersJSON
+					replyFrom, replyDate := reply_article.FromHeader, reply_article.DateString
+					reply_article.Mux.RUnlock()
+					// Handle subject with "Re: " prefix
+					if !strings.HasPrefix(strings.ToLower(replySubject), "re:") {
+						article.Subject = "Re: " + models.ConvertToUTF8(replySubject)
+					} else {
+						article.Subject = models.ConvertToUTF8(replySubject)
+					}
+					// The submit refuses a longer Subject: start the form within the limit.
+					article.Subject = cutToOctets(article.Subject, maxWebPostSubjectOctets)
 					// Quote the original message body
-					if reply_article.BodyText != "" {
-						// Clean the body text first to remove HTML entities
-						cleanBodyText := models.ConvertToUTF8(reply_article.BodyText)
+					if replyBody != "" {
+						// Decode the body like the article page shows it (its Content-Transfer-Encoding
+						// and charset); encoded words and HTML entities in a body are text.
+						cleanBodyText := models.DecodeBodyText(replyBody, replyHeaders)
 						lines := strings.Split(cleanBodyText, "\n")
 						var quotedLines []string
 
 						// Add header line with properly decoded FromHeader for NNTP posting
-						cleanFromHeader := models.ConvertToUTF8(reply_article.FromHeader)
+						cleanFromHeader := models.ConvertToUTF8(replyFrom)
 						quotedLines = append(quotedLines, fmt.Sprintf("On %s, %s wrote:",
-							reply_article.DateString, cleanFromHeader))
+							replyDate, cleanFromHeader))
 						quotedLines = append(quotedLines, "")
 
 						// Quote each line with "> "
@@ -87,7 +152,10 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 						article.BodyText = strings.Join(quotedLines, "\n")
 					}
 				} else {
+					// A missing article gets the same message as a hidden one, so the
+					// form does not tell "hidden" from "missing" (D2).
 					log.Printf("Warning: Failed to get article for reply: %v", err)
+					replyPrefillError = "Article not found"
 				}
 			} else {
 				log.Printf("Warning: Failed to get group database for reply: %v", err)
@@ -96,7 +164,7 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	}
 
 	// Get max article size from database config
-	maxArticleSizeStr, err := s.DB.GetConfigValue("WebPostMaxArticleSize")
+	maxArticleSizeStr, err := s.DB.GetConfigValue(config.CFG_KEY_WEBPOSTSIZE)
 	if err != nil {
 		log.Printf("Warning: Failed to get WebPostMaxArticleSize config in sitePostPage, using default: %v", err)
 		maxArticleSizeStr = "32768" // fallback to default
@@ -105,7 +173,7 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 	// Create template data with no errors (this is just displaying the form)
 	pageTitle := "New Thread"
 	if isReply {
-		pageTitle = "Reply to"
+		pageTitle = fmt.Sprintf("Reply to: [%s] %s)", replyToArticleNum, replyToMessageID)
 	}
 	var prefilledBodyStr string
 	if isReply && len(article.BodyText) > 0 {
@@ -123,7 +191,7 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 		PrefilledNewsgroup:    prefilledNewsgroup,
 		PrefilledSubject:      prefilledSubjectStr,
 		PrefilledBody:         prefilledBodyStr,
-		Error:                 "", // No errors when just displaying the form
+		Error:                 replyPrefillError,
 		Success:               "", // No success message when just displaying the form
 		WebPostMaxArticleSize: maxArticleSizeStr,
 		IsReply:               isReply,
@@ -132,27 +200,30 @@ func (s *WebServer) sitePostPage(c *gin.Context) {
 		ReplySubject:          prefilledSubjectStr,
 	}
 
-	// Load and render the posting form template
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	// Render the posting form template
+	s.renderPage(c, http.StatusOK, data, "sitepost.html")
 }
 
 // sitePostSubmit handles the POST submission of new articles from web interface
-func (s *WebServer) sitePostSubmit(c *gin.Context) {
+func (s *WebServer) sitePostSubmit(c *Context) {
 	// Check if user is authenticated
 	session := s.getWebSession(c)
 	if session == nil {
 		c.Redirect(http.StatusFound, "/login")
 		return
 	}
+	user, err := s.DB.GetUserByID(session.User.ID)
+	if err != nil {
+		log.Printf("Failed to get user by ID: %v", err)
+		c.Redirect(http.StatusFound, "/login")
+		return
+	}
 	// Get form data
 	subject := strings.TrimSpace(c.PostForm("subject"))
 	body := strings.TrimSpace(c.PostForm("body"))
+	// Browsers submit textarea values with CRLF line ends: store LF only, so Lines and the
+	// :bytes size (WireArticleSize adds the CRLF itself) count each line end once.
+	body = strings.ReplaceAll(body, "\r\n", "\n")
 	newsgroupsStr := strings.TrimSpace(c.PostForm("newsgroups"))
 	//log.Printf("User %s is posting to newsgroups: %v, subject: %s", session.User.Username, newsgroupsStr, subject)
 
@@ -160,55 +231,97 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 	replyTo := strings.TrimSpace(c.PostForm("reply_to"))
 	messageID := strings.TrimSpace(c.PostForm("message_id"))
 	isReply := replyTo != "" && messageID != ""
+	var errors []string
+
+	// Header values end up in HeadersJSON (split on "\n" by the NNTP server): validate them
+	// unconditionally so the message is shown even when other errors exist.
+	if err := validatePostHeaders(subject, messageID, isReply); err != nil {
+		errors = append(errors, err.Error())
+	}
+	if strings.ContainsRune(body, 0) {
+		errors = append(errors, "Message body contains invalid characters")
+	}
+
+	abuseMail, err := s.DB.GetConfigValue(config.CFG_KEY_ABUSEMAIL)
+	if err != nil {
+		log.Printf("Warning: Failed to get AbuseMail config: %v", err)
+	}
+	if abuseMail == "" || abuseMail == "abuse@invalid.invalid" {
+		errors = append(errors, "System Abuse email is not configured. Please contact the administrator.")
+	}
+	if strings.ContainsAny(abuseMail, "\r\n") || strings.ContainsAny(processor.LocalNNTPHostname, "\r\n") {
+		log.Printf("[WEB]: SitePost: AbuseMail or NNTP hostname contains CR/LF, refusing to post")
+		errors = append(errors, "Server configuration error: invalid AbuseMail or hostname")
+	}
 
 	// Get max article size from database config
-	maxArticleSizeStr, err := s.DB.GetConfigValue("WebPostMaxArticleSize")
+	maxArticleSizeStr, err := s.DB.GetConfigValue(config.CFG_KEY_WEBPOSTSIZE)
 	if err != nil {
-		log.Printf("Warning: Failed to get WebPostMaxArticleSize config, using default: %v", err)
-		maxArticleSizeStr = "32768" // fallback to default
+		log.Printf("Warning: Failed to get WebPostMaxArticleSize config: %v", err)
 	}
 
-	maxArticleSize := 32768 // default fallback
+	maxArticleSize := -1
 	if parsed, err := strconv.Atoi(maxArticleSizeStr); err == nil && parsed > 0 {
-		maxArticleSize = parsed
+		if parsed >= 1000 && parsed <= 16*1024*1024 {
+			maxArticleSize = parsed
+		}
 	}
 
-	// Validate required fields
-	var errors []string
-	if subject == "" {
-		errors = append(errors, "Subject is required")
+	if maxArticleSize <= 0 {
+		errors = append(errors, "Server configuration error: invalid max WebPostMaxArticleSize")
+		log.Printf("Warning: WebPostMaxArticleSize config value is out of valid range (1000-16777216)")
 	}
-	if len(subject) > 72 {
-		errors = append(errors, "Subject must be less than 72 characters")
-	}
-	if body == "" {
-		errors = append(errors, "Message body is required")
-	}
-	if len(body) > maxArticleSize {
-		errors = append(errors, fmt.Sprintf("Message body must be less than %d bytes", maxArticleSize))
-	}
-	if newsgroupsStr == "" {
-		errors = append(errors, "At least one newsgroup is required")
+
+	if len(errors) == 0 {
+		// Validate required fields
+		if subject == "" {
+			errors = append(errors, "Subject is required")
+		}
+		if len(subject) > maxWebPostSubjectOctets {
+			errors = append(errors, fmt.Sprintf("Subject limited to %d bytes", maxWebPostSubjectOctets))
+		}
+		if body == "" {
+			errors = append(errors, "Message body is required")
+		}
+		if len(body) > maxArticleSize {
+			errors = append(errors, fmt.Sprintf("Message body must be less than %d bytes", maxArticleSize))
+		}
+		if newsgroupsStr == "" {
+			errors = append(errors, "At least one newsgroup is required")
+		}
+		if user.NoPosting > 0 || user.Disabled > 0 {
+			errors = append(errors, "Your account is not permitted to post")
+		}
+		if user.LastPostUnix > time.Now().Add(-WebPostingBackOff).Unix() {
+			errors = append(errors, fmt.Sprintf("You can only post once every %d seconds", int(WebPostingBackOff.Seconds())))
+		}
 	}
 
 	// Parse newsgroups (space or comma separated)
 	var newsgroups []string
-	if newsgroupsStr != "" {
+	if len(errors) == 0 && newsgroupsStr != "" {
 		// Replace commas with spaces and split
 		newsgroupsStr = strings.ReplaceAll(newsgroupsStr, ",", " ")
 		parts := strings.FieldsSeq(newsgroupsStr)
 		for part := range parts {
 			if part != "" {
-				newsgroups = append(newsgroups, part)
+				if processor.IsValidGroupName(part) {
+					newsgroups = append(newsgroups, part)
+				} else {
+					errors = append(errors, "Invalid newsgroup name: "+part)
+					break
+				}
 			}
 		}
+		// Only report this when parsing actually ran and found nothing: otherwise it was
+		// added next to an unrelated error (for example "Invalid reply message-id"), which
+		// skipped the parse block in the first place.
+		if len(errors) == 0 && len(newsgroups) == 0 {
+			errors = append(errors, "No valid newsgroups specified")
+		}
 	}
-
-	if len(newsgroups) == 0 {
-		errors = append(errors, "No valid newsgroups specified")
-	}
-	if len(newsgroups) > processor.MaxCrossPosts {
-		errors = append(errors, fmt.Sprintf("You can post to a maximum of %d newsgroups at once", processor.MaxCrossPosts))
+	if maxCross := s.DB.MaxCrossPosts(); len(newsgroups) > maxCross {
+		errors = append(errors, fmt.Sprintf("You can post to a maximum of %d newsgroups at once", maxCross))
 	}
 
 	if len(errors) == 0 {
@@ -217,11 +330,19 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		for _, newsgroup := range newsgroups {
 			ng, err := s.DB.GetNewsgroupByName(newsgroup)
 			if err != nil {
-				errors = append(errors, fmt.Sprintf("Newsgroup '%s' does not exist", newsgroup))
+				errors = append(errors, fmt.Sprintf("Newsgroup '%s' does not exist.", newsgroup))
 				continue
 			}
 			if !ng.Active {
-				errors = append(errors, fmt.Sprintf("Newsgroup '%s' is not active for posting", newsgroup))
+				errors = append(errors, fmt.Sprintf("Newsgroup '%s' is not active.", newsgroup))
+				continue
+			}
+			if ng.Status == "m" || ng.Status == "mod" || ng.Status == "moderated" {
+				errors = append(errors, fmt.Sprintf("Newsgroup '%s' is moderated.", newsgroup))
+				continue
+			}
+			if ng.Status == "n" || ng.Status == "x" {
+				errors = append(errors, fmt.Sprintf("Newsgroup '%s' does not allow posting.", newsgroup))
 				continue
 			}
 			validNewsgroups = append(validNewsgroups, newsgroup)
@@ -231,6 +352,30 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		// Check if we have any valid newsgroups after validation
 		if len(newsgroups) == 0 && len(errors) == 0 {
 			errors = append(errors, "No valid active newsgroups found")
+		}
+	}
+	nowTime := time.Now()
+	now := nowTime.Unix()
+	nonce := strconv.FormatInt(now, 10)
+	hashedUser, err := s.DB.ComputeHashedUsername(session.User.Username, nonce)
+	if err != nil {
+		errors = append(errors, "Failed to compute hashed username")
+	}
+	// The server generates the Message-ID (and the Date) before the post is reserved, so a
+	// failure here does not charge the user's back-off.
+	newMessageID, err := common.GenerateMessageID(processor.LocalNNTPHostname)
+	if err != nil {
+		log.Printf("[WEB]: SitePost: %v", err)
+		errors = append(errors, "Failed to generate a message-id")
+	}
+	if len(errors) == 0 {
+		// Atomic back-off check + post count update (concurrent submits can't bypass the back-off)
+		ok, err := s.DB.TryReserveWebPost(user.ID, now, int64(WebPostingBackOff.Seconds()))
+		if err != nil {
+			log.Printf("[WEB]: Failed to update user post count: %v", err)
+			errors = append(errors, "Failed to update post count")
+		} else if !ok {
+			errors = append(errors, fmt.Sprintf("You can only post once every %d seconds", int(WebPostingBackOff.Seconds())))
 		}
 	}
 
@@ -248,66 +393,65 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 			ReplyToMessageID:      messageID,
 		}
 
-		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
-		c.Header("Content-Type", "text/html")
-		err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-		if err != nil {
-			s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		}
+		s.renderPage(c, http.StatusOK, data, "sitepost.html")
 		return
 	}
-	var headers []string
-	headers = append(headers, "Newsgroups: "+strings.Join(newsgroups, ","))
-	// Create article similar to threading.go
-	article := &models.Article{
-		MessageID:   generateMessageID(),
-		Subject:     subject,
-		HeadersJSON: strings.Join(headers, "\n"),
-		FromHeader:  fmt.Sprintf("%s <%s>", session.User.DisplayName, session.User.DisplayName+"@"+processor.LocalNNTPHostname),
-		DateString:  time.Now().Format(time.RFC1123Z),
-		BodyText:    body,
-		IsThrRoot:   !isReply, // Only new threads are thread roots
-		IsReply:     isReply,
-		Lines:       strings.Count(body, "\n") + 1,
-		Bytes:       len(body),
-		Path:        ".POSTED!not-for-mail",
-		ArticleNums: make(map[*string]int64),
-		RefSlice:    []string{},
-		Headers:     make(map[string][]string, 6),
+	displayName := sanitizePostDisplayName(session.User.DisplayName)
+	if displayName != "" {
+		displayName = displayName + " <noreply@pugleaf.net.invalid>"
+	} else {
+		// Fallback if display name is empty
+		displayName = fmt.Sprintf("Lorem Ipsum <oops@%s.invalid>", processor.LocalNNTPHostname)
 	}
-	article.Headers["newsgroups"] = []string{strings.Join(newsgroups, ",")}
-	article.Headers["subject"] = []string{subject}
-	article.Headers["from"] = []string{article.FromHeader}
-	article.Headers["date"] = []string{article.DateString}
-	article.Headers["message-id"] = []string{article.MessageID}
-	// If this is a reply, set up References header
+	linesCount := strings.Count(body, "\n") + 1
+	// If this is a reply, build the References header: original References + original
+	// Message-ID. The value is re-joined from its fields, so no stored whitespace (CR/LF,
+	// folding) of the original References reaches the header block.
+	var references string
+	refSlice := []string{}
 	if isReply {
 		log.Printf("Setting up References header for reply to message ID: %s", messageID)
 		// Try to find the original article to get its References
-		var originalRefs string
-		for _, newsgroup := range newsgroups {
-			groupDBs, err := s.DB.GetGroupDBs(newsgroup)
-			if err != nil {
-				log.Printf("Warning: Failed to get group DB for %s: %v", newsgroup, err)
-				continue
-			}
-			defer groupDBs.Return(s.DB)
+		originalRefs := s.lookupReplyReferences(c, newsgroups, messageID)
+		refSlice = utils.ParseReferences(originalRefs + " " + messageID)
+		references = strings.Join(refSlice, " ")
+	}
+	headers, dateString, bytesCount := buildWebPostHeaders(webPostHeaderInput{
+		Host:       processor.LocalNNTPHostname,
+		From:       displayName,
+		Subject:    subject,
+		MessageID:  newMessageID,
+		References: references,
+		AbuseMail:  abuseMail,
+		HashedUser: hashedUser,
+		Nonce:      nonce,
+		Newsgroups: newsgroups,
+		Now:        nowTime,
+		Body:       body,
+	})
 
-			originalArticle, err := s.DB.GetArticleByMessageID(groupDBs, messageID)
-			if err != nil {
-				log.Printf("Warning: Failed to find original article %s in %s: %v", messageID, newsgroup, err)
-				continue
-			}
-			if originalArticle.References != "" {
-				originalRefs = originalArticle.References
-			}
-			break
-		}
-
-		// Build new References header: original References + original Message-ID
-		article.References = strings.TrimSpace(originalRefs + " " + messageID)
-		article.RefSlice = utils.ParseReferences(article.References)
+	// Create article similar to threading.go
+	article := &models.Article{
+		MessageID:   newMessageID,
+		Subject:     subject,
+		HeadersJSON: strings.Join(headers, "\n"),
+		FromHeader:  displayName,
+		DateString:  dateString,
+		BodyText:    body,
+		IsThrRoot:   !isReply, // Only new threads are thread roots
+		IsReply:     isReply,
+		Lines:       linesCount,
+		Bytes:       bytesCount,
+		Path:        ".POSTED!not-for-mail",
+		ArticleNums: make(map[*string]int64),
+		RefSlice:    refSlice,
+		Headers:     make(map[string][]string, 6),
+	}
+	article.Headers["newsgroups"] = []string{strings.Join(newsgroups, ",")}
+	if isReply {
+		article.References = references
 		article.Headers["references"] = []string{article.References}
+		article.Headers["lines"] = []string{strconv.Itoa(article.Lines)}
 	}
 	//log.Printf("Web posting: User '%s': article='%#v'", session.User.Username, article)
 
@@ -319,8 +463,19 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 
 	default:
 		log.Printf("Warning: Post queue channel is full, article is lost.")
+		// The reservation above already charged a post and started the back-off: give the post
+		// back, but leave a short retry window instead of the user's previous last post time.
+		// WebPostingBackOff is the only per-user throttle on this route, so restoring it fully
+		// would let a client hammer submits while the queue is full; ~5 seconds is enough to
+		// keep that bounded without punishing the user for a server-side failure.
+		releaseTo := now - int64(WebPostingBackOff.Seconds()) + 5
+		if released, err := s.DB.ReleaseWebPost(user.ID, now, releaseTo); err != nil {
+			log.Printf("[WEB]: sitePostSubmit: failed to release post reservation of user %d: %v", user.ID, err)
+		} else if !released {
+			log.Printf("[WEB]: sitePostSubmit: post reservation of user %d not released (lastpost_unix changed)", user.ID)
+		}
 		data := PostPageData{
-			TemplateData:          s.getBaseTemplateData(c, "New Thread"),
+			TemplateData:          s.getBaseTemplateData(c, "Posting failed"),
 			PrefilledNewsgroup:    newsgroupsStr,
 			PrefilledSubject:      subject,
 			PrefilledBody:         body,
@@ -331,12 +486,7 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 			ReplyToMessageID:      messageID,
 		}
 
-		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
-		c.Header("Content-Type", "text/html")
-		err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-		if err != nil {
-			s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		}
+		s.renderPage(c, http.StatusOK, data, "sitepost.html")
 		return
 	}
 
@@ -354,21 +504,149 @@ func (s *WebServer) sitePostSubmit(c *gin.Context) {
 		WebPostMaxArticleSize: strconv.Itoa(maxArticleSize),
 	}
 
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/sitepost.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "sitepost.html")
 }
 
-// generateMessageID creates a unique message ID for web-posted articles
-func generateMessageID() string {
-	random, err := generateRandomHex(8)
-	if err != nil {
-		log.Printf("Error in generateMessageID: generating random hex: %v", err)
-		return fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), processor.LocalNNTPHostname)
+// lookupReplyReferences returns the References header of the article messageID in the first
+// newsgroup that has it (empty when none has it). Each group DB is returned before the next one
+// is opened, so a crosspost never holds several group DBs until the handler ends.
+// An article hidden for the requester (D2: hide > 0 and not an admin, flags read from the
+// group DB like the article routes) gives no References: its thread data is not copied into
+// a reply. The reply still names the message-id itself.
+func (s *WebServer) lookupReplyReferences(c *Context, newsgroups []string, messageID string) string {
+	for _, newsgroup := range newsgroups {
+		groupDB, err := s.DB.GetGroupDB(newsgroup)
+		if err != nil {
+			log.Printf("Warning: Failed to get group DB for %s: %v", newsgroup, err)
+			continue
+		}
+		originalArticle, err := s.DB.GetArticleByMessageID(groupDB, messageID)
+		var hide int
+		var flagErr error
+		if err == nil {
+			_, _, hide, flagErr = s.DB.GetArticleFlagsByMessageID(groupDB, messageID)
+		}
+		groupDB.Return()
+		if err != nil {
+			log.Printf("Warning: Failed to find original article %s in %s: %v", messageID, newsgroup, err)
+			continue
+		}
+		if flagErr != nil {
+			if !errors.Is(flagErr, sql.ErrNoRows) {
+				log.Printf("[WEB]: SitePost references: GetArticleFlagsByMessageID(%s): %v", newsgroup, flagErr)
+			}
+			continue
+		}
+		if s.articleHiddenFor(c, hide) {
+			return ""
+		}
+		// The first group that has the article decides, even when its References are empty.
+		originalArticle.Mux.RLock()
+		refs := originalArticle.References
+		originalArticle.Mux.RUnlock()
+		return refs
 	}
-	return fmt.Sprintf("<%d$%s@%s>", time.Now().UnixNano(), random, processor.LocalNNTPHostname)
+	return ""
+}
+
+// postMessageIDRe matches a single message-id as accepted for replies: printable ASCII
+// without '<', '>' and space between the brackets. Control bytes (CR, LF, NUL, \x0b,
+// \x7f) and non-ASCII are rejected, so nothing can inject a header line. There is no
+// '@' requirement: stored legacy ids such as <bnews.x.1> must stay replyable.
+var postMessageIDRe = regexp.MustCompile(`^<[\x21-\x3B\x3D\x3F-\x7E]{1,248}>$`)
+
+// validatePostHeaders rejects subject and reply message-id values that could inject header lines.
+func validatePostHeaders(subject, messageID string, isReply bool) error {
+	if strings.ContainsAny(subject, "\r\n\x00") {
+		return errors.New("Subject contains invalid characters")
+	}
+	if isReply && (len(messageID) > 250 || !postMessageIDRe.MatchString(messageID)) {
+		return errors.New("Invalid reply message-id")
+	}
+	return nil
+}
+
+// sanitizePostDisplayName makes a user display name safe for the From header:
+// control runes and <>" are dropped, whitespace is collapsed and the result is capped at 64 runes.
+func sanitizePostDisplayName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '<' || r == '>' || r == '"':
+			continue
+		case unicode.IsSpace(r):
+			b.WriteRune(' ')
+		case unicode.IsControl(r) || r == utf8.RuneError:
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	name := strings.Join(strings.Fields(b.String()), " ")
+	if utf8.RuneCountInString(name) > 64 {
+		name = strings.TrimSpace(string([]rune(name)[:64]))
+	}
+	return name
+}
+
+// webPostHeaderInput holds the values of one web post that end up in its header block.
+type webPostHeaderInput struct {
+	Host, From, Subject, MessageID, References, AbuseMail, HashedUser, Nonce string
+	Newsgroups                                                               []string
+	Now                                                                      time.Time
+	Body                                                                     string
+}
+
+// buildWebPostHeaders returns the stored header lines (D8 order), the Date value and the RFC 3977 :bytes size.
+//
+// Order: Path, From, Newsgroups, Subject, Date, Message-ID, References (only when set, folded),
+// MIME-Version, Content-Type, Content-Transfer-Encoding, Injection-Date, Injection-Info
+// (folded; continuation lines start with a space; mail-complaints-to only when AbuseMail is
+// set), Lines. There is no Bytes header: the size is returned instead. Date and
+// Injection-Date are the same instant (the server generated Message-ID and Date, RFC 5537
+// §3.5). The caller has rejected CR/LF/NUL in every value.
+func buildWebPostHeaders(in webPostHeaderInput) (lines []string, date string, bytes int) {
+	date = common.FormatNewsDate(in.Now)
+	lines = make([]string, 0, 16)
+	lines = append(lines,
+		"Path: .POSTED!not-for-mail",
+		"From: "+in.From,
+		"Newsgroups: "+strings.Join(in.Newsgroups, ","),
+		"Subject: "+in.Subject,
+		"Date: "+date,
+		"Message-ID: "+in.MessageID,
+	)
+	if in.References != "" {
+		// Folded like common.ReconstructHeaders (a new continuation line, starting with a
+		// space, when the next id would pass 78 columns), so a deep reply chain never yields
+		// a line over 998 octets. Every line carries at least one id.
+		refline := "References:"
+		for i, ref := range strings.Fields(in.References) {
+			if i > 0 && len(refline)+1+len(ref) > 78 {
+				lines = append(lines, refline)
+				refline = ""
+			}
+			refline += " " + ref
+		}
+		lines = append(lines, refline)
+	}
+	lines = append(lines,
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=\"UTF-8\"",
+		"Content-Transfer-Encoding: 8bit",
+		"Injection-Date: "+date,
+		"Injection-Info: "+in.Host+";",
+		" posting-account=\""+in.HashedUser+"\";",
+	)
+	if in.AbuseMail != "" {
+		lines = append(lines,
+			" logging-data=\""+in.Nonce+"\";",
+			" mail-complaints-to=\""+in.AbuseMail+"\"",
+		)
+	} else {
+		lines = append(lines, " logging-data=\""+in.Nonce+"\"")
+	}
+	lines = append(lines, "Lines: "+strconv.Itoa(strings.Count(in.Body, "\n")+1))
+	bytes = common.WireArticleSize(lines, strings.Split(in.Body, "\n"))
+	return lines, date, bytes
 }

@@ -5,45 +5,80 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/go-while/go-pugleaf/internal/config"
+	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // adminPage displays the admin interface
-func (s *WebServer) adminPage(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login?redirect=/admin")
+func (s *WebServer) adminPage(c *Context) {
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
+	session := s.getWebSession(c)
+
+	// Get current user for template
 	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
+	if err != nil {
+		session.SetError("Failed to load user")
 		c.Redirect(http.StatusSeeOther, "/profile")
 		return
 	}
 
-	// Check if user is admin
-	if !s.isAdmin(currentUser) {
-		s.renderError(c, http.StatusForbidden, "Access Denied", "You don't have permission to access the admin interface")
-		return
+	var users []*models.User
+	userSearch := c.Query("user_search")
+	nonce := c.Query("nonce")
+
+	// Only search users if search term is provided and has at least 2 characters
+	if userSearch != "" && len(strings.TrimSpace(userSearch)) >= 2 {
+		var err error
+
+		// If nonce is provided, treat userSearch as a computed hash and search by hash
+		if nonce != "" && len(strings.TrimSpace(nonce)) > 0 {
+			targetHash := strings.TrimSpace(userSearch)
+			nonceValue := strings.TrimSpace(nonce)
+
+			// Search for user by computed hash
+			user, err := s.DB.SearchUserByComputedHash(targetHash, nonceValue)
+			if err != nil {
+				log.Printf("Failed to search user by computed hash: %v", err)
+				s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to search user by computed hash")
+				return
+			}
+
+			if user != nil {
+				users = []*models.User{user}
+			}
+		} else {
+			// Regular search by username, email, or display name
+			users, err = s.DB.SearchUsers(strings.TrimSpace(userSearch), 100) // Limit to 100 results for performance
+			if err != nil {
+				log.Printf("Failed to search users: %v", err)
+				s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to search users")
+				return
+			}
+		}
 	}
 
-	// Get all users
-	users, err := s.DB.GetAllUsers()
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to load users")
-		return
+	// Create a map of user IDs to their NNTP users
+	userNNTPMap := make(map[int64]*models.NNTPUser)
+	for _, user := range users {
+		nntpUser, err := s.DB.GetNNTPUserByWebUserID(user.ID)
+		if err == nil && nntpUser != nil {
+			userNNTPMap[user.ID] = nntpUser
+		}
 	}
 
 	// Get newsgroups with pagination and search
 	page := 1
 	pageSize := 50 // Static page size for newsgroups (cache efficiency)
 	searchTerm := c.Query("search")
+	searchDescription := c.Query("search_description") == "on"
 
 	if p := c.Query("ng_page"); p != "" {
 		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
@@ -55,14 +90,18 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	var newsgroupCount int
 
 	if searchTerm != "" {
-		// Use search function if search term provided
-		// For admin page, get all results without pagination for now
-		newsgroups, err = s.DB.SearchNewsgroups(searchTerm, 1000, 0, true) // High limit for admin
+		// Use search function with description option if search term provided
+		newsgroups, err = s.DB.SearchNewsgroupsWithOptions(searchTerm, 1000, 0, true, searchDescription) // High limit for admin
 		if err != nil {
 			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to search newsgroups")
 			return
 		}
-		newsgroupCount = len(newsgroups)
+		// Get accurate count using the same search options
+		newsgroupCount, err = s.DB.CountSearchNewsgroupsWithOptions(searchTerm, searchDescription, true)
+		if err != nil {
+			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to count search results")
+			return
+		}
 
 		// Apply manual pagination to search results
 		start := (page - 1) * pageSize
@@ -117,12 +156,27 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		return
 	}
 
-	// Get all NNTP users
-	nntpUsers, err := s.DB.GetAllNNTPUsers()
+	// Get all cron jobs
+	cronJobs, err := s.DB.GetAllCronJobs()
 	if err != nil {
-		log.Printf("Failed to load NNTP users: %v", err)
-		s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to load NNTP users")
+		log.Printf("Failed to load cron jobs: %v", err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to load cron jobs")
 		return
+	}
+
+	// Get all NNTP users
+	var nntpUsers []*models.NNTPUser
+	nntpUserSearch := c.Query("nntp_user_search")
+
+	// Only search NNTP users if search term is provided and has at least 2 characters
+	if nntpUserSearch != "" && len(strings.TrimSpace(nntpUserSearch)) >= 2 {
+		var err error
+		nntpUsers, err = s.DB.SearchNNTPUsers(strings.TrimSpace(nntpUserSearch), 100) // Limit to 100 results for performance
+		if err != nil {
+			log.Printf("Failed to search NNTP users: %v", err)
+			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to search NNTP users")
+			return
+		}
 	}
 
 	// Get all sections with their group counts (efficient single query)
@@ -144,7 +198,7 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	// Read tab parameter to control active tab in template
 	activeTab := c.Query("tab")
 	if activeTab == "" {
-		activeTab = "users" // or any other default tab you want
+		activeTab = "settings" // or any other default tab you want
 	}
 
 	// Create pagination info for newsgroups
@@ -247,45 +301,62 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	}
 
 	// Get message ID cache statistics
+	// The cache is a fixed set of shards (maps); the older "bucket" keys are kept for the template.
 	var messageIdCacheStats map[string]interface{}
 	if history.MsgIdCache != nil {
-		totalBuckets, occupiedBuckets, items, maxChainLength, loadFactor := history.MsgIdCache.DetailedStats()
+		shards, occupiedShards, items, largestShard, itemsPerShard := history.MsgIdCache.DetailedStats()
 
-		// Calculate utilization percentage (how much of the available capacity is used)
-		utilizationPercent := 0.0
-		if history.UpperLimitMsgIdCacheSize > 0 {
-			utilizationPercent = float64(totalBuckets) / float64(history.UpperLimitMsgIdCacheSize) * 100
+		// share of all items held by the largest shard
+		largestShardPercent := 0.0
+		if items > 0 {
+			largestShardPercent = float64(largestShard) / float64(items) * 100
 		}
-
-		// Calculate bucket occupancy percentage (how many buckets have items)
-		bucketOccupancyPercent := 0.0
-		if totalBuckets > 0 {
-			bucketOccupancyPercent = float64(occupiedBuckets) / float64(totalBuckets) * 100
+		// largest shard relative to the average shard (1.00 = perfectly even distribution)
+		shardSkew := 0.0
+		if itemsPerShard > 0 {
+			shardSkew = float64(largestShard) / itemsPerShard
+		}
+		shardOccupancyPercent := 0.0
+		if shards > 0 {
+			shardOccupancyPercent = float64(occupiedShards) / float64(shards) * 100
 		}
 
 		messageIdCacheStats = map[string]interface{}{
-			"total_buckets":            totalBuckets,
-			"occupied_buckets":         occupiedBuckets,
-			"items":                    items,
-			"max_chain_length":         maxChainLength,
-			"load_factor":              loadFactor,
-			"utilization_percent":      utilizationPercent,
-			"bucket_occupancy_percent": bucketOccupancyPercent,
-			"max_buckets":              history.UpperLimitMsgIdCacheSize,
-			"max_load_factor":          history.MaxLoadFactor,
+			"shards":                shards,
+			"occupied_shards":       occupiedShards,
+			"items":                 items,
+			"largest_shard":         largestShard,
+			"items_per_shard":       itemsPerShard,
+			"largest_shard_percent": largestShardPercent,
+			"shard_skew":            shardSkew,
+			// keys used by admin_statistics.html
+			"total_buckets":            shards,
+			"occupied_buckets":         occupiedShards,
+			"max_chain_length":         largestShard,
+			"load_factor":              itemsPerShard,
+			"utilization_percent":      largestShardPercent,
+			"bucket_occupancy_percent": shardOccupancyPercent,
+			"max_buckets":              shards,
+			"max_load_factor":          shardSkew,
 			"status":                   "active",
 		}
 	} else {
 		messageIdCacheStats = map[string]interface{}{
+			"shards":                   0,
+			"occupied_shards":          0,
+			"items":                    0,
+			"largest_shard":            0,
+			"items_per_shard":          0.0,
+			"largest_shard_percent":    0.0,
+			"shard_skew":               0.0,
 			"total_buckets":            0,
 			"occupied_buckets":         0,
-			"items":                    0,
 			"max_chain_length":         0,
 			"load_factor":              0.0,
 			"utilization_percent":      0.0,
 			"bucket_occupancy_percent": 0.0,
-			"max_buckets":              history.UpperLimitMsgIdCacheSize,
-			"max_load_factor":          history.MaxLoadFactor,
+			"max_buckets":              0,
+			"max_load_factor":          0.0,
 			"status":                   "not initialized",
 		}
 	}
@@ -331,6 +402,30 @@ func (s *WebServer) adminPage(c *gin.Context) {
 		spamPagination = models.NewPaginationInfo(spamPage, spamPageSize, spamCount)
 	}
 
+	// Handle post queue data if on postqueue tab
+	var postQueue []*database.PostQueueEntryWithDetails
+	var queueStats map[string]int
+	statusFilter := c.Query("status_filter")
+	queueSearch := c.Query("search")
+
+	if activeTab == "postqueue" {
+		// Get post queue entries with filtering
+		var err error
+		postQueue, err = s.DB.GetAllPostQueueEntries(100, 0, statusFilter, queueSearch)
+		if err != nil {
+			log.Printf("Failed to load post queue entries: %v", err)
+			s.renderError(c, http.StatusInternalServerError, "Database Error", "Failed to load post queue entries")
+			return
+		}
+
+		// Get queue statistics
+		queueStats, err = s.DB.GetPostQueueStats()
+		if err != nil {
+			log.Printf("Failed to load post queue stats: %v", err)
+			// Don't fail the request, just log the error
+		}
+	}
+
 	// Get registration status
 	registrationEnabled, err := s.DB.IsRegistrationEnabled()
 	if err != nil {
@@ -346,68 +441,189 @@ func (s *WebServer) adminPage(c *gin.Context) {
 	}
 
 	// Get current WebPostMaxArticleSize from database
-	webPostMaxSize, err := s.DB.GetConfigValue("WebPostMaxArticleSize")
+	webPostMaxSize, err := s.DB.GetConfigValue(config.CFG_KEY_WEBPOSTSIZE)
 	if err != nil {
 		log.Printf("Failed to get WebPostMaxArticleSize: %v", err)
 		webPostMaxSize = "32768" // Default to 32KB on error
 	}
 
-	data := AdminPageData{
-		TemplateData:          s.getBaseTemplateData(c, "Admin Interface"),
-		Users:                 users,
-		Newsgroups:            newsgroups,
-		NewsgroupPagination:   newsgroupPagination,
-		NewsgroupSearch:       searchTerm,
-		Providers:             providers,
-		APITokens:             apiTokens,
-		AIModels:              aiModels,
-		NNTPUsers:             nntpUsers,
-		SiteNews:              siteNews,
-		Sections:              sections,
-		SectionGroups:         sectionGroups,
-		SpamArticles:          spamArticles,
-		SpamPagination:        spamPagination,
-		CurrentUser:           currentUser,
-		AdminCount:            s.countAdminUsers(users),
-		EnabledTokensCount:    s.countEnabledAPITokens(apiTokens),
-		ActiveSessions:        s.countActiveSessions(),
-		ActiveNNTPUsers:       s.countActiveNNTPUsers(nntpUsers),
-		PostingNNTPUsers:      s.countPostingNNTPUsers(nntpUsers),
-		Uptime:                s.getUptime(),
-		CacheStats:            cacheStats,
-		NewsgroupCacheStats:   newsgroupCacheStats,
-		ArticleCacheStats:     articleCacheStats,
-		NNTPAuthCacheStats:    nntpAuthCacheStats,
-		MessageIdCacheStats:   messageIdCacheStats,
-		RegistrationEnabled:   registrationEnabled,
-		CurrentHostname:       currentHostname,
-		WebPostMaxArticleSize: webPostMaxSize,
-		Success:               session.GetSuccess(),
-		Error:                 session.GetError(),
-		ActiveTab:             activeTab, // <-- add this field to AdminPageData struct
+	// Get current AbuseMail from database
+	abuseMail, err := s.DB.GetConfigValue(config.CFG_KEY_ABUSEMAIL)
+	if err != nil {
+		log.Printf("Failed to get AbuseMail: %v", err)
+		abuseMail = "" // Default to empty on error
 	}
 
-	// Load modular admin templates
-	tmpl := template.Must(template.ParseFiles(
-		"web/templates/base.html",
-		"web/templates/admin_modular.html",
-		"web/templates/admin_users.html",
-		"web/templates/admin_newsgroups.html",
-		"web/templates/admin_providers.html",
-		"web/templates/admin_apitokens.html",
-		"web/templates/admin_aimodels.html",
-		"web/templates/admin_nntpusers.html",
-		"web/templates/admin_sitenews.html",
-		"web/templates/admin_sections.html",
-		"web/templates/admin_statistics.html",
-		"web/templates/admin_spam.html",
-	))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
+	// Get current WebLocalNNTPServerAddrInfo from database
+	webLocalNNTPServerAddrInfo, err := s.DB.GetConfigValue(config.CFG_KEY_WEBLOCALNNTP)
 	if err != nil {
-		// Log the error but don't render error page since response has started
-		log.Printf("[ERROR] Template execution failed: %v", err)
-		// Write a simple error message that won't break the layout
-		c.Writer.WriteString(`<div class="alert alert-danger">Template Error: ` + err.Error() + `</div>`)
+		log.Printf("Failed to get WebLocalNNTPServerAddrInfo: %v", err)
+		webLocalNNTPServerAddrInfo = "" // Default to empty on error
 	}
+
+	// Get current ReverseProxyAddr from database
+	reverseProxyAddr, err := s.DB.GetConfigValue(config.CFG_KEY_REVERSEPROXY)
+	if err != nil {
+		log.Printf("Failed to get ReverseProxyAddr: %v", err)
+		reverseProxyAddr = "" // Default to empty on error
+	}
+
+	// Get current ReverseProxyIPHeader from database
+	reverseProxyIPHeader, err := s.DB.GetConfigValue(config.CFG_KEY_REVERSEPROXY_IPHEADER)
+	if err != nil {
+		log.Printf("Failed to get ReverseProxyIPHeader: %v", err)
+		reverseProxyIPHeader = "" // Default to empty (X-Forwarded-For) on error
+	}
+
+	// Get current BadBots from database
+	badBots, err := s.DB.GetConfigValue(config.CFG_KEY_BADBOTS)
+	if err != nil {
+		log.Printf("Failed to get BadBots: %v", err)
+		badBots = "" // Default to empty on error
+	}
+
+	// Get current BlockBadBots from database
+	blockBadBotsStr, err := s.DB.GetConfigValue(config.CFG_KEY_BLOCKBADBOTS)
+	if err != nil {
+		log.Printf("Failed to get BlockBadBots: %v", err)
+		blockBadBotsStr = "false" // Default to false on error
+	}
+	blockBadBots := blockBadBotsStr == "true"
+
+	// Get current BadIPs from database
+	badIPs, err := s.DB.GetConfigValue(config.CFG_KEY_BADIPS)
+	if err != nil {
+		log.Printf("Failed to get BadIPs: %v", err)
+		badIPs = "" // Default to empty on error
+	}
+
+	// Get current BlockBadIPs from database
+	blockBadIPsStr, err := s.DB.GetConfigValue(config.CFG_KEY_BLOCKBADIPS)
+	if err != nil {
+		log.Printf("Failed to get BlockBadIPs: %v", err)
+		blockBadIPsStr = "false" // Default to false on error
+	}
+	blockBadIPs := blockBadIPsStr == "true"
+
+	// Get current API Enabled from database
+	apiEnabledStr, err := s.DB.GetConfigValue(config.CFG_KEY_API_ENABLED)
+	if err != nil {
+		log.Printf("Failed to get APIEnabled: %v", err)
+		apiEnabledStr = "false" // Default to false on error
+	}
+	apiEnabled := apiEnabledStr == "true"
+
+	// Get total users count for statistics
+	totalUsersCount := s.DB.GetUsersCount()
+	// Get total admin users count for statistics
+	totalAdminCount := s.DB.GetAdminUsersCount()
+
+	data := AdminPageData{
+		TemplateData:               s.getBaseTemplateData(c, "Admin Interface"),
+		Users:                      users,
+		UserSearch:                 userSearch,
+		Nonce:                      nonce,
+		UserNNTPMap:                userNNTPMap,
+		Newsgroups:                 newsgroups,
+		NewsgroupPagination:        newsgroupPagination,
+		NewsgroupSearch:            searchTerm,
+		SearchDescription:          searchDescription,
+		Providers:                  providers,
+		APITokens:                  apiTokens,
+		AIModels:                   aiModels,
+		NNTPUsers:                  nntpUsers,
+		NNTPUserSearch:             nntpUserSearch,
+		SiteNews:                   siteNews,
+		CronJobs:                   cronJobs,
+		CronEdit:                   s.CronEdit,
+		Sections:                   sections,
+		SectionGroups:              sectionGroups,
+		SpamArticles:               spamArticles,
+		SpamPagination:             spamPagination,
+		CurrentUser:                currentUser,
+		TotalUsersCount:            totalUsersCount,
+		AdminCount:                 s.countAdminUsers(users),
+		TotalAdminCount:            totalAdminCount,
+		EnabledTokensCount:         s.countEnabledAPITokens(apiTokens),
+		ActiveSessions:             s.countActiveSessions(),
+		ActiveNNTPUsers:            s.countActiveNNTPUsers(nntpUsers),
+		PostingNNTPUsers:           s.countPostingNNTPUsers(nntpUsers),
+		Uptime:                     s.getUptime(),
+		CacheStats:                 cacheStats,
+		NewsgroupCacheStats:        newsgroupCacheStats,
+		ArticleCacheStats:          articleCacheStats,
+		NNTPAuthCacheStats:         nntpAuthCacheStats,
+		MessageIdCacheStats:        messageIdCacheStats,
+		RegistrationEnabled:        registrationEnabled,
+		CurrentHostname:            currentHostname,
+		WebPostMaxArticleSize:      webPostMaxSize,
+		MaxCrossPosts:              s.DB.MaxCrossPosts(),
+		MaxCrossPostsLimit:         config.MaxCrossPostsLimit,
+		AbuseMail:                  abuseMail,
+		WebLocalNNTPServerAddrInfo: webLocalNNTPServerAddrInfo,
+		ReverseProxyAddr:           reverseProxyAddr,
+		ReverseProxyIPHeader:       reverseProxyIPHeader,
+		BadBots:                    badBots,
+		BlockBadBots:               blockBadBots,
+		BadIPs:                     badIPs,
+		BlockBadIPs:                blockBadIPs,
+		APIEnabled:                 apiEnabled,
+		// Form field constants for admin settings
+		FormFieldHostname:             config.FORM_FIELD_HOSTNAME,
+		FormFieldWebPostSize:          config.FORM_FIELD_WEBPOSTSIZE,
+		FormFieldMaxCrossPosts:        config.FORM_FIELD_MAXCROSSPOSTS,
+		FormFieldAbuseMail:            config.FORM_FIELD_ABUSEMAIL,
+		FormFieldWebLocalNNTP:         config.FORM_FIELD_WEBLOCALNNTP,
+		FormFieldReverseProxy:         config.FORM_FIELD_REVERSEPROXY,
+		FormFieldReverseProxyIPHeader: config.FORM_FIELD_REVERSEPROXY_IPHEADER,
+		FormFieldRegistration:         config.FORM_FIELD_REGISTRATION,
+		FormFieldBadBots:              config.FORM_FIELD_BADBOTS,
+		FormFieldBlockBadBots:         config.FORM_FIELD_BLOCKBADBOTS,
+		FormFieldBadIPs:               config.FORM_FIELD_BADIPS,
+		FormFieldBlockBadIPs:          config.FORM_FIELD_BLOCKBADIPS,
+		FormFieldAPIEnabled:           config.FORM_FIELD_API_ENABLED,
+		PostQueue:                     postQueue,
+		QueueStats:                    queueStats,
+		StatusFilter:                  statusFilter,
+		QueueSearch:                   queueSearch,
+		Success:                       session.GetSuccess(),
+		Error:                         session.GetError(),
+		ActiveTab:                     activeTab,
+	}
+
+	// Render the modular admin templates (cached under the "admin" name with adminTemplateFuncs)
+	s.renderTemplateSet(c, http.StatusOK, "admin", adminTemplateFuncs, "base.html", data, adminTemplateFiles...)
+}
+
+// adminTemplateFuncs are the template functions of the admin page. They hold no request state,
+// so the parsed set can be cached.
+var adminTemplateFuncs = template.FuncMap{
+	"since": func(t time.Time) int64 {
+		return int64(time.Since(t).Seconds())
+	},
+	"div": func(a, b int64) int64 {
+		if b == 0 {
+			return 0
+		}
+		return a / b
+	},
+}
+
+// adminTemplateFiles are the modular admin templates (names inside web/templates).
+var adminTemplateFiles = []string{
+	"base.html",
+	"admin_modular.html",
+	"admin_users.html",
+	"admin_newsgroups.html",
+	"admin_providers.html",
+	"admin_apitokens.html",
+	"admin_aimodels.html",
+	"admin_nntpusers.html",
+	"admin_sitenews.html",
+	"admin_sections.html",
+	"admin_statistics.html",
+	"admin_spam.html",
+	"admin_settings.html",
+	"admin_crons.html",
+	"admin_postqueue.html",
 }

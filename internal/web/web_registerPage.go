@@ -2,12 +2,11 @@ package web
 
 import (
 	"fmt"
-	"html/template"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -20,11 +19,12 @@ type RegisterPageData struct {
 }
 
 // registerPage displays the registration form
-func (s *WebServer) registerPage(c *gin.Context) {
+func (s *WebServer) registerPage(c *Context) {
 	// Check if registration is enabled
 	registrationEnabled, err := s.DB.IsRegistrationEnabled()
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
+		log.Printf("[WEB]: registerPage: IsRegistrationEnabled: %v", err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 	if !registrationEnabled {
@@ -42,20 +42,16 @@ func (s *WebServer) registerPage(c *gin.Context) {
 		TemplateData: s.getBaseTemplateData(c, "Register"),
 	}
 
-	// Load template individually
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/register.html"))
-	c.Header("Content-Type", "text/html")
-	if err := tmpl.ExecuteTemplate(c.Writer, "base.html", data); err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template Error", err.Error())
-	}
+	s.renderPage(c, http.StatusOK, data, "register.html")
 }
 
 // registerSubmit processes registration form submission
-func (s *WebServer) registerSubmit(c *gin.Context) {
+func (s *WebServer) registerSubmit(c *Context) {
 	// Check if registration is enabled
 	registrationEnabled, err := s.DB.IsRegistrationEnabled()
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
+		log.Printf("[WEB]: registerSubmit: IsRegistrationEnabled: %v", err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 	if !registrationEnabled {
@@ -122,20 +118,21 @@ func (s *WebServer) registerSubmit(c *gin.Context) {
 	// Create user
 	user, err := s.createUser(username, email, passwordHash, username)
 	if err != nil {
-		fmt.Printf("ERROR: Failed to create user %s: %v\n", username, err)
-		s.renderRegisterError(c, "Failed to create user: "+err.Error(), username, email)
+		log.Printf("[WEB]: Failed to create user '%x': %v", username, err)
+		s.renderRegisterError(c, "Failed to create user", username, email)
 		return
 	}
 	fmt.Printf("INFO: Successfully created user %s with ID %d\n", user.Username, user.ID)
 
-	// Create session
-	err = s.createWebSession(c, int64(user.ID))
+	// Log the new user in (users.session_id, the session store getWebSession reads)
+	sessionID, err := s.DB.CreateUserSession(user.ID, c.ClientIP())
 	if err != nil {
-		// Log the actual error for debugging
-		fmt.Printf("ERROR: Failed to create web session for user %s (ID: %d): %v\n", user.Username, user.ID, err)
-		s.renderRegisterError(c, "Registration successful but failed to log in: "+err.Error(), username, email)
+		log.Printf("[WEB]: Failed to create web session for user %s (ID: %d): %v", user.Username, user.ID, err)
+		s.renderRegisterError(c, "Registration successful but failed to log in. Please log in.", username, email)
 		return
 	}
+	s.setSessionCookie(c, sessionID)
+	s.clearRequestSession(c)
 
 	// Redirect to home
 	c.Redirect(http.StatusSeeOther, "/")
@@ -148,6 +145,11 @@ func (s *WebServer) createUser(username, email, passwordHash, displayName string
 		Email:        email,
 		PasswordHash: passwordHash,
 		DisplayName:  displayName,
+		Verified:     0, // Default not verified
+		Disabled:     0, // Default not disabled
+		NoPosting:    0, // Default can post
+		PostCount:    0, // Default no posts
+		LastPostUnix: 0, // Default no last post
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -174,7 +176,7 @@ func (s *WebServer) createUser(username, email, passwordHash, displayName string
 }
 
 // renderRegisterError renders register page with error
-func (s *WebServer) renderRegisterError(c *gin.Context, errorMsg, username, email string) {
+func (s *WebServer) renderRegisterError(c *Context, errorMsg, username, email string) {
 	data := RegisterPageData{
 		TemplateData: s.getBaseTemplateData(c, "Register"),
 		Error:        errorMsg,
@@ -182,11 +184,5 @@ func (s *WebServer) renderRegisterError(c *gin.Context, errorMsg, username, emai
 		Email:        email,
 	}
 
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/register.html"))
-	c.Header("Content-Type", "text/html")
-	c.Status(http.StatusBadRequest)
-	err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template Error", err.Error())
-	}
+	s.renderPage(c, http.StatusBadRequest, data, "register.html")
 }

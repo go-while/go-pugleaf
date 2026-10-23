@@ -2,12 +2,14 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
@@ -20,59 +22,126 @@ import (
 var appVersion = "-unset-"
 
 func main() {
+	os.Exit(run(os.Args[1:]))
+}
+
+// run returns the process exit code for the command line args (without the program name):
+// 0 ok, 1 error, 2 bad flags, 130 one-shot run stopped by a signal (before the batch started,
+// or the batch returned postmgr.ErrStopped). A batch that finished before the signal arrived
+// exits 0. SIGINT/SIGTERM are handled from the same point as before (after the cleanup flags),
+// see runWith.
+func run(args []string) int {
+	return runWith(args, nil)
+}
+
+// runWith is run with an optional shutdown channel. stopChan == nil installs the SIGINT/SIGTERM
+// handler (notifyShutdown) after the cleanup flags are handled, as the tool always did; tests pass
+// their own channel and close it instead of sending a signal.
+// Nothing after OpenDatabase exits the process: every return goes through the deferred
+// shutdown, which runs after the deferred close of the posting pools.
+func runWith(args []string, stopChan <-chan struct{}) (code int) {
 	config.AppVersion = appVersion
 	database.DBidleTimeOut = 15 * time.Second
 	database.NO_CACHE_BOOT = true // prevents booting caches
 	log.Printf("Starting go-pugleaf Post Queue Tool (version %s)", config.AppVersion)
 
 	// Command line flags
+	fs := flag.NewFlagSet("post-queue", flag.ContinueOnError)
 	var (
-		showHelp = flag.Bool("help", false, "Show usage examples and exit")
-		daemon   = flag.Bool("daemon", false, "Run as a daemon")
-		limit    = flag.Int("max-batch", 100, "Post max N articles in a batch")
+		showHelp      = fs.Bool("help", false, "Show usage examples and exit")
+		daemon        = fs.Bool("daemon", false, "Run as a daemon")
+		limit         = fs.Int("max-batch", 100, "Post max N articles in a batch")
+		cleanupPosted = fs.Bool("cleanup-posted-entries", false, "Delete all successfully posted entries from post_queue table and exit")
+		cleanupOlder  = fs.Int("cleanup-older", 0, "Delete successfully posted post_queue entries older than N days and exit (0 = disabled)")
+		dataDir       = fs.String("data", "./data", "Directory to store database files")
 	)
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		// Parse already printed the error and the usage, like flag.ExitOnError, which exits 0
+		// for -h/-help requests it does not define (flag.ErrHelp) and 2 otherwise.
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
 
 	if *showHelp {
 		showUsageExamples()
-		os.Exit(0)
+		return 0
 	}
 
 	// Initialize database
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+		log.Printf("Failed to initialize database: %v", err)
+		return 1
 	}
-	defer db.Shutdown()
+	defer func() {
+		if !shutdown(db) && code == 0 {
+			code = 1
+		}
+	}()
+
+	// Handle cleanup flags
+	if *cleanupPosted || *cleanupOlder > 0 {
+		if *cleanupPosted && *cleanupOlder > 0 {
+			log.Printf("Cleaning up successfully posted entries AND entries older than %d days from post_queue table...", *cleanupOlder)
+		} else if *cleanupPosted {
+			log.Printf("Cleaning up successfully posted entries from post_queue table...")
+		} else {
+			log.Printf("Cleaning up post_queue entries older than %d days...", *cleanupOlder)
+		}
+
+		deletedCount, err := db.CleanupPostedEntries(*cleanupPosted, *cleanupOlder)
+		if err != nil {
+			log.Printf("Failed to cleanup entries: %v", err)
+			return 1
+		}
+		log.Printf("Successfully deleted %d entries from post_queue table", deletedCount)
+		return 0
+	}
 
 	// Set up signal handling for graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt)
-	shutdownChan := make(chan struct{})
+	shutdownChan := stopChan
+	if shutdownChan == nil {
+		sigShutdown, stopSignals := notifyShutdown()
+		defer stopSignals()
+		shutdownChan = sigShutdown
+	}
+	runDone := make(chan struct{})
+	defer close(runDone)
 
-	go func() {
-		<-sigChan
-		log.Printf("Received shutdown signal, initiating graceful shutdown...")
-		close(shutdownChan)
-	}()
+	// Rows left in_processing by a killed or crashed earlier run are never selected again:
+	// return them to pending before this run selects. This assumes only one post-queue runs
+	// at a time: the web cron scheduler runs the executions of a job one after another
+	// (internal/web/cronjobs.go runJobScheduler waits for executeJob). A second post-queue
+	// started at the same time would reset rows the first one is posting (possible repost).
+	if err := db.ResetAllPostQueueProcessing(); err != nil {
+		log.Printf("Failed to reset stale in_processing post_queue entries: %v", err)
+		return 1
+	}
 
 	// Get providers with posting enabled
 	providers, err := getPostingProviders(db)
 	if err != nil {
-		log.Fatalf("Failed to get posting providers: %v", err)
+		log.Printf("Failed to get posting providers: %v", err)
+		return 1
 	}
 
 	if len(providers) == 0 {
 		log.Printf("No providers with posting enabled found")
-		os.Exit(0)
+		return 0
 	}
 
-	log.Printf("Found %d providers with posting enabled", len(providers))
+	//log.Printf("Found %d providers with posting enabled", len(providers))
 
 	// Create connection pools for posting providers
 	pools, err := createPostingPools(providers)
 	if err != nil {
-		log.Fatalf("Failed to create posting pools: %v", err)
+		log.Printf("Failed to create posting pools: %v", err)
+		return 1
 	}
 	defer func() {
 		for _, pool := range pools {
@@ -84,16 +153,35 @@ func main() {
 	posterManager := postmgr.NewPosterManager(db, pools)
 
 	// Start the posting loop
-	log.Printf("Starting post queue processing...")
+	//log.Printf("Starting post queue processing...")
 
 	if !*daemon {
+		// A signal during startup (reset, providers, pools): don't start the batch at all.
+		select {
+		case <-shutdownChan:
+			log.Printf("Shutdown requested before processing, no posts sent")
+			return 130
+		default:
+		}
+		// A shutdown signal stops the batch: the rows not posted yet go back to pending.
+		go func() {
+			select {
+			case <-shutdownChan:
+				posterManager.Stop()
+			case <-runDone:
+			}
+		}()
 		done, err := posterManager.ProcessPendingPosts(*limit)
+		if errors.Is(err, postmgr.ErrStopped) {
+			log.Printf("Stopped by shutdown signal after %d pending posts, the rest is back to pending", done)
+			return 130
+		}
 		if err != nil {
 			log.Printf("Error processing pending posts: %v", err)
-			os.Exit(1)
+			return 1
 		}
-		log.Printf("Processed %d pending posts", done)
-		os.Exit(0)
+		log.Printf("Post queue run done: %d pending posts worked on (posted + failed)", done)
+		return 0
 	}
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -101,7 +189,41 @@ func main() {
 	wg.Wait()
 
 	log.Printf("Post Queue Tool has shut down gracefully")
+	return 0
+}
 
+// notifyShutdown returns a channel that is closed on SIGINT or SIGTERM, and stop, which ends the
+// watcher goroutine and the signal notification (call it once, when the run returns).
+func notifyShutdown() (shutdownChan <-chan struct{}, stop func()) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	closeChan := make(chan struct{})
+	runDone := make(chan struct{})
+
+	go func() {
+		select {
+		case <-sigChan:
+			log.Printf("Received shutdown signal, initiating graceful shutdown...")
+			close(closeChan)
+		case <-runDone:
+		}
+	}()
+	return closeChan, func() {
+		close(runDone)
+		signal.Stop(sigChan)
+	}
+}
+
+// shutdown stops the database. OpenDatabase adds the batch orchestrators to db.WG,
+// so StopChan must be closed and WG waited for before Shutdown.
+func shutdown(db *database.Database) bool {
+	close(db.StopChan)
+	db.WG.Wait()
+	if err := db.Shutdown(); err != nil {
+		log.Printf("Failed to shutdown database: %v", err)
+		return false
+	}
+	return true
 }
 
 // showUsageExamples displays usage examples
@@ -112,15 +234,29 @@ func showUsageExamples() {
 	fmt.Println()
 	fmt.Println("Basic Usage:")
 	fmt.Println("  ./post-queue")
+	fmt.Println("  ./post-queue -daemon              # Run continuously as daemon")
+	fmt.Println("  ./post-queue -max-batch 50        # Process max 50 articles per batch")
 	fmt.Println()
-	fmt.Println("Advanced Options:")
-	fmt.Println("  ./post-queue -max-providers 5 -max-concurrent 3")
-	fmt.Println("  ./post-queue -retry-attempts 5 -retry-delay 60s")
-	fmt.Println("  ./post-queue -check-interval 30s")
-	fmt.Println("  ./post-queue -dry-run (test mode without actual posting)")
+	fmt.Println("Maintenance:")
+	fmt.Println("  ./post-queue -cleanup-posted-entries         # Delete all successfully posted entries")
+	fmt.Println("  ./post-queue -cleanup-older 7                # Delete posted entries older than 7 days")
+	fmt.Println("  ./post-queue -cleanup-posted-entries -cleanup-older 30  # Delete posted entries older than 30 days")
 	fmt.Println()
-	fmt.Println("Monitoring:")
-	fmt.Println("  ./post-queue -max-concurrent 1 -check-interval 10s")
+	fmt.Println("Data directory:")
+	fmt.Println("  ./post-queue -data ./data-test       # Use another data root (default ./data)")
+	fmt.Println()
+	fmt.Println("Attempts:")
+	fmt.Println("  An entry every provider rejects (441) counts one attempt; connection errors do not count.")
+	fmt.Println("  After PostQueueMaxAttempts attempts (config key, default 5) the entry is parked and no")
+	fmt.Println("  longer posted; retry it on the admin page (Post Queue tab) or raise the key.")
+	fmt.Println()
+	fmt.Println("Flags:")
+	fmt.Println("  -help                     Show this help message")
+	fmt.Println("  -daemon                   Run as continuous daemon")
+	fmt.Println("  -max-batch N              Process max N articles per batch (default: 100)")
+	fmt.Println("  -cleanup-posted-entries   Delete all successfully posted entries and exit")
+	fmt.Println("  -cleanup-older N          Delete posted entries older than N days and exit")
+	fmt.Println("  -data DIR                 Directory to store database files (default: ./data)")
 	fmt.Println()
 }
 
@@ -134,8 +270,7 @@ func getPostingProviders(db *database.Database) ([]*models.Provider, error) {
 	var postingProviders []*models.Provider
 	for _, p := range allProviders {
 		if p.Enabled && p.Posting && p.Host != "" && p.Port > 0 && p.MaxConns > 0 {
-			log.Printf("Found posting provider: %s (ID: %d, Host: %s, Port: %d, MaxConns: %d)",
-				p.Name, p.ID, p.Host, p.Port, p.MaxConns)
+			//log.Printf("Found posting provider: %s (ID: %d, Host: %s, Port: %d, MaxConns: %d)",	p.Name, p.ID, p.Host, p.Port, p.MaxConns)
 			postingProviders = append(postingProviders, p)
 		}
 	}
@@ -189,9 +324,8 @@ func createPostingPools(providers []*models.Provider) ([]*nntp.Pool, error) {
 		}
 
 		pool := nntp.NewPool(backendConfig)
-		pool.StartCleanupWorker(5 * time.Second)
 		pools = append(pools, pool)
-		log.Printf("Created posting pool for provider '%s' with max %d connections", p.Name, p.MaxConns)
+		//log.Printf("Created posting pool for provider '%s' with max %d connections", p.Name, p.MaxConns)
 	}
 
 	return pools, nil

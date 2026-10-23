@@ -2,13 +2,19 @@
 
 This package implements Matrix protocol support for bridging NNTP newsgroups to Matrix rooms.
 
+> **Status: stub, not wired in.** Nothing reaches this package at runtime: the `-enable-matrix`,
+> `-matrix-homeserver`, `-matrix-accesstoken` and `-matrix-userid` flags are commented out in
+> `cmd/web/main.go`, nothing calls `processor.EnableBridges` (so `Processor.BridgeManager` stays nil), and the
+> `BridgeArticle` call in `internal/processor/threading.go` is commented out. The client code itself does
+> real HTTP calls (create room, send message) when called directly.
+
 ## Features
 
-- **Matrix Client**: Full Matrix client implementation
-- **Room Management**: Automatic room creation for newsgroups
+- **Matrix Client**: Minimal Matrix client (create room, send `m.room.message`; nothing else)
+- **Room Management**: Room creation for newsgroups on `RegisterNewsgroup` (the newsgroup → room map lives in memory only; existing rooms are not looked up)
 - **Rich Formatting**: HTML and plain text message support
-- **Real-time Bridging**: Live article streaming to Matrix rooms
-- **Error Handling**: Robust error handling and logging
+- **Real-time Bridging**: Live article streaming to Matrix rooms (planned; the processor hook is commented out)
+- **Error Handling**: Errors are returned and logged (no retry or backoff)
 
 ## Components
 
@@ -18,6 +24,7 @@ Core Matrix client implementation:
 - `MatrixMessage` - Rich message formatting (HTML + plain text)
 - `RoomCreateRequest/Response` - Room management
 - `ArticleToMessage()` - Converts NNTP articles to Matrix messages
+- `CreateRoom`, `SendMessage`, `SendArticle` - the HTTP calls (30 s client timeout)
 
 ### `bridge.go`
 Bridge management:
@@ -52,11 +59,12 @@ Each newsgroup gets its own Matrix room with:
 
 ## Message Format
 
-Articles are formatted as rich Matrix messages:
+Articles are formatted as rich Matrix messages (`msgtype` `m.text`, `format` `org.matrix.custom.html`). Subject,
+From, Message-ID and body are inserted into the HTML without escaping:
 
 ### HTML Format
 ```html
-<h3>Subject: Hello World</h3>
+<h3>Hello World</h3>
 <p><strong>From:</strong> user@example.com</p>
 <p><strong>Date:</strong> 2025-07-09T12:00:00Z</p>
 <p><strong>Message-ID:</strong> 123@example.com</p>
@@ -81,13 +89,16 @@ Article body content here...
 2. Access token (obtain via Element or API)
 3. User ID in format `@username:homeserver.com`
 
-### Enable via command line:
+### Enable via command line (planned: the flags are commented out in `cmd/web/main.go`, so `web` rejects them today):
 ```bash
 ./web --enable-matrix \
       --matrix-homeserver=https://matrix.org \
       --matrix-accesstoken=your_access_token \
       --matrix-userid=@your_user:matrix.org
 ```
+
+The intended wiring is `processor.EnableBridges(&processor.BridgeConfig{MatrixEnabled: true, MatrixHomeserver: ..., MatrixAccessToken: ..., MatrixUserID: ...})`
+(`internal/processor/bridges.go`); `NewBridgeManager` creates the bridge only when homeserver and access token are both set.
 
 ### Getting Access Token
 
@@ -107,21 +118,23 @@ curl -XPOST -d '{"type":"m.login.password", "user":"username", "password":"passw
 - `POST /_matrix/client/r0/createRoom` - Create newsgroup rooms
 - `POST /_matrix/client/r0/rooms/{roomId}/send/m.room.message/{txnId}` - Send articles
 
+The access token is passed as the `access_token` query parameter, not as an `Authorization` header.
+
 ## Room Settings
 
 Created rooms have these settings:
 - **Preset**: `public_chat` (anyone can join)
 - **Visibility**: `public` (listed in directory)
 - **History Visibility**: Inherited from homeserver
-- **Join Rules**: `public`
+- **Join Rules**: `public` (implied by the preset, not set explicitly)
 
 ## Error Handling
 
-The bridge handles common Matrix errors:
-- **Rate Limiting**: HTTP 429 responses
+Every non-200 reply becomes `unexpected status code: <n>`; there is no special handling of:
+- **Rate Limiting**: HTTP 429 responses (no retry, no backoff)
 - **Authentication**: Invalid/expired tokens
 - **Permission**: Insufficient room permissions
-- **Network**: Connection timeouts and failures
+- **Network**: Connection timeouts and failures (30 s client timeout, returned as an error)
 
 ## Security Considerations
 
@@ -132,6 +145,9 @@ The bridge handles common Matrix errors:
 
 ## TODO
 
+- [ ] Wire the bridge into `cmd/web` (flags, `EnableBridges`) and the processor (`BridgeArticle` call)
+- [ ] Reuse existing rooms (alias lookup) and persist the newsgroup → room map
+- [ ] Escape article fields in the HTML message
 - [ ] Support for Matrix → NNTP bridging (replies)
 - [ ] Rate limiting and backoff strategies
 - [ ] End-to-end encryption support

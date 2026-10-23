@@ -1,0 +1,1440 @@
+package nntp
+
+// Article retrieval tests for the NNTP server (plan nntp-audit-tests, slice
+// test-nntp-article): ARTICLE/HEAD/BODY/STAT by number, by message-id in the
+// current group and in another group, without an argument, with invalid or
+// missing numbers, the current article pointer, byte-exact output (CRLF and
+// dot-stuffing), the local430 negative cache and the per-command delay.
+//
+// Every check states the RFC-correct behavior (RFC 3977). Where the current
+// code differs, the result goes through knownBug with the seed id (BUG-1,
+// BUG-6, BUG-8, RFC-3) or a new id (T-nntp-article-1). The harness servers run with ErrorDelay=0, so
+// rateLimitOnError does not sleep on the error replies below.
+// Identifiers use the art/TestArt prefixes (contract K2). Note that
+// `-run TestArt` also matches the pre-existing TestArticleMatching; run these
+// tests with `-run '^TestArt[A-Z]'`.
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/go-while/go-pugleaf/internal/config"
+	"github.com/go-while/go-pugleaf/internal/database"
+	"github.com/go-while/go-pugleaf/internal/history"
+	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/nntp-testkit/client"
+)
+
+// artCmds maps each retrieval command to its RFC 3977 §6.2 success code.
+var artCmds = []struct {
+	name string
+	code int
+}{
+	{"ARTICLE", 220},
+	{"HEAD", 221},
+	{"BODY", 222},
+	{"STAT", 223},
+}
+
+// ---------------------------------------------------------------------------
+// Helpers (art prefix; waits use the harness hang guard hDeadline)
+
+// artDefaultHeaders returns the header lines stored for a default article a of group.
+func artDefaultHeaders(group string, a hArticle) []string {
+	return []string{
+		"Path: " + a.Path,
+		"From: " + a.From,
+		"Newsgroups: " + group,
+		"Subject: " + a.Subject,
+		"Date: " + a.DateString,
+		"Message-ID: " + a.MessageID,
+	}
+}
+
+// artSeed creates group "t4.<test>.<seq>" with articles 1..n whose header block
+// is set explicitly (so the expected output is known), applies mutate and
+// returns the group name and the inserted articles.
+func artSeed(t *testing.T, test string, n int, mutate func(i int, a *hArticle)) (string, []hArticle) {
+	t.Helper()
+	g := hGroup(t, "t4."+test, 0, nil)
+	var arts []hArticle
+	for i := 1; i <= n; i++ {
+		a := hDefaultArticle(g, int64(i))
+		a.Headers = strings.Join(artDefaultHeaders(g, a), "\n")
+		if mutate != nil {
+			mutate(i, &a)
+		}
+		if a.Skip {
+			continue
+		}
+		arts = append(arts, a)
+	}
+	if len(arts) > 0 {
+		hArticleSQL(t, g, arts...)
+	}
+	return g, arts
+}
+
+// artFind returns the seeded article with number num.
+func artFind(t *testing.T, arts []hArticle, num int64) hArticle {
+	t.Helper()
+	for _, a := range arts {
+		if a.Num == num {
+			return a
+		}
+	}
+	t.Fatalf("no seeded article %d", num)
+	return hArticle{}
+}
+
+// artHeaderLines splits a stored header block into lines.
+func artHeaderLines(a hArticle) []string {
+	return strings.Split(a.Headers, "\n")
+}
+
+// artBodyLines splits a stored body into lines; an empty body has no lines.
+func artBodyLines(a hArticle) []string {
+	if a.Body == "" {
+		return nil
+	}
+	return strings.Split(a.Body, "\n")
+}
+
+// artExpectedLines returns the (un-stuffed) lines of the multi-line block
+// that cmd should send for a (RFC 3977 §6.2.1-§6.2.3).
+func artExpectedLines(cmd string, a hArticle) []string {
+	switch cmd {
+	case "ARTICLE":
+		out := append([]string{}, artHeaderLines(a)...)
+		out = append(out, "")
+		return append(out, artBodyLines(a)...)
+	case "HEAD":
+		return artHeaderLines(a)
+	case "BODY":
+		return artBodyLines(a)
+	}
+	return nil
+}
+
+// artDo sends one command and reads the multi-line block when the reply is
+// 220, 221 or 222, so the connection stays in sync whatever the server answers.
+func artDo(t *testing.T, c *client.Conn, format string, args ...interface{}) (int, string, []string) {
+	t.Helper()
+	code, line := c.Cmd(format, args...)
+	var lines []string
+	if code >= 220 && code <= 222 {
+		lines = c.ReadDotLines()
+	}
+	return code, line, lines
+}
+
+// artCheckStatus checks "<wantCode> <wantNum> <wantMID> ..." (RFC 3977 §6.2:
+// the first two arguments are the article number and the message-id).
+func artCheckStatus(code int, line string, wantCode int, wantNum int64, wantMID string) error {
+	f := strings.Fields(line)
+	if code != wantCode || len(f) < 3 || f[1] != strconv.FormatInt(wantNum, 10) || f[2] != wantMID {
+		return fmt.Errorf("got %q, want \"%d %d %s ...\"", line, wantCode, wantNum, wantMID)
+	}
+	return nil
+}
+
+// artCheckRetrieval runs "<cmd> <arg>" and checks the status line and the
+// block against article a reported as number wantNum.
+func artCheckRetrieval(t *testing.T, c *client.Conn, cmd, arg string, wantCode int, wantNum int64, a hArticle) error {
+	t.Helper()
+	code, line, lines := artDo(t, c, "%s %s", cmd, arg)
+	if err := artCheckStatus(code, line, wantCode, wantNum, a.MessageID); err != nil {
+		return fmt.Errorf("%s %s: %w", cmd, arg, err)
+	}
+	if cmd == "STAT" {
+		return nil
+	}
+	if err := client.ExpectLines(lines, artExpectedLines(cmd, a)); err != nil {
+		return fmt.Errorf("%s %s block: %w", cmd, arg, err)
+	}
+	return nil
+}
+
+// artRawResponse sends one command and returns the raw status line and, for
+// 220/221/222, the raw block up to and including the terminator.
+func artRawResponse(t *testing.T, c *client.Conn, cmd string) (status, block []byte) {
+	t.Helper()
+	if err := c.Send(cmd + CRLF); err != nil {
+		t.Fatalf("send %q: %v", cmd, err)
+	}
+	_ = c.Conn.SetDeadline(time.Now().Add(c.Deadline))
+	status, err := c.R.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("%s: status line: %v (%q)", cmd, err, status)
+	}
+	code, err := client.ParseCode(strings.TrimRight(string(status), "\r\n"))
+	if err != nil {
+		t.Fatalf("%s: %v", cmd, err)
+	}
+	if code >= 220 && code <= 222 {
+		block = c.RawUntilDot()
+	}
+	return status, block
+}
+
+// artCRLF joins lines, each terminated by CRLF.
+func artCRLF(lines ...string) []byte {
+	var b bytes.Buffer
+	for _, l := range lines {
+		b.WriteString(l)
+		b.WriteString(CRLF)
+	}
+	return b.Bytes()
+}
+
+// artCheckCRLF returns an error unless every line in raw ends in CRLF
+// (RFC 3977 §3.1: lines are terminated by CRLF; no bare LF or CR).
+func artCheckCRLF(what string, raw []byte) error {
+	if !bytes.HasSuffix(raw, []byte(CRLF)) {
+		return fmt.Errorf("%s: does not end in CRLF: %q", what, raw)
+	}
+	for i, b := range raw {
+		if b == '\n' && (i == 0 || raw[i-1] != '\r') {
+			return fmt.Errorf("%s: bare LF at offset %d: %q", what, i, raw)
+		}
+		if b == '\r' && (i+1 >= len(raw) || raw[i+1] != '\n') {
+			return fmt.Errorf("%s: bare CR at offset %d: %q", what, i, raw)
+		}
+	}
+	return nil
+}
+
+// artExpectRaw compares raw bytes.
+func artExpectRaw(what string, got, want []byte) error {
+	if !bytes.Equal(got, want) {
+		return fmt.Errorf("%s:\n got %q\nwant %q", what, got, want)
+	}
+	return nil
+}
+
+// artSetHeadersJSON overwrites headers_json of article num in group (hArticleSQL
+// regenerates an empty header block, so an empty one is set afterwards).
+func artSetHeadersJSON(t *testing.T, group string, num int64, headers string) {
+	t.Helper()
+	gdb, err := hTestDB(t).GetGroupDB(group)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", group, err)
+	}
+	defer gdb.Return()
+	if _, err := database.RetryableExec(gdb.DB, `UPDATE articles SET headers_json = ? WHERE article_num = ?`, headers, num); err != nil {
+		t.Fatalf("update headers_json of %d in %s: %v", num, group, err)
+	}
+}
+
+// artSelect sends GROUP g and fails unless it answers 211 (RFC 3977 §6.1.1).
+func artSelect(t *testing.T, c *client.Conn, g string) {
+	t.Helper()
+	code, line := c.Cmd("GROUP %s", g)
+	if err := client.ExpectCode(code, line, 211); err != nil {
+		t.Fatalf("GROUP %s: %v", g, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// By number, by message-id
+
+func TestArtByNumber(t *testing.T) {
+	g, arts := artSeed(t, "bynumber", 3, nil)
+	hs := newTestServer(t, hServerOpts{})
+	hs.S.SetXrefMode(XrefOff) // stored-header passthrough (Xref: lines are tested in nntp-xref_test.go)
+	a2 := artFind(t, arts, 2)
+
+	for _, cmd := range artCmds {
+		t.Run(cmd.name, func(t *testing.T) {
+			c := hs.dial(t)
+			artSelect(t, c, g)
+			// RFC 3977 §6.2.1-§6.2.4: "<cmd> n" answers 220/221/222/223 "n <message-id>";
+			// ARTICLE sends headers, a blank line and the body, HEAD the headers,
+			// BODY the body, STAT nothing.
+			if err := artCheckRetrieval(t, c, cmd.name, "2", cmd.code, 2, a2); err != nil {
+				t.Fatal(err)
+			}
+			// The connection is still in sync: the next reply is the next STAT.
+			if err := artCheckRetrieval(t, c, "STAT", "1", 223, 1, artFind(t, arts, 1)); err != nil {
+				t.Fatalf("after %s: %v", cmd.name, err)
+			}
+		})
+	}
+}
+
+func TestArtByMessageIDCurrentGroup(t *testing.T) {
+	// Articles 5..7 only, so the reported number cannot be a list index.
+	g, arts := artSeed(t, "bymsgid", 7, func(i int, a *hArticle) { a.Skip = i < 5 })
+	hs := newTestServer(t, hServerOpts{})
+	hs.S.SetXrefMode(XrefOff) // stored-header passthrough (Xref: lines are tested in nntp-xref_test.go)
+	a6 := artFind(t, arts, 6)
+
+	for _, cmd := range artCmds {
+		t.Run(cmd.name, func(t *testing.T) {
+			c := hs.dial(t)
+			artSelect(t, c, g)
+			// RFC 3977 §6.2.1.2: for the message-id form, n is the article's number
+			// in the currently selected group when it is in that group.
+			if err := artCheckRetrieval(t, c, cmd.name, a6.MessageID, cmd.code, 6, a6); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestArtMessageIDOtherGroup(t *testing.T) {
+	gA, _ := artSeed(t, "othergrp-a", 1, nil)
+	// The article lives in group B as number 7: replying 7 would leak B's
+	// numbering into group A.
+	gB, artsB := artSeed(t, "othergrp-b", 7, func(i int, a *hArticle) { a.Skip = i < 7 })
+	b7 := artFind(t, artsB, 7)
+
+	// db is taken here: findFn runs on the server goroutine, where hTestDB's
+	// t.Skipf must not be called.
+	db := hTestDB(t)
+	proc := &hFakeProcessor{}
+	proc.findFn = func(messageID, currentGroup string) (*models.Article, error) {
+		gdb, err := db.GetGroupDB(gB)
+		if err != nil {
+			return nil, err
+		}
+		defer gdb.Return()
+		a, err := db.GetArticleByMessageID(gdb, messageID)
+		if err != nil {
+			return nil, fmt.Errorf("artOtherGroup %s: %w", messageID, ErrArticleNotFound)
+		}
+		return a, nil
+	}
+	hs := newTestServer(t, hServerOpts{Proc: proc})
+
+	for _, cmd := range artCmds {
+		t.Run("other-group-selected/"+cmd.name, func(t *testing.T) {
+			c := hs.dial(t)
+			artSelect(t, c, gA)
+			before := proc.findCount()
+			// RFC 3977 §6.2.1.2: an article selected by message-id that is not in
+			// the current group is reported with article number 0.
+			if err := artCheckRetrieval(t, c, cmd.name, b7.MessageID, cmd.code, 0, b7); err != nil {
+				t.Fatal(err)
+			}
+			if proc.findCount() <= before {
+				t.Fatalf("processor lookup not called (findCount %d)", proc.findCount())
+			}
+		})
+	}
+	t.Run("no-group-selected", func(t *testing.T) {
+		c := hs.dial(t)
+		// RFC 3977 §6.2.1.2: without a selected group the number is 0 as well.
+		if err := artCheckRetrieval(t, c, "STAT", b7.MessageID, 223, 0, b7); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// No argument, invalid and missing numbers
+
+func TestArtNoArgument(t *testing.T) {
+	g, arts := artSeed(t, "noarg", 2, nil)
+	gEmpty, _ := artSeed(t, "noarg-empty", 0, nil)
+	hs := newTestServer(t, hServerOpts{})
+	hs.S.SetXrefMode(XrefOff) // stored-header passthrough (Xref: lines are tested in nntp-xref_test.go)
+	a1 := artFind(t, arts, 1)
+
+	t.Run("current-article", func(t *testing.T) {
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		// RFC 3977 §6.2.1-§6.2.4: without an argument the current article is used.
+		var errs []error
+		for _, cmd := range artCmds {
+			// STAT n sets the current article (RFC 3977 §6.2.4.2). It is set again
+			// before each bare command, so an RFC-3 fix is not hidden by BUG-1
+			// (a bare ARTICLE/HEAD/BODY resetting the current article to 0).
+			if err := artCheckRetrieval(t, c, "STAT", "1", 223, 1, a1); err != nil {
+				t.Fatal(err)
+			}
+			code, line, lines := artDo(t, c, "%s", cmd.name)
+			err := artCheckStatus(code, line, cmd.code, 1, a1.MessageID)
+			if err == nil && cmd.name != "STAT" {
+				err = client.ExpectLines(lines, artExpectedLines(cmd.name, a1))
+			}
+			if err != nil {
+				errs = append(errs, fmt.Errorf("bare %s: %w", cmd.name, err))
+			}
+		}
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("invalid-current-article-420", func(t *testing.T) {
+		c := hs.dial(t)
+		// An empty group has no valid current article.
+		artSelect(t, c, gEmpty)
+		var errs []error
+		for _, cmd := range artCmds {
+			code, line, _ := artDo(t, c, "%s", cmd.name)
+			// RFC 3977 §6.2.1.2: 420 current article number is invalid.
+			if err := client.ExpectCode(code, line, 420); err != nil {
+				errs = append(errs, fmt.Errorf("bare %s: %w", cmd.name, err))
+			}
+		}
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("current-article-hidden-420", func(t *testing.T) {
+		gH, _ := artSeed(t, "noarg-hidden", 2, nil)
+		c := hs.dial(t)
+		artSelect(t, c, gH) // current article = 1
+		artHide(t, gH, 1)
+		for _, cmd := range artCmds {
+			code, line, _ := artDo(t, c, "%s", cmd.name)
+			// RFC 3977 §6.2.1.2: the no-argument form answers only 220-223, 412 or 420;
+			// a current article hidden or expired since GROUP is 420, not 423.
+			if err := client.ExpectCode(code, line, 420); err != nil {
+				t.Errorf("bare %s after the current article was hidden: %v", cmd.name, err)
+			}
+		}
+		// The number form keeps 423.
+		code, line, _ := artDo(t, c, "STAT 1")
+		if err := client.ExpectCode(code, line, 423); err != nil {
+			t.Errorf("STAT 1 (hidden): %v", err)
+		}
+	})
+	t.Run("no-group-412", func(t *testing.T) {
+		c := hs.dial(t)
+		var errs []error
+		for _, cmd := range artCmds {
+			code, line, _ := artDo(t, c, "%s", cmd.name)
+			// RFC 3977 §6.2.1.2: 412 no newsgroup selected (the current-article
+			// form needs a group).
+			if err := client.ExpectCode(code, line, 412); err != nil {
+				errs = append(errs, fmt.Errorf("bare %s: %w", cmd.name, err))
+			}
+		}
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestArtInvalidNumbers(t *testing.T) {
+	g, arts := artSeed(t, "invalidnum", 2, nil)
+	hs := newTestServer(t, hServerOpts{})
+	cases := []struct {
+		arg string
+		bug string // seed id when the current code differs; "" when already correct
+	}{
+		// "0" matches article-number (1*16DIGIT) but no article 0 exists: 423.
+		// "-1" is not an article-number: 501. Either reply is accepted for both.
+		{"0", ""},
+		{"-1", ""},
+		// 20 digits exceeds 1*16DIGIT and int64: 501 (423 accepted).
+		{"99999999999999999999", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.arg, func(t *testing.T) {
+			c := hs.dial(t)
+			artSelect(t, c, g)
+			var errs []error
+			for _, cmd := range artCmds {
+				code, line, _ := artDo(t, c, "%s %s", cmd.name, tc.arg)
+				// RFC 3977 §6.2.1.2 (423 no article with that number) and §3.2.1
+				// (501 syntax error in arguments).
+				if err := client.ExpectCode(code, line, 423, 501); err != nil {
+					errs = append(errs, fmt.Errorf("%s %s: %w", cmd.name, tc.arg, err))
+				}
+			}
+			// The connection is still usable afterwards.
+			if err := artCheckRetrieval(t, c, "STAT", "1", 223, 1, artFind(t, arts, 1)); err != nil {
+				errs = append(errs, fmt.Errorf("after invalid numbers: %w", err))
+			}
+			err := errors.Join(errs...)
+			if tc.bug != "" {
+				knownBug(t, tc.bug, err)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestArtNotFound(t *testing.T) {
+	// Articles 1 and 3; 2 is a deleted number.
+	g, _ := artSeed(t, "notfound", 3, func(i int, a *hArticle) { a.Skip = i == 2 })
+	missingMID := hMessageID(g, 99)
+
+	t.Run("missing-number-423", func(t *testing.T) {
+		hs := newTestServer(t, hServerOpts{})
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		for _, arg := range []string{"2", "99"} {
+			for _, cmd := range artCmds {
+				code, line, _ := artDo(t, c, "%s %s", cmd.name, arg)
+				// RFC 3977 §6.2.1.2: 423 no article with that number.
+				if err := client.ExpectCode(code, line, 423); err != nil {
+					t.Errorf("%s %s: %v", cmd.name, arg, err)
+				}
+			}
+		}
+	})
+	t.Run("missing-message-id-430", func(t *testing.T) {
+		hs := newTestServer(t, hServerOpts{})
+		c := hs.dial(t)
+		for _, selected := range []bool{false, true} {
+			if selected {
+				artSelect(t, c, g)
+			}
+			for _, cmd := range artCmds {
+				code, line, _ := artDo(t, c, "%s %s", cmd.name, missingMID)
+				// RFC 3977 §6.2.1.2: 430 no article with that message-id.
+				if err := client.ExpectCode(code, line, 430); err != nil {
+					t.Errorf("%s %s (group selected %v): %v", cmd.name, missingMID, selected, err)
+				}
+			}
+		}
+	})
+	t.Run("missing-message-id-430-processor", func(t *testing.T) {
+		proc := &hFakeProcessor{findErr: fmt.Errorf("artNotFound: %w", ErrArticleNotFound)}
+		hs := newTestServer(t, hServerOpts{Proc: proc})
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		for _, cmd := range artCmds {
+			code, line, _ := artDo(t, c, "%s %s", cmd.name, missingMID)
+			// RFC 3977 §6.2.1.2: 430 no article with that message-id.
+			if err := client.ExpectCode(code, line, 430); err != nil {
+				t.Errorf("%s %s: %v", cmd.name, missingMID, err)
+			}
+		}
+	})
+	t.Run("no-group-412", func(t *testing.T) {
+		hs := newTestServer(t, hServerOpts{})
+		c := hs.dial(t)
+		for _, cmd := range artCmds {
+			code, line, _ := artDo(t, c, "%s 1", cmd.name)
+			// RFC 3977 §6.2.1.2: the number form without a selected group → 412.
+			if err := client.ExpectCode(code, line, 412); err != nil {
+				t.Errorf("%s 1: %v", cmd.name, err)
+			}
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Current article
+
+func TestArtCurrentArticle(t *testing.T) {
+	g, arts := artSeed(t, "current", 3, nil)
+	hs := newTestServer(t, hServerOpts{})
+	hs.S.SetXrefMode(XrefOff) // stored-header passthrough (Xref: lines are tested in nntp-xref_test.go)
+	a2 := artFind(t, arts, 2)
+	a3 := artFind(t, arts, 3)
+
+	// RFC 3977 §6.2.1.2: a successful ARTICLE/HEAD/BODY n sets the current
+	// article number to n. The pointer is read with a bare XOVER, which uses the
+	// current article (RFC 2980 §2.8, RFC 3977 §8.3.2: 224 and the overview line
+	// of n; 420 when the current article is invalid), and again with a bare STAT
+	// below. GetArticleByNum used to leave DBArtNum at 0, so the current article
+	// became 0 and XOVER answered 420 (was BUG-1).
+	for _, cmd := range artCmds[:3] { // ARTICLE, HEAD, BODY
+		t.Run("after-"+cmd.name, func(t *testing.T) {
+			c := hs.dial(t)
+			artSelect(t, c, g)
+			if err := artCheckRetrieval(t, c, cmd.name, "2", cmd.code, 2, a2); err != nil {
+				t.Fatal(err)
+			}
+			if err := artCheckBareXover(t, c, 2); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	t.Run("after-STAT", func(t *testing.T) {
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		// RFC 3977 §6.2.4.2: STAT n sets the current article as well. The STAT
+		// path does set it today (control for BUG-1: bare XOVER works).
+		if err := artCheckRetrieval(t, c, "STAT", "2", 223, 2, a2); err != nil {
+			t.Fatal(err)
+		}
+		if err := artCheckBareXover(t, c, 2); err != nil {
+			t.Fatal(err)
+		}
+		// RFC 3977 §6.2.4: a bare STAT reports the current article (was 501, RFC-3).
+		code, line, _ := artDo(t, c, "STAT")
+		if err := artCheckStatus(code, line, 223, 2, a2.MessageID); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("message-id-lookup-unchanged", func(t *testing.T) {
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		if err := artCheckRetrieval(t, c, "STAT", "2", 223, 2, a2); err != nil {
+			t.Fatal(err)
+		}
+		// RFC 3977 §6.2.1.2: the message-id form MUST NOT change the current
+		// article number.
+		if err := artCheckRetrieval(t, c, "ARTICLE", a3.MessageID, 220, 3, a3); err != nil {
+			t.Fatal(err)
+		}
+		if err := artCheckBareXover(t, c, 2); err != nil {
+			t.Fatal(err)
+		}
+		// The same through a bare STAT, which answers 501 today (RFC-3).
+		code, line, _ := artDo(t, c, "STAT")
+		if err := artCheckStatus(code, line, 223, 2, a2.MessageID); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// artCheckBareXover sends a bare XOVER and checks that it answers 224 with one
+// overview line for article wantNum (RFC 2980 §2.8, RFC 3977 §8.3.2).
+func artCheckBareXover(t *testing.T, c *client.Conn, wantNum int64) error {
+	t.Helper()
+	code, line := c.Cmd("XOVER")
+	if code != 224 {
+		return fmt.Errorf("bare XOVER: got %q, want 224 and the overview of %d", line, wantNum)
+	}
+	lines := c.ReadDotLines()
+	if len(lines) != 1 || strings.SplitN(lines[0], "\t", 2)[0] != strconv.FormatInt(wantNum, 10) {
+		return fmt.Errorf("bare XOVER: got lines %q, want one overview line of %d", lines, wantNum)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Byte-exact output
+
+func TestArtByteExact(t *testing.T) {
+	t.Run("crlf-and-body-dot-stuffing", func(t *testing.T) {
+		g, arts := artSeed(t, "bytes-body", 1, func(_ int, a *hArticle) {
+			a.Body = ".dot\n.\nplain\n..two\n"
+		})
+		a := arts[0]
+		hs := newTestServer(t, hServerOpts{})
+		hs.S.SetXrefMode(XrefOff) // byte-exact stored headers (Xref: lines are tested in nntp-xref_test.go)
+		c := hs.dial(t)
+		artSelect(t, c, g)
+
+		// RFC 3977 §3.1.1: every line of a multi-line block ends in CRLF; a line
+		// starting with "." is sent with one more "." ("." → "..", ".dot" → "..dot");
+		// the block ends with ".\r\n". The stored body ends in LF, i.e. its last
+		// line is empty.
+		wantBody := artCRLF("..dot", "..", "plain", "...two", "")
+		wantArticle := append(artCRLF(artHeaderLines(a)...), CRLF...)
+		wantArticle = append(wantArticle, wantBody...)
+		wantArticle = append(wantArticle, ".\r\n"...)
+
+		status, block := artRawResponse(t, c, "ARTICLE 1")
+		if err := artCheckCRLF("ARTICLE status", status); err != nil {
+			t.Error(err)
+		}
+		if err := artCheckCRLF("ARTICLE block", block); err != nil {
+			t.Error(err)
+		}
+		if err := artExpectRaw("ARTICLE block", block, wantArticle); err != nil {
+			t.Error(err)
+		}
+
+		status, block = artRawResponse(t, c, "BODY 1")
+		if err := artCheckCRLF("BODY status", status); err != nil {
+			t.Error(err)
+		}
+		if err := artExpectRaw("BODY block", block, append(wantBody, ".\r\n"...)); err != nil {
+			t.Error(err)
+		}
+
+		status, block = artRawResponse(t, c, "HEAD 1")
+		if err := artCheckCRLF("HEAD status", status); err != nil {
+			t.Error(err)
+		}
+		if err := artExpectRaw("HEAD block", block, append(artCRLF(artHeaderLines(a)...), ".\r\n"...)); err != nil {
+			t.Error(err)
+		}
+
+		status, _ = artRawResponse(t, c, "STAT 1")
+		if err := artCheckCRLF("STAT status", status); err != nil {
+			t.Error(err)
+		}
+	})
+
+	// A header line starting with "." is dot-stuffed like any other line of a
+	// multi-line block (RFC 3977 §3.1.1; was BUG-6, fixed by the data-block writer).
+	t.Run("header-dot-continuation", func(t *testing.T) {
+		g, arts := artSeed(t, "bytes-hdrdot", 1, func(_ int, a *hArticle) {
+			// A stored header line starting with "." (lax intake).
+			a.Headers += "\nX-Folded: first\n.second part"
+		})
+		a := arts[0]
+		hs := newTestServer(t, hServerOpts{})
+		hs.S.SetXrefMode(XrefOff) // byte-exact stored headers (Xref: lines are tested in nntp-xref_test.go)
+		wantHead := artCRLF(append(artDefaultHeaders(g, a), "X-Folded: first", "..second part")...)
+		var errs []error
+
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		_, block := artRawResponse(t, c, "HEAD 1")
+		errs = append(errs, artExpectRaw("HEAD block", block, append(append([]byte{}, wantHead...), ".\r\n"...)))
+
+		_, block = artRawResponse(t, c, "ARTICLE 1")
+		wantArticle := append(append([]byte{}, wantHead...), CRLF...)
+		wantArticle = append(wantArticle, artCRLF(artBodyLines(a)...)...)
+		errs = append(errs, artExpectRaw("ARTICLE block", block, append(wantArticle, ".\r\n"...)))
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// A stored header line "." (a dot-stuffed ".." unstuffed by a lax intake) is
+	// sent as ".." and does not end HEAD/ARTICLE early (audit A-nntp-rfc-2, was
+	// part of BUG-6; intake itself refuses such a header with 441 today).
+	t.Run("header-lone-dot", func(t *testing.T) {
+		g, arts := artSeed(t, "bytes-hdrlone", 1, func(_ int, a *hArticle) {
+			a.Headers += "\nX-Folded: first\n."
+		})
+		a := arts[0]
+		hs := newTestServer(t, hServerOpts{})
+		hs.S.SetXrefMode(XrefOff) // byte-exact stored headers (Xref: lines are tested in nntp-xref_test.go)
+		wantHead := artCRLF(append(artDefaultHeaders(g, a), "X-Folded: first", "..")...)
+		var errs []error
+
+		// Separate connections: an early "." leaves the rest of the block unread.
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		_, block := artRawResponse(t, c, "HEAD 1")
+		errs = append(errs, artExpectRaw("HEAD block", block, append(append([]byte{}, wantHead...), ".\r\n"...)))
+		c.Close()
+
+		c = hs.dial(t)
+		artSelect(t, c, g)
+		_, block = artRawResponse(t, c, "ARTICLE 1")
+		wantArticle := append(append([]byte{}, wantHead...), CRLF...)
+		wantArticle = append(wantArticle, artCRLF(artBodyLines(a)...)...)
+		errs = append(errs, artExpectRaw("ARTICLE block", block, append(wantArticle, ".\r\n"...)))
+		c.Close()
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// An empty body has zero lines: ARTICLE ends with the headers' blank line
+	// followed directly by ".\r\n", and BODY is just ".\r\n" (RFC 3977 §3.1.1,
+	// §6.2.1; was BUG-6).
+	t.Run("empty-body", func(t *testing.T) {
+		g, arts := artSeed(t, "bytes-emptybody", 1, func(_ int, a *hArticle) { a.Body = "" })
+		a := arts[0]
+		hs := newTestServer(t, hServerOpts{})
+		hs.S.SetXrefMode(XrefOff) // byte-exact stored headers (Xref: lines are tested in nntp-xref_test.go)
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		var errs []error
+		_, block := artRawResponse(t, c, "ARTICLE 1")
+		want := append(artCRLF(artHeaderLines(a)...), "\r\n.\r\n"...)
+		errs = append(errs, artExpectRaw("ARTICLE block", block, want))
+		_, block = artRawResponse(t, c, "BODY 1")
+		errs = append(errs, artExpectRaw("BODY block", block, []byte(".\r\n")))
+		if err := errors.Join(errs...); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// HEAD carries header lines only; an empty line inside it would read as the
+	// header/body separator (RFC 3977 §6.2.2, RFC 5322 §2.1). An empty
+	// headers_json must not be sent as one empty line (was BUG-6).
+	t.Run("empty-headers", func(t *testing.T) {
+		g, _ := artSeed(t, "bytes-emptyhdr", 1, nil)
+		artSetHeadersJSON(t, g, 1, "")
+		hs := newTestServer(t, hServerOpts{})
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		_, block := artRawResponse(t, c, "HEAD 1")
+		var err error
+		for i, l := range bytes.SplitAfter(block, []byte(CRLF)) {
+			if bytes.Equal(l, []byte(CRLF)) {
+				err = fmt.Errorf("HEAD block has an empty line (line %d): %q", i, block)
+				break
+			}
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// local430
+
+// artLocal430Env is one local430 scenario: a group the article arrives in
+// later, the article, a fake processor whose findFn misses until arrived is
+// set, the server and a reader connection with no group selected (so every
+// lookup goes through local430 and the processor).
+type artLocal430Env struct {
+	g       string
+	a       hArticle
+	proc    *hFakeProcessor
+	arrived *atomic.Bool
+	hs      *hServer
+	c       *client.Conn
+}
+
+// artLocal430Miss builds the scenario and checks the two misses: the first
+// STAT asks the processor (430), the second is answered from local430 without
+// a second processor call.
+func artLocal430Miss(t *testing.T, test string) *artLocal430Env {
+	t.Helper()
+	g, _ := artSeed(t, test, 0, nil)
+	a := hDefaultArticle(g, 1)
+	a.Headers = strings.Join(artDefaultHeaders(g, a), "\n")
+
+	// db is taken here: findFn runs on the server goroutine, where hTestDB's
+	// t.Skipf must not be called.
+	db := hTestDB(t)
+	arrived := &atomic.Bool{}
+	// IHAVE wants the article (335) and the transfer is accepted (235).
+	proc := &hFakeProcessor{checkResult: history.CasePass, processResult: history.CasePass}
+	proc.findFn = func(messageID, currentGroup string) (*models.Article, error) {
+		if !arrived.Load() {
+			return nil, fmt.Errorf("artLocal430 %s: %w", messageID, ErrArticleNotFound)
+		}
+		gdb, err := db.GetGroupDB(g)
+		if err != nil {
+			return nil, err
+		}
+		defer gdb.Return()
+		art, err := db.GetArticleByMessageID(gdb, messageID)
+		if err != nil {
+			return nil, fmt.Errorf("artLocal430 %s: %v: %w", messageID, err, ErrArticleNotFound)
+		}
+		return art, nil
+	}
+	hs := newTestServer(t, hServerOpts{Proc: proc})
+	c := hs.dial(t)
+
+	// RFC 3977 §6.2.4.2: 430 no article with that message-id.
+	code, line := c.Cmd("STAT %s", a.MessageID)
+	if err := client.ExpectCode(code, line, 430); err != nil {
+		t.Fatalf("first STAT: %v", err)
+	}
+	if n := proc.findCount(); n != 1 {
+		t.Fatalf("first STAT: findCount %d, want 1", n)
+	}
+	// A definite miss is remembered: the second STAT is answered from local430.
+	code, line = c.Cmd("STAT %s", a.MessageID)
+	if err := client.ExpectCode(code, line, 430); err != nil {
+		t.Fatalf("second STAT: %v", err)
+	}
+	if n := proc.findCount(); n != 1 {
+		t.Fatalf("second STAT: findCount %d, want 1 (no second processor call)", n)
+	}
+	return &artLocal430Env{g: g, a: a, proc: proc, arrived: arrived, hs: hs, c: c}
+}
+
+// artPollStat223 polls STAT <mid> on c until it answers "223 0 <mid>" or 1 s
+// has passed, and returns the result of the last check.
+//
+// The 1 s window is deliberately short and is NOT raised to hDeadline: it serves
+// the T-nntp-article-1 known-bug path, which runs to the end of the window while
+// the bug is open (the cached miss lives for the 60 s local430 TTL), so a long
+// window would only slow every run. 1 s is still 60x under that TTL.
+func artPollStat223(t *testing.T, c *client.Conn, a hArticle) error {
+	t.Helper()
+	deadline := time.Now().Add(time.Second) // deliberate short window, see above
+	for {
+		code, line := c.Cmd("STAT %s", a.MessageID)
+		// RFC 3977 §6.2.4.2: 223 n message-id; §6.2.1.2: no group selected → n is 0.
+		err := artCheckStatus(code, line, 223, 0, a.MessageID)
+		if err == nil || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestArtLocal430(t *testing.T) {
+	// A 430 for an existing article is wrong (RFC 3977 §6.2.4.2), so a cached
+	// miss must not outlive the article's arrival.
+
+	// The article arrives through this server (IHAVE answered 235). The intake
+	// handler removes the message-id from local430 before it sends the 235 (BUG-8
+	// fixed by nntp-intake-injection; the cache TTL alone is 60 s), so the very
+	// next STAT must answer 223: no polling and no time window.
+	t.Run("ihave-arrival", func(t *testing.T) {
+		env := artLocal430Miss(t, "local430-ihave")
+
+		// A peer with transfer permission delivers the article.
+		user, pass := hUser(t, true, true)
+		peer := env.hs.dial(t)
+		code, line := peer.Cmd("AUTHINFO USER %s", user)
+		if err := client.ExpectCode(code, line, 381); err != nil {
+			t.Fatalf("AUTHINFO USER: %v", err)
+		}
+		code, line = peer.Cmd("AUTHINFO PASS %s", pass)
+		if err := client.ExpectCode(code, line, 281); err != nil {
+			t.Fatalf("AUTHINFO PASS: %v", err)
+		}
+		// RFC 3977 §6.3.2.2: IHAVE of a wanted article → 335, then 235 after transfer.
+		code, line = peer.Cmd("IHAVE %s", env.a.MessageID)
+		if err := client.ExpectCode(code, line, 335); err != nil {
+			t.Fatalf("IHAVE: %v", err)
+		}
+		raw := string(artCRLF(artHeaderLines(env.a)...)) + CRLF + string(artCRLF(artBodyLines(env.a)...)) + ".\r\n"
+		if err := peer.Send(raw); err != nil {
+			t.Fatalf("send article: %v", err)
+		}
+		code, line, err := peer.ReadStatus()
+		if err != nil {
+			t.Fatalf("IHAVE transfer reply: %v (%q)", err, line)
+		}
+		if err := client.ExpectCode(code, line, 235); err != nil {
+			t.Fatalf("IHAVE transfer: %v", err)
+		}
+		// BUG-8: the 235 removed the cached miss (checked on the table: the arrival grace of
+		// plan post-430-window skips local430 for this id, so the STAT below cannot show it).
+		if artLocal430Has(env.hs, env.a.MessageID) {
+			t.Fatalf("local430 still holds %s after IHAVE 235", env.a.MessageID)
+		}
+		// What the real processor does on CasePass: the article is stored and the
+		// history finds it.
+		hArticleSQL(t, env.g, env.a)
+		env.arrived.Store(true)
+
+		code, line = env.c.Cmd("STAT %s", env.a.MessageID)
+		// RFC 3977 §6.2.4.2: 223 n message-id; §6.2.1.2: no group selected → n is 0.
+		if err := artCheckStatus(code, line, 223, 0, env.a.MessageID); err != nil {
+			t.Fatalf("STAT after IHAVE 235: %v", err)
+		}
+	})
+
+	// T-nntp-article-1 (low): local430 has no coherence with intake outside
+	// this process. When nntp-fetcher (another process) stores the article in
+	// the shared DB and history, this server is never told, so a message-id that
+	// missed once stays 430 for up to ~75 s after the fetcher stored it. Here the
+	// article "arrives" by raw SQL and the processor finds it right away.
+	// The 1 s poll window of artPollStat223 is deliberately short: while the bug
+	// is open this path always runs to the end of the window, so it must fail
+	// fast; a fix makes the first STAT answer 223 and the marker fail.
+	t.Run("external-arrival", func(t *testing.T) {
+		env := artLocal430Miss(t, "local430-external")
+		hArticleSQL(t, env.g, env.a)
+		env.arrived.Store(true)
+		knownBug(t, "T-nntp-article-1", artPollStat223(t, env.c, env.a))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Delay
+
+func TestArtNoDelay(t *testing.T) {
+	// With the default ArticleCmdDelay (DefaultArticleCmdDelay, 25 ms) every
+	// ARTICLE/HEAD/BODY/STAT sleeps before answering, which caps one connection
+	// at a few dozen articles/s (BUG-3). The harness sets ArticleCmdDelay=0.
+	// Structural check, no duration (plan test-timing-hardening D4): every STAT
+	// passes the delay site, counted by ArticleDelayCount whether or not the
+	// delay is > 0, and the site only sleeps for ArticleCmdDelay > 0, which is 0
+	// here.
+	g, arts := artSeed(t, "nodelay", 1, nil)
+	hs := newTestServer(t, hServerOpts{})
+	if hs.S.ArticleCmdDelay != 0 {
+		t.Fatalf("harness ArticleCmdDelay = %s, want 0", hs.S.ArticleCmdDelay)
+	}
+	c := hs.dial(t)
+	artSelect(t, c, g)
+	a1 := artFind(t, arts, 1)
+	before := hs.S.ArticleDelayCount()
+	const n = 50
+	for i := 0; i < n; i++ {
+		code, line := c.Cmd("STAT 1")
+		// RFC 3977 §6.2.4.2: 223 n message-id.
+		if err := artCheckStatus(code, line, 223, 1, a1.MessageID); err != nil {
+			t.Fatalf("STAT %d: %v", i, err)
+		}
+	}
+	if got := hs.S.ArticleDelayCount() - before; got != n {
+		t.Fatalf("%d STATs passed the ArticleCmdDelay site %d times, want %d", n, got, n)
+	}
+
+	// Both STAT forms go through the same delay site (one count each).
+	for _, tc := range []struct {
+		name, arg string
+		num       int64
+	}{
+		{"number", "1", 1},
+		{"message-id", a1.MessageID, 1},
+	} {
+		before := hs.S.ArticleDelayCount()
+		code, line := c.Cmd("STAT %s", tc.arg)
+		if err := artCheckStatus(code, line, 223, tc.num, a1.MessageID); err != nil {
+			t.Fatalf("STAT by %s: %v", tc.name, err)
+		}
+		if got := hs.S.ArticleDelayCount() - before; got != 1 {
+			t.Errorf("STAT by %s passed the ArticleCmdDelay site %d times, want 1", tc.name, got)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Hidden articles and 430 texts (plan nntp-server-hardening, slice nntp-read)
+
+// artHide sets hide = 1 on article num of group (decision 2: never served over NNTP).
+func artHide(t *testing.T, group string, num int64) {
+	t.Helper()
+	gdb, err := hTestDB(t).GetGroupDB(group)
+	if err != nil {
+		t.Fatalf("GetGroupDB %s: %v", group, err)
+	}
+	defer gdb.Return()
+	if _, err := database.RetryableExec(gdb.DB, `UPDATE articles SET hide = 1 WHERE article_num = ?`, num); err != nil {
+		t.Fatalf("hide article %d in %s: %v", num, group, err)
+	}
+}
+
+func TestArtHidden(t *testing.T) {
+	g, arts := artSeed(t, "hidden", 3, nil)
+	artHide(t, g, 2)
+	a2 := artFind(t, arts, 2)
+	a3 := artFind(t, arts, 3)
+
+	t.Run("number-423", func(t *testing.T) {
+		hs := newTestServer(t, hServerOpts{})
+		hs.S.SetXrefMode(XrefOff) // stored-header passthrough (Xref: lines are tested in nntp-xref_test.go)
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		for _, cmd := range artCmds {
+			code, line, _ := artDo(t, c, "%s 2", cmd.name)
+			// A hidden article answers as if it did not exist: 423 (RFC 3977 §6.2.1.2).
+			if err := client.ExpectCode(code, line, 423); err != nil {
+				t.Errorf("%s 2: %v", cmd.name, err)
+			}
+		}
+		// The visible neighbour is still served.
+		if err := artCheckRetrieval(t, c, "ARTICLE", "3", 220, 3, a3); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("message-id-current-group-430", func(t *testing.T) {
+		hs := newTestServer(t, hServerOpts{})
+		c := hs.dial(t)
+		artSelect(t, c, g)
+		for _, cmd := range artCmds {
+			code, line, _ := artDo(t, c, "%s %s", cmd.name, a2.MessageID)
+			if err := client.ExpectCode(code, line, 430); err != nil {
+				t.Errorf("%s %s: %v", cmd.name, a2.MessageID, err)
+			}
+		}
+	})
+	t.Run("message-id-processor-430", func(t *testing.T) {
+		gA, _ := artSeed(t, "hidden-a", 1, nil)
+		// db is taken here: findFn runs on the server goroutine.
+		db := hTestDB(t)
+		proc := &hFakeProcessor{}
+		proc.findFn = func(messageID, currentGroup string) (*models.Article, error) {
+			gdb, err := db.GetGroupDB(g)
+			if err != nil {
+				return nil, err
+			}
+			defer gdb.Return()
+			// GetArticleByMessageID does not filter hide: the processor finds the hidden copy.
+			a, err := db.GetArticleByMessageID(gdb, messageID)
+			if err != nil {
+				return nil, fmt.Errorf("artHidden %s: %w", messageID, ErrArticleNotFound)
+			}
+			return a, nil
+		}
+		hs := newTestServer(t, hServerOpts{Proc: proc})
+		for _, selected := range []bool{true, false} {
+			c := hs.dial(t)
+			if selected {
+				artSelect(t, c, gA)
+			}
+			before := proc.findCount()
+			code, line := c.Cmd("STAT %s", a2.MessageID)
+			if err := client.ExpectCode(code, line, 430); err != nil {
+				t.Errorf("STAT %s (group %s selected %v): %v", a2.MessageID, gA, selected, err)
+			}
+			if proc.findCount() <= before {
+				t.Errorf("STAT %s (selected %v): processor lookup not called", a2.MessageID, selected)
+			}
+			// The visible article of the same group is found through the processor.
+			if err := artCheckRetrieval(t, c, "STAT", a3.MessageID, 223, 0, a3); err != nil {
+				t.Errorf("selected %v: %v", selected, err)
+			}
+		}
+	})
+}
+
+func TestArtNotFoundTexts(t *testing.T) {
+	g, _ := artSeed(t, "notfoundtexts", 1, nil)
+	missing := hMessageID(g, 99)
+	var lines []string
+
+	// no processor: only the current group is searched
+	hs := newTestServer(t, hServerOpts{})
+	c := hs.dial(t)
+	artSelect(t, c, g)
+	for _, cmd := range artCmds {
+		code, line, _ := artDo(t, c, "%s %s", cmd.name, missing)
+		if err := client.ExpectCode(code, line, 430); err != nil {
+			t.Fatalf("%s %s: %v", cmd.name, missing, err)
+		}
+		lines = append(lines, line)
+	}
+
+	// processor miss, then the same id answered from local430
+	proc := &hFakeProcessor{findErr: fmt.Errorf("artNotFoundTexts: %w", ErrArticleNotFound)}
+	hsP := newTestServer(t, hServerOpts{Proc: proc})
+	cP := hsP.dial(t)
+	for i := 0; i < 2; i++ {
+		code, line := cP.Cmd("STAT %s", missing)
+		if err := client.ExpectCode(code, line, 430); err != nil {
+			t.Fatalf("STAT %s round %d: %v", missing, i, err)
+		}
+		lines = append(lines, line)
+	}
+	if n := proc.findCount(); n != 1 {
+		t.Fatalf("findCount %d, want 1 (second miss from local430)", n)
+	}
+
+	for _, line := range lines {
+		for _, bad := range []string{"Cache says no", "NotF0", "NotF1"} {
+			if strings.Contains(line, bad) {
+				t.Errorf("430 reply %q contains the debug text %q", line, bad)
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Arrival grace (plan post-430-window, slice arrival-grace): an article this process
+// accepted (POST 240, IHAVE 235, TAKETHIS 239) is found by message-id without a selected
+// group although the history index does not know it yet, and a miss in the first
+// ArrivalGrace is never cached in local430.
+
+// artGraceEnv is the arrival-grace server, shared by the subtests of TestArtArrivalGrace (one
+// posting user: its bcrypt login is slow under -race): a fake processor that accepts every
+// transfer and whose history lookup (FindArticleByMessageID) always misses, as the history
+// index is flushed only after the group DB commit; the server (Config.Hostname set, POST
+// needs a path identity) and an authenticated poster connection. Every subtest uses its own
+// group and message-ids.
+type artGraceEnv struct {
+	proc   *hFakeProcessor
+	hs     *hServer
+	poster *client.Conn
+}
+
+// artGraceServer is newTestServer with Config.Hostname set before Serve, so no connection
+// goroutine can see the write.
+func artGraceServer(t *testing.T, proc ArticleProcessor) *hServer {
+	t.Helper()
+	db := hTestDB(t)
+	cfg := &config.ServerConfig{}
+	cfg.NNTP.MaxConns = 100
+	cfg.Hostname = "example.org"
+	hs := &hServer{}
+	s, err := NewNNTPServer(db, cfg, &hs.wg, proc)
+	if err != nil {
+		t.Fatalf("NewNNTPServer: %v", err)
+	}
+	s.ArticleCmdDelay = 0
+	s.GroupCmdDelay = 0
+	s.ErrorDelay = 0
+	hs.S = s
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	hs.Addr = l.Addr().String()
+	if err := s.Serve(l, false); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	t.Cleanup(func() { hs.stop(t) })
+	return hs
+}
+
+// artGraceSetup builds the shared server.
+func artGraceSetup(t *testing.T) *artGraceEnv {
+	t.Helper()
+	proc := &hFakeProcessor{
+		checkResult:   history.CasePass,
+		processResult: history.CasePass,
+		findErr:       fmt.Errorf("artGrace: history not flushed yet: %w", ErrArticleNotFound),
+	}
+	hs := artGraceServer(t, proc)
+	user, pass := hUser(t, true, true)
+	poster := hs.dial(t)
+	authMustLogin(t, poster, user, pass)
+	return &artGraceEnv{proc: proc, hs: hs, poster: poster}
+}
+
+// artGraceArticle returns article n of g; with stored it is inserted into the group DB first
+// (what the batch writer committed by the time the intake reply is sent).
+func artGraceArticle(t *testing.T, g string, n int64, stored bool) hArticle {
+	t.Helper()
+	a := hDefaultArticle(g, n)
+	a.Headers = strings.Join(artDefaultHeaders(g, a), "\n")
+	if stored {
+		hArticleSQL(t, g, a)
+	}
+	return a
+}
+
+// artGraceRaw is the article as the client sends it (no Date, no Path: POST adds them).
+func artGraceRaw(newsgroups string, a hArticle) string {
+	return string(artCRLF("Message-ID: "+a.MessageID, "Newsgroups: "+newsgroups, "From: "+a.From, "Subject: "+a.Subject)) +
+		CRLF + string(artCRLF(artBodyLines(a)...)) + ".\r\n"
+}
+
+// artGraceTransfer delivers a with the Newsgroups header newsgroups by cmd (POST, IHAVE or
+// TAKETHIS) on c and expects the success reply (RFC 3977 §6.3.1.2: 240, §6.3.2.2: 235;
+// RFC 4644 §2.5.2: 239).
+func artGraceTransfer(t *testing.T, c *client.Conn, cmd, newsgroups string, a hArticle) {
+	t.Helper()
+	raw := artGraceRaw(newsgroups, a)
+	want := 0
+	switch cmd {
+	case "POST":
+		code, line := c.For(t).Cmd("POST")
+		if err := client.ExpectCode(code, line, 340); err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		want = 240
+	case "IHAVE":
+		code, line := c.For(t).Cmd("IHAVE %s", a.MessageID)
+		if err := client.ExpectCode(code, line, 335); err != nil {
+			t.Fatalf("IHAVE: %v", err)
+		}
+		want = 235
+	case "TAKETHIS":
+		raw = "TAKETHIS " + a.MessageID + CRLF + raw
+		want = 239
+	default:
+		t.Fatalf("unknown transfer command %s", cmd)
+	}
+	if err := c.Send(raw); err != nil {
+		t.Fatalf("%s: send article: %v", cmd, err)
+	}
+	code, line, err := c.ReadStatus()
+	if err != nil {
+		t.Fatalf("%s reply: %v (%q)", cmd, err, line)
+	}
+	if err := client.ExpectCode(code, line, want); err != nil {
+		t.Fatalf("%s transfer: %v", cmd, err)
+	}
+}
+
+// artLocal430Has reports whether local430 holds messageID.
+func artLocal430Has(hs *hServer, messageID string) bool {
+	hs.S.local430.mu.RLock()
+	defer hs.S.local430.mu.RUnlock()
+	_, ok := hs.S.local430.cache[messageID]
+	return ok
+}
+
+// artGraceReads checks every by-message-id read on c (no group selected): STAT/HEAD/BODY/
+// ARTICLE answer with number 0 (RFC 3977 §6.2.1.2), OVER 224 (§8.3.2), HDR 225 (§8.5.2),
+// XHDR 221 with "<message-id> <value>".
+func artGraceReads(t *testing.T, c *client.Conn, a hArticle) {
+	t.Helper()
+	for _, cmd := range artCmds {
+		code, line, _ := artDo(t, c, "%s %s", cmd.name, a.MessageID)
+		if err := artCheckStatus(code, line, cmd.code, 0, a.MessageID); err != nil {
+			t.Errorf("%s %s: %v", cmd.name, a.MessageID, err)
+		}
+	}
+	code, line := c.For(t).Cmd("OVER %s", a.MessageID)
+	if err := client.ExpectCode(code, line, 224); err != nil {
+		t.Errorf("OVER %s: %v", a.MessageID, err)
+	} else if lines := c.For(t).ReadDotLines(); len(lines) != 1 || !strings.HasPrefix(lines[0], "0\t"+a.Subject+"\t") {
+		t.Errorf("OVER %s: %q, want one line for article 0", a.MessageID, lines)
+	}
+	code, line = c.For(t).Cmd("HDR Subject %s", a.MessageID)
+	if err := client.ExpectCode(code, line, 225); err != nil {
+		t.Errorf("HDR Subject %s: %v", a.MessageID, err)
+	} else if lines := c.For(t).ReadDotLines(); len(lines) != 1 || lines[0] != "0 "+a.Subject {
+		t.Errorf("HDR Subject %s: %q, want [%q]", a.MessageID, lines, "0 "+a.Subject)
+	}
+	code, line = c.Cmd("XHDR Subject %s", a.MessageID)
+	if err := client.ExpectCode(code, line, 221); err != nil {
+		t.Errorf("XHDR Subject %s: %v", a.MessageID, err)
+	} else if lines := c.ReadDotLines(); len(lines) != 1 || lines[0] != a.MessageID+" "+a.Subject {
+		t.Errorf("XHDR Subject %s: %q, want [%q]", a.MessageID, lines, a.MessageID+" "+a.Subject)
+	}
+}
+
+// artGracePostWaits returns the commit-wait timeouts the server passed to ProcessPostedArticle.
+func artGracePostWaits(p *hFakeProcessor) []time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]time.Duration(nil), p.postWaits...)
+}
+
+// artGroupDBFiles returns the base names of the group DB files under <data>/db.
+func artGroupDBFiles(t *testing.T) map[string]bool {
+	t.Helper()
+	files := make(map[string]bool)
+	err := filepath.WalkDir(filepath.Join(hDataDir(t), "db"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			files[d.Name()] = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk group DBs: %v", err)
+	}
+	return files
+}
+
+func TestArtArrivalGrace(t *testing.T) {
+	// The history index learns an article only after the group DB commit and its own flush,
+	// so a lookup without a group right after the intake reply missed and cached the miss
+	// for the local430 TTL (60 s). Now every same-process arrival is found through its
+	// groups at once and is never cached as a miss during ArrivalGrace.
+	env := artGraceSetup(t)
+
+	for _, cmd := range []string{"POST", "IHAVE", "TAKETHIS"} {
+		t.Run(strings.ToLower(cmd), func(t *testing.T) {
+			g, _ := artSeed(t, "grace-"+strings.ToLower(cmd), 0, nil)
+			a := artGraceArticle(t, g, 1, true)
+			waitsBefore := len(artGracePostWaits(env.proc))
+			processedBefore := len(env.proc.processedArticles())
+			artGraceTransfer(t, env.poster, cmd, g, a)
+			if groups, ok := env.hs.S.recentArrivals.RecentArrival(a.MessageID); !ok || len(groups) != 1 || groups[0] != g {
+				t.Fatalf("recentArrivals after %s: %q %v, want [%s]", cmd, groups, ok, g)
+			}
+			// the same connection, no GROUP
+			artGraceReads(t, env.poster, a)
+			if artLocal430Has(env.hs, a.MessageID) {
+				t.Errorf("local430 holds %s after %s", a.MessageID, cmd)
+			}
+			// a new connection
+			code, line := env.hs.dial(t).Cmd("STAT %s", a.MessageID)
+			if err := artCheckStatus(code, line, 223, 0, a.MessageID); err != nil {
+				t.Errorf("STAT on a new connection: %v", err)
+			}
+			if n := len(env.proc.processedArticles()) - processedBefore; n != 1 {
+				t.Errorf("%s: %d articles processed, want 1", cmd, n)
+			}
+			waits := artGracePostWaits(env.proc)[waitsBefore:]
+			if cmd != "POST" {
+				// feeds keep ProcessIncomingArticle: no commit wait
+				if len(waits) != 0 {
+					t.Errorf("%s called ProcessPostedArticle: %v", cmd, waits)
+				}
+				return
+			}
+			// POST waits for the commit with the server's setting (default 5 s), 0 = no wait
+			if want := env.hs.S.PostCommitWait(); len(waits) != 1 || waits[0] != want || want != DefaultPostCommitWait {
+				t.Fatalf("POST commit waits %v, want [%v] (default %v)", waits, want, DefaultPostCommitWait)
+			}
+			env.hs.S.SetPostCommitWait(0)
+			defer env.hs.S.SetPostCommitWait(DefaultPostCommitWait)
+			a2 := artGraceArticle(t, g, 2, true)
+			artGraceTransfer(t, env.poster, "POST", g, a2)
+			if waits := artGracePostWaits(env.proc)[waitsBefore:]; len(waits) != 2 || waits[1] != 0 {
+				t.Fatalf("POST commit waits %v after SetPostCommitWait(0), want [%v 0]", waits, DefaultPostCommitWait)
+			}
+			artGraceReads(t, env.poster, a2)
+		})
+	}
+
+	// The hints are the Newsgroups names as received: a name the server does not carry is
+	// skipped without opening (and so creating) a group DB for it.
+	t.Run("unknown-group-hint", func(t *testing.T) {
+		g, _ := artSeed(t, "grace-hint", 0, nil)
+		ghost := hGroupName("t4.nonexistent")
+		a := artGraceArticle(t, g, 1, true)
+		artGraceTransfer(t, env.poster, "POST", ghost+","+g, a)
+		if groups, ok := env.hs.S.recentArrivals.RecentArrival(a.MessageID); !ok || len(groups) != 2 || groups[0] != ghost {
+			t.Fatalf("recentArrivals: %q %v, want [%s %s]", groups, ok, ghost, g)
+		}
+		code, line := env.hs.dial(t).Cmd("STAT %s", a.MessageID)
+		if err := artCheckStatus(code, line, 223, 0, a.MessageID); err != nil {
+			t.Fatalf("STAT with an unknown first hint: %v", err)
+		}
+		files := artGroupDBFiles(t)
+		if !files[database.SanitizeGroupName(g)+".db"] {
+			t.Fatalf("no group DB file for %s: the file check is broken", g)
+		}
+		if name := database.SanitizeGroupName(ghost) + ".db"; files[name] {
+			t.Errorf("a read command created the group DB %s for the unknown group %s", name, ghost)
+		}
+	})
+
+	// A miss during the grace (the article is not committed yet: the IHAVE/TAKETHIS case, or
+	// a POST whose commit wait ran out) answers 430 but is not cached: as soon as the row is
+	// in the group DB the next STAT answers 223, without any TTL wait.
+	t.Run("miss-not-cached", func(t *testing.T) {
+		g, _ := artSeed(t, "grace-miss", 0, nil)
+		a := artGraceArticle(t, g, 1, false)
+		artGraceTransfer(t, env.poster, "IHAVE", g, a)
+		reader := env.hs.dial(t)
+		for i := 0; i < 2; i++ {
+			before := env.proc.findCount()
+			code, line := reader.Cmd("STAT %s", a.MessageID)
+			if err := client.ExpectCode(code, line, 430); err != nil {
+				t.Fatalf("STAT %d before the commit: %v", i, err)
+			}
+			// the history is asked every time: not answered from local430
+			if n := env.proc.findCount() - before; n != 1 {
+				t.Errorf("STAT %d before the commit: %d history lookups, want 1", i, n)
+			}
+			if artLocal430Has(env.hs, a.MessageID) {
+				t.Fatalf("local430 holds %s during the arrival grace", a.MessageID)
+			}
+		}
+		hArticleSQL(t, g, a) // the batch writer commits
+		code, line := reader.Cmd("STAT %s", a.MessageID)
+		if err := artCheckStatus(code, line, 223, 0, a.MessageID); err != nil {
+			t.Fatalf("STAT after the commit: %v", err)
+		}
+		if artLocal430Has(env.hs, a.MessageID) {
+			t.Errorf("local430 holds %s", a.MessageID)
+		}
+	})
+
+	// After the grace the old rules apply: only the history is asked, and a miss is cached
+	// for the local430 TTL. Also: a 430 cached before the arrival is removed by it (BUG-8).
+	t.Run("after-grace", func(t *testing.T) {
+		g, _ := artSeed(t, "grace-after", 0, nil)
+		a := artGraceArticle(t, g, 1, true)
+		if !env.hs.S.local430.Add(a.MessageID) {
+			t.Fatal("local430.Add refused the id")
+		}
+		artGraceTransfer(t, env.poster, "POST", g, a)
+		if artLocal430Has(env.hs, a.MessageID) {
+			t.Fatalf("local430 still holds %s after POST 240 (BUG-8)", a.MessageID)
+		}
+		if !env.hs.S.recentArrivals.ageForTest(a.MessageID, ArrivalGrace) {
+			t.Fatalf("no recentArrivals entry for %s", a.MessageID)
+		}
+		if _, ok := env.hs.S.recentArrivals.RecentArrival(a.MessageID); ok {
+			t.Fatalf("%s is still a recent arrival after ArrivalGrace", a.MessageID)
+		}
+		reader := env.hs.dial(t)
+		code, line := reader.Cmd("STAT %s", a.MessageID)
+		if err := client.ExpectCode(code, line, 430); err != nil {
+			t.Fatalf("STAT after the grace: %v", err)
+		}
+		if !artLocal430Has(env.hs, a.MessageID) {
+			t.Fatalf("a miss after the grace is not cached in local430")
+		}
+		before := env.proc.findCount()
+		code, line = reader.Cmd("STAT %s", a.MessageID)
+		if err := client.ExpectCode(code, line, 430); err != nil {
+			t.Fatalf("second STAT after the grace: %v", err)
+		}
+		if n := env.proc.findCount(); n != before {
+			t.Errorf("second STAT asked the processor (%d lookups), want the local430 answer", n-before)
+		}
+	})
+}

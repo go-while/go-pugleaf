@@ -2,13 +2,15 @@
 package database
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"log"
-	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -52,7 +54,7 @@ const query_AddProvider = `INSERT INTO providers (name, grp, host, port, ssl, us
 	          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (db *Database) AddProvider(provider *models.Provider) error {
-	_, err := retryableExec(db.mainDB, query_AddProvider,
+	_, err := RetryableExec(db.mainDB, query_AddProvider,
 		provider.Name, provider.Grp, provider.Host, provider.Port,
 		provider.SSL, provider.Username, provider.Password,
 		provider.MaxConns, provider.Enabled, provider.Priority,
@@ -67,7 +69,7 @@ func (db *Database) AddProvider(provider *models.Provider) error {
 
 // DeleteProvider deletes a provider from the main database
 func (db *Database) DeleteProvider(id int) error {
-	_, err := retryableExec(db.mainDB, `DELETE FROM providers WHERE id = ?`, id)
+	_, err := RetryableExec(db.mainDB, `DELETE FROM providers WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete provider %d: %w", id, err)
 	}
@@ -81,7 +83,7 @@ const query_SetProvider = `UPDATE providers SET
 		WHERE id = ?`
 
 func (db *Database) SetProvider(provider *models.Provider) error {
-	_, err := retryableExec(db.mainDB, query_SetProvider,
+	_, err := RetryableExec(db.mainDB, query_SetProvider,
 		provider.Grp, provider.Host, provider.Port,
 		provider.SSL, provider.Username, provider.Password,
 		provider.MaxConns, provider.Enabled, provider.Priority,
@@ -95,10 +97,12 @@ func (db *Database) SetProvider(provider *models.Provider) error {
 }
 
 // GetProviders returns all providers
-const query_GetProviders = `SELECT id, enabled, priority, name, host, port, ssl, username, password, max_conns, max_art_size, posting, created_at, proxy_enabled, proxy_type, proxy_host, proxy_port, proxy_username, proxy_password FROM providers order by priority ASC`
+// query_GetProviders: the text columns are nullable in the schema; a NULL username in a hand-inserted or
+// legacy row must not break every GetProviders caller (post-queue failed its scan on such a row).
+const query_GetProviders = `SELECT id, enabled, priority, COALESCE(name,''), COALESCE(host,''), port, ssl, COALESCE(username,''), COALESCE(password,''), max_conns, max_art_size, posting, created_at, proxy_enabled, COALESCE(proxy_type,''), COALESCE(proxy_host,''), proxy_port, COALESCE(proxy_username,''), COALESCE(proxy_password,'') FROM providers order by priority ASC`
 
 func (db *Database) GetProviders() ([]*models.Provider, error) {
-	rows, err := retryableQuery(db.mainDB, query_GetProviders)
+	rows, err := RetryableQuery(db.mainDB, query_GetProviders)
 	if err != nil {
 		return nil, err
 	}
@@ -117,28 +121,132 @@ func (db *Database) GetProviders() ([]*models.Provider, error) {
 // InsertNewsgroup inserts a new newsgroup
 const query_InsertNewsgroup = `INSERT INTO newsgroups (name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
+// query_HierarchyAddGroup counts one new active group into its hierarchies row, creating the
+// row when the hierarchy is new. One O(1) statement per insert: the preloader inserts
+// 100k+ groups, so a recount per insert is out of the question. The admin's "update
+// hierarchies" (UpdateHierarchyCounts) remains the full resync.
+const query_HierarchyAddGroup = `INSERT INTO hierarchies (name, description, group_count, last_updated, created_at)
+		VALUES (?, '', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(name) DO UPDATE SET group_count = COALESCE(group_count, 0) + 1, last_updated = CURRENT_TIMESTAMP`
+
+// query_HierarchyRecount sets one hierarchies row to its real number of active groups
+// (idx_newsgroups_hierarchy makes this one index range), creating the row when missing.
+// Used when a group's active flag changes; cheap enough for that admin-driven path.
+const query_HierarchyRecount = `INSERT INTO hierarchies (name, description, group_count, last_updated, created_at)
+		VALUES (?, '', (SELECT COUNT(*) FROM newsgroups WHERE hierarchy = ? AND active = 1), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(name) DO UPDATE SET group_count = excluded.group_count, last_updated = CURRENT_TIMESTAMP`
+
 func (db *Database) InsertNewsgroup(g *models.Newsgroup) error {
 	// Auto-populate hierarchy from newsgroup name if not set
 	if g.Hierarchy == "" {
 		g.Hierarchy = ExtractHierarchyFromGroupName(g.Name)
 	}
-	_, err := retryableExec(db.mainDB, query_InsertNewsgroup, g.Name, g.Description, g.LastArticle, g.MessageCount, g.Active, g.ExpiryDays, g.MaxArticles, g.MaxArtSize, g.HighWater, g.LowWater, g.Status, g.Hierarchy)
+	// The group and its hierarchy count go in one transaction: the hierarchies table is
+	// what the Usenet page lists, and until 2026-10-23 only the admin button filled it.
+	err := RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(query_InsertNewsgroup, g.Name, g.Description, g.LastArticle, g.MessageCount, g.Active, g.ExpiryDays, g.MaxArticles, g.MaxArtSize, g.HighWater, g.LowWater, g.Status, g.Hierarchy); err != nil {
+			return err
+		}
+		if g.Active && g.Hierarchy != "" {
+			if _, err := tx.Exec(query_HierarchyAddGroup, g.Hierarchy); err != nil {
+				return fmt.Errorf("hierarchies row %s: %w", g.Hierarchy, err)
+			}
+		}
+		return nil
+	})
 
 	// Invalidate hierarchy cache for the affected hierarchy
 	if err == nil && db.HierarchyCache != nil {
 		db.HierarchyCache.InvalidateHierarchy(g.Hierarchy)
+		db.HierarchyCache.refreshHierarchyRow(db, g.Hierarchy)
 	}
 
 	return err
+}
+
+// recountHierarchies sets the hierarchies rows of the given group names to their real
+// active group counts (one statement per distinct top level) and refreshes the cached
+// top-level list. Errors are logged: the groups' own change already succeeded.
+func (db *Database) recountHierarchies(names ...string) {
+	done := make(map[string]bool, len(names))
+	for _, name := range names {
+		top := ExtractHierarchyFromGroupName(name)
+		if top == "" || done[top] {
+			continue
+		}
+		done[top] = true
+		if _, err := RetryableExec(db.mainDB, query_HierarchyRecount, top, top); err != nil {
+			log.Printf("[DB] recountHierarchies: hierarchy '%s': %v", top, err)
+			continue
+		}
+		if db.HierarchyCache != nil {
+			db.HierarchyCache.refreshHierarchyRow(db, top)
+		}
+	}
+}
+
+// query_HierarchiesListed counts the hierarchies the Usenet page would list; query_ActiveGroups
+// the active groups. Both empty-table checks run once, when the cache warms.
+const query_HierarchiesListed = `SELECT COUNT(*) FROM hierarchies WHERE group_count > 0`
+const query_ActiveGroupsCount = `SELECT COUNT(*) FROM newsgroups WHERE active = 1`
+
+// seedHierarchiesIfEmpty runs the full hierarchy sync (UpdateHierarchyCounts) once when
+// the hierarchies table lists nothing although active groups exist: a fresh install, a
+// restored main DB or a database from before the incremental maintenance. It reports
+// whether it ran. Normal starts cost two COUNT queries, never the full sync.
+func (db *Database) seedHierarchiesIfEmpty() (bool, error) {
+	var listed, groups int64
+	if err := RetryableQueryRowScan(db.mainDB, query_HierarchiesListed, nil, &listed); err != nil {
+		return false, err
+	}
+	if listed > 0 {
+		return false, nil
+	}
+	if err := RetryableQueryRowScan(db.mainDB, query_ActiveGroupsCount, nil, &groups); err != nil {
+		return false, err
+	}
+	if groups == 0 {
+		return false, nil
+	}
+	log.Printf("[DB] hierarchies table lists nothing for %d active groups: running the full hierarchy sync once", groups)
+	return true, db.UpdateHierarchyCounts()
 }
 
 const query_MainDBGetAllNewsgroupsCount = `SELECT COUNT(*) FROM newsgroups`
 
 func (db *Database) MainDBGetAllNewsgroupsCount() int64 {
 	var count int64
-	err := retryableQueryRowScan(db.mainDB, query_MainDBGetAllNewsgroupsCount, nil, &count)
+	err := RetryableQueryRowScan(db.mainDB, query_MainDBGetAllNewsgroupsCount, nil, &count)
 	if err != nil {
 		log.Printf("MainDBGetNewsgroupsCount: Failed to get newsgroups count: %v", err)
+		return 0
+	}
+	return count
+}
+
+// GetUsersCount gets the total number of users
+const query_GetUsersCount = `SELECT COUNT(*) FROM users`
+
+func (db *Database) GetUsersCount() int64 {
+	var count int64
+	err := RetryableQueryRowScan(db.mainDB, query_GetUsersCount, nil, &count)
+	if err != nil {
+		log.Printf("GetUsersCount: Failed to get users count: %v", err)
+		return 0
+	}
+	return count
+}
+
+// GetAdminUsersCount gets the total number of admin users
+const query_GetAdminUsersCount = `SELECT COUNT(DISTINCT u.id) FROM users u
+LEFT JOIN user_permissions up ON u.id = up.user_id
+WHERE u.disabled = 0 AND (u.id = 1 OR up.permission = 'admin')`
+
+func (db *Database) GetAdminUsersCount() int64 {
+	var count int64
+	err := RetryableQueryRowScan(db.mainDB, query_GetAdminUsersCount, nil, &count)
+	if err != nil {
+		log.Printf("GetAdminUsersCount: Failed to get admin users count: %v", err)
 		return 0
 	}
 	return count
@@ -148,7 +256,7 @@ const query_MainDBGetNewsgroupsActiveCount = `SELECT COUNT(*) FROM newsgroups WH
 
 func (db *Database) MainDBGetNewsgroupsActiveCount() int64 {
 	var count int64
-	err := retryableQueryRowScan(db.mainDB, query_MainDBGetNewsgroupsActiveCount, nil, &count)
+	err := RetryableQueryRowScan(db.mainDB, query_MainDBGetNewsgroupsActiveCount, nil, &count)
 	if err != nil {
 		log.Printf("MainDBGetNewsgroupsActiveCount: Failed to get newsgroups count: %v", err)
 		return 0
@@ -156,11 +264,15 @@ func (db *Database) MainDBGetNewsgroupsActiveCount() int64 {
 	return count
 }
 
-// MainDBGetAllNewsgroups returns all newsgroups
-const query_MainDBGetAllNewsgroups = `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy, created_at FROM newsgroups order by name`
+// MainDBGetAllNewsgroups returns all newsgroups.
+// The three MainDBGet* readers COALESCE the nullable columns (last_article, message_count,
+// high_water, low_water, status, hierarchy): a row with a NULL in any of them, as the old
+// batch upsert created, made the scan fail and aborted every caller (A-db-1). Migration
+// 0029 repairs such rows; the COALESCE keeps the readers working until it has run.
+const query_MainDBGetAllNewsgroups = `SELECT id, name, description, COALESCE(last_article, 0), COALESCE(message_count, 0), active, expiry_days, max_articles, max_art_size, COALESCE(high_water, 0), COALESCE(low_water, 1), COALESCE(status, 'y'), COALESCE(hierarchy, ''), created_at FROM newsgroups order by name`
 
 func (db *Database) MainDBGetAllNewsgroups() ([]*models.Newsgroup, error) {
-	rows, err := retryableQuery(db.mainDB, query_MainDBGetAllNewsgroups)
+	rows, err := RetryableQuery(db.mainDB, query_MainDBGetAllNewsgroups)
 	if err != nil {
 		log.Printf("MainDBGetAllNewsgroups: Failed to query newsgroups: %v", err)
 		return nil, err
@@ -174,14 +286,20 @@ func (db *Database) MainDBGetAllNewsgroups() ([]*models.Newsgroup, error) {
 		}
 		out = append(out, &g)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
 // MainDBGetNewsgroup returns a newsgroups information from MainDB
-const query_MainDBGetNewsgroup = `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy, created_at FROM newsgroups WHERE name = ?`
+const query_MainDBGetNewsgroup = `SELECT id, name, description, COALESCE(last_article, 0), COALESCE(message_count, 0), active, expiry_days, max_articles, max_art_size, COALESCE(high_water, 0), COALESCE(low_water, 1), COALESCE(status, 'y'), COALESCE(hierarchy, ''), created_at FROM newsgroups WHERE name = ?`
 
 func (db *Database) MainDBGetNewsgroup(newsgroup string) (*models.Newsgroup, error) {
-	rows, err := retryableQuery(db.mainDB, query_MainDBGetNewsgroup, newsgroup)
+	if db == nil || db.mainDB == nil {
+		return nil, fmt.Errorf("MainDBGetNewsgroup %s: main database is not open", newsgroup)
+	}
+	rows, err := RetryableQuery(db.mainDB, query_MainDBGetNewsgroup, newsgroup)
 	if err != nil {
 		log.Printf("MainDBGetNewsgroup: Failed to query newsgroup '%s': %v", newsgroup, err)
 		return nil, err
@@ -195,6 +313,9 @@ func (db *Database) MainDBGetNewsgroup(newsgroup string) (*models.Newsgroup, err
 		}
 		found = true
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	if !found {
 		return nil, sql.ErrNoRows
 	}
@@ -202,10 +323,10 @@ func (db *Database) MainDBGetNewsgroup(newsgroup string) (*models.Newsgroup, err
 }
 
 // MainDBGetNewsgroupByID returns a newsgroup information from MainDB by ID
-const query_MainDBGetNewsgroupByID = `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, high_water, low_water, status, hierarchy, created_at FROM newsgroups WHERE id = ?`
+const query_MainDBGetNewsgroupByID = `SELECT id, name, description, COALESCE(last_article, 0), COALESCE(message_count, 0), active, expiry_days, max_articles, max_art_size, COALESCE(high_water, 0), COALESCE(low_water, 1), COALESCE(status, 'y'), COALESCE(hierarchy, ''), created_at FROM newsgroups WHERE id = ?`
 
 func (db *Database) MainDBGetNewsgroupByID(id int64) (*models.Newsgroup, error) {
-	rows, err := retryableQuery(db.mainDB, query_MainDBGetNewsgroupByID, id)
+	rows, err := RetryableQuery(db.mainDB, query_MainDBGetNewsgroupByID, id)
 	if err != nil {
 		log.Printf("MainDBGetNewsgroupByID: Failed to query newsgroup with ID %d: %v", id, err)
 		return nil, err
@@ -218,6 +339,9 @@ func (db *Database) MainDBGetNewsgroupByID(id int64) (*models.Newsgroup, error) 
 			return nil, err
 		}
 		found = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	if !found {
 		return nil, sql.ErrNoRows
@@ -234,7 +358,7 @@ func (db *Database) UpdateNewsgroup(g *models.Newsgroup) error {
 		g.Hierarchy = ExtractHierarchyFromGroupName(g.Name)
 	}
 
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroup,
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroup,
 		g.Description, g.LastArticle, g.MessageCount, g.Active, g.ExpiryDays, g.MaxArticles, g.HighWater, g.LowWater, g.Status, g.Hierarchy, g.Name,
 	)
 
@@ -250,7 +374,7 @@ func (db *Database) UpdateNewsgroup(g *models.Newsgroup) error {
 const query_UpdateNewsgroupExpiry = `UPDATE newsgroups SET expiry_days = ? WHERE name = ?`
 
 func (db *Database) UpdateNewsgroupExpiry(name string, expiryDays int) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupExpiry, expiryDays, name)
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupExpiry, expiryDays, name)
 	return err
 }
 
@@ -258,7 +382,7 @@ func (db *Database) UpdateNewsgroupExpiry(name string, expiryDays int) error {
 const query_UpdateNewsgroupExpiryPrefix = `UPDATE newsgroups SET expiry_days = ? WHERE name LIKE ? `
 
 func (db *Database) UpdateNewsgroupExpiryPrefix(name string, expiryDays int) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupExpiryPrefix, expiryDays, name+"%")
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupExpiryPrefix, expiryDays, name+"%")
 	return err
 }
 
@@ -266,7 +390,7 @@ func (db *Database) UpdateNewsgroupExpiryPrefix(name string, expiryDays int) err
 const query_UpdateNewsgroupMaxArticles = `UPDATE newsgroups SET max_articles = ? WHERE name = ?`
 
 func (db *Database) UpdateNewsgroupMaxArticles(name string, maxArticles int) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupMaxArticles, maxArticles, name)
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupMaxArticles, maxArticles, name)
 	return err
 }
 
@@ -274,7 +398,7 @@ func (db *Database) UpdateNewsgroupMaxArticles(name string, maxArticles int) err
 const query_UpdateNewsgroupMaxArticlesPrefix = `UPDATE newsgroups SET max_articles = ? WHERE name LIKE ?`
 
 func (db *Database) UpdateNewsgroupMaxArticlesPrefix(name string, maxArticles int) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupMaxArticlesPrefix, maxArticles, name+"%")
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupMaxArticlesPrefix, maxArticles, name+"%")
 	return err
 }
 
@@ -282,7 +406,7 @@ func (db *Database) UpdateNewsgroupMaxArticlesPrefix(name string, maxArticles in
 const query_UpdateNewsgroupMaxArtSize = `UPDATE newsgroups SET max_art_size = ? WHERE name = ?`
 
 func (db *Database) UpdateNewsgroupMaxArtSize(name string, maxArtSize int) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupMaxArtSize, maxArtSize, name)
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupMaxArtSize, maxArtSize, name)
 	return err
 }
 
@@ -290,11 +414,14 @@ const query_UpdateNewsgroupActive = `UPDATE newsgroups SET active = ? WHERE name
 
 // UpdateNewsgroupActive updates the active status for a newsgroup
 func (db *Database) UpdateNewsgroupActive(name string, active bool) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupActive, active, name)
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupActive, active, name)
 
 	// Update hierarchy cache with new active status instead of invalidating
 	if err == nil && db.HierarchyCache != nil {
 		db.HierarchyCache.UpdateNewsgroupActiveStatus(name, active)
+	}
+	if err == nil {
+		db.recountHierarchies(name)
 	}
 
 	return err
@@ -348,22 +475,39 @@ func (db *Database) BulkUpdateNewsgroupActive(names []string, active bool) (int,
 			db.HierarchyCache.UpdateNewsgroupActiveStatus(name, active)
 		}
 	}
+	db.recountHierarchies(names...)
 
 	return int(rowsAffected), nil
 }
 
-// BulkDeleteNewsgroups deletes multiple inactive newsgroups
+// The bulk forms of the two dependent deletes of DeleteNewsgroup (E9). Each %s takes the
+// same `?,?,...` placeholder list as query_BulkDeleteNewsgroupsRows, and each repeats its
+// `active = 0` guard through a subselect on newsgroups, so all three statements cover
+// exactly the same groups - the ones the newsgroups delete really removes. Both therefore
+// have to run while the newsgroups rows are still there: the flags are keyed on
+// newsgroups.id, which only the surviving row resolves, and after the delete nothing says
+// any more which of the named groups was inactive.
+//
+// query_BulkDeleteSpamRows does the same for the main-DB spam table (FU:E15): it has no FK
+// and no cascade either, so its rows outlived a deleted group and inflated the admin spam
+// count.
+const (
+	query_BulkDeleteUserSpamFlags  = `DELETE FROM user_spam_flags WHERE newsgroup_id IN (SELECT id FROM newsgroups WHERE name IN (%s) AND active = 0)`
+	query_BulkDeleteSectionGroups  = `DELETE FROM section_groups WHERE newsgroup_name IN (SELECT name FROM newsgroups WHERE name IN (%s) AND active = 0)`
+	query_BulkDeleteSpamRows       = `DELETE FROM spam WHERE newsgroup_id IN (SELECT id FROM newsgroups WHERE name IN (%s) AND active = 0)`
+	query_BulkDeleteNewsgroupsRows = `DELETE FROM newsgroups WHERE name IN (%s) AND active = 0`
+)
+
+// BulkDeleteNewsgroups deletes multiple inactive newsgroups and the rows keyed on them.
+// It removes the same dependent rows as DeleteNewsgroup: without that, a bulk-deleted
+// section member left an orphan section_groups row, still listed in the admin section view
+// where it 404s, plus user_spam_flags rows that nothing would ever clean up (E9), and the
+// spam rows of the group (FU:E15). The statements run in one RetryableTransactionExec, so
+// an admin bulk delete waits out SQLITE_BUSY instead of failing outright (FU:E13).
 func (db *Database) BulkDeleteNewsgroups(names []string) (int, error) {
 	if len(names) == 0 {
 		return 0, nil
 	}
-
-	// Use transaction for atomicity
-	tx, err := db.mainDB.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
 
 	// Build placeholders for IN clause - only delete inactive newsgroups
 	placeholders := make([]string, len(names))
@@ -373,23 +517,35 @@ func (db *Database) BulkDeleteNewsgroups(names []string) (int, error) {
 		placeholders[i] = "?"
 		args[i] = name
 	}
+	in := strings.Join(placeholders, ",")
 
-	query := fmt.Sprintf(
-		`DELETE FROM newsgroups WHERE name IN (%s) AND active = 0`,
-		strings.Join(placeholders, ","),
-	)
-
-	result, err := tx.Exec(query, args...)
+	var rowsAffected int64
+	err := RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
+		// RetryableTransactionExec re-runs this body after a retryable error, including one
+		// from the commit, so the count of an earlier attempt must not leak out.
+		rowsAffected = 0
+		// Dependent rows first, while the newsgroups rows they are resolved from still exist.
+		if _, err := tx.Exec(fmt.Sprintf(query_BulkDeleteUserSpamFlags, in), args...); err != nil {
+			return fmt.Errorf("failed to delete user spam flags of %d newsgroups: %w", len(names), err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf(query_BulkDeleteSectionGroups, in), args...); err != nil {
+			return fmt.Errorf("failed to delete section groups of %d newsgroups: %w", len(names), err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf(query_BulkDeleteSpamRows, in), args...); err != nil {
+			return fmt.Errorf("failed to delete spam rows of %d newsgroups: %w", len(names), err)
+		}
+		result, err := tx.Exec(fmt.Sprintf(query_BulkDeleteNewsgroupsRows, in), args...)
+		if err != nil {
+			return fmt.Errorf("failed to delete %d newsgroups: %w", len(names), err)
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected for %d newsgroups: %w", len(names), err)
+		}
+		rowsAffected = n
+		return nil
+	})
 	if err != nil {
-		return 0, err
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
-
-	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 
@@ -408,14 +564,36 @@ func (db *Database) BulkDeleteNewsgroups(names []string) (int, error) {
 const query_UpdateNewsgroupDescription = `UPDATE newsgroups SET description = ? WHERE name = ?`
 
 func (db *Database) UpdateNewsgroupDescription(name string, description string) error {
-	_, err := retryableExec(db.mainDB, query_UpdateNewsgroupDescription, description, name)
+	_, err := RetryableExec(db.mainDB, query_UpdateNewsgroupDescription, description, name)
 	return err
 }
 
 // DeleteNewsgroup deletes a newsgroup from the main database
 const query_DeleteNewsgroup = `DELETE FROM newsgroups WHERE name = ? AND active = 0`
 
-func (db *Database) DeleteNewsgroup(name string) error {
+// query_DeleteSectionGroupsByNewsgroup drops the section memberships of a deleted newsgroup.
+// Without it the section routes keep listing and serving a group that no longer exists (F10).
+const query_DeleteSectionGroupsByNewsgroup = `DELETE FROM section_groups WHERE newsgroup_name = ?`
+
+// query_DeleteUserSpamFlagsByNewsgroup drops the spam flags of a deleted newsgroup (A4).
+// user_spam_flags (migration 0007) has a foreign key on user_id only, so nothing cascades
+// on the newsgroup_id side the way post_queue does (migration 0016), and the rows would
+// outlive the group forever: newsgroups.id is AUTOINCREMENT, so no later group inherits
+// them, they just accumulate. The subselect repeats the `active = 0` guard of
+// query_DeleteNewsgroup so both statements cover exactly the same groups, which is also
+// why this one has to run while the newsgroups row is still there.
+const query_DeleteUserSpamFlagsByNewsgroup = `DELETE FROM user_spam_flags WHERE newsgroup_id IN (SELECT id FROM newsgroups WHERE name = ? AND active = 0)`
+
+// query_DeleteSpamRowsByNewsgroup drops the main-DB spam rows of a deleted newsgroup
+// (FU:E15). spam (migration 0006) has no FK and no cascade, so the rows outlived the group
+// and inflated the admin spam count. Same `active = 0` guard and ordering as
+// query_DeleteUserSpamFlagsByNewsgroup.
+const query_DeleteSpamRowsByNewsgroup = `DELETE FROM spam WHERE newsgroup_id IN (SELECT id FROM newsgroups WHERE name = ? AND active = 0)`
+
+// DeleteNewsgroup removes an inactive newsgroup and the rows keyed on it. It reports
+// whether a row was really deleted: query_DeleteNewsgroup only matches `active = 0`, so
+// deleting an active group is a no-op and the caller must not claim it happened (B3).
+func (db *Database) DeleteNewsgroup(name string) (bool, error) {
 	// Get hierarchy before deletion for cache invalidation
 	newsgroup, err := db.MainDBGetNewsgroup(name)
 	var hierarchy string
@@ -426,22 +604,62 @@ func (db *Database) DeleteNewsgroup(name string) error {
 		hierarchy = ExtractHierarchyFromGroupName(name)
 	}
 
-	_, err = retryableExec(db.mainDB, query_DeleteNewsgroup, name)
-
-	// Invalidate hierarchy cache for the affected hierarchy
-	if err == nil && db.HierarchyCache != nil {
-		db.HierarchyCache.InvalidateHierarchy(hierarchy)
+	// The newsgroup row, its section_groups, user_spam_flags and spam rows go in one
+	// transaction: the dependent rows are only removed when the group was really deleted
+	// (the DELETE is a no-op while active).
+	var deleted bool
+	err = RetryableTransactionExec(db.mainDB, func(tx *sql.Tx) error {
+		// RetryableTransactionExec re-runs this body after a retryable error, including one
+		// from the commit, so the result of an earlier attempt must not leak out.
+		deleted = false
+		// Before the newsgroups row goes: the flags are keyed on newsgroups.id, which this
+		// statement can only resolve by name while the row still exists. Its `active = 0`
+		// guard matches query_DeleteNewsgroup, so it deletes nothing for a group that stays.
+		if _, err := tx.Exec(query_DeleteUserSpamFlagsByNewsgroup, name); err != nil {
+			return fmt.Errorf("failed to delete user spam flags of %s: %w", name, err)
+		}
+		if _, err := tx.Exec(query_DeleteSpamRowsByNewsgroup, name); err != nil {
+			return fmt.Errorf("failed to delete spam rows of %s: %w", name, err)
+		}
+		result, err := tx.Exec(query_DeleteNewsgroup, name)
+		if err != nil {
+			return fmt.Errorf("failed to delete newsgroup %s: %w", name, err)
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected for newsgroup %s: %w", name, err)
+		}
+		if rowsAffected != 1 {
+			return nil
+		}
+		if _, err := tx.Exec(query_DeleteSectionGroupsByNewsgroup, name); err != nil {
+			return fmt.Errorf("failed to delete section groups of %s: %w", name, err)
+		}
+		deleted = true
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
 
-	return err
+	// Invalidate hierarchy cache for the affected hierarchy
+	if db.HierarchyCache != nil {
+		db.HierarchyCache.InvalidateHierarchy(hierarchy)
+	}
+	// No uiCacheHeaderSections.invalidate() here: that cache holds rows of the sections
+	// table only (query_GetHeaderSections), which deleting a newsgroup and its
+	// section_groups rows cannot change. Invalidating it would be dead work and would
+	// make every concurrent in-flight load discard its result.
+
+	return deleted, nil
 }
 
 const query_GetThreadsCount = `SELECT COUNT(*) FROM threads`
 
-func (db *Database) GetThreadsCount(groupDBs *GroupDBs) (int64, error) {
+func (db *Database) GetThreadsCount(groupDB *GroupDB) (int64, error) {
 	var count int64
 
-	err := retryableQueryRowScan(groupDBs.DB, query_GetThreadsCount, nil, &count)
+	err := RetryableQueryRowScan(groupDB.DB, query_GetThreadsCount, nil, &count)
 	if err != nil {
 		return 0, err
 	}
@@ -450,10 +668,10 @@ func (db *Database) GetThreadsCount(groupDBs *GroupDBs) (int64, error) {
 
 const query_GetArticlesCount = `SELECT COUNT(*) FROM articles`
 
-func (db *Database) GetArticlesCount(groupDBs *GroupDBs) (int64, error) {
+func (db *Database) GetArticlesCount(groupDB *GroupDB) (int64, error) {
 	var count int64
 
-	err := retryableQueryRowScan(groupDBs.DB, query_GetArticlesCount, nil, &count)
+	err := RetryableQueryRowScan(groupDB.DB, query_GetArticlesCount, nil, &count)
 	if err != nil {
 		return 0, err
 	}
@@ -475,12 +693,12 @@ func (db *Database) GetArticleCountFromMainDB(groupName string) (int64, error) {
 // Returns nil if no articles found
 const query_GetLastArticleDate = `SELECT MAX(date_sent) FROM articles WHERE hide = 0`
 
-func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
+func (db *Database) GetLastArticleDate(groupDB *GroupDB) (*time.Time, error) {
 	var lastDateStr sql.NullString
 
-	err := retryableQueryRowScan(groupDBs.DB, query_GetLastArticleDate, nil, &lastDateStr)
+	err := RetryableQueryRowScan(groupDB.DB, query_GetLastArticleDate, nil, &lastDateStr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get last article date for group %s: %w", groupDBs.Newsgroup, err)
+		return nil, fmt.Errorf("failed to get last article date for group %s: %w", groupDB.Newsgroup, err)
 	}
 
 	if !lastDateStr.Valid || lastDateStr.String == "" {
@@ -490,7 +708,7 @@ func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
 	// Parse the date string using the adapter
 	lastDate := parseDateString(lastDateStr.String)
 	if lastDate.IsZero() {
-		return nil, fmt.Errorf("failed to parse last article date '%s' for group %s", lastDateStr.String, groupDBs.Newsgroup)
+		return nil, fmt.Errorf("failed to parse last article date '%s' for group %s", lastDateStr.String, groupDB.Newsgroup)
 	}
 
 	return &lastDate, nil
@@ -499,12 +717,12 @@ func (db *Database) GetLastArticleDate(groupDBs *GroupDBs) (*time.Time, error) {
 const query_GetArticlesBatch = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles ORDER BY article_num ASC LIMIT ? OFFSET ?`
 
 // GetArticlesBatch retrieves articles from a group database in batches for memory efficiency
-func (db *Database) GetArticlesBatch(groupDBs *GroupDBs, limit, offset int) ([]*models.Article, error) {
+func (db *Database) GetArticlesBatch(groupDB *GroupDB, limit, offset int) ([]*models.Article, error) {
 	if limit <= 0 {
 		limit = 100 // Default batch size
 	}
 
-	rows, err := retryableQuery(groupDBs.DB, query_GetArticlesBatch, limit, offset)
+	rows, err := RetryableQuery(groupDB.DB, query_GetArticlesBatch, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -518,8 +736,8 @@ func (db *Database) GetArticlesBatch(groupDBs *GroupDBs, limit, offset int) ([]*
 			return nil, err
 		}
 		a.ArticleNums = make(map[*string]int64)
-		a.ArticleNums[groupDBs.NewsgroupPtr] = artnum
-		a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDBs.NewsgroupPtr)
+		a.ArticleNums[groupDB.NewsgroupPtr] = artnum
+		a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDB.NewsgroupPtr)
 		out = append(out, &a)
 	}
 	return out, nil
@@ -528,8 +746,8 @@ func (db *Database) GetArticlesBatch(groupDBs *GroupDBs, limit, offset int) ([]*
 // InsertThread inserts a thread into a group's threads database
 const query_InsertThread = `INSERT INTO threads (root_article, parent_article, child_article, depth, thread_order) VALUES (?, ?, ?, ?, ?)`
 
-func (db *Database) InsertThread(groupDBs *GroupDBs, t *models.Thread, a *models.Article) error {
-	_, err := retryableExec(groupDBs.DB, query_InsertThread,
+func (db *Database) InsertThread(groupDB *GroupDB, t *models.Thread, a *models.Article) error {
+	_, err := RetryableExec(groupDB.DB, query_InsertThread,
 		t.RootArticle, t.ParentArticle, t.ChildArticle, t.Depth, t.ThreadOrder,
 	)
 
@@ -538,8 +756,8 @@ func (db *Database) InsertThread(groupDBs *GroupDBs, t *models.Thread, a *models
 
 const query_GetThreads = `SELECT id, root_article, parent_article, child_article, depth, thread_order FROM threads`
 
-func (db *Database) GetThreads(groupDBs *GroupDBs) ([]*models.Thread, error) {
-	rows, err := retryableQuery(groupDBs.DB, query_GetThreads)
+func (db *Database) GetThreads(groupDB *GroupDB) ([]*models.Thread, error) {
+	rows, err := RetryableQuery(groupDB.DB, query_GetThreads)
 	if err != nil {
 		return nil, err
 	}
@@ -559,11 +777,13 @@ func (db *Database) GetThreads(groupDBs *GroupDBs) ([]*models.Thread, error) {
 	return out, nil
 }
 
-// InsertOverview inserts an overview entry using the articles table (unified schema)
-const query_InsertOverview = `INSERT INTO articles (subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+// InsertOverview inserts an overview entry using the articles table (unified schema).
+// query_InsertOverview takes the next number from article_num_seq (migration 0010, INT-5), like
+// the batch writer, so numbers of deleted articles are not reused.
+const query_InsertOverview = `INSERT INTO articles (article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES ((SELECT MAX(last_num, COALESCE((SELECT MAX(article_num) FROM articles), 0)) + 1 FROM article_num_seq WHERE id = 1), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 const query_ImportOverview = `INSERT INTO articles (article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-func (db *Database) InsertOverview(groupDBs *GroupDBs, o *models.Overview) (int64, error) {
+func (db *Database) InsertOverview(groupDB *GroupDB, o *models.Overview) (int64, error) {
 	var res sql.Result
 	var err error
 
@@ -571,13 +791,13 @@ func (db *Database) InsertOverview(groupDBs *GroupDBs, o *models.Overview) (int6
 	dateSentStr := o.DateSent.UTC().Format("2006-01-02 15:04:05")
 
 	if o.ArticleNum == 0 {
-		// Auto-increment article_num - don't include it in INSERT
-		res, err = retryableExec(groupDBs.DB, query_InsertOverview,
+		// Next number from article_num_seq (subquery in the statement, no argument)
+		res, err = RetryableExec(groupDB.DB, query_InsertOverview,
 			o.Subject, o.FromHeader, dateSentStr, o.DateString, o.MessageID, o.References, o.Bytes, o.Lines, o.ReplyCount, o.Downloaded,
 		)
 	} else {
 		// Explicit article_num provided (e.g. from ImportOverview)
-		res, err = retryableExec(groupDBs.DB, query_ImportOverview,
+		res, err = RetryableExec(groupDB.DB, query_ImportOverview,
 			o.ArticleNum, o.Subject, o.FromHeader, dateSentStr, o.DateString, o.MessageID, o.References, o.Bytes, o.Lines, o.ReplyCount, o.Downloaded,
 		)
 	}
@@ -590,10 +810,8 @@ func (db *Database) InsertOverview(groupDBs *GroupDBs, o *models.Overview) (int6
 
 const query_GetOverviews = `SELECT article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded FROM articles`
 
-func (db *Database) GetOverviews(groupDBs *GroupDBs) ([]*models.Overview, error) {
-	log.Printf("GetOverviews: group '%s' fetching overviews from articles table", groupDBs.Newsgroup)
-
-	rows, err := retryableQuery(groupDBs.DB, query_GetOverviews)
+func (db *Database) GetOverviews(groupDB *GroupDB) ([]*models.Overview, error) {
+	rows, err := RetryableQuery(groupDB.DB, query_GetOverviews)
 	if err != nil {
 		return nil, err
 	}
@@ -611,11 +829,11 @@ func (db *Database) GetOverviews(groupDBs *GroupDBs) ([]*models.Overview, error)
 
 /*
 // SetOverviewDownloaded sets the downloaded flag for an article in the articles table
-func (db *Database) SetOverviewDownloaded(groupDBs *GroupDBs, articleNum int64, downloaded int) error {
-	db.Batch.BatchCaptureSetOverviewDownloaded(groupDBs.Newsgroup, articleNum)
+func (db *Database) SetOverviewDownloaded(groupDB *GroupDB, articleNum int64, downloaded int) error {
+	db.Batch.BatchCaptureSetOverviewDownloaded(groupDB.Newsgroup, articleNum)
 	//
 
-		_, err := groupDBs.DB.Exec(
+		_, err := groupDB.DB.Exec(
 			`UPDATE articles SET downloaded = ? WHERE article_num = ?`,
 			downloaded, articleNum,
 		)
@@ -629,8 +847,8 @@ func (db *Database) SetOverviewDownloaded(groupDBs *GroupDBs, articleNum int64, 
 // GetUndownloadedOverviews returns all overview entries from articles table that have not been downloaded
 const query_GetUndownloadedOverviews = `SELECT article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded FROM articles WHERE downloaded = 0 ORDER BY article_num ASC LIMIT ?`
 
-func (db *Database) GetUndownloadedOverviews(groupDBs *GroupDBs, fetchMax int) ([]*models.Overview, error) {
-	rows, err := groupDBs.DB.Query(query_GetUndownloadedOverviews, fetchMax)
+func (db *Database) GetUndownloadedOverviews(groupDB *GroupDB, fetchMax int) ([]*models.Overview, error) {
+	rows, err := groupDB.DB.Query(query_GetUndownloadedOverviews, fetchMax)
 	if err != nil {
 		return nil, err
 	}
@@ -647,61 +865,84 @@ func (db *Database) GetUndownloadedOverviews(groupDBs *GroupDBs, fetchMax int) (
 }
 
 // --- User Queries ---
-const query_InsertUser = `INSERT INTO users (username, email, password_hash, display_name) VALUES (?, ?, ?, ?)`
+const query_InsertUser = `INSERT INTO users (username, email, password_hash, display_name, verified, disabled, no_posting, post_count, lastpost_unix) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func (db *Database) InsertUser(u *models.User) error {
 	_, err := db.mainDB.Exec(query_InsertUser,
-		u.Username, u.Email, u.PasswordHash, u.DisplayName,
+		u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Verified, u.Disabled, u.NoPosting, u.PostCount, u.LastPostUnix,
 	)
 	return err
 }
 
-const query_GetUserByUsername = `SELECT id, username, email, password_hash, display_name, created_at FROM users WHERE username = ?`
+const query_GetUserByUsername = `SELECT id, username, email, password_hash, display_name, verified, disabled, no_posting, post_count, lastpost_unix, created_at FROM users WHERE username = ?`
 
 func (db *Database) GetUserByUsername(username string) (*models.User, error) {
 	row := db.mainDB.QueryRow(query_GetUserByUsername, username)
 	var u models.User
-	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Verified, &u.Disabled, &u.NoPosting, &u.PostCount, &u.LastPostUnix, &u.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &u, nil
 }
 
-const query_GetUserByEmail = `SELECT id, username, email, password_hash, display_name, created_at FROM users WHERE email = ?`
+const query_GetUserByEmail = `SELECT id, username, email, password_hash, display_name, verified, disabled, no_posting, post_count, lastpost_unix, created_at FROM users WHERE email = ?`
 
 func (db *Database) GetUserByEmail(email string) (*models.User, error) {
 	row := db.mainDB.QueryRow(query_GetUserByEmail, email)
 	var u models.User
-	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Verified, &u.Disabled, &u.NoPosting, &u.PostCount, &u.LastPostUnix, &u.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &u, nil
 }
 
-const query_GetUserByID = `SELECT id, username, email, password_hash, display_name, created_at FROM users WHERE id = ?`
+const query_GetUserByID = `SELECT id, username, email, password_hash, display_name, verified, disabled, no_posting, post_count, lastpost_unix, created_at FROM users WHERE id = ?`
 
 func (db *Database) GetUserByID(id int64) (*models.User, error) {
 	row := db.mainDB.QueryRow(query_GetUserByID, id)
 	var u models.User
-	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Verified, &u.Disabled, &u.NoPosting, &u.PostCount, &u.LastPostUnix, &u.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &u, nil
 }
 
-// UpdateUserEmail updates a user's email address
-const query_UpdateUserEmail = `UPDATE users SET email = ? WHERE id = ?`
+// The three statements that write an editable column of a users row. They are the only
+// place naming those columns: UpdateUserProfile (db_user_profile.go) executes them inside
+// one transaction and the per-field helpers below delegate to it, so the admin path and the
+// user's own profile form write a column exactly the same way. Before E8 the same three
+// columns were written from two places with duplicated SQL, and an additive change to one
+// side (an updated_at stamp, a `AND disabled = 0` guard) would silently have applied to
+// only one of them. The 64-rune display name limit has one owner too, UpdateUserProfile.
+const (
+	query_UpdateUserEmail       = `UPDATE users SET email = ? WHERE id = ?`
+	query_UpdateUserPassword    = `UPDATE users SET password_hash = ? WHERE id = ?`
+	query_UpdateUserDisplayName = `UPDATE users SET display_name = ? WHERE id = ?`
+)
 
+// UpdateUserEmail updates a user's email address (admin user edit, web_admin_userfuncs.go)
 func (db *Database) UpdateUserEmail(userID int64, email string) error {
-	_, err := db.mainDB.Exec(query_UpdateUserEmail, email, userID)
+	return db.UpdateUserProfile(userID, nil, &email, nil)
+}
+
+// UpdateUserPassword updates a user's password hash (cmd/usermgr)
+func (db *Database) UpdateUserPassword(userID int64, passwordHash string) error {
+	return db.UpdateUserProfile(userID, &passwordHash, nil, nil)
+}
+
+// UpdateUserStatus updates user status fields (verified, disabled, no_posting)
+const query_UpdateUserStatus = `UPDATE users SET verified = ?, disabled = ?, no_posting = ? WHERE id = ?`
+
+func (db *Database) UpdateUserStatus(userID int64, verified, disabled, noPosting int) error {
+	_, err := db.mainDB.Exec(query_UpdateUserStatus, verified, disabled, noPosting, userID)
 	return err
 }
 
-// UpdateUserPassword updates a user's password hash
-const query_UpdateUserPassword = `UPDATE users SET password_hash = ? WHERE id = ?`
+// UpdateUserPostCount updates a user's post count and last post timestamp
+const query_UpdateUserPostCount = `UPDATE users SET post_count = post_count+1, lastpost_unix = ? WHERE id = ?`
 
-func (db *Database) UpdateUserPassword(userID int64, passwordHash string) error {
-	_, err := db.mainDB.Exec(query_UpdateUserPassword, passwordHash, userID)
+func (db *Database) UpdateUserPostCount(userID int64, lastPostUnix int64) error {
+	_, err := db.mainDB.Exec(query_UpdateUserPostCount, lastPostUnix, userID)
 	return err
 }
 
@@ -761,26 +1002,27 @@ func (db *Database) GetUserPermissions(userID int64) ([]*models.UserPermission, 
 // GetArticleByNum retrieves an article by its article number
 const query_GetArticleByNum = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles WHERE article_num = ?`
 
-func (db *Database) GetArticleByNum(groupDBs *GroupDBs, articleNum int64) (*models.Article, error) {
+func (db *Database) GetArticleByNum(groupDB *GroupDB, articleNum int64) (*models.Article, error) {
 	// Try cache first
 	if db.ArticleCache != nil {
-		if article, found := db.ArticleCache.Get(groupDBs.Newsgroup, articleNum); found {
+		if article, found := db.ArticleCache.Get(groupDB.Newsgroup, articleNum); found {
 			return article, nil
 		}
 	}
-	row := groupDBs.DB.QueryRow(query_GetArticleByNum, articleNum)
+	row := groupDB.DB.QueryRow(query_GetArticleByNum, articleNum)
 	var a models.Article
 	var artnum int64
 	if err := row.Scan(&artnum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
 		return nil, err
 	}
 	a.ArticleNums = make(map[*string]int64)
-	a.ArticleNums[groupDBs.NewsgroupPtr] = artnum
-	a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDBs.NewsgroupPtr)
+	a.ArticleNums[groupDB.NewsgroupPtr] = artnum
+	a.DBArtNum = artnum
+	a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDB.NewsgroupPtr)
 
 	// Cache the result
 	if db.ArticleCache != nil {
-		db.ArticleCache.Put(groupDBs.Newsgroup, articleNum, &a)
+		db.ArticleCache.Put(groupDB.Newsgroup, articleNum, &a)
 	}
 	return &a, nil
 }
@@ -788,22 +1030,23 @@ func (db *Database) GetArticleByNum(groupDBs *GroupDBs, articleNum int64) (*mode
 // GetArticleByMessageID retrieves an article by its message ID
 const query_GetArticleByMessageID = `SELECT article_num, message_id, subject, from_header, date_sent, date_string, "references", bytes, lines, reply_count, path, headers_json, body_text, imported_at FROM articles WHERE message_id = ?`
 
-func (db *Database) GetArticleByMessageID(groupDBs *GroupDBs, messageID string) (*models.Article, error) {
-	//log.Printf("GetArticleByMessageID: group '%s' fetching article with message ID '%s'", groupDBs.Newsgroup, messageID)
+func (db *Database) GetArticleByMessageID(groupDB *GroupDB, messageID string) (*models.Article, error) {
+	//log.Printf("GetArticleByMessageID: group '%s' fetching article with message ID '%s'", groupDB.Newsgroup, messageID)
 
-	row := groupDBs.DB.QueryRow(query_GetArticleByMessageID, messageID)
+	row := groupDB.DB.QueryRow(query_GetArticleByMessageID, messageID)
 	var a models.Article
 	var artnum int64
 	if err := row.Scan(&artnum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.ReplyCount, &a.Path, &a.HeadersJSON, &a.BodyText, &a.ImportedAt); err != nil {
 		return nil, err
 	}
 	a.ArticleNums = make(map[*string]int64)
-	a.ArticleNums[groupDBs.NewsgroupPtr] = artnum
-	a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDBs.NewsgroupPtr)
+	a.ArticleNums[groupDB.NewsgroupPtr] = artnum
+	a.DBArtNum = artnum
+	a.NewsgroupsPtr = append(a.NewsgroupsPtr, groupDB.NewsgroupPtr)
 
 	// Cache the result
 	if db.ArticleCache != nil {
-		db.ArticleCache.Put(groupDBs.Newsgroup, a.ArticleNums[groupDBs.NewsgroupPtr], &a)
+		db.ArticleCache.Put(groupDB.Newsgroup, a.ArticleNums[groupDB.NewsgroupPtr], &a)
 	}
 	return &a, nil
 }
@@ -811,16 +1054,16 @@ func (db *Database) GetArticleByMessageID(groupDBs *GroupDBs, messageID string) 
 // UpdateReplyCount updates the reply count for an article
 const query_UpdateReplyCount = `UPDATE articles SET reply_count = ? WHERE message_id = ?`
 
-func (db *Database) UpdateReplyCount(groupDBs *GroupDBs, messageID string, replyCount int) error {
-	_, err := retryableExec(groupDBs.DB, query_UpdateReplyCount, replyCount, messageID)
+func (db *Database) UpdateReplyCount(groupDB *GroupDB, messageID string, replyCount int) error {
+	_, err := RetryableExec(groupDB.DB, query_UpdateReplyCount, replyCount, messageID)
 	return err
 }
 
 // IncrementReplyCount increments the reply count for an article
 const query_IncrementReplyCount = `UPDATE articles SET reply_count = reply_count + 1 WHERE message_id = ?`
 
-func (db *Database) IncrementReplyCount(groupDBs *GroupDBs, messageID string) error {
-	_, err := retryableExec(groupDBs.DB,
+func (db *Database) IncrementReplyCount(groupDB *GroupDB, messageID string) error {
+	_, err := RetryableExec(groupDB.DB,
 		query_IncrementReplyCount,
 		messageID,
 	)
@@ -830,8 +1073,8 @@ func (db *Database) IncrementReplyCount(groupDBs *GroupDBs, messageID string) er
 // GetReplyCount gets the current reply count for an article
 const query_GetReplyCount = `SELECT reply_count FROM articles WHERE message_id = ?`
 
-func (db *Database) GetReplyCount(groupDBs *GroupDBs, messageID string) (int, error) {
-	row := groupDBs.DB.QueryRow(
+func (db *Database) GetReplyCount(groupDB *GroupDB, messageID string) (int, error) {
+	row := groupDB.DB.QueryRow(
 		query_GetReplyCount,
 		messageID,
 	)
@@ -842,11 +1085,19 @@ func (db *Database) GetReplyCount(groupDBs *GroupDBs, messageID string) (int, er
 	return count, nil
 }
 
+// UpdateArticleDateSent updates the date_sent field for an article
+const query_UpdateArticleDateSent = `UPDATE articles SET date_sent = ?, date_string = ? WHERE message_id = ?`
+
+func (db *Database) UpdateArticleDateSent(groupDB *GroupDB, messageID string, dateSent time.Time, dateString string) error {
+	_, err := RetryableExec(groupDB.DB, query_UpdateArticleDateSent, dateSent.UTC().Format("2006-01-02 15:04:05"), dateString, messageID)
+	return err
+}
+
 // UpdateOverviewReplyCount updates the reply count for an article in the articles table
 const query_UpdateOverviewReplyCount = `UPDATE articles SET reply_count = ? WHERE message_id = ?`
 
-func (db *Database) UpdateOverviewReplyCount(groupDBs *GroupDBs, messageID string, replyCount int) error {
-	_, err := retryableExec(groupDBs.DB,
+func (db *Database) UpdateOverviewReplyCount(groupDB *GroupDB, messageID string, replyCount int) error {
+	_, err := RetryableExec(groupDB.DB,
 		query_UpdateOverviewReplyCount,
 		replyCount, messageID,
 	)
@@ -856,9 +1107,9 @@ func (db *Database) UpdateOverviewReplyCount(groupDBs *GroupDBs, messageID strin
 // IncrementOverviewReplyCount increments the reply count for an article in the articles table
 const query_IncrementOverviewReplyCount = `UPDATE articles SET reply_count = reply_count + 1 WHERE message_id = ?`
 
-func (db *Database) IncrementOverviewReplyCount(groupDBs *GroupDBs, messageID string) error {
+func (db *Database) IncrementOverviewReplyCount(groupDB *GroupDB, messageID string) error {
 
-	_, err := retryableExec(groupDBs.DB,
+	_, err := RetryableExec(groupDB.DB,
 		query_IncrementOverviewReplyCount,
 		messageID,
 	)
@@ -887,11 +1138,14 @@ func (db *Database) UpsertNewsgroupDescription(name, description string) error {
 	return err
 }
 
-// GetActiveNewsgroups returns only newsgroups that are active
-const query_GetActiveNewsgroups = `SELECT id, name, description, last_article, message_count, active, created_at FROM newsgroups WHERE active = 1 ORDER BY name`
+// GetActiveNewsgroups returns only newsgroups that are active.
+// The four listing readers (GetActiveNewsgroups*, GetNewsgroupsPaginated*) COALESCE the
+// nullable counters like the MainDBGet* readers: one NULL used to abort the whole listing
+// (A-db-13).
+const query_GetActiveNewsgroups = `SELECT id, name, description, COALESCE(last_article, 0), COALESCE(message_count, 0), active, created_at FROM newsgroups WHERE active = 1 ORDER BY name`
 
 func (db *Database) GetActiveNewsgroups() ([]*models.Newsgroup, error) {
-	rows, err := db.mainDB.Query(query_GetActiveNewsgroups)
+	rows, err := RetryableQuery(db.mainDB, query_GetActiveNewsgroups)
 	if err != nil {
 		return nil, err
 	}
@@ -903,15 +1157,18 @@ func (db *Database) GetActiveNewsgroups() ([]*models.Newsgroup, error) {
 			return nil, err
 		}
 		out = append(out, &g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
 
-// GetActiveNewsgroups returns only newsgroups that are active
-const query_GetActiveNewsgroupsWithMessages = `SELECT id, name, description, last_article, message_count, active, created_at FROM newsgroups WHERE message_count > 0 AND active = 1 ORDER BY name`
+// GetActiveNewsgroupsWithMessages returns only active newsgroups that hold messages
+const query_GetActiveNewsgroupsWithMessages = `SELECT id, name, description, COALESCE(last_article, 0), COALESCE(message_count, 0), active, created_at FROM newsgroups WHERE message_count > 0 AND active = 1 ORDER BY name`
 
 func (db *Database) GetActiveNewsgroupsWithMessages() ([]*models.Newsgroup, error) {
-	rows, err := db.mainDB.Query(query_GetActiveNewsgroupsWithMessages)
+	rows, err := RetryableQuery(db.mainDB, query_GetActiveNewsgroupsWithMessages)
 	if err != nil {
 		return nil, err
 	}
@@ -923,13 +1180,16 @@ func (db *Database) GetActiveNewsgroupsWithMessages() ([]*models.Newsgroup, erro
 			return nil, err
 		}
 		out = append(out, &g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
 
 // GetNewsgroupsPaginated returns newsgroups with pagination
 const query_GetNewsgroupsPaginated1 = `SELECT COUNT(*) FROM newsgroups WHERE active = 1 AND message_count > 0`
-const query_GetNewsgroupsPaginated2 = `SELECT id, name, description, last_article, message_count, active, created_at
+const query_GetNewsgroupsPaginated2 = `SELECT id, name, description, COALESCE(last_article, 0), COALESCE(message_count, 0), active, created_at
 FROM newsgroups WHERE active = 1 AND message_count > 0
 ORDER BY name
 LIMIT ? OFFSET ?`
@@ -938,13 +1198,13 @@ func (db *Database) GetNewsgroupsPaginated(page, pageSize int) ([]*models.Newsgr
 	offset := (page - 1) * pageSize
 	// Get total count
 	var totalCount int
-	err := db.mainDB.QueryRow(query_GetNewsgroupsPaginated1).Scan(&totalCount)
+	err := RetryableQueryRowScan(db.mainDB, query_GetNewsgroupsPaginated1, nil, &totalCount)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	// Get paginated results
-	rows, err := db.mainDB.Query(query_GetNewsgroupsPaginated2, pageSize, offset)
+	rows, err := RetryableQuery(db.mainDB, query_GetNewsgroupsPaginated2, pageSize, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -958,13 +1218,16 @@ func (db *Database) GetNewsgroupsPaginated(page, pageSize int) ([]*models.Newsgr
 		}
 		out = append(out, &g)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
 
 	return out, totalCount, nil
 }
 
 // GetNewsgroupsPaginatedAdmin returns ALL newsgroups with pagination
 const query_GetNewsgroupsPaginatedAdmin1 = `SELECT COUNT(*) FROM newsgroups`
-const query_GetNewsgroupsPaginatedAdmin2 = `SELECT id, name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at
+const query_GetNewsgroupsPaginatedAdmin2 = `SELECT id, name, description, COALESCE(last_article, 0), COALESCE(message_count, 0), active, expiry_days, max_articles, max_art_size, COALESCE(status, 'y'), created_at
 FROM newsgroups
 ORDER BY name
 LIMIT ? OFFSET ?`
@@ -973,13 +1236,13 @@ func (db *Database) GetNewsgroupsPaginatedAdmin(page, pageSize int) ([]*models.N
 	offset := (page - 1) * pageSize
 	// Get total count
 	var totalCount int
-	err := db.mainDB.QueryRow(query_GetNewsgroupsPaginatedAdmin1).Scan(&totalCount)
+	err := RetryableQueryRowScan(db.mainDB, query_GetNewsgroupsPaginatedAdmin1, nil, &totalCount)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	// Get paginated results
-	rows, err := db.mainDB.Query(query_GetNewsgroupsPaginatedAdmin2, pageSize, offset)
+	rows, err := RetryableQuery(db.mainDB, query_GetNewsgroupsPaginatedAdmin2, pageSize, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -988,10 +1251,13 @@ func (db *Database) GetNewsgroupsPaginatedAdmin(page, pageSize int) ([]*models.N
 	var out []*models.Newsgroup
 	for rows.Next() {
 		var g models.Newsgroup
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.CreatedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.LastArticle, &g.MessageCount, &g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.Status, &g.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, &g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
 	}
 
 	return out, totalCount, nil
@@ -1014,11 +1280,11 @@ const query_GetOverviewsPaginated3 = `SELECT article_num FROM articles
 			 ORDER BY article_num DESC
 			 LIMIT 1`
 
-func (db *Database) GetOverviewsPaginated(groupDBs *GroupDBs, lastArticleNum int64, pageSize int) ([]*models.Overview, int, bool, error) {
+func (db *Database) GetOverviewsPaginated(groupDB *GroupDB, lastArticleNum int64, pageSize int) ([]*models.Overview, int, bool, error) {
 
 	// Get total count from newsgroups table in main database (much faster than COUNT(*) on articles)
 	var totalCount int
-	newsgroupInfo, err := db.MainDBGetNewsgroup(groupDBs.Newsgroup)
+	newsgroupInfo, err := db.MainDBGetNewsgroup(groupDB.Newsgroup)
 	if err != nil || newsgroupInfo == nil {
 		totalCount = -1 // Fallback if newsgroup not found
 	} else {
@@ -1030,7 +1296,7 @@ func (db *Database) GetOverviewsPaginated(groupDBs *GroupDBs, lastArticleNum int
 	if lastArticleNum > 0 {
 		// Continue from last seen article (descending order by article_num)
 		args := []interface{}{lastArticleNum, pageSize}
-		rows, err = groupDBs.DB.Query(query_GetOverviewsPaginated1, args...)
+		rows, err = groupDB.DB.Query(query_GetOverviewsPaginated1, args...)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -1038,7 +1304,7 @@ func (db *Database) GetOverviewsPaginated(groupDBs *GroupDBs, lastArticleNum int
 	} else {
 		// First page
 		args := []interface{}{pageSize}
-		rows, err = groupDBs.DB.Query(query_GetOverviewsPaginated2, args...)
+		rows, err = groupDB.DB.Query(query_GetOverviewsPaginated2, args...)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -1058,7 +1324,7 @@ func (db *Database) GetOverviewsPaginated(groupDBs *GroupDBs, lastArticleNum int
 	hasMore := false
 	if len(out) == pageSize {
 		var nextArticleNum int64
-		err := groupDBs.DB.QueryRow(query_GetOverviewsPaginated3,
+		err := groupDB.DB.QueryRow(query_GetOverviewsPaginated3,
 			out[len(out)-1].ArticleNum).Scan(&nextArticleNum)
 		if err == nil {
 			hasMore = true
@@ -1074,7 +1340,8 @@ func (db *Database) GetOverviewsPaginated(groupDBs *GroupDBs, lastArticleNum int
 const query_InsertSection = `INSERT INTO sections (name, display_name, description, show_in_header, enable_local_spool, sort_order) VALUES (?, ?, ?, ?, ?, ?)`
 
 func (db *Database) InsertSection(s *models.Section) error {
-	_, err := db.mainDB.Exec(
+	defer uiCacheHeaderSections.invalidate()
+	_, err := RetryableExec(db.mainDB,
 		query_InsertSection,
 		s.Name, s.DisplayName, s.Description, s.ShowInHeader, s.EnableLocalSpool, s.SortOrder,
 	)
@@ -1116,8 +1383,18 @@ func (db *Database) GetSectionByName(name string) (*models.Section, error) {
 // GetHeaderSections returns sections that should be shown in the header
 const query_GetHeaderSections = `SELECT id, name, display_name, description, show_in_header, enable_local_spool, sort_order, created_at FROM sections WHERE show_in_header = 1 ORDER BY sort_order, name`
 
+// GetHeaderSections is cached for uiCacheTTL; section writers in this package invalidate it.
+// Callers get a new slice of shared pointers and must not modify the sections.
 func (db *Database) GetHeaderSections() ([]*models.Section, error) {
-	rows, err := db.mainDB.Query(query_GetHeaderSections)
+	out, err := uiCacheHeaderSections.get(uiCacheTTL, db.loadHeaderSections)
+	if err != nil {
+		return nil, err
+	}
+	return uiCacheCopy(out), nil
+}
+
+func (db *Database) loadHeaderSections() ([]*models.Section, error) {
+	rows, err := RetryableQuery(db.mainDB, query_GetHeaderSections)
 	if err != nil {
 		return nil, err
 	}
@@ -1130,7 +1407,7 @@ func (db *Database) GetHeaderSections() ([]*models.Section, error) {
 		}
 		out = append(out, &s)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // --- Section Group Queries ---
@@ -1164,6 +1441,106 @@ func (db *Database) GetSectionGroups(sectionID int) ([]*models.SectionGroup, err
 		out = append(out, &sg)
 	}
 	return out, nil
+}
+
+// GetSectionGroupsWithActivity returns all groups for a specific section with activity data
+const query_GetSectionGroupsWithActivity = `
+	SELECT
+		sg.id, sg.section_id, sg.newsgroup_name, sg.group_description,
+		sg.sort_order, sg.is_category_header, sg.created_at,
+		COALESCE(n.updated_at, datetime('1970-01-01 00:00:00')) as updated_at,
+		COALESCE(n.message_count, 0) as message_count,
+		COALESCE(n.last_article, 0) as last_article
+	FROM section_groups sg
+	LEFT JOIN newsgroups n ON sg.newsgroup_name = n.name AND n.active = 1
+	WHERE sg.section_id = ?
+	ORDER BY %s`
+
+// query_GetSectionGroupsWithActivityStrict is query_GetSectionGroupsWithActivity without the
+// members a visitor cannot open (E1). The LEFT JOIN above keeps a section_groups row whose
+// newsgroup is inactive, or orphaned by a delete that predates the section access fix (F10),
+// and lists it with message_count 0 - but the group routes 404 on both, so the listing
+// promises a group that cannot be opened. `n.name IS NOT NULL` passes only the rows the join
+// matched, and the join condition already requires `active = 1`. Category headers carry no
+// newsgroup of their own and are kept regardless. This does not clean up the orphan rows, it
+// only stops showing them.
+const query_GetSectionGroupsWithActivityStrict = `
+	SELECT
+		sg.id, sg.section_id, sg.newsgroup_name, sg.group_description,
+		sg.sort_order, sg.is_category_header, sg.created_at,
+		COALESCE(n.updated_at, datetime('1970-01-01 00:00:00')) as updated_at,
+		COALESCE(n.message_count, 0) as message_count,
+		COALESCE(n.last_article, 0) as last_article
+	FROM section_groups sg
+	LEFT JOIN newsgroups n ON sg.newsgroup_name = n.name AND n.active = 1
+	WHERE sg.section_id = ? AND (sg.is_category_header = 1 OR n.name IS NOT NULL)
+	ORDER BY %s`
+
+func (db *Database) GetSectionGroupsWithActivity(sectionID int, sortBy string) ([]*models.SectionGroup, error) {
+	return db.sectionGroupsWithActivity(query_GetSectionGroupsWithActivity, sectionID, sortBy)
+}
+
+// GetSectionGroupsWithActivityStrict is GetSectionGroupsWithActivity restricted to the members
+// that exist and are active, for the non-admin section listing (E1).
+func (db *Database) GetSectionGroupsWithActivityStrict(sectionID int, sortBy string) ([]*models.SectionGroup, error) {
+	return db.sectionGroupsWithActivity(query_GetSectionGroupsWithActivityStrict, sectionID, sortBy)
+}
+
+// sectionGroupsWithActivity runs one of the two section listing queries above; they differ
+// only in their WHERE clause and both take the sort order through the same %s.
+func (db *Database) sectionGroupsWithActivity(queryTemplate string, sectionID int, sortBy string) ([]*models.SectionGroup, error) {
+	// Determine sort order based on parameter
+	var orderBy string
+	switch sortBy {
+	case "activity":
+		orderBy = "n.updated_at DESC, sg.sort_order, sg.newsgroup_name"
+	case "name":
+		orderBy = "sg.newsgroup_name ASC"
+	default: // "sort_order" or any other value defaults to original sorting
+		orderBy = "sg.sort_order, sg.newsgroup_name"
+	}
+
+	query := fmt.Sprintf(queryTemplate, orderBy)
+	rows, err := db.mainDB.Query(query, sectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*models.SectionGroup
+	for rows.Next() {
+		var sg models.SectionGroup
+		var updatedAtStr sql.NullString
+
+		if err := rows.Scan(&sg.ID, &sg.SectionID, &sg.NewsgroupName, &sg.GroupDescription,
+			&sg.SortOrder, &sg.IsCategoryHeader, &sg.CreatedAt,
+			&updatedAtStr, &sg.MessageCount, &sg.LastArticle); err != nil {
+			return nil, err
+		}
+
+		// Handle updated_at field parsing
+		if updatedAtStr.Valid {
+			// Try RFC3339 format first (with Z timezone)
+			if parsedTime, err := time.Parse(time.RFC3339, updatedAtStr.String); err == nil {
+				sg.UpdatedAt = parsedTime
+			} else if parsedTime, err := time.Parse("2006-01-02 15:04:05", updatedAtStr.String); err == nil {
+				// Fallback to MySQL/SQLite format if RFC3339 fails
+				sg.UpdatedAt = parsedTime
+			} else {
+				// If parsing fails, use zero time (will show as "never")
+				sg.UpdatedAt = time.Time{}
+			}
+		} else {
+			// If NULL, use zero time (will show as "never")
+			sg.UpdatedAt = time.Time{}
+		}
+
+		out = append(out, &sg)
+	}
+	// Without rows.Err() a truncated result set reads as a complete listing with a nil
+	// error and the visitor silently gets a short section page (E10b). One line covers both
+	// GetSectionGroupsWithActivity and ...Strict, which share this body.
+	return out, rows.Err()
 }
 
 // GetSectionGroupsByName returns all section groups for a newsgroup name
@@ -1288,20 +1665,20 @@ func (db *Database) GetTotalThreadsCount() (int64, error) {
 	var totalThreads int64
 	for _, group := range groups {
 		// Get group database
-		groupDBs, err := db.GetGroupDBs(group.Name)
+		groupDB, err := db.GetGroupDB(group.Name)
 		if err != nil {
 			continue // Skip groups that don't have databases yet
 		}
 
 		// Count threads in this group
-		threadCount, err := db.GetThreadsCount(groupDBs)
+		threadCount, err := db.GetThreadsCount(groupDB)
 		if err != nil {
-			groupDBs.Return(db)
+			groupDB.Return()
 			continue // Skip groups with errors
 		}
 
 		totalThreads += threadCount
-		groupDBs.Return(db)
+		groupDB.Return()
 	}
 
 	return totalThreads, nil
@@ -1309,7 +1686,7 @@ func (db *Database) GetTotalThreadsCount() (int64, error) {
 
 // SearchNewsgroups searches for newsgroups by name pattern with pagination
 const query_SearchNewsgroups = `
-		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
 		FROM newsgroups
 		WHERE active = 1 AND (name LIKE ? COLLATE NOCASE
 		OR description LIKE ? COLLATE NOCASE)
@@ -1317,8 +1694,45 @@ const query_SearchNewsgroups = `
 		LIMIT ? OFFSET ?
 	` // SearchNewsgroups searches for newsgroups by name pattern with pagination
 
+// Search queries with description (patterns come from escapeLike, hence ESCAPE)
+const query_SearchNewsgroupsWithDesc = `
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
+		FROM newsgroups
+		WHERE active = 1 AND (name LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\')
+		ORDER BY message_count DESC, name ASC
+		LIMIT ? OFFSET ?
+	`
+
+const query_SearchNewsgroupsAdminWithDesc = `
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
+		FROM newsgroups
+		WHERE (name LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\')
+		ORDER BY message_count DESC, name ASC
+		LIMIT ? OFFSET ?
+	`
+
+// Search queries name-only
+// A plain "name LIKE ? ESCAPE" (no COLLATE) lets SQLite apply the LIKE optimization to a
+// prefix pattern and range-scan idx_newsgroups_name_nocase (migration 0027). The unary +
+// on active keeps the planner from choosing idx_active, which visits every active group.
+const query_SearchNewsgroupsNameOnly = `
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
+		FROM newsgroups
+		WHERE +active = 1 AND name LIKE ? ESCAPE '\'
+		ORDER BY message_count DESC, name ASC
+		LIMIT ? OFFSET ?
+	`
+
+const query_SearchNewsgroupsAdminNameOnly = `
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
+		FROM newsgroups
+		WHERE name LIKE ? ESCAPE '\'
+		ORDER BY message_count DESC, name ASC
+		LIMIT ? OFFSET ?
+	`
+
 const query_SearchNewsgroupsAdmin = `
-		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, created_at, updated_at
+		SELECT name, description, last_article, message_count, active, expiry_days, max_articles, max_art_size, status, created_at, updated_at
 		FROM newsgroups
 		WHERE (name LIKE ? COLLATE NOCASE
 		OR description LIKE ? COLLATE NOCASE)
@@ -1327,17 +1741,38 @@ const query_SearchNewsgroupsAdmin = `
 	`
 
 func (db *Database) SearchNewsgroups(searchTerm string, limit, offset int, admin bool) ([]*models.Newsgroup, error) {
-	var query string
-	switch admin {
-	case true:
-		query = query_SearchNewsgroupsAdmin
-	default:
-		query = query_SearchNewsgroups
+	return db.SearchNewsgroupsWithOptions(searchTerm, limit, offset, admin, false)
+}
 
+// SearchNewsgroupsWithOptions searches for newsgroups with configurable options
+func (db *Database) SearchNewsgroupsWithOptions(searchTerm string, limit, offset int, admin bool, searchDescription bool) ([]*models.Newsgroup, error) {
+	var query string
+	var args []interface{}
+
+	// Use prefix matching (term%) instead of substring (%term%); % and _ in the term are literal
+	searchPattern := escapeLike(searchTerm) + "%"
+
+	if searchDescription {
+		// Search both name and description
+		switch admin {
+		case true:
+			query = query_SearchNewsgroupsAdminWithDesc
+		default:
+			query = query_SearchNewsgroupsWithDesc
+		}
+		args = []interface{}{searchPattern, searchPattern, limit, offset}
+	} else {
+		// Search only name
+		switch admin {
+		case true:
+			query = query_SearchNewsgroupsAdminNameOnly
+		default:
+			query = query_SearchNewsgroupsNameOnly
+		}
+		args = []interface{}{searchPattern, limit, offset}
 	}
-	// Use LIKE for pattern matching, case-insensitive
-	searchPattern := "%" + searchTerm + "%"
-	rows, err := db.mainDB.Query(query, searchPattern, searchPattern, limit, offset)
+
+	rows, err := db.mainDB.Query(query, args...)
 
 	if err != nil {
 		return nil, err
@@ -1349,7 +1784,7 @@ func (db *Database) SearchNewsgroups(searchTerm string, limit, offset int, admin
 		g := &models.Newsgroup{}
 		err := rows.Scan(
 			&g.Name, &g.Description, &g.LastArticle, &g.MessageCount,
-			&g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.CreatedAt, &g.UpdatedAt,
+			&g.Active, &g.ExpiryDays, &g.MaxArticles, &g.MaxArtSize, &g.Status, &g.CreatedAt, &g.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -1368,18 +1803,88 @@ const query_CountSearchNewsgroups = `
 		OR description LIKE ? COLLATE NOCASE)
 	`
 
+// Count queries with description
+const query_CountSearchNewsgroupsWithDesc = `
+		SELECT COUNT(*)
+		FROM newsgroups
+		WHERE active = 1 AND (name LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\')
+	`
+
+const query_CountSearchNewsgroupsAdminWithDesc = `
+		SELECT COUNT(*)
+		FROM newsgroups
+		WHERE (name LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\')
+	`
+
+// Count queries name-only (index notes: see query_SearchNewsgroupsNameOnly)
+const query_CountSearchNewsgroupsNameOnly = `
+		SELECT COUNT(*)
+		FROM newsgroups
+		WHERE +active = 1 AND name LIKE ? ESCAPE '\'
+	`
+
+const query_CountSearchNewsgroupsAdminNameOnly = `
+		SELECT COUNT(*)
+		FROM newsgroups
+		WHERE name LIKE ? ESCAPE '\'
+	`
+
+// escapeLike escapes the LIKE wildcards % and _ and the escape character \ itself,
+// for patterns used with ESCAPE '\'.
+func escapeLike(s string) string {
+	if !strings.ContainsAny(s, `\%_`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' || c == '%' || c == '_' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
 func (db *Database) CountSearchNewsgroups(searchTerm string) (int, error) {
-	// Use LIKE for pattern matching, case-insensitive
-	searchPattern := "%" + searchTerm + "%"
+	return db.CountSearchNewsgroupsWithOptions(searchTerm, false, false)
+}
+
+// CountSearchNewsgroupsWithOptions counts newsgroups with configurable options
+func (db *Database) CountSearchNewsgroupsWithOptions(searchTerm string, searchDescription bool, admin bool) (int, error) {
+	// Use prefix matching (term%) instead of substring (%term%); % and _ in the term are literal
+	searchPattern := escapeLike(searchTerm) + "%"
+
+	var query string
+	var args []interface{}
+
+	if searchDescription {
+		// Count both name and description matches
+		if admin {
+			query = query_CountSearchNewsgroupsAdminWithDesc
+		} else {
+			query = query_CountSearchNewsgroupsWithDesc
+		}
+		args = []interface{}{searchPattern, searchPattern}
+	} else {
+		// Count only name matches
+		if admin {
+			query = query_CountSearchNewsgroupsAdminNameOnly
+		} else {
+			query = query_CountSearchNewsgroupsNameOnly
+		}
+		args = []interface{}{searchPattern}
+	}
 
 	var count int
-	err := db.mainDB.QueryRow(query_CountSearchNewsgroups, searchPattern, searchPattern).Scan(&count)
+	err := db.mainDB.QueryRow(query, args...).Scan(&count)
 
 	return count, err
 }
 
 // GetAllUsers retrieves all users from the database
-const query_GetAllUsers = `SELECT id, username, email, display_name, password_hash, created_at FROM users ORDER BY username`
+const query_GetAllUsers = `SELECT id, username, email, display_name, password_hash, verified, disabled, no_posting, post_count, lastpost_unix, created_at FROM users ORDER BY username`
 
 func (db *Database) GetAllUsers() ([]*models.User, error) {
 	rows, err := db.mainDB.Query(query_GetAllUsers)
@@ -1391,7 +1896,7 @@ func (db *Database) GetAllUsers() ([]*models.User, error) {
 	var users []*models.User
 	for rows.Next() {
 		var user models.User
-		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.PasswordHash, &user.CreatedAt); err != nil {
+		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.PasswordHash, &user.Verified, &user.Disabled, &user.NoPosting, &user.PostCount, &user.LastPostUnix, &user.CreatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, &user)
@@ -1399,38 +1904,72 @@ func (db *Database) GetAllUsers() ([]*models.User, error) {
 	return users, nil
 }
 
-// GetOverviewsRange returns overview entries from articles table for a specific range of article numbers
+// SearchUsers searches for users by username, email, or display name with a limit
+func (db *Database) SearchUsers(searchTerm string, limit int) ([]*models.User, error) {
+	query := `SELECT id, username, email, display_name, password_hash, verified, disabled, no_posting, post_count, lastpost_unix, created_at
+              FROM users
+              WHERE username LIKE ? OR email LIKE ? OR display_name LIKE ?
+              ORDER BY username
+              LIMIT ?`
+
+	searchPattern := "%" + searchTerm + "%"
+	rows, err := db.mainDB.Query(query, searchPattern, searchPattern, searchPattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []*models.User
+	for rows.Next() {
+		var user models.User
+		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.PasswordHash, &user.Verified, &user.Disabled, &user.NoPosting, &user.PostCount, &user.LastPostUnix, &user.CreatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, &user)
+	}
+	return users, nil
+}
+
+// GetOverviewsRange returns at most limit visible (hide = 0) overview entries with
+// startNum <= article_num <= endNum, in number order. limit <= 0 means OverviewRangeChunk.
+// Callers page through a large range by calling again from the last number + 1.
 const query_GetOverviewsRange = `SELECT article_num, subject, from_header, date_sent, date_string, message_id, "references", bytes, lines, reply_count, downloaded
 		 FROM articles
-		 WHERE article_num >= ? AND article_num <= ?
-		 ORDER BY article_num ASC`
+		 WHERE hide = 0 AND article_num >= ? AND article_num <= ?
+		 ORDER BY article_num ASC LIMIT ?`
 
-func (db *Database) GetOverviewsRange(groupDBs *GroupDBs, startNum, endNum int64) ([]*models.Overview, error) {
+func (db *Database) GetOverviewsRange(groupDB *GroupDB, startNum, endNum int64, limit int) ([]*models.Overview, error) {
 	if startNum > endNum {
 		return nil, fmt.Errorf("start number %d is greater than end number %d", startNum, endNum)
 	}
-
-	// Limit range to prevent excessive queries
-	if endNum-startNum > 1000 {
-		endNum = startNum + 1000
+	if limit <= 0 {
+		limit = OverviewRangeChunk
 	}
 
-	rows, err := groupDBs.DB.Query(query_GetOverviewsRange, startNum, endNum)
+	rows, err := RetryableQuery(groupDB.DB, query_GetOverviewsRange, startNum, endNum, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var out []*models.Overview
-
 	for rows.Next() {
 		var o models.Overview
-		if err := rows.Scan(&o.ArticleNum, &o.Subject, &o.FromHeader, &o.DateSent, &o.DateString, &o.MessageID, &o.References, &o.Bytes, &o.Lines, &o.ReplyCount, &o.Downloaded); err != nil {
+		// Nullable columns go through sql.Null*: one NULL row must not fail the whole range.
+		var subject, from, dateString, refs sql.NullString
+		var dateSent sql.NullTime
+		var bytes, lines, replyCount sql.NullInt64
+		if err := rows.Scan(&o.ArticleNum, &subject, &from, &dateSent, &dateString, &o.MessageID, &refs, &bytes, &lines, &replyCount, &o.Downloaded); err != nil {
 			return nil, err
 		}
+		o.Subject, o.FromHeader, o.DateString, o.References = subject.String, from.String, dateString.String, refs.String
+		o.DateSent = dateSent.Time
+		o.Bytes, o.Lines, o.ReplyCount = int(bytes.Int64), int(lines.Int64), int(replyCount.Int64)
 		out = append(out, &o)
 	}
-
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -1442,9 +1981,9 @@ const query_GetOverviewByMessageID = `
 		WHERE message_id = ? LIMIT 1
 	`
 
-func (db *Database) GetOverviewByMessageID(groupDBs *GroupDBs, messageID string) (*models.Overview, error) {
+func (db *Database) GetOverviewByMessageID(groupDB *GroupDB, messageID string) (*models.Overview, error) {
 	overview := &models.Overview{}
-	err := groupDBs.DB.QueryRow(query_GetOverviewByMessageID, messageID).Scan(
+	err := groupDB.DB.QueryRow(query_GetOverviewByMessageID, messageID).Scan(
 		&overview.ArticleNum, &overview.Subject, &overview.FromHeader,
 		&overview.DateSent, &overview.DateString, &overview.MessageID,
 		&overview.References, &overview.Bytes, &overview.Lines,
@@ -1458,81 +1997,86 @@ func (db *Database) GetOverviewByMessageID(groupDBs *GroupDBs, messageID string)
 	return overview, nil
 }
 
-// GetHeaderFieldRange returns specific header field values for a range of articles
-const query_GetHeaderFieldRange1 = `SELECT article_num, subject FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
-const query_GetHeaderFieldRange2 = `SELECT article_num, from_header FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
-const query_GetHeaderFieldRange3 = `SELECT article_num, date_string FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
-const query_GetHeaderFieldRange4 = `SELECT article_num, message_id FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
-const query_GetHeaderFieldRange5 = `SELECT article_num, "references" FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
-const query_GetHeaderFieldRange6 = `SELECT article_num, bytes FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
-const query_GetHeaderFieldRange7 = `SELECT article_num, lines FROM articles WHERE article_num >= ? AND article_num <= ? ORDER BY article_num ASC`
+// GetHeaderFieldRange returns the value of one header field for at most limit visible
+// (hide = 0) articles with startNum <= article_num <= endNum, one element per article in
+// number order. The 7 overview fields and Path come from their columns, Xref is always
+// empty; any other field is read from headers_json (first occurrence, unfolded; empty
+// when absent).
+// limit <= 0 means OverviewRangeChunk.
+const query_GetHeaderFieldRange1 = `SELECT article_num, subject FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+const query_GetHeaderFieldRange2 = `SELECT article_num, from_header FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+const query_GetHeaderFieldRange3 = `SELECT article_num, date_string FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+const query_GetHeaderFieldRange4 = `SELECT article_num, message_id FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+const query_GetHeaderFieldRange5 = `SELECT article_num, "references" FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+const query_GetHeaderFieldRange6 = `SELECT article_num, bytes FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+const query_GetHeaderFieldRange7 = `SELECT article_num, lines FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
 
-func (db *Database) GetHeaderFieldRange(groupDBs *GroupDBs, field string, startNum, endNum int64) (map[int64]string, error) {
+func (db *Database) GetHeaderFieldRange(groupDB *GroupDB, field string, startNum, endNum int64, limit int) ([]HeaderFieldValue, error) {
 	if startNum > endNum {
 		return nil, fmt.Errorf("start number %d is greater than end number %d", startNum, endNum)
 	}
-
-	// Limit range to prevent excessive queries
-	if endNum-startNum > 1000 {
-		endNum = startNum + 1000
+	if limit <= 0 {
+		limit = OverviewRangeChunk
 	}
 
-	var query string
-	var dbToQuery *sql.DB
+	// headers_json fallback for every field without a column of its own
+	const queryHeadersJSON = `SELECT article_num, headers_json FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+	// headers_json keeps the raw upstream Xref and Path lines, which HEAD/ARTICLE never serve
+	// (common.ReconstructHeaders drops both and rebuilds Path from the path column). Xref holds
+	// the other server's article numbers, so it is always served as absent; Path comes from
+	// the stored path column.
+	const queryPath = `SELECT article_num, path FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
+	const queryXref = `SELECT article_num, '' FROM articles WHERE hide = 0 AND article_num >= ? AND article_num <= ? ORDER BY article_num ASC LIMIT ?`
 
+	query := queryHeadersJSON
+	fromJSON := false
 	switch strings.ToLower(field) {
+	case "path":
+		query = queryPath
+	case "xref":
+		query = queryXref
 	case "subject":
 		query = query_GetHeaderFieldRange1
-		dbToQuery = groupDBs.DB
 	case "from":
 		query = query_GetHeaderFieldRange2
-		dbToQuery = groupDBs.DB
 	case "date":
 		query = query_GetHeaderFieldRange3
-		dbToQuery = groupDBs.DB
 	case "message-id":
 		query = query_GetHeaderFieldRange4
-		dbToQuery = groupDBs.DB
 	case "references":
 		query = query_GetHeaderFieldRange5
-		dbToQuery = groupDBs.DB
 	case "bytes":
 		query = query_GetHeaderFieldRange6
-		dbToQuery = groupDBs.DB
 	case "lines":
 		query = query_GetHeaderFieldRange7
-		dbToQuery = groupDBs.DB
 	default:
-		// For other headers, try to get from the full article headers
-		// For now, return empty result for unsupported headers
-		return make(map[int64]string), nil
+		fromJSON = true
 	}
 
-	rows, err := dbToQuery.Query(query, startNum, endNum)
-
+	rows, err := RetryableQuery(groupDB.DB, query, startNum, endNum, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	result := make(map[int64]string)
+	var out []HeaderFieldValue
 	for rows.Next() {
-		var articleNum int64
-		if strings.ToLower(field) == "bytes" || strings.ToLower(field) == "lines" {
-			var value int
-			if err := rows.Scan(&articleNum, &value); err != nil {
-				return nil, err
-			}
-			result[articleNum] = fmt.Sprintf("%d", value)
-		} else {
-			var value string
-			if err := rows.Scan(&articleNum, &value); err != nil {
-				return nil, err
-			}
-			result[articleNum] = value
+		var v HeaderFieldValue
+		var value sql.NullString // NULL gives an empty value; integers convert to decimal text
+		if err := rows.Scan(&v.ArticleNum, &value); err != nil {
+			return nil, err
 		}
+		if fromJSON {
+			v.Value = HeaderValueFromJSON(value.String, field)
+		} else {
+			v.Value = value.String
+		}
+		out = append(out, v)
 	}
-	return result, nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // UpdateNewsgroupWatermarks updates the high and low water marks for a newsgroup
@@ -1770,6 +2314,7 @@ func (db *Database) GetAllHierarchies() ([]*models.Hierarchy, error) {
 func (db *Database) GetHierarchiesPaginated(page, pageSize int, sortBy string) ([]*models.Hierarchy, int, error) {
 	// Use cache if available, otherwise fall back to direct query
 	if db.HierarchyCache != nil {
+		//log.Printf("GetHierarchiesPaginated: Using cached hierarchies | page %d, pageSize %d, sortBy %s", page, pageSize, sortBy)
 		return db.HierarchyCache.GetHierarchiesPaginated(db, page, pageSize, sortBy)
 	}
 	return db.getHierarchiesPaginatedDirect(page, pageSize, sortBy)
@@ -1785,7 +2330,7 @@ func (db *Database) getHierarchiesPaginatedDirect(page, pageSize int, sortBy str
 	// First get total count of hierarchies that have active newsgroups with messages
 	// Using optimized query with hierarchy column instead of LIKE pattern matching
 	var totalCount int
-	err := db.mainDB.QueryRow(query_getHierarchiesPaginatedDirect1).Scan(&totalCount)
+	err := RetryableQueryRowScan(db.mainDB, query_getHierarchiesPaginatedDirect1, nil, &totalCount)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1806,33 +2351,40 @@ func (db *Database) getHierarchiesPaginatedDirect(page, pageSize int, sortBy str
 
 	// Get paginated hierarchies that have active newsgroups with messages
 	// Using optimized query with hierarchy column (O(1) join vs O(n) LIKE)
-	query := `SELECT DISTINCT h.id, h.name, h.description, h.group_count, h.last_updated, h.created_at
+	query := `SELECT DISTINCT h.id, h.name, COALESCE(h.description, ''), COALESCE(h.group_count, 0), h.last_updated, h.created_at
 			  FROM hierarchies h
 			  INNER JOIN newsgroups n ON n.hierarchy = h.name
 			  WHERE h.group_count > 0 AND n.message_count > 0 AND n.active = 1
 			  ORDER BY ` + orderBy + `
 			  LIMIT ? OFFSET ?`
 
-	rows, err := db.mainDB.Query(query, pageSize, offset)
+	rows, err := RetryableQuery(db.mainDB, query, pageSize, offset)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
 
 	var hierarchies []*models.Hierarchy
+	scanErrs := 0
 	for rows.Next() {
 		hierarchy := &models.Hierarchy{}
-		var description sql.NullString
-		err := rows.Scan(&hierarchy.ID, &hierarchy.Name, &description,
+		err := rows.Scan(&hierarchy.ID, &hierarchy.Name, &hierarchy.Description,
 			&hierarchy.GroupCount, &hierarchy.LastUpdated, &hierarchy.CreatedAt)
 		if err != nil {
-			log.Printf("GetHierarchiesPaginated: Failed to scan hierarchy: %v", err)
+			// Log the first scan error of this call only; the rest are counted below.
+			scanErrs++
+			if scanErrs == 1 {
+				log.Printf("[HIERARCHY] getHierarchiesPaginatedDirect: failed to scan hierarchy row: %v", err)
+			}
 			continue
 		}
-		if description.Valid {
-			hierarchy.Description = description.String
-		}
 		hierarchies = append(hierarchies, hierarchy)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("getHierarchiesPaginatedDirect: reading hierarchies: %w", err)
+	}
+	if scanErrs > 1 {
+		log.Printf("[HIERARCHY] getHierarchiesPaginatedDirect: skipped %d hierarchy rows that failed to scan", scanErrs)
 	}
 
 	return hierarchies, totalCount, nil
@@ -1884,9 +2436,10 @@ const query_UpdateHierarchyCounts1 = `UPDATE newsgroups
 		END
 		WHERE hierarchy IS NULL`
 const query_UpdateHierarchyCounts2 = `
-		INSERT OR REPLACE INTO hierarchies (name, group_count, last_updated, created_at)
+		INSERT OR REPLACE INTO hierarchies (name, description, group_count, last_updated, created_at)
 		SELECT
 			hierarchy,
+			COALESCE((SELECT description FROM hierarchies WHERE name = newsgroups.hierarchy), '') as description,
 			COUNT(*) as group_count,
 			CURRENT_TIMESTAMP as last_updated,
 			COALESCE((SELECT created_at FROM hierarchies WHERE name = newsgroups.hierarchy), CURRENT_TIMESTAMP) as created_at
@@ -1926,6 +2479,480 @@ func (db *Database) UpdateHierarchyCounts() error {
 	return nil
 }
 
+// RestoreHierarchyDescriptions restores all default hierarchy descriptions from the migration
+func (db *Database) RestoreHierarchyDescriptions() error {
+	//log.Printf("Starting RestoreHierarchyDescriptions")
+
+	// Map of hierarchy names to descriptions from 0003_main_create_hierarchies.sql
+	hierarchyDescriptions := map[string]string{
+		// Primary Big 8 hierarchies (alphabetical)
+		"comp":       "Computer-related discussions and support",
+		"humanities": "Liberal arts and humanities",
+		"misc":       "Miscellaneous topics not fitting other categories",
+		"news":       "Usenet news and announcements",
+		"rec":        "Recreation, hobbies, and entertainment",
+		"sci":        "Science and technology discussions",
+		"soc":        "Social issues and cultural topics",
+		"talk":       "General discussion and debate",
+
+		// Alternative hierarchies
+		"alt": "Alternative discussions and topics",
+
+		// Regional/Language hierarchies (alphabetical by code)
+		"ar":  "Arabic language newsgroups",
+		"at":  "Austrian newsgroups",
+		"au":  "Australian newsgroups",
+		"aus": "Australian regional groups",
+		"be":  "Belgian newsgroups",
+		"bg":  "Bulgarian newsgroups",
+		"br":  "Brazilian Portuguese newsgroups",
+		"ca":  "California regional groups",
+		"can": "Canadian regional groups",
+		"ch":  "Swiss newsgroups",
+		"cl":  "Chilean newsgroups",
+		"cn":  "Chinese language newsgroups",
+		"co":  "Colombian newsgroups",
+		"cr":  "Costa Rican newsgroups",
+		"cz":  "Czech language newsgroups",
+		"de":  "German language newsgroups",
+		"dk":  "Danish language newsgroups",
+		"ee":  "Estonian newsgroups",
+		"eg":  "Egyptian newsgroups",
+		"es":  "Spanish language newsgroups",
+		"fi":  "Finnish language newsgroups",
+		"fj":  "Japanese newsgroups (From Japan)",
+		"fr":  "French language newsgroups",
+		"gr":  "Greek language newsgroups",
+		"hk":  "Hong Kong newsgroups",
+		"hr":  "Croatian newsgroups",
+		"hu":  "Hungarian newsgroups",
+		"id":  "Indonesian newsgroups",
+		"ie":  "Irish newsgroups",
+		"in":  "Indian newsgroups",
+		"is":  "Icelandic newsgroups",
+		"it":  "Italian language newsgroups",
+		"jp":  "Japanese language newsgroups",
+		"kr":  "Korean language newsgroups",
+		"lt":  "Lithuanian newsgroups",
+		"lu":  "Luxembourg newsgroups",
+		"lv":  "Latvian newsgroups",
+		"mx":  "Mexican newsgroups",
+		"my":  "Malaysian newsgroups",
+		"nl":  "Dutch/Netherlands newsgroups",
+		"no":  "Norwegian language newsgroups",
+		"nz":  "New Zealand newsgroups",
+		"pe":  "Peruvian newsgroups",
+		"ph":  "Philippine newsgroups",
+		"pk":  "Pakistani newsgroups",
+		"pl":  "Polish language newsgroups",
+		"pt":  "Portuguese language newsgroups",
+		"ro":  "Romanian newsgroups",
+		"ru":  "Russian language newsgroups",
+		"se":  "Swedish language newsgroups",
+		"sg":  "Singapore newsgroups",
+		"si":  "Slovenian newsgroups",
+		"sk":  "Slovak language newsgroups",
+		"th":  "Thai newsgroups",
+		"tn":  "Tunisian newsgroups",
+		"tr":  "Turkish language newsgroups",
+		"tw":  "Taiwanese newsgroups",
+		"ua":  "Ukrainian newsgroups",
+		"uk":  "United Kingdom regional groups",
+		"uy":  "Uruguayan newsgroups",
+		"ve":  "Venezuelan newsgroups",
+		"vn":  "Vietnamese newsgroups",
+		"yu":  "Former Yugoslav newsgroups",
+		"za":  "South African newsgroups",
+
+		// Regional US hierarchies (alphabetical)
+		"austin":   "Austin, Texas area",
+		"az":       "Arizona regional groups",
+		"ba":       "San Francisco Bay Area",
+		"boston":   "Boston area",
+		"chi":      "Chicago area",
+		"ct":       "Connecticut regional groups",
+		"dc":       "Washington DC area",
+		"fl":       "Florida regional groups",
+		"ga":       "Georgia regional groups",
+		"hawaii":   "Hawaii regional groups",
+		"houston":  "Houston area",
+		"ia":       "Iowa regional groups",
+		"il":       "Illinois regional groups",
+		"ks":       "Kansas regional groups",
+		"ky":       "Kentucky regional groups",
+		"la":       "Los Angeles area",
+		"ma":       "Massachusetts regional groups",
+		"md":       "Maryland regional groups",
+		"me":       "Maine regional groups",
+		"mi":       "Michigan regional groups",
+		"mn":       "Minnesota regional groups",
+		"mo":       "Missouri regional groups",
+		"ms":       "Mississippi regional groups",
+		"mt":       "Montana regional groups",
+		"nc":       "North Carolina regional groups",
+		"nd":       "North Dakota regional groups",
+		"ne":       "Nebraska regional groups",
+		"nh":       "New Hampshire regional groups",
+		"nj":       "New Jersey regional groups",
+		"nm":       "New Mexico regional groups",
+		"nv":       "Nevada regional groups",
+		"ny":       "New York regional groups",
+		"nyc":      "New York City area",
+		"oh":       "Ohio regional groups",
+		"ok":       "Oklahoma regional groups",
+		"or":       "Oregon regional groups",
+		"pa":       "Pennsylvania regional groups",
+		"pdx":      "Portland area",
+		"phila":    "Philadelphia area",
+		"phoenix":  "Phoenix area",
+		"pgh":      "Pittsburgh area",
+		"ri":       "Rhode Island regional groups",
+		"sc":       "South Carolina regional groups",
+		"sd":       "South Dakota regional groups",
+		"seattle":  "Seattle area",
+		"stl":      "St. Louis area",
+		"tenn":     "Tennessee regional groups",
+		"triangle": "Research Triangle area (NC)",
+		"tx":       "Texas regional groups",
+		"ut":       "Utah regional groups",
+		"va":       "Virginia regional groups",
+		"vt":       "Vermont regional groups",
+		"wa":       "Washington state regional groups",
+		"wi":       "Wisconsin regional groups",
+		"wv":       "West Virginia regional groups",
+		"wy":       "Wyoming regional groups",
+
+		// Special interest/alternative hierarchies (alphabetical)
+		"aioe":              "Aioe.org server newsgroups",
+		"eternal-september": "Eternal September server groups",
+		"i2pn":              "I2P network newsgroups",
+		"rocksolid":         "Rocksolid decentralized newsgroups",
+		"tor":               "Tor network related groups",
+
+		// Technical/Computing (alphabetical)
+		"amiga":     "Amiga computers (legacy)",
+		"android":   "Android development and usage",
+		"apple":     "Apple products and technologies",
+		"atari":     "Atari computers (legacy)",
+		"beos":      "BeOS operating system (legacy)",
+		"borland":   "Borland development tools",
+		"bsd":       "BSD operating systems",
+		"commodore": "Commodore computers (legacy)",
+		"debian":    "Debian Linux distribution",
+		"dos":       "DOS operating systems",
+		"fedora":    "Fedora Linux distribution",
+		"freebsd":   "FreeBSD operating system",
+		"gentoo":    "Gentoo Linux distribution",
+		"gnu":       "GNU project and free software",
+		"grc":       "Gibson Research Corporation",
+		"ibm":       "IBM products and technologies",
+		"linux":     "Linux operating system discussions",
+		"mac":       "Macintosh computers and software",
+		"mandriva":  "Mandriva Linux (legacy)",
+		"microsoft": "Microsoft products and technologies",
+		"msdos":     "MS-DOS related (legacy)",
+		"netbsd":    "NetBSD operating system",
+		"novell":    "Novell products (legacy)",
+		"openbsd":   "OpenBSD operating system",
+		"oracle":    "Oracle database and products",
+		"os2":       "OS/2 operating system (legacy)",
+		"redhat":    "Red Hat Linux distribution",
+		"sco":       "SCO Unix (legacy)",
+		"sgi":       "Silicon Graphics (legacy)",
+		"slackware": "Slackware Linux distribution",
+		"solaris":   "Solaris operating system",
+		"sun":       "Sun Microsystems (legacy)",
+		"suse":      "SUSE Linux distribution",
+		"ubuntu":    "Ubuntu Linux distribution",
+		"unix":      "Unix systems and variants",
+		"vms":       "VMS operating system",
+		"windows":   "Windows operating systems",
+		"xenix":     "Xenix operating system (legacy)",
+
+		// Internet/Network related (alphabetical)
+		"aol":        "America Online groups",
+		"compuserve": "CompuServe groups (legacy)",
+		"fidonet":    "FidoNet network groups",
+		"inet":       "Internet service providers",
+		"isp":        "ISP-specific newsgroups",
+		"prodigy":    "Prodigy service (legacy)",
+		"uunet":      "UUNET provider groups",
+		"well":       "The WELL community",
+
+		// Educational institutions (alphabetical)
+		"berkeley":     "UC Berkeley newsgroups",
+		"caltech":      "California Institute of Technology",
+		"cmu":          "Carnegie Mellon University",
+		"columbia":     "Columbia University",
+		"cornell":      "Cornell University",
+		"dartmouth":    "Dartmouth College",
+		"duke":         "Duke University",
+		"gatech":       "Georgia Tech",
+		"harvard":      "Harvard University",
+		"indiana":      "Indiana University",
+		"jhu":          "Johns Hopkins University",
+		"mit":          "MIT newsgroups",
+		"msu":          "Michigan State University",
+		"ncsu":         "North Carolina State University",
+		"northwestern": "Northwestern University",
+		"nyu":          "New York University",
+		"osu":          "Ohio State University",
+		"princeton":    "Princeton University",
+		"psu":          "Penn State University",
+		"purdue":       "Purdue University",
+		"rice":         "Rice University",
+		"rutgers":      "Rutgers University",
+		"stanford":     "Stanford University",
+		"tamu":         "Texas A&M University",
+		"ucb":          "UC Berkeley newsgroups",
+		"ucla":         "UCLA newsgroups",
+		"ucsb":         "UC Santa Barbara",
+		"ucsd":         "UC San Diego",
+		"ufl":          "University of Florida",
+		"uiuc":         "University of Illinois",
+		"umich":        "University of Michigan",
+		"umn":          "University of Minnesota",
+		"unc":          "University of North Carolina",
+		"upenn":        "University of Pennsylvania",
+		"usc":          "University of Southern California",
+		"utexas":       "University of Texas",
+		"uw":           "University of Washington",
+		"virginia":     "University of Virginia",
+		"vt.edu":       "Virginia Tech",
+		"wisc":         "University of Wisconsin",
+		"wustl":        "Washington University in St. Louis",
+		"yale":         "Yale University",
+
+		// Hobby/Interest groups (alphabetical)
+		"aquaria":      "Aquarium and fish keeping",
+		"astro":        "Astronomy discussions",
+		"auto":         "Automotive discussions",
+		"aviation":     "Aviation and flying",
+		"bicycles":     "Bicycle discussions",
+		"birds":        "Bird watching and avian topics",
+		"boats":        "Boating and marine topics",
+		"cats":         "Cat-related discussions",
+		"climbing":     "Rock climbing and mountaineering",
+		"collecting":   "Collecting hobbies",
+		"comics":       "Comic books and graphic novels",
+		"crafts":       "Crafts and DIY projects",
+		"dance":        "Dance discussions",
+		"dogs":         "Dog-related discussions",
+		"electronics":  "Electronics hobbyists",
+		"equestrian":   "Horse riding and care",
+		"film":         "Film and cinema discussions",
+		"fitness":      "Fitness and exercise",
+		"food":         "Food and cooking",
+		"games":        "Computer and video games",
+		"gardening":    "Gardening discussions",
+		"genealogy":    "Family history research",
+		"guns":         "Firearms discussions",
+		"ham":          "Amateur radio discussions",
+		"history":      "Historical discussions",
+		"hunting":      "Hunting discussions",
+		"martial-arts": "Martial arts discussions",
+		"military":     "Military topics",
+		"models":       "Model building hobbies",
+		"motorcycles":  "Motorcycle discussions",
+		"mudding":      "MUD gaming discussions",
+		"music":        "Music discussions",
+		"outdoors":     "Outdoor activities",
+		"pets":         "Pet care and discussions",
+		"philosophy":   "Philosophical discussions",
+		"photo":        "Photography discussions",
+		"politics":     "Political discussions",
+		"puzzles":      "Puzzles and brain teasers",
+		"radio":        "Radio broadcasting topics",
+		"railroads":    "Railroad enthusiasts",
+		"religion":     "Religious discussions",
+		"roguelike":    "Roguelike games",
+		"running":      "Running and jogging",
+		"scouting":     "Boy/Girl Scouts discussions",
+		"scuba":        "Scuba diving",
+		"skiing":       "Skiing and snowboarding",
+		"space":        "Space exploration",
+		"sport":        "Sports discussions",
+		"stamps":       "Stamp collecting",
+		"startrek":     "Star Trek fandom",
+		"starwars":     "Star Wars fandom",
+		"travel":       "Travel discussions",
+		"tv":           "Television discussions",
+		"video":        "Video production and editing",
+		"wine":         "Wine appreciation",
+		"woodworking":  "Woodworking projects",
+
+		// Corporate/Commercial (alphabetical)
+		"adobe":           "Adobe products discussions",
+		"amazon":          "Amazon services discussions",
+		"ap":              "Associated Press feeds",
+		"autodesk":        "Autodesk products",
+		"bbc":             "BBC news groups",
+		"biz":             "Business and commercial discussions",
+		"biz.marketplace": "Commercial marketplace",
+		"clari":           "ClariNet news service",
+		"clarinet":        "Professional news service",
+		"corel":           "Corel products discussions",
+		"courts":          "Legal/court discussions",
+		"ebay":            "eBay marketplace discussions",
+		"google":          "Google products discussions",
+		"govnews":         "Government news feeds",
+		"intel":           "Intel products discussions",
+		"lotus":           "Lotus products (legacy)",
+		"market":          "Financial market discussions",
+		"mozilla":         "Mozilla products discussions",
+		"netscape":        "Netscape (legacy)",
+		"nokia":           "Nokia products discussions",
+		"reuters":         "Reuters news feeds",
+		"sybase":          "Sybase database products",
+		"symantec":        "Symantec products",
+		"vmware":          "VMware virtualization",
+		"wordperfect":     "WordPerfect (legacy)",
+		"xerox":           "Xerox products",
+
+		// Network gateways (alphabetical)
+		"bit":     "BITNET mailing list gateways",
+		"bitnet":  "BITNET gateway groups",
+		"fido":    "FidoNet gateways",
+		"fido7":   "Fido7",
+		"gateway": "Gateway services",
+		"lists":   "Mailing list gateways",
+
+		// Programming languages (alphabetical)
+		"ada":         "Ada programming language",
+		"asm":         "Assembly language programming",
+		"basic":       "BASIC programming language",
+		"c":           "C programming language",
+		"c++":         "C++ programming language",
+		"clojure":     "Clojure programming language",
+		"cobol":       "COBOL programming language",
+		"dart":        "Dart programming language",
+		"delphi":      "Delphi programming",
+		"elixir":      "Elixir programming language",
+		"erlang":      "Erlang programming language",
+		"forth":       "Forth programming language",
+		"fortran":     "Fortran programming language",
+		"go":          "Go programming language",
+		"groovy":      "Groovy programming language",
+		"haskell":     "Haskell programming language",
+		"java":        "Java programming language",
+		"javascript":  "JavaScript programming",
+		"julia":       "Julia programming language",
+		"kotlin":      "Kotlin programming language",
+		"lisp":        "Lisp programming language",
+		"lua":         "Lua programming language",
+		"matlab":      "MATLAB programming",
+		"ml":          "ML programming languages",
+		"modula":      "Modula programming languages",
+		"nim":         "Nim programming language",
+		"objective-c": "Objective-C programming",
+		"ocaml":       "OCaml programming language",
+		"pascal":      "Pascal programming language",
+		"perl":        "Perl programming language",
+		"php":         "PHP programming language",
+		"prolog":      "Prolog programming language",
+		"python":      "Python programming language",
+		"r":           "R programming language",
+		"racket":      "Racket programming language",
+		"ruby":        "Ruby programming language",
+		"rust":        "Rust programming language",
+		"scala":       "Scala programming language",
+		"scheme":      "Scheme programming language",
+		"smalltalk":   "Smalltalk programming",
+		"swift":       "Swift programming language",
+		"tcl":         "Tcl programming language",
+		"typescript":  "TypeScript programming",
+		"vb":          "Visual Basic programming",
+		"verilog":     "Verilog hardware description",
+		"vhdl":        "VHDL hardware description",
+		"zig":         "Zig programming language",
+
+		// Academic/Research (alphabetical)
+		"aaai":           "AI research groups",
+		"acm":            "ACM organization groups",
+		"bioinformatics": "Bioinformatics research",
+		"biomed":         "Biomedical research",
+		"chem":           "Chemistry discussions",
+		"cognitive":      "Cognitive science",
+		"comp-sci":       "Computer science research",
+		"ecology":        "Ecology research",
+		"eng":            "Engineering discussions",
+		"genetics":       "Genetics research",
+		"geology":        "Geology discussions",
+		"ieee":           "IEEE organization groups",
+		"linguistics":    "Linguistics research",
+		"math":           "Mathematics discussions",
+		"meteorology":    "Weather and climate science",
+		"neuroscience":   "Neuroscience research",
+		"physics":        "Physics discussions",
+		"psychology":     "Psychology discussions",
+		"robotics":       "Robotics research",
+		"sociology":      "Sociology discussions",
+		"statistics":     "Statistics discussions",
+
+		// Special purpose (alphabetical)
+		"answers": "Q&A and FAQ postings",
+		"bionet":  "Biology research network",
+		"control": "Control messages",
+		"eunet":   "European network groups",
+		"example": "Example newsgroups for testing",
+		"free":    "Free newsgroups hierarchy",
+		"han":     "Korean Hangul newsgroups",
+		"info":    "Information and announcements",
+		"israel":  "Israeli national hierarchy",
+		"japan":   "Japanese national hierarchy",
+		"junk":    "Test messages",
+		"k12":     "K-12 education groups",
+		"local":   "Local server groups",
+		"nzl":     "New Zealand local groups",
+		"relcom":  "Former Soviet Union network",
+		"school":  "School-related newsgroups",
+		"test":    "Test postings",
+		"to":      "Personal messages (legacy)",
+		"tnn":     "The Network News",
+		"usenet":  "USENET meta-discussions",
+		"vmsnet":  "VMS network groups",
+		"world":   "Worldwide discussions",
+
+		// Specialized networks (alphabetical)
+		"darknet": "Darknet discussion groups",
+		"freenet": "Freenet network groups",
+		"gopher":  "Gopher protocol groups",
+		"i2p":     "I2P anonymous network",
+		"onion":   "Tor onion network groups",
+		"p2p":     "Peer-to-peer networking",
+		"zer0net": "Zer0net distributed groups",
+
+		// Defunct but historically important (alphabetical)
+		"arpa":   "ARPANET (historical)",
+		"csnet":  "Computer Science Network (legacy)",
+		"ddn":    "Defense Data Network (legacy)",
+		"fa":     "From ARPANET (legacy)",
+		"mod":    "Moderated groups (legacy)",
+		"nato":   "NATO network (legacy)",
+		"net":    "Original Internet hierarchy (legacy)",
+		"pubnet": "Public access network (legacy)",
+		"uucp":   "UUCP network maps (legacy)",
+	}
+
+	// Update descriptions for existing hierarchies
+	updated := 0
+	for name, description := range hierarchyDescriptions {
+		result, err := db.mainDB.Exec("UPDATE hierarchies SET description = ? WHERE name = ? AND (description IS NULL OR description = '')", description, name)
+		if err != nil {
+			log.Printf("RestoreHierarchyDescriptions: Failed to update hierarchy %s: %v", name, err)
+			continue
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected > 0 {
+			updated++
+		}
+	}
+
+	log.Printf("Restored descriptions for %d hierarchies (map: %d)", updated, len(hierarchyDescriptions))
+	return nil
+}
+
 // GetNewsgroupsByHierarchy returns newsgroups belonging to a specific hierarchy with sorting
 const query_GetNewsgroupsByHierarchy1 = `SELECT COUNT(*) FROM newsgroups WHERE name LIKE ? AND active = 1`
 const query_GetNewsgroupsByHierarchy2 = `SELECT COUNT(*) FROM newsgroups WHERE hierarchy = ? AND active = 1`
@@ -1948,7 +2975,7 @@ func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize in
 
 	// First get total count
 	var totalCount int
-	err := db.mainDB.QueryRow(countQuery, queryArgs...).Scan(&totalCount)
+	err := RetryableQueryRowScan(db.mainDB, countQuery, queryArgs, &totalCount)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1982,8 +3009,8 @@ func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize in
 	}
 
 	// Get paginated newsgroups
-	query := `SELECT id, name, description, active, message_count, last_article,
-			  expiry_days, max_articles, max_art_size, hierarchy, created_at, updated_at
+	query := `SELECT id, name, description, active, COALESCE(message_count, 0), COALESCE(last_article, 0),
+			  expiry_days, max_articles, max_art_size, COALESCE(hierarchy, ''), created_at, updated_at
 			  FROM newsgroups
 			  ` + whereClause + `
 			  ORDER BY ` + orderBy + `
@@ -1992,23 +3019,34 @@ func (db *Database) GetNewsgroupsByHierarchy(hierarchy string, page, pageSize in
 	// Add pagination parameters
 	mainQueryArgs = append(mainQueryArgs, pageSize, offset)
 
-	rows, err := db.mainDB.Query(query, mainQueryArgs...)
+	rows, err := RetryableQuery(db.mainDB, query, mainQueryArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
 
 	var newsgroups []*models.Newsgroup
+	scanErrs := 0
 	for rows.Next() {
 		newsgroup := &models.Newsgroup{}
 		err := rows.Scan(&newsgroup.ID, &newsgroup.Name, &newsgroup.Description,
 			&newsgroup.Active, &newsgroup.MessageCount, &newsgroup.LastArticle,
 			&newsgroup.ExpiryDays, &newsgroup.MaxArticles, &newsgroup.MaxArtSize, &newsgroup.Hierarchy, &newsgroup.CreatedAt, &newsgroup.UpdatedAt)
 		if err != nil {
-			log.Printf("GetNewsgroupsByHierarchy: Failed to scan newsgroup: %v", err)
+			// Log the first scan error of this call only; the rest are counted below.
+			scanErrs++
+			if scanErrs == 1 {
+				log.Printf("[HIERARCHY] GetNewsgroupsByHierarchy: failed to scan newsgroup of '%s': %v", hierarchy, err)
+			}
 			continue
 		}
 		newsgroups = append(newsgroups, newsgroup)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("GetNewsgroupsByHierarchy: reading newsgroups of '%s': %w", hierarchy, err)
+	}
+	if scanErrs > 1 {
+		log.Printf("[HIERARCHY] GetNewsgroupsByHierarchy: skipped %d newsgroup rows of '%s' that failed to scan", scanErrs, hierarchy)
 	}
 
 	return newsgroups, totalCount, nil
@@ -2071,6 +3109,41 @@ func (db *Database) DeleteUser(userID int64) error {
 	return nil
 }
 
+// groupDBFileExists reports whether the group database file of newsgroupName is
+// already present below the configured data directory. It uses the same layout as
+// GetGroupDB (<data>/db/<MD5Hash(name)>/<SanitizeGroupName(name)>.db) but never
+// creates anything, so callers can skip groups that have no database yet.
+func (db *Database) groupDBFileExists(newsgroupName string) bool {
+	// No DataDir fallback here on purpose: GetGroupDB resolves the same layout from
+	// db.dbconfig.DataDir verbatim, so a fallback would probe a different directory
+	// than the one GetGroupDB would create the database in.
+	groupDBfile := filepath.Join(db.dbconfig.DataDir, "db", MD5Hash(newsgroupName), SanitizeGroupName(newsgroupName)+".db")
+	return FileExists(groupDBfile)
+}
+
+// listNewsgroupNames returns every newsgroup name from the main database. It is a
+// separate method so the read cursor is closed before the caller starts long-running
+// work (ResetAllNewsgroupData resets one group database per name).
+func (db *Database) listNewsgroupNames() ([]string, error) {
+	rows, err := RetryableQuery(db.mainDB, `SELECT name FROM newsgroups`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list newsgroups: %w", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("failed to scan newsgroup name: %w", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read newsgroup names: %w", err)
+	}
+	return names, nil
+}
+
 // ResetAllNewsgroupData resets all newsgroup counters and flushes all articles, threads, overview, and cache tables
 // WARNING: This will permanently delete ALL articles, threads, and overview data from ALL newsgroups!
 func (db *Database) ResetAllNewsgroupData() error {
@@ -2078,7 +3151,7 @@ func (db *Database) ResetAllNewsgroupData() error {
 
 	// Step 1: Reset all counters in main database with a single efficient UPDATE
 	log.Printf("ResetAllNewsgroupData: Resetting all newsgroup counters in main database...")
-	result, err := db.mainDB.Exec(`UPDATE newsgroups SET
+	result, err := RetryableExec(db.mainDB, `UPDATE newsgroups SET
 		message_count = 0,
 		last_article = 0,
 		high_water = 0,
@@ -2091,35 +3164,30 @@ func (db *Database) ResetAllNewsgroupData() error {
 	rowsAffected, _ := result.RowsAffected()
 	log.Printf("ResetAllNewsgroupData: Reset counters for %d newsgroups in main database", rowsAffected)
 
-	// Step 2: Only process actual newsgroup databases that exist
-	// Check data directory for existing newsgroup databases
-	dataDir := db.dbconfig.DataDir
-	if dataDir == "" {
-		dataDir = "./data"
+	// Step 2: Only process newsgroups whose group database file already exists.
+	// Group DBs live in <data>/db/<MD5Hash(name)>/<SanitizeGroupName(name)>.db, so the
+	// newsgroup names come from the main DB, not from a directory listing. Calling
+	// ResetNewsgroupData for a name without a file would create an empty database
+	// (GetGroupDB creates one for any name), so the file is checked first.
+	names, err := db.listNewsgroupNames()
+	if err != nil {
+		return err
 	}
 
-	groupsDir := dataDir + "/groups"
-	entries, err := os.ReadDir(groupsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			log.Printf("ResetAllNewsgroupData: No groups directory found at %s, only main database counters reset", groupsDir)
-			return nil
+	var existing []string
+	for _, name := range names {
+		if db.groupDBFileExists(name) {
+			existing = append(existing, name)
 		}
-		return fmt.Errorf("failed to read groups directory %s: %w", groupsDir, err)
 	}
 
 	var resetCount int
 	var errorCount int
 
-	log.Printf("ResetAllNewsgroupData: Found %d newsgroup databases to reset", len(entries))
+	log.Printf("ResetAllNewsgroupData: Found %d newsgroup databases to reset (of %d newsgroups)", len(existing), len(names))
 
 	// Process only existing newsgroup databases
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		newsgroupName := entry.Name()
+	for _, newsgroupName := range existing {
 		log.Printf("ResetAllNewsgroupData: Resetting database for newsgroup '%s'...", newsgroupName)
 
 		// Reset the group database tables
@@ -2138,7 +3206,7 @@ func (db *Database) ResetAllNewsgroupData() error {
 
 	if errorCount > 0 {
 		log.Printf("ResetAllNewsgroupData: Completed with %d successful database resets and %d errors", resetCount, errorCount)
-		return fmt.Errorf("reset completed with %d errors out of %d newsgroup databases", errorCount, len(entries))
+		return fmt.Errorf("reset completed with %d errors out of %d newsgroup databases", errorCount, len(existing))
 	}
 
 	log.Printf("ResetAllNewsgroupData: Successfully reset %d newsgroup databases and %d main database entries", resetCount, rowsAffected)
@@ -2150,16 +3218,16 @@ func (db *Database) ResetNewsgroupData(newsgroupName string) error {
 	log.Printf("ResetNewsgroupData: Resetting data for newsgroup '%s'", newsgroupName)
 
 	// Get the group database connection
-	groupDBs, err := db.GetGroupDBs(newsgroupName)
+	groupDB, err := db.GetGroupDB(newsgroupName)
 	if err != nil {
 		// If group database doesn't exist yet, nothing to reset
 		log.Printf("ResetNewsgroupData: No database found for newsgroup '%s', skipping", newsgroupName)
 		return nil
 	}
-	defer groupDBs.Return(db)
+	defer groupDB.Return()
 
 	// Begin transaction for atomic reset
-	tx, err := groupDBs.DB.Begin()
+	tx, err := groupDB.DB.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to start transaction for newsgroup '%s': %w", newsgroupName, err)
 	}
@@ -2208,6 +3276,13 @@ func (db *Database) ResetNewsgroupData(newsgroupName string) error {
 		return fmt.Errorf("failed to delete articles for newsgroup '%s': %w", newsgroupName, err)
 	}
 
+	// 6. Restart the article numbering on purpose (INT-5: article_num_seq, migration 0010;
+	// GetGroupDB ran the migration, so the row exists)
+	_, err = tx.Exec("UPDATE article_num_seq SET last_num = 0 WHERE id = 1")
+	if err != nil {
+		return fmt.Errorf("failed to reset article_num_seq for newsgroup '%s': %w", newsgroupName, err)
+	}
+
 	// Reset auto-increment counters to start fresh
 	_, err = tx.Exec("DELETE FROM sqlite_sequence WHERE name IN ('articles', 'threads', 'cached_trees')")
 	if err != nil {
@@ -2219,6 +3294,15 @@ func (db *Database) ResetNewsgroupData(newsgroupName string) error {
 	err = tx.Commit()
 	if err != nil {
 		return fmt.Errorf("failed to commit reset transaction for newsgroup '%s': %w", newsgroupName, err)
+	}
+
+	// The numbers restart at 1: the main-DB spam/user_spam_flags rows and the cached bodies of the
+	// old numbers would otherwise be inherited by the new articles (INT-5).
+	if db.ArticleCache != nil {
+		db.ArticleCache.ClearGroup(newsgroupName)
+	}
+	if err := db.deleteSpamRowsForGroup(newsgroupName); err != nil {
+		return fmt.Errorf("newsgroup '%s' was reset but its spam flags were not removed: %w", newsgroupName, err)
 	}
 
 	log.Printf("ResetNewsgroupData: Successfully cleared all data for newsgroup '%s'", newsgroupName)
@@ -2238,7 +3322,7 @@ func (db *Database) ResetNewsgroupCounters(newsgroupName string) error {
 	log.Printf("ResetNewsgroupCounters: Resetting counters for newsgroup '%s'", newsgroupName)
 
 	// Reset all counters to 0 and water marks to default values
-	_, err := retryableExec(db.mainDB, query_ResetNewsgroupCounters, newsgroupName)
+	_, err := RetryableExec(db.mainDB, query_ResetNewsgroupCounters, newsgroupName)
 
 	if err != nil {
 		return fmt.Errorf("failed to reset counters for newsgroup '%s': %w", newsgroupName, err)
@@ -2255,7 +3339,7 @@ const query_GetAllSiteNews = `SELECT id, subject, content, date_published, is_vi
 			  FROM site_news ORDER BY date_published DESC`
 
 func (db *Database) GetAllSiteNews() ([]*models.SiteNews, error) {
-	rows, err := retryableQuery(db.mainDB, query_GetAllSiteNews)
+	rows, err := RetryableQuery(db.mainDB, query_GetAllSiteNews)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query all site news: %w", err)
 	}
@@ -2283,8 +3367,18 @@ func (db *Database) GetAllSiteNews() ([]*models.SiteNews, error) {
 const query_GetVisibleSiteNews = `SELECT id, subject, content, date_published, is_visible, created_at, updated_at
 			  FROM site_news WHERE is_visible = 1 ORDER BY date_published DESC`
 
+// GetVisibleSiteNews is cached for uiCacheTTL; the site news writers invalidate it.
+// Callers get a new slice of shared pointers and must not modify the entries.
 func (db *Database) GetVisibleSiteNews() ([]*models.SiteNews, error) {
-	rows, err := retryableQuery(db.mainDB, query_GetVisibleSiteNews)
+	news, err := uiCacheSiteNews.get(uiCacheTTL, db.loadVisibleSiteNews)
+	if err != nil {
+		return nil, err
+	}
+	return uiCacheCopy(news), nil
+}
+
+func (db *Database) loadVisibleSiteNews() ([]*models.SiteNews, error) {
+	rows, err := RetryableQuery(db.mainDB, query_GetVisibleSiteNews)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query visible site news: %w", err)
 	}
@@ -2305,6 +3399,10 @@ func (db *Database) GetVisibleSiteNews() ([]*models.SiteNews, error) {
 		news = append(news, &item)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate visible site news: %w", err)
+	}
+
 	return news, nil
 }
 
@@ -2315,7 +3413,7 @@ const query_GetSiteNewsByID = `SELECT id, subject, content, date_published, is_v
 func (db *Database) GetSiteNewsByID(id int) (*models.SiteNews, error) {
 	var item models.SiteNews
 	var isVisibleInt int
-	err := retryableQueryRowScan(db.mainDB, query_GetSiteNewsByID, []interface{}{id},
+	err := RetryableQueryRowScan(db.mainDB, query_GetSiteNewsByID, []interface{}{id},
 		&item.ID, &item.Subject, &item.Content, &item.DatePublished,
 		&isVisibleInt, &item.CreatedAt, &item.UpdatedAt)
 
@@ -2335,12 +3433,14 @@ const query_CreateSiteNews = `INSERT INTO site_news (subject, content, date_publ
 			  VALUES (?, ?, ?, ?)`
 
 func (db *Database) CreateSiteNews(news *models.SiteNews) error {
+	defer uiCacheSiteNews.invalidate()
+
 	isVisibleInt := 0
 	if news.IsVisible {
 		isVisibleInt = 1
 	}
 
-	result, err := retryableExec(db.mainDB, query_CreateSiteNews, news.Subject, news.Content,
+	result, err := RetryableExec(db.mainDB, query_CreateSiteNews, news.Subject, news.Content,
 		news.DatePublished, isVisibleInt)
 	if err != nil {
 		return fmt.Errorf("failed to create site news: %w", err)
@@ -2360,12 +3460,14 @@ const query_UpdateSiteNews = `UPDATE site_news SET subject = ?, content = ?, dat
 			  is_visible = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
 
 func (db *Database) UpdateSiteNews(news *models.SiteNews) error {
+	defer uiCacheSiteNews.invalidate()
+
 	isVisibleInt := 0
 	if news.IsVisible {
 		isVisibleInt = 1
 	}
 
-	_, err := retryableExec(db.mainDB, query_UpdateSiteNews, news.Subject, news.Content,
+	_, err := RetryableExec(db.mainDB, query_UpdateSiteNews, news.Subject, news.Content,
 		news.DatePublished, isVisibleInt, news.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update site news ID %d: %w", news.ID, err)
@@ -2378,7 +3480,9 @@ func (db *Database) UpdateSiteNews(news *models.SiteNews) error {
 const query_DeleteSiteNews = `DELETE FROM site_news WHERE id = ?`
 
 func (db *Database) DeleteSiteNews(id int) error {
-	_, err := retryableExec(db.mainDB, query_DeleteSiteNews, id)
+	defer uiCacheSiteNews.invalidate()
+
+	_, err := RetryableExec(db.mainDB, query_DeleteSiteNews, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete site news ID %d: %w", id, err)
 	}
@@ -2389,7 +3493,9 @@ func (db *Database) DeleteSiteNews(id int) error {
 const query_ToggleSiteNewsVisibility = `UPDATE site_news SET is_visible = (1 - is_visible) WHERE id = ?`
 
 func (db *Database) ToggleSiteNewsVisibility(id int) error {
-	_, err := retryableExec(db.mainDB, query_ToggleSiteNewsVisibility, id)
+	defer uiCacheSiteNews.invalidate()
+
+	_, err := RetryableExec(db.mainDB, query_ToggleSiteNewsVisibility, id)
 	if err != nil {
 		return fmt.Errorf("failed to toggle visibility for site news ID %d: %w", id, err)
 	}
@@ -2397,8 +3503,11 @@ func (db *Database) ToggleSiteNewsVisibility(id int) error {
 	return nil
 }
 
-// GetSpamArticles gets articles with spam flags for admin page with pagination
-const query_GetSpamArticles1 = `SELECT COUNT(*) FROM spam`
+// GetSpamArticles gets articles with spam flags for admin page with pagination.
+// query_GetSpamArticles1 counts through the same join as query_GetSpamArticles2, so spam
+// rows of a group that no longer exists cannot inflate the count past the rows the page
+// can list (FU:E15).
+const query_GetSpamArticles1 = `SELECT COUNT(*) FROM spam s JOIN newsgroups n ON s.newsgroup_id = n.id`
 const query_GetSpamArticles2 = `
 		SELECT s.newsgroup_id, s.article_num, n.name as newsgroup_name
 		FROM spam s
@@ -2433,7 +3542,7 @@ func (db *Database) GetSpamArticles(offset, limit int) ([]*models.Overview, []st
 		}
 
 		// Get article details from the specific newsgroup database
-		groupDBs, err := db.GetGroupDBs(newsgroupName)
+		groupDB, err := db.GetGroupDB(newsgroupName)
 		if err != nil {
 			// Log error but continue with next article
 			log.Printf("Failed to get group database for %s: %v", newsgroupName, err)
@@ -2441,8 +3550,8 @@ func (db *Database) GetSpamArticles(offset, limit int) ([]*models.Overview, []st
 		}
 
 		// Use existing function to get article overview
-		overview, err := db.GetOverviewByArticleNum(groupDBs, int64(articleNum))
-		groupDBs.Return(db)
+		overview, err := db.GetOverviewByArticleNum(groupDB, int64(articleNum))
+		groupDB.Return()
 
 		if err != nil {
 			// Log error but continue with next article - article might have been deleted
@@ -2459,4 +3568,377 @@ func (db *Database) GetSpamArticles(offset, limit int) ([]*models.Overview, []st
 	}
 
 	return spamArticles, groupNames, totalCount, nil
+}
+
+// ComputeHashedUsername returns a hashed username for Injection-info / X-Trace header
+func (db *Database) ComputeHashedUsername(username string, nonce string) (string, error) {
+	usersalt, err := db.GetConfigValue(config.CFG_KEY_USERSALT)
+	if err != nil || usersalt == "" {
+		log.Printf("Failed to get UserSalt config: %v", err)
+		return "", err
+	}
+	hashedUser := fmt.Sprintf("%x", sha256.Sum256([]byte(usersalt+username+nonce)))
+	return hashedUser, nil
+}
+
+// SearchUserByComputedHash searches for a user by comparing computed hashes with a nonce
+// Loops through all users in batches of 1000 to find the one matching the target hash
+func (db *Database) SearchUserByComputedHash(targetHash string, nonce string) (*models.User, error) {
+	if targetHash == "" || nonce == "" {
+		return nil, fmt.Errorf("target hash and nonce are required")
+	}
+
+	// Get UserSalt for hash computation
+	usersalt, err := db.GetConfigValue(config.CFG_KEY_USERSALT)
+	if err != nil || usersalt == "" {
+		log.Printf("Failed to get UserSalt config: %v", err)
+		return nil, fmt.Errorf("failed to get UserSalt config: %v", err)
+	}
+
+	offset := 0
+	batchSize := 1000
+
+	for {
+		// Query users in batches
+		query := `SELECT id, username, email, display_name, password_hash, verified, disabled, no_posting, post_count, lastpost_unix, created_at
+		          FROM users
+				  WHERE post_count > 0
+		          ORDER BY id
+		          LIMIT ? OFFSET ?`
+
+		rows, err := db.mainDB.Query(query, batchSize, offset)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query users batch: %v", err)
+		}
+
+		var users []*models.User
+		for rows.Next() {
+			var user models.User
+			if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.DisplayName, &user.PasswordHash, &user.Verified, &user.Disabled, &user.NoPosting, &user.PostCount, &user.LastPostUnix, &user.CreatedAt); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("failed to scan user: %v", err)
+			}
+			users = append(users, &user)
+		}
+		rows.Close()
+
+		// If no users in this batch, we've reached the end
+		if len(users) == 0 {
+			break
+		}
+
+		// Check each user's computed hash against the target
+		for _, user := range users {
+			computedHash := fmt.Sprintf("%x", sha256.Sum256([]byte(usersalt+user.Username+nonce)))
+			if computedHash == targetHash {
+				return user, nil
+			}
+		}
+
+		// Move to next batch
+		offset += batchSize
+
+		// If we got fewer users than batch size, we've reached the end
+		if len(users) < batchSize {
+			break
+		}
+	}
+
+	// No matching user found
+	return nil, nil
+}
+
+const query_getMessageIDsBatchWithDateFilter_selectPart = `SELECT message_id FROM articles`
+const query_getMessageIDsBatchWithDateFilter_orderby = " ORDER BY date_sent ASC"
+const query_getArticlesBatchWithDateFilter_selectPart = `SELECT article_num, message_id, subject, from_header,
+date_sent, date_string, "references", bytes, lines, headers_json, body_text,
+path, imported_at, spam, hide FROM articles`
+const query_getArticlesBatchWithDateFilter_orderby = " ORDER BY date_sent ASC LIMIT ? OFFSET ?"
+
+// GetArticlesByIDs retrieves articles by their message IDs, ordered by date_sent
+func (db *Database) GetArticlesByIDs(newsgroup *string, wantedIDs []*string) ([]*models.Article, error) {
+	if len(wantedIDs) == 0 {
+		return nil, nil
+	}
+
+	groupDB, err := db.GetGroupDB(*newsgroup)
+	if err != nil {
+		return nil, err
+	}
+	defer groupDB.Return()
+
+	// Build the IN clause with placeholders
+	placeholders := make([]string, len(wantedIDs))
+	args := make([]interface{}, len(wantedIDs))
+	for i, id := range wantedIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	// Build query with IN clause for message_ids
+	query := query_getArticlesBatchWithDateFilter_selectPart +
+		" WHERE message_id IN (" + strings.Join(placeholders, ",") + ") " +
+		"ORDER BY date_sent ASC"
+
+	rows, err := groupDB.DB.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query articles by IDs: %w", err)
+	}
+	defer rows.Close()
+
+	var articles []*models.Article
+	for rows.Next() {
+		article := &models.Article{}
+		if err := rows.Scan(
+			&article.DBArtNum,
+			&article.MessageID,
+			&article.Subject,
+			&article.FromHeader,
+			&article.DateSent,
+			&article.DateString,
+			&article.References,
+			&article.Bytes,
+			&article.Lines,
+			&article.HeadersJSON,
+			&article.BodyText,
+			&article.Path,
+			&article.ImportedAt,
+			&article.Spam,
+			&article.Hide,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan article: %w", err)
+		}
+		articles = append(articles, article)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating article rows: %w", err)
+	}
+
+	return articles, nil
+}
+
+// GetArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
+func (db *Database) GetMessageIDsWithDateFilter(ng *models.Newsgroup, startTime, endTime *time.Time, batchCheck int64, resultChan chan []*string) error {
+	// Get group database
+	groupDB, err := db.GetGroupDB(ng.Name)
+	if err != nil {
+		return fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", ng.Name, err)
+	}
+	defer close(resultChan)
+	defer db.ForceCloseGroupDB(groupDB)
+	var loaded uint64
+	var query string
+	var args []interface{}
+	start := time.Now()
+	if startTime != nil || endTime != nil {
+		// Build query with date filtering
+		var whereConditions []string
+
+		// Always exclude NULL date_sent values when using ORDER BY date_sent
+		whereConditions = append(whereConditions, "date_sent IS NOT NULL")
+
+		if startTime != nil {
+			whereConditions = append(whereConditions, "date_sent >= ?")
+			args = append(args, startTime.UTC().Format("2006-01-02 15:04:05"))
+		}
+
+		if endTime != nil {
+			whereConditions = append(whereConditions, "date_sent <= ?")
+			args = append(args, endTime.UTC().Format("2006-01-02 15:04:05"))
+		}
+
+		whereClause := ""
+		if len(whereConditions) > 0 {
+			whereClause = " WHERE " + strings.Join(whereConditions, " AND ")
+		}
+
+		query = query_getMessageIDsBatchWithDateFilter_selectPart + whereClause + query_getMessageIDsBatchWithDateFilter_orderby
+	} else {
+		// No date filtering
+		query = query_getMessageIDsBatchWithDateFilter_selectPart + query_getMessageIDsBatchWithDateFilter_orderby
+	}
+	log.Printf("Newsgroup: '%s' | GetMessageIDsWithDateFilter: Executing query: '%s' with args: '%v'", ng.Name, query, args)
+	rows, err := groupDB.DB.Query(query, args...)
+	if err != nil {
+		log.Printf("ERROR Newsgroup: '%s' | GetMessageIDsWithDateFilter: Failed to execute query: %v", ng.Name, err)
+		return err
+	}
+	defer rows.Close()
+	//out := make([]*models.Article, dbBatchSize)
+	tmpChan := make(chan *string, batchCheck)
+	for rows.Next() {
+		var msgid string
+		if err := rows.Scan(
+			&msgid,
+		); err != nil {
+			log.Printf("ERROR GetMessageIDsWithDateFilter: Failed to scan message ID in newsgroup '%s': %v", ng.Name, err)
+			return err
+		}
+
+		if msgid != "" {
+		load:
+			for {
+				select {
+				case tmpChan <- &msgid:
+					break load
+				default:
+					// chan full
+					loaded += db.releaseTmpChan(tmpChan, resultChan, cap(tmpChan))
+					tmpChan <- &msgid
+					break load
+				}
+			}
+		}
+	}
+	loaded += db.releaseTmpChan(tmpChan, resultChan, 0)
+	log.Printf("Newsgroup: '%s' | GetMessageIDsWithDateFilter: Loaded %d message IDs | took: %v", ng.Name, loaded, time.Since(start))
+	return nil
+}
+
+func (db *Database) releaseTmpChan(tmpChan chan *string, resultChan chan []*string, limit int) (loaded uint64) {
+	if limit > 0 && len(tmpChan) < limit && len(tmpChan) < cap(tmpChan) {
+		return 0
+	}
+	if len(tmpChan) > 0 {
+		out := make([]*string, 0, len(tmpChan))
+	empty:
+		for {
+			select {
+			case mid := <-tmpChan:
+				out = append(out, mid)
+			default:
+				break empty
+			}
+		}
+		if len(out) > 0 {
+			resultChan <- out
+			loaded += uint64(len(out))
+		}
+	}
+	return loaded
+}
+
+// GetArticlesBatchWithDateFilter retrieves articles from a group database with optional date filtering
+func (db *Database) GetArticlesBatchWithDateFilter(ng *models.Newsgroup, offset int64, startTime, endTime *time.Time, dbBatchSize int64) ([]*models.Article, error) {
+	// Get group database
+	groupDB, err := db.GetGroupDB(ng.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group DBs for newsgroup '%s': %v", ng.Name, err)
+	}
+
+	var query string
+	var args []interface{}
+
+	if startTime != nil || endTime != nil {
+		// Build query with date filtering
+		var whereConditions []string
+
+		// Always exclude NULL date_sent values when using ORDER BY date_sent
+		whereConditions = append(whereConditions, "date_sent IS NOT NULL")
+
+		if startTime != nil {
+			whereConditions = append(whereConditions, "date_sent >= ?")
+			args = append(args, startTime.UTC().Format("2006-01-02 15:04:05"))
+		}
+
+		if endTime != nil {
+			whereConditions = append(whereConditions, "date_sent <= ?")
+			args = append(args, endTime.UTC().Format("2006-01-02 15:04:05"))
+		}
+
+		whereClause := ""
+		if len(whereConditions) > 0 {
+			whereClause = " WHERE " + strings.Join(whereConditions, " AND ")
+		}
+
+		query = query_getArticlesBatchWithDateFilter_selectPart + whereClause + query_getArticlesBatchWithDateFilter_orderby
+		args = append(args, dbBatchSize, offset)
+	} else {
+		// No date filtering - simple OFFSET pagination
+		query = query_getArticlesBatchWithDateFilter_selectPart + query_getArticlesBatchWithDateFilter_orderby
+		args = []interface{}{dbBatchSize, offset}
+	}
+
+	rows, err := groupDB.DB.Query(query, args...)
+	if err != nil {
+		db.ForceCloseGroupDB(groupDB)
+		return nil, err
+	}
+	defer rows.Close()
+	//out := make([]*models.Article, dbBatchSize)
+	var out []*models.Article
+	for rows.Next() {
+		a := models.NewArticle()
+		if err := rows.Scan(&a.DBArtNum, &a.MessageID, &a.Subject, &a.FromHeader, &a.DateSent, &a.DateString, &a.References, &a.Bytes, &a.Lines, &a.HeadersJSON, &a.BodyText, &a.Path, &a.ImportedAt, &a.Spam, &a.Hide); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+
+	if int64(len(out)) < dbBatchSize {
+		db.ForceCloseGroupDB(groupDB)
+	} else {
+		groupDB.Return()
+	}
+	return out, nil
+}
+
+// GetArticleCountWithDateFilter gets the total count of articles with optional date filtering
+// When no date filter is specified, uses cached message_count from newsgroups table in main DB
+func (db *Database) GetArticleCountWithDateFilter(groupDB *GroupDB, startTime, endTime *time.Time) (int64, error) {
+	var query string
+	var args []interface{}
+	var count int64
+	start := time.Now()
+
+	if startTime != nil || endTime != nil {
+		// Build count query with date filtering - must use live COUNT(*) query
+		var whereConditions []string
+
+		// Always exclude NULL date_sent values to match SELECT query behavior
+		whereConditions = append(whereConditions, "date_sent IS NOT NULL")
+
+		if startTime != nil {
+			whereConditions = append(whereConditions, "date_sent >= ?")
+			args = append(args, startTime.UTC().Format("2006-01-02 15:04:05"))
+		}
+
+		if endTime != nil {
+			whereConditions = append(whereConditions, "date_sent <= ?")
+			args = append(args, endTime.UTC().Format("2006-01-02 15:04:05"))
+		}
+
+		whereClause := ""
+		if len(whereConditions) > 0 {
+			whereClause = " WHERE " + strings.Join(whereConditions, " AND ")
+		}
+
+		query = "SELECT COUNT(*) FROM articles" + whereClause
+		err := groupDB.DB.QueryRow(query, args...).Scan(&count)
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		// No date filtering - use cached message_count from newsgroups table in main DB
+		// This is MUCH faster than COUNT(*) on large tables (O(1) vs O(N))
+		query = "SELECT COALESCE(message_count, 0) FROM newsgroups WHERE name = ?"
+		err := db.GetMainDB().QueryRow(query, groupDB.Newsgroup).Scan(&count)
+		if err != nil {
+			// Fallback to direct COUNT if newsgroups table doesn't have the entry
+			log.Printf("WARNING: Could not get message_count from newsgroups table for '%s', falling back to COUNT(*): %v", groupDB.Newsgroup, err)
+			query = "SELECT COUNT(*) FROM articles"
+			err = groupDB.DB.QueryRow(query).Scan(&count)
+			if err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	elapsed := time.Since(start)
+	if elapsed > 5*time.Second {
+		log.Printf("WARNING: Slow COUNT query for group '%s' took %v (count=%d)", groupDB.Newsgroup, elapsed, count)
+	}
+
+	return count, nil
 }

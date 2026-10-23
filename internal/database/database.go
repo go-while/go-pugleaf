@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
+	"sort"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite3 driver
@@ -19,159 +21,174 @@ func (db *Database) GetMainDB() *sql.DB {
 }
 
 func (db *Database) CronDB() {
-	baseSleep := 10 * time.Second
-	for {
-		// Adaptive sleep: longer intervals during heavy load to reduce mutex contention
-		time.Sleep(baseSleep)
+	db.cronDBEvery(10 * time.Second)
+}
+
+// cronDBEvery closes idle group databases on every tick until Shutdown has marked the
+// group databases closed. It deliberately does not stop on StopChan: the batch drain
+// keeps opening group databases after that channel is closed, and without this loop a
+// large backlog would exceed MaxOpenDatabases and the fd limit during the final flush.
+// CronDB is started outside db.WG (db_init.go), so db.WG.Wait() never waits for it.
+func (db *Database) cronDBEvery(every time.Duration) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for range ticker.C {
+		db.MainMutex.RLock()
+		shutdown := db.groupDBsShutdown
+		db.MainMutex.RUnlock()
+		if shutdown {
+			return
+		}
 		db.cleanupIdleGroups()
 	}
 }
 
+// groupDBToClose is a group database removed from the map that still has to be closed.
+type groupDBToClose struct {
+	name string
+	age  time.Duration
+	db   *sql.DB
+}
+
 func (db *Database) cleanupIdleGroups() {
-	db.MainMutex.RLock()
-	shouldClose := db.openDBsNum >= MaxOpenDatabases // TODO HARDCODED
-	if shouldClose {
-		closedCount := 0
+	db.cleanupIdleGroupsWith(DBidleTimeOut)
+}
 
-		// Find oldest databases to close
-		type dbAge struct {
-			name string
-			age  time.Duration
-		}
-		var candidates []dbAge
+// cleanupIdleGroupsWith closes group databases without workers that were idle longer
+// than idle. When MaxOpenDatabases or more are open, the oldest databases without
+// workers are closed regardless of idle time until at most MaxOpenDatabases/2 remain.
+// Entries are marked CLOSED and removed under the locks; the *sql.DB is closed after
+// the locks are released.
+func (db *Database) cleanupIdleGroupsWith(idle time.Duration) {
+	db.cleanupGroupDBsWithLimit(idle, MaxOpenDatabases)
+}
 
-		for groupName, groupDBs := range db.groupDBs {
-			if groupDBs == nil {
-				log.Printf("cleanupIdleGroups Warning: GroupDBs for '%s' is nil, skipping", groupName)
-				continue
-			}
-			groupDBs.mux.RLock()
-			candidates = append(candidates, dbAge{
-				name: groupName,
-				age:  time.Since(groupDBs.Idle),
-			})
-			groupDBs.mux.RUnlock()
-		}
-
-		// Sort by age (oldest first)
-		for i := 0; i < len(candidates)-1; i++ {
-			for j := i + 1; j < len(candidates); j++ {
-				if candidates[i].age < candidates[j].age {
-					candidates[i], candidates[j] = candidates[j], candidates[i]
-				}
-			}
-		}
-
-		db.MainMutex.RUnlock()
-
-		// Close oldest databases
-		db.MainMutex.Lock()
-		for _, candidate := range candidates {
-			if db.openDBsNum <= MaxOpenDatabases/2 {
-				break
-			}
-			groupDBs := db.groupDBs[candidate.name]
-			if groupDBs != nil {
-				groupDBs.mux.Lock()
-				if groupDBs.Workers == 0 {
-					if err := groupDBs.Close("force cleanup"); err != nil {
-						log.Printf("Failed to force close group database for '%s': %v", candidate.name, err)
-					} else {
-						delete(db.groupDBs, candidate.name)
-						db.openDBsNum--
-						closedCount++
-						log.Printf("Force closed idle DB ng: '%s' (age: %v)", candidate.name, candidate.age)
-					}
-				} else {
-					//log.Printf("Skipping force close for busy group DB '%s' (workers: %d)", candidate.name, groupDBs.Workers)
-				}
-				groupDBs.mux.Unlock()
-			}
-		}
-		log.Printf("Force closed %d databases due to exceeding limit (%d >= %d)", closedCount, db.openDBsNum+closedCount, MaxOpenDatabases)
-		db.MainMutex.Unlock()
-		return
+// cleanupGroupDBsWithLimit is cleanupIdleGroupsWith with maxOpen in place of MaxOpenDatabases (tests).
+func (db *Database) cleanupGroupDBsWithLimit(idle time.Duration, maxOpen int) {
+	type candidate struct {
+		name    string
+		groupDB *GroupDB
+		age     time.Duration
 	}
-	db.MainMutex.RUnlock()
 
-	db.MainMutex.Lock()
-	// normal idle processing with idle time
-	for groupName, groupDBs := range db.groupDBs {
-		if groupDBs == nil {
-			log.Printf("cleanupIdleGroups Warning: GroupDBs for '%s' is nil, skipping", groupName)
+	db.MainMutex.RLock()
+	force := db.openDBsNum >= maxOpen
+	candidates := make([]candidate, 0, len(db.groupDB))
+	for groupName, groupDB := range db.groupDB {
+		if groupDB == nil {
+			log.Printf("cleanupIdleGroups Warning: GroupDB for '%s' is nil, skipping", groupName)
 			continue
 		}
+		groupDB.mux.RLock()
+		candidates = append(candidates, candidate{name: groupName, groupDB: groupDB, age: time.Since(groupDB.Idle)})
+		groupDB.mux.RUnlock()
+	}
+	db.MainMutex.RUnlock()
+	if len(candidates) == 0 {
+		return
+	}
 
-		// Use a non-blocking check to avoid holding locks too long
-		groupDBs.mux.Lock()
-		if groupDBs.Workers < 0 {
-			log.Printf("Warning: Negative worker count for group '%s': %d", groupName, groupDBs.Workers)
+	// Sort by age (oldest first)
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].age > candidates[j].age })
+
+	var toClose []groupDBToClose
+	db.MainMutex.Lock()
+	for _, c := range candidates {
+		if force && db.openDBsNum <= maxOpen/2 {
+			break
 		}
-		isIdle := (groupDBs.Workers == 0 && time.Since(groupDBs.Idle) > DBidleTimeOut)
-		if isIdle {
-			// Mark for closure and remove from active map immediately
-			if err := groupDBs.Close("cleanupIdleGroups"); err != nil {
-				log.Printf("Failed to close group database for '%s': %v", groupDBs.Newsgroup, err)
-				groupDBs.mux.Unlock()
-				continue
-			}
-			//groupsToClose = append(groupsToClose, groupDBs)
-			delete(db.groupDBs, groupName)
+		if db.groupDB[c.name] != c.groupDB {
+			continue // already removed or replaced
+		}
+		g := c.groupDB
+		g.mux.Lock()
+		if g.Workers < 0 {
+			log.Printf("Warning: Negative worker count for group '%s': %d", c.name, g.Workers)
+		}
+		if g.state == stateCREATED && g.Workers == 0 && (force || time.Since(g.Idle) > idle) {
+			g.state = stateCLOSED
+			toClose = append(toClose, groupDBToClose{name: c.name, age: time.Since(g.Idle), db: g.DB})
+			delete(db.groupDB, c.name)
 			db.openDBsNum--
 		}
-		groupDBs.mux.Unlock()
+		g.mux.Unlock()
 	}
+	openNow := db.openDBsNum
 	db.MainMutex.Unlock()
-}
 
-func (db *Database) removePartialInitializedGroupDB(groupName string) {
-	db.MainMutex.Lock()
-	db.groupDBs[groupName] = nil
-	db.MainMutex.Unlock()
-}
-
-// Close closes all database connections
-func (db *Database) Shutdown() error {
-	var errs []error
-
-	// STEP 1: Mark shutdown as in progress
-	if err := db.SetShutdownState(ShutdownStateInProgress); err != nil {
-		log.Printf("[DATABASE] Warning: Failed to set shutdown state: %v", err)
-		// Continue with shutdown even if we can't update the state
-	}
-
-	// STEP 2: Close per-group databases first (thousands of them)
-	db.MainMutex.Lock()
-	log.Printf("[DATABASE] Closing %d group databases...", len(db.groupDBs))
-	groupCloseErrors := 0
-	for groupName, groupDBs := range db.groupDBs {
-		if groupDBs != nil && groupDBs.DB != nil {
-			groupDBs.mux.Lock()
-			if err := groupDBs.DB.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("failed to close group database %s: %w", groupName, err))
-				groupCloseErrors++
-			}
-			groupDBs.mux.Unlock()
+	closedCount := 0
+	for _, c := range toClose {
+		if c.db == nil {
+			continue
+		}
+		if err := c.db.Close(); err != nil {
+			log.Printf("[DATABASE] Failed to close group database for '%s': %v", c.name, err)
+			continue
+		}
+		closedCount++
+		if force {
+			log.Printf("Force closed idle DB ng: '%s' (age: %v)", c.name, c.age)
 		}
 	}
+	if force {
+		log.Printf("Force closed %d databases due to exceeding limit (%d >= %d)", closedCount, openNow+len(toClose), maxOpen)
+	}
+}
+
+// Shutdown stops the cache cron loops and closes all database connections. Callers close
+// StopChan and wait for WG first. A Database from OpenDatabase resets INIT as the last
+// step, so a new OpenDatabase can follow.
+func (db *Database) Shutdown() error {
+	db.stopBackground() // no-op on a bare &Database{} (tests)
+	if db.bgStop != nil {
+		// only a Database created by OpenDatabase owns INIT, and it gives it up once: a second
+		// Shutdown of the same Database must not reset INIT for a Database opened after it.
+		// Deferred: runs after the main DB is closed.
+		defer db.initResetOnce.Do(func() {
+			GlobalDBMutex.Lock()
+			INIT = false
+			GlobalDBMutex.Unlock()
+		})
+	}
+
+	var errs []error
+
+	// Close per-group databases first (thousands of them)
+	var toClose []groupDBToClose
+	db.MainMutex.Lock()
+	db.groupDBsShutdown = true
+	log.Printf("[DATABASE] Closing %d group databases...", len(db.groupDB))
+	for groupName, groupDB := range db.groupDB {
+		if groupDB == nil {
+			continue
+		}
+		groupDB.mux.Lock()
+		// An entry still initializing (state 0) keeps its *sql.DB: its creator sees
+		// CLOSED and closes it, so it is not closed under a running migration.
+		if groupDB.state != 0 && groupDB.DB != nil {
+			toClose = append(toClose, groupDBToClose{name: groupName, db: groupDB.DB})
+		}
+		groupDB.state = stateCLOSED
+		groupDB.mux.Unlock()
+	}
+	// Clear the group databases map
+	db.groupDB = make(map[string]*GroupDB)
+	db.openDBsNum = 0
 	db.MainMutex.Unlock()
+
+	groupCloseErrors := 0
+	for _, c := range toClose {
+		if err := c.db.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close group database %s: %w", c.name, err))
+			groupCloseErrors++
+		}
+	}
 	if groupCloseErrors > 0 {
 		log.Printf("[DATABASE] Failed to close %d group databases", groupCloseErrors)
 	}
-
-	// Clear the group databases map
-	db.MainMutex.Lock()
-	db.groupDBs = make(map[string]*GroupDBs)
-	db.MainMutex.Unlock()
 	log.Printf("[DATABASE] Group databases closed")
 
-	// STEP 4: Mark shutdown as clean BEFORE closing main database
-	if err := db.SetShutdownState(ShutdownStateClean); err != nil {
-		log.Printf("[DATABASE] Warning: Failed to mark shutdown as clean: %v", err)
-		// Continue anyway
-	}
-
-	// STEP 5: Close main database last
+	// Close main database last
 	if db.mainDB != nil {
 		if err := db.mainDB.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to close main database: %w", err))
@@ -201,7 +218,7 @@ type Stats struct {
 		WaitCount       int64
 		WaitDuration    time.Duration
 	}
-	GroupDBs map[string]struct {
+	GroupDB map[string]struct {
 		OpenConnections int
 		IdleConnections int
 		WaitCount       int64
@@ -209,10 +226,10 @@ type Stats struct {
 	}
 }
 
-// GetStats returns database connection statistics
-func (db *Database) GetStats() *Stats {
+// GetDatabaseStats returns database connection statistics
+func (db *Database) GetDatabaseStats() *Stats {
 	stats := &Stats{
-		GroupDBs: make(map[string]struct {
+		GroupDB: make(map[string]struct {
 			OpenConnections int
 			IdleConnections int
 			WaitCount       int64
@@ -232,20 +249,24 @@ func (db *Database) GetStats() *Stats {
 	// Group database stats
 	db.MainMutex.RLock()
 	defer db.MainMutex.RUnlock()
-	for groupName, groupDBs := range db.groupDBs {
-		if groupDBs != nil && groupDBs.DB != nil {
-			dbStats := groupDBs.DB.Stats()
-			stats.GroupDBs[groupName] = struct {
-				OpenConnections int
-				IdleConnections int
-				WaitCount       int64
-				WaitDuration    time.Duration
-			}{
-				OpenConnections: dbStats.OpenConnections,
-				IdleConnections: dbStats.Idle,
-				WaitCount:       dbStats.WaitCount,
-				WaitDuration:    dbStats.WaitDuration,
+	for groupName, groupDB := range db.groupDB {
+		if groupDB != nil {
+			groupDB.mux.RLock()
+			if groupDB.DB != nil {
+				dbStats := groupDB.DB.Stats()
+				stats.GroupDB[groupName] = struct {
+					OpenConnections int
+					IdleConnections int
+					WaitCount       int64
+					WaitDuration    time.Duration
+				}{
+					OpenConnections: dbStats.OpenConnections,
+					IdleConnections: dbStats.Idle,
+					WaitCount:       dbStats.WaitCount,
+					WaitDuration:    dbStats.WaitDuration,
+				}
 			}
+			groupDB.mux.RUnlock()
 		}
 	}
 
@@ -259,7 +280,7 @@ func (db *Database) GetHistoryUseShortHashLen(defaultValue int) (int, bool, erro
 	var locked string
 
 	// Get the UseShortHashLen value
-	err := retryableQueryRowScan(db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{"history_use_short_hash_len"}, &value)
+	err := RetryableQueryRowScan(db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{"history_use_short_hash_len"}, &value)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Not found, use default
@@ -269,7 +290,7 @@ func (db *Database) GetHistoryUseShortHashLen(defaultValue int) (int, bool, erro
 	}
 
 	// Check if config is locked
-	err = retryableQueryRowScan(db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{"history_config_locked"}, &locked)
+	err = RetryableQueryRowScan(db.mainDB, "SELECT value FROM config WHERE key = ?", []interface{}{"history_config_locked"}, &locked)
 	if err != nil && err != sql.ErrNoRows {
 		return 0, false, fmt.Errorf("failed to query history_config_locked: %w", err)
 	}
@@ -303,14 +324,14 @@ func (db *Database) SetHistoryUseShortHashLen(value int) error {
 	}
 
 	// Store the value
-	_, err = retryableExec(db.mainDB, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+	_, err = RetryableExec(db.mainDB, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
 		"history_use_short_hash_len", fmt.Sprintf("%d", value))
 	if err != nil {
 		return fmt.Errorf("failed to store history_use_short_hash_len: %w", err)
 	}
 
 	// Lock the configuration to prevent future changes
-	_, err = retryableExec(db.mainDB, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+	_, err = RetryableExec(db.mainDB, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
 		"history_config_locked", "true")
 	if err != nil {
 		return fmt.Errorf("failed to lock history configuration: %w", err)
@@ -320,135 +341,36 @@ func (db *Database) SetHistoryUseShortHashLen(value int) error {
 	return nil
 }
 
-// Shutdown state constants
-const (
-	ShutdownStateRunning    = "running"
-	ShutdownStateInProgress = "shutting_down"
-	ShutdownStateClean      = "clean_shutdown"
-	ShutdownStateCrashed    = "crashed"
-)
-
-// SetShutdownState updates the shutdown state in the database
-func (db *Database) SetShutdownState(state string) error {
-	if db.mainDB == nil {
-		return fmt.Errorf("main database not initialized")
-	}
-
-	var query string
-	var args []interface{}
-
-	switch state {
-	case ShutdownStateInProgress:
-		query = `UPDATE system_status SET shutdown_state = ?, shutdown_started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = 1`
-		args = []interface{}{state}
-	case ShutdownStateClean:
-		query = `UPDATE system_status SET shutdown_state = ?, shutdown_completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = 1`
-		args = []interface{}{state}
-	default:
-		query = `UPDATE system_status SET shutdown_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`
-		args = []interface{}{state}
-	}
-
-	_, err := retryableExec(db.mainDB, query, args...)
-	if err != nil {
-		return fmt.Errorf("failed to update shutdown state to %s: %w", state, err)
-	}
-
-	log.Printf("[DATABASE] Shutdown state updated to: %s", state)
-	return nil
-}
-
-// GetShutdownState retrieves the current shutdown state from the database
-func (db *Database) GetShutdownState() (string, error) {
-	if db.mainDB == nil {
-		return ShutdownStateCrashed, fmt.Errorf("main database not initialized")
-	}
-
-	var state string
-	err := retryableQueryRowScan(db.mainDB, "SELECT shutdown_state FROM system_status WHERE id = 1", []interface{}{}, &state)
-	if err != nil {
-		return ShutdownStateCrashed, fmt.Errorf("failed to get shutdown state: %w", err)
-	}
-
-	return state, nil
-}
-
 // InitializeSystemStatus sets up the system status on startup
-func (db *Database) InitializeSystemStatus(appVersion string, pid int, hostname string) error {
+func (db *Database) InitializeSystemStatus(appVersion string) error {
 	if db.mainDB == nil {
 		return fmt.Errorf("main database not initialized")
 	}
 
 	// Update the system status with current app info and set to running state
 	query := `UPDATE system_status SET
-		shutdown_state = ?,
 		app_version = ?,
 		pid = ?,
 		hostname = ?,
-		shutdown_started_at = NULL,
-		shutdown_completed_at = NULL,
 		last_heartbeat = CURRENT_TIMESTAMP,
-		updated_at = CURRENT_TIMESTAMP
+		shutdown_state = ''
 		WHERE id = 1`
+	hostname, _ := os.Hostname()
+	pid := os.Getpid()
 
-	_, err := retryableExec(db.mainDB, query, ShutdownStateRunning, appVersion, pid, hostname)
+	_, err := RetryableExec(db.mainDB, query, appVersion, pid, hostname)
 	if err != nil {
 		return fmt.Errorf("failed to initialize system status: %w", err)
 	}
 
-	log.Printf("[DATABASE] System status initialized: version=%s, pid=%d, hostname=%s", appVersion, pid, hostname)
+	log.Printf("[DATABASE] System status initialized: version=%s, pid=%d", appVersion, pid)
 	return nil
-}
-
-// CheckPreviousShutdown checks if the previous shutdown was clean
-func (db *Database) CheckPreviousShutdown() (bool, error) {
-	state, err := db.GetShutdownState()
-	if err != nil {
-		return false, err
-	}
-
-	wasClean := (state == ShutdownStateClean)
-	if !wasClean {
-		log.Printf("[DATABASE] WARNING: Previous shutdown was not clean. State was: %s", state)
-	} else {
-		log.Printf("[DATABASE] Previous shutdown was clean")
-	}
-
-	return wasClean, nil
-}
-
-// IsShuttingDown returns true if the database is in the process of shutting down
-func (db *Database) IsShuttingDown() bool {
-	state, err := db.GetShutdownState()
-	if err != nil {
-		// If we can't read the state, assume we're shutting down to be safe
-		return true
-	}
-	return state == ShutdownStateInProgress || state == ShutdownStateClean
-}
-
-// UpdateHeartbeat updates the last heartbeat timestamp
-func (db *Database) UpdateHeartbeat() {
-	ticker := time.NewTicker(60 * time.Second)
-	for range ticker.C {
-
-		if db.mainDB == nil {
-			log.Printf("ERROR UpdateHeartbeat: main database not initialized")
-			return
-		}
-
-		_, err := retryableExec(db.mainDB, "UPDATE system_status SET last_heartbeat = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = 1")
-		if err != nil {
-			log.Printf("ERROR UpdateHeartbeat: failed to update heartbeat: %v", err)
-			continue
-		}
-	}
 }
 
 // GetNewsgroupID returns the ID of a newsgroup by name
 func (db *Database) GetNewsgroupID(groupName string) (int, error) {
 	var id int
-	err := retryableQueryRowScan(db.mainDB, "SELECT id FROM newsgroups WHERE name = ?", []interface{}{groupName}, &id)
+	err := RetryableQueryRowScan(db.mainDB, "SELECT id FROM newsgroups WHERE name = ?", []interface{}{groupName}, &id)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get newsgroup ID for '%s': %w", groupName, err)
 	}
@@ -467,15 +389,15 @@ func (db *Database) IncrementArticleSpam(groupName string, articleNum int64) err
 	}
 	log.Printf("DEBUG: Found newsgroupID=%d for group %s", newsgroupID, groupName)
 
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		log.Printf("DEBUG: Failed to get group databases for %s: %v", groupName, err)
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDB.Return()
 
 	// Update spam counter in group database
-	result, err := retryableExec(groupDBs.DB, "UPDATE articles SET spam = spam + 1 WHERE article_num = ?", articleNum)
+	result, err := RetryableExec(groupDB.DB, "UPDATE articles SET spam = spam + 1 WHERE article_num = ?", articleNum)
 	if err != nil {
 		log.Printf("DEBUG: Failed to update spam count in group DB: %v", err)
 		return fmt.Errorf("failed to increment spam count: %w", err)
@@ -485,7 +407,7 @@ func (db *Database) IncrementArticleSpam(groupName string, articleNum int64) err
 	log.Printf("DEBUG: Updated %d rows in articles table for article %d", rowsAffected, articleNum)
 
 	// Add to main database spam table
-	result2, err := retryableExec(db.mainDB, "INSERT OR IGNORE INTO spam (newsgroup_id, article_num) VALUES (?, ?)", newsgroupID, articleNum)
+	result2, err := RetryableExec(db.mainDB, "INSERT OR IGNORE INTO spam (newsgroup_id, article_num) VALUES (?, ?)", newsgroupID, articleNum)
 	if err != nil {
 		log.Printf("DEBUG: Failed to insert into spam table: %v", err)
 		return fmt.Errorf("failed to add to spam table: %w", err)
@@ -499,13 +421,13 @@ func (db *Database) IncrementArticleSpam(groupName string, articleNum int64) err
 
 // IncrementArticleHide increments the hide counter for a specific article
 func (db *Database) IncrementArticleHide(groupName string, articleNum int64) error {
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDB.Return()
 
-	_, err = retryableExec(groupDBs.DB, "UPDATE articles SET hide = 1 WHERE article_num = ? AND spam > 0", articleNum)
+	_, err = RetryableExec(groupDB.DB, "UPDATE articles SET hide = 1 WHERE article_num = ? AND spam > 0", articleNum)
 	if err != nil {
 		return fmt.Errorf("failed to increment hide count: %w", err)
 	}
@@ -515,13 +437,13 @@ func (db *Database) IncrementArticleHide(groupName string, articleNum int64) err
 
 // UnHideArticle sets the hide counter to zero for a specific article
 func (db *Database) UnHideArticle(groupName string, articleNum int64) error {
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDB.Return()
 
-	_, err = retryableExec(groupDBs.DB, "UPDATE articles SET hide = 0 WHERE article_num = ?", articleNum)
+	_, err = RetryableExec(groupDB.DB, "UPDATE articles SET hide = 0 WHERE article_num = ?", articleNum)
 	if err != nil {
 		return fmt.Errorf("failed to unhide: %w", err)
 	}
@@ -541,16 +463,16 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 	}
 	log.Printf("DEBUG: Found newsgroupID=%d for group %s", newsgroupID, groupName)
 
-	groupDBs, err := db.GetGroupDBs(groupName)
+	groupDB, err := db.GetGroupDB(groupName)
 	if err != nil {
 		log.Printf("DEBUG: Failed to get group databases for %s: %v", groupName, err)
 		return fmt.Errorf("failed to get group databases: %w", err)
 	}
-	defer groupDBs.Return(db)
+	defer groupDB.Return()
 
 	// Check current spam count first
 	var currentSpam int
-	err = retryableQueryRowScan(groupDBs.DB, "SELECT spam FROM articles WHERE article_num = ?", []interface{}{articleNum}, &currentSpam)
+	err = RetryableQueryRowScan(groupDB.DB, "SELECT spam FROM articles WHERE article_num = ?", []interface{}{articleNum}, &currentSpam)
 	if err != nil {
 		log.Printf("DEBUG: Failed to get current spam count: %v", err)
 		return fmt.Errorf("failed to get current spam count: %w", err)
@@ -562,7 +484,7 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 	}
 
 	// Decrement spam counter in group database
-	result, err := retryableExec(groupDBs.DB, "UPDATE articles SET spam = spam - 1 WHERE article_num = ? AND spam > 0", articleNum)
+	result, err := RetryableExec(groupDB.DB, "UPDATE articles SET spam = spam - 1 WHERE article_num = ? AND spam > 0", articleNum)
 	if err != nil {
 		log.Printf("DEBUG: Failed to decrement spam count in group DB: %v", err)
 		return fmt.Errorf("failed to decrement spam count: %w", err)
@@ -571,9 +493,9 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 	rowsAffected, _ := result.RowsAffected()
 	log.Printf("DEBUG: Decremented spam count for %d rows in articles table for article %d", rowsAffected, articleNum)
 
-	// If spam count reaches 0, remove from main database spam table
+	// If spam count reaches 0, remove from main database spam table and clear all user flags
 	if currentSpam == 1 {
-		result2, err := retryableExec(db.mainDB, "DELETE FROM spam WHERE newsgroup_id = ? AND article_num = ?", newsgroupID, articleNum)
+		result2, err := RetryableExec(db.mainDB, "DELETE FROM spam WHERE newsgroup_id = ? AND article_num = ?", newsgroupID, articleNum)
 		if err != nil {
 			log.Printf("DEBUG: Failed to remove from spam table: %v", err)
 			return fmt.Errorf("failed to remove from spam table: %w", err)
@@ -581,6 +503,16 @@ func (db *Database) DecrementArticleSpam(groupName string, articleNum int64) err
 
 		rowsAffected2, _ := result2.RowsAffected()
 		log.Printf("DEBUG: Removed %d rows from spam table", rowsAffected2)
+
+		// Also remove all user spam flags for this article
+		result3, err := RetryableExec(db.mainDB, "DELETE FROM user_spam_flags WHERE newsgroup_id = ? AND article_num = ?", newsgroupID, articleNum)
+		if err != nil {
+			log.Printf("DEBUG: Failed to clear user spam flags: %v", err)
+			return fmt.Errorf("failed to clear user spam flags: %w", err)
+		}
+
+		rowsAffected3, _ := result3.RowsAffected()
+		log.Printf("DEBUG: Cleared %d user spam flags for article %d", rowsAffected3, articleNum)
 	}
 
 	return nil
@@ -595,7 +527,7 @@ func (db *Database) HasUserFlaggedSpam(userID int64, groupName string, articleNu
 	}
 
 	var count int
-	err = retryableQueryRowScan(db.mainDB, `
+	err = RetryableQueryRowScan(db.mainDB, `
 		SELECT COUNT(*) FROM user_spam_flags
 		WHERE user_id = ? AND newsgroup_id = ? AND article_num = ?`,
 		[]interface{}{userID, newsgroupID, articleNum}, &count)
@@ -615,7 +547,7 @@ func (db *Database) RecordUserSpamFlag(userID int64, groupName string, articleNu
 		return fmt.Errorf("failed to get newsgroup ID: %w", err)
 	}
 
-	_, err = retryableExec(db.mainDB, `
+	_, err = RetryableExec(db.mainDB, `
 		INSERT OR IGNORE INTO user_spam_flags (user_id, newsgroup_id, article_num)
 		VALUES (?, ?, ?)`,
 		userID, newsgroupID, articleNum)

@@ -2,25 +2,26 @@
 package web
 
 import (
-	"html/template"
+	"database/sql"
+	"errors"
+	"log"
 	"net/http"
 	"strconv"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // This file should contain the article page related functions from server.go:
 //
 // Functions to be moved from server.go:
-//   - func (s *WebServer) articlePage(c *gin.Context) (line ~671)
+//   - func (s *WebServer) articlePage(c *Context) (line ~671)
 //     Handles "/groups/:group/articles/:articleNum" route to display a specific article
-//   - func (s *WebServer) articleByMessageIdPage(c *gin.Context) (line ~739)
+//   - func (s *WebServer) articleByMessageIdPage(c *Context) (line ~739)
 //     Handles "/groups/:group/message/:messageId" route to display article by message ID
 //
 // This file will handle the individual article view functionality, displaying specific articles
 // either by article number or message ID.
-func (s *WebServer) articlePage(c *gin.Context) {
+func (s *WebServer) articlePage(c *Context) {
 	groupName := c.Param("group")
 	articleNumStr := c.Param("articleNum")
 
@@ -35,22 +36,22 @@ func (s *WebServer) articlePage(c *gin.Context) {
 		return
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
-	if groupDBs == nil || err != nil {
+	groupDB, err := s.DB.GetGroupDB(groupName)
+	if groupDB == nil || err != nil {
 		c.String(http.StatusNotFound, "Group not found: %v", err)
 		return
 	}
-	defer groupDBs.Return(s.DB)
-	if groupDBs.NewsgroupPtr == nil {
+	defer groupDB.Return()
+	if groupDB.NewsgroupPtr == nil {
 		c.String(http.StatusInternalServerError, "Group pointer is nil for group %s", groupName)
 		return
 	}
 	// Get the article
-	article, err := s.DB.GetArticleByNum(groupDBs, articleNum)
+	article, err := s.DB.GetArticleByNum(groupDB, articleNum)
 	if err != nil {
 		/* TODO: THIS DOES NOT SCALE WELL!
 		// Article not found in articles table, let's check if it exists in overview
-		overviews, _ := s.DB.GetOverviews(groupDBs)
+		overviews, _ := s.DB.GetOverviews(groupDB)
 		var foundInOverview bool
 		for _, overview := range overviews {
 			if overview.ArticleNum == articleNum {
@@ -68,8 +69,17 @@ func (s *WebServer) articlePage(c *gin.Context) {
 		c.String(http.StatusNotFound, "Article #%d not found in group %s. Available articles may have different numbers.", articleNum, groupName)
 		return
 	}
+	// Flags straight from the group DB (never from the cached article): hidden = not found for non-admins.
+	spam, hide, err := s.DB.GetArticleFlags(groupDB, articleNum)
+	if err != nil || s.articleHiddenFor(c, hide) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: articlePage: GetArticleFlags(%s/%d): %v", groupName, articleNum, err)
+		}
+		c.String(http.StatusNotFound, "Article #%d not found in group %s. Available articles may have different numbers.", articleNum, groupName)
+		return
+	}
 	// Batch sanitize the article for better performance
-	models.BatchSanitizeArticles([]*models.Article{article})
+	models.BatchSanitizeArticles([]*models.Article{article}, groupName)
 
 	// Get thread context - for now, don't show all articles (too many)
 	// TODO: Implement proper threading based on References/In-Reply-To headers
@@ -81,25 +91,20 @@ func (s *WebServer) articlePage(c *gin.Context) {
 	data := ArticlePageData{
 		TemplateData: s.getBaseTemplateData(c, subjectText+" - Article "+articleNumStr),
 		GroupName:    groupName,
-		GroupPtr:     groupDBs.NewsgroupPtr,
+		GroupPtr:     groupDB.NewsgroupPtr,
 		ArticleNum:   articleNum,
 		Article:      article,
 		Thread:       thread,
 		PrevArticle:  articleNum - 1,
 		NextArticle:  articleNum + 1,
+		ArticleSpam:  spam,
+		ArticleHide:  hide,
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/article.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "article.html")
 }
 
-func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
+func (s *WebServer) articleByMessageIdPage(c *Context) {
 	groupName := c.Param("group")
 	messageId := c.Param("messageId")
 
@@ -108,15 +113,24 @@ func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
 		return // Error response already sent by checkGroupAccess
 	}
 
-	groupDBs, err := s.DB.GetGroupDBs(groupName)
+	groupDB, err := s.DB.GetGroupDB(groupName)
 	if err != nil {
 		c.String(http.StatusNotFound, "Group not found: %v", err)
 		return
 	}
-	defer groupDBs.Return(s.DB)
+	defer groupDB.Return()
 	// Get the article by message ID
-	article, err := s.DB.GetArticleByMessageID(groupDBs, messageId)
+	article, err := s.DB.GetArticleByMessageID(groupDB, messageId)
 	if err != nil {
+		c.String(http.StatusNotFound, "Article with message ID %s not found in group %s", messageId, groupName)
+		return
+	}
+	// Flags straight from the group DB (never from the cached article): hidden = not found for non-admins.
+	_, spam, hide, err := s.DB.GetArticleFlagsByMessageID(groupDB, messageId)
+	if err != nil || s.articleHiddenFor(c, hide) {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[WEB]: articleByMessageIdPage: GetArticleFlagsByMessageID(%s): %v", groupName, err)
+		}
 		c.String(http.StatusNotFound, "Article with message ID %s not found in group %s", messageId, groupName)
 		return
 	}
@@ -127,29 +141,31 @@ func (s *WebServer) articleByMessageIdPage(c *gin.Context) {
 
 	// Batch sanitize the article for better performance
 	if article != nil {
-		models.BatchSanitizeArticles([]*models.Article{article})
+		models.BatchSanitizeArticles([]*models.Article{article}, groupName)
 	}
 
 	// Get subject for title without HTML escaping (for proper browser title display)
 	subjectText := article.GetCleanSubject()
 
 	data := ArticlePageData{
-		TemplateData: s.getBaseTemplateData(c, subjectText+" - Article "+strconv.FormatInt(article.ArticleNums[groupDBs.NewsgroupPtr], 10)),
+		TemplateData: s.getBaseTemplateData(c, subjectText+" - Article "+strconv.FormatInt(article.ArticleNums[groupDB.NewsgroupPtr], 10)),
 		GroupName:    groupName,
-		GroupPtr:     groupDBs.NewsgroupPtr,
-		ArticleNum:   article.ArticleNums[groupDBs.NewsgroupPtr],
+		GroupPtr:     groupDB.NewsgroupPtr,
+		ArticleNum:   article.ArticleNums[groupDB.NewsgroupPtr],
 		Article:      article,
 		Thread:       thread,
-		PrevArticle:  article.ArticleNums[groupDBs.NewsgroupPtr] - 1,
-		NextArticle:  article.ArticleNums[groupDBs.NewsgroupPtr] + 1,
+		PrevArticle:  article.ArticleNums[groupDB.NewsgroupPtr] - 1,
+		NextArticle:  article.ArticleNums[groupDB.NewsgroupPtr] + 1,
+		ArticleSpam:  spam,
+		ArticleHide:  hide,
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/article.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		c.String(http.StatusInternalServerError, "Template error: %v", err)
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "article.html")
+}
+
+// articleHiddenFor reports whether an article with this hide counter is invisible to the
+// requester: hidden articles (hide > 0) exist only for admins (D2). Callers read hide with
+// GetArticleFlags/GetArticleFlagsByMessageID, never from a cached article.
+func (s *WebServer) articleHiddenFor(c *Context, hide int) bool {
+	return hide > 0 && !s.isAdminRequest(c)
 }

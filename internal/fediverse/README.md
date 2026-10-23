@@ -2,12 +2,18 @@
 
 This package implements ActivityPub protocol support for bridging NNTP newsgroups to the Fediverse (Mastodon, Pleroma, etc.).
 
+> **Status: stub, not wired in.** Nothing reaches this package at runtime: the `-enable-fediverse`,
+> `-fediverse-domain` and `-fediverse-baseurl` flags are commented out in `cmd/web/main.go`, nothing calls
+> `processor.EnableBridges` (so `Processor.BridgeManager` stays nil), and the `BridgeArticle` call in
+> `internal/processor/threading.go` is commented out. Even when called directly, the bridge only builds
+> actors, Notes and Create activities in memory and logs them; no activity is ever sent and no HTTP route serves them.
+
 ## Features
 
-- **ActivityPub Server**: Creates newsgroups as ActivityPub Group actors
-- **Article Bridging**: Converts NNTP articles to ActivityPub Notes
+- **ActivityPub Server**: Creates newsgroups as ActivityPub Group actors (in memory; `ActivityPubServer` is not an HTTP server)
+- **Article Bridging**: Converts NNTP articles to ActivityPub Notes (the Create activity is built and discarded: `// TODO: actually send the activity`)
 - **Federation Ready**: Supports ActivityStreams vocabulary
-- **HTTP Signatures**: Prepared for authenticated federation (TODO)
+- **HTTP Signatures**: Prepared for authenticated federation (TODO; no keys are generated, `PublicKeyPem` is the placeholder `"TODO: RSA public key"`)
 
 ## Components
 
@@ -17,6 +23,7 @@ Core ActivityPub protocol implementation:
 - `Actor` - Represents newsgroups as Group actors
 - `Note` - Represents articles as ActivityPub Notes
 - `Activity` - Wraps actions (Create, Update, etc.)
+- `SendActivity` - POSTs an activity to an inbox, unsigned; nothing calls it
 
 ### `bridge.go`
 Bridge management:
@@ -42,7 +49,8 @@ bridge.BridgeArticle(article, "comp.lang.go")
 
 ## ActivityPub Endpoints
 
-When integrated, the following endpoints will be available:
+Planned only: none of these routes is registered in `internal/web` (the IDs below are only the URLs the
+actor and Note objects point to):
 
 - `GET /newsgroups/{name}` - Newsgroup actor
 - `GET /newsgroups/{name}/inbox` - Receive activities
@@ -52,10 +60,12 @@ When integrated, the following endpoints will be available:
 
 ## Configuration
 
-Enable via command line:
+Planned command line (the flags exist in `cmd/web/main.go` but are commented out, so `web` rejects them today):
 ```bash
 ./web --enable-fediverse --fediverse-domain=your.domain.com --fediverse-baseurl=https://your.domain.com
 ```
+The intended wiring is `processor.EnableBridges(&processor.BridgeConfig{FediverseEnabled: true, FediverseDomain: ..., FediverseBaseURL: ...})`
+(`internal/processor/bridges.go`); `NewBridgeManager` creates the bridge only when domain and base URL are both set.
 
 ## Standards Compliance
 
@@ -93,6 +103,8 @@ Enable via command line:
 
 ## TODO
 
+- [ ] Wire the bridge into `cmd/web` (flags, `EnableBridges`) and the processor (`BridgeArticle` call)
+- [ ] Serve the actor/inbox/outbox/Note endpoints and deliver activities to followers
 - [ ] Implement HTTP signatures for authentication
 - [ ] Add webhook support for incoming activities
 - [ ] Support for replies and threading

@@ -4,6 +4,8 @@ package config
 
 import (
 	"log"
+	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,6 +28,67 @@ const (
 	// NNTPServer defaults
 	NNTPServerMaxConns = 500 // Maximum concurrent NNTP connections
 )
+
+// Global bot configuration variables (populated from database on startup)
+var Default_BadBots []string
+var BlockBadBots bool
+var BadBotsMutex sync.RWMutex
+
+// Global IP blocking configuration variables (populated from database on startup)
+var Default_BlockedIPs []*net.IPNet
+var BlockBadIPs bool
+var BadIPsMutex sync.RWMutex
+
+// Config database keys
+const CFG_KEY_HOSTNAME string = "local_nntp_hostname"
+const CFG_KEY_WEBPOSTSIZE string = "WebPostMaxArticleSize"
+const CFG_KEY_ABUSEMAIL string = "AbuseMail"
+const CFG_KEY_WEBLOCALNNTP string = "WebLocalNNTPServerAddrInfo"
+const CFG_KEY_REVERSEPROXY string = "ReverseProxyAddr"
+
+// CFG_KEY_REVERSEPROXY_IPHEADER names the single header the client IP is taken from behind a
+// trusted proxy ("X-Forwarded-For" or "X-Real-IP"). A missing key reads as "" = X-Forwarded-For.
+const CFG_KEY_REVERSEPROXY_IPHEADER string = "ReverseProxyIPHeader"
+const CFG_KEY_REGISTRATION string = "registration_enabled"
+const CFG_KEY_USERSALT string = "UserSalt"
+const CFG_KEY_BADBOTS string = "BadBots"
+const CFG_KEY_BLOCKBADBOTS string = "BlockBadBots"
+const CFG_KEY_BADIPS string = "BadIPs"
+const CFG_KEY_BLOCKBADIPS string = "BlockBadIPs"
+const CFG_KEY_API_ENABLED string = "APIEnabled"
+
+// CFG_KEY_POSTQUEUE_MAXATTEMPTS is the number of 441 rejections after which post-queue parks a
+// post_queue row (invalid or <= 0 reads as 5); raising it un-parks rows below the new value.
+const CFG_KEY_POSTQUEUE_MAXATTEMPTS string = "PostQueueMaxAttempts"
+
+// CFG_KEY_MAXCROSSPOSTS is the most newsgroups one article may be filed into; the fetcher,
+// the NNTP intake and the web post form all reject an article listing more. Every process
+// reads it through the config cache, so a change made on the admin settings page reaches the
+// fetcher and the NNTP server within the cache refresh interval without a restart. A missing,
+// invalid or out-of-range value reads as DefaultMaxCrossPosts.
+const CFG_KEY_MAXCROSSPOSTS string = "MaxCrossPosts"
+
+// DefaultMaxCrossPosts is the MaxCrossPosts used when the key is missing or invalid.
+const DefaultMaxCrossPosts = 9
+
+// MaxCrossPostsLimit is the largest MaxCrossPosts the admin page accepts. The processor sizes
+// each article's ProcessQueue from the configured value, so this is only a sanity bound.
+const MaxCrossPostsLimit = 99
+
+// Admin settings form field names
+const FORM_FIELD_HOSTNAME string = "local_nntp_hostname"
+const FORM_FIELD_WEBPOSTSIZE string = "web_post_size"
+const FORM_FIELD_MAXCROSSPOSTS string = "max_crossposts"
+const FORM_FIELD_ABUSEMAIL string = "abuse_mail"
+const FORM_FIELD_WEBLOCALNNTP string = "web_local_nntp_server_addr_info"
+const FORM_FIELD_REVERSEPROXY string = "reverse_proxy_addr"
+const FORM_FIELD_REVERSEPROXY_IPHEADER string = "reverse_proxy_ip_header"
+const FORM_FIELD_REGISTRATION string = "registration_toggle"
+const FORM_FIELD_BADBOTS string = "bad_bots"
+const FORM_FIELD_BLOCKBADBOTS string = "block_bad_bots"
+const FORM_FIELD_BADIPS string = "bad_ips"
+const FORM_FIELD_BLOCKBADIPS string = "block_bad_ips"
+const FORM_FIELD_API_ENABLED string = "api_toogle"
 
 // Config holds the main configuration for go-pugleaf
 type MainConfig struct {
@@ -79,6 +142,7 @@ type ServerConfig struct {
 	// NNTP server-specific configuration
 	NNTP struct {
 		Enabled    bool   `json:"enabled"`
+		Addr       string `json:"addr"` // IP address the NNTP listeners bind to ("" = all interfaces)
 		Port       int    `json:"port"`
 		TLSPort    int    `json:"tls_port"`
 		MaxConns   int    `json:"max_connections"`
@@ -98,156 +162,391 @@ type DatabaseConfig struct {
 // WebConfig holds web interface configuration
 type WebConfig struct {
 	ListenPort int    `json:"listen_port"`
+	ListenAddr string `json:"listen_addr,omitempty"` // bind address; "" = every interface (behind a reverse proxy use 127.0.0.1)
 	SSL        bool   `json:"ssl"`
 	CertFile   string `json:"cert_file,omitempty"`
 	KeyFile    string `json:"key_file,omitempty"`
 	StaticDir  string `json:"static_dir"`
-	Debug      bool   `json:"debug"` // Enable debug logging for sessions/auth
+	Debug      bool   `json:"debug"`     // Enable debug logging for sessions/auth
+	CronEdit   bool   `json:"cron_edit"` // Allow editing cron jobs via web interface
 }
 
 var DefaultProviders = []Provider{
 	{
-		Grp:        "Primary",
-		Name:       "localhost",
-		Host:       "localhost",
-		Username:   "",
-		Password:   "",
-		Port:       119,
-		SSL:        false,
-		MaxConns:   100,
-		Enabled:    false,
-		Priority:   97,
-		MaxArtSize: 32768,
+		Grp:          "localhost",
+		Name:         "localhost",
+		Host:         "localhost",
+		Username:     "",
+		Password:     "",
+		Port:         119,
+		SSL:          false,
+		MaxConns:     100,
+		Enabled:      false,
+		Priority:     97,
+		MaxArtSize:   32768,
+		ProxyEnabled: false,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
 	},
 	{
-		Grp:        "Archive",
-		Name:       "pugleaf Archive",
-		Host:       "81-171-22-215.pugleaf.net",
-		Username:   "pugleaf",
-		Password:   "rslight",
-		Port:       563,
-		SSL:        true,
-		MaxConns:   50,
-		Enabled:    false,
-		Priority:   98,
-		MaxArtSize: 32768,
+		Grp:          "Archive",
+		Name:         "pugleaf Archive",
+		Host:         "81-171-22-215.pugleaf.net",
+		Username:     "pugleaf",
+		Password:     "rslight",
+		Port:         563,
+		SSL:          true,
+		MaxConns:     50,
+		Enabled:      false,
+		Priority:     98,
+		MaxArtSize:   32768,
+		ProxyEnabled: false,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
 	},
 	{
-		Grp:        "Secondary",
-		Name:       "pugleaf - Washington DC",
-		Host:       "news-wdc.pugleaf.net",
-		Username:   "",
-		Password:   "",
-		Port:       119,
-		SSL:        false,
-		MaxConns:   5,
-		Enabled:    false,
-		Priority:   99,
-		MaxArtSize: 32768,
+		Grp:          "Secondary",
+		Name:         "pugleaf - Washington DC",
+		Host:         "news-wdc.pugleaf.net",
+		Username:     "",
+		Password:     "",
+		Port:         563,
+		SSL:          true,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     99,
+		MaxArtSize:   32768,
+		ProxyEnabled: false,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
 	},
 	{
-		Grp:        "Secondary",
-		Name:       "pugleaf - San Francisco",
-		Host:       "news-sfo.pugleaf.net",
-		Username:   "",
-		Password:   "",
-		Port:       119,
-		SSL:        false,
-		MaxConns:   5,
-		Enabled:    false,
-		Priority:   99,
-		MaxArtSize: 32768,
+		Grp:          "TOR Secondary",
+		Name:         "TOR: news-wdc",
+		Host:         "tws5lk6q4k343oxnvp5ejnxldhkpaolll6wl6yo5etcb3opq4u2333id.onion",
+		Username:     "",
+		Password:     "",
+		Port:         119,
+		SSL:          false,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     100,
+		MaxArtSize:   32768,
+		ProxyEnabled: true,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
 	},
 	{
-		Grp:        "Secondary",
-		Name:       "pugleaf - Los Angeles",
-		Host:       "news-lax.pugleaf.net",
-		Username:   "",
-		Password:   "",
-		Port:       119,
-		SSL:        false,
-		MaxConns:   5,
-		Enabled:    false,
-		Priority:   99,
-		MaxArtSize: 32768,
+		Grp:          "Secondary",
+		Name:         "pugleaf - San Francisco",
+		Host:         "news-sfo.pugleaf.net",
+		Username:     "",
+		Password:     "",
+		Port:         563,
+		SSL:          true,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     99,
+		MaxArtSize:   32768,
+		ProxyEnabled: false,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
 	},
 	{
-		Grp:        "Secondary",
-		Name:       "pugleaf - Canada",
-		Host:       "news-can.pugleaf.net",
-		Username:   "",
-		Password:   "",
-		Port:       119,
-		SSL:        false,
-		MaxConns:   5,
-		Enabled:    false,
-		Priority:   99,
-		MaxArtSize: 32768,
+		Grp:          "TOR Secondary",
+		Name:         "TOR: news-sfo",
+		Host:         "mlmwfop6ysdohrlidazpramtkjeanznrpuj2o54jaxfew7ubqf5gbxqd.onion",
+		Username:     "",
+		Password:     "",
+		Port:         119,
+		SSL:          false,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     100,
+		MaxArtSize:   32768,
+		ProxyEnabled: true,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
 	},
 	{
-		Grp:        "Secondary",
-		Name:       "pugleaf - Tokyo",
-		Host:       "news-tyo.pugleaf.net",
-		Username:   "",
-		Password:   "",
-		Port:       119,
-		SSL:        false,
-		MaxConns:   5,
-		Enabled:    false,
-		Priority:   99,
-		MaxArtSize: 32768,
+		Grp:          "Secondary",
+		Name:         "pugleaf - Los Angeles",
+		Host:         "news-lax.pugleaf.net",
+		Username:     "",
+		Password:     "",
+		Port:         563,
+		SSL:          true,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     99,
+		MaxArtSize:   32768,
+		ProxyEnabled: false,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
 	},
 	{
-		Grp:        "Secondary",
-		Name:       "pugleaf - Singapore",
-		Host:       "news-sin.pugleaf.net",
-		Username:   "",
-		Password:   "",
-		Port:       119,
-		SSL:        false,
-		MaxConns:   5,
-		Enabled:    false,
-		Priority:   99,
-		MaxArtSize: 32768,
+		Grp:          "TOR Secondary",
+		Name:         "TOR: news-lax",
+		Host:         "derpefchhgbmou6nivzq2ajnkegpguk25xc654meujs5ldu6x7avl3id.onion",
+		Username:     "",
+		Password:     "",
+		Port:         119,
+		SSL:          false,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     100,
+		MaxArtSize:   32768,
+		ProxyEnabled: true,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
 	},
 	{
-		Grp:        "Secondary",
-		Name:       "pugleaf - Frankfurt",
-		Host:       "news-fra.pugleaf.net",
-		Username:   "",
-		Password:   "",
-		Port:       119,
-		SSL:        false,
-		MaxConns:   5,
-		Enabled:    false,
-		Priority:   99,
-		MaxArtSize: 32768,
+		Grp:          "Secondary",
+		Name:         "pugleaf - Canada",
+		Host:         "news-can.pugleaf.net",
+		Username:     "",
+		Password:     "",
+		Port:         563,
+		SSL:          true,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     99,
+		MaxArtSize:   32768,
+		ProxyEnabled: false,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
 	},
 	{
-		Grp:        "Secondary",
-		Name:       "pugleaf - Amsterdam",
-		Host:       "news-ams.pugleaf.net",
-		Username:   "",
-		Password:   "",
-		Port:       119,
-		SSL:        false,
-		MaxConns:   5,
-		Enabled:    false,
-		Priority:   99,
-		MaxArtSize: 32768,
+		Grp:          "TOR Secondary",
+		Name:         "TOR: news-can",
+		Host:         "pkq37mrydcjc4hkv2pu6alvad2f2iysnyffwbkquj5twzi7lshwje7id.onion",
+		Username:     "",
+		Password:     "",
+		Port:         119,
+		SSL:          false,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     100,
+		MaxArtSize:   32768,
+		ProxyEnabled: true,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
 	},
 	{
-		Grp:        "Secondary",
-		Name:       "pugleaf - London",
-		Host:       "news-lon.pugleaf.net",
-		Username:   "",
-		Password:   "",
-		Port:       119,
-		SSL:        false,
-		MaxConns:   5,
-		Enabled:    false,
-		Priority:   99,
-		MaxArtSize: 32768,
+		Grp:          "Secondary",
+		Name:         "pugleaf - Tokyo",
+		Host:         "news-tyo.pugleaf.net",
+		Username:     "",
+		Password:     "",
+		Port:         563,
+		SSL:          true,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     99,
+		MaxArtSize:   32768,
+		ProxyEnabled: false,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
+	},
+	{
+		Grp:          "TOR Secondary",
+		Name:         "TOR: news-tyo",
+		Host:         "h7yirgkelxgefct6qrn7esakg7cxjurmttnel2hkhp2lhojr6h5d7kad.onion",
+		Username:     "",
+		Password:     "",
+		Port:         119,
+		SSL:          false,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     100,
+		MaxArtSize:   32768,
+		ProxyEnabled: true,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
+	},
+	{
+		Grp:          "Secondary",
+		Name:         "pugleaf - Singapore",
+		Host:         "news-sin.pugleaf.net",
+		Username:     "",
+		Password:     "",
+		Port:         563,
+		SSL:          true,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     99,
+		MaxArtSize:   32768,
+		ProxyEnabled: false,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
+	},
+	{
+		Grp:          "TOR Secondary",
+		Name:         "TOR: news-sin",
+		Host:         "k2jncpwygu7u6p24aol6zxs36jhnyrvey2kjjpq3ktpzr433v7texvad.onion",
+		Username:     "",
+		Password:     "",
+		Port:         119,
+		SSL:          false,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     100,
+		MaxArtSize:   32768,
+		ProxyEnabled: true,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
+	},
+	{
+		Grp:          "Secondary",
+		Name:         "pugleaf - Frankfurt",
+		Host:         "news-fra.pugleaf.net",
+		Username:     "",
+		Password:     "",
+		Port:         563,
+		SSL:          true,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     99,
+		MaxArtSize:   32768,
+		ProxyEnabled: false,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
+	},
+	{
+		Grp:          "TOR Secondary",
+		Name:         "TOR: news-fra",
+		Host:         "daizdh5dzadcx4v56vwilbpw76y4fnfhkutn3pspbkklxp3swkg4oaqd.onion",
+		Username:     "",
+		Password:     "",
+		Port:         119,
+		SSL:          false,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     100,
+		MaxArtSize:   32768,
+		ProxyEnabled: true,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
+	},
+	{
+		Grp:          "Secondary",
+		Name:         "pugleaf - Amsterdam",
+		Host:         "news-ams.pugleaf.net",
+		Username:     "",
+		Password:     "",
+		Port:         563,
+		SSL:          true,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     99,
+		MaxArtSize:   32768,
+		ProxyEnabled: false,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
+	},
+	{
+		Grp:          "TOR Secondary",
+		Name:         "TOR: news-ams",
+		Host:         "apjhyuwozpsrxhudiefxp547dpv2u46xowo4l6ufpqgek2xu5irot5yd.onion",
+		Username:     "",
+		Password:     "",
+		Port:         119,
+		SSL:          false,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     100,
+		MaxArtSize:   32768,
+		ProxyEnabled: true,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
+	},
+	{
+		Grp:          "Secondary",
+		Name:         "pugleaf - London",
+		Host:         "news-lon.pugleaf.net",
+		Username:     "",
+		Password:     "",
+		Port:         563,
+		SSL:          true,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     99,
+		MaxArtSize:   32768,
+		ProxyEnabled: false,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
+	},
+	{
+		Grp:          "TOR Secondary",
+		Name:         "TOR: news-lon",
+		Host:         "iat3kqk4wx75ai24rjz7u5lqr6xwbgp7gvqwt5t2kcb74wtkpamfk6ad.onion",
+		Username:     "",
+		Password:     "",
+		Port:         119,
+		SSL:          false,
+		MaxConns:     3,
+		Enabled:      false,
+		Priority:     100,
+		MaxArtSize:   32768,
+		ProxyEnabled: true,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
+	},
+	{
+		Grp:          "Pub",
+		Name:         "news.tcpreset.net - Germany",
+		Host:         "news.tcpreset.net",
+		Username:     "",
+		Password:     "",
+		Port:         119,
+		SSL:          false,
+		MaxConns:     3,
+		Enabled:      false,
+		Posting:      true,
+		Priority:     101,
+		MaxArtSize:   32768,
+		ProxyEnabled: false,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
+	},
+	{
+		Grp:          "TOR Pub",
+		Name:         "TOR: tcpreset",
+		Host:         "peannyjkqwqfynd24p6dszvtchkq7hfkwymi5by5y332wmosy5dwfaqd.onion",
+		Username:     "",
+		Password:     "",
+		Port:         119,
+		SSL:          false,
+		MaxConns:     3,
+		Enabled:      false,
+		Posting:      true,
+		Priority:     102,
+		MaxArtSize:   32768,
+		ProxyEnabled: true,
+		ProxyType:    "socks5",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    9050,
 	},
 	{
 		Grp:        "Backup",
@@ -276,10 +575,11 @@ func NewDefaultConfig() *MainConfig {
 			WEB: &WebConfig{
 				ListenPort: 11980,
 				SSL:        false,
-				StaticDir:  "web/static",
+				StaticDir:  "./web/static",
 			},
 			NNTP: struct {
 				Enabled    bool   `json:"enabled"`
+				Addr       string `json:"addr"`
 				Port       int    `json:"port"`
 				TLSPort    int    `json:"tls_port"`
 				MaxConns   int    `json:"max_connections"`
@@ -291,15 +591,15 @@ func NewDefaultConfig() *MainConfig {
 				Port:       1119,
 				TLSPort:    1563,
 				MaxConns:   NNTPServerMaxConns,
-				TLSCert:    "ssl/cert.pem",
+				TLSCert:    "ssl/fullchain.pem",
 				TLSKey:     "ssl/privkey.pem",
 				MaxArtSize: DefaultMaxArticleSize, // 128 KB
 			},
 		},
 		Database: DatabaseConfig{
-			MainDB:    "data/pugleaf.sq3",
-			GroupsDir: "data/groups",
-			BackupDir: "backups",
+			MainDB:    "./data/cfg/pugleaf.sq3",
+			GroupsDir: "./data/db",
+			BackupDir: "./backups",
 		},
 		Providers: DefaultProviders,
 	}
@@ -308,4 +608,92 @@ func NewDefaultConfig() *MainConfig {
 	log.Printf("MainConfig initialized with %d providers", len(maincfg.Providers))
 	maincfg.mux.Unlock()
 	return maincfg
+}
+
+// UpdateBadBots safely updates the global bad bots configuration.
+// Patterns are stored lowercase (the web middleware matches the lowercased User-Agent), and the
+// list is replaced by a new slice, never mutated, so readers may keep a copied slice header.
+// An empty setting clears the list, so the running server matches a start with an empty setting.
+func UpdateBadBots(badBotsStr string, blockEnabled bool) {
+	BadBotsMutex.Lock()
+	defer BadBotsMutex.Unlock()
+
+	BlockBadBots = blockEnabled
+
+	// Parse comma-separated list and trim whitespace
+	var patterns []string
+	for _, pattern := range strings.Split(badBotsStr, ",") {
+		trimmed := strings.TrimSpace(pattern)
+		if trimmed != "" {
+			patterns = append(patterns, strings.ToLower(trimmed))
+		}
+	}
+	Default_BadBots = patterns
+	log.Printf("Updated BadBots list (%d patterns)", len(Default_BadBots))
+
+	log.Printf("Bot configuration updated: BlockBadBots=%t, patterns=%d", BlockBadBots, len(Default_BadBots))
+}
+
+// UpdateBadIPs safely updates the global bad IPs configuration.
+// The list is replaced by a new slice, never mutated, so readers may keep a copied slice header.
+func UpdateBadIPs(badIPsStr string, blockEnabled bool) error {
+	BadIPsMutex.Lock()
+	defer BadIPsMutex.Unlock()
+
+	BlockBadIPs = blockEnabled
+
+	if badIPsStr == "" {
+		// Use default IP ranges if config is empty
+		defaultRanges := []string{
+			"47.74.0.0/15",     // alibaba
+			"47.76.0.0/14",     // alibaba
+			"47.80.0.0/13",     // alibaba
+			"185.191.171.0/24", // semrush
+		}
+
+		blocked := make([]*net.IPNet, 0, len(defaultRanges))
+		for _, cidr := range defaultRanges {
+			_, ipNet, err := net.ParseCIDR(cidr)
+			if err != nil {
+				log.Printf("Warning: failed to parse default CIDR %s: %v", cidr, err)
+				continue
+			}
+			blocked = append(blocked, ipNet)
+		}
+		Default_BlockedIPs = blocked
+		log.Printf("Using default BlockedIPs list (%d ranges)", len(Default_BlockedIPs))
+	} else {
+		// Parse comma-separated list and trim whitespace
+		blocked := []*net.IPNet{}
+		for _, cidr := range strings.Split(badIPsStr, ",") {
+			trimmed := strings.TrimSpace(cidr)
+			if trimmed == "" {
+				continue
+			}
+
+			// Handle single IP addresses by adding /32 or /128 suffix
+			if !strings.Contains(trimmed, "/") {
+				ip := net.ParseIP(trimmed)
+				if ip != nil {
+					if ip.To4() != nil {
+						trimmed += "/32" // IPv4
+					} else {
+						trimmed += "/128" // IPv6
+					}
+				}
+			}
+
+			_, ipNet, err := net.ParseCIDR(trimmed)
+			if err != nil {
+				log.Printf("Warning: failed to parse CIDR %s: %v", trimmed, err)
+				continue
+			}
+			blocked = append(blocked, ipNet)
+		}
+		Default_BlockedIPs = blocked
+		log.Printf("Updated BlockedIPs list (%d ranges)", len(Default_BlockedIPs))
+	}
+
+	log.Printf("IP blocking configuration updated: BlockBadIPs=%t, ranges=%d", BlockBadIPs, len(Default_BlockedIPs))
+	return nil
 }

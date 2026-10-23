@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -11,11 +12,33 @@ import (
 
 const MaxOpenDatabases = 256
 
-const stateCREATED = 1
+// GroupDB states. A GroupDB starts in state 0 (init) while its creator opens and
+// migrates the database.
+//
+// Locking: Database.MainMutex is always taken before GroupDB.mux, never the other way.
+// Workers are only added while holding MainMutex (read or write) and GroupDB.mux with
+// the state stateCREATED. Every state change away from init/CREATED (FAILED, CLOSED)
+// and the matching delete from Database.groupDB happen while holding MainMutex.Lock and
+// GroupDB.mux, so an entry found in the map under MainMutex.RLock is never CLOSED or
+// FAILED-and-removed before its worker is counted. The *sql.DB is closed outside the locks.
+const (
+	stateCREATED = 1 // open and usable
+	stateFAILED  = 2 // initialization failed, entry is removed from the map
+	stateCLOSED  = 3 // closed (idle cleanup, ForceCloseGroupDB, Shutdown)
+)
 
-// GroupDBs holds a single database connection for a group
-type GroupDBs struct {
-	state        int64 // 0 = not initialized, 1 = initialized
+var (
+	errGroupDBClosed     = errors.New("group database is closed")
+	errGroupDBInitFailed = errors.New("group database initialization failed")
+	// errGroupDBInitTimeout means another goroutine is still initializing the group
+	// database (WAL hook, migrations, busy_timeout). The database is not broken, so a
+	// caller that already holds data for the group waits instead of dropping it.
+	errGroupDBInitTimeout = errors.New("timeout waiting for group database initialization")
+)
+
+// GroupDB holds a single database connection for a group
+type GroupDB struct {
+	state        int64 // 0 = init, 1 = CREATED, 2 = FAILED, 3 = CLOSED (guarded by mux)
 	mux          sync.RWMutex
 	Newsgroup    string    // Name of the newsgroup TODO: remove and use ptr below
 	NewsgroupPtr *string   // pointer to the newsgroup
@@ -24,133 +47,271 @@ type GroupDBs struct {
 	DB           *sql.DB   // Single database containing articles, overview, threads, etc.
 }
 
-// GetGroupDBs returns groupDB for a specific newsgroup
-func (db *Database) GetGroupDBs(groupName string) (*GroupDBs, error) {
+// NewsgroupDBsIDcache cache maps newsgroup IDs to names
+var NewsgroupDBsIDcache = &NewsgroupDBsIDcacheStruct{
+	cache: make(map[int64]string),
+}
+
+type NewsgroupDBsIDcacheStruct struct {
+	mux   sync.RWMutex
+	cache map[int64]string // map[newsgroupID]newsgroupName
+}
+
+func (c *NewsgroupDBsIDcacheStruct) GetNewsgroupNameByID(newsgroupID int64, db *Database) (ngname string, exists bool) {
+	c.mux.RLock()
+	ngname, exists = c.cache[newsgroupID]
+	c.mux.RUnlock()
+	if !exists {
+		ng, err := db.MainDBGetNewsgroupByID(newsgroupID)
+		if err != nil {
+			log.Printf("GetNewsgroupNameByID: failed to get newsgroup name for ID %d: %v", newsgroupID, err)
+			return
+		}
+		c.mux.Lock()
+		c.cache[newsgroupID] = ng.Name
+		c.mux.Unlock()
+		ngname = ng.Name
+		exists = true
+	}
+	return ngname, exists
+}
+
+func (c *NewsgroupDBsIDcacheStruct) SetNewsgroupNameByID(newsgroupID int64, newsgroupName string) {
+	c.mux.Lock()
+	c.cache[newsgroupID] = newsgroupName
+	c.mux.Unlock()
+}
+
+func (db *Database) GetAnyNewsgroupDBfromIDs(newsgroupIDs []int64) (*GroupDB, error) {
+	for _, ngID := range newsgroupIDs {
+		if ngName, exists := NewsgroupDBsIDcache.GetNewsgroupNameByID(ngID, db); exists {
+			return db.GetGroupDB(ngName)
+		}
+	}
+	return nil, fmt.Errorf("failed to get any newsgroup DB for IDs: %v", newsgroupIDs)
+}
+
+func (db *Database) GetNewsgroupsDBbyID(newsgroupID int64) (*GroupDB, error) {
+	if ngName, exists := NewsgroupDBsIDcache.GetNewsgroupNameByID(newsgroupID, db); exists {
+		return db.GetGroupDB(ngName)
+	}
+	return nil, fmt.Errorf("failed to get newsgroup DB for ID: %d", newsgroupID)
+}
+
+// acquire adds a worker when the group database is CREATED and returns the state it
+// saw and whether a worker was added. The caller must hold db.MainMutex (read or
+// write lock) and must have found dbs in db.groupDB under that lock; this makes the
+// check and the increment atomic with respect to every closer.
+func (dbs *GroupDB) acquire() (state int64, ok bool) {
+	dbs.mux.Lock()
+	defer dbs.mux.Unlock()
+	if dbs.state == stateCREATED && dbs.DB != nil {
+		dbs.Workers++
+		dbs.Idle = time.Now()
+		return dbs.state, true
+	}
+	return dbs.state, false
+}
+
+// GetGroupDB returns groupDB for a specific newsgroup
+func (db *Database) GetGroupDB(groupName string) (*GroupDB, error) {
 
 	if db.dbconfig == nil {
 		log.Printf(("Database configuration is not set, cannot get group DBs for '%s'"), groupName)
 		return nil, fmt.Errorf("database configuration is not set")
 	}
 
-	db.MainMutex.Lock()
-	groupDBs := db.groupDBs[groupName]
-	if groupDBs != nil {
-		db.MainMutex.Unlock()
-
-		for {
-			groupDBs.mux.RLock()
-			if groupDBs.state == stateCREATED {
-				groupDBs.mux.RUnlock()
-				groupDBs.IncrementWorkers()
-				return groupDBs, nil
+	deadline := time.Now().Add(60 * time.Second)
+	var waitingOn *GroupDB // entry seen in init on the previous iteration
+	for {
+		if waitingOn != nil {
+			// the entry we waited for failed to initialize: don't retry the init ourselves
+			waitingOn.mux.RLock()
+			failed := waitingOn.state == stateFAILED
+			waitingOn.mux.RUnlock()
+			if failed {
+				return nil, fmt.Errorf("failed to get group database %s: %w", groupName, errGroupDBInitFailed)
 			}
-			groupDBs.mux.RUnlock()
-			time.Sleep(10 * time.Millisecond)
+			waitingOn = nil
 		}
-	} else {
-		groupDBs = &GroupDBs{
-			Newsgroup:    groupName,
-			NewsgroupPtr: db.Batch.GetNewsgroupPointer(groupName),
-			DB:           nil,
-			Idle:         time.Now(),
+		// fast path: existing entry, acquired while still holding the read lock
+		db.MainMutex.RLock()
+		if db.groupDBsShutdown {
+			db.MainMutex.RUnlock()
+			return nil, fmt.Errorf("failed to get group database %s: %w", groupName, errGroupDBClosed)
 		}
-		db.groupDBs[groupName] = groupDBs
-		db.MainMutex.Unlock()
-
-		groupsHash := GroupHashMap.GroupToHash(groupName)
-
-		//log.Printf("Open DB for newsgroup '%s' hash='%s' db.openDBsNum=%d db.groupDBs=%d", groupName, groupsHash, db.openDBsNum, len(db.groupDBs))
-
-		// Create single database filename
-		baseGroupDBdir := filepath.Join(db.dbconfig.DataDir, "/db/"+groupsHash)
-		if err := createDirIfNotExists(baseGroupDBdir); err != nil {
-			db.removePartialInitializedGroupDB(groupName)
-			return nil, fmt.Errorf("failed to create group database directory: %w", err)
+		groupDB := db.groupDB[groupName]
+		var state int64
+		var ok bool
+		if groupDB != nil {
+			state, ok = groupDB.acquire()
 		}
-		groupDBfile := filepath.Join(baseGroupDBdir + "/" + SanitizeGroupName(groupName) + ".db")
+		db.MainMutex.RUnlock()
 
-		// Check if database file already exists
-		dbExists := FileExists(groupDBfile)
-
-		// Open single database
-		groupDB, err := sql.Open("sqlite3", groupDBfile)
-		if err != nil {
-			db.removePartialInitializedGroupDB(groupName)
-			return nil, err
-		}
-
-		// Apply pragmas (optimized for existing vs new DBs)
-		var pragmaErr error
-		if dbExists {
-			// Use optimized pragmas for existing DBs (no page_size)
-			pragmaErr = db.applySQLitePragmasGroupDB(groupDB)
-		}
-		if pragmaErr != nil {
-			if cerr := groupDB.Close(); cerr != nil {
-				log.Printf("Failed to close groupDB during pragma error: %v", cerr)
+		if groupDB == nil {
+			// slow path: create the entry unless someone else did meanwhile
+			db.MainMutex.Lock() //mux #d2ef40e0
+			if db.groupDB[groupName] == nil && !db.groupDBsShutdown {
+				groupDB = &GroupDB{
+					Newsgroup:    groupName,
+					NewsgroupPtr: db.Batch.GetNewsgroupPointer(groupName),
+					DB:           nil,
+					Idle:         time.Now(),
+					Workers:      1,
+				}
+				db.groupDB[groupName] = groupDB
+				db.MainMutex.Unlock() //mux #d2ef40e0
+				if err := db.initGroupDB(groupDB); err != nil {
+					return nil, err
+				}
+				return groupDB, nil
 			}
-			db.removePartialInitializedGroupDB(groupName)
-			return nil, pragmaErr
+			db.MainMutex.Unlock() //mux #d2ef40e0
+			// created by someone else or shut down: look it up again
+			continue
 		}
 
-		groupDBs.mux.Lock()
-		groupDBs.Idle = time.Now()
-		groupDBs.DB = groupDB
-		groupDBs.mux.Unlock()
-
-		// Apply schemas using the new migration system instead of direct file application
-		// Apply all migrations to ensure schema is up to date
-		if err := db.migrateGroupDB(groupDBs); err != nil {
-			if cerr := groupDB.Close(); cerr != nil {
-				log.Printf("Failed to close groupDB during migration error: %v", cerr)
+		if ok {
+			return groupDB, nil
+		}
+		if state == stateFAILED {
+			return nil, fmt.Errorf("failed to get group database %s: %w", groupName, errGroupDBInitFailed)
+		}
+		// init (or, defensively, CLOSED): wait and look it up again
+		if time.Now().After(deadline) {
+			if state == stateCLOSED {
+				return nil, fmt.Errorf("failed to get group database %s: %w", groupName, errGroupDBClosed)
 			}
-			db.removePartialInitializedGroupDB(groupName)
-			return nil, fmt.Errorf("failed to migrate group database %s: %w", groupName, err)
+			return nil, fmt.Errorf("group database %s: %w", groupName, errGroupDBInitTimeout)
 		}
-
-		groupDBs.IncrementWorkers()
-
-		db.MainMutex.Lock()
-		db.openDBsNum++
-		db.MainMutex.Unlock()
-
-		groupDBs.mux.Lock()
-		groupDBs.state = stateCREATED
-		groupDBs.mux.Unlock()
-
-		return groupDBs, nil
+		waitingOn = groupDB
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-func (db *Database) ForceCloseGroupDBs(groupsDB *GroupDBs) error {
+// initGroupDB opens and migrates the database of a new map entry created by GetGroupDB.
+// On failure the entry is marked FAILED (waiters return an error) and removed from the map.
+func (db *Database) initGroupDB(groupDB *GroupDB) error {
+	groupName := groupDB.Newsgroup
+	var groupsDB *sql.DB
+
+	fail := func(err error) error {
+		db.MainMutex.Lock()
+		groupDB.mux.Lock()
+		if groupDB.state == 0 {
+			groupDB.state = stateFAILED
+		}
+		groupDB.DB = nil
+		if db.groupDB[groupName] == groupDB {
+			delete(db.groupDB, groupName)
+		}
+		groupDB.mux.Unlock()
+		db.MainMutex.Unlock()
+		if groupsDB != nil {
+			if cerr := groupsDB.Close(); cerr != nil {
+				log.Printf("[DATABASE] Failed to close groupsDB %s after init error: %v", groupName, cerr)
+			}
+		}
+		return err
+	}
+
+	groupsHash := GroupHashMap.GroupToHash(groupName)
+
+	//log.Printf("Open DB for newsgroup '%s' hash='%s' db.openDBsNum=%d db.groupDB=%d", groupName, groupsHash, db.openDBsNum, len(db.groupDB))
+
+	// Create single database filename
+	baseGroupDBdir := filepath.Join(db.dbconfig.DataDir, "/db/"+groupsHash)
+	if err := createDirIfNotExists(baseGroupDBdir); err != nil {
+		return fail(fmt.Errorf("failed to create group %s database directory: %w", groupName, err))
+	}
+	groupDBfile := filepath.Join(baseGroupDBdir + "/" + SanitizeGroupName(groupName) + ".db")
+
+	// Open single database; pragmas run on every connection via the driver's ConnectHook
+	db.ensureGroupConnPragmas()
+	var err error
+	groupsDB, err = sql.Open(driverNameGroup, groupDBfile)
+	if err != nil {
+		return fail(fmt.Errorf("failed to open group database %s: %w", groupName, err))
+	}
+	groupsDB.SetMaxIdleConns(2)
+	groupsDB.SetConnMaxIdleTime(5 * time.Minute)
+
+	groupDB.mux.Lock()
+	groupDB.Idle = time.Now()
+	groupDB.DB = groupsDB
+	groupDB.mux.Unlock()
+
+	// Apply schemas using the new migration system instead of direct file application
+	// Apply all migrations to ensure schema is up to date
+	if err := db.migrateGroupDB(groupDB, true); err != nil {
+		return fail(fmt.Errorf("failed to migrate group database %s: %w", groupName, err))
+	}
+
+	db.MainMutex.Lock()
+	groupDB.mux.Lock()
+	if groupDB.state != 0 || db.groupDB[groupName] != groupDB {
+		// Shutdown closed the entry while it was initializing (Shutdown leaves the
+		// *sql.DB of an entry in init to its creator)
+		groupDB.DB = nil
+		groupDB.mux.Unlock()
+		db.MainMutex.Unlock()
+		if cerr := groupsDB.Close(); cerr != nil {
+			log.Printf("[DATABASE] Failed to close groupsDB %s after shutdown during init: %v", groupName, cerr)
+		}
+		return fmt.Errorf("failed to get group database %s: %w", groupName, errGroupDBClosed)
+	}
+	groupDB.state = stateCREATED
+	groupDB.Idle = time.Now()
+	db.openDBsNum++
+	groupDB.mux.Unlock()
+	db.MainMutex.Unlock()
+
+	return nil
+}
+
+// ForceCloseGroupDB returns a worker and closes the group database when it was the last one.
+func (db *Database) ForceCloseGroupDB(groupsDB *GroupDB) error {
+	if groupsDB == nil {
+		return fmt.Errorf("error in ForceCloseGroupDB: nil GroupDB")
+	}
 	if db.dbconfig == nil {
 		log.Printf(("Database configuration is not set, cannot get group DBs for '%s'"), groupsDB.Newsgroup)
 		return fmt.Errorf("database configuration is not set")
 	}
 	db.MainMutex.Lock()
-	defer db.MainMutex.Unlock()
 	groupsDB.mux.Lock()
 	if groupsDB.Workers < 1 {
 		groupsDB.mux.Unlock()
-		return fmt.Errorf("error in ForceCloseGroupDBs: workers <= 0")
+		db.MainMutex.Unlock()
+		return fmt.Errorf("error in ForceCloseGroupDB: workers <= 0")
 	}
 	groupsDB.Workers--
-	if groupsDB.Workers > 0 {
+	if groupsDB.Workers > 0 || groupsDB.state != stateCREATED {
 		groupsDB.mux.Unlock()
+		db.MainMutex.Unlock()
 		return nil
 	}
-	if err := groupsDB.Close("ForceCloseGroupDBs"); err != nil {
-		groupsDB.mux.Unlock()
-		return fmt.Errorf("error ForceCloseGroupDBs groupsDB.Close ng:'%s' err='%v'", groupsDB.Newsgroup, err)
-	}
+	groupsDB.state = stateCLOSED
+	toClose := groupsDB.DB
 	groupsDB.mux.Unlock()
-	db.openDBsNum--
-	delete(db.groupDBs, groupsDB.Newsgroup)
-	//log.Printf("ForceCloseGroupDBs: closed group DB for '%s', openDBsNum=%d, groupDBs=%d", groupsDB.Newsgroup, db.openDBsNum, len(db.groupDBs))
+	if db.groupDB[groupsDB.Newsgroup] == groupsDB {
+		delete(db.groupDB, groupsDB.Newsgroup)
+		db.openDBsNum--
+	}
+	db.MainMutex.Unlock()
+
+	// close outside the locks
+	if toClose == nil {
+		return fmt.Errorf("error ForceCloseGroupDB groupsDB.Close ng:'%s' err='group DB already closed'", groupsDB.Newsgroup)
+	}
+	if err := toClose.Close(); err != nil {
+		return fmt.Errorf("error ForceCloseGroupDB groupsDB.Close ng:'%s' err='%v'", groupsDB.Newsgroup, err)
+	}
+	//log.Printf("ForceCloseGroupDB: closed group DB for '%s'", groupsDB.Newsgroup)
 	return nil
 }
 
-func (dbs *GroupDBs) IncrementWorkers() {
+func (dbs *GroupDB) IncrementWorkers() {
 	dbs.mux.Lock()
 	dbs.Workers++
 	//log.Printf("DEBUG: IncrementWorkers for group '%s': %d", dbs.Newsgroup, dbs.Workers)
@@ -158,30 +319,58 @@ func (dbs *GroupDBs) IncrementWorkers() {
 	dbs.mux.Unlock()
 }
 
-func (dbs *GroupDBs) Return(db *Database) {
-	if dbs != nil && db != nil {
-		dbs.mux.Lock()
-		dbs.Idle = time.Now() // Update idle time to now
-		dbs.Workers--
-		dbs.mux.Unlock()
-	} else {
-		log.Printf("Warning: Attempted to return a nil db=%#v dbs=%#v", db, dbs)
-	}
-}
-
-func (db *GroupDBs) ExistsMsgIdInArticlesDB(messageID string) bool {
-	query := "SELECT 1 FROM articles WHERE message_id = ? LIMIT 1"
-	var exists bool
-	if err := retryableQueryRowScan(db.DB, query, []interface{}{messageID}, &exists); err != nil {
-		return false
-	}
-	return exists
-}
-
-func (dbs *GroupDBs) Close(who string) error {
+func (dbs *GroupDB) Return() {
 	if dbs == nil {
-		log.Printf("Warning: Attempted to close nil GroupDBs")
-		return fmt.Errorf("nil GroupDBs cannot be closed")
+		log.Printf("Warning: Attempted to return a nil GroupDB")
+		return
+	}
+	dbs.mux.Lock()
+	dbs.Idle = time.Now() // Update idle time to now
+	dbs.Workers--
+	if dbs.Workers < 0 {
+		log.Printf("Warning: Return() made the worker count negative for group '%s': %d", dbs.Newsgroup, dbs.Workers)
+	}
+	dbs.mux.Unlock()
+}
+
+// NNTPNewsgroupActive reads only the active flag of a newsgroup from the main database (the
+// NNTP server re-checks the selected group before every group-relative command). found is
+// false when no row has this name; err is a main database fault.
+func (db *Database) NNTPNewsgroupActive(name string) (active, found bool, err error) {
+	if db == nil || db.mainDB == nil {
+		return false, false, fmt.Errorf("NNTPNewsgroupActive: main database is not open")
+	}
+	if err := RetryableQueryRowScan(db.mainDB, `SELECT active FROM newsgroups WHERE name = ?`,
+		[]interface{}{name}, &active); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	return active, true, nil
+}
+
+// NNTPArticleNumByMessageID returns the number of the visible (hide = 0) article with
+// messageID in groupDB, reading only the index row (STAT by message-id needs no headers or
+// body). It returns sql.ErrNoRows when the article is absent or hidden, like
+// NNTPArticleByMessageID.
+func (db *Database) NNTPArticleNumByMessageID(groupDB *GroupDB, messageID string) (int64, error) {
+	if groupDB == nil || groupDB.DB == nil {
+		return 0, fmt.Errorf("NNTPArticleNumByMessageID: group database is not open")
+	}
+	var num int64
+	if err := RetryableQueryRowScan(groupDB.DB,
+		`SELECT article_num FROM articles WHERE message_id = ? AND hide = 0 LIMIT 1`,
+		[]interface{}{messageID}, &num); err != nil {
+		return 0, err
+	}
+	return num, nil
+}
+
+func (dbs *GroupDB) Close(who string) error {
+	if dbs == nil {
+		log.Printf("Warning: Attempted to close nil GroupDB")
+		return fmt.Errorf("nil GroupDB cannot be closed")
 	}
 	if dbs.DB != nil {
 		if err := dbs.DB.Close(); err != nil {
@@ -191,4 +380,54 @@ func (dbs *GroupDBs) Close(who string) error {
 		return fmt.Errorf("group DB already closed")
 	}
 	return nil
+}
+
+// GetGroupDBWithSuffix opens a group database with a custom suffix (e.g., ".new")
+// Returns the database connection, the full file path, and any error
+func (db *Database) GetGroupDBWithSuffix(groupName, suffix string) (*sql.DB, string, error) {
+	if db.dbconfig == nil {
+		return nil, "", fmt.Errorf("database configuration is not set")
+	}
+
+	groupsHash := GroupHashMap.GroupToHash(groupName)
+	baseGroupDBdir := filepath.Join(db.dbconfig.DataDir, "/db."+suffix+"/"+groupsHash)
+
+	if err := createDirIfNotExists(baseGroupDBdir); err != nil {
+		return nil, "", fmt.Errorf("failed to create group database directory: %w", err)
+	}
+
+	groupDBfile := filepath.Join(baseGroupDBdir + "/" + SanitizeGroupName(groupName) + ".db")
+
+	// Open database; pragmas run on every connection via the driver's ConnectHook
+	db.ensureGroupConnPragmas()
+	groupDB, err := sql.Open(driverNameGroup, groupDBfile)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to open database: %w", err)
+	}
+	groupDB.SetMaxIdleConns(2)
+	groupDB.SetConnMaxIdleTime(5 * time.Minute)
+
+	// Apply schema/migrations
+	tempGroupDB := &GroupDB{
+		Newsgroup: groupName,
+		DB:        groupDB,
+		Idle:      time.Now(),
+	}
+
+	if err := db.migrateGroupDB(tempGroupDB, false); err != nil {
+		if cerr := groupDB.Close(); cerr != nil {
+			log.Printf("Failed to close groupDB during migration error: %v", cerr)
+		}
+		return nil, "", fmt.Errorf("failed to migrate group database: %w", err)
+	}
+
+	return groupDB, groupDBfile, nil
+}
+
+// CloseGroupDBDirectly closes a database connection directly
+func CloseGroupDBDirectly(db *sql.DB) error {
+	if db == nil {
+		return nil
+	}
+	return db.Close()
 }

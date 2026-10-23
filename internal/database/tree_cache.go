@@ -63,9 +63,9 @@ func (tree *ThreadTree) GetTreeStats() TreeStats {
 }
 
 // BuildThreadTree constructs a hierarchical tree for a given thread root
-func (db *Database) BuildThreadTree(groupDBs *GroupDBs, threadRoot int64) (*ThreadTree, error) {
+func (db *Database) BuildThreadTree(groupDB *GroupDB, threadRoot int64) (*ThreadTree, error) {
 	// First check if we have a cached tree
-	if tree, err := db.GetCachedTree(groupDBs, threadRoot); err == nil {
+	if tree, err := db.GetCachedTree(groupDB, threadRoot); err == nil {
 		return tree, nil
 	}
 
@@ -75,7 +75,7 @@ func (db *Database) BuildThreadTree(groupDBs *GroupDBs, threadRoot int64) (*Thre
 	// Get all articles in this thread from thread_cache
 	var childArticles string
 	query := `SELECT child_articles FROM thread_cache WHERE thread_root = ?`
-	err := retryableQueryRowScan(groupDBs.DB, query, []interface{}{threadRoot}, &childArticles)
+	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{threadRoot}, &childArticles)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Thread cache not yet built - fall back to single article
@@ -100,7 +100,7 @@ func (db *Database) BuildThreadTree(groupDBs *GroupDBs, threadRoot int64) (*Thre
 	// Get overview data for all articles to access References headers
 	overviews := make(map[int64]*models.Overview)
 	for _, artNum := range allArticles {
-		if overview, err := db.GetOverviewByArticleNum(groupDBs, artNum); err == nil {
+		if overview, err := db.GetOverviewByArticleNum(groupDB, artNum); err == nil {
 			overviews[artNum] = overview
 		}
 	}
@@ -110,84 +110,15 @@ func (db *Database) BuildThreadTree(groupDBs *GroupDBs, threadRoot int64) (*Thre
 	for _, overview := range overviews {
 		overviewList = append(overviewList, overview)
 	}
-	models.BatchSanitizeOverviews(overviewList)
+	models.BatchSanitizeOverviews(overviewList, groupDB.Newsgroup)
 
-	// Ensure root article exists in overviews
-	if _, ok := overviews[threadRoot]; !ok {
-		return nil, fmt.Errorf("root article %d not found in overviews (may be missing from DB)", threadRoot)
+	tree, err := buildTreeFromOverviews(threadRoot, overviews)
+	if err != nil {
+		return nil, err
 	}
-
-	// Build parent-child relationships from References headers
-	tree := &ThreadTree{
-		ThreadRoot:  threadRoot,
-		NodeMap:     make(map[int64]*TreeNode),
-		LastUpdated: time.Now(),
-	}
-
-	// Create nodes for all articles
-	for artNum, overview := range overviews {
-		node := &TreeNode{
-			ArticleNum: artNum,
-			Overview:   overview,
-			Children:   make([]*TreeNode, 0),
-		}
-		tree.NodeMap[artNum] = node
-	}
-
-	// Build parent-child relationships using References
-	for artNum, overview := range overviews {
-		node := tree.NodeMap[artNum]
-
-		if artNum == threadRoot {
-			// This is the root node
-			node.Depth = 0
-			node.ParentArticle = nil
-			tree.RootNode = node
-		} else {
-			// Find parent from references
-			refs := utils.ParseReferences(overview.References)
-			if len(refs) > 0 {
-				parentMessageID := refs[len(refs)-1] // Last reference is immediate parent
-
-				// Find parent article number
-				var parentFound bool
-				for parentNum, parentOverview := range overviews {
-					if parentOverview.MessageID == parentMessageID {
-						node.ParentArticle = &parentNum
-						parentNode := tree.NodeMap[parentNum]
-						parentNode.Children = append(parentNode.Children, node)
-						node.Depth = parentNode.Depth + 1
-						parentFound = true
-						break
-					}
-				}
-
-				// Debug: Log cross-posting issues
-				if !parentFound {
-					log.Printf("[TREE:CROSSPOST] Article %d references parent %s not found in current group (cross-post?)",
-						artNum, parentMessageID)
-				}
-			}
-
-			// If no parent found, attach to root
-			if node.ParentArticle == nil {
-				// Safety check: ensure root node exists
-				if tree.RootNode == nil {
-					return nil, fmt.Errorf("root node is nil when trying to attach orphaned node %d", artNum)
-				}
-				node.ParentArticle = &threadRoot
-				tree.RootNode.Children = append(tree.RootNode.Children, node)
-				node.Depth = 1
-			}
-		}
-	}
-
-	// Calculate tree statistics and paths
-	tree.calculateTreeStats()
-	tree.assignSortOrder()
 
 	// Cache the tree structure
-	if err := db.CacheTreeStructure(groupDBs, tree); err != nil {
+	if err := db.CacheTreeStructure(groupDB, tree); err != nil {
 		log.Printf("Failed to cache tree structure: %v", err)
 		// Don't fail - tree is still usable
 	}
@@ -195,12 +126,140 @@ func (db *Database) BuildThreadTree(groupDBs *GroupDBs, threadRoot int64) (*Thre
 	return tree, nil
 }
 
+// buildTreeFromOverviews builds the thread tree of threadRoot from the overviews of its
+// articles (keyed by article number). The result does not depend on map iteration order:
+// articles are processed by ascending number, a message-id that occurs twice resolves to the
+// lowest article number, and children are ordered by date with the article number as
+// tiebreak. The parent of an article is the article named by its last reference; a missing
+// parent, a self-reference or a reference that would close a cycle attaches it to the root.
+func buildTreeFromOverviews(threadRoot int64, ov map[int64]*models.Overview) (*ThreadTree, error) {
+	rootOv, ok := ov[threadRoot]
+	if !ok {
+		return nil, fmt.Errorf("root article %d not found in overviews (may be missing from DB)", threadRoot)
+	}
+
+	nums := make([]int64, 0, len(ov))
+	for artNum := range ov {
+		nums = append(nums, artNum)
+	}
+	sort.Slice(nums, func(i, j int) bool { return nums[i] < nums[j] })
+
+	tree := &ThreadTree{
+		ThreadRoot:  threadRoot,
+		NodeMap:     make(map[int64]*TreeNode, len(ov)),
+		LastUpdated: time.Now(),
+	}
+	root := &TreeNode{ArticleNum: threadRoot, Overview: rootOv, Children: make([]*TreeNode, 0)}
+	tree.RootNode = root
+	tree.NodeMap[threadRoot] = root
+
+	// Create nodes and the message-id index (ascending: the first article with a message-id wins).
+	byMsgID := make(map[string]int64, len(ov))
+	for _, artNum := range nums {
+		overview := ov[artNum]
+		if artNum != threadRoot {
+			tree.NodeMap[artNum] = &TreeNode{ArticleNum: artNum, Overview: overview, Children: make([]*TreeNode, 0)}
+		}
+		if overview == nil || overview.MessageID == "" {
+			continue
+		}
+		if _, dup := byMsgID[overview.MessageID]; !dup {
+			byMsgID[overview.MessageID] = artNum
+		}
+	}
+
+	// Resolve parents. parentOf only holds accepted links, so it never contains a cycle and
+	// every chain ends at the root.
+	parentOf := make(map[int64]int64, len(ov))
+	closesCycle := func(artNum, parent int64) bool {
+		for steps := 0; steps <= len(ov); steps++ {
+			if parent == artNum {
+				return true
+			}
+			next, ok := parentOf[parent]
+			if !ok {
+				return false
+			}
+			parent = next
+		}
+		return true // guard: a chain longer than the thread is treated as a cycle
+	}
+	for _, artNum := range nums {
+		if artNum == threadRoot {
+			continue
+		}
+		parent := threadRoot
+		if overview := ov[artNum]; overview != nil {
+			if refs := utils.ParseReferences(overview.References); len(refs) > 0 {
+				parentMessageID := refs[len(refs)-1] // Last reference is immediate parent
+				if p, found := byMsgID[parentMessageID]; !found {
+					log.Printf("[TREE:CROSSPOST] Article %d references parent %s not found in current group (cross-post?)",
+						artNum, parentMessageID)
+				} else if p != artNum && !closesCycle(artNum, p) {
+					parent = p
+				}
+			}
+		}
+		parentOf[artNum] = parent
+	}
+	for _, artNum := range nums {
+		if artNum == threadRoot {
+			continue
+		}
+		node := tree.NodeMap[artNum]
+		parentNum := parentOf[artNum]
+		node.ParentArticle = &parentNum
+		parentNode := tree.NodeMap[parentNum]
+		parentNode.Children = append(parentNode.Children, node)
+	}
+
+	// Depths from the root; anything not reached (not expected) is attached to the root.
+	visited := make(map[*TreeNode]bool, len(tree.NodeMap))
+	var setDepth func(node *TreeNode, depth int)
+	setDepth = func(node *TreeNode, depth int) {
+		visited[node] = true
+		node.Depth = depth
+		for _, child := range node.Children {
+			if !visited[child] {
+				setDepth(child, depth+1)
+			}
+		}
+	}
+	setDepth(root, 0)
+	for _, artNum := range nums {
+		node := tree.NodeMap[artNum]
+		if visited[node] {
+			continue
+		}
+		log.Printf("[TREE:BUILD] Article %d not reachable from root %d, attaching it to the root", artNum, threadRoot)
+		if node.ParentArticle != nil {
+			if old := tree.NodeMap[*node.ParentArticle]; old != nil {
+				for i, child := range old.Children {
+					if child == node {
+						old.Children = append(old.Children[:i], old.Children[i+1:]...)
+						break
+					}
+				}
+			}
+		}
+		rootNum := threadRoot
+		node.ParentArticle = &rootNum
+		root.Children = append(root.Children, node)
+		setDepth(node, 1)
+	}
+
+	// Calculate tree statistics and paths
+	tree.calculateTreeStats()
+	tree.assignSortOrder()
+	return tree, nil
+}
+
 // GetCachedTree retrieves a pre-computed tree from the cache
-func (db *Database) GetCachedTree(groupDBs *GroupDBs, threadRoot int64) (*ThreadTree, error) {
+func (db *Database) GetCachedTree(groupDB *GroupDB, threadRoot int64) (*ThreadTree, error) {
 	// Check if tree cache exists and is recent
 	var lastUpdated time.Time
 	query := `SELECT last_updated FROM tree_stats WHERE thread_root = ?`
-	err := retryableQueryRowScan(groupDBs.DB, query, []interface{}{threadRoot}, &lastUpdated)
+	err := RetryableQueryRowScan(groupDB.DB, query, []interface{}{threadRoot}, &lastUpdated)
 	if err != nil {
 		return nil, fmt.Errorf("no cached tree found: %w", err)
 	}
@@ -211,7 +270,7 @@ func (db *Database) GetCachedTree(groupDBs *GroupDBs, threadRoot int64) (*Thread
 	}
 
 	// Load tree structure from cache
-	rows, err := retryableQuery(groupDBs.DB, `
+	rows, err := RetryableQuery(groupDB.DB, `
 		SELECT article_num, parent_article, depth, child_count, descendant_count,
 		       tree_path, sort_order
 		FROM cached_trees
@@ -228,7 +287,8 @@ func (db *Database) GetCachedTree(groupDBs *GroupDBs, threadRoot int64) (*Thread
 		LastUpdated: lastUpdated,
 	}
 
-	// Load all nodes
+	// Load all nodes (rows come in sort_order; ordered keeps it for the children lists)
+	var ordered []*TreeNode
 	for rows.Next() {
 		node := &TreeNode{
 			Children: make([]*TreeNode, 0),
@@ -253,15 +313,16 @@ func (db *Database) GetCachedTree(groupDBs *GroupDBs, threadRoot int64) (*Thread
 		}
 
 		tree.NodeMap[node.ArticleNum] = node
+		ordered = append(ordered, node)
 
 		if node.ArticleNum == threadRoot {
 			tree.RootNode = node
 		}
 	}
 
-	// Build parent-child relationships
-	for _, node := range tree.NodeMap {
-		if node.ParentArticle != nil {
+	// Build parent-child relationships in sort_order, so children keep their cached order
+	for _, node := range ordered {
+		if node.ParentArticle != nil && *node.ParentArticle != node.ArticleNum {
 			if parentNode, exists := tree.NodeMap[*node.ParentArticle]; exists {
 				parentNode.Children = append(parentNode.Children, node)
 			}
@@ -270,7 +331,7 @@ func (db *Database) GetCachedTree(groupDBs *GroupDBs, threadRoot int64) (*Thread
 
 	// Load tree stats
 	statsQuery := `SELECT max_depth, total_nodes, leaf_count FROM tree_stats WHERE thread_root = ?`
-	err = retryableQueryRowScan(groupDBs.DB, statsQuery, []interface{}{threadRoot},
+	err = RetryableQueryRowScan(groupDB.DB, statsQuery, []interface{}{threadRoot},
 		&tree.MaxDepth, &tree.TotalNodes, &tree.LeafCount)
 	if err != nil {
 		log.Printf("Failed to load tree stats: %v", err)
@@ -285,9 +346,9 @@ func (db *Database) GetCachedTree(groupDBs *GroupDBs, threadRoot int64) (*Thread
 }
 
 // CacheTreeStructure saves a computed tree to the cache
-func (db *Database) CacheTreeStructure(groupDBs *GroupDBs, tree *ThreadTree) error {
+func (db *Database) CacheTreeStructure(groupDB *GroupDB, tree *ThreadTree) error {
 	// Start transaction for atomicity
-	tx, err := groupDBs.DB.Begin()
+	tx, err := groupDB.DB.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to start transaction: %w", err)
 	}
@@ -385,13 +446,13 @@ func (db *Database) CacheTreeStructure(groupDBs *GroupDBs, tree *ThreadTree) err
 }
 
 // InvalidateTreeCache removes cached tree data when thread structure changes
-func (db *Database) InvalidateTreeCache(groupDBs *GroupDBs, threadRoot int64) error {
-	_, err := retryableExec(groupDBs.DB, `DELETE FROM cached_trees WHERE thread_root = ?`, threadRoot)
+func (db *Database) InvalidateTreeCache(groupDB *GroupDB, threadRoot int64) error {
+	_, err := RetryableExec(groupDB.DB, `DELETE FROM cached_trees WHERE thread_root = ?`, threadRoot)
 	if err != nil {
 		return fmt.Errorf("failed to invalidate tree cache: %w", err)
 	}
 
-	_, err = retryableExec(groupDBs.DB, `DELETE FROM tree_stats WHERE thread_root = ?`, threadRoot)
+	_, err = RetryableExec(groupDB.DB, `DELETE FROM tree_stats WHERE thread_root = ?`, threadRoot)
 	if err != nil {
 		return fmt.Errorf("failed to invalidate tree stats: %w", err)
 	}
@@ -424,38 +485,60 @@ func (tree *ThreadTree) calculateTreeStats() {
 	}
 }
 
+// countDescendants returns the number of distinct nodes below node. It terminates on any
+// input: a node met twice (a cycle or a shared child) is counted once.
 func (tree *ThreadTree) countDescendants(node *TreeNode) int {
+	if node == nil {
+		return 0
+	}
+	seen := map[*TreeNode]bool{node: true}
+	stack := append([]*TreeNode(nil), node.Children...)
 	count := 0
-	for _, child := range node.Children {
-		count += 1 + tree.countDescendants(child)
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if n == nil || seen[n] {
+			continue
+		}
+		seen[n] = true
+		count++
+		stack = append(stack, n.Children...)
 	}
 	return count
 }
 
 func (tree *ThreadTree) assignSortOrder() {
+	if tree.RootNode == nil {
+		return
+	}
 	sortOrder := 0
-	tree.assignSortOrderRecursive(tree.RootNode, &sortOrder, "0")
+	tree.assignSortOrderRecursive(tree.RootNode, &sortOrder, "0", make(map[*TreeNode]bool, len(tree.NodeMap)))
 }
 
-func (tree *ThreadTree) assignSortOrderRecursive(node *TreeNode, sortOrder *int, pathPrefix string) {
+func (tree *ThreadTree) assignSortOrderRecursive(node *TreeNode, sortOrder *int, pathPrefix string, visited map[*TreeNode]bool) {
+	visited[node] = true
 	node.SortOrder = *sortOrder
 	node.TreePath = pathPrefix
 	*sortOrder++
 
 	// Sort children by date for consistent ordering
 	// This ensures deterministic tree structure between page loads
-	sort.Slice(node.Children, func(i, j int) bool {
+	sort.SliceStable(node.Children, func(i, j int) bool {
+		a, b := node.Children[i], node.Children[j]
 		// Sort by date (ascending order - oldest first)
-		if node.Children[i].Overview != nil && node.Children[j].Overview != nil {
-			return node.Children[i].Overview.DateSent.Before(node.Children[j].Overview.DateSent)
+		if a.Overview != nil && b.Overview != nil && !a.Overview.DateSent.Equal(b.Overview.DateSent) {
+			return a.Overview.DateSent.Before(b.Overview.DateSent)
 		}
-		// Fallback to article number if dates are missing
-		return node.Children[i].ArticleNum < node.Children[j].ArticleNum
+		// Same date or missing dates: article number
+		return a.ArticleNum < b.ArticleNum
 	})
 
 	for i, child := range node.Children {
+		if child == nil || visited[child] {
+			continue // a cycle or a shared child: each node gets one path
+		}
 		childPath := fmt.Sprintf("%s.%d", pathPrefix, i)
-		tree.assignSortOrderRecursive(child, sortOrder, childPath)
+		tree.assignSortOrderRecursive(child, sortOrder, childPath, visited)
 	}
 }
 

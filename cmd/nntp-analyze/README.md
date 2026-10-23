@@ -1,109 +1,134 @@
 # NNTP Analyze Tool
 
-A powerful command-line tool for analyzing NNTP newsgroups, providing detailed statistics about article distribution, sizes, dates, and caching performance.
+A command-line tool that fetches the overview (XOVER) data of newsgroups from one NNTP server,
+caches it locally and prints statistics about article counts, sizes and dates.
 
 ## Features
 
-- **Comprehensive Group Analysis**: Analyze individual newsgroups or all groups at once
-- **Article Size Distribution**: Detailed breakdown of article sizes across predefined ranges
-- **Date Range Analysis**: Filter and analyze articles by date ranges
-- **Caching System**: Intelligent caching for improved performance on subsequent analyses
-- **Multiple Export Formats**: Export results in JSON or CSV format
-- **Batch Processing**: Efficient processing of large newsgroups with configurable limits
+- **Group Analysis**: one newsgroup, every group in the local database (`$all`), a name prefix
+  (`prefix.*`), or the groups listed in an active file
+- **Article Size Distribution**: breakdown of article sizes across fixed ranges
+- **Date Range Filtering**: restrict the statistics to a date range
+- **Overview Cache**: later runs read the cached XOVER data instead of fetching it again
+- **Export Formats**: JSON (one file per group) or CSV (one row per group)
 
 ## Installation
 
 ```bash
-go build -o nntp-analyze ./cmd/nntp-analyze
+./build_analyze.sh            # writes build/nntp-analyze, with the version from appVersion.txt
+# or
+go build -o build/nntp-analyze ./cmd/nntp-analyze
 ```
+
+`./nntp-analyze -help` prints usage examples, `./nntp-analyze -h` lists every flag with its default.
 
 ## Usage
 
 ### Basic Analysis
 
-Analyze a single newsgroup:
+Analyze a single newsgroup on the default server (see [Server and defaults](#server-and-defaults)):
 ```bash
-./nntp-analyze -host news.example.com -port 119 -group alt.binaries.movies
+./nntp-analyze -group alt.test
+```
+
+On another server, plain text on port 119 (TLS is on by default, so it must be switched off):
+```bash
+./nntp-analyze -host news.example.com -port 119 -ssl=false -group alt.binaries.movies
+```
+
+On another server with TLS on port 563 and an account:
+```bash
+./nntp-analyze -host news.example.com -username user -password pass -group alt.test
 ```
 
 ### Analyze All Groups
 
-Use the special `$all` flag to analyze all groups in the database:
+`-group '$all'` analyzes every newsgroup in the go-pugleaf database below `-data`;
+`-group 'prefix.*'` only those whose name starts with `prefix.`. Quote both in the shell.
 ```bash
-./nntp-analyze -host news.example.com -port 119 -group '$all'
+./nntp-analyze -data ./data -group '$all'
+./nntp-analyze -data ./data -group 'comp.*'
 ```
 
-### Advanced Options
+### Analyze Groups from an Active File
+
+`-groups-file` is used instead of `-group`. Each line is `groupname high low status`. Empty lines
+and `#` comments are skipped; lines with fewer than 4 fields and invalid group names are skipped
+with a warning.
+```bash
+./nntp-analyze -groups-file /path/to/active
+```
+A groups-file run also writes a summary to `<out>/<active file path with / replaced by _>.summary.txt`.
+
+### All Options
+
+```
+Group selection (one of the two is required):
+  -group string        Newsgroup name, '$all' or 'prefix.*' ('$all' and 'prefix.*' read the
+                       group list from the databases below -data)
+  -groups-file string  Active file with the newsgroups to analyze
+
+Server:
+  -host string         NNTP server hostname (default "81-171-22-215.pugleaf.net")
+  -port int            NNTP server port (default 563)
+  -ssl                 Use SSL/TLS (default true; use -ssl=false for a plain-text port)
+  -username string     NNTP username (default "read")
+  -password string     NNTP password (default "only")
+  -timeout int         Connect timeout in seconds (default 30), in every mode
+
+Analysis:
+  -force-refresh       Ignore the overview cache and fetch from the server again
+  -max-analyze int     Stop after N articles (default 0 = no limit); a limited run writes no cache
+  -start-date string   Only count articles from this date on (YYYY-MM-DD)
+  -end-date string     Only count articles up to this date (YYYY-MM-DD)
+
+Cache management (no analysis is run):
+  -cache-stats         Show statistics from the cache file only (no XOVER fetch)
+  -validate-cache      Check the format of the cache file
+  -clear-cache         Delete the cache file
+
+Files and output:
+  -data string         Data root: overview cache and, for '$all'/'prefix.*', the databases (default "./data")
+  -out string          Directory for -export files and the groups-file summary (default <data>/analyze-out)
+  -export string       Export format: 'json' or 'csv'
+
+  -help                Show usage examples and exit
+```
+
+### Examples
 
 ```bash
-./nntp-analyze [OPTIONS]
+# Analyze with date filtering
+./nntp-analyze -group alt.test -start-date 2024-01-01 -end-date 2024-12-31
 
-Required:
-  -host string       NNTP server hostname
-  -port int         NNTP server port (default: 119)
-  -group string     Newsgroup name to analyze (use '$all' for all groups)
+# Fetch again and stop after 10,000 articles (this run writes no cache)
+./nntp-analyze -group alt.test -force-refresh -max-analyze 10000
 
-Authentication:
-  -username string  NNTP username (if required)
-  -password string  NNTP password (if required)
-  -ssl             Use SSL/TLS connection
-
-Analysis Options:
-  -force           Force refresh of cached data
-  -max-articles int Maximum number of articles to analyze (0 = unlimited)
-  -start-date string Start date for analysis (YYYY-MM-DD format)
-  -end-date string   End date for analysis (YYYY-MM-DD format)
-  -timeout int      Connection timeout in seconds (default: 30)
-
-Cache Management:
-  -clear-cache     Clear cached data for the specified group
-  -cache-stats     Show statistics for cached data only
-  -validate-cache  Validate cache file integrity
-
-Export Options:
-  -export string   Export format: 'json' or 'csv'
-
-Examples:
-  # Analyze with date filtering
-  ./nntp-analyze -host news.server.com -group alt.test -start-date 2024-01-01 -end-date 2024-12-31
-
-  # Force refresh and limit analysis
-  ./nntp-analyze -host news.server.com -group alt.test -force -max-articles 10000
-
-  # Export results to JSON
-  ./nntp-analyze -host news.server.com -group alt.test -export json
-
-  # Analyze with SSL
-  ./nntp-analyze -host ssl.news.server.com -port 563 -ssl -group alt.test
+# Export results to JSON below a scratch data root
+./nntp-analyze -data ./data-test -group alt.test -export json
 ```
+
+## Server and defaults
+
+Without `-host`, the tool connects to `81-171-22-215.pugleaf.net:563` with TLS. This is the
+go-pugleaf project's public server, and the default `-username read` / `-password only` are its public
+read-only credentials. Pass `-host` (and the account of that server) to analyze another server.
+The default port 563 is the TLS port: for a plain-text server on port 119 add `-ssl=false`.
 
 ## Output Format
 
-The analyzer provides detailed statistics including:
-
 ### Basic Statistics
-- Group name and provider information
-- Total article count and size
-- Article number range (first to last)
-- Date range (oldest to newest articles)
-- Time span and articles per day
-- Cache status and performance
+- Group name and provider (the `-host` name without the port)
+- Group size (article count reported by the server) and article number range
+- Number of analyzed articles, with a warning when it is lower than the group size
+- Total bytes
+- Date range (oldest to newest article), time span and articles per day
+- Cache status and analysis time
 
 ### Article Size Distribution
-Articles are categorized into the following size ranges:
-- **< 4K**: Small text posts, short messages
-- **4K - 16K**: Medium text posts, small attachments
-- **16K - 32K**: Large text posts, small binaries
-- **32K - 64K**: Medium binaries, multi-part text
-- **64K - 128K**: Large binaries, compressed files
-- **128K - 256K**: Very large binaries
-- **256K - 512K**: Huge binaries, large media files
-- **> 512K**: Extremely large binaries
-
-Each category shows:
-- Absolute count with comma-separated formatting
-- Percentage of total articles
-- Human-readable size information
+Articles are counted in these size ranges (by the XOVER byte count):
+`< 4K`, `4K - 16K`, `16K - 32K`, `32K - 64K`, `64K - 128K`, `128K - 256K`, `256K - 512K`, `> 512K`.
+Each range shows the count and the percentage of all analyzed articles.
 
 ### Example Output
 
@@ -111,9 +136,9 @@ Each category shows:
 === Analysis Results ===
 Group: alt.binaries.movies
 Provider: news.example.com
-Total Articles: 15,432
+Group Size: 15,432 articles (range 1001 - 16432)
+Analyzed Articles: 15,432
 Total Bytes: 2.3 GB
-Article Range: 1001 - 16432
 Date Range: 2024-01-15 to 2024-12-28
 Time Span: 348.0 days
 Articles per Day: 44.3
@@ -126,124 +151,119 @@ Total Articles: 15,432
 Total Size: 2.3 GB
 Average Size: 156.2 KB
 
-< 4K           :    1,245 ( 8.1%)
-4K - 16K       :    2,891 (18.7%)
-16K - 32K      :    3,567 (23.1%)
-32K - 64K      :    4,123 (26.7%)
-64K - 128K     :    2,234 (14.5%)
-128K - 256K    :      892 ( 5.8%)
-256K - 512K    :      345 ( 2.2%)
-> 512K         :      135 ( 0.9%)
+< 4K           :    1,245 (  8.1%)
+4K - 16K       :    2,891 ( 18.7%)
+16K - 32K      :    3,567 ( 23.1%)
+32K - 64K      :    4,123 ( 26.7%)
+64K - 128K     :    2,234 ( 14.5%)
+128K - 256K    :      892 (  5.8%)
+256K - 512K    :      345 (  2.2%)
+> 512K         :      135 (  0.9%)
 ```
+
+`$all`, `prefix.*` and `-groups-file` runs print this per group, then a summary with aggregate
+statistics and the top 10 groups by article count and by total size.
 
 ## Caching System
 
-The analyzer uses an intelligent caching system to improve performance:
-
-- **Cache Location**: `data/cache/{provider}/{sanitized_group_name}.overview`
-- **Cache Format**: Tab-separated XOVER data for fast parsing
-- **Automatic Creation**: Cache is created during first analysis
-- **Incremental Updates**: Future analyses can reuse cached data
-- **Cache Validation**: Built-in integrity checking
+- **Cache Location**: `<data>/cache/<host>/<sha256 of the group name>.overview`, where `<data>` is
+  `-data` (default `./data`) and `<host>` is the `-host` name without a port (an IPv6 literal such as
+  `[2001:db8::1]` becomes `2001_db8__1`).
+- **Cache Format**: one tab-separated XOVER line per article
+  (number, subject, from, date, message-id, references, bytes, lines).
+- **Creation**: the first full analysis of a group fetches the whole group in batches of 10,000
+  articles and writes the cache to a temporary file, which is renamed into place only after every
+  batch succeeded. A failed batch fails the analysis of that group and leaves an existing cache as it was.
+- **Reuse**: later runs read the cache as long as it exists; it is not updated with new articles.
+  Use `-force-refresh` to fetch the group again (this replaces the cache).
+- **Limited runs**: a run with `-max-analyze` writes no cache; an existing cache stays.
+- **Date filters**: the cache always holds the whole group; `-start-date`/`-end-date` only filter
+  the statistics.
+- **Permissions**: cache and export directories are created with mode 0750, files with 0600.
 
 ### Cache Management Commands
 
 ```bash
-# Clear cache for a specific group
-./nntp-analyze -host news.server.com -group alt.test -clear-cache
+# Delete the cache file of a group
+./nntp-analyze -group alt.test -clear-cache
 
-# Show cache statistics without re-analyzing
-./nntp-analyze -host news.server.com -group alt.test -cache-stats
+# Show statistics from the cache file without contacting the server for XOVER data
+./nntp-analyze -group alt.test -cache-stats
 
-# Validate cache file integrity
-./nntp-analyze -host news.server.com -group alt.test -validate-cache
+# Check that the cache file has valid XOVER lines
+./nntp-analyze -group alt.test -validate-cache
 ```
+
+The cache file name depends on `-host`: pass the same `-host` (and `-data`) as in the run that
+created the cache.
 
 ## Date Filtering
 
-The analyzer supports flexible date filtering:
-
 ```bash
-# Analyze articles from a specific date range
-./nntp-analyze -host news.server.com -group alt.test \
-  -start-date 2024-01-01 -end-date 2024-12-31
+# Articles from a specific date range
+./nntp-analyze -group alt.test -start-date 2024-01-01 -end-date 2024-12-31
 
-# Analyze articles from a specific date onwards
-./nntp-analyze -host news.server.com -group alt.test \
-  -start-date 2024-06-01
+# Articles from a specific date onwards
+./nntp-analyze -group alt.test -start-date 2024-06-01
 
-# Analyze articles up to a specific date
-./nntp-analyze -host news.server.com -group alt.test \
-  -end-date 2024-12-31
+# Articles up to a specific date
+./nntp-analyze -group alt.test -end-date 2024-12-31
 ```
+
+Articles whose Date header cannot be parsed are counted without the date filter. They are logged,
+and `$all`, `prefix.*` and `-groups-file` runs list them again at the end.
 
 ## Export Formats
 
+Exports are written to `-out` (default `<data>/analyze-out`), which is created when needed.
+A group name that is not a valid newsgroup name is not exported (a warning is logged; the results
+are still printed).
+
 ### JSON Export
 ```bash
-./nntp-analyze -host news.server.com -group alt.test -export json
+./nntp-analyze -group alt.test -export json
 ```
-
-Produces structured JSON output suitable for integration with other tools.
+Writes `<out>/alt.test.json` (replacing an existing file) with the fields `group_name`,
+`provider_name`, `total_articles`, `total_bytes`, `first_article`, `last_article`, `oldest_date`,
+`newest_date`, `analyzed_at`, `cache_exists` and `cached_articles`.
 
 ### CSV Export
 ```bash
-./nntp-analyze -host news.server.com -group alt.test -export csv
+./nntp-analyze -group alt.test -export csv
 ```
-
-Produces comma-separated values suitable for spreadsheet applications.
+Appends one row to `<out>/<hierarchy>.csv`, where `<hierarchy>` is the group name up to the first
+dot (`alt.test` goes to `alt.csv`). A new or empty file first gets this header, which a `-export csv`
+run also prints at its start:
+```
+group_name,provider_name,total_articles,total_bytes,first_article,last_article,oldest_date,newest_date,analyzed_at,cache_exists,cached_articles
+```
 
 ## Performance Considerations
 
-- **Large Groups**: Analysis is limited to 10,000 articles by default for performance
-- **Batch Processing**: Articles are processed in 10,000-article batches
-- **Connection Pooling**: Uses efficient connection pooling for NNTP operations
-- **Memory Usage**: Streaming processing keeps memory usage low
-- **Caching**: Significantly reduces analysis time for repeated operations
+- **Large Groups**: there is no article limit by default (`-max-analyze 0`); set `-max-analyze`
+  to stop early.
+- **Batch Processing**: XOVER data is fetched in batches of 10,000 articles.
+- **Connection Pooling**: one pool (up to 5 connections) is shared by all groups of a run.
+- **Caching**: repeated analyses of a group read the local cache instead of the server.
 
 ## Error Handling
 
-The analyzer handles various error conditions gracefully:
-
-- **Network Issues**: Automatic retry and timeout handling
-- **Invalid Dates**: Malformed date headers are logged but don't stop analysis
-- **Missing Articles**: Gaps in article sequences are handled transparently
-- **Cache Corruption**: Automatic cache validation and rebuilding
+- **Network Issues**: there is no retry; a failed XOVER batch fails the analysis of that group,
+  and `$all`/`-groups-file` runs continue with the next group and list the failures at the end.
+- **Invalid Dates**: malformed Date headers are logged but don't stop the analysis.
+- **Missing Articles**: a batch without articles (NNTP 423) is skipped.
+- **Cache Corruption**: there is no automatic rebuild; check with `-validate-cache`, then use
+  `-force-refresh` or `-clear-cache`.
+- **Exit status**: a single-group run exits with 1 when the analysis fails; `$all`, `prefix.*` and
+  `-groups-file` runs exit with 0 and list the failed groups at the end. A failed `-validate-cache`
+  check is printed but does not count as a failure.
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **Connection Refused**: Check host, port, and firewall settings
-2. **Authentication Failed**: Verify username and password
-3. **Group Not Found**: Ensure the newsgroup exists and is accessible
-4. **Cache Issues**: Use `-clear-cache` to rebuild corrupted cache files
-
-### Debug Information
-
-The analyzer provides detailed logging during operation:
-- Connection status and authentication
-- Batch processing progress
-- Date parsing warnings for malformed headers
-- Cache operations and statistics
-
-## Integration
-
-The analyzer can be integrated into larger workflows:
-
-- **Monitoring**: Regular analysis of newsgroup activity
-- **Reporting**: Automated generation of usage statistics
-- **Data Pipeline**: CSV/JSON export for further processing
-- **Alerting**: Detect unusual patterns in newsgroup activity
-
-## Contributing
-
-When contributing to the analyzer:
-
-1. Test with various newsgroup types (text, binary, mixed)
-2. Ensure backward compatibility with existing cache files
-3. Add appropriate error handling for new features
-4. Update this README for new functionality
+1. **Connection Refused**: check host, port, `-ssl` (TLS is on by default) and firewall settings
+2. **Authentication Failed**: verify username and password (the defaults belong to the default `-host`)
+3. **Group Not Found**: ensure the newsgroup exists on the server and is accessible
+4. **Stale or broken cache**: use `-force-refresh` or `-clear-cache`
 
 ## License
 

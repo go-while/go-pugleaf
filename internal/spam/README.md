@@ -2,6 +2,14 @@
 
 This package integrates SpamAssassin spam filtering into the go-pugleaf newsgroup system. It provides both fast rule-based filtering and full SpamAssassin integration for comprehensive spam detection in Usenet messages.
 
+> **Status: disabled draft (stub).** Every source file is renamed to `*.go.off`, so the package has no
+> compiled Go code and nothing imports `internal/spam`. No config loader reads the `spam_filter` section
+> below, and neither the fetcher, the NNTP server nor the processor calls any of these functions. The
+> features, numbers and examples below describe the draft, not running behaviour. The spam handling that
+> is live today is separate: the web "Spam" button and admin unhide/decrement in `internal/web`
+> (`web_admin_spam.go`, `POST /groups/:group/articles/:articleNum/spam`) with the counters and user spam
+> flags from migrations `0006_main_spam_system.sql` and `0007_main_user_spam_flags.sql`.
+
 ## Features
 
 ### ✅ **Fast Rule-Based Filtering**
@@ -32,7 +40,7 @@ This package integrates SpamAssassin spam filtering into the go-pugleaf newsgrou
 
 ## Your SpamAssassin Configuration
 
-Based on your existing SpamAssassin rules in `/spamassassin/`, the system includes:
+Based on your existing SpamAssassin rules in `/spamassassin/` (not part of this repository), the system includes:
 
 ### Server Detection (`15_servers.cf`)
 - **Giganews with Injection-Info**: Auto-reject (score: 25.0)
@@ -71,7 +79,7 @@ spamFilter := spam.NewSpamFilter(
 )
 
 // In your article processing function
-func processArticle(art *nntp.Article, newsgroups []string) error {
+func ProcessArticle(art *nntp.Article, newsgroups []string) error {
     // Quick pre-filter
     shouldSkip, reason := spamFilter.PreFilterCheck(article, newsgroups)
     if shouldSkip && reason != "WHITELISTED" {
@@ -96,7 +104,7 @@ func processArticle(art *nntp.Article, newsgroups []string) error {
 
 ## Configuration
 
-Create a configuration file (see `config.example.yaml`):
+Create a configuration file (see `config.example.yaml`; nothing reads it yet, see Status above):
 
 ```yaml
 spam_filter:
@@ -112,6 +120,8 @@ spam_filter:
 ```
 
 ## Performance
+
+Unmeasured estimates for the draft:
 
 - **Quick Rules**: ~0.1ms per message
 - **SpamAssassin**: ~50-200ms per message (depending on rules)
@@ -144,15 +154,17 @@ for _, article := range articleBatch {
 
 ## Files Created
 
-- `spamassassin.go`: Full SpamAssassin integration
-- `quickrules.go`: Fast rule-based filtering (based on your config)
-- `filter.go`: Unified filtering interface
-- `integration_example.go`: Usage examples
+All Go files are disabled (`.go.off`, not compiled):
+
+- `spamassassin.go.off`: Full SpamAssassin integration (`SpamAssassinFilter`, runs the `spamassassin` binary)
+- `quickrules.go.off`: Fast rule-based filtering (based on your config; `PredefinedRules`, `QuickSpamCheck`)
+- `filter.go.off`: Unified filtering interface (`SpamFilter`, `FilterArticle`, `PreFilterCheck`, `ShouldRejectArticle`)
+- `integration_example.go.off`: Usage examples
 - `config.example.yaml`: Configuration template
 
 ## Next Steps
 
-1. **Test Integration**: Add spam filtering to your `processArticle` function
+1. **Test Integration**: Rename the `.go.off` files back to `.go`, make them build, and add spam filtering to your `ProcessArticle` function
 2. **Monitor Performance**: Watch for any slowdowns during bulk imports
 3. **Tune Thresholds**: Adjust rejection thresholds based on results
 4. **Add Statistics**: Track spam detection rates and false positives

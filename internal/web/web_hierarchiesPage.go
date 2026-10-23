@@ -2,13 +2,12 @@
 package web
 
 import (
-	"html/template"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
@@ -20,7 +19,7 @@ var LIMIT_hierarchyTreePage = 384
 var LIMIT_hierarchiesPage = 512
 
 // Shows all available hierarchies with group counts and navigation
-func (s *WebServer) hierarchiesPage(c *gin.Context) {
+func (s *WebServer) hierarchiesPage(c *Context) {
 	// Get pagination parameters
 	page := 1
 
@@ -38,10 +37,8 @@ func (s *WebServer) hierarchiesPage(c *gin.Context) {
 
 	hierarchies, totalCount, err := s.DB.GetHierarchiesPaginated(page, LIMIT_hierarchiesPage, sortBy)
 	if err != nil {
-		// Load error template individually
-		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/error.html"))
-		c.Header("Content-Type", "text/html")
-		tmpl.ExecuteTemplate(c.Writer, "base.html", gin.H{"Error": err.Error()})
+		log.Printf("[WEB]: hierarchiesPage: GetHierarchiesPaginated(page=%d sort=%s): %v", page, sortBy, err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 
@@ -54,18 +51,11 @@ func (s *WebServer) hierarchiesPage(c *gin.Context) {
 		SortBy:       sortBy,
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/hierarchies.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "hierarchies.html", "pagination.html")
 }
 
 // hierarchyGroupsPage displays all newsgroups within a specific hierarchy
-func (s *WebServer) hierarchyGroupsPage(c *gin.Context) {
+func (s *WebServer) hierarchyGroupsPage(c *Context) {
 	hierarchyName := c.Param("hierarchy")
 	if hierarchyName == "" {
 		s.renderError(c, http.StatusBadRequest, "Missing hierarchy", "Hierarchy name is required")
@@ -89,10 +79,8 @@ func (s *WebServer) hierarchyGroupsPage(c *gin.Context) {
 
 	groups, totalCount, err := s.DB.GetNewsgroupsByHierarchy(hierarchyName, page, LIMIT_hierarchyGroupsPage, sortBy)
 	if err != nil {
-		// Load error template individually
-		tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/error.html"))
-		c.Header("Content-Type", "text/html")
-		tmpl.ExecuteTemplate(c.Writer, "base.html", gin.H{"Error": err.Error()})
+		log.Printf("[WEB]: hierarchyGroupsPage: GetNewsgroupsByHierarchy(%s page=%d): %v", hierarchyName, page, err)
+		s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 		return
 	}
 
@@ -106,35 +94,29 @@ func (s *WebServer) hierarchyGroupsPage(c *gin.Context) {
 		SortBy:        sortBy,
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/hierarchy_groups.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "hierarchy_groups.html", "pagination.html")
 }
 
 // adminUpdateHierarchies updates the hierarchy counts and structure
-func (s *WebServer) adminUpdateHierarchies(c *gin.Context) {
+func (s *WebServer) adminUpdateHierarchies(c *Context) {
 	// Check authentication and admin permissions
 	session := s.getWebSession(c)
 	if session == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Not authenticated"})
+		c.JSON(http.StatusUnauthorized, H{"error": "Not authenticated"})
 		return
 	}
 
 	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
 	if err != nil || !s.isAdmin(currentUser) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		c.JSON(http.StatusForbidden, H{"error": "Access denied"})
 		return
 	}
 
 	// Update hierarchy counts
 	err = s.DB.UpdateHierarchyCounts()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update hierarchies: " + err.Error()})
+		session.SetError("Failed to update hierarchies: " + err.Error())
+		c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 		return
 	}
 
@@ -144,12 +126,13 @@ func (s *WebServer) adminUpdateHierarchies(c *gin.Context) {
 		go s.DB.HierarchyCache.WarmCache(s.DB) // Warm cache in background
 	}
 
-	// Return success response as JSON
-	c.JSON(http.StatusOK, gin.H{"message": "Hierarchies updated and cache refreshed successfully"})
+	// Set success message and redirect to settings tab
+	session.SetSuccess("Hierarchies updated and cache refreshed successfully")
+	c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 }
 
 // hierarchyTreePage displays a hierarchical tree view for browsing newsgroups
-func (s *WebServer) hierarchyTreePage(c *gin.Context) {
+func (s *WebServer) hierarchyTreePage(c *Context) {
 	hierarchyName := c.Param("hierarchy")
 
 	// Build path from individual level parameters
@@ -226,7 +209,8 @@ func (s *WebServer) hierarchyTreePage(c *gin.Context) {
 	// Get sub-hierarchies and groups for this level
 	subHierarchies, groups, totalSubHierarchies, totalGroups, err := s.getHierarchyLevel(currentPath, sortBy, page, LIMIT_hierarchyTreePage)
 	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Database error", err.Error())
+		log.Printf("[WEB]: hierarchyTreePage: getHierarchyLevel(%s page=%d): %v", currentPath, page, err)
+		s.renderError(c, http.StatusInternalServerError, "Database error", publicErrorDetail)
 		return
 	}
 
@@ -260,14 +244,7 @@ func (s *WebServer) hierarchyTreePage(c *gin.Context) {
 		AtMaxDepth:     atMaxDepth,
 	}
 
-	// Load template
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/hierarchy_tree.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "hierarchy_tree.html", "pagination.html")
 }
 
 // getHierarchyLevel returns sub-hierarchies and groups for a given hierarchy level with pagination
@@ -312,4 +289,32 @@ func (s *WebServer) getHierarchyLevel(currentPath string, sortBy string, page in
 	}
 
 	return subHierarchies, directGroups, totalSubHierarchies, totalGroups, nil
+}
+
+// adminRestoreHierarchyDescriptions handles restoring all hierarchy descriptions from migration
+func (s *WebServer) adminRestoreHierarchyDescriptions(c *Context) {
+	// Check authentication and admin permissions
+	if !s.requireAdminAuth(c) {
+		return
+	}
+
+	session := s.getWebSession(c)
+
+	// Restore hierarchy descriptions
+	err := s.DB.RestoreHierarchyDescriptions()
+	if err != nil {
+		session.SetError("Failed to restore hierarchy descriptions: " + err.Error())
+		c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
+		return
+	}
+
+	// Refresh hierarchy cache after restore
+	if s.DB.HierarchyCache != nil {
+		s.DB.HierarchyCache.InvalidateAll()
+		go s.DB.HierarchyCache.WarmCache(s.DB) // Warm cache in background
+	}
+
+	// Set success message and redirect to settings tab
+	session.SetSuccess("Hierarchy descriptions restored successfully from migration defaults")
+	c.Redirect(http.StatusSeeOther, "/admin?tab=settings")
 }

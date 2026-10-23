@@ -29,7 +29,7 @@
         <p>
             <strong>Lines:</strong> {{.Article.Lines}} |
             <strong>Bytes:</strong> {{.Article.Bytes}} |
-            <strong>Article:</strong> #{{.Article.ArticleNum}}
+            <strong>Article:</strong> #{{.ArticleNum}}
         </p>
         {{if .Article.References}}
         <p><strong>References:</strong> {{.Article.PrintSanitized "references" .GroupName}} <br>

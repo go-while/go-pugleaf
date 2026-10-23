@@ -8,9 +8,9 @@
 - **Type**: Production newsgroup server system (medium-to-large codebase)
 - **Size**: 149 Go files across 13 internal packages, 21 command applications
 - **Languages**: Go 1.25.0+ (primary), HTML/CSS/JavaScript (web frontend), Shell scripts (build system)
-- **Frameworks**: Gin web framework, custom NNTP protocol implementation, SQLite3 database
+- **Frameworks**: net/http ServeMux + html/template (standard library), custom NNTP protocol implementation, SQLite3 database
 - **Target Runtime**: Linux/Unix systems (Windows support not tested)
-- **Dependencies**: Minimal external dependencies - SQLite3, Gin, Go crypto libraries
+- **Dependencies**: Minimal external dependencies - SQLite3, Go crypto libraries (web: standard library net/http)
 
 ## Build, Test, and Development Commands
 
@@ -44,10 +44,9 @@ go mod tidy && go mod verify
 ./build_import_flat-files.sh   # Import flat files
 ./build_recover-db.sh          # Database recovery
 ./build_rslight_importer.sh    # RSLight importer
-./build_TestMsgIdItemCache.sh  # Message ID cache tester
 
 # Note: Some cmd applications don't have build scripts:
-# benchmark_hash, extract_hierarchies, history-demo, parsedates, test-nntp, usermgr
+# benchmark_hash, extract_hierarchies, history-demo, parsedates, usermgr
 
 # Build output goes to build/ directory
 ls -la build/  # List all built binaries
@@ -63,6 +62,7 @@ go test ./internal/nntp/... -v
 
 # Note: Most packages have no test files - this is expected
 # Some nntp tests skip due to missing test data files - this is normal
+# The nntp tests' fake server and test client come from github.com/go-while/nntp-testkit (see go.mod)
 ```
 
 ### Linting (if golangci-lint is available)
@@ -81,10 +81,10 @@ golangci-lint run
 # Web server (main application)
 ./build/webserver -nntphostname your.domain.com
 # Opens web interface on http://localhost:11980
-# Requires "web" folder with templates to be present
+# Templates, static files and favicon are embedded; no "web" folder needed
 
 # NNTP fetcher for downloading articles
-./build/pugleaf-fetcher -group alt.test -test-conn
+./build/pugleaf-fetcher -group alt.test
 
 # NNTP server for serving articles
 ./build/pugleaf-nntp-server -port 1119
@@ -97,7 +97,7 @@ golangci-lint run
 ### Important Build Notes
 - **Always** run builds from repository root directory
 - The `build/` directory is auto-created and contains all executables
-- Build scripts use `-race` flag for race condition detection
+- Build scripts do not use `-race`; race detection happens in `go test -race` (see .claude/CLAUDE.md)
 - Version injection uses `appVersion.txt` file
 - Clean builds remove `build/*` before building
 - Build failures typically indicate missing dependencies
@@ -123,7 +123,7 @@ golangci-lint run
   ├── rslight-importer/ # RSLight importer
   ├── test-MsgIdItemCache/ # Message ID cache tester
   └── [6 other tools]   # benchmark_hash, extract_hierarchies, history-demo, 
-                        # parsedates, test-nntp, usermgr (no build scripts)
+                        # parsedates, usermgr (no build scripts)
 
 /internal/              # 13 internal packages (core business logic)
   ├── nntp/            # NNTP protocol implementation (60+ files)
@@ -141,7 +141,7 @@ golangci-lint run
   └── matrix/          # Matrix protocol support
 
 /web/                   # Frontend assets
-  ├── templates/       # HTML templates (Gin templating)
+  ├── templates/       # HTML templates (html/template)
   └── static files     # CSS, JS, favicon
 
 /configs/               # Configuration samples and documentation
@@ -164,7 +164,7 @@ golangci-lint run
 - Pattern matching for newsgroup filtering
 
 **Web Interface** (`internal/web/`):
-- Gin-based REST API and web pages
+- net/http ServeMux-based REST API and web pages
 - User authentication and session management  
 - Admin interface for newsgroup/provider management
 - Multiple theme support (modern, classic, amber)
@@ -181,7 +181,7 @@ golangci-lint run
 - **Spam Filtering** (`internal/spam/`): SpamAssassin integration with fast rule-based filtering
 
 ### Dependencies Not Obvious from Layout
-- **Race Detection**: All builds use `-race` flag for concurrency safety
+- **Race Detection**: `go test -race` on the tested packages; production binaries are built without `-race`
 - **Version Injection**: Build scripts inject version from `appVersion.txt`
 - **Template Dependencies**: Web server requires `web/` directory present
 - **SSL/TLS Support**: Both web and NNTP servers support TLS with cert files

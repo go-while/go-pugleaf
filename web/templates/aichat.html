@@ -220,7 +220,6 @@ const charCount = document.getElementById('char-count');
 const modelSelect = document.getElementById('model-select');
 const activeModelName = document.getElementById('active-model-name');
 const activeModelDescription = document.getElementById('active-model-description');
-const sessionToken = "{{.SessionToken}}"; // Strong session token from backend
 
 // Available models data from backend
 const availableModels = {};
@@ -240,7 +239,7 @@ function loadInitialChatHistory() {
   fetch(`/aichat/history/${currentModel}`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sessionToken: sessionToken})
+    body: JSON.stringify({})
   })
   .then(r => r.json())
   .then(data => {
@@ -269,24 +268,48 @@ function loadInitialChatHistory() {
 // Load initial chat history and scroll to bottom on page load
 loadInitialChatHistory();
 
-// Fix any escaped HTML in pre-rendered chat history from template
-function fixPreRenderedHTML() {
-  const chatContent = document.querySelectorAll('#chat-messages div');
-  chatContent.forEach(div => {
-    let innerHTML = div.innerHTML;
-    innerHTML = innerHTML.replace(/&lt;br&gt;/gi, '<br>');
-    //innerHTML = innerHTML.replace(/&lt;think&gt;/gi, '<div class="thinking-block collapsed">');
-    //innerHTML = innerHTML.replace(/&lt;\/think&gt;/gi, '</div>');
+// Chat text is model or user input: it is only ever inserted as text nodes (A-web-12).
+// appendChatText appends text to parent and turns literal <br> markers into <br> elements.
+function appendChatText(parent, text) {
+  const parts = String(text).split(/<br\s*\/?>/i);
+  parts.forEach((part, i) => {
+    if (i > 0) parent.appendChild(document.createElement('br'));
+    if (part) parent.appendChild(document.createTextNode(part));
+  });
+}
 
-    if (innerHTML !== div.innerHTML) {
-      div.innerHTML = innerHTML;
-      // Add click handlers to any thinking blocks
-      div.querySelectorAll('.thinking-block').forEach(block => {
-        block.addEventListener('click', function() {
-          this.classList.toggle('collapsed');
-        });
-      });
-    }
+// appendAssistantText renders <think>...</think> segments as collapsible thinking blocks
+// and everything else as text; a stray </think> marker is dropped.
+function appendAssistantText(parent, text) {
+  const re = /<think>([\s\S]*?)(?:<\/think>|$)/gi;
+  const stripClose = s => s.replace(/<\/think>/gi, '');
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    appendChatText(parent, stripClose(text.slice(last, m.index)));
+    const block = document.createElement('div');
+    block.className = 'thinking-block collapsed';
+    appendChatText(block, m[1]);
+    block.addEventListener('click', function() {
+      this.classList.toggle('collapsed');
+    });
+    parent.appendChild(block);
+    last = re.lastIndex;
+    if (last >= text.length) break;
+  }
+  appendChatText(parent, stripClose(text.slice(last)));
+}
+
+// Turn literal <br> markers in the pre-rendered (html/template escaped) chat history
+// into <br> elements without re-parsing any markup.
+function fixPreRenderedHTML() {
+  chatMessages.querySelectorAll(':scope > div').forEach(div => {
+    Array.from(div.childNodes).forEach(node => {
+      if (node.nodeType !== Node.TEXT_NODE || !/<br\s*\/?>/i.test(node.nodeValue)) return;
+      const frag = document.createDocumentFragment();
+      appendChatText(frag, node.nodeValue);
+      div.replaceChild(frag, node);
+    });
   });
 }
 
@@ -316,26 +339,23 @@ function appendMessage(role, content) {
   const div = document.createElement('div');
   div.className = role === 'user' ? 'text-end mb-2' : 'text-start mb-2';
 
-  // Process content to handle thinking blocks
-  let processedContent = content;
+  const label = document.createElement('span');
+  label.className = 'fw-bold';
+  label.textContent = (role === 'user' ? 'You' : 'AI') + ':';
+  div.appendChild(label);
+  div.appendChild(document.createTextNode(' '));
+
+  const text = content == null ? '' : String(content);
   if (role === 'assistant') {
-    // Convert <think> tags to proper divs with class
-    processedContent = processedContent.replace(/<think>/gi, '<div class="thinking-block collapsed">');
-    processedContent = processedContent.replace(/<\/think>/gi, '</div>');
+    appendAssistantText(div, text);
+  } else {
+    appendChatText(div, text);
   }
 
-  div.innerHTML = `<span class='fw-bold'>${role === 'user' ? 'You' : 'AI'}:</span> ${processedContent}<hr class="my-2 border-secondary opacity-25">`;
+  const hr = document.createElement('hr');
+  hr.className = 'my-2 border-secondary opacity-25';
+  div.appendChild(hr);
   chatMessages.appendChild(div);
-
-  // Add click handlers to thinking blocks
-  if (role === 'assistant') {
-    const thinkingBlocks = div.querySelectorAll('.thinking-block');
-    thinkingBlocks.forEach(block => {
-      block.addEventListener('click', function() {
-        this.classList.toggle('collapsed');
-      });
-    });
-  }
 
   chatMessages.scrollTop = chatMessages.scrollHeight;
 }
@@ -354,7 +374,7 @@ function updateActiveModelInfo(modelKey) {
 
 function updateModelSelectCounts() {
   // Update the dropdown options with current message counts
-  fetch(`/aichat/counts?sessionToken=${sessionToken}`)
+  fetch('/aichat/counts')
   .then(r => r.json())
   .then(data => {
     if (data.counts) {
@@ -387,7 +407,7 @@ function switchModel() {
   fetch(`/aichat/history/${newModel}`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({sessionToken: sessionToken})
+    body: JSON.stringify({})
   })
   .then(r => r.json())
   .then(data => {
@@ -440,7 +460,6 @@ function sendMessage() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       message: msg,
-      sessionToken: sessionToken,
       model: currentModel
     })
   })
@@ -476,9 +495,7 @@ function clearCurrentModel() {
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      sessionToken: '{{.SessionToken}}'
-    })
+    body: JSON.stringify({})
   })
   .then(response => response.json())
   .then(data => {
@@ -508,9 +525,7 @@ function clearAllModels() {
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      sessionToken: '{{.SessionToken}}'
-    })
+    body: JSON.stringify({})
   })
   .then(response => response.json())
   .then(data => {

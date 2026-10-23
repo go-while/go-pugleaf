@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -34,6 +36,7 @@ type SanitizedCache struct {
 	maxAge      time.Duration // Maximum age of entries
 	cleanupTick time.Duration // How often to run cleanup
 	stopCleanup chan bool
+	stopOnce    sync.Once    // Stop closes stopCleanup once per cache instance
 	cachedSize  int64        // Size of the cache in bytes (optional, can be used for memory limits)
 	countermux  sync.RWMutex // Mutex for cachedSize updates
 	hits        int64        // Cache hit counter
@@ -74,6 +77,93 @@ func NewSanitizedCache(maxEntries int, maxAge time.Duration) *SanitizedCache {
 	return sc
 }
 
+// sanitizedFieldNames maps every accepted field name (lower case) to its
+// canonical name. It is the only alias table: GetField, SetField, SetArticle
+// and BatchSetArticles all resolve names through it (A-web-10), so an alias
+// such as "from" or "fromheader" always hits the same slot.
+var sanitizedFieldNames = map[string]string{
+	"subject":      "subject",
+	"author":       "from",
+	"from":         "from",
+	"fromheader":   "from",
+	"from_header":  "from",
+	"body":         "body",
+	"bodytext":     "body",
+	"body_text":    "body",
+	"date":         "date",
+	"datestring":   "date",
+	"date_string":  "date",
+	"date_since":   "date_since",
+	"references":   "references",
+	"messageid":    "messageid",
+	"message_id":   "messageid",
+	"path":         "path",
+	"headers_json": "headers_json",
+}
+
+// CanonicalField returns the canonical name of a sanitized field and whether
+// the name is known. Field names are case-insensitive.
+func CanonicalField(field string) (string, bool) {
+	canon, ok := sanitizedFieldNames[strings.ToLower(field)]
+	return canon, ok
+}
+
+// slot returns the struct field that stores the given field name, or nil for
+// an unknown name. Caller must hold article.mux.
+func (article *SanitizedArticle) slot(field string) *template.HTML {
+	canon, ok := CanonicalField(field)
+	if !ok {
+		return nil
+	}
+	switch canon {
+	case "subject":
+		return &article.Subject
+	case "from":
+		return &article.Author
+	case "body":
+		return &article.Body
+	case "date":
+		return &article.Date
+	case "references":
+		return &article.References
+	case "messageid":
+		return &article.MessageID
+	case "path":
+		return &article.Path
+	case "headers_json":
+		return &article.HeadersJSON
+	case "date_since":
+		return &article.DateSince
+	}
+	return nil
+}
+
+// setFieldsLocked stores the known fields and returns the size change.
+// Unknown field names are ignored and not counted. Caller must hold article.mux.
+func (article *SanitizedArticle) setFieldsLocked(fields map[string]template.HTML) int64 {
+	var sizeDiff int64
+	for field, value := range fields {
+		p := article.slot(field)
+		if p == nil {
+			continue
+		}
+		sizeDiff += int64(len(value)) - int64(len(*p))
+		*p = value
+	}
+	article.Size += sizeDiff
+	return sizeDiff
+}
+
+// hasKnownField reports whether at least one field name is known.
+func hasKnownField(fields map[string]template.HTML) bool {
+	for field := range fields {
+		if _, ok := CanonicalField(field); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // GetField retrieves a specific sanitized field from a cached article
 func (sc *SanitizedCache) GetField(messageID string, field string) (template.HTML, bool) {
 
@@ -95,67 +185,21 @@ func (sc *SanitizedCache) GetField(messageID string, field string) (template.HTM
 	sc.hits++
 	sc.countermux.Unlock()
 
-	// Update last used time
+	// Update last used time and read the requested field under the same lock:
+	// SetField/SetArticle/BatchSetArticles write these fields under article.mux.
+	var value template.HTML
 	article.mux.Lock()
 	article.LastUsed = time.Now()
+	if p := article.slot(field); p != nil {
+		value = *p
+	}
 	article.mux.Unlock()
 
-	// Return the requested field
-	switch field {
-	case "subject":
-		if len(article.Subject) == 0 {
-			//log.Printf("SanitizedCache: GetField EMPTY-HIT->MISS for messageID='%s', field='%s', treating as miss", messageID, field)
-			return "", false
-		}
-		return article.Subject, true
-	case "author", "fromheader":
-		if len(article.Author) == 0 {
-			//log.Printf("SanitizedCache: GetField EMPTY-HIT->MISS for messageID='%s', field='%s', treating as miss", messageID, field)
-			return "", false
-		}
-		return article.Author, true
-	case "body", "bodytext":
-		if len(article.Body) == 0 {
-			//log.Printf("SanitizedCache: GetField EMPTY-HIT->MISS for messageID='%s', field='%s', treating as miss", messageID, field)
-			return "", false
-		}
-		return article.Body, true
-	case "date", "date_string":
-		if len(article.Date) == 0 {
-			//log.Printf("SanitizedCache: GetField EMPTY-HIT->MISS for messageID='%s', field='%s', treating as miss", messageID, field)
-			return "", false
-		}
-		return article.Date, true
-	case "references":
-		if len(article.References) == 0 {
-			//log.Printf("SanitizedCache: GetField EMPTY-HIT->MISS for messageID='%s', field='%s', key='%s', treating as miss", messageID, field, key)
-			return "", false
-		}
-		//log.Printf("SanitizedCache: GetField HIT for messageID='%s', field='%s', value_len=%d", messageID, field, len(article.References))
-		return article.References, true
-	case "messageid":
-		if len(article.MessageID) == 0 {
-			return "", false
-		}
-		return article.MessageID, true
-	case "path":
-		if len(article.Path) == 0 {
-			return "", false
-		}
-		return article.Path, true
-	case "headers_json":
-		if len(article.HeadersJSON) == 0 {
-			return "", false
-		}
-		return article.HeadersJSON, true
-	case "date_since":
-		if len(article.DateSince) == 0 {
-			return "", false
-		}
-		return article.DateSince, true
-	default:
+	// An empty field (or an unknown field name) is treated as a miss
+	if len(value) == 0 {
 		return "", false
 	}
+	return value, true
 }
 
 // GetArticle retrieves a complete cached sanitized article
@@ -177,73 +221,21 @@ func (sc *SanitizedCache) GetArticle(messageID string) (*SanitizedArticle, bool)
 	return article, true
 }
 
-// SetField stores a single sanitized field, creating or updating the article entry
+// SetField stores a single sanitized field, creating or updating the article entry.
+// An unknown field name is not stored and creates no entry.
 func (sc *SanitizedCache) SetField(messageID string, field string, value template.HTML) {
-	now := time.Now()
-
-	sc.mutex.Lock()
-	// Get existing article or create new one
-	article, exists := sc.cache[messageID]
-	if !exists {
-		//log.Printf("SanitizedCache: SetField '%s': creating new entry for messageID '%s'", field, messageID)
-
-		article = &SanitizedArticle{
-			CreatedAt: now,
-			LastUsed:  now,
-		}
-		sc.cache[messageID] = article
+	if _, ok := CanonicalField(field); !ok {
+		return
 	}
-	sc.mutex.Unlock()
-
-	article.mux.Lock()
-	// Calculate old size for this field to avoid double-counting
-	var oldSize int64
-	switch field {
-	case "subject":
-		oldSize = int64(len(article.Subject))
-		article.Subject = value
-	case "author", "fromheader":
-		oldSize = int64(len(article.Author))
-		article.Author = value
-	case "body", "bodytext":
-		oldSize = int64(len(article.Body))
-		article.Body = value
-	case "date", "date_string":
-		oldSize = int64(len(article.Date))
-		article.Date = value
-	case "references":
-		oldSize = int64(len(article.References))
-		//log.Printf("SanitizedCache: SetField 'references' for messageID='%s', key='%s', old_len=%d, new_len=%d", messageID, key, len(article.References), len(value))
-		article.References = value
-	case "messageid":
-		oldSize = int64(len(article.MessageID))
-		article.MessageID = value
-	case "path":
-		oldSize = int64(len(article.Path))
-		article.Path = value
-	case "headers_json":
-		oldSize = int64(len(article.HeadersJSON))
-		article.HeadersJSON = value
-	case "date_since":
-		oldSize = int64(len(article.DateSince))
-		article.DateSince = value
-	}
-	article.LastUsed = now
-	newSize := int64(len(value))
-	sizeDiff := newSize - oldSize
-	article.Size += sizeDiff
-	article.mux.Unlock()
-
-	// Update global cache size
-	go func(sc *SanitizedCache, sizeDiff int64) {
-		sc.countermux.Lock()
-		sc.cachedSize += sizeDiff
-		sc.countermux.Unlock()
-	}(sc, sizeDiff)
+	sc.SetArticle(messageID, map[string]template.HTML{field: value})
 }
 
-// SetArticle stores a complete sanitized article in one operation
+// SetArticle stores sanitized fields of one article in one operation. Fields not
+// in the map keep their cached value; unknown field names are ignored.
 func (sc *SanitizedCache) SetArticle(messageID string, sanitizedFields map[string]template.HTML) {
+	if !hasKnownField(sanitizedFields) {
+		return
+	}
 	now := time.Now()
 
 	sc.mutex.Lock()
@@ -256,49 +248,30 @@ func (sc *SanitizedCache) SetArticle(messageID string, sanitizedFields map[strin
 		}
 		sc.cache[messageID] = article
 	}
-	sc.mutex.Unlock()
 
+	// Set the fields while still holding sc.mutex (as BatchSetArticles does), so an
+	// eviction cannot remove the entry between insert and field set and leave
+	// cachedSize counting an entry that is gone.
 	article.mux.Lock()
-	oldSize := article.Size
-	var newSize int64
-
-	// Set all fields from the map
-	for field, value := range sanitizedFields {
-		switch field {
-		case "subject":
-			article.Subject = value
-		case "author", "fromheader":
-			article.Author = value
-		case "body", "bodytext":
-			article.Body = value
-		case "date", "date_string":
-			article.Date = value
-		case "references":
-			article.References = value
-		case "messageid":
-			article.MessageID = value
-		case "path":
-			article.Path = value
-		case "headers_json":
-			article.HeadersJSON = value
-		case "date_since":
-			article.DateSince = value
-		}
-		newSize += int64(len(value))
-	}
-
+	sizeDiff := article.setFieldsLocked(sanitizedFields)
 	article.LastUsed = now
-	sizeDiff := newSize - oldSize
-	article.Size = newSize
 	article.mux.Unlock()
 
-	// Update global cache size
 	sc.countermux.Lock()
 	sc.cachedSize += sizeDiff
 	sc.countermux.Unlock()
+
+	if !exists {
+		sc.enforceLimitLocked()
+	}
+	sc.mutex.Unlock()
 }
 
-// BatchSetArticles efficiently stores multiple complete sanitized articles
+// BatchSetArticles efficiently stores multiple complete sanitized articles.
+// cachedSize is updated inside the same sc.mutex section as the writes and the
+// eviction (as in SetArticle), so the counter always matches the entries a
+// concurrent eviction or cleanup sees: a write that lands on an entry evicted a
+// moment before re-creates it and is counted once, never subtracted twice.
 func (sc *SanitizedCache) BatchSetArticles(articles map[string]map[string]template.HTML) {
 	if len(articles) == 0 {
 		return
@@ -308,8 +281,12 @@ func (sc *SanitizedCache) BatchSetArticles(articles map[string]map[string]templa
 	var totalSizeDiff int64
 
 	// Process all articles in one lock cycle
+	added := false
 	sc.mutex.Lock()
 	for messageID, fields := range articles {
+		if !hasKnownField(fields) {
+			continue
+		}
 
 		// Get existing article or create new one
 		article, exists := sc.cache[messageID]
@@ -319,55 +296,32 @@ func (sc *SanitizedCache) BatchSetArticles(articles map[string]map[string]templa
 				LastUsed:  now,
 			}
 			sc.cache[messageID] = article
+			added = true
 		}
 
 		// Set fields for this article
 		article.mux.Lock()
-		oldSize := article.Size
-		var newSize int64
-
-		for field, value := range fields {
-			switch field {
-			case "subject":
-				article.Subject = value
-			case "author", "fromheader", "from", "from_header":
-				article.Author = value
-			case "body", "bodytext", "body_text":
-				article.Body = value
-			case "date", "datestring", "date_string":
-				article.Date = value
-			case "references":
-				article.References = value
-			case "messageid":
-				article.MessageID = value
-			case "path":
-				article.Path = value
-			case "headers_json":
-				article.HeadersJSON = value
-			case "date_since":
-				article.DateSince = value
-			}
-			newSize += int64(len(value))
-		}
-
+		totalSizeDiff += article.setFieldsLocked(fields)
 		article.LastUsed = now
-		sizeDiff := newSize - oldSize
-		article.Size = newSize
-		totalSizeDiff += sizeDiff
 		article.mux.Unlock()
 	}
-	sc.mutex.Unlock()
-
-	// Update global cache size
+	// Count the writes before the eviction subtracts the sizes of the entries it removes.
 	sc.countermux.Lock()
 	sc.cachedSize += totalSizeDiff
 	sc.countermux.Unlock()
+	if added {
+		sc.enforceLimitLocked()
+	}
+	sc.mutex.Unlock()
 }
 
-// Clear removes all entries from the cache
+// Clear removes all entries from the cache and resets cachedSize with them.
 func (sc *SanitizedCache) Clear() {
 	sc.mutex.Lock()
 	sc.cache = make(map[string]*SanitizedArticle)
+	sc.countermux.Lock()
+	sc.cachedSize = 0
+	sc.countermux.Unlock()
 	sc.mutex.Unlock()
 }
 
@@ -398,9 +352,10 @@ func (sc *SanitizedCache) Stats() map[string]interface{} {
 	}
 }
 
-// Stop shuts down the cache and cleanup goroutine
+// Stop shuts down the cleanup goroutine of this cache instance. It may be called
+// more than once; only the first call closes stopCleanup.
 func (sc *SanitizedCache) Stop() {
-	close(sc.stopCleanup)
+	sc.stopOnce.Do(func() { close(sc.stopCleanup) })
 }
 
 // hashMessageID creates a consistent hash from a message ID
@@ -416,30 +371,52 @@ func (sc *SanitizedCache) xxxhashMessageID(messageID string) string {
 	return messageID
 }
 
-// evictOldest removes the oldest entry
-func (sc *SanitizedCache) evictOldest() {
-	go func() {
-		var oldestKey string
-		var oldestTime time.Time
+// enforceLimitLocked bounds the cache to maxEntries articles (A-web-2).
+// Caller must hold sc.mutex (write lock). When the cache is over its limit,
+// the least recently used entries are evicted down to 90% of maxEntries so the
+// sort is not repeated on every insert. maxEntries <= 0 means unbounded.
+func (sc *SanitizedCache) enforceLimitLocked() {
+	if sc.maxEntries <= 0 || len(sc.cache) <= sc.maxEntries {
+		return
+	}
+	target := sc.maxEntries * 9 / 10
+	if target < 1 {
+		target = 1
+	}
+	sc.evictOldest(len(sc.cache) - target)
+}
 
-		sc.mutex.RLock()
-		for key, article := range sc.cache {
-			article.mux.RLock()
-			lastused := article.LastUsed
-			article.mux.RUnlock()
-			if oldestKey == "" || lastused.Before(oldestTime) {
-				oldestKey = key
-				oldestTime = lastused
-			}
-		}
-		sc.mutex.RUnlock()
-
-		sc.mutex.Lock()
-		if oldestKey != "" {
-			delete(sc.cache, oldestKey)
-		}
-		sc.mutex.Unlock()
-	}()
+// evictOldest removes the n least recently used entries in one pass over a
+// slice sorted by LastUsed. Caller must hold sc.mutex (write lock).
+func (sc *SanitizedCache) evictOldest(n int) {
+	if n <= 0 || len(sc.cache) == 0 {
+		return
+	}
+	type lruEntry struct {
+		key      string
+		lastUsed time.Time
+		size     int64
+	}
+	entries := make([]lruEntry, 0, len(sc.cache))
+	for key, article := range sc.cache {
+		article.mux.RLock()
+		entries = append(entries, lruEntry{key: key, lastUsed: article.LastUsed, size: article.Size})
+		article.mux.RUnlock()
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].lastUsed.Before(entries[j].lastUsed)
+	})
+	if n > len(entries) {
+		n = len(entries)
+	}
+	var delsize int64
+	for _, e := range entries[:n] {
+		delete(sc.cache, e.key)
+		delsize += e.size
+	}
+	sc.countermux.Lock()
+	sc.cachedSize -= delsize
+	sc.countermux.Unlock()
 }
 
 // cleanupLoop runs periodic cleanup of expired entries
@@ -470,32 +447,52 @@ func (sc *SanitizedCache) cleanup() {
 	now := time.Now()
 	keysToDelete := make([]string, 0)
 
-	var delsize int64
-
 	sc.mutex.RLock()
 	for key, article := range sc.cache {
 		article.mux.RLock()
 		if now.Sub(article.CreatedAt) > sc.maxAge {
 			keysToDelete = append(keysToDelete, key)
-			delsize += article.Size // Track size for cleanup
 		}
 		article.mux.RUnlock()
 	}
 	sc.mutex.RUnlock()
 
-	if len(keysToDelete) > 0 {
-		sc.mutex.Lock()
-		for _, key := range keysToDelete {
-			delete(sc.cache, key)
-		}
-		sc.mutex.Unlock()
-		// Could add logging here if needed
-		// log.Printf("Cache cleanup: removed %d expired entries", len(keysToDelete))
+	if len(keysToDelete) == 0 {
+		return // nothing expired: no size update, no log line
 	}
-	go func(sc *SanitizedCache, delsize int64) {
+
+	// Re-check under the write lock: an entry may have been evicted (and its
+	// size already subtracted) or replaced since the read pass.
+	var delsize int64
+	removed := 0
+	sc.mutex.Lock()
+	for _, key := range keysToDelete {
+		article, ok := sc.cache[key]
+		if !ok {
+			continue
+		}
+		article.mux.RLock()
+		expired := now.Sub(article.CreatedAt) > sc.maxAge
+		size := article.Size
+		article.mux.RUnlock()
+		if !expired {
+			continue
+		}
+		delete(sc.cache, key)
+		delsize += size
+		removed++
+	}
+	// Subtract inside the sc.mutex section (as evictOldest and BatchSetArticles do): a Clear
+	// between the unlock and the subtraction would otherwise leave cachedSize negative.
+	if removed > 0 {
 		sc.countermux.Lock()
 		sc.cachedSize -= delsize
 		sc.countermux.Unlock()
-		log.Printf("SanitizedCache: cleanup: removed %d bytes from cache", delsize)
-	}(sc, delsize)
+	}
+	sc.mutex.Unlock()
+
+	if removed == 0 {
+		return
+	}
+	log.Printf("SanitizedCache: cleanup: removed %d entries (%d bytes) from cache", removed, delsize)
 }

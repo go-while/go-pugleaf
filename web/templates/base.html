@@ -106,21 +106,20 @@
                         {{if .IsAdmin}}
                         <a href="/admin" class="btn btn-danger btn-sm">🛠️ Admin</a>
                         {{end}}
+                        <!--<a href="/SiteChat" class="btn btn-outline-primary btn-sm"> 💬 Chat</a>-->
                         <a href="/" class="btn btn-secondary btn-sm">🏠 Home</a>
                         <a href="/SiteNews" class="btn btn-secondary btn-sm">📰 News</a>
-                        <a href="/groups" class="btn btn-secondary btn-sm">📰 Usenet</a>
-                        <a href="/hierarchies" class="btn btn-secondary btn-sm">🗂️ Hierarchies</a>
+                        <a href="/hierarchies" class="btn btn-secondary btn-sm">🗂️ Usenet</a>
                         {{if .AvailableSections}}
                         <a href="/sections" class="btn btn-secondary btn-sm">📚 Sections</a>
                         {{end}}
                         <a href="/search" class="btn btn-secondary btn-sm"><i class="bi bi-search"></i> Search</a>
-                        <!--<a href="/static/sites/chat.html" class="btn btn-outline-primary btn-sm"> 💬 Chat</a>-->
                         {{if .User}}
                         <!-- User is logged in -->
                         {{if .AvailableAIModels}}
                         <a href="/aichat" class="btn btn-secondary btn-sm">💬 AI Chat</a>
                         {{end}}
-                        <a href="/profile" class="btn btn-info btn-sm">👤 {{.User.Username}}</a>
+                        <a href="/profile" class="btn btn-info btn-sm">👤 Profile</a>
                         <a href="/logout" class="btn btn-secondary btn-sm">🚪 Logout</a>
                         {{else}}
                         <!-- User is not logged in -->
@@ -168,6 +167,11 @@
                 </div>
 
                 <div class="col-md-3">
+                    <small>
+                        <a href="/SiteMemory" class="text-decoration-none text-muted">
+                            <i class="bi bi-heart me-1"></i>In memory of Retro Guy
+                        </a>
+                    </small>
                 </div>
 
                 <div class="col-md-6 text-md-end">
@@ -175,7 +179,7 @@
                         <a href="/SiteIRC" class="text-decoration-none me-3">IRC</a>
                         <a href="/SiteHelp" class="text-decoration-none me-3">Help</a>
                         <a href="/static/icons.html" class="text-decoration-none me-3">Icons</a>
-                        <a href="/stats" class="text-decoration-none me-3">Statistics</a>
+                        <a href="/stats" class="text-decoration-none me-3">Stats</a>
                         <span class="text-muted">Built with ❤️ by RockSolid fans</span>
                     </small>
                 </div>

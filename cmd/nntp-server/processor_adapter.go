@@ -1,8 +1,10 @@
 package main
 
 import (
-	"github.com/go-while/go-pugleaf/internal/history"
+	"time"
+
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/go-while/go-pugleaf/internal/nntp"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
@@ -23,9 +25,29 @@ func (pa *ProcessorAdapter) ProcessIncomingArticle(article *models.Article) (int
 	return pa.processor.ProcessIncomingArticle(article)
 }
 
-// Lookup checks if a message-ID exists in history
-func (pa *ProcessorAdapter) Lookup(msgIdItem *history.MessageIdItem) (int, error) {
-	return pa.processor.History.Lookup(msgIdItem)
+// ProcessPostedArticle processes a POSTed article and waits for its commit (see nntp.ArticleProcessor)
+func (pa *ProcessorAdapter) ProcessPostedArticle(article *models.Article, stop <-chan struct{}, timeout time.Duration) (int, error) {
+	return pa.processor.ProcessPostedArticle(article, stop, timeout)
+}
+
+// CheckMessageID checks if an offered message-ID is wanted (IHAVE/TAKETHIS)
+func (pa *ProcessorAdapter) CheckMessageID(messageID string) int {
+	return pa.processor.CheckMessageID(messageID)
+}
+
+// FindArticleByMessageID finds an article by message-ID (current group first, then history)
+func (pa *ProcessorAdapter) FindArticleByMessageID(messageID, currentGroup string) (*models.Article, error) {
+	return pa.processor.FindArticleByMessageID(messageID, currentGroup)
+}
+
+// XrefLocations returns the groups and article numbers known for messageID (Xref: header)
+func (pa *ProcessorAdapter) XrefLocations(messageID string) ([]nntp.XrefLocation, error) {
+	return pa.processor.XrefLocations(messageID)
+}
+
+// XrefLocationsBatch is XrefLocations for many message-ids (Xref: header of ranges)
+func (pa *ProcessorAdapter) XrefLocationsBatch(messageIDs []string) (map[string][]nntp.XrefLocation, error) {
+	return pa.processor.XrefLocationsBatch(messageIDs)
 }
 
 // CheckNoMoreWorkInHistory checks if there's no more work in history

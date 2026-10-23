@@ -12,6 +12,15 @@
                             <strong>{{.Pagination.TotalCount}}</strong> items
                             (Page <strong>{{.Pagination.CurrentPage}}</strong> of
                             <strong>{{.Pagination.TotalPages}}</strong>)
+                            {{if .Pagination.IsClamped}}
+                            {{/* Deliberately does NOT point at ?cursor=: reading by cursor works,
+                                 but a cursor view's own Next/Previous links are not wired yet
+                                 (they emit ?page=0 and bounce back to page 1), so recommending it
+                                 would send the visitor into a dead end. Restore the pointer once
+                                 cursor navigation links through. */}}
+                            &mdash; only the first <strong>{{.Pagination.LinkablePages}}</strong>
+                            pages can be reached by page number
+                            {{end}}
                         </small>
                     </div>
 
@@ -49,7 +58,7 @@
                                 </a>
                             </li>
                             <li class="page-item">
-                                <a class="page-link" href="?page={{.Pagination.TotalPages}}" aria-label="Last">
+                                <a class="page-link" href="?page={{.Pagination.LastLinkablePage}}" aria-label="Last">
                                     Last <span aria-hidden="true">&raquo;</span>
                                 </a>
                             </li>

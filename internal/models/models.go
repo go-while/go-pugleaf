@@ -3,6 +3,7 @@ package models
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -94,10 +95,15 @@ type User struct {
 	Email            string     `json:"email" db:"email"`
 	PasswordHash     string     `json:"password_hash" db:"password_hash"`
 	DisplayName      string     `json:"display_name" db:"display_name"`
-	SessionID        string     `json:"session_id" db:"session_id"`                 // Current active session (64 chars)
+	SessionID        string     `json:"session_id" db:"session_id"`                 // hex(sha256) of the active session token - see database.HashSessionToken; never the cookie value
 	LastLoginIP      string     `json:"last_login_ip" db:"last_login_ip"`           // IP of last login (for logging only)
 	SessionExpiresAt *time.Time `json:"session_expires_at" db:"session_expires_at"` // Session expiration (sliding)
 	LoginAttempts    int        `json:"login_attempts" db:"login_attempts"`         // Failed login attempts counter
+	Verified         int        `json:"verified" db:"verified"`                     // User verification status (0|1)
+	Disabled         int        `json:"disabled" db:"disabled"`                     // User disabled status (0|1)
+	NoPosting        int        `json:"no_posting" db:"no_posting"`                 // Posting restriction (0|1)
+	PostCount        int        `json:"post_count" db:"post_count"`                 // User's post count
+	LastPostUnix     int64      `json:"lastpost_unix" db:"lastpost_unix"`           // Last post timestamp (Unix)
 	CreatedAt        time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at" db:"updated_at"`
 }
@@ -122,6 +128,7 @@ type UserPermission struct {
 type Article struct {
 	GetDataFunc func(what string, group string) string `json:"-" db:"-"`
 	Mux         sync.RWMutex                           `json:"-" db:"-"`
+	DBArtNum    int64                                  `json:"dbarticle_num" db:"article_num"`
 	MessageID   string                                 `json:"message_id" db:"message_id"`
 	Subject     string                                 `json:"subject" db:"subject"`
 	FromHeader  string                                 `json:"from_header" db:"from_header"`
@@ -150,8 +157,72 @@ type Article struct {
 	RefSlice      []string            `json:"-" db:"-"` // Parsed references for threading
 	NewsgroupsPtr []*string           `json:"-" db:"-"` // Parsed newsgroup for threading
 	ProcessQueue  chan *string        `json:"-" db:"-"` // newsgroup ptr for batching
+	Posted        bool                `json:"-" db:"-"` // set by the NNTP POST handler: injected here (proto-article)
 }
 
+var ArticlePool = make(chan *Article, 128*1024)
+
+func NewArticle() *Article {
+	select {
+	case art := <-ArticlePool:
+		return art
+	default:
+		return &Article{}
+	}
+}
+
+func RecycleArticles(arts []*Article) {
+	for _, art := range arts {
+		RecycleArticle(art)
+	}
+}
+
+func RecycleArticle(art *Article) {
+	// Clear fields to avoid memory leaks
+	art.GetDataFunc = nil
+	art.DBArtNum = 0
+	art.MessageID = ""
+	art.Subject = ""
+	art.FromHeader = ""
+	art.DateSent = time.Time{}
+	art.DateString = ""
+	art.References = ""
+	art.Bytes = 0
+	art.Lines = 0
+	art.ReplyCount = 0
+	art.HeadersJSON = ""
+	art.BodyText = ""
+	art.Path = ""
+	art.ImportedAt = time.Time{}
+	art.Spam = 0
+	art.Hide = 0
+	art.Sanitized = false
+	art.MsgIdItem = nil
+	art.Headers = nil
+	art.ArticleNums = nil
+	art.NNTPhead = nil
+	art.NNTPbody = nil
+	art.IsThrRoot = false
+	art.IsReply = false
+	art.RefSlice = nil
+	art.NewsgroupsPtr = nil
+	art.ProcessQueue = nil
+	art.Posted = false
+
+	select {
+	case ArticlePool <- art:
+		// Successfully recycled
+	default:
+		// Pool is full, let it be garbage collected
+		//log.Printf("Warning: ArticlePool is full, discarding article to be garbage collected")
+	}
+}
+
+// GetData returns derived article data for templates. "parent_URL" and "references_URLs"
+// link to the message-id page of the last (most immediate) reference; group and message-id
+// are path-escaped, so '?', '#', '%', ' ' and '/' in an RFC 5536 message-id stay inside the
+// {messageId} segment (A-web-18; '/' stays inside the segment because ServeMux unescapes path values). '+' is escaped as %2B
+// too, so the link does not depend on how the router treats a literal '+'.
 func (a *Article) GetData(what string, group string) string {
 	if a == nil {
 		return ""
@@ -159,33 +230,15 @@ func (a *Article) GetData(what string, group string) string {
 	switch what {
 	case "path":
 		return a.Path
-	case "references_URLs":
-		if a.References == "" {
-			return ""
-		}
-		// Split by whitespace and return the first reference as URL
-		refs := strings.Fields(a.References)
-		if len(refs) > 0 {
-			url := fmt.Sprintf("/groups/%s/message/%s", group, refs[0]) // TODO FIXME<REVIEW, WHY FIRST AND NOT LAST?!
-			return url
-		}
-	case "parent_URL":
-		//log.Printf("DEBUG parent_URL: a.References='%s', len=%d", a.References, len(a.References))
-		if a.References == "" {
-			//log.Printf("DEBUG parent_URL: References is empty!")
-			return ""
-		}
+	case "references_URLs", "parent_URL":
 		// Get the last (most immediate) parent reference
 		refs := strings.Fields(a.References)
-		//log.Printf("DEBUG parent_URL: refs=%v, len(refs)=%d", refs, len(refs))
-		if len(refs) > 0 {
-			parentRef := refs[len(refs)-1]
-			url := fmt.Sprintf("/groups/%s/message/%s", group, parentRef)
-			//log.Printf("DEBUG parent_URL: Generated URL: %s", url)
-			return url
-		} else {
-			//log.Printf("DEBUG parent_URL: No refs found after splitting!")
+		if len(refs) == 0 {
+			return ""
 		}
+		parentRef := refs[len(refs)-1]
+		escapePathSegment := func(s string) string { return strings.ReplaceAll(url.PathEscape(s), "+", "%2B") }
+		return fmt.Sprintf("/groups/%s/message/%s", escapePathSegment(group), escapePathSegment(parentRef))
 	}
 
 	return ""
@@ -263,46 +316,26 @@ func (f *ForumThread) PrintLastActivity() string {
 	}
 }
 
-// PrintLastActivity returns a human-readable time difference from now for newsgroups
-func (n *Newsgroup) PrintLastActivity() string {
-	// This function returns a human-readable time difference from now
-	if n.UpdatedAt.IsZero() {
+// printLastActivityFromTime returns a human-readable time difference from now
+// This helper function consolidates the common logic used by all PrintLastActivity methods
+func printLastActivityFromTime(timestamp time.Time) string {
+	if timestamp.IsZero() {
 		return "never"
 	}
 
 	// Ensure we're working with UTC times for consistent calculation
 	now := time.Now().UTC()
-	updatedAtUTC := n.UpdatedAt.UTC()
-	diff := now.Sub(updatedAtUTC)
+	timestampUTC := timestamp.UTC()
+	diff := now.Sub(timestampUTC)
 	totalDays := int(diff.Hours() / 24)
 
-	// Debug: log the actual timestamp and calculated diff
-	/*
-		log.Printf("DEBUG models.go PrintLastActivity: Group=%s, UpdatedAt=%v (UTC: %v), Now=%v, Diff=%v, Hours=%.1f",
-			n.Name, n.UpdatedAt, updatedAtUTC, now, diff, diff.Hours())
-	*/
 	if diff < time.Minute {
 		return fmt.Sprintf("%d seconds ago", int(diff.Seconds()))
-	} else if diff < time.Hour {
+	} else if diff < time.Hour*2 {
 		return fmt.Sprintf("%d minutes ago", int(diff.Minutes()))
 	} else if diff < 48*time.Hour {
 		return fmt.Sprintf("%d hours ago", int(diff.Hours()))
 	} else if totalDays < 365 {
-		/*
-			months := totalDays / 30
-			remainingDays := totalDays % 30
-			if remainingDays > 0 {
-				if months == 1 {
-					return fmt.Sprintf("1 Month %d Days ago", remainingDays)
-				}
-				return fmt.Sprintf("%d Months %d Days ago", months, remainingDays)
-			} else {
-				if months == 1 {
-					return "1 Month ago"
-				}
-				return fmt.Sprintf("%d Months ago", months)
-			}
-		*/
 		return fmt.Sprintf("%d days ago", totalDays)
 	} else {
 		years := totalDays / 365
@@ -327,6 +360,21 @@ func (n *Newsgroup) PrintLastActivity() string {
 	}
 }
 
+// PrintLastActivity returns a human-readable time difference from now for newsgroups
+func (n *Newsgroup) PrintLastActivity() string {
+	return printLastActivityFromTime(n.UpdatedAt)
+}
+
+// PrintLastActivity returns a human-readable time difference from now for hierarchies
+func (h *Hierarchy) PrintLastActivity() string {
+	return printLastActivityFromTime(h.LastUpdated)
+}
+
+// PrintLastActivity returns a human-readable time difference from now for section groups
+func (sg *SectionGroup) PrintLastActivity() string {
+	return printLastActivityFromTime(sg.UpdatedAt)
+}
+
 // PaginatedResponse represents a paginated API response
 type PaginatedResponse struct {
 	Data       interface{} `json:"data"`
@@ -344,28 +392,73 @@ type PaginationInfo struct {
 	PageSize    int
 	TotalCount  int
 	TotalPages  int
-	HasNext     bool
-	HasPrev     bool
-	NextPage    int
-	PrevPage    int
+	// LinkablePages is the highest page the server will actually serve, for listings whose
+	// ?page= is clamped to a maximum OFFSET (article listings cap it, because turning a page
+	// number into a cursor is a deep OFFSET scan). Zero means "not clamped": templates then
+	// link up to TotalPages. Templates must use LastLinkablePage()/IsClamped() rather than
+	// TotalPages, or a "Last" link promises a page the handler silently serves as another
+	// one (D1).
+	LinkablePages int
+	HasNext       bool
+	HasPrev       bool
+	NextPage      int
+	PrevPage      int
 }
 
-// NewPaginationInfo creates pagination info
-func NewPaginationInfo(page, pageSize, totalCount int) *PaginationInfo {
+// LastLinkablePage returns the highest page number a template may link to.
+func (p *PaginationInfo) LastLinkablePage() int {
+	if p == nil {
+		return 1
+	}
+	if p.LinkablePages > 0 && p.LinkablePages < p.TotalPages {
+		return p.LinkablePages
+	}
+	return p.TotalPages
+}
+
+// IsClamped reports whether the listing has more pages than the server will serve by page
+// number, so the info text can say so instead of the links promising them.
+func (p *PaginationInfo) IsClamped() bool {
+	return p != nil && p.LinkablePages > 0 && p.TotalPages > p.LinkablePages
+}
+
+// NewPaginationInfo creates pagination info.
+// maxOffset is optional: a caller whose ?page= is clamped to a maximum OFFSET passes that
+// maximum (the same value it gives the clamp), and the pages above maxOffset/pageSize+1 are
+// then not linkable. Callers that pass nothing behave exactly as before.
+func NewPaginationInfo(page, pageSize, totalCount int, maxOffset ...int) *PaginationInfo {
+	// Callers pass a page size from a package var, so guard the division: pageSize 0 would
+	// panic here rather than in the caller's slice, which is easy to miss.
+	if pageSize < 1 {
+		pageSize = 1
+	}
 	totalPages := (totalCount + pageSize - 1) / pageSize
 	if totalPages == 0 {
 		totalPages = 1
 	}
 
+	// Mirror internal/web.clampOffsetPage: it allows 1..maxOffset/pageSize+1.
+	linkablePages := 0
+	if len(maxOffset) > 0 && maxOffset[0] > 0 {
+		linkablePages = maxOffset[0]/pageSize + 1
+	}
+	lastLinkable := totalPages
+	if linkablePages > 0 && linkablePages < totalPages {
+		lastLinkable = linkablePages
+	}
+
 	return &PaginationInfo{
-		CurrentPage: page,
-		PageSize:    pageSize,
-		TotalCount:  totalCount,
-		TotalPages:  totalPages,
-		HasNext:     page < totalPages,
-		HasPrev:     page > 1,
-		NextPage:    page + 1,
-		PrevPage:    page - 1,
+		CurrentPage:   page,
+		PageSize:      pageSize,
+		TotalCount:    totalCount,
+		TotalPages:    totalPages,
+		LinkablePages: linkablePages,
+		// Not page < totalPages: beyond the clamp the next page number comes back as the
+		// current one, so there is nothing to link.
+		HasNext:  page < lastLinkable,
+		HasPrev:  page > 1,
+		NextPage: page + 1,
+		PrevPage: page - 1,
 	}
 }
 
@@ -403,6 +496,11 @@ type SectionGroup struct {
 	SortOrder        int       `json:"sort_order" db:"sort_order"`
 	IsCategoryHeader bool      `json:"is_category_header" db:"is_category_header"`
 	CreatedAt        time.Time `json:"created_at" db:"created_at"`
+
+	// Activity fields (populated when joining with newsgroups table)
+	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`
+	MessageCount int       `json:"message_count" db:"message_count"`
+	LastArticle  int       `json:"last_article" db:"last_article"`
 }
 
 // ActiveNewsgroup represents a newsgroup in the active.db
@@ -499,4 +597,18 @@ type SpamTracking struct {
 	ID          int   `json:"id" db:"id"`
 	NewsgroupID int   `json:"newsgroup_id" db:"newsgroup_id"`
 	ArticleNum  int64 `json:"article_num" db:"article_num"`
+}
+
+// CronJob represents a scheduled job configuration
+type CronJob struct {
+	ID              int64      `json:"id" db:"id"`
+	Name            string     `json:"name" db:"name"`
+	Command         string     `json:"command" db:"command"`
+	IntervalMinutes int        `json:"interval_minutes" db:"interval_minutes"`
+	StartHourMinute string     `json:"start_hour_minute" db:"start_hour_minute"`
+	Enabled         bool       `json:"enabled" db:"enabled"`
+	LastRun         *time.Time `json:"last_run" db:"last_run"`
+	RunCount        int        `json:"run_count" db:"run_count"`
+	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at" db:"updated_at"`
 }

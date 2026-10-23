@@ -1,3 +1,10 @@
+//go:build ignore
+
+// organize_by_theme is a one-off helper, excluded from `go build ./...` by the build tag above.
+// Run it from active_files/hierarchies with `go run organize_by_theme.go`. It reads the
+// hierarchy categories from internal/database/migrations/0003_main_create_hierarchies.sql
+// (the old ../../migrations/ path no longer exists) and copies the .active files of the
+// current directory into ./themed/<category>/.
 package main
 
 import (
@@ -88,7 +95,7 @@ func sanitizeCategoryName(name string) string {
 }
 
 func main() {
-	sqlFile := "../../migrations/0003_main_create_hierarchies.sql"
+	sqlFile := "../../internal/database/migrations/0003_main_create_hierarchies.sql"
 	hierarchiesDir := "."
 	themedDir := "themed"
 

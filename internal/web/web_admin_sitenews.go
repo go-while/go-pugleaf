@@ -6,27 +6,18 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // Site News Management Functions
 
 // adminCreateSiteNews handles site news creation
-func (s *WebServer) adminCreateSiteNews(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+func (s *WebServer) adminCreateSiteNews(c *Context) {
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Parse form data
 	subject := c.PostForm("subject")
@@ -73,20 +64,12 @@ func (s *WebServer) adminCreateSiteNews(c *gin.Context) {
 }
 
 // adminUpdateSiteNews handles site news updates
-func (s *WebServer) adminUpdateSiteNews(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+func (s *WebServer) adminUpdateSiteNews(c *Context) {
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Parse news ID
 	newsIDStr := c.PostForm("news_id")
@@ -149,20 +132,12 @@ func (s *WebServer) adminUpdateSiteNews(c *gin.Context) {
 }
 
 // adminDeleteSiteNews handles site news deletion
-func (s *WebServer) adminDeleteSiteNews(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+func (s *WebServer) adminDeleteSiteNews(c *Context) {
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Parse news ID
 	newsIDStr := c.PostForm("news_id")
@@ -187,20 +162,12 @@ func (s *WebServer) adminDeleteSiteNews(c *gin.Context) {
 }
 
 // adminToggleSiteNewsVisibility handles toggling news visibility
-func (s *WebServer) adminToggleSiteNewsVisibility(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+func (s *WebServer) adminToggleSiteNewsVisibility(c *Context) {
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Parse news ID
 	newsIDStr := c.PostForm("news_id")
