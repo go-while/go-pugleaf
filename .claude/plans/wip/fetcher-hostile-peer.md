@@ -118,7 +118,8 @@ plus the full CLAUDE.md list on the merged tree. No wall-clock assertions anywhe
 1. `./build_fetcher.sh` and `./build_nntp-server.sh` succeed.
 2. The verifier runs the wave-2 processor test with `-v` and `PUGLEAF_TEST_DEADLINE=180s` three times
    (`-count=3`) to show it is stable under `-race`.
-3. `cmd/nntp-server` under ulimit by hand: `sh -c 'ulimit -n 24; exec ./build/pugleaf-nntp-server -data ./data-test-hostile -nntphostname hostile.test -nntpbind 127.0.0.1 -nntptcpport 11119 -nntptlsport 0 -maxconnections 100'`
+3. `cmd/nntp-server` under ulimit by hand: `sh -c 'ulimit -n 24; exec ./build/pugleaf-nntp-server -data ./data-test-hostile -nntphostname example.org -nntpbind 127.0.0.1 -nntptcpport 11129 -nntptlsport 0 -maxconnections 100 -history=false'
+   (the hostname must resolve: `validateHostname` does a DNS lookup; 11119 is taken on this machine by an unrelated nzbrex server)`
    (flags as the unit test uses them), 40 parallel `nc` connections: the first ones get a greeting and answer
    `CAPABILITIES`, the log shows an accept error with backoff and no log flood (fewer than 20 accept lines per
    second), after the `nc`s exit a new connection is served; `kill -TERM` stops it within the shutdown grace.
