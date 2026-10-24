@@ -172,3 +172,33 @@ plus the full CLAUDE.md list on the merged tree. No wall-clock assertions anywhe
   and the XHDR stream for the rest of the span keeps one connection until it ends; `cmd/nntp-fetcher` does not inspect
   `ErrAuthRequired`, so a dead login still walks every group once per run (bounded, noisy); the ulimit test has a fixed
   budget (`-n 24`, 14 served here) and fails rather than skips on an odd fd layout.
+
+## Outcome (2026-10-24)
+- Integration branch `plan-fetcher-hostile-peer` (20 commits from testing-001 c8c9d41-era base, 14 files, +2810/-15),
+  merged into `testing-001` with `--no-ff` as **b6cc911** after the user's OK. Not pushed.
+- Wave merges: 7bf42ca (client-provider-quirks), 22d0627 (client-session-faults), 00ee7c8 (client-read-bounds),
+  e52fd9b (server-ulimit), 368e1ea (fetcher-download-fake). Inline fixes on the branch: a5f9f82/2b469e4 (480 →
+  `ErrAuthRequired` on every reader command, `ErrResponseTooLarge` on the line limit), 9241f24, 7ae38c1, 236f2ae,
+  4af4051 (end-to-end command corrected: resolvable hostname, port 11129, `-history=false`).
+- Worktrees (user cleans up), all under `/tank0/claude/trees/go-pugleaf/`: `agent-adde089f8f273c94e`
+  (`worktree-agent-adde089f8f273c94e`, client-provider-quirks), `agent-a4b7ff0de42898ef7`
+  (`worktree-agent-a4b7ff0de42898ef7`, client-session-faults), `agent-af94cd37b92ea42f2`
+  (`worktree-agent-af94cd37b92ea42f2`, client-read-bounds), `agent-aa1e5a192d81b5044`
+  (`worktree-agent-aa1e5a192d81b5044`, server-ulimit), `agent-a7fd731beba22a4b7`
+  (`worktree-agent-a7fd731beba22a4b7`, fetcher-download-fake).
+- Verification (pugleaf-verifier on the branch, all PASS): gofmt/vet/build, the full CLAUDE.md test list (30 packages)
+  under `-race`, `PUGLEAF_KNOWN_BUGS=1` = exactly the one accepted marker (T-nntp-article-1, renamed
+  `nntp-article-430-cache-delay` in testing-001 507021e), `build_fetcher.sh` + `build_nntp-server.sh`, `TestDLArtFake*`
+  stable with `-count=3`, hand-run ulimit scenario (`-n 24`: 14/40 connections served, ~1 accept log line/s, one recovery
+  line, a new connection served afterwards, SIGTERM exit 0).
+- Production fixes shipped: 480 mapped on all reader commands; fetcher data race on duplicate hand-off; fetcher worker
+  nil dereference after returning an item; auth failure mid-run aborts the group run with progress untouched; Message-ID
+  mismatch dropped with one log line per run; accept loop exponential backoff with rate-limited logging; line-limit error
+  wraps `ErrResponseTooLarge`.
+- Leftovers / decisions (see wave notes above): progress still advances over skipped and mismatched articles; bounded
+  over-fetch after an auth abort; `cmd/nntp-fetcher` ignores `ErrAuthRequired` (dead login walks every group once per run);
+  kit `StoreHandler` lacks XHDR (hand-written Handler fake stays until a kit tag adds it; v0.7.0 still has none);
+  duplicated `cli*Run`/`cli*Pool` test helpers; `TestCliConnReadIdleTimeout` lower-bound elapsed check; ulimit test fails
+  rather than skips on an odd fd layout; `Pool.XHdr` force-closes on 423. Pinned: XOVER caps at 100 lines and never
+  splits; 503 on XOVER force-closes; unusable overview lines dropped silently; 423 on ARTICLE drops the connection;
+  mismatched articles dropped, not re-filed.
