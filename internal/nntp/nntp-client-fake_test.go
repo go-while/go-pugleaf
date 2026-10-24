@@ -80,3 +80,33 @@ func cliDial(t *testing.T, s *cliFakeServer, mutate func(*BackendConfig)) (*Back
 	t.Cleanup(func() { _ = c.CloseFromPoolOnly() })
 	return c, nil
 }
+
+// Stateful fake (kit Store mode) and fault hooks, for plan fetcher-hostile-peer.
+// The aliases keep the cliFake* naming; the slices add only their own files.
+type (
+	cliFakeStore      = fakeserver.Store
+	cliFakeStoreOpts  = fakeserver.StoreOptions
+	cliFakeFaults     = fakeserver.Faults
+	cliFakeGenerator  = fakeserver.Generator
+	cliFakeArticle    = fakeserver.Article
+	cliFakeGroup      = fakeserver.Group
+	cliFakeGroupNums  = func(conn int, g fakeserver.Group) fakeserver.Group
+	cliFakeOverFields = func(conn int, group string, fields []string) []string
+)
+
+var (
+	cliFakeNewStore         = fakeserver.NewStore
+	cliFakeStoreHandler     = fakeserver.StoreHandler
+	cliFakeGeneratedArticle = fakeserver.GeneratedArticle
+)
+
+// cliStoreServer starts a fakeserver in Store mode (the built-in RFC 3977
+// handler over st) with the given store options and faults, cliWait as the
+// hang guard and t.Cleanup(s.Close). A nil st gets an empty store.
+func cliStoreServer(t *testing.T, st *cliFakeStore, so cliFakeStoreOpts, f cliFakeFaults) *cliFakeServer {
+	t.Helper()
+	if st == nil {
+		st = cliFakeNewStore()
+	}
+	return newCliFakeServer(t, cliFakeOpts{Store: st, StoreOpts: so, Faults: f})
+}

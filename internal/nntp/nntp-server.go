@@ -310,9 +310,25 @@ func (s *NNTPServer) startBackgroundLocked() {
 	})
 }
 
+// Accept-error backoff of serve. A persistent error (EMFILE/ENFILE once the
+// process hit its file-descriptor limit: the pending connection stays in the
+// accept queue and every retry fails again) must neither spin the loop nor
+// flood the log. The pause grows from minAcceptBackoff to maxAcceptBackoff and
+// is reset by the next accepted connection; the error is logged on the first
+// failure of a burst and then at most once per acceptLogEvery.
+const (
+	minAcceptBackoff = 5 * time.Millisecond
+	maxAcceptBackoff = time.Second
+	acceptLogEvery   = time.Second
+)
+
 // serve handles incoming connections on the given listener
 func (s *NNTPServer) serve(listener net.Listener, isTLS bool) {
 	defer s.wg.Done()
+
+	var acceptBackoff time.Duration // 0 = no error since the last accepted connection
+	var acceptErrs int              // consecutive accept errors
+	var lastAcceptLog time.Time     // when the last accept error was logged
 
 	for {
 		conn, err := listener.Accept()
@@ -326,14 +342,34 @@ func (s *NNTPServer) serve(listener net.Listener, isTLS bool) {
 				log.Printf("[NNTP] listener %s closed, accept loop ends", listener.Addr())
 				return
 			}
-			log.Printf("[NNTP] Error accepting connection: %v", err)
-			// back off briefly so a persistent error (e.g. EMFILE) does not spin
+			acceptErrs++
+			if acceptBackoff <= 0 {
+				acceptBackoff = minAcceptBackoff
+			} else if acceptBackoff < maxAcceptBackoff {
+				acceptBackoff *= 2
+				if acceptBackoff > maxAcceptBackoff {
+					acceptBackoff = maxAcceptBackoff
+				}
+			}
+			if acceptErrs == 1 || time.Since(lastAcceptLog) >= acceptLogEvery {
+				log.Printf("[NNTP] Error accepting connection: %v (%d in a row, retrying in %s)", err, acceptErrs, acceptBackoff)
+				lastAcceptLog = time.Now()
+			}
 			select {
 			case <-s.shutdown:
 				return
-			case <-time.After(50 * time.Millisecond):
+			case <-time.After(acceptBackoff):
 			}
 			continue
+		}
+		if acceptErrs > 0 {
+			// A real outage (fd limit) is a burst; a single error between two accepts
+			// (a peer churning at the ceiling) gets no recovery line of its own.
+			if acceptErrs > 1 || time.Since(lastAcceptLog) >= acceptLogEvery {
+				log.Printf("[NNTP] listener %s accepting again after %d accept errors", listener.Addr(), acceptErrs)
+				lastAcceptLog = time.Now()
+			}
+			acceptErrs, acceptBackoff = 0, 0
 		}
 
 		// The connection limit counts at accept time, so a burst cannot overshoot it.

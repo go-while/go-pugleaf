@@ -235,7 +235,7 @@ func (pool *Pool) SelectGroup(group string) (*GroupInfo, error) {
 		// group not found: the connection is healthy, put it back
 		pool.Put(client)
 		return nil, ErrNewsgroupNotFound
-	case code == 480:
+	case code == AuthRequired:
 		// authentication required: this connection is no use, close it
 		client.ForceCloseConn()
 		return nil, ErrAuthRequired
