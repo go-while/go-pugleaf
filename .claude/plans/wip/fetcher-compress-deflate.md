@@ -99,3 +99,16 @@ CLAUDE.md list; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server
    SQL on the scratch DB: the fetcher log shows one `COMPRESS DEFLATE accepted` line per connection and the
    stats line with `compressed=…%`; the kit server's `Lines()` show every command once (no doubled COMPRESS).
 3. Same against `StoreOpts.Compress: false`: one `refused (500 …)` line, articles still fetched.
+
+## Progress
+### Wave 0 (2026-10-25, inline b200eb1)
+- `internal/nntp/inflate` ported from the kit (tests included), `Compress` on `models.Provider`/`config.Provider`/
+  `nntp.BackendConfig`, migration 0033.
+### Wave 1
+- `worktree-agent-a4736a42745b6bbdf` (compress-config, 92702aa) reviewed MERGE, merged b297896. Column/Scan order of
+  the five provider queries verified by the reviewer. CLI-built configs (cmd/nntp-transfer, cmd/nntp-analyze,
+  processor analyze) have no provider row, so no flag: a `-compress` flag for nntp-transfer is a follow-up.
+- Wave 2 picks up two review minors: extend `internal/web/adf_opt_admin_test.go` (provider create/update form)
+  with the `compress` field and an update without it going back to false; move both checkboxes out of the
+  "Proxy Configuration" block next to `posting_enabled`. Pre-existing: `GetProviderByName/ByID` use raw
+  `QueryRow` instead of `RetryableQueryRowScan` (separate cleanup, not this plan).
