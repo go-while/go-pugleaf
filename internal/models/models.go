@@ -36,6 +36,7 @@ type Provider struct {
 	MaxConns   int    `json:"max_conns" db:"max_conns"`       // Maximum concurrent connections
 	MaxArtSize int    `json:"max_art_size" db:"max_art_size"` // Maximum article size in bytes
 	Posting    bool   `json:"posting" db:"posting"`           // Whether posting is enabled for this provider
+	Compress   bool   `json:"compress" db:"compress"`         // Send COMPRESS DEFLATE (RFC 8054) after login; off: plain
 	// Proxy configuration fields
 	ProxyEnabled  bool      `json:"proxy_enabled" db:"proxy_enabled"`   // Whether to use proxy for this provider
 	ProxyType     string    `json:"proxy_type" db:"proxy_type"`         // Proxy type: socks4, socks5

@@ -116,6 +116,7 @@ type BackendConfig struct {
 	SSL            bool          // whether to use SSL/TLS
 	Username       string        // username for authentication
 	Password       string        // password for authentication
+	Compress       bool          // send COMPRESS DEFLATE (RFC 8054) after the greeting/AUTHINFO; a refusal keeps the connection plain
 	ConnectTimeout time.Duration // timeout for dial, TLS handshake, greeting and AUTHINFO (each Read/Write)
 	// ReadTimeout is the idle timeout per Read after connect; 0 = DefaultClientReadTimeout, <0 = none.
 	ReadTimeout time.Duration
