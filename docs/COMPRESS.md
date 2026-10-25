@@ -57,7 +57,7 @@ Every hostile-peer bound of the client measures the **inflated** stream: the res
 compressed bomb is therefore cut by the same caps as an uncompressed one — the compression
 ratio buys a peer nothing.
 
-Each compressed connection costs roughly **1 MiB of heap** on top of a plain one: the inflater
+Each compressed connection costs **up to ~1 MiB of heap** on top of a plain one (the pending buffer grows only while the reader falls behind): the inflater
 holds up to 1 MiB of decoded octets for the reader (it blocks while that much is unread) plus
 the deflate window and buffers of both directions. With `MaxConns: 16` that is ~16 MiB per
 provider pool; a provider with many connections and little traffic is not worth the flag.
@@ -71,3 +71,6 @@ provider pool; a provider with many connections and little traffic is not worth 
   box, look for the `accepted` or `refused` line once, and leave it as it is.
 - **go-pugleaf's own NNTP server does not offer COMPRESS** and advertises no such capability
   (decision 2026-10-25): the flag is for *outgoing* connections to other people's servers only.
+
+The byte totals count from a successful connect on: the greeting, AUTHINFO and COMPRESS
+octets of a connection whose connect failed are not aggregated.

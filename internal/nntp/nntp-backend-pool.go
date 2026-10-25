@@ -476,7 +476,9 @@ func (pool *Pool) Put(conn *BackendConn) error {
 	}
 }
 
-// Closes a specific connection
+// Closes a specific connection. Always call it with lock=true: the byte totals of the
+// connection are collected (and its liveConns entry removed) only in the locked branch, so
+// lock=false would strand the entry and keep the connection alive in Stats.
 func (pool *Pool) closeConn(client *BackendConn, lock bool) error {
 
 	if client == nil {

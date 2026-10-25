@@ -736,7 +736,7 @@ func logProviderBytes(pools []*nntp.Pool) {
 // savedPercent is how much of raw the wire stream did not carry, in percent;
 // 0 when nothing was received.
 func savedPercent(raw, wire int64) float64 {
-	if raw <= 0 {
+	if raw <= 0 || wire >= raw { // deflate framing can exceed a few short replies: never a negative share
 		return 0
 	}
 	return float64(raw-wire) / float64(raw) * 100
