@@ -1159,6 +1159,139 @@ func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponses
 	return checksSent, nil
 }
 
+// transferHeaders builds the header lines of an article for an outbound
+// transfer (TAKETHIS and IHAVE): relay the stored header block where it is
+// complete (RFC 5537 §3.6), rebuild it with ReconstructHeaders where it is
+// incomplete (web posts, rows without headers_json). An error means the
+// article must not be transferred; common.ErrRelayHeadersInvalid marks the
+// unsafe stored blocks the caller skips (the connection stays healthy).
+func transferHeaders(article *models.Article, nntphostname *string, newsgroup string) ([]string, error) {
+	host := ""
+	if nntphostname != nil {
+		host = *nntphostname
+	}
+	var headers []string
+	var err error
+	if article.HeadersJSON != "" {
+		headers, err = common.RelayHeaders(article, host)
+	}
+	if article.HeadersJSON == "" || errors.Is(err, common.ErrRelayHeadersIncomplete) {
+		headers, err = common.ReconstructHeaders(article, true, nntphostname, newsgroup)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return headers, nil
+}
+
+// IHave offers one article to a transit peer with IHAVE (RFC 3977 §6.3.2), the
+// fallback for peers without streaming (plan transfer-ihave-fallback). Unlike
+// the pipelined CHECK/TAKETHIS path it is synchronous and takes c.mux for the
+// whole exchange, like PostArticleContext: one article, one answer.
+//
+// The returned code is the peer's status; err is nil exactly for the four
+// outcomes the caller counts and decides on:
+//
+//	235 - transferred and accepted
+//	435 - not wanted (the peer has it, or refuses the id)
+//	436 - transfer failed, try again later (before or after the article)
+//	437 - rejected after the transfer: do not offer it again
+//
+// Everything else returns an error: a 480 wraps ErrAuthRequired, 500/501 (no
+// IHAVE) and 502 (transfer permission denied) wrap ErrIHaveUnsupported — all
+// three leave the connection usable, the caller stops offering articles. An
+// unsafe or incomplete header block is skipped before anything is written
+// (common.ErrRelayHeadersInvalid, ErrInvalidCommandArg; the connection stays
+// connected). A read error, EOF or any other status force-closes the
+// connection: the article may be half-sent and the peer's state is unknown.
+//
+// txBytes is the number of octets of the article written on the wire (headers,
+// separator, dot-stuffed body and terminator), 0 when nothing was written.
+func (c *BackendConn) IHave(article *models.Article, nntphostname *string, newsgroup string) (code int, txBytes int, err error) {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	if !c.IsConnected() {
+		return 0, 0, fmt.Errorf("not connected")
+	}
+
+	headers, err := transferHeaders(article, nntphostname, newsgroup)
+	if err != nil {
+		if errors.Is(err, common.ErrRelayHeadersInvalid) {
+			log.Printf("[NNTP-CLIENT] Newsgroup: '%s' | skip IHAVE '%s': %v", newsgroup, article.MessageID, err)
+		}
+		return 0, 0, err
+	}
+	// RelayHeaders/ReconstructHeaders reject invalid Message-IDs already; this
+	// guards the command argument itself (skipped, nothing written).
+	if err := validMessageIDArg(article.MessageID); err != nil {
+		log.Printf("[NNTP-CLIENT] Newsgroup: '%s' | skip IHAVE: %v", newsgroup, err)
+		return 0, 0, err
+	}
+	c.lastUsed = time.Now()
+
+	id, err := c.sendCmd("IHAVE %s", article.MessageID)
+	if errors.Is(err, ErrInvalidCommandArg) {
+		return 0, 0, err // refused before writing: the connection is healthy
+	}
+	if err != nil {
+		c.ForceCloseConn()
+		return 0, 0, fmt.Errorf("failed to send IHAVE command: %w", err)
+	}
+
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id)
+
+	// First response: 335 asks for the article, everything else ends here.
+	code, line, err := c.TextConn.ReadCodeLine(335)
+	if err != nil && code == 0 {
+		c.ForceCloseConn()
+		return 0, 0, fmt.Errorf("failed to read IHAVE '%s' response: %w", article.MessageID, err)
+	}
+	switch code {
+	case 335:
+		// send the article below
+	case 435, 436:
+		return code, 0, nil // not wanted / deferred: nothing was written
+	case AuthRequired:
+		return code, 0, authRequiredErr("IHAVE "+article.MessageID, code, line)
+	case 500, 501, 502:
+		return code, 0, fmt.Errorf("%w: %d %s", ErrIHaveUnsupported, code, strings.TrimSpace(line))
+	default:
+		c.ForceCloseConn()
+		return code, 0, fmt.Errorf("unexpected IHAVE '%s' response: %d %s", article.MessageID, code, strings.TrimSpace(line))
+	}
+
+	// Send headers, separator, body (dot-stuffed, byte-exact) and terminator
+	writer := bufio.NewWriter(c.conn)
+	tx, werr := writeArticleLines(writer, headers, article.BodyText)
+	txBytes += tx
+	if werr != nil {
+		c.ForceCloseConn()
+		return 0, txBytes, fmt.Errorf("failed to write article for IHAVE '%s': %w", article.MessageID, werr)
+	}
+	if werr := writer.Flush(); werr != nil {
+		c.ForceCloseConn()
+		return 0, txBytes, fmt.Errorf("failed to flush article data for IHAVE '%s': %w", article.MessageID, werr)
+	}
+
+	// Second response: the peer's verdict on the transferred article.
+	code, line, err = c.TextConn.ReadCodeLine(235)
+	if err != nil && code == 0 {
+		c.ForceCloseConn()
+		return 0, txBytes, fmt.Errorf("failed to read IHAVE '%s' article response: %w", article.MessageID, err)
+	}
+	switch code {
+	case 235, 436, 437:
+		return code, txBytes, nil // accepted / deferred / rejected: the caller counts
+	case AuthRequired:
+		return code, txBytes, authRequiredErr("IHAVE "+article.MessageID, code, line)
+	default:
+		c.ForceCloseConn()
+		return code, txBytes, fmt.Errorf("unexpected IHAVE '%s' response after the article: %d %s", article.MessageID, code, strings.TrimSpace(line))
+	}
+}
+
 // SendTakeThisArticleStreaming IS UNSAFE! MUST BE LOCKED AND UNLOCKED OUTSIDE FOR THE WHOLE BATCH!!!
 // sends TAKETHIS command and article content without waiting for response
 // Returns command ID for later response reading - used for streaming mode
@@ -1181,21 +1314,10 @@ func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntp
 	c.lastUsed = time.Now()
 	//c.mux.Unlock()
 
-	// Prepare article for transfer: relay the stored header block where it is
-	// complete (RFC 5537 §3.6), rebuild it with ReconstructHeaders where it is
-	// incomplete (web posts, rows without headers_json), skip it when unsafe.
-	// Nothing is written before this decision.
-	host := ""
-	if nntphostname != nil {
-		host = *nntphostname
-	}
+	// Prepare article for transfer (see transferHeaders). Nothing is written
+	// before this decision.
 	var headers []string
-	if article.HeadersJSON != "" {
-		headers, err = common.RelayHeaders(article, host)
-	}
-	if article.HeadersJSON == "" || errors.Is(err, common.ErrRelayHeadersIncomplete) {
-		headers, err = common.ReconstructHeaders(article, true, nntphostname, newsgroup)
-	}
+	headers, err = transferHeaders(article, nntphostname, newsgroup)
 	if err != nil {
 		if errors.Is(err, common.ErrRelayHeadersInvalid) {
 			log.Printf("[NNTP-CLIENT] Newsgroup: '%s' | skip TAKETHIS '%s': %v", newsgroup, article.MessageID, err)
