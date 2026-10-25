@@ -1498,7 +1498,7 @@ func (c *BackendConn) SwitchToModeStream() error {
 	defer c.TextConn.EndResponse(id)
 
 	code, line, err := c.TextConn.ReadCodeLine(203)
-	if err != nil {
+	if err != nil && code == 0 {
 		return fmt.Errorf("failed to read MODE STREAM response: %w", err)
 	}
 
