@@ -97,5 +97,6 @@
  - Leftovers of the optional waves are listed in the Outcome of `.claude/plans/done/audit-delta-fixes.md`; the
    wall-clock-sensitive tests are the subject of the plan `.claude/plans/done/test-timing-hardening.md`.
  - peering: the unfinished `PeeringManager` was removed (CLI-6); incoming feeds work via IHAVE/TAKETHIS, outgoing
-   feeds via `cmd/nntp-transfer` (CHECK/TAKETHIS streaming); there is no automatic peer-to-peer feed configuration.
+   feeds via `cmd/nntp-transfer` (CHECK/TAKETHIS streaming, IHAVE fallback for peers without streaming: `-ihave`,
+   see `docs/TRANSFER.md`); there is no automatic peer-to-peer feed configuration.
  - the history index must be (re)built with cmd/history-rebuild for articles imported before it was enabled
