@@ -76,3 +76,21 @@ CLAUDE.md list; `./build_nntp-transfer.sh`; `PUGLEAF_KNOWN_BUGS=1 ...` unchanged
 -max-threads 1 <group selection flags as the tool needs>`: log shows the fallback line once, `N articles sent via IHAVE`,
 exit 0; the kit peer's `Have` holds every id. Same with `-ihave never`: the pool retry line appears, no IHAVE, the run
 is stopped by the test's deadline (documented as the pre-plan behaviour).
+
+## Progress
+### Wave 0 (2026-10-25, inline 74a5302 + 279c631)
+- `ErrStreamingUnsupported` (MODE STREAM 500/501, read from the code before the textproto error), `ErrIHaveUnsupported`;
+  `TestCliTxNoStream*` assert the sentinel.
+### Wave 1
+- `worktree-agent-a2408d2df140d4c85` (ihave-client, ba83f7f) reviewed MERGE, merged 70fd1d9: `transferHeaders` factored
+  out of TAKETHIS (wire byte-identical, pinned by TestCliIHaveWireEqualsTakeThis), `BackendConn.IHave`.
+- `worktree-agent-a74ceff9750b31136` (ihave-tool, 5adef45) merged ee68585 (did not compile alone: needed IHave):
+  `-ihave auto|never|always`, IHaveWorker, stop path with exit 1, summary `mode=`.
+- Inline e4b69bf: `nntp.MODE_NONE_MV` (= 0; SwitchMode no-op, Pool.Get hands an idle connection out as is) so IHAVE
+  runs on a transit connection (innd gives a MODE READER connection to nnrpd, which has no IHAVE); IHave refuses a
+  reader-mode connection, accepts 437 before the article as "rejected by id", treats a textproto continuation reply
+  ("335-...") as malformed (force-close); ihaveConnMode flipped from the MODE_READER_MV stopgap; TestTxIHaveWorkerPeer
+  unskipped. Review minors applied from the client review (1, 2, 3, 4); informational: a sendCmd write failure leaves
+  the textproto response sequence stuck until the asynchronous ForceCloseConn lands (pre-existing house pattern; the
+  worker never reuses a failed connection).
+- Kit note: PeerHandler ignores Faults (Store/Script only), so refusal cases use Script-mode peers.
