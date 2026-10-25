@@ -32,6 +32,7 @@ func (s *WebServer) adminCreateProvider(c *Context) {
 	maxArtSizeStr := strings.TrimSpace(c.PostForm("max_art_size"))
 	enabledStr := c.PostForm("enabled")
 	postingEnabledStr := c.PostForm("posting_enabled")
+	compressStr := c.PostForm("compress")
 
 	// Get proxy form data
 	proxyEnabledStr := c.PostForm("proxy_enabled")
@@ -102,6 +103,9 @@ func (s *WebServer) adminCreateProvider(c *Context) {
 	// Parse posting enabled status
 	postingEnabled := postingEnabledStr == "on" || postingEnabledStr == "true"
 
+	// Parse COMPRESS DEFLATE (RFC 8054) status
+	compress := compressStr == "on" || compressStr == "true"
+
 	// Parse proxy settings
 	proxyEnabled := proxyEnabledStr == "on" || proxyEnabledStr == "true"
 
@@ -167,6 +171,7 @@ func (s *WebServer) adminCreateProvider(c *Context) {
 		MaxArtSize:    maxArtSize,
 		Enabled:       enabled,
 		Posting:       postingEnabled,
+		Compress:      compress,
 		ProxyEnabled:  proxyEnabled,
 		ProxyType:     proxyType,
 		ProxyHost:     proxyHost,
@@ -212,6 +217,7 @@ func (s *WebServer) adminUpdateProvider(c *Context) {
 	maxArtSizeStr := strings.TrimSpace(c.PostForm("max_art_size"))
 	enabledStr := c.PostForm("enabled")
 	postingEnabledStr := c.PostForm("posting_enabled")
+	compressStr := c.PostForm("compress")
 
 	// Get proxy form data
 	proxyEnabledStr := c.PostForm("proxy_enabled")
@@ -291,6 +297,9 @@ func (s *WebServer) adminUpdateProvider(c *Context) {
 
 	// Parse posting enabled status
 	postingEnabled := postingEnabledStr == "on" || postingEnabledStr == "true"
+
+	// Parse COMPRESS DEFLATE (RFC 8054) status
+	compress := compressStr == "on" || compressStr == "true"
 
 	// Parse proxy settings
 	proxyEnabled := proxyEnabledStr == "on" || proxyEnabledStr == "true"
@@ -402,6 +411,7 @@ func (s *WebServer) adminUpdateProvider(c *Context) {
 		MaxArtSize:    maxArtSize,
 		Enabled:       enabled,
 		Posting:       postingEnabled,
+		Compress:      compress,
 		ProxyEnabled:  proxyEnabled,
 		ProxyType:     proxyType,
 		ProxyHost:     proxyHost,

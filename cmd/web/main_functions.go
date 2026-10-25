@@ -991,6 +991,7 @@ func ConnectPools(db *database.Database) []*nntp.Pool {
 			Enabled:    p.Enabled,
 			Priority:   p.Priority,
 			MaxArtSize: p.MaxArtSize,
+			Compress:   p.Compress,
 			// Copy proxy configuration from database provider
 			ProxyEnabled:  p.ProxyEnabled,
 			ProxyType:     p.ProxyType,
@@ -1011,6 +1012,7 @@ func ConnectPools(db *database.Database) []*nntp.Pool {
 			//WriteTimeout:   60 * time.Second,
 			MaxConns: p.MaxConns,
 			Provider: configProvider, // Set the Provider field
+			Compress: p.Compress,     // COMPRESS DEFLATE (RFC 8054) when the provider asks for it
 			// Copy proxy configuration from database provider
 			ProxyEnabled:  p.ProxyEnabled,
 			ProxyType:     p.ProxyType,

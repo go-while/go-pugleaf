@@ -471,6 +471,7 @@ func (db *Database) LoadDefaultProviders() error {
 				Password:     p.Password,
 				MaxConns:     p.MaxConns,
 				MaxArtSize:   p.MaxArtSize,
+				Compress:     p.Compress,
 				ProxyEnabled: p.ProxyEnabled,
 				ProxyType:    p.ProxyType,
 				ProxyHost:    p.ProxyHost,

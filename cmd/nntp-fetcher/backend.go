@@ -33,6 +33,7 @@ func fetcherBackendConfig(p *models.Provider, maxConns int) *nntp.BackendConfig 
 		Priority:   p.Priority,
 		MaxArtSize: p.MaxArtSize,
 		Posting:    p.Posting,
+		Compress:   p.Compress,
 		// Copy proxy configuration from database provider
 		ProxyEnabled:  p.ProxyEnabled,
 		ProxyType:     p.ProxyType,
@@ -53,6 +54,7 @@ func fetcherBackendConfig(p *models.Provider, maxConns int) *nntp.BackendConfig 
 		//ReadTimeout:    60 * time.Second,
 		//WriteTimeout:   30 * time.Second,
 		Provider: configProvider, // Set the Provider field
+		Compress: p.Compress,     // COMPRESS DEFLATE (RFC 8054) when the provider asks for it
 		// Copy proxy configuration from database provider
 		ProxyEnabled:  p.ProxyEnabled,
 		ProxyType:     p.ProxyType,
