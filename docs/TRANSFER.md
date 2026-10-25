@@ -35,9 +35,9 @@ pipelining and no CHECK: IHAVE asks the peer itself.
 | 435 | before or after the article | not wanted: counted as `unwanted`, cached in Redis. RFC 3977 puts it before the article only; a peer that answers it afterwards is accepted too, otherwise the article would be offered forever |
 | 436 | before or after the article | try again later (the peer is paused): retried once at the end of the job, a second 436 is counted as `retry` and left for a later run |
 | 437 | before or after the article | rejected: counted as `rejected`, cached in Redis, never offered again |
-| 480 | any | authentication required: the worker requeues its job and exits, the run stops (exit code 1) |
-| 500, 501 | any | the peer has no IHAVE: `nntp.ErrIHaveUnsupported`, the run stops (exit code 1) |
-| 502 | any | transfer permission denied: `nntp.ErrIHaveUnsupported`, the run stops (exit code 1) |
+| 480 | before or after the article | authentication required: the worker requeues its job and exits, the run stops (exit code 1) |
+| 500, 501 | before or after the article | the peer has no IHAVE: `nntp.ErrIHaveUnsupported`, the run stops (exit code 1) |
+| 502 | before or after the article | transfer permission denied: `nntp.ErrIHaveUnsupported`, the run stops (exit code 1) |
 
 Anything else, a read error or an EOF force-closes the connection (the article may be half-sent
 and the peer's state is unknown); the job is requeued and `BootConnWorkers` boots a new worker.
@@ -62,7 +62,7 @@ the run has to be stopped by hand. It is kept for peers that must never be fed w
 - `-check-first` is ignored: there is no CHECK, IHAVE itself asks the peer.
 - `-batch-check` still sizes the batches: each IHAVE job loads that many articles from the group
   database at once (they are then offered one by one).
-- the Redis flags (`-redis-cache`, `-redis-ttl`, `-redis-clear-cache`) work in both modes, with the
+- the Redis flags (`-redis-cache`, `-redis-ttl`, `-redis-flushdb`) work in both modes, with the
   same keys (`pugleaf:tx:<host>:<port>:<message-id>`) and the same TTL.
 - `-max-threads` is the number of connections and workers in both modes.
 
@@ -70,8 +70,9 @@ the run has to be stopped by hand. It is kept for peers that must never be fed w
 
 - `0`: the run finished (articles may still be left over: 431/436 are retried in a later run).
 - `1`: a peer that offers neither streaming nor IHAVE (or refuses it: 480/500/501/502) — a
-  configuration error, logged as `peer has neither streaming nor IHAVE (or refuses it): stopping`;
-  the running jobs drain first. The usual startup and database failures also exit 1.
+  configuration error, logged as `peer has neither streaming nor IHAVE (or refuses it): stopping`.
+  It calls `common.ForceShutdown()`, so the job in flight is aborted and requeued and the database
+  is shut down; nothing is drained. The usual startup and database failures also exit 1.
 
 ## Example
 

@@ -1202,7 +1202,9 @@ func transferHeaders(article *models.Article, nntphostname *string, newsgroup st
 // Everything else returns an error: a 480 wraps ErrAuthRequired, 500/501 (no
 // IHAVE), 502 (transfer permission denied) and a MODE READER connection wrap
 // ErrIHaveUnsupported — they leave the connection usable, the caller stops
-// offering articles (it must not reconnect into the same refusal). An
+// offering articles (it must not reconnect into the same refusal). 480 and the
+// three refusal codes are handled before and after the article: a peer may
+// read the article first and refuse afterwards. An
 // unsafe or incomplete header block is skipped before anything is written
 // (common.ErrRelayHeadersInvalid, ErrInvalidCommandArg; the connection stays
 // connected). A read error, EOF or any other status force-closes the
@@ -1317,6 +1319,11 @@ func (c *BackendConn) IHave(article *models.Article, nntphostname *string, newsg
 		return code, txBytes, nil
 	case AuthRequired:
 		return code, txBytes, authRequiredErr("IHAVE "+article.MessageID, code, line)
+	case 500, 501, 502:
+		// the peer refuses IHAVE itself, only after reading the article: the same
+		// sentinel as before the article, so the caller stops instead of booking a
+		// connection error and offering the article again forever.
+		return code, txBytes, fmt.Errorf("%w: %d %s", ErrIHaveUnsupported, code, strings.TrimSpace(line))
 	default:
 		c.ForceCloseConn()
 		return code, txBytes, fmt.Errorf("unexpected IHAVE '%s' response after the article: %d %s", article.MessageID, code, strings.TrimSpace(line))

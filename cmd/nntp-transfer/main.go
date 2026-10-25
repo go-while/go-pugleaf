@@ -2084,9 +2084,11 @@ forever:
 		errChan := common.GetStructChanCap1()
 		defer common.RecycleStructChanCap1(errChan)
 		newConns := 0
-		// getBackoff: the Get failed and the backoff was already applied below, so the
-		// "no connections obtained" branch must not double isleep a second time.
-		getBackoff := false
+		// skipBackoff: this round already decided how long to wait before the next one
+		// (the Get error path applied the backoff itself, the other breaks retry after
+		// the loop's defaultSleep), so the "no connections obtained" branch below must
+		// not log and double isleep on top of it.
+		skipBackoff := false
 		// boot: every exit of this loop falls through to the monitor goroutine, so the
 		// workers launched in this round are watched even when a later Get fails (a
 		// mixed round: connection 0 streams, connection 1 is refused).
@@ -2097,6 +2099,7 @@ forever:
 			if err != nil {
 				if fellBack {
 					// -ihave auto switched the run to IHAVE: reconnect at once, no backoff
+					skipBackoff = true
 					break boot
 				}
 				log.Printf("BootConnWorkers failed to get connection from pool: %v ... retry in: %v", err, isleep)
@@ -2107,7 +2110,7 @@ forever:
 				if isleep > time.Minute {
 					isleep = time.Minute
 				}
-				getBackoff = true
+				skipBackoff = true
 				break boot
 			}
 			if !usingIHave() && conn.ModeReader {
@@ -2115,6 +2118,7 @@ forever:
 					log.Printf("got connection in reader mode, closing and getting a new one")
 				}
 				conn.ForceCloseConn()
+				skipBackoff = true
 				break boot
 			}
 			// got a connection
@@ -2122,6 +2126,7 @@ forever:
 			if slotID < 0 {
 				log.Printf("BootConnWorkers: no empty worker slot found, closing connection")
 				conn.ForceCloseConn()
+				skipBackoff = true
 				break boot
 			}
 			returnSignal := &ReturnSignal{
@@ -2146,7 +2151,7 @@ forever:
 			newConns++
 		}
 		if newConns == 0 {
-			if !getBackoff {
+			if !skipBackoff {
 				log.Printf("BootConnWorkers: no connections obtained, retry in: %v", isleep)
 				isleep = isleep * 2
 				if isleep > time.Minute {

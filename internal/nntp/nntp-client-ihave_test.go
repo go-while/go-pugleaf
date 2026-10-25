@@ -456,3 +456,42 @@ func TestCliIHaveReaderMode(t *testing.T) {
 		t.Errorf("peer read %q, want nothing", lines)
 	}
 }
+
+// TestCliIHaveRefusedAfterArticle: a peer may read the article first and only then
+// refuse IHAVE itself (500/501/502) or demand authentication. These replies carry the
+// same sentinels as before the article, so the caller stops the run instead of
+// booking a connection error and offering the article again forever; the connection
+// stays usable.
+func TestCliIHaveRefusedAfterArticle(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		reply    string
+		wantCode int
+		wantIs   error
+	}{
+		{"502 permission", "502 Transfer permission denied", 502, ErrIHaveUnsupported},
+		{"500 unknown", "500 Unknown command", 500, ErrIHaveUnsupported},
+		{"501 syntax", "501 Not supported", 501, ErrIHaveUnsupported},
+		{"480 auth", "480 authentication required", 480, ErrAuthRequired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := cliIHReplyPeer(t, cliIHExchange{first: []string{"335 send it"}, after: []string{tc.reply}})
+			c := cliCmdDial(t, s, nil)
+
+			code, txBytes, err := cliIHSend(t, c, cliIHRelayArticle("<ih-refpost@test.invalid>"))
+			if !errors.Is(err, tc.wantIs) {
+				t.Fatalf("IHave = (%d, %d, %v), want errors.Is %v", code, txBytes, err, tc.wantIs)
+			}
+			if code != tc.wantCode {
+				t.Errorf("code = %d, want the peer's %d", code, tc.wantCode)
+			}
+			if txBytes <= 0 {
+				t.Errorf("txBytes = %d, want the octets of the transferred article", txBytes)
+			}
+			cliCmdWaitArticles(t, s, 1) // the peer read the article before refusing
+			if !c.IsConnected() {
+				t.Errorf("connection closed after %q, want it usable", tc.reply)
+			}
+		})
+	}
+}
