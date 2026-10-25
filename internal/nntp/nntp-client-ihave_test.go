@@ -16,6 +16,7 @@ package nntp
 
 import (
 	"errors"
+	"net/textproto"
 	"strings"
 	"testing"
 	"time"
@@ -314,5 +315,144 @@ func TestCliIHaveInvalidHeadersSkipped(t *testing.T) {
 	}
 	if lines := s.Lines(); len(lines) != 1 || lines[0] != "IHAVE <ih-good@test.invalid>" {
 		t.Fatalf("peer read %q, want only the IHAVE of the valid article", lines)
+	}
+}
+
+// cliIHExchange is one IHAVE answered by cliIHReplyPeer: first is the reply to the
+// command line, after the reply to the transferred article (only written when first
+// is a 335 and the article arrived). Both may be multi-line.
+type cliIHExchange struct {
+	first []string
+	after []string
+}
+
+// cliIHReplyPeer is a peer that answers every IHAVE with the next exchange (the last
+// one repeats). The scripted fake cannot write a reply, then read the article block,
+// then write a second reply, so these cases need their own handler.
+func cliIHReplyPeer(t *testing.T, ex ...cliIHExchange) *cliFakeServer {
+	t.Helper()
+	n := 0
+	return newCliFakeServer(t, cliFakeOpts{Handler: func(c *cliFakeConn) {
+		for {
+			line, err := c.ReadLine()
+			if err != nil {
+				return
+			}
+			if !strings.HasPrefix(strings.ToUpper(line), "IHAVE ") {
+				if err := c.WriteLines("500 fakeserver: unexpected " + line); err != nil {
+					return
+				}
+				continue
+			}
+			e := ex[min(n, len(ex)-1)]
+			n++
+			if err := c.WriteLines(e.first...); err != nil {
+				return
+			}
+			if !strings.HasPrefix(e.first[0], "335") {
+				continue
+			}
+			if _, err := c.ReadDotBlock(); err != nil {
+				return
+			}
+			if err := c.WriteLines(e.after...); err != nil {
+				return
+			}
+		}
+	}})
+}
+
+// TestCliIHaveContinuationReply: a multi-line reply ("435-..." plus a second line) is
+// malformed for IHAVE. Both reads use ReadCodeLine(0), so the status never hides in a
+// *textproto.Error and the continuation is reported as a textproto.ProtocolError: the
+// connection is force-closed instead of leaving the unread lines in the buffer for the
+// next command.
+func TestCliIHaveContinuationReply(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		ex          cliIHExchange
+		wantCode    int
+		wantArticle bool
+	}{
+		{"before the article", cliIHExchange{first: []string{"435-not wanted", "435 and here is why"}}, 435, false},
+		{"after the article", cliIHExchange{
+			first: []string{"335 send it"},
+			after: []string{"437-rejected", "437 and here is why"},
+		}, 437, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := cliIHReplyPeer(t, tc.ex)
+			c := cliCmdDial(t, s, nil)
+
+			code, _, err := cliIHSend(t, c, cliIHRelayArticle("<ih-cont@test.invalid>"))
+			if err == nil {
+				t.Fatalf("IHave = (%d, nil), want an error on a multi-line reply", code)
+			}
+			var perr textproto.ProtocolError
+			if !errors.As(err, &perr) {
+				t.Errorf("err = %v (%T), want a textproto.ProtocolError", err, err)
+			}
+			if code != tc.wantCode {
+				t.Errorf("code = %d, want the peer's %d", code, tc.wantCode)
+			}
+			if !strings.Contains(err.Error(), "malformed IHAVE") {
+				t.Errorf("err = %v, want it to name the malformed response", err)
+			}
+			if tc.wantArticle {
+				cliCmdWaitArticles(t, s, 1)
+			}
+			cliIHWaitClosed(t, c)
+		})
+	}
+}
+
+// TestCliIHave435AfterArticle: a peer that answers 435 after the article (instead of
+// before it, RFC 3977 §6.3.2) is counted as "not wanted", not treated as a broken
+// exchange: the caller must not offer the article again forever. The connection stays
+// in sync, so the next IHAVE on it works.
+func TestCliIHave435AfterArticle(t *testing.T) {
+	s := cliIHReplyPeer(t,
+		cliIHExchange{first: []string{"335 send it"}, after: []string{"435 not wanted after all"}},
+		cliIHExchange{first: []string{"335 send it"}, after: []string{"235 ok"}},
+	)
+	c := cliCmdDial(t, s, nil)
+
+	code, txBytes, err := cliIHSend(t, c, cliIHRelayArticle("<ih-435post@test.invalid>"))
+	if err != nil || code != 435 {
+		t.Fatalf("IHave = (%d, %d, %v), want (435, >0, nil)", code, txBytes, err)
+	}
+	if txBytes <= 0 {
+		t.Errorf("txBytes = %d, want the octets of the transferred article", txBytes)
+	}
+	if !c.IsConnected() {
+		t.Fatal("connection closed after a 435 following the article")
+	}
+	if code, _, err := cliIHSend(t, c, cliIHRelayArticle("<ih-435next@test.invalid>")); err != nil || code != 235 {
+		t.Fatalf("next IHave on the same connection = (%d, %v), want (235, nil): the connection desynced", code, err)
+	}
+	cliCmdWaitArticles(t, s, 2)
+}
+
+// TestCliIHaveReaderMode: a MODE READER connection has no IHAVE (innd hands it to
+// nnrpd). The refusal wraps ErrIHaveUnsupported, so the caller takes its "stop the
+// run" path instead of reconnecting into the same refusal; nothing is written and the
+// connection stays usable.
+func TestCliIHaveReaderMode(t *testing.T) {
+	s := cliIHPeer(t, &cliPeerOpts{})
+	c := cliCmdDial(t, s, nil)
+	c.ModeReader = true
+
+	code, txBytes, err := cliIHSend(t, c, cliIHRelayArticle("<ih-reader@test.invalid>"))
+	if !errors.Is(err, ErrIHaveUnsupported) {
+		t.Fatalf("IHave = (%d, %d, %v), want ErrIHaveUnsupported", code, txBytes, err)
+	}
+	if code != 0 || txBytes != 0 {
+		t.Errorf("IHave = (%d, %d, ...), want (0, 0, ...): nothing is written", code, txBytes)
+	}
+	if !c.IsConnected() {
+		t.Error("connection closed although nothing was written")
+	}
+	if lines := s.Lines(); len(lines) != 0 {
+		t.Errorf("peer read %q, want nothing", lines)
 	}
 }
