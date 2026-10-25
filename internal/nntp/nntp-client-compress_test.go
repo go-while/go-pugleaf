@@ -28,18 +28,22 @@ package nntp
 // server test is a bound on a server that answers nothing, not a measurement.
 
 import (
+	"bufio"
 	"bytes"
 	"compress/flate"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-while/go-pugleaf/internal/config"
 )
 
 const cliCompGroup = "compress.test"
@@ -212,19 +216,33 @@ func TestCliCompressRoundTrip(t *testing.T) {
 // is logged once per provider, not once per connection.
 func TestCliCompressRefused(t *testing.T) {
 	cases := []struct {
-		name  string
-		opts  cliFakeStoreOpts
-		fault cliFakeFaults
+		name string
+		opts cliFakeStoreOpts
+		// wantLogs maps a substring of the log line to how often it must
+		// appear after two connections.
+		wantLogs map[string]int
+		fault    cliFakeFaults
 	}{
 		{
-			name:  "403",
-			opts:  cliFakeStoreOpts{Compress: true},
-			fault: cliFakeFaults{Override: map[string][]string{"COMPRESS": {"403 Unable to activate compression"}}},
+			name:     "403",
+			opts:     cliFakeStoreOpts{Compress: true},
+			fault:    cliFakeFaults{Override: map[string][]string{"COMPRESS": {"403 Unable to activate compression"}}},
+			wantLogs: map[string]int{"COMPRESS DEFLATE refused": 1, "needs authentication first": 0},
 		},
 		{
 			// A server without the command: the kit answers 500.
-			name: "500 unknown command",
-			opts: cliFakeStoreOpts{},
+			name:     "500 unknown command",
+			opts:     cliFakeStoreOpts{},
+			wantLogs: map[string]int{"COMPRESS DEFLATE refused": 1, "needs authentication first": 0},
+		},
+		{
+			// 480 means the provider wants authentication this connection did
+			// not do: a misconfiguration, so it is logged on every connection
+			// and not folded into the per-provider refusal line.
+			name:     "480 authentication required",
+			opts:     cliFakeStoreOpts{Compress: true},
+			fault:    cliFakeFaults{Override: map[string][]string{"COMPRESS": {"480 Authentication required"}}},
+			wantLogs: map[string]int{"COMPRESS DEFLATE refused": 0, "needs authentication first": 2},
 		},
 	}
 	for _, tc := range cases {
@@ -257,8 +275,10 @@ func TestCliCompressRefused(t *testing.T) {
 				_ = c.CloseFromPoolOnly()
 			}
 
-			if n := logs.count("COMPRESS DEFLATE refused"); n != 1 {
-				t.Fatalf("the refusal was logged %d times for two connections, want 1", n)
+			for sub, want := range tc.wantLogs {
+				if n := logs.count(sub); n != want {
+					t.Fatalf("%q appears %d times in the log of two connections, want %d", sub, n, want)
+				}
 			}
 		})
 	}
@@ -394,7 +414,8 @@ func TestCliCompressInflatedBounds(t *testing.T) {
 	})
 
 	t.Run("long line", func(t *testing.T) {
-		s := cliCompServer(t, 3, cliFakeFaults{LongLine: map[string]int{"ARTICLE": 4096}})
+		const longLine = 4096
+		s := cliCompServer(t, 3, cliFakeFaults{LongLine: map[string]int{"ARTICLE": longLine}})
 		c := cliCompDial(t, s, func(cfg *BackendConfig) {
 			cfg.MaxResponseLineBytes = 512
 		})
@@ -402,9 +423,13 @@ func TestCliCompressInflatedBounds(t *testing.T) {
 		if !errors.Is(err, ErrResponseLineTooLong) {
 			t.Fatalf("GetArticle on a compressed over-long line: err = %v, want ErrResponseLineTooLong", err)
 		}
-		if c.RxBytesWire() >= c.RxBytesRaw() {
-			t.Fatalf("rx wire %d >= rx raw %d: the line cap did not measure the inflated stream",
-				c.RxBytesWire(), c.RxBytesRaw())
+		// The cap fired on a line of longLine inflated octets while the whole
+		// connection read fewer than that from the socket: the cap measured
+		// the inflated stream. (rxRaw does not count the long line itself:
+		// the octets of a failed read are not handed on, so they are not
+		// counted either.)
+		if w := c.RxBytesWire(); w >= longLine {
+			t.Fatalf("rx wire = %d octets for a %d byte line: the line cap did not measure the inflated stream", w, longLine)
 		}
 	})
 }
@@ -457,6 +482,10 @@ func TestCliCompressClose(t *testing.T) {
 		cliCompWaitInflater(t, d)
 		if err := d.Close(); err != nil {
 			t.Fatalf("second Close: %v, want nil (idempotent)", err)
+		}
+		// Nothing is served after Close, not even octets inflated before it.
+		if n, err := d.Read(make([]byte, 64)); !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Read after Close = %d, %v, want 0, net.ErrClosed", n, err)
 		}
 	})
 
@@ -645,4 +674,152 @@ func TestCliCompressCorruptInput(t *testing.T) {
 		t.Fatalf("the force-close hook did not run within %v", cliWait)
 	}
 	cliCompWaitInflater(t, d)
+}
+
+// cliCompMaxRun returns the longest run of octets in b without a '\n'.
+func cliCompMaxRun(b []byte) int {
+	best, run := 0, 0
+	for _, c := range b {
+		if c == '\n' {
+			run = 0
+			continue
+		}
+		run++
+		if run > best {
+			best = run
+		}
+	}
+	return best
+}
+
+// cliCompPipelinePayload builds what the pipelining fake writes in one go: the
+// 206 line and, right behind it, the deflated replies to the commands the
+// client sends next (the GROUP and the XOVER of n records that XOver issues).
+// Compression starts after the CRLF of the 206, so those octets are already
+// compressed payload. They must hold a run of more than lineCap octets without
+// a '\n' for the test to bite: a client whose response line cap is still armed
+// while it reads the 206 measures them as a response line, fails that read and
+// drops the rest of it. The seed is raised until the stream has such a run, so
+// the payload stays deterministic.
+func cliCompPipelinePayload(t *testing.T, n, lineCap int) []byte {
+	t.Helper()
+	for seed := int64(1); seed <= 50; seed++ {
+		rnd := rand.New(rand.NewSource(seed))
+		var plain bytes.Buffer
+		fmt.Fprintf(&plain, "211 %d 1 %d %s\r\n", n, n, cliCompGroup)
+		plain.WriteString("224 overview follows\r\n")
+		subject := make([]byte, 48)
+		for i := 1; i <= n; i++ {
+			for j := range subject {
+				subject[j] = byte('a' + rnd.Intn(26))
+			}
+			fmt.Fprintf(&plain, "%d\t%s\tA <a@b.invalid>\t%s\t<ov%d@test.invalid>\t\t1234\t10\r\n",
+				i, subject, cliCmdDate, i)
+		}
+		plain.WriteString(".\r\n")
+
+		var z bytes.Buffer
+		zw, err := flate.NewWriter(&z, flate.DefaultCompression)
+		if err != nil {
+			t.Fatalf("flate.NewWriter: %v", err)
+		}
+		if _, err := zw.Write(plain.Bytes()); err != nil {
+			t.Fatalf("deflating the payload: %v", err)
+		}
+		if err := zw.Flush(); err != nil {
+			t.Fatalf("flushing the payload: %v", err)
+		}
+		// Only the first read of the client (one bufio fill of 4096 octets)
+		// can trip the cap before the switch.
+		head := z.Bytes()
+		if len(head) > 4000 {
+			head = head[:4000]
+		}
+		if cliCompMaxRun(head) <= lineCap {
+			continue
+		}
+		return append([]byte("206 Compression active\r\n"), z.Bytes()...)
+	}
+	t.Fatalf("no seed gave compressed octets with a run over %d bytes without a newline", lineCap)
+	return nil
+}
+
+// cliCompPipelineServer listens on 127.0.0.1:0, greets, waits for the COMPRESS
+// line and then writes payload in one socket write: the 206 and the compressed
+// replies of the commands that have not arrived yet. It reads and drops the
+// client's compressed commands afterwards.
+func cliCompPipelineServer(t *testing.T, payload []byte) (string, int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, err := conn.Write([]byte("200 pipelined compress fake ready\r\n")); err != nil {
+			return
+		}
+		br := bufio.NewReader(conn)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if strings.HasPrefix(strings.ToUpper(line), "COMPRESS") {
+				break
+			}
+		}
+		if _, err := conn.Write(payload); err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+	return "127.0.0.1", ln.Addr().(*net.TCPAddr).Port
+}
+
+// TestCliCompressPipelinedAfter206: a server that puts compressed payload in
+// the same write as the 206 is read correctly although MaxResponseLineBytes is
+// small. The cap must not measure those octets (they are not a response line)
+// and none of them may be dropped, or the inflater starts mid-stream and the
+// first reply is a corrupt-input error.
+func TestCliCompressPipelinedAfter206(t *testing.T) {
+	const (
+		records = 300
+		lineCap = 512
+	)
+	host, port := cliCompPipelineServer(t, cliCompPipelinePayload(t, records, lineCap))
+	cfg := &BackendConfig{
+		Host:                 host,
+		Port:                 port,
+		MaxConns:             1,
+		ConnectTimeout:       30 * time.Second,
+		AuthFailureBackoff:   -1,
+		Compress:             true,
+		MaxResponseLineBytes: lineCap,
+		Provider:             &config.Provider{Name: "cli-compress-pipeline", Host: host, Port: port},
+	}
+	c := NewConn(cfg)
+	if _, err := cliCmdRun(t, func() error { return c.Connect() }); err != nil {
+		t.Fatalf("Connect against the pipelining fake: %v", err)
+	}
+	t.Cleanup(func() { _ = c.CloseFromPoolOnly() })
+	if !c.compressed() {
+		t.Fatal("the connection is not compressed after the pipelined 206")
+	}
+	var over []OverviewLine
+	if _, err := cliCmdRun(t, func() error {
+		var e error
+		over, e = c.XOver(cliCompGroup, 1, records, false)
+		return e
+	}); err != nil {
+		t.Fatalf("XOver after a pipelined 206: %v", err)
+	}
+	if len(over) != records {
+		t.Fatalf("XOver returned %d records, want %d: octets of the pipelined stream were lost", len(over), records)
+	}
 }

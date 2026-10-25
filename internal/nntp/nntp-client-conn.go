@@ -71,9 +71,13 @@ func (dc *deadlineConn) setTimeouts(rd, wr time.Duration) {
 }
 
 // setMaxLine sets the response line cap (bytes before the '\n'); n <= 0
-// disables it. Call it before the first Read (Connect holds c.mux).
+// disables it. It also clears the state of the cap, because the octets
+// measured so far belong to the stream before the change (the COMPRESS
+// exchange disables the cap and re-arms it on the inflated stream). Call it
+// while no Read is in progress (Connect holds c.mux).
 func (dc *deadlineConn) setMaxLine(n int) {
 	dc.maxLine.Store(int64(n))
+	dc.run, dc.lineErr = 0, nil
 }
 
 // setCounters attaches the octet counters of the connection; nil disables the
@@ -118,9 +122,7 @@ func (dc *deadlineConn) Read(p []byte) (int, error) {
 		}
 	}
 	n, err := dc.Conn.Read(p)
-	if dc.ctr != nil {
-		dc.count(&dc.ctr.rxRaw, &dc.ctr.rxWire, n)
-	}
+	ret := n // the octets handed on, and the octets counted
 	if limit := dc.maxLine.Load(); limit > 0 && n > 0 {
 		// Walk every '\n' in p[:n]: the first segment continues the line of
 		// earlier reads (run), each following one is measured between two
@@ -146,10 +148,13 @@ func (dc *deadlineConn) Read(p []byte) (int, error) {
 			// reader can never return it; it fails on that line, and every
 			// later Read fails with the same error.
 			dc.lineErr = fmt.Errorf("%w: over %d bytes", ErrResponseLineTooLong, limit)
-			return start, dc.lineErr
+			ret, err = start, dc.lineErr
 		}
 	}
-	return n, err
+	if dc.ctr != nil {
+		dc.count(&dc.ctr.rxRaw, &dc.ctr.rxWire, ret)
+	}
+	return ret, err
 }
 
 // Write arms the write deadline, then writes to the socket.

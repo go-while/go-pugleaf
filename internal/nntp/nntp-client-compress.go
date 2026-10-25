@@ -90,12 +90,21 @@ func (c *BackendConn) compressed() bool {
 // the server answers 206 (RFC 8054 §2.2). A refusal (403, 500, 501, 502, 503,
 // and any other final reply) is not a connection failure: it is logged once
 // per provider and the connection stays plain, so startCompress returns nil.
-// Only an I/O or protocol error is returned, and then the caller aborts the
-// connect. The client never sends COMPRESS twice: Connect calls this once and
-// it refuses to run on an already compressed connection.
+// A 480 is logged every time and with its own wording: it means the provider
+// wants authentication that this connection did not do, which is a
+// misconfiguration, not a provider without COMPRESS. Only an I/O or protocol
+// error is returned, and then the caller aborts the connect. The client never
+// sends COMPRESS twice: Connect calls this once and it refuses to run on an
+// already compressed connection.
+//
+// The response line cap is disabled around the exchange and re-armed on the
+// inflated stream afterwards: a server may put compressed payload in the same
+// segment as the 206 (compression starts right after its CRLF), and the cap
+// would measure those octets as part of a response line, fail the read and
+// drop the rest of it, which leaves the inflater starting mid-stream.
 //
 // The caller holds c.mux (Connect does) and must not have a response in
-// flight: the compression layer starts right after the CRLF of the 206.
+// flight.
 func (c *BackendConn) startCompress() error {
 	if c.dconn == nil || c.TextConn == nil {
 		return errors.New("nntp: COMPRESS DEFLATE without a connection")
@@ -103,24 +112,41 @@ func (c *BackendConn) startCompress() error {
 	if c.compressed() {
 		return errors.New("nntp: COMPRESS DEFLATE is already active")
 	}
+	label := c.Backend.providerLabel()
+	maxLine := int(c.dconn.maxLine.Load())
+	c.dconn.setMaxLine(0)
+	// armMaxLine puts the cap back; after the switch it measures the inflated
+	// stream, and swapConn has cleared the state of the plain one.
+	armMaxLine := func() { c.dconn.setMaxLine(maxLine) }
+
 	id, err := c.sendCmd("COMPRESS DEFLATE")
 	if err != nil {
-		return err
+		armMaxLine()
+		return fmt.Errorf("COMPRESS DEFLATE: %w", err)
 	}
 	c.TextConn.StartResponse(id)
 	code, message, err := c.TextConn.ReadCodeLine(0)
 	c.TextConn.EndResponse(id)
 	if err != nil && code == 0 {
-		return err
+		armMaxLine()
+		return fmt.Errorf("COMPRESS DEFLATE: %w", err)
 	}
-	if code != NNTPCompressActive {
-		logCompressRefused(c.Backend.providerLabel(), code, message)
+	switch {
+	case code == AuthRequired:
+		armMaxLine()
+		log.Printf("[NNTP-CONN] provider '%s': COMPRESS DEFLATE needs authentication first (%d %s), continuing uncompressed", label, code, message)
+		return nil
+	case code != NNTPCompressActive:
+		armMaxLine()
+		logCompressRefused(label, code, message)
 		return nil
 	}
 	if err := c.enableCompression(); err != nil {
+		armMaxLine()
 		return err
 	}
-	log.Printf("[NNTP-CONN] provider '%s': COMPRESS DEFLATE accepted", c.Backend.providerLabel())
+	armMaxLine()
+	log.Printf("[NNTP-CONN] provider '%s': COMPRESS DEFLATE accepted", label)
 	return nil
 }
 
@@ -177,6 +203,8 @@ type deflateConn struct {
 	wmu  sync.Mutex // serialises Write: the flate.Writer is not concurrency safe
 	zw   *flate.Writer
 	wbuf bytes.Buffer // the deflated octets of one Write, written to raw in one go
+
+	rawClosed atomic.Bool // the socket is closed only once
 
 	mu       sync.Mutex
 	room     *sync.Cond // the inflater waits on it while buf is full
@@ -262,7 +290,9 @@ func (d *deflateConn) runInflate(src *bufio.Reader) {
 	d.mu.Unlock()
 	d.notify()
 	if corrupt {
-		_ = d.Close()
+		// Only the socket goes; the conn is not marked closed, so the reader
+		// still gets the corrupt-input error instead of net.ErrClosed.
+		_ = d.closeRaw()
 		if d.onCorrupt != nil {
 			d.onCorrupt()
 		}
@@ -294,6 +324,10 @@ func (d *deflateConn) Read(p []byte) (int, error) {
 	for {
 		d.mu.Lock()
 		switch {
+		case d.closed:
+			// Nothing is served after Close, not even octets inflated before it.
+			d.mu.Unlock()
+			return 0, net.ErrClosed
 		case len(d.buf) > 0:
 			n := copy(p, d.buf)
 			d.buf = d.buf[n:]
@@ -304,9 +338,6 @@ func (d *deflateConn) Read(p []byte) (int, error) {
 			err := d.err
 			d.mu.Unlock()
 			return 0, err
-		case d.closed:
-			d.mu.Unlock()
-			return 0, net.ErrClosed
 		}
 		dl := d.deadline
 		d.mu.Unlock()
@@ -367,7 +398,8 @@ func (d *deflateConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Close closes the socket, which ends the inflater goroutine. It is
+// Close closes the socket, which ends the inflater goroutine, and drops the
+// inflated octets nobody read: a Read after Close is net.ErrClosed. It is
 // idempotent: later calls do nothing and return nil.
 func (d *deflateConn) Close() error {
 	d.mu.Lock()
@@ -376,9 +408,18 @@ func (d *deflateConn) Close() error {
 		return nil
 	}
 	d.closed = true
+	d.buf = nil
 	d.room.Broadcast()
 	d.mu.Unlock()
 	d.notify()
+	return d.closeRaw()
+}
+
+// closeRaw closes the socket once; later calls return nil.
+func (d *deflateConn) closeRaw() error {
+	if d.rawClosed.Swap(true) {
+		return nil
+	}
 	return d.raw.Close()
 }
 
