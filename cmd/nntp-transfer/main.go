@@ -41,7 +41,7 @@ var VERBOSE bool
 // showUsageExamples displays usage examples for NNTP transfer
 func showUsageExamples() {
 	fmt.Println("\n=== NNTP Transfer Tool - Usage Examples ===")
-	fmt.Println("The NNTP transfer tool sends articles via CHECK/TAKETHIS commands.")
+	fmt.Println("The NNTP transfer tool sends articles via CHECK/TAKETHIS (streaming), or via IHAVE to peers without streaming.")
 	fmt.Println()
 	fmt.Println("Connection Configuration:")
 	fmt.Println("  ./nntp-transfer -host news.server.local -group news.admin.*")
@@ -55,6 +55,14 @@ func showUsageExamples() {
 	fmt.Println()
 	fmt.Println("Performance Tuning:")
 	fmt.Println("  ./nntp-transfer -host news.server.local -max-threads 4 -group alt.*")
+	fmt.Println()
+	fmt.Println("Sending Mode (IHAVE fallback, see docs/TRANSFER.md):")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.test -ihave auto")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.test -ihave always")
+	fmt.Println("  ./nntp-transfer -host news.server.local -group alt.test -ihave never")
+	fmt.Println("  # auto (default): stream with CHECK/TAKETHIS, switch the whole run to IHAVE when the peer refuses MODE STREAM")
+	fmt.Println("  # always: IHAVE from the start (peers whose TAKETHIS is broken); never: streaming only, retried for as long as the tool runs")
+	fmt.Println("  # In IHAVE mode -check-first is ignored (IHAVE asks the peer itself); -batch-check still sizes the batches")
 	fmt.Println()
 	fmt.Println("Date Filtering:")
 	fmt.Println("  ./nntp-transfer -host news.server.local -date-beg 2024-01-01 -group alt.test")
@@ -206,7 +214,7 @@ func main() {
 		// History configuration
 		useShortHashLen = flag.Int("useshorthashlen", 7, "Short hash length for history storage (2-7, default: 7)")
 		checkFirst      = flag.Bool("check-first", true, "Use CHECK command before TAKETHIS to avoid duplicates (recommended)")
-		ihaveMode       = flag.String("ihave", "auto", "IHAVE fallback: 'auto' (streaming, switch to IHAVE when the peer refuses MODE STREAM), 'never' (streaming only) or 'always' (IHAVE from the start). In IHAVE mode -check-first and -batch-check are ignored.")
+		ihaveMode       = flag.String("ihave", "auto", "IHAVE fallback: 'auto' (streaming, switch to IHAVE when the peer refuses MODE STREAM), 'never' (streaming only) or 'always' (IHAVE from the start). In IHAVE mode -check-first is ignored; -batch-check still sizes the batches (each IHAVE job loads that many articles at once).")
 
 		// Newsgroup filtering options
 		fileInclude      = flag.String("file-include", "", "File containing newsgroup patterns to include (one per line)")
@@ -227,7 +235,7 @@ func main() {
 		log.Fatalf("Error: %v", err)
 	}
 	if usingIHave() {
-		log.Printf("[TRANSFER] -ihave always: sending with IHAVE (-check-first and -batch-check are ignored)")
+		log.Printf("[TRANSFER] -ihave always: sending with IHAVE (-check-first is ignored; -batch-check still sizes the batches: each IHAVE job loads that many articles at once)")
 	}
 	redisKeyPrefix = buildRedisKeyPrefix(*host, *port)
 	common.IgnoreGoogleHeaders = *ignoreGoogleHeaders
@@ -2076,13 +2084,20 @@ forever:
 		errChan := common.GetStructChanCap1()
 		defer common.RecycleStructChanCap1(errChan)
 		newConns := 0
+		// getBackoff: the Get failed and the backoff was already applied below, so the
+		// "no connections obtained" branch must not double isleep a second time.
+		getBackoff := false
+		// boot: every exit of this loop falls through to the monitor goroutine, so the
+		// workers launched in this round are watched even when a later Get fails (a
+		// mixed round: connection 0 streams, connection 1 is refused).
+	boot:
 		for workerID := range bootN {
 			// Get a connection from pool (IHAVE mode: without MODE STREAM)
 			conn, fellBack, err := transferGetConn(pool, ServerHostName)
 			if err != nil {
 				if fellBack {
 					// -ihave auto switched the run to IHAVE: reconnect at once, no backoff
-					continue forever
+					break boot
 				}
 				log.Printf("BootConnWorkers failed to get connection from pool: %v ... retry in: %v", err, isleep)
 				if isleep > defaultSleep {
@@ -2092,21 +2107,22 @@ forever:
 				if isleep > time.Minute {
 					isleep = time.Minute
 				}
-				continue forever
+				getBackoff = true
+				break boot
 			}
 			if !usingIHave() && conn.ModeReader {
 				if VERBOSE {
 					log.Printf("got connection in reader mode, closing and getting a new one")
 				}
 				conn.ForceCloseConn()
-				continue forever
+				break boot
 			}
 			// got a connection
 			slotID := findEmptySlot(&openConns, workerSlots, &mux)
 			if slotID < 0 {
 				log.Printf("BootConnWorkers: no empty worker slot found, closing connection")
 				conn.ForceCloseConn()
-				continue forever
+				break boot
 			}
 			returnSignal := &ReturnSignal{
 				slotID:     slotID,
@@ -2130,16 +2146,18 @@ forever:
 			newConns++
 		}
 		if newConns == 0 {
-			log.Printf("BootConnWorkers: no connections obtained, retry in: %v", isleep)
-			isleep = isleep * 2
-			if isleep > time.Minute {
-				isleep = time.Minute
+			if !getBackoff {
+				log.Printf("BootConnWorkers: no connections obtained, retry in: %v", isleep)
+				isleep = isleep * 2
+				if isleep > time.Minute {
+					isleep = time.Minute
+				}
 			}
 			continue forever
 		}
 		isleep = defaultSleep // reset to default
 		log.Printf("BootConnWorkers: launched %d workers (mode=%s)", newConns, transferModeName())
-		// Monitor recently launched CHTT workers
+		// Monitor the transfer workers (CHTTWorker or IHaveWorker) launched above
 		go func() {
 			monitoring := newConns
 			for {
@@ -2151,7 +2169,7 @@ forever:
 					select {
 					case rs := <-wait.ExitChan:
 						WorkerQueueLengthMux.Lock()
-						log.Printf("CHTTWorker (%d) exited. processed jobs: %d", workerID, WorkerQueueLength[workerID])
+						log.Printf("transfer worker (%d, mode=%s) exited. processed jobs: %d", workerID, transferModeName(), WorkerQueueLength[workerID])
 						WorkerQueueLengthMux.Unlock()
 
 						monitoring--
@@ -2161,13 +2179,13 @@ forever:
 
 						rs.Mux.Lock()
 						if len(rs.jobs) > 0 {
-							log.Printf("CHTTWorker (%d) try requeue %d jobs", workerID, len(rs.jobs))
+							log.Printf("transfer worker (%d) try requeue %d jobs", workerID, len(rs.jobs))
 							for _, job := range rs.jobs {
 								if job != nil {
 									// copy articles pointer
 									job.Mux.Lock()
 									if len(job.MessageIDs) == 0 {
-										log.Printf("ERROR in CHTTWorker (%d) job #%d has no articles, skipping requeue", workerID, job.JobID)
+										log.Printf("ERROR in transfer worker (%d) job #%d has no articles, skipping requeue", workerID, job.JobID)
 										job.Mux.Unlock()
 										continue
 									}
@@ -2183,7 +2201,7 @@ forever:
 									jobRequeueMutex.Lock()
 									jobRequeue[rqj.Newsgroup] = append(jobRequeue[rqj.Newsgroup], rqj)
 									jobRequeueMutex.Unlock()
-									log.Printf("CHTTWorker (%d) did requeue job #%d with %d articles for newsgroup '%s'", workerID, rqj.JobID, len(rqj.MessageIDs), *rqj.Newsgroup)
+									log.Printf("transfer worker (%d) did requeue job #%d with %d articles for newsgroup '%s'", workerID, rqj.JobID, len(rqj.MessageIDs), *rqj.Newsgroup)
 									// unlink pointers
 									job.Mux.Lock()
 									select {
@@ -2202,7 +2220,7 @@ forever:
 									job.Mux.Unlock()
 								}
 							}
-							log.Printf("CHTTWorker (%d) did requeue %d jobs", workerID, len(rs.jobs))
+							log.Printf("transfer worker (%d) did requeue %d jobs", workerID, len(rs.jobs))
 						}
 
 						// Clean up ReturnSignal maps and unlink pointers
