@@ -112,3 +112,15 @@ CLAUDE.md list; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server
   with the `compress` field and an update without it going back to false; move both checkboxes out of the
   "Proxy Configuration" block next to `posting_enabled`. Pre-existing: `GetProviderByName/ByID` use raw
   `QueryRow` instead of `RetryableQueryRowScan` (separate cleanup, not this plan).
+- `worktree-agent-a12cfcbdaf7cae7d2` (compress-conn, b399e14 + review fixes c239e20) reviewed MERGE, merged ab061f9.
+  Review fixes: COMPRESS errors wrapped; line cap disabled around the 206 and re-armed after the swap (a server
+  pipelining compressed payload behind the 206 is pinned by TestCliCompressPipelinedAfter206); rxRaw counts the
+  returned octets on a cap abort; Read after Close is net.ErrClosed. Decision: a 480 to COMPRESS stays a refusal
+  (plain, logged every time with its own wording, no dedupe). flate.DefaultCompression hardcoded.
+### Wave 2
+- `worktree-agent-ac8f06835ae720b93` (compress-stats + the two wave-1 minors: 8896382 77b0f70 2f1fc81 99583bd)
+  reviewed MERGE, merged (see git log) and polished inline 8d729e7 (no negative compressed share; closeConn
+  lock=true note; docs "up to ~1 MiB"; byte totals count from a successful connect on). Pool: liveConns map +
+  four totals under pool.mux, PoolStats byte fields; fetcher logs one `[FETCHER] provider '%s': rx %s (wire %s,
+  compressed %.1f%%) tx %s` line per provider at shutdown; docs/COMPRESS.md + docs/README.md (new index).
+  A stray first spawn landed in a kit worktree (my shell cwd was the kit tree): removed, no work lost.
