@@ -124,3 +124,17 @@ CLAUDE.md list; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server
   four totals under pool.mux, PoolStats byte fields; fetcher logs one `[FETCHER] provider '%s': rx %s (wire %s,
   compressed %.1f%%) tx %s` line per provider at shutdown; docs/COMPRESS.md + docs/README.md (new index).
   A stray first spawn landed in a kit worktree (my shell cwd was the kit tree): removed, no work lost.
+### Verification (2026-10-25, pugleaf-verifier on ce6c9f8): all PASS
+- gofmt/vet/build; the full CLAUDE.md list under -race (31 package lines incl. internal/nntp/inflate); known bugs
+  exactly `nntp-article-430-cache-delay`; build_fetcher/build_webserver/build_nntp-transfer; TestCliCompress*/TestPool*
+  stable with -count=3.
+- End-to-end: the plan's recipe needs a correction: the kit **Store** server of v0.7.0 has no XHDR, and the fetcher
+  downloads with XHDR Message-ID, so COMPRESS negotiated but no article could be fetched. The verifier used a
+  Handler-mode fake on the kit's Conn instead (kit main 540bcd5 has Store XHDR now; after its tag the Store recipe
+  works). `-nntphostname` must be resolvable (example.com). Results: compressed run 500 articles stored, one
+  `COMPRESS DEFLATE accepted` per connection (2), `rx 1.0 MiB (wire 51.4 KiB, compressed 95.1%) tx 23.5 KiB`;
+  plain server with compress=1: one `refused (500 Unknown command), continuing uncompressed` line for two
+  connections, 300 articles fetched, `compressed 0.0%`. Pool accounting clean (created 2, closed 2), no panics.
+- Pinned by observation: the refusal dedupe is for the log line only; the client still sends COMPRESS on every new
+  connection to a refusing provider (one command + one 500 per connection). The stats line shows compression for
+  rx only (tx raw).
