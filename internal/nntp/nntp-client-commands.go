@@ -1502,6 +1502,9 @@ func (c *BackendConn) SwitchToModeStream() error {
 		return fmt.Errorf("failed to read MODE STREAM response: %w", err)
 	}
 
+	if code == 500 || code == 501 {
+		return fmt.Errorf("%w: %d %s", ErrStreamingUnsupported, code, strings.TrimSpace(line))
+	}
 	if code != 203 {
 		return fmt.Errorf("MODE STREAM failed (code %d): %s", code, line)
 	}
