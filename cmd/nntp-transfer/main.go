@@ -177,6 +177,7 @@ func main() {
 		username = flag.String("username", "", "Target NNTP username")
 		password = flag.String("password", "", "Target NNTP password")
 		ssl      = flag.Bool("ssl", false, "Use SSL/TLS connection")
+		compress = flag.Bool("compress", false, "Send COMPRESS DEFLATE (RFC 8054) after login; a refusal keeps the connection plain")
 		timeout  = flag.Int("timeout", 30, "Connection timeout in seconds")
 
 		// Proxy configuration
@@ -330,7 +331,7 @@ func main() {
 
 	// Test connection if requested
 	if *testConn {
-		if err := testConnection(host, port, username, password, ssl, timeout, proxyConfig); err != nil {
+		if err := testConnection(host, port, username, password, ssl, compress, timeout, proxyConfig); err != nil {
 			log.Fatalf("Connection test failed: %v", err)
 		}
 		log.Printf("Connection test successful!")
@@ -435,6 +436,7 @@ func main() {
 		Host:           *host,
 		Port:           *port,
 		SSL:            *ssl,
+		Compress:       *compress,
 		Username:       *username,
 		Password:       *password,
 		MaxConns:       *maxThreads,
@@ -726,7 +728,7 @@ func parseProxyConfig(address, proxyType, username, password string) (*ProxyConf
 }
 
 // testConnection tests the connection to the target NNTP server
-func testConnection(host *string, port *int, username *string, password *string, ssl *bool, timeout *int, proxyConfig *ProxyConfig) error {
+func testConnection(host *string, port *int, username *string, password *string, ssl, compress *bool, timeout *int, proxyConfig *ProxyConfig) error {
 	testProvider := &config.Provider{
 		Name:     "test",
 		Host:     *host,
@@ -743,6 +745,7 @@ func testConnection(host *string, port *int, username *string, password *string,
 		Host:           *host,
 		Port:           *port,
 		SSL:            *ssl,
+		Compress:       *compress,
 		Username:       *username,
 		Password:       *password,
 		MaxConns:       1,
