@@ -206,6 +206,7 @@ func main() {
 		// History configuration
 		useShortHashLen = flag.Int("useshorthashlen", 7, "Short hash length for history storage (2-7, default: 7)")
 		checkFirst      = flag.Bool("check-first", true, "Use CHECK command before TAKETHIS to avoid duplicates (recommended)")
+		ihaveMode       = flag.String("ihave", "auto", "IHAVE fallback: 'auto' (streaming, switch to IHAVE when the peer refuses MODE STREAM), 'never' (streaming only) or 'always' (IHAVE from the start). In IHAVE mode -check-first and -batch-check are ignored.")
 
 		// Newsgroup filtering options
 		fileInclude      = flag.String("file-include", "", "File containing newsgroup patterns to include (one per line)")
@@ -222,6 +223,12 @@ func main() {
 		gcPercent = flag.Int("gc-percent", 50, "Set GOGC percentage (default 100). Lower values = more frequent GC, less memory")
 	)
 	flag.Parse()
+	if err := setIHavePolicy(*ihaveMode); err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+	if usingIHave() {
+		log.Printf("[TRANSFER] -ihave always: sending with IHAVE (-check-first and -batch-check are ignored)")
+	}
 	redisKeyPrefix = buildRedisKeyPrefix(*host, *port)
 	common.IgnoreGoogleHeaders = *ignoreGoogleHeaders
 	CHECK_FIRST = *checkFirst
@@ -640,6 +647,10 @@ func main() {
 	}
 	time.Sleep(time.Second * 3) // wait for all goroutines to finish
 	log.Printf("nntp-transfer exit. Runtime: %v", time.Since(bootTime))
+	if transferFailed() {
+		// the peer offers neither streaming nor IHAVE: a configuration error
+		os.Exit(1)
+	}
 }
 
 // parseDateTime parses a date string in multiple supported formats
@@ -1176,8 +1187,8 @@ func runTransfer(db *database.Database, newsgroups []*models.Newsgroup, batchChe
 	for _, result := range results {
 		log.Print(result)
 	}
-	log.Printf("Summary: total: %d | transferred: %d | cache_hits: %d (before_check: %d, before_takethis: %d) | checked: %d/%d | wanted: %d | unwanted: %d | rejected: %d | retry: %d  | skipped: %d | TX_Errors: %d | connErrors: %d",
-		globalTotalArticles, totalTransferred, totalRedisCacheHits, totalRedisCacheBeforeCheck, totalRedisCacheBeforeTakethis, totalChecked, totalCheckSentCount, totalWanted, totalUnwanted, totalRejected, totalRetry, totalSkipped, totalTXErrors, totalConnErrors)
+	log.Printf("Summary: mode=%s | total: %d | transferred: %d | cache_hits: %d (before_check: %d, before_takethis: %d) | checked: %d/%d | wanted: %d | unwanted: %d | rejected: %d | retry: %d  | skipped: %d | TX_Errors: %d | connErrors: %d",
+		transferModeName(), globalTotalArticles, totalTransferred, totalRedisCacheHits, totalRedisCacheBeforeCheck, totalRedisCacheBeforeTakethis, totalChecked, totalCheckSentCount, totalWanted, totalUnwanted, totalRejected, totalRetry, totalSkipped, totalTXErrors, totalConnErrors)
 	nntp.ResultsMutex.Unlock()
 	log.Printf("Debug: StructChansCap1: %d/%d", len(common.StructChansCap1), cap(common.StructChansCap1))
 	return nil
@@ -2042,6 +2053,11 @@ forever:
 			log.Printf("BootConnWorkers: WantShutdown, exiting")
 			break forever
 		}
+		if ihavePeerRefused() {
+			// the peer has neither streaming nor IHAVE: stop instead of reconnecting forever
+			stopRunNoIHave()
+			break forever
+		}
 		mux.Lock()
 		allEstablished = openConns == nntp.NNTPTransferThreads
 		mux.Unlock()
@@ -2061,9 +2077,13 @@ forever:
 		defer common.RecycleStructChanCap1(errChan)
 		newConns := 0
 		for workerID := range bootN {
-			// Get a connection from pool
-			conn, err := pool.Get(nntp.MODE_STREAM_MV)
+			// Get a connection from pool (IHAVE mode: without MODE STREAM)
+			conn, fellBack, err := transferGetConn(pool, ServerHostName)
 			if err != nil {
+				if fellBack {
+					// -ihave auto switched the run to IHAVE: reconnect at once, no backoff
+					continue forever
+				}
 				log.Printf("BootConnWorkers failed to get connection from pool: %v ... retry in: %v", err, isleep)
 				if isleep > defaultSleep {
 					time.Sleep(isleep)
@@ -2074,7 +2094,7 @@ forever:
 				}
 				continue forever
 			}
-			if conn.ModeReader {
+			if !usingIHave() && conn.ModeReader {
 				if VERBOSE {
 					log.Printf("got connection in reader mode, closing and getting a new one")
 				}
@@ -2102,7 +2122,11 @@ forever:
 			returnSignals[workerID] = returnSignal
 			// assign checkQueue by openConns counter
 			// so restarted workers get same channels to read from
-			go CHTTWorker(db, workerID, conn, returnSignal)
+			if usingIHave() {
+				go IHaveWorker(db, workerID, conn, returnSignal)
+			} else {
+				go CHTTWorker(db, workerID, conn, returnSignal)
+			}
 			newConns++
 		}
 		if newConns == 0 {
@@ -2114,7 +2138,7 @@ forever:
 			continue forever
 		}
 		isleep = defaultSleep // reset to default
-		log.Printf("BootConnWorkers: launched %d CHTT workers", newConns)
+		log.Printf("BootConnWorkers: launched %d workers (mode=%s)", newConns, transferModeName())
 		// Monitor recently launched CHTT workers
 		go func() {
 			monitoring := newConns
@@ -2245,6 +2269,10 @@ type ReturnSignal struct {
 	jobsReadOK map[*nntp.CHTTJob]uint64
 	jobMap     map[*string]*nntp.CHTTJob
 	jobs       []*nntp.CHTTJob
+	// ihaveSend replaces (*nntp.BackendConn).IHave in IHaveWorker. It is nil in
+	// production (BootConnWorkers never sets it); the worker tests use it to drive
+	// the bookkeeping without a peer.
+	ihaveSend ihaveSender
 }
 
 func replyChan(request chan struct{}, reply chan struct{}) {
