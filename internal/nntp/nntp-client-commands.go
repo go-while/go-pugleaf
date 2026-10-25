@@ -1194,13 +1194,17 @@ func transferHeaders(article *models.Article, nntphostname *string, newsgroup st
 // outcomes the caller counts and decides on:
 //
 //	235 - transferred and accepted
-//	435 - not wanted (the peer has it, or refuses the id)
+//	435 - not wanted (the peer has it, or refuses the id; also accepted after
+//	      the article: non-conforming peers answer it there)
 //	436 - transfer failed, try again later (before or after the article)
-//	437 - rejected after the transfer: do not offer it again
+//	437 - rejected: do not offer it again (before or after the article)
 //
 // Everything else returns an error: a 480 wraps ErrAuthRequired, 500/501 (no
-// IHAVE) and 502 (transfer permission denied) wrap ErrIHaveUnsupported — all
-// three leave the connection usable, the caller stops offering articles. An
+// IHAVE), 502 (transfer permission denied) and a MODE READER connection wrap
+// ErrIHaveUnsupported — they leave the connection usable, the caller stops
+// offering articles (it must not reconnect into the same refusal). 480 and the
+// three refusal codes are handled before and after the article: a peer may
+// read the article first and refuse afterwards. An
 // unsafe or incomplete header block is skipped before anything is written
 // (common.ErrRelayHeadersInvalid, ErrInvalidCommandArg; the connection stays
 // connected). A read error, EOF or any other status force-closes the
@@ -1208,8 +1212,13 @@ func transferHeaders(article *models.Article, nntphostname *string, newsgroup st
 //
 // txBytes is the number of octets of the article handed to the connection (headers,
 // separator, dot-stuffed body and terminator), 0 when nothing was written. A MODE READER
-// connection is refused up front (innd answers IHAVE with 500 there): get the connection
-// with MODE_NONE_MV.
+// connection is refused up front with ErrIHaveUnsupported (innd answers IHAVE with 500
+// there): get the connection with MODE_NONE_MV.
+//
+// Both replies are read with ReadCodeLine(0): the status is never matched against an
+// expected code (that would hide it in a *textproto.Error), so a multi-line reply is
+// the only protocol error left and it force-closes the connection instead of silently
+// leaving its continuation lines in the read buffer.
 func (c *BackendConn) IHave(article *models.Article, nntphostname *string, newsgroup string) (code int, txBytes int, err error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
@@ -1218,7 +1227,10 @@ func (c *BackendConn) IHave(article *models.Article, nntphostname *string, newsg
 		return 0, 0, fmt.Errorf("not connected")
 	}
 	if c.ModeReader {
-		return 0, 0, fmt.Errorf("IHAVE '%s' on a MODE READER connection: use a transit connection (MODE_NONE_MV)", article.MessageID)
+		// innd hands a MODE READER connection to nnrpd, which has no IHAVE: the
+		// sentinel takes the caller to its "stop the run" path (a reconnect would
+		// meet the same refusal).
+		return 0, 0, fmt.Errorf("%w: IHAVE '%s' on a MODE READER connection: use a transit connection (MODE_NONE_MV)", ErrIHaveUnsupported, article.MessageID)
 	}
 
 	headers, err := transferHeaders(article, nntphostname, newsgroup)
@@ -1249,7 +1261,9 @@ func (c *BackendConn) IHave(article *models.Article, nntphostname *string, newsg
 	defer c.TextConn.EndResponse(id)
 
 	// First response: 335 asks for the article, everything else ends here.
-	code, line, err := c.TextConn.ReadCodeLine(335)
+	// ReadCodeLine(0) accepts any status: the switch below decides, and the only
+	// error left is a malformed or multi-line reply.
+	code, line, err := c.TextConn.ReadCodeLine(0)
 	if err != nil && code == 0 {
 		c.ForceCloseConn()
 		return 0, 0, fmt.Errorf("failed to read IHAVE '%s' response: %w", article.MessageID, err)
@@ -1286,8 +1300,9 @@ func (c *BackendConn) IHave(article *models.Article, nntphostname *string, newsg
 		return 0, txBytes, fmt.Errorf("failed to flush article data for IHAVE '%s': %w", article.MessageID, werr)
 	}
 
-	// Second response: the peer's verdict on the transferred article.
-	code, line, err = c.TextConn.ReadCodeLine(235)
+	// Second response: the peer's verdict on the transferred article (any status,
+	// see the first read).
+	code, line, err = c.TextConn.ReadCodeLine(0)
 	if err != nil && code == 0 {
 		c.ForceCloseConn()
 		return 0, txBytes, fmt.Errorf("failed to read IHAVE '%s' article response: %w", article.MessageID, err)
@@ -1297,10 +1312,18 @@ func (c *BackendConn) IHave(article *models.Article, nntphostname *string, newsg
 		return code, txBytes, fmt.Errorf("malformed IHAVE '%s' article response: %w", article.MessageID, err)
 	}
 	switch code {
-	case 235, 436, 437:
-		return code, txBytes, nil // accepted / deferred / rejected: the caller counts
+	case 235, 435, 436, 437:
+		// accepted / not wanted / deferred / rejected: the caller counts. 435 does
+		// not belong here (RFC 3977 §6.3.2), but peers answer it; treating it as a
+		// broken exchange would requeue the article forever.
+		return code, txBytes, nil
 	case AuthRequired:
 		return code, txBytes, authRequiredErr("IHAVE "+article.MessageID, code, line)
+	case 500, 501, 502:
+		// the peer refuses IHAVE itself, only after reading the article: the same
+		// sentinel as before the article, so the caller stops instead of booking a
+		// connection error and offering the article again forever.
+		return code, txBytes, fmt.Errorf("%w: %d %s", ErrIHaveUnsupported, code, strings.TrimSpace(line))
 	default:
 		c.ForceCloseConn()
 		return code, txBytes, fmt.Errorf("unexpected IHAVE '%s' response after the article: %d %s", article.MessageID, code, strings.TrimSpace(line))

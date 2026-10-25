@@ -11,8 +11,9 @@ package main
 //	        switches the whole run to IHAVE
 //	always  IHAVE from the start (for peers whose TAKETHIS is broken)
 //
-// In IHAVE mode -check-first and -batch-check have no effect: every article is
-// offered with a single IHAVE and there is no pipelining.
+// In IHAVE mode -check-first has no effect (IHAVE asks the peer itself): every
+// article is offered with a single IHAVE and there is no pipelining. -batch-check
+// still sizes the batches: one job loads that many articles at once.
 
 import (
 	"errors"
@@ -251,7 +252,7 @@ func ihaveJob(db *database.Database, workerID int, conn *nntp.BackendConn, rs *R
 		if common.WantShutdown() {
 			return true, fmt.Errorf("shutdown while sending job #%d", job.JobID)
 		}
-		stop, defer436, err := ihaveArticle(conn, rs, send, job, newsgroup, article)
+		stop, defer436, err := ihaveArticle(conn, rs, send, job, newsgroup, article, false)
 		if stop {
 			return true, err
 		}
@@ -263,7 +264,7 @@ func ihaveJob(db *database.Database, workerID int, conn *nntp.BackendConn, rs *R
 		if common.WantShutdown() {
 			return true, fmt.Errorf("shutdown while retrying job #%d", job.JobID)
 		}
-		stop, defer436, err := ihaveArticle(conn, rs, send, job, newsgroup, article)
+		stop, defer436, err := ihaveArticle(conn, rs, send, job, newsgroup, article, true)
 		if stop {
 			return true, err
 		}
@@ -278,21 +279,28 @@ func ihaveJob(db *database.Database, workerID int, conn *nntp.BackendConn, rs *R
 }
 
 // ihaveArticle offers one article with IHAVE and books the result on the job's
-// progress. defer436 is true when the peer answered 436 (transfer later).
-func ihaveArticle(conn *nntp.BackendConn, rs *ReturnSignal, send ihaveSender, job *nntp.CHTTJob, newsgroup string, article *models.Article) (stop bool, defer436 bool, err error) {
+// progress. defer436 is true when the peer answered 436 (transfer later); retry marks
+// the second offer of such an article, whose send is not booked again.
+func ihaveArticle(conn *nntp.BackendConn, rs *ReturnSignal, send ihaveSender, job *nntp.CHTTJob, newsgroup string, article *models.Article, retry bool) (stop bool, defer436 bool, err error) {
 	if !conn.IsConnected() {
 		job.NGTProgress.Increment(nntp.IncrFLAG_CONN_ERRORS, 1)
 		return true, false, fmt.Errorf("connection lost before IHAVE '%s'", article.MessageID)
 	}
 	code, txBytes, err := send(article, newsgroup)
-	job.NGTProgress.Increment(nntp.IncrFLAG_TTSentCount, 1)
 	if txBytes > 0 {
+		// the octets that went out, booked like the TAKETHIS path books them (before
+		// the error check: a half-written article was sent too)
 		job.Mux.Lock()
 		job.TTxBytes += uint64(txBytes)
 		job.Mux.Unlock()
+	}
+	if err == nil && !retry {
+		// One offer, one article: TAKETHIS books the sent command after a successful
+		// send (main.go, sendArticlesBatchViaTakeThis) and the article with its bytes
+		// when the reply arrives (TTResponseWorker). The 436 retry pass offers an
+		// article that is already booked, so it is not counted a second time.
+		job.NGTProgress.Increment(nntp.IncrFLAG_TTSentCount, 1)
 		job.NGTProgress.AddNGTP(0, 1, uint64(txBytes))
-	} else {
-		job.NGTProgress.AddNGTP(0, 1, 0)
 	}
 	if err != nil {
 		if errors.Is(err, nntp.ErrIHaveUnsupported) || errors.Is(err, nntp.ErrAuthRequired) {

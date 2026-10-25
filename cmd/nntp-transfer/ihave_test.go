@@ -372,8 +372,9 @@ func TestTxIHaveModeAlways(t *testing.T) {
 }
 
 // TestTxIHaveWorkerCounters: every article of a job is offered once; 235, 435 and 437
-// land on the transferred, unwanted and rejected counters, the job is answered and the
-// worker runs without Redis (rs.redisCli == nil).
+// land on the transferred, unwanted and rejected counters, every successful offer is
+// booked once (TTSentCount and the bytes, as the TAKETHIS path books them), the job is
+// answered and the worker runs without Redis (rs.redisCli == nil).
 func TestTxIHaveWorkerCounters(t *testing.T) {
 	txIHaveMode(t, "always")
 	txIHaveQueues(t, 1)
@@ -490,6 +491,14 @@ func TestTxIHaveWorker436Retry(t *testing.T) {
 	if progress.Transferred != 1 || progress.Rejected != 1 || progress.Retry != 1 {
 		t.Errorf("transferred=%d rejected=%d retry=%d, want 1/1/1", progress.Transferred, progress.Rejected, progress.Retry)
 	}
+	// Only the first offer of an article is booked: the three first offers, not the
+	// two of the 436 retry pass (the deferred articles are already counted).
+	if progress.TTSentCount != 3 {
+		t.Errorf("TTSentCount = %d, want 3 (the 436 retry pass is not counted again)", progress.TTSentCount)
+	}
+	if progress.TXBytes != 50 {
+		t.Errorf("TXBytes = %d, want 50 (only the first offers carry bytes here)", progress.TXBytes)
+	}
 }
 
 // TestTxIHaveWorkerUnsupported: a peer that refuses IHAVE stops the worker; the job
@@ -555,6 +564,9 @@ func TestTxIHaveWorkerUnsupported(t *testing.T) {
 	if progress.Transferred != 0 {
 		t.Errorf("transferred = %d, want 0", progress.Transferred)
 	}
+	if progress.TTSentCount != 0 {
+		t.Errorf("TTSentCount = %d, want 0: a failed offer is not a sent article", progress.TTSentCount)
+	}
 }
 
 // TestTxIHaveWorkerConnError: a connection error mid-job stops the worker and leaves
@@ -606,13 +618,14 @@ func TestTxIHaveWorkerConnError(t *testing.T) {
 	if progress.ConnErrors != 1 {
 		t.Errorf("connErrors = %d, want 1", progress.ConnErrors)
 	}
+	if progress.TTSentCount != 0 {
+		t.Errorf("TTSentCount = %d, want 0: a failed offer is not a sent article", progress.TTSentCount)
+	}
 }
 
 // TestTxIHaveWorkerPeer drives IHaveWorker through the real client command against a
 // kit peer without streaming: every article of the job ends up in the peer's Have.
-// Needs (*nntp.BackendConn).IHave from the parallel slice ihave-client.
 func TestTxIHaveWorkerPeer(t *testing.T) {
-
 	txIHaveMode(t, "always")
 	txIHaveQueues(t, 1)
 	db := txIHaveOpenDB(t)
