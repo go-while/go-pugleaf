@@ -162,12 +162,13 @@ func TestAdfOptAIChatNoInnerHTML(t *testing.T) {
 }
 
 // TestAdfOptProviderCreateExists (A-web-14): a second create with the same name reports
-// "already exists" and leaves one row.
+// "already exists" and leaves one row. The create also carries the COMPRESS DEFLATE
+// checkbox (plan fetcher-compress-deflate): a ticked box stores compress = true.
 func TestAdfOptProviderCreateExists(t *testing.T) {
 	db := w0DB(t)
 	_, cookie := w0NewUser(t, true)
 	name := w0Name("adfoptprov")
-	form := url.Values{"name": {name}, "host": {"news.test.invalid"}, "port": {"119"}}
+	form := url.Values{"name": {name}, "host": {"news.test.invalid"}, "port": {"119"}, "compress": {"on"}}
 
 	resp, success, failure := adfOptPost(t, cookie, "/admin/providers", form)
 	if resp.StatusCode != http.StatusSeeOther || !strings.Contains(success, "created successfully") || failure != "" {
@@ -200,10 +201,14 @@ func TestAdfOptProviderCreateExists(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("%d providers named %s, want 1", n, name)
 	}
+	if !p.Compress {
+		t.Errorf("create with compress=on stored compress=%v, want true", p.Compress)
+	}
 }
 
 // TestAdfOptProviderUpdate (A-web-14): an unknown id is an error, a rename is refused, and an
-// update without the (read-only) name field succeeds.
+// update without the (read-only) name field succeeds. The unchecked COMPRESS DEFLATE box
+// (plan fetcher-compress-deflate) sends no field at all, which clears compress again.
 func TestAdfOptProviderUpdate(t *testing.T) {
 	db := w0DB(t)
 	_, cookie := w0NewUser(t, true)
@@ -238,7 +243,7 @@ func TestAdfOptProviderUpdate(t *testing.T) {
 	}
 
 	_, success, failure = adfOptPost(t, cookie, "/admin/providers/update",
-		url.Values{"id": {id}, "host": {"new.test.invalid"}})
+		url.Values{"id": {id}, "host": {"new.test.invalid"}, "compress": {"on"}})
 	if failure != "" || !strings.Contains(success, "updated successfully") {
 		t.Errorf("update without name: success=%q error=%q", success, failure)
 	}
@@ -248,6 +253,23 @@ func TestAdfOptProviderUpdate(t *testing.T) {
 	}
 	if got.Host != "new.test.invalid" || got.Name != name {
 		t.Errorf("after update: name=%q host=%q, want %q / new.test.invalid", got.Name, got.Host, name)
+	}
+	if !got.Compress {
+		t.Errorf("after update with compress=on: compress=%v, want true", got.Compress)
+	}
+
+	// An unticked checkbox is not posted at all: the update must clear the flag.
+	_, success, failure = adfOptPost(t, cookie, "/admin/providers/update",
+		url.Values{"id": {id}, "host": {"new.test.invalid"}})
+	if failure != "" || !strings.Contains(success, "updated successfully") {
+		t.Errorf("update without compress: success=%q error=%q", success, failure)
+	}
+	got, err = db.GetProviderByID(p.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetProviderByID(%d) = %v, %v", p.ID, got, err)
+	}
+	if got.Compress {
+		t.Errorf("after an update without the compress field: compress=%v, want false", got.Compress)
 	}
 }
 
