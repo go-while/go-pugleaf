@@ -76,3 +76,53 @@ CLAUDE.md list; `./build_nntp-transfer.sh`; `PUGLEAF_KNOWN_BUGS=1 ...` unchanged
 -max-threads 1 <group selection flags as the tool needs>`: log shows the fallback line once, `N articles sent via IHAVE`,
 exit 0; the kit peer's `Have` holds every id. Same with `-ihave never`: the pool retry line appears, no IHAVE, the run
 is stopped by the test's deadline (documented as the pre-plan behaviour).
+
+## Progress
+### Wave 0 (2026-10-25, inline 74a5302 + 279c631)
+- `ErrStreamingUnsupported` (MODE STREAM 500/501, read from the code before the textproto error), `ErrIHaveUnsupported`;
+  `TestCliTxNoStream*` assert the sentinel.
+### Wave 1
+- `worktree-agent-a2408d2df140d4c85` (ihave-client, ba83f7f) reviewed MERGE, merged 70fd1d9: `transferHeaders` factored
+  out of TAKETHIS (wire byte-identical, pinned by TestCliIHaveWireEqualsTakeThis), `BackendConn.IHave`.
+- `worktree-agent-a74ceff9750b31136` (ihave-tool, 5adef45) merged ee68585 (did not compile alone: needed IHave):
+  `-ihave auto|never|always`, IHaveWorker, stop path with exit 1, summary `mode=`.
+- Inline e4b69bf: `nntp.MODE_NONE_MV` (= 0; SwitchMode no-op, Pool.Get hands an idle connection out as is) so IHAVE
+  runs on a transit connection (innd gives a MODE READER connection to nnrpd, which has no IHAVE); IHave refuses a
+  reader-mode connection, accepts 437 before the article as "rejected by id", treats a textproto continuation reply
+  ("335-...") as malformed (force-close); ihaveConnMode flipped from the MODE_READER_MV stopgap; TestTxIHaveWorkerPeer
+  unskipped. Review minors applied from the client review (1, 2, 3, 4); informational: a sendCmd write failure leaves
+  the textproto response sequence stuck until the asynchronous ForceCloseConn lands (pre-existing house pattern; the
+  worker never reuses a failed connection).
+- Kit note: PeerHandler ignores Faults (Store/Script only), so refusal cases use Script-mode peers.
+### Wave 2
+- `worktree-agent-aa746a7f0053dfa6d` (ihave-docs-verify + six review follow-ups: 0493741 d4c7670 ef9528b c12deb8) reviewed
+  MERGE-after-fixes, fixes done, merged. IHave reads both replies with ReadCodeLine(0) (continuation replies fatal,
+  code preserved), accepts 435 after the article, stops the run on 500/501/502 after the article and on a reader-mode
+  connection (ErrIHaveUnsupported); BootConnWorkers' boot round always starts the monitor for launched workers (old
+  hole: workers of a partially failed round were never monitored), only the Get error owns the backoff (skipBackoff);
+  IHAVE send counters booked like TAKETHIS; mode-aware monitor logs; docs/TRANSFER.md + docs index; BUGS.md note; usage
+  text fixed (-redis-flushdb, inline).
+- Known, unchanged (pre-existing): a partial boot round reuses worker ids 0..n-1 so two workers may share CheckQueues[0]
+  (moot at -max-threads 1); BootConnWorkers has no unit test (walked by review); TTSentCount counts offers in IHAVE mode.
+### Verification (2026-10-25, pugleaf-verifier on 530188a): all PASS
+- gofmt/vet/build; full CLAUDE.md list under -race; known bugs exactly `nntp-article-430-cache-delay`; build scripts;
+  stability -count=3.
+- Binary e2e (scratch `-data ./data-test-ihave`, 20 seeded articles; needs a resolvable `local_nntp_hostname`
+  (example.com) and `newsgroups.message_count` set for raw-inserted rows): (a) `-ihave auto` vs NoStream peer: one
+  fallback line, 20 IHAVE / 0 CHECK / 0 TAKETHIS / MODE 1, transferred 20, `mode=ihave`, exit 0; (b) `-ihave never`:
+  retry 1s..16s, no IHAVE, documented pre-plan loop; (c) streaming peer + auto: 20 CHECK/20 TAKETHIS, 0 IHAVE,
+  `mode=streaming`; (d) peer answering 502 to IHAVE with `-ihave always`: one offer, "neither streaming nor IHAVE"
+  line, exit 1. No panics, races or duplicates.
+- Pre-existing, both modes: `[NNTP-POOL] WARNING: Pool closed with positive count 1 active connections remaining` on
+  shutdown, and the tool never sends QUIT before closing; shutdown 5-8 s (fixed 3 s sleep).
+
+## Outcome (2026-10-25)
+- Integration branch `plan-transfer-ihave-fallback` merged into `testing-001` with `--no-ff` (merge commit: `git log
+  --merges -1`). Not pushed. User pre-approved the run ("ok to them all"), and asked for no new jobs near the usage limit.
+- Wave merges: 70fd1d9 (ihave-client), ee68585 (ihave-tool), f5dd95e (ihave-docs-verify); inline e4b69bf, 01f4c37.
+- Worktrees (user cleans up), under `/tank0/claude/trees/go-pugleaf/`: `agent-a2408d2df140d4c85`
+  (`worktree-agent-a2408d2df140d4c85`), `agent-a74ceff9750b31136` (`worktree-agent-a74ceff9750b31136`),
+  `agent-aa746a7f0053dfa6d` (`worktree-agent-aa746a7f0053dfa6d`).
+- Leftovers: partial boot rounds reuse worker ids (moot at -max-threads 1); BootConnWorkers untested by unit tests;
+  pool "positive count" warning and missing QUIT at shutdown (pre-existing); Redis path of IHAVE covered by unit tests
+  only; `-compress` flag for nntp-transfer (from the compress plan) still open.

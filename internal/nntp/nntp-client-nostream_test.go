@@ -1,6 +1,7 @@
 package nntp
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -29,8 +30,8 @@ func TestCliTxNoStreamPeer(t *testing.T) {
 		conn.ForceCloseConn()
 		t.Fatal("Pool.Get(MODE_STREAM_MV) succeeded against a peer without streaming")
 	}
-	if !strings.Contains(err.Error(), "501") {
-		t.Fatalf("Pool.Get error = %q, want the peer's 501 in it", err)
+	if !errors.Is(err, ErrStreamingUnsupported) || !strings.Contains(err.Error(), "501") {
+		t.Fatalf("Pool.Get error = %q, want ErrStreamingUnsupported with the peer's 501 in it", err)
 	}
 	cliSessWaitStats(t, pool, "the failed connection closed and not counted", func(st PoolStats) bool {
 		return st.TotalCreated >= 1 && st.TotalCreated == st.TotalClosed &&
@@ -75,8 +76,8 @@ func TestCliTxNoStreamConn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	if err := c.SwitchToModeStream(); err == nil || !strings.Contains(err.Error(), "501") {
-		t.Fatalf("SwitchToModeStream error = %v, want the peer's 501", err)
+	if err := c.SwitchToModeStream(); !errors.Is(err, ErrStreamingUnsupported) || !strings.Contains(err.Error(), "501") {
+		t.Fatalf("SwitchToModeStream error = %v, want ErrStreamingUnsupported with the peer's 501", err)
 	}
 	if c.ModeStream || c.ModeReader {
 		t.Fatalf("after a refused MODE STREAM: ModeStream=%v ModeReader=%v, want neither", c.ModeStream, c.ModeReader)

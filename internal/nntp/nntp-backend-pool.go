@@ -267,6 +267,10 @@ func (pool *Pool) SelectGroup(group string) (*GroupInfo, error) {
 	return gi, nil
 }
 
+// MODE_NONE_MV asks the pool for a connection without a mode switch: a transit connection for
+// IHAVE (innd hands a MODE READER connection to nnrpd, which has no IHAVE). The mode of a
+// reused idle connection is not guaranteed; IHave refuses a reader-mode one.
+const MODE_NONE_MV int = 0
 const MODE_READER_MV int = 1
 const MODE_STREAM_MV int = 2
 

@@ -74,6 +74,16 @@ const (
 // to a command; the connection is force-closed.
 var ErrAuthRequired = errors.New("authentication required")
 
+// ErrStreamingUnsupported is returned (wrapped) by SwitchToModeStream when the peer answers
+// MODE STREAM with 500 or 501: a transit peer without streaming (innd with streaming off),
+// which innfeed and innxmit feed with IHAVE instead (plan transfer-ihave-fallback).
+var ErrStreamingUnsupported = errors.New("peer has no streaming (MODE STREAM refused)")
+
+// ErrIHaveUnsupported is returned (wrapped) by IHave when the peer answers IHAVE with 500 or
+// 501 (no IHAVE at all) or 502 (transfer permission denied): the caller stops instead of
+// retrying every article.
+var ErrIHaveUnsupported = errors.New("peer refuses IHAVE")
+
 // ErrAuthRejected wraps an AUTHINFO USER/PASS reply other than 281/381.
 var ErrAuthRejected = errors.New("authentication rejected")
 
