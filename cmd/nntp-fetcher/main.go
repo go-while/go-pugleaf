@@ -704,7 +704,56 @@ func main() {
 	log.Printf("[FETCHER]: Total downloaded: %d articles, notfound: %d (newsgroups: %d)", downloaded, notfound, queued)
 	mux.Unlock()
 
+	logProviderBytes(pools)
+
 	log.Printf("[FETCHER]: Graceful shutdown completed. Exiting here.")
+}
+
+// logProviderBytes prints one summary line per provider pool at the end of the
+// run: the octets the NNTP layer moved, and for a provider with COMPRESS
+// DEFLATE on (plan fetcher-compress-deflate) what crossed the socket and how
+// much deflate saved on the received stream.
+func logProviderBytes(pools []*nntp.Pool) {
+	for _, pool := range pools {
+		if pool == nil || pool.Backend == nil {
+			continue
+		}
+		name := pool.Backend.Host
+		if pool.Backend.Provider != nil && pool.Backend.Provider.Name != "" {
+			name = pool.Backend.Provider.Name
+		}
+		st := pool.Stats()
+		if !pool.Backend.Compress {
+			log.Printf("[FETCHER] provider '%s': rx %s tx %s", name, humanBytes(st.RxBytesRaw), humanBytes(st.TxBytesRaw))
+			continue
+		}
+		log.Printf("[FETCHER] provider '%s': rx %s (wire %s, compressed %.1f%%) tx %s",
+			name, humanBytes(st.RxBytesRaw), humanBytes(st.RxBytesWire),
+			savedPercent(st.RxBytesRaw, st.RxBytesWire), humanBytes(st.TxBytesRaw))
+	}
+}
+
+// savedPercent is how much of raw the wire stream did not carry, in percent;
+// 0 when nothing was received.
+func savedPercent(raw, wire int64) float64 {
+	if raw <= 0 || wire >= raw { // deflate framing can exceed a few short replies: never a negative share
+		return 0
+	}
+	return float64(raw-wire) / float64(raw) * 100
+}
+
+// humanBytes formats an octet count with a binary unit (1 decimal above KiB).
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit && exp < 4; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
 }
 
 const (

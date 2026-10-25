@@ -36,6 +36,13 @@ type deadlineConn struct {
 	writeTimeout atomic.Int64 // nanoseconds; <= 0: no write deadline
 	maxLine      atomic.Int64 // response line cap in bytes; <= 0: no cap
 
+	// ctr counts the octets of both directions (nil: no accounting). What
+	// passes through deadlineConn is the raw stream; the wire octets are
+	// counted here as well unless the layer underneath does it (belowCounts,
+	// set by swapConn for the COMPRESS DEFLATE layer).
+	ctr         *byteCounters
+	belowCounts atomic.Bool
+
 	// run and lineErr are used by Read only (one reader at a time: textproto).
 	run     int64 // bytes since the last '\n' seen in earlier reads
 	lineErr error // sticky ErrResponseLineTooLong once the cap was exceeded
@@ -64,9 +71,44 @@ func (dc *deadlineConn) setTimeouts(rd, wr time.Duration) {
 }
 
 // setMaxLine sets the response line cap (bytes before the '\n'); n <= 0
-// disables it. Call it before the first Read (Connect holds c.mux).
+// disables it. It also clears the state of the cap, because the octets
+// measured so far belong to the stream before the change (the COMPRESS
+// exchange disables the cap and re-arms it on the inflated stream). Call it
+// while no Read is in progress (Connect holds c.mux).
 func (dc *deadlineConn) setMaxLine(n int) {
 	dc.maxLine.Store(int64(n))
+	dc.run, dc.lineErr = 0, nil
+}
+
+// setCounters attaches the octet counters of the connection; nil disables the
+// accounting. Call it before the first Read or Write.
+func (dc *deadlineConn) setCounters(ctr *byteCounters) {
+	dc.ctr = ctr
+}
+
+// swapConn puts another conn underneath: the COMPRESS DEFLATE layer over the
+// socket (nntp-client-compress.go). The deadlines and the line cap keep
+// working on what that layer hands up, which is the inflated stream, and the
+// line-cap state is reset because the octets counted so far belong to the
+// plain stream before the 206. From now on the layer underneath counts the
+// wire octets. Call it while no Read or Write is in progress (Connect holds
+// c.mux and nothing is in flight).
+func (dc *deadlineConn) swapConn(c net.Conn) {
+	dc.Conn = c
+	dc.run, dc.lineErr = 0, nil
+	dc.belowCounts.Store(true)
+}
+
+// count adds n octets of one direction to the counters: always to the raw
+// stream, and to the wire stream unless the layer underneath counts it.
+func (dc *deadlineConn) count(raw, wire *atomic.Int64, n int) {
+	if dc.ctr == nil || n <= 0 {
+		return
+	}
+	raw.Add(int64(n))
+	if !dc.belowCounts.Load() {
+		wire.Add(int64(n))
+	}
 }
 
 // Read arms the read deadline, reads from the socket and checks the line cap.
@@ -80,6 +122,7 @@ func (dc *deadlineConn) Read(p []byte) (int, error) {
 		}
 	}
 	n, err := dc.Conn.Read(p)
+	ret := n // the octets handed on, and the octets counted
 	if limit := dc.maxLine.Load(); limit > 0 && n > 0 {
 		// Walk every '\n' in p[:n]: the first segment continues the line of
 		// earlier reads (run), each following one is measured between two
@@ -105,10 +148,13 @@ func (dc *deadlineConn) Read(p []byte) (int, error) {
 			// reader can never return it; it fails on that line, and every
 			// later Read fails with the same error.
 			dc.lineErr = fmt.Errorf("%w: over %d bytes", ErrResponseLineTooLong, limit)
-			return start, dc.lineErr
+			ret, err = start, dc.lineErr
 		}
 	}
-	return n, err
+	if dc.ctr != nil {
+		dc.count(&dc.ctr.rxRaw, &dc.ctr.rxWire, ret)
+	}
+	return ret, err
 }
 
 // Write arms the write deadline, then writes to the socket.
@@ -118,5 +164,9 @@ func (dc *deadlineConn) Write(p []byte) (int, error) {
 			return 0, err
 		}
 	}
-	return dc.Conn.Write(p)
+	n, err := dc.Conn.Write(p)
+	if dc.ctr != nil {
+		dc.count(&dc.ctr.txRaw, &dc.ctr.txWire, n)
+	}
+	return n, err
 }

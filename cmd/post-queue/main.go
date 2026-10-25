@@ -297,6 +297,7 @@ func createPostingPools(providers []*models.Provider) ([]*nntp.Pool, error) {
 			Priority:   p.Priority,
 			MaxArtSize: p.MaxArtSize,
 			Posting:    p.Posting,
+			Compress:   p.Compress,
 			// Copy proxy configuration
 			ProxyEnabled:  p.ProxyEnabled,
 			ProxyType:     p.ProxyType,
@@ -314,6 +315,7 @@ func createPostingPools(providers []*models.Provider) ([]*nntp.Pool, error) {
 			Password: p.Password,
 			MaxConns: p.MaxConns,
 			Provider: configProvider,
+			Compress: p.Compress,
 			// Copy proxy configuration
 			ProxyEnabled:  p.ProxyEnabled,
 			ProxyType:     p.ProxyType,

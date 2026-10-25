@@ -99,3 +99,42 @@ CLAUDE.md list; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server
    SQL on the scratch DB: the fetcher log shows one `COMPRESS DEFLATE accepted` line per connection and the
    stats line with `compressed=…%`; the kit server's `Lines()` show every command once (no doubled COMPRESS).
 3. Same against `StoreOpts.Compress: false`: one `refused (500 …)` line, articles still fetched.
+
+## Progress
+### Wave 0 (2026-10-25, inline b200eb1)
+- `internal/nntp/inflate` ported from the kit (tests included), `Compress` on `models.Provider`/`config.Provider`/
+  `nntp.BackendConfig`, migration 0033.
+### Wave 1
+- `worktree-agent-a4736a42745b6bbdf` (compress-config, 92702aa) reviewed MERGE, merged b297896. Column/Scan order of
+  the five provider queries verified by the reviewer. CLI-built configs (cmd/nntp-transfer, cmd/nntp-analyze,
+  processor analyze) have no provider row, so no flag: a `-compress` flag for nntp-transfer is a follow-up.
+- Wave 2 picks up two review minors: extend `internal/web/adf_opt_admin_test.go` (provider create/update form)
+  with the `compress` field and an update without it going back to false; move both checkboxes out of the
+  "Proxy Configuration" block next to `posting_enabled`. Pre-existing: `GetProviderByName/ByID` use raw
+  `QueryRow` instead of `RetryableQueryRowScan` (separate cleanup, not this plan).
+- `worktree-agent-a12cfcbdaf7cae7d2` (compress-conn, b399e14 + review fixes c239e20) reviewed MERGE, merged ab061f9.
+  Review fixes: COMPRESS errors wrapped; line cap disabled around the 206 and re-armed after the swap (a server
+  pipelining compressed payload behind the 206 is pinned by TestCliCompressPipelinedAfter206); rxRaw counts the
+  returned octets on a cap abort; Read after Close is net.ErrClosed. Decision: a 480 to COMPRESS stays a refusal
+  (plain, logged every time with its own wording, no dedupe). flate.DefaultCompression hardcoded.
+### Wave 2
+- `worktree-agent-ac8f06835ae720b93` (compress-stats + the two wave-1 minors: 8896382 77b0f70 2f1fc81 99583bd)
+  reviewed MERGE, merged (see git log) and polished inline 8d729e7 (no negative compressed share; closeConn
+  lock=true note; docs "up to ~1 MiB"; byte totals count from a successful connect on). Pool: liveConns map +
+  four totals under pool.mux, PoolStats byte fields; fetcher logs one `[FETCHER] provider '%s': rx %s (wire %s,
+  compressed %.1f%%) tx %s` line per provider at shutdown; docs/COMPRESS.md + docs/README.md (new index).
+  A stray first spawn landed in a kit worktree (my shell cwd was the kit tree): removed, no work lost.
+### Verification (2026-10-25, pugleaf-verifier on ce6c9f8): all PASS
+- gofmt/vet/build; the full CLAUDE.md list under -race (31 package lines incl. internal/nntp/inflate); known bugs
+  exactly `nntp-article-430-cache-delay`; build_fetcher/build_webserver/build_nntp-transfer; TestCliCompress*/TestPool*
+  stable with -count=3.
+- End-to-end: the plan's recipe needs a correction: the kit **Store** server of v0.7.0 has no XHDR, and the fetcher
+  downloads with XHDR Message-ID, so COMPRESS negotiated but no article could be fetched. The verifier used a
+  Handler-mode fake on the kit's Conn instead (kit main 540bcd5 has Store XHDR now; after its tag the Store recipe
+  works). `-nntphostname` must be resolvable (example.com). Results: compressed run 500 articles stored, one
+  `COMPRESS DEFLATE accepted` per connection (2), `rx 1.0 MiB (wire 51.4 KiB, compressed 95.1%) tx 23.5 KiB`;
+  plain server with compress=1: one `refused (500 Unknown command), continuing uncompressed` line for two
+  connections, 300 articles fetched, `compressed 0.0%`. Pool accounting clean (created 2, closed 2), no panics.
+- Pinned by observation: the refusal dedupe is for the log line only; the client still sends COMPRESS on every new
+  connection to a refusing provider (one command + one 500 per connection). The stats line shows compression for
+  rx only (tx raw).

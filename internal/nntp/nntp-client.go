@@ -107,7 +107,28 @@ type BackendConn struct {
 	// we must set ForceClose to true and Put the connection back in pool and get a new one...
 
 	greetingCode int // the server's welcome code (200: posting allowed, 201: no posting)
+
+	// counters hold the octets this connection moved in both directions, the
+	// raw (NNTP) stream and the wire stream; they differ only with COMPRESS
+	// DEFLATE (nntp-client-compress.go).
+	counters byteCounters
 }
+
+// TxBytesRaw returns the octets this connection sent as the NNTP layer wrote
+// them (before compression).
+func (c *BackendConn) TxBytesRaw() int64 { return c.counters.txRaw.Load() }
+
+// TxBytesWire returns the octets this connection sent over the socket (after
+// compression); without COMPRESS DEFLATE it equals TxBytesRaw.
+func (c *BackendConn) TxBytesWire() int64 { return c.counters.txWire.Load() }
+
+// RxBytesRaw returns the octets this connection received as the NNTP layer
+// read them (after decompression).
+func (c *BackendConn) RxBytesRaw() int64 { return c.counters.rxRaw.Load() }
+
+// RxBytesWire returns the octets this connection received over the socket
+// (still compressed); without COMPRESS DEFLATE it equals RxBytesRaw.
+func (c *BackendConn) RxBytesWire() int64 { return c.counters.rxWire.Load() }
 
 // BackendConfig holds configuration for an NNTP client
 type BackendConfig struct {
@@ -116,6 +137,7 @@ type BackendConfig struct {
 	SSL            bool          // whether to use SSL/TLS
 	Username       string        // username for authentication
 	Password       string        // password for authentication
+	Compress       bool          // send COMPRESS DEFLATE (RFC 8054) after the greeting/AUTHINFO; a refusal keeps the connection plain
 	ConnectTimeout time.Duration // timeout for dial, TLS handshake, greeting and AUTHINFO (each Read/Write)
 	// ReadTimeout is the idle timeout per Read after connect; 0 = DefaultClientReadTimeout, <0 = none.
 	ReadTimeout time.Duration
@@ -291,6 +313,7 @@ func (c *BackendConn) Connect() error {
 		maxLine = DefaultClientMaxLineBytes
 	}
 	dc.setMaxLine(maxLine)
+	dc.setCounters(&c.counters)
 	c.dconn = dc
 	c.conn = dc
 	c.TextConn = textproto.NewConn(dc)
@@ -330,6 +353,18 @@ func (c *BackendConn) Connect() error {
 	} else {
 		//log.Printf("[NNTP-AUTH] No credentials provided, skipping authentication for %s:%d", c.Backend.Host, c.Backend.Port)
 	}
+
+	// COMPRESS DEFLATE (RFC 8054 §2.2.2: after authentication). A refusal is
+	// logged once per provider and keeps the connection plain; only an I/O or
+	// protocol error aborts the connect (plan fetcher-compress-deflate).
+	if c.Backend.Compress {
+		if err := c.startCompress(); err != nil {
+			log.Printf("[NNTP-CONN] COMPRESS DEFLATE failed on %s:%d: %v", c.Backend.Host, c.Backend.Port, err)
+			c.abortConnect()
+			return err
+		}
+	}
+
 	dc.setTimeouts(pickDuration(c.Backend.ReadTimeout, DefaultClientReadTimeout), pickDuration(c.Backend.WriteTimeout, DefaultClientWriteTimeout))
 	c.isConnected <- struct{}{}
 	return nil

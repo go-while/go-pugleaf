@@ -31,6 +31,19 @@ type Pool struct {
 	// Statistics
 	totalCreated int64
 	totalClosed  int64
+
+	// Byte totals of the connections this pool has closed; the current
+	// counters of the live connections are added in Stats. Guarded by mux.
+	txBytesRaw  int64
+	txBytesWire int64
+	rxBytesRaw  int64
+	rxBytesWire int64
+
+	// liveConns holds the connections this pool created and has not closed
+	// yet, so Stats can add their current byte counters to the totals above.
+	// A connection is added when it is created and removed (its counters
+	// added to the totals) when it is closed. Guarded by mux.
+	liveConns map[*BackendConn]struct{}
 }
 
 var ErrNewsgroupNotFound = fmt.Errorf("newsgroup not found")
@@ -44,6 +57,7 @@ func NewPool(cfg *BackendConfig) *Pool {
 		connections: make(chan *BackendConn, cfg.MaxConns),
 		maxConns:    cfg.MaxConns,
 		idleTimeout: pickDuration(cfg.IdleExpire, DefaultConnExpire), // 0 (IdleExpire < 0): never expire
+		liveConns:   make(map[*BackendConn]struct{}, cfg.MaxConns),
 	}
 	go pool.startCleanupWorker()
 	return pool
@@ -340,6 +354,7 @@ newConn:
 		// keeps created - closed == active
 		pool.mux.Lock()
 		pool.totalCreated++
+		pool.trackConnLocked(pconn)
 		pool.mux.Unlock()
 		err = pconn.SwitchMode(wantMode)
 		if err != nil {
@@ -461,7 +476,9 @@ func (pool *Pool) Put(conn *BackendConn) error {
 	}
 }
 
-// Closes a specific connection
+// Closes a specific connection. Always call it with lock=true: the byte totals of the
+// connection are collected (and its liveConns entry removed) only in the locked branch, so
+// lock=false would strand the entry and keep the connection alive in Stats.
 func (pool *Pool) closeConn(client *BackendConn, lock bool) error {
 
 	if client == nil {
@@ -476,9 +493,40 @@ func (pool *Pool) closeConn(client *BackendConn, lock bool) error {
 		pool.mux.Lock()
 		pool.totalClosed++
 		pool.activeConns--
+		// The socket is closed: the connection's counters are final and are
+		// taken over into the pool totals before the connection is dropped.
+		pool.collectBytesLocked(client)
 		pool.mux.Unlock()
 	}
 	return nil
+}
+
+// trackConnLocked registers a freshly created connection, so its byte counters
+// are part of Stats while it lives. Caller holds pool.mux.
+func (pool *Pool) trackConnLocked(client *BackendConn) {
+	if client == nil {
+		return
+	}
+	if pool.liveConns == nil {
+		pool.liveConns = make(map[*BackendConn]struct{}, pool.maxConns)
+	}
+	pool.liveConns[client] = struct{}{}
+}
+
+// collectBytesLocked adds the byte counters of a closed connection to the pool
+// totals and drops it from the live set, once. Caller holds pool.mux.
+func (pool *Pool) collectBytesLocked(client *BackendConn) {
+	if client == nil || pool.liveConns == nil {
+		return
+	}
+	if _, ok := pool.liveConns[client]; !ok {
+		return // not created by this pool, or already collected
+	}
+	delete(pool.liveConns, client)
+	pool.txBytesRaw += client.TxBytesRaw()
+	pool.txBytesWire += client.TxBytesWire()
+	pool.rxBytesRaw += client.RxBytesRaw()
+	pool.rxBytesWire += client.RxBytesWire()
 }
 
 // closePoolDrainWait bounds how long ClosePool waits for connections that are being closed
@@ -562,14 +610,27 @@ func (pool *Pool) Stats() PoolStats {
 	pool.mux.RLock()
 	defer pool.mux.RUnlock()
 
-	return PoolStats{
+	stats := PoolStats{
 		MaxConnections:    pool.maxConns,
 		ActiveConnections: pool.activeConns,
 		IdleConnections:   len(pool.connections),
 		TotalCreated:      pool.totalCreated,
 		TotalClosed:       pool.totalClosed,
 		Closed:            pool.closed,
+		TxBytesRaw:        pool.txBytesRaw,
+		TxBytesWire:       pool.txBytesWire,
+		RxBytesRaw:        pool.rxBytesRaw,
+		RxBytesWire:       pool.rxBytesWire,
 	}
+	// The closed connections' octets are in the totals above; add what the
+	// live ones have moved so far (their counters are atomic).
+	for conn := range pool.liveConns {
+		stats.TxBytesRaw += conn.TxBytesRaw()
+		stats.TxBytesWire += conn.TxBytesWire()
+		stats.RxBytesRaw += conn.RxBytesRaw()
+		stats.RxBytesWire += conn.RxBytesWire()
+	}
+	return stats
 }
 
 // PoolStats contains pool statistics
@@ -580,6 +641,13 @@ type PoolStats struct {
 	TotalCreated      int64
 	TotalClosed       int64
 	Closed            bool
+	// Octets this pool's connections moved, closed and live ones together:
+	// Raw as the NNTP layer saw them, Wire as they crossed the socket. They
+	// differ only with COMPRESS DEFLATE (nntp-client-compress.go).
+	TxBytesRaw  int64
+	TxBytesWire int64
+	RxBytesRaw  int64
+	RxBytesWire int64
 }
 
 // createConnection creates a new NNTP client connection

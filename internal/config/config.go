@@ -126,6 +126,7 @@ type Provider struct {
 	Priority   int    `json:"priority"`         // Lower numbers = higher priority
 	MaxArtSize int    `json:"max_article_size"` // Maximum article size in bytes
 	Posting    bool   `json:"posting"`          // Whether posting is enabled for this provider
+	Compress   bool   `json:"compress"`         // Send COMPRESS DEFLATE (RFC 8054) after login; a refusal is logged once and the connection stays plain
 	// Proxy configuration fields
 	ProxyEnabled  bool   `json:"proxy_enabled"`  // Whether to use proxy for this provider
 	ProxyType     string `json:"proxy_type"`     // Proxy type: socks4, socks5
