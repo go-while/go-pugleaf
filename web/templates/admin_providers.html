@@ -123,6 +123,12 @@
                                                             <label class="form-check-label">Posting</label>
                                                         </div>
                                                     </div>
+                                                    <div class="col-md-2">
+                                                        <div class="form-check">
+                                                            <input class="form-check-input" type="checkbox" name="compress" {{if .Compress}}checked{{end}}>
+                                                            <label class="form-check-label">Compress (DEFLATE)</label>
+                                                        </div>
+                                                    </div>
                                                 </div>
                                                 <hr class="my-3">
                                                 <div class="row">
@@ -220,10 +226,6 @@
                                                         <div class="form-check">
                                                             <input class="form-check-input" type="checkbox" name="proxy_enabled" {{if .ProxyEnabled}}checked{{end}}>
                                                             <label class="form-check-label">Enable Proxy</label>
-                                                        </div>
-                                                        <div class="form-check">
-                                                            <input class="form-check-input" type="checkbox" name="compress" {{if .Compress}}checked{{end}}>
-                                                            <label class="form-check-label">Compress (DEFLATE)</label>
                                                         </div>
                                                     </div>
                                                     <div class="col-md-2">
@@ -337,6 +339,16 @@
                                   </div>
                               </div>
                           </div>
+                          <div class="col-md-2">
+                              <div class="mb-3">
+                                  <div class="form-check mt-2">
+                                      <input class="form-check-input" type="checkbox" id="provider_compress" name="compress">
+                                      <label class="form-check-label" for="provider_compress">
+                                          Compress (DEFLATE)
+                                      </label>
+                                  </div>
+                              </div>
+                          </div>
                       </div>
                       <hr class="my-3">
                       <div class="row">
@@ -438,12 +450,6 @@
                                       <input class="form-check-input" type="checkbox" id="provider_proxy_enabled" name="proxy_enabled">
                                       <label class="form-check-label" for="provider_proxy_enabled">
                                           Use Proxy
-                                      </label>
-                                  </div>
-                                  <div class="form-check mt-2">
-                                      <input class="form-check-input" type="checkbox" id="provider_compress" name="compress">
-                                      <label class="form-check-label" for="provider_compress">
-                                          Compress (DEFLATE)
                                       </label>
                                   </div>
                               </div>
