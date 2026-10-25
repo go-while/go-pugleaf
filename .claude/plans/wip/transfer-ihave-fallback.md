@@ -104,3 +104,25 @@ is stopped by the test's deadline (documented as the pre-plan behaviour).
   text fixed (-redis-flushdb, inline).
 - Known, unchanged (pre-existing): a partial boot round reuses worker ids 0..n-1 so two workers may share CheckQueues[0]
   (moot at -max-threads 1); BootConnWorkers has no unit test (walked by review); TTSentCount counts offers in IHAVE mode.
+### Verification (2026-10-25, pugleaf-verifier on 530188a): all PASS
+- gofmt/vet/build; full CLAUDE.md list under -race; known bugs exactly `nntp-article-430-cache-delay`; build scripts;
+  stability -count=3.
+- Binary e2e (scratch `-data ./data-test-ihave`, 20 seeded articles; needs a resolvable `local_nntp_hostname`
+  (example.com) and `newsgroups.message_count` set for raw-inserted rows): (a) `-ihave auto` vs NoStream peer: one
+  fallback line, 20 IHAVE / 0 CHECK / 0 TAKETHIS / MODE 1, transferred 20, `mode=ihave`, exit 0; (b) `-ihave never`:
+  retry 1s..16s, no IHAVE, documented pre-plan loop; (c) streaming peer + auto: 20 CHECK/20 TAKETHIS, 0 IHAVE,
+  `mode=streaming`; (d) peer answering 502 to IHAVE with `-ihave always`: one offer, "neither streaming nor IHAVE"
+  line, exit 1. No panics, races or duplicates.
+- Pre-existing, both modes: `[NNTP-POOL] WARNING: Pool closed with positive count 1 active connections remaining` on
+  shutdown, and the tool never sends QUIT before closing; shutdown 5-8 s (fixed 3 s sleep).
+
+## Outcome (2026-10-25)
+- Integration branch `plan-transfer-ihave-fallback` merged into `testing-001` with `--no-ff` (merge commit: `git log
+  --merges -1`). Not pushed. User pre-approved the run ("ok to them all"), and asked for no new jobs near the usage limit.
+- Wave merges: 70fd1d9 (ihave-client), ee68585 (ihave-tool), f5dd95e (ihave-docs-verify); inline e4b69bf, 01f4c37.
+- Worktrees (user cleans up), under `/tank0/claude/trees/go-pugleaf/`: `agent-a2408d2df140d4c85`
+  (`worktree-agent-a2408d2df140d4c85`), `agent-a74ceff9750b31136` (`worktree-agent-a74ceff9750b31136`),
+  `agent-aa746a7f0053dfa6d` (`worktree-agent-aa746a7f0053dfa6d`).
+- Leftovers: partial boot rounds reuse worker ids (moot at -max-threads 1); BootConnWorkers untested by unit tests;
+  pool "positive count" warning and missing QUIT at shutdown (pre-existing); Redis path of IHAVE covered by unit tests
+  only; `-compress` flag for nntp-transfer (from the compress plan) still open.
