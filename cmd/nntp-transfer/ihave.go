@@ -48,13 +48,10 @@ var (
 	transferExitCode atomic.Int32
 )
 
-// ihaveConnMode is the pool mode IHAVE connections are fetched with. IHAVE needs no
-// mode at all, but Pool.Get always switches mode and the pool is not part of this
-// slice, so the reader mode is the stopgap: the kit peer answers IHAVE in reader mode.
-// TODO(transfer-ihave-fallback): add nntp.MODE_NONE_MV (SwitchMode returns nil, Get
-// skips the reader/stream fixups) and use it here; real innd hands a MODE READER
-// connection to nnrpd, which has no IHAVE.
-var ihaveConnMode = nntp.MODE_READER_MV
+// ihaveConnMode is the pool mode IHAVE connections are fetched with: no mode switch at
+// all. Real innd hands a MODE READER connection to nnrpd, which has no IHAVE, and
+// BackendConn.IHave refuses a reader-mode connection.
+var ihaveConnMode = nntp.MODE_NONE_MV
 
 // setIHavePolicy parses the -ihave flag value. "always" starts the run in IHAVE mode.
 func setIHavePolicy(value string) error {

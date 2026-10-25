@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -1205,14 +1206,19 @@ func transferHeaders(article *models.Article, nntphostname *string, newsgroup st
 // connected). A read error, EOF or any other status force-closes the
 // connection: the article may be half-sent and the peer's state is unknown.
 //
-// txBytes is the number of octets of the article written on the wire (headers,
-// separator, dot-stuffed body and terminator), 0 when nothing was written.
+// txBytes is the number of octets of the article handed to the connection (headers,
+// separator, dot-stuffed body and terminator), 0 when nothing was written. A MODE READER
+// connection is refused up front (innd answers IHAVE with 500 there): get the connection
+// with MODE_NONE_MV.
 func (c *BackendConn) IHave(article *models.Article, nntphostname *string, newsgroup string) (code int, txBytes int, err error) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 
 	if !c.IsConnected() {
 		return 0, 0, fmt.Errorf("not connected")
+	}
+	if c.ModeReader {
+		return 0, 0, fmt.Errorf("IHAVE '%s' on a MODE READER connection: use a transit connection (MODE_NONE_MV)", article.MessageID)
 	}
 
 	headers, err := transferHeaders(article, nntphostname, newsgroup)
@@ -1248,11 +1254,16 @@ func (c *BackendConn) IHave(article *models.Article, nntphostname *string, newsg
 		c.ForceCloseConn()
 		return 0, 0, fmt.Errorf("failed to read IHAVE '%s' response: %w", article.MessageID, err)
 	}
+	var perr textproto.ProtocolError // a continuation marker ("335-..."): the reply is not complete
+	if errors.As(err, &perr) {
+		c.ForceCloseConn()
+		return code, 0, fmt.Errorf("malformed IHAVE '%s' response: %w", article.MessageID, err)
+	}
 	switch code {
 	case 335:
 		// send the article below
-	case 435, 436:
-		return code, 0, nil // not wanted / deferred: nothing was written
+	case 435, 436, 437:
+		return code, 0, nil // not wanted / deferred / rejected by id: nothing was written
 	case AuthRequired:
 		return code, 0, authRequiredErr("IHAVE "+article.MessageID, code, line)
 	case 500, 501, 502:
@@ -1280,6 +1291,10 @@ func (c *BackendConn) IHave(article *models.Article, nntphostname *string, newsg
 	if err != nil && code == 0 {
 		c.ForceCloseConn()
 		return 0, txBytes, fmt.Errorf("failed to read IHAVE '%s' article response: %w", article.MessageID, err)
+	}
+	if errors.As(err, &perr) {
+		c.ForceCloseConn()
+		return code, txBytes, fmt.Errorf("malformed IHAVE '%s' article response: %w", article.MessageID, err)
 	}
 	switch code {
 	case 235, 436, 437:
@@ -1556,6 +1571,8 @@ func writeArticleLines(w *bufio.Writer, headers []string, body string) (int, err
 // Supported modes: "reader", "stream"
 func (c *BackendConn) SwitchMode(mode int) error {
 	switch mode {
+	case MODE_NONE_MV:
+		return nil // no switch: IHAVE on a transit connection
 	case MODE_READER_MV:
 		return c.SwitchToModeReader()
 	case MODE_STREAM_MV:

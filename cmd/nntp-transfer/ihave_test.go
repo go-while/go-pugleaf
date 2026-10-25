@@ -612,7 +612,6 @@ func TestTxIHaveWorkerConnError(t *testing.T) {
 // kit peer without streaming: every article of the job ends up in the peer's Have.
 // Needs (*nntp.BackendConn).IHave from the parallel slice ihave-client.
 func TestTxIHaveWorkerPeer(t *testing.T) {
-	t.Skip("needs ihave-client: (*nntp.BackendConn).IHave; unskip after the merge")
 
 	txIHaveMode(t, "always")
 	txIHaveQueues(t, 1)
