@@ -94,3 +94,13 @@ is stopped by the test's deadline (documented as the pre-plan behaviour).
   the textproto response sequence stuck until the asynchronous ForceCloseConn lands (pre-existing house pattern; the
   worker never reuses a failed connection).
 - Kit note: PeerHandler ignores Faults (Store/Script only), so refusal cases use Script-mode peers.
+### Wave 2
+- `worktree-agent-aa746a7f0053dfa6d` (ihave-docs-verify + six review follow-ups: 0493741 d4c7670 ef9528b c12deb8) reviewed
+  MERGE-after-fixes, fixes done, merged. IHave reads both replies with ReadCodeLine(0) (continuation replies fatal,
+  code preserved), accepts 435 after the article, stops the run on 500/501/502 after the article and on a reader-mode
+  connection (ErrIHaveUnsupported); BootConnWorkers' boot round always starts the monitor for launched workers (old
+  hole: workers of a partially failed round were never monitored), only the Get error owns the backoff (skipBackoff);
+  IHAVE send counters booked like TAKETHIS; mode-aware monitor logs; docs/TRANSFER.md + docs index; BUGS.md note; usage
+  text fixed (-redis-flushdb, inline).
+- Known, unchanged (pre-existing): a partial boot round reuses worker ids 0..n-1 so two workers may share CheckQueues[0]
+  (moot at -max-threads 1); BootConnWorkers has no unit test (walked by review); TTSentCount counts offers in IHAVE mode.
