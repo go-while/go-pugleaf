@@ -138,3 +138,19 @@ CLAUDE.md list; `PUGLEAF_KNOWN_BUGS=1 go test ./internal/nntp/ ./cmd/nntp-server
 - Pinned by observation: the refusal dedupe is for the log line only; the client still sends COMPRESS on every new
   connection to a refusing provider (one command + one 500 per connection). The stats line shows compression for
   rx only (tx raw).
+
+## Outcome (2026-10-25)
+- Integration branch `plan-fetcher-compress-deflate` (16 commits from testing-001 300deb3), merged into `testing-001`
+  with `--no-ff` (merge commit: see `git log --merges -1`). Not pushed. User pre-approved the run ("ok to them all").
+- Wave merges: b297896 (compress-config), ab061f9 (compress-conn), compress-stats (wave 2) + inline 8d729e7.
+- Worktrees (user cleans up), under `/tank0/claude/trees/go-pugleaf/`: `agent-a4736a42745b6bbdf`
+  (`worktree-agent-a4736a42745b6bbdf`, compress-config), `agent-a12cfcbdaf7cae7d2` (`worktree-agent-a12cfcbdaf7cae7d2`,
+  compress-conn), `agent-ac8f06835ae720b93` (`worktree-agent-ac8f06835ae720b93`, compress-stats).
+- Verification: see above (all PASS; e2e 95.1% compression on text articles).
+- Leftovers / decisions: `cmd/nntp-transfer` and `cmd/nntp-analyze` build their config from CLI flags and have no
+  `-compress` flag (follow-up); `GetProviderByName/ByID` use raw `QueryRow` instead of `RetryableQueryRowScan`
+  (pre-existing cleanup); byte totals count from a successful connect on; the client re-sends COMPRESS on every new
+  connection to a refusing provider (cheap; a per-provider "stop trying" memo was not built); go-pugleaf's own
+  nntp-server does not offer COMPRESS (out of scope); `flate.DefaultCompression` hardcoded; the kit Store server
+  gains XHDR in kit main 540bcd5 (untagged), after which `proc_DLArt_fake_srv_test.go` and the plan's e2e can use
+  Store mode.
