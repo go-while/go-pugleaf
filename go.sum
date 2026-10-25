@@ -10,8 +10,8 @@ github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017122104-f0412ef9498e h1:RWQ2H
 github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017122104-f0412ef9498e/go.mod h1:C/4BQE5gxV6BeHycS1wJ5iugN/nWFApPE/pa3mkkB6s=
 github.com/go-while/mbox2nntp v0.0.0-20261017113153-823cac0bb507 h1:vAbJVNIIx0OHUMIJ2xYxAzft6/Zs5pYSc/WQ60eTC9Y=
 github.com/go-while/mbox2nntp v0.0.0-20261017113153-823cac0bb507/go.mod h1:dr8HQGk2x0/Vkgs85z2rGhpZ3E9qaJeQehIVUpIw6Sw=
-github.com/go-while/nntp-testkit v0.7.0 h1:aUxGrdKY525AX5H9z065yLDncdXPEIBWoj3dHu4Qbyg=
-github.com/go-while/nntp-testkit v0.7.0/go.mod h1:ToP/P8mZXHw5kBz8er8EmSG3ZHyVF4pR5iuauD2MyTM=
+github.com/go-while/nntp-testkit v0.8.0 h1:Zpki/pkYtyNx80Qy/zm6TXFlFz9IapjXuZ2sonvIcP4=
+github.com/go-while/nntp-testkit v0.8.0/go.mod h1:ToP/P8mZXHw5kBz8er8EmSG3ZHyVF4pR5iuauD2MyTM=
 github.com/mattn/go-sqlite3 v1.14.32 h1:JD12Ag3oLy1zQA+BNn74xRgaBbdhbNIDYvQUEuuErjs=
 github.com/mattn/go-sqlite3 v1.14.32/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
 github.com/redis/go-redis/v9 v9.14.0 h1:u4tNCjXOyzfgeLN+vAZaW1xUooqWDqVEsZN0U01jfAE=

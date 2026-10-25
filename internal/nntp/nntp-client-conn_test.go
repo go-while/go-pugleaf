@@ -315,13 +315,15 @@ func TestCliConnDemuxerAfterAuth(t *testing.T) {
 }
 
 // A-nntp-client-11: ForceCloseConn three times closes once and frees exactly one slot.
+// The kit's transit peer answers MODE READER with 502 since v0.8.0 (innd with reader access denied), so the
+// pool tests below fetch streaming connections: the mode is irrelevant to what they pin.
 func TestCliConnForceCloseIdempotent(t *testing.T) {
 	s := newCliFakeServer(t, cliFakeOpts{Handler: cliPeerHandler(&cliPeerOpts{})})
 	cfg := cliBackend(s)
 	cfg.MaxConns = 2
 	cfg.PoolWaitTimeout = 200 * time.Millisecond
 	pool := cliConnPool(t, cfg)
-	conn, _, err := cliConnGet(t, pool, MODE_READER_MV)
+	conn, _, err := cliConnGet(t, pool, MODE_STREAM_MV)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -356,15 +358,15 @@ func TestCliConnForceCloseIdempotent(t *testing.T) {
 	}
 	s.WaitOpen(t, 0, 2*time.Second)
 
-	c1, _, err := cliConnGet(t, pool, MODE_READER_MV)
+	c1, _, err := cliConnGet(t, pool, MODE_STREAM_MV)
 	if err != nil {
 		t.Fatalf("Get #1 after force-close: %v", err)
 	}
-	c2, _, err := cliConnGet(t, pool, MODE_READER_MV)
+	c2, _, err := cliConnGet(t, pool, MODE_STREAM_MV)
 	if err != nil {
 		t.Fatalf("Get #2 after force-close: %v", err)
 	}
-	c3, elapsed, err := cliConnGet(t, pool, MODE_READER_MV)
+	c3, elapsed, err := cliConnGet(t, pool, MODE_STREAM_MV)
 	if err == nil {
 		_ = pool.Put(c3)
 		t.Fatalf("Get #3 succeeded with MaxConns 2 and both conns held (stats %+v)", pool.Stats())
@@ -387,14 +389,14 @@ func TestCliConnGetContextCancel(t *testing.T) {
 	cfg := cliBackend(s)
 	cfg.MaxConns = 1
 	pool := cliConnPool(t, cfg)
-	held, _, err := cliConnGet(t, pool, MODE_READER_MV)
+	held, _, err := cliConnGet(t, pool, MODE_STREAM_MV)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	_, err = cliConnRun(t, func() error {
-		c, err := pool.GetContext(ctx, MODE_READER_MV)
+		c, err := pool.GetContext(ctx, MODE_STREAM_MV)
 		if err == nil {
 			_ = pool.Put(c)
 			return fmt.Errorf("GetContext returned a connection with MaxConns 1 held")
@@ -413,7 +415,7 @@ func TestCliConnIdleExpire(t *testing.T) {
 	cfg := cliBackend(s)
 	cfg.IdleExpire = 100 * time.Millisecond
 	pool := cliConnPool(t, cfg)
-	c, _, err := cliConnGet(t, pool, MODE_READER_MV)
+	c, _, err := cliConnGet(t, pool, MODE_STREAM_MV)
 	if err != nil {
 		t.Fatalf("Get #1: %v", err)
 	}
@@ -421,7 +423,7 @@ func TestCliConnIdleExpire(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 	time.Sleep(250 * time.Millisecond) // the idle expiry under test
-	c2, _, err := cliConnGet(t, pool, MODE_READER_MV)
+	c2, _, err := cliConnGet(t, pool, MODE_STREAM_MV)
 	if err != nil {
 		t.Fatalf("Get #2: %v", err)
 	}
