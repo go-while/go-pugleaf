@@ -489,10 +489,14 @@ func TestDLArtFakeAuthExpiredMidRun(t *testing.T) {
 			if n := strings.Count(logs.String(), "authentication expired"); n != 1 {
 				t.Errorf("%d 'authentication expired' log lines, want 1", n)
 			}
-			// the run stops instead of walking the rest of the group; what is still
-			// queued in the global Batch.GetQ when it stops is bounded by that queue
-			if n := f.sent480.Load(); n > int64(cap(Batch.GetQ))+10 {
-				t.Errorf("%d articles were refused with 480, want at most the queue depth", n)
+			// the run stops instead of walking the rest of the group (that would be about
+			// high-50 refusals). What is still asked for after the stop: the items in the
+			// global Batch.GetQ (its depth), one in flight per worker, and what the feeder
+			// pushed before it saw the run end; the workers keep draining the queue while
+			// this line runs. Two queue depths cover that on a slow 2-core host (the
+			// distro matrix saw queue+12 on Alpine 3.24) and still rule out the walk.
+			if n := f.sent480.Load(); n > 2*int64(cap(Batch.GetQ)) {
+				t.Errorf("%d articles were refused with 480, want at most two queue depths (%d)", n, 2*cap(Batch.GetQ))
 			}
 			if got := e.stored(); int64(len(got)) >= high {
 				t.Errorf("%d articles stored, want fewer than the whole group %d", len(got), high)
