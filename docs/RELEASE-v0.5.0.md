@@ -25,7 +25,8 @@ CPU core and blocked shutdown. Both need no login.
 |---|---|---|---|
 | nntpmgr | `-maxconns` (new users) | 1 | 3 (allowed 1-25) |
 | nntp-server | article size limit | unlimited | 32 KiB (`-maxartsize`) |
-| nntp-transfer | `-ssl` | true | false (pass `-ssl -port 563` for TLS peers) |
+| nntp-transfer | `-ssl` | true | false |
+| nntp-transfer | `-port` | 563 | 433 (the project's own transfer target; pass `-port 119`, or `-ssl -port 563`, for other peers) |
 | nntp-transfer | `-batch-check` | 25 | 100 |
 | history-rebuild | `-batch-size` | 5000 | 10000 (now a number range per query) |
 | tcp2tor | `-listen-host` / `-listen-port` | `""` / 1119 | `127.2.3.4` / 0 (set it, or use `-config`) |
