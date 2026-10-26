@@ -1,0 +1,15 @@
+Go: go1.27.2
+Scanner: govulncheck@v1.9.0
+DB: https://vuln.go.dev
+DB updated: 2026-10-08 22:31:09 +0000 UTC
+
+=== Symbol Results ===
+
+No vulnerabilities found.
+
+Your code is affected by 0 vulnerabilities.
+This scan also found 0 vulnerabilities in packages you import and 1
+vulnerability in modules you require, but your code doesn't appear to call these
+vulnerabilities.
+Use '-show verbose' for more details.
+exit=0

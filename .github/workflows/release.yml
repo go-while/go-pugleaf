@@ -12,27 +12,79 @@ name: Build and Release
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
+  test:
+    name: Vet and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      # Upper bound for the tests' event waits (plan test-timing-hardening); shared runners are slow under -race.
+      PUGLEAF_TEST_DEADLINE: 120s
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      # Same package list as .github/workflows/tests.yml
+      - name: Test (race detector)
+        run: |
+          go test -race -count=1 -timeout 1200s \
+            ./internal/database/... ./internal/web/... ./internal/history/... ./internal/nntp/... \
+            ./internal/processor/... ./cmd/expire-news/... ./cmd/history-rebuild/... ./cmd/nntp-server/... \
+            ./internal/postmgr/... ./internal/cache/... ./internal/models/... ./internal/common/... \
+            ./cmd/tcp2tor/... ./cmd/web/... ./cmd/nntp-fetcher/... ./cmd/nntp-analyze/... ./cmd/recover-db/... \
+            ./cmd/post-queue/... ./cmd/import-flat-files/... ./cmd/rslight-importer/... ./cmd/fix-references/... \
+            ./cmd/fix-thread-activity/... ./cmd/audit-web-posts/... ./cmd/extract_hierarchies/... ./cmd/merge-active/... \
+            ./cmd/merge-descriptions/... ./cmd/nntp-transfer/... ./cmd/usermgr/... ./cmd/mbox-importer/...
+
   build:
     name: Build binaries
-    runs-on: ubuntu-latest
+    needs: test
+    # One native runner per target: go-sqlite3 needs cgo, so no cross-compilation.
     strategy:
+      fail-fast: false
       matrix:
-        os: [linux, darwin, windows]
-        arch: [amd64, arm64]
-        exclude:
-          # Windows on ARM64 is not commonly used for this type of application
-          - os: windows
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-24.04
+          - os: linux
             arch: arm64
+            runner: ubuntu-24.04-arm
+          - os: darwin
+            arch: arm64
+            runner: macos-15
+          - os: darwin
+            arch: amd64
+            runner: macos-15-intel
+          - os: windows
+            arch: amd64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CGO_ENABLED: "1"
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.25.x'
+          go-version-file: go.mod
 
       - name: Install dependencies
         run: go mod download
@@ -42,13 +94,18 @@ jobs:
 
       - name: Extract version from tag or input
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
           else
-            VERSION=${GITHUB_REF#refs/tags/v}
+            VERSION="${GITHUB_REF#refs/tags/v}"
           fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # optional suffix for tags like v0.4.7-1; still no shell/filename metacharacters
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || { echo "invalid version"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "$VERSION" > appVersion.txt
           echo "Version set to: $VERSION"
 
@@ -56,14 +113,21 @@ jobs:
         run: mkdir -p build
 
       - name: Set build environment
+        env:
+          MATRIX_OS: ${{ matrix.os }}
+          MATRIX_ARCH: ${{ matrix.arch }}
         run: |
-          echo "GOOS=${{ matrix.os }}" >> $GITHUB_ENV
-          echo "GOARCH=${{ matrix.arch }}" >> $GITHUB_ENV
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            echo "BINARY_EXT=.exe" >> $GITHUB_ENV
+          echo "GOOS=$MATRIX_OS" >> "$GITHUB_ENV"
+          echo "GOARCH=$MATRIX_ARCH" >> "$GITHUB_ENV"
+          if [ "$MATRIX_OS" = "windows" ]; then
+            echo "BINARY_EXT=.exe" >> "$GITHUB_ENV"
           else
-            echo "BINARY_EXT=" >> $GITHUB_ENV
+            echo "BINARY_EXT=" >> "$GITHUB_ENV"
           fi
+
+      - name: Check C compiler (cgo)
+        if: runner.os == 'Windows'
+        run: gcc --version
 
       - name: Build all binaries
         run: |
@@ -103,7 +167,6 @@ jobs:
                 -ldflags "-X main.appVersion=$VERSION" \
                 "./cmd/$cmd_dir"
             else
-              # Standard build (removing -race for cross-compilation)
               go build -o "build/${binary_name}${BINARY_EXT}" \
                 -ldflags "-X main.appVersion=$VERSION" \
                 "./cmd/$cmd_dir"
@@ -116,42 +179,59 @@ jobs:
           done
 
       - name: Generate SHA256 checksums
+        env:
+          MATRIX_OS: ${{ matrix.os }}
+          MATRIX_ARCH: ${{ matrix.arch }}
+          RUNNER_OS_NAME: ${{ runner.os }}
         run: |
-          OS="${{ matrix.os }}"
-          ARCH="${{ matrix.arch }}"
-          CHECKSUMS_FILE="checksums-${OS}-${ARCH}.sha256"
+          CHECKSUMS_FILE="checksums-${MATRIX_OS}-${MATRIX_ARCH}.sha256"
+          # sha256sum is missing on macOS runners; shasum -a 256 prints the same format
+          if [ "$RUNNER_OS_NAME" = "macOS" ]; then
+            SHA256="shasum -a 256"
+          else
+            SHA256="sha256sum"
+          fi
 
-          echo "Generating SHA256 checksums for ${OS}-${ARCH} binaries..."
+          echo "Generating SHA256 checksums for ${MATRIX_OS}-${MATRIX_ARCH} binaries..."
           cd build
-          sha256sum * > "../${CHECKSUMS_FILE}"
+          $SHA256 * > "../${CHECKSUMS_FILE}"
           cd ..
 
-          echo "CHECKSUMS_FILE=${CHECKSUMS_FILE}" >> $GITHUB_ENV
+          echo "CHECKSUMS_FILE=${CHECKSUMS_FILE}" >> "$GITHUB_ENV"
           echo ""
-          echo "Generated checksums for ${OS}-${ARCH}:"
+          echo "Generated checksums for ${MATRIX_OS}-${MATRIX_ARCH}:"
           echo "================================="
           cat "${CHECKSUMS_FILE}"
 
-      - name: Create release archive
+      - name: Prepare release archive
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          MATRIX_OS: ${{ matrix.os }}
+          MATRIX_ARCH: ${{ matrix.arch }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          OS="${{ matrix.os }}"
-          ARCH="${{ matrix.arch }}"
-          ARCHIVE_NAME="go-pugleaf-v${VERSION}-${OS}-${ARCH}"
+          ARCHIVE_NAME="go-pugleaf-v${VERSION}-${MATRIX_OS}-${MATRIX_ARCH}"
 
           # Include checksums in the archive
-          cp "${{ env.CHECKSUMS_FILE }}" build/checksums.sha256
+          cp "$CHECKSUMS_FILE" build/checksums.sha256
 
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            zip -r "${ARCHIVE_NAME}.zip" build/ README.md LICENSE
-            echo "ARCHIVE_FILE=${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
+          if [ "$MATRIX_OS" = "windows" ]; then
+            echo "ARCHIVE_FILE=${ARCHIVE_NAME}.zip" >> "$GITHUB_ENV"
           else
-            tar -czf "${ARCHIVE_NAME}.tar.gz" build/ README.md LICENSE
-            echo "ARCHIVE_FILE=${ARCHIVE_NAME}.tar.gz" >> $GITHUB_ENV
+            echo "ARCHIVE_FILE=${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_ENV"
           fi
 
+      - name: Create release archive (tar.gz)
+        if: runner.os != 'Windows'
+        run: tar -czf "$ARCHIVE_FILE" build/ README.md LICENSE
+
+      - name: Create release archive (zip)
+        # zip is not installed on the Windows runner; Compress-Archive is built into PowerShell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path build, README.md, LICENSE -DestinationPath $env:ARCHIVE_FILE
+
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: go-pugleaf-${{ matrix.os }}-${{ matrix.arch }}
           path: |
@@ -161,33 +241,40 @@ jobs:
   release:
     name: Create release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Extract version from tag or input
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
           else
-            VERSION=${GITHUB_REF#refs/tags/v}
+            VERSION="${GITHUB_REF#refs/tags/v}"
           fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # optional suffix for tags like v0.4.7-1; still no shell/filename metacharacters
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || { echo "invalid version"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
 
       - name: Create comprehensive checksums file
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           echo "Creating comprehensive SHA256 checksums file..."
-          echo "# Go-Pugleaf v${{ steps.version.outputs.version }} - SHA256 Checksums" > SHA256SUMS.txt
+          echo "# Go-Pugleaf v${VERSION} - SHA256 Checksums" > SHA256SUMS.txt
           echo "# Generated on $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
 
@@ -205,6 +292,8 @@ jobs:
                   # Extract hash and filename
                   hash=$(echo "$line" | cut -d' ' -f1)
                   filename=$(echo "$line" | cut -d' ' -f2-)
+                  # MSYS sha256sum (Windows) marks binary mode with a leading '*'
+                  filename="${filename#\*}"
                   echo "$hash  $filename ($platform)" >> SHA256SUMS.txt
                 done < "$checksums_file"
               fi
@@ -217,7 +306,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', steps.version.outputs.version) || github.ref_name }}
           name: Release v${{ steps.version.outputs.version }}

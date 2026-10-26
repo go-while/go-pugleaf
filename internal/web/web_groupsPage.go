@@ -2,23 +2,22 @@
 package web
 
 import (
-	"html/template"
+	"log"
 	"net/http"
 	"strconv"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // This file should contain the groups listing page related functions from server.go:
 //
 // Functions to be moved from server.go:
-// - func (s *WebServer) groupsPage(c *gin.Context) (line ~553)
+// - func (s *WebServer) groupsPage(c *Context) (line ~553)
 //   Handles "/groups" route to display all available newsgroups
 //
 // This file will handle the groups listing functionality, showing all available newsgroups.
 
-func (s *WebServer) groupsPage(c *gin.Context) {
+func (s *WebServer) groupsPage(c *Context) {
 	// Get pagination parameters
 	page := 1
 	pageSize := 50 // Static page size for groups (cache efficiency)
@@ -37,10 +36,8 @@ func (s *WebServer) groupsPage(c *gin.Context) {
 		// Cache miss - fetch from database
 		groups, totalCount, err = s.DB.GetNewsgroupsPaginated(page, pageSize)
 		if err != nil {
-			// Load error template individually
-			tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/error.html"))
-			c.Header("Content-Type", "text/html")
-			tmpl.ExecuteTemplate(c.Writer, "base.html", gin.H{"Error": err.Error()})
+			log.Printf("[WEB]: groupsPage: GetNewsgroupsPaginated(page=%d): %v", page, err)
+			s.renderError(c, http.StatusInternalServerError, "Database Error", publicErrorDetail)
 			return
 		}
 
@@ -57,12 +54,5 @@ func (s *WebServer) groupsPage(c *gin.Context) {
 	}
 	data.GroupCount = totalCount
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/groups.html", "web/templates/pagination.html"))
-	c.Header("Content-Type", "text/html")
-	err = tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "groups.html", "pagination.html")
 }

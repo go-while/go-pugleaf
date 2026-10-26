@@ -1,0 +1,22 @@
+# Example client authorization file for TOR
+# This file shows the correct format for Tor hidden service client authorization
+#
+## TOR SETUP: Client side
+# To access a version 3 Onion Service with client authorization as a client,
+#  make sure you have ClientOnionAuthDir set in your torrc.
+#
+# For example, add this line to /etc/tor/torrc:
+# ClientOnionAuthDir /var/lib/tor/onion_auth
+#
+# sudo mkdir /var/lib/tor/onion_auth
+# sudo chown debian-tor /var/lib/tor/onion_auth
+# sudo chmod 700 /var/lib/tor/onion_auth
+#
+# Then, in the <ClientOnionAuthDir> directory, create an .auth_private file for the Onion Service corresponding to this key
+# (i.e. 'bob_onion.auth_private').
+# The content of the <ClientOnionAuthDir>/<user>.auth_private file should look like this Format:
+#
+# <56-char-onion-addr-without-.onion>:descriptor:x25519:<52-char-private-key>
+#
+# Example (this is a dummy key, replace with your actual keys):
+# peannyjkqwqfynd24p6dszvtchkq7hfkwymi5by5y332wmosy5dwfaqd:descriptor:x25519:ZDUVQQ7IKBXSGR2WWOBNM3VP5ELNOYSSINDK7CAUN2WD7A3EKZWQ

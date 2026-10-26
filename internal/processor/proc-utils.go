@@ -4,21 +4,37 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-while/go-pugleaf/internal/common"
 )
 
 var (
-	separatorRegex       = regexp.MustCompile(`[,;:\s]+`)
+	//separatorRegex       = regexp.MustCompile(`[,;:\s]+`)
 	parenRe              = regexp.MustCompile(`\s*\([^)]*\)$`)
 	threeDigitTimezoneRe = regexp.MustCompile(`\s([+-])(\d{3})\s*$`)
-	yearRegex            = regexp.MustCompile(`\b(19[7-9]\d|20[0-9]\d)\b`)
+	yearRegex            = regexp.MustCompile(`\b(19\d\d|20\d\d)\b`)
 	monthRegex           = regexp.MustCompile(`\b(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b`)
-	dayRegex             = regexp.MustCompile(`\b([1-9]|[12]\d|3[01])\b`)
+	dayRegex             = regexp.MustCompile(`\b(0?[1-9]|[12]\d|3[01])\b`)
 	timeRegex            = regexp.MustCompile(`\b(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?\b`)
-	twoDigitYearRegex    = regexp.MustCompile(`\b([0-9]\d)\b`)
-	numericRegex         = regexp.MustCompile(`\b(\d{1,4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,4})\b`)
+	// day next to a month name: "3 Mar", "03-Mar", "Mar 3", "Nov10", "May 19th", "February 11,"
+	dayBeforeMonthRe = regexp.MustCompile(`(?i)\b(0?[1-9]|[12]\d|3[01])(?:\s?(?:st|nd|rd|th))?[-\s/.,]*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b`)
+	dayAfterMonthRe  = regexp.MustCompile(`(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?[-\s/.,]*(0?[1-9]|[12]\d|3[01])(?:\s?(?:st|nd|rd|th))?\b`)
+	ampmRe           = regexp.MustCompile(`(?i)\d\s*([ap])\.?m\b`)
+	numOffsetRe      = regexp.MustCompile(`(?:^|\s)([+-])(\d{2}):?(\d{2})\b`)
+	gmtOffsetRe      = regexp.MustCompile(`(?i)\b(?:GMT|UTC)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?\b`)
+	// "91May07 11:07 pm": YYMonDD as written by some BBS gateways
+	yyMonDDRe     = regexp.MustCompile(`^(\d{2})([A-Za-z]{3})(\d{2})\b`)
+	letterDigitRe = regexp.MustCompile(`([A-Za-z])(\d)|(\d)([A-Za-z])`)
+	// everything up to the time and an optional zone/offset: what remains of a date line
+	// that carries trailing junk ("<br>", " ,", "From: ...", a JIS escape)
+	dateCoreRe        = regexp.MustCompile(`^(.*?\d{1,2}:\d{2}(?::\d{2})?(?:\s*[ap]\.?m\.?)?(?:\s*(?:[+-]\d{4}|[+-]\d{2}:\d{2}|GMT\s*[+-]\d{1,2}|[A-Za-z]{1,5}))?)`)
+	zoneAbbrRe        = regexp.MustCompile(`(?i)\b(` + zoneAbbrAlternation() + `)\b`)
+	twoDigitYearRegex = regexp.MustCompile(`\b([0-9]\d)\b`)
+	numericRegex      = regexp.MustCompile(`\b(\d{1,4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,4})\b`)
 )
 
 var NNTPDateLayouts = []string{
@@ -406,56 +422,18 @@ var NNTPDateLayouts = []string{
 // IsValidGroupName validates a newsgroup name according to RFC standards
 // Returns true if the group name is valid (lowercase, alphanumeric components separated by dots)
 func IsValidGroupName(name string) bool {
-	if validGroupNameRegexchar.MatchString(name) {
-		return true
-	}
-
-	if !UseStrictGroupValidation {
-
-		if validGroupNameRegexLazy.MatchString(name) {
-			return true
-		}
-		if validGroupNameRegexSingle.MatchString(name) {
-			return true
-		}
-		// Allow both lowercase and mixed case group names
-		if validGroupNameRegexCaps.MatchString(name) {
-			return true
-		}
-		return false
-	}
-	if len(name) < 1 {
-		log.Printf("IsValidGroupName: Group name '%s' is too short (%d characters)", name, len(name))
-		return false
-	}
-	if len(name) > 255 {
-		log.Printf("IsValidGroupName: Group name '%s' is too long (%d characters)", name, len(name))
-		return false
-	}
-	name = strings.ToLower(name)
-	// Special case for programming language groups ending with ++
-	if strings.HasSuffix(name, "++") || strings.HasSuffix(name, "+") {
-		// Allow C++, C+, etc. in programming contexts
-		if validGroupNameRegexLazy.MatchString(strings.ReplaceAll(name, "+", "")) {
-			return true
-		}
-	}
-	if validGroupNameRegexStrict.MatchString(name) {
-		return true
-	}
-	return false
+	return common.IsValidGroupName(name)
 }
 
 func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []string {
 	// Use a single regex to split on any combination of separators
-	rawGroups := separatorRegex.Split(groupsline, -1)
+	rawGroups := common.SeparatorRegex.Split(groupsline, -1)
 
 	var validGroups []string
-	seen := make(map[string]bool) // For deduplication
+	seen := make(map[string]bool, len(rawGroups)) // For deduplication
 
 	for _, group := range rawGroups {
 		group = strings.TrimSpace(group)
-		newsgroupPtr := proc.DB.Batch.GetNewsgroupPointer(group) // Ensure group is registered in the batch
 		if group == "" {
 			continue
 		}
@@ -463,6 +441,10 @@ func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []stri
 			continue
 		}
 		if RunRSLIGHTImport {
+			// the rslight sections check needs the batch pointer before validation (this
+			// branch only); the non-rslight path below registers a pointer only for names
+			// that pass validation (INT-3)
+			newsgroupPtr := proc.DB.Batch.GetNewsgroupPointer(group)
 			if proc.IsNewsGroupInSectionsDB(newsgroupPtr) {
 				if DebugProcessorHeaders {
 					log.Printf("[RSLIGHT] extractGroupsFromHeaders Article '%s' newsgroup '%s' IS IN sections DB", msgID, group)
@@ -481,29 +463,11 @@ func (proc *Processor) extractGroupsFromHeaders(msgID, groupsline string) []stri
 		}
 
 		// Deduplicate using map (faster than slices.Contains)
-		if !seen[group] {
-			seen[group] = true
-			validGroups = append(validGroups, group)
-		}
+		seen[group] = true
+		validGroups = append(validGroups, group)
 	}
 
 	return validGroups
-}
-
-func multiLineHeaderToMergedString(vals []string) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	if len(vals) == 1 {
-		return vals[0] // Fast path for single-line headers (most common case)
-	}
-	return strings.Join(vals, "\n") // Ultra fast for multi-line
-}
-
-func multiLineStringToSlice(input string) []string {
-	// Replace newlines with spaces, trim leading/trailing spaces
-	result := strings.Split(input, "\n")
-	return result
 }
 
 /* UNUSED KEEP FOR REFERENCE
@@ -551,61 +515,38 @@ func multiLineHeaderToStringHTML(vals []string) string {
 }
 */
 
-/* UNUSED KEEP FOR REFERENCE
-func multiLineHeaderToStringSpaced(vals []string) string {
-	var sb strings.Builder
-	for i, line := range vals {
-		if i > 0 {
-			sb.WriteString(" ")
-		}
-		sb.WriteString(line)
-	}
-	result := sb.String()
-	result = strings.TrimSuffix(result, " ")
-	return result
-}
-*/
+// MaxFutureDate is how far a Date (or Injection-Date) may lie in the future before
+// ProcessArticle refuses the article (RFC 5537 §3.7 step 2: 24 hours; A-intake-7).
+// bruteForceDateParse keeps its own internal 25 h sanity bound.
+var MaxFutureDate = 24 * time.Hour
 
-// getHeaderFirst returns the first value for a header, or "" if not present
-func getHeaderFirst(headers map[string][]string, key string) string {
-	if vals, ok := headers[key]; ok && len(vals) > 0 {
-		// For headers that can be folded across multiple lines (like References),
-		// we need to join with spaces instead of newlines to properly unfold them
-		if key == "references" || key == "References" || key == "in-reply-to" || key == "In-Reply-To" {
-			return multiLineHeaderToStringSpaced(vals)
-		}
-		return multiLineHeaderToMergedString(vals)
-	}
-	return ""
-}
-
-// multiLineHeaderToStringSpaced joins multi-line headers with spaces (for RFC-compliant header unfolding)
-func multiLineHeaderToStringSpaced(vals []string) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	if len(vals) == 1 {
-		return vals[0] // Fast path for single-line headers
-	}
-	var sb strings.Builder
-	for i, line := range vals {
-		// Trim each line and add spaces between them
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue // Skip empty lines
-		}
-		if i > 0 {
-			sb.WriteString(" ")
-		}
-		sb.WriteString(line)
-	}
-	return sb.String()
-}
-
-// parseNNTPDate parses an NNTP date string to time.Time, handling common NNTP quirks.
+// ParseNNTPDate parses an NNTP date string to time.Time, handling common NNTP quirks.
+// It is lenient about the shape (330 layouts, then brute force on any string that holds
+// a year and a month; a missing day or time defaults to the 1st and noon) but invents
+// nothing: without a readable year and month it returns the zero time. The rslight
+// import falls back to Unix epoch strings.
 func ParseNNTPDate(dateStr string) time.Time {
+	t, ok := ParseNNTPDateStrict(dateStr)
+	if ok || !t.IsZero() {
+		return t
+	}
+	// Last resort for RSLIGHT import. The normalization in ParseNNTPDateStrict only
+	// changes strings that contain whitespace or letters, which never parse as an
+	// integer, so the epoch parser sees the same digits as before.
+	if RunRSLIGHTImport && dateStr != "" {
+		return parseUnixEpochToRFC1123(strings.TrimSpace(parenRe.ReplaceAllString(dateStr, "")))
+	}
+	return time.Time{}
+}
+
+// ParseNNTPDateStrict runs the ParseNNTPDate pipeline (normalization, NNTP layouts,
+// brute-force extraction) without the rslight epoch fallback. ok is true for a layout
+// match or a brute-force result whose year and month were both found in the string;
+// otherwise the returned time is the lenient result (possibly zero) and ok is false.
+// Non-bulk intake rejects dates with !ok (D10).
+func ParseNNTPDateStrict(dateStr string) (time.Time, bool) {
 	if dateStr == "" {
-		return time.Time{}
+		return time.Time{}, false
 	}
 	// Remove trailing parenthesized timezone, e.g., " (NZDT)"
 	dateStr = parenRe.ReplaceAllString(dateStr, "")
@@ -615,33 +556,156 @@ func ParseNNTPDate(dateStr string) time.Time {
 		dateStr = strings.ReplaceAll(dateStr, "Sum, ", "Sun, ")
 	}
 
-	// Fix 3-digit timezone formats like +200 -> +0200
-	if match := threeDigitTimezoneRe.FindStringSubmatch(dateStr); len(match) == 3 {
-		sign := match[1]
-		digits := match[2]
-		// Convert 3-digit to 4-digit by adding leading zero
-		normalizedTz := fmt.Sprintf("%s0%s", sign, digits)
-		dateStr = threeDigitTimezoneRe.ReplaceAllString(dateStr, " "+normalizedTz)
-	}
+	dateStr = normalizeDateString(dateStr)
 
 	// Try a list of common NNTP date layouts
 	for _, layout := range NNTPDateLayouts {
 		t, err := time.Parse(layout, dateStr)
 		if err == nil {
-			return t
+			return t, true
 		}
 	}
 
-	// If standard parsing failed, try bruteforce extraction
-	if t := bruteForceDateParse(dateStr); !t.IsZero() {
-		return t
+	// Trailing junk ("<br>", " ,", a glued "From:", an escape sequence) keeps an otherwise
+	// regular date from matching a layout: retry with the part up to the time and zone.
+	core := strings.TrimSpace(dateCoreRe.FindString(dateStr))
+	if core != "" && core != dateStr {
+		for _, layout := range NNTPDateLayouts {
+			t, err := time.Parse(layout, core)
+			if err == nil {
+				return t, true
+			}
+		}
 	}
 
-	// Last resort for RSLIGHT import
-	if RunRSLIGHTImport {
-		return parseUnixEpochToRFC1123(dateStr)
+	// If standard parsing failed, try bruteforce extraction: the whole string first (a
+	// ctime-style year comes after the time and would be cut off), then the cut one.
+	t, ok := bruteForceDateParseOK(dateStr)
+	if !ok && core != "" && core != dateStr {
+		if tc, okc := bruteForceDateParseOK(core); okc {
+			return tc, true
+		}
 	}
-	return time.Time{}
+	return t, ok
+}
+
+// zoneOffsets maps time zone abbreviations (and the spelled-out US names) to the numeric
+// offset Go's layouts understand. time.Parse accepts any letters where a layout says MST
+// but silently treats an abbreviation it does not know as UTC, so every abbreviation that
+// shows up in archived Date headers must be listed here. Ambiguous ones (IST, AST in
+// Asia, BST in Bangladesh, ...) use the Usenet-dominant reading.
+var zoneOffsets = map[string]string{
+	// North America
+	"EST": "-0500", "EDT": "-0400", "CST": "-0600", "CDT": "-0500", "MST": "-0700", "MDT": "-0600",
+	"PST": "-0800", "PDT": "-0700", "AKST": "-0900", "AKDT": "-0800", "HST": "-1000", "HDT": "-0900",
+	"AST": "-0400", "ADT": "-0300", "NST": "-0330", "NDT": "-0230",
+	// Europe
+	"GMT": "+0000", "UTC": "+0000", "UT": "+0000", "WET": "+0000", "WEST": "+0100", "BST": "+0100",
+	"IST": "+0100", "CET": "+0100", "CEST": "+0200", "MET": "+0100", "MEST": "+0200", "MESZ": "+0200",
+	"MEZ": "+0100", "MES": "+0100", "MEZT": "+0200", "MDST": "+0200", "EET": "+0200", "EEST": "+0300",
+	"MSK": "+0300", "MSD": "+0400",
+	// Asia, Pacific
+	"JST": "+0900", "KST": "+0900", "HKT": "+0800", "SGT": "+0800", "AWST": "+0800", "ACST": "+0930",
+	"AEST": "+1000", "AEDT": "+1100", "NZST": "+1200", "NZDT": "+1300",
+}
+
+// zoneLongNames are the spelled-out zone names some Windows mailers wrote.
+var zoneLongNames = []struct{ name, offset string }{
+	{"Eastern Daylight Time", "-0400"}, {"Eastern Standard Time", "-0500"},
+	{"Central Daylight Time", "-0500"}, {"Central Standard Time", "-0600"},
+	{"Mountain Daylight Time", "-0600"}, {"Mountain Standard Time", "-0700"},
+	{"Pacific Daylight Time", "-0700"}, {"Pacific Standard Time", "-0800"},
+}
+
+func zoneAbbrAlternation() string {
+	names := make([]string, 0, len(zoneOffsets))
+	for n := range zoneOffsets {
+		names = append(names, n)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		return len(names[i]) > len(names[j]) || (len(names[i]) == len(names[j]) && names[i] < names[j])
+	})
+	return strings.Join(names, "|")
+}
+
+// normalizeDateString rewrites the spellings the layouts cannot express: runs of
+// whitespace, "91May07", spelled-out and abbreviated zone names (any case), "GMT+1" and
+// three-digit offsets all become the plain RFC 5322 forms.
+func normalizeDateString(dateStr string) string {
+	dateStr = strings.Join(strings.Fields(dateStr), " ")
+	if m := yyMonDDRe.FindStringSubmatch(dateStr); m != nil {
+		dateStr = m[3] + " " + m[2] + " " + m[1] + dateStr[len(m[0]):]
+	}
+	for _, z := range zoneLongNames {
+		if i := strings.Index(strings.ToLower(dateStr), strings.ToLower(z.name)); i >= 0 {
+			dateStr = dateStr[:i] + z.offset + dateStr[i+len(z.name):]
+			break
+		}
+	}
+	if m := gmtOffsetRe.FindStringSubmatchIndex(dateStr); m != nil {
+		sign := dateStr[m[2]:m[3]]
+		h := dateStr[m[4]:m[5]]
+		if len(h) == 1 {
+			h = "0" + h
+		}
+		mm := "00"
+		if m[6] >= 0 {
+			mm = dateStr[m[6]:m[7]]
+		}
+		dateStr = dateStr[:m[0]] + sign + h + mm + dateStr[m[1]:]
+	}
+	dateStr = zoneAbbrRe.ReplaceAllStringFunc(dateStr, func(abbr string) string {
+		return zoneOffsets[strings.ToUpper(abbr)]
+	})
+	// Fix 3-digit timezone formats like +200 -> +0200
+	if match := threeDigitTimezoneRe.FindStringSubmatch(dateStr); len(match) == 3 {
+		dateStr = threeDigitTimezoneRe.ReplaceAllString(dateStr, " "+match[1]+"0"+match[2])
+	}
+	return dateStr
+}
+
+// fallbackDateHeaders are tried, in order, when the Date header is missing or unreadable
+// on a bulk-mode (archive) article: the B-news "Posted:" and "Date-Received:" of the utzoo
+// era, then the trace dates of later software. Each value goes through the same parser.
+var fallbackDateHeaders = []string{"posted", "date-received", "nntp-posting-date", "injection-date", "x-original-date"}
+
+// minArchiveDate is the earliest date an archive article can really carry: Usenet started
+// in 1980. Earlier values come from broken clocks, typically ctime(-1) written by utzoo-era
+// B-news sites as "Wed, 31-Dec-69 18:59:59 EDT" into Date and Posted, so bulk intake treats
+// them like an unreadable Date and prefers a fallback header (Date-Received is usually sane).
+var minArchiveDate = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// archiveDateUsable reports whether t is a parsed date from the Usenet era.
+func archiveDateUsable(t time.Time) bool {
+	return !t.IsZero() && !t.Before(minArchiveDate)
+}
+
+// fallbackDate returns the first usable secondary date header and its name, or the zero
+// time and "" when none of fallbackDateHeaders parses to a date from the Usenet era.
+func fallbackDate(headers map[string][]string) (time.Time, string) {
+	for _, name := range fallbackDateHeaders {
+		if v := common.GetHeaderFirst(headers, name); v != "" {
+			if t, ok := ParseNNTPDateStrict(v); ok && archiveDateUsable(t) {
+				return t, name
+			}
+		}
+	}
+	return time.Time{}, ""
+}
+
+// bulkArticleDate picks the date of a bulk-mode (archive) article: the lenient reading of
+// the Date header when it is usable, else the first usable fallback header (its name is
+// returned). A pre-Usenet Date with no fallback is kept as parsed (name ""), so the article
+// is still filed; only an unreadable Date without any fallback yields the zero time.
+func bulkArticleDate(dateString string, headers map[string][]string) (time.Time, string) {
+	t := ParseNNTPDate(dateString)
+	if archiveDateUsable(t) {
+		return t, ""
+	}
+	if ft, name := fallbackDate(headers); !ft.IsZero() {
+		return ft, name
+	}
+	return t, ""
 }
 
 func parseUnixEpochToRFC1123(epochStr string) time.Time {
@@ -671,8 +735,15 @@ func countLines(b []byte) int {
 // bruteForceDateParse attempts to extract date components from malformed date strings
 // This function tries to parse human-readable but non-standard date formats
 func bruteForceDateParse(dateStr string) time.Time {
+	t, _ := bruteForceDateParseOK(dateStr)
+	return t
+}
+
+// bruteForceDateParseOK is bruteForceDateParse that also reports success: ok is false,
+// with the zero time, when the string holds no year (1900-2099) or no month.
+func bruteForceDateParseOK(dateStr string) (time.Time, bool) {
 	if dateStr == "" {
-		return time.Time{}
+		return time.Time{}, false
 	}
 
 	// Clean up common issues
@@ -682,6 +753,8 @@ func bruteForceDateParse(dateStr string) time.Time {
 	// Remove common prefixes that might interfere
 	dateStr = strings.TrimPrefix(dateStr, "Date:")
 	dateStr = strings.TrimSpace(dateStr)
+	// "Nov10", "8pm", "2011Sr": letters glued to a number
+	dateStr = letterDigitRe.ReplaceAllString(dateStr, "$1$3 $2$4")
 
 	// Month name mappings for fuzzy matching
 	monthMap := map[string]time.Month{
@@ -717,12 +790,19 @@ func bruteForceDateParse(dateStr string) time.Time {
 		}
 	}
 
-	// Pattern 3: Find day (1-31, but be flexible)
-	dayMatches := dayRegex.FindAllString(dateStr, -1)
-	for _, dayMatch := range dayMatches {
-		if d, err := strconv.Atoi(dayMatch); err == nil && d >= 1 && d <= 31 {
-			// Make sure this isn't the year we already found
-			if d != year && d != month {
+	// Pattern 3: the day. A number next to the month name wins ("3 Mar", "Mar 3", "Nov10");
+	// otherwise the first 1..31 that is not part of a time (next to a colon). A leading
+	// zero is allowed ("09-Jan-2007"), and a day may equal the month number ("3 Mar").
+	if m := dayBeforeMonthRe.FindStringSubmatch(dateStr); m != nil {
+		day, _ = strconv.Atoi(m[1])
+	} else if m := dayAfterMonthRe.FindStringSubmatchIndex(dateStr); m != nil && (m[3] >= len(dateStr) || dateStr[m[3]] != ':') {
+		day, _ = strconv.Atoi(dateStr[m[2]:m[3]])
+	} else {
+		for _, loc := range dayRegex.FindAllStringIndex(dateStr, -1) {
+			if (loc[0] > 0 && dateStr[loc[0]-1] == ':') || (loc[1] < len(dateStr) && dateStr[loc[1]] == ':') {
+				continue // hour, minute or second
+			}
+			if d, err := strconv.Atoi(dateStr[loc[0]:loc[1]]); err == nil && d >= 1 && d <= 31 {
 				day = d
 				break
 			}
@@ -740,6 +820,14 @@ func bruteForceDateParse(dateStr string) time.Time {
 		if len(timeMatch) > 3 && timeMatch[3] != "" {
 			if s, err := strconv.Atoi(timeMatch[3]); err == nil && s >= 0 && s <= 59 {
 				sec = s
+			}
+		}
+		// "8:17 pm", "12:56 am"
+		if m := ampmRe.FindStringSubmatch(dateStr); m != nil && hour <= 12 {
+			if strings.EqualFold(m[1], "p") && hour < 12 {
+				hour += 12
+			} else if strings.EqualFold(m[1], "a") && hour == 12 {
+				hour = 0
 			}
 		}
 	}
@@ -839,15 +927,14 @@ func bruteForceDateParse(dateStr string) time.Time {
 		}
 	}
 
-	// Final validation and fallbacks
-	if year < 1970 || year > 2099 {
-		year = 1990 // Default fallback year
-	}
-	if month < 1 || month > 12 {
-		month = 1 // Default to January
+	// No year or no month in the string means no date: nothing is invented (the old
+	// "1990-01-01 12:00" default filed unreadable archive dates on a day nobody chose;
+	// the bulk intake tries the secondary date headers instead, see fallbackDate).
+	if year < 1900 || year > 2099 || month < 1 || month > 12 {
+		return time.Time{}, false
 	}
 	if day < 1 || day > 31 {
-		day = 1 // Default to 1st
+		day = 1 // month precision ("Oct 86")
 	}
 
 	// Validate day against month
@@ -857,9 +944,21 @@ func bruteForceDateParse(dateStr string) time.Time {
 		day = 30
 	}
 
-	// If we have at least year and month, create a date
-	if year >= 1970 && month >= 1 && month <= 12 {
+	{
 		parsedDate := time.Date(year, time.Month(month), day, hour, min, sec, 0, time.UTC)
+		// "31 Jan 1995 02:37 -0500": the wall clock is local, the offset makes it UTC
+		if m := numOffsetRe.FindStringSubmatch(dateStr); m != nil {
+			oh, _ := strconv.Atoi(m[2])
+			om, _ := strconv.Atoi(m[3])
+			if oh <= 14 && om < 60 {
+				off := time.Duration(oh)*time.Hour + time.Duration(om)*time.Minute
+				if m[1] == "+" {
+					parsedDate = parsedDate.Add(-off)
+				} else {
+					parsedDate = parsedDate.Add(off)
+				}
+			}
+		}
 
 		// Sanity check: parsed date cannot be more than 25 hours in the future
 		now := time.Now().UTC()
@@ -867,11 +966,9 @@ func bruteForceDateParse(dateStr string) time.Time {
 
 		if parsedDate.After(maxFutureTime) {
 			// Date is too far in the future, likely a parsing error
-			return time.Time{}
+			return time.Time{}, false
 		}
 
-		return parsedDate
+		return parsedDate, true
 	}
-
-	return time.Time{}
 }

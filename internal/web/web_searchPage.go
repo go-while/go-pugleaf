@@ -2,25 +2,23 @@
 package web
 
 import (
-	"html/template"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // This file should contain the search page related functions from server.go:
 //
 // Functions to be moved from server.go:
-//   - func (s *WebServer) searchPage(c *gin.Context) (line ~784)
+//   - func (s *WebServer) searchPage(c *Context) (line ~784)
 //     Handles "/search" route for searching articles and groups
 //
 // This file will handle the search functionality, allowing users to search for articles
 // and groups across the NNTP server.
-func (s *WebServer) searchPage(c *gin.Context) {
+func (s *WebServer) searchPage(c *Context) {
 	query := strings.TrimSpace(c.Query("q"))
 	searchType := c.DefaultQuery("searchType", "all")
 
@@ -52,8 +50,8 @@ func (s *WebServer) searchPage(c *gin.Context) {
 			offset := (page - 1) * pageSize
 			groups, err := s.DB.SearchNewsgroups(query, pageSize, offset, false)
 			if err != nil {
-				log.Printf("Error searching groups: %v", err)
-				s.renderError(c, http.StatusInternalServerError, "Search Error", err.Error())
+				log.Printf("[WEB]: searchPage: SearchNewsgroups(groups, offset=%d): %v", offset, err)
+				s.renderError(c, http.StatusInternalServerError, "Search Error", publicErrorDetail)
 				return
 			}
 
@@ -71,7 +69,7 @@ func (s *WebServer) searchPage(c *gin.Context) {
 			data.ResultCount = totalCount
 			data.HasResults = len(groups) > 0
 			data.Pagination = pagination
-			data.Title = template.HTML("Search Results: " + query)
+			data.Title = "Search Results: " + query
 
 		case "subjects":
 			// TODO: Implement article subject search
@@ -91,8 +89,8 @@ func (s *WebServer) searchPage(c *gin.Context) {
 			offset := (page - 1) * pageSize
 			groups, err := s.DB.SearchNewsgroups(query, pageSize, offset, false)
 			if err != nil {
-				log.Printf("Error searching: %v", err)
-				s.renderError(c, http.StatusInternalServerError, "Search Error", err.Error())
+				log.Printf("[WEB]: searchPage: SearchNewsgroups(all, offset=%d): %v", offset, err)
+				s.renderError(c, http.StatusInternalServerError, "Search Error", publicErrorDetail)
 				return
 			}
 
@@ -110,16 +108,9 @@ func (s *WebServer) searchPage(c *gin.Context) {
 			data.ResultCount = totalCount
 			data.HasResults = len(groups) > 0
 			data.Pagination = pagination
-			data.Title = template.HTML("Search Results: " + query)
+			data.Title = "Search Results: " + query
 		}
 	}
 
-	// Load template individually to avoid conflicts
-	tmpl := template.Must(template.ParseFiles("web/templates/base.html", "web/templates/search.html"))
-	c.Header("Content-Type", "text/html")
-	err := tmpl.ExecuteTemplate(c.Writer, "base.html", data)
-	if err != nil {
-		s.renderError(c, http.StatusInternalServerError, "Template error", err.Error())
-		return
-	}
+	s.renderPage(c, http.StatusOK, data, "search.html")
 }

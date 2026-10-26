@@ -1,51 +1,92 @@
 package web
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/database"
-	"github.com/go-while/go-pugleaf/internal/models"
 	"golang.org/x/crypto/bcrypt"
 )
 
 // Global flash message map and mutex
 var (
-	flashMessages   = make(map[string]FlashMessage)
+	flashMessages   = make(map[string]map[string]string)
+	flashSetAt      = make(map[string]time.Time) // last Set per session, for pruning
+	flashLastPrune  time.Time                    // last prune scan, throttled to flashPruneEvery
 	flashMessagesMu sync.RWMutex
 )
+
+const (
+	flashMaxSessions = 1000             // prune once more sessions than this hold messages
+	flashMaxAge      = 15 * time.Minute // messages older than this are pruned
+	flashPruneEvery  = time.Minute      // at most one prune scan per interval
+)
+
+// setFlashLocked stores one flash message; the caller holds flashMessagesMu.
+// Messages that are never read (for example after a redirect the client did not follow)
+// would otherwise stay in the map forever, so old entries are pruned when it grows.
+func setFlashLocked(sessionID, mtype, msg string) {
+	now := time.Now()
+	if len(flashMessages) > flashMaxSessions && now.Sub(flashLastPrune) >= flashPruneEvery {
+		flashLastPrune = now
+		for id, at := range flashSetAt {
+			if now.Sub(at) > flashMaxAge {
+				delete(flashMessages, id)
+				delete(flashSetAt, id)
+			}
+		}
+		for id := range flashMessages {
+			if _, ok := flashSetAt[id]; !ok {
+				delete(flashMessages, id)
+			}
+		}
+	}
+	if flashMessages[sessionID] == nil {
+		flashMessages[sessionID] = make(map[string]string)
+	}
+	flashMessages[sessionID][mtype] = msg
+	flashSetAt[sessionID] = now
+}
 
 // SetFlashError sets a temporary error message for a session
 func SetFlashError(sessionID, msg string) {
 	flashMessagesMu.Lock()
-	flashMessages[sessionID] = FlashMessage{Type: "error", Message: msg}
+	setFlashLocked(sessionID, "error", msg)
 	flashMessagesMu.Unlock()
 }
 
 // SetFlashSuccess sets a temporary success message for a session
 func SetFlashSuccess(sessionID, msg string) {
 	flashMessagesMu.Lock()
-	flashMessages[sessionID] = FlashMessage{Type: "success", Message: msg}
+	setFlashLocked(sessionID, "success", msg)
 	flashMessagesMu.Unlock()
 }
 
 // GetAndClearFlash retrieves and clears flash messages for a session
-func GetAndClearFlash(sessionID string) (success, errorMsg string) {
+func GetAndClearFlash(sessionID string, mtype string) (success, errorMsg string) {
 	flashMessagesMu.Lock()
-	fm := flashMessages[sessionID]
-	switch fm.Type {
+	switch mtype {
 	case "success":
-		success = fm.Message
+		success = flashMessages[sessionID]["success"]
+		delete(flashMessages[sessionID], "success")
 	case "error":
-		errorMsg = fm.Message
+		errorMsg = flashMessages[sessionID]["error"]
+		delete(flashMessages[sessionID], "error")
 	}
-	delete(flashMessages, sessionID)
+	if len(flashMessages[sessionID]) == 0 {
+		delete(flashMessages, sessionID)
+		delete(flashSetAt, sessionID)
+	}
+	if len(flashMessages) == 0 {
+		flashMessages = make(map[string]map[string]string)
+		flashSetAt = make(map[string]time.Time)
+	}
 	flashMessagesMu.Unlock()
 	return
 }
@@ -81,71 +122,41 @@ func (s *SessionData) SetSuccess(msg string) {
 
 // GetSuccess retrieves and clears the temporary success message
 func (s *SessionData) GetSuccess() string {
-	succ, _ := GetAndClearFlash(s.SessionID)
+	succ, _ := GetAndClearFlash(s.SessionID, "success")
 	return succ
 }
 
 // GetError retrieves and clears the temporary error message
 func (s *SessionData) GetError() string {
-	_, err := GetAndClearFlash(s.SessionID)
+	_, err := GetAndClearFlash(s.SessionID, "error")
 	return err
 }
 
-// WebAuthRequired middleware for web authentication (different from API auth)
-func (s *WebServer) WebAuthRequired() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		session := s.getWebSession(c)
-		if session == nil {
-			c.Redirect(http.StatusSeeOther, "/login?redirect="+c.Request.URL.Path)
-			c.Abort()
-			return
-		}
+// Context keys of the per-request auth cache.
+const (
+	ctxKeyWebSessionChecked = "pugleaf.webSessionChecked" // bool: getWebSession already ran
+	ctxKeyWebSession        = "pugleaf.webSession"        // *SessionData or nil
+	ctxKeyIsAdmin           = "pugleaf.isAdmin"           // bool: memoized isAdminRequest
+)
 
-		// Store user in context for handlers
-		c.Set("user", session.User)
-		c.Next()
+// getWebSession retrieves session from cookie and returns full session data.
+// The result (including "not logged in") is memoized in the request Context, so helpers
+// called several times per request validate the session only once.
+func (s *WebServer) getWebSession(c *Context) *SessionData {
+	if v, ok := c.Get(ctxKeyWebSessionChecked); ok {
+		if checked, _ := v.(bool); checked {
+			sd, _ := c.MustGet(ctxKeyWebSession).(*SessionData)
+			return sd
+		}
 	}
+	session := s.lookupWebSession(c)
+	c.Set(ctxKeyWebSession, session)
+	c.Set(ctxKeyWebSessionChecked, true)
+	return session
 }
 
-// WebAdminRequired middleware for admin-only routes
-func (s *WebServer) WebAdminRequired() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		session := s.getWebSession(c)
-		if session == nil {
-			c.Redirect(http.StatusSeeOther, "/login?redirect="+c.Request.URL.Path)
-			c.Abort()
-			return
-		}
-
-		// Check if user has admin permission
-		permissions, err := s.DB.GetUserPermissions(session.UserID)
-		if err != nil {
-			s.renderError(c, http.StatusInternalServerError, "Database Error", err.Error())
-			c.Abort()
-			return
-		}
-
-		hasAdminPerm := false
-		for _, perm := range permissions {
-			if perm.Permission == "admin" {
-				hasAdminPerm = true
-				break
-			}
-		}
-
-		if !hasAdminPerm {
-			s.renderError(c, http.StatusForbidden, "Access Denied", "Admin access required")
-			c.Abort()
-			return
-		}
-
-		c.Set("user", session.User)
-		c.Next()
-	}
-}
-
-// getWebSession retrieves session from cookie and returns full session data
-func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
+// lookupWebSession validates the session cookie against the database.
+func (s *WebServer) lookupWebSession(c *Context) *SessionData {
 	sessionID, err := c.Cookie("session_id")
 	if err != nil {
 		return nil
@@ -157,8 +168,9 @@ func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
 		return nil
 	}
 
-	// Refresh cookie to keep client-side max age in sync with sliding server timeout
-	s.setSessionCookie(c, sessionID)
+	// Refresh cookie to keep client-side max age in sync with the server-side expiry,
+	// which slides only every database.sessionSlideEvery.
+	s.setSessionCookieMaxAge(c, sessionID, sessionCookieMaxAge(*user.SessionExpiresAt))
 
 	authUser := &AuthUser{
 		ID:          user.ID,
@@ -176,34 +188,70 @@ func (s *WebServer) getWebSession(c *gin.Context) *SessionData {
 	}
 }
 
-// createWebSession creates a new session for user
-func (s *WebServer) createWebSession(c *gin.Context, userID int64) error {
-	// Generate random session ID
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return err
+// clearRequestSession drops the memoized session and admin flag of this request
+// (after login or logout changed the session).
+func (s *WebServer) clearRequestSession(c *Context) {
+	c.Set(ctxKeyWebSessionChecked, false)
+	c.Set(ctxKeyWebSession, (*SessionData)(nil))
+	c.Set(ctxKeyIsAdmin, nil)
+}
+
+// isAdminRequest reports whether the logged-in user of this request is an admin.
+// The result is memoized in the request Context.
+func (s *WebServer) isAdminRequest(c *Context) bool {
+	if v, ok := c.Get(ctxKeyIsAdmin); ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
 	}
-	sessionID := hex.EncodeToString(bytes)
-
-	// Set expiration to server session timeout for consistency
-	expiresAt := time.Now().Add(database.SessionTimeout)
-
-	// Store session in database
-	session := &models.Session{
-		ID:        sessionID,
-		UserID:    userID,
-		CreatedAt: time.Now(),
-		ExpiresAt: expiresAt,
+	admin := false
+	if session := s.getWebSession(c); session != nil {
+		if user, err := s.DB.GetUserByID(session.UserID); err == nil {
+			admin = s.isAdmin(user)
+		}
 	}
+	c.Set(ctxKeyIsAdmin, admin)
+	return admin
+}
 
-	err := s.DB.InsertSession(session)
-	if err != nil {
-		return err
+// safeRedirect returns u when it is a local path on this site, otherwise "/".
+// It rejects absolute and scheme-relative URLs ("//host", "/\host") and header-breaking input.
+func safeRedirect(u string) string {
+	if u == "" || len(u) > 2048 || strings.ContainsAny(u, "\r\n\\") {
+		return "/"
 	}
+	if !strings.HasPrefix(u, "/") || strings.HasPrefix(u, "//") {
+		return "/"
+	}
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" {
+		return "/"
+	}
+	return u
+}
 
-	// Set cookie
-	s.setSessionCookie(c, sessionID)
+// validateDisplayName checks a user-supplied display name: at most 64 runes, no control
+// characters and none of < > " (it ends up in the From: header of web posts). Empty is allowed.
+func validateDisplayName(name string) error {
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("display name contains invalid characters")
+	}
+	if utf8.RuneCountInString(name) > 64 {
+		return fmt.Errorf("display name must be at most 64 characters")
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || r == '<' || r == '>' || r == '"' {
+			return fmt.Errorf("display name contains invalid characters")
+		}
+	}
 	return nil
+}
+
+// dummyPasswordHash is compared against when a login names an unknown user, so that
+// the response time does not reveal whether the user exists.
+var dummyPasswordHash struct {
+	once sync.Once
+	hash []byte
 }
 
 // hashPassword creates a bcrypt hash of the password
@@ -243,39 +291,51 @@ func validateUsername(username string) error {
 
 // validatePassword validates password requirements
 func validatePassword(password string) error {
-	if len(password) < 6 {
-		return fmt.Errorf("password must be at least 6 characters long")
+	if len(password) < 12 {
+		return fmt.Errorf("password must be at least 12 characters long")
 	}
-	if len(password) > 128 {
-		return fmt.Errorf("password must be less than 128 characters")
+	if len(password) > 72 {
+		// bcrypt rejects longer passwords (ErrPasswordTooLong)
+		return fmt.Errorf("password must be at most 72 bytes")
 	}
 	return nil
 }
 
-// Helper function to set session cookie
-func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
+// setSessionCookie sets the session cookie of a freshly created session, which lasts a
+// full SessionTimeout. Requests on an existing session use setSessionCookieMaxAge with
+// sessionCookieMaxAge, so the cookie follows the server-side expiry.
+func (s *WebServer) setSessionCookie(c *Context, sessionID string) {
+	s.setSessionCookieMaxAge(c, sessionID, int(database.SessionTimeout.Seconds()))
+}
+
+// sessionCookieMaxAge returns the cookie Max-Age (seconds) for a server-side session
+// expiry: the remaining lifetime, clamped to 1..SessionTimeout. The DB expiry slides only
+// every database.sessionSlideEvery, so a fixed full-timeout Max-Age would leave the
+// browser holding a valid-looking cookie for a session the server already dropped.
+func sessionCookieMaxAge(expiresAt time.Time) int {
+	maxAge := int(database.SessionTimeout.Seconds())
+	remaining := int(time.Until(expiresAt).Seconds())
+	if remaining < 1 {
+		return 1
+	}
+	if remaining > maxAge {
+		return maxAge
+	}
+	return remaining
+}
+
+// setSessionCookieMaxAge writes the session cookie with an explicit Max-Age.
+func (s *WebServer) setSessionCookieMaxAge(c *Context, sessionID string, maxAge int) {
 	// Detect HTTPS from the current request perspective only
 	// Prefer actual TLS on the request or trusted reverse proxy header
-	// Gin guarantees c.Request is non-nil for handlers
+	// The router guarantees c.Request is non-nil for handlers
+	isHTTPS := c.Request.TLS != nil
 	if v, exists := c.Get("is_https"); exists {
 		if b, ok := v.(bool); ok {
 			// Use scheme determined by ReverseProxyMiddleware
-			isHTTPS := b
-			cookie := &http.Cookie{
-				Name:     "session_id",
-				Value:    sessionID,
-				Path:     "/",
-				HttpOnly: true,
-				Secure:   isHTTPS,
-				SameSite: http.SameSiteLaxMode, // Works well with reverse proxies
-				MaxAge:   int(database.SessionTimeout.Seconds()), // align with server-side sliding timeout
-			}
-			http.SetCookie(c.Writer, cookie)
-			return
+			isHTTPS = b
 		}
 	}
-	// Fallback if middleware wasn't applied
-	isHTTPS := c.Request.TLS != nil
 
 	cookie := &http.Cookie{
 		Name:     "session_id",
@@ -284,16 +344,16 @@ func (s *WebServer) setSessionCookie(c *gin.Context, sessionID string) {
 		HttpOnly: true,
 		Secure:   isHTTPS,
 		SameSite: http.SameSiteLaxMode, // Works well with reverse proxies
-		MaxAge:   int(database.SessionTimeout.Seconds()), // align with server-side sliding timeout
+		MaxAge:   maxAge,               // follows the server-side sliding timeout
 	}
 
 	http.SetCookie(c.Writer, cookie)
 }
 
 // Helper function to clear session cookie
-func (s *WebServer) clearSessionCookie(c *gin.Context) {
+func (s *WebServer) clearSessionCookie(c *Context) {
 	// Detect HTTPS from the current request perspective only
-	// Gin guarantees c.Request is non-nil for handlers
+	// The router guarantees c.Request is non-nil for handlers
 	isHTTPS := c.Request.TLS != nil
 	if v, exists := c.Get("is_https"); exists {
 		if b, ok := v.(bool); ok {

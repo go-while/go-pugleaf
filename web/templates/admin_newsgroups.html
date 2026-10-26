@@ -12,11 +12,19 @@
               <div class="card-body">
                   <form method="GET" action="/admin" class="row g-3">
                       <input type="hidden" name="tab" value="newsgroups">
-                      <div class="col-md-8">
+                      <div class="col-md-6">
                           <input type="text" class="form-control" name="search"
-                                 value="{{.NewsgroupSearch}}" placeholder="Search by name or prefix...">
+                                 value="{{.NewsgroupSearch}}" placeholder="Search by name prefix...">
                       </div>
-                      <div class="col-md-4">
+                      <div class="col-md-3">
+                          <div class="form-check">
+                              <input class="form-check-input" type="checkbox" name="search_description" id="search_description" {{if .SearchDescription}}checked{{end}}>
+                              <label class="form-check-label" for="search_description">
+                                  search descriptions
+                              </label>
+                          </div>
+                      </div>
+                      <div class="col-md-3">
                           <button type="submit" class="btn btn-outline-primary">Search</button>
                           {{if .NewsgroupSearch}}
                           <a href="/admin?tab=newsgroups" class="btn btn-outline-secondary">Clear</a>
@@ -51,13 +59,14 @@
                   <div class="row mb-3">
                       <div class="col-12">
                           <div class="alert alert-light border">
-                              <form method="POST" id="bulkActionsForm">
+                                  <form method="POST" id="bulkActionsForm">
                                   {{if .NewsgroupSearch}}
                                   <input type="hidden" name="search" value="{{.NewsgroupSearch}}">
                                   {{end}}
-                                  <input type="hidden" name="ng_page" value="{{.NewsgroupPagination.CurrentPage}}">
-
-                                  <div class="d-flex align-items-center justify-content-between">
+                                  {{if .SearchDescription}}
+                                  <input type="hidden" name="search_description" value="on">
+                                  {{end}}
+                                  <input type="hidden" name="ng_page" value="{{.NewsgroupPagination.CurrentPage}}">                                  <div class="d-flex align-items-center justify-content-between">
                                       <div class="d-flex align-items-center">
                                           <input type="checkbox" id="selectAll" class="form-check-input me-2" onchange="toggleAllCheckboxes()">
                                           <label for="selectAll" class="form-check-label me-3">Select All</label>
@@ -88,16 +97,14 @@
                           <thead>
                               <tr>
                                   <th width="30">
-                                      <input type="checkbox" id="headerCheckbox" class="form-check-input">
+                                      x<!--<input type="checkbox" id="headerCheckbox" class="form-check-input">-->
                                   </th>
-                                  <th>Edit / Toggle</th>
+                                  <th>ON</th>
+                                  <th>Count<br>Last</th>
+                                  <th>Edit</th>
                                   <th>Newsgroup</th>
-                                  <th>Description</th>
                                   <th>Section</th>
-                                  <th>Active</th>
-                                  <th>Count</th>
-                                  <th>Last</th>
-                                  <th>Expiry | Max</th>
+                                  <th>Expiry</th>
                                   <th>Actions</th>
                                   <th>Delete</th>
                               </tr>
@@ -106,40 +113,71 @@
                               {{range .Newsgroups}}
                               <tr>
                                   <td>
-                                      <input type="checkbox" class="form-check-input newsgroup-checkbox"
+                                      <input title="Select {{.Name}}" type="checkbox" class="form-check-input newsgroup-checkbox"
                                              name="newsgroups" value="{{.Name}}" data-active="{{.Active}}"
                                              form="bulkActionsForm" onchange="updateSelectedCount()">
                                   </td>
                                   <td>
-                                    <button type="button" class="btn btn-outline-primary btn-sm edit-newsgroup-btn"
-                                            data-name="{{.Name}}"
-                                            data-description="{{.Description}}"
-                                            data-expiry-days="{{if .ExpiryDays}}{{.ExpiryDays}}{{else}}0{{end}}"
-                                            data-max-articles="{{if .MaxArticles}}{{.MaxArticles}}{{else}}0{{end}}"
-                                            data-max-art-size="{{if .MaxArtSize}}{{.MaxArtSize}}{{else}}0{{end}}"
-                                            data-active="{{.Active}}">
-                                        Edit
-                                    </button>
                                     <!-- button to toggle enable disable -->
                                     <form action="/admin/newsgroups/toggle" method="post" style="display: inline;">
                                         <input type="hidden" name="name" value="{{.Name}}">
                                         {{if $.NewsgroupSearch}}
                                         <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
                                         {{end}}
+                                        {{if $.SearchDescription}}
+                                        <input type="hidden" name="search_description" value="on">
+                                        {{end}}
                                         <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                         {{if .Active}}
-                                        <button type="submit" class="btn btn-outline-warning btn-sm">
-                                            <i class="bi bi-person-slash me-1"></i>Disable
+                                        <button type="submit" class="btn btn-outline-success btn-sm" title="{{.Name}} is Enabled. Click to disable.">
+                                            ✅
                                         </button>
                                         {{else}}
-                                        <button type="submit" class="btn btn-outline-success btn-sm">
-                                            <i class="bi bi-person-check me-1"></i>Enable
+                                        <button type="submit" class="btn btn-outline-success btn-sm" title="{{.Name}} is Disabled. Click to enable.">
+                                            ❌
                                         </button>
                                         {{end}}
                                     </form>
+
+                                    {{if .Status}}
+                                    <span class="badge {{if eq .Status "y"}}bg-success{{else if eq .Status "m"}}bg-warning text-dark{{else if eq .Status "n"}}bg-secondary{{else if eq .Status "j"}}bg-info text-dark{{else if eq .Status "x"}}bg-danger{{else}}bg-primary{{end}}">
+                                        {{if eq .Status "y"}}y
+                                        {{else if eq .Status "m"}}m
+                                        {{else if eq .Status "n"}}n
+                                        {{else if eq .Status "j"}}j
+                                        {{else if eq .Status "x"}}x
+                                        {{else}}[{{.Status}}]{{end}}
+                                    </span>
+                                    {{else}}
+                                    <span class="badge bg-secondary">
+                                        <em>err!</em>
+                                    </span>
+                                    {{end}}
                                   </td>
-                                  <td><strong><a href="/groups/{{.Name}}" target="_blank" class="btn btn-outline-success btn-sm">{{.Name}}</a></strong></td>
-                                  <td>{{if .Description}}{{.Description}}{{else}}<em>No description</em>{{end}}</td>
+                                  <td>
+                                    <small>C:{{.MessageCount}}</small>
+                                    <br>
+                                    <small>L#{{if .LastArticle}}{{.LastArticle}}{{else}}-{{end}}</small>
+                                  </td>
+                                  <td>
+                                    <button title="Edit {{.Name}}" type="button" class="btn btn-outline-primary btn-sm edit-newsgroup-btn"
+                                            data-name="{{.Name}}"
+                                            data-description="{{.Description}}"
+                                            data-expiry-days="{{if .ExpiryDays}}{{.ExpiryDays}}{{else}}0{{end}}"
+                                            data-max-articles="{{if .MaxArticles}}{{.MaxArticles}}{{else}}0{{end}}"
+                                            data-max-art-size="{{if .MaxArtSize}}{{.MaxArtSize}}{{else}}0{{end}}"
+                                            data-active="{{.Active}}"
+                                            data-status="{{.Status}}">
+                                        Edit
+                                    </button>
+                                    <br>
+
+                                  </td>
+                                  <td>
+                                    <strong><a href="/groups/{{.Name}}" target="_blank" class="btn btn-outline-success btn-sm">{{.Name}}</a></strong>
+                                    <br>
+                                    <small>{{if .Description}}{{.Description}}{{else}}<em>No description</em>{{end}}</small>
+                                  </td>
                                   <td>
                                       {{/* Find current section assignment */}}
                                       {{$currentSection := ""}}
@@ -157,6 +195,9 @@
                                           {{if $.NewsgroupSearch}}
                                           <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
                                           {{end}}
+                                          {{if $.SearchDescription}}
+                                          <input type="hidden" name="search_description" value="on">
+                                          {{end}}
                                           <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                           <select class="form-select form-select-sm" name="section_id" onchange="this.form.submit()">
                                               <option value="0" {{if eq $currentSectionID 0}}selected{{end}}>No Section</option>
@@ -167,37 +208,75 @@
                                       </form>
                                   </td>
                                   <td>
-                                      {{if .Active}}
-                                      <span class="badge bg-success">Active</span>
-                                      {{else}}
-                                      <span class="badge bg-secondary">Inactive</span>
-                                      {{end}}
-                                  </td>
-                                  <td>{{.MessageCount}}</td>
-                                  <td>{{if .LastArticle}}{{.LastArticle}}{{else}}-{{end}}</td>
-                                  <td>{{.ExpiryDays}}d | {{.MaxArticles}}{{if .MaxArtSize}} | {{.MaxArtSize}}B{{end}}</td>
-                                  <td>
-                                      <form method="POST" action="/admin/newsgroups/migrate-activity" style="display: inline;">
-                                          <input type="hidden" name="newsgroup_name" value="{{.Name}}">
-                                          {{if $.NewsgroupSearch}}
-                                          <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
-                                          {{end}}
-                                          <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
-                                          <button type="submit" class="btn btn-outline-primary btn-sm"
-                                                  title="Recalculate last activity timestamp for this newsgroup">
-                                              <i class="bi bi-clock-history me-1"></i>Fix Activity
-                                          </button>
-                                      </form>
+                                      <button type="button" class="btn btn-outline-secondary btn-sm"
+                                              title="Expiry Days: Articles older than {{.ExpiryDays}} days will be automatically expired">
+                                          {{.ExpiryDays}}d
+                                      </button>
+                                      <button type="button" class="btn btn-outline-secondary btn-sm"
+                                              title="Max Articles: Maximum number of articles allowed in this newsgroup ({{.MaxArticles}})">
+                                          {{.MaxArticles}}
+                                      </button>
+                                      <button type="button" class="btn btn-outline-secondary btn-sm"
+                                              title="Max Article Size: Maximum size per article in bytes ({{.MaxArtSize}}B)">
+                                          {{.MaxArtSize}}B
+                                      </button>
                                   </td>
                                   <td>
                                       <div class="btn-group btn-group-sm">
-                                          <a href="/groups/{{.Name}}" class="btn btn-outline-info btn-sm">View</a>
-                                          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                                          <form method="POST" action="/admin/newsgroups/migrate-activity" style="display: inline;">
+                                              <input type="hidden" name="newsgroup_name" value="{{.Name}}">
+                                              {{if $.NewsgroupSearch}}
+                                              <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                              {{end}}
+                                              {{if $.SearchDescription}}
+                                              <input type="hidden" name="search_description" value="on">
+                                              {{end}}
+                                              <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
+                                              <button type="submit" class="btn btn-outline-primary btn-sm"
+                                                      title="Fix Activity recalculates last activity timestamp for this newsgroup. Run it on all newsgroups with the webserver flag '-update-newsgroups-activity N' ( N is the number of newsgroups to process concurrently! )">
+                                                  <i class="bi bi-clock me-1"></i>FNA
+                                              </button>
+                                          </form>
+                                          <form method="POST" action="/admin/newsgroups/fix-thread-activity" style="display: inline;">
+                                              <input type="hidden" name="newsgroup_name" value="{{.Name}}">
+                                              {{if $.NewsgroupSearch}}
+                                              <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                              {{end}}
+                                              {{if $.SearchDescription}}
+                                              <input type="hidden" name="search_description" value="on">
+                                              {{end}}
+                                              <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
+                                              <button type="submit" class="btn btn-outline-info btn-sm"
+                                                      title="Fix Thread Activity recalculates thread last_activity timestamps that may be incorrectly set to future dates.">
+                                                  <i class="bi bi-arrow-clockwise me-1"></i>FTA
+                                              </button>
+                                          </form>
+                                          <form method="POST" action="/admin/newsgroups/hide-future-posts" style="display: inline;">
+                                              <input type="hidden" name="newsgroup_name" value="{{.Name}}">
+                                              {{if $.NewsgroupSearch}}
+                                              <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                              {{end}}
+                                              {{if $.SearchDescription}}
+                                              <input type="hidden" name="search_description" value="on">
+                                              {{end}}
+                                              <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
+                                              <button type="submit" class="btn btn-outline-warning btn-sm"
+                                                      title="Hide Future Posts finds and marks future-dated articles (>48h) as spam. Articles will appear in spam management. Run it on all newsgroups with the webserver flag '-update-newsgroups-hide-futureposts'">
+                                                  <i class="bi bi-clock-history me-1"></i>HFP
+                                              </button>
+                                          </form>
+                                      </div>
+                                  </td>
+                                  <td>
+                                      <div class="btn-group btn-group-sm">
                                           {{if not .Active}}
                                           <form method="POST" action="/admin/newsgroups/delete?tab=newsgroups" style="display: inline;">
                                               <input type="hidden" name="name" value="{{.Name}}">
                                               {{if $.NewsgroupSearch}}
                                               <input type="hidden" name="search" value="{{$.NewsgroupSearch}}">
+                                              {{end}}
+                                              {{if $.SearchDescription}}
+                                              <input type="hidden" name="search_description" value="on">
                                               {{end}}
                                               <input type="hidden" name="ng_page" value="{{$.NewsgroupPagination.CurrentPage}}">
                                               <button type="submit" class="btn btn-outline-danger btn-sm"
@@ -372,6 +451,7 @@
                 <div class="modal-body">
                     <input type="hidden" id="edit_newsgroup_original_name" name="original_name">
                     <input type="hidden" id="edit_search_term" name="search" value="{{.NewsgroupSearch}}">
+                    <input type="hidden" id="edit_search_description" name="search_description" value="{{if .SearchDescription}}on{{end}}">
                     <input type="hidden" id="edit_ng_page" name="ng_page" value="{{.NewsgroupPagination.CurrentPage}}">
 
                     <div class="mb-3">
@@ -418,6 +498,22 @@
                             </label>
                         </div>
                     </div>
+
+                    <div class="mb-3">
+                        <label for="edit_newsgroup_status" class="form-label">Status</label>
+                        <select class="form-select" id="edit_newsgroup_status" name="status">
+                            <option value="y">y - Local postings and articles from peers are allowed</option>
+                            <option value="m">m - Moderated (all postings must be approved)</option>
+                            <option value="n">n - No local postings, only articles from peers</option>
+                            <option value="j">j - Articles from peers filed in junk group</option>
+                            <option value="x">x - No local postings, articles from peers ignored</option>
+                            <option value="=" disabled>= - Redirect to another group (enter manually)</option>
+                        </select>
+                        <div class="form-text">
+                            Controls posting permissions and article handling.
+                            For redirect (=), manually enter "=foo.bar" to file articles in foo.bar instead.
+                        </div>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -442,6 +538,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const maxArticles = parseInt(this.dataset.maxArticles) || 0;
             const maxArtSize = parseInt(this.dataset.maxArtSize) || 0;
             const active = this.dataset.active === 'true';
+            const status = this.dataset.status || 'y';
 
             // Populate the modal form
             document.getElementById('edit_newsgroup_original_name').value = name;
@@ -451,6 +548,23 @@ document.addEventListener('DOMContentLoaded', function() {
             document.getElementById('edit_max_articles').value = maxArticles;
             document.getElementById('edit_max_art_size').value = maxArtSize;
             document.getElementById('edit_newsgroup_active').checked = active;
+
+            // Handle status - if it starts with '=', it's a redirect
+            const statusSelect = document.getElementById('edit_newsgroup_status');
+            if (status.startsWith('=')) {
+                // For redirect status, select the '=' option and show a note
+                statusSelect.value = '=';
+                // If '=' option doesn't exist in select, add it with the full value
+                if (!statusSelect.querySelector('option[value="' + status + '"]')) {
+                    const redirectOption = document.createElement('option');
+                    redirectOption.value = status;
+                    redirectOption.text = status + ' - Redirect to ' + status.substring(1);
+                    redirectOption.selected = true;
+                    statusSelect.appendChild(redirectOption);
+                }
+            } else {
+                statusSelect.value = status;
+            }
 
             // Show the modal
             editModal.show();

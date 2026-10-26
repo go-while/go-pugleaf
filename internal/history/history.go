@@ -1,876 +1,780 @@
 package history
 
 import (
-	"bufio"
 	"database/sql"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mattn/go-sqlite3"
 )
 
-const ENABLE_HISTORY = false // EXPERIMENTAL !
+// ENABLE_HISTORY is read ONCE by NewHistory. Changing it later does not affect a running instance.
+var ENABLE_HISTORY = false // EXPERIMENTAL !
 
-var HistoryDEBUG = false                // Set to true for spammy debug logs
-var MaxLookupWorkers = runtime.NumCPU() // Use number of CPU cores for lookup workers
+var HistoryDEBUG = false // Set to true for spammy debug logs
+
+// ErrHistoryClosed is returned by reads after Close()
+var ErrHistoryClosed = errors.New("history is closed")
 
 const (
-	//MaxLookupWorkers = 64
 
 	// History file constants
-	DefaultHistoryDir = "data/history" // TODO set via config
-	HistoryFileName   = "history.dat"
+	DefaultHistoryDir = "./data/history" // TODO set via config
 
 	// Cache configuration
 	DefaultCacheExpires = 15 // seconds
 	DefaultCachePurge   = 5  // seconds
 
 	// History Write Batching configuration
-	DefaultBatchSize    = 10000 // Number of entries to batch before flushing (reduced from 10000 to fix memory bloat)
-	DefaultBatchTimeout = 5000  // Milliseconds to wait before forced flush
+	DefaultBatchSize    = 10000 // Number of ops per flush
+	DefaultBatchTimeout = 1000  // Milliseconds between forced flushes. maps to h.config.BatchTimeout
 
 	// Sharding configuration constants
 	SHARD_16_256 = 2 // 16 DBs with 256 tables each (recommended)
 )
 
-// NewHistory creates a new history manager
-// The mainWG parameter should be the main application's waitgroup that will coordinate shutdown
-func NewHistory(config *HistoryConfig, mainWG *sync.WaitGroup) (*History, error) {
-	if config == nil {
-		config = DefaultConfig()
-	}
+const (
+	historyNumDBs = 16 // must match GetShardConfig
 
-	if err := config.ValidateConfig(); err != nil {
+	// Begin retry on busy/locked (busy_timeout already waits 30s per attempt)
+	beginRetryBaseDelay = 100 * time.Millisecond
+	beginRetryMaxDelay  = 5 * time.Second
+	beginMaxRetries     = 100
+
+	// writer poll interval while shutting down
+	shutdownPollInterval = 50 * time.Millisecond
+)
+
+// history op kinds
+const (
+	opAdd    uint8 = 1
+	opRemove uint8 = 2
+)
+
+// historyOp is one queued write: add or remove groupID for messageID
+type historyOp struct {
+	op         uint8
+	messageID  string
+	groupID    int64
+	articleNum int64 // article number in groupID; 0 = unknown (plan xref-history)
+}
+
+// Location is one place an article is stored: a main-DB newsgroup ID and the article
+// number in that group's database (0 when the index row predates the numbers).
+type Location struct {
+	GroupID    int64
+	ArticleNum int64
+}
+
+// routedOp is a historyOp with its target table in the routed database file
+type routedOp struct {
+	historyOp
+	tableName string
+}
+
+// History row encoding (plan xref-history): newsgroups is a CSV of tokens, one per group the
+// article is stored in. A token is "groupID:articleNum" when the number is known, or the plain
+// "groupID" of rows written before the numbers were recorded (number unknown). Both formats may
+// appear in one row; readers accept both (parseLocations).
+//
+// A group is never stored twice. An add with a number is authoritative: it upgrades a plain "id"
+// token of the group in place to "id:num" (token order kept) and rewrites "id:<other>" to
+// "id:num" (setGroupToken, only when the UPSERT changed nothing), so a history-rebuild over an
+// existing index fills in the numbers of old rows and fixes renumbered groups (recover-db).
+// An add without a number never appends a plain token next to an existing token of the group
+// and never downgrades "id:num".
+const (
+	// add a token ("id:num" or plain "id"): skip if the row holds "id:<anything>" (prefix probe
+	// ",id:") or the plain "id" while the token has no number (exact probe ",id,"); upgrade a
+	// plain "id" in place to the numbered token; otherwise append. A skipped numbered add is
+	// followed by the renumber check in Go (executeDBTransaction, renumberGroupToken).
+	// args: ?1 messageID, ?2 token, ?3 groupID
+	sqlAddArticle = `INSERT INTO %s(message_id,newsgroups) VALUES(?1,?2) ON CONFLICT(message_id) DO UPDATE SET newsgroups = CASE` +
+		` WHEN coalesce(newsgroups,'')='' THEN excluded.newsgroups` +
+		` WHEN instr(','||newsgroups||',', ','||?3||',') > 0 THEN trim(replace(','||newsgroups||',', ','||?3||',', ','||excluded.newsgroups||','), ',')` +
+		` ELSE newsgroups||','||excluded.newsgroups END` +
+		` WHERE instr(','||coalesce(newsgroups,'')||',', ','||?3||':') = 0` +
+		` AND (instr(','||coalesce(newsgroups,'')||',', ','||?3||',') = 0 OR excluded.newsgroups <> ?3)`
+	// remove the exact token "id:num" and a plain "id" token of the same group (number unknown).
+	// Changes the row only when one of them is present, so RowsAffected()==0 means "not removed":
+	// the caller then strips every token of the group (a stale number, see RemoveArticleAt).
+	// args: ?1 "id:num", ?2 "id", ?3 messageID
+	sqlRemoveArticle = `UPDATE %s SET newsgroups = trim(replace(replace(','||newsgroups||',', ','||?1||',', ','), ','||?2||',', ','), ',')` +
+		` WHERE message_id=?3 AND (instr(','||newsgroups||',', ','||?1||',') > 0 OR instr(','||newsgroups||',', ','||?2||',') > 0)`
+	// remove with an unknown number: read-modify-write in Go (stripGroupTokens)
+	sqlSelectNewsgroups = `SELECT newsgroups FROM %s WHERE message_id=?`
+	sqlSetNewsgroups    = `UPDATE %s SET newsgroups=? WHERE message_id=?`
+	// drop the row if no group is left
+	sqlDeleteEmpty = `DELETE FROM %s WHERE message_id=? AND coalesce(newsgroups,'')=''`
+)
+
+// historyToken returns the CSV token for groupID: "id:num", or the plain "id" when num is unknown (<= 0)
+func historyToken(groupID, articleNum int64) string {
+	id := strconv.FormatInt(groupID, 10)
+	if articleNum <= 0 {
+		return id
+	}
+	return id + ":" + strconv.FormatInt(articleNum, 10)
+}
+
+// setGroupToken rewrites the first token of groupID (plain "id" or "id:<any>") to token and drops
+// further tokens of groupID. Other tokens are kept verbatim and in order. A csv without a token of
+// groupID is returned unchanged. changed reports whether the result differs from csv.
+func setGroupToken(csv string, groupID int64, token string) (out string, changed bool) {
+	id := strconv.FormatInt(groupID, 10)
+	parts := strings.Split(csv, ",")
+	kept := make([]string, 0, len(parts))
+	found := false
+	for _, part := range parts {
+		tok := strings.TrimSpace(part)
+		if tok == id || strings.HasPrefix(tok, id+":") {
+			if found {
+				continue
+			}
+			found = true
+			if tok == token {
+				kept = append(kept, part) // already right: keep verbatim
+			} else {
+				kept = append(kept, token)
+			}
+			continue
+		}
+		kept = append(kept, part)
+	}
+	if !found {
+		return csv, false
+	}
+	out = strings.Join(kept, ",")
+	return out, out != csv
+}
+
+// stripGroupTokens drops every token of groupID (plain "id" or "id:num") and empty parts from csv.
+// Other tokens are kept verbatim and in order. changed reports whether the result differs from csv.
+func stripGroupTokens(csv string, groupID int64) (out string, changed bool) {
+	id := strconv.FormatInt(groupID, 10)
+	parts := strings.Split(csv, ",")
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		tok := strings.TrimSpace(part)
+		if tok == "" {
+			continue
+		}
+		if tok == id || strings.HasPrefix(tok, id+":") {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	out = strings.Join(kept, ",")
+	return out, out != csv
+}
+
+// NewHistory creates a new history manager.
+// The mainWG parameter (may be nil) is the main application's waitgroup: when enabled
+// it gets +1 for the writer goroutine, which calls Done() after its final flush.
+func NewHistory(cfg *HistoryConfig, mainWG *sync.WaitGroup) (*History, error) {
+	enabled := ENABLE_HISTORY // read once
+
+	if cfg == nil {
+		cfg = DefaultConfig()
+	}
+	if err := cfg.ValidateConfig(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	// Create history directory
-	if !dirExists(config.HistoryDir) {
-		if !mkdir(config.HistoryDir) {
-			return nil, fmt.Errorf("failed to create history directory: %s", config.HistoryDir)
-		}
-	}
-	MaxLookupWorkers = MaxLookupWorkers / 2
-	if MaxLookupWorkers < 1 {
-		MaxLookupWorkers = 1
-	}
 	h := &History{
-		config:     config,
-		stats:      &HistoryStats{},
-		tickChan:   make(chan struct{}, 1),
-		lookupChan: make(chan *MessageIdItem, MaxLookupWorkers*2),
-		writerChan: make(chan *MessageIdItem, int(config.BatchSize*2)),
-		dbChan:     make(chan *MessageIdItem, int(config.BatchSize*2)),
-		stopChan:   make(chan struct{}),
-		lastFlush:  time.Now(),
-		mainWG:     mainWG, // Store the main application's waitgroup
+		config:     cfg,
+		enabled:    enabled,
+		closeChan:  make(chan struct{}),
+		writerDone: make(chan struct{}),
 	}
-	if ENABLE_HISTORY {
-		// Initialize database backend
-		if err := h.initDatabase(); err != nil {
-			return nil, fmt.Errorf("failed to initialize database: %w", err)
-		}
-
-		// Open history file
-		if err := h.openHistoryFile(); err != nil {
-			return nil, fmt.Errorf("failed to open history file: %w", err)
-		}
-
-		// Start worker goroutines with main application waitgroup coordination
-		h.bootLookupWorkers()
+	if !enabled {
+		log.Printf("[HISTORY] history index disabled")
+		return h, nil
 	}
-	go h.writerWorker() // +1 wg mainWG waitGroup
+
+	// Create history directory
+	if !dirExists(cfg.HistoryDir) {
+		if !mkdir(cfg.HistoryDir) {
+			return nil, fmt.Errorf("failed to create history directory: %s", cfg.HistoryDir)
+		}
+	}
+
+	// Initialize database backend
+	if err := h.initDatabase(); err != nil {
+		return nil, fmt.Errorf("failed to initialize database: %w", err)
+	}
+
+	h.opChan = make(chan historyOp, cfg.BatchSize*2)
+	h.mainWG = mainWG
+	h.writerAlive = true
+	if mainWG != nil {
+		mainWG.Add(1)
+	}
+	go h.writerWorker() // mainWG.Done() when finished
 	return h, nil
 }
 
-// Add adds a new message-ID to history
-func (h *History) Add(msgIdItem *MessageIdItem) {
-	if !ENABLE_HISTORY {
-		msgIdItem.Mux.Lock()
-		msgIdItem.Response = CaseDupes
-		msgIdItem.CachedEntryExpires = time.Now().Add(15 * time.Second)
-		msgIdItem.Mux.Unlock()
-		return
-	}
-	if msgIdItem == nil {
-		log.Printf("[HISTORY] ERROR: Add called with nil MessageIdItem")
-		return
-	}
-	msgIdItem.Mux.Lock()
-	if msgIdItem.MessageId == "" {
-		log.Printf("[HISTORY] ERROR: Add called with empty MessageId item='%#v'", msgIdItem)
-		msgIdItem.Mux.Unlock()
-		return
-	}
-	if msgIdItem.StorageToken == "" && (msgIdItem.GroupName == nil || *msgIdItem.GroupName == "" || msgIdItem.ArtNum <= 0) {
-		log.Printf("[HISTORY] ERROR: Add called with invalid MessageIdItem='%#v'", msgIdItem)
-		msgIdItem.Mux.Unlock()
-		return
-	}
-	if msgIdItem.FileOffset > 0 {
-		log.Printf("[HISTORY] ERROR: Add called with already stored MessageIdItem='%v'", msgIdItem)
-		msgIdItem.Mux.Unlock()
-		return
-	}
-	if msgIdItem.Response != CaseLock {
-		/*
-			if msgIdItem.MessageId == "<32304224.79C1@parkcity.com>" {
-				log.Printf("[DEBUG-HISTORY-STEP8-FAIL] Target message ID blocked from entering history! Response: %x (expected: %x)", msgIdItem.Response, CaseLock)
-			}
-		*/
-		msgIdItem.Mux.Unlock()
-		log.Printf("[HISTORY] DUPLICATE to Add msgId='%s' case: %x != %x", msgIdItem.MessageId, msgIdItem.Response, CaseLock)
-		return
-	}
-	//msgIdItem.Response = CaseWrite // Set to write state // FIXMEE
-	//msgIdItem.CachedEntryExpires = time.Now().Add(CachedEntryTTL)
-	msgIdItem.Mux.Unlock()
-
-	/*
-		if msgIdItem.MessageId == "<32304224.79C1@parkcity.com>" {
-			log.Printf("[DEBUG-HISTORY-STEP8] Target message ID entering writer channel: %s", msgIdItem.MessageId)
-		}
-	*/
-	/*
-		// Check if already exists
-
-	*/
-	if len(h.writerChan) >= h.config.BatchSize {
-		select {
-		case h.tickChan <- NOTIFY:
-			// pass
-		default:
-			// full
-		}
-	}
-	h.lookupChan <- msgIdItem
-	// Add entry to pending batch
-	//log.Printf("[HISTORY] Adding msgId='%s' to writer chan (queued %d/%d)", msgIdItem.MessageId, len(h.writerChan), cap(h.writerChan))
-
-	// Successfully queued for batch processing
-	//h.updateStats(func(s *HistoryStats) { s.TotalAdds++ })
-
+// Enabled reports whether this instance maintains the history index
+func (h *History) Enabled() bool {
+	return h != nil && h.enabled
 }
 
-func (h *History) bootLookupWorkers() {
-	log.Printf("[HISTORY] Starting %d lookup workers", MaxLookupWorkers)
-	for i := 1; i <= MaxLookupWorkers; i++ {
-		go h.LookupWorker(i)
-	}
-	time.Sleep(1000 * time.Millisecond) // Give workers time to start
+// AddArticle queues "messageID is stored in groupID". Idempotent. Blocks when the queue is full (backpressure).
+// The article number stays unknown; use AddArticleAt when it is known.
+func (h *History) AddArticle(messageID string, groupID int64) {
+	h.enqueue(opAdd, messageID, groupID, 0)
 }
 
-func (h *History) LookupWorker(wid int) {
-	//log.Printf("[HISTORY] LookupWorker %03d started", wid)
-	processed := 0
-	maxWork := 65536 / MaxLookupWorkers
-	if maxWork < 16384 {
-		maxWork = 16384 // Ensure minimum work per worker
+// AddArticleAt is AddArticle with the article number of messageID in groupID (0 = unknown).
+// The row then holds the token "groupID:articleNum": a plain "groupID" token (number unknown) is
+// upgraded in place and a token with a different number is rewritten (the latest numbered add wins).
+func (h *History) AddArticleAt(messageID string, groupID, articleNum int64) {
+	h.enqueue(opAdd, messageID, groupID, articleNum)
+}
+
+// RemoveArticle queues "messageID is no longer stored in groupID" (trimming). The number is
+// unknown, so every token of groupID (plain or with a number) is removed.
+func (h *History) RemoveArticle(messageID string, groupID int64) {
+	h.enqueue(opRemove, messageID, groupID, 0)
+}
+
+// RemoveArticleAt is RemoveArticle with the article number the row holds for groupID (0 = unknown).
+// It removes the exact token "groupID:articleNum" or a plain "groupID" token in one statement. A
+// group DB holds a message-id at most once, so a token of groupID with a different number can only
+// be a stale number (renumbering): when neither token matched, every token of groupID is removed.
+func (h *History) RemoveArticleAt(messageID string, groupID, articleNum int64) {
+	h.enqueue(opRemove, messageID, groupID, articleNum)
+}
+
+// enqueue returns true if the op was queued
+func (h *History) enqueue(kind uint8, messageID string, groupID, articleNum int64) bool {
+	if h == nil || !h.enabled {
+		return false
 	}
-	restart := false
-	for {
-		if restart {
-			break
+	if messageID == "" || groupID <= 0 {
+		if n := h.invalidOps.Add(1); n <= 10 || n%10000 == 0 {
+			log.Printf("[HISTORY] WARN: ignoring invalid op=%d messageID='%s' groupID=%d (invalid ops: %d)", kind, messageID, groupID, n)
 		}
-		msgIdItem := <-h.lookupChan
-		processed++
-		if processed >= maxWork {
-			restart = true
+		return false
+	}
+	// count first, then check closed: the writer checks closed before pending, so it can not miss this op
+	h.pending.Add(1)
+	if h.closed.Load() {
+		h.pending.Add(-1)
+		if h.closedWarned.CompareAndSwap(false, true) {
+			log.Printf("[HISTORY] WARN: op after Close() dropped: op=%d messageID='%s' groupID=%d (further drops are not logged)", kind, messageID, groupID)
 		}
-		start := time.Now()
-		if response, err := h.Lookup(msgIdItem); err != nil || response != CasePass {
-			msgIdItem.Mux.Lock()
-			if response != CaseDupes {
-				log.Printf("[HISTORY] DEBUG Add()->Lookup(): msgId: '%s'response = %x != CasePass entry.msgIdItem.Response=%x", msgIdItem.MessageId, response, msgIdItem.Response)
-			}
-			msgIdItem.CachedEntryExpires = time.Now().Add(3 * time.Second)
-			msgIdItem.Mux.Unlock()
-			//h.updateStats(func(s *HistoryStats) { s.Duplicates++ })
-			if HistoryDEBUG {
-				log.Printf("[HISTORY] Add()->Lookup(): Duplicate msgId: '%s' lookup took %v err='%v'", msgIdItem.MessageId, time.Since(start), err)
-			}
+		return false
+	}
+	h.opChan <- historyOp{op: kind, messageID: messageID, groupID: groupID, articleNum: articleNum}
+	if kind == opAdd {
+		h.stats.adds.Add(1)
+	} else {
+		h.stats.removes.Add(1)
+	}
+	return true
+}
+
+// Exists checks if a message-ID has a row in the history index
+func (h *History) Exists(messageID string) (bool, error) {
+	if h == nil || !h.enabled || messageID == "" {
+		return false, nil
+	}
+	if h.dbClosed.Load() {
+		return false, ErrHistoryClosed
+	}
+	db, tableName, err := h.readDB(messageID)
+	if err != nil {
+		return false, err
+	}
+	h.stats.lookups.Add(1)
+	var one int
+	err = db.QueryRow("SELECT 1 FROM "+tableName+" WHERE message_id = ? LIMIT 1", messageID).Scan(&one)
+	switch {
+	case err == sql.ErrNoRows:
+		return false, nil
+	case err != nil:
+		h.stats.errors.Add(1)
+		return false, fmt.Errorf("history exists query failed: %w", err)
+	}
+	h.stats.duplicates.Add(1)
+	return true, nil
+}
+
+// LookupGroups returns the newsgroup IDs stored for messageID.
+// nil, nil = not found; a non-nil (maybe empty) slice = row exists.
+func (h *History) LookupGroups(messageID string) ([]int64, error) {
+	if h == nil || !h.enabled || messageID == "" {
+		return nil, nil
+	}
+	if h.dbClosed.Load() {
+		return nil, ErrHistoryClosed
+	}
+	db, tableName, err := h.readDB(messageID)
+	if err != nil {
+		return nil, err
+	}
+	h.stats.lookups.Add(1)
+	var newsgroups sql.NullString
+	err = db.QueryRow("SELECT newsgroups FROM "+tableName+" WHERE message_id = ?", messageID).Scan(&newsgroups)
+	switch {
+	case err == sql.ErrNoRows:
+		return nil, nil
+	case err != nil:
+		h.stats.errors.Add(1)
+		return nil, fmt.Errorf("history lookup query failed: %w", err)
+	}
+	h.stats.duplicates.Add(1)
+	return parseGroupIDs(newsgroups.String), nil
+}
+
+// LookupLocations returns the stored locations (group ID and article number) of messageID.
+// nil, nil = not found; a non-nil (maybe empty) slice = row exists. Rows written before the
+// numbers were recorded give ArticleNum 0.
+func (h *History) LookupLocations(messageID string) ([]Location, error) {
+	if h == nil || !h.enabled || messageID == "" {
+		return nil, nil
+	}
+	if h.dbClosed.Load() {
+		return nil, ErrHistoryClosed
+	}
+	db, tableName, err := h.readDB(messageID)
+	if err != nil {
+		return nil, err
+	}
+	h.stats.lookups.Add(1)
+	var newsgroups sql.NullString
+	err = db.QueryRow("SELECT newsgroups FROM "+tableName+" WHERE message_id = ?", messageID).Scan(&newsgroups)
+	switch {
+	case err == sql.ErrNoRows:
+		return nil, nil
+	case err != nil:
+		h.stats.errors.Add(1)
+		return nil, fmt.Errorf("history lookup query failed: %w", err)
+	}
+	h.stats.duplicates.Add(1)
+	return parseLocations(newsgroups.String), nil
+}
+
+// lookupBatchChunk bounds the ids of one query of LookupLocationsBatch: below SQLite's host
+// parameter limit (999 on old builds) and its compound SELECT limit (500 terms, at most one
+// term per id) on every supported build.
+const lookupBatchChunk = 500
+
+// historyShardTable is one table in one shard database (routeHash result)
+type historyShardTable struct {
+	dbIndex   int
+	tableName string
+}
+
+// historyBatchItem is one id of a batch lookup with the table it routes to
+type historyBatchItem struct {
+	tableName string
+	messageID string
+}
+
+// LookupLocationsBatch is LookupLocations for many message-ids: the result maps every id the
+// index knows to its locations (a non-nil, maybe empty slice); ids it does not know are
+// absent. The ids are grouped per shard database and per table and looked up with one query
+// per shard database (one UNION ALL term per table, in chunks of lookupBatchChunk ids): the
+// ids of an OVER range spread over thousands of tables, but only over 16 databases.
+// Duplicate and empty ids in the input are skipped, every distinct id counts as one lookup in
+// the stats. nil, nil = history disabled or no ids. One failing query fails the whole call.
+func (h *History) LookupLocationsBatch(messageIDs []string) (map[string][]Location, error) {
+	if h == nil || !h.enabled || len(messageIDs) == 0 {
+		return nil, nil
+	}
+	if h.dbClosed.Load() {
+		return nil, ErrHistoryClosed
+	}
+	groups := make(map[historyShardTable][]string)
+	var shardTables [historyNumDBs][]historyShardTable // per database, tables in first appearance order
+	seen := make(map[string]struct{}, len(messageIDs))
+	for _, id := range messageIDs {
+		if id == "" {
 			continue
 		}
-		msgIdItem.Mux.Lock()
-		msgIdItem.Response = CaseWrite // Set to write state // FIXMEE
-		//msgIdItem.CachedEntryExpires = time.Now().Add(CachedEntryTTL)
-		msgIdItem.Mux.Unlock()
-		h.writerChan <- msgIdItem // Send to writer channel for processing
-		if HistoryDEBUG {
-			log.Printf("[HISTORY] Add()->Lookup(): msgId: '%s' not found, lookup took %v (queued %d)", msgIdItem.MessageId, time.Since(start), len(h.writerChan))
+		if _, dup := seen[id]; dup {
+			continue
 		}
-	}
-	//log.Printf("[HISTORY] LookupWorker (%03d/%03d) did %d/%d, restarting...", wid, MaxLookupWorkers, processed, maxWork)
-	go h.LookupWorker(wid)
-}
-
-// Lookup checks if a message-ID exists in history
-// Returns: ResponsePass (0) = not found, ResponseDuplicate (1) = found, ResponseRetry (2) = error
-func (h *History) Lookup(msgIdItem *MessageIdItem) (int, error) {
-	if !ENABLE_HISTORY {
-		return CasePass, nil
-	}
-	found, err := h.lookupInDatabase(msgIdItem)
-	//log.Printf("[HISTORY] Lookup for msgId='%s' found='%v', err='%v'", msgIdItem.MessageId, found, err)
-	if err != nil {
-		log.Printf("[HISTORY] ERROR: Lookup failed for msgId='%s': %v", msgIdItem.MessageId, err)
-		//h.updateStats(func(s *HistoryStats) { s.Errors++ })
-		return CaseError, err
-	}
-	//log.Printf("Lookup for msgID: '%s' found='%v', offsets='%v'", messageID, found, offsetsData)
-	if found {
-		//h.updateStats(func(s *HistoryStats) { s.TotalLookups++ })
-		return CaseDupes, nil
-	}
-	return CasePass, nil
-}
-
-// lookupInDatabase looks up a hash in the sharded database
-// Returns: bool (found), error
-func (h *History) lookupInDatabase(msgIdItem *MessageIdItem) (bool, error) {
-	// Route hash: 1st char -> DB, 2nd+3rd chars -> table, remaining -> stored value
-	start1 := time.Now()
-	dbIndex, tableName, shortHash, err := h.routeHash(msgIdItem.MessageId)
-	if err != nil {
-		return false, fmt.Errorf("failed to route hash: %v", err)
-	}
-	if HistoryDEBUG {
-		log.Printf("[HISTORY] #0 lookupInDatabase: routed hash '%s' to dbIndex=%d, tableName='%s', shortHash='%s' took %v", msgIdItem.MessageIdHash, dbIndex, tableName, shortHash, time.Since(start1))
-	}
-
-	// Get database connection
-	var db *sql.DB
-	//start2 := time.Now()
-
-	db, err = h.db.GetShardedDB(dbIndex, false)
-	if err != nil {
-		return false, fmt.Errorf("failed to get database connection: %v", err)
-	}
-
-	/*
-		if HistoryDEBUG || time.Since(start2) > 1*time.Millisecond {
-			log.Printf("[HISTORY] #1 lookupInDatabase: got database connection took %v", time.Since(start2))
-		}
-	*/
-
-	// Query database for file offsets with optimized retry logic
-	var offsetsData string
-	start3 := time.Now()
-	baseDelay := 10 * time.Millisecond
-
-	for {
-		err = db.QueryRow("SELECT o FROM "+tableName+" WHERE h = ?", shortHash).Scan(&offsetsData)
+		seen[id] = struct{}{}
+		dbIndex, tableName, err := h.routeHash(id)
 		if err != nil {
-			if err == sql.ErrNoRows {
-				if HistoryDEBUG {
-					log.Printf("[HISTORY] #2.1 lookupInDatabase: sql.ErrNoRows dbIndex=%x tableName=%s shortHash='%s' took %v", dbIndex, tableName, shortHash, time.Since(start3))
+			return nil, fmt.Errorf("failed to route hash: %v", err)
+		}
+		key := historyShardTable{dbIndex: dbIndex, tableName: tableName}
+		if _, ok := groups[key]; !ok {
+			shardTables[dbIndex] = append(shardTables[dbIndex], key)
+		}
+		groups[key] = append(groups[key], id)
+	}
+	if len(seen) == 0 {
+		return nil, nil
+	}
+	h.stats.lookups.Add(int64(len(seen)))
+	out := make(map[string][]Location, len(seen))
+	var items []historyBatchItem
+	for dbIndex, tables := range shardTables {
+		if len(tables) == 0 {
+			continue
+		}
+		db, err := h.db.GetShardedDB(dbIndex, false)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get database connection: %v", err)
+		}
+		items = items[:0]
+		for _, key := range tables {
+			for _, id := range groups[key] {
+				items = append(items, historyBatchItem{tableName: key.tableName, messageID: id})
+			}
+		}
+		for rest := items; len(rest) > 0; {
+			n := min(len(rest), lookupBatchChunk)
+			if err := lookupLocationsChunk(db, rest[:n], out); err != nil {
+				if h.dbClosed.Load() { // Close() landed during the call
+					return nil, ErrHistoryClosed
 				}
-				return false, nil // Not found
+				h.stats.errors.Add(1)
+				return nil, err
 			}
-
-			// Check if it's a retryable error (database lock/busy)
-			errStr := strings.ToLower(err.Error())
-			if strings.Contains(errStr, "database is locked") || strings.Contains(errStr, "busy") {
-				time.Sleep(baseDelay)
-				log.Printf("[HISTORY] lookupInDatabase: retrying after error '%v'", err)
-				continue
-			}
+			rest = rest[n:]
 		}
-		break
 	}
-	if HistoryDEBUG {
-		log.Printf("[HISTORY] #2.2 lookupInDatabase: database query took %v HistoryDEBUG=%t", time.Since(start3), HistoryDEBUG)
+	h.stats.duplicates.Add(int64(len(out)))
+	return out, nil
+}
+
+// lookupLocationsChunk runs one query for items (all in db, the ids of one table next to each
+// other): one "SELECT ... WHERE message_id IN (...)" per table, joined with UNION ALL. Every
+// row found is added to out.
+func lookupLocationsChunk(db *sql.DB, items []historyBatchItem, out map[string][]Location) error {
+	args := make([]any, len(items))
+	var query strings.Builder
+	query.Grow(len(items) * 16)
+	for i, it := range items {
+		args[i] = it.messageID
+		switch {
+		case i == 0:
+			query.WriteString("SELECT message_id, newsgroups FROM " + it.tableName + " WHERE message_id IN (?")
+		case it.tableName != items[i-1].tableName:
+			query.WriteString(") UNION ALL SELECT message_id, newsgroups FROM " + it.tableName + " WHERE message_id IN (?")
+		default:
+			query.WriteString(",?")
+		}
 	}
-	// Parse file offsets
-	offsetStrings := strings.Split(offsetsData, ",")
-	var offsets []int64 // TODO GET FROM SYNC POOL
-	// Check each offset for hash collisions
-	for _, offsetStr := range offsetStrings {
-		offset, err := strconv.ParseInt(strings.TrimSpace(offsetStr), 10, 64)
-		if err != nil {
-			log.Printf("WARN: Invalid offset in database: %s", offsetStr)
+	query.WriteString(")")
+	rows, err := db.Query(query.String(), args...)
+	if err != nil {
+		return fmt.Errorf("history batch lookup query failed: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var messageID string
+		var newsgroups sql.NullString
+		if err := rows.Scan(&messageID, &newsgroups); err != nil {
+			return fmt.Errorf("history batch lookup scan failed: %w", err)
+		}
+		out[messageID] = parseLocations(newsgroups.String)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("history batch lookup rows failed: %w", err)
+	}
+	return nil
+}
+
+// parseLocations parses a CSV of "groupID" or "groupID:articleNum" tokens, skipping
+// empty/invalid parts. A token without a number (or with an invalid one) gives ArticleNum 0.
+// Never returns nil.
+func parseLocations(csv string) []Location {
+	locs := make([]Location, 0, strings.Count(csv, ",")+1)
+	for _, part := range strings.Split(csv, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
 			continue
 		}
-		offsets = append(offsets, offset) // Append to offsets slice
-	}
-	// Check each offset for hash collisions
-	for _, offset := range offsets {
-		// Read and verify the history entry at this offset
-		response, err := h.readHistoryEntryAtOffset(offset, msgIdItem)
-		if err != nil {
-			log.Printf("WARN: Failed to read history entry at offset %d: %v", offset, err)
+		idStr, numStr, hasNum := strings.Cut(part, ":")
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil || id <= 0 {
+			if HistoryDEBUG {
+				log.Printf("[HISTORY] WARN: invalid group id '%s' in newsgroups '%s'", part, csv)
+			}
 			continue
 		}
-		//h.updateStats(func(s *HistoryStats) { s.TotalFileLookups++ })
-		/*
-			if msgIdItem.MessageId == "<32304224.79C1@parkcity.com>" {
-				log.Printf("[DEBUG-HISTORY-STEP15] Target message ID readHistoryEntryAtOffset response: %x msgIdItem='%#v'", response, msgIdItem)
-			}*/
-
-		switch response {
-		case CaseError:
-			log.Printf("ERROR: Failed to read history entry at offset %d: %v", offset, err)
-			h.updateStats(func(s *HistoryStats) { s.Errors++ })
-			return false, err
-
-		case CaseRetry:
-			continue // Hash collision, not a match
-
-		case CaseDupes:
-			// Found a matching entry, returns item with storage token added from readHistoryEntryAtOffset
-			return true, nil // Found a matching entry, return storage token in Item pointer
-		} // end switch response
+		var num int64
+		if hasNum {
+			if n, err := strconv.ParseInt(numStr, 10, 64); err == nil && n > 0 {
+				num = n
+			}
+		}
+		locs = append(locs, Location{GroupID: id, ArticleNum: num})
 	}
-	// No matching entries found
-	return false, nil
+	return locs
+}
+
+// parseGroupIDs parses a CSV of group IDs, skipping empty/invalid parts. Never returns nil.
+// A "groupID:articleNum" token counts for its group ID.
+func parseGroupIDs(csv string) []int64 {
+	locs := parseLocations(csv)
+	ids := make([]int64, 0, len(locs))
+	for _, l := range locs {
+		ids = append(ids, l.GroupID)
+	}
+	return ids
+}
+
+// readDB routes messageID to its database pool and table
+func (h *History) readDB(messageID string) (*sql.DB, string, error) {
+	dbIndex, tableName, err := h.routeHash(messageID)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to route hash: %v", err)
+	}
+	db, err := h.db.GetShardedDB(dbIndex, false)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to get database connection: %v", err)
+	}
+	return db, tableName, nil
 }
 
 // GetStats returns current statistics
 func (h *History) GetStats() HistoryStats {
-	h.stats.mux.RLock()
-	defer h.stats.mux.RUnlock()
+	if h == nil {
+		return HistoryStats{}
+	}
 	return HistoryStats{
-		TotalLookups: h.stats.TotalLookups,
-		TotalAdds:    h.stats.TotalAdds,
-		CacheHits:    h.stats.CacheHits,
-		CacheMisses:  h.stats.CacheMisses,
-		Duplicates:   h.stats.Duplicates,
-		Errors:       h.stats.Errors,
+		TotalLookups:   h.stats.lookups.Load(),
+		TotalAdds:      h.stats.adds.Load(),
+		TotalRemoves:   h.stats.removes.Load(),
+		TotalCommitted: h.stats.committed.Load(),
+		Flushes:        h.stats.flushes.Load(),
+		Pending:        h.pending.Load(),
+		Duplicates:     h.stats.duplicates.Load(),
+		Errors:         h.stats.errors.Load(),
 	}
 }
 
-// updateStats safely updates statistics
-func (h *History) updateStats(fn func(*HistoryStats)) {
-	h.stats.mux.Lock()
-	defer h.stats.mux.Unlock()
-	fn(h.stats)
+// CheckNoMoreWorkInHistory returns true if no op is waiting to be committed
+func (h *History) CheckNoMoreWorkInHistory() bool {
+	if h == nil {
+		return true
+	}
+	return h.pending.Load() == 0
 }
 
-// Close gracefully shuts down the history system
+// SetDatabaseWorkChecker sets the database work checker interface for coordinated shutdown
+func (h *History) SetDatabaseWorkChecker(checker DatabaseWorkChecker) {
+	if h == nil {
+		return
+	}
+	h.checkerMux.Lock()
+	h.dbWorkChecker = checker
+	h.checkerMux.Unlock()
+}
+
+// noMoreDBWork asks the database batch system (if set) whether it is idle. Called without holding any lock.
+func (h *History) noMoreDBWork() bool {
+	h.checkerMux.RLock()
+	checker := h.dbWorkChecker
+	h.checkerMux.RUnlock()
+	return checker == nil || checker.CheckNoMoreWorkInMaps()
+}
+
+// Close stops accepting ops, waits for the writer's final flush and closes the databases.
+// Idempotent; concurrent callers all return after the final flush.
 func (h *History) Close() error {
-	log.Printf("Closing down history system...")
-	h.mux.Lock()
-	defer h.mux.Unlock()
-	// Signal workers to stop via stop channel
-	close(h.stopChan)
-
-	// Note: We don't wait for workers here anymore since the main application
-	// will wait for them via the main waitgroup (mainWG)
-	// Workers will continue processing until no more work remains
-	log.Printf("History system shutdown initialized")
-	return nil
+	if h == nil {
+		return nil
+	}
+	var err error
+	h.closeOnce.Do(func() {
+		h.closed.Store(true)
+		close(h.closeChan)
+		if !h.enabled {
+			return
+		}
+		log.Printf("[HISTORY] Closing down history system (pending=%d)...", h.pending.Load())
+		if h.writerAlive {
+			<-h.writerDone
+		}
+		h.dbClosed.Store(true)
+		if h.db != nil {
+			err = h.db.Close()
+		}
+		log.Printf("[HISTORY] History system closed")
+	})
+	return err
 }
 
-var NOTIFY = struct{}{}
-
-// writerWorker handles background writing of history entries with batching
+// writerWorker collects ops and flushes them every BatchTimeout or when BatchSize is reached.
+// Exits when Close() was called, nothing is pending and the database batch system is idle.
 func (h *History) writerWorker() {
-	// Signal completion to main waitgroup
-	if h.mainWG == nil {
-		log.Fatalf("Main waitgroup is nil, cannot signal completion")
-	}
-	log.Printf("History writer worker started (batching enabled: size=%d, timeout=%dms)",
-		h.config.BatchSize, h.config.BatchTimeout)
+	defer func() {
+		h.checkpointAll()
+		close(h.writerDone)
+		if h.mainWG != nil {
+			h.mainWG.Done()
+		}
+		log.Printf("[HISTORY] History writer worker stopped")
+	}()
+	log.Printf("[HISTORY] History writer worker started (BatchSize=%d, BatchTimeout=%d ms)", h.config.BatchSize, h.config.BatchTimeout)
 
-	//counter := 100
-	//shutdown := false
-	// Initialize batch timeout timer
+	ticker := time.NewTicker(time.Duration(h.config.BatchTimeout) * time.Millisecond)
+	defer ticker.Stop()
 
-	go func(h *History) {
-		ticker := time.NewTicker(50 * time.Millisecond)
-		var chansize int
-		var chanlimit bool
-		lastChanlimit := time.Now()
-		timeout := time.Duration(h.config.BatchTimeout) * time.Millisecond
-		defer ticker.Stop()
-		for {
-			<-ticker.C
-			h.batchMux.RLock()
-			lastFlush := time.Since(h.lastFlush)
-			h.batchMux.RUnlock()
-			chansize = len(h.writerChan)
-			chanlimit = chansize >= h.config.BatchSize
-			if chanlimit {
-				log.Printf("[HISTORY] ticker writerWorker: lastChanLimit: %v | lastFlush: %v", time.Since(lastChanlimit), lastFlush)
-				lastChanlimit = time.Now()
+	batch := make([]historyOp, 0, h.config.BatchSize)
+	closeChan := h.closeChan
+	lastWaitLog := time.Now()
+	for {
+		select {
+		case op := <-h.opChan:
+			batch = append(batch, op)
+			if len(batch) >= h.config.BatchSize {
+				h.flushBatch(batch)
+				batch = batch[:0]
 			}
-			if lastFlush >= timeout || chanlimit {
-				select {
-				case h.tickChan <- NOTIFY:
-					// pass
-					h.batchMux.Lock()
-					h.lastFlush = time.Now()
-					h.batchMux.Unlock()
-				default:
-					// full
-				}
+			continue
+
+		case <-closeChan:
+			closeChan = nil // fire once
+			if time.Duration(h.config.BatchTimeout)*time.Millisecond > shutdownPollInterval {
+				ticker.Reset(shutdownPollInterval)
 			}
+
+		case <-ticker.C:
 		}
-	}(h)
 
-	go func(h *History) {
-		defer log.Printf("History writer worker stopped")
-		defer h.mainWG.Done()
+		if len(batch) > 0 {
+			h.flushBatch(batch)
+			batch = batch[:0]
+		}
 
-		shutdownCounter := 100
-		chanSize := 0
-		chanlimit := false
-		for {
-			<-h.tickChan
-			// Handle shutdown
-			if h.ServerShutdown() && h.CheckNoMoreWorkInHistory() {
-				//log.Printf("[HISTORY] writerWorker Server shutdown initiated, checking for pending work...")
-				time.Sleep(100 * time.Millisecond)
-				shutdownCounter--
-
-				if !h.dbWorkChecker.CheckNoMoreWorkInMaps() {
-					shutdownCounter = 100
-					continue
-				}
-				h.flushPendingBatch()
-				if shutdownCounter <= 0 && len(h.writerChan) == 0 {
-					log.Printf("[HISTORY] writerWorker CheckNoMoreWorkInHistory ok. shutting down...")
-					return
-				}
-				select {
-				case h.tickChan <- NOTIFY:
-					// pass
-				default:
-					// full
-				}
-				continue
+		// check closed BEFORE pending (see enqueue)
+		if !h.closed.Load() || h.pending.Load() != 0 {
+			continue
+		}
+		if !h.noMoreDBWork() {
+			if time.Since(lastWaitLog) >= 10*time.Second {
+				log.Printf("[HISTORY] writer shutdown: waiting for database batch system to finish")
+				lastWaitLog = time.Now()
 			}
-			chanSize = len(h.writerChan)
-			if chanSize == 0 {
-				continue
-			}
-			h.flushPendingBatch()
-			chanlimit = chanSize >= h.config.BatchSize
-			if chanlimit {
-				select {
-				case h.tickChan <- NOTIFY:
-					// pass
-				default:
-					// full
-				}
-			}
+			continue
 		}
-	}(h)
-} // end func writerWorker
-
-func (h *History) ServerShutdown() bool {
-	select {
-	case _, ok := <-h.stopChan:
-		if !ok {
-			return true
+		if h.pending.Load() != 0 {
+			continue // the batch system queued more work meanwhile
 		}
-	default:
-		// pass
-	}
-	return false
-}
-
-// readHistoryEntryAtOffset reads and parses a history entry at a specific file offset
-func (h *History) readHistoryEntryAtOffset(offset int64, msgIdItem *MessageIdItem) (int, error) {
-	getTimestamp := false
-
-	msgIdItem.Mux.RLock()
-	if msgIdItem.Arrival == 0 {
-		getTimestamp = true
-	}
-	/*
-		if msgIdItem.MessageIdHash == "" {
-			msgIdItem.Mux.RUnlock()
-			return CaseError, fmt.Errorf("readHistoryEntryAtOffset called with empty MessageIdHash")
-		}
-	*/
-
-	if msgIdItem.StorageToken != "" /*|| (msgIdItem.GroupName != nil && msgIdItem.ArtNum > 0) fucksup with history rebuild... TODO REVIEW */ {
-		//log.Printf("[HISTORY] readHist: already have storage token='%s' msgId='%s'", msgIdItem.StorageToken, msgIdItem.MessageId)
-		// already have storage token or group/article info, no need to read file
-		msgIdItem.Mux.RUnlock()
-		return CaseDupes, nil
-	}
-	//if HistoryDEBUG {
-	//	log.Printf("[HISTORY] readHistoryEntryAtOffset called for MessageIdHash: '%s' at offset %d", msgIdItem.MessageIdHash, offset)
-	//}
-	msgIdItem.Mux.RUnlock()
-
-	// Open read-only file handle for this specific read
-	file, err := os.Open(h.HistoryFilePath)
-	if err != nil {
-		return CaseError, fmt.Errorf("failed to open history file for reading: %v", err)
-	}
-	// Seek to offset and read line
-	_, err = file.Seek(offset, io.SeekStart)
-	if err != nil {
-		file.Close()
-		return CaseError, fmt.Errorf("failed to seek to offset %d: %v", offset, err)
-	}
-
-	reader := bufio.NewReader(file)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		file.Close()
-		return CaseError, fmt.Errorf("failed to read line at offset %d: %v", offset, err)
-	}
-	file.Close()
-	//log.Printf("[HISTORY] readHistoryEntryAtOffset: read line at offset %d: '%s'", offset, result)
-
-	// Parse history line: "hash storagetoken timestamp messageid"
-	parts := strings.SplitN(line, "\t", 4)
-	if len(parts) < 4 {
-		return CaseError, fmt.Errorf("invalid history format offset=%d line='%s'", offset, line)
-	}
-
-	//messageID := parts[0]
-	//storageSystem := parts[1]
-	//storageToken := parts[2]
-	//timestampStr := parts[3]
-
-	msgIdItem.Mux.Lock()
-	if msgIdItem.StorageToken != "" {
-		msgIdItem.Mux.Unlock()
-		return CaseDupes, nil
-	}
-	if parts[0] != msgIdItem.MessageId {
-		log.Printf("[HISTORY] readHistoryEntryAtOffset:mismatch for (msgId='%s') at offset %d parts='%#v'", msgIdItem.MessageId, offset, parts)
-		msgIdItem.Mux.Unlock()
-		return CaseRetry, nil
-	}
-	msgIdItem.StorageToken = parts[2] // Set storage token
-	msgIdItem.Mux.Unlock()
-
-	if HistoryDEBUG {
-		log.Printf("[HISTORY] readHistoryEntryAtOffset: msgId='%s' at offset %d => token='%s'", msgIdItem.MessageId, offset, msgIdItem.StorageToken)
-	}
-
-	if getTimestamp {
-		timestamp, err := strconv.ParseInt(parts[3][:len(parts[3])-1], 10, 64)
-		if err != nil {
-			return CaseError, fmt.Errorf("invalid timestamp in history file: %s", parts[3])
-		}
-		msgIdItem.Mux.Lock()
-		msgIdItem.Arrival = timestamp // Set arrival time
-		msgIdItem.Mux.Unlock()
-	}
-	return CaseDupes, nil
-}
-
-// routeHash routes a hash to the correct database and table
-// Returns: dbIndex, tableName, shortHash (for storage), error
-func (h *History) routeHash(msgId string) (int, string, string, error) {
-	/*
-		minCharsNeeded := 3 + h.config.UseShortHashLen // routing chars + storage chars
-		if len(hash) < minCharsNeeded {
-			return 0, "", "", fmt.Errorf("hash too short: need at least %d characters, got %d", minCharsNeeded, len(hash))
-		}
-	*/
-	// For sharded database modes:
-	// 1st char -> database index (0-f maps to 0-15)
-	// 2nd+3rd chars -> table name (s + 00-ff)
-	// 4th-Nth chars -> stored hash value (configurable 2-7 chars) (max 10 bits of entropy = 16^10 = 1,099511628×10¹² ...)
-	hash := ComputeMessageIDHash(msgId)[:3+h.config.UseShortHashLen] // Compute the hash of the message ID
-	dbChar := hash[0:1]
-	tableChars := hash[1:3]
-	shortHash := hash[3:]
-	if len(shortHash) > h.config.UseShortHashLen {
-		shortHash = shortHash[:h.config.UseShortHashLen] // Limit to configured length
-	}
-
-	// Convert first hex char to database index
-	dbIndex, err := hexToInt(dbChar)
-	if err != nil {
-		return 0, "", "", fmt.Errorf("invalid hex char for database: %s", dbChar)
-	}
-
-	// Validate database index
-	numDBs, _, _ := GetShardConfig(h.config.ShardMode)
-	if dbIndex >= numDBs {
-		return 0, "", "", fmt.Errorf("database index %d exceeds available databases %d", dbIndex, numDBs)
-	}
-
-	// Table name from 2nd+3rd hex chars (s + hex)
-
-	return dbIndex, "s" + tableChars, shortHash, nil
-}
-
-// flushPendingBatch processes all entries in the current batch atomically
-func (h *History) flushPendingBatch() {
-	if len(h.writerChan) == 0 {
 		return
 	}
-	//log.Printf("[HISTORY] PRE Flushing batch of %d history entries", toProcess)
-	h.batchMux.Lock()
-	h.processing = true
-	h.batchMux.Unlock()
-
-	//log.Printf("[HISTORY] PRE processBatch of %d history entries", toProcess)
-	h.processBatch()
-
-	h.batchMux.Lock()
-	h.processing = false
-	h.lastFlush = time.Now()
-	h.batchMux.Unlock()
 }
 
-// processBatch processes multiple entries atomically for optimal performance
-func (h *History) processBatch() {
-	jobs := len(h.writerChan)
-	if jobs == 0 {
-		return // No items to process
-	}
-	// Step 1: Write all entries to history file in sequence (atomic file operations)
-	start1 := time.Now()
-	if err := h.writeBatchToFile(); err != nil {
-		log.Printf("ERROR: Failed to write batch to file: %v", err)
+// checkpointAll truncates the WAL of every database file
+func (h *History) checkpointAll() {
+	if h.db == nil {
 		return
 	}
-	if HistoryDEBUG {
-		log.Printf("[HISTORY] done BATCH writeBatchToFile: %d entries (took %v)", jobs, time.Since(start1))
+	for i, pool := range h.db.DBPools {
+		if pool == nil || pool.DB == nil {
+			continue
+		}
+		if _, err := pool.DB.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			log.Printf("[HISTORY] WARN: wal_checkpoint(TRUNCATE) failed for db %x: %v", i, err)
+		}
 	}
-
-	start2 := time.Now()
-	// Step 2: Write all entries to database in batch (transaction-based)
-	if err := h.writeBatchToDatabase(); err != nil {
-		log.Printf("ERROR: Failed to write batch to database: %v", err)
-		return
-	}
-	if HistoryDEBUG {
-		log.Printf("[HISTORY] done BATCH writeBatchToDatabase: %d entries (took %v)", jobs, time.Since(start2))
-	}
-
-	// All entries processed successfully
-	//if HistoryDEBUG {
-	if jobs > h.config.BatchSize {
-		jobs = h.config.BatchSize
-	}
-	log.Printf("[HISTORY] ADD BATCHED: %d (took %v)", jobs, time.Since(start1))
-	//}
 }
 
-const DefaultStorageSystem = 0x1
-
-// writeBatchToFile writes multiple entries to the history file atomically
-/*
-tail history.dat
-3e516276738e1312fd0e8190ecdefacc de.rec.tiere.aquaristik:4491 1752178804 <3f389015$0$20726$91cee783@newsreader02.highway.telekom.at>
-c4741046fca0ce7fac49df105e487cc5 de.rec.tiere.aquaristik:4492 1752178804 <bha47a$i8$07$1@news.t-online.com>
-5028257d375b9b51e6440b47cc5ec810 de.rec.tiere.aquaristik:4493 1752178804 <bha6f0$qi9$03$1@news.t-online.com>
-*/
-func (h *History) writeBatchToFile() error {
-	h.mux.Lock()
-	defer h.mux.Unlock()
-	/*
-		// Get the ACTUAL current file position instead of relying on cached offset
-		actualOffset, err := h.historyFile.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return fmt.Errorf("failed to get current file position: %v", err)
-		}
-
-		// Verify our cached offset matches reality
-		if actualOffset != h.offset {
-			log.Printf("[HISTORY] WARNING: Cached offset %d != actual file position %d, correcting", h.offset, actualOffset)
-			h.offset = actualOffset
-		}
-
-		// Reset the buffered writer to ensure it's positioned correctly
-		h.fileWriter.Reset(h.historyFile)
-	*/
-
-	// Capture file offsets for each entry BEFORE writing
-	currentOffset := h.offset
-	now := time.Now().Unix()
-	processed, skipped := 0, 0
-	totalBytes := int64(0)
+// flushBatch writes batch grouped by database file (op order kept within a file), files in parallel
+func (h *History) flushBatch(batch []historyOp) {
+	n := len(batch)
+	if n == 0 {
+		return
+	}
 	start := time.Now()
-	dbChanBefore := len(h.dbChan)
-processingLoop:
-	for {
-		select {
-		case item := <-h.writerChan:
-			/*
-				if item.MessageId == "<32304224.79C1@parkcity.com>" {
-					// debug
-					log.Printf("[HISTORY] DEBUG: Writing batch entry for MessageId '%s' at offset %d", item.MessageId, currentOffset)
-				}
-			*/
-
-			item.Mux.Lock()
-			// Only generate storage token if it's not already set (avoid redundant fmt.Sprintf calls)
-			if item.StorageToken == "" {
-				if item.GroupName == nil || item.ArtNum <= 0 {
-					log.Printf("[HISTORY-ERROR] Missing storage info for item: GroupName=%v ArtNum=%d", item.GroupName, item.ArtNum)
-					item.Mux.Unlock()
-					skipped++
-					continue // Skip items without proper storage info
-				}
-				item.StorageToken = fmt.Sprintf("%s:%d", *item.GroupName, item.ArtNum)
-			}
-			// Set the file offset before writing
-			// Write directly to buffered writer
-			n, err := fmt.Fprintf(h.fileWriter, "%s\t%x\t%s\t%d\n",
-				item.MessageId,       // message-Id <a@b.c>
-				DefaultStorageSystem, // placeholder for storage system, e.g. 0x1
-				item.StorageToken,    // <newsgroup>:<artnum>
-				now,                  // timestamp
-			)
-			if err != nil {
-				item.Mux.Unlock()
-				return fmt.Errorf("failed to write history line to file: %v", err)
-			}
-			item.Arrival = now // Set arrival time to current time
-			item.FileOffset = currentOffset
-			item.Mux.Unlock()
-			currentOffset += int64(n)
-			totalBytes += int64(n)
-			h.dbChan <- item
-			processed++
-			if processed >= h.config.BatchSize {
-				//log.Printf("[HISTORY] writeBatchToFile reached %d entries, flushing...", processed)
-				// Flush batch immediately if size limit reached
-				break processingLoop
-			}
-		default:
-			//log.Printf("[HISTORY] writeBatchToFile processed %d entries, flushing...", processed)
-			break processingLoop // No more items to process
+	var perFile [historyNumDBs][]routedOp
+	for _, op := range batch {
+		dbIndex, tableName, err := h.routeHash(op.messageID)
+		if err != nil {
+			log.Printf("[HISTORY] ERROR: dropping op for messageID='%s': %v", op.messageID, err)
+			h.stats.errors.Add(1)
+			continue
 		}
-	}
-	startFlush := time.Now()
-	// Flush buffered writer to ensure all data is written
-	if err := h.fileWriter.Flush(); err != nil {
-		return fmt.Errorf("failed to flush history file buffer: %v", err)
+		perFile[dbIndex] = append(perFile[dbIndex], routedOp{historyOp: op, tableName: tableName})
 	}
 
-	// Update global offset
-	h.offset += totalBytes
-
-	/*
-		// Ensure data is written to disk
-		if err := h.historyFile.Sync(); err != nil {
-			log.Printf("WARN: Failed to sync history file: %v", err)
-			// Continue anyway, data is in OS buffer
-		}
-	*/
-	log.Printf("writeBatchToFile: %d entries took %v h.dbChan=%d=>%d flush: %v (written: %d)", processed, time.Since(start), dbChanBefore, len(h.dbChan), time.Since(startFlush), totalBytes)
-	return nil
-}
-
-// writeBatchToDatabase writes multiple entries to the database using transactions
-func (h *History) writeBatchToDatabase() error {
-	// Group entries by database index only - calculate routing on-demand
-	dbGroups := make(map[int][]*MessageIdItem)
-	processed := 0
-processingLoop:
-	for {
-		select {
-		case item := <-h.dbChan:
-			/*
-				minCharsNeeded := 3 + h.config.UseShortHashLen
-				if len(item.MessageIdHash) < minCharsNeeded {
-					return fmt.Errorf("hash too short: need at least %d characters, got %d [item='%#v']", minCharsNeeded, len(item.MessageIdHash), item)
-				}
-			*/
-			// Calculate only database index - no temporary struct needed
-			dbIndex, _, _, err := h.routeHash(item.MessageId)
-			if err != nil {
-				return fmt.Errorf("failed to route hash: %v", err)
-			}
-			if len(dbGroups[dbIndex]) == 0 {
-				// First entry for this database, initialize any necessary structures
-				dbGroups[dbIndex] = make([]*MessageIdItem, 0, 640) // Preallocate slice for performance
-			}
-			// Group by database index using original MessageIdItem pointers
-			dbGroups[dbIndex] = append(dbGroups[dbIndex], item)
-			processed++
-			if processed >= h.config.BatchSize {
-				break processingLoop
-			}
-		default:
-			break processingLoop
-		}
-	}
-
-	// Process databases in parallel for better performance
 	var wg sync.WaitGroup
-	errChan := make(chan error, len(dbGroups))
-
-	for dbIndex, entries := range dbGroups {
-		if len(entries) == 0 {
-			continue // Skip empty groups
+	for dbIndex := range perFile {
+		ops := perFile[dbIndex]
+		if len(ops) == 0 {
+			continue
 		}
 		wg.Add(1)
-		go func(dbIdx int, dbEntries []*MessageIdItem) {
+		go func(dbIdx int, ops []routedOp) {
 			defer wg.Done()
-			start := time.Now()
-			if err := h.writeBatchToHashDB(dbIdx, dbEntries); err != nil {
-				errChan <- fmt.Errorf("failed to write batch to database dbIdx=%d: %v", dbIdx, err)
+			if err := h.executeDBTransaction(dbIdx, ops); err != nil {
+				log.Printf("[HISTORY] ERROR: dropping %d ops for database %x: %v", len(ops), dbIdx, err)
+				h.stats.errors.Add(1)
+				return
 			}
-			if HistoryDEBUG {
-				log.Printf("[HISTORY] writeBatchToDatabase: dbIndex=%d, processed %d entries took %v", dbIndex, len(dbEntries), time.Since(start))
-			}
-		}(dbIndex, entries)
+			h.stats.committed.Add(int64(len(ops)))
+		}(dbIndex, ops)
 	}
-
 	wg.Wait()
-	close(errChan)
 
-	// Check for any errors
-	for err := range errChan {
-		if err != nil {
-			return err
-		}
+	h.stats.flushes.Add(1)
+	h.pending.Add(-int64(n))
+	if HistoryDEBUG {
+		log.Printf("[HISTORY] flushBatch: %d ops took %v (pending=%d)", n, time.Since(start), h.pending.Load())
 	}
-
-	return nil
 }
 
-// writeBatchToHashDB writes all entries for a single database in one giant transaction
-func (h *History) writeBatchToHashDB(dbIndex int, entries []*MessageIdItem) error {
-	const maxRetries = 1000
-	const baseDelay = 100 * time.Millisecond
+// isBusyError reports SQLITE_BUSY / SQLITE_LOCKED
+func isBusyError(err error) bool {
+	var sqliteErr sqlite3.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "database is locked") || strings.Contains(errStr, "busy")
+}
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		err := h.executeDBTransaction(dbIndex, entries)
+// beginTx starts a write transaction (_txlock=immediate: lock contention surfaces here).
+// Retries busy/locked errors with capped backoff, exits the process after beginMaxRetries.
+func (h *History) beginTx(dbIndex int, db *sql.DB) (*sql.Tx, error) {
+	delay := beginRetryBaseDelay
+	for attempt := 1; ; attempt++ {
+		tx, err := db.Begin()
 		if err == nil {
-			return nil
+			return tx, nil
 		}
-
-		// Check if it's a transient lock error
-		errStr := strings.ToLower(err.Error())
-		if strings.Contains(errStr, "database is locked") || strings.Contains(errStr, "busy") {
-			if attempt < maxRetries-1 {
-				time.Sleep(baseDelay)
-				continue
-			}
+		if !isBusyError(err) {
+			return nil, err
 		}
-
-		// Non-retryable error or max retries reached
-		log.Fatalf("ERROR: Failed to write batch to database %d after %d attempts: %v", dbIndex, attempt+1, err)
-		//return err
+		if attempt >= beginMaxRetries {
+			log.Fatalf("[HISTORY] FATAL: failed to begin transaction on database %x after %d attempts: %v", dbIndex, attempt, err)
+		}
+		if attempt%10 == 0 {
+			log.Printf("[HISTORY] WARN: database %x busy, begin attempt %d/%d: %v", dbIndex, attempt, beginMaxRetries, err)
+		}
+		time.Sleep(delay)
+		delay *= 2
+		if delay > beginRetryMaxDelay {
+			delay = beginRetryMaxDelay
+		}
 	}
-	return fmt.Errorf("history writeBatchToHashDB max retries exceeded")
 }
 
-// executeDBTransaction executes one giant transaction for all tables in a database
-func (h *History) executeDBTransaction(dbIndex int, entries []*MessageIdItem) error {
-	// Get database connection
-	//var txWg sync.WaitGroup
-	var db *sql.DB
-	var err error
+// executeDBTransaction writes all ops of one database file in one transaction
+func (h *History) executeDBTransaction(dbIndex int, ops []routedOp) error {
 	start := time.Now()
-	db, err = h.db.GetShardedDB(dbIndex, true)
+	db, err := h.db.GetShardedDB(dbIndex, true)
 	if err != nil {
 		return fmt.Errorf("failed to get database connection: %v", err)
 	}
 
-	// Start one giant transaction for all tables in this database
-	tx, err := db.Begin()
+	tx, err := h.beginTx(dbIndex, db)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %v", err)
 	}
@@ -882,200 +786,171 @@ func (h *History) executeDBTransaction(dbIndex int, entries []*MessageIdItem) er
 		}
 	}()
 
-	// Group entries by table and hash within this database - calculate routing on-demand
-	tableHashGroups := make(map[string]map[string][]*MessageIdItem)
-	for _, entry := range entries {
-		// Calculate routing info on-demand (no struct allocation)
-		_, tableName, shortHash, err := h.routeHash(entry.MessageId)
-		if err != nil {
-			return fmt.Errorf("failed to route hash for entry: %v", err)
+	// prepared statements per table + query, valid for this transaction
+	stmts := make(map[string]*sql.Stmt)
+	getStmt := func(query string, tableName string) (*sql.Stmt, error) {
+		key := query + tableName
+		if stmt, ok := stmts[key]; ok {
+			return stmt, nil
 		}
-
-		if tableHashGroups[tableName] == nil {
-			tableHashGroups[tableName] = make(map[string][]*MessageIdItem)
+		stmt, perr := tx.Prepare(fmt.Sprintf(query, tableName))
+		if perr != nil {
+			return nil, perr
 		}
-		tableHashGroups[tableName][shortHash] = append(tableHashGroups[tableName][shortHash], entry)
-		entry.Mux.Lock()
-		entry.Response = CaseDupes                                 // Set response state to CaseDupes for processed articles
-		entry.CachedEntryExpires = time.Now().Add(3 * time.Second) // Set cache expiration
-		entry.Mux.Unlock()
-
+		stmts[key] = stmt
+		return stmt, nil
 	}
 
-	// Process each table in this database with optimized batch operations
-
-	for tableName, hashGroups := range tableHashGroups {
-		//txWg.Add(1)
-		//go func(tx *sql.Tx, tableName string, hashGroups map[string][]*EntryWithRouting) {
-		//	defer txWg.Done()
-		// Process this table in the transaction
-		if err := h.processTableInTransaction(tx, tableName, hashGroups); err != nil {
-			log.Printf("ERROR: Failed to process table %s in transaction: %v", tableName, err)
-			/*
-				err := tx.Rollback() // Rollback on error
-				if err != nil {
-					log.Printf("ERROR: Failed to rollback transaction: %v", err)
+	var stmt *sql.Stmt
+	for _, rop := range ops {
+		groupID := strconv.FormatInt(rop.groupID, 10)
+		token := historyToken(rop.groupID, rop.articleNum)
+		switch rop.op {
+		case opAdd:
+			if stmt, err = getStmt(sqlAddArticle, rop.tableName); err != nil {
+				err = fmt.Errorf("prepare add %s: %v", rop.tableName, err)
+				return err
+			}
+			var res sql.Result
+			if res, err = stmt.Exec(rop.messageID, token, groupID); err != nil {
+				err = fmt.Errorf("add messageID='%s' token=%s table=%s: %v", rop.messageID, token, rop.tableName, err)
+				return err
+			}
+			if rop.articleNum > 0 {
+				// UPSERT skipped: the row holds "id:<num>" for this group, maybe with another number
+				var affected int64
+				if affected, err = res.RowsAffected(); err != nil {
+					err = fmt.Errorf("add messageID='%s' token=%s table=%s: rows affected: %v", rop.messageID, token, rop.tableName, err)
+					return err
 				}
-			*/
-			log.Printf("ERROR HISTORY Rolling back transaction due to error: %v", err) // @AI!! THIS IS A CRITICAL ERROR, WE MUST EXIT! DO NOT TOUCH THIS LINE OF CODE!!
-			return fmt.Errorf("failed to process table %s in transaction: %v", tableName, err)
+				if affected == 0 {
+					if err = h.renumberGroupToken(getStmt, rop, token); err != nil {
+						return err
+					}
+				}
+			}
+
+		case opRemove:
+			if rop.articleNum > 0 {
+				if stmt, err = getStmt(sqlRemoveArticle, rop.tableName); err != nil {
+					err = fmt.Errorf("prepare remove %s: %v", rop.tableName, err)
+					return err
+				}
+				var res sql.Result
+				if res, err = stmt.Exec(token, groupID, rop.messageID); err != nil {
+					err = fmt.Errorf("remove messageID='%s' token=%s table=%s: %v", rop.messageID, token, rop.tableName, err)
+					return err
+				}
+				var affected int64
+				if affected, err = res.RowsAffected(); err != nil {
+					err = fmt.Errorf("remove messageID='%s' token=%s table=%s: rows affected: %v", rop.messageID, token, rop.tableName, err)
+					return err
+				}
+				if affected == 0 {
+					// no exact or plain token: strip a stale-numbered token of the group
+					if err = h.removeGroupTokens(getStmt, rop); err != nil {
+						return err
+					}
+				}
+			} else if err = h.removeGroupTokens(getStmt, rop); err != nil {
+				return err
+			}
+			if stmt, err = getStmt(sqlDeleteEmpty, rop.tableName); err != nil {
+				err = fmt.Errorf("prepare delete %s: %v", rop.tableName, err)
+				return err
+			}
+			if _, err = stmt.Exec(rop.messageID); err != nil {
+				err = fmt.Errorf("delete empty messageID='%s' table=%s: %v", rop.messageID, rop.tableName, err)
+				return err
+			}
+
+		default:
+			err = fmt.Errorf("unknown history op %d", rop.op)
+			return err
 		}
-		//}(tx, tableName, hashGroups)
 	}
-	//txWg.Wait() // Wait for all table processing goroutines to finish
-	// Commit the giant transaction
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("failed to commit transaction: %v", err)
+
+	// Commit the transaction (closes the prepared statements)
+	if err = tx.Commit(); err != nil {
+		err = fmt.Errorf("failed to commit transaction: %v", err)
+		return err
 	}
 	if HistoryDEBUG {
-		log.Printf("[HISTORY] executeDBTransaction: dbIndex=%d, committed %d entries in %v HistoryDEBUG=%t", dbIndex, len(entries), time.Since(start), HistoryDEBUG)
+		log.Printf("[HISTORY] executeDBTransaction: dbIndex=%d, committed %d ops in %v", dbIndex, len(ops), time.Since(start))
 	}
 	return nil
 }
 
-// processTableInTransaction efficiently processes all hash groups for a single table
-func (h *History) processTableInTransaction(tx *sql.Tx, tableName string, hashGroups map[string][]*MessageIdItem) error {
-	start := time.Now()
-	for {
-		// Execute efficient bulk UPSERT operations
-		if len(hashGroups) > 0 {
-			//start := time.Now()
-
-			// Build bulk UPSERT with VALUES syntax
-			var valuesList []string
-			var args []interface{}
-
-			for shortHash, hashEntries := range hashGroups {
-				// Build new offsets for this hash - optimized for 1-2 offsets typical case
-				valuesList = append(valuesList, "(?, ?)")
-
-				var offsetString string
-				if len(hashEntries) == 1 {
-					// Most common case: single offset
-					offsetString = fmt.Sprintf("%d", hashEntries[0].FileOffset)
-				} else if len(hashEntries) == 2 {
-					// Second most common case: two offsets
-					offsetString = fmt.Sprintf("%d,%d", hashEntries[0].FileOffset, hashEntries[1].FileOffset)
-				} else {
-					// Rare case: 3+ offsets, fall back to slice+join
-					var newOffsets []string
-					for _, entry := range hashEntries {
-						newOffsets = append(newOffsets, fmt.Sprintf("%d", entry.FileOffset))
-					}
-					offsetString = strings.Join(newOffsets, ",")
-				}
-
-				args = append(args, shortHash, offsetString)
-				//log.Printf("[HISTORY] processTableInTransaction: hash '%s' has %d entries, offset string: '%s'", shortHash, len(hashEntries), offsetString)
-			}
-
-			// Execute single bulk UPSERT statement
-			bulkUpsertQuery := fmt.Sprintf(`
-			INSERT INTO %s (h, o) VALUES %s
-			ON CONFLICT(h) DO UPDATE SET
-				o = o || ',' || excluded.o
-		`, tableName, strings.Join(valuesList, ", "))
-
-			if _, err := tx.Exec(bulkUpsertQuery, args...); err != nil {
-				log.Printf("failed to bulk upsert into table %s: %v", tableName, err)
-				time.Sleep(100 * time.Millisecond) // Wait before retrying
-				continue                           // Retry the transaction
-			}
-			break
-			//if HistoryDEBUG {
-			//log.Printf("[HISTORY] processTableInTransaction: bulk upserted %d hashes, %d args, into table %s in %v", len(hashGroups), len(args), tableName, time.Since(start))
-			//}
-		}
-		if HistoryDEBUG {
-			log.Printf("[HISTORY] processTableInTransaction: bulk processed table %s with %d hashes in %v",
-				tableName, len(hashGroups), time.Since(start))
-		}
+// removeGroupTokens is the remove with an unknown article number (or with a number that matched
+// no token, see RemoveArticleAt): it reads the row's CSV,
+// drops every token of rop.groupID in either format and writes it back, inside the caller's
+// transaction (statements from its getStmt cache). A missing row is a no-op.
+func (h *History) removeGroupTokens(getStmt func(query, tableName string) (*sql.Stmt, error), rop routedOp) error {
+	stmt, err := getStmt(sqlSelectNewsgroups, rop.tableName)
+	if err != nil {
+		return fmt.Errorf("prepare select %s: %v", rop.tableName, err)
+	}
+	var newsgroups sql.NullString
+	err = stmt.QueryRow(rop.messageID).Scan(&newsgroups)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("select messageID='%s' table=%s: %v", rop.messageID, rop.tableName, err)
+	}
+	out, changed := stripGroupTokens(newsgroups.String, rop.groupID)
+	if !changed {
+		return nil
+	}
+	if stmt, err = getStmt(sqlSetNewsgroups, rop.tableName); err != nil {
+		return fmt.Errorf("prepare set %s: %v", rop.tableName, err)
+	}
+	if _, err = stmt.Exec(out, rop.messageID); err != nil {
+		return fmt.Errorf("remove messageID='%s' group=%d table=%s: %v", rop.messageID, rop.groupID, rop.tableName, err)
 	}
 	return nil
 }
 
-// LookupStorageToken looks up a message-ID and returns its storage token
-// This function:
-// 1. Looks up the message-ID in the history database to get file offsets
-// 2. Reads the actual history file entries at those offsets
-// 3. Matches the hash and message-ID to handle hash collisions
-// 4. Returns the storage token if found
-func (h *History) xxLookupStorageToken(msgIdItem *MessageIdItem) int {
-	log.Printf("ERROR LEGACY FUNCTION CALLED LookupStorageToken")
-	return CaseError // Default to error case
-	/*
-		msgIdItem.Mux.RLock()
-		iserror := msgIdItem.Response == CaseError || msgIdItem.MessageId == ""
-		isset := msgIdItem.StorageToken != ""
-		//ispass := msgIdItem.Response == CasePass
-		msgIdItem.Mux.RUnlock()
-
-		if iserror {
-			msgIdItem.Mux.Lock()
-			msgIdItem.Response = CaseError
-			msgIdItem.Mux.Unlock()
-			log.Printf("[HISTORY] ERROR: LookupStorageToken called with invalid MessageIdItem")
-			return CaseError // Invalid input, return error code
-		}
-		if isset {
-			return CaseDupes // Already exists, return storage token
-		}
-		//if ispass {
-		//	return CasePass // Already checked and not found, return empty string
-		//}
-		// Look up in database to get file offsets
-		found, err := h.lookupInDatabase(msgIdItem)
-		if err != nil {
-			msgIdItem.Mux.Lock()
-			msgIdItem.Response = CaseError
-			msgIdItem.Mux.Unlock()
-			h.updateStats(func(s *HistoryStats) { s.Errors++ })
-			return CaseError // Error occurred, return empty string
-		}
-		if !found {
-			msgIdItem.Mux.Lock()
-			if msgIdItem.Response == 0 {
-				log.Printf("[HISTORY] LookupStorageToken: MessageIdHash '%s' not found in database, setting response to CasePass", msgIdItem.MessageIdHash)
-				// Only set to CasePass if not already set to something else
-				//log.Printf("[HISTORY] LookupStorageToken: MessageIdHash '%s' not found in database, setting response to CasePass", msgIdItem
-				//msgIdItem.Response = CasePass // Set response state to CasePass for not found
-			}
-			msgIdItem.Mux.Unlock()
-			return CasePass // Not found
-		}
-		msgIdItem.Mux.Lock()
-		if msgIdItem.Response == CasePass {
-			log.Printf("[HISTORY] LookupStorageToken: MessageIdHash '%s' found in database, setting response to CaseDupes", msgIdItem.MessageIdHash)
-			msgIdItem.Response = CaseDupes // only set to CaseDupes if not anything else is already set
-		}
-		msgIdItem.Mux.Unlock()
-		h.updateStats(func(s *HistoryStats) { s.TotalLookups++ })
-		return CaseDupes
-	*/
+// renumberGroupToken makes a numbered add authoritative when the UPSERT changed nothing: it reads
+// the row's CSV and rewrites the group's token to token if it holds another number, inside the
+// caller's transaction (statements from its getStmt cache). An equal number writes nothing.
+func (h *History) renumberGroupToken(getStmt func(query, tableName string) (*sql.Stmt, error), rop routedOp, token string) error {
+	stmt, err := getStmt(sqlSelectNewsgroups, rop.tableName)
+	if err != nil {
+		return fmt.Errorf("prepare select %s: %v", rop.tableName, err)
+	}
+	var newsgroups sql.NullString
+	err = stmt.QueryRow(rop.messageID).Scan(&newsgroups)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("select messageID='%s' table=%s: %v", rop.messageID, rop.tableName, err)
+	}
+	out, changed := setGroupToken(newsgroups.String, rop.groupID, token)
+	if !changed {
+		return nil
+	}
+	if stmt, err = getStmt(sqlSetNewsgroups, rop.tableName); err != nil {
+		return fmt.Errorf("prepare set %s: %v", rop.tableName, err)
+	}
+	if _, err = stmt.Exec(out, rop.messageID); err != nil {
+		return fmt.Errorf("renumber messageID='%s' token=%s table=%s: %v", rop.messageID, token, rop.tableName, err)
+	}
+	return nil
 }
 
-// CheckNoMoreWorkInHistory checks if there's no more pending work (similar to CheckNoMoreWorkInMaps)
-func (h *History) CheckNoMoreWorkInHistory() bool {
-	// Check if writer channel has pending entries
-	if len(h.writerChan) > 0 {
-		return false
+// routeHash routes a message-ID to the correct database and table
+// 1st md5 hex char -> database index (0-f), 2nd+3rd chars -> table name (_00-_ff)
+func (h *History) routeHash(messageID string) (dbIndex int, tableName string, err error) {
+	hash := ComputeMessageIDHash(messageID)[:3]
+
+	dbIndex, err = hexToInt(hash[0:1])
+	if err != nil {
+		return 0, "", fmt.Errorf("invalid hex char for database: %s", hash[0:1])
 	}
-
-	// Check if database channel has pending entries
-	if len(h.dbChan) > 0 {
-		return false
+	if dbIndex >= historyNumDBs {
+		return 0, "", fmt.Errorf("database index %d exceeds available databases %d", dbIndex, historyNumDBs)
 	}
-
-	// Check if there's a pending batch
-	h.batchMux.Lock()
-	isProcessing := h.processing
-	h.batchMux.Unlock()
-
-	return !isProcessing
-}
-
-// SetDatabaseWorkChecker sets the database work checker interface for coordinated shutdown
-func (h *History) SetDatabaseWorkChecker(checker DatabaseWorkChecker) {
-	h.dbWorkChecker = checker
+	return dbIndex, "_" + hash[1:3], nil
 }

@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -20,120 +22,146 @@ var appVersion = "-unset-"
 func main() {
 	config.AppVersion = appVersion
 	database.NO_CACHE_BOOT = true // prevents booting caches
-	log.Printf("go-pugleaf NNTP User Manager (version: %s)", config.AppVersion)
+	log.Printf("[NNTPMGR] go-pugleaf NNTP User Manager (version: %s)", config.AppVersion)
 	var (
-		createUser = flag.Bool("create", false, "Create a new NNTP user")
-		listUsers  = flag.Bool("list", false, "List all NNTP users")
-		deleteUser = flag.Bool("delete", false, "Delete an NNTP user")
-		updateUser = flag.Bool("update", false, "Update an NNTP user")
-		username   = flag.String("username", "random", "Username for NNTP user operations (10-20 chars)")
-		password   = flag.String("password", "random", "Password for NNTP user (10-20 chars, will be bcrypt hashed)")
-		maxConns   = flag.Int("maxconns", 1, "Maximum concurrent connections")
-		posting    = flag.Bool("posting", false, "Allow posting (default: read-only)")
+		createUser     = flag.Bool("create", false, "Create a new NNTP user")
+		listUsers      = flag.Bool("list", false, "List all NNTP users")
+		deleteUser     = flag.Bool("delete", false, "Delete an NNTP user (active or not)")
+		updateUser     = flag.Bool("update", false, "Update an NNTP user: changes only -maxconns and/or -posting when given")
+		activateUser   = flag.Bool("activate", false, "Activate an NNTP user")
+		deactivateUser = flag.Bool("deactivate", false, "Deactivate an NNTP user (logins refused, account kept)")
+		setPassword    = flag.Bool("setpassword", false, "Set a new password for an NNTP user (uses -password)")
+		username       = flag.String("username", "random", "Username for NNTP user operations (10-20 chars; 'random' only with -create)")
+		password       = flag.String("password", "random", "Password for -create/-setpassword (10-72 bytes, bcrypt hashed; 'random' generates and prints one)")
+		maxConns       = flag.Int("maxconns", database.DefaultNNTPUserMaxConns, "Maximum concurrent connections (1-25)")
+		posting        = flag.Bool("posting", false, "Allow posting (default: read-only; -posting=false revokes it with -update)")
+		dataDir        = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
+	set := flagsSet()
 
-	if !*createUser && !*listUsers && !*deleteUser && !*updateUser {
+	actions := 0
+	for _, a := range []bool{*createUser, *listUsers, *deleteUser, *updateUser, *activateUser, *deactivateUser, *setPassword} {
+		if a {
+			actions++
+		}
+	}
+	if actions == 0 {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  %s -create -username reader1 -password secret123 -maxconns 3\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -create -username poster1 -password pass456 -posting -maxconns 2\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -create -username reader0001 -password secret1234 -maxconns 3\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -create -username poster0001 -password random -posting -maxconns 2\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -list\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -update -username reader1 -maxconns 5 -posting\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -delete -username reader1\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -update -username reader0001 -maxconns 5 -posting\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -update -username reader0001 -posting=false\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -deactivate -username reader0001\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -activate -username reader0001\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -setpassword -username reader0001 -password random\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -delete -username reader0001\n", os.Args[0])
 		os.Exit(1)
 	}
+	if actions > 1 {
+		log.Fatal("[NNTPMGR] give only one of -create, -list, -update, -activate, -deactivate, -setpassword, -delete")
+	}
 
-	if *username == "random" {
+	if *createUser && *username == "random" {
 		// Generate a random username if not provided
 		randomBytes := make([]byte, 6)
 		if _, err := rand.Read(randomBytes); err != nil {
-			log.Fatalf("Failed to generate random username: %v", err)
+			log.Fatalf("[NNTPMGR] Failed to generate random username: %v", err)
 		}
 		*username = hex.EncodeToString(randomBytes)
 	}
-
-	if *password == "random" {
-		// Generate a random password if not provided
-		randomBytes := make([]byte, 6)
-		if _, err := rand.Read(randomBytes); err != nil {
-			log.Fatalf("Failed to generate random password: %v", err)
-		}
-		*password = hex.EncodeToString(randomBytes)
+	if !*createUser && !*listUsers && !set["username"] {
+		log.Fatal("[NNTPMGR] -username is required for this operation")
 	}
 
-	// Initialize configuration
-	//mainConfig := config.NewDefaultConfig()
+	// The password is printed only when it was generated here (OPS-2).
+	generatedPassword := false
+	if *createUser || *setPassword {
+		if *password == "random" {
+			randomBytes := make([]byte, 6)
+			if _, err := rand.Read(randomBytes); err != nil {
+				log.Fatalf("[NNTPMGR] Failed to generate random password: %v", err)
+			}
+			*password = hex.EncodeToString(randomBytes)
+			generatedPassword = true
+		}
+		// One password rule for -create and -setpassword; 72 bytes is the bcrypt limit.
+		if len(*password) < 10 || len(*password) > 72 {
+			log.Fatal("[NNTPMGR] password must be 10-72 bytes")
+		}
+	}
 
 	// Initialize database
-	db, err := database.OpenDatabase(nil)
-	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
-	}
-	defer db.Shutdown()
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
 
-	// Apply migrations
-	if err := db.Migrate(); err != nil {
-		log.Fatalf("Failed to apply database migrations: %v", err)
+	db, err := database.OpenDatabase(dbConfig)
+	if err != nil {
+		log.Fatalf("[NNTPMGR] Failed to initialize database: %v", err)
 	}
 
 	switch {
 	case *createUser:
-		if *username == "" {
-			log.Fatal("Username is required for user creation")
+		if err = createNNTPUser(db, *username, *password, generatedPassword, *maxConns, *posting); err != nil {
+			err = fmt.Errorf("failed to create NNTP user: %w", err)
 		}
-		if *password == "" {
-			log.Fatal("Password is required for user creation")
-		}
-		err := createNNTPUser(db, *username, *password, *maxConns, *posting)
-		if err != nil {
-			log.Fatalf("Failed to create NNTP user: %v", err)
-		}
-
 	case *listUsers:
-		err := listNNTPUsers(db)
-		if err != nil {
-			log.Fatalf("Failed to list NNTP users: %v", err)
+		if err = listNNTPUsers(db); err != nil {
+			err = fmt.Errorf("failed to list NNTP users: %w", err)
 		}
-
 	case *deleteUser:
-		if *username == "" {
-			log.Fatal("Username is required for user deletion")
+		if err = deleteNNTPUser(db, *username); err != nil {
+			err = fmt.Errorf("failed to delete NNTP user: %w", err)
 		}
-		err := deleteNNTPUser(db, *username)
-		if err != nil {
-			log.Fatalf("Failed to delete NNTP user: %v", err)
-		}
-
 	case *updateUser:
-		if *username == "" {
-			log.Fatal("Username is required for user update")
+		if err = updateNNTPUser(db, *username, set, *maxConns, *posting); err != nil {
+			err = fmt.Errorf("failed to update NNTP user: %w", err)
 		}
-		err := updateNNTPUser(db, *username, *maxConns, *posting)
-		if err != nil {
-			log.Fatalf("Failed to update NNTP user: %v", err)
+	case *activateUser, *deactivateUser:
+		if err = setNNTPUserActive(db, *username, *activateUser); err != nil {
+			err = fmt.Errorf("failed to change NNTP user state: %w", err)
 		}
+	case *setPassword:
+		if err = setNNTPUserPassword(db, *username, *password, generatedPassword); err != nil {
+			err = fmt.Errorf("failed to set NNTP user password: %w", err)
+		}
+	}
+
+	if shutdownErr := db.Shutdown(); shutdownErr != nil {
+		log.Printf("[NNTPMGR] database shutdown: %v", shutdownErr)
+	}
+	if err != nil {
+		log.Fatalf("[NNTPMGR] %v", err)
 	}
 }
 
-func createNNTPUser(db *database.Database, username, password string, maxConns int, posting bool) error {
-	// Validate input
+// flagsSet returns the names of the flags given on the command line.
+func flagsSet() map[string]bool {
+	set := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	return set
+}
+
+func createNNTPUser(db *database.Database, username, password string, generatedPassword bool, maxConns int, posting bool) error {
+	// Validate input (the password rule is checked in main)
 	if len(username) < 10 || len(username) > 20 {
 		return fmt.Errorf("username must be 10-20 characters")
-	}
-	if len(password) < 10 || len(password) > 20 {
-		return fmt.Errorf("password must be 10-20 characters")
 	}
 	if maxConns < 1 || maxConns > 25 {
 		return fmt.Errorf("maxconns must be between 1 and 25")
 	}
 
-	// Check if user already exists
-	_, err := db.GetNNTPUserByUsername(username)
+	// Check if user already exists (active or not: the username is UNIQUE)
+	_, err := db.GetNNTPUserByUsernameAnyState(username)
 	if err == nil {
 		return fmt.Errorf("NNTP user '%s' already exists", username)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("lookup of '%s': %w", username, err)
 	}
 
 	// Create user
@@ -149,9 +177,14 @@ func createNNTPUser(db *database.Database, username, password string, maxConns i
 	if err != nil {
 		return fmt.Errorf("failed to insert NNTP user: %v", err)
 	}
+	log.Printf("[NNTPMGR] created NNTP user '%s' (maxconns=%d posting=%v)", username, maxConns, posting)
 
 	fmt.Printf("✅ NNTP user '%s' created successfully\n", username)
-	fmt.Printf("   Password: %s\n", password)
+	if generatedPassword {
+		fmt.Printf("   Password: %s\n", password)
+	} else {
+		fmt.Printf("   Password: (as given)\n")
+	}
 	fmt.Printf("   Max connections: %d\n", maxConns)
 	fmt.Printf("   Posting allowed: %v\n", posting)
 
@@ -169,11 +202,12 @@ func listNNTPUsers(db *database.Database) error {
 		return nil
 	}
 
+	// Password hashes are never printed (OPS-2).
 	fmt.Printf("Found %d NNTP users:\n\n", len(users))
-	fmt.Printf("%-4s %-16s %-16s %-8s %-8s %-8s %-19s %s\n",
-		"ID", "Username", "Password", "MaxConns", "Posting", "Active", "Last Login", "Created")
-	fmt.Printf("%-4s %-16s %-16s %-8s %-8s %-8s %-19s %s\n",
-		"----", "--------", "--------", "--------", "-------", "------", "----------", "-------")
+	fmt.Printf("%-4s %-20s %-8s %-8s %-8s %-19s %s\n",
+		"ID", "Username", "MaxConns", "Posting", "Active", "Last Login", "Created")
+	fmt.Printf("%-4s %-20s %-8s %-8s %-8s %-19s %s\n",
+		"----", "--------", "--------", "-------", "------", "----------", "-------")
 
 	for _, user := range users {
 		lastLogin := "Never"
@@ -181,10 +215,9 @@ func listNNTPUsers(db *database.Database) error {
 			lastLogin = user.LastLogin.Format("2006-01-02 15:04")
 		}
 
-		fmt.Printf("%-4d %-16s %-16s %-8d %-8v %-8v %-19s %s\n",
+		fmt.Printf("%-4d %-20s %-8d %-8v %-8v %-19s %s\n",
 			user.ID,
 			user.Username,
-			user.Password,
 			user.MaxConns,
 			user.Posting,
 			user.IsActive,
@@ -197,10 +230,10 @@ func listNNTPUsers(db *database.Database) error {
 }
 
 func deleteNNTPUser(db *database.Database, username string) error {
-	// Check if user exists
-	user, err := db.GetNNTPUserByUsername(username)
+	// Check if user exists (active or not)
+	user, err := db.GetNNTPUserByUsernameAnyState(username)
 	if err != nil {
-		return fmt.Errorf("NNTP user '%s' not found", username)
+		return fmt.Errorf("NNTP user '%s' not found: %w", username, err)
 	}
 
 	// Confirm deletion
@@ -219,16 +252,26 @@ func deleteNNTPUser(db *database.Database, username string) error {
 	if err != nil {
 		return fmt.Errorf("failed to delete NNTP user: %v", err)
 	}
+	log.Printf("[NNTPMGR] deleted NNTP user '%s' (ID: %d)", username, user.ID)
 
 	fmt.Printf("✅ NNTP user '%s' deleted successfully\n", username)
 	return nil
 }
 
-func updateNNTPUser(db *database.Database, username string, maxConns int, posting bool) error {
-	// Check if user exists
-	user, err := db.GetNNTPUserByUsername(username)
+// updateNNTPUser changes only the settings whose flags were given (set): -maxconns
+// and/or -posting. Without either it changes nothing and returns an error.
+func updateNNTPUser(db *database.Database, username string, set map[string]bool, maxConns int, posting bool) error {
+	if !set["maxconns"] && !set["posting"] {
+		return fmt.Errorf("nothing to update: give -maxconns and/or -posting")
+	}
+	if set["maxconns"] && (maxConns < 1 || maxConns > 25) {
+		return fmt.Errorf("maxconns must be between 1 and 25")
+	}
+
+	// Check if user exists (active or not)
+	user, err := db.GetNNTPUserByUsernameAnyState(username)
 	if err != nil {
-		return fmt.Errorf("NNTP user '%s' not found", username)
+		return fmt.Errorf("NNTP user '%s' not found: %w", username, err)
 	}
 
 	// Show current settings
@@ -236,15 +279,70 @@ func updateNNTPUser(db *database.Database, username string, maxConns int, postin
 	fmt.Printf("  Max connections: %d\n", user.MaxConns)
 	fmt.Printf("  Posting allowed: %v\n", user.Posting)
 
+	newMaxConns, newPosting := user.MaxConns, user.Posting
+	if set["maxconns"] {
+		newMaxConns = maxConns
+	}
+	if set["posting"] {
+		newPosting = posting
+	}
+
 	// Update user
-	err = db.UpdateNNTPUserPermissions(user.ID, maxConns, posting)
+	err = db.UpdateNNTPUserPermissions(user.ID, newMaxConns, newPosting)
 	if err != nil {
 		return fmt.Errorf("failed to update NNTP user: %v", err)
 	}
+	log.Printf("[NNTPMGR] updated NNTP user '%s' (maxconns=%d posting=%v)", username, newMaxConns, newPosting)
 
 	fmt.Printf("✅ NNTP user '%s' updated successfully\n", username)
-	fmt.Printf("   Max connections: %d\n", maxConns)
-	fmt.Printf("   Posting allowed: %v\n", posting)
+	fmt.Printf("   Max connections: %d\n", newMaxConns)
+	fmt.Printf("   Posting allowed: %v\n", newPosting)
 
+	return nil
+}
+
+// setNNTPUserActive activates or deactivates an NNTP user (looked up in any state).
+func setNNTPUserActive(db *database.Database, username string, active bool) error {
+	user, err := db.GetNNTPUserByUsernameAnyState(username)
+	if err != nil {
+		return fmt.Errorf("NNTP user '%s' not found: %w", username, err)
+	}
+	state := "deactivated"
+	if active {
+		state = "activated"
+		err = db.ActivateNNTPUser(user.ID)
+	} else {
+		err = db.DeactivateNNTPUser(user.ID)
+	}
+	if err != nil {
+		if database.IsWebUserMappingConflict(err) {
+			return fmt.Errorf("%s: %w", user.Username, database.ErrWebUserHasNNTPAccount)
+		}
+		return err
+	}
+	log.Printf("[NNTPMGR] %s NNTP user '%s' (ID: %d)", state, username, user.ID)
+	fmt.Printf("✅ NNTP user '%s' %s\n", username, state)
+	return nil
+}
+
+// setNNTPUserPassword stores a new password; it is printed only when it was generated.
+func setNNTPUserPassword(db *database.Database, username, password string, generatedPassword bool) error {
+	user, err := db.GetNNTPUserByUsernameAnyState(username)
+	if err != nil {
+		return fmt.Errorf("NNTP user '%s' not found: %w", username, err)
+	}
+	if err := db.UpdateNNTPUserPassword(user.ID, password); err != nil {
+		return err
+	}
+	log.Printf("[NNTPMGR] new password set for NNTP user '%s' (ID: %d)", username, user.ID)
+	fmt.Printf("✅ Password of NNTP user '%s' changed\n", username)
+	if generatedPassword {
+		fmt.Printf("   Password: %s\n", password)
+	} else {
+		fmt.Printf("   Password: (as given)\n")
+	}
+	if !user.IsActive {
+		fmt.Printf("   Note: the user is inactive (use -activate)\n")
+	}
 	return nil
 }

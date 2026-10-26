@@ -19,10 +19,18 @@ var DefaultCronGroupHash = 15 * time.Minute // TODO expose to config
 // group := GroupGHmap.GetGroupFromHash(hash)
 // the 2nd only returns a group if it has been hashed before!
 
+// NewGHmap returns a GHmap whose cleanup loop never stops (see NewGHmapStop).
 func NewGHmap() *GHmap {
+	return NewGHmapStop(nil)
+}
+
+// NewGHmapStop returns a GHmap whose cleanup loop (GHmapCron) returns when stop is
+// closed. A nil stop channel never fires: the loop then runs for the life of the process.
+func NewGHmapStop(stop <-chan struct{}) *GHmap {
 	h := &GHmap{
 		GHmap:  make(map[string]*HashedEntry, 256),
 		Groups: make(map[string]*GroupEntry, 256),
+		stop:   stop,
 	}
 	go h.GHmapCron() // Start the cleanup goroutine
 	return h
@@ -49,6 +57,7 @@ type GHmap struct {
 	Gnegs     uint64                  // Number of times a group was not found in the map
 	expired   uint64                  // expired since lastPrint
 	lastPrint time.Time
+	stop      <-chan struct{} // closed to end GHmapCron (nil: never)
 }
 
 func (h *GHmap) Ghit() {
@@ -79,33 +88,39 @@ func (h *GHmap) Hneg() {
 	//log.Printf("[CACHE:GROUPHASH] Hneg! negs: %d", h.Hnegs)
 }
 
+// GHmapCron removes expired entries every DefaultCronGroupHash until h.stop is closed.
 func (h *GHmap) GHmapCron() {
-	time.Sleep(DefaultCronGroupHash)
-	expired := 0
-	// Cleanup expired entries
-	now := time.Now()
-	h.mux.Lock() //no defer this here we are looping!
-	for group, entry := range h.GHmap {
-		if now.After(entry.Expiry) {
-			delete(h.GHmap, group)
+	for {
+		select {
+		case <-h.stop:
+			return
+		case <-time.After(DefaultCronGroupHash):
 		}
-	}
-	for hash, entry := range h.Groups {
-		if now.After(entry.Expiry) {
-			delete(h.Groups, hash)
-			expired++
+		expired := 0
+		// Cleanup expired entries
+		now := time.Now()
+		h.mux.Lock() //no defer this here we are looping!
+		for group, entry := range h.GHmap {
+			if now.After(entry.Expiry) {
+				delete(h.GHmap, group)
+			}
 		}
+		for hash, entry := range h.Groups {
+			if now.After(entry.Expiry) {
+				delete(h.Groups, hash)
+				expired++
+			}
+		}
+		if expired > 0 {
+			h.expired += uint64(expired)
+		}
+		if time.Since(h.lastPrint) > 1*time.Hour {
+			log.Printf("[CACHE:GROUPHASH] Cleaned: %d | Cached: %d [Ghits: %d, Gnegs: %d, Hhits: %d, Hnegs: %d]", h.expired, len(h.GHmap), h.Ghits, h.Gnegs, h.Hhits, h.Hnegs)
+			h.expired, h.Ghits, h.Gnegs, h.Hhits, h.Hnegs = 0, 0, 0, 0, 0
+			h.lastPrint = time.Now()
+		}
+		h.mux.Unlock()
 	}
-	if expired > 0 {
-		h.expired += uint64(expired)
-	}
-	if time.Since(h.lastPrint) > 1*time.Hour {
-		log.Printf("[CACHE:GROUPHASH] Cleaned: %d | Cached: %d [Ghits: %d, Gnegs: %d, Hhits: %d, Hnegs: %d]", h.expired, len(h.GHmap), h.Ghits, h.Gnegs, h.Hhits, h.Hnegs)
-		h.expired, h.Ghits, h.Gnegs, h.Hhits, h.Hnegs = 0, 0, 0, 0, 0
-		h.lastPrint = time.Now()
-	}
-	h.mux.Unlock()
-	go h.GHmapCron()
 }
 
 // GetHash retrieves the hash for a given group name, generating it if not found
@@ -142,10 +157,10 @@ func (h *GHmap) GetGroupFromHash(hash string) (string, bool) {
 	h.mux.RLock()
 	entry, exists := h.Groups[hash]
 	h.mux.RUnlock()
-	if exists {
-		h.Ghit()
-	} else {
+	if !exists || entry == nil {
 		h.Gneg()
+		return "", false
 	}
-	return entry.Group, exists
+	h.Ghit()
+	return entry.Group, true
 }

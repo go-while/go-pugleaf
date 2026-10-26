@@ -1,11 +1,14 @@
 package database
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,20 +20,7 @@ var (
 	migrationCache     []*MigrationFile
 	migrationCacheMux  sync.RWMutex
 	migrationCacheInit bool
-
-	// Cache for databases that have already been fully migrated
-	migratedDBsCache map[string]bool // key: dbType:filename
-	migratedDBsMux   sync.RWMutex
 )
-
-// initMigratedDBsCache initializes the migrated databases cache
-func initMigratedDBsCache() {
-	migratedDBsMux.Lock()
-	if migratedDBsCache == nil {
-		migratedDBsCache = make(map[string]bool)
-	}
-	migratedDBsMux.Unlock()
-}
 
 // MigrationType represents the type of database that migrations apply to
 type MigrationType string
@@ -179,7 +169,7 @@ func ensureMigrationsTable(db *sql.DB, dbType string) error {
 func getAppliedMigrations(db *sql.DB, dbType string) (map[string]bool, error) {
 	applied := make(map[string]bool)
 
-	rows, err := retryableQuery(db, `SELECT filename FROM schema_migrations WHERE db_type = ? OR db_type = ''`, dbType)
+	rows, err := RetryableQuery(db, `SELECT filename FROM schema_migrations WHERE db_type = ? OR db_type = ''`, dbType)
 	if err != nil {
 		log.Printf("Failed to query applied migrations for %s: %v", dbType, err)
 		return nil, fmt.Errorf("failed to query applied migrations for %s: %w", dbType, err)
@@ -224,21 +214,104 @@ func applyMigration(db *sql.DB, migration *MigrationFile, dbType string) error {
 		content = string(contentBytes)
 	}
 
-	// Apply the migration
-	if _, err := db.Exec(content); err != nil {
+	// Run the migration and its schema_migrations row atomically on one dedicated
+	// connection. foreign_keys can't change inside a transaction, so it is switched
+	// off before BEGIN and restored on the same connection before it is released.
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get connection for migration %s for %s: %w", migration.FileName, dbType, err)
+	}
+	defer func() {
+		if cerr := conn.Close(); cerr != nil {
+			log.Printf("[DATABASE] Failed to release connection after migration %s for %s: %v", migration.FileName, dbType, cerr)
+		}
+	}()
+
+	foreignKeys := SQLITE_foreign_keys
+	if dbType == "main" {
+		foreignKeys = "ON" // the main DB always runs with foreign keys (see buildMainConnPragmas)
+	}
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
+		return fmt.Errorf("failed to disable foreign keys for migration %s for %s: %w", migration.FileName, dbType, err)
+	}
+	defer func() {
+		if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys="+foreignKeys); err != nil {
+			log.Printf("[DATABASE] Failed to restore foreign_keys=%s after migration %s for %s: %v", foreignKeys, migration.FileName, dbType, err)
+			// don't return a connection with the wrong setting to the pool
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin migration %s for %s: %w", migration.FileName, dbType, err)
+	}
+	if _, err := tx.ExecContext(ctx, stripMigrationPragmas(content)); err != nil {
+		if rerr := tx.Rollback(); rerr != nil {
+			log.Printf("[DATABASE] Failed to roll back migration %s for %s: %v", migration.FileName, dbType, rerr)
+		}
 		log.Printf("Failed to execute migration %s for %s: %v", migration.FileName, dbType, err)
 		return fmt.Errorf("failed to execute migration %s for %s: %w", migration.FileName, dbType, err)
 	}
 
 	// Record the migration as applied
-	_, err = db.Exec(`INSERT INTO schema_migrations (filename, db_type) VALUES (?, ?)`, migration.FileName, dbType)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (filename, db_type) VALUES (?, ?)`, migration.FileName, dbType); err != nil {
+		if rerr := tx.Rollback(); rerr != nil {
+			log.Printf("[DATABASE] Failed to roll back migration %s for %s: %v", migration.FileName, dbType, rerr)
+		}
 		log.Printf("Failed to record migration %s for %s: %v", migration.FileName, dbType, err)
 		return fmt.Errorf("failed to record migration %s for %s: %w", migration.FileName, dbType, err)
 	}
 
+	if err := tx.Commit(); err != nil {
+		log.Printf("Failed to commit migration %s for %s: %v", migration.FileName, dbType, err)
+		return fmt.Errorf("failed to commit migration %s for %s: %w", migration.FileName, dbType, err)
+	}
+
+	// Report (but don't fail on) foreign key violations left by the migration
+	rows, err := conn.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		log.Printf("[DATABASE] foreign_key_check after migration %s for %s failed: %v", migration.FileName, dbType, err)
+		return nil
+	}
+	defer rows.Close()
+	violations := 0
+	for rows.Next() {
+		var table, parent sql.NullString
+		var rowid, fkid sql.NullInt64
+		if err := rows.Scan(&table, &rowid, &parent, &fkid); err != nil {
+			log.Printf("[DATABASE] foreign_key_check scan after migration %s for %s: %v", migration.FileName, dbType, err)
+			break
+		}
+		violations++
+		if violations <= 10 {
+			log.Printf("[DATABASE] foreign key violation after migration %s for %s: table=%s rowid=%d parent=%s fkid=%d",
+				migration.FileName, dbType, table.String, rowid.Int64, parent.String, fkid.Int64)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[DATABASE] foreign_key_check rows after migration %s for %s: %v", migration.FileName, dbType, err)
+	}
+	if violations > 10 {
+		log.Printf("[DATABASE] %d foreign key violations after migration %s for %s", violations, migration.FileName, dbType)
+	}
+
 	//log.Printf("Applied migration %s to %s database", migration.FileName, dbType)
 	return nil
+}
+
+// migrationPragmaLine matches a whole line holding one PRAGMA statement (optionally
+// followed by a -- comment). Pragmas are no-ops or harmful inside the migration
+// transaction; connection settings come from the driver's ConnectHook.
+// The character classes stop at the line end on purpose: a PRAGMA line without its
+// semicolon is left in place, so the migration fails loudly instead of silently losing
+// the statements that follow it.
+var migrationPragmaLine = regexp.MustCompile(`(?im)^[ \t]*PRAGMA[ \t]+[^;\n]*;[ \t\r]*(--[^\n]*)?$`)
+
+// stripMigrationPragmas removes whole-line PRAGMA statements from migration SQL.
+func stripMigrationPragmas(content string) string {
+	return migrationPragmaLine.ReplaceAllString(content, "")
 }
 
 // migrateMainDB applies migrations to the main database
@@ -277,23 +350,11 @@ func (db *Database) migrateMainDB() error {
 	return nil
 }
 
-// MigrateGroup applies migrations for a specific newsgroup database
-func (db *Database) MigrateGroup(groupName string) error {
-	groupDBs, err := db.GetGroupDBs(groupName)
-	if err != nil {
-		log.Printf("Failed to get group database for %s: %v", groupName, err)
-		return fmt.Errorf("failed to get group database: %w", err)
-	}
-	defer groupDBs.Return(db)
-
-	return db.migrateGroupDB(groupDBs)
-}
-
-// migrateGroupDB applies migrations to a group database
-func (db *Database) migrateGroupDB(groupDBs *GroupDBs) error {
-	// Initialize cache if needed
-	initMigratedDBsCache()
-
+// migrateGroupDB applies migrations to a group database.
+// useCache is ignored: every open reads schema_migrations of the group database (one
+// small query). A per-process "already migrated" cache keyed by group name skipped the
+// schema of a group database file that was deleted and re-created (AUDIT A-db-6).
+func (db *Database) migrateGroupDB(groupDB *GroupDB, useCache bool) error {
 	// Get migration files
 	migrations, err := getMigrationFiles()
 	if err != nil {
@@ -301,55 +362,23 @@ func (db *Database) migrateGroupDB(groupDBs *GroupDBs) error {
 		return err
 	}
 
-	// Create a cache key based on group name
-	cacheKey := fmt.Sprintf("%s:group", groupDBs.Newsgroup)
-
-	// Check if this database is already known to be fully migrated
-	migratedDBsMux.RLock()
-	isFullyMigrated := migratedDBsCache[cacheKey]
-	migratedDBsMux.RUnlock()
-
-	if isFullyMigrated {
-		// Skip migration checks for this database
-		return nil
-	}
-
 	// Ensure migrations table exists
-	if err := ensureMigrationsTable(groupDBs.DB, "group"); err != nil {
+	if err := ensureMigrationsTable(groupDB.DB, "group"); err != nil {
 		log.Printf("Failed to ensure migrations table for group: %v", err)
 		return fmt.Errorf("failed to ensure migrations table for group: %w", err)
 	}
 
 	// Get applied migrations
-	applied, err := getAppliedMigrations(groupDBs.DB, "group")
+	applied, err := getAppliedMigrations(groupDB.DB, "group")
 	if err != nil {
 		log.Printf("Failed to get applied migrations for group: %v", err)
 		return fmt.Errorf("failed to get applied migrations for group: %w", err)
 	}
 
-	// Check if all migrations for this type are already applied
-	allApplied := true
-	migrationsToApply := 0
-	for _, migration := range migrations {
-		if migration.Type == MigrationTypeGroup {
-			migrationsToApply++
-			if !applied[migration.FileName] {
-				allApplied = false
-				break
-			}
-		}
-	}
-	// If all migrations are applied, cache this fact
-	if allApplied && migrationsToApply > 0 {
-		migratedDBsMux.Lock()
-		migratedDBsCache[cacheKey] = true
-		migratedDBsMux.Unlock()
-	}
-
 	// Apply missing migrations for group database
 	for _, migration := range migrations {
 		if migration.Type == MigrationTypeGroup && !applied[migration.FileName] {
-			if err := applyMigration(groupDBs.DB, migration, "group"); err != nil {
+			if err := applyMigration(groupDB.DB, migration, "group"); err != nil {
 				return fmt.Errorf("failed to apply migration %s to group database: %w", migration.FileName, err)
 			}
 			//log.Printf("Done: apply migration %s to group database\n", migration.FileName)

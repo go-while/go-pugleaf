@@ -2,54 +2,146 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
-// multiLineHeaderToStringSpaced joins multi-line headers with spaces (for RFC-compliant header unfolding)
-func multiLineHeaderToStringSpaced(vals []string) string {
-	if len(vals) == 0 {
-		return ""
-	}
-	if len(vals) == 1 {
-		return vals[0] // Fast path for single-line headers
-	}
-	var sb strings.Builder
-	for i, line := range vals {
-		// Trim each line and add spaces between them
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue // Skip empty lines
-		}
-		if i > 0 {
-			sb.WriteString(" ")
-		}
-		sb.WriteString(line)
-	}
-	return sb.String()
+// appVersion is set at build time (build_fix-references.sh: -X main.appVersion).
+var appVersion = "-unset-"
+
+// fixRefsExitTimeout bounds the wait for background goroutines in fixRefsExit.
+const fixRefsExitTimeout = 60 * time.Second
+
+var (
+	fixRefsStopOnce sync.Once
+	// fixRefsExitMu serializes fixRefsExit: the first caller tears down and exits, a
+	// concurrent second one (the signal handler vs. main) waits here until the process is gone.
+	fixRefsExitMu sync.Mutex
+	// fixRefsStopReq is set by the first SIGINT/SIGTERM: main stops after the current newsgroup.
+	fixRefsStopReq atomic.Bool
+)
+
+// fixRefsExitSignaled is the exit code of a run ended by a signal.
+const fixRefsExitSignaled = 130
+
+// fixRefsExit tears the database down (close StopChan once, wait for the background
+// goroutines up to fixRefsExitTimeout, Shutdown) and exits with code. It is the only
+// way out of main once the database is open.
+func fixRefsExit(db *database.Database, code int) {
+	fixRefsExitMu.Lock() // never unlocked: os.Exit below ends the process
+	fixRefsExitLocked(db, code)
 }
 
-// getHeaderFirst returns the first value for a header, or "" if not present
-func getHeaderFirst(headers map[string][]string, key string) string {
-	if vals, ok := headers[key]; ok && len(vals) > 0 {
-		// For headers that can be folded across multiple lines (like References),
-		// we need to join with spaces instead of newlines to properly unfold them
-		if key == "references" || key == "References" || key == "in-reply-to" || key == "In-Reply-To" {
-			return multiLineHeaderToStringSpaced(vals)
+// fixRefsExitNow is the second-signal exit: it tears down like fixRefsExit unless a teardown
+// already holds fixRefsExitMu (it may be waiting on db.WG for up to a minute); then it
+// exits at once without waiting for it.
+func fixRefsExitNow(db *database.Database) {
+	if !fixRefsExitMu.TryLock() {
+		log.Printf("[FIX-REFS] teardown already running: exiting now")
+		os.Exit(fixRefsExitSignaled)
+	}
+	fixRefsExitLocked(db, fixRefsExitSignaled) // never unlocked: it ends the process
+}
+
+// fixRefsExitLocked is fixRefsExit for a caller that holds fixRefsExitMu.
+func fixRefsExitLocked(db *database.Database, code int) {
+	if db != nil {
+		fixRefsStopOnce.Do(func() {
+			if db.StopChan != nil {
+				close(db.StopChan)
+			}
+		})
+		if db.WG != nil {
+			done := make(chan struct{})
+			go func() {
+				db.WG.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(fixRefsExitTimeout):
+				log.Printf("[FIX-REFS] background goroutines did not stop within %v, shutting down anyway", fixRefsExitTimeout)
+			}
 		}
-		// For other headers, just return first value
-		if len(vals) > 0 {
-			return vals[0]
+		if err := db.Shutdown(); err != nil {
+			log.Printf("[FIX-REFS] database shutdown failed: %v", err)
+			if code == 0 {
+				code = 1
+			}
 		}
 	}
-	return ""
+	os.Exit(code)
+}
+
+// fixRefsSignalLoop handles the signals of sigChan: the first one calls requestStop
+// (main stops after the current newsgroup), a second one calls exitNow. It returns
+// after the second signal or when sigChan is closed.
+func fixRefsSignalLoop(sigChan <-chan os.Signal, requestStop, exitNow func()) {
+	sig, ok := <-sigChan
+	if !ok {
+		return
+	}
+	log.Printf("[FIX-REFS] Received %v: stopping after the current newsgroup (send it again to stop now)", sig)
+	requestStop()
+	sig, ok = <-sigChan
+	if !ok {
+		return
+	}
+	log.Printf("[FIX-REFS] Received %v again: stopping now", sig)
+	exitNow()
+}
+
+// fixRefsHandleSignals registers SIGINT/SIGTERM for the run with the open database db;
+// both ways out go through fixRefsExit (exit code fixRefsExitSignaled).
+func fixRefsHandleSignals(db *database.Database) {
+	sigChan := make(chan os.Signal, 2)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	// ends with the process: every way out of main is fixRefsExit (os.Exit)
+	go fixRefsSignalLoop(sigChan, func() { fixRefsStopReq.Store(true) }, func() { fixRefsExitNow(db) })
+}
+
+// usageText is the usage line and example printed when -data or -group is empty.
+func usageText(prog string) (usage, example string) {
+	usage = fmt.Sprintf("Usage: %s -data <data-dir> -group <newsgroup-name> [options]\n", prog)
+	example = fmt.Sprintf("  %s -data /path/to/data -group comp.lang.go\n", prog)
+	return usage, example
+}
+
+// dryRunHint tells how to leave the dry run: -dry-run defaults to true.
+func dryRunHint() string {
+	return "Run with -dry-run=false to apply fixes\n"
+}
+
+// resolveNamedGroups looks every name up in the main database (A-ops-8): GetGroupDB would
+// create an empty group database for a name that is not a newsgroup. Unknown names are
+// returned in unknown; any other lookup error is returned as err.
+func resolveNamedGroups(db *database.Database, names []string) (found []*models.Newsgroup, unknown []string, err error) {
+	for _, name := range names {
+		ng, err := db.MainDBGetNewsgroup(name)
+		if errors.Is(err, sql.ErrNoRows) {
+			unknown = append(unknown, name)
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to look up newsgroup '%s': %w", name, err)
+		}
+		found = append(found, ng)
+	}
+	return found, unknown, nil
 }
 
 // parseRawHeaders parses raw header string (with \n line breaks) into a map
@@ -98,63 +190,70 @@ func parseRawHeaders(rawHeaders string) map[string][]string {
 }
 
 func main() {
+	config.AppVersion = appVersion
+	database.NO_CACHE_BOOT = true // prevents booting caches
 	var (
-		dbPath         = flag.String("db", "data", "Data Path to main data directory (required)")
 		newsgroup      = flag.String("group", "$all", "Newsgroup name to fix (required) (\\$all to fix all)")
-		verbose        = flag.Bool("v", false, "Verbose output")
-		dryRun         = flag.Bool("dry-run", false, "Show what would be fixed without making changes")
+		verbose        = flag.Bool("v", true, "Verbose output")
+		dryRun         = flag.Bool("dry-run", true, "Show what would be fixed without making changes")
 		limit          = flag.Int("limit", 0, "Limit number of articles to process (0 = no limit)")
 		rebuildThreads = flag.Bool("rebuild-threads", false, "Rebuild thread relationships after fixing references (default: false)")
 		batchSize      = flag.Int("batch-size", 10000, "Number of articles to process in each batch (for large datasets)")
+		dataDir        = flag.String("data", "./data", "Directory to store database files")
 	)
 	flag.Parse()
 
-	if *dbPath == "" || *newsgroup == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s -db <database-path> -group <newsgroup-name> [options]\n", os.Args[0])
+	if *dataDir == "" || *newsgroup == "" {
+		usage, example := usageText(os.Args[0])
+		fmt.Fprint(os.Stderr, usage)
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExample:\n")
-		fmt.Fprintf(os.Stderr, "  %s -db /path/to/databases -group comp.lang.go\n", os.Args[0])
+		fmt.Fprint(os.Stderr, example)
 		os.Exit(1)
 	}
 
 	// Validate database path
-	if _, err := os.Stat(*dbPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: Database path '%s' does not exist\n", *dbPath)
+	if _, err := os.Stat(*dataDir); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: Database path '%s' does not exist\n", *dataDir)
 		os.Exit(1)
 	}
 
-	// Initialize configuration
-	mainConfig := config.NewDefaultConfig()
-	log.Printf("go-pugleaf References Header Fix Tool (version: %s)", mainConfig.AppVersion)
+	log.Printf("go-pugleaf References Header Fix Tool (version: %s)", config.AppVersion)
 
 	// Initialize database connection
-	db, err := database.OpenDatabase(nil)
+	dbConfig := database.DefaultDBConfig()
+	dbConfig.DataDir = *dataDir
+
+	db, err := database.OpenDatabase(dbConfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
-	defer db.Shutdown()
-
-	// Apply migrations
-	if err := db.Migrate(); err != nil {
-		log.Fatalf("Failed to apply database migrations: %v", err)
-	}
+	fixRefsHandleSignals(db)
 
 	var newsgroups []*models.Newsgroup
 	if *newsgroup != "$all" && *newsgroup != "" {
-		newsgroups = append(newsgroups, &models.Newsgroup{
-			Name: *newsgroup,
-		})
+		found, unknown, err := resolveNamedGroups(db, []string{*newsgroup})
+		if err != nil {
+			log.Printf("[FIX-REFS] %v", err)
+			fixRefsExit(db, 1)
+		}
+		if len(unknown) > 0 {
+			fmt.Fprintf(os.Stderr, "Error: unknown newsgroup '%s'\n", strings.Join(unknown, "', '"))
+			fixRefsExit(db, 1)
+		}
+		newsgroups = found
 	} else {
 		newsgroups, err = db.MainDBGetAllNewsgroups()
 		if err != nil {
-			log.Fatalf("failed to get newsgroups from database: %v", err)
+			log.Printf("[FIX-REFS] failed to get newsgroups from database: %v", err)
+			fixRefsExit(db, 1)
 		}
 	}
 
 	fmt.Printf("🔧 Starting References Header Fix Tool for go-pugleaf\n")
 	fmt.Printf("====================================================\n")
-	fmt.Printf("📂 Data Path: %s\n", *dbPath)
+	fmt.Printf("📂 Data Path: %s\n", *dataDir)
 	fmt.Printf("📊 Newsgroups: %d\n", len(newsgroups))
 	fmt.Printf("🔍 Dry Run: %v\n", *dryRun)
 	fmt.Printf("📝 Verbose: %v\n", *verbose)
@@ -165,11 +264,17 @@ func main() {
 	fmt.Printf("\n")
 
 	var totalProcessed, totalFixed int
+	stopped := false
 
 	for i, newsgroup := range newsgroups {
+		if fixRefsStopReq.Load() {
+			fmt.Printf("🛑 Stopped by a signal after %d of %d newsgroups\n", i, len(newsgroups))
+			stopped = true
+			break
+		}
 		fmt.Printf("🔍 [%d/%d] Processing newsgroup: %s\n", i+1, len(newsgroups), newsgroup.Name)
 
-		groupDB, err := db.GetGroupDBs(newsgroup.Name)
+		groupDB, err := db.GetGroupDB(newsgroup.Name)
 		if err != nil {
 			fmt.Printf("   ❌ Failed to get group database: %v\n", err)
 			continue
@@ -178,7 +283,7 @@ func main() {
 		processed, fixed, err := fixReferencesInNewsgroup(groupDB, *dryRun, *verbose, *limit, *batchSize)
 		if err != nil {
 			fmt.Printf("   ❌ Failed to fix references: %v\n", err)
-			groupDB.Return(db)
+			groupDB.Return()
 			continue
 		}
 
@@ -196,7 +301,7 @@ func main() {
 			}
 		}
 
-		groupDB.Return(db)
+		groupDB.Return()
 
 		if processed > 0 {
 			if fixed > 0 {
@@ -217,16 +322,20 @@ func main() {
 	fmt.Printf("Total references fixed: %d\n", totalFixed)
 	if *dryRun {
 		fmt.Printf("\n🔍 DRY RUN - No changes were made\n")
-		fmt.Printf("Run without -dry-run to apply fixes\n")
+		fmt.Print(dryRunHint())
 	} else if totalFixed > 0 {
 		fmt.Printf("\n✅ References headers have been fixed\n")
 		fmt.Printf("💡 Consider rebuilding thread indexes for better performance\n")
 	} else {
 		fmt.Printf("\n✅ No broken references found - all headers are correct\n")
 	}
+	if stopped {
+		fixRefsExit(db, fixRefsExitSignaled)
+	}
+	fixRefsExit(db, 0)
 }
 
-func fixReferencesInNewsgroup(groupDB *database.GroupDBs, dryRun, verbose bool, limit, batchSize int) (int, int, error) {
+func fixReferencesInNewsgroup(groupDB *database.GroupDB, dryRun, verbose bool, limit, batchSize int) (int, int, error) {
 	// Get total count for progress tracking
 	var totalCount int
 	countQuery := "SELECT COUNT(*) FROM articles WHERE headers_json IS NOT NULL AND headers_json != ''"
@@ -274,7 +383,7 @@ func fixReferencesInNewsgroup(groupDB *database.GroupDBs, dryRun, verbose bool, 
 	return totalProcessed, totalFixed, nil
 }
 
-func processBatch(groupDB *database.GroupDBs, dryRun, verbose bool, offset, batchSize int) (int, int, error) {
+func processBatch(groupDB *database.GroupDB, dryRun, verbose bool, offset, batchSize int) (int, int, error) {
 	// Query articles with potentially broken references
 	query := `
 		SELECT article_num, message_id, "references", headers_json
@@ -319,7 +428,7 @@ func processBatch(groupDB *database.GroupDBs, dryRun, verbose bool, offset, batc
 		headers := parseRawHeaders(headersJSON)
 
 		// Extract the correct references using our fixed function
-		correctReferences := getHeaderFirst(headers, "references")
+		correctReferences := common.GetHeaderFirst(headers, "references")
 		if messageID == "<106kmd6$vnsl$1@dont-email.me>" {
 			log.Printf("DEBUG storedReferences:  '%s'", storedReferences)
 			log.Printf("DEBUG correctReferences: '%s'", correctReferences)
@@ -360,7 +469,7 @@ func processBatch(groupDB *database.GroupDBs, dryRun, verbose bool, offset, batc
 }
 
 // rebuildThreadsInNewsgroup rebuilds thread relationships for a newsgroup using batched processing
-func rebuildThreadsInNewsgroup(groupDB *database.GroupDBs, verbose bool, batchSize int) (int, error) {
+func rebuildThreadsInNewsgroup(groupDB *database.GroupDB, verbose bool, batchSize int) (int, error) {
 	// Get total article count
 	var totalCount int
 	err := database.RetryableQueryRowScan(groupDB.DB, "SELECT COUNT(*) FROM articles", nil, &totalCount)
@@ -459,7 +568,7 @@ func rebuildThreadsInNewsgroup(groupDB *database.GroupDBs, verbose bool, batchSi
 	return totalThreadsBuilt, nil
 }
 
-func processThreadBatch(groupDB *database.GroupDBs, msgIDToArticleNum map[string]int64, offset, batchSize int, verbose bool) (int, error) {
+func processThreadBatch(groupDB *database.GroupDB, msgIDToArticleNum map[string]int64, offset, batchSize int, verbose bool) (int, error) {
 	// Get batch of articles with their references
 	rows, err := database.RetryableQuery(groupDB.DB, `
 		SELECT article_num, message_id, "references"

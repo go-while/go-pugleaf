@@ -3,8 +3,12 @@ package nntp
 // Package nntp provides NNTP command implementations for go-pugleaf.
 
 import (
+	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -28,27 +32,52 @@ var MaxReadLinesXover int64 = 100 // XOVER command typically retrieves overview 
 // MaxReadLinesBody Maximum lines for BODY command, which retrieves the body of an article
 const MaxReadLinesBody = MaxReadLinesArticle - MaxReadLinesHeaders
 
+// ErrResponseTooLarge is returned when a multi-line response exceeds its octet
+// budget (BackendConfig.MaxArticleResponseBytes / MaxListResponseBytes) or an
+// XHDR stream returns more lines than articles were requested. The connection
+// is unusable afterwards and is force-closed.
+var ErrResponseTooLarge = errors.New("nntp: response too large")
+
+// authRequiredErr is the client's error for a 480 on a reader command: it wraps
+// ErrAuthRequired (errors.Is works through the pool's %w wrapping) and keeps the
+// command and the server's line. A 480 after a successful login means the server
+// dropped the login (timed out, or the account changed); the pool closes that
+// connection and the next Get dials and authenticates again. Before this every
+// command but GROUP returned a plain error, so a caller could not tell an expired
+// login from any other failure (plan fetcher-hostile-peer).
+func authRequiredErr(cmd string, code int, message string) error {
+	return fmt.Errorf("%w: %s: %d %s", ErrAuthRequired, cmd, code, strings.TrimSpace(message))
+}
+
+// ErrNoArticlesInRange is wrapped into the XOver error when the server answers
+// 423 (RFC 3977 §8.3.2: no articles in that range). The response line was read
+// completely; callers may treat the range as empty.
+var ErrNoArticlesInRange = errors.New("no articles in range")
+
 // StatArticle checks if an article exists on the server
 func (c *BackendConn) StatArticle(messageID string) (bool, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := validMessageIDArg(messageID); err != nil {
+		return false, err
+	}
+	c.mux.Lock()
+	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return false, fmt.Errorf("not connected")
 	}
 
 	c.lastUsed = time.Now()
 
-	id, err := c.textConn.Cmd("STAT %s", messageID)
+	id, err := c.sendCmd("STAT %s", messageID)
 	if err != nil {
 		return false, fmt.Errorf("failed to send STAT command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, _, err := c.textConn.ReadCodeLine(223)
-	if err != nil {
+	code, _, err := c.TextConn.ReadCodeLine(223)
+	if err != nil && code == 0 {
 		return false, fmt.Errorf("failed to read STAT response: %w", err)
 	}
 
@@ -57,6 +86,8 @@ func (c *BackendConn) StatArticle(messageID string) (bool, error) {
 		return true, nil
 	case NoSuchArticle, DMCA:
 		return false, nil
+	case AuthRequired:
+		return false, authRequiredErr("STAT "+messageID, code, "")
 	default:
 		return false, fmt.Errorf("unexpected STAT response: %d", code)
 	}
@@ -64,48 +95,45 @@ func (c *BackendConn) StatArticle(messageID string) (bool, error) {
 
 // GetArticle retrieves a complete article from the server
 func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Article, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if messageID == nil {
+		return nil, fmt.Errorf("%w: nil message-id", ErrInvalidCommandArg)
+	}
+	if err := validMessageIDArg(*messageID); err != nil {
+		return nil, err
+	}
+	c.mux.Lock()
+	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
 	c.lastUsed = time.Now()
-	/*
-		// Set a per-operation timeout (10 seconds for article retrieval)
-		if err := c.conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
-			return nil, fmt.Errorf("failed to set read deadline: %w", err)
-		}
-		defer func() {
-			// Clear the deadline when operation completes
-			if c.conn != nil {
-				c.conn.SetReadDeadline(time.Time{})
-			}
-		}()
-	*/
-	id, err := c.textConn.Cmd("ARTICLE %s", *messageID)
+	id, err := c.sendCmd("ARTICLE %s", *messageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send ARTICLE '%s' command: %w", *messageID, err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(ArticleFollows)
+	code, message, err := c.TextConn.ReadCodeLine(ArticleFollows)
 	if err != nil && code == 0 {
 		log.Printf("[ERROR] failed to read ARTICLE '%s' code=%d message='%s' err: %v", *messageID, code, message, err)
-		return nil, fmt.Errorf("failed to read ARTICLE '%s' code=%d message='%s' err: %v", *messageID, code, message, err)
+		return nil, fmt.Errorf("failed to read ARTICLE '%s' code=%d message='%s' err: %w", *messageID, code, message, err)
 	}
 
 	if code != ArticleFollows {
 		switch code {
 		case NoSuchArticle:
-			log.Printf("[BECONN] GetArticle: not found: '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
+			// ---> internal/nntp/nntp-backend-pool.go:158
+			//log.Printf("[BECONN] GetArticle: not found: '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
 			return nil, ErrArticleNotFound
 		case DMCA:
 			log.Printf("[BECONN] GetArticle: removed (DMCA): '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
 			return nil, ErrArticleRemoved
+		case AuthRequired:
+			return nil, authRequiredErr("ARTICLE "+*messageID, code, message)
 		default:
 			return nil, fmt.Errorf("unexpected ARTICLE '%s' code=%d message='%s' err='%v'", *messageID, code, message, err)
 		}
@@ -128,25 +156,28 @@ func (c *BackendConn) GetArticle(messageID *string, bulkmode bool) (*models.Arti
 
 // GetHead retrieves only the headers of an article
 func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := validMessageIDArg(messageID); err != nil {
+		return nil, err
+	}
+	c.mux.Lock()
+	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
 	c.lastUsed = time.Now()
 
-	id, err := c.textConn.Cmd("HEAD %s", messageID)
+	id, err := c.sendCmd("HEAD %s", messageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send HEAD command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(HeadFollows)
-	if err != nil {
+	code, message, err := c.TextConn.ReadCodeLine(HeadFollows)
+	if err != nil && code == 0 {
 		return nil, fmt.Errorf("failed to read HEAD response: %w", err)
 	}
 
@@ -158,6 +189,8 @@ func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
 		case DMCA:
 			log.Printf("[INFO] head removed (DMCA): %s", messageID)
 			return nil, ErrArticleRemoved
+		case AuthRequired:
+			return nil, authRequiredErr("HEAD "+messageID, code, message)
 		default:
 			return nil, fmt.Errorf("unexpected HEAD response: %d %s", code, message)
 		}
@@ -184,25 +217,28 @@ func (c *BackendConn) GetHead(messageID string) (*models.Article, error) {
 
 // GetBody retrieves only the body of an article
 func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := validMessageIDArg(messageID); err != nil {
+		return nil, err
+	}
+	c.mux.Lock()
+	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
 	c.lastUsed = time.Now()
 
-	id, err := c.textConn.Cmd("BODY %s", messageID)
+	id, err := c.sendCmd("BODY %s", messageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send BODY command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(BodyFollows)
-	if err != nil {
+	code, message, err := c.TextConn.ReadCodeLine(BodyFollows)
+	if err != nil && code == 0 {
 		return nil, fmt.Errorf("failed to read BODY response: %w", err)
 	}
 
@@ -214,6 +250,8 @@ func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
 		case DMCA:
 			log.Printf("[INFO] body removed (DMCA): %s", messageID)
 			return nil, ErrArticleRemoved
+		case AuthRequired:
+			return nil, authRequiredErr("BODY "+messageID, code, message)
 		default:
 			return nil, fmt.Errorf("unexpected BODY response: %d %s", code, message)
 		}
@@ -232,25 +270,28 @@ func (c *BackendConn) GetBody(messageID string) ([]byte, error) {
 
 // ListGroups retrieves a list of available newsgroups
 func (c *BackendConn) ListGroups() ([]GroupInfo, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mux.Lock()
+	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
 	c.lastUsed = time.Now()
 
-	id, err := c.textConn.Cmd("LIST")
+	id, err := c.sendCmd("LIST")
 	if err != nil {
 		return nil, fmt.Errorf("failed to send LIST command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(215)
+	code, message, err := c.TextConn.ReadCodeLine(215)
 	if err != nil {
+		if code == AuthRequired {
+			return nil, authRequiredErr("LIST", code, message)
+		}
 		return nil, fmt.Errorf("failed to read LIST response: %w", err)
 	}
 
@@ -267,92 +308,11 @@ func (c *BackendConn) ListGroups() ([]GroupInfo, error) {
 	// Parse group information
 	var groups = make([]GroupInfo, 0, len(lines))
 	for _, line := range lines {
-		group, err := c.parseGroupLine(line)
+		group, err := ParseGroupLine(line)
 		if err != nil {
 			continue // Skip malformed lines
 		}
 		groups = append(groups, group)
-	}
-
-	return groups, nil
-}
-
-// ListGroupsLimited retrieves a limited number of newsgroups for testing
-func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.connected {
-		return nil, fmt.Errorf("not connected")
-	}
-
-	c.lastUsed = time.Now()
-
-	id, err := c.textConn.Cmd("LIST")
-	if err != nil {
-		return nil, fmt.Errorf("failed to send LIST command: %w", err)
-	}
-
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
-
-	code, message, err := c.textConn.ReadCodeLine(215)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read LIST response: %w", err)
-	}
-
-	if code != 215 {
-		return nil, fmt.Errorf("unexpected LIST response: %d %s", code, message)
-	}
-
-	// Read the group list with limit
-	var groups []GroupInfo
-	lineCount := 0
-
-	for {
-		if lineCount >= maxGroups {
-			c.conn.Close() // Close connection on limit reached
-			c.conn = nil
-			log.Printf("Connection reached maximum group limit: %d", maxGroups)
-			break
-		}
-
-		line, err := c.textConn.ReadLine()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read group list: %w", err)
-		}
-
-		// Check for end marker
-		if line == "." {
-			break
-		}
-
-		// Handle dot-stuffing
-		if strings.HasPrefix(line, "..") {
-			line = line[1:]
-		}
-
-		// Parse group information
-		group, err := c.parseGroupLine(line)
-		if err != nil {
-			continue // Skip malformed lines
-		}
-
-		groups = append(groups, group)
-		lineCount++
-	}
-
-	// Read remaining lines until end marker if we hit the limit
-	if lineCount >= maxGroups {
-		for {
-			line, err := c.textConn.ReadLine()
-			if err != nil {
-				break
-			}
-			if line == DOT {
-				break
-			}
-		}
 	}
 
 	return groups, nil
@@ -360,33 +320,32 @@ func (c *BackendConn) ListGroupsLimited(maxGroups int) ([]GroupInfo, error) {
 
 // SelectGroup selects a newsgroup for operation
 func (c *BackendConn) SelectGroup(groupName string) (*GroupInfo, int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := validGroupArg(groupName); err != nil {
+		return nil, 0, err
+	}
+	c.mux.Lock()
+	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, 0, fmt.Errorf("not connected")
 	}
 
 	c.lastUsed = time.Now()
 
-	id, err := c.textConn.Cmd("GROUP %s", groupName)
+	id, err := c.sendCmd("GROUP %s", groupName)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to send GROUP '%s' command: %w", groupName, err)
+		return nil, 0, err
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(211)
+	code, message, err := c.TextConn.ReadCodeLine(211)
 	if err != nil {
-		return nil, code, fmt.Errorf("failed to read GROUP '%s' response: %w", groupName, err)
-	}
-
-	if code != 211 {
-		return nil, code, fmt.Errorf(
-			"group selection failed: expected code 211, got %d - response: %s group %s",
-			code, message, groupName,
-		)
+		if code != 411 {
+			log.Printf("[ERROR] failed to read GROUP '%s' code=%d message='%s' err: %v", groupName, code, message, err)
+		}
+		return nil, code, err
 	}
 
 	// Parse group information from response
@@ -431,13 +390,19 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 	if groupName == "" {
 		return nil, fmt.Errorf("error XOver: group name is required")
 	}
+	if err := validGroupArg(groupName); err != nil {
+		return nil, err
+	}
 	//log.Printf("XOver group '%s' start=%d end=%d", groupName, start, end)
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 	groupInfo, code, err := c.SelectGroup(groupName)
-	if err != nil && code != 411 {
-		return nil, fmt.Errorf("failed to select group '%s': cdeo=%d err=%w", groupName, code, err)
+	if err != nil {
+		if code == 411 {
+			return nil, fmt.Errorf("XOVER group '%s': %w", groupName, ErrNewsgroupNotFound)
+		}
+		return nil, fmt.Errorf("failed to select group '%s': code=%d err=%w", groupName, code, err)
 	}
 	_ = groupInfo // groupInfo is not used further, but we keep it for clarity
 	c.lastUsed = time.Now()
@@ -449,23 +414,32 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 
 	var id uint
 	if end > 0 {
-		id, err = c.textConn.Cmd("XOVER %d-%d", start, end)
+		id, err = c.sendCmd("XOVER %d-%d", start, end)
 	} else {
-		id, err = c.textConn.Cmd("XOVER %d", start)
+		id, err = c.sendCmd("XOVER %d", start)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to send XOVER command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(224)
+	code, message, err := c.TextConn.ReadCodeLine(224)
 	if err != nil {
+		if code == 423 {
+			return nil, fmt.Errorf("failed to read XOVER response: %w: %w", err, ErrNoArticlesInRange)
+		}
+		if code == AuthRequired {
+			return nil, authRequiredErr("XOVER", code, message)
+		}
 		return nil, fmt.Errorf("failed to read XOVER response: %w", err)
 	}
 
 	if code != 224 {
+		if code == 423 {
+			return nil, fmt.Errorf("XOVER failed: %d %s: %w", code, message, ErrNoArticlesInRange)
+		}
 		return nil, fmt.Errorf("XOVER failed: %d %s", code, message)
 	}
 
@@ -493,15 +467,24 @@ func (c *BackendConn) XOver(groupName string, start, end int64, enforceLimit boo
 
 // XHdr retrieves specific header field for a range of articles
 // Automatically limits to max 1000 articles to prevent SQLite overload
-func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]*HeaderLine, error) {
-	c.mu.Lock()
-	if !c.connected {
-		c.mu.Unlock()
+func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]HeaderLine, error) {
+	if err := validGroupArg(groupName); err != nil {
+		return nil, err
+	}
+	if err := validTokenArg(field, false); err != nil {
+		return nil, fmt.Errorf("XHDR field: %w", err)
+	}
+	c.mux.Lock()
+	if !c.IsConnected() {
+		c.mux.Unlock()
 		return nil, fmt.Errorf("not connected")
 	}
-	c.mu.Unlock()
+	c.mux.Unlock()
 	groupInfo, code, err := c.SelectGroup(groupName)
-	if err != nil && code != 411 {
+	if err != nil {
+		if code == 411 {
+			return nil, fmt.Errorf("XHDR group '%s': %w", groupName, ErrNewsgroupNotFound)
+		}
 		return nil, fmt.Errorf("failed to select group '%s': code=%d err=%w", groupName, code, err)
 	}
 	_ = groupInfo // groupInfo is not used further, but we keep it for clarity
@@ -514,19 +497,22 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]*Header
 	log.Printf("XHdr group '%s' field '%s' start=%d end=%d", groupName, field, start, end)
 	var id uint
 	if end > 0 {
-		id, err = c.textConn.Cmd("XHDR %s %d-%d", field, start, end)
+		id, err = c.sendCmd("XHDR %s %d-%d", field, start, end)
 	} else {
-		id, err = c.textConn.Cmd("XHDR %s %d", field, start)
+		id, err = c.sendCmd("XHDR %s %d", field, start)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to send XHDR command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(221)
+	code, message, err := c.TextConn.ReadCodeLine(221)
 	if err != nil {
+		if code == AuthRequired {
+			return nil, authRequiredErr("XHDR", code, message)
+		}
 		return nil, fmt.Errorf("failed to read XHDR response: %w", err)
 	}
 
@@ -541,13 +527,15 @@ func (c *BackendConn) XHdr(groupName, field string, start, end int64) ([]*Header
 	}
 
 	// Parse header lines
-	var headers = make([]*HeaderLine, 0, len(lines))
+	var headers = make([]HeaderLine, 0, len(lines))
 	for _, line := range lines {
 		header, err := c.parseHeaderLine(line)
 		if err != nil {
 			continue // Skip malformed lines
 		}
-		headers = append(headers, header)
+		if header.ArticleNum > 0 {
+			headers = append(headers, header)
+		}
 	}
 
 	return headers, nil
@@ -568,8 +556,16 @@ func (c *BackendConn) WantShutdown(shutdownChan <-chan struct{}) bool {
 }
 
 // XHdrStreamed performs XHDR command and streams results line by line through a channel
-// Fetches max 1000 hdrs and starts a new fetch if the channel is less than 10% capacity
-func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
+// Fetches max 1000 hdrs and starts a new fetch if the channel is less than 10% capacity.
+// xhdrChan is always closed when it returns; a panic is turned into an error.
+func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) (err error) {
+	defer close(xhdrChan)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[NNTP-CLIENT] XHdrStreamed panic ng='%s': %v", groupName, r)
+			err = fmt.Errorf("XHdrStreamed panic: %v", r)
+		}
+	}()
 	channelCap := cap(xhdrChan)
 	lowWaterMark := channelCap / 10 // 10% threshold
 	if lowWaterMark < 1 {
@@ -581,7 +577,6 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 	for currentStart <= end {
 		// Check for shutdown signal
 		if c.WantShutdown(shutdownChan) {
-			close(xhdrChan)
 			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
 			return fmt.Errorf("shutdown requested")
 		}
@@ -590,7 +585,6 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 		for len(xhdrChan) > lowWaterMark {
 			time.Sleep(time.Duration(isleep) * time.Millisecond)
 			if c.WantShutdown(shutdownChan) {
-				close(xhdrChan)
 				log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
 				return fmt.Errorf("shutdown requested")
 			}
@@ -604,9 +598,7 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 
 		// Fetch this batch
 		startStream := time.Now()
-		err := c.XHdrStreamedBatch(groupName, field, currentStart, batchEnd, xhdrChan, shutdownChan)
-		if err != nil {
-			close(xhdrChan) // Close on error
+		if err := c.XHdrStreamedBatch(groupName, field, currentStart, batchEnd, xhdrChan, shutdownChan); err != nil {
 			return fmt.Errorf("XHdrStreamedBatch failed for range %d-%d: %w", currentStart, batchEnd, err)
 		}
 		isleep = time.Since(startStream).Milliseconds() / 2
@@ -619,22 +611,29 @@ func (c *BackendConn) XHdrStreamed(groupName, field string, start, end int64, xh
 
 	}
 
-	// Close channel when all batches are complete
-	close(xhdrChan)
-	return nil
+	return nil // the deferred close ends the stream
 }
 
 // XHdrStreamedBatch performs XHDR command and streams results line by line through a channel
-func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- *HeaderLine, shutdownChan <-chan struct{}) error {
-	c.mu.Lock()
-	if !c.connected {
-		c.mu.Unlock()
+func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int64, xhdrChan chan<- HeaderLine, shutdownChan <-chan struct{}) error {
+	if err := validGroupArg(groupName); err != nil {
+		return err
+	}
+	if err := validTokenArg(field, false); err != nil {
+		return fmt.Errorf("XHDR field: %w", err)
+	}
+	c.mux.Lock()
+	if !c.IsConnected() {
+		c.mux.Unlock()
 		return fmt.Errorf("not connected")
 	}
-	c.mu.Unlock()
+	c.mux.Unlock()
 
 	groupInfo, code, err := c.SelectGroup(groupName)
-	if err != nil && code != 411 {
+	if err != nil || groupInfo == nil {
+		if code == 411 {
+			return fmt.Errorf("XHDR group '%s': %w", groupName, ErrNewsgroupNotFound)
+		}
 		return fmt.Errorf("failed to select group '%s': code=%d err=%w", groupName, code, err)
 	}
 	if end > groupInfo.Last {
@@ -649,18 +648,23 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 	}
 	//log.Printf("XHdrStreamed group '%s' field '%s' start=%d end=%d", groupName, field, start, end)
 
+	// The server may not return more lines than articles requested (A-nntp-client-1).
+	maxLines := int64(1)
 	var id uint
 	if end > 0 {
-		id, err = c.textConn.Cmd("XHDR %s %d-%d", field, start, end)
+		id, err = c.sendCmd("XHDR %s %d-%d", field, start, end)
+		if end >= start {
+			maxLines = end - start + 1
+		}
 	} else {
-		id, err = c.textConn.Cmd("XHDR %s %d-%d", field, start, start)
+		id, err = c.sendCmd("XHDR %s %d-%d", field, start, start)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to send XHDR command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
 	// Check for shutdown before reading initial response
 	if c.WantShutdown(shutdownChan) {
@@ -668,8 +672,11 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 		return fmt.Errorf("shutdown requested")
 	}
 
-	code, message, err := c.textConn.ReadCodeLine(221)
+	code, message, err := c.TextConn.ReadCodeLine(221)
 	if err != nil {
+		if code == AuthRequired {
+			return authRequiredErr("XHDR", code, message)
+		}
 		return fmt.Errorf("failed to read XHDR response: %w", err)
 	}
 
@@ -677,26 +684,32 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 		return fmt.Errorf("XHDR failed: ng: '%s' %d %s", groupName, code, message)
 	}
 
-	// Read multiline response line by line and send to channel immediately
+	// Read multiline response line by line and send to channel immediately.
+	// Every error return leaves the response unread: the pool wrapper
+	// force-closes the connection on any error.
+	var lineCount int64
 	for {
 		// Check for shutdown signal between reads
 		if c.WantShutdown(shutdownChan) {
-			c.conn.Close() // Close connection on shutdown
-			c.conn = nil
 			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
 			return fmt.Errorf("shutdown requested")
 		}
 
-		line, err := c.textConn.ReadLine()
+		line, err := c.TextConn.ReadLine()
 		if err != nil {
+			// a cut-off stream is an error, not a complete result
 			log.Printf("[ERROR] XHdrStreamed read error ng: '%s' err='%v'", groupName, err)
-			// EOF or error, finish streaming
-			break
+			return fmt.Errorf("XHDR stream ng '%s': %w", groupName, err)
 		}
 
 		// Check for end marker
 		if line == DOT {
 			break
+		}
+
+		lineCount++
+		if lineCount > maxLines {
+			return fmt.Errorf("%w: XHDR returned more lines than requested (%d) ng '%s'", ErrResponseTooLarge, maxLines, groupName)
 		}
 
 		// Parse the header line
@@ -705,10 +718,11 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 			log.Printf("[ERROR] XHdrStreamed parse error ng: '%s' err='%v'", groupName, parseErr)
 			continue // Skip malformed lines
 		}
+		if header.ArticleNum <= 0 {
+			continue // Skip invalid article numbers (A-nntp-client-7)
+		}
 
 		if c.WantShutdown(shutdownChan) {
-			c.conn.Close() // Close connection on shutdown
-			c.conn = nil
 			log.Printf("XHdrStreamed: Worker received shutdown signal, stopping")
 			return fmt.Errorf("shutdown requested")
 		}
@@ -722,10 +736,13 @@ func (c *BackendConn) XHdrStreamedBatch(groupName, field string, start, end int6
 
 // ListGroup retrieves article numbers for a specific group
 func (c *BackendConn) ListGroup(groupName string, start, end int64) ([]int64, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := validGroupArg(groupName); err != nil {
+		return nil, err
+	}
+	c.mux.Lock()
+	defer c.mux.Unlock()
 
-	if !c.connected {
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 
@@ -734,19 +751,22 @@ func (c *BackendConn) ListGroup(groupName string, start, end int64) ([]int64, er
 	var id uint
 	var err error
 	if start > 0 && end > 0 {
-		id, err = c.textConn.Cmd("LISTGROUP %s %d-%d", groupName, start, end)
+		id, err = c.sendCmd("LISTGROUP %s %d-%d", groupName, start, end)
 	} else {
-		id, err = c.textConn.Cmd("LISTGROUP %s", groupName)
+		id, err = c.sendCmd("LISTGROUP %s", groupName)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to send LISTGROUP command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id) // Always clean up response state
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id) // Always clean up response state
 
-	code, message, err := c.textConn.ReadCodeLine(211)
+	code, message, err := c.TextConn.ReadCodeLine(211)
 	if err != nil {
+		if code == AuthRequired {
+			return nil, authRequiredErr("LISTGROUP", code, message)
+		}
 		return nil, fmt.Errorf("failed to read LISTGROUP response: %w", err)
 	}
 
@@ -777,10 +797,33 @@ func (c *BackendConn) ListGroup(groupName string, start, end int64) ([]int64, er
 	return articleNums, nil
 }
 
+// responseBudget returns the octet budget of a multi-line response of kind src
+// (readMultilineResponse): article/headers/body use MaxArticleResponseBytes,
+// everything else MaxListResponseBytes. 0 selects the default, a negative
+// value means unlimited (returned as 0).
+func (c *BackendConn) responseBudget(src string) int64 {
+	var v, def int64
+	switch src {
+	case "article", "headers", "body":
+		v, def = c.Backend.MaxArticleResponseBytes, DefaultClientMaxArticleBytes
+	default:
+		v, def = c.Backend.MaxListResponseBytes, DefaultClientMaxListBytes
+	}
+	switch {
+	case v == 0:
+		return def
+	case v < 0:
+		return 0
+	}
+	return v
+}
+
 // readMultilineResponse reads a multi-line response ending with "."
 func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 	var lines []string
 	lineCount := 0
+	budget := c.responseBudget(src) // 0: unlimited
+	var total int64
 	maxReadLines := MaxReadLines // Use the constant defined in your package
 
 	switch src {
@@ -821,18 +864,30 @@ func (c *BackendConn) readMultilineResponse(src string) ([]string, error) {
 	for {
 		if lineCount >= maxReadLines {
 			c.conn.Close() // Close connection on limit reached
-			c.conn = nil
-			return nil, fmt.Errorf("too many lines in response (limit: %d)", maxReadLines)
+			c.forceClose = true
+			return nil, fmt.Errorf("%w: too many lines in response (limit: %d)", ErrResponseTooLarge, maxReadLines)
 		}
 
-		line, err := c.textConn.ReadLine()
+		line, err := c.TextConn.ReadLine()
 		if err != nil {
+			if errors.Is(err, ErrResponseLineTooLong) {
+				c.forceClose = true // a limit was exceeded: never reuse this connection
+			}
 			return nil, err
 		}
 
 		// Check for end marker
 		if line == "." {
 			break
+		}
+
+		total += int64(len(line)) + 2 // CRLF
+		if budget > 0 && total > budget {
+			if c.conn != nil {
+				_ = c.conn.Close() // Close connection on limit reached
+			}
+			c.forceClose = true
+			return nil, fmt.Errorf("%w: %s response over %d bytes", ErrResponseTooLarge, src, budget)
 		}
 
 		// Handle dot-stuffing (lines starting with .. become .)
@@ -872,10 +927,12 @@ func ParseLegacyArticleLines(messageID string, lines []string, bulkmode bool) (*
 		return nil, err
 	}
 
+	// RFC 3977 §8.1.1 :bytes: the whole article with CRLF line ends (also for an empty body)
+	article.Bytes = common.WireArticleSize(lines[:bodyStart-1], lines[bodyStart:])
+
 	// Parse article
 	if bodyStart < len(lines) {
 		article.BodyText = strings.Join(lines[bodyStart:], "\n")
-		article.Bytes = len(article.BodyText)
 		article.Lines = len(lines) - bodyStart
 		if !bulkmode {
 			// original body lines for peering
@@ -883,12 +940,12 @@ func ParseLegacyArticleLines(messageID string, lines []string, bulkmode bool) (*
 			article.NNTPbody = lines[bodyStart:]
 		}
 	}
-	article.Subject = getHeaderFirst(article.Headers, "subject")
-	article.FromHeader = getHeaderFirst(article.Headers, "from")
-	article.Path = getHeaderFirst(article.Headers, "path")
-	article.References = getHeaderFirst(article.Headers, "references")
+	article.Subject = common.GetHeaderFirst(article.Headers, "subject")
+	article.FromHeader = common.GetHeaderFirst(article.Headers, "from")
+	article.Path = common.GetHeaderFirst(article.Headers, "path")
+	article.References = common.GetHeaderFirst(article.Headers, "references")
 	article.RefSlice = utils.ParseReferences(article.References) // capture all references for thread chain analysis
-	article.DateString = getHeaderFirst(article.Headers, "date")
+	article.DateString = common.GetHeaderFirst(article.Headers, "date")
 	return article, nil
 }
 
@@ -953,7 +1010,7 @@ func ParseHeaders(article *models.Article, headerLines []string) error {
 }
 
 // parseGroupLine parses a single line from LIST command response
-func (c *BackendConn) parseGroupLine(line string) (GroupInfo, error) {
+func ParseGroupLine(line string) (GroupInfo, error) {
 	// Format: "group last first posting"
 	parts := strings.Fields(line)
 	if len(parts) < 4 {
@@ -981,6 +1038,7 @@ func (c *BackendConn) parseGroupLine(line string) (GroupInfo, error) {
 		First:     first,
 		Last:      last,
 		PostingOK: postingOK,
+		Status:    parts[3],
 	}, nil
 }
 
@@ -992,7 +1050,10 @@ func (c *BackendConn) parseOverviewLine(line string) (OverviewLine, error) {
 		return OverviewLine{}, fmt.Errorf("malformed XOVER line: %s", line)
 	}
 
-	articleNum, _ := strconv.ParseInt(parts[0], 10, 64)
+	articleNum, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || articleNum <= 0 {
+		return OverviewLine{}, fmt.Errorf("invalid article number in XOVER line: %q", parts[0])
+	}
 	bytes, _ := strconv.ParseInt(parts[6], 10, 64)
 	lines := int64(0)
 	if len(parts) > 7 {
@@ -1013,376 +1074,455 @@ func (c *BackendConn) parseOverviewLine(line string) (OverviewLine, error) {
 
 // parseHeaderLine parses a single XHDR response line
 // Format: articlenum<space>header-value
-func (c *BackendConn) parseHeaderLine(line string) (*HeaderLine, error) {
+func (c *BackendConn) parseHeaderLine(line string) (HeaderLine, error) {
 	parts := strings.SplitN(line, " ", 2)
 	if len(parts) < 2 {
-		return nil, fmt.Errorf("malformed XHDR line: %s", line)
+		return HeaderLine{}, fmt.Errorf("malformed XHDR line: %s", line)
 	}
 
 	articleNum, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		log.Printf("Invalid article number in XHDR line: %q", parts[0])
-		return nil, fmt.Errorf("invalid article number in XHDR line: %q", parts[0])
+		return HeaderLine{}, fmt.Errorf("invalid article number in XHDR line: %q", parts[0])
 	}
-
-	return &HeaderLine{
+	headerline := HeaderLine{
 		ArticleNum: articleNum,
 		Value:      parts[1],
-	}, nil
-}
-
-// CheckResponse represents a response to CHECK command
-type CheckResponse struct {
-	MessageID *string
-	Wanted    bool
-	Code      int
-}
-
-// CheckMultiple sends a CHECK command for multiple message IDs and returns responses
-func (c *BackendConn) CheckMultiple(messageIDs []*string) ([]CheckResponse, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.connected {
-		return nil, fmt.Errorf("not connected")
 	}
+	return headerline, nil
+}
+
+// SendCheckMultiple sends CHECK commands for multiple message IDs without returning responses!
+// Registers each command ID with the demuxer for proper response routing
+func (c *BackendConn) SendCheckMultiple(messageIDs []*string, readCHECKResponsesChan chan *ReadRequest, job *CHTTJob, demuxer *ResponseDemuxer) (checksSent uint64, err error) {
+	c.mux.Lock()
+
+	if !c.IsConnected() {
+		c.mux.Unlock()
+		return 0, fmt.Errorf("not connected")
+	}
+
+	if c.ModeReader {
+		c.mux.Unlock()
+		return 0, fmt.Errorf("cannot check article in reader mode")
+	}
+	c.lastUsed = time.Now()
+	c.mux.Unlock()
 
 	if len(messageIDs) == 0 {
-		return nil, fmt.Errorf("no message IDs provided")
+		return 0, fmt.Errorf("no message IDs provided")
 	}
 
-	c.lastUsed = time.Now()
+	// Reject an invalid message-id before any CHECK of the batch is written
+	// (nntp-transfer drops them when it builds the batch).
+	for _, msgID := range messageIDs {
+		if msgID == nil || *msgID == "" {
+			continue // skipped below
+		}
+		if err := validMessageIDArg(*msgID); err != nil {
+			return 0, fmt.Errorf("CHECK: %w", err)
+		}
+	}
 
-	// Send individual CHECK commands for each message ID (pipelining)
-	commandIds := make([]uint, len(messageIDs))
-	for i, msgID := range messageIDs {
-		id, err := c.textConn.Cmd("CHECK %s", *msgID)
+	//writer := bufio.NewWriter(c.conn)
+	//defer writer.Flush()
+	//log.Printf("Newsgroup: '%s' | SendCheckMultiple commands for %d message IDs", *job.Newsgroup, len(messageIDs))
+
+	for n, msgID := range messageIDs {
+		if msgID == nil || *msgID == "" {
+			log.Printf("Newsgroup: '%s' | Skipping empty message ID in CHECK command", *job.Newsgroup)
+			continue
+		}
+		//log.Printf("Newsgroup: '%s' | CHECK '%s' acquire c.mux.Lock() (%d/%d)", *job.Newsgroup, *msgID, n+1, len(messageIDs))
+		c.mux.Lock()
+		cmdID, err := c.sendCmd("CHECK %s", *msgID)
+		c.mux.Unlock()
 		if err != nil {
-			return nil, fmt.Errorf("failed to send CHECK command for %s: %w", *msgID, err)
+			return checksSent, fmt.Errorf("failed to send CHECK '%s': %w", *msgID, err)
 		}
-		commandIds[i] = id
+
+		checksSent++
+
+		// Register command ID with demuxer as TYPE_CHECK
+		demuxer.RegisterCommand(cmdID, TYPE_CHECK)
+
+		//log.Printf("Newsgroup: '%s' | CHECK sent '%s' (CmdID=%d) pass notify to readResponsesChan=%d", *job.Newsgroup, *msgID, cmdID, len(readCHECKResponsesChan))
+		//readCHECKResponsesChan <- &ReadRequest{CmdID: cmdID, Job: job, MsgID: msgID, N: n + 1, Reqs: len(messageIDs)}
+		readCHECKResponsesChan <- GetReadRequest(cmdID, job, msgID, n+1, len(messageIDs))
+		//log.Printf("Newsgroup: '%s' | CHECK notified response reader '%s' (CmdID=%d) readCHECKResponsesChan=%d", *job.Newsgroup, *msgID, cmdID, len(readCHECKResponsesChan))
 	}
 
-	// Read responses for each CHECK command
-	responses := make([]CheckResponse, 0, len(messageIDs))
-	var outoforder []CheckResponse
-	for i, msgID := range messageIDs {
-		id := commandIds[i]
-		c.textConn.StartResponse(id)
+	// Update job counter with how many CHECK commands were actually sent
+	job.Mux.Lock()
+	job.CheckSentCount += checksSent
+	job.Mux.Unlock()
 
-		// Read response for this CHECK command
-		code, line, err := c.textConn.ReadCodeLine(238)
-		c.textConn.EndResponse(id)
-
-		if code == 0 && err != nil {
-			log.Printf("Failed to read CHECK response for %s: %v", *msgID, err)
-			continue
-		}
-
-		// Parse response line
-		// Format: code <message-id> [message]
-		// 238 <message-id> - article wanted
-		// 431 <message-id> - article not wanted
-		// 438 <message-id> - article not wanted (already have it)
-		// ReadCodeLine returns: code=238, message="<message-id> article wanted"
-		parts := strings.Fields(line)
-		if len(parts) < 1 {
-			log.Printf("Malformed CHECK response: %s", line)
-			continue
-		}
-		if parts[0] != *msgID {
-			log.Printf("Mismatched CHECK response: expected %s, got %s", *msgID, parts[0])
-			outoforder = append(outoforder, CheckResponse{
-				MessageID: &parts[0],
-				Code:      code,
-				Wanted:    code == 238, // 238 means article wanted
-			})
-			continue
-		}
-
-		response := CheckResponse{
-			MessageID: msgID, // First part is the message ID
-			Code:      code,
-			Wanted:    code == 238, // 238 means article wanted
-		}
-
-		responses = append(responses, response)
-	}
-
-	for _, resp := range outoforder {
-		for _, msgID := range messageIDs {
-			if *resp.MessageID == *msgID {
-				responses = append(responses, CheckResponse{
-					MessageID: msgID, // First part is the message ID
-					Code:      resp.Code,
-					Wanted:    resp.Wanted,
-				})
-			}
-		}
-	}
-
-	// Return all responses
-
-	return responses, nil
+	return checksSent, nil
 }
 
-// TakeThisArticle sends an article via TAKETHIS command
-func (c *BackendConn) TakeThisArticle(article *models.Article, nntphostname *string) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.connected {
-		return 0, fmt.Errorf("not connected")
+// transferHeaders builds the header lines of an article for an outbound
+// transfer (TAKETHIS and IHAVE): relay the stored header block where it is
+// complete (RFC 5537 §3.6), rebuild it with ReconstructHeaders where it is
+// incomplete (web posts, rows without headers_json). An error means the
+// article must not be transferred; common.ErrRelayHeadersInvalid marks the
+// unsafe stored blocks the caller skips (the connection stays healthy).
+func transferHeaders(article *models.Article, nntphostname *string, newsgroup string) ([]string, error) {
+	host := ""
+	if nntphostname != nil {
+		host = *nntphostname
 	}
-
-	// Prepare article for transfer
-	headers, err := common.ReconstructHeaders(article, true, nntphostname)
+	var headers []string
+	var err error
+	if article.HeadersJSON != "" {
+		headers, err = common.RelayHeaders(article, host)
+	}
+	if article.HeadersJSON == "" || errors.Is(err, common.ErrRelayHeadersIncomplete) {
+		headers, err = common.ReconstructHeaders(article, true, nntphostname, newsgroup)
+	}
 	if err != nil {
-		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
+		return nil, err
+	}
+	return headers, nil
+}
+
+// IHave offers one article to a transit peer with IHAVE (RFC 3977 §6.3.2), the
+// fallback for peers without streaming (plan transfer-ihave-fallback). Unlike
+// the pipelined CHECK/TAKETHIS path it is synchronous and takes c.mux for the
+// whole exchange, like PostArticleContext: one article, one answer.
+//
+// The returned code is the peer's status; err is nil exactly for the four
+// outcomes the caller counts and decides on:
+//
+//	235 - transferred and accepted
+//	435 - not wanted (the peer has it, or refuses the id; also accepted after
+//	      the article: non-conforming peers answer it there)
+//	436 - transfer failed, try again later (before or after the article)
+//	437 - rejected: do not offer it again (before or after the article)
+//
+// Everything else returns an error: a 480 wraps ErrAuthRequired, 500/501 (no
+// IHAVE), 502 (transfer permission denied) and a MODE READER connection wrap
+// ErrIHaveUnsupported — they leave the connection usable, the caller stops
+// offering articles (it must not reconnect into the same refusal). 480 and the
+// three refusal codes are handled before and after the article: a peer may
+// read the article first and refuse afterwards. An
+// unsafe or incomplete header block is skipped before anything is written
+// (common.ErrRelayHeadersInvalid, ErrInvalidCommandArg; the connection stays
+// connected). A read error, EOF or any other status force-closes the
+// connection: the article may be half-sent and the peer's state is unknown.
+//
+// txBytes is the number of octets of the article handed to the connection (headers,
+// separator, dot-stuffed body and terminator), 0 when nothing was written. A MODE READER
+// connection is refused up front with ErrIHaveUnsupported (innd answers IHAVE with 500
+// there): get the connection with MODE_NONE_MV.
+//
+// Both replies are read with ReadCodeLine(0): the status is never matched against an
+// expected code (that would hide it in a *textproto.Error), so a multi-line reply is
+// the only protocol error left and it force-closes the connection instead of silently
+// leaving its continuation lines in the read buffer.
+func (c *BackendConn) IHave(article *models.Article, nntphostname *string, newsgroup string) (code int, txBytes int, err error) {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	if !c.IsConnected() {
+		return 0, 0, fmt.Errorf("not connected")
+	}
+	if c.ModeReader {
+		// innd hands a MODE READER connection to nnrpd, which has no IHAVE: the
+		// sentinel takes the caller to its "stop the run" path (a reconnect would
+		// meet the same refusal).
+		return 0, 0, fmt.Errorf("%w: IHAVE '%s' on a MODE READER connection: use a transit connection (MODE_NONE_MV)", ErrIHaveUnsupported, article.MessageID)
 	}
 
+	headers, err := transferHeaders(article, nntphostname, newsgroup)
+	if err != nil {
+		if errors.Is(err, common.ErrRelayHeadersInvalid) {
+			log.Printf("[NNTP-CLIENT] Newsgroup: '%s' | skip IHAVE '%s': %v", newsgroup, article.MessageID, err)
+		}
+		return 0, 0, err
+	}
+	// RelayHeaders/ReconstructHeaders reject invalid Message-IDs already; this
+	// guards the command argument itself (skipped, nothing written).
+	if err := validMessageIDArg(article.MessageID); err != nil {
+		log.Printf("[NNTP-CLIENT] Newsgroup: '%s' | skip IHAVE: %v", newsgroup, err)
+		return 0, 0, err
+	}
 	c.lastUsed = time.Now()
 
-	// Send TAKETHIS command
-	id, err := c.textConn.Cmd("TAKETHIS %s", article.MessageID)
+	id, err := c.sendCmd("IHAVE %s", article.MessageID)
+	if errors.Is(err, ErrInvalidCommandArg) {
+		return 0, 0, err // refused before writing: the connection is healthy
+	}
 	if err != nil {
-		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
+		c.ForceCloseConn()
+		return 0, 0, fmt.Errorf("failed to send IHAVE command: %w", err)
 	}
 
-	// Send headers
-	for _, headerLine := range headers {
-		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
-			return 0, fmt.Errorf("failed to write header: %w", err)
-		}
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id)
+
+	// First response: 335 asks for the article, everything else ends here.
+	// ReadCodeLine(0) accepts any status: the switch below decides, and the only
+	// error left is a malformed or multi-line reply.
+	code, line, err := c.TextConn.ReadCodeLine(0)
+	if err != nil && code == 0 {
+		c.ForceCloseConn()
+		return 0, 0, fmt.Errorf("failed to read IHAVE '%s' response: %w", article.MessageID, err)
+	}
+	var perr textproto.ProtocolError // a continuation marker ("335-..."): the reply is not complete
+	if errors.As(err, &perr) {
+		c.ForceCloseConn()
+		return code, 0, fmt.Errorf("malformed IHAVE '%s' response: %w", article.MessageID, err)
+	}
+	switch code {
+	case 335:
+		// send the article below
+	case 435, 436, 437:
+		return code, 0, nil // not wanted / deferred / rejected by id: nothing was written
+	case AuthRequired:
+		return code, 0, authRequiredErr("IHAVE "+article.MessageID, code, line)
+	case 500, 501, 502:
+		return code, 0, fmt.Errorf("%w: %d %s", ErrIHaveUnsupported, code, strings.TrimSpace(line))
+	default:
+		c.ForceCloseConn()
+		return code, 0, fmt.Errorf("unexpected IHAVE '%s' response: %d %s", article.MessageID, code, strings.TrimSpace(line))
 	}
 
-	// Send empty line between headers and body
-	if _, err := c.writer.WriteString(CRLF); err != nil {
-		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
+	// Send headers, separator, body (dot-stuffed, byte-exact) and terminator
+	writer := bufio.NewWriter(c.conn)
+	tx, werr := writeArticleLines(writer, headers, article.BodyText)
+	txBytes += tx
+	if werr != nil {
+		c.ForceCloseConn()
+		return 0, txBytes, fmt.Errorf("failed to write article for IHAVE '%s': %w", article.MessageID, werr)
+	}
+	if werr := writer.Flush(); werr != nil {
+		c.ForceCloseConn()
+		return 0, txBytes, fmt.Errorf("failed to flush article data for IHAVE '%s': %w", article.MessageID, werr)
 	}
 
-	// Send body with proper dot-stuffing
-	// Split body preserving line endings
-	bodyLines := strings.Split(article.BodyText, "\n")
-	for i, line := range bodyLines {
-		// Skip empty last element from trailing \n
-		if i == len(bodyLines)-1 && line == "" {
-			break
-		}
-
-		// Remove trailing \r if present (will add CRLF)
-		line = strings.TrimSuffix(line, "\r")
-
-		// Dot-stuff lines that start with a dot (RFC 977)
-		if strings.HasPrefix(line, ".") {
-			line = "." + line
-		}
-
-		if _, err := c.writer.WriteString(line + CRLF); err != nil {
-			return 0, fmt.Errorf("failed to write body line: %w", err)
-		}
+	// Second response: the peer's verdict on the transferred article (any status,
+	// see the first read).
+	code, line, err = c.TextConn.ReadCodeLine(0)
+	if err != nil && code == 0 {
+		c.ForceCloseConn()
+		return 0, txBytes, fmt.Errorf("failed to read IHAVE '%s' article response: %w", article.MessageID, err)
 	}
-
-	// Send termination line (single dot)
-	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
-		return 0, fmt.Errorf("failed to send article terminator: %w", err)
+	if errors.As(err, &perr) {
+		c.ForceCloseConn()
+		return code, txBytes, fmt.Errorf("malformed IHAVE '%s' article response: %w", article.MessageID, err)
 	}
-
-	// Flush the writer to ensure all data is sent
-	if err := c.writer.Flush(); err != nil {
-		return 0, fmt.Errorf("failed to flush article data: %w", err)
+	switch code {
+	case 235, 435, 436, 437:
+		// accepted / not wanted / deferred / rejected: the caller counts. 435 does
+		// not belong here (RFC 3977 §6.3.2), but peers answer it; treating it as a
+		// broken exchange would requeue the article forever.
+		return code, txBytes, nil
+	case AuthRequired:
+		return code, txBytes, authRequiredErr("IHAVE "+article.MessageID, code, line)
+	case 500, 501, 502:
+		// the peer refuses IHAVE itself, only after reading the article: the same
+		// sentinel as before the article, so the caller stops instead of booking a
+		// connection error and offering the article again forever.
+		return code, txBytes, fmt.Errorf("%w: %d %s", ErrIHaveUnsupported, code, strings.TrimSpace(line))
+	default:
+		c.ForceCloseConn()
+		return code, txBytes, fmt.Errorf("unexpected IHAVE '%s' response after the article: %d %s", article.MessageID, code, strings.TrimSpace(line))
 	}
-
-	// Read TAKETHIS response
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id)
-
-	code, _, err := c.textConn.ReadCodeLine(239) // -1 means any code is acceptable
-	if code == 0 && err != nil {
-		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
-	}
-
-	// Parse response
-	// Format: code <message-id> [message]
-	// 239 <message-id> - article transferred successfully
-	// 439 <message-id> - article transfer failed
-
-	return code, nil
 }
 
-// SendTakeThisArticleStreaming sends TAKETHIS command and article content without waiting for response
+// SendTakeThisArticleStreaming IS UNSAFE! MUST BE LOCKED AND UNLOCKED OUTSIDE FOR THE WHOLE BATCH!!!
+// sends TAKETHIS command and article content without waiting for response
 // Returns command ID for later response reading - used for streaming mode
-func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string) (uint, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// Registers the command ID with the demuxer for proper response routing
+// return value doContinue indicates whether the caller should continue sending more articles
+func (c *BackendConn) SendTakeThisArticleStreaming(article *models.Article, nntphostname *string, newsgroup string, demuxer *ResponseDemuxer, readTAKETHISResponsesChan chan *ReadRequest, job *CHTTJob, n int, reqs int) (cmdID uint, txBytes int, err error, doContinue bool) {
+	//start := time.Now()
+	//c.mux.Lock()
+	//defer c.mux.Unlock()
 
-	if !c.connected {
-		return 0, fmt.Errorf("not connected")
+	if !c.IsConnected() {
+		//c.mux.Unlock()
+		return 0, 0, fmt.Errorf("not connected"), false
 	}
 
-	// Prepare article for transfer
-	headers, err := common.ReconstructHeaders(article, true, nntphostname)
-	if err != nil {
-		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
+	if c.ModeReader {
+		//c.mux.Unlock()
+		return 0, 0, fmt.Errorf("cannot send article in reader mode"), false
 	}
-
 	c.lastUsed = time.Now()
+	//c.mux.Unlock()
 
-	// Send TAKETHIS command
-	id, err := c.textConn.Cmd("TAKETHIS %s", article.MessageID)
+	// Prepare article for transfer (see transferHeaders). Nothing is written
+	// before this decision.
+	var headers []string
+	headers, err = transferHeaders(article, nntphostname, newsgroup)
 	if err != nil {
-		return 0, fmt.Errorf("failed to send TAKETHIS command: %w", err)
-	}
-
-	// Send headers
-	for _, headerLine := range headers {
-		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
-			return 0, fmt.Errorf("failed to write header: %w", err)
+		if errors.Is(err, common.ErrRelayHeadersInvalid) {
+			log.Printf("[NNTP-CLIENT] Newsgroup: '%s' | skip TAKETHIS '%s': %v", newsgroup, article.MessageID, err)
 		}
+		return 0, 0, err, true
+	}
+	// RelayHeaders/ReconstructHeaders reject invalid Message-IDs already; this
+	// guards the command argument itself (skipped, nothing written).
+	if err := validMessageIDArg(article.MessageID); err != nil {
+		log.Printf("[NNTP-CLIENT] Newsgroup: '%s' | skip TAKETHIS: %v", newsgroup, err)
+		return 0, 0, err, true
+	}
+	//writer := bufio.NewWriterSize(c.conn, c.GetBufSize(article.Bytes)) // Slightly larger buffer than article size for headers
+	writer := bufio.NewWriter(c.conn)
+
+	//c.mux.Lock()
+	//defer c.mux.Unlock()
+
+	//startSend := time.Now()
+	// Send TAKETHIS command
+	cmdID, err = c.sendCmd("TAKETHIS %s", article.MessageID)
+	if errors.Is(err, ErrInvalidCommandArg) {
+		return 0, 0, err, true // refused before writing: the connection is healthy
+	}
+	if err != nil {
+		c.ForceCloseConn() // the pipeline is broken (async: the caller holds c.mux)
+		return 0, 0, fmt.Errorf("failed SendTakeThisArticleStreaming command: %w", err), false
 	}
 
-	// Send empty line between headers and body
-	if _, err := c.writer.WriteString(CRLF); err != nil {
-		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
+	// Send headers, separator, body (dot-stuffed, byte-exact) and terminator
+	tx, err := writeArticleLines(writer, headers, article.BodyText)
+	txBytes += tx
+	if err != nil {
+		c.ForceCloseConn()
+		return 0, txBytes, fmt.Errorf("failed to write article SendTakeThisArticleStreaming: %w", err), false
+	}
+	//log.Printf("Newsgroup: '%s' | TAKETHIS sent CmdID=%d '%s' txBytes: %d in %v (sending took: %v) readTAKETHISResponsesChanLen=%d/%d", newsgroup, cmdID, article.MessageID, txBytes, time.Since(start), time.Since(startSend), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
+
+	//startFlush := time.Now()
+	if err := writer.Flush(); err != nil {
+		c.ForceCloseConn()
+		return 0, txBytes, fmt.Errorf("failed to flush article data SendTakeThisArticleStreaming: %w", err), false
 	}
 
-	// Send body with proper dot-stuffing
-	// Split body preserving line endings
-	bodyLines := strings.Split(article.BodyText, "\n")
-	for i, line := range bodyLines {
-		// Skip empty last element from trailing \n
-		if i == len(bodyLines)-1 && line == "" {
-			break
-		}
+	//chanStart := time.Now()
+	// Register command ID with demuxer as TYPE_TAKETHIS (CRITICAL: must match CHECK pattern)
+	demuxer.RegisterCommand(cmdID, TYPE_TAKETHIS)
 
-		// Remove trailing \r if present (will add CRLF)
-		line = strings.TrimSuffix(line, "\r")
-
-		// Dot-stuff lines that start with a dot (RFC 977)
-		if strings.HasPrefix(line, ".") {
-			line = "." + line
-		}
-
-		if _, err := c.writer.WriteString(line + CRLF); err != nil {
-			return 0, fmt.Errorf("failed to write body line: %w", err)
-		}
-	}
-
-	// Send termination line (single dot)
-	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
-		return 0, fmt.Errorf("failed to send article terminator: %w", err)
-	}
-
-	// Flush the writer to ensure all data is sent
-	if err := c.writer.Flush(); err != nil {
-		return 0, fmt.Errorf("failed to flush article data: %w", err)
-	}
-
+	//log.Printf("Newsgroup: '%s' | TAKETHIS flushed CmdID=%d '%s' (flushing took: %v) total time: %v readTAKETHISResponsesChan=%d/%d", newsgroup, cmdID, article.MessageID, time.Since(startFlush), time.Since(start), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
+	// Queue ReadRequest IMMEDIATELY after command (like SendCheckMultiple does at line 1608)
+	//readTAKETHISResponsesChan <- &ReadRequest{CmdID: cmdID, Job: job, MsgID: &article.MessageID, N: 1, Reqs: 1}
+	readTAKETHISResponsesChan <- GetReadRequest(cmdID, job, &article.MessageID, n+1, reqs) // reuse global struct to reduce GC pressure
+	//log.Printf("Newsgroup: '%s' | TAKETHIS notified response reader CmdID=%d '%s' waited %v readTAKETHISResponsesChan=%d/%d", newsgroup, cmdID, article.MessageID, time.Since(chanStart), len(readTAKETHISResponsesChan), cap(readTAKETHISResponsesChan))
 	// Return command ID without reading response (streaming mode)
-	return id, nil
+	return cmdID, txBytes, nil, true
 }
 
-// ReadTakeThisResponseStreaming reads a TAKETHIS response using the command ID
-// Used in streaming mode after all articles have been sent
-func (c *BackendConn) ReadTakeThisResponseStreaming(id uint) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Read TAKETHIS response
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id)
-
-	code, _, err := c.textConn.ReadCodeLine(239)
-	if code == 0 && err != nil {
-		return 0, fmt.Errorf("failed to read TAKETHIS response: %w", err)
-	}
-
-	// Parse response
-	// Format: code <message-id> [message]
-	// 239 <message-id> - article transferred successfully
-	// 439 <message-id> - article transfer failed
-	return code, nil
-}
-
-// PostArticle posts an article using the POST command
+// PostArticle posts an article using the POST command. It is
+// PostArticleContext without a way to interrupt it.
 func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return c.PostArticleContext(context.Background(), article)
+}
 
-	if !c.connected {
+// PostArticleContext posts an article using the POST command. When ctx is
+// done while the command runs (waiting for the 340, sending the article or
+// waiting for the 240), the connection is force-closed: the raw socket is
+// closed, so the blocked Read or Write returns at once instead of after the
+// idle timeout, and the error wraps the context's cause. A deadline in the past
+// would be re-armed by the next deadlineConn.Read; a Close is sticky. The
+// connection is unusable afterwards: ForceCloseConn hands it back to its pool,
+// which frees the slot (a later ForceCloseConn or Pool.Put by the caller is a
+// no-op or closes it again idempotently).
+//
+// A stop that lands after the article was flushed but before the 240 was read
+// may leave the article posted at the provider while the caller sees an error;
+// posting it again later gets the provider's duplicate answer (441).
+func (c *BackendConn) PostArticleContext(ctx context.Context, article *models.Article) (code int, err error) {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	if !c.IsConnected() {
 		return 0, fmt.Errorf("not connected")
+	}
+	if ctx.Err() != nil {
+		return 0, fmt.Errorf("POST not sent: %w", context.Cause(ctx))
+	}
+	if dc := c.dconn; dc != nil {
+		fired := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() {
+			defer close(fired)
+			c.ForceCloseConn() // closing first: never handed out again; its goroutine waits for c.mux
+			_ = dc.Conn.Close()
+		})
+		defer func() {
+			if stop() {
+				return // ctx was not done during the command
+			}
+			<-fired // the close ran or is running: wait, so the caller sees a closed conn
+			if err != nil {
+				err = fmt.Errorf("POST interrupted: %w: %w", context.Cause(ctx), err)
+			}
+		}()
 	}
 	// Prepare article for posting
-	headers, err := common.ReconstructHeaders(article, false, nil)
+	headers, err := common.ReconstructHeaders(article, false, nil, "")
 	if err != nil {
 		return 0, fmt.Errorf("failed to reconstruct headers: %v", err)
 	}
 	c.lastUsed = time.Now()
 
 	// Send POST command
-	id, err := c.textConn.Cmd("POST")
+	id, err := c.sendCmd("POST")
 	if err != nil {
 		return 0, fmt.Errorf("failed to send POST command: %w", err)
 	}
 
-	c.textConn.StartResponse(id)
-	defer c.textConn.EndResponse(id)
-
+	c.TextConn.StartResponse(id)
 	// Read response to POST command
-	code, line, err := c.textConn.ReadCodeLine(340)
-	if err != nil {
+	code, line, err := c.TextConn.ReadCodeLine(340)
+	c.TextConn.EndResponse(id)
+	if err != nil && code == 0 {
 		return code, fmt.Errorf("POST command failed: %s", line)
 	}
+	switch code {
+	case 340:
+		// pass, posted
+
+	case 401:
+		// RFC 3977 §3.2.1: "401 MODE-READER" asks for MODE READER first
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(line)), "MODE-READER") {
+			if err := c.SwitchMode(MODE_READER_MV); err != nil {
+				return code, fmt.Errorf("POST '%s' failed. switching to reader mode failed: %w", article.MessageID, err)
+			}
+
+			// Send POST command again
+			id, err := c.sendCmd("POST")
+			if err != nil {
+				return 0, fmt.Errorf("failed to send POST command: %w", err)
+			}
+			c.TextConn.StartResponse(id)
+			defer c.TextConn.EndResponse(id)
+			// Read response to POST command
+			code, line, err = c.TextConn.ReadCodeLine(340)
+			if err != nil {
+				return code, fmt.Errorf("POST command failed: %s", line)
+			}
+			c.ModeReader = true
+		}
+	}
+
 	if code != 340 {
 		return code, fmt.Errorf("POST command rejected (code %d): %s", code, line)
 	}
 
-	// Send headers using writer (not DotWriter)
-	for _, headerLine := range headers {
-		if _, err := c.writer.WriteString(headerLine + CRLF); err != nil {
-			return 0, fmt.Errorf("failed to write header: %w", err)
-		}
-	}
-
-	// Send empty line between headers and body
-	if _, err := c.writer.WriteString(CRLF); err != nil {
-		return 0, fmt.Errorf("failed to write header/body separator: %w", err)
-	}
-
-	// Send body with proper dot-stuffing (like TakeThisArticle)
-	// Split body preserving line endings
-	bodyLines := strings.Split(article.BodyText, "\n")
-	for i, line := range bodyLines {
-		// Skip empty last element from trailing \n
-		if i == len(bodyLines)-1 && line == "" {
-			break
-		}
-
-		// Remove trailing \r if present (will add CRLF)
-		line = strings.TrimSuffix(line, "\r")
-
-		// Dot-stuff lines that start with a dot (RFC 977)
-		if strings.HasPrefix(line, ".") {
-			line = "." + line
-		}
-
-		if _, err := c.writer.WriteString(line + CRLF); err != nil {
-			return 0, fmt.Errorf("failed to write body line: %w", err)
-		}
-	}
-
-	// Send termination line (single dot)
-	if _, err := c.writer.WriteString(DOT + CRLF); err != nil {
-		return 0, fmt.Errorf("failed to send article terminator: %w", err)
+	// Send headers, separator, body (dot-stuffed, byte-exact) and terminator
+	writer := bufio.NewWriter(c.conn)
+	if _, err := writeArticleLines(writer, headers, article.BodyText); err != nil {
+		return 0, fmt.Errorf("failed to write article: %w", err)
 	}
 
 	// Flush the writer to ensure all data is sent
-	if err := c.writer.Flush(); err != nil {
+	if err := writer.Flush(); err != nil {
 		return 0, fmt.Errorf("failed to flush article data: %w", err)
 	}
 
 	// Read final response
-	code, _, err = c.textConn.ReadCodeLine(240)
+	code, _, err = c.TextConn.ReadCodeLine(240)
 	if err != nil {
 		return code, fmt.Errorf("failed to read POST response: %w", err)
 	}
@@ -1391,4 +1531,146 @@ func (c *BackendConn) PostArticle(article *models.Article) (int, error) {
 	// 240 - article posted successfully
 	// 441 - posting failed
 	return code, nil
+}
+
+// dotStuff returns line with an extra leading "." when it starts with "."
+// (RFC 3977 §3.1.1).
+func dotStuff(line string) string {
+	if strings.HasPrefix(line, ".") {
+		return "." + line
+	}
+	return line
+}
+
+// wireBodyLines splits a stored body into its wire lines: the exact inverse of
+// the parser's strings.Join(lines, "\n"), so a final empty line is kept. One
+// trailing "\r" per line is removed (CRLF is added on the wire). An empty body
+// has no lines.
+func wireBodyLines(body string) []string {
+	if body == "" {
+		return nil
+	}
+	lines := strings.Split(body, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimSuffix(l, "\r")
+	}
+	return lines
+}
+
+// writeArticleLines writes an article in the POST/TAKETHIS wire format: every
+// header line dot-stuffed + CRLF, an empty line, every wireBodyLines(body)
+// line dot-stuffed + CRLF, then "." CRLF. It returns the bytes written into w
+// (the caller flushes).
+func writeArticleLines(w *bufio.Writer, headers []string, body string) (int, error) {
+	total := 0
+	for _, h := range headers {
+		n, err := w.WriteString(dotStuff(h) + CRLF)
+		total += n
+		if err != nil {
+			return total, fmt.Errorf("write header line: %w", err)
+		}
+	}
+	n, err := w.WriteString(CRLF)
+	total += n
+	if err != nil {
+		return total, fmt.Errorf("write header/body separator: %w", err)
+	}
+	for _, l := range wireBodyLines(body) {
+		n, err := w.WriteString(dotStuff(l) + CRLF)
+		total += n
+		if err != nil {
+			return total, fmt.Errorf("write body line: %w", err)
+		}
+	}
+	n, err = w.WriteString(DOT + CRLF)
+	total += n
+	if err != nil {
+		return total, fmt.Errorf("write article terminator: %w", err)
+	}
+	return total, nil
+}
+
+// SwitchMode switches the NNTP connection to a specific mode
+// Supported modes: "reader", "stream"
+func (c *BackendConn) SwitchMode(mode int) error {
+	switch mode {
+	case MODE_NONE_MV:
+		return nil // no switch: IHAVE on a transit connection
+	case MODE_READER_MV:
+		return c.SwitchToModeReader()
+	case MODE_STREAM_MV:
+		return c.SwitchToModeStream()
+	default:
+		return fmt.Errorf("unsupported mode: %d (supported: reader, stream)", mode)
+	}
+}
+
+// SwitchToModeReader switches the connection to MODE READER
+func (c *BackendConn) SwitchToModeReader() error {
+
+	if c.ModeReader {
+		// Already in reader mode
+		return nil
+	}
+
+	c.lastUsed = time.Now()
+
+	// Send MODE READER command
+	id, err := c.sendCmd("MODE READER")
+	if err != nil {
+		return fmt.Errorf("failed to send MODE READER command: %w", err)
+	}
+
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id)
+
+	code, line, err := c.TextConn.ReadCodeLine(200)
+	if code == 0 && err != nil {
+		return fmt.Errorf("failed to read MODE READER response: %w", err)
+	}
+
+	if code < 200 || code > 201 {
+		return fmt.Errorf("set MODE READER failed (code %d): %s", code, line)
+	}
+
+	c.ModeReader = true
+	return nil
+}
+
+// SwitchToModeStream switches the connection to MODE STREAM
+func (c *BackendConn) SwitchToModeStream() error {
+
+	if c.ModeStream {
+		// Already in stream mode
+		return nil
+	}
+	if c.ModeReader {
+		return fmt.Errorf("cannot switch from MODE READER to MODE STREAM on same connection")
+	}
+
+	c.lastUsed = time.Now()
+
+	// Send MODE STREAM command
+	id, err := c.sendCmd("MODE STREAM")
+	if err != nil {
+		return fmt.Errorf("failed to send MODE STREAM command: %w", err)
+	}
+
+	c.TextConn.StartResponse(id)
+	defer c.TextConn.EndResponse(id)
+
+	code, line, err := c.TextConn.ReadCodeLine(203)
+	if err != nil && code == 0 {
+		return fmt.Errorf("failed to read MODE STREAM response: %w", err)
+	}
+
+	if code == 500 || code == 501 {
+		return fmt.Errorf("%w: %d %s", ErrStreamingUnsupported, code, strings.TrimSpace(line))
+	}
+	if code != 203 {
+		return fmt.Errorf("MODE STREAM failed (code %d): %s", code, line)
+	}
+
+	c.ModeStream = true
+	return nil
 }

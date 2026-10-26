@@ -8,25 +8,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-while/go-pugleaf/internal/models"
 )
 
 // adminCreateProvider handles provider creation
-func (s *WebServer) adminCreateProvider(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+func (s *WebServer) adminCreateProvider(c *Context) {
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get form data
 	name := strings.TrimSpace(c.PostForm("name"))
@@ -41,6 +32,7 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 	maxArtSizeStr := strings.TrimSpace(c.PostForm("max_art_size"))
 	enabledStr := c.PostForm("enabled")
 	postingEnabledStr := c.PostForm("posting_enabled")
+	compressStr := c.PostForm("compress")
 
 	// Get proxy form data
 	proxyEnabledStr := c.PostForm("proxy_enabled")
@@ -56,10 +48,11 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
 		return
 	}
-
+	var err error
 	// Parse port
 	port := 119 // Default NNTP port
 	if portStr != "" {
+
 		port, err = strconv.Atoi(portStr)
 		if err != nil || port <= 0 || port > 65535 {
 			session.SetError("Invalid port number")
@@ -110,6 +103,9 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 	// Parse posting enabled status
 	postingEnabled := postingEnabledStr == "on" || postingEnabledStr == "true"
 
+	// Parse COMPRESS DEFLATE (RFC 8054) status
+	compress := compressStr == "on" || compressStr == "true"
+
 	// Parse proxy settings
 	proxyEnabled := proxyEnabledStr == "on" || proxyEnabledStr == "true"
 
@@ -147,9 +143,15 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 	}
 
 	// Check if provider already exists
+	// GetProviderByName returns (nil, nil) when the name is free.
 	res, err := s.DB.GetProviderByName(name)
 	if err != nil {
-		log.Printf("Error checking provider existence: %v res='%v'", err, res)
+		log.Printf("[WEB]: Error checking provider existence for '%s': %v", name, err)
+		session.SetError("Failed to check provider '" + name + "'")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
+		return
+	}
+	if res != nil {
 		session.SetError("Provider already exists '" + name + "'")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
 		return
@@ -169,6 +171,7 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 		MaxArtSize:    maxArtSize,
 		Enabled:       enabled,
 		Posting:       postingEnabled,
+		Compress:      compress,
 		ProxyEnabled:  proxyEnabled,
 		ProxyType:     proxyType,
 		ProxyHost:     proxyHost,
@@ -180,6 +183,7 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 
 	err = s.DB.AddProvider(provider)
 	if err != nil {
+		log.Printf("[WEB]: Error creating provider '%s': %v", name, err)
 		session.SetError("Failed to create provider")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
 		return
@@ -190,20 +194,12 @@ func (s *WebServer) adminCreateProvider(c *gin.Context) {
 }
 
 // adminUpdateProvider handles provider updates
-func (s *WebServer) adminUpdateProvider(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+func (s *WebServer) adminUpdateProvider(c *Context) {
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get form data
 	idStr := strings.TrimSpace(c.PostForm("id"))
@@ -221,6 +217,7 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 	maxArtSizeStr := strings.TrimSpace(c.PostForm("max_art_size"))
 	enabledStr := c.PostForm("enabled")
 	postingEnabledStr := c.PostForm("posting_enabled")
+	compressStr := c.PostForm("compress")
 
 	// Get proxy form data
 	proxyEnabledStr := c.PostForm("proxy_enabled")
@@ -232,9 +229,10 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 	clearProxyUsernameStr := c.PostForm("clear_proxy_username")
 	clearProxyPasswordStr := c.PostForm("clear_proxy_password")
 
-	// Validate required fields
-	if idStr == "" || name == "" || host == "" {
-		session.SetError("Provider ID, name and host are required")
+	// Validate required fields. The name is not required: it cannot be changed
+	// (SetProvider does not write it) and is only checked against the stored one.
+	if idStr == "" || host == "" {
+		session.SetError("Provider ID and host are required")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
 		return
 	}
@@ -300,6 +298,9 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 	// Parse posting enabled status
 	postingEnabled := postingEnabledStr == "on" || postingEnabledStr == "true"
 
+	// Parse COMPRESS DEFLATE (RFC 8054) status
+	compress := compressStr == "on" || compressStr == "true"
+
 	// Parse proxy settings
 	proxyEnabled := proxyEnabledStr == "on" || proxyEnabledStr == "true"
 
@@ -339,18 +340,31 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 	clearPassword := clearPasswordStr == "on" || clearPasswordStr == "true"
 
 	// Get existing provider to preserve current credentials if needed
+	// GetProviderByID returns (nil, nil) for an unknown id.
 	existingProvider, err := s.DB.GetProviderByID(id)
 	if err != nil {
+		log.Printf("[WEB]: Error getting provider %d: %v", id, err)
 		session.SetError("Failed to get existing provider")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
 		return
 	}
+	if existingProvider == nil {
+		session.SetError(fmt.Sprintf("Provider not found (ID %d)", id))
+		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
+		return
+	}
+	if name != "" && name != existingProvider.Name {
+		session.SetError("Provider name cannot be changed ('" + existingProvider.Name + "')")
+		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
+		return
+	}
+	name = existingProvider.Name
 
 	// Handle username: clear if checkbox is checked, otherwise use form value or preserve existing
 	finalUsername := username
 	if clearUsername {
 		finalUsername = ""
-	} else if username == "" && existingProvider != nil {
+	} else if username == "" {
 		finalUsername = existingProvider.Username
 	}
 
@@ -358,7 +372,7 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 	finalPassword := password
 	if clearPassword {
 		finalPassword = ""
-	} else if password == "" && existingProvider != nil {
+	} else if password == "" {
 		finalPassword = existingProvider.Password
 	}
 
@@ -370,7 +384,7 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 	finalProxyUsername := proxyUsername
 	if clearProxyUsername {
 		finalProxyUsername = ""
-	} else if proxyUsername == "" && existingProvider != nil {
+	} else if proxyUsername == "" {
 		finalProxyUsername = existingProvider.ProxyUsername
 	}
 
@@ -378,7 +392,7 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 	finalProxyPassword := proxyPassword
 	if clearProxyPassword {
 		finalProxyPassword = ""
-	} else if proxyPassword == "" && existingProvider != nil {
+	} else if proxyPassword == "" {
 		finalProxyPassword = existingProvider.ProxyPassword
 	}
 
@@ -397,6 +411,7 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 		MaxArtSize:    maxArtSize,
 		Enabled:       enabled,
 		Posting:       postingEnabled,
+		Compress:      compress,
 		ProxyEnabled:  proxyEnabled,
 		ProxyType:     proxyType,
 		ProxyHost:     proxyHost,
@@ -429,6 +444,7 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 
 	err = s.DB.SetProvider(provider)
 	if err != nil {
+		log.Printf("[WEB]: Error updating provider %d: %v", id, err)
 		session.SetError("Failed to update provider")
 		c.Redirect(http.StatusSeeOther, "/admin?tab=providers")
 		return
@@ -439,20 +455,12 @@ func (s *WebServer) adminUpdateProvider(c *gin.Context) {
 }
 
 // adminDeleteProvider handles provider deletion
-func (s *WebServer) adminDeleteProvider(c *gin.Context) {
-	// Check authentication and admin permissions
-	session := s.getWebSession(c)
-	if session == nil {
-		c.Redirect(http.StatusSeeOther, "/login")
+func (s *WebServer) adminDeleteProvider(c *Context) {
+	if !s.requireAdminAuth(c) {
 		return
 	}
 
-	currentUser, err := s.DB.GetUserByID(int64(session.UserID))
-	if err != nil || !s.isAdmin(currentUser) {
-		session.SetError("Access denied")
-		c.Redirect(http.StatusSeeOther, "/profile")
-		return
-	}
+	session := s.getWebSession(c)
 
 	// Get provider ID
 	idStr := strings.TrimSpace(c.PostForm("id"))

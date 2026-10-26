@@ -19,6 +19,24 @@ func main() {
 
 	activeFilesDir := os.Args[1]
 
+	descriptions, err := mergeDescriptionFiles(activeFilesDir)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	// Write merged descriptions to output file
+	outputFile := filepath.Join(activeFilesDir, "newsgroups.descriptions")
+	if err := writeDescriptions(outputFile, descriptions); err != nil {
+		log.Fatalf("Error writing output file: %v", err)
+	}
+
+	log.Printf("Successfully wrote %d newsgroup descriptions to %s", len(descriptions), outputFile)
+}
+
+// mergeDescriptionFiles reads newsgroups.isc.latest first and then the
+// newsgroups.isc.year.* files newest first. The first file that has a group wins,
+// so a newer description is never replaced by an older one.
+func mergeDescriptionFiles(activeFilesDir string) (map[string]string, error) {
 	// Initialize the newsgroup descriptions map
 	descriptions := make(map[string]string)
 
@@ -33,8 +51,10 @@ func main() {
 	// Read all year files and merge missing groups
 	yearFiles, err := filepath.Glob(filepath.Join(activeFilesDir, "newsgroups.isc.year.*"))
 	if err != nil {
-		log.Fatalf("Error finding year files: %v", err)
+		return nil, fmt.Errorf("error finding year files: %w", err)
 	}
+	// Newest year first: Glob sorts ascending, and the first file with a group wins.
+	sort.Sort(sort.Reverse(sort.StringSlice(yearFiles)))
 
 	for _, yearFile := range yearFiles {
 		initialCount := len(descriptions)
@@ -46,14 +66,7 @@ func main() {
 		log.Printf("Read %s: added %d new descriptions (total: %d)",
 			filepath.Base(yearFile), addedCount, len(descriptions))
 	}
-
-	// Write merged descriptions to output file
-	outputFile := filepath.Join(activeFilesDir, "newsgroups.descriptions")
-	if err := writeDescriptions(outputFile, descriptions); err != nil {
-		log.Fatalf("Error writing output file: %v", err)
-	}
-
-	log.Printf("Successfully wrote %d newsgroup descriptions to %s", len(descriptions), outputFile)
+	return descriptions, nil
 }
 
 // readNewsgroupsFile reads a newsgroups file and adds entries to the descriptions map
@@ -121,13 +134,14 @@ func readNewsgroupsFile(filename string, descriptions map[string]string) error {
 }
 
 // writeDescriptions writes the merged descriptions to an output file
-// The output is sorted by newsgroup name for consistency
+// The output is sorted by newsgroup name for consistency.
+// Write, flush and close errors are returned, so a full disk does not leave a
+// silently truncated file behind a success message.
 func writeDescriptions(filename string, descriptions map[string]string) error {
 	file, err := os.Create(filename)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
 	// Sort newsgroup names for consistent output
 	newsgroups := make([]string, 0, len(descriptions))
@@ -137,14 +151,23 @@ func writeDescriptions(filename string, descriptions map[string]string) error {
 	sort.Strings(newsgroups)
 
 	writer := bufio.NewWriter(file)
-	defer writer.Flush()
 
 	// Write each newsgroup and description
 	for _, newsgroup := range newsgroups {
 		description := descriptions[newsgroup]
 		// Use tab separation to match input format
-		fmt.Fprintf(writer, "%s\t%s\n", newsgroup, description)
+		if _, err := fmt.Fprintf(writer, "%s\t%s\n", newsgroup, description); err != nil {
+			_ = file.Close()
+			return fmt.Errorf("write %s: %w", filename, err)
+		}
 	}
 
+	if err := writer.Flush(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("flush %s: %w", filename, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", filename, err)
+	}
 	return nil
 }

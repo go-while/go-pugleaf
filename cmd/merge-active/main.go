@@ -9,9 +9,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/processor"
 )
@@ -51,13 +53,18 @@ func main() {
 	config.AppVersion = appVersion
 
 	// Disable strict group validation to allow legitimate groups with + and _ characters
-	processor.UseStrictGroupValidation = false
+	common.UseStrictGroupValidation = false
 
 	// Command line flags
 	var filterMalformed bool
 	var processOverview bool
+	var activeDir, primaryFile, overviewDir, overviewActive string
 	flag.BoolVar(&filterMalformed, "filter", false, "Filter out malformed group names and write to active.file.new")
-	flag.BoolVar(&processOverview, "overview", false, "Process overview files for groups with <100 messages from ../active_files/local-mode.active")
+	flag.BoolVar(&processOverview, "overview", false, "Process overview files for groups with <100 messages from -overview-active (needs -overview-dir)")
+	flag.StringVar(&activeDir, "dir", "active_files", "Directory with the active files to merge (output: <dir>/"+mergedActiveName+")")
+	flag.StringVar(&primaryFile, "primary", "active.isc", "Primary active file name inside -dir; its entries win")
+	flag.StringVar(&overviewDir, "overview-dir", "", "Directory with <sha256(group)>.overview files (required with -overview)")
+	flag.StringVar(&overviewActive, "overview-active", "", "Active file for -overview (default: <dir>/local-mode.active)")
 	flag.Parse()
 
 	// Handle filter mode
@@ -74,16 +81,19 @@ func main() {
 
 	// Handle overview processing mode
 	if processOverview {
-		if err := processOverviewFiles(); err != nil {
+		if overviewActive == "" {
+			overviewActive = filepath.Join(activeDir, "local-mode.active")
+		}
+		if overviewDir == "" {
+			log.Fatalf("-overview requires -overview-dir <directory with .overview files>")
+		}
+		if err := processOverviewFiles(overviewActive, overviewDir); err != nil {
 			log.Fatalf("Failed to process overview files: %v", err)
 		}
 		return
 	}
 
-	activeDir := "active_files"
-	primaryFile := "active.isc"
-
-	// Check if active_files directory exists
+	// Check if the active files directory exists
 	if _, err := os.Stat(activeDir); os.IsNotExist(err) {
 		log.Fatalf("Active files directory not found: %s", activeDir)
 	}
@@ -98,24 +108,10 @@ func main() {
 	}
 	fmt.Printf("Loaded %d newsgroups from primary file\n", len(primaryMap))
 
-	// Find all other *.active files
-	activeFiles, err := filepath.Glob(filepath.Join(activeDir, "*.active"))
+	// Find all other *.active and active.* files (not the primary, not our own output)
+	activeFiles, err := collectActiveFiles(activeDir, primaryFile)
 	if err != nil {
-		log.Fatalf("Failed to find active files: %v", err)
-	}
-
-	// Also check for other active.* files (not just *.active)
-	otherActiveFiles, err := filepath.Glob(filepath.Join(activeDir, "active.*"))
-	if err != nil {
-		log.Printf("Warning: Failed to find active.* files: %v", err)
-	} else {
-		// Add non-primary active.* files
-		for _, file := range otherActiveFiles {
-			base := filepath.Base(file)
-			if base != primaryFile {
-				activeFiles = append(activeFiles, file)
-			}
-		}
+		log.Fatalf("%v", err)
 	}
 
 	fmt.Printf("Found %d additional active files to process\n", len(activeFiles))
@@ -158,7 +154,7 @@ func main() {
 	}
 
 	// Write merged active file
-	outputPath := filepath.Join(activeDir, "active.merged")
+	outputPath := filepath.Join(activeDir, mergedActiveName)
 	fmt.Printf("Writing merged active file to: %s\n", outputPath)
 
 	if err := writeMergedActiveFile(outputPath, primaryMap); err != nil {
@@ -175,28 +171,81 @@ func main() {
 }
 
 func writeMergedActiveFile(outputPath string, primaryMap ActiveMap) error {
+	if err := writeActiveMap(outputPath, primaryMap, "merged active file"); err != nil {
+		return err
+	}
+	fmt.Printf("Merged active file written successfully: %s\n", outputPath)
+	return nil
+}
+
+// writeActiveMap writes the entries sorted by group name in active file format
+// (<group> <high> <low> <status>) and reports write, flush and close errors.
+func writeActiveMap(outputPath string, activeMap ActiveMap, what string) error {
 	file, err := os.Create(outputPath)
 	if err != nil {
-		return fmt.Errorf("failed to create merged active file: %w", err)
+		return fmt.Errorf("failed to create %s: %w", what, err)
 	}
-	defer file.Close()
+
+	names := make([]string, 0, len(activeMap))
+	for name := range activeMap {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 
 	writer := bufio.NewWriter(file)
-
-	for _, entry := range primaryMap {
+	for _, name := range names {
+		entry := activeMap[name]
 		line := fmt.Sprintf("%s %s %s %s\n", entry.GroupName, entry.HighWater, entry.LowWater, entry.Status)
 		if _, err := writer.WriteString(line); err != nil {
+			_ = file.Close()
 			return fmt.Errorf("failed to write line for group '%s': %w", entry.GroupName, err)
 		}
 	}
 
 	if err := writer.Flush(); err != nil {
-		return fmt.Errorf("failed to flush merged active file: %w", err)
+		_ = file.Close()
+		return fmt.Errorf("failed to flush %s: %w", what, err)
 	}
-
-	fmt.Printf("Merged active file written successfully: %s\n", outputPath)
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close %s: %w", what, err)
+	}
 	return nil
 }
+
+// collectActiveFiles returns the active files in activeDir to merge into the
+// primary file: *.active and active.*, without the primary file itself and
+// without mergedActiveName (the output of a previous run). The list is sorted
+// and has no duplicates.
+func collectActiveFiles(activeDir, primaryFile string) ([]string, error) {
+	activeFiles, err := filepath.Glob(filepath.Join(activeDir, "*.active"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to find active files: %w", err)
+	}
+
+	// Also check for other active.* files (not just *.active)
+	otherActiveFiles, err := filepath.Glob(filepath.Join(activeDir, "active.*"))
+	if err != nil {
+		log.Printf("Warning: Failed to find active.* files: %v", err)
+	} else {
+		activeFiles = append(activeFiles, otherActiveFiles...)
+	}
+
+	seen := make(map[string]bool, len(activeFiles))
+	var out []string
+	for _, file := range activeFiles {
+		base := filepath.Base(file)
+		if base == primaryFile || base == mergedActiveName || seen[file] {
+			continue
+		}
+		seen[file] = true
+		out = append(out, file)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// mergedActiveName is the output file of the default (merge) mode.
+const mergedActiveName = "active.merged"
 
 // loadActiveFile loads an NNTP active file into a map
 // File format: <groupname> <highwater> <lowwater> <status>
@@ -364,24 +413,8 @@ func filterAndWriteCleanFile(inputFile string) error {
 
 // writeCleanActiveFile writes the filtered active file in standard format
 func writeCleanActiveFile(outputPath string, activeMap ActiveMap) error {
-	file, err := os.Create(outputPath)
-	if err != nil {
-		return fmt.Errorf("failed to create clean active file: %w", err)
-	}
-	defer file.Close()
-
-	writer := bufio.NewWriter(file)
-
-	// Write each valid group entry
-	for _, entry := range activeMap {
-		line := fmt.Sprintf("%s %s %s %s\n", entry.GroupName, entry.HighWater, entry.LowWater, entry.Status)
-		if _, err := writer.WriteString(line); err != nil {
-			return fmt.Errorf("failed to write line for group '%s': %w", entry.GroupName, err)
-		}
-	}
-
-	if err := writer.Flush(); err != nil {
-		return fmt.Errorf("failed to flush clean active file: %w", err)
+	if err := writeActiveMap(outputPath, activeMap, "clean active file"); err != nil {
+		return err
 	}
 
 	fmt.Printf("Clean active file written successfully: %s\n", outputPath)
@@ -390,25 +423,8 @@ func writeCleanActiveFile(outputPath string, activeMap ActiveMap) error {
 
 // writeFilteredGroupsFile writes the filtered (invalid) groups to a file for reference
 func writeFilteredGroupsFile(outputPath string, invalidGroups ActiveMap) error {
-	file, err := os.Create(outputPath)
-	if err != nil {
-		return fmt.Errorf("failed to create filtered groups file: %w", err)
-	}
-	defer file.Close()
-
-	writer := bufio.NewWriter(file)
-
-	// Write each filtered group entry with source information
-	for _, entry := range invalidGroups {
-		line := fmt.Sprintf("%s %s %s %s\n",
-			entry.GroupName, entry.HighWater, entry.LowWater, entry.Status)
-		if _, err := writer.WriteString(line); err != nil {
-			return fmt.Errorf("failed to write line for group '%s': %w", entry.GroupName, err)
-		}
-	}
-
-	if err := writer.Flush(); err != nil {
-		return fmt.Errorf("failed to flush filtered groups file: %w", err)
+	if err := writeActiveMap(outputPath, invalidGroups, "filtered groups file"); err != nil {
+		return err
 	}
 
 	fmt.Printf("Filtered groups file written successfully: %s\n", outputPath)
@@ -551,12 +567,11 @@ func printFilteredGroupStatistics(activeMap ActiveMap) {
 		messagesLarger, float64(messagesLarger)/float64(totalMessages)*100)
 }
 
-// processOverviewFiles processes overview files for groups with <100 messages
-func processOverviewFiles() error {
+// processOverviewFiles processes overview files for groups with <100 messages.
+// A group without an overview file is skipped and counted, not fatal.
+func processOverviewFiles(activeFile, overviewDir string) error {
 	fmt.Printf("=== PROCESSING OVERVIEW FILES ===\n")
 
-	// Load the local-mode.active file
-	activeFile := "../active_files/local-mode.active"
 	fmt.Printf("Loading active file: %s\n", activeFile)
 
 	activeMap, err := loadActiveFile(activeFile)
@@ -585,25 +600,22 @@ func processOverviewFiles() error {
 	fmt.Printf("Found %d groups with <100 messages\n", len(smallGroups))
 
 	// Process overview files
-	overviewDir := "/tank0/OV/overview/nntp-server-new"
 	if _, err := os.Stat(overviewDir); os.IsNotExist(err) {
 		return fmt.Errorf("overview directory not found: %s", overviewDir)
 	}
 
 	overviewMap := make(OverviewMap)
 	processedGroups := 0
+	missingFiles := 0
 	totalOverviewEntries := 0
 
 	for groupName := range smallGroups {
-		// Generate SHA256 hash of group name
-		hash := sha256.Sum256([]byte(groupName))
-		hashStr := fmt.Sprintf("%x", hash)
+		overviewFile := overviewFilePath(overviewDir, groupName)
 
-		overviewFile := filepath.Join(overviewDir, hashStr+".overview")
-
-		// Check if overview file exists
+		// Skip (and count) groups without an overview file
 		if _, err := os.Stat(overviewFile); os.IsNotExist(err) {
-			return fmt.Errorf("not found overview ng:'%s' file:'%s'", groupName, overviewFile)
+			missingFiles++
+			continue
 		}
 
 		// Load overview file
@@ -629,6 +641,7 @@ func processOverviewFiles() error {
 	fmt.Printf("=== OVERVIEW PROCESSING COMPLETE ===\n")
 	fmt.Printf("Groups with <100 messages: %d\n", len(smallGroups))
 	fmt.Printf("Overview files processed: %d\n", processedGroups)
+	fmt.Printf("Overview files missing (skipped): %d\n", missingFiles)
 	fmt.Printf("Total overview entries loaded: %d\n", totalOverviewEntries)
 	fmt.Printf("Unique message IDs: %d\n", len(overviewMap))
 
@@ -636,6 +649,12 @@ func processOverviewFiles() error {
 	analyzeDuplicates(overviewMap)
 
 	return nil
+}
+
+// overviewFilePath returns <overviewDir>/<sha256(groupName) hex>.overview.
+func overviewFilePath(overviewDir, groupName string) string {
+	hash := sha256.Sum256([]byte(groupName))
+	return filepath.Join(overviewDir, fmt.Sprintf("%x", hash)+".overview")
 }
 
 // loadOverviewFile loads an overview file and parses the entries

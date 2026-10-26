@@ -2,15 +2,19 @@ package database
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-while/go-pugleaf/internal/config"
 	"github.com/go-while/go-pugleaf/internal/models"
+	"github.com/mattn/go-sqlite3"
 )
 
 var GroupHashMap *GHmap // Global variable for group hash map
@@ -35,8 +39,10 @@ type Database struct {
 	mainDB *sql.DB
 
 	// Per-group database connections (cached)
-	groupDBs   map[string]*GroupDBs // map with open database pointers
-	openDBsNum int                  // Total number of open group databases
+	groupDB    map[string]*GroupDB // map with open database pointers
+	openDBsNum int                 // Total number of open group databases
+	// groupDBsShutdown is set by Shutdown (guarded by MainMutex); GetGroupDB then fails
+	groupDBsShutdown bool
 
 	MainMutex sync.RWMutex
 
@@ -49,10 +55,17 @@ type Database struct {
 	ArticleCache   *ArticleCache   // LRU cache for individual articles
 	NNTPAuthCache  *NNTPAuthCache  // Authentication cache for NNTP users
 	HierarchyCache *HierarchyCache // Fast hierarchy and group browsing cache
+	ConfigCache    *ConfigCache    // Configuration values cache with 5-minute refresh
 	Batch          *SQ3batch       // sqlite3 Batch operations
 
 	WG       *sync.WaitGroup
 	StopChan chan struct{} // Channel to signal shutdown
+
+	// bgStop ends the background loops OpenDatabase starts outside WG (cache crons);
+	// closed once by stopBackground at the start of Shutdown. nil on a bare &Database{}.
+	bgStop        chan struct{}
+	bgStopOnce    sync.Once
+	initResetOnce sync.Once // Shutdown resets INIT at most once per Database
 }
 
 // Config represents database configuration
@@ -66,10 +79,13 @@ type DBConfig struct {
 	ConnMaxLifetime time.Duration
 
 	// Performance settings
-	WALMode   bool   // Write-Ahead Logging
-	SyncMode  string // OFF, NORMAL, FULL
-	CacheSize int    // KB
-	TempStore string // MEMORY, FILE
+	WALMode      bool   // Write-Ahead Logging
+	SyncMode     string // OFF, NORMAL, FULL
+	CacheSize    int    // KB
+	TempStore    string // MEMORY, FILE
+	MaxDBbatch   int    // maximum number of DB operations in a batch
+	MaxDBthreads int    // maximum number of concurrent DB batch threads
+	MaxQueued    int    // maximum number of queued articles for batch processing
 
 	// Backup settings
 	BackupEnabled  bool
@@ -79,6 +95,7 @@ type DBConfig struct {
 	// Cache settings
 	ArticleCacheSize   int           // Maximum number of cached articles
 	ArticleCacheExpiry time.Duration // Cache expiry duration
+
 }
 
 // DefaultDBConfig returns default database configuration
@@ -97,90 +114,148 @@ func DefaultDBConfig() (dbconfig *DBConfig) {
 		BackupDir:          "./backups",
 		ArticleCacheSize:   1000,             // Default cache size
 		ArticleCacheExpiry: 15 * time.Minute, // Default cache expiry
+		MaxDBbatch:         1000,             // default max DB batch size (db_batch.go -> *SQ3batch)
+		MaxDBthreads:       16,               // default max DB threads (db_batch.go -> *SQ3batch)
+		MaxQueued:          1280,             // default max queued articles (db_batch.go -> *SQ3batch)
 	}
 }
 
 var GlobalDBMutex sync.Mutex // Mutex to protect database operations
-var INIT bool
+var INIT bool                // true while a Database from OpenDatabase is open (guarded by GlobalDBMutex)
 
-// New creates a new Database instance
+// ErrRunAsRoot is returned (wrapped) by OpenDatabase when the process runs as root or as
+// a system user (UID < 1000).
+var ErrRunAsRoot = errors.New("refusing to run as root")
+
+// checkRootUser verifies we're NOT running as root or system user on Unix-like systems
+func checkRootUser() error {
+	// Only check on Unix-like systems (Linux, macOS, BSD, etc.)
+	if runtime.GOOS == "windows" {
+		return nil // Skip check on Windows
+	}
+
+	// Check if running as root or system user
+	if os.Geteuid() < 1000 {
+		return fmt.Errorf("FATAL: Running as root or system user (UID < 1000) is not allowed for security reasons. Please run as a regular user")
+	}
+
+	return nil
+}
+
+// OpenDatabase opens the main database, runs its migrations and starts the background
+// tasks. Only one Database may be open per process; after Shutdown a new one can be
+// opened. On error nothing stays open or running and INIT is unchanged.
 func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
-	new := false
 	GlobalDBMutex.Lock()
 	defer GlobalDBMutex.Unlock()
-	if INIT {
-		return nil, fmt.Errorf("database already initialized")
+
+	// Check if running as root
+	if err := checkRootUser(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRunAsRoot, err)
 	}
-	INIT = true
+
+	if INIT {
+		return nil, fmt.Errorf("main database already initialized")
+	}
 	if dbconfig == nil {
 		dbconfig = DefaultDBConfig()
-		new = true
 	}
 
 	db := &Database{
 		dbconfig: dbconfig,
-		groupDBs: make(map[string]*GroupDBs),
+		groupDB:  make(map[string]*GroupDB),
 		WG:       &sync.WaitGroup{}, // Initialize wait group for background tasks
 
 	}
 
-	// Initialize main database
+	// Initialize main database (closes it again on its own errors)
 	if err := db.initMainDB(); err != nil {
 		return nil, fmt.Errorf("failed to initialize main database: %w", err)
 	}
 
+	// closeOnErr closes the main database after a failed step and returns err.
+	// Every fallible step runs before any background goroutine or global is set up.
+	closeOnErr := func(err error) (*Database, error) {
+		if cerr := db.mainDB.Close(); cerr != nil {
+			log.Printf("[DATABASE] Failed to close main database after open error: %v", cerr)
+		}
+		db.mainDB = nil
+		return nil, err
+	}
+
 	// Run migrations to ensure all tables exist
 	if err := db.Migrate(); err != nil {
-		return nil, fmt.Errorf("failed to run database migrations: %w", err)
+		return closeOnErr(fmt.Errorf("failed to run database migrations: %w", err))
 	}
 
-	// Check previous shutdown state and initialize system status
-	if wasClean, err := db.CheckPreviousShutdown(); err != nil {
-		log.Printf("Warning: Failed to check previous shutdown state: %v", err)
-	} else if !wasClean {
-		log.Printf("WARNING: Previous shutdown was not clean - database may need recovery")
+	// Load default providers on first boot
+	if err := db.LoadDefaultProviders(); err != nil {
+		log.Printf("Failed to add default providers to database: %v", err)
+		return closeOnErr(fmt.Errorf("failed to sync config providers: %w", err))
 	}
 
-	// Initialize system status for this startup
-	hostname, _ := os.Hostname()
-	if err := db.InitializeSystemStatus("go-pugleaf", os.Getpid(), hostname); err != nil {
-		log.Printf("Warning: Failed to initialize system status: %v", err)
+	// Initialize configuration cache
+	db.ConfigCache = NewConfigCache(db)
+	//log.Printf("Configuration cache initialized")
+	usersalt, err := db.GetConfigValue(config.CFG_KEY_USERSALT)
+	if err != nil {
+		return closeOnErr(fmt.Errorf("failed to get UserSalt config: %w", err))
+	}
+	if usersalt == "" {
+		// generate a usersalt, used for injection-info in header for posting
+		usersalt = generateRandomString(42)
+		if err := db.SetConfigValue(config.CFG_KEY_USERSALT, usersalt); err != nil {
+			return closeOnErr(fmt.Errorf("failed to set UserSalt config: %w", err))
+		}
+		log.Printf("Generated new UserSalt for hashing usernames")
 	}
 
-	if new {
-		// Load default providers on first boot
-		if err := db.LoadDefaultProviders(); err != nil {
-			log.Printf("Failed to add default providers to database: %v", err)
-			return nil, fmt.Errorf("failed to sync config providers: %w", err)
+	abuseMail, err := db.GetConfigValue(config.CFG_KEY_ABUSEMAIL)
+	if err != nil {
+		return closeOnErr(fmt.Errorf("failed to get AbuseMail config: %w", err))
+	}
+	if abuseMail == "" {
+		if err := db.SetConfigValue(config.CFG_KEY_ABUSEMAIL, "abuse@invalid.invalid"); err != nil {
+			return closeOnErr(fmt.Errorf("failed to set AbuseMail config: %w", err))
 		}
 	}
+
+	// Nothing below can fail: start caches and background tasks
 	db.StopChan = make(chan struct{}, 1) // Channel to signal shutdown (will get closed)
-	log.Printf("pugLeaf DB init config: %+v NO_CACHE_BOOT=%t", dbconfig, NO_CACHE_BOOT)
+	db.bgStop = make(chan struct{})      // closed by Shutdown (stopBackground)
+	//log.Printf("pugLeaf DB init config: %+v NO_CACHE_BOOT=%t", dbconfig, NO_CACHE_BOOT)
 	if !NO_CACHE_BOOT {
-		db.SectionsCache = NewGroupSectionDBCache()
-		db.MemThreadCache = NewMemCachedThreads()
+		db.SectionsCache = newGroupSectionDBCacheStop(db.backgroundStop())
+		db.MemThreadCache = NewMemCachedThreadsStop(db.backgroundStop())
 		db.HierarchyCache = NewHierarchyCache() // Initialize hierarchy cache for fast browsing
 		// Start hierarchy cache warming in background
 		go db.HierarchyCache.WarmCache(db)
 	}
-	GroupHashMap = NewGHmap()
+	GroupHashMap = NewGHmapStop(db.backgroundStop())
 	db.Batch = NewSQ3batch(db) // Initialize SQ3batch for batch operations
 
 	// Start other DB cron tasks
 	go db.CronDB()
 
 	// Start the smart orchestrator that monitors channel thresholds and timers
-	go db.Batch.orchestrator.StartOrch() // main wg waitGroup Add(+1)
+	// StartOrch and the StartOrchestrator goroutine it spawns each call db.WG.Done() on exit
+	db.WG.Add(2)
+	go db.Batch.orchestrator.StartOrch()
 	// Periodically expire idle per-group batch state (keeps memory bounded during scans)
 	go db.Batch.ExpireCache()
 
 	db.NNTPAuthCache = NewNNTPAuthCache(NNTP_AUTH_CACHE_TIME)
 	//log.Printf("[WEB]: NNTP authentication cache initialized (15 minute TTL)")
 
+	// Load IP blocking configuration
+	db.loadIPBlockingConfiguration()
+	// Load bot configuration from database
+	db.loadBotConfiguration()
+
 	// Start article cache cleanup routine
 	if ENABLE_ARTICLE_CACHE {
 		db.ArticleCache = NewArticleCache(db.dbconfig.ArticleCacheSize, db.dbconfig.ArticleCacheExpiry, db)
-		log.Printf("Article cache initialized with size %d and expiry %s", db.dbconfig.ArticleCacheSize, db.dbconfig.ArticleCacheExpiry)
+		//log.Printf("Article cache initialized with size %d and expiry %s", db.dbconfig.ArticleCacheSize, db.dbconfig.ArticleCacheExpiry)
 	} else {
 		log.Println("Article cache is disabled")
 	}
@@ -198,9 +273,37 @@ func OpenDatabase(dbconfig *DBConfig) (*Database, error) {
 			}
 		}
 	}()
-
-	log.Printf("Database initialized: %+v", db)
+	go func() {
+		wait := time.NewTimer(1 * time.Minute)
+		defer wait.Stop()
+		for {
+			select {
+			case <-db.StopChan:
+				return
+			case <-wait.C:
+			}
+			log.Printf("\n *** Database Statistics:\n ::: %+v", db.GetDatabaseStats())
+			wait.Reset(5 * time.Minute)
+		}
+	}()
+	//log.Printf("Database initialized: %+v", db)
+	INIT = true // last step: a failed open leaves INIT false, so a later open can succeed
 	return db, nil
+}
+
+// stopBackground closes bgStop once (ends the cache cron loops). No-op on a Database
+// that was not created by OpenDatabase (bgStop nil).
+func (db *Database) stopBackground() {
+	if db.bgStop == nil {
+		return
+	}
+	db.bgStopOnce.Do(func() { close(db.bgStop) })
+}
+
+// backgroundStop returns the channel closed by stopBackground (nil on a bare Database:
+// a nil channel never fires).
+func (db *Database) backgroundStop() <-chan struct{} {
+	return db.bgStop
 }
 
 func (db *Database) IsDBshutdown() bool {
@@ -210,7 +313,7 @@ func (db *Database) IsDBshutdown() bool {
 	select {
 	case _, ok := <-db.StopChan:
 		if !ok {
-			log.Println("[DATABASE] preparing shutdown: StopChan is already closed")
+			//log.Println("[DATABASE] preparing shutdown: StopChan is already closed")
 		}
 		return true // If StopChan is closed, database is shutdown
 	default:
@@ -221,15 +324,19 @@ func (db *Database) IsDBshutdown() bool {
 // initMainDB initializes the main database connection
 func (db *Database) initMainDB() error {
 	dbPath := filepath.Join(db.dbconfig.DataDir, "/cfg/pugleaf.sq3")
-	log.Printf("Initializing main database at: %s", dbPath)
+	//log.Printf("Initializing main database at: %s", dbPath)
 
 	// Create data directory if it doesn't exist
 	if err := createDirIfNotExists(db.dbconfig.DataDir + "/cfg/"); err != nil {
 		return fmt.Errorf("failed to create data directory: %w", err)
 	}
 
+	// Pragmas run on every pooled connection through the driver's ConnectHook
+	pragmas := db.buildMainConnPragmas()
+	mainConnPragmas.Store(&pragmas)
+
 	// Open main database
-	mainDB, err := sql.Open("sqlite3", dbPath)
+	mainDB, err := sql.Open(driverNameMain, dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to open main database: %w", err)
 	}
@@ -239,7 +346,7 @@ func (db *Database) initMainDB() error {
 	mainDB.SetMaxIdleConns(db.dbconfig.MaxIdleConns)
 	mainDB.SetConnMaxLifetime(db.dbconfig.ConnMaxLifetime)
 
-	// Test connection
+	// Test connection (the first connection also runs the pragmas)
 	if err := mainDB.Ping(); err != nil {
 		if cerr := mainDB.Close(); cerr != nil {
 			return fmt.Errorf("failed to ping main database: %w; also failed to close mainDB: %v", err, cerr)
@@ -247,26 +354,56 @@ func (db *Database) initMainDB() error {
 		return fmt.Errorf("failed to ping main database: %w", err)
 	}
 
-	// Apply SQLite pragmas for performance
-	if err := db.applySQLitePragmas(mainDB); err != nil {
-		if cerr := mainDB.Close(); cerr != nil {
-			return fmt.Errorf("failed to apply SQLite pragmas: %w; also failed to close mainDB: %v", err, cerr)
-		}
-		return fmt.Errorf("failed to apply SQLite pragmas: %w", err)
-	}
-
 	db.mainDB = mainDB
 	return nil
 }
 
-// applySQLitePragmas applies performance and configuration pragmas to SQLite connection
-func (db *Database) applySQLitePragmas(conn *sql.DB) error {
+// SQLite driver names used by the main DB and the group DBs. Both drivers run the
+// pragma list stored in mainConnPragmas / groupConnPragmas on every new pooled
+// connection (ConnectHook), so busy_timeout, foreign_keys, synchronous, ... are
+// active on all connections, not only on the first one.
+// progress.go, internal/nntp and cmd/* keep using the plain "sqlite3" driver.
+const (
+	driverNameMain  = "sqlite3_pugleaf_main"
+	driverNameGroup = "sqlite3_pugleaf_group"
+)
+
+var (
+	mainConnPragmas  atomic.Pointer[[]string]
+	groupConnPragmas atomic.Pointer[[]string]
+)
+
+func init() {
+	for name, list := range map[string]*atomic.Pointer[[]string]{
+		driverNameMain:  &mainConnPragmas,
+		driverNameGroup: &groupConnPragmas,
+	} {
+		sql.Register(name, &sqlite3.SQLiteDriver{
+			ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+				pragmas := list.Load()
+				if pragmas == nil {
+					return nil
+				}
+				for _, p := range *pragmas {
+					if _, err := conn.Exec(p, nil); err != nil {
+						return fmt.Errorf("pragma %q: %w", p, err)
+					}
+				}
+				return nil
+			},
+		})
+	}
+}
+
+// buildMainConnPragmas returns the per-connection pragmas of the main database.
+// busy_timeout comes first so the following pragmas already wait on locks.
+func (db *Database) buildMainConnPragmas() []string {
 	pragmas := []string{
-		fmt.Sprintf("PRAGMA cache_size = %d", db.dbconfig.CacheSize),
-		fmt.Sprintf("PRAGMA synchronous = %s", db.dbconfig.SyncMode),
-		fmt.Sprintf("PRAGMA temp_store = %s", db.dbconfig.TempStore),
-		"PRAGMA foreign_keys = ON",
 		"PRAGMA busy_timeout = 30000", // 30 seconds
+		"PRAGMA foreign_keys = ON",
+		fmt.Sprintf("PRAGMA synchronous = %s", db.dbconfig.SyncMode),
+		fmt.Sprintf("PRAGMA cache_size = %d", db.dbconfig.CacheSize),
+		fmt.Sprintf("PRAGMA temp_store = %s", db.dbconfig.TempStore),
 		"PRAGMA mmap_size = 0",
 	}
 
@@ -274,57 +411,41 @@ func (db *Database) applySQLitePragmas(conn *sql.DB) error {
 		pragmas = append(pragmas, "PRAGMA journal_mode = WAL")
 		pragmas = append(pragmas, "PRAGMA wal_autocheckpoint = 1000")
 	}
-
-	for _, pragma := range pragmas {
-		if _, err := conn.Exec(pragma); err != nil {
-			return fmt.Errorf("failed to execute pragma '%s': %w", pragma, err)
-		}
-	}
-
-	return nil
+	return pragmas
 }
 
-var PragmaMutex sync.RWMutex // Mutex to protect pragma execution
+var PragmaMutex sync.RWMutex // Mutex to protect building the group pragma list
 var PragmasGroupDB []string
 
-// applySQLitePragmas applies performance and configuration pragmas to SQLite connection
-func (db *Database) applySQLitePragmasGroupDB(conn *sql.DB) error {
-	PragmaMutex.RLock()
-	exists := len(PragmasGroupDB) > 0
-	PragmaMutex.RUnlock()
-	if !exists {
-		PragmaMutex.Lock()
-		exists = len(PragmasGroupDB) > 0
-		if !exists {
-			PragmasGroupDB = []string{
-				fmt.Sprintf("PRAGMA cache_size = %d", SQLITE_cache_size),
-				fmt.Sprintf("PRAGMA busy_timeout = %d", SQLITE_busy_timeout),
-				fmt.Sprintf("PRAGMA foreign_keys = %s", SQLITE_foreign_keys),
-				fmt.Sprintf("PRAGMA synchronous = %s", SQLITE_sync_mode),
-				fmt.Sprintf("PRAGMA temp_store = %s", SQLITE_temp_store),
-			}
-
-			if db.dbconfig.WALMode {
-				PragmasGroupDB = append(PragmasGroupDB, "PRAGMA journal_mode = WAL")
-				PragmasGroupDB = append(PragmasGroupDB, "PRAGMA wal_autocheckpoint = 2000")
-			}
-			exists = true
-		}
-		PragmaMutex.Unlock()
+// ensureGroupConnPragmas builds the per-connection pragma list of the group databases
+// once (from the SQLITE_* vars and WALMode) and stores it for the group driver's
+// ConnectHook. It runs before every group database open.
+func (db *Database) ensureGroupConnPragmas() {
+	if groupConnPragmas.Load() != nil {
+		return
 	}
-
-	if exists {
-		for _, pragma := range PragmasGroupDB {
-			if _, err := conn.Exec(pragma); err != nil {
-				return fmt.Errorf("failed to execute pragma '%s': %w", pragma, err)
-			}
-		}
-		return nil
-	} else {
-		log.Printf("Error: Pragmas not found?! using defaults...")
+	PragmaMutex.Lock()
+	defer PragmaMutex.Unlock()
+	if groupConnPragmas.Load() != nil {
+		return
 	}
+	if len(PragmasGroupDB) == 0 {
+		PragmasGroupDB = []string{
+			fmt.Sprintf("PRAGMA busy_timeout = %d", SQLITE_busy_timeout),
+			fmt.Sprintf("PRAGMA foreign_keys = %s", SQLITE_foreign_keys),
+			fmt.Sprintf("PRAGMA synchronous = %s", SQLITE_sync_mode),
+			fmt.Sprintf("PRAGMA cache_size = %d", SQLITE_cache_size),
+			fmt.Sprintf("PRAGMA temp_store = %s", SQLITE_temp_store),
+		}
 
-	return nil
+		if db.dbconfig.WALMode {
+			PragmasGroupDB = append(PragmasGroupDB, "PRAGMA journal_mode = WAL")
+			PragmasGroupDB = append(PragmasGroupDB, "PRAGMA wal_autocheckpoint = 2000")
+		}
+	}
+	pragmas := make([]string, len(PragmasGroupDB))
+	copy(pragmas, PragmasGroupDB)
+	groupConnPragmas.Store(&pragmas)
 }
 
 // sync default config providers to database
@@ -339,17 +460,22 @@ func (db *Database) LoadDefaultProviders() error {
 		// If provider doesn't exist, add it
 		if existing == nil {
 			provider := &models.Provider{
-				Name:       p.Name,
-				Enabled:    p.Enabled,
-				Priority:   p.Priority,
-				Grp:        p.Grp,
-				Host:       p.Host,
-				Port:       p.Port,
-				SSL:        p.SSL,
-				Username:   p.Username,
-				Password:   p.Password,
-				MaxConns:   p.MaxConns,
-				MaxArtSize: p.MaxArtSize,
+				Name:         p.Name,
+				Enabled:      p.Enabled,
+				Priority:     p.Priority,
+				Grp:          p.Grp,
+				Host:         p.Host,
+				Port:         p.Port,
+				SSL:          p.SSL,
+				Username:     p.Username,
+				Password:     p.Password,
+				MaxConns:     p.MaxConns,
+				MaxArtSize:   p.MaxArtSize,
+				Compress:     p.Compress,
+				ProxyEnabled: p.ProxyEnabled,
+				ProxyType:    p.ProxyType,
+				ProxyHost:    p.ProxyHost,
+				ProxyPort:    p.ProxyPort,
 			}
 
 			err = db.AddProvider(provider)
@@ -362,4 +488,54 @@ func (db *Database) LoadDefaultProviders() error {
 	}
 
 	return nil
+}
+
+// loadBotConfiguration loads bot settings from database and populates global config variables
+func (db *Database) loadBotConfiguration() {
+	if NO_CACHE_BOOT {
+		return
+	}
+	// Load BlockBadBots setting and BadBots list
+	blockBadBotsStr, err := db.GetConfigValue(config.CFG_KEY_BLOCKBADBOTS)
+	if err != nil {
+		log.Printf("Failed to get BlockBadBots config, using default (false): %v", err)
+		blockBadBotsStr = "false"
+	}
+
+	// Load BadBots list
+	badBotsStr, err := db.GetConfigValue(config.CFG_KEY_BADBOTS)
+	if err != nil {
+		log.Printf("Failed to get BadBots config err='%v'", err)
+		badBotsStr = ""
+	}
+
+	// Use UpdateBadBots to safely update configuration (handles mutex internally)
+	blockEnabled := blockBadBotsStr == "true"
+	config.UpdateBadBots(badBotsStr, blockEnabled)
+}
+
+// loadIPBlockingConfiguration loads IP blocking settings from database and populates global config variables
+func (db *Database) loadIPBlockingConfiguration() {
+	if NO_CACHE_BOOT {
+		return
+	}
+	// Load BlockBadIPs setting and BadIPs list
+	blockBadIPsStr, err := db.GetConfigValue(config.CFG_KEY_BLOCKBADIPS)
+	if err != nil {
+		log.Printf("Failed to get BlockBadIPs config, using default (false): %v", err)
+		blockBadIPsStr = "false"
+	}
+
+	// Load BadIPs list (CIDR ranges)
+	badIPsStr, err := db.GetConfigValue(config.CFG_KEY_BADIPS)
+	if err != nil {
+		log.Printf("Failed to get BadIPs config err='%v'", err)
+		badIPsStr = ""
+	}
+
+	// Use UpdateBadIPs to safely update configuration (handles mutex internally)
+	blockEnabled := blockBadIPsStr == "true"
+	if err := config.UpdateBadIPs(badIPsStr, blockEnabled); err != nil {
+		log.Printf("Failed to update BadIPs configuration: %v", err)
+	}
 }
