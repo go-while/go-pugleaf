@@ -181,6 +181,9 @@ func TestMboxUatInputName(t *testing.T) {
 		"pl.comp.usenet.xz.part": false,
 		"pl.comp.usenet.gz":      false,
 		"pl.comp.txt":            false,
+		"gwu.2014.mbox.csv.gz":   false,
+		"gwu.2014.mbox.CSV.zip":  false,
+		"gwu.2014.mbox.gz":       true,
 	} {
 		if got := isInputName(name); got != want {
 			t.Errorf("isInputName(%q) = %t, want %t", name, got, want)

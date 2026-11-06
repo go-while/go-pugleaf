@@ -12,7 +12,7 @@ with IHAVE.
 - Reads Usenet Archive Toolkit archives (`.usenet`, `.usenet.xz`, `.usenet.7z`; via the installed
   `zstd` program, plus `xz` or `7z`), see [UAT archives](#uat-archives)
 - Several inputs per run; a directory argument imports its mbox files and UAT archives in name order,
-  one after the other or `-parallel N` at a time
+  one after the other or `-parallel N` at a time (CSV files such as archive.org's `NAME.mbox.csv.gz` index are never inputs)
 - Files every article like a fetched one, through the processor in bulk mode (message-id history,
   overview, threading): into the first group of its `Newsgroups:` header, or into `-group NAME`
 - Creates missing newsgroups on the fly
@@ -255,7 +255,7 @@ An input row has one of these states:
 | `done` | imported |
 | `failed` | an input error, article errors or a failed commit wait; `reason` says which |
 | `stopped` | SIGINT/SIGTERM ended the import of this input |
-| `unsupported` | the importer cannot read this file at all; `reason` says why (`iso`, `sqsh`, `tar`, `txt`, `ufs`, `img`, `xml`, `torrent`, `unsupported-suffix`). These are final: no scan tries them again |
+| `unsupported` | the importer cannot read this file at all; `reason` says why (`iso`, `sqsh`, `tar`, `txt`, `ufs`, `img`, `xml`, `torrent`, `csv`, `unsupported-suffix`). These are final: no scan tries them again |
 
 **An input is imported once.** At the start of an input the run compares the file with its row: a
 row that is `done` for the same size and mtime (and the same md5, when the row and the source both
@@ -392,7 +392,7 @@ not the same:
 
 | | Status | Reasons | On the next scan |
 |---|--------|---------|------------------|
-| the importer has no reader for the name | `unsupported` | `iso` (CD images), `sqsh`, `tar`, `ufs`, `img`, `txt` (OCR derivatives), `xml` (`_files.xml`, `_meta.xml`), `torrent`, `unsupported-suffix` | nothing: they are listed for later tools, never imported |
+| the importer has no reader for the name | `unsupported` | `iso` (CD images), `sqsh`, `tar`, `ufs`, `img`, `txt` (OCR derivatives), `xml` (`_files.xml`, `_meta.xml`), `torrent`, `csv` (`NAME.mbox.csv.gz`, the offset index next to each `NAME.mbox.gz`), `unsupported-suffix` | nothing: they are listed for later tools, never imported |
 | the file is not ready on disk | `pending` | `missing`, `size-changed`, `stat-error`, and with `-verify-md5` `md5-mismatch` or `md5-error` | tried again (a `md5-mismatch` that is unchanged is not hashed again) |
 
 Supported names are the ones the importer reads anyway (`.mbox`, `.bag`, `.mbox.gz`, `.mbox.zip`,

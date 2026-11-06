@@ -198,6 +198,9 @@ func iafetchSupported(name string) (bool, string) {
 	if isInputName(base) && iafetchReadable(base) {
 		return true, ""
 	}
+	if isCSVIndexName(base) {
+		return false, "csv" // NAME.mbox.csv.gz: the offset index of NAME.mbox.gz
+	}
 	if reason, ok := iaUnsupportedSuffixes[strings.ToLower(filepath.Ext(base))]; ok {
 		return false, reason
 	}

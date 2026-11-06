@@ -374,6 +374,10 @@ func TestMboxIASupportedNames(t *testing.T) {
 		{"alt.foo.mbox.zst", false, iaReasonUnsupported},
 		{"alt.foo.mbox.tar", false, "tar"},
 		{"alt.foo.mbox.txt", false, "txt"},
+		// archive.org's offset index next to each NAME.mbox.gz, not an mbox
+		{"gwu.20140123.mbox.csv.gz", false, "csv"},
+		{"alt.foo.mbox.csv", false, "csv"},
+		{"01alt.test.csv.gz", false, "csv"},
 		// isInputName is case-sensitive, like the directory scan it is shared with.
 		{"X.MBOX.ZIP", false, iaReasonUnsupported},
 		{"F.ISO", false, "iso"},
