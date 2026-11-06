@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
 	"github.com/go-while/go-pugleaf/internal/models"
@@ -234,8 +235,9 @@ func laxMessageID(msgid string) bool {
 
 // messageIDFromHeaders finds the article's message-id (lax repairs as in mbox2nntp; strict
 // requires common.ValidMessageID and applies no repair). An early B-news article without a
-// Message-ID field but with "Article-I.D.: site.n" gets <bnews.site.n> (bnewsMessageID);
-// that form has no "@", so -strict-msgid refuses it as bad-msgid.
+// Message-ID field but with "Article-I.D.: site.n" gets <bnews.site.n> (bnewsMessageID).
+// Neither that form nor the <anews....> of an A-news article (anewsHeader) holds an "@", so
+// -strict-msgid refuses both as bad-msgid.
 func messageIDFromHeaders(head []string, strict bool) (msgid string, reason skipReason) {
 	value, found := headerField(head, "Message-ID")
 	if !found || value == "" {
@@ -413,34 +415,52 @@ func rewriteHead(msgid string, head []string) (newhead []string, reason skipReas
 	return newhead, skipNone
 }
 
-// bnewsDateFields are the date fields a Date line is taken from when the article has none:
-// the "Posted:" and "Date-Received:" of the B-news era (the utzoo tapes carry articles with
-// only these). The processor has the same fallback (its fallbackDateHeaders), but it reads
-// the article's header map, which keeps none of these fields, so the importer writes the
-// Date into the stored header block instead.
-var bnewsDateFields = []string{"Posted", "Date-Received"}
+// bnewsDateFields are the date fields a Date line is taken from when the article has none,
+// in this order: the "Posted:" and "Date-Received:" of the B-news era (the utzoo tapes carry
+// articles with only these), then the two injection dates of later software. The processor
+// has the same fallback (its fallbackDateHeaders), but it reads the article's header map,
+// which keeps none of these fields, so the importer writes the Date into the stored header
+// block instead.
+var bnewsDateFields = []string{"Posted", "Date-Received", "NNTP-Posting-Date", "Injection-Date"}
 
 // minArchiveYear is the first year an archive article can really carry (Usenet started in
 // 1980; the processor's minArchiveDate). An earlier fallback date is a broken clock, mostly
-// ctime(-1), and is not written into the header block.
+// ctime(0) or ctime(-1), and is not written into the header block.
 const minArchiveYear = 1980
 
 // fallbackDateLine returns the "Date: ..." line of an article that has no Date header,
-// built from the first readable B-news date field, as RFC 5322 (a ctime date or any
-// spelling the processor's lenient parser knows); ok is false when there is none.
+// built from the first B-news date field whose value is a full date, as RFC 5322; ok is
+// false when there is none. Only ctime and the layouts of the processor's date parser are
+// accepted, never its brute-force reading: that one answers a prose value ("sometime in May
+// 1995") with an invented day and time, which would date the article by guesswork.
 func fallbackDateLine(head []string) (line string, ok bool) {
 	for _, name := range bnewsDateFields {
 		value, found := headerField(head, name)
 		if !found || value == "" {
 			continue
 		}
-		t, parsed := processor.ParseNNTPDateStrict(cleanHeadline(value))
+		t, parsed := parseDateLayouts(cleanHeadline(value))
 		if !parsed || t.Year() < minArchiveYear {
 			continue
 		}
 		return "Date: " + t.Format(rfc5322DateLayout), true
 	}
 	return "", false
+}
+
+// parseDateLayouts parses a date by ctime and then by the processor's layouts (the parser
+// the stored Date header is read with later, minus its brute-force extraction).
+func parseDateLayouts(value string) (time.Time, bool) {
+	value = strings.Join(strings.Fields(value), " ")
+	if t, ok := parseCtime(value); ok {
+		return t, true
+	}
+	for _, layout := range processor.NNTPDateLayouts {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // firstNewsgroup returns the first group of the Newsgroups header (folded lines joined,

@@ -175,6 +175,147 @@ func TestMboxANewsWatmathSample(t *testing.T) {
 	}
 }
 
+// TestMboxANewsIDLineBlanks: a trailing blank on the id line still starts an article (and
+// is not part of the Message-ID), so the article does not land in the body before it.
+func TestMboxANewsIDLineBlanks(t *testing.T) {
+	batch := anewsWatmath +
+		"Aalice.184 \n" +
+		"net.columbia\n" +
+		"utzoo!decvax!ucbvax!mhtsa!research!alice!sjb\n" +
+		"Mon Nov 30 18:11:37 1981\n" +
+		"Columbia launch\n" +
+		"The launch is set for tomorrow morning.\n"
+	got, err := collectANews(t, batch)
+	if err != nil {
+		t.Fatalf("parseANews: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d articles, want 2", len(got))
+	}
+	if got[0].body != "Pipeline jokes.....\n" {
+		t.Errorf("first body %q", got[0].body)
+	}
+	want := []string{
+		"Path: utzoo!decvax!ucbvax!mhtsa!research!alice!sjb",
+		"From: alice!sjb",
+		"Newsgroups: net.columbia",
+		"Subject: Columbia launch",
+		"Date: Mon, 30 Nov 1981 18:11:37 +0000",
+		"Message-ID: <anews.Aalice.184>",
+	}
+	if !reflect.DeepEqual(got[1].head, want) {
+		t.Errorf("second head:\n got %q\nwant %q", got[1].head, want)
+	}
+}
+
+// TestMboxANewsRnewsFraming: an "#! rnews N" batch framing line is dropped wherever it
+// stands, not appended to the body of the article before it.
+func TestMboxANewsRnewsFraming(t *testing.T) {
+	batch := "#! rnews 274\n" + anewsWatmath + "#! rnews 198\n" + anewsBatch
+	got, err := collectANews(t, batch)
+	if err != nil {
+		t.Fatalf("parseANews: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d articles, want 3", len(got))
+	}
+	if got[0].body != "Pipeline jokes.....\n" {
+		t.Errorf("body of the article before the framing line: %q", got[0].body)
+	}
+	if got[1].head[len(got[1].head)-1] != "Message-ID: <anews.Aalice.154>" {
+		t.Errorf("second article: %q", got[1].head)
+	}
+}
+
+// TestMboxANewsPreUsenetDate: a block with a pre-Usenet date is still an article (its body
+// does not end up in the one before it), but it carries no Date line and handleLines skips
+// it as no-date. An article without a title is skipped as no-subject.
+func TestMboxANewsPreUsenetDate(t *testing.T) {
+	batch := anewsWatmath +
+		"Aalice.1\n" +
+		"net.general\n" +
+		"utzoo!alice!ark\n" +
+		"Thu Jan  1 00:00:00 1970\n" +
+		"Broken clock\n" +
+		"body of the article with the broken clock\n" +
+		"Aalice.2\n" +
+		"net.general\n" +
+		"utzoo!alice!ark\n" +
+		"Tue Jan 12 20:03:13 1982\n" +
+		"\n" +
+		"body of the article without a title\n"
+	got, err := collectANews(t, batch)
+	if err != nil {
+		t.Fatalf("parseANews: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d articles, want 3", len(got))
+	}
+	if got[0].body != "Pipeline jokes.....\n" {
+		t.Errorf("body of the article before the broken clock: %q", got[0].body)
+	}
+	wantBroken := []string{
+		"Path: utzoo!alice!ark",
+		"From: alice!ark",
+		"Newsgroups: net.general",
+		"Subject: Broken clock",
+		"Message-ID: <anews.Aalice.1>",
+	}
+	if !reflect.DeepEqual(got[1].head, wantBroken) {
+		t.Errorf("pre-Usenet head:\n got %q\nwant %q", got[1].head, wantBroken)
+	}
+
+	// the two broken ones are skipped, the good one is stored
+	sink := newCaptureSink()
+	c := newCounters("batch")
+	for _, art := range got {
+		c.Read++
+		handleMessage(c, art.head, strings.NewReader(art.body), &runOptions{}, sink)
+	}
+	if c.Stored != 1 || c.Skipped[skipNoDate] != 1 || c.Skipped[skipNoSubject] != 1 {
+		t.Errorf("counters: stored=%d skipped=%s", c.Stored, c.skippedDetail())
+	}
+	if sink.arts["<anews.Awatmath.1472>"] == nil {
+		t.Errorf("the good article was not stored: %v", sink.arts)
+	}
+}
+
+// TestMboxANewsOversized: an article whose body passes maxANewsArticle is not emitted, the
+// batch goes on with the next block, and a batch with nothing else says so in its error.
+func TestMboxANewsOversized(t *testing.T) {
+	old := maxANewsArticle
+	maxANewsArticle = 64
+	defer func() { maxANewsArticle = old }()
+
+	big := strings.Repeat("filler line\n", 20) // well over 64 bytes
+	batch := "Aalice.1\n" +
+		"net.general\n" +
+		"utzoo!alice!ark\n" +
+		"Tue Jan 12 20:03:13 1982\n" +
+		"Too long\n" +
+		big +
+		anewsWatmath
+	got, err := collectANews(t, batch)
+	if err != nil {
+		t.Fatalf("parseANews: %v", err)
+	}
+	if len(got) != 1 || got[0].head[len(got[0].head)-1] != "Message-ID: <anews.Awatmath.1472>" {
+		t.Fatalf("got %d articles: %q", len(got), got)
+	}
+	if got[0].body != "Pipeline jokes.....\n" {
+		t.Errorf("body %q", got[0].body)
+	}
+
+	// nothing but the oversized article: an error that names it
+	got, err = collectANews(t, batch[:len(batch)-len(anewsWatmath)])
+	if err == nil || !strings.Contains(err.Error(), "1 over 64 bytes") {
+		t.Errorf("error %v, want one naming the oversized article", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("emitted %d articles", len(got))
+	}
+}
+
 // TestMboxANewsBrokenBlock: a block whose date line is not a ctime date is no article, its
 // lines stay in the body of the article before it.
 func TestMboxANewsBrokenBlock(t *testing.T) {

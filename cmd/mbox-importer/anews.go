@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -98,8 +99,8 @@ func (a *anewsReader) advance(n int) {
 
 // anewsHeader builds the RFC 5322 header block of the A-news article that starts at the
 // next unread line, or reports that none starts there: the first of the five lines must be
-// an A-news id and the fourth a ctime date (a line that only looks like an id belongs to
-// the body). The lines are not consumed.
+// an A-news id (trailing blanks and all) and the fourth a ctime date (a line that only looks
+// like an id belongs to the body). The lines are not consumed.
 func anewsHeader(a *anewsReader) (head []string, ok bool) {
 	block := make([]string, 0, anewsHeaderLines)
 	for i := 0; i < anewsHeaderLines; i++ {
@@ -109,11 +110,12 @@ func anewsHeader(a *anewsReader) (head []string, ok bool) {
 		}
 		block = append(block, line)
 	}
-	if !anewsIDRe.MatchString(block[0]) {
+	id := strings.TrimSpace(block[0])
+	if !anewsIDRe.MatchString(id) {
 		return nil, false
 	}
-	date, ok := parseCtime(block[3])
-	if !ok {
+	date, dated := parseCtime(block[3])
+	if !dated {
 		return nil, false
 	}
 	head = make([]string, 0, anewsHeaderLines+1)
@@ -123,12 +125,19 @@ func anewsHeader(a *anewsReader) (head []string, ok bool) {
 			head = append(head, "From: "+from)
 		}
 	}
-	return append(head,
+	head = append(head,
 		"Newsgroups: "+strings.TrimSpace(block[1]),
 		"Subject: "+strings.TrimSpace(block[4]),
-		"Date: "+date.Format(rfc5322DateLayout),
-		"Message-ID: <anews."+block[0]+">",
-	), true
+	)
+	// a date before Usenet (a broken clock, ctime(0) or ctime(-1)) is no date: the block is
+	// still an article, so its body does not end up in the one before it, but it goes on
+	// without a Date line and is skipped as no-date
+	if date.Year() >= minArchiveYear {
+		head = append(head, "Date: "+date.Format(rfc5322DateLayout))
+	}
+	// the <anews....> form has no "@", so -strict-msgid refuses it as bad-msgid, as it does
+	// the <bnews....> form of an early B-news article (bnewsMessageID)
+	return append(head, "Message-ID: <anews."+id+">"), true
 }
 
 // anewsFrom is the From header of an A-news article: the last two elements of the bang
@@ -147,32 +156,61 @@ func anewsFrom(path string) string {
 	return strings.Join(parts, "!")
 }
 
+// rnewsPrefix starts the batch framing line of an rnews batch ("#! rnews 1234"), which the
+// utzoo files carry between articles: never part of an article, dropped wherever it stands.
+const rnewsPrefix = "#! rnews "
+
+// maxANewsArticle is the most body bytes one A-news article may hold; a batch whose blocks
+// are not found (a misclassified file) must not grow one article without a bound. The
+// A-news era knew nothing bigger, four times the default article size cap is plenty. Tests
+// lower it.
+var maxANewsArticle = 4 * defaultMaxArticleSize
+
 // parseANews reads an A-news batch from r and calls emit once per article with an RFC 5322
 // header block (Path, From, Newsgroups, Subject, Date, Message-ID) and the body. The body
 // runs to the next header block, so the lines of a block that is broken (no readable ctime
-// date) stay with the previous article; text before the first block is dropped. An error is
-// returned for a read error, and for a batch that holds no article at all (the dropped line
-// count is in its message); emit may have been called before either.
+// date) stay with the previous article; text before the first block, and every "#! rnews"
+// framing line, is dropped. A block with a pre-Usenet date gets no Date line and an article
+// without a title no Subject value, so handleLines skips those as no-date and no-subject;
+// an article whose body passes maxANewsArticle is logged and not emitted. An error is
+// returned for a read error, and for a batch that holds no article at all (with the dropped,
+// oversized and article counts in its message); emit may have been called before either.
 func parseANews(r io.Reader, emit func(head []string, body io.Reader)) error {
 	a := &anewsReader{br: bufio.NewReader(r)}
 	var (
-		head    []string // header block of the article being read, nil before the first
-		body    []string
-		emitted int
-		dropped int // non-blank lines before the first article
+		head     []string        // header block of the article being read, nil before the first
+		body     strings.Builder // its body, as it will be handed to emit
+		tooBig   bool            // the body of the current article passed maxANewsArticle
+		emitted  int
+		oversize int
+		dropped  int // non-blank lines before the first article
 	)
+	addLine := func(line string) {
+		if tooBig {
+			return
+		}
+		if body.Len()+len(line)+1 > maxANewsArticle {
+			tooBig = true
+			body.Reset()
+			return
+		}
+		body.WriteString(line)
+		body.WriteByte('\n')
+	}
 	flush := func() {
 		if head == nil {
 			return
 		}
-		var b strings.Builder
-		for _, l := range body {
-			b.WriteString(l)
-			b.WriteByte('\n')
+		if tooBig {
+			oversize++
+			msgid, _ := headerField(head, "Message-ID")
+			log.Printf("[MBOX-IMPORT] skipped msgid=%q: A-news article over %d bytes", msgid, maxANewsArticle)
+		} else {
+			emit(head, strings.NewReader(body.String()))
+			emitted++
 		}
-		emit(head, strings.NewReader(b.String()))
-		emitted++
-		head, body = nil, nil
+		head, tooBig = nil, false
+		body.Reset()
 	}
 	for {
 		if next, ok := anewsHeader(a); ok {
@@ -187,8 +225,9 @@ func parseANews(r io.Reader, emit func(head []string, body io.Reader)) error {
 		}
 		a.advance(1)
 		switch {
+		case strings.HasPrefix(line, rnewsPrefix):
 		case head != nil:
-			body = append(body, line)
+			addLine(line)
 		case strings.TrimSpace(line) != "":
 			dropped++
 		}
@@ -198,7 +237,8 @@ func parseANews(r io.Reader, emit func(head []string, body io.Reader)) error {
 		return fmt.Errorf("read A-news batch: %w", a.err)
 	}
 	if emitted == 0 {
-		return fmt.Errorf("no A-news article in the batch (%d lines dropped)", dropped)
+		return fmt.Errorf("no A-news article in the batch (%d lines dropped, %d over %d bytes)",
+			dropped, oversize, maxANewsArticle)
 	}
 	return nil
 }

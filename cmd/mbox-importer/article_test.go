@@ -527,8 +527,39 @@ func TestMboxArtOldDateFormats(t *testing.T) {
 			instant:  time.Date(1981, time.November, 23, 23, 44, 52, 0, time.UTC),
 		},
 		{
+			name:     "Posted wins over NNTP-Posting-Date",
+			dateHead: []string{"NNTP-Posting-Date: Tue, 21 Jul 1992 05:43:39 GMT", "Posted: Mon Nov 23 23:44:52 1981"},
+			want:     "Mon, 23 Nov 1981 23:44:52 +0000",
+			instant:  time.Date(1981, time.November, 23, 23, 44, 52, 0, time.UTC),
+		},
+		{
+			name:     "NNTP-Posting-Date without Date",
+			dateHead: []string{"NNTP-Posting-Date: Tue, 21 Jul 1992 05:43:39 GMT"},
+			want:     "Tue, 21 Jul 1992 05:43:39 +0000",
+			instant:  time.Date(1992, time.July, 21, 5, 43, 39, 0, time.UTC),
+		},
+		{
+			name:     "Injection-Date without Date",
+			dateHead: []string{"Injection-Date: Tue, 21 Jul 1992 05:43:39 +0200"},
+			want:     "Tue, 21 Jul 1992 05:43:39 +0200",
+			instant:  time.Date(1992, time.July, 21, 3, 43, 39, 0, time.UTC),
+		},
+		{
 			name:     "pre-Usenet Posted, ctime(-1)",
 			dateHead: []string{"Posted: Wed, 31-Dec-69 18:59:59 EDT"},
+		},
+		{
+			name:     "pre-Usenet Posted, ctime(0)",
+			dateHead: []string{"Posted: Thu Jan  1 00:00:00 1970"},
+		},
+		{
+			// the processor's brute-force reading would invent a day and a time here
+			name:     "prose Posted value",
+			dateHead: []string{"Posted: sometime in May 1995"},
+		},
+		{
+			name:     "Posted with a year only",
+			dateHead: []string{"Posted: 1983"},
 		},
 		{
 			name:     "no date header at all",
