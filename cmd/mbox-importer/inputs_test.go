@@ -43,7 +43,7 @@ func readAllMessages(t *testing.T, src *source) []testMessage {
 		if err != nil {
 			t.Fatalf("ReadMessage: %v", err)
 		}
-		body, _ := readBody(msg.BodyReader(), true)
+		body, _, _ := readBody(msg.BodyReader(), true, -1)
 		out = append(out, testMessage{head: msg.Headers(), body: body})
 	}
 }
@@ -290,7 +290,7 @@ func TestMboxInUnread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	readBody(msg.BodyReader(), false)
+	readBody(msg.BodyReader(), false, -1)
 	if !src.Unread() {
 		t.Error("Unread false on a stream abandoned after the first message")
 	}

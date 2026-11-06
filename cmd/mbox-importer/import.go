@@ -55,7 +55,7 @@ func (c *counters) skippedTotal() int {
 // skippedDetail lists the non-zero skip counts as "name=count,..." in reason order, or "-".
 func (c *counters) skippedDetail() string {
 	var parts []string
-	for r := skipNoMessageID; r <= skipBadGroup; r++ {
+	for r := skipNoMessageID; r <= skipLast; r++ {
 		if n := c.Skipped[r]; n > 0 {
 			parts = append(parts, fmt.Sprintf("%s=%d", r, n))
 		}
@@ -134,6 +134,7 @@ type runOptions struct {
 	history, dryRun, keepBinary        bool
 	markDone, strictMsgID              bool
 	commitTimeout                      time.Duration // 0: no limit
+	maxArticleSize                     int           // -max-article-size in bytes, header and body; 0: no limit
 }
 
 // readMbox reads one input and feeds the sink. It returns errStopped (with the counters
@@ -176,9 +177,32 @@ func readMbox(src *source, opts *runOptions, sink inputSink, stop <-chan struct{
 }
 
 // handleMessage checks one message, hands it to the sink and counts the outcome.
-// The body is always drained.
+// The body is always drained. An article over -max-article-size is skipped as "too-big";
+// one written by mbox2nntp's exporters (X-Mbox2nntp-Format: mboxrd) is unquoted first.
 func handleMessage(c *counters, rawHead []string, bodyReader io.Reader, opts *runOptions, sink inputSink) {
-	body, isBinary := readBody(bodyReader, opts.keepBinary)
+	maxBody := -1 // no limit
+	if opts.maxArticleSize > 0 {
+		maxBody = opts.maxArticleSize
+		for _, l := range rawHead {
+			maxBody -= len(l) + 1
+		}
+		maxBody = max(maxBody, 0)
+	}
+	body, isBinary, tooBig := readBody(bodyReader, opts.keepBinary, maxBody)
+	if tooBig {
+		c.Skipped[skipTooBig]++
+		msgid, _ := headerField(rawHead, "Message-ID")
+		log.Printf("[MBOX-IMPORT] skipped msgid=%q: article over -max-article-size %d bytes", msgid, opts.maxArticleSize)
+		return
+	}
+	if isMboxrdQuoted(rawHead) {
+		for i, l := range rawHead {
+			rawHead[i] = mboxrdUnquote(l)
+		}
+		for i, l := range body {
+			body[i] = mboxrdUnquote(l)
+		}
+	}
 	handleLines(c, rawHead, body, isBinary, opts, sink)
 }
 

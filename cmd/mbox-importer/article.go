@@ -24,10 +24,16 @@ const (
 	skipTooManyHeaders
 	skipNoNewsgroups
 	skipBadGroup
+	skipTooBig
+	skipLast = skipTooBig // the last reason, for loops over all of them
 )
 
 // maxHeaderLines is the most header lines (continuations included) an article may have.
 const maxHeaderLines = 256
+
+// defaultMaxArticleSize is the default of -max-article-size (mbox2nntp's cap: text
+// articles are mostly under 16 KB, servers rarely take one over 256 KB).
+const defaultMaxArticleSize = 1 << 20
 
 // bodyChunkSize is the read size of readBody; longer lines are joined from several reads.
 const bodyChunkSize = 64 * 1024
@@ -54,6 +60,8 @@ func (r skipReason) String() string {
 		return "no-newsgroups"
 	case skipBadGroup:
 		return "bad-group"
+	case skipTooBig:
+		return "too-big"
 	}
 	return "unknown"
 }
@@ -65,25 +73,32 @@ func isspace(b byte) bool {
 }
 
 // readBody reads a message body into lines without line endings; isBinary is set (and the
-// body left out) when keepBinary is false and a line starts with "=ybegin". It reads r in
-// 64 KiB chunks, joins a line split over several reads, strips CR and LF at the line end
-// and removes trailing empty lines. r is always read to its end.
-func readBody(r io.Reader, keepBinary bool) (body []string, isBinary bool) {
+// body left out) when keepBinary is false and a line starts with "=ybegin". tooBig is set
+// (and the body left out) when the body holds more than maxBytes bytes (maxBytes < 0: no
+// limit), so a huge article never sits in memory whole. It reads r in 64 KiB chunks, joins
+// a line split over several reads, strips CR and LF at the line end and removes trailing
+// empty lines. r is always read to its end.
+func readBody(r io.Reader, keepBinary bool, maxBytes int) (body []string, isBinary, tooBig bool) {
 	buffer := make([]byte, bodyChunkSize)
 	var part []byte // the start of a line not yet ended by '\n'
+	size := 0       // body bytes read so far, line endings included
 	addLine := func(line string) {
 		if !keepBinary && !isBinary && strings.HasPrefix(line, "=ybegin") {
 			isBinary = true
 			body = nil
 		}
-		if !isBinary {
+		if !isBinary && !tooBig {
 			body = append(body, strings.TrimRight(line, "\r\n"))
 		}
 	}
 	for {
 		n, err := r.Read(buffer)
 		chunk := buffer[:n]
-		for len(chunk) > 0 {
+		if size += n; maxBytes >= 0 && size > maxBytes && !tooBig {
+			tooBig = true
+			body, part = nil, nil
+		}
+		for len(chunk) > 0 && !tooBig {
 			i := bytes.IndexByte(chunk, '\n')
 			if i < 0 {
 				part = append(part, chunk...)
@@ -106,7 +121,7 @@ func readBody(r io.Reader, keepBinary bool) (body []string, isBinary bool) {
 			break
 		}
 	}
-	return removeFinalEmptyLines(body), isBinary
+	return removeFinalEmptyLines(body), isBinary, tooBig
 }
 
 // removeFinalEmptyLines drops empty lines at the end of body (mbox2nntp's
@@ -161,6 +176,47 @@ func repairMessageID(msgid string) string {
 	return msgid
 }
 
+// firstMessageID cuts a field holding several IDs, "<a@b> <c@d>" or "<a@b><c@d>", to the
+// first (mbox2nntp's lax GetMessageID, v0.3.2).
+func firstMessageID(msgid string) string {
+	if strings.HasPrefix(msgid, "<") {
+		if j := strings.IndexByte(msgid, '>'); j > 0 && strings.HasPrefix(strings.TrimLeft(msgid[j+1:], " \t"), "<") {
+			return msgid[:j+1]
+		}
+	}
+	return msgid
+}
+
+// mboxrdFormatField names the header field mbox2nntp's exporters (uatexport, ncexport,
+// v0.3.0+) end each article's header with: the article is quoted mboxrd, header and body.
+const mboxrdFormatField = "X-Mbox2nntp-Format"
+
+// isMboxrdQuoted reports whether head holds "X-Mbox2nntp-Format: mboxrd" (mbox2nntp's
+// mboxout.IsQuoted). Old archive mboxes are not quoted: in them a ">From " line is part
+// of the article as posted, so only an article with this field is unquoted.
+func isMboxrdQuoted(head []string) bool {
+	for _, l := range head {
+		if name, value, ok := strings.Cut(l, ":"); ok &&
+			strings.EqualFold(strings.TrimSpace(name), mboxrdFormatField) &&
+			strings.EqualFold(strings.TrimSpace(value), "mboxrd") {
+			return true
+		}
+	}
+	return false
+}
+
+// mboxrdUnquote undoes the exporters' quote of one line: a '>' before a line that, with
+// any number of '>' taken off, starts "From " or "#! rnews " (mbox2nntp's mboxout.Unquote).
+func mboxrdUnquote(l string) string {
+	if strings.HasPrefix(l, ">") {
+		t := strings.TrimLeft(l[1:], ">")
+		if strings.HasPrefix(t, "From ") || strings.HasPrefix(t, "#! rnews ") {
+			return l[1:]
+		}
+	}
+	return l
+}
+
 // laxMessageID reports whether msgid starts with '<', ends with '>' and holds no
 // whitespace or control byte (mbox2nntp's -lax-msgid default, without spaces).
 func laxMessageID(msgid string) bool {
@@ -188,6 +244,7 @@ func messageIDFromHeaders(head []string, strict bool) (msgid string, reason skip
 		}
 		return value, skipNone
 	}
+	value = firstMessageID(value)
 	value = repairMessageID(value)
 	if !laxMessageID(value) {
 		return "", skipBadMessageID
@@ -244,7 +301,8 @@ func hasNonBlankContinuation(head []string, i int) bool {
 
 // rewriteHead turns the stored header lines into the ones handed to the processor
 // (mbox2nntp's rewriteHead without the Path prefix: the processor prefixes the local
-// hostname). Per line: NUL, backspace, tab and CR become spaces; Xref, Expires and stray
+// hostname). Per line: NUL, backspace, tab and CR become spaces; Xref, Expires,
+// X-Mbox2nntp-Format and stray
 // "From " lines are dropped with their continuations, so are lines without a colon (or
 // with a field name that is not RFC 5322 ftext) and orphan or blank continuations;
 // a header with an empty value and no continuation is dropped; "Key:value" and
@@ -306,7 +364,7 @@ func rewriteHead(msgid string, head []string) (newhead []string, reason skipReas
 			continue
 		}
 		switch strings.ToLower(key) {
-		case "xref", "expires":
+		case "xref", "expires", "x-mbox2nntp-format":
 			continue
 		case "message-id":
 			if !hasMsgID {

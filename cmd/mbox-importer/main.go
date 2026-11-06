@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/go-while/go-pugleaf/internal/database"
 	"github.com/go-while/go-pugleaf/internal/history"
 	"github.com/go-while/go-pugleaf/internal/processor"
+	"github.com/go-while/mbox2nntp/uat"
 )
 
 var appVersion = "-unset-"
@@ -62,6 +64,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		commitTimeout   = fs.Duration("commit-timeout", 30*time.Minute, "per input: how long to wait until the batch writer committed its articles (0 = no limit)")
 		parallel        = fs.Int("parallel", 1, "inputs imported at the same time (1-32; each worker takes the next input in order)")
 		maxBatch        = fs.Int("max-batch", 1000, "articles the batch writer commits per group database transaction (100-1000)")
+		maxArtSize      = fs.Int("max-article-size", defaultMaxArticleSize, "skip articles larger than this many bytes, header and body, counted as too-big (0 = no limit)")
 		maxQueue        = fs.Int("max-queue", 0, "articles the batch writer may hold queued over all groups (16-100000; 0 = 2 x parallel x max-batch, at least 1280)")
 	)
 	fs.Usage = func() { usage(fs) }
@@ -109,6 +112,10 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		fmt.Fprintf(fs.Output(), "mbox-importer: -max-queue %d is not 0 or in %d-%d\n", *maxQueue, minBatchQueue, maxBatchQueue)
 		return 2
 	}
+	if *maxArtSize < 0 {
+		fmt.Fprintf(fs.Output(), "mbox-importer: -max-article-size %d is negative\n", *maxArtSize)
+		return 2
+	}
 	queueSize := batchQueueSize(*parallel, *maxBatch, *maxQueue)
 
 	opts := &runOptions{
@@ -128,8 +135,14 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		markDone:        *markDoneFlag,
 		strictMsgID:     *strictMsgID,
 		commitTimeout:   *commitTimeout,
+		maxArticleSize:  *maxArtSize,
 	}
 
+	// the UAT reader reads past bigger messages and counts them (Package.TooBig)
+	uat.MaxMessageSize = math.MaxInt
+	if opts.maxArticleSize > 0 {
+		uat.MaxMessageSize = opts.maxArticleSize
+	}
 	history.ENABLE_HISTORY = opts.history // read once by NewHistory
 	database.GlobalDateParser = processor.ParseNNTPDate
 	log.Printf("[MBOX-IMPORT] Starting go-pugleaf mbox-importer (version %s) parallel=%d max-batch=%d max-queue=%d", config.AppVersion, *parallel, *maxBatch, queueSize)

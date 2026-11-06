@@ -103,6 +103,7 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 | `-keep-binary` | `false` | Import yEnc binary articles (`=ybegin`) instead of skipping them |
 | `-mark-done` | `true` | Rename a fully imported input to `INPUT.done` (see below) |
 | `-strict-msgid` | `false` | Require Message-IDs that pass go-pugleaf's own validator instead of the lax mbox2nntp rules |
+| `-max-article-size` | `1048576` | Skip articles larger than this many bytes, header and body, counted as `too-big` (mbox2nntp's 1 MiB cap); `0` = no limit. A bigger mbox article is read past without being held in memory; for UAT inputs the reader skips it |
 | `-commit-timeout` | `30m` | How long to wait, per input, until the batch writer has committed its articles; `0` = no limit |
 | `-parallel` | `1` | Inputs imported at the same time (1-32). Each worker takes the next input in the given order; the summary keeps that order. Every worker still hands its articles to the one batch writer, so more workers mostly help with many small inputs or slow unpacking |
 | `-max-batch` | `1000` | Articles the batch writer commits per group database transaction (100-1000). Smaller batches commit sooner and hold less in memory; larger ones are faster on big inputs |
@@ -196,7 +197,7 @@ Exit codes:
 |------|---------|
 | `0` | every input was read without an article error (marked done or not, see the log; also when there was nothing to import) |
 | `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error |
-| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000) |
+| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000, negative `-max-article-size`) |
 | `130` | stopped by SIGINT/SIGTERM |
 
 ## What is stored
@@ -205,17 +206,24 @@ Exit codes:
   header, or `-group NAME`. Crossposts are not processed: the article is filed in that one group
   only, which is how the fetcher's bulk mode works. Missing groups are created (active) on the fly.
 - **Header rewrite** before the article is handed to the processor:
-  - `Xref:`, `Expires:` and stray `From ` lines (with their continuation lines) are dropped;
+  - `Xref:`, `Expires:`, `X-Mbox2nntp-Format:` and stray `From ` lines (with their continuation
+    lines) are dropped;
   - NUL, backspace and tab characters become spaces;
   - lines without a colon (that are not continuations) and empty headers without a continuation
     are dropped; `Key:value` and `Key :value` are repaired to `Key: value`;
   - the `Message-ID:` header is reduced to one line `Message-ID: <msgid>` (added if it was lost);
+    the ID comes from the first `Message-ID:` field; in lax mode a field holding several IDs
+    (`<a@b> <c@d>`) is cut to the first, as in mbox2nntp v0.3.2;
   - a broken `Date:` line from some Google Groups headers is dropped (`isBadDateLine`, as in
     mbox2nntp);
   - `Path:` is kept as in the file; the processor prefixes it with the local hostname
     (`-nntphostname`).
 - **Bodies are stored as in the file.** `>From ` lines are left untouched, line endings are
   normalised, trailing empty lines are removed. Dot-stuffing is added by the NNTP server on output.
+  The exception are articles written by mbox2nntp's exporters (`uatexport`, `ncexport`, v0.3.0+):
+  their header ends with `X-Mbox2nntp-Format: mboxrd`, and they are quoted mboxrd, so one `>` is
+  taken off every header and body line that starts with `>`s followed by `From ` or `#! rnews `
+  (old archive mboxes are not quoted: there a `>From ` line is part of the article as posted).
 - **Already present** articles (the Message-ID is already in the target group) are counted as
   `present` and not processed again.
 - **Threading uses `References:` only.** A reply that is imported before its parent gets no thread
@@ -238,6 +246,7 @@ Skipped articles are counted per reason in the summary line.
 | `too-many-headers` | has more than 256 header lines |
 | `no-newsgroups` | has no `Newsgroups:` header |
 | `bad-group` | has a first group in `Newsgroups:` that is not a valid group name (no fallback to a later group) |
+| `too-big` | is larger than `-max-article-size` (header and body; UAT: the stored message size) |
 
 With `-group`, the first group is not looked up, so `bad-group` does not apply. `no-newsgroups`
 still applies, because the processor requires the header.
@@ -252,9 +261,11 @@ in the future, or a duplicate core header (`Date`, `From`, `Message-ID`, `Newsgr
 
 The parser reports body lines that start like a message separator (`From ` or `#! rnews `) but were
 *not* taken as one, and up to five samples are logged with their line numbers. In ordinary prose
-this is normal (`From Table 1 ...`). If the samples look like separators
-(`From user@host Thu Dec  8 ...`), the collection uses a separator shape the parser does not know
-and articles were merged: fix that in `go-lib-mbox2nntp` before importing the collection.
+this is normal (`From Table 1 ...`). The RFC 4155 line most mbox writers use
+(`From user@host Thu Dec  8 12:55:04 2016`, the whole line) is a known separator since
+go-lib-mbox2nntp 73e35b8. If the samples still look like separators, the collection uses a
+separator shape the parser does not know and articles were merged: fix that in `go-lib-mbox2nntp`
+before importing the collection.
 
 **Dry-run one file of every new collection first and read the near-miss samples.**
 

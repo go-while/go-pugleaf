@@ -1,12 +1,10 @@
 module github.com/go-while/go-pugleaf
 
-go 1.27.1
-
-toolchain go1.27.3
+go 1.27.3
 
 require (
-	github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017122104-f0412ef9498e
-	github.com/go-while/mbox2nntp v0.0.0-20261017113153-823cac0bb507
+	github.com/go-while/go-lib-mbox2nntp v0.0.0-20261022120752-73e35b8ebb89
+	github.com/go-while/mbox2nntp v0.3.2
 	github.com/go-while/nntp-testkit v0.8.0
 	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/redis/go-redis/v9 v9.14.0

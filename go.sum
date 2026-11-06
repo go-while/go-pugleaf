@@ -6,10 +6,10 @@ github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UF
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/rVNCu3HqELle0jiPLLBs70cWOduZpkS1E78=
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
-github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017122104-f0412ef9498e h1:RWQ2HTKF6ECX/EExSouZmfZRheH6bp4/ZqI9/iAitd4=
-github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017122104-f0412ef9498e/go.mod h1:C/4BQE5gxV6BeHycS1wJ5iugN/nWFApPE/pa3mkkB6s=
-github.com/go-while/mbox2nntp v0.0.0-20261017113153-823cac0bb507 h1:vAbJVNIIx0OHUMIJ2xYxAzft6/Zs5pYSc/WQ60eTC9Y=
-github.com/go-while/mbox2nntp v0.0.0-20261017113153-823cac0bb507/go.mod h1:dr8HQGk2x0/Vkgs85z2rGhpZ3E9qaJeQehIVUpIw6Sw=
+github.com/go-while/go-lib-mbox2nntp v0.0.0-20261022120752-73e35b8ebb89 h1:3xfg8JvhsLnm4OSZJIGsYo004QOgaJl9AcTInJRqOGo=
+github.com/go-while/go-lib-mbox2nntp v0.0.0-20261022120752-73e35b8ebb89/go.mod h1:+JYfNk+CJoNMoXo1DN/KZuF7xmc61FFfyDfTBWNNZF0=
+github.com/go-while/mbox2nntp v0.3.2 h1:BJPvtCnXRm6I29tPfXPz/h4lPLAlQ07/xs0UPrIJxxk=
+github.com/go-while/mbox2nntp v0.3.2/go.mod h1:oY0HRxJ7mFjgc6eG9NPFxIVWQyBoQ1Si5DdhFTWQdM4=
 github.com/go-while/nntp-testkit v0.8.0 h1:Zpki/pkYtyNx80Qy/zm6TXFlFz9IapjXuZ2sonvIcP4=
 github.com/go-while/nntp-testkit v0.8.0/go.mod h1:ToP/P8mZXHw5kBz8er8EmSG3ZHyVF4pR5iuauD2MyTM=
 github.com/mattn/go-sqlite3 v1.14.32 h1:JD12Ag3oLy1zQA+BNn74xRgaBbdhbNIDYvQUEuuErjs=

@@ -147,6 +147,12 @@ func importUAT(path string, opts *runOptions, sink articleSink, stop <-chan stru
 			log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, eachErr)
 		}
 	}
+	if p.TooBig > 0 {
+		// messages over uat.MaxMessageSize (-max-article-size): read past by Each
+		c.Read += p.TooBig
+		c.Skipped[skipTooBig] += p.TooBig
+		log.Printf("[MBOX-IMPORT] uat file=%q skipped %d message(s) over -max-article-size", path, p.TooBig)
+	}
 	closeErr := p.Close()
 	if closeErr != nil {
 		log.Printf("[MBOX-IMPORT] input error: file=%q: %v", path, closeErr)

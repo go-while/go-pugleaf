@@ -11,7 +11,9 @@ import (
 
 // fixtureMbox holds two articles with the archive.org separator. The first has a folded
 // Newsgroups header with three groups, a "Key:value" and a "Key :value" line, an empty
-// header, a tab, a stray "From " line and a folded Xref header.
+// header, a tab, a stray "From " line and a folded Xref header. The stray line has text after
+// its date (UUCP "remote from"): a whole-line "From SENDER DATE" is an RFC 4155 separator since
+// go-lib-mbox2nntp 73e35b8 and would end the article there.
 const fixtureMbox = "From nobody Thu Dec  8 13:43:59 2016\n" +
 	"Path: a.example!b.example!not-for-mail\n" +
 	"From: Alice <alice@example.invalid>\n" +
@@ -23,7 +25,7 @@ const fixtureMbox = "From nobody Thu Dec  8 13:43:59 2016\n" +
 	"Message-ID: <first@example.invalid>\n" +
 	"Organization :Example Org\n" +
 	"Keywords:\n" +
-	"From someone@example.invalid Mon Jun 30 23:33:23 2003\n" +
+	"From someone@example.invalid Mon Jun 30 23:33:23 2003 remote from uucp\n" +
 	"X-Trace: t\t1 2\n" +
 	"Xref: news.example de.test.one:1\n" +
 	" de.test.two:2 de.test.three:3\n" +
@@ -220,10 +222,10 @@ func TestMboxArtSkipReasons(t *testing.T) {
 	if _, r := firstNewsgroup(append(without("Newsgroups"), "Newsgroups: bad/group!name,de.test.one")); r != skipBadGroup {
 		t.Errorf("bad first group: %v", r)
 	}
-	if body, bin := readBody(strings.NewReader("text\n=ybegin line=128 size=3 name=a.bin\nabc\n=yend\n"), false); !bin || body != nil {
+	if body, bin, _ := readBody(strings.NewReader("text\n=ybegin line=128 size=3 name=a.bin\nabc\n=yend\n"), false, -1); !bin || body != nil {
 		t.Errorf("binary: isBinary=%v body=%q", bin, body)
 	}
-	if body, _ := readBody(strings.NewReader("\n\r\n\n"), false); len(body) != 0 {
+	if body, _, _ := readBody(strings.NewReader("\n\r\n\n"), false, -1); len(body) != 0 {
 		t.Errorf("empty body (no-body): %q", body)
 	}
 	if _, r := rewriteHead("<x@example.invalid>", base()); r != skipNone {
@@ -317,7 +319,7 @@ func TestMboxArtReadBody(t *testing.T) {
 		{"small reads", &chunkReader{data: []byte(input), n: 7}},
 		{"chunk-sized reads", &chunkReader{data: []byte(input), n: bodyChunkSize}},
 	} {
-		body, bin := readBody(tc.r, true)
+		body, bin, _ := readBody(tc.r, true, -1)
 		if bin {
 			t.Errorf("%s: isBinary with keepBinary", tc.name)
 		}
@@ -332,7 +334,7 @@ func TestMboxArtReadBody(t *testing.T) {
 	}
 
 	r := &chunkReader{data: []byte(input), n: 1000}
-	body, bin := readBody(r, false)
+	body, bin, _ := readBody(r, false, -1)
 	if !bin || body != nil {
 		t.Errorf("=ybegin without keepBinary: isBinary=%v body=%d lines", bin, len(body))
 	}
@@ -340,7 +342,7 @@ func TestMboxArtReadBody(t *testing.T) {
 		t.Errorf("readBody left %d bytes unread", len(r.data))
 	}
 
-	body, _ = readBody(strings.NewReader("a\r\n\r\nb\r\n\r\n\n\r\n"), false)
+	body, _, _ = readBody(strings.NewReader("a\r\n\r\nb\r\n\r\n\n\r\n"), false, -1)
 	if !reflect.DeepEqual(body, []string{"a", "", "b"}) {
 		t.Errorf("CRLF and final empty lines: %q", body)
 	}
