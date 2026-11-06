@@ -41,6 +41,20 @@ type counters struct {
 	Skipped                                                            map[skipReason]int
 	StoppedEarly, Unread, MarkedDone                                   bool
 	CommitFailed                                                       bool // the commit wait of the input failed
+	// news spool inputs (-spool, disc images; plan mbox-import-discs), 0 for an mbox input:
+	Files        int // regular files walked
+	NotArticle   int // files that are no article, A-news batch or mbox (binaries, tar, README, ...)
+	XrefPointers int // NetNews/CD "<n>.XRF" crosspost pointer files (not read)
+	ANewsBatches int // A-news batch files (several articles each)
+}
+
+// spoolDetail is the spool part of the per-input log line ("" for an mbox input).
+func (c *counters) spoolDetail() string {
+	if c.Files == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" files=%d not-article=%d xref-pointers=%d anews-batches=%d",
+		c.Files, c.NotArticle, c.XrefPointers, c.ANewsBatches)
 }
 
 func newCounters(file string) *counters {
@@ -79,6 +93,10 @@ func (c *counters) add(o *counters) {
 	c.Errors += o.Errors
 	c.ParserSkipped += o.ParserSkipped
 	c.NearMisses += o.NearMisses
+	c.Files += o.Files
+	c.NotArticle += o.NotArticle
+	c.XrefPointers += o.XrefPointers
+	c.ANewsBatches += o.ANewsBatches
 	for r, n := range o.Skipped {
 		c.Skipped[r] += n
 	}
@@ -801,9 +819,9 @@ func importInput(path string, opts *runOptions, sink articleSink, stop <-chan st
 		}
 	}
 
-	log.Printf("[MBOX-IMPORT] file=%q read=%d stored=%d present=%d skipped=%d (%s) rejected=%d errors=%d parser-skipped=%d near-misses=%d stopped-early=%t unread=%t marked-done=%t",
+	log.Printf("[MBOX-IMPORT] file=%q read=%d stored=%d present=%d skipped=%d (%s) rejected=%d errors=%d parser-skipped=%d near-misses=%d stopped-early=%t unread=%t marked-done=%t%s",
 		path, c.Read, c.Stored, c.Present, c.skippedTotal(), c.skippedDetail(), c.Rejected, c.Errors,
-		c.ParserSkipped, c.NearMisses, c.StoppedEarly, c.Unread, c.MarkedDone)
+		c.ParserSkipped, c.NearMisses, c.StoppedEarly, c.Unread, c.MarkedDone, c.spoolDetail())
 	for _, nm := range samples {
 		log.Printf("[MBOX-IMPORT]   near-miss file=%q line=%d %q", path, nm.line, nm.text)
 	}
