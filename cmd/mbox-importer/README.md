@@ -705,14 +705,14 @@ kills it (and its children), removes the unpack directory and ends the input as 
 **What `7z x` is allowed to complain about.** Exit status 0 is the normal case. Exit status 1
 (warnings: something could not be read) is logged and the files that were extracted are imported.
 Exit status 2 is an input error (exit code 1), with one exception that the old CD images need: a
-symbolic link whose target leaves the image is refused by 7-Zip, which writes an empty file in its
-place, extracts everything else and still exits 2. That image is imported — and marked done, so it
+symbolic link with a `..` in its target is refused by 7-Zip (even one that stays inside the image),
+which writes an empty file in its place, extracts everything else and still exits 2. That image is imported — and marked done, so it
 is not unpacked again on the next scan, which would end exactly the same way — as long as the
 unpack directory is not empty and every other `ERROR` line of the run is such a link. The refused
 links are counted:
 
 ```
-[MBOX-IMPORT] file="…/NN_1992_16.iso" 37 dangerous link(s) skipped by 7z: a symbolic link out of the image is left as an empty file, everything else was extracted
+[MBOX-IMPORT] file="…/NN_1992_16.iso" 37 dangerous link(s) skipped by 7z: a symbolic link with ".." in its target is left as an empty file, everything else was extracted
 ```
 
 An archive that cannot be opened, a truncated one (7-Zip prints an `ERRORS:` header) and a killed
@@ -722,10 +722,10 @@ An archive that cannot be opened, a truncated one (7-Zip prints an `ERRORS:` hea
 
 A spool tree holds much more than articles — `LIB/ACTIVE`, `BIN/`, `.overview` files, `YMTRANS.TBL`,
 tarballs, `.Z` files — so every file is classified by its first bytes, not by its name, and the
-per-input summary line gains four counters:
+per-input summary line gains five counters:
 
 ```
-[MBOX-IMPORT] file="…/NN_1992_16.iso" read=… stored=… present=… skipped=… (…) rejected=… errors=… … files=191203 not-article=4821 xref-pointers=12044 anews-batches=0
+[MBOX-IMPORT] file="…/NN_1992_16.iso" read=… stored=… present=… skipped=… (…) rejected=… errors=… … files=191203 not-article=4821 xref-pointers=12044 anews-batches=0 file-errors=0
 ```
 
 - `files`: regular files walked;
@@ -735,7 +735,12 @@ per-input summary line gains four counters:
   article (`alt/cad/autocad/1005`), counted and not read — the article itself is in the group the
   pointer names, and crossposts are not processed by this importer anyway;
 - `anews-batches`: files in the old A-news batch format (several articles in one file), as in the
-  earliest utzoo tapes.
+  earliest utzoo tapes;
+- `file-errors`: files or directories that could not be opened or read to their end (each one is
+  logged with its name). A one-article file is read whole before it is handed on, so a read error
+  never stores a truncated article. Unreadable files do **not** keep the input from being marked
+  done and do not change the exit code — a damaged image does not heal on the next scan — but the
+  tracking database's `reason` for that input says `N unreadable file(s)`.
 
 An mbox file inside a spool (the `DOUG.*` floppies are plain mboxes without a suffix) is read with
 the normal mbox reader, so its articles are counted in `read`/`stored` like any other.
@@ -768,7 +773,7 @@ for i in /tank0/archive.org/*/*.iso /tank0/archive.org/*/*.sqsh; do
 done
 ```
 
-Read the `files=… not-article=… xref-pointers=… anews-batches=…` counter line, the target groups
+Read the `files=… not-article=… xref-pointers=… anews-batches=… file-errors=…` counter line, the target groups
 (`dry-run group="…" articles=…`) and the [skip reasons](#skip-reasons) of each image. A disc whose
 `not-article` is most of its `files` is a disc of software, not of articles.
 
@@ -809,7 +814,7 @@ database) is stored in the `log` table of that database as well.
 - `stopped-early=true`: the parser lost its place before the end of the file
 - `unread=true`: the stream ended before the underlying file did
 - `marked-done`: whether the input was renamed to `INPUT.done`
-- `files`, `not-article`, `xref-pointers`, `anews-batches`: only for a news spool input (a disc
+- `files`, `not-article`, `xref-pointers`, `anews-batches`, `file-errors`: only for a news spool input (a disc
   image or `-spool`), see [What the walk counts](#what-the-walk-counts)
 
 ## Notes
