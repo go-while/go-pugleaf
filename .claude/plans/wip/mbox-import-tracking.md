@@ -158,3 +158,17 @@ Before the first run: check the DB file name and whether iafetch runs with an ab
 
 `mbox-importer -data /tank0/go-pugleaf/data -from-iafetch /tank0/archive.org/.iafetch/<db> -group-from-name
 -parallel 4 -follow 10m` as user go-pugleaf in a `screen`, or a oneshot/timer unit later.
+
+## Progress
+### Wave 0 (2026-11-06, inline 517b177 + plan note 30a53bc)
+### Wave 1 (2026-11-06)
+- slice `iasource`: branch worktree-agent-ab233f85c18dc4ccd (a67df74, 7e22add; review fixes bbba79f: escaped DSN
+  `iafetchDSN`, read-only pinned by tests incl. cross-process writer, `iafetchPending`, size from disk when the DB
+  has <= 0, supported = isInputName && readable suffix (.mbox/.bag/.gz/.zip/.7z/UAT)). Merged 6075719.
+- slice `trackdb`: branch worktree-agent-ab6959be19ac4648d (5416a1e; review fixes a1b301d: run liveness by host +
+  boot id + process start time, `-reimport` takes rows of foreign-host runs, README recovery SQL, path Abs/Clean +
+  `dedupePlanned`, tee never closes its data channel, escaped DSNs, log prefix stripped). Merged c1904c0.
+  Deviations kept: `runs.pid/boot_id/pstart`; DB not opened when nothing to import; tracking write errors don't
+  change the exit code.
+- For wave 2: `trackPlannedStatus` maps every unsupported input to `unsupported`; it must map
+  `iafetchPending(reason)` to `pending`.
