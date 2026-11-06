@@ -56,7 +56,8 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		sevenZip        = fs.String("7z", "7z", "program used to unpack .7z inputs (name in PATH or a full path)")
 		zstdProg        = fs.String("zstd", "zstd", "program used to read UAT archives (.usenet, .usenet.xz, .usenet.7z; name in PATH or a full path)")
 		xzProg          = fs.String("xz", "xz", "program used to unpack .usenet.xz inputs; when it is not found, -7z is used (7z e -txz)")
-		tmpDir          = fs.String("tmpdir", "", "directory for the unpacked copy of a .usenet.xz / .usenet.7z input (as large as the package) and the zstd dictionary (\"\" = system temp dir)")
+		tmpDir          = fs.String("tmpdir", "", "directory for the unpacked copy of a .usenet.xz / .usenet.7z input or of a disc image (as large as the unpacked contents) and the zstd dictionary (\"\" = system temp dir)")
+		spoolFlag       = fs.Bool("spool", false, "read a positional directory or .zip input as a news spool (one article per file, as on a CD image) instead of scanning the directory for *.mbox* files; disc images (.iso, .cdr, .sqsh, .img) are always read this way")
 		dryRun          = fs.Bool("dry-run", false, "parse and count only: no database is opened, no input is renamed")
 		keepBinary      = fs.Bool("keep-binary", false, "import yEnc binary articles (=ybegin) instead of skipping them")
 		markDoneFlag    = fs.Bool("mark-done", true, "rename a fully imported input to INPUT.done")
@@ -109,6 +110,13 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		fmt.Fprintln(fs.Output(), "mbox-importer: "+msg)
 		return 2
 	}
+	if *spoolFlag && *fromIAFetch != "" {
+		// -spool is about positional directory and zip arguments, and -from-iafetch has
+		// none; a disc image of the mirror is read as a news spool without the flag.
+		fmt.Fprintln(fs.Output(), "mbox-importer: -spool and -from-iafetch exclude each other: "+
+			"-spool is for positional directory or .zip inputs (a disc image is read as a news spool anyway)")
+		return 2
+	}
 	if *fromIAFetch == "" && fs.NArg() == 0 {
 		fmt.Fprintln(fs.Output(), "mbox-importer: no input given")
 		fs.Usage()
@@ -156,6 +164,7 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		zstd:            *zstdProg,
 		xz:              *xzProg,
 		tmpDir:          *tmpDir,
+		spool:           *spoolFlag,
 		useShortHashLen: *useShortHashLen,
 		parallel:        *parallel,
 		groupFromName:   *groupFromName,
@@ -204,9 +213,12 @@ func runWith(args []string, stopChan <-chan struct{}) (code int) {
 		planned = first
 		opts.markDone = false // iafetch's mirror is only read, never renamed
 	} else {
-		files, errs := expandInputs(fs.Args())
+		files, errs := expandInputs(fs.Args(), opts.spool)
 		expandErrs = errs
 		planned = plannedFromPaths(files)
+		if opts.spool {
+			spoolDirSizes(planned) // a spool directory is tracked with size 0 (disc.go)
+		}
 	}
 
 	// The tracking database is opened before the run is logged: its log tee catches every
@@ -445,12 +457,17 @@ func usage(fs *flag.FlagSet) {
 	fmt.Fprintln(out, "       mbox-importer [flags] -status [-json]   (prints the tracking database, imports nothing)")
 	fmt.Fprintln(out, "  INPUT: NAME.mbox, NAME.bag, NAME.mbox.gz, NAME.mbox.zip, NAME.mbox.7z (via -7z),")
 	fmt.Fprintln(out, "         UAT archives NAME.usenet, NAME.usenet.xz (via -xz), NAME.usenet.7z (via -7z), all via -zstd,")
-	fmt.Fprintln(out, "         or a directory (its *.mbox* / *.bag* / *.usenet* files not ending in .done, sorted by name)")
+	fmt.Fprintln(out, "         disc images IMAGE.iso, IMAGE.cdr, IMAGE.sqsh, IMAGE.img (news spools, unpacked into -tmpdir via -7z),")
+	fmt.Fprintln(out, "         a directory (its *.mbox* / *.bag* / *.usenet* files not ending in .done, sorted by name),")
+	fmt.Fprintln(out, "         or, with -spool, a directory or SPOOL.zip read as a news spool (one article per file)")
 	fmt.Fprintln(out, "Examples:")
 	fmt.Fprintln(out, "  mbox-importer -dry-run de.comm.internet.commerce.mbox")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -nntphostname news.example.org de.comm.internet.commerce.mbox")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -group local.archive /archive/usenet/de.comm/")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -tmpdir /big/tmp pl.comp.lang.c.usenet.xz")
+	fmt.Fprintln(out, "  mbox-importer -dry-run -tmpdir /big/tmp NN_1992_16.iso                            # analyse a CD image first")
+	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -tmpdir /big/tmp utzoo.sqsh                  # -tmpdir needs the unpacked size")
+	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -spool /mnt/netnews-cd NN_1992_25.zip        # a mounted image and a zipped spool")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -parallel 4 -max-batch 500 /archive/usenet/")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -group-from-name -parallel 4 /archive/uat-mbox/   # de.comm.foo.mbox.gz -> de.comm.foo")
 	fmt.Fprintln(out, "  mbox-importer -data ./data-test-mbox -status                                         # what the tracking database knows")

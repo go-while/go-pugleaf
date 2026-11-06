@@ -182,6 +182,7 @@ type runOptions struct {
 	useShortHashLen                    int
 	parallel                           int  // inputs imported at the same time (<= 1: one after the other)
 	groupFromName                      bool // -group-from-name: the target group of an input is its file name (inputOptions)
+	spool                              bool // -spool: a positional directory or .zip input is a news spool (disc.go)
 	history, dryRun, keepBinary        bool
 	markDone, strictMsgID              bool
 	tracked                            bool          // the tracking DB is on: it, not the rename, holds the import state
@@ -401,9 +402,13 @@ func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, st
 					}
 				}
 				o.started = true
-				if uatSuffix(in.Path) != "" {
+				switch spool := spoolInput(in.Path, opts); {
+				case uatSuffix(in.Path) != "":
 					o.c, o.inputErr, o.stopped = importUAT(in.Path, opts, sink, stop)
-				} else {
+				case spool != spoolNone:
+					// a disc image, or a directory or zip file of -spool (disc.go)
+					o.c, o.inputErr, o.stopped = importSpool(in.Path, spool, opts, sink, stop)
+				default:
 					o.c, o.inputErr, o.stopped = importInput(in.Path, opts, sink, stop)
 				}
 				track.finishInput(id, o.c, o.inputErr, o.stopped)

@@ -188,8 +188,9 @@ func TestMboxIAOrderAndReasons(t *testing.T) {
 		t.Fatalf("iafetchInputs: %v", err)
 	}
 	want := []string{
+		"item-a/a3.iso",                            // a disc image: before every other input (iafetchDiscsFirst)
 		"item-b/b1.usenet.xz", "item-b/b_djvu.txt", // ord 1
-		"item-a/a1.mbox.zip", "item-a/a3.iso", "item-a/a_meta.xml", "item-a/sub/dir/a2.mbox.gz", // ord 2
+		"item-a/a1.mbox.zip", "item-a/a_meta.xml", "item-a/sub/dir/a2.mbox.gz", // ord 2
 		"item-c/c1.mbox.zip", // ord 3
 		"item-n/n1.mbox.zip", // no ord: last, by identifier
 		"item-z/z1.mbox.zip", // no items row: last, by identifier
@@ -206,7 +207,7 @@ func TestMboxIAOrderAndReasons(t *testing.T) {
 	}{
 		{"item-a", "a1.mbox.zip", true, ""},
 		{"item-a", "sub/dir/a2.mbox.gz", true, ""},
-		{"item-a", "a3.iso", false, "iso"},
+		{"item-a", "a3.iso", true, ""}, // a disc image is read as a news spool
 		{"item-a", "a_meta.xml", false, "xml"},
 		{"item-b", "b1.usenet.xz", true, ""},
 		{"item-b", "b_djvu.txt", false, "txt"},
@@ -303,7 +304,9 @@ func TestMboxIADiskState(t *testing.T) {
 	iaWrite(t, unknown, 5)
 	iaFileRow(t, db, "item-a", "a5.mbox.zip", -1, "aa55", unknown)
 	// 5. an unsupported file that is missing keeps its suffix reason.
-	iaFileRow(t, db, "item-a", "a6.iso", 100, "aa66", filepath.Join(dir, "item-a", "a6.iso"))
+	iaFileRow(t, db, "item-a", "a6.tar", 100, "aa66", filepath.Join(dir, "item-a", "a6.tar"))
+	// 6. a disc image is supported now: missing on disk makes it pending like an mbox.
+	iaFileRow(t, db, "item-a", "a7.iso", 100, "aa77", filepath.Join(dir, "item-a", "a7.iso"))
 
 	inputs, err := iafetchInputs(dbPath, "")
 	if err != nil {
@@ -322,7 +325,8 @@ func TestMboxIADiskState(t *testing.T) {
 		{"a3.mbox.zip", true, "", 42, true, false},
 		{"a4.mbox.zip", true, "", 9, true, false}, // Size from disk
 		{"a5.mbox.zip", true, "", 5, true, false}, // Size from disk
-		{"a6.iso", false, "iso", 100, false, false},
+		{"a6.tar", false, "tar", 100, false, false},
+		{"a7.iso", false, iaReasonMissing, 100, false, true},
 	} {
 		in := iaFind(t, inputs, "item-a", c.name)
 		if in.Supported != c.supported || in.Reason != c.reason {
@@ -356,19 +360,24 @@ func TestMboxIASupportedNames(t *testing.T) {
 		{"alt.foo.usenet.xz", true, ""},
 		{"alt.foo.usenet.7z", true, ""},
 		{"sub/dir/alt.foo.mbox.zip", true, ""},
-		{"cd1.iso", false, "iso"},
-		{"spool.sqsh", false, "sqsh"},
+		// disc images are news spools: unpacked with 7z and walked (plan mbox-import-discs)
+		{"cd1.iso", true, ""},
+		{"spool.sqsh", true, ""},
+		{"disk.img", true, ""},
+		{"CDROM_March92.cdr", true, ""},
+		{"cd1.iso.done", false, iaReasonUnsupported}, // already imported by an older run
 		{"spool.tar", false, "tar"},
 		{"item_djvu.txt", false, "txt"},
 		{"spool.ufs", false, "ufs"},
-		{"disk.img", false, "img"},
+		// the raw CD dump of a NetNews disc: no .mbox member and no file system 7z walks
+		{"[PC] Netnews CD April 06-20 1992.7z", false, iaReasonUnsupported},
 		{"item_files.xml", false, "xml"},
 		{"item_archive.torrent", false, "torrent"},
 		{"item_jp2.zip", false, iaReasonUnsupported},
 		{"item_meta.sqlite", false, iaReasonUnsupported},
 		{"README", false, iaReasonUnsupported},
 		{"alt.foo.mbox.zip.done", false, iaReasonUnsupported}, // already imported by an older run
-		{"mbox.zip/decoy.iso", false, "iso"},                  // the base name decides, not the folder
+		{"mbox.zip/decoy.iso", true, ""},                      // the base name decides, not the folder
 		// openSource has no reader for these, although isInputName sees ".mbox" in them.
 		{"alt.foo.mbox.bz2", false, iaReasonUnsupported},
 		{"alt.foo.mbox.zst", false, iaReasonUnsupported},
@@ -380,7 +389,8 @@ func TestMboxIASupportedNames(t *testing.T) {
 		{"01alt.test.csv.gz", false, "csv"},
 		// isInputName is case-sensitive, like the directory scan it is shared with.
 		{"X.MBOX.ZIP", false, iaReasonUnsupported},
-		{"F.ISO", false, "iso"},
+		// a disc image is decided case-insensitively (inputKind lower-cases the name).
+		{"F.ISO", true, ""},
 	} {
 		supported, reason := iafetchSupported(c.name)
 		if supported != c.supported || reason != c.reason {
