@@ -5,8 +5,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-while/go-pugleaf/internal/common"
+	"github.com/go-while/go-pugleaf/internal/processor"
 )
 
 // fixtureMbox holds two articles with the archive.org separator. The first has a folded
@@ -473,5 +475,167 @@ func TestMboxArtBuildArticle(t *testing.T) {
 	// the caller's slices are not changed
 	if len(head) != 9 || head[8] != "Message-ID: <third@example.invalid>" {
 		t.Errorf("head changed: %q", head)
+	}
+}
+
+// TestMboxArtOldDateFormats checks that the date spellings of the 1981-92 CDs survive the
+// import path (handleLines -> buildArticle) and are read as the instant they mean by the
+// parser the processor uses for a bulk article (its bulkArticleDate calls ParseNNTPDate).
+// An article with no Date header but a B-news "Posted:" or "Date-Received:" gets a Date
+// line of its own; a pre-Usenet fallback date (ctime(-1)) is no date at all.
+func TestMboxArtOldDateFormats(t *testing.T) {
+	cases := []struct {
+		name     string
+		dateHead []string  // the date headers of the article
+		want     string    // the stored Date header value, "" when the article is skipped
+		instant  time.Time // the instant the date means
+	}{
+		{
+			name:     "two-digit year, no weekday",
+			dateHead: []string{"Date: 6 Dec 90 14:06:05 GMT"},
+			want:     "6 Dec 90 14:06:05 GMT",
+			instant:  time.Date(1990, time.December, 6, 14, 6, 5, 0, time.UTC),
+		},
+		{
+			name:     "two-digit year with weekday",
+			dateHead: []string{"Date: Tue, 21 Jul 92 05:43:39 GMT"},
+			want:     "Tue, 21 Jul 92 05:43:39 GMT",
+			instant:  time.Date(1992, time.July, 21, 5, 43, 39, 0, time.UTC),
+		},
+		{
+			name:     "ctime in the Date header",
+			dateHead: []string{"Date: Mon Nov 23 23:44:52 1981"},
+			want:     "Mon Nov 23 23:44:52 1981",
+			instant:  time.Date(1981, time.November, 23, 23, 44, 52, 0, time.UTC),
+		},
+		{
+			name:     "B-news Posted without Date",
+			dateHead: []string{"Posted: Mon Nov 23 23:44:52 1981"},
+			want:     "Mon, 23 Nov 1981 23:44:52 +0000",
+			instant:  time.Date(1981, time.November, 23, 23, 44, 52, 0, time.UTC),
+		},
+		{
+			name:     "B-news Date-Received without Date",
+			dateHead: []string{"Date-Received: Tue Jan 12 20:03:13 1982"},
+			want:     "Tue, 12 Jan 1982 20:03:13 +0000",
+			instant:  time.Date(1982, time.January, 12, 20, 3, 13, 0, time.UTC),
+		},
+		{
+			name:     "Posted wins over an unreadable Date-Received",
+			dateHead: []string{"Date-Received: nonsense", "Posted: Mon Nov 23 23:44:52 1981"},
+			want:     "Mon, 23 Nov 1981 23:44:52 +0000",
+			instant:  time.Date(1981, time.November, 23, 23, 44, 52, 0, time.UTC),
+		},
+		{
+			name:     "pre-Usenet Posted, ctime(-1)",
+			dateHead: []string{"Posted: Wed, 31-Dec-69 18:59:59 EDT"},
+		},
+		{
+			name:     "no date header at all",
+			dateHead: []string{"X-Posted: Mon Nov 23 23:44:52 1981"},
+		},
+	}
+	for _, tc := range cases {
+		head := append([]string{
+			"Path: utzoo!decvax!watmath!ipe",
+			"From: ipe@watmath.uucp",
+			"Newsgroups: net.jokes.q",
+			"Subject: old date",
+			"Message-ID: <old@example.invalid>",
+		}, tc.dateHead...)
+		c := newCounters(tc.name)
+		sink := newCaptureSink()
+		handleLines(c, head, []string{"body"}, false, &runOptions{}, sink)
+		art := sink.arts["<old@example.invalid>"]
+		if tc.want == "" {
+			if art != nil {
+				t.Errorf("%s: stored with Date %q, want skipped", tc.name, art.DateString)
+			} else if c.Skipped[skipNoDate] != 1 {
+				t.Errorf("%s: skipped=%s, want no-date", tc.name, c.skippedDetail())
+			}
+			continue
+		}
+		if art == nil {
+			t.Errorf("%s: not stored (skipped=%s errors=%d)", tc.name, c.skippedDetail(), c.Errors)
+			continue
+		}
+		if art.DateString != tc.want {
+			t.Errorf("%s: stored Date %q, want %q", tc.name, art.DateString, tc.want)
+		}
+		got, ok := processor.ParseNNTPDateStrict(art.DateString)
+		if !ok || !got.Equal(tc.instant) {
+			t.Errorf("%s: Date %q read as %v (ok=%v), want %v", tc.name, art.DateString, got, ok, tc.instant)
+		}
+		// the stored header block keeps the fields of the article and passes the bulk check
+		if _, err := common.CheckHeaderBlock(strings.Split(art.HeadersJSON, "\n"), common.HeaderBlockFetch); err != nil {
+			t.Errorf("%s: CheckHeaderBlock: %v", tc.name, err)
+		}
+		for _, line := range tc.dateHead {
+			if !strings.Contains(art.HeadersJSON, line) {
+				t.Errorf("%s: stored block lost %q:\n%s", tc.name, line, art.HeadersJSON)
+			}
+		}
+	}
+}
+
+// TestMboxArtArticleIDFallback: an early B-news article with only "Article-I.D." is
+// imported under Google's <bnews.site.n>, the Article-I.D. line stays and the stored block
+// carries the Message-ID header. A real Message-ID wins; -strict-msgid refuses the
+// synthetic form.
+func TestMboxArtArticleIDFallback(t *testing.T) {
+	head := []string{
+		"Path: utzoo!decvax!ucbvax!ark",
+		"From: ark@alice.uucp",
+		"Newsgroups: net.games",
+		"Subject: Quitting",
+		"Date: Mon Nov 23 23:44:52 1981",
+		"Article-I.D.: decvax.123",
+	}
+	msgid, reason := messageIDFromHeaders(head, false)
+	if msgid != "<bnews.decvax.123>" || reason != skipNone {
+		t.Fatalf("messageIDFromHeaders = %q %v", msgid, reason)
+	}
+	if _, reason := messageIDFromHeaders(head, true); reason != skipBadMessageID {
+		t.Errorf("strict: reason %v, want bad-msgid", reason)
+	}
+	got, reason := rewriteHead(msgid, head)
+	want := append(append([]string{}, head...), "Message-ID: <bnews.decvax.123>")
+	if reason != skipNone || !reflect.DeepEqual(got, want) {
+		t.Fatalf("rewriteHead:\n got %q %v\nwant %q", got, reason, want)
+	}
+	if v := common.HeaderValue(got, "Message-ID"); v != msgid {
+		t.Errorf("Message-ID header %q, want %q", v, msgid)
+	}
+
+	// an empty Message-ID line is replaced by the synthetic id, not kept
+	withEmpty := append(append([]string{}, head...), "Message-ID:")
+	msgid, reason = messageIDFromHeaders(withEmpty, false)
+	if msgid != "<bnews.decvax.123>" || reason != skipNone {
+		t.Fatalf("empty Message-ID: %q %v", msgid, reason)
+	}
+	got, reason = rewriteHead(msgid, withEmpty)
+	if reason != skipNone || !reflect.DeepEqual(got, want) {
+		t.Errorf("empty Message-ID rewrite:\n got %q %v\nwant %q", got, reason, want)
+	}
+
+	// a real Message-ID wins
+	both := append(append([]string{}, head...), "Message-ID: <real@decvax.uucp>")
+	if msgid, reason = messageIDFromHeaders(both, false); msgid != "<real@decvax.uucp>" || reason != skipNone {
+		t.Errorf("both ids: %q %v", msgid, reason)
+	}
+	if msgid, reason = messageIDFromHeaders(both, true); msgid != "<real@decvax.uucp>" || reason != skipNone {
+		t.Errorf("both ids, strict: %q %v", msgid, reason)
+	}
+
+	// the whole path: the article is stored under the synthetic id
+	c := newCounters("decvax.123")
+	sink := newCaptureSink()
+	handleLines(c, head, []string{"body"}, false, &runOptions{}, sink)
+	art := sink.arts["<bnews.decvax.123>"]
+	if art == nil {
+		t.Fatalf("not stored: skipped=%s arts=%v", c.skippedDetail(), sink.arts)
+	}
+	if !strings.Contains(art.HeadersJSON, "Article-I.D.: decvax.123") {
+		t.Errorf("stored block lost the Article-I.D. line:\n%s", art.HeadersJSON)
 	}
 }
