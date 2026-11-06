@@ -172,3 +172,11 @@ Before the first run: check the DB file name and whether iafetch runs with an ab
   change the exit code.
 - For wave 2: `trackPlannedStatus` maps every unsupported input to `unsupported`; it must map
   `iafetchPending(reason)` to `pending`.
+### Wave 2 (2026-11-06)
+- branch worktree-agent-a61c4c64fd244d54e: 8df70ee (flags -from-iafetch, -from-iafetch-base, -verify-md5,
+  -follow; checkIAFetchFlags; importScans/followScan; trackPlannedStatus → pending for plannedPending reasons);
+  review fixes eaeb348: -verify-md5 claim-first (only claimTake rows hashed), `releaseInput` back to pending with
+  `md5_seen` (new v1 column), an unchanged mismatching file is not rehashed, exit 130 only inside an input (stop
+  during a scan or hashing → 0), a failed later scan is retried without counting a round, -dry-run allowed with
+  -trackdb off. `claimInput` kept as a wrapper around `claimInputRow`. One run row per process. Merged f9a5449.
+  Full check list green on f9a5449.
