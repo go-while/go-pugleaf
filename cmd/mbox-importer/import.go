@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -82,16 +84,40 @@ func (c *counters) add(o *counters) {
 	}
 }
 
-// runSummary is the result of one run (all inputs).
+// runSummary is the result of one run (all inputs; with -follow the scans added up).
 type runSummary struct {
 	Inputs, InputErrors, MarkedDone int
 	CommitErrors                    int // inputs whose commit wait failed
 	AlreadyImported                 int // inputs the tracking DB knows as done (same file)
-	Unsupported                     int // planned inputs the importer cannot read
+	Unsupported                     int // planned inputs the importer cannot read at all
+	Pending                         int // planned inputs worth another look on the next scan
 	HeldByRun                       int // inputs another live run of the tracking DB holds
+	Scans                           int // scans of this run (1 without -follow)
 	Stopped                         bool
 	Total                           *counters
 	PerInput                        []*counters
+}
+
+// addScan adds the result of one scan to r: with -follow a process imports one scan after
+// the other, and the run row of the tracking DB holds the totals of all of them.
+func (r *runSummary) addScan(o *runSummary) {
+	if o == nil {
+		return
+	}
+	r.Scans++
+	r.Inputs += o.Inputs
+	r.InputErrors += o.InputErrors
+	r.MarkedDone += o.MarkedDone
+	r.CommitErrors += o.CommitErrors
+	r.AlreadyImported += o.AlreadyImported
+	r.Unsupported += o.Unsupported
+	r.Pending += o.Pending
+	r.HeldByRun += o.HeldByRun
+	r.Stopped = r.Stopped || o.Stopped
+	r.PerInput = append(r.PerInput, o.PerInput...)
+	if o.Total != nil {
+		r.Total.add(o.Total)
+	}
 }
 
 // exitCode is the exit code of a run that got past the database and processor setup:
@@ -139,6 +165,8 @@ type runOptions struct {
 	history, dryRun, keepBinary        bool
 	markDone, strictMsgID              bool
 	tracked                            bool          // the tracking DB is on: it, not the rename, holds the import state
+	verifyMD5                          bool          // -verify-md5: hash an input before importing it (-from-iafetch)
+	follow                             time.Duration // -follow: wait this long, then scan the source again; 0: one scan
 	commitTimeout                      time.Duration // 0: no limit
 	maxArticleSize                     int           // -max-article-size in bytes, header and body; 0: no limit
 }
@@ -288,9 +316,9 @@ func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, st
 	inputs = dedupePlanned(inputs)
 	res := &runSummary{Total: newCounters("")}
 	type outcome struct {
-		c                                       *counters
-		started, inputErr, stopped              bool
-		alreadyImported, heldByRun, unsupported bool
+		c                                                *counters
+		started, inputErr, stopped                       bool
+		alreadyImported, heldByRun, unsupported, pending bool
 	}
 	outcomes := make([]outcome, len(inputs))
 
@@ -315,11 +343,22 @@ func importPlanned(inputs []plannedInput, opts *runOptions, sink articleSink, st
 				}
 				o := &outcomes[i]
 				in := inputs[i]
+				if in.Supported && opts.verifyMD5 && in.MD5 != "" {
+					checked, stopped := verifyPlannedMD5(in, stop)
+					if stopped {
+						continue // the hashing was cut short: the input is not started
+					}
+					in = checked
+				}
 				if !in.Supported {
 					if err := track.recordPlanned(in); err != nil {
 						track.trackErr(fmt.Sprintf("input %q", in.Path), err)
 					}
-					o.unsupported = true
+					if plannedPending(in) {
+						o.pending = true
+					} else {
+						o.unsupported = true
+					}
 					continue
 				}
 				id, state, err := track.claimInput(in)
@@ -367,6 +406,9 @@ feed:
 		case o.unsupported:
 			res.Unsupported++
 			continue
+		case o.pending:
+			res.Pending++
+			continue
 		case o.alreadyImported:
 			res.AlreadyImported++
 			continue
@@ -399,11 +441,202 @@ feed:
 		res.Stopped = true
 		log.Printf("[MBOX-IMPORT] stopped by shutdown signal: %d inputs not started", notStarted)
 	}
-	if res.AlreadyImported > 0 || res.Unsupported > 0 || res.HeldByRun > 0 {
-		log.Printf("[MBOX-IMPORT] tracking: not imported: already-imported=%d unsupported=%d held-by-another-run=%d",
-			res.AlreadyImported, res.Unsupported, res.HeldByRun)
+	if res.AlreadyImported > 0 || res.Unsupported > 0 || res.Pending > 0 || res.HeldByRun > 0 {
+		log.Printf("[MBOX-IMPORT] tracking: not imported: already-imported=%d pending=%d unsupported=%d held-by-another-run=%d",
+			res.AlreadyImported, res.Pending, res.Unsupported, res.HeldByRun)
 	}
 	return res
+}
+
+// scanFunc returns the inputs of one scan of the source: iafetch's DB with -from-iafetch
+// (iafetchInputs). It is nil for a run whose inputs are the positional arguments, which are
+// read once and never scanned again.
+type scanFunc func() ([]plannedInput, error)
+
+// followWait waits for the next scan of -follow: it returns true when d has passed and false
+// when the stop channel was closed first (the run then ends without an error). Tests replace
+// it with a channel they control, so no test has to wait for a clock.
+var followWait = func(d time.Duration, stop <-chan struct{}) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-stop:
+		return false
+	}
+}
+
+// importScans imports the inputs of one scan after the other: the inputs of first, and with
+// -follow (opts.follow > 0 and a scan function) the inputs of a new scan after every wait,
+// until the stop channel is closed. The returned summary is the total of every scan, because
+// one process is one run of the tracking DB.
+//
+// A failed later scan is not fatal: iafetch keeps writing its DB while the importer runs, so
+// the error is logged and the next round scans again (the first scan is checked by the
+// caller, before the run starts). A stop while waiting ends the run without an error; a stop
+// inside an input is a stopped run (exit code 130), as it is without -follow.
+func importScans(first []plannedInput, scan scanFunc, opts *runOptions, sink articleSink, stop <-chan struct{}, track *tracker) *runSummary {
+	total := &runSummary{Total: newCounters("")}
+	planned := first
+	for round := 1; ; round++ {
+		if scan != nil {
+			logPlannedCounts(round, planned)
+		}
+		res := importPlanned(planned, opts, sink, stop, track)
+		if scan != nil {
+			logScanTotals(round, res)
+		}
+		total.addScan(res)
+		if scan == nil || opts.follow <= 0 || total.Stopped {
+			return total
+		}
+		if !followWait(opts.follow, stop) {
+			log.Printf("[MBOX-IMPORT] -follow: shutdown signal while waiting %v for the next scan: %d scan(s) done",
+				opts.follow, total.Scans)
+			return total
+		}
+		next, err := scan()
+		if err != nil {
+			log.Printf("[MBOX-IMPORT] -follow: scan %d failed, trying again in %v: %v", round+1, opts.follow, err)
+			next = nil
+		}
+		planned = next
+	}
+}
+
+// logPlannedCounts logs what a scan found before anything is imported: the inputs the
+// importer can read, the ones it will look at again on the next scan (pending: the file is
+// missing, has another size or failed -verify-md5) and the ones it cannot read at all, with
+// the count per reason in reason order.
+func logPlannedCounts(round int, planned []plannedInput) {
+	supported, pending, unsupported := 0, 0, 0
+	pendingBy, unsupportedBy := map[string]int{}, map[string]int{}
+	for _, in := range planned {
+		switch {
+		case in.Supported:
+			supported++
+		case plannedPending(in):
+			pending++
+			pendingBy[in.Reason]++
+		default:
+			unsupported++
+			unsupportedBy[in.Reason]++
+		}
+	}
+	log.Printf("[MBOX-IMPORT] scan %d: %d planned input(s): supported=%d pending=%d unsupported=%d",
+		round, len(planned), supported, pending, unsupported)
+	if pending > 0 {
+		log.Printf("[MBOX-IMPORT] scan %d: pending %s", round, countsByReason(pendingBy))
+	}
+	if unsupported > 0 {
+		log.Printf("[MBOX-IMPORT] scan %d: unsupported %s", round, countsByReason(unsupportedBy))
+	}
+}
+
+// countsByReason formats a reason histogram as "reason=count ..." in reason order.
+func countsByReason(by map[string]int) string {
+	reasons := make([]string, 0, len(by))
+	for r := range by {
+		reasons = append(reasons, r)
+	}
+	sort.Strings(reasons)
+	parts := make([]string, 0, len(reasons))
+	for _, r := range reasons {
+		name := r
+		if name == "" {
+			name = "(no reason)"
+		}
+		parts = append(parts, fmt.Sprintf("%s=%d", name, by[r]))
+	}
+	return strings.Join(parts, " ")
+}
+
+// logScanTotals logs the result of one scan: what it imported and what it left alone.
+func logScanTotals(round int, r *runSummary) {
+	t := r.Total
+	if t == nil {
+		t = newCounters("")
+	}
+	log.Printf("[MBOX-IMPORT] scan %d done: imported=%d already-imported=%d pending=%d unsupported=%d held-by-another-run=%d input-errors=%d read=%d stored=%d present=%d errors=%d",
+		round, r.Inputs, r.AlreadyImported, r.Pending, r.Unsupported, r.HeldByRun, r.InputErrors,
+		t.Read, t.Stored, t.Present, t.Errors)
+}
+
+// Reasons of -verify-md5 (plannedInput.Reason). Both are pending reasons: the recorded md5
+// belongs to the file iafetch downloaded, so a file that does not match it (or cannot be
+// read) is worth another look on the next scan instead of being written off.
+const (
+	reasonMD5Mismatch = "md5-mismatch" // the file's md5 is not the one the source recorded
+	reasonMD5Error    = "md5-error"    // the file could not be read for hashing
+)
+
+// md5ChunkSize is how much of a file is hashed between two checks of the stop channel.
+const md5ChunkSize = 1 << 20
+
+// plannedPending reports whether an input the importer is not going to read now is worth
+// another look on the next scan: iafetch's own "the file on disk is not ready yet" reasons
+// (iafetchPending) and the two -verify-md5 reasons. The format reasons (iso, txt, ...) are
+// final: there is no reader for such a name.
+func plannedPending(in plannedInput) bool {
+	if in.Supported {
+		return false
+	}
+	return iafetchPending(in.Reason) || in.Reason == reasonMD5Mismatch || in.Reason == reasonMD5Error
+}
+
+// verifyPlannedMD5 hashes the file of in and compares the sum with the md5 the source
+// recorded (-verify-md5). A mismatch is no input error: the input is returned as not
+// supported with the reason reasonMD5Mismatch, which the tracking DB records as pending, so
+// a file iafetch is replacing right now is imported on a later scan. stopped reports that
+// the stop channel ended the hashing; in is then left as it was and not imported this scan.
+func verifyPlannedMD5(in plannedInput, stop <-chan struct{}) (checked plannedInput, stopped bool) {
+	sum, err := fileMD5(in.Path, stop)
+	switch {
+	case errors.Is(err, errStopped):
+		return in, true
+	case err != nil:
+		log.Printf("[MBOX-IMPORT] file=%q md5 check failed: %v", in.Path, err)
+		in.Supported, in.Reason = false, reasonMD5Error
+	case !strings.EqualFold(sum, in.MD5):
+		log.Printf("[MBOX-IMPORT] file=%q md5 %s does not match the recorded %s: not imported, pending for the next scan",
+			in.Path, sum, in.MD5)
+		in.Supported, in.Reason = false, reasonMD5Mismatch
+	}
+	return in, false
+}
+
+// fileMD5 is the hex md5 of the file at path. It reads the file in md5ChunkSize blocks and
+// checks stop between two of them, so hashing a multi-gigabyte input does not hold up the
+// shutdown; it returns errStopped when stop was closed.
+func fileMD5(path string, stop <-chan struct{}) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	// #nosec G401 -- md5 is the checksum archive.org publishes and iafetch records, not a security hash
+	h := md5.New()
+	buf := make([]byte, md5ChunkSize)
+	for {
+		select {
+		case <-stop:
+			return "", errStopped
+		default:
+		}
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			if _, werr := h.Write(buf[:n]); werr != nil {
+				return "", werr
+			}
+		}
+		if errors.Is(rerr, io.EOF) {
+			return hex.EncodeToString(h.Sum(nil)), nil
+		}
+		if rerr != nil {
+			return "", rerr
+		}
+	}
 }
 
 // inputOptions returns the options of one input: opts itself, or with -group-from-name a copy

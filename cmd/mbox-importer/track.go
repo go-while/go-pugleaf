@@ -537,9 +537,12 @@ func (t *tracker) recordPlanned(in plannedInput) error {
 	})
 }
 
-// trackPlannedStatus is the status a planned input is recorded with.
+// trackPlannedStatus is the status a planned input is recorded with: pending for one the
+// importer can read, and for one it could read if the file on disk were ready (a missing or
+// changed file, a failed -verify-md5: plannedPending), so the next scan tries it again. An
+// input there is no reader for (iso, txt, ...) is recorded as unsupported, with its reason.
 func trackPlannedStatus(in plannedInput) string {
-	if in.Supported {
+	if in.Supported || plannedPending(in) {
 		return trackPending
 	}
 	return trackUnsupported

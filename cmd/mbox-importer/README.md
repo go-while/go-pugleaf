@@ -21,6 +21,9 @@ with IHAVE.
 - Remembers every input, every run and the whole log output in a tracking database
   (`<data>/cfg/mbox-import.sq3`, `-trackdb off` turns it off), so an input is not imported twice
   even when it cannot be renamed, and `-status` says what is done and what is left
+- Takes its inputs from the download database of mbox2nntp's `iafetch` (`-from-iafetch`), reading
+  that database and the mirror only, and with `-follow D` keeps scanning it while the download runs,
+  see [Importing an archive.org mirror](#importing-an-archiveorg-mirror)
 - Dry run (`-dry-run`): parses the inputs and counts per target group without opening a database
   (for UAT archives `zstd`, and `xz` or `7z`, still run)
 
@@ -124,9 +127,14 @@ renamed; the copy of a `.usenet.xz`/`.usenet.7z` unpacked into `-tmpdir` is remo
 | `-log-keep-runs` | `0` | At start, delete the `log` rows of all but the newest N runs (`0` = keep all). N counts the run doing the deleting, so `-log-keep-runs 1` keeps only this run's lines. The `runs` and `inputs` rows are never deleted |
 | `-status` | `false` | Print what the tracking database knows and exit, importing nothing (no input argument needed) |
 | `-json` | `false` | Print `-status` as JSON |
+| `-from-iafetch` | (none) | Take the inputs from the download database of mbox2nntp's `iafetch` at this path instead of positional arguments; see [Importing an archive.org mirror](#importing-an-archiveorg-mirror). The database is only read. Not together with positional inputs, and not with `-trackdb off` |
+| `-from-iafetch-base` | (none) | iafetch's working directory: a relative `files.path` of its database is resolved against it. Needed when iafetch ran with a relative `-o`; it is never guessed. Only with `-from-iafetch` |
+| `-verify-md5` | `false` | Hash an input and compare it with the md5 iafetch recorded before importing it. A mismatch is no error: the input becomes `pending` with the reason `md5-mismatch` and is tried again on the next scan. The check runs before the input is claimed, so every scan hashes every recorded file again: not for a short `-follow`. Only with `-from-iafetch` (nothing else records an md5) |
+| `-follow` | `0` | After the inputs of a scan are done, wait this long and scan iafetch's database again, until SIGINT/SIGTERM stops the run. `0` means one scan. Only with `-from-iafetch`; ignored in a dry run |
 | `-help` | | Print the usage and exit |
 
-Positional arguments are the inputs; at least one is required (except with `-status`).
+Positional arguments are the inputs; at least one is required (except with `-status` and
+`-from-iafetch`, which bring their own).
 
 ## Inputs
 
@@ -215,8 +223,8 @@ Exit codes:
 |------|---------|
 | `0` | every input was read without an article error (marked done or not, see the log; also when there was nothing to import) |
 | `1` | an input could not be opened or read (open, unpack, 7z exit status, close or rename error; for a UAT input also a missing zstd, a zstd failure or a size mismatch), an article could not be stored (`errors` > 0), or the commit wait failed; a database/processor/hostname error, or the tracking database could not be opened |
-| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000, negative `-max-article-size`, negative `-log-keep-runs`, `-status` with `-trackdb off`) |
-| `130` | stopped by SIGINT/SIGTERM |
+| `2` | bad command line (unknown flag, no input, invalid `-group` name, `-group` with `-group-from-name`, `-useshorthashlen` outside 2-7, negative `-commit-timeout`, `-parallel` outside 1-32, `-max-batch` outside 100-1000, `-max-queue` outside 16-100000, negative `-max-article-size`, negative `-log-keep-runs`, `-status` with `-trackdb off`, `-from-iafetch` with positional inputs or with `-trackdb off`, negative `-follow`, `-from-iafetch-base`/`-verify-md5`/`-follow` without `-from-iafetch`, and the first scan of `-from-iafetch` failing: a database that cannot be read or a relative path without `-from-iafetch-base`) |
+| `130` | stopped by SIGINT/SIGTERM (with `-follow` only when the signal came while an input was being imported; while it waits for the next scan the run ends with `0`) |
 
 ## Tracking database
 
@@ -242,19 +250,19 @@ An input row has one of these states:
 
 | Status | Meaning |
 |--------|---------|
-| `pending` | known, not imported yet |
+| `pending` | known, not imported yet. With `-from-iafetch` also a file the importer could read but will not read now: `reason` is `missing` (recorded, not on disk), `size-changed`, `stat-error` or `md5-mismatch`/`md5-error` (`-verify-md5`). Every scan looks at these again |
 | `importing` | a run holds it right now |
 | `done` | imported |
 | `failed` | an input error, article errors or a failed commit wait; `reason` says which |
 | `stopped` | SIGINT/SIGTERM ended the import of this input |
-| `unsupported` | the importer cannot read this file; `reason` says why (`iso`, `txt`, ...) |
+| `unsupported` | the importer cannot read this file at all; `reason` says why (`iso`, `sqsh`, `tar`, `txt`, `ufs`, `img`, `xml`, `torrent`, `unsupported-suffix`). These are final: no scan tries them again |
 
 **An input is imported once.** At the start of an input the run compares the file with its row: a
 row that is `done` for the same size and mtime (and the same md5, when the row and the source both
 know one) means the file was imported before. It is not read again and counted in one line per run:
 
 ```
-[MBOX-IMPORT] tracking: not imported: already-imported=2 unsupported=5 held-by-another-run=0
+[MBOX-IMPORT] tracking: not imported: already-imported=2 pending=1 unsupported=5 held-by-another-run=0
 ```
 
 A file that changed (another size or mtime) is imported again; its articles that are already in the
@@ -328,6 +336,96 @@ log rows: 136
 
 It lists the inputs per status with their byte count, the last 10 failed inputs with their reason,
 the totals of the last run and the number of log rows.
+
+## Importing an archive.org mirror
+
+`-from-iafetch DB` takes the inputs from the download database of mbox2nntp's `iafetch`
+(`../mbox2nntp/cmd/iafetch`, `-db`, default `iafetch.sqlite`) instead of from positional arguments:
+every row of its `files` table is one planned input, in the order the items were selected
+(`items.ord`, then identifier and file name; rows whose item has no `ord` come last). iafetch writes
+a `files` row only after the file's size and md5 matched archive.org's metadata and `FILE.part` was
+renamed to `FILE`, so a recorded file is complete even while its item is still downloading — the
+importer does not wait for the item's `status`.
+
+On arc1-ca, where the ~10 TB mirror is downloaded into `/tank0/archive.org` while the import runs:
+
+```bash
+mbox-importer -data /tank0/go-pugleaf/data \
+  -from-iafetch /tank0/archive.org/.iafetch/iafetch.sqlite \
+  -group-from-name -parallel 4 -follow 10m
+```
+
+Run it as the user that owns the go-pugleaf data (`go-pugleaf`) in a `screen`, or from a oneshot
+unit with a timer. Check iafetch's database file name before the first run, and whether iafetch ran
+with an absolute `-o`: `files.path` is `filepath.Join(-o, identifier, name)` as iafetch got it on its
+command line, so with a relative `-o` the paths are relative to iafetch's working directory and
+`-from-iafetch-base DIR` has to name that directory. It is never guessed — a guessed folder is how
+the wrong tree gets read — and a relative path without it ends the run before it starts (exit 2,
+the message names the first such row).
+
+**Nothing in the mirror is written.** iafetch's database is opened read-only
+(`file:...?mode=ro&_busy_timeout=10000`), with one short query per scan, and it is closed again
+before the import starts; iafetch keeps writing meanwhile. `-mark-done` is ignored with
+`-from-iafetch` (one line in the log says so), so no input is renamed: the mirror's item folders
+belong to the downloading user and a rename would make iafetch fetch the file again. The
+[tracking database](#tracking-database) is therefore required — `-from-iafetch` with `-trackdb off`
+is refused, because without it every scan would import every recorded file again.
+
+**Read access to the whole database folder.** iafetch keeps its database in WAL mode, so a reader
+needs the folder, the database file and its `-wal` and `-shm` files readable, not just the database
+file; SQLite also wants to create or map the `-shm`. If the open or the first query fails, the error
+says so:
+
+```
+iafetch DB "/tank0/archive.org/.iafetch/iafetch.sqlite": unable to open database file (the DB folder
+and the -wal/-shm files next to the DB need to be readable: iafetch keeps the DB in WAL mode)
+```
+
+On arc1-ca the folder is `drwxrwsr-x mbox2nntp:archive` (setgid) and `go-pugleaf` is in the group
+`archive`, so the files iafetch creates there are group-readable.
+
+**Pending or unsupported.** An item holds much more than article archives, and a recorded file may
+not be where iafetch put it any more. Both are recorded instead of being imported, and the two are
+not the same:
+
+| | Status | Reasons | On the next scan |
+|---|--------|---------|------------------|
+| the importer has no reader for the name | `unsupported` | `iso` (CD images), `sqsh`, `tar`, `ufs`, `img`, `txt` (OCR derivatives), `xml` (`_files.xml`, `_meta.xml`), `torrent`, `unsupported-suffix` | nothing: they are listed for later tools, never imported |
+| the file is not ready on disk | `pending` | `missing`, `size-changed`, `stat-error`, and with `-verify-md5` `md5-mismatch` or `md5-error` | tried again |
+
+Supported names are the ones the importer reads anyway (`.mbox`, `.bag`, `.mbox.gz`, `.mbox.zip`,
+`.mbox.7z`, `.usenet`, `.usenet.xz`, `.usenet.7z`), decided by the file's base name. Every scan logs
+what it found and what it did with it:
+
+```
+[MBOX-IMPORT] scan 1: 2613 planned input(s): supported=2470 pending=3 unsupported=140
+[MBOX-IMPORT] scan 1: pending missing=3
+[MBOX-IMPORT] scan 1: unsupported iso=97 txt=38 xml=5
+[MBOX-IMPORT] scan 1 done: imported=2470 already-imported=0 pending=3 unsupported=140 held-by-another-run=0 input-errors=0 read=… stored=… present=… errors=0
+```
+
+`-verify-md5` hashes an input before it is imported and compares the sum with the md5 iafetch
+recorded (iafetch already verified it, so this is off by default; it reads every byte of the mirror
+a second time). A mismatch is not an input error: the input is recorded `pending`/`md5-mismatch`,
+one line is logged and the next scan looks at it again. The hashing stops on SIGINT/SIGTERM between
+two 1 MiB chunks, so even a 5 GB input does not hold up the shutdown. It happens before the input
+is claimed, so a scan hashes every file it was given, the ones that are already `done` included:
+use it for a one-off verification pass (`-verify-md5` without `-follow`), not with a short
+`-follow`, where it would read the whole mirror again at every tick.
+
+**`-follow D`** keeps the importer going: after the inputs of a scan are done it waits `D`, scans
+iafetch's database again and imports what is new (a file that was `pending` and is now readable
+included). The process is **one run** of the tracking database, whatever the number of scans: the
+`runs` row holds the totals of all of them, and the summary lines above tell the scans apart. A scan
+that fails (the database is unreadable for a moment) is logged and tried again at the next tick;
+only the first scan can end the run. SIGINT/SIGTERM while it waits ends the run with exit code 0,
+inside an input with 130 as usual. Without `-follow` there is exactly one scan.
+
+`-status` shows what is left to do, including the formats that need other tools:
+
+```bash
+mbox-importer -data /tank0/go-pugleaf/data -status
+```
 
 ## What is stored
 
