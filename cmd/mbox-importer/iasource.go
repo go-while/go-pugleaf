@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,24 @@ const (
 	iaReasonStatError   = "stat-error"         // on disk, but stat failed (permissions, ...)
 	iaReasonUnsupported = "unsupported-suffix" // a name the importer has no reader for
 )
+
+// iafetchPending reports whether a reason means "try this file again later" (the tracking
+// DB's pending status): the file is an input the importer can read, only its state on disk
+// is not right yet — iafetch is still writing, or the file was moved away. The format
+// reasons (iso, txt, ...) are final: the importer has no reader for the name (status
+// unsupported).
+func iafetchPending(reason string) bool {
+	switch reason {
+	case iaReasonMissing, iaReasonSizeChanged, iaReasonStatError:
+		return true
+	}
+	return false
+}
+
+// iaReadableSuffixes are the suffixes openSource (inputs.go) can actually read: the plain
+// mbox/bag file and the three compressed forms (inputKind). A name that passes isInputName
+// but ends in another suffix (x.mbox.bz2, x.mbox.zst) has no reader, so it is unsupported.
+var iaReadableSuffixes = []string{".mbox", ".bag", ".gz", ".zip", ".7z"}
 
 // iaUnsupportedSuffixes maps the suffixes worth naming in -status to their short reason.
 var iaUnsupportedSuffixes = map[string]string{
@@ -54,21 +73,24 @@ const iafetchFilesQuery = `SELECT files.identifier, files.name, files.size, file
 // import order. base is iafetch's working directory (-from-iafetch-base): a relative
 // files.path is joined to it, an absolute one is used as is. A relative path with an empty
 // base is an error naming the first such row, because guessing the folder is how the wrong
-// tree gets read.
+// tree gets read. The recorded path itself stays inside the item's directory: iafetch's
+// localPath refuses an identifier or a file name that is not local (fetch.go), so the names
+// of the mirror cannot escape the base.
 //
-// Supported is true for the names the importer reads today (isInputName, the same rule as
-// the directory scan); any other name gets Supported false and a suffix reason. A supported
-// file that is not on disk, or has another size than iafetch recorded, is not supported
-// either (reason iaReasonMissing / iaReasonSizeChanged); the size is only compared when
-// iafetch recorded one (> 0). Size and MD5 come from the DB, Mtime from disk (0 when the
-// file is missing or cannot be stat'ed).
+// Supported is true for the names the importer can read today (iafetchSupported); any other
+// name gets Supported false and a suffix reason. A supported file that is not on disk, or
+// has another size than iafetch recorded, is not supported either (reason iaReasonMissing /
+// iaReasonSizeChanged, both iafetchPending: worth another look on the next scan). The size
+// is only compared when iafetch recorded one (> 0; it stores -1 for an unknown and 0 for an
+// empty file), and when it did not, Size is taken from disk. MD5 comes from the DB, Mtime
+// from disk (0 when the file is missing or cannot be stat'ed).
 //
 // The DB is opened read-only with one short query; it is closed before the call returns.
 func iafetchInputs(dbPath, base string) ([]plannedInput, error) {
 	if dbPath == "" {
 		return nil, errors.New("iafetch DB: no path given")
 	}
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro&_busy_timeout=10000")
+	db, err := sql.Open("sqlite3", iafetchDSN(dbPath))
 	if err != nil {
 		return nil, iafetchReadError(dbPath, err)
 	}
@@ -98,6 +120,15 @@ func iafetchInputs(dbPath, base string) ([]plannedInput, error) {
 		return nil, fmt.Errorf("iafetch DB %q: %w", dbPath, err)
 	}
 	return inputs, nil
+}
+
+// iafetchDSN is the read-only DSN of iafetch's DB. The path is URI-escaped (as iafetch
+// itself builds its DSN, cmd/iafetch/db.go): the mattn driver hands a "file:" DSN to
+// SQLite's URI parser with SQLITE_OPEN_URI|READWRITE|CREATE, so a '?' or '#' in the path of
+// a concatenated DSN would cut the path short, drop mode=ro and open — or create — another
+// file read-write. mode=ro is the only thing that keeps this reader off iafetch's DB.
+func iafetchDSN(dbPath string) string {
+	return "file:" + (&url.URL{Path: dbPath}).EscapedPath() + "?mode=ro&_busy_timeout=10000"
 }
 
 // iafetchInput turns one files row into a planned input (see iafetchInputs). recorded is
@@ -131,8 +162,14 @@ func iafetchInput(identifier, name string, size int64, md5, recorded, base strin
 	switch {
 	case err == nil:
 		in.Mtime = fi.ModTime().Unix()
-		if in.Supported && size > 0 && fi.Size() != size {
-			in.Supported, in.Reason = false, iaReasonSizeChanged
+		if size > 0 {
+			if in.Supported && fi.Size() != size {
+				in.Supported, in.Reason = false, iaReasonSizeChanged
+			}
+		} else {
+			// iafetch had no size to verify (-1 unknown, 0 empty file): the file on disk
+			// is the only size there is, and the tracking DB needs one.
+			in.Size = fi.Size()
 		}
 	case errors.Is(err, os.ErrNotExist):
 		if in.Supported {
@@ -147,18 +184,38 @@ func iafetchInput(identifier, name string, size int64, md5, recorded, base strin
 }
 
 // iafetchSupported reports whether a recorded file name is an input the importer can read
-// (isInputName, the rule of the directory scan in inputs.go) and, if it is not, the short
-// reason for -status. An archive.org file name can hold a subfolder ("sub/dir/NAME"), so
-// only its base name decides.
+// and, if it is not, the short reason for -status. An archive.org file name can hold a
+// subfolder ("sub/dir/NAME"), so only its base name decides.
+//
+// A name has to pass both halves of the importer's own rule: isInputName (the rule of the
+// directory scan in inputs.go) and a suffix openSource has a reader for (iaReadableSuffixes
+// or a UAT archive) — isInputName only looks for ".mbox"/".bag" anywhere in the name, so a
+// mirror file like "x.mbox.bz2" or "x.mbox.zst" would pass it and then fail to open.
+// isInputName is case-sensitive like the directory scan, so an upper-case "X.MBOX.ZIP" is
+// not an input here either.
 func iafetchSupported(name string) (bool, string) {
 	base := filepath.Base(filepath.FromSlash(name))
-	if isInputName(base) {
+	if isInputName(base) && iafetchReadable(base) {
 		return true, ""
 	}
 	if reason, ok := iaUnsupportedSuffixes[strings.ToLower(filepath.Ext(base))]; ok {
 		return false, reason
 	}
 	return false, iaReasonUnsupported
+}
+
+// iafetchReadable reports whether openSource (inputs.go) has a reader for base's suffix.
+func iafetchReadable(base string) bool {
+	if uatSuffix(base) != "" {
+		return true
+	}
+	lower := strings.ToLower(base)
+	for _, s := range iaReadableSuffixes {
+		if strings.HasSuffix(lower, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // iafetchReadError wraps a failure to open iafetch's DB or to run the first query with the
