@@ -46,6 +46,11 @@ type counters struct {
 	NotArticle   int // files that are no article, A-news batch or mbox (binaries, tar, README, ...)
 	XrefPointers int // NetNews/CD "<n>.XRF" crosspost pointer files (not read)
 	ANewsBatches int // A-news batch files (several articles each)
+	// FileErrors are the files and directories of the spool that could not be opened or
+	// read (a scratched disc image). They are no article errors: the input is still marked
+	// done and the exit code is unchanged, because a re-walk of a read-only image would
+	// only read the same bad blocks again (and -follow would do it on every scan).
+	FileErrors int
 }
 
 // spoolDetail is the spool part of the per-input log line ("" for an mbox input).
@@ -53,8 +58,8 @@ func (c *counters) spoolDetail() string {
 	if c.Files == 0 {
 		return ""
 	}
-	return fmt.Sprintf(" files=%d not-article=%d xref-pointers=%d anews-batches=%d",
-		c.Files, c.NotArticle, c.XrefPointers, c.ANewsBatches)
+	return fmt.Sprintf(" files=%d not-article=%d xref-pointers=%d anews-batches=%d file-errors=%d",
+		c.Files, c.NotArticle, c.XrefPointers, c.ANewsBatches, c.FileErrors)
 }
 
 func newCounters(file string) *counters {
@@ -97,6 +102,7 @@ func (c *counters) add(o *counters) {
 	c.NotArticle += o.NotArticle
 	c.XrefPointers += o.XrefPointers
 	c.ANewsBatches += o.ANewsBatches
+	c.FileErrors += o.FileErrors
 	for r, n := range o.Skipped {
 		c.Skipped[r] += n
 	}
