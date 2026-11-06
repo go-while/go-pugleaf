@@ -401,3 +401,44 @@ func TestMboxIAReadOnlyFolder(t *testing.T) {
 		t.Errorf("input = %+v, want the supported file %q", in, path)
 	}
 }
+
+// TestMboxIAReadOnlyShm pins the other half of the deployment case: the -shm file is only
+// readable for the importer's user (iafetch's umask 022 gives group "archive" r--), while
+// iafetch keeps writing. A reader of a WAL database normally needs the -shm read-write, so
+// either SQLite falls back to a read-only shm mapping, or the error carries the hint that
+// says which files need access.
+func TestMboxIAReadOnlyShm(t *testing.T) {
+	root := t.TempDir()
+	dbDir := filepath.Join(root, "iafetch")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(dbDir, "iafetch.sqlite")
+	db := iaNewDB(t, dbPath)
+	iaItem(t, db, "item-a", 1, "done")
+	path := filepath.Join(root, "mirror", "item-a", "a1.mbox.zip")
+	iaFileRow(t, db, "item-a", "a1.mbox.zip", iaWrite(t, path, 13), "aa11", path)
+
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Chmod(p, 0o444); err != nil {
+			t.Fatalf("chmod %s: %v", p, err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
+	}
+
+	inputs, err := iafetchInputs(dbPath, "")
+	if err != nil {
+		if !strings.Contains(err.Error(), "-wal/-shm") {
+			t.Errorf("error without the access hint: %v", err)
+		}
+		t.Logf("read-only -shm: refused with %v", err)
+		return
+	}
+	t.Logf("read-only -shm: read %d inputs", len(inputs))
+	if len(inputs) != 1 {
+		t.Fatalf("got %d inputs, want 1: %v", len(inputs), iaNames(inputs))
+	}
+	if in := inputs[0]; !in.Supported || in.Path != path {
+		t.Errorf("input = %+v, want the supported file %q", in, path)
+	}
+}
