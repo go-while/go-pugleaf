@@ -135,3 +135,25 @@ On arc1-ca, after deploy, read-only: `-dry-run -trackdb off` on `NN_1992_16.iso`
 1. A-news / early B-news get Google's `<anews.A<site>.<n>>` / `<bnews.<site>.<n>>` Message-IDs.
 2. Stripped comp.sources postings without any Message-ID are skipped (`no-msgid`).
 3. Branch from `plan-mbox-import-tracking` (c84c1ed), which is not merged into testing-001 yet.
+
+## Progress
+
+### Wave 0 (41407d2)
+Counters Files/NotArticle/XrefPointers/ANewsBatches + spoolDetail, readSpool/parseANews/bnewsMessageID stubs.
+
+### Wave 1
+- anews: worktree-agent-a9d36174b3c3a1813 (11ecf24, 33a632a, review fixes f7460fd), merged 02ce4ae.
+  Beyond the plan: B-news `Posted:`/`Date-Received:`/`NNTP-Posting-Date:`/`Injection-Date:` give a Date when
+  there is none (strict layouts only, >= 1980); pre-1980 A-news dates → no-date; 4 MiB cap per A-news article.
+- spool: worktree-agent-a40f5ba065af0f505 (aab4d32, review fixes a207fdf), merged 763b1ba.
+  Decision (orchestrator): unreadable files / mid-file read errors count `FileErrors`, logged by name, do not
+  block done or change the exit code; tracking reason "N unreadable file(s)". One-article files are read
+  whole before handleMessage, so no truncated article is stored.
+- disc: worktree-agent-a99daf26b16568175 (d5d6aae, f3bf33f, review fixes 1d3f64d), merged 60fd0b7.
+  7z exit 1 → warning; exit 2 with only "Dangerous link path was ignored" → continue; a spool without any
+  article is an input error; -spool directory identity = path + top-level mtime (logged, README).
+- inline: 59bab45 (FileErrors status test; .gitignore `/post-queue`, `/mbox-importer` anchored, they hid
+  cmd/post-queue and cmd/mbox-importer); integration commit (spoolZip test helper clash, stub-era tests made
+  strict for the merged walker).
+Deferred: a present-but-unreadable Date with a good Posted is still rejected by the processor
+(internal/nntp.ParseHeaders drops the fallback fields) — outside this plan.

@@ -177,9 +177,9 @@ func TestMboxSpoolWalkTree(t *testing.T) {
 	}
 }
 
-// spoolZip packs every regular file of root into a zip and returns it as an fs.FS, the
+// spoolZipFS packs every regular file of root into a zip and returns it as an fs.FS, the
 // way a ".zip" spool (NN_1992_25.zip) is read.
-func spoolZip(t *testing.T, root string) fs.FS {
+func spoolZipFS(t *testing.T, root string) fs.FS {
 	t.Helper()
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
@@ -221,7 +221,7 @@ func spoolZip(t *testing.T, root string) fs.FS {
 func TestMboxSpoolWalkZip(t *testing.T) {
 	root := spoolTestTree(t)
 	sink := newSpoolSink()
-	c, err := readSpool(spoolZip(t, root), "tree.zip", &runOptions{}, sink, nil)
+	c, err := readSpool(spoolZipFS(t, root), "tree.zip", &runOptions{}, sink, nil)
 	if err != nil {
 		t.Fatalf("readSpool: %v", err)
 	}
@@ -337,15 +337,16 @@ func TestMboxSpoolNameOrder(t *testing.T) {
 	}
 }
 
-// TestMboxSpoolANewsBatch reads a tree with one A-news batch. parseANews belongs to
-// another slice: while it is a stub that emits nothing the batch counts as not-article,
-// and once it parses the batch it counts as an A-news batch with its articles read.
+// TestMboxSpoolANewsBatch reads a tree with one A-news batch: it counts as an A-news batch
+// with every article parseANews emits read.
 func TestMboxSpoolANewsBatch(t *testing.T) {
 	emitted := 0
-	perr := parseANews(strings.NewReader(spoolANewsText), func(_ []string, body io.Reader) {
+	if err := parseANews(strings.NewReader(spoolANewsText), func(_ []string, body io.Reader) {
 		emitted++
 		_, _ = io.Copy(io.Discard, body)
-	})
+	}); err != nil || emitted == 0 {
+		t.Fatalf("parseANews: emitted=%d err=%v", emitted, err)
+	}
 	root := t.TempDir()
 	spoolWrite(t, root, "news001f1/a13", spoolANewsText)
 	sink := newSpoolSink()
@@ -355,14 +356,6 @@ func TestMboxSpoolANewsBatch(t *testing.T) {
 	}
 	if c.Files != 1 {
 		t.Errorf("Files=%d, want 1", c.Files)
-	}
-	if emitted == 0 {
-		t.Logf("parseANews is still a stub (%v): the batch counts as not-article", perr)
-		if c.ANewsBatches != 0 || c.NotArticle != 1 || c.Read != 0 {
-			t.Errorf("stub: anews-batches=%d not-article=%d read=%d, want 0 1 0",
-				c.ANewsBatches, c.NotArticle, c.Read)
-		}
-		return
 	}
 	if c.ANewsBatches != 1 || c.NotArticle != 0 || c.Read != emitted {
 		t.Errorf("anews-batches=%d not-article=%d read=%d, want 1 0 %d",

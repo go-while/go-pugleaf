@@ -465,14 +465,9 @@ func TestMboxDiscUnpackStopped(t *testing.T) {
 }
 
 // TestMboxDiscImportDispatch runs a disc image, a spool directory and a zip spool through
-// the import loop. readSpool is still the wave-0 stub (errSpoolNotImplemented), so every
-// input ends as an input error here; what this pins is the dispatch, the cleanup of the
-// unpack directory and that no spool input is renamed on a failed read.
-//
-// Two paths of importSpool cannot be reached while readSpool is that stub, because it never
-// returns a nil error: a spool that was walked and held no article at all (the "no articles
-// in the spool" input error) and a spool that was imported and is then marked done. Both
-// are for the walker's own tests, or for the verifier once the spool slice is merged.
+// the import loop: each is read as one input, -mark-done renames the image and the zip but
+// never the directory, no unpack directory is left, and a spool without any article is an
+// input error that is not renamed.
 func TestMboxDiscImportDispatch(t *testing.T) {
 	need7z(t)
 	dir := t.TempDir()
@@ -483,30 +478,45 @@ func TestMboxDiscImportDispatch(t *testing.T) {
 	tmp := t.TempDir()
 
 	for _, c := range []struct {
-		name  string
-		path  string
-		spool bool
+		name    string
+		path    string
+		spool   bool
+		renamed bool // -mark-done renames an image or zip, never a directory
 	}{
-		{"disc image", image, false},
-		{"spool directory", tree, true},
-		{"spool zip", zipPath, true},
+		{"disc image", image, false, true},
+		{"spool directory", tree, true, false},
+		{"spool zip", zipPath, true, true},
 	} {
 		opts := &runOptions{sevenZip: "7z", tmpDir: tmp, spool: c.spool, markDone: true}
 		res := importInputs([]string{c.path}, opts, newCountingSink(), nil)
-		if res.Inputs != 1 || res.InputErrors != 1 {
-			t.Errorf("%s: inputs=%d input-errors=%d, want 1/1 (readSpool is still a stub)",
-				c.name, res.Inputs, res.InputErrors)
+		if res.Inputs != 1 || res.InputErrors != 0 {
+			t.Errorf("%s: inputs=%d input-errors=%d, want 1/0", c.name, res.Inputs, res.InputErrors)
 		}
 		if len(res.PerInput) != 1 || res.PerInput[0].File != c.path {
-			t.Errorf("%s: per-input counters %v", c.name, res.PerInput)
+			t.Fatalf("%s: per-input counters %v", c.name, res.PerInput)
 		}
-		if res.Stopped || res.MarkedDone != 0 || miExists(c.path+".done") {
-			t.Errorf("%s: stopped=%v marked-done=%d: an input that failed must not be renamed",
-				c.name, res.Stopped, res.MarkedDone)
+		if pc := res.PerInput[0]; pc.Files == 0 || pc.Read == 0 || pc.Stored == 0 {
+			t.Errorf("%s: files=%d read=%d stored=%d, want articles", c.name, pc.Files, pc.Read, pc.Stored)
+		}
+		wantMarked := 0
+		if c.renamed {
+			wantMarked = 1
+		}
+		if res.Stopped || res.MarkedDone != wantMarked || miExists(c.path+".done") != c.renamed {
+			t.Errorf("%s: stopped=%v marked-done=%d renamed=%v, want marked-done=%d",
+				c.name, res.Stopped, res.MarkedDone, miExists(c.path+".done"), wantMarked)
 		}
 		if dirs := dcUnpackDirs(t, tmp); len(dirs) != 0 {
 			t.Errorf("%s: unpack directories left: %v", c.name, dirs)
 		}
+	}
+
+	// a spool without a single article is an input error and is not renamed
+	empty := writeZip(t, "empty-spool.zip", map[string]string{"README": "no news here\n"}, []string{"README"})
+	res := importInputs([]string{empty}, &runOptions{sevenZip: "7z", tmpDir: tmp, spool: true, markDone: true},
+		newCountingSink(), nil)
+	if res.InputErrors != 1 || res.MarkedDone != 0 || miExists(empty+".done") {
+		t.Errorf("spool without articles: input-errors=%d marked-done=%d, want 1/0", res.InputErrors, res.MarkedDone)
 	}
 
 	// a spool directory is never renamed, not even when the import went through: the
